@@ -23,7 +23,7 @@
         "type": "Direct",
         "requested": "[2.0.0, 2.0.0]",
         "resolved": "2.0.0",
-        "contentHash": "kFyR7sNOGo5D90S5axrOj1OYK+YBYhkQpGkyuqh6sw+2aHcVALVK35cf8/ETfzB9KmVnLN8fVNWx+8GwOeu6kQ=="
+        "contentHash": "nQoUdG0dV51rgXwTOcAsIr+Zle044XUf58Cs50OJTvsoSt5g70yms9P9culK6hovOCkOxNtiHKekUIT9YL73ug=="
       },
       "Microsoft.Windows.AI.MachineLearning": {
         "type": "Transitive",
@@ -145,7 +145,7 @@
         "type": "CentralTransitive",
         "requested": "[2.0.0, 2.0.0]",
         "resolved": "2.0.0",
-        "contentHash": "tmHhSWck+flTqev+mgc+afRT8hYFYoypyWvF6slz2CkRGCHZxZikyNGMcxovAncI72S6kyE+HESSkuIe7aGWKA==",
+        "contentHash": "yW8iSKRTJ5zAHX0vig0kMZ3tnc/i+Xp90FQkZubWUwTfHUH7HNwZxipXRCtvwFSqebNShRWPxOkIB4V/IKxJKg==",
         "dependencies": {
           "VibeOCR.Runtime.Contracts": "2.0.0"
         }
