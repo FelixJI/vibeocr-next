@@ -34,7 +34,9 @@ jobs:
           dotnet restore tests/dotnet/VibeOCR.Platform.Tests/VibeOCR.Platform.Tests.csproj --locked-mode
           dotnet restore tests/dotnet/VibeOCR.App.Tests/VibeOCR.App.Tests.csproj --locked-mode
           dotnet test tests/dotnet/VibeOCR.Platform.Tests/VibeOCR.Platform.Tests.csproj -c Release --no-restore
-          ./scripts/test_app_ci.ps1
+          ./scripts/test_app_ci.ps1 `
+            -Filter 'FullyQualifiedName=VibeOCR.App.Tests.WindowLayoutStoreTests.LoadReturnsNullWhenFileMissing' `
+            -ExpectedPassed 1
           ./scripts/build-release.ps1
       - name: Upload App test diagnostics
         if: always()

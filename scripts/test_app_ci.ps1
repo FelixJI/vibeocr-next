@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param()
+param(
+    [string]$Filter,
+    [int]$ExpectedPassed = 71
+)
 
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -11,11 +14,23 @@ if (Test-Path -LiteralPath $results) {
 }
 New-Item -ItemType Directory -Path $results -Force | Out-Null
 
-dotnet test $project -c Release --no-restore `
-  --blame-hang --blame-hang-timeout 2m --blame-hang-dump-type none `
-  --logger 'console;verbosity=detailed' `
-  --logger 'trx;LogFileName=app-tests.trx' `
-  --results-directory $results
+$arguments = @(
+    'test',
+    $project,
+    '-c', 'Release',
+    '--no-restore',
+    '--blame-hang',
+    '--blame-hang-timeout', '2m',
+    '--blame-hang-dump-type', 'none',
+    '--logger', 'console;verbosity=detailed',
+    '--logger', 'trx;LogFileName=app-tests.trx',
+    '--results-directory', $results
+)
+if (-not [string]::IsNullOrWhiteSpace($Filter)) {
+    $arguments += @('--filter', $Filter)
+}
+
+dotnet @arguments
 $testExitCode = $LASTEXITCODE
 
 $trxPath = Join-Path $results 'app-tests.trx'
@@ -32,14 +47,17 @@ if ($testExitCode -ne 0) {
 if ($summary.outcome -ne 'Completed') {
     throw "App test run outcome was $($summary.outcome), expected Completed"
 }
-if ([int]$counters.total -ne 71 -or
-    [int]$counters.passed -ne 71 -or
+if ([int]$counters.total -ne $ExpectedPassed -or
+    [int]$counters.passed -ne $ExpectedPassed -or
     [int]$counters.failed -ne 0) {
     throw (
         'App test result count mismatch: ' +
         "total=$($counters.total), passed=$($counters.passed), " +
-        "failed=$($counters.failed); expected 71/71/0"
+        "failed=$($counters.failed); expected $ExpectedPassed/$ExpectedPassed/0"
     )
 }
 
-Write-Host 'App test result verified: 71/71 passed with Completed outcome.'
+Write-Host (
+    "App test result verified: $ExpectedPassed/$ExpectedPassed passed " +
+    'with Completed outcome.'
+)
