@@ -18,7 +18,14 @@ $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $python = Join-Path $repo '.venv\Scripts\python.exe'
 $collector = Join-Path $repo 'scripts\collect_startup_metrics.py'
-if (-not (Test-Path $python)) { throw "project Python not found: $python" }
+if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+    $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+    if ($null -eq $pythonCommand) { throw 'Python 3.13 is required' }
+    $python = $pythonCommand.Source
+}
+if (-not (Test-Path -LiteralPath $collector -PathType Leaf)) {
+    throw "startup metrics collector not found: $collector"
+}
 if (-not (Test-Path $AppPath -PathType Leaf)) { throw "WinUI app not found: $AppPath" }
 
 $zipBytes = 0
