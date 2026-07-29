@@ -8,5 +8,6 @@ obj/
 dist/
 build/
 artifacts/
+.test-results/
 .release-input/
 dev-overrides.json
