@@ -36,3 +36,17 @@ def test_dotnet_lock_update_uses_published_packages_and_isolated_caches() -> Non
         "NUGET_PACKAGES",
     ):
         assert required in script
+
+
+def test_startup_benchmark_only_passes_supported_collector_arguments() -> None:
+    wrapper = (ROOT / "scripts" / "benchmark_winui_startup.ps1").read_text(
+        encoding="utf-8"
+    )
+    collector = (ROOT / "scripts" / "collect_startup_metrics.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "--name" not in wrapper
+    for argument in ("--target", "--runs", "--zip-bytes", "--output"):
+        assert argument in wrapper
+        assert f'"{argument}"' in collector

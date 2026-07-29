@@ -37,7 +37,6 @@ if ($ZipPath) {
 & $python $collector `
     --target $AppPath `
     --runs $Runs `
-    --name winui `
     --zip-bytes $zipBytes `
     --output $Output
 exit $LASTEXITCODE
