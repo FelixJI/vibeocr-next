@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+bin/
+obj/
+dist/
+build/
+artifacts/
+.release-input/
+dev-overrides.json
