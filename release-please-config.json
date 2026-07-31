@@ -1,0 +1,28 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "simple",
+  "include-v-in-tag": true,
+  "include-component-in-tag": false,
+  "pull-request-title-pattern": "chore(main): release ${version}",
+  "draft": true,
+  "force-tag-creation": true,
+  "packages": {
+    ".": {
+      "package-name": "vibeocr-next",
+      "prerelease": true,
+      "prerelease-type": "preview",
+      "extra-files": [
+        {
+          "type": "xml",
+          "path": "src/dotnet/VibeOCR.App/VibeOCR.App.csproj",
+          "xpath": "//Project/PropertyGroup/Version"
+        },
+        {
+          "type": "json",
+          "path": "repository.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    }
+  }
+}
