@@ -17,6 +17,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: src/dotnet/VibeOCR.App/WebAssets/package-lock.json
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
@@ -27,6 +32,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          python -m pip install --upgrade pip
+          python -m pip install --group dev
+          ./scripts/check-quality.ps1
           gh release download v2.0.0 --repo FelixJI/vibeocr-protocol --dir .release-input/protocol
           gh release download v0.7.0 --repo FelixJI/vibeocr-backend --dir .release-input/backend
           python scripts/bind_component_releases.py product-lock --protocol-release-dir .release-input/protocol --backend-release-dir .release-input/backend --protocol-repository FelixJI/vibeocr-protocol --protocol-version 2.0.0 --backend-repository FelixJI/vibeocr-backend --backend-version 0.7.0 --profile win-x64-cpu --required-capability ocr.recognition.v2 --required-capability pdf.edit.v2 --required-capability qrcode.v2 --required-capability export.document.v1 --required-capability runtime.settings.v2 --output .release-input/component-lock.json

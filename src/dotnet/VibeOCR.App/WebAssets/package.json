@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "packageManager": "npm@11.7.0",
   "scripts": {
     "test": "node --test ../../../../tests/web/*.test.ts"
   }
