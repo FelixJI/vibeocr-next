@@ -47,7 +47,13 @@ jobs:
           preview = int(match.group(4)) if match.group(4) else None
           bump = os.environ["BUMP"]
           if bump == "prerelease":
-              version = f"{major}.{minor}.{patch}-preview.{(preview or 0) + 1}"
+              if preview is None:
+                  raise SystemExit(
+                      f"current version {current} is a stable release; "
+                      "'prerelease' bump would demote it to a preview. "
+                      "Use patch/minor/major instead."
+                  )
+              version = f"{major}.{minor}.{patch}-preview.{preview + 1}"
           elif bump == "major":
               version = f"{major + 1}.0.0-preview.1"
           elif bump == "minor":
