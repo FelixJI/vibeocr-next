@@ -1,7 +1,20 @@
 [CmdletBinding()]
-param()
+param(
+    [string]$Version
+)
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$projectFile = Join-Path $root 'src/dotnet/VibeOCR.App/VibeOCR.App.csproj'
+[xml]$project = Get-Content -LiteralPath $projectFile -Raw
+$projectVersion = [string]$project.Project.PropertyGroup.Version
+if (-not $Version) {
+    $Version = $projectVersion
+} else {
+    $Version = $Version.TrimStart('v')
+}
+if ($Version -ne $projectVersion) {
+    throw "Release version '$Version' does not match project version '$projectVersion'"
+}
 $artifacts = Join-Path $root 'artifacts'
 $build = Join-Path $root '.release-build'
 $inputs = Join-Path $root '.release-input'
@@ -56,10 +69,10 @@ Copy-Item -LiteralPath (Join-Path $build 'updater-dist/updater.exe') `
   -Destination $product
 Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination $product
 Copy-Item -LiteralPath (Join-Path $root 'CHANGELOG.md') -Destination $product
-$zip = Join-Path $artifacts 'VibeOCR-Next-v0.1.0-preview.1-win64.zip'
+$zip = Join-Path $artifacts "VibeOCR-Next-v$Version-win64.zip"
 python (Join-Path $root 'scripts/package_product_release.py') `
   --product-root $product --frontend next `
-  --frontend-version 0.1.0-preview.1 `
+  --frontend-version $Version `
   --source-commit (git -C $root rev-parse HEAD).Trim() `
   --component-lock $lock --protocol-release-dir $protocol `
   --backend-release-dir $backend --output $zip
@@ -72,7 +85,7 @@ python (Join-Path $root 'scripts/build_release_checksums.py') $artifacts `
 if ($LASTEXITCODE -ne 0) { throw 'sidecar checksum build failed' }
 Remove-Item -LiteralPath (Join-Path $artifacts 'SHA256SUMS') -Force
 python (Join-Path $root 'scripts/build_spdx_sbom.py') --artifacts-dir $artifacts `
-  --repository-name FelixJI/vibeocr-next --version 0.1.0-preview.1
+  --repository-name FelixJI/vibeocr-next --version $Version
 if ($LASTEXITCODE -ne 0) { throw 'SBOM build failed' }
 python (Join-Path $root 'scripts/build_release_checksums.py') $artifacts
 if ($LASTEXITCODE -ne 0) { throw 'checksum build failed' }

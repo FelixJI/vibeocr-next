@@ -1,0 +1,88 @@
+name: Release Please
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version part to bump in the Release PR
+        required: true
+        default: prerelease
+        type: choice
+        options: [prerelease, patch, minor, major]
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: release-please-${{ github.repository }}-main
+  cancel-in-progress: false
+
+jobs:
+  release-pr:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Compute requested preview version
+        id: version
+        shell: python
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          current = json.loads(Path(".release-please-manifest.json").read_text())["."]
+          match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:-preview\.(\d+))?", current)
+          if match is None:
+              raise SystemExit(f"unsupported current version: {current}")
+          major, minor, patch = map(int, match.group(1, 2, 3))
+          preview = int(match.group(4)) if match.group(4) else None
+          bump = os.environ["BUMP"]
+          if bump == "prerelease":
+              if preview is None:
+                  raise SystemExit(
+                      f"current version {current} is a stable release; "
+                      "'prerelease' bump would demote it to a preview. "
+                      "Use patch/minor/major instead."
+                  )
+              version = f"{major}.{minor}.{patch}-preview.{preview + 1}"
+          elif bump == "major":
+              version = f"{major + 1}.0.0-preview.1"
+          elif bump == "minor":
+              version = f"{major}.{minor + 1}.0-preview.1"
+          else:
+              version = f"{major}.{minor}.{patch + 1}-preview.1"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"next={version}\n")
+      - name: Create or update Release PR
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          release-as: ${{ steps.version.outputs.next }}
+          skip-github-release: true
+
+  draft-release:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Create tag and draft prerelease for a merged Release PR
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ github.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          skip-github-pull-request: true
