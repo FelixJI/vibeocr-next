@@ -1,7 +1,7 @@
 {
   "backend": {
-    "artifact_sha256": "b16fb2b98a3dcaaa4f496629e7c8cb27b1ed2373dcf26db0bbeb1e4f372a9709",
     "accelerator": "cpu",
+    "artifact_sha256": "b16fb2b98a3dcaaa4f496629e7c8cb27b1ed2373dcf26db0bbeb1e4f372a9709",
     "repository": "FelixJI/vibeocr-backend",
     "runtime_manifest_sha256": "13caec62e2d74e71a6a46bee8dc7fd70b48d22127d1fa93d2477b1956e449f43",
     "version": "0.7.0"
