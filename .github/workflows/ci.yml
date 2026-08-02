@@ -37,7 +37,7 @@ jobs:
           ./scripts/check-quality.ps1
           gh release download v2.0.0 --repo FelixJI/vibeocr-protocol --dir .release-input/protocol
           gh release download v0.7.0 --repo FelixJI/vibeocr-backend --dir .release-input/backend
-          python scripts/bind_component_releases.py product-lock --protocol-release-dir .release-input/protocol --backend-release-dir .release-input/backend --protocol-repository FelixJI/vibeocr-protocol --protocol-version 2.0.0 --backend-repository FelixJI/vibeocr-backend --backend-version 0.7.0 --profile win-x64-cpu --required-capability ocr.recognition.v2 --required-capability pdf.edit.v2 --required-capability qrcode.v2 --required-capability export.document.v1 --required-capability runtime.settings.v2 --output .release-input/component-lock.json
+          python scripts/bind_component_releases.py product-lock --protocol-release-dir .release-input/protocol --backend-release-dir .release-input/backend --protocol-repository FelixJI/vibeocr-protocol --protocol-version 2.0.0 --backend-repository FelixJI/vibeocr-backend --backend-version 0.7.0 --accelerator cpu --required-capability ocr.recognition.v2 --required-capability pdf.edit.v2 --required-capability qrcode.v2 --required-capability export.document.v1 --required-capability runtime.settings.v2 --output .release-input/component-lock.json
           $generatedLock = Get-Content .release-input/component-lock.json -Raw | ConvertFrom-Json | ConvertTo-Json -Depth 100 -Compress
           $committedLock = Get-Content component-lock.json -Raw | ConvertFrom-Json | ConvertTo-Json -Depth 100 -Compress
           if ($generatedLock -ne $committedLock) { throw 'component lock mismatch' }
