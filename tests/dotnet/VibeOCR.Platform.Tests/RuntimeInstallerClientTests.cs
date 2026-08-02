@@ -26,9 +26,10 @@ public sealed class RuntimeInstallerClientTests
         Assert.Equal("vibeocr.backend.supervisor.main", launch.SupervisorModule);
         Assert.Equal(@"C:\Next", launch.WorkingDirectory);
         Assert.Equal(@"C:\store", launch.Environment["VIBEOCR_RUNTIME_ROOT"]);
-        Assert.Equal("ensure", Request(runner.LastStartInfo!).GetProperty("operation").GetString());
+        ProcessStartInfo startInfo = Assert.IsType<ProcessStartInfo>(runner.LastStartInfo);
+        Assert.Equal("ensure", Request(startInfo).GetProperty("operation").GetString());
         Assert.DoesNotContain(
-            runner.LastStartInfo.ArgumentList,
+            startInfo.ArgumentList,
             argument => argument.Contains("pip", StringComparison.OrdinalIgnoreCase) ||
                 argument.Contains("torch", StringComparison.OrdinalIgnoreCase));
     }
