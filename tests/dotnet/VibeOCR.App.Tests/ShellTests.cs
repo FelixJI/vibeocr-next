@@ -37,8 +37,6 @@ public sealed class ShellTests
     public void SupervisorOptionsUseInstallerLaunchContractVerbatim()
     {
         var launch = new RuntimeLaunch(
-            "manifest/win-x64-cpu",
-            "win-x64-cpu",
             @"D:\shared\runtimes\python.exe",
             "custom.backend.supervisor",
             @"D:\products\next",

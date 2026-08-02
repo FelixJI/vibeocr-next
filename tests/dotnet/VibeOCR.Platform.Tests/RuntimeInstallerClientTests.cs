@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using VibeOCR.Platform.Bootstrap;
 using Xunit;
 
@@ -14,20 +15,7 @@ public sealed class RuntimeInstallerClientTests
         var runner = new StubRunner(
             new RuntimeInstallerProcessResult(
                 0,
-                """
-                {
-                  "runtime_id": "abc/win-x64-cpu",
-                  "profile": "win-x64-cpu",
-                  "python_executable": "C:\\store\\python.exe",
-                  "supervisor_module": "vibeocr.backend.supervisor.main",
-                  "working_directory": "C:\\Next",
-                  "model_root": "C:\\store\\models",
-                  "environment": {
-                    "VIBEOCR_RUNTIME_ROOT": "C:\\store",
-                    "VIBEOCR_MODEL_ROOT": "C:\\store\\models"
-                  }
-                }
-                """,
+                LaunchEnvelope(),
                 string.Empty));
         var client = new RuntimeInstallerClient(Configuration(), runner);
 
@@ -38,7 +26,7 @@ public sealed class RuntimeInstallerClientTests
         Assert.Equal("vibeocr.backend.supervisor.main", launch.SupervisorModule);
         Assert.Equal(@"C:\Next", launch.WorkingDirectory);
         Assert.Equal(@"C:\store", launch.Environment["VIBEOCR_RUNTIME_ROOT"]);
-        Assert.Equal("ensure", runner.LastStartInfo!.ArgumentList[0]);
+        Assert.Equal("ensure", Request(runner.LastStartInfo!).GetProperty("operation").GetString());
         Assert.DoesNotContain(
             runner.LastStartInfo.ArgumentList,
             argument => argument.Contains("pip", StringComparison.OrdinalIgnoreCase) ||
@@ -51,17 +39,7 @@ public sealed class RuntimeInstallerClientTests
         var runner = new StubRunner(
             new RuntimeInstallerProcessResult(
                 0,
-                """
-                {
-                  "status": "ready",
-                  "runtime_id": "abc/win-x64-cpu",
-                  "profile": "win-x64-cpu",
-                  "runtime_root": "C:\\store",
-                  "manifest_sha256": "abc",
-                  "backend_version": "0.7.0",
-                  "integrity": "verified"
-                }
-                """,
+                InspectEnvelope(),
                 string.Empty));
         var client = new RuntimeInstallerClient(Configuration(), runner);
 
@@ -70,7 +48,8 @@ public sealed class RuntimeInstallerClientTests
 
         Assert.Equal("ready", inspection.Status);
         Assert.Equal("verified", inspection.Integrity);
-        Assert.Equal("inspect", runner.LastStartInfo!.ArgumentList[0]);
+        Assert.Equal("cpu", inspection.Accelerator);
+        Assert.Equal("inspect", Request(runner.LastStartInfo!).GetProperty("operation").GetString());
     }
 
     [Fact]
@@ -81,15 +60,15 @@ public sealed class RuntimeInstallerClientTests
             PortableLayoutManifest = @"C:\bundle\portable-layout.json",
             ProductId = "next",
         };
-        var runner = LaunchRunner();
+        var runner = LaunchRunner("repair");
         var client = new RuntimeInstallerClient(configuration, runner);
 
         await client.RepairAsync(TestContext.Current.CancellationToken);
 
-        IReadOnlyList<string> arguments = runner.LastStartInfo!.ArgumentList;
-        AssertOption(arguments, "--layout-manifest", @"C:\bundle\portable-layout.json");
-        AssertOption(arguments, "--product-id", "next");
-        Assert.Equal("repair", arguments[0]);
+        JsonElement request = Request(runner.LastStartInfo!);
+        Assert.Equal(@"C:\bundle\portable-layout.json", request.GetProperty("layout_manifest").GetString());
+        Assert.Equal("next", request.GetProperty("product_id").GetString());
+        Assert.Equal("repair", request.GetProperty("operation").GetString());
     }
 
     [Fact]
@@ -100,8 +79,9 @@ public sealed class RuntimeInstallerClientTests
 
         await client.EnsureAsync(TestContext.Current.CancellationToken);
 
-        Assert.DoesNotContain("--layout-manifest", runner.LastStartInfo!.ArgumentList);
-        Assert.DoesNotContain("--product-id", runner.LastStartInfo.ArgumentList);
+        JsonElement request = Request(runner.LastStartInfo!);
+        Assert.False(request.TryGetProperty("layout_manifest", out _));
+        Assert.False(request.TryGetProperty("product_id", out _));
     }
 
     [Fact]
@@ -110,7 +90,7 @@ public sealed class RuntimeInstallerClientTests
         var runner = new StubRunner(
             new RuntimeInstallerProcessResult(
                 1,
-                """{"error":"RuntimeInstallError","message":"hash mismatch"}""",
+                """{"protocol_version":2,"ok":false,"operation":"ensure","error":{"code":"install_failed","message":"hash mismatch","retryable":false}}""",
                 string.Empty));
         var client = new RuntimeInstallerClient(Configuration(), runner);
 
@@ -118,28 +98,6 @@ public sealed class RuntimeInstallerClientTests
             () => client.EnsureAsync(TestContext.Current.CancellationToken));
 
         Assert.Contains("hash mismatch", error.Message);
-    }
-
-    [Fact]
-    public async Task GarbageCollectionForwardsAllProductLocks()
-    {
-        var runner = new StubRunner(
-            new RuntimeInstallerProcessResult(
-                0,
-                """["old/runtime"]""",
-                string.Empty));
-        var client = new RuntimeInstallerClient(Configuration(), runner);
-
-        IReadOnlyList<string> removed = await client.GcAsync(
-            [@"C:\Next\component-lock.json", @"C:\Classic\component-lock.json"],
-            TestContext.Current.CancellationToken);
-
-        Assert.Equal(["old/runtime"], removed);
-        Assert.Equal("gc", runner.LastStartInfo!.ArgumentList[0]);
-        Assert.Equal(
-            2,
-            runner.LastStartInfo.ArgumentList.Count(
-                argument => argument == "--referenced-component-lock"));
     }
 
     [Fact]
@@ -301,7 +259,7 @@ public sealed class RuntimeInstallerClientTests
         RuntimeInstallerConfiguration configuration =
             RuntimeInstallerConfiguration.ForNext(
                 layout,
-                runtimeProfile: "win-x64-cu126",
+                accelerator: "nvidia_cuda",
                 executable: @"C:\Next\runtime-installer\installer.exe");
 
         Assert.Equal(@"C:\Next", configuration.ProductRoot);
@@ -309,7 +267,7 @@ public sealed class RuntimeInstallerClientTests
         Assert.Equal(
             @"C:\Next\backend\runtime-manifest.json",
             configuration.RuntimeManifest);
-        Assert.Equal("win-x64-cu126", configuration.RuntimeProfile);
+        Assert.Equal("nvidia_cuda", configuration.Accelerator);
     }
 
     private static RuntimeInstallerConfiguration Configuration() =>
@@ -318,34 +276,67 @@ public sealed class RuntimeInstallerClientTests
             @"C:\Next",
             @"C:\Next\component-lock.json",
             @"C:\Next\backend\runtime-manifest.json",
-            "win-x64-cpu");
+            "cpu");
 
-    private static StubRunner LaunchRunner() =>
+    private static StubRunner LaunchRunner(string operation = "ensure") =>
         new(
             new RuntimeInstallerProcessResult(
                 0,
-                """
-                {
-                  "runtime_id": "abc/win-x64-cpu",
-                  "profile": "win-x64-cpu",
-                  "python_executable": "C:\\store\\python.exe",
-                  "supervisor_module": "vibeocr.backend.supervisor.main",
-                  "working_directory": "C:\\Next",
-                  "model_root": "C:\\store\\models",
-                  "environment": {}
-                }
-                """,
+                LaunchEnvelope(operation),
                 string.Empty));
 
-    private static void AssertOption(
-        IReadOnlyList<string> arguments,
-        string option,
-        string expected)
+    private static JsonElement Request(ProcessStartInfo startInfo)
     {
-        int index = arguments.ToList().IndexOf(option);
+        int index = startInfo.ArgumentList.ToList().IndexOf("--request-json");
         Assert.True(index >= 0);
-        Assert.Equal(expected, arguments[index + 1]);
+        using JsonDocument document = JsonDocument.Parse(startInfo.ArgumentList[index + 1]);
+        return document.RootElement.Clone();
     }
+
+    private static string InspectEnvelope() =>
+        """
+        {
+          "protocol_version": 2,
+          "ok": true,
+          "operation": "inspect",
+          "state": {
+            "status": "ready",
+            "runtime_root": "C:\\store\\runtime",
+            "accelerator": "cpu",
+            "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "backend_version": "0.7.0",
+            "integrity": "verified"
+          },
+          "launch": null
+        }
+        """;
+
+    private static string LaunchEnvelope(string operation = "ensure") =>
+        $$"""
+        {
+          "protocol_version": 2,
+          "ok": true,
+          "operation": "{{operation}}",
+          "state": {
+            "status": "ready",
+            "runtime_root": "C:\\store\\runtime",
+            "accelerator": "cpu",
+            "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "backend_version": "0.7.0",
+            "integrity": "verified"
+          },
+          "launch": {
+            "python_executable": "C:\\store\\python.exe",
+            "supervisor_module": "vibeocr.backend.supervisor.main",
+            "working_directory": "C:\\Next",
+            "model_root": "C:\\store\\models",
+            "environment": {
+              "VIBEOCR_RUNTIME_ROOT": "C:\\store",
+              "VIBEOCR_MODEL_ROOT": "C:\\store\\models"
+            }
+          }
+        }
+        """;
 
     private static ProcessStartInfo BoundStartInfo(
         string executable,
@@ -358,10 +349,16 @@ public sealed class RuntimeInstallerClientTests
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
-        startInfo.ArgumentList.Add("--component-lock");
-        startInfo.ArgumentList.Add(componentLock);
-        startInfo.ArgumentList.Add("--runtime-manifest");
-        startInfo.ArgumentList.Add(manifest);
+        startInfo.ArgumentList.Add("--request-json");
+        startInfo.ArgumentList.Add(JsonSerializer.Serialize(new
+        {
+            protocol_version = 2,
+            operation = "inspect",
+            product_root = Path.GetDirectoryName(manifest),
+            component_lock = componentLock,
+            runtime_manifest = manifest,
+            accelerator = "cpu",
+        }));
         return startInfo;
     }
 

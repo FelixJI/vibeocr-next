@@ -13,13 +13,13 @@ public sealed record RuntimeInstallerConfiguration(
     string ProductRoot,
     string ComponentLock,
     string RuntimeManifest,
-    string RuntimeProfile,
+    string? Accelerator,
     string? PortableLayoutManifest = null,
     string? ProductId = null)
 {
     public static RuntimeInstallerConfiguration ForNext(
         PortableLayout layout,
-        string? runtimeProfile = null,
+        string? accelerator = null,
         string? executable = null)
     {
         ArgumentNullException.ThrowIfNull(layout);
@@ -29,15 +29,14 @@ public sealed record RuntimeInstallerConfiguration(
                 layout.InstallRoot,
                 "runtime-installer",
                 "vibeocr-runtime-installer.exe");
-        string profile = runtimeProfile ??
-            Environment.GetEnvironmentVariable("VIBEOCR_RUNTIME_PROFILE") ??
-            "win-x64-cpu";
+        string? selectedAccelerator = accelerator ??
+            Environment.GetEnvironmentVariable("VIBEOCR_RUNTIME_ACCELERATOR");
         return new RuntimeInstallerConfiguration(
             installer,
             layout.InstallRoot,
             Path.Combine(layout.InstallRoot, "component-lock.json"),
             Path.Combine(layout.InstallRoot, "backend", "runtime-manifest.json"),
-            profile,
+            selectedAccelerator,
             layout.PortableLayoutManifest,
             layout.PortableLayoutManifest is null ? null : "next");
     }
@@ -45,16 +44,13 @@ public sealed record RuntimeInstallerConfiguration(
 
 public sealed record RuntimeInspection(
     [property: JsonPropertyName("status")] string Status,
-    [property: JsonPropertyName("runtime_id")] string RuntimeId,
-    [property: JsonPropertyName("profile")] string Profile,
     [property: JsonPropertyName("runtime_root")] string RuntimeRoot,
+    [property: JsonPropertyName("accelerator")] string Accelerator,
     [property: JsonPropertyName("manifest_sha256")] string ManifestSha256,
     [property: JsonPropertyName("backend_version")] string BackendVersion,
     [property: JsonPropertyName("integrity")] string Integrity);
 
 public sealed record RuntimeLaunch(
-    [property: JsonPropertyName("runtime_id")] string RuntimeId,
-    [property: JsonPropertyName("profile")] string Profile,
     [property: JsonPropertyName("python_executable")] string PythonExecutable,
     [property: JsonPropertyName("supervisor_module")] string SupervisorModule,
     [property: JsonPropertyName("working_directory")] string WorkingDirectory,
@@ -79,10 +75,20 @@ public interface IRuntimeInstallerClient
     Task<RuntimeInspection> InspectAsync(CancellationToken cancellationToken = default);
     Task<RuntimeLaunch> EnsureAsync(CancellationToken cancellationToken = default);
     Task<RuntimeLaunch> RepairAsync(CancellationToken cancellationToken = default);
-    Task<IReadOnlyList<string>> GcAsync(
-        IReadOnlyList<string> componentLocks,
-        CancellationToken cancellationToken = default);
 }
+
+public sealed record RuntimeHostError(
+    [property: JsonPropertyName("code")] string Code,
+    [property: JsonPropertyName("message")] string Message,
+    [property: JsonPropertyName("retryable")] bool Retryable);
+
+public sealed record RuntimeHostEnvelope(
+    [property: JsonPropertyName("protocol_version")] int ProtocolVersion,
+    [property: JsonPropertyName("ok")] bool Ok,
+    [property: JsonPropertyName("operation")] string? Operation,
+    [property: JsonPropertyName("state")] RuntimeInspection? State,
+    [property: JsonPropertyName("launch")] RuntimeLaunch? Launch,
+    [property: JsonPropertyName("error")] RuntimeHostError? Error);
 
 public sealed class RuntimeInstallerException : InvalidOperationException
 {
@@ -124,7 +130,7 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
     }
 
     public Task<RuntimeInspection> InspectAsync(CancellationToken cancellationToken = default) =>
-        InvokeAsync<RuntimeInspection>("inspect", [], cancellationToken);
+        InvokeStateAsync(cancellationToken);
 
     public Task<RuntimeLaunch> EnsureAsync(CancellationToken cancellationToken = default) =>
         InvokeLaunchAsync("ensure", cancellationToken);
@@ -132,29 +138,25 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
     public Task<RuntimeLaunch> RepairAsync(CancellationToken cancellationToken = default) =>
         InvokeLaunchAsync("repair", cancellationToken);
 
-    public Task<IReadOnlyList<string>> GcAsync(
-        IReadOnlyList<string> componentLocks,
-        CancellationToken cancellationToken = default)
+    private async Task<RuntimeInspection> InvokeStateAsync(
+        CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(componentLocks);
-        var extraArguments = new List<string>(componentLocks.Count * 2);
-        foreach (string componentLock in componentLocks)
-        {
-            ArgumentException.ThrowIfNullOrWhiteSpace(componentLock);
-            extraArguments.Add("--referenced-component-lock");
-            extraArguments.Add(Path.GetFullPath(componentLock));
-        }
-        return InvokeAsync<IReadOnlyList<string>>("gc", extraArguments, cancellationToken);
+        RuntimeHostEnvelope envelope = await InvokeAsync(
+            "inspect",
+            cancellationToken).ConfigureAwait(false);
+        return envelope.State ?? throw new RuntimeInstallerException(
+            "Runtime Host inspect response has no state.");
     }
 
     private async Task<RuntimeLaunch> InvokeLaunchAsync(
         string operation,
         CancellationToken cancellationToken)
     {
-        RuntimeLaunch launch = await InvokeAsync<RuntimeLaunch>(
+        RuntimeHostEnvelope envelope = await InvokeAsync(
             operation,
-            [],
             cancellationToken).ConfigureAwait(false);
+        RuntimeLaunch launch = envelope.Launch ?? throw new RuntimeInstallerException(
+            $"Runtime Host {operation} response has no launch contract.");
         if (string.IsNullOrWhiteSpace(launch.PythonExecutable) ||
             string.IsNullOrWhiteSpace(launch.SupervisorModule) ||
             string.IsNullOrWhiteSpace(launch.WorkingDirectory) ||
@@ -170,12 +172,11 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         return launch;
     }
 
-    private async Task<T> InvokeAsync<T>(
+    private async Task<RuntimeHostEnvelope> InvokeAsync(
         string operation,
-        IReadOnlyList<string> extraArguments,
         CancellationToken cancellationToken)
     {
-        ProcessStartInfo startInfo = BuildStartInfo(operation, extraArguments);
+        ProcessStartInfo startInfo = BuildStartInfo(operation);
         RuntimeInstallerProcessResult result = await _runner.RunAsync(
             startInfo,
             cancellationToken).ConfigureAwait(false);
@@ -189,8 +190,17 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
 
         try
         {
-            T? value = JsonSerializer.Deserialize<T>(result.StandardOutput, JsonOptions);
-            return value ?? throw new JsonException("JSON value was null.");
+            RuntimeHostEnvelope? value = JsonSerializer.Deserialize<RuntimeHostEnvelope>(
+                result.StandardOutput,
+                JsonOptions);
+            if (value is null || value.ProtocolVersion != 2 ||
+                !string.Equals(value.Operation, operation, StringComparison.Ordinal) ||
+                !value.Ok)
+            {
+                throw new RuntimeInstallerException(
+                    value?.Error?.Message ?? $"Runtime Host {operation} returned an invalid envelope.");
+            }
+            return value;
         }
         catch (JsonException error)
         {
@@ -200,8 +210,7 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
     }
 
     private ProcessStartInfo BuildStartInfo(
-        string operation,
-        IReadOnlyList<string> extraArguments)
+        string operation)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -212,23 +221,21 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
-        startInfo.ArgumentList.Add(operation);
-        AddOption(startInfo, "--product-root", _configuration.ProductRoot);
-        AddOption(startInfo, "--component-lock", _configuration.ComponentLock);
-        AddOption(startInfo, "--runtime-manifest", _configuration.RuntimeManifest);
-        AddOption(startInfo, "--profile", _configuration.RuntimeProfile);
+        var request = new Dictionary<string, object?>
+        {
+            ["protocol_version"] = 2,
+            ["operation"] = operation,
+            ["product_root"] = _configuration.ProductRoot,
+            ["component_lock"] = _configuration.ComponentLock,
+            ["runtime_manifest"] = _configuration.RuntimeManifest,
+            ["accelerator"] = _configuration.Accelerator,
+        };
         if (_configuration.PortableLayoutManifest is not null)
         {
-            AddOption(
-                startInfo,
-                "--layout-manifest",
-                _configuration.PortableLayoutManifest);
-            AddOption(startInfo, "--product-id", _configuration.ProductId!);
+            request["layout_manifest"] = _configuration.PortableLayoutManifest;
+            request["product_id"] = _configuration.ProductId;
         }
-        foreach (string argument in extraArguments)
-        {
-            startInfo.ArgumentList.Add(argument);
-        }
+        AddOption(startInfo, "--request-json", JsonSerializer.Serialize(request));
         return startInfo;
     }
 
@@ -243,7 +250,8 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         try
         {
             using JsonDocument document = JsonDocument.Parse(standardOutput);
-            if (document.RootElement.TryGetProperty("message", out JsonElement message))
+            if (document.RootElement.TryGetProperty("error", out JsonElement error) &&
+                error.TryGetProperty("message", out JsonElement message))
             {
                 return message.GetString();
             }
@@ -260,7 +268,11 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         ArgumentException.ThrowIfNullOrWhiteSpace(configuration.ProductRoot);
         ArgumentException.ThrowIfNullOrWhiteSpace(configuration.ComponentLock);
         ArgumentException.ThrowIfNullOrWhiteSpace(configuration.RuntimeManifest);
-        ArgumentException.ThrowIfNullOrWhiteSpace(configuration.RuntimeProfile);
+        if (configuration.Accelerator is not null &&
+            configuration.Accelerator is not ("cpu" or "nvidia_cuda"))
+        {
+            throw new ArgumentException("Accelerator must be cpu or nvidia_cuda.");
+        }
         if ((configuration.PortableLayoutManifest is null) !=
             (configuration.ProductId is null))
         {
@@ -306,12 +318,14 @@ public sealed class RuntimeInstallerCommandRunner : IRuntimeInstallerCommandRunn
     {
         try
         {
-            string componentLockPath = RequireOption(
-                startInfo,
-                "--component-lock");
-            string runtimeManifestPath = RequireOption(
-                startInfo,
-                "--runtime-manifest");
+            string requestJson = RequireOption(startInfo, "--request-json");
+            using JsonDocument request = JsonDocument.Parse(requestJson);
+            string componentLockPath = request.RootElement
+                .GetProperty("component_lock").GetString() ??
+                throw new InvalidDataException("component_lock is missing.");
+            string runtimeManifestPath = request.RootElement
+                .GetProperty("runtime_manifest").GetString() ??
+                throw new InvalidDataException("runtime_manifest is missing.");
 
             byte[] componentLockBytes = File.ReadAllBytes(componentLockPath);
             byte[] runtimeManifestBytes = File.ReadAllBytes(runtimeManifestPath);
