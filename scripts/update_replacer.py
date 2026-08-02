@@ -428,7 +428,9 @@ def replace_app_files(
             for item in old_items:
                 bak = backup_dir / item.name
                 if item.is_dir():
-                    shutil.copytree(item, bak, dirs_exist_ok=True, copy_function=_busy_copy2)
+                    shutil.copytree(
+                        item, bak, dirs_exist_ok=True, copy_function=_busy_copy2
+                    )
                 else:
                     _busy_copy2(item, bak)
                 backed_up.append((item, bak))
@@ -655,7 +657,11 @@ def _safe_remove_running_exe(path: Path, *, label: str = "") -> None:
             # 用 use_last_error=True 让 ctypes.get_last_error() 拿到真实错误码。
             move_file_ex = ctypes.windll.kernel32.MoveFileExW  # type: ignore[attr-defined]
             move_file_ex.restype = ctypes.c_int
-            move_file_ex.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+            move_file_ex.argtypes = [
+                ctypes.c_wchar_p,
+                ctypes.c_wchar_p,
+                ctypes.c_uint32,
+            ]
             ok = move_file_ex(str(path), None, 4)
             if ok:
                 logger.info(f"{name} 被占用，已标记在下次重启时删除")
@@ -719,8 +725,7 @@ def _normalize_dep_value(v: object) -> str:
     s = str(v).strip()
     # 已是约束串（以 PEP 440 操作符开头）→ 直接返回；否则视为裸版本号
     if s and (
-        s.startswith(("==", "!=", ">=", "<=", "~="))
-        or (s[:1] in "><" and len(s) > 1)
+        s.startswith(("==", "!=", ">=", "<=", "~=")) or (s[:1] in "><" and len(s) > 1)
     ):
         return s
     return f">={s}" if s else ""
@@ -783,7 +788,9 @@ def _sync_dependencies(
     removed = [pkg for pkg in old_deps if pkg not in new_deps]
     # 过滤掉非追踪的包（旧 version.json 可能含 _TRACKED_PREFIXES 之外的残留）
     _TRACKED_PREFIXES = ("paddle", "paddleocr", "mineru", "torch", "nvidia")
-    removed = [p for p in removed if any(p.startswith(pre) for pre in _TRACKED_PREFIXES)]
+    removed = [
+        p for p in removed if any(p.startswith(pre) for pre in _TRACKED_PREFIXES)
+    ]
 
     if not changed and not removed:
         logger.info("AI 依赖版本无变化")

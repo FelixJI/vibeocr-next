@@ -89,15 +89,17 @@ def collect(
                 if process.returncode != 0:
                     raise ValueError(f"process exited with {process.returncode}")
                 t0_t3, t0_t6 = _read_trace(trace)
-            except (OSError, subprocess.TimeoutExpired, ValueError, json.JSONDecodeError) as error:
+            except (
+                OSError,
+                subprocess.TimeoutExpired,
+                ValueError,
+                json.JSONDecodeError,
+            ) as error:
                 print(f"run {index + 1}: INVALID ({error})")
                 continue
             t0_t3_samples.append(t0_t3)
             t0_t6_samples.append(t0_t6)
-            print(
-                f"run {index + 1}: T0-T3={t0_t3:.0f} ms, "
-                f"T0-T6={t0_t6:.0f} ms"
-            )
+            print(f"run {index + 1}: T0-T3={t0_t3:.0f} ms, T0-T6={t0_t6:.0f} ms")
 
     return {
         "name": "winui",
