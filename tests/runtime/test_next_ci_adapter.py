@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from scripts.automation_core import CommandRunner
+from scripts.check_quality import resolve_executable
 from scripts.release_smoke import verify
 from scripts.resolve_component_releases import assert_protocol_compatible
 from scripts.sync_version import sync_version
@@ -42,6 +43,17 @@ def test_command_runner_resolves_platform_command_shims(
     CommandRunner(tmp_path).run(["npm", "ci"])
 
     assert calls == [["C:/node/npm.cmd", "ci"]]
+
+
+def test_quality_script_resolves_platform_command_shims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "scripts.check_quality.shutil.which",
+        lambda command: "C:/node/npm.cmd" if command == "npm" else None,
+    )
+
+    assert resolve_executable("npm") == "C:/node/npm.cmd"
 
 
 def test_project_config_declares_minor_compatible_protocol_and_single_identity_asset() -> (
