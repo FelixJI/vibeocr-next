@@ -185,3 +185,25 @@ def test_only_canonical_workflows_remain() -> None:
         "ci.yml",
         "cd.yml",
     }
+
+
+def test_publish_checkout_keeps_job_token_for_git_tag_push() -> None:
+    root = Path(__file__).parents[2]
+    workflow = (root / ".github/workflows/cd.yml").read_text(encoding="utf-8")
+    publish_job = workflow.split("\n  publish:\n", maxsplit=1)[1]
+    permissions = publish_job.split("\n    permissions:\n", maxsplit=1)[1].split(
+        "\n    steps:\n", maxsplit=1
+    )[0]
+    checkout = publish_job.split("- uses: actions/checkout@", maxsplit=1)[1].split(
+        "- uses: actions/setup-python@", maxsplit=1
+    )[0]
+
+    assert {line.strip() for line in permissions.splitlines() if line.strip()} == {
+        "actions: read",
+        "attestations: write",
+        "contents: write",
+        "id-token: write",
+    }
+    assert "persist-credentials: true" in checkout
+    assert "persist-credentials: false" not in checkout
+    assert "token:" not in checkout
