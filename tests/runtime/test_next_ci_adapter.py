@@ -72,7 +72,7 @@ def test_project_config_declares_minor_compatible_protocol_and_single_identity_a
     assert build_script.count("build_release_checksums.py") == 1
 
 
-def test_backend_identity_hashes_distinct_runtime_and_release_manifests() -> None:
+def test_backend_identity_hashes_runtime_and_optional_release_manifests() -> None:
     root = Path(__file__).parents[2]
     resolver = (root / "scripts/resolve_component_releases.py").read_text(
         encoding="utf-8"
@@ -84,8 +84,10 @@ def test_backend_identity_hashes_distinct_runtime_and_release_manifests() -> Non
     )
     assert (
         '"release_manifest_sha256": _sha(work / "backend" / "release-manifest.json")'
-        in resolver
+        not in resolver
     )
+    assert 'backend_identity["release_manifest_sha256"] = _sha(' in resolver
+    assert "if backend_release_manifest.is_file():" in resolver
 
 
 def test_sync_version_updates_repository_and_desktop_project(tmp_path: Path) -> None:

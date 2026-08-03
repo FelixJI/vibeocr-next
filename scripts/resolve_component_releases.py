@@ -128,15 +128,18 @@ def resolve(root: Path = ROOT) -> Path:
         ),
         output=lock,
     )
+    backend_identity = {
+        "repository": backend_repo,
+        "version": backend_version,
+        "source_sha": _source_sha(backend_repo, backend["tag_name"], backend),
+        "runtime_manifest_sha256": _sha(work / "backend" / "runtime-manifest.json"),
+    }
+    backend_release_manifest = work / "backend" / "release-manifest.json"
+    if backend_release_manifest.is_file():
+        backend_identity["release_manifest_sha256"] = _sha(backend_release_manifest)
     identity = {
         "schema_version": 1,
-        "backend": {
-            "repository": backend_repo,
-            "version": backend_version,
-            "source_sha": _source_sha(backend_repo, backend["tag_name"], backend),
-            "runtime_manifest_sha256": _sha(work / "backend" / "runtime-manifest.json"),
-            "release_manifest_sha256": _sha(work / "backend" / "release-manifest.json"),
-        },
+        "backend": backend_identity,
         "protocol": {
             "repository": protocol_repo,
             "version": protocol_version,
