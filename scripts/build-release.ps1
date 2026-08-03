@@ -23,7 +23,7 @@ foreach ($path in @($build)) {
     }
     New-Item -ItemType Directory -Path $path -Force | Out-Null
 }
-$inputs = Join-Path $artifacts 'components'
+$inputs = Join-Path $root '.release-input'
 $protocol = Join-Path $inputs 'protocol'
 $backend = Join-Path $inputs 'backend'
 $lock = Join-Path $artifacts 'component-lock.json'

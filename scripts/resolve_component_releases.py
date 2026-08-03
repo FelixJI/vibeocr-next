@@ -77,7 +77,7 @@ def _source_sha(repository: str, tag: str, release: dict[str, Any]) -> str:
 def resolve(root: Path = ROOT) -> Path:
     config = json.loads((root / ".ci/project.json").read_text(encoding="utf-8"))
     artifacts = Path(os.environ["AUTOMATION_ARTIFACTS_DIR"]).resolve()
-    work = artifacts / "components"
+    work = root / ".release-input"
     if work.exists():
         shutil.rmtree(work)
     backend_repo, protocol_repo = "FelixJI/vibeocr-backend", "FelixJI/vibeocr-protocol"

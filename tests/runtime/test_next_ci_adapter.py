@@ -70,6 +70,11 @@ def test_project_config_declares_minor_compatible_protocol_and_single_identity_a
     ]
     build_script = (root / "scripts/build-release.ps1").read_text(encoding="utf-8")
     assert build_script.count("build_release_checksums.py") == 1
+    resolver = (root / "scripts/resolve_component_releases.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'work = root / ".release-input"' in resolver
+    assert "$inputs = Join-Path $root '.release-input'" in build_script
 
 
 def test_backend_identity_hashes_runtime_and_optional_release_manifests() -> None:
