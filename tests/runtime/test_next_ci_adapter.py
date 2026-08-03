@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import zipfile
+from pathlib import Path
+
+import pytest
+
+from scripts.release_smoke import verify
+from scripts.resolve_component_releases import assert_protocol_compatible
+from scripts.sync_version import sync_version
+
+
+def test_protocol_compatibility_requires_declared_major_and_minor() -> None:
+    compatibility = {"supported_majors": [2], "minor_compatible": True}
+    assert_protocol_compatible("2.0.0", compatibility)
+    assert_protocol_compatible("2.99.0", compatibility)
+    with pytest.raises(ValueError, match="no fallback"):
+        assert_protocol_compatible("3.0.0", compatibility)
+
+
+def test_project_config_declares_minor_compatible_protocol_and_single_identity_asset() -> (
+    None
+):
+    root = Path(__file__).parents[2]
+    config = json.loads((root / ".ci/project.json").read_text(encoding="utf-8"))
+    assert config["project"]["protocol_compatibility"] == {
+        "supported_majors": [2],
+        "minor_compatible": True,
+    }
+    assert config["release"]["identity_asset"] == "component-identities.json"
+    assert "component-lock.json" in config["release"]["required_assets"]
+    build_script = (root / "scripts/build-release.ps1").read_text(encoding="utf-8")
+    assert build_script.count("build_release_checksums.py") == 1
+
+
+def test_backend_identity_hashes_distinct_runtime_and_release_manifests() -> None:
+    root = Path(__file__).parents[2]
+    resolver = (root / "scripts/resolve_component_releases.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        '"runtime_manifest_sha256": _sha(work / "backend" / "runtime-manifest.json")'
+        in resolver
+    )
+    assert (
+        '"release_manifest_sha256": _sha(work / "backend" / "release-manifest.json")'
+        in resolver
+    )
+
+
+def test_sync_version_updates_repository_and_desktop_project(tmp_path: Path) -> None:
+    (tmp_path / "src/dotnet/VibeOCR.App").mkdir(parents=True)
+    (tmp_path / "repository.json").write_text(
+        '{"version":"0.1.0-preview.1"}', encoding="utf-8"
+    )
+    project = tmp_path / "src/dotnet/VibeOCR.App/VibeOCR.App.csproj"
+    project.write_text(
+        "<Project><PropertyGroup><Version>0.1.0-preview.1</Version></PropertyGroup></Project>",
+        encoding="utf-8",
+    )
+    sync_version(tmp_path, "0.2.0")
+    assert (
+        json.loads((tmp_path / "repository.json").read_text(encoding="utf-8"))[
+            "version"
+        ]
+        == "0.2.0"
+    )
+    assert "<Version>0.2.0</Version>" in project.read_text(encoding="utf-8")
+
+
+def test_release_smoke_binds_real_archive_and_component_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "VibeOCR-Next-v0.2.0-win64.zip"
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr("VibeOCR.Next/VibeOCR.WinUI.exe", b"desktop")
+    (tmp_path / "component-lock.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "component-identities.json").write_text(
+        json.dumps(
+            {
+                "backend": {"version": "1.0.0", "source_sha": "a" * 40},
+                "protocol": {"version": "2.0.0", "source_sha": "b" * 40},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "SBOM.spdx.json").write_text("{}", encoding="utf-8")
+    sidecar = archive.with_name(archive.name + ".sha256")
+    sidecar.write_text(
+        f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "scripts.release_smoke.subprocess.run", lambda *args, **kwargs: None
+    )
+    verify(tmp_path)
+
+
+def test_only_canonical_workflows_remain() -> None:
+    root = Path(__file__).parents[2]
+    assert {path.name for path in (root / ".github/workflows").glob("*.yml")} == {
+        "ci.yml",
+        "cd.yml",
+    }
