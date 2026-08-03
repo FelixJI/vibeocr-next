@@ -32,7 +32,9 @@ def test_command_runner_resolves_platform_command_shims(
         lambda command, **kwargs: "C:/node/npm.cmd" if command == "npm" else None,
     )
 
-    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(command)
         return subprocess.CompletedProcess(command, 0)
 
@@ -53,6 +55,19 @@ def test_project_config_declares_minor_compatible_protocol_and_single_identity_a
     }
     assert config["release"]["identity_asset"] == "component-identities.json"
     assert "component-lock.json" in config["release"]["required_assets"]
+    bootstrap = config["ci"]["bootstrap"]
+    resolver_index = bootstrap.index(
+        ["python", "scripts/resolve_component_releases.py"]
+    )
+    restore_indexes = [
+        index
+        for index, command in enumerate(bootstrap)
+        if command[:2] == ["dotnet", "restore"]
+    ]
+    assert restore_indexes and resolver_index < min(restore_indexes)
+    assert ["python", "scripts/resolve_component_releases.py"] not in config["ci"][
+        "e2e"
+    ]
     build_script = (root / "scripts/build-release.ps1").read_text(encoding="utf-8")
     assert build_script.count("build_release_checksums.py") == 1
 

@@ -9,12 +9,12 @@
     "bootstrap": [
       ["python", "-m", "pip", "install", "--group", "dev"],
       ["npm", "ci", "--prefix", "src/dotnet/VibeOCR.App/WebAssets"],
+      ["python", "scripts/resolve_component_releases.py"],
       ["dotnet", "restore", "tests/dotnet/VibeOCR.Platform.Tests/VibeOCR.Platform.Tests.csproj", "--locked-mode"],
       ["dotnet", "restore", "tests/dotnet/VibeOCR.App.Tests/VibeOCR.App.Tests.csproj", "--locked-mode"]
     ],
     "quality": [["python", "scripts/check_quality.py"]],
     "e2e": [
-      ["python", "scripts/resolve_component_releases.py"],
       ["dotnet", "test", "tests/dotnet/VibeOCR.Platform.Tests/VibeOCR.Platform.Tests.csproj", "-c", "Release", "--no-restore"],
       ["pwsh", "-File", "scripts/test_app_ci.ps1"]
     ],
