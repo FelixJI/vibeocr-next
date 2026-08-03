@@ -29,6 +29,18 @@ def verify(artifacts: Path) -> None:
         if not record.get("version") or len(str(record.get("source_sha", ""))) != 40:
             raise ValueError(f"missing actual {component} version/source identity")
     archive = next(artifacts.glob("VibeOCR-Next-v*-win64.zip"))
+    expected_names = {
+        archive.name,
+        f"{archive.name}.sha256",
+        "component-lock.json",
+        "component-identities.json",
+        "SBOM.spdx.json",
+    }
+    if set(names) != expected_names:
+        raise ValueError(
+            "release asset set mismatch; "
+            f"expected={sorted(expected_names)}, actual={sorted(names)}"
+        )
     root = Path(os.environ.get("AUTOMATION_PROJECT_ROOT", Path(__file__).parents[1]))
     subprocess.run(
         [

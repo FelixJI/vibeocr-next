@@ -10,6 +10,7 @@ import shutil
 import urllib.request
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree
 
 ROOT = Path(__file__).resolve().parents[1]
 SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
@@ -45,6 +46,24 @@ def assert_protocol_compatible(version: str, compatibility: dict[str, Any]) -> N
         "supported_majors", []
     ):
         raise ValueError(f"unsupported Protocol {version}; no fallback is allowed")
+
+
+def compile_protocol_version(root: Path) -> str:
+    """Return the single pinned Protocol SDK version used for compilation."""
+    versions = {
+        element.attrib["Version"].removeprefix("[").removesuffix("]")
+        for element in ElementTree.parse(root / "Directory.Packages.props").iter(
+            "PackageVersion"
+        )
+        if element.attrib.get("Include", "").startswith("VibeOCR.Runtime.")
+    }
+    if len(versions) != 1:
+        raise ValueError(
+            f"one pinned Protocol SDK version required: {sorted(versions)}"
+        )
+    version = versions.pop()
+    _version(version)
+    return version
 
 
 def _download(release: dict[str, Any], destination: Path) -> None:
@@ -108,6 +127,20 @@ def resolve(root: Path = ROOT) -> Path:
     if protocol.get("prerelease") or protocol.get("draft"):
         raise ValueError("bound Protocol release is not formal")
     _download(protocol, work / "protocol")
+    sdk_version = compile_protocol_version(root)
+    assert_protocol_compatible(sdk_version, config["project"]["protocol_compatibility"])
+    if _version(sdk_version) > _version(protocol_version):
+        raise ValueError(
+            f"Protocol SDK {sdk_version} is newer than bound runtime {protocol_version}"
+        )
+    sdk_release = (
+        protocol
+        if sdk_version == protocol_version
+        else _api(protocol_repo, f"/releases/tags/v{sdk_version}")
+    )
+    if sdk_release.get("prerelease") or sdk_release.get("draft"):
+        raise ValueError("Protocol SDK release is not formal")
+    _download(sdk_release, work / "protocol-sdk")
     from bind_component_releases import bind_product_releases
 
     lock = artifacts / "component-lock.json"

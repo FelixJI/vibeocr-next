@@ -11,7 +11,10 @@ import pytest
 from scripts.automation_core import CommandRunner
 from scripts.check_quality import resolve_executable
 from scripts.release_smoke import verify
-from scripts.resolve_component_releases import assert_protocol_compatible
+from scripts.resolve_component_releases import (
+    assert_protocol_compatible,
+    compile_protocol_version,
+)
 from scripts.sync_version import sync_version
 
 
@@ -21,6 +24,20 @@ def test_protocol_compatibility_requires_declared_major_and_minor() -> None:
     assert_protocol_compatible("2.99.0", compatibility)
     with pytest.raises(ValueError, match="no fallback"):
         assert_protocol_compatible("3.0.0", compatibility)
+
+
+def test_compile_sdk_version_is_pinned_independently_from_runtime(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "Directory.Packages.props").write_text(
+        """<Project><ItemGroup>
+        <PackageVersion Include="VibeOCR.Runtime.Contracts" Version="[2.0.0]" />
+        <PackageVersion Include="VibeOCR.Runtime.Client" Version="[2.0.0]" />
+        </ItemGroup></Project>""",
+        encoding="utf-8",
+    )
+
+    assert compile_protocol_version(tmp_path) == "2.0.0"
 
 
 def test_command_runner_resolves_platform_command_shims(
@@ -88,6 +105,8 @@ def test_project_config_declares_minor_compatible_protocol_and_single_identity_a
     )
     assert 'work = root / ".release-input"' in resolver
     assert "$inputs = Join-Path $root '.release-input'" in build_script
+    nuget = (root / "NuGet.Config").read_text(encoding="utf-8")
+    assert 'value=".release-input/protocol-sdk"' in nuget
 
 
 def test_backend_identity_hashes_runtime_and_optional_release_manifests() -> None:
@@ -154,6 +173,10 @@ def test_release_smoke_binds_real_archive_and_component_identity(
         "scripts.release_smoke.subprocess.run", lambda *args, **kwargs: None
     )
     verify(tmp_path)
+
+    (tmp_path / "unexpected.txt").write_text("unexpected", encoding="utf-8")
+    with pytest.raises(ValueError, match="release asset set mismatch"):
+        verify(tmp_path)
 
 
 def test_only_canonical_workflows_remain() -> None:
