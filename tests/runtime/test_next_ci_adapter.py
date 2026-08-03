@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import zipfile
 from pathlib import Path
 
 import pytest
 
+from scripts.automation_core import CommandRunner
 from scripts.release_smoke import verify
 from scripts.resolve_component_releases import assert_protocol_compatible
 from scripts.sync_version import sync_version
@@ -18,6 +20,26 @@ def test_protocol_compatibility_requires_declared_major_and_minor() -> None:
     assert_protocol_compatible("2.99.0", compatibility)
     with pytest.raises(ValueError, match="no fallback"):
         assert_protocol_compatible("3.0.0", compatibility)
+
+
+def test_command_runner_resolves_platform_command_shims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        "scripts.automation_core.shutil.which",
+        lambda command, **kwargs: "C:/node/npm.cmd" if command == "npm" else None,
+    )
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr("scripts.automation_core.subprocess.run", fake_run)
+    CommandRunner(tmp_path).run(["npm", "ci"])
+
+    assert calls == [["C:/node/npm.cmd", "ci"]]
 
 
 def test_project_config_declares_minor_compatible_protocol_and_single_identity_asset() -> (
