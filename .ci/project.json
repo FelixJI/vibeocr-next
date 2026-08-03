@@ -9,6 +9,7 @@
     "bootstrap": [
       ["python", "-m", "pip", "install", "--group", "dev"],
       ["npm", "ci", "--prefix", "src/dotnet/VibeOCR.App/WebAssets"],
+      ["pwsh", "-File", "scripts/install_windows_app_runtime.ps1"],
       ["python", "scripts/resolve_component_releases.py"],
       ["dotnet", "restore", "tests/dotnet/VibeOCR.Platform.Tests/VibeOCR.Platform.Tests.csproj", "--locked-mode"],
       ["dotnet", "restore", "tests/dotnet/VibeOCR.App.Tests/VibeOCR.App.Tests.csproj", "--locked-mode"]

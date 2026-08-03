@@ -68,6 +68,7 @@ def test_project_config_declares_minor_compatible_protocol_and_single_identity_a
     assert config["release"]["identity_asset"] == "component-identities.json"
     assert "component-lock.json" in config["release"]["required_assets"]
     bootstrap = config["ci"]["bootstrap"]
+    assert ["pwsh", "-File", "scripts/install_windows_app_runtime.ps1"] in bootstrap
     resolver_index = bootstrap.index(
         ["python", "scripts/resolve_component_releases.py"]
     )
