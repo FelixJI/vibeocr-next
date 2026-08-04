@@ -12,6 +12,14 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
+if __package__:
+    from .bind_component_releases import (
+        bind_product_releases,
+        protocol_manifest_version,
+    )
+else:
+    from bind_component_releases import bind_product_releases, protocol_manifest_version
+
 ROOT = Path(__file__).resolve().parents[1]
 SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
@@ -93,6 +101,20 @@ def _source_sha(repository: str, tag: str, release: dict[str, Any]) -> str:
     return ref["sha"]
 
 
+def bound_protocol_version(backend_release_dir: Path) -> str:
+    """Read and validate the Protocol identity bundled by Backend."""
+    manifest = json.loads(
+        (backend_release_dir / "protocol-release-manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    if not isinstance(manifest, dict):
+        raise ValueError("Backend bound Protocol manifest must be an object")
+    version = protocol_manifest_version(manifest)
+    _version(version)
+    return version
+
+
 def resolve(root: Path = ROOT) -> Path:
     config = json.loads((root / ".ci/project.json").read_text(encoding="utf-8"))
     artifacts = Path(os.environ["AUTOMATION_ARTIFACTS_DIR"]).resolve()
@@ -106,20 +128,7 @@ def resolve(root: Path = ROOT) -> Path:
     backend_version = backend["tag_name"].removeprefix("v")
     _version(backend_version)
     _download(backend, work / "backend")
-    runtime = json.loads(
-        (work / "backend" / "runtime-manifest.json").read_text(encoding="utf-8")
-    )
-    protocol_version = str(
-        runtime["protocol_version"] if "protocol_version" in runtime else ""
-    )
-    if not protocol_version:
-        protocol_version = str(
-            json.loads(
-                (work / "backend" / runtime["protocol_manifest"]).read_text(
-                    encoding="utf-8"
-                )
-            )["protocol_version"]
-        )
+    protocol_version = bound_protocol_version(work / "backend")
     assert_protocol_compatible(
         protocol_version, config["project"]["protocol_compatibility"]
     )
@@ -141,8 +150,6 @@ def resolve(root: Path = ROOT) -> Path:
     if sdk_release.get("prerelease") or sdk_release.get("draft"):
         raise ValueError("Protocol SDK release is not formal")
     _download(sdk_release, work / "protocol-sdk")
-    from bind_component_releases import bind_product_releases
-
     lock = artifacts / "component-lock.json"
     bind_product_releases(
         protocol_release_dir=work / "protocol",
@@ -151,7 +158,7 @@ def resolve(root: Path = ROOT) -> Path:
         protocol_version=protocol_version,
         backend_repository=backend_repo,
         backend_version=backend_version,
-        profile="win-x64-cpu",
+        accelerator="cpu",
         required_capabilities=(
             "ocr.recognition.v2",
             "pdf.edit.v2",
