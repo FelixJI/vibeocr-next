@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import hashlib
+import inspect
 import json
 import subprocess
 import zipfile
@@ -9,10 +11,12 @@ from pathlib import Path
 import pytest
 
 from scripts.automation_core import CommandRunner
+from scripts.bind_component_releases import bind_product_releases
 from scripts.check_quality import resolve_executable
 from scripts.release_smoke import verify
 from scripts.resolve_component_releases import (
     assert_protocol_compatible,
+    bound_protocol_version,
     compile_protocol_version,
 )
 from scripts.sync_version import sync_version
@@ -38,6 +42,41 @@ def test_compile_sdk_version_is_pinned_independently_from_runtime(
     )
 
     assert compile_protocol_version(tmp_path) == "2.0.0"
+
+
+def test_reads_backend_bound_protocol_v2_identity(tmp_path: Path) -> None:
+    (tmp_path / "protocol-release-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "project": {"component": "protocol"},
+                "protocol": {"version": "2.1.0"},
+                "release": {"version": "2.1.0", "tag": "v2.1.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert bound_protocol_version(tmp_path) == "2.1.0"
+
+
+def test_resolver_binding_keywords_match_the_binding_api() -> None:
+    root = Path(__file__).parents[2]
+    tree = ast.parse(
+        (root / "scripts/resolve_component_releases.py").read_text(encoding="utf-8")
+    )
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "bind_product_releases"
+    ]
+
+    assert len(calls) == 1
+    passed_keywords = {keyword.arg for keyword in calls[0].keywords}
+    accepted_keywords = set(inspect.signature(bind_product_releases).parameters)
+    assert passed_keywords <= accepted_keywords
 
 
 def test_command_runner_resolves_platform_command_shims(
