@@ -45,6 +45,11 @@ public interface IInferenceClient : IAsyncDisposable
     /// <summary>Residency status (model TTL/pin/LRU/VRAM).</summary>
     Task<ResidencyStatus> GetResidencyAsync(CancellationToken cancellationToken);
 
+    /// <summary>Backend runtime profile, component and maintenance status.</summary>
+    Task<RuntimeStatusSnapshot> GetRuntimeStatusAsync(CancellationToken cancellationToken) =>
+        Task.FromException<RuntimeStatusSnapshot>(
+            new NotSupportedException("This inference client does not expose runtime status."));
+
     /// <summary>Backend settings snapshot.</summary>
     Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken);
 

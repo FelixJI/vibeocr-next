@@ -111,6 +111,17 @@ public sealed class InferenceHttpClient : IInferenceClient
         return await ReadAsync<ResidencyStatus>(response, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<RuntimeStatusSnapshot> GetRuntimeStatusAsync(
+        CancellationToken cancellationToken)
+    {
+        using HttpResponseMessage response = await _runtime.GetAsync(
+            RuntimeOperationPaths.GetRuntimeStatus, cancellationToken)
+            .ConfigureAwait(false);
+        await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+        return await ReadAsync<RuntimeStatusSnapshot>(response, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public async Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken)
     {
         using HttpResponseMessage response = await _runtime.GetAsync(

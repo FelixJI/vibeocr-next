@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using VibeOCR.Platform.Bootstrap;
+using Host = VibeOCR.Runtime.Contracts.Generated.Host;
 using Xunit;
 
 namespace VibeOCR.Platform.Tests;
@@ -28,10 +29,62 @@ public sealed class RuntimeInstallerClientTests
         Assert.Equal(@"C:\store", launch.Environment["VIBEOCR_RUNTIME_ROOT"]);
         ProcessStartInfo startInfo = Assert.IsType<ProcessStartInfo>(runner.LastStartInfo);
         Assert.Equal("ensure", Request(startInfo).GetProperty("operation").GetString());
+        Assert.False(Request(startInfo).TryGetProperty("accepted_event_streams", out _));
         Assert.DoesNotContain(
             startInfo.ArgumentList,
             argument => argument.Contains("pip", StringComparison.OrdinalIgnoreCase) ||
                 argument.Contains("torch", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task EnsureOptsIntoNdjsonAndReportsMaintenanceEventsWhenCapabilityIsBound()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-events-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string manifest = Path.Combine(root, "runtime-manifest.json");
+            await File.WriteAllTextAsync(
+                manifest,
+                """
+                {
+                  "capabilities":["runtime.maintenance.v1"],
+                  "profiles":{"win-x64-cpu":{"components":[
+                    {"component_id":"ocr_engine","display_name":"OCR engine","version":"3.7.0"}
+                  ]}}
+                }
+                """,
+                TestContext.Current.CancellationToken);
+            string eventLine = """{"protocol_version":2,"event_version":1,"event_type":"progress","operation":"ensure","snapshot":{"operation_id":"op-1","sequence":2,"operation":"ensure","operation_state":"running","phase":"install_profile","profile_id":"win-x64-cpu","component_id":"ocr_engine","updated_at":"2026-08-05T00:00:00Z","progress":{"unit":"steps","current":1,"total":3}},"message_code":"runtime.installing","message_args":null,"fallback_message":"Installing"}""";
+            string compactEnvelope = JsonSerializer.Serialize(
+                JsonDocument.Parse(LaunchEnvelope()).RootElement);
+            var runner = new StubRunner(new RuntimeInstallerProcessResult(
+                0,
+                eventLine + Environment.NewLine + compactEnvelope,
+                string.Empty));
+            var progress = new CaptureProgress();
+            var client = new RuntimeInstallerClient(
+                Configuration() with { RuntimeManifest = manifest },
+                runner);
+
+            await client.EnsureAsync(progress, TestContext.Current.CancellationToken);
+
+            JsonElement request = Request(runner.LastStartInfo!);
+            Assert.Equal(
+                "ndjson.v1",
+                request.GetProperty("accepted_event_streams")[0].GetString());
+            Host.RuntimeMaintenanceEvent update = Assert.Single(progress.Events);
+            Assert.Equal("ocr_engine", update.Snapshot.ComponentId);
+            Assert.Equal(1, update.Snapshot.Progress?.Current);
+            Host.RuntimeProfileDescriptor profile =
+                Assert.IsType<Host.RuntimeProfileDescriptor>(client.ReadProfileDescriptor());
+            Assert.Equal("win-x64-cpu", profile.ProfileId);
+            Assert.Equal("OCR engine", Assert.Single(profile.Components).DisplayName);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
@@ -390,5 +443,11 @@ public sealed class RuntimeInstallerClientTests
             LastStartInfo = startInfo;
             return Task.FromResult(result);
         }
+    }
+
+    private sealed class CaptureProgress : IProgress<Host.RuntimeMaintenanceEvent>
+    {
+        public List<Host.RuntimeMaintenanceEvent> Events { get; } = [];
+        public void Report(Host.RuntimeMaintenanceEvent value) => Events.Add(value);
     }
 }

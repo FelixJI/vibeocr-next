@@ -20,6 +20,7 @@ using VibeOCR.Platform.Migration;
 using VibeOCR.Platform.Update;
 using VibeOCR.Platform.Inference;
 using VibeOCR.Platform.Windows;
+using Host = VibeOCR.Runtime.Contracts.Generated.Host;
 
 namespace VibeOCR.App;
 
@@ -35,6 +36,7 @@ public sealed partial class App : Application
     private readonly SemaphoreSlim _supervisorLifecycle = new(1, 1);
     private readonly CancellationTokenSource _applicationShutdown = new();
     private readonly Dictionary<string, double> _startupMilestones = [];
+    private readonly RuntimeStatusViewModel _runtimeStatus = new();
     private MainWindow? _window;
     private WindowLayoutStore? _windowLayoutStore;
     private SingleInstanceService? _singleInstance;
@@ -127,6 +129,7 @@ public sealed partial class App : Application
             Environment.GetEnvironmentVariable("VIBEOCR_PORTABLE_LAYOUT"));
         _runtimeInstaller = new RuntimeInstallerClient(
             RuntimeInstallerConfiguration.ForNext(layout));
+        _runtimeStatus.ApplyProfile(_runtimeInstaller.ReadProfileDescriptor());
         AppLog.Initialize(Path.Combine(layout.DataRoot, "logs"));
         AppLog.Info($"OnLaunched: profile={options.Profile} shellOnly={options.ShellOnly}");
         if (layout.Profile == "production" && File.Exists(layout.ConfigFile))
@@ -148,7 +151,8 @@ public sealed partial class App : Application
                 {
                     await Windows.System.Launcher.LaunchUriAsync(uri);
                 }
-            });
+            },
+            _runtimeStatus);
         _supervisorLayout = layout;
         _supervisorDiagnostics = diagnostics;
         _soakCrashRequested =
@@ -184,7 +188,9 @@ public sealed partial class App : Application
                 return new PdfPage(
                     new PdfViewModel(_inferenceGateway, new PdfFileSource(() => handle)));
             },
-            () => new SettingsPage(new SettingsViewModel(_inferenceGateway), _shellViewModel!),
+            () => new SettingsPage(
+                new SettingsViewModel(_inferenceGateway, _runtimeStatus),
+                _shellViewModel!),
             () =>
             {
                 return new AboutPage(
@@ -361,7 +367,10 @@ public sealed partial class App : Application
         {
             IRuntimeInstallerClient installer = _runtimeInstaller
                 ?? throw new InvalidOperationException("Runtime Installer is unavailable.");
+            var maintenanceProgress = new Progress<Host.RuntimeMaintenanceEvent>(
+                _runtimeStatus.ApplyMaintenance);
             RuntimeLaunch launch = await installer.EnsureAsync(
+                maintenanceProgress,
                 _applicationShutdown.Token);
             string logPath = Path.Combine(layout.DataRoot, "supervisor.log");
             string token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
@@ -394,6 +403,19 @@ public sealed partial class App : Application
             _qrCodeGateway.Attach(qrClient);
             _activeInferenceClient = inferenceClient;
             _activeQrCodeClient = qrClient;
+
+            try
+            {
+                _runtimeStatus.ApplySnapshot(
+                    await inferenceClient.GetRuntimeStatusAsync(_applicationShutdown.Token));
+            }
+            catch (Exception error) when (
+                error is HttpRequestException or InvalidDataException or
+                JsonException or InferenceClientException)
+            {
+                AppLog.Warn(
+                    $"Runtime HTTP status unavailable; keeping installer status: {error.Message}");
+            }
 
             diagnostics.UpdateSupervisor(new SupervisorHealth(
                 SupervisorHealthState.Ready,

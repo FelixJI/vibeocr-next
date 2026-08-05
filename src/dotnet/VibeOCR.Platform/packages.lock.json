@@ -4,18 +4,18 @@
     "net10.0-windows10.0.17763": {
       "VibeOCR.Runtime.Client": {
         "type": "Direct",
-        "requested": "[2.0.0, 2.0.0]",
-        "resolved": "2.0.0",
-        "contentHash": "yW8iSKRTJ5zAHX0vig0kMZ3tnc/i+Xp90FQkZubWUwTfHUH7HNwZxipXRCtvwFSqebNShRWPxOkIB4V/IKxJKg==",
+        "requested": "[2.2.0, 2.2.0]",
+        "resolved": "2.2.0",
+        "contentHash": "zkJg5if9bu13nhk0+RHb8ruLUVw0xSJsk+Ajc/g7sPXeEqFHY3jAjpKbpDvmpzYttdBW4rjgcJirPr1EKRRvMw==",
         "dependencies": {
-          "VibeOCR.Runtime.Contracts": "2.0.0"
+          "VibeOCR.Runtime.Contracts": "2.2.0"
         }
       },
       "VibeOCR.Runtime.Contracts": {
         "type": "Direct",
-        "requested": "[2.0.0, 2.0.0]",
-        "resolved": "2.0.0",
-        "contentHash": "nQoUdG0dV51rgXwTOcAsIr+Zle044XUf58Cs50OJTvsoSt5g70yms9P9culK6hovOCkOxNtiHKekUIT9YL73ug=="
+        "requested": "[2.2.0, 2.2.0]",
+        "resolved": "2.2.0",
+        "contentHash": "EfeMlUErqxyn4aANqKTtCOl0oi4CuR0ksbBzXk9GVZxRtqvKICy5Yo9UIYQ4emb3X80IRjxKuc9XeTjPscRjKw=="
       }
     }
   }

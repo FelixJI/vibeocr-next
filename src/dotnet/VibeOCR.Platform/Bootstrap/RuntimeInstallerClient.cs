@@ -1,7 +1,9 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Host = VibeOCR.Runtime.Contracts.Generated.Host;
 
 namespace VibeOCR.Platform.Bootstrap;
 
@@ -68,6 +70,12 @@ public interface IRuntimeInstallerCommandRunner
     Task<RuntimeInstallerProcessResult> RunAsync(
         ProcessStartInfo startInfo,
         CancellationToken cancellationToken);
+
+    Task<RuntimeInstallerProcessResult> RunAsync(
+        ProcessStartInfo startInfo,
+        Action<string>? standardOutputLine,
+        CancellationToken cancellationToken) =>
+        RunAsync(startInfo, cancellationToken);
 }
 
 public interface IRuntimeInstallerClient
@@ -75,6 +83,18 @@ public interface IRuntimeInstallerClient
     Task<RuntimeInspection> InspectAsync(CancellationToken cancellationToken = default);
     Task<RuntimeLaunch> EnsureAsync(CancellationToken cancellationToken = default);
     Task<RuntimeLaunch> RepairAsync(CancellationToken cancellationToken = default);
+
+    Task<RuntimeLaunch> EnsureAsync(
+        IProgress<Host.RuntimeMaintenanceEvent>? progress,
+        CancellationToken cancellationToken = default) =>
+        EnsureAsync(cancellationToken);
+
+    Task<RuntimeLaunch> RepairAsync(
+        IProgress<Host.RuntimeMaintenanceEvent>? progress,
+        CancellationToken cancellationToken = default) =>
+        RepairAsync(cancellationToken);
+
+    Host.RuntimeProfileDescriptor? ReadProfileDescriptor() => null;
 }
 
 public sealed record RuntimeHostError(
@@ -88,7 +108,9 @@ public sealed record RuntimeHostEnvelope(
     [property: JsonPropertyName("operation")] string? Operation,
     [property: JsonPropertyName("state")] RuntimeInspection? State,
     [property: JsonPropertyName("launch")] RuntimeLaunch? Launch,
-    [property: JsonPropertyName("error")] RuntimeHostError? Error);
+    [property: JsonPropertyName("error")] RuntimeHostError? Error,
+    [property: JsonPropertyName("profile")] Host.RuntimeProfileDescriptor? Profile = null,
+    [property: JsonPropertyName("maintenance")] Host.RuntimeMaintenanceSnapshot? Maintenance = null);
 
 public sealed class RuntimeInstallerException : InvalidOperationException
 {
@@ -133,16 +155,74 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         InvokeStateAsync(cancellationToken);
 
     public Task<RuntimeLaunch> EnsureAsync(CancellationToken cancellationToken = default) =>
-        InvokeLaunchAsync("ensure", cancellationToken);
+        InvokeLaunchAsync("ensure", progress: null, cancellationToken);
 
     public Task<RuntimeLaunch> RepairAsync(CancellationToken cancellationToken = default) =>
-        InvokeLaunchAsync("repair", cancellationToken);
+        InvokeLaunchAsync("repair", progress: null, cancellationToken);
+
+    public Task<RuntimeLaunch> EnsureAsync(
+        IProgress<Host.RuntimeMaintenanceEvent>? progress,
+        CancellationToken cancellationToken = default) =>
+        InvokeLaunchAsync("ensure", progress, cancellationToken);
+
+    public Task<RuntimeLaunch> RepairAsync(
+        IProgress<Host.RuntimeMaintenanceEvent>? progress,
+        CancellationToken cancellationToken = default) =>
+        InvokeLaunchAsync("repair", progress, cancellationToken);
+
+    public Host.RuntimeProfileDescriptor? ReadProfileDescriptor()
+    {
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(
+                File.ReadAllBytes(_configuration.RuntimeManifest));
+            JsonElement profiles = document.RootElement.GetProperty("profiles");
+            string profileId = _configuration.Accelerator == "nvidia_cuda"
+                ? profiles.EnumerateObject()
+                    .Select(item => item.Name)
+                    .First(name => name.Contains("cu", StringComparison.OrdinalIgnoreCase))
+                : profiles.EnumerateObject()
+                    .Select(item => item.Name)
+                    .First(name => name.EndsWith("cpu", StringComparison.OrdinalIgnoreCase));
+            JsonElement profile = profiles.GetProperty(profileId);
+            Host.Accelerator accelerator = _configuration.Accelerator == "nvidia_cuda"
+                ? Host.Accelerator.NvidiaCuda
+                : Host.Accelerator.Cpu;
+            Host.RuntimeComponentDescriptor[] components = profile
+                .GetProperty("components")
+                .EnumerateArray()
+                .Select(component => new Host.RuntimeComponentDescriptor
+                {
+                    ComponentId = component.GetProperty("component_id").GetString()
+                        ?? throw new JsonException("component_id must be a string."),
+                    DisplayName = component.GetProperty("display_name").GetString()
+                        ?? throw new JsonException("display_name must be a string."),
+                    Version = component.TryGetProperty("version", out JsonElement version)
+                        ? version.GetString()
+                        : null,
+                })
+                .ToArray();
+            return new Host.RuntimeProfileDescriptor
+            {
+                ProfileId = profileId,
+                Accelerator = accelerator,
+                Components = components,
+            };
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException or JsonException or
+            KeyNotFoundException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
 
     private async Task<RuntimeInspection> InvokeStateAsync(
         CancellationToken cancellationToken)
     {
         RuntimeHostEnvelope envelope = await InvokeAsync(
             "inspect",
+            progress: null,
             cancellationToken).ConfigureAwait(false);
         return envelope.State ?? throw new RuntimeInstallerException(
             "Runtime Host inspect response has no state.");
@@ -150,10 +230,12 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
 
     private async Task<RuntimeLaunch> InvokeLaunchAsync(
         string operation,
+        IProgress<Host.RuntimeMaintenanceEvent>? progress,
         CancellationToken cancellationToken)
     {
         RuntimeHostEnvelope envelope = await InvokeAsync(
             operation,
+            progress,
             cancellationToken).ConfigureAwait(false);
         RuntimeLaunch launch = envelope.Launch ?? throw new RuntimeInstallerException(
             $"Runtime Host {operation} response has no launch contract.");
@@ -174,15 +256,35 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
 
     private async Task<RuntimeHostEnvelope> InvokeAsync(
         string operation,
+        IProgress<Host.RuntimeMaintenanceEvent>? progress,
         CancellationToken cancellationToken)
     {
         ProcessStartInfo startInfo = BuildStartInfo(operation);
+        int streamedEvents = 0;
+        void HandleOutputLine(string line)
+        {
+            if (TryParseMaintenanceEvent(line, operation, out Host.RuntimeMaintenanceEvent? update)
+                && update is not null)
+            {
+                Interlocked.Increment(ref streamedEvents);
+                progress?.Report(update);
+            }
+        }
         RuntimeInstallerProcessResult result = await _runner.RunAsync(
             startInfo,
+            HandleOutputLine,
             cancellationToken).ConfigureAwait(false);
+        if (Volatile.Read(ref streamedEvents) == 0)
+        {
+            foreach (string line in OutputLines(result.StandardOutput))
+            {
+                HandleOutputLine(line);
+            }
+        }
+        string? envelopeJson = FinalEnvelopeJson(result.StandardOutput);
         if (result.ExitCode != 0)
         {
-            string detail = ParseError(result.StandardOutput) ??
+            string detail = ParseError(envelopeJson) ??
                 result.StandardError.Trim();
             throw new RuntimeInstallerException(
                 $"Runtime Installer {operation} failed with exit code {result.ExitCode}: {detail}");
@@ -191,7 +293,7 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         try
         {
             RuntimeHostEnvelope? value = JsonSerializer.Deserialize<RuntimeHostEnvelope>(
-                result.StandardOutput,
+                envelopeJson ?? string.Empty,
                 JsonOptions);
             if (value is null || value.ProtocolVersion != 2 ||
                 !string.Equals(value.Operation, operation, StringComparison.Ordinal) ||
@@ -235,8 +337,31 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
             request["layout_manifest"] = _configuration.PortableLayoutManifest;
             request["product_id"] = _configuration.ProductId;
         }
+        if (SupportsMaintenanceEvents())
+        {
+            request["accepted_event_streams"] = new[] { "ndjson.v1" };
+        }
         AddOption(startInfo, "--request-json", JsonSerializer.Serialize(request));
         return startInfo;
+    }
+
+    private bool SupportsMaintenanceEvents()
+    {
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(
+                File.ReadAllBytes(_configuration.RuntimeManifest));
+            return document.RootElement
+                .GetProperty("capabilities")
+                .EnumerateArray()
+                .Any(item => item.GetString() == "runtime.maintenance.v1");
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException or JsonException or
+            KeyNotFoundException or InvalidOperationException)
+        {
+            return false;
+        }
     }
 
     private static void AddOption(ProcessStartInfo startInfo, string name, string value)
@@ -245,11 +370,15 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         startInfo.ArgumentList.Add(value);
     }
 
-    private static string? ParseError(string standardOutput)
+    private static string? ParseError(string? envelopeJson)
     {
+        if (string.IsNullOrWhiteSpace(envelopeJson))
+        {
+            return null;
+        }
         try
         {
-            using JsonDocument document = JsonDocument.Parse(standardOutput);
+            using JsonDocument document = JsonDocument.Parse(envelopeJson);
             if (document.RootElement.TryGetProperty("error", out JsonElement error) &&
                 error.TryGetProperty("message", out JsonElement message))
             {
@@ -258,6 +387,78 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         }
         catch (JsonException)
         {
+        }
+        return null;
+    }
+
+    private static bool TryParseMaintenanceEvent(
+        string line,
+        string operation,
+        out Host.RuntimeMaintenanceEvent? update)
+    {
+        update = null;
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return false;
+        }
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(line);
+            if (!document.RootElement.TryGetProperty("event_version", out JsonElement eventVersion)
+                || eventVersion.GetInt32() != 1)
+            {
+                return false;
+            }
+            Host.RuntimeMaintenanceEvent? value =
+                JsonSerializer.Deserialize<Host.RuntimeMaintenanceEvent>(line, JsonOptions);
+            if (value is null || value.ProtocolVersion != 2 ||
+                !string.Equals(
+                    JsonSerializer.Serialize(value.Operation, JsonOptions).Trim('"'),
+                    operation,
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+            update = value;
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static IEnumerable<string> OutputLines(string standardOutput) =>
+        standardOutput.Split(
+            ['\r', '\n'],
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    private static string? FinalEnvelopeJson(string standardOutput)
+    {
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(standardOutput);
+            if (!document.RootElement.TryGetProperty("event_version", out _))
+            {
+                return standardOutput;
+            }
+        }
+        catch (JsonException)
+        {
+        }
+        foreach (string line in OutputLines(standardOutput).Reverse())
+        {
+            try
+            {
+                using JsonDocument document = JsonDocument.Parse(line);
+                if (!document.RootElement.TryGetProperty("event_version", out _))
+                {
+                    return line;
+                }
+            }
+            catch (JsonException)
+            {
+            }
         }
         return null;
     }
@@ -286,16 +487,29 @@ public sealed class RuntimeInstallerCommandRunner : IRuntimeInstallerCommandRunn
 {
     public async Task<RuntimeInstallerProcessResult> RunAsync(
         ProcessStartInfo startInfo,
+        CancellationToken cancellationToken) =>
+        await RunAsync(startInfo, standardOutputLine: null, cancellationToken)
+            .ConfigureAwait(false);
+
+    public async Task<RuntimeInstallerProcessResult> RunAsync(
+        ProcessStartInfo startInfo,
+        Action<string>? standardOutputLine,
         CancellationToken cancellationToken)
     {
         VerifyBoundExecutable(startInfo);
         using Process process = Process.Start(startInfo) ??
             throw new RuntimeInstallerException("Could not start Runtime Installer.");
-        Task<string> stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
+        var stdoutBuffer = new StringBuilder();
+        Task stdout = ReadStandardOutputAsync(
+            process.StandardOutput,
+            stdoutBuffer,
+            standardOutputLine,
+            cancellationToken);
         Task<string> stderr = process.StandardError.ReadToEndAsync(cancellationToken);
         try
         {
             await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            await stdout.ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -310,8 +524,21 @@ public sealed class RuntimeInstallerCommandRunner : IRuntimeInstallerCommandRunn
         }
         return new RuntimeInstallerProcessResult(
             process.ExitCode,
-            await stdout.ConfigureAwait(false),
+            stdoutBuffer.ToString(),
             await stderr.ConfigureAwait(false));
+    }
+
+    private static async Task ReadStandardOutputAsync(
+        StreamReader reader,
+        StringBuilder buffer,
+        Action<string>? standardOutputLine,
+        CancellationToken cancellationToken)
+    {
+        while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+        {
+            buffer.AppendLine(line);
+            standardOutputLine?.Invoke(line);
+        }
     }
 
     private static void VerifyBoundExecutable(ProcessStartInfo startInfo)

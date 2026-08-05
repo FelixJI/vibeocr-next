@@ -132,7 +132,9 @@ if (Test-Path $manifestPath -PathType Leaf) {
             'ocr.recognition.v2',
             'pdf.edit.v2',
             'qrcode.v2',
+            'runtime.maintenance.v1',
             'runtime.settings.v2'
+            'task.progress.v1'
         )
         if (($requiredCapabilities -join "`n") -ne ($expectedCapabilities -join "`n")) {
             $errors.Add("Next component lock capability set is incomplete")

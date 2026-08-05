@@ -60,6 +60,9 @@ public sealed class DeferredInferenceClient : IInferenceClient
     public Task<ResidencyStatus> GetResidencyAsync(CancellationToken cancellationToken)
         => Current.GetResidencyAsync(cancellationToken);
 
+    public Task<RuntimeStatusSnapshot> GetRuntimeStatusAsync(CancellationToken cancellationToken)
+        => Current.GetRuntimeStatusAsync(cancellationToken);
+
     public Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken)
         => Current.GetSettingsAsync(cancellationToken);
 
