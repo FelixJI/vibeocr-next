@@ -71,14 +71,67 @@
                         <Button Click="OnSwitchBackendClicked" Content="切换后端" IsEnabled="{x:Bind ViewModel.CanSwitchBackend, Mode=OneWay}" />
                         <CheckBox Content="需重启" IsChecked="{x:Bind ViewModel.RestartRequired, Mode=OneWay}" IsEnabled="False" />
                     </StackPanel>
-                    <TextBlock Opacity="0.6" FontSize="12" Text="依赖状态树：功能开发中" />
-                    <StackPanel Orientation="Horizontal" Spacing="4">
-                        <Button Content="重装选中项" IsEnabled="False" />
-                        <Button Content="重装运行时" IsEnabled="False" />
-                        <Button Content="重装依赖" IsEnabled="False" />
-                        <Button Content="补充安装" IsEnabled="False" />
-                        <Button Content="更新依赖" IsEnabled="False" />
-                    </StackPanel>
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock FontWeight="SemiBold" Text="Backend 运行时" />
+                            <TextBlock
+                                Opacity="0.7"
+                                FontSize="12"
+                                Text="{x:Bind ViewModel.RuntimeStatus.Profile, Mode=OneWay}" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" HorizontalAlignment="Right">
+                            <TextBlock HorizontalAlignment="Right" Text="{x:Bind ViewModel.RuntimeStatus.Status, Mode=OneWay}" />
+                            <TextBlock
+                                HorizontalAlignment="Right"
+                                Opacity="0.7"
+                                FontSize="12"
+                                Text="{x:Bind ViewModel.RuntimeStatus.Phase, Mode=OneWay}" />
+                        </StackPanel>
+                    </Grid>
+                    <ProgressBar
+                        Minimum="0"
+                        Maximum="100"
+                        IsIndeterminate="{x:Bind ViewModel.RuntimeStatus.IsProgressIndeterminate, Mode=OneWay}"
+                        Value="{x:Bind ViewModel.RuntimeStatus.ProgressValue, Mode=OneWay}" />
+                    <TextBlock
+                        HorizontalAlignment="Right"
+                        Opacity="0.7"
+                        FontSize="12"
+                        Text="{x:Bind ViewModel.RuntimeStatus.ProgressText, Mode=OneWay}" />
+                    <Grid Padding="8,4" ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="140" />
+                            <ColumnDefinition Width="100" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock FontWeight="SemiBold" Text="Backend 组件" />
+                        <TextBlock Grid.Column="1" FontWeight="SemiBold" Text="状态" />
+                        <TextBlock Grid.Column="2" FontWeight="SemiBold" Text="版本" />
+                    </Grid>
+                    <ListView ItemsSource="{x:Bind ViewModel.RuntimeStatus.Components}" MaxHeight="260">
+                        <ListView.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Padding="8,5" ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="140" />
+                                        <ColumnDefinition Width="100" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Column="1" Text="{Binding State}" />
+                                    <TextBlock Grid.Column="2" FontFamily="Consolas" Text="{Binding Version}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                    <TextBlock
+                        Opacity="0.6"
+                        FontSize="12"
+                        Text="Supervisor 就绪前由安装器事件更新；就绪后由认证 HTTP 状态统一刷新。" />
                 </StackPanel>
             </Border>
         </StackPanel>

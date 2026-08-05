@@ -18,6 +18,47 @@
             <TextBlock FontSize="20" Text="{x:Bind ViewModel.SupervisorStatus, Mode=OneWay}" />
             <TextBlock Text="{x:Bind ViewModel.ProtocolStatus, Mode=OneWay}" />
             <TextBlock FontWeight="SemiBold" Text="运行时" />
+            <Border Padding="16" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" CornerRadius="8">
+                <StackPanel Spacing="8">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock FontWeight="SemiBold" Text="Backend 与重依赖" />
+                            <TextBlock Opacity="0.7" Text="{x:Bind ViewModel.RuntimeStatus.Profile, Mode=OneWay}" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1">
+                            <TextBlock HorizontalAlignment="Right" Text="{x:Bind ViewModel.RuntimeStatus.Status, Mode=OneWay}" />
+                            <TextBlock HorizontalAlignment="Right" Opacity="0.7" Text="{x:Bind ViewModel.RuntimeStatus.Phase, Mode=OneWay}" />
+                        </StackPanel>
+                    </Grid>
+                    <ProgressBar
+                        Minimum="0"
+                        Maximum="100"
+                        IsIndeterminate="{x:Bind ViewModel.RuntimeStatus.IsProgressIndeterminate, Mode=OneWay}"
+                        Value="{x:Bind ViewModel.RuntimeStatus.ProgressValue, Mode=OneWay}" />
+                    <TextBlock HorizontalAlignment="Right" Opacity="0.7" Text="{x:Bind ViewModel.RuntimeStatus.ProgressText, Mode=OneWay}" />
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.RuntimeStatus.Components}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="0,3" ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="120" />
+                                        <ColumnDefinition Width="100" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="{Binding DisplayName}" />
+                                    <TextBlock Grid.Column="1" Text="{Binding State}" />
+                                    <TextBlock Grid.Column="2" FontFamily="Consolas" Text="{Binding Version}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+            <TextBlock FontWeight="SemiBold" Text="系统前置条件" />
             <ItemsControl ItemsSource="{x:Bind ViewModel.Prerequisites}">
                 <ItemsControl.ItemTemplate>
                     <DataTemplate>

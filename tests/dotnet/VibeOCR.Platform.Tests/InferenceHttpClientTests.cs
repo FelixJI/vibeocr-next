@@ -144,6 +144,34 @@ public sealed class InferenceHttpClientTests
     }
 
     [Fact]
+    public async Task RuntimeStatusUsesAuthenticatedHttpEndpointAsync()
+    {
+        var handler = new FakeHandler("""
+            {
+              "schema_version":2,
+              "instance_id":"sup-1",
+              "service_state":"ready",
+              "backend_version":"0.9.0",
+              "profile":{"profile_id":"win-x64-cpu","accelerator":"cpu","components":[
+                {"component_id":"ocr_engine","display_name":"OCR engine","state":"ready","version":"3.7.0"}
+              ]},
+              "maintenance":null
+            }
+            """);
+        await using var client = new InferenceHttpClient(Base, "tok", handler);
+
+        RuntimeStatusSnapshot status = await client.GetRuntimeStatusAsync(
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal("0.9.0", status.BackendVersion);
+        Assert.Equal(RuntimeComponentState.Ready, Assert.Single(status.Profile.Components).State);
+        Assert.Equal(HttpMethod.Get, handler.LastMethod);
+        Assert.Equal("/v2/runtime/status", handler.LastPath);
+        Assert.Equal("Bearer", handler.LastAuthorizationScheme);
+        Assert.Equal("tok", handler.LastAuthorizationParameter);
+    }
+
+    [Fact]
     public async Task TypedErrorIsRaisedOnNonSuccessAsync()
     {
         var handler = new FakeHandler("""

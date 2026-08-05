@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Filter,
-    [int]$ExpectedPassed = 71
+    [int]$ExpectedPassed = 73
 )
 
 $ErrorActionPreference = 'Stop'

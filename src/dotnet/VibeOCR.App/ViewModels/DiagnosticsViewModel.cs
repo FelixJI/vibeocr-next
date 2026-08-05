@@ -33,12 +33,14 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
     public DiagnosticsViewModel(
         string profile,
         PrerequisiteReport prerequisites,
-        Func<PrerequisiteStatus, CancellationToken, Task>? repair = null)
+        Func<PrerequisiteStatus, CancellationToken, Task>? repair = null,
+        RuntimeStatusViewModel? runtimeStatus = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(profile);
         Profile = profile;
         Prerequisites = prerequisites?.Items ?? throw new ArgumentNullException(nameof(prerequisites));
         _repair = repair ?? (static (_, _) => Task.CompletedTask);
+        RuntimeStatus = runtimeStatus ?? new RuntimeStatusViewModel();
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -46,6 +48,8 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
     public string Profile { get; }
 
     public IReadOnlyList<PrerequisiteStatus> Prerequisites { get; }
+
+    public RuntimeStatusViewModel RuntimeStatus { get; }
 
     public string AppVersion { get; } =
         typeof(DiagnosticsViewModel).Assembly.GetName().Version?.ToString() ?? "0.0.0";

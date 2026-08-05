@@ -1,13 +1,15 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using VibeOCR.App.ViewModels;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Inference;
 
 namespace VibeOCR.App.Features.Settings;
 
-public sealed class SettingsViewModel(IInferenceClient inference) : INotifyPropertyChanged
+public sealed class SettingsViewModel : INotifyPropertyChanged
 {
+    private readonly IInferenceClient _inference;
     private long _generation;
     private bool _isBusy;
     private string _status = "正在读取设置";
@@ -16,10 +18,19 @@ public sealed class SettingsViewModel(IInferenceClient inference) : INotifyPrope
     private bool _restartRequired;
     private bool _gpuAvailable;
 
+    public SettingsViewModel(
+        IInferenceClient inference,
+        RuntimeStatusViewModel? runtimeStatus = null)
+    {
+        _inference = inference ?? throw new ArgumentNullException(nameof(inference));
+        RuntimeStatus = runtimeStatus ?? new RuntimeStatusViewModel();
+    }
+
     public event PropertyChangedEventHandler? PropertyChanged;
     public ObservableCollection<string> PreloadPipelines { get; } = [];
     public ObservableCollection<ResidencyEntry> ResidencyEntries { get; } = [];
     public ObservableCollection<PipelineSpec> ResidencyPipelines { get; } = [];
+    public RuntimeStatusViewModel RuntimeStatus { get; }
     public int DefaultTtlSeconds { get; private set; } = 300;
     public int? VramTotalMb { get; private set; }
     public int? VramUsedMb { get; private set; }
@@ -37,7 +48,7 @@ public sealed class SettingsViewModel(IInferenceClient inference) : INotifyPrope
         if (generation == Volatile.Read(ref _generation)) { IsBusy = true; Status = "正在读取模型驻留状态"; }
         try
         {
-            ResidencyStatus status = await inference.GetResidencyAsync(cancellationToken);
+            ResidencyStatus status = await _inference.GetResidencyAsync(cancellationToken);
             if (generation != Volatile.Read(ref _generation)) return;
             DefaultTtlSeconds = status.DefaultTtlSeconds;
             VramTotalMb = status.VramTotalMb;
@@ -48,6 +59,15 @@ public sealed class SettingsViewModel(IInferenceClient inference) : INotifyPrope
             PropertyChanged?.Invoke(this, new(nameof(VramTotalMb)));
             PropertyChanged?.Invoke(this, new(nameof(VramUsedMb)));
             Status = $"默认 TTL {status.DefaultTtlSeconds}s；已驻留管线 {status.Entries.Count} 个";
+            try
+            {
+                RuntimeStatusSnapshot runtime = await _inference.GetRuntimeStatusAsync(cancellationToken);
+                if (generation == Volatile.Read(ref _generation)) RuntimeStatus.ApplySnapshot(runtime);
+            }
+            catch (NotSupportedException)
+            {
+                // Older test doubles and pre-2.2 clients retain installer-local status.
+            }
         }
         catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) Status = "已取消"; }
         catch (InferenceClientException error) { if (generation == Volatile.Read(ref _generation)) Status = LocalizeV2(error.Code); }
