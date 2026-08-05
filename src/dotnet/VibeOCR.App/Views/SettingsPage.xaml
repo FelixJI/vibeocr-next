@@ -102,6 +102,12 @@
                         Opacity="0.7"
                         FontSize="12"
                         Text="{x:Bind ViewModel.RuntimeStatus.ProgressText, Mode=OneWay}" />
+                    <TextBlock
+                        FontFamily="Consolas"
+                        FontSize="11"
+                        Opacity="0.6"
+                        Text="{x:Bind ViewModel.RuntimeStatus.SourceIdentity, Mode=OneWay}"
+                        TextWrapping="Wrap" />
                     <Grid Padding="8,4" ColumnSpacing="12">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />
