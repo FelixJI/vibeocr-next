@@ -40,6 +40,12 @@
                         IsIndeterminate="{x:Bind ViewModel.RuntimeStatus.IsProgressIndeterminate, Mode=OneWay}"
                         Value="{x:Bind ViewModel.RuntimeStatus.ProgressValue, Mode=OneWay}" />
                     <TextBlock HorizontalAlignment="Right" Opacity="0.7" Text="{x:Bind ViewModel.RuntimeStatus.ProgressText, Mode=OneWay}" />
+                    <TextBlock
+                        FontFamily="Consolas"
+                        FontSize="11"
+                        Opacity="0.6"
+                        Text="{x:Bind ViewModel.RuntimeStatus.SourceIdentity, Mode=OneWay}"
+                        TextWrapping="Wrap" />
                     <ItemsControl ItemsSource="{x:Bind ViewModel.RuntimeStatus.Components}">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>

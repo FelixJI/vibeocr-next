@@ -50,7 +50,15 @@ public sealed record RuntimeInspection(
     [property: JsonPropertyName("accelerator")] string Accelerator,
     [property: JsonPropertyName("manifest_sha256")] string ManifestSha256,
     [property: JsonPropertyName("backend_version")] string BackendVersion,
-    [property: JsonPropertyName("integrity")] string Integrity);
+    [property: JsonPropertyName("integrity")] string Integrity,
+    [property: JsonPropertyName("source")] RuntimeSourceIdentity? Source = null);
+
+public sealed record RuntimeSourceIdentity(
+    [property: JsonPropertyName("backend_version")] string BackendVersion,
+    [property: JsonPropertyName("backend_source_sha")] string BackendSourceSha,
+    [property: JsonPropertyName("runtime_manifest_sha256")] string RuntimeManifestSha256,
+    [property: JsonPropertyName("protocol_version")] string ProtocolVersion,
+    [property: JsonPropertyName("protocol_manifest_sha256")] string ProtocolManifestSha256);
 
 public sealed record RuntimeLaunch(
     [property: JsonPropertyName("python_executable")] string PythonExecutable,
@@ -80,9 +88,54 @@ public interface IRuntimeInstallerCommandRunner
 
 public interface IRuntimeInstallerClient
 {
+    IReadOnlyList<string> NegotiatedCapabilities => Array.Empty<string>();
+    IReadOnlyList<RuntimeCapabilityDescriptor> CapabilityDescriptors =>
+        Array.Empty<RuntimeCapabilityDescriptor>();
+
     Task<RuntimeInspection> InspectAsync(CancellationToken cancellationToken = default);
     Task<RuntimeLaunch> EnsureAsync(CancellationToken cancellationToken = default);
     Task<RuntimeLaunch> RepairAsync(CancellationToken cancellationToken = default);
+    Task<RuntimeLaunch> EnsureAsync(
+        string operationId,
+        IProgress<Host.RuntimeMaintenanceEvent>? progress = null,
+        CancellationToken cancellationToken = default);
+    Task<RuntimeLaunch> RepairAsync(
+        string operationId,
+        IProgress<Host.RuntimeMaintenanceEvent>? progress = null,
+        CancellationToken cancellationToken = default);
+    Task<RuntimeHostEnvelope> CancelAsync(
+        string operationId,
+        string commandId,
+        long? expectedSequence = null,
+        CancellationToken cancellationToken = default);
+    Task<RuntimeHostEnvelope> CancelAsync(
+        string operationId,
+        long? expectedSequence = null,
+        CancellationToken cancellationToken = default) =>
+        CancelAsync(
+            operationId,
+            Guid.NewGuid().ToString(),
+            expectedSequence,
+            cancellationToken);
+    Task<RuntimeHostEnvelope> RetryAsync(
+        string operationId,
+        string newOperationId,
+        string commandId,
+        CancellationToken cancellationToken = default);
+    Task<RuntimeHostEnvelope> RetryAsync(
+        string operationId,
+        string newOperationId,
+        CancellationToken cancellationToken = default) =>
+        RetryAsync(
+            operationId,
+            newOperationId,
+            Guid.NewGuid().ToString(),
+            cancellationToken);
+    Task<RuntimeMaintenanceObserveEnvelope> ObserveAsync(
+        string operationId,
+        long afterSequence,
+        int limit = 128,
+        CancellationToken cancellationToken = default);
 
     Task<RuntimeLaunch> EnsureAsync(
         IProgress<Host.RuntimeMaintenanceEvent>? progress,
@@ -100,7 +153,19 @@ public interface IRuntimeInstallerClient
 public sealed record RuntimeHostError(
     [property: JsonPropertyName("code")] string Code,
     [property: JsonPropertyName("message")] string Message,
-    [property: JsonPropertyName("retryable")] bool Retryable);
+    [property: JsonPropertyName("retryable")] bool Retryable,
+    [property: JsonPropertyName("canonical_code")] string? CanonicalCode = null,
+    [property: JsonPropertyName("category")] string? Category = null,
+    [property: JsonPropertyName("retry_after")] int? RetryAfter = null,
+    [property: JsonPropertyName("detail")] IReadOnlyDictionary<string, JsonElement>? Detail = null);
+
+public sealed record RuntimeCapabilityDescriptor(
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("lifecycle")] string Lifecycle,
+    [property: JsonPropertyName("introduced_in")] string IntroducedIn,
+    [property: JsonPropertyName("deprecated_in")] string? DeprecatedIn,
+    [property: JsonPropertyName("sunset_at")] string? SunsetAt,
+    [property: JsonPropertyName("replacement")] string? Replacement);
 
 public sealed record RuntimeHostEnvelope(
     [property: JsonPropertyName("protocol_version")] int ProtocolVersion,
@@ -110,14 +175,39 @@ public sealed record RuntimeHostEnvelope(
     [property: JsonPropertyName("launch")] RuntimeLaunch? Launch,
     [property: JsonPropertyName("error")] RuntimeHostError? Error,
     [property: JsonPropertyName("profile")] Host.RuntimeProfileDescriptor? Profile = null,
-    [property: JsonPropertyName("maintenance")] Host.RuntimeMaintenanceSnapshot? Maintenance = null);
+    [property: JsonPropertyName("maintenance")] Host.RuntimeMaintenanceSnapshot? Maintenance = null,
+    [property: JsonPropertyName("negotiated_capabilities")] string[]? NegotiatedCapabilities = null,
+    [property: JsonPropertyName("capability_descriptors")] RuntimeCapabilityDescriptor[]? CapabilityDescriptors = null);
+
+public sealed record RuntimeMaintenanceObserveEnvelope(
+    [property: JsonPropertyName("protocol_version")] int ProtocolVersion,
+    [property: JsonPropertyName("ok")] bool Ok,
+    [property: JsonPropertyName("request_kind")] string RequestKind,
+    [property: JsonPropertyName("operation_id")] string OperationId,
+    [property: JsonPropertyName("snapshot")] Host.RuntimeMaintenanceSnapshot Snapshot,
+    [property: JsonPropertyName("events")] Host.RuntimeMaintenanceEvent[] Events,
+    [property: JsonPropertyName("oldest_sequence")] long OldestSequence,
+    [property: JsonPropertyName("through_sequence")] long ThroughSequence,
+    [property: JsonPropertyName("more")] bool More,
+    [property: JsonPropertyName("replay_expires_at")] string? ReplayExpiresAt);
 
 public sealed class RuntimeInstallerException : InvalidOperationException
 {
-    public RuntimeInstallerException(string message)
+    public RuntimeInstallerException(string message, RuntimeHostError? error = null)
         : base(message)
     {
+        CanonicalCode = error?.CanonicalCode;
+        Category = error?.Category;
+        Retryable = error?.Retryable ?? false;
+        RetryAfter = error?.RetryAfter;
+        Detail = error?.Detail;
     }
+
+    public string? CanonicalCode { get; }
+    public string? Category { get; }
+    public bool Retryable { get; }
+    public int? RetryAfter { get; }
+    public IReadOnlyDictionary<string, JsonElement>? Detail { get; }
 }
 
 /// <summary>
@@ -136,6 +226,11 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
 
     private readonly RuntimeInstallerConfiguration _configuration;
     private readonly IRuntimeInstallerCommandRunner _runner;
+    public string? LastOperationId { get; private set; }
+    public IReadOnlyList<string> NegotiatedCapabilities { get; private set; } =
+        Array.Empty<string>();
+    public IReadOnlyList<RuntimeCapabilityDescriptor> CapabilityDescriptors { get; private set; } =
+        Array.Empty<RuntimeCapabilityDescriptor>();
 
     public RuntimeInstallerClient(RuntimeInstallerConfiguration configuration)
         : this(configuration, new RuntimeInstallerCommandRunner())
@@ -161,6 +256,26 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         InvokeLaunchAsync("repair", progress: null, cancellationToken);
 
     public Task<RuntimeLaunch> EnsureAsync(
+        string operationId,
+        IProgress<Host.RuntimeMaintenanceEvent>? progress = null,
+        CancellationToken cancellationToken = default) =>
+        InvokeLaunchAsync(
+            "ensure",
+            progress,
+            cancellationToken,
+            operationId: operationId);
+
+    public Task<RuntimeLaunch> RepairAsync(
+        string operationId,
+        IProgress<Host.RuntimeMaintenanceEvent>? progress = null,
+        CancellationToken cancellationToken = default) =>
+        InvokeLaunchAsync(
+            "repair",
+            progress,
+            cancellationToken,
+            operationId: operationId);
+
+    public Task<RuntimeLaunch> EnsureAsync(
         IProgress<Host.RuntimeMaintenanceEvent>? progress,
         CancellationToken cancellationToken = default) =>
         InvokeLaunchAsync("ensure", progress, cancellationToken);
@@ -169,6 +284,127 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         IProgress<Host.RuntimeMaintenanceEvent>? progress,
         CancellationToken cancellationToken = default) =>
         InvokeLaunchAsync("repair", progress, cancellationToken);
+
+    public Task<RuntimeLaunch> RepairComponentsAsync(
+        IReadOnlyCollection<string> componentIds,
+        IProgress<Host.RuntimeMaintenanceEvent>? progress = null,
+        CancellationToken cancellationToken = default) =>
+        InvokeRepairComponentsAsync(
+            operationId: null,
+            componentIds,
+            progress,
+            cancellationToken);
+
+    public Task<RuntimeLaunch> RepairComponentsAsync(
+        string operationId,
+        IReadOnlyCollection<string> componentIds,
+        IProgress<Host.RuntimeMaintenanceEvent>? progress = null,
+        CancellationToken cancellationToken = default) =>
+        InvokeRepairComponentsAsync(
+            operationId,
+            componentIds,
+            progress,
+            cancellationToken);
+
+    private Task<RuntimeLaunch> InvokeRepairComponentsAsync(
+        string? operationId,
+        IReadOnlyCollection<string> componentIds,
+        IProgress<Host.RuntimeMaintenanceEvent>? progress,
+        CancellationToken cancellationToken) =>
+        InvokeLaunchAsync(
+            "repair",
+            progress,
+            cancellationToken,
+            componentIds: componentIds,
+            requiredCapabilities:
+            [
+                "runtime.maintenance.v2",
+                "runtime.component-repair.v1",
+            ],
+            operationId: operationId);
+
+    public Task<RuntimeHostEnvelope> CancelAsync(
+        string operationId,
+        long? expectedSequence = null,
+        CancellationToken cancellationToken = default) =>
+        CancelAsync(
+            operationId,
+            Guid.NewGuid().ToString(),
+            expectedSequence,
+            cancellationToken);
+
+    public Task<RuntimeHostEnvelope> CancelAsync(
+        string operationId,
+        string commandId,
+        long? expectedSequence = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(commandId);
+        var request = BindingRequest();
+        request["request_kind"] = "command";
+        request["command_id"] = commandId;
+        request["command"] = "cancel";
+        request["target_operation_id"] = operationId;
+        if (expectedSequence is not null) request["expected_sequence"] = expectedSequence.Value;
+        return InvokeControlAsync<RuntimeHostEnvelope>(
+            request,
+            cancellationToken,
+            expectedOperationId: operationId);
+    }
+
+    public Task<RuntimeHostEnvelope> RetryAsync(
+        string operationId,
+        string newOperationId,
+        CancellationToken cancellationToken = default) =>
+        RetryAsync(
+            operationId,
+            newOperationId,
+            Guid.NewGuid().ToString(),
+            cancellationToken);
+
+    public Task<RuntimeHostEnvelope> RetryAsync(
+        string operationId,
+        string newOperationId,
+        string commandId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(newOperationId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(commandId);
+        var request = BindingRequest();
+        request["request_kind"] = "command";
+        request["command_id"] = commandId;
+        request["command"] = "retry";
+        request["target_operation_id"] = operationId;
+        request["new_operation_id"] = newOperationId;
+        return InvokeControlAsync<RuntimeHostEnvelope>(
+            request,
+            cancellationToken,
+            expectedOperationId: newOperationId);
+    }
+
+    public Task<RuntimeMaintenanceObserveEnvelope> ObserveAsync(
+        string operationId,
+        long afterSequence,
+        int limit = 128,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationId);
+        ArgumentOutOfRangeException.ThrowIfNegative(afterSequence);
+        if (limit is < 1 or > 512) throw new ArgumentOutOfRangeException(nameof(limit));
+        var request = BindingRequest();
+        request["request_kind"] = "observe";
+        request["operation_id"] = operationId;
+        request["after_sequence"] = afterSequence;
+        request["limit"] = limit;
+        return InvokeControlAsync<RuntimeMaintenanceObserveEnvelope>(
+            request,
+            cancellationToken,
+            expectedRequestKind: "observe",
+            expectedOperationId: operationId,
+            afterSequence: afterSequence);
+    }
 
     public Host.RuntimeProfileDescriptor? ReadProfileDescriptor()
     {
@@ -231,12 +467,18 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
     private async Task<RuntimeLaunch> InvokeLaunchAsync(
         string operation,
         IProgress<Host.RuntimeMaintenanceEvent>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlyCollection<string>? componentIds = null,
+        IReadOnlyCollection<string>? requiredCapabilities = null,
+        string? operationId = null)
     {
         RuntimeHostEnvelope envelope = await InvokeAsync(
             operation,
             progress,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            componentIds,
+            requiredCapabilities,
+            operationId).ConfigureAwait(false);
         RuntimeLaunch launch = envelope.Launch ?? throw new RuntimeInstallerException(
             $"Runtime Host {operation} response has no launch contract.");
         if (string.IsNullOrWhiteSpace(launch.PythonExecutable) ||
@@ -257,23 +499,101 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
     private async Task<RuntimeHostEnvelope> InvokeAsync(
         string operation,
         IProgress<Host.RuntimeMaintenanceEvent>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlyCollection<string>? componentIds = null,
+        IReadOnlyCollection<string>? requiredCapabilities = null,
+        string? operationId = null)
     {
-        ProcessStartInfo startInfo = BuildStartInfo(operation);
+        bool supportsV2 = SupportsCapability("runtime.maintenance.v2");
+        if (!supportsV2 && operationId is not null)
+        {
+            throw new RuntimeInstallerException(
+                "Runtime Host does not support caller-provided operation ids.");
+        }
+        operationId = supportsV2 ? operationId ?? Guid.NewGuid().ToString() : null;
+        LastOperationId = operationId;
+        ProcessStartInfo startInfo = BuildStartInfo(
+            operation,
+            operationId,
+            componentIds,
+            requiredCapabilities);
         int streamedEvents = 0;
+        long lastSequence = 0;
+        bool replayRequired = false;
         void HandleOutputLine(string line)
         {
             if (TryParseMaintenanceEvent(line, operation, out Host.RuntimeMaintenanceEvent? update)
                 && update is not null)
             {
+                long sequence = update.Snapshot.Sequence;
+                if (supportsV2)
+                {
+                    if (sequence <= Volatile.Read(ref lastSequence)) return;
+                    if (sequence != Volatile.Read(ref lastSequence) + 1)
+                    {
+                        replayRequired = true;
+                        return;
+                    }
+                    Interlocked.Exchange(ref lastSequence, sequence);
+                }
                 Interlocked.Increment(ref streamedEvents);
                 progress?.Report(update);
             }
         }
-        RuntimeInstallerProcessResult result = await _runner.RunAsync(
+        using var ownedCancellation = supportsV2 ? new CancellationTokenSource() : null;
+        Task<RuntimeInstallerProcessResult> run = _runner.RunAsync(
             startInfo,
             HandleOutputLine,
-            cancellationToken).ConfigureAwait(false);
+            ownedCancellation?.Token ?? cancellationToken);
+        RuntimeInstallerProcessResult result;
+        bool cancellationWasRequested = false;
+        try
+        {
+            result = supportsV2
+                ? await run.WaitAsync(cancellationToken).ConfigureAwait(false)
+                : await run.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (
+            supportsV2 && operationId is not null && cancellationToken.IsCancellationRequested)
+        {
+            cancellationWasRequested = true;
+            long sequence = Volatile.Read(ref lastSequence);
+            await CancelAsync(
+                operationId,
+                $"cancel-{operationId}",
+                sequence > 0 ? sequence : null,
+                CancellationToken.None).ConfigureAwait(false);
+            Host.RuntimeMaintenanceSnapshot terminal = await AwaitTerminalSnapshotAsync(
+                operationId,
+                sequence,
+                progress).ConfigureAwait(false);
+            try
+            {
+                result = await run.WaitAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(false);
+            }
+            catch (TimeoutException) when (
+                terminal.OperationState == Host.RuntimeOperationState.Cancelled)
+            {
+                ownedCancellation?.Cancel();
+                try
+                {
+                    await run.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+                throw new OperationCanceledException(cancellationToken);
+            }
+            catch (TimeoutException)
+            {
+                throw new RuntimeInstallerException(
+                    "Runtime reached a terminal state but its installer process did not exit.");
+            }
+            if (terminal.OperationState == Host.RuntimeOperationState.Cancelled)
+            {
+                throw new OperationCanceledException(cancellationToken);
+            }
+        }
         if (Volatile.Read(ref streamedEvents) == 0)
         {
             foreach (string line in OutputLines(result.StandardOutput))
@@ -281,13 +601,24 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
                 HandleOutputLine(line);
             }
         }
+        if (supportsV2 && replayRequired && operationId is not null)
+        {
+            await ReplayAsync(
+                operationId,
+                Volatile.Read(ref lastSequence),
+                progress,
+                cancellationWasRequested ? CancellationToken.None : cancellationToken)
+                .ConfigureAwait(false);
+        }
         string? envelopeJson = FinalEnvelopeJson(result.StandardOutput);
         if (result.ExitCode != 0)
         {
             string detail = ParseError(envelopeJson) ??
                 result.StandardError.Trim();
+            RuntimeHostError? error = ParseHostError(envelopeJson);
             throw new RuntimeInstallerException(
-                $"Runtime Installer {operation} failed with exit code {result.ExitCode}: {detail}");
+                $"Runtime Installer {operation} failed with exit code {result.ExitCode}: {detail}",
+                error);
         }
 
         try
@@ -302,6 +633,29 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
                 throw new RuntimeInstallerException(
                     value?.Error?.Message ?? $"Runtime Host {operation} returned an invalid envelope.");
             }
+            IReadOnlyCollection<string> requestedCapabilities =
+                SupportsCapability("runtime.capability-metadata.v1") &&
+                requiredCapabilities is { Count: > 0 }
+                    ? requiredCapabilities
+                    : Array.Empty<string>();
+            if (requestedCapabilities.Count > 0 &&
+                (value.NegotiatedCapabilities is null ||
+                    requestedCapabilities.Except(value.NegotiatedCapabilities).Any()))
+            {
+                throw new RuntimeInstallerException(
+                    $"Runtime Host {operation} did not negotiate every required capability.");
+            }
+            RuntimeCapabilityDescriptor[] descriptors = value.CapabilityDescriptors ?? [];
+            if (descriptors.Any(descriptor =>
+                string.IsNullOrWhiteSpace(descriptor.Name) ||
+                string.IsNullOrWhiteSpace(descriptor.IntroducedIn) ||
+                descriptor.Lifecycle is not ("active" or "deprecated")))
+            {
+                throw new RuntimeInstallerException(
+                    $"Runtime Host {operation} returned invalid capability metadata.");
+            }
+            NegotiatedCapabilities = value.NegotiatedCapabilities?.ToArray() ?? [];
+            CapabilityDescriptors = descriptors.ToArray();
             return value;
         }
         catch (JsonException error)
@@ -311,8 +665,87 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         }
     }
 
+    private async Task<Host.RuntimeMaintenanceSnapshot> AwaitTerminalSnapshotAsync(
+        string operationId,
+        long afterSequence,
+        IProgress<Host.RuntimeMaintenanceEvent>? progress)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        long cursor = afterSequence;
+        try
+        {
+            while (true)
+            {
+                RuntimeMaintenanceObserveEnvelope page = await ObserveAsync(
+                    operationId,
+                    cursor,
+                    cancellationToken: timeout.Token).ConfigureAwait(false);
+                foreach (Host.RuntimeMaintenanceEvent update in page.Events)
+                {
+                    if (update.Snapshot.Sequence <= cursor) continue;
+                    cursor = update.Snapshot.Sequence;
+                    progress?.Report(update);
+                }
+                if (!page.More && cursor >= page.Snapshot.Sequence &&
+                    page.Snapshot.OperationState is (
+                        Host.RuntimeOperationState.Succeeded or
+                        Host.RuntimeOperationState.Failed or
+                        Host.RuntimeOperationState.Cancelled))
+                {
+                    return page.Snapshot;
+                }
+                cursor = Math.Max(cursor, page.ThroughSequence);
+                await Task.Delay(TimeSpan.FromMilliseconds(100), timeout.Token)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            throw new RuntimeInstallerException(
+                "Runtime cancellation was not confirmed by a terminal snapshot.");
+        }
+    }
+
+    private async Task ReplayAsync(
+        string operationId,
+        long afterSequence,
+        IProgress<Host.RuntimeMaintenanceEvent>? progress,
+        CancellationToken cancellationToken)
+    {
+        long cursor = afterSequence;
+        while (true)
+        {
+            RuntimeMaintenanceObserveEnvelope page = await ObserveAsync(
+                operationId,
+                cursor,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            foreach (Host.RuntimeMaintenanceEvent update in page.Events)
+            {
+                long sequence = update.Snapshot.Sequence;
+                if (sequence <= cursor) continue;
+                if (sequence != cursor + 1)
+                {
+                    throw new RuntimeInstallerException(
+                        "Runtime maintenance replay sequence is not contiguous.");
+                }
+                cursor = sequence;
+                progress?.Report(update);
+            }
+            if (!page.More) return;
+            if (page.ThroughSequence <= afterSequence || page.ThroughSequence != cursor)
+            {
+                throw new RuntimeInstallerException(
+                    "Runtime maintenance replay cursor did not advance.");
+            }
+            afterSequence = cursor;
+        }
+    }
+
     private ProcessStartInfo BuildStartInfo(
-        string operation)
+        string operation,
+        string? operationId = null,
+        IReadOnlyCollection<string>? componentIds = null,
+        IReadOnlyCollection<string>? requiredCapabilities = null)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -323,10 +756,65 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
+        Dictionary<string, object?> request = BindingRequest();
+        request["operation"] = operation;
+        if (SupportsCapability("runtime.maintenance.v2"))
+        {
+            if (componentIds is { Count: > 0 } &&
+                !SupportsCapability("runtime.component-repair.v1"))
+            {
+                throw new RuntimeInstallerException(
+                    "Runtime Host does not support component-scoped repair.");
+            }
+            if (requiredCapabilities is { Count: > 0 } &&
+                !SupportsCapability("runtime.capability-metadata.v1"))
+            {
+                throw new RuntimeInstallerException(
+                    "Runtime Host does not support capability negotiation metadata.");
+            }
+            request["accepted_event_streams"] = new[] { "ndjson.v2" };
+            request["operation_id"] = operationId ?? Guid.NewGuid().ToString();
+            if (componentIds is { Count: > 0 }) request["component_ids"] = componentIds;
+            if (requiredCapabilities is { Count: > 0 })
+            {
+                request["required_capabilities"] = requiredCapabilities;
+            }
+        }
+        else if (SupportsMaintenanceEvents())
+        {
+            request["accepted_event_streams"] = new[] { "ndjson.v1" };
+        }
+        AddOption(startInfo, "--request-json", JsonSerializer.Serialize(request));
+        return startInfo;
+    }
+
+    private bool SupportsMaintenanceEvents()
+        => SupportsCapability("runtime.maintenance.v1");
+
+    private bool SupportsCapability(string capability)
+    {
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(
+                File.ReadAllBytes(_configuration.RuntimeManifest));
+            return document.RootElement
+                .GetProperty("capabilities")
+                .EnumerateArray()
+                .Any(item => item.GetString() == capability);
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException or JsonException or
+            KeyNotFoundException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private Dictionary<string, object?> BindingRequest()
+    {
         var request = new Dictionary<string, object?>
         {
             ["protocol_version"] = 2,
-            ["operation"] = operation,
             ["product_root"] = _configuration.ProductRoot,
             ["component_lock"] = _configuration.ComponentLock,
             ["runtime_manifest"] = _configuration.RuntimeManifest,
@@ -337,31 +825,182 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
             request["layout_manifest"] = _configuration.PortableLayoutManifest;
             request["product_id"] = _configuration.ProductId;
         }
-        if (SupportsMaintenanceEvents())
-        {
-            request["accepted_event_streams"] = new[] { "ndjson.v1" };
-        }
-        AddOption(startInfo, "--request-json", JsonSerializer.Serialize(request));
-        return startInfo;
+        return request;
     }
 
-    private bool SupportsMaintenanceEvents()
+    private async Task<T> InvokeControlAsync<T>(
+        Dictionary<string, object?> request,
+        CancellationToken cancellationToken,
+        string? expectedRequestKind = null,
+        string? expectedOperationId = null,
+        long? afterSequence = null)
     {
+        ProcessStartInfo startInfo = StartInfo(request);
+        RuntimeInstallerProcessResult result = await _runner.RunAsync(
+            startInfo,
+            cancellationToken).ConfigureAwait(false);
+        string? envelopeJson = FinalEnvelopeJson(result.StandardOutput);
+        RuntimeHostError? error = ParseHostError(envelopeJson);
+        if (result.ExitCode != 0)
+        {
+            throw new RuntimeInstallerException(
+                error?.Message ?? result.StandardError.Trim(),
+                error);
+        }
         try
         {
-            using JsonDocument document = JsonDocument.Parse(
-                File.ReadAllBytes(_configuration.RuntimeManifest));
-            return document.RootElement
-                .GetProperty("capabilities")
-                .EnumerateArray()
-                .Any(item => item.GetString() == "runtime.maintenance.v1");
+            using JsonDocument document = JsonDocument.Parse(envelopeJson ?? string.Empty);
+            ValidateControlEnvelope(
+                document.RootElement,
+                expectedRequestKind,
+                expectedOperationId,
+                afterSequence);
+            T? value = JsonSerializer.Deserialize<T>(envelopeJson ?? string.Empty, JsonOptions);
+            return value ?? throw new RuntimeInstallerException("Runtime control returned no envelope.");
         }
-        catch (Exception error) when (
-            error is IOException or UnauthorizedAccessException or JsonException or
-            KeyNotFoundException or InvalidOperationException)
+        catch (JsonException exception)
         {
-            return false;
+            throw new RuntimeInstallerException(
+                $"Runtime control returned invalid JSON: {exception.Message}");
         }
+        catch (Exception exception) when (
+            (exception is InvalidOperationException &&
+                exception is not RuntimeInstallerException) ||
+            exception is KeyNotFoundException)
+        {
+            throw new RuntimeInstallerException(
+                $"Runtime control returned an invalid envelope: {exception.Message}");
+        }
+    }
+
+    private static void ValidateControlEnvelope(
+        JsonElement root,
+        string? expectedRequestKind,
+        string? expectedOperationId,
+        long? afterSequence)
+    {
+        if (root.ValueKind != JsonValueKind.Object ||
+            !root.TryGetProperty("protocol_version", out JsonElement protocolVersion) ||
+            protocolVersion.ValueKind != JsonValueKind.Number ||
+            !protocolVersion.TryGetInt32(out int version) ||
+            version != 2 ||
+            !root.TryGetProperty("ok", out JsonElement ok) ||
+            ok.ValueKind is not JsonValueKind.True)
+        {
+            throw new RuntimeInstallerException("Runtime control returned an invalid envelope.");
+        }
+        if (expectedRequestKind is not null &&
+            (!root.TryGetProperty("request_kind", out JsonElement requestKind) ||
+                requestKind.GetString() != expectedRequestKind))
+        {
+            throw new RuntimeInstallerException("Runtime control response kind mismatch.");
+        }
+        JsonElement operationId;
+        if (expectedRequestKind == "observe")
+        {
+            if (!root.TryGetProperty("operation_id", out operationId) ||
+                operationId.ValueKind != JsonValueKind.String ||
+                !root.TryGetProperty("snapshot", out JsonElement snapshot) ||
+                snapshot.ValueKind != JsonValueKind.Object ||
+                !snapshot.TryGetProperty("operation_id", out JsonElement snapshotOperationId) ||
+                snapshotOperationId.ValueKind != JsonValueKind.String ||
+                snapshotOperationId.GetString() != expectedOperationId)
+            {
+                throw new RuntimeInstallerException(
+                    "Runtime observe response has no valid snapshot.");
+            }
+            ValidateObserveCursor(root, expectedOperationId, afterSequence ?? 0);
+        }
+        else
+        {
+            if (!root.TryGetProperty("maintenance", out JsonElement maintenance) ||
+                maintenance.ValueKind != JsonValueKind.Object ||
+                !maintenance.TryGetProperty("operation_id", out operationId) ||
+                operationId.ValueKind != JsonValueKind.String)
+            {
+                throw new RuntimeInstallerException(
+                    "Runtime command response has no maintenance snapshot.");
+            }
+        }
+        if (expectedOperationId is not null && operationId.GetString() != expectedOperationId)
+        {
+            throw new RuntimeInstallerException("Runtime control operation id mismatch.");
+        }
+    }
+
+    private static void ValidateObserveCursor(
+        JsonElement root,
+        string? expectedOperationId,
+        long afterSequence)
+    {
+        if (!root.TryGetProperty("oldest_sequence", out JsonElement oldest) ||
+            oldest.ValueKind != JsonValueKind.Number ||
+            !oldest.TryGetInt64(out long oldestSequence) ||
+            oldestSequence < 1 ||
+            !root.TryGetProperty("through_sequence", out JsonElement through) ||
+            through.ValueKind != JsonValueKind.Number ||
+            !through.TryGetInt64(out long throughSequence) ||
+            throughSequence < 0 ||
+            !root.TryGetProperty("more", out JsonElement more) ||
+            more.ValueKind is not (JsonValueKind.True or JsonValueKind.False) ||
+            !root.TryGetProperty("events", out JsonElement events) ||
+            events.ValueKind != JsonValueKind.Array ||
+            !root.TryGetProperty("snapshot", out JsonElement rootSnapshot) ||
+            rootSnapshot.ValueKind != JsonValueKind.Object ||
+            !rootSnapshot.TryGetProperty("sequence", out JsonElement snapshotSequenceElement) ||
+            snapshotSequenceElement.ValueKind != JsonValueKind.Number ||
+            !snapshotSequenceElement.TryGetInt64(out long snapshotSequence) ||
+            snapshotSequence < 1 ||
+            snapshotSequence < throughSequence ||
+            oldestSequence > snapshotSequence)
+        {
+            throw new RuntimeInstallerException("Runtime observe cursor is invalid.");
+        }
+        long cursor = afterSequence;
+        foreach (JsonElement update in events.EnumerateArray())
+        {
+            if (update.ValueKind != JsonValueKind.Object ||
+                !update.TryGetProperty("snapshot", out JsonElement snapshot) ||
+                snapshot.ValueKind != JsonValueKind.Object ||
+                !snapshot.TryGetProperty("sequence", out JsonElement sequenceElement) ||
+                sequenceElement.ValueKind != JsonValueKind.Number ||
+                !sequenceElement.TryGetInt64(out long sequence) ||
+                !snapshot.TryGetProperty("operation_id", out JsonElement operationId) ||
+                operationId.ValueKind != JsonValueKind.String)
+            {
+                throw new RuntimeInstallerException(
+                    "Runtime observe event snapshot is invalid.");
+            }
+            if (sequence != cursor + 1 ||
+                operationId.GetString() != expectedOperationId)
+            {
+                throw new RuntimeInstallerException(
+                    "Runtime observe events are not contiguous.");
+            }
+            cursor = sequence;
+        }
+        if ((events.GetArrayLength() > 0 && throughSequence != cursor) ||
+            (events.GetArrayLength() == 0 && throughSequence > afterSequence) ||
+            (events.GetArrayLength() == 0 && more.ValueKind == JsonValueKind.True))
+        {
+            throw new RuntimeInstallerException(
+                "Runtime observe through_sequence mismatch.");
+        }
+    }
+
+    private ProcessStartInfo StartInfo(Dictionary<string, object?> request)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = _configuration.Executable,
+            WorkingDirectory = _configuration.ProductRoot,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        AddOption(startInfo, "--request-json", JsonSerializer.Serialize(request));
+        return startInfo;
     }
 
     private static void AddOption(ProcessStartInfo startInfo, string name, string value)
@@ -389,6 +1028,22 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         {
         }
         return null;
+    }
+
+    private static RuntimeHostError? ParseHostError(string? envelopeJson)
+    {
+        if (string.IsNullOrWhiteSpace(envelopeJson)) return null;
+        try
+        {
+            RuntimeHostEnvelope? envelope = JsonSerializer.Deserialize<RuntimeHostEnvelope>(
+                envelopeJson,
+                JsonOptions);
+            return envelope?.Error;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private static bool TryParseMaintenanceEvent(

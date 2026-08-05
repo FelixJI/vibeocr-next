@@ -48,6 +48,7 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
     private string _status = "等待运行时检查";
     private string _phase = "尚未开始";
     private string _progressText = "";
+    private string _sourceIdentity = "";
     private double _progressValue;
     private bool _isProgressIndeterminate = true;
 
@@ -77,6 +78,11 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
         get => _isProgressIndeterminate;
         private set => SetField(ref _isProgressIndeterminate, value);
     }
+    public string SourceIdentity
+    {
+        get => _sourceIdentity;
+        private set => SetField(ref _sourceIdentity, value);
+    }
 
     public void ApplyProfile(Host.RuntimeProfileDescriptor? profile)
     {
@@ -97,15 +103,6 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
         Phase = PhaseText(snapshot.Phase);
         Status = OperationStateText(snapshot.OperationState);
         ApplyProgress(snapshot.Progress);
-
-        if (snapshot.OperationState == Host.RuntimeOperationState.Succeeded)
-        {
-            foreach (RuntimeComponentItem component in Components)
-            {
-                component.UpdateState("已就绪");
-            }
-            return;
-        }
 
         if (snapshot.Phase == Host.RuntimeMaintenancePhase.VerifyRuntime)
         {
@@ -133,13 +130,14 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         BackendVersion = snapshot.BackendVersion;
+        SourceIdentity = SourceIdentityText(snapshot);
         Profile = $"{snapshot.Profile.ProfileId} · {Accelerator(snapshot.Profile.Accelerator)}";
         ReplaceComponents(snapshot.Profile.Components.Select(component =>
             new RuntimeComponentItem(
                 component.ComponentId,
                 component.DisplayName,
-                component.Version,
-                ComponentStateText(component.State))));
+                ActualVersion(component) ?? component.Version,
+                ComponentStateText(component))));
 
         Status = snapshot.ServiceState switch
         {
@@ -173,28 +171,86 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
 
     private void ApplyProgress(Host.ProgressSnapshot? progress)
     {
-        if (progress is null || progress.Total is not > 0)
+        if (progress is null)
         {
-            ProgressText = progress is null ? "" : $"已完成 {progress.Current}";
+            ProgressText = "";
+            IsProgressIndeterminate = true;
+            return;
+        }
+        if (progress.Unit == Host.ProgressUnit.Steps || progress.Total is not > 0)
+        {
+            ProgressText = progress.Total is > 0
+                ? $"{progress.Current} / {progress.Total.Value} 步"
+                : $"已完成 {progress.Current} 步";
             IsProgressIndeterminate = true;
             return;
         }
         ProgressValue = Math.Clamp(progress.Current * 100d / progress.Total.Value, 0, 100);
-        ProgressText = $"{progress.Current} / {progress.Total.Value}";
+        ProgressText = MeasuredProgressText(
+            progress.Current,
+            progress.Total.Value,
+            progress.Unit == Host.ProgressUnit.Bytes ? "bytes" : "项",
+            EstimatedRemainingSeconds(progress));
         IsProgressIndeterminate = false;
     }
 
     private void ApplyProgress(Http.ProgressSnapshot? progress)
     {
-        if (progress is null || progress.Total is not > 0)
+        if (progress is null)
         {
-            ProgressText = progress is null ? "" : $"已完成 {progress.Current}";
+            ProgressText = "";
+            IsProgressIndeterminate = true;
+            return;
+        }
+        if (progress.Unit == Http.ProgressUnit.Steps || progress.Total is not > 0)
+        {
+            ProgressText = progress.Total is > 0
+                ? $"{progress.Current} / {progress.Total.Value} 步"
+                : $"已完成 {progress.Current} 步";
             IsProgressIndeterminate = true;
             return;
         }
         ProgressValue = Math.Clamp(progress.Current * 100d / progress.Total.Value, 0, 100);
-        ProgressText = $"{progress.Current} / {progress.Total.Value}";
+        ProgressText = MeasuredProgressText(
+            progress.Current,
+            progress.Total.Value,
+            progress.Unit == Http.ProgressUnit.Bytes ? "bytes" : "项",
+            EstimatedRemainingSeconds(progress));
         IsProgressIndeterminate = false;
+    }
+
+    private static string MeasuredProgressText(
+        long current,
+        long total,
+        string unit,
+        double? estimatedRemainingSeconds)
+    {
+        string text = $"{current} / {total} {unit}";
+        return estimatedRemainingSeconds is >= 0
+            ? $"{text} · 预计剩余 {Math.Ceiling(estimatedRemainingSeconds.Value)} 秒"
+            : text;
+    }
+
+    private static double? EstimatedRemainingSeconds(object progress)
+    {
+        object? value = progress.GetType()
+            .GetProperty("EstimatedRemainingSeconds")?
+            .GetValue(progress);
+        return value is null ? null : Convert.ToDouble(value);
+    }
+
+    private static string? ActualVersion(Http.RuntimeComponentStatus component) =>
+        component.GetType().GetProperty("ActualVersion")?.GetValue(component) as string;
+
+    private static string SourceIdentityText(Http.RuntimeStatusSnapshot snapshot)
+    {
+        object? source = snapshot.GetType().GetProperty("Source")?.GetValue(snapshot);
+        if (source is null) return "";
+        string? sourceSha = source.GetType().GetProperty("BackendSourceSha")?.GetValue(source) as string;
+        string? manifest = source.GetType().GetProperty("RuntimeManifestSha256")?.GetValue(source) as string;
+        if (string.IsNullOrWhiteSpace(sourceSha) || string.IsNullOrWhiteSpace(manifest)) return "";
+        return $"Source {sourceSha[..Math.Min(12, sourceSha.Length)]} · " +
+            $"manifest {manifest[..Math.Min(12, manifest.Length)]}";
     }
 
     private static string Accelerator(Host.Accelerator accelerator) => accelerator switch
@@ -215,7 +271,7 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
     {
         Host.RuntimeOperationState.Queued => "维护任务排队中",
         Host.RuntimeOperationState.Running => "正在准备 Backend 运行时",
-        Host.RuntimeOperationState.Succeeded => "运行时已就绪",
+        Host.RuntimeOperationState.Succeeded => "维护操作已完成",
         Host.RuntimeOperationState.Failed => "运行时安装失败",
         Host.RuntimeOperationState.Cancelled => "运行时安装已取消",
         _ => "运行时状态未知",
@@ -256,6 +312,36 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
         Http.RuntimeComponentState.Cancelled => "已取消",
         _ => "未知",
     };
+
+    private static string ComponentStateText(Http.RuntimeComponentStatus component)
+    {
+        string state = ComponentStateText(component.State);
+        object? actual = component.GetType().GetProperty("ActualState")?.GetValue(component);
+        object? drift = component.GetType().GetProperty("DriftReason")?.GetValue(component);
+        string? actualName = actual?.ToString();
+        string? driftName = drift?.ToString();
+        if (component.State == Http.RuntimeComponentState.Ready)
+        {
+            state = actualName switch
+            {
+                "Missing" or "missing" => "缺失",
+                "Drifted" or "drifted" => "已漂移",
+                "Unknown" or "unknown" => "实际状态未知",
+                _ => state,
+            };
+        }
+        string? driftText = driftName switch
+        {
+            null or "None" or "none" => null,
+            "Missing" or "missing" => "文件缺失",
+            "VersionMismatch" or "version_mismatch" => "版本不一致",
+            "IdentityMismatch" or "identity_mismatch" => "来源身份不一致",
+            "IntegrityFailed" or "integrity_failed" => "完整性校验失败",
+            "Unexpected" or "unexpected" => "存在非预期组件",
+            _ => "状态不一致",
+        };
+        return driftText is null ? state : $"{state} · {driftText}";
+    }
 
     private void SetField<T>(ref T field, T value, [CallerMemberName] string? name = null)
     {
