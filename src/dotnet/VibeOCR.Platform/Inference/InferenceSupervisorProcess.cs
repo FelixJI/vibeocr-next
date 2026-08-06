@@ -28,8 +28,11 @@ public sealed record SupervisorReadyEnvelope(
 {
     public Uri BaseUrl => new($"http://127.0.0.1:{Port}");
 
-    public static SupervisorReadyEnvelope Parse(string line)
+    public static SupervisorReadyEnvelope Parse(
+        string line,
+        IReadOnlySet<string> requiredCapabilities)
     {
+        ArgumentNullException.ThrowIfNull(requiredCapabilities);
         RuntimeReadyEnvelope? wire = JsonSerializer.Deserialize<RuntimeReadyEnvelope>(line);
         if (wire is null || !wire.Ready)
         {
@@ -59,13 +62,12 @@ public sealed record SupervisorReadyEnvelope(
                 + $"{envelope.ProtocolVersion}/{envelope.SchemaVersion}.");
         }
         if (envelope.Capabilities is null
-            || envelope.Capabilities.Count != envelope.Capabilities.Distinct().Count()
-            || envelope.Capabilities.Any(
-                capability => !RuntimeProtocol.AllCapabilities.Contains(capability)))
+            || envelope.Capabilities.Any(string.IsNullOrWhiteSpace)
+            || envelope.Capabilities.Count != envelope.Capabilities.Distinct(StringComparer.Ordinal).Count())
         {
             throw new InvalidDataException("Supervisor ready envelope contains invalid capabilities.");
         }
-        string[] missingCapabilities = RuntimeProtocol.AllCapabilities
+        string[] missingCapabilities = requiredCapabilities
             .Except(envelope.Capabilities, StringComparer.Ordinal)
             .ToArray();
         if (missingCapabilities.Length > 0)
@@ -85,6 +87,7 @@ public sealed record InferenceSupervisorOptions(
     string WorkingDirectory,
     string LogPath,
     TimeSpan StartupTimeout,
+    IReadOnlySet<string> RequiredCapabilities,
     IReadOnlyDictionary<string, string>? EnvironmentOverrides = null);
 
 /// <summary>Details for an unplanned supervisor-process exit.</summary>
@@ -227,7 +230,9 @@ public sealed class InferenceSupervisorProcess : IDisposable
             startup.CancelAfter(_options.StartupTimeout);
             string firstLine = await process.StandardOutput.ReadLineAsync(startup.Token)
                 .ConfigureAwait(false) ?? string.Empty;
-            SupervisorReadyEnvelope ready = SupervisorReadyEnvelope.Parse(firstLine);
+            SupervisorReadyEnvelope ready = SupervisorReadyEnvelope.Parse(
+                firstLine,
+                _options.RequiredCapabilities);
             lock (_lifecycleLock)
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);

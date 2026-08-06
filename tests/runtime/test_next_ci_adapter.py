@@ -44,6 +44,13 @@ def test_compile_sdk_version_is_pinned_independently_from_runtime(
     assert compile_protocol_version(tmp_path) == "2.0.0"
 
 
+def test_newer_sdk_and_older_bound_runtime_are_minor_compatible() -> None:
+    compatibility = {"supported_majors": [2], "minor_compatible": True}
+
+    assert_protocol_compatible("2.3.0", compatibility)
+    assert_protocol_compatible("2.0.0", compatibility)
+
+
 def test_reads_backend_bound_protocol_v2_identity(tmp_path: Path) -> None:
     (tmp_path / "protocol-release-manifest.json").write_text(
         json.dumps(
@@ -164,6 +171,12 @@ def test_backend_identity_hashes_runtime_and_optional_release_manifests() -> Non
     )
     assert 'backend_identity["release_manifest_sha256"] = _sha(' in resolver
     assert "if backend_release_manifest.is_file():" in resolver
+    assert '"protocol_sdk": {' in resolver
+    assert "Protocol SDK {sdk_version} is newer than bound runtime" not in resolver
+    assert (
+        'verify_protocol_release(work / "protocol-sdk", version=sdk_version)'
+        in resolver
+    )
 
 
 def test_sync_version_updates_repository_and_desktop_project(tmp_path: Path) -> None:
@@ -197,7 +210,16 @@ def test_release_smoke_binds_real_archive_and_component_identity(
         json.dumps(
             {
                 "backend": {"version": "1.0.0", "source_sha": "a" * 40},
-                "protocol": {"version": "2.0.0", "source_sha": "b" * 40},
+                "protocol": {
+                    "version": "2.0.0",
+                    "source_sha": "b" * 40,
+                    "release_manifest_sha256": "c" * 64,
+                },
+                "protocol_sdk": {
+                    "version": "2.3.0",
+                    "source_sha": "d" * 40,
+                    "release_manifest_sha256": "e" * 64,
+                },
             }
         ),
         encoding="utf-8",
@@ -212,6 +234,24 @@ def test_release_smoke_binds_real_archive_and_component_identity(
         "scripts.release_smoke.subprocess.run", lambda *args, **kwargs: None
     )
     verify(tmp_path)
+
+    identity = json.loads(
+        (tmp_path / "component-identities.json").read_text(encoding="utf-8")
+    )
+    del identity["protocol_sdk"]
+    (tmp_path / "component-identities.json").write_text(
+        json.dumps(identity), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="protocol_sdk"):
+        verify(tmp_path)
+    identity["protocol_sdk"] = {
+        "version": "2.3.0",
+        "source_sha": "d" * 40,
+        "release_manifest_sha256": "e" * 64,
+    }
+    (tmp_path / "component-identities.json").write_text(
+        json.dumps(identity), encoding="utf-8"
+    )
 
     (tmp_path / "unexpected.txt").write_text("unexpected", encoding="utf-8")
     with pytest.raises(ValueError, match="release asset set mismatch"):

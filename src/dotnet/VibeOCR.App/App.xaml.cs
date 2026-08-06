@@ -384,6 +384,8 @@ public sealed partial class App : Application
                 launch,
                 logPath,
                 TimeSpan.FromSeconds(layout.Profile == "winui-dev" ? 90 : 15),
+                RuntimeCapabilityRequirements.Read(
+                    Path.Combine(layout.InstallRoot, "component-lock.json")),
                 injectSoakCrash);
 
             // Start the supervisor process.
@@ -469,9 +471,11 @@ public sealed partial class App : Application
         RuntimeLaunch launch,
         string logPath,
         TimeSpan startupTimeout,
+        IReadOnlySet<string> requiredCapabilities,
         bool injectSoakCrash = false)
     {
         ArgumentNullException.ThrowIfNull(launch);
+        ArgumentNullException.ThrowIfNull(requiredCapabilities);
         var environment = launch.Environment.ToDictionary(
             item => item.Key,
             item => item.Value,
@@ -486,6 +490,7 @@ public sealed partial class App : Application
             launch.WorkingDirectory,
             logPath,
             startupTimeout,
+            requiredCapabilities,
             environment);
     }
 

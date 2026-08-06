@@ -50,6 +50,7 @@ public sealed class ShellTests
             launch,
             @"D:\products\next\data\supervisor.log",
             TimeSpan.FromSeconds(42),
+            new HashSet<string>(["ocr.recognition.v2"], StringComparer.Ordinal),
             injectSoakCrash: true);
 
         Assert.Equal(launch.PythonExecutable, options.FileName);
@@ -61,6 +62,7 @@ public sealed class ShellTests
         Assert.Equal(
             "1",
             options.EnvironmentOverrides["VIBEOCR_SUPERVISOR_SOAK_CRASH_AFTER_READY"]);
+        Assert.Contains("ocr.recognition.v2", options.RequiredCapabilities!);
     }
 
     [Fact]

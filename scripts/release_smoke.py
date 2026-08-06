@@ -24,10 +24,14 @@ def verify(artifacts: Path) -> None:
     identity = json.loads(
         (artifacts / "component-identities.json").read_text(encoding="utf-8")
     )
-    for component in ("backend", "protocol"):
+    for component in ("backend", "protocol", "protocol_sdk"):
         record = identity.get(component, {})
         if not record.get("version") or len(str(record.get("source_sha", ""))) != 40:
             raise ValueError(f"missing actual {component} version/source identity")
+    for component in ("protocol", "protocol_sdk"):
+        record = identity[component]
+        if not record.get("release_manifest_sha256"):
+            raise ValueError(f"missing actual {component} release manifest identity")
     archive = next(artifacts.glob("VibeOCR-Next-v*-win64.zip"))
     expected_names = {
         archive.name,
