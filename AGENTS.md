@@ -63,7 +63,7 @@
 - `global.json` 固定 .NET SDK 且禁止 roll-forward；`Directory.Build.props` 强制 warnings-as-errors、deterministic 与 locked restore。NuGet central versions/packages.lock 禁止手改，只通过 `scripts/update_dotnet_locks.ps1` 更新。
 - `.ci/project.json` 的 bootstrap 必须包含 Python dev tools、WebAssets `npm ci`、Windows App Runtime 安装、组件解析和 locked restore；遗漏 Windows App Runtime 会使 WinUI testhost 挂起。
 - quality=`uv run python scripts/check_quality.py`；E2E 同时运行 Platform tests 与 `scripts/test_app_ci.ps1` 的 fail-closed App tests；随后 `scripts/build-release.ps1` 和 `uv run python scripts/release_smoke.py` 构建并验证真实候选。
-- 每次 CI 使用最新正式 Backend 和其绑定的 Protocol runtime，支持 Protocol major 2 且 minor-compatible。编译 SDK 从 `Directory.Packages.props` 的单一精确 pin 读取并下载到 `.release-input/protocol-sdk`；运行时 Protocol 位于 `.release-input/protocol`。SDK 不得高于绑定 runtime，NuGet 不得从任意外部 feed 获取 `VibeOCR.Runtime.*`。
+- 每次 CI 使用最新正式 Backend 和其绑定的 Protocol runtime，支持 Protocol major 2 且 minor-compatible。编译 SDK 从 `Directory.Packages.props` 的单一精确 pin 读取并下载到 `.release-input/protocol-sdk`；运行时 Protocol 位于 `.release-input/protocol`。两者只要求同 major，不比较 minor 大小；新行为必须按调用点 capability 协商。NuGet 不得从任意外部 feed 获取 `VibeOCR.Runtime.*`。
 - 版本唯一事实源是 `repository.json`，`scripts/sync_version.py` 派生 App csproj。正式资产为 Next win64 ZIP/sha256、component lock、component identities 与 SPDX SBOM，项目 smoke 必须拒绝额外资产。
 - release publish 必须包含 WinUI `.xbf`/`.pri`、Bootstrapper、updater 与组件 identity；否则可能出现 `XamlParseException`。修改 publish layout、WebAssets、runtime installer 参数或 capabilities 时执行真实打包验证。
 - Python/PowerShell/TOML 用 4 空格，C#/JSON/YAML 用 2 空格；Python Ruff/Node/.NET 版本以配置为准。不在文档中假定某个 clone 是否安装 Git hook，按工作开始时的实际检查执行，未安装时运行配置对应质量脚本。
@@ -71,6 +71,6 @@
 ## 六仓关系
 
 - 本仓与 `vibeocr-classic` 都消费最新正式 `vibeocr-backend` 及其绑定的 `vibeocr-protocol`，但两者不互相依赖、不共享发版版本。
-- Protocol v2 minor 兼容允许固定 2.0 编译 SDK 对接较新的 2.x runtime；Backend/Protocol major 改变必须显式升级兼容声明、locks 与客户端实现。
+- Protocol v2 minor 兼容必须同时允许较旧 SDK 对接较新 Runtime，以及较新 SDK 对接较旧 Runtime；后者在 capability 缺失时必须隐藏、禁用或 fallback。Backend/Protocol major 改变必须显式升级兼容声明、locks 与客户端实现。
 - Backend 发版不级联触发本仓 CD；本仓下一次 PR/main CI 自然跟踪最新正式 Backend，CD 只发布本仓同一 CI 候选。
 - `file-toolbox`、`vibetable` 与本仓无运行时依赖，仅共享自动化治理。

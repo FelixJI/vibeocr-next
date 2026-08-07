@@ -16,9 +16,14 @@ if __package__:
     from .bind_component_releases import (
         bind_product_releases,
         protocol_manifest_version,
+        verify_protocol_release,
     )
 else:
-    from bind_component_releases import bind_product_releases, protocol_manifest_version
+    from bind_component_releases import (
+        bind_product_releases,
+        protocol_manifest_version,
+        verify_protocol_release,
+    )
 
 ROOT = Path(__file__).resolve().parents[1]
 SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
@@ -138,10 +143,6 @@ def resolve(root: Path = ROOT) -> Path:
     _download(protocol, work / "protocol")
     sdk_version = compile_protocol_version(root)
     assert_protocol_compatible(sdk_version, config["project"]["protocol_compatibility"])
-    if _version(sdk_version) > _version(protocol_version):
-        raise ValueError(
-            f"Protocol SDK {sdk_version} is newer than bound runtime {protocol_version}"
-        )
     sdk_release = (
         protocol
         if sdk_version == protocol_version
@@ -150,6 +151,7 @@ def resolve(root: Path = ROOT) -> Path:
     if sdk_release.get("prerelease") or sdk_release.get("draft"):
         raise ValueError("Protocol SDK release is not formal")
     _download(sdk_release, work / "protocol-sdk")
+    verify_protocol_release(work / "protocol-sdk", version=sdk_version)
     lock = artifacts / "component-lock.json"
     bind_product_releases(
         protocol_release_dir=work / "protocol",
@@ -188,6 +190,16 @@ def resolve(root: Path = ROOT) -> Path:
             "source_sha": _source_sha(protocol_repo, protocol["tag_name"], protocol),
             "release_manifest_sha256": _sha(
                 work / "protocol" / "release-manifest.json"
+            ),
+        },
+        "protocol_sdk": {
+            "repository": protocol_repo,
+            "version": sdk_version,
+            "source_sha": _source_sha(
+                protocol_repo, sdk_release["tag_name"], sdk_release
+            ),
+            "release_manifest_sha256": _sha(
+                work / "protocol-sdk" / "release-manifest.json"
             ),
         },
         "component_lock_sha256": _sha(lock),

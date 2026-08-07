@@ -9,11 +9,24 @@ namespace VibeOCR.Platform.Tests;
 
 public sealed class InferenceSupervisorProcessTests
 {
+    private static readonly IReadOnlySet<string> BaselineCapabilities = new HashSet<string>(
+        [
+            "ocr.recognition.v2",
+            "pdf.edit.v2",
+            "qrcode.v2",
+            "export.document.v1",
+            "runtime.settings.v2",
+            "runtime.maintenance.v1",
+            "task.progress.v1",
+        ],
+        StringComparer.Ordinal);
+
     [Fact]
     public void ReadyEnvelopeParsesPortAndInstanceId()
     {
         var env = SupervisorReadyEnvelope.Parse(
-            """{"ready":true,"pid":4321,"port":5432,"instance_id":"sup-abc","protocol_version":2,"schema_version":2,"ready_version":1,"capabilities":["ocr.recognition.v2","pdf.edit.v2","qrcode.v2","export.document.v1","runtime.settings.v2","runtime.maintenance.v1","task.progress.v1"]}""");
+            """{"ready":true,"pid":4321,"port":5432,"instance_id":"sup-abc","protocol_version":2,"schema_version":2,"ready_version":1,"capabilities":["ocr.recognition.v2","pdf.edit.v2","qrcode.v2","export.document.v1","runtime.settings.v2","runtime.maintenance.v1","task.progress.v1"]}""",
+            BaselineCapabilities);
         Assert.Equal(5432, env.Port);
         Assert.Equal("sup-abc", env.InstanceId);
         Assert.Equal(2, env.ProtocolVersion);
@@ -27,7 +40,8 @@ public sealed class InferenceSupervisorProcessTests
         // (we only assert the token is NEVER in the line — the parse does not
         // look for it). What we actually guard: the token lives only in env.
         var env = SupervisorReadyEnvelope.Parse(
-            """{"ready":true,"pid":1,"port":2,"instance_id":"sup","protocol_version":2,"schema_version":2,"ready_version":1,"capabilities":["ocr.recognition.v2","pdf.edit.v2","qrcode.v2","export.document.v1","runtime.settings.v2","runtime.maintenance.v1","task.progress.v1"]}""");
+            """{"ready":true,"pid":1,"port":2,"instance_id":"sup","protocol_version":2,"schema_version":2,"ready_version":1,"capabilities":["ocr.recognition.v2","pdf.edit.v2","qrcode.v2","export.document.v1","runtime.settings.v2","runtime.maintenance.v1","task.progress.v1"]}""",
+            BaselineCapabilities);
         Assert.DoesNotContain("token", "pid/port/instance_id");
         Assert.Equal(2, env.SchemaVersion);
     }
@@ -45,14 +59,42 @@ public sealed class InferenceSupervisorProcessTests
     public void ReadyEnvelopeRejectsInvalidOrIncompatibleRuntime(string payload)
     {
         Assert.Throws<InvalidDataException>(
-            () => SupervisorReadyEnvelope.Parse(payload));
+            () => SupervisorReadyEnvelope.Parse(payload, BaselineCapabilities));
+    }
+
+    [Fact]
+    public void ReadyEnvelopeAcceptsRuntimeCapabilitiesUnknownToAnOlderSdk()
+    {
+        SupervisorReadyEnvelope envelope = SupervisorReadyEnvelope.Parse(
+            """{"ready":true,"pid":1,"port":2,"instance_id":"sup","protocol_version":2,"schema_version":2,"ready_version":1,"capabilities":["ocr.recognition.v2","pdf.edit.v2","qrcode.v2","export.document.v1","runtime.settings.v2","runtime.maintenance.v1","task.progress.v1","runtime.new-feature.v1"]}""",
+            BaselineCapabilities);
+
+        Assert.Contains("runtime.new-feature.v1", envelope.Capabilities);
+    }
+
+    [Fact]
+    public void ReadyEnvelopeAcceptsOldRuntimeWhenNewSdkAddsOnlyOptionalCapabilities()
+    {
+        SupervisorReadyEnvelope envelope = SupervisorReadyEnvelope.Parse(
+            """{"ready":true,"pid":1,"port":2,"instance_id":"sup","protocol_version":2,"schema_version":2,"ready_version":1,"capabilities":["ocr.recognition.v2"]}""",
+            new HashSet<string>(["ocr.recognition.v2"], StringComparer.Ordinal));
+
+        Assert.Equal("sup", envelope.InstanceId);
+    }
+
+    [Fact]
+    public void ReadyEnvelopeRejectsRuntimeMissingProductBaselineCapability()
+    {
+        Assert.Throws<InvalidDataException>(() => SupervisorReadyEnvelope.Parse(
+            """{"ready":true,"pid":1,"port":2,"instance_id":"sup","protocol_version":2,"schema_version":2,"ready_version":1,"capabilities":["ocr.recognition.v2"]}""",
+            BaselineCapabilities));
     }
 
     [Fact]
     public void ConstructorRequiresSessionToken()
     {
         var options = new InferenceSupervisorOptions(
-            "python", new[] { "-m", "vibeocr.backend.supervisor.main" }, ".", "log.txt", TimeSpan.FromSeconds(5));
+            "python", new[] { "-m", "vibeocr.backend.supervisor.main" }, ".", "log.txt", TimeSpan.FromSeconds(5), BaselineCapabilities);
         Assert.Throws<ArgumentNullException>(() => new InferenceSupervisorProcess(options, null!));
         Assert.Throws<ArgumentException>(() => new InferenceSupervisorProcess(options, "   "));
     }
@@ -61,7 +103,7 @@ public sealed class InferenceSupervisorProcessTests
     public void ReadyThrowsBeforeStart()
     {
         var options = new InferenceSupervisorOptions(
-            "python", Array.Empty<string>(), ".", "log.txt", TimeSpan.FromSeconds(5));
+            "python", Array.Empty<string>(), ".", "log.txt", TimeSpan.FromSeconds(5), BaselineCapabilities);
         var proc = new InferenceSupervisorProcess(options, "tok");
         Assert.Throws<InvalidOperationException>(() => proc.Ready);
     }
@@ -105,7 +147,8 @@ public sealed class InferenceSupervisorProcessTests
                 [],
                 root,
                 Path.Combine(root, "supervisor.log"),
-                TimeSpan.FromSeconds(1)),
+                TimeSpan.FromSeconds(1),
+                BaselineCapabilities),
             "tok");
         try
         {
@@ -214,7 +257,8 @@ public sealed class InferenceSupervisorProcessTests
                 ],
                 root,
                 Path.Combine(root, "supervisor.log"),
-                TimeSpan.FromSeconds(5)),
+                TimeSpan.FromSeconds(5),
+                BaselineCapabilities),
             "tok");
     }
 }
