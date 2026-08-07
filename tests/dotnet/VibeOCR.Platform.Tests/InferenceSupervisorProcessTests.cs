@@ -1,6 +1,6 @@
 // Tests for InferenceSupervisorProcess + SupervisorReadyEnvelope parsing.
 //
-// Parser tests are complemented by a lightweight PowerShell child that exercises
+// Parser tests are complemented by a lightweight command child that exercises
 // the owner lifecycle without requiring the Python backend.
 using VibeOCR.Platform.Inference;
 using Xunit;
@@ -238,22 +238,31 @@ public sealed class InferenceSupervisorProcessTests
         string root,
         int lifetimeMilliseconds = 30_000)
     {
-        string powershell = Path.Combine(
+        string commandPrompt = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.System),
-            "WindowsPowerShell",
-            "v1.0",
-            "powershell.exe");
+            "cmd.exe");
+        int pingCount = Math.Max(
+            2,
+            (int)Math.Ceiling(lifetimeMilliseconds / 1000d) + 1);
         const string envelope =
             """{"ready":true,"pid":4321,"port":5432,"instance_id":"sup-test","protocol_version":2,"schema_version":2,"ready_version":1,"capabilities":["ocr.recognition.v2","pdf.edit.v2","qrcode.v2","export.document.v1","runtime.settings.v2","runtime.maintenance.v1","task.progress.v1"]}""";
+        const string scriptName = "fake-supervisor.cmd";
+        string scriptPath = Path.Combine(root, scriptName);
+        File.WriteAllLines(
+            scriptPath,
+            [
+                "@echo off",
+                $"echo {envelope}",
+                $"ping 127.0.0.1 -n {pingCount} >nul",
+            ]);
         return new InferenceSupervisorProcess(
             new InferenceSupervisorOptions(
-                powershell,
+                commandPrompt,
                 [
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    $"[Console]::Out.WriteLine('{envelope}'); "
-                    + $"Start-Sleep -Milliseconds {lifetimeMilliseconds}",
+                    "/d",
+                    "/s",
+                    "/c",
+                    scriptName,
                 ],
                 root,
                 Path.Combine(root, "supervisor.log"),
