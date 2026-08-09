@@ -13,4 +13,5 @@ build/
 artifacts/
 .test-results/
 .release-input/
+.release-build/
 dev-overrides.json

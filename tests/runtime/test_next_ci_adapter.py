@@ -4,6 +4,8 @@ import ast
 import hashlib
 import inspect
 import json
+import os
+import shutil
 import subprocess
 import zipfile
 from pathlib import Path
@@ -12,6 +14,7 @@ import pytest
 
 from scripts.automation_core import CommandRunner
 from scripts.bind_component_releases import bind_product_releases
+from scripts.check_quality import main as run_quality
 from scripts.check_quality import resolve_executable
 from scripts.release_smoke import verify
 from scripts.resolve_component_releases import (
@@ -117,6 +120,417 @@ def test_quality_script_resolves_platform_command_shims(
     )
 
     assert resolve_executable("npm") == "C:/node/npm.cmd"
+
+
+def test_quality_runs_web_gates_once_and_verifies_production_dist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+    verified: list[Path] = []
+
+    monkeypatch.setattr(
+        "scripts.check_quality.shutil.which",
+        lambda command: "C:/node/npm.cmd" if command == "npm" else None,
+    )
+    monkeypatch.setattr(
+        "scripts.check_quality.subprocess.run",
+        lambda command, **kwargs: commands.append(command),
+    )
+    monkeypatch.setattr(
+        "scripts.check_quality.verify_web_assets", lambda path: verified.append(path)
+    )
+
+    assert run_quality() == 0
+
+    web_prefix = "src/dotnet/VibeOCR.App/WebAssets"
+    assert commands[-5:] == [
+        ["C:/node/npm.cmd", "run", "format:check", "--prefix", web_prefix],
+        ["C:/node/npm.cmd", "run", "lint", "--prefix", web_prefix],
+        ["C:/node/npm.cmd", "run", "typecheck", "--prefix", web_prefix],
+        ["C:/node/npm.cmd", "run", "test", "--prefix", web_prefix],
+        ["C:/node/npm.cmd", "run", "build", "--prefix", web_prefix],
+    ]
+    assert all("test:legacy" not in command for command in commands)
+    assert verified == [
+        Path(__file__).parents[2] / "src/dotnet/VibeOCR.App/WebAssets/dist"
+    ]
+
+
+def _run_release_build_fixture(
+    tmp_path: Path,
+    *,
+    fail_stage: str,
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    root = Path(__file__).parents[2]
+    project = tmp_path / "src/dotnet/VibeOCR.App/VibeOCR.App.csproj"
+    project.parent.mkdir(parents=True)
+    project.write_text(
+        "<Project><PropertyGroup><Version>1.2.3</Version></PropertyGroup></Project>",
+        encoding="utf-8",
+    )
+    for relative in (".release-input/protocol", ".release-input/backend", "artifacts"):
+        (tmp_path / relative).mkdir(parents=True, exist_ok=True)
+    for name in ("component-lock.json", "component-identities.json"):
+        (tmp_path / "artifacts" / name).write_text("{}", encoding="utf-8")
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    call_log = tmp_path / "calls.log"
+    (scripts / "smoke_web_workbench.ps1").write_text(
+        """param([string]$ProductRoot)
+Add-Content -LiteralPath $env:CALL_LOG -Value "smoke|$ProductRoot"
+$global:LASTEXITCODE = 0
+""",
+        encoding="utf-8",
+    )
+    wrapper = tmp_path / "run-build.ps1"
+    wrapper.write_text(
+        """$ErrorActionPreference = 'Stop'
+function Write-Call {
+    param([string]$Name, [object[]]$Arguments)
+    Add-Content -LiteralPath $env:CALL_LOG -Value "$Name|$($Arguments -join ' ')"
+}
+function npm {
+    Write-Call 'npm' $args
+    if (($env:FAIL_STAGE -eq 'npm-ci' -and $args[0] -eq 'ci') -or
+        ($env:FAIL_STAGE -eq 'npm-build' -and $args[0] -eq 'run')) {
+        $global:LASTEXITCODE = 21
+    } else { $global:LASTEXITCODE = 0 }
+}
+function uv {
+    Write-Call 'uv' $args
+    if ($env:FAIL_STAGE -eq 'web-verify') {
+        $global:LASTEXITCODE = 22
+    } else { $global:LASTEXITCODE = 0 }
+}
+function python { Write-Call 'python' $args; $global:LASTEXITCODE = 0 }
+function git {
+    Write-Call 'git' $args
+    $global:LASTEXITCODE = 0
+    '0000000000000000000000000000000000000000'
+}
+function dotnet {
+    Write-Call 'dotnet' $args
+    if ($args[0] -eq 'publish') {
+        for ($index = 0; $index -lt $args.Count - 1; $index++) {
+            if ($args[$index] -eq '-o') {
+                New-Item -ItemType Directory -Path $args[$index + 1] -Force | Out-Null
+            }
+        }
+    }
+    if ($env:FAIL_STAGE -eq 'bootstrap-publish' -and
+        $args[0] -eq 'publish' -and $args[1] -like '*Bootstrapper*') {
+        $global:LASTEXITCODE = 23
+    } else { $global:LASTEXITCODE = 0 }
+}
+& $env:BUILD_SCRIPT -Version '1.2.3'
+""",
+        encoding="utf-8",
+    )
+    environment = os.environ | {
+        "AUTOMATION_PROJECT_ROOT": str(tmp_path),
+        "AUTOMATION_ARTIFACTS_DIR": str(tmp_path / "artifacts"),
+        "BUILD_SCRIPT": str(root / "scripts/build-release.ps1"),
+        "CALL_LOG": str(call_log),
+        "FAIL_STAGE": fail_stage,
+    }
+    completed = subprocess.run(
+        [resolve_executable("pwsh"), "-NoProfile", "-File", str(wrapper)],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+    )
+    calls = call_log.read_text(encoding="utf-8-sig").splitlines()
+    return completed, calls
+
+
+@pytest.mark.parametrize(
+    ("fail_stage", "expected_commands"),
+    [
+        ("npm-ci", ["npm"]),
+        ("npm-build", ["npm", "npm"]),
+        ("web-verify", ["npm", "npm", "uv"]),
+    ],
+)
+def test_release_build_web_gates_fail_closed_before_publish(
+    tmp_path: Path,
+    fail_stage: str,
+    expected_commands: list[str],
+) -> None:
+    completed, calls = _run_release_build_fixture(tmp_path, fail_stage=fail_stage)
+
+    assert completed.returncode != 0
+    assert [call.partition("|")[0] for call in calls] == expected_commands
+
+
+def test_release_build_runs_verified_web_bundle_before_packaged_smoke(
+    tmp_path: Path,
+) -> None:
+    completed, calls = _run_release_build_fixture(
+        tmp_path,
+        fail_stage="bootstrap-publish",
+    )
+
+    assert completed.returncode != 0
+    verifier = next(index for index, call in enumerate(calls) if call.startswith("uv|"))
+    app_publish = next(
+        index
+        for index, call in enumerate(calls)
+        if call.startswith("dotnet|publish") and "VibeOCR.App.csproj" in call
+    )
+    smoke = next(index for index, call in enumerate(calls) if call.startswith("smoke|"))
+    bootstrap_publish = next(
+        index
+        for index, call in enumerate(calls)
+        if call.startswith("dotnet|publish") and "VibeOCR.Bootstrapper" in call
+    )
+    assert verifier < app_publish < smoke < bootstrap_publish
+    assert not any(call.startswith("python|-m PyInstaller") for call in calls)
+
+
+def _configure_release_smoke_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail_smoke: bool,
+) -> tuple[Path, list[list[str]]]:
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    archive = artifacts / "VibeOCR-Next-v1.2.3-win64.zip"
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr("VibeOCR.Next/VibeOCR.WinUI.exe", b"placeholder")
+    names = {
+        archive.name,
+        f"{archive.name}.sha256",
+        "component-lock.json",
+        "component-identities.json",
+        "SBOM.spdx.json",
+    }
+    (artifacts / "component-identities.json").write_text(
+        json.dumps(
+            {
+                component: {
+                    "version": "2.0.0",
+                    "source_sha": "a" * 40,
+                    **(
+                        {"release_manifest_sha256": "b" * 64}
+                        if component != "backend"
+                        else {}
+                    ),
+                }
+                for component in ("backend", "protocol", "protocol_sdk")
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "scripts.release_smoke.verify_release_assets",
+        lambda *args, **kwargs: names,
+    )
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if "smoke_web_workbench.ps1" in command[2]:
+            product_root = Path(command[command.index("-ProductRoot") + 1])
+            assert (product_root / "VibeOCR.WinUI.exe").is_file()
+            if fail_smoke:
+                raise subprocess.CalledProcessError(31, command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr("scripts.release_smoke.subprocess.run", fake_run)
+    return artifacts, calls
+
+
+def test_release_smoke_executes_the_extracted_product_handshake(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts, calls = _configure_release_smoke_fixture(
+        tmp_path,
+        monkeypatch,
+        fail_smoke=False,
+    )
+
+    verify(artifacts)
+
+    assert len(calls) == 2
+    assert calls[1][2].endswith("smoke_web_workbench.ps1")
+
+
+def test_release_smoke_propagates_a_failed_web_ready_handshake(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts, calls = _configure_release_smoke_fixture(
+        tmp_path,
+        monkeypatch,
+        fail_smoke=True,
+    )
+
+    with pytest.raises(subprocess.CalledProcessError):
+        verify(artifacts)
+
+    assert len(calls) == 2
+
+
+def test_web_ready_smoke_runs_an_isolated_production_profile(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).parents[2]
+    product = tmp_path / "product"
+    product.mkdir()
+    (product / "VibeOCR.WinUI.exe").write_bytes(b"placeholder")
+    launch = tmp_path / "launch.json"
+    wrapper = tmp_path / "run-smoke.ps1"
+    wrapper.write_text(
+        """param([string]$Smoke, [string]$Product, [string]$Launch)
+function Start-Process {
+    param(
+        [string]$FilePath,
+        [object[]]$ArgumentList,
+        [string]$WorkingDirectory,
+        [string]$WindowStyle,
+        [switch]$PassThru
+    )
+    @{
+        file = $FilePath
+        arguments = @($ArgumentList)
+        working_directory = $WorkingDirectory
+        user_data = $env:WEBVIEW2_USER_DATA_FOLDER
+    } | ConvertTo-Json | Set-Content -LiteralPath $Launch
+    '{"schema_version":1,"state":"bridge-ready"}' |
+        Set-Content -LiteralPath $env:VIBEOCR_WEB_READY_FILE
+    $process = [pscustomobject]@{ ExitCode = 0 }
+    $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+        param([int]$Milliseconds)
+        return $true
+    }
+    return $process
+}
+& $Smoke -ProductRoot $Product
+""",
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [
+            resolve_executable("pwsh"),
+            "-NoProfile",
+            "-File",
+            str(wrapper),
+            str(root / "scripts/smoke_web_workbench.ps1"),
+            str(product),
+            str(launch),
+        ],
+        check=True,
+    )
+
+    launched = json.loads(launch.read_text(encoding="utf-8-sig"))
+    assert Path(launched["file"]).parent != product
+    assert launched["working_directory"] == str(Path(launched["file"]).parent)
+    assert launched["arguments"] == ["--shell-only", "--profile", "production"]
+    assert (
+        Path(launched["user_data"]).parent == Path(launched["working_directory"]).parent
+    )
+    assert Path(launched["user_data"]) != Path(launched["working_directory"])
+    assert not Path(launched["user_data"]).exists()
+    assert not Path(launched["working_directory"]).exists()
+    assert list(product.iterdir()) == [product / "VibeOCR.WinUI.exe"]
+
+
+def _run_app_ci_fixture(
+    tmp_path: Path,
+    *,
+    total: int,
+    passed: int,
+    failed: int,
+    not_executed: int,
+) -> subprocess.CompletedProcess[str]:
+    root = Path(__file__).parents[2]
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    script = scripts / "test_app_ci.ps1"
+    shutil.copyfile(root / "scripts/test_app_ci.ps1", script)
+    wrapper = tmp_path / "run-app-tests.ps1"
+    wrapper.write_text(
+        """$ErrorActionPreference = 'Stop'
+function dotnet {
+    $resultIndex = [Array]::IndexOf($args, '--results-directory')
+    $resultRoot = $args[$resultIndex + 1]
+    New-Item -ItemType Directory -Path $resultRoot -Force | Out-Null
+    $xml = @"
+<TestRun><ResultSummary outcome="Completed"><Counters total="$env:TRX_TOTAL"
+passed="$env:TRX_PASSED" failed="$env:TRX_FAILED"
+notExecuted="$env:TRX_NOT_EXECUTED" /></ResultSummary></TestRun>
+"@
+    Set-Content -LiteralPath (Join-Path $resultRoot 'app-tests.trx') -Value $xml
+    $global:LASTEXITCODE = 0
+}
+& $env:APP_TEST_SCRIPT
+""",
+        encoding="utf-8",
+    )
+    return subprocess.run(
+        [resolve_executable("pwsh"), "-NoProfile", "-File", str(wrapper)],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=os.environ
+        | {
+            "APP_TEST_SCRIPT": str(script),
+            "TRX_TOTAL": str(total),
+            "TRX_PASSED": str(passed),
+            "TRX_FAILED": str(failed),
+            "TRX_NOT_EXECUTED": str(not_executed),
+        },
+    )
+
+
+def test_app_ci_accepts_any_nonempty_all_passed_trx_count(tmp_path: Path) -> None:
+    completed = _run_app_ci_fixture(
+        tmp_path,
+        total=2,
+        passed=2,
+        failed=0,
+        not_executed=0,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("total", "passed", "failed", "not_executed"),
+    [
+        (0, 0, 0, 0),
+        (2, 1, 1, 0),
+        (2, 1, 0, 1),
+    ],
+)
+def test_app_ci_rejects_empty_failed_or_incomplete_trx(
+    tmp_path: Path,
+    total: int,
+    passed: int,
+    failed: int,
+    not_executed: int,
+) -> None:
+    completed = _run_app_ci_fixture(
+        tmp_path,
+        total=total,
+        passed=passed,
+        failed=failed,
+        not_executed=not_executed,
+    )
+
+    assert completed.returncode != 0
+    assert "App test result is incomplete" in completed.stderr
 
 
 def test_project_config_declares_minor_compatible_protocol_and_single_identity_asset() -> (

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Filter,
-    [int]$ExpectedPassed = 75
+    [Nullable[int]]$ExpectedPassed
 )
 
 $ErrorActionPreference = 'Stop'
@@ -47,17 +47,24 @@ if ($testExitCode -ne 0) {
 if ($summary.outcome -ne 'Completed') {
     throw "App test run outcome was $($summary.outcome), expected Completed"
 }
-if ([int]$counters.total -ne $ExpectedPassed -or
-    [int]$counters.passed -ne $ExpectedPassed -or
-    [int]$counters.failed -ne 0) {
+if ([int]$counters.total -le 0 -or
+    [int]$counters.passed -ne [int]$counters.total -or
+    [int]$counters.failed -ne 0 -or
+    [int]$counters.notExecuted -ne 0) {
     throw (
-        'App test result count mismatch: ' +
+        'App test result is incomplete: ' +
         "total=$($counters.total), passed=$($counters.passed), " +
-        "failed=$($counters.failed); expected $ExpectedPassed/$ExpectedPassed/0"
+        "failed=$($counters.failed), notExecuted=$($counters.notExecuted); " +
+        'expected a nonempty all-passed run'
     )
 }
 
-Write-Host (
-    "App test result verified: $ExpectedPassed/$ExpectedPassed passed " +
-    'with Completed outcome.'
-)
+if ($PSBoundParameters.ContainsKey('ExpectedPassed') -and
+    [int]$counters.total -ne $ExpectedPassed) {
+    throw (
+        'App test result count mismatch: ' +
+        "total=$($counters.total); expected=$ExpectedPassed"
+    )
+}
+
+Write-Host "App test result verified: $($counters.passed)/$($counters.total) passed with Completed outcome."

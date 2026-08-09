@@ -66,13 +66,7 @@ $requiredFiles = @(
     'VibeOCR.Platform.dll',
     'App.xbf',
     'MainWindow.xbf',
-    'Views\AboutPage.xbf',
-    'Views\BatchPage.xbf',
-    'Views\DiagnosticsPage.xbf',
-    'Views\PdfPage.xbf',
-    'Views\QrCodePage.xbf',
-    'Views\RecognitionPage.xbf',
-    'Views\SettingsPage.xbf',
+    'WebAssets\index.html',
     'component-lock.json',
     'product-release-manifest.json',
     'backend\runtime-manifest.json',
@@ -216,6 +210,18 @@ $forbidden = Get-ChildItem -Path $root -Recurse -Directory -ErrorAction Silently
     Where-Object { $_.Name -in @('output', '__pycache__', '.pytest_cache', 'bin', 'obj') } |
     Select-Object -First 5
 if ($forbidden) { $errors.Add("build/test/cache directories present: $($forbidden.Name -join ', ')") }
+
+$webAssetsRoot = Join-Path $root 'WebAssets'
+if (Test-Path -LiteralPath $webAssetsRoot -PathType Container) {
+    $webSourceFiles = Get-ChildItem -LiteralPath $webAssetsRoot -Recurse -File |
+        Where-Object { $_.Extension -in @('.ts', '.tsx', '.map') }
+    if ($webSourceFiles) {
+        $errors.Add('WebAssets contains TypeScript or source-map files')
+    }
+    if (Test-Path -LiteralPath (Join-Path $webAssetsRoot 'node_modules')) {
+        $errors.Add('WebAssets contains node_modules')
+    }
+}
 
 if ($errors.Count -gt 0) {
     if ($extract -and (Test-Path $extract)) {
