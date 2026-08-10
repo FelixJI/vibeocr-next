@@ -425,6 +425,7 @@ function Start-Process {
         arguments = @($ArgumentList)
         working_directory = $WorkingDirectory
         user_data = $env:WEBVIEW2_USER_DATA_FOLDER
+        instance_scope = $env:VIBEOCR_SELF_TEST_INSTANCE
     } | ConvertTo-Json | Set-Content -LiteralPath $Launch
     New-Item -ItemType Directory -Path $env:WEBVIEW2_USER_DATA_FOLDER |
         Out-Null
@@ -437,7 +438,11 @@ function Start-Process {
     }
     return $process
 }
+$env:VIBEOCR_SELF_TEST_INSTANCE = 'outer-test-scope'
 & $Smoke -ProductRoot $Product
+if ($env:VIBEOCR_SELF_TEST_INSTANCE -ne 'outer-test-scope') {
+    throw 'smoke did not restore the caller instance scope'
+}
 $global:webViewCleanupAttempts | Set-Content -LiteralPath $Cleanup
 """,
         encoding="utf-8",
@@ -461,6 +466,10 @@ $global:webViewCleanupAttempts | Set-Content -LiteralPath $Cleanup
     assert Path(launched["file"]).parent != product
     assert launched["working_directory"] == str(Path(launched["file"]).parent)
     assert launched["arguments"] == ["--shell-only", "--profile", "production"]
+    assert len(launched["instance_scope"]) == 32
+    assert all(
+        character in "0123456789abcdef" for character in launched["instance_scope"]
+    )
     assert (
         Path(launched["user_data"]).parent == Path(launched["working_directory"]).parent
     )

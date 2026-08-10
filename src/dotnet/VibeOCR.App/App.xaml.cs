@@ -82,8 +82,12 @@ public sealed partial class App : Application
     {
         AppLaunchOptions options = AppLaunchOptions.Parse(Environment.GetCommandLineArgs()[1..]);
         _startupHealthFile = options.HealthFile;
+        SelfTestInstanceScope instanceScope = SelfTestInstanceScope.Resolve(
+            options.Profile,
+            Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE"),
+            Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_INSTANCE"));
         _singleInstance = new SingleInstanceService(
-            $"VibeOCR-{options.Profile}",
+            instanceScope.SingleInstanceName,
             arguments =>
             {
                 _window?.DispatcherQueue.TryEnqueue(() =>
@@ -114,7 +118,7 @@ public sealed partial class App : Application
         // 跨产品互斥：同一登录会话内 PySide Classic 与 WinUI Next 不同时运行。
         // 在同产品单实例通过后、Supervisor 启动前获取；失败时提示退出，不启动
         // 第二个 Supervisor。Mutex 由 OS 在前端崩溃时自动释放（ADR §6）。
-        _exclusiveLock = new FrontendExclusiveLock();
+        _exclusiveLock = new FrontendExclusiveLock(instanceScope.ExclusiveMutexName);
         if (!_exclusiveLock.IsAcquired)
         {
             FrontendExclusiveLock.ShowAnotherProductRunningPrompt();

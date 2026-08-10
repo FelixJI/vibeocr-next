@@ -108,3 +108,21 @@
 - 已解析最新正式 Backend 及其绑定 Protocol/SDK identity；完整 release build 生成 `VibeOCR-Next-v0.2.0-win64.zip`、sidecar 与 SPDX SBOM，产物验证和解压后的 packaged bridge-ready release smoke 均通过。
 - 构建前 smoke 最初污染产品目录的 `winui-dev` profile，修复为临时产品副本 + production profile + 独立 WebView2 user-data；真实失败还暴露 WebView2 子进程句柄生命周期，现按精确 GUID user-data 命令行清理，不放宽 `no dev profile` 产物门禁。
 - `computer-use` 因 Codex 安装目录 `EPERM lstat` 无法初始化；系统截图又无法捕获 WebView2 composition。故视觉证据由真实 ready/window responding、浏览器 DOM 尺寸/七路由/无横向溢出和行为测试共同组成，不能声称完整键盘截图自动化已执行。
+
+## Release main CI Failure（2026-08-10）
+
+- 发布 PR #19 合并后的 main CI run `31349358391` 在 Platform 83 项中的 `SuccessfulStartIsOneShotAndDisposeClearsReady` 失败；产品质量、Web 门禁和前 82 项均通过，CD 因 main CI 失败而按设计跳过。
+- 失败发生于 `proc.Dispose()` 返回后的 `Directory.Delete(root, recursive: true)`：`ping.exe` 后代仍将临时目录作为工作目录，Windows 报目录被另一进程占用。
+- 当前 `Terminate()` 调用 `process.Kill(entireProcessTree: true)`，随后仅等待父 `cmd.exe`；Microsoft 明确说明父进程 `WaitForExit`/`HasExited` 不反映后代退出状态。
+- `WindowsJobObject.Dispose()` 关闭带 `KILL_ON_JOB_CLOSE` 的 handle 会发起整组终止，但实现没有等待 Job 中所有进程退出，因此 `Dispose()` 的“整树已终止”所有权契约未闭合。
+- 日志使用短生命周期 `File.AppendAllText`，没有长期文件流；本地精确单测 50 轮通过，说明这是 runner 调度放大的低概率退出竞态，而非版本文件或发布构建差异。
+- 官方契约：https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.process.kill 与 https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects 。
+- 修复以 `TerminateJobObject` 终止 Job，并通过 `QueryInformationJobObject(JobObjectBasicAccountingInformation)` 的 `ActiveProcesses` 有界等待归零；父进程 `Process.Kill` 仅保留为 Job API 失败/超时的 fallback。
+- 初始 64 后代压力测试在旧实现上仍通过，不能可靠区分修复，已撤销；最终回归 seam 直接向同一 Job 分配两个长生命周期进程，旧实现缺少整组等待契约而确定性 red，新实现返回时两个进程均已退出。
+- 本地完整 release build 在 publish 后的 bridge-ready smoke 超时；GitHub PR #20 run `31353677789` 也在同一 smoke 超时，但此前的 Platform 原始失败已转绿（84/84），证明这是第二个独立门禁问题。
+- 临时进程探针显示超时时父进程存活且没有对应 WebView2 子进程；可见启动后的 Win32 窗口类为 `#32770`，而非 WinUI 主窗口，且 `AppLog.Initialize` 前没有日志。证据闭合到 production 跨产品互斥提示框：smoke 虽隔离了产品副本和 WebView2 user-data，却仍复用真实 `Local\\VibeOCR.Frontend.Exclusive.v2` 与 production 单实例名，自动化运行会被当前用户会话或 runner 残留命名对象阻塞。
+- 正确修复方向不是延长 timeout 或跳过互斥，而是给 `VIBEOCR_SELF_TEST_SMOKE=web-ready` 增加每次随机且严格校验的实例 scope；同一 `SingleInstanceService`/`FrontendExclusiveLock` 生产代码仍被执行，只将 named object 名称隔离，符合 smoke 已有的临时产品副本与唯一 WebView2 user-data 语义。
+- 修复后的真实验证发生在 Classic 仍持有 production 跨产品锁的同一用户会话：重新 publish 的 WinUI 包到达 `bridge-ready`；随后权威 `build-release.ps1` 完整生成 ZIP/sidecar/SBOM，解压后的独立 `release_smoke.py` 再次到达 `bridge-ready`。这直接覆盖了原阻塞条件，不依赖延长 30 秒 timeout。
+- 发布恢复不能只合并代码修复：`_finalize_main_candidate` 要求 main 的 HEAD commit 修改 `.release/plan.json`，否则写入 `plan-unchanged` sentinel；而直接再次执行 `minor` 会从当前 0.3.0 推到错误的 0.4.0。
+- 安全恢复是机械回退尚未发布的 PR #19（恢复已发布 0.2.0 版本/plan 基线），先让生命周期修复进入 main，再通过 CD 的权威 `release prepare --bump minor` 重新生成 0.3.0；不手改生成版本源或 plan。
+- 修复分支已推送并创建 ready PR #20；首轮云端 quality、App、Platform 和 CodeQL 均通过，`required` 仅剩 packaged WebView2 smoke 隔离失败。

@@ -27,6 +27,7 @@ if (-not ([System.IO.Path]::GetFullPath($isolatedRoot).StartsWith(
     throw 'Web workbench smoke isolation path escaped the temporary directory'
 }
 $previousSmoke = $env:VIBEOCR_SELF_TEST_SMOKE
+$previousInstance = $env:VIBEOCR_SELF_TEST_INSTANCE
 $previousHealth = $env:VIBEOCR_WEB_READY_FILE
 $previousWebViewData = $env:WEBVIEW2_USER_DATA_FOLDER
 $process = $null
@@ -36,6 +37,7 @@ try {
         Copy-Item -Destination $isolatedRoot -Recurse -Force
     $executable = Join-Path $isolatedRoot 'VibeOCR.WinUI.exe'
     $env:VIBEOCR_SELF_TEST_SMOKE = 'web-ready'
+    $env:VIBEOCR_SELF_TEST_INSTANCE = [guid]::NewGuid().ToString('N')
     $env:VIBEOCR_WEB_READY_FILE = $healthFile
     $env:WEBVIEW2_USER_DATA_FOLDER = $webViewDataRoot
     $process = Start-Process -FilePath $executable `
@@ -59,6 +61,7 @@ try {
     Write-Host 'Web workbench smoke verified: packaged WebView2 reached bridge-ready.'
 } finally {
     $env:VIBEOCR_SELF_TEST_SMOKE = $previousSmoke
+    $env:VIBEOCR_SELF_TEST_INSTANCE = $previousInstance
     $env:VIBEOCR_WEB_READY_FILE = $previousHealth
     $env:WEBVIEW2_USER_DATA_FOLDER = $previousWebViewData
     if (Test-Path -LiteralPath $healthFile) {
