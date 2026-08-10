@@ -121,10 +121,10 @@ internal sealed class GitHubUpdateSource(
         };
         startInfo.ArgumentList.Add("--update");
         startInfo.ArgumentList.Add(packagePath);
-        startInfo.ArgumentList.Add("--app-dir");
+        startInfo.ArgumentList.Add("--install-root");
         startInfo.ArgumentList.Add(_installRoot);
-        startInfo.ArgumentList.Add("--entry");
-        startInfo.ArgumentList.Add("VibeOCR.Bootstrapper.exe");
+        startInfo.ArgumentList.Add("--user-data-root");
+        startInfo.ArgumentList.Add(Path.GetFullPath(Path.Combine(_updateRoot, "..", "..")));
         startInfo.ArgumentList.Add("--entry-arg=--profile");
         startInfo.ArgumentList.Add("--entry-arg=production");
         startInfo.ArgumentList.Add("--entry-arg=--health-file");
@@ -152,10 +152,7 @@ internal sealed class GitHubUpdateSource(
     }
 
     /// <summary>
-    /// 从 release assets 中选出本进程要下载的 asset。选择规则与 Classic 侧
-    /// update_service._find_asset 对齐，但前端是 Next：
-    /// 1. 优先：名字含 "-Next-" 且后缀匹配（本进程是 WinUI Next 运行态）。
-    /// 2. 不接受通用 zip 回退，避免把 Classic 或其他资产交给 Next updater。
+    /// 只选择产品化后的唯一公开 VibeOCR Windows 资产。
     /// </summary>
     /// <remarks>
     /// 早期用 SingleOrDefault 按后缀匹配，在双产物 release（Classic+Next 同时发布）
@@ -166,9 +163,8 @@ internal sealed class GitHubUpdateSource(
     {
         foreach (ReleaseAsset asset in assets)
         {
-            if (!asset.Name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
-                continue;
-            if (asset.Name.Contains("-Next-", StringComparison.OrdinalIgnoreCase))
+            if (asset.Name.StartsWith("VibeOCR-v", StringComparison.OrdinalIgnoreCase) &&
+                asset.Name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
                 return asset;
         }
         return null;

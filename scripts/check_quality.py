@@ -23,17 +23,38 @@ def resolve_executable(command: str) -> str:
 
 def main() -> int:
     npm = resolve_executable("npm")
-    for command in (
-        [sys.executable, "-m", "ruff", "check", "scripts", "tests/runtime"],
-        [sys.executable, "-m", "ruff", "format", "--check", "scripts", "tests/runtime"],
-        [sys.executable, "-m", "pytest", "tests/runtime"],
-        [npm, "run", "format:check", "--prefix", WEB_ASSETS],
-        [npm, "run", "lint", "--prefix", WEB_ASSETS],
-        [npm, "run", "typecheck", "--prefix", WEB_ASSETS],
-        [npm, "run", "test", "--prefix", WEB_ASSETS],
-        [npm, "run", "build", "--prefix", WEB_ASSETS],
+    for label, command in (
+        (
+            "brand-assets",
+            [sys.executable, "scripts/generate_brand_assets.py", "--check"],
+        ),
+        (
+            "ruff-check",
+            [sys.executable, "-m", "ruff", "check", "scripts", "tests/runtime"],
+        ),
+        (
+            "ruff-format",
+            [
+                sys.executable,
+                "-m",
+                "ruff",
+                "format",
+                "--check",
+                "scripts",
+                "tests/runtime",
+            ],
+        ),
+        ("pytest", [sys.executable, "-m", "pytest", "tests/runtime"]),
+        ("web-format", [npm, "run", "format:check", "--prefix", WEB_ASSETS]),
+        ("web-lint", [npm, "run", "lint", "--prefix", WEB_ASSETS]),
+        ("web-typecheck", [npm, "run", "typecheck", "--prefix", WEB_ASSETS]),
+        ("web-test", [npm, "run", "test", "--prefix", WEB_ASSETS]),
+        ("web-visual", [npm, "run", "test:visual", "--prefix", WEB_ASSETS]),
+        ("web-build", [npm, "run", "build", "--prefix", WEB_ASSETS]),
     ):
+        print(f"::notice title=Quality stage::{label} started", flush=True)
         subprocess.run(command, cwd=ROOT, check=True)
+        print(f"::notice title=Quality stage::{label} completed", flush=True)
     verify_web_assets(ROOT / WEB_ASSETS / "dist")
     return 0
 

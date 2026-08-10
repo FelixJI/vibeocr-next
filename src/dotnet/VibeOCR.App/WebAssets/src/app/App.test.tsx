@@ -40,7 +40,9 @@ describe("AppShell", () => {
     expect(
       screen.getByRole("button", { name: "导出全部 Markdown" }),
     ).toBeDisabled();
-    expect(screen.getByText("此功能需要宿主能力：batch.export")).toBeVisible();
+    expect(
+      screen.getAllByText("此功能需要宿主能力：batch.export"),
+    ).toHaveLength(3);
 
     unmount();
     await new Promise((resolve) => setTimeout(resolve, 0));

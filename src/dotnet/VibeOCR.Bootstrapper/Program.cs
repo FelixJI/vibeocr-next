@@ -3,6 +3,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using VibeOCR.ProductLayout;
 using Windows.Management.Deployment;
 using Windows.System;
 
@@ -13,12 +14,23 @@ internal static class Program
     private const int PrerequisiteMissing = 2;
     private const int AppMissing = 3;
     private const int InvalidArguments = 4;
+    private const int LayoutInvalid = 5;
 
     [STAThread]
     private static int Main(string[] args)
     {
         string installRoot = AppDomain.CurrentDomain.BaseDirectory;
-        string appPath = ReadOption(args, "--app") ?? Path.Combine(installRoot, "VibeOCR.WinUI.exe");
+        ResolvedProductLayout layout;
+        try
+        {
+            layout = ResolvedProductLayout.Open(installRoot);
+        }
+        catch (InvalidDataException error)
+        {
+            Console.Error.WriteLine(error.Message);
+            return LayoutInvalid;
+        }
+        string appPath = layout.AppEntry;
         string profile = ReadOption(args, "--profile") ?? "production";
         string? healthFile = ReadOption(args, "--health-file");
         if (profile is not ("production" or "winui-dev"))
@@ -31,7 +43,7 @@ internal static class Program
             HasDotNetDesktop10() ? null : ".NET Desktop Runtime 10 x64",
             HasWindowsAppRuntime22() ? null : "Windows App Runtime 2.2 x64",
             HasWebView2() ? null : "Microsoft Edge WebView2 Evergreen Runtime",
-            HasBoundRuntimeAssets(installRoot) ? null : "VibeOCR bound Runtime assets",
+            HasBoundRuntimeAssets(layout) ? null : "VibeOCR bound Runtime assets",
         }.Where(item => item != null).Select(item => item!).ToArray();
         if (missing.Length > 0)
         {
@@ -51,7 +63,8 @@ internal static class Program
             return AppMissing;
         }
 
-        string arguments = "--profile " + Quote(profile);
+        string arguments = "--profile " + Quote(profile) +
+            " --install-root " + Quote(layout.InstallRoot);
         if (!string.IsNullOrWhiteSpace(healthFile))
         {
             arguments += " --health-file " + Quote(Path.GetFullPath(healthFile));
@@ -80,13 +93,10 @@ internal static class Program
         return null;
     }
 
-    private static bool HasBoundRuntimeAssets(string installRoot) =>
-        File.Exists(Path.Combine(installRoot, "component-lock.json")) &&
-        File.Exists(Path.Combine(installRoot, "backend", "runtime-manifest.json")) &&
-        File.Exists(Path.Combine(
-            installRoot,
-            "runtime-installer",
-            "vibeocr-runtime-installer.exe"));
+    private static bool HasBoundRuntimeAssets(ResolvedProductLayout layout) =>
+        File.Exists(layout.ComponentLock) &&
+        File.Exists(layout.RuntimeManifest) &&
+        File.Exists(layout.RuntimeInstaller);
 
     private static bool HasDotNetDesktop10()
     {

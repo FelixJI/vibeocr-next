@@ -10,24 +10,26 @@
   "scripts": {
     "build": "tsc -b && vite build",
     "dev": "vite",
-    "format:check": "prettier --check \"src/{app,bridge,components,features,layout,styles,test,theme}/**/*.{ts,tsx,css}\" src/main.tsx \"*.{json,js,ts}\" index.html",
+    "format:check": "prettier --check \"src/{app,bridge,components,features,layout,styles,test,theme}/**/*.{ts,tsx,css}\" \"e2e/**/*.ts\" src/main.tsx \"*.{json,js,ts}\" index.html",
     "lint": "eslint . --max-warnings 0",
     "test": "npm run test:legacy && npm run test:unit",
     "test:legacy": "node --test ../../../../tests/web/*.test.ts",
     "test:unit": "vitest run",
+    "test:visual": "playwright test",
     "test:watch": "vitest",
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
     "@fluentui/react-components": "9.74.5",
-    "@fluentui/react-icons": "2.0.335",
     "@griffel/react": "1.7.7",
+    "lucide-react": "1.27.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-router": "8.3.0"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@playwright/test": "1.62.0",
     "@testing-library/dom": "10.4.1",
     "@testing-library/jest-dom": "7.0.0",
     "@testing-library/react": "16.3.2",

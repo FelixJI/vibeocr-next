@@ -6,7 +6,22 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $sourceRoot = (Resolve-Path -LiteralPath $ProductRoot).Path
-$sourceExecutable = Join-Path $sourceRoot 'VibeOCR.WinUI.exe'
+$layoutDescriptor = Join-Path $sourceRoot 'app\metadata\product-layout.json'
+$installedLayout = Test-Path -LiteralPath $layoutDescriptor -PathType Leaf
+if ($installedLayout) {
+    $scriptsRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+    & uv run --no-project python (Join-Path $scriptsRoot 'product_layout.py') inspect `
+        --product-root $sourceRoot | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Web workbench smoke product layout is invalid'
+    }
+    $layout = Get-Content -LiteralPath $layoutDescriptor -Raw | ConvertFrom-Json
+    $relativeExecutable = [string]$layout.app.entry
+} else {
+    # build-release smoke also accepts the explicit dotnet publish output.
+    $relativeExecutable = 'VibeOCR.WinUI.exe'
+}
+$sourceExecutable = Join-Path $sourceRoot $relativeExecutable
 if (-not (Test-Path -LiteralPath $sourceExecutable -PathType Leaf)) {
     throw "Web workbench smoke executable is missing: $sourceExecutable"
 }
@@ -35,17 +50,24 @@ try {
     New-Item -ItemType Directory -Path $isolatedRoot | Out-Null
     Get-ChildItem -LiteralPath $sourceRoot -Force |
         Copy-Item -Destination $isolatedRoot -Recurse -Force
-    $executable = Join-Path $isolatedRoot 'VibeOCR.WinUI.exe'
+    $executable = Join-Path $isolatedRoot $relativeExecutable
     $env:VIBEOCR_SELF_TEST_SMOKE = 'web-ready'
     $env:VIBEOCR_SELF_TEST_INSTANCE = [guid]::NewGuid().ToString('N')
     $env:VIBEOCR_WEB_READY_FILE = $healthFile
     $env:WEBVIEW2_USER_DATA_FOLDER = $webViewDataRoot
+    $arguments = @('--shell-only', '--profile', 'production')
+    if ($installedLayout) {
+        $arguments += @('--install-root', $isolatedRoot)
+    }
     $process = Start-Process -FilePath $executable `
-        -ArgumentList @('--shell-only', '--profile', 'production') `
-        -WorkingDirectory $isolatedRoot -WindowStyle Hidden -PassThru
+        -ArgumentList $arguments `
+        -WorkingDirectory (Split-Path -Parent $executable) `
+        -WindowStyle Hidden -PassThru
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         $process.Kill($true)
-        $process.WaitForExit()
+        if (-not $process.WaitForExit(5000)) {
+            throw 'Web workbench process tree did not exit after forced termination'
+        }
         throw "Web workbench did not reach bridge-ready within $TimeoutSeconds seconds"
     }
     if ($process.ExitCode -ne 0) {

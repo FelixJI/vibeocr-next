@@ -2,12 +2,12 @@
   color-scheme: light dark;
   --ink: #20211f;
   --muted: #6d6f6a;
-  --accent: #c45b11;
-  --accent-soft: #fff0e5;
-  --surface: #f7f7f5;
+  --accent: #3370ff;
+  --accent-soft: #eef3ff;
+  --surface: #f7f8fa;
   --surface-raised: #ffffff;
-  --stage: #efefec;
-  --line: #d9dad5;
+  --stage: #f2f3f5;
+  --line: #dee0e3;
   --shadow: 0 12px 36px rgb(31 35 28 / 8%);
   font-family: Bahnschrift, Aptos, "Segoe UI Variable", sans-serif;
   background: transparent;
@@ -18,12 +18,12 @@
   :root {
     --ink: #e8e8e4;
     --muted: #a2a59e;
-    --accent: #ff9d52;
-    --accent-soft: #3b2618;
-    --surface: #171815;
-    --surface-raised: #20211e;
-    --stage: #11120f;
-    --line: #3b3d37;
+    --accent: #7da2ff;
+    --accent-soft: #24345c;
+    --surface: #17181a;
+    --surface-raised: #202124;
+    --stage: #292b2f;
+    --line: #3b3d42;
     --shadow: 0 14px 40px rgb(0 0 0 / 24%);
   }
 }

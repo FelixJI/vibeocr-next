@@ -11,13 +11,28 @@ import {
   ToolbarDivider,
 } from "@fluentui/react-components";
 import {
-  ArrowDownloadRegular,
-  ArrowRotateClockwiseRegular,
-  DocumentAddRegular,
-  FolderOpenRegular,
-  ImageAddRegular,
-  SaveRegular,
-} from "@fluentui/react-icons";
+  ArrowDown,
+  ArrowUp,
+  Camera,
+  ClipboardPaste,
+  Copy,
+  Download,
+  ExternalLink,
+  FileSpreadsheet,
+  FilePlus2,
+  FolderOpen,
+  ImagePlus,
+  Play,
+  QrCode,
+  RefreshCw,
+  RotateCw,
+  Save,
+  ScanText,
+  Sheet,
+  Square,
+  Trash2,
+  X,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 
 import type { AppActions, AppViewState } from "../app/types";
@@ -232,7 +247,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
             capabilities={viewState.capabilities}
             action={{ type: "recognition.selectImage" }}
             actions={actions}
-            icon={<ImageAddRegular />}
+            icon={<ImagePlus aria-hidden="true" size={16} />}
           >
             选择图片
           </CapabilityGate>
@@ -242,6 +257,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
             capabilities={viewState.capabilities}
             action={{ type: "recognition.readClipboard" }}
             actions={actions}
+            icon={<ClipboardPaste aria-hidden="true" size={16} />}
           >
             从剪贴板
           </CapabilityGate>
@@ -251,6 +267,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
             capabilities={viewState.capabilities}
             action={{ type: "recognition.captureScreen" }}
             actions={actions}
+            icon={<Camera aria-hidden="true" size={16} />}
           >
             截图识别
           </CapabilityGate>
@@ -260,6 +277,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
             action={{ type: "recognition.cancel" }}
             actions={actions}
             disabled={!booleanValue(state.isBusy)}
+            icon={<Square aria-hidden="true" size={16} />}
           >
             取消
           </CapabilityGate>
@@ -294,6 +312,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
                   capabilities={viewState.capabilities}
                   action={{ type: "recognition.copy", format: "plain" }}
                   actions={actions}
+                  icon={<Copy aria-hidden="true" size={16} />}
                 >
                   复制文本
                 </CapabilityGate>
@@ -302,9 +321,27 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
                   capabilities={viewState.capabilities}
                   action={{ type: "recognition.export", format: "markdown" }}
                   actions={actions}
-                  icon={<ArrowDownloadRegular />}
+                  icon={<Download aria-hidden="true" size={16} />}
                 >
                   导出 Markdown
+                </CapabilityGate>
+                <CapabilityGate
+                  capability="recognition.results"
+                  capabilities={viewState.capabilities}
+                  action={{ type: "recognition.export", format: "docx" }}
+                  actions={actions}
+                  icon={<Sheet aria-hidden="true" size={16} />}
+                >
+                  导出 Word
+                </CapabilityGate>
+                <CapabilityGate
+                  capability="recognition.results"
+                  capabilities={viewState.capabilities}
+                  action={{ type: "recognition.export", format: "xlsx" }}
+                  actions={actions}
+                  icon={<FileSpreadsheet aria-hidden="true" size={16} />}
+                >
+                  导出 Excel
                 </CapabilityGate>
               </Toolbar>
               <pre className="result-document">
@@ -345,7 +382,7 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
             capabilities={viewState.capabilities}
             action={{ type: "batch.addFiles" }}
             actions={actions}
-            icon={<DocumentAddRegular />}
+            icon={<FilePlus2 aria-hidden="true" size={16} />}
           >
             添加图片
           </CapabilityGate>
@@ -356,6 +393,7 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
             action={{ type: "batch.start" }}
             actions={actions}
             disabled={itemCount === 0 || running}
+            icon={<Play aria-hidden="true" size={16} />}
           >
             开始识别
           </CapabilityGate>
@@ -365,6 +403,13 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
             action={{ type: running ? "batch.cancel" : "batch.clear" }}
             actions={actions}
             disabled={itemCount === 0}
+            icon={
+              running ? (
+                <Square aria-hidden="true" size={16} />
+              ) : (
+                <Trash2 aria-hidden="true" size={16} />
+              )
+            }
           >
             {running ? "取消全部" : "清空队列"}
           </CapabilityGate>
@@ -440,7 +485,7 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
                           })
                         }
                       >
-                        ↑
+                        <ArrowUp aria-hidden="true" size={15} />
                       </Button>
                       <Button
                         appearance="subtle"
@@ -456,7 +501,7 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
                           })
                         }
                       >
-                        ↓
+                        <ArrowDown aria-hidden="true" size={15} />
                       </Button>
                       <Button
                         appearance="subtle"
@@ -469,7 +514,7 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
                           })
                         }
                       >
-                        ×
+                        <Trash2 aria-hidden="true" size={15} />
                       </Button>
                     </span>
                   </li>
@@ -523,12 +568,32 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
           <CapabilityGate
             capability="batch.export"
             capabilities={viewState.capabilities}
-            action={{ type: "batch.exportMarkdown" }}
+            action={{ type: "batch.exportAll", format: "markdown" }}
             actions={actions}
-            icon={<ArrowDownloadRegular />}
+            icon={<Download aria-hidden="true" size={16} />}
             disabled={completed === 0}
           >
             导出全部 Markdown
+          </CapabilityGate>
+          <CapabilityGate
+            capability="batch.export"
+            capabilities={viewState.capabilities}
+            action={{ type: "batch.exportAll", format: "docx" }}
+            actions={actions}
+            icon={<Sheet aria-hidden="true" size={16} />}
+            disabled={completed === 0}
+          >
+            导出全部 Word
+          </CapabilityGate>
+          <CapabilityGate
+            capability="batch.export"
+            capabilities={viewState.capabilities}
+            action={{ type: "batch.exportAll", format: "xlsx" }}
+            actions={actions}
+            icon={<FileSpreadsheet aria-hidden="true" size={16} />}
+            disabled={completed === 0}
+          >
+            导出全部 Excel
           </CapabilityGate>
         </Panel>
       </div>
@@ -553,7 +618,7 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
     <Workspace
       eyebrow="DOCUMENT / 03"
       title="PDF 工作台"
-      description="选择页面后完成旋转、文字层与保存操作。"
+      description="选择页面后完成旋转、页面 OCR 与保存操作。"
       actions={
         <>
           <CapabilityGate
@@ -562,7 +627,7 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
             capabilities={viewState.capabilities}
             action={{ type: "pdf.open" }}
             actions={actions}
-            icon={<FolderOpenRegular />}
+            icon={<FolderOpen aria-hidden="true" size={16} />}
           >
             打开 PDF
           </CapabilityGate>
@@ -572,6 +637,7 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
             action={{ type: "pdf.close" }}
             actions={actions}
             disabled={pageCount === 0}
+            icon={<X aria-hidden="true" size={16} />}
           >
             关闭文档
           </CapabilityGate>
@@ -667,7 +733,7 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
               capabilities={viewState.capabilities}
               action={{ type: "pdf.rotate", degrees: 90 }}
               actions={actions}
-              icon={<ArrowRotateClockwiseRegular />}
+              icon={<RotateCw aria-hidden="true" size={16} />}
               disabled={selectedPages.length === 0}
             >
               顺时针 90°
@@ -678,6 +744,7 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
               action={{ type: "pdf.deletePages" }}
               actions={actions}
               disabled={selectedPages.length === 0}
+              icon={<Trash2 aria-hidden="true" size={16} />}
             >
               删除选中页
             </CapabilityGate>
@@ -687,8 +754,9 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
               action={{ type: "pdf.ocrPages" }}
               actions={actions}
               disabled={selectedPages.length === 0}
+              icon={<ScanText aria-hidden="true" size={16} />}
             >
-              添加文字层
+              OCR 选中页
             </CapabilityGate>
             <ToolbarDivider />
             <CapabilityGate
@@ -697,7 +765,7 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
               action={{ type: "pdf.save" }}
               actions={actions}
               disabled={pageCount === 0}
-              icon={<SaveRegular />}
+              icon={<Save aria-hidden="true" size={16} />}
             >
               保存
             </CapabilityGate>
@@ -715,7 +783,7 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
                 detail={
                   pageCount > 0
                     ? `已选 ${selectedPages.length} 页`
-                    : "选择页面后显示渲染预览与文字层摘要。"
+                    : "选择页面后显示渲染预览与 OCR 状态。"
                 }
               />
             )}
@@ -788,6 +856,7 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
                 action={{ type: "qrcode.generate", text: qrText }}
                 actions={actions}
                 disabled={qrText.trim().length === 0 || isBusy}
+                icon={<QrCode aria-hidden="true" size={16} />}
               >
                 生成二维码
               </CapabilityGate>
@@ -797,12 +866,13 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
                 action={{ type: "qrcode.save" }}
                 actions={actions}
                 disabled={!generated}
-                icon={<SaveRegular />}
+                icon={<Save aria-hidden="true" size={16} />}
               >
                 保存二维码
               </CapabilityGate>
               <p className="form-note">
-                尺寸、纠错、颜色与 Logo 在宿主能力就绪后显示。
+                当前生成接口支持内容与编码格式；颜色、Logo 与标签需要
+                Backend/Protocol 生成选项。
               </p>
             </div>
           ) : (
@@ -814,6 +884,7 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
                 action={{ type: "qrcode.decode" }}
                 actions={actions}
                 disabled={isBusy}
+                icon={<ScanText aria-hidden="true" size={16} />}
               >
                 选择图片识别
               </CapabilityGate>
@@ -823,6 +894,7 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
                 action={{ type: "qrcode.decodeClipboard" }}
                 actions={actions}
                 disabled={isBusy}
+                icon={<ClipboardPaste aria-hidden="true" size={16} />}
               >
                 粘贴图片
               </CapabilityGate>
@@ -832,6 +904,7 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
                 action={{ type: "qrcode.clear" }}
                 actions={actions}
                 disabled={results.length === 0 && !generated}
+                icon={<Trash2 aria-hidden="true" size={16} />}
               >
                 清空结果
               </CapabilityGate>
@@ -847,6 +920,7 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
                           capabilities={viewState.capabilities}
                           action={{ type: "qrcode.openUrl", url: result.data }}
                           actions={actions}
+                          icon={<ExternalLink aria-hidden="true" size={16} />}
                         >
                           打开链接
                         </CapabilityGate>
@@ -866,6 +940,7 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
             appearance="secondary"
             disabled={!isBusy}
             onClick={() => actions.run({ type: "qrcode.cancel" })}
+            icon={<Square aria-hidden="true" size={16} />}
           >
             取消任务
           </Button>
@@ -929,13 +1004,14 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             capabilities={viewState.capabilities}
             action={{ type: "settings.refreshRuntime" }}
             actions={actions}
+            icon={<RefreshCw aria-hidden="true" size={16} />}
           >
             刷新运行时
           </CapabilityGate>
           <p className="form-note">
             {statusLabel(
               state.statusCode,
-              "模型预热、缓存清理与后端切换将在对应宿主能力可用时显示。",
+              "当前接口提供 Runtime 与模型驻留状态读取；预热、缓存清理和后端切换需要 Backend/Protocol 写操作。",
             )}
           </p>
         </Panel>
@@ -965,6 +1041,7 @@ function HotkeyEditor({
       <Button
         disabled={!enabled}
         onClick={() => actions.run({ type: "settings.setHotkey", hotkey })}
+        icon={<Save aria-hidden="true" size={16} />}
       >
         应用
       </Button>
@@ -1005,6 +1082,7 @@ export function AboutPage({ viewState, actions }: FeatureProps) {
             capabilities={viewState.capabilities}
             action={{ type: "about.openProject" }}
             actions={actions}
+            icon={<ExternalLink aria-hidden="true" size={16} />}
           >
             打开项目主页
           </CapabilityGate>
@@ -1021,6 +1099,7 @@ export function AboutPage({ viewState, actions }: FeatureProps) {
             capabilities={viewState.capabilities}
             action={{ type: "update.check" }}
             actions={actions}
+            icon={<RefreshCw aria-hidden="true" size={16} />}
           >
             检查更新
           </CapabilityGate>
@@ -1031,6 +1110,7 @@ export function AboutPage({ viewState, actions }: FeatureProps) {
             action={{ type: "update.download" }}
             actions={actions}
             disabled={!booleanValue(update.updateAvailable)}
+            icon={<Download aria-hidden="true" size={16} />}
           >
             下载并安装
           </CapabilityGate>
@@ -1040,6 +1120,7 @@ export function AboutPage({ viewState, actions }: FeatureProps) {
             action={{ type: "update.cancel" }}
             actions={actions}
             disabled={!booleanValue(update.isBusy)}
+            icon={<Square aria-hidden="true" size={16} />}
           >
             取消
           </CapabilityGate>
@@ -1063,6 +1144,7 @@ export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
           capabilities={viewState.capabilities}
           action={{ type: "diagnostics.export" }}
           actions={actions}
+          icon={<Download aria-hidden="true" size={16} />}
         >
           导出脱敏诊断
         </CapabilityGate>

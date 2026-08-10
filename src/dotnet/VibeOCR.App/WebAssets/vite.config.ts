@@ -3,6 +3,7 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   base: "./",
+  publicDir: "../../../../assets/brand/generated",
   plugins: [react()],
   build: {
     emptyOutDir: true,
@@ -34,6 +35,7 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
     setupFiles: ["./src/test/setup.ts"],
   },
 });
