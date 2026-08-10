@@ -714,6 +714,21 @@ def test_web_ready_smoke_never_waits_unbounded_after_forced_termination() -> Non
     assert "$process.WaitForExit(5000)" in smoke
 
 
+def test_release_build_emits_actionable_stage_annotations() -> None:
+    root = Path(__file__).parents[2]
+    build = (root / "scripts/build-release.ps1").read_text(encoding="utf-8")
+
+    assert "::notice title=Release build stage::" in build
+    for stage in (
+        "app-publish",
+        "app-webview-smoke",
+        "updater-pyinstaller",
+        "product-package",
+        "artifact-verify",
+    ):
+        assert f"Write-CiStage '{stage}'" in build
+
+
 def test_backend_identity_hashes_runtime_and_optional_release_manifests() -> None:
     root = Path(__file__).parents[2]
     resolver = (root / "scripts/resolve_component_releases.py").read_text(
