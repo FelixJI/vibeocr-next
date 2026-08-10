@@ -232,6 +232,13 @@ def test_brand_asset_edge_process_does_not_capture_inherited_pipes(
     assert all(kwargs["stdout"] is subprocess.DEVNULL for _, kwargs in calls)
     assert all(kwargs["stderr"] is subprocess.DEVNULL for _, kwargs in calls)
     assert all("capture_output" not in kwargs for _, kwargs in calls)
+    profiles = [
+        next(
+            argument for argument in command if argument.startswith("--user-data-dir=")
+        )
+        for command, _ in calls
+    ]
+    assert len(set(profiles)) == len(BRAND_ASSET_SIZES)
 
 
 def _run_release_build_fixture(

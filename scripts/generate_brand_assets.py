@@ -105,7 +105,7 @@ def _generate(source: Path, destination: Path) -> None:
                     "--no-first-run",
                     "--force-device-scale-factor=1",
                     "--default-background-color=00000000",
-                    f"--user-data-dir={workspace / 'profile'}",
+                    f"--user-data-dir={workspace / f'profile-{size}'}",
                     f"--window-size={size},{size}",
                     f"--screenshot={output}",
                     html.as_uri(),
