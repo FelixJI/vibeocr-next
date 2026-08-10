@@ -16,6 +16,8 @@ from scripts.automation_core import CommandRunner
 from scripts.bind_component_releases import bind_product_releases
 from scripts.check_quality import main as run_quality
 from scripts.check_quality import resolve_executable
+from scripts.generate_brand_assets import SIZES as BRAND_ASSET_SIZES
+from scripts.generate_brand_assets import _generate as generate_brand_assets
 from scripts.release_smoke import verify
 from scripts.resolve_component_releases import (
     _api,
@@ -155,7 +157,7 @@ def test_quality_script_resolves_platform_command_shims(
 
 
 def test_quality_runs_web_gates_once_and_verifies_production_dist(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     commands: list[list[str]] = []
     verified: list[Path] = []
@@ -187,6 +189,42 @@ def test_quality_runs_web_gates_once_and_verifies_production_dist(
     assert verified == [
         Path(__file__).parents[2] / "src/dotnet/VibeOCR.App/WebAssets/dist"
     ]
+    output = capsys.readouterr().out
+    assert "::notice title=Quality stage::brand-assets started" in output
+    assert "::notice title=Quality stage::web-build completed" in output
+
+
+def test_brand_asset_edge_process_does_not_capture_inherited_pipes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    source = tmp_path / "vibeocr.svg"
+    source.write_text("<svg/>", encoding="utf-8")
+
+    def fake_run(command: list[str], **kwargs: object) -> None:
+        calls.append((command, kwargs))
+        screenshot = next(
+            Path(argument.removeprefix("--screenshot="))
+            for argument in command
+            if argument.startswith("--screenshot=")
+        )
+        size = int(screenshot.stem.removeprefix("vibeocr-"))
+        screenshot.write_bytes(
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00IHDR"
+            + size.to_bytes(4, "big")
+            + size.to_bytes(4, "big")
+        )
+
+    monkeypatch.setattr("scripts.generate_brand_assets._edge", lambda: Path("edge"))
+    monkeypatch.setattr("scripts.generate_brand_assets.subprocess.run", fake_run)
+
+    generate_brand_assets(source, tmp_path / "generated")
+
+    assert len(calls) == len(BRAND_ASSET_SIZES)
+    assert all(kwargs["timeout"] == 30 for _, kwargs in calls)
+    assert all(kwargs["stdout"] is subprocess.DEVNULL for _, kwargs in calls)
+    assert all(kwargs["stderr"] is subprocess.DEVNULL for _, kwargs in calls)
+    assert all("capture_output" not in kwargs for _, kwargs in calls)
 
 
 def _run_release_build_fixture(

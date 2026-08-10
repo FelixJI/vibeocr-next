@@ -82,7 +82,9 @@ def _generate(source: Path, destination: Path) -> None:
                     html.as_uri(),
                 ],
                 check=True,
-                capture_output=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
             )
             content = output.read_bytes()
             if _png_dimensions(content) != (size, size):
