@@ -163,7 +163,7 @@ public sealed class DesktopWorkbenchCommandHandler :
           cancellationToken),
         AddBatchFilesCommand => await AddBatchFilesAsync(cancellationToken),
         AddDroppedBatchFilesCommand dropped => AddDroppedBatchFiles(dropped),
-        ExportBatchMarkdownCommand => await ExportBatchAsync(cancellationToken),
+        ExportBatchCommand export => await ExportBatchAsync(export, cancellationToken),
         StartBatchCommand => StartBatch(cancellationToken),
         CancelBatchCommand => CancelBatch(),
         ClearBatchCommand => ClearBatch(),
@@ -355,8 +355,10 @@ public sealed class DesktopWorkbenchCommandHandler :
       throw new InvalidOperationException("No recognition result is available.");
     ResultExportFormat format = command.Format switch
     {
+      "docx" => ResultExportFormat.Docx,
       "html" => ResultExportFormat.Html,
       "markdown" => ResultExportFormat.Markdown,
+      "xlsx" => ResultExportFormat.Xlsx,
       _ => ResultExportFormat.Text,
     };
     await actions.ExportAsync(format, cancellationToken);
@@ -403,6 +405,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   }
 
   private async Task<BatchWorkbenchState> ExportBatchAsync(
+    ExportBatchCommand command,
     CancellationToken cancellationToken)
   {
     batch ??= batchFactory();
@@ -415,7 +418,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     StorageFolder? folder = await picker.PickSingleFolderAsync();
     if (folder is not null)
     {
-      await batch.ExportAllAsync(folder.Path, "markdown", cancellationToken);
+      await batch.ExportAllAsync(folder.Path, command.Format, cancellationToken);
     }
     return BatchState(batch);
   }

@@ -21,12 +21,7 @@ from pathlib import Path
 
 # 与 update_replacer.py 同目录（scripts/），PyInstaller --onefile 自动收集。
 # 打包态下两者都在 PYZ 内，普通 import 即可。
-from update_replacer import (
-    _detect_self_exe_names,
-    logger,
-    run_replacement,
-    setup_logging,
-)
+from update_replacer import logger, run_replacement, setup_logging
 
 
 def _notify_failure(message: str) -> None:
@@ -50,14 +45,12 @@ def _notify_failure(message: str) -> None:
         logger.error(f"弹出失败提示框异常: {e}")
 
 
-def parse_args() -> tuple[Path, Path, str, tuple[str, ...], Path | None]:
+def parse_args() -> tuple[Path, Path, Path, tuple[str, ...], Path | None]:
     parser = argparse.ArgumentParser(description="VibeOCR 更新助手")
     parser.add_argument("--update", required=True, help="更新包 zip 路径")
-    parser.add_argument("--app-dir", required=True, help="应用目录路径")
+    parser.add_argument("--install-root", required=True, help="VibeOCR 安装根目录")
     parser.add_argument(
-        "--entry",
-        required=True,
-        help="替换完成后启动的产品专属入口文件名",
+        "--user-data-root", required=True, help="VibeOCR 用户数据根目录"
     )
     parser.add_argument(
         "--entry-arg",
@@ -67,38 +60,28 @@ def parse_args() -> tuple[Path, Path, str, tuple[str, ...], Path | None]:
     )
     parser.add_argument("--health-file", help="可选的产品启动健康信号路径")
     args = parser.parse_args()
-    if Path(args.entry).name != args.entry:
-        parser.error("--entry 必须是单个文件名")
     return (
         Path(args.update),
-        Path(args.app_dir),
-        args.entry,
+        Path(args.install_root),
+        Path(args.user_data_root),
         tuple(args.entry_arg),
         Path(args.health_file) if args.health_file else None,
     )
 
 
 def main() -> int:
-    zip_path, app_dir, launch_entry, launch_args, health_file = parse_args()
+    zip_path, install_root, user_data_root, launch_args, health_file = parse_args()
     # updater 专用日志文件（与旧版 self_update.log 历史区分，现仅 updater 一条路径）。
-    setup_logging(app_dir, "updater.log")
+    setup_logging(user_data_root, "updater.log")
     logger.info("VibeOCR 更新助手启动（updater.exe）")
-
-    # 自动判断新旧路径：updater 自身是否在 app_dir。
-    # 新路径（暂存目录运行）无需避让 updater.exe；旧路径（过渡期，自身在 app_dir）需避让。
-    # 产品入口由调用方显式传入；更新器不包含跨产品回退。
-    detected = _detect_self_exe_names(app_dir)
-    self_exe_names = (*detected, launch_entry)
-    logger.info(f"路径判定: detected={detected}, self_exe_names={self_exe_names}")
 
     # 就绪信号用默认的 updater.ready，与主程序端 _launch_updater 的轮询文件名对应。
     # on_failure: windowed 运行下 stdout 不可见，失败必须弹窗告知用户。
     return run_replacement(
         zip_path,
-        app_dir,
-        self_exe_names=self_exe_names,
+        install_root,
+        user_data_root,
         ready_filename="updater.ready",
-        launch_entry=launch_entry,
         launch_args=launch_args,
         launch_health_file=health_file,
         on_failure=_notify_failure,

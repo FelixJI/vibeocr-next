@@ -143,11 +143,12 @@ def test_quality_runs_web_gates_once_and_verifies_production_dist(
     assert run_quality() == 0
 
     web_prefix = "src/dotnet/VibeOCR.App/WebAssets"
-    assert commands[-5:] == [
+    assert commands[-6:] == [
         ["C:/node/npm.cmd", "run", "format:check", "--prefix", web_prefix],
         ["C:/node/npm.cmd", "run", "lint", "--prefix", web_prefix],
         ["C:/node/npm.cmd", "run", "typecheck", "--prefix", web_prefix],
         ["C:/node/npm.cmd", "run", "test", "--prefix", web_prefix],
+        ["C:/node/npm.cmd", "run", "test:visual", "--prefix", web_prefix],
         ["C:/node/npm.cmd", "run", "build", "--prefix", web_prefix],
     ]
     assert all("test:legacy" not in command for command in commands)
@@ -199,7 +200,8 @@ function npm {
 }
 function uv {
     Write-Call 'uv' $args
-    if ($env:FAIL_STAGE -eq 'web-verify') {
+    if ($env:FAIL_STAGE -eq 'web-verify' -and
+        ($args -join ' ') -like '*verify_web_assets.py*') {
         $global:LASTEXITCODE = 22
     } else { $global:LASTEXITCODE = 0 }
 }
@@ -250,9 +252,9 @@ function dotnet {
 @pytest.mark.parametrize(
     ("fail_stage", "expected_commands"),
     [
-        ("npm-ci", ["npm"]),
-        ("npm-build", ["npm", "npm"]),
-        ("web-verify", ["npm", "npm", "uv"]),
+        ("npm-ci", ["uv", "npm"]),
+        ("npm-build", ["uv", "npm", "npm"]),
+        ("web-verify", ["uv", "npm", "npm", "uv"]),
     ],
 )
 def test_release_build_web_gates_fail_closed_before_publish(
@@ -275,7 +277,11 @@ def test_release_build_runs_verified_web_bundle_before_packaged_smoke(
     )
 
     assert completed.returncode != 0
-    verifier = next(index for index, call in enumerate(calls) if call.startswith("uv|"))
+    verifier = next(
+        index
+        for index, call in enumerate(calls)
+        if call.startswith("uv|") and "verify_web_assets.py" in call
+    )
     app_publish = next(
         index
         for index, call in enumerate(calls)
@@ -299,7 +305,7 @@ def _configure_release_smoke_fixture(
 ) -> tuple[Path, list[list[str]]]:
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
-    archive = artifacts / "VibeOCR-Next-v1.2.3-win64.zip"
+    archive = artifacts / "VibeOCR-v1.2.3-win64.zip"
     with zipfile.ZipFile(archive, "w") as package:
         package.writestr("VibeOCR.Next/VibeOCR.WinUI.exe", b"placeholder")
     names = {
@@ -379,13 +385,74 @@ def test_release_smoke_propagates_a_failed_web_ready_handshake(
     assert len(calls) == 2
 
 
+@pytest.mark.parametrize("installed_layout", [False, True])
 def test_web_ready_smoke_runs_an_isolated_production_profile(
     tmp_path: Path,
+    installed_layout: bool,
 ) -> None:
     root = Path(__file__).parents[2]
     product = tmp_path / "product"
     product.mkdir()
-    (product / "VibeOCR.WinUI.exe").write_bytes(b"placeholder")
+    executable = product / (
+        "app/VibeOCR.WinUI.exe" if installed_layout else "VibeOCR.WinUI.exe"
+    )
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.write_bytes(b"placeholder")
+    if installed_layout:
+        metadata = product / "app/metadata"
+        metadata.mkdir(parents=True)
+        (metadata / "product-layout.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "product_id": "vibeocr",
+                    "public_entry": "VibeOCR.exe",
+                    "roots": {
+                        "app": "app",
+                        "runtime": "runtime",
+                        "metadata": "app/metadata",
+                    },
+                    "app": {
+                        "entry": "app/VibeOCR.WinUI.exe",
+                        "web_assets": "app/WebAssets",
+                        "updater": "app/tools/updater.exe",
+                    },
+                    "runtime": {
+                        "manifest": "runtime/backend/runtime-manifest.json",
+                        "installer": "runtime/installer/vibeocr-runtime-installer.exe",
+                    },
+                    "metadata": {
+                        "component_lock": "app/metadata/component-lock.json",
+                        "component_identities": "app/metadata/component-identities.json",
+                        "release_manifest": "app/metadata/product-release-manifest.json",
+                    },
+                    "user_data": {
+                        "known_folder": "LocalApplicationData",
+                        "relative": "VibeOCR",
+                    },
+                    "required": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        for name in ("VibeOCR.exe", "LICENSE", "CHANGELOG.md"):
+            (product / name).write_bytes(b"placeholder")
+        for relative in (
+            "app/VibeOCR.WinUI.dll",
+            "app/VibeOCR.WinUI.pri",
+            "app/App.xbf",
+            "app/MainWindow.xbf",
+            "app/WebAssets/index.html",
+            "app/tools/updater.exe",
+            "app/metadata/component-lock.json",
+            "app/metadata/component-identities.json",
+            "app/metadata/product-release-manifest.json",
+            "runtime/backend/runtime-manifest.json",
+            "runtime/installer/vibeocr-runtime-installer.exe",
+        ):
+            path = product / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"placeholder")
     launch = tmp_path / "launch.json"
     cleanup = tmp_path / "cleanup.txt"
     wrapper = tmp_path / "run-smoke.ps1"
@@ -465,19 +532,34 @@ $global:webViewCleanupAttempts | Set-Content -LiteralPath $Cleanup
     launched = json.loads(launch.read_text(encoding="utf-8-sig"))
     assert Path(launched["file"]).parent != product
     assert launched["working_directory"] == str(Path(launched["file"]).parent)
-    assert launched["arguments"] == ["--shell-only", "--profile", "production"]
+    expected_arguments = ["--shell-only", "--profile", "production"]
+    if installed_layout:
+        expected_arguments += ["--install-root", str(Path(launched["file"]).parents[1])]
+    assert launched["arguments"] == expected_arguments
     assert len(launched["instance_scope"]) == 32
     assert all(
         character in "0123456789abcdef" for character in launched["instance_scope"]
     )
-    assert (
-        Path(launched["user_data"]).parent == Path(launched["working_directory"]).parent
+    isolated_product = (
+        Path(launched["file"]).parents[1]
+        if installed_layout
+        else Path(launched["file"]).parent
     )
+    assert Path(launched["user_data"]).parent == isolated_product.parent
     assert Path(launched["user_data"]) != Path(launched["working_directory"])
     assert cleanup.read_text(encoding="utf-8-sig").strip() == "2"
     assert not Path(launched["user_data"]).exists()
     assert not Path(launched["working_directory"]).exists()
-    assert list(product.iterdir()) == [product / "VibeOCR.WinUI.exe"]
+    if installed_layout:
+        assert {path.name for path in product.iterdir()} == {
+            "VibeOCR.exe",
+            "LICENSE",
+            "CHANGELOG.md",
+            "app",
+            "runtime",
+        }
+    else:
+        assert list(product.iterdir()) == [product / "VibeOCR.WinUI.exe"]
 
 
 def _run_app_ci_fixture(
@@ -652,7 +734,7 @@ def test_sync_version_updates_repository_and_desktop_project(tmp_path: Path) -> 
 def test_release_smoke_binds_real_archive_and_component_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    archive = tmp_path / "VibeOCR-Next-v0.2.0-win64.zip"
+    archive = tmp_path / "VibeOCR-v0.2.0-win64.zip"
     with zipfile.ZipFile(archive, "w") as package:
         package.writestr("VibeOCR.Next/VibeOCR.WinUI.exe", b"desktop")
     (tmp_path / "component-lock.json").write_text("{}", encoding="utf-8")

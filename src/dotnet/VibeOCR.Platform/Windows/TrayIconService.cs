@@ -17,9 +17,14 @@ public sealed class TrayIconService : IDisposable
     private bool _visible;
     private bool _disposed;
 
-    public TrayIconService(ITrayIconNativeMethods? native = null)
+    public TrayIconService(string iconPath)
+        : this(new TrayIconNativeMethods(iconPath))
     {
-        _native = native ?? new TrayIconNativeMethods();
+    }
+
+    public TrayIconService(ITrayIconNativeMethods native)
+    {
+        _native = native ?? throw new ArgumentNullException(nameof(native));
     }
 
     public void Show(nint windowHandle, uint callbackMessage, string tooltip)
@@ -53,9 +58,14 @@ public sealed class TrayIconService : IDisposable
             _native.Delete(_id, _windowHandle);
             _visible = false;
         }
+
+        if (_native is IDisposable disposable)
+        {
+            disposable.Dispose();
+        }
     }
 
-    private sealed class TrayIconNativeMethods : ITrayIconNativeMethods
+    private sealed class TrayIconNativeMethods : ITrayIconNativeMethods, IDisposable
     {
         private const uint AddMessage = 0;
         private const uint DeleteMessage = 2;
@@ -63,13 +73,30 @@ public sealed class TrayIconService : IDisposable
         private const uint IconFlag = 0x0002;
         private const uint TipFlag = 0x0004;
         private const uint GuidFlag = 0x0020;
+        private const uint ImageIcon = 1;
+        private const uint LoadFromFile = 0x0010;
+        private const uint LoadDefaultSize = 0x0040;
+        private readonly nint _icon;
+
+        public TrayIconNativeMethods(string iconPath)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(iconPath);
+            string fullPath = Path.GetFullPath(iconPath);
+            _icon = LoadImage(0, fullPath, ImageIcon, 0, 0, LoadFromFile | LoadDefaultSize);
+            if (_icon == 0)
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastPInvokeError(),
+                    $"Failed to load tray icon: {fullPath}");
+            }
+        }
 
         public bool Add(Guid id, nint windowHandle, uint callbackMessage, string tooltip)
         {
             NotifyIconData data = CreateData(id, windowHandle);
             data.Flags = MessageFlag | IconFlag | TipFlag | GuidFlag;
             data.CallbackMessage = callbackMessage;
-            data.Icon = LoadIcon(0, (nint)32512);
+            data.Icon = _icon;
             data.Tip = tooltip.Length > 127 ? tooltip[..127] : tooltip;
             return ShellNotifyIcon(AddMessage, ref data);
         }
@@ -79,6 +106,14 @@ public sealed class TrayIconService : IDisposable
             NotifyIconData data = CreateData(id, windowHandle);
             data.Flags = GuidFlag;
             return ShellNotifyIcon(DeleteMessage, ref data);
+        }
+
+        public void Dispose()
+        {
+            if (_icon != 0)
+            {
+                DestroyIcon(_icon);
+            }
         }
 
         private static NotifyIconData CreateData(Guid id, nint windowHandle) =>
@@ -131,7 +166,22 @@ public sealed class TrayIconService : IDisposable
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool ShellNotifyIcon(uint message, ref NotifyIconData data);
 
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        private static extern nint LoadIcon(nint instance, nint iconName);
+        [DllImport(
+            "user32.dll",
+            EntryPoint = "LoadImageW",
+            CharSet = CharSet.Unicode,
+            ExactSpelling = true,
+            SetLastError = true)]
+        private static extern nint LoadImage(
+            nint instance,
+            string name,
+            uint type,
+            int width,
+            int height,
+            uint loadFlags);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DestroyIcon(nint icon);
     }
 }

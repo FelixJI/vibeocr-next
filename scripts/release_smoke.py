@@ -36,7 +36,7 @@ def verify(artifacts: Path) -> None:
     names = verify_release_assets(
         artifacts,
         required=("component-lock.json", "component-identities.json", "SBOM.spdx.json"),
-        require_one=("VibeOCR-Next-v*-win64.zip", "VibeOCR-Next-v*-win64.zip.sha256"),
+        require_one=("VibeOCR-v*-win64.zip", "VibeOCR-v*-win64.zip.sha256"),
         require_index=False,
     )
     identity = json.loads(
@@ -50,7 +50,7 @@ def verify(artifacts: Path) -> None:
         record = identity[component]
         if not record.get("release_manifest_sha256"):
             raise ValueError(f"missing actual {component} release manifest identity")
-    archive = next(artifacts.glob("VibeOCR-Next-v*-win64.zip"))
+    archive = next(artifacts.glob("VibeOCR-v*-win64.zip"))
     expected_names = {
         archive.name,
         f"{archive.name}.sha256",

@@ -30,6 +30,8 @@ $lock = Join-Path $artifacts 'component-lock.json'
 $identity = Join-Path $artifacts 'component-identities.json'
 if (-not (Test-Path -LiteralPath $protocol -PathType Container) -or -not (Test-Path -LiteralPath $backend -PathType Container) -or -not (Test-Path -LiteralPath $lock -PathType Leaf) -or -not (Test-Path -LiteralPath $identity -PathType Leaf)) { throw 'resolved Backend/Protocol identities are required before build' }
 $webAssets = Join-Path $root 'src/dotnet/VibeOCR.App/WebAssets'
+uv run --no-project python (Join-Path $root 'scripts/generate_brand_assets.py') --check
+if ($LASTEXITCODE -ne 0) { throw 'Brand asset consistency verification failed' }
 npm ci --prefix $webAssets
 if ($LASTEXITCODE -ne 0) { throw 'WebAssets locked install failed' }
 npm run build --prefix $webAssets
@@ -41,27 +43,36 @@ dotnet restore (Join-Path $root 'src/dotnet/VibeOCR.App/VibeOCR.App.csproj') --l
 if ($LASTEXITCODE -ne 0) { throw 'Next restore failed' }
 dotnet restore (Join-Path $root 'src/dotnet/VibeOCR.Bootstrapper/VibeOCR.Bootstrapper.csproj') --locked-mode
 if ($LASTEXITCODE -ne 0) { throw 'Next bootstrapper restore failed' }
-$product = Join-Path $build 'VibeOCR.Next'
+$appPublish = Join-Path $build 'app-publish'
 dotnet publish (Join-Path $root 'src/dotnet/VibeOCR.App/VibeOCR.App.csproj') `
-  -c Release -r win-x64 --self-contained false --no-restore -o $product
+  -c Release -r win-x64 --self-contained false --no-restore -o $appPublish
 if ($LASTEXITCODE -ne 0) { throw 'Next publish failed' }
-& (Join-Path $root 'scripts/smoke_web_workbench.ps1') -ProductRoot $product
+& (Join-Path $root 'scripts/smoke_web_workbench.ps1') -ProductRoot $appPublish
 if ($LASTEXITCODE -ne 0) { throw 'Web workbench bridge-ready smoke failed' }
+$bootstrapperPublish = Join-Path $build 'bootstrapper-publish'
 dotnet publish (Join-Path $root 'src/dotnet/VibeOCR.Bootstrapper/VibeOCR.Bootstrapper.csproj') `
-  -c Release --self-contained false --no-restore -o $product
+  -c Release --self-contained false --no-restore -o $bootstrapperPublish
 if ($LASTEXITCODE -ne 0) { throw 'Next bootstrapper publish failed' }
 uv run --no-sync --with pyinstaller==6.21.0 python -m PyInstaller `
   --noconfirm --clean --onefile --windowed `
+  --icon (Join-Path $root 'assets/brand/generated/vibeocr.ico') `
   --name updater --distpath (Join-Path $build 'updater-dist') `
   --workpath (Join-Path $build 'updater-work') `
   --specpath (Join-Path $build 'updater-spec') `
   (Join-Path $root 'scripts/updater_main.py')
 if ($LASTEXITCODE -ne 0) { throw 'Next updater build failed' }
-Copy-Item -LiteralPath (Join-Path $build 'updater-dist/updater.exe') `
-  -Destination $product
-Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination $product
-Copy-Item -LiteralPath (Join-Path $root 'CHANGELOG.md') -Destination $product
-$zip = Join-Path $artifacts "VibeOCR-Next-v$Version-win64.zip"
+$product = Join-Path $build 'VibeOCR'
+uv run --no-sync python (Join-Path $root 'scripts/product_layout.py') stage `
+  --product-root $product `
+  --app-publish-root $appPublish `
+  --bootstrapper-executable (Join-Path $bootstrapperPublish 'VibeOCR.Bootstrapper.exe') `
+  --updater-executable (Join-Path $build 'updater-dist/updater.exe') `
+  --component-lock $lock --component-identities $identity `
+  --backend-release-dir $backend `
+  --license-file (Join-Path $root 'LICENSE') `
+  --changelog-file (Join-Path $root 'CHANGELOG.md')
+if ($LASTEXITCODE -ne 0) { throw 'VibeOCR product layout staging failed' }
+$zip = Join-Path $artifacts "VibeOCR-v$Version-win64.zip"
 uv run --no-sync python (Join-Path $root 'scripts/package_product_release.py') `
   --product-root $product --frontend next `
   --frontend-version $Version `
@@ -69,6 +80,9 @@ uv run --no-sync python (Join-Path $root 'scripts/package_product_release.py') `
   --component-lock $lock --protocol-release-dir $protocol `
   --backend-release-dir $backend --output $zip
 if ($LASTEXITCODE -ne 0) { throw 'Next product binding failed' }
+uv run --no-sync python (Join-Path $root 'scripts/product_layout.py') verify `
+  --product-root $product
+if ($LASTEXITCODE -ne 0) { throw 'Next product release closure verification failed' }
 & (Join-Path $root 'scripts/verify_winui_artifact.ps1') -Artifact $zip
 if ($LASTEXITCODE -ne 0) { throw 'Next artifact verification failed' }
 uv run --no-sync python (Join-Path $root 'scripts/build_release_checksums.py') $artifacts `

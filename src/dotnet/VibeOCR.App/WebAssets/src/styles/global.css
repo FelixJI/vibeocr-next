@@ -1,8 +1,12 @@
 :root {
   color-scheme: light dark;
-  font-family: "Segoe UI Variable", "Segoe UI", sans-serif;
-  background: #f8f7f4;
-  color: #22221f;
+  --vibe-motion-fast: 120ms;
+  --vibe-motion-normal: 200ms;
+  --vibe-ease: cubic-bezier(0.34, 0.6, 0.2, 1);
+  font-family:
+    "Segoe UI Variable", "Microsoft YaHei UI", "Segoe UI", sans-serif;
+  background: #f7f8fa;
+  color: #1f2329;
 }
 * {
   box-sizing: border-box;
@@ -11,7 +15,7 @@ html,
 body,
 #root {
   width: 100%;
-  min-width: 900px;
+  min-width: 1024px;
   height: 100%;
   min-height: 100%;
   margin: 0;
@@ -30,14 +34,14 @@ input {
 }
 .app-shell {
   display: grid;
-  grid-template-columns: 224px minmax(0, 1fr);
+  grid-template-columns: 216px minmax(0, 1fr);
   min-height: 100vh;
 }
 .navigation-rail {
   display: flex;
   flex-direction: column;
-  gap: 24px;
-  padding: 18px 12px;
+  gap: 16px;
+  padding: 14px 10px 10px;
   background: var(--colorNeutralBackground1);
   border-right: 1px solid var(--colorNeutralStroke1);
 }
@@ -45,61 +49,76 @@ input {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 8px;
+  padding: 0 6px;
   color: var(--colorNeutralForeground1);
-  font-family: Bahnschrift, "Segoe UI Variable", sans-serif;
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 700;
   letter-spacing: -0.02em;
 }
 .brand-mark {
-  display: grid;
-  width: 28px;
-  height: 28px;
-  place-items: center;
-  border-radius: 6px;
-  background: var(--colorBrandBackground);
-  color: var(--colorNeutralForegroundOnBrand);
-  font-size: 14px;
+  display: block;
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  filter: drop-shadow(0 2px 5px rgb(51 112 255 / 20%));
 }
 .navigation-list {
   display: grid;
-  gap: 3px;
+  gap: 2px;
+}
+.navigation-utility {
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--colorNeutralStroke2);
 }
 .navigation-link {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 36px;
+  min-height: 38px;
   padding: 0 10px;
-  border-radius: 5px;
+  border-radius: 6px;
   color: var(--colorNeutralForeground2);
   font-size: 14px;
   text-decoration: none;
+  transition:
+    color var(--vibe-motion-fast) var(--vibe-ease),
+    background var(--vibe-motion-fast) var(--vibe-ease),
+    transform var(--vibe-motion-fast) var(--vibe-ease);
 }
 .navigation-link:hover {
   background: var(--colorNeutralBackground3);
   color: var(--colorNeutralForeground1);
+  transform: translateX(2px);
 }
 .navigation-link.is-active {
-  background: color-mix(in srgb, var(--colorBrandBackground) 12%, transparent);
+  background: color-mix(in srgb, var(--colorBrandBackground) 11%, transparent);
   color: var(--colorBrandForeground1);
   font-weight: 600;
 }
+.navigation-link.is-active::before {
+  position: absolute;
+  left: 4px;
+  width: 3px;
+  height: 18px;
+  border-radius: 3px;
+  background: var(--colorBrandBackground);
+  content: "";
+}
 .navigation-footnote {
-  margin-top: auto;
-  padding: 0 8px;
+  padding: 2px 8px 0;
   color: var(--colorNeutralForeground3);
   font-size: 12px;
 }
 .shell-content {
   display: grid;
   min-width: 0;
-  grid-template-rows: 48px minmax(0, 1fr);
+  grid-template-rows: 44px minmax(0, 1fr);
 }
 .app-toolbar {
   min-width: 0;
-  padding: 0 20px;
+  padding: 0 16px;
   border-bottom: 1px solid var(--colorNeutralStroke1);
   background: var(--colorNeutralBackground1);
 }
@@ -121,8 +140,8 @@ input {
 .workspace {
   display: grid;
   min-height: 100%;
-  gap: 16px;
-  padding: 20px 24px 24px;
+  gap: 14px;
+  padding: 16px 18px 20px;
 }
 .workspace-header {
   display: flex;
@@ -133,11 +152,10 @@ input {
 .workspace-header h1 {
   margin: 0;
   color: var(--colorNeutralForeground1);
-  font-family: Bahnschrift, "Segoe UI Variable", sans-serif;
-  font-size: 24px;
+  font-size: 21px;
   font-weight: 650;
   letter-spacing: -0.025em;
-  line-height: 32px;
+  line-height: 28px;
 }
 .eyebrow {
   margin: 0 0 3px;
@@ -151,8 +169,8 @@ input {
   max-width: 660px;
   margin: 4px 0 0;
   color: var(--colorNeutralForeground2);
-  font-size: 14px;
-  line-height: 20px;
+  font-size: 13px;
+  line-height: 19px;
 }
 .workspace-actions {
   display: flex;
@@ -164,7 +182,10 @@ input {
 .status-line {
   display: block;
   padding: 9px 12px;
+  border: 1px solid
+    color-mix(in srgb, var(--colorBrandStroke1) 28%, transparent);
   border-left: 3px solid var(--colorBrandStroke1);
+  border-radius: 6px;
   background: var(--colorNeutralBackground3);
   color: var(--colorNeutralForeground2);
   font-size: 12px;
@@ -184,13 +205,26 @@ input {
   border: 1px solid var(--colorNeutralStroke1);
   border-radius: 8px;
   background: var(--colorNeutralBackground1);
+  box-shadow: 0 1px 2px rgb(31 35 41 / 4%);
+  transition:
+    border-color var(--vibe-motion-fast) var(--vibe-ease),
+    box-shadow var(--vibe-motion-normal) var(--vibe-ease);
+}
+.work-panel:focus-within {
+  border-color: color-mix(
+    in srgb,
+    var(--colorBrandStroke1) 55%,
+    var(--colorNeutralStroke1)
+  );
+  box-shadow: 0 0 0 2px
+    color-mix(in srgb, var(--colorBrandBackground) 9%, transparent);
 }
 .panel-heading {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 58px;
-  padding: 11px 14px;
+  min-height: 50px;
+  padding: 9px 12px;
   border-bottom: 1px solid var(--colorNeutralStroke1);
 }
 .panel-heading span {
@@ -227,6 +261,7 @@ input {
   background: var(--colorNeutralBackground3);
   color: var(--colorNeutralForeground2);
   text-align: center;
+  transition: background var(--vibe-motion-normal) var(--vibe-ease);
 }
 .empty-stage strong {
   color: var(--colorNeutralForeground1);
@@ -278,6 +313,21 @@ input {
   border: 1px solid var(--colorNeutralStroke2);
   border-radius: 6px;
   background: var(--colorNeutralBackground2);
+  transition:
+    background var(--vibe-motion-fast) var(--vibe-ease),
+    border-color var(--vibe-motion-fast) var(--vibe-ease);
+}
+.batch-item:hover {
+  border-color: color-mix(
+    in srgb,
+    var(--colorBrandStroke1) 32%,
+    var(--colorNeutralStroke2)
+  );
+  background: color-mix(
+    in srgb,
+    var(--colorBrandBackground) 4%,
+    var(--colorNeutralBackground2)
+  );
 }
 .batch-position {
   font:
@@ -506,7 +556,17 @@ input {
   outline: 2px solid var(--colorBrandStroke1);
   outline-offset: 2px;
 }
-@media (max-width: 1100px) {
+:disabled {
+  cursor: not-allowed;
+}
+button,
+a,
+input,
+select {
+  transition-duration: var(--vibe-motion-fast);
+  transition-timing-function: var(--vibe-ease);
+}
+@media (max-width: 1160px) {
   .app-shell {
     grid-template-columns: 52px minmax(0, 1fr);
   }

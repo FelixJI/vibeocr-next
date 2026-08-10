@@ -25,7 +25,7 @@
   "release": {
     "version_sources": [{"kind": "json", "path": "repository.json", "key": "version"}, {"kind": "xml", "path": "src/dotnet/VibeOCR.App/VibeOCR.App.csproj", "key": "Version"}],
     "generated_commands": [["python", "scripts/sync_version.py", "--version", "{version}"]],
-    "required_assets": ["VibeOCR-Next-v*-win64.zip", "VibeOCR-Next-v*-win64.zip.sha256", "component-lock.json", "component-identities.json", "SBOM.spdx.json"],
+    "required_assets": ["VibeOCR-v*-win64.zip", "VibeOCR-v*-win64.zip.sha256", "component-lock.json", "component-identities.json", "SBOM.spdx.json"],
     "identity_asset": "component-identities.json",
     "mirrors": [
       {"name": "gitee", "url_env": "GITEE_URL", "user_env": "GITEE_USER", "token_env": "GITEE_TOKEN", "user": "git"},

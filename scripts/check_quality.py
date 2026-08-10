@@ -24,6 +24,7 @@ def resolve_executable(command: str) -> str:
 def main() -> int:
     npm = resolve_executable("npm")
     for command in (
+        [sys.executable, "scripts/generate_brand_assets.py", "--check"],
         [sys.executable, "-m", "ruff", "check", "scripts", "tests/runtime"],
         [sys.executable, "-m", "ruff", "format", "--check", "scripts", "tests/runtime"],
         [sys.executable, "-m", "pytest", "tests/runtime"],
@@ -31,6 +32,7 @@ def main() -> int:
         [npm, "run", "lint", "--prefix", WEB_ASSETS],
         [npm, "run", "typecheck", "--prefix", WEB_ASSETS],
         [npm, "run", "test", "--prefix", WEB_ASSETS],
+        [npm, "run", "test:visual", "--prefix", WEB_ASSETS],
         [npm, "run", "build", "--prefix", WEB_ASSETS],
     ):
         subprocess.run(command, cwd=ROOT, check=True)

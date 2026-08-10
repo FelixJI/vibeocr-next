@@ -1,1 +1,2 @@
 src/dotnet/VibeOCR.App/WebAssets/** text eol=lf
+src/dotnet/VibeOCR.App/WebAssets/**/*.png binary
