@@ -6,9 +6,17 @@ import argparse
 import struct
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
+try:
+    from scripts.run_ci_command import terminate_process_tree
+except ModuleNotFoundError:  # 直接执行 scripts/generate_brand_assets.py
+    from run_ci_command import terminate_process_tree
+
 SIZES = (16, 24, 32, 48, 64, 128, 256)
+PNG_END = b"IEND\xaeB`\x82"
+RENDER_TIMEOUT_SECONDS = 30
 
 
 def _edge() -> Path:
@@ -53,6 +61,27 @@ def _png_dimensions(content: bytes) -> tuple[int, int]:
     return struct.unpack(">II", content[16:24])
 
 
+def _render_png(command: list[str], output: Path, size: int) -> bytes:
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + RENDER_TIMEOUT_SECONDS
+    try:
+        while time.monotonic() < deadline:
+            try:
+                content = output.read_bytes()
+            except OSError:
+                content = b""
+            if content.endswith(PNG_END) and _png_dimensions(content) == (size, size):
+                return content
+            time.sleep(0.1)
+        raise TimeoutError(f"Edge did not render the {size}px brand asset in time")
+    finally:
+        terminate_process_tree(process)
+
+
 def _generate(source: Path, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     pngs: list[tuple[int, bytes]] = []
@@ -67,7 +96,7 @@ def _generate(source: Path, destination: Path) -> None:
         )
         for size in SIZES:
             output = destination / f"vibeocr-{size}.png"
-            subprocess.run(
+            content = _render_png(
                 [
                     str(_edge()),
                     "--headless=new",
@@ -81,14 +110,9 @@ def _generate(source: Path, destination: Path) -> None:
                     f"--screenshot={output}",
                     html.as_uri(),
                 ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=30,
+                output,
+                size,
             )
-            content = output.read_bytes()
-            if _png_dimensions(content) != (size, size):
-                raise ValueError(f"Brand asset has the wrong dimensions: {output}")
             pngs.append((size, content))
     _write_ico(pngs, destination / "vibeocr.ico")
 

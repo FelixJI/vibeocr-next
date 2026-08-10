@@ -198,10 +198,11 @@ def test_brand_asset_edge_process_does_not_capture_inherited_pipes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[tuple[list[str], dict[str, object]]] = []
+    terminated: list[object] = []
     source = tmp_path / "vibeocr.svg"
     source.write_text("<svg/>", encoding="utf-8")
 
-    def fake_run(command: list[str], **kwargs: object) -> None:
+    def fake_popen(command: list[str], **kwargs: object) -> object:
         calls.append((command, kwargs))
         screenshot = next(
             Path(argument.removeprefix("--screenshot="))
@@ -213,15 +214,21 @@ def test_brand_asset_edge_process_does_not_capture_inherited_pipes(
             b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00IHDR"
             + size.to_bytes(4, "big")
             + size.to_bytes(4, "big")
+            + b"IEND\xaeB`\x82"
         )
+        return object()
 
     monkeypatch.setattr("scripts.generate_brand_assets._edge", lambda: Path("edge"))
-    monkeypatch.setattr("scripts.generate_brand_assets.subprocess.run", fake_run)
+    monkeypatch.setattr("scripts.generate_brand_assets.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "scripts.generate_brand_assets.terminate_process_tree",
+        lambda process: terminated.append(process),
+    )
 
     generate_brand_assets(source, tmp_path / "generated")
 
     assert len(calls) == len(BRAND_ASSET_SIZES)
-    assert all(kwargs["timeout"] == 30 for _, kwargs in calls)
+    assert len(terminated) == len(BRAND_ASSET_SIZES)
     assert all(kwargs["stdout"] is subprocess.DEVNULL for _, kwargs in calls)
     assert all(kwargs["stderr"] is subprocess.DEVNULL for _, kwargs in calls)
     assert all("capture_output" not in kwargs for _, kwargs in calls)
