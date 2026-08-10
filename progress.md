@@ -165,3 +165,79 @@
 | 2026-08-10 | 已 publish 产品的 60 秒 smoke 仍超时 | 2 | 用此前验证通过的 0.2.0 候选作差分探针 |
 | 2026-08-10 | 0.2.0 旧候选在当前机器同样超时 | 3 | 后续云端同样超时，撤销“仅本机环境”判断并继续根因分析 |
 | 2026-08-10 | PR #20 packaged smoke 云端超时 | 4 | 窗口类探针确认互斥提示框；改为隔离 self-test named object，而非延长 timeout |
+
+## Session: 2026-08-10（产品化改造）
+
+### Phase 9：产品化方案、基线与独立审查
+
+- **Status:** in_progress
+- Actions taken:
+  - 通过七轮需求拷问锁定发布目录、数据边界、Classic 对齐、VibeTable 设计语言、Lucide、品牌、任务生命周期、测试与单 PR 交付边界。
+  - 建立持续目标，从最新 `origin/main@6f172f6` 创建 `codex/vibeocr-productization` 独立 worktree。
+  - 核实根 AGENTS.md、无启用 hooks、GitHub 认证、无开放 PR；v0.3.0 正式 Release、main CI/CodeQL/CD 均成功，故收口旧 Phase 8。
+  - 读取并应用 planning-with-files、codebase-design、frontend-design 与 git-pr-delivery；启动 ProductLayout 三方案独立设计评审。
+  - 盘点 build/package/verifier/Bootstrapper/updater/PortableLayout、Web 主题/壳/测试与 CI 入口，更新 task_plan.md/findings.md。
+  - 完成 ProductLayout 三方案比较与计划 Standards/Spec 双轴审查；修复 Issue 前置、identity 闭包、metadata seam、schema 命名和对外 ZIP 命名缺口。
+  - 创建 GitHub Issue #23，固定目标、非目标、关键风险和验收，并关联 `docs/productization-plan.md`。
+  - 完成实施前基线：quality 全绿（64 Python + 33 Web + format/lint/type/build），App 105/105；Platform 84/85，唯一失败为修改前已有 Job Object 退出竞态。
+- Files created/modified:
+  - `task_plan.md`（追加 Phase 9–14、决策、验收与错误）
+  - `findings.md`（追加产品化需求、布局、UI 与测试事实）
+  - `progress.md`（本节）
+
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-08-10 | 通过 `uv run` 执行 planning catchup 生成未跟踪根 `uv.lock` | 1 | 依据创建时间确认是本次副作用并精确删除；后续只用仓库既有 `uv run --no-sync`/封装入口 |
+| 2026-08-10 | 并行可选 Git 探测因无 hooks 配置/无关键词命中返回 exit 1 | 1 | 改为可选探测显式 `exit 0` 并分别读取必要结果，不重复原命令 |
+| 2026-08-10 | 批量读取包含不存在的 Bootstrapper `App.config` | 1 | 记录为待核实事实；转查 csproj/生成配置与发布产物，不假设源码中存在 App.config |
+| 2026-08-10 | Platform 基线 `TerminateAndWaitReturnsAfterEveryAssignedProcessExits` 临时目录仍被后代占用 | 1 | 记录为修改前 existing baseline failure；不原样重跑粉饰，后续若触及相关 lifecycle 再以定向契约诊断 |
+
+| Test | Actual | Status |
+|------|--------|--------|
+| npm locked install | 327 packages，0 vulnerability | passed |
+| quality | 64 Python + 14 legacy Web + 19 Vitest；format/lint/type/build | passed |
+| App Release tests | 105/105 | passed |
+| Platform Release tests | 84/85；Job Object 退出竞态 1 failed | failed-confirmed-baseline |
+
+### Phase 10–13：产品布局、UI 与验证实现
+
+- `ProductLayout schema_version=1` 已成为 build、Bootstrapper、WinUI、packager、verifier 和 updater 的共同路径契约；公开根严格收敛为五项。
+- production 用户数据已移出安装目录，固定为 `%LOCALAPPDATA%\VibeOCR`；更新器只替换五个部署项并在健康超时后恢复旧部署。
+- 发布资产收敛为 `VibeOCR-v*-win64.zip`；metadata 保留 component lock、component identities 和完整 release manifest。
+- Web 采用 VibeTable 风格蓝色/冷中性语义 token、1024×720 响应式壳和 Lucide 功能图标；原创 SVG 派生 ICO 与 7 档 PNG。
+- 单图和批量结果新增 Markdown/Word/Excel 导出；Playwright 增加三个固定主题/尺寸/状态截图。
+- 新增 Classic 行为矩阵后确认 PDF 文字层/插页重排、QR 样式/Logo、Runtime mutation 受当前 Backend/Protocol capability 阻断；Draft PR 不把这些占位能力声明为完成。
+- 既有 Job Object 全量波动以诊断反馈环收口：修复前 Platform 全套 9/10 失败；测试清理显式等待并关闭进程句柄后 0/10 失败。
+- 自审关闭跨卷更新缺口：LocalAppData 候选验证后复制到安装盘同级 stage，stage/rollback 与安装根只进行同卷 rename；新增回归证明用户数据不进入任何原子 move。
+
+| Test | Actual | Status |
+|------|--------|--------|
+| ProductLayout/package/updater/CI adapters | 32/32 | passed |
+| App Release tests | 108/108 | passed |
+| Platform Release tests stress | 87/87 × 10，0 failure | passed |
+| Bootstrapper Release build | 0 warning / 0 error | passed |
+| Web format/lint/type/tests/build | 14 legacy + 19 Vitest；全部通过 | passed |
+| Playwright visual | 3/3，1280×800 light recognition/PDF + 1024×720 dark batch | passed |
+
+### Phase 13 最终候选验收
+
+- 最终审查发现并关闭三项发布风险：updater 在触碰安装根前验证 release manifest、完整文件 closure 与 component binding；品牌生成移除未锁定 Pillow 并进入 quality/release 门禁；托盘改用随包发布的原创 ICO。
+- Python 与 C# 对 `schema_version=1` 的 canonical path 保持一致；Python 明确区分打包前 `stage`、完整树 `inspect` 与发布 closure `verify`，避免用暂存语义放宽已安装产品。
+- 真实候选 ZIP 根精确为 `VibeOCR.exe`、`LICENSE`、`CHANGELOG.md`、`app/`、`runtime/`，PDB 与 `.exe.config` 均为 0。
+- 高 DPI 与完整键盘 GUI 路径未在本机自动化；PR 以 Playwright 三张固定 Windows 基线、真实 WebView2 ready、forced-colors/reduced-motion 代码契约和明确人工复核项交付，不伪造通过。
+
+| Test | Actual | Status |
+|------|--------|--------|
+| Python quality | 74/74；Ruff format/check | passed |
+| Web quality | 14 legacy + 19 Vitest + 3 Playwright；Prettier/ESLint/typecheck/build | passed |
+| App CI TRX | 108/108，Completed | passed |
+| Platform Release | 87/87 | passed |
+| Brand assets | SVG → 7 PNG + ICO 字节一致性 | passed |
+| Release build | WinUI/Bootstrapper/PyInstaller updater/layout/closure/ZIP/checksum/SBOM | passed |
+| Release smoke | artifact verifier + 解压候选 WebView2 bridge-ready | passed |
+
+### Phase 14：Draft PR 交付
+
+- 三个中文 Conventional Commit 已推送到 `codex/vibeocr-productization`，未绕过 hooks，分支基于最新 `origin/main`（ahead 3 / behind 0）。
+- Draft PR #25 已创建：`https://github.com/FelixJI/vibeocr-next/pull/25`；正文包含 Issue #23、根因、布局/更新/UI 变更、Classic 阻断矩阵、精确验证命令与三张视觉基线。
+- GitHub CI `plan` 与四语言 CodeQL 已触发并处于 `IN_PROGRESS`；pending 未写成 passed，PR 未合并。

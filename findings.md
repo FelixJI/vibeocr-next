@@ -129,3 +129,77 @@
 - PR #20 第二轮 required（run `31355011152`）7分28秒通过，四语言 CodeQL 全绿，并 squash merge 为 main `35a0668`。
 - 合并后 main CI run `31355464161` 又在同一 lifecycle fixture 失败，说明首个修复只关闭了“Job 已终止但尚未退出”的等待竞态，没有关闭启动 enrollment 竞态：`Process.Start()` 与 `AssignProcessToJobObject` 之间，`cmd.exe` 已能创建 `ping.exe`；把父进程加入 Job 不会追溯包含既有后代，故 `ActiveProcesses == 0` 仍可能遗漏逃逸子进程。
 - 第二层修复用 Toolhelp 进程快照计算 root 的后代闭包：先分配 root，使后续新子进程自动继承 Job；再重复吸收快照中尚未入 Job 的既有后代，直到稳定，最后仍由 `TerminateJobObject + ActiveProcesses` 有界等待。确定性测试显式让 PowerShell 在分配前启动 `ping.exe` 并输出 PID，旧实现 CS1061 red，新实现验证 parent/child 都退出且临时目录可立即删除。
+
+## Productization Requirements（2026-08-10）
+
+- 用户确认一次性交付一个超大 PR；PR 内允许多个逻辑 commit，最终 squash merge，不在功能 PR 中直接修改版本。
+- 发布根公开面固定为唯一 `VibeOCR.exe`、`LICENSE`、`CHANGELOG.md`、`app/` 与 `runtime/`；实现依赖、XBF/PRI、WebAssets、机器清单和组件运行时不得继续平铺。
+- 新版本是无旧包袱的开发基线：不支持旧布局应用内升级，不迁移、不读取，也不自动删除旧开发版数据；只验证新布局之间的更新和回滚。
+- 用户设置、日志、缓存和临时资源默认进入 `%LOCALAPPDATA%\VibeOCR`，用户导出由显式选择位置；更新事务不能覆盖或回滚用户数据。
+- Classic 是功能行为契约而不是 Qt 布局模板；单图/截图/剪贴板、识别管道、复制与 Word/Excel 导出、批量、PDF、二维码、Runtime/模型/缓存/更新都进入矩阵，缺少 capability 时阻断而非占位。
+- UI 保留 React 19、Fluent UI 控件和原生 Windows 标题栏，功能图标完全切换到 `lucide-react`；原创 SVG 品牌资产确定性派生 ICO/PNG。
+- 视觉采用 VibeTable 的冷中性、蓝色主状态、紧凑尺度、轻边框、完整交互状态和无障碍语言，但不引用 VibeTable 源码或复制其数据库布局。
+- 1280x800 为主要设计尺寸，1024x720 必须完整可用；覆盖浅/深/系统主题、125%/150%/200% 缩放、forced-colors、reduced-motion 和键盘工作流。
+- 不新增永久识别历史；跨路由保留任务，取消只在底层确认停止后结束；重启不自动恢复未完成 OCR。
+
+## Product Layout Findings（2026-08-10）
+
+- 根目录零散文件不是单点 copy bug：`build-release.ps1` 把 WinUI publish、Bootstrapper publish、PyInstaller updater 和文档输出到同一 `$product`；`package_product_release.py` 又在同一根写 component lock、backend、runtime installer 和 product manifest。
+- 运行时消费者同样硬编码旧布局：Bootstrapper 默认同根启动 `VibeOCR.WinUI.exe` 并查根 lock/backend/installer；`GitHubUpdateSource` 固定 updater entry 为 `VibeOCR.Bootstrapper.exe`；PowerShell verifier 固定根 required file 列表。
+- `PortableLayout` 当前把 production `config/data/output` 放入安装根；`UpdateArtifactCleaner` 甚至要求 DataRoot 必须在 InstallRoot 内。这两处都必须改为 LocalAppData 策略和显式 deployment root。
+- WinUI csproj 的 XBF/PRI 回填与 WebAssets `dist` 复制是可靠 publish adapter，应整体发布到 `app/`，不能拆散或移除。
+- `product-release-manifest.json` 已承担完整文件 closure 与 hash；新 layout descriptor 只应承担相对路径和布局 schema，不复制 release identity/hash 职责。
+- 三个独立 ProductLayout 方案都收敛到版本化 JSON descriptor + 语言内 adapters；分歧主要在跨语言实现形状、legacy 迁移和根 `.exe.config`。用户已明确拒绝 legacy 迁移，因此所有 legacy reader/migration 建议从最终方案删除。
+- 推荐的 seam：声明式 `app/metadata/product-layout.json` 是跨语言 interface；Python stage/verify 是构建 implementation，C# net472/net10 是运行时 adapters，Python updater 是替换 adapter，PowerShell 仅编排稳定 CLI。
+- `component-identities.json` 既是正式独立 Release identity asset，也必须嵌入 `app/metadata/` 并进入 product release manifest closure；布局重构不能弱化现有 identity 契约。
+- 用户侧品牌去除 `Next` 还要求正式 ZIP 从 `VibeOCR-Next-v*-win64.zip` 改为 `VibeOCR-v*-win64.zip`，并同步 `.ci` required assets、更新选择器、checksum/SBOM 与 smoke。
+- 依赖分类：schema/path 是 in-process；目录树/ZIP/LocalAppData/进程健康是 local-substitutable；GitHub 下载是 true external，保留现有 HttpClient adapter；Backend/Protocol release input 继续由现有 resolver adapter 负责。
+
+## UI and Test Findings（2026-08-10）
+
+- Web 现有 `@fluentui/react-icons` 只集中覆盖导航和少量工具，业务页大量动作仍只有文字；切换 Lucide 需要删除旧依赖、更新 Vite vendor grouping、集中 IconButton/导航 adapter，并用 lint/源码断言阻止回流。
+- 当前橙色主题和 CSS 以 900px 最小宽度、224px rail、大量通用 `work-panel` 为主；新方向应以语义 token 统一蓝色状态、4px spacing、4/6/8px radius、120/200ms motion，并避免每段内容都悬浮成卡片。
+- Vitest/jsdom 已覆盖路由、capability gate、QR payload、批量窗口、PDF 选择、Canvas 撤销、busy/cancel 与 About；没有 Playwright、浏览器截图或视觉回归。
+- 现有真实 E2E 是 packaged WinUI/WebView2 bridge-ready smoke，不产生截图。新增 Playwright 应使用 mock bridge 只验证稳定壳层/关键状态，真实候选仍由 WebView2 smoke 和 Windows GUI 证据兜底。
+- `.ci/project.json` 已有 quality/e2e/release_build/release_smoke 权威入口；新增 Playwright 与 ProductLayout contract 必须进入项目 adapter/quality，而不是在 workflow 重复命令。
+
+## Productization Plan Review（2026-08-10）
+
+- Standards review：2 项硬问题——`CONTRIBUTING.md` 要求大改先建 Issue；计划遗漏 embedded component identities。1 项判断——“layout v1 → v1”命名含混。
+- Spec review：当前只有计划、没有实现属于 Phase 9 的预期状态；`findings.md` 的根 `metadata/` seam 与 `app/metadata/` 目标冲突。Scope creep 为 0。
+- 主审额外发现：正式资产名仍含 `Next` 会违反对外产品名决策，已加入 `.ci`、更新器和发布 smoke 的同步改名工作。
+- 优化结果：Issue 变为实施前置；identity 同时作为独立 Release 资产与 ZIP 内 metadata；所有 seam 统一为 `app/metadata/product-layout.json`；更新契约改称 `schema_version=1` 新树到同 schema。
+
+## Productization Baseline（2026-08-10）
+
+- 锁定工具：.NET SDK 10.0.302、Node 24.18.0、npm 11.7.0、uv 0.9.21；npm locked install 327 packages，0 vulnerability。
+- `uv run --no-project --with pytest==9.0.3 --with ruff==0.15.17 python scripts/check_quality.py` 通过：64 Python、14 legacy Web、19 Vitest、Prettier、ESLint、TypeScript 与 Vite build 全绿。
+- App Release tests 105/105 通过。
+- Platform Release tests 84/85；唯一失败 `WindowsJobObjectTests.TerminateAndWaitReturnsAfterEveryAssignedProcessExits` 在本任务任何 Platform 修改前出现，临时目录仍被后代占用。它与 Phase 8 历史竞态一致，记录为 existing baseline failure，不能用重试伪装通过。
+
+## Layout Test Seams（2026-08-10）
+
+- 当前 Python package tests 只从预先存在的 `product_root` 绑定 Backend，并断言旧根 `component-lock.json/backend/runtime-installer`；适合替换为 stage 输入→新树输出的 interface 测试。
+- 当前 `PortableLayoutTests` 明确把 production DataRoot/Config/Output 断言在 InstallRoot，且 RuntimeInstaller 的 portable manifest 是另一个 Backend contract，不能与新 `product-layout.json` 混为同一概念。
+- 当前 `UpdateArtifactCleanerTests` 只接受 DataRoot 位于 InstallRoot；新测试必须反转为显式 LocalAppData update root，同时继续验证只删除白名单 updater artifacts。
+- 当前 `GitHubUpdateSourceTests` 刻意只选择 `VibeOCR-Next-*` 并拒绝 `VibeOCR-*`；资产改名会先在该稳定 selector seam 产生确定性红灯。
+- 没有发现直接覆盖 Python `update_replacer.py` 的现有测试文件；更新事务实现前必须新增成功、stage 验证失败、替换失败回滚、health timeout 与用户数据不触碰契约。
+- Bootstrapper 只有 BCL + Windows/WebView packages；共享 ProductLayout 若新增单独 DLL 会再次污染根。linked compile 同一 net472-compatible 源码到 Bootstrapper/Platform 是更符合根约束的 implementation。
+- App 当前从内部 WinUI exe 推导 InstallRoot，发布后会错误得到 `<install>/app`；Bootstrapper 必须显式传入产品根，AppLaunchOptions/PortableLayout 接收该值，禁止父目录扫描。
+- `VIBEOCR_PORTABLE_LAYOUT` 与 `PortableLayoutManifest` 是传给 Backend Runtime Installer 的另一个 portable-store contract，不是产品 layout descriptor；重构时保留字段语义并只替换其周围 product paths。
+- App 的 WebAssets 仍可从 `AppContext.BaseDirectory/WebAssets` 读取，因为内部 app publish 闭包整体移动；启动项、component lock、installer、runtime manifest 和 updater 才需要改用 resolved product layout。
+
+## Classic Behavior Audit（2026-08-10）
+
+- 代码事实推翻了“七路由存在即完整等价”的宽松判断；严格矩阵见 `docs/classic-behavior-matrix.md`。
+- 当前单图输入会立即启动识别，Canvas 编辑结果没有回送给宿主；因此缺少 Classic 的“输入→配置/编辑→开始”提交边界。
+- 批量新增全部 Markdown/Word/Excel 导出，但仍没有选中项预览、完整结果与当前项导出。
+- PDF OCR 只把文本写入 `PdfPageViewModel.OcrText`，`SavePdfAsync` 没有文字层参数；把按钮写成“添加文字层”会误导用户。
+- `IQrCodeClient.GenerateAsync` 只接受 `data/format`；颜色、Logo、标签等不是遗漏 UI 控件，而是发布接口不存在。
+- Settings 能读取 residency/runtime snapshot，但 `IInferenceClient` 没有 preload/evict/cache/profile/reinstall mutation；占位文案不能计作完成。
+- 这些能力跨越已发布 Backend/Protocol seam。依据仓库关系和用户的单仓超大 PR 边界，本 PR 可完成布局、更新、视觉和已有接口上的体验，但不能伪造严格 Classic 全功能等价。
+- 更新器最初把候选和 rollback 都放在 LocalAppData 后直接 `Path.replace` 到安装根；当两者位于不同盘符时，跨卷 rename 必然失败。修复后下载/解压仍在用户数据，原子 move 的 deployment stage 与 rollback 均位于安装根同卷同级，并以测试断言所有 move 不经过 user-data。
+- 最终 Spec 审查指出 updater 仅验证布局、没有在替换前验证 release/identity closure；现统一由 `verify_product_release` 校验精确文件集、size/hash、component lock、component identities、Protocol/Backend/runtime manifest 与 installer 绑定，并在解压树和同卷 deployment stage 各执行一次。
+- 最终 Standards 审查指出 Python/C# canonical path 与 stage/release 语义不够清晰；现路径固定值完全一致，Python 将 pre-manifest staging 限定为 packager interface，完整安装树必须包含 release manifest。
+- 品牌生成不再依赖未锁定 Pillow：Windows-only 构建直接用系统 Edge 按 7 个目标尺寸渲染 SVG，读取 PNG IHDR 验证尺寸，再生成 ICO；`--check` 字节比较已接入 quality/release。PyInstaller updater 和托盘均消费同一 ICO。
+- 最终真实候选通过 layout/closure、PowerShell artifact verifier、SHA-256、SPDX SBOM 与解压后 WebView2 bridge-ready；ZIP 根五项且无 PDB/`.exe.config`。

@@ -40,6 +40,7 @@ public sealed class WindowsJobObjectTests
         child.Dispose();
       }
       TryKill(parent);
+      parent.Dispose();
       Directory.Delete(root, recursive: true);
     }
   }
@@ -66,6 +67,8 @@ public sealed class WindowsJobObjectTests
     {
       TryKill(first);
       TryKill(second);
+      first.Dispose();
+      second.Dispose();
       Directory.Delete(root, recursive: true);
     }
   }
@@ -134,8 +137,8 @@ public sealed class WindowsJobObjectTests
       if (!process.HasExited)
       {
         process.Kill(entireProcessTree: true);
-        process.WaitForExit(milliseconds: 5_000);
       }
+      process.WaitForExit(milliseconds: 5_000);
     }
     catch (InvalidOperationException)
     {

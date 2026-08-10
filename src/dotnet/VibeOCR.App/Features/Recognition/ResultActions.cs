@@ -8,7 +8,7 @@ using VibeOCR.Platform.Inference;
 namespace VibeOCR.App.Features.Recognition;
 
 public enum ResultCopyFormat { Rich, Markdown, Plain }
-public enum ResultExportFormat { Html, Markdown, Text }
+public enum ResultExportFormat { Docx, Html, Markdown, Text, Xlsx }
 public sealed record RecognitionResultContent(string RawText, string MarkdownText, string HtmlText, System.Text.Json.JsonElement[] RawBlocks);
 public sealed class ClipboardBusyException(Exception? inner = null) : Exception("The clipboard is busy.", inner);
 
@@ -43,7 +43,14 @@ public sealed class ResultActions(IInferenceClient inference, IResultActionPlatf
         if (path is null) return null;
         bool existed = File.Exists(path);
         if (existed && !await platform.ConfirmOverwriteAsync(path, cancellationToken)) return null;
-        string fmt = format switch { ResultExportFormat.Html => "html", ResultExportFormat.Markdown => "markdown", _ => "txt" };
+        string fmt = format switch
+        {
+            ResultExportFormat.Docx => "docx",
+            ResultExportFormat.Html => "html",
+            ResultExportFormat.Markdown => "markdown",
+            ResultExportFormat.Xlsx => "xlsx",
+            _ => "txt",
+        };
         return await inference.ExportAsync(new ExportRequest(
             result.RawText, result.MarkdownText, result.HtmlText, path, fmt, existed), cancellationToken);
     }
@@ -75,7 +82,14 @@ public sealed class WindowsResultActionPlatform(Func<nint> windowHandle) : IResu
     public async Task<string?> PickExportPathAsync(ResultExportFormat format, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        string ext = format switch { ResultExportFormat.Html => ".html", ResultExportFormat.Markdown => ".md", _ => ".txt" };
+        string ext = format switch
+        {
+            ResultExportFormat.Docx => ".docx",
+            ResultExportFormat.Html => ".html",
+            ResultExportFormat.Markdown => ".md",
+            ResultExportFormat.Xlsx => ".xlsx",
+            _ => ".txt",
+        };
         FileSavePicker picker = new() { SuggestedStartLocation = PickerLocationId.DocumentsLibrary, SuggestedFileName = "ocr-result" };
         picker.FileTypeChoices.Add("Export", [ext]);
         WinRT.Interop.InitializeWithWindow.Initialize(picker, windowHandle());

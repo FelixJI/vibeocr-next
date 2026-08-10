@@ -12,15 +12,16 @@ import {
   Tooltip,
 } from "@fluentui/react-components";
 import {
-  InfoRegular,
-  AppsListDetailRegular,
-  BarcodeScannerRegular,
-  DocumentPdfRegular,
-  ImageRegular,
-  SettingsRegular,
-  ShieldTaskRegular,
-  WeatherMoonRegular,
-} from "@fluentui/react-icons";
+  Camera,
+  FileText,
+  Info,
+  ListChecks,
+  MoonStar,
+  ScanLine,
+  Settings,
+  ShieldCheck,
+  Sparkles,
+} from "lucide-react";
 import { NavLink, Outlet } from "react-router";
 
 import type { AppActions, AppViewState, ThemePreference } from "../app/types";
@@ -32,15 +33,42 @@ interface AppShellProps {
   readonly onThemeChange: (theme: ThemePreference) => void;
 }
 
-const navigation = [
-  ["recognition", "单次识别", ImageRegular],
-  ["batch", "批量识别", AppsListDetailRegular],
-  ["qrcode", "二维码", BarcodeScannerRegular],
-  ["pdf", "PDF", DocumentPdfRegular],
-  ["settings", "设置", SettingsRegular],
-  ["about", "关于", InfoRegular],
-  ["diagnostics", "诊断与修复", ShieldTaskRegular],
+const primaryNavigation = [
+  ["recognition", "单次识别", ScanLine],
+  ["batch", "批量识别", ListChecks],
+  ["qrcode", "二维码", Sparkles],
+  ["pdf", "PDF", FileText],
 ] as const;
+
+const utilityNavigation = [
+  ["settings", "设置", Settings],
+  ["about", "关于", Info],
+  ["diagnostics", "诊断与修复", ShieldCheck],
+] as const;
+
+function NavigationItems({
+  items,
+  navigate,
+}: {
+  readonly items: typeof primaryNavigation | typeof utilityNavigation;
+  readonly navigate: AppActions["navigate"];
+}) {
+  return items.map(([route, label, Icon]) => (
+    <NavLink
+      aria-label={label}
+      className={({ isActive }) =>
+        `navigation-link${isActive ? " is-active" : ""}`
+      }
+      key={route}
+      onClick={() => navigate(route)}
+      title={label}
+      to={`/${route}`}
+    >
+      <Icon aria-hidden="true" size={18} strokeWidth={1.8} />
+      <span>{label}</span>
+    </NavLink>
+  ));
+}
 
 export function AppShell({
   viewState,
@@ -52,28 +80,25 @@ export function AppShell({
     <div className="app-shell">
       <aside className="navigation-rail" aria-label="主导航">
         <div className="brand-lockup">
-          <span className="brand-mark" aria-hidden="true">
-            V
-          </span>
+          <img className="brand-mark" src="./vibeocr-64.png" alt="" />
           <span>VibeOCR</span>
         </div>
         <nav className="navigation-list">
-          {navigation.map(([route, label, Icon]) => (
-            <NavLink
-              aria-label={label}
-              className={({ isActive }) =>
-                `navigation-link${isActive ? " is-active" : ""}`
-              }
-              key={route}
-              onClick={() => actions.navigate(route)}
-              to={`/${route}`}
-            >
-              <Icon aria-hidden="true" />
-              <span>{label}</span>
-            </NavLink>
-          ))}
+          <NavigationItems
+            items={primaryNavigation}
+            navigate={actions.navigate}
+          />
         </nav>
-        <div className="navigation-footnote">本地 OCR 工作台</div>
+        <nav
+          className="navigation-list navigation-utility"
+          aria-label="应用与帮助"
+        >
+          <NavigationItems
+            items={utilityNavigation}
+            navigate={actions.navigate}
+          />
+        </nav>
+        <div className="navigation-footnote">离线工作台</div>
       </aside>
       <div className="shell-content">
         <Toolbar aria-label="应用命令" className="app-toolbar">
@@ -93,7 +118,7 @@ export function AppShell({
               <Tooltip content="切换主题" relationship="label">
                 <ToolbarButton
                   aria-label="切换主题"
-                  icon={<WeatherMoonRegular />}
+                  icon={<MoonStar aria-hidden="true" size={17} />}
                 />
               </Tooltip>
             </MenuTrigger>
@@ -114,6 +139,7 @@ export function AppShell({
           <Button
             appearance="primary"
             disabled={!viewState.capabilities.includes("recognition.capture")}
+            icon={<Camera aria-hidden="true" size={16} />}
             onClick={() => actions.run({ type: "recognition.captureScreen" })}
           >
             截图识别

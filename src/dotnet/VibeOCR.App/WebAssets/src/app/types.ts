@@ -20,7 +20,7 @@ export type AppActionType =
   | "recognition.copy"
   | "recognition.export"
   | "batch.addFiles"
-  | "batch.exportMarkdown"
+  | "batch.exportAll"
   | "batch.start"
   | "batch.cancel"
   | "batch.clear"

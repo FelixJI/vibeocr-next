@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from scripts.bind_component_releases import bind_product_releases
 from scripts.package_product_release import package_product_release
+from scripts.product_layout import stage_product_layout
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -89,6 +90,46 @@ def _releases(tmp_path: Path) -> tuple[Path, Path]:
     return protocol, backend
 
 
+def _stage_product(
+    tmp_path: Path, name: str, backend: Path, component_lock: Path
+) -> Path:
+    app = tmp_path / f"{name}-app"
+    for relative in (
+        "VibeOCR.WinUI.exe",
+        "VibeOCR.WinUI.dll",
+        "VibeOCR.WinUI.pri",
+        "App.xbf",
+        "MainWindow.xbf",
+        "WebAssets/index.html",
+    ):
+        path = app / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(relative.encode())
+    bootstrapper = tmp_path / f"{name}-bootstrapper.exe"
+    bootstrapper.write_bytes(b"bootstrapper")
+    updater = tmp_path / f"{name}-updater.exe"
+    updater.write_bytes(b"updater")
+    identities = tmp_path / f"{name}-identities.json"
+    identities.write_text("{}", encoding="utf-8")
+    license_file = tmp_path / f"{name}-LICENSE"
+    license_file.write_text("license", encoding="utf-8")
+    changelog = tmp_path / f"{name}-CHANGELOG.md"
+    changelog.write_text("changes", encoding="utf-8")
+    product = tmp_path / name / "VibeOCR"
+    stage_product_layout(
+        product_root=product,
+        app_publish_root=app,
+        bootstrapper_executable=bootstrapper,
+        updater_executable=updater,
+        component_lock=component_lock,
+        component_identities=identities,
+        backend_release_dir=backend,
+        license_file=license_file,
+        changelog_file=changelog,
+    )
+    return product
+
+
 def test_product_package_is_deterministic_and_binds_runtime(tmp_path: Path) -> None:
     protocol, backend = _releases(tmp_path)
     component_lock = tmp_path / "component-lock.json"
@@ -105,9 +146,7 @@ def test_product_package_is_deterministic_and_binds_runtime(tmp_path: Path) -> N
     )
     outputs = []
     for name in ("first", "second"):
-        product = tmp_path / name / "VibeOCR"
-        product.mkdir(parents=True)
-        (product / "VibeOCR.exe").write_bytes(b"app")
+        product = _stage_product(tmp_path, name, backend, component_lock)
         output = tmp_path / f"{name}.zip"
         outputs.append(
             package_product_release(
@@ -124,9 +163,9 @@ def test_product_package_is_deterministic_and_binds_runtime(tmp_path: Path) -> N
     assert outputs[0].read_bytes() == outputs[1].read_bytes()
     with zipfile.ZipFile(outputs[0]) as archive:
         members = set(archive.namelist())
-    assert "VibeOCR/component-lock.json" in members
-    assert "VibeOCR/runtime-installer/vibeocr-runtime-installer.exe" in members
-    assert "VibeOCR/backend/runtime-manifest.json" in members
+    assert "VibeOCR/app/metadata/component-lock.json" in members
+    assert "VibeOCR/runtime/installer/vibeocr-runtime-installer.exe" in members
+    assert "VibeOCR/runtime/backend/runtime-manifest.json" in members
 
 
 def test_product_package_accepts_equivalent_crlf_component_lock(
@@ -148,9 +187,7 @@ def test_product_package_accepts_equivalent_crlf_component_lock(
     component_lock.write_bytes(
         component_lock.read_text(encoding="utf-8").replace("\n", "\r\n").encode()
     )
-    product = tmp_path / "product" / "VibeOCR"
-    product.mkdir(parents=True)
-    (product / "VibeOCR.exe").write_bytes(b"app")
+    product = _stage_product(tmp_path, "product", backend, component_lock)
 
     output = package_product_release(
         product_root=product,

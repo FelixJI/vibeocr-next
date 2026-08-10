@@ -53,24 +53,42 @@ if ($Artifact -and (Test-Path $Artifact -PathType Leaf) -and $Artifact.EndsWith(
 }
 
 $errors = [System.Collections.Generic.List[string]]::new()
+$scriptsRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+& uv run --no-project python (Join-Path $scriptsRoot 'product_layout.py') inspect `
+    --product-root $root | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    $errors.Add('product layout descriptor or root closure is invalid')
+}
+
+$expectedRootEntries = @('VibeOCR.exe', 'LICENSE', 'CHANGELOG.md', 'app', 'runtime')
+$actualRootEntries = @(Get-ChildItem -LiteralPath $root -Force | ForEach-Object { $_.Name })
+$actualRootClosure = (($actualRootEntries | Sort-Object) -join "`n")
+$expectedRootClosure = (($expectedRootEntries | Sort-Object) -join "`n")
+if ($actualRootClosure -ne $expectedRootClosure) {
+    $errors.Add(
+        "product root must contain exactly: $($expectedRootEntries -join ', '); " +
+        "actual: $($actualRootEntries -join ', ')")
+}
 
 # Required release surface.  A deny-only verifier allowed empty/zero-byte
 # fixtures to pass, so validate the stable entry points and supervisor contract.
 $requiredFiles = @(
-    'VibeOCR.WinUI.exe',
-    'VibeOCR.Bootstrapper.exe',
-    'updater.exe',
-    'VibeOCR.WinUI.dll',
-    'VibeOCR.WinUI.pri',
-    'VibeOCR.Contracts.dll',
-    'VibeOCR.Platform.dll',
-    'App.xbf',
-    'MainWindow.xbf',
-    'WebAssets\index.html',
-    'component-lock.json',
-    'product-release-manifest.json',
-    'backend\runtime-manifest.json',
-    'runtime-installer\vibeocr-runtime-installer.exe',
+    'VibeOCR.exe',
+    'app\VibeOCR.WinUI.exe',
+    'app\tools\updater.exe',
+    'app\VibeOCR.WinUI.dll',
+    'app\VibeOCR.WinUI.pri',
+    'app\VibeOCR.Contracts.dll',
+    'app\VibeOCR.Platform.dll',
+    'app\App.xbf',
+    'app\MainWindow.xbf',
+    'app\WebAssets\index.html',
+    'app\metadata\product-layout.json',
+    'app\metadata\component-lock.json',
+    'app\metadata\component-identities.json',
+    'app\metadata\product-release-manifest.json',
+    'runtime\backend\runtime-manifest.json',
+    'runtime\installer\vibeocr-runtime-installer.exe',
     'CHANGELOG.md',
     'LICENSE'
 )
@@ -83,7 +101,7 @@ foreach ($relative in $requiredFiles) {
     }
 }
 
-$manifestPath = Join-Path $root 'product-release-manifest.json'
+$manifestPath = Join-Path $root 'app\metadata\product-release-manifest.json'
 if (Test-Path $manifestPath -PathType Leaf) {
     $manifest = $null
     try {
@@ -114,7 +132,7 @@ if (Test-Path $manifestPath -PathType Leaf) {
             }
         }
 
-        $lockPath = Join-Path $root 'component-lock.json'
+        $lockPath = Join-Path $root 'app\metadata\component-lock.json'
         $lock = Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json
         $lockHash = Get-Sha256 -LiteralPath $lockPath
         if ($lockHash -ne $manifest.component_lock_sha256) {
@@ -127,20 +145,20 @@ if (Test-Path $manifestPath -PathType Leaf) {
             'pdf.edit.v2',
             'qrcode.v2',
             'runtime.maintenance.v1',
-            'runtime.settings.v2'
+            'runtime.settings.v2',
             'task.progress.v1'
         )
         if (($requiredCapabilities -join "`n") -ne ($expectedCapabilities -join "`n")) {
             $errors.Add("Next component lock capability set is incomplete")
         }
 
-        $runtimeManifestPath = Join-Path $root 'backend\runtime-manifest.json'
+        $runtimeManifestPath = Join-Path $root 'runtime\backend\runtime-manifest.json'
         $runtimeManifest = Get-Content -LiteralPath $runtimeManifestPath -Raw | ConvertFrom-Json
         $runtimeManifestHash = Get-Sha256 -LiteralPath $runtimeManifestPath
         if ($runtimeManifestHash -ne $lock.backend.runtime_manifest_sha256) {
             $errors.Add("bound runtime manifest hash mismatch")
         }
-        $backendWheelPath = Join-Path (Join-Path $root 'backend') $runtimeManifest.backend_wheel
+        $backendWheelPath = Join-Path (Join-Path $root 'runtime\backend') $runtimeManifest.backend_wheel
         if (-not (Test-Path $backendWheelPath -PathType Leaf)) {
             $errors.Add("bound backend wheel is missing")
         } else {
@@ -150,7 +168,7 @@ if (Test-Path $manifestPath -PathType Leaf) {
                 $errors.Add("bound backend wheel hash mismatch")
             }
         }
-        $installerPath = Join-Path $root 'runtime-installer\vibeocr-runtime-installer.exe'
+        $installerPath = Join-Path $root 'runtime\installer\vibeocr-runtime-installer.exe'
         if (Test-Path $installerPath -PathType Leaf) {
             $installerHash = Get-Sha256 -LiteralPath $installerPath
             if ($installerHash -ne $runtimeManifest.installer.executable_sha256) {
@@ -211,7 +229,7 @@ $forbidden = Get-ChildItem -Path $root -Recurse -Directory -ErrorAction Silently
     Select-Object -First 5
 if ($forbidden) { $errors.Add("build/test/cache directories present: $($forbidden.Name -join ', ')") }
 
-$webAssetsRoot = Join-Path $root 'WebAssets'
+$webAssetsRoot = Join-Path $root 'app\WebAssets'
 if (Test-Path -LiteralPath $webAssetsRoot -PathType Container) {
     $webSourceFiles = Get-ChildItem -LiteralPath $webAssetsRoot -Recurse -File |
         Where-Object { $_.Extension -in @('.ts', '.tsx', '.map') }
@@ -221,6 +239,12 @@ if (Test-Path -LiteralPath $webAssetsRoot -PathType Container) {
     if (Test-Path -LiteralPath (Join-Path $webAssetsRoot 'node_modules')) {
         $errors.Add('WebAssets contains node_modules')
     }
+}
+
+$debugArtifacts = Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Extension -eq '.pdb' -or $_.Name.EndsWith('.exe.config') }
+if ($debugArtifacts) {
+    $errors.Add('release contains PDB or executable config sidecars')
 }
 
 if ($errors.Count -gt 0) {

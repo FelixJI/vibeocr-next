@@ -12,6 +12,8 @@ dist/
 build/
 artifacts/
 .test-results/
+test-results/
+playwright-report/
 .release-input/
 .release-build/
 dev-overrides.json
