@@ -1,3 +1,6 @@
+using System.Net;
+using System.Security.Cryptography;
+using System.Text;
 using VibeOCR.App.Features.Update;
 using Xunit;
 
@@ -94,6 +97,117 @@ public sealed class GitHubUpdateSourceTests
             GitHubUpdateSource.ReleasesEndpoint);
     }
 
+    [Fact]
+    public async Task DownloadVerifyFallsBackAcrossBadSources()
+    {
+        byte[] packageBytes = Encoding.UTF8.GetBytes("verified next package");
+        string expectedHash = Convert.ToHexStringLower(SHA256.HashData(packageBytes));
+        var handler = new UpdateFallbackHandler(packageBytes, expectedHash);
+        using var client = new HttpClient(handler);
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-next-update-{Guid.NewGuid():N}");
+
+        try
+        {
+            var source = new GitHubUpdateSource("0.9.0", root, root, client);
+            (string version, bool available) = await source.FetchLatestAsync(CancellationToken.None);
+
+            Assert.Equal("1.0.0", version);
+            Assert.True(available);
+            Assert.True(await source.DownloadVerifyAsync(CancellationToken.None));
+            Assert.Contains("https://github.test/package.zip.sha256", handler.Requests);
+            Assert.Contains(
+                "https://gh-proxy.com/https://github.test/package.zip.sha256",
+                handler.Requests);
+            Assert.DoesNotContain(
+                "https://gh-proxy.com/https://github.test/package.zip",
+                handler.Requests);
+            Assert.Contains(
+                "https://ghfast.top/https://github.test/package.zip.sha256",
+                handler.Requests);
+            Assert.Contains(
+                "https://ghfast.top/https://github.test/package.zip",
+                handler.Requests);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static GitHubUpdateSource.ReleaseAsset MakeAsset(string name) =>
         new(name, $"https://example.test/{name}");
+
+    private sealed class UpdateFallbackHandler(byte[] packageBytes, string expectedHash)
+        : HttpMessageHandler
+    {
+        public List<string> Requests { get; } = [];
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string url = request.RequestUri!.AbsoluteUri;
+            Requests.Add(url);
+
+            if (url == GitHubUpdateSource.ReleasesEndpoint)
+            {
+                const string releaseJson = """
+                    [
+                      {
+                        "tag_name": "v1.0.0",
+                        "draft": false,
+                        "assets": [
+                          {
+                            "name": "VibeOCR-Next-v1.0.0-win64.zip",
+                            "browser_download_url": "https://github.test/package.zip"
+                          },
+                          {
+                            "name": "VibeOCR-Next-v1.0.0-win64.zip.sha256",
+                            "browser_download_url": "https://github.test/package.zip.sha256"
+                          }
+                        ]
+                      }
+                    ]
+                    """;
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(releaseJson, Encoding.UTF8, "application/json"),
+                });
+            }
+
+            if (url.StartsWith("https://github.test/", StringComparison.Ordinal))
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadGateway));
+
+            if (url == "https://gh-proxy.com/https://github.test/package.zip.sha256")
+            {
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("<html>proxy error</html>", Encoding.UTF8, "text/html"),
+                });
+            }
+
+            if (url == "https://ghfast.top/https://github.test/package.zip.sha256")
+            {
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(
+                        $"{expectedHash}  VibeOCR-Next-v1.0.0-win64.zip\n",
+                        Encoding.UTF8,
+                        "application/octet-stream"),
+                });
+            }
+
+            if (url == "https://ghfast.top/https://github.test/package.zip")
+            {
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new ByteArrayContent(packageBytes),
+                });
+            }
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+        }
+    }
 }

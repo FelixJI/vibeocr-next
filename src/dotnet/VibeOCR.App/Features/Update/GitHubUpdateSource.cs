@@ -17,6 +17,11 @@ internal sealed class GitHubUpdateSource(
     // 被 UpdateViewModel 的 catch 吞成「检查更新失败，请检查网络」。
     internal const string ReleasesEndpoint =
         "https://api.github.com/repos/FelixJI/vibeocr-next/releases?per_page=20";
+    private static readonly string[] ProxyPrefixes =
+    [
+        "https://gh-proxy.com/",
+        "https://ghfast.top/",
+    ];
     private readonly ProductVersion _currentVersion = ParseVersion(currentVersion);
     private readonly string _installRoot = Path.GetFullPath(installRoot);
     private readonly string _updateRoot = updateRoot;
@@ -53,23 +58,51 @@ internal sealed class GitHubUpdateSource(
         Directory.CreateDirectory(_updateRoot);
         string packagePath = Path.Combine(_updateRoot, package.Name);
         string checksumPath = packagePath + ".sha256";
+        _verifiedPackagePath = null;
 
-        await DownloadAsync(package.BrowserDownloadUrl, packagePath, cancellationToken);
-        await DownloadAsync(checksum.BrowserDownloadUrl, checksumPath, cancellationToken);
-
-        string expected = (await File.ReadAllTextAsync(checksumPath, cancellationToken))
-            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)[0];
-        await using FileStream stream = File.OpenRead(packagePath);
-        byte[] actualBytes = await SHA256.HashDataAsync(stream, cancellationToken);
-        string actual = Convert.ToHexStringLower(actualBytes);
-        if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
+        foreach ((string packageUrl, string checksumUrl) in BuildDownloadCandidates(
+            package.BrowserDownloadUrl,
+            checksum.BrowserDownloadUrl))
         {
             File.Delete(packagePath);
             File.Delete(checksumPath);
-            return false;
+            try
+            {
+                // 小型 checksum 先行，坏代理无需先等待完整更新包。
+                await DownloadAsync(checksumUrl, checksumPath, cancellationToken);
+                string? expected = await ReadExpectedHashAsync(
+                    checksumPath,
+                    cancellationToken);
+                if (expected is null)
+                    continue;
+
+                await DownloadAsync(packageUrl, packagePath, cancellationToken);
+                await using FileStream stream = File.OpenRead(packagePath);
+                byte[] actualBytes = await SHA256.HashDataAsync(stream, cancellationToken);
+                string actual = Convert.ToHexStringLower(actualBytes);
+                if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                _verifiedPackagePath = packagePath;
+                return true;
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                // HttpClient 自身超时：当前来源失败，继续下一个候选。
+            }
+            catch (HttpRequestException)
+            {
+                // HTTP / DNS / TLS 失败只淘汰当前来源。
+            }
+            catch (HttpIOException)
+            {
+                // 响应流中断只淘汰当前来源。
+            }
         }
-        _verifiedPackagePath = packagePath;
-        return true;
+
+        File.Delete(packagePath);
+        File.Delete(checksumPath);
+        return false;
     }
 
     public async Task<bool> LaunchUpdaterAsync(CancellationToken cancellationToken)
@@ -160,10 +193,27 @@ internal sealed class GitHubUpdateSource(
         return updaterPath;
     }
 
-    // TODO: 当前只硬连 browser_download_url（GitHub 直链），国内用户可能因 GitHub
-    // 被墙下载失败。Classic 侧（update_service.py + env_config.py）有完整 3 源回退
-    // （gh-proxy → ghproxy → GitHub 直连，按 network_type 选序）。WinUI 当前不发版、
-    // 用户极少，暂不移植；正式发版前需补齐。
+    private static IEnumerable<(string PackageUrl, string ChecksumUrl)>
+        BuildDownloadCandidates(string packageUrl, string checksumUrl)
+    {
+        yield return (packageUrl, checksumUrl);
+        foreach (string prefix in ProxyPrefixes)
+            yield return (prefix + packageUrl, prefix + checksumUrl);
+    }
+
+    private static async Task<string?> ReadExpectedHashAsync(
+        string checksumPath,
+        CancellationToken cancellationToken)
+    {
+        string text = await File.ReadAllTextAsync(checksumPath, cancellationToken);
+        string? expected = text
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault();
+        if (expected is null || expected.Length != 64 || !expected.All(Uri.IsHexDigit))
+            return null;
+        return expected.ToLowerInvariant();
+    }
+
     private async Task DownloadAsync(string url, string destination, CancellationToken cancellationToken)
     {
         using HttpResponseMessage response = await _http.GetAsync(
