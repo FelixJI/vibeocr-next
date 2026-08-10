@@ -126,3 +126,6 @@
 - 发布恢复不能只合并代码修复：`_finalize_main_candidate` 要求 main 的 HEAD commit 修改 `.release/plan.json`，否则写入 `plan-unchanged` sentinel；而直接再次执行 `minor` 会从当前 0.3.0 推到错误的 0.4.0。
 - 安全恢复是机械回退尚未发布的 PR #19（恢复已发布 0.2.0 版本/plan 基线），先让生命周期修复进入 main，再通过 CD 的权威 `release prepare --bump minor` 重新生成 0.3.0；不手改生成版本源或 plan。
 - 修复分支已推送并创建 ready PR #20；首轮云端 quality、App、Platform 和 CodeQL 均通过，`required` 仅剩 packaged WebView2 smoke 隔离失败。
+- PR #20 第二轮 required（run `31355011152`）7分28秒通过，四语言 CodeQL 全绿，并 squash merge 为 main `35a0668`。
+- 合并后 main CI run `31355464161` 又在同一 lifecycle fixture 失败，说明首个修复只关闭了“Job 已终止但尚未退出”的等待竞态，没有关闭启动 enrollment 竞态：`Process.Start()` 与 `AssignProcessToJobObject` 之间，`cmd.exe` 已能创建 `ping.exe`；把父进程加入 Job 不会追溯包含既有后代，故 `ActiveProcesses == 0` 仍可能遗漏逃逸子进程。
+- 第二层修复用 Toolhelp 进程快照计算 root 的后代闭包：先分配 root，使后续新子进程自动继承 Job；再重复吸收快照中尚未入 Job 的既有后代，直到稳定，最后仍由 `TerminateJobObject + ActiveProcesses` 有界等待。确定性测试显式让 PowerShell 在分配前启动 `ping.exe` 并输出 PID，旧实现 CS1061 red，新实现验证 parent/child 都退出且临时目录可立即删除。

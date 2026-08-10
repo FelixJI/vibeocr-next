@@ -136,6 +136,8 @@
 - 已创建并推送 PR #20；云端 Platform 84/84 证明 supervisor 整树等待修复有效，CodeQL 与其余质量门禁通过。
 - PR #20 的 `required` 新失败位于 packaged WebView2 smoke。探针确认进程停在 `AppLog`/WebView2 之前，窗口类 `#32770` 对应跨产品互斥提示框；当前正在以随机 self-test instance scope 隔离 named Mutex/pipe，并补脚本与 C# 回归契约。
 - self-test instance scope 已完成 red→green：C# 5/5 覆盖生产默认、隔离名称和错误输入；脚本行为测试覆盖随机 32 位 scope 与调用方环境恢复。在 Classic 仍占生产锁时，真实 packaged smoke、完整 release build、ZIP release smoke 全部通过。
+- PR #20 云端 required 与四语言 CodeQL 全绿后已 squash merge；main SHA `35a0668` 的 CI run `31355464161` 再次暴露原生命周期用例，首个错误仍是 `Directory.Delete` 被 `ping.exe` 占用。
+- 新证据表明 `cmd.exe` 可在父进程入 Job 前创建后代，Job enrollment 不会追溯既有后代。已新增确定性“分配前既有 child”契约：旧实现 CS1061 red；Toolhelp 后代闭包 enrollment 后 1/1 green，原 GitHub 失败用例 50/50，Platform 全量 85/85。
 
 | Test | Actual | Status |
 |------|--------|--------|
@@ -150,6 +152,10 @@
 | self-test instance scope | C# 5/5；PowerShell 行为 1/1 | passed |
 | quality / App / Platform | 64 Python + 33 Web；105 App；84 Platform | passed |
 | release build / release smoke | ZIP、sidecar、SBOM、artifact verify；两次 packaged bridge-ready | passed |
+| main CI `31355464161` | PR 全绿后仍有启动 enrollment 竞态；83/84 Platform | failed-confirmed |
+| 既有后代 enrollment 契约 | red CS1061 → green 1/1；parent/child 均退出 | passed |
+| 原 lifecycle 用例复跑 | 50/50 | passed |
+| Platform 全量（第二层修复） | 85/85 | passed |
 
 | Timestamp | Error | Attempt | Resolution |
 |-----------|-------|---------|------------|
