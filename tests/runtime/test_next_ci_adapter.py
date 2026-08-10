@@ -341,6 +341,7 @@ def _configure_release_smoke_fixture(
     def fake_run(
         command: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
+        assert kwargs["timeout"] == 120
         calls.append(command)
         if "smoke_web_workbench.ps1" in command[2]:
             product_root = Path(command[command.index("-ProductRoot") + 1])
@@ -703,6 +704,14 @@ def test_platform_e2e_has_a_bounded_hang_diagnostic() -> None:
         "--logger",
         "console;verbosity=detailed",
     ]
+
+
+def test_web_ready_smoke_never_waits_unbounded_after_forced_termination() -> None:
+    root = Path(__file__).parents[2]
+    smoke = (root / "scripts/smoke_web_workbench.ps1").read_text(encoding="utf-8")
+
+    assert "$process.WaitForExit()" not in smoke
+    assert "$process.WaitForExit(5000)" in smoke
 
 
 def test_backend_identity_hashes_runtime_and_optional_release_manifests() -> None:

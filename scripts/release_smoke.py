@@ -73,6 +73,7 @@ def verify(artifacts: Path) -> None:
             str(archive),
         ],
         check=True,
+        timeout=120,
     )
     with tempfile.TemporaryDirectory(prefix="vibeocr-web-smoke-") as temporary:
         extracted = Path(temporary)
@@ -86,6 +87,7 @@ def verify(artifacts: Path) -> None:
                 str(product_root),
             ],
             check=True,
+            timeout=120,
         )
     if "component-lock.json" not in names:
         raise ValueError("component lock missing from release closure")
@@ -100,6 +102,7 @@ if __name__ == "__main__":
         ValueError,
         json.JSONDecodeError,
         subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
     ) as exc:
         print(f"::error::{exc}", file=sys.stderr)
         raise SystemExit(1)

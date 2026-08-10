@@ -65,7 +65,9 @@ try {
         -WindowStyle Hidden -PassThru
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         $process.Kill($true)
-        $process.WaitForExit()
+        if (-not $process.WaitForExit(5000)) {
+            throw 'Web workbench process tree did not exit after forced termination'
+        }
         throw "Web workbench did not reach bridge-ready within $TimeoutSeconds seconds"
     }
     if ($process.ExitCode -ne 0) {
