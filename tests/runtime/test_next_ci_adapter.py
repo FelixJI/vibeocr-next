@@ -687,6 +687,24 @@ def test_project_config_declares_minor_compatible_protocol_and_single_identity_a
     assert 'value=".release-input/protocol-sdk"' in nuget
 
 
+def test_platform_e2e_has_a_bounded_hang_diagnostic() -> None:
+    root = Path(__file__).parents[2]
+    config = json.loads((root / ".ci/project.json").read_text(encoding="utf-8"))
+    platform_test = next(
+        command for command in config["ci"]["e2e"] if command[:2] == ["dotnet", "test"]
+    )
+
+    assert platform_test[-7:] == [
+        "--blame-hang",
+        "--blame-hang-timeout",
+        "2m",
+        "--blame-hang-dump-type",
+        "none",
+        "--logger",
+        "console;verbosity=detailed",
+    ]
+
+
 def test_backend_identity_hashes_runtime_and_optional_release_manifests() -> None:
     root = Path(__file__).parents[2]
     resolver = (root / "scripts/resolve_component_releases.py").read_text(
