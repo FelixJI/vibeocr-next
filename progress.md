@@ -120,3 +120,35 @@
 - 最终 spec 复审指出 session 重用、Canvas 工具缺口、QR 无 busy/cancel、有界列表不可翻页和 About 元数据缺失；已逐项补齐并新增回归测试。
 - 最终 standards 复审指出构建目录忽略、C# 缩进、后台释放竞态、主题状态覆盖和 smoke 进程竞态；均已修正，处理器新增直接异步取消/释放测试。
 - 修后复审：Spec blocker/actionable 0；Standards blocker/actionable 0。最终权威 App CI TRX 为 100/100，QR stale-success 修复后的正式候选已重建并通过 artifact verify 与两次 packaged bridge-ready smoke。
+
+### Phase 8：发布后 main CI 故障诊断
+
+- **Status:** in_progress
+- 失败事实：main SHA `52c4574` 的 CI run `31349358391` 在 Platform lifecycle 单测清理临时目录时失败；CD workflow_run 随后正确 skipped。
+- 复现反馈环：显式使用 x64 .NET 10.0.302，精确单测连续 50 轮均通过，确认本地基础复现率低；GitHub runner 日志提供原始 red 证据。
+- 根因证据：生产 `Terminate()` 杀整树后只等待父进程；.NET 官方契约明确父进程退出不代表后代已退出，测试后代 `ping.exe` 持有工作目录。
+- 待执行：以 Job Object 为进程树真源，增加有界终止等待和确定性回归，再走 PR、main CI、CD 全链复验。
+- 已实现 `WindowsJobObject.TerminateAndWait`：调用 `TerminateJobObject`，查询 `ActiveProcesses`，最多等待 5 秒；`InferenceSupervisorProcess` 仅在 Job 路径失败时回退 `Process.Kill(entireProcessTree: true)`。
+- 回归测试 red：`WindowsJobObject` 不含 `TerminateAndWait`，CS1061；green：两个已分配长生命周期进程均在方法返回前退出，1/1 passed。
+- 相关生命周期测试 22/22；原始失败用例修复后连续 50/50；完整 Platform 84/84。
+- quality 通过：64 Python、14 legacy Web、19 Vitest、Prettier/ESLint/typecheck/build；App 100/100。
+- 发布状态机要求候选 main HEAD 本身变更 plan；单独修复会 `plan-unchanged`，直接再跑 `minor` 则会错误生成 0.4.0。恢复方案为回退未发布 #19 后，通过 CD 正式入口重新生成 0.3.0。
+
+| Test | Actual | Status |
+|------|--------|--------|
+| main CI run `31349358391` | Platform 82/83；目录被后代进程占用 | failed-confirmed |
+| 精确 lifecycle 单测 x50 | 50/50 passed，本机未复现低概率竞态 | passed-low-repro |
+| Job Object 确定性契约 | red CS1061 → green 1/1，两个活动进程均退出 | passed |
+| supervisor/Job Object 相关测试 | 22/22 passed | passed |
+| Platform 全量 | 84/84 passed，0 skip | passed |
+| quality | 64 Python + 14 legacy Web + 19 Vitest，格式/lint/type/build 全通过 | passed |
+| App CI | 100/100，Completed TRX | passed |
+| release build | Web/build/publish 通过；当前本机 WebView2 smoke 超时 | blocked-local-environment |
+
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-08-10 | 默认 `dotnet` 命中 x86 host，未发现 SDK 10.0.302 | 1 | 显式使用 `C:\Program Files\dotnet\dotnet.exe` 后反馈环正常运行 |
+| 2026-08-10 | 64 后代压力测试在旧实现上仍通过，无法形成可靠红灯 | 1 | 撤销脆弱测试，改为 Job Object 多活动进程的确定性接口契约 |
+| 2026-08-10 | release build 在 build/publish 成功后，构建前 WebView2 smoke 30 秒超时 | 1 | 作为独立本地启动信号调查；下一探针延长观测并区分进程退出/存活/health，不原样重试 |
+| 2026-08-10 | 已 publish 产品的 60 秒 smoke 仍超时 | 2 | 用此前验证通过的 0.2.0 候选作差分探针 |
+| 2026-08-10 | 0.2.0 旧候选在当前机器同样超时 | 3 | 确认为本机 WebView2/桌面会话状态，不改产品或门禁；GitHub runner 作为权威 release smoke |

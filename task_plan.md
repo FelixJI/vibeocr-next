@@ -6,7 +6,7 @@
 
 ## Current Phase
 
-Phase 7：审查、完整验证与交付（已完成）
+Phase 8：发布后 main CI 生命周期竞态修复（进行中）
 
 ## Confirmed Test Seams
 
@@ -83,6 +83,17 @@ Phase 7：审查、完整验证与交付（已完成）
 - [x] 所有可自动化验收标准完成；视觉/完整键盘人工复核限制已如实记录
 - **Status:** complete-with-documented-visual-limitation
 
+### Phase 8：发布后 main CI 生命周期竞态修复
+
+- [x] 定位失败 run、SHA、job 和首个错误；确认 CD 因 main CI 失败而正确跳过
+- [x] 用失败测试连续运行建立反馈环，并记录本地 50 轮未复现的低概率特征
+- [x] 核对 `Process.Kill(entireProcessTree)`、父进程等待和 Job Object 生命周期契约
+- [x] 经确认后实现 Job Object 整树终止等待和确定性回归测试
+- [x] 运行 Platform 全量与 quality；release build 编译/publish 通过，smoke 因本机环境故障转交 GitHub runner
+- [ ] 在修复 PR 中机械回退未发布的 #19 计划，跟踪 PR 与合并后 main CI
+- [ ] 通过 CD `minor` 重新生成 0.3.0 release PR，并跟踪 main CI、CD 与正式 Release
+- **Status:** in_progress
+
 ## Key Decisions
 
 | Decision | Rationale |
@@ -122,6 +133,9 @@ Phase 7：审查、完整验证与交付（已完成）
 | tsbuildinfo 与 ESLint 两次 apply_patch section 结构无效 | 1 | 用包含完整上下文的独立 update/add/delete sections 后成功应用 |
 | 前端整体验证发现 ESLint 2 处错误与 Prettier 范围包含待迁移伪 TS | 1 | UI 子代理修复主题单一事实源和未使用图标；主线程收紧格式化范围并重新执行全部 Web 门禁 |
 | Windows 沙箱启动 PowerShell 返回错误 1920 | 1 | 经用户批准仅对只读检查使用沙箱外 PowerShell；所有源码写入继续使用 apply_patch |
+| 默认 `dotnet` 命中 x86 host，报告没有 SDK | 1 | 改用已安装的 `C:\Program Files\dotnet\dotnet.exe` 10.0.302，不修改 `global.json` |
+| 完整 release build 的构建前 WebView2 smoke 在 30 秒内未 bridge-ready | 1 | 编译/publish 已成功；改用延长观测与显式进程/health 探针区分冷启动延迟、残留进程和启动崩溃，不原样重试 |
+| 单独合并代码修复会使 pending 0.3.0 plan 命中 `plan-unchanged`，无法发布 | 1 | 回退未发布 #19 计划到已发布 0.2.0 基线；修复合并后用权威 CD `minor` 重新生成 0.3.0 |
 
 ## Notes
 

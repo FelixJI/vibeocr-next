@@ -7,4 +7,7 @@
     <PackageReference Include="VibeOCR.Runtime.Contracts" />
     <PackageReference Include="VibeOCR.Runtime.Client" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="VibeOCR.Platform.Tests" />
+  </ItemGroup>
 </Project>

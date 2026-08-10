@@ -307,19 +307,31 @@ public sealed class InferenceSupervisorProcess : IDisposable
             _jobObject = null;
         }
 
+        bool jobTerminated = false;
         try
         {
-            if (process is not null && !process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
+            jobTerminated = jobObject?.TerminateAndWait(TimeSpan.FromSeconds(5)) == true;
         }
         catch
         {
-            // Best-effort.
+            // Fall back to Process.Kill when the Job Object cannot terminate the tree.
         }
 
-        jobObject?.Dispose();
+        if (!jobTerminated)
+        {
+            try
+            {
+                if (process is not null && !process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+            }
+            catch
+            {
+                // Best-effort fallback.
+            }
+        }
+
         if (process is not null)
         {
             try
@@ -332,6 +344,7 @@ public sealed class InferenceSupervisorProcess : IDisposable
             }
             process.Dispose();
         }
+        jobObject?.Dispose();
     }
 
     private void OnProcessExited(object? sender, EventArgs eventArgs)
