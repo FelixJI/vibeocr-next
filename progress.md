@@ -235,3 +235,9 @@
 | Brand assets | SVG → 7 PNG + ICO 字节一致性 | passed |
 | Release build | WinUI/Bootstrapper/PyInstaller updater/layout/closure/ZIP/checksum/SBOM | passed |
 | Release smoke | artifact verifier + 解压候选 WebView2 bridge-ready | passed |
+
+### Phase 14：Draft PR 交付
+
+- 三个中文 Conventional Commit 已推送到 `codex/vibeocr-productization`，未绕过 hooks，分支基于最新 `origin/main`（ahead 3 / behind 0）。
+- Draft PR #25 已创建：`https://github.com/FelixJI/vibeocr-next/pull/25`；正文包含 Issue #23、根因、布局/更新/UI 变更、Classic 阻断矩阵、精确验证命令与三张视觉基线。
+- GitHub CI `plan` 与四语言 CodeQL 已触发并处于 `IN_PROGRESS`；pending 未写成 passed，PR 未合并。

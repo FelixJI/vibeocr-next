@@ -161,10 +161,10 @@ Phase 14：提交、推送与 Draft PR
 
 - [x] 复核最终 diff、生成物、lock、敏感信息、文档与验证记录
 - [x] 按完整意图形成多个中文 Conventional Commit，不绕过 hooks
-- [ ] 推送 `codex/vibeocr-productization` 并创建中文 Draft PR
-- [ ] PR 正文包含根因、变更、影响风险、Classic 矩阵、精确验证结果与 UI 截图
-- [ ] 确认 GitHub CI 已触发；pending 保持 pending，不擅自合并
-- **Status:** pending
+- [x] 推送 `codex/vibeocr-productization` 并创建中文 Draft PR #25
+- [x] PR 正文包含根因、变更、影响风险、Classic 矩阵、精确验证结果与 UI 截图
+- [x] 确认 GitHub CI/CodeQL 已触发且保持 pending；不擅自合并
+- **Status:** complete-delivery；PR 保持 Draft，等待云端门禁和上游 capability
 
 ## Key Decisions
 
