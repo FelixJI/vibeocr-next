@@ -168,12 +168,12 @@ GitHub 下载仍是 true external adapter；下载并校验完成后，更新事
 执行顺序：
 
 1. 从 ZIP 唯一定位 `app/tools/updater.exe`，复制到 `%LOCALAPPDATA%/VibeOCR/cache/update/<transaction>/` 后启动。
-2. 解压候选到 LocalAppData staging；在触碰当前安装前完成 layout、allowlist、release manifest、component binding 和文件 closure 验证。
-3. 将当前五个部署项 `VibeOCR.exe`、`LICENSE`、`CHANGELOG.md`、`app/`、`runtime/` 整体移入 rollback。
-4. 将 staging 的同名部署项移入安装根；不做逐 DLL 混合更新。
+2. 解压候选到 LocalAppData transaction；在触碰当前安装前完成 layout、allowlist、release manifest、component binding 和文件 closure 验证。
+3. 将已验证候选复制到安装根同卷、同级且带 transaction id 的 deployment stage，再次验证完整布局；这关闭 LocalAppData 与安装盘不同卷时 rename 必然失败的边界。
+4. 将当前五个部署项 `VibeOCR.exe`、`LICENSE`、`CHANGELOG.md`、`app/`、`runtime/` 整体移入同卷 rollback，再把 deployment stage 的同名项移入安装根；不做逐 DLL 混合更新。
 5. 启动新 `VibeOCR.exe`；Bootstrapper 启动 WinUI 后由 App 写入 health。
-6. health 成功才清理 staging/rollback；超时或启动失败则恢复完整旧部署项并重新启动旧 `VibeOCR.exe`。
-7. rollback 失败时保留现场并返回稳定终态，不继续删除。
+6. health 成功才清理 LocalAppData transaction、同卷 stage/rollback；超时或启动失败则恢复完整旧部署项并重新启动旧 `VibeOCR.exe`。
+7. rollback 失败时保留同卷现场并返回稳定终态，不继续删除。
 
 `product-layout.json` schema 1 的新树是唯一支持的输入和更新来源。没有 descriptor、schema 不匹配或旧平铺结构直接返回 `update.unsupported-layout`，不执行迁移或删除。
 

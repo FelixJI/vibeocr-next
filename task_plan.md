@@ -6,7 +6,7 @@
 
 ## Current Phase
 
-Phase 9：产品化方案、基线与独立审查（进行中）
+Phase 14：提交、推送与 Draft PR
 
 ## Confirmed Test Seams
 
@@ -106,61 +106,61 @@ Phase 9：产品化方案、基线与独立审查（进行中）
 - [x] 通过多轮需求拷问锁定发布、UI、功能、任务状态、兼容性与交付边界
 - [x] 从最新 `origin/main` 创建独立 `codex/vibeocr-productization` worktree
 - [x] 核对 AGENTS.md、Git、远端、hooks、现有 PR、v0.3.0 Release 与 main CI
-- [ ] 盘点发布布局、路径消费者、Classic 功能矩阵、Web 状态与测试缺口
+- [x] 盘点发布布局、路径消费者、Classic 功能矩阵、Web 状态与测试缺口
 - [x] 写入完整实施方案和验收矩阵
 - [x] 对 `ProductLayout` interface 执行三方案独立评审并优化方案
 - [x] 依据 CONTRIBUTING.md 创建并关联大改 Issue #23
-- [ ] 运行变更前最小相关基线，记录环境与现有失败
-- **Status:** in_progress
+- [x] 运行变更前最小相关基线，记录环境与现有失败
+- **Status:** complete
 
 ### Phase 10：产品布局、数据边界与更新事务
 
-- [ ] 先为布局 allowlist、路径投影、数据根和更新回滚补充旧实现失败的契约测试
-- [ ] 建立单一版本化产品布局事实源及跨 C#/Python/PowerShell adapters
-- [ ] 将公开根收敛为 `VibeOCR.exe`、`LICENSE`、`CHANGELOG.md`、`app/`、`runtime/`
-- [ ] 将 WinUI/XBF/PRI/WebAssets 与 `app/metadata`、Backend/Installer/Runtime 放入声明目录
-- [ ] 将 component identities 嵌入 metadata 并保留独立 Release identity asset
-- [ ] 将正式 ZIP/selector/CI 契约从 `VibeOCR-Next-*` 收敛为 `VibeOCR-*`
-- [ ] 将设置、日志、缓存和 Web 临时资源迁入 `%LOCALAPPDATA%\VibeOCR`
-- [ ] 改造 Bootstrapper、更新器、打包器、验证器和 smoke 共同消费布局 interface
-- [ ] 实现新布局版本间原子替换、健康确认与失败回滚；不兼容、不迁移、不删除旧开发布局
-- **Status:** pending
+- [x] 先为布局 allowlist、路径投影、数据根和更新回滚补充旧实现失败的契约测试
+- [x] 建立单一版本化产品布局事实源及跨 C#/Python/PowerShell adapters
+- [x] 将公开根收敛为 `VibeOCR.exe`、`LICENSE`、`CHANGELOG.md`、`app/`、`runtime/`
+- [x] 将 WinUI/XBF/PRI/WebAssets 与 `app/metadata`、Backend/Installer/Runtime 放入声明目录
+- [x] 将 component identities 嵌入 metadata 并保留独立 Release identity asset
+- [x] 将正式 ZIP/selector/CI 契约从 `VibeOCR-Next-*` 收敛为 `VibeOCR-*`
+- [x] 将设置、日志、缓存和 Web 临时资源迁入 `%LOCALAPPDATA%\VibeOCR`
+- [x] 改造 Bootstrapper、更新器、打包器、验证器和 smoke 共同消费布局 interface
+- [x] 实现新布局版本间原子替换、健康确认与失败回滚；不兼容、不迁移、不删除旧开发布局
+- **Status:** complete
 
 ### Phase 11：品牌、设计系统、Lucide 与应用壳
 
-- [ ] 建立 Next 自有语义 token，统一浅色/深色/系统主题、状态色、密度、焦点与 motion
-- [ ] 完全移除 Fluent 功能图标依赖，保留 Fluent UI 控件并统一改用 `lucide-react`
-- [ ] 创建原创 VibeOCR SVG 品牌事实源及确定性 ICO/PNG 生成和一致性验证
-- [ ] 将品牌应用到 EXE、窗口/任务栏、托盘、Web 壳、启动/恢复页、关于页和更新器
-- [ ] 重构任务式导航、全局 Runtime/任务状态、通知层级和 1024x720 响应式应用壳
-- [ ] 保留原生 Windows 标题栏，补齐键盘、forced-colors、reduced-motion 和无障碍语义
-- **Status:** pending
+- [x] 建立 Next 自有语义 token，统一浅色/深色/系统主题、状态色、密度、焦点与 motion
+- [x] 完全移除 Fluent 功能图标依赖，保留 Fluent UI 控件并统一改用 `lucide-react`
+- [x] 创建原创 VibeOCR SVG 品牌事实源及确定性 ICO/PNG 生成和一致性验证
+- [x] 将品牌应用到 EXE、窗口/任务栏、托盘、Web 壳、启动/恢复页、关于页和更新器
+- [x] 重构任务式导航、全局 Runtime/任务状态、通知层级和 1024x720 响应式应用壳
+- [x] 保留原生 Windows 标题栏，补齐键盘、forced-colors、reduced-motion 和无障碍语义
+- **Status:** complete
 
 ### Phase 12：Classic 功能矩阵与工作流体验
 
-- [ ] 建立 Classic → Next 行为矩阵，逐项以代码/测试事实判定等价、缺口或需补充能力
+- [x] 建立 Classic → Next 行为矩阵，逐项以代码/测试事实判定等价、缺口或需补充能力
 - [ ] 重构单图/截图/剪贴板的输入→配置→结果工作区与高级参数渐进披露
-- [ ] 对齐复制文本/Markdown、Word/Excel 导出、编辑、撤销/重做和 dirty-state
+- [x] 对齐复制文本/Markdown、Word/Excel 导出；保留既有编辑、撤销/重做和 dirty-state
 - [ ] 对齐批量队列、真实取消、部分失败继续、当前/全部导出和跨路由状态保留
 - [ ] 对齐 PDF 页面编辑/文字层/OCR、二维码生成/识别及设置/Runtime/缓存/更新能力
 - [ ] 保持可配置全局截图快捷键、托盘后台行为、选区编辑和返回主工作区
 - [ ] 为各页面覆盖空闲、待开始、加载、运行、取消、空结果、部分成功、可恢复/阻断错误与 Runtime 不可用状态
-- **Status:** pending
+- **Status:** partial-upstream-blocked；严格等价缺口已记录在 `docs/classic-behavior-matrix.md`
 
 ### Phase 13：测试、视觉证据与真实发布验收
 
-- [ ] 为新增 interface 补充 C#/Python/PowerShell/TypeScript 定向契约与回归测试
-- [ ] 增加 mock bridge 驱动的 Playwright，覆盖关键页面、主题、尺寸和状态的稳定截图
-- [ ] 运行 formatter、lint、typecheck、Web tests、App tests、Platform tests 和相关质量入口
-- [ ] 执行真实 release build、artifact verifier、ZIP tree/allowlist、更新/回滚和 WebView2 smoke
+- [x] 为新增 interface 补充 C#/Python/PowerShell/TypeScript 定向契约与回归测试
+- [x] 增加 mock bridge 驱动的 Playwright，覆盖关键页面、主题、尺寸和状态的稳定截图
+- [x] 运行 formatter、lint、typecheck、Web tests、App tests、Platform tests 和相关质量入口
+- [x] 执行真实 release build、artifact verifier、ZIP tree/allowlist、更新/回滚和 WebView2 smoke
 - [ ] 在 Windows 1024x720/1280x800 与 125%/150%/200% 缩放下记录 GUI 视觉与键盘证据
-- [ ] 独立执行 Standards/Spec 双轴代码审查并修复所有可操作问题
-- **Status:** pending
+- [x] 独立执行 Standards/Spec 双轴代码审查并修复所有可操作问题
+- **Status:** complete-with-documented-manual-gui-limit；真实高 DPI/完整键盘路径留作 PR 人工复核
 
 ### Phase 14：提交、推送与 Draft PR
 
-- [ ] 复核最终 diff、生成物、lock、敏感信息、文档与验证记录
-- [ ] 按完整意图形成多个中文 Conventional Commit，不绕过 hooks
+- [x] 复核最终 diff、生成物、lock、敏感信息、文档与验证记录
+- [x] 按完整意图形成多个中文 Conventional Commit，不绕过 hooks
 - [ ] 推送 `codex/vibeocr-productization` 并创建中文 Draft PR
 - [ ] PR 正文包含根因、变更、影响风险、Classic 矩阵、精确验证结果与 UI 截图
 - [ ] 确认 GitHub CI 已触发；pending 保持 pending，不擅自合并

@@ -169,3 +169,37 @@
 - Spec review：当前只有计划、没有实现属于 Phase 9 的预期状态；`findings.md` 的根 `metadata/` seam 与 `app/metadata/` 目标冲突。Scope creep 为 0。
 - 主审额外发现：正式资产名仍含 `Next` 会违反对外产品名决策，已加入 `.ci`、更新器和发布 smoke 的同步改名工作。
 - 优化结果：Issue 变为实施前置；identity 同时作为独立 Release 资产与 ZIP 内 metadata；所有 seam 统一为 `app/metadata/product-layout.json`；更新契约改称 `schema_version=1` 新树到同 schema。
+
+## Productization Baseline（2026-08-10）
+
+- 锁定工具：.NET SDK 10.0.302、Node 24.18.0、npm 11.7.0、uv 0.9.21；npm locked install 327 packages，0 vulnerability。
+- `uv run --no-project --with pytest==9.0.3 --with ruff==0.15.17 python scripts/check_quality.py` 通过：64 Python、14 legacy Web、19 Vitest、Prettier、ESLint、TypeScript 与 Vite build 全绿。
+- App Release tests 105/105 通过。
+- Platform Release tests 84/85；唯一失败 `WindowsJobObjectTests.TerminateAndWaitReturnsAfterEveryAssignedProcessExits` 在本任务任何 Platform 修改前出现，临时目录仍被后代占用。它与 Phase 8 历史竞态一致，记录为 existing baseline failure，不能用重试伪装通过。
+
+## Layout Test Seams（2026-08-10）
+
+- 当前 Python package tests 只从预先存在的 `product_root` 绑定 Backend，并断言旧根 `component-lock.json/backend/runtime-installer`；适合替换为 stage 输入→新树输出的 interface 测试。
+- 当前 `PortableLayoutTests` 明确把 production DataRoot/Config/Output 断言在 InstallRoot，且 RuntimeInstaller 的 portable manifest 是另一个 Backend contract，不能与新 `product-layout.json` 混为同一概念。
+- 当前 `UpdateArtifactCleanerTests` 只接受 DataRoot 位于 InstallRoot；新测试必须反转为显式 LocalAppData update root，同时继续验证只删除白名单 updater artifacts。
+- 当前 `GitHubUpdateSourceTests` 刻意只选择 `VibeOCR-Next-*` 并拒绝 `VibeOCR-*`；资产改名会先在该稳定 selector seam 产生确定性红灯。
+- 没有发现直接覆盖 Python `update_replacer.py` 的现有测试文件；更新事务实现前必须新增成功、stage 验证失败、替换失败回滚、health timeout 与用户数据不触碰契约。
+- Bootstrapper 只有 BCL + Windows/WebView packages；共享 ProductLayout 若新增单独 DLL 会再次污染根。linked compile 同一 net472-compatible 源码到 Bootstrapper/Platform 是更符合根约束的 implementation。
+- App 当前从内部 WinUI exe 推导 InstallRoot，发布后会错误得到 `<install>/app`；Bootstrapper 必须显式传入产品根，AppLaunchOptions/PortableLayout 接收该值，禁止父目录扫描。
+- `VIBEOCR_PORTABLE_LAYOUT` 与 `PortableLayoutManifest` 是传给 Backend Runtime Installer 的另一个 portable-store contract，不是产品 layout descriptor；重构时保留字段语义并只替换其周围 product paths。
+- App 的 WebAssets 仍可从 `AppContext.BaseDirectory/WebAssets` 读取，因为内部 app publish 闭包整体移动；启动项、component lock、installer、runtime manifest 和 updater 才需要改用 resolved product layout。
+
+## Classic Behavior Audit（2026-08-10）
+
+- 代码事实推翻了“七路由存在即完整等价”的宽松判断；严格矩阵见 `docs/classic-behavior-matrix.md`。
+- 当前单图输入会立即启动识别，Canvas 编辑结果没有回送给宿主；因此缺少 Classic 的“输入→配置/编辑→开始”提交边界。
+- 批量新增全部 Markdown/Word/Excel 导出，但仍没有选中项预览、完整结果与当前项导出。
+- PDF OCR 只把文本写入 `PdfPageViewModel.OcrText`，`SavePdfAsync` 没有文字层参数；把按钮写成“添加文字层”会误导用户。
+- `IQrCodeClient.GenerateAsync` 只接受 `data/format`；颜色、Logo、标签等不是遗漏 UI 控件，而是发布接口不存在。
+- Settings 能读取 residency/runtime snapshot，但 `IInferenceClient` 没有 preload/evict/cache/profile/reinstall mutation；占位文案不能计作完成。
+- 这些能力跨越已发布 Backend/Protocol seam。依据仓库关系和用户的单仓超大 PR 边界，本 PR 可完成布局、更新、视觉和已有接口上的体验，但不能伪造严格 Classic 全功能等价。
+- 更新器最初把候选和 rollback 都放在 LocalAppData 后直接 `Path.replace` 到安装根；当两者位于不同盘符时，跨卷 rename 必然失败。修复后下载/解压仍在用户数据，原子 move 的 deployment stage 与 rollback 均位于安装根同卷同级，并以测试断言所有 move 不经过 user-data。
+- 最终 Spec 审查指出 updater 仅验证布局、没有在替换前验证 release/identity closure；现统一由 `verify_product_release` 校验精确文件集、size/hash、component lock、component identities、Protocol/Backend/runtime manifest 与 installer 绑定，并在解压树和同卷 deployment stage 各执行一次。
+- 最终 Standards 审查指出 Python/C# canonical path 与 stage/release 语义不够清晰；现路径固定值完全一致，Python 将 pre-manifest staging 限定为 packager interface，完整安装树必须包含 release manifest。
+- 品牌生成不再依赖未锁定 Pillow：Windows-only 构建直接用系统 Edge 按 7 个目标尺寸渲染 SVG，读取 PNG IHDR 验证尺寸，再生成 ICO；`--check` 字节比较已接入 quality/release。PyInstaller updater 和托盘均消费同一 ICO。
+- 最终真实候选通过 layout/closure、PowerShell artifact verifier、SHA-256、SPDX SBOM 与解压后 WebView2 bridge-ready；ZIP 根五项且无 PDB/`.exe.config`。
