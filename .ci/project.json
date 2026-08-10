@@ -7,12 +7,12 @@
   },
   "ci": {
     "bootstrap": [
-      ["python", "-m", "pip", "install", "--group", "dev"],
-      ["npm", "ci", "--prefix", "src/dotnet/VibeOCR.App/WebAssets"],
-      ["pwsh", "-File", "scripts/install_windows_app_runtime.ps1"],
-      ["python", "scripts/resolve_component_releases.py"],
-      ["dotnet", "restore", "tests/dotnet/VibeOCR.Platform.Tests/VibeOCR.Platform.Tests.csproj", "--locked-mode"],
-      ["dotnet", "restore", "tests/dotnet/VibeOCR.App.Tests/VibeOCR.App.Tests.csproj", "--locked-mode"]
+      ["python", "scripts/run_ci_command.py", "--label", "python-bootstrap", "--timeout-seconds", "300", "--", "python", "-m", "pip", "install", "--group", "dev"],
+      ["python", "scripts/run_ci_command.py", "--label", "web-bootstrap", "--timeout-seconds", "300", "--", "npm", "ci", "--prefix", "src/dotnet/VibeOCR.App/WebAssets"],
+      ["python", "scripts/run_ci_command.py", "--label", "windows-runtime-bootstrap", "--timeout-seconds", "180", "--", "pwsh", "-File", "scripts/install_windows_app_runtime.ps1"],
+      ["python", "scripts/run_ci_command.py", "--label", "component-resolve", "--timeout-seconds", "300", "--", "python", "scripts/resolve_component_releases.py"],
+      ["python", "scripts/run_ci_command.py", "--label", "platform-restore", "--timeout-seconds", "300", "--", "dotnet", "restore", "tests/dotnet/VibeOCR.Platform.Tests/VibeOCR.Platform.Tests.csproj", "--locked-mode"],
+      ["python", "scripts/run_ci_command.py", "--label", "app-restore", "--timeout-seconds", "300", "--", "dotnet", "restore", "tests/dotnet/VibeOCR.App.Tests/VibeOCR.App.Tests.csproj", "--locked-mode"]
     ],
     "quality": [["python", "scripts/run_ci_command.py", "--label", "quality", "--timeout-seconds", "300", "--", "python", "scripts/check_quality.py"]],
     "e2e": [

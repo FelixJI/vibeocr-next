@@ -107,7 +107,8 @@ def test_component_resolver_authenticates_api_with_ci_gh_token(
     monkeypatch.setenv("GH_TOKEN", "ci-token")
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
 
-    def fake_urlopen(request: object) -> Response:
+    def fake_urlopen(request: object, *, timeout: float) -> Response:
+        assert timeout == 60
         requests.append(request)
         return Response()
 
@@ -695,14 +696,19 @@ def test_project_config_declares_minor_compatible_protocol_and_single_identity_a
     assert config["release"]["identity_asset"] == "component-identities.json"
     assert "component-lock.json" in config["release"]["required_assets"]
     bootstrap = config["ci"]["bootstrap"]
-    assert ["pwsh", "-File", "scripts/install_windows_app_runtime.ps1"] in bootstrap
-    resolver_index = bootstrap.index(
-        ["python", "scripts/resolve_component_releases.py"]
+    assert any(
+        command[-3:] == ["pwsh", "-File", "scripts/install_windows_app_runtime.ps1"]
+        for command in bootstrap
+    )
+    resolver_index = next(
+        index
+        for index, command in enumerate(bootstrap)
+        if "component-resolve" in command
     )
     restore_indexes = [
         index
         for index, command in enumerate(bootstrap)
-        if command[:2] == ["dotnet", "restore"]
+        if "dotnet" in command and "restore" in command
     ]
     assert restore_indexes and resolver_index < min(restore_indexes)
     assert ["python", "scripts/resolve_component_releases.py"] not in config["ci"][
@@ -741,7 +747,7 @@ def test_long_running_ci_commands_have_outer_process_tree_timeouts() -> None:
     root = Path(__file__).parents[2]
     config = json.loads((root / ".ci/project.json").read_text(encoding="utf-8"))
 
-    for stage in ("quality", "e2e", "release_build", "release_smoke"):
+    for stage in ("bootstrap", "quality", "e2e", "release_build", "release_smoke"):
         for command in config["ci"][stage]:
             assert command[:2] == ["python", "scripts/run_ci_command.py"]
             assert "--timeout-seconds" in command

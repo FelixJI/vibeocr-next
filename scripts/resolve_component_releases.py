@@ -27,6 +27,7 @@ else:
 
 ROOT = Path(__file__).resolve().parents[1]
 SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+NETWORK_TIMEOUT_SECONDS = 60
 
 
 def _github_token() -> str:
@@ -42,7 +43,9 @@ def _api(repository: str, path: str) -> Any:
             **({"Authorization": f"Bearer {token}"} if token else {}),
         },
     )
-    with urllib.request.urlopen(request) as response:  # noqa: S310
+    with urllib.request.urlopen(  # noqa: S310
+        request, timeout=NETWORK_TIMEOUT_SECONDS
+    ) as response:
         return json.loads(response.read())
 
 
@@ -94,7 +97,9 @@ def _download(release: dict[str, Any], destination: Path) -> None:
                 **({"Authorization": f"Bearer {token}"} if token else {}),
             },
         )
-        with urllib.request.urlopen(request) as response:  # noqa: S310
+        with urllib.request.urlopen(  # noqa: S310
+            request, timeout=NETWORK_TIMEOUT_SECONDS
+        ) as response:
             (destination / asset["name"]).write_bytes(response.read())
 
 
