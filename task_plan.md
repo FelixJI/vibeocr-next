@@ -92,7 +92,8 @@ Phase 8：发布后 main CI 生命周期竞态修复（进行中）
 - [x] 运行 Platform 全量与 quality；release build 编译/publish 通过，smoke 因本机环境故障转交 GitHub runner
 - [x] 在修复 PR 中机械回退未发布的 #19 计划并创建 PR #20；原 supervisor 失败在云端 84/84 通过
 - [x] 修复 PR #20 新暴露的 packaged WebView2 smoke 启动隔离问题；本地真实 publish、完整 release build 与解压后 release smoke 均通过
-- [ ] 合并 PR #20 并跟踪 main CI
+- [x] 合并 PR #20；PR required 与 CodeQL 全绿
+- [ ] 修复合并后 main CI 暴露的“父进程入 Job 前已启动后代”enrollment 竞态，并重新通过 PR/main CI
 - [ ] 通过 CD `minor` 重新生成 0.3.0 release PR，并跟踪 main CI、CD 与正式 Release
 - **Status:** in_progress
 
@@ -138,6 +139,7 @@ Phase 8：发布后 main CI 生命周期竞态修复（进行中）
 | 默认 `dotnet` 命中 x86 host，报告没有 SDK | 1 | 改用已安装的 `C:\Program Files\dotnet\dotnet.exe` 10.0.302，不修改 `global.json` |
 | 完整 release build 的构建前 WebView2 smoke 在 30 秒内未 bridge-ready | 1 | 云端同样失败；窗口类探针确认本机停在 production 跨产品互斥提示框（`#32770`）。补严格 GUID self-test 实例 scope，隔离单实例/跨产品 named object；当前有 Classic 占锁的同一会话中，真实 publish smoke、完整 release build 和 ZIP release smoke 均转绿 |
 | 单独合并代码修复会使 pending 0.3.0 plan 命中 `plan-unchanged`，无法发布 | 1 | 回退未发布 #19 计划到已发布 0.2.0 基线；修复合并后用权威 CD `minor` 重新生成 0.3.0 |
+| PR #20 全绿但合并后 main CI 原生命周期用例再次失败 | 2 | `TerminateAndWait` 只等待已入 Job 进程；`cmd.exe` 可在父进程分配前创建 `ping.exe`，而 Windows 不追溯吸收既有后代。新增“既有后代”确定性 red→green，分配根进程后用 Toolhelp 快照闭包吸收启动竞态中的后代，再等待 Job 归零 |
 
 ## Notes
 

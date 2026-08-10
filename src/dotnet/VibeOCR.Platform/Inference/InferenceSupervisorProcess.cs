@@ -212,7 +212,7 @@ public sealed class InferenceSupervisorProcess : IDisposable
             try
             {
                 _jobObject = new WindowsJobObject();
-                _jobObject.Assign(process);
+                _jobObject.AssignProcessTree(process);
             }
             catch
             {
