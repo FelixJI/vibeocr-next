@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 
@@ -44,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--timeout-seconds must be positive")
     if not command:
         raise SystemExit("a command is required after --")
+    command[0] = shutil.which(command[0]) or command[0]
 
     print(f"::notice title=CI command::{args.label} started", flush=True)
     process = subprocess.Popen(command)

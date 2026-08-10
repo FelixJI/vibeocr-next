@@ -26,6 +26,21 @@ def test_returns_the_child_exit_code(monkeypatch) -> None:
     assert main(["--label", "quality", "--timeout-seconds", "30", "--", "fake"]) == 17
 
 
+def test_resolves_windows_command_shims_before_starting_child(monkeypatch) -> None:
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        "scripts.run_ci_command.shutil.which",
+        lambda command: "C:/node/npm.cmd" if command == "npm" else None,
+    )
+    monkeypatch.setattr(
+        "scripts.run_ci_command.subprocess.Popen",
+        lambda command: commands.append(command) or _FakeProcess(),
+    )
+
+    assert main(["--label", "web", "--timeout-seconds", "30", "--", "npm", "ci"]) == 0
+    assert commands == [["C:/node/npm.cmd", "ci"]]
+
+
 def test_timeout_terminates_the_process_tree(monkeypatch) -> None:
     process = _FakeProcess(times_out=True)
     terminated: list[int] = []
