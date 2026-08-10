@@ -133,6 +133,9 @@
 - 相关生命周期测试 22/22；原始失败用例修复后连续 50/50；完整 Platform 84/84。
 - quality 通过：64 Python、14 legacy Web、19 Vitest、Prettier/ESLint/typecheck/build；App 100/100。
 - 发布状态机要求候选 main HEAD 本身变更 plan；单独修复会 `plan-unchanged`，直接再跑 `minor` 则会错误生成 0.4.0。恢复方案为回退未发布 #19 后，通过 CD 正式入口重新生成 0.3.0。
+- 已创建并推送 PR #20；云端 Platform 84/84 证明 supervisor 整树等待修复有效，CodeQL 与其余质量门禁通过。
+- PR #20 的 `required` 新失败位于 packaged WebView2 smoke。探针确认进程停在 `AppLog`/WebView2 之前，窗口类 `#32770` 对应跨产品互斥提示框；当前正在以随机 self-test instance scope 隔离 named Mutex/pipe，并补脚本与 C# 回归契约。
+- self-test instance scope 已完成 red→green：C# 5/5 覆盖生产默认、隔离名称和错误输入；脚本行为测试覆盖随机 32 位 scope 与调用方环境恢复。在 Classic 仍占生产锁时，真实 packaged smoke、完整 release build、ZIP release smoke 全部通过。
 
 | Test | Actual | Status |
 |------|--------|--------|
@@ -143,7 +146,10 @@
 | Platform 全量 | 84/84 passed，0 skip | passed |
 | quality | 64 Python + 14 legacy Web + 19 Vitest，格式/lint/type/build 全通过 | passed |
 | App CI | 100/100，Completed TRX | passed |
-| release build | Web/build/publish 通过；当前本机 WebView2 smoke 超时 | blocked-local-environment |
+| PR #20 required（上一轮） | quality/App/Platform 通过；packaged WebView2 smoke 超时 | failed-confirmed |
+| self-test instance scope | C# 5/5；PowerShell 行为 1/1 | passed |
+| quality / App / Platform | 64 Python + 33 Web；105 App；84 Platform | passed |
+| release build / release smoke | ZIP、sidecar、SBOM、artifact verify；两次 packaged bridge-ready | passed |
 
 | Timestamp | Error | Attempt | Resolution |
 |-----------|-------|---------|------------|
@@ -151,4 +157,5 @@
 | 2026-08-10 | 64 后代压力测试在旧实现上仍通过，无法形成可靠红灯 | 1 | 撤销脆弱测试，改为 Job Object 多活动进程的确定性接口契约 |
 | 2026-08-10 | release build 在 build/publish 成功后，构建前 WebView2 smoke 30 秒超时 | 1 | 作为独立本地启动信号调查；下一探针延长观测并区分进程退出/存活/health，不原样重试 |
 | 2026-08-10 | 已 publish 产品的 60 秒 smoke 仍超时 | 2 | 用此前验证通过的 0.2.0 候选作差分探针 |
-| 2026-08-10 | 0.2.0 旧候选在当前机器同样超时 | 3 | 确认为本机 WebView2/桌面会话状态，不改产品或门禁；GitHub runner 作为权威 release smoke |
+| 2026-08-10 | 0.2.0 旧候选在当前机器同样超时 | 3 | 后续云端同样超时，撤销“仅本机环境”判断并继续根因分析 |
+| 2026-08-10 | PR #20 packaged smoke 云端超时 | 4 | 窗口类探针确认互斥提示框；改为隔离 self-test named object，而非延长 timeout |

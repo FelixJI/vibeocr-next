@@ -119,6 +119,10 @@
 - 官方契约：https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.process.kill 与 https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects 。
 - 修复以 `TerminateJobObject` 终止 Job，并通过 `QueryInformationJobObject(JobObjectBasicAccountingInformation)` 的 `ActiveProcesses` 有界等待归零；父进程 `Process.Kill` 仅保留为 Job API 失败/超时的 fallback。
 - 初始 64 后代压力测试在旧实现上仍通过，不能可靠区分修复，已撤销；最终回归 seam 直接向同一 Job 分配两个长生命周期进程，旧实现缺少整组等待契约而确定性 red，新实现返回时两个进程均已退出。
-- 本地完整 release build 在 publish 后的 bridge-ready smoke 超时；将观察窗口延长到 60 秒仍失败，且此前已验证的原始 0.2.0 候选在同一时刻也出现相同超时。由此排除本次 Platform 代码和新 publish 内容，判定为当前本机 WebView2/桌面会话环境故障；不修改产品、不延长仓库 30 秒门禁，交由干净 GitHub Windows runner 复验。
+- 本地完整 release build 在 publish 后的 bridge-ready smoke 超时；GitHub PR #20 run `31353677789` 也在同一 smoke 超时，但此前的 Platform 原始失败已转绿（84/84），证明这是第二个独立门禁问题。
+- 临时进程探针显示超时时父进程存活且没有对应 WebView2 子进程；可见启动后的 Win32 窗口类为 `#32770`，而非 WinUI 主窗口，且 `AppLog.Initialize` 前没有日志。证据闭合到 production 跨产品互斥提示框：smoke 虽隔离了产品副本和 WebView2 user-data，却仍复用真实 `Local\\VibeOCR.Frontend.Exclusive.v2` 与 production 单实例名，自动化运行会被当前用户会话或 runner 残留命名对象阻塞。
+- 正确修复方向不是延长 timeout 或跳过互斥，而是给 `VIBEOCR_SELF_TEST_SMOKE=web-ready` 增加每次随机且严格校验的实例 scope；同一 `SingleInstanceService`/`FrontendExclusiveLock` 生产代码仍被执行，只将 named object 名称隔离，符合 smoke 已有的临时产品副本与唯一 WebView2 user-data 语义。
+- 修复后的真实验证发生在 Classic 仍持有 production 跨产品锁的同一用户会话：重新 publish 的 WinUI 包到达 `bridge-ready`；随后权威 `build-release.ps1` 完整生成 ZIP/sidecar/SBOM，解压后的独立 `release_smoke.py` 再次到达 `bridge-ready`。这直接覆盖了原阻塞条件，不依赖延长 30 秒 timeout。
 - 发布恢复不能只合并代码修复：`_finalize_main_candidate` 要求 main 的 HEAD commit 修改 `.release/plan.json`，否则写入 `plan-unchanged` sentinel；而直接再次执行 `minor` 会从当前 0.3.0 推到错误的 0.4.0。
 - 安全恢复是机械回退尚未发布的 PR #19（恢复已发布 0.2.0 版本/plan 基线），先让生命周期修复进入 main，再通过 CD 的权威 `release prepare --bump minor` 重新生成 0.3.0；不手改生成版本源或 plan。
+- 修复分支已推送并创建 ready PR #20；首轮云端 quality、App、Platform 和 CodeQL 均通过，`required` 仅剩 packaged WebView2 smoke 隔离失败。
