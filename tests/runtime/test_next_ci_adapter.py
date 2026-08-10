@@ -387,9 +387,31 @@ def test_web_ready_smoke_runs_an_isolated_production_profile(
     product.mkdir()
     (product / "VibeOCR.WinUI.exe").write_bytes(b"placeholder")
     launch = tmp_path / "launch.json"
+    cleanup = tmp_path / "cleanup.txt"
     wrapper = tmp_path / "run-smoke.ps1"
     wrapper.write_text(
-        """param([string]$Smoke, [string]$Product, [string]$Launch)
+        """param(
+    [string]$Smoke,
+    [string]$Product,
+    [string]$Launch,
+    [string]$Cleanup
+)
+$global:webViewCleanupAttempts = 0
+function Remove-Item {
+    [CmdletBinding()]
+    param(
+        [string]$LiteralPath,
+        [switch]$Recurse,
+        [switch]$Force
+    )
+    if ($LiteralPath -like '*vibeocr-webview-smoke-*') {
+        $global:webViewCleanupAttempts += 1
+        if ($global:webViewCleanupAttempts -eq 1) {
+            throw 'simulated WebView2 file handle is still active'
+        }
+    }
+    Microsoft.PowerShell.Management\\Remove-Item @PSBoundParameters
+}
 function Start-Process {
     param(
         [string]$FilePath,
@@ -404,6 +426,8 @@ function Start-Process {
         working_directory = $WorkingDirectory
         user_data = $env:WEBVIEW2_USER_DATA_FOLDER
     } | ConvertTo-Json | Set-Content -LiteralPath $Launch
+    New-Item -ItemType Directory -Path $env:WEBVIEW2_USER_DATA_FOLDER |
+        Out-Null
     '{"schema_version":1,"state":"bridge-ready"}' |
         Set-Content -LiteralPath $env:VIBEOCR_WEB_READY_FILE
     $process = [pscustomobject]@{ ExitCode = 0 }
@@ -414,6 +438,7 @@ function Start-Process {
     return $process
 }
 & $Smoke -ProductRoot $Product
+$global:webViewCleanupAttempts | Set-Content -LiteralPath $Cleanup
 """,
         encoding="utf-8",
     )
@@ -427,6 +452,7 @@ function Start-Process {
             str(root / "scripts/smoke_web_workbench.ps1"),
             str(product),
             str(launch),
+            str(cleanup),
         ],
         check=True,
     )
@@ -439,6 +465,7 @@ function Start-Process {
         Path(launched["user_data"]).parent == Path(launched["working_directory"]).parent
     )
     assert Path(launched["user_data"]) != Path(launched["working_directory"])
+    assert cleanup.read_text(encoding="utf-8-sig").strip() == "2"
     assert not Path(launched["user_data"]).exists()
     assert not Path(launched["working_directory"]).exists()
     assert list(product.iterdir()) == [product / "VibeOCR.WinUI.exe"]

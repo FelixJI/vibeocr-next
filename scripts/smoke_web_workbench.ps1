@@ -98,6 +98,19 @@ try {
             [System.StringComparison]::OrdinalIgnoreCase)) {
             throw 'Refusing to remove WebView2 smoke data outside the temporary directory'
         }
-        Remove-Item -LiteralPath $resolvedWebViewData -Recurse -Force
+        $removed = $false
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            try {
+                Remove-Item -LiteralPath $resolvedWebViewData -Recurse -Force
+                $removed = $true
+                break
+            } catch {
+                if ($attempt -eq 19) { throw }
+                Start-Sleep -Milliseconds 250
+            }
+        }
+        if (-not $removed) {
+            throw 'WebView2 smoke data cleanup did not complete'
+        }
     }
 }
