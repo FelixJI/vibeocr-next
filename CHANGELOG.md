@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.0
+
+### Features
+
+- **workbench:** 迁移统一 Web 工作台与原生深宿主 (#18) (6d70f2b)
+- **runtime:** 接入可靠维护与组件修复 (#14) (e2648eb)
+
+### Bug Fixes
+
+- **platform:** 吸收 supervisor 启动期后代 (afc885f)
+- **release:** 修复 supervisor 退出竞态并恢复 0.3.0 发版 (35a0668)
+- **protocol:** 解耦 SDK 与运行时协商 (#16) (272c009)
+- **ci:** 修复镜像标签同步并完善六仓治理 (#15) (ad38f01)
+
 ## 0.2.0
 
 ### Features
