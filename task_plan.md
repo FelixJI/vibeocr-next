@@ -1,12 +1,12 @@
-# VibeOCR Next Web 工作台实施计划
+# VibeOCR 产品化实施计划
 
 ## Goal
 
-在不削弱 Windows 原生能力、Backend 运行时治理和发布门禁的前提下，将 VibeOCR Next 的可见主界面迁移为统一的 React/TypeScript/Fluent Web 工作台，以小而稳定的类型化 interface 连接 C# 原生深宿主，并完成测试、真实打包与故障恢复验收。
+在不削弱 Windows 原生能力、Backend 运行时治理和发布门禁的前提下，一次性交付 VibeOCR 新产品基线：收拢 Windows 发布目录、建立可更新回滚的新布局、按 Classic 行为完成全功能对齐、以 VibeTable 设计语言重构 React/WinUI 界面并全面迁移 Lucide、补齐品牌资产、自动化与视觉测试，最终创建一个合规 Draft PR。
 
 ## Current Phase
 
-Phase 8：发布后 main CI 生命周期竞态修复（进行中）
+Phase 9：产品化方案、基线与独立审查（进行中）
 
 ## Confirmed Test Seams
 
@@ -17,6 +17,10 @@ Phase 8：发布后 main CI 生命周期竞态修复（进行中）
 3. 各业务工作流的公开命令与状态快照，不测试内部协作者或私有方法。
 4. WebAssets 生产构建与打包 interface：`dist`、CSP、离线资产集合。
 5. 真实 WinUI/WebView2 启动 interface：ready handshake、路由激活、进程失败恢复和原生恢复页。
+6. `ProductLayout`：安装根、公开入口、内部应用/运行时/元数据、用户数据位置和布局版本的不变量。
+7. 更新事务：新布局版本间的 staging、切换、健康确认和失败回滚，不覆盖 `%LOCALAPPDATA%\VibeOCR`。
+8. Web 设计系统：语义 token、页面状态模型和 Lucide 图标 adapter 的用户可观察行为。
+9. 品牌资产生成：单一 SVG 事实源到 ICO/PNG 生成物和发布包引用的一致性。
 
 ## Phases
 
@@ -93,9 +97,74 @@ Phase 8：发布后 main CI 生命周期竞态修复（进行中）
 - [x] 在修复 PR 中机械回退未发布的 #19 计划并创建 PR #20；原 supervisor 失败在云端 84/84 通过
 - [x] 修复 PR #20 新暴露的 packaged WebView2 smoke 启动隔离问题；本地真实 publish、完整 release build 与解压后 release smoke 均通过
 - [x] 合并 PR #20；PR required 与 CodeQL 全绿
-- [ ] 修复合并后 main CI 暴露的“父进程入 Job 前已启动后代”enrollment 竞态，并重新通过 PR/main CI
-- [ ] 通过 CD `minor` 重新生成 0.3.0 release PR，并跟踪 main CI、CD 与正式 Release
+- [x] 修复合并后 main CI 暴露的“父进程入 Job 前已启动后代”enrollment 竞态，并重新通过 PR/main CI
+- [x] 通过 CD `minor` 重新生成 0.3.0 release PR，并跟踪 main CI、CD 与正式 Release
+- **Status:** complete
+
+### Phase 9：产品化方案、基线与独立审查
+
+- [x] 通过多轮需求拷问锁定发布、UI、功能、任务状态、兼容性与交付边界
+- [x] 从最新 `origin/main` 创建独立 `codex/vibeocr-productization` worktree
+- [x] 核对 AGENTS.md、Git、远端、hooks、现有 PR、v0.3.0 Release 与 main CI
+- [ ] 盘点发布布局、路径消费者、Classic 功能矩阵、Web 状态与测试缺口
+- [x] 写入完整实施方案和验收矩阵
+- [x] 对 `ProductLayout` interface 执行三方案独立评审并优化方案
+- [x] 依据 CONTRIBUTING.md 创建并关联大改 Issue #23
+- [ ] 运行变更前最小相关基线，记录环境与现有失败
 - **Status:** in_progress
+
+### Phase 10：产品布局、数据边界与更新事务
+
+- [ ] 先为布局 allowlist、路径投影、数据根和更新回滚补充旧实现失败的契约测试
+- [ ] 建立单一版本化产品布局事实源及跨 C#/Python/PowerShell adapters
+- [ ] 将公开根收敛为 `VibeOCR.exe`、`LICENSE`、`CHANGELOG.md`、`app/`、`runtime/`
+- [ ] 将 WinUI/XBF/PRI/WebAssets 与 `app/metadata`、Backend/Installer/Runtime 放入声明目录
+- [ ] 将 component identities 嵌入 metadata 并保留独立 Release identity asset
+- [ ] 将正式 ZIP/selector/CI 契约从 `VibeOCR-Next-*` 收敛为 `VibeOCR-*`
+- [ ] 将设置、日志、缓存和 Web 临时资源迁入 `%LOCALAPPDATA%\VibeOCR`
+- [ ] 改造 Bootstrapper、更新器、打包器、验证器和 smoke 共同消费布局 interface
+- [ ] 实现新布局版本间原子替换、健康确认与失败回滚；不兼容、不迁移、不删除旧开发布局
+- **Status:** pending
+
+### Phase 11：品牌、设计系统、Lucide 与应用壳
+
+- [ ] 建立 Next 自有语义 token，统一浅色/深色/系统主题、状态色、密度、焦点与 motion
+- [ ] 完全移除 Fluent 功能图标依赖，保留 Fluent UI 控件并统一改用 `lucide-react`
+- [ ] 创建原创 VibeOCR SVG 品牌事实源及确定性 ICO/PNG 生成和一致性验证
+- [ ] 将品牌应用到 EXE、窗口/任务栏、托盘、Web 壳、启动/恢复页、关于页和更新器
+- [ ] 重构任务式导航、全局 Runtime/任务状态、通知层级和 1024x720 响应式应用壳
+- [ ] 保留原生 Windows 标题栏，补齐键盘、forced-colors、reduced-motion 和无障碍语义
+- **Status:** pending
+
+### Phase 12：Classic 功能矩阵与工作流体验
+
+- [ ] 建立 Classic → Next 行为矩阵，逐项以代码/测试事实判定等价、缺口或需补充能力
+- [ ] 重构单图/截图/剪贴板的输入→配置→结果工作区与高级参数渐进披露
+- [ ] 对齐复制文本/Markdown、Word/Excel 导出、编辑、撤销/重做和 dirty-state
+- [ ] 对齐批量队列、真实取消、部分失败继续、当前/全部导出和跨路由状态保留
+- [ ] 对齐 PDF 页面编辑/文字层/OCR、二维码生成/识别及设置/Runtime/缓存/更新能力
+- [ ] 保持可配置全局截图快捷键、托盘后台行为、选区编辑和返回主工作区
+- [ ] 为各页面覆盖空闲、待开始、加载、运行、取消、空结果、部分成功、可恢复/阻断错误与 Runtime 不可用状态
+- **Status:** pending
+
+### Phase 13：测试、视觉证据与真实发布验收
+
+- [ ] 为新增 interface 补充 C#/Python/PowerShell/TypeScript 定向契约与回归测试
+- [ ] 增加 mock bridge 驱动的 Playwright，覆盖关键页面、主题、尺寸和状态的稳定截图
+- [ ] 运行 formatter、lint、typecheck、Web tests、App tests、Platform tests 和相关质量入口
+- [ ] 执行真实 release build、artifact verifier、ZIP tree/allowlist、更新/回滚和 WebView2 smoke
+- [ ] 在 Windows 1024x720/1280x800 与 125%/150%/200% 缩放下记录 GUI 视觉与键盘证据
+- [ ] 独立执行 Standards/Spec 双轴代码审查并修复所有可操作问题
+- **Status:** pending
+
+### Phase 14：提交、推送与 Draft PR
+
+- [ ] 复核最终 diff、生成物、lock、敏感信息、文档与验证记录
+- [ ] 按完整意图形成多个中文 Conventional Commit，不绕过 hooks
+- [ ] 推送 `codex/vibeocr-productization` 并创建中文 Draft PR
+- [ ] PR 正文包含根因、变更、影响风险、Classic 矩阵、精确验证结果与 UI 截图
+- [ ] 确认 GitHub CI 已触发；pending 保持 pending，不擅自合并
+- **Status:** pending
 
 ## Key Decisions
 
@@ -108,15 +177,32 @@ Phase 8：发布后 main CI 生命周期竞态修复（进行中）
 | 动态资源使用受控 URL | 保持 64 KiB 消息限制，不传输图片/PDF base64 |
 | 原生恢复页永久保留 | WebView2 或 WebAssets 失败时应用仍可诊断、重载和退出 |
 | 纵向 red-green 切片 | 每次用一个可观察行为驱动最小实现，避免一次性水平重写 |
+| 单个超大 PR、多个逻辑 commit | 用户要求一次性交付；开发和复核仍按完整意图分 commit，最终 squash merge |
+| 唯一公开 `VibeOCR.exe` + 内部 `app/`/`runtime/` | 将用户入口与实现文件分离，根目录严格 allowlist |
+| 用户数据默认 `%LOCALAPPDATA%\VibeOCR` | 让程序目录可整体替换并避免更新事务覆盖用户数据 |
+| 不兼容旧开发布局 | 当前仍处开发阶段，不承担旧数据迁移；同时不自动删除任何旧输出 |
+| 保留 Fluent UI 控件、图标完全切换 Lucide | 复用成熟无障碍基础设施，同时统一图标语义和视觉 |
+| Next 独立语义 token，对齐 VibeTable 设计语言 | 保持产品族一致但不形成跨仓运行时或源码依赖 |
+| 原创 SVG 品牌事实源 | 功能图标与品牌身份分离，并确定性派生 ICO/PNG |
+| Classic 是行为契约而非 Qt 布局模板 | 保留用户任务、错误和取消语义，重新设计信息架构与响应布局 |
+| 不新增永久识别历史 | 避免在未定义隐私、容量与清理契约前持久化敏感识别内容 |
 
 ## Acceptance Criteria
 
-- 七个现有目的地功能等价并使用统一 Fluent 风格。
+- 七个现有目的地与 Classic 已确认行为等价，缺少 Backend/Protocol capability 时阻断完成而非占位或静默隐藏。
+- 发布根目录只包含 `VibeOCR.exe`、`LICENSE`、`CHANGELOG.md`、`app/` 与 `runtime/`，且用户 ZIP 不含 PDB 或开发文件。
+- Bootstrapper、WinUI、构建、打包、验证和更新共同消费 `app/metadata/product-layout.json`；XBF/PRI/WebAssets、Runtime 与 component identities 均由真实候选验证。
+- 用户可见产品目录、入口、界面文案和正式 ZIP 名均使用 `VibeOCR`，不继续暴露 `Next`。
+- 新布局版本间更新成功；健康确认失败会回滚完整程序目录；`%LOCALAPPDATA%\VibeOCR` 不参与替换或回滚。
+- 旧开发布局不迁移、不读取、不自动删除，也不进入升级兼容测试。
 - 全局快捷键、托盘、单实例转发和 `--goto` 正确驱动 Web 路由。
 - Web 不直接访问 Backend、任意文件系统或外网。
 - 图片、二维码和 PDF 缩略图不通过 bridge JSON 传输。
 - WebView2 renderer/browser 失败不会留下不可操作白屏。
-- 已实现 900x600/常规窗口响应式、DPI 无关布局、键盘焦点、中文输入与 forced-colors；DOM/行为/CSS 契约已验证，缩放视觉、完整键盘路径与高对比度视觉因 WebView2 composition 工具限制保留人工复核，不记为自动化通过。
+- UI 使用 Next 自有语义 token、冷中性表面和蓝色主状态；功能图标只来自 Lucide，品牌只来自原创资产管线。
+- 1280x800 为主要设计尺寸，1024x720 必须完整可用；验证 Windows 125%/150%/200% 缩放、键盘焦点、中文输入、forced-colors 和 reduced-motion。
+- 页面状态显式覆盖空闲、输入待识别、加载、运行、取消、空结果、部分成功、可恢复/阻断错误与 Runtime 不可用。
+- 关键壳层和页面状态具有稳定 Playwright 视觉回归；真实 WinUI 截图与人工键盘路径作为 PR 证据，如环境受限则明确标记未验证。
 - formatter、lint、typecheck、Web tests、App tests、Platform tests 全部通过。
 - release build 与真实 release smoke 验证打包后的 WebAssets 和 ready handshake。
 
@@ -125,6 +211,7 @@ Phase 8：发布后 main CI 生命周期竞态修复（进行中）
 | Error | Attempt | Resolution |
 |-------|---------|------------|
 | `planning-with-files` catchup 通过 `uv run` 在无根项目锁的仓库生成了未跟踪 `uv.lock` | 1 | 立即删除；后续仅调用仓库既有环境或封装脚本，避免根级锁副作用 |
+| 并行只读基线命令因 `core.hooksPath`/关键词检索无结果返回 exit 1，导致其他输出未汇总 | 1 | 将可选探测改为显式容忍“未配置/未命中”，后续分别读取必要结果，不原样重试 |
 | 基线 `dotnet test` 无法启动：`PATH` 中没有 SDK，仓库要求 10.0.302 | 1 | 停止重复运行，先定位工作区捆绑 SDK 或请求安装权限；该结果不计为代码测试失败 |
 | 更新 findings 的 patch 上下文不匹配 | 1 | 读取实际文本后缩小上下文重新应用 |
 | npm 开发依赖命令将 `@types\\node` 解析为本地路径并报 ENOENT | 1 | 改用引号保护 scoped package 的正斜杠名称 |

@@ -165,3 +165,27 @@
 | 2026-08-10 | 已 publish 产品的 60 秒 smoke 仍超时 | 2 | 用此前验证通过的 0.2.0 候选作差分探针 |
 | 2026-08-10 | 0.2.0 旧候选在当前机器同样超时 | 3 | 后续云端同样超时，撤销“仅本机环境”判断并继续根因分析 |
 | 2026-08-10 | PR #20 packaged smoke 云端超时 | 4 | 窗口类探针确认互斥提示框；改为隔离 self-test named object，而非延长 timeout |
+
+## Session: 2026-08-10（产品化改造）
+
+### Phase 9：产品化方案、基线与独立审查
+
+- **Status:** in_progress
+- Actions taken:
+  - 通过七轮需求拷问锁定发布目录、数据边界、Classic 对齐、VibeTable 设计语言、Lucide、品牌、任务生命周期、测试与单 PR 交付边界。
+  - 建立持续目标，从最新 `origin/main@6f172f6` 创建 `codex/vibeocr-productization` 独立 worktree。
+  - 核实根 AGENTS.md、无启用 hooks、GitHub 认证、无开放 PR；v0.3.0 正式 Release、main CI/CodeQL/CD 均成功，故收口旧 Phase 8。
+  - 读取并应用 planning-with-files、codebase-design、frontend-design 与 git-pr-delivery；启动 ProductLayout 三方案独立设计评审。
+  - 盘点 build/package/verifier/Bootstrapper/updater/PortableLayout、Web 主题/壳/测试与 CI 入口，更新 task_plan.md/findings.md。
+  - 完成 ProductLayout 三方案比较与计划 Standards/Spec 双轴审查；修复 Issue 前置、identity 闭包、metadata seam、schema 命名和对外 ZIP 命名缺口。
+  - 创建 GitHub Issue #23，固定目标、非目标、关键风险和验收，并关联 `docs/productization-plan.md`。
+- Files created/modified:
+  - `task_plan.md`（追加 Phase 9–14、决策、验收与错误）
+  - `findings.md`（追加产品化需求、布局、UI 与测试事实）
+  - `progress.md`（本节）
+
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-08-10 | 通过 `uv run` 执行 planning catchup 生成未跟踪根 `uv.lock` | 1 | 依据创建时间确认是本次副作用并精确删除；后续只用仓库既有 `uv run --no-sync`/封装入口 |
+| 2026-08-10 | 并行可选 Git 探测因无 hooks 配置/无关键词命中返回 exit 1 | 1 | 改为可选探测显式 `exit 0` 并分别读取必要结果，不重复原命令 |
+| 2026-08-10 | 批量读取包含不存在的 Bootstrapper `App.config` | 1 | 记录为待核实事实；转查 csproj/生成配置与发布产物，不假设源码中存在 App.config |

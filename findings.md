@@ -129,3 +129,43 @@
 - PR #20 第二轮 required（run `31355011152`）7分28秒通过，四语言 CodeQL 全绿，并 squash merge 为 main `35a0668`。
 - 合并后 main CI run `31355464161` 又在同一 lifecycle fixture 失败，说明首个修复只关闭了“Job 已终止但尚未退出”的等待竞态，没有关闭启动 enrollment 竞态：`Process.Start()` 与 `AssignProcessToJobObject` 之间，`cmd.exe` 已能创建 `ping.exe`；把父进程加入 Job 不会追溯包含既有后代，故 `ActiveProcesses == 0` 仍可能遗漏逃逸子进程。
 - 第二层修复用 Toolhelp 进程快照计算 root 的后代闭包：先分配 root，使后续新子进程自动继承 Job；再重复吸收快照中尚未入 Job 的既有后代，直到稳定，最后仍由 `TerminateJobObject + ActiveProcesses` 有界等待。确定性测试显式让 PowerShell 在分配前启动 `ping.exe` 并输出 PID，旧实现 CS1061 red，新实现验证 parent/child 都退出且临时目录可立即删除。
+
+## Productization Requirements（2026-08-10）
+
+- 用户确认一次性交付一个超大 PR；PR 内允许多个逻辑 commit，最终 squash merge，不在功能 PR 中直接修改版本。
+- 发布根公开面固定为唯一 `VibeOCR.exe`、`LICENSE`、`CHANGELOG.md`、`app/` 与 `runtime/`；实现依赖、XBF/PRI、WebAssets、机器清单和组件运行时不得继续平铺。
+- 新版本是无旧包袱的开发基线：不支持旧布局应用内升级，不迁移、不读取，也不自动删除旧开发版数据；只验证新布局之间的更新和回滚。
+- 用户设置、日志、缓存和临时资源默认进入 `%LOCALAPPDATA%\VibeOCR`，用户导出由显式选择位置；更新事务不能覆盖或回滚用户数据。
+- Classic 是功能行为契约而不是 Qt 布局模板；单图/截图/剪贴板、识别管道、复制与 Word/Excel 导出、批量、PDF、二维码、Runtime/模型/缓存/更新都进入矩阵，缺少 capability 时阻断而非占位。
+- UI 保留 React 19、Fluent UI 控件和原生 Windows 标题栏，功能图标完全切换到 `lucide-react`；原创 SVG 品牌资产确定性派生 ICO/PNG。
+- 视觉采用 VibeTable 的冷中性、蓝色主状态、紧凑尺度、轻边框、完整交互状态和无障碍语言，但不引用 VibeTable 源码或复制其数据库布局。
+- 1280x800 为主要设计尺寸，1024x720 必须完整可用；覆盖浅/深/系统主题、125%/150%/200% 缩放、forced-colors、reduced-motion 和键盘工作流。
+- 不新增永久识别历史；跨路由保留任务，取消只在底层确认停止后结束；重启不自动恢复未完成 OCR。
+
+## Product Layout Findings（2026-08-10）
+
+- 根目录零散文件不是单点 copy bug：`build-release.ps1` 把 WinUI publish、Bootstrapper publish、PyInstaller updater 和文档输出到同一 `$product`；`package_product_release.py` 又在同一根写 component lock、backend、runtime installer 和 product manifest。
+- 运行时消费者同样硬编码旧布局：Bootstrapper 默认同根启动 `VibeOCR.WinUI.exe` 并查根 lock/backend/installer；`GitHubUpdateSource` 固定 updater entry 为 `VibeOCR.Bootstrapper.exe`；PowerShell verifier 固定根 required file 列表。
+- `PortableLayout` 当前把 production `config/data/output` 放入安装根；`UpdateArtifactCleaner` 甚至要求 DataRoot 必须在 InstallRoot 内。这两处都必须改为 LocalAppData 策略和显式 deployment root。
+- WinUI csproj 的 XBF/PRI 回填与 WebAssets `dist` 复制是可靠 publish adapter，应整体发布到 `app/`，不能拆散或移除。
+- `product-release-manifest.json` 已承担完整文件 closure 与 hash；新 layout descriptor 只应承担相对路径和布局 schema，不复制 release identity/hash 职责。
+- 三个独立 ProductLayout 方案都收敛到版本化 JSON descriptor + 语言内 adapters；分歧主要在跨语言实现形状、legacy 迁移和根 `.exe.config`。用户已明确拒绝 legacy 迁移，因此所有 legacy reader/migration 建议从最终方案删除。
+- 推荐的 seam：声明式 `app/metadata/product-layout.json` 是跨语言 interface；Python stage/verify 是构建 implementation，C# net472/net10 是运行时 adapters，Python updater 是替换 adapter，PowerShell 仅编排稳定 CLI。
+- `component-identities.json` 既是正式独立 Release identity asset，也必须嵌入 `app/metadata/` 并进入 product release manifest closure；布局重构不能弱化现有 identity 契约。
+- 用户侧品牌去除 `Next` 还要求正式 ZIP 从 `VibeOCR-Next-v*-win64.zip` 改为 `VibeOCR-v*-win64.zip`，并同步 `.ci` required assets、更新选择器、checksum/SBOM 与 smoke。
+- 依赖分类：schema/path 是 in-process；目录树/ZIP/LocalAppData/进程健康是 local-substitutable；GitHub 下载是 true external，保留现有 HttpClient adapter；Backend/Protocol release input 继续由现有 resolver adapter 负责。
+
+## UI and Test Findings（2026-08-10）
+
+- Web 现有 `@fluentui/react-icons` 只集中覆盖导航和少量工具，业务页大量动作仍只有文字；切换 Lucide 需要删除旧依赖、更新 Vite vendor grouping、集中 IconButton/导航 adapter，并用 lint/源码断言阻止回流。
+- 当前橙色主题和 CSS 以 900px 最小宽度、224px rail、大量通用 `work-panel` 为主；新方向应以语义 token 统一蓝色状态、4px spacing、4/6/8px radius、120/200ms motion，并避免每段内容都悬浮成卡片。
+- Vitest/jsdom 已覆盖路由、capability gate、QR payload、批量窗口、PDF 选择、Canvas 撤销、busy/cancel 与 About；没有 Playwright、浏览器截图或视觉回归。
+- 现有真实 E2E 是 packaged WinUI/WebView2 bridge-ready smoke，不产生截图。新增 Playwright 应使用 mock bridge 只验证稳定壳层/关键状态，真实候选仍由 WebView2 smoke 和 Windows GUI 证据兜底。
+- `.ci/project.json` 已有 quality/e2e/release_build/release_smoke 权威入口；新增 Playwright 与 ProductLayout contract 必须进入项目 adapter/quality，而不是在 workflow 重复命令。
+
+## Productization Plan Review（2026-08-10）
+
+- Standards review：2 项硬问题——`CONTRIBUTING.md` 要求大改先建 Issue；计划遗漏 embedded component identities。1 项判断——“layout v1 → v1”命名含混。
+- Spec review：当前只有计划、没有实现属于 Phase 9 的预期状态；`findings.md` 的根 `metadata/` seam 与 `app/metadata/` 目标冲突。Scope creep 为 0。
+- 主审额外发现：正式资产名仍含 `Next` 会违反对外产品名决策，已加入 `.ci`、更新器和发布 smoke 的同步改名工作。
+- 优化结果：Issue 变为实施前置；identity 同时作为独立 Release 资产与 ZIP 内 metadata；所有 seam 统一为 `app/metadata/product-layout.json`；更新契约改称 `schema_version=1` 新树到同 schema。
