@@ -29,8 +29,12 @@ ROOT = Path(__file__).resolve().parents[1]
 SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
 
+def _github_token() -> str:
+    return os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
+
+
 def _api(repository: str, path: str) -> Any:
-    token = os.environ.get("GITHUB_TOKEN", "")
+    token = _github_token()
     request = urllib.request.Request(
         f"https://api.github.com/repos/{repository}{path}",
         headers={
@@ -81,7 +85,7 @@ def compile_protocol_version(root: Path) -> str:
 
 def _download(release: dict[str, Any], destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
-    token = os.environ.get("GITHUB_TOKEN", "")
+    token = _github_token()
     for asset in release["assets"]:
         request = urllib.request.Request(
             asset["browser_download_url"],

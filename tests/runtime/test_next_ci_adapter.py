@@ -18,6 +18,7 @@ from scripts.check_quality import main as run_quality
 from scripts.check_quality import resolve_executable
 from scripts.release_smoke import verify
 from scripts.resolve_component_releases import (
+    _api,
     assert_protocol_compatible,
     bound_protocol_version,
     compile_protocol_version,
@@ -87,6 +88,36 @@ def test_resolver_binding_keywords_match_the_binding_api() -> None:
     passed_keywords = {keyword.arg for keyword in calls[0].keywords}
     accepted_keywords = set(inspect.signature(bind_product_releases).parameters)
     assert passed_keywords <= accepted_keywords
+
+
+def test_component_resolver_authenticates_api_with_ci_gh_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"tag_name":"v1.0.0"}'
+
+    requests: list[object] = []
+    monkeypatch.setenv("GH_TOKEN", "ci-token")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    def fake_urlopen(request: object) -> Response:
+        requests.append(request)
+        return Response()
+
+    monkeypatch.setattr(
+        "scripts.resolve_component_releases.urllib.request.urlopen", fake_urlopen
+    )
+
+    assert _api("FelixJI/vibeocr-backend", "/releases/latest") == {"tag_name": "v1.0.0"}
+    assert len(requests) == 1
+    assert requests[0].get_header("Authorization") == "Bearer ci-token"
 
 
 def test_command_runner_resolves_platform_command_shims(
