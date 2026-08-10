@@ -14,9 +14,16 @@
       ["dotnet", "restore", "tests/dotnet/VibeOCR.Platform.Tests/VibeOCR.Platform.Tests.csproj", "--locked-mode"],
       ["dotnet", "restore", "tests/dotnet/VibeOCR.App.Tests/VibeOCR.App.Tests.csproj", "--locked-mode"]
     ],
-    "quality": [["python", "scripts/check_quality.py"]],
+    "quality": [["python", "scripts/run_ci_command.py", "--label", "quality", "--timeout-seconds", "300", "--", "python", "scripts/check_quality.py"]],
     "e2e": [
       [
+        "python",
+        "scripts/run_ci_command.py",
+        "--label",
+        "platform-tests",
+        "--timeout-seconds",
+        "300",
+        "--",
         "dotnet",
         "test",
         "tests/dotnet/VibeOCR.Platform.Tests/VibeOCR.Platform.Tests.csproj",
@@ -31,10 +38,10 @@
         "--logger",
         "console;verbosity=detailed"
       ],
-      ["pwsh", "-File", "scripts/test_app_ci.ps1"]
+      ["python", "scripts/run_ci_command.py", "--label", "app-tests", "--timeout-seconds", "300", "--", "pwsh", "-File", "scripts/test_app_ci.ps1"]
     ],
-    "release_build": [["pwsh", "-File", "scripts/build-release.ps1"]],
-    "release_smoke": [["python", "scripts/release_smoke.py"]]
+    "release_build": [["python", "scripts/run_ci_command.py", "--label", "release-build", "--timeout-seconds", "600", "--", "pwsh", "-File", "scripts/build-release.ps1"]],
+    "release_smoke": [["python", "scripts/run_ci_command.py", "--label", "release-smoke", "--timeout-seconds", "180", "--", "python", "scripts/release_smoke.py"]]
   },
   "release": {
     "version_sources": [{"kind": "json", "path": "repository.json", "key": "version"}, {"kind": "xml", "path": "src/dotnet/VibeOCR.App/VibeOCR.App.csproj", "key": "Version"}],

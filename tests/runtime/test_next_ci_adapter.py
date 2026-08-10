@@ -692,7 +692,7 @@ def test_platform_e2e_has_a_bounded_hang_diagnostic() -> None:
     root = Path(__file__).parents[2]
     config = json.loads((root / ".ci/project.json").read_text(encoding="utf-8"))
     platform_test = next(
-        command for command in config["ci"]["e2e"] if command[:2] == ["dotnet", "test"]
+        command for command in config["ci"]["e2e"] if "platform-tests" in command
     )
 
     assert platform_test[-7:] == [
@@ -704,6 +704,16 @@ def test_platform_e2e_has_a_bounded_hang_diagnostic() -> None:
         "--logger",
         "console;verbosity=detailed",
     ]
+
+
+def test_long_running_ci_commands_have_outer_process_tree_timeouts() -> None:
+    root = Path(__file__).parents[2]
+    config = json.loads((root / ".ci/project.json").read_text(encoding="utf-8"))
+
+    for stage in ("quality", "e2e", "release_build", "release_smoke"):
+        for command in config["ci"][stage]:
+            assert command[:2] == ["python", "scripts/run_ci_command.py"]
+            assert "--timeout-seconds" in command
 
 
 def test_web_ready_smoke_never_waits_unbounded_after_forced_termination() -> None:
