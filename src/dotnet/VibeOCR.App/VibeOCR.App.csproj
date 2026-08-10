@@ -20,8 +20,10 @@
     <ProjectReference Include="../VibeOCR.Platform/VibeOCR.Platform.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <Content Include="WebAssets/index.html" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="WebAssets/src/**/*.css;WebAssets/src/**/*.js" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="WebAssets\dist\**\*"
+             Link="WebAssets\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <!-- 暴露 internal 成员给测试程序集（GitHubUpdateSource.SelectAsset 等）。

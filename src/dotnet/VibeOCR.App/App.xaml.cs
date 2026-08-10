@@ -14,7 +14,6 @@ using VibeOCR.App.Features.Shell;
 using VibeOCR.App.Features.Update;
 using VibeOCR.App.Services;
 using VibeOCR.App.ViewModels;
-using VibeOCR.App.Views;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Migration;
 using VibeOCR.Platform.Update;
@@ -164,40 +163,34 @@ public sealed partial class App : Application
             Path.Combine(layout.DataRoot, "winui-layout.json"));
 
         _window = new MainWindow(
-            diagnostics,
-            layout,
-            () => new RecognitionViewModel(
-                _inferenceGateway,
-                new InputService(() => WinRT.Interop.WindowNative.GetWindowHandle(_window!))),
-            () => new BatchViewModel(
-                _inferenceGateway,
-                new BatchFileSource(() => WinRT.Interop.WindowNative.GetWindowHandle(_window!))),
-            () =>
-            {
-                nint handle = WinRT.Interop.WindowNative.GetWindowHandle(_window!);
-                var qrViewModel = new QrCodeViewModel(
-                    _qrCodeGateway,
-                    new QrCodeInputService(() => handle));
-                return new QrCodePage(
-                    qrViewModel,
-                    new QrCodeSaveCommands(new QrCodeSavePlatform(() => handle)));
-            },
-            () =>
-            {
-                nint handle = WinRT.Interop.WindowNative.GetWindowHandle(_window!);
-                return new PdfPage(
-                    new PdfViewModel(_inferenceGateway, new PdfFileSource(() => handle)));
-            },
-            () => new SettingsPage(
-                new SettingsViewModel(_inferenceGateway, _runtimeStatus),
-                _shellViewModel!),
-            () =>
-            {
-                return new AboutPage(
-                    _shellViewModel ?? throw new InvalidOperationException("Desktop shell is unavailable."),
-                    _updateViewModel ?? throw new InvalidOperationException("Update service is unavailable."));
-            },
-            _windowLayoutStore);
+          diagnostics,
+          layout,
+          () => new RecognitionViewModel(
+            _inferenceGateway,
+            new InputService(() => WinRT.Interop.WindowNative.GetWindowHandle(_window!))),
+          () => new BatchViewModel(
+            _inferenceGateway,
+            new BatchFileSource(() => WinRT.Interop.WindowNative.GetWindowHandle(_window!))),
+          () =>
+          {
+            nint handle = WinRT.Interop.WindowNative.GetWindowHandle(_window!);
+            return new QrCodeViewModel(
+              _qrCodeGateway,
+              new QrCodeInputService(() => handle));
+          },
+          () =>
+          {
+            nint handle = WinRT.Interop.WindowNative.GetWindowHandle(_window!);
+            return new PdfViewModel(
+              _inferenceGateway,
+              new PdfFileSource(() => handle));
+          },
+          () => new SettingsViewModel(_inferenceGateway, _runtimeStatus),
+          () => _shellViewModel ??
+            throw new InvalidOperationException("Desktop shell is unavailable."),
+          () => _updateViewModel ??
+            throw new InvalidOperationException("Update service is unavailable."),
+          _windowLayoutStore);
         _window.AppWindow.Closing += OnAppWindowClosing;
         _window.Closed += OnWindowClosedFallback;
         _window.Activate();

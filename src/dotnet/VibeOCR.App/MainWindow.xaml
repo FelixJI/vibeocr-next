@@ -1,14 +1,59 @@
-<Window x:Class="VibeOCR.App.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <NavigationView x:Name="RootNavigation" IsBackButtonVisible="Collapsed" IsSettingsVisible="False" PaneDisplayMode="Left" PaneTitle="VibeOCR" SelectionChanged="OnSelectionChanged">
-        <NavigationView.MenuItems>
-            <NavigationViewItem Content="单次识别" Icon="Pictures" Tag="recognition" />
-            <NavigationViewItem Content="批量识别" Icon="AllApps" Tag="batch" />
-            <NavigationViewItem Content="二维码" Icon="Link" Tag="qrcode" />
-            <NavigationViewItem Content="PDF" Icon="Document" Tag="pdf" />
-            <NavigationViewItem Content="设置" Icon="Setting" Tag="settings" />
-            <NavigationViewItem Content="关于" Icon="Contact" Tag="about" />
-            <NavigationViewItem Content="诊断与修复" Icon="Help" Tag="diagnostics" />
-        </NavigationView.MenuItems>
-        <Frame x:Name="ContentFrame" />
-    </NavigationView>
+<Window
+    x:Class="VibeOCR.App.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid
+        x:Name="RootLayout"
+        AllowDrop="True"
+        DragOver="OnDragOver"
+        Drop="OnDrop"
+        Loaded="OnWorkbenchLoaded">
+        <WebView2
+            x:Name="WorkbenchWebView"
+            DefaultBackgroundColor="Transparent" />
+
+        <Border
+            x:Name="RecoveryPanel"
+            MaxWidth="560"
+            Margin="32"
+            Padding="28"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+            BorderThickness="1"
+            CornerRadius="12"
+            Visibility="Collapsed">
+            <StackPanel Spacing="14">
+                <FontIcon
+                    HorizontalAlignment="Left"
+                    FontSize="28"
+                    Glyph="&#xE7BA;" />
+                <TextBlock
+                    FontSize="24"
+                    FontWeight="SemiBold"
+                    Text="工作台需要恢复" />
+                <TextBlock
+                    x:Name="RecoveryDetail"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="WebView2 或页面资源未能稳定启动。你仍可重载、导出诊断或安全退出。"
+                    TextWrapping="Wrap" />
+                <TextBlock
+                    x:Name="RecoveryStatus"
+                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                    Text="原生恢复界面可用。"
+                    TextWrapping="Wrap" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button
+                        Click="OnReloadWorkbenchClicked"
+                        Content="重新加载工作台"
+                        Style="{StaticResource AccentButtonStyle}" />
+                    <Button
+                        Click="OnExportDiagnosticsClicked"
+                        Content="导出脱敏诊断" />
+                    <Button Click="OnExitClicked" Content="退出" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+    </Grid>
 </Window>

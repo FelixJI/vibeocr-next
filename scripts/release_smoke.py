@@ -6,12 +6,30 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+import zipfile
 from pathlib import Path
 
 try:
     from scripts.verify_release_assets import verify_release_assets
 except ModuleNotFoundError:  # 直接执行 scripts/release_smoke.py
     from verify_release_assets import verify_release_assets
+
+
+def _extract_product(archive: Path, destination: Path) -> Path:
+    root = destination.resolve()
+    with zipfile.ZipFile(archive) as package:
+        for member in package.infolist():
+            target = (root / member.filename).resolve()
+            try:
+                target.relative_to(root)
+            except ValueError as error:
+                raise ValueError(
+                    f"release archive entry escapes the product root: {member.filename}"
+                ) from error
+            package.extract(member, root)
+    roots = [path for path in root.iterdir() if path.is_dir()]
+    return roots[0] if len(roots) == 1 else root
 
 
 def verify(artifacts: Path) -> None:
@@ -56,6 +74,19 @@ def verify(artifacts: Path) -> None:
         ],
         check=True,
     )
+    with tempfile.TemporaryDirectory(prefix="vibeocr-web-smoke-") as temporary:
+        extracted = Path(temporary)
+        product_root = _extract_product(archive, extracted)
+        subprocess.run(
+            [
+                "pwsh",
+                "-File",
+                str(root / "scripts/smoke_web_workbench.ps1"),
+                "-ProductRoot",
+                str(product_root),
+            ],
+            check=True,
+        )
     if "component-lock.json" not in names:
         raise ValueError("component lock missing from release closure")
 

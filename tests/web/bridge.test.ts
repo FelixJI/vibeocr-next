@@ -84,11 +84,14 @@ test("renders hostile text as text and blocks data or remote image URLs", () => 
   assert.equal(isAllowedPreviewUrl("blob:https://app.vibeocr/id"), true);
 });
 
-test("packaged page has strict CSP and no inline or remote scripts", async () => {
+test("packaged page permits only same-origin broker resources", async () => {
   const html = await readFile(new URL("../../src/dotnet/VibeOCR.App/WebAssets/index.html", import.meta.url), "utf8");
   assert.match(html, /default-src 'none'/);
   assert.match(html, /script-src 'self'/);
-  assert.match(html, /connect-src 'none'/);
+  assert.match(html, /connect-src 'self'/);
+  assert.match(html, /img-src 'self' blob:/);
+  assert.doesNotMatch(html, /img-src[^;]*data:/);
+  assert.doesNotMatch(html, /unsafe-inline|unsafe-eval/);
   assert.doesNotMatch(html, /<script(?![^>]*\bsrc=)[^>]*>/i);
   assert.doesNotMatch(html, /https:\/\/(?!app\.vibeocr)/i);
 });
