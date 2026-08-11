@@ -205,6 +205,9 @@
 - 不增加 manifest、hash 或新的存在性脚本。缺少被引用资产会由编译/打包自然失败；品牌内容通过普通二进制 diff、UI 与真实候选评审。
 - 定向 quality seam 已完成 red→green：旧实现因 `generate_brand_assets.py` 命令仍存在而失败；删除调用后 1/1 通过。
 - 品牌门禁移除后，PR 自身的代理回退测试首次运行到下载路径并稳定失败。根因是 merge 后 selector 已只接受产品化 `VibeOCR-v*`，但 PR 新 fixture 的 release JSON/checksum 文本仍使用旧 `VibeOCR-Next-v*`，导致 `available=false`/下载返回 false；生产 selector 无需修改，只同步 fixture 到正式资产契约。
+- 第二轮云端 required 在 Platform 86/87 失败：`SuccessfulStartIsOneShotAndDisposeClearsReady` 的 Job enrollment 通过 `Process.SafeHandle` 打开快照后代时抛 `Access is denied`；本地同一测试则稳定重现 Dispose 后目录仍被后代占用。
+- Microsoft Job API 契约要求：`IsProcessInJob` 只需 `PROCESS_QUERY_INFORMATION` 或 `PROCESS_QUERY_LIMITED_INFORMATION`，`AssignProcessToJobObject` 只需 `PROCESS_SET_QUOTA | PROCESS_TERMINATE`。生产代码改为对快照 PID 显式 `OpenProcess` 三项最小权限，并只把 PID 已消失对应的 `ERROR_INVALID_PARAMETER` 视为正常快照竞态；其他权限错误继续 fail closed。
+- 原始精确测试完成 red→green：修复前 1 failed（目录占用），修复后 1 passed；完整并行 Platform suite 连续 10 轮均为 87/87 passed。
 
 ## Layout Test Seams（2026-08-10）
 

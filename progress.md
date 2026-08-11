@@ -266,6 +266,7 @@
 | 2026-08-11 | Ruff format check 要求重排两个受影响 Python 文件 | 1 | Ruff lint 已通过；按仓库 formatter 格式化后重跑 lint/format 与 pytest |
 | 2026-08-11 | adapter 全文件测试有 3 个 release command 序列仍期待已删除的品牌 `uv` 调用 | 1 | 保留 Web fail-closed 语义，仅从三个期望序列删除首个品牌命令后重跑 |
 | 2026-08-11 | 完整 quality 在 82 个 Python 测试通过后找不到 Prettier | 1 | 对应 worktree 尚无锁定 `node_modules`；先执行 `npm ci` bootstrap，再重跑完整 quality |
+| 2026-08-11 | 精确 Platform 测试无法启动：缺少 `project.assets.json` | 1 | 先对 Platform tests 执行 locked restore，再运行同一测试反馈环 |
 
 - 失败日志已闭合到 brand-assets：24px Edge headless screenshot 在 30 秒内未产生完整 PNG。
 - GitHub connector 证实 PR 实际 diff 仅含更新下载代理与对应测试；brand generator 失败来自新 base，不是该 diff 引入。
@@ -279,3 +280,6 @@
 - 更新代理定向 .NET 测试 5/6，通过的唯一失败为 `DownloadVerifyFallsBackAcrossBadSources` 返回 `false`；该测试在 PR 合入产品化 main 后首次运行到实际 selector 路径。
 - 根因确认：测试 fixture 仍发布旧 `VibeOCR-Next-v*`，而产品化 selector 只接受 `VibeOCR-v*`；同步 JSON 与 checksum 文件名，不修改生产 selector。
 - 更新代理 fixture 修复后定向 App tests 6/6 通过。
+- 推送后 CodeQL 全绿、quality 云端通过；required 在 Platform 86/87 失败：`SuccessfulStartIsOneShotAndDisposeClearsReady` 的 Job enrollment 读取后代 `Process.SafeHandle` 时抛 `Win32Exception: Access is denied`。
+- locked restore 后本地精确测试稳定重现目录占用；改用 Job API 所需最小权限显式打开快照后代句柄后，同一测试转为 1/1 passed。
+- 完整 Platform suite 连续运行 10 轮并在格式整理后再运行 1 轮，11 轮全部 87/87 passed，未再出现句柄拒绝或 Dispose 后目录占用。
