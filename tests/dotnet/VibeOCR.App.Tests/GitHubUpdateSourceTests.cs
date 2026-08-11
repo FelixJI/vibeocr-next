@@ -158,11 +158,11 @@ public sealed class GitHubUpdateSourceTests
                         "draft": false,
                         "assets": [
                           {
-                            "name": "VibeOCR-Next-v1.0.0-win64.zip",
+                            "name": "VibeOCR-v1.0.0-win64.zip",
                             "browser_download_url": "https://github.test/package.zip"
                           },
                           {
-                            "name": "VibeOCR-Next-v1.0.0-win64.zip.sha256",
+                            "name": "VibeOCR-v1.0.0-win64.zip.sha256",
                             "browser_download_url": "https://github.test/package.zip.sha256"
                           }
                         ]
@@ -191,7 +191,7 @@ public sealed class GitHubUpdateSourceTests
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
                 {
                     Content = new StringContent(
-                        $"{expectedHash}  VibeOCR-Next-v1.0.0-win64.zip\n",
+                        $"{expectedHash}  VibeOCR-v1.0.0-win64.zip\n",
                         Encoding.UTF8,
                         "application/octet-stream"),
                 });
