@@ -36,11 +36,11 @@ Release 在本机完成。
 ## 下载与使用
 
 1. 从 [Releases](https://github.com/FelixJI/vibeocr-next/releases/latest) 下载最新的
-   `VibeOCR-Next-v*-win64.zip` 与同名 `.sha256`。
+   `VibeOCR-v*-win64.zip` 与同名 `.sha256`。
 2. 校验 SHA-256：
 
    ```powershell
-   Get-FileHash .\VibeOCR-Next-v*-win64.zip -Algorithm SHA256
+   Get-FileHash .\VibeOCR-v*-win64.zip -Algorithm SHA256
    ```
 
 3. 解压并运行包内主程序。首次使用相关能力时，应用会按 component lock 安装本地 Backend 运行时。
@@ -132,8 +132,8 @@ WebAssets 使用 Node 24.x、npm 11.7、React 19、TypeScript 6 和 Vite 8。修
 
 ## 发布资产
 
-正式 Release 包括 Next Windows ZIP 与 SHA-256、component locks、component identities、build identity
-和 SPDX SBOM。版本与派生文件只由自动化脚本更新。
+正式 Release 的精确资产集合包括 Next Windows ZIP 与同名 SHA-256、`component-lock.json`、
+`component-identities.json` 和 SPDX SBOM。版本与派生文件只由自动化脚本更新。
 
 ## 参与贡献
 
