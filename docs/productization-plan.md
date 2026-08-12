@@ -199,9 +199,8 @@ GitHub 下载仍是 true external adapter；下载并校验完成后，更新事
 
 ### 5.3 品牌资产
 
-- 单一事实源：`assets/brand/vibeocr.svg`，采用“扫描框 + 文档/文字识别”几何语义，与 VibeTable 同族但不复用其标志。
-- `scripts/generate_brand_assets.*` 从 SVG 确定性生成 16/20/24/32/48/64/128/256 PNG 与多尺寸 ICO；生成依赖必须锁定。
-- 一致性检查验证生成物未漂移；手改 PNG/ICO 会失败。
+- `assets/brand/generated/` 中的 PNG 与 ICO 是直接维护、随仓提交的品牌资产，采用“扫描框 + 文档/文字识别”几何语义，与 VibeTable 同族但不复用其标志。
+- 品牌修改通过普通文件 diff、UI 视觉验证与真实打包验证评审；CI 不启动浏览器重新生成或逐字节复算图像。
 - WinUI、Bootstrapper、PyInstaller updater、托盘、Web 壳、启动/恢复页和关于页使用同一版本资产。
 
 ### 5.4 信息架构

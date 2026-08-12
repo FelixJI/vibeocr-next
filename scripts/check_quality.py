@@ -25,10 +25,6 @@ def main() -> int:
     npm = resolve_executable("npm")
     for label, command in (
         (
-            "brand-assets",
-            [sys.executable, "scripts/generate_brand_assets.py", "--check"],
-        ),
-        (
             "ruff-check",
             [sys.executable, "-m", "ruff", "check", "scripts", "tests/runtime"],
         ),

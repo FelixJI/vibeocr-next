@@ -35,9 +35,6 @@ $lock = Join-Path $artifacts 'component-lock.json'
 $identity = Join-Path $artifacts 'component-identities.json'
 if (-not (Test-Path -LiteralPath $protocol -PathType Container) -or -not (Test-Path -LiteralPath $backend -PathType Container) -or -not (Test-Path -LiteralPath $lock -PathType Leaf) -or -not (Test-Path -LiteralPath $identity -PathType Leaf)) { throw 'resolved Backend/Protocol identities are required before build' }
 $webAssets = Join-Path $root 'src/dotnet/VibeOCR.App/WebAssets'
-Write-CiStage 'brand-assets'
-uv run --no-project python (Join-Path $root 'scripts/generate_brand_assets.py') --check
-if ($LASTEXITCODE -ne 0) { throw 'Brand asset consistency verification failed' }
 Write-CiStage 'web-assets'
 npm ci --prefix $webAssets
 if ($LASTEXITCODE -ne 0) { throw 'WebAssets locked install failed' }

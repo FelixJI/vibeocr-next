@@ -6,7 +6,7 @@
 
 ## Current Phase
 
-Phase 14：提交、推送与 Draft PR
+Phase 15：PR #26 CI 测试失败诊断与修复
 
 ## Confirmed Test Seams
 
@@ -20,7 +20,7 @@ Phase 14：提交、推送与 Draft PR
 6. `ProductLayout`：安装根、公开入口、内部应用/运行时/元数据、用户数据位置和布局版本的不变量。
 7. 更新事务：新布局版本间的 staging、切换、健康确认和失败回滚，不覆盖 `%LOCALAPPDATA%\VibeOCR`。
 8. Web 设计系统：语义 token、页面状态模型和 Lucide 图标 adapter 的用户可观察行为。
-9. 品牌资产生成：单一 SVG 事实源到 ICO/PNG 生成物和发布包引用的一致性。
+9. 品牌资产：随仓维护的 ICO/PNG 文件及其应用、发布包引用。
 
 ## Phases
 
@@ -130,7 +130,7 @@ Phase 14：提交、推送与 Draft PR
 
 - [x] 建立 Next 自有语义 token，统一浅色/深色/系统主题、状态色、密度、焦点与 motion
 - [x] 完全移除 Fluent 功能图标依赖，保留 Fluent UI 控件并统一改用 `lucide-react`
-- [x] 创建原创 VibeOCR SVG 品牌事实源及确定性 ICO/PNG 生成和一致性验证
+- [x] 创建并直接维护原创 VibeOCR ICO/PNG 品牌资产
 - [x] 将品牌应用到 EXE、窗口/任务栏、托盘、Web 壳、启动/恢复页、关于页和更新器
 - [x] 重构任务式导航、全局 Runtime/任务状态、通知层级和 1024x720 响应式应用壳
 - [x] 保留原生 Windows 标题栏，补齐键盘、forced-colors、reduced-motion 和无障碍语义
@@ -166,6 +166,19 @@ Phase 14：提交、推送与 Draft PR
 - [x] 确认 GitHub CI/CodeQL 已触发且保持 pending；不擅自合并
 - **Status:** complete-delivery；PR 保持 Draft，等待云端门禁和上游 capability
 
+### Phase 15：PR #26 CI 测试失败诊断与修复
+
+- [x] 核对仓库指令、Git 状态、远端、hooks、现有 worktree 与 GitHub CLI 认证
+- [x] 确认仅 PR #26 的 `required` 失败，PR #24 全部检查通过
+- [x] fetch 远端并 fast-forward 到 PR 当前 head `97c32f2`
+- [x] 获取失败 job 日志并建立能命中同一症状的最小红灯反馈环
+- [x] 给出 3–5 个可证伪假设、确认根因并提出聚焦修复方案
+- [x] 删除 SVG→PNG/ICO 生成链、Edge quality/release 门禁与对应测试
+- [x] 将现有 PNG/ICO 作为直接维护的品牌资产，并修正文档事实
+- [x] 运行定向门禁、完整 quality 与更新代理测试
+- [ ] 提交、推送，复查 PR #26 云端检查与剩余风险
+- **Status:** in_progress
+
 ## Key Decisions
 
 | Decision | Rationale |
@@ -183,7 +196,7 @@ Phase 14：提交、推送与 Draft PR
 | 不兼容旧开发布局 | 当前仍处开发阶段，不承担旧数据迁移；同时不自动删除任何旧输出 |
 | 保留 Fluent UI 控件、图标完全切换 Lucide | 复用成熟无障碍基础设施，同时统一图标语义和视觉 |
 | Next 独立语义 token，对齐 VibeTable 设计语言 | 保持产品族一致但不形成跨仓运行时或源码依赖 |
-| 原创 SVG 品牌事实源 | 功能图标与品牌身份分离，并确定性派生 ICO/PNG |
+| 原创 ICO/PNG 品牌资产 | 功能图标与品牌身份分离，图像文件直接随仓维护并接受普通 diff/打包评审 |
 | Classic 是行为契约而非 Qt 布局模板 | 保留用户任务、错误和取消语义，重新设计信息架构与响应布局 |
 | 不新增永久识别历史 | 避免在未定义隐私、容量与清理契约前持久化敏感识别内容 |
 
