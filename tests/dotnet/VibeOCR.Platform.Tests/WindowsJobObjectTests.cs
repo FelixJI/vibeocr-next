@@ -94,38 +94,20 @@ public sealed class WindowsJobObjectTests
 
   private static Process StartParentWithExistingChild(string workingDirectory)
   {
-    string script = Path.Combine(workingDirectory, "start-child.ps1");
-    File.WriteAllLines(
-      script,
-      [
-        "$ping = Join-Path $env:SystemRoot 'System32\\ping.exe'",
-        "$child = Start-Process -FilePath $ping -ArgumentList @('127.0.0.1', '-t') "
-          + "-WorkingDirectory $PSScriptRoot -PassThru",
-        "Write-Output $child.Id",
-        "[Console]::Out.Flush()",
-        "$child.WaitForExit()",
-      ]);
-    string powerShell = Path.Combine(
-      Environment.GetFolderPath(Environment.SpecialFolder.System),
-      "WindowsPowerShell",
-      "v1.0",
-      "powershell.exe");
     var process = new Process
     {
       StartInfo = new ProcessStartInfo
       {
-        FileName = powerShell,
+        FileName = Path.Combine(
+          AppContext.BaseDirectory,
+          "VibeOCR.Platform.Tests.exe"),
         WorkingDirectory = workingDirectory,
         UseShellExecute = false,
         RedirectStandardOutput = true,
         RedirectStandardError = true,
       },
     };
-    process.StartInfo.ArgumentList.Add("-NoProfile");
-    process.StartInfo.ArgumentList.Add("-ExecutionPolicy");
-    process.StartInfo.ArgumentList.Add("Bypass");
-    process.StartInfo.ArgumentList.Add("-File");
-    process.StartInfo.ArgumentList.Add(script);
+    process.StartInfo.ArgumentList.Add("--job-object-parent-helper");
     Assert.True(process.Start());
     return process;
   }
