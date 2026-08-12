@@ -14,6 +14,7 @@ from scripts.product_layout import ROOT_ALLOWLIST, load_product_layout
 def _write_product(root: Path, marker: str) -> Path:
     files = {
         "VibeOCR.exe": marker,
+        "Velopack.dll": "velopack",
         "LICENSE": "license",
         "CHANGELOG.md": marker,
         "app/VibeOCR.WinUI.exe": marker,

@@ -64,8 +64,14 @@ public sealed class ShellFeatureTests
     [Fact]
     public async Task UpdateCheckSurfacesNewVersion()
     {
-        var source = new FakeUpdateSource { Version = "1.2.0", Available = true };
-        var vm = new UpdateViewModel(source);
+        var coordinator = new FakeUpdateCoordinator
+        {
+            CheckResult = new UpdateCheckResult(
+                UpdateCheckStatus.Available,
+                "1.2.0",
+                "更快的识别体验"),
+        };
+        var vm = new UpdateViewModel(coordinator);
 
         await vm.CheckAsync(TestContext.Current.CancellationToken);
 
@@ -75,24 +81,31 @@ public sealed class ShellFeatureTests
     }
 
     [Fact]
-    public async Task UpdateCheckNetworkErrorLocalized()
+    public async Task LegacyInstallOffersOneTimeSetupMigration()
     {
-        var source = new FakeUpdateSource { Throw = true };
-        var vm = new UpdateViewModel(source);
+        var coordinator = new FakeUpdateCoordinator
+        {
+            CheckResult = new UpdateCheckResult(
+                UpdateCheckStatus.NotInstalled,
+                "0.3.0"),
+        };
+        var vm = new UpdateViewModel(coordinator);
 
         await vm.CheckAsync(TestContext.Current.CancellationToken);
 
-        Assert.Contains("网络", vm.Status);
+        Assert.True(vm.UpdateAvailable);
+        Assert.Equal("update.migration", vm.StatusCode);
+        Assert.Contains("一次性迁移", vm.Status);
     }
 
     [Fact]
     public async Task UpdateDownloadWithoutAvailableIsNoOp()
     {
-        var source = new FakeUpdateSource { Available = false };
-        var vm = new UpdateViewModel(source);
+        var coordinator = new FakeUpdateCoordinator();
+        var vm = new UpdateViewModel(coordinator);
         await vm.CheckAsync(TestContext.Current.CancellationToken);
 
-        await vm.DownloadAndVerifyAsync(TestContext.Current.CancellationToken);
+        await vm.DownloadAndApplyAsync(TestContext.Current.CancellationToken);
 
         Assert.Equal(string.Empty, vm.Status == "已是最新版本" ? string.Empty : vm.Status);
         Assert.False(vm.IsBusy);
@@ -101,14 +114,17 @@ public sealed class ShellFeatureTests
     [Fact]
     public async Task UpdateDownloadVerifySuccess()
     {
-        var source = new FakeUpdateSource { Version = "1.2.0", Available = true, VerifyOk = true };
+        var coordinator = new FakeUpdateCoordinator
+        {
+            CheckResult = new UpdateCheckResult(UpdateCheckStatus.Available, "1.2.0"),
+            ApplyResult = new UpdateApplyResult(UpdateApplyStatus.ApplyStarted),
+        };
         bool shutdownRequested = false;
-        var vm = new UpdateViewModel(source, () => shutdownRequested = true);
+        var vm = new UpdateViewModel(coordinator, () => shutdownRequested = true);
         await vm.CheckAsync(TestContext.Current.CancellationToken);
 
-        await vm.DownloadAndVerifyAsync(TestContext.Current.CancellationToken);
+        await vm.DownloadAndApplyAsync(TestContext.Current.CancellationToken);
 
-        Assert.True(source.UpdaterLaunched);
         Assert.True(shutdownRequested);
         Assert.Contains("即将退出", vm.Status);
     }
@@ -116,18 +132,18 @@ public sealed class ShellFeatureTests
     [Fact]
     public async Task UpdateDoesNotExitWhenUpdaterFailsToStart()
     {
-        var source = new FakeUpdateSource
+        var coordinator = new FakeUpdateCoordinator
         {
-            Version = "1.2.0",
-            Available = true,
-            VerifyOk = true,
-            LaunchOk = false,
+            CheckResult = new UpdateCheckResult(UpdateCheckStatus.Available, "1.2.0"),
+            ApplyResult = new UpdateApplyResult(
+                UpdateApplyStatus.Failed,
+                "更新器启动失败，请重试"),
         };
         bool shutdownRequested = false;
-        var vm = new UpdateViewModel(source, () => shutdownRequested = true);
+        var vm = new UpdateViewModel(coordinator, () => shutdownRequested = true);
         await vm.CheckAsync(TestContext.Current.CancellationToken);
 
-        await vm.DownloadAndVerifyAsync(TestContext.Current.CancellationToken);
+        await vm.DownloadAndApplyAsync(TestContext.Current.CancellationToken);
 
         Assert.False(shutdownRequested);
         Assert.Contains("启动失败", vm.Status);
@@ -151,25 +167,18 @@ public sealed class ShellFeatureTests
         public bool SetEnabled(bool enabled) => Ok;
     }
 
-    private sealed class FakeUpdateSource : IUpdateSource
+    private sealed class FakeUpdateCoordinator : IUpdateCoordinator
     {
-        public string Version { get; set; } = "0.0.0";
-        public bool Available { get; set; }
-        public bool VerifyOk { get; set; } = true;
-        public bool LaunchOk { get; set; } = true;
-        public bool UpdaterLaunched { get; private set; }
-        public bool Throw { get; set; }
+        public UpdateCheckResult CheckResult { get; set; } =
+            new(UpdateCheckStatus.Latest, "0.3.0");
+        public UpdateApplyResult ApplyResult { get; set; } =
+            new(UpdateApplyStatus.Downloaded);
 
-        public Task<(string Version, bool Available)> FetchLatestAsync(CancellationToken cancellationToken)
-            => Throw ? throw new IOException("network down") : Task.FromResult((Version, Available));
+        public Task<UpdateCheckResult> CheckAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(CheckResult);
 
-        public Task<bool> DownloadVerifyAsync(CancellationToken cancellationToken)
-            => Task.FromResult(VerifyOk);
-
-        public Task<bool> LaunchUpdaterAsync(CancellationToken cancellationToken)
-        {
-            UpdaterLaunched = true;
-            return Task.FromResult(LaunchOk);
-        }
+        public Task<UpdateApplyResult> DownloadAndApplyAsync(
+            IProgress<int>? progress,
+            CancellationToken cancellationToken) => Task.FromResult(ApplyResult);
     }
 }

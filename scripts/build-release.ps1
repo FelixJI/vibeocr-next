@@ -96,12 +96,37 @@ if ($LASTEXITCODE -ne 0) { throw 'Next product binding failed' }
 uv run --no-sync python (Join-Path $root 'scripts/product_layout.py') verify `
   --product-root $product
 if ($LASTEXITCODE -ne 0) { throw 'Next product release closure verification failed' }
+Write-CiStage 'velopack-package'
+$dotnet = if ($env:DOTNET_HOST_PATH) { $env:DOTNET_HOST_PATH } else { 'dotnet' }
+& $dotnet tool restore
+if ($LASTEXITCODE -ne 0) { throw 'Velopack tool restore failed' }
+$velopackOutput = Join-Path $build 'velopack-output'
+& $dotnet tool run vpk pack `
+  --packId VibeOCRNext --packVersion $Version --packDir $product `
+  --mainExe VibeOCR.exe --outputDir $velopackOutput --channel win `
+  --runtime win-x64 --delta None --packTitle VibeOCR --packAuthors FelixJI `
+  --icon (Join-Path $root 'assets/brand/generated/vibeocr.ico')
+if ($LASTEXITCODE -ne 0) { throw 'Velopack package build failed' }
+$full = @(Get-ChildItem -LiteralPath $velopackOutput -Filter '*-full.nupkg')
+$setup = @(Get-ChildItem -LiteralPath $velopackOutput -Filter '*-Setup.exe')
+$portable = @(Get-ChildItem -LiteralPath $velopackOutput -Filter '*-Portable.zip')
+$feed = @(Get-ChildItem -LiteralPath $velopackOutput -Filter 'releases.win.json')
+if ($full.Count -ne 1 -or $setup.Count -ne 1 -or $portable.Count -ne 1 -or $feed.Count -ne 1) {
+    throw 'Velopack output set is incomplete or ambiguous'
+}
+Copy-Item -LiteralPath $full[0].FullName -Destination (Join-Path $artifacts "VibeOCRNext-$Version-full.nupkg")
+Copy-Item -LiteralPath $setup[0].FullName -Destination (Join-Path $artifacts 'VibeOCRNext-Setup.exe')
+Copy-Item -LiteralPath $portable[0].FullName -Destination (Join-Path $artifacts 'VibeOCRNext-Portable.zip')
+Copy-Item -LiteralPath $feed[0].FullName -Destination (Join-Path $artifacts 'releases.win.json')
 Write-CiStage 'artifact-verify'
 & (Join-Path $root 'scripts/verify_winui_artifact.ps1') -Artifact $zip
 if ($LASTEXITCODE -ne 0) { throw 'Next artifact verification failed' }
 uv run --no-sync python (Join-Path $root 'scripts/build_release_checksums.py') $artifacts `
   --sidecar-for $zip
 if ($LASTEXITCODE -ne 0) { throw 'sidecar checksum build failed' }
+uv run --no-sync python (Join-Path $root 'scripts/build_release_checksums.py') $artifacts `
+  --sidecar-for (Join-Path $artifacts 'VibeOCRNext-Setup.exe')
+if ($LASTEXITCODE -ne 0) { throw 'Setup sidecar checksum build failed' }
 Remove-Item -LiteralPath (Join-Path $artifacts 'SHA256SUMS') -Force
 uv run --no-sync python (Join-Path $root 'scripts/build_spdx_sbom.py') --artifacts-dir $artifacts `
   --repository-name FelixJI/vibeocr-next --version $Version

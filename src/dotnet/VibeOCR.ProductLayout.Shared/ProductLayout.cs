@@ -85,6 +85,7 @@ public sealed class ResolvedProductLayout
         var expectedRoot = new HashSet<string>(StringComparer.Ordinal)
         {
             "VibeOCR.exe",
+            "Velopack.dll",
             "LICENSE",
             "CHANGELOG.md",
             "app",

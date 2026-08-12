@@ -107,6 +107,7 @@ def _stage_product(
         path.write_bytes(relative.encode())
     bootstrapper = tmp_path / f"{name}-bootstrapper.exe"
     bootstrapper.write_bytes(b"bootstrapper")
+    (tmp_path / "Velopack.dll").write_bytes(b"velopack")
     updater = tmp_path / f"{name}-updater.exe"
     updater.write_bytes(b"updater")
     identities = tmp_path / f"{name}-identities.json"

@@ -14,9 +14,11 @@
     <Platforms>x64</Platforms>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>../../../assets/brand/generated/vibeocr.ico</ApplicationIcon>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" />
+    <PackageReference Include="Velopack" />
     <PackageReference Include="VibeOCR.Runtime.Contracts" />
     <ProjectReference Include="../VibeOCR.Platform/VibeOCR.Platform.csproj" />
   </ItemGroup>
@@ -27,8 +29,6 @@
              CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
-    <!-- 暴露 internal 成员给测试程序集（GitHubUpdateSource.SelectAsset 等）。
-         生产程序集不受影响；仅测试可访问 internal 辅助方法。 -->
     <InternalsVisibleTo Include="VibeOCR.App.Tests" />
   </ItemGroup>
   <!--
