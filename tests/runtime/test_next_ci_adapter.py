@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import shutil
 import subprocess
 import zipfile
@@ -16,6 +17,7 @@ from scripts.automation_core import CommandRunner
 from scripts.bind_component_releases import bind_product_releases
 from scripts.check_quality import main as run_quality
 from scripts.check_quality import resolve_executable
+from scripts.product_layout import ROOT_ALLOWLIST
 from scripts.release_smoke import verify
 from scripts.resolve_component_releases import (
     _api,
@@ -810,6 +812,16 @@ def test_release_build_emits_actionable_stage_annotations() -> None:
         "artifact-verify",
     ):
         assert f"Write-CiStage '{stage}'" in build
+
+
+def test_winui_artifact_verifier_matches_product_root_allowlist() -> None:
+    root = Path(__file__).parents[2]
+    verifier = (root / "scripts/verify_winui_artifact.ps1").read_text(encoding="utf-8")
+    assignment = next(
+        line for line in verifier.splitlines() if "$expectedRootEntries = @(" in line
+    )
+
+    assert set(re.findall(r"'([^']+)'", assignment)) == ROOT_ALLOWLIST
 
 
 def test_velopack_startup_hook_runs_in_the_packaged_root_entrypoint() -> None:
