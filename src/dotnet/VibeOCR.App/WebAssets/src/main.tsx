@@ -25,6 +25,12 @@ const demoActions: AppActions = {
   setTheme: () => undefined,
 };
 
+declare global {
+  interface Window {
+    __VIBEOCR_VISUAL_STATE__?: AppViewState;
+  }
+}
+
 const root = document.getElementById("root");
 if (!root) throw new Error("VibeOCR root element is missing.");
 
@@ -46,7 +52,10 @@ function renderApp(viewState: AppViewState, actions: AppActions): void {
 
 const transport = ChromeWebViewTransport.fromWindow(window);
 if (!transport) {
-  renderApp(demoState, demoActions);
+  const visualState = import.meta.env.DEV
+    ? window.__VIBEOCR_VISUAL_STATE__
+    : undefined;
+  renderApp(visualState ?? demoState, demoActions);
 } else {
   reactRoot.render(<div role="status">正在连接原生宿主…</div>);
   const bridge = new BridgeClient(transport);

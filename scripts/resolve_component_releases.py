@@ -27,10 +27,15 @@ else:
 
 ROOT = Path(__file__).resolve().parents[1]
 SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+NETWORK_TIMEOUT_SECONDS = 60
+
+
+def _github_token() -> str:
+    return os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
 
 
 def _api(repository: str, path: str) -> Any:
-    token = os.environ.get("GITHUB_TOKEN", "")
+    token = _github_token()
     request = urllib.request.Request(
         f"https://api.github.com/repos/{repository}{path}",
         headers={
@@ -38,7 +43,9 @@ def _api(repository: str, path: str) -> Any:
             **({"Authorization": f"Bearer {token}"} if token else {}),
         },
     )
-    with urllib.request.urlopen(request) as response:  # noqa: S310
+    with urllib.request.urlopen(  # noqa: S310
+        request, timeout=NETWORK_TIMEOUT_SECONDS
+    ) as response:
         return json.loads(response.read())
 
 
@@ -81,7 +88,7 @@ def compile_protocol_version(root: Path) -> str:
 
 def _download(release: dict[str, Any], destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
-    token = os.environ.get("GITHUB_TOKEN", "")
+    token = _github_token()
     for asset in release["assets"]:
         request = urllib.request.Request(
             asset["browser_download_url"],
@@ -90,7 +97,9 @@ def _download(release: dict[str, Any], destination: Path) -> None:
                 **({"Authorization": f"Bearer {token}"} if token else {}),
             },
         )
-        with urllib.request.urlopen(request) as response:  # noqa: S310
+        with urllib.request.urlopen(  # noqa: S310
+            request, timeout=NETWORK_TIMEOUT_SECONDS
+        ) as response:
             (destination / asset["name"]).write_bytes(response.read())
 
 

@@ -16,6 +16,10 @@ internal sealed class WindowsJobObject : IDisposable
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
     private const uint SupervisorTerminationExitCode = 1;
     private const uint SnapshotProcesses = 0x00000002;
+    private const uint ProcessTerminate = 0x0001;
+    private const uint ProcessSetQuota = 0x0100;
+    private const uint ProcessQueryLimitedInformation = 0x1000;
+    private const int ErrorInvalidParameter = 87;
     private const int MaxTreeEnrollmentPasses = 8;
     private readonly SafeFileHandle _handle;
 
@@ -88,40 +92,40 @@ internal sealed class WindowsJobObject : IDisposable
 
     private bool TryAssignExistingProcess(int processId)
     {
-        try
+        using SafeProcessHandle processHandle = OpenProcess(
+            ProcessTerminate | ProcessSetQuota | ProcessQueryLimitedInformation,
+            inheritHandle: false,
+            (uint)processId);
+        if (processHandle.IsInvalid)
         {
-            using Process process = Process.GetProcessById(processId);
-            if (process.HasExited || IsProcessAssigned(process))
-            {
-                return false;
-            }
-            if (AssignProcessToJobObject(_handle, process.SafeHandle))
-            {
-                return true;
-            }
-
             int error = Marshal.GetLastWin32Error();
-            if (process.HasExited)
+            if (error == ErrorInvalidParameter)
             {
                 return false;
             }
             throw new Win32Exception(error);
         }
-        catch (ArgumentException)
+
+        if (IsProcessAssigned(processHandle))
         {
-            // The process exited after the snapshot was captured.
             return false;
         }
-        catch (InvalidOperationException)
+        if (AssignProcessToJobObject(_handle, processHandle))
         {
-            // The process exited while its handle or state was queried.
+            return true;
+        }
+
+        int assignmentError = Marshal.GetLastWin32Error();
+        if (assignmentError == ErrorInvalidParameter)
+        {
             return false;
         }
+        throw new Win32Exception(assignmentError);
     }
 
-    private bool IsProcessAssigned(Process process)
+    private bool IsProcessAssigned(SafeProcessHandle processHandle)
     {
-        if (!IsProcessInJob(process.SafeHandle, _handle, out bool assigned))
+        if (!IsProcessInJob(processHandle, _handle, out bool assigned))
         {
             throw new Win32Exception(Marshal.GetLastWin32Error());
         }
@@ -238,6 +242,12 @@ internal sealed class WindowsJobObject : IDisposable
     private static extern bool AssignProcessToJobObject(
         SafeFileHandle job,
         SafeProcessHandle process);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeProcessHandle OpenProcess(
+        uint desiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+        uint processId);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

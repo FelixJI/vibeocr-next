@@ -129,7 +129,8 @@ public sealed partial class App : Application
         PortableLayout layout = PortableLayout.Resolve(
             executable,
             options.Profile,
-            Environment.GetEnvironmentVariable("VIBEOCR_PORTABLE_LAYOUT"));
+            Environment.GetEnvironmentVariable("VIBEOCR_PORTABLE_LAYOUT"),
+            options.InstallRoot);
         _runtimeInstaller = new RuntimeInstallerClient(
             RuntimeInstallerConfiguration.ForNext(layout));
         _runtimeStatus.ApplyProfile(_runtimeInstaller.ReadProfileDescriptor());
@@ -254,7 +255,7 @@ public sealed partial class App : Application
         nint handle = WinRT.Interop.WindowNative.GetWindowHandle(_window!);
         _windowMessages = new WindowMessageService(handle);
         _windowMessages.MessageReceived += OnWindowMessage;
-        _trayIcon = new TrayIconService();
+        _trayIcon = new TrayIconService(Path.Combine(layout.WebAssetsRoot, "vibeocr.ico"));
         _trayIcon.Show(handle, TrayMessage, "VibeOCR");
 
         string hotkey = ReadConfiguredHotkey(layout.ConfigFile) ?? "Ctrl+Alt+Q";
@@ -264,7 +265,7 @@ public sealed partial class App : Application
         _hotkeyRegistrar.Register(hotkey, out _);
         _shellViewModel = new ShellViewModel(
             _hotkeyRegistrar,
-            new WindowsStartupRegistrar(Path.Combine(layout.InstallRoot, "VibeOCR.Bootstrapper.exe")),
+            new WindowsStartupRegistrar(layout.ProductEntry),
             () => _window!.AppWindow.Hide(),
             () => _window!.Close(),
             hotkey);
@@ -382,7 +383,7 @@ public sealed partial class App : Application
                 logPath,
                 TimeSpan.FromSeconds(layout.Profile == "winui-dev" ? 90 : 15),
                 RuntimeCapabilityRequirements.Read(
-                    Path.Combine(layout.InstallRoot, "component-lock.json")),
+                    layout.ComponentLock),
                 injectSoakCrash);
 
             // Start the supervisor process.
@@ -425,7 +426,7 @@ public sealed partial class App : Application
             RecordMilestone(diagnostics, "T6", _startup.Elapsed);
             WriteHealthSignal();
             _ = UpdateArtifactCleaner.CleanupAsync(
-                layout.InstallRoot, layout.DataRoot, TimeSpan.FromSeconds(3));
+                layout.DataRoot, TimeSpan.FromSeconds(3));
 
             bool soakCycleComplete = !_soakCrashRequested || isRecovery;
             if (soakCycleComplete)
@@ -716,7 +717,12 @@ public sealed partial class App : Application
     }
 }
 
-public sealed record AppLaunchOptions(string Profile, string? HealthFile, bool ShellOnly, string? Goto = null)
+public sealed record AppLaunchOptions(
+    string Profile,
+    string? HealthFile,
+    bool ShellOnly,
+    string? Goto = null,
+    string? InstallRoot = null)
 {
     public static AppLaunchOptions Parse(IReadOnlyList<string> args)
     {
@@ -724,6 +730,7 @@ public sealed record AppLaunchOptions(string Profile, string? HealthFile, bool S
         string? healthFile = null;
         bool shellOnly = false;
         string? gotoDestination = null;
+        string? installRoot = null;
         for (int index = 0; index < args.Count; index++)
         {
             if (string.Equals(args[index], "--profile", StringComparison.Ordinal))
@@ -746,6 +753,14 @@ public sealed record AppLaunchOptions(string Profile, string? HealthFile, bool S
             {
                 shellOnly = true;
             }
+            else if (string.Equals(args[index], "--install-root", StringComparison.Ordinal))
+            {
+                if (index + 1 >= args.Count)
+                {
+                    throw new ArgumentException("--install-root requires a value.", nameof(args));
+                }
+                installRoot = Path.GetFullPath(args[++index]);
+            }
             else if (string.Equals(args[index], "--goto", StringComparison.Ordinal))
             {
                 if (index + 1 >= args.Count)
@@ -767,7 +782,7 @@ public sealed record AppLaunchOptions(string Profile, string? HealthFile, bool S
             throw new ArgumentException($"Unsupported profile: {profile}.", nameof(args));
         }
 
-        return new AppLaunchOptions(profile, healthFile, shellOnly, gotoDestination);
+        return new AppLaunchOptions(profile, healthFile, shellOnly, gotoDestination, installRoot);
     }
 }
 

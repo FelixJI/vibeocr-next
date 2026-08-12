@@ -9,9 +9,9 @@ public sealed class UpdateArtifactCleanerTests
     public async Task CleanupRemovesOnlyWhitelistedArtifacts()
     {
         string root = Path.Combine(Path.GetTempPath(), $"vibeocr-cleaner-{Guid.NewGuid():N}");
-        string update = Path.Combine(root, "data", "cache", "update");
-        Directory.CreateDirectory(Path.Combine(update, "tmp"));
-        Directory.CreateDirectory(Path.Combine(update, "_backup"));
+        string data = Path.Combine(root, "data");
+        string update = Path.Combine(data, "cache", "update");
+        Directory.CreateDirectory(Path.Combine(update, "transaction-stale", "staging"));
         CancellationToken cancellationToken = TestContext.Current.CancellationToken;
         await File.WriteAllTextAsync(Path.Combine(update, "package.zip"), "zip", cancellationToken);
         await File.WriteAllTextAsync(Path.Combine(update, "package.zip.sha256"), "hash", cancellationToken);
@@ -20,20 +20,19 @@ public sealed class UpdateArtifactCleanerTests
         await File.WriteAllTextAsync(Path.Combine(update, "startup.healthy"), "healthy", cancellationToken);
         await File.WriteAllTextAsync(Path.Combine(update, "progress.json"), "{}", cancellationToken);
         await File.WriteAllTextAsync(Path.Combine(update, "keep.txt"), "keep", cancellationToken);
-        await File.WriteAllTextAsync(Path.Combine(root, "VibeOCR.WinUI.exe.old"), "old", cancellationToken);
+        await File.WriteAllTextAsync(Path.Combine(update, "application.healthy"), "healthy", cancellationToken);
 
         try
         {
             await UpdateArtifactCleaner.CleanupAsync(
-                root,
-                Path.Combine(root, "data"),
+                data,
                 TimeSpan.Zero,
                 cancellationToken);
 
-            Assert.False(Directory.Exists(Path.Combine(update, "tmp")));
+            Assert.False(Directory.Exists(Path.Combine(update, "transaction-stale")));
             Assert.False(File.Exists(Path.Combine(update, "package.zip")));
             Assert.False(File.Exists(Path.Combine(update, "updater.exe")));
-            Assert.False(File.Exists(Path.Combine(root, "VibeOCR.WinUI.exe.old")));
+            Assert.False(File.Exists(Path.Combine(update, "application.healthy")));
             Assert.True(File.Exists(Path.Combine(update, "progress.json")));
             Assert.True(File.Exists(Path.Combine(update, "keep.txt")));
         }
@@ -44,12 +43,26 @@ public sealed class UpdateArtifactCleanerTests
     }
 
     [Fact]
-    public async Task CleanupRejectsDataRootOutsideInstallRoot()
+    public async Task CleanupAcceptsAnExplicitUserDataRootOutsideInstallRoot()
     {
-        await Assert.ThrowsAsync<ArgumentException>(() => UpdateArtifactCleaner.CleanupAsync(
-            Path.Combine(Path.GetTempPath(), "install"),
-            Path.Combine(Path.GetTempPath(), "outside"),
-            TimeSpan.Zero,
-            TestContext.Current.CancellationToken));
+        string root = Path.Combine(Path.GetTempPath(), $"install-{Guid.NewGuid():N}");
+        string data = Path.Combine(Path.GetTempPath(), $"data-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(data, "cache", "update", "transaction-stale"));
+        try
+        {
+            await UpdateArtifactCleaner.CleanupAsync(
+                data,
+                TimeSpan.Zero,
+                TestContext.Current.CancellationToken);
+            Assert.False(Directory.Exists(
+                Path.Combine(data, "cache", "update", "transaction-stale")));
+        }
+        finally
+        {
+            if (Directory.Exists(data))
+            {
+                Directory.Delete(data, recursive: true);
+            }
+        }
     }
 }

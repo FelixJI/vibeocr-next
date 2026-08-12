@@ -258,13 +258,14 @@ public static class WorkbenchBridgeCodec
       case ("recognition", "export"):
         return new ExportRecognitionResultCommand(ParseFormat(
           arguments,
-          ["text", "markdown", "html"]));
+          ["text", "markdown", "html", "docx", "xlsx"]));
       case ("batch", "addFiles"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new AddBatchFilesCommand();
-      case ("batch", "exportMarkdown"):
-        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
-        return new ExportBatchMarkdownCommand();
+      case ("batch", "exportAll"):
+        return new ExportBatchCommand(ParseFormat(
+          arguments,
+          ["text", "markdown", "html", "docx", "xlsx"]));
       case ("batch", "start"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new StartBatchCommand();

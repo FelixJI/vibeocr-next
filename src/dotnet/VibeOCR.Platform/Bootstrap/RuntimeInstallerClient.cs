@@ -27,17 +27,14 @@ public sealed record RuntimeInstallerConfiguration(
         ArgumentNullException.ThrowIfNull(layout);
         string installer = executable ??
             Environment.GetEnvironmentVariable("VIBEOCR_RUNTIME_INSTALLER") ??
-            Path.Combine(
-                layout.InstallRoot,
-                "runtime-installer",
-                "vibeocr-runtime-installer.exe");
+            layout.RuntimeInstaller;
         string? selectedAccelerator = accelerator ??
             Environment.GetEnvironmentVariable("VIBEOCR_RUNTIME_ACCELERATOR");
         return new RuntimeInstallerConfiguration(
             installer,
             layout.InstallRoot,
-            Path.Combine(layout.InstallRoot, "component-lock.json"),
-            Path.Combine(layout.InstallRoot, "backend", "runtime-manifest.json"),
+            layout.ComponentLock,
+            layout.RuntimeManifest,
             selectedAccelerator,
             layout.PortableLayoutManifest,
             layout.PortableLayoutManifest is null ? null : "next");

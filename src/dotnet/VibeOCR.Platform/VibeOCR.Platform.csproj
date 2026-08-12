@@ -10,4 +10,8 @@
   <ItemGroup>
     <InternalsVisibleTo Include="VibeOCR.Platform.Tests" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../VibeOCR.ProductLayout.Shared/ProductLayout.cs"
+             Link="ProductLayout/ProductLayout.cs" />
+  </ItemGroup>
 </Project>

@@ -119,7 +119,7 @@ public sealed class WorkbenchBridgeCodecTests
       ("recognition", "readClipboard", "{}", typeof(ReadRecognitionClipboardCommand)),
       ("recognition", "captureScreen", "{}", typeof(CaptureRecognitionScreenCommand)),
       ("batch", "addFiles", "{}", typeof(AddBatchFilesCommand)),
-      ("batch", "exportMarkdown", "{}", typeof(ExportBatchMarkdownCommand)),
+      ("batch", "exportAll", "{\"format\":\"markdown\"}", typeof(ExportBatchCommand)),
       ("batch", "setWindow", "{\"start\":40}", typeof(SetBatchWindowCommand)),
       ("pdf", "open", "{}", typeof(OpenPdfCommand)),
       ("pdf", "rotate", "{}", typeof(RotatePdfCommand)),
@@ -175,6 +175,24 @@ public sealed class WorkbenchBridgeCodecTests
     Assert.Equal(itemId, command.ItemId);
     Assert.Equal(-1, command.Delta);
     Assert.DoesNotContain("path", json, StringComparison.OrdinalIgnoreCase);
+  }
+
+  [Theory]
+  [InlineData("docx")]
+  [InlineData("xlsx")]
+  public void ParseCommandAcceptsClassicDocumentExportFormats(string format)
+  {
+    Guid sessionId = Guid.NewGuid();
+    ExportRecognitionResultCommand command = Assert.IsType<ExportRecognitionResultCommand>(
+      WorkbenchBridgeCodec.ParseCommand(
+        CommandJson(
+          sessionId,
+          "recognition",
+          "export",
+          $$"""{"format":"{{format}}"}"""),
+        sessionId).Command);
+
+    Assert.Equal(format, command.Format);
   }
 
   [Fact]

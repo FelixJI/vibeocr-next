@@ -22,10 +22,10 @@ namespace VibeOCR.App;
 
 public sealed partial class MainWindow : Window
 {
-  private const int DefaultWidth = 1180;
-  private const int DefaultHeight = 760;
-  private const int MinWidth = 900;
-  private const int MinHeight = 600;
+  private const int DefaultWidth = 1280;
+  private const int DefaultHeight = 800;
+  private const int MinWidth = 1024;
+  private const int MinHeight = 720;
 
   [DllImport("user32.dll")]
   private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
@@ -119,7 +119,7 @@ public sealed partial class MainWindow : Window
     {
       await webHost.InitializeAsync(
         WorkbenchWebView,
-        Path.Combine(AppContext.BaseDirectory, "WebAssets"));
+        layout.WebAssetsRoot);
     }
     catch (Exception error) when (
       error is InvalidOperationException or DirectoryNotFoundException)

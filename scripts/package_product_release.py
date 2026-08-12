@@ -5,15 +5,16 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import shutil
 import tempfile
 import zipfile
 from pathlib import Path
 
 if __package__:
     from .bind_component_releases import bind_product_releases
+    from .product_layout import load_staged_product_layout
 else:
     from bind_component_releases import bind_product_releases
+    from product_layout import load_staged_product_layout
 
 FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 PROHIBITED_ROOTS = {".git", "apps", "contracts", "packages", "supervisor", "tests"}
@@ -73,30 +74,21 @@ def package_product_release(
         if json.loads(generated.read_text(encoding="utf-8")) != lock:
             raise ValueError("committed component lock differs from verified releases")
 
-    embedded_lock = product_root / "component-lock.json"
-    shutil.copyfile(lock_path, embedded_lock)
-    backend_output = product_root / "backend"
-    if backend_output.exists():
-        raise ValueError("product layout already contains a backend directory")
-    backend_output.mkdir()
-    for source in sorted(backend_release_dir.resolve(strict=True).iterdir()):
-        if source.is_file():
-            shutil.copyfile(source, backend_output / source.name)
+    layout = load_staged_product_layout(product_root)
+    embedded_lock = layout.component_lock
+    if json.loads(embedded_lock.read_text(encoding="utf-8")) != lock:
+        raise ValueError("staged component lock differs from verified releases")
+    backend_output = layout.runtime_manifest.parent
+    manifest_path = layout.release_manifest
 
     runtime_manifest = json.loads(
         (backend_output / "runtime-manifest.json").read_text(encoding="utf-8")
     )
     installer = runtime_manifest["installer"]
-    installer_output = product_root / "runtime-installer"
-    installer_output.mkdir()
-    with zipfile.ZipFile(backend_output / installer["archive"]) as archive:
-        executable = archive.read(installer["executable_path"])
-    executable_path = installer_output / "vibeocr-runtime-installer.exe"
-    executable_path.write_bytes(executable)
+    executable_path = layout.runtime_installer
     if _sha256(executable_path) != installer["executable_sha256"]:
         raise ValueError("extracted Runtime Installer hash mismatch")
 
-    manifest_path = product_root / "product-release-manifest.json"
     files = sorted(
         path
         for path in product_root.rglob("*")
@@ -122,7 +114,6 @@ def package_product_release(
         encoding="utf-8",
         newline="\n",
     )
-
     output.parent.mkdir(parents=True, exist_ok=True)
     archive_files = sorted(path for path in product_root.rglob("*") if path.is_file())
     with zipfile.ZipFile(

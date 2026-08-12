@@ -55,7 +55,7 @@ public sealed record AddBatchFilesCommand : WorkbenchCommand;
 public sealed record AddDroppedBatchFilesCommand(
   IReadOnlyList<string> Paths) : WorkbenchCommand;
 
-public sealed record ExportBatchMarkdownCommand : WorkbenchCommand;
+public sealed record ExportBatchCommand(string Format) : WorkbenchCommand;
 
 public sealed record StartBatchCommand : WorkbenchCommand;
 

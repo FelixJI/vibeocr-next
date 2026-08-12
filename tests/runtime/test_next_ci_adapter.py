@@ -18,6 +18,7 @@ from scripts.check_quality import main as run_quality
 from scripts.check_quality import resolve_executable
 from scripts.release_smoke import verify
 from scripts.resolve_component_releases import (
+    _api,
     assert_protocol_compatible,
     bound_protocol_version,
     compile_protocol_version,
@@ -89,6 +90,37 @@ def test_resolver_binding_keywords_match_the_binding_api() -> None:
     assert passed_keywords <= accepted_keywords
 
 
+def test_component_resolver_authenticates_api_with_ci_gh_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"tag_name":"v1.0.0"}'
+
+    requests: list[object] = []
+    monkeypatch.setenv("GH_TOKEN", "ci-token")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    def fake_urlopen(request: object, *, timeout: float) -> Response:
+        assert timeout == 60
+        requests.append(request)
+        return Response()
+
+    monkeypatch.setattr(
+        "scripts.resolve_component_releases.urllib.request.urlopen", fake_urlopen
+    )
+
+    assert _api("FelixJI/vibeocr-backend", "/releases/latest") == {"tag_name": "v1.0.0"}
+    assert len(requests) == 1
+    assert requests[0].get_header("Authorization") == "Bearer ci-token"
+
+
 def test_command_runner_resolves_platform_command_shims(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -123,7 +155,7 @@ def test_quality_script_resolves_platform_command_shims(
 
 
 def test_quality_runs_web_gates_once_and_verifies_production_dist(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     commands: list[list[str]] = []
     verified: list[Path] = []
@@ -143,17 +175,26 @@ def test_quality_runs_web_gates_once_and_verifies_production_dist(
     assert run_quality() == 0
 
     web_prefix = "src/dotnet/VibeOCR.App/WebAssets"
-    assert commands[-5:] == [
+    assert commands[-6:] == [
         ["C:/node/npm.cmd", "run", "format:check", "--prefix", web_prefix],
         ["C:/node/npm.cmd", "run", "lint", "--prefix", web_prefix],
         ["C:/node/npm.cmd", "run", "typecheck", "--prefix", web_prefix],
         ["C:/node/npm.cmd", "run", "test", "--prefix", web_prefix],
+        ["C:/node/npm.cmd", "run", "test:visual", "--prefix", web_prefix],
         ["C:/node/npm.cmd", "run", "build", "--prefix", web_prefix],
     ]
     assert all("test:legacy" not in command for command in commands)
+    assert not any(
+        "generate_brand_assets.py" in argument
+        for command in commands
+        for argument in command
+    )
     assert verified == [
         Path(__file__).parents[2] / "src/dotnet/VibeOCR.App/WebAssets/dist"
     ]
+    output = capsys.readouterr().out
+    assert "brand-assets" not in output
+    assert "::notice title=Quality stage::web-build completed" in output
 
 
 def _run_release_build_fixture(
@@ -199,7 +240,8 @@ function npm {
 }
 function uv {
     Write-Call 'uv' $args
-    if ($env:FAIL_STAGE -eq 'web-verify') {
+    if ($env:FAIL_STAGE -eq 'web-verify' -and
+        ($args -join ' ') -like '*verify_web_assets.py*') {
         $global:LASTEXITCODE = 22
     } else { $global:LASTEXITCODE = 0 }
 }
@@ -275,7 +317,11 @@ def test_release_build_runs_verified_web_bundle_before_packaged_smoke(
     )
 
     assert completed.returncode != 0
-    verifier = next(index for index, call in enumerate(calls) if call.startswith("uv|"))
+    verifier = next(
+        index
+        for index, call in enumerate(calls)
+        if call.startswith("uv|") and "verify_web_assets.py" in call
+    )
     app_publish = next(
         index
         for index, call in enumerate(calls)
@@ -299,7 +345,7 @@ def _configure_release_smoke_fixture(
 ) -> tuple[Path, list[list[str]]]:
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
-    archive = artifacts / "VibeOCR-Next-v1.2.3-win64.zip"
+    archive = artifacts / "VibeOCR-v1.2.3-win64.zip"
     with zipfile.ZipFile(archive, "w") as package:
         package.writestr("VibeOCR.Next/VibeOCR.WinUI.exe", b"placeholder")
     names = {
@@ -335,6 +381,7 @@ def _configure_release_smoke_fixture(
     def fake_run(
         command: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
+        assert kwargs["timeout"] == 120
         calls.append(command)
         if "smoke_web_workbench.ps1" in command[2]:
             product_root = Path(command[command.index("-ProductRoot") + 1])
@@ -379,13 +426,74 @@ def test_release_smoke_propagates_a_failed_web_ready_handshake(
     assert len(calls) == 2
 
 
+@pytest.mark.parametrize("installed_layout", [False, True])
 def test_web_ready_smoke_runs_an_isolated_production_profile(
     tmp_path: Path,
+    installed_layout: bool,
 ) -> None:
     root = Path(__file__).parents[2]
     product = tmp_path / "product"
     product.mkdir()
-    (product / "VibeOCR.WinUI.exe").write_bytes(b"placeholder")
+    executable = product / (
+        "app/VibeOCR.WinUI.exe" if installed_layout else "VibeOCR.WinUI.exe"
+    )
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.write_bytes(b"placeholder")
+    if installed_layout:
+        metadata = product / "app/metadata"
+        metadata.mkdir(parents=True)
+        (metadata / "product-layout.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "product_id": "vibeocr",
+                    "public_entry": "VibeOCR.exe",
+                    "roots": {
+                        "app": "app",
+                        "runtime": "runtime",
+                        "metadata": "app/metadata",
+                    },
+                    "app": {
+                        "entry": "app/VibeOCR.WinUI.exe",
+                        "web_assets": "app/WebAssets",
+                        "updater": "app/tools/updater.exe",
+                    },
+                    "runtime": {
+                        "manifest": "runtime/backend/runtime-manifest.json",
+                        "installer": "runtime/installer/vibeocr-runtime-installer.exe",
+                    },
+                    "metadata": {
+                        "component_lock": "app/metadata/component-lock.json",
+                        "component_identities": "app/metadata/component-identities.json",
+                        "release_manifest": "app/metadata/product-release-manifest.json",
+                    },
+                    "user_data": {
+                        "known_folder": "LocalApplicationData",
+                        "relative": "VibeOCR",
+                    },
+                    "required": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        for name in ("VibeOCR.exe", "LICENSE", "CHANGELOG.md"):
+            (product / name).write_bytes(b"placeholder")
+        for relative in (
+            "app/VibeOCR.WinUI.dll",
+            "app/VibeOCR.WinUI.pri",
+            "app/App.xbf",
+            "app/MainWindow.xbf",
+            "app/WebAssets/index.html",
+            "app/tools/updater.exe",
+            "app/metadata/component-lock.json",
+            "app/metadata/component-identities.json",
+            "app/metadata/product-release-manifest.json",
+            "runtime/backend/runtime-manifest.json",
+            "runtime/installer/vibeocr-runtime-installer.exe",
+        ):
+            path = product / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"placeholder")
     launch = tmp_path / "launch.json"
     cleanup = tmp_path / "cleanup.txt"
     wrapper = tmp_path / "run-smoke.ps1"
@@ -465,19 +573,34 @@ $global:webViewCleanupAttempts | Set-Content -LiteralPath $Cleanup
     launched = json.loads(launch.read_text(encoding="utf-8-sig"))
     assert Path(launched["file"]).parent != product
     assert launched["working_directory"] == str(Path(launched["file"]).parent)
-    assert launched["arguments"] == ["--shell-only", "--profile", "production"]
+    expected_arguments = ["--shell-only", "--profile", "production"]
+    if installed_layout:
+        expected_arguments += ["--install-root", str(Path(launched["file"]).parents[1])]
+    assert launched["arguments"] == expected_arguments
     assert len(launched["instance_scope"]) == 32
     assert all(
         character in "0123456789abcdef" for character in launched["instance_scope"]
     )
-    assert (
-        Path(launched["user_data"]).parent == Path(launched["working_directory"]).parent
+    isolated_product = (
+        Path(launched["file"]).parents[1]
+        if installed_layout
+        else Path(launched["file"]).parent
     )
+    assert Path(launched["user_data"]).parent == isolated_product.parent
     assert Path(launched["user_data"]) != Path(launched["working_directory"])
     assert cleanup.read_text(encoding="utf-8-sig").strip() == "2"
     assert not Path(launched["user_data"]).exists()
     assert not Path(launched["working_directory"]).exists()
-    assert list(product.iterdir()) == [product / "VibeOCR.WinUI.exe"]
+    if installed_layout:
+        assert {path.name for path in product.iterdir()} == {
+            "VibeOCR.exe",
+            "LICENSE",
+            "CHANGELOG.md",
+            "app",
+            "runtime",
+        }
+    else:
+        assert list(product.iterdir()) == [product / "VibeOCR.WinUI.exe"]
 
 
 def _run_app_ci_fixture(
@@ -581,14 +704,19 @@ def test_project_config_declares_minor_compatible_protocol_and_single_identity_a
     assert config["release"]["identity_asset"] == "component-identities.json"
     assert "component-lock.json" in config["release"]["required_assets"]
     bootstrap = config["ci"]["bootstrap"]
-    assert ["pwsh", "-File", "scripts/install_windows_app_runtime.ps1"] in bootstrap
-    resolver_index = bootstrap.index(
-        ["python", "scripts/resolve_component_releases.py"]
+    assert any(
+        command[-3:] == ["pwsh", "-File", "scripts/install_windows_app_runtime.ps1"]
+        for command in bootstrap
+    )
+    resolver_index = next(
+        index
+        for index, command in enumerate(bootstrap)
+        if "component-resolve" in command
     )
     restore_indexes = [
         index
         for index, command in enumerate(bootstrap)
-        if command[:2] == ["dotnet", "restore"]
+        if "dotnet" in command and "restore" in command
     ]
     assert restore_indexes and resolver_index < min(restore_indexes)
     assert ["python", "scripts/resolve_component_releases.py"] not in config["ci"][
@@ -603,6 +731,57 @@ def test_project_config_declares_minor_compatible_protocol_and_single_identity_a
     assert "$inputs = Join-Path $root '.release-input'" in build_script
     nuget = (root / "NuGet.Config").read_text(encoding="utf-8")
     assert 'value=".release-input/protocol-sdk"' in nuget
+
+
+def test_platform_e2e_has_a_bounded_hang_diagnostic() -> None:
+    root = Path(__file__).parents[2]
+    config = json.loads((root / ".ci/project.json").read_text(encoding="utf-8"))
+    platform_test = next(
+        command for command in config["ci"]["e2e"] if "platform-tests" in command
+    )
+
+    assert platform_test[-7:] == [
+        "--blame-hang",
+        "--blame-hang-timeout",
+        "2m",
+        "--blame-hang-dump-type",
+        "none",
+        "--logger",
+        "console;verbosity=detailed",
+    ]
+
+
+def test_long_running_ci_commands_have_outer_process_tree_timeouts() -> None:
+    root = Path(__file__).parents[2]
+    config = json.loads((root / ".ci/project.json").read_text(encoding="utf-8"))
+
+    for stage in ("bootstrap", "quality", "e2e", "release_build", "release_smoke"):
+        for command in config["ci"][stage]:
+            assert command[:2] == ["python", "scripts/run_ci_command.py"]
+            assert "--timeout-seconds" in command
+
+
+def test_web_ready_smoke_never_waits_unbounded_after_forced_termination() -> None:
+    root = Path(__file__).parents[2]
+    smoke = (root / "scripts/smoke_web_workbench.ps1").read_text(encoding="utf-8")
+
+    assert "$process.WaitForExit()" not in smoke
+    assert "$process.WaitForExit(5000)" in smoke
+
+
+def test_release_build_emits_actionable_stage_annotations() -> None:
+    root = Path(__file__).parents[2]
+    build = (root / "scripts/build-release.ps1").read_text(encoding="utf-8")
+
+    assert "::notice title=Release build stage::" in build
+    for stage in (
+        "app-publish",
+        "app-webview-smoke",
+        "updater-pyinstaller",
+        "product-package",
+        "artifact-verify",
+    ):
+        assert f"Write-CiStage '{stage}'" in build
 
 
 def test_backend_identity_hashes_runtime_and_optional_release_manifests() -> None:
@@ -652,7 +831,7 @@ def test_sync_version_updates_repository_and_desktop_project(tmp_path: Path) -> 
 def test_release_smoke_binds_real_archive_and_component_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    archive = tmp_path / "VibeOCR-Next-v0.2.0-win64.zip"
+    archive = tmp_path / "VibeOCR-v0.2.0-win64.zip"
     with zipfile.ZipFile(archive, "w") as package:
         package.writestr("VibeOCR.Next/VibeOCR.WinUI.exe", b"desktop")
     (tmp_path / "component-lock.json").write_text("{}", encoding="utf-8")
