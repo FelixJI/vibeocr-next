@@ -137,7 +137,7 @@
 - 新版本是无旧包袱的开发基线：不支持旧布局应用内升级，不迁移、不读取，也不自动删除旧开发版数据；只验证新布局之间的更新和回滚。
 - 用户设置、日志、缓存和临时资源默认进入 `%LOCALAPPDATA%\VibeOCR`，用户导出由显式选择位置；更新事务不能覆盖或回滚用户数据。
 - Classic 是功能行为契约而不是 Qt 布局模板；单图/截图/剪贴板、识别管道、复制与 Word/Excel 导出、批量、PDF、二维码、Runtime/模型/缓存/更新都进入矩阵，缺少 capability 时阻断而非占位。
-- UI 保留 React 19、Fluent UI 控件和原生 Windows 标题栏，功能图标完全切换到 `lucide-react`；原创 SVG 品牌资产确定性派生 ICO/PNG。
+- UI 保留 React 19、Fluent UI 控件和原生 Windows 标题栏，功能图标完全切换到 `lucide-react`；原创 ICO/PNG 品牌资产直接随仓维护。
 - 视觉采用 VibeTable 的冷中性、蓝色主状态、紧凑尺度、轻边框、完整交互状态和无障碍语言，但不引用 VibeTable 源码或复制其数据库布局。
 - 1280x800 为主要设计尺寸，1024x720 必须完整可用；覆盖浅/深/系统主题、125%/150%/200% 缩放、forced-colors、reduced-motion 和键盘工作流。
 - 不新增永久识别历史；跨路由保留任务，取消只在底层确认停止后结束；重启不自动恢复未完成 OCR。
@@ -176,6 +176,38 @@
 - `uv run --no-project --with pytest==9.0.3 --with ruff==0.15.17 python scripts/check_quality.py` 通过：64 Python、14 legacy Web、19 Vitest、Prettier、ESLint、TypeScript 与 Vite build 全绿。
 - App Release tests 105/105 通过。
 - Platform Release tests 84/85；唯一失败 `WindowsJobObjectTests.TerminateAndWaitReturnsAfterEveryAssignedProcessExits` 在本任务任何 Platform 修改前出现，临时目录仍被后代占用。它与 Phase 8 历史竞态一致，记录为 existing baseline failure，不能用重试伪装通过。
+
+## PR #26 CI 诊断（2026-08-11）
+
+- 打开的草稿 PR 中，#24 的 `required` 与 CodeQL 全绿；#26 的 CodeQL 全绿，仅 CI `required` 失败。
+- 失败 run 为 `31402937437`、job 为 `93502227864`；PR 当前 head 为 `97c32f2`。
+- 本地 `codex/fix-update-proxy-fallback` worktree 原先停在 `cba9765`，fetch 后已 fast-forward 到远端合并提交 `97c32f2`，工作树保持干净。
+- main 主工作树包含用户已有 `.worktrees/`，未修改；已删除远端的 `codex/vibeocr-productization` 仍被 worktree 使用，按安全规则保留。
+- `required` 的首个故障是 `scripts/generate_brand_assets.py --check`：16px Edge 截图完成并清理后，24px 渲染等待满 30 秒，最终抛出 `TimeoutError: Edge did not render the 24px brand asset in time`。
+- PR #26 相对 `main` 只改 `GitHubUpdateSource.cs` 与 `GitHubUpdateSourceTests.cs`；品牌生成器来自刚合并的 `main@e24a267`，故失败与更新代理 diff 无直接关系，但阻断该 PR 的 required gate。
+- PR 合并前 head `cba9765` 的 CI 全绿；合入 `main@e24a267` 后 head `97c32f2` 才触发品牌生成失败。`main@e24a267` 自身也有两次失败 CI，需要继续比对是否同一症状。
+- 现有生成器为 7 个尺寸逐个冷启动独立 Edge：检测到 PNG 后仍通过 `taskkill /T /F` 终止仍在运行的 browser tree；现有测试只断言调用次数、独立 profile 和清理，不覆盖 Edge 提前退出、挂起或诊断信息。
+- 真实本地 `uv run --no-project python scripts/generate_brand_assets.py --check` 在 10.38 秒通过，确认资产内容/24px 输入本身有效，故单次本地绿灯不能复现 hosted runner 的低概率停顿。
+- 最小确定性红灯为：将 `scripts.generate_brand_assets._generate` 替换为 `AssertionError("quality check launched Edge")` 后调用 `main --check`；当前实现 1 秒稳定失败，栈精确落在 `main -> _generate`，证明 quality 一致性检查必然依赖实时 Edge。
+- 同一 `main@e24a267` 的 run `31402880280` 也在 24px brand screenshot 超时；另一个 run `31402868897` 已通过 brand/Python/Web 单测，随后在 Playwright batch screenshot 超时。失败在不同浏览器截图阶段漂移，排除 24px SVG/尺寸确定性错误，支持 hosted Edge/截图链路存在瞬时停顿。
+
+### 排名假设
+
+1. **quality 契约错误地把外部渲染放进一致性检查**：每次 `--check` 都冷启动 7 次 Edge，任一瞬时挂起即让 PR fail。预测：同 SHA 相邻 run 可在不同浏览器截图阶段失败，真实本地单次可通过，替换 Edge 启动后 `--check` 稳定红；三项均已满足。
+2. **仅 30 秒超时过短**：预测同一挂起进程延长等待后最终产生 24px PNG；现有失败 runner 已销毁，无法在原进程验证，且单纯延时不能消除外部 GUI 依赖。
+3. **上一尺寸清理遗留 Edge 后代导致第二次启动卡住**：预测失败稳定集中在第二个尺寸且清理后存在带临时 profile 的后代；当前只有云端恰在 24px，两次本地完整清理无异常证据，可信度低于 #1。
+4. **24px SVG/截图参数本身无效**：预测所有环境稳定在 24px 失败；被本地完整通过与另一 main run 通过 brand 阶段直接否定。
+
+### 最终收缩决策
+
+- 用户确认不需要生成 provenance 或逐字节一致性：现有 PNG/ICO 直接作为仓库品牌资产即可。
+- 删除 SVG、Edge 生成脚本、quality/release build 调用和生成器专属测试；App、Bootstrapper、WebAssets 与 PyInstaller 继续消费现有 PNG/ICO 路径。
+- 不增加 manifest、hash 或新的存在性脚本。缺少被引用资产会由编译/打包自然失败；品牌内容通过普通二进制 diff、UI 与真实候选评审。
+- 定向 quality seam 已完成 red→green：旧实现因 `generate_brand_assets.py` 命令仍存在而失败；删除调用后 1/1 通过。
+- 品牌门禁移除后，PR 自身的代理回退测试首次运行到下载路径并稳定失败。根因是 merge 后 selector 已只接受产品化 `VibeOCR-v*`，但 PR 新 fixture 的 release JSON/checksum 文本仍使用旧 `VibeOCR-Next-v*`，导致 `available=false`/下载返回 false；生产 selector 无需修改，只同步 fixture 到正式资产契约。
+- 第二轮云端 required 在 Platform 86/87 失败：`SuccessfulStartIsOneShotAndDisposeClearsReady` 的 Job enrollment 通过 `Process.SafeHandle` 打开快照后代时抛 `Access is denied`；本地同一测试则稳定重现 Dispose 后目录仍被后代占用。
+- Microsoft Job API 契约要求：`IsProcessInJob` 只需 `PROCESS_QUERY_INFORMATION` 或 `PROCESS_QUERY_LIMITED_INFORMATION`，`AssignProcessToJobObject` 只需 `PROCESS_SET_QUOTA | PROCESS_TERMINATE`。生产代码改为对快照 PID 显式 `OpenProcess` 三项最小权限，并只把 PID 已消失对应的 `ERROR_INVALID_PARAMETER` 视为正常快照竞态；其他权限错误继续 fail closed。
+- 原始精确测试完成 red→green：修复前 1 failed（目录占用），修复后 1 passed；完整并行 Platform suite 连续 10 轮均为 87/87 passed。
 
 ## Layout Test Seams（2026-08-10）
 

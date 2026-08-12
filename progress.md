@@ -232,7 +232,7 @@
 | Web quality | 14 legacy + 19 Vitest + 3 Playwright；Prettier/ESLint/typecheck/build | passed |
 | App CI TRX | 108/108，Completed | passed |
 | Platform Release | 87/87 | passed |
-| Brand assets | SVG → 7 PNG + ICO 字节一致性 | passed |
+| Brand assets | 7 个 PNG + ICO 的应用与发布引用 | passed |
 | Release build | WinUI/Bootstrapper/PyInstaller updater/layout/closure/ZIP/checksum/SBOM | passed |
 | Release smoke | artifact verifier + 解压候选 WebView2 bridge-ready | passed |
 
@@ -241,3 +241,45 @@
 - 三个中文 Conventional Commit 已推送到 `codex/vibeocr-productization`，未绕过 hooks，分支基于最新 `origin/main`（ahead 3 / behind 0）。
 - Draft PR #25 已创建：`https://github.com/FelixJI/vibeocr-next/pull/25`；正文包含 Issue #23、根因、布局/更新/UI 变更、Classic 阻断矩阵、精确验证命令与三张视觉基线。
 - GitHub CI `plan` 与四语言 CodeQL 已触发并处于 `IN_PROGRESS`；pending 未写成 passed，PR 未合并。
+
+## Session: 2026-08-11（PR #26 CI 修复）
+
+### Phase 15：失败检查定位
+
+- **Status:** in_progress
+- Actions taken:
+  - 读取并应用 `github:gh-fix-ci`、`diagnosing-bugs`、`git-pr-delivery` 与 `planning-with-files`。
+  - 核对 Next 仓库 Git、远端、hooks、worktree 与 GitHub CLI；clone 未启用实际 hooks。
+  - 同步 `origin`，确认 PR #26 的 `required` 失败、CodeQL 通过；PR #24 全绿。
+  - 将对应 worktree fast-forward 到 PR head `97c32f2`，未覆盖任何未提交改动。
+
+| Test | Actual | Status |
+|------|--------|--------|
+| `gh pr checks 24` | `required` 与 CodeQL 全绿 | passed |
+| `gh pr checks 26` | `required` failed；CodeQL passed | failed-confirmed |
+
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-08-11 | Windows 沙箱启动 PowerShell 返回错误 1920 | 1 | 经批准对只读 Git/文件检查使用沙箱外 PowerShell；源码写入仍使用 apply_patch |
+| 2026-08-11 | 官方 `inspect_pr_checks.py` 在 Windows 按 GBK 解码 UTF-8 gh 日志而崩溃 | 1 | 以 `PYTHONUTF8=1`、`PYTHONIOENCODING=utf-8` 重跑后成功提取失败日志 |
+| 2026-08-11 | 首个删除链补丁对 `build-release.ps1` 使用了错误上下文 | 1 | 确认补丁未部分应用，读取实际片段后拆分为精确小补丁 |
+| 2026-08-11 | Ruff format check 要求重排两个受影响 Python 文件 | 1 | Ruff lint 已通过；按仓库 formatter 格式化后重跑 lint/format 与 pytest |
+| 2026-08-11 | adapter 全文件测试有 3 个 release command 序列仍期待已删除的品牌 `uv` 调用 | 1 | 保留 Web fail-closed 语义，仅从三个期望序列删除首个品牌命令后重跑 |
+| 2026-08-11 | 完整 quality 在 82 个 Python 测试通过后找不到 Prettier | 1 | 对应 worktree 尚无锁定 `node_modules`；先执行 `npm ci` bootstrap，再重跑完整 quality |
+| 2026-08-11 | 精确 Platform 测试无法启动：缺少 `project.assets.json` | 1 | 先对 Platform tests 执行 locked restore，再运行同一测试反馈环 |
+
+- 失败日志已闭合到 brand-assets：24px Edge headless screenshot 在 30 秒内未产生完整 PNG。
+- GitHub connector 证实 PR 实际 diff 仅含更新下载代理与对应测试；brand generator 失败来自新 base，不是该 diff 引入。
+- 建立快速红灯：`uv run --no-project python -c "...patch _generate...; module.main()"` 在 1 秒内以 `AssertionError: quality check launched Edge` 失败；该 seam 精确覆盖 quality `--check` 对外部 Edge 的依赖。
+- 本地真实 brand check 10.38 秒通过；相邻 main run 分别在 brand 24px 与 Playwright batch screenshot 超时，根因收敛到 CI 中实时浏览器渲染的不确定性，而非 PR 更新代理代码或 24px 资产内容。
+- 用户选择最小方案：PNG/ICO 直接随仓维护，不保留 SVG 生成链、manifest 或额外哈希校验。
+- quality 定向契约 red→green：删除前 1 failed，删除脚本与调用后 1 passed。
+- CI adapter 全文件测试在同步 release command 序列后 31/31 通过；Ruff lint 与 format check 通过。
+- 完整 quality 的 Ruff 与 82/82 Python 测试已通过；Web 阶段因本地未安装锁定依赖暂未启动。
+- `npm ci` 按锁安装 331 packages、0 vulnerability；完整 quality 随后通过：82 Python、14 legacy Web、19 Vitest、3 Playwright 及 format/lint/typecheck/build。
+- 更新代理定向 .NET 测试 5/6，通过的唯一失败为 `DownloadVerifyFallsBackAcrossBadSources` 返回 `false`；该测试在 PR 合入产品化 main 后首次运行到实际 selector 路径。
+- 根因确认：测试 fixture 仍发布旧 `VibeOCR-Next-v*`，而产品化 selector 只接受 `VibeOCR-v*`；同步 JSON 与 checksum 文件名，不修改生产 selector。
+- 更新代理 fixture 修复后定向 App tests 6/6 通过。
+- 推送后 CodeQL 全绿、quality 云端通过；required 在 Platform 86/87 失败：`SuccessfulStartIsOneShotAndDisposeClearsReady` 的 Job enrollment 读取后代 `Process.SafeHandle` 时抛 `Win32Exception: Access is denied`。
+- locked restore 后本地精确测试稳定重现目录占用；改用 Job API 所需最小权限显式打开快照后代句柄后，同一测试转为 1/1 passed。
+- 完整 Platform suite 连续运行 10 轮并在格式整理后再运行 1 轮，11 轮全部 87/87 passed，未再出现句柄拒绝或 Dispose 后目录占用。

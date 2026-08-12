@@ -16,8 +16,6 @@ from scripts.automation_core import CommandRunner
 from scripts.bind_component_releases import bind_product_releases
 from scripts.check_quality import main as run_quality
 from scripts.check_quality import resolve_executable
-from scripts.generate_brand_assets import SIZES as BRAND_ASSET_SIZES
-from scripts.generate_brand_assets import _generate as generate_brand_assets
 from scripts.release_smoke import verify
 from scripts.resolve_component_releases import (
     _api,
@@ -186,59 +184,17 @@ def test_quality_runs_web_gates_once_and_verifies_production_dist(
         ["C:/node/npm.cmd", "run", "build", "--prefix", web_prefix],
     ]
     assert all("test:legacy" not in command for command in commands)
+    assert not any(
+        "generate_brand_assets.py" in argument
+        for command in commands
+        for argument in command
+    )
     assert verified == [
         Path(__file__).parents[2] / "src/dotnet/VibeOCR.App/WebAssets/dist"
     ]
     output = capsys.readouterr().out
-    assert "::notice title=Quality stage::brand-assets started" in output
+    assert "brand-assets" not in output
     assert "::notice title=Quality stage::web-build completed" in output
-
-
-def test_brand_asset_edge_process_does_not_capture_inherited_pipes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[tuple[list[str], dict[str, object]]] = []
-    terminated: list[object] = []
-    source = tmp_path / "vibeocr.svg"
-    source.write_text("<svg/>", encoding="utf-8")
-
-    def fake_popen(command: list[str], **kwargs: object) -> object:
-        calls.append((command, kwargs))
-        screenshot = next(
-            Path(argument.removeprefix("--screenshot="))
-            for argument in command
-            if argument.startswith("--screenshot=")
-        )
-        size = int(screenshot.stem.removeprefix("vibeocr-"))
-        screenshot.write_bytes(
-            b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00IHDR"
-            + size.to_bytes(4, "big")
-            + size.to_bytes(4, "big")
-            + b"IEND\xaeB`\x82"
-        )
-        return object()
-
-    monkeypatch.setattr("scripts.generate_brand_assets._edge", lambda: Path("edge"))
-    monkeypatch.setattr("scripts.generate_brand_assets.subprocess.Popen", fake_popen)
-    monkeypatch.setattr(
-        "scripts.generate_brand_assets.terminate_process_tree",
-        lambda process: terminated.append(process),
-    )
-
-    generate_brand_assets(source, tmp_path / "generated")
-
-    assert len(calls) == len(BRAND_ASSET_SIZES)
-    assert len(terminated) == len(BRAND_ASSET_SIZES)
-    assert all(kwargs["stdout"] is subprocess.DEVNULL for _, kwargs in calls)
-    assert all(kwargs["stderr"] is subprocess.DEVNULL for _, kwargs in calls)
-    assert all("capture_output" not in kwargs for _, kwargs in calls)
-    profiles = [
-        next(
-            argument for argument in command if argument.startswith("--user-data-dir=")
-        )
-        for command, _ in calls
-    ]
-    assert len(set(profiles)) == len(BRAND_ASSET_SIZES)
 
 
 def _run_release_build_fixture(
@@ -336,9 +292,9 @@ function dotnet {
 @pytest.mark.parametrize(
     ("fail_stage", "expected_commands"),
     [
-        ("npm-ci", ["uv", "npm"]),
-        ("npm-build", ["uv", "npm", "npm"]),
-        ("web-verify", ["uv", "npm", "npm", "uv"]),
+        ("npm-ci", ["npm"]),
+        ("npm-build", ["npm", "npm"]),
+        ("web-verify", ["npm", "npm", "uv"]),
     ],
 )
 def test_release_build_web_gates_fail_closed_before_publish(
