@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.1
+
+### Features
+
+- **updater:** 迁移 Velopack 更新链 (#27) (15dc590)
+- **product:** 完成 VibeOCR 产品化基线 (#25) (e24a267)
+
+### Bug Fixes
+
+- **settings:** 原子写入桌面配置 (#30) (d09b9b8)
+- **automation:** 避免污染 scripts 命名空间 (#29) (a027e0e)
+- **update:** 修复更新代理回退 (aea7bd1)
+
+### Dependencies
+
+- **protocol:** 升级 .NET Protocol SDK 至 2.5.0 (#31) (435898d)
+
 ## 0.3.0
 
 ### Features
