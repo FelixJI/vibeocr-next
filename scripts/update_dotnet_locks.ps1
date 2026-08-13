@@ -3,7 +3,8 @@
 Regenerates .NET package locks from the published Protocol release.
 
 .DESCRIPTION
-Downloads and verifies the immutable Protocol v2.0.0 NUPKGs, regenerates all
+Reads the exact Protocol SDK pin from Directory.Packages.props, downloads and
+verifies that immutable release's NUPKGs, regenerates all
 Next package locks with an isolated NuGet cache, then proves the committed
 graph restores in locked mode from a second empty cache.
 #>
@@ -12,11 +13,43 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$feed = Join-Path $repo '.release-input\protocol'
-$dotnet = Join-Path $env:ProgramFiles 'dotnet\dotnet.exe'
+$feed = Join-Path $repo '.release-input\protocol-sdk'
+$packagePropsPath = Join-Path $repo 'Directory.Packages.props'
+$dotnet = if ($env:DOTNET_ROOT) {
+    Join-Path $env:DOTNET_ROOT 'dotnet.exe'
+} else {
+    Join-Path $env:ProgramFiles 'dotnet\dotnet.exe'
+}
 if (-not (Test-Path -LiteralPath $dotnet -PathType Leaf)) {
     throw '64-bit dotnet SDK is required'
 }
+
+[xml]$packageProps = Get-Content -LiteralPath $packagePropsPath -Raw
+$protocolPackageNames = @(
+    'VibeOCR.Runtime.Contracts',
+    'VibeOCR.Runtime.Client'
+)
+$protocolPins = @(
+    $packageProps.Project.ItemGroup.PackageVersion |
+        Where-Object { $_.Include -in $protocolPackageNames }
+)
+if ($protocolPins.Count -ne $protocolPackageNames.Count) {
+    throw 'Directory.Packages.props must pin both Protocol SDK packages'
+}
+$protocolVersions = @(
+    $protocolPins | ForEach-Object {
+        $match = [regex]::Match([string]$_.Version, '^\[(\d+\.\d+\.\d+)\]$')
+        if (-not $match.Success) {
+            throw "Protocol SDK package must use an exact stable pin: $($_.Include)"
+        }
+        $match.Groups[1].Value
+    } | Select-Object -Unique
+)
+if ($protocolVersions.Count -ne 1) {
+    throw 'Protocol SDK packages must use the same exact version'
+}
+$protocolVersion = $protocolVersions[0]
+$protocolPackagePattern = "VibeOCR.Runtime.*.$protocolVersion.nupkg"
 
 $tempRoot = [System.IO.Path]::GetFullPath(
     (Join-Path ([System.IO.Path]::GetTempPath()) 'vibeocr-next-lock-update')
@@ -38,16 +71,16 @@ if (Test-Path -LiteralPath $feed) {
 }
 New-Item -ItemType Directory -Path $feed | Out-Null
 
-gh release download v2.0.0 `
+gh release download "v$protocolVersion" `
     --repo FelixJI/vibeocr-protocol `
-    --pattern 'VibeOCR.Runtime.*.2.0.0.nupkg' `
+    --pattern $protocolPackagePattern `
     --dir $feed
 if ($LASTEXITCODE -ne 0) {
     throw 'Protocol NUPKG download failed'
 }
 
 $packages = @(
-    Get-ChildItem -LiteralPath $feed -Filter 'VibeOCR.Runtime.*.2.0.0.nupkg'
+    Get-ChildItem -LiteralPath $feed -Filter $protocolPackagePattern
 )
 if ($packages.Count -ne 2) {
     throw "expected two Protocol NUPKGs, found $($packages.Count)"
@@ -93,4 +126,4 @@ finally {
     }
 }
 
-Write-Host 'Next .NET package locks regenerated and verified from Protocol v2.0.0.'
+Write-Host "Next .NET package locks regenerated and verified from Protocol v$protocolVersion."
