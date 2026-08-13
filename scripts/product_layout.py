@@ -12,7 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 LAYOUT_RELATIVE_PATH = Path("app/metadata/product-layout.json")
-ROOT_ALLOWLIST = frozenset({"VibeOCR.exe", "LICENSE", "CHANGELOG.md", "app", "runtime"})
+ROOT_ALLOWLIST = frozenset(
+    {"VibeOCR.exe", "Velopack.dll", "LICENSE", "CHANGELOG.md", "app", "runtime"}
+)
 CANONICAL_PATHS = {
     "public_entry": "VibeOCR.exe",
     "roots.app": "app",
@@ -355,6 +357,10 @@ def stage_product_layout(
 
         shutil.copyfile(
             bootstrapper_executable.resolve(strict=True), staging / "VibeOCR.exe"
+        )
+        shutil.copyfile(
+            bootstrapper_executable.with_name("Velopack.dll").resolve(strict=True),
+            staging / "Velopack.dll",
         )
         shutil.copyfile(
             updater_executable.resolve(strict=True), tools_root / "updater.exe"

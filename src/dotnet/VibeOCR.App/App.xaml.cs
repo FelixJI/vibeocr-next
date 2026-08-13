@@ -270,16 +270,8 @@ public sealed partial class App : Application
             () => _window!.Close(),
             hotkey);
         _updateViewModel = new UpdateViewModel(
-            new GitHubUpdateSource(
-                typeof(App).Assembly
-                    .GetCustomAttributes(
-                        typeof(System.Reflection.AssemblyInformationalVersionAttribute),
-                        inherit: false)
-                    .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
-                    .FirstOrDefault()?.InformationalVersion.Split('+', 2)[0]
-                    ?? typeof(App).Assembly.GetName().Version?.ToString(3)
-                    ?? "0.0.0",
-                layout.InstallRoot,
+            VelopackUpdateCoordinator.Create(
+                layout.ConfigFile,
                 Path.Combine(layout.DataRoot, "cache", "update")),
             () => _window!.Close());
     }
@@ -427,7 +419,6 @@ public sealed partial class App : Application
             WriteHealthSignal();
             _ = UpdateArtifactCleaner.CleanupAsync(
                 layout.DataRoot, TimeSpan.FromSeconds(3));
-
             bool soakCycleComplete = !_soakCrashRequested || isRecovery;
             if (soakCycleComplete)
             {

@@ -6,6 +6,7 @@ using System.Linq;
 using VibeOCR.ProductLayout;
 using Windows.Management.Deployment;
 using Windows.System;
+using Velopack;
 
 namespace VibeOCR.Bootstrapper;
 
@@ -19,6 +20,7 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        VelopackApp.Build().Run();
         string installRoot = AppDomain.CurrentDomain.BaseDirectory;
         ResolvedProductLayout layout;
         try

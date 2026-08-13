@@ -35,8 +35,20 @@ def _extract_product(archive: Path, destination: Path) -> Path:
 def verify(artifacts: Path) -> None:
     names = verify_release_assets(
         artifacts,
-        required=("component-lock.json", "component-identities.json", "SBOM.spdx.json"),
-        require_one=("VibeOCR-v*-win64.zip", "VibeOCR-v*-win64.zip.sha256"),
+        required=(
+            "VibeOCRNext-Setup.exe",
+            "VibeOCRNext-Setup.exe.sha256",
+            "VibeOCRNext-Portable.zip",
+            "releases.win.json",
+            "component-lock.json",
+            "component-identities.json",
+            "SBOM.spdx.json",
+        ),
+        require_one=(
+            "VibeOCR-v*-win64.zip",
+            "VibeOCR-v*-win64.zip.sha256",
+            "VibeOCRNext-*-full.nupkg",
+        ),
         require_index=False,
     )
     identity = json.loads(
@@ -51,9 +63,15 @@ def verify(artifacts: Path) -> None:
         if not record.get("release_manifest_sha256"):
             raise ValueError(f"missing actual {component} release manifest identity")
     archive = next(artifacts.glob("VibeOCR-v*-win64.zip"))
+    full = next(artifacts.glob("VibeOCRNext-*-full.nupkg"))
     expected_names = {
         archive.name,
         f"{archive.name}.sha256",
+        full.name,
+        "VibeOCRNext-Setup.exe",
+        "VibeOCRNext-Setup.exe.sha256",
+        "VibeOCRNext-Portable.zip",
+        "releases.win.json",
         "component-lock.json",
         "component-identities.json",
         "SBOM.spdx.json",

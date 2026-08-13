@@ -12,6 +12,7 @@
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" PrivateAssets="all" />
     <PackageReference Include="Microsoft.Web.WebView2" />
     <PackageReference Include="Microsoft.Windows.SDK.Contracts" />
+    <PackageReference Include="Velopack" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="../VibeOCR.ProductLayout.Shared/ProductLayout.cs"

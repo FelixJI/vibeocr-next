@@ -277,6 +277,7 @@
         "type": "Project",
         "dependencies": {
           "Microsoft.WindowsAppSDK": "[2.2.0, )",
+          "Velopack": "[1.2.0, )",
           "VibeOCR.Platform": "[1.0.0, )",
           "VibeOCR.Runtime.Contracts": "[2.2.0, 2.2.0]"
         }
@@ -303,6 +304,12 @@
           "Microsoft.WindowsAppSDK.Widgets": "2.0.5",
           "Microsoft.WindowsAppSDK.WinUI": "2.2.1"
         }
+      },
+      "Velopack": {
+        "type": "CentralTransitive",
+        "requested": "[1.2.0, )",
+        "resolved": "1.2.0",
+        "contentHash": "Rz67gJL619fSBS6omaSINUxyDuwhIxkm5mmubf7uLd5Qgi6LLKaKCha+QFP6n+Bw/UjA0vutnH4JQfYzn6ANtw=="
       },
       "VibeOCR.Runtime.Client": {
         "type": "CentralTransitive",

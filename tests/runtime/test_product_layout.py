@@ -42,6 +42,7 @@ def _release_inputs(tmp_path: Path) -> dict[str, Path]:
 
     bootstrapper = tmp_path / "VibeOCR.Bootstrapper.exe"
     bootstrapper.write_bytes(b"launcher")
+    (tmp_path / "Velopack.dll").write_bytes(b"velopack")
     (tmp_path / "VibeOCR.Bootstrapper.exe.config").write_text(
         "<configuration />", encoding="utf-8"
     )
@@ -98,12 +99,14 @@ def test_stage_product_layout_builds_the_strict_public_tree(tmp_path: Path) -> N
 
     assert {path.name for path in product_root.iterdir()} == {
         "VibeOCR.exe",
+        "Velopack.dll",
         "LICENSE",
         "CHANGELOG.md",
         "app",
         "runtime",
     }
     assert layout.public_entry == product_root / "VibeOCR.exe"
+    assert (product_root / "Velopack.dll").read_bytes() == b"velopack"
     assert layout.app_entry == product_root / "app" / "VibeOCR.WinUI.exe"
     assert (product_root / LAYOUT_RELATIVE_PATH).is_file()
     assert (product_root / "app/tools/updater.exe").is_file()

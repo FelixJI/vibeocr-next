@@ -873,7 +873,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     await update.Value.CheckAsync(cancellationToken);
     return new UpdateWorkbenchState(
       update.Value.IsBusy,
-      update.Value.UpdateAvailable ? "update.available" : "update.current",
+      update.Value.StatusCode,
       update.Value.LatestVersion,
       update.Value.UpdateAvailable);
   }
@@ -881,7 +881,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private async Task<UpdateWorkbenchState> DownloadUpdateAsync(
     CancellationToken cancellationToken)
   {
-    await update.Value.DownloadAndVerifyAsync(cancellationToken);
+    await update.Value.DownloadAndApplyAsync(cancellationToken);
     return UpdateState();
   }
 
@@ -1100,7 +1100,7 @@ public sealed class DesktopWorkbenchCommandHandler :
 
   private UpdateWorkbenchState UpdateState() => new(
     update.Value.IsBusy,
-    update.Value.UpdateAvailable ? "update.available" : "update.current",
+    update.Value.StatusCode,
     update.Value.LatestVersion,
     update.Value.UpdateAvailable);
 

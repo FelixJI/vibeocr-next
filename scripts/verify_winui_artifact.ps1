@@ -60,7 +60,7 @@ if ($LASTEXITCODE -ne 0) {
     $errors.Add('product layout descriptor or root closure is invalid')
 }
 
-$expectedRootEntries = @('VibeOCR.exe', 'LICENSE', 'CHANGELOG.md', 'app', 'runtime')
+$expectedRootEntries = @('VibeOCR.exe', 'Velopack.dll', 'LICENSE', 'CHANGELOG.md', 'app', 'runtime')
 $actualRootEntries = @(Get-ChildItem -LiteralPath $root -Force | ForEach-Object { $_.Name })
 $actualRootClosure = (($actualRootEntries | Sort-Object) -join "`n")
 $expectedRootClosure = (($expectedRootEntries | Sort-Object) -join "`n")

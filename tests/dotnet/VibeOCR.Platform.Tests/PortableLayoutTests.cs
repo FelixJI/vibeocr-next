@@ -83,6 +83,7 @@ public sealed class PortableLayoutTests
         string[] required =
         [
             "VibeOCR.exe",
+            "Velopack.dll",
             "LICENSE",
             "CHANGELOG.md",
             "app/VibeOCR.WinUI.exe",

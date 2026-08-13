@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import shutil
 import subprocess
 import zipfile
@@ -16,6 +17,7 @@ from scripts.automation_core import CommandRunner
 from scripts.bind_component_releases import bind_product_releases
 from scripts.check_quality import main as run_quality
 from scripts.check_quality import resolve_executable
+from scripts.product_layout import ROOT_ALLOWLIST
 from scripts.release_smoke import verify
 from scripts.resolve_component_releases import (
     _api,
@@ -348,9 +350,23 @@ def _configure_release_smoke_fixture(
     archive = artifacts / "VibeOCR-v1.2.3-win64.zip"
     with zipfile.ZipFile(archive, "w") as package:
         package.writestr("VibeOCR.Next/VibeOCR.WinUI.exe", b"placeholder")
+    full = artifacts / "VibeOCRNext-1.2.3-full.nupkg"
+    full.write_bytes(b"velopack-package")
+    for name in (
+        "VibeOCRNext-Setup.exe",
+        "VibeOCRNext-Setup.exe.sha256",
+        "VibeOCRNext-Portable.zip",
+        "releases.win.json",
+    ):
+        (artifacts / name).write_bytes(b"placeholder")
     names = {
         archive.name,
         f"{archive.name}.sha256",
+        full.name,
+        "VibeOCRNext-Setup.exe",
+        "VibeOCRNext-Setup.exe.sha256",
+        "VibeOCRNext-Portable.zip",
+        "releases.win.json",
         "component-lock.json",
         "component-identities.json",
         "SBOM.spdx.json",
@@ -476,7 +492,7 @@ def test_web_ready_smoke_runs_an_isolated_production_profile(
             ),
             encoding="utf-8",
         )
-        for name in ("VibeOCR.exe", "LICENSE", "CHANGELOG.md"):
+        for name in ("VibeOCR.exe", "Velopack.dll", "LICENSE", "CHANGELOG.md"):
             (product / name).write_bytes(b"placeholder")
         for relative in (
             "app/VibeOCR.WinUI.dll",
@@ -594,6 +610,7 @@ $global:webViewCleanupAttempts | Set-Content -LiteralPath $Cleanup
     if installed_layout:
         assert {path.name for path in product.iterdir()} == {
             "VibeOCR.exe",
+            "Velopack.dll",
             "LICENSE",
             "CHANGELOG.md",
             "app",
@@ -702,7 +719,18 @@ def test_project_config_declares_minor_compatible_protocol_and_single_identity_a
         "minor_compatible": True,
     }
     assert config["release"]["identity_asset"] == "component-identities.json"
-    assert "component-lock.json" in config["release"]["required_assets"]
+    assert config["release"]["required_assets"] == [
+        "VibeOCR-v*-win64.zip",
+        "VibeOCR-v*-win64.zip.sha256",
+        "VibeOCRNext-*-full.nupkg",
+        "VibeOCRNext-Setup.exe",
+        "VibeOCRNext-Setup.exe.sha256",
+        "VibeOCRNext-Portable.zip",
+        "releases.win.json",
+        "component-lock.json",
+        "component-identities.json",
+        "SBOM.spdx.json",
+    ]
     bootstrap = config["ci"]["bootstrap"]
     assert any(
         command[-3:] == ["pwsh", "-File", "scripts/install_windows_app_runtime.ps1"]
@@ -723,7 +751,8 @@ def test_project_config_declares_minor_compatible_protocol_and_single_identity_a
         "e2e"
     ]
     build_script = (root / "scripts/build-release.ps1").read_text(encoding="utf-8")
-    assert build_script.count("build_release_checksums.py") == 1
+    assert build_script.count("build_release_checksums.py") == 2
+    assert "dotnet tool run vpk pack" in build_script
     resolver = (root / "scripts/resolve_component_releases.py").read_text(
         encoding="utf-8"
     )
@@ -779,9 +808,41 @@ def test_release_build_emits_actionable_stage_annotations() -> None:
         "app-webview-smoke",
         "updater-pyinstaller",
         "product-package",
+        "velopack-package",
         "artifact-verify",
     ):
         assert f"Write-CiStage '{stage}'" in build
+
+
+def test_winui_artifact_verifier_matches_product_root_allowlist() -> None:
+    root = Path(__file__).parents[2]
+    verifier = (root / "scripts/verify_winui_artifact.ps1").read_text(encoding="utf-8")
+    assignment = next(
+        line for line in verifier.splitlines() if "$expectedRootEntries = @(" in line
+    )
+
+    assert set(re.findall(r"'([^']+)'", assignment)) == ROOT_ALLOWLIST
+
+
+def test_velopack_startup_hook_runs_in_the_packaged_root_entrypoint() -> None:
+    root = Path(__file__).parents[2]
+    program = (root / "src/dotnet/VibeOCR.Bootstrapper/Program.cs").read_text(
+        encoding="utf-8"
+    )
+    project = (
+        root / "src/dotnet/VibeOCR.Bootstrapper/VibeOCR.Bootstrapper.csproj"
+    ).read_text(encoding="utf-8")
+
+    assert program.index("VelopackApp.Build().Run();") < program.index(
+        "AppDomain.CurrentDomain.BaseDirectory"
+    )
+    assert '<PackageReference Include="Velopack" />' in project
+    child_program = (root / "src/dotnet/VibeOCR.App/Program.cs").read_text(
+        encoding="utf-8"
+    )
+    assert child_program.index("VelopackApp.Build().Run();") < child_program.index(
+        "Application.Start"
+    )
 
 
 def test_backend_identity_hashes_runtime_and_optional_release_manifests() -> None:
@@ -854,6 +915,15 @@ def test_release_smoke_binds_real_archive_and_component_identity(
         encoding="utf-8",
     )
     (tmp_path / "SBOM.spdx.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "VibeOCRNext-0.2.0-full.nupkg").write_bytes(b"velopack-package")
+    setup = tmp_path / "VibeOCRNext-Setup.exe"
+    setup.write_bytes(b"setup")
+    (tmp_path / "VibeOCRNext-Setup.exe.sha256").write_text(
+        f"{hashlib.sha256(setup.read_bytes()).hexdigest()}  {setup.name}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "VibeOCRNext-Portable.zip").write_bytes(b"portable")
+    (tmp_path / "releases.win.json").write_text("{}", encoding="utf-8")
     sidecar = archive.with_name(archive.name + ".sha256")
     sidecar.write_text(
         f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n",
