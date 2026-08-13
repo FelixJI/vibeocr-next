@@ -34,12 +34,9 @@ public sealed class WindowLayoutStore
 
     public void Save(WindowGeometry geometry)
     {
-        string? directory = Path.GetDirectoryName(_filePath);
-        if (!string.IsNullOrEmpty(directory))
+        AtomicFile.Write(_filePath, stream =>
         {
-            Directory.CreateDirectory(directory);
-        }
-        using FileStream stream = File.Create(_filePath);
-        JsonSerializer.Serialize(stream, geometry, Options);
+            JsonSerializer.Serialize(stream, geometry, Options);
+        });
     }
 }
