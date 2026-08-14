@@ -11,4 +11,8 @@
     <PackageReference Include="xunit.runner.visualstudio" PrivateAssets="all" />
     <ProjectReference Include="../../../src/dotnet/VibeOCR.Platform/VibeOCR.Platform.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../../src/dotnet/VibeOCR.Bootstrapper/BootstrapperLog.cs"
+             Link="Bootstrapper/BootstrapperLog.cs" />
+  </ItemGroup>
 </Project>

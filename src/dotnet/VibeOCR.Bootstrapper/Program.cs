@@ -21,7 +21,22 @@ internal static class Program
     private static int Main(string[] args)
     {
         VelopackApp.Build().Run();
+        BootstrapperLog.Initialize();
+        try
+        {
+            return Launch(args);
+        }
+        catch (Exception error)
+        {
+            BootstrapperLog.Error("Unexpected bootstrapper failure: " + error);
+            throw;
+        }
+    }
+
+    private static int Launch(string[] args)
+    {
         string installRoot = AppDomain.CurrentDomain.BaseDirectory;
+        BootstrapperLog.Info($"Bootstrapper starting: root={installRoot}");
         ResolvedProductLayout layout;
         try
         {
@@ -29,14 +44,14 @@ internal static class Program
         }
         catch (InvalidDataException error)
         {
-            Console.Error.WriteLine(error.Message);
+            Report(error.Message);
             return LayoutInvalid;
         }
         string appPath = layout.AppEntry;
         string profile = ReadOption(args, "--profile") ?? "production";
         if (profile is not ("production" or "winui-dev"))
         {
-            Console.Error.WriteLine("Unsupported profile: " + profile);
+            Report("Unsupported profile: " + profile);
             return InvalidArguments;
         }
         string[] missing = new string?[]
@@ -48,19 +63,19 @@ internal static class Program
         }.Where(item => item != null).Select(item => item!).ToArray();
         if (missing.Length > 0)
         {
-            Console.Error.WriteLine("VibeOCR prerequisites require repair:");
+            Report("VibeOCR prerequisites require repair:");
             foreach (string item in missing)
             {
-                Console.Error.WriteLine("- " + item);
+                Report("- " + item);
             }
 
-            Console.Error.WriteLine("No component was downloaded or modified.");
+            Report("No component was downloaded or modified.");
             return PrerequisiteMissing;
         }
 
         if (!File.Exists(appPath))
         {
-            Console.Error.WriteLine("WinUI application is missing: " + appPath);
+            Report("WinUI application is missing: " + appPath);
             return AppMissing;
         }
 
@@ -74,7 +89,14 @@ internal static class Program
             UseShellExecute = true,
         };
         Process.Start(startInfo);
+        BootstrapperLog.Info($"Launched WinUI app: {appPath} {arguments}");
         return 0;
+    }
+
+    private static void Report(string message)
+    {
+        Console.Error.WriteLine(message);
+        BootstrapperLog.Error(message);
     }
 
     private static string? ReadOption(string[] args, string name)
