@@ -34,7 +34,6 @@ internal static class Program
         }
         string appPath = layout.AppEntry;
         string profile = ReadOption(args, "--profile") ?? "production";
-        string? healthFile = ReadOption(args, "--health-file");
         if (profile is not ("production" or "winui-dev"))
         {
             Console.Error.WriteLine("Unsupported profile: " + profile);
@@ -67,10 +66,6 @@ internal static class Program
 
         string arguments = "--profile " + Quote(profile) +
             " --install-root " + Quote(layout.InstallRoot);
-        if (!string.IsNullOrWhiteSpace(healthFile))
-        {
-            arguments += " --health-file " + Quote(Path.GetFullPath(healthFile));
-        }
         var startInfo = new ProcessStartInfo
         {
             FileName = appPath,

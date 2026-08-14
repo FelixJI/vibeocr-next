@@ -48,11 +48,6 @@ public sealed class UpdateViewModel(IUpdateCoordinator coordinator, Action? requ
                     StatusCode = "update.available";
                     Status = $"发现新版本 {result.Version}";
                     break;
-                case UpdateCheckStatus.NotInstalled:
-                    UpdateAvailable = true;
-                    StatusCode = "update.migration";
-                    Status = "需要一次性迁移到新版安装器";
-                    break;
                 case UpdateCheckStatus.Error:
                     UpdateAvailable = false;
                     StatusCode = "update.error";

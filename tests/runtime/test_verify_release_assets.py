@@ -24,20 +24,20 @@ def test_verify_release_assets_accepts_complete_candidate(tmp_path: Path) -> Non
         {
             "SBOM.spdx.json": b"{}",
             "component-lock.json": b"{}",
-            "VibeOCR-v1.0.0-win64.zip": b"zip",
+            "VibeOCRNext-1.0.0-full.nupkg": b"package",
         },
     )
 
     names = verify_release_assets(
         tmp_path,
         required=("SBOM.spdx.json", "component-lock.json"),
-        require_one=("VibeOCR-v*-win64.zip",),
+        require_one=("VibeOCRNext-*-full.nupkg",),
     )
 
     assert set(names) == {
         "SHA256SUMS",
         "SBOM.spdx.json",
-        "VibeOCR-v1.0.0-win64.zip",
+        "VibeOCRNext-1.0.0-full.nupkg",
         "component-lock.json",
     }
 

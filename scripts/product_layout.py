@@ -15,6 +15,7 @@ LAYOUT_RELATIVE_PATH = Path("app/metadata/product-layout.json")
 ROOT_ALLOWLIST = frozenset(
     {"VibeOCR.exe", "Velopack.dll", "LICENSE", "CHANGELOG.md", "app", "runtime"}
 )
+VELOPACK_ROOT_MARKERS = frozenset({"sq.version"})
 CANONICAL_PATHS = {
     "public_entry": "VibeOCR.exe",
     "roots.app": "app",
@@ -22,7 +23,6 @@ CANONICAL_PATHS = {
     "roots.metadata": "app/metadata",
     "app.entry": "app/VibeOCR.WinUI.exe",
     "app.web_assets": "app/WebAssets",
-    "app.updater": "app/tools/updater.exe",
     "runtime.manifest": "runtime/backend/runtime-manifest.json",
     "runtime.installer": "runtime/installer/vibeocr-runtime-installer.exe",
     "metadata.component_lock": "app/metadata/component-lock.json",
@@ -42,7 +42,6 @@ class ProductLayout:
     app_root: Path
     app_entry: Path
     web_assets: Path
-    updater: Path
     runtime_root: Path
     runtime_manifest: Path
     runtime_installer: Path
@@ -123,9 +122,9 @@ def _load_product_layout(
             "layout.missing-entry: product root is not a directory"
         )
     actual_root = {path.name for path in root.iterdir()}
-    if actual_root != ROOT_ALLOWLIST:
-        unexpected = sorted(actual_root - ROOT_ALLOWLIST)
-        missing = sorted(ROOT_ALLOWLIST - actual_root)
+    unexpected = sorted(actual_root - ROOT_ALLOWLIST - VELOPACK_ROOT_MARKERS)
+    missing = sorted(ROOT_ALLOWLIST - actual_root)
+    if unexpected or missing:
         raise ProductLayoutError(
             f"layout.root-conflict: unexpected={unexpected}, missing={missing}"
         )
@@ -155,7 +154,6 @@ def _load_product_layout(
         "roots.metadata": roots.get("metadata"),
         "app.entry": app.get("entry"),
         "app.web_assets": app.get("web_assets"),
-        "app.updater": app.get("updater"),
         "runtime.manifest": runtime.get("manifest"),
         "runtime.installer": runtime.get("installer"),
         "metadata.component_lock": metadata.get("component_lock"),
@@ -173,7 +171,6 @@ def _load_product_layout(
         app_root=_resolved_relative(root, roots.get("app"), "roots.app"),
         app_entry=_resolved_relative(root, app.get("entry"), "app.entry"),
         web_assets=_resolved_relative(root, app.get("web_assets"), "app.web_assets"),
-        updater=_resolved_relative(root, app.get("updater"), "app.updater"),
         runtime_root=_resolved_relative(root, roots.get("runtime"), "roots.runtime"),
         runtime_manifest=_resolved_relative(
             root, runtime.get("manifest"), "runtime.manifest"
@@ -202,7 +199,6 @@ def _load_product_layout(
         layout.app_root / "App.xbf",
         layout.app_root / "MainWindow.xbf",
         layout.web_assets / "index.html",
-        layout.updater,
         layout.runtime_manifest,
         layout.runtime_installer,
         layout.component_lock,
@@ -248,7 +244,11 @@ def verify_product_release(product_root: Path) -> ProductLayout:
     actual_files = {
         path.relative_to(layout.product_root).as_posix(): path
         for path in layout.product_root.rglob("*")
-        if path.is_file() and path != layout.release_manifest
+        if path.is_file()
+        and path != layout.release_manifest
+        and not (
+            path.parent == layout.product_root and path.name in VELOPACK_ROOT_MARKERS
+        )
     }
     if set(records) != set(actual_files):
         raise ProductLayoutError("layout.closure-mismatch: release file set")
@@ -329,7 +329,6 @@ def stage_product_layout(
     product_root: Path,
     app_publish_root: Path,
     bootstrapper_executable: Path,
-    updater_executable: Path,
     component_lock: Path,
     component_identities: Path,
     backend_release_dir: Path,
@@ -346,12 +345,10 @@ def stage_product_layout(
     try:
         app_root = staging / "app"
         metadata_root = app_root / "metadata"
-        tools_root = app_root / "tools"
         backend_root = staging / "runtime" / "backend"
         installer_root = staging / "runtime" / "installer"
         _copy_publish_tree(app_publish_root, app_root)
         metadata_root.mkdir(parents=True)
-        tools_root.mkdir(parents=True)
         backend_root.mkdir(parents=True)
         installer_root.mkdir(parents=True)
 
@@ -361,9 +358,6 @@ def stage_product_layout(
         shutil.copyfile(
             bootstrapper_executable.with_name("Velopack.dll").resolve(strict=True),
             staging / "Velopack.dll",
-        )
-        shutil.copyfile(
-            updater_executable.resolve(strict=True), tools_root / "updater.exe"
         )
         shutil.copyfile(
             component_lock.resolve(strict=True), metadata_root / "component-lock.json"
@@ -415,7 +409,6 @@ def stage_product_layout(
             "app": {
                 "entry": "app/VibeOCR.WinUI.exe",
                 "web_assets": "app/WebAssets",
-                "updater": "app/tools/updater.exe",
             },
             "runtime": {
                 "manifest": "runtime/backend/runtime-manifest.json",
@@ -449,7 +442,6 @@ def main(argv: list[str] | None = None) -> int:
     stage.add_argument("--product-root", type=Path, required=True)
     stage.add_argument("--app-publish-root", type=Path, required=True)
     stage.add_argument("--bootstrapper-executable", type=Path, required=True)
-    stage.add_argument("--updater-executable", type=Path, required=True)
     stage.add_argument("--component-lock", type=Path, required=True)
     stage.add_argument("--component-identities", type=Path, required=True)
     stage.add_argument("--backend-release-dir", type=Path, required=True)
@@ -465,7 +457,6 @@ def main(argv: list[str] | None = None) -> int:
             product_root=args.product_root,
             app_publish_root=args.app_publish_root,
             bootstrapper_executable=args.bootstrapper_executable,
-            updater_executable=args.updater_executable,
             component_lock=args.component_lock,
             component_identities=args.component_identities,
             backend_release_dir=args.backend_release_dir,

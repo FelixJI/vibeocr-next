@@ -70,28 +70,6 @@ public sealed class VelopackTransportTests
         }
     }
 
-    [Theory]
-    [InlineData(
-        "https://github.com/FelixJI/vibeocr-next/releases/latest/download/",
-        "https://github.com/FelixJI/vibeocr-next/releases/download/v0.4.0/VibeOCRNext-Setup.exe")]
-    [InlineData(
-        "http://prefix.invalid/https://github.com/FelixJI/vibeocr-next/releases/latest/download/",
-        "http://prefix.invalid/https://github.com/FelixJI/vibeocr-next/releases/download/v0.4.0/VibeOCRNext-Setup.exe")]
-    public void LegacySetupUriIsBoundToTheCheckedReleaseVersion(
-        string baseUrl,
-        string expected)
-    {
-        var endpoint = new VelopackFeedEndpoint(
-            new Uri(baseUrl),
-            new HttpClientFileDownloader());
-
-        Uri actual = endpoint.AssetUri(
-            VelopackUpdateCoordinator.SetupFileName,
-            "0.4.0");
-
-        Assert.Equal(expected, actual.AbsoluteUri);
-    }
-
     [Fact]
     public async Task DirectSourceUsesSameOriginForFeedAndFullPackage()
     {

@@ -13,7 +13,6 @@ public enum UpdateCheckStatus
 {
     Latest,
     Available,
-    NotInstalled,
     Error,
 }
 

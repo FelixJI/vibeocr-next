@@ -14,13 +14,11 @@ public sealed class ShellTests
         AppLaunchOptions defaults = AppLaunchOptions.Parse([]);
         AppLaunchOptions production = AppLaunchOptions.Parse(["--profile", "production"]);
         AppLaunchOptions development = AppLaunchOptions.Parse(["--profile", "winui-dev"]);
-        AppLaunchOptions health = AppLaunchOptions.Parse(["--health-file", "startup.healthy"]);
         AppLaunchOptions installed = AppLaunchOptions.Parse(["--install-root", @"C:\VibeOCR"]);
 
         Assert.Equal(AppBuildDefaults.Profile, defaults.Profile);
         Assert.Equal("production", production.Profile);
         Assert.Equal("winui-dev", development.Profile);
-        Assert.EndsWith("startup.healthy", health.HealthFile);
         Assert.Equal(Path.GetFullPath(@"C:\VibeOCR"), installed.InstallRoot);
         Assert.Contains("diagnostics", ShellNavigation.Destinations);
     }

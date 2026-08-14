@@ -16,7 +16,6 @@ using VibeOCR.App.Services;
 using VibeOCR.App.ViewModels;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Migration;
-using VibeOCR.Platform.Update;
 using VibeOCR.Platform.Inference;
 using VibeOCR.Platform.Windows;
 using Host = VibeOCR.Runtime.Contracts.Generated.Host;
@@ -51,7 +50,6 @@ public sealed partial class App : Application
     private WindowsHotkeyRegistrar? _hotkeyRegistrar;
     private ShellViewModel? _shellViewModel;
     private UpdateViewModel? _updateViewModel;
-    private string? _startupHealthFile;
     private bool _shutdownStarted;
     private bool _soakCrashRequested;
     private bool _soakCrashInjected;
@@ -81,7 +79,6 @@ public sealed partial class App : Application
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         AppLaunchOptions options = AppLaunchOptions.Parse(Environment.GetCommandLineArgs()[1..]);
-        _startupHealthFile = options.HealthFile;
         SelfTestInstanceScope instanceScope = SelfTestInstanceScope.Resolve(
             options.Profile,
             Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE"),
@@ -270,9 +267,7 @@ public sealed partial class App : Application
             () => _window!.Close(),
             hotkey);
         _updateViewModel = new UpdateViewModel(
-            VelopackUpdateCoordinator.Create(
-                layout.ConfigFile,
-                Path.Combine(layout.DataRoot, "cache", "update")),
+            VelopackUpdateCoordinator.Create(layout.ConfigFile),
             () => _window!.Close());
     }
 
@@ -416,9 +411,6 @@ public sealed partial class App : Application
                 null));
             AppLog.Info($"Supervisor ready: instance={ready.InstanceId} port={ready.Port}");
             RecordMilestone(diagnostics, "T6", _startup.Elapsed);
-            WriteHealthSignal();
-            _ = UpdateArtifactCleaner.CleanupAsync(
-                layout.DataRoot, TimeSpan.FromSeconds(3));
             bool soakCycleComplete = !_soakCrashRequested || isRecovery;
             if (soakCycleComplete)
             {
@@ -497,14 +489,6 @@ public sealed partial class App : Application
             FlushStartupTrace();
             Environment.Exit(1);
         }
-    }
-
-    private void WriteHealthSignal()
-    {
-        if (string.IsNullOrWhiteSpace(_startupHealthFile)) return;
-        string fullPath = Path.GetFullPath(_startupHealthFile);
-        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
-        File.WriteAllText(fullPath, JsonSerializer.Serialize(new { status = "healthy", pid = Environment.ProcessId, timestamp = DateTimeOffset.UtcNow }));
     }
 
     private void RecordMilestone(DiagnosticsViewModel diagnostics, string name, TimeSpan elapsed)
@@ -710,7 +694,6 @@ public sealed partial class App : Application
 
 public sealed record AppLaunchOptions(
     string Profile,
-    string? HealthFile,
     bool ShellOnly,
     string? Goto = null,
     string? InstallRoot = null)
@@ -718,7 +701,6 @@ public sealed record AppLaunchOptions(
     public static AppLaunchOptions Parse(IReadOnlyList<string> args)
     {
         string profile = AppBuildDefaults.Profile;
-        string? healthFile = null;
         bool shellOnly = false;
         string? gotoDestination = null;
         string? installRoot = null;
@@ -731,14 +713,6 @@ public sealed record AppLaunchOptions(
                     throw new ArgumentException("--profile requires a value.", nameof(args));
                 }
                 profile = args[++index];
-            }
-            else if (string.Equals(args[index], "--health-file", StringComparison.Ordinal))
-            {
-                if (index + 1 >= args.Count)
-                {
-                    throw new ArgumentException("--health-file requires a value.", nameof(args));
-                }
-                healthFile = Path.GetFullPath(args[++index]);
             }
             else if (string.Equals(args[index], "--shell-only", StringComparison.Ordinal))
             {
@@ -773,7 +747,7 @@ public sealed record AppLaunchOptions(
             throw new ArgumentException($"Unsupported profile: {profile}.", nameof(args));
         }
 
-        return new AppLaunchOptions(profile, healthFile, shellOnly, gotoDestination, installRoot);
+        return new AppLaunchOptions(profile, shellOnly, gotoDestination, installRoot);
     }
 }
 

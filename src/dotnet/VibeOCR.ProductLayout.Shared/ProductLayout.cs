@@ -18,7 +18,6 @@ public sealed class ResolvedProductLayout
         AppRoot = Path.Combine(installRoot, "app");
         AppEntry = Path.Combine(AppRoot, "VibeOCR.WinUI.exe");
         WebAssetsRoot = Path.Combine(AppRoot, "WebAssets");
-        Updater = Path.Combine(AppRoot, "tools", "updater.exe");
         RuntimeRoot = Path.Combine(installRoot, "runtime");
         RuntimeManifest = Path.Combine(RuntimeRoot, "backend", "runtime-manifest.json");
         RuntimeInstaller = Path.Combine(
@@ -37,7 +36,6 @@ public sealed class ResolvedProductLayout
     public string AppRoot { get; }
     public string AppEntry { get; }
     public string WebAssetsRoot { get; }
-    public string Updater { get; }
     public string RuntimeRoot { get; }
     public string RuntimeManifest { get; }
     public string RuntimeInstaller { get; }
@@ -96,6 +94,7 @@ public sealed class ResolvedProductLayout
         {
             actualRoot.Add(Path.GetFileName(path));
         }
+        actualRoot.Remove("sq.version");
         if (!actualRoot.SetEquals(expectedRoot))
         {
             throw new InvalidDataException("layout.root-conflict: product root is not closed");
@@ -110,7 +109,6 @@ public sealed class ResolvedProductLayout
             Path.Combine(AppRoot, "App.xbf"),
             Path.Combine(AppRoot, "MainWindow.xbf"),
             Path.Combine(WebAssetsRoot, "index.html"),
-            Updater,
             RuntimeManifest,
             RuntimeInstaller,
             ComponentLock,
@@ -148,7 +146,6 @@ public sealed class ResolvedProductLayout
         Expect(value.Roots.Metadata, "app/metadata", "roots.metadata");
         Expect(value.App.Entry, "app/VibeOCR.WinUI.exe", "app.entry");
         Expect(value.App.WebAssets, "app/WebAssets", "app.web_assets");
-        Expect(value.App.Updater, "app/tools/updater.exe", "app.updater");
         Expect(
             value.Runtime.Manifest,
             "runtime/backend/runtime-manifest.json",
@@ -231,8 +228,6 @@ public sealed class ResolvedProductLayout
         [DataMember(Name = "web_assets")]
         public string? WebAssets { get; set; }
 
-        [DataMember(Name = "updater")]
-        public string? Updater { get; set; }
     }
 
     [DataContract]

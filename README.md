@@ -35,15 +35,16 @@ Release 在本机完成。
 
 ## 下载与使用
 
-1. 从 [Releases](https://github.com/FelixJI/vibeocr-next/releases/latest) 下载最新的
-   `VibeOCR-v*-win64.zip` 与同名 `.sha256`。
-2. 校验 SHA-256：
+1. 从 [Releases](https://github.com/FelixJI/vibeocr-next/releases/latest) 下载
+   `VibeOCRNext-Setup.exe`；无需安装时可选 `VibeOCRNext-Portable.zip`。
+2. 校验 Setup 的 SHA-256：
 
    ```powershell
-   Get-FileHash .\VibeOCR-v*-win64.zip -Algorithm SHA256
+   Get-FileHash .\VibeOCRNext-Setup.exe -Algorithm SHA256
    ```
 
-3. 解压并运行包内主程序。首次使用相关能力时，应用会按 component lock 安装本地 Backend 运行时。
+3. 安装版由 Velopack 在应用内检查、下载并应用更新；Portable 用户手动下载新版。首次使用相关能力时，
+   应用会按 component lock 安装本地 Backend 运行时。
 
 ## 架构
 
@@ -132,8 +133,8 @@ WebAssets 使用 Node 24.x、npm 11.7、React 19、TypeScript 6 和 Vite 8。修
 
 ## 发布资产
 
-正式 Release 的精确资产集合包括 Next Windows ZIP 与同名 SHA-256、`component-lock.json`、
-`component-identities.json` 和 SPDX SBOM。版本与派生文件只由自动化脚本更新。
+正式 Release 精确包含 Velopack full nupkg、Setup 与 SHA-256、Portable、feed、
+`component-lock.json`、`component-identities.json` 和 SPDX SBOM。版本与派生文件只由自动化脚本更新。
 
 ## 参与贡献
 
