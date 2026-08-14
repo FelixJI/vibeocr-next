@@ -46,8 +46,6 @@ def _release_inputs(tmp_path: Path) -> dict[str, Path]:
     (tmp_path / "VibeOCR.Bootstrapper.exe.config").write_text(
         "<configuration />", encoding="utf-8"
     )
-    updater = tmp_path / "updater.exe"
-    updater.write_bytes(b"updater")
     component_lock = tmp_path / "component-lock.json"
     component_lock.write_text("{}", encoding="utf-8")
     identities = tmp_path / "component-identities.json"
@@ -81,7 +79,6 @@ def _release_inputs(tmp_path: Path) -> dict[str, Path]:
     return {
         "app_publish_root": app,
         "bootstrapper_executable": bootstrapper,
-        "updater_executable": updater,
         "component_lock": component_lock,
         "component_identities": identities,
         "backend_release_dir": backend,
@@ -109,7 +106,6 @@ def test_stage_product_layout_builds_the_strict_public_tree(tmp_path: Path) -> N
     assert (product_root / "Velopack.dll").read_bytes() == b"velopack"
     assert layout.app_entry == product_root / "app" / "VibeOCR.WinUI.exe"
     assert (product_root / LAYOUT_RELATIVE_PATH).is_file()
-    assert (product_root / "app/tools/updater.exe").is_file()
     assert (product_root / "app/metadata/component-lock.json").is_file()
     assert (product_root / "app/metadata/component-identities.json").is_file()
     assert (product_root / "runtime/backend/runtime-manifest.json").is_file()
@@ -141,6 +137,18 @@ def test_load_product_layout_rejects_escape_and_root_clutter(tmp_path: Path) -> 
     (cluttered_root / "unexpected.dll").write_bytes(b"clutter")
     with pytest.raises(ProductLayoutError, match="layout.root-conflict"):
         load_product_layout(cluttered_root)
+
+
+def test_load_product_layout_accepts_velopack_version_marker(tmp_path: Path) -> None:
+    product_root = tmp_path / "VibeOCR"
+    stage_product_layout(product_root=product_root, **_release_inputs(tmp_path))
+    release_manifest = product_root / "app/metadata/product-release-manifest.json"
+    release_manifest.write_text("{}", encoding="utf-8")
+    (product_root / "sq.version").write_text("0.3.1", encoding="utf-8")
+
+    layout = load_product_layout(product_root)
+
+    assert layout.product_root == product_root.resolve()
 
 
 def test_load_product_layout_rejects_safe_but_noncanonical_paths(

@@ -1,4 +1,4 @@
-"""验证 Next 真实桌面包及其 Backend/Protocol identity 资产。"""
+"""验证 Next Velopack Portable 与 Backend/Protocol identity 资产。"""
 
 from __future__ import annotations
 
@@ -44,11 +44,7 @@ def verify(artifacts: Path) -> None:
             "component-identities.json",
             "SBOM.spdx.json",
         ),
-        require_one=(
-            "VibeOCR-v*-win64.zip",
-            "VibeOCR-v*-win64.zip.sha256",
-            "VibeOCRNext-*-full.nupkg",
-        ),
+        require_one=("VibeOCRNext-*-full.nupkg",),
         require_index=False,
     )
     identity = json.loads(
@@ -62,11 +58,8 @@ def verify(artifacts: Path) -> None:
         record = identity[component]
         if not record.get("release_manifest_sha256"):
             raise ValueError(f"missing actual {component} release manifest identity")
-    archive = next(artifacts.glob("VibeOCR-v*-win64.zip"))
     full = next(artifacts.glob("VibeOCRNext-*-full.nupkg"))
     expected_names = {
-        archive.name,
-        f"{archive.name}.sha256",
         full.name,
         "VibeOCRNext-Setup.exe",
         "VibeOCRNext-Setup.exe.sha256",
@@ -82,20 +75,11 @@ def verify(artifacts: Path) -> None:
             f"expected={sorted(expected_names)}, actual={sorted(names)}"
         )
     root = Path(os.environ.get("AUTOMATION_PROJECT_ROOT", Path(__file__).parents[1]))
-    subprocess.run(
-        [
-            "pwsh",
-            "-File",
-            str(root / "scripts/verify_winui_artifact.ps1"),
-            "-Artifact",
-            str(archive),
-        ],
-        check=True,
-        timeout=120,
-    )
     with tempfile.TemporaryDirectory(prefix="vibeocr-web-smoke-") as temporary:
         extracted = Path(temporary)
-        product_root = _extract_product(archive, extracted)
+        product_root = _extract_product(
+            artifacts / "VibeOCRNext-Portable.zip", extracted
+        )
         subprocess.run(
             [
                 "pwsh",

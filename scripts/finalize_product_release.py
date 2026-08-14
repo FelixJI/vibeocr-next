@@ -1,4 +1,4 @@
-"""Bind verified Runtime assets into a deterministic portable product ZIP."""
+"""Bind verified component releases and finalize the Velopack pack directory."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import json
 import tempfile
-import zipfile
 from pathlib import Path
 
 if __package__:
@@ -16,7 +15,6 @@ else:
     from bind_component_releases import bind_product_releases
     from product_layout import load_staged_product_layout
 
-FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 PROHIBITED_ROOTS = {".git", "apps", "contracts", "packages", "supervisor", "tests"}
 
 
@@ -32,7 +30,7 @@ def _canonical_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
-def package_product_release(
+def finalize_product_release(
     *,
     product_root: Path,
     frontend: str,
@@ -41,8 +39,9 @@ def package_product_release(
     component_lock: Path,
     protocol_release_dir: Path,
     backend_release_dir: Path,
-    output: Path,
 ) -> Path:
+    """Verify component bindings and write the product closure manifest."""
+
     product_root = product_root.resolve(strict=True)
     if not product_root.is_dir():
         raise ValueError("product_root must be a directory")
@@ -78,23 +77,19 @@ def package_product_release(
     embedded_lock = layout.component_lock
     if json.loads(embedded_lock.read_text(encoding="utf-8")) != lock:
         raise ValueError("staged component lock differs from verified releases")
-    backend_output = layout.runtime_manifest.parent
-    manifest_path = layout.release_manifest
-
-    runtime_manifest = json.loads(
-        (backend_output / "runtime-manifest.json").read_text(encoding="utf-8")
-    )
-    installer = runtime_manifest["installer"]
-    executable_path = layout.runtime_installer
-    if _sha256(executable_path) != installer["executable_sha256"]:
+    runtime_manifest = json.loads(layout.runtime_manifest.read_text(encoding="utf-8"))
+    if (
+        _sha256(layout.runtime_installer)
+        != runtime_manifest["installer"]["executable_sha256"]
+    ):
         raise ValueError("extracted Runtime Installer hash mismatch")
 
     files = sorted(
         path
         for path in product_root.rglob("*")
-        if path.is_file() and path != manifest_path
+        if path.is_file() and path != layout.release_manifest
     )
-    manifest_path.write_text(
+    layout.release_manifest.write_text(
         _canonical_json(
             {
                 "schema_version": 1,
@@ -114,23 +109,7 @@ def package_product_release(
         encoding="utf-8",
         newline="\n",
     )
-    output.parent.mkdir(parents=True, exist_ok=True)
-    archive_files = sorted(path for path in product_root.rglob("*") if path.is_file())
-    with zipfile.ZipFile(
-        output,
-        "w",
-        compression=zipfile.ZIP_DEFLATED,
-        compresslevel=9,
-    ) as archive:
-        for path in archive_files:
-            relative = (
-                Path(product_root.name) / path.relative_to(product_root)
-            ).as_posix()
-            info = zipfile.ZipInfo(relative, date_time=FIXED_ZIP_TIME)
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = 0o644 << 16
-            archive.writestr(info, path.read_bytes(), compresslevel=9)
-    return output
+    return layout.release_manifest
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -142,10 +121,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--component-lock", type=Path, required=True)
     parser.add_argument("--protocol-release-dir", type=Path, required=True)
     parser.add_argument("--backend-release-dir", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     print(
-        package_product_release(
+        finalize_product_release(
             product_root=args.product_root,
             frontend=args.frontend,
             frontend_version=args.frontend_version,
@@ -153,7 +131,6 @@ def main(argv: list[str] | None = None) -> int:
             component_lock=args.component_lock,
             protocol_release_dir=args.protocol_release_dir,
             backend_release_dir=args.backend_release_dir,
-            output=args.output,
         )
     )
     return 0

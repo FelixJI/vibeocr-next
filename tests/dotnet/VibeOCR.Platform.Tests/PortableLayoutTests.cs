@@ -75,7 +75,7 @@ public sealed class PortableLayoutTests
     }
 
     [Fact]
-    public void ExplicitInstallRootResolvesTheVersionedProductLayout()
+    public void ExplicitInstallRootResolvesTheVelopackProductLayout()
     {
         string root = Path.Combine(Path.GetTempPath(), $"vibeocr-product-{Guid.NewGuid():N}");
         string metadata = Path.Combine(root, "app", "metadata");
@@ -92,7 +92,6 @@ public sealed class PortableLayoutTests
             "app/App.xbf",
             "app/MainWindow.xbf",
             "app/WebAssets/index.html",
-            "app/tools/updater.exe",
             "app/metadata/component-lock.json",
             "app/metadata/component-identities.json",
             "app/metadata/product-release-manifest.json",
@@ -113,12 +112,13 @@ public sealed class PortableLayoutTests
               "product_id": "vibeocr",
               "public_entry": "VibeOCR.exe",
               "roots": {"app":"app","runtime":"runtime","metadata":"app/metadata"},
-              "app": {"entry":"app/VibeOCR.WinUI.exe","web_assets":"app/WebAssets","updater":"app/tools/updater.exe"},
+              "app": {"entry":"app/VibeOCR.WinUI.exe","web_assets":"app/WebAssets"},
               "runtime": {"manifest":"runtime/backend/runtime-manifest.json","installer":"runtime/installer/vibeocr-runtime-installer.exe"},
               "metadata": {"component_lock":"app/metadata/component-lock.json","component_identities":"app/metadata/component-identities.json","release_manifest":"app/metadata/product-release-manifest.json"},
               "user_data": {"known_folder":"LocalApplicationData","relative":"VibeOCR"}
             }
             """);
+        File.WriteAllText(Path.Combine(root, "sq.version"), "0.3.1");
         try
         {
             PortableLayout layout = PortableLayout.Resolve(

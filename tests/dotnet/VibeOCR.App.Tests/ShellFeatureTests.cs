@@ -81,24 +81,6 @@ public sealed class ShellFeatureTests
     }
 
     [Fact]
-    public async Task LegacyInstallOffersOneTimeSetupMigration()
-    {
-        var coordinator = new FakeUpdateCoordinator
-        {
-            CheckResult = new UpdateCheckResult(
-                UpdateCheckStatus.NotInstalled,
-                "0.3.0"),
-        };
-        var vm = new UpdateViewModel(coordinator);
-
-        await vm.CheckAsync(TestContext.Current.CancellationToken);
-
-        Assert.True(vm.UpdateAvailable);
-        Assert.Equal("update.migration", vm.StatusCode);
-        Assert.Contains("一次性迁移", vm.Status);
-    }
-
-    [Fact]
     public async Task UpdateDownloadWithoutAvailableIsNoOp()
     {
         var coordinator = new FakeUpdateCoordinator();

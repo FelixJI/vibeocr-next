@@ -5,7 +5,6 @@ import hashlib
 import inspect
 import json
 import os
-import re
 import shutil
 import subprocess
 import zipfile
@@ -17,7 +16,6 @@ from scripts.automation_core import CommandRunner
 from scripts.bind_component_releases import bind_product_releases
 from scripts.check_quality import main as run_quality
 from scripts.check_quality import resolve_executable
-from scripts.product_layout import ROOT_ALLOWLIST
 from scripts.release_smoke import verify
 from scripts.resolve_component_releases import (
     _api,
@@ -347,21 +345,17 @@ def _configure_release_smoke_fixture(
 ) -> tuple[Path, list[list[str]]]:
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
-    archive = artifacts / "VibeOCR-v1.2.3-win64.zip"
-    with zipfile.ZipFile(archive, "w") as package:
-        package.writestr("VibeOCR.Next/VibeOCR.WinUI.exe", b"placeholder")
     full = artifacts / "VibeOCRNext-1.2.3-full.nupkg"
     full.write_bytes(b"velopack-package")
     for name in (
         "VibeOCRNext-Setup.exe",
         "VibeOCRNext-Setup.exe.sha256",
-        "VibeOCRNext-Portable.zip",
         "releases.win.json",
     ):
         (artifacts / name).write_bytes(b"placeholder")
+    with zipfile.ZipFile(artifacts / "VibeOCRNext-Portable.zip", "w") as package:
+        package.writestr("VibeOCR.WinUI.exe", b"placeholder")
     names = {
-        archive.name,
-        f"{archive.name}.sha256",
         full.name,
         "VibeOCRNext-Setup.exe",
         "VibeOCRNext-Setup.exe.sha256",
@@ -422,8 +416,8 @@ def test_release_smoke_executes_the_extracted_product_handshake(
 
     verify(artifacts)
 
-    assert len(calls) == 2
-    assert calls[1][2].endswith("smoke_web_workbench.ps1")
+    assert len(calls) == 1
+    assert calls[0][2].endswith("smoke_web_workbench.ps1")
 
 
 def test_release_smoke_propagates_a_failed_web_ready_handshake(
@@ -439,7 +433,7 @@ def test_release_smoke_propagates_a_failed_web_ready_handshake(
     with pytest.raises(subprocess.CalledProcessError):
         verify(artifacts)
 
-    assert len(calls) == 2
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("installed_layout", [False, True])
@@ -472,7 +466,6 @@ def test_web_ready_smoke_runs_an_isolated_production_profile(
                     "app": {
                         "entry": "app/VibeOCR.WinUI.exe",
                         "web_assets": "app/WebAssets",
-                        "updater": "app/tools/updater.exe",
                     },
                     "runtime": {
                         "manifest": "runtime/backend/runtime-manifest.json",
@@ -500,7 +493,6 @@ def test_web_ready_smoke_runs_an_isolated_production_profile(
             "app/App.xbf",
             "app/MainWindow.xbf",
             "app/WebAssets/index.html",
-            "app/tools/updater.exe",
             "app/metadata/component-lock.json",
             "app/metadata/component-identities.json",
             "app/metadata/product-release-manifest.json",
@@ -720,8 +712,6 @@ def test_project_config_declares_minor_compatible_protocol_and_single_identity_a
     }
     assert config["release"]["identity_asset"] == "component-identities.json"
     assert config["release"]["required_assets"] == [
-        "VibeOCR-v*-win64.zip",
-        "VibeOCR-v*-win64.zip.sha256",
         "VibeOCRNext-*-full.nupkg",
         "VibeOCRNext-Setup.exe",
         "VibeOCRNext-Setup.exe.sha256",
@@ -751,7 +741,7 @@ def test_project_config_declares_minor_compatible_protocol_and_single_identity_a
         "e2e"
     ]
     build_script = (root / "scripts/build-release.ps1").read_text(encoding="utf-8")
-    assert build_script.count("build_release_checksums.py") == 2
+    assert build_script.count("build_release_checksums.py") == 1
     assert "dotnet tool run vpk pack" in build_script
     resolver = (root / "scripts/resolve_component_releases.py").read_text(
         encoding="utf-8"
@@ -806,22 +796,11 @@ def test_release_build_emits_actionable_stage_annotations() -> None:
     for stage in (
         "app-publish",
         "app-webview-smoke",
-        "updater-pyinstaller",
-        "product-package",
+        "product-finalize",
         "velopack-package",
         "artifact-verify",
     ):
         assert f"Write-CiStage '{stage}'" in build
-
-
-def test_winui_artifact_verifier_matches_product_root_allowlist() -> None:
-    root = Path(__file__).parents[2]
-    verifier = (root / "scripts/verify_winui_artifact.ps1").read_text(encoding="utf-8")
-    assignment = next(
-        line for line in verifier.splitlines() if "$expectedRootEntries = @(" in line
-    )
-
-    assert set(re.findall(r"'([^']+)'", assignment)) == ROOT_ALLOWLIST
 
 
 def test_velopack_startup_hook_runs_in_the_packaged_root_entrypoint() -> None:
@@ -889,12 +868,9 @@ def test_sync_version_updates_repository_and_desktop_project(tmp_path: Path) -> 
     assert "<Version>0.2.0</Version>" in project.read_text(encoding="utf-8")
 
 
-def test_release_smoke_binds_real_archive_and_component_identity(
+def test_release_smoke_binds_native_portable_and_component_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    archive = tmp_path / "VibeOCR-v0.2.0-win64.zip"
-    with zipfile.ZipFile(archive, "w") as package:
-        package.writestr("VibeOCR.Next/VibeOCR.WinUI.exe", b"desktop")
     (tmp_path / "component-lock.json").write_text("{}", encoding="utf-8")
     (tmp_path / "component-identities.json").write_text(
         json.dumps(
@@ -922,13 +898,9 @@ def test_release_smoke_binds_real_archive_and_component_identity(
         f"{hashlib.sha256(setup.read_bytes()).hexdigest()}  {setup.name}\n",
         encoding="utf-8",
     )
-    (tmp_path / "VibeOCRNext-Portable.zip").write_bytes(b"portable")
+    with zipfile.ZipFile(tmp_path / "VibeOCRNext-Portable.zip", "w") as package:
+        package.writestr("VibeOCR.WinUI.exe", b"desktop")
     (tmp_path / "releases.win.json").write_text("{}", encoding="utf-8")
-    sidecar = archive.with_name(archive.name + ".sha256")
-    sidecar.write_text(
-        f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n",
-        encoding="utf-8",
-    )
     monkeypatch.setattr(
         "scripts.release_smoke.subprocess.run", lambda *args, **kwargs: None
     )

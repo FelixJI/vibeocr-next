@@ -6,7 +6,7 @@ import zipfile
 from typing import TYPE_CHECKING
 
 from scripts.bind_component_releases import bind_product_releases
-from scripts.package_product_release import package_product_release
+from scripts.finalize_product_release import finalize_product_release
 from scripts.product_layout import stage_product_layout
 
 if TYPE_CHECKING:
@@ -108,8 +108,6 @@ def _stage_product(
     bootstrapper = tmp_path / f"{name}-bootstrapper.exe"
     bootstrapper.write_bytes(b"bootstrapper")
     (tmp_path / "Velopack.dll").write_bytes(b"velopack")
-    updater = tmp_path / f"{name}-updater.exe"
-    updater.write_bytes(b"updater")
     identities = tmp_path / f"{name}-identities.json"
     identities.write_text("{}", encoding="utf-8")
     license_file = tmp_path / f"{name}-LICENSE"
@@ -121,7 +119,6 @@ def _stage_product(
         product_root=product,
         app_publish_root=app,
         bootstrapper_executable=bootstrapper,
-        updater_executable=updater,
         component_lock=component_lock,
         component_identities=identities,
         backend_release_dir=backend,
@@ -131,7 +128,7 @@ def _stage_product(
     return product
 
 
-def test_product_package_is_deterministic_and_binds_runtime(tmp_path: Path) -> None:
+def test_product_finalize_is_deterministic_and_binds_runtime(tmp_path: Path) -> None:
     protocol, backend = _releases(tmp_path)
     component_lock = tmp_path / "component-lock.json"
     bind_product_releases(
@@ -145,12 +142,11 @@ def test_product_package_is_deterministic_and_binds_runtime(tmp_path: Path) -> N
         required_capabilities=("ocr.recognition.v2",),
         output=component_lock,
     )
-    outputs = []
+    manifests = []
     for name in ("first", "second"):
         product = _stage_product(tmp_path, name, backend, component_lock)
-        output = tmp_path / f"{name}.zip"
-        outputs.append(
-            package_product_release(
+        manifests.append(
+            finalize_product_release(
                 product_root=product,
                 frontend="classic",
                 frontend_version="0.7.0",
@@ -158,18 +154,16 @@ def test_product_package_is_deterministic_and_binds_runtime(tmp_path: Path) -> N
                 component_lock=component_lock,
                 protocol_release_dir=protocol,
                 backend_release_dir=backend,
-                output=output,
             )
         )
-    assert outputs[0].read_bytes() == outputs[1].read_bytes()
-    with zipfile.ZipFile(outputs[0]) as archive:
-        members = set(archive.namelist())
-    assert "VibeOCR/app/metadata/component-lock.json" in members
-    assert "VibeOCR/runtime/installer/vibeocr-runtime-installer.exe" in members
-    assert "VibeOCR/runtime/backend/runtime-manifest.json" in members
+    assert manifests[0].read_bytes() == manifests[1].read_bytes()
+    records = json.loads(manifests[0].read_text(encoding="utf-8"))["files"]
+    assert "app/metadata/component-lock.json" in records
+    assert "runtime/installer/vibeocr-runtime-installer.exe" in records
+    assert "runtime/backend/runtime-manifest.json" in records
 
 
-def test_product_package_accepts_equivalent_crlf_component_lock(
+def test_product_finalize_accepts_equivalent_crlf_component_lock(
     tmp_path: Path,
 ) -> None:
     protocol, backend = _releases(tmp_path)
@@ -190,7 +184,7 @@ def test_product_package_accepts_equivalent_crlf_component_lock(
     )
     product = _stage_product(tmp_path, "product", backend, component_lock)
 
-    output = package_product_release(
+    output = finalize_product_release(
         product_root=product,
         frontend="next",
         frontend_version="0.1.0-preview.1",
@@ -198,7 +192,6 @@ def test_product_package_accepts_equivalent_crlf_component_lock(
         component_lock=component_lock,
         protocol_release_dir=protocol,
         backend_release_dir=backend,
-        output=tmp_path / "product.zip",
     )
 
     assert output.is_file()

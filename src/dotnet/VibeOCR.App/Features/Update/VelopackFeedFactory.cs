@@ -6,19 +6,6 @@ namespace VibeOCR.App.Features.Update;
 internal sealed record VelopackFeedEndpoint(Uri BaseUri, IFileDownloader Downloader)
 {
     public SimpleWebSource CreateSource() => new(BaseUri, Downloader);
-
-    public Uri AssetUri(string fileName, string? releaseVersion = null)
-    {
-        string baseUrl = BaseUri.AbsoluteUri;
-        if (!string.IsNullOrWhiteSpace(releaseVersion))
-        {
-            baseUrl = baseUrl.Replace(
-                "/releases/latest/download/",
-                $"/releases/download/v{releaseVersion}/",
-                StringComparison.Ordinal);
-        }
-        return new Uri(new Uri(baseUrl), fileName);
-    }
 }
 
 internal static class VelopackFeedFactory

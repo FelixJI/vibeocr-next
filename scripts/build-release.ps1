@@ -60,35 +60,24 @@ Write-CiStage 'bootstrapper-publish'
 dotnet publish (Join-Path $root 'src/dotnet/VibeOCR.Bootstrapper/VibeOCR.Bootstrapper.csproj') `
   -c Release --self-contained false --no-restore -o $bootstrapperPublish
 if ($LASTEXITCODE -ne 0) { throw 'Next bootstrapper publish failed' }
-Write-CiStage 'updater-pyinstaller'
-uv run --no-sync --with pyinstaller==6.21.0 python -m PyInstaller `
-  --noconfirm --clean --onefile --windowed `
-  --icon (Join-Path $root 'assets/brand/generated/vibeocr.ico') `
-  --name updater --distpath (Join-Path $build 'updater-dist') `
-  --workpath (Join-Path $build 'updater-work') `
-  --specpath (Join-Path $build 'updater-spec') `
-  (Join-Path $root 'scripts/updater_main.py')
-if ($LASTEXITCODE -ne 0) { throw 'Next updater build failed' }
 $product = Join-Path $build 'VibeOCR'
 Write-CiStage 'product-layout'
 uv run --no-sync python (Join-Path $root 'scripts/product_layout.py') stage `
   --product-root $product `
   --app-publish-root $appPublish `
   --bootstrapper-executable (Join-Path $bootstrapperPublish 'VibeOCR.Bootstrapper.exe') `
-  --updater-executable (Join-Path $build 'updater-dist/updater.exe') `
   --component-lock $lock --component-identities $identity `
   --backend-release-dir $backend `
   --license-file (Join-Path $root 'LICENSE') `
   --changelog-file (Join-Path $root 'CHANGELOG.md')
 if ($LASTEXITCODE -ne 0) { throw 'VibeOCR product layout staging failed' }
-$zip = Join-Path $artifacts "VibeOCR-v$Version-win64.zip"
-Write-CiStage 'product-package'
-uv run --no-sync python (Join-Path $root 'scripts/package_product_release.py') `
+Write-CiStage 'product-finalize'
+uv run --no-sync python (Join-Path $root 'scripts/finalize_product_release.py') `
   --product-root $product --frontend next `
   --frontend-version $Version `
   --source-commit (git -C $root rev-parse HEAD).Trim() `
   --component-lock $lock --protocol-release-dir $protocol `
-  --backend-release-dir $backend --output $zip
+  --backend-release-dir $backend
 if ($LASTEXITCODE -ne 0) { throw 'Next product binding failed' }
 uv run --no-sync python (Join-Path $root 'scripts/product_layout.py') verify `
   --product-root $product
@@ -116,11 +105,6 @@ Copy-Item -LiteralPath $setup[0].FullName -Destination (Join-Path $artifacts 'Vi
 Copy-Item -LiteralPath $portable[0].FullName -Destination (Join-Path $artifacts 'VibeOCRNext-Portable.zip')
 Copy-Item -LiteralPath $feed[0].FullName -Destination (Join-Path $artifacts 'releases.win.json')
 Write-CiStage 'artifact-verify'
-& (Join-Path $root 'scripts/verify_winui_artifact.ps1') -Artifact $zip
-if ($LASTEXITCODE -ne 0) { throw 'Next artifact verification failed' }
-uv run --no-sync python (Join-Path $root 'scripts/build_release_checksums.py') $artifacts `
-  --sidecar-for $zip
-if ($LASTEXITCODE -ne 0) { throw 'sidecar checksum build failed' }
 uv run --no-sync python (Join-Path $root 'scripts/build_release_checksums.py') $artifacts `
   --sidecar-for (Join-Path $artifacts 'VibeOCRNext-Setup.exe')
 if ($LASTEXITCODE -ne 0) { throw 'Setup sidecar checksum build failed' }
