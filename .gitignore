@@ -17,3 +17,4 @@ playwright-report/
 .release-input/
 .release-build/
 dev-overrides.json
+.worktrees/
