@@ -107,7 +107,8 @@ public sealed class RuntimeMaintenanceCoordinator
             intent.DownloadSourceIds ?? [],
             CanCancel: true,
             CanRetry: false));
-        var progress = new Progress<Host.RuntimeMaintenanceEvent>(ApplyEvent);
+        IProgress<Host.RuntimeMaintenanceEvent> progress =
+            new SynchronousProgress(ApplyEvent);
         try
         {
             await _installer().EnsureAsync(
@@ -214,6 +215,16 @@ public sealed class RuntimeMaintenanceCoordinator
             SetState(_state with { IsRunning = false, StatusCode = "failed", CanRetry = true });
             throw;
         }
+    }
+
+    /// <summary>
+    /// Applies events inline: operation state must reflect every snapshot
+    /// before the installer call returns, independent of any sync context.
+    /// </summary>
+    private sealed class SynchronousProgress(
+        Action<Host.RuntimeMaintenanceEvent> handler) : IProgress<Host.RuntimeMaintenanceEvent>
+    {
+        public void Report(Host.RuntimeMaintenanceEvent value) => handler(value);
     }
 
     private void ApplyEvent(Host.RuntimeMaintenanceEvent update)
