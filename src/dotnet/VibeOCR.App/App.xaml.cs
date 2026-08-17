@@ -128,6 +128,13 @@ public sealed partial class App : Application
             options.Profile,
             Environment.GetEnvironmentVariable("VIBEOCR_PORTABLE_LAYOUT"),
             options.InstallRoot);
+        // 便携状态根就绪探针:不可写时 fail closed,不回退用户目录。
+        layout.EnsurePortableState();
+        // WebView2 user-data/cache/cookies 固定在便携 state 内;通过 Loader
+        // 官方环境变量指定(WinRT 投影无带目录的 CreateAsync 重载)。
+        Environment.SetEnvironmentVariable(
+            "WEBVIEW2_USER_DATA_FOLDER",
+            layout.WebView2Root);
         _runtimeInstaller = new RuntimeInstallerClient(
             RuntimeInstallerConfiguration.ForNext(layout));
         _runtimeStatus.ApplyProfile(_runtimeInstaller.ReadProfileDescriptor());
@@ -379,7 +386,8 @@ public sealed partial class App : Application
                 TimeSpan.FromSeconds(layout.Profile == "winui-dev" ? 90 : 15),
                 RuntimeCapabilityRequirements.Read(
                     layout.ComponentLock),
-                injectSoakCrash);
+                injectSoakCrash,
+                portableLayout: layout);
 
             // Start the supervisor process.
             var process = new InferenceSupervisorProcess(options, token);
@@ -461,7 +469,8 @@ public sealed partial class App : Application
         string logPath,
         TimeSpan startupTimeout,
         IReadOnlySet<string> requiredCapabilities,
-        bool injectSoakCrash = false)
+        bool injectSoakCrash = false,
+        PortableLayout? portableLayout = null)
     {
         ArgumentNullException.ThrowIfNull(launch);
         ArgumentNullException.ThrowIfNull(requiredCapabilities);
@@ -469,6 +478,19 @@ public sealed partial class App : Application
             item => item.Key,
             item => item.Value,
             StringComparer.OrdinalIgnoreCase);
+        if (portableLayout is not null)
+        {
+            // 模型/缓存路径收口到便携 state;PaddleX 专属参数未经契约确认,
+            // 不猜测变量名。
+            environment["HF_HOME"] = Path.Combine(portableLayout.ModelsRoot, "huggingface");
+            environment["HF_HUB_CACHE"] = Path.Combine(
+                portableLayout.ModelsRoot, "huggingface", "hub");
+            environment["MODELSCOPE_CACHE"] = Path.Combine(
+                portableLayout.ModelsRoot, "modelscope");
+            environment["MINERU_TOOLS_CONFIG_JSON"] = Path.Combine(
+                Path.GetDirectoryName(portableLayout.ConfigFile)!,
+                "mineru.json");
+        }
         if (injectSoakCrash)
         {
             environment["VIBEOCR_SUPERVISOR_SOAK_CRASH_AFTER_READY"] = "1";

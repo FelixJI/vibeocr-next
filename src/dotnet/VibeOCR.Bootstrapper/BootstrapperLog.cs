@@ -6,9 +6,10 @@ namespace VibeOCR.Bootstrapper;
 /// <summary>
 /// Best-effort launch log for a GUI-subsystem entry point. Console.Error is
 /// invisible when the bootstrapper is started by double-click, so every
-/// startup failure is mirrored to a file. The default directory follows the
-/// product layout's user_data policy (LocalApplicationData/VibeOCR) and stays
-/// reachable even when the layout descriptor itself cannot be read.
+/// startup failure is mirrored to a file. The default directory is derived
+/// from the bootstrapper's own executable (the stable portable root) and
+/// stays reachable even when the layout descriptor itself cannot be read; it
+/// never falls back to AppData.
 /// </summary>
 internal static class BootstrapperLog
 {
@@ -16,8 +17,8 @@ internal static class BootstrapperLog
     private static string? _logPath;
 
     public static string DefaultLogDirectory() => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "VibeOCR",
+        AppDomain.CurrentDomain.BaseDirectory,
+        "state",
         "logs");
 
     public static void Initialize(string? logDirectory = null)

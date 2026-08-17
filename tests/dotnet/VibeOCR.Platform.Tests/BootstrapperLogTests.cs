@@ -6,13 +6,10 @@ namespace VibeOCR.Platform.Tests;
 public sealed class BootstrapperLogTests
 {
     [Fact]
-    public void DefaultDirectoryFollowsUserDataPolicy()
+    public void DefaultDirectoryFollowsThePortableStateRoot()
     {
         Assert.Equal(
-            Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "VibeOCR",
-                "logs"),
+            Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "state", "logs"),
             BootstrapperLog.DefaultLogDirectory());
     }
 

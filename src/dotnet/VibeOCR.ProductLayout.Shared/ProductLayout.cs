@@ -89,13 +89,21 @@ public sealed class ResolvedProductLayout
             "app",
             "runtime",
         };
+        // 便携运行时允许出现的额外根条目:稳定 state 目录与运行时生成的
+        // portable-layout 清单;二者允许缺失,但其它污染仍拒绝。
+        var portableTolerated = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "state",
+            "portable-layout.json",
+        };
         var actualRoot = new HashSet<string>(StringComparer.Ordinal);
         foreach (string path in Directory.EnumerateFileSystemEntries(InstallRoot))
         {
             actualRoot.Add(Path.GetFileName(path));
         }
         actualRoot.Remove("sq.version");
-        if (!actualRoot.SetEquals(expectedRoot))
+        if (!expectedRoot.IsSubsetOf(actualRoot) ||
+            actualRoot.Except(expectedRoot).Except(portableTolerated).Any())
         {
             throw new InvalidDataException("layout.root-conflict: product root is not closed");
         }
@@ -166,8 +174,11 @@ public sealed class ResolvedProductLayout
             value.Metadata.ReleaseManifest,
             "app/metadata/product-release-manifest.json",
             "metadata.release_manifest");
-        Expect(value.UserData.KnownFolder, "LocalApplicationData", "user_data.known_folder");
-        Expect(value.UserData.Relative, "VibeOCR", "user_data.relative");
+        if (!string.IsNullOrEmpty(value.UserData.KnownFolder))
+        {
+            throw new InvalidDataException("layout.invalid-path: user_data.known_folder");
+        }
+        Expect(value.UserData.Relative, "state", "user_data.relative");
     }
 
     private static void Expect(string? actual, string expected, string field)

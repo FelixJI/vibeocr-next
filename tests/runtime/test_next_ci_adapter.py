@@ -500,10 +500,7 @@ def test_web_ready_smoke_runs_an_isolated_production_profile(
                         "component_identities": "app/metadata/component-identities.json",
                         "release_manifest": "app/metadata/product-release-manifest.json",
                     },
-                    "user_data": {
-                        "known_folder": "LocalApplicationData",
-                        "relative": "VibeOCR",
-                    },
+                    "user_data": {"relative": "state"},
                     "required": [],
                 }
             ),
