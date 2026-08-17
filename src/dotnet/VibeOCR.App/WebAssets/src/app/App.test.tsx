@@ -545,6 +545,86 @@ describe("AppShell", () => {
     unmount();
   });
 
+  it("drives runtime maintenance install, cancel and retry from settings state", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 31,
+      route: "settings",
+      theme: "light",
+      capabilities: [
+        "settings.shell",
+        "settings.selection",
+        "runtime.maintenance",
+      ],
+      features: {
+        settings: {
+          theme: "light",
+          isBusy: false,
+          statusCode: "settings.ready",
+          backend: "cpu",
+          startupEnabled: false,
+          hotkey: "Ctrl+Alt+Q",
+          pendingBackend: "nvidia_cuda",
+          engines: [],
+          sources: [],
+          features: [
+            {
+              featureId: "document_parsing",
+              displayName: "文档解析（PaddleOCR/MinerU）",
+              accelerator: "nvidia_cuda",
+              selected: true,
+            },
+          ],
+          maintenance: {
+            isRunning: false,
+            statusCode: "failed",
+            operationId: "ui-op-1",
+            requestedComponentIds: ["document_parsing"],
+            effectiveComponentIds: ["document_parsing", "runtime_host"],
+            requestedSourceIds: ["tuna-pypi"],
+            canCancel: false,
+            canRetry: true,
+          },
+        },
+      },
+      runtimeLabel: "原生宿主已连接",
+    };
+
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+
+    await user.click(screen.getByRole("button", { name: "安装所选组件" }));
+    expect(confirmSpy).toHaveBeenCalledWith(
+      expect.stringContaining("文档解析（PaddleOCR/MinerU）"),
+    );
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.installRuntime",
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "重试（沿用上次选择）" }),
+    );
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.retryRuntimeMaintenance",
+    });
+
+    // requested/effective 回显是安装真相。
+    expect(
+      screen.getByText(/实际安装：document_parsing、runtime_host/),
+    ).toBeVisible();
+    expect(screen.getByText(/下载源：tuna-pypi/)).toBeVisible();
+
+    confirmSpy.mockRestore();
+    unmount();
+  });
+
   it("separates the recognition task engine override from the global default", async () => {
     window.location.hash = "#/recognition";
     const user = userEvent.setup();

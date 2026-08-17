@@ -43,6 +43,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       "runtime.refresh",
       "settings.shell",
       "settings.selection",
+      "runtime.maintenance",
       "recognition.engine",
       "update.check",
       "update.install",
@@ -228,6 +229,10 @@ public sealed class DesktopWorkbenchCommandHandler :
         SetAcceleratorCommand accelerator => SetAccelerator(accelerator),
         SetRuntimeFeatureCommand feature => SetFeature(feature),
         SetTaskEngineCommand taskEngine => SetTaskEngine(taskEngine),
+        InstallRuntimeCommand => await InstallRuntimeAsync(cancellationToken),
+        CancelRuntimeMaintenanceCommand => CancelRuntimeMaintenance(),
+        RetryRuntimeMaintenanceCommand => await RetryRuntimeMaintenanceAsync(
+          cancellationToken),
         CheckUpdateCommand => await CheckUpdateAsync(cancellationToken),
         DownloadUpdateCommand => StartUpdateDownload(cancellationToken),
         CancelUpdateCommand => CancelUpdate(),
@@ -958,6 +963,29 @@ public sealed class DesktopWorkbenchCommandHandler :
     return RecognitionState(false, RecognitionStatusCode(recognition));
   }
 
+  private async Task<SettingsWorkbenchState> InstallRuntimeAsync(
+    CancellationToken cancellationToken)
+  {
+    settings ??= settingsFactory();
+    await settings.InstallPendingAsync(cancellationToken);
+    return SettingsState(settings);
+  }
+
+  private SettingsWorkbenchState CancelRuntimeMaintenance()
+  {
+    settings ??= settingsFactory();
+    settings.CancelMaintenance();
+    return SettingsState(settings);
+  }
+
+  private async Task<SettingsWorkbenchState> RetryRuntimeMaintenanceAsync(
+    CancellationToken cancellationToken)
+  {
+    settings ??= settingsFactory();
+    await settings.RetryMaintenanceAsync(cancellationToken);
+    return SettingsState(settings);
+  }
+
   private async Task<UpdateWorkbenchState> CheckUpdateAsync(
     CancellationToken cancellationToken)
   {
@@ -1209,7 +1237,16 @@ public sealed class DesktopWorkbenchCommandHandler :
       feature.FeatureId,
       feature.DisplayName,
       feature.Accelerator,
-      feature.Selected))]);
+      feature.Selected))],
+    Maintenance: new SettingsMaintenanceState(
+      viewModel.Maintenance.State.IsRunning,
+      viewModel.Maintenance.State.StatusCode,
+      viewModel.Maintenance.State.OperationId,
+      viewModel.Maintenance.State.RequestedComponentIds,
+      viewModel.Maintenance.State.EffectiveComponentIds,
+      viewModel.Maintenance.State.RequestedSourceIds,
+      viewModel.Maintenance.State.CanCancel,
+      viewModel.Maintenance.State.CanRetry));
 
   private UpdateWorkbenchState UpdateState() => new(
     update.Value.IsBusy,

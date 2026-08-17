@@ -136,6 +136,15 @@ public sealed record SetRuntimeFeatureCommand(string FeatureId, bool Enabled) : 
 /// </summary>
 public sealed record SetTaskEngineCommand(string? Engine) : WorkbenchCommand;
 
+/// <summary>Start ensure with the staged explicit component/source intent.</summary>
+public sealed record InstallRuntimeCommand : WorkbenchCommand;
+
+/// <summary>Cancel the running durable maintenance operation.</summary>
+public sealed record CancelRuntimeMaintenanceCommand : WorkbenchCommand;
+
+/// <summary>Retry the last failed/cancelled maintenance operation (reuse intent).</summary>
+public sealed record RetryRuntimeMaintenanceCommand : WorkbenchCommand;
+
 public sealed record CheckUpdateCommand : WorkbenchCommand;
 
 public sealed record DownloadUpdateCommand : WorkbenchCommand;
@@ -249,10 +258,27 @@ public sealed record SettingsWorkbenchState(
   IReadOnlyList<SettingsSourceOptionState>? Sources = null,
   string PendingBackend = "cpu",
   bool CanSwitchBackend = false,
-  IReadOnlyList<SettingsFeatureOptionState>? Features = null) : WorkbenchState
+  IReadOnlyList<SettingsFeatureOptionState>? Features = null,
+  SettingsMaintenanceState? Maintenance = null) : WorkbenchState
 {
   public override string Scope => "settings";
 }
+
+/// <summary>
+/// Durable maintenance operation projection: requested/effective component
+/// sets are the installation truth from Backend snapshots; requested sources
+/// are the client-side normalized intent (the installer contract has no
+/// source echo).
+/// </summary>
+public sealed record SettingsMaintenanceState(
+  bool IsRunning,
+  string StatusCode,
+  string? OperationId,
+  IReadOnlyList<string> RequestedComponentIds,
+  IReadOnlyList<string> EffectiveComponentIds,
+  IReadOnlyList<string> RequestedSourceIds,
+  bool CanCancel,
+  bool CanRetry);
 
 /// <summary>Catalog engine projected for the settings page.</summary>
 public sealed record SettingsEngineOptionState(
