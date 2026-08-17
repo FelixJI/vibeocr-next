@@ -54,7 +54,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public SettingsViewModel(
         IInferenceClient inference,
         RuntimeStatusViewModel? runtimeStatus = null,
-        string? configFile = null)
+        string? configFile = null,
+        Func<IRuntimeInstallerClient>? installerFactory = null)
     {
         _inference = inference ?? throw new ArgumentNullException(nameof(inference));
         RuntimeStatus = runtimeStatus ?? new RuntimeStatusViewModel();
@@ -62,6 +63,14 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             ?? VibeOCR.Platform.Bootstrap.PortableLayout.Resolve(
                 Environment.ProcessPath ?? string.Empty,
                 "production").ConfigFile;
+        Maintenance = installerFactory is null
+            ? new RuntimeMaintenanceCoordinator(
+                () => throw new InvalidOperationException(
+                    "Runtime installer is unavailable in this mode."),
+                RuntimeStatus)
+            : new RuntimeMaintenanceCoordinator(
+                installerFactory,
+                RuntimeStatus);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -113,6 +122,9 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     }
 
     public RuntimeSelectionService? Selection => _selection;
+
+    /// <summary>Durable maintenance operations driven by the staged selection.</summary>
+    public RuntimeMaintenanceCoordinator Maintenance { get; }
 
     public async Task LoadSnapshotAsync(CancellationToken cancellationToken)
     {
@@ -250,6 +262,70 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     /// <summary>Selected optional feature ids for the pending accelerator (N4 consumes these).</summary>
     public IReadOnlyList<string> PendingFeatureIds =>
         [.. Features.Where(item => item.Selected).Select(item => item.FeatureId)];
+
+    /// <summary>
+    /// 用户确认后以显式 intent 启动 ensure:未选功能时发送空 component 列表
+    /// (显式 base-only);来源使用当前 Backend Settings 偏好。
+    /// </summary>
+    public async Task InstallPendingAsync(CancellationToken cancellationToken)
+    {
+        if (_selection is null)
+        {
+            Status = "运行时目录尚未加载，请先刷新运行时";
+            return;
+        }
+        try
+        {
+            await Maintenance.InstallAsync(
+                _selection,
+                PendingBackend,
+                PendingFeatureIds,
+                _selectedSourceIds,
+                cancellationToken);
+            Status = "运行时维护操作已完成";
+            await LoadSnapshotAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            Status = "运行时维护操作已取消";
+        }
+        catch (RuntimeSelectionException error)
+        {
+            Status = LocalizeSelection(error);
+        }
+        catch (RuntimeInstallerException error)
+        {
+            Status = $"运行时维护失败：{error.Message}";
+        }
+        catch (InvalidOperationException error)
+        {
+            Status = error.Message;
+        }
+    }
+
+    public void CancelMaintenance() => Maintenance.Cancel();
+
+    public async Task RetryMaintenanceAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Maintenance.RetryAsync(cancellationToken);
+            Status = "运行时维护操作已完成";
+            await LoadSnapshotAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            Status = "已取消";
+        }
+        catch (RuntimeInstallerException error)
+        {
+            Status = $"运行时维护重试失败：{error.Message}";
+        }
+        catch (InvalidOperationException error)
+        {
+            Status = error.Message;
+        }
+    }
 
     public void DetectGpu(bool available) { GpuAvailable = available; if (!available && PendingBackend == "nvidia_cuda") PendingBackend = "cpu"; }
     public void Cancel() { }

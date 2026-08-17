@@ -190,7 +190,12 @@ public sealed partial class App : Application
               new PdfFileSource(() => handle),
               layout.ConfigFile);
           },
-          () => new SettingsViewModel(_inferenceGateway, _runtimeStatus, layout.ConfigFile),
+          () => new SettingsViewModel(
+            _inferenceGateway,
+            _runtimeStatus,
+            layout.ConfigFile,
+            () => _runtimeInstaller
+              ?? throw new InvalidOperationException("Runtime installer is unavailable.")),
           () => _shellViewModel ??
             throw new InvalidOperationException("Desktop shell is unavailable."),
           () => _updateViewModel ??

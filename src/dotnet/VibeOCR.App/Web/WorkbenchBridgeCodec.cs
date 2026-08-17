@@ -433,6 +433,15 @@ public static class WorkbenchBridgeCodec
         return new SetRuntimeFeatureCommand(
           featureId,
           arguments.GetProperty("enabled").GetBoolean());
+      case ("settings", "installRuntime"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new InstallRuntimeCommand();
+      case ("settings", "cancelRuntimeMaintenance"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new CancelRuntimeMaintenanceCommand();
+      case ("settings", "retryRuntimeMaintenance"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new RetryRuntimeMaintenanceCommand();
       case ("recognition", "setTaskEngine"):
         bool hasTaskEngine = !HasExactFields(arguments, EmptyFields);
         if (hasTaskEngine)
@@ -594,6 +603,17 @@ public static class WorkbenchBridgeCodec
       settings.PendingBackend,
       settings.CanSwitchBackend,
       features = settings.Features ?? [],
+      maintenance = settings.Maintenance is null ? null : new
+      {
+        settings.Maintenance.IsRunning,
+        settings.Maintenance.StatusCode,
+        settings.Maintenance.OperationId,
+        requestedComponentIds = settings.Maintenance.RequestedComponentIds,
+        effectiveComponentIds = settings.Maintenance.EffectiveComponentIds,
+        requestedSourceIds = settings.Maintenance.RequestedSourceIds,
+        settings.Maintenance.CanCancel,
+        settings.Maintenance.CanRetry,
+      },
     },
     UpdateWorkbenchState update => new
     {

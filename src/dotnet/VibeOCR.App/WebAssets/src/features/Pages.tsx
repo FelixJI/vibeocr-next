@@ -92,6 +92,17 @@ interface FeatureOptionState {
   readonly selected: boolean;
 }
 
+interface MaintenanceState {
+  readonly isRunning: boolean;
+  readonly statusCode: string;
+  readonly operationId?: string | null;
+  readonly requestedComponentIds: readonly string[];
+  readonly effectiveComponentIds: readonly string[];
+  readonly requestedSourceIds: readonly string[];
+  readonly canCancel: boolean;
+  readonly canRetry: boolean;
+}
+
 interface RecognitionEngineState {
   readonly engine: string;
   readonly displayName: string;
@@ -252,6 +263,35 @@ function recognitionEngines(value: unknown): readonly RecognitionEngineState[] {
       typeof option.requiresDownload === "boolean"
     );
   });
+}
+
+function maintenanceState(value: unknown): MaintenanceState | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return undefined;
+  const state = value as Partial<MaintenanceState>;
+  if (
+    typeof state.isRunning !== "boolean" ||
+    typeof state.statusCode !== "string" ||
+    !Array.isArray(state.requestedComponentIds) ||
+    !Array.isArray(state.effectiveComponentIds) ||
+    !Array.isArray(state.requestedSourceIds) ||
+    typeof state.canCancel !== "boolean" ||
+    typeof state.canRetry !== "boolean"
+  )
+    return undefined;
+  return state as MaintenanceState;
+}
+
+function maintenanceStatusLabel(statusCode: string): string {
+  const labels: Readonly<Record<string, string>> = {
+    idle: "尚未执行维护操作",
+    running: "正在执行维护操作",
+    succeeded: "维护操作已完成",
+    failed: "维护操作失败",
+    cancelled: "维护操作已取消",
+    unavailable: "当前模式不可用",
+  };
+  return labels[statusCode] ?? statusCode;
 }
 
 function stringValue(value: unknown): string | undefined {
@@ -1151,6 +1191,12 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             enabled={viewState.capabilities.includes("settings.selection")}
             actions={actions}
           />
+          <MaintenanceActions
+            maintenance={maintenanceState(state.maintenance)}
+            features={featureOptions(state.features)}
+            enabled={viewState.capabilities.includes("runtime.maintenance")}
+            actions={actions}
+          />
           <p className="form-note">
             {statusLabel(
               state.statusCode,
@@ -1325,6 +1371,81 @@ function AcceleratorFeatures({
           当前加速器没有可选功能组件；安装入口在运行时维护操作中提供。
         </p>
       )}
+    </>
+  );
+}
+
+function MaintenanceActions({
+  maintenance,
+  features,
+  enabled,
+  actions,
+}: {
+  readonly maintenance: MaintenanceState | undefined;
+  readonly features: readonly FeatureOptionState[];
+  readonly enabled: boolean;
+  readonly actions: AppActions;
+}) {
+  const busy = maintenance?.isRunning === true;
+  const selectedFeatures = features.filter((feature) => feature.selected);
+  const requested = maintenance?.requestedComponentIds ?? [];
+  const effective = maintenance?.effectiveComponentIds ?? [];
+  const sources = maintenance?.requestedSourceIds ?? [];
+  return (
+    <>
+      <div className="setting-row">
+        <Button
+          disabled={!enabled || busy}
+          onClick={() => {
+            const detail =
+              selectedFeatures.length > 0
+                ? selectedFeatures
+                    .map((feature) => feature.displayName)
+                    .join("、")
+                : "基础组件";
+            if (
+              window.confirm(
+                `将在线安装：${detail}。是否继续？（失败不会破坏现有基础组件）`,
+              )
+            ) {
+              actions.run({ type: "settings.installRuntime" });
+            }
+          }}
+          icon={<Play aria-hidden="true" size={16} />}
+        >
+          安装所选组件
+        </Button>
+        {maintenance?.canCancel === true ? (
+          <Button
+            disabled={!enabled}
+            onClick={() =>
+              actions.run({ type: "settings.cancelRuntimeMaintenance" })
+            }
+            icon={<Square aria-hidden="true" size={16} />}
+          >
+            取消安装
+          </Button>
+        ) : null}
+        {maintenance?.canRetry === true ? (
+          <Button
+            disabled={!enabled}
+            onClick={() =>
+              actions.run({ type: "settings.retryRuntimeMaintenance" })
+            }
+            icon={<RefreshCw aria-hidden="true" size={16} />}
+          >
+            重试（沿用上次选择）
+          </Button>
+        ) : null}
+      </div>
+      {maintenance ? (
+        <p className="form-note">
+          {maintenanceStatusLabel(maintenance.statusCode)}
+          {requested.length > 0 ? `；请求组件：${requested.join("、")}` : ""}
+          {effective.length > 0 ? `；实际安装：${effective.join("、")}` : ""}
+          {sources.length > 0 ? `；下载源：${sources.join("、")}` : ""}
+        </p>
+      ) : null}
     </>
   );
 }
