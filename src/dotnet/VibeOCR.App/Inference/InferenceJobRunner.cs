@@ -34,7 +34,8 @@ internal sealed class InferenceJobRunner(IInferenceClient inference)
         JobPriority priority,
         IReadOnlyList<InferenceUploadInput> inputs,
         IReadOnlyDictionary<string, JsonElement>? options,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default,
+        OcrEngine? engine = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(pipelineId);
         ArgumentNullException.ThrowIfNull(inputs);
@@ -75,6 +76,9 @@ internal sealed class InferenceJobRunner(IInferenceClient inference)
                 Options = options is null
                     ? new Dictionary<string, JsonElement>()
                     : new Dictionary<string, JsonElement>(options, StringComparer.Ordinal),
+                // Task-level engine override; only the plain-text OCR pipeline
+                // accepts it and null omits the wire field (Backend default).
+                Engine = engine,
             },
             Items = submitItems,
         };

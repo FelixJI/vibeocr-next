@@ -66,6 +66,10 @@ public sealed class DeferredInferenceClient : IInferenceClient
     public Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken)
         => Current.GetSettingsAsync(cancellationToken);
 
+    public Task<SettingsSnapshot> UpdateSettingsAsync(
+        SettingsSnapshot settings, CancellationToken cancellationToken)
+        => Current.UpdateSettingsAsync(settings, cancellationToken);
+
     public Task<ExportResult> ExportAsync(ExportRequest request, CancellationToken cancellationToken)
         => Current.ExportAsync(request, cancellationToken);
 

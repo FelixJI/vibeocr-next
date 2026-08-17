@@ -53,6 +53,14 @@ public interface IInferenceClient : IAsyncDisposable
     /// <summary>Backend settings snapshot.</summary>
     Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Replace Backend settings and return the updated snapshot. The Backend
+    /// snapshot is the long-term source of truth for download source
+    /// preferences; callers must not persist a second copy.
+    /// </summary>
+    Task<SettingsSnapshot> UpdateSettingsAsync(
+        SettingsSnapshot settings, CancellationToken cancellationToken);
+
     /// <summary>Export OCR result to a file (txt/markdown/html) via the supervisor.</summary>
     Task<ExportResult> ExportAsync(ExportRequest request, CancellationToken cancellationToken);
 

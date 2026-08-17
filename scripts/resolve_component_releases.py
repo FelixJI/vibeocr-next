@@ -178,6 +178,9 @@ def resolve(root: Path = ROOT) -> Path:
             "runtime.maintenance.v1",
             "runtime.settings.v2",
             "task.progress.v1",
+            "ocr.engine-selection.v1",
+            "runtime.download-sources.v1",
+            "runtime.component-selection.v1",
         ),
         output=lock,
     )

@@ -90,6 +90,30 @@ def test_resolver_binding_keywords_match_the_binding_api() -> None:
     assert passed_keywords <= accepted_keywords
 
 
+def test_component_resolver_requires_protocol_2_7_selection_capabilities() -> None:
+    root = Path(__file__).parents[2]
+    tree = ast.parse(
+        (root / "scripts/resolve_component_releases.py").read_text(encoding="utf-8")
+    )
+    call = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "bind_product_releases"
+    )
+    keyword = next(
+        keyword for keyword in call.keywords if keyword.arg == "required_capabilities"
+    )
+    required = ast.literal_eval(keyword.value)
+    for capability in (
+        "ocr.engine-selection.v1",
+        "runtime.download-sources.v1",
+        "runtime.component-selection.v1",
+    ):
+        assert capability in required
+
+
 def test_component_resolver_authenticates_api_with_ci_gh_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

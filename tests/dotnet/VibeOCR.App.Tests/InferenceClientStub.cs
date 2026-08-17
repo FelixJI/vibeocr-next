@@ -34,6 +34,11 @@ internal abstract class InferenceClientStub : IInferenceClient
     public virtual Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>
         throw new NotImplementedException();
 
+    public virtual Task<SettingsSnapshot> UpdateSettingsAsync(
+        SettingsSnapshot settings,
+        CancellationToken cancellationToken) =>
+        throw new NotImplementedException();
+
     public virtual Task<ExportResult> ExportAsync(
         ExportRequest request,
         CancellationToken cancellationToken) =>

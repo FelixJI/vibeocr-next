@@ -128,6 +128,8 @@ public sealed class RuntimeInstallerClientTests
             Assert.Equal("stable-operation", client.LastOperationId);
             Assert.Equal("stable-operation", request.GetProperty("operation_id").GetString());
             Assert.Equal("ocr_engine", request.GetProperty("component_ids")[0].GetString());
+            Assert.False(request.TryGetProperty("install_component_ids", out _));
+            Assert.False(request.TryGetProperty("download_source_ids", out _));
             string?[] requiredCapabilities = request
                 .GetProperty("required_capabilities")
                 .EnumerateArray()
@@ -147,6 +149,202 @@ public sealed class RuntimeInstallerClientTests
         {
             Directory.Delete(root, recursive: true);
         }
+    }
+
+    private static async Task<string> WriteSelectionManifestAsync()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-select-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        string manifest = Path.Combine(root, "runtime-manifest.json");
+        await File.WriteAllTextAsync(
+            manifest,
+            """
+            {"capabilities":["runtime.maintenance.v2","runtime.component-selection.v1","runtime.download-sources.v1"]}
+            """,
+            TestContext.Current.CancellationToken);
+        return manifest;
+    }
+
+    [Fact]
+    public async Task EnsureSelectionSendsInstallAndSourceIdsWithoutRepairField()
+    {
+        string manifest = await WriteSelectionManifestAsync();
+        try
+        {
+            var runner = new StubRunner(new RuntimeInstallerProcessResult(
+                0,
+                V2LaunchEnvelope("ensure", "runtime.maintenance.v2"),
+                string.Empty));
+            var client = new RuntimeInstallerClient(
+                Configuration() with { RuntimeManifest = manifest },
+                runner);
+
+            await client.EnsureAsync(
+                new RuntimeInstallSelection
+                {
+                    InstallComponentIds = ["document_parsing"],
+                    DownloadSourceIds = ["tuna-pypi"],
+                },
+                "selection-op",
+                cancellationToken: TestContext.Current.CancellationToken);
+
+            JsonElement request = Request(runner.LastStartInfo!);
+            Assert.Equal("selection-op", request.GetProperty("operation_id").GetString());
+            Assert.Equal(
+                "document_parsing",
+                request.GetProperty("install_component_ids")[0].GetString());
+            Assert.Equal(
+                "tuna-pypi",
+                request.GetProperty("download_source_ids")[0].GetString());
+            Assert.False(request.TryGetProperty("component_ids", out _));
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(manifest)!, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task EnsureSelectionKeepsEmptyInstallListAsExplicitBaseOnlyScope()
+    {
+        string manifest = await WriteSelectionManifestAsync();
+        try
+        {
+            var runner = new StubRunner(new RuntimeInstallerProcessResult(
+                0,
+                V2LaunchEnvelope("ensure", "runtime.maintenance.v2"),
+                string.Empty));
+            var client = new RuntimeInstallerClient(
+                Configuration() with { RuntimeManifest = manifest },
+                runner);
+
+            await client.EnsureAsync(
+                new RuntimeInstallSelection { InstallComponentIds = [] },
+                "base-only-op",
+                cancellationToken: TestContext.Current.CancellationToken);
+
+            JsonElement request = Request(runner.LastStartInfo!);
+            Assert.True(
+                request.TryGetProperty("install_component_ids", out JsonElement installIds));
+            Assert.Equal(0, installIds.GetArrayLength());
+            Assert.False(request.TryGetProperty("download_source_ids", out _));
+            Assert.False(request.TryGetProperty("component_ids", out _));
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(manifest)!, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task EnsureSelectionFailsClosedWithoutSelectionCapabilities()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-noselect-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string manifest = Path.Combine(root, "runtime-manifest.json");
+            await File.WriteAllTextAsync(
+                manifest,
+                """{"capabilities":["runtime.maintenance.v2"]}""",
+                TestContext.Current.CancellationToken);
+            var runner = new StubRunner(new RuntimeInstallerProcessResult(
+                0,
+                V2LaunchEnvelope("ensure", "runtime.maintenance.v2"),
+                string.Empty));
+            var client = new RuntimeInstallerClient(
+                Configuration() with { RuntimeManifest = manifest },
+                runner);
+
+            RuntimeInstallerException componentError =
+                await Assert.ThrowsAsync<RuntimeInstallerException>(
+                    () => client.EnsureAsync(
+                        new RuntimeInstallSelection { InstallComponentIds = ["document_parsing"] },
+                        "op-components",
+                        cancellationToken: TestContext.Current.CancellationToken));
+            Assert.Contains("component selection", componentError.Message);
+
+            RuntimeInstallerException sourceError =
+                await Assert.ThrowsAsync<RuntimeInstallerException>(
+                    () => client.EnsureAsync(
+                        new RuntimeInstallSelection { DownloadSourceIds = ["tuna-pypi"] },
+                        "op-sources",
+                        cancellationToken: TestContext.Current.CancellationToken));
+            Assert.Contains("download source selection", sourceError.Message);
+
+            Assert.Null(runner.LastStartInfo);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RetrySelectionReplacesIntentExplicitlyAndReusesItWhenOmitted()
+    {
+        string manifest = await WriteSelectionManifestAsync();
+        try
+        {
+            string envelope(string operationId) =>
+                $$$"""
+                {"protocol_version":2,"ok":true,"operation":"repair","state":null,"launch":null,"error":null,"maintenance":{"operation_id":"{{{operationId}}}","sequence":1,"operation":"ensure","operation_state":"running","phase":"install_profile","profile_id":"win-x64-cpu","updated_at":"2026-08-17T00:00:00Z"}}
+                """;
+            var runner = new QueueRunner(
+                new RuntimeInstallerProcessResult(0, envelope("op-2"), string.Empty),
+                new RuntimeInstallerProcessResult(0, envelope("op-3"), string.Empty));
+            var client = new RuntimeInstallerClient(
+                Configuration() with { RuntimeManifest = manifest },
+                runner);
+
+            await client.RetryAsync(
+                "op-1",
+                "op-2",
+                new RuntimeInstallSelection
+                {
+                    InstallComponentIds = ["document_parsing"],
+                    DownloadSourceIds = ["pypi"],
+                },
+                "retry-command-1",
+                TestContext.Current.CancellationToken);
+            await client.RetryAsync(
+                "op-2",
+                "op-3",
+                selection: null,
+                "retry-command-2",
+                TestContext.Current.CancellationToken);
+
+            JsonElement explicitRequest = Request(runner.StartInfos[0]);
+            Assert.Equal("retry", explicitRequest.GetProperty("command").GetString());
+            Assert.Equal(
+                "document_parsing",
+                explicitRequest.GetProperty("install_component_ids")[0].GetString());
+            Assert.Equal(
+                "pypi",
+                explicitRequest.GetProperty("download_source_ids")[0].GetString());
+            JsonElement reuseRequest = Request(runner.StartInfos[1]);
+            Assert.False(reuseRequest.TryGetProperty("install_component_ids", out _));
+            Assert.False(reuseRequest.TryGetProperty("download_source_ids", out _));
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(manifest)!, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void InstallSelectionRejectsEmptySourcesAndDuplicateOrBlankIds()
+    {
+        Assert.Throws<ArgumentException>(
+            () => new RuntimeInstallSelection { DownloadSourceIds = [] });
+        Assert.Throws<ArgumentException>(
+            () => new RuntimeInstallSelection { InstallComponentIds = ["a", "a"] });
+        Assert.Throws<ArgumentException>(
+            () => new RuntimeInstallSelection { DownloadSourceIds = [" ", "tuna-pypi"] });
+
+        RuntimeInstallSelection baseOnly = new() { InstallComponentIds = [] };
+        Assert.Empty(baseOnly.InstallComponentIds!);
+        Assert.Null(baseOnly.DownloadSourceIds);
     }
 
     [Fact]

@@ -27,9 +27,9 @@
       },
       "VibeOCR.Runtime.Contracts": {
         "type": "Direct",
-        "requested": "[2.5.0, 2.5.0]",
-        "resolved": "2.5.0",
-        "contentHash": "J+ClH2TwjSnlNIQE59iTULInHjaR+iINNbTYY1C326+Zk8iHANq+9fEjtCVtepgQXUCU/xQ7WRBUPwKws6GK2Q=="
+        "requested": "[2.7.1, 2.7.1]",
+        "resolved": "2.7.1",
+        "contentHash": "CCXg6xNrQ0yljnfe6TS7Ohpei17jrHX+Is4LWZ2Z1JCw+2XXQ8uQCPZdKTucDZA4A/YKbU3IIHPZ+6eTPu+6Og=="
       },
       "Microsoft.Windows.AI.MachineLearning": {
         "type": "Transitive",
@@ -137,8 +137,8 @@
       "vibeocr.platform": {
         "type": "Project",
         "dependencies": {
-          "VibeOCR.Runtime.Client": "[2.5.0, 2.5.0]",
-          "VibeOCR.Runtime.Contracts": "[2.5.0, 2.5.0]"
+          "VibeOCR.Runtime.Client": "[2.7.1, 2.7.1]",
+          "VibeOCR.Runtime.Contracts": "[2.7.1, 2.7.1]"
         }
       },
       "Microsoft.Web.WebView2": {
@@ -149,11 +149,11 @@
       },
       "VibeOCR.Runtime.Client": {
         "type": "CentralTransitive",
-        "requested": "[2.5.0, 2.5.0]",
-        "resolved": "2.5.0",
-        "contentHash": "YCxGMoL05TqlXvmub1l9fJJL1+mgy2jUo0WTyE80q46nks4XeiAPllWRweoBYfFWCllKOGuTRnPbZ7nI9vy0xA==",
+        "requested": "[2.7.1, 2.7.1]",
+        "resolved": "2.7.1",
+        "contentHash": "Vh4d6bbYrRDM2CtjQUF/497dTf5cMU/Y04BlENlWUVsfKe8kGUiipIDz9qLSEPKbrfT9z9x8s3ao+blYWac8ug==",
         "dependencies": {
-          "VibeOCR.Runtime.Contracts": "2.5.0"
+          "VibeOCR.Runtime.Contracts": "2.7.1"
         }
       }
     },

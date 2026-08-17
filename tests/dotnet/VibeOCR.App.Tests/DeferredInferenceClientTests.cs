@@ -61,8 +61,12 @@ public sealed class DeferredInferenceClientTests
         deferred.Attach(inner);
 
         ResidencyStatus status = await deferred.GetResidencyAsync(CancellationToken.None);
+        SettingsSnapshot updated = await deferred.UpdateSettingsAsync(
+            new SettingsSnapshot { DownloadSourceIds = ["tuna-pypi"] },
+            CancellationToken.None);
 
         Assert.Equal(600, status.DefaultTtlSeconds);
+        Assert.Equal(["tuna-pypi"], updated.DownloadSourceIds);
     }
 
     [Fact]
@@ -151,6 +155,11 @@ public sealed class DeferredInferenceClientTests
 
         public Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken)
             => Task.FromResult(new SettingsSnapshot());
+
+        public Task<SettingsSnapshot> UpdateSettingsAsync(
+            SettingsSnapshot settings,
+            CancellationToken cancellationToken)
+            => Task.FromResult(settings);
 
         public Task<ExportResult> ExportAsync(ExportRequest request, CancellationToken ct)
             => throw new NotImplementedException();

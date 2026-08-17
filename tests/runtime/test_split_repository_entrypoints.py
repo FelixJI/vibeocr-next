@@ -43,8 +43,8 @@ def test_dotnet_lock_update_uses_published_packages_and_isolated_caches() -> Non
         "$protocolPackagePattern",
     ):
         assert required in script
-    assert protocol_versions == {"[2.5.0]"}
-    assert "v2.5.0" not in script
+    assert protocol_versions == {"[2.7.1]"}
+    assert "v2.7.1" not in script
 
 
 def test_startup_benchmark_only_passes_supported_collector_arguments() -> None:
