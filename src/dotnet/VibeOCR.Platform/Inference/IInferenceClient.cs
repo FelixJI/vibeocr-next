@@ -10,6 +10,7 @@
 // concrete InferenceHttpClient (HttpClient + HttpV2 DTOs) lives alongside;
 // InferenceSupervisorProcess owns the child process lifecycle.
 using VibeOCR.Contracts.HttpV2;
+using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 
 namespace VibeOCR.Platform.Inference;
 
@@ -49,6 +50,15 @@ public interface IInferenceClient : IAsyncDisposable
     Task<RuntimeStatusSnapshot> GetRuntimeStatusAsync(CancellationToken cancellationToken) =>
         Task.FromException<RuntimeStatusSnapshot>(
             new NotSupportedException("This inference client does not expose runtime status."));
+
+    /// <summary>
+    /// Backend health snapshot including capability descriptors; selection
+    /// catalogs (engines, download sources, component variants) live on the
+    /// descriptors of the capabilities that advertise them.
+    /// </summary>
+    Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken) =>
+        Task.FromException<Wire.Health>(
+            new NotSupportedException("This inference client does not expose runtime health."));
 
     /// <summary>Backend settings snapshot.</summary>
     Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken);

@@ -1,6 +1,7 @@
 // Deferred inference gateway used while the Supervisor is starting.
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Inference;
+using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 
 namespace VibeOCR.App.Inference;
 
@@ -62,6 +63,9 @@ public sealed class DeferredInferenceClient : IInferenceClient
 
     public Task<RuntimeStatusSnapshot> GetRuntimeStatusAsync(CancellationToken cancellationToken)
         => Current.GetRuntimeStatusAsync(cancellationToken);
+
+    public Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
+        => Current.GetHealthAsync(cancellationToken);
 
     public Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken)
         => Current.GetSettingsAsync(cancellationToken);

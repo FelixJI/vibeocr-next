@@ -1,7 +1,9 @@
 using System.Net;
 using System.Text.Json;
 using VibeOCR.Contracts.HttpV2;
+using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
+using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 using Xunit;
 
 namespace VibeOCR.Platform.Tests;
@@ -227,6 +229,138 @@ public sealed class InferenceHttpClientTests
     }
 
     [Fact]
+    public async Task GetHealthParsesCapabilityCatalogsAsync()
+    {
+        var handler = new FakeHandler("""
+            {
+              "schema_version": 2,
+              "instance_id": "sup-1",
+              "protocol_version": 2,
+              "ready": true,
+              "draining": false,
+              "capabilities": ["ocr.recognition.v2", "ocr.engine-selection.v1", "runtime.download-sources.v1"],
+              "capability_descriptors": [
+                {"name":"ocr.engine-selection.v1","lifecycle":"active","introduced_in":"2.6.0","deprecated_in":null,"sunset_at":null,"replacement":null,
+                 "ocr_engine_catalog":{"engines":[
+                   {"id":"rapidocr","availability":"ready","included_in_base":true,"reason_code":null,"required_component":null},
+                   {"id":"paddleocr","availability":"preparation_required","included_in_base":false,"reason_code":null,"required_component":"paddle-engine"}
+                 ]}},
+                {"name":"runtime.download-sources.v1","lifecycle":"active","introduced_in":"2.7.0","deprecated_in":null,"sunset_at":null,"replacement":null,
+                 "download_source_catalog":{"sources":[
+                   {"kind":"package-index","id":"tuna-pypi","endpoint":"https://mirrors.tuna.example/pypi/simple"},
+                   {"kind":"internal-mirror","id":"mirror-1","endpoint":"https://example.invalid/simple"}
+                 ]}}
+              ]
+            }
+            """);
+        await using var client = new InferenceHttpClient(Base, "tok", handler);
+
+        Wire.Health health = await client.GetHealthAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpMethod.Get, handler.LastMethod);
+        Assert.Equal("/v2/health", handler.LastPath);
+        Assert.True(health.Ready);
+        RuntimeSelectionService selection = new(health);
+        Assert.Equal(2, selection.EngineOptions.Count);
+        Assert.Equal(OcrEngine.RapidOcr, selection.EngineOptions[0].Engine);
+        Assert.Contains(selection.Sources, source =>
+            source.Kind == "internal-mirror" && source.Id == "mirror-1");
+    }
+
+    [Fact]
+    public async Task ApplySourcePreferenceRoundTripsValidatedIdsIntoBackendSettingsAsync()
+    {
+        var handler = new FakeHandler(
+        [
+            """
+            {"schema_version":2,"residency":{"default_ttl_seconds":600,"pipelines":[]},"extra":{"theme":"dark"},"download_source_ids":["pypi"]}
+            """,
+            """
+            {"schema_version":2,"residency":{"default_ttl_seconds":600,"pipelines":[]},"extra":{"theme":"dark"},"download_source_ids":["tuna-pypi","huggingface"]}
+            """,
+            """
+            {"schema_version":2,"residency":{"default_ttl_seconds":600,"pipelines":[]},"extra":{"theme":"dark"}}
+            """,
+        ]);
+        await using var client = new InferenceHttpClient(Base, "tok", handler);
+        RuntimeSelectionService selection = new(HealthWithSources(
+            ("package-index", "tuna-pypi", "https://a.invalid"),
+            ("model-registry", "huggingface", "https://b.invalid")));
+
+        SettingsSnapshot updated = await selection.ApplySourcePreferenceAsync(
+            client,
+            ["tuna-pypi", "huggingface"],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpMethod.Put, handler.LastMethod);
+        Assert.Equal("/v2/settings", handler.LastPath);
+        Assert.Contains("\"download_source_ids\":[\"tuna-pypi\",\"huggingface\"]", handler.LastBody);
+        // 复用当前 snapshot,residency/extra 不丢失;endpoint 永不写入。
+        Assert.Contains("\"default_ttl_seconds\":600", handler.LastBody);
+        Assert.Contains("\"theme\":\"dark\"", handler.LastBody);
+        Assert.DoesNotContain("https://a.invalid", handler.LastBody!);
+        Assert.Equal(["tuna-pypi", "huggingface"], updated.DownloadSourceIds);
+
+        await selection.ApplySourcePreferenceAsync(
+            client,
+            sourceIds: null,
+            TestContext.Current.CancellationToken);
+        Assert.DoesNotContain("download_source_ids", handler.LastBody!);
+    }
+
+    [Fact]
+    public async Task ApplySourcePreferenceFailsClosedForUnknownSourceAsync()
+    {
+        var handler = new FakeHandler("""
+            {"schema_version":2,"residency":{"default_ttl_seconds":300,"pipelines":[]},"extra":{}}
+            """);
+        await using var client = new InferenceHttpClient(Base, "tok", handler);
+        RuntimeSelectionService selection = new(HealthWithSources(
+            ("package-index", "tuna-pypi", "https://a.invalid")));
+
+        RuntimeSelectionException error = await Assert.ThrowsAsync<RuntimeSelectionException>(
+            () => selection.ApplySourcePreferenceAsync(
+                client,
+                ["aliyun-pypi"],
+                TestContext.Current.CancellationToken));
+
+        Assert.Equal(RuntimeSelectionErrorKind.UnknownSource, error.Kind);
+        Assert.Null(handler.LastMethod);
+    }
+
+    private static Wire.Health HealthWithSources(
+        params (string Kind, string Id, string Endpoint)[] sources) => new()
+    {
+        SchemaVersion = 2,
+        InstanceId = "sup-1",
+        ProtocolVersion = 2,
+        Ready = true,
+        Draining = false,
+        Capabilities = [RuntimeSelectionService.DownloadSourceCapability],
+        CapabilityDescriptors =
+        [
+            new Wire.CapabilityDescriptor
+            {
+                Name = RuntimeSelectionService.DownloadSourceCapability,
+                Lifecycle = "active",
+                IntroducedIn = "2.7.0",
+                DeprecatedIn = null,
+                SunsetAt = null,
+                Replacement = null,
+                DownloadSourceCatalog = new Wire.DownloadSourceCatalog
+                {
+                    Sources = [.. sources.Select(source => new Wire.DownloadSourceDescriptor
+                    {
+                        Kind = source.Kind,
+                        Id = source.Id,
+                        Endpoint = source.Endpoint,
+                    })],
+                },
+            },
+        ],
+    };
+
+    [Fact]
     public async Task SubmitSendsTaskEngineOverrideAndOmitsItWhenNullAsync()
     {
         var handler = new FakeHandler("""
@@ -311,12 +445,17 @@ public sealed class InferenceHttpClientTests
 
     private sealed class FakeHandler : HttpMessageHandler
     {
-        private readonly string _body;
+        private readonly Queue<string> _bodies;
         private readonly HttpStatusCode _status;
 
         public FakeHandler(string body, HttpStatusCode statusCode = HttpStatusCode.OK)
+            : this([body], statusCode)
         {
-            _body = body;
+        }
+
+        public FakeHandler(string[] bodies, HttpStatusCode statusCode = HttpStatusCode.OK)
+        {
+            _bodies = new Queue<string>(bodies);
             _status = statusCode;
         }
 
@@ -341,7 +480,8 @@ public sealed class InferenceHttpClientTests
             LastBody = request.Content is null
                 ? null
                 : await request.Content.ReadAsStringAsync(cancellationToken);
-            var content = new StringContent(_body);
+            string body = _bodies.Count > 1 ? _bodies.Dequeue() : _bodies.Peek();
+            var content = new StringContent(body);
             content.Headers.ContentType = new("application/json");
             return new HttpResponseMessage(_status) { Content = content };
         }

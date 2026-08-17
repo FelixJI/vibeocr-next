@@ -8,6 +8,7 @@ using System.Text.Json.Serialization.Metadata;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Runtime.Client;
 using VibeOCR.Runtime.Contracts.Generated;
+using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 
 namespace VibeOCR.Platform.Inference;
 
@@ -120,6 +121,32 @@ public sealed class InferenceHttpClient : IInferenceClient
         await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
         return await ReadAsync<RuntimeStatusSnapshot>(response, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    public async Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
+    {
+        using HttpResponseMessage response = await _runtime.GetAsync(
+            RuntimeOperationPaths.GetRuntimeHealth, cancellationToken)
+            .ConfigureAwait(false);
+        await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using JsonDocument document = await _runtime
+                .ReadJsonDocumentAsync(response, cancellationToken)
+                .ConfigureAwait(false);
+            return document.RootElement.Deserialize<Wire.Health>()
+                ?? throw new InferenceClientException(
+                    HttpV2ErrorCode.InternalError,
+                    "Runtime health returned no payload.",
+                    retryable: false);
+        }
+        catch (JsonException exception)
+        {
+            throw new InferenceClientException(
+                HttpV2ErrorCode.ProtocolMismatch,
+                $"Invalid runtime health payload: {exception.Message}",
+                retryable: false);
+        }
     }
 
     public async Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken)

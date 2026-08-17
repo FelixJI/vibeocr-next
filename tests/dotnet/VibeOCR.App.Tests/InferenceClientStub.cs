@@ -1,5 +1,6 @@
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Inference;
+using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 
 namespace VibeOCR.App.Tests;
 
@@ -29,6 +30,9 @@ internal abstract class InferenceClientStub : IInferenceClient
         throw new NotImplementedException();
 
     public virtual Task<ResidencyStatus> GetResidencyAsync(CancellationToken cancellationToken) =>
+        throw new NotImplementedException();
+
+    public virtual Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken) =>
         throw new NotImplementedException();
 
     public virtual Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>

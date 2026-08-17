@@ -1,6 +1,7 @@
 using VibeOCR.App.Inference;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Inference;
+using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 using Xunit;
 
 namespace VibeOCR.App.Tests;
@@ -64,9 +65,12 @@ public sealed class DeferredInferenceClientTests
         SettingsSnapshot updated = await deferred.UpdateSettingsAsync(
             new SettingsSnapshot { DownloadSourceIds = ["tuna-pypi"] },
             CancellationToken.None);
+        Wire.Health health = await deferred.GetHealthAsync(CancellationToken.None);
 
         Assert.Equal(600, status.DefaultTtlSeconds);
         Assert.Equal(["tuna-pypi"], updated.DownloadSourceIds);
+        Assert.True(health.Ready);
+        Assert.Contains("ocr.engine-selection.v1", health.Capabilities);
     }
 
     [Fact]
@@ -160,6 +164,18 @@ public sealed class DeferredInferenceClientTests
             SettingsSnapshot settings,
             CancellationToken cancellationToken)
             => Task.FromResult(settings);
+
+        public Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
+            => Task.FromResult(new Wire.Health
+            {
+                SchemaVersion = 2,
+                InstanceId = "sup-1",
+                ProtocolVersion = 2,
+                Ready = true,
+                Draining = false,
+                Capabilities = ["ocr.engine-selection.v1"],
+                CapabilityDescriptors = null,
+            });
 
         public Task<ExportResult> ExportAsync(ExportRequest request, CancellationToken ct)
             => throw new NotImplementedException();
