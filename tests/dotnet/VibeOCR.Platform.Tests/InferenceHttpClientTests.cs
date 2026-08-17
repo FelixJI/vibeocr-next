@@ -172,6 +172,97 @@ public sealed class InferenceHttpClientTests
     }
 
     [Fact]
+    public async Task GetSettingsReturnsTypedSnapshotWithoutSourceSelectionAsync()
+    {
+        var handler = new FakeHandler("""
+            {"schema_version":2,"residency":{"default_ttl_seconds":300,"pipelines":[]},"extra":{}}
+            """);
+        await using var client = new InferenceHttpClient(Base, "tok", handler);
+
+        SettingsSnapshot snapshot = await client.GetSettingsAsync(
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(300, snapshot.Residency.DefaultTtlSeconds);
+        Assert.Null(snapshot.DownloadSourceIds);
+        Assert.Equal(HttpMethod.Get, handler.LastMethod);
+        Assert.Equal("/v2/settings", handler.LastPath);
+    }
+
+    [Fact]
+    public async Task UpdateSettingsPutsSnapshotAndReturnsUpdatedStateAsync()
+    {
+        var handler = new FakeHandler("""
+            {"schema_version":2,"residency":{"default_ttl_seconds":600,"pipelines":[]},"extra":{},"download_source_ids":["tuna-pypi"]}
+            """);
+        await using var client = new InferenceHttpClient(Base, "tok", handler);
+
+        SettingsSnapshot updated = await client.UpdateSettingsAsync(
+            new SettingsSnapshot
+            {
+                Residency = new SettingsResidency { DefaultTtlSeconds = 600 },
+                DownloadSourceIds = ["tuna-pypi"],
+            },
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpMethod.Put, handler.LastMethod);
+        Assert.Equal("/v2/settings", handler.LastPath);
+        Assert.Equal("application/json", handler.LastContentType);
+        Assert.Contains("\"download_source_ids\":[\"tuna-pypi\"]", handler.LastBody);
+        Assert.Equal(["tuna-pypi"], updated.DownloadSourceIds);
+    }
+
+    [Fact]
+    public async Task UpdateSettingsOmitsEmptySourceListOnTheWireAsync()
+    {
+        var handler = new FakeHandler("""
+            {"schema_version":2,"residency":{"default_ttl_seconds":300,"pipelines":[]},"extra":{}}
+            """);
+        await using var client = new InferenceHttpClient(Base, "tok", handler);
+
+        await client.UpdateSettingsAsync(
+            new SettingsSnapshot { DownloadSourceIds = [] },
+            TestContext.Current.CancellationToken);
+
+        Assert.DoesNotContain("download_source_ids", handler.LastBody!);
+    }
+
+    [Fact]
+    public async Task SubmitSendsTaskEngineOverrideAndOmitsItWhenNullAsync()
+    {
+        var handler = new FakeHandler("""
+            {"job_id":"job-1","schema_version":2,"instance_id":"sup-1","state":"accepted","items":[]}
+            """);
+        await using var client = new InferenceHttpClient(Base, "tok", handler);
+        SubmitRequest request = UploadRequest();
+
+        await client.SubmitAsync(
+            request,
+            new Dictionary<string, SubmitUpload>
+            {
+                ["file-a"] = new("image/png", new byte[] { 1, 2, 3 }),
+            },
+            TestContext.Current.CancellationToken);
+        Assert.DoesNotContain("\"engine\"", handler.LastBody);
+
+        request = UploadRequest() with
+        {
+            Pipeline = new PipelineSelection
+            {
+                PipelineId = "OCR",
+                Engine = OcrEngine.PaddleOcr,
+            },
+        };
+        await client.SubmitAsync(
+            request,
+            new Dictionary<string, SubmitUpload>
+            {
+                ["file-a"] = new("image/png", new byte[] { 1, 2, 3 }),
+            },
+            TestContext.Current.CancellationToken);
+        Assert.Contains("\"engine\":\"paddleocr\"", handler.LastBody);
+    }
+
+    [Fact]
     public async Task TypedErrorIsRaisedOnNonSuccessAsync()
     {
         var handler = new FakeHandler("""

@@ -70,6 +70,75 @@ public sealed record RuntimeInstallerProcessResult(
     string StandardOutput,
     string StandardError);
 
+/// <summary>
+/// Explicit install intent for ensure and retry maintenance operations.
+/// Only stable component and download source ids are accepted here; source
+/// endpoints and Python package names belong to the Backend.
+/// </summary>
+public sealed record RuntimeInstallSelection
+{
+    private IReadOnlyList<string>? _installComponentIds;
+    private IReadOnlyList<string>? _downloadSourceIds;
+
+    /// <summary>
+    /// Manual install scope as stable component ids. Null omits the wire
+    /// field (the Backend applies its default set, retry reuses the source
+    /// operation's normalized intent); an empty list explicitly selects the
+    /// base-only scope.
+    /// </summary>
+    public IReadOnlyList<string>? InstallComponentIds
+    {
+        get => _installComponentIds;
+        init
+        {
+            ValidateIds(value, allowEmpty: true, nameof(InstallComponentIds));
+            _installComponentIds = value;
+        }
+    }
+
+    /// <summary>
+    /// Download source ids snapshotted into the operation. Null delegates to
+    /// the Backend settings/defaults (retry reuses the source operation's
+    /// intent); when present the wire format requires a non-empty array with
+    /// at most one id per source kind.
+    /// </summary>
+    public IReadOnlyList<string>? DownloadSourceIds
+    {
+        get => _downloadSourceIds;
+        init
+        {
+            ValidateIds(value, allowEmpty: false, nameof(DownloadSourceIds));
+            _downloadSourceIds = value;
+        }
+    }
+
+    private static void ValidateIds(
+        IReadOnlyList<string>? ids,
+        bool allowEmpty,
+        string name)
+    {
+        if (ids is null)
+        {
+            return;
+        }
+        if (!allowEmpty && ids.Count == 0)
+        {
+            throw new ArgumentException(
+                $"{name} must not be empty; omit the selection to use Backend defaults.",
+                name);
+        }
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string id in ids)
+        {
+            if (string.IsNullOrWhiteSpace(id) || !seen.Add(id))
+            {
+                throw new ArgumentException(
+                    $"{name} must contain unique non-blank ids.", name);
+            }
+        }
+    }
+}
+
 public interface IRuntimeInstallerCommandRunner
 {
     Task<RuntimeInstallerProcessResult> RunAsync(
@@ -96,6 +165,17 @@ public interface IRuntimeInstallerClient
         string operationId,
         IProgress<Host.RuntimeMaintenanceEvent>? progress = null,
         CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Ensure with an explicit install intent. <see cref="RuntimeInstallSelection"/>
+    /// carries <c>install_component_ids</c>/<c>download_source_ids</c>; repair
+    /// keeps using <see cref="RepairComponentsAsync"/> with
+    /// <c>component_ids</c> and the two field families never mix.
+    /// </summary>
+    Task<RuntimeLaunch> EnsureAsync(
+        RuntimeInstallSelection? selection,
+        string operationId,
+        IProgress<Host.RuntimeMaintenanceEvent>? progress = null,
+        CancellationToken cancellationToken = default);
     Task<RuntimeLaunch> RepairAsync(
         string operationId,
         IProgress<Host.RuntimeMaintenanceEvent>? progress = null,
@@ -118,7 +198,13 @@ public interface IRuntimeInstallerClient
         string operationId,
         string newOperationId,
         string commandId,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default) =>
+        RetryAsync(
+            operationId,
+            newOperationId,
+            selection: null,
+            commandId,
+            cancellationToken);
     Task<RuntimeHostEnvelope> RetryAsync(
         string operationId,
         string newOperationId,
@@ -126,8 +212,30 @@ public interface IRuntimeInstallerClient
         RetryAsync(
             operationId,
             newOperationId,
+            selection: null,
+            cancellationToken);
+    /// <summary>
+    /// Retry with an explicit replacement intent: a null
+    /// <see cref="RuntimeInstallSelection"/> (or null members) reuses the
+    /// source operation's normalized intent, explicit values replace it.
+    /// </summary>
+    Task<RuntimeHostEnvelope> RetryAsync(
+        string operationId,
+        string newOperationId,
+        RuntimeInstallSelection? selection,
+        CancellationToken cancellationToken = default) =>
+        RetryAsync(
+            operationId,
+            newOperationId,
+            selection,
             Guid.NewGuid().ToString(),
             cancellationToken);
+    Task<RuntimeHostEnvelope> RetryAsync(
+        string operationId,
+        string newOperationId,
+        RuntimeInstallSelection? selection,
+        string commandId,
+        CancellationToken cancellationToken = default);
     Task<RuntimeMaintenanceObserveEnvelope> ObserveAsync(
         string operationId,
         long afterSequence,
@@ -262,6 +370,22 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
             cancellationToken,
             operationId: operationId);
 
+    public Task<RuntimeLaunch> EnsureAsync(
+        RuntimeInstallSelection? selection,
+        string operationId,
+        IProgress<Host.RuntimeMaintenanceEvent>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(operationId);
+        return InvokeLaunchAsync(
+            "ensure",
+            progress,
+            cancellationToken,
+            installComponentIds: selection?.InstallComponentIds,
+            downloadSourceIds: selection?.DownloadSourceIds,
+            operationId: operationId);
+    }
+
     public Task<RuntimeLaunch> RepairAsync(
         string operationId,
         IProgress<Host.RuntimeMaintenanceEvent>? progress = null,
@@ -357,12 +481,37 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         RetryAsync(
             operationId,
             newOperationId,
+            selection: null,
+            cancellationToken);
+
+    public Task<RuntimeHostEnvelope> RetryAsync(
+        string operationId,
+        string newOperationId,
+        string commandId,
+        CancellationToken cancellationToken = default) =>
+        RetryAsync(
+            operationId,
+            newOperationId,
+            selection: null,
+            commandId,
+            cancellationToken);
+
+    public Task<RuntimeHostEnvelope> RetryAsync(
+        string operationId,
+        string newOperationId,
+        RuntimeInstallSelection? selection,
+        CancellationToken cancellationToken = default) =>
+        RetryAsync(
+            operationId,
+            newOperationId,
+            selection,
             Guid.NewGuid().ToString(),
             cancellationToken);
 
     public Task<RuntimeHostEnvelope> RetryAsync(
         string operationId,
         string newOperationId,
+        RuntimeInstallSelection? selection,
         string commandId,
         CancellationToken cancellationToken = default)
     {
@@ -375,6 +524,10 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         request["command"] = "retry";
         request["target_operation_id"] = operationId;
         request["new_operation_id"] = newOperationId;
+        ApplySelection(
+            request,
+            selection?.InstallComponentIds,
+            selection?.DownloadSourceIds);
         return InvokeControlAsync<RuntimeHostEnvelope>(
             request,
             cancellationToken,
@@ -467,6 +620,8 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         CancellationToken cancellationToken,
         IReadOnlyCollection<string>? componentIds = null,
         IReadOnlyCollection<string>? requiredCapabilities = null,
+        IReadOnlyCollection<string>? installComponentIds = null,
+        IReadOnlyCollection<string>? downloadSourceIds = null,
         string? operationId = null)
     {
         RuntimeHostEnvelope envelope = await InvokeAsync(
@@ -475,6 +630,8 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
             cancellationToken,
             componentIds,
             requiredCapabilities,
+            installComponentIds,
+            downloadSourceIds,
             operationId).ConfigureAwait(false);
         RuntimeLaunch launch = envelope.Launch ?? throw new RuntimeInstallerException(
             $"Runtime Host {operation} response has no launch contract.");
@@ -499,6 +656,8 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         CancellationToken cancellationToken,
         IReadOnlyCollection<string>? componentIds = null,
         IReadOnlyCollection<string>? requiredCapabilities = null,
+        IReadOnlyCollection<string>? installComponentIds = null,
+        IReadOnlyCollection<string>? downloadSourceIds = null,
         string? operationId = null)
     {
         bool supportsV2 = SupportsCapability("runtime.maintenance.v2");
@@ -513,7 +672,9 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
             operation,
             operationId,
             componentIds,
-            requiredCapabilities);
+            requiredCapabilities,
+            installComponentIds,
+            downloadSourceIds);
         int streamedEvents = 0;
         long lastSequence = 0;
         bool replayRequired = false;
@@ -742,7 +903,9 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         string operation,
         string? operationId = null,
         IReadOnlyCollection<string>? componentIds = null,
-        IReadOnlyCollection<string>? requiredCapabilities = null)
+        IReadOnlyCollection<string>? requiredCapabilities = null,
+        IReadOnlyCollection<string>? installComponentIds = null,
+        IReadOnlyCollection<string>? downloadSourceIds = null)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -776,6 +939,7 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
             {
                 request["required_capabilities"] = requiredCapabilities;
             }
+            ApplySelection(request, installComponentIds, downloadSourceIds);
         }
         else if (SupportsMaintenanceEvents())
         {
@@ -783,6 +947,31 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         }
         AddOption(startInfo, "--request-json", JsonSerializer.Serialize(request));
         return startInfo;
+    }
+
+    private void ApplySelection(
+        Dictionary<string, object?> request,
+        IReadOnlyCollection<string>? installComponentIds,
+        IReadOnlyCollection<string>? downloadSourceIds)
+    {
+        if (installComponentIds is not null)
+        {
+            if (!SupportsCapability("runtime.component-selection.v1"))
+            {
+                throw new RuntimeInstallerException(
+                    "Runtime Host does not support explicit component selection.");
+            }
+            request["install_component_ids"] = installComponentIds;
+        }
+        if (downloadSourceIds is { Count: > 0 })
+        {
+            if (!SupportsCapability("runtime.download-sources.v1"))
+            {
+                throw new RuntimeInstallerException(
+                    "Runtime Host does not support download source selection.");
+            }
+            request["download_source_ids"] = downloadSourceIds;
+        }
     }
 
     private bool SupportsMaintenanceEvents()

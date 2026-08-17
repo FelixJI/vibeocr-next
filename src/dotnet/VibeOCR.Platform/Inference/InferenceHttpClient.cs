@@ -131,6 +131,18 @@ public sealed class InferenceHttpClient : IInferenceClient
         return await ReadAsync<SettingsSnapshot>(response, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<SettingsSnapshot> UpdateSettingsAsync(
+        SettingsSnapshot settings, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        using StringContent content = _runtime.CreateJsonContent(settings, _options);
+        using HttpResponseMessage response = await _runtime.PutAsync(
+            RuntimeOperationPaths.PutSettings, content, cancellationToken)
+            .ConfigureAwait(false);
+        await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+        return await ReadAsync<SettingsSnapshot>(response, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<ExportResult> ExportAsync(ExportRequest request, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
