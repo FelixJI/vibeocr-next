@@ -7,7 +7,10 @@ using VibeOCR.Platform.Inference;
 
 namespace VibeOCR.App.Features.Pdf;
 
-public sealed class PdfViewModel(IInferenceClient inference, IPdfFileSource files) : INotifyPropertyChanged
+public sealed class PdfViewModel(
+    IInferenceClient inference,
+    IPdfFileSource files,
+    string? configFile = null) : INotifyPropertyChanged
 {
     private readonly InferenceJobRunner _jobs = new(inference);
     private CancellationTokenSource? _activeRun;
@@ -119,7 +122,8 @@ public sealed class PdfViewModel(IInferenceClient inference, IPdfFileSource file
                 JobPriority.Background,
                 inputs,
                 options: null,
-                run.Token);
+                cancellationToken: run.Token,
+                engine: VibeOCR.App.Features.Settings.OcrEngineSettings.GlobalEngine(configFile));
             JobSnapshot snap = job.Snapshot;
             if (generation != Volatile.Read(ref _generation)) return;
             if (snap.State is JobState.Cancelled) { foreach (int idx in pages) if (idx < Pages.Count) Pages[idx].State = PdfPageState.None; Status = "已取消"; return; }

@@ -169,10 +169,12 @@ public sealed partial class App : Application
           layout,
           () => new RecognitionViewModel(
             _inferenceGateway,
-            new InputService(() => WinRT.Interop.WindowNative.GetWindowHandle(_window!))),
+            new InputService(() => WinRT.Interop.WindowNative.GetWindowHandle(_window!)),
+            layout.ConfigFile),
           () => new BatchViewModel(
             _inferenceGateway,
-            new BatchFileSource(() => WinRT.Interop.WindowNative.GetWindowHandle(_window!))),
+            new BatchFileSource(() => WinRT.Interop.WindowNative.GetWindowHandle(_window!)),
+            layout.ConfigFile),
           () =>
           {
             nint handle = WinRT.Interop.WindowNative.GetWindowHandle(_window!);
@@ -185,9 +187,10 @@ public sealed partial class App : Application
             nint handle = WinRT.Interop.WindowNative.GetWindowHandle(_window!);
             return new PdfViewModel(
               _inferenceGateway,
-              new PdfFileSource(() => handle));
+              new PdfFileSource(() => handle),
+              layout.ConfigFile);
           },
-          () => new SettingsViewModel(_inferenceGateway, _runtimeStatus),
+          () => new SettingsViewModel(_inferenceGateway, _runtimeStatus, layout.ConfigFile),
           () => _shellViewModel ??
             throw new InvalidOperationException("Desktop shell is unavailable."),
           () => _updateViewModel ??

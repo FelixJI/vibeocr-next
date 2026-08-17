@@ -33,7 +33,7 @@ internal abstract class InferenceClientStub : IInferenceClient
         throw new NotImplementedException();
 
     public virtual Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken) =>
-        throw new NotImplementedException();
+        throw new NotSupportedException("This stub does not expose runtime health.");
 
     public virtual Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>
         throw new NotImplementedException();

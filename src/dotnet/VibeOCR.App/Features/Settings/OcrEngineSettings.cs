@@ -70,6 +70,15 @@ internal static class OcrEngineSettings
             root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
     }
 
+    /// <summary>
+    /// The persisted global engine for plain-text OCR pipelines; a null config
+    /// path (tests) resolves to the migrated default.
+    /// </summary>
+    public static OcrEngine? GlobalEngine(string? configFile) =>
+        configFile is null
+            ? ToEngine(DefaultEngineWireName)
+            : Load(configFile).Engine;
+
     internal static OcrEngine? ToEngine(string? wireName) => wireName switch
     {
         "rapidocr" => OcrEngine.RapidOcr,

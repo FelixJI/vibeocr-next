@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using VibeOCR.App.Features.Settings;
 using VibeOCR.App.Inference;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Inference;
@@ -11,6 +12,7 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     private readonly IInferenceClient _inference;
     private readonly InferenceJobRunner _jobs;
     private readonly IInputService _inputs;
+    private readonly string? _configFile;
     private CancellationTokenSource? _activeRun;
     private long _generation;
     private bool _isBusy;
@@ -18,12 +20,17 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     private RecognizeResponse? _result;
     private RecognitionInput? _currentInput;
     private string _status = "请选择图片";
+    private string? _taskEngine;
 
-    public RecognitionViewModel(IInferenceClient inference, IInputService inputs)
+    public RecognitionViewModel(
+        IInferenceClient inference,
+        IInputService inputs,
+        string? configFile = null)
     {
         _inference = inference ?? throw new ArgumentNullException(nameof(inference));
         _jobs = new InferenceJobRunner(inference);
         _inputs = inputs ?? throw new ArgumentNullException(nameof(inputs));
+        _configFile = configFile;
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -36,6 +43,30 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     public string Pipeline { get; set; } = "OCR";
     public string? Language { get; set; }
     public RecognizeResponse? Result => _result;
+
+    /// <summary>
+    /// Task-level OCR engine override as a wire engine id. Null uses the
+    /// persisted global preference; only the plain-text OCR pipeline sends it.
+    /// </summary>
+    public string? TaskEngine
+    {
+        get => _taskEngine;
+        set => SetField(ref _taskEngine, string.IsNullOrWhiteSpace(value) ? null : value);
+    }
+
+    /// <summary>The engine this run would use: task override, else the global preference.</summary>
+    public OcrEngine? EffectiveEngine
+    {
+        get
+        {
+            OcrEngine? task = OcrEngineSettings.ToEngine(TaskEngine);
+            if (task is not null)
+            {
+                return task;
+            }
+            return OcrEngineSettings.GlobalEngine(_configFile);
+        }
+    }
 
     public ResultActions CreateResultActions(IResultActionPlatform platform)
     {
@@ -107,7 +138,8 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
                         input.Data),
                 ],
                 options: null,
-                run.Token);
+                cancellationToken: run.Token,
+                engine: EffectiveEngine);
             JobSnapshot snapshot = job.Snapshot;
 
             if (generation != Volatile.Read(ref _generation)) return;
@@ -166,6 +198,11 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         HttpV2ErrorCode.OutOfMemory => "内存或显存不足",
         HttpV2ErrorCode.SupervisorDraining => "Supervisor 正在关闭，请稍后",
         HttpV2ErrorCode.ProtocolMismatch => "Supervisor 协议不兼容",
+        HttpV2ErrorCode.OcrEngineUnknown => "未知引擎，请重新选择",
+        HttpV2ErrorCode.OcrEngineUnavailable => "所选引擎不可用，请在设置中重选",
+        HttpV2ErrorCode.OcrEnginePreparationRequired => "所选引擎需要先准备依赖",
+        HttpV2ErrorCode.OcrEngineNotValidForPipeline => "该管线不支持所选引擎",
+        HttpV2ErrorCode.OcrEngineLanguageUnavailable => "所选引擎缺少语言包",
         _ => "识别失败",
     };
 

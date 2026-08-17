@@ -70,6 +70,37 @@ interface QrResultState {
   readonly isUrl: boolean;
 }
 
+interface EngineOptionState {
+  readonly engine: string;
+  readonly displayName: string;
+  readonly availability: string;
+  readonly requiresDownload: boolean;
+  readonly selected: boolean;
+}
+
+interface SourceOptionState {
+  readonly kind: string;
+  readonly id: string;
+  readonly displayName: string;
+  readonly selected: boolean;
+}
+
+interface FeatureOptionState {
+  readonly featureId: string;
+  readonly displayName: string;
+  readonly accelerator: string;
+  readonly selected: boolean;
+}
+
+interface RecognitionEngineState {
+  readonly engine: string;
+  readonly displayName: string;
+  readonly selected: boolean;
+  readonly isTaskOverride: boolean;
+  readonly availability: string;
+  readonly requiresDownload: boolean;
+}
+
 function feature(
   viewState: AppViewState,
   scope: string,
@@ -158,6 +189,94 @@ function qrResults(value: unknown): readonly QrResultState[] {
       typeof result.isUrl === "boolean"
     );
   });
+}
+
+function engineOptions(value: unknown): readonly EngineOptionState[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is EngineOptionState => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry))
+      return false;
+    const option = entry as Partial<EngineOptionState>;
+    return (
+      typeof option.engine === "string" &&
+      typeof option.displayName === "string" &&
+      typeof option.availability === "string" &&
+      typeof option.requiresDownload === "boolean" &&
+      typeof option.selected === "boolean"
+    );
+  });
+}
+
+function sourceOptions(value: unknown): readonly SourceOptionState[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is SourceOptionState => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry))
+      return false;
+    const option = entry as Partial<SourceOptionState>;
+    return (
+      typeof option.kind === "string" &&
+      typeof option.id === "string" &&
+      typeof option.displayName === "string" &&
+      typeof option.selected === "boolean"
+    );
+  });
+}
+
+function featureOptions(value: unknown): readonly FeatureOptionState[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is FeatureOptionState => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry))
+      return false;
+    const option = entry as Partial<FeatureOptionState>;
+    return (
+      typeof option.featureId === "string" &&
+      typeof option.displayName === "string" &&
+      typeof option.accelerator === "string" &&
+      typeof option.selected === "boolean"
+    );
+  });
+}
+
+function recognitionEngines(value: unknown): readonly RecognitionEngineState[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is RecognitionEngineState => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry))
+      return false;
+    const option = entry as Partial<RecognitionEngineState>;
+    return (
+      typeof option.engine === "string" &&
+      typeof option.displayName === "string" &&
+      typeof option.selected === "boolean" &&
+      typeof option.isTaskOverride === "boolean" &&
+      typeof option.availability === "string" &&
+      typeof option.requiresDownload === "boolean"
+    );
+  });
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function availabilityLabel(availability: string): string {
+  const labels: Readonly<Record<string, string>> = {
+    ready: "可用",
+    preparation_required: "需准备依赖",
+    unavailable: "不可用",
+  };
+  return labels[availability] ?? availability;
+}
+
+function sourceKindLabel(kind: string): string {
+  const labels: Readonly<Record<string, string>> = {
+    "package-index": "Python 包源",
+    "model-registry": "模型仓库源",
+  };
+  return labels[kind] ?? `源类别：${kind}`;
+}
+
+function acceleratorLabel(accelerator: string): string {
+  return accelerator === "nvidia_cuda" ? "CUDA GPU" : "CPU";
 }
 
 function statusLabel(value: unknown, fallback: string): string {
@@ -292,6 +411,12 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
             : "等待宿主输入。演示状态不会读取剪贴板、文件或屏幕。",
         )}
       </StatusLine>
+      <TaskEngineSelector
+        engines={recognitionEngines(state.engines)}
+        taskEngine={stringValue(state.taskEngine)}
+        enabled={viewState.capabilities.includes("recognition.engine")}
+        actions={actions}
+      />
       <div className="inspection-grid">
         <Panel label="INPUT / 01" title="输入图像">
           {input ? (
@@ -991,6 +1116,18 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             actions={actions}
           />
         </Panel>
+        <Panel label="OCR" title="识别引擎">
+          <EngineSelector
+            engines={engineOptions(state.engines)}
+            selectedEngine={stringValue(state.selectedEngine)}
+            choiceRequired={booleanValue(state.engineChoiceRequired)}
+            enabled={viewState.capabilities.includes("settings.selection")}
+            actions={actions}
+          />
+          <p className="form-note">
+            全局默认引擎对全部纯文本识别生效；单次识别可在识别页临时改用其他引擎。
+          </p>
+        </Panel>
         <Panel label="RUNTIME" title="推理后端与依赖">
           <div className="runtime-summary">
             <strong>{backend}</strong>
@@ -1008,6 +1145,12 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
           >
             刷新运行时
           </CapabilityGate>
+          <AcceleratorFeatures
+            pendingBackend={stringValue(state.pendingBackend) ?? "cpu"}
+            features={featureOptions(state.features)}
+            enabled={viewState.capabilities.includes("settings.selection")}
+            actions={actions}
+          />
           <p className="form-note">
             {statusLabel(
               state.statusCode,
@@ -1015,8 +1158,217 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             )}
           </p>
         </Panel>
+        <Panel label="SOURCES" title="下载源">
+          <SourceSelector
+            sources={sourceOptions(state.sources)}
+            enabled={viewState.capabilities.includes("settings.selection")}
+            actions={actions}
+          />
+          <p className="form-note">
+            下载源偏好保存在 Backend 设置中；未知源类别仅展示，不做前端预设。
+          </p>
+        </Panel>
       </div>
     </Workspace>
+  );
+}
+
+function EngineSelector({
+  engines,
+  selectedEngine,
+  choiceRequired,
+  enabled,
+  actions,
+}: {
+  readonly engines: readonly EngineOptionState[];
+  readonly selectedEngine: string | undefined;
+  readonly choiceRequired: boolean;
+  readonly enabled: boolean;
+  readonly actions: AppActions;
+}) {
+  if (engines.length === 0) {
+    return <p className="form-note">当前 Backend 未提供引擎目录。</p>;
+  }
+  return (
+    <>
+      <div className="setting-row">
+        <label htmlFor="ocr-engine">全局默认引擎</label>
+        <Select
+          id="ocr-engine"
+          value={selectedEngine ?? ""}
+          disabled={!enabled}
+          onChange={(_, data) =>
+            actions.run({
+              type: "settings.setEngine",
+              engine: String(data.value),
+            })
+          }
+        >
+          {engines.map((option) => (
+            <option key={option.engine} value={option.engine}>
+              {`${option.displayName}（${availabilityLabel(option.availability)}${
+                option.requiresDownload ? "，需下载" : ""
+              }）`}
+            </option>
+          ))}
+        </Select>
+      </div>
+      {choiceRequired ? (
+        <p className="form-note">本地引擎偏好无效，请重新选择引擎。</p>
+      ) : null}
+    </>
+  );
+}
+
+function SourceSelector({
+  sources,
+  enabled,
+  actions,
+}: {
+  readonly sources: readonly SourceOptionState[];
+  readonly enabled: boolean;
+  readonly actions: AppActions;
+}) {
+  if (sources.length === 0) {
+    return <p className="form-note">当前 Backend 未提供下载源目录。</p>;
+  }
+  const kinds = [...new Set(sources.map((source) => source.kind))];
+  return (
+    <>
+      {kinds.map((kind) => {
+        const kindSources = sources.filter((source) => source.kind === kind);
+        const selected =
+          kindSources.find((source) => source.selected) ?? undefined;
+        return (
+          <div className="setting-row" key={kind}>
+            <label htmlFor={`source-${kind}`}>{sourceKindLabel(kind)}</label>
+            <Select
+              id={`source-${kind}`}
+              value={selected?.id ?? ""}
+              disabled={!enabled}
+              onChange={(_, data) =>
+                data.value === ""
+                  ? actions.run({ type: "settings.setSource", kind })
+                  : actions.run({
+                      type: "settings.setSource",
+                      kind,
+                      sourceId: String(data.value),
+                    })
+              }
+            >
+              <option value="">跟随 Backend 默认</option>
+              {kindSources.map((source) => (
+                <option key={source.id} value={source.id}>
+                  {source.displayName}
+                </option>
+              ))}
+            </Select>
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+function AcceleratorFeatures({
+  pendingBackend,
+  features,
+  enabled,
+  actions,
+}: {
+  readonly pendingBackend: string;
+  readonly features: readonly FeatureOptionState[];
+  readonly enabled: boolean;
+  readonly actions: AppActions;
+}) {
+  return (
+    <>
+      <div className="setting-row">
+        <label htmlFor="accelerator">目标加速器</label>
+        <Select
+          id="accelerator"
+          value={pendingBackend}
+          disabled={!enabled}
+          onChange={(_, data) =>
+            actions.run({
+              type: "settings.setAccelerator",
+              accelerator: String(data.value),
+            })
+          }
+        >
+          <option value="cpu">CPU</option>
+          <option value="nvidia_cuda">CUDA GPU</option>
+        </Select>
+      </div>
+      {features.length > 0 ? (
+        features.map((feature) => (
+          <div className="setting-row" key={feature.featureId}>
+            <Checkbox
+              label={feature.displayName}
+              checked={feature.selected}
+              disabled={!enabled}
+              onChange={(_, data) =>
+                actions.run({
+                  type: "settings.setFeature",
+                  featureId: feature.featureId,
+                  enabled: data.checked === true,
+                })
+              }
+            />
+            <Badge appearance="outline">
+              {acceleratorLabel(feature.accelerator)}
+            </Badge>
+          </div>
+        ))
+      ) : (
+        <p className="form-note">
+          当前加速器没有可选功能组件；安装入口在运行时维护操作中提供。
+        </p>
+      )}
+    </>
+  );
+}
+
+function TaskEngineSelector({
+  engines,
+  taskEngine,
+  enabled,
+  actions,
+}: {
+  readonly engines: readonly RecognitionEngineState[];
+  readonly taskEngine: string | undefined;
+  readonly enabled: boolean;
+  readonly actions: AppActions;
+}) {
+  if (engines.length === 0) {
+    return null;
+  }
+  return (
+    <div className="setting-row">
+      <label htmlFor="task-engine">本次识别引擎</label>
+      <Select
+        id="task-engine"
+        value={taskEngine ?? ""}
+        disabled={!enabled}
+        onChange={(_, data) =>
+          data.value === ""
+            ? actions.run({ type: "recognition.setTaskEngine" })
+            : actions.run({
+                type: "recognition.setTaskEngine",
+                engine: String(data.value),
+              })
+        }
+      >
+        <option value="">跟随全局默认</option>
+        {engines.map((engine) => (
+          <option key={engine.engine} value={engine.engine}>
+            {`${engine.displayName}（${availabilityLabel(engine.availability)}${
+              engine.requiresDownload ? "，需下载" : ""
+            }）`}
+          </option>
+        ))}
+      </Select>
+    </div>
   );
 }
 
