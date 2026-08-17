@@ -3,13 +3,39 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using VibeOCR.App.ViewModels;
 using VibeOCR.Contracts.HttpV2;
+using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
+using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 
 namespace VibeOCR.App.Features.Settings;
+
+/// <summary>One catalog engine projected for display (wire id + localization).</summary>
+public sealed record SettingsEngineOption(
+    string Engine,
+    string DisplayName,
+    string Availability,
+    string? ReasonCode,
+    bool RequiresDownload,
+    bool Selected);
+
+/// <summary>One catalog download source; unknown kinds render as-is.</summary>
+public sealed record SettingsSourceOption(
+    string Kind,
+    string Id,
+    string DisplayName,
+    bool Selected);
+
+/// <summary>One optional feature for the pending accelerator.</summary>
+public sealed record SettingsFeatureOption(
+    string FeatureId,
+    string DisplayName,
+    string Accelerator,
+    bool Selected);
 
 public sealed class SettingsViewModel : INotifyPropertyChanged
 {
     private readonly IInferenceClient _inference;
+    private readonly string _configFile;
     private long _generation;
     private bool _isBusy;
     private string _status = "正在读取设置";
@@ -17,13 +43,25 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private string _pendingBackend = "cpu";
     private bool _restartRequired;
     private bool _gpuAvailable;
+    private RuntimeSelectionService? _selection;
+    private IReadOnlyList<SettingsEngineOption> _engines = [];
+    private IReadOnlyList<SettingsSourceOption> _sources = [];
+    private IReadOnlyList<SettingsFeatureOption> _features = [];
+    private string? _selectedEngine;
+    private IReadOnlyList<string> _selectedSourceIds = [];
+    private bool _engineChoiceRequired;
 
     public SettingsViewModel(
         IInferenceClient inference,
-        RuntimeStatusViewModel? runtimeStatus = null)
+        RuntimeStatusViewModel? runtimeStatus = null,
+        string? configFile = null)
     {
         _inference = inference ?? throw new ArgumentNullException(nameof(inference));
         RuntimeStatus = runtimeStatus ?? new RuntimeStatusViewModel();
+        _configFile = configFile
+            ?? VibeOCR.Platform.Bootstrap.PortableLayout.Resolve(
+                Environment.ProcessPath ?? string.Empty,
+                "production").ConfigFile;
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -41,6 +79,40 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public bool RestartRequired { get => _restartRequired; private set => SetField(ref _restartRequired, value); }
     public bool GpuAvailable { get => _gpuAvailable; private set => SetField(ref _gpuAvailable, value); }
     public bool CanSwitchBackend => !IsBusy && !string.Equals(Backend, PendingBackend, StringComparison.Ordinal);
+
+    /// <summary>Catalog-driven engine options; empty until health has been read.</summary>
+    public IReadOnlyList<SettingsEngineOption> Engines
+    {
+        get => _engines;
+        private set => SetField(ref _engines, value);
+    }
+
+    public string? SelectedEngine
+    {
+        get => _selectedEngine;
+        private set => SetField(ref _selectedEngine, value);
+    }
+
+    /// <summary>未知/损坏的本地引擎偏好要求用户重选,不静默回退。</summary>
+    public bool EngineChoiceRequired
+    {
+        get => _engineChoiceRequired;
+        private set => SetField(ref _engineChoiceRequired, value);
+    }
+
+    public IReadOnlyList<SettingsSourceOption> Sources
+    {
+        get => _sources;
+        private set => SetField(ref _sources, value);
+    }
+
+    public IReadOnlyList<SettingsFeatureOption> Features
+    {
+        get => _features;
+        private set => SetField(ref _features, value);
+    }
+
+    public RuntimeSelectionService? Selection => _selection;
 
     public async Task LoadSnapshotAsync(CancellationToken cancellationToken)
     {
@@ -68,6 +140,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             {
                 // Older test doubles and pre-2.2 clients retain installer-local status.
             }
+            await LoadSelectionAsync(generation, cancellationToken);
         }
         catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) Status = "已取消"; }
         catch (InferenceClientException error) { if (generation == Volatile.Read(ref _generation)) Status = LocalizeV2(error.Code); }
@@ -75,8 +148,231 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         finally { if (generation == Volatile.Read(ref _generation)) IsBusy = false; }
     }
 
-    public void DetectGpu(bool available) { GpuAvailable = available; if (!available && PendingBackend == "gpu") PendingBackend = "cpu"; }
+    /// <summary>
+    /// Apply a global engine choice: the catalog must still accept it. The
+    /// preference is persisted locally (task-level overrides live elsewhere).
+    /// </summary>
+    public void SetEngine(string engineWireName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(engineWireName);
+        if (_selection is null)
+        {
+            Status = "运行时目录尚未加载，请先刷新运行时";
+            return;
+        }
+        OcrEngine? engine = OcrEngineSettings.ToEngine(engineWireName);
+        if (engine is null)
+        {
+            Status = $"未知引擎 {engineWireName}";
+            return;
+        }
+        try
+        {
+            RuntimeEngineOption option = _selection.SelectEngine(engine.Value);
+            OcrEngineSettings.Save(_configFile, engine.Value);
+            SelectedEngine = engineWireName;
+            EngineChoiceRequired = false;
+            Status = option.Availability == Wire.OcrEngineAvailability.PreparationRequired
+                ? $"已选择 {DisplayName(engine.Value)}；该引擎需要先准备依赖"
+                : $"已选择 {DisplayName(engine.Value)}";
+            Engines = [.. Engines.Select(item => item with
+            {
+                Selected = item.Engine == engineWireName,
+            })];
+        }
+        catch (RuntimeSelectionException error)
+        {
+            Status = LocalizeSelection(error);
+        }
+    }
+
+    /// <summary>
+    /// Persist the per-kind source selection in Backend settings (the
+    /// long-term source of truth); null id clears that kind's selection.
+    /// </summary>
+    public async Task SetSourceAsync(string kind, string? sourceId, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(kind);
+        if (_selection is null)
+        {
+            Status = "运行时目录尚未加载，请先刷新运行时";
+            return;
+        }
+        try
+        {
+            IReadOnlyList<string> next = ComposeSourceSelection(kind, sourceId);
+            SettingsSnapshot updated = await _selection.ApplySourcePreferenceAsync(
+                _inference,
+                next.Count == 0 ? null : next,
+                cancellationToken);
+            _selectedSourceIds = updated.DownloadSourceIds ?? [];
+            Sources = ProjectSources(_selection, _selectedSourceIds);
+            Status = "已保存下载源偏好";
+        }
+        catch (RuntimeSelectionException error)
+        {
+            Status = LocalizeSelection(error);
+        }
+        catch (InferenceClientException error)
+        {
+            Status = LocalizeV2(error.Code);
+        }
+    }
+
+    /// <summary>Stage the accelerator for the pending feature selection.</summary>
+    public void SetPendingAccelerator(string accelerator)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(accelerator);
+        PendingBackend = accelerator;
+        Features = _selection is null
+            ? []
+            : ProjectFeatures(_selection, accelerator, []);
+    }
+
+    /// <summary>Toggle one optional feature for the pending accelerator (session state).</summary>
+    public void SetFeatureEnabled(string featureId, bool enabled)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(featureId);
+        IReadOnlyList<SettingsFeatureOption> current = Features;
+        if (!current.Any(item => item.FeatureId == featureId))
+        {
+            Status = $"未知功能 {featureId}";
+            return;
+        }
+        Features = [.. current.Select(item => item.FeatureId == featureId
+            ? item with { Selected = enabled }
+            : item)];
+        Status = enabled
+            ? $"已选择功能 {featureId}（安装属运行时维护操作）"
+            : $"已取消功能 {featureId}";
+    }
+
+    /// <summary>Selected optional feature ids for the pending accelerator (N4 consumes these).</summary>
+    public IReadOnlyList<string> PendingFeatureIds =>
+        [.. Features.Where(item => item.Selected).Select(item => item.FeatureId)];
+
+    public void DetectGpu(bool available) { GpuAvailable = available; if (!available && PendingBackend == "nvidia_cuda") PendingBackend = "cpu"; }
     public void Cancel() { }
+
+    private async Task LoadSelectionAsync(long generation, CancellationToken cancellationToken)
+    {
+        try
+        {
+            Wire.Health health = await _inference.GetHealthAsync(cancellationToken);
+            if (generation != Volatile.Read(ref _generation)) return;
+            RuntimeSelectionService selection = new(health);
+            _selection = selection;
+            OcrEnginePreference preference = OcrEngineSettings.Load(_configFile);
+            EngineChoiceRequired = preference.RequiresChoice;
+            SelectedEngine = preference.Engine is null ? null : OcrEngineSettings.ToWireName(preference.Engine.Value);
+            Engines = ProjectEngines(selection, preference);
+            SettingsSnapshot settings = await _inference.GetSettingsAsync(cancellationToken);
+            if (generation != Volatile.Read(ref _generation)) return;
+            _selectedSourceIds = settings.DownloadSourceIds ?? [];
+            Sources = ProjectSources(selection, _selectedSourceIds);
+            Features = ProjectFeatures(selection, PendingBackend, []);
+        }
+        catch (NotSupportedException)
+        {
+            // Pre-2.7 clients do not expose health; selection stays unloaded.
+        }
+        catch (RuntimeSelectionException error)
+        {
+            if (generation == Volatile.Read(ref _generation)) Status = LocalizeSelection(error);
+        }
+        catch (InferenceClientException error)
+        {
+            if (generation == Volatile.Read(ref _generation)) Status = LocalizeV2(error.Code);
+        }
+    }
+
+    private IReadOnlyList<string> ComposeSourceSelection(string kind, string? sourceId)
+    {
+        List<string> next = [.. _selectedSourceIds.Where(id =>
+            _selection?.Sources.Any(source => source.Id == id && source.Kind != kind) == true)];
+        if (!string.IsNullOrWhiteSpace(sourceId))
+        {
+            next.Add(sourceId);
+        }
+        return next;
+    }
+
+    private static IReadOnlyList<SettingsEngineOption> ProjectEngines(
+        RuntimeSelectionService selection,
+        OcrEnginePreference preference)
+    {
+        if (!selection.SupportsEngineSelection)
+        {
+            return [];
+        }
+        return [.. selection.EngineOptions.Select(option => new SettingsEngineOption(
+            OcrEngineSettings.ToWireName(option.Engine),
+            DisplayName(option.Engine),
+            option.Availability.ToString().ToLowerInvariant(),
+            option.ReasonCode,
+            !option.IncludedInBase,
+            preference.Engine is not null &&
+                OcrEngineSettings.ToWireName(option.Engine) ==
+                    OcrEngineSettings.ToWireName(preference.Engine.Value)))];
+    }
+
+    private static IReadOnlyList<SettingsSourceOption> ProjectSources(
+        RuntimeSelectionService selection,
+        IReadOnlyList<string> selectedIds) =>
+        [.. selection.Sources.Select(source => new SettingsSourceOption(
+            source.Kind,
+            source.Id,
+            SourceDisplayName(source),
+            selectedIds.Contains(source.Id)))];
+
+    private static IReadOnlyList<SettingsFeatureOption> ProjectFeatures(
+        RuntimeSelectionService selection,
+        string accelerator,
+        IReadOnlyList<string> selectedIds) =>
+        [.. selection.Variants
+            .Where(variant => variant.Accelerator == accelerator)
+            .Select(variant => new SettingsFeatureOption(
+                variant.FeatureId,
+                FeatureDisplayName(variant.FeatureId),
+                variant.Accelerator,
+                selectedIds.Contains(variant.FeatureId)))];
+
+    internal static string DisplayName(OcrEngine engine) => engine switch
+    {
+        OcrEngine.RapidOcr => "RapidOCR",
+        OcrEngine.Windows => "Windows OCR",
+        OcrEngine.PaddleOcr => "PaddleOCR",
+        _ => engine.ToString(),
+    };
+
+    internal static string SourceDisplayName(Wire.DownloadSourceDescriptor source) => source.Id switch
+    {
+        "tuna-pypi" => "TUNA PyPI 镜像",
+        "pypi" => "PyPI 官方源",
+        "huggingface" => "Hugging Face",
+        "modelscope" => "ModelScope",
+        _ => source.Id,
+    };
+
+    internal static string FeatureDisplayName(string featureId) => featureId switch
+    {
+        "document_parsing" => "文档解析（PaddleOCR/MinerU）",
+        "gpu_runtime" => "CUDA GPU 运行时",
+        _ => featureId,
+    };
+
+    internal static string LocalizeSelection(RuntimeSelectionException error) => error.Kind switch
+    {
+        RuntimeSelectionErrorKind.CapabilityMissing => "当前 Backend 不支持该选择能力",
+        RuntimeSelectionErrorKind.InvalidCatalogEntry or RuntimeSelectionErrorKind.DuplicateCatalogEntry
+            => "运行时目录数据无效，请刷新或更新 Backend",
+        RuntimeSelectionErrorKind.UnknownEngine => "未知引擎，请重新选择",
+        RuntimeSelectionErrorKind.EngineUnavailable => "该引擎当前不可用，请先安装所需依赖或选择其他引擎",
+        RuntimeSelectionErrorKind.UnknownSource => "未知下载源，请重新选择",
+        RuntimeSelectionErrorKind.DuplicateSourceKind => "每种下载源类别只能选择一个",
+        RuntimeSelectionErrorKind.UnknownFeature => "当前加速器不支持该功能",
+        _ => "选择失败",
+    };
 
     private static string LocalizeV2(HttpV2ErrorCode code) => code switch
     {
@@ -86,6 +382,14 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         HttpV2ErrorCode.OutOfMemory => "内存或显存不足",
         HttpV2ErrorCode.SupervisorDraining => "Supervisor 正在关闭，请稍后",
         HttpV2ErrorCode.ProtocolMismatch => "Supervisor 协议不兼容",
+        HttpV2ErrorCode.OcrEngineUnknown => "未知引擎，请重新选择",
+        HttpV2ErrorCode.OcrEngineUnavailable => "所选引擎不可用，请在设置中重选",
+        HttpV2ErrorCode.OcrEnginePreparationRequired => "所选引擎需要先准备依赖",
+        HttpV2ErrorCode.OcrEngineNotValidForPipeline => "该管线不支持所选引擎",
+        HttpV2ErrorCode.OcrEngineLanguageUnavailable => "所选引擎缺少语言包",
+        HttpV2ErrorCode.DownloadSourceUnknown => "未知下载源，请重新选择",
+        HttpV2ErrorCode.RuntimeComponentUnknown => "未知运行时组件",
+        HttpV2ErrorCode.RuntimeCapabilityUnavailable => "当前 Backend 不支持该能力",
         _ => "操作失败",
     };
 

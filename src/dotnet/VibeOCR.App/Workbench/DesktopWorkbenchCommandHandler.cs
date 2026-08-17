@@ -8,6 +8,8 @@ using VibeOCR.App.Features.Shell;
 using VibeOCR.App.Features.Update;
 using VibeOCR.App.Services;
 using VibeOCR.App.Web;
+using VibeOCR.Contracts.HttpV2;
+using VibeOCR.Platform.Bootstrap;
 using Windows.Storage;
 using Windows.Storage.Pickers;
 using Windows.System;
@@ -40,6 +42,8 @@ public sealed class DesktopWorkbenchCommandHandler :
       "about.openProject",
       "runtime.refresh",
       "settings.shell",
+      "settings.selection",
+      "recognition.engine",
       "update.check",
       "update.install",
       "diagnostics.export",
@@ -217,6 +221,13 @@ public sealed class DesktopWorkbenchCommandHandler :
         SetThemeCommand setTheme => SetTheme(setTheme),
         SetStartupCommand startup => SetStartup(startup),
         SetHotkeyCommand hotkey => SetHotkey(hotkey),
+        SetOcrEngineCommand engine => SetEngine(engine),
+        SetDownloadSourceCommand source => await SetSourceAsync(
+          source,
+          cancellationToken),
+        SetAcceleratorCommand accelerator => SetAccelerator(accelerator),
+        SetRuntimeFeatureCommand feature => SetFeature(feature),
+        SetTaskEngineCommand taskEngine => SetTaskEngine(taskEngine),
         CheckUpdateCommand => await CheckUpdateAsync(cancellationToken),
         DownloadUpdateCommand => StartUpdateDownload(cancellationToken),
         CancelUpdateCommand => CancelUpdate(),
@@ -250,7 +261,46 @@ public sealed class DesktopWorkbenchCommandHandler :
     recognition ??= recognitionFactory();
     long generation = Interlocked.Increment(ref recognitionGeneration);
     Track(CompleteRecognitionAsync(action, generation, cancellationToken));
-    return new RecognitionWorkbenchState(true, "recognition.running");
+    return RecognitionState(true, "recognition.running");
+  }
+
+  private RecognitionWorkbenchState RecognitionState(
+    bool isBusy,
+    string statusCode,
+    WorkbenchResourceReference? input = null,
+    WorkbenchResourceReference? result = null) =>
+    new(
+      isBusy,
+      statusCode,
+      input,
+      result,
+      RecognitionEngines(),
+      recognition?.TaskEngine);
+
+  /// <summary>
+  /// Project catalog engines for the recognition page. The effective engine
+  /// is the task override when set, else the persisted global preference.
+  /// </summary>
+  private IReadOnlyList<RecognitionEngineChoice>? RecognitionEngines()
+  {
+    RuntimeSelectionService? selection = settings?.Selection;
+    if (selection is null || !selection.SupportsEngineSelection)
+    {
+      return null;
+    }
+    recognition ??= recognitionFactory();
+    OcrEngine effective = recognition.EffectiveEngine
+      ?? OcrEngine.RapidOcr;
+    bool isOverride = recognition.TaskEngine is not null;
+    return [.. selection.EngineOptions.Select(option => new RecognitionEngineChoice(
+      OcrEngineSettings.ToWireName(option.Engine),
+      SettingsViewModel.DisplayName(option.Engine),
+      OcrEngineSettings.ToWireName(option.Engine) ==
+        OcrEngineSettings.ToWireName(effective),
+      isOverride &&
+        OcrEngineSettings.ToWireName(option.Engine) == recognition.TaskEngine,
+      option.Availability.ToString().ToLowerInvariant(),
+      !option.IncludedInBase))];
   }
 
   private async Task CompleteRecognitionAsync(
@@ -312,7 +362,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       resultActions = recognition.CreateResultActions(
         new WindowsResultActionPlatform(windowHandle));
     }
-    return new RecognitionWorkbenchState(
+    return RecognitionState(
       recognition.IsBusy,
       RecognitionStatusCode(recognition),
       input,
@@ -834,6 +884,8 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     settings ??= settingsFactory();
     await settings.LoadSnapshotAsync(cancellationToken);
+    // 运行时目录加载后,识别页的引擎选择也需要最新目录。
+    StateChanged?.Invoke(RecognitionState(false, "recognition.ready"));
     return SettingsState(settings);
   }
 
@@ -864,6 +916,46 @@ public sealed class DesktopWorkbenchCommandHandler :
     shell.Value.PendingHotkey = command.Hotkey;
     shell.Value.ApplyHotkey();
     return SettingsState(settings);
+  }
+
+  private SettingsWorkbenchState SetEngine(SetOcrEngineCommand command)
+  {
+    settings ??= settingsFactory();
+    settings.SetEngine(command.Engine);
+    return SettingsState(settings);
+  }
+
+  private async Task<SettingsWorkbenchState> SetSourceAsync(
+    SetDownloadSourceCommand command,
+    CancellationToken cancellationToken)
+  {
+    settings ??= settingsFactory();
+    await settings.SetSourceAsync(
+      command.Kind,
+      command.SourceId,
+      cancellationToken);
+    return SettingsState(settings);
+  }
+
+  private SettingsWorkbenchState SetAccelerator(SetAcceleratorCommand command)
+  {
+    settings ??= settingsFactory();
+    settings.SetPendingAccelerator(command.Accelerator);
+    return SettingsState(settings);
+  }
+
+  private SettingsWorkbenchState SetFeature(SetRuntimeFeatureCommand command)
+  {
+    settings ??= settingsFactory();
+    settings.SetFeatureEnabled(command.FeatureId, command.Enabled);
+    return SettingsState(settings);
+  }
+
+  private RecognitionWorkbenchState SetTaskEngine(SetTaskEngineCommand command)
+  {
+    recognition ??= recognitionFactory();
+    recognition.TaskEngine = command.Engine;
+    return RecognitionState(false, RecognitionStatusCode(recognition));
   }
 
   private async Task<UpdateWorkbenchState> CheckUpdateAsync(
@@ -1096,7 +1188,28 @@ public sealed class DesktopWorkbenchCommandHandler :
     viewModel.RestartRequired ? "settings.restartRequired" : "settings.ready",
     viewModel.Backend,
     shell.Value.StartWithSystem,
-    shell.Value.RegisteredHotkey);
+    shell.Value.RegisteredHotkey,
+    [.. viewModel.Engines.Select(engine => new SettingsEngineOptionState(
+      engine.Engine,
+      engine.DisplayName,
+      engine.Availability,
+      engine.ReasonCode,
+      engine.RequiresDownload,
+      engine.Selected))],
+    viewModel.SelectedEngine,
+    viewModel.EngineChoiceRequired,
+    [.. viewModel.Sources.Select(source => new SettingsSourceOptionState(
+      source.Kind,
+      source.Id,
+      source.DisplayName,
+      source.Selected))],
+    viewModel.PendingBackend,
+    viewModel.CanSwitchBackend,
+    [.. viewModel.Features.Select(feature => new SettingsFeatureOptionState(
+      feature.FeatureId,
+      feature.DisplayName,
+      feature.Accelerator,
+      feature.Selected))]);
 
   private UpdateWorkbenchState UpdateState() => new(
     update.Value.IsBusy,

@@ -7,7 +7,10 @@ using VibeOCR.Platform.Inference;
 
 namespace VibeOCR.App.Features.Batch;
 
-public sealed class BatchViewModel(IInferenceClient inference, IBatchFileSource files) : INotifyPropertyChanged
+public sealed class BatchViewModel(
+    IInferenceClient inference,
+    IBatchFileSource files,
+    string? configFile = null) : INotifyPropertyChanged
 {
     private readonly InferenceJobRunner _jobs = new(inference);
     private readonly object _counterLock = new();
@@ -68,7 +71,8 @@ public sealed class BatchViewModel(IInferenceClient inference, IBatchFileSource 
                 JobPriority.Background,
                 inputs,
                 options: null,
-                _run.Token);
+                cancellationToken: _run.Token,
+                engine: VibeOCR.App.Features.Settings.OcrEngineSettings.GlobalEngine(configFile));
             JobSnapshot snapshot = job.Snapshot;
 
             if (generation != Volatile.Read(ref _generation)) return;

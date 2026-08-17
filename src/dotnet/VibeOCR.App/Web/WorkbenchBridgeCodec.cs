@@ -35,6 +35,12 @@ public static class WorkbenchBridgeCodec
   private static readonly HashSet<string> PagesArgumentFields = ["pages"];
   private static readonly HashSet<string> StartArgumentFields = ["start"];
   private static readonly HashSet<string> UrlArgumentFields = ["url"];
+  private static readonly HashSet<string> EngineArgumentFields = ["engine"];
+  private static readonly HashSet<string> SourceKindOnlyFields = ["kind"];
+  private static readonly HashSet<string> SourceArgumentFields = ["kind", "sourceId"];
+  private static readonly HashSet<string> AcceleratorArgumentFields = ["accelerator"];
+  private static readonly HashSet<string> FeatureArgumentFields = ["featureId", "enabled"];
+  private static readonly HashSet<string> TaskEngineArgumentFields = ["engine"];
 
   public static Guid ParseBootstrapRequest(string json)
   {
@@ -377,6 +383,75 @@ public static class WorkbenchBridgeCodec
           throw new WorkbenchBridgeProtocolException("Workbench hotkey is invalid.");
         }
         return new SetHotkeyCommand(hotkey);
+      case ("settings", "setEngine"):
+        EnsureObjectWithFields(arguments, EngineArgumentFields, "command arguments");
+        string? engine = arguments.GetProperty("engine").GetString();
+        if (string.IsNullOrWhiteSpace(engine) || engine.Length > 32)
+        {
+          throw new WorkbenchBridgeProtocolException("Workbench engine is invalid.");
+        }
+        return new SetOcrEngineCommand(engine);
+      case ("settings", "setSource"):
+        bool hasSourceId = !HasExactFields(arguments, SourceKindOnlyFields);
+        if (hasSourceId)
+        {
+          EnsureObjectWithFields(arguments, SourceArgumentFields, "command arguments");
+        }
+        else
+        {
+          EnsureObjectWithFields(arguments, SourceKindOnlyFields, "command arguments");
+        }
+        string kind = arguments.GetProperty("kind").GetString() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(kind) || kind.Length > 64)
+        {
+          throw new WorkbenchBridgeProtocolException("Workbench source kind is invalid.");
+        }
+        string? sourceId = hasSourceId
+          ? arguments.GetProperty("sourceId").GetString()
+          : null;
+        if (sourceId is not null && (sourceId.Length == 0 || sourceId.Length > 64))
+        {
+          throw new WorkbenchBridgeProtocolException("Workbench source id is invalid.");
+        }
+        return new SetDownloadSourceCommand(kind, sourceId);
+      case ("settings", "setAccelerator"):
+        EnsureObjectWithFields(arguments, AcceleratorArgumentFields, "command arguments");
+        string? accelerator = arguments.GetProperty("accelerator").GetString();
+        if (accelerator is not ("cpu" or "nvidia_cuda"))
+        {
+          throw new WorkbenchBridgeProtocolException(
+            "Workbench accelerator is invalid.");
+        }
+        return new SetAcceleratorCommand(accelerator);
+      case ("settings", "setFeature"):
+        EnsureObjectWithFields(arguments, FeatureArgumentFields, "command arguments");
+        string? featureId = arguments.GetProperty("featureId").GetString();
+        if (string.IsNullOrWhiteSpace(featureId) || featureId.Length > 64)
+        {
+          throw new WorkbenchBridgeProtocolException("Workbench feature is invalid.");
+        }
+        return new SetRuntimeFeatureCommand(
+          featureId,
+          arguments.GetProperty("enabled").GetBoolean());
+      case ("recognition", "setTaskEngine"):
+        bool hasTaskEngine = !HasExactFields(arguments, EmptyFields);
+        if (hasTaskEngine)
+        {
+          EnsureObjectWithFields(arguments, TaskEngineArgumentFields, "command arguments");
+        }
+        else
+        {
+          EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        }
+        string? taskEngine = hasTaskEngine
+          ? arguments.GetProperty("engine").GetString()
+          : null;
+        if (taskEngine is not null &&
+            (taskEngine.Length == 0 || taskEngine.Length > 32))
+        {
+          throw new WorkbenchBridgeProtocolException("Workbench task engine is invalid.");
+        }
+        return new SetTaskEngineCommand(taskEngine);
       case ("update", "check"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new CheckUpdateCommand();
@@ -473,6 +548,8 @@ public static class WorkbenchBridgeCodec
       recognition.StatusCode,
       recognition.Input,
       recognition.Result,
+      engines = recognition.Engines ?? [],
+      recognition.TaskEngine,
     },
     BatchWorkbenchState batch => new
     {
@@ -510,6 +587,13 @@ public static class WorkbenchBridgeCodec
       settings.Backend,
       settings.StartupEnabled,
       settings.Hotkey,
+      engines = settings.Engines ?? [],
+      settings.SelectedEngine,
+      settings.EngineChoiceRequired,
+      sources = settings.Sources ?? [],
+      settings.PendingBackend,
+      settings.CanSwitchBackend,
+      features = settings.Features ?? [],
     },
     UpdateWorkbenchState update => new
     {
@@ -577,6 +661,21 @@ public static class WorkbenchBridgeCodec
     Uri.TryCreate(value, UriKind.Absolute, out Uri? uri) &&
     uri.Scheme is "http" or "https" &&
     string.IsNullOrEmpty(uri.UserInfo);
+
+  private static bool HasExactFields(
+    JsonElement element,
+    IReadOnlySet<string> expected)
+  {
+    if (element.ValueKind != JsonValueKind.Object)
+    {
+      return false;
+    }
+    return element
+      .EnumerateObject()
+      .Select(property => property.Name)
+      .ToHashSet(StringComparer.Ordinal)
+      .SetEquals(expected);
+  }
 
   private static void EnsureObjectWithFields(
     JsonElement element,

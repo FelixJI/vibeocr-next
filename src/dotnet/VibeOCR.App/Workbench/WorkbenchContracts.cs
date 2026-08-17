@@ -115,6 +115,27 @@ public sealed record SetStartupCommand(bool Enabled) : WorkbenchCommand;
 
 public sealed record SetHotkeyCommand(string Hotkey) : WorkbenchCommand;
 
+/// <summary>Persist the global OCR engine preference (wire engine id).</summary>
+public sealed record SetOcrEngineCommand(string Engine) : WorkbenchCommand;
+
+/// <summary>
+/// Select the download source for one kind (single-select). A null source id
+/// clears the kind's selection and delegates to Backend defaults.
+/// </summary>
+public sealed record SetDownloadSourceCommand(string Kind, string? SourceId) : WorkbenchCommand;
+
+/// <summary>Stage the accelerator for pending feature selection.</summary>
+public sealed record SetAcceleratorCommand(string Accelerator) : WorkbenchCommand;
+
+/// <summary>Toggle one optional feature for the pending accelerator.</summary>
+public sealed record SetRuntimeFeatureCommand(string FeatureId, bool Enabled) : WorkbenchCommand;
+
+/// <summary>
+/// Set the task-level OCR engine override for the recognition page; null
+/// clears the override and falls back to the global preference.
+/// </summary>
+public sealed record SetTaskEngineCommand(string? Engine) : WorkbenchCommand;
+
 public sealed record CheckUpdateCommand : WorkbenchCommand;
 
 public sealed record DownloadUpdateCommand : WorkbenchCommand;
@@ -144,10 +165,26 @@ public sealed record RecognitionWorkbenchState(
   bool IsBusy,
   string StatusCode,
   WorkbenchResourceReference? Input = null,
-  WorkbenchResourceReference? Result = null) : WorkbenchState
+  WorkbenchResourceReference? Result = null,
+  IReadOnlyList<RecognitionEngineChoice>? Engines = null,
+  string? TaskEngine = null) : WorkbenchState
 {
   public override string Scope => "recognition";
 }
+
+/// <summary>
+/// One selectable engine on the recognition page. <see cref="Selected"/> marks
+/// the effective engine (task override or global default) and
+/// <see cref="IsTaskOverride"/> distinguishes a task-level override from the
+/// persisted global preference.
+/// </summary>
+public sealed record RecognitionEngineChoice(
+  string Engine,
+  string DisplayName,
+  bool Selected,
+  bool IsTaskOverride,
+  string Availability,
+  bool RequiresDownload);
 
 public sealed record BatchWorkbenchState(
   bool IsRunning,
@@ -205,10 +242,40 @@ public sealed record SettingsWorkbenchState(
   string StatusCode,
   string Backend,
   bool StartupEnabled,
-  string Hotkey) : WorkbenchState
+  string Hotkey,
+  IReadOnlyList<SettingsEngineOptionState>? Engines = null,
+  string? SelectedEngine = null,
+  bool EngineChoiceRequired = false,
+  IReadOnlyList<SettingsSourceOptionState>? Sources = null,
+  string PendingBackend = "cpu",
+  bool CanSwitchBackend = false,
+  IReadOnlyList<SettingsFeatureOptionState>? Features = null) : WorkbenchState
 {
   public override string Scope => "settings";
 }
+
+/// <summary>Catalog engine projected for the settings page.</summary>
+public sealed record SettingsEngineOptionState(
+  string Engine,
+  string DisplayName,
+  string Availability,
+  string? ReasonCode,
+  bool RequiresDownload,
+  bool Selected);
+
+/// <summary>Catalog download source projected per kind (single-select).</summary>
+public sealed record SettingsSourceOptionState(
+  string Kind,
+  string Id,
+  string DisplayName,
+  bool Selected);
+
+/// <summary>Optional feature for the pending accelerator.</summary>
+public sealed record SettingsFeatureOptionState(
+  string FeatureId,
+  string DisplayName,
+  string Accelerator,
+  bool Selected);
 
 public sealed record UpdateWorkbenchState(
   bool IsBusy,

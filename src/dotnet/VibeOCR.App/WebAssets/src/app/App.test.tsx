@@ -419,4 +419,187 @@ describe("AppShell", () => {
     expect(actions.run).toHaveBeenCalledWith({ type: "about.openProject" });
     unmount();
   });
+
+  it("drives catalog engine, source and feature selection from settings state", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 20,
+      route: "settings",
+      theme: "light",
+      capabilities: ["settings.shell", "settings.selection", "runtime.refresh"],
+      features: {
+        settings: {
+          theme: "light",
+          isBusy: false,
+          statusCode: "settings.ready",
+          backend: "cpu",
+          startupEnabled: false,
+          hotkey: "Ctrl+Alt+Q",
+          selectedEngine: "rapidocr",
+          engineChoiceRequired: false,
+          pendingBackend: "nvidia_cuda",
+          canSwitchBackend: true,
+          engines: [
+            {
+              engine: "rapidocr",
+              displayName: "RapidOCR",
+              availability: "ready",
+              reasonCode: null,
+              requiresDownload: false,
+              selected: true,
+            },
+            {
+              engine: "paddleocr",
+              displayName: "PaddleOCR",
+              availability: "preparation_required",
+              reasonCode: null,
+              requiresDownload: true,
+              selected: false,
+            },
+          ],
+          sources: [
+            {
+              kind: "package-index",
+              id: "tuna-pypi",
+              displayName: "TUNA PyPI 镜像",
+              selected: true,
+            },
+            {
+              kind: "package-index",
+              id: "pypi",
+              displayName: "PyPI 官方源",
+              selected: false,
+            },
+            {
+              kind: "internal-mirror",
+              id: "mirror-1",
+              displayName: "mirror-1",
+              selected: false,
+            },
+          ],
+          features: [
+            {
+              featureId: "document_parsing",
+              displayName: "文档解析（PaddleOCR/MinerU）",
+              accelerator: "nvidia_cuda",
+              selected: false,
+            },
+          ],
+        },
+      },
+      runtimeLabel: "原生宿主已连接",
+    };
+
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+
+    const engineSelect = screen.getByLabelText("全局默认引擎");
+    expect(engineSelect).toHaveValue("rapidocr");
+    await user.selectOptions(engineSelect, "paddleocr");
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setEngine",
+      engine: "paddleocr",
+    });
+
+    const packageSource = screen.getByLabelText("Python 包源");
+    expect(packageSource).toHaveValue("tuna-pypi");
+    await user.selectOptions(packageSource, "");
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setSource",
+      kind: "package-index",
+    });
+    await user.selectOptions(packageSource, "pypi");
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setSource",
+      kind: "package-index",
+      sourceId: "pypi",
+    });
+
+    // 未知 kind 只分组展示,不提供预设选项。
+    expect(screen.getByLabelText("源类别：internal-mirror")).toHaveValue("");
+
+    const accelerator = screen.getByLabelText("目标加速器");
+    expect(accelerator).toHaveValue("nvidia_cuda");
+    await user.selectOptions(accelerator, "cpu");
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setAccelerator",
+      accelerator: "cpu",
+    });
+
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "文档解析（PaddleOCR/MinerU）",
+      }),
+    );
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setFeature",
+      featureId: "document_parsing",
+      enabled: true,
+    });
+    unmount();
+  });
+
+  it("separates the recognition task engine override from the global default", async () => {
+    window.location.hash = "#/recognition";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 21,
+      route: "recognition",
+      theme: "light",
+      capabilities: ["recognition.engine", "recognition.capture"],
+      features: {
+        recognition: {
+          isBusy: false,
+          statusCode: "recognition.ready",
+          taskEngine: null,
+          engines: [
+            {
+              engine: "rapidocr",
+              displayName: "RapidOCR",
+              selected: true,
+              isTaskOverride: false,
+              availability: "ready",
+              requiresDownload: false,
+            },
+            {
+              engine: "windows",
+              displayName: "Windows OCR",
+              selected: false,
+              isTaskOverride: false,
+              availability: "unavailable",
+              requiresDownload: false,
+            },
+          ],
+        },
+      },
+      runtimeLabel: "原生宿主已连接",
+    };
+
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+
+    const taskEngine = screen.getByLabelText("本次识别引擎");
+    expect(taskEngine).toHaveValue("");
+    await user.selectOptions(taskEngine, "windows");
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "recognition.setTaskEngine",
+      engine: "windows",
+    });
+    await user.selectOptions(taskEngine, "");
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "recognition.setTaskEngine",
+    });
+    unmount();
+  });
 });
