@@ -8,10 +8,13 @@ internal sealed class VelopackUpdateCoordinator : IUpdateCoordinator
     internal const string PackId = "VibeOCRNext";
     internal const string Channel = "win";
     private readonly IReadOnlyList<VelopackFeedEndpoint> _feeds;
+    private readonly Action? _verifyWritableRoot;
     private UpdateManager? _selectedManager;
     private UpdateInfo? _pendingUpdate;
 
-    internal VelopackUpdateCoordinator(IReadOnlyList<VelopackFeedEndpoint> feeds)
+    internal VelopackUpdateCoordinator(
+        IReadOnlyList<VelopackFeedEndpoint> feeds,
+        Action? verifyWritableRoot = null)
     {
         ArgumentNullException.ThrowIfNull(feeds);
         if (feeds.Count == 0)
@@ -19,10 +22,13 @@ internal sealed class VelopackUpdateCoordinator : IUpdateCoordinator
             throw new ArgumentException("At least one update feed is required.", nameof(feeds));
         }
         _feeds = feeds;
+        _verifyWritableRoot = verifyWritableRoot;
     }
 
-    public static VelopackUpdateCoordinator Create(string configFile) =>
-        new(VelopackFeedFactory.FromSettings(configFile));
+    public static VelopackUpdateCoordinator Create(
+        string configFile,
+        Action? verifyWritableRoot = null) =>
+        new(VelopackFeedFactory.FromSettings(configFile), verifyWritableRoot);
 
     public async Task<UpdateCheckResult> CheckAsync(CancellationToken cancellationToken)
     {
@@ -40,13 +46,10 @@ internal sealed class VelopackUpdateCoordinator : IUpdateCoordinator
                     ExplicitChannel = Channel,
                     MaximumDeltasBeforeFallback = -1,
                 });
-            if (!manager.IsInstalled)
-            {
-                return new UpdateCheckResult(
-                    UpdateCheckStatus.Error,
-                    ErrorMessage: "便携版不支持自动更新，请手动下载新版 Setup 或 Portable。");
-            }
-
+            // Portable 版同样位于 Velopack 布局(默认 locator 可发现
+            // Update.exe/sq.version);仅在完全脱离 Velopack 上下文(开发
+            // 运行)时 IsInstalled 为 false,交给 NotInstalledException 分支
+            // 报告,不做硬拒绝。
             try
             {
                 UpdateInfo? update = await manager.CheckForUpdatesAsync()
@@ -90,6 +93,22 @@ internal sealed class VelopackUpdateCoordinator : IUpdateCoordinator
 
         try
         {
+            // 应用更新前再次验证便携根可写,防止更新缓存回落用户目录。
+            if (_verifyWritableRoot is not null)
+            {
+                try
+                {
+                    _verifyWritableRoot();
+                }
+                catch (Exception error) when (
+                    error is InvalidOperationException or IOException or
+                    UnauthorizedAccessException)
+                {
+                    return new UpdateApplyResult(
+                        UpdateApplyStatus.Failed,
+                        $"便携目录不可写，无法应用更新：{error.Message}");
+                }
+            }
             await _selectedManager.DownloadUpdatesAsync(
                 _pendingUpdate,
                 value => progress?.Report(value),

@@ -44,7 +44,7 @@ Bootstrapper 与 Platform。稳定错误包括 `layout.unsupported-schema`、`la
 1. WebAssets 和 .NET app/Bootstrapper 分别构建到中间目录；
 2. `product_layout.py stage` 组装严格 product root 并嵌入已解析 Backend/Protocol 组件；
 3. `finalize_product_release.py` 复核组件 Release 绑定并写入文件 closure manifest；
-4. `vpk pack` 直接消费该 product root，生成 full nupkg、Setup、Portable 和 feed；
+4. `vpk pack` 直接消费该 product root，生成 full nupkg、Portable 和 feed（N6 起 `--noInst`，Setup 退场）；
 5. release smoke 校验精确资产、component identities，并从原生 Portable 启动 WebView smoke。
 
 发布与应用内更新只使用 Velopack；项目不再拥有独立 updater、ZIP 替换事务或健康文件回滚协议。
@@ -62,6 +62,6 @@ capability gate 通过 typed state/action 契约表达；路由切换不取消�
 
 - 严格产品布局和跨语言 descriptor 契约通过；
 - Backend/Protocol/runtime/component identities 与 closure manifest 绑定一致；
-- Setup、Portable、WebView2 和更新 transport smoke 通过；
+- Portable、WebView2 和更新 transport smoke 通过；
 - 配置、Runtime 与输出保持在安装目录外；
 - Web、Python、App、Platform 质量入口及 PR release build/smoke 全绿。
