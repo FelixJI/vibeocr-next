@@ -321,6 +321,106 @@ public sealed class PortableLayoutTests
     }
 
     [Fact]
+    public void DirectoryCreationDoesNotEscapeAReplacedParent()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-directory-create-{Guid.NewGuid():N}");
+        string outsideRoot = root + "-outside";
+        string stateDirectory = Path.Combine(root, "state");
+        string displacedDirectory = stateDirectory + "-displaced";
+        Directory.CreateDirectory(stateDirectory);
+        Directory.CreateDirectory(outsideRoot);
+        string sentinel = Path.Combine(outsideRoot, "sentinel.txt");
+        File.WriteAllText(sentinel, "outside");
+        bool replacementRejected = false;
+        try
+        {
+            PortableLayout layout = PortableLayout.Resolve(
+                Path.Combine(root, "VibeOCR.Next.exe"),
+                "production");
+
+            layout.EnsureContainedDirectory(layout.CacheRoot, () =>
+            {
+                try
+                {
+                    Directory.Move(stateDirectory, displacedDirectory);
+                    CreateJunction(stateDirectory, outsideRoot);
+                }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+                {
+                    replacementRejected = true;
+                }
+            });
+
+            Assert.True(replacementRejected);
+            Assert.Equal("outside", File.ReadAllText(sentinel));
+            Assert.False(Directory.Exists(Path.Combine(outsideRoot, "cache")));
+            Assert.True(Directory.Exists(layout.CacheRoot));
+        }
+        finally
+        {
+            if (Directory.Exists(stateDirectory)
+                && File.GetAttributes(stateDirectory).HasFlag(FileAttributes.ReparsePoint))
+            {
+                Directory.Delete(stateDirectory);
+            }
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+            if (Directory.Exists(outsideRoot))
+            {
+                Directory.Delete(outsideRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void WritableProbeDoesNotTouchAReplacedLexicalStateDirectory()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-probe-write-{Guid.NewGuid():N}");
+        string outsideRoot = root + "-outside";
+        string stateDirectory = Path.Combine(root, "state");
+        string displacedDirectory = stateDirectory + "-displaced";
+        Directory.CreateDirectory(stateDirectory);
+        Directory.CreateDirectory(outsideRoot);
+        const string probeName = ".probe-controlled";
+        string sentinel = Path.Combine(outsideRoot, probeName);
+        File.WriteAllText(sentinel, "outside");
+        try
+        {
+            PortableLayout layout = PortableLayout.Resolve(
+                Path.Combine(root, "VibeOCR.Next.exe"),
+                "production");
+
+            Assert.Throws<PortableLayoutException>(() =>
+                layout.ProbeWritableStateRoot(probeName, () =>
+                {
+                    Directory.Move(stateDirectory, displacedDirectory);
+                    CreateJunction(stateDirectory, outsideRoot);
+                }));
+
+            Assert.Equal("outside", File.ReadAllText(sentinel));
+            Assert.Empty(Directory.EnumerateFiles(displacedDirectory, ".probe-controlled*"));
+        }
+        finally
+        {
+            if (Directory.Exists(stateDirectory)
+                && File.GetAttributes(stateDirectory).HasFlag(FileAttributes.ReparsePoint))
+            {
+                Directory.Delete(stateDirectory);
+            }
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+            if (Directory.Exists(outsideRoot))
+            {
+                Directory.Delete(outsideRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public void ExplicitInstallRootResolvesTheVelopackProductLayout()
     {
         string root = Path.Combine(Path.GetTempPath(), $"vibeocr-product-{Guid.NewGuid():N}");

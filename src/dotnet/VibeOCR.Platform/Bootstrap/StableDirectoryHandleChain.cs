@@ -13,6 +13,7 @@ namespace VibeOCR.Platform.Bootstrap;
 internal sealed class StableDirectoryHandleChain : IDisposable
 {
   private const uint FileReadAttributes = 0x00000080;
+  private const uint FileTraverse = 0x00000020;
   private const uint FileShareRead = 0x00000001;
   private const uint FileShareWrite = 0x00000002;
   private const uint OpenExisting = 3;
@@ -21,11 +22,15 @@ internal sealed class StableDirectoryHandleChain : IDisposable
   private const int FileAttributeTagInfoClass = 9;
   private const int FileIdInfoClass = 18;
 
+  private const uint GenericRead = 0x80000000;
   private const uint GenericWrite = 0x40000000;
   private const uint Delete = 0x00010000;
   private const uint Synchronize = 0x00100000;
   private const uint FileAttributeNormal = 0x00000080;
+  private const uint FileAttributeDirectory = 0x00000010;
   private const uint FileCreate = 2;
+  private const uint FileOpenIf = 3;
+  private const uint FileDirectoryFile = 0x00000001;
   private const uint FileWriteThrough = 0x00000002;
   private const uint FileSynchronousIoNonAlert = 0x00000020;
   private const uint FileNonDirectoryFile = 0x00000040;
@@ -126,6 +131,49 @@ internal sealed class StableDirectoryHandleChain : IDisposable
     }
   }
 
+  public static void EnsureDirectory(
+      string installRoot,
+      string targetDirectory,
+      Action? beforeFinalSegmentOpen)
+  {
+    string install = NormalizeDirectory(installRoot);
+    string target = NormalizeDirectory(targetDirectory);
+    if (!IsDescendantOrSelf(install, target))
+    {
+      throw new PortableLayoutException("目标目录不在 Portable 安装根目录内。");
+    }
+
+    using var chain = new StableDirectoryHandleChain(install, install, target);
+    string current = install;
+    string parentFinal = chain.OpenAndHold(current);
+    string relative = Path.GetRelativePath(install, target);
+    string[] segments = relative == "."
+        ? []
+        : relative.Split(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+            StringSplitOptions.RemoveEmptyEntries);
+    for (int index = 0; index < segments.Length; index++)
+    {
+      string segment = segments[index];
+      if (index == segments.Length - 1)
+      {
+        beforeFinalSegmentOpen?.Invoke();
+      }
+      current = Path.Combine(current, segment);
+      string currentFinal = chain.OpenOrCreateRelativeDirectory(segment, current);
+      if (!IsStrictDescendant(parentFinal, currentFinal))
+      {
+        throw new PortableLayoutException(
+            $"Portable 目录创建期间父目录已被替换：{current}。");
+      }
+      parentFinal = currentFinal;
+    }
+
+    chain._parentFinalPath = parentFinal;
+    chain._parentIdentity = GetDirectoryIdentity(chain.ParentHandle);
+    chain.VerifyLexicalParentIdentity(".directory-identity");
+  }
+
   public void WriteFileAtomically(
       string targetFileName,
       byte[] contents,
@@ -177,6 +225,64 @@ internal sealed class StableDirectoryHandleChain : IDisposable
     VerifyLexicalParentIdentity(targetFileName);
   }
 
+  public void ProbeWritableDirectory(string probeFileName, Action? beforeProbeOpen)
+  {
+    ValidateFileName(probeFileName);
+    beforeProbeOpen?.Invoke();
+
+    byte[] payload = "probe"u8.ToArray();
+    string renamedName = probeFileName + ".renamed";
+    using SafeFileHandle probe = CreateRelativeFile(
+        probeFileName,
+        GenericRead | GenericWrite | Delete | Synchronize);
+    bool deletionRequested = false;
+    try
+    {
+      using (var borrowed = new SafeFileHandle(
+          probe.DangerousGetHandle(),
+          ownsHandle: false))
+      using (var stream = new FileStream(
+          borrowed,
+          FileAccess.ReadWrite,
+          bufferSize: 4096,
+          isAsync: false))
+      {
+        stream.Write(payload);
+        stream.Flush(flushToDisk: true);
+        stream.Position = 0;
+        byte[] readBack = new byte[payload.Length];
+        stream.ReadExactly(readBack);
+        if (!readBack.AsSpan().SequenceEqual(payload))
+        {
+          throw new IOException("probe content mismatch");
+        }
+      }
+
+      PromoteRelativeFile(probe, renamedName);
+      DeleteRelativeFile(probe);
+      deletionRequested = true;
+    }
+    catch (Exception operationError)
+    {
+      if (!deletionRequested)
+      {
+        try
+        {
+          DeleteRelativeFile(probe);
+        }
+        catch (Exception cleanupError)
+        {
+          throw new PortableLayoutException(
+              $"可写探针失败且无法清理：{operationError.Message}; "
+              + $"cleanup: {cleanupError.Message}");
+        }
+      }
+      throw;
+    }
+
+    VerifyLexicalParentIdentity(probeFileName);
+  }
+
   private void VerifyLexicalParentIdentity(string targetFileName)
   {
     StableDirectoryHandleChain reopened;
@@ -208,7 +314,10 @@ internal sealed class StableDirectoryHandleChain : IDisposable
     }
   }
 
-  private SafeFileHandle CreateRelativeFile(string fileName)
+  private SafeFileHandle CreateRelativeFile(string fileName) =>
+      CreateRelativeFile(fileName, GenericWrite | Delete | Synchronize);
+
+  private SafeFileHandle CreateRelativeFile(string fileName, uint desiredAccess)
   {
     ValidateFileName(fileName);
     using var nativeName = new NativeUnicodeString(fileName);
@@ -221,7 +330,7 @@ internal sealed class StableDirectoryHandleChain : IDisposable
     };
     int status = NtCreateFile(
         out SafeFileHandle handle,
-        GenericWrite | Delete | Synchronize,
+        desiredAccess,
         ref attributes,
         out _,
         nint.Zero,
@@ -286,6 +395,37 @@ internal sealed class StableDirectoryHandleChain : IDisposable
     }
   }
 
+  private string OpenOrCreateRelativeDirectory(string segment, string displayPath)
+  {
+    ValidateFileName(segment);
+    using var nativeName = new NativeUnicodeString(segment);
+    var attributes = new ObjectAttributes
+    {
+      Length = (uint)Marshal.SizeOf<ObjectAttributes>(),
+      RootDirectory = ParentHandle.DangerousGetHandle(),
+      ObjectName = nativeName.Structure,
+      Attributes = ObjectCaseInsensitive,
+    };
+    int status = NtCreateFile(
+        out SafeFileHandle handle,
+        FileReadAttributes | FileTraverse | Synchronize,
+        ref attributes,
+        out _,
+        nint.Zero,
+        FileAttributeDirectory,
+        FileShareRead | FileShareWrite,
+        FileOpenIf,
+        FileDirectoryFile | FileSynchronousIoNonAlert | FileFlagOpenReparsePoint,
+        nint.Zero,
+        0);
+    if (status < 0)
+    {
+      handle?.Dispose();
+      throw NtError(status, $"无法安全创建或打开 Portable 目录 {displayPath}");
+    }
+    return VerifyAndHoldDirectory(handle, displayPath);
+  }
+
   private string OpenAndHold(string path)
   {
     SafeFileHandle handle = CreateFileW(
@@ -304,6 +444,11 @@ internal sealed class StableDirectoryHandleChain : IDisposable
           $"无法安全打开 Portable 目录 {path}：{new Win32Exception(error).Message}");
     }
 
+    return VerifyAndHoldDirectory(handle, path);
+  }
+
+  private string VerifyAndHoldDirectory(SafeFileHandle handle, string path)
+  {
     try
     {
       if (!GetFileAttributeTagInformation(

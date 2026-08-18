@@ -157,21 +157,23 @@ public sealed record PortableLayout(
     /// Fail closed unless the state root supports create/write/rename/delete
     /// for this process. Never falls back to another location.
     /// </summary>
-    public void ProbeWritableStateRoot()
+    public void ProbeWritableStateRoot() => ProbeWritableStateRoot(
+        $".probe-{Guid.NewGuid():N}",
+        beforeProbeOpen: null);
+
+    internal void ProbeWritableStateRoot(
+        string probeFileName,
+        Action? beforeProbeOpen)
     {
         try
         {
             EnsureContainedDirectory(StateRoot);
-            string probe = Path.Combine(StateRoot, $".probe-{Guid.NewGuid():N}");
-            File.WriteAllText(probe, "probe");
-            string renamed = probe + ".renamed";
-            File.Move(probe, renamed);
-            string readBack = File.ReadAllText(renamed);
-            File.Delete(renamed);
-            if (readBack != "probe")
-            {
-                throw new IOException("probe content mismatch");
-            }
+            using StableDirectoryHandleChain handles = StableDirectoryHandleChain.Open(
+                NormalizeDirectory(InstallRoot),
+                StateRoot,
+                StateRoot,
+                probeFileName);
+            handles.ProbeWritableDirectory(probeFileName, beforeProbeOpen);
         }
         catch (Exception error) when (
             error is IOException or UnauthorizedAccessException or NotSupportedException)
@@ -251,11 +253,16 @@ public sealed record PortableLayout(
     }
 
     /// <summary>
-    /// Creates one state directory only after validating the complete existing
-    /// path chain, and validates it again after creation. Callers never need a
-    /// separate validate-then-create sequence.
+    /// Creates one state directory one relative segment at a time from a held
+    /// install-root handle. Lexical paths are diagnostic inputs only and never
+    /// become mutation targets after validation.
     /// </summary>
-    private void EnsureContainedDirectory(string directory)
+    private void EnsureContainedDirectory(string directory) =>
+        EnsureContainedDirectory(directory, beforeFinalSegmentOpen: null);
+
+    internal void EnsureContainedDirectory(
+        string directory,
+        Action? beforeFinalSegmentOpen)
     {
         string fullDirectory = NormalizeDirectory(directory);
         string installRoot = NormalizeDirectory(InstallRoot);
@@ -263,9 +270,10 @@ public sealed record PortableLayout(
         {
             throw new PortableLayoutException($"目录不在安装目录内：{fullDirectory}。");
         }
-        RejectEscapingReparsePoints(installRoot, fullDirectory);
-        Directory.CreateDirectory(fullDirectory);
-        RejectEscapingReparsePoints(installRoot, fullDirectory);
+        StableDirectoryHandleChain.EnsureDirectory(
+            installRoot,
+            fullDirectory,
+            beforeFinalSegmentOpen);
     }
 
     /// <summary>
