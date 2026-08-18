@@ -1,5 +1,4 @@
 using System.IO;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -10,114 +9,119 @@ namespace VibeOCR.Platform.Migration;
 /// <summary>
 /// Idempotent profile/config migrator mirroring the Python
 /// <c>vibeocr.migration.profile_migrator</c>. Adds <c>schema_version</c> to
-/// <c>app_settings.json</c>, writes a hashed backup, and replaces atomically.
+/// <c>app_settings.json</c>, writes a schema-labelled backup, and replaces atomically.
 /// A second run is a no-op.
 /// </summary>
 public static class ProfileMigrationClient
 {
-    public const int CurrentSchemaVersion = 1;
+  public const int CurrentSchemaVersion = 1;
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
+  private static readonly JsonSerializerOptions JsonOptions = new()
+  {
+    WriteIndented = true,
+    Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+  };
+
+  public static MigrationResult MigrateConfig(PortableLayout layout)
+  {
+    ArgumentNullException.ThrowIfNull(layout);
+    string configPath = layout.ConfigFile;
+    var path = new FileInfo(configPath);
+    if (!path.Exists)
     {
-        WriteIndented = true,
-        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-    };
-
-    public static MigrationResult MigrateConfig(PortableLayout layout)
-    {
-        ArgumentNullException.ThrowIfNull(layout);
-        string configPath = layout.ConfigFile;
-        var path = new FileInfo(configPath);
-        if (!path.Exists)
-        {
-            return new MigrationResult("skipped", configPath, null, CurrentSchemaVersion, "file not found");
-        }
-
-        string text;
-        try
-        {
-            text = File.ReadAllText(path.FullName, Encoding.UTF8);
-        }
-        catch (Exception)
-        {
-            return new MigrationResult("skipped", configPath, null, CurrentSchemaVersion, "cannot read");
-        }
-
-        Dictionary<string, object?> data;
-        try
-        {
-            data = JsonSerializer.Deserialize<Dictionary<string, object?>>(text, JsonOptions)
-                ?? throw new JsonException("null root");
-        }
-        catch (JsonException)
-        {
-            return new MigrationResult("skipped", configPath, null, CurrentSchemaVersion, "not a JSON object");
-        }
-
-        if (data.TryGetValue("schema_version", out object? existing))
-        {
-            int version = existing switch
-            {
-                JsonElement e when e.ValueKind == JsonValueKind.Number => e.GetInt32(),
-                int i => i,
-                _ => -1,
-            };
-            if (version == CurrentSchemaVersion)
-            {
-                return new MigrationResult("already_migrated", configPath, null, CurrentSchemaVersion, string.Empty);
-            }
-            if (version > CurrentSchemaVersion)
-            {
-                return new MigrationResult("skipped", configPath, null, CurrentSchemaVersion,
-                    $"schema_version {version} is newer than migrator");
-            }
-        }
-
-        string backupPath;
-        try
-        {
-            backupPath = WriteHashedBackup(layout, path);
-        }
-        catch (Exception error)
-        {
-            return new MigrationResult(
-                "skipped",
-                configPath,
-                null,
-                CurrentSchemaVersion,
-                $"backup failed: {error.Message}");
-        }
-        data["schema_version"] = CurrentSchemaVersion;
-        try
-        {
-            AtomicWrite(layout, path, data);
-        }
-        catch (Exception error)
-        {
-            return new MigrationResult("skipped", configPath, backupPath, CurrentSchemaVersion, $"write failed: {error.Message}");
-        }
-        return new MigrationResult("migrated", configPath, backupPath, CurrentSchemaVersion, string.Empty);
+      return new MigrationResult("skipped", configPath, null, CurrentSchemaVersion, "file not found");
     }
 
-    private static string WriteHashedBackup(PortableLayout layout, FileInfo path)
+    string text;
+    try
     {
-        byte[] original = File.ReadAllBytes(path.FullName);
-        string digest = Convert.ToHexStringLower(SHA256.HashData(original))[..16];
-        string backup = Path.Combine(
-            path.DirectoryName!,
-            $"{Path.GetFileNameWithoutExtension(path.Name)}.pre-migrate-{digest}{path.Extension}.bak");
-        layout.WriteStateFileAtomically(backup, original);
-        return backup;
+      text = File.ReadAllText(path.FullName, Encoding.UTF8);
+    }
+    catch (Exception)
+    {
+      return new MigrationResult("skipped", configPath, null, CurrentSchemaVersion, "cannot read");
     }
 
-    private static void AtomicWrite(
-        PortableLayout layout,
-        FileInfo path,
-        Dictionary<string, object?> data)
+    Dictionary<string, object?> data;
+    try
     {
-        string payload = JsonSerializer.Serialize(data, JsonOptions);
-        layout.WriteStateFileAtomically(path.FullName, payload);
+      data = JsonSerializer.Deserialize<Dictionary<string, object?>>(text, JsonOptions)
+          ?? throw new JsonException("null root");
     }
+    catch (JsonException)
+    {
+      return new MigrationResult("skipped", configPath, null, CurrentSchemaVersion, "not a JSON object");
+    }
+
+    int sourceSchemaVersion = 0;
+    if (data.TryGetValue("schema_version", out object? existing))
+    {
+      int version = existing switch
+      {
+        JsonElement e when e.ValueKind == JsonValueKind.Number => e.GetInt32(),
+        int i => i,
+        _ => -1,
+      };
+      sourceSchemaVersion = Math.Max(version, 0);
+      if (version == CurrentSchemaVersion)
+      {
+        return new MigrationResult("already_migrated", configPath, null, CurrentSchemaVersion, string.Empty);
+      }
+      if (version > CurrentSchemaVersion)
+      {
+        return new MigrationResult("skipped", configPath, null, CurrentSchemaVersion,
+            $"schema_version {version} is newer than migrator");
+      }
+    }
+
+    string backupPath;
+    try
+    {
+      backupPath = WriteSchemaBackup(layout, path, sourceSchemaVersion);
+    }
+    catch (Exception error)
+    {
+      return new MigrationResult(
+          "skipped",
+          configPath,
+          null,
+          CurrentSchemaVersion,
+          $"backup failed: {error.Message}");
+    }
+    data["schema_version"] = CurrentSchemaVersion;
+    try
+    {
+      AtomicWrite(layout, path, data);
+    }
+    catch (Exception error)
+    {
+      return new MigrationResult("skipped", configPath, backupPath, CurrentSchemaVersion, $"write failed: {error.Message}");
+    }
+    return new MigrationResult("migrated", configPath, backupPath, CurrentSchemaVersion, string.Empty);
+  }
+
+  private static string WriteSchemaBackup(
+      PortableLayout layout,
+      FileInfo path,
+      int sourceSchemaVersion)
+  {
+    byte[] original = File.ReadAllBytes(path.FullName);
+    string backup = Path.Combine(
+        path.DirectoryName!,
+        $"{Path.GetFileNameWithoutExtension(path.Name)}.pre-migrate-schema-v{sourceSchemaVersion}"
+            + $"-to-v{CurrentSchemaVersion}{path.Extension}.bak");
+    layout.WriteStateFileAtomically(backup, original);
+    return backup;
+  }
+
+  private static void AtomicWrite(
+      PortableLayout layout,
+      FileInfo path,
+      Dictionary<string, object?> data)
+  {
+    string payload = JsonSerializer.Serialize(data, JsonOptions);
+    layout.WriteStateFileAtomically(path.FullName, payload);
+  }
 }
 
 public sealed record MigrationResult(

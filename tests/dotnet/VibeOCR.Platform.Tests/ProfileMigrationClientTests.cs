@@ -23,6 +23,11 @@ public sealed class ProfileMigrationClientTests
             Assert.Equal(ProfileMigrationClient.CurrentSchemaVersion, data!["schema_version"].GetInt32());
             Assert.Equal("Ctrl+Alt+Q", data!["hotkey"].GetString());
             Assert.True(File.Exists(result.BackupPath));
+            Assert.Equal(
+                Path.Combine(
+                    Path.GetDirectoryName(path)!,
+                    "app_settings.pre-migrate-schema-v0-to-v1.json.bak"),
+                result.BackupPath);
             Assert.Equal(original, File.ReadAllBytes(result.BackupPath!));
         }
         finally
