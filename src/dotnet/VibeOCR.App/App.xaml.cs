@@ -131,10 +131,15 @@ public sealed partial class App : Application
         // 便携状态根就绪探针:不可写时 fail closed,不回退用户目录。
         layout.EnsurePortableState();
         // WebView2 user-data/cache/cookies 固定在便携 state 内;通过 Loader
-        // 官方环境变量指定(WinRT 投影无带目录的 CreateAsync 重载)。
-        Environment.SetEnvironmentVariable(
-            "WEBVIEW2_USER_DATA_FOLDER",
-            layout.WebView2Root);
+        // 官方环境变量指定(WinRT 投影无带目录的 CreateAsync 重载)。外部
+        // 显式覆盖(测试/隔离)优先。
+        if (string.IsNullOrWhiteSpace(
+                Environment.GetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER")))
+        {
+            Environment.SetEnvironmentVariable(
+                "WEBVIEW2_USER_DATA_FOLDER",
+                layout.WebView2Root);
+        }
         _runtimeInstaller = new RuntimeInstallerClient(
             RuntimeInstallerConfiguration.ForNext(layout));
         _runtimeStatus.ApplyProfile(_runtimeInstaller.ReadProfileDescriptor());
