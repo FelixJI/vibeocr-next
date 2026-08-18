@@ -400,7 +400,16 @@ public sealed class PortableLayoutTests
                 }));
 
             Assert.Equal("outside", File.ReadAllText(sentinel));
-            Assert.Empty(Directory.EnumerateFiles(displacedDirectory, ".probe-controlled*"));
+            if (Directory.Exists(displacedDirectory))
+            {
+                Assert.Empty(Directory.EnumerateFiles(displacedDirectory, ".probe-controlled*"));
+            }
+            else
+            {
+                Assert.True(Directory.Exists(stateDirectory));
+                Assert.False(
+                    File.GetAttributes(stateDirectory).HasFlag(FileAttributes.ReparsePoint));
+            }
         }
         finally
         {
