@@ -45,8 +45,8 @@ Bootstrapper 与 Platform。稳定错误包括 `layout.unsupported-schema`、`la
 2. `product_layout.py stage` 组装严格 product root 并嵌入已解析 Backend/Protocol 组件；
 3. `finalize_product_release.py` 复核组件 Release 绑定并写入文件 closure manifest；
 4. `vpk pack` 直接消费该 product root，生成 full nupkg、Portable 和 feed（N6 起 `--noInst`，Setup 退场）；
-5. release smoke 校验精确资产、component identities，并执行真实两版本 Portable 的 Velopack 更新/restart
-   链（当前打包 smoke 与该链分开命名，不能互相替代）。
+5. release smoke 校验精确资产与 component identities；真实两版本 Portable 的 Velopack check/download/apply/restart
+   链仍由用户独立执行，当前解包/Web smoke 不得替代或标记为已通过。
 
 发布与应用内更新只使用 Velopack；项目不再拥有独立 updater、ZIP 替换事务或健康文件回滚协议。
 

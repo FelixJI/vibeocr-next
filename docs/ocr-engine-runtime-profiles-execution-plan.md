@@ -15,7 +15,7 @@
 | Backend 代码 | 当前 `main` 已由 `OcrEngineResolver`、profile-aware manifest 与 `RuntimeSelectionPolicy` 提供 engine/component/source 契约 | Platform 只消费 catalog、normalized intent 与 requested/effective 回显；App/WebAssets 不复制依赖闭包或探测逻辑 |
 | Backend Release | 最新正式 `v0.11.2` 早于六个相关提交；当前 `build_runtime_manifest.py` 的默认 capability 列表仍缺三项新能力 | resolver 把三项能力加入 required capabilities；最新 Release 不合格时 fail closed，不回退 |
 | Next | 当前 `RuntimeInstallerClient`、`IInferenceClient` 与 SettingsViewModel 仍是 2.5 surface | 先升级包与 lock，再扩展 Platform facade、Settings、request 和 maintenance；不在 App/WebAssets 手写 2.7 DTO |
-| 产品发布 | 当前 `.ci/project.json` 仍要求 Setup、sidecar、Portable、NUPKG/feed | Portable-only 仍是后续工作包，不能写成已完成；迁移时保留 NUPKG/feed 供 Velopack 自更新 |
+| 产品发布 | 当前 `.ci/project.json` 精确要求 full NUPKG、Portable、feed、component lock、component identities 与 SBOM 六项资产，并拒绝 Setup/sidecar | 保留 NUPKG/feed 供 Velopack 自更新；真实两版本 check/download/apply/restart 仍是独立的用户执行项，现有解包/Web smoke 不得替代 |
 | 可变状态 | `PortableLayout.Resolve` 与 product descriptor 默认 `%LOCALAPPDATA%/VibeOCR`；Bootstrapper 日志直接写 LocalAppData；WebView2 使用默认 user-data folder | 不能把当前 Portable ZIP 误报为完全便携；生产路径改为 `<portable-root>/state`，同步 descriptor/闭包校验并禁止用户目录 fallback |
 
 Protocol 2.7.1 的 wire schema、Python/.NET DTO 与生成绑定已经支持
