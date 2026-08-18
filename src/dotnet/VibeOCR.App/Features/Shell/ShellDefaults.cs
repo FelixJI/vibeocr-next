@@ -1,17 +1,17 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Win32;
-using VibeOCR.App.Services;
+using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Windows;
 
 namespace VibeOCR.App.Features.Shell;
 
 internal sealed class WindowsHotkeyRegistrar(
     GlobalHotkeyService service,
-    string configFile) : IHotkeyRegistrar, IDisposable
+    PortableLayout layout) : IHotkeyRegistrar, IDisposable
 {
     private readonly GlobalHotkeyService _service = service;
-    private readonly string _configFile = configFile;
+    private readonly PortableLayout _layout = layout;
     private IDisposable? _registration;
     private int _nextId;
 
@@ -51,14 +51,15 @@ internal sealed class WindowsHotkeyRegistrar(
 
     private void Persist(string hotkey)
     {
-        JsonObject root = File.Exists(_configFile)
-            ? JsonNode.Parse(File.ReadAllText(_configFile))?.AsObject() ?? []
+        string configFile = _layout.ConfigFile;
+        JsonObject root = File.Exists(configFile)
+            ? JsonNode.Parse(File.ReadAllText(configFile))?.AsObject() ?? []
             : [];
         JsonObject hotkeys = root["hotkeys"] as JsonObject ?? [];
         hotkeys["global_screenshot"] = hotkey;
         root["hotkeys"] = hotkeys;
-        AtomicFile.WriteAllText(
-            _configFile,
+        _layout.WriteStateFileAtomically(
+            configFile,
             root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
     }
 

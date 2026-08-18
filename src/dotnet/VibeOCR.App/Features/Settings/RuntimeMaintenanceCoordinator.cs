@@ -1,4 +1,5 @@
 using VibeOCR.App.ViewModels;
+using VibeOCR.App.Features.Maintenance;
 using VibeOCR.Platform.Bootstrap;
 using Host = VibeOCR.Runtime.Contracts.Generated.Host;
 
@@ -12,6 +13,7 @@ public sealed record RuntimeMaintenanceState(
     IReadOnlyList<string> RequestedComponentIds,
     IReadOnlyList<string> EffectiveComponentIds,
     IReadOnlyList<string> RequestedSourceIds,
+    IReadOnlyList<string> EffectiveSourceIds,
     bool CanCancel,
     bool CanRetry)
 {
@@ -19,6 +21,7 @@ public sealed record RuntimeMaintenanceState(
         false,
         "idle",
         null,
+        [],
         [],
         [],
         [],
@@ -32,6 +35,7 @@ public sealed record RuntimeMaintenanceState(
         [],
         [],
         [],
+        [],
         CanCancel: false,
         CanRetry: false);
 }
@@ -42,23 +46,26 @@ public sealed record RuntimeMaintenanceState(
 /// base-only), cancellation through the durable v2 flow, and retry that
 /// reuses the source operation's normalized intent unless a new install is
 /// started. Requested/effective component ids from Backend snapshots are the
-/// installation truth; the client-side source intent is reported as requested
-/// sources because the installer process contract does not echo source ids.
+/// installation truth, including requested/effective source ids echoed by the
+/// Runtime maintenance snapshot.
 /// </summary>
 public sealed class RuntimeMaintenanceCoordinator
 {
     private readonly Func<IRuntimeInstallerClient> _installer;
     private readonly RuntimeStatusViewModel _runtimeStatus;
+    private readonly ProductMaintenanceCoordinator _productMaintenance;
     private CancellationTokenSource? _active;
     private RuntimeMaintenanceState _state = RuntimeMaintenanceState.Idle;
     private string? _lastRetryableOperationId;
 
     public RuntimeMaintenanceCoordinator(
         Func<IRuntimeInstallerClient> installer,
-        RuntimeStatusViewModel runtimeStatus)
+        RuntimeStatusViewModel runtimeStatus,
+        ProductMaintenanceCoordinator? productMaintenance = null)
     {
         _installer = installer ?? throw new ArgumentNullException(nameof(installer));
         _runtimeStatus = runtimeStatus ?? throw new ArgumentNullException(nameof(runtimeStatus));
+        _productMaintenance = productMaintenance ?? new ProductMaintenanceCoordinator();
     }
 
     public RuntimeMaintenanceState State => _state;
@@ -97,6 +104,9 @@ public sealed class RuntimeMaintenanceCoordinator
         string operationId = $"ui-{Guid.NewGuid():N}";
         _lastRetryableOperationId = null;
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        using IDisposable productLease = _productMaintenance.Acquire(
+            ProductMaintenanceOwner.RuntimeMaintenance,
+            linked.Cancel);
         _active = linked;
         SetState(new RuntimeMaintenanceState(
             true,
@@ -105,17 +115,20 @@ public sealed class RuntimeMaintenanceCoordinator
             componentIds,
             [],
             intent.DownloadSourceIds ?? [],
+            [],
             CanCancel: true,
             CanRetry: false));
         IProgress<Host.RuntimeMaintenanceEvent> progress =
             new SynchronousProgress(ApplyEvent);
         try
         {
-            await _installer().EnsureAsync(
+            IRuntimeInstallerClient installer = _installer();
+            await installer.EnsureAsync(
                 intent,
                 operationId,
                 progress,
                 linked.Token).ConfigureAwait(false);
+            ApplySources(installer.LastMaintenanceSources);
             SetState(new RuntimeMaintenanceState(
                 false,
                 "succeeded",
@@ -123,6 +136,7 @@ public sealed class RuntimeMaintenanceCoordinator
                 _state.RequestedComponentIds,
                 _state.EffectiveComponentIds,
                 _state.RequestedSourceIds,
+                _state.EffectiveSourceIds,
                 CanCancel: false,
                 CanRetry: false));
         }
@@ -135,6 +149,7 @@ public sealed class RuntimeMaintenanceCoordinator
                 _state.RequestedComponentIds,
                 _state.EffectiveComponentIds,
                 _state.RequestedSourceIds,
+                _state.EffectiveSourceIds,
                 CanCancel: false,
                 CanRetry: true));
             _lastRetryableOperationId = operationId;
@@ -149,8 +164,15 @@ public sealed class RuntimeMaintenanceCoordinator
                 _state.RequestedComponentIds,
                 _state.EffectiveComponentIds,
                 _state.RequestedSourceIds,
+                _state.EffectiveSourceIds,
                 CanCancel: false,
                 CanRetry: true));
+            _lastRetryableOperationId = operationId;
+            throw;
+        }
+        catch (Exception)
+        {
+            SetState(_state with { IsRunning = false, StatusCode = "failed", CanCancel = false, CanRetry = true });
             _lastRetryableOperationId = operationId;
             throw;
         }
@@ -178,6 +200,11 @@ public sealed class RuntimeMaintenanceCoordinator
             throw new InvalidOperationException("No retryable runtime maintenance operation.");
         }
         string newOperationId = $"ui-{Guid.NewGuid():N}";
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        using IDisposable productLease = _productMaintenance.Acquire(
+            ProductMaintenanceOwner.RuntimeMaintenance,
+            linked.Cancel);
+        _active = linked;
         SetState(new RuntimeMaintenanceState(
             true,
             "running",
@@ -185,7 +212,8 @@ public sealed class RuntimeMaintenanceCoordinator
             _state.RequestedComponentIds,
             _state.EffectiveComponentIds,
             _state.RequestedSourceIds,
-            CanCancel: false,
+            _state.EffectiveSourceIds,
+            CanCancel: true,
             CanRetry: false));
         try
         {
@@ -193,7 +221,7 @@ public sealed class RuntimeMaintenanceCoordinator
                 sourceOperationId,
                 newOperationId,
                 selection: null,
-                cancellationToken).ConfigureAwait(false);
+                linked.Token).ConfigureAwait(false);
             Host.RuntimeMaintenanceSnapshot snapshot = envelope.Maintenance
                 ?? throw new RuntimeInstallerException(
                     "Runtime retry returned no maintenance snapshot.");
@@ -206,14 +234,33 @@ public sealed class RuntimeMaintenanceCoordinator
                 newOperationId,
                 snapshot.RequestedComponentIds ?? _state.RequestedComponentIds,
                 snapshot.EffectiveComponentIds ?? [],
-                _state.RequestedSourceIds,
+                envelope.MaintenanceSources?.RequestedSourceIds ?? _state.RequestedSourceIds,
+                envelope.MaintenanceSources?.EffectiveSourceIds ?? [],
                 CanCancel: false,
-                CanRetry: false));
+                CanRetry: snapshot.OperationState != Host.RuntimeOperationState.Succeeded));
+            if (snapshot.OperationState != Host.RuntimeOperationState.Succeeded)
+            {
+                _lastRetryableOperationId = newOperationId;
+            }
         }
-        catch (RuntimeInstallerException)
+        catch (OperationCanceledException) when (linked.IsCancellationRequested)
         {
-            SetState(_state with { IsRunning = false, StatusCode = "failed", CanRetry = true });
+            _lastRetryableOperationId = newOperationId;
+            SetState(_state with { IsRunning = false, StatusCode = "cancelled", CanCancel = false, CanRetry = true });
             throw;
+        }
+        catch (Exception)
+        {
+            _lastRetryableOperationId = newOperationId;
+            SetState(_state with { IsRunning = false, StatusCode = "failed", CanCancel = false, CanRetry = true });
+            throw;
+        }
+        finally
+        {
+            if (ReferenceEquals(Interlocked.CompareExchange(ref _active, null, linked), linked))
+            {
+                linked.Dispose();
+            }
         }
     }
 
@@ -244,5 +291,15 @@ public sealed class RuntimeMaintenanceCoordinator
     {
         _state = value;
         StateChanged?.Invoke();
+    }
+
+    private void ApplySources(RuntimeMaintenanceSourceSnapshot? sources)
+    {
+        if (sources is null) return;
+        SetState(_state with
+        {
+            RequestedSourceIds = sources.RequestedSourceIds,
+            EffectiveSourceIds = sources.EffectiveSourceIds,
+        });
     }
 }

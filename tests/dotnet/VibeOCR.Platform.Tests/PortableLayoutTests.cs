@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using VibeOCR.Platform.Bootstrap;
 using Xunit;
 
@@ -106,8 +107,6 @@ public sealed class PortableLayoutTests
             layout.LogsRoot,
             layout.ModelsRoot,
             layout.OutputRoot,
-            layout.UpdateRoot,
-            layout.TempRoot,
             layout.LocksRoot,
             layout.WebView2Root,
         })
@@ -161,6 +160,114 @@ public sealed class PortableLayoutTests
             userDataRoot: Path.Combine(Path.GetTempPath(), "elsewhere")));
 
         Directory.Delete(root, recursive: true);
+    }
+
+    [Fact]
+    public void StateRootInAnAdjacentPrefixFailsClosed()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-app-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            Assert.Throws<PortableLayoutException>(() => PortableLayout.Resolve(
+                Path.Combine(root, "VibeOCR.Next.exe"),
+                "production",
+                userDataRoot: root + "-evil\\state"));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void StateFileWriteReplacesOnlyContainedTarget()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-state-write-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            PortableLayout layout = PortableLayout.Resolve(
+                Path.Combine(root, "VibeOCR.Next.exe"),
+                "production");
+            layout.EnsurePortableState();
+            string target = Path.Combine(layout.StateRoot, "config", "app_settings.json");
+            File.WriteAllText(target, "before");
+
+            layout.WriteStateFileAtomically(target, "after");
+
+            Assert.Equal("after", File.ReadAllText(target));
+            Assert.Empty(Directory.EnumerateFiles(
+                Path.GetDirectoryName(target)!,
+                ".app_settings.json.*.tmp"));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void StateFileWriteRejectsAdjacentPrefixAndLeavesItUntouched()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-state-write-{Guid.NewGuid():N}");
+        string adjacent = root + "-evil";
+        Directory.CreateDirectory(root);
+        Directory.CreateDirectory(adjacent);
+        string outside = Path.Combine(adjacent, "app_settings.json");
+        File.WriteAllText(outside, "before");
+        try
+        {
+            PortableLayout layout = PortableLayout.Resolve(
+                Path.Combine(root, "VibeOCR.Next.exe"),
+                "production");
+
+            Assert.Throws<PortableLayoutException>(
+                () => layout.WriteStateFileAtomically(outside, "after"));
+
+            Assert.Equal("before", File.ReadAllText(outside));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+            Directory.Delete(adjacent, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void StateFileWriteRejectsReparseParentAndLeavesOutsideFileUntouched()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-state-write-{Guid.NewGuid():N}");
+        string outsideRoot = root + "-outside";
+        Directory.CreateDirectory(root);
+        Directory.CreateDirectory(outsideRoot);
+        try
+        {
+            PortableLayout layout = PortableLayout.Resolve(
+                Path.Combine(root, "VibeOCR.Next.exe"),
+                "production");
+            layout.EnsurePortableState();
+            string configDirectory = Path.GetDirectoryName(layout.ConfigFile)!;
+            Directory.Delete(configDirectory);
+            CreateJunction(configDirectory, outsideRoot);
+            string outside = Path.Combine(outsideRoot, "app_settings.json");
+            File.WriteAllText(outside, "before");
+
+            Assert.Throws<PortableLayoutException>(
+                () => layout.WriteStateFileAtomically(layout.ConfigFile, "after"));
+
+            Assert.Equal("before", File.ReadAllText(outside));
+        }
+        finally
+        {
+            string configDirectory = Path.Combine(root, "state", "config");
+            if (Directory.Exists(configDirectory))
+            {
+                Directory.Delete(configDirectory);
+            }
+            Directory.Delete(root, recursive: true);
+            Directory.Delete(outsideRoot, recursive: true);
+        }
     }
 
     [Fact]
@@ -310,6 +417,24 @@ public sealed class PortableLayoutTests
         finally
         {
             Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static void CreateJunction(string link, string target)
+    {
+        using Process process = Process.Start(new ProcessStartInfo(
+            "cmd.exe",
+            $"/c mklink /J \"{link}\" \"{target}\"")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardError = true,
+        }) ?? throw new InvalidOperationException("Unable to start mklink.");
+        string error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"Unable to create junction: {error}");
         }
     }
 

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Migration;
 using Xunit;
 
@@ -9,12 +10,13 @@ public sealed class ProfileMigrationClientTests
     [Fact]
     public void MigrateUnversionedAddsSchemaVersionAndBackup()
     {
-        string path = Path.Combine(Path.GetTempPath(), $"migrate-{Guid.NewGuid():N}.json");
+        PortableLayout layout = CreateLayout(out string root);
+        string path = layout.ConfigFile;
         File.WriteAllText(path, "{\"preload_pipelines\":[\"OCR\"],\"hotkey\":\"Ctrl+Alt+Q\"}");
         byte[] original = File.ReadAllBytes(path);
         try
         {
-            MigrationResult result = ProfileMigrationClient.MigrateConfig(path);
+            MigrationResult result = ProfileMigrationClient.MigrateConfig(layout);
 
             Assert.Equal("migrated", result.Status);
             var data = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(File.ReadAllText(path));
@@ -25,70 +27,91 @@ public sealed class ProfileMigrationClientTests
         }
         finally
         {
-            File.Delete(path);
-            if (File.Exists(path + ".bak")) File.Delete(path + ".bak");
+            Directory.Delete(root, recursive: true);
         }
     }
 
     [Fact]
     public void SecondRunIsAlreadyMigrated()
     {
-        string path = Path.Combine(Path.GetTempPath(), $"migrate-{Guid.NewGuid():N}.json");
+        PortableLayout layout = CreateLayout(out string root);
+        string path = layout.ConfigFile;
         File.WriteAllText(path, "{\"x\":1}");
         try
         {
-            ProfileMigrationClient.MigrateConfig(path);
+            ProfileMigrationClient.MigrateConfig(layout);
             byte[] snapshot = File.ReadAllBytes(path);
 
-            MigrationResult second = ProfileMigrationClient.MigrateConfig(path);
+            MigrationResult second = ProfileMigrationClient.MigrateConfig(layout);
 
             Assert.Equal("already_migrated", second.Status);
             Assert.Equal(snapshot, File.ReadAllBytes(path));
         }
         finally
         {
-            File.Delete(path);
+            Directory.Delete(root, recursive: true);
         }
     }
 
     [Fact]
     public void MissingFileIsSkipped()
     {
-        MigrationResult result = ProfileMigrationClient.MigrateConfig(Path.GetTempFileName() + ".missing");
-        Assert.Equal("skipped", result.Status);
+        PortableLayout layout = CreateLayout(out string root);
+        try
+        {
+            MigrationResult result = ProfileMigrationClient.MigrateConfig(layout);
+            Assert.Equal("skipped", result.Status);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
     public void NewerSchemaIsSkipped()
     {
-        string path = Path.Combine(Path.GetTempPath(), $"migrate-{Guid.NewGuid():N}.json");
+        PortableLayout layout = CreateLayout(out string root);
+        string path = layout.ConfigFile;
         File.WriteAllText(path, "{\"schema_version\":99}");
         try
         {
-            MigrationResult result = ProfileMigrationClient.MigrateConfig(path);
+            MigrationResult result = ProfileMigrationClient.MigrateConfig(layout);
             Assert.Equal("skipped", result.Status);
             Assert.Contains("newer", result.Message);
         }
         finally
         {
-            File.Delete(path);
+            Directory.Delete(root, recursive: true);
         }
     }
 
     [Fact]
     public void CorruptJsonIsSkippedWithoutWriting()
     {
-        string path = Path.Combine(Path.GetTempPath(), $"migrate-{Guid.NewGuid():N}.json");
+        PortableLayout layout = CreateLayout(out string root);
+        string path = layout.ConfigFile;
         File.WriteAllText(path, "{ broken");
         try
         {
-            MigrationResult result = ProfileMigrationClient.MigrateConfig(path);
+            MigrationResult result = ProfileMigrationClient.MigrateConfig(layout);
             Assert.Equal("skipped", result.Status);
             Assert.Equal("{ broken", File.ReadAllText(path));
         }
         finally
         {
-            File.Delete(path);
+            Directory.Delete(root, recursive: true);
         }
+    }
+
+    private static PortableLayout CreateLayout(out string root)
+    {
+        root = Path.Combine(Path.GetTempPath(), $"vibeocr-migrate-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        PortableLayout layout = PortableLayout.Resolve(
+            Path.Combine(root, "VibeOCR.Next.exe"),
+            "production");
+        layout.EnsurePortableState();
+        return layout;
     }
 }

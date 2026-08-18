@@ -1,15 +1,21 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using VibeOCR.App.Features.Maintenance;
 
 namespace VibeOCR.App.Features.Update;
 
 /// <summary>Maps stable update coordinator results to user-visible state.</summary>
-public sealed class UpdateViewModel(IUpdateCoordinator coordinator, Action? requestShutdown = null)
+public sealed class UpdateViewModel(
+    IUpdateCoordinator coordinator,
+    Action? requestShutdown = null,
+    ProductMaintenanceCoordinator? productMaintenance = null)
     : INotifyPropertyChanged
 {
     private readonly IUpdateCoordinator _coordinator = coordinator ??
         throw new ArgumentNullException(nameof(coordinator));
     private readonly Action _requestShutdown = requestShutdown ?? (() => { });
+    private readonly ProductMaintenanceCoordinator _productMaintenance =
+        productMaintenance ?? new ProductMaintenanceCoordinator();
     private CancellationTokenSource? _activeRun;
     private bool _isBusy;
     private string _status = string.Empty;
@@ -24,6 +30,9 @@ public sealed class UpdateViewModel(IUpdateCoordinator coordinator, Action? requ
     public string StatusCode { get => _statusCode; private set => SetField(ref _statusCode, value); }
     public string? LatestVersion { get => _latestVersion; private set => SetField(ref _latestVersion, value); }
     public bool UpdateAvailable { get => _updateAvailable; private set => SetField(ref _updateAvailable, value); }
+    public bool CanCancelRuntimeMaintenance =>
+        _productMaintenance.State.ActiveOwner == ProductMaintenanceOwner.RuntimeMaintenance &&
+        _productMaintenance.State.CanCancelActive;
 
     public async Task CheckAsync(CancellationToken cancellationToken)
     {
@@ -82,6 +91,8 @@ public sealed class UpdateViewModel(IUpdateCoordinator coordinator, Action? requ
         Status = "正在下载";
         try
         {
+            using IDisposable productLease = _productMaintenance.Acquire(
+                ProductMaintenanceOwner.AppUpdate);
             UpdateApplyResult result = await _coordinator.DownloadAndApplyAsync(null, run.Token);
             switch (result.Status)
             {
@@ -111,6 +122,13 @@ public sealed class UpdateViewModel(IUpdateCoordinator coordinator, Action? requ
             StatusCode = "update.cancelled";
             Status = "已取消";
         }
+        catch (ProductMaintenanceConflictException conflict)
+        {
+            StatusCode = "update.runtimeBusy";
+            Status = conflict.ActiveOwner == ProductMaintenanceOwner.RuntimeMaintenance
+                ? "运行时维护正在进行；请等待完成，或在设置中取消安装后再更新"
+                : "已有应用更新任务正在进行";
+        }
         catch (Exception)
         {
             StatusCode = "update.error";
@@ -123,6 +141,30 @@ public sealed class UpdateViewModel(IUpdateCoordinator coordinator, Action? requ
     }
 
     public void Cancel() => _activeRun?.Cancel();
+
+    /// <summary>Lets update UI cancel Runtime and wait for its lease to release.</summary>
+    public async Task CancelRuntimeMaintenanceAndWaitAsync(CancellationToken cancellationToken)
+    {
+        StatusCode = "update.waitingRuntime";
+        Status = "正在取消运行时维护并等待其安全退出";
+        try
+        {
+            bool released = await _productMaintenance.CancelRuntimeMaintenanceAndWaitAsync(
+                TimeSpan.FromMinutes(2), cancellationToken);
+            StatusCode = released ? "update.runtimeReleased" : "update.runtimeBusy";
+            Status = released ? "运行时维护已退出，可以继续更新" : "没有可取消的运行时维护";
+        }
+        catch (OperationCanceledException)
+        {
+            StatusCode = "update.cancelled";
+            Status = "已取消等待运行时维护退出";
+        }
+        catch (TimeoutException)
+        {
+            StatusCode = "update.runtimeBusy";
+            Status = "运行时维护未在限定时间内退出，未开始应用更新";
+        }
+    }
 
     private void SetField<T>(ref T field, T value, [CallerMemberName] string? name = null)
     {

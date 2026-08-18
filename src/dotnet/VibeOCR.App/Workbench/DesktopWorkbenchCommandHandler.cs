@@ -236,6 +236,7 @@ public sealed class DesktopWorkbenchCommandHandler :
         CheckUpdateCommand => await CheckUpdateAsync(cancellationToken),
         DownloadUpdateCommand => StartUpdateDownload(cancellationToken),
         CancelUpdateCommand => CancelUpdate(),
+        CancelRuntimeForUpdateCommand => await CancelRuntimeForUpdateAsync(cancellationToken),
         ExportDiagnosticsCommand => await ExportDiagnosticsAsync(cancellationToken),
         _ => throw new InvalidOperationException("Unsupported desktop workbench command."),
       };
@@ -1067,6 +1068,13 @@ public sealed class DesktopWorkbenchCommandHandler :
     return UpdateState();
   }
 
+  private async Task<UpdateWorkbenchState> CancelRuntimeForUpdateAsync(
+    CancellationToken cancellationToken)
+  {
+    await update.Value.CancelRuntimeMaintenanceAndWaitAsync(cancellationToken);
+    return UpdateState();
+  }
+
   private async Task<DiagnosticsWorkbenchState> ExportDiagnosticsAsync(
     CancellationToken cancellationToken)
   {
@@ -1245,6 +1253,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       viewModel.Maintenance.State.RequestedComponentIds,
       viewModel.Maintenance.State.EffectiveComponentIds,
       viewModel.Maintenance.State.RequestedSourceIds,
+      viewModel.Maintenance.State.EffectiveSourceIds,
       viewModel.Maintenance.State.CanCancel,
       viewModel.Maintenance.State.CanRetry));
 
@@ -1252,7 +1261,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     update.Value.IsBusy,
     update.Value.StatusCode,
     update.Value.LatestVersion,
-    update.Value.UpdateAvailable);
+    update.Value.UpdateAvailable,
+    update.Value.CanCancelRuntimeMaintenance);
 
   private AboutWorkbenchState AboutState() => new(
     shell.Value.AppVersion,

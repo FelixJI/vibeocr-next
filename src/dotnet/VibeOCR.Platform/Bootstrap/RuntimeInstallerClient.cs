@@ -253,7 +253,18 @@ public interface IRuntimeInstallerClient
         RepairAsync(cancellationToken);
 
     Host.RuntimeProfileDescriptor? ReadProfileDescriptor() => null;
+
+    RuntimeMaintenanceSourceSnapshot? LastMaintenanceSources => null;
 }
+
+/// <summary>
+/// UI-neutral source projection retained by the external-process adapter.
+/// Protocol 2.7.1's Host generated snapshot omits these emitted wire fields;
+/// App code consumes this model and never parses JSON itself.
+/// </summary>
+public sealed record RuntimeMaintenanceSourceSnapshot(
+    IReadOnlyList<string> RequestedSourceIds,
+    IReadOnlyList<string> EffectiveSourceIds);
 
 public sealed record RuntimeHostError(
     [property: JsonPropertyName("code")] string Code,
@@ -282,7 +293,8 @@ public sealed record RuntimeHostEnvelope(
     [property: JsonPropertyName("profile")] Host.RuntimeProfileDescriptor? Profile = null,
     [property: JsonPropertyName("maintenance")] Host.RuntimeMaintenanceSnapshot? Maintenance = null,
     [property: JsonPropertyName("negotiated_capabilities")] string[]? NegotiatedCapabilities = null,
-    [property: JsonPropertyName("capability_descriptors")] RuntimeCapabilityDescriptor[]? CapabilityDescriptors = null);
+    [property: JsonPropertyName("capability_descriptors")] RuntimeCapabilityDescriptor[]? CapabilityDescriptors = null,
+    RuntimeMaintenanceSourceSnapshot? MaintenanceSources = null);
 
 public sealed record RuntimeMaintenanceObserveEnvelope(
     [property: JsonPropertyName("protocol_version")] int ProtocolVersion,
@@ -324,6 +336,7 @@ public sealed class RuntimeInstallerException : InvalidOperationException
 /// </remarks>
 public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
 {
+    private RuntimeMaintenanceSourceSnapshot? _lastMaintenanceSources;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -336,6 +349,7 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         Array.Empty<string>();
     public IReadOnlyList<RuntimeCapabilityDescriptor> CapabilityDescriptors { get; private set; } =
         Array.Empty<RuntimeCapabilityDescriptor>();
+    public RuntimeMaintenanceSourceSnapshot? LastMaintenanceSources => _lastMaintenanceSources;
 
     public RuntimeInstallerClient(RuntimeInstallerConfiguration configuration)
         : this(configuration, new RuntimeInstallerCommandRunner())
@@ -784,6 +798,14 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
             RuntimeHostEnvelope? value = JsonSerializer.Deserialize<RuntimeHostEnvelope>(
                 envelopeJson ?? string.Empty,
                 JsonOptions);
+            using JsonDocument rawEnvelope = JsonDocument.Parse(envelopeJson ?? string.Empty);
+            RuntimeMaintenanceSourceSnapshot? sources = ExtractMaintenanceSources(
+                rawEnvelope.RootElement);
+            if (value is not null && sources is not null)
+            {
+                value = value with { MaintenanceSources = sources };
+                _lastMaintenanceSources = sources;
+            }
             if (value is null || value.ProtocolVersion != 2 ||
                 !string.Equals(value.Operation, operation, StringComparison.Ordinal) ||
                 !value.Ok)
@@ -1042,6 +1064,17 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
                 expectedOperationId,
                 afterSequence);
             T? value = JsonSerializer.Deserialize<T>(envelopeJson ?? string.Empty, JsonOptions);
+            if (value is RuntimeHostEnvelope host)
+            {
+                RuntimeMaintenanceSourceSnapshot? sources = ExtractMaintenanceSources(
+                    document.RootElement);
+                if (sources is not null)
+                {
+                    host = host with { MaintenanceSources = sources };
+                    _lastMaintenanceSources = sources;
+                    value = (T)(object)host;
+                }
+            }
             return value ?? throw new RuntimeInstallerException("Runtime control returned no envelope.");
         }
         catch (JsonException exception)
@@ -1273,6 +1306,46 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         standardOutput.Split(
             ['\r', '\n'],
             StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    private static RuntimeMaintenanceSourceSnapshot? ExtractMaintenanceSources(
+        JsonElement envelope)
+    {
+        if (!envelope.TryGetProperty("maintenance", out JsonElement maintenance) ||
+            maintenance.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+        IReadOnlyList<string>? requested = ReadOptionalIds(
+            maintenance,
+            "requested_download_source_ids");
+        IReadOnlyList<string>? effective = ReadOptionalIds(
+            maintenance,
+            "effective_download_source_ids");
+        return requested is null && effective is null
+            ? null
+            : new RuntimeMaintenanceSourceSnapshot(requested ?? [], effective ?? []);
+    }
+
+    private static IReadOnlyList<string>? ReadOptionalIds(JsonElement source, string name)
+    {
+        if (!source.TryGetProperty(name, out JsonElement value)) return null;
+        if (value.ValueKind != JsonValueKind.Array)
+        {
+            throw new RuntimeInstallerException($"Runtime Host field '{name}' must be an array.");
+        }
+        var ids = new List<string>();
+        foreach (JsonElement item in value.EnumerateArray())
+        {
+            string? id = item.GetString();
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                throw new RuntimeInstallerException(
+                    $"Runtime Host field '{name}' contains a blank source id.");
+            }
+            ids.Add(id);
+        }
+        return ids;
+    }
 
     private static string? FinalEnvelopeJson(string standardOutput)
     {

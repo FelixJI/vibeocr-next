@@ -247,7 +247,7 @@ public sealed class InferenceHttpClientTests
                  ]}},
                 {"name":"runtime.download-sources.v1","lifecycle":"active","introduced_in":"2.7.0","deprecated_in":null,"sunset_at":null,"replacement":null,
                  "download_source_catalog":{"sources":[
-                   {"kind":"package-index","id":"tuna-pypi","endpoint":"https://mirrors.tuna.example/pypi/simple"},
+                   {"kind":"package_index","id":"tuna-pypi","endpoint":"https://mirrors.tuna.example/pypi/simple"},
                    {"kind":"internal-mirror","id":"mirror-1","endpoint":"https://example.invalid/simple"}
                  ]}}
               ]
@@ -284,8 +284,8 @@ public sealed class InferenceHttpClientTests
         ]);
         await using var client = new InferenceHttpClient(Base, "tok", handler);
         RuntimeSelectionService selection = new(HealthWithSources(
-            ("package-index", "tuna-pypi", "https://a.invalid"),
-            ("model-registry", "huggingface", "https://b.invalid")));
+            ("package_index", "tuna-pypi", "https://a.invalid"),
+            ("model_registry", "huggingface", "https://b.invalid")));
 
         SettingsSnapshot updated = await selection.ApplySourcePreferenceAsync(
             client,
@@ -312,16 +312,16 @@ public sealed class InferenceHttpClientTests
     public async Task ModelRegistrySourcesSelectPerKindAndPersistAsync()
     {
         // 补验 §6 矩阵:Hugging Face/ModelScope 经同一 Backend Settings 通道
-        // 单选持久化,package-index 与 model-registry 各自独立。
+        // 单选持久化,package_index 与 model_registry 各自独立。
         string updatedBody = """
             {"schema_version":2,"residency":{"default_ttl_seconds":300,"pipelines":[]},"extra":{}}
             """;
         var handler = new FakeHandler(updatedBody);
         await using var client = new InferenceHttpClient(Base, "tok", handler);
         RuntimeSelectionService selection = new(HealthWithSources(
-            ("package-index", "tuna-pypi", "https://a.invalid"),
-            ("model-registry", "huggingface", "https://huggingface.co"),
-            ("model-registry", "modelscope", "https://www.modelscope.cn")));
+            ("package_index", "tuna-pypi", "https://a.invalid"),
+            ("model_registry", "huggingface", "https://huggingface.co"),
+            ("model_registry", "modelscope", "https://www.modelscope.cn")));
 
         await selection.ApplySourcePreferenceAsync(
             client,
@@ -342,7 +342,7 @@ public sealed class InferenceHttpClientTests
             """);
         await using var client = new InferenceHttpClient(Base, "tok", handler);
         RuntimeSelectionService selection = new(HealthWithSources(
-            ("package-index", "tuna-pypi", "https://a.invalid")));
+            ("package_index", "tuna-pypi", "https://a.invalid")));
 
         RuntimeSelectionException error = await Assert.ThrowsAsync<RuntimeSelectionException>(
             () => selection.ApplySourcePreferenceAsync(

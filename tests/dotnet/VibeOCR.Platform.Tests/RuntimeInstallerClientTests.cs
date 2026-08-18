@@ -28,6 +28,7 @@ public sealed class RuntimeInstallerClientTests
         Assert.Equal("vibeocr.backend.supervisor.main", launch.SupervisorModule);
         Assert.Equal(@"C:\Next", launch.WorkingDirectory);
         Assert.Equal(@"C:\store", launch.Environment["VIBEOCR_RUNTIME_ROOT"]);
+        Assert.Null(client.LastMaintenanceSources);
         ProcessStartInfo startInfo = Assert.IsType<ProcessStartInfo>(runner.LastStartInfo);
         Assert.Equal("ensure", Request(startInfo).GetProperty("operation").GetString());
         Assert.False(Request(startInfo).TryGetProperty("accepted_event_streams", out _));
@@ -35,6 +36,26 @@ public sealed class RuntimeInstallerClientTests
             startInfo.ArgumentList,
             argument => argument.Contains("pip", StringComparison.OrdinalIgnoreCase) ||
                 argument.Contains("torch", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task EnsureProjectsRawMaintenanceSourceFieldsOutsideTheGeneratedHostDto()
+    {
+        JsonNode envelope = JsonNode.Parse(LaunchEnvelope())!;
+        envelope["maintenance"] = JsonNode.Parse(
+            """
+            {"operation_id":"op-1","sequence":2,"operation":"ensure","operation_state":"succeeded","phase":"commit_runtime","profile_id":"win-x64-cpu","updated_at":"2026-08-18T00:00:00Z","requested_download_source_ids":["pypi-tuna","hf-mirror"],"effective_download_source_ids":["pypi-tuna","hf-mirror"]}
+            """);
+        var client = new RuntimeInstallerClient(
+            Configuration(),
+            new StubRunner(new RuntimeInstallerProcessResult(0, envelope.ToJsonString(), string.Empty)));
+
+        await client.EnsureAsync(TestContext.Current.CancellationToken);
+
+        RuntimeMaintenanceSourceSnapshot sources = Assert.IsType<RuntimeMaintenanceSourceSnapshot>(
+            client.LastMaintenanceSources);
+        Assert.Equal(["pypi-tuna", "hf-mirror"], sources.RequestedSourceIds);
+        Assert.Equal(["pypi-tuna", "hf-mirror"], sources.EffectiveSourceIds);
     }
 
     [Fact]

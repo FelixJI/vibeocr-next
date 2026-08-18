@@ -466,13 +466,13 @@ describe("AppShell", () => {
           ],
           sources: [
             {
-              kind: "package-index",
+              kind: "package_index",
               id: "tuna-pypi",
               displayName: "TUNA PyPI 镜像",
               selected: true,
             },
             {
-              kind: "package-index",
+              kind: "package_index",
               id: "pypi",
               displayName: "PyPI 官方源",
               selected: false,
@@ -512,12 +512,12 @@ describe("AppShell", () => {
     await user.selectOptions(packageSource, "");
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.setSource",
-      kind: "package-index",
+      kind: "package_index",
     });
     await user.selectOptions(packageSource, "pypi");
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.setSource",
-      kind: "package-index",
+      kind: "package_index",
       sourceId: "pypi",
     });
 
@@ -590,6 +590,7 @@ describe("AppShell", () => {
             requestedComponentIds: ["document_parsing"],
             effectiveComponentIds: ["document_parsing", "runtime_host"],
             requestedSourceIds: ["tuna-pypi"],
+            effectiveSourceIds: ["tuna-pypi"],
             canCancel: false,
             canRetry: true,
           },

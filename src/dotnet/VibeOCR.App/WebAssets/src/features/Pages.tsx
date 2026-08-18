@@ -99,6 +99,7 @@ interface MaintenanceState {
   readonly requestedComponentIds: readonly string[];
   readonly effectiveComponentIds: readonly string[];
   readonly requestedSourceIds: readonly string[];
+  readonly effectiveSourceIds: readonly string[];
   readonly canCancel: boolean;
   readonly canRetry: boolean;
 }
@@ -275,6 +276,7 @@ function maintenanceState(value: unknown): MaintenanceState | undefined {
     !Array.isArray(state.requestedComponentIds) ||
     !Array.isArray(state.effectiveComponentIds) ||
     !Array.isArray(state.requestedSourceIds) ||
+    !Array.isArray(state.effectiveSourceIds) ||
     typeof state.canCancel !== "boolean" ||
     typeof state.canRetry !== "boolean"
   )
@@ -309,8 +311,8 @@ function availabilityLabel(availability: string): string {
 
 function sourceKindLabel(kind: string): string {
   const labels: Readonly<Record<string, string>> = {
-    "package-index": "Python 包源",
-    "model-registry": "模型仓库源",
+    package_index: "Python 包源",
+    model_registry: "模型仓库源",
   };
   return labels[kind] ?? `源类别：${kind}`;
 }
@@ -1390,7 +1392,8 @@ function MaintenanceActions({
   const selectedFeatures = features.filter((feature) => feature.selected);
   const requested = maintenance?.requestedComponentIds ?? [];
   const effective = maintenance?.effectiveComponentIds ?? [];
-  const sources = maintenance?.requestedSourceIds ?? [];
+  const requestedSources = maintenance?.requestedSourceIds ?? [];
+  const effectiveSources = maintenance?.effectiveSourceIds ?? [];
   return (
     <>
       <div className="setting-row">
@@ -1443,7 +1446,12 @@ function MaintenanceActions({
           {maintenanceStatusLabel(maintenance.statusCode)}
           {requested.length > 0 ? `；请求组件：${requested.join("、")}` : ""}
           {effective.length > 0 ? `；实际安装：${effective.join("、")}` : ""}
-          {sources.length > 0 ? `；下载源：${sources.join("、")}` : ""}
+          {requestedSources.length > 0
+            ? `；请求下载源：${requestedSources.join("、")}`
+            : ""}
+          {effectiveSources.length > 0
+            ? `；实际下载源：${effectiveSources.join("、")}`
+            : ""}
         </p>
       ) : null}
     </>
@@ -1597,6 +1605,17 @@ export function AboutPage({ viewState, actions }: FeatureProps) {
           >
             取消
           </CapabilityGate>
+          {booleanValue(update.canCancelRuntimeMaintenance) ? (
+            <CapabilityGate
+              capability="update.install"
+              capabilities={viewState.capabilities}
+              action={{ type: "update.cancelRuntimeMaintenance" }}
+              actions={actions}
+              icon={<Square aria-hidden="true" size={16} />}
+            >
+              取消运行时维护后更新
+            </CapabilityGate>
+          ) : null}
         </Panel>
       </div>
     </Workspace>

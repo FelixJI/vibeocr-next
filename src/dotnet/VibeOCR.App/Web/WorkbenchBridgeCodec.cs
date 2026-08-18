@@ -470,6 +470,9 @@ public static class WorkbenchBridgeCodec
       case ("update", "cancel"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new CancelUpdateCommand();
+      case ("update", "cancelRuntimeMaintenance"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new CancelRuntimeForUpdateCommand();
       case ("diagnostics", "export"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new ExportDiagnosticsCommand();
@@ -611,6 +614,7 @@ public static class WorkbenchBridgeCodec
         requestedComponentIds = settings.Maintenance.RequestedComponentIds,
         effectiveComponentIds = settings.Maintenance.EffectiveComponentIds,
         requestedSourceIds = settings.Maintenance.RequestedSourceIds,
+        effectiveSourceIds = settings.Maintenance.EffectiveSourceIds,
         settings.Maintenance.CanCancel,
         settings.Maintenance.CanRetry,
       },
@@ -621,6 +625,7 @@ public static class WorkbenchBridgeCodec
       update.StatusCode,
       update.LatestVersion,
       update.UpdateAvailable,
+      update.CanCancelRuntimeMaintenance,
     },
     AboutWorkbenchState about => new
     {

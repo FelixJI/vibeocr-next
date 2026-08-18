@@ -9,6 +9,7 @@ using VibeOCR.App.Features.Batch;
 using VibeOCR.App.Features.Pdf;
 using VibeOCR.App.Features.QrCode;
 using VibeOCR.App.Features.Settings;
+using VibeOCR.App.Features.Maintenance;
 using VibeOCR.App.Inference;
 using VibeOCR.App.Features.Shell;
 using VibeOCR.App.Features.Update;
@@ -35,6 +36,7 @@ public sealed partial class App : Application
     private readonly CancellationTokenSource _applicationShutdown = new();
     private readonly Dictionary<string, double> _startupMilestones = [];
     private readonly RuntimeStatusViewModel _runtimeStatus = new();
+    private readonly ProductMaintenanceCoordinator _productMaintenance = new();
     private MainWindow? _window;
     private WindowLayoutStore? _windowLayoutStore;
     private SingleInstanceService? _singleInstance;
@@ -147,7 +149,7 @@ public sealed partial class App : Application
         AppLog.Info($"OnLaunched: profile={options.Profile} shellOnly={options.ShellOnly}");
         if (layout.Profile == "production" && File.Exists(layout.ConfigFile))
         {
-            MigrationResult migration = ProfileMigrationClient.MigrateConfig(layout.ConfigFile);
+            MigrationResult migration = ProfileMigrationClient.MigrateConfig(layout);
             if (migration.Status == "skipped")
             {
                 throw new InvalidDataException(
@@ -207,7 +209,9 @@ public sealed partial class App : Application
             _runtimeStatus,
             layout.ConfigFile,
             () => _runtimeInstaller
-              ?? throw new InvalidOperationException("Runtime installer is unavailable.")),
+              ?? throw new InvalidOperationException("Runtime installer is unavailable."),
+            _productMaintenance,
+            layout),
           () => _shellViewModel ??
             throw new InvalidOperationException("Desktop shell is unavailable."),
           () => _updateViewModel ??
@@ -278,7 +282,7 @@ public sealed partial class App : Application
         string hotkey = ReadConfiguredHotkey(layout.ConfigFile) ?? "Ctrl+Alt+Q";
         _hotkeyRegistrar = new WindowsHotkeyRegistrar(
             new GlobalHotkeyService(windowHandle: handle),
-            layout.ConfigFile);
+            layout);
         _hotkeyRegistrar.Register(hotkey, out _);
         _shellViewModel = new ShellViewModel(
             _hotkeyRegistrar,
@@ -288,7 +292,8 @@ public sealed partial class App : Application
             hotkey);
         _updateViewModel = new UpdateViewModel(
             VelopackUpdateCoordinator.Create(layout.ConfigFile, layout.ProbeWritableStateRoot),
-            () => _window!.Close());
+            () => _window!.Close(),
+            _productMaintenance);
     }
 
     private static string? ReadConfiguredHotkey(string configFile)

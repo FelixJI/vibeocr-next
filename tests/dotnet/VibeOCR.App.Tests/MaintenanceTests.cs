@@ -118,6 +118,46 @@ public sealed class MaintenanceTests : IDisposable
     }
 
     [Fact]
+    public async Task RetryCancellationReturnsToTerminalStateAndCanRunAgain()
+    {
+        var fake = new FakeRuntimeInstallerClient { FailNextInstall = true };
+        var settings = await LoadedSettingsAsync(fake, sources: null);
+        await settings.InstallPendingAsync(CancellationToken.None);
+        fake.HangOnRetry = true;
+
+        Task retry = settings.RetryMaintenanceAsync(CancellationToken.None);
+        await fake.RetryStarted.Task.WaitAsync(
+            TimeSpan.FromSeconds(10),
+            TestContext.Current.CancellationToken);
+        settings.CancelMaintenance();
+        await retry;
+
+        Assert.Equal("cancelled", settings.Maintenance.State.StatusCode);
+        Assert.True(settings.Maintenance.State.CanRetry);
+        fake.HangOnRetry = false;
+        await settings.RetryMaintenanceAsync(CancellationToken.None);
+        Assert.Equal("succeeded", settings.Maintenance.State.StatusCode);
+    }
+
+    [Fact]
+    public async Task RetryUnexpectedFailureReturnsToTerminalStateAndCanRunAgain()
+    {
+        var fake = new FakeRuntimeInstallerClient { FailNextInstall = true };
+        var settings = await LoadedSettingsAsync(fake, sources: null);
+        await settings.InstallPendingAsync(CancellationToken.None);
+        fake.FailNextRetryUnexpectedly = true;
+
+        await Assert.ThrowsAsync<IOException>(() =>
+            settings.RetryMaintenanceAsync(CancellationToken.None));
+        Assert.Equal("failed", settings.Maintenance.State.StatusCode);
+        Assert.True(settings.Maintenance.State.CanRetry);
+
+        fake.FailNextRetryUnexpectedly = false;
+        await settings.RetryMaintenanceAsync(CancellationToken.None);
+        Assert.Equal("succeeded", settings.Maintenance.State.StatusCode);
+    }
+
+    [Fact]
     public void BridgeParsesMaintenanceCommandsAndSerializesTheOperationState()
     {
         Guid sessionId = Guid.NewGuid();
@@ -161,6 +201,7 @@ public sealed class MaintenanceTests : IDisposable
                 ["document_parsing"],
                 ["document_parsing", "gpu_runtime"],
                 ["tuna-pypi"],
+                ["pypi"],
                 CanCancel: true,
                 CanRetry: false));
         string payload = WorkbenchBridgeCodecTestsHelper.SerializeState(
@@ -171,6 +212,7 @@ public sealed class MaintenanceTests : IDisposable
         Assert.Contains("\"requestedComponentIds\":[\"document_parsing\"]", payload);
         Assert.Contains("\"effectiveComponentIds\":[\"document_parsing\",\"gpu_runtime\"]", payload);
         Assert.Contains("\"requestedSourceIds\":[\"tuna-pypi\"]", payload);
+        Assert.Contains("\"effectiveSourceIds\":[\"pypi\"]", payload);
         Assert.Contains("\"canCancel\":true", payload);
         Assert.DoesNotContain("endpoint", payload);
     }
@@ -234,7 +276,7 @@ public sealed class MaintenanceTests : IDisposable
                         [
                             new Wire.DownloadSourceDescriptor
                             {
-                                Kind = "package-index",
+                                Kind = "package_index",
                                 Id = "tuna-pypi",
                                 Endpoint = "https://mirrors.tuna.example/pypi/simple",
                             },
@@ -286,8 +328,12 @@ public sealed class MaintenanceTests : IDisposable
         public RuntimeInstallSelection? RetrySelection { get; private set; }
         public bool FailNextInstall { get; set; }
         public bool HangOnInstall { get; set; }
+        public bool HangOnRetry { get; set; }
+        public bool FailNextRetryUnexpectedly { get; set; }
         public Action<string>? EnsureStarted { get; set; }
         public TaskCompletionSource<bool> InstallStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> RetryStarted { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public Task<RuntimeInspection> InspectAsync(CancellationToken cancellationToken = default) =>
@@ -355,7 +401,7 @@ public sealed class MaintenanceTests : IDisposable
             CancellationToken cancellationToken = default) =>
             throw new NotImplementedException();
 
-        public Task<RuntimeHostEnvelope> RetryAsync(
+        public async Task<RuntimeHostEnvelope> RetryAsync(
             string operationId,
             string newOperationId,
             RuntimeInstallSelection? selection,
@@ -365,7 +411,16 @@ public sealed class MaintenanceTests : IDisposable
             RetrySourceOperationId = operationId;
             RetrySelection = selection;
             LastOperationId = newOperationId;
-            return Task.FromResult(new RuntimeHostEnvelope(
+            if (HangOnRetry)
+            {
+                RetryStarted.TrySetResult(true);
+                await Task.Delay(Timeout.Infinite, cancellationToken);
+            }
+            if (FailNextRetryUnexpectedly)
+            {
+                throw new IOException("retry transport failed");
+            }
+            return new RuntimeHostEnvelope(
                 2,
                 true,
                 "ensure",
@@ -391,7 +446,7 @@ public sealed class MaintenanceTests : IDisposable
                     UpdatedAt = "2026-08-18T00:00:00Z",
                 },
                 NegotiatedCapabilities: null,
-                CapabilityDescriptors: null));
+                CapabilityDescriptors: null);
         }
 
         public Task<RuntimeMaintenanceObserveEnvelope> ObserveAsync(

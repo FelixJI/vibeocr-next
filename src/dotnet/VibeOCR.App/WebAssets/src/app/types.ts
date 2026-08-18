@@ -58,6 +58,7 @@ export type AppActionType =
   | "update.check"
   | "update.download"
   | "update.cancel"
+  | "update.cancelRuntimeMaintenance"
   | "diagnostics.export";
 
 export interface AppAction {

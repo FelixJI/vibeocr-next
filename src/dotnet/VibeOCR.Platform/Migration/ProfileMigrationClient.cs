@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using VibeOCR.Platform.Bootstrap;
 
 namespace VibeOCR.Platform.Migration;
 
@@ -22,8 +23,10 @@ public static class ProfileMigrationClient
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
 
-    public static MigrationResult MigrateConfig(string configPath)
+    public static MigrationResult MigrateConfig(PortableLayout layout)
     {
+        ArgumentNullException.ThrowIfNull(layout);
+        string configPath = layout.ConfigFile;
         var path = new FileInfo(configPath);
         if (!path.Exists)
         {
@@ -73,7 +76,7 @@ public static class ProfileMigrationClient
         string backupPath;
         try
         {
-            backupPath = WriteHashedBackup(path);
+            backupPath = WriteHashedBackup(layout, path);
         }
         catch (Exception error)
         {
@@ -87,7 +90,7 @@ public static class ProfileMigrationClient
         data["schema_version"] = CurrentSchemaVersion;
         try
         {
-            AtomicWrite(path, data);
+            AtomicWrite(layout, path, data);
         }
         catch (Exception error)
         {
@@ -96,49 +99,24 @@ public static class ProfileMigrationClient
         return new MigrationResult("migrated", configPath, backupPath, CurrentSchemaVersion, string.Empty);
     }
 
-    private static string WriteHashedBackup(FileInfo path)
+    private static string WriteHashedBackup(PortableLayout layout, FileInfo path)
     {
         byte[] original = File.ReadAllBytes(path.FullName);
         string digest = Convert.ToHexStringLower(SHA256.HashData(original))[..16];
         string backup = Path.Combine(
             path.DirectoryName!,
             $"{Path.GetFileNameWithoutExtension(path.Name)}.pre-migrate-{digest}{path.Extension}.bak");
-        using var stream = new FileStream(
-            backup,
-            FileMode.Create,
-            FileAccess.Write,
-            FileShare.None,
-            4096,
-            FileOptions.WriteThrough);
-        stream.Write(original);
-        stream.Flush(flushToDisk: true);
+        layout.WriteStateFileAtomically(backup, original);
         return backup;
     }
 
-    private static void AtomicWrite(FileInfo path, Dictionary<string, object?> data)
+    private static void AtomicWrite(
+        PortableLayout layout,
+        FileInfo path,
+        Dictionary<string, object?> data)
     {
         string payload = JsonSerializer.Serialize(data, JsonOptions);
-        string tmp = path.FullName + ".tmp";
-        try
-        {
-            using (var stream = new FileStream(
-                tmp,
-                FileMode.Create,
-                FileAccess.Write,
-                FileShare.None,
-                4096,
-                FileOptions.WriteThrough))
-            {
-                byte[] bytes = new UTF8Encoding(false).GetBytes(payload);
-                stream.Write(bytes);
-                stream.Flush(flushToDisk: true);
-            }
-            File.Move(tmp, path.FullName, overwrite: true);
-        }
-        finally
-        {
-            File.Delete(tmp);
-        }
+        layout.WriteStateFileAtomically(path.FullName, payload);
     }
 }
 
