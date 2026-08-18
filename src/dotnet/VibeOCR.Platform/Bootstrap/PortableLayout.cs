@@ -269,15 +269,32 @@ public sealed record PortableLayout(
     }
 
     /// <summary>
-    /// Owns the check/open/write/rename sequence for product-controlled
-    /// metadata. A caller cannot validate a path and later write it through a
-    /// separate TOCTOU seam; the final parent chain is checked before opening
-    /// the temporary file and again before promotion.
+    /// Owns the open/write/rename sequence for product-controlled metadata.
+    /// Every directory segment is held and all file I/O is relative to the
+    /// fixed parent handle, so a replaced lexical path cannot redirect writes.
     /// </summary>
     public void WriteStateFileAtomically(string path, string contents)
     {
         ArgumentNullException.ThrowIfNull(contents);
-        WriteStateFileAtomically(path, new System.Text.UTF8Encoding(false).GetBytes(contents));
+        WriteContainedFileAtomically(
+            path,
+            StateRoot,
+            new System.Text.UTF8Encoding(false).GetBytes(contents),
+            beforeFinalOpen: null);
+    }
+
+    internal void WriteStateFileAtomically(
+        string path,
+        string contents,
+        Action beforeFinalOpen)
+    {
+        ArgumentNullException.ThrowIfNull(contents);
+        ArgumentNullException.ThrowIfNull(beforeFinalOpen);
+        WriteContainedFileAtomically(
+            path,
+            StateRoot,
+            new System.Text.UTF8Encoding(false).GetBytes(contents),
+            beforeFinalOpen);
     }
 
     /// <summary>
@@ -286,7 +303,7 @@ public sealed record PortableLayout(
     /// containment and reparse-point guarantees as text metadata callers.
     /// </summary>
     public void WriteStateFileAtomically(string path, byte[] contents)
-        => WriteContainedFileAtomically(path, StateRoot, contents);
+        => WriteContainedFileAtomically(path, StateRoot, contents, beforeFinalOpen: null);
 
     private void WritePortableMetadataFileAtomically(string path, string contents)
     {
@@ -294,10 +311,15 @@ public sealed record PortableLayout(
         WriteContainedFileAtomically(
             path,
             InstallRoot,
-            new System.Text.UTF8Encoding(false).GetBytes(contents));
+            new System.Text.UTF8Encoding(false).GetBytes(contents),
+            beforeFinalOpen: null);
     }
 
-    private void WriteContainedFileAtomically(string path, string permittedRoot, byte[] contents)
+    private void WriteContainedFileAtomically(
+        string path,
+        string permittedRoot,
+        byte[] contents,
+        Action? beforeFinalOpen)
     {
         ArgumentNullException.ThrowIfNull(contents);
         string fullPath = Path.GetFullPath(path);
@@ -307,36 +329,13 @@ public sealed record PortableLayout(
         }
         string directory = Path.GetDirectoryName(fullPath)
             ?? throw new PortableLayoutException("元数据路径缺少父目录。");
-        EnsureContainedDirectory(directory);
-        string installRoot = NormalizeDirectory(InstallRoot);
-        string temporary = Path.Combine(
+        string targetFileName = Path.GetFileName(fullPath);
+        using StableDirectoryHandleChain handles = StableDirectoryHandleChain.Open(
+            NormalizeDirectory(InstallRoot),
+            permittedRoot,
             directory,
-            $".{Path.GetFileName(fullPath)}.{Guid.NewGuid():N}.tmp");
-        try
-        {
-            RejectEscapingReparsePoints(installRoot, NormalizeDirectory(directory));
-            using (var stream = new FileStream(temporary, new FileStreamOptions
-            {
-                Mode = FileMode.CreateNew,
-                Access = FileAccess.Write,
-                Share = FileShare.None,
-                Options = FileOptions.WriteThrough,
-            }))
-            {
-                stream.Write(contents);
-                stream.Flush(flushToDisk: true);
-            }
-            RejectEscapingReparsePoints(installRoot, NormalizeDirectory(directory));
-            File.Move(temporary, fullPath, overwrite: true);
-            RejectEscapingReparsePoints(installRoot, NormalizeDirectory(directory));
-        }
-        finally
-        {
-            if (File.Exists(temporary))
-            {
-                File.Delete(temporary);
-            }
-        }
+            targetFileName);
+        handles.WriteFileAtomically(targetFileName, contents, beforeFinalOpen);
     }
 
     private static bool IsStrictDescendant(string root, string candidate) =>

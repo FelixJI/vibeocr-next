@@ -271,6 +271,56 @@ public sealed class PortableLayoutTests
     }
 
     [Fact]
+    public void StateFileWriteHoldsParentAgainstReplacementUntilPromotionCompletes()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-state-write-{Guid.NewGuid():N}");
+        string outsideRoot = root + "-outside";
+        string configDirectory = Path.Combine(root, "state", "config");
+        string displacedDirectory = configDirectory + "-displaced";
+        Directory.CreateDirectory(root);
+        Directory.CreateDirectory(outsideRoot);
+        string sentinel = Path.Combine(outsideRoot, "app_settings.json");
+        File.WriteAllText(sentinel, "outside");
+        try
+        {
+            PortableLayout layout = PortableLayout.Resolve(
+                Path.Combine(root, "VibeOCR.Next.exe"),
+                "production");
+            layout.EnsurePortableState();
+            File.WriteAllText(layout.ConfigFile, "before");
+
+            Assert.Throws<PortableLayoutException>(() =>
+                layout.WriteStateFileAtomically(layout.ConfigFile, "after", () =>
+                {
+                    Directory.Move(configDirectory, displacedDirectory);
+                    CreateJunction(configDirectory, outsideRoot);
+                }));
+
+            Assert.Equal("outside", File.ReadAllText(sentinel));
+            Assert.Equal(
+                "after",
+                File.ReadAllText(Path.Combine(displacedDirectory, "app_settings.json")));
+            Assert.Empty(Directory.EnumerateFiles(displacedDirectory, "*.tmp"));
+        }
+        finally
+        {
+            if (Directory.Exists(configDirectory)
+                && File.GetAttributes(configDirectory).HasFlag(FileAttributes.ReparsePoint))
+            {
+                Directory.Delete(configDirectory);
+            }
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+            if (Directory.Exists(outsideRoot))
+            {
+                Directory.Delete(outsideRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public void ExplicitInstallRootResolvesTheVelopackProductLayout()
     {
         string root = Path.Combine(Path.GetTempPath(), $"vibeocr-product-{Guid.NewGuid():N}");
