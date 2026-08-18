@@ -96,6 +96,13 @@ try {
             [System.StringComparison]::OrdinalIgnoreCase)) {
             throw 'Refusing to remove smoke isolation outside the temporary directory'
         }
+        # 便携 state 可能携带 WebView2 user-data;先终止引用隔离根的浏览器
+        # 进程,避免删除竞态。
+        Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" |
+            Where-Object { $_.CommandLine -like "*$resolvedIsolation*" } |
+            ForEach-Object {
+                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            }
         $removed = $false
         for ($attempt = 0; $attempt -lt 20; $attempt++) {
             try {

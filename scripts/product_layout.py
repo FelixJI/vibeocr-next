@@ -16,6 +16,9 @@ ROOT_ALLOWLIST = frozenset(
     {"VibeOCR.exe", "Velopack.dll", "LICENSE", "CHANGELOG.md", "app", "runtime"}
 )
 VELOPACK_ROOT_MARKERS = frozenset({"sq.version"})
+# 便携运行时允许的额外根条目:稳定 state 目录与运行时生成的 portable-layout
+# 清单;允许缺失,其它污染仍拒绝。
+PORTABLE_RUNTIME_MARKERS = frozenset({"state", "portable-layout.json"})
 CANONICAL_PATHS = {
     "public_entry": "VibeOCR.exe",
     "roots.app": "app",
@@ -122,7 +125,9 @@ def _load_product_layout(
             "layout.missing-entry: product root is not a directory"
         )
     actual_root = {path.name for path in root.iterdir()}
-    unexpected = sorted(actual_root - ROOT_ALLOWLIST - VELOPACK_ROOT_MARKERS)
+    unexpected = sorted(
+        actual_root - ROOT_ALLOWLIST - VELOPACK_ROOT_MARKERS - PORTABLE_RUNTIME_MARKERS
+    )
     missing = sorted(ROOT_ALLOWLIST - actual_root)
     if unexpected or missing:
         raise ProductLayoutError(
@@ -145,7 +150,7 @@ def _load_product_layout(
     runtime = _require_mapping(descriptor.get("runtime"), "runtime")
     metadata = _require_mapping(descriptor.get("metadata"), "metadata")
     user_data = _require_mapping(descriptor.get("user_data"), "user_data")
-    if user_data != {"known_folder": "LocalApplicationData", "relative": "VibeOCR"}:
+    if user_data != {"relative": "state"}:
         raise ProductLayoutError("layout.invalid-descriptor: invalid user_data policy")
     canonical = {
         "public_entry": descriptor.get("public_entry"),
@@ -419,10 +424,7 @@ def stage_product_layout(
                 "component_identities": "app/metadata/component-identities.json",
                 "release_manifest": "app/metadata/product-release-manifest.json",
             },
-            "user_data": {
-                "known_folder": "LocalApplicationData",
-                "relative": "VibeOCR",
-            },
+            "user_data": {"relative": "state"},
         }
         (staging / LAYOUT_RELATIVE_PATH).write_text(
             _canonical_json(descriptor), encoding="utf-8", newline="\n"
