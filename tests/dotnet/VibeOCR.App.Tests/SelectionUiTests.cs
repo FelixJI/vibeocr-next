@@ -235,6 +235,31 @@ public sealed class SelectionUiTests : IDisposable
         Assert.DoesNotContain("component_id", payload);
     }
 
+    [Fact]
+    public async Task ModelRegistrySourcesProjectAndPersistPerKind()
+    {
+        var fake = new SelectionInferenceClient
+        {
+            Health = SelectionHealth(),
+            Settings = new SettingsSnapshot { DownloadSourceIds = ["tuna-pypi"] },
+        };
+        var viewModel = new SettingsViewModel(fake, configFile: _configFile);
+        await viewModel.LoadSnapshotAsync(CancellationToken.None);
+
+        Assert.Contains(viewModel.Sources, source =>
+            source.Kind == "model-registry" && source.Id == "huggingface");
+        Assert.Contains(viewModel.Sources, source =>
+            source.Kind == "model-registry" && source.Id == "modelscope");
+
+        await viewModel.SetSourceAsync("model-registry", "modelscope", CancellationToken.None);
+        Assert.Equal(
+            ["tuna-pypi", "modelscope"],
+            fake.LastUpdate?.DownloadSourceIds);
+        Assert.Contains(
+            viewModel.Sources.Where(s => s.Selected).Select(s => s.Id),
+            id => id == "modelscope");
+    }
+
     private static Wire.Health SelectionHealth() => new()
     {
         SchemaVersion = 2,
@@ -312,6 +337,18 @@ public sealed class SelectionUiTests : IDisposable
                             Kind = "package-index",
                             Id = "pypi",
                             Endpoint = "https://pypi.org/simple",
+                        },
+                        new Wire.DownloadSourceDescriptor
+                        {
+                            Kind = "model-registry",
+                            Id = "huggingface",
+                            Endpoint = "https://huggingface.co",
+                        },
+                        new Wire.DownloadSourceDescriptor
+                        {
+                            Kind = "model-registry",
+                            Id = "modelscope",
+                            Endpoint = "https://www.modelscope.cn",
                         },
                     ],
                 },

@@ -309,6 +309,32 @@ public sealed class InferenceHttpClientTests
     }
 
     [Fact]
+    public async Task ModelRegistrySourcesSelectPerKindAndPersistAsync()
+    {
+        // 补验 §6 矩阵:Hugging Face/ModelScope 经同一 Backend Settings 通道
+        // 单选持久化,package-index 与 model-registry 各自独立。
+        string updatedBody = """
+            {"schema_version":2,"residency":{"default_ttl_seconds":300,"pipelines":[]},"extra":{}}
+            """;
+        var handler = new FakeHandler(updatedBody);
+        await using var client = new InferenceHttpClient(Base, "tok", handler);
+        RuntimeSelectionService selection = new(HealthWithSources(
+            ("package-index", "tuna-pypi", "https://a.invalid"),
+            ("model-registry", "huggingface", "https://huggingface.co"),
+            ("model-registry", "modelscope", "https://www.modelscope.cn")));
+
+        await selection.ApplySourcePreferenceAsync(
+            client,
+            ["tuna-pypi", "modelscope"],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpMethod.Put, handler.LastMethod);
+        Assert.Contains(
+            "\"download_source_ids\":[\"tuna-pypi\",\"modelscope\"]",
+            handler.LastBody);
+    }
+
+    [Fact]
     public async Task ApplySourcePreferenceFailsClosedForUnknownSourceAsync()
     {
         var handler = new FakeHandler("""
