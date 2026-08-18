@@ -287,7 +287,7 @@ public sealed partial class App : Application
             () => _window!.Close(),
             hotkey);
         _updateViewModel = new UpdateViewModel(
-            VelopackUpdateCoordinator.Create(layout.ConfigFile),
+            VelopackUpdateCoordinator.Create(layout.ConfigFile, layout.ProbeWritableStateRoot),
             () => _window!.Close());
     }
 

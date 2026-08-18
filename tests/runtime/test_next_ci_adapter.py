@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-import hashlib
 import inspect
 import json
 import os
@@ -371,18 +370,12 @@ def _configure_release_smoke_fixture(
     artifacts.mkdir()
     full = artifacts / "VibeOCRNext-1.2.3-full.nupkg"
     full.write_bytes(b"velopack-package")
-    for name in (
-        "VibeOCRNext-Setup.exe",
-        "VibeOCRNext-Setup.exe.sha256",
-        "releases.win.json",
-    ):
+    for name in ("releases.win.json",):
         (artifacts / name).write_bytes(b"placeholder")
     with zipfile.ZipFile(artifacts / "VibeOCRNext-Portable.zip", "w") as package:
         package.writestr("VibeOCR.WinUI.exe", b"placeholder")
     names = {
         full.name,
-        "VibeOCRNext-Setup.exe",
-        "VibeOCRNext-Setup.exe.sha256",
         "VibeOCRNext-Portable.zip",
         "releases.win.json",
         "component-lock.json",
@@ -734,8 +727,6 @@ def test_project_config_declares_minor_compatible_protocol_and_single_identity_a
     assert config["release"]["identity_asset"] == "component-identities.json"
     assert config["release"]["required_assets"] == [
         "VibeOCRNext-*-full.nupkg",
-        "VibeOCRNext-Setup.exe",
-        "VibeOCRNext-Setup.exe.sha256",
         "VibeOCRNext-Portable.zip",
         "releases.win.json",
         "component-lock.json",
@@ -913,12 +904,6 @@ def test_release_smoke_binds_native_portable_and_component_identity(
     )
     (tmp_path / "SBOM.spdx.json").write_text("{}", encoding="utf-8")
     (tmp_path / "VibeOCRNext-0.2.0-full.nupkg").write_bytes(b"velopack-package")
-    setup = tmp_path / "VibeOCRNext-Setup.exe"
-    setup.write_bytes(b"setup")
-    (tmp_path / "VibeOCRNext-Setup.exe.sha256").write_text(
-        f"{hashlib.sha256(setup.read_bytes()).hexdigest()}  {setup.name}\n",
-        encoding="utf-8",
-    )
     with zipfile.ZipFile(tmp_path / "VibeOCRNext-Portable.zip", "w") as package:
         package.writestr("VibeOCR.WinUI.exe", b"desktop")
     (tmp_path / "releases.win.json").write_text("{}", encoding="utf-8")

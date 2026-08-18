@@ -36,8 +36,6 @@ def verify(artifacts: Path) -> None:
     names = verify_release_assets(
         artifacts,
         required=(
-            "VibeOCRNext-Setup.exe",
-            "VibeOCRNext-Setup.exe.sha256",
             "VibeOCRNext-Portable.zip",
             "releases.win.json",
             "component-lock.json",
@@ -61,8 +59,6 @@ def verify(artifacts: Path) -> None:
     full = next(artifacts.glob("VibeOCRNext-*-full.nupkg"))
     expected_names = {
         full.name,
-        "VibeOCRNext-Setup.exe",
-        "VibeOCRNext-Setup.exe.sha256",
         "VibeOCRNext-Portable.zip",
         "releases.win.json",
         "component-lock.json",

@@ -3,19 +3,118 @@
   "project": {
     "component": "next",
     "repository": "FelixJI/vibeocr-next",
-    "protocol_compatibility": {"supported_majors": [2], "minor_compatible": true}
+    "protocol_compatibility": {
+      "supported_majors": [
+        2
+      ],
+      "minor_compatible": true
+    }
   },
   "ci": {
     "bootstrap": [
-      ["python", "scripts/run_ci_command.py", "--label", "python-bootstrap", "--timeout-seconds", "300", "--", "python", "-m", "pip", "install", "--group", "dev"],
-      ["python", "scripts/run_ci_command.py", "--label", "web-bootstrap", "--timeout-seconds", "300", "--", "npm", "ci", "--prefix", "src/dotnet/VibeOCR.App/WebAssets"],
-      ["python", "scripts/run_ci_command.py", "--label", "windows-runtime-bootstrap", "--timeout-seconds", "180", "--", "pwsh", "-File", "scripts/install_windows_app_runtime.ps1"],
-      ["python", "scripts/run_ci_command.py", "--label", "component-resolve", "--timeout-seconds", "300", "--", "python", "scripts/resolve_component_releases.py"],
-      ["python", "scripts/run_ci_command.py", "--label", "velopack-tool-restore", "--timeout-seconds", "300", "--", "dotnet", "tool", "restore"],
-      ["python", "scripts/run_ci_command.py", "--label", "platform-restore", "--timeout-seconds", "300", "--", "dotnet", "restore", "tests/dotnet/VibeOCR.Platform.Tests/VibeOCR.Platform.Tests.csproj", "--locked-mode"],
-      ["python", "scripts/run_ci_command.py", "--label", "app-restore", "--timeout-seconds", "300", "--", "dotnet", "restore", "tests/dotnet/VibeOCR.App.Tests/VibeOCR.App.Tests.csproj", "--locked-mode"]
+      [
+        "python",
+        "scripts/run_ci_command.py",
+        "--label",
+        "python-bootstrap",
+        "--timeout-seconds",
+        "300",
+        "--",
+        "python",
+        "-m",
+        "pip",
+        "install",
+        "--group",
+        "dev"
+      ],
+      [
+        "python",
+        "scripts/run_ci_command.py",
+        "--label",
+        "web-bootstrap",
+        "--timeout-seconds",
+        "300",
+        "--",
+        "npm",
+        "ci",
+        "--prefix",
+        "src/dotnet/VibeOCR.App/WebAssets"
+      ],
+      [
+        "python",
+        "scripts/run_ci_command.py",
+        "--label",
+        "windows-runtime-bootstrap",
+        "--timeout-seconds",
+        "180",
+        "--",
+        "pwsh",
+        "-File",
+        "scripts/install_windows_app_runtime.ps1"
+      ],
+      [
+        "python",
+        "scripts/run_ci_command.py",
+        "--label",
+        "component-resolve",
+        "--timeout-seconds",
+        "300",
+        "--",
+        "python",
+        "scripts/resolve_component_releases.py"
+      ],
+      [
+        "python",
+        "scripts/run_ci_command.py",
+        "--label",
+        "velopack-tool-restore",
+        "--timeout-seconds",
+        "300",
+        "--",
+        "dotnet",
+        "tool",
+        "restore"
+      ],
+      [
+        "python",
+        "scripts/run_ci_command.py",
+        "--label",
+        "platform-restore",
+        "--timeout-seconds",
+        "300",
+        "--",
+        "dotnet",
+        "restore",
+        "tests/dotnet/VibeOCR.Platform.Tests/VibeOCR.Platform.Tests.csproj",
+        "--locked-mode"
+      ],
+      [
+        "python",
+        "scripts/run_ci_command.py",
+        "--label",
+        "app-restore",
+        "--timeout-seconds",
+        "300",
+        "--",
+        "dotnet",
+        "restore",
+        "tests/dotnet/VibeOCR.App.Tests/VibeOCR.App.Tests.csproj",
+        "--locked-mode"
+      ]
     ],
-    "quality": [["python", "scripts/run_ci_command.py", "--label", "quality", "--timeout-seconds", "300", "--", "python", "scripts/check_quality.py"]],
+    "quality": [
+      [
+        "python",
+        "scripts/run_ci_command.py",
+        "--label",
+        "quality",
+        "--timeout-seconds",
+        "300",
+        "--",
+        "python",
+        "scripts/check_quality.py"
+      ]
+    ],
     "e2e": [
       [
         "python",
@@ -39,19 +138,91 @@
         "--logger",
         "console;verbosity=detailed"
       ],
-      ["python", "scripts/run_ci_command.py", "--label", "app-tests", "--timeout-seconds", "300", "--", "pwsh", "-File", "scripts/test_app_ci.ps1"]
+      [
+        "python",
+        "scripts/run_ci_command.py",
+        "--label",
+        "app-tests",
+        "--timeout-seconds",
+        "300",
+        "--",
+        "pwsh",
+        "-File",
+        "scripts/test_app_ci.ps1"
+      ]
     ],
-    "release_build": [["python", "scripts/run_ci_command.py", "--label", "release-build", "--timeout-seconds", "600", "--", "pwsh", "-File", "scripts/build-release.ps1"]],
-    "release_smoke": [["python", "scripts/run_ci_command.py", "--label", "release-smoke", "--timeout-seconds", "180", "--", "python", "scripts/release_smoke.py"]]
+    "release_build": [
+      [
+        "python",
+        "scripts/run_ci_command.py",
+        "--label",
+        "release-build",
+        "--timeout-seconds",
+        "600",
+        "--",
+        "pwsh",
+        "-File",
+        "scripts/build-release.ps1"
+      ]
+    ],
+    "release_smoke": [
+      [
+        "python",
+        "scripts/run_ci_command.py",
+        "--label",
+        "release-smoke",
+        "--timeout-seconds",
+        "180",
+        "--",
+        "python",
+        "scripts/release_smoke.py"
+      ]
+    ]
   },
   "release": {
-    "version_sources": [{"kind": "json", "path": "repository.json", "key": "version"}, {"kind": "xml", "path": "src/dotnet/VibeOCR.App/VibeOCR.App.csproj", "key": "Version"}],
-    "generated_commands": [["python", "scripts/sync_version.py", "--version", "{version}"]],
-    "required_assets": ["VibeOCRNext-*-full.nupkg", "VibeOCRNext-Setup.exe", "VibeOCRNext-Setup.exe.sha256", "VibeOCRNext-Portable.zip", "releases.win.json", "component-lock.json", "component-identities.json", "SBOM.spdx.json"],
+    "version_sources": [
+      {
+        "kind": "json",
+        "path": "repository.json",
+        "key": "version"
+      },
+      {
+        "kind": "xml",
+        "path": "src/dotnet/VibeOCR.App/VibeOCR.App.csproj",
+        "key": "Version"
+      }
+    ],
+    "generated_commands": [
+      [
+        "python",
+        "scripts/sync_version.py",
+        "--version",
+        "{version}"
+      ]
+    ],
+    "required_assets": [
+      "VibeOCRNext-*-full.nupkg",
+      "VibeOCRNext-Portable.zip",
+      "releases.win.json",
+      "component-lock.json",
+      "component-identities.json",
+      "SBOM.spdx.json"
+    ],
     "identity_asset": "component-identities.json",
     "mirrors": [
-      {"name": "gitee", "url_env": "GITEE_URL", "user_env": "GITEE_USER", "token_env": "GITEE_TOKEN", "user": "git"},
-      {"name": "cnb", "url_env": "CNB_URL", "token_env": "CNB_TOKEN", "user": "git"}
+      {
+        "name": "gitee",
+        "url_env": "GITEE_URL",
+        "user_env": "GITEE_USER",
+        "token_env": "GITEE_TOKEN",
+        "user": "git"
+      },
+      {
+        "name": "cnb",
+        "url_env": "CNB_URL",
+        "token_env": "CNB_TOKEN",
+        "user": "git"
+      }
     ]
   }
 }

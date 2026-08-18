@@ -3,8 +3,9 @@
 ## 结论
 
 VibeOCR Next 只使用 Velopack 1.2.0 C# SDK 与同版本 `vpk` CLI。安装版通过
-`IUpdateCoordinator` 检查、下载并应用 full nupkg；Portable 版提示用户手动下载新版 Setup 或
-Portable。项目不再发布旧 Windows ZIP，不再构建 Python updater，也不再下载并启动 Setup 作为桥接。
+`IUpdateCoordinator` 检查、下载并应用 full nupkg;用户交付仅 Portable,Portable 同样
+位于 Velopack 布局,经默认 locator 执行 check/download/apply/restart,应用前再次
+验证便携根可写。项目不再发布旧 Windows ZIP，不再构建 Python updater，也不再下载并启动 Setup 作为桥接。
 
 启动健康失败自动回退不设为 required；包校验、更新互斥、优雅退出、真实 Setup/Portable 启动 smoke
 和安装目录外的用户数据仍是发布门禁。
@@ -18,14 +19,14 @@ Portable。项目不再发布旧 Windows ZIP，不再构建 Python updater，也
 | 安装根 | Velopack 默认 `%LocalAppData%\VibeOCRNext` |
 | 用户数据 | `%LocalAppData%\VibeOCR`，不得进入 `current/` |
 | Package | full nupkg，禁用 delta |
-| 新用户入口 | `VibeOCRNext-Setup.exe` |
+| 新用户入口 | `VibeOCRNext-Portable.zip`（唯一用户资产；N6 起 Setup 不再构建） |
 | Portable | `VibeOCRNext-Portable.zip`，不支持应用内自动更新 |
 | 代理 | direct、URL-prefix、standard HTTP(S) forward proxy |
 
 正式 Release 精确包含八项资产：
 
 - `VibeOCRNext-{version}-full.nupkg`；
-- `VibeOCRNext-Setup.exe` 与 `.sha256`；
+- `VibeOCRNext-Portable.zip`（N6 起 Setup 退场,full nupkg 与 `releases.win.json` 仅供 Velopack 更新 feed）；
 - `VibeOCRNext-Portable.zip`；
 - `releases.win.json`；
 - `component-lock.json`；
@@ -64,7 +65,7 @@ product root 不包含独立 updater，可由 Velopack 整体替换。
 ## 验收
 
 - direct、URL-prefix、forward proxy 均覆盖 feed 与 full nupkg；
-- Portable 不下载或启动 Setup，返回可诊断的手动升级提示；
+- Portable 不下载或启动 Setup；更新经 Velopack feed 就地应用,根不可写时返回可诊断失败；
 - 取消下载不退出，损坏 nupkg 报校验错误，当前版本仍可启动；
 - 并发更新只有一个任务取得锁；
 - Setup 与 Portable 启动真实冻结入口；
