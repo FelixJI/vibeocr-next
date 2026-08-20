@@ -285,30 +285,37 @@ public sealed class SelectionUiTests : IDisposable
     }
 
     [Fact]
-    public async Task ModelRegistrySourcesStayOpaqueAndCannotBeSelectedByTheUi()
+    public async Task ModelRegistrySourcesCanBeSelectedWithoutExposingEndpoints()
     {
         var fake = new SelectionInferenceClient
         {
             Health = SelectionHealth(),
             Settings = new SettingsSnapshot
             {
-                DownloadSourceIds = ["tuna-pypi", "huggingface"],
+                DownloadSourceIds = ["tuna-pypi", "huggingface", "legacy-source"],
             },
         };
         var viewModel = new SettingsViewModel(fake, configFile: _configFile);
         await viewModel.LoadSnapshotAsync(CancellationToken.None);
 
-        Assert.All(viewModel.Sources, source =>
-            Assert.Equal("package_index", source.Kind));
+        Assert.Equal(
+            ["package_index", "package_index", "model_registry", "model_registry"],
+            viewModel.Sources.Select(source => source.Kind));
 
         await viewModel.SetSourceAsync("package_index", "pypi", CancellationToken.None);
         Assert.Equal(
-            ["huggingface", "pypi"],
+            ["huggingface", "legacy-source", "pypi"],
             fake.LastUpdate?.DownloadSourceIds);
 
         await viewModel.SetSourceAsync("model_registry", "modelscope", CancellationToken.None);
-        Assert.Equal(1, fake.UpdateCalls);
-        Assert.Contains("不支持", viewModel.Status);
+        Assert.Equal(2, fake.UpdateCalls);
+        Assert.Equal(
+            ["legacy-source", "pypi", "modelscope"],
+            fake.LastUpdate?.DownloadSourceIds);
+        Assert.Equal(
+            ["pypi", "modelscope"],
+            viewModel.Sources.Where(source => source.Selected).Select(source => source.Id));
+        Assert.Equal("已保存下载源偏好", viewModel.Status);
     }
 
     private static Wire.Health SelectionHealth() => new()
@@ -400,6 +407,12 @@ public sealed class SelectionUiTests : IDisposable
                             Kind = "model_registry",
                             Id = "modelscope",
                             Endpoint = "https://www.modelscope.cn",
+                        },
+                        new Wire.DownloadSourceDescriptor
+                        {
+                            Kind = "future_registry",
+                            Id = "legacy-source",
+                            Endpoint = "https://legacy.example.invalid",
                         },
                     ],
                 },
