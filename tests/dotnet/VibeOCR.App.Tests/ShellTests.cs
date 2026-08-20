@@ -48,6 +48,7 @@ public sealed class ShellTests
             new Dictionary<string, string>
             {
                 ["VIBEOCR_RUNTIME_ROOT"] = @"D:\shared\runtimes",
+                ["PADDLE_PDX_CACHE_HOME"] = @"D:\shared\paddlex-cache",
             });
 
         InferenceSupervisorOptions options = App.BuildSupervisorOptions(
@@ -66,6 +67,12 @@ public sealed class ShellTests
         Assert.Equal(
             "1",
             options.EnvironmentOverrides["VIBEOCR_SUPERVISOR_SOAK_CRASH_AFTER_READY"]);
+        Assert.Equal(
+            launch.Environment.Count + 1,
+            options.EnvironmentOverrides.Count);
+        Assert.Equal(
+            launch.Environment["PADDLE_PDX_CACHE_HOME"],
+            options.EnvironmentOverrides["PADDLE_PDX_CACHE_HOME"]);
         Assert.Contains("ocr.recognition.v2", options.RequiredCapabilities!);
     }
 

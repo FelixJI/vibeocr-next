@@ -396,8 +396,7 @@ public sealed partial class App : Application
                 TimeSpan.FromSeconds(layout.Profile == "winui-dev" ? 90 : 15),
                 RuntimeCapabilityRequirements.Read(
                     layout.ComponentLock),
-                injectSoakCrash,
-                portableLayout: layout);
+                injectSoakCrash);
 
             // Start the supervisor process.
             var process = new InferenceSupervisorProcess(options, token);
@@ -479,8 +478,7 @@ public sealed partial class App : Application
         string logPath,
         TimeSpan startupTimeout,
         IReadOnlySet<string> requiredCapabilities,
-        bool injectSoakCrash = false,
-        PortableLayout? portableLayout = null)
+        bool injectSoakCrash = false)
     {
         ArgumentNullException.ThrowIfNull(launch);
         ArgumentNullException.ThrowIfNull(requiredCapabilities);
@@ -488,19 +486,6 @@ public sealed partial class App : Application
             item => item.Key,
             item => item.Value,
             StringComparer.OrdinalIgnoreCase);
-        if (portableLayout is not null)
-        {
-            // 模型/缓存路径收口到便携 state;PaddleX 专属参数未经契约确认,
-            // 不猜测变量名。
-            environment["HF_HOME"] = Path.Combine(portableLayout.ModelsRoot, "huggingface");
-            environment["HF_HUB_CACHE"] = Path.Combine(
-                portableLayout.ModelsRoot, "huggingface", "hub");
-            environment["MODELSCOPE_CACHE"] = Path.Combine(
-                portableLayout.ModelsRoot, "modelscope");
-            environment["MINERU_TOOLS_CONFIG_JSON"] = Path.Combine(
-                Path.GetDirectoryName(portableLayout.ConfigFile)!,
-                "mineru.json");
-        }
         if (injectSoakCrash)
         {
             environment["VIBEOCR_SUPERVISOR_SOAK_CRASH_AFTER_READY"] = "1";

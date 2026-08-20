@@ -309,14 +309,6 @@ function availabilityLabel(availability: string): string {
   return labels[availability] ?? availability;
 }
 
-function sourceKindLabel(kind: string): string {
-  const labels: Readonly<Record<string, string>> = {
-    package_index: "Python 包源",
-    model_registry: "模型仓库源",
-  };
-  return labels[kind] ?? `源类别：${kind}`;
-}
-
 function acceleratorLabel(accelerator: string): string {
   return accelerator === "nvidia_cuda" ? "CUDA GPU" : "CPU";
 }
@@ -1277,44 +1269,39 @@ function SourceSelector({
   readonly enabled: boolean;
   readonly actions: AppActions;
 }) {
-  if (sources.length === 0) {
+  const packageSources = sources.filter(
+    (source) => source.kind === "package_index",
+  );
+  if (packageSources.length === 0) {
     return <p className="form-note">当前 Backend 未提供下载源目录。</p>;
   }
-  const kinds = [...new Set(sources.map((source) => source.kind))];
+  const selected =
+    packageSources.find((source) => source.selected) ?? undefined;
   return (
-    <>
-      {kinds.map((kind) => {
-        const kindSources = sources.filter((source) => source.kind === kind);
-        const selected =
-          kindSources.find((source) => source.selected) ?? undefined;
-        return (
-          <div className="setting-row" key={kind}>
-            <label htmlFor={`source-${kind}`}>{sourceKindLabel(kind)}</label>
-            <Select
-              id={`source-${kind}`}
-              value={selected?.id ?? ""}
-              disabled={!enabled}
-              onChange={(_, data) =>
-                data.value === ""
-                  ? actions.run({ type: "settings.setSource", kind })
-                  : actions.run({
-                      type: "settings.setSource",
-                      kind,
-                      sourceId: String(data.value),
-                    })
-              }
-            >
-              <option value="">跟随 Backend 默认</option>
-              {kindSources.map((source) => (
-                <option key={source.id} value={source.id}>
-                  {source.displayName}
-                </option>
-              ))}
-            </Select>
-          </div>
-        );
-      })}
-    </>
+    <div className="setting-row">
+      <label htmlFor="source-package_index">Python 包源</label>
+      <Select
+        id="source-package_index"
+        value={selected?.id ?? ""}
+        disabled={!enabled}
+        onChange={(_, data) =>
+          data.value === ""
+            ? actions.run({ type: "settings.setSource", kind: "package_index" })
+            : actions.run({
+                type: "settings.setSource",
+                kind: "package_index",
+                sourceId: String(data.value),
+              })
+        }
+      >
+        <option value="">跟随 Backend 默认</option>
+        {packageSources.map((source) => (
+          <option key={source.id} value={source.id}>
+            {source.displayName}
+          </option>
+        ))}
+      </Select>
+    </div>
   );
 }
 
