@@ -532,6 +532,7 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         ArgumentException.ThrowIfNullOrWhiteSpace(operationId);
         ArgumentException.ThrowIfNullOrWhiteSpace(newOperationId);
         ArgumentException.ThrowIfNullOrWhiteSpace(commandId);
+        _lastMaintenanceSources = null;
         var request = BindingRequest();
         request["request_kind"] = "command";
         request["command_id"] = commandId;
@@ -680,6 +681,7 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
             throw new RuntimeInstallerException(
                 "Runtime Host does not support caller-provided operation ids.");
         }
+        _lastMaintenanceSources = null;
         operationId = supportsV2 ? operationId ?? Guid.NewGuid().ToString() : null;
         LastOperationId = operationId;
         ProcessStartInfo startInfo = BuildStartInfo(
@@ -804,7 +806,6 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
             if (value is not null && sources is not null)
             {
                 value = value with { MaintenanceSources = sources };
-                _lastMaintenanceSources = sources;
             }
             if (value is null || value.ProtocolVersion != 2 ||
                 !string.Equals(value.Operation, operation, StringComparison.Ordinal) ||
@@ -836,6 +837,7 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
             }
             NegotiatedCapabilities = value.NegotiatedCapabilities?.ToArray() ?? [];
             CapabilityDescriptors = descriptors.ToArray();
+            _lastMaintenanceSources = sources;
             return value;
         }
         catch (JsonException error)

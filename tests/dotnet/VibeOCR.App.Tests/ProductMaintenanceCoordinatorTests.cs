@@ -27,6 +27,26 @@ public sealed class ProductMaintenanceCoordinatorTests
     }
 
     [Fact]
+    public async Task CancelAndWaitClearsWaitingStateWhenCancellationCallbackFails()
+    {
+        var coordinator = new ProductMaintenanceCoordinator();
+        IDisposable runtime = coordinator.Acquire(
+            ProductMaintenanceOwner.RuntimeMaintenance,
+            () => throw new InvalidOperationException("cancel failed"));
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => coordinator.CancelRuntimeMaintenanceAndWaitAsync(
+                TimeSpan.FromSeconds(2),
+                CancellationToken.None));
+
+        Assert.Equal("cancel failed", error.Message);
+        Assert.False(coordinator.State.IsWaitingForRuntimeTermination);
+        Assert.Equal(ProductMaintenanceOwner.RuntimeMaintenance, coordinator.State.ActiveOwner);
+        runtime.Dispose();
+        using IDisposable update = coordinator.Acquire(ProductMaintenanceOwner.AppUpdate);
+    }
+
+    [Fact]
     public void RuntimeLeaseBlocksUpdateAndReleasesAfterCancellation()
     {
         var coordinator = new ProductMaintenanceCoordinator();

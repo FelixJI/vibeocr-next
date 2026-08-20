@@ -271,6 +271,34 @@ public sealed class PortableLayoutTests
     }
 
     [Fact]
+    public void StateFileWriteWrapsReplacementRejectionAndPreservesTheOriginalFile()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-state-write-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            PortableLayout layout = PortableLayout.Resolve(
+                Path.Combine(root, "VibeOCR.Next.exe"),
+                "production");
+            layout.EnsurePortableState();
+            File.WriteAllText(layout.ConfigFile, "before");
+
+            PortableLayoutException error = Assert.Throws<PortableLayoutException>(() =>
+                layout.WriteStateFileAtomically(
+                    layout.ConfigFile,
+                    "after",
+                    () => throw new IOException("replacement rejected")));
+
+            Assert.Contains("replacement rejected", error.Message);
+            Assert.Equal("before", File.ReadAllText(layout.ConfigFile));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void StateFileWriteHoldsParentAgainstReplacementUntilPromotionCompletes()
     {
         string root = Path.Combine(Path.GetTempPath(), $"vibeocr-state-write-{Guid.NewGuid():N}");
@@ -281,6 +309,7 @@ public sealed class PortableLayoutTests
         Directory.CreateDirectory(outsideRoot);
         string sentinel = Path.Combine(outsideRoot, "app_settings.json");
         File.WriteAllText(sentinel, "outside");
+        bool replacementRejected = false;
         try
         {
             PortableLayout layout = PortableLayout.Resolve(
@@ -292,15 +321,27 @@ public sealed class PortableLayoutTests
             Assert.Throws<PortableLayoutException>(() =>
                 layout.WriteStateFileAtomically(layout.ConfigFile, "after", () =>
                 {
-                    Directory.Move(configDirectory, displacedDirectory);
-                    CreateJunction(configDirectory, outsideRoot);
+                    try
+                    {
+                        Directory.Move(configDirectory, displacedDirectory);
+                        CreateJunction(configDirectory, outsideRoot);
+                    }
+                    catch (Exception error) when (
+                        error is IOException or UnauthorizedAccessException)
+                    {
+                        replacementRejected = true;
+                        throw;
+                    }
                 }));
 
             Assert.Equal("outside", File.ReadAllText(sentinel));
+            string securedDirectory = Directory.Exists(displacedDirectory)
+                ? displacedDirectory
+                : configDirectory;
             Assert.Equal(
-                "after",
-                File.ReadAllText(Path.Combine(displacedDirectory, "app_settings.json")));
-            Assert.Empty(Directory.EnumerateFiles(displacedDirectory, "*.tmp"));
+                replacementRejected ? "before" : "after",
+                File.ReadAllText(Path.Combine(securedDirectory, "app_settings.json")));
+            Assert.Empty(Directory.EnumerateFiles(securedDirectory, "*.tmp"));
         }
         finally
         {

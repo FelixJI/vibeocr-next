@@ -109,9 +109,9 @@ public sealed class ProductMaintenanceCoordinator
             completion = _activeCompletion.Task;
         }
         StateChanged?.Invoke();
-        cancel();
         try
         {
+            cancel();
             await completion.WaitAsync(timeout, cancellationToken).ConfigureAwait(false);
             return true;
         }

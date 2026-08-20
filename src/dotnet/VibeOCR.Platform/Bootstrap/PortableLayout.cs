@@ -338,12 +338,21 @@ public sealed record PortableLayout(
         string directory = Path.GetDirectoryName(fullPath)
             ?? throw new PortableLayoutException("元数据路径缺少父目录。");
         string targetFileName = Path.GetFileName(fullPath);
-        using StableDirectoryHandleChain handles = StableDirectoryHandleChain.Open(
-            NormalizeDirectory(InstallRoot),
-            permittedRoot,
-            directory,
-            targetFileName);
-        handles.WriteFileAtomically(targetFileName, contents, beforeFinalOpen);
+        try
+        {
+            using StableDirectoryHandleChain handles = StableDirectoryHandleChain.Open(
+                NormalizeDirectory(InstallRoot),
+                permittedRoot,
+                directory,
+                targetFileName);
+            handles.WriteFileAtomically(targetFileName, contents, beforeFinalOpen);
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            throw new PortableLayoutException(
+                $"无法安全写入 Portable 状态文件 {fullPath}：{error.Message}");
+        }
     }
 
     private static bool IsStrictDescendant(string root, string candidate) =>

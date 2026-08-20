@@ -5,23 +5,29 @@ using VibeOCR.App.Features.Maintenance;
 namespace VibeOCR.App.Features.Update;
 
 /// <summary>Maps stable update coordinator results to user-visible state.</summary>
-public sealed class UpdateViewModel(
-    IUpdateCoordinator coordinator,
-    Action? requestShutdown = null,
-    ProductMaintenanceCoordinator? productMaintenance = null)
-    : INotifyPropertyChanged
+public sealed class UpdateViewModel : INotifyPropertyChanged, IDisposable
 {
-    private readonly IUpdateCoordinator _coordinator = coordinator ??
-        throw new ArgumentNullException(nameof(coordinator));
-    private readonly Action _requestShutdown = requestShutdown ?? (() => { });
-    private readonly ProductMaintenanceCoordinator _productMaintenance =
-        productMaintenance ?? new ProductMaintenanceCoordinator();
+    private readonly IUpdateCoordinator _coordinator;
+    private readonly Action _requestShutdown;
+    private readonly ProductMaintenanceCoordinator _productMaintenance;
     private CancellationTokenSource? _activeRun;
     private bool _isBusy;
     private string _status = string.Empty;
     private string _statusCode = "update.current";
     private string? _latestVersion;
     private bool _updateAvailable;
+    private int _disposed;
+
+    public UpdateViewModel(
+        IUpdateCoordinator coordinator,
+        Action? requestShutdown = null,
+        ProductMaintenanceCoordinator? productMaintenance = null)
+    {
+        _coordinator = coordinator ?? throw new ArgumentNullException(nameof(coordinator));
+        _requestShutdown = requestShutdown ?? (() => { });
+        _productMaintenance = productMaintenance ?? new ProductMaintenanceCoordinator();
+        _productMaintenance.StateChanged += OnProductMaintenanceStateChanged;
+    }
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -78,6 +84,7 @@ public sealed class UpdateViewModel(
         }
         finally
         {
+            Interlocked.CompareExchange(ref _activeRun, null, run);
             IsBusy = false;
         }
     }
@@ -136,6 +143,7 @@ public sealed class UpdateViewModel(
         }
         finally
         {
+            Interlocked.CompareExchange(ref _activeRun, null, run);
             IsBusy = false;
         }
     }
@@ -163,6 +171,24 @@ public sealed class UpdateViewModel(
         {
             StatusCode = "update.runtimeBusy";
             Status = "运行时维护未在限定时间内退出，未开始应用更新";
+        }
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) == 0)
+        {
+            _productMaintenance.StateChanged -= OnProductMaintenanceStateChanged;
+        }
+    }
+
+    private void OnProductMaintenanceStateChanged()
+    {
+        if (Volatile.Read(ref _disposed) == 0)
+        {
+            PropertyChanged?.Invoke(
+                this,
+                new PropertyChangedEventArgs(nameof(CanCancelRuntimeMaintenance)));
         }
     }
 

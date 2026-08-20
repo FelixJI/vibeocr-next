@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Win32;
+using VibeOCR.App.Features.Configuration;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Windows;
 
@@ -24,11 +25,25 @@ internal sealed class WindowsHotkeyRegistrar(
                 Interlocked.Increment(ref _nextId),
                 modifiers | HotkeyModifiers.NoRepeat,
                 virtualKey);
-            _registration?.Dispose();
+            try
+            {
+                Persist(hotkey);
+            }
+            catch
+            {
+                next.Dispose();
+                throw;
+            }
+            IDisposable? previous = _registration;
             _registration = next;
-            Persist(hotkey);
+            previous?.Dispose();
             conflict = null;
             return true;
+        }
+        catch (JsonException)
+        {
+            conflict = "配置文件已损坏，无法保存快捷键；原文件已保留";
+            return false;
         }
         catch (Exception error) when (
             error is ArgumentException or HotkeyRegistrationException or InvalidOperationException)
@@ -51,16 +66,11 @@ internal sealed class WindowsHotkeyRegistrar(
 
     private void Persist(string hotkey)
     {
-        string configFile = _layout.ConfigFile;
-        JsonObject root = File.Exists(configFile)
-            ? JsonNode.Parse(File.ReadAllText(configFile))?.AsObject() ?? []
-            : [];
+        JsonObject root = AppSettingsStore.ReadForUpdate(_layout);
         JsonObject hotkeys = root["hotkeys"] as JsonObject ?? [];
         hotkeys["global_screenshot"] = hotkey;
         root["hotkeys"] = hotkeys;
-        _layout.WriteStateFileAtomically(
-            configFile,
-            root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        AppSettingsStore.Write(_layout, root);
     }
 
     private static (HotkeyModifiers Modifiers, uint VirtualKey) Parse(string hotkey)

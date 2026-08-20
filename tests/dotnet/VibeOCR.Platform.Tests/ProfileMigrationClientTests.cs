@@ -109,6 +109,64 @@ public sealed class ProfileMigrationClientTests
         }
     }
 
+    [Fact]
+    public void NonNumericSchemaUsesTheVersionZeroBackupName()
+    {
+        PortableLayout layout = CreateLayout(out string root);
+        string path = layout.ConfigFile;
+        File.WriteAllText(path, "{\"schema_version\":\"legacy\",\"hotkey\":\"Ctrl+Alt+Q\"}");
+        try
+        {
+            MigrationResult result = ProfileMigrationClient.MigrateConfig(layout);
+
+            Assert.Equal("migrated", result.Status);
+            Assert.Equal(
+                Path.Combine(
+                    Path.GetDirectoryName(path)!,
+                    "app_settings.pre-migrate-schema-v0-to-v1.json.bak"),
+                result.BackupPath);
+            Assert.True(File.Exists(result.BackupPath));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ReadFailureReportsItsCauseWithoutChangingTheConfig()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-migrate-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        PortableLayout layout = PortableLayout.Resolve(
+            Path.Combine(root, "VibeOCR.Next.exe"),
+            "production");
+        string path = layout.ConfigFile;
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        const string original = "{\"hotkey\":\"Ctrl+Alt+Q\"}";
+        File.WriteAllText(path, original);
+        try
+        {
+            using var locked = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.ReadWrite,
+                FileShare.None);
+
+            MigrationResult result = ProfileMigrationClient.MigrateConfig(layout);
+
+            Assert.Equal("skipped", result.Status);
+            Assert.StartsWith("cannot read: ", result.Message);
+            locked.Position = 0;
+            using var reader = new StreamReader(locked, leaveOpen: true);
+            Assert.Equal(original, reader.ReadToEnd());
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static PortableLayout CreateLayout(out string root)
     {
         root = Path.Combine(Path.GetTempPath(), $"vibeocr-migrate-{Guid.NewGuid():N}");

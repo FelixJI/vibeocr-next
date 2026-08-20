@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Text;
 using VibeOCR.App.Features.Batch;
 using VibeOCR.App.Features.Pdf;
@@ -107,7 +108,12 @@ public sealed class DesktopWorkbenchCommandHandler :
     ArgumentNullException.ThrowIfNull(shellFactory);
     ArgumentNullException.ThrowIfNull(updateFactory);
     shell = new Lazy<ShellViewModel>(shellFactory);
-    update = new Lazy<UpdateViewModel>(updateFactory);
+    update = new Lazy<UpdateViewModel>(() =>
+    {
+      UpdateViewModel viewModel = updateFactory();
+      viewModel.PropertyChanged += OnUpdatePropertyChanged;
+      return viewModel;
+    });
     this.diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
     this.resourceBroker = resourceBroker ??
       throw new ArgumentNullException(nameof(resourceBroker));
@@ -1264,6 +1270,15 @@ public sealed class DesktopWorkbenchCommandHandler :
     update.Value.UpdateAvailable,
     update.Value.CanCancelRuntimeMaintenance);
 
+  private void OnUpdatePropertyChanged(object? sender, PropertyChangedEventArgs args)
+  {
+    if (Volatile.Read(ref disposed) == 0 &&
+      args.PropertyName == nameof(UpdateViewModel.CanCancelRuntimeMaintenance))
+    {
+      StateChanged?.Invoke(UpdateState());
+    }
+  }
+
   private AboutWorkbenchState AboutState() => new(
     shell.Value.AppVersion,
     shell.Value.License,
@@ -1332,7 +1347,9 @@ public sealed class DesktopWorkbenchCommandHandler :
     pdf?.Cancel();
     if (update.IsValueCreated)
     {
+      update.Value.PropertyChanged -= OnUpdatePropertyChanged;
       update.Value.Cancel();
+      update.Value.Dispose();
     }
     Task[] operations;
     lock (backgroundOperations)

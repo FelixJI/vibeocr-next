@@ -1,5 +1,8 @@
+using VibeOCR.App.Features.Maintenance;
 using VibeOCR.App.Features.Shell;
 using VibeOCR.App.Features.Update;
+using VibeOCR.Platform.Bootstrap;
+using VibeOCR.Platform.Windows;
 using Xunit;
 
 namespace VibeOCR.App.Tests;
@@ -59,6 +62,40 @@ public sealed class ShellFeatureTests
         shell.SetStartWithSystem(true);
 
         Assert.False(shell.StartWithSystem);
+    }
+
+    [Fact]
+    public void HotkeyRegistrationKeepsPreviousBindingWhenConfigIsCorrupt()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-hotkey-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        PortableLayout layout = PortableLayout.Resolve(
+            Path.Combine(root, "VibeOCR.Next.exe"),
+            "production");
+        layout.EnsurePortableState();
+        var native = new FakeHotkeyNativeMethods();
+        using var registrar = new WindowsHotkeyRegistrar(
+            new GlobalHotkeyService(native),
+            layout);
+        try
+        {
+            Assert.True(registrar.Register("Ctrl+Alt+Q", out string? initialConflict));
+            Assert.Null(initialConflict);
+            Assert.Equal([1], native.ActiveIds);
+            const string corruptConfig = "{\"hotkeys\": not-json";
+            File.WriteAllText(layout.ConfigFile, corruptConfig);
+
+            bool registered = registrar.Register("Ctrl+Shift+Q", out string? conflict);
+
+            Assert.False(registered);
+            Assert.Contains("配置文件已损坏", conflict);
+            Assert.Equal([1], native.ActiveIds);
+            Assert.Equal(corruptConfig, File.ReadAllText(layout.ConfigFile));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
@@ -131,6 +168,35 @@ public sealed class ShellFeatureTests
         Assert.Contains("启动失败", vm.Status);
     }
 
+    [Fact]
+    public void UpdateViewModelPublishesMaintenanceAvailabilityUntilDisposed()
+    {
+        var maintenance = new ProductMaintenanceCoordinator();
+        var vm = new UpdateViewModel(
+            new FakeUpdateCoordinator(),
+            productMaintenance: maintenance);
+        var changes = new List<string?>();
+        vm.PropertyChanged += (_, args) => changes.Add(args.PropertyName);
+
+        IDisposable runtime = maintenance.Acquire(
+            ProductMaintenanceOwner.RuntimeMaintenance,
+            () => { });
+        Assert.True(vm.CanCancelRuntimeMaintenance);
+        runtime.Dispose();
+        Assert.False(vm.CanCancelRuntimeMaintenance);
+        Assert.Equal(
+            2,
+            changes.Count(name => name == nameof(UpdateViewModel.CanCancelRuntimeMaintenance)));
+
+        vm.Dispose();
+        using IDisposable afterDispose = maintenance.Acquire(
+            ProductMaintenanceOwner.RuntimeMaintenance,
+            () => { });
+        Assert.Equal(
+            2,
+            changes.Count(name => name == nameof(UpdateViewModel.CanCancelRuntimeMaintenance)));
+    }
+
     private sealed class FakeHotkeyRegistrar : IHotkeyRegistrar
     {
         public bool Accept { get; set; } = true;
@@ -141,6 +207,21 @@ public sealed class ShellFeatureTests
             return Accept;
         }
         public void Unregister() { }
+    }
+
+    private sealed class FakeHotkeyNativeMethods : IHotkeyNativeMethods
+    {
+        private readonly HashSet<int> _activeIds = [];
+
+        public IReadOnlyCollection<int> ActiveIds => _activeIds.Order().ToArray();
+
+        public bool Register(
+            nint windowHandle,
+            int id,
+            HotkeyModifiers modifiers,
+            uint virtualKey) => _activeIds.Add(id);
+
+        public bool Unregister(nint windowHandle, int id) => _activeIds.Remove(id);
     }
 
     private sealed class FakeStartupRegistrar : IStartupRegistrar

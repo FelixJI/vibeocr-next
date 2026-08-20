@@ -590,7 +590,7 @@ describe("AppShell", () => {
             requestedComponentIds: ["document_parsing"],
             effectiveComponentIds: ["document_parsing", "runtime_host"],
             requestedSourceIds: ["tuna-pypi"],
-            effectiveSourceIds: ["tuna-pypi"],
+            effectiveSourceIds: ["pypi"],
             canCancel: false,
             canRetry: true,
           },
@@ -620,7 +620,7 @@ describe("AppShell", () => {
     expect(
       screen.getByText(/实际安装：document_parsing、runtime_host/),
     ).toBeVisible();
-    expect(screen.getByText(/下载源：tuna-pypi/)).toBeVisible();
+    expect(screen.getByText(/下载源：pypi/)).toBeVisible();
 
     confirmSpy.mockRestore();
     unmount();

@@ -217,6 +217,10 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         {
             Status = LocalizeSelection(error);
         }
+        catch (System.Text.Json.JsonException)
+        {
+            Status = "配置文件已损坏，无法保存 OCR 引擎设置；原文件已保留";
+        }
     }
 
     /// <summary>

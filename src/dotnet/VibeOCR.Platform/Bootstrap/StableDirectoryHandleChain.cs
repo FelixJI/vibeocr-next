@@ -430,7 +430,7 @@ internal sealed class StableDirectoryHandleChain : IDisposable
   {
     SafeFileHandle handle = CreateFileW(
         path,
-        FileReadAttributes,
+        FileReadAttributes | FileTraverse,
         FileShareRead | FileShareWrite,
         nint.Zero,
         OpenExisting,

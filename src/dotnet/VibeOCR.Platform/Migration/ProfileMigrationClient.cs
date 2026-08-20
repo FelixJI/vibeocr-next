@@ -37,9 +37,15 @@ public static class ProfileMigrationClient
     {
       text = File.ReadAllText(path.FullName, Encoding.UTF8);
     }
-    catch (Exception)
+    catch (Exception error) when (
+        error is IOException or UnauthorizedAccessException or NotSupportedException)
     {
-      return new MigrationResult("skipped", configPath, null, CurrentSchemaVersion, "cannot read");
+      return new MigrationResult(
+          "skipped",
+          configPath,
+          null,
+          CurrentSchemaVersion,
+          $"cannot read: {error.Message}");
     }
 
     Dictionary<string, object?> data;

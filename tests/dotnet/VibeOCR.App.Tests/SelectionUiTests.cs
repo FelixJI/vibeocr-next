@@ -101,6 +101,39 @@ public sealed class SelectionUiTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData("{\"ocr\": not-json")]
+    [InlineData("[]")]
+    public async Task SetEngineReportsCorruptConfigWithoutOverwritingIt(string corruptConfig)
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-selection-ui-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        PortableLayout layout = PortableLayout.Resolve(
+            Path.Combine(root, "VibeOCR.Next.exe"),
+            "production");
+        layout.EnsurePortableState();
+        var fake = new SelectionInferenceClient { Health = SelectionHealth() };
+        var viewModel = new SettingsViewModel(
+            fake,
+            configFile: layout.ConfigFile,
+            portableLayout: layout);
+        try
+        {
+            await viewModel.LoadSnapshotAsync(CancellationToken.None);
+            File.WriteAllText(layout.ConfigFile, corruptConfig);
+
+            viewModel.SetEngine("paddleocr");
+
+            Assert.Contains("配置文件已损坏", viewModel.Status);
+            Assert.Equal("rapidocr", viewModel.SelectedEngine);
+            Assert.Equal(corruptConfig, File.ReadAllText(layout.ConfigFile));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task SetSourceWritesValidatedSelectionToBackendSettings()
     {
