@@ -19,7 +19,7 @@ public sealed record SettingsEngineOption(
     bool RequiresDownload,
     bool Selected);
 
-/// <summary>One package-index source available for dependency installation.</summary>
+/// <summary>One user-selectable upstream source preference.</summary>
 public sealed record SettingsSourceOption(
     string Kind,
     string Id,
@@ -35,7 +35,11 @@ public sealed record SettingsFeatureOption(
 
 public sealed class SettingsViewModel : INotifyPropertyChanged
 {
-    private const string UserSelectableSourceKind = "package_index";
+    private static readonly HashSet<string> UserSelectableSourceKinds = new(StringComparer.Ordinal)
+    {
+        "package_index",
+        "model_registry",
+    };
 
     private readonly IInferenceClient _inference;
     private readonly string _configFile;
@@ -237,7 +241,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             Status = "运行时目录尚未加载，请先刷新运行时";
             return;
         }
-        if (!string.Equals(kind, UserSelectableSourceKind, StringComparison.Ordinal))
+        if (!UserSelectableSourceKinds.Contains(kind))
         {
             Status = "当前版本不支持设置此下载源类别";
             return;
@@ -397,13 +401,18 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private IReadOnlyList<string> ComposeSourceSelection(string kind, string? sourceId)
     {
         List<string> next = [.. _selectedSourceIds.Where(id =>
-            _selection?.Sources.Any(source => source.Id == id && source.Kind != kind) == true)];
+            !IsSelectionForKind(id, kind))];
         if (!string.IsNullOrWhiteSpace(sourceId))
         {
             next.Add(sourceId);
         }
         return next;
     }
+
+    private bool IsSelectionForKind(string sourceId, string kind) =>
+        _selection?.Sources.Any(source =>
+            source.Id == sourceId &&
+            string.Equals(source.Kind, kind, StringComparison.Ordinal)) == true;
 
     private static IReadOnlyList<SettingsEngineOption> ProjectEngines(
         RuntimeSelectionService selection,
@@ -428,10 +437,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         RuntimeSelectionService selection,
         IReadOnlyList<string> selectedIds) =>
         [.. selection.Sources
-            .Where(source => string.Equals(
-                source.Kind,
-                UserSelectableSourceKind,
-                StringComparison.Ordinal))
+            .Where(source => UserSelectableSourceKinds.Contains(source.Kind))
             .Select(source => new SettingsSourceOption(
                 source.Kind,
                 source.Id,
@@ -462,6 +468,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     {
         "tuna-pypi" => "TUNA PyPI 镜像",
         "pypi" => "PyPI 官方源",
+        "huggingface" => "Hugging Face",
+        "modelscope" => "ModelScope",
         _ => source.Id,
     };
 

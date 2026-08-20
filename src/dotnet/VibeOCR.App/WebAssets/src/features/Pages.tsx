@@ -1272,30 +1272,66 @@ function SourceSelector({
   const packageSources = sources.filter(
     (source) => source.kind === "package_index",
   );
-  if (packageSources.length === 0) {
+  const modelSources = sources.filter(
+    (source) => source.kind === "model_registry",
+  );
+  if (packageSources.length === 0 && modelSources.length === 0) {
     return <p className="form-note">当前 Backend 未提供下载源目录。</p>;
   }
-  const selected =
-    packageSources.find((source) => source.selected) ?? undefined;
+  return (
+    <>
+      <SourceKindSelector
+        kind="package_index"
+        label="Python 包源"
+        sources={packageSources}
+        enabled={enabled}
+        actions={actions}
+      />
+      <SourceKindSelector
+        kind="model_registry"
+        label="模型源"
+        sources={modelSources}
+        enabled={enabled}
+        actions={actions}
+      />
+    </>
+  );
+}
+
+function SourceKindSelector({
+  kind,
+  label,
+  sources,
+  enabled,
+  actions,
+}: {
+  readonly kind: string;
+  readonly label: string;
+  readonly sources: readonly SourceOptionState[];
+  readonly enabled: boolean;
+  readonly actions: AppActions;
+}) {
+  if (sources.length === 0) return null;
+  const selected = sources.find((source) => source.selected);
   return (
     <div className="setting-row">
-      <label htmlFor="source-package_index">Python 包源</label>
+      <label htmlFor={`source-${kind}`}>{label}</label>
       <Select
-        id="source-package_index"
+        id={`source-${kind}`}
         value={selected?.id ?? ""}
         disabled={!enabled}
         onChange={(_, data) =>
           data.value === ""
-            ? actions.run({ type: "settings.setSource", kind: "package_index" })
+            ? actions.run({ type: "settings.setSource", kind })
             : actions.run({
                 type: "settings.setSource",
-                kind: "package_index",
+                kind,
                 sourceId: String(data.value),
               })
         }
       >
         <option value="">跟随 Backend 默认</option>
-        {packageSources.map((source) => (
+        {sources.map((source) => (
           <option key={source.id} value={source.id}>
             {source.displayName}
           </option>

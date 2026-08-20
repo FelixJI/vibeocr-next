@@ -521,7 +521,16 @@ describe("AppShell", () => {
       sourceId: "pypi",
     });
 
-    expect(screen.queryByText("Hugging Face")).not.toBeInTheDocument();
+    const modelSource = screen.getByLabelText("模型源");
+    expect(modelSource).toHaveValue("");
+    await user.selectOptions(modelSource, "huggingface");
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setSource",
+      kind: "model_registry",
+      sourceId: "huggingface",
+    });
+
+    expect(screen.getByText("Hugging Face")).toBeInTheDocument();
 
     const accelerator = screen.getByLabelText("目标加速器");
     expect(accelerator).toHaveValue("nvidia_cuda");
