@@ -66,23 +66,72 @@ public sealed class SelectionUiTests : IDisposable
     [Fact]
     public async Task SetEnginePersistsChoiceAndRejectsUnavailableEngines()
     {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-selection-ui-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        PortableLayout layout = PortableLayout.Resolve(
+            Path.Combine(root, "VibeOCR.Next.exe"),
+            "production");
+        layout.EnsurePortableState();
         var fake = new SelectionInferenceClient { Health = SelectionHealth() };
-        var viewModel = new SettingsViewModel(fake, configFile: _configFile);
-        await viewModel.LoadSnapshotAsync(CancellationToken.None);
+        var viewModel = new SettingsViewModel(
+            fake,
+            configFile: layout.ConfigFile,
+            portableLayout: layout);
+        try
+        {
+            await viewModel.LoadSnapshotAsync(CancellationToken.None);
 
-        viewModel.SetEngine("paddleocr");
-        Assert.Equal("paddleocr", viewModel.SelectedEngine);
-        Assert.Equal("paddleocr", JsonDocument.Parse(File.ReadAllText(_configFile))
-            .RootElement.GetProperty("ocr").GetProperty("engine").GetString());
-        Assert.True(viewModel.Engines.Single(engine => engine.Engine == "paddleocr").Selected);
-
-        viewModel.SetEngine("windows");
-        Assert.Contains("不可用", viewModel.Status);
-        Assert.Equal("paddleocr", viewModel.SelectedEngine);
-        Assert.Equal(
-            "paddleocr",
-            JsonDocument.Parse(File.ReadAllText(_configFile))
+            viewModel.SetEngine("paddleocr");
+            Assert.Equal("paddleocr", viewModel.SelectedEngine);
+            Assert.Equal("paddleocr", JsonDocument.Parse(File.ReadAllText(layout.ConfigFile))
                 .RootElement.GetProperty("ocr").GetProperty("engine").GetString());
+            Assert.True(viewModel.Engines.Single(engine => engine.Engine == "paddleocr").Selected);
+
+            viewModel.SetEngine("windows");
+            Assert.Contains("不可用", viewModel.Status);
+            Assert.Equal("paddleocr", viewModel.SelectedEngine);
+            Assert.Equal(
+                "paddleocr",
+                JsonDocument.Parse(File.ReadAllText(layout.ConfigFile))
+                    .RootElement.GetProperty("ocr").GetProperty("engine").GetString());
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("{\"ocr\": not-json")]
+    [InlineData("[]")]
+    public async Task SetEngineReportsCorruptConfigWithoutOverwritingIt(string corruptConfig)
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-selection-ui-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        PortableLayout layout = PortableLayout.Resolve(
+            Path.Combine(root, "VibeOCR.Next.exe"),
+            "production");
+        layout.EnsurePortableState();
+        var fake = new SelectionInferenceClient { Health = SelectionHealth() };
+        var viewModel = new SettingsViewModel(
+            fake,
+            configFile: layout.ConfigFile,
+            portableLayout: layout);
+        try
+        {
+            await viewModel.LoadSnapshotAsync(CancellationToken.None);
+            File.WriteAllText(layout.ConfigFile, corruptConfig);
+
+            viewModel.SetEngine("paddleocr");
+
+            Assert.Contains("配置文件已损坏", viewModel.Status);
+            Assert.Equal("rapidocr", viewModel.SelectedEngine);
+            Assert.Equal(corruptConfig, File.ReadAllText(layout.ConfigFile));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
@@ -93,16 +142,16 @@ public sealed class SelectionUiTests : IDisposable
         var viewModel = new SettingsViewModel(fake, configFile: _configFile);
         await viewModel.LoadSnapshotAsync(CancellationToken.None);
 
-        await viewModel.SetSourceAsync("package-index", "pypi", CancellationToken.None);
+        await viewModel.SetSourceAsync("package_index", "pypi", CancellationToken.None);
 
         Assert.Equal(["pypi"], fake.LastUpdate?.DownloadSourceIds);
         Assert.Equal(["pypi"], viewModel.Sources.Where(s => s.Selected).Select(s => s.Id));
         Assert.Equal("已保存下载源偏好", viewModel.Status);
 
-        await viewModel.SetSourceAsync("package-index", null, CancellationToken.None);
+        await viewModel.SetSourceAsync("package_index", null, CancellationToken.None);
         Assert.Null(fake.LastUpdate?.DownloadSourceIds);
 
-        await viewModel.SetSourceAsync("package-index", "aliyun-pypi", CancellationToken.None);
+        await viewModel.SetSourceAsync("package_index", "aliyun-pypi", CancellationToken.None);
         Assert.Contains("未知下载源", viewModel.Status);
         Assert.Equal(2, fake.UpdateCalls);
     }
@@ -187,9 +236,9 @@ public sealed class SelectionUiTests : IDisposable
         Assert.IsType<SetOcrEngineCommand>(
             WorkbenchBridgeCodec.ParseCommand(Command("settings", "setEngine", """{"engine":"paddleocr"}"""), sessionId).Command);
         Assert.IsType<SetDownloadSourceCommand>(
-            WorkbenchBridgeCodec.ParseCommand(Command("settings", "setSource", """{"kind":"package-index","sourceId":"pypi"}"""), sessionId).Command);
+            WorkbenchBridgeCodec.ParseCommand(Command("settings", "setSource", """{"kind":"package_index","sourceId":"pypi"}"""), sessionId).Command);
         Assert.IsType<SetDownloadSourceCommand>(
-            WorkbenchBridgeCodec.ParseCommand(Command("settings", "setSource", """{"kind":"package-index"}"""), sessionId).Command);
+            WorkbenchBridgeCodec.ParseCommand(Command("settings", "setSource", """{"kind":"package_index"}"""), sessionId).Command);
         Assert.IsType<SetAcceleratorCommand>(
             WorkbenchBridgeCodec.ParseCommand(Command("settings", "setAccelerator", """{"accelerator":"nvidia_cuda"}"""), sessionId).Command);
         Assert.IsType<SetRuntimeFeatureCommand>(
@@ -216,7 +265,7 @@ public sealed class SelectionUiTests : IDisposable
             [new SettingsEngineOptionState("paddleocr", "PaddleOCR", "preparation_required", null, true, true)],
             "paddleocr",
             false,
-            [new SettingsSourceOptionState("package-index", "tuna-pypi", "TUNA", true)],
+            [new SettingsSourceOptionState("package_index", "tuna-pypi", "TUNA", true)],
             "nvidia_cuda",
             true,
             [new SettingsFeatureOptionState("gpu_runtime", "CUDA", "nvidia_cuda", false)]);
@@ -247,11 +296,11 @@ public sealed class SelectionUiTests : IDisposable
         await viewModel.LoadSnapshotAsync(CancellationToken.None);
 
         Assert.Contains(viewModel.Sources, source =>
-            source.Kind == "model-registry" && source.Id == "huggingface");
+            source.Kind == "model_registry" && source.Id == "huggingface");
         Assert.Contains(viewModel.Sources, source =>
-            source.Kind == "model-registry" && source.Id == "modelscope");
+            source.Kind == "model_registry" && source.Id == "modelscope");
 
-        await viewModel.SetSourceAsync("model-registry", "modelscope", CancellationToken.None);
+        await viewModel.SetSourceAsync("model_registry", "modelscope", CancellationToken.None);
         Assert.Equal(
             ["tuna-pypi", "modelscope"],
             fake.LastUpdate?.DownloadSourceIds);
@@ -328,25 +377,25 @@ public sealed class SelectionUiTests : IDisposable
                     [
                         new Wire.DownloadSourceDescriptor
                         {
-                            Kind = "package-index",
+                            Kind = "package_index",
                             Id = "tuna-pypi",
                             Endpoint = "https://mirrors.tuna.example/pypi/simple",
                         },
                         new Wire.DownloadSourceDescriptor
                         {
-                            Kind = "package-index",
+                            Kind = "package_index",
                             Id = "pypi",
                             Endpoint = "https://pypi.org/simple",
                         },
                         new Wire.DownloadSourceDescriptor
                         {
-                            Kind = "model-registry",
+                            Kind = "model_registry",
                             Id = "huggingface",
                             Endpoint = "https://huggingface.co",
                         },
                         new Wire.DownloadSourceDescriptor
                         {
-                            Kind = "model-registry",
+                            Kind = "model_registry",
                             Id = "modelscope",
                             Endpoint = "https://www.modelscope.cn",
                         },

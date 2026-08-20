@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using VibeOCR.App.Features.Settings;
 using VibeOCR.Contracts.HttpV2;
+using VibeOCR.Platform.Bootstrap;
 using Xunit;
 
 namespace VibeOCR.App.Tests;
@@ -74,19 +75,33 @@ public sealed class OcrEngineSettingsTests : IDisposable
     [Fact]
     public void SavePersistsWireNameAndPreservesOtherKeys()
     {
-        WriteConfig(
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-engine-settings-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            PortableLayout layout = PortableLayout.Resolve(
+                Path.Combine(root, "VibeOCR.Next.exe"),
+                "production");
+            layout.EnsurePortableState();
+            File.WriteAllText(
+                layout.ConfigFile,
             """{"schema_version":1,"hotkeys":{"global_screenshot":"Ctrl+Alt+Q"},"ocr":{"engine":"windows"}}""");
 
-        OcrEngineSettings.Save(_configFile, OcrEngine.PaddleOcr);
+            OcrEngineSettings.Save(layout, OcrEngine.PaddleOcr);
 
-        JsonObject root = JsonNode.Parse(File.ReadAllText(_configFile))!.AsObject();
-        Assert.Equal("paddleocr", (string?)root["ocr"]!["engine"]);
-        Assert.Equal("Ctrl+Alt+Q", (string?)root["hotkeys"]!["global_screenshot"]);
-        Assert.Equal(1, (int?)root["schema_version"]);
+            JsonObject config = JsonNode.Parse(File.ReadAllText(layout.ConfigFile))!.AsObject();
+            Assert.Equal("paddleocr", (string?)config["ocr"]!["engine"]);
+            Assert.Equal("Ctrl+Alt+Q", (string?)config["hotkeys"]!["global_screenshot"]);
+            Assert.Equal(1, (int?)config["schema_version"]);
 
-        OcrEnginePreference reloaded = OcrEngineSettings.Load(_configFile);
-        Assert.Equal(OcrEngine.PaddleOcr, reloaded.Engine);
-        Assert.False(reloaded.RequiresChoice);
+            OcrEnginePreference reloaded = OcrEngineSettings.Load(layout.ConfigFile);
+            Assert.Equal(OcrEngine.PaddleOcr, reloaded.Engine);
+            Assert.False(reloaded.RequiresChoice);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]

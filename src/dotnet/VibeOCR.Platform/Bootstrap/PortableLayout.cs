@@ -45,8 +45,6 @@ public sealed record PortableLayout(
     public string LogsRoot => Path.Combine(DataRoot, "logs");
     public string RuntimesRoot => Path.Combine(DataRoot, "runtimes");
     public string ModelsRoot => Path.Combine(DataRoot, "models");
-    public string UpdateRoot => Path.Combine(DataRoot, "update");
-    public string TempRoot => Path.Combine(DataRoot, "temp");
     public string LocksRoot => Path.Combine(DataRoot, "locks");
     public string WebView2Root => Path.Combine(DataRoot, "webview2");
 
@@ -146,13 +144,11 @@ public sealed record PortableLayout(
             LogsRoot,
             ModelsRoot,
             OutputRoot,
-            UpdateRoot,
-            TempRoot,
             LocksRoot,
             WebView2Root,
         })
         {
-            Directory.CreateDirectory(directory);
+            EnsureContainedDirectory(directory);
         }
         WritePortableLayoutManifest();
     }
@@ -161,27 +157,35 @@ public sealed record PortableLayout(
     /// Fail closed unless the state root supports create/write/rename/delete
     /// for this process. Never falls back to another location.
     /// </summary>
-    public void ProbeWritableStateRoot()
+    public void ProbeWritableStateRoot() => ProbeWritableStateRoot(
+        $".probe-{Guid.NewGuid():N}",
+        beforeProbeOpen: null);
+
+    internal void ProbeWritableStateRoot(
+        string probeFileName,
+        Action? beforeProbeOpen)
     {
         try
         {
-            Directory.CreateDirectory(StateRoot);
-            string probe = Path.Combine(StateRoot, $".probe-{Guid.NewGuid():N}");
-            File.WriteAllText(probe, "probe");
-            string renamed = probe + ".renamed";
-            File.Move(probe, renamed);
-            string readBack = File.ReadAllText(renamed);
-            File.Delete(renamed);
-            if (readBack != "probe")
-            {
-                throw new IOException("probe content mismatch");
-            }
+            EnsureContainedDirectory(StateRoot);
+            using StableDirectoryHandleChain handles = StableDirectoryHandleChain.Open(
+                NormalizeDirectory(InstallRoot),
+                StateRoot,
+                StateRoot,
+                probeFileName);
+            handles.ProbeWritableDirectory(probeFileName, beforeProbeOpen);
         }
         catch (Exception error) when (
             error is IOException or UnauthorizedAccessException or NotSupportedException)
         {
             throw new PortableLayoutException(
                 $"无法写入状态目录 {StateRoot}。请把 VibeOCR 移动到当前用户可写的目录后重试；"
+                + $"应用不会请求管理员权限，也不会改用其他目录。原因：{error.Message}");
+        }
+        catch (PortableLayoutException error)
+        {
+            throw new PortableLayoutException(
+                $"无法使用状态目录 {StateRoot}。请把 VibeOCR 移动到安全且可写的目录后重试；"
                 + $"应用不会请求管理员权限，也不会改用其他目录。原因：{error.Message}");
         }
     }
@@ -201,14 +205,7 @@ public sealed record PortableLayout(
         {
             return;
         }
-        string directory = Path.GetDirectoryName(manifestPath)!;
-        Directory.CreateDirectory(directory);
-        // 原子替换,避免安装器读到半写状态。
-        string temporary = Path.Combine(
-            directory,
-            $".{Path.GetFileName(manifestPath)}.{Guid.NewGuid():N}.tmp");
-        File.WriteAllText(temporary, payload + Environment.NewLine);
-        File.Move(temporary, manifestPath, overwrite: true);
+        WritePortableMetadataFileAtomically(manifestPath, payload + Environment.NewLine);
     }
 
     /// <summary>
@@ -217,13 +214,9 @@ public sealed record PortableLayout(
     /// </summary>
     private void ValidateContainment()
     {
-        string installRoot = Path.GetFullPath(InstallRoot)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        string stateRoot = Path.GetFullPath(StateRoot)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        if (!stateRoot.StartsWith(
-                installRoot + Path.DirectorySeparatorChar,
-                StringComparison.OrdinalIgnoreCase))
+        string installRoot = NormalizeDirectory(InstallRoot);
+        string stateRoot = NormalizeDirectory(StateRoot);
+        if (!IsStrictDescendant(installRoot, stateRoot))
         {
             throw new PortableLayoutException(
                 $"状态目录必须位于安装目录内：{stateRoot} 不在 {installRoot} 之下。");
@@ -233,27 +226,148 @@ public sealed record PortableLayout(
 
     private static void RejectEscapingReparsePoints(string installRoot, string stateRoot)
     {
-        DirectoryInfo? directory = new(stateRoot);
-        string normalizedInstallRoot = installRoot
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        while (directory is not null &&
-            directory.FullName
-                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-                .StartsWith(normalizedInstallRoot, StringComparison.OrdinalIgnoreCase))
+        string relative = Path.GetRelativePath(installRoot, stateRoot);
+        string current = installRoot;
+        foreach (string segment in relative.Split(
+            Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar))
         {
-            string? linkTarget = directory.LinkTarget;
-            if (linkTarget is not null)
+            if (string.IsNullOrEmpty(segment))
             {
-                string resolved = Path.GetFullPath(
-                    linkTarget,
-                    directory.Parent?.FullName ?? Path.GetPathRoot(directory.FullName) ?? "/");
-                if (!resolved.StartsWith(normalizedInstallRoot, StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new PortableLayoutException(
-                        $"状态目录包含指向安装目录外的链接：{directory.FullName} → {resolved}。");
-                }
+                continue;
             }
-            directory = directory.Parent;
+            current = Path.Combine(current, segment);
+            var directory = new DirectoryInfo(current);
+            if (!directory.Exists ||
+                !directory.Attributes.HasFlag(FileAttributes.ReparsePoint))
+            {
+                continue;
+            }
+            FileSystemInfo? resolved = directory.ResolveLinkTarget(returnFinalTarget: true);
+            if (resolved is null || !IsDescendantOrSelf(installRoot, NormalizeDirectory(resolved.FullName)))
+            {
+                throw new PortableLayoutException(
+                    $"状态目录包含指向安装目录外或无法解析的重解析点：{directory.FullName}。");
+            }
         }
     }
+
+    /// <summary>
+    /// Creates one state directory one relative segment at a time from a held
+    /// install-root handle. Lexical paths are diagnostic inputs only and never
+    /// become mutation targets after validation.
+    /// </summary>
+    private void EnsureContainedDirectory(string directory) =>
+        EnsureContainedDirectory(directory, beforeFinalSegmentOpen: null);
+
+    internal void EnsureContainedDirectory(
+        string directory,
+        Action? beforeFinalSegmentOpen)
+    {
+        string fullDirectory = NormalizeDirectory(directory);
+        string installRoot = NormalizeDirectory(InstallRoot);
+        if (!IsDescendantOrSelf(installRoot, fullDirectory))
+        {
+            throw new PortableLayoutException($"目录不在安装目录内：{fullDirectory}。");
+        }
+        StableDirectoryHandleChain.EnsureDirectory(
+            installRoot,
+            fullDirectory,
+            beforeFinalSegmentOpen);
+    }
+
+    /// <summary>
+    /// Owns the open/write/rename sequence for product-controlled metadata.
+    /// Every directory segment is held and all file I/O is relative to the
+    /// fixed parent handle, so a replaced lexical path cannot redirect writes.
+    /// </summary>
+    public void WriteStateFileAtomically(string path, string contents)
+    {
+        ArgumentNullException.ThrowIfNull(contents);
+        WriteContainedFileAtomically(
+            path,
+            StateRoot,
+            new System.Text.UTF8Encoding(false).GetBytes(contents),
+            beforeFinalOpen: null);
+    }
+
+    internal void WriteStateFileAtomically(
+        string path,
+        string contents,
+        Action beforeFinalOpen)
+    {
+        ArgumentNullException.ThrowIfNull(contents);
+        ArgumentNullException.ThrowIfNull(beforeFinalOpen);
+        WriteContainedFileAtomically(
+            path,
+            StateRoot,
+            new System.Text.UTF8Encoding(false).GetBytes(contents),
+            beforeFinalOpen);
+    }
+
+    /// <summary>
+    /// Atomically writes product-controlled bytes under the portable state
+    /// root. Binary callers, such as the migration backup, retain the same
+    /// containment and reparse-point guarantees as text metadata callers.
+    /// </summary>
+    public void WriteStateFileAtomically(string path, byte[] contents)
+        => WriteContainedFileAtomically(path, StateRoot, contents, beforeFinalOpen: null);
+
+    private void WritePortableMetadataFileAtomically(string path, string contents)
+    {
+        ArgumentNullException.ThrowIfNull(contents);
+        WriteContainedFileAtomically(
+            path,
+            InstallRoot,
+            new System.Text.UTF8Encoding(false).GetBytes(contents),
+            beforeFinalOpen: null);
+    }
+
+    private void WriteContainedFileAtomically(
+        string path,
+        string permittedRoot,
+        byte[] contents,
+        Action? beforeFinalOpen)
+    {
+        ArgumentNullException.ThrowIfNull(contents);
+        string fullPath = Path.GetFullPath(path);
+        if (!IsDescendantOrSelf(NormalizeDirectory(permittedRoot), fullPath))
+        {
+            throw new PortableLayoutException("状态文件必须位于 Portable state 根目录内。");
+        }
+        string directory = Path.GetDirectoryName(fullPath)
+            ?? throw new PortableLayoutException("元数据路径缺少父目录。");
+        string targetFileName = Path.GetFileName(fullPath);
+        try
+        {
+            using StableDirectoryHandleChain handles = StableDirectoryHandleChain.Open(
+                NormalizeDirectory(InstallRoot),
+                permittedRoot,
+                directory,
+                targetFileName);
+            handles.WriteFileAtomically(targetFileName, contents, beforeFinalOpen);
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            throw new PortableLayoutException(
+                $"无法安全写入 Portable 状态文件 {fullPath}：{error.Message}");
+        }
+    }
+
+    private static bool IsStrictDescendant(string root, string candidate) =>
+        !string.Equals(root, candidate, StringComparison.OrdinalIgnoreCase) &&
+        IsDescendantOrSelf(root, candidate);
+
+    private static bool IsDescendantOrSelf(string root, string candidate)
+    {
+        string relative = Path.GetRelativePath(root, candidate);
+        return !Path.IsPathRooted(relative) &&
+            relative is not ".." &&
+            !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) &&
+            !relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal);
+    }
+
+    private static string NormalizeDirectory(string path) => Path.GetFullPath(path)
+        .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 }

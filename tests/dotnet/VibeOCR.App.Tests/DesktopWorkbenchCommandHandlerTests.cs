@@ -1,4 +1,6 @@
+using VibeOCR.App.Features.Maintenance;
 using VibeOCR.App.Features.QrCode;
+using VibeOCR.App.Features.Update;
 using VibeOCR.App.ViewModels;
 using VibeOCR.App.Web;
 using VibeOCR.App.Workbench;
@@ -64,6 +66,62 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     }
   }
 
+  [Fact]
+  public async Task RuntimeMaintenanceLeaseChangesArePublishedToUpdateWorkbenchState()
+  {
+    string resourceRoot = Path.Combine(
+      Path.GetTempPath(),
+      $"vibeocr-handler-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      var maintenance = new ProductMaintenanceCoordinator();
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => new UpdateViewModel(
+          new CurrentUpdateCoordinator(),
+          productMaintenance: maintenance),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker,
+        resourceRoot,
+        static () => 0);
+      var published = new List<WorkbenchState>();
+      handler.StateChanged += published.Add;
+      await handler.ExecuteAsync(
+        new CheckUpdateCommand(),
+        TestContext.Current.CancellationToken);
+      published.Clear();
+
+      IDisposable runtime = maintenance.Acquire(
+        ProductMaintenanceOwner.RuntimeMaintenance,
+        () => { });
+      Assert.True(Assert.IsType<UpdateWorkbenchState>(Assert.Single(published))
+        .CanCancelRuntimeMaintenance);
+
+      runtime.Dispose();
+      Assert.False(Assert.IsType<UpdateWorkbenchState>(published[1])
+        .CanCancelRuntimeMaintenance);
+      Assert.Equal(2, published.Count);
+
+      await handler.DisposeAsync();
+      published.Clear();
+      using IDisposable afterDispose = maintenance.Acquire(
+        ProductMaintenanceOwner.RuntimeMaintenance,
+        () => { });
+      Assert.Empty(published);
+    }
+    finally
+    {
+      Directory.Delete(resourceRoot, recursive: true);
+    }
+  }
+
   private sealed class BlockingQrCodeClient : IQrCodeClient
   {
     private readonly TaskCompletionSource<QrCodeGeneratedImage> completion = new(
@@ -99,5 +157,16 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     public Task<QrCodeInput?> ReadDroppedFileAsync(
       string path,
       CancellationToken cancellationToken) => Task.FromResult<QrCodeInput?>(null);
+  }
+
+  private sealed class CurrentUpdateCoordinator : IUpdateCoordinator
+  {
+    public Task<UpdateCheckResult> CheckAsync(CancellationToken cancellationToken) =>
+      Task.FromResult(new UpdateCheckResult(UpdateCheckStatus.Latest, "0.3.0"));
+
+    public Task<UpdateApplyResult> DownloadAndApplyAsync(
+      IProgress<int>? progress,
+      CancellationToken cancellationToken) =>
+      Task.FromResult(new UpdateApplyResult(UpdateApplyStatus.Downloaded));
   }
 }

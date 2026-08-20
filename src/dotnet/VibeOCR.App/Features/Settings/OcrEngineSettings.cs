@@ -1,7 +1,8 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using VibeOCR.App.Services;
+using VibeOCR.App.Features.Configuration;
 using VibeOCR.Contracts.HttpV2;
+using VibeOCR.Platform.Bootstrap;
 
 namespace VibeOCR.App.Features.Settings;
 
@@ -56,18 +57,14 @@ internal static class OcrEngineSettings
         }
     }
 
-    public static void Save(string configFile, OcrEngine engine)
+    public static void Save(PortableLayout layout, OcrEngine engine)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(configFile);
-        JsonObject root = File.Exists(configFile)
-            ? JsonNode.Parse(File.ReadAllText(configFile))?.AsObject() ?? []
-            : [];
+        ArgumentNullException.ThrowIfNull(layout);
+        JsonObject root = AppSettingsStore.ReadForUpdate(layout);
         JsonObject section = root[SectionName] as JsonObject ?? [];
         section[EngineKey] = ToWireName(engine);
         root[SectionName] = section;
-        AtomicFile.WriteAllText(
-            configFile,
-            root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        AppSettingsStore.Write(layout, root);
     }
 
     /// <summary>

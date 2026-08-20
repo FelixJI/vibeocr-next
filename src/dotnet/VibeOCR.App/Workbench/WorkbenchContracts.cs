@@ -151,6 +151,9 @@ public sealed record DownloadUpdateCommand : WorkbenchCommand;
 
 public sealed record CancelUpdateCommand : WorkbenchCommand;
 
+/// <summary>Cancel the active Runtime operation before retrying an app update.</summary>
+public sealed record CancelRuntimeForUpdateCommand : WorkbenchCommand;
+
 public sealed record ExportDiagnosticsCommand : WorkbenchCommand;
 
 public enum WorkbenchTheme
@@ -266,9 +269,8 @@ public sealed record SettingsWorkbenchState(
 
 /// <summary>
 /// Durable maintenance operation projection: requested/effective component
-/// sets are the installation truth from Backend snapshots; requested sources
-/// are the client-side normalized intent (the installer contract has no
-/// source echo).
+/// sets and requested/effective source ids are the installation truth from
+/// Backend snapshots. App/UI code only consumes this neutral projection.
 /// </summary>
 public sealed record SettingsMaintenanceState(
   bool IsRunning,
@@ -277,6 +279,7 @@ public sealed record SettingsMaintenanceState(
   IReadOnlyList<string> RequestedComponentIds,
   IReadOnlyList<string> EffectiveComponentIds,
   IReadOnlyList<string> RequestedSourceIds,
+  IReadOnlyList<string> EffectiveSourceIds,
   bool CanCancel,
   bool CanRetry);
 
@@ -307,7 +310,8 @@ public sealed record UpdateWorkbenchState(
   bool IsBusy,
   string StatusCode,
   string? LatestVersion,
-  bool UpdateAvailable) : WorkbenchState
+  bool UpdateAvailable,
+  bool CanCancelRuntimeMaintenance = false) : WorkbenchState
 {
   public override string Scope => "update";
 }

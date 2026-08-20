@@ -28,6 +28,7 @@ public sealed class RuntimeInstallerClientTests
         Assert.Equal("vibeocr.backend.supervisor.main", launch.SupervisorModule);
         Assert.Equal(@"C:\Next", launch.WorkingDirectory);
         Assert.Equal(@"C:\store", launch.Environment["VIBEOCR_RUNTIME_ROOT"]);
+        Assert.Null(client.LastMaintenanceSources);
         ProcessStartInfo startInfo = Assert.IsType<ProcessStartInfo>(runner.LastStartInfo);
         Assert.Equal("ensure", Request(startInfo).GetProperty("operation").GetString());
         Assert.False(Request(startInfo).TryGetProperty("accepted_event_streams", out _));
@@ -35,6 +36,104 @@ public sealed class RuntimeInstallerClientTests
             startInfo.ArgumentList,
             argument => argument.Contains("pip", StringComparison.OrdinalIgnoreCase) ||
                 argument.Contains("torch", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task EnsureProjectsRawMaintenanceSourceFieldsOutsideTheGeneratedHostDto()
+    {
+        JsonNode envelope = JsonNode.Parse(LaunchEnvelope())!;
+        envelope["maintenance"] = JsonNode.Parse(
+            """
+            {"operation_id":"op-1","sequence":2,"operation":"ensure","operation_state":"succeeded","phase":"commit_runtime","profile_id":"win-x64-cpu","updated_at":"2026-08-18T00:00:00Z","requested_download_source_ids":["pypi-tuna","hf-mirror"],"effective_download_source_ids":["pypi-tuna","hf-mirror"]}
+            """);
+        var client = new RuntimeInstallerClient(
+            Configuration(),
+            new StubRunner(new RuntimeInstallerProcessResult(0, envelope.ToJsonString(), string.Empty)));
+
+        await client.EnsureAsync(TestContext.Current.CancellationToken);
+
+        RuntimeMaintenanceSourceSnapshot sources = Assert.IsType<RuntimeMaintenanceSourceSnapshot>(
+            client.LastMaintenanceSources);
+        Assert.Equal(["pypi-tuna", "hf-mirror"], sources.RequestedSourceIds);
+        Assert.Equal(["pypi-tuna", "hf-mirror"], sources.EffectiveSourceIds);
+    }
+
+    [Fact]
+    public async Task NewEnsureClearsSourcesWhenItsResponseOmitsTheSnapshot()
+    {
+        JsonNode first = JsonNode.Parse(LaunchEnvelope())!;
+        first["maintenance"] = JsonNode.Parse(
+            """
+            {"operation_id":"op-1","sequence":2,"operation":"ensure","operation_state":"succeeded","phase":"commit_runtime","profile_id":"win-x64-cpu","updated_at":"2026-08-18T00:00:00Z","requested_download_source_ids":["pypi-tuna"],"effective_download_source_ids":["pypi"]}
+            """);
+        var runner = new QueueRunner(
+            new RuntimeInstallerProcessResult(0, first.ToJsonString(), string.Empty),
+            new RuntimeInstallerProcessResult(0, LaunchEnvelope(), string.Empty));
+        var client = new RuntimeInstallerClient(Configuration(), runner);
+
+        await client.EnsureAsync(TestContext.Current.CancellationToken);
+        Assert.NotNull(client.LastMaintenanceSources);
+
+        await client.EnsureAsync(TestContext.Current.CancellationToken);
+
+        Assert.Null(client.LastMaintenanceSources);
+    }
+
+    [Fact]
+    public async Task NewRetryClearsSourcesWhenItsResponseOmitsTheSnapshot()
+    {
+        JsonNode first = JsonNode.Parse(LaunchEnvelope())!;
+        first["maintenance"] = JsonNode.Parse(
+            """
+            {"operation_id":"op-1","sequence":2,"operation":"ensure","operation_state":"succeeded","phase":"commit_runtime","profile_id":"win-x64-cpu","updated_at":"2026-08-18T00:00:00Z","requested_download_source_ids":["pypi-tuna"],"effective_download_source_ids":["pypi"]}
+            """);
+        const string retry =
+            """
+            {"protocol_version":2,"ok":true,"operation":"repair","state":null,"launch":null,"error":null,"maintenance":{"operation_id":"op-2","sequence":1,"operation":"repair","operation_state":"running","phase":"install_profile","profile_id":"win-x64-cpu","updated_at":"2026-08-18T00:00:01Z"}}
+            """;
+        var runner = new QueueRunner(
+            new RuntimeInstallerProcessResult(0, first.ToJsonString(), string.Empty),
+            new RuntimeInstallerProcessResult(0, retry, string.Empty));
+        var client = new RuntimeInstallerClient(Configuration(), runner);
+        await client.EnsureAsync(TestContext.Current.CancellationToken);
+        Assert.NotNull(client.LastMaintenanceSources);
+
+        await client.RetryAsync(
+            "op-1",
+            "op-2",
+            "retry-command",
+            TestContext.Current.CancellationToken);
+
+        Assert.Null(client.LastMaintenanceSources);
+    }
+
+    [Fact]
+    public async Task ObserveWithoutSourcesKeepsTheCurrentOperationSnapshot()
+    {
+        JsonNode first = JsonNode.Parse(LaunchEnvelope())!;
+        first["maintenance"] = JsonNode.Parse(
+            """
+            {"operation_id":"op-1","sequence":2,"operation":"ensure","operation_state":"succeeded","phase":"commit_runtime","profile_id":"win-x64-cpu","updated_at":"2026-08-18T00:00:00Z","requested_download_source_ids":["pypi-tuna"],"effective_download_source_ids":["pypi"]}
+            """);
+        const string observed =
+            """
+            {"protocol_version":2,"ok":true,"request_kind":"observe","operation_id":"op-1","snapshot":{"operation_id":"op-1","sequence":3,"operation":"ensure","operation_state":"succeeded","phase":"commit_runtime","profile_id":"win-x64-cpu","updated_at":"2026-08-18T00:00:01Z"},"events":[],"oldest_sequence":1,"through_sequence":2,"more":false,"replay_expires_at":null}
+            """;
+        var runner = new QueueRunner(
+            new RuntimeInstallerProcessResult(0, first.ToJsonString(), string.Empty),
+            new RuntimeInstallerProcessResult(0, observed, string.Empty));
+        var client = new RuntimeInstallerClient(Configuration(), runner);
+        await client.EnsureAsync(TestContext.Current.CancellationToken);
+
+        await client.ObserveAsync(
+            "op-1",
+            2,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        RuntimeMaintenanceSourceSnapshot sources = Assert.IsType<RuntimeMaintenanceSourceSnapshot>(
+            client.LastMaintenanceSources);
+        Assert.Equal(["pypi-tuna"], sources.RequestedSourceIds);
+        Assert.Equal(["pypi"], sources.EffectiveSourceIds);
     }
 
     [Fact]

@@ -26,8 +26,8 @@ VibeOCR/
 根目录是严格 allowlist；PDB、源码、source map、测试、缓存、用户数据和额外根级文件都会使构建失败。
 产品目录只包含可由 Velopack 整体替换的程序闭包。
 
-用户可变数据固定在 `%LocalAppData%\VibeOCR`：配置、日志、Runtime、WebView2 数据与输出不进入
-Velopack `current/`，也不参与更新替换。
+用户可变数据固定在稳定 Portable 根的 `state/`：配置、日志、Runtime、WebView2 数据与输出不进入
+Velopack `current/`，也不参与更新替换。应用绝不回退到 `%LocalAppData%`、用户目录或系统临时目录。
 
 ## 稳定接口
 
@@ -45,7 +45,8 @@ Bootstrapper 与 Platform。稳定错误包括 `layout.unsupported-schema`、`la
 2. `product_layout.py stage` 组装严格 product root 并嵌入已解析 Backend/Protocol 组件；
 3. `finalize_product_release.py` 复核组件 Release 绑定并写入文件 closure manifest；
 4. `vpk pack` 直接消费该 product root，生成 full nupkg、Portable 和 feed（N6 起 `--noInst`，Setup 退场）；
-5. release smoke 校验精确资产、component identities，并从原生 Portable 启动 WebView smoke。
+5. release smoke 校验精确资产与 component identities；真实两版本 Portable 的 Velopack check/download/apply/restart
+   链仍由用户独立执行，当前解包/Web smoke 不得替代或标记为已通过。
 
 发布与应用内更新只使用 Velopack；项目不再拥有独立 updater、ZIP 替换事务或健康文件回滚协议。
 
@@ -62,6 +63,6 @@ capability gate 通过 typed state/action 契约表达；路由切换不取消�
 
 - 严格产品布局和跨语言 descriptor 契约通过；
 - Backend/Protocol/runtime/component identities 与 closure manifest 绑定一致；
-- Portable、WebView2 和更新 transport smoke 通过；
-- 配置、Runtime 与输出保持在安装目录外；
+- Portable、WebView2 和两版本 packaged update smoke 通过；
+- 配置、Runtime 与输出保持在稳定 Portable 根的 `state/`；
 - Web、Python、App、Platform 质量入口及 PR release build/smoke 全绿。

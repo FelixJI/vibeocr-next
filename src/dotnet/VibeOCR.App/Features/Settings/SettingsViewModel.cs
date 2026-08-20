@@ -5,6 +5,7 @@ using VibeOCR.App.ViewModels;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
+using VibeOCR.App.Features.Maintenance;
 using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 
 namespace VibeOCR.App.Features.Settings;
@@ -36,6 +37,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 {
     private readonly IInferenceClient _inference;
     private readonly string _configFile;
+    private readonly PortableLayout? _portableLayout;
     private long _generation;
     private bool _isBusy;
     private string _status = "正在读取设置";
@@ -55,11 +57,24 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         IInferenceClient inference,
         RuntimeStatusViewModel? runtimeStatus = null,
         string? configFile = null,
-        Func<IRuntimeInstallerClient>? installerFactory = null)
+        Func<IRuntimeInstallerClient>? installerFactory = null,
+        ProductMaintenanceCoordinator? productMaintenance = null,
+        PortableLayout? portableLayout = null)
     {
         _inference = inference ?? throw new ArgumentNullException(nameof(inference));
+        if (portableLayout is not null && configFile is not null &&
+            !string.Equals(
+                Path.GetFullPath(configFile),
+                Path.GetFullPath(portableLayout.ConfigFile),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException(
+                "配置文件必须与 Portable state 布局一致。",
+                nameof(configFile));
+        }
+        _portableLayout = portableLayout;
         RuntimeStatus = runtimeStatus ?? new RuntimeStatusViewModel();
-        _configFile = configFile
+        _configFile = portableLayout?.ConfigFile ?? configFile
             ?? VibeOCR.Platform.Bootstrap.PortableLayout.Resolve(
                 Environment.ProcessPath ?? string.Empty,
                 "production").ConfigFile;
@@ -67,10 +82,12 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             ? new RuntimeMaintenanceCoordinator(
                 () => throw new InvalidOperationException(
                     "Runtime installer is unavailable in this mode."),
-                RuntimeStatus)
+                RuntimeStatus,
+                productMaintenance)
             : new RuntimeMaintenanceCoordinator(
                 installerFactory,
-                RuntimeStatus);
+                RuntimeStatus,
+                productMaintenance);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -181,7 +198,11 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         try
         {
             RuntimeEngineOption option = _selection.SelectEngine(engine.Value);
-            OcrEngineSettings.Save(_configFile, engine.Value);
+            if (_portableLayout is null)
+            {
+                throw new InvalidOperationException("便携状态布局不可用，无法保存 OCR 引擎设置。");
+            }
+            OcrEngineSettings.Save(_portableLayout, engine.Value);
             SelectedEngine = engineWireName;
             EngineChoiceRequired = false;
             Status = option.Availability == Wire.OcrEngineAvailability.PreparationRequired
@@ -195,6 +216,10 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         catch (RuntimeSelectionException error)
         {
             Status = LocalizeSelection(error);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            Status = "配置文件已损坏，无法保存 OCR 引擎设置；原文件已保留";
         }
     }
 

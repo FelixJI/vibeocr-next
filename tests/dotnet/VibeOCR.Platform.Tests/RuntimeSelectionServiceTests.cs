@@ -8,6 +8,22 @@ namespace VibeOCR.Platform.Tests;
 public sealed class RuntimeSelectionServiceTests
 {
     [Fact]
+    public void ProtocolGoldenSourceKindsProjectWithoutAppAliases()
+    {
+        RuntimeSelectionService service = new(Health(
+            [SourceCapability],
+            sources: SourceCatalog(
+                ("package_index", "pypi-official", "https://pypi.org/simple"),
+                ("package_index", "pypi-tuna", "https://pypi.tuna.tsinghua.edu.cn/simple"),
+                ("model_registry", "hf-official", "https://huggingface.co"),
+                ("model_registry", "hf-mirror", "https://hf-mirror.com"))));
+
+        Assert.Equal(
+            ["package_index", "package_index", "model_registry", "model_registry"],
+            service.Sources.Select(source => source.Kind));
+    }
+
+    [Fact]
     public void CatalogsProjectFromHealthCapabilityDescriptors()
     {
         RuntimeSelectionService service = new(Health(
@@ -16,8 +32,8 @@ public sealed class RuntimeSelectionServiceTests
                 (Wire.OcrEngineId.Rapidocr, Wire.OcrEngineAvailability.Ready, true, null, null),
                 (Wire.OcrEngineId.Paddleocr, Wire.OcrEngineAvailability.PreparationRequired, false, null, "paddle-engine")),
             sources: SourceCatalog(
-                ("package-index", "tuna-pypi", "https://mirrors.tuna.example/pypi/simple"),
-                ("package-index", "pypi", "https://pypi.org/simple"),
+                ("package_index", "tuna-pypi", "https://mirrors.tuna.example/pypi/simple"),
+                ("package_index", "pypi", "https://pypi.org/simple"),
                 ("internal-mirror", "mirror-1", "https://example.invalid/simple")),
             variants: VariantCatalog(
                 ("document_parsing", "cpu", "doc-parser-cpu"),
@@ -73,8 +89,8 @@ public sealed class RuntimeSelectionServiceTests
             () => new RuntimeSelectionService(Health(
                 [SourceCapability],
                 sources: SourceCatalog(
-                    ("package-index", "tuna-pypi", "https://a.invalid"),
-                    ("model-registry", "tuna-pypi", "https://b.invalid")))));
+                    ("package_index", "tuna-pypi", "https://a.invalid"),
+                    ("model_registry", "tuna-pypi", "https://b.invalid")))));
         Assert.Equal(RuntimeSelectionErrorKind.DuplicateCatalogEntry, duplicateSource.Kind);
 
         RuntimeSelectionException duplicateVariant = Assert.Throws<RuntimeSelectionException>(
@@ -96,7 +112,7 @@ public sealed class RuntimeSelectionServiceTests
         RuntimeSelectionException blankSource = Assert.Throws<RuntimeSelectionException>(
             () => new RuntimeSelectionService(Health(
                 [SourceCapability],
-                sources: SourceCatalog(("package-index", " ", "https://a.invalid")))));
+                sources: SourceCatalog(("package_index", " ", "https://a.invalid")))));
         Assert.Equal(RuntimeSelectionErrorKind.InvalidCatalogEntry, blankSource.Kind);
 
         var repeated = new Wire.Health
@@ -150,9 +166,9 @@ public sealed class RuntimeSelectionServiceTests
         RuntimeSelectionService service = new(Health(
             [SourceCapability],
             sources: SourceCatalog(
-                ("package-index", "tuna-pypi", "https://a.invalid"),
-                ("package-index", "pypi", "https://b.invalid"),
-                ("model-registry", "huggingface", "https://c.invalid"))));
+                ("package_index", "tuna-pypi", "https://a.invalid"),
+                ("package_index", "pypi", "https://b.invalid"),
+                ("model_registry", "huggingface", "https://c.invalid"))));
 
         Assert.Empty(service.NormalizeSourceSelection(null));
         Assert.Equal(
