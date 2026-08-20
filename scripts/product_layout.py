@@ -6,10 +6,11 @@ import argparse
 import hashlib
 import json
 import shutil
+import stat
 import uuid
 import zipfile
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 LAYOUT_RELATIVE_PATH = Path("app/metadata/product-layout.json")
 ROOT_ALLOWLIST = frozenset(
@@ -19,6 +20,26 @@ VELOPACK_ROOT_MARKERS = frozenset({"sq.version"})
 # 便携运行时允许的额外根条目:稳定 state 目录与运行时生成的 portable-layout
 # 清单;允许缺失,其它污染仍拒绝。
 PORTABLE_RUNTIME_MARKERS = frozenset({"state", "portable-layout.json"})
+WINDOWS_RESERVED_FILENAMES = frozenset(
+    {
+        "AUX",
+        "CLOCK$",
+        "CON",
+        "CONIN$",
+        "CONOUT$",
+        "COM¹",
+        "COM²",
+        "COM³",
+        "LPT¹",
+        "LPT²",
+        "LPT³",
+        "NUL",
+        "PRN",
+        *(f"COM{index}" for index in range(1, 10)),
+        *(f"LPT{index}" for index in range(1, 10)),
+    }
+)
+WINDOWS_INVALID_FILENAME_CHARS = frozenset('<>:"/\\|?*')
 CANONICAL_PATHS = {
     "public_entry": "VibeOCR.exe",
     "roots.app": "app",
@@ -329,6 +350,129 @@ def _copy_publish_tree(source: Path, destination: Path) -> None:
             shutil.copyfile(path, target)
 
 
+def _release_file_name(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ProductLayoutError(
+            f"layout.invalid-descriptor: {field} must be a release filename"
+        )
+    windows_path = PureWindowsPath(value)
+    device_name = value.split(".", 1)[0].rstrip(" .").upper()
+    if (
+        windows_path.drive
+        or windows_path.root
+        or len(windows_path.parts) != 1
+        or value[-1] in {".", " "}
+        or device_name in WINDOWS_RESERVED_FILENAMES
+        or any(
+            character in WINDOWS_INVALID_FILENAME_CHARS or ord(character) < 32
+            for character in value
+        )
+    ):
+        raise ProductLayoutError(
+            f"layout.invalid-descriptor: {field} must be a release filename"
+        )
+    return value
+
+
+def _runtime_pack_file_names(value: object, field: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not value:
+        raise ProductLayoutError(
+            f"layout.invalid-descriptor: {field} must be null or a non-empty array"
+        )
+    return tuple(
+        _release_file_name(item, f"{field}[{index}]")
+        for index, item in enumerate(value)
+    )
+
+
+def _require_non_reparse_regular_file(path: Path) -> None:
+    try:
+        file_status = path.lstat()
+    except OSError as error:
+        raise ProductLayoutError(
+            "layout.missing-entry: backend product closure file is unavailable: "
+            f"{path.name}"
+        ) from error
+    attributes = getattr(file_status, "st_file_attributes", 0)
+    if not stat.S_ISREG(file_status.st_mode) or attributes & getattr(
+        stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+    ):
+        raise ProductLayoutError(
+            "layout.invalid-path: backend product closure source must be a "
+            f"non-reparse regular file: {path.name}"
+        )
+
+
+def _backend_product_closure(backend_release_dir: Path) -> tuple[Path, ...]:
+    """Resolve the release-bound base runtime closure embedded in the product."""
+
+    source = backend_release_dir.resolve(strict=True)
+    runtime_manifest_path = source / "runtime-manifest.json"
+    _require_non_reparse_regular_file(runtime_manifest_path)
+    runtime_manifest = _read_json_object(runtime_manifest_path, "runtime manifest")
+    names = {
+        "runtime-manifest.json",
+        "release-manifest.json",
+        "build-identity.json",
+        _release_file_name(runtime_manifest.get("backend_wheel"), "backend_wheel"),
+        _release_file_name(
+            runtime_manifest.get("protocol_manifest"), "protocol_manifest"
+        ),
+        _release_file_name(runtime_manifest.get("protocol_wheel"), "protocol_wheel"),
+    }
+    python = _require_mapping(runtime_manifest.get("python"), "python")
+    installer = _require_mapping(runtime_manifest.get("installer"), "installer")
+    names.add(_release_file_name(python.get("archive"), "python.archive"))
+    names.add(_release_file_name(installer.get("archive"), "installer.archive"))
+
+    profiles = _require_mapping(runtime_manifest.get("profiles"), "profiles")
+    base_packs: tuple[str, ...] | None = None
+    for profile_name, value in profiles.items():
+        profile = _require_mapping(value, f"profiles.{profile_name}")
+        names.add(
+            _release_file_name(profile.get("lock"), f"profiles.{profile_name}.lock")
+        )
+        profile_packs = _runtime_pack_file_names(
+            profile.get("runtime_pack"), f"profiles.{profile_name}.runtime_pack"
+        )
+        if profile_name == "win-x64-base":
+            base_packs = profile_packs
+        scopes = profile.get("install_scopes", [])
+        if not isinstance(scopes, list):
+            raise ProductLayoutError(
+                f"layout.invalid-descriptor: profiles.{profile_name}.install_scopes "
+                "must be an array"
+            )
+        for index, value in enumerate(scopes):
+            scope = _require_mapping(
+                value, f"profiles.{profile_name}.install_scopes[{index}]"
+            )
+            names.add(
+                _release_file_name(
+                    scope.get("lock"),
+                    f"profiles.{profile_name}.install_scopes[{index}].lock",
+                )
+            )
+            _runtime_pack_file_names(
+                scope.get("runtime_pack"),
+                f"profiles.{profile_name}.install_scopes[{index}].runtime_pack",
+            )
+
+    if not base_packs:
+        raise ProductLayoutError(
+            "layout.invalid-descriptor: profiles.win-x64-base.runtime_pack "
+            "must contain the offline base pack"
+        )
+    names.update(base_packs)
+
+    closure = tuple(source / name for name in sorted(names))
+    for path in closure:
+        _require_non_reparse_regular_file(path)
+    return closure
+
+
 def stage_product_layout(
     *,
     product_root: Path,
@@ -374,12 +518,7 @@ def stage_product_layout(
         shutil.copyfile(license_file.resolve(strict=True), staging / "LICENSE")
         shutil.copyfile(changelog_file.resolve(strict=True), staging / "CHANGELOG.md")
 
-        backend_source = backend_release_dir.resolve(strict=True)
-        for path in sorted(backend_source.iterdir()):
-            if path.is_symlink() or not path.is_file():
-                raise ProductLayoutError(
-                    f"layout.invalid-path: backend release entry is not a regular file: {path}"
-                )
+        for path in _backend_product_closure(backend_release_dir):
             shutil.copyfile(path, backend_root / path.name)
         runtime_manifest = json.loads(
             (backend_root / "runtime-manifest.json").read_text(encoding="utf-8")

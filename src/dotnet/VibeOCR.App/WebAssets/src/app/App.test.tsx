@@ -478,9 +478,9 @@ describe("AppShell", () => {
               selected: false,
             },
             {
-              kind: "internal-mirror",
-              id: "mirror-1",
-              displayName: "mirror-1",
+              kind: "model_registry",
+              id: "huggingface",
+              displayName: "Hugging Face",
               selected: false,
             },
           ],
@@ -521,8 +521,7 @@ describe("AppShell", () => {
       sourceId: "pypi",
     });
 
-    // 未知 kind 只分组展示,不提供预设选项。
-    expect(screen.getByLabelText("源类别：internal-mirror")).toHaveValue("");
+    expect(screen.queryByText("Hugging Face")).not.toBeInTheDocument();
 
     const accelerator = screen.getByLabelText("目标加速器");
     expect(accelerator).toHaveValue("nvidia_cuda");

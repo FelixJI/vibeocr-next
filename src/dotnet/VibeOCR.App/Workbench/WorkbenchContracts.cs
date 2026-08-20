@@ -119,8 +119,8 @@ public sealed record SetHotkeyCommand(string Hotkey) : WorkbenchCommand;
 public sealed record SetOcrEngineCommand(string Engine) : WorkbenchCommand;
 
 /// <summary>
-/// Select the download source for one kind (single-select). A null source id
-/// clears the kind's selection and delegates to Backend defaults.
+/// Select the package-index dependency source. A null source id clears the
+/// selection and delegates to Backend defaults; other wire kinds are not editable.
 /// </summary>
 public sealed record SetDownloadSourceCommand(string Kind, string? SourceId) : WorkbenchCommand;
 
@@ -292,7 +292,7 @@ public sealed record SettingsEngineOptionState(
   bool RequiresDownload,
   bool Selected);
 
-/// <summary>Catalog download source projected per kind (single-select).</summary>
+/// <summary>Catalog package-index source projected as a single-select option.</summary>
 public sealed record SettingsSourceOptionState(
   string Kind,
   string Id,

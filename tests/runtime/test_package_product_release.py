@@ -47,8 +47,12 @@ def _releases(tmp_path: Path) -> tuple[Path, Path]:
     copied_manifest.write_bytes(protocol_manifest.read_bytes())
     python = backend / "python.tar.gz"
     python.write_bytes(b"python")
-    lock = backend / "cpu.lock"
-    lock.write_bytes(b"cpu")
+    base_lock = backend / "base.lock"
+    base_lock.write_bytes(b"base")
+    cpu_lock = backend / "cpu.lock"
+    cpu_lock.write_bytes(b"cpu")
+    base_pack = backend / "base-pack.zip"
+    base_pack.write_bytes(b"base-pack")
     installer = backend / "installer.zip"
     with zipfile.ZipFile(installer, "w") as archive:
         archive.writestr("runtime-installer/installer.exe", b"installer")
@@ -71,13 +75,24 @@ def _releases(tmp_path: Path) -> tuple[Path, Path]:
                     "executable_sha256": _sha(b"installer"),
                 },
                 "profiles": {
-                    "win-x64-cpu": {"lock": lock.name, "sha256": _sha(b"cpu")}
+                    "win-x64-base": {
+                        "lock": base_lock.name,
+                        "sha256": _sha(b"base"),
+                        "runtime_pack": [base_pack.name],
+                    },
+                    "win-x64-cpu": {
+                        "lock": cpu_lock.name,
+                        "sha256": _sha(b"cpu"),
+                        "runtime_pack": None,
+                    },
                 },
                 "capabilities": ["ocr.recognition.v2"],
             }
         ),
         encoding="utf-8",
     )
+    (backend / "release-manifest.json").write_text("{}", encoding="utf-8")
+    (backend / "build-identity.json").write_text("{}", encoding="utf-8")
     checksums = backend / "SHA256SUMS"
     checksums.write_text(
         "".join(

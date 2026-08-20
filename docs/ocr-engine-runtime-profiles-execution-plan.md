@@ -27,7 +27,7 @@ Protocol 2.7.1 的 wire schema、Python/.NET DTO 与生成绑定已经支持
 
 Next 只承担 Windows 客户端职责：选择与持久化用户偏好、构造强类型请求、展示
 Backend catalog/status、编排 Runtime 和 Velopack 更新。OCR/PDF/MinerU 推理、依赖闭包、
-source endpoint 解析和安装执行全部属于 Backend。
+source endpoint 语义解释和安装执行全部属于 Backend；Next 只做 descriptor 契约校验与保留。
 
 目标：
 
@@ -35,11 +35,11 @@ source endpoint 解析和安装执行全部属于 Backend。
 - 全局默认 RapidOCR，任务可临时 override；Windows/PaddleOCR 不可用时 fail closed。
 - feature/accelerator 选择映射为 Backend component id，full CPU/CUDA 只在用户确认后
   按当前 Backend release hash lock 在线安装。
-- 下载源按开放 kind 分组，每个已知 kind 至多选择一个；安装 operation 固化 source
-  intent，不受并发 Settings 修改影响。
-- model registry 首版只公开 PaddleX 与 MinerU 的共同远端来源 `huggingface`、
-  `modelscope`；AIStudio/BOS 是 PaddleX 专属能力，在现有全局 kind 契约下暂不展示。模型
-  acquisition 完成后，推理只绑定 portable 本地模型路径。
+- Next 只允许用户选择 `package_index` 依赖源；未知 source kind 继续作为开放 wire 值透传，
+  descriptor endpoint 仍须严格解析并原样保留，但不进入 UI 或由 UI 解释。安装 operation
+  固化 source intent，不受并发 Settings 修改影响。
+- 模型获取、缓存布局与远端选择由上游 Runtime 原生管理；Next 不解释或使用
+  Runtime Host 返回的 legacy 不透明模型根，不建立模型资产清单或第二套下载状态机。
 - UI 只消费既有 Runtime snapshot/events/heartbeat/progress；不建立第二套状态机。
 - 所有产品拥有的配置、缓存、日志、Runtime、模型、输出、更新状态、WebView2 profile 和
   临时文件都位于 `<portable-root>/state`；稳定 portable 根不能混同会被更新替换的
@@ -69,12 +69,10 @@ WebView2 的 VibeOCR user-data/cache/cookies 必须在 `state` 内。
    wire `download_source_ids: []` 非法。`DownloadSourceKind` 保持开放 string。
 5. Backend Release 只携带 base pack；full 组件的在线 install scope/lock/catalog 来自同一
    Backend identity，不作为额外 runtime pack 被前端解析。
-6. Backend model registry 门槛尚未满足：`model_registry` kind 已定义，但 catalog 还只有
-   package index。下一版合格 Backend 必须声明稳定 id `huggingface`/`modelscope`，并通过
-   PaddleX/MinerU Adapter 执行真实下载；前端在 capability/catalog 出现前不预造选项。
-7. 现有 Protocol 每 kind 至多选一个来源，首版仅用两引擎交集即可保持 2.7.1 不变。未来
-   若开放 PaddleX 专属 AIStudio/BOS 或按 consumer 分别选择，必须先发布含 consumer scope
-   的新 Protocol minor，不能选择两个同 kind id。
+6. Backend 新版不再声明 `model_registry`；旧版若仍返回该开放 kind，Next 严格解析并保留完整
+   DTO/wire（包括 required endpoint），但不投影为用户选项。模型获取策略属于 Backend 自身。
+7. Next 的用户选择面只处理 `package_index`，每次至多选择一个；其它 kind 不参与客户端
+   selection policy。
 8. Portable 根启动时执行 create/write/rename/delete 探针；不可写时 fail closed 并提示移动
    目录，不请求管理员权限，也不回退 `%LOCALAPPDATA%`、用户 profile 或系统 Temp。
 
@@ -86,12 +84,12 @@ WebView2 的 VibeOCR user-data/cache/cookies 必须在 `state` 内。
 | OCR 选择 | `PipelineSelection.engine` | `IInferenceClient`/request builder 强类型发送 |
 | feature 目录 | 当前 CPU 为 `document_parsing`；CUDA 为 `document_parsing`/`gpu_runtime`，且 CUDA document parsing 闭包含 GPU runtime | Platform 仍按 `feature_id + accelerator` 映射；不得固化当前 feature id 恰好等于 component id，WebAssets 不处理 component id |
 | 安装意图 | ensure/retry `install_component_ids` | `RuntimeInstallerClient` 保留 null 与空 list 的差异 |
-| source 目录 | 当前只声明 package-index 的 `tuna-pypi`（默认）与 `pypi`；目标再增加 model-registry 的 `huggingface`/`modelscope` | Platform 保留未知 kind；App 只开放 catalog 实际声明的已知 kind，不预造模型源 |
+| source 目录 | package-index 的 `tuna-pypi`（默认）与 `pypi`；其它 kind 保持开放 wire 值 | Platform 严格解析并保留未知 kind/endpoint；App 只开放 `package_index`，不展示模型源或 endpoint |
 | 默认 source | Backend Settings `download_source_ids` | `InferenceHttpClient` 强类型读写并作为长期真相；App 不维护第二份持久 source 配置 |
 | 本次 source | maintenance `download_source_ids` | installer start/retry 显式传入当前选择 |
 | 安装状态 | requested/effective component/source ids + existing events | Platform 投影为 immutable state，Workbench bridge 只传 UI 所需字段 |
 | Portable 状态根 | 非 Protocol 字段；`PortableLayout` 是唯一 owner | 固定 `<portable-root>/state`；App/Bootstrapper/WebView 不自行读用户目录 |
-| 模型根 | Runtime Installer `RuntimeLaunch.model_root` | 固定 `<portable-root>/state/models` 并传给 Backend；Platform 不理解仓库内部布局 |
+| Legacy 模型根 | Runtime Host required response `RuntimeLaunch.model_root` | Platform 严格验证并原样保留；App 不解释、不使用，也不据此注入环境变量 |
 
 省略与空值是 wire 语义，不能在 C# collection default 中被抹平：
 
@@ -102,7 +100,7 @@ WebView2 的 VibeOCR user-data/cache/cookies 必须在 `state` 内。
   每种 kind 至多一个，数组顺序不表示优先级。
 
 `DownloadSourceKind` 必须投影为 `string`，不能恢复 closed enum。强类型边界位于 descriptor、
-request/status record；known values 由 UI policy 识别，未知 response 值原样保留。
+request/status record；未知 response 值原样保留，但只有 `package_index` 进入 Next 用户选择面。
 
 统一 state 布局：
 
@@ -110,11 +108,11 @@ request/status record；known values 由 UI policy 识别，未知 response 值�
 <portable-root>/
   VibeOCR.exe / Update.exe / current/ / packages/          # Velopack 应用与更新载荷
   state/
-    config/           # app_settings、Backend/MinerU config
+    config/           # app_settings 与 Backend-owned configuration
     cache/            # HTTP、缩略图及通用 cache
     logs/             # App 与 Bootstrapper
     runtimes/         # 版本化 Backend runtime environments
-    models/           # rapidocr/paddleocr/mineru/download staging
+    models/           # 预留不透明路径；实际 cache/config 由 Host environment 管理
     output/
     update/           # app updater cache/staging/journal
     temp/
@@ -168,10 +166,9 @@ UI 状态；source preference 写入 Backend Settings，不在 App 复制第二�
 - 已知 source kind 的单选项。
 - operation requested/effective 集合、progress、可取消/可 retry 状态。
 
-WebAssets 不接触 Protocol 包、不保存 endpoint、不自己推导 component id。未知 source
-kind 可显示“当前版本暂不支持配置”，但不得导致整个设置页或 health 失败。当前 Backend
-未声明 model registry 时，不显示伪造的模型源选项；声明后显示 Hugging Face /
-ModelScope，AIStudio/BOS 暂不显示。
+WebAssets 不接触 Protocol 包、不保存 endpoint、不自己推导 component id。只有
+`package_index` 进入设置页；未知 source kind 保留在 Platform DTO/wire 层，但不显示或
+允许用户选择，也不得导致整个设置页或 health 失败。
 
 ### 4.4 PortableLayout 深模块与缓存收口
 
@@ -188,31 +185,20 @@ ModelScope，AIStudio/BOS 暂不显示。
 - `WebWorkbenchHost.InitializeAsync` 创建 `CoreWebView2Environment`，把 `userDataFolder` 固定
   为 `state/webview2` 后再 `EnsureCoreWebView2Async(environment)`；WebAssets 本身不获取绝对
   state path。
-- `RuntimeInstallerConfiguration.ForNext(layout)` 把 `state/models` 和完整 portable launch
-  environment 传给 Runtime Host；在任何 PaddleX/MinerU/Hugging Face/ModelScope import 前
-  至少设置 `HF_HOME`/`HF_HUB_CACHE`、`MODELSCOPE_CACHE`、
-  `MINERU_TOOLS_CONFIG_JSON`。PaddleX 锁定版本的 cache/model 参数经契约测试确认后绑定
-  `state/models/paddleocr`，不猜测变量名。
+- `RuntimeInstallerConfiguration.ForNext(layout)` 请求侧只传 `product_root`；Platform 对
+  Runtime Host 返回的 required `RuntimeLaunch.model_root` 作 legacy opaque wire 兼容，
+  严格验证并原样保留。App 不解释或使用该字段，也不据此注入环境变量；
+  模型 cache/config 只服从 Host environment 的官方变量。
 - 生产只使用 portable layout；测试保留 in-memory/temp layout。路径做 containment、junction/
   symlink 与 `..` 校验。若需要兼容旧测试数据，只提供显式一次性 import，不自动读取或双写
   LocalAppData。
 
-### 4.5 Backend model registry seam
+### 4.5 Backend 模型责任边界
 
-Backend 增加 model acquisition interface，至少有 PaddleX、MinerU 生产 Adapter 与 in-memory
-测试 Adapter：
-
-- catalog 声明 `{kind: model_registry, id: huggingface|modelscope, endpoint: ...}`；endpoint
-  Release-owned、UI 只读，不允许用户任意 URL。
-- Adapter 将 source id 映射为 `PADDLE_PDX_MODEL_SOURCE`/
-  `MINERU_MODEL_SOURCE`。下载阶段使用所选远端；成功后记录 source/revision/local path，推理
-  显式使用 portable 本地模型，避免自动探测和用户目录写入。
-- full `document_parsing` ensure 把 PaddleOCR/MinerU 所需模型纳入同一 durable maintenance
-  operation，复用 progress/cancel/retry/requested/effective source snapshot。只有所有声明资产
-  就绪才标记 ready，首次业务请求不再承担不可观察的懒下载。
-- 下载 staging 位于 `state/models/downloads`，成功原子切换；失败不能破坏 base 或既有模型。
-  MinerU 配置固定为 `state/config/mineru.json`，通过 `MINERU_TOOLS_CONFIG_JSON` 指向它；
-  本地推理使用 `local` + `models-dir`。
+Backend/其原生依赖拥有模型获取、缓存、版本和失败恢复。Next 只向 Runtime Host
+传递 `product_root` 并展示既有 maintenance 状态；`state/models` 若保留在布局中，仅是预留的
+不透明路径。Next 不定义模型资产名称、远端 endpoint、下载 staging、环境变量或引擎私有目录，
+也不把模型打进独立附加包。
 
 ### 4.6 Portable、Runtime 与应用更新
 
@@ -228,17 +214,19 @@ Backend 增加 model acquisition interface，至少有 PaddleX、MinerU 生产 A
 - 移除 `VelopackUpdateCoordinator` 对 `UpdateManager.IsInstalled == false` 的 Portable 硬拒绝，
   使用 packaged portable locator 执行 check/download/apply/restart；更新前再次验证根可写，
   防止 package cache 回落 LocalAppData。
-- Portable 内只含 base pack；full 未选择时 release/build/smoke 证明不存在重依赖资产。
+- Portable/NUPKG 精确保留 release-bound standalone Python、base pack、installer、manifests、
+  profile locks 与 identity；高级 profile packs 和无关重资产不进入产品闭包。
 - 应用更新与 runtime maintenance 通过协调服务串行化；更新后兼容组件复用，不兼容时
   明确要求重新准备，不在启动时偷偷下载。
 
 ## 5. 分阶段工作包
 
-### N0：Backend model registry 前置包
+### N0：Backend 原生模型管理前置包
 
-- 发布 `huggingface`/`modelscope` model-registry catalog、Settings round-trip 与 Adapter。
-- 将 PaddleOCR/MinerU model acquisition 纳入 durable maintenance，并把全部 cache/config/model
-  路径收口到 portable state；通过真实下载、中断、retry、断网本地复用测试。
+- Backend 不再通过 download-source catalog 暴露模型仓库；其原生依赖拥有模型获取与缓存。
+- Backend 在导入 PaddleX/MinerU 前通过 launch environment 固定上游官方 cache/config 根；
+  首次推理触发的原生下载、失败恢复与后续复用由 Backend 对实际 pipeline 做测试，Runtime
+  maintenance 只负责 Python/高级依赖，不接管模型文件。
 - 修正 manifest 的三项 capability 后随下一版正式 Backend Release 交付。
 
 ### N1：正式 Protocol 包与强类型契约
@@ -255,13 +243,13 @@ Backend 增加 model acquisition interface，至少有 PaddleX、MinerU 生产 A
 
 - 实现 catalog 业务键校验和 feature/accelerator 映射。
 - 新配置默认 RapidOCR；旧配置无值迁移，未知值要求用户重选。
-- source ids 保存到 Backend Settings 而非 App 配置，且不保存 endpoint；只允许 Backend
-  catalog 中的 id。
+- `package_index` source id 保存到 Backend Settings 而非 App 配置，且不保存 endpoint；未知
+  kind/endpoint 仅在 DTO/wire 层严格解析和保留，不进入 editable selection。
 
 ### N3：OCR 请求与设置 UI
 
 - 全局 engine 与任务 override 分离；非 OCR pipeline 不发送 engine。
-- SettingsViewModel/Workbench/WebAssets 完成 engine、feature 和 source 选择。
+- SettingsViewModel/Workbench/WebAssets 完成 engine、feature 和 `package_index` source 选择。
 - 对当前 Backend 显示 CPU/CUDA 的 `document_parsing`/`gpu_runtime` 和 TUNA/PyPI，但不把
   这些当前值固化为前端协议枚举。
 - unavailable/preparation required、426/428 和稳定错误码提供本地化动作提示，不 fallback。
@@ -284,7 +272,8 @@ Backend 增加 model acquisition interface，至少有 PaddleX、MinerU 生产 A
 
 - 删除 Setup 用户交付路径，保留 Velopack update feed；更新精确资产测试和文档。
 - clean-machine 禁网 base install + RapidOCR/PDF smoke。
-- full online install、失败保持 base、应用更新后复用组件和 frozen WebView UI smoke。
+- full online install、失败保持 base、应用更新后复用组件和 frozen WebView UI smoke；发布布局
+  契约排除未来高级 profile packs 和无关重资产。
 
 ## 6. 测试矩阵
 
@@ -297,7 +286,7 @@ C# 单元/契约：
 - catalog duplicate source id、duplicate feature+accelerator、unknown component/source fail closed。
 - 全局 RapidOCR、任务 override、非 OCR pipeline、引擎 unavailable/preparation-required。
 - Settings 修改与 operation snapshot 竞态；retry reuse 与 explicit replace。
-- Workbench bridge round-trip 不泄漏 endpoint/内部依赖信息，未知 kind 有降级显示。
+- Workbench bridge round-trip 不泄漏 endpoint/内部依赖信息，未知 kind 不进入 UI。
 
 集成/E2E：
 
@@ -309,8 +298,8 @@ C# 单元/契约：
 - Windows OCR 有/无语言包；PaddleOCR 未准备→确认下载→完成→OCR。
 - full 未选择零下载；CPU/CUDA 只装选定 closure；中断、空间不足、lock 不匹配保持 base。
 - 安装期间改变 Settings 不影响当前 sources；下一 operation 使用新偏好。
-- Hugging Face/ModelScope 分别准备 PaddleOCR 与 MinerU；完成后断网重启仍只读本地模型，
-  source 改动只影响下一次 acquisition。
+- 上游 Runtime 原生完成模型准备后，Next 只验证推理结果/错误与 portable launch 环境透传；
+  真实模型下载和断网复用由 Backend pipeline 测试负责，不映射为 Runtime maintenance 操作。
 - 将 `USERPROFILE`/`LOCALAPPDATA`/`TEMP` 指向监控目录后运行设置、WebView2、OCR/PDF、Runtime
   ensure、Bootstrapper 错误与更新检查，断言监控目录无产品新增文件；不可写根 fail closed。
 - Velopack 更新不重复下载兼容 full components；不兼容组合 fail closed。
@@ -323,17 +312,17 @@ build/smoke；完整结果以 GitHub PR `required` 为权威。
 
 - [ ] 两个 NuGet 包与四份 lock 已精确绑定 Protocol 2.7.1；下一版正式 Backend Release 的
   runtime manifest/health 同时声明三项能力并被严格绑定，latest 不兼容时不回退。
-- [ ] 引擎、feature/accelerator、source 三类选择均由 Backend catalog 驱动。
+- [ ] 引擎、feature/accelerator 与 `package_index` source 选择由 Backend catalog 驱动。
 - [ ] C# 强类型 client 保留 omission/empty/open-kind/snapshot/retry 的精确 wire 语义。
 - [ ] base 禁网可用，full 仅显式在线安装，失败不破坏 base。
-- [ ] Backend catalog 正式声明 Hugging Face/ModelScope；PaddleOCR/MinerU 经同一 portable
-  model store 准备并可断网复用，用户 profile 无 cache/config 写入。
+- [ ] 模型由上游 Runtime 原生管理；Next 不展示 `model_registry` 或 endpoint，旧 wire kind 的
+  required endpoint 仍被严格解析并原样保留，非法 descriptor fail closed。
 - [ ] Next 配置、日志、缓存、Runtime、模型、输出、临时文件、WebView2 profile 与更新状态
   全部位于 `<portable-root>/state`；不可写时不回退。
 - [ ] 用户资产只有 Portable，Velopack 应用更新与 Runtime 组件生命周期正确隔离。
 - [ ] clean-machine、WebAssets/WinUI、release build/smoke 和 PR required 全部通过。
 
-建议 PR 顺序：Backend model registry/Release gate → Protocol locks → selection
+建议 PR 顺序：Backend Release gate → Protocol locks → selection
 service/config → inference/UI → maintenance → Portable state → Portable release。每个 PR 只
 表达一个可验证意图；不得把 Backend main 状态
 写成正式 Release 已就绪，不得在 UI 中复制 Protocol DTO 解析、让 WebAssets 直连 Backend、
@@ -341,9 +330,4 @@ service/config → inference/UI → maintenance → Portable state → Portable 
 
 ## 8. 外部能力依据（实施时重新核对锁定版本）
 
-- PaddleX 模型源：<https://paddlepaddle.github.io/PaddleX/latest/en/module_usage/tutorials/ocr_modules/layout_detection.html>
-- MinerU 模型源与本地模型：<https://opendatalab.github.io/MinerU/usage/model_source/>
-- MinerU 配置路径：<https://opendatalab.github.io/MinerU/usage/cli_tools/>
-- Hugging Face cache 环境变量：<https://huggingface.co/docs/huggingface_hub/en/package_reference/environment_variables>
-- ModelScope cache：<https://www.modelscope.cn/docs/sdk/cli>
 - Velopack Portable 交付：<https://docs.velopack.io/packaging/overview>

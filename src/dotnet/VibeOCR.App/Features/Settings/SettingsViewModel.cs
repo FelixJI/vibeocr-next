@@ -19,7 +19,7 @@ public sealed record SettingsEngineOption(
     bool RequiresDownload,
     bool Selected);
 
-/// <summary>One catalog download source; unknown kinds render as-is.</summary>
+/// <summary>One package-index source available for dependency installation.</summary>
 public sealed record SettingsSourceOption(
     string Kind,
     string Id,
@@ -35,6 +35,8 @@ public sealed record SettingsFeatureOption(
 
 public sealed class SettingsViewModel : INotifyPropertyChanged
 {
+    private const string UserSelectableSourceKind = "package_index";
+
     private readonly IInferenceClient _inference;
     private readonly string _configFile;
     private readonly PortableLayout? _portableLayout;
@@ -235,6 +237,11 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             Status = "运行时目录尚未加载，请先刷新运行时";
             return;
         }
+        if (!string.Equals(kind, UserSelectableSourceKind, StringComparison.Ordinal))
+        {
+            Status = "当前版本不支持设置此下载源类别";
+            return;
+        }
         try
         {
             IReadOnlyList<string> next = ComposeSourceSelection(kind, sourceId);
@@ -420,11 +427,16 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private static IReadOnlyList<SettingsSourceOption> ProjectSources(
         RuntimeSelectionService selection,
         IReadOnlyList<string> selectedIds) =>
-        [.. selection.Sources.Select(source => new SettingsSourceOption(
-            source.Kind,
-            source.Id,
-            SourceDisplayName(source),
-            selectedIds.Contains(source.Id)))];
+        [.. selection.Sources
+            .Where(source => string.Equals(
+                source.Kind,
+                UserSelectableSourceKind,
+                StringComparison.Ordinal))
+            .Select(source => new SettingsSourceOption(
+                source.Kind,
+                source.Id,
+                SourceDisplayName(source),
+                selectedIds.Contains(source.Id)))];
 
     private static IReadOnlyList<SettingsFeatureOption> ProjectFeatures(
         RuntimeSelectionService selection,
@@ -450,8 +462,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     {
         "tuna-pypi" => "TUNA PyPI 镜像",
         "pypi" => "PyPI 官方源",
-        "huggingface" => "Hugging Face",
-        "modelscope" => "ModelScope",
         _ => source.Id,
     };
 

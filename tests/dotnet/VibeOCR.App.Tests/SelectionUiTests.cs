@@ -285,28 +285,30 @@ public sealed class SelectionUiTests : IDisposable
     }
 
     [Fact]
-    public async Task ModelRegistrySourcesProjectAndPersistPerKind()
+    public async Task ModelRegistrySourcesStayOpaqueAndCannotBeSelectedByTheUi()
     {
         var fake = new SelectionInferenceClient
         {
             Health = SelectionHealth(),
-            Settings = new SettingsSnapshot { DownloadSourceIds = ["tuna-pypi"] },
+            Settings = new SettingsSnapshot
+            {
+                DownloadSourceIds = ["tuna-pypi", "huggingface"],
+            },
         };
         var viewModel = new SettingsViewModel(fake, configFile: _configFile);
         await viewModel.LoadSnapshotAsync(CancellationToken.None);
 
-        Assert.Contains(viewModel.Sources, source =>
-            source.Kind == "model_registry" && source.Id == "huggingface");
-        Assert.Contains(viewModel.Sources, source =>
-            source.Kind == "model_registry" && source.Id == "modelscope");
+        Assert.All(viewModel.Sources, source =>
+            Assert.Equal("package_index", source.Kind));
+
+        await viewModel.SetSourceAsync("package_index", "pypi", CancellationToken.None);
+        Assert.Equal(
+            ["huggingface", "pypi"],
+            fake.LastUpdate?.DownloadSourceIds);
 
         await viewModel.SetSourceAsync("model_registry", "modelscope", CancellationToken.None);
-        Assert.Equal(
-            ["tuna-pypi", "modelscope"],
-            fake.LastUpdate?.DownloadSourceIds);
-        Assert.Contains(
-            viewModel.Sources.Where(s => s.Selected).Select(s => s.Id),
-            id => id == "modelscope");
+        Assert.Equal(1, fake.UpdateCalls);
+        Assert.Contains("不支持", viewModel.Status);
     }
 
     private static Wire.Health SelectionHealth() => new()
