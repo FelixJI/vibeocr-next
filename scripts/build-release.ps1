@@ -104,7 +104,8 @@ if (@(Get-ChildItem -LiteralPath $velopackOutput -Filter '*-Setup.exe').Count -n
     throw 'Velopack produced a Setup installer although portable-only is configured'
 }
 Copy-Item -LiteralPath $full[0].FullName -Destination (Join-Path $artifacts "VibeOCRNext-$Version-full.nupkg")
-Copy-Item -LiteralPath $portable[0].FullName -Destination (Join-Path $artifacts 'VibeOCRNext-Portable.zip')
+Copy-Item -LiteralPath $portable[0].FullName `
+  -Destination (Join-Path $artifacts "VibeOCRNext-v$Version-win-x64.zip")
 Copy-Item -LiteralPath $feed[0].FullName -Destination (Join-Path $artifacts 'releases.win.json')
 Write-CiStage 'artifact-verify'
 uv run --no-sync python (Join-Path $root 'scripts/build_release_checksums.py') $artifacts

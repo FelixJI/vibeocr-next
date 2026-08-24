@@ -69,7 +69,7 @@
 - `.ci/project.json` 的 bootstrap 必须包含 Python dev tools、WebAssets `npm ci`、Windows App Runtime 安装、组件解析和 locked restore；遗漏 Windows App Runtime 会使 WinUI testhost 挂起。
 - quality=`uv run python scripts/check_quality.py`；E2E 同时运行 Platform tests 与 `scripts/test_app_ci.ps1` 的 fail-closed App tests；随后 `scripts/build-release.ps1` 和 `uv run python scripts/release_smoke.py` 构建并验证真实候选。
 - 每次 CI 使用最新正式 Backend 和其绑定的 Protocol runtime，支持 Protocol major 2 且 minor-compatible。编译 SDK 从 `Directory.Packages.props` 的单一精确 pin 读取并下载到 `.release-input/protocol-sdk`；运行时 Protocol 位于 `.release-input/protocol`。两者只要求同 major，不比较 minor 大小；新行为必须按调用点 capability 协商。NuGet 不得从任意外部 feed 获取 `VibeOCR.Runtime.*`。
-- 版本唯一事实源是 `repository.json`，`scripts/sync_version.py` 派生 App csproj。正式资产精确为 Velopack full nupkg、Portable ZIP、`releases.win.json`、component lock、component identities 与 SPDX SBOM 六项，项目 smoke 必须拒绝 Setup、sidecar 和任何额外资产。Portable 应用通过 Velopack feed 完成应用内下载、应用与 restart，不走 Setup 或手动下载桥接。
+- 版本唯一事实源是 `repository.json`，`scripts/sync_version.py` 派生 App csproj。正式资产精确为 Velopack full nupkg、`VibeOCRNext-v{version}-win-x64.zip`、`releases.win.json`、component lock、component identities 与 SPDX SBOM 六项，项目 smoke 必须拒绝 Setup、sidecar 和任何额外资产。Portable 应用通过 Velopack feed 完成应用内下载、应用与 restart，不走 Setup 或手动下载桥接。
 - release publish 必须包含 WinUI `.xbf`/`.pri`、Bootstrapper、Velopack 运行时文件与组件 identity；否则可能出现 `XamlParseException` 或更新入口失效。修改 publish layout、WebAssets、runtime installer 参数或 capabilities 时执行真实打包验证。
 - Python/PowerShell/TOML 用 4 空格，C#/JSON/YAML 用 2 空格；Python Ruff/Node/.NET 版本以配置为准。不在文档中假定某个 clone 是否安装 Git hook，按工作开始时的实际检查执行，未安装时运行配置对应质量脚本。
 

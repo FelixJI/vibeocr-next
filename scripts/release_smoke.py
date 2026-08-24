@@ -32,11 +32,12 @@ def _extract_product(archive: Path, destination: Path) -> Path:
     return roots[0] if len(roots) == 1 else root
 
 
-def verify(artifacts: Path) -> None:
+def verify(artifacts: Path, version: str) -> None:
+    portable_name = f"VibeOCRNext-v{version}-win-x64.zip"
     names = verify_release_assets(
         artifacts,
         required=(
-            "VibeOCRNext-Portable.zip",
+            portable_name,
             "releases.win.json",
             "component-lock.json",
             "component-identities.json",
@@ -59,7 +60,7 @@ def verify(artifacts: Path) -> None:
     full = next(artifacts.glob("VibeOCRNext-*-full.nupkg"))
     expected_names = {
         full.name,
-        "VibeOCRNext-Portable.zip",
+        portable_name,
         "releases.win.json",
         "component-lock.json",
         "component-identities.json",
@@ -73,9 +74,7 @@ def verify(artifacts: Path) -> None:
     root = Path(os.environ.get("AUTOMATION_PROJECT_ROOT", Path(__file__).parents[1]))
     with tempfile.TemporaryDirectory(prefix="vibeocr-web-smoke-") as temporary:
         extracted = Path(temporary)
-        product_root = _extract_product(
-            artifacts / "VibeOCRNext-Portable.zip", extracted
-        )
+        product_root = _extract_product(artifacts / portable_name, extracted)
         subprocess.run(
             [
                 "pwsh",
@@ -93,7 +92,10 @@ def verify(artifacts: Path) -> None:
 
 if __name__ == "__main__":
     try:
-        verify(Path(os.environ["AUTOMATION_ARTIFACTS_DIR"]).resolve())
+        verify(
+            Path(os.environ["AUTOMATION_ARTIFACTS_DIR"]).resolve(),
+            os.environ["AUTOMATION_VERSION"],
+        )
     except (
         KeyError,
         OSError,
