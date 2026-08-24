@@ -372,11 +372,11 @@ def _configure_release_smoke_fixture(
     full.write_bytes(b"velopack-package")
     for name in ("releases.win.json",):
         (artifacts / name).write_bytes(b"placeholder")
-    with zipfile.ZipFile(artifacts / "VibeOCRNext-Portable.zip", "w") as package:
+    with zipfile.ZipFile(artifacts / "VibeOCRNext-v1.2.3-win-x64.zip", "w") as package:
         package.writestr("VibeOCR.WinUI.exe", b"placeholder")
     names = {
         full.name,
-        "VibeOCRNext-Portable.zip",
+        "VibeOCRNext-v1.2.3-win-x64.zip",
         "releases.win.json",
         "component-lock.json",
         "component-identities.json",
@@ -431,7 +431,7 @@ def test_release_smoke_executes_the_extracted_product_handshake(
         fail_smoke=False,
     )
 
-    verify(artifacts)
+    verify(artifacts, "1.2.3")
 
     assert len(calls) == 1
     assert calls[0][2].endswith("smoke_web_workbench.ps1")
@@ -448,7 +448,7 @@ def test_release_smoke_propagates_a_failed_web_ready_handshake(
     )
 
     with pytest.raises(subprocess.CalledProcessError):
-        verify(artifacts)
+        verify(artifacts, "1.2.3")
 
     assert len(calls) == 1
 
@@ -727,7 +727,7 @@ def test_project_config_declares_minor_compatible_protocol_and_single_identity_a
     assert config["release"]["identity_asset"] == "component-identities.json"
     assert config["release"]["required_assets"] == [
         "VibeOCRNext-*-full.nupkg",
-        "VibeOCRNext-Portable.zip",
+        "VibeOCRNext-v{version}-win-x64.zip",
         "releases.win.json",
         "component-lock.json",
         "component-identities.json",
@@ -904,13 +904,13 @@ def test_release_smoke_binds_native_portable_and_component_identity(
     )
     (tmp_path / "SBOM.spdx.json").write_text("{}", encoding="utf-8")
     (tmp_path / "VibeOCRNext-0.2.0-full.nupkg").write_bytes(b"velopack-package")
-    with zipfile.ZipFile(tmp_path / "VibeOCRNext-Portable.zip", "w") as package:
+    with zipfile.ZipFile(tmp_path / "VibeOCRNext-v0.2.0-win-x64.zip", "w") as package:
         package.writestr("VibeOCR.WinUI.exe", b"desktop")
     (tmp_path / "releases.win.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
         "scripts.release_smoke.subprocess.run", lambda *args, **kwargs: None
     )
-    verify(tmp_path)
+    verify(tmp_path, "0.2.0")
 
     identity = json.loads(
         (tmp_path / "component-identities.json").read_text(encoding="utf-8")
@@ -920,7 +920,7 @@ def test_release_smoke_binds_native_portable_and_component_identity(
         json.dumps(identity), encoding="utf-8"
     )
     with pytest.raises(ValueError, match="protocol_sdk"):
-        verify(tmp_path)
+        verify(tmp_path, "0.2.0")
     identity["protocol_sdk"] = {
         "version": "2.3.0",
         "source_sha": "d" * 40,
@@ -932,7 +932,7 @@ def test_release_smoke_binds_native_portable_and_component_identity(
 
     (tmp_path / "unexpected.txt").write_text("unexpected", encoding="utf-8")
     with pytest.raises(ValueError, match="release asset set mismatch"):
-        verify(tmp_path)
+        verify(tmp_path, "0.2.0")
 
 
 def test_only_canonical_workflows_remain() -> None:

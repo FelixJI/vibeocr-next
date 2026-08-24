@@ -202,7 +202,7 @@
     ],
     "required_assets": [
       "VibeOCRNext-*-full.nupkg",
-      "VibeOCRNext-Portable.zip",
+      "VibeOCRNext-v{version}-win-x64.zip",
       "releases.win.json",
       "component-lock.json",
       "component-identities.json",

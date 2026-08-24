@@ -36,14 +36,14 @@ Release 在本机完成。
 ## 下载与使用
 
 1. 从 [Releases](https://github.com/FelixJI/vibeocr-next/releases/latest) 下载
-   `VibeOCRNext-Setup.exe`；无需安装时可选 `VibeOCRNext-Portable.zip`。
-2. 校验 Setup 的 SHA-256：
+   `VibeOCRNext-v<version>-win-x64.zip`。
+2. 校验 Portable ZIP 的 SHA-256：
 
    ```powershell
-   Get-FileHash .\VibeOCRNext-Setup.exe -Algorithm SHA256
+   Get-FileHash .\VibeOCRNext-v*-win-x64.zip -Algorithm SHA256
    ```
 
-3. 安装版由 Velopack 在应用内检查、下载并应用更新；Portable 用户手动下载新版。首次使用相关能力时，
+3. 便携版由 Velopack 在应用内检查、下载并应用更新。首次使用相关能力时，
    应用会按 component lock 安装本地 Backend 运行时。
 
 ## 架构
