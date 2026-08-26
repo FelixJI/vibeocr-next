@@ -68,6 +68,16 @@ public sealed class SelectionUiTests : IDisposable
     {
         var fake = new DelayedSelectionInferenceClient { Health = SelectionHealth() };
         var viewModel = new SettingsViewModel(fake, configFile: _configFile);
+        bool publishedBeforeProjectionCompleted = false;
+        viewModel.PropertyChanged += (_, eventArgs) =>
+        {
+            if (eventArgs.PropertyName is nameof(SettingsViewModel.SelectedEngine)
+                or nameof(SettingsViewModel.Engines))
+            {
+                publishedBeforeProjectionCompleted |=
+                    viewModel.RecognitionSelection is not null;
+            }
+        };
 
         Task first = viewModel.LoadSelectionAsync(CancellationToken.None);
         await fake.HealthRequested.Task.WaitAsync(TestContext.Current.CancellationToken);
@@ -79,6 +89,11 @@ public sealed class SelectionUiTests : IDisposable
         Assert.NotNull(viewModel.Selection);
         Assert.Equal(3, viewModel.Engines.Count);
         Assert.Equal(1, fake.HealthCalls);
+        Assert.False(publishedBeforeProjectionCompleted);
+        RecognitionSelectionSnapshot snapshot = Assert.IsType<RecognitionSelectionSnapshot>(
+            viewModel.RecognitionSelection);
+        Assert.Same(viewModel.Selection, snapshot.Catalog);
+        Assert.Equal("rapidocr", snapshot.SelectedId);
     }
 
     [Fact]
