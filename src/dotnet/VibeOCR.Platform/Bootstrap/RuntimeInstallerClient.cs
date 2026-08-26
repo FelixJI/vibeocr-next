@@ -732,11 +732,25 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         {
             cancellationWasRequested = true;
             long sequence = Volatile.Read(ref lastSequence);
-            await CancelAsync(
-                operationId,
-                $"cancel-{operationId}",
-                sequence > 0 ? sequence : null,
-                CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                await CancelAsync(
+                    operationId,
+                    $"cancel-{operationId}",
+                    sequence > 0 ? sequence : null,
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (RuntimeInstallerException error) when (
+                string.Equals(
+                    error.CanonicalCode,
+                    "RUNTIME_OPERATION_NOT_CANCELLABLE",
+                    StringComparison.Ordinal))
+            {
+                // The Backend closes cancellation once commit begins. The
+                // operation remains authoritative, so observe its terminal
+                // snapshot instead of turning a successful commit into a
+                // client-side failure.
+            }
             Host.RuntimeMaintenanceSnapshot terminal = await AwaitTerminalSnapshotAsync(
                 operationId,
                 sequence,

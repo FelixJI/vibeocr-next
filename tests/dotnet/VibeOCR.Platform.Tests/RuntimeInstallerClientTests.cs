@@ -738,6 +738,43 @@ public sealed class RuntimeInstallerClientTests
     }
 
     [Fact]
+    public async Task V2CancellationRejectedAfterCommitWaitsForSucceededSnapshot()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(),
+            $"vibeocr-v2-cancel-commit-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string manifest = Path.Combine(root, "runtime-manifest.json");
+            await File.WriteAllTextAsync(
+                manifest,
+                """{"capabilities":["runtime.maintenance.v2"]}""",
+                TestContext.Current.CancellationToken);
+            var runner = new CommitRaceCancellationRunner();
+            var client = new RuntimeInstallerClient(
+                Configuration() with { RuntimeManifest = manifest },
+                runner);
+            using var cancellation = new CancellationTokenSource();
+            Task<RuntimeLaunch> operation = client.EnsureAsync(
+                "stable-op",
+                cancellationToken: cancellation.Token);
+            await runner.Started.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+            cancellation.Cancel();
+
+            RuntimeLaunch launch = await operation;
+            Assert.Equal(@"C:\store\python.exe", launch.PythonExecutable);
+            Assert.Equal(3, runner.StartInfos.Count);
+            Assert.False(runner.OwnedToken.IsCancellationRequested);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task InspectParsesIntegrityWithoutDerivingRuntimePaths()
     {
         var runner = new StubRunner(
@@ -1211,6 +1248,50 @@ public sealed class RuntimeInstallerClientTests
                 return Task.FromResult(new RuntimeInstallerProcessResult(
                     0,
                     """{"protocol_version":2,"ok":true,"operation":"ensure","maintenance":{"operation_id":"stable-op","sequence":2,"operation":"ensure","operation_state":"running","phase":"install_profile","profile_id":"win-x64-cpu","updated_at":"2026-08-05T00:00:01Z"}}""",
+                    string.Empty));
+            }
+            return Task.FromResult(new RuntimeInstallerProcessResult(
+                0,
+                $$"""{"protocol_version":2,"ok":true,"request_kind":"observe","operation_id":"stable-op","snapshot":{"operation_id":"stable-op","sequence":3,"operation":"ensure","operation_state":"succeeded","phase":"commit_runtime","profile_id":"win-x64-cpu","updated_at":"2026-08-05T00:00:02Z"},"events":[{{MaintenanceEvent(1)}},{{MaintenanceEvent(2)}},{{MaintenanceEvent(3)}}],"oldest_sequence":1,"through_sequence":3,"more":false,"replay_expires_at":null}""",
+                string.Empty));
+        }
+
+        public Task<RuntimeInstallerProcessResult> RunAsync(
+            ProcessStartInfo startInfo,
+            Action<string>? standardOutputLine,
+            CancellationToken cancellationToken)
+        {
+            StartInfos.Add(startInfo);
+            OwnedToken = cancellationToken;
+            Started.TrySetResult();
+            return _operation.Task;
+        }
+    }
+
+    private sealed class CommitRaceCancellationRunner : IRuntimeInstallerCommandRunner
+    {
+        private readonly TaskCompletionSource<RuntimeInstallerProcessResult> _operation =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource Started { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public List<ProcessStartInfo> StartInfos { get; } = [];
+        public CancellationToken OwnedToken { get; private set; }
+
+        public Task<RuntimeInstallerProcessResult> RunAsync(
+            ProcessStartInfo startInfo,
+            CancellationToken cancellationToken)
+        {
+            StartInfos.Add(startInfo);
+            if (StartInfos.Count == 2)
+            {
+                _operation.TrySetResult(new RuntimeInstallerProcessResult(
+                    0,
+                    V2LaunchEnvelope("ensure", "runtime.maintenance.v2"),
+                    string.Empty));
+                return Task.FromResult(new RuntimeInstallerProcessResult(
+                    1,
+                    """{"protocol_version":2,"ok":false,"error":{"code":"operation_not_cancellable","canonical_code":"RUNTIME_OPERATION_NOT_CANCELLABLE","category":"conflict","message":"operation is committing","retryable":false}}""",
                     string.Empty));
             }
             return Task.FromResult(new RuntimeInstallerProcessResult(
