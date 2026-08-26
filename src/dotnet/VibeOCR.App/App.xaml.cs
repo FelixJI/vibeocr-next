@@ -9,6 +9,7 @@ using VibeOCR.App.Features.Batch;
 using VibeOCR.App.Features.Pdf;
 using VibeOCR.App.Features.QrCode;
 using VibeOCR.App.Features.Settings;
+using VibeOCR.App.Features.Startup;
 using VibeOCR.App.Features.Maintenance;
 using VibeOCR.App.Inference;
 using VibeOCR.App.Features.Shell;
@@ -379,7 +380,8 @@ public sealed partial class App : Application
                 ?? throw new InvalidOperationException("Runtime Installer is unavailable.");
             var maintenanceProgress = new Progress<Host.RuntimeMaintenanceEvent>(
                 _runtimeStatus.ApplyMaintenance);
-            RuntimeLaunch launch = await installer.EnsureAsync(
+            RuntimeLaunch launch = await StartupRuntimeInstaller.EnsureBaseRuntimeAsync(
+                installer,
                 maintenanceProgress,
                 _applicationShutdown.Token);
             string logPath = Path.Combine(layout.DataRoot, "supervisor.log");
