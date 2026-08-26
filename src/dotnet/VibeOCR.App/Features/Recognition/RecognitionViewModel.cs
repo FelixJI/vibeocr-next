@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 using VibeOCR.App.Features.Settings;
 using VibeOCR.App.Inference;
 using VibeOCR.Contracts.HttpV2;
+using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 
 namespace VibeOCR.App.Features.Recognition;
@@ -21,6 +22,8 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     private RecognitionInput? _currentInput;
     private string _status = "请选择图片";
     private string? _taskEngine;
+    private RecognitionModeOption? _taskRecognitionMode;
+    private RecognitionModeOption? _globalRecognitionMode;
 
     public RecognitionViewModel(
         IInferenceClient inference,
@@ -45,8 +48,8 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     public RecognizeResponse? Result => _result;
 
     /// <summary>
-    /// Task-level OCR engine override as a wire engine id. Null uses the
-    /// persisted global preference; only the plain-text OCR pipeline sends it.
+    /// Task-level recognition-mode id, or a legacy wire engine id when the
+    /// runtime does not expose Protocol 2.8 recognition modes.
     /// </summary>
     public string? TaskEngine
     {
@@ -54,19 +57,34 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         set => SetField(ref _taskEngine, string.IsNullOrWhiteSpace(value) ? null : value);
     }
 
+    public void SetRecognitionModes(RecognitionModeOption? taskMode, RecognitionModeOption? globalMode)
+    {
+        _taskRecognitionMode = taskMode;
+        _globalRecognitionMode = globalMode;
+    }
+
     /// <summary>The engine this run would use: task override, else the global preference.</summary>
     public OcrEngine? EffectiveEngine
     {
         get
         {
+            if (_taskRecognitionMode is not null) return _taskRecognitionMode.Engine;
+            if (_globalRecognitionMode is not null) return _globalRecognitionMode.Engine;
             OcrEngine? task = OcrEngineSettings.ToEngine(TaskEngine);
             if (task is not null)
             {
                 return task;
             }
+            if (TaskEngine is not null)
+            {
+                throw new InvalidOperationException(
+                    $"任务识别模式 {TaskEngine} 尚未绑定 Runtime catalog，不能静默降级。");
+            }
             return OcrEngineSettings.GlobalEngine(_configFile);
         }
     }
+
+    public string EffectivePipeline => _taskRecognitionMode?.PipelineId ?? _globalRecognitionMode?.PipelineId ?? Pipeline;
 
     public ResultActions CreateResultActions(IResultActionPlatform platform)
     {
@@ -127,8 +145,10 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
             }
 
             const string clientItemKey = "recognition-input";
+            string pipeline = EffectivePipeline;
+            OcrEngine? engine = EffectiveEngine;
             InferenceJobRun job = await _jobs.RunRecognitionAsync(
-                Pipeline,
+                pipeline,
                 JobPriority.Interactive,
                 [
                     new InferenceUploadInput(
@@ -139,7 +159,7 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
                 ],
                 options: null,
                 cancellationToken: run.Token,
-                engine: EffectiveEngine);
+                engine: engine);
             JobSnapshot snapshot = job.Snapshot;
 
             if (generation != Volatile.Read(ref _generation)) return;
@@ -154,7 +174,7 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
                 return;
             }
 
-            _result = RecognitionOutcomeMapper.ToResponse(outcome, Pipeline);
+            _result = RecognitionOutcomeMapper.ToResponse(outcome, pipeline);
             ResultText = _result.Text;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Result)));
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasResult)));

@@ -179,6 +179,7 @@ def resolve(root: Path = ROOT) -> Path:
             "runtime.settings.v2",
             "task.progress.v1",
             "ocr.engine-selection.v1",
+            "ocr.recognition-modes.v1",
             "runtime.download-sources.v1",
             "runtime.component-selection.v1",
         ),

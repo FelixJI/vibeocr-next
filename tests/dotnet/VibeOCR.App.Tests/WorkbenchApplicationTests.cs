@@ -85,6 +85,24 @@ public sealed class WorkbenchApplicationTests
   }
 
   [Fact]
+  public async Task BootstrapPreparesRuntimeCatalogBeforeReadingInitialStates()
+  {
+    var handler = new StreamingCommandHandler();
+    await using var application = new WorkbenchApplication(
+      ["recognition.capture"],
+      WorkbenchRoute.Recognition,
+      handler);
+
+    WorkbenchBootstrap bootstrap = await application.BootstrapAsync(
+      CancellationToken.None);
+
+    Assert.True(handler.Prepared);
+    RecognitionWorkbenchState state = Assert.IsType<RecognitionWorkbenchState>(
+      bootstrap.States.Single(item => item.Scope == "recognition").State);
+    Assert.Equal("recognition.catalog-ready", state.StatusCode);
+  }
+
+  [Fact]
   public async Task EachBootstrapStartsANewSessionWithoutResettingRevision()
   {
     await using var application = new WorkbenchApplication(
@@ -152,11 +170,16 @@ public sealed class WorkbenchApplicationTests
 
   private sealed class StreamingCommandHandler :
     IWorkbenchCommandHandler,
-    IWorkbenchStateSource
+    IWorkbenchStateSource,
+    IWorkbenchBootstrapSource
   {
-    public IReadOnlyList<WorkbenchState> InitialStates { get; } =
+    public bool Prepared { get; private set; }
+
+    public IReadOnlyList<WorkbenchState> InitialStates =>
     [
-      new RecognitionWorkbenchState(false, "recognition.ready"),
+      new RecognitionWorkbenchState(
+        false,
+        Prepared ? "recognition.catalog-ready" : "recognition.ready"),
       new BatchWorkbenchState(false, 0, 0, 0),
     ];
 
@@ -166,6 +189,13 @@ public sealed class WorkbenchApplicationTests
       WorkbenchCommand command,
       CancellationToken cancellationToken) => ValueTask.FromResult(
         new WorkbenchCommandOutcome([], null));
+
+    public ValueTask PrepareBootstrapAsync(CancellationToken cancellationToken)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      Prepared = true;
+      return ValueTask.CompletedTask;
+    }
 
     public void Publish(WorkbenchState state) => StateChanged?.Invoke(state);
   }

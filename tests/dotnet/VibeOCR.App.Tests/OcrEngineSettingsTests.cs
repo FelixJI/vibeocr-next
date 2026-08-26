@@ -13,22 +13,24 @@ public sealed class OcrEngineSettingsTests : IDisposable
         Path.Combine(Path.GetTempPath(), $"vibeocr-engine-settings-{Guid.NewGuid():N}.json");
 
     [Fact]
-    public void MissingConfigFileMigratesToRapidOcrDefault()
+    public void MissingConfigDefersToRuntimeRapidTextDefault()
     {
         OcrEnginePreference preference = OcrEngineSettings.Load(_configFile);
 
-        Assert.Equal(OcrEngine.RapidOcr, preference.Engine);
+        Assert.Null(preference.Engine);
+        Assert.Null(preference.Mode);
         Assert.False(preference.RequiresChoice);
     }
 
     [Fact]
-    public void ConfigWithoutEngineKeyMigratesToRapidOcrDefault()
+    public void ConfigWithoutRecognitionChoiceDefersToRuntimeRapidTextDefault()
     {
         WriteConfig("""{"schema_version":1,"hotkeys":{"global_screenshot":"Ctrl+Alt+Q"}}""");
 
         OcrEnginePreference preference = OcrEngineSettings.Load(_configFile);
 
-        Assert.Equal(OcrEngine.RapidOcr, preference.Engine);
+        Assert.Null(preference.Engine);
+        Assert.Null(preference.Mode);
         Assert.False(preference.RequiresChoice);
     }
 
@@ -85,12 +87,13 @@ public sealed class OcrEngineSettingsTests : IDisposable
             layout.EnsurePortableState();
             File.WriteAllText(
                 layout.ConfigFile,
-            """{"schema_version":1,"hotkeys":{"global_screenshot":"Ctrl+Alt+Q"},"ocr":{"engine":"windows"}}""");
+            """{"schema_version":1,"hotkeys":{"global_screenshot":"Ctrl+Alt+Q"},"ocr":{"engine":"windows","recognition_mode":"windows_text"}}""");
 
             OcrEngineSettings.Save(layout, OcrEngine.PaddleOcr);
 
             JsonObject config = JsonNode.Parse(File.ReadAllText(layout.ConfigFile))!.AsObject();
             Assert.Equal("paddleocr", (string?)config["ocr"]!["engine"]);
+            Assert.Null(config["ocr"]!["recognition_mode"]);
             Assert.Equal("Ctrl+Alt+Q", (string?)config["hotkeys"]!["global_screenshot"]);
             Assert.Equal(1, (int?)config["schema_version"]);
 
@@ -116,6 +119,60 @@ public sealed class OcrEngineSettingsTests : IDisposable
             Assert.Equal(engine, OcrEngineSettings.ToEngine(wireName));
         }
         Assert.Null(OcrEngineSettings.ToEngine("not-an-engine"));
+    }
+
+    [Theory]
+    [InlineData(OcrEngine.RapidOcr, "rapid_text")]
+    [InlineData(OcrEngine.Windows, "windows_text")]
+    [InlineData(OcrEngine.PaddleOcr, "paddle_text")]
+    public void LegacyTextEngineMigratesBidirectionally(
+        OcrEngine engine,
+        string recognitionMode)
+    {
+        Assert.Equal(recognitionMode, OcrEngineSettings.ToRecognitionMode(engine));
+        Assert.Equal(engine, OcrEngineSettings.ToLegacyEngine(recognitionMode));
+    }
+
+    [Theory]
+    [InlineData("rapid_text", OcrEngine.RapidOcr)]
+    [InlineData("windows_text", OcrEngine.Windows)]
+    [InlineData("paddle_text", OcrEngine.PaddleOcr)]
+    public void GlobalEnginePreservesPersistedTextModeForLegacyRuntime(
+        string recognitionMode,
+        OcrEngine expected)
+    {
+        WriteConfig($$$"""{"ocr":{"recognition_mode":"{{{recognitionMode}}}"}}""");
+
+        Assert.Equal(expected, OcrEngineSettings.GlobalEngine(_configFile));
+    }
+
+    [Theory]
+    [InlineData("paddle_structure")]
+    [InlineData("paddle_document_vl")]
+    [InlineData("mineru_document")]
+    [InlineData("paddle_table")]
+    [InlineData("paddle_formula")]
+    public void DocumentAndSpecializedModesDoNotPretendToBeLegacyTextEngines(
+        string recognitionMode)
+    {
+        Assert.Null(OcrEngineSettings.ToLegacyEngine(recognitionMode));
+    }
+
+    [Theory]
+    [InlineData("paddle_structure")]
+    [InlineData("paddle_document_vl")]
+    [InlineData("mineru_document")]
+    [InlineData("paddle_table")]
+    [InlineData("paddle_formula")]
+    public void SpecializedModeFailsClosedWithoutRecognitionModeCatalog(
+        string recognitionMode)
+    {
+        WriteConfig($$$"""{"ocr":{"recognition_mode":"{{{recognitionMode}}}"}}""");
+
+        InvalidOperationException error = Assert.Throws<InvalidOperationException>(
+            () => OcrEngineSettings.GlobalEngine(_configFile));
+
+        Assert.Contains("不能按文本 OCR 静默降级", error.Message);
     }
 
     private void WriteConfig(string json) =>

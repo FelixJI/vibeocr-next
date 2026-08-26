@@ -14,7 +14,7 @@ public sealed class DeferredInferenceClientTests
         var deferred = new DeferredInferenceClient();
 
         Assert.False(deferred.IsAttached);
-        await Assert.ThrowsAsync<InvalidOperationException>(
+        await Assert.ThrowsAsync<InferenceClientNotAttachedException>(
             () => deferred.ObserveAsync("job-1", 0, CancellationToken.None));
     }
 
@@ -82,7 +82,7 @@ public sealed class DeferredInferenceClientTests
         deferred.Detach(inner);
 
         Assert.False(deferred.IsAttached);
-        await Assert.ThrowsAsync<InvalidOperationException>(
+        await Assert.ThrowsAsync<InferenceClientNotAttachedException>(
             () => deferred.ObserveAsync("job-1", 0, CancellationToken.None));
     }
 

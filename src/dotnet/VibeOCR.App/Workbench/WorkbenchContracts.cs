@@ -196,7 +196,12 @@ public sealed record RecognitionEngineChoice(
   bool Selected,
   bool IsTaskOverride,
   string Availability,
-  bool RequiresDownload);
+  bool RequiresDownload,
+  string LifecycleKind = "unmanaged",
+  bool SupportsPreload = false,
+  bool SupportsTtl = false,
+  bool SupportsPinning = false,
+  bool SupportsRelease = false);
 
 public sealed record BatchWorkbenchState(
   bool IsRunning,
@@ -397,4 +402,9 @@ public interface IWorkbenchStateSource
   IReadOnlyList<WorkbenchState> InitialStates { get; }
 
   event Action<WorkbenchState>? StateChanged;
+}
+
+public interface IWorkbenchBootstrapSource
+{
+  ValueTask PrepareBootstrapAsync(CancellationToken cancellationToken);
 }

@@ -6,6 +6,7 @@
 using System.Text.Json;
 using VibeOCR.App.Features.Batch;
 using VibeOCR.Contracts.HttpV2;
+using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 using Xunit;
 
@@ -58,6 +59,24 @@ public sealed class BatchViewModelSupervisorTests
         Assert.Equal(BatchItemState.Failed, viewModel.Items[1].State);
         Assert.NotNull(viewModel.Items[1].Error);
         Assert.Equal(BatchItemState.Completed, viewModel.Items[2].State);
+    }
+
+    [Fact]
+    public async Task RecognitionModeRoutesTheWholeBatchThroughItsBoundPipeline()
+    {
+        var files = new FakeBatchFileSource();
+        var fake = new FakeBatchInferenceClient();
+        var viewModel = new BatchViewModel(fake, files);
+        viewModel.SetRecognitionMode(DocumentMode(
+            "mineru_document",
+            "MinerU",
+            "process_keep_alive"));
+        viewModel.AddFiles([CreateTempPng("m")]);
+
+        await viewModel.StartAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal("MinerU", fake.LastRequest?.Pipeline.PipelineId);
+        Assert.Null(fake.LastRequest?.Pipeline.Engine);
     }
 
     [Fact]
@@ -129,6 +148,25 @@ public sealed class BatchViewModelSupervisorTests
         File.WriteAllBytes(path, [(byte)stem[0], 1, 2]);
         return path;
     }
+
+    private static RecognitionModeOption DocumentMode(
+        string id,
+        string pipeline,
+        string lifecycleKind) => new(
+            id,
+            "document",
+            pipeline,
+            null,
+            "advanced_component",
+            "ready",
+            null,
+            "document-component",
+            [],
+            lifecycleKind,
+            lifecycleKind == "model_residency",
+            true,
+            lifecycleKind == "model_residency",
+            true);
 
     private sealed class FakeBatchFileSource : IBatchFileSource
     {

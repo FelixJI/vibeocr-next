@@ -5,6 +5,9 @@ using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 
 namespace VibeOCR.App.Inference;
 
+public sealed class InferenceClientNotAttachedException(string message)
+    : InvalidOperationException(message);
+
 /// <summary>
 /// An <see cref="IInferenceClient"/> whose calls delegate to an attached inner
 /// client once <see cref="Attach"/> is called; before that, every call throws.
@@ -40,7 +43,7 @@ public sealed class DeferredInferenceClient : IInferenceClient
 
     private IInferenceClient Current =>
         Volatile.Read(ref _inner)
-        ?? throw new InvalidOperationException(
+        ?? throw new InferenceClientNotAttachedException(
             "The inference Supervisor client is not attached. "
             + "Wait for Supervisor startup to complete or inspect diagnostics.");
 

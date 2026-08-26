@@ -8,6 +8,7 @@ using System.Text.Json;
 using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Inference;
 using VibeOCR.Contracts.HttpV2;
+using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 using Xunit;
 
@@ -40,6 +41,39 @@ public sealed class RecognitionViewModelSupervisorTests
             IReadOnlyDictionary<string, SubmitUpload>>(fakeInference.LastUploads);
         Assert.Single(uploads);
         Assert.Equal(new byte[] { 1, 2, 3, 4 }, uploads["input-0"].Content);
+    }
+
+    [Fact]
+    public async Task RecognitionModeSubmitsItsBoundPipelineAndEngine()
+    {
+        var fakeInference = new FakeInferenceClient("structured result");
+        var inputs = new StubInputService();
+        var viewModel = new RecognitionViewModel(fakeInference, inputs);
+        viewModel.SetRecognitionModes(
+            new RecognitionModeOption(
+                "paddle_structure",
+                "document",
+                "PP-StructureV3",
+                null,
+                "advanced_component",
+                "ready",
+                null,
+                "paddleocr-cpu",
+                [],
+                "model_residency",
+                true,
+                true,
+                true,
+                true),
+            null);
+
+        await viewModel.RecognizeViaSupervisorAsync(
+            ct => inputs.PickFileAsync(ct),
+            CancellationToken.None);
+
+        Assert.NotNull(fakeInference.LastRequest);
+        Assert.Equal("PP-StructureV3", fakeInference.LastRequest!.Pipeline.PipelineId);
+        Assert.Null(fakeInference.LastRequest.Pipeline.Engine);
     }
 
     [Fact]

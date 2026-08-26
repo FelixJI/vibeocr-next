@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using VibeOCR.App.Inference;
 using VibeOCR.Contracts.HttpV2;
+using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 
 namespace VibeOCR.App.Features.Pdf;
@@ -21,6 +22,7 @@ public sealed class PdfViewModel(
     private string? _filePath;
     private int _pageCount;
     private int _selectedPage = -1;
+    private RecognitionModeOption? _recognitionMode;
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public ObservableCollection<PdfPageViewModel> Pages { get; } = [];
@@ -31,6 +33,8 @@ public sealed class PdfViewModel(
     public int PageCount { get => _pageCount; private set => SetField(ref _pageCount, value); }
     public int SelectedPage { get => _selectedPage; set => SetField(ref _selectedPage, value); }
     public bool HasSession => _sessionId is not null;
+
+    public void SetRecognitionMode(RecognitionModeOption? mode) => _recognitionMode = mode;
 
     public async Task OpenAsync(CancellationToken ct) { string? path = await files.PickFileAsync(ct); if (path is null) { Status = "已取消选择"; return; } await OpenPathAsync(path, ct); }
 
@@ -117,13 +121,16 @@ public sealed class PdfViewModel(
                     image);
             }
 
+            string pipeline = _recognitionMode?.PipelineId ?? "OCR";
+            OcrEngine? engine = _recognitionMode?.Engine ??
+                VibeOCR.App.Features.Settings.OcrEngineSettings.GlobalEngine(configFile);
             InferenceJobRun job = await _jobs.RunRecognitionAsync(
-                "OCR",
+                pipeline,
                 JobPriority.Background,
                 inputs,
                 options: null,
                 cancellationToken: run.Token,
-                engine: VibeOCR.App.Features.Settings.OcrEngineSettings.GlobalEngine(configFile));
+                engine: engine);
             JobSnapshot snap = job.Snapshot;
             if (generation != Volatile.Read(ref _generation)) return;
             if (snap.State is JobState.Cancelled) { foreach (int idx in pages) if (idx < Pages.Count) Pages[idx].State = PdfPageState.None; Status = "已取消"; return; }
@@ -135,7 +142,7 @@ public sealed class PdfViewModel(
                 ItemOutcome outcome = job.OutcomesByClientItemKey[$"page-{idx}"];
                 if (outcome.State is ItemState.Succeeded)
                 {
-                    Pages[idx].OcrText = RecognitionOutcomeMapper.ToResponse(outcome, "OCR").Text;
+                    Pages[idx].OcrText = RecognitionOutcomeMapper.ToResponse(outcome, pipeline).Text;
                     Pages[idx].State = PdfPageState.Done;
                     s++;
                 }

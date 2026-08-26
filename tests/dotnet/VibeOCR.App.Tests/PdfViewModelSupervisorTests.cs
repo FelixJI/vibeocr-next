@@ -1,6 +1,7 @@
 using System.Text.Json;
 using VibeOCR.App.Features.Pdf;
 using VibeOCR.Contracts.HttpV2;
+using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 using Xunit;
 
@@ -40,6 +41,34 @@ public sealed class PdfViewModelSupervisorTests
         Assert.Equal(PdfPageState.Done, viewModel.Pages[1].State);
         Assert.Equal("ocr-page-1", viewModel.Pages[1].OcrText);
         Assert.Equal("OCR 完成：成功 2 页，失败 0 页", viewModel.Status);
+    }
+
+    [Fact]
+    public async Task RecognitionModeRoutesPdfPagesThroughItsBoundPipeline()
+    {
+        var fake = new FakePdfInference();
+        var viewModel = new PdfViewModel(fake, new StubPdfSource());
+        viewModel.SetRecognitionMode(new RecognitionModeOption(
+            "paddle_structure",
+            "document",
+            "PP-StructureV3",
+            null,
+            "advanced_component",
+            "ready",
+            null,
+            "paddleocr-cpu",
+            [],
+            "model_residency",
+            true,
+            true,
+            true,
+            true));
+        await viewModel.OpenPathAsync("test.pdf", CancellationToken.None);
+
+        await viewModel.StartOcrAsync([0], false, CancellationToken.None);
+
+        Assert.Equal("PP-StructureV3", fake.LastRequest?.Pipeline.PipelineId);
+        Assert.Null(fake.LastRequest?.Pipeline.Engine);
     }
 
     private sealed class StubPdfSource : IPdfFileSource

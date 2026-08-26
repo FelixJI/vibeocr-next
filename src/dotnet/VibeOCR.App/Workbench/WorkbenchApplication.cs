@@ -34,21 +34,25 @@ public sealed class WorkbenchApplication : IWorkbenchApplication
     }
   }
 
-  public ValueTask<WorkbenchBootstrap> BootstrapAsync(
+  public async ValueTask<WorkbenchBootstrap> BootstrapAsync(
     CancellationToken cancellationToken)
   {
     cancellationToken.ThrowIfCancellationRequested();
+    if (_commandHandler is IWorkbenchBootstrapSource bootstrapSource)
+    {
+      await bootstrapSource.PrepareBootstrapAsync(cancellationToken);
+    }
     lock (_gate)
     {
       ObjectDisposedException.ThrowIf(_disposed, this);
       EnsureInitialStates();
-      return ValueTask.FromResult(new WorkbenchBootstrap(
+      return new WorkbenchBootstrap(
         WorkbenchProtocol.Version,
         Guid.NewGuid(),
         _revision,
         _route,
         _snapshots.Values.OrderBy(state => state.Scope).ToArray(),
-        _capabilities));
+        _capabilities);
     }
   }
 
