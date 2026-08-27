@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2
+
+### Dependencies
+
+- **toolchain:** 更新 SDK 与应用依赖 (#53) (2a68c1b)
+
 ## 0.4.1
 
 ### Features
