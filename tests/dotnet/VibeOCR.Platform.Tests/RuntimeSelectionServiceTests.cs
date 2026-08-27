@@ -161,6 +161,85 @@ public sealed class RuntimeSelectionServiceTests
     }
 
     [Fact]
+    public void RecognitionModesProjectTypedExecutionAndLifecycleContracts()
+    {
+        RuntimeSelectionService service = new(Health(
+            [RecognitionModesCapability],
+            recognitionModes: RecognitionCatalog()));
+
+        Assert.True(service.SupportsRecognitionModes);
+        Assert.Empty(service.EngineOptions);
+        Assert.Equal(8, service.RecognitionModes.Count);
+
+        RecognitionModeOption rapid = service.SelectRecognitionMode("rapid_text");
+        Assert.Equal("OCR", rapid.PipelineId);
+        Assert.Equal(OcrEngine.RapidOcr, rapid.Engine);
+        Assert.Equal("base_runtime", rapid.Provisioning);
+        Assert.Equal("unmanaged", rapid.LifecycleKind);
+        Assert.False(rapid.SupportsPreload);
+
+        RecognitionModeOption paddle = service.SelectRecognitionMode("paddle_structure");
+        Assert.Equal("PP-StructureV3", paddle.PipelineId);
+        Assert.Null(paddle.Engine);
+        Assert.Equal("model_residency", paddle.LifecycleKind);
+        Assert.True(paddle.SupportsPreload);
+        Assert.True(paddle.SupportsPinning);
+
+        RecognitionModeOption mineru = service.SelectRecognitionMode("mineru_document");
+        Assert.Equal("MinerU", mineru.PipelineId);
+        Assert.Equal("process_keep_alive", mineru.LifecycleKind);
+        Assert.False(mineru.SupportsPreload);
+        Assert.True(mineru.SupportsTtl);
+        Assert.False(mineru.SupportsPinning);
+        Assert.True(mineru.SupportsRelease);
+    }
+
+    [Fact]
+    public void RecognitionModeCapabilityAndExecutionMappingFailClosed()
+    {
+        RuntimeSelectionException missingCatalog = Assert.Throws<RuntimeSelectionException>(
+            () => new RuntimeSelectionService(Health([RecognitionModesCapability])));
+        Assert.Equal(RuntimeSelectionErrorKind.InvalidCatalogEntry, missingCatalog.Kind);
+
+        Wire.RecognitionModeCatalog invalid = RecognitionCatalog();
+        invalid = invalid with
+        {
+            Modes =
+            [
+                invalid.Modes[0] with { PipelineId = Wire.ExecutionPipelineId.MinerU },
+                .. invalid.Modes.Skip(1),
+            ],
+        };
+        Assert.Throws<InvalidDataException>(() => new RuntimeSelectionService(Health(
+            [RecognitionModesCapability],
+            recognitionModes: invalid)));
+
+        Wire.RecognitionModeCatalog unavailable = RecognitionCatalog();
+        unavailable = unavailable with
+        {
+            Modes =
+            [
+                unavailable.Modes[0],
+                unavailable.Modes[1] with
+                {
+                    Availability = Wire.RecognitionModeAvailability.Unavailable,
+                    ReasonCode = "language_pack_missing",
+                },
+                .. unavailable.Modes.Skip(2),
+            ],
+        };
+        RuntimeSelectionService service = new(Health(
+            [RecognitionModesCapability],
+            recognitionModes: unavailable));
+        Assert.Equal(
+            "unavailable",
+            service.FindRecognitionMode("windows_text").Availability);
+        RuntimeSelectionException rejected = Assert.Throws<RuntimeSelectionException>(
+            () => service.SelectRecognitionMode("windows_text"));
+        Assert.Equal(RuntimeSelectionErrorKind.EngineUnavailable, rejected.Kind);
+    }
+
+    [Fact]
     public void SourceSelectionAllowsAtMostOneIdPerKind()
     {
         RuntimeSelectionService service = new(Health(
@@ -217,12 +296,14 @@ public sealed class RuntimeSelectionServiceTests
     }
 
     private const string EngineCapability = RuntimeSelectionService.EngineSelectionCapability;
+    private const string RecognitionModesCapability = RuntimeSelectionService.RecognitionModesCapability;
     private const string SourceCapability = RuntimeSelectionService.DownloadSourceCapability;
     private const string VariantCapability = RuntimeSelectionService.ComponentSelectionCapability;
 
     private static Wire.Health Health(
         string[] capabilities,
         Wire.OcrEngineCatalog? engines = null,
+        Wire.RecognitionModeCatalog? recognitionModes = null,
         Wire.DownloadSourceCatalog? sources = null,
         Wire.ComponentVariantCatalog? variants = null) => new()
     {
@@ -237,6 +318,7 @@ public sealed class RuntimeSelectionServiceTests
             .. capabilities.Select(capability => Descriptor(
                 capability,
                 engines: capability == EngineCapability ? engines : null,
+                recognitionModes: capability == RecognitionModesCapability ? recognitionModes : null,
                 sources: capability == SourceCapability ? sources : null,
                 variants: capability == VariantCapability ? variants : null)),
         ],
@@ -245,6 +327,7 @@ public sealed class RuntimeSelectionServiceTests
     private static Wire.CapabilityDescriptor Descriptor(
         string name,
         Wire.OcrEngineCatalog? engines = null,
+        Wire.RecognitionModeCatalog? recognitionModes = null,
         Wire.DownloadSourceCatalog? sources = null,
         Wire.ComponentVariantCatalog? variants = null) => new()
     {
@@ -255,6 +338,7 @@ public sealed class RuntimeSelectionServiceTests
         SunsetAt = null,
         Replacement = null,
         OcrEngineCatalog = engines,
+        RecognitionModeCatalog = recognitionModes,
         DownloadSourceCatalog = sources,
         ComponentVariantCatalog = variants,
     };
@@ -270,6 +354,78 @@ public sealed class RuntimeSelectionServiceTests
             ReasonCode = engine.ReasonCode,
             RequiredComponent = engine.RequiredComponent,
         })],
+    };
+
+    private static Wire.RecognitionModeCatalog RecognitionCatalog() => new()
+    {
+        Modes =
+        [
+            Mode(Wire.RecognitionModeId.RapidText, Wire.RecognitionModeFamily.Text,
+                Wire.ExecutionPipelineId.OCR, Wire.OcrEngineId.Rapidocr,
+                Wire.RecognitionModeProvisioning.BaseRuntime,
+                Wire.RecognitionModeLifecycleKind.Unmanaged, false, false, false, false),
+            Mode(Wire.RecognitionModeId.WindowsText, Wire.RecognitionModeFamily.Text,
+                Wire.ExecutionPipelineId.OCR, Wire.OcrEngineId.Windows,
+                Wire.RecognitionModeProvisioning.OperatingSystem,
+                Wire.RecognitionModeLifecycleKind.Unmanaged, false, false, false, false),
+            Mode(Wire.RecognitionModeId.PaddleText, Wire.RecognitionModeFamily.Text,
+                Wire.ExecutionPipelineId.OCR, Wire.OcrEngineId.Paddleocr,
+                Wire.RecognitionModeProvisioning.AdvancedComponent,
+                Wire.RecognitionModeLifecycleKind.ModelResidency, true, true, true, true),
+            Mode(Wire.RecognitionModeId.PaddleStructure, Wire.RecognitionModeFamily.Document,
+                Wire.ExecutionPipelineId.PPStructureV3, null,
+                Wire.RecognitionModeProvisioning.AdvancedComponent,
+                Wire.RecognitionModeLifecycleKind.ModelResidency, true, true, true, true),
+            Mode(Wire.RecognitionModeId.PaddleDocumentVl, Wire.RecognitionModeFamily.Document,
+                Wire.ExecutionPipelineId.PaddleOCRVL, null,
+                Wire.RecognitionModeProvisioning.AdvancedComponent,
+                Wire.RecognitionModeLifecycleKind.ModelResidency, true, true, true, true),
+            Mode(Wire.RecognitionModeId.MineruDocument, Wire.RecognitionModeFamily.Document,
+                Wire.ExecutionPipelineId.MinerU, null,
+                Wire.RecognitionModeProvisioning.AdvancedComponent,
+                Wire.RecognitionModeLifecycleKind.ProcessKeepAlive, false, true, false, true),
+            Mode(Wire.RecognitionModeId.PaddleTable, Wire.RecognitionModeFamily.Specialized,
+                Wire.ExecutionPipelineId.TABLERECOGNITION, null,
+                Wire.RecognitionModeProvisioning.AdvancedComponent,
+                Wire.RecognitionModeLifecycleKind.ModelResidency, true, true, true, true),
+            Mode(Wire.RecognitionModeId.PaddleFormula, Wire.RecognitionModeFamily.Specialized,
+                Wire.ExecutionPipelineId.FORMULARECOGNITION, null,
+                Wire.RecognitionModeProvisioning.AdvancedComponent,
+                Wire.RecognitionModeLifecycleKind.ModelResidency, true, true, true, true),
+        ],
+    };
+
+    private static Wire.RecognitionModeDescriptor Mode(
+        Wire.RecognitionModeId id,
+        Wire.RecognitionModeFamily family,
+        Wire.ExecutionPipelineId pipeline,
+        Wire.OcrEngineId? engine,
+        Wire.RecognitionModeProvisioning provisioning,
+        Wire.RecognitionModeLifecycleKind lifecycleKind,
+        bool supportsPreload,
+        bool supportsTtl,
+        bool supportsPinning,
+        bool supportsRelease) => new()
+    {
+        Id = id,
+        Family = family,
+        PipelineId = pipeline,
+        Engine = engine,
+        Provisioning = provisioning,
+        Availability = Wire.RecognitionModeAvailability.Ready,
+        ReasonCode = null,
+        RequiredComponent = provisioning == Wire.RecognitionModeProvisioning.AdvancedComponent
+            ? "advanced-component"
+            : null,
+        SupportedOptions = [],
+        Lifecycle = new Wire.RecognitionModeLifecycle
+        {
+            Kind = lifecycleKind,
+            SupportsPreload = supportsPreload,
+            SupportsTtl = supportsTtl,
+            SupportsPinning = supportsPinning,
+            SupportsRelease = supportsRelease,
+        },
     };
 
     private static Wire.DownloadSourceCatalog SourceCatalog(

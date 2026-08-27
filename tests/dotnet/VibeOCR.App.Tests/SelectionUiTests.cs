@@ -64,6 +64,39 @@ public sealed class SelectionUiTests : IDisposable
     }
 
     [Fact]
+    public async Task ConcurrentSelectionLoadsShareOneCompleteCatalogSnapshot()
+    {
+        var fake = new DelayedSelectionInferenceClient { Health = SelectionHealth() };
+        var viewModel = new SettingsViewModel(fake, configFile: _configFile);
+        bool publishedBeforeProjectionCompleted = false;
+        viewModel.PropertyChanged += (_, eventArgs) =>
+        {
+            if (eventArgs.PropertyName is nameof(SettingsViewModel.SelectedEngine)
+                or nameof(SettingsViewModel.Engines))
+            {
+                publishedBeforeProjectionCompleted |=
+                    viewModel.RecognitionSelection is not null;
+            }
+        };
+
+        Task first = viewModel.LoadSelectionAsync(CancellationToken.None);
+        await fake.HealthRequested.Task.WaitAsync(TestContext.Current.CancellationToken);
+        Task second = viewModel.LoadSelectionAsync(CancellationToken.None);
+        fake.ReleaseHealth.TrySetResult(true);
+
+        await Task.WhenAll(first, second);
+
+        Assert.NotNull(viewModel.Selection);
+        Assert.Equal(3, viewModel.Engines.Count);
+        Assert.Equal(1, fake.HealthCalls);
+        Assert.False(publishedBeforeProjectionCompleted);
+        RecognitionSelectionSnapshot snapshot = Assert.IsType<RecognitionSelectionSnapshot>(
+            viewModel.RecognitionSelection);
+        Assert.Same(viewModel.Selection, snapshot.Catalog);
+        Assert.Equal("rapidocr", snapshot.SelectedId);
+    }
+
+    [Fact]
     public async Task SetEnginePersistsChoiceAndRejectsUnavailableEngines()
     {
         string root = Path.Combine(Path.GetTempPath(), $"vibeocr-selection-ui-{Guid.NewGuid():N}");
@@ -212,7 +245,39 @@ public sealed class SelectionUiTests : IDisposable
             ct => Task.FromResult<RecognitionInput?>(new RecognitionInput([1], "image/png", "a.png", "test")),
             CancellationToken.None);
 
-        Assert.Equal(OcrEngine.RapidOcr, fake.LastRequest?.Pipeline.Engine);
+        Assert.Null(fake.LastRequest?.Pipeline.Engine);
+    }
+
+    [Fact]
+    public async Task LegacyRuntimeExecutionPreservesPersistedWindowsTextMode()
+    {
+        WriteConfig("""{"ocr":{"recognition_mode":"windows_text"}}""");
+        var fake = new CompletedRecognitionClient();
+        var viewModel = new RecognitionViewModel(fake, new StubInputs(), _configFile);
+
+        await viewModel.RecognizeViaSupervisorAsync(
+            _ => Task.FromResult<RecognitionInput?>(
+                new RecognitionInput([1], "image/png", "a.png", "test")),
+            CancellationToken.None);
+
+        Assert.Equal(OcrEngine.Windows, fake.LastRequest?.Pipeline.Engine);
+    }
+
+    [Fact]
+    public async Task LegacyRuntimeExecutionRejectsSpecializedModeInsteadOfUsingRapid()
+    {
+        WriteConfig("""{"ocr":{"recognition_mode":"paddle_structure"}}""");
+        var fake = new CompletedRecognitionClient();
+        var viewModel = new RecognitionViewModel(fake, new StubInputs(), _configFile);
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => viewModel.RecognizeViaSupervisorAsync(
+                _ => Task.FromResult<RecognitionInput?>(
+                    new RecognitionInput([1], "image/png", "a.png", "test")),
+                CancellationToken.None));
+
+        Assert.Contains("不能按文本 OCR 静默降级", error.Message);
+        Assert.Null(fake.LastRequest);
     }
 
     [Fact]
@@ -453,7 +518,7 @@ public sealed class SelectionUiTests : IDisposable
         ],
     };
 
-    private sealed class SelectionInferenceClient : InferenceClientStub
+    private class SelectionInferenceClient : InferenceClientStub
     {
         public Wire.Health Health { get; set; } = new()
         {
@@ -488,6 +553,26 @@ public sealed class SelectionUiTests : IDisposable
             LastUpdate = settings;
             Settings = settings;
             return Task.FromResult(settings);
+        }
+    }
+
+    private sealed class DelayedSelectionInferenceClient : SelectionInferenceClient
+    {
+        public TaskCompletionSource<bool> HealthRequested { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource<bool> ReleaseHealth { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public int HealthCalls { get; private set; }
+
+        public override async Task<Wire.Health> GetHealthAsync(
+            CancellationToken cancellationToken)
+        {
+            HealthCalls++;
+            HealthRequested.TrySetResult(true);
+            await ReleaseHealth.Task.WaitAsync(cancellationToken);
+            return Health;
         }
     }
 
@@ -564,6 +649,8 @@ private sealed class CompletedRecognitionClient : InferenceClientStub
     });
 }
 
+    private void WriteConfig(string json) => File.WriteAllText(_configFile, json);
+
     public void Dispose()
     {
         if (File.Exists(_configFile))
@@ -572,4 +659,3 @@ private sealed class CompletedRecognitionClient : InferenceClientStub
         }
     }
 }
-

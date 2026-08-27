@@ -499,7 +499,7 @@ describe("AppShell", () => {
 
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
 
-    const engineSelect = screen.getByLabelText("全局默认引擎");
+    const engineSelect = screen.getByLabelText("全局默认识别模式");
     expect(engineSelect).toHaveValue("rapidocr");
     await user.selectOptions(engineSelect, "paddleocr");
     expect(actions.run).toHaveBeenCalledWith({
@@ -661,6 +661,11 @@ describe("AppShell", () => {
               isTaskOverride: false,
               availability: "ready",
               requiresDownload: false,
+              lifecycleKind: "unmanaged",
+              supportsPreload: false,
+              supportsTtl: false,
+              supportsPinning: false,
+              supportsRelease: false,
             },
             {
               engine: "windows",
@@ -676,10 +681,15 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount, rerender } = render(
+      <App actions={actions} viewState={viewState} />,
+    );
 
-    const taskEngine = screen.getByLabelText("本次识别引擎");
+    const taskEngine = screen.getByLabelText("本次识别模式");
     expect(taskEngine).toHaveValue("");
+    expect(
+      screen.getByText("该模式不提供模型预热、TTL、固定驻留或释放控制。"),
+    ).toBeVisible();
     await user.selectOptions(taskEngine, "windows");
     expect(actions.run).toHaveBeenCalledWith({
       type: "recognition.setTaskEngine",
@@ -689,6 +699,76 @@ describe("AppShell", () => {
     expect(actions.run).toHaveBeenCalledWith({
       type: "recognition.setTaskEngine",
     });
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 22,
+          features: {
+            recognition: {
+              isBusy: false,
+              statusCode: "recognition.ready",
+              taskEngine: null,
+              engines: [
+                {
+                  engine: "paddle_text",
+                  displayName: "通用 OCR（PaddleOCR）",
+                  selected: true,
+                  isTaskOverride: false,
+                  availability: "ready",
+                  requiresDownload: false,
+                  lifecycleKind: "model_residency",
+                  supportsPreload: true,
+                  supportsTtl: true,
+                  supportsPinning: true,
+                  supportsRelease: true,
+                },
+              ],
+            },
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.getByText(
+        "该 Paddle 模式使用模型驻留；支持：预热、TTL、固定驻留、释放。",
+      ),
+    ).toBeVisible();
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 23,
+          features: {
+            recognition: {
+              isBusy: false,
+              statusCode: "recognition.ready",
+              taskEngine: null,
+              engines: [
+                {
+                  engine: "mineru_document",
+                  displayName: "深度文档解析（MinerU）",
+                  selected: true,
+                  isTaskOverride: false,
+                  availability: "ready",
+                  requiresDownload: false,
+                  lifecycleKind: "process_keep_alive",
+                  supportsPreload: false,
+                  supportsTtl: true,
+                  supportsPinning: false,
+                  supportsRelease: true,
+                },
+              ],
+            },
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.getByText("MinerU 使用进程保活；仅支持：TTL、释放。"),
+    ).toBeVisible();
     unmount();
   });
 });

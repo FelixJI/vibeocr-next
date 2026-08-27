@@ -71,6 +71,7 @@ public sealed record RuntimeEngineOption(
 public sealed class RuntimeSelectionService
 {
     public const string EngineSelectionCapability = "ocr.engine-selection.v1";
+    public const string RecognitionModesCapability = RecognitionModeCatalog.Capability;
     public const string DownloadSourceCapability = "runtime.download-sources.v1";
     public const string ComponentSelectionCapability = "runtime.component-selection.v1";
 
@@ -81,12 +82,14 @@ public sealed class RuntimeSelectionService
     private readonly Dictionary<string, Wire.DownloadSourceDescriptor> _sourcesById;
     private readonly Dictionary<(string FeatureId, string Accelerator), string>
         _componentByVariant;
+    private readonly RecognitionModeCatalog? _recognitionModes;
 
     public RuntimeSelectionService(Wire.Health health)
     {
         ArgumentNullException.ThrowIfNull(health);
         Health = health;
         Wire.OcrEngineCatalog? engineCatalog = null;
+        Wire.RecognitionModeCatalog? recognitionModeCatalog = null;
         Wire.DownloadSourceCatalog? sourceCatalog = null;
         Wire.ComponentVariantCatalog? variantCatalog = null;
         foreach (Wire.CapabilityDescriptor descriptor in health.CapabilityDescriptors ?? [])
@@ -94,6 +97,19 @@ public sealed class RuntimeSelectionService
             if (descriptor.OcrEngineCatalog is not null)
             {
                 engineCatalog = SingleCatalog(engineCatalog, descriptor.OcrEngineCatalog, "ocr_engine_catalog");
+            }
+            if (descriptor.RecognitionModeCatalog is not null)
+            {
+                if (descriptor.Name != RecognitionModesCapability)
+                {
+                    throw Error(
+                        RuntimeSelectionErrorKind.InvalidCatalogEntry,
+                        "Recognition mode catalog is attached to the wrong capability descriptor.");
+                }
+                recognitionModeCatalog = SingleCatalog(
+                    recognitionModeCatalog,
+                    descriptor.RecognitionModeCatalog,
+                    "recognition_mode_catalog");
             }
             if (descriptor.DownloadSourceCatalog is not null)
             {
@@ -108,6 +124,18 @@ public sealed class RuntimeSelectionService
         }
 
         _engineCatalog = engineCatalog;
+        bool advertisesRecognitionModes = health.Capabilities.Contains(
+            RecognitionModesCapability,
+            StringComparer.Ordinal);
+        if (advertisesRecognitionModes != (recognitionModeCatalog is not null))
+        {
+            throw Error(
+                RuntimeSelectionErrorKind.InvalidCatalogEntry,
+                "Recognition mode capability and catalog must be advertised together.");
+        }
+        _recognitionModes = recognitionModeCatalog is null
+            ? null
+            : RecognitionModeCatalog.FromWire(recognitionModeCatalog);
         _sourceCatalog = sourceCatalog;
         _variantCatalog = variantCatalog;
 
@@ -168,6 +196,7 @@ public sealed class RuntimeSelectionService
     public Wire.Health Health { get; }
 
     public bool SupportsEngineSelection => _engineCatalog is not null;
+    public bool SupportsRecognitionModes => _recognitionModes is not null;
     public bool SupportsDownloadSources => _sourceCatalog is not null;
     public bool SupportsComponentSelection => _variantCatalog is not null;
 
@@ -176,12 +205,32 @@ public sealed class RuntimeSelectionService
     {
         get
         {
-            if (_engineCatalog is null)
+            if (_recognitionModes is not null || _engineCatalog is null)
             {
                 return Array.Empty<RuntimeEngineOption>();
             }
             return [.. _engineCatalog.Engines.Select(ToEngineOption)];
         }
+    }
+
+    public IReadOnlyList<RecognitionModeOption> RecognitionModes =>
+        _recognitionModes?.Modes ?? Array.Empty<RecognitionModeOption>();
+
+    public RecognitionModeOption SelectRecognitionMode(string modeId)
+    {
+        RecognitionModeOption mode = FindRecognitionMode(modeId);
+        if (!mode.IsUsable)
+            throw Error(RuntimeSelectionErrorKind.EngineUnavailable,
+                $"Recognition mode '{modeId}' is unavailable.");
+        return mode;
+    }
+
+    public RecognitionModeOption FindRecognitionMode(string modeId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(modeId);
+        RecognitionModeOption? mode = RecognitionModes.SingleOrDefault(item => item.Id == modeId);
+        return mode ?? throw Error(RuntimeSelectionErrorKind.UnknownEngine,
+            $"Recognition mode '{modeId}' is not in the runtime catalog.");
     }
 
     /// <summary>Catalog sources (kind stays an open string); empty when absent.</summary>

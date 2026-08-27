@@ -111,6 +111,11 @@ interface RecognitionEngineState {
   readonly isTaskOverride: boolean;
   readonly availability: string;
   readonly requiresDownload: boolean;
+  readonly lifecycleKind?: string;
+  readonly supportsPreload?: boolean;
+  readonly supportsTtl?: boolean;
+  readonly supportsPinning?: boolean;
+  readonly supportsRelease?: boolean;
 }
 
 function feature(
@@ -307,6 +312,32 @@ function availabilityLabel(availability: string): string {
     unavailable: "不可用",
   };
   return labels[availability] ?? availability;
+}
+
+function lifecycleHint(
+  engine: RecognitionEngineState | undefined,
+): string | null {
+  if (!engine) return null;
+  const controls = [
+    engine.supportsPreload === true ? "预热" : null,
+    engine.supportsTtl === true ? "TTL" : null,
+    engine.supportsPinning === true ? "固定驻留" : null,
+    engine.supportsRelease === true ? "释放" : null,
+  ].filter((value): value is string => value !== null);
+  if (engine.lifecycleKind === "unmanaged") {
+    return "该模式不提供模型预热、TTL、固定驻留或释放控制。";
+  }
+  if (engine.lifecycleKind === "process_keep_alive") {
+    return controls.length === 0
+      ? "MinerU 使用进程保活；当前目录未声明可用控制。"
+      : `MinerU 使用进程保活；仅支持：${controls.join("、")}。`;
+  }
+  if (engine.lifecycleKind === "model_residency") {
+    return controls.length === 0
+      ? "该 Paddle 模式使用模型驻留；当前目录未声明可用控制。"
+      : `该 Paddle 模式使用模型驻留；支持：${controls.join("、")}。`;
+  }
+  return null;
 }
 
 function acceleratorLabel(accelerator: string): string {
@@ -1150,7 +1181,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             actions={actions}
           />
         </Panel>
-        <Panel label="OCR" title="识别引擎">
+        <Panel label="OCR" title="识别模式">
           <EngineSelector
             engines={engineOptions(state.engines)}
             selectedEngine={stringValue(state.selectedEngine)}
@@ -1159,7 +1190,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             actions={actions}
           />
           <p className="form-note">
-            全局默认引擎对全部纯文本识别生效；单次识别可在识别页临时改用其他引擎。
+            全局默认模式由 Runtime capability catalog 提供；单次识别可临时覆盖。
           </p>
         </Panel>
         <Panel label="RUNTIME" title="推理后端与依赖">
@@ -1232,7 +1263,7 @@ function EngineSelector({
   return (
     <>
       <div className="setting-row">
-        <label htmlFor="ocr-engine">全局默认引擎</label>
+        <label htmlFor="ocr-engine">全局默认识别模式</label>
         <Select
           id="ocr-engine"
           value={selectedEngine ?? ""}
@@ -1495,9 +1526,12 @@ function TaskEngineSelector({
   if (engines.length === 0) {
     return null;
   }
+  const active =
+    engines.find((engine) => engine.isTaskOverride) ??
+    engines.find((engine) => engine.selected);
   return (
     <div className="setting-row">
-      <label htmlFor="task-engine">本次识别引擎</label>
+      <label htmlFor="task-engine">本次识别模式</label>
       <Select
         id="task-engine"
         value={taskEngine ?? ""}
@@ -1520,6 +1554,9 @@ function TaskEngineSelector({
           </option>
         ))}
       </Select>
+      {lifecycleHint(active) ? (
+        <p className="form-note">{lifecycleHint(active)}</p>
+      ) : null}
     </div>
   );
 }

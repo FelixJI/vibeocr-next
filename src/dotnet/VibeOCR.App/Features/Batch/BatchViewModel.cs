@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using VibeOCR.App.Inference;
 using VibeOCR.Contracts.HttpV2;
+using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 
 namespace VibeOCR.App.Features.Batch;
@@ -19,6 +20,7 @@ public sealed class BatchViewModel(
     private bool _isRunning;
     private int _completedCount;
     private int _failedCount;
+    private RecognitionModeOption? _recognitionMode;
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public ObservableCollection<BatchItemViewModel> Items { get; } = [];
@@ -28,6 +30,8 @@ public sealed class BatchViewModel(
     public int TotalCount => Items.Count;
     public int Concurrency { get; set; } = 1;
     public string Progress => $"{CompletedCount + FailedCount}/{TotalCount}";
+
+    public void SetRecognitionMode(RecognitionModeOption? mode) => _recognitionMode = mode;
 
     public void AddFiles(IEnumerable<string> paths)
     {
@@ -66,13 +70,16 @@ public sealed class BatchViewModel(
                     data);
             }
 
+            string pipeline = _recognitionMode?.PipelineId ?? "OCR";
+            OcrEngine? engine = _recognitionMode?.Engine ??
+                VibeOCR.App.Features.Settings.OcrEngineSettings.GlobalEngine(configFile);
             InferenceJobRun job = await _jobs.RunRecognitionAsync(
-                "OCR",
+                pipeline,
                 JobPriority.Background,
                 inputs,
                 options: null,
                 cancellationToken: _run.Token,
-                engine: VibeOCR.App.Features.Settings.OcrEngineSettings.GlobalEngine(configFile));
+                engine: engine);
             JobSnapshot snapshot = job.Snapshot;
 
             if (generation != Volatile.Read(ref _generation)) return;
@@ -90,7 +97,7 @@ public sealed class BatchViewModel(
                 ItemOutcome outcome = job.OutcomesByClientItemKey[item.Id.ToString("N")];
                 if (outcome.State is ItemState.Succeeded)
                 {
-                    item.Result = RecognitionOutcomeMapper.ToResponse(outcome, "OCR");
+                    item.Result = RecognitionOutcomeMapper.ToResponse(outcome, pipeline);
                     item.State = BatchItemState.Completed;
                     IncrementCompleted();
                 }

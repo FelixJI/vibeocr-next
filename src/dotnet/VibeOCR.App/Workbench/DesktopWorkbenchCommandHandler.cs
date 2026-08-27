@@ -7,6 +7,7 @@ using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Features.Settings;
 using VibeOCR.App.Features.Shell;
 using VibeOCR.App.Features.Update;
+using VibeOCR.App.Inference;
 using VibeOCR.App.Services;
 using VibeOCR.App.Web;
 using VibeOCR.Contracts.HttpV2;
@@ -20,6 +21,7 @@ namespace VibeOCR.App.Workbench;
 public sealed class DesktopWorkbenchCommandHandler :
   IWorkbenchCommandHandler,
   IWorkbenchStateSource,
+  IWorkbenchBootstrapSource,
   IAsyncDisposable
 {
   public static IReadOnlySet<string> Capabilities { get; } = new HashSet<string>(
@@ -123,23 +125,37 @@ public sealed class DesktopWorkbenchCommandHandler :
 
   public IReadOnlyList<WorkbenchState> InitialStates =>
   [
-    new RecognitionWorkbenchState(false, "recognition.ready"),
+    RecognitionState(false, "recognition.ready"),
     new BatchWorkbenchState(false, 0, 0, 0),
     new PdfWorkbenchState(false, "pdf.empty", 0, -1),
     new QrCodeWorkbenchState(false, "qrcode.ready", [], null),
-    new SettingsWorkbenchState(
+    settings is null ? new SettingsWorkbenchState(
       theme,
       false,
       "settings.ready",
       "unknown",
       shell.Value.StartWithSystem,
-      shell.Value.RegisteredHotkey),
+      shell.Value.RegisteredHotkey) : SettingsState(settings),
     new UpdateWorkbenchState(false, "update.current", null, false),
     AboutState(),
     DiagnosticsState(),
   ];
 
   public event Action<WorkbenchState>? StateChanged;
+
+  public async ValueTask PrepareBootstrapAsync(CancellationToken cancellationToken)
+  {
+    try
+    {
+      await EnsureSelectionLoadedAsync(cancellationToken);
+    }
+    catch (InferenceClientNotAttachedException)
+    {
+      // The window intentionally appears before Supervisor startup completes.
+      // Bootstrap exposes no guessed catalog; the first command after attach
+      // crosses the same gate and negotiates the authoritative runtime state.
+    }
+  }
 
   public async ValueTask<WorkbenchCommandOutcome> ExecuteAsync(
     WorkbenchCommand command,
@@ -280,14 +296,17 @@ public sealed class DesktopWorkbenchCommandHandler :
     bool isBusy,
     string statusCode,
     WorkbenchResourceReference? input = null,
-    WorkbenchResourceReference? result = null) =>
-    new(
+    WorkbenchResourceReference? result = null)
+  {
+    SynchronizeRecognitionMode();
+    return new(
       isBusy,
       statusCode,
       input,
       result,
       RecognitionEngines(),
       recognition?.TaskEngine);
+  }
 
   /// <summary>
   /// Project catalog engines for the recognition page. The effective engine
@@ -295,12 +314,24 @@ public sealed class DesktopWorkbenchCommandHandler :
   /// </summary>
   private IReadOnlyList<RecognitionEngineChoice>? RecognitionEngines()
   {
-    RuntimeSelectionService? selection = settings?.Selection;
-    if (selection is null || !selection.SupportsEngineSelection)
+    RecognitionSelectionSnapshot? snapshot = settings?.RecognitionSelection;
+    RuntimeSelectionService? selection = snapshot?.Catalog;
+    if (selection is null || (!selection.SupportsEngineSelection && !selection.SupportsRecognitionModes))
     {
       return null;
     }
     recognition ??= recognitionFactory();
+    if (selection.SupportsRecognitionModes)
+    {
+      string? task = recognition.TaskEngine;
+      string? selected = task ?? snapshot?.SelectedId;
+      return [.. selection.RecognitionModes.Select(mode => new RecognitionEngineChoice(
+        mode.Id, SettingsViewModel.DisplayName(mode.Id), selected == mode.Id, task == mode.Id,
+        mode.Availability,
+        mode.Availability == "preparation_required" && mode.RequiredComponent is not null,
+        mode.LifecycleKind,
+        mode.SupportsPreload, mode.SupportsTtl, mode.SupportsPinning, mode.SupportsRelease))];
+    }
     OcrEngine effective = recognition.EffectiveEngine
       ?? OcrEngine.RapidOcr;
     bool isOverride = recognition.TaskEngine is not null;
@@ -322,6 +353,8 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     try
     {
+      await EnsureSelectionLoadedAsync(cancellationToken);
+      SynchronizeRecognitionMode(requireUsable: true);
       RecognitionWorkbenchState state = await RunRecognitionAsync(action, cancellationToken);
       if (generation == Volatile.Read(ref recognitionGeneration))
       {
@@ -489,6 +522,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     CancellationToken cancellationToken)
   {
     batch ??= batchFactory();
+    await EnsureSelectionLoadedAsync(cancellationToken);
+    batch.SetRecognitionMode(SelectedRecognitionMode(requireUsable: true));
     await batch.StartAsync(cancellationToken);
     return BatchState(batch);
   }
@@ -653,6 +688,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     CancellationToken cancellationToken)
   {
     pdf ??= pdfFactory();
+    await EnsureSelectionLoadedAsync(cancellationToken);
+    pdf.SetRecognitionMode(SelectedRecognitionMode(requireUsable: true));
     PdfViewModel viewModel = pdf;
     int[] pages = SelectedPdfPages(viewModel);
     if (pages.Length > 0)
@@ -966,8 +1003,58 @@ public sealed class DesktopWorkbenchCommandHandler :
   private RecognitionWorkbenchState SetTaskEngine(SetTaskEngineCommand command)
   {
     recognition ??= recognitionFactory();
-    recognition.TaskEngine = command.Engine;
+    settings ??= settingsFactory();
+    RuntimeSelectionService? selection = settings.RecognitionSelection?.Catalog;
+    if (string.IsNullOrWhiteSpace(command.Engine)) recognition.TaskEngine = null;
+    else if (selection?.SupportsRecognitionModes is true)
+      recognition.TaskEngine = selection.SelectRecognitionMode(command.Engine).Id;
+    else if (selection?.SupportsEngineSelection is true && OcrEngineSettings.ToEngine(command.Engine) is OcrEngine engine)
+    {
+      selection.SelectEngine(engine);
+      recognition.TaskEngine = OcrEngineSettings.ToWireName(engine);
+    }
+    else throw new RuntimeSelectionException(RuntimeSelectionErrorKind.CapabilityMissing,
+      "The runtime does not provide a recognition selection catalog.");
     return RecognitionState(false, RecognitionStatusCode(recognition));
+  }
+
+  private void SynchronizeRecognitionMode(bool requireUsable = false)
+  {
+    RecognitionSelectionSnapshot? snapshot = settings?.RecognitionSelection;
+    if (recognition is null || snapshot?.Catalog.SupportsRecognitionModes is not true)
+    {
+      recognition?.SetRecognitionModes(null, null);
+      return;
+    }
+    RuntimeSelectionService selection = snapshot.Catalog;
+    RecognitionModeOption? Resolve(string? id) => string.IsNullOrWhiteSpace(id)
+      ? null
+      : requireUsable
+        ? selection.SelectRecognitionMode(id)
+        : selection.FindRecognitionMode(id);
+    recognition.SetRecognitionModes(Resolve(recognition.TaskEngine), Resolve(snapshot.SelectedId));
+  }
+
+  private async Task EnsureSelectionLoadedAsync(CancellationToken cancellationToken)
+  {
+    settings ??= settingsFactory();
+    // Always cross SettingsViewModel's single-flight gate. A refresh may be
+    // replacing an older snapshot even while Selection remains non-null.
+    await settings.LoadSelectionAsync(cancellationToken);
+  }
+
+  private RecognitionModeOption? SelectedRecognitionMode(bool requireUsable)
+  {
+    RecognitionSelectionSnapshot? snapshot = settings?.RecognitionSelection;
+    RuntimeSelectionService? selection = snapshot?.Catalog;
+    string? id = snapshot?.SelectedId;
+    if (selection?.SupportsRecognitionModes is not true || string.IsNullOrWhiteSpace(id))
+    {
+      return null;
+    }
+    return requireUsable
+      ? selection.SelectRecognitionMode(id)
+      : selection.FindRecognitionMode(id);
   }
 
   private async Task<SettingsWorkbenchState> InstallRuntimeAsync(
