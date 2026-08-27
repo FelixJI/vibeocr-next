@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.1
+
+### Features
+
+- **recognition:** 落地正式识别模式契约 (#51) (bc4f27f)
+
+### Bug Fixes
+
+- **runtime:** 修复首启安装范围与提交取消 (#50) (2b72411)
+
 ## 0.4.0
 
 ### Features
