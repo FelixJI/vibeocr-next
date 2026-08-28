@@ -87,23 +87,87 @@ $dotnet = if ($env:DOTNET_HOST_PATH) { $env:DOTNET_HOST_PATH } else { 'dotnet' }
 & $dotnet tool restore
 if ($LASTEXITCODE -ne 0) { throw 'Velopack tool restore failed' }
 $velopackOutput = Join-Path $build 'velopack-output'
+$deltaPlanFile = Join-Path $build 'velopack-delta-plan.json'
+$deltaPrepareArgs = @(
+  '--repository', 'FelixJI/vibeocr-next', '--pack-id', 'VibeOCRNext',
+  '--target-version', $Version, '--output-dir', $velopackOutput,
+  '--plan-file', $deltaPlanFile
+)
+if ($env:AUTOMATION_SOURCE_SHA) {
+    $releaseTagCommit = (& git -C $root rev-list -n 1 "v$Version" 2>$null)
+    if ($LASTEXITCODE -eq 0 -and $releaseTagCommit.Trim() -eq $env:AUTOMATION_SOURCE_SHA) {
+        $deltaPrepareArgs += '--reproduce-published-delta'
+    }
+}
+uv run --no-sync python (Join-Path $root 'scripts/prepare_velopack_delta.py') @deltaPrepareArgs
+if ($LASTEXITCODE -ne 0) { throw 'Velopack delta base preparation failed' }
+$deltaPlan = Get-Content -LiteralPath $deltaPlanFile -Raw | ConvertFrom-Json
+$deltaMode = [string]$deltaPlan.delta_mode
 & $dotnet tool run vpk pack `
   --packId VibeOCRNext --packVersion $Version --packDir $product `
   --mainExe VibeOCR.exe --outputDir $velopackOutput --channel win `
-  --runtime win-x64 --delta None --packTitle VibeOCR --packAuthors FelixJI `
+  --runtime win-x64 --delta $deltaMode --packTitle VibeOCR --packAuthors FelixJI `
   --noInst `
   --icon (Join-Path $root 'assets/brand/generated/vibeocr.ico')
 if ($LASTEXITCODE -ne 0) { throw 'Velopack package build failed' }
-$full = @(Get-ChildItem -LiteralPath $velopackOutput -Filter '*-full.nupkg')
+$normalizeFeedArgs = @(
+  '--feed', (Join-Path $velopackOutput 'releases.win.json'),
+  '--pack-id', 'VibeOCRNext', '--target-version', $Version
+)
+if ($deltaPlan.base_version) {
+    $normalizeFeedArgs += @('--expected-base-version', [string]$deltaPlan.base_version)
+}
+uv run --no-sync python (Join-Path $root 'scripts/normalize_velopack_feed.py') @normalizeFeedArgs
+if ($LASTEXITCODE -ne 0) { throw 'Velopack feed normalization failed' }
+$full = @(Get-ChildItem -LiteralPath $velopackOutput -Filter "VibeOCRNext-$Version-full.nupkg")
+$delta = @(Get-ChildItem -LiteralPath $velopackOutput -Filter "VibeOCRNext-$Version-delta.nupkg")
 $portable = @(Get-ChildItem -LiteralPath $velopackOutput -Filter '*-Portable.zip')
 $feed = @(Get-ChildItem -LiteralPath $velopackOutput -Filter 'releases.win.json')
-if ($full.Count -ne 1 -or $portable.Count -ne 1 -or $feed.Count -ne 1) {
+if ($full.Count -ne 1 -or $delta.Count -gt 1 -or $portable.Count -ne 1 -or $feed.Count -ne 1) {
     throw 'Velopack output set is incomplete or ambiguous'
 }
 if (@(Get-ChildItem -LiteralPath $velopackOutput -Filter '*-Setup.exe').Count -ne 0) {
     throw 'Velopack produced a Setup installer although portable-only is configured'
 }
+$fullOldOutput = Join-Path $build 'velopack-full-e2e-old'
+& $dotnet tool run vpk pack `
+  --packId VibeOCRNext --packVersion 0.0.1 `
+  --packDir $product --mainExe VibeOCR.exe --outputDir $fullOldOutput `
+  --channel win --runtime win-x64 --delta None `
+  --packTitle VibeOCR --packAuthors FelixJI --noInst `
+  --icon (Join-Path $root 'assets/brand/generated/vibeocr.ico')
+if ($LASTEXITCODE -ne 0) { throw 'Velopack full E2E old Portable build failed' }
+uv run --no-sync python `
+  (Join-Path $root 'scripts/verify_velopack_portable_delta_e2e.py') `
+  --old-portable (Join-Path $fullOldOutput 'VibeOCRNext-win-Portable.zip') `
+  --new-feed $velopackOutput --target-version $Version `
+  --require-package-type full `
+  --legacy-state-layout `
+  --work-dir (Join-Path $build 'velopack-portable-full-e2e') --timeout 1200
+if ($LASTEXITCODE -ne 0) { throw 'Velopack Portable full fallback E2E failed' }
+if ($deltaPlan.base_package) {
+    $deltaOldOutput = Join-Path $build 'velopack-delta-e2e-old'
+    & $dotnet tool run vpk pack `
+      --packId VibeOCRNext --packVersion ([string]$deltaPlan.base_version) `
+      --packDir $product --mainExe VibeOCR.exe --outputDir $deltaOldOutput `
+      --channel win --runtime win-x64 --delta None `
+      --packTitle VibeOCR --packAuthors FelixJI --noInst `
+      --icon (Join-Path $root 'assets/brand/generated/vibeocr.ico')
+    if ($LASTEXITCODE -ne 0) { throw 'Velopack delta E2E old Portable build failed' }
+    uv run --no-sync python `
+      (Join-Path $root 'scripts/verify_velopack_portable_delta_e2e.py') `
+      --old-portable (Join-Path $deltaOldOutput 'VibeOCRNext-win-Portable.zip') `
+      --old-package (Join-Path $velopackOutput ([string]$deltaPlan.base_package)) `
+      --new-feed $velopackOutput --target-version $Version `
+      --require-package-type delta `
+      --work-dir (Join-Path $build 'velopack-portable-delta-e2e') --timeout 1200
+    if ($LASTEXITCODE -ne 0) { throw 'Velopack Portable delta E2E failed' }
+}
 Copy-Item -LiteralPath $full[0].FullName -Destination (Join-Path $artifacts "VibeOCRNext-$Version-full.nupkg")
+if ($delta.Count -eq 1) {
+    Copy-Item -LiteralPath $delta[0].FullName `
+      -Destination (Join-Path $artifacts "VibeOCRNext-$Version-delta.nupkg")
+}
 Copy-Item -LiteralPath $portable[0].FullName `
   -Destination (Join-Path $artifacts "VibeOCRNext-v$Version-win-x64.zip")
 Copy-Item -LiteralPath $feed[0].FullName -Destination (Join-Path $artifacts 'releases.win.json')

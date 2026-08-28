@@ -7,6 +7,7 @@ internal sealed class VelopackUpdateCoordinator : IUpdateCoordinator
 {
     internal const string PackId = "VibeOCRNext";
     internal const string Channel = "win";
+    internal const int MaximumDeltasBeforeFallback = 1;
     private readonly IReadOnlyList<VelopackFeedEndpoint> _feeds;
     private readonly Action? _verifyWritableRoot;
     private UpdateManager? _selectedManager;
@@ -44,7 +45,7 @@ internal sealed class VelopackUpdateCoordinator : IUpdateCoordinator
                 new UpdateOptions
                 {
                     ExplicitChannel = Channel,
-                    MaximumDeltasBeforeFallback = -1,
+                    MaximumDeltasBeforeFallback = MaximumDeltasBeforeFallback,
                 });
             // Portable 版同样位于 Velopack 布局(默认 locator 可发现
             // Update.exe/sq.version);仅在完全脱离 Velopack 上下文(开发

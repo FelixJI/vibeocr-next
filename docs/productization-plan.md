@@ -8,6 +8,9 @@
 VibeOCR/
 ├─ VibeOCR.exe
 ├─ Velopack.dll
+├─ Microsoft.Web.WebView2.Core.dll
+├─ WebView2Loader.dll
+├─ Newtonsoft.Json.dll
 ├─ LICENSE
 ├─ CHANGELOG.md
 ├─ app/
@@ -45,8 +48,12 @@ Bootstrapper 与 Platform。稳定错误包括 `layout.unsupported-schema`、`la
 2. `product_layout.py stage` 组装严格 product root 并嵌入已解析 Backend/Protocol 组件；
 3. `finalize_product_release.py` 复核组件 Release 绑定并写入文件 closure manifest；
 4. `vpk pack` 直接消费该 product root，生成 full nupkg、Portable 和 feed（N6 起 `--noInst`，Setup 退场）；
-5. release smoke 校验精确资产与 component identities；真实两版本 Portable 的 Velopack check/download/apply/restart
-   链仍由用户独立执行，当前解包/Web smoke 不得替代或标记为已通过。
+5. release smoke 校验精确资产与 component identities；当目标版本高于最新正式版时，release build 还会预置
+   上一正式 full base，并用候选代码构建合成旧版本 Portable，执行 Velopack check/download/apply/restart，
+   断言请求 delta、替换 `current/`、保留稳定 `state/`。同版本构建保持 full-only，当前解包/Web smoke 不替代
+   相邻版本 E2E。首个能力版本由迁移前客户端通过 full 更新；从其下一相邻版本开始，真实上一正式客户端
+   才具备请求 delta 的能力；首阶段 E2E 使用真实旧 `current/state` 布局，并由新版本 updated hook 从
+   Velopack backup 原子迁入稳定根。合成旧版本 E2E 不作为首阶段现网 delta 采用证明。
 
 发布与应用内更新只使用 Velopack；项目不再拥有独立 updater、ZIP 替换事务或健康文件回滚协议。
 

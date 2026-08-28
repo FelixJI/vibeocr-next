@@ -14,5 +14,9 @@
   <ItemGroup>
     <Compile Include="../../../src/dotnet/VibeOCR.Bootstrapper/BootstrapperLog.cs"
              Link="Bootstrapper/BootstrapperLog.cs" />
+    <Compile Include="../../../src/dotnet/VibeOCR.Bootstrapper/BootstrapperArtifactSmoke.cs"
+             Link="Bootstrapper/BootstrapperArtifactSmoke.cs" />
+    <Compile Include="../../../src/dotnet/VibeOCR.Bootstrapper/LegacyVelopackStateMigration.cs"
+             Link="Bootstrapper/LegacyVelopackStateMigration.cs" />
   </ItemGroup>
 </Project>

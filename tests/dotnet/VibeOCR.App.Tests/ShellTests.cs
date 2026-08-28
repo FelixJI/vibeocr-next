@@ -14,12 +14,14 @@ public sealed class ShellTests
         AppLaunchOptions defaults = AppLaunchOptions.Parse([]);
         AppLaunchOptions production = AppLaunchOptions.Parse(["--profile", "production"]);
         AppLaunchOptions development = AppLaunchOptions.Parse(["--profile", "winui-dev"]);
-        AppLaunchOptions installed = AppLaunchOptions.Parse(["--install-root", @"C:\VibeOCR"]);
+        AppLaunchOptions installed = AppLaunchOptions.Parse(
+            ["--install-root", @"C:\VibeOCR", "--product-root", @"C:\VibeOCR\current"]);
 
         Assert.Equal(AppBuildDefaults.Profile, defaults.Profile);
         Assert.Equal("production", production.Profile);
         Assert.Equal("winui-dev", development.Profile);
         Assert.Equal(Path.GetFullPath(@"C:\VibeOCR"), installed.InstallRoot);
+        Assert.Equal(Path.GetFullPath(@"C:\VibeOCR\current"), installed.ProductRoot);
         Assert.Contains("diagnostics", ShellNavigation.Destinations);
     }
 
@@ -36,6 +38,10 @@ public sealed class ShellTests
     [Fact]
     public void MissingInstallRootValueIsRejected() =>
         Assert.Throws<ArgumentException>(() => AppLaunchOptions.Parse(["--install-root"]));
+
+    [Fact]
+    public void MissingProductRootValueIsRejected() =>
+        Assert.Throws<ArgumentException>(() => AppLaunchOptions.Parse(["--product-root"]));
 
     [Fact]
     public void SupervisorOptionsUseInstallerLaunchContractVerbatim()

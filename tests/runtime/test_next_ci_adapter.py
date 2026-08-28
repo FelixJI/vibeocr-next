@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import inspect
 import json
 import os
@@ -23,6 +24,28 @@ from scripts.resolve_component_releases import (
     compile_protocol_version,
 )
 from scripts.sync_version import sync_version
+
+
+def _write_velopack_feed(artifacts: Path, version: str) -> None:
+    assets: list[dict[str, object]] = []
+    for kind in ("Full", "Delta"):
+        path = artifacts / f"VibeOCRNext-{version}-{kind.casefold()}.nupkg"
+        if not path.is_file():
+            continue
+        assets.append(
+            {
+                "PackageId": "VibeOCRNext",
+                "Version": version,
+                "Type": kind,
+                "FileName": path.name,
+                "SHA1": hashlib.sha1(path.read_bytes()).hexdigest().upper(),
+                "SHA256": hashlib.sha256(path.read_bytes()).hexdigest().upper(),
+                "Size": path.stat().st_size,
+            }
+        )
+    (artifacts / "releases.win.json").write_text(
+        json.dumps({"Assets": assets}), encoding="utf-8"
+    )
 
 
 def test_protocol_compatibility_requires_declared_major_and_minor() -> None:
@@ -365,13 +388,15 @@ def _configure_release_smoke_fixture(
     monkeypatch: pytest.MonkeyPatch,
     *,
     fail_smoke: bool,
+    include_delta: bool = False,
 ) -> tuple[Path, list[list[str]]]:
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     full = artifacts / "VibeOCRNext-1.2.3-full.nupkg"
     full.write_bytes(b"velopack-package")
-    for name in ("releases.win.json",):
-        (artifacts / name).write_bytes(b"placeholder")
+    if include_delta:
+        (artifacts / "VibeOCRNext-1.2.3-delta.nupkg").write_bytes(b"delta")
+    _write_velopack_feed(artifacts, "1.2.3")
     with zipfile.ZipFile(artifacts / "VibeOCRNext-v1.2.3-win-x64.zip", "w") as package:
         package.writestr("VibeOCR.WinUI.exe", b"placeholder")
     names = {
@@ -382,6 +407,8 @@ def _configure_release_smoke_fixture(
         "component-identities.json",
         "SBOM.spdx.json",
     }
+    if include_delta:
+        names.add("VibeOCRNext-1.2.3-delta.nupkg")
     (artifacts / "component-identities.json").write_text(
         json.dumps(
             {
@@ -435,6 +462,53 @@ def test_release_smoke_executes_the_extracted_product_handshake(
 
     assert len(calls) == 1
     assert calls[0][2].endswith("smoke_web_workbench.ps1")
+
+
+def test_release_smoke_accepts_and_binds_one_current_delta(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts, _calls = _configure_release_smoke_fixture(
+        tmp_path,
+        monkeypatch,
+        fail_smoke=False,
+        include_delta=True,
+    )
+
+    verify(artifacts, "1.2.3")
+
+    (artifacts / "VibeOCRNext-1.2.3-delta.nupkg").write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="Delta"):
+        verify(artifacts, "1.2.3")
+
+
+def test_release_smoke_rejects_future_historical_full(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts, _calls = _configure_release_smoke_fixture(
+        tmp_path,
+        monkeypatch,
+        fail_smoke=False,
+        include_delta=True,
+    )
+    feed_path = artifacts / "releases.win.json"
+    feed = json.loads(feed_path.read_text(encoding="utf-8"))
+    feed["Assets"].append(
+        {
+            "PackageId": "VibeOCRNext",
+            "Version": "1.2.4",
+            "Type": "Full",
+            "FileName": "VibeOCRNext-1.2.4-full.nupkg",
+            "SHA1": "A" * 40,
+            "SHA256": "B" * 64,
+            "Size": 123,
+        }
+    )
+    feed_path.write_text(json.dumps(feed), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="historical"):
+        verify(artifacts, "1.2.3")
 
 
 def test_release_smoke_propagates_a_failed_web_ready_handshake(
@@ -499,7 +573,15 @@ def test_web_ready_smoke_runs_an_isolated_production_profile(
             ),
             encoding="utf-8",
         )
-        for name in ("VibeOCR.exe", "Velopack.dll", "LICENSE", "CHANGELOG.md"):
+        for name in (
+            "VibeOCR.exe",
+            "Velopack.dll",
+            "Microsoft.Web.WebView2.Core.dll",
+            "WebView2Loader.dll",
+            "Newtonsoft.Json.dll",
+            "LICENSE",
+            "CHANGELOG.md",
+        ):
             (product / name).write_bytes(b"placeholder")
         for relative in (
             "app/VibeOCR.WinUI.dll",
@@ -617,6 +699,9 @@ $global:webViewCleanupAttempts | Set-Content -LiteralPath $Cleanup
         assert {path.name for path in product.iterdir()} == {
             "VibeOCR.exe",
             "Velopack.dll",
+            "Microsoft.Web.WebView2.Core.dll",
+            "WebView2Loader.dll",
+            "Newtonsoft.Json.dll",
             "LICENSE",
             "CHANGELOG.md",
             "app",
@@ -727,6 +812,7 @@ def test_project_config_declares_minor_compatible_protocol_and_single_identity_a
     assert config["release"]["identity_asset"] == "component-identities.json"
     assert config["release"]["required_assets"] == [
         "VibeOCRNext-*-full.nupkg",
+        "VibeOCRNext-*-delta.nupkg",
         "VibeOCRNext-v{version}-win-x64.zip",
         "releases.win.json",
         "component-lock.json",
@@ -753,6 +839,36 @@ def test_project_config_declares_minor_compatible_protocol_and_single_identity_a
         "e2e"
     ]
     build_script = (root / "scripts/build-release.ps1").read_text(encoding="utf-8")
+    assert "prepare_velopack_delta.py" in build_script
+    assert "normalize_velopack_feed.py" in build_script
+    assert "--reproduce-published-delta" in build_script
+    assert "AUTOMATION_SOURCE_SHA" in build_script
+    assert "--delta $deltaMode" in build_script
+    assert "verify_velopack_portable_delta_e2e.py" in build_script
+    assert "--old-package" in build_script
+    assert "--require-package-type full" in build_script
+    assert "--require-package-type delta" in build_script
+    assert "--legacy-state-layout" in build_script
+    assert "velopack-full-e2e-old" in build_script
+    delta_e2e = (root / "scripts/verify_velopack_portable_delta_e2e.py").read_text(
+        encoding="utf-8"
+    )
+    program = (root / "src/dotnet/VibeOCR.App/Program.cs").read_text(encoding="utf-8")
+    assert 'f"-{require_package_type}.nupkg"' in delta_e2e
+    assert "Velopack apply lost state marker" in delta_e2e
+    assert "_wait_for_evidence_writer_exit(evidence" in delta_e2e
+    assert "requested the target full package after delta" in delta_e2e
+    assert '"LOCALAPPDATA"' in delta_e2e
+    assert '"USERPROFILE"' in delta_e2e
+    assert '"TEMP"' in delta_e2e
+    assert "allowed_external" in delta_e2e
+    assert "wrote unexpected data outside the Portable root" in delta_e2e
+    assert "VelopackUpdateSelfTest.Run()" in program
+    bootstrapper = (root / "src/dotnet/VibeOCR.Bootstrapper/Program.cs").read_text(
+        encoding="utf-8"
+    )
+    assert "OnAfterUpdateFastCallback" in bootstrapper
+    assert "LegacyVelopackStateMigration.Migrate" in bootstrapper
     assert build_script.count("build_release_checksums.py") == 1
     assert "dotnet tool run vpk pack" in build_script
     resolver = (root / "scripts/resolve_component_releases.py").read_text(
@@ -824,8 +940,15 @@ def test_velopack_startup_hook_runs_in_the_packaged_root_entrypoint() -> None:
         root / "src/dotnet/VibeOCR.Bootstrapper/VibeOCR.Bootstrapper.csproj"
     ).read_text(encoding="utf-8")
 
-    assert program.index("VelopackApp.Build().Run();") < program.index(
-        "AppDomain.CurrentDomain.BaseDirectory"
+    assert (
+        ".OnAfterUpdateFastCallback(_ => LegacyVelopackStateMigration.Migrate("
+        in program
+    )
+    assert program.index("LegacyVelopackStateMigration.Resume(") < program.index(
+        "VelopackApp.Build()"
+    )
+    assert program.index("VelopackApp.Build()") < program.index(
+        "PortableProductRoots roots"
     )
     assert '<PackageReference Include="Velopack" />' in project
     child_program = (root / "src/dotnet/VibeOCR.App/Program.cs").read_text(
@@ -906,7 +1029,7 @@ def test_release_smoke_binds_native_portable_and_component_identity(
     (tmp_path / "VibeOCRNext-0.2.0-full.nupkg").write_bytes(b"velopack-package")
     with zipfile.ZipFile(tmp_path / "VibeOCRNext-v0.2.0-win-x64.zip", "w") as package:
         package.writestr("VibeOCR.WinUI.exe", b"desktop")
-    (tmp_path / "releases.win.json").write_text("{}", encoding="utf-8")
+    _write_velopack_feed(tmp_path, "0.2.0")
     monkeypatch.setattr(
         "scripts.release_smoke.subprocess.run", lambda *args, **kwargs: None
     )

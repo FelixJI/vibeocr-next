@@ -20,8 +20,14 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
-        VelopackApp.Build().Run();
-        BootstrapperLog.Initialize();
+        LegacyVelopackStateMigration.Resume(AppDomain.CurrentDomain.BaseDirectory);
+        VelopackApp.Build()
+            .OnAfterUpdateFastCallback(_ => LegacyVelopackStateMigration.Migrate(
+                AppDomain.CurrentDomain.BaseDirectory))
+            .Run();
+        PortableProductRoots roots = PortableProductRoots.Resolve(
+            AppDomain.CurrentDomain.BaseDirectory);
+        BootstrapperLog.Initialize(Path.Combine(roots.InstallRoot, "state", "logs"));
         try
         {
             return Launch(args);
@@ -35,12 +41,14 @@ internal static class Program
 
     private static int Launch(string[] args)
     {
-        string installRoot = AppDomain.CurrentDomain.BaseDirectory;
-        BootstrapperLog.Info($"Bootstrapper starting: root={installRoot}");
+        PortableProductRoots roots = PortableProductRoots.Resolve(
+            AppDomain.CurrentDomain.BaseDirectory);
+        BootstrapperLog.Info(
+            $"Bootstrapper starting: installRoot={roots.InstallRoot} productRoot={roots.ProductRoot}");
         ResolvedProductLayout layout;
         try
         {
-            layout = ResolvedProductLayout.Open(installRoot);
+            layout = ResolvedProductLayout.Open(roots.ProductRoot);
         }
         catch (InvalidDataException error)
         {
@@ -54,13 +62,19 @@ internal static class Program
             Report("Unsupported profile: " + profile);
             return InvalidArguments;
         }
-        string[] missing = new string?[]
-        {
-            HasDotNetDesktop10() ? null : ".NET Desktop Runtime 10 x64",
-            HasWindowsAppRuntime22() ? null : "Windows App Runtime 2.2 x64",
-            HasWebView2() ? null : "Microsoft Edge WebView2 Evergreen Runtime",
-            HasBoundRuntimeAssets(layout) ? null : "VibeOCR bound Runtime assets",
-        }.Where(item => item != null).Select(item => item!).ToArray();
+        string[] missing = (BootstrapperArtifactSmoke.IsRequested()
+            ? new string?[]
+            {
+                HasBoundRuntimeAssets(layout) ? null : "VibeOCR bound Runtime assets",
+            }
+            : new string?[]
+            {
+                HasDotNetDesktop10() ? null : ".NET Desktop Runtime 10 x64",
+                HasWindowsAppRuntime22() ? null : "Windows App Runtime 2.2 x64",
+                HasWebView2() ? null : "Microsoft Edge WebView2 Evergreen Runtime",
+                HasBoundRuntimeAssets(layout) ? null : "VibeOCR bound Runtime assets",
+            })
+            .Where(item => item != null).Select(item => item!).ToArray();
         if (missing.Length > 0)
         {
             Report("VibeOCR prerequisites require repair:");
@@ -80,7 +94,8 @@ internal static class Program
         }
 
         string arguments = "--profile " + Quote(profile) +
-            " --install-root " + Quote(layout.InstallRoot);
+            " --install-root " + Quote(roots.InstallRoot) +
+            " --product-root " + Quote(roots.ProductRoot);
         var startInfo = new ProcessStartInfo
         {
             FileName = appPath,
