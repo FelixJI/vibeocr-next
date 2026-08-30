@@ -21,13 +21,14 @@ const THEMES = new Set<ThemePreference>(["system", "light", "dark"]);
 
 export class WorkbenchWebRuntime {
   private current?: AppViewState;
+  private listener?: (state: AppViewState) => void;
   private sessionId?: string;
   private unsubscribe?: () => void;
 
   readonly actions: AppActions = {
     run: ({ type, ...payload }) => this.runCommand(type, payload),
-    navigate: (route) => this.runCommand("shell.navigate", { route }),
-    setTheme: (theme) => this.runCommand("settings.setTheme", { theme }),
+    navigate: (route) => void this.runCommand("shell.navigate", { route }),
+    setTheme: (theme) => void this.runCommand("settings.setTheme", { theme }),
   };
 
   constructor(
@@ -40,6 +41,7 @@ export class WorkbenchWebRuntime {
     const snapshot = await this.bridge.bootstrap();
     this.sessionId = snapshot.sessionId;
     this.current = projectSnapshot(snapshot);
+    this.listener = listener;
     listener(this.current);
     this.unsubscribe = this.bridge.subscribe((event) => {
       if (
@@ -57,19 +59,54 @@ export class WorkbenchWebRuntime {
   stop(): void {
     this.unsubscribe?.();
     this.unsubscribe = undefined;
+    this.listener = undefined;
   }
 
-  private runCommand(type: string, args: Record<string, unknown>): void {
+  private async runCommand(
+    type: string,
+    args: Record<string, unknown>,
+  ): Promise<boolean> {
     const separator = type.indexOf(".");
-    if (separator < 1 || separator === type.length - 1) return;
+    if (separator < 1 || separator === type.length - 1) return false;
     const command: HostCommand = {
       scope: type.slice(0, separator),
       action: type.slice(separator + 1),
       arguments: args,
     };
-    void this.bridge.execute(command).catch((error: unknown) => {
-      this.onError(error instanceof Error ? error : new Error(String(error)));
-    });
+    try {
+      const receipt = await this.bridge.execute(command);
+      if (!receipt.ok) {
+        const messageKey = receipt.problem?.messageKey;
+        this.reportCommandProblem(
+          typeof messageKey === "string"
+            ? messageKey
+            : "workbench.error.commandFailed",
+        );
+        return false;
+      }
+      this.clearCommandProblem();
+      return true;
+    } catch (error: unknown) {
+      const normalized =
+        error instanceof Error ? error : new Error(String(error));
+      this.onError(normalized);
+      this.reportCommandProblem("workbench.error.bridgeUnavailable");
+      return false;
+    }
+  }
+
+  private reportCommandProblem(messageKey: string): void {
+    if (!this.current || !this.listener) return;
+    this.current = { ...this.current, commandProblem: messageKey };
+    this.listener(this.current);
+  }
+
+  private clearCommandProblem(): void {
+    if (!this.current?.commandProblem || !this.listener) return;
+    const current = { ...this.current };
+    delete current.commandProblem;
+    this.current = current;
+    this.listener(this.current);
   }
 }
 

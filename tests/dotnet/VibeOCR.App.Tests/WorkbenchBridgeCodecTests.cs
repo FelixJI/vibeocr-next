@@ -118,6 +118,8 @@ public sealed class WorkbenchBridgeCodecTests
       ("recognition", "selectImage", "{}", typeof(SelectRecognitionImageCommand)),
       ("recognition", "readClipboard", "{}", typeof(ReadRecognitionClipboardCommand)),
       ("recognition", "captureScreen", "{}", typeof(CaptureRecognitionScreenCommand)),
+      ("recognition", "copyAnnotatedImage", "{\"resourceUri\":\"https://app.vibeocr/__annotation/00000000000000000000000000000000\"}", typeof(CopyAnnotatedImageCommand)),
+      ("recognition", "saveAnnotatedImage", "{\"resourceUri\":\"https://app.vibeocr/__annotation/11111111111111111111111111111111\"}", typeof(SaveAnnotatedImageCommand)),
       ("batch", "addFiles", "{}", typeof(AddBatchFilesCommand)),
       ("batch", "exportAll", "{\"format\":\"markdown\"}", typeof(ExportBatchCommand)),
       ("batch", "setWindow", "{\"start\":40}", typeof(SetBatchWindowCommand)),
@@ -155,6 +157,42 @@ public sealed class WorkbenchBridgeCodecTests
         },
       });
       Assert.IsType(type, WorkbenchBridgeCodec.ParseCommand(json, sessionId).Command);
+    }
+  }
+
+  [Fact]
+  public void ParseAnnotatedImageCommandsAcceptOnlyOpaqueSameOriginUris()
+  {
+    Guid sessionId = Guid.NewGuid();
+    const string resourceUri =
+      "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef";
+    CopyAnnotatedImageCommand copy = Assert.IsType<CopyAnnotatedImageCommand>(
+      WorkbenchBridgeCodec.ParseCommand(
+        CommandJson(
+          sessionId,
+          "recognition",
+          "copyAnnotatedImage",
+          $$"""{"resourceUri":"{{resourceUri}}"}"""),
+        sessionId).Command);
+    Assert.Equal(resourceUri, copy.ResourceUri);
+
+    string[] invalid =
+    [
+      "C:/Users/example/annotation.png",
+      "data:image/png;base64,iVBORw0KGgo=",
+      "https://app.vibeocr/__resource/0123456789abcdef0123456789abcdef",
+      "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef?download=1",
+    ];
+    foreach (string value in invalid)
+    {
+      Assert.Throws<WorkbenchBridgeProtocolException>(() =>
+        WorkbenchBridgeCodec.ParseCommand(
+          CommandJson(
+            sessionId,
+            "recognition",
+            "saveAnnotatedImage",
+            JsonSerializer.Serialize(new { resourceUri = value })),
+          sessionId));
     }
   }
 

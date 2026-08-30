@@ -23,6 +23,25 @@ public sealed class WebWorkbenchHostPolicyTests
   public void NavigationRejectsEveryOtherTarget(string url) =>
     Assert.False(WebWorkbenchHost.IsNavigationAllowed(new Uri(url)));
 
+  [Theory]
+  [InlineData("https://app.vibeocr/__annotation", "POST", "image/png", true)]
+  [InlineData("https://app.vibeocr/__annotation", "GET", "image/png", false)]
+  [InlineData("https://app.vibeocr/__annotation/", "POST", "image/png", false)]
+  [InlineData("https://app.vibeocr/__annotation?debug=1", "POST", "image/png", false)]
+  [InlineData("https://example.test/__annotation", "POST", "image/png", false)]
+  [InlineData("http://app.vibeocr/__annotation", "POST", "image/png", false)]
+  [InlineData("https://app.vibeocr/__annotation", "POST", "text/plain", false)]
+  public void AnnotationUploadAllowsOnlyExactSameOriginPngPost(
+    string url,
+    string method,
+    string contentType,
+    bool expected) => Assert.Equal(
+      expected,
+      WebWorkbenchHost.IsAnnotationUploadRequest(
+        new Uri(url),
+        method,
+        contentType));
+
   [Fact]
   public void RecoveryAllowsOneAutomaticAttemptPerReadyEpisode()
   {
@@ -77,6 +96,21 @@ public sealed class WebWorkbenchHostPolicyTests
 
     Assert.NotNull(error);
     Assert.True(source.IsDisposed);
+  }
+
+  [Fact]
+  public async Task BufferBytesRewindsJsonResponse()
+  {
+    byte[] expected = Encoding.UTF8.GetBytes("{\"resourceUri\":\"opaque\"}");
+
+    using IRandomAccessStream buffered = await WebWorkbenchHost.BufferBytesAsync(
+      expected,
+      TestContext.Current.CancellationToken);
+
+    using Stream reader = buffered.AsStreamForRead();
+    using MemoryStream copy = new();
+    await reader.CopyToAsync(copy, TestContext.Current.CancellationToken);
+    Assert.Equal(expected, copy.ToArray());
   }
 
   private sealed class TrackingStream(

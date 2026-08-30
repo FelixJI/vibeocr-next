@@ -136,14 +136,16 @@ export function AppShell({
               </MenuList>
             </MenuPopover>
           </Menu>
-          <Button
-            appearance="primary"
-            disabled={!viewState.capabilities.includes("recognition.capture")}
-            icon={<Camera aria-hidden="true" size={16} />}
-            onClick={() => actions.run({ type: "recognition.captureScreen" })}
-          >
-            截图识别
-          </Button>
+          {viewState.route !== "recognition" && (
+            <Button
+              appearance="primary"
+              disabled={!viewState.capabilities.includes("recognition.capture")}
+              icon={<Camera aria-hidden="true" size={16} />}
+              onClick={() => actions.run({ type: "recognition.captureScreen" })}
+            >
+              截图识别
+            </Button>
+          )}
         </Toolbar>
         <main className="page-region">
           <Outlet />

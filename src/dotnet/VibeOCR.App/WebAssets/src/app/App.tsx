@@ -133,6 +133,43 @@ export function App({
           </MessageBarBody>
         </MessageBar>
       )}
+      {viewState.connected && viewState.commandProblem && (
+        <MessageBar
+          className="demo-notice"
+          intent={
+            viewState.commandProblem ===
+            "workbench.error.annotationOperationCancelled"
+              ? "warning"
+              : "error"
+          }
+          layout="multiline"
+          role="alert"
+        >
+          <MessageBarBody>
+            <MessageBarTitle>
+              {viewState.commandProblem ===
+              "workbench.error.annotationOperationCancelled"
+                ? "操作已取消"
+                : "操作未完成"}
+            </MessageBarTitle>
+            {commandProblemLabel(viewState.commandProblem)}
+          </MessageBarBody>
+        </MessageBar>
+      )}
     </FluentProvider>
   );
+}
+
+function commandProblemLabel(messageKey: string): string {
+  const messages: Readonly<Record<string, string>> = {
+    "workbench.error.desktopCommandFailed":
+      "原生操作执行失败。请检查当前输入和运行时状态后重试。",
+    "workbench.error.unsupportedCommand":
+      "当前版本不支持这项操作，请更新应用后重试。",
+    "workbench.error.bridgeUnavailable":
+      "原生宿主暂时没有响应，请重启应用后重试。",
+    "workbench.error.annotationOperationCancelled":
+      "未保存标注图片；原图和当前识别结果均未改变。",
+  };
+  return messages[messageKey] ?? "当前操作被原生宿主拒绝，请检查状态后重试。";
 }

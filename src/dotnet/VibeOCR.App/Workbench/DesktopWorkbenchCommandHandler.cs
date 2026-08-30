@@ -30,6 +30,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       "recognition.clipboard",
       "recognition.capture",
       "recognition.results",
+      "recognition.annotation",
       "batch.add",
       "batch.export",
       "batch.run",
@@ -65,6 +66,8 @@ public sealed class DesktopWorkbenchCommandHandler :
   private readonly WorkbenchResourceBroker resourceBroker;
   private readonly string resourceRoot;
   private readonly Func<nint> windowHandle;
+  private readonly WorkbenchAnnotationStore annotationStore;
+  private readonly IAnnotatedImagePlatform annotatedImagePlatform;
   private readonly List<string> generatedFiles = [];
   private readonly HashSet<Task> backgroundOperations = [];
   private readonly HashSet<int> selectedPdfPages = [];
@@ -97,7 +100,9 @@ public sealed class DesktopWorkbenchCommandHandler :
     VibeOCR.App.ViewModels.DiagnosticsViewModel diagnostics,
     WorkbenchResourceBroker resourceBroker,
     string resourceRoot,
-    Func<nint> windowHandle)
+    Func<nint> windowHandle,
+    WorkbenchAnnotationStore annotationStore,
+    IAnnotatedImagePlatform? annotatedImagePlatform = null)
   {
     this.recognitionFactory = recognitionFactory ??
       throw new ArgumentNullException(nameof(recognitionFactory));
@@ -121,6 +126,10 @@ public sealed class DesktopWorkbenchCommandHandler :
       throw new ArgumentNullException(nameof(resourceBroker));
     this.resourceRoot = Path.GetFullPath(resourceRoot);
     this.windowHandle = windowHandle ?? throw new ArgumentNullException(nameof(windowHandle));
+    this.annotationStore = annotationStore ??
+      throw new ArgumentNullException(nameof(annotationStore));
+    this.annotatedImagePlatform = annotatedImagePlatform ??
+      new AnnotatedImagePlatform(this.windowHandle);
   }
 
   public IReadOnlyList<WorkbenchState> InitialStates =>
@@ -187,6 +196,12 @@ public sealed class DesktopWorkbenchCommandHandler :
           cancellationToken),
         ExportRecognitionResultCommand export => await ExportRecognitionAsync(
           export,
+          cancellationToken),
+        CopyAnnotatedImageCommand copy => await CopyAnnotatedImageAsync(
+          copy,
+          cancellationToken),
+        SaveAnnotatedImageCommand save => await SaveAnnotatedImageAsync(
+          save,
           cancellationToken),
         AddBatchFilesCommand => await AddBatchFilesAsync(cancellationToken),
         AddDroppedBatchFilesCommand dropped => AddDroppedBatchFiles(dropped),
@@ -268,9 +283,19 @@ public sealed class DesktopWorkbenchCommandHandler :
     {
       throw;
     }
+    catch (AnnotatedImageOperationCancelledException)
+    {
+      return new WorkbenchCommandOutcome(
+        [],
+        new WorkbenchProblem(
+          "annotation_operation_cancelled",
+          WorkbenchProblemCategory.Conflict,
+          false,
+          "workbench.error.annotationOperationCancelled"));
+    }
     catch (Exception error) when (
       error is IOException or UnauthorizedAccessException or InvalidOperationException or
-        ClipboardBusyException)
+        ClipboardBusyException or WorkbenchAnnotationAccessException)
     {
       return new WorkbenchCommandOutcome(
         [],
@@ -281,6 +306,33 @@ public sealed class DesktopWorkbenchCommandHandler :
           "workbench.error.desktopCommandFailed"));
     }
   }
+
+  private async Task<RecognitionWorkbenchState> CopyAnnotatedImageAsync(
+    CopyAnnotatedImageCommand command,
+    CancellationToken cancellationToken)
+  {
+    using WorkbenchAnnotationFile annotation = annotationStore.Take(
+      new Uri(command.ResourceUri));
+    await annotatedImagePlatform.CopyPngAsync(annotation.Path, cancellationToken);
+    return CurrentRecognitionState();
+  }
+
+  private async Task<RecognitionWorkbenchState> SaveAnnotatedImageAsync(
+    SaveAnnotatedImageCommand command,
+    CancellationToken cancellationToken)
+  {
+    using WorkbenchAnnotationFile annotation = annotationStore.Take(
+      new Uri(command.ResourceUri));
+    if (!await annotatedImagePlatform.SavePngAsync(annotation.Path, cancellationToken))
+    {
+      throw new AnnotatedImageOperationCancelledException();
+    }
+    return CurrentRecognitionState();
+  }
+
+  private RecognitionWorkbenchState CurrentRecognitionState() => RecognitionState(
+    false,
+    recognition is null ? "recognition.ready" : RecognitionStatusCode(recognition));
 
   private RecognitionWorkbenchState StartRecognition(
     Func<RecognitionViewModel, Task> action,
@@ -1458,5 +1510,9 @@ public sealed class DesktopWorkbenchCommandHandler :
       }
     }
     generatedFiles.Clear();
+  }
+
+  private sealed class AnnotatedImageOperationCancelledException : Exception
+  {
   }
 }

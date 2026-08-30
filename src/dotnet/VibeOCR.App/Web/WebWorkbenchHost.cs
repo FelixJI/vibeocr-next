@@ -1,6 +1,8 @@
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Web.WebView2.Core;
+using System.Text;
+using System.Text.Json;
 using VibeOCR.App.Workbench;
 using Windows.Storage.Streams;
 
@@ -36,6 +38,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
 
   private readonly IWorkbenchApplication application;
   private readonly WorkbenchResourceBroker resourceBroker;
+  private readonly WorkbenchAnnotationStore annotationStore;
   private readonly WorkbenchRecoveryPolicy recoveryPolicy = new();
   private CoreWebView2? core;
   private DispatcherQueue? dispatcher;
@@ -46,10 +49,12 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
 
   public WebWorkbenchHost(
     IWorkbenchApplication application,
-    WorkbenchResourceBroker resourceBroker)
+    WorkbenchResourceBroker resourceBroker,
+    WorkbenchAnnotationStore annotationStore)
   {
     this.application = application ?? throw new ArgumentNullException(nameof(application));
     this.resourceBroker = resourceBroker ?? throw new ArgumentNullException(nameof(resourceBroker));
+    this.annotationStore = annotationStore ?? throw new ArgumentNullException(nameof(annotationStore));
   }
 
   public event Action<string>? StateChanged;
@@ -71,6 +76,21 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     }
     return uri.AbsolutePath is "/" or "/index.html";
   }
+
+  internal static bool IsAnnotationUploadRequest(
+    Uri uri,
+    string method,
+    string? contentType) =>
+    uri.IsAbsoluteUri &&
+    string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) &&
+    string.Equals(uri.IdnHost, VirtualHost, StringComparison.OrdinalIgnoreCase) &&
+    uri.IsDefaultPort &&
+    string.IsNullOrEmpty(uri.UserInfo) &&
+    string.IsNullOrEmpty(uri.Query) &&
+    string.IsNullOrEmpty(uri.Fragment) &&
+    string.Equals(uri.AbsolutePath, "/__annotation", StringComparison.Ordinal) &&
+    string.Equals(method, "POST", StringComparison.Ordinal) &&
+    string.Equals(contentType?.Trim(), "image/png", StringComparison.OrdinalIgnoreCase);
 
   public async Task InitializeAsync(WebView2 webView, string assetFolder)
   {
@@ -108,6 +128,9 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     next.ProcessFailed += OnProcessFailed;
     next.AddWebResourceRequestedFilter(
       $"https://{VirtualHost}/__resource/*",
+      CoreWebView2WebResourceContext.All);
+    next.AddWebResourceRequestedFilter(
+      $"https://{VirtualHost}/__annotation",
       CoreWebView2WebResourceContext.All);
     next.WebResourceRequested += OnWebResourceRequested;
     core = next;
@@ -291,14 +314,46 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     IRandomAccessStream? buffered = null;
     try
     {
-      if (!Uri.TryCreate(args.Request.Uri, UriKind.Absolute, out Uri? uri) ||
-          !string.Equals(args.Request.Method, "GET", StringComparison.Ordinal))
+      if (!Uri.TryCreate(args.Request.Uri, UriKind.Absolute, out Uri? uri))
+      {
+        args.Response = Forbidden(sender);
+        return;
+      }
+      string contentType = string.Equals(
+        args.Request.Method,
+        "POST",
+        StringComparison.Ordinal)
+        ? args.Request.Headers.GetHeader("Content-Type")
+        : string.Empty;
+      if (IsAnnotationUploadRequest(uri, args.Request.Method, contentType))
+      {
+        using Stream upload = args.Request.Content.AsStreamForRead();
+        WorkbenchAnnotationLease lease = await annotationStore.UploadPngAsync(
+          upload,
+          CancellationToken.None);
+        byte[] payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        {
+          resourceUri = lease.ResourceUri.AbsoluteUri,
+        }));
+        buffered = await BufferBytesAsync(payload, CancellationToken.None);
+        args.Response = sender.Environment.CreateWebResourceResponse(
+          buffered,
+          201,
+          "Created",
+          "Content-Type: application/json; charset=utf-8\r\n" +
+          $"Content-Length: {payload.LongLength}\r\n" +
+          "Cache-Control: no-store\r\n" +
+          "X-Content-Type-Options: nosniff");
+        buffered = null;
+        return;
+      }
+      if (!string.Equals(args.Request.Method, "GET", StringComparison.Ordinal))
       {
         args.Response = Forbidden(sender);
         return;
       }
       WorkbenchResourceResponse response = await resourceBroker.OpenAsync(uri);
-      string contentType = response.ContentType;
+      contentType = response.ContentType;
       long contentLength = response.ContentLength;
       buffered = await BufferResourceAsync(response, CancellationToken.None);
       args.Response = sender.Environment.CreateWebResourceResponse(
@@ -333,6 +388,28 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       await using WorkbenchResourceResponse ownedResponse = response;
       using IRandomAccessStream source = response.Content.AsRandomAccessStream();
       await RandomAccessStream.CopyAsync(source, buffered).AsTask(cancellationToken);
+      buffered.Seek(0);
+      return buffered;
+    }
+    catch
+    {
+      buffered.Dispose();
+      throw;
+    }
+  }
+
+  internal static async Task<IRandomAccessStream> BufferBytesAsync(
+    byte[] content,
+    CancellationToken cancellationToken)
+  {
+    ArgumentNullException.ThrowIfNull(content);
+    InMemoryRandomAccessStream buffered = new();
+    try
+    {
+      using DataWriter writer = new(buffered);
+      writer.WriteBytes(content);
+      await writer.StoreAsync().AsTask(cancellationToken);
+      writer.DetachStream();
       buffered.Seek(0);
       return buffered;
     }
@@ -385,7 +462,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       current.WebResourceRequested -= OnWebResourceRequested;
       current.ClearVirtualHostNameToFolderMapping(VirtualHost);
     }
-    resourceBroker.Dispose();
     await application.DisposeAsync();
+    annotationStore.Dispose();
+    resourceBroker.Dispose();
   }
 }

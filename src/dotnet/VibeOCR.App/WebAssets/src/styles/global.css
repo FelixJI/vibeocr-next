@@ -249,7 +249,19 @@ input {
   padding: 12px;
 }
 .editor-toolbar {
+  flex-wrap: wrap;
+  row-gap: 4px;
+  padding-bottom: 6px;
   border-bottom: 1px solid var(--colorNeutralStroke2);
+}
+.editor-toolbar button {
+  min-width: 0;
+  padding-inline: 10px;
+}
+.editor-toolbar-break {
+  width: 100%;
+  height: 0;
+  flex-basis: 100%;
 }
 .empty-stage {
   display: grid;
@@ -498,6 +510,23 @@ input {
   display: grid;
   min-height: 0;
   gap: 8px;
+}
+.editor-guidance,
+.editor-operation-status {
+  margin: 0;
+  color: var(--colorNeutralForeground3);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.editor-footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.editor-operation-status {
+  flex: 1 1 260px;
+  padding-left: 6px;
 }
 .canvas-stage {
   min-height: 300px;

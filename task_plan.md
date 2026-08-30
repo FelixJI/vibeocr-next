@@ -6,7 +6,7 @@
 
 ## Current Phase
 
-Phase 15：PR #26 CI 测试失败诊断与修复
+Phase 16：Bootstrapper WebView2 修复与截图标注验收
 
 ## Confirmed Test Seams
 
@@ -179,6 +179,16 @@ Phase 15：PR #26 CI 测试失败诊断与修复
 - [ ] 提交、推送，复查 PR #26 云端检查与剩余风险
 - **Status:** in_progress
 
+### Phase 16：Bootstrapper WebView2 修复与截图标注验收
+
+- [x] 建立能捕获发布包缺少 `Microsoft.Web.WebView2.Core` 的确定性回归反馈环
+- [x] 排查并修复 Bootstrapper 的依赖声明、输出闭包与发布打包链
+- [x] 盘点截图标注全部工具、快捷操作、状态提示和 HostBridge/C# 接线
+- [x] 以 Classic 用户行为为基准修复缺口，并按现代、简洁、克制的桌面工作台方向优化界面与说明
+- [x] 补充或调整 Web、.NET、打包与真实候选测试
+- [x] 完成定向质量、完整 quality、release build/smoke 与独立复核
+- **Status:** complete-with-documented-local-admin-limitation
+
 ## Key Decisions
 
 | Decision | Rationale |
@@ -224,6 +234,12 @@ Phase 15：PR #26 CI 测试失败诊断与修复
 | Error | Attempt | Resolution |
 |-------|---------|------------|
 | `planning-with-files` catchup 通过 `uv run` 在无根项目锁的仓库生成了未跟踪 `uv.lock` | 1 | 立即删除；后续仅调用仓库既有环境或封装脚本，避免根级锁副作用 |
+| 本次会话首次运行 catchup 时沙箱拒绝启动本机 `uv.exe` | 1 | 获得只读执行许可后在沙箱外运行，脚本成功且未报告未同步上下文 |
+| 本次会话首次 `git fetch --prune origin` 无法写 `.git/FETCH_HEAD` | 1 | 获得仓库元数据写入许可后重跑成功；从最新 `origin/main` 建立独立 worktree |
+| `git ls-remote` 因沙箱内 Schannel 无凭据失败，脚本分支误打印“remote branch free” | 1 | 不据此判断；改用成功 fetch 后的 `refs/remotes/origin/...` 精确检查远端跟踪分支 |
+| 首版发布依赖探针在 PowerShell 7 调用 `ReflectionOnlyLoadFrom`，该 API 不受支持且空值错误后错误地打印通过 | 1 | 改用 Windows PowerShell 5.1 的 .NET Framework 反射元数据，并让缺失引用直接非零退出；连续两次稳定红灯 |
+| 首次 `rg` 传入不存在的根级 `packages.lock.json` 导致附带 os error | 1 | 后续只检索实际的项目级 lock 文件，不重复传入不存在路径 |
+| 记录红灯反馈环的首次合并 patch 因 progress 表格占位上下文不匹配而整体未应用 | 1 | 读取实际表格后拆成精确、小上下文 patch，不重复旧 patch |
 | 并行只读基线命令因 `core.hooksPath`/关键词检索无结果返回 exit 1，导致其他输出未汇总 | 1 | 将可选探测改为显式容忍“未配置/未命中”，后续分别读取必要结果，不原样重试 |
 | 基线 `dotnet test` 无法启动：`PATH` 中没有 SDK，仓库要求 10.0.302 | 1 | 停止重复运行，先定位工作区捆绑 SDK 或请求安装权限；该结果不计为代码测试失败 |
 | 更新 findings 的 patch 上下文不匹配 | 1 | 读取实际文本后缩小上下文重新应用 |

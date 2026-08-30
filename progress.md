@@ -1,5 +1,39 @@
 # VibeOCR Next Web 工作台进度
 
+## Session: 2026-08-30
+
+### Phase 16：Bootstrapper WebView2 修复与截图标注验收
+
+- **Status:** complete-with-documented-local-admin-limitation
+- **Started:** 2026-08-30 20:03（用户报告时间）
+- Actions taken:
+  - 创建持续目标并读取 diagnosing-bugs、frontend-design、planning-with-files、route-subagents、git-pr-workflow 技能。
+  - 运行会话恢复；未发现未同步上下文。
+  - 核对原工作树 Git 状态、远端、分支和 worktree，保留全部用户未跟踪文件。
+  - fetch 最新 `origin/main`，创建 `codex/fix-bootstrapper-annotation` 独立 worktree。
+  - 建立 Windows PowerShell 反射反馈环，连续两次复现最终产品入口引用 WebView2 Core 1.0.4129.50 但 DLL 缺失的精确症状。
+  - 检查 Bootstrapper 调用点、项目引用、release build 与 product layout staging，形成 5 个排名可证伪假设。
+  - 移除 Bootstrapper 对 WebView2 托管程序集的编译期引用，改为通过产品 `app/WebView2Loader.dll` 导出检测 Evergreen Runtime；公开入口新增无启动副作用的 `--self-test-prerequisites`。
+  - 修正 Windows App Runtime 2.2 的实际 `Microsoft.WindowsAppRuntime.CBS.2` 包身份兼容检测，并在 Platform/Bootstrapper 两处保持一致。
+  - release smoke 现在先执行真实 ZIP 解包后的公开 `VibeOCR.exe` 先决条件自检，再执行内部 WinUI WebView2 bridge-ready smoke。
+  - 对标 Classic 后，将马赛克、模糊、裁剪、旋转接入真实 Canvas 导出；补充标注图复制/保存、撤销重做/Delete/Escape 快捷键、失败/取消/宿主错误提示和明确的“不重新识别”边界说明。
+  - 完成 1280×800 视觉复核，消除重复截图入口和工具栏截断；三位子代理分别审计打包根因、Classic 行为矩阵和前端接线。
+  - 独立复核发现浏览器下载被宿主取消、Clipboard 权限被拒绝；将标注 PNG 改为同源受限 POST→opaque URI→闭集 HostBridge 命令→原生 Clipboard/FileSavePicker，只有实际成功后才提示成功，取消与失败可见。
+  - 标注导出改为原图分辨率离屏渲染，不包含选中/裁剪辅助虚线；旋转会映射已有标注。Playwright 证明 80×40 原图导出仍为 80×40、选中与未选中 PNG 字节一致、旋转后为 40×80，并验证双击只产生一次上传。
+  - 标注上传使用独立 session store：64 MiB 单文件、8 条/128 MiB 会话配额、5 分钟过期回收、one-shot 消费；解析 PNG chunk、IHDR/IEND、单边 32768 与总像素 1 亿边界，失败路径清理，不改变只读 ResourceBroker/下载权限策略。并发 staging 字节也在每次写盘前原子计入 128 MiB 配额，取消、失败和窗口释放均归还预留并清理临时文件。
+  - 完整 quality 通过：Ruff、100 个 runtime pytest、Prettier、ESLint、TypeScript、14 个 legacy Web 测试、27 个 Vitest、5 个 Playwright 用例及 Vite build。
+  - Platform 139/139、App 192/192 通过；重新解析并验证最新正式组件后，完整 `build-release.ps1` 和最终 `release_smoke.py` 均通过。
+  - 最终 staging 公开入口 `VibeOCR.exe --self-test-prerequisites` 返回 0，反射引用表中的托管 WebView2 引用数为 0。
+  - 本机执行聚合 `automation.py ci --phase full` 时，bootstrap 的 `Get-AppxPackage -AllUsers` 因当前会话无管理员权限被系统拒绝；没有弱化脚本，改由同一权威子入口逐项完成验证。
+- Files created/modified:
+  - `task_plan.md`（追加 Phase 16）
+  - `findings.md`（追加本次需求与工作区事实）
+  - `progress.md`（追加本次会话日志）
+
+- **Completed:** 2026-08-30
+- **Result:** 修复真实发布入口启动崩溃；标注像素输出、原生复制/保存、提示、错误投影、资源配额和视觉基线完成，真实候选构建/解包冒烟通过。
+
+
 ## Session: 2026-08-09
 
 ### Phase 1–2：基线、契约与 Web tracer bullet
@@ -29,6 +63,7 @@
 
 | Test | Command | Expected | Actual | Status |
 |------|---------|----------|--------|--------|
+| 最新 Release Bootstrapper 依赖闭包 | Windows PowerShell 读取 `Documents\VibeOCR.Next\current\VibeOCR.exe` 引用并核对同目录 DLL | 缺依赖时非零退出并包含精确程序集身份 | 连续两次检测到 `Microsoft.Web.WebView2.Core 1.0.4129.50` 引用且 DLL 缺失 | expected-red |
 | Git baseline | `git status -sb` | 独立最新分支、仅计划文件变更 | `codex/web-workbench` 基于 `origin/main`，仅三份计划文件未跟踪 | passed |
 | Python/Web quality baseline | `uv run --no-sync python scripts/check_quality.py` | Ruff/runtime/Web tests 通过 | Ruff 通过；40 runtime + 14 Web tests 通过 | passed |
 | Platform baseline | `dotnet test ... --no-restore` | 启动锁定 .NET 测试 | 系统未发现 .NET SDK 10.0.302，测试未启动 | blocked-env |
