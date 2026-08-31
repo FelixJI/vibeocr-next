@@ -41,6 +41,7 @@ public static class WorkbenchBridgeCodec
   private static readonly HashSet<string> AcceleratorArgumentFields = ["accelerator"];
   private static readonly HashSet<string> FeatureArgumentFields = ["featureId", "enabled"];
   private static readonly HashSet<string> TaskEngineArgumentFields = ["engine"];
+  private static readonly HashSet<string> ResourceUriArgumentFields = ["resourceUri"];
 
   public static Guid ParseBootstrapRequest(string json)
   {
@@ -265,6 +266,10 @@ public static class WorkbenchBridgeCodec
         return new ExportRecognitionResultCommand(ParseFormat(
           arguments,
           ["text", "markdown", "html", "docx", "xlsx"]));
+      case ("recognition", "copyAnnotatedImage"):
+        return new CopyAnnotatedImageCommand(ParseAnnotationResourceUri(arguments));
+      case ("recognition", "saveAnnotatedImage"):
+        return new SaveAnnotatedImageCommand(ParseAnnotationResourceUri(arguments));
       case ("batch", "addFiles"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new AddBatchFilesCommand();
@@ -480,6 +485,19 @@ public static class WorkbenchBridgeCodec
         throw new WorkbenchBridgeProtocolException(
           "Workbench bridge command type is not supported.");
     }
+  }
+
+  private static string ParseAnnotationResourceUri(JsonElement arguments)
+  {
+    EnsureObjectWithFields(arguments, ResourceUriArgumentFields, "command arguments");
+    string? value = arguments.GetProperty("resourceUri").GetString();
+    if (!Uri.TryCreate(value, UriKind.Absolute, out Uri? uri) ||
+        !WorkbenchAnnotationStore.IsResourceUri(uri))
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench annotated image URI is invalid.");
+    }
+    return uri.AbsoluteUri;
   }
 
   private static RotatePdfCommand ParseRotate(JsonElement arguments)

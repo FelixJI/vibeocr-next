@@ -10,6 +10,7 @@ export interface AppViewState {
   readonly capabilities: readonly string[];
   readonly features: Readonly<Record<string, unknown>>;
   readonly runtimeLabel: string;
+  readonly commandProblem?: string;
 }
 
 export type AppActionType =
@@ -19,6 +20,8 @@ export type AppActionType =
   | "recognition.cancel"
   | "recognition.copy"
   | "recognition.export"
+  | "recognition.copyAnnotatedImage"
+  | "recognition.saveAnnotatedImage"
   | "batch.addFiles"
   | "batch.exportAll"
   | "batch.start"
@@ -67,7 +70,7 @@ export interface AppAction {
 }
 
 export interface AppActions {
-  readonly run: (action: AppAction) => void;
+  readonly run: (action: AppAction) => Promise<boolean>;
   readonly navigate: (route: AppRoute) => void;
   readonly setTheme: (theme: ThemePreference) => void;
 }

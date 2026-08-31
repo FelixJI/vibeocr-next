@@ -2,6 +2,47 @@
 
 ## Requirements
 
+### 2026-08-30 Bootstrapper 与截图标注修复
+
+- 修复最新 VibeOCR Next Release 启动时 Bootstrapper 因缺少 `Microsoft.Web.WebView2.Core, Version=1.0.4129.50` 直接失败的问题。
+- 核查截图标注工具是否完整、界面是否现代简洁、说明提示是否足够、是否存在未接线交互。
+- 与 VibeOCR Classic 的用户可观察行为对标，补齐实际缺口，不复制 Qt 布局。
+- 补充和调整测试，并完成项目级验证；使用子代理进行独立盘点与复核。
+
+### 2026-08-30 工作区事实
+
+- 原主工作树 `main` 落后 `origin/main` 5 个提交，且已有用户未跟踪的 `.dotnet-task/`、`docs/ocr-engine-portable-client-execution-plan.md`、`uv.lock`，已原样保留。
+- 成功 fetch 后最新 `origin/main` 为 `5fa382b`（`chore(release): 0.4.2 (#54)`）。
+- 本任务使用独立分支 `codex/fix-bootstrapper-annotation` 和仓库规定位置的 worktree。
+
+### 2026-08-30 Bootstrapper 红灯反馈环
+
+- 用户现有安装的 `VibeOCR.Next\current` 产品根仅有 `VibeOCR.exe`、`Velopack.dll`、文档和目录，没有 `Microsoft.Web.WebView2.Core.dll`。
+- Windows PowerShell `.NET Framework` 反射元数据确认该 `VibeOCR.exe` 引用 `Microsoft.Web.WebView2.Core, Version=1.0.4129.50`；同目录 DLL 缺失，连续两次确定性红灯，精确匹配用户异常。
+- `Program.HasWebView2()` 直接调用 `CoreWebView2Environment.GetAvailableBrowserVersionString()`；`VibeOCR.Bootstrapper.csproj` 因此直接引用 `Microsoft.Web.WebView2`。
+- `scripts/product_layout.py::stage_product_layout` 只把 Bootstrapper publish 中的 EXE 和 `Velopack.dll` 复制到产品根；严格根 allowlist 也不允许 WebView2 托管 DLL。现有 `test_product_layout.py` 只构造并断言这两个文件，无法捕获 Bootstrapper 的完整托管依赖闭包。
+- 初步最合理方向是让 Bootstrapper 的先决条件检测不再编译期依赖 WebView2 托管程序集，同时保留主 App 自身的 WebView2 包；最终方案仍需验证原始 publish 输出、可用的 Windows Evergreen Runtime 检测契约和测试 seam。
+
+### 排名假设
+
+1. staging 丢弃 Bootstrapper WebView2 托管依赖；预测：原始 publish 有 DLL，而最终产品根没有。
+2. Bootstrapper 的探测设计引入了不必要的托管依赖；预测：改为无托管依赖的检测后 EXE 引用表不再包含 WebView2 Core，且产品根 allowlist 无需扩张。
+3. 原始 publish 本身未输出 DLL；预测：bootstrapper-publish 目录也缺文件。
+4. 绑定重定向/版本不匹配；预测：产品根存在另一版本 DLL（当前观察已不支持）。
+5. 用户更新残留造成单机损坏；预测：仓库 staging 会复制完整闭包（当前代码已不支持）。
+
+### 2026-08-30 最终结论
+
+- 根因由假设 1 和 2 共同构成：Bootstrapper publish 产生完整 WebView2 托管闭包，但严格产品根只收录公开 EXE 与 Velopack；公开 EXE 又在进入 `HasWebView2()` 前必须解析缺失的 Core 程序集，导致先决条件提示本身无法运行。
+- 最终修复没有扩大产品根 allowlist，也没有复制一套 WebView2 托管依赖到根；Bootstrapper 使用随内部 App 发布的原生 loader 查询 Evergreen Runtime，最终公开 EXE 的托管引用表不再包含 `Microsoft.Web.WebView2.Core`。
+- 第一轮真实 ZIP 冒烟揭示两个静态测试遗漏：loader 实际位于 `app/WebView2Loader.dll`，Windows App SDK 当前包身份是 `Microsoft.WindowsAppRuntime.CBS.2`。两项均已修正并加入回归契约。
+- Next 原标注器存在“看起来已实现、实际不影响输出”的接线缺口：马赛克/模糊只是半透明色块，裁剪/旋转只作用于预览，也没有标注图复制或保存。现在这些操作都进入 Canvas 输出，且失败会进入可访问状态提示。
+- WebView 宿主无条件取消下载并拒绝网页权限，因此浏览器 `<a download>`/Clipboard API 不是可验收接线。最终使用同源受限 PNG POST、opaque one-shot URI 和闭集 HostBridge 命令，由 C# 原生剪贴板与 `FileSavePicker` 完成；没有放宽普通下载或 Web 权限。
+- 导出不再复制 900×600 展示画布，而是在原图像素尺寸离屏渲染；编辑辅助虚线不进入 PNG，旋转时已有标注同步映射。浏览器测试覆盖原尺寸、无 editor chrome、旋转维度和防双击重入。
+- POST store 在 lease 前解析 PNG chunk/IHDR/IEND 与编码边界，限制 64 MiB 单文件、32768 单边、1 亿像素、8 条/128 MiB 会话配额，并在上传前回收过期 lease；并发上传的 staging 字节逐块预留，聚合临时占用同样不能越过 128 MiB，取消、失败和 Dispose 路径均释放预留；不新增重复 hash/CRC 校验。
+- 与 Classic 仍有一个明确产品边界：Classic 可在 OCR 前编辑截图；Next 当前标注发生在识别展示阶段，只生成复制/保存的图片副本，不会重新提交 OCR。本次用显式说明消除误导，未伪造不存在的 Host/Protocol 能力。
+- 视觉基线确认 1280×800 下所有工具、说明和底部动作完整可见，页面与全局截图按钮不再重复；界面维持安静、紧凑的 Fluent 工作台语言。
+
 - 按“Web 工作台 + 原生深宿主”架构完整实施，而非只输出方案。
 - 使用适当 Web 框架，统一页面风格并提升现代感和操作效率。
 - 使用子代理组织独立工作包，并补充、调整审查与测试。

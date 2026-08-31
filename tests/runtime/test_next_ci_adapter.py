@@ -389,6 +389,7 @@ def _configure_release_smoke_fixture(
     *,
     fail_smoke: bool,
     include_delta: bool = False,
+    fail_bootstrapper: bool = False,
 ) -> tuple[Path, list[list[str]]]:
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
@@ -398,7 +399,8 @@ def _configure_release_smoke_fixture(
         (artifacts / "VibeOCRNext-1.2.3-delta.nupkg").write_bytes(b"delta")
     _write_velopack_feed(artifacts, "1.2.3")
     with zipfile.ZipFile(artifacts / "VibeOCRNext-v1.2.3-win-x64.zip", "w") as package:
-        package.writestr("VibeOCR.WinUI.exe", b"placeholder")
+        package.writestr("VibeOCR/VibeOCR.exe", b"bootstrapper")
+        package.writestr("VibeOCR/app/VibeOCR.WinUI.exe", b"desktop")
     names = {
         full.name,
         "VibeOCRNext-v1.2.3-win-x64.zip",
@@ -435,11 +437,17 @@ def _configure_release_smoke_fixture(
     def fake_run(
         command: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
-        assert kwargs["timeout"] == 120
         calls.append(command)
-        if "smoke_web_workbench.ps1" in command[2]:
+        if command[0].endswith("VibeOCR.exe"):
+            assert command[1:] == ["--self-test-prerequisites"]
+            assert kwargs["timeout"] == 30
+            assert kwargs["cwd"] == Path(command[0]).parent
+            if fail_bootstrapper:
+                raise subprocess.CalledProcessError(30, command)
+        elif "smoke_web_workbench.ps1" in command[2]:
+            assert kwargs["timeout"] == 120
             product_root = Path(command[command.index("-ProductRoot") + 1])
-            assert (product_root / "VibeOCR.WinUI.exe").is_file()
+            assert (product_root / "app/VibeOCR.WinUI.exe").is_file()
             if fail_smoke:
                 raise subprocess.CalledProcessError(31, command)
         return subprocess.CompletedProcess(command, 0)
@@ -460,8 +468,27 @@ def test_release_smoke_executes_the_extracted_product_handshake(
 
     verify(artifacts, "1.2.3")
 
+    assert len(calls) == 2
+    assert calls[0][0].endswith("VibeOCR.exe")
+    assert calls[0][1:] == ["--self-test-prerequisites"]
+    assert calls[1][2].endswith("smoke_web_workbench.ps1")
+
+
+def test_release_smoke_propagates_a_failed_public_entry_self_test(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts, calls = _configure_release_smoke_fixture(
+        tmp_path,
+        monkeypatch,
+        fail_smoke=False,
+        fail_bootstrapper=True,
+    )
+
+    with pytest.raises(subprocess.CalledProcessError):
+        verify(artifacts, "1.2.3")
+
     assert len(calls) == 1
-    assert calls[0][2].endswith("smoke_web_workbench.ps1")
 
 
 def test_release_smoke_accepts_and_binds_one_current_delta(
@@ -524,7 +551,7 @@ def test_release_smoke_propagates_a_failed_web_ready_handshake(
     with pytest.raises(subprocess.CalledProcessError):
         verify(artifacts, "1.2.3")
 
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize("installed_layout", [False, True])
@@ -956,6 +983,56 @@ def test_velopack_startup_hook_runs_in_the_packaged_root_entrypoint() -> None:
     )
     assert child_program.index("VelopackApp.Build().Run();") < child_program.index(
         "Application.Start"
+    )
+
+
+def test_bootstrapper_webview_probe_uses_the_packaged_native_loader() -> None:
+    root = Path(__file__).parents[2]
+    program = (root / "src/dotnet/VibeOCR.Bootstrapper/Program.cs").read_text(
+        encoding="utf-8"
+    )
+    project = (
+        root / "src/dotnet/VibeOCR.Bootstrapper/VibeOCR.Bootstrapper.csproj"
+    ).read_text(encoding="utf-8")
+
+    assert "using Microsoft.Web.WebView2.Core;" not in program
+    assert '<PackageReference Include="Microsoft.Web.WebView2" />' not in project
+    assert 'Path.Combine(layout.AppRoot, "WebView2Loader.dll")' in program
+    assert "GetAvailableCoreWebView2BrowserVersionString" in program
+
+    version_call = program.index("int result = getVersion")
+    cleanup_try = program.index("try", version_call)
+    failed_result = program.index(
+        "if (result < 0 || versionInfo == IntPtr.Zero)", version_call
+    )
+    cleanup_finally = program.index("finally", failed_result)
+    release_version = program.index("Marshal.FreeCoTaskMem(versionInfo)", failed_result)
+    assert (
+        version_call < cleanup_try < failed_result < cleanup_finally < release_version
+    )
+
+
+def test_bootstrapper_accepts_historical_and_cbs_windows_app_runtime_identities() -> (
+    None
+):
+    root = Path(__file__).parents[2]
+    program = (root / "src/dotnet/VibeOCR.Bootstrapper/Program.cs").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'name.Equals("Microsoft.WindowsAppRuntime.2",' in program
+    assert 'name.Equals("Microsoft.WindowsAppRuntime.CBS.2",' in program
+    assert "Microsoft.WindowsAppRuntime.2.2" not in program
+
+
+def test_bootstrapper_prerequisite_self_test_never_launches_the_app() -> None:
+    root = Path(__file__).parents[2]
+    program = (root / "src/dotnet/VibeOCR.Bootstrapper/Program.cs").read_text(
+        encoding="utf-8"
+    )
+
+    assert program.index("args.Contains(SelfTestPrerequisites") < program.index(
+        "Process.Start(startInfo)"
     )
 
 

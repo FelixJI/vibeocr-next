@@ -50,6 +50,10 @@ public sealed record CopyRecognitionResultCommand(string Format) : WorkbenchComm
 
 public sealed record ExportRecognitionResultCommand(string Format) : WorkbenchCommand;
 
+public sealed record CopyAnnotatedImageCommand(string ResourceUri) : WorkbenchCommand;
+
+public sealed record SaveAnnotatedImageCommand(string ResourceUri) : WorkbenchCommand;
+
 public sealed record AddBatchFilesCommand : WorkbenchCommand;
 
 public sealed record AddDroppedBatchFilesCommand(

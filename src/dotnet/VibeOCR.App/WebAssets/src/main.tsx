@@ -20,7 +20,7 @@ const demoState: AppViewState = {
 };
 
 const demoActions: AppActions = {
-  run: () => undefined,
+  run: async () => true,
   navigate: () => undefined,
   setTheme: () => undefined,
 };

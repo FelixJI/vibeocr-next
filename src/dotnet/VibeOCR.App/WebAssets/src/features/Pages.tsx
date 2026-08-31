@@ -349,6 +349,8 @@ function statusLabel(value: unknown, fallback: string): string {
     "recognition.running": "正在识别",
     "recognition.completed": "识别完成",
     "recognition.ready": "等待输入",
+    "recognition.failed": "识别失败，请检查运行时状态后重试",
+    "recognition.cancelled": "识别已取消，可重新选择输入",
     "pdf.open": "PDF 会话已建立",
     "pdf.empty": "尚未建立 PDF 会话",
     "qrcode.decoded": "识别完成",
@@ -485,7 +487,13 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
       <div className="inspection-grid">
         <Panel label="INPUT / 01" title="输入图像">
           {input ? (
-            <ImageCanvasEditor source={input.url} />
+            <ImageCanvasEditor
+              actions={actions}
+              canExport={viewState.capabilities.includes(
+                "recognition.annotation",
+              )}
+              source={input.url}
+            />
           ) : (
             <EmptyStage
               title="等待图片"

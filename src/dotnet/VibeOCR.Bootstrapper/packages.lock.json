@@ -11,12 +11,6 @@
           "Microsoft.NETFramework.ReferenceAssemblies.net472": "1.0.3"
         }
       },
-      "Microsoft.Web.WebView2": {
-        "type": "Direct",
-        "requested": "[1.0.4129.50, )",
-        "resolved": "1.0.4129.50",
-        "contentHash": "BuJC70c7SCl8wlvojLZbc/E5ONmGyG3fhAMmpftCpKerxae//TxgKOTELRK2QRD7m7jigNFQRf6cfVT3ZiIQoQ=="
-      },
       "Microsoft.Windows.SDK.Contracts": {
         "type": "Direct",
         "requested": "[10.0.28000.2526, )",
@@ -66,13 +60,6 @@
         }
       }
     },
-    ".NETFramework,Version=v4.7.2/win-x64": {
-      "Microsoft.Web.WebView2": {
-        "type": "Direct",
-        "requested": "[1.0.4129.50, )",
-        "resolved": "1.0.4129.50",
-        "contentHash": "BuJC70c7SCl8wlvojLZbc/E5ONmGyG3fhAMmpftCpKerxae//TxgKOTELRK2QRD7m7jigNFQRf6cfVT3ZiIQoQ=="
-      }
-    }
+    ".NETFramework,Version=v4.7.2/win-x64": {}
   }
 }

@@ -125,6 +125,15 @@ def verify(artifacts: Path, version: str) -> None:
         product_root = _extract_product(artifacts / portable_name, extracted)
         subprocess.run(
             [
+                str(product_root / "VibeOCR.exe"),
+                "--self-test-prerequisites",
+            ],
+            check=True,
+            timeout=30,
+            cwd=product_root,
+        )
+        subprocess.run(
+            [
                 "pwsh",
                 "-File",
                 str(root / "scripts/smoke_web_workbench.ps1"),
