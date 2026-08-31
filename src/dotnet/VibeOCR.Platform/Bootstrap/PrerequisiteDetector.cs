@@ -131,9 +131,10 @@ internal static class WindowsPrerequisiteProbe
         {
             var manager = new PackageManager();
             Package? package = manager.FindPackagesForUser(string.Empty)
-                .Where(item => item.Id.Name.Equals(
-                    "Microsoft.WindowsAppRuntime.2.2",
-                    StringComparison.OrdinalIgnoreCase))
+                .Where(item => IsCompatibleWindowsAppRuntimePackage(
+                    item.Id.Name,
+                    item.Id.Version.Major,
+                    item.Id.Version.Minor))
                 .Where(item => item.Id.Architecture is ProcessorArchitecture.X64 or ProcessorArchitecture.Neutral)
                 .FirstOrDefault(item => item.Status.VerifyIsOK());
             if (package is null)
@@ -149,6 +150,14 @@ internal static class WindowsPrerequisiteProbe
             return null;
         }
     }
+
+    internal static bool IsCompatibleWindowsAppRuntimePackage(
+        string name,
+        ushort major,
+        ushort minor) =>
+        (name.Equals("Microsoft.WindowsAppRuntime.2", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("Microsoft.WindowsAppRuntime.CBS.2", StringComparison.OrdinalIgnoreCase)) &&
+        (major > 2 || (major == 2 && minor >= 2));
 
     private static string? FindWebView2Version()
     {

@@ -267,7 +267,7 @@ describe("AppShell", () => {
       revision: 10,
       route: "recognition",
       theme: "light",
-      capabilities: ["recognition.file"],
+      capabilities: ["recognition.file", "recognition.annotation"],
       features: {
         recognition: {
           input: {
@@ -286,6 +286,15 @@ describe("AppShell", () => {
     expect(screen.getByRole("button", { name: "椭圆" })).toBeVisible();
     expect(screen.getByRole("button", { name: "马赛克" })).toBeVisible();
     expect(screen.getByRole("button", { name: "模糊" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "复制标注图" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "保存标注图" })).toBeEnabled();
+    expect(
+      screen.getByText(/马赛克与模糊会写入复制、保存的图片副本/),
+    ).toBeVisible();
+    expect(screen.getByLabelText("图片检查画布")).toHaveAttribute(
+      "tabindex",
+      "0",
+    );
     await user.click(screen.getByRole("button", { name: "文字" }));
     expect(screen.getByRole("textbox", { name: "标注文字" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "旋转 90°" }));
@@ -293,6 +302,47 @@ describe("AppShell", () => {
     await user.click(undo);
     expect(undo).toBeDisabled();
     unmount();
+  });
+
+  it("shows failed recognition and rejected host commands without hiding them as idle", () => {
+    window.location.hash = "#/recognition";
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 11,
+      route: "recognition",
+      theme: "light",
+      capabilities: [],
+      features: { recognition: { statusCode: "recognition.failed" } },
+      runtimeLabel: "原生宿主已连接",
+      commandProblem: "workbench.error.desktopCommandFailed",
+    };
+
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+
+    expect(screen.getByText("识别失败，请检查运行时状态后重试")).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "原生操作执行失败。请检查当前输入和运行时状态后重试。",
+    );
+    unmount();
+
+    const cancelled = render(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          commandProblem: "workbench.error.annotationOperationCancelled",
+        }}
+      />,
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "未保存标注图片；原图和当前识别结果均未改变。",
+    );
+    cancelled.unmount();
   });
 
   it("shows QR busy state immediately and lets the user cancel", async () => {

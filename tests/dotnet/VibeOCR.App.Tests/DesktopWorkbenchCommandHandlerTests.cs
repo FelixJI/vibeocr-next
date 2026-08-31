@@ -1,5 +1,6 @@
 using VibeOCR.App.Features.Maintenance;
 using VibeOCR.App.Features.QrCode;
+using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Features.Update;
 using VibeOCR.App.ViewModels;
 using VibeOCR.App.Web;
@@ -12,6 +13,122 @@ namespace VibeOCR.App.Tests;
 
 public sealed class DesktopWorkbenchCommandHandlerTests
 {
+  private static readonly byte[] AnnotationPng = Convert.FromBase64String(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+
+  [Fact]
+  public async Task AnnotatedImageCopyConsumesOpaqueUploadOnlyAfterNativeSuccess()
+  {
+    string resourceRoot = Path.Combine(
+      Path.GetTempPath(),
+      $"vibeocr-handler-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      var platform = new RecordingAnnotatedImagePlatform();
+      await using DesktopWorkbenchCommandHandler handler = CreateAnnotationHandler(
+        broker,
+        annotationStore,
+        platform,
+        resourceRoot);
+      await using MemoryStream upload = new(AnnotationPng);
+      WorkbenchAnnotationLease lease = await annotationStore.UploadPngAsync(
+        upload,
+        TestContext.Current.CancellationToken);
+
+      WorkbenchCommandOutcome outcome = await handler.ExecuteAsync(
+        new CopyAnnotatedImageCommand(lease.ResourceUri.AbsoluteUri),
+        TestContext.Current.CancellationToken);
+
+      Assert.Null(outcome.Error);
+      Assert.Equal(AnnotationPng, platform.CopiedBytes);
+      Assert.Throws<WorkbenchAnnotationAccessException>(() =>
+        annotationStore.Take(lease.ResourceUri));
+    }
+    finally
+    {
+      Directory.Delete(resourceRoot, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task AnnotatedImageSaveCancellationIsVisibleAndUploadIsCleaned()
+  {
+    string resourceRoot = Path.Combine(
+      Path.GetTempPath(),
+      $"vibeocr-handler-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      var platform = new RecordingAnnotatedImagePlatform { SaveResult = false };
+      await using DesktopWorkbenchCommandHandler handler = CreateAnnotationHandler(
+        broker,
+        annotationStore,
+        platform,
+        resourceRoot);
+      await using MemoryStream upload = new(AnnotationPng);
+      WorkbenchAnnotationLease lease = await annotationStore.UploadPngAsync(
+        upload,
+        TestContext.Current.CancellationToken);
+
+      WorkbenchCommandOutcome outcome = await handler.ExecuteAsync(
+        new SaveAnnotatedImageCommand(lease.ResourceUri.AbsoluteUri),
+        TestContext.Current.CancellationToken);
+
+      Assert.Equal("annotation_operation_cancelled", outcome.Error?.Code);
+      Assert.Equal(AnnotationPng, platform.SavedBytes);
+      Assert.Throws<WorkbenchAnnotationAccessException>(() =>
+        annotationStore.Take(lease.ResourceUri));
+    }
+    finally
+    {
+      Directory.Delete(resourceRoot, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task AnnotatedImageNativeFailureIsVisibleAndUploadIsCleaned()
+  {
+    string resourceRoot = Path.Combine(
+      Path.GetTempPath(),
+      $"vibeocr-handler-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      var platform = new RecordingAnnotatedImagePlatform
+      {
+        CopyError = new IOException("clipboard unavailable"),
+      };
+      await using DesktopWorkbenchCommandHandler handler = CreateAnnotationHandler(
+        broker,
+        annotationStore,
+        platform,
+        resourceRoot);
+      await using MemoryStream upload = new(AnnotationPng);
+      WorkbenchAnnotationLease lease = await annotationStore.UploadPngAsync(
+        upload,
+        TestContext.Current.CancellationToken);
+
+      WorkbenchCommandOutcome outcome = await handler.ExecuteAsync(
+        new CopyAnnotatedImageCommand(lease.ResourceUri.AbsoluteUri),
+        TestContext.Current.CancellationToken);
+
+      Assert.Equal("desktop_command_failed", outcome.Error?.Code);
+      Assert.Throws<WorkbenchAnnotationAccessException>(() =>
+        annotationStore.Take(lease.ResourceUri));
+    }
+    finally
+    {
+      Directory.Delete(resourceRoot, recursive: true);
+    }
+  }
+
   [Fact]
   public async Task QrCodeWorkStartsBusyAndCancellationSuppressesLateSuccess()
   {
@@ -24,6 +141,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       var client = new BlockingQrCodeClient();
       var input = new EmptyQrCodeInput();
       using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
       await using var handler = new DesktopWorkbenchCommandHandler(
         static () => throw new InvalidOperationException(),
         static () => throw new InvalidOperationException(),
@@ -35,7 +153,8 @@ public sealed class DesktopWorkbenchCommandHandlerTests
         new DiagnosticsViewModel("test", new PrerequisiteReport([])),
         broker,
         resourceRoot,
-        static () => 0);
+        static () => 0,
+        annotationStore);
       var published = new List<WorkbenchState>();
       handler.StateChanged += published.Add;
 
@@ -77,6 +196,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     {
       var maintenance = new ProductMaintenanceCoordinator();
       using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
       await using var handler = new DesktopWorkbenchCommandHandler(
         static () => throw new InvalidOperationException(),
         static () => throw new InvalidOperationException(),
@@ -90,7 +210,8 @@ public sealed class DesktopWorkbenchCommandHandlerTests
         new DiagnosticsViewModel("test", new PrerequisiteReport([])),
         broker,
         resourceRoot,
-        static () => 0);
+        static () => 0,
+        annotationStore);
       var published = new List<WorkbenchState>();
       handler.StateChanged += published.Add;
       await handler.ExecuteAsync(
@@ -144,6 +265,55 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       CancellationToken cancellationToken) => completion.Task;
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+  }
+
+  private static DesktopWorkbenchCommandHandler CreateAnnotationHandler(
+    WorkbenchResourceBroker broker,
+    WorkbenchAnnotationStore annotationStore,
+    IAnnotatedImagePlatform platform,
+    string resourceRoot) => new(
+      static () => throw new InvalidOperationException(),
+      static () => throw new InvalidOperationException(),
+      static () => throw new InvalidOperationException(),
+      static () => throw new InvalidOperationException(),
+      static () => throw new InvalidOperationException(),
+      static () => throw new InvalidOperationException(),
+      static () => throw new InvalidOperationException(),
+      new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+      broker,
+      resourceRoot,
+      static () => 0,
+      annotationStore,
+      platform);
+
+  private sealed class RecordingAnnotatedImagePlatform : IAnnotatedImagePlatform
+  {
+    public byte[]? CopiedBytes { get; private set; }
+
+    public byte[]? SavedBytes { get; private set; }
+
+    public bool SaveResult { get; init; } = true;
+
+    public Exception? CopyError { get; init; }
+
+    public async Task CopyPngAsync(
+      string sourcePath,
+      CancellationToken cancellationToken)
+    {
+      CopiedBytes = await File.ReadAllBytesAsync(sourcePath, cancellationToken);
+      if (CopyError is not null)
+      {
+        throw CopyError;
+      }
+    }
+
+    public async Task<bool> SavePngAsync(
+      string sourcePath,
+      CancellationToken cancellationToken)
+    {
+      SavedBytes = await File.ReadAllBytesAsync(sourcePath, cancellationToken);
+      return SaveResult;
+    }
   }
 
   private sealed class EmptyQrCodeInput : IQrCodeInput

@@ -79,6 +79,7 @@ public sealed partial class MainWindow : Window
     string resourceRoot = Path.Combine(layout.DataRoot, "web-resources");
     Directory.CreateDirectory(resourceRoot);
     var resourceBroker = new WorkbenchResourceBroker(resourceRoot);
+    var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
     var commandHandler = new DesktopWorkbenchCommandHandler(
       recognitionFactory,
       batchFactory,
@@ -90,14 +91,16 @@ public sealed partial class MainWindow : Window
       diagnostics,
       resourceBroker,
       resourceRoot,
-      () => WindowNative.GetWindowHandle(this));
+      () => WindowNative.GetWindowHandle(this),
+      annotationStore);
     application = new WorkbenchApplication(
       DesktopWorkbenchCommandHandler.Capabilities,
       WorkbenchRoute.Recognition,
       commandHandler);
     webHost = new WebWorkbenchHost(
       application,
-      resourceBroker);
+      resourceBroker,
+      annotationStore);
     webHost.ProtocolViolation += OnProtocolViolation;
     webHost.RecoveryRequired += OnRecoveryRequired;
     webHost.StateChanged += OnHostStateChanged;

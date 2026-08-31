@@ -7,10 +7,12 @@ import type {
   HostCommand,
   HostStateEvent,
 } from "./client";
+import type { AppViewState } from "../app/types";
 import { WorkbenchWebRuntime } from "./runtime";
 
 class FakeHostBridge implements HostBridge {
   readonly commands: HostCommand[] = [];
+  nextResult: CommandResult = { revision: 8, ok: true, problem: null };
   private listener?: (event: HostStateEvent) => void;
 
   async bootstrap(): Promise<AppSnapshot> {
@@ -26,7 +28,7 @@ class FakeHostBridge implements HostBridge {
 
   async execute(command: HostCommand): Promise<CommandResult> {
     this.commands.push(command);
-    return { revision: 8, ok: true, problem: null };
+    return this.nextResult;
   }
 
   subscribe(listener: (event: HostStateEvent) => void): () => void {
@@ -94,7 +96,7 @@ describe("WorkbenchWebRuntime", () => {
     await runtime.start(() => undefined);
 
     runtime.actions.navigate("pdf");
-    runtime.actions.run({ type: "pdf.rotate", degrees: 90 });
+    await runtime.actions.run({ type: "pdf.rotate", degrees: 90 });
 
     expect(bridge.commands).toEqual([
       {
@@ -108,5 +110,33 @@ describe("WorkbenchWebRuntime", () => {
         arguments: { degrees: 90 },
       },
     ]);
+  });
+
+  it("projects rejected host receipts into visible application state", async () => {
+    const bridge = new FakeHostBridge();
+    bridge.nextResult = {
+      revision: 8,
+      ok: false,
+      problem: {
+        code: "desktop_command_failed",
+        category: "Internal",
+        retryable: true,
+        messageKey: "workbench.error.desktopCommandFailed",
+      },
+    };
+    const runtime = new WorkbenchWebRuntime(bridge);
+    const states: AppViewState[] = [];
+    await runtime.start((state) => states.push(state));
+
+    await runtime.actions.run({ type: "recognition.captureScreen" });
+
+    expect(states.at(-1)?.commandProblem).toBe(
+      "workbench.error.desktopCommandFailed",
+    );
+
+    bridge.nextResult = { revision: 9, ok: true, problem: null };
+    await runtime.actions.run({ type: "recognition.captureScreen" });
+
+    expect(states.at(-1)?.commandProblem).toBeUndefined();
   });
 });
