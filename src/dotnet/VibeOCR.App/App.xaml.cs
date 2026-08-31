@@ -130,7 +130,8 @@ public sealed partial class App : Application
             executable,
             options.Profile,
             Environment.GetEnvironmentVariable("VIBEOCR_PORTABLE_LAYOUT"),
-            options.InstallRoot);
+            options.InstallRoot,
+            productRootOverride: options.ProductRoot);
         // 便携状态根就绪探针:不可写时 fail closed,不回退用户目录。
         layout.EnsurePortableState();
         // WebView2 user-data/cache/cookies 固定在便携 state 内;通过 Loader
@@ -723,7 +724,8 @@ public sealed record AppLaunchOptions(
     string Profile,
     bool ShellOnly,
     string? Goto = null,
-    string? InstallRoot = null)
+    string? InstallRoot = null,
+    string? ProductRoot = null)
 {
     public static AppLaunchOptions Parse(IReadOnlyList<string> args)
     {
@@ -731,6 +733,7 @@ public sealed record AppLaunchOptions(
         bool shellOnly = false;
         string? gotoDestination = null;
         string? installRoot = null;
+        string? productRoot = null;
         for (int index = 0; index < args.Count; index++)
         {
             if (string.Equals(args[index], "--profile", StringComparison.Ordinal))
@@ -753,6 +756,14 @@ public sealed record AppLaunchOptions(
                 }
                 installRoot = Path.GetFullPath(args[++index]);
             }
+            else if (string.Equals(args[index], "--product-root", StringComparison.Ordinal))
+            {
+                if (index + 1 >= args.Count)
+                {
+                    throw new ArgumentException("--product-root requires a value.", nameof(args));
+                }
+                productRoot = Path.GetFullPath(args[++index]);
+            }
             else if (string.Equals(args[index], "--goto", StringComparison.Ordinal))
             {
                 if (index + 1 >= args.Count)
@@ -774,7 +785,12 @@ public sealed record AppLaunchOptions(
             throw new ArgumentException($"Unsupported profile: {profile}.", nameof(args));
         }
 
-        return new AppLaunchOptions(profile, shellOnly, gotoDestination, installRoot);
+        return new AppLaunchOptions(
+            profile,
+            shellOnly,
+            gotoDestination,
+            installRoot,
+            productRoot);
     }
 }
 

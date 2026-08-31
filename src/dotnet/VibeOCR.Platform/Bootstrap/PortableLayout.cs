@@ -28,6 +28,7 @@ public sealed class PortableLayoutException : InvalidOperationException
 public sealed record PortableLayout(
     string Profile,
     string InstallRoot,
+    string ProductRoot,
     string DataRoot,
     string OutputRoot,
     string ConfigFile,
@@ -53,7 +54,8 @@ public sealed record PortableLayout(
         string profile,
         string? portableLayoutManifest = null,
         string? installRootOverride = null,
-        string? userDataRoot = null)
+        string? userDataRoot = null,
+        string? productRootOverride = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(executable);
         if (profile is not ("production" or "winui-dev"))
@@ -69,12 +71,18 @@ public sealed record PortableLayout(
             File.Exists(candidate)
             ? Path.GetDirectoryName(candidate)!
             : candidate;
+        string productRoot = !string.IsNullOrWhiteSpace(productRootOverride)
+            ? Path.GetFullPath(productRootOverride)
+            : !string.IsNullOrWhiteSpace(installRootOverride)
+                ? Path.GetFullPath(installRootOverride)
+                : installRoot;
         ResolvedProductLayout? productLayout = string.IsNullOrWhiteSpace(installRootOverride)
             ? null
-            : ResolvedProductLayout.Open(installRootOverride);
+            : ResolvedProductLayout.Open(productRoot);
         if (productLayout is not null)
         {
-            installRoot = productLayout.InstallRoot;
+            installRoot = Path.GetFullPath(installRootOverride!);
+            productRoot = productLayout.InstallRoot;
         }
         // 生产可变状态固定在便携根下的 state/,不再默认 LocalApplicationData;
         // userDataRoot 仅作为测试/隔离注入。
@@ -97,10 +105,11 @@ public sealed record PortableLayout(
         var layout = new PortableLayout(
             profile,
             installRoot,
+            productRoot,
             dataRoot,
             Path.Combine(scopedRoot, "output"),
             Path.Combine(scopedRoot, "config", "app_settings.json"),
-            productLayout?.PublicEntry ?? Path.Combine(installRoot, "VibeOCR.exe"),
+            Path.Combine(installRoot, "VibeOCR.exe"),
             productLayout?.AppEntry ?? candidate,
             productLayout?.WebAssetsRoot ?? Path.Combine(installRoot, "WebAssets"),
             productLayout?.ComponentLock ?? Path.Combine(installRoot, "component-lock.json"),
@@ -196,8 +205,12 @@ public sealed record PortableLayout(
         {
             return;
         }
-        const string payload =
-            "{\"products\":{\"next\":{\"component_lock\":\"app/metadata/component-lock.json\",\"root\":\".\"}},\"schema_version\":1,\"shared_root\":\"state\"}";
+        string relativeProductRoot = Path.GetRelativePath(InstallRoot, ProductRoot)
+            .Replace(Path.DirectorySeparatorChar, '/');
+        string payload =
+            "{\"products\":{\"next\":{\"component_lock\":\"app/metadata/component-lock.json\",\"root\":\"" +
+            relativeProductRoot +
+            "\"}},\"schema_version\":1,\"shared_root\":\"state\"}";
         string? existing = File.Exists(manifestPath)
             ? File.ReadAllText(manifestPath).Trim()
             : null;
@@ -215,7 +228,13 @@ public sealed record PortableLayout(
     private void ValidateContainment()
     {
         string installRoot = NormalizeDirectory(InstallRoot);
+        string productRoot = NormalizeDirectory(ProductRoot);
         string stateRoot = NormalizeDirectory(StateRoot);
+        if (!IsDescendantOrSelf(installRoot, productRoot))
+        {
+            throw new PortableLayoutException(
+                $"产品载荷目录必须位于安装目录内：{productRoot} 不在 {installRoot} 之下。");
+        }
         if (!IsStrictDescendant(installRoot, stateRoot))
         {
             throw new PortableLayoutException(

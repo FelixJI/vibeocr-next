@@ -18,6 +18,12 @@ namespace VibeOCR.App.Tests;
 public sealed class VelopackTransportTests
 {
     [Fact]
+    public void UpdatePolicyAllowsOnlyOneAdjacentDelta()
+    {
+        Assert.Equal(1, VelopackUpdateCoordinator.MaximumDeltasBeforeFallback);
+    }
+
+    [Fact]
     public void InvalidSettingsEntriesAreSkippedWithoutBlockingStartup()
     {
         string configFile = Path.GetTempFileName();

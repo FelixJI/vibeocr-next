@@ -133,7 +133,7 @@ WebAssets 使用 Node 24.x、npm 11.7、React 19、TypeScript 6 和 Vite 8。修
 
 ## 发布资产
 
-正式 Release 精确包含 Velopack full nupkg、Setup 与 SHA-256、Portable、feed、
+正式 Release 精确包含 Velopack full nupkg、相邻版本 delta nupkg、Portable、feed、
 `component-lock.json`、`component-identities.json` 和 SPDX SBOM。版本与派生文件只由自动化脚本更新。
 
 ## 参与贡献

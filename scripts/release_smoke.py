@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -32,6 +33,51 @@ def _extract_product(archive: Path, destination: Path) -> Path:
     return roots[0] if len(roots) == 1 else root
 
 
+def _digest(path: Path, algorithm: str) -> str:
+    digest = hashlib.new(algorithm)
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest().upper()
+
+
+def _verify_velopack_feed(artifacts: Path, version: str) -> tuple[Path, Path | None]:
+    full = artifacts / f"VibeOCRNext-{version}-full.nupkg"
+    delta = artifacts / f"VibeOCRNext-{version}-delta.nupkg"
+    document = json.loads((artifacts / "releases.win.json").read_text(encoding="utf-8"))
+    assets = document.get("Assets") if isinstance(document, dict) else None
+    if not isinstance(assets, list) or not all(
+        isinstance(asset, dict) for asset in assets
+    ):
+        raise ValueError("Velopack feed assets are invalid")
+    current = [
+        asset
+        for asset in assets
+        if asset.get("PackageId") == "VibeOCRNext" and asset.get("Version") == version
+    ]
+    expected_paths = {"Full": full}
+    if delta.is_file():
+        expected_paths["Delta"] = delta
+    if {asset.get("Type") for asset in current} != set(expected_paths) or len(
+        current
+    ) != len(expected_paths):
+        raise ValueError("Velopack feed must bind the current full and optional delta")
+    for asset in current:
+        path = expected_paths[asset["Type"]]
+        expected = {
+            "FileName": path.name,
+            "SHA1": _digest(path, "sha1"),
+            "SHA256": _digest(path, "sha256"),
+            "Size": path.stat().st_size,
+        }
+        if any(asset.get(field) != value for field, value in expected.items()):
+            raise ValueError(f"Velopack feed does not bind {asset['Type']} package")
+    historical = [asset for asset in assets if asset not in current]
+    if historical:
+        raise ValueError("published Velopack feed must not contain historical assets")
+    return full, delta if delta.is_file() else None
+
+
 def verify(artifacts: Path, version: str) -> None:
     portable_name = f"VibeOCRNext-v{version}-win-x64.zip"
     names = verify_release_assets(
@@ -57,7 +103,7 @@ def verify(artifacts: Path, version: str) -> None:
         record = identity[component]
         if not record.get("release_manifest_sha256"):
             raise ValueError(f"missing actual {component} release manifest identity")
-    full = next(artifacts.glob("VibeOCRNext-*-full.nupkg"))
+    full, delta = _verify_velopack_feed(artifacts, version)
     expected_names = {
         full.name,
         portable_name,
@@ -66,6 +112,8 @@ def verify(artifacts: Path, version: str) -> None:
         "component-identities.json",
         "SBOM.spdx.json",
     }
+    if delta is not None:
+        expected_names.add(delta.name)
     if set(names) != expected_names:
         raise ValueError(
             "release asset set mismatch; "

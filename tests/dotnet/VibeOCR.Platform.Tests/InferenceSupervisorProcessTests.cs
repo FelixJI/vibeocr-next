@@ -131,7 +131,7 @@ public sealed class InferenceSupervisorProcessTests
         finally
         {
             proc.Dispose();
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -159,7 +159,7 @@ public sealed class InferenceSupervisorProcessTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -178,7 +178,7 @@ public sealed class InferenceSupervisorProcessTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -205,7 +205,7 @@ public sealed class InferenceSupervisorProcessTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -230,7 +230,7 @@ public sealed class InferenceSupervisorProcessTests
         finally
         {
             proc.Dispose();
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 

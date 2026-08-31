@@ -122,7 +122,13 @@ def _stage_product(
         path.write_bytes(relative.encode())
     bootstrapper = tmp_path / f"{name}-bootstrapper.exe"
     bootstrapper.write_bytes(b"bootstrapper")
-    (tmp_path / "Velopack.dll").write_bytes(b"velopack")
+    for dependency in (
+        "Velopack.dll",
+        "Microsoft.Web.WebView2.Core.dll",
+        "WebView2Loader.dll",
+        "Newtonsoft.Json.dll",
+    ):
+        (tmp_path / dependency).write_bytes(dependency.encode())
     identities = tmp_path / f"{name}-identities.json"
     identities.write_text("{}", encoding="utf-8")
     license_file = tmp_path / f"{name}-LICENSE"

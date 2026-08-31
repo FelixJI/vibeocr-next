@@ -183,7 +183,7 @@ public sealed class RuntimeInstallerClientTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -246,7 +246,7 @@ public sealed class RuntimeInstallerClientTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -299,7 +299,7 @@ public sealed class RuntimeInstallerClientTests
         }
         finally
         {
-            Directory.Delete(Path.GetDirectoryName(manifest)!, recursive: true);
+            TestDirectory.Delete(Path.GetDirectoryName(manifest)!, recursive: true);
         }
     }
 
@@ -331,7 +331,7 @@ public sealed class RuntimeInstallerClientTests
         }
         finally
         {
-            Directory.Delete(Path.GetDirectoryName(manifest)!, recursive: true);
+            TestDirectory.Delete(Path.GetDirectoryName(manifest)!, recursive: true);
         }
     }
 
@@ -375,7 +375,7 @@ public sealed class RuntimeInstallerClientTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -427,7 +427,7 @@ public sealed class RuntimeInstallerClientTests
         }
         finally
         {
-            Directory.Delete(Path.GetDirectoryName(manifest)!, recursive: true);
+            TestDirectory.Delete(Path.GetDirectoryName(manifest)!, recursive: true);
         }
     }
 
@@ -474,7 +474,7 @@ public sealed class RuntimeInstallerClientTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -522,7 +522,7 @@ public sealed class RuntimeInstallerClientTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -561,7 +561,7 @@ public sealed class RuntimeInstallerClientTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -698,7 +698,7 @@ public sealed class RuntimeInstallerClientTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -733,7 +733,7 @@ public sealed class RuntimeInstallerClientTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -770,7 +770,7 @@ public sealed class RuntimeInstallerClientTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -888,7 +888,7 @@ public sealed class RuntimeInstallerClientTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -943,7 +943,7 @@ public sealed class RuntimeInstallerClientTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -990,7 +990,7 @@ public sealed class RuntimeInstallerClientTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 

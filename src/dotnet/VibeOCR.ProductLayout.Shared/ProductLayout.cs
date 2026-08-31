@@ -7,6 +7,41 @@ using System.Text;
 
 namespace VibeOCR.ProductLayout;
 
+public sealed class PortableProductRoots
+{
+    private PortableProductRoots(string installRoot, string productRoot)
+    {
+        InstallRoot = installRoot;
+        ProductRoot = productRoot;
+    }
+
+    public string InstallRoot { get; }
+    public string ProductRoot { get; }
+
+    public static PortableProductRoots Resolve(string productRoot)
+    {
+        if (string.IsNullOrWhiteSpace(productRoot))
+        {
+            throw new ArgumentException("Product root is required.", nameof(productRoot));
+        }
+
+        string product = Path.GetFullPath(productRoot)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        DirectoryInfo directory = new(product);
+        DirectoryInfo? parent = directory.Parent;
+        if (directory.Name.Equals("current", StringComparison.OrdinalIgnoreCase) &&
+            parent is not null &&
+            File.Exists(Path.Combine(parent.FullName, ".portable")) &&
+            File.Exists(Path.Combine(parent.FullName, "Update.exe")) &&
+            File.Exists(Path.Combine(parent.FullName, "VibeOCR.exe")))
+        {
+            return new PortableProductRoots(parent.FullName, product);
+        }
+
+        return new PortableProductRoots(product, product);
+    }
+}
+
 public sealed class ResolvedProductLayout
 {
     public const string DescriptorRelativePath = @"app\metadata\product-layout.json";
@@ -95,6 +130,7 @@ public sealed class ResolvedProductLayout
         {
             "state",
             "portable-layout.json",
+            "velopack",
         };
         var actualRoot = new HashSet<string>(StringComparer.Ordinal);
         foreach (string path in Directory.EnumerateFileSystemEntries(InstallRoot))
@@ -106,6 +142,19 @@ public sealed class ResolvedProductLayout
             actualRoot.Except(expectedRoot).Except(portableTolerated).Any())
         {
             throw new InvalidDataException("layout.root-conflict: product root is not closed");
+        }
+        string velopackRuntime = Path.Combine(InstallRoot, "velopack");
+        if (File.Exists(velopackRuntime) ||
+            (Directory.Exists(velopackRuntime) &&
+             (File.GetAttributes(velopackRuntime).HasFlag(FileAttributes.ReparsePoint) ||
+              Directory.EnumerateFileSystemEntries(velopackRuntime).Any(path =>
+                  Directory.Exists(path) ||
+                  File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint) ||
+                  !Path.GetFileName(path).Equals(
+                      "velopack_VibeOCRNext.log",
+                      StringComparison.Ordinal)))))
+        {
+            throw new InvalidDataException("layout.root-conflict: Velopack runtime directory is invalid");
         }
 
         string[] required =

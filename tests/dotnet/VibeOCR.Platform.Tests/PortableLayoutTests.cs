@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using VibeOCR.Platform.Bootstrap;
+using VibeOCR.ProductLayout;
 using Xunit;
 
 namespace VibeOCR.Platform.Tests;
@@ -83,7 +84,7 @@ public sealed class PortableLayoutTests
         }
         finally
         {
-            Directory.Delete(bundle, recursive: true);
+            TestDirectory.Delete(bundle, recursive: true);
         }
     }
 
@@ -124,7 +125,7 @@ public sealed class PortableLayoutTests
             firstWrite,
             File.GetLastWriteTimeUtc(layout.PortableLayoutManifest!).ToString("O"));
 
-        Directory.Delete(root, recursive: true);
+        TestDirectory.Delete(root, recursive: true);
     }
 
     [Fact]
@@ -145,7 +146,7 @@ public sealed class PortableLayoutTests
         Assert.Contains("移动", error.Message);
         Assert.Contains("不会请求管理员权限", error.Message);
 
-        Directory.Delete(root, recursive: true);
+        TestDirectory.Delete(root, recursive: true);
     }
 
     [Fact]
@@ -159,7 +160,7 @@ public sealed class PortableLayoutTests
             "production",
             userDataRoot: Path.Combine(Path.GetTempPath(), "elsewhere")));
 
-        Directory.Delete(root, recursive: true);
+        TestDirectory.Delete(root, recursive: true);
     }
 
     [Fact]
@@ -176,7 +177,7 @@ public sealed class PortableLayoutTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -203,7 +204,7 @@ public sealed class PortableLayoutTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -229,8 +230,8 @@ public sealed class PortableLayoutTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
-            Directory.Delete(adjacent, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
+            TestDirectory.Delete(adjacent, recursive: true);
         }
     }
 
@@ -248,7 +249,7 @@ public sealed class PortableLayoutTests
                 "production");
             layout.EnsurePortableState();
             string configDirectory = Path.GetDirectoryName(layout.ConfigFile)!;
-            Directory.Delete(configDirectory);
+            TestDirectory.Delete(configDirectory);
             CreateJunction(configDirectory, outsideRoot);
             string outside = Path.Combine(outsideRoot, "app_settings.json");
             File.WriteAllText(outside, "before");
@@ -263,10 +264,10 @@ public sealed class PortableLayoutTests
             string configDirectory = Path.Combine(root, "state", "config");
             if (Directory.Exists(configDirectory))
             {
-                Directory.Delete(configDirectory);
+                TestDirectory.Delete(configDirectory);
             }
-            Directory.Delete(root, recursive: true);
-            Directory.Delete(outsideRoot, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
+            TestDirectory.Delete(outsideRoot, recursive: true);
         }
     }
 
@@ -294,7 +295,7 @@ public sealed class PortableLayoutTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -348,15 +349,15 @@ public sealed class PortableLayoutTests
             if (Directory.Exists(configDirectory)
                 && File.GetAttributes(configDirectory).HasFlag(FileAttributes.ReparsePoint))
             {
-                Directory.Delete(configDirectory);
+                TestDirectory.Delete(configDirectory);
             }
             if (Directory.Exists(root))
             {
-                Directory.Delete(root, recursive: true);
+                TestDirectory.Delete(root, recursive: true);
             }
             if (Directory.Exists(outsideRoot))
             {
-                Directory.Delete(outsideRoot, recursive: true);
+                TestDirectory.Delete(outsideRoot, recursive: true);
             }
         }
     }
@@ -402,15 +403,15 @@ public sealed class PortableLayoutTests
             if (Directory.Exists(stateDirectory)
                 && File.GetAttributes(stateDirectory).HasFlag(FileAttributes.ReparsePoint))
             {
-                Directory.Delete(stateDirectory);
+                TestDirectory.Delete(stateDirectory);
             }
             if (Directory.Exists(root))
             {
-                Directory.Delete(root, recursive: true);
+                TestDirectory.Delete(root, recursive: true);
             }
             if (Directory.Exists(outsideRoot))
             {
-                Directory.Delete(outsideRoot, recursive: true);
+                TestDirectory.Delete(outsideRoot, recursive: true);
             }
         }
     }
@@ -457,15 +458,15 @@ public sealed class PortableLayoutTests
             if (Directory.Exists(stateDirectory)
                 && File.GetAttributes(stateDirectory).HasFlag(FileAttributes.ReparsePoint))
             {
-                Directory.Delete(stateDirectory);
+                TestDirectory.Delete(stateDirectory);
             }
             if (Directory.Exists(root))
             {
-                Directory.Delete(root, recursive: true);
+                TestDirectory.Delete(root, recursive: true);
             }
             if (Directory.Exists(outsideRoot))
             {
-                Directory.Delete(outsideRoot, recursive: true);
+                TestDirectory.Delete(outsideRoot, recursive: true);
             }
         }
     }
@@ -534,12 +535,68 @@ public sealed class PortableLayoutTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
     [Fact]
-    public void ProductRootClosureToleratesOnlyPortableStateEntries()
+    public void VelopackPortableRootKeepsStateOutsideTheVersionedCurrentPayload()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-velopack-{Guid.NewGuid():N}");
+        string current = Path.Combine(root, "current");
+        CreateProductLayoutFixture(current);
+        File.WriteAllText(Path.Combine(root, ".portable"), "");
+        File.WriteAllText(Path.Combine(root, "Update.exe"), "fixture");
+        File.WriteAllText(Path.Combine(root, "VibeOCR.exe"), "fixture");
+        try
+        {
+            PortableProductRoots roots = PortableProductRoots.Resolve(current);
+            PortableLayout layout = PortableLayout.Resolve(
+                Path.Combine(current, "app", "VibeOCR.WinUI.exe"),
+                "production",
+                installRootOverride: roots.InstallRoot,
+                productRootOverride: roots.ProductRoot);
+
+            Assert.Equal(Path.GetFullPath(root), layout.InstallRoot);
+            Assert.Equal(Path.GetFullPath(current), layout.ProductRoot);
+            Assert.Equal(Path.Combine(root, "state"), layout.DataRoot);
+            Assert.Equal(Path.Combine(root, "VibeOCR.exe"), layout.ProductEntry);
+            Assert.Equal(
+                Path.Combine(current, "app", "VibeOCR.WinUI.exe"),
+                layout.AppEntry);
+
+            layout.EnsurePortableState();
+            string manifest = File.ReadAllText(Path.Combine(root, "portable-layout.json"));
+            Assert.Contains("\"root\":\"current\"", manifest);
+            Assert.False(Directory.Exists(Path.Combine(current, "state", "config")));
+        }
+        finally
+        {
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PortableProductRootsRejectsAFalseCurrentDirectoryWithoutVelopackMarkers()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-velopack-{Guid.NewGuid():N}");
+        string current = Path.Combine(root, "current");
+        Directory.CreateDirectory(current);
+        try
+        {
+            PortableProductRoots roots = PortableProductRoots.Resolve(current);
+
+            Assert.Equal(Path.GetFullPath(current), roots.InstallRoot);
+            Assert.Equal(Path.GetFullPath(current), roots.ProductRoot);
+        }
+        finally
+        {
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ProductRootClosureToleratesOnlyKnownPortableRuntimeEntries()
     {
         string root = Path.Combine(Path.GetTempPath(), $"vibeocr-closure-{Guid.NewGuid():N}");
         string metadata = Path.Combine(root, "app", "metadata");
@@ -580,9 +637,11 @@ public sealed class PortableLayoutTests
             """);
         Directory.CreateDirectory(Path.Combine(root, "state", "logs"));
         File.WriteAllText(Path.Combine(root, "portable-layout.json"), "{}");
+        Directory.CreateDirectory(Path.Combine(root, "velopack"));
+        File.WriteAllText(Path.Combine(root, "velopack", "velopack_VibeOCRNext.log"), "log");
         try
         {
-            // state/portable-layout.json 允许存在也允许缺失。
+            // state、portable-layout.json 与 Velopack 自有日志允许存在。
             PortableLayout.Resolve(
                 Path.Combine(root, "app", "VibeOCR.WinUI.exe"),
                 "production",
@@ -593,10 +652,16 @@ public sealed class PortableLayoutTests
                 Path.Combine(root, "app", "VibeOCR.WinUI.exe"),
                 "production",
                 installRootOverride: root);
+
+            File.WriteAllText(Path.Combine(root, "velopack", "unexpected.bin"), "fixture");
+            Assert.Throws<InvalidDataException>(() => PortableLayout.Resolve(
+                Path.Combine(root, "app", "VibeOCR.WinUI.exe"),
+                "production",
+                installRootOverride: root));
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -616,7 +681,7 @@ public sealed class PortableLayoutTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -636,6 +701,76 @@ public sealed class PortableLayoutTests
         {
             throw new InvalidOperationException($"Unable to create junction: {error}");
         }
+    }
+
+    [Fact]
+    public void ProductRootClosureRejectsVelopackRuntimeJunction()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-closure-{Guid.NewGuid():N}");
+        string outside = Path.Combine(Path.GetTempPath(), $"vibeocr-closure-outside-{Guid.NewGuid():N}");
+        CreateProductLayoutFixture(root);
+        Directory.CreateDirectory(outside);
+        File.WriteAllText(Path.Combine(outside, "velopack_VibeOCRNext.log"), "log");
+        string link = Path.Combine(root, "velopack");
+        CreateJunction(link, outside);
+        try
+        {
+            Assert.Throws<InvalidDataException>(() => PortableLayout.Resolve(
+                Path.Combine(root, "app", "VibeOCR.WinUI.exe"),
+                "production",
+                installRootOverride: root));
+        }
+        finally
+        {
+            if (Directory.Exists(link) &&
+                File.GetAttributes(link).HasFlag(FileAttributes.ReparsePoint))
+            {
+                TestDirectory.Delete(link);
+            }
+            TestDirectory.Delete(root, recursive: true);
+            TestDirectory.Delete(outside, recursive: true);
+        }
+    }
+
+    private static void CreateProductLayoutFixture(string root)
+    {
+        string metadata = Path.Combine(root, "app", "metadata");
+        Directory.CreateDirectory(metadata);
+        string[] required =
+        [
+            "VibeOCR.exe",
+            "Velopack.dll",
+            "LICENSE",
+            "CHANGELOG.md",
+            "app/VibeOCR.WinUI.exe",
+            "app/VibeOCR.WinUI.dll",
+            "app/VibeOCR.WinUI.pri",
+            "app/App.xbf",
+            "app/MainWindow.xbf",
+            "app/WebAssets/index.html",
+            "app/metadata/component-lock.json",
+            "app/metadata/component-identities.json",
+            "app/metadata/product-release-manifest.json",
+            "runtime/backend/runtime-manifest.json",
+            "runtime/installer/vibeocr-runtime-installer.exe",
+        ];
+        foreach (string relative in required)
+        {
+            string path = Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, "fixture");
+        }
+        File.WriteAllText(
+            Path.Combine(metadata, "product-layout.json"),
+            """
+            {"schema_version":1,"product_id":"vibeocr","public_entry":"VibeOCR.exe",
+             "roots":{"app":"app","runtime":"runtime","metadata":"app/metadata"},
+             "app":{"entry":"app/VibeOCR.WinUI.exe","web_assets":"app/WebAssets"},
+             "runtime":{"manifest":"runtime/backend/runtime-manifest.json","installer":"runtime/installer/vibeocr-runtime-installer.exe"},
+             "metadata":{"component_lock":"app/metadata/component-lock.json","component_identities":"app/metadata/component-identities.json","release_manifest":"app/metadata/product-release-manifest.json"},
+             "user_data":{"relative":"state"}}
+            """);
+        File.WriteAllText(Path.Combine(root, "sq.version"), "0.4.2");
     }
 
     [Theory]
