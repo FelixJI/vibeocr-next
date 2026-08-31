@@ -29,7 +29,7 @@ public sealed class LegacyVelopackStateMigrationTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -66,7 +66,7 @@ public sealed class LegacyVelopackStateMigrationTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -93,7 +93,7 @@ public sealed class LegacyVelopackStateMigrationTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -121,7 +121,7 @@ public sealed class LegacyVelopackStateMigrationTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -150,7 +150,7 @@ public sealed class LegacyVelopackStateMigrationTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -176,8 +176,8 @@ public sealed class LegacyVelopackStateMigrationTests
         finally
         {
             DeleteJunction(link);
-            Directory.Delete(root, recursive: true);
-            Directory.Delete(outside, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
+            TestDirectory.Delete(outside, recursive: true);
         }
     }
 
@@ -207,8 +207,8 @@ public sealed class LegacyVelopackStateMigrationTests
         finally
         {
             DeleteJunction(link);
-            Directory.Delete(root, recursive: true);
-            Directory.Delete(outside, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
+            TestDirectory.Delete(outside, recursive: true);
         }
     }
 
@@ -230,7 +230,7 @@ public sealed class LegacyVelopackStateMigrationTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -267,7 +267,7 @@ public sealed class LegacyVelopackStateMigrationTests
         if (Directory.Exists(link) &&
             File.GetAttributes(link).HasFlag(FileAttributes.ReparsePoint))
         {
-            Directory.Delete(link);
+            TestDirectory.Delete(link);
         }
     }
 }

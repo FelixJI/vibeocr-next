@@ -84,7 +84,7 @@ public sealed class PortableLayoutTests
         }
         finally
         {
-            Directory.Delete(bundle, recursive: true);
+            TestDirectory.Delete(bundle, recursive: true);
         }
     }
 
@@ -125,7 +125,7 @@ public sealed class PortableLayoutTests
             firstWrite,
             File.GetLastWriteTimeUtc(layout.PortableLayoutManifest!).ToString("O"));
 
-        Directory.Delete(root, recursive: true);
+        TestDirectory.Delete(root, recursive: true);
     }
 
     [Fact]
@@ -146,7 +146,7 @@ public sealed class PortableLayoutTests
         Assert.Contains("移动", error.Message);
         Assert.Contains("不会请求管理员权限", error.Message);
 
-        Directory.Delete(root, recursive: true);
+        TestDirectory.Delete(root, recursive: true);
     }
 
     [Fact]
@@ -160,7 +160,7 @@ public sealed class PortableLayoutTests
             "production",
             userDataRoot: Path.Combine(Path.GetTempPath(), "elsewhere")));
 
-        Directory.Delete(root, recursive: true);
+        TestDirectory.Delete(root, recursive: true);
     }
 
     [Fact]
@@ -177,7 +177,7 @@ public sealed class PortableLayoutTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -204,7 +204,7 @@ public sealed class PortableLayoutTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -230,8 +230,8 @@ public sealed class PortableLayoutTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
-            Directory.Delete(adjacent, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
+            TestDirectory.Delete(adjacent, recursive: true);
         }
     }
 
@@ -249,7 +249,7 @@ public sealed class PortableLayoutTests
                 "production");
             layout.EnsurePortableState();
             string configDirectory = Path.GetDirectoryName(layout.ConfigFile)!;
-            Directory.Delete(configDirectory);
+            TestDirectory.Delete(configDirectory);
             CreateJunction(configDirectory, outsideRoot);
             string outside = Path.Combine(outsideRoot, "app_settings.json");
             File.WriteAllText(outside, "before");
@@ -264,10 +264,10 @@ public sealed class PortableLayoutTests
             string configDirectory = Path.Combine(root, "state", "config");
             if (Directory.Exists(configDirectory))
             {
-                Directory.Delete(configDirectory);
+                TestDirectory.Delete(configDirectory);
             }
-            Directory.Delete(root, recursive: true);
-            Directory.Delete(outsideRoot, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
+            TestDirectory.Delete(outsideRoot, recursive: true);
         }
     }
 
@@ -295,7 +295,7 @@ public sealed class PortableLayoutTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -349,15 +349,15 @@ public sealed class PortableLayoutTests
             if (Directory.Exists(configDirectory)
                 && File.GetAttributes(configDirectory).HasFlag(FileAttributes.ReparsePoint))
             {
-                Directory.Delete(configDirectory);
+                TestDirectory.Delete(configDirectory);
             }
             if (Directory.Exists(root))
             {
-                Directory.Delete(root, recursive: true);
+                TestDirectory.Delete(root, recursive: true);
             }
             if (Directory.Exists(outsideRoot))
             {
-                Directory.Delete(outsideRoot, recursive: true);
+                TestDirectory.Delete(outsideRoot, recursive: true);
             }
         }
     }
@@ -403,15 +403,15 @@ public sealed class PortableLayoutTests
             if (Directory.Exists(stateDirectory)
                 && File.GetAttributes(stateDirectory).HasFlag(FileAttributes.ReparsePoint))
             {
-                Directory.Delete(stateDirectory);
+                TestDirectory.Delete(stateDirectory);
             }
             if (Directory.Exists(root))
             {
-                Directory.Delete(root, recursive: true);
+                TestDirectory.Delete(root, recursive: true);
             }
             if (Directory.Exists(outsideRoot))
             {
-                Directory.Delete(outsideRoot, recursive: true);
+                TestDirectory.Delete(outsideRoot, recursive: true);
             }
         }
     }
@@ -458,15 +458,15 @@ public sealed class PortableLayoutTests
             if (Directory.Exists(stateDirectory)
                 && File.GetAttributes(stateDirectory).HasFlag(FileAttributes.ReparsePoint))
             {
-                Directory.Delete(stateDirectory);
+                TestDirectory.Delete(stateDirectory);
             }
             if (Directory.Exists(root))
             {
-                Directory.Delete(root, recursive: true);
+                TestDirectory.Delete(root, recursive: true);
             }
             if (Directory.Exists(outsideRoot))
             {
-                Directory.Delete(outsideRoot, recursive: true);
+                TestDirectory.Delete(outsideRoot, recursive: true);
             }
         }
     }
@@ -538,7 +538,7 @@ public sealed class PortableLayoutTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -575,7 +575,7 @@ public sealed class PortableLayoutTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -594,7 +594,7 @@ public sealed class PortableLayoutTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -667,7 +667,7 @@ public sealed class PortableLayoutTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -687,7 +687,7 @@ public sealed class PortableLayoutTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
         }
     }
 
@@ -731,10 +731,10 @@ public sealed class PortableLayoutTests
             if (Directory.Exists(link) &&
                 File.GetAttributes(link).HasFlag(FileAttributes.ReparsePoint))
             {
-                Directory.Delete(link);
+                TestDirectory.Delete(link);
             }
-            Directory.Delete(root, recursive: true);
-            Directory.Delete(outside, recursive: true);
+            TestDirectory.Delete(root, recursive: true);
+            TestDirectory.Delete(outside, recursive: true);
         }
     }
 

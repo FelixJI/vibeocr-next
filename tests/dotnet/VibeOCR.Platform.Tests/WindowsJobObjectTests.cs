@@ -41,7 +41,7 @@ public sealed class WindowsJobObjectTests
       }
       TryKill(parent);
       parent.Dispose();
-      Directory.Delete(root, recursive: true);
+      TestDirectory.Delete(root, recursive: true);
     }
   }
 
@@ -69,7 +69,7 @@ public sealed class WindowsJobObjectTests
       TryKill(second);
       first.Dispose();
       second.Dispose();
-      Directory.Delete(root, recursive: true);
+      TestDirectory.Delete(root, recursive: true);
     }
   }
 
