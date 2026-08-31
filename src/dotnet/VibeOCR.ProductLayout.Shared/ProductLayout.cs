@@ -119,9 +119,6 @@ public sealed class ResolvedProductLayout
         {
             "VibeOCR.exe",
             "Velopack.dll",
-            "Microsoft.Web.WebView2.Core.dll",
-            "WebView2Loader.dll",
-            "Newtonsoft.Json.dll",
             "LICENSE",
             "CHANGELOG.md",
             "app",

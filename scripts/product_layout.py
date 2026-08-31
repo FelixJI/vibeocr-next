@@ -14,23 +14,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 LAYOUT_RELATIVE_PATH = Path("app/metadata/product-layout.json")
 ROOT_ALLOWLIST = frozenset(
-    {
-        "VibeOCR.exe",
-        "Velopack.dll",
-        "Microsoft.Web.WebView2.Core.dll",
-        "WebView2Loader.dll",
-        "Newtonsoft.Json.dll",
-        "LICENSE",
-        "CHANGELOG.md",
-        "app",
-        "runtime",
-    }
-)
-BOOTSTRAPPER_DEPENDENCIES = (
-    "Velopack.dll",
-    "Microsoft.Web.WebView2.Core.dll",
-    "WebView2Loader.dll",
-    "Newtonsoft.Json.dll",
+    {"VibeOCR.exe", "Velopack.dll", "LICENSE", "CHANGELOG.md", "app", "runtime"}
 )
 VELOPACK_ROOT_MARKERS = frozenset({"sq.version"})
 # 便携运行时允许的额外根条目:稳定 state 目录与运行时生成的 portable-layout
@@ -520,11 +504,10 @@ def stage_product_layout(
         shutil.copyfile(
             bootstrapper_executable.resolve(strict=True), staging / "VibeOCR.exe"
         )
-        for name in BOOTSTRAPPER_DEPENDENCIES:
-            shutil.copyfile(
-                bootstrapper_executable.with_name(name).resolve(strict=True),
-                staging / name,
-            )
+        shutil.copyfile(
+            bootstrapper_executable.with_name("Velopack.dll").resolve(strict=True),
+            staging / "Velopack.dll",
+        )
         shutil.copyfile(
             component_lock.resolve(strict=True), metadata_root / "component-lock.json"
         )

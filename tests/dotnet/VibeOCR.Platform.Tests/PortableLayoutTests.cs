@@ -481,9 +481,6 @@ public sealed class PortableLayoutTests
         [
             "VibeOCR.exe",
             "Velopack.dll",
-            "Microsoft.Web.WebView2.Core.dll",
-            "WebView2Loader.dll",
-            "Newtonsoft.Json.dll",
             "LICENSE",
             "CHANGELOG.md",
             "app/VibeOCR.WinUI.exe",
@@ -608,9 +605,6 @@ public sealed class PortableLayoutTests
         [
             "VibeOCR.exe",
             "Velopack.dll",
-            "Microsoft.Web.WebView2.Core.dll",
-            "WebView2Loader.dll",
-            "Newtonsoft.Json.dll",
             "LICENSE",
             "CHANGELOG.md",
             "app/VibeOCR.WinUI.exe",
@@ -746,9 +740,6 @@ public sealed class PortableLayoutTests
         [
             "VibeOCR.exe",
             "Velopack.dll",
-            "Microsoft.Web.WebView2.Core.dll",
-            "WebView2Loader.dll",
-            "Newtonsoft.Json.dll",
             "LICENSE",
             "CHANGELOG.md",
             "app/VibeOCR.WinUI.exe",

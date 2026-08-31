@@ -42,9 +42,6 @@ def _release_inputs(tmp_path: Path) -> dict[str, Path]:
     bootstrapper = tmp_path / "VibeOCR.Bootstrapper.exe"
     bootstrapper.write_bytes(b"launcher")
     (tmp_path / "Velopack.dll").write_bytes(b"velopack")
-    (tmp_path / "Microsoft.Web.WebView2.Core.dll").write_bytes(b"webview2-core")
-    (tmp_path / "WebView2Loader.dll").write_bytes(b"webview2-loader")
-    (tmp_path / "Newtonsoft.Json.dll").write_bytes(b"newtonsoft")
     (tmp_path / "VibeOCR.Bootstrapper.exe.config").write_text(
         "<configuration />", encoding="utf-8"
     )
@@ -137,9 +134,6 @@ def test_stage_product_layout_builds_the_strict_public_tree(tmp_path: Path) -> N
     assert {path.name for path in product_root.iterdir()} == {
         "VibeOCR.exe",
         "Velopack.dll",
-        "Microsoft.Web.WebView2.Core.dll",
-        "WebView2Loader.dll",
-        "Newtonsoft.Json.dll",
         "LICENSE",
         "CHANGELOG.md",
         "app",
@@ -147,10 +141,6 @@ def test_stage_product_layout_builds_the_strict_public_tree(tmp_path: Path) -> N
     }
     assert layout.public_entry == product_root / "VibeOCR.exe"
     assert (product_root / "Velopack.dll").read_bytes() == b"velopack"
-    assert (
-        product_root / "Microsoft.Web.WebView2.Core.dll"
-    ).read_bytes() == b"webview2-core"
-    assert (product_root / "WebView2Loader.dll").read_bytes() == b"webview2-loader"
     assert layout.app_entry == product_root / "app" / "VibeOCR.WinUI.exe"
     assert (product_root / LAYOUT_RELATIVE_PATH).is_file()
     assert (product_root / "app/metadata/component-lock.json").is_file()

@@ -603,9 +603,6 @@ def test_web_ready_smoke_runs_an_isolated_production_profile(
         for name in (
             "VibeOCR.exe",
             "Velopack.dll",
-            "Microsoft.Web.WebView2.Core.dll",
-            "WebView2Loader.dll",
-            "Newtonsoft.Json.dll",
             "LICENSE",
             "CHANGELOG.md",
         ):
@@ -726,9 +723,6 @@ $global:webViewCleanupAttempts | Set-Content -LiteralPath $Cleanup
         assert {path.name for path in product.iterdir()} == {
             "VibeOCR.exe",
             "Velopack.dll",
-            "Microsoft.Web.WebView2.Core.dll",
-            "WebView2Loader.dll",
-            "Newtonsoft.Json.dll",
             "LICENSE",
             "CHANGELOG.md",
             "app",
