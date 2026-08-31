@@ -259,7 +259,6 @@ public sealed class DesktopWorkbenchCommandHandler :
         SetThemeCommand setTheme => SetTheme(setTheme),
         SetStartupCommand startup => SetStartup(startup),
         SetHotkeyCommand hotkey => SetHotkey(hotkey),
-        SetOcrEngineCommand engine => SetEngine(engine),
         SetDownloadSourceCommand source => await SetSourceAsync(
           source,
           cancellationToken),
@@ -361,13 +360,12 @@ public sealed class DesktopWorkbenchCommandHandler :
   }
 
   /// <summary>
-  /// Project catalog engines for the recognition page. The effective engine
-  /// is the task override when set, else the persisted global preference.
+  /// Project catalog modes for the recognition page. Only an explicit task
+  /// override is selected; an empty choice delegates to the Runtime default.
   /// </summary>
   private IReadOnlyList<RecognitionEngineChoice>? RecognitionEngines()
   {
-    RecognitionSelectionSnapshot? snapshot = settings?.RecognitionSelection;
-    RuntimeSelectionService? selection = snapshot?.Catalog;
+    RuntimeSelectionService? selection = settings?.RecognitionSelection?.Catalog;
     if (selection is null || (!selection.SupportsEngineSelection && !selection.SupportsRecognitionModes))
     {
       return null;
@@ -376,24 +374,20 @@ public sealed class DesktopWorkbenchCommandHandler :
     if (selection.SupportsRecognitionModes)
     {
       string? task = recognition.TaskEngine;
-      string? selected = task ?? snapshot?.SelectedId;
       return [.. selection.RecognitionModes.Select(mode => new RecognitionEngineChoice(
-        mode.Id, SettingsViewModel.DisplayName(mode.Id), selected == mode.Id, task == mode.Id,
+        mode.Id, SettingsViewModel.DisplayName(mode.Id), task == mode.Id, task == mode.Id,
         mode.Availability,
         mode.Availability == "preparation_required" && mode.RequiredComponent is not null,
         mode.LifecycleKind,
         mode.SupportsPreload, mode.SupportsTtl, mode.SupportsPinning, mode.SupportsRelease))];
     }
-    OcrEngine effective = recognition.EffectiveEngine
-      ?? OcrEngine.RapidOcr;
     bool isOverride = recognition.TaskEngine is not null;
     return [.. selection.EngineOptions.Select(option => new RecognitionEngineChoice(
-      OcrEngineSettings.ToWireName(option.Engine),
+      OcrEngineWire.Format(option.Engine),
       SettingsViewModel.DisplayName(option.Engine),
-      OcrEngineSettings.ToWireName(option.Engine) ==
-        OcrEngineSettings.ToWireName(effective),
+      isOverride && OcrEngineWire.Format(option.Engine) == recognition.TaskEngine,
       isOverride &&
-        OcrEngineSettings.ToWireName(option.Engine) == recognition.TaskEngine,
+        OcrEngineWire.Format(option.Engine) == recognition.TaskEngine,
       option.Availability.ToString().ToLowerInvariant(),
       !option.IncludedInBase))];
   }
@@ -574,8 +568,6 @@ public sealed class DesktopWorkbenchCommandHandler :
     CancellationToken cancellationToken)
   {
     batch ??= batchFactory();
-    await EnsureSelectionLoadedAsync(cancellationToken);
-    batch.SetRecognitionMode(SelectedRecognitionMode(requireUsable: true));
     await batch.StartAsync(cancellationToken);
     return BatchState(batch);
   }
@@ -740,8 +732,6 @@ public sealed class DesktopWorkbenchCommandHandler :
     CancellationToken cancellationToken)
   {
     pdf ??= pdfFactory();
-    await EnsureSelectionLoadedAsync(cancellationToken);
-    pdf.SetRecognitionMode(SelectedRecognitionMode(requireUsable: true));
     PdfViewModel viewModel = pdf;
     int[] pages = SelectedPdfPages(viewModel);
     if (pages.Length > 0)
@@ -1019,13 +1009,6 @@ public sealed class DesktopWorkbenchCommandHandler :
     return SettingsState(settings);
   }
 
-  private SettingsWorkbenchState SetEngine(SetOcrEngineCommand command)
-  {
-    settings ??= settingsFactory();
-    settings.SetEngine(command.Engine);
-    return SettingsState(settings);
-  }
-
   private async Task<SettingsWorkbenchState> SetSourceAsync(
     SetDownloadSourceCommand command,
     CancellationToken cancellationToken)
@@ -1060,10 +1043,10 @@ public sealed class DesktopWorkbenchCommandHandler :
     if (string.IsNullOrWhiteSpace(command.Engine)) recognition.TaskEngine = null;
     else if (selection?.SupportsRecognitionModes is true)
       recognition.TaskEngine = selection.SelectRecognitionMode(command.Engine).Id;
-    else if (selection?.SupportsEngineSelection is true && OcrEngineSettings.ToEngine(command.Engine) is OcrEngine engine)
+    else if (selection?.SupportsEngineSelection is true && OcrEngineWire.Parse(command.Engine) is OcrEngine engine)
     {
       selection.SelectEngine(engine);
-      recognition.TaskEngine = OcrEngineSettings.ToWireName(engine);
+      recognition.TaskEngine = OcrEngineWire.Format(engine);
     }
     else throw new RuntimeSelectionException(RuntimeSelectionErrorKind.CapabilityMissing,
       "The runtime does not provide a recognition selection catalog.");
@@ -1075,7 +1058,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     RecognitionSelectionSnapshot? snapshot = settings?.RecognitionSelection;
     if (recognition is null || snapshot?.Catalog.SupportsRecognitionModes is not true)
     {
-      recognition?.SetRecognitionModes(null, null);
+      recognition?.SetRecognitionMode(null);
       return;
     }
     RuntimeSelectionService selection = snapshot.Catalog;
@@ -1084,7 +1067,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       : requireUsable
         ? selection.SelectRecognitionMode(id)
         : selection.FindRecognitionMode(id);
-    recognition.SetRecognitionModes(Resolve(recognition.TaskEngine), Resolve(snapshot.SelectedId));
+    recognition.SetRecognitionMode(Resolve(recognition.TaskEngine));
   }
 
   private async Task EnsureSelectionLoadedAsync(CancellationToken cancellationToken)
@@ -1093,20 +1076,6 @@ public sealed class DesktopWorkbenchCommandHandler :
     // Always cross SettingsViewModel's single-flight gate. A refresh may be
     // replacing an older snapshot even while Selection remains non-null.
     await settings.LoadSelectionAsync(cancellationToken);
-  }
-
-  private RecognitionModeOption? SelectedRecognitionMode(bool requireUsable)
-  {
-    RecognitionSelectionSnapshot? snapshot = settings?.RecognitionSelection;
-    RuntimeSelectionService? selection = snapshot?.Catalog;
-    string? id = snapshot?.SelectedId;
-    if (selection?.SupportsRecognitionModes is not true || string.IsNullOrWhiteSpace(id))
-    {
-      return null;
-    }
-    return requireUsable
-      ? selection.SelectRecognitionMode(id)
-      : selection.FindRecognitionMode(id);
   }
 
   private async Task<SettingsWorkbenchState> InstallRuntimeAsync(
@@ -1370,15 +1339,6 @@ public sealed class DesktopWorkbenchCommandHandler :
     viewModel.Backend,
     shell.Value.StartWithSystem,
     shell.Value.RegisteredHotkey,
-    [.. viewModel.Engines.Select(engine => new SettingsEngineOptionState(
-      engine.Engine,
-      engine.DisplayName,
-      engine.Availability,
-      engine.ReasonCode,
-      engine.RequiresDownload,
-      engine.Selected))],
-    viewModel.SelectedEngine,
-    viewModel.EngineChoiceRequired,
     [.. viewModel.Sources.Select(source => new SettingsSourceOptionState(
       source.Kind,
       source.Id,

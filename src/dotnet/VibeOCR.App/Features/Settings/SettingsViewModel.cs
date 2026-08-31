@@ -10,15 +10,6 @@ using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 
 namespace VibeOCR.App.Features.Settings;
 
-/// <summary>One catalog engine projected for display (wire id + localization).</summary>
-public sealed record SettingsEngineOption(
-    string Engine,
-    string DisplayName,
-    string Availability,
-    string? ReasonCode,
-    bool RequiresDownload,
-    bool Selected);
-
 /// <summary>One user-selectable upstream source preference.</summary>
 public sealed record SettingsSourceOption(
     string Kind,
@@ -33,9 +24,7 @@ public sealed record SettingsFeatureOption(
     string Accelerator,
     bool Selected);
 
-internal sealed record RecognitionSelectionSnapshot(
-    RuntimeSelectionService Catalog,
-    string? SelectedId);
+internal sealed record RecognitionSelectionSnapshot(RuntimeSelectionService Catalog);
 
 public sealed class SettingsViewModel : INotifyPropertyChanged
 {
@@ -46,8 +35,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     };
 
     private readonly IInferenceClient _inference;
-    private readonly string _configFile;
-    private readonly PortableLayout? _portableLayout;
     private readonly SemaphoreSlim _selectionLoadGate = new(1, 1);
     private long _generation;
     private bool _isBusy;
@@ -58,38 +45,18 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private bool _gpuAvailable;
     private RuntimeSelectionService? _selection;
     private RecognitionSelectionSnapshot? _recognitionSelection;
-    private IReadOnlyList<SettingsEngineOption> _engines = [];
     private IReadOnlyList<SettingsSourceOption> _sources = [];
     private IReadOnlyList<SettingsFeatureOption> _features = [];
-    private string? _selectedEngine;
     private IReadOnlyList<string> _selectedSourceIds = [];
-    private bool _engineChoiceRequired;
 
     public SettingsViewModel(
         IInferenceClient inference,
         RuntimeStatusViewModel? runtimeStatus = null,
-        string? configFile = null,
         Func<IRuntimeInstallerClient>? installerFactory = null,
-        ProductMaintenanceCoordinator? productMaintenance = null,
-        PortableLayout? portableLayout = null)
+        ProductMaintenanceCoordinator? productMaintenance = null)
     {
         _inference = inference ?? throw new ArgumentNullException(nameof(inference));
-        if (portableLayout is not null && configFile is not null &&
-            !string.Equals(
-                Path.GetFullPath(configFile),
-                Path.GetFullPath(portableLayout.ConfigFile),
-                StringComparison.OrdinalIgnoreCase))
-        {
-            throw new ArgumentException(
-                "配置文件必须与 Portable state 布局一致。",
-                nameof(configFile));
-        }
-        _portableLayout = portableLayout;
         RuntimeStatus = runtimeStatus ?? new RuntimeStatusViewModel();
-        _configFile = portableLayout?.ConfigFile ?? configFile
-            ?? VibeOCR.Platform.Bootstrap.PortableLayout.Resolve(
-                Environment.ProcessPath ?? string.Empty,
-                "production").ConfigFile;
         Maintenance = installerFactory is null
             ? new RuntimeMaintenanceCoordinator(
                 () => throw new InvalidOperationException(
@@ -117,26 +84,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public bool RestartRequired { get => _restartRequired; private set => SetField(ref _restartRequired, value); }
     public bool GpuAvailable { get => _gpuAvailable; private set => SetField(ref _gpuAvailable, value); }
     public bool CanSwitchBackend => !IsBusy && !string.Equals(Backend, PendingBackend, StringComparison.Ordinal);
-
-    /// <summary>Catalog-driven engine options; empty until health has been read.</summary>
-    public IReadOnlyList<SettingsEngineOption> Engines
-    {
-        get => _engines;
-        private set => SetField(ref _engines, value);
-    }
-
-    public string? SelectedEngine
-    {
-        get => _selectedEngine;
-        private set => SetField(ref _selectedEngine, value);
-    }
-
-    /// <summary>未知/损坏的本地引擎偏好要求用户重选,不静默回退。</summary>
-    public bool EngineChoiceRequired
-    {
-        get => _engineChoiceRequired;
-        private set => SetField(ref _engineChoiceRequired, value);
-    }
 
     public IReadOnlyList<SettingsSourceOption> Sources
     {
@@ -195,65 +142,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     public Task LoadSelectionAsync(CancellationToken cancellationToken) =>
         LoadSelectionSerializedAsync(forceReload: false, cancellationToken);
-
-    /// <summary>
-    /// Apply a global engine choice: the catalog must still accept it. The
-    /// preference is persisted locally (task-level overrides live elsewhere).
-    /// </summary>
-    public void SetEngine(string engineWireName)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(engineWireName);
-        if (_selection is null)
-        {
-            Status = "运行时目录尚未加载，请先刷新运行时";
-            return;
-        }
-        OcrEngine? engine = OcrEngineSettings.ToEngine(engineWireName);
-        if (engine is null && !_selection.SupportsRecognitionModes)
-        {
-            Status = $"未知引擎 {engineWireName}";
-            return;
-        }
-        try
-        {
-            if (_selection.SupportsRecognitionModes)
-            {
-                RecognitionModeOption mode = _selection.SelectRecognitionMode(engineWireName);
-                if (_portableLayout is null) throw new InvalidOperationException("便携状态布局不可用，无法保存识别模式设置。");
-                OcrEngineSettings.SaveMode(_portableLayout, mode.Id);
-                SelectedEngine = mode.Id;
-                EngineChoiceRequired = false;
-                Engines = [.. Engines.Select(item => item with { Selected = item.Engine == mode.Id })];
-                PublishRecognitionSelection(_selection, mode.Id);
-                Status = $"已选择 {DisplayName(mode.Id)}";
-                return;
-            }
-            RuntimeEngineOption option = _selection.SelectEngine(engine!.Value);
-            if (_portableLayout is null)
-            {
-                throw new InvalidOperationException("便携状态布局不可用，无法保存 OCR 引擎设置。");
-            }
-            OcrEngineSettings.Save(_portableLayout, engine.Value);
-            SelectedEngine = engineWireName;
-            EngineChoiceRequired = false;
-            Status = option.Availability == Wire.OcrEngineAvailability.PreparationRequired
-                ? $"已选择 {DisplayName(engine.Value)}；该引擎需要先准备依赖"
-                : $"已选择 {DisplayName(engine.Value)}";
-            Engines = [.. Engines.Select(item => item with
-            {
-                Selected = item.Engine == engineWireName,
-            })];
-            PublishRecognitionSelection(_selection, engineWireName);
-        }
-        catch (RuntimeSelectionException error)
-        {
-            Status = LocalizeSelection(error);
-        }
-        catch (System.Text.Json.JsonException)
-        {
-            Status = "配置文件已损坏，无法保存 OCR 引擎设置；原文件已保留";
-        }
-    }
 
     /// <summary>
     /// Persist the per-kind source selection in Backend settings (the
@@ -417,47 +305,12 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         {
             Wire.Health health = await _inference.GetHealthAsync(cancellationToken);
             RuntimeSelectionService selection = new(health);
-            OcrEnginePreference preference = OcrEngineSettings.Load(_configFile);
-            bool engineChoiceRequired = preference.RequiresChoice;
-            string? selectedEngine;
-            if (selection.SupportsRecognitionModes)
-            {
-                selectedEngine = preference.Mode ??
-                    OcrEngineSettings.ToRecognitionMode(preference.Engine);
-                if (selectedEngine is null && !engineChoiceRequired)
-                {
-                    selectedEngine = selection.RecognitionModes.FirstOrDefault(mode =>
-                        mode.Id == "rapid_text" && mode.IsUsable)?.Id;
-                }
-            }
-            else
-            {
-                OcrEngine? legacyEngine = preference.Engine ??
-                    OcrEngineSettings.ToLegacyEngine(preference.Mode);
-                if (preference.Mode is not null && legacyEngine is null)
-                {
-                    engineChoiceRequired = true;
-                }
-                selectedEngine = legacyEngine is null
-                    ? null
-                    : OcrEngineSettings.ToWireName(legacyEngine.Value);
-                if (selectedEngine is null && !engineChoiceRequired)
-                {
-                    selectedEngine = selection.EngineOptions.FirstOrDefault(option =>
-                        option.Engine == OcrEngine.RapidOcr && option.IsUsable) is null
-                        ? null
-                        : OcrEngineSettings.ToWireName(OcrEngine.RapidOcr);
-                }
-            }
             SettingsSnapshot settings = await _inference.GetSettingsAsync(cancellationToken);
             IReadOnlyList<string> selectedSourceIds = settings.DownloadSourceIds ?? [];
 
             // Commit one complete catalog snapshot only after every remote read
             // succeeds. Concurrent bootstrap/execution callers then observe the
             // same selection instead of a partially projected catalog.
-            EngineChoiceRequired = engineChoiceRequired;
-            SelectedEngine = selectedEngine;
-            Engines = ProjectEngines(selection, selectedEngine);
             _selectedSourceIds = selectedSourceIds;
             Sources = ProjectSources(selection, selectedSourceIds);
             Features = ProjectFeatures(selection, PendingBackend, []);
@@ -465,7 +318,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             // selection can therefore also observe its matching projections;
             // command paths additionally await this same gate.
             _selection = selection;
-            PublishRecognitionSelection(selection, selectedEngine);
+            PublishRecognitionSelection(selection);
         }
         catch (NotSupportedException)
         {
@@ -499,36 +352,9 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             source.Id == sourceId &&
             string.Equals(source.Kind, kind, StringComparison.Ordinal)) == true;
 
-    private void PublishRecognitionSelection(
-        RuntimeSelectionService selection,
-        string? selectedId) => Volatile.Write(
+    private void PublishRecognitionSelection(RuntimeSelectionService selection) => Volatile.Write(
             ref _recognitionSelection,
-            new RecognitionSelectionSnapshot(selection, selectedId));
-
-    private static IReadOnlyList<SettingsEngineOption> ProjectEngines(
-        RuntimeSelectionService selection,
-        string? selectedEngine)
-    {
-        if (selection.SupportsRecognitionModes)
-        {
-            return [.. selection.RecognitionModes.Select(mode => new SettingsEngineOption(
-                mode.Id, DisplayName(mode.Id), mode.Availability, mode.ReasonCode,
-                mode.Availability == "preparation_required" &&
-                    mode.RequiredComponent is not null,
-                selectedEngine == mode.Id))];
-        }
-        if (!selection.SupportsEngineSelection)
-        {
-            return [];
-        }
-        return [.. selection.EngineOptions.Select(option => new SettingsEngineOption(
-            OcrEngineSettings.ToWireName(option.Engine),
-            DisplayName(option.Engine),
-            option.Availability.ToString().ToLowerInvariant(),
-            option.ReasonCode,
-            !option.IncludedInBase,
-            OcrEngineSettings.ToWireName(option.Engine) == selectedEngine))];
-    }
+            new RecognitionSelectionSnapshot(selection));
 
     private static IReadOnlyList<SettingsSourceOption> ProjectSources(
         RuntimeSelectionService selection,

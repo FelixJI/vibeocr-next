@@ -13,34 +13,23 @@ using Xunit;
 namespace VibeOCR.App.Tests;
 
 /// <summary>
-/// N3 selection UI seams: catalog-driven settings state, engine preference
-/// migration surfaced to the user, task-level engine override, and the
-/// workbench bridge commands that drive them.
+/// Selection UI seams: catalog-driven maintenance state, task-level recognition
+/// mode selection, and the workbench bridge commands that drive them.
 /// </summary>
-public sealed class SelectionUiTests : IDisposable
+public sealed class SelectionUiTests
 {
-    private readonly string _configFile =
-        Path.Combine(Path.GetTempPath(), $"vibeocr-selection-ui-{Guid.NewGuid():N}.json");
-
     [Fact]
-    public async Task SettingsLoadProjectsCatalogEnginesSourcesAndFeatures()
+    public async Task SettingsLoadProjectsSourcesAndFeatures()
     {
         var fake = new SelectionInferenceClient { Health = SelectionHealth() };
         fake.Settings = new SettingsSnapshot
         {
             DownloadSourceIds = ["tuna-pypi"],
         };
-        var viewModel = new SettingsViewModel(fake, configFile: _configFile);
+        var viewModel = new SettingsViewModel(fake);
 
         await viewModel.LoadSnapshotAsync(CancellationToken.None);
 
-        Assert.Equal(3, viewModel.Engines.Count);
-        Assert.Equal("rapidocr", viewModel.SelectedEngine);
-        Assert.False(viewModel.EngineChoiceRequired);
-        Assert.Equal("RapidOCR", viewModel.Engines[0].DisplayName);
-        Assert.True(viewModel.Engines[0].Selected);
-        Assert.Equal("windows", viewModel.Engines[1].Engine);
-        Assert.Equal("unavailable", viewModel.Engines[1].Availability);
         Assert.Equal(
             ["tuna-pypi"],
             viewModel.Sources.Where(source => source.Selected).Select(source => source.Id));
@@ -49,35 +38,10 @@ public sealed class SelectionUiTests : IDisposable
     }
 
     [Fact]
-    public async Task SettingsLoadMarksUnknownLocalEngineForReSelection()
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(_configFile)!);
-        File.WriteAllText(_configFile, """{"ocr":{"engine":"tesseract"}}""");
-        var fake = new SelectionInferenceClient { Health = SelectionHealth() };
-        var viewModel = new SettingsViewModel(fake, configFile: _configFile);
-
-        await viewModel.LoadSnapshotAsync(CancellationToken.None);
-
-        Assert.True(viewModel.EngineChoiceRequired);
-        Assert.Null(viewModel.SelectedEngine);
-        Assert.Contains("tesseract", File.ReadAllText(_configFile));
-    }
-
-    [Fact]
     public async Task ConcurrentSelectionLoadsShareOneCompleteCatalogSnapshot()
     {
         var fake = new DelayedSelectionInferenceClient { Health = SelectionHealth() };
-        var viewModel = new SettingsViewModel(fake, configFile: _configFile);
-        bool publishedBeforeProjectionCompleted = false;
-        viewModel.PropertyChanged += (_, eventArgs) =>
-        {
-            if (eventArgs.PropertyName is nameof(SettingsViewModel.SelectedEngine)
-                or nameof(SettingsViewModel.Engines))
-            {
-                publishedBeforeProjectionCompleted |=
-                    viewModel.RecognitionSelection is not null;
-            }
-        };
+        var viewModel = new SettingsViewModel(fake);
 
         Task first = viewModel.LoadSelectionAsync(CancellationToken.None);
         await fake.HealthRequested.Task.WaitAsync(TestContext.Current.CancellationToken);
@@ -87,84 +51,10 @@ public sealed class SelectionUiTests : IDisposable
         await Task.WhenAll(first, second);
 
         Assert.NotNull(viewModel.Selection);
-        Assert.Equal(3, viewModel.Engines.Count);
         Assert.Equal(1, fake.HealthCalls);
-        Assert.False(publishedBeforeProjectionCompleted);
         RecognitionSelectionSnapshot snapshot = Assert.IsType<RecognitionSelectionSnapshot>(
             viewModel.RecognitionSelection);
         Assert.Same(viewModel.Selection, snapshot.Catalog);
-        Assert.Equal("rapidocr", snapshot.SelectedId);
-    }
-
-    [Fact]
-    public async Task SetEnginePersistsChoiceAndRejectsUnavailableEngines()
-    {
-        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-selection-ui-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(root);
-        PortableLayout layout = PortableLayout.Resolve(
-            Path.Combine(root, "VibeOCR.Next.exe"),
-            "production");
-        layout.EnsurePortableState();
-        var fake = new SelectionInferenceClient { Health = SelectionHealth() };
-        var viewModel = new SettingsViewModel(
-            fake,
-            configFile: layout.ConfigFile,
-            portableLayout: layout);
-        try
-        {
-            await viewModel.LoadSnapshotAsync(CancellationToken.None);
-
-            viewModel.SetEngine("paddleocr");
-            Assert.Equal("paddleocr", viewModel.SelectedEngine);
-            Assert.Equal("paddleocr", JsonDocument.Parse(File.ReadAllText(layout.ConfigFile))
-                .RootElement.GetProperty("ocr").GetProperty("engine").GetString());
-            Assert.True(viewModel.Engines.Single(engine => engine.Engine == "paddleocr").Selected);
-
-            viewModel.SetEngine("windows");
-            Assert.Contains("不可用", viewModel.Status);
-            Assert.Equal("paddleocr", viewModel.SelectedEngine);
-            Assert.Equal(
-                "paddleocr",
-                JsonDocument.Parse(File.ReadAllText(layout.ConfigFile))
-                    .RootElement.GetProperty("ocr").GetProperty("engine").GetString());
-        }
-        finally
-        {
-            Directory.Delete(root, recursive: true);
-        }
-    }
-
-    [Theory]
-    [InlineData("{\"ocr\": not-json")]
-    [InlineData("[]")]
-    public async Task SetEngineReportsCorruptConfigWithoutOverwritingIt(string corruptConfig)
-    {
-        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-selection-ui-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(root);
-        PortableLayout layout = PortableLayout.Resolve(
-            Path.Combine(root, "VibeOCR.Next.exe"),
-            "production");
-        layout.EnsurePortableState();
-        var fake = new SelectionInferenceClient { Health = SelectionHealth() };
-        var viewModel = new SettingsViewModel(
-            fake,
-            configFile: layout.ConfigFile,
-            portableLayout: layout);
-        try
-        {
-            await viewModel.LoadSnapshotAsync(CancellationToken.None);
-            File.WriteAllText(layout.ConfigFile, corruptConfig);
-
-            viewModel.SetEngine("paddleocr");
-
-            Assert.Contains("配置文件已损坏", viewModel.Status);
-            Assert.Equal("rapidocr", viewModel.SelectedEngine);
-            Assert.Equal(corruptConfig, File.ReadAllText(layout.ConfigFile));
-        }
-        finally
-        {
-            Directory.Delete(root, recursive: true);
-        }
     }
 
     [Fact]
@@ -172,7 +62,7 @@ public sealed class SelectionUiTests : IDisposable
     {
         var fake = new SelectionInferenceClient { Health = SelectionHealth() };
         fake.Settings = new SettingsSnapshot { DownloadSourceIds = ["tuna-pypi"] };
-        var viewModel = new SettingsViewModel(fake, configFile: _configFile);
+        var viewModel = new SettingsViewModel(fake);
         await viewModel.LoadSnapshotAsync(CancellationToken.None);
 
         await viewModel.SetSourceAsync("package_index", "pypi", CancellationToken.None);
@@ -193,7 +83,7 @@ public sealed class SelectionUiTests : IDisposable
     public async Task AcceleratorAndFeatureSelectionStagePendingChoices()
     {
         var fake = new SelectionInferenceClient { Health = SelectionHealth() };
-        var viewModel = new SettingsViewModel(fake, configFile: _configFile);
+        var viewModel = new SettingsViewModel(fake);
         await viewModel.LoadSnapshotAsync(CancellationToken.None);
 
         viewModel.SetPendingAccelerator("nvidia_cuda");
@@ -211,13 +101,11 @@ public sealed class SelectionUiTests : IDisposable
     }
 
     [Fact]
-    public async Task RecognitionTaskEngineOverridesGlobalDefault()
+    public async Task RecognitionTaskModeOverridesRuntimeDefault()
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(_configFile)!);
-        File.WriteAllText(_configFile, """{"ocr":{"engine":"paddleocr"}}""");
         var fake = new CompletedRecognitionClient();
-        var viewModel = new RecognitionViewModel(fake, new StubInputs(), _configFile);
-        Assert.Equal(OcrEngine.PaddleOcr, viewModel.EffectiveEngine);
+        var viewModel = new RecognitionViewModel(fake, new StubInputs());
+        Assert.Null(viewModel.EffectiveEngine);
 
         viewModel.TaskEngine = "windows";
         Assert.Equal(OcrEngine.Windows, viewModel.EffectiveEngine);
@@ -228,15 +116,15 @@ public sealed class SelectionUiTests : IDisposable
         Assert.Equal(OcrEngine.Windows, fake.LastRequest?.Pipeline.Engine);
 
         viewModel.TaskEngine = null;
-        Assert.Equal(OcrEngine.PaddleOcr, viewModel.EffectiveEngine);
+        Assert.Null(viewModel.EffectiveEngine);
         await viewModel.RecognizeViaSupervisorAsync(
             ct => Task.FromResult<RecognitionInput?>(new RecognitionInput([4, 5, 6], "image/png", "b.png", "test")),
             CancellationToken.None);
-        Assert.Equal(OcrEngine.PaddleOcr, fake.LastRequest?.Pipeline.Engine);
+        Assert.Null(fake.LastRequest?.Pipeline.Engine);
     }
 
     [Fact]
-    public async Task RecognitionDefaultsToMigratedRapidOcrWithoutConfig()
+    public async Task RecognitionWithoutTaskModeUsesRuntimeDefault()
     {
         var fake = new CompletedRecognitionClient();
         var viewModel = new RecognitionViewModel(fake, new StubInputs());
@@ -246,38 +134,6 @@ public sealed class SelectionUiTests : IDisposable
             CancellationToken.None);
 
         Assert.Null(fake.LastRequest?.Pipeline.Engine);
-    }
-
-    [Fact]
-    public async Task LegacyRuntimeExecutionPreservesPersistedWindowsTextMode()
-    {
-        WriteConfig("""{"ocr":{"recognition_mode":"windows_text"}}""");
-        var fake = new CompletedRecognitionClient();
-        var viewModel = new RecognitionViewModel(fake, new StubInputs(), _configFile);
-
-        await viewModel.RecognizeViaSupervisorAsync(
-            _ => Task.FromResult<RecognitionInput?>(
-                new RecognitionInput([1], "image/png", "a.png", "test")),
-            CancellationToken.None);
-
-        Assert.Equal(OcrEngine.Windows, fake.LastRequest?.Pipeline.Engine);
-    }
-
-    [Fact]
-    public async Task LegacyRuntimeExecutionRejectsSpecializedModeInsteadOfUsingRapid()
-    {
-        WriteConfig("""{"ocr":{"recognition_mode":"paddle_structure"}}""");
-        var fake = new CompletedRecognitionClient();
-        var viewModel = new RecognitionViewModel(fake, new StubInputs(), _configFile);
-
-        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => viewModel.RecognizeViaSupervisorAsync(
-                _ => Task.FromResult<RecognitionInput?>(
-                    new RecognitionInput([1], "image/png", "a.png", "test")),
-                CancellationToken.None));
-
-        Assert.Contains("不能按文本 OCR 静默降级", error.Message);
-        Assert.Null(fake.LastRequest);
     }
 
     [Fact]
@@ -298,8 +154,6 @@ public sealed class SelectionUiTests : IDisposable
                 },
             });
 
-        Assert.IsType<SetOcrEngineCommand>(
-            WorkbenchBridgeCodec.ParseCommand(Command("settings", "setEngine", """{"engine":"paddleocr"}"""), sessionId).Command);
         Assert.IsType<SetDownloadSourceCommand>(
             WorkbenchBridgeCodec.ParseCommand(Command("settings", "setSource", """{"kind":"package_index","sourceId":"pypi"}"""), sessionId).Command);
         Assert.IsType<SetDownloadSourceCommand>(
@@ -316,10 +170,6 @@ public sealed class SelectionUiTests : IDisposable
         Assert.Throws<WorkbenchBridgeProtocolException>(
             () => WorkbenchBridgeCodec.ParseCommand(
                 Command("settings", "setAccelerator", """{"accelerator":"tpu"}"""), sessionId));
-        Assert.Throws<WorkbenchBridgeProtocolException>(
-            () => WorkbenchBridgeCodec.ParseCommand(
-                Command("settings", "setEngine", """{"engine":""}"""), sessionId));
-
         var state = new SettingsWorkbenchState(
             WorkbenchTheme.Dark,
             false,
@@ -327,9 +177,6 @@ public sealed class SelectionUiTests : IDisposable
             "cpu",
             false,
             "Ctrl+Alt+Q",
-            [new SettingsEngineOptionState("paddleocr", "PaddleOCR", "preparation_required", null, true, true)],
-            "paddleocr",
-            false,
             [new SettingsSourceOptionState("package_index", "tuna-pypi", "TUNA", true)],
             "nvidia_cuda",
             true,
@@ -337,9 +184,8 @@ public sealed class SelectionUiTests : IDisposable
         string payload = WorkbenchBridgeCodec.SerializeState(
             sessionId,
             new WorkbenchStateEnvelope(7, "settings", WorkbenchStateChange.Replace, state));
-        Assert.Contains("\"engines\":[", payload);
-        Assert.Contains("\"displayName\":\"PaddleOCR\"", payload);
-        Assert.Contains("\"engineChoiceRequired\":false", payload);
+        Assert.DoesNotContain("\"engines\"", payload);
+        Assert.DoesNotContain("selectedEngine", payload);
         Assert.Contains("\"sources\":[", payload);
         Assert.Contains("\"pendingBackend\":\"nvidia_cuda\"", payload);
         Assert.Contains("\"canSwitchBackend\":true", payload);
@@ -360,7 +206,7 @@ public sealed class SelectionUiTests : IDisposable
                 DownloadSourceIds = ["tuna-pypi", "huggingface", "legacy-source"],
             },
         };
-        var viewModel = new SettingsViewModel(fake, configFile: _configFile);
+        var viewModel = new SettingsViewModel(fake);
         await viewModel.LoadSnapshotAsync(CancellationToken.None);
 
         Assert.Equal(
@@ -649,13 +495,4 @@ private sealed class CompletedRecognitionClient : InferenceClientStub
     });
 }
 
-    private void WriteConfig(string json) => File.WriteAllText(_configFile, json);
-
-    public void Dispose()
-    {
-        if (File.Exists(_configFile))
-        {
-            File.Delete(_configFile);
-        }
-    }
 }

@@ -14,11 +14,8 @@ namespace VibeOCR.App.Tests;
 /// feature closure), requested/effective echo, durable cancel/retry via the
 /// existing installer client, and the workbench projection.
 /// </summary>
-public sealed class MaintenanceTests : IDisposable
+public sealed class MaintenanceTests
 {
-    private readonly string _configFile =
-        Path.Combine(Path.GetTempPath(), $"vibeocr-maintenance-{Guid.NewGuid():N}.json");
-
     [Fact]
     public async Task InstallSendsExplicitIntentAndEchoesRequestedEffective()
     {
@@ -224,7 +221,6 @@ public sealed class MaintenanceTests : IDisposable
         var fake = new SelectionHealthClient(sources);
         var settings = new SettingsViewModel(
             fake,
-            configFile: _configFile,
             installerFactory: () => installer);
         await settings.LoadSnapshotAsync(CancellationToken.None);
         return settings;
@@ -483,13 +479,6 @@ public sealed class MaintenanceTests : IDisposable
         };
     }
 
-    public void Dispose()
-    {
-        if (File.Exists(_configFile))
-        {
-            File.Delete(_configFile);
-        }
-    }
 }
 
 internal static class WorkbenchBridgeCodecTestsHelper

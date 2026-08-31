@@ -50,7 +50,6 @@ export type AppActionType =
   | "settings.refreshRuntime"
   | "settings.setStartup"
   | "settings.setHotkey"
-  | "settings.setEngine"
   | "settings.setSource"
   | "settings.setAccelerator"
   | "settings.setFeature"
