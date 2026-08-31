@@ -119,9 +119,6 @@ public sealed record SetStartupCommand(bool Enabled) : WorkbenchCommand;
 
 public sealed record SetHotkeyCommand(string Hotkey) : WorkbenchCommand;
 
-/// <summary>Persist the global OCR engine preference (wire engine id).</summary>
-public sealed record SetOcrEngineCommand(string Engine) : WorkbenchCommand;
-
 /// <summary>
 /// Select the package-index dependency source. A null source id clears the
 /// selection and delegates to Backend defaults; other wire kinds are not editable.
@@ -135,8 +132,8 @@ public sealed record SetAcceleratorCommand(string Accelerator) : WorkbenchComman
 public sealed record SetRuntimeFeatureCommand(string FeatureId, bool Enabled) : WorkbenchCommand;
 
 /// <summary>
-/// Set the task-level OCR engine override for the recognition page; null
-/// clears the override and falls back to the global preference.
+/// Set the task-level recognition mode for the recognition page; null clears
+/// the override and delegates to the Runtime default.
 /// </summary>
 public sealed record SetTaskEngineCommand(string? Engine) : WorkbenchCommand;
 
@@ -189,10 +186,9 @@ public sealed record RecognitionWorkbenchState(
 }
 
 /// <summary>
-/// One selectable engine on the recognition page. <see cref="Selected"/> marks
-/// the effective engine (task override or global default) and
-/// <see cref="IsTaskOverride"/> distinguishes a task-level override from the
-/// persisted global preference.
+/// One selectable recognition mode on the recognition page. <see cref="Selected"/>
+/// and <see cref="IsTaskOverride"/> are true only for an explicit task choice;
+/// otherwise the Runtime default remains selected by omission.
 /// </summary>
 public sealed record RecognitionEngineChoice(
   string Engine,
@@ -264,9 +260,6 @@ public sealed record SettingsWorkbenchState(
   string Backend,
   bool StartupEnabled,
   string Hotkey,
-  IReadOnlyList<SettingsEngineOptionState>? Engines = null,
-  string? SelectedEngine = null,
-  bool EngineChoiceRequired = false,
   IReadOnlyList<SettingsSourceOptionState>? Sources = null,
   string PendingBackend = "cpu",
   bool CanSwitchBackend = false,
@@ -291,15 +284,6 @@ public sealed record SettingsMaintenanceState(
   IReadOnlyList<string> EffectiveSourceIds,
   bool CanCancel,
   bool CanRetry);
-
-/// <summary>Catalog engine projected for the settings page.</summary>
-public sealed record SettingsEngineOptionState(
-  string Engine,
-  string DisplayName,
-  string Availability,
-  string? ReasonCode,
-  bool RequiresDownload,
-  bool Selected);
 
 /// <summary>Catalog package-index source projected as a single-select option.</summary>
 public sealed record SettingsSourceOptionState(

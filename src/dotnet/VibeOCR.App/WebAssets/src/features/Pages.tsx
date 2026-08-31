@@ -70,14 +70,6 @@ interface QrResultState {
   readonly isUrl: boolean;
 }
 
-interface EngineOptionState {
-  readonly engine: string;
-  readonly displayName: string;
-  readonly availability: string;
-  readonly requiresDownload: boolean;
-  readonly selected: boolean;
-}
-
 interface SourceOptionState {
   readonly kind: string;
   readonly id: string;
@@ -204,22 +196,6 @@ function qrResults(value: unknown): readonly QrResultState[] {
       typeof result.data === "string" &&
       typeof result.format === "string" &&
       typeof result.isUrl === "boolean"
-    );
-  });
-}
-
-function engineOptions(value: unknown): readonly EngineOptionState[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((entry): entry is EngineOptionState => {
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry))
-      return false;
-    const option = entry as Partial<EngineOptionState>;
-    return (
-      typeof option.engine === "string" &&
-      typeof option.displayName === "string" &&
-      typeof option.availability === "string" &&
-      typeof option.requiresDownload === "boolean" &&
-      typeof option.selected === "boolean"
     );
   });
 }
@@ -390,14 +366,19 @@ function useResourceText(reference: ResourceReference | undefined): string {
 function Panel({
   label,
   title,
+  className,
   children,
 }: {
   readonly label: string;
   readonly title: string;
+  readonly className?: string;
   readonly children: React.ReactNode;
 }) {
   return (
-    <section className="work-panel" aria-label={title}>
+    <section
+      className={`work-panel${className ? ` ${className}` : ""}`}
+      aria-label={title}
+    >
       <header className="panel-heading">
         <span>{label}</span>
         <h2>{title}</h2>
@@ -1164,10 +1145,14 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
     <Workspace
       eyebrow="PREFERENCES / 05"
       title="设置"
-      description="管理本地应用偏好、快捷键和运行时状态。"
+      description="管理快捷操作、运行时组件和下载来源。识别模式在对应任务中选择。"
     >
       <div className="settings-grid">
-        <Panel label="APPLICATION" title="应用设置">
+        <Panel
+          label="APPLICATION"
+          title="应用与快捷键"
+          className="settings-app-panel"
+        >
           <div className="setting-row">
             <Checkbox
               label="开机自启动"
@@ -1180,7 +1165,6 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
                 })
               }
             />
-            <span>由 Windows 原生启动项管理</span>
           </div>
           <HotkeyEditor
             key={hostHotkey}
@@ -1189,19 +1173,11 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             actions={actions}
           />
         </Panel>
-        <Panel label="OCR" title="识别模式">
-          <EngineSelector
-            engines={engineOptions(state.engines)}
-            selectedEngine={stringValue(state.selectedEngine)}
-            choiceRequired={booleanValue(state.engineChoiceRequired)}
-            enabled={viewState.capabilities.includes("settings.selection")}
-            actions={actions}
-          />
-          <p className="form-note">
-            全局默认模式由 Runtime capability catalog 提供；单次识别可临时覆盖。
-          </p>
-        </Panel>
-        <Panel label="RUNTIME" title="推理后端与依赖">
+        <Panel
+          label="RUNTIME"
+          title="运行时与组件"
+          className="settings-runtime-panel"
+        >
           <div className="runtime-summary">
             <strong>{backend}</strong>
             <ProgressBar
@@ -1209,6 +1185,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
               aria-label="运行时加载进度"
             />
           </div>
+          <BundledCapabilities capabilities={viewState.capabilities} />
           <CapabilityGate
             capability="runtime.refresh"
             capabilities={viewState.capabilities}
@@ -1216,7 +1193,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             actions={actions}
             icon={<RefreshCw aria-hidden="true" size={16} />}
           >
-            刷新运行时
+            重新检查状态
           </CapabilityGate>
           <AcceleratorFeatures
             pendingBackend={stringValue(state.pendingBackend) ?? "cpu"}
@@ -1231,71 +1208,25 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             actions={actions}
           />
           <p className="form-note">
-            {statusLabel(
-              state.statusCode,
-              "当前接口提供 Runtime 与模型驻留状态读取；预热、缓存清理和后端切换需要 Backend/Protocol 写操作。",
-            )}
+            {statusLabel(state.statusCode, "运行时状态已同步。")}
           </p>
         </Panel>
-        <Panel label="SOURCES" title="下载源">
+        <Panel
+          label="DOWNLOADS"
+          title="组件下载"
+          className="settings-download-panel"
+        >
           <SourceSelector
             sources={sourceOptions(state.sources)}
             enabled={viewState.capabilities.includes("settings.selection")}
             actions={actions}
           />
           <p className="form-note">
-            下载源偏好保存在 Backend 设置中；未知源类别仅展示，不做前端预设。
+            仅影响后续组件和模型下载；留空时使用 Runtime 默认源。
           </p>
         </Panel>
       </div>
     </Workspace>
-  );
-}
-
-function EngineSelector({
-  engines,
-  selectedEngine,
-  choiceRequired,
-  enabled,
-  actions,
-}: {
-  readonly engines: readonly EngineOptionState[];
-  readonly selectedEngine: string | undefined;
-  readonly choiceRequired: boolean;
-  readonly enabled: boolean;
-  readonly actions: AppActions;
-}) {
-  if (engines.length === 0) {
-    return <p className="form-note">当前 Backend 未提供引擎目录。</p>;
-  }
-  return (
-    <>
-      <div className="setting-row">
-        <label htmlFor="ocr-engine">全局默认识别模式</label>
-        <Select
-          id="ocr-engine"
-          value={selectedEngine ?? ""}
-          disabled={!enabled}
-          onChange={(_, data) =>
-            actions.run({
-              type: "settings.setEngine",
-              engine: String(data.value),
-            })
-          }
-        >
-          {engines.map((option) => (
-            <option key={option.engine} value={option.engine}>
-              {`${option.displayName}（${availabilityLabel(option.availability)}${
-                option.requiresDownload ? "，需下载" : ""
-              }）`}
-            </option>
-          ))}
-        </Select>
-      </div>
-      {choiceRequired ? (
-        <p className="form-note">本地引擎偏好无效，请重新选择引擎。</p>
-      ) : null}
-    </>
   );
 }
 
@@ -1321,14 +1252,14 @@ function SourceSelector({
     <>
       <SourceKindSelector
         kind="package_index"
-        label="Python 包源"
+        label="Python 包下载源"
         sources={packageSources}
         enabled={enabled}
         actions={actions}
       />
       <SourceKindSelector
         kind="model_registry"
-        label="模型源"
+        label="模型下载源"
         sources={modelSources}
         enabled={enabled}
         actions={actions}
@@ -1394,7 +1325,7 @@ function AcceleratorFeatures({
   return (
     <>
       <div className="setting-row">
-        <label htmlFor="accelerator">目标加速器</label>
+        <label htmlFor="accelerator">组件安装目标</label>
         <Select
           id="accelerator"
           value={pendingBackend}
@@ -1432,7 +1363,7 @@ function AcceleratorFeatures({
         ))
       ) : (
         <p className="form-note">
-          当前加速器没有可选功能组件；安装入口在运行时维护操作中提供。
+          当前没有需要额外安装的识别能力；随包基础能力可直接使用。
         </p>
       )}
     </>
@@ -1452,10 +1383,6 @@ function MaintenanceActions({
 }) {
   const busy = maintenance?.isRunning === true;
   const selectedFeatures = features.filter((feature) => feature.selected);
-  const requested = maintenance?.requestedComponentIds ?? [];
-  const effective = maintenance?.effectiveComponentIds ?? [];
-  const requestedSources = maintenance?.requestedSourceIds ?? [];
-  const effectiveSources = maintenance?.effectiveSourceIds ?? [];
   return (
     <>
       <div className="setting-row">
@@ -1478,7 +1405,7 @@ function MaintenanceActions({
           }}
           icon={<Play aria-hidden="true" size={16} />}
         >
-          安装所选组件
+          {selectedFeatures.length > 0 ? "安装所选能力" : "修复基础组件"}
         </Button>
         {maintenance?.canCancel === true ? (
           <Button
@@ -1506,17 +1433,35 @@ function MaintenanceActions({
       {maintenance ? (
         <p className="form-note">
           {maintenanceStatusLabel(maintenance.statusCode)}
-          {requested.length > 0 ? `；请求组件：${requested.join("、")}` : ""}
-          {effective.length > 0 ? `；实际安装：${effective.join("、")}` : ""}
-          {requestedSources.length > 0
-            ? `；请求下载源：${requestedSources.join("、")}`
-            : ""}
-          {effectiveSources.length > 0
-            ? `；实际下载源：${effectiveSources.join("、")}`
-            : ""}
         </p>
       ) : null}
     </>
+  );
+}
+
+function BundledCapabilities({
+  capabilities,
+}: {
+  readonly capabilities: readonly string[];
+}) {
+  const qrReady =
+    capabilities.includes("qrcode.generate") &&
+    capabilities.includes("qrcode.decode");
+  return (
+    <div className="bundled-capabilities" aria-label="随包基础能力">
+      <span className="bundled-capabilities-title">随包基础能力</span>
+      <div className="bundled-capability-row">
+        <div>
+          <strong>二维码与条形码</strong>
+          <p className="form-note">
+            生成与识别独立运行，可从二维码工具直接使用。
+          </p>
+        </div>
+        <Badge appearance="outline">
+          {qrReady ? "随包可用" : "当前 Runtime 不可用"}
+        </Badge>
+      </div>
+    </div>
   );
 }
 
@@ -1553,7 +1498,7 @@ function TaskEngineSelector({
               })
         }
       >
-        <option value="">跟随全局默认</option>
+        <option value="">使用 Runtime 默认模式</option>
         {engines.map((engine) => (
           <option key={engine.engine} value={engine.engine}>
             {`${engine.displayName}（${availabilityLabel(engine.availability)}${

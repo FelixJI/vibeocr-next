@@ -10,8 +10,7 @@ namespace VibeOCR.App.Features.Pdf;
 
 public sealed class PdfViewModel(
     IInferenceClient inference,
-    IPdfFileSource files,
-    string? configFile = null) : INotifyPropertyChanged
+    IPdfFileSource files) : INotifyPropertyChanged
 {
     private readonly InferenceJobRunner _jobs = new(inference);
     private CancellationTokenSource? _activeRun;
@@ -122,8 +121,7 @@ public sealed class PdfViewModel(
             }
 
             string pipeline = _recognitionMode?.PipelineId ?? "OCR";
-            OcrEngine? engine = _recognitionMode?.Engine ??
-                VibeOCR.App.Features.Settings.OcrEngineSettings.GlobalEngine(configFile);
+            OcrEngine? engine = _recognitionMode?.Engine;
             InferenceJobRun job = await _jobs.RunRecognitionAsync(
                 pipeline,
                 JobPriority.Background,

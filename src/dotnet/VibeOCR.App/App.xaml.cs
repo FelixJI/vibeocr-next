@@ -185,12 +185,10 @@ public sealed partial class App : Application
           layout,
           () => new RecognitionViewModel(
             _inferenceGateway,
-            new InputService(() => WinRT.Interop.WindowNative.GetWindowHandle(_window!)),
-            layout.ConfigFile),
+            new InputService(() => WinRT.Interop.WindowNative.GetWindowHandle(_window!))),
           () => new BatchViewModel(
             _inferenceGateway,
-            new BatchFileSource(() => WinRT.Interop.WindowNative.GetWindowHandle(_window!)),
-            layout.ConfigFile),
+            new BatchFileSource(() => WinRT.Interop.WindowNative.GetWindowHandle(_window!))),
           () =>
           {
             nint handle = WinRT.Interop.WindowNative.GetWindowHandle(_window!);
@@ -203,17 +201,14 @@ public sealed partial class App : Application
             nint handle = WinRT.Interop.WindowNative.GetWindowHandle(_window!);
             return new PdfViewModel(
               _inferenceGateway,
-              new PdfFileSource(() => handle),
-              layout.ConfigFile);
+              new PdfFileSource(() => handle));
           },
           () => new SettingsViewModel(
             _inferenceGateway,
             _runtimeStatus,
-            layout.ConfigFile,
             () => _runtimeInstaller
               ?? throw new InvalidOperationException("Runtime installer is unavailable."),
-            _productMaintenance,
-            layout),
+            _productMaintenance),
           () => _shellViewModel ??
             throw new InvalidOperationException("Desktop shell is unavailable."),
           () => _updateViewModel ??

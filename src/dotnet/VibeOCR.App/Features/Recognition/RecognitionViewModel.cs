@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
-using VibeOCR.App.Features.Settings;
 using VibeOCR.App.Inference;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
@@ -13,7 +12,6 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     private readonly IInferenceClient _inference;
     private readonly InferenceJobRunner _jobs;
     private readonly IInputService _inputs;
-    private readonly string? _configFile;
     private CancellationTokenSource? _activeRun;
     private long _generation;
     private bool _isBusy;
@@ -23,17 +21,14 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     private string _status = "请选择图片";
     private string? _taskEngine;
     private RecognitionModeOption? _taskRecognitionMode;
-    private RecognitionModeOption? _globalRecognitionMode;
 
     public RecognitionViewModel(
         IInferenceClient inference,
-        IInputService inputs,
-        string? configFile = null)
+        IInputService inputs)
     {
         _inference = inference ?? throw new ArgumentNullException(nameof(inference));
         _jobs = new InferenceJobRunner(inference);
         _inputs = inputs ?? throw new ArgumentNullException(nameof(inputs));
-        _configFile = configFile;
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -57,20 +52,16 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         set => SetField(ref _taskEngine, string.IsNullOrWhiteSpace(value) ? null : value);
     }
 
-    public void SetRecognitionModes(RecognitionModeOption? taskMode, RecognitionModeOption? globalMode)
-    {
+    public void SetRecognitionMode(RecognitionModeOption? taskMode) =>
         _taskRecognitionMode = taskMode;
-        _globalRecognitionMode = globalMode;
-    }
 
-    /// <summary>The engine this run would use: task override, else the global preference.</summary>
+    /// <summary>The engine explicitly selected for this task, if any.</summary>
     public OcrEngine? EffectiveEngine
     {
         get
         {
             if (_taskRecognitionMode is not null) return _taskRecognitionMode.Engine;
-            if (_globalRecognitionMode is not null) return _globalRecognitionMode.Engine;
-            OcrEngine? task = OcrEngineSettings.ToEngine(TaskEngine);
+            OcrEngine? task = OcrEngineWire.Parse(TaskEngine);
             if (task is not null)
             {
                 return task;
@@ -80,11 +71,11 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
                 throw new InvalidOperationException(
                     $"任务识别模式 {TaskEngine} 尚未绑定 Runtime catalog，不能静默降级。");
             }
-            return OcrEngineSettings.GlobalEngine(_configFile);
+            return null;
         }
     }
 
-    public string EffectivePipeline => _taskRecognitionMode?.PipelineId ?? _globalRecognitionMode?.PipelineId ?? Pipeline;
+    public string EffectivePipeline => _taskRecognitionMode?.PipelineId ?? Pipeline;
 
     public ResultActions CreateResultActions(IResultActionPlatform platform)
     {
@@ -219,7 +210,7 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         HttpV2ErrorCode.SupervisorDraining => "Supervisor 正在关闭，请稍后",
         HttpV2ErrorCode.ProtocolMismatch => "Supervisor 协议不兼容",
         HttpV2ErrorCode.OcrEngineUnknown => "未知引擎，请重新选择",
-        HttpV2ErrorCode.OcrEngineUnavailable => "所选引擎不可用，请在设置中重选",
+        HttpV2ErrorCode.OcrEngineUnavailable => "所选引擎不可用，请重新选择本次识别模式",
         HttpV2ErrorCode.OcrEnginePreparationRequired => "所选引擎需要先准备依赖",
         HttpV2ErrorCode.OcrEngineNotValidForPipeline => "该管线不支持所选引擎",
         HttpV2ErrorCode.OcrEngineLanguageUnavailable => "所选引擎缺少语言包",

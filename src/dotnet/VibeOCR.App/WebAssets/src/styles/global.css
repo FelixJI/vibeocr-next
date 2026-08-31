@@ -450,6 +450,35 @@ input {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-content: start;
 }
+.settings-app-panel,
+.settings-runtime-panel,
+.settings-download-panel {
+  grid-column: 1 / -1;
+}
+.bundled-capabilities {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--colorNeutralStroke2);
+  border-radius: 6px;
+  background: var(--colorNeutralBackground2);
+}
+.bundled-capabilities-title {
+  color: var(--colorNeutralForeground3);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+.bundled-capability-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.bundled-capability-row strong {
+  font-size: 13px;
+  font-weight: 600;
+}
 .setting-row {
   min-height: 36px;
 }
@@ -614,8 +643,16 @@ select {
   }
   .inspection-grid,
   .collection-workspace,
-  .qr-workspace {
+  .qr-workspace,
+  .settings-grid,
+  .about-grid,
+  .diagnostics-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+  .settings-app-panel,
+  .settings-runtime-panel,
+  .settings-download-panel {
+    grid-column: auto;
   }
   .collection-workspace .work-panel:nth-child(2),
   .collection-workspace .work-panel:nth-child(3) {

@@ -470,7 +470,7 @@ describe("AppShell", () => {
     unmount();
   });
 
-  it("drives catalog engine, source and feature selection from settings state", async () => {
+  it("drives source and feature selection from settings state", async () => {
     window.location.hash = "#/settings";
     const user = userEvent.setup();
     const actions: AppActions = {
@@ -483,7 +483,13 @@ describe("AppShell", () => {
       revision: 20,
       route: "settings",
       theme: "light",
-      capabilities: ["settings.shell", "settings.selection", "runtime.refresh"],
+      capabilities: [
+        "settings.shell",
+        "settings.selection",
+        "runtime.refresh",
+        "qrcode.generate",
+        "qrcode.decode",
+      ],
       features: {
         settings: {
           theme: "light",
@@ -492,28 +498,8 @@ describe("AppShell", () => {
           backend: "cpu",
           startupEnabled: false,
           hotkey: "Ctrl+Alt+Q",
-          selectedEngine: "rapidocr",
-          engineChoiceRequired: false,
           pendingBackend: "nvidia_cuda",
           canSwitchBackend: true,
-          engines: [
-            {
-              engine: "rapidocr",
-              displayName: "RapidOCR",
-              availability: "ready",
-              reasonCode: null,
-              requiresDownload: false,
-              selected: true,
-            },
-            {
-              engine: "paddleocr",
-              displayName: "PaddleOCR",
-              availability: "preparation_required",
-              reasonCode: null,
-              requiresDownload: true,
-              selected: false,
-            },
-          ],
           sources: [
             {
               kind: "package_index",
@@ -549,15 +535,13 @@ describe("AppShell", () => {
 
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
 
-    const engineSelect = screen.getByLabelText("全局默认识别模式");
-    expect(engineSelect).toHaveValue("rapidocr");
-    await user.selectOptions(engineSelect, "paddleocr");
-    expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.setEngine",
-      engine: "paddleocr",
-    });
+    expect(screen.queryByLabelText("默认模式")).not.toBeInTheDocument();
+    expect(screen.getByText("二维码与条形码")).toBeVisible();
+    expect(screen.getByText("随包可用")).toBeVisible();
+    expect(screen.getByText(/从二维码工具直接使用/)).toBeVisible();
+    expect(screen.getByText(/识别模式在对应任务中选择/)).toBeVisible();
 
-    const packageSource = screen.getByLabelText("Python 包源");
+    const packageSource = screen.getByLabelText("Python 包下载源");
     expect(packageSource).toHaveValue("tuna-pypi");
     await user.selectOptions(packageSource, "");
     expect(actions.run).toHaveBeenCalledWith({
@@ -571,7 +555,7 @@ describe("AppShell", () => {
       sourceId: "pypi",
     });
 
-    const modelSource = screen.getByLabelText("模型源");
+    const modelSource = screen.getByLabelText("模型下载源");
     expect(modelSource).toHaveValue("");
     await user.selectOptions(modelSource, "huggingface");
     expect(actions.run).toHaveBeenCalledWith({
@@ -582,7 +566,7 @@ describe("AppShell", () => {
 
     expect(screen.getByText("Hugging Face")).toBeInTheDocument();
 
-    const accelerator = screen.getByLabelText("目标加速器");
+    const accelerator = screen.getByLabelText("组件安装目标");
     expect(accelerator).toHaveValue("nvidia_cuda");
     await user.selectOptions(accelerator, "cpu");
     expect(actions.run).toHaveBeenCalledWith({
@@ -659,7 +643,8 @@ describe("AppShell", () => {
 
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
 
-    await user.click(screen.getByRole("button", { name: "安装所选组件" }));
+    expect(screen.getByText("当前 Runtime 不可用")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "安装所选能力" }));
     expect(confirmSpy).toHaveBeenCalledWith(
       expect.stringContaining("文档解析（PaddleOCR/MinerU）"),
     );
@@ -674,17 +659,14 @@ describe("AppShell", () => {
       type: "settings.retryRuntimeMaintenance",
     });
 
-    // requested/effective 回显是安装真相。
-    expect(
-      screen.getByText(/实际安装：document_parsing、runtime_host/),
-    ).toBeVisible();
-    expect(screen.getByText(/下载源：pypi/)).toBeVisible();
-
+    // 原始组件与下载源 id 属于诊断细节，不在普通设置页回显。
+    expect(screen.queryByText(/runtime_host/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/请求下载源/)).not.toBeInTheDocument();
     confirmSpy.mockRestore();
     unmount();
   });
 
-  it("separates the recognition task engine override from the global default", async () => {
+  it("uses a task recognition mode or delegates to the Runtime default", async () => {
     window.location.hash = "#/recognition";
     const user = userEvent.setup();
     const actions: AppActions = {
@@ -707,7 +689,7 @@ describe("AppShell", () => {
             {
               engine: "rapidocr",
               displayName: "RapidOCR",
-              selected: true,
+              selected: false,
               isTaskOverride: false,
               availability: "ready",
               requiresDownload: false,
@@ -737,9 +719,7 @@ describe("AppShell", () => {
 
     const taskEngine = screen.getByLabelText("本次识别模式");
     expect(taskEngine).toHaveValue("");
-    expect(
-      screen.getByText("该模式不提供模型预热、TTL、固定驻留或释放控制。"),
-    ).toBeVisible();
+    expect(screen.getByText("使用 Runtime 默认模式")).toBeVisible();
     await user.selectOptions(taskEngine, "windows");
     expect(actions.run).toHaveBeenCalledWith({
       type: "recognition.setTaskEngine",
@@ -759,13 +739,13 @@ describe("AppShell", () => {
             recognition: {
               isBusy: false,
               statusCode: "recognition.ready",
-              taskEngine: null,
+              taskEngine: "paddle_text",
               engines: [
                 {
                   engine: "paddle_text",
                   displayName: "通用 OCR（PaddleOCR）",
                   selected: true,
-                  isTaskOverride: false,
+                  isTaskOverride: true,
                   availability: "ready",
                   requiresDownload: false,
                   lifecycleKind: "model_residency",
@@ -795,13 +775,13 @@ describe("AppShell", () => {
             recognition: {
               isBusy: false,
               statusCode: "recognition.ready",
-              taskEngine: null,
+              taskEngine: "mineru_document",
               engines: [
                 {
                   engine: "mineru_document",
                   displayName: "深度文档解析（MinerU）",
                   selected: true,
-                  isTaskOverride: false,
+                  isTaskOverride: true,
                   availability: "ready",
                   requiresDownload: false,
                   lifecycleKind: "process_keep_alive",

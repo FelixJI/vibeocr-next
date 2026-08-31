@@ -35,7 +35,6 @@ public static class WorkbenchBridgeCodec
   private static readonly HashSet<string> PagesArgumentFields = ["pages"];
   private static readonly HashSet<string> StartArgumentFields = ["start"];
   private static readonly HashSet<string> UrlArgumentFields = ["url"];
-  private static readonly HashSet<string> EngineArgumentFields = ["engine"];
   private static readonly HashSet<string> SourceKindOnlyFields = ["kind"];
   private static readonly HashSet<string> SourceArgumentFields = ["kind", "sourceId"];
   private static readonly HashSet<string> AcceleratorArgumentFields = ["accelerator"];
@@ -388,14 +387,6 @@ public static class WorkbenchBridgeCodec
           throw new WorkbenchBridgeProtocolException("Workbench hotkey is invalid.");
         }
         return new SetHotkeyCommand(hotkey);
-      case ("settings", "setEngine"):
-        EnsureObjectWithFields(arguments, EngineArgumentFields, "command arguments");
-        string? engine = arguments.GetProperty("engine").GetString();
-        if (string.IsNullOrWhiteSpace(engine) || engine.Length > 32)
-        {
-          throw new WorkbenchBridgeProtocolException("Workbench engine is invalid.");
-        }
-        return new SetOcrEngineCommand(engine);
       case ("settings", "setSource"):
         bool hasSourceId = !HasExactFields(arguments, SourceKindOnlyFields);
         if (hasSourceId)
@@ -617,9 +608,6 @@ public static class WorkbenchBridgeCodec
       settings.Backend,
       settings.StartupEnabled,
       settings.Hotkey,
-      engines = settings.Engines ?? [],
-      settings.SelectedEngine,
-      settings.EngineChoiceRequired,
       sources = settings.Sources ?? [],
       settings.PendingBackend,
       settings.CanSwitchBackend,

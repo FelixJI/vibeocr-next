@@ -10,8 +10,7 @@ namespace VibeOCR.App.Features.Batch;
 
 public sealed class BatchViewModel(
     IInferenceClient inference,
-    IBatchFileSource files,
-    string? configFile = null) : INotifyPropertyChanged
+    IBatchFileSource files) : INotifyPropertyChanged
 {
     private readonly InferenceJobRunner _jobs = new(inference);
     private readonly object _counterLock = new();
@@ -71,8 +70,7 @@ public sealed class BatchViewModel(
             }
 
             string pipeline = _recognitionMode?.PipelineId ?? "OCR";
-            OcrEngine? engine = _recognitionMode?.Engine ??
-                VibeOCR.App.Features.Settings.OcrEngineSettings.GlobalEngine(configFile);
+            OcrEngine? engine = _recognitionMode?.Engine;
             InferenceJobRun job = await _jobs.RunRecognitionAsync(
                 pipeline,
                 JobPriority.Background,

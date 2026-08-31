@@ -49,7 +49,7 @@ public sealed class RecognitionViewModelSupervisorTests
         var fakeInference = new FakeInferenceClient("structured result");
         var inputs = new StubInputService();
         var viewModel = new RecognitionViewModel(fakeInference, inputs);
-        viewModel.SetRecognitionModes(
+        viewModel.SetRecognitionMode(
             new RecognitionModeOption(
                 "paddle_structure",
                 "document",
@@ -64,8 +64,7 @@ public sealed class RecognitionViewModelSupervisorTests
                 true,
                 true,
                 true,
-                true),
-            null);
+                true));
 
         await viewModel.RecognizeViaSupervisorAsync(
             ct => inputs.PickFileAsync(ct),
