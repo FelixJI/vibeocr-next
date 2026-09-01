@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.3
+
+### Features
+
+- **update:** 支持相邻版本 Velopack 增量更新 (#55) (9134fb0)
+
+### Bug Fixes
+
+- **app:** 修复启动依赖并完善截图标注 (#57) (1f34482)
+
 ## 0.4.2
 
 ### Dependencies
