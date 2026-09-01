@@ -9,6 +9,10 @@ public readonly record struct PhysicalPoint(int X, int Y);
 
 public readonly record struct PhysicalRectangle(int X, int Y, int Width, int Height)
 {
+    public int Right => X + Width;
+
+    public int Bottom => Y + Height;
+
     public void Validate()
     {
         if (Width <= 0 || Height <= 0)

@@ -29,6 +29,12 @@ public sealed class WindowMessageService : IDisposable
 
     public event EventHandler<WindowMessage>? MessageReceived;
 
+    /// <summary>
+    /// 先于 MessageReceived 询问的拦截链：任一处理器返回非 null 即作为窗口
+    /// 过程结果直接返回（如 WM_MOUSEACTIVATE→MA_NOACTIVATE），不再转发。
+    /// </summary>
+    public event Func<WindowMessage, nint?>? MessageHandled;
+
     private nint OnWindowMessage(
         nint windowHandle,
         uint message,
@@ -37,6 +43,18 @@ public sealed class WindowMessageService : IDisposable
         nuint subclassId,
         nuint referenceData)
     {
+        if (MessageHandled is { } handlers)
+        {
+            foreach (Func<WindowMessage, nint?> handler in handlers.GetInvocationList()
+                         .Cast<Func<WindowMessage, nint?>>())
+            {
+                if (handler(new WindowMessage(message, wParam, lParam)) is { } result)
+                {
+                    return result;
+                }
+            }
+        }
+
         MessageReceived?.Invoke(this, new WindowMessage(message, wParam, lParam));
         return DefSubclassProc(windowHandle, message, wParam, lParam);
     }
