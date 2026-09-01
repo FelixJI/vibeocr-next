@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.ProductLayout;
 using Xunit;
@@ -117,6 +118,9 @@ public sealed class PortableLayoutTests
         string manifest = File.ReadAllText(layout.PortableLayoutManifest!);
         Assert.Contains("\"shared_root\":\"state\"", manifest);
         Assert.Contains("\"next\"", manifest);
+        // 直跑布局注册稳定安装根自身,component_lock 相对它解析。
+        Assert.Contains("\"root\":\".\"", manifest);
+        Assert.Contains("\"component_lock\":\"component-lock.json\"", manifest);
         // 幂等:内容不变不重写。
         string firstWrite = File.GetLastWriteTimeUtc(layout.PortableLayoutManifest!)
             .ToString("O");
@@ -567,8 +571,29 @@ public sealed class PortableLayoutTests
 
             layout.EnsurePortableState();
             string manifest = File.ReadAllText(Path.Combine(root, "portable-layout.json"));
-            Assert.Contains("\"root\":\"current\"", manifest);
+            Assert.Contains("\"root\":\".\"", manifest);
+            Assert.Contains(
+                "\"component_lock\":\"current/app/metadata/component-lock.json\"",
+                manifest);
             Assert.False(Directory.Exists(Path.Combine(current, "state", "config")));
+            // Backend 身份校验等价物:注册 root 经 manifest 所在目录解析后必须
+            // 等于 Runtime Installer 声明的 product_root(稳定安装根),否则
+            // ensure 在 LayoutError: product_root does not match 上失败。
+            RuntimeInstallerConfiguration configuration =
+                RuntimeInstallerConfiguration.ForNext(layout);
+            using (JsonDocument document = JsonDocument.Parse(manifest))
+            {
+                string registeredRoot = document.RootElement
+                    .GetProperty("products")
+                    .GetProperty("next")
+                    .GetProperty("root")
+                    .GetString()!;
+                string resolvedRegistered = Path.GetFullPath(
+                    Path.Combine(root, registeredRoot));
+                Assert.Equal(
+                    Path.GetFullPath(configuration.ProductRoot),
+                    resolvedRegistered);
+            }
         }
         finally
         {

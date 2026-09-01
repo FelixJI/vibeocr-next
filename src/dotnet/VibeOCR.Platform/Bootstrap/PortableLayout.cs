@@ -205,12 +205,17 @@ public sealed record PortableLayout(
         {
             return;
         }
-        string relativeProductRoot = Path.GetRelativePath(InstallRoot, ProductRoot)
+        // 注册稳定安装根(manifest 所在目录)而非版本载荷目录:Runtime
+        // Installer 收到的 product_root 是 InstallRoot,跨 Velopack 更新稳定;
+        // Backend 会把注册 root 相对 manifest 解析后与之比对,注册 current
+        // 这类版本目录会在每次更新后失配并使 ensure 失败。
+        string manifestRoot = Path.GetDirectoryName(Path.GetFullPath(manifestPath))!;
+        string relativeComponentLock = Path.GetRelativePath(manifestRoot, ComponentLock)
             .Replace(Path.DirectorySeparatorChar, '/');
         string payload =
-            "{\"products\":{\"next\":{\"component_lock\":\"app/metadata/component-lock.json\",\"root\":\"" +
-            relativeProductRoot +
-            "\"}},\"schema_version\":1,\"shared_root\":\"state\"}";
+            "{\"products\":{\"next\":{\"component_lock\":\"" +
+            relativeComponentLock +
+            "\",\"root\":\".\"}},\"schema_version\":1,\"shared_root\":\"state\"}";
         string? existing = File.Exists(manifestPath)
             ? File.ReadAllText(manifestPath).Trim()
             : null;
