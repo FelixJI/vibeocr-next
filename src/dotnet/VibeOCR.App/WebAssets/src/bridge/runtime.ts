@@ -19,6 +19,10 @@ const APP_ROUTES = new Set<AppRoute>([
 
 const THEMES = new Set<ThemePreference>(["system", "light", "dark"]);
 
+// revision 只用于丢弃过期事件，不属于用户可见状态；徽章文案保持稳定，
+// 避免每次状态推送都变化。
+const CONNECTED_LABEL = "原生宿主已连接";
+
 export class WorkbenchWebRuntime {
   private current?: AppViewState;
   private listener?: (state: AppViewState) => void;
@@ -118,7 +122,7 @@ export function projectSnapshot(snapshot: AppSnapshot): AppViewState {
     theme: snapshot.theme,
     capabilities: snapshot.capabilities,
     features: snapshot.features,
-    runtimeLabel: runtimeLabel(snapshot.revision),
+    runtimeLabel: CONNECTED_LABEL,
   };
 }
 
@@ -153,12 +157,8 @@ function projectEvent(
     route,
     theme,
     features,
-    runtimeLabel: runtimeLabel(event.revision),
+    runtimeLabel: CONNECTED_LABEL,
   };
-}
-
-function runtimeLabel(revision: number): string {
-  return `原生宿主已连接 · 状态版本 ${revision}`;
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {

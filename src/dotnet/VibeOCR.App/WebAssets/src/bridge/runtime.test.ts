@@ -73,7 +73,7 @@ describe("WorkbenchWebRuntime", () => {
         theme: "dark",
         capabilities: ["recognition.capture"],
         features: { recognition: { status: "ready" } },
-        runtimeLabel: "原生宿主已连接 · 状态版本 7",
+        runtimeLabel: "原生宿主已连接",
       },
       {
         connected: true,
@@ -85,7 +85,7 @@ describe("WorkbenchWebRuntime", () => {
           recognition: { status: "ready" },
           shell: { route: "batch" },
         },
-        runtimeLabel: "原生宿主已连接 · 状态版本 8",
+        runtimeLabel: "原生宿主已连接",
       },
     ]);
   });

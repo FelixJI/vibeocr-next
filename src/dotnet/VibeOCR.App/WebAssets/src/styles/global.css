@@ -28,14 +28,17 @@ input {
   font: inherit;
 }
 .fluent-root {
-  min-height: 100%;
+  height: 100%;
   background: var(--colorNeutralBackground2);
   color: var(--colorNeutralForeground1);
 }
+/* 高度链必须保持确定（html/body/#root/fluent-root/app-shell 都是 100%），
+   否则长页面会把 app-shell 撑过视口，body overflow:hidden 裁掉侧边栏底部
+   且页面无法滚动；page-region 负责内部滚动。 */
 .app-shell {
   display: grid;
   grid-template-columns: 216px minmax(0, 1fr);
-  min-height: 100vh;
+  height: 100%;
 }
 .navigation-rail {
   display: flex;
@@ -114,6 +117,7 @@ input {
 .shell-content {
   display: grid;
   min-width: 0;
+  min-height: 0;
   grid-template-rows: 44px minmax(0, 1fr);
 }
 .app-toolbar {
