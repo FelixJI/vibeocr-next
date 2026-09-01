@@ -6,6 +6,7 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Features.Batch;
+using VibeOCR.App.Features.FloatingToolbar;
 using VibeOCR.App.Features.Pdf;
 using VibeOCR.App.Features.QrCode;
 using VibeOCR.App.Features.Settings;
@@ -51,6 +52,7 @@ public sealed partial class App : Application
     private WindowMessageService? _windowMessages;
     private TrayIconService? _trayIcon;
     private WindowsHotkeyRegistrar? _hotkeyRegistrar;
+    private FloatingToolbarShell? _floatingToolbar;
     private ShellViewModel? _shellViewModel;
     private UpdateViewModel? _updateViewModel;
     private bool _shutdownStarted;
@@ -291,6 +293,38 @@ public sealed partial class App : Application
             VelopackUpdateCoordinator.Create(layout.ConfigFile, layout.ProbeWritableStateRoot),
             () => _window!.Close(),
             _productMaintenance);
+
+        // 悬浮工具栏默认关闭；自检模式强制启用并在稳定后注入交互验证。
+        bool floatingToolbarSelfTest =
+            Environment.GetEnvironmentVariable("VIBEOCR_FLOATING_TOOLBAR_SELF_TEST") == "1";
+        _floatingToolbar = FloatingToolbarShell.TryCreate(
+            layout,
+            RecognizeFromHotkeyAsync,
+            ShowMainWindow,
+            () => _window!.ShowAndNavigate("settings"),
+            forceEnabled: floatingToolbarSelfTest);
+        if (floatingToolbarSelfTest)
+        {
+            _ = RunFloatingToolbarSelfTestAsync();
+        }
+    }
+
+    private async Task RunFloatingToolbarSelfTestAsync()
+    {
+        try
+        {
+            // 等待首窗稳定后再注入交互，避免与启动期的窗口几何恢复竞争。
+            await Task.Delay(1500);
+            bool passed = _floatingToolbar?.RunInteractionSelfTest() == true;
+            AppLog.Info($"Floating toolbar self-test: {(passed ? "passed" : "failed")}");
+            FlushStartupTrace();
+            Environment.Exit(passed ? 0 : 1);
+        }
+        catch (Exception error)
+        {
+            AppLog.Error("Floating toolbar self-test crashed", error);
+            Environment.Exit(1);
+        }
     }
 
     private static string? ReadConfiguredHotkey(string configFile)
@@ -684,6 +718,8 @@ public sealed partial class App : Application
 
     private async Task DisposeDesktopShellAsync()
     {
+        _floatingToolbar?.Dispose();
+        _floatingToolbar = null;
         _hotkeyRegistrar?.Dispose();
         _hotkeyRegistrar = null;
         _trayIcon?.Dispose();
