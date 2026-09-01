@@ -22,6 +22,8 @@ namespace VibeOCR.App;
 
 public sealed partial class MainWindow : Window
 {
+  // 默认/最小尺寸均为逻辑像素（DIP），与前端 CSS 的 min-width/min-height 一致；
+  // 写入 AppWindow/WM_GETMINMAXINFO 前由 WindowGeometryPolicy 按 DPI 换算为物理像素。
   private const int DefaultWidth = 1280;
   private const int DefaultHeight = 800;
   private const int MinWidth = 1024;
@@ -137,15 +139,27 @@ public sealed partial class MainWindow : Window
     IntPtr hwnd = WindowNative.GetWindowHandle(this);
     WindowMinSizeEnforcer.Apply(hwnd, MinWidth, MinHeight);
 
+    double scale = WindowGeometryPolicy.GetWindowScale(hwnd);
+    int minWidth = WindowGeometryPolicy.ScaleToPhysical(MinWidth, scale);
+    int minHeight = WindowGeometryPolicy.ScaleToPhysical(MinHeight, scale);
+    DisplayArea area = DisplayArea.GetFromWindowId(
+      AppWindow.Id,
+      DisplayAreaFallback.Nearest);
+
     WindowGeometry? saved = layoutStore.Load();
     var presenter = (OverlappedPresenter)AppWindow.Presenter;
     if (saved is { } geometry)
     {
+      WindowGeometry clamped = WindowGeometryPolicy.ClampRestored(
+        geometry,
+        area.WorkArea,
+        minWidth,
+        minHeight);
       AppWindow.MoveAndResize(new RectInt32(
-        geometry.X,
-        geometry.Y,
-        geometry.Width,
-        geometry.Height));
+        clamped.X,
+        clamped.Y,
+        clamped.Width,
+        clamped.Height));
       if (geometry.IsMaximized)
       {
         presenter.Maximize();
@@ -153,13 +167,11 @@ public sealed partial class MainWindow : Window
       return;
     }
 
-    DisplayArea area = DisplayArea.GetFromWindowId(
-      AppWindow.Id,
-      DisplayAreaFallback.Nearest);
-    RectInt32 work = area.WorkArea;
-    int x = work.X + Math.Max(0, (work.Width - DefaultWidth) / 2);
-    int y = work.Y + Math.Max(0, (work.Height - DefaultHeight) / 2);
-    AppWindow.MoveAndResize(new RectInt32(x, y, DefaultWidth, DefaultHeight));
+    AppWindow.MoveAndResize(WindowGeometryPolicy.DefaultGeometry(
+      area.WorkArea,
+      scale,
+      DefaultWidth,
+      DefaultHeight));
   }
 
   internal WindowGeometry? CaptureGeometry()
