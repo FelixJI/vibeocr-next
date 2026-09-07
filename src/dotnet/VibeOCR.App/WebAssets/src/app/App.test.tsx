@@ -34,7 +34,7 @@ describe("AppShell", () => {
     expect(screen.getByText("快捷键冲突：已占用")).toBeVisible();
     expect(screen.getByText("当前生效：未注册")).toBeVisible();
     expect(screen.getByLabelText("截图快捷键")).toHaveValue("Ctrl+Alt+Q");
-    await user.click(screen.getByRole("button", { name: "应用", exact: true }));
+    await user.click(screen.getByRole("button", { name: "应用" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.setHotkey",
       hotkey: "Ctrl+Alt+Q",
