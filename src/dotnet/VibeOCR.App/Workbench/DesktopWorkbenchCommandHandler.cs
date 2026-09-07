@@ -144,7 +144,9 @@ public sealed class DesktopWorkbenchCommandHandler :
       "settings.ready",
       "unknown",
       shell.Value.StartWithSystem,
-      shell.Value.RegisteredHotkey) : SettingsState(settings),
+      shell.Value.RegisteredHotkey,
+      HotkeyStatus: shell.Value.HotkeyStatus,
+      PendingHotkey: shell.Value.PendingHotkey) : SettingsState(settings),
     new UpdateWorkbenchState(false, "update.current", null, false),
     AboutState(),
     DiagnosticsState(),
@@ -990,7 +992,9 @@ public sealed class DesktopWorkbenchCommandHandler :
         "settings.ready",
         "unknown",
         shell.Value.StartWithSystem,
-        shell.Value.RegisteredHotkey)
+        shell.Value.RegisteredHotkey,
+        HotkeyStatus: shell.Value.HotkeyStatus,
+        PendingHotkey: shell.Value.PendingHotkey)
       : SettingsState(settings);
   }
 
@@ -1351,6 +1355,8 @@ public sealed class DesktopWorkbenchCommandHandler :
       feature.DisplayName,
       feature.Accelerator,
       feature.Selected))],
+    HotkeyStatus: shell.Value.HotkeyStatus,
+    PendingHotkey: shell.Value.PendingHotkey,
     Maintenance: new SettingsMaintenanceState(
       viewModel.Maintenance.State.IsRunning,
       viewModel.Maintenance.State.StatusCode,

@@ -7,6 +7,40 @@ import { App, type AppActions, type AppViewState } from "./App";
 Object.assign(globalThis, { NodeFilter: { FILTER_SKIP: 3 } });
 
 describe("AppShell", () => {
+  it("shows startup hotkey conflicts and allows retrying the configured key", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 1,
+      route: "settings",
+      theme: "light",
+      capabilities: ["settings.shell"],
+      runtimeLabel: "运行时已就绪",
+      features: {
+        settings: {
+          hotkey: "",
+          pendingHotkey: "Ctrl+Alt+Q",
+          hotkeyStatus: "快捷键冲突：已占用",
+        },
+      },
+    };
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    expect(screen.getByText("快捷键冲突：已占用")).toBeVisible();
+    expect(screen.getByText("当前生效：未注册")).toBeVisible();
+    expect(screen.getByLabelText("截图快捷键")).toHaveValue("Ctrl+Alt+Q");
+    await user.click(screen.getByRole("button", { name: "应用" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setHotkey",
+      hotkey: "Ctrl+Alt+Q",
+    });
+    unmount();
+  });
   it("lets the user navigate to QR tools and clearly gates an unavailable batch export", async () => {
     window.location.hash = "#/recognition";
     const user = userEvent.setup();

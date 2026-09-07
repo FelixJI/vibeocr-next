@@ -63,6 +63,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow) : IScreenRegionPi
             PhysicalRectangle? selected = await ShowOverlayAsync(
                 desktop,
                 background,
+                desktopBgra,
                 cancellationToken);
             if (selected is null)
             {
@@ -126,182 +127,281 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow) : IScreenRegionPi
         SHAppBarMessage(AbmSetState, ref data);
     }
 
-    private static async Task<PhysicalRectangle?> ShowOverlayAsync(
-        PhysicalRectangle desktop,
-        BitmapImage background,
-        CancellationToken cancellationToken)
+  private static async Task<PhysicalRectangle?> ShowOverlayAsync(
+    PhysicalRectangle desktop,
+    BitmapImage background,
+    byte[] pixels,
+    CancellationToken cancellationToken)
+  {
+    var completion = new TaskCompletionSource<PhysicalRectangle?>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var session = new ScreenSelectionSession(desktop.Width, desktop.Height);
+    var overlay = new Window();
+    var root = new Grid { RequestedTheme = ElementTheme.Dark };
+    root.Children.Add(new Image { Source = background, Stretch = Stretch.Fill });
+    var canvas = new Canvas { Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };
+    root.Children.Add(canvas);
+    // Four shades leave the selected pixels unobscured.
+    Rectangle[] shades = Enumerable.Range(0, 4).Select(_ => new Rectangle
     {
-        var completion = new TaskCompletionSource<PhysicalRectangle?>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var overlay = new Window();
-        var root = new Grid
-        {
-            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(1, 0, 0, 0)),
-        };
-        root.Children.Add(new Image { Source = background, Stretch = Stretch.Fill });
-        root.Children.Add(new Border
-        {
-            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(72, 0, 0, 0)),
-        });
-        var canvas = new Canvas
-        {
-            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(1, 0, 0, 0)),
-        };
-        var selection = new Rectangle
-        {
-            Stroke = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 255, 255, 255)),
-            StrokeThickness = 2,
-            Fill = new SolidColorBrush(Windows.UI.Color.FromArgb(22, 255, 255, 255)),
-            Visibility = Visibility.Collapsed,
-        };
-        canvas.Children.Add(selection);
-        root.Children.Add(canvas);
-        root.Children.Add(new Border
-        {
-            Margin = new Thickness(20),
-            Padding = new Thickness(12, 8, 12, 8),
-            HorizontalAlignment = HorizontalAlignment.Left,
-            VerticalAlignment = VerticalAlignment.Top,
-            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(210, 24, 24, 24)),
-            CornerRadius = new CornerRadius(6),
-            Child = new TextBlock
-            {
-                Text = "拖动框选识别区域 · 右键重新框选 / 取消 · Esc 取消",
-                Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 255, 255, 255)),
-            },
-        });
-        overlay.Content = root;
-
-        Windows.Foundation.Point? start = null;
-        canvas.PointerPressed += (_, args) =>
-        {
-            var properties = args.GetCurrentPoint(canvas).Properties;
-
-            // 右键按状态分支：已有框选→清空重选；空状态→取消并关闭遮罩。
-            if (properties.IsRightButtonPressed)
-            {
-                if (start is not null)
-                {
-                    // 兜底：拖拽进行中收到右键（左键 capture 时一般不触发，但保险）。
-                    start = null;
-                    canvas.ReleasePointerCapture(args.Pointer);
-                }
-
-                if (selection.Visibility == Visibility.Visible)
-                {
-                    selection.Visibility = Visibility.Collapsed;
-                    selection.Width = 0;
-                    selection.Height = 0;
-                }
-                else
-                {
-                    completion.TrySetResult(null);
-                    overlay.Close();
-                }
-                args.Handled = true;
-                return;
-            }
-
-            if (!properties.IsLeftButtonPressed)
-            {
-                return;
-            }
-
-            start = args.GetCurrentPoint(canvas).Position;
-            selection.Visibility = Visibility.Visible;
-            selection.Width = 0;
-            selection.Height = 0;
-            canvas.CapturePointer(args.Pointer);
-            args.Handled = true;
-        };
-        canvas.PointerMoved += (_, args) =>
-        {
-            if (start is not { } origin || !args.GetCurrentPoint(canvas).Properties.IsLeftButtonPressed)
-            {
-                return;
-            }
-
-            UpdateSelection(selection, origin, args.GetCurrentPoint(canvas).Position);
-        };
-        canvas.PointerReleased += (_, args) =>
-        {
-            if (start is not { } origin)
-            {
-                return;
-            }
-
-            Windows.Foundation.Point end = args.GetCurrentPoint(canvas).Position;
-            UpdateSelection(selection, origin, end);
-            start = null;
-            canvas.ReleasePointerCapture(args.Pointer);
-            double left = Math.Min(origin.X, end.X);
-            double top = Math.Min(origin.Y, end.Y);
-            double width = Math.Abs(end.X - origin.X);
-            double height = Math.Abs(end.Y - origin.Y);
-            if (width >= 4 && height >= 4 && canvas.ActualWidth > 0 && canvas.ActualHeight > 0)
-            {
-                completion.TrySetResult(ScaleSelection(
-                    desktop,
-                    left,
-                    top,
-                    width,
-                    height,
-                    canvas.ActualWidth,
-                    canvas.ActualHeight));
-                overlay.Close();
-            }
-            else
-            {
-                // 选区太小：清空并留在遮罩等待重新框选，替代原来的静默保留。
-                selection.Visibility = Visibility.Collapsed;
-                selection.Width = 0;
-                selection.Height = 0;
-            }
-        };
-        var keyboardSink = new Button
-        {
-            Width = 1,
-            Height = 1,
-            Opacity = 0,
-            IsTabStop = true,
-            HorizontalAlignment = HorizontalAlignment.Left,
-            VerticalAlignment = VerticalAlignment.Top,
-        };
-        root.Children.Add(keyboardSink);
-        root.KeyDown += (_, args) =>
-        {
-            if (args.Key == VirtualKey.Escape)
-            {
-                completion.TrySetResult(null);
-                overlay.Close();
-                args.Handled = true;
-            }
-        };
-        overlay.Closed += (_, _) => completion.TrySetResult(null);
-
-        OverlappedPresenter presenter = OverlappedPresenter.Create();
-        presenter.SetBorderAndTitleBar(false, false);
-        presenter.IsAlwaysOnTop = true;
-        presenter.IsResizable = false;
-        overlay.AppWindow.SetPresenter(presenter);
-        overlay.AppWindow.IsShownInSwitchers = false;
-        overlay.AppWindow.MoveAndResize(new RectInt32(
-            desktop.X,
-            desktop.Y,
-            desktop.Width,
-            desktop.Height));
-        overlay.Activate();
-        keyboardSink.Focus(FocusState.Programmatic);
-
-        using CancellationTokenRegistration registration = cancellationToken.Register(() =>
-            root.DispatcherQueue.TryEnqueue(() =>
-            {
-                completion.TrySetCanceled(cancellationToken);
-                overlay.Close();
-            }));
-        return await completion.Task;
+      Fill = new SolidColorBrush(Windows.UI.Color.FromArgb(90, 0, 0, 0)),
+      IsHitTestVisible = false,
+    }).ToArray();
+    foreach (Rectangle shade in shades) canvas.Children.Add(shade);
+    var selection = new Rectangle
+    {
+      Stroke = new SolidColorBrush(Microsoft.UI.Colors.White),
+      StrokeThickness = 1,
+      IsHitTestVisible = false,
+      Visibility = Visibility.Collapsed,
+    };
+    canvas.Children.Add(selection);
+    Rectangle[] handles = Enumerable.Range(0, 8).Select(_ => new Rectangle
+    {
+      Width = 7,
+      Height = 7,
+      Fill = new SolidColorBrush(Microsoft.UI.Colors.White),
+      IsHitTestVisible = false,
+      Visibility = Visibility.Collapsed,
+    }).ToArray();
+    foreach (Rectangle handle in handles) canvas.Children.Add(handle);
+    var sizeLabel = new TextBlock();
+    var help = new TextBlock
+    {
+      Text = "拖动框选；选区内拖动移动，边缘拖动缩放\nEnter 识别 · 右键返回 / 退出 · Esc 退出 · 方向键微调 · Shift ×10 · Ctrl+方向键缩放\nCtrl+Z 撤销 · Ctrl+Y / Ctrl+Shift+Z 重做 · M 放大镜 · Ctrl+C 复制色号",
+      IsHitTestVisible = false,
+    };
+    var toolbar = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+    var panel = new StackPanel { Spacing = 8 };
+    panel.Children.Add(help);
+    panel.Children.Add(sizeLabel);
+    panel.Children.Add(toolbar);
+    var panelBorder = new Border
+    {
+      Background = new SolidColorBrush(Windows.UI.Color.FromArgb(240, 24, 24, 24)),
+      Padding = new Thickness(12),
+      CornerRadius = new CornerRadius(8),
+      Child = panel,
+    };
+    canvas.Children.Add(panelBorder);
+    Button AddButton(string text, Action action)
+    {
+      var button = new Button { Content = text };
+      button.Click += (_, _) => action();
+      toolbar.Children.Add(button);
+      return button;
     }
+    void Finish(bool accept)
+    {
+      if (completion.Task.IsCompleted || (accept && !session.CanConfirm)) return;
+      PhysicalRectangle? result = accept && session.Selection is { } rect
+          ? rect with { X = rect.X + desktop.X, Y = rect.Y + desktop.Y } : null;
+      completion.TrySetResult(result);
+      overlay.Close();
+    }
+    void Back()
+    {
+      if (session.Back()) Finish(false);
+      canvas.ReleasePointerCaptures();
+    }
+    Button confirm = AddButton("识别 (Enter)", () => Finish(true));
+    Button undo = AddButton("撤销", session.Undo);
+    Button redo = AddButton("重做", session.Redo);
+    AddButton("重选", () => { if (session.Selection is not null || session.IsDragging) Back(); });
+    AddButton("退出 (Esc)", () => Finish(false));
+    foreach (Button button in toolbar.Children.OfType<Button>()) button.Click += (_, _) => Render();
 
+    var magnifierCanvas = new Canvas { Width = 99, Height = 99 };
+    SolidColorBrush[] pixelBrushes = Enumerable.Range(0, 121).Select(_ => new SolidColorBrush()).ToArray();
+    for (int i = 0; i < pixelBrushes.Length; i++)
+    {
+      var pixel = new Rectangle { Width = 9, Height = 9, Fill = pixelBrushes[i] };
+      Canvas.SetLeft(pixel, i % 11 * 9);
+      Canvas.SetTop(pixel, i / 11 * 9);
+      magnifierCanvas.Children.Add(pixel);
+    }
+    var crosshair = new Rectangle
+    {
+      Width = 11,
+      Height = 11,
+      Stroke = new SolidColorBrush(Microsoft.UI.Colors.Red),
+      StrokeThickness = 2,
+    };
+    Canvas.SetLeft(crosshair, 44);
+    Canvas.SetTop(crosshair, 44);
+    magnifierCanvas.Children.Add(crosshair);
+    var colorLabel = new TextBlock();
+    var magnifierPanel = new StackPanel { Spacing = 4 };
+    magnifierPanel.Children.Add(magnifierCanvas);
+    magnifierPanel.Children.Add(colorLabel);
+    var magnifier = new Border
+    {
+      Child = magnifierPanel,
+      Padding = new Thickness(8),
+      IsHitTestVisible = false,
+      Background = new SolidColorBrush(Windows.UI.Color.FromArgb(245, 24, 24, 24)),
+      Visibility = Visibility.Collapsed,
+    };
+    canvas.Children.Add(magnifier);
+    bool showMagnifier = true;
+    string? colorHex = null;
+    Windows.Foundation.Point? lastPoint = null;
+    PhysicalPoint ToPhysical(Windows.Foundation.Point point) => new(
+        (int)Math.Round(point.X * desktop.Width / Math.Max(1, canvas.ActualWidth)),
+        (int)Math.Round(point.Y * desktop.Height / Math.Max(1, canvas.ActualHeight)));
+    void UpdateMagnifier(Windows.Foundation.Point point)
+    {
+      lastPoint = point;
+      PhysicalPoint location = ToPhysical(point);
+      int x = Math.Clamp(location.X, 0, desktop.Width - 1);
+      int y = Math.Clamp(location.Y, 0, desktop.Height - 1);
+      for (int i = 0; i < pixelBrushes.Length; i++)
+      {
+        int px = Math.Clamp(x + i % 11 - 5, 0, desktop.Width - 1);
+        int py = Math.Clamp(y + i / 11 - 5, 0, desktop.Height - 1);
+        int offset = (py * desktop.Width + px) * 4;
+        pixelBrushes[i].Color = Windows.UI.Color.FromArgb(255, pixels[offset + 2], pixels[offset + 1], pixels[offset]);
+      }
+      Windows.UI.Color color = pixelBrushes[60].Color;
+      colorHex = $"#{color.R:X2}{color.G:X2}{color.B:X2}";
+      colorLabel.Text = $"{desktop.X + x}, {desktop.Y + y}\n{colorHex}\nRGB {color.R}, {color.G}, {color.B}";
+      magnifier.Visibility = showMagnifier ? Visibility.Visible : Visibility.Collapsed;
+      Canvas.SetLeft(magnifier, Math.Max(0, point.X + 24 + 180 > canvas.ActualWidth ? point.X - 180 : point.X + 24));
+      Canvas.SetTop(magnifier, Math.Max(0, point.Y + 24 + 190 > canvas.ActualHeight ? point.Y - 190 : point.Y + 24));
+    }
+    void Place(Rectangle rectangle, double x, double y, double w, double h)
+    {
+      Canvas.SetLeft(rectangle, x); Canvas.SetTop(rectangle, y);
+      rectangle.Width = Math.Max(0, w); rectangle.Height = Math.Max(0, h);
+    }
+    void Render()
+    {
+      double w = canvas.ActualWidth, h = canvas.ActualHeight;
+      double sx = w / desktop.Width, sy = h / desktop.Height;
+      PhysicalRectangle? rect = session.Selection;
+      double left = rect?.X * sx ?? 0, top = rect?.Y * sy ?? 0;
+      double right = rect?.Right * sx ?? 0, bottom = rect?.Bottom * sy ?? 0;
+      Place(shades[0], 0, 0, w, top);
+      Place(shades[1], 0, top, left, bottom - top);
+      Place(shades[2], right, top, w - right, bottom - top);
+      Place(shades[3], 0, bottom, w, h - bottom);
+      selection.Visibility = rect is null ? Visibility.Collapsed : Visibility.Visible;
+      Place(selection, left, top, right - left, bottom - top);
+      (double X, double Y)[] points = [(left, top), ((left + right) / 2, top), (right, top),
+                (left, (top + bottom) / 2), (right, (top + bottom) / 2),
+                (left, bottom), ((left + right) / 2, bottom), (right, bottom)];
+      for (int i = 0; i < handles.Length; i++)
+      {
+        handles[i].Visibility = rect is null ? Visibility.Collapsed : Visibility.Visible;
+        Canvas.SetLeft(handles[i], points[i].X - 3.5);
+        Canvas.SetTop(handles[i], points[i].Y - 3.5);
+      }
+      sizeLabel.Text = rect is { } r ? $"{r.Width} × {r.Height} px · 调整完成后按 Enter 识别" : "请选择区域";
+      confirm.IsEnabled = session.CanConfirm;
+      undo.IsEnabled = session.CanUndo;
+      redo.IsEnabled = session.CanRedo;
+      panelBorder.Measure(new Windows.Foundation.Size(w, h));
+      double pw = panelBorder.DesiredSize.Width, ph = panelBorder.DesiredSize.Height;
+      Canvas.SetLeft(panelBorder, Math.Clamp(left, 0, Math.Max(0, w - pw)));
+      Canvas.SetTop(panelBorder, rect is null ? Math.Max(0, h - ph - 20) :
+          bottom + ph + 12 <= h ? bottom + 12 : Math.Max(0, top - ph - 12));
+      panelBorder.Visibility = session.IsDragging ? Visibility.Collapsed : Visibility.Visible;
+    }
+    canvas.PointerPressed += (_, args) =>
+    {
+      if (!args.GetCurrentPoint(canvas).Properties.IsLeftButtonPressed || args.Handled) return;
+      // Child buttons and the help panel must not start a new selection.
+      if (args.OriginalSource is DependencyObject source)
+      {
+        for (DependencyObject? node = source; node is not null; node = VisualTreeHelper.GetParent(node))
+          if (node == panelBorder) return;
+      }
+      session.Begin(ToPhysical(args.GetCurrentPoint(canvas).Position),
+                  Math.Max(1, (int)Math.Ceiling(6 * desktop.Width / Math.Max(1, canvas.ActualWidth))));
+      canvas.CapturePointer(args.Pointer);
+      Render();
+      args.Handled = true;
+    };
+    root.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, args) =>
+    {
+      if (!args.GetCurrentPoint(canvas).Properties.IsRightButtonPressed) return;
+      Back(); Render(); args.Handled = true;
+    }), true);
+    canvas.PointerMoved += (_, args) =>
+    {
+      Windows.Foundation.Point point = args.GetCurrentPoint(canvas).Position;
+      session.Move(ToPhysical(point));
+      UpdateMagnifier(point);
+      Render();
+    };
+    canvas.PointerReleased += (_, args) =>
+    {
+      if (!session.IsDragging || args.GetCurrentPoint(canvas).Properties.IsLeftButtonPressed) return;
+      session.End(ToPhysical(args.GetCurrentPoint(canvas).Position));
+      canvas.ReleasePointerCapture(args.Pointer);
+      Render(); args.Handled = true;
+    };
+    canvas.PointerCaptureLost += (_, _) => { session.CancelDrag(); Render(); };
+    canvas.PointerCanceled += (_, _) => { session.CancelDrag(); Render(); };
+    var keyboardSink = new Button
+    {
+      Width = 1,
+      Height = 1,
+      Opacity = 0,
+      IsTabStop = true,
+      HorizontalAlignment = HorizontalAlignment.Left,
+      VerticalAlignment = VerticalAlignment.Top
+    };
+    root.Children.Add(keyboardSink);
+    root.AddHandler(UIElement.PreviewKeyDownEvent, new KeyEventHandler((_, args) =>
+        {
+          bool control = (Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control) & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0;
+          bool shift = (Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift) & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0;
+          int step = shift ? 10 : 1;
+          switch (args.Key)
+          {
+            case VirtualKey.Escape: Finish(false); break;
+            case VirtualKey.Enter: Finish(true); break;
+            case VirtualKey.Z when control && shift: session.Redo(); break;
+            case VirtualKey.Z when control: session.Undo(); break;
+            case VirtualKey.Y when control: session.Redo(); break;
+            case VirtualKey.Left: session.Adjust(-step, 0, control); break;
+            case VirtualKey.Right: session.Adjust(step, 0, control); break;
+            case VirtualKey.Up: session.Adjust(0, -step, control); break;
+            case VirtualKey.Down: session.Adjust(0, step, control); break;
+            case VirtualKey.M when !control:
+              showMagnifier = !showMagnifier;
+              if (lastPoint is { } point) UpdateMagnifier(point);
+              break;
+            case VirtualKey.C when control && colorHex is not null:
+              try
+              {
+                var data = new Windows.ApplicationModel.DataTransfer.DataPackage();
+                data.SetText(colorHex);
+                Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(data);
+                colorLabel.Text += "\n已复制";
+              }
+              catch (COMException) { colorLabel.Text += "\n剪贴板暂不可用"; }
+              break;
+            default: return;
+          }
+          Render(); args.Handled = true;
+        }), true);
+    canvas.SizeChanged += (_, _) => Render();
+    overlay.Content = root;
+    overlay.Closed += (_, _) => completion.TrySetResult(null);
+    OverlappedPresenter presenter = OverlappedPresenter.Create();
+    presenter.SetBorderAndTitleBar(false, false);
+    presenter.IsAlwaysOnTop = true;
+    presenter.IsResizable = false;
+    overlay.AppWindow.SetPresenter(presenter);
+    overlay.AppWindow.IsShownInSwitchers = false;
+    overlay.AppWindow.MoveAndResize(new RectInt32(desktop.X, desktop.Y, desktop.Width, desktop.Height));
+    overlay.Activate();
+    keyboardSink.Focus(FocusState.Programmatic);
+    using CancellationTokenRegistration registration = cancellationToken.Register(() =>
+    root.DispatcherQueue.TryEnqueue(() => { completion.TrySetCanceled(cancellationToken); overlay.Close(); }));
+    return await completion.Task;
+  }
     public static PhysicalRectangle ScaleSelection(
         PhysicalRectangle desktop,
         double left,
@@ -316,17 +416,6 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow) : IScreenRegionPi
         int right = desktop.X + (int)Math.Round((left + width) * desktop.Width / canvasWidth);
         int bottom = desktop.Y + (int)Math.Round((top + height) * desktop.Height / canvasHeight);
         return new PhysicalRectangle(x, y, Math.Max(1, right - x), Math.Max(1, bottom - y));
-    }
-
-    private static void UpdateSelection(
-        Rectangle selection,
-        Windows.Foundation.Point start,
-        Windows.Foundation.Point end)
-    {
-        Canvas.SetLeft(selection, Math.Min(start.X, end.X));
-        Canvas.SetTop(selection, Math.Min(start.Y, end.Y));
-        selection.Width = Math.Abs(end.X - start.X);
-        selection.Height = Math.Abs(end.Y - start.Y);
     }
 
     private static byte[] CropBgra(

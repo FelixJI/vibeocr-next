@@ -608,6 +608,8 @@ public static class WorkbenchBridgeCodec
       settings.Backend,
       settings.StartupEnabled,
       settings.Hotkey,
+      settings.HotkeyStatus,
+      settings.PendingHotkey,
       sources = settings.Sources ?? [],
       settings.PendingBackend,
       settings.CanSwitchBackend,

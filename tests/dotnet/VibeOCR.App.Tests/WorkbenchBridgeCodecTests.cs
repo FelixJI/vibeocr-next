@@ -9,6 +9,18 @@ namespace VibeOCR.App.Tests;
 public sealed class WorkbenchBridgeCodecTests
 {
   [Fact]
+  public void SettingsStateSeparatesConfiguredHotkeyFromFailedRegistration()
+  {
+    var state = new SettingsWorkbenchState(WorkbenchTheme.Light, false, "settings.ready", "cpu", false, "",
+      HotkeyStatus: "快捷键冲突：已占用", PendingHotkey: "Ctrl+Alt+Q");
+    using JsonDocument json = JsonDocument.Parse(WorkbenchBridgeCodec.SerializeState(Guid.NewGuid(),
+      new WorkbenchStateEnvelope(1, "settings", WorkbenchStateChange.Replace, state)));
+    JsonElement settings = json.RootElement.GetProperty("payload").GetProperty("state");
+    Assert.Equal("", settings.GetProperty("hotkey").GetString());
+    Assert.Equal("Ctrl+Alt+Q", settings.GetProperty("pendingHotkey").GetString());
+    Assert.Contains("已占用", settings.GetProperty("hotkeyStatus").GetString());
+  }
+  [Fact]
   public void ParseCommandProducesTypedNavigateCommand()
   {
     Guid sessionId = Guid.NewGuid();

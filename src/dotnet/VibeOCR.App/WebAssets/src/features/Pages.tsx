@@ -1138,7 +1138,11 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
 export function SettingsPage({ viewState, actions }: FeatureProps) {
   const state = feature(viewState, "settings");
   const hostHotkey =
-    typeof state.hotkey === "string" ? state.hotkey : "Ctrl+Alt+Q";
+    typeof state.pendingHotkey === "string" && state.pendingHotkey
+      ? state.pendingHotkey
+      : typeof state.hotkey === "string"
+        ? state.hotkey
+        : "Ctrl+Alt+Q";
   const backend =
     typeof state.backend === "string" ? state.backend : "等待宿主同步";
   return (
@@ -1172,6 +1176,15 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             enabled={viewState.capabilities.includes("settings.shell")}
             actions={actions}
           />
+          <p role="status">
+            {typeof state.hotkeyStatus === "string" ? state.hotkeyStatus : ""}
+          </p>
+          <p>
+            当前生效：
+            {typeof state.hotkey === "string" && state.hotkey
+              ? state.hotkey
+              : "未注册"}
+          </p>
         </Panel>
         <Panel
           label="RUNTIME"
