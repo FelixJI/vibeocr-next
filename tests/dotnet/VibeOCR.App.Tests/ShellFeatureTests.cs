@@ -10,6 +10,29 @@ namespace VibeOCR.App.Tests;
 public sealed class ShellFeatureTests
 {
     [Fact]
+    public void StartupConflictDoesNotClaimAnActiveHotkeyAndAllowsSameKeyRetry()
+    {
+        var registrar = new FakeHotkeyRegistrar { Accept = false, Conflict = "已占用" };
+        var shell = new ShellViewModel(registrar, new FakeStartupRegistrar());
+        shell.InitializeHotkey();
+        Assert.Empty(shell.RegisteredHotkey);
+        Assert.Equal("Ctrl+Alt+Q", shell.PendingHotkey);
+        Assert.Contains("已占用", shell.HotkeyStatus);
+        registrar.Accept = true;
+        shell.ApplyHotkey();
+        Assert.Equal("Ctrl+Alt+Q", shell.RegisteredHotkey);
+        Assert.Equal("快捷键已更新", shell.HotkeyStatus);
+    }
+
+    [Fact]
+    public void StartupRegistersConfiguredShortcut()
+    {
+        var shell = new ShellViewModel(new FakeHotkeyRegistrar { Accept = true },
+            new FakeStartupRegistrar(), initialHotkey: "Ctrl+Shift+F8");
+        shell.InitializeHotkey();
+        Assert.Equal("Ctrl+Shift+F8", shell.RegisteredHotkey);
+    }
+    [Fact]
     public void ApplyHotkeyWithConflictLeavesRegisteredUnchanged()
     {
         var registrar = new FakeHotkeyRegistrar { Accept = false, Conflict = "已占用" };

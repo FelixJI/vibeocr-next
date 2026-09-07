@@ -264,7 +264,9 @@ public sealed record SettingsWorkbenchState(
   string PendingBackend = "cpu",
   bool CanSwitchBackend = false,
   IReadOnlyList<SettingsFeatureOptionState>? Features = null,
-  SettingsMaintenanceState? Maintenance = null) : WorkbenchState
+  SettingsMaintenanceState? Maintenance = null,
+  string HotkeyStatus = "",
+  string PendingHotkey = "") : WorkbenchState
 {
   public override string Scope => "settings";
 }

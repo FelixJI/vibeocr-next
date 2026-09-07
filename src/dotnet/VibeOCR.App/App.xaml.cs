@@ -282,13 +282,14 @@ public sealed partial class App : Application
         _hotkeyRegistrar = new WindowsHotkeyRegistrar(
             new GlobalHotkeyService(windowHandle: handle),
             layout);
-        _hotkeyRegistrar.Register(hotkey, out _);
+
         _shellViewModel = new ShellViewModel(
             _hotkeyRegistrar,
             new WindowsStartupRegistrar(layout.ProductEntry),
             () => _window!.AppWindow.Hide(),
             () => _window!.Close(),
             hotkey);
+        _shellViewModel.InitializeHotkey();
         _updateViewModel = new UpdateViewModel(
             VelopackUpdateCoordinator.Create(layout.ConfigFile, layout.ProbeWritableStateRoot),
             () => _window!.Close(),

@@ -53,6 +53,13 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         _pendingHotkey = initialHotkey;
     }
 
+    /// <summary>Register the configured shortcut without claiming a failed binding is active.</summary>
+    public void InitializeHotkey()
+    {
+        RegisteredHotkey = string.Empty;
+        ApplyHotkey();
+    }
+
     /// <summary>
     /// Apply the pending hotkey. A conflict (registrar returns false) surfaces
     /// a localized status and leaves the registered hotkey unchanged.
