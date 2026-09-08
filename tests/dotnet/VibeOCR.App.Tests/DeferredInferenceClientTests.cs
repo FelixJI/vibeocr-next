@@ -87,6 +87,65 @@ public sealed class DeferredInferenceClientTests
     }
 
     [Fact]
+    public async Task PendingStartupCallWaitsThenDelegatesAfterAttachAsync()
+    {
+        var deferred = new DeferredInferenceClient();
+        deferred.MarkStartupPending();
+
+        Task<Wire.Health> call = deferred.GetHealthAsync(CancellationToken.None);
+        Assert.False(call.IsCompleted);
+
+        deferred.Attach(new StubInferenceClient());
+        Wire.Health health = await call;
+
+        Assert.True(health.Ready);
+    }
+
+    [Fact]
+    public async Task StartupFailureReleasesPendingCallsAsync()
+    {
+        var deferred = new DeferredInferenceClient();
+        deferred.MarkStartupPending();
+        Task<Wire.Health> pending = deferred.GetHealthAsync(CancellationToken.None);
+
+        deferred.MarkStartupFailed(new InvalidOperationException("cold import timeout"));
+
+        InferenceClientNotAttachedException error = await Assert.ThrowsAsync<
+            InferenceClientNotAttachedException>(() => pending);
+        Assert.Contains("cold import timeout", error.Message);
+        // Startup is no longer pending: later calls fail fast again.
+        await Assert.ThrowsAsync<InferenceClientNotAttachedException>(
+            () => deferred.GetHealthAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ShutdownTokenCancelsPendingCallsAsync()
+    {
+        using var shutdown = new CancellationTokenSource();
+        var deferred = new DeferredInferenceClient(shutdown.Token);
+        deferred.MarkStartupPending();
+        Task<Wire.Health> pending = deferred.GetHealthAsync(CancellationToken.None);
+
+        shutdown.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+    }
+
+    [Fact]
+    public async Task AttachAfterStartupFailureServesCallsAgainAsync()
+    {
+        var deferred = new DeferredInferenceClient();
+        deferred.MarkStartupPending();
+        deferred.MarkStartupFailed(new InvalidOperationException("boom"));
+
+        deferred.Attach(new StubInferenceClient());
+
+        Assert.True(deferred.IsAttached);
+        Wire.Health health = await deferred.GetHealthAsync(CancellationToken.None);
+        Assert.True(health.Ready);
+    }
+
+    [Fact]
     public async Task DisposeAsyncDetachesAndDisposesInner()
     {
         var deferred = new DeferredInferenceClient();

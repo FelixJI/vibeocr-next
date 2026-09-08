@@ -32,8 +32,8 @@ public sealed partial class App : Application
     /// v2 supervisor client (deferred until the supervisor process is started).
     /// Attached after the Supervisor process reports a v2 ready envelope.
     /// </summary>
-    private readonly DeferredInferenceClient _inferenceGateway = new();
-    private readonly DeferredQrCodeClient _qrCodeGateway = new();
+    private readonly DeferredInferenceClient _inferenceGateway;
+    private readonly DeferredQrCodeClient _qrCodeGateway;
     private readonly SemaphoreSlim _supervisorLifecycle = new(1, 1);
     private readonly CancellationTokenSource _applicationShutdown = new();
     private readonly Dictionary<string, double> _startupMilestones = [];
@@ -67,6 +67,9 @@ public sealed partial class App : Application
     {
         UnhandledException += OnUnhandledException;
         InitializeComponent();
+        // 网关等待 Supervisor 启动时以应用关停令牌兜底，避免退出时挂起。
+        _inferenceGateway = new DeferredInferenceClient(_applicationShutdown.Token);
+        _qrCodeGateway = new DeferredQrCodeClient(_applicationShutdown.Token);
     }
 
     private void OnUnhandledException(
@@ -215,7 +218,8 @@ public sealed partial class App : Application
             throw new InvalidOperationException("Desktop shell is unavailable."),
           () => _updateViewModel ??
             throw new InvalidOperationException("Update service is unavailable."),
-          _windowLayoutStore);
+          _windowLayoutStore,
+          () => _inferenceGateway.IsAttached);
         _window.AppWindow.Closing += OnAppWindowClosing;
         _window.Closed += OnWindowClosedFallback;
         _window.Activate();
@@ -242,6 +246,10 @@ public sealed partial class App : Application
             // QrCodeHttpClient into the deferred gateways so every ViewModel's
             // v2 calls stop throwing. Fire-and-forget: the window is already
             // interactive; the diagnostics panel reflects Connecting → Ready.
+            // 启动尝试期间网关调用等待 Attach 而不是立即失败，窗口早于后端
+            // 就绪期间触发的命令得以完成。
+            _inferenceGateway.MarkStartupPending();
+            _qrCodeGateway.MarkStartupPending();
             _ = ConnectSupervisorAfterFirstWindowAsync(layout, diagnostics);
         }
 
@@ -407,6 +415,10 @@ public sealed partial class App : Application
         await _supervisorLifecycle.WaitAsync();
         try
         {
+            // Recovery reuses this entry point; re-announce the attempt so
+            // calls crossing the detach gap wait for this reconnect.
+            _inferenceGateway.MarkStartupPending();
+            _qrCodeGateway.MarkStartupPending();
             IRuntimeInstallerClient installer = _runtimeInstaller
                 ?? throw new InvalidOperationException("Runtime Installer is unavailable.");
             var maintenanceProgress = new Progress<Host.RuntimeMaintenanceEvent>(
@@ -484,6 +496,9 @@ public sealed partial class App : Application
         }
         catch (Exception error)
         {
+            // 释放等待本次启动尝试的网关调用，使其携带启动失败原因返回。
+            _inferenceGateway.MarkStartupFailed(error);
+            _qrCodeGateway.MarkStartupFailed(error);
             AppLog.Error("Supervisor connection failed", error);
             await DisconnectSupervisorResourcesAsync();
             diagnostics.UpdateSupervisor(new SupervisorHealth(
