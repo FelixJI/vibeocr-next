@@ -1,10 +1,14 @@
+using System.Text.Json;
 using VibeOCR.App.Features.Maintenance;
 using VibeOCR.App.Features.QrCode;
 using VibeOCR.App.Features.Recognition;
+using VibeOCR.App.Features.Settings;
 using VibeOCR.App.Features.Update;
+using VibeOCR.App.Inference;
 using VibeOCR.App.ViewModels;
 using VibeOCR.App.Web;
 using VibeOCR.App.Workbench;
+using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 using Xunit;
@@ -186,6 +190,67 @@ public sealed class DesktopWorkbenchCommandHandlerTests
   }
 
   [Fact]
+  public async Task RecognitionDuringSupervisorStartupWaitsAndCompletesAfterAttach()
+  {
+    string resourceRoot = Path.Combine(
+      Path.GetTempPath(),
+      $"vibeocr-handler-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      var deferred = new DeferredInferenceClient();
+      deferred.MarkStartupPending();
+      var inputs = new SignallingInputService();
+      var recognition = new RecognitionViewModel(deferred, inputs);
+      var settings = new SettingsViewModel(deferred);
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        () => recognition,
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => settings,
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker,
+        resourceRoot,
+        static () => 0,
+        annotationStore,
+        inferenceAttached: () => deferred.IsAttached);
+      var terminal = new TaskCompletionSource<RecognitionWorkbenchState>(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+      handler.StateChanged += state =>
+      {
+        if (state is RecognitionWorkbenchState { IsBusy: false } final)
+        {
+          terminal.TrySetResult(final);
+        }
+      };
+
+      WorkbenchCommandOutcome started = await handler.ExecuteAsync(
+        new SelectRecognitionImageCommand(),
+        TestContext.Current.CancellationToken);
+      Assert.True(Assert.IsType<RecognitionWorkbenchState>(Assert.Single(started.States))
+        .IsBusy);
+
+      // 后台识别在启动窗口内采集输入并在网关处等待 Attach，而不是失败。
+      await inputs.Captured.Task.WaitAsync(
+        TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      deferred.Attach(new CompletedRecognitionInferenceClient());
+
+      RecognitionWorkbenchState finalState = await terminal.Task.WaitAsync(
+        TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+      Assert.Equal("recognition.completed", finalState.StatusCode);
+    }
+    finally
+    {
+      Directory.Delete(resourceRoot, recursive: true);
+    }
+  }
+
+  [Fact]
   public async Task RuntimeMaintenanceLeaseChangesArePublishedToUpdateWorkbenchState()
   {
     string resourceRoot = Path.Combine(
@@ -241,6 +306,84 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     {
       Directory.Delete(resourceRoot, recursive: true);
     }
+  }
+
+  /// <summary>Signals the moment an input is acquired so tests can assert
+  /// capture ordering against gateway attachment.</summary>
+  private sealed class SignallingInputService : IInputService
+  {
+    public TaskCompletionSource Captured { get; } = new(
+      TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public Task<RecognitionInput?> PickFileAsync(CancellationToken cancellationToken) => Acquire();
+
+    public Task<RecognitionInput?> ReadClipboardAsync(CancellationToken cancellationToken) => Acquire();
+
+    public Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken) => Acquire();
+
+    public Task<RecognitionInput?> ReadDroppedFileAsync(
+      string path, CancellationToken cancellationToken) => Acquire();
+
+    private Task<RecognitionInput?> Acquire()
+    {
+      Captured.TrySetResult();
+      return Task.FromResult<RecognitionInput?>(
+        new RecognitionInput([1, 2, 3, 4], "image/png", "file.png", "file"));
+    }
+  }
+
+  /// <summary>Attaches as a ready Supervisor whose first job completes with
+  /// raw text "late attach" on the first observe probe.</summary>
+  private sealed class CompletedRecognitionInferenceClient : InferenceClientStub
+  {
+    public override Task<JobRef> SubmitAsync(
+      SubmitRequest request,
+      IReadOnlyDictionary<string, SubmitUpload> uploads,
+      CancellationToken cancellationToken) => Task.FromResult(new JobRef
+      {
+        JobId = "job-late",
+        Items =
+        [
+          new JobItem
+          {
+            ItemId = "it-0",
+            ClientItemKey = request.Items[0].ClientItemKey,
+            Ordinal = 0,
+            DisplayName = request.Items[0].DisplayName,
+            State = ItemState.Queued,
+          },
+        ],
+      });
+
+    public override Task<JobUpdate> ObserveAsync(
+      string jobId,
+      int afterSequence,
+      CancellationToken cancellationToken) => Task.FromResult(new JobUpdate
+      {
+        Snapshot = new JobSnapshot
+        {
+          JobId = jobId,
+          Kind = JobKind.Recognition,
+          Priority = JobPriority.Interactive,
+          State = JobState.Completed,
+        },
+        Events = Array.Empty<StageEvent>(),
+        Outcomes =
+        [
+          new ItemOutcome
+          {
+            ItemId = "it-0",
+            State = ItemState.Succeeded,
+            Attempt = 1,
+            PayloadType = "ocr.v1",
+            Payload = new Dictionary<string, JsonElement>
+            {
+              ["raw_text"] = JsonSerializer.SerializeToElement("late attach"),
+            },
+          },
+        ],
+        ThroughSequence = afterSequence,
+      });
   }
 
   private sealed class BlockingQrCodeClient : IQrCodeClient

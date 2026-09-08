@@ -65,7 +65,8 @@ public sealed partial class MainWindow : Window
     Func<SettingsViewModel> settingsFactory,
     Func<ShellViewModel> shellFactory,
     Func<UpdateViewModel> updateFactory,
-    WindowLayoutStore layoutStore)
+    WindowLayoutStore layoutStore,
+    Func<bool>? inferenceAttached = null)
   {
     this.diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
     this.layout = layout ?? throw new ArgumentNullException(nameof(layout));
@@ -94,7 +95,8 @@ public sealed partial class MainWindow : Window
       resourceBroker,
       resourceRoot,
       () => WindowNative.GetWindowHandle(this),
-      annotationStore);
+      annotationStore,
+      inferenceAttached: inferenceAttached);
     application = new WorkbenchApplication(
       DesktopWorkbenchCommandHandler.Capabilities,
       WorkbenchRoute.Recognition,

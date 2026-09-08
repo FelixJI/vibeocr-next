@@ -161,6 +161,32 @@ public sealed class RecognitionViewModelSupervisorTests
     }
 
     [Fact]
+    public async Task PendingSupervisorStartupDefersSubmitButNotInputAcquisition()
+    {
+        // 回归契约：截图/剪贴板输入必须立即采集，只有提交在网关处等待
+        // Supervisor 启动完成——否则延迟启动期间截到的是就绪后的屏幕。
+        var deferred = new DeferredInferenceClient();
+        deferred.MarkStartupPending();
+        var inputs = new SignallingInputService();
+        var viewModel = new RecognitionViewModel(deferred, inputs);
+
+        Task run = viewModel.RecognizeViaSupervisorAsync(
+            ct => inputs.CaptureScreenAsync(ct),
+            CancellationToken.None);
+
+        await inputs.Captured.Task.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.False(deferred.IsAttached);
+        Assert.False(run.IsCompleted);
+
+        deferred.Attach(new FakeInferenceClient("late attach"));
+        await run.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        Assert.Equal("late attach", viewModel.ResultText);
+        Assert.Equal("识别完成", viewModel.Status);
+    }
+
+    [Fact]
     public async Task NullInputReturnsCancelSelection()
     {
         var viewModel = new RecognitionViewModel(new DeferredInferenceClient(), new StubInputService());
@@ -187,6 +213,30 @@ public sealed class RecognitionViewModelSupervisorTests
 
         public Task<RecognitionInput?> ReadDroppedFileAsync(string path, CancellationToken cancellationToken)
             => PickFileAsync(cancellationToken);
+    }
+
+    /// <summary>Signals the moment an input is acquired so tests can assert
+    /// capture ordering against gateway attachment.</summary>
+    private sealed class SignallingInputService : IInputService
+    {
+        public TaskCompletionSource Captured { get; } = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<RecognitionInput?> PickFileAsync(CancellationToken cancellationToken) => Acquire();
+
+        public Task<RecognitionInput?> ReadClipboardAsync(CancellationToken cancellationToken) => Acquire();
+
+        public Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken) => Acquire();
+
+        public Task<RecognitionInput?> ReadDroppedFileAsync(
+            string path, CancellationToken cancellationToken) => Acquire();
+
+        private Task<RecognitionInput?> Acquire()
+        {
+            Captured.TrySetResult();
+            return Task.FromResult<RecognitionInput?>(
+                new RecognitionInput([1, 2, 3, 4], "image/png", "shot.png", "screenshot"));
+        }
     }
 
     /// <summary>

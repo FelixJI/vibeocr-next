@@ -68,6 +68,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private readonly Func<nint> windowHandle;
   private readonly WorkbenchAnnotationStore annotationStore;
   private readonly IAnnotatedImagePlatform annotatedImagePlatform;
+  private readonly Func<bool>? inferenceAttached;
   private readonly List<string> generatedFiles = [];
   private readonly HashSet<Task> backgroundOperations = [];
   private readonly HashSet<int> selectedPdfPages = [];
@@ -102,7 +103,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     string resourceRoot,
     Func<nint> windowHandle,
     WorkbenchAnnotationStore annotationStore,
-    IAnnotatedImagePlatform? annotatedImagePlatform = null)
+    IAnnotatedImagePlatform? annotatedImagePlatform = null,
+    Func<bool>? inferenceAttached = null)
   {
     this.recognitionFactory = recognitionFactory ??
       throw new ArgumentNullException(nameof(recognitionFactory));
@@ -130,6 +132,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       throw new ArgumentNullException(nameof(annotationStore));
     this.annotatedImagePlatform = annotatedImagePlatform ??
       new AnnotatedImagePlatform(this.windowHandle);
+    this.inferenceAttached = inferenceAttached;
   }
 
   public IReadOnlyList<WorkbenchState> InitialStates =>
@@ -401,9 +404,28 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     try
     {
-      await EnsureSelectionLoadedAsync(cancellationToken);
+      bool deferredSelection = !await EnsureSelectionLoadedAsync(cancellationToken);
       SynchronizeRecognitionMode(requireUsable: true);
       RecognitionWorkbenchState state = await RunRecognitionAsync(action, cancellationToken);
+      if (deferredSelection)
+      {
+        // The run started before the Supervisor attached; its submit already
+        // waited for readiness, so the authoritative catalog can load now and
+        // the completion state carries the engine list.
+        try
+        {
+          await EnsureSelectionLoadedAsync(cancellationToken);
+          state = state with { Engines = RecognitionEngines() };
+        }
+        catch (OperationCanceledException)
+        {
+          throw;
+        }
+        catch (Exception)
+        {
+          // 本次识别已完成；目录补载失败只影响引擎列表，不推翻结果。
+        }
+      }
       if (generation == Volatile.Read(ref recognitionGeneration))
       {
         StateChanged?.Invoke(state);
@@ -1074,12 +1096,26 @@ public sealed class DesktopWorkbenchCommandHandler :
     recognition.SetRecognitionMode(Resolve(recognition.TaskEngine));
   }
 
-  private async Task EnsureSelectionLoadedAsync(CancellationToken cancellationToken)
+  /// <summary>
+  /// Load the authoritative runtime selection catalog. While the Supervisor
+  /// client is unattached the load is skipped: bootstrap must not block the
+  /// window, and a recognition run must capture screenshot/clipboard input
+  /// immediately — cold start has no cached catalog and therefore no engine
+  /// override, so the default pipeline stays authoritative while the submit
+  /// path waits for the Supervisor at the gateway. Returns whether the catalog
+  /// was (re)loaded.
+  /// </summary>
+  private async Task<bool> EnsureSelectionLoadedAsync(CancellationToken cancellationToken)
   {
     settings ??= settingsFactory();
+    if (inferenceAttached?.Invoke() == false)
+    {
+      return false;
+    }
     // Always cross SettingsViewModel's single-flight gate. A refresh may be
     // replacing an older snapshot even while Selection remains non-null.
     await settings.LoadSelectionAsync(cancellationToken);
+    return true;
   }
 
   private async Task<SettingsWorkbenchState> InstallRuntimeAsync(
