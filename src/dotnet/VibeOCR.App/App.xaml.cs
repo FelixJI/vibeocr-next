@@ -427,6 +427,9 @@ public sealed partial class App : Application
                 installer,
                 maintenanceProgress,
                 _applicationShutdown.Token);
+            // T4 记录 runtime ensure 完成：与 T5（Supervisor ready envelope）
+            // 的差值把启动窗口分解为 installer 阶段与 Supervisor 进程阶段。
+            RecordMilestone(diagnostics, "T4", _startup.Elapsed);
             string logPath = Path.Combine(layout.DataRoot, "supervisor.log");
             string token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
             bool injectSoakCrash =
@@ -449,7 +452,6 @@ public sealed partial class App : Application
             _supervisorProcess = process;
             SupervisorReadyEnvelope ready = await process.StartAsync(_applicationShutdown.Token);
 
-            RecordMilestone(diagnostics, "T4", _startup.Elapsed);
             RecordMilestone(diagnostics, "T5", _startup.Elapsed);
 
             // Construct v2 clients and attach to the deferred gateways.
