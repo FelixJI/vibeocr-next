@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.2
+
+### Features
+
+- **screenshot:** 完善截图交互与快捷键状态反馈 (#65) (7860d71)
+
+### Bug Fixes
+
+- **app:** 拆分 T4/T5 里程碑以度量 runtime ensure 阶段 (#67) (3d58ed9)
+- **app:** 修复 Supervisor 启动期间识别命令未等待即失败 (#66) (83a2683)
+
 ## 0.5.1
 
 内部改进与维护。
