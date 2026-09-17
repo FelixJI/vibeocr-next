@@ -71,7 +71,7 @@
 - 每次 CI 使用最新正式 Backend 和其绑定的 Protocol runtime，支持 Protocol major 2 且 minor-compatible。编译 SDK 从 `Directory.Packages.props` 的单一精确 pin 读取并下载到 `.release-input/protocol-sdk`；运行时 Protocol 位于 `.release-input/protocol`。两者只要求同 major，不比较 minor 大小；新行为必须按调用点 capability 协商。NuGet 不得从任意外部 feed 获取 `VibeOCR.Runtime.*`。
 - 版本唯一事实源是 `repository.json`，`scripts/sync_version.py` 派生 App csproj。正式资产精确为 Velopack full nupkg、`VibeOCRNext-v{version}-win-x64.zip`、`releases.win.json`、component lock、component identities 与 SPDX SBOM 六项，项目 smoke 必须拒绝 Setup、sidecar 和任何额外资产。Portable 应用通过 Velopack feed 完成应用内下载、应用与 restart，不走 Setup 或手动下载桥接。
 - release publish 必须包含 WinUI `.xbf`/`.pri`、Bootstrapper、Velopack 运行时文件与组件 identity；否则可能出现 `XamlParseException` 或更新入口失效。修改 publish layout、WebAssets、runtime installer 参数或 capabilities 时执行真实打包验证。
-- Python/PowerShell/TOML 用 4 空格，C#/JSON/YAML 用 2 空格；Python Ruff/Node/.NET 版本以配置为准。不在文档中假定某个 clone 是否安装 Git hook，按工作开始时的实际检查执行，未安装时运行配置对应质量脚本。
+- Python/PowerShell/TOML 用 4 空格，C#/JSON/YAML 用 2 空格；Ruff/Node/.NET 版本以配置为准。不在文档中假定某个 clone 是否安装 Git hook，按工作开始时的实际检查执行，未安装时运行配置对应质量脚本。
 
 ## 六仓关系
 
@@ -79,3 +79,9 @@
 - Protocol v2 minor 兼容必须同时允许较旧 SDK 对接较新 Runtime，以及较新 SDK 对接较旧 Runtime；后者在 capability 缺失时必须隐藏、禁用或 fallback。Backend/Protocol major 改变必须显式升级兼容声明、locks 与客户端实现。
 - Backend 发版不级联触发本仓 CD；本仓下一次 PR/main CI 自然跟踪最新正式 Backend，CD 只发布本仓同一 CI 候选。
 - `file-toolbox`、`vibetable` 与本仓无运行时依赖，仅共享自动化治理。
+
+<!-- AI-FLOW-V4:START -->
+## AI Flow v4.0
+
+执行 AI Flow 任务前，读取 `.ai-flow/AGENTS.md`、`.ai-flow/AI_CODING_PLAYBOOK.md`、`.ai-flow/project.json` 和对应 GitHub Issue。工作流补充而不覆盖上面的工程规则；Issue-first、balanced、人工跨工具交接、Codex 只读 reviewer 子代理、人工合并。
+<!-- AI-FLOW-V4:END -->
