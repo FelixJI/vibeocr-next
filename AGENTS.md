@@ -79,3 +79,9 @@
 - Protocol v2 minor 兼容必须同时允许较旧 SDK 对接较新 Runtime，以及较新 SDK 对接较旧 Runtime；后者在 capability 缺失时必须隐藏、禁用或 fallback。Backend/Protocol major 改变必须显式升级兼容声明、locks 与客户端实现。
 - Backend 发版不级联触发本仓 CD；本仓下一次 PR/main CI 自然跟踪最新正式 Backend，CD 只发布本仓同一 CI 候选。
 - `file-toolbox`、`vibetable` 与本仓无运行时依赖，仅共享自动化治理。
+
+<!-- AI-FLOW-V4:START -->
+## AI Flow v4.0
+
+执行 AI Flow 任务前，读取 `.ai-flow/AGENTS.md`、`.ai-flow/AI_CODING_PLAYBOOK.md`、`.ai-flow/project.json` 和对应 GitHub Issue。工作流补充而不覆盖上面的工程规则；Issue-first、balanced、人工跨工具交接、Codex 只读 reviewer 子代理、人工合并。
+<!-- AI-FLOW-V4:END -->
