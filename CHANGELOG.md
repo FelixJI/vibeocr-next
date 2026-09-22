@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0
+
+### Features
+
+- **runtime:** 贯通安装计划确认与独立维护状态 (#75) (ff3c390)
+
 ## 0.5.2
 
 ### Features
