@@ -234,6 +234,13 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
                 double.IsFinite(measured) && measured >= 0)
                 parts.Add($"{label}：{measured.ToString("0.###", CultureInfo.InvariantCulture)}");
         }
+        foreach ((string key, string label) in new[] { ("package", "依赖包"), ("step", "子步骤") })
+        {
+            if (arguments.TryGetValue(key, out JsonElement value) && value.ValueKind == JsonValueKind.String &&
+                value.GetString() is { Length: > 0 and <= 120 } identifier &&
+                identifier.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.'))
+                parts.Add($"{label}：{identifier}");
+        }
         return string.Join("；", parts);
     }
 

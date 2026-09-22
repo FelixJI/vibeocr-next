@@ -45,6 +45,26 @@ public sealed class RuntimeStatusViewModelTests
     }
 
     [Fact]
+    public void ProgressDetailsPreservePackageAndStepWithoutRawDiagnostics()
+    {
+        var model = new RuntimeStatusViewModel();
+        model.ApplyMaintenance(Maintenance(1, Host.RuntimeOperationState.Running) with
+        {
+            MessageArgs = new Dictionary<string, System.Text.Json.JsonElement>
+            {
+                ["package"] = System.Text.Json.JsonSerializer.SerializeToElement("paddlepaddle-gpu"),
+                ["step"] = System.Text.Json.JsonSerializer.SerializeToElement("runtime.download_package"),
+                ["elapsed_seconds"] = System.Text.Json.JsonSerializer.SerializeToElement("12.5"),
+                ["detail"] = System.Text.Json.JsonSerializer.SerializeToElement("https://example.invalid/private"),
+            },
+        });
+        Assert.Contains("paddlepaddle-gpu", model.ProgressDetail);
+        Assert.Contains("runtime.download_package", model.ProgressDetail);
+        Assert.Contains("12.5", model.ProgressDetail);
+        Assert.DoesNotContain("https://", model.ProgressDetail);
+    }
+
+    [Fact]
     public void UnknownByteTotalDoesNotBecomeStepCountOrPercentage()
     {
         var model = new RuntimeStatusViewModel();
