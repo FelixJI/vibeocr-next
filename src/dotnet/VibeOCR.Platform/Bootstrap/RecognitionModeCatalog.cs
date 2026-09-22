@@ -41,11 +41,7 @@ public sealed record RecognitionModeCatalog(IReadOnlyList<RecognitionModeOption>
         Wire.ExecutionPipelineId Pipeline,
         Wire.OcrEngineId? Engine,
         Wire.RecognitionModeProvisioning Provisioning,
-        Wire.RecognitionModeLifecycleKind LifecycleKind,
-        bool SupportsPreload,
-        bool SupportsTtl,
-        bool SupportsPinning,
-        bool SupportsRelease);
+        Wire.RecognitionModeLifecycleKind LifecycleKind);
 
     private static readonly IReadOnlyDictionary<Wire.RecognitionModeId, ExpectedMode> Expected =
         new Dictionary<Wire.RecognitionModeId, ExpectedMode>
@@ -55,15 +51,13 @@ public sealed record RecognitionModeCatalog(IReadOnlyList<RecognitionModeOption>
                 Wire.ExecutionPipelineId.OCR,
                 Wire.OcrEngineId.Rapidocr,
                 Wire.RecognitionModeProvisioning.BaseRuntime,
-                Wire.RecognitionModeLifecycleKind.Unmanaged,
-                false, false, false, false),
+                Wire.RecognitionModeLifecycleKind.Unmanaged),
             [Wire.RecognitionModeId.WindowsText] = Mode(
                 Wire.RecognitionModeFamily.Text,
                 Wire.ExecutionPipelineId.OCR,
                 Wire.OcrEngineId.Windows,
                 Wire.RecognitionModeProvisioning.OperatingSystem,
-                Wire.RecognitionModeLifecycleKind.Unmanaged,
-                false, false, false, false),
+                Wire.RecognitionModeLifecycleKind.Unmanaged),
             [Wire.RecognitionModeId.PaddleText] = Paddle(
                 Wire.RecognitionModeFamily.Text,
                 Wire.ExecutionPipelineId.OCR,
@@ -79,8 +73,7 @@ public sealed record RecognitionModeCatalog(IReadOnlyList<RecognitionModeOption>
                 Wire.ExecutionPipelineId.MinerU,
                 null,
                 Wire.RecognitionModeProvisioning.AdvancedComponent,
-                Wire.RecognitionModeLifecycleKind.ProcessKeepAlive,
-                false, true, false, true),
+                Wire.RecognitionModeLifecycleKind.ProcessKeepAlive),
             [Wire.RecognitionModeId.PaddleTable] = Paddle(
                 Wire.RecognitionModeFamily.Specialized,
                 Wire.ExecutionPipelineId.TABLERECOGNITION),
@@ -106,11 +99,7 @@ public sealed record RecognitionModeCatalog(IReadOnlyList<RecognitionModeOption>
                 descriptor.PipelineId != expected.Pipeline ||
                 descriptor.Engine != expected.Engine ||
                 descriptor.Provisioning != expected.Provisioning ||
-                descriptor.Lifecycle.Kind != expected.LifecycleKind ||
-                descriptor.Lifecycle.SupportsPreload != expected.SupportsPreload ||
-                descriptor.Lifecycle.SupportsTtl != expected.SupportsTtl ||
-                descriptor.Lifecycle.SupportsPinning != expected.SupportsPinning ||
-                descriptor.Lifecycle.SupportsRelease != expected.SupportsRelease)
+                descriptor.Lifecycle.Kind != expected.LifecycleKind)
             {
                 throw Invalid(
                     $"Recognition mode '{ModeId(descriptor.Id)}' violates its execution or lifecycle contract.");
@@ -123,6 +112,7 @@ public sealed record RecognitionModeCatalog(IReadOnlyList<RecognitionModeOption>
                     $"Recognition mode '{ModeId(descriptor.Id)}' has invalid supported options.");
             }
 
+            // Lifecycle support flags are negotiated Runtime capabilities, not fixed mode identity.
             result.Add(new RecognitionModeOption(
                 ModeId(descriptor.Id),
                 Family(descriptor.Family),
@@ -155,29 +145,20 @@ public sealed record RecognitionModeCatalog(IReadOnlyList<RecognitionModeOption>
             pipeline,
             engine,
             Wire.RecognitionModeProvisioning.AdvancedComponent,
-            Wire.RecognitionModeLifecycleKind.ModelResidency,
-            true, true, true, true);
+            Wire.RecognitionModeLifecycleKind.ModelResidency);
 
     private static ExpectedMode Mode(
         Wire.RecognitionModeFamily family,
         Wire.ExecutionPipelineId pipeline,
         Wire.OcrEngineId? engine,
         Wire.RecognitionModeProvisioning provisioning,
-        Wire.RecognitionModeLifecycleKind lifecycleKind,
-        bool supportsPreload,
-        bool supportsTtl,
-        bool supportsPinning,
-        bool supportsRelease) =>
+        Wire.RecognitionModeLifecycleKind lifecycleKind) =>
         new(
             family,
             pipeline,
             engine,
             provisioning,
-            lifecycleKind,
-            supportsPreload,
-            supportsTtl,
-            supportsPinning,
-            supportsRelease);
+            lifecycleKind);
 
     private static string ModeId(Wire.RecognitionModeId value) => value switch
     {

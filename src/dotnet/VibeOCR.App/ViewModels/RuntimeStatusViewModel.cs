@@ -105,6 +105,9 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
                 "等待检查")));
     }
 
+    public void ReportServicePausedForMaintenance() =>
+        ServiceStatus = "运行环境维护中，识别服务已暂停。";
+
     public void ReportServiceUnavailable()
     {
         ServiceStatus = "运行环境暂不可用，请重新检查或打开诊断与修复。";

@@ -774,7 +774,9 @@ public sealed partial class RuntimeInstallerClient : IRuntimeInstallerClient
                 await CancelAsync(
                     operationId,
                     $"cancel-{operationId}",
-                    sequence > 0 ? sequence : null,
+                    // Progress can advance while the command process starts. Cancel targets
+                    // the immutable operation id, not an optimistic snapshot revision.
+                    expectedSequence: null,
                     CancellationToken.None).ConfigureAwait(false);
             }
             catch (RuntimeInstallerException error) when (

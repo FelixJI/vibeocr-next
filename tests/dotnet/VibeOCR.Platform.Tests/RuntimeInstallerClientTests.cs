@@ -743,6 +743,7 @@ public sealed class RuntimeInstallerClientTests
             JsonElement command = Request(runner.StartInfos[1]);
             Assert.Equal("cancel", command.GetProperty("command").GetString());
             Assert.Equal("cancel-stable-op", command.GetProperty("command_id").GetString());
+            Assert.False(command.TryGetProperty("expected_sequence", out _));
             Assert.Equal(4, runner.StartInfos.Count);
             Assert.False(runner.OwnedToken.IsCancellationRequested);
         }
@@ -1253,12 +1254,12 @@ public sealed class RuntimeInstallerClientTests
             {
                 return Task.FromResult(new RuntimeInstallerProcessResult(
                     0,
-                    $$"""{"protocol_version":2,"ok":true,"request_kind":"observe","operation_id":"stable-op","snapshot":{"operation_id":"stable-op","sequence":3,"operation":"ensure","operation_state":"cancelled","phase":"install_profile","profile_id":"win-x64-cpu","updated_at":"2026-08-05T00:00:02Z"},"events":[{{MaintenanceEvent(1)}}],"oldest_sequence":1,"through_sequence":1,"more":true,"replay_expires_at":null}""",
+                    $$"""{"protocol_version":2,"ok":true,"request_kind":"observe","operation_id":"stable-op","snapshot":{"operation_id":"stable-op","sequence":3,"operation":"ensure","operation_state":"cancelled","phase":"install_profile","profile_id":"win-x64-cpu","updated_at":"2026-08-05T00:00:02Z"},"events":[{{MaintenanceEvent(2)}}],"oldest_sequence":1,"through_sequence":2,"more":true,"replay_expires_at":null}""",
                     string.Empty));
             }
             return Task.FromResult(new RuntimeInstallerProcessResult(
                 0,
-                $$"""{"protocol_version":2,"ok":true,"request_kind":"observe","operation_id":"stable-op","snapshot":{"operation_id":"stable-op","sequence":3,"operation":"ensure","operation_state":"cancelled","phase":"install_profile","profile_id":"win-x64-cpu","updated_at":"2026-08-05T00:00:02Z"},"events":[{{MaintenanceEvent(2)}},{{MaintenanceEvent(3)}}],"oldest_sequence":1,"through_sequence":3,"more":false,"replay_expires_at":null}""",
+                $$"""{"protocol_version":2,"ok":true,"request_kind":"observe","operation_id":"stable-op","snapshot":{"operation_id":"stable-op","sequence":3,"operation":"ensure","operation_state":"cancelled","phase":"install_profile","profile_id":"win-x64-cpu","updated_at":"2026-08-05T00:00:02Z"},"events":[{{MaintenanceEvent(3)}}],"oldest_sequence":1,"through_sequence":3,"more":false,"replay_expires_at":null}""",
                 string.Empty));
         }
 
@@ -1269,6 +1270,7 @@ public sealed class RuntimeInstallerClientTests
         {
             StartInfos.Add(startInfo);
             OwnedToken = cancellationToken;
+            standardOutputLine?.Invoke(MaintenanceEvent(1));
             Started.TrySetResult();
             return _operation.Task;
         }

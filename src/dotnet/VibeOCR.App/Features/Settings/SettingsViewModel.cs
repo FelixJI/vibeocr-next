@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using VibeOCR.App.ViewModels;
+using VibeOCR.App.Services;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
@@ -153,7 +154,11 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) Status = "已取消"; }
         catch (RuntimeSelectionException error) { if (generation == Volatile.Read(ref _generation)) Status = LocalizeSelection(error); }
         catch (InferenceClientException error) { if (generation == Volatile.Read(ref _generation)) Status = LocalizeV2(error.Code); }
-        catch (Exception) when (generation == Volatile.Read(ref _generation)) { Status = "Supervisor 已断开，请重试"; }
+        catch (Exception error) when (generation == Volatile.Read(ref _generation))
+        {
+            AppLog.Warn($"Settings refresh failed: {error.GetType().Name}: {error.Message}");
+            Status = "设置状态读取失败，请重试或打开诊断与修复。";
+        }
         finally { if (generation == Volatile.Read(ref _generation)) IsBusy = false; }
     }
 

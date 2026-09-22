@@ -20,6 +20,20 @@ public sealed class RuntimeStatusViewModelTests
     }
 
     [Fact]
+    public void PausedServiceDoesNotReplaceMaintenanceFailure()
+    {
+        var model = new RuntimeStatusViewModel();
+        model.ApplySnapshot(Ready());
+        model.ApplyMaintenance(Maintenance(8, Host.RuntimeOperationState.Failed));
+        model.ReportServicePausedForMaintenance();
+        Assert.Contains("已暂停", model.ServiceStatus);
+        Assert.Equal("运行时安装失败", model.Status);
+        model.ApplySnapshot(Ready());
+        Assert.Equal("运行时已就绪", model.ServiceStatus);
+        Assert.Equal("运行时安装失败", model.Status);
+    }
+
+    [Fact]
     public void ReplayedProgressCannotReplaceTerminalResult()
     {
         var model = new RuntimeStatusViewModel();

@@ -662,7 +662,11 @@ public sealed partial class App : Application
     {
         Interlocked.Exchange(ref _runtimeMaintenanceActive, 1);
         await _supervisorLifecycle.WaitAsync(cancellationToken);
-        try { await DisconnectSupervisorResourcesAsync(); }
+        try
+        {
+            await DisconnectSupervisorResourcesAsync();
+            _runtimeStatus.ReportServicePausedForMaintenance();
+        }
         finally { _supervisorLifecycle.Release(); }
     }
 
