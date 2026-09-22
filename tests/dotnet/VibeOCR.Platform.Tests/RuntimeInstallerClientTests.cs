@@ -12,6 +12,56 @@ namespace VibeOCR.Platform.Tests;
 public sealed class RuntimeInstallerClientTests
 {
     [Fact]
+    public void PublishedSdkReadsMeasuredDownloadProgressBeyondTwoGiB()
+    {
+        const string json = """{"unit":"bytes","current":3221225472,"total":4294967296}""";
+        Host.ProgressSnapshot? progress = JsonSerializer.Deserialize<Host.ProgressSnapshot>(json);
+        Assert.NotNull(progress);
+        Assert.Equal(3221225472L, (long)progress.Current);
+        Assert.Equal(4294967296L, (long?)progress.Total);
+    }
+
+    [Fact]
+    public async Task ConfirmedPlanCannotBeOverriddenByConfiguredAccelerator()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-plan-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string manifest = Path.Combine(root, "runtime-manifest.json");
+            await File.WriteAllTextAsync(manifest,
+                """{"capabilities":["runtime.maintenance.v2","runtime.install-plan.v1","runtime.capability-metadata.v1"]}""",
+                TestContext.Current.CancellationToken);
+            JsonNode envelope = JsonNode.Parse(V2LaunchEnvelope("ensure", "runtime.install-plan.v1"))!;
+            JsonNode snapshot = JsonNode.Parse(Snapshot(3))!;
+            snapshot["operation_state"] = "succeeded";
+            snapshot["plan_id"] = "plan-cuda";
+            envelope["maintenance"] = snapshot;
+            var runner = new StubRunner(new RuntimeInstallerProcessResult(0, envelope.ToJsonString(), ""));
+            var client = new RuntimeInstallerClient(Configuration() with { RuntimeManifest = manifest }, runner);
+            await client.ConfirmInstallAsync("plan-cuda", "stable-op", cancellationToken: TestContext.Current.CancellationToken);
+            JsonElement request = Request(Assert.IsType<ProcessStartInfo>(runner.LastStartInfo));
+            Assert.Equal("plan-cuda", request.GetProperty("plan_id").GetString());
+            Assert.Equal("stable-op", request.GetProperty("operation_id").GetString());
+            Assert.False(request.TryGetProperty("accelerator", out _));
+            Assert.False(request.TryGetProperty("install_component_ids", out _));
+            Assert.False(request.TryGetProperty("download_source_ids", out _));
+        }
+        finally { TestDirectory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public async Task OldRuntimeRejectsPreviewWithoutStartingAnInstaller()
+    {
+        var runner = LaunchRunner();
+        var client = new RuntimeInstallerClient(Configuration(), runner);
+        Assert.False(client.SupportsInstallPlan);
+        await Assert.ThrowsAsync<NotSupportedException>(() => client.PreviewInstallAsync(
+            new RuntimeInstallSelection { InstallComponentIds = [] }, "cpu", TestContext.Current.CancellationToken));
+        Assert.Null(runner.LastStartInfo);
+    }
+
+    [Fact]
     public async Task EnsureUsesOnlyInstallerLaunchContract()
     {
         var runner = new StubRunner(

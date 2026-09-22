@@ -271,6 +271,7 @@ public sealed class DesktopWorkbenchCommandHandler :
         SetRuntimeFeatureCommand feature => SetFeature(feature),
         SetTaskEngineCommand taskEngine => SetTaskEngine(taskEngine),
         InstallRuntimeCommand => await InstallRuntimeAsync(cancellationToken),
+        ConfirmRuntimeInstallCommand confirm => StartRuntimeInstall(confirm.PlanId, cancellationToken),
         CancelRuntimeMaintenanceCommand => CancelRuntimeMaintenance(),
         RetryRuntimeMaintenanceCommand => await RetryRuntimeMaintenanceAsync(
           cancellationToken),
@@ -997,7 +998,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private async Task<SettingsWorkbenchState> RefreshRuntimeAsync(
     CancellationToken cancellationToken)
   {
-    settings ??= settingsFactory();
+    settings ??= CreateSettings();
     await settings.LoadSnapshotAsync(cancellationToken);
     // 运行时目录加载后,识别页的引擎选择也需要最新目录。
     StateChanged?.Invoke(RecognitionState(false, "recognition.ready"));
@@ -1022,14 +1023,14 @@ public sealed class DesktopWorkbenchCommandHandler :
 
   private SettingsWorkbenchState SetStartup(SetStartupCommand command)
   {
-    settings ??= settingsFactory();
+    settings ??= CreateSettings();
     shell.Value.SetStartWithSystem(command.Enabled);
     return SettingsState(settings);
   }
 
   private SettingsWorkbenchState SetHotkey(SetHotkeyCommand command)
   {
-    settings ??= settingsFactory();
+    settings ??= CreateSettings();
     shell.Value.PendingHotkey = command.Hotkey;
     shell.Value.ApplyHotkey();
     return SettingsState(settings);
@@ -1039,7 +1040,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     SetDownloadSourceCommand command,
     CancellationToken cancellationToken)
   {
-    settings ??= settingsFactory();
+    settings ??= CreateSettings();
     await settings.SetSourceAsync(
       command.Kind,
       command.SourceId,
@@ -1049,14 +1050,14 @@ public sealed class DesktopWorkbenchCommandHandler :
 
   private SettingsWorkbenchState SetAccelerator(SetAcceleratorCommand command)
   {
-    settings ??= settingsFactory();
+    settings ??= CreateSettings();
     settings.SetPendingAccelerator(command.Accelerator);
     return SettingsState(settings);
   }
 
   private SettingsWorkbenchState SetFeature(SetRuntimeFeatureCommand command)
   {
-    settings ??= settingsFactory();
+    settings ??= CreateSettings();
     settings.SetFeatureEnabled(command.FeatureId, command.Enabled);
     return SettingsState(settings);
   }
@@ -1064,7 +1065,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private RecognitionWorkbenchState SetTaskEngine(SetTaskEngineCommand command)
   {
     recognition ??= recognitionFactory();
-    settings ??= settingsFactory();
+    settings ??= CreateSettings();
     RuntimeSelectionService? selection = settings.RecognitionSelection?.Catalog;
     if (string.IsNullOrWhiteSpace(command.Engine)) recognition.TaskEngine = null;
     else if (selection?.SupportsRecognitionModes is true)
@@ -1107,7 +1108,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   /// </summary>
   private async Task<bool> EnsureSelectionLoadedAsync(CancellationToken cancellationToken)
   {
-    settings ??= settingsFactory();
+    settings ??= CreateSettings();
     if (inferenceAttached?.Invoke() == false)
     {
       return false;
@@ -1118,17 +1119,47 @@ public sealed class DesktopWorkbenchCommandHandler :
     return true;
   }
 
+  private SettingsViewModel CreateSettings()
+  {
+    SettingsViewModel model = settingsFactory();
+    model.Maintenance.StateChanged += OnSettingsChanged;
+    model.RuntimeStatus.PropertyChanged += OnSettingsPropertyChanged;
+    model.PropertyChanged += OnSettingsPropertyChanged;
+    return model;
+  }
+
+  private void OnSettingsChanged()
+  {
+    if (Volatile.Read(ref disposed) == 0 && settings is not null)
+      StateChanged?.Invoke(SettingsState(settings));
+  }
+
+  private void OnSettingsPropertyChanged(object? sender, PropertyChangedEventArgs args) => OnSettingsChanged();
+
+  private SettingsWorkbenchState StartRuntimeInstall(string planId, CancellationToken cancellationToken)
+  {
+    settings ??= CreateSettings();
+    Track(CompleteRuntimeInstallAsync(settings, planId, cancellationToken));
+    return SettingsState(settings);
+  }
+
+  private async Task CompleteRuntimeInstallAsync(SettingsViewModel model, string planId, CancellationToken cancellationToken)
+  {
+    await model.ConfirmInstallAsync(planId, cancellationToken);
+    if (Volatile.Read(ref disposed) == 0) StateChanged?.Invoke(SettingsState(model));
+  }
+
   private async Task<SettingsWorkbenchState> InstallRuntimeAsync(
     CancellationToken cancellationToken)
   {
-    settings ??= settingsFactory();
-    await settings.InstallPendingAsync(cancellationToken);
+    settings ??= CreateSettings();
+    await settings.PreviewInstallAsync(cancellationToken);
     return SettingsState(settings);
   }
 
   private SettingsWorkbenchState CancelRuntimeMaintenance()
   {
-    settings ??= settingsFactory();
+    settings ??= CreateSettings();
     settings.CancelMaintenance();
     return SettingsState(settings);
   }
@@ -1136,7 +1167,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private async Task<SettingsWorkbenchState> RetryRuntimeMaintenanceAsync(
     CancellationToken cancellationToken)
   {
-    settings ??= settingsFactory();
+    settings ??= CreateSettings();
     await settings.RetryMaintenanceAsync(cancellationToken);
     return SettingsState(settings);
   }
@@ -1402,7 +1433,18 @@ public sealed class DesktopWorkbenchCommandHandler :
       viewModel.Maintenance.State.RequestedSourceIds,
       viewModel.Maintenance.State.EffectiveSourceIds,
       viewModel.Maintenance.State.CanCancel,
-      viewModel.Maintenance.State.CanRetry));
+      viewModel.Maintenance.State.CanRetry,
+      viewModel.Maintenance.State.FailureReason,
+      viewModel.Maintenance.State.FailureCode),
+    StatusMessage: viewModel.Status,
+    ServiceStatus: viewModel.RuntimeStatus.ServiceStatus,
+    MaintenanceStatus: viewModel.RuntimeStatus.Status,
+    MaintenancePhase: viewModel.RuntimeStatus.Phase,
+    ProgressText: viewModel.RuntimeStatus.ProgressText,
+    ProgressDetail: viewModel.RuntimeStatus.ProgressDetail,
+    ProgressPercent: viewModel.RuntimeStatus.IsProgressIndeterminate ? null : viewModel.RuntimeStatus.ProgressValue,
+    CanPreviewInstall: viewModel.Maintenance.SupportsInstallPlan,
+    InstallPlan: viewModel.Maintenance.Plan);
 
   private UpdateWorkbenchState UpdateState() => new(
     update.Value.IsBusy,
@@ -1491,6 +1533,13 @@ public sealed class DesktopWorkbenchCommandHandler :
       update.Value.PropertyChanged -= OnUpdatePropertyChanged;
       update.Value.Cancel();
       update.Value.Dispose();
+    }
+    if (settings is not null)
+    {
+      settings.Maintenance.StateChanged -= OnSettingsChanged;
+      settings.RuntimeStatus.PropertyChanged -= OnSettingsPropertyChanged;
+      settings.PropertyChanged -= OnSettingsPropertyChanged;
+      settings.CancelMaintenance();
     }
     Task[] operations;
     lock (backgroundOperations)

@@ -65,7 +65,7 @@
 ## 项目架构与独特约束
 
 - 本仓是仅 Windows 的 .NET 10 WinUI 前端，不是 WPF。主应用、平台层与 net472 Bootstrapper 分别位于 `src/dotnet/VibeOCR.App`、`VibeOCR.Platform`、`VibeOCR.Bootstrapper`；WebView2 WebAssets 使用锁定 Node/TypeScript。
-- `global.json` 固定 .NET SDK 且禁止 roll-forward；`Directory.Build.props` 强制 warnings-as-errors、deterministic 与 locked restore。NuGet central versions/packages.lock 禁止手改，只通过 `scripts/update_dotnet_locks.ps1` 更新。
+- `global.json` 固定 .NET SDK 基线并允许 `latestPatch` 前滚；`Directory.Build.props` 强制 warnings-as-errors、deterministic 与 locked restore。NuGet central versions/packages.lock 禁止手改，只通过 `scripts/update_dotnet_locks.ps1` 更新。
 - `.ci/project.json` 的 bootstrap 必须包含 Python dev tools、WebAssets `npm ci`、Windows App Runtime 安装、组件解析和 locked restore；遗漏 Windows App Runtime 会使 WinUI testhost 挂起。
 - quality=`uv run python scripts/check_quality.py`；E2E 同时运行 Platform tests 与 `scripts/test_app_ci.ps1` 的 fail-closed App tests；随后 `scripts/build-release.ps1` 和 `uv run python scripts/release_smoke.py` 构建并验证真实候选。
 - 每次 CI 使用最新正式 Backend 和其绑定的 Protocol runtime，支持 Protocol major 2 且 minor-compatible。编译 SDK 从 `Directory.Packages.props` 的单一精确 pin 读取并下载到 `.release-input/protocol-sdk`；运行时 Protocol 位于 `.release-input/protocol`。两者只要求同 major，不比较 minor 大小；新行为必须按调用点 capability 协商。NuGet 不得从任意外部 feed 获取 `VibeOCR.Runtime.*`。

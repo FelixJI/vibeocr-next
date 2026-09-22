@@ -59,6 +59,7 @@ public sealed partial class App : Application
     private bool _soakCrashRequested;
     private bool _soakCrashInjected;
     private int _supervisorRecoveryScheduled;
+    private int _runtimeMaintenanceActive;
 
     private const uint HotkeyMessage = 0x0312;
     private const uint TrayMessage = 0x8001;
@@ -213,7 +214,8 @@ public sealed partial class App : Application
             _runtimeStatus,
             () => _runtimeInstaller
               ?? throw new InvalidOperationException("Runtime installer is unavailable."),
-            _productMaintenance),
+            _productMaintenance, StopForMaintenanceAsync, RestoreAfterMaintenanceAsync,
+            Path.Combine(layout.DataRoot, "runtime-maintenance.json")),
           () => _shellViewModel ??
             throw new InvalidOperationException("Desktop shell is unavailable."),
           () => _updateViewModel ??
@@ -415,6 +417,7 @@ public sealed partial class App : Application
         await _supervisorLifecycle.WaitAsync();
         try
         {
+            if (Volatile.Read(ref _runtimeMaintenanceActive) != 0) return false;
             // Recovery reuses this entry point; re-announce the attempt so
             // calls crossing the detach gap wait for this reconnect.
             _inferenceGateway.MarkStartupPending();
@@ -586,6 +589,7 @@ public sealed partial class App : Application
         SupervisorUnexpectedExitEventArgs eventArgs)
     {
         if (_applicationShutdown.IsCancellationRequested
+            || Volatile.Read(ref _runtimeMaintenanceActive) != 0
             || !ReferenceEquals(sender, _supervisorProcess)
             || Interlocked.Exchange(ref _supervisorRecoveryScheduled, 1) != 0)
         {
@@ -651,6 +655,22 @@ public sealed partial class App : Application
         {
             Interlocked.Exchange(ref _supervisorRecoveryScheduled, 0);
         }
+    }
+
+    private async Task StopForMaintenanceAsync(CancellationToken cancellationToken)
+    {
+        Interlocked.Exchange(ref _runtimeMaintenanceActive, 1);
+        await _supervisorLifecycle.WaitAsync(cancellationToken);
+        try { await DisconnectSupervisorResourcesAsync(); }
+        finally { _supervisorLifecycle.Release(); }
+    }
+
+    private async Task RestoreAfterMaintenanceAsync()
+    {
+        Interlocked.Exchange(ref _runtimeMaintenanceActive, 0);
+        if (_applicationShutdown.IsCancellationRequested || _supervisorProcess is not null) return;
+        if (_supervisorLayout is not null && _supervisorDiagnostics is not null)
+            await ConnectSupervisorAfterFirstWindowAsync(_supervisorLayout, _supervisorDiagnostics, isRecovery: true);
     }
 
     private async Task StopSupervisorAsync()

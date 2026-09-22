@@ -494,6 +494,41 @@ input {
   display: grid;
   gap: 10px;
 }
+.install-plan {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--colorNeutralStroke2);
+  border-radius: 6px;
+  background: var(--colorNeutralBackground2);
+}
+.install-plan h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.plan-components {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+}
+.plan-tech-details {
+  font-size: 12px;
+  color: var(--colorNeutralForeground3);
+}
+.plan-tech-details summary {
+  cursor: pointer;
+  user-select: none;
+}
+.plan-tech-details ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 2px;
+  font-family: "Cascadia Mono", Consolas, monospace;
+}
 .detail-list {
   display: grid;
   grid-template-columns: max-content 1fr;

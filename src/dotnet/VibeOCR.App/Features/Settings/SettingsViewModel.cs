@@ -43,6 +43,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private string _pendingBackend = "cpu";
     private bool _restartRequired;
     private bool _gpuAvailable;
+    private bool _selectionStaged;
+    private HashSet<string> _installedComponentIds = new(StringComparer.Ordinal);
     private RuntimeSelectionService? _selection;
     private RecognitionSelectionSnapshot? _recognitionSelection;
     private IReadOnlyList<SettingsSourceOption> _sources = [];
@@ -53,7 +55,10 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         IInferenceClient inference,
         RuntimeStatusViewModel? runtimeStatus = null,
         Func<IRuntimeInstallerClient>? installerFactory = null,
-        ProductMaintenanceCoordinator? productMaintenance = null)
+        ProductMaintenanceCoordinator? productMaintenance = null,
+        Func<CancellationToken, Task>? stopService = null,
+        Func<Task>? restoreService = null,
+        string? operationStorePath = null)
     {
         _inference = inference ?? throw new ArgumentNullException(nameof(inference));
         RuntimeStatus = runtimeStatus ?? new RuntimeStatusViewModel();
@@ -66,7 +71,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             : new RuntimeMaintenanceCoordinator(
                 installerFactory,
                 RuntimeStatus,
-                productMaintenance);
+                productMaintenance, stopService, restoreService, operationStorePath);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -107,30 +112,42 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     public async Task LoadSnapshotAsync(CancellationToken cancellationToken)
     {
+        await Maintenance.RestoreAsync(cancellationToken);
         long generation = Interlocked.Increment(ref _generation);
         if (generation == Volatile.Read(ref _generation)) { IsBusy = true; Status = "正在读取模型驻留状态"; }
         try
         {
-            ResidencyStatus status = await _inference.GetResidencyAsync(cancellationToken);
-            if (generation != Volatile.Read(ref _generation)) return;
-            DefaultTtlSeconds = status.DefaultTtlSeconds;
-            VramTotalMb = status.VramTotalMb;
-            VramUsedMb = status.VramUsedMb;
-            ResidencyEntries.Clear(); foreach (var e in status.Entries) ResidencyEntries.Add(e);
-            ResidencyPipelines.Clear(); foreach (var p in status.Pipelines) ResidencyPipelines.Add(p);
-            PropertyChanged?.Invoke(this, new(nameof(DefaultTtlSeconds)));
-            PropertyChanged?.Invoke(this, new(nameof(VramTotalMb)));
-            PropertyChanged?.Invoke(this, new(nameof(VramUsedMb)));
-            Status = $"默认 TTL {status.DefaultTtlSeconds}s；已驻留管线 {status.Entries.Count} 个";
             try
             {
                 RuntimeStatusSnapshot runtime = await _inference.GetRuntimeStatusAsync(cancellationToken);
-                if (generation == Volatile.Read(ref _generation)) RuntimeStatus.ApplySnapshot(runtime);
+                if (generation != Volatile.Read(ref _generation)) return;
+                RuntimeStatus.ApplySnapshot(runtime);
+                Backend = runtime.Profile.Accelerator == RuntimeAccelerator.Cpu ? "cpu" : "nvidia_cuda";
+                _installedComponentIds = runtime.Profile.Components
+                    .Where(component => component.ActualState == RuntimeComponentActualState.Ready)
+                    .Select(component => component.ComponentId).ToHashSet(StringComparer.Ordinal);
+                if (!_selectionStaged) PendingBackend = Backend;
             }
             catch (NotSupportedException)
             {
-                // Older test doubles and pre-2.2 clients retain installer-local status.
+                // Older test doubles retain installer-local status.
             }
+            try
+            {
+                ResidencyStatus status = await _inference.GetResidencyAsync(cancellationToken);
+                if (generation != Volatile.Read(ref _generation)) return;
+                DefaultTtlSeconds = status.DefaultTtlSeconds;
+                VramTotalMb = status.VramTotalMb;
+                VramUsedMb = status.VramUsedMb;
+                ResidencyEntries.Clear(); foreach (var e in status.Entries) ResidencyEntries.Add(e);
+                ResidencyPipelines.Clear(); foreach (var p in status.Pipelines) ResidencyPipelines.Add(p);
+                PropertyChanged?.Invoke(this, new(nameof(DefaultTtlSeconds)));
+                PropertyChanged?.Invoke(this, new(nameof(VramTotalMb)));
+                PropertyChanged?.Invoke(this, new(nameof(VramUsedMb)));
+                Status = $"默认 TTL {status.DefaultTtlSeconds}s；已驻留管线 {status.Entries.Count} 个";
+            }
+            catch (NotSupportedException) { Status = "当前运行环境不提供模型驻留控制。"; }
+            catch (InferenceClientException error) { Status = LocalizeV2(error.Code); }
             await LoadSelectionSerializedAsync(forceReload: true, cancellationToken);
         }
         catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) Status = "已取消"; }
@@ -150,6 +167,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public async Task SetSourceAsync(string kind, string? sourceId, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(kind);
+        if (Maintenance.State.IsRunning) { Status = "运行环境维护尚未结束。"; return; }
+        Maintenance.DiscardPlan();
         if (_selection is null)
         {
             Status = "运行时目录尚未加载，请先刷新运行时";
@@ -167,6 +186,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                 _inference,
                 next.Count == 0 ? null : next,
                 cancellationToken);
+            Maintenance.DiscardPlan();
             _selectedSourceIds = updated.DownloadSourceIds ?? [];
             Sources = ProjectSources(_selection, _selectedSourceIds);
             Status = "已保存下载源偏好";
@@ -185,6 +205,9 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public void SetPendingAccelerator(string accelerator)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(accelerator);
+        if (Maintenance.State.IsRunning) { Status = "运行环境维护尚未结束。"; return; }
+        Maintenance.DiscardPlan();
+        _selectionStaged = true;
         PendingBackend = accelerator;
         Features = _selection is null
             ? []
@@ -195,12 +218,15 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public void SetFeatureEnabled(string featureId, bool enabled)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(featureId);
+        if (Maintenance.State.IsRunning) { Status = "运行环境维护尚未结束。"; return; }
         IReadOnlyList<SettingsFeatureOption> current = Features;
         if (!current.Any(item => item.FeatureId == featureId))
         {
             Status = $"未知功能 {featureId}";
             return;
         }
+        Maintenance.DiscardPlan();
+        _selectionStaged = true;
         Features = [.. current.Select(item => item.FeatureId == featureId
             ? item with { Selected = enabled }
             : item)];
@@ -217,7 +243,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     /// 用户确认后以显式 intent 启动 ensure:未选功能时发送空 component 列表
     /// (显式 base-only);来源使用当前 Backend Settings 偏好。
     /// </summary>
-    public async Task InstallPendingAsync(CancellationToken cancellationToken)
+    public async Task PreviewInstallAsync(CancellationToken cancellationToken)
     {
         if (_selection is null)
         {
@@ -226,14 +252,13 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
         try
         {
-            await Maintenance.InstallAsync(
+            await Maintenance.PreviewAsync(
                 _selection,
                 PendingBackend,
                 PendingFeatureIds,
                 _selectedSourceIds,
                 cancellationToken);
-            Status = "运行时维护操作已完成";
-            await LoadSnapshotAsync(cancellationToken);
+            Status = "请核对 Backend 返回的安装计划，再确认执行。";
         }
         catch (OperationCanceledException)
         {
@@ -243,13 +268,27 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         {
             Status = LocalizeSelection(error);
         }
-        catch (RuntimeInstallerException error)
+        catch (RuntimeInstallerException)
         {
-            Status = $"运行时维护失败：{error.Message}";
+            Status = "安装预览失败，请检查下载来源或导出诊断。";
         }
-        catch (InvalidOperationException error)
+        catch (Exception error) when (error is InvalidOperationException or NotSupportedException)
         {
             Status = error.Message;
+        }
+    }
+
+    public async Task ConfirmInstallAsync(string planId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Maintenance.ConfirmAsync(planId, cancellationToken);
+            Status = "运行环境维护已完成";
+        }
+        catch (OperationCanceledException) { Status = "运行环境维护已取消"; }
+        catch (Exception error) when (error is RuntimeInstallerException or InvalidOperationException or NotSupportedException)
+        {
+            Status = error is RuntimeInstallerException ? "安装失败，可重试、调整下载来源或导出诊断。" : error.Message;
         }
     }
 
@@ -260,18 +299,17 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         try
         {
             await Maintenance.RetryAsync(cancellationToken);
-            Status = "运行时维护操作已完成";
-            await LoadSnapshotAsync(cancellationToken);
+            Status = "已重新预览上次安装范围，请核对并确认。";
         }
         catch (OperationCanceledException)
         {
             Status = "已取消";
         }
-        catch (RuntimeInstallerException error)
+        catch (RuntimeInstallerException)
         {
-            Status = $"运行时维护重试失败：{error.Message}";
+            Status = "重新预览失败，请检查运行环境或导出诊断。";
         }
-        catch (InvalidOperationException error)
+        catch (Exception error) when (error is InvalidOperationException or NotSupportedException)
         {
             Status = error.Message;
         }
@@ -313,7 +351,11 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             // same selection instead of a partially projected catalog.
             _selectedSourceIds = selectedSourceIds;
             Sources = ProjectSources(selection, selectedSourceIds);
-            Features = ProjectFeatures(selection, PendingBackend, []);
+            IReadOnlyList<string> selectedFeatures = _selectionStaged ? PendingFeatureIds :
+                selection.Variants.Where(variant => variant.Accelerator == PendingBackend &&
+                    _installedComponentIds.Contains(variant.ComponentId))
+                    .Select(variant => variant.FeatureId).ToArray();
+            Features = ProjectFeatures(selection, PendingBackend, selectedFeatures);
             // Publish the catalog marker last. Readers that observe the new
             // selection can therefore also observe its matching projections;
             // command paths additionally await this same gate.

@@ -7,6 +7,64 @@ namespace VibeOCR.App.Tests;
 
 public sealed class RuntimeStatusViewModelTests
 {
+    [Theory]
+    [InlineData(Host.RuntimeOperationState.Failed, "运行时安装失败")]
+    [InlineData(Host.RuntimeOperationState.Cancelled, "运行时安装已取消")]
+    public void ReadyWithoutMaintenancePreservesTerminalResult(Host.RuntimeOperationState state, string expected)
+    {
+        var model = new RuntimeStatusViewModel();
+        model.ApplyMaintenance(Maintenance(8, state));
+        model.ApplySnapshot(Ready());
+        Assert.Equal(expected, model.Status);
+        Assert.NotEqual(100, model.ProgressValue);
+    }
+
+    [Fact]
+    public void ReplayedProgressCannotReplaceTerminalResult()
+    {
+        var model = new RuntimeStatusViewModel();
+        model.ApplyMaintenance(Maintenance(8, Host.RuntimeOperationState.Failed));
+        model.ApplyMaintenance(Maintenance(7, Host.RuntimeOperationState.Running));
+        model.ApplyMaintenance(Maintenance(8, Host.RuntimeOperationState.Running));
+        model.ApplyMaintenance(Maintenance(9, Host.RuntimeOperationState.Running));
+        Assert.Equal("运行时安装失败", model.Status);
+    }
+
+    [Fact]
+    public void UnknownByteTotalDoesNotBecomeStepCountOrPercentage()
+    {
+        var model = new RuntimeStatusViewModel();
+        var update = Maintenance(1, Host.RuntimeOperationState.Running);
+        model.ApplyMaintenance(update with { Snapshot = update.Snapshot with
+        {
+            Progress = new Host.ProgressSnapshot { Unit = Host.ProgressUnit.Bytes, Current = 1024 },
+        }});
+        Assert.True(model.IsProgressIndeterminate);
+        Assert.Contains("bytes", model.ProgressText);
+        Assert.DoesNotContain("步", model.ProgressText);
+    }
+
+    private static Host.RuntimeMaintenanceEvent Maintenance(int sequence, Host.RuntimeOperationState state) => new()
+    {
+        ProtocolVersion = 2, EventVersion = 2, EventType = Host.RuntimeMaintenanceEventType.Progress,
+        Operation = Host.RuntimeHostOperation.Ensure, MessageCode = "runtime.installing",
+        Snapshot = new Host.RuntimeMaintenanceSnapshot
+        {
+            OperationId = "ui-test", Sequence = sequence, Operation = Host.RuntimeHostOperation.Ensure,
+            OperationState = state, Phase = Host.RuntimeMaintenancePhase.InstallProfile,
+            ProfileId = "win-x64-cpu", UpdatedAt = "2026-09-21T00:00:00Z",
+        },
+    };
+
+    private static Http.RuntimeStatusSnapshot Ready() => new()
+    {
+        InstanceId = "sup-test", ServiceState = Http.RuntimeServiceState.Ready, BackendVersion = "0.14.0",
+        Profile = new Http.RuntimeProfileStatus
+        {
+            ProfileId = "win-x64-cpu", Accelerator = Http.RuntimeAccelerator.Cpu, Components = [],
+        },
+    };
+
     [Fact]
     public void InstallerEventProjectsCurrentComponentAndProgress()
     {
@@ -165,6 +223,7 @@ public sealed class RuntimeStatusViewModelTests
         Assert.Equal("运行时已就绪", viewModel.Status);
         Assert.Equal("0.9.0", viewModel.BackendVersion);
         Assert.Equal("已就绪", Assert.Single(viewModel.Components).State);
-        Assert.Equal(100, viewModel.ProgressValue);
+        Assert.True(viewModel.IsProgressIndeterminate);
+        Assert.NotEqual(100, viewModel.ProgressValue);
     }
 }

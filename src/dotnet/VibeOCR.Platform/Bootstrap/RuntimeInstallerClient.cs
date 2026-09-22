@@ -154,11 +154,22 @@ public interface IRuntimeInstallerCommandRunner
 
 public interface IRuntimeInstallerClient
 {
+    bool SupportsInstallPlan => false;
+    Task<Host.RuntimeInstallPlan> PreviewInstallAsync(
+        RuntimeInstallSelection selection, string accelerator, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("当前 Runtime 不支持安装预览，请先更新 Runtime。");
+    Task<RuntimeLaunch> ConfirmInstallAsync(
+        string planId, string operationId, IProgress<Host.RuntimeMaintenanceEvent>? progress = null,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("当前 Runtime 不支持安装预览，请先更新 Runtime。");
+
     IReadOnlyList<string> NegotiatedCapabilities => Array.Empty<string>();
     IReadOnlyList<RuntimeCapabilityDescriptor> CapabilityDescriptors =>
         Array.Empty<RuntimeCapabilityDescriptor>();
 
     Task<RuntimeInspection> InspectAsync(CancellationToken cancellationToken = default);
+    Task<RuntimeInstallSelection> ReadStartupSelectionAsync(CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("无法检查已安装组件，未更改运行环境。");
     Task<RuntimeLaunch> EnsureAsync(CancellationToken cancellationToken = default);
     Task<RuntimeLaunch> RepairAsync(CancellationToken cancellationToken = default);
     Task<RuntimeLaunch> EnsureAsync(
@@ -334,7 +345,7 @@ public sealed class RuntimeInstallerException : InvalidOperationException
 /// This client intentionally knows nothing about Python packages, indexes,
 /// lock-file contents, runtime directories, or model directories.
 /// </remarks>
-public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
+public sealed partial class RuntimeInstallerClient : IRuntimeInstallerClient
 {
     private RuntimeMaintenanceSourceSnapshot? _lastMaintenanceSources;
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -618,6 +629,24 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         }
     }
 
+    public async Task<RuntimeInstallSelection> ReadStartupSelectionAsync(CancellationToken cancellationToken = default)
+    {
+        RuntimeHostEnvelope envelope = await InvokeAsync("inspect", null, cancellationToken).ConfigureAwait(false);
+        Host.RuntimeProfileDescriptor profile = envelope.Profile
+            ?? throw new RuntimeInstallerException("Runtime 检查缺少组件状态，未更改安装范围。");
+        using JsonDocument manifest = JsonDocument.Parse(File.ReadAllBytes(_configuration.RuntimeManifest));
+        HashSet<string> baseIds = manifest.RootElement.GetProperty("profiles").GetProperty("win-x64-base")
+            .GetProperty("components").EnumerateArray()
+            .Select(component => component.GetProperty("component_id").GetString()!).ToHashSet(StringComparer.Ordinal);
+        if (baseIds.Count == 0) throw new RuntimeInstallerException("Runtime 基础组件声明为空。");
+        return new RuntimeInstallSelection
+        {
+            InstallComponentIds = profile.Components
+                .Where(component => !baseIds.Contains(component.ComponentId) && component.ActualState == "ready")
+                .Select(component => component.ComponentId).ToArray(),
+        };
+    }
+
     private async Task<RuntimeInspection> InvokeStateAsync(
         CancellationToken cancellationToken)
     {
@@ -637,7 +666,8 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         IReadOnlyCollection<string>? requiredCapabilities = null,
         IReadOnlyCollection<string>? installComponentIds = null,
         IReadOnlyCollection<string>? downloadSourceIds = null,
-        string? operationId = null)
+        string? operationId = null,
+        string? planId = null)
     {
         RuntimeHostEnvelope envelope = await InvokeAsync(
             operation,
@@ -647,7 +677,12 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
             requiredCapabilities,
             installComponentIds,
             downloadSourceIds,
-            operationId).ConfigureAwait(false);
+            operationId,
+            planId).ConfigureAwait(false);
+        if (planId is not null && (envelope.Maintenance is not { } completed ||
+            completed.OperationId != operationId || completed.PlanId != planId ||
+            completed.OperationState != Host.RuntimeOperationState.Succeeded))
+            throw new RuntimeInstallerException("安装结果未确认当前计划成功，请重新检查运行环境。");
         RuntimeLaunch launch = envelope.Launch ?? throw new RuntimeInstallerException(
             $"Runtime Host {operation} response has no launch contract.");
         if (string.IsNullOrWhiteSpace(launch.PythonExecutable) ||
@@ -673,7 +708,8 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         IReadOnlyCollection<string>? requiredCapabilities = null,
         IReadOnlyCollection<string>? installComponentIds = null,
         IReadOnlyCollection<string>? downloadSourceIds = null,
-        string? operationId = null)
+        string? operationId = null,
+        string? planId = null)
     {
         bool supportsV2 = SupportsCapability("runtime.maintenance.v2");
         if (!supportsV2 && operationId is not null)
@@ -690,7 +726,8 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
             componentIds,
             requiredCapabilities,
             installComponentIds,
-            downloadSourceIds);
+            downloadSourceIds,
+            planId);
         int streamedEvents = 0;
         long lastSequence = 0;
         bool replayRequired = false;
@@ -943,7 +980,8 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         IReadOnlyCollection<string>? componentIds = null,
         IReadOnlyCollection<string>? requiredCapabilities = null,
         IReadOnlyCollection<string>? installComponentIds = null,
-        IReadOnlyCollection<string>? downloadSourceIds = null)
+        IReadOnlyCollection<string>? downloadSourceIds = null,
+        string? planId = null)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -982,6 +1020,13 @@ public sealed class RuntimeInstallerClient : IRuntimeInstallerClient
         else if (SupportsMaintenanceEvents())
         {
             request["accepted_event_streams"] = new[] { "ndjson.v1" };
+        }
+        if (planId is not null)
+        {
+            if (!SupportsInstallPlan) throw new RuntimeInstallerException("Runtime 不支持安装计划确认。");
+            request.Remove("accelerator");
+            request["plan_id"] = planId;
+            request["required_capabilities"] = new[] { InstallPlanCapability };
         }
         AddOption(startInfo, "--request-json", JsonSerializer.Serialize(request));
         return startInfo;
