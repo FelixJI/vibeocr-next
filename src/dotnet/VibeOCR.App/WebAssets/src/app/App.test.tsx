@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -964,6 +964,26 @@ describe("AppShell", () => {
     await user.click(screen.getByText("技术详情"));
     expect(screen.getByText("disk_space_insufficient")).toBeVisible();
 
+    vi.useFakeTimers();
+    try {
+      rerender(
+        <App
+          actions={actions}
+          viewState={settings({
+            installPlan: {
+              expiresAt: new Date(Date.now() + 1_000).toISOString(),
+            },
+          })}
+        />,
+      );
+      expect(confirm).toBeEnabled();
+      await act(async () => {
+        vi.advanceTimersByTime(1_001);
+      });
+      expect(confirm).toBeDisabled();
+    } finally {
+      vi.useRealTimers();
+    }
     rerender(
       <App
         actions={actions}

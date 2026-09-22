@@ -505,6 +505,7 @@ public sealed partial class App : Application
             _inferenceGateway.MarkStartupFailed(error);
             _qrCodeGateway.MarkStartupFailed(error);
             AppLog.Error("Supervisor connection failed", error);
+            _runtimeStatus.ReportServiceUnavailable();
             await DisconnectSupervisorResourcesAsync();
             diagnostics.UpdateSupervisor(new SupervisorHealth(
                 SupervisorHealthState.Faulted, null, null, error.Message));

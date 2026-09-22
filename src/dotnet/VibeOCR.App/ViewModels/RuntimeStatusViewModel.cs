@@ -105,6 +105,12 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
                 "等待检查")));
     }
 
+    public void ReportServiceUnavailable()
+    {
+        ServiceStatus = "运行环境暂不可用，请重新检查或打开诊断与修复。";
+        if (_operationId is null) Status = ServiceStatus;
+    }
+
     public void BeginMaintenance(string operationId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(operationId);

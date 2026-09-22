@@ -36,6 +36,24 @@ public sealed class MaintenanceTests
     }
 
     [Fact]
+    public async Task InvalidRecoveryRecordDoesNotStartAnotherInstallation()
+    {
+        string store = Path.GetTempFileName();
+        try
+        {
+            await File.WriteAllTextAsync(store, "{\"State\":null}", TestContext.Current.CancellationToken);
+            var fake = new FakeRuntimeInstallerClient();
+            var coordinator = new RuntimeMaintenanceCoordinator(() => fake,
+                new VibeOCR.App.ViewModels.RuntimeStatusViewModel(), operationStorePath: store);
+            await coordinator.RestoreAsync(TestContext.Current.CancellationToken);
+            Assert.Equal("unknown", coordinator.State.StatusCode);
+            Assert.False(coordinator.State.CanRetry);
+            Assert.Null(fake.LastOperationId);
+        }
+        finally { File.Delete(store); }
+    }
+
+    [Fact]
     public async Task ChangingSelectionDiscardsAnInflightPreview()
     {
         var fake = new FakeRuntimeInstallerClient { PreviewGate = new() };

@@ -434,6 +434,17 @@ def _backend_product_closure(backend_release_dir: Path) -> tuple[Path, ...]:
         names.add(
             _release_file_name(profile.get("lock"), f"profiles.{profile_name}.lock")
         )
+        if "paddle_environment" in profile:
+            paddle = _require_mapping(
+                profile["paddle_environment"],
+                f"profiles.{profile_name}.paddle_environment",
+            )
+            names.add(
+                _release_file_name(
+                    paddle.get("lock"),
+                    f"profiles.{profile_name}.paddle_environment.lock",
+                )
+            )
         profile_packs = _runtime_pack_file_names(
             profile.get("runtime_pack"), f"profiles.{profile_name}.runtime_pack"
         )

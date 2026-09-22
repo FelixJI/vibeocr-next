@@ -96,6 +96,10 @@ public sealed class RuntimeMaintenanceCoordinator
         {
             StoredOperation stored = JsonSerializer.Deserialize<StoredOperation>(File.ReadAllText(_operationStorePath))
                 ?? throw new InvalidDataException("运行环境维护记录为空。");
+            if (stored.State is null || string.IsNullOrWhiteSpace(stored.State.OperationId) ||
+                (stored.LastUpdate is not null &&
+                    stored.LastUpdate.Snapshot.OperationId != stored.State.OperationId))
+                throw new JsonException("维护记录缺少操作标识或与快照不一致。");
             if (loadStored)
             {
                 _state = stored.State;
@@ -199,13 +203,13 @@ public sealed class RuntimeMaintenanceCoordinator
             DownloadSourceIds = plan.RequestedDownloadSourceIds,
         };
         string operationId = $"ui-{Guid.NewGuid():N}";
-        _runtimeStatus.BeginMaintenance(operationId);
-        _lastSequence = -1;
-        _lastUpdate = null;
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         using IDisposable productLease = _productMaintenance.Acquire(
             ProductMaintenanceOwner.RuntimeMaintenance,
             linked.Cancel);
+        _runtimeStatus.BeginMaintenance(operationId);
+        _lastSequence = -1;
+        _lastUpdate = null;
         _active = linked;
         DiscardPlan();
         try
@@ -215,9 +219,9 @@ public sealed class RuntimeMaintenanceCoordinator
             "running",
             operationId,
             componentIds,
-            [],
+            plan.EffectiveComponentIds,
             intent.DownloadSourceIds ?? [],
-            [],
+            plan.EffectiveDownloadSourceIds,
             CanCancel: true,
             CanRetry: false,
             Accelerator: plan.Accelerator == Host.Accelerator.Cpu ? "cpu" : "nvidia_cuda"));
