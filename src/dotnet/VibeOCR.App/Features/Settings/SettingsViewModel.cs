@@ -286,6 +286,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     public async Task ConfirmInstallAsync(string planId, CancellationToken cancellationToken)
     {
+        string? previousOperation = Maintenance.State.OperationId;
         try
         {
             await Maintenance.ConfirmAsync(planId, cancellationToken);
@@ -295,6 +296,20 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         catch (Exception error) when (error is RuntimeInstallerException or InvalidOperationException or NotSupportedException)
         {
             Status = error is RuntimeInstallerException ? "安装失败，可重试、调整下载来源或导出诊断。" : error.Message;
+        }
+        finally
+        {
+            if (Maintenance.State.OperationId != previousOperation && !Maintenance.State.IsRunning)
+            {
+                // The restored Supervisor owns the current device and engine availability.
+                // Do not let recognition reuse the pre-maintenance catalog if refresh fails.
+                string outcome = Status;
+                _selection = null;
+                Volatile.Write(ref _recognitionSelection, null);
+                if (Maintenance.State.StatusCode == "succeeded") _selectionStaged = false;
+                await LoadSnapshotAsync(CancellationToken.None);
+                if (_selection is not null) Status = outcome;
+            }
         }
     }
 

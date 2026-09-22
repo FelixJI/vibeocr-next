@@ -1146,7 +1146,11 @@ public sealed class DesktopWorkbenchCommandHandler :
   private async Task CompleteRuntimeInstallAsync(SettingsViewModel model, string planId, CancellationToken cancellationToken)
   {
     await model.ConfirmInstallAsync(planId, cancellationToken);
-    if (Volatile.Read(ref disposed) == 0) StateChanged?.Invoke(SettingsState(model));
+    if (Volatile.Read(ref disposed) == 0)
+    {
+      StateChanged?.Invoke(SettingsState(model));
+      StateChanged?.Invoke(RecognitionState(false, "recognition.ready"));
+    }
   }
 
   private async Task<SettingsWorkbenchState> InstallRuntimeAsync(

@@ -54,6 +54,56 @@ public sealed class MaintenanceTests
     }
 
     [Fact]
+    public async Task SuccessfulMaintenanceRefreshesDeviceAndRecognitionCatalog()
+    {
+        var installer = new FakeRuntimeInstallerClient();
+        var inference = new SelectionHealthClient(null);
+        var settings = new SettingsViewModel(inference, installerFactory: () => installer,
+            restoreService: () => { inference.Accelerator = RuntimeAccelerator.NvidiaCuda; return Task.CompletedTask; });
+        await settings.LoadSnapshotAsync(TestContext.Current.CancellationToken);
+        var previous = settings.RecognitionSelection;
+        settings.SetPendingAccelerator("nvidia_cuda");
+        settings.SetFeatureEnabled("gpu_runtime", true);
+
+        await PreviewAndConfirmAsync(settings);
+        // Recognition callers use this cached snapshot without an explicit settings refresh.
+        await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+        Assert.Equal("nvidia_cuda", settings.Backend);
+        Assert.Equal("nvidia_cuda", settings.PendingBackend);
+        Assert.NotSame(previous, settings.RecognitionSelection);
+        Assert.Equal(2, inference.HealthCalls);
+        Assert.Equal("succeeded", settings.Maintenance.State.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task UnknownRecoveryCanBeCheckedAgainAfterTransientFailure(bool restart)
+    {
+        string store = Path.GetTempFileName();
+        try
+        {
+            var state = RuntimeMaintenanceState.Idle with { IsRunning = true, StatusCode = "running", OperationId = "recover-me" };
+            await File.WriteAllTextAsync(store, System.Text.Json.JsonSerializer.Serialize(new { State = state }),
+                TestContext.Current.CancellationToken);
+            var installer = new FakeRuntimeInstallerClient { FailNextObserve = true };
+            var status = new VibeOCR.App.ViewModels.RuntimeStatusViewModel();
+            var coordinator = new RuntimeMaintenanceCoordinator(() => installer, status, operationStorePath: store);
+            await coordinator.RestoreAsync(TestContext.Current.CancellationToken);
+            Assert.Equal("unknown", coordinator.State.StatusCode);
+            if (restart) coordinator = new RuntimeMaintenanceCoordinator(() => installer, status, operationStorePath: store);
+
+            await coordinator.RestoreAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(2, installer.ObserveCalls);
+            Assert.Equal("succeeded", coordinator.State.StatusCode);
+            Assert.Empty(coordinator.State.FailureReason);
+            Assert.Empty(coordinator.State.FailureCode);
+            Assert.Null(installer.LastOperationId);
+        }
+        finally { File.Delete(store); }
+    }
+
+    [Fact]
     public async Task ChangingSelectionDiscardsAnInflightPreview()
     {
         var fake = new FakeRuntimeInstallerClient { PreviewGate = new() };
@@ -274,7 +324,7 @@ public sealed class MaintenanceTests
         return settings;
     }
 
-    private sealed class SelectionHealthClient : InferenceClientStub
+    private sealed class SelectionHealthClient : InferenceClientStub, IInferenceClient
     {
         private readonly IReadOnlyList<string>? _sources;
 
@@ -283,8 +333,22 @@ public sealed class MaintenanceTests
         public override Task<ResidencyStatus> GetResidencyAsync(CancellationToken cancellationToken) =>
             Task.FromResult(new ResidencyStatus());
 
-        public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken) =>
-            Task.FromResult(MaintenanceHealth());
+        public RuntimeAccelerator Accelerator { get; set; } = RuntimeAccelerator.Cpu;
+        public int HealthCalls { get; private set; }
+
+        public Task<RuntimeStatusSnapshot> GetRuntimeStatusAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new RuntimeStatusSnapshot
+            {
+                InstanceId = "sup-test", ServiceState = RuntimeServiceState.Ready, BackendVersion = "0.14.0",
+                Profile = new RuntimeProfileStatus { ProfileId = Accelerator == RuntimeAccelerator.Cpu ? "win-x64-cpu" : "win-x64-cu126",
+                    Accelerator = Accelerator, Components = [] },
+            });
+
+        public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
+        {
+            HealthCalls++;
+            return Task.FromResult(MaintenanceHealth());
+        }
 
         public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>
             Task.FromResult(new SettingsSnapshot
@@ -391,6 +455,8 @@ public sealed class MaintenanceTests
         public string? LastOperationId { get; private set; }
         public string? RetrySourceOperationId { get; private set; }
         public RuntimeInstallSelection? RetrySelection { get; private set; }
+        public bool FailNextObserve { get; set; }
+        public int ObserveCalls { get; private set; }
         public bool FailNextInstall { get; set; }
         public bool HangOnInstall { get; set; }
         public bool HangOnRetry { get; set; }
@@ -518,8 +584,18 @@ public sealed class MaintenanceTests
             string operationId,
             long afterSequence,
             int limit = 128,
-            CancellationToken cancellationToken = default) =>
-            throw new NotImplementedException();
+            CancellationToken cancellationToken = default)
+        {
+            ObserveCalls++;
+            if (FailNextObserve)
+            {
+                FailNextObserve = false;
+                throw new RuntimeInstallerException("temporary observe failure");
+            }
+            var snapshot = Event(operationId, Host.RuntimeOperationState.Succeeded, [], []).Snapshot;
+            return Task.FromResult(new RuntimeMaintenanceObserveEnvelope(2, true, "maintenance_observe", operationId,
+                snapshot, [], 0, snapshot.Sequence, false, null));
+        }
 
         private static Host.RuntimeMaintenanceEvent Event(
             string operationId,

@@ -86,9 +86,11 @@ public sealed class RuntimeMaintenanceCoordinator
 
     private sealed record StoredOperation(RuntimeMaintenanceState State, Host.RuntimeMaintenanceEvent? LastUpdate);
 
+    private bool NeedsRecovery => _state.IsRunning || (_state.StatusCode == "unknown" && _state.OperationId is not null);
+
     public async Task RestoreAsync(CancellationToken cancellationToken)
     {
-        if (_active is not null || (_restored && !_state.IsRunning)) return;
+        if (_active is not null || (_restored && !NeedsRecovery)) return;
         bool loadStored = !_restored;
         _restored = true;
         if (_operationStorePath is null || !File.Exists(_operationStorePath)) return;
@@ -109,7 +111,7 @@ public sealed class RuntimeMaintenanceCoordinator
             if (_state.OperationId is not { } operationId) return;
             _runtimeStatus.BeginMaintenance(operationId);
             if (_lastUpdate is not null) _runtimeStatus.ApplyMaintenance(_lastUpdate);
-            if (!_state.IsRunning)
+            if (!NeedsRecovery)
             {
                 _runtimeStatus.CompleteMaintenance(_state.StatusCode);
                 StateChanged?.Invoke();
@@ -137,7 +139,7 @@ public sealed class RuntimeMaintenanceCoordinator
         bool running = snapshot.OperationState is Host.RuntimeOperationState.Running or Host.RuntimeOperationState.Queued;
         bool retryable = snapshot.OperationState is Host.RuntimeOperationState.Failed or Host.RuntimeOperationState.Cancelled;
         SetState(_state with { IsRunning = running, StatusCode = snapshot.OperationState.ToString().ToLowerInvariant(),
-            CanCancel = false, CanRetry = retryable });
+            CanCancel = false, CanRetry = retryable, FailureReason = "", FailureCode = "" });
         if (!running) _runtimeStatus.CompleteMaintenance(_state.StatusCode);
     }
 
