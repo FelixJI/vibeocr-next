@@ -192,11 +192,14 @@ public sealed class MaintenanceTests
         settings.SetFeatureEnabled("gpu_runtime", true);
         await PreviewAndConfirmAsync(settings);
         string? previous = fake.LastOperationId;
+        settings.SetPendingAccelerator("cpu");
         await settings.RetryMaintenanceAsync(TestContext.Current.CancellationToken);
         Assert.Equal(previous, fake.LastOperationId);
         Assert.Equal("failed", settings.Maintenance.State.StatusCode);
         Assert.Equal(Host.Accelerator.NvidiaCuda, settings.Maintenance.Plan!.Accelerator);
         Assert.Equal(["gpu_runtime"], settings.Maintenance.Plan.RequestedComponentIds);
+        Assert.Equal("nvidia_cuda", settings.PendingBackend);
+        Assert.Equal(["gpu_runtime"], settings.PendingFeatureIds);
     }
 
     [Fact]

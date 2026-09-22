@@ -8,6 +8,7 @@ using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 using VibeOCR.App.Features.Maintenance;
 using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
+using Host = VibeOCR.Runtime.Contracts.Generated.Host;
 
 namespace VibeOCR.App.Features.Settings;
 
@@ -304,6 +305,17 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         try
         {
             await Maintenance.RetryAsync(cancellationToken);
+            if (Maintenance.Plan is not { } plan) return;
+            _selectionStaged = true;
+            PendingBackend = plan.Accelerator == Host.Accelerator.Cpu ? "cpu" : "nvidia_cuda";
+            if (_selection is not null)
+            {
+                HashSet<string> requested = (plan.RequestedComponentIds ?? []).ToHashSet(StringComparer.Ordinal);
+                string[] selected = _selection.Variants
+                    .Where(variant => variant.Accelerator == PendingBackend && requested.Contains(variant.ComponentId))
+                    .Select(variant => variant.FeatureId).ToArray();
+                Features = ProjectFeatures(_selection, PendingBackend, selected);
+            }
             Status = "已重新预览上次安装范围，请核对并确认。";
         }
         catch (OperationCanceledException)
