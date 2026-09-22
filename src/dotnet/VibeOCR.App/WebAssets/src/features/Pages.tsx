@@ -84,7 +84,37 @@ interface FeatureOptionState {
   readonly selected: boolean;
 }
 
+interface InstallPlanComponentState {
+  readonly componentId: string;
+  readonly action: string;
+  readonly dependencyState: string;
+  readonly reasonCodes: readonly string[];
+}
+
+interface InstallPlanBlockerState {
+  readonly code: string;
+  readonly componentId?: string;
+  readonly nextAction: string;
+}
+
+interface InstallPlanState {
+  readonly planId: string;
+  readonly expiresAt: string;
+  readonly accelerator: string;
+  readonly effectiveComponentIds: readonly string[];
+  readonly effectiveDownloadSourceIds: readonly string[];
+  readonly components: readonly InstallPlanComponentState[];
+  readonly blockers: readonly InstallPlanBlockerState[];
+  readonly cost: {
+    readonly downloadBytes: number | null;
+    readonly additionalDiskBytes: number | null;
+    readonly unknownReasonCodes: readonly string[];
+  };
+}
+
 interface MaintenanceState {
+  readonly failureReason?: string;
+  readonly failureCode?: string;
   readonly isRunning: boolean;
   readonly statusCode: string;
   readonly operationId?: string | null;
@@ -265,6 +295,137 @@ function maintenanceState(value: unknown): MaintenanceState | undefined {
   return state as MaintenanceState;
 }
 
+function planComponents(value: unknown): readonly InstallPlanComponentState[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(
+      (entry): entry is Record<string, unknown> =>
+        entry !== null && typeof entry === "object" && !Array.isArray(entry),
+    )
+    .map((entry) => ({
+      componentId: stringValue(entry.componentId) ?? "",
+      action: stringValue(entry.action) ?? "",
+      dependencyState: stringValue(entry.dependencyState) ?? "",
+      reasonCodes: stringValues(entry.reasonCodes),
+    }))
+    .filter((entry) => entry.componentId !== "");
+}
+
+function planBlockers(value: unknown): readonly InstallPlanBlockerState[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(
+      (entry): entry is Record<string, unknown> =>
+        entry !== null && typeof entry === "object" && !Array.isArray(entry),
+    )
+    .map((entry) => ({
+      code: stringValue(entry.code) ?? "",
+      componentId: stringValue(entry.componentId ?? undefined),
+      nextAction: stringValue(entry.nextAction) ?? "",
+    }))
+    .filter((entry) => entry.code !== "" && entry.nextAction !== "");
+}
+
+function planCost(value: unknown): InstallPlanState["cost"] {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return {
+      downloadBytes: null,
+      additionalDiskBytes: null,
+      unknownReasonCodes: [],
+    };
+  const cost = value as Record<string, unknown>;
+  return {
+    downloadBytes:
+      typeof cost.downloadBytes === "number" &&
+      Number.isFinite(cost.downloadBytes)
+        ? cost.downloadBytes
+        : null,
+    additionalDiskBytes:
+      typeof cost.additionalDiskBytes === "number" &&
+      Number.isFinite(cost.additionalDiskBytes)
+        ? cost.additionalDiskBytes
+        : null,
+    unknownReasonCodes: stringValues(cost.unknownReasonCodes),
+  };
+}
+
+function installPlan(value: unknown): InstallPlanState | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return undefined;
+  const plan = value as Record<string, unknown>;
+  const planId = stringValue(plan.planId);
+  const expiresAt = stringValue(plan.expiresAt);
+  const accelerator = stringValue(plan.accelerator);
+  if (!planId || !expiresAt || !accelerator) return undefined;
+  return {
+    planId,
+    expiresAt,
+    accelerator,
+    effectiveComponentIds: stringValues(plan.effectiveComponentIds),
+    effectiveDownloadSourceIds: stringValues(plan.effectiveDownloadSourceIds),
+    components: planComponents(plan.components),
+    blockers: planBlockers(plan.blockers),
+    cost: planCost(plan.cost),
+  };
+}
+
+function isPlanFresh(expiresAt: string): boolean {
+  const expiry = Date.parse(expiresAt);
+  return Number.isFinite(expiry) && expiry > Date.now();
+}
+
+const installActionLabels: Readonly<Record<string, string>> = {
+  retain: "保留",
+  install: "安装",
+  replace: "替换",
+  remove: "移除",
+};
+
+const dependencyStateLabels: Readonly<Record<string, string>> = {
+  satisfied: "依赖已满足",
+  pending: "依赖待安装",
+};
+
+const installReasonLabels: Readonly<Record<string, string>> = {
+  requested: "用户选择",
+  required_dependency: "必要依赖",
+  removed_by_selection: "按选择移除",
+};
+
+const unknownCostLabels: Readonly<Record<string, string>> = {
+  artifact_resolution_required: "下载量待解析",
+  candidate_disk_usage_unknown: "磁盘用量未知",
+  native_model_preparation_not_estimated: "原生模型首次准备另计",
+};
+
+function formatBytes(bytes: number): string {
+  if (bytes <= 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  const exponent = Math.min(
+    units.length - 1,
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+  );
+  const value = bytes / 1024 ** exponent;
+  const text =
+    value >= 100 || Number.isInteger(value)
+      ? value.toFixed(0)
+      : value.toFixed(1);
+  return `${text} ${units[exponent]}`;
+}
+
+function knownLabels(
+  codes: readonly string[],
+  labels: Readonly<Record<string, string>>,
+  unknownCodes: string[],
+): readonly string[] {
+  return codes.flatMap((code) => {
+    const label = labels[code];
+    if (label !== undefined) return [label];
+    unknownCodes.push(code);
+    return [];
+  });
+}
+
 function maintenanceStatusLabel(statusCode: string): string {
   const labels: Readonly<Record<string, string>> = {
     idle: "尚未执行维护操作",
@@ -331,7 +492,7 @@ function statusLabel(value: unknown, fallback: string): string {
     "pdf.empty": "尚未建立 PDF 会话",
     "qrcode.decoded": "识别完成",
     "qrcode.ready": "等待输入",
-    "settings.ready": "运行时设置已同步",
+    "settings.ready": "运行环境设置已同步",
     "settings.restartRequired": "更改将在重启后生效",
     "update.available": "发现可用更新",
     "update.current": "当前已是最新版本",
@@ -1145,11 +1306,28 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
         : "Ctrl+Alt+Q";
   const backend =
     typeof state.backend === "string" ? state.backend : "等待宿主同步";
+  const backendLabel =
+    backend === "cpu" || backend === "nvidia_cuda"
+      ? acceleratorLabel(backend)
+      : backend;
+  const maintenance = maintenanceState(state.maintenance);
+  const busy = maintenance?.isRunning === true;
+  const sources = sourceOptions(state.sources);
+  const serviceText = stringValue(state.serviceStatus) ?? "等待宿主同步";
+  const maintenanceParts = [
+    stringValue(state.maintenanceStatus),
+    stringValue(state.maintenancePhase),
+  ].filter((part): part is string => part !== undefined);
+  const maintenanceLine =
+    maintenanceParts.length > 0
+      ? maintenanceParts.join(" · ")
+      : "尚未执行维护操作";
+  const progressText = stringValue(state.progressText);
   return (
     <Workspace
       eyebrow="PREFERENCES / 05"
       title="设置"
-      description="管理快捷操作、运行时组件和下载来源。识别模式在对应任务中选择。"
+      description="管理快捷操作、运行环境与下载来源。识别模式在对应任务中选择。"
     >
       <div className="settings-grid">
         <Panel
@@ -1188,15 +1366,29 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
         </Panel>
         <Panel
           label="RUNTIME"
-          title="运行时与组件"
+          title="运行环境"
           className="settings-runtime-panel"
         >
           <div className="runtime-summary">
-            <strong>{backend}</strong>
+            <strong>{backendLabel}</strong>
+            <p>当前服务：{serviceText}</p>
+            <p>本次维护：{maintenanceLine}</p>
             <ProgressBar
-              value={booleanValue(state.isBusy) ? undefined : 1}
-              aria-label="运行时加载进度"
+              value={
+                typeof state.progressPercent === "number" &&
+                Number.isFinite(state.progressPercent)
+                  ? state.progressPercent / 100
+                  : undefined
+              }
+              aria-label="运行环境维护进度"
             />
+            {progressText ? <p>{progressText}</p> : null}
+            {stringValue(state.progressDetail) ? (
+              <details>
+                <summary>进度明细</summary>
+                <p>{stringValue(state.progressDetail)}</p>
+              </details>
+            ) : null}
           </div>
           <BundledCapabilities capabilities={viewState.capabilities} />
           <CapabilityGate
@@ -1212,30 +1404,36 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             pendingBackend={stringValue(state.pendingBackend) ?? "cpu"}
             features={featureOptions(state.features)}
             enabled={viewState.capabilities.includes("settings.selection")}
+            locked={busy}
             actions={actions}
           />
           <MaintenanceActions
-            maintenance={maintenanceState(state.maintenance)}
-            features={featureOptions(state.features)}
+            maintenance={maintenance}
+            plan={installPlan(state.installPlan)}
+            canPreview={state.canPreviewInstall === true}
             enabled={viewState.capabilities.includes("runtime.maintenance")}
+            sources={sources}
+            features={featureOptions(state.features)}
             actions={actions}
           />
           <p className="form-note">
-            {statusLabel(state.statusCode, "运行时状态已同步。")}
+            {stringValue(state.statusMessage) ??
+              statusLabel(state.statusCode, "运行环境状态已同步。")}
           </p>
         </Panel>
         <Panel
           label="DOWNLOADS"
-          title="组件下载"
+          title="下载来源"
           className="settings-download-panel"
         >
           <SourceSelector
-            sources={sourceOptions(state.sources)}
+            sources={sources}
             enabled={viewState.capabilities.includes("settings.selection")}
+            locked={busy}
             actions={actions}
           />
           <p className="form-note">
-            仅影响后续组件和模型下载；留空时使用 Runtime 默认源。
+            依赖包来源用于安装运行环境；模型原生来源由引擎使用。更换来源不会安装组件或提前准备模型。
           </p>
         </Panel>
       </div>
@@ -1246,10 +1444,12 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
 function SourceSelector({
   sources,
   enabled,
+  locked,
   actions,
 }: {
   readonly sources: readonly SourceOptionState[];
   readonly enabled: boolean;
+  readonly locked: boolean;
   readonly actions: AppActions;
 }) {
   const packageSources = sources.filter(
@@ -1268,6 +1468,7 @@ function SourceSelector({
         label="Python 包下载源"
         sources={packageSources}
         enabled={enabled}
+        locked={locked}
         actions={actions}
       />
       <SourceKindSelector
@@ -1275,6 +1476,7 @@ function SourceSelector({
         label="模型下载源"
         sources={modelSources}
         enabled={enabled}
+        locked={locked}
         actions={actions}
       />
     </>
@@ -1286,12 +1488,14 @@ function SourceKindSelector({
   label,
   sources,
   enabled,
+  locked,
   actions,
 }: {
   readonly kind: string;
   readonly label: string;
   readonly sources: readonly SourceOptionState[];
   readonly enabled: boolean;
+  readonly locked: boolean;
   readonly actions: AppActions;
 }) {
   if (sources.length === 0) return null;
@@ -1302,7 +1506,7 @@ function SourceKindSelector({
       <Select
         id={`source-${kind}`}
         value={selected?.id ?? ""}
-        disabled={!enabled}
+        disabled={!enabled || locked}
         onChange={(_, data) =>
           data.value === ""
             ? actions.run({ type: "settings.setSource", kind })
@@ -1328,21 +1532,23 @@ function AcceleratorFeatures({
   pendingBackend,
   features,
   enabled,
+  locked,
   actions,
 }: {
   readonly pendingBackend: string;
   readonly features: readonly FeatureOptionState[];
   readonly enabled: boolean;
+  readonly locked: boolean;
   readonly actions: AppActions;
 }) {
   return (
     <>
       <div className="setting-row">
-        <label htmlFor="accelerator">组件安装目标</label>
+        <label htmlFor="accelerator">推理设备</label>
         <Select
           id="accelerator"
           value={pendingBackend}
-          disabled={!enabled}
+          disabled={!enabled || locked}
           onChange={(_, data) =>
             actions.run({
               type: "settings.setAccelerator",
@@ -1354,13 +1560,17 @@ function AcceleratorFeatures({
           <option value="nvidia_cuda">CUDA GPU</option>
         </Select>
       </div>
+      <p className="form-note">
+        推理设备只决定运行环境的安装目标；选择 GPU
+        不代表识别引擎已安装，各引擎可用性在识别任务中选择时显示。
+      </p>
       {features.length > 0 ? (
         features.map((feature) => (
           <div className="setting-row" key={feature.featureId}>
             <Checkbox
               label={feature.displayName}
               checked={feature.selected}
-              disabled={!enabled}
+              disabled={!enabled || locked}
               onChange={(_, data) =>
                 actions.run({
                   type: "settings.setFeature",
@@ -1376,7 +1586,7 @@ function AcceleratorFeatures({
         ))
       ) : (
         <p className="form-note">
-          当前没有需要额外安装的识别能力；随包基础能力可直接使用。
+          当前推理设备没有需要额外勾选的组件；这不代表识别引擎已全部就绪。
         </p>
       )}
     </>
@@ -1385,40 +1595,31 @@ function AcceleratorFeatures({
 
 function MaintenanceActions({
   maintenance,
-  features,
+  plan,
+  canPreview,
   enabled,
+  sources,
+  features,
   actions,
 }: {
   readonly maintenance: MaintenanceState | undefined;
-  readonly features: readonly FeatureOptionState[];
+  readonly plan: InstallPlanState | undefined;
+  readonly canPreview: boolean;
   readonly enabled: boolean;
+  readonly sources: readonly SourceOptionState[];
+  readonly features: readonly FeatureOptionState[];
   readonly actions: AppActions;
 }) {
   const busy = maintenance?.isRunning === true;
-  const selectedFeatures = features.filter((feature) => feature.selected);
   return (
     <>
       <div className="setting-row">
         <Button
-          disabled={!enabled || busy}
-          onClick={() => {
-            const detail =
-              selectedFeatures.length > 0
-                ? selectedFeatures
-                    .map((feature) => feature.displayName)
-                    .join("、")
-                : "基础组件";
-            if (
-              window.confirm(
-                `将在线安装：${detail}。是否继续？（失败不会破坏现有基础组件）`,
-              )
-            ) {
-              actions.run({ type: "settings.installRuntime" });
-            }
-          }}
+          disabled={!enabled || busy || !canPreview}
+          onClick={() => actions.run({ type: "settings.installRuntime" })}
           icon={<Play aria-hidden="true" size={16} />}
         >
-          {selectedFeatures.length > 0 ? "安装所选能力" : "修复基础组件"}
+          预览安装范围
         </Button>
         {maintenance?.canCancel === true ? (
           <Button
@@ -1433,22 +1634,195 @@ function MaintenanceActions({
         ) : null}
         {maintenance?.canRetry === true ? (
           <Button
-            disabled={!enabled}
+            disabled={!enabled || busy}
             onClick={() =>
               actions.run({ type: "settings.retryRuntimeMaintenance" })
             }
             icon={<RefreshCw aria-hidden="true" size={16} />}
           >
-            重试（沿用上次选择）
+            重新预览上次选择
           </Button>
         ) : null}
       </div>
-      {maintenance ? (
+      {busy ? (
         <p className="form-note">
-          {maintenanceStatusLabel(maintenance.statusCode)}
+          维护进行中：推理设备、组件与下载来源的修改和确认已暂停。
         </p>
       ) : null}
+      {!canPreview ? (
+        <p className="form-note">
+          当前运行环境不支持安装预览，请先更新运行环境。
+        </p>
+      ) : null}
+      {plan ? (
+        <InstallPlanSection
+          plan={plan}
+          sources={sources}
+          features={features}
+          confirmDisabled={
+            !enabled || busy || !canPreview || plan.blockers.length > 0
+          }
+          actions={actions}
+        />
+      ) : null}
+      {maintenance ? (
+        <>
+          <p className="form-note">
+            {maintenanceStatusLabel(maintenance.statusCode)}
+          </p>
+          {maintenance.failureReason ? (
+            <p role="alert">{maintenance.failureReason}</p>
+          ) : null}
+          {maintenance.failureCode ? (
+            <details>
+              <summary>维护技术详情</summary>
+              <p>{maintenance.failureCode}</p>
+            </details>
+          ) : null}
+        </>
+      ) : null}
     </>
+  );
+}
+
+function displayNameFor(
+  id: string,
+  features: readonly FeatureOptionState[],
+): string {
+  return (
+    features.find((feature) => feature.featureId === id)?.displayName ?? id
+  );
+}
+
+function sourceNameFor(
+  id: string,
+  sources: readonly SourceOptionState[],
+): string {
+  return sources.find((source) => source.id === id)?.displayName ?? id;
+}
+
+function InstallPlanSection({
+  plan,
+  sources,
+  features,
+  confirmDisabled,
+  actions,
+}: {
+  readonly plan: InstallPlanState;
+  readonly sources: readonly SourceOptionState[];
+  readonly features: readonly FeatureOptionState[];
+  readonly confirmDisabled: boolean;
+  readonly actions: AppActions;
+}) {
+  const [clock, setClock] = useState(Date.now);
+  useEffect(() => {
+    const expiry = Date.parse(plan.expiresAt);
+    if (!Number.isFinite(expiry) || expiry <= Date.now()) return;
+    const timer = window.setTimeout(
+      () => setClock(Date.now()),
+      Math.min(Math.max(0, expiry - Date.now() + 1), 2_147_483_647),
+    );
+    return () => window.clearTimeout(timer);
+  }, [plan.expiresAt, clock]);
+  const expired = !isPlanFresh(plan.expiresAt);
+  const unknownCodes: string[] = [];
+  const componentLines = plan.components.map((component) => {
+    const reasons = knownLabels(
+      component.reasonCodes,
+      installReasonLabels,
+      unknownCodes,
+    );
+    const parts = [
+      installActionLabels[component.action] ?? component.action,
+      dependencyStateLabels[component.dependencyState] ??
+        component.dependencyState,
+      ...reasons,
+    ];
+    return `${displayNameFor(component.componentId, features)}：${parts.join("；")}`;
+  });
+  const sourceNames = plan.effectiveDownloadSourceIds.map((id) =>
+    sourceNameFor(id, sources),
+  );
+  const knownUnknownCosts = knownLabels(
+    plan.cost.unknownReasonCodes,
+    unknownCostLabels,
+    unknownCodes,
+  );
+  const downloadText =
+    plan.cost.downloadBytes === null
+      ? "未知"
+      : formatBytes(plan.cost.downloadBytes);
+  const diskText =
+    plan.cost.additionalDiskBytes === null
+      ? "未知"
+      : formatBytes(plan.cost.additionalDiskBytes);
+  const blockerCodes = plan.blockers.map((blocker) => blocker.code);
+  return (
+    <section className="install-plan" aria-label="运行环境安装计划">
+      <h3>核对安装范围</h3>
+      <p className="form-note">
+        推理设备：{plan.accelerator}。以下范围由 Backend
+        预览，确认前不会修改本机组件或停止当前服务。
+      </p>
+      <ul className="plan-components">
+        {componentLines.map((line, index) => (
+          <li key={plan.components[index]?.componentId ?? index}>{line}</li>
+        ))}
+      </ul>
+      <p className="form-note">
+        下载来源：
+        {sourceNames.length > 0 ? sourceNames.join("、") : "跟随 Backend 默认"}
+      </p>
+      <p className="form-note">
+        预计下载 {downloadText}；新增磁盘占用 {diskText}。
+      </p>
+      {knownUnknownCosts.length > 0 ? (
+        <ul className="plan-components">
+          {knownUnknownCosts.map((reason) => (
+            <li key={reason}>{reason}</li>
+          ))}
+        </ul>
+      ) : null}
+      {plan.blockers.map((blocker, index) => (
+        <p
+          key={`${blocker.code}-${blocker.componentId ?? index}`}
+          role="alert"
+          className="form-note"
+        >
+          无法安装
+          {blocker.componentId
+            ? ` ${displayNameFor(blocker.componentId, features)}`
+            : ""}
+          ：{blocker.nextAction}
+        </p>
+      ))}
+      {expired ? (
+        <p role="alert" className="form-note">
+          安装计划已过期，请重新预览后确认。
+        </p>
+      ) : null}
+      <Button
+        disabled={confirmDisabled || expired}
+        onClick={() =>
+          actions.run({
+            type: "settings.confirmRuntimeInstall",
+            planId: plan.planId,
+          })
+        }
+      >
+        确认此计划并安装
+      </Button>
+      {unknownCodes.length > 0 || blockerCodes.length > 0 ? (
+        <details className="plan-tech-details">
+          <summary>技术详情</summary>
+          <ul>
+            {[...new Set([...unknownCodes, ...blockerCodes])].map((code) => (
+              <li key={code}>{code}</li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+    </section>
   );
 }
 
@@ -1471,7 +1845,7 @@ function BundledCapabilities({
           </p>
         </div>
         <Badge appearance="outline">
-          {qrReady ? "随包可用" : "当前 Runtime 不可用"}
+          {qrReady ? "随包可用" : "当前运行环境不可用"}
         </Badge>
       </div>
     </div>

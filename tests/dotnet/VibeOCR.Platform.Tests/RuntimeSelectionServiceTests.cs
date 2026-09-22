@@ -194,6 +194,27 @@ public sealed class RuntimeSelectionServiceTests
         Assert.True(mineru.SupportsRelease);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MineruPreloadCapabilityFollowsRuntimeAcrossMinorVersions(bool supportsPreload)
+    {
+        Wire.RecognitionModeCatalog catalog = RecognitionCatalog();
+        catalog = catalog with
+        {
+            Modes = catalog.Modes.Select(mode => mode.Id == Wire.RecognitionModeId.MineruDocument
+                ? mode with { Lifecycle = mode.Lifecycle with { SupportsPreload = supportsPreload } }
+                : mode).ToArray(),
+        };
+        RuntimeSelectionService service = new(Health(
+            [RecognitionModesCapability], recognitionModes: catalog));
+
+        RecognitionModeOption mineru = service.SelectRecognitionMode("mineru_document");
+        Assert.Equal(supportsPreload, mineru.SupportsPreload);
+        Assert.Equal("MinerU", mineru.PipelineId);
+        Assert.Equal("process_keep_alive", mineru.LifecycleKind);
+    }
+
     [Fact]
     public void RecognitionModeCapabilityAndExecutionMappingFailClosed()
     {

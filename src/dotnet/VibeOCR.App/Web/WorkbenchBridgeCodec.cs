@@ -432,6 +432,12 @@ public static class WorkbenchBridgeCodec
       case ("settings", "installRuntime"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new InstallRuntimeCommand();
+      case ("settings", "confirmRuntimeInstall"):
+        EnsureObjectWithFields(arguments, new HashSet<string> { "planId" }, "command arguments");
+        string? planId = arguments.GetProperty("planId").GetString();
+        if (string.IsNullOrWhiteSpace(planId) || planId.Length > 256)
+          throw new WorkbenchBridgeProtocolException("安装计划标识无效。");
+        return new ConfirmRuntimeInstallCommand(planId);
       case ("settings", "cancelRuntimeMaintenance"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new CancelRuntimeMaintenanceCommand();
@@ -614,6 +620,24 @@ public static class WorkbenchBridgeCodec
       settings.PendingBackend,
       settings.CanSwitchBackend,
       features = settings.Features ?? [],
+      settings.StatusMessage,
+      settings.ServiceStatus,
+      settings.MaintenanceStatus,
+      settings.MaintenancePhase,
+      settings.ProgressText,
+      settings.ProgressDetail,
+      settings.ProgressPercent,
+      settings.CanPreviewInstall,
+      installPlan = settings.InstallPlan is not { } plan ? null : new
+      {
+        plan.PlanId, plan.ExpiresAt,
+        accelerator = plan.Accelerator == VibeOCR.Runtime.Contracts.Generated.Host.Accelerator.Cpu ? "CPU" : "NVIDIA CUDA",
+        plan.ProfileId, plan.EffectiveComponentIds, plan.EffectiveDownloadSourceIds,
+        components = plan.Components.Select(component => new
+        { component.ComponentId, component.Action, component.DependencyState, component.ReasonCodes }),
+        blockers = plan.Blockers.Select(blocker => new { blocker.Code, blocker.ComponentId, blocker.NextAction }),
+        cost = new { plan.Cost.DownloadBytes, plan.Cost.AdditionalDiskBytes, plan.Cost.UnknownReasonCodes },
+      },
       maintenance = settings.Maintenance is null ? null : new
       {
         settings.Maintenance.IsRunning,
@@ -625,6 +649,8 @@ public static class WorkbenchBridgeCodec
         effectiveSourceIds = settings.Maintenance.EffectiveSourceIds,
         settings.Maintenance.CanCancel,
         settings.Maintenance.CanRetry,
+        settings.Maintenance.FailureReason,
+        settings.Maintenance.FailureCode,
       },
     },
     UpdateWorkbenchState update => new

@@ -8,7 +8,7 @@ namespace VibeOCR.App.Tests;
 public sealed class StartupRuntimeInstallerTests
 {
     [Fact]
-    public async Task StartupEnsureSelectsBaseRuntimeOnly()
+    public async Task StartupEnsurePreservesInspectedScope()
     {
         var installer = new RecordingInstaller();
 
@@ -19,12 +19,14 @@ public sealed class StartupRuntimeInstallerTests
 
         Assert.NotNull(installer.Selection);
         Assert.NotNull(installer.Selection.InstallComponentIds);
-        Assert.Empty(installer.Selection.InstallComponentIds);
+        Assert.Equal(["mineru-cuda"], installer.Selection.InstallComponentIds);
         Assert.StartsWith("startup-", installer.OperationId, StringComparison.Ordinal);
     }
 
     private sealed class RecordingInstaller : IRuntimeInstallerClient
     {
+        public Task<RuntimeInstallSelection> ReadStartupSelectionAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(new RuntimeInstallSelection { InstallComponentIds = ["mineru-cuda"] });
         public RuntimeInstallSelection? Selection { get; private set; }
         public string? OperationId { get; private set; }
 

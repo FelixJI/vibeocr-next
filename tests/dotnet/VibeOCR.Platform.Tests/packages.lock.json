@@ -160,24 +160,24 @@
       "vibeocr.platform": {
         "type": "Project",
         "dependencies": {
-          "VibeOCR.Runtime.Client": "[2.8.0, 2.8.0]",
-          "VibeOCR.Runtime.Contracts": "[2.8.0, 2.8.0]"
+          "VibeOCR.Runtime.Client": "[2.8.4, 2.8.4]",
+          "VibeOCR.Runtime.Contracts": "[2.8.4, 2.8.4]"
         }
       },
       "VibeOCR.Runtime.Client": {
         "type": "CentralTransitive",
-        "requested": "[2.8.0, 2.8.0]",
-        "resolved": "2.8.0",
-        "contentHash": "hQl5c365Pt2lpwOxKzSxNYVd8HVUDnkrI2Bgg1JQVuIp+EtD8FXPg2yEg1mwo31+N5LXMWXd2WQRF7RjdNgu0g==",
+        "requested": "[2.8.4, 2.8.4]",
+        "resolved": "2.8.4",
+        "contentHash": "WFv5Yb1NEnMPY3H44Q+7hXQUtAO7Q8bzk9l/vTDEBhWLXcBU/TSHPl16c7n30kYbtqHUg/NSyHFNNM8YFj2tzw==",
         "dependencies": {
-          "VibeOCR.Runtime.Contracts": "2.8.0"
+          "VibeOCR.Runtime.Contracts": "2.8.4"
         }
       },
       "VibeOCR.Runtime.Contracts": {
         "type": "CentralTransitive",
-        "requested": "[2.8.0, 2.8.0]",
-        "resolved": "2.8.0",
-        "contentHash": "bPtPda8pV1LY2Qu8P+XiOXzSsm3cdDQ7oMcuctZv9Wd4rrKew5PSYzPvsbOf0vnPhw7twXJmakvKHKuX7gTdOA=="
+        "requested": "[2.8.4, 2.8.4]",
+        "resolved": "2.8.4",
+        "contentHash": "KhdVKzT4zTL2o/PLIwF1wSDT3Y0JNQz0xPF3Vy018VXH0wUrPncxP6jerU597W4xpfYqNJjWw7b7vRjkHFBt9Q=="
       }
     }
   }

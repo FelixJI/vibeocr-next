@@ -395,3 +395,27 @@ def test_load_product_layout_rejects_safe_but_noncanonical_paths(
 
     with pytest.raises(ProductLayoutError, match="layout.invalid-path: app.entry"):
         load_product_layout(product_root)
+
+
+@pytest.mark.parametrize("present", [True, False])
+def test_stage_requires_declared_paddle_environment_lock(
+    tmp_path: Path, present: bool
+) -> None:
+    inputs = _release_inputs(tmp_path)
+    backend = inputs["backend_release_dir"]
+    manifest_path = backend / "runtime-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["profiles"]["win-x64-cpu"]["paddle_environment"] = {
+        "lock": "paddle-cpu.lock"
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    product = tmp_path / "VibeOCR"
+    if not present:
+        with pytest.raises(ProductLayoutError, match="closure file is unavailable"):
+            stage_product_layout(product_root=product, **inputs)
+        return
+    (backend / "paddle-cpu.lock").write_text("paddlepaddle==3.2.0", encoding="utf-8")
+    stage_product_layout(product_root=product, **inputs)
+    assert (product / "runtime/backend/paddle-cpu.lock").read_text(
+        encoding="utf-8"
+    ) == "paddlepaddle==3.2.0"

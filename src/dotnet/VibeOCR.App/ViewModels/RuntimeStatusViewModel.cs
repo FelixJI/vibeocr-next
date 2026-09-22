@@ -1,6 +1,8 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Globalization;
+using System.Text.Json;
 using Http = VibeOCR.Contracts.HttpV2;
 using Host = VibeOCR.Runtime.Contracts.Generated.Host;
 
@@ -43,11 +45,16 @@ public sealed class RuntimeComponentItem : INotifyPropertyChanged
 /// </summary>
 public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
 {
+    private string? _operationId;
+    private long _sequence = -1;
+    private bool _terminal;
+    private string _serviceStatus = "等待运行时检查";
     private string _profile = "正在识别运行时配置";
     private string _backendVersion = "未知";
     private string _status = "等待运行时检查";
     private string _phase = "尚未开始";
     private string _progressText = "";
+    private string _progressDetail = "";
     private string _sourceIdentity = "";
     private double _progressValue;
     private bool _isProgressIndeterminate = true;
@@ -61,6 +68,7 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
         get => _backendVersion;
         private set => SetField(ref _backendVersion, value);
     }
+    public string ServiceStatus { get => _serviceStatus; private set => SetField(ref _serviceStatus, value); }
     public string Status { get => _status; private set => SetField(ref _status, value); }
     public string Phase { get => _phase; private set => SetField(ref _phase, value); }
     public string ProgressText
@@ -78,6 +86,7 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
         get => _isProgressIndeterminate;
         private set => SetField(ref _isProgressIndeterminate, value);
     }
+    public string ProgressDetail { get => _progressDetail; private set => SetField(ref _progressDetail, value); }
     public string SourceIdentity
     {
         get => _sourceIdentity;
@@ -96,13 +105,65 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
                 "等待检查")));
     }
 
+    public void ReportServicePausedForMaintenance() =>
+        ServiceStatus = "运行环境维护中，识别服务已暂停。";
+
+    public void ReportServiceUnavailable()
+    {
+        ServiceStatus = "运行环境暂不可用，请重新检查或打开诊断与修复。";
+        if (_operationId is null) Status = ServiceStatus;
+    }
+
+    public void BeginMaintenance(string operationId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationId);
+        _operationId = operationId;
+        _sequence = -1;
+        _terminal = false;
+        Phase = "尚未开始";
+        ProgressValue = 0;
+        ProgressText = "";
+        ProgressDetail = "";
+        IsProgressIndeterminate = true;
+    }
+
+    public void CompleteMaintenance(string state)
+    {
+        _terminal = true;
+        Status = state switch
+        {
+            "succeeded" => "维护操作已完成",
+            "cancelled" => "运行时安装已取消",
+            "failed" => "运行时安装失败",
+            _ => "维护结果待核实",
+        };
+        if (state == "succeeded") { ProgressValue = 100; IsProgressIndeterminate = false; }
+        else { ProgressValue = 0; IsProgressIndeterminate = true; }
+    }
+
+    private bool Accept(string operationId, long sequence)
+    {
+        if (_operationId is not null && _operationId != operationId) return false;
+        if (_terminal || sequence <= _sequence) return false;
+        _operationId = operationId;
+        _sequence = sequence;
+        return true;
+    }
+
     public void ApplyMaintenance(Host.RuntimeMaintenanceEvent update)
     {
         ArgumentNullException.ThrowIfNull(update);
         Host.RuntimeMaintenanceSnapshot snapshot = update.Snapshot;
+        if (!Accept(snapshot.OperationId, snapshot.Sequence)) return;
         Phase = PhaseText(snapshot.Phase);
+        ProgressDetail = ProgressDetailText(update.MessageArgs);
         Status = OperationStateText(snapshot.OperationState);
         ApplyProgress(snapshot.Progress);
+        if (snapshot.OperationState is Host.RuntimeOperationState.Succeeded or Host.RuntimeOperationState.Failed or Host.RuntimeOperationState.Cancelled)
+        {
+            CompleteMaintenance(snapshot.OperationState.ToString().ToLowerInvariant());
+            return;
+        }
 
         if (snapshot.Phase == Host.RuntimeMaintenancePhase.VerifyRuntime)
         {
@@ -139,25 +200,48 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
                 ActualVersion(component) ?? component.Version,
                 ComponentStateText(component))));
 
-        Status = snapshot.ServiceState switch
+        ServiceStatus = snapshot.ServiceState switch
         {
             Http.RuntimeServiceState.Ready => "运行时已就绪",
             Http.RuntimeServiceState.Degraded => "运行时降级",
             Http.RuntimeServiceState.Maintenance => "正在维护运行时",
             _ => "运行时状态未知",
         };
-        if (snapshot.Maintenance is { } maintenance)
+        if (_operationId is null) Status = ServiceStatus;
+        if (snapshot.Maintenance is { } maintenance &&
+            Accept(maintenance.OperationId, maintenance.Sequence))
         {
+            Status = OperationStateText(Enum.Parse<Host.RuntimeOperationState>(maintenance.OperationState.ToString()));
             Phase = PhaseText(maintenance.Phase);
             ApplyProgress(maintenance.Progress);
+            if (maintenance.OperationState is Http.RuntimeOperationState.Succeeded or Http.RuntimeOperationState.Failed or Http.RuntimeOperationState.Cancelled)
+                CompleteMaintenance(maintenance.OperationState.ToString().ToLowerInvariant());
         }
-        else
+    }
+
+    private static string ProgressDetailText(IReadOnlyDictionary<string, JsonElement>? arguments)
+    {
+        if (arguments is null) return "";
+        List<string> parts = [];
+        foreach ((string key, string label) in new[]
         {
-            Phase = "维护任务已完成";
-            ProgressText = "";
-            ProgressValue = 100;
-            IsProgressIndeterminate = false;
+            ("elapsed_seconds", "已耗时（秒）"), ("last_activity_seconds", "距最近活动（秒）"),
+            ("cache_bytes", "复用缓存（bytes）"), ("download_bytes", "实际下载（bytes）"),
+        })
+        {
+            if (arguments.TryGetValue(key, out JsonElement value) &&
+                double.TryParse(value.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out double measured) &&
+                double.IsFinite(measured) && measured >= 0)
+                parts.Add($"{label}：{measured.ToString("0.###", CultureInfo.InvariantCulture)}");
         }
+        foreach ((string key, string label) in new[] { ("package", "依赖包"), ("step", "子步骤") })
+        {
+            if (arguments.TryGetValue(key, out JsonElement value) && value.ValueKind == JsonValueKind.String &&
+                value.GetString() is { Length: > 0 and <= 120 } identifier &&
+                identifier.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.'))
+                parts.Add($"{label}：{identifier}");
+        }
+        return string.Join("；", parts);
     }
 
     private void ReplaceComponents(IEnumerable<RuntimeComponentItem> components)
@@ -174,14 +258,18 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
         if (progress is null)
         {
             ProgressText = "";
+            ProgressValue = 0;
             IsProgressIndeterminate = true;
             return;
         }
+        string unit = progress.Unit == Host.ProgressUnit.Bytes ? "bytes"
+            : progress.Unit == Host.ProgressUnit.Steps ? "步" : "项";
         if (progress.Unit == Host.ProgressUnit.Steps || progress.Total is not > 0)
         {
             ProgressText = progress.Total is > 0
-                ? $"{progress.Current} / {progress.Total.Value} 步"
-                : $"已完成 {progress.Current} 步";
+                ? $"{progress.Current} / {progress.Total.Value} {unit}"
+                : $"已完成 {progress.Current} {unit} · 总量未知";
+            ProgressValue = 0;
             IsProgressIndeterminate = true;
             return;
         }
@@ -199,14 +287,18 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
         if (progress is null)
         {
             ProgressText = "";
+            ProgressValue = 0;
             IsProgressIndeterminate = true;
             return;
         }
+        string unit = progress.Unit == Http.ProgressUnit.Bytes ? "bytes"
+            : progress.Unit == Http.ProgressUnit.Steps ? "步" : "项";
         if (progress.Unit == Http.ProgressUnit.Steps || progress.Total is not > 0)
         {
             ProgressText = progress.Total is > 0
-                ? $"{progress.Current} / {progress.Total.Value} 步"
-                : $"已完成 {progress.Current} 步";
+                ? $"{progress.Current} / {progress.Total.Value} {unit}"
+                : $"已完成 {progress.Current} {unit} · 总量未知";
+            ProgressValue = 0;
             IsProgressIndeterminate = true;
             return;
         }

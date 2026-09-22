@@ -139,6 +139,7 @@ public sealed record SetTaskEngineCommand(string? Engine) : WorkbenchCommand;
 
 /// <summary>Start ensure with the staged explicit component/source intent.</summary>
 public sealed record InstallRuntimeCommand : WorkbenchCommand;
+public sealed record ConfirmRuntimeInstallCommand(string PlanId) : WorkbenchCommand;
 
 /// <summary>Cancel the running durable maintenance operation.</summary>
 public sealed record CancelRuntimeMaintenanceCommand : WorkbenchCommand;
@@ -266,7 +267,16 @@ public sealed record SettingsWorkbenchState(
   IReadOnlyList<SettingsFeatureOptionState>? Features = null,
   SettingsMaintenanceState? Maintenance = null,
   string HotkeyStatus = "",
-  string PendingHotkey = "") : WorkbenchState
+  string PendingHotkey = "",
+  string StatusMessage = "",
+  string ServiceStatus = "",
+  string MaintenanceStatus = "",
+  string MaintenancePhase = "",
+  string ProgressText = "",
+  string ProgressDetail = "",
+  double? ProgressPercent = null,
+  bool CanPreviewInstall = false,
+  VibeOCR.Runtime.Contracts.Generated.Host.RuntimeInstallPlan? InstallPlan = null) : WorkbenchState
 {
   public override string Scope => "settings";
 }
@@ -285,7 +295,9 @@ public sealed record SettingsMaintenanceState(
   IReadOnlyList<string> RequestedSourceIds,
   IReadOnlyList<string> EffectiveSourceIds,
   bool CanCancel,
-  bool CanRetry);
+  bool CanRetry,
+  string FailureReason = "",
+  string FailureCode = "");
 
 /// <summary>Catalog package-index source projected as a single-select option.</summary>
 public sealed record SettingsSourceOptionState(

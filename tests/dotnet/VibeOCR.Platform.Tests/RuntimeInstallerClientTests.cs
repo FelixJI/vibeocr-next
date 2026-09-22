@@ -12,6 +12,56 @@ namespace VibeOCR.Platform.Tests;
 public sealed class RuntimeInstallerClientTests
 {
     [Fact]
+    public void PublishedSdkReadsMeasuredDownloadProgressBeyondTwoGiB()
+    {
+        const string json = """{"unit":"bytes","current":3221225472,"total":4294967296}""";
+        Host.ProgressSnapshot? progress = JsonSerializer.Deserialize<Host.ProgressSnapshot>(json);
+        Assert.NotNull(progress);
+        Assert.Equal(3221225472L, (long)progress.Current);
+        Assert.Equal(4294967296L, (long?)progress.Total);
+    }
+
+    [Fact]
+    public async Task ConfirmedPlanCannotBeOverriddenByConfiguredAccelerator()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-plan-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string manifest = Path.Combine(root, "runtime-manifest.json");
+            await File.WriteAllTextAsync(manifest,
+                """{"capabilities":["runtime.maintenance.v2","runtime.install-plan.v1","runtime.capability-metadata.v1"]}""",
+                TestContext.Current.CancellationToken);
+            JsonNode envelope = JsonNode.Parse(V2LaunchEnvelope("ensure", "runtime.install-plan.v1"))!;
+            JsonNode snapshot = JsonNode.Parse(Snapshot(3))!;
+            snapshot["operation_state"] = "succeeded";
+            snapshot["plan_id"] = "plan-cuda";
+            envelope["maintenance"] = snapshot;
+            var runner = new StubRunner(new RuntimeInstallerProcessResult(0, envelope.ToJsonString(), ""));
+            var client = new RuntimeInstallerClient(Configuration() with { RuntimeManifest = manifest }, runner);
+            await client.ConfirmInstallAsync("plan-cuda", "stable-op", cancellationToken: TestContext.Current.CancellationToken);
+            JsonElement request = Request(Assert.IsType<ProcessStartInfo>(runner.LastStartInfo));
+            Assert.Equal("plan-cuda", request.GetProperty("plan_id").GetString());
+            Assert.Equal("stable-op", request.GetProperty("operation_id").GetString());
+            Assert.False(request.TryGetProperty("accelerator", out _));
+            Assert.False(request.TryGetProperty("install_component_ids", out _));
+            Assert.False(request.TryGetProperty("download_source_ids", out _));
+        }
+        finally { TestDirectory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public async Task OldRuntimeRejectsPreviewWithoutStartingAnInstaller()
+    {
+        var runner = LaunchRunner();
+        var client = new RuntimeInstallerClient(Configuration(), runner);
+        Assert.False(client.SupportsInstallPlan);
+        await Assert.ThrowsAsync<NotSupportedException>(() => client.PreviewInstallAsync(
+            new RuntimeInstallSelection { InstallComponentIds = [] }, "cpu", TestContext.Current.CancellationToken));
+        Assert.Null(runner.LastStartInfo);
+    }
+
+    [Fact]
     public async Task EnsureUsesOnlyInstallerLaunchContract()
     {
         var runner = new StubRunner(
@@ -693,6 +743,7 @@ public sealed class RuntimeInstallerClientTests
             JsonElement command = Request(runner.StartInfos[1]);
             Assert.Equal("cancel", command.GetProperty("command").GetString());
             Assert.Equal("cancel-stable-op", command.GetProperty("command_id").GetString());
+            Assert.False(command.TryGetProperty("expected_sequence", out _));
             Assert.Equal(4, runner.StartInfos.Count);
             Assert.False(runner.OwnedToken.IsCancellationRequested);
         }
@@ -1203,12 +1254,12 @@ public sealed class RuntimeInstallerClientTests
             {
                 return Task.FromResult(new RuntimeInstallerProcessResult(
                     0,
-                    $$"""{"protocol_version":2,"ok":true,"request_kind":"observe","operation_id":"stable-op","snapshot":{"operation_id":"stable-op","sequence":3,"operation":"ensure","operation_state":"cancelled","phase":"install_profile","profile_id":"win-x64-cpu","updated_at":"2026-08-05T00:00:02Z"},"events":[{{MaintenanceEvent(1)}}],"oldest_sequence":1,"through_sequence":1,"more":true,"replay_expires_at":null}""",
+                    $$"""{"protocol_version":2,"ok":true,"request_kind":"observe","operation_id":"stable-op","snapshot":{"operation_id":"stable-op","sequence":3,"operation":"ensure","operation_state":"cancelled","phase":"install_profile","profile_id":"win-x64-cpu","updated_at":"2026-08-05T00:00:02Z"},"events":[{{MaintenanceEvent(2)}}],"oldest_sequence":1,"through_sequence":2,"more":true,"replay_expires_at":null}""",
                     string.Empty));
             }
             return Task.FromResult(new RuntimeInstallerProcessResult(
                 0,
-                $$"""{"protocol_version":2,"ok":true,"request_kind":"observe","operation_id":"stable-op","snapshot":{"operation_id":"stable-op","sequence":3,"operation":"ensure","operation_state":"cancelled","phase":"install_profile","profile_id":"win-x64-cpu","updated_at":"2026-08-05T00:00:02Z"},"events":[{{MaintenanceEvent(2)}},{{MaintenanceEvent(3)}}],"oldest_sequence":1,"through_sequence":3,"more":false,"replay_expires_at":null}""",
+                $$"""{"protocol_version":2,"ok":true,"request_kind":"observe","operation_id":"stable-op","snapshot":{"operation_id":"stable-op","sequence":3,"operation":"ensure","operation_state":"cancelled","phase":"install_profile","profile_id":"win-x64-cpu","updated_at":"2026-08-05T00:00:02Z"},"events":[{{MaintenanceEvent(3)}}],"oldest_sequence":1,"through_sequence":3,"more":false,"replay_expires_at":null}""",
                 string.Empty));
         }
 
@@ -1219,6 +1270,7 @@ public sealed class RuntimeInstallerClientTests
         {
             StartInfos.Add(startInfo);
             OwnedToken = cancellationToken;
+            standardOutputLine?.Invoke(MaintenanceEvent(1));
             Started.TrySetResult();
             return _operation.Task;
         }

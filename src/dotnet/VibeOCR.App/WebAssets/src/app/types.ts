@@ -54,6 +54,7 @@ export type AppActionType =
   | "settings.setAccelerator"
   | "settings.setFeature"
   | "settings.installRuntime"
+  | "settings.confirmRuntimeInstall"
   | "settings.cancelRuntimeMaintenance"
   | "settings.retryRuntimeMaintenance"
   | "recognition.setTaskEngine"

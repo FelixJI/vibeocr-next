@@ -16,6 +16,124 @@ namespace VibeOCR.App.Tests;
 /// </summary>
 public sealed class MaintenanceTests
 {
+    private static async Task PreviewAndConfirmAsync(SettingsViewModel settings)
+    {
+        await settings.PreviewInstallAsync(TestContext.Current.CancellationToken);
+        await settings.ConfirmInstallAsync(settings.Maintenance.Plan!.PlanId, TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task PreviewDoesNotStartInstallationAndConfirmUsesPreviewIdentity()
+    {
+        var fake = new FakeRuntimeInstallerClient();
+        var settings = await LoadedSettingsAsync(fake, sources: null);
+        await settings.PreviewInstallAsync(TestContext.Current.CancellationToken);
+        Assert.NotNull(settings.Maintenance.Plan);
+        Assert.Null(fake.LastOperationId);
+        await settings.ConfirmInstallAsync("unrelated-plan", TestContext.Current.CancellationToken);
+        Assert.Null(fake.LastOperationId);
+        Assert.Contains("重新预览", settings.Status);
+    }
+
+    [Fact]
+    public async Task InvalidRecoveryRecordDoesNotStartAnotherInstallation()
+    {
+        string store = Path.GetTempFileName();
+        try
+        {
+            await File.WriteAllTextAsync(store, "{\"State\":null}", TestContext.Current.CancellationToken);
+            var fake = new FakeRuntimeInstallerClient();
+            var coordinator = new RuntimeMaintenanceCoordinator(() => fake,
+                new VibeOCR.App.ViewModels.RuntimeStatusViewModel(), operationStorePath: store);
+            await coordinator.RestoreAsync(TestContext.Current.CancellationToken);
+            Assert.Equal("unknown", coordinator.State.StatusCode);
+            Assert.False(coordinator.State.CanRetry);
+            Assert.Null(fake.LastOperationId);
+        }
+        finally { File.Delete(store); }
+    }
+
+    [Fact]
+    public async Task SuccessfulMaintenanceRefreshesDeviceAndRecognitionCatalog()
+    {
+        var installer = new FakeRuntimeInstallerClient();
+        var inference = new SelectionHealthClient(null);
+        var settings = new SettingsViewModel(inference, installerFactory: () => installer,
+            restoreService: () => { inference.Accelerator = RuntimeAccelerator.NvidiaCuda; return Task.CompletedTask; });
+        await settings.LoadSnapshotAsync(TestContext.Current.CancellationToken);
+        var previous = settings.RecognitionSelection;
+        settings.SetPendingAccelerator("nvidia_cuda");
+        settings.SetFeatureEnabled("gpu_runtime", true);
+
+        await PreviewAndConfirmAsync(settings);
+        // Recognition callers use this cached snapshot without an explicit settings refresh.
+        await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+        Assert.Equal("nvidia_cuda", settings.Backend);
+        Assert.Equal("nvidia_cuda", settings.PendingBackend);
+        Assert.NotSame(previous, settings.RecognitionSelection);
+        Assert.Equal(2, inference.HealthCalls);
+        Assert.Equal("succeeded", settings.Maintenance.State.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task UnknownRecoveryCanBeCheckedAgainAfterTransientFailure(bool restart)
+    {
+        string store = Path.GetTempFileName();
+        try
+        {
+            var state = RuntimeMaintenanceState.Idle with { IsRunning = true, StatusCode = "running", OperationId = "recover-me" };
+            await File.WriteAllTextAsync(store, System.Text.Json.JsonSerializer.Serialize(new { State = state }),
+                TestContext.Current.CancellationToken);
+            var installer = new FakeRuntimeInstallerClient { FailNextObserve = true };
+            var status = new VibeOCR.App.ViewModels.RuntimeStatusViewModel();
+            var coordinator = new RuntimeMaintenanceCoordinator(() => installer, status, operationStorePath: store);
+            await coordinator.RestoreAsync(TestContext.Current.CancellationToken);
+            Assert.Equal("unknown", coordinator.State.StatusCode);
+            if (restart) coordinator = new RuntimeMaintenanceCoordinator(() => installer, status, operationStorePath: store);
+
+            await coordinator.RestoreAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(2, installer.ObserveCalls);
+            Assert.Equal("succeeded", coordinator.State.StatusCode);
+            Assert.Empty(coordinator.State.FailureReason);
+            Assert.Empty(coordinator.State.FailureCode);
+            Assert.Null(installer.LastOperationId);
+        }
+        finally { File.Delete(store); }
+    }
+
+    [Fact]
+    public async Task ChangingSelectionDiscardsAnInflightPreview()
+    {
+        var fake = new FakeRuntimeInstallerClient { PreviewGate = new() };
+        var settings = await LoadedSettingsAsync(fake, sources: null);
+        Task preview = settings.PreviewInstallAsync(TestContext.Current.CancellationToken);
+        settings.SetPendingAccelerator("nvidia_cuda");
+        fake.PreviewGate.SetResult();
+        await preview;
+        Assert.Null(settings.Maintenance.Plan);
+    }
+
+    [Fact]
+    public async Task MaintenanceRemainsBusyUntilServiceRestorationFinishes()
+    {
+        var fake = new FakeRuntimeInstallerClient();
+        var restoreStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var restoreDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var settings = new SettingsViewModel(new SelectionHealthClient(null), installerFactory: () => fake,
+            restoreService: async () => { restoreStarted.SetResult(); await restoreDone.Task; });
+        await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+        Task install = PreviewAndConfirmAsync(settings);
+        await restoreStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        Assert.True(settings.Maintenance.State.IsRunning);
+        settings.SetPendingAccelerator("nvidia_cuda");
+        Assert.Equal("cpu", settings.PendingBackend);
+        restoreDone.SetResult();
+        await install;
+        Assert.False(settings.Maintenance.State.IsRunning);
+    }
+
     [Fact]
     public async Task InstallSendsExplicitIntentAndEchoesRequestedEffective()
     {
@@ -25,7 +143,7 @@ public sealed class MaintenanceTests
         settings.SetFeatureEnabled("document_parsing", true);
         settings.SetFeatureEnabled("gpu_runtime", true);
 
-        await settings.InstallPendingAsync(CancellationToken.None);
+        await PreviewAndConfirmAsync(settings);
 
         Assert.NotNull(fake.LastIntent);
         Assert.Equal(
@@ -51,7 +169,7 @@ public sealed class MaintenanceTests
         var fake = new FakeRuntimeInstallerClient();
         var settings = await LoadedSettingsAsync(fake, sources: null);
 
-        await settings.InstallPendingAsync(CancellationToken.None);
+        await PreviewAndConfirmAsync(settings);
 
         Assert.NotNull(fake.LastIntent!.InstallComponentIds);
         Assert.Empty(fake.LastIntent.InstallComponentIds);
@@ -69,7 +187,7 @@ public sealed class MaintenanceTests
         Assert.Contains("未知功能", settings.Status);
         Assert.Empty(settings.PendingFeatureIds);
         // 未暂存任何功能 → 显式 base-only,而不是猜测安装范围。
-        await settings.InstallPendingAsync(CancellationToken.None);
+        await PreviewAndConfirmAsync(settings);
 
         Assert.NotNull(fake.LastIntent!.InstallComponentIds);
         Assert.Empty(fake.LastIntent.InstallComponentIds);
@@ -84,14 +202,15 @@ public sealed class MaintenanceTests
         string? failedOperationId = null;
         fake.EnsureStarted = operationId => failedOperationId = operationId;
 
-        await settings.InstallPendingAsync(CancellationToken.None);
+        await PreviewAndConfirmAsync(settings);
         Assert.Equal("failed", settings.Maintenance.State.StatusCode);
         Assert.True(settings.Maintenance.State.CanRetry);
 
         fake.FailNextInstall = false;
         await settings.RetryMaintenanceAsync(CancellationToken.None);
-        Assert.Equal(failedOperationId, fake.RetrySourceOperationId);
-        Assert.Null(fake.RetrySelection);
+        Assert.Equal(failedOperationId, fake.LastOperationId);
+        Assert.Equal("failed", settings.Maintenance.State.StatusCode);
+        await settings.ConfirmInstallAsync(settings.Maintenance.Plan!.PlanId, TestContext.Current.CancellationToken);
         Assert.Equal("succeeded", settings.Maintenance.State.StatusCode);
         Assert.False(settings.Maintenance.State.CanRetry);
     }
@@ -101,7 +220,7 @@ public sealed class MaintenanceTests
     {
         var fake = new FakeRuntimeInstallerClient { HangOnInstall = true };
         var settings = await LoadedSettingsAsync(fake, sources: null);
-        Task install = settings.InstallPendingAsync(CancellationToken.None);
+        Task install = PreviewAndConfirmAsync(settings);
         await fake.InstallStarted.Task.WaitAsync(
             TimeSpan.FromSeconds(10),
             TestContext.Current.CancellationToken);
@@ -115,43 +234,22 @@ public sealed class MaintenanceTests
     }
 
     [Fact]
-    public async Task RetryCancellationReturnsToTerminalStateAndCanRunAgain()
+    public async Task RetryPreviewsTheFailedIntentWithoutReinstalling()
     {
         var fake = new FakeRuntimeInstallerClient { FailNextInstall = true };
         var settings = await LoadedSettingsAsync(fake, sources: null);
-        await settings.InstallPendingAsync(CancellationToken.None);
-        fake.HangOnRetry = true;
-
-        Task retry = settings.RetryMaintenanceAsync(CancellationToken.None);
-        await fake.RetryStarted.Task.WaitAsync(
-            TimeSpan.FromSeconds(10),
-            TestContext.Current.CancellationToken);
-        settings.CancelMaintenance();
-        await retry;
-
-        Assert.Equal("cancelled", settings.Maintenance.State.StatusCode);
-        Assert.True(settings.Maintenance.State.CanRetry);
-        fake.HangOnRetry = false;
-        await settings.RetryMaintenanceAsync(CancellationToken.None);
-        Assert.Equal("succeeded", settings.Maintenance.State.StatusCode);
-    }
-
-    [Fact]
-    public async Task RetryUnexpectedFailureReturnsToTerminalStateAndCanRunAgain()
-    {
-        var fake = new FakeRuntimeInstallerClient { FailNextInstall = true };
-        var settings = await LoadedSettingsAsync(fake, sources: null);
-        await settings.InstallPendingAsync(CancellationToken.None);
-        fake.FailNextRetryUnexpectedly = true;
-
-        await Assert.ThrowsAsync<IOException>(() =>
-            settings.RetryMaintenanceAsync(CancellationToken.None));
+        settings.SetPendingAccelerator("nvidia_cuda");
+        settings.SetFeatureEnabled("gpu_runtime", true);
+        await PreviewAndConfirmAsync(settings);
+        string? previous = fake.LastOperationId;
+        settings.SetPendingAccelerator("cpu");
+        await settings.RetryMaintenanceAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(previous, fake.LastOperationId);
         Assert.Equal("failed", settings.Maintenance.State.StatusCode);
-        Assert.True(settings.Maintenance.State.CanRetry);
-
-        fake.FailNextRetryUnexpectedly = false;
-        await settings.RetryMaintenanceAsync(CancellationToken.None);
-        Assert.Equal("succeeded", settings.Maintenance.State.StatusCode);
+        Assert.Equal(Host.Accelerator.NvidiaCuda, settings.Maintenance.Plan!.Accelerator);
+        Assert.Equal(["gpu_runtime"], settings.Maintenance.Plan.RequestedComponentIds);
+        Assert.Equal("nvidia_cuda", settings.PendingBackend);
+        Assert.Equal(["gpu_runtime"], settings.PendingFeatureIds);
     }
 
     [Fact]
@@ -226,7 +324,7 @@ public sealed class MaintenanceTests
         return settings;
     }
 
-    private sealed class SelectionHealthClient : InferenceClientStub
+    private sealed class SelectionHealthClient : InferenceClientStub, IInferenceClient
     {
         private readonly IReadOnlyList<string>? _sources;
 
@@ -235,8 +333,22 @@ public sealed class MaintenanceTests
         public override Task<ResidencyStatus> GetResidencyAsync(CancellationToken cancellationToken) =>
             Task.FromResult(new ResidencyStatus());
 
-        public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken) =>
-            Task.FromResult(MaintenanceHealth());
+        public RuntimeAccelerator Accelerator { get; set; } = RuntimeAccelerator.Cpu;
+        public int HealthCalls { get; private set; }
+
+        public Task<RuntimeStatusSnapshot> GetRuntimeStatusAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new RuntimeStatusSnapshot
+            {
+                InstanceId = "sup-test", ServiceState = RuntimeServiceState.Ready, BackendVersion = "0.14.0",
+                Profile = new RuntimeProfileStatus { ProfileId = Accelerator == RuntimeAccelerator.Cpu ? "win-x64-cpu" : "win-x64-cu126",
+                    Accelerator = Accelerator, Components = [] },
+            });
+
+        public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
+        {
+            HealthCalls++;
+            return Task.FromResult(MaintenanceHealth());
+        }
 
         public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>
             Task.FromResult(new SettingsSnapshot
@@ -318,10 +430,33 @@ public sealed class MaintenanceTests
 
     private sealed class FakeRuntimeInstallerClient : IRuntimeInstallerClient
     {
+        public bool SupportsInstallPlan => true;
+        public TaskCompletionSource? PreviewGate { get; init; }
+        public async Task<Host.RuntimeInstallPlan> PreviewInstallAsync(RuntimeInstallSelection selection, string accelerator, CancellationToken cancellationToken = default)
+        {
+            LastIntent = selection;
+            if (PreviewGate is not null) await PreviewGate.Task.WaitAsync(cancellationToken);
+            return new Host.RuntimeInstallPlan
+            {
+                PlanId = "test-plan", ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(10).ToString("O"),
+                Accelerator = accelerator == "cpu" ? Host.Accelerator.Cpu : Host.Accelerator.NvidiaCuda,
+                ProfileId = "win-x64-cpu", RequestedComponentIds = selection.InstallComponentIds,
+                EffectiveComponentIds = selection.InstallComponentIds ?? [],
+                RequestedDownloadSourceIds = selection.DownloadSourceIds, EffectiveDownloadSourceIds = selection.DownloadSourceIds ?? [],
+                Source = new Host.RuntimeSourceIdentity { BackendVersion = "0.14.0", BackendSourceSha = "test", RuntimeManifestSha256 = "test", ProtocolVersion = "2.8.3", ProtocolManifestSha256 = "test" },
+                Components = [], Blockers = [], Cost = new Host.RuntimeInstallPlanCost { DownloadBytes = null, AdditionalDiskBytes = null, UnknownReasonCodes = [] },
+            };
+        }
+        public Task<RuntimeLaunch> ConfirmInstallAsync(string planId, string operationId,
+            IProgress<Host.RuntimeMaintenanceEvent>? progress = null, CancellationToken cancellationToken = default) =>
+            EnsureAsync(LastIntent, operationId, progress, cancellationToken);
+
         public RuntimeInstallSelection? LastIntent { get; private set; }
         public string? LastOperationId { get; private set; }
         public string? RetrySourceOperationId { get; private set; }
         public RuntimeInstallSelection? RetrySelection { get; private set; }
+        public bool FailNextObserve { get; set; }
+        public int ObserveCalls { get; private set; }
         public bool FailNextInstall { get; set; }
         public bool HangOnInstall { get; set; }
         public bool HangOnRetry { get; set; }
@@ -449,8 +584,18 @@ public sealed class MaintenanceTests
             string operationId,
             long afterSequence,
             int limit = 128,
-            CancellationToken cancellationToken = default) =>
-            throw new NotImplementedException();
+            CancellationToken cancellationToken = default)
+        {
+            ObserveCalls++;
+            if (FailNextObserve)
+            {
+                FailNextObserve = false;
+                throw new RuntimeInstallerException("temporary observe failure");
+            }
+            var snapshot = Event(operationId, Host.RuntimeOperationState.Succeeded, [], []).Snapshot;
+            return Task.FromResult(new RuntimeMaintenanceObserveEnvelope(2, true, "maintenance_observe", operationId,
+                snapshot, [], 0, snapshot.Sequence, false, null));
+        }
 
         private static Host.RuntimeMaintenanceEvent Event(
             string operationId,
@@ -461,12 +606,12 @@ public sealed class MaintenanceTests
             ProtocolVersion = 2,
             EventVersion = 1,
             EventType = Host.RuntimeMaintenanceEventType.Snapshot,
-            Sequence = 1,
+            Sequence = state == Host.RuntimeOperationState.Running ? 1 : 2,
             Operation = Host.RuntimeHostOperation.Ensure,
             Snapshot = new Host.RuntimeMaintenanceSnapshot
             {
                 OperationId = operationId,
-                Sequence = 1,
+                Sequence = state == Host.RuntimeOperationState.Running ? 1 : 2,
                 Operation = Host.RuntimeHostOperation.Ensure,
                 OperationState = state,
                 Phase = Host.RuntimeMaintenancePhase.InstallProfile,

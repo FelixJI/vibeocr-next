@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -600,7 +600,7 @@ describe("AppShell", () => {
 
     expect(screen.getByText("Hugging Face")).toBeInTheDocument();
 
-    const accelerator = screen.getByLabelText("组件安装目标");
+    const accelerator = screen.getByLabelText("推理设备");
     expect(accelerator).toHaveValue("nvidia_cuda");
     await user.selectOptions(accelerator, "cpu");
     expect(actions.run).toHaveBeenCalledWith({
@@ -659,6 +659,7 @@ describe("AppShell", () => {
               selected: true,
             },
           ],
+          canPreviewInstall: true,
           maintenance: {
             isRunning: false,
             statusCode: "failed",
@@ -677,18 +678,17 @@ describe("AppShell", () => {
 
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
 
-    expect(screen.getByText("当前 Runtime 不可用")).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "安装所选能力" }));
-    expect(confirmSpy).toHaveBeenCalledWith(
-      expect.stringContaining("文档解析（PaddleOCR/MinerU）"),
+    expect(screen.getByText("当前运行环境不可用")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "预览安装范围" }));
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(actions.run).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "settings.confirmRuntimeInstall" }),
     );
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.installRuntime",
     });
 
-    await user.click(
-      screen.getByRole("button", { name: "重试（沿用上次选择）" }),
-    );
+    await user.click(screen.getByRole("button", { name: "重新预览上次选择" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.retryRuntimeMaintenance",
     });
@@ -697,6 +697,416 @@ describe("AppShell", () => {
     expect(screen.queryByText(/runtime_host/)).not.toBeInTheDocument();
     expect(screen.queryByText(/请求下载源/)).not.toBeInTheDocument();
     confirmSpy.mockRestore();
+    unmount();
+  });
+
+  it("renders the install plan in Chinese and confirms only the displayed planId", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 32,
+      route: "settings",
+      theme: "light",
+      capabilities: ["settings.selection", "runtime.maintenance"],
+      features: {
+        settings: {
+          theme: "light",
+          isBusy: false,
+          statusCode: "settings.ready",
+          backend: "nvidia_cuda",
+          startupEnabled: false,
+          hotkey: "Ctrl+Alt+Q",
+          pendingBackend: "nvidia_cuda",
+          sources: [
+            {
+              kind: "package_index",
+              id: "tuna-pypi",
+              displayName: "TUNA PyPI 镜像",
+              selected: true,
+            },
+          ],
+          features: [
+            {
+              featureId: "document_parsing",
+              displayName: "文档解析（PaddleOCR/MinerU）",
+              accelerator: "nvidia_cuda",
+              selected: true,
+            },
+          ],
+          canPreviewInstall: true,
+          maintenance: {
+            isRunning: false,
+            statusCode: "idle",
+            operationId: null,
+            requestedComponentIds: [],
+            effectiveComponentIds: [],
+            requestedSourceIds: [],
+            effectiveSourceIds: [],
+            canCancel: false,
+            canRetry: false,
+          },
+          installPlan: {
+            planId: "plan-42",
+            expiresAt: "2099-01-01T00:00:00.000Z",
+            accelerator: "NVIDIA CUDA",
+            profileId: "profile-default",
+            effectiveComponentIds: ["document_parsing", "runtime_host"],
+            effectiveDownloadSourceIds: ["tuna-pypi"],
+            components: [
+              {
+                componentId: "document_parsing",
+                action: "install",
+                dependencyState: "satisfied",
+                reasonCodes: ["requested"],
+              },
+              {
+                componentId: "runtime_host",
+                action: "retain",
+                dependencyState: "pending",
+                reasonCodes: ["required_dependency"],
+              },
+              {
+                componentId: "legacy_engine",
+                action: "remove",
+                dependencyState: "satisfied",
+                reasonCodes: ["removed_by_selection", "future_reason_code"],
+              },
+            ],
+            blockers: [],
+            cost: {
+              downloadBytes: 0,
+              additionalDiskBytes: 3221225472,
+              unknownReasonCodes: [
+                "artifact_resolution_required",
+                "future_cost_code",
+              ],
+            },
+          },
+        },
+      },
+      runtimeLabel: "原生宿主已连接",
+    };
+
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+
+    expect(
+      screen.getByText(
+        "文档解析（PaddleOCR/MinerU）：安装；依赖已满足；用户选择",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText("runtime_host：保留；依赖待安装；必要依赖"),
+    ).toBeVisible();
+    expect(
+      screen.getByText("legacy_engine：移除；依赖已满足；按选择移除"),
+    ).toBeVisible();
+    expect(screen.getByText("下载来源：TUNA PyPI 镜像")).toBeVisible();
+    expect(
+      screen.getByText("预计下载 0 B；新增磁盘占用 3 GiB。"),
+    ).toBeVisible();
+    expect(screen.getByText("下载量待解析")).toBeVisible();
+
+    await user.click(screen.getByText("技术详情"));
+    expect(screen.getByText("future_reason_code")).toBeVisible();
+    expect(screen.getByText("future_cost_code")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "预览安装范围" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.installRuntime",
+    });
+    expect(actions.run).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "settings.confirmRuntimeInstall" }),
+    );
+
+    await user.click(screen.getByRole("button", { name: "确认此计划并安装" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.confirmRuntimeInstall",
+      planId: "plan-42",
+    });
+    unmount();
+  });
+
+  it("blocks confirming blocked, expired, busy or unsupported install plans", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const base: AppViewState = {
+      connected: true,
+      revision: 33,
+      route: "settings",
+      theme: "light",
+      capabilities: ["settings.selection", "runtime.maintenance"],
+      features: {
+        settings: {
+          theme: "light",
+          isBusy: false,
+          statusCode: "settings.ready",
+          backend: "nvidia_cuda",
+          startupEnabled: false,
+          hotkey: "Ctrl+Alt+Q",
+          pendingBackend: "nvidia_cuda",
+          sources: [
+            {
+              kind: "package_index",
+              id: "tuna-pypi",
+              displayName: "TUNA PyPI 镜像",
+              selected: true,
+            },
+          ],
+          features: [
+            {
+              featureId: "document_parsing",
+              displayName: "文档解析（PaddleOCR/MinerU）",
+              accelerator: "nvidia_cuda",
+              selected: true,
+            },
+          ],
+          canPreviewInstall: true,
+          maintenance: {
+            isRunning: false,
+            statusCode: "idle",
+            operationId: null,
+            requestedComponentIds: [],
+            effectiveComponentIds: [],
+            requestedSourceIds: [],
+            effectiveSourceIds: [],
+            canCancel: false,
+            canRetry: false,
+          },
+          installPlan: {
+            planId: "plan-43",
+            expiresAt: "2099-01-01T00:00:00.000Z",
+            accelerator: "NVIDIA CUDA",
+            profileId: "profile-default",
+            effectiveComponentIds: ["document_parsing"],
+            effectiveDownloadSourceIds: ["tuna-pypi"],
+            components: [
+              {
+                componentId: "document_parsing",
+                action: "install",
+                dependencyState: "satisfied",
+                reasonCodes: ["requested"],
+              },
+            ],
+            blockers: [],
+            cost: {
+              downloadBytes: 1024,
+              additionalDiskBytes: null,
+              unknownReasonCodes: [],
+            },
+          },
+        },
+      },
+      runtimeLabel: "原生宿主已连接",
+    };
+
+    const { rerender, unmount } = render(
+      <App actions={actions} viewState={base} />,
+    );
+    const confirm = screen.getByRole("button", { name: "确认此计划并安装" });
+    expect(confirm).toBeEnabled();
+    await user.click(confirm);
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.confirmRuntimeInstall",
+      planId: "plan-43",
+    });
+
+    const settingsBase = base.features.settings as Record<string, unknown> & {
+      readonly installPlan: Record<string, unknown>;
+    };
+    const settings = (patch: Record<string, unknown>): AppViewState => ({
+      ...base,
+      revision: base.revision + 1,
+      features: {
+        settings: {
+          ...settingsBase,
+          ...patch,
+          installPlan: {
+            ...settingsBase.installPlan,
+            ...(patch.installPlan as Record<string, unknown> | undefined),
+          },
+        },
+      },
+    });
+
+    rerender(
+      <App
+        actions={actions}
+        viewState={settings({
+          installPlan: {
+            blockers: [
+              {
+                code: "disk_space_insufficient",
+                componentId: "document_parsing",
+                nextAction: "请清理磁盘后重新预览",
+              },
+            ],
+          },
+        })}
+      />,
+    );
+    expect(confirm).toBeDisabled();
+    expect(
+      screen.getByText(
+        "无法安装 文档解析（PaddleOCR/MinerU）：请清理磁盘后重新预览",
+      ),
+    ).toBeVisible();
+    await user.click(screen.getByText("技术详情"));
+    expect(screen.getByText("disk_space_insufficient")).toBeVisible();
+
+    vi.useFakeTimers();
+    try {
+      rerender(
+        <App
+          actions={actions}
+          viewState={settings({
+            installPlan: {
+              expiresAt: new Date(Date.now() + 1_000).toISOString(),
+            },
+          })}
+        />,
+      );
+      expect(confirm).toBeEnabled();
+      await act(async () => {
+        vi.advanceTimersByTime(1_001);
+      });
+      expect(confirm).toBeDisabled();
+    } finally {
+      vi.useRealTimers();
+    }
+    rerender(
+      <App
+        actions={actions}
+        viewState={settings({
+          installPlan: { expiresAt: "2020-01-01T00:00:00.000Z" },
+        })}
+      />,
+    );
+    expect(confirm).toBeDisabled();
+    expect(
+      screen.getByText("安装计划已过期，请重新预览后确认。"),
+    ).toBeVisible();
+
+    rerender(
+      <App
+        actions={actions}
+        viewState={settings({
+          maintenance: {
+            isRunning: true,
+            statusCode: "running",
+            operationId: "op-9",
+            requestedComponentIds: ["document_parsing"],
+            effectiveComponentIds: ["document_parsing"],
+            requestedSourceIds: [],
+            effectiveSourceIds: [],
+            canCancel: true,
+            canRetry: true,
+          },
+        })}
+      />,
+    );
+    expect(confirm).toBeDisabled();
+    expect(screen.getByRole("button", { name: "预览安装范围" })).toBeDisabled();
+    expect(screen.getByLabelText("推理设备")).toBeDisabled();
+    expect(screen.getByLabelText("Python 包下载源")).toBeDisabled();
+    expect(
+      screen.getByRole("checkbox", {
+        name: "文档解析（PaddleOCR/MinerU）",
+      }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText(
+        /维护进行中：推理设备、组件与下载来源的修改和确认已暂停/,
+      ),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "取消安装" })).toBeEnabled();
+
+    rerender(
+      <App
+        actions={actions}
+        viewState={settings({ canPreviewInstall: false })}
+      />,
+    );
+    expect(confirm).toBeDisabled();
+    expect(screen.getByText(/当前运行环境不支持安装预览/)).toBeVisible();
+    unmount();
+  });
+
+  it("keeps the current service state separate from a failed maintenance outcome", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 34,
+      route: "settings",
+      theme: "light",
+      capabilities: ["settings.selection", "runtime.maintenance"],
+      features: {
+        settings: {
+          theme: "light",
+          isBusy: false,
+          statusCode: "settings.ready",
+          backend: "cpu",
+          startupEnabled: false,
+          hotkey: "Ctrl+Alt+Q",
+          pendingBackend: "cpu",
+          sources: [],
+          features: [],
+          serviceStatus: "识别服务已就绪。",
+          maintenanceStatus: "上次安装失败：下载中断。",
+          maintenancePhase: "",
+          progressText: "",
+          progressPercent: null,
+          canPreviewInstall: true,
+          maintenance: {
+            isRunning: false,
+            statusCode: "failed",
+            operationId: "op-8",
+            requestedComponentIds: ["document_parsing"],
+            effectiveComponentIds: ["document_parsing"],
+            requestedSourceIds: [],
+            effectiveSourceIds: [],
+            canCancel: false,
+            canRetry: true,
+          },
+        },
+      },
+      runtimeLabel: "原生宿主已连接",
+    };
+
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+
+    expect(screen.getByText("当前服务：识别服务已就绪。")).toBeVisible();
+    expect(
+      screen.getByText("本次维护：上次安装失败：下载中断。"),
+    ).toBeVisible();
+    expect(screen.getByText("维护操作失败")).toBeVisible();
+    expect(screen.getByRole("progressbar")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/维护操作已完成|维护任务已完成|100%/),
+    ).not.toBeInTheDocument();
+
+    const retry = screen.getByRole("button", { name: "重新预览上次选择" });
+    expect(retry).toBeEnabled();
+    await user.click(retry);
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.retryRuntimeMaintenance",
+    });
     unmount();
   });
 
