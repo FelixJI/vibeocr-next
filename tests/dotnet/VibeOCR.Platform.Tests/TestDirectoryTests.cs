@@ -5,7 +5,7 @@ namespace VibeOCR.Platform.Tests;
 public sealed class TestDirectoryTests
 {
   [Fact]
-  public async Task DeleteWaitsForAReleasedSharingViolation()
+  public void DeleteWaitsForAReleasedSharingViolation()
   {
     string root = Path.Combine(
         Path.GetTempPath(),
@@ -17,14 +17,17 @@ public sealed class TestDirectoryTests
         FileMode.CreateNew,
         FileAccess.ReadWrite,
         FileShare.None);
-    Task release = Task.Run(async () =>
+    // 锁的释放只允许依赖内核唤醒：thread-pool 饥饿会拖后 Task.Delay 的延续，
+    // 在 CI 高负载下曾超过 Delete 约 1 秒的重试预算。
+    Thread release = new(() =>
     {
-      await Task.Delay(150, TestContext.Current.CancellationToken);
-      await locked.DisposeAsync();
-    }, TestContext.Current.CancellationToken);
+      Thread.Sleep(150);
+      locked.Dispose();
+    });
+    release.Start();
 
     TestDirectory.Delete(root, recursive: true);
-    await release;
+    release.Join();
 
     Assert.False(Directory.Exists(root));
   }
