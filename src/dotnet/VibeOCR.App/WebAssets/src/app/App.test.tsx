@@ -165,7 +165,6 @@ describe("AppShell", () => {
           itemCount: 2,
           completedCount: 1,
           failedCount: 0,
-          concurrency: 2,
           items: [
             {
               id: "11111111-1111-1111-1111-111111111111",
@@ -188,6 +187,10 @@ describe("AppShell", () => {
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
     expect(screen.getByText("发票一.png")).toBeVisible();
     expect(screen.getByText("合计 42 元")).toBeVisible();
+    expect(screen.getByText("批次由识别服务自动调度")).toBeVisible();
+    expect(
+      screen.queryByRole("combobox", { name: "批量并发数" }),
+    ).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "下移 发票一.png" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "batch.moveItem",

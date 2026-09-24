@@ -216,7 +216,6 @@ public sealed class DesktopWorkbenchCommandHandler :
         ClearBatchCommand => ClearBatch(),
         MoveBatchItemCommand move => MoveBatchItem(move),
         RemoveBatchItemCommand remove => RemoveBatchItem(remove),
-        SetBatchConcurrencyCommand concurrency => SetBatchConcurrency(concurrency),
         SetBatchWindowCommand window => SetBatchWindow(window),
         OpenPdfCommand => await OpenPdfAsync(cancellationToken),
         OpenDroppedPdfCommand dropped => await OpenDroppedPdfAsync(
@@ -670,19 +669,6 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     batch ??= batchFactory();
     batch.Remove(command.ItemId);
-    return BatchState(batch);
-  }
-
-  private BatchWorkbenchState SetBatchConcurrency(
-    SetBatchConcurrencyCommand command)
-  {
-    batch ??= batchFactory();
-    if (batch.IsRunning)
-    {
-      throw new InvalidOperationException(
-        "Batch concurrency cannot change while a batch is running.");
-    }
-    batch.Concurrency = command.Concurrency;
     return BatchState(batch);
   }
 
@@ -1312,7 +1298,6 @@ public sealed class DesktopWorkbenchCommandHandler :
         $"batch.item.{item.State.ToString().ToLowerInvariant()}",
         item.Result is null ? null : Truncate(item.Result.Text, 120)))
       .ToArray(),
-    viewModel.Concurrency,
     batchWindowStart);
   }
 

@@ -29,7 +29,6 @@ export type AppActionType =
   | "batch.clear"
   | "batch.moveItem"
   | "batch.removeItem"
-  | "batch.setConcurrency"
   | "batch.setWindow"
   | "pdf.open"
   | "pdf.rotate"

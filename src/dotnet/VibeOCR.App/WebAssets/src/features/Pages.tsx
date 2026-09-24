@@ -708,7 +708,6 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
   const running = booleanValue(state.isRunning);
   const items = batchItems(state.items);
   const windowStart = Math.max(0, numberValue(state.windowStart));
-  const concurrency = Math.max(1, numberValue(state.concurrency) || 1);
   return (
     <Workspace
       eyebrow="QUEUE / 02"
@@ -769,27 +768,8 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
                     ? "队列已就绪"
                     : "等待输入"}
             </Badge>
-            <label className="concurrency-control">
-              <span>并发</span>
-              <Select
-                aria-label="批量并发数"
-                disabled={running}
-                value={String(concurrency)}
-                onChange={(event) =>
-                  actions.run({
-                    type: "batch.setConcurrency",
-                    concurrency: Number(event.currentTarget.value),
-                  })
-                }
-              >
-                {[1, 2, 3, 4, 6, 8].map((value) => (
-                  <option key={value} value={value}>
-                    {value}
-                  </option>
-                ))}
-              </Select>
-            </label>
           </div>
+          <p className="batch-scheduling-note">批次由识别服务自动调度</p>
           {itemCount === 0 ? (
             <EmptyStage
               title="队列为空"

@@ -71,8 +71,6 @@ public sealed record MoveBatchItemCommand(Guid ItemId, int Delta) : WorkbenchCom
 
 public sealed record RemoveBatchItemCommand(Guid ItemId) : WorkbenchCommand;
 
-public sealed record SetBatchConcurrencyCommand(int Concurrency) : WorkbenchCommand;
-
 public sealed record SetBatchWindowCommand(int Start) : WorkbenchCommand;
 
 public sealed record OpenPdfCommand : WorkbenchCommand;
@@ -210,7 +208,6 @@ public sealed record BatchWorkbenchState(
   int CompletedCount,
   int FailedCount,
   IReadOnlyList<BatchWorkbenchItem>? Items = null,
-  int Concurrency = 1,
   int WindowStart = 0) : WorkbenchState
 {
   public override string Scope => "batch";
