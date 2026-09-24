@@ -31,7 +31,6 @@ public static class WorkbenchBridgeCodec
   private static readonly HashSet<string> HotkeyArgumentFields = ["hotkey"];
   private static readonly HashSet<string> BatchMoveArgumentFields = ["itemId", "delta"];
   private static readonly HashSet<string> BatchItemArgumentFields = ["itemId"];
-  private static readonly HashSet<string> ConcurrencyArgumentFields = ["concurrency"];
   private static readonly HashSet<string> PagesArgumentFields = ["pages"];
   private static readonly HashSet<string> StartArgumentFields = ["start"];
   private static readonly HashSet<string> UrlArgumentFields = ["url"];
@@ -299,15 +298,6 @@ public static class WorkbenchBridgeCodec
       case ("batch", "removeItem"):
         EnsureObjectWithFields(arguments, BatchItemArgumentFields, "command arguments");
         return new RemoveBatchItemCommand(ParseGuidArgument(arguments, "itemId"));
-      case ("batch", "setConcurrency"):
-        EnsureObjectWithFields(arguments, ConcurrencyArgumentFields, "command arguments");
-        int concurrency = arguments.GetProperty("concurrency").GetInt32();
-        if (concurrency is < 1 or > 8)
-        {
-          throw new WorkbenchBridgeProtocolException(
-            "Workbench batch concurrency is invalid.");
-        }
-        return new SetBatchConcurrencyCommand(concurrency);
       case ("batch", "setWindow"):
         return new SetBatchWindowCommand(ParseWindowStart(arguments));
       case ("pdf", "open"):
@@ -585,7 +575,6 @@ public static class WorkbenchBridgeCodec
       batch.CompletedCount,
       batch.FailedCount,
       items = batch.Items ?? [],
-      batch.Concurrency,
       batch.WindowStart,
     },
     PdfWorkbenchState pdf => new

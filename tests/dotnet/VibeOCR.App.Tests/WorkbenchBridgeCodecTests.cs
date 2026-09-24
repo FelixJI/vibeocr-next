@@ -227,6 +227,16 @@ public sealed class WorkbenchBridgeCodecTests
     Assert.DoesNotContain("path", json, StringComparison.OrdinalIgnoreCase);
   }
 
+  [Fact]
+  public void ParseCommandRejectsRemovedBatchConcurrencyAction()
+  {
+    Guid sessionId = Guid.NewGuid();
+    Assert.Throws<WorkbenchBridgeProtocolException>(() =>
+      WorkbenchBridgeCodec.ParseCommand(
+        CommandJson(sessionId, "batch", "setConcurrency", "{\"concurrency\":2}"),
+        sessionId));
+  }
+
   [Theory]
   [InlineData("docx")]
   [InlineData("xlsx")]
@@ -283,8 +293,7 @@ public sealed class WorkbenchBridgeCodecTests
       1,
       1,
       0,
-      [new BatchWorkbenchItem(Guid.NewGuid(), "invoice.png", "batch.item.completed", "合计 42")],
-      2);
+      [new BatchWorkbenchItem(Guid.NewGuid(), "invoice.png", "batch.item.completed", "合计 42")]);
     string json = WorkbenchBridgeCodec.SerializeState(
       sessionId,
       new WorkbenchStateEnvelope(4, "batch", WorkbenchStateChange.Replace, batch));
@@ -292,7 +301,7 @@ public sealed class WorkbenchBridgeCodecTests
     using JsonDocument document = JsonDocument.Parse(json);
     JsonElement state = document.RootElement.GetProperty("payload").GetProperty("state");
     Assert.Equal("invoice.png", state.GetProperty("items")[0].GetProperty("name").GetString());
-    Assert.Equal(2, state.GetProperty("concurrency").GetInt32());
+    Assert.False(state.TryGetProperty("concurrency", out _));
     Assert.DoesNotContain("path", json, StringComparison.OrdinalIgnoreCase);
     Assert.DoesNotContain("base64", json, StringComparison.OrdinalIgnoreCase);
   }
@@ -307,7 +316,7 @@ public sealed class WorkbenchBridgeCodecTests
         5,
         "batch",
         WorkbenchStateChange.Replace,
-        new BatchWorkbenchState(false, 80, 0, 0, [], 2, 40)));
+        new BatchWorkbenchState(false, 80, 0, 0, [], 40)));
     using JsonDocument batch = JsonDocument.Parse(batchJson);
     Assert.Equal(
       40,
@@ -346,7 +355,7 @@ public sealed class WorkbenchBridgeCodecTests
         99,
         "batch",
         WorkbenchStateChange.Replace,
-        new BatchWorkbenchState(false, 500, 40, 0, items, 8)));
+        new BatchWorkbenchState(false, 500, 40, 0, items)));
 
     Assert.True(Encoding.UTF8.GetByteCount(json) < WorkbenchBridgeCodec.MaxMessageBytes);
   }

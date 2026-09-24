@@ -27,7 +27,6 @@ public sealed class BatchViewModel(
     public int CompletedCount { get => _completedCount; private set => Set(ref _completedCount, value); }
     public int FailedCount { get => _failedCount; private set => Set(ref _failedCount, value); }
     public int TotalCount => Items.Count;
-    public int Concurrency { get; set; } = 1;
     public string Progress => $"{CompletedCount + FailedCount}/{TotalCount}";
 
     public void SetRecognitionMode(RecognitionModeOption? mode) => _recognitionMode = mode;
