@@ -292,7 +292,11 @@ def test_real_pip_resolves_hash_locked_wheel_with_observable_activity(
     reporter = _reporter(tmp_path / "state", events.append)
     monkeypatch.setattr(installer, "_RESOLVE_NETWORK_TIMEOUT_SECONDS", 0.2)
     monkeypatch.setattr(installer, "_RESOLVE_NETWORK_RETRIES", 1)
-    monkeypatch.setattr(installer, "_RESOLVE_TOTAL_TIMEOUT_SECONDS", 10)
+    # The outer guard must sit far above worst-case child startup: gate spawn
+    # plus fresh-venv pip import can exceed 8s on a cold CI runner, and a 10s
+    # guard then fires before pip's own 0.2s network timeout can exit nonzero.
+    # Supervisor deadline semantics stay pinned by this module's dedicated tests.
+    monkeypatch.setattr(installer, "_RESOLVE_TOTAL_TIMEOUT_SECONDS", 60)
     # The product runtime has pip; uv's development .venv intentionally does not.
     resolver_venv = tmp_path / "resolver-venv"
     subprocess.run(
