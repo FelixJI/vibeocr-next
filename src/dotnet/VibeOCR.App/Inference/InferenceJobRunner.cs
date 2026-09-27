@@ -35,7 +35,8 @@ internal sealed class InferenceJobRunner(IInferenceClient inference)
         IReadOnlyList<InferenceUploadInput> inputs,
         IReadOnlyDictionary<string, JsonElement>? options,
         CancellationToken cancellationToken = default,
-        OcrEngine? engine = null)
+        OcrEngine? engine = null,
+        MineruConfig? mineru = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(pipelineId);
         ArgumentNullException.ThrowIfNull(inputs);
@@ -68,7 +69,7 @@ internal sealed class InferenceJobRunner(IInferenceClient inference)
         var request = new SubmitRequest
         {
             RequestId = Guid.NewGuid().ToString("N"),
-            Kind = JobKind.Recognition,
+            Kind = pipelineId == "MinerU" ? JobKind.MineruParse : JobKind.Recognition,
             Priority = priority,
             Pipeline = new PipelineSelection
             {
@@ -79,6 +80,9 @@ internal sealed class InferenceJobRunner(IInferenceClient inference)
                 // Task-level engine override; only the plain-text OCR pipeline
                 // accepts it and null omits the wire field (Backend default).
                 Engine = engine,
+                // Typed MinerU 4 configuration (ocr.mineru-config.v1); null
+                // omits the wire field and keeps the legacy payload shape.
+                Mineru = mineru,
             },
             Items = submitItems,
         };

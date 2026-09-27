@@ -74,6 +74,28 @@ public sealed class DeferredInferenceClientTests
     }
 
     [Fact]
+    public async Task PendingPreloadDelegatesAfterSupervisorAttach()
+    {
+        var deferred = new DeferredInferenceClient();
+        deferred.MarkStartupPending();
+        var request = new Wire.RuntimePreloadRequest
+        {
+            Pipelines = ["MinerU"],
+            RecognitionModes = [Wire.RecognitionModeId.MineruDocument],
+        };
+        Task<ResidencyStatus> pending = deferred.PreloadRuntimeAsync(
+            request, TestContext.Current.CancellationToken);
+        Assert.False(pending.IsCompleted);
+
+        var inner = new StubInferenceClient();
+        deferred.Attach(inner);
+        ResidencyStatus result = await pending;
+
+        Assert.Same(request, inner.LastPreloadRequest);
+        Assert.Equal(300, result.DefaultTtlSeconds);
+    }
+
+    [Fact]
     public async Task DetachRestoresThrowingStateAsync()
     {
         var deferred = new DeferredInferenceClient();
@@ -168,6 +190,7 @@ public sealed class DeferredInferenceClientTests
         public IReadOnlyDictionary<string, SubmitUpload>? LastUploads { get; private set; }
         public (string JobId, int AfterSequence)? LastObserve { get; private set; }
         public JobCommand? LastCommand { get; private set; }
+        public Wire.RuntimePreloadRequest? LastPreloadRequest { get; private set; }
         public Uri BaseUrl => new("http://127.0.0.1:1");
 
         public Task<JobRef> SubmitAsync(
@@ -215,6 +238,13 @@ public sealed class DeferredInferenceClientTests
 
         public Task<ResidencyStatus> GetResidencyAsync(CancellationToken cancellationToken)
             => Task.FromResult(new ResidencyStatus { DefaultTtlSeconds = DefaultTtl });
+
+        public Task<ResidencyStatus> PreloadRuntimeAsync(
+            Wire.RuntimePreloadRequest request, CancellationToken cancellationToken)
+        {
+            LastPreloadRequest = request;
+            return GetResidencyAsync(cancellationToken);
+        }
 
         public Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken)
             => Task.FromResult(new SettingsSnapshot());

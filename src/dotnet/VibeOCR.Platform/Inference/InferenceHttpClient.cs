@@ -112,6 +112,20 @@ public sealed class InferenceHttpClient : IInferenceClient
         return await ReadAsync<ResidencyStatus>(response, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<ResidencyStatus> PreloadRuntimeAsync(
+        Wire.RuntimePreloadRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        using StringContent content = _runtime.CreateJsonContent(request);
+        using HttpResponseMessage response = await _runtime.PostAsync(
+            RuntimeOperationPaths.PreloadRuntime, content, cancellationToken)
+            .ConfigureAwait(false);
+        await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+        return await ReadAsync<ResidencyStatus>(response, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public async Task<RuntimeStatusSnapshot> GetRuntimeStatusAsync(
         CancellationToken cancellationToken)
     {

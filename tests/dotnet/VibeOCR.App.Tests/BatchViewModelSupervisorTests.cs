@@ -70,13 +70,15 @@ public sealed class BatchViewModelSupervisorTests
         viewModel.SetRecognitionMode(DocumentMode(
             "mineru_document",
             "MinerU",
-            "process_keep_alive"));
+            "process_keep_alive"), new MineruConfig(MineruTier.Basic));
         viewModel.AddFiles([CreateTempPng("m")]);
 
         await viewModel.StartAsync(TestContext.Current.CancellationToken);
 
         Assert.Equal("MinerU", fake.LastRequest?.Pipeline.PipelineId);
+        Assert.Equal(JobKind.MineruParse, fake.LastRequest?.Kind);
         Assert.Null(fake.LastRequest?.Pipeline.Engine);
+        Assert.Equal(MineruTier.Basic, fake.LastRequest?.Pipeline.Mineru?.Tier);
     }
 
     [Fact]

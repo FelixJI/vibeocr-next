@@ -21,6 +21,7 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     private string _status = "请选择图片";
     private string? _taskEngine;
     private RecognitionModeOption? _taskRecognitionMode;
+    private MineruConfig? _taskMineruConfig;
 
     public RecognitionViewModel(
         IInferenceClient inference,
@@ -38,6 +39,7 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     public string Status { get => _status; private set => SetField(ref _status, value); }
     public RecognitionInput? CurrentInput { get => _currentInput; private set => SetField(ref _currentInput, value); }
     public bool HasResult => _result is not null;
+    public JobState? TerminalState { get; private set; }
     public string Pipeline { get; set; } = "OCR";
     public string? Language { get; set; }
     public RecognizeResponse? Result => _result;
@@ -52,8 +54,17 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         set => SetField(ref _taskEngine, string.IsNullOrWhiteSpace(value) ? null : value);
     }
 
-    public void SetRecognitionMode(RecognitionModeOption? taskMode) =>
+    /// <summary>
+    /// 绑定任务级识别模式及其类型化 MinerU 4 配置（仅目录声明
+    /// ocr.mineru-config.v1 时由宿主提供；null 完全省略 mineru 块）。
+    /// </summary>
+    public void SetRecognitionMode(
+        RecognitionModeOption? taskMode,
+        MineruConfig? mineruConfig = null)
+    {
         _taskRecognitionMode = taskMode;
+        _taskMineruConfig = taskMode is null ? null : mineruConfig;
+    }
 
     /// <summary>The engine explicitly selected for this task, if any.</summary>
     public OcrEngine? EffectiveEngine
@@ -113,6 +124,7 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         if (generation == Volatile.Read(ref _generation))
         {
             IsBusy = true;
+            TerminalState = null;
             Status = "正在读取输入";
         }
 
@@ -121,7 +133,11 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
             RecognitionInput? input = await loadInput(run.Token);
             if (input is null)
             {
-                if (generation == Volatile.Read(ref _generation)) Status = "已取消选择";
+                if (generation == Volatile.Read(ref _generation))
+                {
+                    TerminalState = JobState.Cancelled;
+                    Status = "已取消选择";
+                }
                 return;
             }
 
@@ -150,18 +166,31 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
                 ],
                 options: null,
                 cancellationToken: run.Token,
-                engine: engine);
+                engine: engine,
+                mineru: pipeline == "MinerU" ? _taskMineruConfig : null);
             JobSnapshot snapshot = job.Snapshot;
 
             if (generation != Volatile.Read(ref _generation)) return;
 
-            if (snapshot.State is JobState.Cancelled) { Status = "已取消"; return; }
-            if (snapshot.State is JobState.Failed) { Status = "识别失败"; return; }
+            if (snapshot.State is JobState.Cancelled)
+            {
+                TerminalState = JobState.Cancelled;
+                Status = "已取消";
+                return;
+            }
+            if (snapshot.State is JobState.Failed)
+            {
+                TerminalState = JobState.Failed;
+                Status = "识别失败";
+                return;
+            }
 
             ItemOutcome outcome = job.OutcomesByClientItemKey[clientItemKey];
             if (outcome.State is not ItemState.Succeeded)
             {
-                Status = outcome.State is ItemState.Cancelled ? "已取消" : "识别失败";
+                TerminalState = outcome.State is ItemState.Cancelled
+                    ? JobState.Cancelled : JobState.Failed;
+                Status = TerminalState is JobState.Cancelled ? "已取消" : "识别失败";
                 return;
             }
 
@@ -173,17 +202,28 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         }
         catch (OperationCanceledException)
         {
-            if (generation == Volatile.Read(ref _generation)) Status = "已取消";
+            if (generation == Volatile.Read(ref _generation))
+            {
+                TerminalState = JobState.Cancelled;
+                Status = "已取消";
+            }
         }
         catch (InferenceClientException error)
         {
             if (generation == Volatile.Read(ref _generation))
+            {
+                TerminalState = error.Code is HttpV2ErrorCode.Cancelled
+                    ? JobState.Cancelled : JobState.Failed;
                 Status = LocalizeV2(error.Code);
+            }
         }
         catch (Exception error) when (error is IOException or ObjectDisposedException)
         {
             if (generation == Volatile.Read(ref _generation))
+            {
+                TerminalState = JobState.Failed;
                 Status = "Supervisor 已断开，请重试";
+            }
         }
         finally
         {

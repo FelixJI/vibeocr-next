@@ -37,7 +37,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     };
 
     private readonly IInferenceClient _inference;
-    private readonly SemaphoreSlim _selectionLoadGate = new(1, 1);
+    private readonly SemaphoreSlim _settingsGate = new(1, 1);
     private long _generation;
     private bool _isBusy;
     private string _status = "正在读取设置";
@@ -52,6 +52,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private IReadOnlyList<SettingsSourceOption> _sources = [];
     private IReadOnlyList<SettingsFeatureOption> _features = [];
     private IReadOnlyList<string> _selectedSourceIds = [];
+    private MineruConnectionState? _mineruConnection;
 
     public SettingsViewModel(
         IInferenceClient inference,
@@ -105,6 +106,16 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     }
 
     public RuntimeSelectionService? Selection => _selection;
+
+    /// <summary>
+    /// 当前 MinerU 连接投影（extra.mineru_connection）；首次设置读取前为
+    /// null，UI 按未加载呈现。API Key 明文不经过此投影。
+    /// </summary>
+    public MineruConnectionState? MineruConnection
+    {
+        get => _mineruConnection;
+        private set => SetField(ref _mineruConnection, value);
+    }
 
     internal RecognitionSelectionSnapshot? RecognitionSelection =>
         Volatile.Read(ref _recognitionSelection);
@@ -187,15 +198,20 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
         try
         {
-            IReadOnlyList<string> next = ComposeSourceSelection(kind, sourceId);
-            SettingsSnapshot updated = await _selection.ApplySourcePreferenceAsync(
-                _inference,
-                next.Count == 0 ? null : next,
-                cancellationToken);
-            Maintenance.DiscardPlan();
-            _selectedSourceIds = updated.DownloadSourceIds ?? [];
-            Sources = ProjectSources(_selection, _selectedSourceIds);
-            Status = "已保存下载源偏好";
+            await _settingsGate.WaitAsync(cancellationToken);
+            try
+            {
+                IReadOnlyList<string> next = ComposeSourceSelection(kind, sourceId);
+                SettingsSnapshot updated = await _selection.ApplySourcePreferenceAsync(
+                    _inference,
+                    next.Count == 0 ? null : next,
+                    cancellationToken);
+                Maintenance.DiscardPlan();
+                _selectedSourceIds = updated.DownloadSourceIds ?? [];
+                Sources = ProjectSources(_selection, _selectedSourceIds);
+                Status = "已保存下载源偏好";
+            }
+            finally { _settingsGate.Release(); }
         }
         catch (RuntimeSelectionException error)
         {
@@ -205,6 +221,123 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         {
             Status = LocalizeV2(error.Code);
         }
+    }
+
+    /// <summary>
+    /// 通过 /v2/settings extra.mineru_connection 写入 MinerU 连接偏好。远程
+    /// 写入需要 Backend 声明 ocr.mineru-remote-api.v1，旧 Backend 明确失败；
+    /// apiKey 为 null 时保留 Backend 已存 Key（宿主合并），空字符串清除，
+    /// 非空替换。保存本身不验证远程服务连通性，成功后回读刷新运行时目录。
+    /// </summary>
+    public async Task SetMineruConnectionAsync(
+        string? mode,
+        string? apiUrl,
+        string? apiKey,
+        CancellationToken cancellationToken)
+    {
+        if (Maintenance.State.IsRunning) { Status = "运行环境维护尚未结束。"; return; }
+        RuntimeSelectionService? selection = _selection;
+        if (selection is null)
+        {
+            Status = "运行时目录尚未加载，请先刷新运行时";
+            return;
+        }
+        if (mode == "remote" && !selection.SupportsMineruRemoteApi)
+        {
+            Status =
+                $"当前 Backend 未声明 {RuntimeSelectionService.MineruRemoteApiCapability}，无法保存远程 MinerU 配置";
+            return;
+        }
+        try
+        {
+            await _settingsGate.WaitAsync(cancellationToken);
+            try
+            {
+                SettingsSnapshot updated = await MineruConnectionSettings.ApplyAsync(
+                    _inference, mode, apiUrl, apiKey, cancellationToken);
+                MineruConnection = MineruConnectionSettings.Read(
+                    updated, selection.SupportsMineruRemoteApi);
+            }
+            finally { _settingsGate.Release(); }
+        }
+        catch (ArgumentException error) { Status = error.Message; return; }
+        catch (InferenceClientException error) { Status = LocalizeV2(error.Code); return; }
+        catch (RuntimeSelectionException error) { Status = LocalizeSelection(error); return; }
+        // 写入成功后回读刷新目录：本地/远程切换可能改变 mineru 模式可用性。
+        try
+        {
+            await LoadSelectionSerializedAsync(forceReload: true, cancellationToken);
+            Status = MineruConnection?.IsRemote == true
+                ? "已保存 MinerU 远程配置（保存不验证服务连通性）"
+                : "已保存 MinerU 本地配置";
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception)
+        {
+            // 保存已生效；目录刷新失败不应把它流报成未保存。
+            Status = "MinerU 配置已保存；刷新运行时目录失败，请重新检查状态。";
+        }
+    }
+
+    /// <summary>
+    /// 对已保存的远程 MinerU 配置执行真实准备：/v2/runtime/preload
+    /// （pipelines=['MinerU']、recognition_modes=['mineru_document']），
+    /// 请求由 Backend 转发到远程 MinerU 4 服务（前端不直连），完成后回读
+    /// 刷新 health/tier 目录。不宣称服务可解析，tier 可用性以刷新后的
+    /// 目录与实际识别任务为准。
+    /// </summary>
+    public async Task PrepareMineruRemoteAsync(CancellationToken cancellationToken)
+    {
+        if (Maintenance.State.IsRunning) { Status = "运行环境维护尚未结束。"; return; }
+        RuntimeSelectionService? selection = _selection;
+        if (selection is null)
+        {
+            Status = "运行时目录尚未加载，请先刷新运行时";
+            return;
+        }
+        if (MineruConnection?.IsRemote != true)
+        {
+            Status = "请先保存远程 MinerU 配置，再执行验证与准备。";
+            return;
+        }
+        RecognitionModeOption mineruMode;
+        try
+        {
+            mineruMode = selection.FindRecognitionMode("mineru_document");
+        }
+        catch (RuntimeSelectionException error)
+        {
+            Status = LocalizeSelection(error);
+            return;
+        }
+        if (!mineruMode.SupportsPreload)
+        {
+            Status = "当前运行时声明 mineru_document 不支持预加载，请更新 Backend。";
+            return;
+        }
+        IsBusy = true;
+        Status = "正在验证并准备远程 MinerU 服务…";
+        try
+        {
+            await _inference.PreloadRuntimeAsync(
+                new Wire.RuntimePreloadRequest
+                {
+                    Pipelines = ["MinerU"],
+                    RecognitionModes = [Wire.RecognitionModeId.MineruDocument],
+                },
+                cancellationToken);
+            // 准备完成必须回读：tier/能力目录以刷新后的 Backend 目录为准。
+            await LoadSelectionSerializedAsync(forceReload: true, cancellationToken);
+            Status = "远程 MinerU 准备已执行并刷新目录；tier 可用性以识别任务实际结果为准。";
+        }
+        catch (OperationCanceledException) { Status = "已取消"; }
+        catch (NotSupportedException)
+        {
+            Status = "当前 Supervisor 不支持运行时预加载，请更新运行环境。";
+        }
+        catch (InferenceClientException error) { Status = LocalizeV2(error.Code); }
+        catch (RuntimeSelectionException error) { Status = LocalizeSelection(error); }
+        finally { IsBusy = false; }
     }
 
     /// <summary>Stage the accelerator for the pending feature selection.</summary>
@@ -354,7 +487,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         bool forceReload,
         CancellationToken cancellationToken)
     {
-        await _selectionLoadGate.WaitAsync(cancellationToken);
+        await _settingsGate.WaitAsync(cancellationToken);
         try
         {
             if (!forceReload && RecognitionSelection is not null)
@@ -365,7 +498,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
         finally
         {
-            _selectionLoadGate.Release();
+            _settingsGate.Release();
         }
     }
 
@@ -382,6 +515,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             // succeeds. Concurrent bootstrap/execution callers then observe the
             // same selection instead of a partially projected catalog.
             _selectedSourceIds = selectedSourceIds;
+            MineruConnection = MineruConnectionSettings.Read(
+                settings, selection.SupportsMineruRemoteApi);
             Sources = ProjectSources(selection, selectedSourceIds);
             IReadOnlyList<string> selectedFeatures = _selectionStaged ? PendingFeatureIds :
                 selection.Variants.Where(variant => variant.Accelerator == PendingBackend &&
@@ -485,6 +620,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     internal static string FeatureDisplayName(string featureId) => featureId switch
     {
+        "paddleocr" => "PaddleOCR 本地文字与文档识别",
+        "mineru" => "MinerU 本地深度文档解析（远程模式无需安装）",
         "document_parsing" => "文档解析（PaddleOCR/MinerU）",
         "gpu_runtime" => "CUDA GPU 运行时",
         _ => featureId,

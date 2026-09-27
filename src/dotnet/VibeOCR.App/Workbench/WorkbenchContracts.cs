@@ -73,6 +73,8 @@ public sealed record RemoveBatchItemCommand(Guid ItemId) : WorkbenchCommand;
 
 public sealed record SetBatchWindowCommand(int Start) : WorkbenchCommand;
 
+public sealed record SetBatchTaskEngineCommand(string? Engine) : WorkbenchCommand;
+
 public sealed record OpenPdfCommand : WorkbenchCommand;
 
 public sealed record OpenDroppedPdfCommand(string Path) : WorkbenchCommand;
@@ -128,6 +130,28 @@ public sealed record SetAcceleratorCommand(string Accelerator) : WorkbenchComman
 
 /// <summary>Toggle one optional feature for the pending accelerator.</summary>
 public sealed record SetRuntimeFeatureCommand(string FeatureId, bool Enabled) : WorkbenchCommand;
+
+/// <summary>
+/// Set the MinerU connection preference in Backend settings
+/// extra.mineru_connection. Remote requires the runtime capability
+/// ocr.mineru-remote-api.v1; local persists only the mode. ApiKey is
+/// three-state: null keeps the stored key (the host merges it back from the
+/// current settings), an empty string clears it explicitly, and a non-empty
+/// string replaces it. Saving never verifies remote reachability, and the
+/// API key never crosses back to the WebView beyond a has-key flag.
+/// </summary>
+public sealed record SetMineruConnectionCommand(
+    string Mode,
+    string? ApiUrl,
+    string? ApiKey) : WorkbenchCommand;
+
+/// <summary>
+/// Verify and prepare the configured remote MinerU service by executing the
+/// real runtime preload (pipelines=['MinerU'], recognition_modes=
+/// ['mineru_document']) through the Backend, then refreshing the health/tier
+/// catalog. The frontend never connects to the remote service directly.
+/// </summary>
+public sealed record PrepareMineruConnectionCommand : WorkbenchCommand;
 
 /// <summary>
 /// Set the task-level recognition mode for the recognition page; null clears
@@ -208,7 +232,9 @@ public sealed record BatchWorkbenchState(
   int CompletedCount,
   int FailedCount,
   IReadOnlyList<BatchWorkbenchItem>? Items = null,
-  int WindowStart = 0) : WorkbenchState
+  int WindowStart = 0,
+  IReadOnlyList<RecognitionEngineChoice>? Engines = null,
+  string? TaskEngine = null) : WorkbenchState
 {
   public override string Scope => "batch";
 }
@@ -273,10 +299,20 @@ public sealed record SettingsWorkbenchState(
   string ProgressDetail = "",
   double? ProgressPercent = null,
   bool CanPreviewInstall = false,
-  VibeOCR.Runtime.Contracts.Generated.Host.RuntimeInstallPlan? InstallPlan = null) : WorkbenchState
+  VibeOCR.Runtime.Contracts.Generated.Host.RuntimeInstallPlan? InstallPlan = null,
+  SettingsMineruConnectionState? MineruConnection = null) : WorkbenchState
 {
   public override string Scope => "settings";
 }
+
+/// <summary>
+/// MinerU 连接投影；API Key 只以是否已配置出现，明文不进入桥接状态。
+/// </summary>
+public sealed record SettingsMineruConnectionState(
+    bool Supported,
+    string Mode,
+    string ApiUrl,
+    bool HasApiKey);
 
 /// <summary>
 /// Durable maintenance operation projection: requested/effective component

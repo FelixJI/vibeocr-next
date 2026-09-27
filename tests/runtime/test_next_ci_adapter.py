@@ -112,7 +112,7 @@ def test_resolver_binding_keywords_match_the_binding_api() -> None:
     assert passed_keywords <= accepted_keywords
 
 
-def test_component_resolver_requires_protocol_2_7_selection_capabilities() -> None:
+def test_component_resolver_requires_selection_and_mineru_capabilities() -> None:
     root = Path(__file__).parents[2]
     tree = ast.parse(
         (root / "scripts/resolve_component_releases.py").read_text(encoding="utf-8")
@@ -132,6 +132,8 @@ def test_component_resolver_requires_protocol_2_7_selection_capabilities() -> No
         "ocr.engine-selection.v1",
         "runtime.download-sources.v1",
         "runtime.component-selection.v1",
+        "ocr.mineru-config.v1",
+        "ocr.mineru-remote-api.v1",
     ):
         assert capability in required
 
@@ -665,7 +667,7 @@ function Start-Process {
     } | ConvertTo-Json | Set-Content -LiteralPath $Launch
     New-Item -ItemType Directory -Path $env:WEBVIEW2_USER_DATA_FOLDER |
         Out-Null
-    '{"schema_version":1,"state":"bridge-ready"}' |
+    '{"schema_version":1,"state":"bridge-ready","resources":"verified"}' |
         Set-Content -LiteralPath $env:VIBEOCR_WEB_READY_FILE
     $process = [pscustomobject]@{ ExitCode = 0 }
     $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {

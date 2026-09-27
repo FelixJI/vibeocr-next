@@ -34,6 +34,17 @@ public interface IInferenceClient : IAsyncDisposable
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Explicitly preload recognition modes through the shared preload
+    /// endpoint (pipelines stays the required legacy projection). The request
+    /// is executed by the Backend against its configured service; the frontend
+    /// never connects to the remote MinerU service directly.
+    /// </summary>
+    Task<ResidencyStatus> PreloadRuntimeAsync(
+        Wire.RuntimePreloadRequest request,
+        CancellationToken cancellationToken) => Task.FromException<ResidencyStatus>(
+            new NotSupportedException("This inference client does not expose runtime preload."));
+
+    /// <summary>
     /// Atomically observe the current snapshot, ordered events and typed
     /// outcomes after <paramref name="afterSequence"/>.
     /// </summary>
