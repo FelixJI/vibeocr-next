@@ -20,7 +20,7 @@ def _control(tmp_path):
     raw["capabilities"].append(CAPABILITY)
     manifest.write_text(json.dumps(raw), encoding="utf-8")
     binding = json.loads(component.read_text())
-    binding["backend"]["runtime_manifest_sha256"] = _sha(manifest.read_bytes())
+    binding["product"]["runtime_manifest_sha256"] = _sha(manifest.read_bytes())
     component.write_text(json.dumps(binding), encoding="utf-8")
     calls = []
 

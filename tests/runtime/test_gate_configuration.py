@@ -1,6 +1,8 @@
 """Next 单一质量入口与候选门禁的静态回归测试。"""
 
 import json
+import os
+import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parents[2]
@@ -50,4 +52,53 @@ def test_release_verifies_runtime_candidate_after_build() -> None:
         for command in config["ci"]["bootstrap"]
     )
     assert "scripts/build_internal_runtime.ps1" in build_script
+    assert "New-Item -ItemType Directory -Path $artifacts -Force" in build_script
+    assert "Remove-Item -LiteralPath $artifacts" not in build_script
     assert "VibeOCRNext" in build_script
+
+
+def test_release_build_rejects_a_different_checkout_before_touching_outputs(
+    tmp_path: Path,
+) -> None:
+    sibling = tmp_path / ".release-build" / "sibling.txt"
+    sibling.parent.mkdir()
+    sibling.write_text("preserve", encoding="utf-8")
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-File", str(REPO_ROOT / "scripts/build-release.ps1")],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        env=os.environ | {"AUTOMATION_PROJECT_ROOT": str(tmp_path)},
+    )
+    assert result.returncode != 0
+    assert "must use the checkout" in result.stderr
+    assert sibling.read_text(encoding="utf-8") == "preserve"
+
+
+def test_runtime_builder_rejects_output_outside_fixed_build_root(
+    tmp_path: Path,
+) -> None:
+    sibling = tmp_path / "sibling.txt"
+    sibling.write_text("preserve", encoding="utf-8")
+    result = subprocess.run(
+        [
+            "pwsh",
+            "-NoProfile",
+            "-File",
+            str(REPO_ROOT / "scripts/build_internal_runtime.ps1"),
+            "-Version",
+            "0.0.0",
+            "-BuildRoot",
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "must be the checkout .release-build directory" in result.stderr
+    assert sibling.read_text(encoding="utf-8") == "preserve"

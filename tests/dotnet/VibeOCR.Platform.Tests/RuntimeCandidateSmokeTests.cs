@@ -101,10 +101,12 @@ public sealed class RuntimeCandidateSmokeTests
             plan.EffectiveComponentIds.ToHashSet(StringComparer.Ordinal));
 
         // 生产启动路径:隔离副本是全新安装,启动选择为空(仅基础组件),
-        // ensure 把基础运行环境安装进隔离副本。
+        // ensure 把基础运行环境安装进隔离副本(候选自带离线 base 包)。
         RuntimeInstallSelection startupSelection =
             await client.ReadStartupSelectionAsync(ensureToken);
-        Assert.Empty(startupSelection.InstallComponentIds);
+        IReadOnlyList<string>? startupComponents = startupSelection.InstallComponentIds;
+        Assert.NotNull(startupComponents);
+        Assert.Empty(startupComponents);
         RuntimeLaunch launch = await client.EnsureAsync(
             startupSelection,
             $"smoke-{Guid.NewGuid():N}",
@@ -120,10 +122,10 @@ public sealed class RuntimeCandidateSmokeTests
         AssertIsUnder(layout.DataRoot, launch.PythonExecutable, "python executable");
         AssertIsUnder(layout.DataRoot, launch.ModelRoot, "model root");
         Assert.True(
-            launch.Environment.TryGetValue("VIBEOCR_RUNTIME_ROOT", out string? runtimeRootValue) &&
-                !string.IsNullOrWhiteSpace(runtimeRootValue),
+            launch.Environment.TryGetValue("VIBEOCR_RUNTIME_ROOT", out string? runtimeRootValue),
             "launch 环境缺少 VIBEOCR_RUNTIME_ROOT。");
-        AssertIsUnder(layout.DataRoot, runtimeRootValue!, "runtime root");
+        Assert.NotNull(runtimeRootValue);
+        AssertIsUnder(layout.DataRoot, runtimeRootValue, "runtime root");
         // 后端身份校验:launch 环境声明的产品根必须就是隔离副本。
         Assert.True(
             launch.Environment.TryGetValue("VIBEOCR_PRODUCT_ROOT", out string? launchProductRoot) &&
@@ -215,17 +217,16 @@ public sealed class RuntimeCandidateSmokeTests
             }
 
             Assert.Equal(ItemState.Succeeded, outcome.State);
-            Assert.NotNull(outcome.Payload);
-            IDictionary<string, JsonElement> payload = outcome.Payload!;
+            IDictionary<string, JsonElement>? payloadValue = outcome.Payload;
+            Assert.NotNull(payloadValue);
+            IDictionary<string, JsonElement> payload = payloadValue;
             if (!payload.TryGetValue("raw_text", out JsonElement rawTextElement) ||
-                rawTextElement.ValueKind != JsonValueKind.String)
+                rawTextElement.ValueKind != JsonValueKind.String ||
+                rawTextElement.GetString() is not { } rawText ||
+                string.IsNullOrWhiteSpace(rawText))
             {
-                throw new InvalidOperationException("OCR 结果缺少 raw_text 字符串字段。");
+                throw new InvalidOperationException("OCR 结果缺少非空 raw_text 字符串,按 fail closed 处理。");
             }
-            string rawText = rawTextElement.GetString()!;
-            Assert.False(
-                string.IsNullOrWhiteSpace(rawText),
-                "OCR raw_text 为空,按 fail closed 处理。");
             Assert.Contains(ExpectedWord, rawText, StringComparison.OrdinalIgnoreCase);
             Assert.Contains(ExpectedDigits, rawText, StringComparison.Ordinal);
             File.WriteAllText(
@@ -271,7 +272,8 @@ public sealed class RuntimeCandidateSmokeTests
             .GetProperty("win-x64-base")
             .GetProperty("components")
             .EnumerateArray()
-            .Select(component => component.GetProperty("component_id").GetString()!)
+            .Select(component => component.GetProperty("component_id").GetString()
+                ?? throw new InvalidDataException("runtime manifest 的 component_id 必须是字符串。"))
             .ToHashSet(StringComparer.Ordinal);
         Assert.NotEmpty(ids);
         return ids;

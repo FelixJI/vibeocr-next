@@ -147,6 +147,8 @@ def _run_release_build_fixture(
 
     scripts = tmp_path / "scripts"
     scripts.mkdir()
+    build_script = scripts / "build-release.ps1"
+    shutil.copyfile(root / "scripts/build-release.ps1", build_script)
     call_log = tmp_path / "calls.log"
     (scripts / "smoke_web_workbench.ps1").write_text(
         """param([string]$ProductRoot)
@@ -203,7 +205,7 @@ function dotnet {
     environment = os.environ | {
         "AUTOMATION_PROJECT_ROOT": str(tmp_path),
         "AUTOMATION_ARTIFACTS_DIR": str(tmp_path / "artifacts"),
-        "BUILD_SCRIPT": str(root / "scripts/build-release.ps1"),
+        "BUILD_SCRIPT": str(build_script),
         "CALL_LOG": str(call_log),
         "FAIL_STAGE": fail_stage,
     }

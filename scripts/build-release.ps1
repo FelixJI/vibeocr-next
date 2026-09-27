@@ -8,7 +8,14 @@ function Write-CiStage {
     Write-Host "::notice title=Release build stage::$Name"
 }
 
-$root = if ($env:AUTOMATION_PROJECT_ROOT) { (Resolve-Path $env:AUTOMATION_PROJECT_ROOT).Path } else { (Resolve-Path (Join-Path $PSScriptRoot '..')).Path }
+$scriptRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$root = if ($env:AUTOMATION_PROJECT_ROOT) { (Resolve-Path $env:AUTOMATION_PROJECT_ROOT).Path } else { $scriptRoot }
+if (-not [string]::Equals(
+    [IO.Path]::GetFullPath($root),
+    [IO.Path]::GetFullPath($scriptRoot),
+    [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Release build must use the checkout that contains build-release.ps1'
+}
 $projectFile = Join-Path $root 'src/dotnet/VibeOCR.App/VibeOCR.App.csproj'
 [xml]$project = Get-Content -LiteralPath $projectFile -Raw
 $projectVersion = [string]$project.Project.PropertyGroup.Version
@@ -21,7 +28,12 @@ if ($Version -ne $projectVersion) {
     throw "Release version '$Version' does not match project version '$projectVersion'"
 }
 $artifacts = if ($env:AUTOMATION_ARTIFACTS_DIR) { $env:AUTOMATION_ARTIFACTS_DIR } else { Join-Path $root 'artifacts' }
+New-Item -ItemType Directory -Path $artifacts -Force | Out-Null
 $build = Join-Path $root '.release-build'
+if ((Test-Path -LiteralPath $build) -and
+    ((Get-Item -LiteralPath $build -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    throw 'Release build output must not be a reparse point'
+}
 foreach ($path in @($build)) {
     if (Test-Path -LiteralPath $path) {
         Remove-Item -LiteralPath $path -Recurse -Force

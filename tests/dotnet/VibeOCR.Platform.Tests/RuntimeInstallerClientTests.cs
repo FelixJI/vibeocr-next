@@ -1180,7 +1180,7 @@ public sealed class RuntimeInstallerClientTests
     {
         await File.WriteAllTextAsync(
             componentLock,
-            "{\"backend\":{\"runtime_manifest_sha256\":\"" +
+            "{\"product\":{\"runtime_manifest_sha256\":\"" +
             Sha256(manifestBytes) +
             "\"}}",
             TestContext.Current.CancellationToken);

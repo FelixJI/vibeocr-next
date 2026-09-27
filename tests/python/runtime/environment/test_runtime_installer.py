@@ -348,9 +348,9 @@ def test_runtime_lock_rejects_embedded_source_directives(
 
 def test_manifest_rejects_tampered_runtime_wheel(tmp_path: Path) -> None:
     manifest_path, _ = _release(tmp_path / "release")
-    (
-        manifest_path.parent / "vibeocr_next_runtime-0.7.0-py3-none-any.whl"
-    ).write_bytes(b"tampered")
+    (manifest_path.parent / "vibeocr_next_runtime-0.7.0-py3-none-any.whl").write_bytes(
+        b"tampered"
+    )
     with pytest.raises(ManifestError, match="Runtime wheel SHA-256 mismatch"):
         load_runtime_manifest(manifest_path)
 
@@ -930,7 +930,9 @@ def test_component_lock_runtime_manifest_mismatch_is_rejected(
     data = json.loads(component.read_text(encoding="utf-8"))
     data["product"]["runtime_manifest_sha256"] = "f" * 64
     component.write_text(json.dumps(data), encoding="utf-8")
-    with pytest.raises(RuntimeInstallError, match="component lock runtime manifest mismatch"):
+    with pytest.raises(
+        RuntimeInstallError, match="component lock runtime manifest mismatch"
+    ):
         RuntimeInstaller(
             product_root=tmp_path / "product",
             component_lock=component,

@@ -9,7 +9,8 @@
 2. **WinUI App**：窗口、ViewModel、用户工作流与应用生命周期。
 3. **VibeOCR.Platform**：Supervisor 进程、typed client 与平台 seam。
 4. **WebAssets**：React 高级 workbench。
-5. **Backend/Protocol**：独立发布的本地推理组件与跨进程契约。
+5. **Python Runtime 与内部契约**：本仓源码内的本地推理服务（Supervisor、OCR/PDF/MinerU
+   worker）与唯一 wire v2 跨进程契约，随单产品同源构建。
 
 ## 20 分钟启动链
 
@@ -92,8 +93,14 @@ typecheck、test、build；不要用 `any` 或跳过 codec 掩盖跨边界类型
 
 ### 组件与发布
 
-从 `.ci/project.json`、component policy/resolve scripts、`scripts/automation.py` 阅读。Backend 与 Protocol
-通过正式 Release、component lock 和 identity 绑定，不通过邻仓源码路径耦合。
+从 `.ci/project.json`、`scripts/build-release.ps1`、`scripts/build_internal_runtime.ps1` 与
+`scripts/automation.py` 阅读。单产品候选全部由本仓当前源码构建：C# 以 ProjectReference 编译，
+内部 Runtime 从当前源码产出 wheel、冻结 installer、offline base pack 与 runtime manifest。
+Release 外部 `product-identity.json` 以 `project:{component,repository,version,source_sha}`
+绑定候选；`runtime-manifest.json` 的 `product` 同为这四字段，installer 摘要、profile 与
+capabilities 在 manifest 顶层；`app/metadata/component-lock.json` 的 `product` 追加
+`runtime_manifest_sha256` 与 `accelerator`，`required_capabilities` 在 lock 顶层。默认不解析
+旧仓 Backend/Protocol Release。
 
 ## 分层验证
 
@@ -122,7 +129,7 @@ dotnet restore tests/dotnet/VibeOCR.App.Tests/VibeOCR.App.Tests.csproj --locked-
 pwsh -File scripts/test_app_ci.ps1
 ```
 
-提交前在 README 建立的 venv 中运行 `uv run --no-sync python scripts/check_quality.py`；完整 release
+提交前运行 `uv run --frozen python scripts/check_quality.py`；完整 release
 build/smoke 由 PR CI 权威执行。
 
 ## 常见误区

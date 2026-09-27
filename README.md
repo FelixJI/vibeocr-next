@@ -195,9 +195,10 @@ dotnet test tests/dotnet/VibeOCR.Runtime.Client.Tests/VibeOCR.Runtime.Client.Tes
 
 ## WebAssets
 
-WebAssets 使用 Node 24.x、npm 11.7、React 19、TypeScript 6 和 Vite 8。修改后至少运行其 package scripts
-中的 lint、typecheck、test 与 build。WebView2 bridge 变更必须同步更新桌面 handler/codec、前端 client
-与两侧测试。
+WebAssets 的 Node/npm 版本以 `.node-version` 与 WebAssets `package.json` 的
+`engines`/`packageManager` 为准，React、TypeScript、Vite 等依赖版本以 `package-lock.json`
+锁定为准，不在本文重复维护。修改后至少运行其 package scripts 中的 lint、typecheck、test 与
+build。WebView2 bridge 变更必须同步更新桌面 handler/codec、前端 client 与两侧测试。
 
 ## 发布资产
 
@@ -208,10 +209,13 @@ WebAssets 使用 Node 24.x、npm 11.7、React 19、TypeScript 6 和 Vite 8。修
 固定第三方 offline base pack 与 runtime manifest；第三方 CPython 归档与各 Windows 运行环境
 profile 锁保留在 `config/runtime/`。产品内部沿用 `runtime/backend/` 与
 `app/metadata/component-lock.json`、`app/metadata/component-identities.json` 作为兼容稳定路径，
-其内容绑定单一 Next 产品（component、repository、version、source SHA、runtime manifest
-SHA-256 与所需 capability），不是旧仓产品图。版本与派生文件只由自动化脚本更新。
+不是旧仓产品图：`component-identities.json` 与 Release 外部 `product-identity.json` 同为
+`project:{component,repository,version,source_sha}`；`runtime-manifest.json` 的 `product`
+同样只含这四字段，installer 摘要、profile 与 capabilities 位于 manifest 顶层；
+`component-lock.json` 的 `product` 在四字段之上追加 `runtime_manifest_sha256` 与
+`accelerator`，`required_capabilities` 位于 lock 顶层。版本与派生文件只由自动化脚本更新。
 
-### 消费面迁移对照（#86 → #87）
+### 消费面迁移对照（旧多仓组件 → 单产品）
 
 - 独立 NuGet SDK：之前编译期从本地 feed 按 `Directory.Packages.props` 精确 pin
   `VibeOCR.Runtime.*`；现在 C# 直接 ProjectReference 本仓 `VibeOCR.Contracts`/
@@ -220,10 +224,13 @@ SHA-256 与所需 capability），不是旧仓产品图。版本与派生文件�
   `vibeocr-next-runtime`（版本由 `repository.json` 派生），作为运行环境隔离安装的实现细节随
   产品分发，不对外独立发行。
 - 跨仓 resolve/bind：之前 bootstrap 解析最新正式 Backend Release 及其绑定的 Protocol 并写
-  组件 identity；现在默认不解析任何旧仓 Release，候选绑定由本仓 `product-identity.json` 与
-  产品内 runtime manifest/component lock 完成。
+  组件 identity；现在默认不解析任何旧仓 Release，候选绑定由 Release 外部 `product-identity.json`
+  （`project` 字段）与产品内 runtime manifest、component lock（`product` 字段）完成。
 - Protocol 发行字段：之前候选 identity 含 `protocol`/`protocol_sdk` 版本与 release manifest
-  摘要；现在 identity 只绑定单一 Next 产品的 component/repository/version/source_sha。
+  摘要；现在 Release 外部 `product-identity.json` 只含
+  `project:{component,repository,version,source_sha}`；`product` 字段只出现在产品内
+  `runtime-manifest.json`（同四字段）与 `app/metadata/component-lock.json`（追加
+  `runtime_manifest_sha256`/`accelerator`，`required_capabilities` 在 lock 顶层）。
 - 外部 hash 边界：第三方 CPython 归档、offline pack 等外部下载字节仍保留 SHA-256 校验与
   manifest 绑定；本仓生成物交给 Git/构建/发布流水线约束，不叠加手工 hash。
 

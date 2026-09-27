@@ -115,7 +115,9 @@ def test_stage_product_layout_embeds_only_the_release_bound_base_runtime_closure
     )
     arbitrary_base_pack = backend / "offline-foundation.part-01.bundle"
     original_base_pack.replace(arbitrary_base_pack)
-    runtime_manifest["profiles"]["win-x64-base"]["runtime_pack"] = [arbitrary_base_pack.name]
+    runtime_manifest["profiles"]["win-x64-base"]["runtime_pack"] = [
+        arbitrary_base_pack.name
+    ]
     advanced_packs = {
         "future-win-x64-base-cpu-profile.pack": b"cpu-full",
         "future-win-x64-base-cu126-profile.pack": b"cuda-full",
@@ -136,9 +138,7 @@ def test_stage_product_layout_embeds_only_the_release_bound_base_runtime_closure
     runtime_manifest["profiles"]["win-x64-cu126"]["runtime_pack_sha256"] = [
         hashlib.sha256(b"cuda-full").hexdigest()
     ]
-    runtime_manifest["profiles"]["win-x64-cpu"]["install_scopes"][0][
-        "runtime_pack"
-    ] = [
+    runtime_manifest["profiles"]["win-x64-cpu"]["install_scopes"][0]["runtime_pack"] = [
         "vibeocr-runtime-pack-paddlex-future.zip",
         "vibeocr-runtime-pack-mineru-future.zip",
     ]

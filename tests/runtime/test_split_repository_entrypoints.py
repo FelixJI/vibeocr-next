@@ -41,7 +41,7 @@ def test_dotnet_lock_update_uses_internal_projects_and_isolated_caches() -> None
         assert required in script
     assert not internal_versions
     assert "FelixJI/vibeocr-protocol" not in script
-    assert '.release-input\\protocol-sdk' not in script
+    assert ".release-input\\protocol-sdk" not in script
 
 
 def test_startup_benchmark_only_passes_supported_collector_arguments() -> None:

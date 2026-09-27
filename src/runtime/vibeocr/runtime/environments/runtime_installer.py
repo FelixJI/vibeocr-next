@@ -1035,7 +1035,9 @@ def _default_install_runner(
     artifact_root = manifest.path.parent
     runtime_wheel = artifact_root / manifest.runtime_wheel
     if not runtime_wheel.is_file():
-        raise RuntimeInstallError("release directory must contain the bound runtime wheel")
+        raise RuntimeInstallError(
+            "release directory must contain the bound runtime wheel"
+        )
     if reporter is not None:
         reporter.advance(
             phase="install_backend",

@@ -76,7 +76,10 @@ def finalize_product_release(
         raise ValueError("staged component lock differs from verified releases")
     if layout.runtime_manifest.read_bytes() != runtime_manifest.path.read_bytes():
         raise ValueError("staged runtime manifest differs from verified runtime")
-    if _sha256(layout.runtime_installer) != runtime_manifest.installer.executable_sha256:
+    if (
+        _sha256(layout.runtime_installer)
+        != runtime_manifest.installer.executable_sha256
+    ):
         raise ValueError("extracted Runtime Installer hash mismatch")
 
     files = sorted(

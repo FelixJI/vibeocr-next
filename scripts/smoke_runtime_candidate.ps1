@@ -4,14 +4,17 @@ Runtime candidate AC6 smoke: isolated base install + real OCR round trip.
 
 .DESCRIPTION
 Copies a built product candidate (ProductRoot, e.g. .release-build/VibeOCR of
-this checkout) into a fresh unique work root under the designated WorkRoot
-drive, generates a synthetic "VibeOCR 123" PNG with the repository's locked
-Pillow dependency, and runs the RuntimeCandidateSmokeTests fact through the
-Platform test project with a precise filter. The TRX must prove the case
-actually executed and passed; a zero-test green run fails closed. Evidence
-under the smoke root is retained for root acceptance: nothing is cleaned or
-recursively deleted, and no user data or cache directory is read. Only the
-child processes of this run are disposed.
+this checkout) into a fresh unique work root under the caller-provided
+WorkRoot (CI may point this at RUNNER_TEMP or any scratch directory),
+generates a synthetic "VibeOCR 123" PNG with the repository's locked Pillow
+dependency, and runs the RuntimeCandidateSmokeTests fact through the Platform
+test project with a precise filter. The TRX must prove the case actually
+executed and passed; a zero-test green run fails closed. The smoke root is
+brand new, never nests with the source candidate, and never reuses a
+candidate that already carries a state directory, so no pre-existing state
+is read. Evidence under the smoke root is retained for root acceptance:
+nothing is cleaned or recursively deleted, and only the child processes of
+this run are disposed.
 #>
 [CmdletBinding()]
 param(
@@ -46,22 +49,17 @@ foreach ($marker in @(
         throw "Runtime candidate is missing required marker '$marker': $sourceRoot"
     }
 }
+if (Test-Path -LiteralPath (Join-Path $sourceRoot 'state')) {
+    throw "Runtime candidate already carries a state directory: $sourceRoot"
+}
 
+# 隔离只依赖精确路径规则:WorkRoot 为目录、不与源候选嵌套,
+# 隔离根全新创建,因此不读取任何既有 state。
 $workRootItem = Get-Item -LiteralPath $WorkRoot -ErrorAction Stop
 if (-not $workRootItem.PSIsContainer) {
     throw "Runtime candidate smoke WorkRoot is not a directory: $WorkRoot"
 }
 $workRootPath = $workRootItem.FullName.TrimEnd('\')
-foreach ($forbidden in @(
-        $repositoryRoot.TrimEnd('\'),
-        $env:USERPROFILE.TrimEnd('\'),
-        [System.IO.Path]::GetTempPath().TrimEnd('\')
-    )) {
-    if ($workRootPath.Equals($forbidden, [System.StringComparison]::OrdinalIgnoreCase) -or
-        $workRootPath.StartsWith($forbidden + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Runtime candidate smoke WorkRoot must stay outside '$forbidden': $workRootPath"
-    }
-}
 if ($sourceRoot.Equals($workRootPath, [System.StringComparison]::OrdinalIgnoreCase) -or
     $sourceRoot.StartsWith($workRootPath + '\', [System.StringComparison]::OrdinalIgnoreCase) -or
     $workRootPath.StartsWith($sourceRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
