@@ -212,7 +212,7 @@ public sealed class DesktopWorkbenchCommandHandler :
         AddBatchFilesCommand => await AddBatchFilesAsync(cancellationToken),
         AddDroppedBatchFilesCommand dropped => AddDroppedBatchFiles(dropped),
         ExportBatchCommand export => await ExportBatchAsync(export, cancellationToken),
-        StartBatchCommand => StartBatch(cancellationToken),
+        StartBatchCommand => await StartBatchAsync(cancellationToken),
         CancelBatchCommand => CancelBatch(),
         ClearBatchCommand => ClearBatch(),
         MoveBatchItemCommand move => MoveBatchItem(move),
@@ -601,13 +601,6 @@ public sealed class DesktopWorkbenchCommandHandler :
     batch ??= batchFactory();
     await EnsureSelectionLoadedAsync(cancellationToken);
     SynchronizeBatchMode(requireUsable: true);
-    await batch.StartAsync(cancellationToken);
-    return BatchState(batch);
-  }
-
-  private BatchWorkbenchState StartBatch(CancellationToken cancellationToken)
-  {
-    batch ??= batchFactory();
     long generation = Interlocked.Increment(ref batchGeneration);
     Track(CompleteBatchAsync(generation, cancellationToken));
     return new BatchWorkbenchState(
@@ -623,7 +616,8 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     try
     {
-      BatchWorkbenchState state = await StartBatchAsync(cancellationToken);
+      await batch!.StartAsync(cancellationToken);
+      BatchWorkbenchState state = BatchState(batch);
       if (generation == Volatile.Read(ref batchGeneration))
       {
         StateChanged?.Invoke(state);
@@ -698,7 +692,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       if (selection?.SupportsRecognitionModes is not true)
         throw new RuntimeSelectionException(RuntimeSelectionErrorKind.CapabilityMissing,
           "The runtime does not provide recognition modes.");
-      selection.FindRecognitionMode(command.Engine);
+      selection.SelectRecognitionMode(command.Engine);
     }
     batchTaskEngine = command.Engine;
     SynchronizeBatchMode();
@@ -1115,10 +1109,12 @@ public sealed class DesktopWorkbenchCommandHandler :
     recognition ??= recognitionFactory();
     SynchronizeRecognitionMode();
     RecognitionWorkbenchState current = await CurrentRecognitionStateAsync(
-      RecognitionStatusCode(recognition), cancellationToken);
+      "recognition.ready", cancellationToken);
+    bool isBusy = recognition.IsBusy;
     StateChanged?.Invoke(current with
     {
-      IsBusy = recognition.IsBusy,
+      StatusCode = RecognitionStatusCode(recognition, isBusy),
+      IsBusy = isBusy,
       Engines = RecognitionEngines(),
       TaskEngine = recognition.TaskEngine,
     });
@@ -1565,8 +1561,9 @@ public sealed class DesktopWorkbenchCommandHandler :
       .Select(milestone => milestone.Name)
       .ToArray());
 
-  private static string RecognitionStatusCode(RecognitionViewModel viewModel) =>
-    viewModel.IsBusy
+  private static string RecognitionStatusCode(
+    RecognitionViewModel viewModel, bool? isBusy = null) =>
+    (isBusy ?? viewModel.IsBusy)
       ? "recognition.running"
       : viewModel.TerminalState switch
       {

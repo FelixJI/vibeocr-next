@@ -231,8 +231,8 @@ public sealed class RuntimeSelectionService
     public bool SupportsMineruConfig => _mineruConfigCatalog is not null;
 
     /// <summary>
-    /// mineru_document 任务的类型化配置：tier 取目录声明的默认 tier，其余
-    /// 字段用 auto/all/ch 生效值；不发送任何遗留 engine 选项。非
+    /// mineru_document 任务的类型化配置：tier 和语言必须来自可用目录，
+    /// 其余字段用 auto/all 生效值；不发送任何遗留 engine 选项。非
     /// mineru_document 或未声明 ocr.mineru-config.v1 时返回 null（完全省略
     /// mineru 块，保持遗留 payload 形态）。
     /// </summary>
@@ -243,15 +243,40 @@ public sealed class RuntimeSelectionService
         {
             return null;
         }
-        return new MineruConfig(ToRequestTier(_mineruConfigCatalog.DefaultTier));
+        MineruTier tier = ToRequestTier(_mineruConfigCatalog.DefaultTier);
+        Wire.MineruTierDescriptor[] defaults = [.. _mineruConfigCatalog.Tiers.Where(
+            item => item.Id == _mineruConfigCatalog.DefaultTier)];
+        if (defaults.Length != 1)
+        {
+            throw Error(RuntimeSelectionErrorKind.InvalidCatalogEntry,
+                "MinerU default tier is missing or duplicated in the runtime catalog.");
+        }
+        if (defaults[0].Availability is not (
+            Wire.MineruTierAvailability.Ready or
+            Wire.MineruTierAvailability.PreparationRequired))
+        {
+            throw Error(RuntimeSelectionErrorKind.EngineUnavailable,
+                "MinerU default tier is unavailable.");
+        }
+        string? language = _mineruConfigCatalog.Languages.Contains("ch", StringComparer.Ordinal)
+            ? "ch"
+            : _mineruConfigCatalog.Languages.FirstOrDefault(item => !string.IsNullOrWhiteSpace(item));
+        if (language is null)
+        {
+            throw Error(RuntimeSelectionErrorKind.InvalidCatalogEntry,
+                "MinerU catalog does not declare a usable language.");
+        }
+        return new MineruConfig(tier, MineruOcrMode.Auto, "all", language);
     }
 
     private static MineruTier ToRequestTier(Wire.MineruTierId tier) => tier switch
     {
+        Wire.MineruTierId.Basic => MineruTier.Basic,
         Wire.MineruTierId.Flash => MineruTier.Flash,
         Wire.MineruTierId.Standard => MineruTier.Standard,
         Wire.MineruTierId.Advanced => MineruTier.Advanced,
-        _ => MineruTier.Basic,
+        _ => throw Error(RuntimeSelectionErrorKind.InvalidCatalogEntry,
+            "MinerU catalog declares an unknown default tier."),
     };
 
     /// <summary>Catalog engines in wire order; empty when the capability is absent.</summary>

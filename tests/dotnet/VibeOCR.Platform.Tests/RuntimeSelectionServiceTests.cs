@@ -327,38 +327,7 @@ public sealed class RuntimeSelectionServiceTests
         Assert.False(service.SupportsMineruConfig);
         Assert.Null(service.MineruConfigFor("mineru_document"));
 
-        Wire.CapabilityDescriptor mineruConfigDescriptor = Descriptor(
-            RuntimeSelectionService.MineruConfigCapability);
-        mineruConfigDescriptor = mineruConfigDescriptor with
-        {
-            MineruConfigCatalog = new Wire.MineruConfigCatalog
-            {
-                DefaultTier = Wire.MineruTierId.Basic,
-                Tiers =
-                [
-                    new Wire.MineruTierDescriptor
-                    {
-                        Id = Wire.MineruTierId.Basic,
-                        Availability = Wire.MineruTierAvailability.PreparationRequired,
-                        ReasonCode = "mineru_execution_preparation_required",
-                    },
-                ],
-                Languages = ["ch"],
-            },
-        };
-        Wire.Health health = Health(
-            [RecognitionModesCapability, RuntimeSelectionService.MineruConfigCapability],
-            recognitionModes: RecognitionCatalog());
-        health = health with
-        {
-            CapabilityDescriptors =
-            [
-                .. (health.CapabilityDescriptors ?? []).Where(
-                    descriptor => descriptor.Name == RecognitionModesCapability),
-                mineruConfigDescriptor,
-            ],
-        };
-        service = new RuntimeSelectionService(health);
+        service = MineruService(MineruCatalog());
 
         Assert.True(service.SupportsMineruConfig);
         // 类型化配置使用目录默认 tier 和 SDK 的 auto/all/ch 默认值。
@@ -370,6 +339,84 @@ public sealed class RuntimeSelectionServiceTests
         Assert.Equal("ch", config.Language);
         Assert.Null(service.MineruConfigFor("paddle_text"));
         Assert.Null(service.MineruConfigFor(null));
+    }
+
+    [Fact]
+    public void MineruConfigRejectsMissingUnknownDuplicateOrUnavailableDefaultTier()
+    {
+        Wire.MineruConfigCatalog catalog = MineruCatalog();
+        Assert.Equal(RuntimeSelectionErrorKind.InvalidCatalogEntry,
+            Assert.Throws<RuntimeSelectionException>(() => MineruService(catalog with
+            {
+                Tiers = [],
+            }).MineruConfigFor("mineru_document")).Kind);
+        Assert.Equal(RuntimeSelectionErrorKind.InvalidCatalogEntry,
+            Assert.Throws<RuntimeSelectionException>(() => MineruService(catalog with
+            {
+                DefaultTier = (Wire.MineruTierId)99,
+            }).MineruConfigFor("mineru_document")).Kind);
+        Assert.Equal(RuntimeSelectionErrorKind.InvalidCatalogEntry,
+            Assert.Throws<RuntimeSelectionException>(() => MineruService(catalog with
+            {
+                Tiers = [.. catalog.Tiers, .. catalog.Tiers],
+            }).MineruConfigFor("mineru_document")).Kind);
+        Assert.Equal(RuntimeSelectionErrorKind.EngineUnavailable,
+            Assert.Throws<RuntimeSelectionException>(() => MineruService(catalog with
+            {
+                Tiers = [catalog.Tiers[0] with
+                {
+                    Availability = Wire.MineruTierAvailability.Unavailable,
+                }],
+            }).MineruConfigFor("mineru_document")).Kind);
+    }
+
+    [Fact]
+    public void MineruConfigUsesDeclaredLanguageAndRejectsEmptyLanguageCatalog()
+    {
+        Wire.MineruConfigCatalog catalog = MineruCatalog();
+        Assert.Equal("korean", MineruService(catalog with
+        {
+            Languages = ["korean"],
+        }).MineruConfigFor("mineru_document")?.Language);
+        Assert.Equal(RuntimeSelectionErrorKind.InvalidCatalogEntry,
+            Assert.Throws<RuntimeSelectionException>(() => MineruService(catalog with
+            {
+                Languages = [],
+            }).MineruConfigFor("mineru_document")).Kind);
+    }
+
+    private static Wire.MineruConfigCatalog MineruCatalog() => new()
+    {
+        DefaultTier = Wire.MineruTierId.Basic,
+        Tiers =
+        [
+            new Wire.MineruTierDescriptor
+            {
+                Id = Wire.MineruTierId.Basic,
+                Availability = Wire.MineruTierAvailability.PreparationRequired,
+                ReasonCode = "mineru_execution_preparation_required",
+            },
+        ],
+        Languages = ["ch"],
+    };
+
+    private static RuntimeSelectionService MineruService(Wire.MineruConfigCatalog catalog)
+    {
+        Wire.Health health = Health(
+            [RecognitionModesCapability, RuntimeSelectionService.MineruConfigCapability],
+            recognitionModes: RecognitionCatalog());
+        return new RuntimeSelectionService(health with
+        {
+            CapabilityDescriptors =
+            [
+                .. (health.CapabilityDescriptors ?? []).Where(
+                    descriptor => descriptor.Name == RecognitionModesCapability),
+                Descriptor(RuntimeSelectionService.MineruConfigCapability) with
+                {
+                    MineruConfigCatalog = catalog,
+                },
+            ],
+        });
     }
 
     private const string EngineCapability = RuntimeSelectionService.EngineSelectionCapability;

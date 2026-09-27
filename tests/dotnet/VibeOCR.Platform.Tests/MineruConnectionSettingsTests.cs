@@ -45,6 +45,24 @@ public sealed class MineruConnectionSettingsTests
     }
 
     [Fact]
+    public void ReadIgnoresStaleRemoteConnectionWithoutCapability()
+    {
+        MineruConnectionState state = MineruConnectionSettings.Read(
+            SnapshotWithMineruConnection(new
+            {
+                mode = "remote",
+                api_url = "https://mineru.example.com",
+                api_key = "secret-value",
+            }),
+            remoteSupported: false);
+
+        Assert.False(state.Supported);
+        Assert.False(state.IsRemote);
+        Assert.Empty(state.ApiUrl);
+        Assert.False(state.HasApiKey);
+    }
+
+    [Fact]
     public void ReadTreatsUnknownConnectionShapesAsLocal()
     {
         Assert.Equal(

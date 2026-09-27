@@ -33,13 +33,17 @@ public static class MineruConnectionSettings
 
     /// <summary>
     /// 从 Backend 设置快照投影当前 MinerU 连接；缺省本地模式，格式无法
-    /// 识别时按本地处理（写入仍受能力与输入校验约束）。
+    /// 识别或能力未声明时按本地处理（写入仍受能力与输入校验约束）。
     /// </summary>
     public static MineruConnectionState Read(
         SettingsSnapshot snapshot,
         bool remoteSupported)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
+        if (!remoteSupported)
+        {
+            return new MineruConnectionState(false, "local", "", false);
+        }
         string mode = "local";
         string apiUrl = "";
         bool hasApiKey = false;

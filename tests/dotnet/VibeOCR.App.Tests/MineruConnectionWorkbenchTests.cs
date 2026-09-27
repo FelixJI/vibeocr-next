@@ -1,6 +1,7 @@
 using System.Text.Json;
 using VibeOCR.App.Features.Settings;
 using VibeOCR.App.Features.Recognition;
+using VibeOCR.App.Features.Batch;
 using VibeOCR.App.Features.Shell;
 using VibeOCR.App.ViewModels;
 using VibeOCR.App.Web;
@@ -500,6 +501,54 @@ public sealed class MineruConnectionWorkbenchTests
     }
   }
 
+  [Fact]
+  public async Task UnavailableBatchModeIsRejectedAtSelectionAndBeforeBackgroundStart()
+  {
+    string resourceRoot = Path.Combine(Path.GetTempPath(),
+      $"vibeocr-batch-selection-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      var fake = new MineruInferenceClient { Health = MineruModeHealth(ready: true) };
+      var settings = new SettingsViewModel(fake);
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        () => new RecognitionViewModel(fake, new EmptyRecognitionInput()),
+        () => new BatchViewModel(fake, new EmptyBatchFiles()),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => settings,
+        () => new ShellViewModel(new StubHotkeyRegistrar(), new StubStartupRegistrar()),
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker, resourceRoot, static () => 0, annotationStore);
+      CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+
+      Assert.Null((await handler.ExecuteAsync(new RefreshRuntimeCommand(), cancellationToken)).Error);
+      Assert.Null((await handler.ExecuteAsync(
+        new SetBatchTaskEngineCommand("mineru_document"), cancellationToken)).Error);
+
+      fake.Health = MineruModeHealth(ready: false, unavailable: true);
+      Assert.Null((await handler.ExecuteAsync(new RefreshRuntimeCommand(), cancellationToken)).Error);
+      WorkbenchCommandOutcome start = await handler.ExecuteAsync(
+        new StartBatchCommand(), cancellationToken);
+      Assert.Equal("desktop_command_failed", start.Error?.Code);
+      Assert.Empty(start.States);
+
+      Assert.Null((await handler.ExecuteAsync(
+        new SetBatchTaskEngineCommand(null), cancellationToken)).Error);
+      WorkbenchCommandOutcome select = await handler.ExecuteAsync(
+        new SetBatchTaskEngineCommand("mineru_document"), cancellationToken);
+      Assert.Equal("desktop_command_failed", select.Error?.Code);
+      Assert.Empty(select.States);
+    }
+    finally
+    {
+      Directory.Delete(resourceRoot, recursive: true);
+    }
+  }
+
   private static void AssertMineruMode(
     WorkbenchState state, string availability, bool requiresDownload)
   {
@@ -515,7 +564,7 @@ public sealed class MineruConnectionWorkbenchTests
     Assert.Equal(requiresDownload, mineru.RequiresDownload);
   }
 
-  private static Wire.Health MineruModeHealth(bool ready) => new()
+  private static Wire.Health MineruModeHealth(bool ready, bool unavailable = false) => new()
   {
     SchemaVersion = 2,
     InstanceId = "sup-1",
@@ -546,7 +595,7 @@ public sealed class MineruConnectionWorkbenchTests
             Mode(Wire.RecognitionModeId.PaddleText, ready),
             Mode(Wire.RecognitionModeId.PaddleStructure, ready),
             Mode(Wire.RecognitionModeId.PaddleDocumentVl, ready),
-            Mode(Wire.RecognitionModeId.MineruDocument, ready),
+            Mode(Wire.RecognitionModeId.MineruDocument, ready, unavailable),
             Mode(Wire.RecognitionModeId.PaddleTable, ready),
             Mode(Wire.RecognitionModeId.PaddleFormula, ready),
           ],
@@ -555,7 +604,8 @@ public sealed class MineruConnectionWorkbenchTests
     ],
   };
 
-  private static Wire.RecognitionModeDescriptor Mode(Wire.RecognitionModeId id, bool ready)
+  private static Wire.RecognitionModeDescriptor Mode(
+    Wire.RecognitionModeId id, bool ready, bool unavailable = false)
   {
     var (family, pipeline, engine, provisioning, lifecycle) = id switch
     {
@@ -593,9 +643,11 @@ public sealed class MineruConnectionWorkbenchTests
       PipelineId = pipeline,
       Engine = engine,
       Provisioning = provisioning,
-      Availability = mineru && !ready
-        ? Wire.RecognitionModeAvailability.PreparationRequired
-        : Wire.RecognitionModeAvailability.Ready,
+      Availability = mineru && unavailable
+        ? Wire.RecognitionModeAvailability.Unavailable
+        : mineru && !ready
+          ? Wire.RecognitionModeAvailability.PreparationRequired
+          : Wire.RecognitionModeAvailability.Ready,
       ReasonCode = mineru && !ready ? "runtime_component_missing" : null,
       RequiredComponent = mineru && !ready ? "mineru-cpu" : null,
       SupportedOptions = [],
@@ -781,5 +833,15 @@ public sealed class MineruConnectionWorkbenchTests
 
     public Task<RecognitionInput?> ReadDroppedFileAsync(
       string path, CancellationToken cancellationToken) => Task.FromResult<RecognitionInput?>(null);
+  }
+
+  private sealed class EmptyBatchFiles : IBatchFileSource
+  {
+    public Task<IReadOnlyList<string>> PickFilesAsync(CancellationToken cancellationToken) =>
+      Task.FromResult<IReadOnlyList<string>>([]);
+
+    public Task<(byte[] Data, string MediaType)> ReadAsync(
+      string path, CancellationToken cancellationToken) =>
+      throw new InvalidOperationException("No batch file should be read during selection.");
   }
 }
