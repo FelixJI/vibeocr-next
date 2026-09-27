@@ -93,6 +93,13 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     return await Current.GetResidencyAsync(cancellationToken);
   }
 
+  public async Task<ResidencyStatus> PreloadRuntimeAsync(
+    Wire.RuntimePreloadRequest request, CancellationToken cancellationToken)
+  {
+    await _gate.WaitAsync(cancellationToken);
+    return await Current.PreloadRuntimeAsync(request, cancellationToken);
+  }
+
   public async Task<RuntimeStatusSnapshot> GetRuntimeStatusAsync(CancellationToken cancellationToken)
   {
     await _gate.WaitAsync(cancellationToken);

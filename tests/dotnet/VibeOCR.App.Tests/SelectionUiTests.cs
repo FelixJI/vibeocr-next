@@ -79,6 +79,46 @@ public sealed class SelectionUiTests
         Assert.Equal(2, fake.UpdateCalls);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ConcurrentSourceAndMineruSavesPreserveBothFields(bool sourceFirst)
+    {
+        Wire.Health health = SelectionHealth();
+        var fake = new BlockFirstSettingsUpdateClient
+        {
+            Health = health with
+            {
+                Capabilities =
+                [.. health.Capabilities ?? [], RuntimeSelectionService.MineruRemoteApiCapability],
+            },
+            Settings = new SettingsSnapshot { DownloadSourceIds = ["tuna-pypi"] },
+        };
+        var viewModel = new SettingsViewModel(fake);
+        await viewModel.LoadSnapshotAsync(TestContext.Current.CancellationToken);
+
+        Task SaveSource() => viewModel.SetSourceAsync(
+            "package_index", "pypi", TestContext.Current.CancellationToken);
+        Task SaveMineru() => viewModel.SetMineruConnectionAsync(
+            "remote", "https://mineru.example.com", "key-1",
+            TestContext.Current.CancellationToken);
+        Task first = sourceFirst ? SaveSource() : SaveMineru();
+        await fake.FirstUpdateStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        int readsBeforeSecondSave = fake.SettingsReads;
+        Task second = sourceFirst ? SaveMineru() : SaveSource();
+
+        // The second read must wait until the first full-snapshot PUT completes.
+        Assert.Equal(readsBeforeSecondSave, fake.SettingsReads);
+        fake.ReleaseFirstUpdate.TrySetResult(true);
+        await Task.WhenAll(first, second);
+
+        Assert.Equal(["pypi"], fake.Settings.DownloadSourceIds);
+        JsonElement connection = fake.Settings.Extra["mineru_connection"];
+        Assert.Equal("remote", connection.GetProperty("mode").GetString());
+        Assert.Equal("https://mineru.example.com", connection.GetProperty("api_url").GetString());
+        Assert.Equal("key-1", connection.GetProperty("api_key").GetString());
+    }
+
     [Fact]
     public async Task AcceleratorAndFeatureSelectionStagePendingChoices()
     {
@@ -419,6 +459,34 @@ public sealed class SelectionUiTests
             HealthRequested.TrySetResult(true);
             await ReleaseHealth.Task.WaitAsync(cancellationToken);
             return Health;
+        }
+    }
+
+    private sealed class BlockFirstSettingsUpdateClient : SelectionInferenceClient
+    {
+        private int _updateCount;
+
+        public int SettingsReads { get; private set; }
+        public TaskCompletionSource<bool> FirstUpdateStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> ReleaseFirstUpdate { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken)
+        {
+            SettingsReads++;
+            return base.GetSettingsAsync(cancellationToken);
+        }
+
+        public override async Task<SettingsSnapshot> UpdateSettingsAsync(
+            SettingsSnapshot settings, CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref _updateCount) == 1)
+            {
+                FirstUpdateStarted.TrySetResult(true);
+                await ReleaseFirstUpdate.Task.WaitAsync(cancellationToken);
+            }
+            return await base.UpdateSettingsAsync(settings, cancellationToken);
         }
     }
 

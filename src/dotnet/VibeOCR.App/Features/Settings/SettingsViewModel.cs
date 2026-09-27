@@ -37,7 +37,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     };
 
     private readonly IInferenceClient _inference;
-    private readonly SemaphoreSlim _selectionLoadGate = new(1, 1);
+    private readonly SemaphoreSlim _settingsGate = new(1, 1);
     private long _generation;
     private bool _isBusy;
     private string _status = "正在读取设置";
@@ -198,15 +198,20 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
         try
         {
-            IReadOnlyList<string> next = ComposeSourceSelection(kind, sourceId);
-            SettingsSnapshot updated = await _selection.ApplySourcePreferenceAsync(
-                _inference,
-                next.Count == 0 ? null : next,
-                cancellationToken);
-            Maintenance.DiscardPlan();
-            _selectedSourceIds = updated.DownloadSourceIds ?? [];
-            Sources = ProjectSources(_selection, _selectedSourceIds);
-            Status = "已保存下载源偏好";
+            await _settingsGate.WaitAsync(cancellationToken);
+            try
+            {
+                IReadOnlyList<string> next = ComposeSourceSelection(kind, sourceId);
+                SettingsSnapshot updated = await _selection.ApplySourcePreferenceAsync(
+                    _inference,
+                    next.Count == 0 ? null : next,
+                    cancellationToken);
+                Maintenance.DiscardPlan();
+                _selectedSourceIds = updated.DownloadSourceIds ?? [];
+                Sources = ProjectSources(_selection, _selectedSourceIds);
+                Status = "已保存下载源偏好";
+            }
+            finally { _settingsGate.Release(); }
         }
         catch (RuntimeSelectionException error)
         {
@@ -245,10 +250,15 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
         try
         {
-            SettingsSnapshot updated = await MineruConnectionSettings.ApplyAsync(
-                _inference, mode, apiUrl, apiKey, cancellationToken);
-            MineruConnection = MineruConnectionSettings.Read(
-                updated, selection.SupportsMineruRemoteApi);
+            await _settingsGate.WaitAsync(cancellationToken);
+            try
+            {
+                SettingsSnapshot updated = await MineruConnectionSettings.ApplyAsync(
+                    _inference, mode, apiUrl, apiKey, cancellationToken);
+                MineruConnection = MineruConnectionSettings.Read(
+                    updated, selection.SupportsMineruRemoteApi);
+            }
+            finally { _settingsGate.Release(); }
         }
         catch (ArgumentException error) { Status = error.Message; return; }
         catch (InferenceClientException error) { Status = LocalizeV2(error.Code); return; }
@@ -477,7 +487,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         bool forceReload,
         CancellationToken cancellationToken)
     {
-        await _selectionLoadGate.WaitAsync(cancellationToken);
+        await _settingsGate.WaitAsync(cancellationToken);
         try
         {
             if (!forceReload && RecognitionSelection is not null)
@@ -488,7 +498,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
         finally
         {
-            _selectionLoadGate.Release();
+            _settingsGate.Release();
         }
     }
 
