@@ -428,7 +428,12 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         catch (OperationCanceledException) { Status = "运行环境维护已取消"; }
         catch (Exception error) when (error is RuntimeInstallerException or InvalidOperationException or NotSupportedException)
         {
-            Status = error is RuntimeInstallerException ? "安装失败，可重试、调整下载来源或导出诊断。" : error.Message;
+            // Only envelope-granted retryable failures prompt a direct retry.
+            Status = error is RuntimeInstallerException installerError
+                ? installerError.Retryable
+                    ? "安装失败，可重试、调整下载来源或导出诊断。"
+                    : "安装失败，请重新预览安装范围或导出诊断。"
+                : error.Message;
         }
         finally
         {

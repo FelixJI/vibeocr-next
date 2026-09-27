@@ -137,9 +137,13 @@ public sealed class RuntimeMaintenanceCoordinator
             Operation = snapshot.Operation, Snapshot = snapshot, MessageCode = "runtime.recovered",
         });
         bool running = snapshot.OperationState is Host.RuntimeOperationState.Running or Host.RuntimeOperationState.Queued;
-        bool retryable = snapshot.OperationState is Host.RuntimeOperationState.Failed or Host.RuntimeOperationState.Cancelled;
+        // Cancelled stays retryable per the durable retry contract; a recovered failure has no error envelope, so keep the persisted failure semantics instead of clearing them.
+        bool retryable = snapshot.OperationState is Host.RuntimeOperationState.Cancelled;
+        bool failed = snapshot.OperationState is Host.RuntimeOperationState.Failed;
         SetState(_state with { IsRunning = running, StatusCode = snapshot.OperationState.ToString().ToLowerInvariant(),
-            CanCancel = false, CanRetry = retryable, FailureReason = "", FailureCode = "" });
+            CanCancel = false, CanRetry = retryable,
+            FailureReason = failed ? _state.FailureReason : "",
+            FailureCode = failed ? _state.FailureCode : "" });
         if (!running) _runtimeStatus.CompleteMaintenance(_state.StatusCode);
     }
 
@@ -264,6 +268,7 @@ public sealed class RuntimeMaintenanceCoordinator
         }
         catch (RuntimeInstallerException error)
         {
+            // Direct retry requires the error envelope's authoritative retryable grant.
             SetState(new RuntimeMaintenanceState(
                 false,
                 "failed",
@@ -273,14 +278,16 @@ public sealed class RuntimeMaintenanceCoordinator
                 _state.RequestedSourceIds,
                 _state.EffectiveSourceIds,
                 CanCancel: false,
-                CanRetry: true, Accelerator: _state.Accelerator));
-            SetState(_state with { FailureReason = FailureReason(error),
-                FailureCode = error.CanonicalCode ?? "runtime.install_failed" });
+                CanRetry: error.Retryable,
+                FailureReason: FailureReason(error),
+                FailureCode: error.CanonicalCode ?? "runtime.install_failed",
+                Accelerator: _state.Accelerator));
             throw;
         }
         catch (Exception)
         {
-            SetState(_state with { IsRunning = false, StatusCode = "failed", CanCancel = false, CanRetry = true });
+            // Unexpected local errors carry no authoritative retryable grant.
+            SetState(_state with { IsRunning = false, StatusCode = "failed", CanCancel = false, CanRetry = false });
             throw;
         }
         finally

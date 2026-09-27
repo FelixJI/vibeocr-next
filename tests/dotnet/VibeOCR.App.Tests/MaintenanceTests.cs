@@ -196,6 +196,7 @@ public sealed class MaintenanceTests
     [Fact]
     public async Task FailedInstallIsRetryableAndRetryReusesSourceIntent()
     {
+        // A transient envelope failure (lock_timeout/RUNTIME_BUSY) grants a direct retry.
         var fake = new FakeRuntimeInstallerClient { FailNextInstall = true };
         var settings = await LoadedSettingsAsync(fake, sources: null);
         settings.SetFeatureEnabled("document_parsing", true);
@@ -205,6 +206,8 @@ public sealed class MaintenanceTests
         await PreviewAndConfirmAsync(settings);
         Assert.Equal("failed", settings.Maintenance.State.StatusCode);
         Assert.True(settings.Maintenance.State.CanRetry);
+        Assert.Equal("RUNTIME_BUSY", settings.Maintenance.State.FailureCode);
+        Assert.Contains("可重试", settings.Status);
 
         fake.FailNextInstall = false;
         await settings.RetryMaintenanceAsync(CancellationToken.None);
@@ -213,6 +216,100 @@ public sealed class MaintenanceTests
         await settings.ConfirmInstallAsync(settings.Maintenance.Plan!.PlanId, TestContext.Current.CancellationToken);
         Assert.Equal("succeeded", settings.Maintenance.State.StatusCode);
         Assert.False(settings.Maintenance.State.CanRetry);
+    }
+
+    [Fact]
+    public async Task NonRetryableInstallFailureNeedsFreshPreview()
+    {
+        // retryable=false means the Backend granted no direct retry; a fresh
+        // preview (possibly with adjusted selection) is the path forward.
+        var fake = new FakeRuntimeInstallerClient
+        {
+            InstallException = new RuntimeInstallerException(
+                "安装未成功完成",
+                new RuntimeHostError(
+                    "install_failed",
+                    "安装未成功完成",
+                    Retryable: false,
+                    CanonicalCode: "RUNTIME_INSTALL_FAILED",
+                    Category: "backend_unavailable")),
+        };
+        var settings = await LoadedSettingsAsync(fake, sources: null);
+        settings.SetFeatureEnabled("document_parsing", true);
+
+        await PreviewAndConfirmAsync(settings);
+
+        Assert.Equal("failed", settings.Maintenance.State.StatusCode);
+        Assert.False(settings.Maintenance.State.CanRetry);
+        Assert.Equal("RUNTIME_INSTALL_FAILED", settings.Maintenance.State.FailureCode);
+        Assert.DoesNotContain("可重试", settings.Status);
+        Assert.Contains("重新预览", settings.Status);
+        await settings.RetryMaintenanceAsync(CancellationToken.None);
+        Assert.Null(settings.Maintenance.Plan);
+        Assert.Contains("没有可重试", settings.Status);
+    }
+
+    [Fact]
+    public async Task UnexpectedClientFailureIsNotRetryable()
+    {
+        // Unexpected local errors carry no authoritative retryable grant.
+        var fake = new FakeRuntimeInstallerClient { InstallException = new IOException("local disk unavailable") };
+        var settings = await LoadedSettingsAsync(fake, sources: null);
+        await settings.PreviewInstallAsync(TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAsync<IOException>(() =>
+            settings.ConfirmInstallAsync(settings.Maintenance.Plan!.PlanId, TestContext.Current.CancellationToken));
+
+        Assert.Equal("failed", settings.Maintenance.State.StatusCode);
+        Assert.False(settings.Maintenance.State.CanRetry);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            settings.Maintenance.RetryAsync(CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData(Host.RuntimeOperationState.Failed)]
+    [InlineData(Host.RuntimeOperationState.Cancelled)]
+    public async Task RecoveredTerminalStateKeepsDurableRetrySemantics(Host.RuntimeOperationState observed)
+    {
+        string store = Path.GetTempFileName();
+        try
+        {
+            // A second recovery pass observes the Backend terminal state: keep
+            // the persisted failure semantics and follow the durable retry
+            // contract (cancelled retryable, recovered failure not).
+            var state = RuntimeMaintenanceState.Idle with
+            {
+                IsRunning = true,
+                StatusCode = "running",
+                OperationId = "recover-terminal",
+                FailureReason = "无法核实上次维护结果，请重新检查状态后预览安装范围。",
+                FailureCode = "maintenance.recovery_unavailable",
+            };
+            await File.WriteAllTextAsync(store, System.Text.Json.JsonSerializer.Serialize(new { State = state }),
+                TestContext.Current.CancellationToken);
+            var installer = new FakeRuntimeInstallerClient { ObserveState = observed };
+            var coordinator = new RuntimeMaintenanceCoordinator(() => installer,
+                new VibeOCR.App.ViewModels.RuntimeStatusViewModel(), operationStorePath: store);
+
+            await coordinator.RestoreAsync(TestContext.Current.CancellationToken);
+
+            Assert.Equal(observed.ToString().ToLowerInvariant(), coordinator.State.StatusCode);
+            Assert.False(coordinator.State.IsRunning);
+            if (observed == Host.RuntimeOperationState.Cancelled)
+            {
+                Assert.True(coordinator.State.CanRetry);
+                Assert.Empty(coordinator.State.FailureReason);
+                Assert.Empty(coordinator.State.FailureCode);
+            }
+            else
+            {
+                Assert.False(coordinator.State.CanRetry);
+                Assert.Equal("无法核实上次维护结果，请重新检查状态后预览安装范围。", coordinator.State.FailureReason);
+                Assert.Equal("maintenance.recovery_unavailable", coordinator.State.FailureCode);
+            }
+            Assert.Null(installer.LastOperationId);
+        }
+        finally { File.Delete(store); }
     }
 
     [Fact]
@@ -458,6 +555,8 @@ public sealed class MaintenanceTests
         public bool FailNextObserve { get; set; }
         public int ObserveCalls { get; private set; }
         public bool FailNextInstall { get; set; }
+        public Host.RuntimeOperationState ObserveState { get; set; } = Host.RuntimeOperationState.Succeeded;
+        public Exception? InstallException { get; set; }
         public bool HangOnInstall { get; set; }
         public bool HangOnRetry { get; set; }
         public bool FailNextRetryUnexpectedly { get; set; }
@@ -503,12 +602,20 @@ public sealed class MaintenanceTests
                 await Task.Delay(Timeout.Infinite, cancellationToken);
                 throw new OperationCanceledException(cancellationToken);
             }
-            if (FailNextInstall)
+            if (InstallException is not null || FailNextInstall)
             {
                 progress?.Report(Event(operationId, Host.RuntimeOperationState.Failed,
                     requested: selection?.InstallComponentIds ?? [],
                     effective: []));
-                throw new RuntimeInstallerException("install failed");
+                throw InstallException ?? new RuntimeInstallerException(
+                    "安装锁被占用",
+                    new RuntimeHostError(
+                        "lock_timeout",
+                        "安装锁被占用",
+                        Retryable: true,
+                        CanonicalCode: "RUNTIME_BUSY",
+                        Category: "transient",
+                        RetryAfter: 1));
             }
             progress?.Report(Event(operationId, Host.RuntimeOperationState.Running,
                 requested: selection?.InstallComponentIds ?? [],
@@ -592,7 +699,7 @@ public sealed class MaintenanceTests
                 FailNextObserve = false;
                 throw new RuntimeInstallerException("temporary observe failure");
             }
-            var snapshot = Event(operationId, Host.RuntimeOperationState.Succeeded, [], []).Snapshot;
+            var snapshot = Event(operationId, ObserveState, [], []).Snapshot;
             return Task.FromResult(new RuntimeMaintenanceObserveEnvelope(2, true, "maintenance_observe", operationId,
                 snapshot, [], 0, snapshot.Sequence, false, null));
         }
