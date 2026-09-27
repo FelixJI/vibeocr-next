@@ -1,5 +1,6 @@
 using System.Text.Json;
 using VibeOCR.App.Features.Settings;
+using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Features.Shell;
 using VibeOCR.App.ViewModels;
 using VibeOCR.App.Web;
@@ -324,7 +325,7 @@ public sealed class MineruConnectionWorkbenchTests
       using var broker = new WorkbenchResourceBroker(resourceRoot);
       using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
       await using var handler = new DesktopWorkbenchCommandHandler(
-        static () => throw new InvalidOperationException(),
+        () => new RecognitionViewModel(fake, new EmptyRecognitionInput()),
         static () => throw new InvalidOperationException(),
         static () => throw new InvalidOperationException(),
         static () => throw new InvalidOperationException(),
@@ -368,6 +369,247 @@ public sealed class MineruConnectionWorkbenchTests
     }
   }
 
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task RemoteConnectionChangePublishesReadyRecognitionCatalogAndNavigationKeepsIt(
+    bool prepare)
+  {
+    string resourceRoot = Path.Combine(
+      Path.GetTempPath(), $"vibeocr-mineru-catalog-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      var fake = new MineruInferenceClient
+      {
+        Health = MineruModeHealth(ready: false),
+        HealthAfterUpdate = prepare ? null : MineruModeHealth(ready: true),
+        HealthAfterPreload = prepare ? MineruModeHealth(ready: true) : null,
+        Settings = prepare ? RemoteConnectionSnapshot() : new SettingsSnapshot(),
+      };
+      var settings = new SettingsViewModel(fake);
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        () => new RecognitionViewModel(fake, new EmptyRecognitionInput { HasInput = true }),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => settings,
+        () => new ShellViewModel(new StubHotkeyRegistrar(), new StubStartupRegistrar()),
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker,
+        resourceRoot,
+        static () => 0,
+        annotationStore);
+      await using var application = new WorkbenchApplication(
+        ["recognition.engine"], WorkbenchRoute.Settings, handler);
+      WorkbenchBootstrap initial = await application.BootstrapAsync(
+        TestContext.Current.CancellationToken);
+      AssertMineruMode(Assert.IsAssignableFrom<WorkbenchState>(
+          initial.States.Single(state => state.Scope == "recognition").State),
+        "preparation_required", requiresDownload: true);
+      AssertMineruMode(Assert.IsAssignableFrom<WorkbenchState>(
+          initial.States.Single(state => state.Scope == "batch").State),
+        "preparation_required", requiresDownload: true);
+      var completed = new TaskCompletionSource<RecognitionWorkbenchState>(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+      handler.StateChanged += state =>
+      {
+        if (state is RecognitionWorkbenchState { StatusCode: "recognition.completed" } result)
+          completed.TrySetResult(result);
+      };
+      WorkbenchCommandReceipt started = await application.ExecuteAsync(
+        new WorkbenchCommandEnvelope(Guid.NewGuid(), new SelectRecognitionImageCommand()),
+        TestContext.Current.CancellationToken);
+      Assert.True(started.Ok);
+      RecognitionWorkbenchState previous = await completed.Task.WaitAsync(
+        TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      Assert.NotNull(previous.Input);
+      Assert.NotNull(previous.Result);
+      initial = await application.BootstrapAsync(TestContext.Current.CancellationToken);
+      await using IAsyncEnumerator<WorkbenchStateEnvelope> updates = application
+        .SubscribeAsync(initial.Revision, TestContext.Current.CancellationToken)
+        .GetAsyncEnumerator(TestContext.Current.CancellationToken);
+
+      WorkbenchCommand command = prepare
+        ? new PrepareMineruConnectionCommand()
+        : new SetMineruConnectionCommand("remote", "https://mineru.example.com", null);
+      WorkbenchCommandReceipt changed = await application.ExecuteAsync(
+        new WorkbenchCommandEnvelope(Guid.NewGuid(), command),
+        TestContext.Current.CancellationToken);
+      Assert.True(changed.Ok);
+      Assert.Equal(prepare ? 1 : 0, fake.PreloadCalls);
+      RecognitionWorkbenchState? refreshed = null;
+      while (await updates.MoveNextAsync().AsTask().WaitAsync(
+        TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken))
+      {
+        if (updates.Current.State is RecognitionWorkbenchState recognition)
+        {
+          refreshed = recognition;
+          break;
+        }
+      }
+      Assert.NotNull(refreshed);
+      AssertMineruMode(refreshed, "ready", requiresDownload: false);
+      Assert.Equal("recognition.completed", refreshed.StatusCode);
+      Assert.NotNull(refreshed.Input);
+      Assert.NotNull(refreshed.Result);
+      BatchWorkbenchState? refreshedBatch = null;
+      while (await updates.MoveNextAsync().AsTask().WaitAsync(
+        TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken))
+      {
+        if (updates.Current.State is BatchWorkbenchState batch)
+        {
+          refreshedBatch = batch;
+          break;
+        }
+      }
+      Assert.NotNull(refreshedBatch);
+      AssertMineruMode(refreshedBatch, "ready", requiresDownload: false);
+
+      WorkbenchCommandReceipt selected = await application.ExecuteAsync(
+        new WorkbenchCommandEnvelope(Guid.NewGuid(),
+          new SetTaskEngineCommand("mineru_document")),
+        TestContext.Current.CancellationToken);
+      Assert.True(selected.Ok);
+
+      WorkbenchCommandReceipt navigated = await application.ExecuteAsync(
+        new WorkbenchCommandEnvelope(Guid.NewGuid(),
+          new NavigateWorkbenchCommand(WorkbenchRoute.Recognition)),
+        TestContext.Current.CancellationToken);
+      Assert.True(navigated.Ok);
+      WorkbenchBootstrap afterNavigation = await application.BootstrapAsync(
+        TestContext.Current.CancellationToken);
+      Assert.Equal(WorkbenchRoute.Recognition, afterNavigation.Route);
+      AssertMineruMode(Assert.IsAssignableFrom<WorkbenchState>(
+          afterNavigation.States.Single(state => state.Scope == "recognition").State),
+        "ready", requiresDownload: false);
+      AssertMineruMode(Assert.IsAssignableFrom<WorkbenchState>(
+          afterNavigation.States.Single(state => state.Scope == "batch").State),
+        "ready", requiresDownload: false);
+      BatchWorkbenchState batchAfterNavigation = Assert.IsType<BatchWorkbenchState>(
+        afterNavigation.States.Single(state => state.Scope == "batch").State);
+      Assert.False(Assert.Single(batchAfterNavigation.Engines!,
+        engine => engine.Engine == "mineru_document").IsTaskOverride);
+    }
+    finally
+    {
+      Directory.Delete(resourceRoot, recursive: true);
+    }
+  }
+
+  private static void AssertMineruMode(
+    WorkbenchState state, string availability, bool requiresDownload)
+  {
+    IReadOnlyList<RecognitionEngineChoice>? engines = state switch
+    {
+      RecognitionWorkbenchState recognition => recognition.Engines,
+      BatchWorkbenchState batch => batch.Engines,
+      _ => throw new InvalidOperationException("Expected recognition or batch state."),
+    };
+    RecognitionEngineChoice mineru = Assert.Single(engines!,
+      engine => engine.Engine == "mineru_document");
+    Assert.Equal(availability, mineru.Availability);
+    Assert.Equal(requiresDownload, mineru.RequiresDownload);
+  }
+
+  private static Wire.Health MineruModeHealth(bool ready) => new()
+  {
+    SchemaVersion = 2,
+    InstanceId = "sup-1",
+    ProtocolVersion = 2,
+    Ready = true,
+    Draining = false,
+    Capabilities =
+    [
+      RuntimeSelectionService.MineruRemoteApiCapability,
+      RuntimeSelectionService.RecognitionModesCapability,
+    ],
+    CapabilityDescriptors =
+    [
+      new Wire.CapabilityDescriptor
+      {
+        Name = RuntimeSelectionService.RecognitionModesCapability,
+        Lifecycle = "active",
+        IntroducedIn = "2.9.0",
+        DeprecatedIn = null,
+        SunsetAt = null,
+        Replacement = null,
+        RecognitionModeCatalog = new Wire.RecognitionModeCatalog
+        {
+          Modes =
+          [
+            Mode(Wire.RecognitionModeId.RapidText, ready),
+            Mode(Wire.RecognitionModeId.WindowsText, ready),
+            Mode(Wire.RecognitionModeId.PaddleText, ready),
+            Mode(Wire.RecognitionModeId.PaddleStructure, ready),
+            Mode(Wire.RecognitionModeId.PaddleDocumentVl, ready),
+            Mode(Wire.RecognitionModeId.MineruDocument, ready),
+            Mode(Wire.RecognitionModeId.PaddleTable, ready),
+            Mode(Wire.RecognitionModeId.PaddleFormula, ready),
+          ],
+        },
+      },
+    ],
+  };
+
+  private static Wire.RecognitionModeDescriptor Mode(Wire.RecognitionModeId id, bool ready)
+  {
+    var (family, pipeline, engine, provisioning, lifecycle) = id switch
+    {
+      Wire.RecognitionModeId.RapidText => (Wire.RecognitionModeFamily.Text,
+        Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Rapidocr,
+        Wire.RecognitionModeProvisioning.BaseRuntime, Wire.RecognitionModeLifecycleKind.Unmanaged),
+      Wire.RecognitionModeId.WindowsText => (Wire.RecognitionModeFamily.Text,
+        Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Windows,
+        Wire.RecognitionModeProvisioning.OperatingSystem, Wire.RecognitionModeLifecycleKind.Unmanaged),
+      Wire.RecognitionModeId.PaddleText => (Wire.RecognitionModeFamily.Text,
+        Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Paddleocr,
+        Wire.RecognitionModeProvisioning.AdvancedComponent, Wire.RecognitionModeLifecycleKind.ModelResidency),
+      Wire.RecognitionModeId.PaddleStructure => (Wire.RecognitionModeFamily.Document,
+        Wire.ExecutionPipelineId.PPStructureV3, (Wire.OcrEngineId?)null,
+        Wire.RecognitionModeProvisioning.AdvancedComponent, Wire.RecognitionModeLifecycleKind.ModelResidency),
+      Wire.RecognitionModeId.PaddleDocumentVl => (Wire.RecognitionModeFamily.Document,
+        Wire.ExecutionPipelineId.PaddleOCRVL, (Wire.OcrEngineId?)null,
+        Wire.RecognitionModeProvisioning.AdvancedComponent, Wire.RecognitionModeLifecycleKind.ModelResidency),
+      Wire.RecognitionModeId.MineruDocument => (Wire.RecognitionModeFamily.Document,
+        Wire.ExecutionPipelineId.MinerU, (Wire.OcrEngineId?)null,
+        Wire.RecognitionModeProvisioning.AdvancedComponent, Wire.RecognitionModeLifecycleKind.ProcessKeepAlive),
+      Wire.RecognitionModeId.PaddleTable => (Wire.RecognitionModeFamily.Specialized,
+        Wire.ExecutionPipelineId.TABLERECOGNITION, (Wire.OcrEngineId?)null,
+        Wire.RecognitionModeProvisioning.AdvancedComponent, Wire.RecognitionModeLifecycleKind.ModelResidency),
+      Wire.RecognitionModeId.PaddleFormula => (Wire.RecognitionModeFamily.Specialized,
+        Wire.ExecutionPipelineId.FORMULARECOGNITION, (Wire.OcrEngineId?)null,
+        Wire.RecognitionModeProvisioning.AdvancedComponent, Wire.RecognitionModeLifecycleKind.ModelResidency),
+      _ => throw new ArgumentOutOfRangeException(nameof(id)),
+    };
+    bool mineru = id == Wire.RecognitionModeId.MineruDocument;
+    return new Wire.RecognitionModeDescriptor
+    {
+      Id = id,
+      Family = family,
+      PipelineId = pipeline,
+      Engine = engine,
+      Provisioning = provisioning,
+      Availability = mineru && !ready
+        ? Wire.RecognitionModeAvailability.PreparationRequired
+        : Wire.RecognitionModeAvailability.Ready,
+      ReasonCode = mineru && !ready ? "runtime_component_missing" : null,
+      RequiredComponent = mineru && !ready ? "mineru-cpu" : null,
+      SupportedOptions = [],
+      Lifecycle = new Wire.RecognitionModeLifecycle
+      {
+        Kind = lifecycle,
+        SupportsPreload = mineru,
+        SupportsTtl = mineru,
+        SupportsPinning = false,
+        SupportsRelease = mineru,
+      },
+    };
+  }
+
   private static Wire.Health MineruHealth(bool remoteCapability) => new()
   {
     SchemaVersion = 2,
@@ -393,7 +635,7 @@ public sealed class MineruConnectionWorkbenchTests
     },
   };
 
-  private sealed class MineruInferenceClient : InferenceClientStub
+  private sealed class MineruInferenceClient : InferenceClientStub, IInferenceClient
   {
     public Wire.Health Health { get; set; } = new()
     {
@@ -409,11 +651,65 @@ public sealed class MineruConnectionWorkbenchTests
 
     public SettingsSnapshot? LastUpdate { get; private set; }
 
+    public Wire.Health? HealthAfterUpdate { get; init; }
+
+    public Wire.Health? HealthAfterPreload { get; init; }
+
     public InferenceClientException? UpdateThrows { get; init; }
 
     public int UpdateCalls { get; private set; }
 
     public int HealthCalls { get; private set; }
+
+    public int PreloadCalls { get; private set; }
+
+    public override Task<JobRef> SubmitAsync(
+      SubmitRequest request,
+      IReadOnlyDictionary<string, SubmitUpload> uploads,
+      CancellationToken cancellationToken) => Task.FromResult(new JobRef
+      {
+        JobId = "job-mineru-test",
+        Items =
+        [
+          new JobItem
+          {
+            ItemId = "it-0",
+            ClientItemKey = request.Items[0].ClientItemKey,
+            Ordinal = 0,
+            DisplayName = request.Items[0].DisplayName,
+            State = ItemState.Queued,
+          },
+        ],
+      });
+
+    public override Task<JobUpdate> ObserveAsync(
+      string jobId, int afterSequence, CancellationToken cancellationToken) =>
+      Task.FromResult(new JobUpdate
+      {
+        Snapshot = new JobSnapshot
+        {
+          JobId = jobId,
+          Kind = JobKind.Recognition,
+          Priority = JobPriority.Interactive,
+          State = JobState.Completed,
+        },
+        Events = [],
+        Outcomes =
+        [
+          new ItemOutcome
+          {
+            ItemId = "it-0",
+            State = ItemState.Succeeded,
+            Attempt = 1,
+            PayloadType = "ocr.v1",
+            Payload = new Dictionary<string, JsonElement>
+            {
+              ["raw_text"] = JsonSerializer.SerializeToElement("recognized text"),
+            },
+          },
+        ],
+        ThroughSequence = afterSequence,
+      });
 
     public override Task<ResidencyStatus> GetResidencyAsync(
       CancellationToken cancellationToken) => Task.FromResult(new ResidencyStatus());
@@ -438,7 +734,17 @@ public sealed class MineruConnectionWorkbenchTests
       }
       LastUpdate = settings;
       Settings = settings;
+      if (HealthAfterUpdate is not null) Health = HealthAfterUpdate;
       return Task.FromResult(settings);
+    }
+
+    public Task<ResidencyStatus> PreloadRuntimeAsync(
+      Wire.RuntimePreloadRequest request,
+      CancellationToken cancellationToken)
+    {
+      PreloadCalls++;
+      if (HealthAfterPreload is not null) Health = HealthAfterPreload;
+      return Task.FromResult(new ResidencyStatus());
     }
   }
 
@@ -456,5 +762,24 @@ public sealed class MineruConnectionWorkbenchTests
   private sealed class StubStartupRegistrar : IStartupRegistrar
   {
     public bool SetEnabled(bool enabled) => true;
+  }
+
+  private sealed class EmptyRecognitionInput : IInputService
+  {
+    public bool HasInput { get; init; }
+
+    public Task<RecognitionInput?> PickFileAsync(CancellationToken cancellationToken) =>
+      Task.FromResult<RecognitionInput?>(HasInput
+        ? new RecognitionInput([1, 2, 3, 4], "image/png", "image.png", "file")
+        : null);
+
+    public Task<RecognitionInput?> ReadClipboardAsync(CancellationToken cancellationToken) =>
+      Task.FromResult<RecognitionInput?>(null);
+
+    public Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken) =>
+      Task.FromResult<RecognitionInput?>(null);
+
+    public Task<RecognitionInput?> ReadDroppedFileAsync(
+      string path, CancellationToken cancellationToken) => Task.FromResult<RecognitionInput?>(null);
   }
 }

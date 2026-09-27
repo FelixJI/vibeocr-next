@@ -139,7 +139,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   public IReadOnlyList<WorkbenchState> InitialStates =>
   [
     RecognitionState(false, "recognition.ready"),
-    new BatchWorkbenchState(false, 0, 0, 0),
+    CurrentBatchState(),
     new PdfWorkbenchState(false, "pdf.empty", 0, -1),
     new QrCodeWorkbenchState(false, "qrcode.ready", [], null),
     settings is null ? new SettingsWorkbenchState(
@@ -1026,8 +1026,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     settings ??= CreateSettings();
     await settings.LoadSnapshotAsync(cancellationToken);
-    // 运行时目录加载后,识别页的引擎选择也需要最新目录。
-    StateChanged?.Invoke(RecognitionState(false, "recognition.ready"));
+    await RefreshRecognitionCatalogStatesAsync(cancellationToken);
     return SettingsState(settings);
   }
 
@@ -1098,6 +1097,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       command.ApiUrl,
       command.ApiKey,
       cancellationToken);
+    await RefreshRecognitionCatalogStatesAsync(cancellationToken);
     return SettingsState(settings);
   }
 
@@ -1106,8 +1106,35 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     settings ??= CreateSettings();
     await settings.PrepareMineruRemoteAsync(cancellationToken);
+    await RefreshRecognitionCatalogStatesAsync(cancellationToken);
     return SettingsState(settings);
   }
+
+  private async Task RefreshRecognitionCatalogStatesAsync(CancellationToken cancellationToken)
+  {
+    recognition ??= recognitionFactory();
+    SynchronizeRecognitionMode();
+    RecognitionWorkbenchState current = await CurrentRecognitionStateAsync(
+      RecognitionStatusCode(recognition), cancellationToken);
+    StateChanged?.Invoke(current with
+    {
+      IsBusy = recognition.IsBusy,
+      Engines = RecognitionEngines(),
+      TaskEngine = recognition.TaskEngine,
+    });
+    StateChanged?.Invoke(CurrentBatchState());
+  }
+
+  private BatchWorkbenchState CurrentBatchState() => batch is null
+    ? new BatchWorkbenchState(false, 0, 0, 0, Engines: BatchEngines())
+    : BatchState(batch);
+
+  private IReadOnlyList<RecognitionEngineChoice>? BatchEngines() =>
+    RecognitionEngines()?.Select(choice => choice with
+    {
+      Selected = choice.Engine == batchTaskEngine,
+      IsTaskOverride = choice.Engine == batchTaskEngine,
+    }).ToArray();
 
   private RecognitionWorkbenchState SetTaskEngine(SetTaskEngineCommand command)
   {
@@ -1198,7 +1225,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     if (Volatile.Read(ref disposed) == 0)
     {
       StateChanged?.Invoke(SettingsState(model));
-      StateChanged?.Invoke(RecognitionState(false, "recognition.ready"));
+      await RefreshRecognitionCatalogStatesAsync(cancellationToken);
     }
   }
 
@@ -1363,11 +1390,7 @@ public sealed class DesktopWorkbenchCommandHandler :
         item.Result is null ? null : Truncate(item.Result.Text, 120)))
       .ToArray(),
     batchWindowStart,
-    RecognitionEngines()?.Select(choice => choice with
-    {
-      Selected = choice.Engine == batchTaskEngine,
-      IsTaskOverride = choice.Engine == batchTaskEngine,
-    }).ToArray(),
+    BatchEngines(),
     batchTaskEngine);
   }
 
