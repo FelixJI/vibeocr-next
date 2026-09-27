@@ -50,12 +50,11 @@ public sealed record RuntimeInspection(
     [property: JsonPropertyName("integrity")] string Integrity,
     [property: JsonPropertyName("source")] RuntimeSourceIdentity? Source = null);
 
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record RuntimeSourceIdentity(
     [property: JsonPropertyName("backend_version")] string BackendVersion,
     [property: JsonPropertyName("backend_source_sha")] string BackendSourceSha,
-    [property: JsonPropertyName("runtime_manifest_sha256")] string RuntimeManifestSha256,
-    [property: JsonPropertyName("protocol_version")] string ProtocolVersion,
-    [property: JsonPropertyName("protocol_manifest_sha256")] string ProtocolManifestSha256);
+    [property: JsonPropertyName("runtime_manifest_sha256")] string RuntimeManifestSha256);
 
 public sealed record RuntimeLaunch(
     [property: JsonPropertyName("python_executable")] string PythonExecutable,
@@ -1536,9 +1535,9 @@ public sealed class RuntimeInstallerCommandRunner : IRuntimeInstallerCommandRunn
             using JsonDocument componentLock = JsonDocument.Parse(componentLockBytes);
             byte[] expectedManifestSha256 = ParseSha256(
                 componentLock.RootElement
-                    .GetProperty("backend")
+                    .GetProperty("product")
                     .GetProperty("runtime_manifest_sha256"),
-                "backend.runtime_manifest_sha256");
+                "product.runtime_manifest_sha256");
             byte[] actualManifestSha256 = SHA256.HashData(runtimeManifestBytes);
             if (!CryptographicOperations.FixedTimeEquals(
                 actualManifestSha256,

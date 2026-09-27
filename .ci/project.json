@@ -2,13 +2,7 @@
   "schema_version": 1,
   "project": {
     "component": "next",
-    "repository": "FelixJI/vibeocr-next",
-    "protocol_compatibility": {
-      "supported_majors": [
-        2
-      ],
-      "minor_compatible": true
-    }
+    "repository": "FelixJI/vibeocr-next"
   },
   "ci": {
     "bootstrap": [
@@ -48,20 +42,6 @@
         "pwsh",
         "-File",
         "scripts/install_windows_app_runtime.ps1"
-      ],
-      [
-        "python",
-        "scripts/run_ci_command.py",
-        "--label",
-        "component-resolve",
-        "--timeout-seconds",
-        "300",
-        "--",
-        "uv",
-        "run",
-        "--frozen",
-        "python",
-        "scripts/resolve_component_releases.py"
       ],
       [
         "python",
@@ -267,11 +247,10 @@
       "VibeOCRNext-*-delta.nupkg",
       "VibeOCRNext-v{version}-win-x64.zip",
       "releases.win.json",
-      "component-lock.json",
-      "component-identities.json",
+      "product-identity.json",
       "SBOM.spdx.json"
     ],
-    "identity_asset": "component-identities.json",
+    "identity_asset": "product-identity.json",
     "mirrors": [
       {
         "name": "gitee",

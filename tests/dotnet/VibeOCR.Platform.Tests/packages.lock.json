@@ -157,27 +157,21 @@
           "xunit.v3.runner.common": "[3.2.2]"
         }
       },
+      "vibeocr.contracts": {
+        "type": "Project"
+      },
       "vibeocr.platform": {
         "type": "Project",
         "dependencies": {
-          "VibeOCR.Runtime.Client": "[2.9.0, 2.9.0]",
-          "VibeOCR.Runtime.Contracts": "[2.9.0, 2.9.0]"
+          "VibeOCR.Contracts": "[1.0.0, )",
+          "VibeOCR.Runtime.Client": "[1.0.0, )"
         }
       },
-      "VibeOCR.Runtime.Client": {
-        "type": "CentralTransitive",
-        "requested": "[2.9.0, 2.9.0]",
-        "resolved": "2.9.0",
-        "contentHash": "iWq+Tr0EXVWcSieQrDzMbWvuOTHhqQ1XAhp2VLdQomyFDUHLBjXx9sGXthIaZ4eQpUmWgNRgQ3nO8divRokdaA==",
+      "vibeocr.runtime.client": {
+        "type": "Project",
         "dependencies": {
-          "VibeOCR.Runtime.Contracts": "2.9.0"
+          "VibeOCR.Contracts": "[1.0.0, )"
         }
-      },
-      "VibeOCR.Runtime.Contracts": {
-        "type": "CentralTransitive",
-        "requested": "[2.9.0, 2.9.0]",
-        "resolved": "2.9.0",
-        "contentHash": "WTqT9jRbiA63Z4dkJCqp1Afh52EJ3yMkaDEhmV14DD78uAPxkbEfPqc3VQgESQ57HzlR6yTbUcVfGYP4Dx0h0g=="
       }
     }
   }

@@ -86,7 +86,7 @@ public sealed class StartupRuntimeInstallerTests
 
         private static Task<RuntimeLaunch> LaunchAsync() => Task.FromResult(new RuntimeLaunch(
             @"C:\store\python.exe",
-            "vibeocr.backend.supervisor.main",
+            "vibeocr.runtime.host.main",
             @"C:\store",
             @"C:\store\models",
             new Dictionary<string, string>()));

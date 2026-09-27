@@ -888,8 +888,6 @@ def runtime_source_identity(manifest: Any) -> dict[str, str]:
         "backend_version": manifest.backend_version,
         "backend_source_sha": manifest.source_commit,
         "runtime_manifest_sha256": manifest.sha256,
-        "protocol_version": manifest.protocol_version,
-        "protocol_manifest_sha256": manifest.protocol_manifest_sha256,
     }
 
 

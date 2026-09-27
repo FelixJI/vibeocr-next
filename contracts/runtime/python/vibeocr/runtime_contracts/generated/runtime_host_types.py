@@ -329,8 +329,6 @@ class RuntimeSourceIdentity(TypedDict, total=False):
     backend_version: Required[str]
     backend_source_sha: Required[str]
     runtime_manifest_sha256: Required[str]
-    protocol_version: Required[str]
-    protocol_manifest_sha256: Required[str]
 
 
 class RuntimeState(TypedDict, total=False):

@@ -80,27 +80,8 @@ def _release(
     with_base_pack: bool = False,
 ) -> tuple[Path, Path]:
     root.mkdir()
-    wheel = root / "vibeocr_backend-0.7.0-py3-none-any.whl"
-    wheel.write_bytes(b"backend-wheel")
-    protocol_wheel = root / "vibeocr_runtime_contracts-2.0.0-py3-none-any.whl"
-    protocol_wheel.write_bytes(b"protocol-wheel")
-    protocol_manifest = root / "protocol-release-manifest.json"
-    protocol_manifest.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "protocol_version": "2.0.0",
-                "artifacts": {
-                    protocol_wheel.name: {
-                        "sha256": _sha(protocol_wheel.read_bytes()),
-                    }
-                },
-            },
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    wheel = root / "vibeocr_next_runtime-0.7.0-py3-none-any.whl"
+    wheel.write_bytes(b"runtime-wheel")
     python_archive = root / "cpython-3.13.15-win_amd64-install_only.tar.gz"
     python_archive.write_bytes(b"python-archive")
     installer_archive = root / "vibeocr-runtime-installer-v0.7.0-win-x64.zip"
@@ -167,15 +148,15 @@ def _release(
         profiles["win-x64-base"]["runtime_pack"] = [pack.name]
         profiles["win-x64-base"]["runtime_pack_sha256"] = [_sha(pack.read_bytes())]
     manifest = {
-        "schema_version": 1,
-        "backend_version": "0.7.0",
-        "backend_wheel": wheel.name,
-        "backend_sha256": _sha(wheel.read_bytes()),
-        "protocol": ">=2.0.0,<3.0.0",
-        "protocol_manifest": protocol_manifest.name,
-        "protocol_manifest_sha256": _sha(protocol_manifest.read_bytes()),
-        "protocol_wheel": protocol_wheel.name,
-        "protocol_sha256": _sha(protocol_wheel.read_bytes()),
+        "schema_version": 2,
+        "product": {
+            "component": "next",
+            "repository": "FelixJI/vibeocr-next",
+            "version": "0.7.0",
+            "source_sha": "0" * 40,
+        },
+        "runtime_wheel": wheel.name,
+        "runtime_sha256": _sha(wheel.read_bytes()),
         "python": {
             "version": "3.13.15",
             "abi": "cp313",
@@ -197,7 +178,6 @@ def _release(
         },
         "profiles": profiles,
         "capabilities": ["ocr.recognition.v2"],
-        "source_commit": "0" * 40,
         "build_workflow": "tests/runtime",
     }
     manifest_path = root / "runtime-manifest.json"
@@ -206,16 +186,12 @@ def _release(
         encoding="utf-8",
     )
     component = {
-        "schema_version": 1,
-        "protocol": {
-            "repository": "FelixJI/vibeocr-protocol",
-            "version": "2.0.0",
-            "manifest_sha256": manifest["protocol_manifest_sha256"],
-        },
-        "backend": {
-            "repository": "FelixJI/vibeocr-backend",
+        "schema_version": 2,
+        "product": {
+            "component": "next",
+            "repository": "FelixJI/vibeocr-next",
             "version": "0.7.0",
-            "artifact_sha256": manifest["backend_sha256"],
+            "source_sha": "0" * 40,
             "runtime_manifest_sha256": _sha(manifest_path.read_bytes()),
             "accelerator": "cpu",
         },
@@ -340,7 +316,7 @@ def test_manifest_verifies_raw_hash_and_bound_artifacts(tmp_path: Path) -> None:
     manifest_path, _ = _release(tmp_path / "release")
     manifest = load_runtime_manifest(manifest_path)
     assert manifest.backend_version == "0.7.0"
-    assert manifest.protocol_wheel == "vibeocr_runtime_contracts-2.0.0-py3-none-any.whl"
+    assert manifest.runtime_wheel == "vibeocr_next_runtime-0.7.0-py3-none-any.whl"
     assert manifest.sha256 == _sha(manifest_path.read_bytes())
     assert set(manifest.profiles) == {"win-x64-base", "win-x64-cpu", "win-x64-cu126"}
 
@@ -370,19 +346,21 @@ def test_runtime_lock_rejects_embedded_source_directives(
         validate_requirements_lock(lock, profile="win-x64-cpu")
 
 
-def test_manifest_rejects_tampered_protocol_wheel(tmp_path: Path) -> None:
+def test_manifest_rejects_tampered_runtime_wheel(tmp_path: Path) -> None:
     manifest_path, _ = _release(tmp_path / "release")
-    (
-        manifest_path.parent / "vibeocr_runtime_contracts-2.0.0-py3-none-any.whl"
-    ).write_bytes(b"tampered")
-    with pytest.raises(ManifestError, match="Protocol wheel SHA-256 mismatch"):
+    (manifest_path.parent / "vibeocr_next_runtime-0.7.0-py3-none-any.whl").write_bytes(
+        b"tampered"
+    )
+    with pytest.raises(ManifestError, match="Runtime wheel SHA-256 mismatch"):
         load_runtime_manifest(manifest_path)
 
 
-def test_manifest_rejects_tampered_protocol_manifest(tmp_path: Path) -> None:
+def test_manifest_rejects_old_schema(tmp_path: Path) -> None:
     manifest_path, _ = _release(tmp_path / "release")
-    (manifest_path.parent / "protocol-release-manifest.json").write_bytes(b"tampered")
-    with pytest.raises(ManifestError, match="Protocol manifest SHA-256 mismatch"):
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 1
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ManifestError, match="schema_version must be 2"):
         load_runtime_manifest(manifest_path)
 
 
@@ -945,14 +923,16 @@ def test_component_lock_capability_mismatch_is_rejected(tmp_path: Path) -> None:
         )
 
 
-def test_component_lock_protocol_manifest_mismatch_is_rejected(
+def test_component_lock_runtime_manifest_mismatch_is_rejected(
     tmp_path: Path,
 ) -> None:
     manifest, component = _release(tmp_path / "release")
     data = json.loads(component.read_text(encoding="utf-8"))
-    data["protocol"]["manifest_sha256"] = "f" * 64
+    data["product"]["runtime_manifest_sha256"] = "f" * 64
     component.write_text(json.dumps(data), encoding="utf-8")
-    with pytest.raises(RuntimeInstallError, match="Protocol manifest mismatch"):
+    with pytest.raises(
+        RuntimeInstallError, match="component lock runtime manifest mismatch"
+    ):
         RuntimeInstaller(
             product_root=tmp_path / "product",
             component_lock=component,
@@ -1109,7 +1089,7 @@ def test_component_drift_uses_installed_distribution_and_selected_repair(
     ]
     manifest.write_text(json.dumps(manifest_payload) + "\n", encoding="utf-8")
     lock_payload = json.loads(component_lock.read_text(encoding="utf-8"))
-    lock_payload["backend"]["runtime_manifest_sha256"] = _sha(manifest.read_bytes())
+    lock_payload["product"]["runtime_manifest_sha256"] = _sha(manifest.read_bytes())
     component_lock.write_text(json.dumps(lock_payload) + "\n", encoding="utf-8")
     calls: list[Path] = []
 
@@ -1623,6 +1603,39 @@ class TestOfflineRuntimePack:
         assert commands[0][commands[0].index("--find-links") + 1] == find_links
         assert (pack_dir / ".complete").stat().st_mtime_ns == marker_before
 
+    def test_same_version_new_manifest_pack_rebuilds_cached_wheels(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        commands, partial_root, manifest_path = _run_default_installer(
+            tmp_path, monkeypatch, with_base_pack=True
+        )
+        first_command = commands[0]
+        pack_dir = Path(first_command[first_command.index("--find-links") + 1])
+        assert (pack_dir / "rapidocr-3.9.2-py3-none-any.whl").is_file()
+
+        document = json.loads(manifest_path.read_text(encoding="utf-8"))
+        profile = document["profiles"]["win-x64-base"]
+        pack_path = manifest_path.parent / profile["runtime_pack"][0]
+        with zipfile.ZipFile(pack_path, mode="w") as archive:
+            archive.writestr("pack-requirements.txt", "rapidocr==3.9.2\n")
+            archive.writestr("rapidocr-3.9.2-new-py3-none-any.whl", b"new-wheel")
+        profile["runtime_pack_sha256"] = [_sha(pack_path.read_bytes())]
+        manifest_path.write_text(json.dumps(document), encoding="utf-8")
+        manifest = load_runtime_manifest(manifest_path)
+
+        from vibeocr.runtime.environments import runtime_installer as installer
+
+        installer._default_install_runner(
+            partial_root,
+            manifest,
+            manifest.profiles["win-x64-base"].scopes[0],
+            _pypi_source(),
+        )
+        assert not (pack_dir / "rapidocr-3.9.2-py3-none-any.whl").exists()
+        assert (pack_dir / "rapidocr-3.9.2-new-py3-none-any.whl").read_bytes() == (
+            b"new-wheel"
+        )
+
     def test_without_pack_installs_online_without_no_index(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1884,13 +1897,17 @@ def test_extract_runtime_pack_rejects_unsafe_members(tmp_path: Path) -> None:
     with zipfile.ZipFile(pack, mode="w") as archive:
         archive.writestr("../evil.whl", b"evil")
     with pytest.raises(RuntimeInstallError, match="unsafe runtime pack member"):
-        installer._extract_runtime_pack([pack], tmp_path / "cache")
+        installer._extract_runtime_pack(
+            [pack], tmp_path / "cache", expected_sha256=(_sha(pack.read_bytes()),)
+        )
 
     pack2 = tmp_path / "pack2.zip"
     with zipfile.ZipFile(pack2, mode="w") as archive:
         archive.writestr("payload.txt", b"not a wheel")
     with pytest.raises(RuntimeInstallError, match="unsafe runtime pack member"):
-        installer._extract_runtime_pack([pack2], tmp_path / "cache2")
+        installer._extract_runtime_pack(
+            [pack2], tmp_path / "cache2", expected_sha256=(_sha(pack2.read_bytes()),)
+        )
 
 
 def test_base_accelerator_maps_to_base_profile() -> None:
@@ -1906,7 +1923,9 @@ def test_extract_runtime_pack_requires_pack_requirements(tmp_path: Path) -> None
     with zipfile.ZipFile(pack, mode="w") as archive:
         archive.writestr("rapidocr-3.9.2-py3-none-any.whl", b"wheel")
     with pytest.raises(RuntimeInstallError, match="lacks pack-requirements.txt"):
-        installer._extract_runtime_pack([pack], tmp_path / "cache")
+        installer._extract_runtime_pack(
+            [pack], tmp_path / "cache", expected_sha256=(_sha(pack.read_bytes()),)
+        )
 
 
 def test_full_profile_without_pack_falls_back_online(tmp_path: Path) -> None:
@@ -1971,15 +1990,83 @@ def test_multi_part_pack_extracts_into_one_directory(tmp_path: Path) -> None:
     with zipfile.ZipFile(part2, mode="w") as archive:
         archive.writestr("onnxruntime-1.28.0-cp313-cp313-win_amd64.whl", b"ort")
 
-    pack_dir = installer._extract_runtime_pack([part1, part2], tmp_path / "cache")
+    binding = (_sha(part1.read_bytes()), _sha(part2.read_bytes()))
+    pack_dir = installer._extract_runtime_pack(
+        [part1, part2], tmp_path / "cache", expected_sha256=binding
+    )
     assert pack_dir.name == "vibeocr-runtime-pack-win-x64-cpu-0.7.0"
     assert (pack_dir / "pack-requirements.txt").is_file()
     assert (pack_dir / "rapidocr-3.9.2-py3-none-any.whl").is_file()
     assert (pack_dir / "onnxruntime-1.28.0-cp313-cp313-win_amd64.whl").is_file()
     assert (pack_dir / ".complete").is_file()
     # 幂等:完整标记存在时直接复用。
-    again = installer._extract_runtime_pack([part1, part2], tmp_path / "cache")
+    again = installer._extract_runtime_pack(
+        [part1, part2], tmp_path / "cache", expected_sha256=binding
+    )
     assert again == pack_dir
+
+
+def test_old_runtime_pack_marker_rebuilds_only_its_cache_directory(
+    tmp_path: Path,
+) -> None:
+    from vibeocr.runtime.environments import runtime_installer as installer
+
+    pack = tmp_path / "vibeocr-runtime-pack-win-x64-base-0.7.0.zip"
+    with zipfile.ZipFile(pack, mode="w") as archive:
+        archive.writestr("pack-requirements.txt", "rapidocr==3.9.2\n")
+        archive.writestr("rapidocr-3.9.2-py3-none-any.whl", b"fresh")
+    cache = tmp_path / "cache"
+    pack_dir = cache / pack.stem
+    pack_dir.mkdir(parents=True)
+    (pack_dir / ".complete").write_text("ok\n", encoding="utf-8")
+    (pack_dir / "stale.whl").write_bytes(b"stale")
+    sibling = cache / "other-pack"
+    sibling.mkdir()
+    (sibling / "keep.txt").write_text("preserve", encoding="utf-8")
+
+    extracted = installer._extract_runtime_pack(
+        [pack], cache, expected_sha256=(_sha(pack.read_bytes()),)
+    )
+
+    assert extracted == pack_dir
+    assert not (pack_dir / "stale.whl").exists()
+    assert (pack_dir / "rapidocr-3.9.2-py3-none-any.whl").read_bytes() == b"fresh"
+    assert (pack_dir / ".complete").read_text(encoding="utf-8") != "ok\n"
+    assert (sibling / "keep.txt").read_text(encoding="utf-8") == "preserve"
+
+
+def test_runtime_pack_cache_rejects_escaping_stem_and_reparse_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibeocr.runtime.environments import runtime_installer as installer
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    sibling = tmp_path / "keep.txt"
+    sibling.write_text("preserve", encoding="utf-8")
+    escaping = tmp_path / "...zip"
+    escaping.write_bytes(b"zip")
+    with pytest.raises(RuntimeInstallError, match="cache name is unsafe"):
+        installer._extract_runtime_pack(
+            [escaping], cache, expected_sha256=(_sha(escaping.read_bytes()),)
+        )
+
+    pack = tmp_path / "pack.zip"
+    pack.write_bytes(b"zip")
+    destination = cache / "pack"
+    destination.mkdir()
+    original_is_junction = Path.is_junction
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda path: path == destination or original_is_junction(path),
+    )
+    with pytest.raises(RuntimeInstallError, match="reparse point"):
+        installer._extract_runtime_pack(
+            [pack], cache, expected_sha256=(_sha(pack.read_bytes()),)
+        )
+    assert destination.is_dir()
+    assert sibling.read_text(encoding="utf-8") == "preserve"
 
 
 def test_ensure_with_explicit_base_only_scope_installs_base_lock(
@@ -2379,7 +2466,7 @@ def test_drift_projection_uses_covering_profile_declared_versions(
     )
     # 组件锁的 manifest 摘要必须跟随改写后的字节，保持绑定校验成立
     lock_document = json.loads(component.read_text(encoding="utf-8"))
-    lock_document["backend"]["runtime_manifest_sha256"] = _sha(
+    lock_document["product"]["runtime_manifest_sha256"] = _sha(
         manifest_path.read_bytes()
     )
     component.write_text(
@@ -2862,7 +2949,7 @@ def test_paddle_only_cuda_status_uses_base_host_lock(tmp_path: Path) -> None:
     ]
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
     binding = json.loads(component_lock.read_text(encoding="utf-8"))
-    binding["backend"]["runtime_manifest_sha256"] = _sha(manifest_path.read_bytes())
+    binding["product"]["runtime_manifest_sha256"] = _sha(manifest_path.read_bytes())
     component_lock.write_text(json.dumps(binding), encoding="utf-8")
 
     def install(partial, manifest, profile):

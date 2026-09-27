@@ -12,6 +12,8 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from vibeocr.runtime.environments.runtime_manifest import load_runtime_manifest
+
 LAYOUT_RELATIVE_PATH = Path("app/metadata/product-layout.json")
 ROOT_ALLOWLIST = frozenset(
     {"VibeOCR.exe", "Velopack.dll", "LICENSE", "CHANGELOG.md", "app", "runtime"}
@@ -292,35 +294,25 @@ def verify_product_release(product_root: Path) -> ProductLayout:
     lock = _read_json_object(layout.component_lock, "component lock")
     identities = _read_json_object(layout.component_identities, "component identities")
     runtime = _read_json_object(layout.runtime_manifest, "runtime manifest")
-    backend_lock = _require_mapping(lock.get("backend"), "component lock backend")
-    backend_identity = _require_mapping(
-        identities.get("backend"), "component identity backend"
-    )
-    runtime_hash = _sha256(layout.runtime_manifest)
+    product = _require_mapping(lock.get("product"), "component lock product")
+    identity = _require_mapping(identities.get("project"), "product identity")
+    manifest_product = _require_mapping(runtime.get("product"), "runtime product")
+    expected = {
+        "component": "next",
+        "repository": "FelixJI/vibeocr-next",
+        "version": manifest.get("frontend_version"),
+        "source_sha": manifest.get("source_commit"),
+    }
     if (
-        identities.get("component_lock_sha256") != lock_hash
-        or backend_lock.get("runtime_manifest_sha256") != runtime_hash
-        or backend_identity.get("runtime_manifest_sha256") != runtime_hash
+        lock.get("schema_version") != 2
+        or identity != expected
+        or manifest_product != expected
+        or any(product.get(key) != value for key, value in expected.items())
+        or product.get("runtime_manifest_sha256") != _sha256(layout.runtime_manifest)
+        or product.get("accelerator") != "cpu"
     ):
         raise ProductLayoutError("layout.closure-mismatch: runtime binding")
-
-    protocol_lock = _require_mapping(lock.get("protocol"), "component lock protocol")
-    protocol_identity = _require_mapping(
-        identities.get("protocol"), "component identity protocol"
-    )
-    protocol_manifest = (
-        layout.runtime_manifest.parent / "protocol-release-manifest.json"
-    )
-    backend_manifest = layout.runtime_manifest.parent / "release-manifest.json"
-    if (
-        not protocol_manifest.is_file()
-        or protocol_lock.get("manifest_sha256") != _sha256(protocol_manifest)
-        or protocol_identity.get("release_manifest_sha256")
-        != _sha256(protocol_manifest)
-        or not backend_manifest.is_file()
-        or backend_identity.get("release_manifest_sha256") != _sha256(backend_manifest)
-    ):
-        raise ProductLayoutError("layout.closure-mismatch: component identity")
+    load_runtime_manifest(layout.runtime_manifest)
 
     installer = _require_mapping(runtime.get("installer"), "runtime installer")
     if installer.get("executable_sha256") != _sha256(layout.runtime_installer):
@@ -405,8 +397,8 @@ def _require_non_reparse_regular_file(path: Path) -> None:
         )
 
 
-def _backend_product_closure(backend_release_dir: Path) -> tuple[Path, ...]:
-    """Resolve the release-bound base runtime closure embedded in the product."""
+def _runtime_product_closure(backend_release_dir: Path) -> tuple[Path, ...]:
+    """Resolve the verified base runtime closure embedded in the product."""
 
     source = backend_release_dir.resolve(strict=True)
     runtime_manifest_path = source / "runtime-manifest.json"
@@ -414,13 +406,7 @@ def _backend_product_closure(backend_release_dir: Path) -> tuple[Path, ...]:
     runtime_manifest = _read_json_object(runtime_manifest_path, "runtime manifest")
     names = {
         "runtime-manifest.json",
-        "release-manifest.json",
-        "build-identity.json",
-        _release_file_name(runtime_manifest.get("backend_wheel"), "backend_wheel"),
-        _release_file_name(
-            runtime_manifest.get("protocol_manifest"), "protocol_manifest"
-        ),
-        _release_file_name(runtime_manifest.get("protocol_wheel"), "protocol_wheel"),
+        _release_file_name(runtime_manifest.get("runtime_wheel"), "runtime_wheel"),
     }
     python = _require_mapping(runtime_manifest.get("python"), "python")
     installer = _require_mapping(runtime_manifest.get("installer"), "installer")
@@ -481,6 +467,7 @@ def _backend_product_closure(backend_release_dir: Path) -> tuple[Path, ...]:
     closure = tuple(source / name for name in sorted(names))
     for path in closure:
         _require_non_reparse_regular_file(path)
+    load_runtime_manifest(runtime_manifest_path)
     return closure
 
 
@@ -529,7 +516,7 @@ def stage_product_layout(
         shutil.copyfile(license_file.resolve(strict=True), staging / "LICENSE")
         shutil.copyfile(changelog_file.resolve(strict=True), staging / "CHANGELOG.md")
 
-        for path in _backend_product_closure(backend_release_dir):
+        for path in _runtime_product_closure(backend_release_dir):
             shutil.copyfile(path, backend_root / path.name)
         runtime_manifest = json.loads(
             (backend_root / "runtime-manifest.json").read_text(encoding="utf-8")

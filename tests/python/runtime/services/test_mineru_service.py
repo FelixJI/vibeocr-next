@@ -55,8 +55,9 @@ class TestMinerUService:
         mock_guard.close.assert_called_once()
         assert MinerUService._job_guard is None
 
-    def test_ensure_api_running_starts_process(self):
+    def test_ensure_api_running_starts_process(self, tmp_path, monkeypatch):
         """_ensure_api_running 应在 API 未运行时启动进程"""
+        monkeypatch.setenv("MINERU_HOME", str(tmp_path / "mineru"))
         MinerUService._api_url = ""
         MinerUService._api_process = None
 
@@ -100,8 +101,9 @@ class TestMinerUService:
         assert MinerUService._api_url != ""
         mock_popen.assert_called_once()
 
-    def test_start_api_uses_python_module(self):
+    def test_start_api_uses_python_module(self, tmp_path, monkeypatch):
         """_start_api 应使用 python -m 方式启动"""
+        monkeypatch.setenv("MINERU_HOME", str(tmp_path / "mineru"))
         MinerUService._api_url = ""
         MinerUService._api_process = None
 

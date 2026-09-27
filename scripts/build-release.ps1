@@ -8,7 +8,14 @@ function Write-CiStage {
     Write-Host "::notice title=Release build stage::$Name"
 }
 
-$root = if ($env:AUTOMATION_PROJECT_ROOT) { (Resolve-Path $env:AUTOMATION_PROJECT_ROOT).Path } else { (Resolve-Path (Join-Path $PSScriptRoot '..')).Path }
+$scriptRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$root = if ($env:AUTOMATION_PROJECT_ROOT) { (Resolve-Path $env:AUTOMATION_PROJECT_ROOT).Path } else { $scriptRoot }
+if (-not [string]::Equals(
+    [IO.Path]::GetFullPath($root),
+    [IO.Path]::GetFullPath($scriptRoot),
+    [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Release build must use the checkout that contains build-release.ps1'
+}
 $projectFile = Join-Path $root 'src/dotnet/VibeOCR.App/VibeOCR.App.csproj'
 [xml]$project = Get-Content -LiteralPath $projectFile -Raw
 $projectVersion = [string]$project.Project.PropertyGroup.Version
@@ -21,19 +28,21 @@ if ($Version -ne $projectVersion) {
     throw "Release version '$Version' does not match project version '$projectVersion'"
 }
 $artifacts = if ($env:AUTOMATION_ARTIFACTS_DIR) { $env:AUTOMATION_ARTIFACTS_DIR } else { Join-Path $root 'artifacts' }
+New-Item -ItemType Directory -Path $artifacts -Force | Out-Null
 $build = Join-Path $root '.release-build'
+if ((Test-Path -LiteralPath $build) -and
+    ((Get-Item -LiteralPath $build -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    throw 'Release build output must not be a reparse point'
+}
 foreach ($path in @($build)) {
     if (Test-Path -LiteralPath $path) {
         Remove-Item -LiteralPath $path -Recurse -Force
     }
     New-Item -ItemType Directory -Path $path -Force | Out-Null
 }
-$inputs = Join-Path $root '.release-input'
-$protocol = Join-Path $inputs 'protocol'
-$backend = Join-Path $inputs 'backend'
-$lock = Join-Path $artifacts 'component-lock.json'
-$identity = Join-Path $artifacts 'component-identities.json'
-if (-not (Test-Path -LiteralPath $protocol -PathType Container) -or -not (Test-Path -LiteralPath $backend -PathType Container) -or -not (Test-Path -LiteralPath $lock -PathType Leaf) -or -not (Test-Path -LiteralPath $identity -PathType Leaf)) { throw 'resolved Backend/Protocol identities are required before build' }
+$backend = Join-Path $build 'runtime-bundle'
+$lock = Join-Path $build 'component-lock.json'
+$identity = Join-Path $build 'product-identity.json'
 $webAssets = Join-Path $root 'src/dotnet/VibeOCR.App/WebAssets'
 Write-CiStage 'web-assets'
 npm ci --prefix $webAssets
@@ -60,6 +69,15 @@ Write-CiStage 'bootstrapper-publish'
 dotnet publish (Join-Path $root 'src/dotnet/VibeOCR.Bootstrapper/VibeOCR.Bootstrapper.csproj') `
   -c Release --self-contained false --no-restore -o $bootstrapperPublish
 if ($LASTEXITCODE -ne 0) { throw 'Next bootstrapper publish failed' }
+Write-CiStage 'internal-runtime'
+& (Join-Path $root 'scripts/build_internal_runtime.ps1') -Version $Version -BuildRoot $build
+if ($LASTEXITCODE -ne 0) { throw 'Next internal Runtime build failed' }
+$sourceSha = (git -C $root rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Next source identity is unavailable' }
+uv run --frozen python (Join-Path $root 'scripts/build_product_binding.py') `
+  --runtime-dir $backend --version $Version --source-sha $sourceSha `
+  --component-lock $lock --product-identity $identity
+if ($LASTEXITCODE -ne 0) { throw 'Next product binding failed' }
 $product = Join-Path $build 'VibeOCR'
 Write-CiStage 'product-layout'
 uv run --no-sync python (Join-Path $root 'scripts/product_layout.py') stage `
@@ -75,9 +93,8 @@ Write-CiStage 'product-finalize'
 uv run --no-sync python (Join-Path $root 'scripts/finalize_product_release.py') `
   --product-root $product --frontend next `
   --frontend-version $Version `
-  --source-commit (git -C $root rev-parse HEAD).Trim() `
-  --component-lock $lock --protocol-release-dir $protocol `
-  --backend-release-dir $backend
+  --source-commit $sourceSha `
+  --component-lock $lock --runtime-dir $backend
 if ($LASTEXITCODE -ne 0) { throw 'Next product binding failed' }
 uv run --no-sync python (Join-Path $root 'scripts/product_layout.py') verify `
   --product-root $product
@@ -171,6 +188,7 @@ if ($delta.Count -eq 1) {
 Copy-Item -LiteralPath $portable[0].FullName `
   -Destination (Join-Path $artifacts "VibeOCRNext-v$Version-win-x64.zip")
 Copy-Item -LiteralPath $feed[0].FullName -Destination (Join-Path $artifacts 'releases.win.json')
+Copy-Item -LiteralPath $identity -Destination (Join-Path $artifacts 'product-identity.json')
 Write-CiStage 'artifact-verify'
 uv run --no-sync python (Join-Path $root 'scripts/build_release_checksums.py') $artifacts
 if ($LASTEXITCODE -ne 0) { throw 'Release checksum build failed' }

@@ -453,8 +453,6 @@ def test_runtime_status_exposes_verified_identity_component_drift_and_real_eta()
         "backend_version",
         "backend_source_sha",
         "runtime_manifest_sha256",
-        "protocol_version",
-        "protocol_manifest_sha256",
     ]
     assert "source" in schemas["RuntimeStatusSnapshot"]["properties"]
 

@@ -118,8 +118,6 @@ public sealed class HttpV2GoldenContractTests
                 BackendVersion = "0.9.0",
                 BackendSourceSha = new string('a', 40),
                 RuntimeManifestSha256 = new string('b', 64),
-                ProtocolVersion = "2.3.0",
-                ProtocolManifestSha256 = new string('c', 64),
             },
         };
         string json = HttpV2Json.Serialize(status);

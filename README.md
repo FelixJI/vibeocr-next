@@ -22,8 +22,8 @@ worker 仍在独立进程运行。
 ![VibeOCR Next 运行时安装进度](docs/runtime-install-progress.png)
 
 > [!IMPORTANT]
-> Next 仅支持 Windows 10/11 x64，桌面技术栈是 WinUI 3，不是 WPF。Release 会绑定经过验证的
-> Backend 与 Protocol 组件。
+> Next 仅支持 Windows 10/11 x64，桌面技术栈是 WinUI 3，不是 WPF。Release 只发布由本仓当前
+> 源码构建并绑定的单 Next 产品候选，不再消费独立 Backend/Protocol Release。
 
 ## 主要能力
 
@@ -113,6 +113,7 @@ src/dotnet/
 ├── VibeOCR.Platform/               # Protocol、进程与平台 seam
 ├── VibeOCR.Contracts/              # 内部 C# wire 契约源码
 ├── VibeOCR.Runtime.Client/         # 内部 C# loopback HTTP client 源码
+├── VibeOCR.ProductLayout.Shared/   # 产品布局共享源码（编译进 Platform）
 └── ...Bootstrapper.../             # .NET Framework 4.7.2 启动器
 src/runtime/vibeocr/runtime/       # Python Runtime，内部按功能分组
 contracts/runtime/python/          # Python wire 契约、schema 与生成物
@@ -121,20 +122,26 @@ tests/dotnet/
 ├── VibeOCR.App.Tests/              # WinUI app tests
 ├── VibeOCR.Contracts.Tests/        # 内部 C# wire 契约测试
 └── VibeOCR.Runtime.Client.Tests/   # 内部 C# HTTP client 测试
-tests/python/                       # Runtime 与契约行为测试
+tests/runtime/ 与 tests/python/     # Runtime、产品布局与契约行为测试
+config/runtime/                     # 第三方 CPython 归档锁与运行环境 profile 锁
 scripts/
 ├── check_quality.py                # Python/Node 质量入口
 ├── generate_runtime_protocol.py    # 从内部 schema 生成 Python/C# wire 绑定
 ├── install_windows_app_runtime.ps1 # 开发/CI 前置条件
-├── resolve_component_releases.py   # 过渡期正式 Backend/Protocol 组件解析
+├── build-release.ps1               # 单产品候选构建入口
+├── build_internal_runtime.ps1      # 从当前源码构建内部 Runtime 发布闭包
 └── automation.py                   # CI/发布稳定入口
 docs/                               # 架构、截图与源码阅读文档
 .ci/project.json                    # 构建、测试、资产与发布契约
 ```
 
-当前 #86 仍沿用正式 Backend/Protocol 组件作为桌面构建输入；Desktop 的旧 NuGet 引用和
-release 输入绑定在 #87 切换为本仓源码，#88 再完成单产品候选与发布流程。不能把本次源码迁入误作
-已有 Release 直连源码。
+#87 起桌面构建直接消费本仓源码：C# 侧通过 ProjectReference 编译 `VibeOCR.Contracts` 与
+`VibeOCR.Runtime.Client`，不再引用独立 Protocol SDK NuGet 包，默认也不解析、下载旧
+`vibeocr-backend`/`vibeocr-protocol` Release。Python 侧构建为单个内部 wheel
+`vibeocr-next-runtime`，版本由 `repository.json` 派生，作为运行环境隔离安装的实现细节随产品
+分发，不再有独立 Python 契约发行面。内部只保留一个 wire v2 契约，随本仓同源演进；跨仓
+SDK/Backend/Protocol minor 产品矩阵退役，但 capability 协商、进程隔离、已安装运行环境的
+manifest 绑定与回滚语义保留。
 
 Runtime 源自 `FelixJI/vibeocr-backend@7dc0ddf446152ef854901760d5125ad64860975b`；
 wire/C# 契约源自 `FelixJI/vibeocr-protocol@31609e19bee1d44562eb74aff2d74fc75bb93eda`。
@@ -171,7 +178,7 @@ uv sync --frozen
 npm ci --prefix src/dotnet/VibeOCR.App/WebAssets
 $env:RUNNER_TEMP = (New-Item -ItemType Directory -Force build/runner-temp).FullName
 pwsh -File scripts/install_windows_app_runtime.ps1
-uv run --frozen python scripts/resolve_component_releases.py
+dotnet tool restore
 dotnet restore tests/dotnet/VibeOCR.Platform.Tests/VibeOCR.Platform.Tests.csproj --locked-mode
 dotnet restore tests/dotnet/VibeOCR.App.Tests/VibeOCR.App.Tests.csproj --locked-mode
 dotnet restore tests/dotnet/VibeOCR.Contracts.Tests/VibeOCR.Contracts.Tests.csproj --locked-mode
@@ -183,19 +190,49 @@ dotnet test tests/dotnet/VibeOCR.Contracts.Tests/VibeOCR.Contracts.Tests.csproj 
 dotnet test tests/dotnet/VibeOCR.Runtime.Client.Tests/VibeOCR.Runtime.Client.Tests.csproj -c Release --no-restore
 ```
 
-这些命令与 [`.ci/project.json`](.ci/project.json) 对齐。完整 PR CI 还会执行 release build、smoke、组件
-identity 与正式资产检查。
+这些命令与 [`.ci/project.json`](.ci/project.json) 对齐。完整 PR CI 还会执行 release build、smoke、
+产品 identity 与正式资产检查。
 
 ## WebAssets
 
-WebAssets 使用 Node 24.x、npm 11.7、React 19、TypeScript 6 和 Vite 8。修改后至少运行其 package scripts
-中的 lint、typecheck、test 与 build。WebView2 bridge 变更必须同步更新桌面 handler/codec、前端 client
-与两侧测试。
+WebAssets 的 Node/npm 版本以 `.node-version` 与 WebAssets `package.json` 的
+`engines`/`packageManager` 为准，React、TypeScript、Vite 等依赖版本以 `package-lock.json`
+锁定为准，不在本文重复维护。修改后至少运行其 package scripts 中的 lint、typecheck、test 与
+build。WebView2 bridge 变更必须同步更新桌面 handler/codec、前端 client 与两侧测试。
 
 ## 发布资产
 
-正式 Release 精确包含 Velopack full nupkg、相邻版本 delta nupkg、Portable、feed、
-`component-lock.json`、`component-identities.json` 和 SPDX SBOM。版本与派生文件只由自动化脚本更新。
+正式 Release 精确包含 Velopack full nupkg、相邻版本可选 delta nupkg、Portable
+（`VibeOCRNext-v{version}-win-x64.zip`）、feed（`releases.win.json`）、`product-identity.json`
+和 SPDX SBOM，不再单独发布独立组件锁文件。`scripts/build-release.ps1` 调用
+`scripts/build_internal_runtime.ps1` 从当前源码产出内部 Runtime wheel、冻结 Runtime Installer、
+固定第三方 offline base pack 与 runtime manifest；第三方 CPython 归档与各 Windows 运行环境
+profile 锁保留在 `config/runtime/`。产品内部沿用 `runtime/backend/` 与
+`app/metadata/component-lock.json`、`app/metadata/component-identities.json` 作为兼容稳定路径，
+不是旧仓产品图：`component-identities.json` 与 Release 外部 `product-identity.json` 同为
+`project:{component,repository,version,source_sha}`；`runtime-manifest.json` 的 `product`
+同样只含这四字段，installer 摘要、profile 与 capabilities 位于 manifest 顶层；
+`component-lock.json` 的 `product` 在四字段之上追加 `runtime_manifest_sha256` 与
+`accelerator`，`required_capabilities` 位于 lock 顶层。版本与派生文件只由自动化脚本更新。
+
+### 消费面迁移对照（旧多仓组件 → 单产品）
+
+- 独立 NuGet SDK：之前编译期从本地 feed 按 `Directory.Packages.props` 精确 pin
+  `VibeOCR.Runtime.*`；现在 C# 直接 ProjectReference 本仓 `VibeOCR.Contracts`/
+  `VibeOCR.Runtime.Client` 源码，NuGet 源只剩 nuget.org，不再存在独立 Protocol SDK 包。
+- Python 契约发行：之前跨仓存在独立契约/SDK 发版面；现在只构建单个内部 wheel
+  `vibeocr-next-runtime`（版本由 `repository.json` 派生），作为运行环境隔离安装的实现细节随
+  产品分发，不对外独立发行。
+- 跨仓 resolve/bind：之前 bootstrap 解析最新正式 Backend Release 及其绑定的 Protocol 并写
+  组件 identity；现在默认不解析任何旧仓 Release，候选绑定由 Release 外部 `product-identity.json`
+  （`project` 字段）与产品内 runtime manifest、component lock（`product` 字段）完成。
+- Protocol 发行字段：之前候选 identity 含 `protocol`/`protocol_sdk` 版本与 release manifest
+  摘要；现在 Release 外部 `product-identity.json` 只含
+  `project:{component,repository,version,source_sha}`；`product` 字段只出现在产品内
+  `runtime-manifest.json`（同四字段）与 `app/metadata/component-lock.json`（追加
+  `runtime_manifest_sha256`/`accelerator`，`required_capabilities` 在 lock 顶层）。
+- 外部 hash 边界：第三方 CPython 归档、offline pack 等外部下载字节仍保留 SHA-256 校验与
+  manifest 绑定；本仓生成物交给 Git/构建/发布流水线约束，不叠加手工 hash。
 
 ## 参与贡献
 

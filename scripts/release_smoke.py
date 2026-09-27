@@ -1,4 +1,4 @@
-"""验证 Next Velopack Portable 与 Backend/Protocol identity 资产。"""
+"""验证 Next Velopack Portable 与单产品 identity 资产。"""
 
 from __future__ import annotations
 
@@ -85,31 +85,29 @@ def verify(artifacts: Path, version: str) -> None:
         required=(
             portable_name,
             "releases.win.json",
-            "component-lock.json",
-            "component-identities.json",
+            "product-identity.json",
             "SBOM.spdx.json",
         ),
         require_one=("VibeOCRNext-*-full.nupkg",),
         require_index=False,
     )
     identity = json.loads(
-        (artifacts / "component-identities.json").read_text(encoding="utf-8")
+        (artifacts / "product-identity.json").read_text(encoding="utf-8")
     )
-    for component in ("backend", "protocol", "protocol_sdk"):
-        record = identity.get(component, {})
-        if not record.get("version") or len(str(record.get("source_sha", ""))) != 40:
-            raise ValueError(f"missing actual {component} version/source identity")
-    for component in ("protocol", "protocol_sdk"):
-        record = identity[component]
-        if not record.get("release_manifest_sha256"):
-            raise ValueError(f"missing actual {component} release manifest identity")
+    project = identity.get("project", {})
+    if (
+        project.get("component") != "next"
+        or project.get("repository") != "FelixJI/vibeocr-next"
+        or project.get("version") != version
+        or len(str(project.get("source_sha", ""))) != 40
+    ):
+        raise ValueError("Next product identity does not bind this candidate")
     full, delta = _verify_velopack_feed(artifacts, version)
     expected_names = {
         full.name,
         portable_name,
         "releases.win.json",
-        "component-lock.json",
-        "component-identities.json",
+        "product-identity.json",
         "SBOM.spdx.json",
     }
     if delta is not None:
@@ -123,6 +121,13 @@ def verify(artifacts: Path, version: str) -> None:
     with tempfile.TemporaryDirectory(prefix="vibeocr-web-smoke-") as temporary:
         extracted = Path(temporary)
         product_root = _extract_product(artifacts / portable_name, extracted)
+        embedded_identity = json.loads(
+            (product_root / "app/metadata/component-identities.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        if embedded_identity != identity:
+            raise ValueError("Portable product identity differs from release asset")
         subprocess.run(
             [
                 str(product_root / "VibeOCR.exe"),
@@ -143,8 +148,6 @@ def verify(artifacts: Path, version: str) -> None:
             check=True,
             timeout=120,
         )
-    if "component-lock.json" not in names:
-        raise ValueError("component lock missing from release closure")
 
 
 if __name__ == "__main__":

@@ -26,12 +26,6 @@
         "resolved": "1.2.0",
         "contentHash": "Rz67gJL619fSBS6omaSINUxyDuwhIxkm5mmubf7uLd5Qgi6LLKaKCha+QFP6n+Bw/UjA0vutnH4JQfYzn6ANtw=="
       },
-      "VibeOCR.Runtime.Contracts": {
-        "type": "Direct",
-        "requested": "[2.9.0, 2.9.0]",
-        "resolved": "2.9.0",
-        "contentHash": "WTqT9jRbiA63Z4dkJCqp1Afh52EJ3yMkaDEhmV14DD78uAPxkbEfPqc3VQgESQ57HzlR6yTbUcVfGYP4Dx0h0g=="
-      },
       "Microsoft.Windows.AI.MachineLearning": {
         "type": "Transitive",
         "resolved": "2.1.74",
@@ -145,11 +139,20 @@
         "resolved": "9.0.0",
         "contentHash": "hyJB4UlpAi19Xr9AXzu2NuagKC4lPfHObNMEAA0HmqFz2rX7wKgzeYzO/jM/eBHDhnUGFFEjk5cOoJaxqg5J4A=="
       },
+      "vibeocr.contracts": {
+        "type": "Project"
+      },
       "vibeocr.platform": {
         "type": "Project",
         "dependencies": {
-          "VibeOCR.Runtime.Client": "[2.9.0, 2.9.0]",
-          "VibeOCR.Runtime.Contracts": "[2.9.0, 2.9.0]"
+          "VibeOCR.Contracts": "[1.0.0, )",
+          "VibeOCR.Runtime.Client": "[1.0.0, )"
+        }
+      },
+      "vibeocr.runtime.client": {
+        "type": "Project",
+        "dependencies": {
+          "VibeOCR.Contracts": "[1.0.0, )"
         }
       },
       "Microsoft.Web.WebView2": {
@@ -157,15 +160,6 @@
         "requested": "[1.0.4129.50, )",
         "resolved": "1.0.4129.50",
         "contentHash": "BuJC70c7SCl8wlvojLZbc/E5ONmGyG3fhAMmpftCpKerxae//TxgKOTELRK2QRD7m7jigNFQRf6cfVT3ZiIQoQ=="
-      },
-      "VibeOCR.Runtime.Client": {
-        "type": "CentralTransitive",
-        "requested": "[2.9.0, 2.9.0]",
-        "resolved": "2.9.0",
-        "contentHash": "iWq+Tr0EXVWcSieQrDzMbWvuOTHhqQ1XAhp2VLdQomyFDUHLBjXx9sGXthIaZ4eQpUmWgNRgQ3nO8divRokdaA==",
-        "dependencies": {
-          "VibeOCR.Runtime.Contracts": "2.9.0"
-        }
       }
     },
     "net10.0-windows10.0.17763/win-x64": {
