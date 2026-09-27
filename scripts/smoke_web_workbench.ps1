@@ -71,16 +71,20 @@ try {
         throw "Web workbench did not reach bridge-ready within $TimeoutSeconds seconds"
     }
     if ($process.ExitCode -ne 0) {
-        throw "Web workbench smoke exited with code $($process.ExitCode)"
+        $detail = if (Test-Path -LiteralPath $healthFile -PathType Leaf) {
+            (Get-Content -LiteralPath $healthFile -Raw | ConvertFrom-Json).error
+        } else { 'no health signal' }
+        throw "Web workbench smoke exited with code $($process.ExitCode): $detail"
     }
     if (-not (Test-Path -LiteralPath $healthFile -PathType Leaf)) {
         throw 'Web workbench did not write its bridge-ready health signal'
     }
     $health = Get-Content -LiteralPath $healthFile -Raw | ConvertFrom-Json
-    if ($health.schema_version -ne 1 -or $health.state -ne 'bridge-ready') {
+    if ($health.schema_version -ne 1 -or $health.state -ne 'bridge-ready' -or
+        $health.resources -ne 'verified') {
         throw 'Web workbench health signal is invalid'
     }
-    Write-Host 'Web workbench smoke verified: packaged WebView2 reached bridge-ready.'
+    Write-Host 'Web workbench smoke verified: bridge-ready, resource GET and annotation POST.'
 } finally {
     $env:VIBEOCR_SELF_TEST_SMOKE = $previousSmoke
     $env:VIBEOCR_SELF_TEST_INSTANCE = $previousInstance

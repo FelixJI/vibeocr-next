@@ -40,6 +40,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   private readonly WorkbenchResourceBroker resourceBroker;
   private readonly WorkbenchAnnotationStore annotationStore;
   private readonly WorkbenchRecoveryPolicy recoveryPolicy = new();
+  private PackagedWebAssets? packagedAssets;
   private CoreWebView2? core;
   private DispatcherQueue? dispatcher;
   private CancellationTokenSource? subscriptionCancellation;
@@ -114,10 +115,9 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     dispatcher = webView.DispatcherQueue;
     await webView.EnsureCoreWebView2Async();
     CoreWebView2 next = webView.CoreWebView2;
-    next.SetVirtualHostNameToFolderMapping(
-      VirtualHost,
-      assets,
-      CoreWebView2HostResourceAccessKind.DenyCors);
+    // WebView2 does not raise WebResourceRequested for a mapped virtual host.
+    // Serve the packaged bundle and opaque resources through one same-origin route.
+    packagedAssets = new PackagedWebAssets(assets);
     ConfigureSettings(next.Settings);
     next.NavigationStarting += OnNavigationStarting;
     next.NavigationCompleted += OnNavigationCompleted;
@@ -127,10 +127,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     next.WebMessageReceived += OnWebMessageReceived;
     next.ProcessFailed += OnProcessFailed;
     next.AddWebResourceRequestedFilter(
-      $"https://{VirtualHost}/__resource/*",
-      CoreWebView2WebResourceContext.All);
-    next.AddWebResourceRequestedFilter(
-      $"https://{VirtualHost}/__annotation",
+      $"https://{VirtualHost}/*",
       CoreWebView2WebResourceContext.All);
     next.WebResourceRequested += OnWebResourceRequested;
     core = next;
@@ -352,7 +349,11 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
         args.Response = Forbidden(sender);
         return;
       }
-      WorkbenchResourceResponse response = await resourceBroker.OpenAsync(uri);
+      WorkbenchResourceResponse response = uri.AbsolutePath.StartsWith(
+        "/__resource/", StringComparison.Ordinal)
+        ? await resourceBroker.OpenAsync(uri)
+        : packagedAssets?.Open(uri) ??
+          throw new WorkbenchResourceAccessException("Unknown workbench resource.");
       contentType = response.ContentType;
       long contentLength = response.ContentLength;
       buffered = await BufferResourceAsync(response, CancellationToken.None);
@@ -460,7 +461,6 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       current.WebMessageReceived -= OnWebMessageReceived;
       current.ProcessFailed -= OnProcessFailed;
       current.WebResourceRequested -= OnWebResourceRequested;
-      current.ClearVirtualHostNameToFolderMapping(VirtualHost);
     }
     await application.DisposeAsync();
     annotationStore.Dispose();

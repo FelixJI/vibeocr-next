@@ -557,41 +557,9 @@ public sealed class MineruConnectionWorkbenchTests
     Directory.CreateDirectory(resourceRoot);
     try
     {
-      Wire.Health health = MineruModeHealth(ready: true);
       var fake = new MineruInferenceClient
       {
-        Health = health with
-        {
-          Capabilities = [.. health.Capabilities,
-            RuntimeSelectionService.MineruConfigCapability],
-          CapabilityDescriptors =
-          [
-            .. health.CapabilityDescriptors!,
-            new Wire.CapabilityDescriptor
-            {
-              Name = RuntimeSelectionService.MineruConfigCapability,
-              Lifecycle = "active",
-              IntroducedIn = "2.9.0",
-              DeprecatedIn = null,
-              SunsetAt = null,
-              Replacement = null,
-              MineruConfigCatalog = new Wire.MineruConfigCatalog
-              {
-                DefaultTier = Wire.MineruTierId.Basic,
-                Tiers =
-                [
-                  new Wire.MineruTierDescriptor
-                  {
-                    Id = Wire.MineruTierId.Basic,
-                    Availability = Wire.MineruTierAvailability.Unavailable,
-                    ReasonCode = "tier_unavailable",
-                  },
-                ],
-                Languages = ["ch"],
-              },
-            },
-          ],
-        },
+        Health = MineruModeHealthWithTier(Wire.MineruTierAvailability.Ready),
       };
       using var broker = new WorkbenchResourceBroker(resourceRoot);
       using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
@@ -609,9 +577,28 @@ public sealed class MineruConnectionWorkbenchTests
 
       Assert.Null((await handler.ExecuteAsync(new RefreshRuntimeCommand(), cancellationToken)).Error);
       Assert.Null((await handler.ExecuteAsync(
-        new SetTaskEngineCommand("windows_text"), cancellationToken)).Error);
+        new SetTaskEngineCommand("mineru_document"), cancellationToken)).Error);
       Assert.Null((await handler.ExecuteAsync(
-        new SetBatchTaskEngineCommand("windows_text"), cancellationToken)).Error);
+        new SetBatchTaskEngineCommand("mineru_document"), cancellationToken)).Error);
+
+      fake.Health = MineruModeHealthWithTier(Wire.MineruTierAvailability.Unavailable);
+      Assert.Null((await handler.ExecuteAsync(new RefreshRuntimeCommand(), cancellationToken)).Error);
+      RecognitionWorkbenchState recognitionState = Assert.IsType<RecognitionWorkbenchState>(
+        handler.InitialStates.Single(state => state.Scope == "recognition"));
+      BatchWorkbenchState batchState = Assert.IsType<BatchWorkbenchState>(
+        handler.InitialStates.Single(state => state.Scope == "batch"));
+      Assert.Equal("mineru_document", recognitionState.TaskEngine);
+      Assert.Equal("mineru_document", batchState.TaskEngine);
+      AssertMineruMode(recognitionState, "unavailable", requiresDownload: false);
+      AssertMineruMode(batchState, "unavailable", requiresDownload: false);
+      Assert.Null((await handler.ExecuteAsync(new SetBatchWindowCommand(0), cancellationToken)).Error);
+      Assert.Equal("desktop_command_failed", (await handler.ExecuteAsync(
+        new StartBatchCommand(), cancellationToken)).Error?.Code);
+
+      Assert.Null((await handler.ExecuteAsync(
+        new SetTaskEngineCommand(null), cancellationToken)).Error);
+      Assert.Null((await handler.ExecuteAsync(
+        new SetBatchTaskEngineCommand(null), cancellationToken)).Error);
 
       WorkbenchCommandOutcome recognition = await handler.ExecuteAsync(
         new SetTaskEngineCommand("mineru_document"), cancellationToken);
@@ -621,17 +608,55 @@ public sealed class MineruConnectionWorkbenchTests
       Assert.Equal("desktop_command_failed", batch.Error?.Code);
 
       Assert.Null((await handler.ExecuteAsync(new RefreshRuntimeCommand(), cancellationToken)).Error);
-      RecognitionWorkbenchState recognitionState = Assert.IsType<RecognitionWorkbenchState>(
+      recognitionState = Assert.IsType<RecognitionWorkbenchState>(
         handler.InitialStates.Single(state => state.Scope == "recognition"));
-      BatchWorkbenchState batchState = Assert.IsType<BatchWorkbenchState>(
+      batchState = Assert.IsType<BatchWorkbenchState>(
         handler.InitialStates.Single(state => state.Scope == "batch"));
-      Assert.Equal("windows_text", recognitionState.TaskEngine);
-      Assert.Equal("windows_text", batchState.TaskEngine);
+      Assert.Null(recognitionState.TaskEngine);
+      Assert.Null(batchState.TaskEngine);
     }
     finally
     {
       Directory.Delete(resourceRoot, recursive: true);
     }
+  }
+
+  private static Wire.Health MineruModeHealthWithTier(Wire.MineruTierAvailability availability)
+  {
+    Wire.Health health = MineruModeHealth(ready: true);
+    return health with
+    {
+      Capabilities = [.. health.Capabilities,
+        RuntimeSelectionService.MineruConfigCapability],
+      CapabilityDescriptors =
+      [
+        .. health.CapabilityDescriptors!,
+        new Wire.CapabilityDescriptor
+        {
+          Name = RuntimeSelectionService.MineruConfigCapability,
+          Lifecycle = "active",
+          IntroducedIn = "2.9.0",
+          DeprecatedIn = null,
+          SunsetAt = null,
+          Replacement = null,
+          MineruConfigCatalog = new Wire.MineruConfigCatalog
+          {
+            DefaultTier = Wire.MineruTierId.Basic,
+            Tiers =
+            [
+              new Wire.MineruTierDescriptor
+              {
+                Id = Wire.MineruTierId.Basic,
+                Availability = availability,
+                ReasonCode = availability == Wire.MineruTierAvailability.Unavailable
+                  ? "tier_unavailable" : null,
+              },
+            ],
+            Languages = ["ch"],
+          },
+        },
+      ],
+    };
   }
 
   private static void AssertMineruMode(

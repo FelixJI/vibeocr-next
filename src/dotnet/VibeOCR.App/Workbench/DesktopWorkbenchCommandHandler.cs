@@ -388,7 +388,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       string? task = recognition.TaskEngine;
       return [.. selection.RecognitionModes.Select(mode => new RecognitionEngineChoice(
         mode.Id, SettingsViewModel.DisplayName(mode.Id), task == mode.Id, task == mode.Id,
-        mode.Availability,
+        TryProjectMineruConfig(selection, mode.Id, out _) ? mode.Availability : "unavailable",
         mode.Availability == "preparation_required" && mode.RequiredComponent is not null,
         mode.LifecycleKind,
         mode.SupportsPreload, mode.SupportsTtl, mode.SupportsPinning, mode.SupportsRelease))];
@@ -711,7 +711,11 @@ public sealed class DesktopWorkbenchCommandHandler :
     RecognitionModeOption? mode = batchTaskEngine is null ? null : requireUsable
       ? selection.SelectRecognitionMode(batchTaskEngine)
       : selection.FindRecognitionMode(batchTaskEngine);
-    batch.SetRecognitionMode(mode, selection.MineruConfigFor(mode?.Id));
+    MineruConfig? config = requireUsable
+      ? selection.MineruConfigFor(mode?.Id)
+      : TryProjectMineruConfig(selection, mode?.Id, out MineruConfig? projected)
+        ? projected : null;
+    batch.SetRecognitionMode(mode, config);
   }
 
   private async Task<PdfWorkbenchState> OpenPdfAsync(CancellationToken cancellationToken)
@@ -1171,7 +1175,28 @@ public sealed class DesktopWorkbenchCommandHandler :
         : selection.FindRecognitionMode(id);
     RecognitionModeOption? mode = Resolve(recognition.TaskEngine);
     // mineru_document 任务随目录默认 tier 携带类型化 MinerU 4 配置。
-    recognition.SetRecognitionMode(mode, selection.MineruConfigFor(mode?.Id));
+    MineruConfig? config = requireUsable
+      ? selection.MineruConfigFor(mode?.Id)
+      : TryProjectMineruConfig(selection, mode?.Id, out MineruConfig? projected)
+        ? projected : null;
+    recognition.SetRecognitionMode(mode, config);
+  }
+
+  private static bool TryProjectMineruConfig(
+    RuntimeSelectionService selection,
+    string? modeId,
+    out MineruConfig? config)
+  {
+    try
+    {
+      config = selection.MineruConfigFor(modeId);
+      return true;
+    }
+    catch (RuntimeSelectionException)
+    {
+      config = null;
+      return false;
+    }
   }
 
   /// <summary>

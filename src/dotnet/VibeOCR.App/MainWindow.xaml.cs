@@ -1,6 +1,7 @@
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using VibeOCR.App.Features.Batch;
 using VibeOCR.App.Features.Pdf;
 using VibeOCR.App.Features.QrCode;
@@ -52,6 +53,8 @@ public sealed partial class MainWindow : Window
   private readonly WindowLayoutStore layoutStore;
   private readonly WorkbenchApplication application;
   private readonly WebWorkbenchHost webHost;
+  private readonly WorkbenchResourceBroker resourceBroker;
+  private readonly string resourceRoot;
   private bool initialized;
   private WorkbenchRoute currentRoute = WorkbenchRoute.Recognition;
 
@@ -79,9 +82,9 @@ public sealed partial class MainWindow : Window
     ArgumentNullException.ThrowIfNull(updateFactory);
     this.layoutStore = layoutStore ?? throw new ArgumentNullException(nameof(layoutStore));
 
-    string resourceRoot = Path.Combine(layout.DataRoot, "web-resources");
+    resourceRoot = Path.Combine(layout.DataRoot, "web-resources");
     Directory.CreateDirectory(resourceRoot);
-    var resourceBroker = new WorkbenchResourceBroker(resourceRoot);
+    resourceBroker = new WorkbenchResourceBroker(resourceRoot);
     var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
     var commandHandler = new DesktopWorkbenchCommandHandler(
       recognitionFactory,
@@ -306,12 +309,12 @@ public sealed partial class MainWindow : Window
         RecoveryPanel.Visibility = Visibility.Collapsed;
         WorkbenchWebView.Visibility = Visibility.Visible;
       });
-      CompleteWebReadySmoke();
+      _ = CompleteWebReadySmokeAsync();
     }
     AppLog.Info($"Web workbench: {state}");
   }
 
-  private static void CompleteWebReadySmoke()
+  private async Task CompleteWebReadySmokeAsync()
   {
     if (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") != "web-ready")
     {
@@ -319,13 +322,74 @@ public sealed partial class MainWindow : Window
     }
     string? healthFile = Environment.GetEnvironmentVariable(
       "VIBEOCR_WEB_READY_FILE");
-    if (!string.IsNullOrWhiteSpace(healthFile))
+    string relative = $"web-ready-{Guid.NewGuid():N}.txt";
+    string path = Path.Combine(resourceRoot, relative);
+    try
     {
-      File.WriteAllText(
-        healthFile,
-        "{\"schema_version\":1,\"state\":\"bridge-ready\"}");
+      await File.WriteAllTextAsync(path, "web-resource-ok");
+      WorkbenchResourceLease lease = resourceBroker.Lease(
+        relative, "text/plain; charset=utf-8", TimeSpan.FromMinutes(1));
+      const string png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+      string script = $$"""
+        window.__vibeocrResourceSmoke = "pending";
+        (async () => {
+          try {
+          const resource = await fetch({{JsonSerializer.Serialize(lease.Uri.AbsoluteUri)}},
+            { cache: "no-store", credentials: "omit" });
+          if (!resource.ok || await resource.text() !== "web-resource-ok")
+            throw new Error("opaque resource GET failed");
+          const bytes = Uint8Array.from(atob("{{png}}"), c => c.charCodeAt(0));
+          const upload = await fetch("/__annotation", {
+            method: "POST", headers: { "Content-Type": "image/png" }, body: bytes,
+          });
+          if (upload.status !== 201 ||
+              typeof (await upload.json()).resourceUri !== "string")
+            throw new Error("annotation POST failed");
+          return "resource-and-annotation-ok";
+          } catch (error) {
+            return `failure: ${error instanceof Error ? error.message : String(error)}`;
+          }
+        })().then(result => { window.__vibeocrResourceSmoke = result; })
+        """;
+      await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(script);
+      string result = "";
+      for (int attempt = 0; attempt < 50; attempt++)
+      {
+        result = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+          "window.__vibeocrResourceSmoke");
+        if (result != JsonSerializer.Serialize("pending")) break;
+        await Task.Delay(100);
+      }
+      if (result != JsonSerializer.Serialize("resource-and-annotation-ok"))
+      {
+        throw new InvalidOperationException($"Web workbench resource smoke failed: {result}");
+      }
+      resourceBroker.Revoke(lease);
+      if (!string.IsNullOrWhiteSpace(healthFile))
+      {
+        File.WriteAllText(healthFile,
+          "{\"schema_version\":1,\"state\":\"bridge-ready\",\"resources\":\"verified\"}");
+      }
+      Environment.Exit(0);
     }
-    Environment.Exit(0);
+    catch (Exception error)
+    {
+      AppLog.Error("Web workbench resource smoke failed", error);
+      if (!string.IsNullOrWhiteSpace(healthFile))
+      {
+        File.WriteAllText(healthFile, JsonSerializer.Serialize(new
+        {
+          schema_version = 1,
+          state = "failed",
+          error = error.Message,
+        }));
+      }
+      Environment.Exit(1);
+    }
+    finally
+    {
+      File.Delete(path);
+    }
   }
 
   private void ShowRecovery(string detail)

@@ -7,6 +7,39 @@ namespace VibeOCR.App.Tests;
 
 public sealed class WebWorkbenchHostPolicyTests
 {
+  [Fact]
+  public async Task PackagedAssetsServeOnlyExactSameOriginBundleFiles()
+  {
+    string parent = Path.Combine(Path.GetTempPath(), $"vibeocr-assets-{Guid.NewGuid():N}");
+    string bundle = Path.Combine(parent, "dist");
+    Directory.CreateDirectory(Path.Combine(bundle, "assets"));
+    try
+    {
+      await File.WriteAllTextAsync(Path.Combine(bundle, "index.html"), "<main>workbench</main>",
+        TestContext.Current.CancellationToken);
+      await File.WriteAllTextAsync(Path.Combine(bundle, "assets", "app.js"), "export const ready = true;",
+        TestContext.Current.CancellationToken);
+      await File.WriteAllTextAsync(Path.Combine(parent, "outside.js"), "secret",
+        TestContext.Current.CancellationToken);
+      var assets = new PackagedWebAssets(bundle);
+
+      await using WorkbenchResourceResponse response = Assert.IsType<WorkbenchResourceResponse>(
+        assets.Open(new Uri("https://app.vibeocr/assets/app.js")));
+      Assert.Equal("text/javascript; charset=utf-8", response.ContentType);
+      using StreamReader reader = new(response.Content);
+      Assert.Equal("export const ready = true;", await reader.ReadToEndAsync(
+        TestContext.Current.CancellationToken));
+      Assert.Null(assets.Open(new Uri("https://app.vibeocr/assets/../outside.js")));
+      Assert.Null(assets.Open(new Uri("https://app.vibeocr/assets/app.js?bypass=1")));
+      Assert.Null(assets.Open(new Uri("https://other.vibeocr/assets/app.js")));
+      Assert.Null(assets.Open(new Uri("http://app.vibeocr/assets/app.js")));
+    }
+    finally
+    {
+      Directory.Delete(parent, recursive: true);
+    }
+  }
+
   [Theory]
   [InlineData("https://app.vibeocr/")]
   [InlineData("https://app.vibeocr/index.html")]
