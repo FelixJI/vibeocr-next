@@ -1,5 +1,6 @@
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { App, type AppActions, type AppViewState } from "./App";
@@ -621,6 +622,127 @@ describe("AppShell", () => {
       featureId: "document_parsing",
       enabled: true,
     });
+    unmount();
+  });
+
+  it("auto-loads runtime settings once per settings page visit", () => {
+    window.location.hash = "#/settings";
+    const run = vi.fn();
+    const actions: AppActions = {
+      run,
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const settings = {
+      isBusy: false,
+      statusCode: "settings.ready",
+      statusMessage: "正在读取设置",
+      backend: "cpu",
+      pendingBackend: "cpu",
+      sources: [],
+      features: [],
+    };
+    const base: AppViewState = {
+      connected: true,
+      revision: 40,
+      route: "settings",
+      theme: "light",
+      capabilities: ["settings.selection"],
+      features: { settings },
+      runtimeLabel: "原生宿主已连接",
+    };
+
+    // 宿主未声明 runtime.refresh 能力时不派发；StrictMode 双挂载也不得提前触发。
+    const { rerender, unmount } = render(
+      <StrictMode>
+        <App actions={actions} viewState={base} />
+      </StrictMode>,
+    );
+    expect(run).not.toHaveBeenCalled();
+
+    // 能力随宿主广播到达后自动加载一次，与手动“重新检查状态”同一命令。
+    rerender(
+      <StrictMode>
+        <App
+          actions={actions}
+          viewState={{
+            ...base,
+            revision: 41,
+            capabilities: ["settings.selection", "runtime.refresh"],
+          }}
+        />
+      </StrictMode>,
+    );
+    expect(run).toHaveBeenCalledWith({ type: "settings.refreshRuntime" });
+
+    // 后续宿主状态广播（刷新结果、能力数组重建）不得再次触发挂载刷新。
+    rerender(
+      <StrictMode>
+        <App
+          actions={actions}
+          viewState={{
+            ...base,
+            revision: 42,
+            capabilities: ["settings.selection", "runtime.refresh"],
+            features: {
+              settings: {
+                ...settings,
+                statusMessage: "默认 TTL 300s；已驻留管线 0 个",
+                sources: [
+                  {
+                    kind: "package_index",
+                    id: "pypi",
+                    displayName: "PyPI 官方源",
+                    selected: true,
+                  },
+                ],
+              },
+            },
+          }}
+        />
+      </StrictMode>,
+    );
+    expect(
+      run.mock.calls.filter(
+        ([action]) => action?.type === "settings.refreshRuntime",
+      ),
+    ).toHaveLength(1);
+    unmount();
+  });
+
+  it("does not describe unloaded download sources as a backend decision", () => {
+    window.location.hash = "#/settings";
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 43,
+      route: "settings",
+      theme: "light",
+      capabilities: ["settings.selection"],
+      features: {
+        settings: {
+          isBusy: false,
+          statusCode: "settings.ready",
+          statusMessage: "正在读取设置",
+          backend: "cpu",
+          pendingBackend: "cpu",
+          sources: [],
+          features: [],
+        },
+      },
+      runtimeLabel: "原生宿主已连接",
+    };
+
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+
+    expect(screen.getByText(/尚未加载/)).toBeVisible();
+    expect(
+      screen.queryByText(/Backend 未提供下载源目录/),
+    ).not.toBeInTheDocument();
     unmount();
   });
 

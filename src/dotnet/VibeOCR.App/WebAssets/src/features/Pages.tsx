@@ -33,7 +33,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { AppActions, AppViewState } from "../app/types";
 import { CapabilityGate } from "../components/CapabilityGate";
@@ -1293,6 +1293,27 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
   const maintenance = maintenanceState(state.maintenance);
   const busy = maintenance?.isRunning === true;
   const sources = sourceOptions(state.sources);
+  const statusMessage =
+    typeof state.statusMessage === "string" ? state.statusMessage : "";
+  // 空下载源列表有两种含义：宿主目录尚未加载与 Backend 确未提供；
+  // 初始/读取中的状态不得误报为 Backend 决策。
+  const sourcesLoaded =
+    sources.length > 0 ||
+    (booleanValue(state.isBusy) !== true &&
+      statusMessage !== "" &&
+      statusMessage !== "正在读取设置" &&
+      statusMessage !== "正在读取模型驻留状态");
+  // 挂载后自动加载一次运行时快照：冷启动 bootstrap 只尽力加载目录，
+  // 状态/来源以一次显式刷新为准（与手动“重新检查状态”同一命令）。
+  // StrictMode 双挂载与宿主广播重放都不得重复派发。
+  const autoRefreshed = useRef(false);
+  useEffect(() => {
+    if (autoRefreshed.current) return;
+    if (!viewState.connected || busy) return;
+    if (!viewState.capabilities.includes("runtime.refresh")) return;
+    autoRefreshed.current = true;
+    void actions.run({ type: "settings.refreshRuntime" });
+  }, [actions, busy, viewState.capabilities, viewState.connected]);
   const serviceText = stringValue(state.serviceStatus) ?? "等待宿主同步";
   const maintenanceParts = [
     stringValue(state.maintenanceStatus),
@@ -1408,6 +1429,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
         >
           <SourceSelector
             sources={sources}
+            loaded={sourcesLoaded}
             enabled={viewState.capabilities.includes("settings.selection")}
             locked={busy}
             actions={actions}
@@ -1423,11 +1445,13 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
 
 function SourceSelector({
   sources,
+  loaded,
   enabled,
   locked,
   actions,
 }: {
   readonly sources: readonly SourceOptionState[];
+  readonly loaded: boolean;
   readonly enabled: boolean;
   readonly locked: boolean;
   readonly actions: AppActions;
@@ -1439,7 +1463,13 @@ function SourceSelector({
     (source) => source.kind === "model_registry",
   );
   if (packageSources.length === 0 && modelSources.length === 0) {
-    return <p className="form-note">当前 Backend 未提供下载源目录。</p>;
+    return (
+      <p className="form-note">
+        {loaded
+          ? "当前 Backend 未提供下载源目录。"
+          : "运行环境目录尚未加载，正在等待宿主同步。"}
+      </p>
+    );
   }
   return (
     <>
