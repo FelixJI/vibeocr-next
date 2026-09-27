@@ -1603,6 +1603,39 @@ class TestOfflineRuntimePack:
         assert commands[0][commands[0].index("--find-links") + 1] == find_links
         assert (pack_dir / ".complete").stat().st_mtime_ns == marker_before
 
+    def test_same_version_new_manifest_pack_rebuilds_cached_wheels(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        commands, partial_root, manifest_path = _run_default_installer(
+            tmp_path, monkeypatch, with_base_pack=True
+        )
+        first_command = commands[0]
+        pack_dir = Path(first_command[first_command.index("--find-links") + 1])
+        assert (pack_dir / "rapidocr-3.9.2-py3-none-any.whl").is_file()
+
+        document = json.loads(manifest_path.read_text(encoding="utf-8"))
+        profile = document["profiles"]["win-x64-base"]
+        pack_path = manifest_path.parent / profile["runtime_pack"][0]
+        with zipfile.ZipFile(pack_path, mode="w") as archive:
+            archive.writestr("pack-requirements.txt", "rapidocr==3.9.2\n")
+            archive.writestr("rapidocr-3.9.2-new-py3-none-any.whl", b"new-wheel")
+        profile["runtime_pack_sha256"] = [_sha(pack_path.read_bytes())]
+        manifest_path.write_text(json.dumps(document), encoding="utf-8")
+        manifest = load_runtime_manifest(manifest_path)
+
+        from vibeocr.runtime.environments import runtime_installer as installer
+
+        installer._default_install_runner(
+            partial_root,
+            manifest,
+            manifest.profiles["win-x64-base"].scopes[0],
+            _pypi_source(),
+        )
+        assert not (pack_dir / "rapidocr-3.9.2-py3-none-any.whl").exists()
+        assert (pack_dir / "rapidocr-3.9.2-new-py3-none-any.whl").read_bytes() == (
+            b"new-wheel"
+        )
+
     def test_without_pack_installs_online_without_no_index(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1864,13 +1897,17 @@ def test_extract_runtime_pack_rejects_unsafe_members(tmp_path: Path) -> None:
     with zipfile.ZipFile(pack, mode="w") as archive:
         archive.writestr("../evil.whl", b"evil")
     with pytest.raises(RuntimeInstallError, match="unsafe runtime pack member"):
-        installer._extract_runtime_pack([pack], tmp_path / "cache")
+        installer._extract_runtime_pack(
+            [pack], tmp_path / "cache", expected_sha256=(_sha(pack.read_bytes()),)
+        )
 
     pack2 = tmp_path / "pack2.zip"
     with zipfile.ZipFile(pack2, mode="w") as archive:
         archive.writestr("payload.txt", b"not a wheel")
     with pytest.raises(RuntimeInstallError, match="unsafe runtime pack member"):
-        installer._extract_runtime_pack([pack2], tmp_path / "cache2")
+        installer._extract_runtime_pack(
+            [pack2], tmp_path / "cache2", expected_sha256=(_sha(pack2.read_bytes()),)
+        )
 
 
 def test_base_accelerator_maps_to_base_profile() -> None:
@@ -1886,7 +1923,9 @@ def test_extract_runtime_pack_requires_pack_requirements(tmp_path: Path) -> None
     with zipfile.ZipFile(pack, mode="w") as archive:
         archive.writestr("rapidocr-3.9.2-py3-none-any.whl", b"wheel")
     with pytest.raises(RuntimeInstallError, match="lacks pack-requirements.txt"):
-        installer._extract_runtime_pack([pack], tmp_path / "cache")
+        installer._extract_runtime_pack(
+            [pack], tmp_path / "cache", expected_sha256=(_sha(pack.read_bytes()),)
+        )
 
 
 def test_full_profile_without_pack_falls_back_online(tmp_path: Path) -> None:
@@ -1951,15 +1990,83 @@ def test_multi_part_pack_extracts_into_one_directory(tmp_path: Path) -> None:
     with zipfile.ZipFile(part2, mode="w") as archive:
         archive.writestr("onnxruntime-1.28.0-cp313-cp313-win_amd64.whl", b"ort")
 
-    pack_dir = installer._extract_runtime_pack([part1, part2], tmp_path / "cache")
+    binding = (_sha(part1.read_bytes()), _sha(part2.read_bytes()))
+    pack_dir = installer._extract_runtime_pack(
+        [part1, part2], tmp_path / "cache", expected_sha256=binding
+    )
     assert pack_dir.name == "vibeocr-runtime-pack-win-x64-cpu-0.7.0"
     assert (pack_dir / "pack-requirements.txt").is_file()
     assert (pack_dir / "rapidocr-3.9.2-py3-none-any.whl").is_file()
     assert (pack_dir / "onnxruntime-1.28.0-cp313-cp313-win_amd64.whl").is_file()
     assert (pack_dir / ".complete").is_file()
     # 幂等:完整标记存在时直接复用。
-    again = installer._extract_runtime_pack([part1, part2], tmp_path / "cache")
+    again = installer._extract_runtime_pack(
+        [part1, part2], tmp_path / "cache", expected_sha256=binding
+    )
     assert again == pack_dir
+
+
+def test_old_runtime_pack_marker_rebuilds_only_its_cache_directory(
+    tmp_path: Path,
+) -> None:
+    from vibeocr.runtime.environments import runtime_installer as installer
+
+    pack = tmp_path / "vibeocr-runtime-pack-win-x64-base-0.7.0.zip"
+    with zipfile.ZipFile(pack, mode="w") as archive:
+        archive.writestr("pack-requirements.txt", "rapidocr==3.9.2\n")
+        archive.writestr("rapidocr-3.9.2-py3-none-any.whl", b"fresh")
+    cache = tmp_path / "cache"
+    pack_dir = cache / pack.stem
+    pack_dir.mkdir(parents=True)
+    (pack_dir / ".complete").write_text("ok\n", encoding="utf-8")
+    (pack_dir / "stale.whl").write_bytes(b"stale")
+    sibling = cache / "other-pack"
+    sibling.mkdir()
+    (sibling / "keep.txt").write_text("preserve", encoding="utf-8")
+
+    extracted = installer._extract_runtime_pack(
+        [pack], cache, expected_sha256=(_sha(pack.read_bytes()),)
+    )
+
+    assert extracted == pack_dir
+    assert not (pack_dir / "stale.whl").exists()
+    assert (pack_dir / "rapidocr-3.9.2-py3-none-any.whl").read_bytes() == b"fresh"
+    assert (pack_dir / ".complete").read_text(encoding="utf-8") != "ok\n"
+    assert (sibling / "keep.txt").read_text(encoding="utf-8") == "preserve"
+
+
+def test_runtime_pack_cache_rejects_escaping_stem_and_reparse_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibeocr.runtime.environments import runtime_installer as installer
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    sibling = tmp_path / "keep.txt"
+    sibling.write_text("preserve", encoding="utf-8")
+    escaping = tmp_path / "...zip"
+    escaping.write_bytes(b"zip")
+    with pytest.raises(RuntimeInstallError, match="cache name is unsafe"):
+        installer._extract_runtime_pack(
+            [escaping], cache, expected_sha256=(_sha(escaping.read_bytes()),)
+        )
+
+    pack = tmp_path / "pack.zip"
+    pack.write_bytes(b"zip")
+    destination = cache / "pack"
+    destination.mkdir()
+    original_is_junction = Path.is_junction
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda path: path == destination or original_is_junction(path),
+    )
+    with pytest.raises(RuntimeInstallError, match="reparse point"):
+        installer._extract_runtime_pack(
+            [pack], cache, expected_sha256=(_sha(pack.read_bytes()),)
+        )
+    assert destination.is_dir()
+    assert sibling.read_text(encoding="utf-8") == "preserve"
 
 
 def test_ensure_with_explicit_base_only_scope_installs_base_lock(

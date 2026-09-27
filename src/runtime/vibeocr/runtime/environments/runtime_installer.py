@@ -985,6 +985,7 @@ def _default_install_runner(
         pack_dir = _extract_runtime_pack(
             pack_files,
             cache / "runtime-packs",
+            expected_sha256=install_scope.runtime_pack_sha256,
             reporter=reporter,
         )
         requirements_file = pack_dir / "pack-requirements.txt"
@@ -1181,6 +1182,7 @@ def _extract_runtime_pack(
     archive_paths: list[Path],
     cache_root: Path,
     *,
+    expected_sha256: tuple[str, ...],
     reporter: RuntimeMaintenanceReporter | None = None,
 ) -> Path:
     """Idempotently extract manifest-bound runtime pack parts into the cache.
@@ -1189,16 +1191,37 @@ def _extract_runtime_pack(
     the hash-free requirements manifest (``pack-requirements.txt``). Each
     archive's SHA-256 has already been verified by ``load_runtime_manifest``;
     extraction is guarded against unsafe members and only re-runs when the
-    destination marker is missing, so repeated ensure/repair installs stay
-    offline and cheap.
+    destination marker does not bind those verified part digests, so repeated
+    ensure/repair installs stay offline without reusing an old same-version pack.
     """
     if not archive_paths:
         raise RuntimeInstallError("runtime pack binding is empty")
+    if len(archive_paths) != len(expected_sha256) or any(
+        not _SHA256_RE.fullmatch(value) for value in expected_sha256
+    ):
+        raise RuntimeInstallError("runtime pack digest binding is invalid")
     # 分片名形如 <pack>.part01.zip:缓存目录按去掉分片后缀的公共 stem。
     stem = re.sub(r"\.part\d+$", "", archive_paths[0].stem)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", stem):
+        raise RuntimeInstallError("runtime pack cache name is unsafe")
     destination = cache_root / stem
+    if destination.is_symlink() or destination.is_junction():
+        raise RuntimeInstallError("runtime pack cache directory is a reparse point")
     marker = destination / ".complete"
-    if marker.is_file():
+    marker_value = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "parts": [
+                    {"filename": path.name, "sha256": sha}
+                    for path, sha in zip(archive_paths, expected_sha256, strict=True)
+                ],
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    if marker.is_file() and marker.read_text(encoding="utf-8") == marker_value:
         return destination
     for archive_path in archive_paths:
         if not archive_path.is_file():
@@ -1226,7 +1249,7 @@ def _extract_runtime_pack(
         raise RuntimeInstallError("runtime pack archive is invalid") from exc
     if not (destination / "pack-requirements.txt").is_file():
         raise RuntimeInstallError("runtime pack lacks pack-requirements.txt")
-    marker.write_text("ok\n", encoding="utf-8")
+    marker.write_text(marker_value, encoding="utf-8")
     if reporter is not None:
         reporter.advance(
             phase="install_profile",
