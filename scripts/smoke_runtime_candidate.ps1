@@ -173,7 +173,7 @@ if ($notPassed.Count -gt 0) {
     $summary = ($notPassed | ForEach-Object { "$($_.testName)=$($_.outcome)" }) -join '; '
     throw "Runtime candidate smoke did not pass: $summary"
 }
-$counters = $trx.TestRun.Counters
+$counters = $trx.TestRun.ResultSummary.Counters
 if ([int]$counters.executed -lt 1 -or [int]$counters.passed -lt 1) {
     throw 'Runtime candidate smoke TRX counters do not prove an executed passed case'
 }
