@@ -135,7 +135,12 @@ public sealed class RuntimeCandidateSmokeTests
                     Path.GetFullPath(productRoot),
                     StringComparison.Ordinal),
             $"launch 环境 VIBEOCR_PRODUCT_ROOT 未指向隔离副本: {launchProductRoot}");
-        AssertIsUnder(productRoot, launch.WorkingDirectory, "working directory");
+        // 生产 launch 契约:installer 把 supervisor cwd 固定为产品根本身
+        // (working_directory = product_root),完整路径相等才是准确预期,
+        // 不是其子目录。
+        Assert.Equal(
+            Path.GetFullPath(productRoot),
+            Path.GetFullPath(launch.WorkingDirectory));
 
         // 与 App.BuildSupervisorOptions 相同:launch.Environment 全量继承,
         // 会话令牌仅经环境变量传递。
