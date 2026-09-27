@@ -491,8 +491,8 @@ function lifecycleHint(
   }
   if (engine.lifecycleKind === "process_keep_alive") {
     return controls.length === 0
-      ? "MinerU 使用进程保活；当前目录未声明可用控制。"
-      : `MinerU 使用进程保活；仅支持：${controls.join("、")}。`;
+      ? "本地 MinerU 使用进程保活；当前目录未声明可用控制。远程模型生命周期由服务端管理。"
+      : `本地 MinerU 使用进程保活；仅支持：${controls.join("、")}。远程模型生命周期由服务端管理。`;
   }
   if (engine.lifecycleKind === "model_residency") {
     return controls.length === 0

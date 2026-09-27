@@ -19,6 +19,15 @@ namespace VibeOCR.App.Tests;
 public sealed class SelectionUiTests
 {
     [Fact]
+    public void CurrentOptionalComponentsHaveUserFacingNames()
+    {
+        Assert.Equal("PaddleOCR 本地文字与文档识别",
+            SettingsViewModel.FeatureDisplayName("paddleocr"));
+        Assert.Equal("MinerU 本地深度文档解析（远程模式无需安装）",
+            SettingsViewModel.FeatureDisplayName("mineru"));
+    }
+
+    [Fact]
     public async Task SettingsLoadProjectsSourcesAndFeatures()
     {
         var fake = new SelectionInferenceClient { Health = SelectionHealth() };

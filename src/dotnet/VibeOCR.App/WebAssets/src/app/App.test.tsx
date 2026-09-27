@@ -1545,7 +1545,9 @@ describe("AppShell", () => {
       />,
     );
     expect(
-      screen.getByText("MinerU 使用进程保活；仅支持：TTL、释放。"),
+      screen.getByText(
+        "本地 MinerU 使用进程保活；仅支持：TTL、释放。远程模型生命周期由服务端管理。",
+      ),
     ).toBeVisible();
     unmount();
   });

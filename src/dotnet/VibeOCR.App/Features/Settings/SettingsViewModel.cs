@@ -620,6 +620,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     internal static string FeatureDisplayName(string featureId) => featureId switch
     {
+        "paddleocr" => "PaddleOCR 本地文字与文档识别",
+        "mineru" => "MinerU 本地深度文档解析（远程模式无需安装）",
         "document_parsing" => "文档解析（PaddleOCR/MinerU）",
         "gpu_runtime" => "CUDA GPU 运行时",
         _ => featureId,

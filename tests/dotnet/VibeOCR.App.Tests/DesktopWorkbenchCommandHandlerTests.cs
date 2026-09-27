@@ -250,6 +250,58 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     }
   }
 
+  [Theory]
+  [InlineData(JobState.Failed, "recognition.failed")]
+  [InlineData(JobState.Cancelled, "recognition.cancelled")]
+  public async Task TerminalRecognitionRemainsVisibleWhenHandlerReprojectsWithoutResult(
+    JobState terminalState, string statusCode)
+  {
+    string resourceRoot = Path.Combine(Path.GetTempPath(),
+      $"vibeocr-handler-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      var client = new CompletedRecognitionInferenceClient { FinalState = terminalState };
+      var recognition = new RecognitionViewModel(client, new SignallingInputService());
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        () => recognition,
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => new SettingsViewModel(client),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker, resourceRoot, static () => 0, annotationStore);
+      var failed = new TaskCompletionSource<RecognitionWorkbenchState>(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+      handler.StateChanged += state =>
+      {
+        if (state is RecognitionWorkbenchState { IsBusy: false } final)
+          failed.TrySetResult(final);
+      };
+
+      await handler.ExecuteAsync(new SelectRecognitionImageCommand(),
+        TestContext.Current.CancellationToken);
+      RecognitionWorkbenchState terminal = await failed.Task.WaitAsync(
+        TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      Assert.Equal(statusCode, terminal.StatusCode);
+      Assert.Null(terminal.Result);
+      Assert.Equal(terminalState, recognition.TerminalState);
+
+      WorkbenchCommandOutcome reprojected = await handler.ExecuteAsync(
+        new SetTaskEngineCommand(string.Empty), TestContext.Current.CancellationToken);
+      Assert.Equal(statusCode, Assert.IsType<RecognitionWorkbenchState>(
+        Assert.Single(reprojected.States)).StatusCode);
+    }
+    finally
+    {
+      Directory.Delete(resourceRoot, recursive: true);
+    }
+  }
+
   [Fact]
   public async Task RuntimeMaintenanceLeaseChangesArePublishedToUpdateWorkbenchState()
   {
@@ -336,6 +388,8 @@ public sealed class DesktopWorkbenchCommandHandlerTests
   /// raw text "late attach" on the first observe probe.</summary>
   private sealed class CompletedRecognitionInferenceClient : InferenceClientStub
   {
+    public JobState FinalState { get; init; } = JobState.Completed;
+
     public override Task<JobRef> SubmitAsync(
       SubmitRequest request,
       IReadOnlyDictionary<string, SubmitUpload> uploads,
@@ -365,10 +419,10 @@ public sealed class DesktopWorkbenchCommandHandlerTests
           JobId = jobId,
           Kind = JobKind.Recognition,
           Priority = JobPriority.Interactive,
-          State = JobState.Completed,
+          State = FinalState,
         },
         Events = Array.Empty<StageEvent>(),
-        Outcomes =
+        Outcomes = FinalState is JobState.Failed ? [] :
         [
           new ItemOutcome
           {

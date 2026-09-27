@@ -1568,9 +1568,12 @@ public sealed class DesktopWorkbenchCommandHandler :
   private static string RecognitionStatusCode(RecognitionViewModel viewModel) =>
     viewModel.IsBusy
       ? "recognition.running"
-      : viewModel.HasResult
-        ? "recognition.completed"
-        : "recognition.ready";
+      : viewModel.TerminalState switch
+      {
+        JobState.Failed => "recognition.failed",
+        JobState.Cancelled => "recognition.cancelled",
+        _ => viewModel.HasResult ? "recognition.completed" : "recognition.ready",
+      };
 
   private static string ExtensionForMediaType(string mediaType) => mediaType switch
   {
