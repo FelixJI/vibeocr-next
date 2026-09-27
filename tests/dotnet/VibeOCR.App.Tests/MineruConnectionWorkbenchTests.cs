@@ -549,6 +549,91 @@ public sealed class MineruConnectionWorkbenchTests
     }
   }
 
+  [Fact]
+  public async Task InvalidMineruTierDoesNotChangeTaskChoicesOrBreakCatalogRefresh()
+  {
+    string resourceRoot = Path.Combine(Path.GetTempPath(),
+      $"vibeocr-mineru-tier-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      Wire.Health health = MineruModeHealth(ready: true);
+      var fake = new MineruInferenceClient
+      {
+        Health = health with
+        {
+          Capabilities = [.. health.Capabilities,
+            RuntimeSelectionService.MineruConfigCapability],
+          CapabilityDescriptors =
+          [
+            .. health.CapabilityDescriptors!,
+            new Wire.CapabilityDescriptor
+            {
+              Name = RuntimeSelectionService.MineruConfigCapability,
+              Lifecycle = "active",
+              IntroducedIn = "2.9.0",
+              DeprecatedIn = null,
+              SunsetAt = null,
+              Replacement = null,
+              MineruConfigCatalog = new Wire.MineruConfigCatalog
+              {
+                DefaultTier = Wire.MineruTierId.Basic,
+                Tiers =
+                [
+                  new Wire.MineruTierDescriptor
+                  {
+                    Id = Wire.MineruTierId.Basic,
+                    Availability = Wire.MineruTierAvailability.Unavailable,
+                    ReasonCode = "tier_unavailable",
+                  },
+                ],
+                Languages = ["ch"],
+              },
+            },
+          ],
+        },
+      };
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        () => new RecognitionViewModel(fake, new EmptyRecognitionInput()),
+        () => new BatchViewModel(fake, new EmptyBatchFiles()),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => new SettingsViewModel(fake),
+        () => new ShellViewModel(new StubHotkeyRegistrar(), new StubStartupRegistrar()),
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker, resourceRoot, static () => 0, annotationStore);
+      CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+
+      Assert.Null((await handler.ExecuteAsync(new RefreshRuntimeCommand(), cancellationToken)).Error);
+      Assert.Null((await handler.ExecuteAsync(
+        new SetTaskEngineCommand("windows_text"), cancellationToken)).Error);
+      Assert.Null((await handler.ExecuteAsync(
+        new SetBatchTaskEngineCommand("windows_text"), cancellationToken)).Error);
+
+      WorkbenchCommandOutcome recognition = await handler.ExecuteAsync(
+        new SetTaskEngineCommand("mineru_document"), cancellationToken);
+      WorkbenchCommandOutcome batch = await handler.ExecuteAsync(
+        new SetBatchTaskEngineCommand("mineru_document"), cancellationToken);
+      Assert.Equal("desktop_command_failed", recognition.Error?.Code);
+      Assert.Equal("desktop_command_failed", batch.Error?.Code);
+
+      Assert.Null((await handler.ExecuteAsync(new RefreshRuntimeCommand(), cancellationToken)).Error);
+      RecognitionWorkbenchState recognitionState = Assert.IsType<RecognitionWorkbenchState>(
+        handler.InitialStates.Single(state => state.Scope == "recognition"));
+      BatchWorkbenchState batchState = Assert.IsType<BatchWorkbenchState>(
+        handler.InitialStates.Single(state => state.Scope == "batch"));
+      Assert.Equal("windows_text", recognitionState.TaskEngine);
+      Assert.Equal("windows_text", batchState.TaskEngine);
+    }
+    finally
+    {
+      Directory.Delete(resourceRoot, recursive: true);
+    }
+  }
+
   private static void AssertMineruMode(
     WorkbenchState state, string availability, bool requiresDownload)
   {

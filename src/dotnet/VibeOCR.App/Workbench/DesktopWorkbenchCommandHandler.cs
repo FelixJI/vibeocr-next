@@ -692,7 +692,8 @@ public sealed class DesktopWorkbenchCommandHandler :
       if (selection?.SupportsRecognitionModes is not true)
         throw new RuntimeSelectionException(RuntimeSelectionErrorKind.CapabilityMissing,
           "The runtime does not provide recognition modes.");
-      selection.SelectRecognitionMode(command.Engine);
+      RecognitionModeOption mode = selection.SelectRecognitionMode(command.Engine);
+      selection.MineruConfigFor(mode.Id);
     }
     batchTaskEngine = command.Engine;
     SynchronizeBatchMode();
@@ -1139,7 +1140,11 @@ public sealed class DesktopWorkbenchCommandHandler :
     RuntimeSelectionService? selection = settings.RecognitionSelection?.Catalog;
     if (string.IsNullOrWhiteSpace(command.Engine)) recognition.TaskEngine = null;
     else if (selection?.SupportsRecognitionModes is true)
-      recognition.TaskEngine = selection.SelectRecognitionMode(command.Engine).Id;
+    {
+      RecognitionModeOption mode = selection.SelectRecognitionMode(command.Engine);
+      selection.MineruConfigFor(mode.Id);
+      recognition.TaskEngine = mode.Id;
+    }
     else if (selection?.SupportsEngineSelection is true && OcrEngineWire.Parse(command.Engine) is OcrEngine engine)
     {
       selection.SelectEngine(engine);
