@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using VibeOCR.App.Workbench;
+using VibeOCR.Platform.Bootstrap;
 
 namespace VibeOCR.App.Web;
 
@@ -38,6 +39,11 @@ public static class WorkbenchBridgeCodec
   private static readonly HashSet<string> SourceArgumentFields = ["kind", "sourceId"];
   private static readonly HashSet<string> AcceleratorArgumentFields = ["accelerator"];
   private static readonly HashSet<string> FeatureArgumentFields = ["featureId", "enabled"];
+  private static readonly HashSet<string> MineruModeArgumentFields = ["mode"];
+  private static readonly HashSet<string> MineruRemoteUrlArgumentFields =
+    ["mode", "apiUrl"];
+  private static readonly HashSet<string> MineruConnectionArgumentFields =
+    ["mode", "apiUrl", "apiKey"];
   private static readonly HashSet<string> TaskEngineArgumentFields = ["engine"];
   private static readonly HashSet<string> ResourceUriArgumentFields = ["resourceUri"];
 
@@ -300,6 +306,8 @@ public static class WorkbenchBridgeCodec
         return new RemoveBatchItemCommand(ParseGuidArgument(arguments, "itemId"));
       case ("batch", "setWindow"):
         return new SetBatchWindowCommand(ParseWindowStart(arguments));
+      case ("batch", "setTaskEngine"):
+        return new SetBatchTaskEngineCommand(ParseTaskEngine(arguments));
       case ("pdf", "open"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new OpenPdfCommand();
@@ -419,6 +427,11 @@ public static class WorkbenchBridgeCodec
         return new SetRuntimeFeatureCommand(
           featureId,
           arguments.GetProperty("enabled").GetBoolean());
+      case ("settings", "setMineruConnection"):
+        return ParseMineruConnection(arguments);
+      case ("settings", "prepareMineruConnection"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new PrepareMineruConnectionCommand();
       case ("settings", "installRuntime"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new InstallRuntimeCommand();
@@ -435,24 +448,7 @@ public static class WorkbenchBridgeCodec
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new RetryRuntimeMaintenanceCommand();
       case ("recognition", "setTaskEngine"):
-        bool hasTaskEngine = !HasExactFields(arguments, EmptyFields);
-        if (hasTaskEngine)
-        {
-          EnsureObjectWithFields(arguments, TaskEngineArgumentFields, "command arguments");
-        }
-        else
-        {
-          EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
-        }
-        string? taskEngine = hasTaskEngine
-          ? arguments.GetProperty("engine").GetString()
-          : null;
-        if (taskEngine is not null &&
-            (taskEngine.Length == 0 || taskEngine.Length > 32))
-        {
-          throw new WorkbenchBridgeProtocolException("Workbench task engine is invalid.");
-        }
-        return new SetTaskEngineCommand(taskEngine);
+        return new SetTaskEngineCommand(ParseTaskEngine(arguments));
       case ("update", "check"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new CheckUpdateCommand();
@@ -506,6 +502,79 @@ public static class WorkbenchBridgeCodec
         "Workbench PDF rotation is invalid.");
     }
     return new RotatePdfCommand(degrees);
+  }
+
+  private static SetMineruConnectionCommand ParseMineruConnection(
+    JsonElement arguments)
+  {
+    // local 仅携带 mode；remote 携带完整 url/key，多余或缺失字段 fail closed。
+    if (arguments.ValueKind != JsonValueKind.Object ||
+      !arguments.TryGetProperty("mode", out JsonElement modeElement) ||
+      modeElement.ValueKind != JsonValueKind.String)
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench MinerU mode is invalid.");
+    }
+    string mode = modeElement.GetString()!;
+    if (mode is not ("local" or "remote"))
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench MinerU mode is invalid.");
+    }
+    if (mode == "local")
+    {
+      EnsureObjectWithFields(arguments, MineruModeArgumentFields, "command arguments");
+      return new SetMineruConnectionCommand(mode, null, null);
+    }
+    bool hasApiKeyField = !HasExactFields(arguments, MineruRemoteUrlArgumentFields);
+    if (hasApiKeyField)
+    {
+      EnsureObjectWithFields(
+        arguments, MineruConnectionArgumentFields, "command arguments");
+    }
+    else
+    {
+      EnsureObjectWithFields(
+        arguments, MineruRemoteUrlArgumentFields, "command arguments");
+    }
+    string? apiUrl = arguments.GetProperty("apiUrl").GetString();
+    if (string.IsNullOrEmpty(apiUrl) ||
+      apiUrl.Length > MineruConnectionSettings.MaxApiUrlLength)
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench MinerU service url is invalid.");
+    }
+    if (!arguments.TryGetProperty("apiKey", out JsonElement apiKeyElement))
+    {
+      // 省略 apiKey=保留 Backend 已存 Key；宿主读回当前设置后合并。
+      return new SetMineruConnectionCommand(mode, apiUrl, null);
+    }
+    if (apiKeyElement.ValueKind != JsonValueKind.String)
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench MinerU api key is invalid.");
+    }
+    string apiKey = apiKeyElement.GetString()!;
+    // 空字符串=显式清除；长度无任意上限，由桥接消息总限额约束。
+    if (apiKey.Contains('\r') || apiKey.Contains('\n'))
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench MinerU api key is invalid.");
+    }
+    return new SetMineruConnectionCommand(mode, apiUrl, apiKey);
+  }
+
+  private static string? ParseTaskEngine(JsonElement arguments)
+  {
+    bool hasEngine = !HasExactFields(arguments, EmptyFields);
+    EnsureObjectWithFields(arguments,
+      hasEngine ? TaskEngineArgumentFields : EmptyFields, "command arguments");
+    string? engine = hasEngine ? arguments.GetProperty("engine").GetString() : null;
+    if (hasEngine && (string.IsNullOrEmpty(engine) || engine.Length > 32))
+    {
+      throw new WorkbenchBridgeProtocolException("Workbench task engine is invalid.");
+    }
+    return engine;
   }
 
   private static int ParseWindowStart(JsonElement arguments)
@@ -576,6 +645,8 @@ public static class WorkbenchBridgeCodec
       batch.FailedCount,
       items = batch.Items ?? [],
       batch.WindowStart,
+      engines = batch.Engines ?? [],
+      batch.TaskEngine,
     },
     PdfWorkbenchState pdf => new
     {
@@ -617,6 +688,13 @@ public static class WorkbenchBridgeCodec
       settings.ProgressDetail,
       settings.ProgressPercent,
       settings.CanPreviewInstall,
+      mineruConnection = settings.MineruConnection is null ? null : new
+      {
+        settings.MineruConnection.Supported,
+        settings.MineruConnection.Mode,
+        apiUrl = settings.MineruConnection.ApiUrl,
+        hasApiKey = settings.MineruConnection.HasApiKey,
+      },
       installPlan = settings.InstallPlan is not { } plan ? null : new
       {
         plan.PlanId, plan.ExpiresAt,

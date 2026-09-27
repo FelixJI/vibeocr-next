@@ -316,6 +316,62 @@ public sealed class RuntimeSelectionServiceTests
         Assert.Equal(RuntimeSelectionErrorKind.UnknownFeature, unknownFeature.Kind);
     }
 
+    [Fact]
+    public void MineruConfigFollowsTheRuntimeDeclaredCatalog()
+    {
+        RuntimeSelectionService service = new(Health(
+            [RecognitionModesCapability],
+            recognitionModes: RecognitionCatalog()));
+
+        // 未声明 ocr.mineru-config.v1 时完全省略 mineru 块（遗留形态）。
+        Assert.False(service.SupportsMineruConfig);
+        Assert.Null(service.MineruConfigFor("mineru_document"));
+
+        Wire.CapabilityDescriptor mineruConfigDescriptor = Descriptor(
+            RuntimeSelectionService.MineruConfigCapability);
+        mineruConfigDescriptor = mineruConfigDescriptor with
+        {
+            MineruConfigCatalog = new Wire.MineruConfigCatalog
+            {
+                DefaultTier = Wire.MineruTierId.Basic,
+                Tiers =
+                [
+                    new Wire.MineruTierDescriptor
+                    {
+                        Id = Wire.MineruTierId.Basic,
+                        Availability = Wire.MineruTierAvailability.PreparationRequired,
+                        ReasonCode = "mineru_execution_preparation_required",
+                    },
+                ],
+                Languages = ["ch"],
+            },
+        };
+        Wire.Health health = Health(
+            [RecognitionModesCapability, RuntimeSelectionService.MineruConfigCapability],
+            recognitionModes: RecognitionCatalog());
+        health = health with
+        {
+            CapabilityDescriptors =
+            [
+                .. (health.CapabilityDescriptors ?? []).Where(
+                    descriptor => descriptor.Name == RecognitionModesCapability),
+                mineruConfigDescriptor,
+            ],
+        };
+        service = new RuntimeSelectionService(health);
+
+        Assert.True(service.SupportsMineruConfig);
+        // 类型化配置使用目录默认 tier 和 SDK 的 auto/all/ch 默认值。
+        MineruConfig? config = service.MineruConfigFor("mineru_document");
+        Assert.NotNull(config);
+        Assert.Equal(MineruTier.Basic, config.Tier);
+        Assert.Equal(MineruOcrMode.Auto, config.OcrMode);
+        Assert.Equal("all", config.PageRange);
+        Assert.Equal("ch", config.Language);
+        Assert.Null(service.MineruConfigFor("paddle_text"));
+        Assert.Null(service.MineruConfigFor(null));
+    }
+
     private const string EngineCapability = RuntimeSelectionService.EngineSelectionCapability;
     private const string RecognitionModesCapability = RuntimeSelectionService.RecognitionModesCapability;
     private const string SourceCapability = RuntimeSelectionService.DownloadSourceCapability;

@@ -21,6 +21,7 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     private string _status = "请选择图片";
     private string? _taskEngine;
     private RecognitionModeOption? _taskRecognitionMode;
+    private MineruConfig? _taskMineruConfig;
 
     public RecognitionViewModel(
         IInferenceClient inference,
@@ -52,8 +53,17 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         set => SetField(ref _taskEngine, string.IsNullOrWhiteSpace(value) ? null : value);
     }
 
-    public void SetRecognitionMode(RecognitionModeOption? taskMode) =>
+    /// <summary>
+    /// 绑定任务级识别模式及其类型化 MinerU 4 配置（仅目录声明
+    /// ocr.mineru-config.v1 时由宿主提供；null 完全省略 mineru 块）。
+    /// </summary>
+    public void SetRecognitionMode(
+        RecognitionModeOption? taskMode,
+        MineruConfig? mineruConfig = null)
+    {
         _taskRecognitionMode = taskMode;
+        _taskMineruConfig = taskMode is null ? null : mineruConfig;
+    }
 
     /// <summary>The engine explicitly selected for this task, if any.</summary>
     public OcrEngine? EffectiveEngine
@@ -150,7 +160,8 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
                 ],
                 options: null,
                 cancellationToken: run.Token,
-                engine: engine);
+                engine: engine,
+                mineru: pipeline == "MinerU" ? _taskMineruConfig : null);
             JobSnapshot snapshot = job.Snapshot;
 
             if (generation != Volatile.Read(ref _generation)) return;

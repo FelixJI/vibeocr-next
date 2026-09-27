@@ -20,6 +20,7 @@ public sealed class BatchViewModel(
     private int _completedCount;
     private int _failedCount;
     private RecognitionModeOption? _recognitionMode;
+    private MineruConfig? _mineruConfig;
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public ObservableCollection<BatchItemViewModel> Items { get; } = [];
@@ -29,7 +30,17 @@ public sealed class BatchViewModel(
     public int TotalCount => Items.Count;
     public string Progress => $"{CompletedCount + FailedCount}/{TotalCount}";
 
-    public void SetRecognitionMode(RecognitionModeOption? mode) => _recognitionMode = mode;
+    /// <summary>
+    /// 绑定批量识别模式及其类型化 MinerU 4 配置；mineru_document 批量任务
+    /// 必须携带目录默认 tier 的 typed 配置，不发送遗留 engine 选项。
+    /// </summary>
+    public void SetRecognitionMode(
+        RecognitionModeOption? mode,
+        MineruConfig? mineruConfig = null)
+    {
+        _recognitionMode = mode;
+        _mineruConfig = mode is null ? null : mineruConfig;
+    }
 
     public void AddFiles(IEnumerable<string> paths)
     {
@@ -76,7 +87,8 @@ public sealed class BatchViewModel(
                 inputs,
                 options: null,
                 cancellationToken: _run.Token,
-                engine: engine);
+                engine: engine,
+                mineru: pipeline == "MinerU" ? _mineruConfig : null);
             JobSnapshot snapshot = job.Snapshot;
 
             if (generation != Volatile.Read(ref _generation)) return;

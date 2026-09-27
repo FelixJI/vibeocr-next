@@ -159,13 +159,28 @@ describe("AppShell", () => {
       revision: 5,
       route: "batch",
       theme: "light",
-      capabilities: ["batch.add", "batch.run", "batch.export"],
+      capabilities: [
+        "batch.add",
+        "batch.run",
+        "batch.export",
+        "recognition.engine",
+      ],
       features: {
         batch: {
           isRunning: false,
           itemCount: 2,
           completedCount: 1,
           failedCount: 0,
+          engines: [
+            {
+              engine: "mineru_document",
+              displayName: "MinerU 文档",
+              selected: false,
+              isTaskOverride: false,
+              availability: "ready",
+              requiresDownload: false,
+            },
+          ],
           items: [
             {
               id: "11111111-1111-1111-1111-111111111111",
@@ -192,6 +207,14 @@ describe("AppShell", () => {
     expect(
       screen.queryByRole("combobox", { name: "批量并发数" }),
     ).not.toBeInTheDocument();
+    await user.selectOptions(
+      screen.getByLabelText("本次识别模式"),
+      "mineru_document",
+    );
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "batch.setTaskEngine",
+      engine: "mineru_document",
+    });
     await user.click(screen.getByRole("button", { name: "下移 发票一.png" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "batch.moveItem",
@@ -707,6 +730,162 @@ describe("AppShell", () => {
         ([action]) => action?.type === "settings.refreshRuntime",
       ),
     ).toHaveLength(1);
+    unmount();
+  });
+
+  it("configures a remote MinerU connection through the settings panel", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 50,
+      route: "settings",
+      theme: "light",
+      capabilities: ["settings.selection"],
+      features: {
+        settings: {
+          theme: "light",
+          isBusy: false,
+          statusCode: "settings.ready",
+          backend: "cpu",
+          startupEnabled: false,
+          hotkey: "Ctrl+Alt+Q",
+          pendingBackend: "cpu",
+          sources: [],
+          features: [],
+          mineruConnection: {
+            supported: true,
+            mode: "local",
+            apiUrl: "",
+            hasApiKey: false,
+          },
+        },
+      },
+      runtimeLabel: "原生宿主已连接",
+    };
+
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+
+    const mode = screen.getByLabelText("MinerU 运行模式");
+    expect(mode).toHaveValue("local");
+    expect(screen.queryByLabelText("服务根地址")).not.toBeInTheDocument();
+    await user.selectOptions(mode, "remote");
+    const url = screen.getByLabelText("服务根地址");
+    await user.type(url, "https://mineru.example.com");
+    const key = screen.getByLabelText("API Key（可选）");
+    expect(key).toHaveAttribute("type", "password");
+    expect(key).toHaveAttribute("autocomplete", "off");
+    await user.type(key, "secret-key");
+    await user.click(screen.getByRole("button", { name: "保存 MinerU 配置" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setMineruConnection",
+      mode: "remote",
+      apiUrl: "https://mineru.example.com",
+      apiKey: "secret-key",
+    });
+    // 保存不验证连通性，本地驻留/TTL 不控制远程，都不得被暗示成已验证可用。
+    expect(screen.getByText(/不验证服务连通性/)).toBeVisible();
+    expect(screen.getByText(/不控制远程服务/)).toBeVisible();
+    expect(screen.getByText(/不要求本地 MinerU/)).toBeVisible();
+    unmount();
+  });
+
+  it("marks remote MinerU explicitly unavailable on old backends", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 51,
+      route: "settings",
+      theme: "light",
+      capabilities: ["settings.selection"],
+      features: {
+        settings: {
+          theme: "light",
+          isBusy: false,
+          statusCode: "settings.ready",
+          backend: "cpu",
+          startupEnabled: false,
+          hotkey: "Ctrl+Alt+Q",
+          pendingBackend: "cpu",
+          sources: [],
+          features: [],
+          mineruConnection: {
+            supported: false,
+            mode: "local",
+            apiUrl: "",
+            hasApiKey: false,
+          },
+        },
+      },
+      runtimeLabel: "原生宿主已连接",
+    };
+
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+
+    expect(
+      screen.getByRole("option", { name: "远程（自部署服务）" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText(/当前 Backend 未声明 ocr\.mineru-remote-api\.v1/),
+    ).toBeVisible();
+    // 本地模式在旧 Backend 上仍可保存（它是缺省状态）。
+    await user.click(screen.getByRole("button", { name: "保存 MinerU 配置" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setMineruConnection",
+      mode: "local",
+    });
+    unmount();
+  });
+
+  it("waits for the runtime catalog before offering MinerU connection editing", () => {
+    window.location.hash = "#/settings";
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 52,
+      route: "settings",
+      theme: "light",
+      capabilities: [],
+      features: {
+        settings: {
+          theme: "light",
+          isBusy: false,
+          statusCode: "settings.ready",
+          backend: "cpu",
+          startupEnabled: false,
+          hotkey: "Ctrl+Alt+Q",
+          pendingBackend: "cpu",
+          sources: [],
+          features: [],
+        },
+      },
+      runtimeLabel: "原生宿主已连接",
+    };
+
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+
+    expect(
+      screen.getByText(/MinerU 连接设置等待运行环境目录同步/),
+    ).toBeVisible();
+    expect(screen.getByLabelText("MinerU 运行模式")).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "保存 MinerU 配置" }),
+    ).toBeDisabled();
     unmount();
   });
 

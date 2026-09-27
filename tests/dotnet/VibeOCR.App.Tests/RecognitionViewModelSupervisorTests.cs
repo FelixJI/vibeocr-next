@@ -76,6 +76,27 @@ public sealed class RecognitionViewModelSupervisorTests
     }
 
     [Fact]
+    public async Task MineruModeSubmitsTypedConfigWithoutLocalEngine()
+    {
+        var fakeInference = new FakeInferenceClient("remote result");
+        var inputs = new StubInputService();
+        var viewModel = new RecognitionViewModel(fakeInference, inputs);
+        viewModel.SetRecognitionMode(new RecognitionModeOption(
+            "mineru_document", "document", "MinerU", null,
+            "advanced_component", "ready", null, "mineru", [],
+            "unmanaged", false, false, false, false),
+            new MineruConfig(MineruTier.Basic));
+
+        await viewModel.RecognizeViaSupervisorAsync(
+            ct => inputs.PickFileAsync(ct), CancellationToken.None);
+
+        Assert.Equal("MinerU", fakeInference.LastRequest?.Pipeline.PipelineId);
+        Assert.Equal(JobKind.MineruParse, fakeInference.LastRequest?.Kind);
+        Assert.Equal(MineruTier.Basic, fakeInference.LastRequest?.Pipeline.Mineru?.Tier);
+        Assert.Null(fakeInference.LastRequest?.Pipeline.Engine);
+    }
+
+    [Fact]
     public async Task SupervisorPathLocalizesTypedError()
     {
         var fakeInference = new FakeInferenceClient(

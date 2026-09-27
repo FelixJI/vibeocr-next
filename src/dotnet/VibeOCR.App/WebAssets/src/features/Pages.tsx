@@ -295,6 +295,31 @@ function maintenanceState(value: unknown): MaintenanceState | undefined {
   return state as MaintenanceState;
 }
 
+interface MineruConnectionState {
+  readonly supported: boolean;
+  readonly mode: string;
+  readonly apiUrl: string;
+  readonly hasApiKey: boolean;
+}
+
+// MinerU 连接投影：宿主只回传模式/根地址/是否已配置 Key，永远不回传明文。
+function mineruConnection(value: unknown): MineruConnectionState | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return undefined;
+  const candidate = value as Partial<MineruConnectionState>;
+  return typeof candidate.supported === "boolean" &&
+    typeof candidate.mode === "string" &&
+    typeof candidate.apiUrl === "string" &&
+    typeof candidate.hasApiKey === "boolean"
+    ? {
+        supported: candidate.supported,
+        mode: candidate.mode,
+        apiUrl: candidate.apiUrl,
+        hasApiKey: candidate.hasApiKey,
+      }
+    : undefined;
+}
+
 function planComponents(value: unknown): readonly InstallPlanComponentState[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -708,6 +733,7 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
   const running = booleanValue(state.isRunning);
   const items = batchItems(state.items);
   const windowStart = Math.max(0, numberValue(state.windowStart));
+  const engines = recognitionEngines(state.engines);
   return (
     <Workspace
       eyebrow="QUEUE / 02"
@@ -756,6 +782,15 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
       }
     >
       <div className="collection-workspace">
+        <TaskEngineSelector
+          engines={engines}
+          taskEngine={stringValue(state.taskEngine)}
+          enabled={
+            viewState.capabilities.includes("recognition.engine") && !running
+          }
+          actions={actions}
+          scope="batch"
+        />
         <Panel label="QUEUE" title="文件队列">
           <div className="queue-summary">
             <span>{itemCount} 个文件</span>
@@ -1324,6 +1359,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
       ? maintenanceParts.join(" · ")
       : "尚未执行维护操作";
   const progressText = stringValue(state.progressText);
+  const mineru = mineruConnection(state.mineruConnection);
   return (
     <Workspace
       eyebrow="PREFERENCES / 05"
@@ -1421,6 +1457,19 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             {stringValue(state.statusMessage) ??
               statusLabel(state.statusCode, "运行环境状态已同步。")}
           </p>
+        </Panel>
+        <Panel
+          label="MINERU"
+          title="MinerU 连接"
+          className="settings-mineru-panel"
+        >
+          <MineruConnectionEditor
+            key={`${mineru?.mode ?? ""}|${mineru?.apiUrl ?? ""}`}
+            connection={mineru}
+            locked={busy}
+            hostBusy={booleanValue(state.isBusy)}
+            actions={actions}
+          />
         </Panel>
         <Panel
           label="DOWNLOADS"
@@ -1599,6 +1648,170 @@ function AcceleratorFeatures({
           当前推理设备没有需要额外勾选的组件；这不代表识别引擎已全部就绪。
         </p>
       )}
+    </>
+  );
+}
+
+function MineruConnectionEditor({
+  connection,
+  locked,
+  hostBusy,
+  actions,
+}: {
+  readonly connection: MineruConnectionState | undefined;
+  readonly locked: boolean;
+  readonly hostBusy: boolean;
+  readonly actions: AppActions;
+}) {
+  const remoteSupported = connection?.supported === true;
+  const loaded = connection !== undefined;
+  const [mode, setMode] = useState<"local" | "remote">(
+    connection?.mode === "remote" ? "remote" : "local",
+  );
+  const [apiUrl, setApiUrl] = useState(connection?.apiUrl ?? "");
+  const [apiKey, setApiKey] = useState("");
+  const [clearKey, setClearKey] = useState(false);
+  const remote = mode === "remote";
+  const hasStoredKey = connection?.hasApiKey === true;
+  const save = async () => {
+    if (!remote) {
+      await actions.run({ type: "settings.setMineruConnection", mode });
+      return;
+    }
+    // 三态：未编辑不携带 apiKey（保留），勾选清除发送空串，输入新值替换。
+    const keyArgument = clearKey ? "" : apiKey === "" ? null : apiKey;
+    const saved = await actions.run(
+      keyArgument === null
+        ? { type: "settings.setMineruConnection", mode, apiUrl }
+        : {
+            type: "settings.setMineruConnection",
+            mode,
+            apiUrl,
+            apiKey: keyArgument,
+          },
+    );
+    if (saved) {
+      setApiKey("");
+      setClearKey(false);
+    }
+  };
+  return (
+    <>
+      {loaded ? null : (
+        <p className="form-note">
+          MinerU 连接设置等待运行环境目录同步；可点击“重新检查状态”后配置。
+        </p>
+      )}
+      <div className="setting-row">
+        <label htmlFor="mineru-mode">MinerU 运行模式</label>
+        <Select
+          id="mineru-mode"
+          value={mode}
+          disabled={locked || !loaded}
+          onChange={(_, data) =>
+            setMode(data.value === "remote" ? "remote" : "local")
+          }
+        >
+          <option value="local">本地（随运行环境安装）</option>
+          <option value="remote" disabled={!remoteSupported}>
+            远程（自部署服务）
+          </option>
+        </Select>
+      </div>
+      {loaded && !remoteSupported ? (
+        <p className="form-note" role="note">
+          当前 Backend 未声明 ocr.mineru-remote-api.v1，远程模式不可用；请更新
+          Backend 后再配置远程连接。
+        </p>
+      ) : null}
+      {remote ? (
+        <>
+          <div className="setting-row">
+            <label htmlFor="mineru-api-url">服务根地址</label>
+            <Input
+              id="mineru-api-url"
+              placeholder="https://mineru4.example.com"
+              value={apiUrl}
+              onChange={(_, data) => setApiUrl(data.value)}
+            />
+          </div>
+          <div className="setting-row">
+            <label htmlFor="mineru-api-key">API Key（可选）</label>
+            <Input
+              id="mineru-api-key"
+              type="password"
+              autoComplete="off"
+              placeholder={
+                hasStoredKey
+                  ? "输入新 Key 替换；留空保存保留已配置的 Key"
+                  : "输入后随保存配置；可留空"
+              }
+              disabled={clearKey}
+              value={apiKey}
+              onChange={(_, data) => setApiKey(data.value)}
+            />
+          </div>
+          {hasStoredKey ? (
+            <div className="setting-row">
+              <Checkbox
+                label="保存时清除已保存的 API Key"
+                checked={clearKey}
+                disabled={locked || !loaded}
+                onChange={(_, data) => setClearKey(data.checked === true)}
+              />
+            </div>
+          ) : null}
+          <p className="form-note">
+            {hasStoredKey
+              ? "Backend 已保存 API Key；留空保存会保留它，勾选上方清除项后保存可移除。"
+              : "Backend 未保存 API Key。"}
+          </p>
+        </>
+      ) : null}
+      <div className="setting-row">
+        <Button
+          disabled={
+            locked ||
+            !loaded ||
+            (remote && (!remoteSupported || apiUrl.trim().length === 0))
+          }
+          onClick={() => void save()}
+          icon={<Save aria-hidden="true" size={16} />}
+        >
+          保存 MinerU 配置
+        </Button>
+      </div>
+      {remote ? (
+        <div className="setting-row">
+          <Button
+            appearance="secondary"
+            disabled={
+              locked ||
+              hostBusy ||
+              !remoteSupported ||
+              apiUrl.trim().length === 0
+            }
+            onClick={() =>
+              void actions.run({ type: "settings.prepareMineruConnection" })
+            }
+            icon={<RefreshCw aria-hidden="true" size={16} />}
+          >
+            验证并准备远程服务
+          </Button>
+        </div>
+      ) : null}
+      <p className="form-note">
+        远程模式由 Backend 将解析请求转发到自部署的 MinerU 4 服务，不要求本地
+        MinerU 组件、模型或
+        GPU；保存只写入配置，不验证服务连通性，实际效果以识别任务结果为准。
+      </p>
+      <p className="form-note">
+        “验证并准备远程服务”由 Backend
+        首次调用远程服务完成准备并刷新可用性；不宣称未验证的连接可解析。
+      </p>
+      <p className="form-note">
+        本地模式下的模型预热、驻留 TTL 与释放只作用于本地模型，不控制远程服务。
+      </p>
     </>
   );
 }
@@ -1867,11 +2080,13 @@ function TaskEngineSelector({
   taskEngine,
   enabled,
   actions,
+  scope = "recognition",
 }: {
   readonly engines: readonly RecognitionEngineState[];
   readonly taskEngine: string | undefined;
   readonly enabled: boolean;
   readonly actions: AppActions;
+  readonly scope?: "recognition" | "batch";
 }) {
   if (engines.length === 0) {
     return null;
@@ -1881,16 +2096,16 @@ function TaskEngineSelector({
     engines.find((engine) => engine.selected);
   return (
     <div className="setting-row">
-      <label htmlFor="task-engine">本次识别模式</label>
+      <label htmlFor={`${scope}-task-engine`}>本次识别模式</label>
       <Select
-        id="task-engine"
+        id={`${scope}-task-engine`}
         value={taskEngine ?? ""}
         disabled={!enabled}
         onChange={(_, data) =>
           data.value === ""
-            ? actions.run({ type: "recognition.setTaskEngine" })
+            ? actions.run({ type: `${scope}.setTaskEngine` })
             : actions.run({
-                type: "recognition.setTaskEngine",
+                type: `${scope}.setTaskEngine`,
                 engine: String(data.value),
               })
         }

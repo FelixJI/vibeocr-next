@@ -455,6 +455,7 @@ input {
 }
 .settings-app-panel,
 .settings-runtime-panel,
+.settings-mineru-panel,
 .settings-download-panel {
   grid-column: 1 / -1;
 }

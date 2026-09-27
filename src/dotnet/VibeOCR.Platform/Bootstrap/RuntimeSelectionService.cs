@@ -74,10 +74,20 @@ public sealed class RuntimeSelectionService
     public const string RecognitionModesCapability = RecognitionModeCatalog.Capability;
     public const string DownloadSourceCapability = "runtime.download-sources.v1";
     public const string ComponentSelectionCapability = "runtime.component-selection.v1";
+    /// <summary>
+    /// 远程 MinerU API 能力，直接引用 Protocol SDK 常量（Protocol 2.9.0
+    /// 新增）；只有声明该能力的 Backend 才接受 extra.mineru_connection
+    /// 的远程写入，旧 Backend 明确失败。
+    /// </summary>
+    public const string MineruRemoteApiCapability =
+        VibeOCR.Runtime.Contracts.Generated.RuntimeProtocol.OCR_MINERU_REMOTE_API_V1;
+    public const string MineruConfigCapability =
+        VibeOCR.Runtime.Contracts.Generated.RuntimeProtocol.OCR_MINERU_CONFIG_V1;
 
     private readonly Wire.OcrEngineCatalog? _engineCatalog;
     private readonly Wire.DownloadSourceCatalog? _sourceCatalog;
     private readonly Wire.ComponentVariantCatalog? _variantCatalog;
+    private readonly Wire.MineruConfigCatalog? _mineruConfigCatalog;
     private readonly Dictionary<string, Wire.OcrEngineDescriptor> _engineById;
     private readonly Dictionary<string, Wire.DownloadSourceDescriptor> _sourcesById;
     private readonly Dictionary<(string FeatureId, string Accelerator), string>
@@ -92,6 +102,7 @@ public sealed class RuntimeSelectionService
         Wire.RecognitionModeCatalog? recognitionModeCatalog = null;
         Wire.DownloadSourceCatalog? sourceCatalog = null;
         Wire.ComponentVariantCatalog? variantCatalog = null;
+        Wire.MineruConfigCatalog? mineruConfigCatalog = null;
         foreach (Wire.CapabilityDescriptor descriptor in health.CapabilityDescriptors ?? [])
         {
             if (descriptor.OcrEngineCatalog is not null)
@@ -121,6 +132,11 @@ public sealed class RuntimeSelectionService
                 variantCatalog = SingleCatalog(
                     variantCatalog, descriptor.ComponentVariantCatalog, "component_variant_catalog");
             }
+            if (descriptor.MineruConfigCatalog is not null)
+            {
+                mineruConfigCatalog = SingleCatalog(
+                    mineruConfigCatalog, descriptor.MineruConfigCatalog, "mineru_config_catalog");
+            }
         }
 
         _engineCatalog = engineCatalog;
@@ -138,6 +154,7 @@ public sealed class RuntimeSelectionService
             : RecognitionModeCatalog.FromWire(recognitionModeCatalog);
         _sourceCatalog = sourceCatalog;
         _variantCatalog = variantCatalog;
+        _mineruConfigCatalog = mineruConfigCatalog;
 
         _engineById = [];
         foreach (Wire.OcrEngineDescriptor engine in engineCatalog?.Engines ?? [])
@@ -199,6 +216,43 @@ public sealed class RuntimeSelectionService
     public bool SupportsRecognitionModes => _recognitionModes is not null;
     public bool SupportsDownloadSources => _sourceCatalog is not null;
     public bool SupportsComponentSelection => _variantCatalog is not null;
+
+    /// <summary>
+    /// Backend 是否声明远程 MinerU API（ocr.mineru-remote-api.v1）。
+    /// </summary>
+    public bool SupportsMineruRemoteApi => Health.Capabilities.Contains(
+        MineruRemoteApiCapability,
+        StringComparer.Ordinal);
+
+    /// <summary>
+    /// Backend 是否声明类型化 MinerU 4 配置（ocr.mineru-config.v1）。只有声明
+    /// 该能力的 Backend 才接受 pipeline.mineru 块。
+    /// </summary>
+    public bool SupportsMineruConfig => _mineruConfigCatalog is not null;
+
+    /// <summary>
+    /// mineru_document 任务的类型化配置：tier 取目录声明的默认 tier，其余
+    /// 字段用 auto/all/ch 生效值；不发送任何遗留 engine 选项。非
+    /// mineru_document 或未声明 ocr.mineru-config.v1 时返回 null（完全省略
+    /// mineru 块，保持遗留 payload 形态）。
+    /// </summary>
+    public MineruConfig? MineruConfigFor(string? modeId)
+    {
+        if (_mineruConfigCatalog is null ||
+            !string.Equals(modeId, "mineru_document", StringComparison.Ordinal))
+        {
+            return null;
+        }
+        return new MineruConfig(ToRequestTier(_mineruConfigCatalog.DefaultTier));
+    }
+
+    private static MineruTier ToRequestTier(Wire.MineruTierId tier) => tier switch
+    {
+        Wire.MineruTierId.Flash => MineruTier.Flash,
+        Wire.MineruTierId.Standard => MineruTier.Standard,
+        Wire.MineruTierId.Advanced => MineruTier.Advanced,
+        _ => MineruTier.Basic,
+    };
 
     /// <summary>Catalog engines in wire order; empty when the capability is absent.</summary>
     public IReadOnlyList<RuntimeEngineOption> EngineOptions

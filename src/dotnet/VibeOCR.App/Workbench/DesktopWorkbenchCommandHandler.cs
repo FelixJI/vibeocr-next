@@ -76,6 +76,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private RecognitionViewModel? recognition;
   private ResultActions? resultActions;
   private BatchViewModel? batch;
+  private string? batchTaskEngine;
   private QrCodeViewModel? qrCode;
   private PdfViewModel? pdf;
   private SettingsViewModel? settings;
@@ -217,6 +218,7 @@ public sealed class DesktopWorkbenchCommandHandler :
         MoveBatchItemCommand move => MoveBatchItem(move),
         RemoveBatchItemCommand remove => RemoveBatchItem(remove),
         SetBatchWindowCommand window => SetBatchWindow(window),
+        SetBatchTaskEngineCommand taskEngine => SetBatchTaskEngine(taskEngine),
         OpenPdfCommand => await OpenPdfAsync(cancellationToken),
         OpenDroppedPdfCommand dropped => await OpenDroppedPdfAsync(
           dropped,
@@ -268,6 +270,11 @@ public sealed class DesktopWorkbenchCommandHandler :
           cancellationToken),
         SetAcceleratorCommand accelerator => SetAccelerator(accelerator),
         SetRuntimeFeatureCommand feature => SetFeature(feature),
+        SetMineruConnectionCommand mineru => await SetMineruConnectionAsync(
+          mineru,
+          cancellationToken),
+        PrepareMineruConnectionCommand => await PrepareMineruConnectionAsync(
+          cancellationToken),
         SetTaskEngineCommand taskEngine => SetTaskEngine(taskEngine),
         InstallRuntimeCommand => await InstallRuntimeAsync(cancellationToken),
         ConfirmRuntimeInstallCommand confirm => StartRuntimeInstall(confirm.PlanId, cancellationToken),
@@ -592,6 +599,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     CancellationToken cancellationToken)
   {
     batch ??= batchFactory();
+    await EnsureSelectionLoadedAsync(cancellationToken);
+    SynchronizeBatchMode(requireUsable: true);
     await batch.StartAsync(cancellationToken);
     return BatchState(batch);
   }
@@ -677,6 +686,37 @@ public sealed class DesktopWorkbenchCommandHandler :
     batch ??= batchFactory();
     batchWindowStart = ClampWindowStart(command.Start, batch.Items.Count, 40);
     return BatchState(batch);
+  }
+
+  private BatchWorkbenchState SetBatchTaskEngine(SetBatchTaskEngineCommand command)
+  {
+    batch ??= batchFactory();
+    if (batch.IsRunning) throw new InvalidOperationException("A running batch cannot change recognition mode.");
+    RuntimeSelectionService? selection = settings?.RecognitionSelection?.Catalog;
+    if (command.Engine is not null)
+    {
+      if (selection?.SupportsRecognitionModes is not true)
+        throw new RuntimeSelectionException(RuntimeSelectionErrorKind.CapabilityMissing,
+          "The runtime does not provide recognition modes.");
+      selection.FindRecognitionMode(command.Engine);
+    }
+    batchTaskEngine = command.Engine;
+    SynchronizeBatchMode();
+    return BatchState(batch);
+  }
+
+  private void SynchronizeBatchMode(bool requireUsable = false)
+  {
+    RuntimeSelectionService? selection = settings?.RecognitionSelection?.Catalog;
+    if (batch is null || selection?.SupportsRecognitionModes is not true)
+    {
+      batch?.SetRecognitionMode(null);
+      return;
+    }
+    RecognitionModeOption? mode = batchTaskEngine is null ? null : requireUsable
+      ? selection.SelectRecognitionMode(batchTaskEngine)
+      : selection.FindRecognitionMode(batchTaskEngine);
+    batch.SetRecognitionMode(mode, selection.MineruConfigFor(mode?.Id));
   }
 
   private async Task<PdfWorkbenchState> OpenPdfAsync(CancellationToken cancellationToken)
@@ -1048,6 +1088,27 @@ public sealed class DesktopWorkbenchCommandHandler :
     return SettingsState(settings);
   }
 
+  private async Task<SettingsWorkbenchState> SetMineruConnectionAsync(
+    SetMineruConnectionCommand command,
+    CancellationToken cancellationToken)
+  {
+    settings ??= CreateSettings();
+    await settings.SetMineruConnectionAsync(
+      command.Mode,
+      command.ApiUrl,
+      command.ApiKey,
+      cancellationToken);
+    return SettingsState(settings);
+  }
+
+  private async Task<SettingsWorkbenchState> PrepareMineruConnectionAsync(
+    CancellationToken cancellationToken)
+  {
+    settings ??= CreateSettings();
+    await settings.PrepareMineruRemoteAsync(cancellationToken);
+    return SettingsState(settings);
+  }
+
   private RecognitionWorkbenchState SetTaskEngine(SetTaskEngineCommand command)
   {
     recognition ??= recognitionFactory();
@@ -1080,7 +1141,9 @@ public sealed class DesktopWorkbenchCommandHandler :
       : requireUsable
         ? selection.SelectRecognitionMode(id)
         : selection.FindRecognitionMode(id);
-    recognition.SetRecognitionMode(Resolve(recognition.TaskEngine));
+    RecognitionModeOption? mode = Resolve(recognition.TaskEngine);
+    // mineru_document 任务随目录默认 tier 携带类型化 MinerU 4 配置。
+    recognition.SetRecognitionMode(mode, selection.MineruConfigFor(mode?.Id));
   }
 
   /// <summary>
@@ -1283,6 +1346,7 @@ public sealed class DesktopWorkbenchCommandHandler :
 
   private BatchWorkbenchState BatchState(BatchViewModel viewModel)
   {
+    SynchronizeBatchMode();
     batchWindowStart = ClampWindowStart(batchWindowStart, viewModel.Items.Count, 40);
     return new BatchWorkbenchState(
     viewModel.IsRunning,
@@ -1298,7 +1362,13 @@ public sealed class DesktopWorkbenchCommandHandler :
         $"batch.item.{item.State.ToString().ToLowerInvariant()}",
         item.Result is null ? null : Truncate(item.Result.Text, 120)))
       .ToArray(),
-    batchWindowStart);
+    batchWindowStart,
+    RecognitionEngines()?.Select(choice => choice with
+    {
+      Selected = choice.Engine == batchTaskEngine,
+      IsTaskOverride = choice.Engine == batchTaskEngine,
+    }).ToArray(),
+    batchTaskEngine);
   }
 
   private PdfWorkbenchState PdfState(PdfViewModel viewModel)
@@ -1433,7 +1503,14 @@ public sealed class DesktopWorkbenchCommandHandler :
     ProgressDetail: viewModel.RuntimeStatus.ProgressDetail,
     ProgressPercent: viewModel.RuntimeStatus.IsProgressIndeterminate ? null : viewModel.RuntimeStatus.ProgressValue,
     CanPreviewInstall: viewModel.Maintenance.SupportsInstallPlan,
-    InstallPlan: viewModel.Maintenance.Plan);
+    InstallPlan: viewModel.Maintenance.Plan,
+    MineruConnection: viewModel.MineruConnection is { } connection
+      ? new SettingsMineruConnectionState(
+        connection.Supported,
+        connection.Mode,
+        connection.ApiUrl,
+        connection.HasApiKey)
+      : null);
 
   private UpdateWorkbenchState UpdateState() => new(
     update.Value.IsBusy,
