@@ -119,7 +119,7 @@ public sealed class RuntimeMaintenanceCoordinator
             }
             RuntimeMaintenanceObserveEnvelope page = await _installer().ObserveAsync(operationId, 0,
                 cancellationToken: cancellationToken);
-            ApplyRecoveredSnapshot(page.Snapshot);
+            ApplyRecoveredSnapshot(page);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or RuntimeInstallerException)
         {
@@ -129,8 +129,9 @@ public sealed class RuntimeMaintenanceCoordinator
         }
     }
 
-    private void ApplyRecoveredSnapshot(Host.RuntimeMaintenanceSnapshot snapshot)
+    private void ApplyRecoveredSnapshot(RuntimeMaintenanceObserveEnvelope page)
     {
+        Host.RuntimeMaintenanceSnapshot snapshot = page.Snapshot;
         ApplyEvent(new Host.RuntimeMaintenanceEvent
         {
             ProtocolVersion = 2, EventVersion = 1, EventType = Host.RuntimeMaintenanceEventType.Snapshot,
@@ -142,9 +143,32 @@ public sealed class RuntimeMaintenanceCoordinator
         bool failed = snapshot.OperationState is Host.RuntimeOperationState.Failed;
         SetState(_state with { IsRunning = running, StatusCode = snapshot.OperationState.ToString().ToLowerInvariant(),
             CanCancel = false, CanRetry = retryable,
-            FailureReason = failed ? _state.FailureReason : "",
+            FailureReason = failed ? RecoveredFailureReason(page) : "",
             FailureCode = failed ? _state.FailureCode : "" });
         if (!running) _runtimeStatus.CompleteMaintenance(_state.StatusCode);
+    }
+
+    /// <summary>
+    /// Prefer an already persisted explanation; otherwise reuse the failure
+    /// event's authoritative reason_code mapping and fall back to the generic
+    /// guidance without inventing a cause or Backend code.
+    /// </summary>
+    private string RecoveredFailureReason(RuntimeMaintenanceObserveEnvelope page)
+    {
+        if (_state.FailureReason.Length > 0) return _state.FailureReason;
+        for (int index = page.Events.Length - 1; index >= 0; index--)
+        {
+            Host.RuntimeMaintenanceEvent update = page.Events[index];
+            if (update.Snapshot.OperationState != Host.RuntimeOperationState.Failed ||
+                update.MessageArgs is not { } arguments ||
+                !arguments.TryGetValue("reason_code", out JsonElement value) ||
+                value.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+            return FailureReason(value.GetString());
+        }
+        return FailureReason((string?)null);
     }
 
     public RuntimeMaintenanceState State => _state;
@@ -252,7 +276,9 @@ public sealed class RuntimeMaintenanceCoordinator
                 CanCancel: false,
                 CanRetry: false, Accelerator: _state.Accelerator));
         }
-        catch (OperationCanceledException) when (linked.IsCancellationRequested)
+        catch (Exception error) when (
+            error is OperationCanceledException && linked.IsCancellationRequested ||
+            error is RuntimeInstallerException { CanonicalCode: "CANCELLED" })
         {
             SetState(new RuntimeMaintenanceState(
                 false,
@@ -377,14 +403,16 @@ public sealed class RuntimeMaintenanceCoordinator
     {
         string? reason = error.Detail is not null && error.Detail.TryGetValue("reason_code", out JsonElement value)
             && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
-        return reason switch
-        {
-            "disk_full" => "磁盘空间不足，请释放空间后重新预览。",
-            "permission_denied" => "无法写入运行环境目录，请检查目录权限。",
-            "network_error" or "download_failed" => "下载失败，请检查网络或调整下载来源后重新预览。",
-            _ => "安装未成功完成。请重新检查运行环境、调整下载来源或导出诊断，再预览重试。",
-        };
+        return FailureReason(reason);
     }
+
+    private static string FailureReason(string? reasonCode) => reasonCode switch
+    {
+        "disk_full" => "磁盘空间不足，请释放空间后重新预览。",
+        "permission_denied" => "无法写入运行环境目录，请检查目录权限。",
+        "network_error" or "download_failed" => "下载失败，请检查网络或调整下载来源后重新预览。",
+        _ => "安装未成功完成。请重新检查运行环境、调整下载来源或导出诊断，再预览重试。",
+    };
 
     private void ApplySources(RuntimeMaintenanceSourceSnapshot? sources)
     {

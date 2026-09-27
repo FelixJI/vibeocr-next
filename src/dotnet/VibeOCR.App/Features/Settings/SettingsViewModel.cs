@@ -430,9 +430,11 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         {
             // Only envelope-granted retryable failures prompt a direct retry.
             Status = error is RuntimeInstallerException installerError
-                ? installerError.Retryable
-                    ? "安装失败，可重试、调整下载来源或导出诊断。"
-                    : "安装失败，请重新预览安装范围或导出诊断。"
+                ? string.Equals(installerError.CanonicalCode, "CANCELLED", StringComparison.Ordinal)
+                    ? "运行环境维护已取消"
+                    : installerError.Retryable
+                        ? "安装失败，可重试、调整下载来源或导出诊断。"
+                        : "安装失败，请重新预览安装范围或导出诊断。"
                 : error.Message;
         }
         finally
