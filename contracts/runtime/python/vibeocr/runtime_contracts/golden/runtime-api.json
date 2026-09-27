@@ -1,0 +1,339 @@
+{
+  "bootstrap_ready": {
+    "ready": true,
+    "pid": 4321,
+    "port": 54321,
+    "instance_id": "sup-golden",
+    "protocol_version": 2,
+    "schema_version": 2,
+    "ready_version": 1,
+    "capabilities": [
+      "ocr.recognition.v2",
+      "pdf.edit.v2"
+    ]
+  },
+  "health": {
+    "schema_version": 2,
+    "instance_id": "sup-golden",
+    "protocol_version": 2,
+    "ready": true,
+    "draining": false,
+    "capabilities": [
+      "ocr.recognition.v2",
+      "pdf.edit.v2",
+      "ocr.engine-selection.v1",
+      "ocr.recognition-modes.v1",
+      "runtime.download-sources.v1",
+      "runtime.component-selection.v1",
+      "ocr.mineru-config.v1",
+      "runtime.install-plan.v1"
+    ],
+    "capability_descriptors": [
+      {
+        "name": "ocr.recognition.v2",
+        "lifecycle": "active",
+        "introduced_in": "2.0.0",
+        "deprecated_in": null,
+        "sunset_at": null,
+        "replacement": null
+      },
+      {
+        "name": "ocr.engine-selection.v1",
+        "lifecycle": "active",
+        "introduced_in": "2.6.0",
+        "deprecated_in": null,
+        "sunset_at": null,
+        "replacement": null,
+        "ocr_engine_catalog": {
+          "engines": [
+            {
+              "id": "rapidocr",
+              "availability": "ready",
+              "included_in_base": true,
+              "reason_code": null,
+              "required_component": null
+            },
+            {
+              "id": "windows",
+              "availability": "preparation_required",
+              "included_in_base": false,
+              "reason_code": "runtime_component_missing",
+              "required_component": "winrt-ocr"
+            },
+            {
+              "id": "paddleocr",
+              "availability": "unavailable",
+              "included_in_base": false,
+              "reason_code": "unsupported_platform",
+              "required_component": null
+            }
+          ]
+        }
+      },
+      {
+        "name": "ocr.recognition-modes.v1",
+        "lifecycle": "active",
+        "introduced_in": "2.8.0",
+        "deprecated_in": null,
+        "sunset_at": null,
+        "replacement": null,
+        "recognition_mode_catalog": {
+          "modes": [
+            {
+              "id": "rapid_text",
+              "family": "text",
+              "pipeline_id": "OCR",
+              "engine": "rapidocr",
+              "provisioning": "base_runtime",
+              "availability": "ready",
+              "reason_code": null,
+              "required_component": null,
+              "supported_options": [],
+              "lifecycle": {"kind": "unmanaged", "supports_preload": false, "supports_ttl": false, "supports_pinning": false, "supports_release": false}
+            },
+            {
+              "id": "windows_text",
+              "family": "text",
+              "pipeline_id": "OCR",
+              "engine": "windows",
+              "provisioning": "operating_system",
+              "availability": "ready",
+              "reason_code": null,
+              "required_component": null,
+              "supported_options": [],
+              "lifecycle": {"kind": "unmanaged", "supports_preload": false, "supports_ttl": false, "supports_pinning": false, "supports_release": false}
+            },
+            {
+              "id": "paddle_text",
+              "family": "text",
+              "pipeline_id": "OCR",
+              "engine": "paddleocr",
+              "provisioning": "advanced_component",
+              "availability": "preparation_required",
+              "reason_code": "runtime_component_missing",
+              "required_component": "paddleocr-cpu",
+              "supported_options": ["use_doc_orientation_classify", "use_doc_unwarping", "use_textline_orientation"],
+              "lifecycle": {"kind": "model_residency", "supports_preload": true, "supports_ttl": true, "supports_pinning": true, "supports_release": true}
+            },
+            {
+              "id": "paddle_structure",
+              "family": "document",
+              "pipeline_id": "PP-StructureV3",
+              "engine": null,
+              "provisioning": "advanced_component",
+              "availability": "preparation_required",
+              "reason_code": "runtime_component_missing",
+              "required_component": "paddleocr-cpu",
+              "supported_options": ["use_doc_orientation_classify", "use_doc_unwarping", "use_textline_orientation", "use_table_recognition", "use_formula_recognition", "use_seal_recognition", "use_chart_recognition"],
+              "lifecycle": {"kind": "model_residency", "supports_preload": true, "supports_ttl": true, "supports_pinning": true, "supports_release": true}
+            },
+            {
+              "id": "paddle_document_vl",
+              "family": "document",
+              "pipeline_id": "PaddleOCR-VL",
+              "engine": null,
+              "provisioning": "advanced_component",
+              "availability": "preparation_required",
+              "reason_code": "runtime_component_missing",
+              "required_component": "paddleocr-cpu",
+              "supported_options": ["use_doc_orientation_classify", "use_doc_unwarping", "vl_use_layout_detection", "vl_use_chart_recognition", "vl_use_seal_recognition", "use_ocr_for_image_block"],
+              "lifecycle": {"kind": "model_residency", "supports_preload": true, "supports_ttl": true, "supports_pinning": true, "supports_release": true}
+            },
+            {
+              "id": "mineru_document",
+              "family": "document",
+              "pipeline_id": "MinerU",
+              "engine": null,
+              "provisioning": "advanced_component",
+              "availability": "preparation_required",
+              "reason_code": "runtime_component_missing",
+              "required_component": "mineru-cpu",
+              "supported_options": ["parse_method", "backend", "effort", "enable_formula", "enable_table", "lang_list", "start_page_id", "end_page_id"],
+              "lifecycle": {"kind": "process_keep_alive", "supports_preload": true, "supports_ttl": true, "supports_pinning": false, "supports_release": true}
+            },
+            {
+              "id": "paddle_table",
+              "family": "specialized",
+              "pipeline_id": "TABLE_RECOGNITION",
+              "engine": null,
+              "provisioning": "advanced_component",
+              "availability": "preparation_required",
+              "reason_code": "runtime_component_missing",
+              "required_component": "paddleocr-cpu",
+              "supported_options": ["use_doc_orientation_classify", "use_doc_unwarping", "use_table_orientation_classify", "use_ocr_results_with_table_cells"],
+              "lifecycle": {"kind": "model_residency", "supports_preload": true, "supports_ttl": true, "supports_pinning": true, "supports_release": true}
+            },
+            {
+              "id": "paddle_formula",
+              "family": "specialized",
+              "pipeline_id": "FORMULA_RECOGNITION",
+              "engine": null,
+              "provisioning": "advanced_component",
+              "availability": "preparation_required",
+              "reason_code": "runtime_component_missing",
+              "required_component": "paddleocr-cpu",
+              "supported_options": ["use_doc_orientation_classify", "use_doc_unwarping", "formula_recognition_batch_size", "formula_recognition_model_name", "formula_recognition_model_dir"],
+              "lifecycle": {"kind": "model_residency", "supports_preload": true, "supports_ttl": true, "supports_pinning": true, "supports_release": true}
+            }
+          ]
+        }
+      },
+      {
+        "name": "runtime.download-sources.v1",
+        "lifecycle": "active",
+        "introduced_in": "2.7.0",
+        "deprecated_in": null,
+        "sunset_at": null,
+        "replacement": null,
+        "download_source_catalog": {
+          "sources": [
+            {
+              "kind": "package_index",
+              "id": "pypi-official",
+              "endpoint": "https://pypi.org/simple"
+            },
+            {
+              "kind": "package_index",
+              "id": "pypi-tuna",
+              "endpoint": "https://pypi.tuna.tsinghua.edu.cn/simple"
+            },
+            {
+              "kind": "model_registry",
+              "id": "huggingface",
+              "endpoint": "https://huggingface.co"
+            },
+            {
+              "kind": "model_registry",
+              "id": "modelscope",
+              "endpoint": "https://www.modelscope.cn"
+            }
+          ]
+        }
+      },
+      {
+        "name": "runtime.component-selection.v1",
+        "lifecycle": "active",
+        "introduced_in": "2.7.0",
+        "deprecated_in": null,
+        "sunset_at": null,
+        "replacement": null,
+        "component_variant_catalog": {
+          "variants": [
+            {
+              "feature_id": "paddleocr",
+              "accelerator": "cpu",
+              "component_id": "paddleocr-cpu"
+            },
+            {
+              "feature_id": "paddleocr",
+              "accelerator": "nvidia_cuda",
+              "component_id": "paddleocr-cuda"
+            },
+            {
+              "feature_id": "mineru",
+              "accelerator": "cpu",
+              "component_id": "mineru-cpu"
+            },
+            {
+              "feature_id": "mineru",
+              "accelerator": "nvidia_cuda",
+              "component_id": "mineru-cuda"
+            }
+          ]
+        }
+      },
+      {
+        "name": "ocr.mineru-config.v1",
+        "lifecycle": "active",
+        "introduced_in": "2.8.1",
+        "deprecated_in": null,
+        "sunset_at": null,
+        "replacement": null,
+        "mineru_config_catalog": {
+          "default_tier": "basic",
+          "tiers": [
+            {
+              "id": "flash",
+              "availability": "ready",
+              "reason_code": null
+            },
+            {
+              "id": "basic",
+              "availability": "ready",
+              "reason_code": null
+            },
+            {
+              "id": "standard",
+              "availability": "preparation_required",
+              "reason_code": "MINERU_TIER_PREPARATION_REQUIRED"
+            },
+            {
+              "id": "advanced",
+              "availability": "unavailable",
+              "reason_code": "MINERU_TIER_UNAVAILABLE"
+            }
+          ],
+          "languages": [
+            "ch",
+            "en"
+          ]
+        }
+      }
+    ]
+  },
+  "multipart_manifest": {
+    "schema_version": 2,
+    "request_id": "request-golden",
+    "kind": "recognition",
+    "priority": "interactive",
+    "pipeline": {
+      "pipeline_id": "OCR",
+      "options_version": 1,
+      "options": {}
+    },
+    "items": [
+      {
+        "client_item_key": "item-0",
+        "ordinal": 0,
+        "display_name": "page.png",
+        "source": {
+          "type": "upload.v1",
+          "attachment": "attachment-0"
+        }
+      }
+    ],
+    "parameters": {}
+  },
+  "ndjson_progress_lines": [
+    {
+      "phase": "load",
+      "current": 1,
+      "total": 2,
+      "message": "loaded page 1",
+      "page_index": 0,
+      "page_payload": null
+    },
+    {
+      "phase": "load",
+      "current": 2,
+      "total": 2,
+      "message": "loaded page 2",
+      "page_index": 1,
+      "page_payload": null
+    }
+  ],
+  "png": {
+    "media_type": "image/png",
+    "content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+  },
+  "unauthorized_error": {
+    "schema_version": 2,
+    "instance_id": "sup-golden",
+    "code": "UNAUTHORIZED",
+    "message": "Missing or invalid session token.",
+    "category": "auth",
+    "retryable": false,
+    "detail": {},
+    "job_id": null
+  }
+}

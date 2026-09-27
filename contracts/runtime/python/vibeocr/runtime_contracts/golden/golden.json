@@ -1,0 +1,528 @@
+{
+  "version": 2,
+  "description": "Golden v2 protocol payloads frozen for Python ↔ C# cross-implementation agreement. Any change here MUST be reviewed: it changes the wire contract.",
+  "job_ref": {
+    "job_id": "11111111-1111-4111-8111-111111111111",
+    "schema_version": 2,
+    "instance_id": "sup-aabbccddee",
+    "state": "accepted",
+    "items": []
+  },
+  "job_snapshot_running": {
+    "job_id": "22222222-2222-4222-8222-222222222222",
+    "kind": "recognition",
+    "priority": "interactive",
+    "state": "running",
+    "schema_version": 2,
+    "instance_id": "sup-aabbccddee",
+    "created_at": "2026-07-24T10:00:00+00:00",
+    "started_at": "2026-07-24T10:00:01+00:00",
+    "finished_at": null,
+    "stage": "recognizing",
+    "progress_current": 1,
+    "progress_total": 3,
+    "items": [
+      {"item_id": "it-0", "display_name": "a.png", "state": "succeeded", "attempt": 0, "error": null, "client_item_key": null, "ordinal": 0, "source_item_id": null},
+      {"item_id": "it-1", "display_name": "b.png", "state": "running", "attempt": 0, "error": null, "client_item_key": null, "ordinal": 1, "source_item_id": null},
+      {"item_id": "it-2", "display_name": "c.png", "state": "queued", "attempt": 0, "error": null, "client_item_key": null, "ordinal": 2, "source_item_id": null}
+    ],
+    "summary": {"succeeded": 1, "failed": 0, "cancelled": 0, "total": 3},
+    "cancel_requested_at": null,
+    "cancel_mode": null,
+    "degraded": false,
+    "event_sequence": 4,
+    "result_available": false,
+    "request_id": null,
+    "source_job_id": null,
+    "pipeline": null
+  },
+  "job_snapshot_completed_with_errors": {
+    "job_id": "33333333-3333-4333-8333-333333333333",
+    "kind": "recognition",
+    "priority": "background",
+    "state": "completed_with_errors",
+    "schema_version": 2,
+    "instance_id": "sup-aabbccddee",
+    "created_at": "2026-07-24T11:00:00+00:00",
+    "started_at": "2026-07-24T11:00:01+00:00",
+    "finished_at": "2026-07-24T11:00:09+00:00",
+    "stage": "done",
+    "progress_current": 2,
+    "progress_total": 2,
+    "items": [
+      {"item_id": "it-0", "display_name": "ok.png", "state": "succeeded", "attempt": 0, "error": null, "client_item_key": null, "ordinal": 0, "source_item_id": null},
+      {"item_id": "it-1", "display_name": "bad.png", "state": "failed", "attempt": 2, "error": "OOM during predict", "client_item_key": null, "ordinal": 1, "source_item_id": null}
+    ],
+    "summary": {"succeeded": 1, "failed": 1, "cancelled": 0, "total": 2},
+    "cancel_requested_at": null,
+    "cancel_mode": null,
+    "degraded": true,
+    "event_sequence": 9,
+    "result_available": true,
+    "request_id": null,
+    "source_job_id": null,
+    "pipeline": null
+  },
+  "job_snapshot_cancelled": {
+    "job_id": "44444444-4444-4444-8444-444444444444",
+    "kind": "pdf_ocr",
+    "priority": "interactive",
+    "state": "cancelled",
+    "schema_version": 2,
+    "instance_id": "sup-aabbccddee",
+    "created_at": "2026-07-24T12:00:00+00:00",
+    "started_at": "2026-07-24T12:00:01+00:00",
+    "finished_at": "2026-07-24T12:00:04+00:00",
+    "stage": "cancelled",
+    "progress_current": 1,
+    "progress_total": 5,
+    "items": [
+      {"item_id": "page-0", "display_name": "page 1", "state": "succeeded", "attempt": 0, "error": null, "client_item_key": null, "ordinal": 0, "source_item_id": null},
+      {"item_id": "page-1", "display_name": "page 2", "state": "cancelled", "attempt": 0, "error": null, "client_item_key": null, "ordinal": 1, "source_item_id": null}
+    ],
+    "summary": {"succeeded": 1, "failed": 0, "cancelled": 1, "total": 2},
+    "cancel_requested_at": "2026-07-24T12:00:03+00:00",
+    "cancel_mode": "cooperative",
+    "degraded": false,
+    "event_sequence": 6,
+    "result_available": true,
+    "request_id": null,
+    "source_job_id": null,
+    "pipeline": null
+  },
+  "error_validation": {
+    "schema_version": 2,
+    "instance_id": "sup-aabbccddee",
+    "code": "VALIDATION_ERROR",
+    "message": "The request was malformed or failed schema validation.",
+    "category": "validation",
+    "retryable": false,
+    "detail": {"field": "files"},
+    "job_id": null
+  },
+  "error_oom": {
+    "schema_version": 2,
+    "instance_id": "sup-aabbccddee",
+    "code": "OUT_OF_MEMORY",
+    "message": "A GPU/host out-of-memory condition occurred; recovery may shrink the batch.",
+    "category": "oom",
+    "retryable": true,
+    "detail": {"device": 0},
+    "job_id": "33333333-3333-4333-8333-333333333333"
+  },
+  "error_cancelled": {
+    "schema_version": 2,
+    "instance_id": "sup-aabbccddee",
+    "code": "CANCELLED",
+    "message": "The job or item was cancelled.",
+    "category": "cancelled",
+    "retryable": false,
+    "detail": {},
+    "job_id": "44444444-4444-4444-8444-444444444444"
+  },
+  "residency_status": {
+    "schema_version": 2,
+    "default_ttl_seconds": 300,
+    "entries": [
+      {
+        "pipeline": "OCR",
+        "kind": "soft_ttl",
+        "active_leases": 1,
+        "remaining_ttl_seconds": 240,
+        "estimated_vram_mb": 1200,
+        "eviction_reason": "none"
+      },
+      {
+        "pipeline": "MinerU",
+        "kind": "pinned",
+        "active_leases": 0,
+        "remaining_ttl_seconds": null,
+        "estimated_vram_mb": 800,
+        "eviction_reason": "none"
+      }
+    ],
+    "pipelines": [
+      {"name": "OCR", "ttl_seconds": null, "pinned": false},
+      {"name": "MinerU", "ttl_seconds": 600, "pinned": false}
+    ],
+    "vram_total_mb": 24576,
+    "vram_used_mb": 2000
+  },
+  "settings_snapshot": {
+    "schema_version": 2,
+    "residency": {
+      "default_ttl_seconds": 300,
+      "pipelines": [
+        {"name": "OCR", "ttl_seconds": null, "pinned": false},
+        {"name": "MinerU", "ttl_seconds": 600, "pinned": false}
+      ]
+    },
+    "extra": {}
+  },
+  "settings_snapshot_empty_selection": {
+    "schema_version": 2,
+    "residency": {
+      "default_ttl_seconds": 300,
+      "pipelines": []
+    },
+    "extra": {}
+  },
+  "pipeline_selection_engine": {
+    "pipeline_id": "OCR",
+    "options_version": 1,
+    "options": {"use_textline_orientation": true},
+    "engine": "windows"
+  },
+  "ocr_engine_catalog": {
+    "engines": [
+      {
+        "id": "rapidocr",
+        "availability": "ready",
+        "included_in_base": true,
+        "reason_code": null,
+        "required_component": null
+      },
+      {
+        "id": "windows",
+        "availability": "preparation_required",
+        "included_in_base": false,
+        "reason_code": "runtime_component_missing",
+        "required_component": "winrt-ocr"
+      },
+      {
+        "id": "paddleocr",
+        "availability": "unavailable",
+        "included_in_base": false,
+        "reason_code": "unsupported_platform",
+        "required_component": null
+      }
+    ]
+  },
+  "download_source_selection": [
+    "pypi-tuna"
+  ],
+  "download_source_catalog": {
+    "sources": [
+      {
+        "kind": "package_index",
+        "id": "pypi-official",
+        "endpoint": "https://pypi.org/simple"
+      },
+      {
+        "kind": "package_index",
+        "id": "pypi-tuna",
+        "endpoint": "https://pypi.tuna.tsinghua.edu.cn/simple"
+      },
+      {
+        "kind": "model_registry",
+        "id": "huggingface",
+        "endpoint": "https://huggingface.co"
+      },
+      {
+        "kind": "model_registry",
+        "id": "modelscope",
+        "endpoint": "https://www.modelscope.cn"
+      }
+    ]
+  },
+  "legacy_download_source_catalog": {
+    "sources": [
+      {
+        "kind": "model_registry",
+        "id": "legacy-models",
+        "endpoint": "https://models.example.invalid"
+      }
+    ]
+  },
+  "install_selection": [
+    "paddleocr-cpu",
+    "mineru-cpu"
+  ],
+  "component_variant_catalog": {
+    "variants": [
+      {
+        "feature_id": "paddleocr",
+        "accelerator": "cpu",
+        "component_id": "paddleocr-cpu"
+      },
+      {
+        "feature_id": "paddleocr",
+        "accelerator": "nvidia_cuda",
+        "component_id": "paddleocr-cuda"
+      },
+      {
+        "feature_id": "mineru",
+        "accelerator": "cpu",
+        "component_id": "mineru-cpu"
+      },
+      {
+        "feature_id": "mineru",
+        "accelerator": "nvidia_cuda",
+        "component_id": "mineru-cuda"
+      }
+    ]
+  },
+  "install_plan_request": {
+    "accelerator": "cpu",
+    "install_component_ids": [
+      "paddleocr-cpu",
+      "mineru-cpu"
+    ],
+    "download_source_ids": [
+      "pypi-tuna"
+    ],
+    "required_capabilities": [
+      "runtime.install-plan.v1"
+    ]
+  },
+  "install_plan": {
+    "plan_id": "plan-7f3a91c2e8d4",
+    "expires_at": "2026-09-19T12:34:56Z",
+    "accelerator": "cpu",
+    "profile_id": "portable-cpu",
+    "requested_component_ids": [
+      "paddleocr-cpu",
+      "mineru-cpu"
+    ],
+    "effective_component_ids": [
+      "paddleocr-cpu",
+      "mineru-cpu",
+      "shared-base-cpu"
+    ],
+    "requested_download_source_ids": [
+      "pypi-tuna"
+    ],
+    "effective_download_source_ids": [
+      "pypi-tuna"
+    ],
+    "source": {
+      "backend_version": "2.8.2",
+      "backend_source_sha": "0123456789abcdef0123456789abcdef01234567",
+      "runtime_manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "protocol_version": "2.8.2",
+      "protocol_manifest_sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    "components": [
+      {
+        "component_id": "paddleocr-cpu",
+        "action": "install",
+        "dependency_state": "satisfied",
+        "reason_codes": []
+      },
+      {
+        "component_id": "mineru-cpu",
+        "action": "install",
+        "dependency_state": "satisfied",
+        "reason_codes": []
+      },
+      {
+        "component_id": "shared-base-cpu",
+        "action": "retain",
+        "dependency_state": "satisfied",
+        "reason_codes": [
+          "dependency_closure"
+        ]
+      }
+    ],
+    "blockers": [],
+    "cost": {
+      "download_bytes": 157286400,
+      "additional_disk_bytes": 524288000,
+      "unknown_reason_codes": []
+    }
+  },
+  "install_plan_omitted_selection": {
+    "plan_id": "plan-1a2b3c4d5e6f",
+    "expires_at": "2026-09-19T12:34:56Z",
+    "accelerator": "cpu",
+    "profile_id": "portable-cpu",
+    "requested_component_ids": null,
+    "effective_component_ids": [
+      "paddleocr-cpu",
+      "shared-base-cpu"
+    ],
+    "requested_download_source_ids": null,
+    "effective_download_source_ids": [
+      "pypi-official"
+    ],
+    "source": {
+      "backend_version": "2.8.2",
+      "backend_source_sha": "0123456789abcdef0123456789abcdef01234567",
+      "runtime_manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "protocol_version": "2.8.2",
+      "protocol_manifest_sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    "components": [
+      {
+        "component_id": "paddleocr-cpu",
+        "action": "install",
+        "dependency_state": "pending",
+        "reason_codes": [
+          "backend_default_selection"
+        ]
+      },
+      {
+        "component_id": "shared-base-cpu",
+        "action": "retain",
+        "dependency_state": "satisfied",
+        "reason_codes": [
+          "dependency_closure"
+        ]
+      },
+      {
+        "component_id": "mineru-cpu",
+        "action": "remove",
+        "dependency_state": "satisfied",
+        "reason_codes": [
+          "not_in_selected_scope"
+        ]
+      }
+    ],
+    "blockers": [],
+    "cost": {
+      "download_bytes": 157286400,
+      "additional_disk_bytes": 524288000,
+      "unknown_reason_codes": []
+    }
+  },
+  "install_plan_gpu_empty_selection": {
+    "plan_id": "plan-9z8y7x6w5v4u",
+    "expires_at": "2026-09-19T12:34:56Z",
+    "accelerator": "nvidia_cuda",
+    "profile_id": "portable-cuda",
+    "requested_component_ids": [],
+    "effective_component_ids": [],
+    "requested_download_source_ids": null,
+    "effective_download_source_ids": [
+      "pypi-official"
+    ],
+    "source": {
+      "backend_version": "2.8.2",
+      "backend_source_sha": "0123456789abcdef0123456789abcdef01234567",
+      "runtime_manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "protocol_version": "2.8.2",
+      "protocol_manifest_sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    "components": [],
+    "blockers": [],
+    "cost": {
+      "download_bytes": 0,
+      "additional_disk_bytes": 0,
+      "unknown_reason_codes": []
+    }
+  },
+  "install_plan_blocked": {
+    "plan_id": "plan-4c5d6e7f8a9b",
+    "expires_at": "2026-09-19T12:34:56Z",
+    "accelerator": "cpu",
+    "profile_id": "portable-cpu",
+    "requested_component_ids": [
+      "mineru-cpu"
+    ],
+    "effective_component_ids": [
+      "paddleocr-cpu",
+      "mineru-cpu"
+    ],
+    "requested_download_source_ids": [
+      "pypi-tuna"
+    ],
+    "effective_download_source_ids": [
+      "pypi-tuna"
+    ],
+    "source": {
+      "backend_version": "2.8.2",
+      "backend_source_sha": "0123456789abcdef0123456789abcdef01234567",
+      "runtime_manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "protocol_version": "2.8.2",
+      "protocol_manifest_sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    "components": [
+      {
+        "component_id": "paddleocr-cpu",
+        "action": "replace",
+        "dependency_state": "satisfied",
+        "reason_codes": [
+          "version_mismatch"
+        ]
+      },
+      {
+        "component_id": "mineru-cpu",
+        "action": "install",
+        "dependency_state": "pending",
+        "reason_codes": []
+      }
+    ],
+    "blockers": [
+      {
+        "code": "insufficient_disk_space",
+        "component_id": "mineru-cpu",
+        "next_action": "free_space"
+      },
+      {
+        "code": "download_source_unreachable",
+        "next_action": "change_source"
+      }
+    ],
+    "cost": {
+      "download_bytes": null,
+      "additional_disk_bytes": 524288000,
+      "unknown_reason_codes": [
+        "model_registry_source_size_unknown"
+      ]
+    }
+  },
+  "error_install_plan_stale": {
+    "schema_version": 2,
+    "instance_id": "sup-aabbccddee",
+    "code": "RUNTIME_INSTALL_PLAN_STALE",
+    "message": "The install plan is expired, unknown, or its verified baseline changed; preview a new plan before confirming maintenance.",
+    "category": "conflict",
+    "retryable": false,
+    "detail": {"plan_id": "plan-4c5d6e7f8a9b"},
+    "job_id": null
+  }
+,
+  "pipeline_selection_mineru": {
+    "pipeline_id": "MinerU",
+    "options_version": 1,
+    "options": {},
+    "mineru": {
+      "tier": "basic",
+      "ocr_mode": "auto",
+      "page_range": "all",
+      "language": "ch"
+    }
+  },
+  "mineru_config_catalog": {
+    "default_tier": "basic",
+    "tiers": [
+      {
+        "id": "flash",
+        "availability": "ready",
+        "reason_code": null
+      },
+      {
+        "id": "basic",
+        "availability": "ready",
+        "reason_code": null
+      },
+      {
+        "id": "standard",
+        "availability": "preparation_required",
+        "reason_code": "MINERU_TIER_PREPARATION_REQUIRED"
+      },
+      {
+        "id": "advanced",
+        "availability": "unavailable",
+        "reason_code": "MINERU_TIER_UNAVAILABLE"
+      }
+    ],
+    "languages": [
+      "ch",
+      "en"
+    ]
+  },
+  "progress_bytes_large": {"unit": "bytes", "current": 3221225472, "total": 4294967296, "estimated_remaining_seconds": 12.5},
+  "progress_bytes_unknown": {"unit": "bytes", "current": 3221225472},
+  "progress_bytes_zero": {"unit": "bytes", "current": 0, "total": 0}
+}

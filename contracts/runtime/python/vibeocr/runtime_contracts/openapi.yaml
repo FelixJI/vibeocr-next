@@ -1,0 +1,5754 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "VibeOCR Local Runtime API",
+    "version": "2.9.0",
+    "description": "Authoritative Runtime API v2. The historical openapi.snapshot.json is non-authoritative."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:{port}",
+      "variables": {
+        "port": {
+          "default": "0"
+        }
+      }
+    }
+  ],
+  "security": [
+    {
+      "SessionToken": []
+    }
+  ],
+  "paths": {
+    "/v2/health": {
+      "get": {
+        "operationId": "getRuntimeHealth",
+        "responses": {
+          "200": {
+            "description": "Runtime health and versioned capabilities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": []
+      }
+    },
+    "/v2/jobs": {
+      "post": {
+        "operationId": "submitJob",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/JobMultipart"
+              },
+              "encoding": {
+                "manifest": {
+                  "contentType": "application/json"
+                }
+              },
+              "examples": {
+                "singleUpload": {
+                  "summary": "One OCR upload manifest; the attachment part is named attachment-0.",
+                  "value": {
+                    "manifest": {
+                      "schema_version": 2,
+                      "request_id": "request-golden",
+                      "kind": "recognition",
+                      "priority": "interactive",
+                      "pipeline": {
+                        "pipeline_id": "OCR",
+                        "options_version": 1,
+                        "options": {}
+                      },
+                      "items": [
+                        {
+                          "client_item_key": "item-0",
+                          "ordinal": 0,
+                          "display_name": "page.png",
+                          "source": {
+                            "type": "upload.v1",
+                            "attachment": "attachment-0"
+                          }
+                        }
+                      ],
+                      "parameters": {}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobRef"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "426": {
+            "$ref": "#/components/responses/Error"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/jobs/{job_id}/observe": {
+      "get": {
+        "operationId": "observeJob",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/JobId"
+          },
+          {
+            "name": "after_sequence",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Atomic job update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobUpdate"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/jobs/command": {
+      "post": {
+        "operationId": "commandJob",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JobCommand"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Command result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/runtime/status": {
+      "get": {
+        "operationId": "getRuntimeStatus",
+        "responses": {
+          "200": {
+            "description": "Runtime service, profile, component, and maintenance status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeStatusSnapshot"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/runtime/install-plan": {
+      "post": {
+        "operationId": "previewRuntimeInstallPlan",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuntimeInstallPlanRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Read-only install plan preview; nothing is installed, downloaded, or changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeInstallPlanResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "426": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/runtime/maintenance": {
+      "post": {
+        "operationId": "startRuntimeMaintenance",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuntimeMaintenanceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Idempotent Runtime maintenance receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeMaintenanceReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "426": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/runtime/maintenance/command": {
+      "post": {
+        "operationId": "commandRuntimeMaintenance",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuntimeMaintenanceCommandRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Idempotent Runtime maintenance command receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeMaintenanceReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/runtime/operations/{operation_id}/observe": {
+      "get": {
+        "operationId": "observeRuntimeMaintenance",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OperationId"
+          },
+          {
+            "name": "after_sequence",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 512,
+              "default": 128
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current snapshot and durable events after the cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeMaintenanceUpdate"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "410": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/runtime/operations/{operation_id}/events": {
+      "get": {
+        "operationId": "streamRuntimeMaintenanceEvents",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OperationId"
+          },
+          {
+            "name": "after_sequence",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Replay followed by live Runtime maintenance events",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "410": {
+            "$ref": "#/components/responses/Error"
+          },
+          "426": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/runtime/residency": {
+      "get": {
+        "operationId": "getRuntimeResidency",
+        "responses": {
+          "200": {
+            "description": "Runtime residency status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResidencyStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/runtime/release": {
+      "post": {
+        "operationId": "releaseRuntime",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuntimeReleaseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Runtime residency status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResidencyStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/runtime/preload": {
+      "post": {
+        "operationId": "preloadRuntime",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuntimePreloadRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Runtime residency status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResidencyStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/settings": {
+      "get": {
+        "operationId": "getSettings",
+        "responses": {
+          "200": {
+            "description": "Runtime settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsSnapshot"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putSettings",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsSnapshot"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated runtime settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/export": {
+      "post": {
+        "operationId": "exportOcr",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Export result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/qrcode/decode": {
+      "post": {
+        "operationId": "decodeQrCode",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QrDecodeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Decoded QR values",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QrDecodeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/qrcode/generate": {
+      "post": {
+        "operationId": "generateQrCode",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QrGenerateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Generated QR image envelope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QrGenerateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/open": {
+      "post": {
+        "operationId": "openPdfSession",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "PDF operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PdfOpenResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/close": {
+      "post": {
+        "operationId": "closePdfSession",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "PDF operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PdfClosedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/model": {
+      "post": {
+        "operationId": "getPdfSessionModel",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "PDF operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PdfDocumentResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/load": {
+      "post": {
+        "operationId": "loadPdfSession",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ndjson"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/render": {
+      "get": {
+        "operationId": "renderPdfPage",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Png"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/render_thumbnail": {
+      "post": {
+        "operationId": "renderPdfThumbnail",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenderThumbnailRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Png"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/render_preview": {
+      "post": {
+        "operationId": "renderPdfPreview",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenderPreviewRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Png"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/detect_text_layers": {
+      "post": {
+        "operationId": "detectPdfTextLayers",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DetectTextLayersRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "PDF operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PdfDetectResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/rotate": {
+      "post": {
+        "operationId": "rotatePdfPages",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RotateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "PDF operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PdfMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/delete_pages": {
+      "post": {
+        "operationId": "deletePdfPages",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeletePagesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "PDF operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PdfMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/insert_blank": {
+      "post": {
+        "operationId": "insertBlankPdfPage",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InsertBlankRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "PDF operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PdfMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/insert_from": {
+      "post": {
+        "operationId": "insertPdfPagesFromFile",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InsertFromRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "PDF operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PdfMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/move_page": {
+      "post": {
+        "operationId": "movePdfPage",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MovePageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "PDF operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PdfMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/reorder": {
+      "post": {
+        "operationId": "reorderPdfPages",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReorderRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "PDF operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PdfMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/add_text_layer": {
+      "post": {
+        "operationId": "addPdfTextLayer",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddTextLayerRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "PDF operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PdfMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/add_text_layer_batch": {
+      "post": {
+        "operationId": "addPdfTextLayerBatch",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchAddTextLayerRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "PDF operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PdfMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/rewrite_text_layer": {
+      "post": {
+        "operationId": "rewritePdfTextLayer",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RewriteTextLayerRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "PDF operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PdfMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/update_block_text": {
+      "post": {
+        "operationId": "updatePdfBlockText",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateBlockTextRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "PDF operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PdfMutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/delete_text_layers": {
+      "post": {
+        "operationId": "deletePdfTextLayers",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PageListRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ndjson"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/save": {
+      "post": {
+        "operationId": "savePdfSession",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "PDF operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PdfSaveResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/save_transactional": {
+      "post": {
+        "operationId": "savePdfSessionTransactional",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PdfPathRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "PDF operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PdfPathResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/cancel": {
+      "post": {
+        "operationId": "cancelPdfSession",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "PDF operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PdfCancelledResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v2/pdf/sessions/{session_id}/reset_cancel": {
+      "post": {
+        "operationId": "resetPdfSessionCancellation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "PDF operation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PdfResetResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "SessionToken": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "parameters": {
+      "JobId": {
+        "name": "job_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "SessionId": {
+        "name": "session_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "OperationId": {
+        "name": "operation_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "requestBodies": {},
+    "responses": {
+      "Error": {
+        "description": "Typed runtime error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Png": {
+        "description": "PNG image",
+        "content": {
+          "image/png": {
+            "schema": {
+              "type": "string",
+              "format": "binary"
+            },
+            "examples": {
+              "onePixelPng": {
+                "summary": "Base64 representation is stored in golden/runtime-api.json.",
+                "value": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"
+              }
+            }
+          }
+        }
+      },
+      "Ndjson": {
+        "description": "One JSON progress event per line",
+        "content": {
+          "application/x-ndjson": {
+            "schema": {
+              "type": "string"
+            },
+            "examples": {
+              "progress": {
+                "value": "{\"phase\":\"load\",\"message\":\"loading\"}\\n"
+              }
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "CapabilityDescriptor": {
+        "type": "object",
+        "required": [
+          "name",
+          "lifecycle",
+          "introduced_in",
+          "deprecated_in",
+          "sunset_at",
+          "replacement"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "lifecycle": {
+            "type": "string",
+            "enum": [
+              "active",
+              "deprecated"
+            ]
+          },
+          "introduced_in": {
+            "type": "string",
+            "minLength": 1
+          },
+          "deprecated_in": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sunset_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "replacement": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ocr_engine_catalog": {
+            "$ref": "#/components/schemas/OcrEngineCatalog"
+          },
+          "recognition_mode_catalog": {
+            "$ref": "#/components/schemas/RecognitionModeCatalog"
+          },
+          "download_source_catalog": {
+            "$ref": "#/components/schemas/DownloadSourceCatalog"
+          },
+          "component_variant_catalog": {
+            "$ref": "#/components/schemas/ComponentVariantCatalog"
+          },
+          "mineru_config_catalog": {
+            "$ref": "#/components/schemas/MineruConfigCatalog"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AddTextLayerRequest": {
+        "properties": {
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          },
+          "ocr_result": {
+            "additionalProperties": true,
+            "title": "Ocr Result",
+            "type": "object"
+          },
+          "pdf_settings": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Pdf Settings"
+          },
+          "overwrite": {
+            "default": false,
+            "title": "Overwrite",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "page",
+          "ocr_result"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "BatchAddTextLayerPage": {
+        "description": "批量加文字层的单页条目。",
+        "properties": {
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          },
+          "ocr_result": {
+            "additionalProperties": true,
+            "title": "Ocr Result",
+            "type": "object"
+          }
+        },
+        "required": [
+          "page",
+          "ocr_result"
+        ],
+        "title": "BatchAddTextLayerPage",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "BatchAddTextLayerRequest": {
+        "description": "批量写 OCR 文字层：一次接收一批页，后端聚合字符解析单一子集字体。\n\n避免逐页 add_text_layer 每页各解析一份子集字体（放大体积）。\n聚合逻辑复用 save_with_rewrite 已验证的\"整文档一次子集\"模式。\n\nsave=True 时，写层成功后紧跟一次 incremental save 把本批落盘\n（崩溃只丢最后一批）。返回 extra.saved 标记是否成功落盘。",
+        "properties": {
+          "pages": {
+            "items": {
+              "$ref": "#/components/schemas/BatchAddTextLayerPage"
+            },
+            "title": "Pages",
+            "type": "array"
+          },
+          "pdf_settings": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Pdf Settings"
+          },
+          "overwrite": {
+            "default": false,
+            "title": "Overwrite",
+            "type": "boolean"
+          },
+          "save": {
+            "default": false,
+            "title": "Save",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "pages"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "CommandResult": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "instance_id",
+          "command_id",
+          "kind",
+          "cancel_mode",
+          "job_ref"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "integer",
+            "const": 2
+          },
+          "instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "command_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "enum": [
+              "cancel",
+              "retry",
+              "forget"
+            ]
+          },
+          "cancel_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              null,
+              "queued_only",
+              "cooperative",
+              "forced"
+            ]
+          },
+          "job_ref": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/JobRef"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ComponentVariantCatalog": {
+        "type": "object",
+        "description": "Structured catalog of optional feature dependency variants, carried by the runtime.component-selection.v1 capability descriptor. Servers MUST NOT list two variants with the same feature_id and accelerator, and MUST NOT list base runtime components that are not selectable. The catalog lists selectable variants only: clients map the user's feature and accelerator choice to component ids and send them as install_component_ids.",
+        "required": [
+          "variants"
+        ],
+        "properties": {
+          "variants": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/ComponentVariantDescriptor"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "ComponentVariantDescriptor": {
+        "type": "object",
+        "description": "One installable variant of an optional feature dependency for a given accelerator. feature_id is a stable capability-family grouping id declared by the Backend release (for example paddleocr or mineru); it never appears in requests, and features that are also plain-text OCR engines SHOULD reuse the OcrEngineId wire values. component_id is the runtime.component-repair.v1 component id the client requests via install_component_ids. The descriptor never carries display text or product defaults.",
+        "required": [
+          "feature_id",
+          "accelerator",
+          "component_id"
+        ],
+        "properties": {
+          "feature_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Stable machine-readable feature grouping id defined by the Backend release; clients group catalog entries by it and never send it back."
+          },
+          "accelerator": {
+            "type": "string",
+            "enum": [
+              "cpu",
+              "nvidia_cuda"
+            ],
+            "description": "Accelerator this variant is built for; it must match the accelerator of the Runtime the selection installs into."
+          },
+          "component_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Runtime component id implementing this variant; selections reference it via install_component_ids and unknown ids fail closed with RUNTIME_COMPONENT_UNKNOWN."
+          }
+        },
+        "additionalProperties": false
+      },
+      "DeletePagesRequest": {
+        "properties": {
+          "pages": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Pages",
+            "type": "array"
+          }
+        },
+        "required": [
+          "pages"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "DetectTextLayersRequest": {
+        "properties": {
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "page"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "DetectTextLayersResponse": {
+        "properties": {
+          "text_layers": {
+            "items": {
+              "$ref": "#/components/schemas/TextLayerInfoMirror"
+            },
+            "title": "Text Layers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "text_layers"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "DownloadSourceCatalog": {
+        "type": "object",
+        "description": "Structured catalog of selectable download sources, carried by the runtime.download-sources.v1 capability descriptor. Servers MUST NOT list two sources with the same id across kinds. A selection contains at most one id for each source kind and array order has no priority meaning. Clients send the user's explicit selection; omission delegates to the Backend-declared default sources.",
+        "required": [
+          "sources"
+        ],
+        "properties": {
+          "sources": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/DownloadSourceDescriptor"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "DownloadSourceDescriptor": {
+        "type": "object",
+        "description": "One selectable download source declared by the Backend release. id is a stable source id the client echoes back in download_source_ids selections; ids are unique across the whole catalog. endpoint is an opaque factual base URL retained for wire compatibility and Backend source binding; clients must not render or parse it. The catalog never carries display text, localization or product defaults.",
+        "required": [
+          "kind",
+          "id",
+          "endpoint"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/DownloadSourceKind"
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Stable machine-readable source id defined by the Backend release; selections reference it and unknown ids fail closed with DOWNLOAD_SOURCE_UNKNOWN."
+          },
+          "endpoint": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Opaque factual base URL retained for wire compatibility and Backend source binding; clients must not render or parse it."
+          }
+        },
+        "additionalProperties": false
+      },
+      "DownloadSourceKind": {
+        "type": "string",
+        "description": "Open source-kind identifier. package_index selects a dependency package index; model_registry selects an upstream model-source preference that the Backend may encode for native engine downloaders. This preference does not make VibeOCR responsible for model files, downloads, caches, validation or repair. Clients preserve unknown response values and only offer selection UI for kinds they understand.",
+        "x-vibeocr-known-values": [
+          "package_index",
+          "model_registry"
+        ]
+      },
+      "Error": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "instance_id",
+          "code",
+          "message",
+          "category",
+          "retryable",
+          "detail",
+          "job_id"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "integer",
+            "const": 2
+          },
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "code": {
+            "type": "string",
+            "x-vibeocr-known-values": [
+              "VALIDATION_ERROR",
+              "QUOTA_EXCEEDED",
+              "UNAUTHORIZED",
+              "FORBIDDEN_LOOPBACK",
+              "JOB_NOT_FOUND",
+              "RESOURCE_NOT_FOUND",
+              "JOB_NOT_CANCELLABLE",
+              "JOB_NOT_RETRYABLE",
+              "INPUT_EXPIRED",
+              "PIN_CAPACITY_CONFLICT",
+              "SUPERVISOR_DRAINING",
+              "CANCELLED",
+              "OUT_OF_MEMORY",
+              "TRANSIENT_BACKEND",
+              "BACKEND_UNAVAILABLE",
+              "ADAPTER_PROTOCOL_VIOLATION",
+              "PROTOCOL_MISMATCH",
+              "INTERNAL_ERROR",
+              "RUNTIME_OPERATION_NOT_FOUND",
+              "RUNTIME_OPERATION_ID_CONFLICT",
+              "RUNTIME_COMMAND_ID_CONFLICT",
+              "RUNTIME_OPERATION_NOT_CANCELLABLE",
+              "RUNTIME_OPERATION_NOT_RETRYABLE",
+              "RUNTIME_CURSOR_EXPIRED",
+              "RUNTIME_CAPABILITY_UNAVAILABLE",
+              "RUNTIME_IDENTITY_MISMATCH",
+              "RUNTIME_BUSY",
+              "RUNTIME_INSTALL_FAILED",
+              "RUNTIME_IO_ERROR",
+              "RUNTIME_INSTALL_PLAN_STALE",
+              "RUNTIME_INSTALL_PLAN_BLOCKED",
+              "OCR_ENGINE_UNKNOWN",
+              "OCR_ENGINE_UNAVAILABLE",
+              "OCR_ENGINE_PREPARATION_REQUIRED",
+              "OCR_ENGINE_NOT_VALID_FOR_PIPELINE",
+              "OCR_ENGINE_LANGUAGE_UNAVAILABLE",
+              "DOWNLOAD_SOURCE_UNKNOWN",
+              "RUNTIME_COMPONENT_UNKNOWN",
+              "RECOGNITION_MODE_UNKNOWN",
+              "RECOGNITION_MODE_UNAVAILABLE",
+              "RECOGNITION_MODE_LIFECYCLE_UNSUPPORTED",
+              "RECOGNITION_MODE_PIPELINE_MISMATCH",
+              "MINERU_CONFIG_UNAVAILABLE",
+              "MINERU_CONFIG_MIGRATION_REQUIRED",
+              "MINERU_TIER_UNAVAILABLE",
+              "MINERU_TIER_PREPARATION_REQUIRED"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string",
+            "x-vibeocr-known-values": [
+              "validation",
+              "auth",
+              "not_found",
+              "conflict",
+              "capability",
+              "identity",
+              "cancelled",
+              "oom",
+              "transient",
+              "backend_unavailable",
+              "internal"
+            ]
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "retry_after": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "detail": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "job_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExportRequest": {
+        "type": "object",
+        "required": [
+          "output_path",
+          "format"
+        ],
+        "properties": {
+          "raw_text": {
+            "type": "string"
+          },
+          "markdown_text": {
+            "type": "string"
+          },
+          "html_text": {
+            "type": "string"
+          },
+          "raw_blocks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "output_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "format": {
+            "type": "string",
+            "minLength": 1
+          },
+          "overwrite": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExportResponse": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "instance_id",
+          "output_path",
+          "bytes_written"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "output_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "bytes_written": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "Health": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "instance_id",
+          "protocol_version",
+          "ready",
+          "draining",
+          "capabilities"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "protocol_version": {
+            "const": 2
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "draining": {
+            "type": "boolean"
+          },
+          "capabilities": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "x-vibeocr-known-values": [
+                "ocr.recognition.v2",
+                "pdf.edit.v2",
+                "qrcode.v2",
+                "export.document.v1",
+                "runtime.settings.v2",
+                "runtime.maintenance.v1",
+                "task.progress.v1",
+                "runtime.maintenance.v2",
+                "runtime.component-repair.v1",
+                "runtime.capability-metadata.v1",
+                "runtime.events.sse.v1",
+                "runtime.events.ndjson.v1",
+                "ocr.engine-selection.v1",
+                "runtime.download-sources.v1",
+                "runtime.component-selection.v1",
+                "ocr.recognition-modes.v1",
+                "ocr.mineru-config.v1",
+                "ocr.mineru-remote-api.v1"
+              ]
+            }
+          },
+          "capability_descriptors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CapabilityDescriptor"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "InsertBlankRequest": {
+        "properties": {
+          "after_index": {
+            "title": "After Index",
+            "type": "integer"
+          },
+          "width": {
+            "default": 612,
+            "title": "Width",
+            "type": "number"
+          },
+          "height": {
+            "default": 792,
+            "title": "Height",
+            "type": "number"
+          }
+        },
+        "required": [
+          "after_index"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "InsertFromRequest": {
+        "properties": {
+          "source_path": {
+            "title": "Source Path",
+            "type": "string"
+          },
+          "after_index": {
+            "title": "After Index",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "source_path",
+          "after_index"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "ItemOutcome": {
+        "type": "object",
+        "required": [
+          "item_id",
+          "state",
+          "attempt",
+          "payload_type",
+          "payload",
+          "error_code",
+          "error_detail"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "succeeded",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "attempt": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "payload_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "payload": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error_detail": {
+            "type": "object"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "succeeded"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload_type": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "payload": {
+                  "type": "object"
+                },
+                "error_code": {
+                  "type": "null"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "payload_type": {
+                  "type": "null"
+                },
+                "payload": {
+                  "type": "null"
+                },
+                "error_code": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        ]
+      },
+      "JobCommand": {
+        "type": "object",
+        "required": [
+          "command_id",
+          "kind",
+          "job_id",
+          "item_ids",
+          "priority_override"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "cancel",
+              "retry",
+              "forget"
+            ]
+          },
+          "job_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "item_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "priority_override": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "interactive",
+              "background",
+              null
+            ]
+          }
+        }
+      },
+      "JobItem": {
+        "type": "object",
+        "required": [
+          "item_id",
+          "display_name",
+          "state"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "attempt": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "client_item_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ordinal": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "source_item_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "JobMultipart": {
+        "type": "object",
+        "required": [
+          "manifest"
+        ],
+        "properties": {
+          "manifest": {
+            "$ref": "#/components/schemas/SubmitRequest"
+          }
+        },
+        "additionalProperties": true
+      },
+      "JobRef": {
+        "type": "object",
+        "required": [
+          "job_id",
+          "schema_version",
+          "instance_id",
+          "state",
+          "items"
+        ],
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "schema_version": {
+            "const": 2
+          },
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "enum": [
+              "accepted",
+              "queued",
+              "running",
+              "completed",
+              "completed_with_errors",
+              "cancel_requested",
+              "cancelled",
+              "failed"
+            ]
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobItem"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "JobSnapshot": {
+        "type": "object",
+        "required": [
+          "job_id",
+          "kind",
+          "priority",
+          "state",
+          "schema_version",
+          "created_at",
+          "items",
+          "summary"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "recognition",
+              "pdf_ocr",
+              "mineru_parse",
+              "model_download",
+              "settings_install"
+            ]
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "interactive",
+              "background"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "queued",
+              "running",
+              "completed",
+              "completed_with_errors",
+              "cancel_requested",
+              "cancelled",
+              "failed"
+            ]
+          },
+          "schema_version": {
+            "type": "integer",
+            "const": 2
+          },
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stage": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "progress_current": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "progress_total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "progress": {
+            "$ref": "#/components/schemas/ProgressSnapshot"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobItem"
+            }
+          },
+          "summary": {
+            "$ref": "#/components/schemas/JobSummary"
+          },
+          "cancel_requested_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cancel_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              null,
+              "queued_only",
+              "cooperative",
+              "forced"
+            ]
+          },
+          "degraded": {
+            "type": "boolean"
+          },
+          "event_sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "result_available": {
+            "type": "boolean"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_job_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pipeline": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PipelineSelection"
+              }
+            ]
+          }
+        }
+      },
+      "JobSummary": {
+        "type": "object",
+        "required": [
+          "succeeded",
+          "failed",
+          "cancelled",
+          "total"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "succeeded": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cancelled": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "JobUpdate": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "snapshot",
+          "events",
+          "outcomes",
+          "through_sequence",
+          "more"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/JobSnapshot"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StageEvent"
+            }
+          },
+          "outcomes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ItemOutcome"
+            }
+          },
+          "through_sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "more": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MineruConfig": {
+        "type": "object",
+        "description": "Typed MinerU 4 configuration, carried by the optional PipelineSelection.mineru block and protected by the ocr.mineru-config.v1 capability. The block is only valid for kind=mineru_parse jobs with pipeline_id=MinerU; a request that combines it with non-empty legacy options or the engine field fails closed with VALIDATION_ERROR instead of silently dropping either side (server-side conformance case; conditional constraints stay out of the released request schema). tier is required and must not be omitted or set to null. Omitting ocr_mode selects auto, omitting page_range selects all, omitting language selects the upstream default hint ch. language is only an OCR hint the upstream service accepts; it does not guarantee that every tier changes the output language. Clients MUST NOT send this block unless the runtime advertises ocr.mineru-config.v1, and MUST NOT fall back to legacy options or the flash tier when the capability is missing.",
+        "required": [
+          "tier"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "tier": {
+            "$ref": "#/components/schemas/MineruTierId"
+          },
+          "ocr_mode": {
+            "$ref": "#/components/schemas/MineruOcrMode"
+          },
+          "page_range": {
+            "type": "string",
+            "pattern": "^(all|r?[1-9][0-9]*(-r?[1-9][0-9]*)?(,r?[1-9][0-9]*(-r?[1-9][0-9]*)?)*)$(?![\\s\\S])",
+            "description": "Canonical page subset: the literal all, or a comma-separated list of 1-based positive page indexes and closed ranges; rN counts from the last page and rA-rB denotes a reversed closed range (for example 1-5,8,r3-r1). Zero, r0, empty fragments, surrounding whitespace and mixing all with numbers are rejected syntactically. Actual page counts, range direction/bounds and file types are validated by the Backend against the input; for non-PDF inputs clients may only omit the field or send all, and the Backend maps both to an omitted upstream range. The Protocol never parses PDFs."
+          },
+          "language": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$(?![\\s\\S])",
+            "description": "Single upstream OCR language id without surrounding whitespace; omitting selects the upstream default ch. The id must be listed by the ocr.mineru-config.v1 catalog before a client may send it."
+          }
+        }
+      },
+      "MineruConfigCatalog": {
+        "type": "object",
+        "description": "Structured catalog of MinerU 4 tiers and accepted language ids, carried only by the ocr.mineru-config.v1 capability descriptor. The catalog describes the real runtime: listing all four tiers in the wire schema never implies that every tier can run. default_tier is the product default the Backend declares (VibeOCR initially basic); it is not the bare upstream default. Servers MUST NOT list duplicate tier ids and languages. The catalog never carries package names, pip arguments, model file paths, a business dependency graph, display text or product defaults beyond default_tier.",
+        "required": [
+          "default_tier",
+          "tiers",
+          "languages"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "default_tier": {
+            "$ref": "#/components/schemas/MineruTierId"
+          },
+          "tiers": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/MineruTierDescriptor"
+            }
+          },
+          "languages": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      },
+      "MineruOcrMode": {
+        "type": "string",
+        "x-vibeocr-exact-enum": true,
+        "description": "Upstream OCR mode hint for text-layer handling. auto lets the upstream service decide, txt trusts the embedded text layer, and ocr forces recognition. Omitting the field selects auto.",
+        "enum": [
+          "auto",
+          "txt",
+          "ocr"
+        ]
+      },
+      "MineruTierAvailability": {
+        "type": "string",
+        "description": "Availability of one MinerU tier in the current runtime. ready means mineru_parse jobs may select it now; preparation_required means the user must prepare runtime components first; unavailable means the tier cannot run in this runtime. Preparation being finished, models being downloaded or the service being ready never implies by itself that a tier is ready for recognition.",
+        "enum": [
+          "ready",
+          "preparation_required",
+          "unavailable"
+        ]
+      },
+      "MineruTierDescriptor": {
+        "type": "object",
+        "description": "Capability and availability state of one MinerU tier. reason_code is a stable machine-readable cause id that clients localize themselves; the Backend never ships display text.",
+        "required": [
+          "id",
+          "availability",
+          "reason_code"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/MineruTierId"
+          },
+          "availability": {
+            "$ref": "#/components/schemas/MineruTierAvailability"
+          },
+          "reason_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "description": "Stable machine-readable reason why the tier is not ready; null when the tier is ready. Clients localize this id and never receive display text."
+          }
+        }
+      },
+      "MineruTierId": {
+        "type": "string",
+        "x-vibeocr-exact-enum": true,
+        "description": "Stable MinerU 4 tier ids. The four tiers are not renames of the legacy backend values; legacy settings that cannot be proven equivalent must be re-selected by the user (MINERU_CONFIG_MIGRATION_REQUIRED) instead of silently falling back. Unknown or omitted tier values fail closed.",
+        "enum": [
+          "flash",
+          "basic",
+          "standard",
+          "advanced"
+        ]
+      },
+      "ModelDiff": {
+        "description": "变更操作的回包增量。\n\n主进程收到后 apply 到 mirror:\n- replaced_pages: 整页替换(变更后的完整 PageInfoMirror)\n- structural_change: 结构性变更(删页/插页/重排)→ 主进程直接用 full_model 替换\n- full_model: 结构性变更或全量刷新时携带完整 model\n- modified_flag / structural_flag: 更新 is_modified / has_structural_change",
+        "properties": {
+          "replaced_pages": {
+            "items": {
+              "$ref": "#/components/schemas/PdfPageInfoMirror"
+            },
+            "title": "Replaced Pages",
+            "type": "array"
+          },
+          "structural_change": {
+            "default": false,
+            "title": "Structural Change",
+            "type": "boolean"
+          },
+          "full_model": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PdfDocumentMirror"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "modified_flag": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Modified Flag"
+          },
+          "structural_flag": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Structural Flag"
+          },
+          "invalidated_thumbnails": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Invalidated Thumbnails",
+            "type": "array"
+          }
+        },
+        "title": "ModelDiff",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "MovePageRequest": {
+        "properties": {
+          "from_index": {
+            "title": "From Index",
+            "type": "integer"
+          },
+          "to_index": {
+            "title": "To Index",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "from_index",
+          "to_index"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "MutateResponse": {
+        "description": "通用变更操作响应(旋转/删除/插入/重排/加文字层/重写/摆正)。",
+        "properties": {
+          "diff": {
+            "$ref": "#/components/schemas/ModelDiff"
+          },
+          "extra": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Extra"
+          }
+        },
+        "required": [
+          "diff"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "ExecutionPipelineId": {
+        "type": "string",
+        "description": "Stable legacy execution-pipeline identifiers. Products present RecognitionModeId values instead of exposing this enum directly.",
+        "enum": [
+          "OCR",
+          "PP-StructureV3",
+          "MinerU",
+          "PaddleOCR-VL",
+          "TABLE_RECOGNITION",
+          "FORMULA_RECOGNITION"
+        ]
+      },
+      "RecognitionModeAvailability": {
+        "type": "string",
+        "enum": [
+          "ready",
+          "preparation_required",
+          "unavailable"
+        ]
+      },
+      "RecognitionModeFamily": {
+        "type": "string",
+        "enum": [
+          "text",
+          "document",
+          "specialized"
+        ]
+      },
+      "RecognitionModeId": {
+        "type": "string",
+        "description": "Stable user-semantic recognition modes. Each mode maps to one legacy execution pipeline and, for plain text OCR, one explicit OCR engine.",
+        "enum": [
+          "rapid_text",
+          "windows_text",
+          "paddle_text",
+          "paddle_structure",
+          "paddle_document_vl",
+          "mineru_document",
+          "paddle_table",
+          "paddle_formula"
+        ]
+      },
+      "RecognitionModeLifecycleKind": {
+        "type": "string",
+        "description": "User-manageable resource lifecycle. unmanaged is an implementation-local cache with no controls; model_residency is Paddle model warm-up/TTL/pinning/release; process_keep_alive is child-process TTL/release and is not model residency. mineru_document is process_keep_alive and additionally supports explicit preload for first-time preparation via the shared preload endpoint; preload never turns it into model residency and never enables pinning.",
+        "enum": [
+          "unmanaged",
+          "model_residency",
+          "process_keep_alive"
+        ]
+      },
+      "RecognitionResourceKind": {
+        "type": "string",
+        "description": "Concrete managed resource reported by lifecycle status. model is Paddle model residency; process is child-process keep-alive.",
+        "enum": [
+          "model",
+          "process"
+        ]
+      },
+      "RecognitionModeLifecycle": {
+        "type": "object",
+        "required": [
+          "kind",
+          "supports_preload",
+          "supports_ttl",
+          "supports_pinning",
+          "supports_release"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/RecognitionModeLifecycleKind"
+          },
+          "supports_preload": {
+            "type": "boolean"
+          },
+          "supports_ttl": {
+            "type": "boolean"
+          },
+          "supports_pinning": {
+            "type": "boolean"
+          },
+          "supports_release": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RecognitionModeProvisioning": {
+        "type": "string",
+        "description": "Where the executable capability comes from: the bundled base runtime, the operating system, or an optional advanced runtime component.",
+        "enum": [
+          "base_runtime",
+          "operating_system",
+          "advanced_component"
+        ]
+      },
+      "RecognitionModeDescriptor": {
+        "type": "object",
+        "description": "One user-semantic recognition mode and its exact execution, provisioning, availability, option and lifecycle facts. The descriptor carries no display text or product default; clients localize stable ids.",
+        "required": [
+          "id",
+          "family",
+          "pipeline_id",
+          "engine",
+          "provisioning",
+          "availability",
+          "reason_code",
+          "required_component",
+          "supported_options",
+          "lifecycle"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/RecognitionModeId"
+          },
+          "family": {
+            "$ref": "#/components/schemas/RecognitionModeFamily"
+          },
+          "pipeline_id": {
+            "$ref": "#/components/schemas/ExecutionPipelineId"
+          },
+          "engine": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OcrEngineId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provisioning": {
+            "$ref": "#/components/schemas/RecognitionModeProvisioning"
+          },
+          "availability": {
+            "$ref": "#/components/schemas/RecognitionModeAvailability"
+          },
+          "reason_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1
+          },
+          "required_component": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1
+          },
+          "supported_options": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "lifecycle": {
+            "$ref": "#/components/schemas/RecognitionModeLifecycle"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RecognitionModeCatalog": {
+        "type": "object",
+        "description": "Structured catalog carried only by the ocr.recognition-modes.v1 capability descriptor. Servers list every stable RecognitionModeId exactly once and keep execution mappings invariant across runtime state changes.",
+        "required": [
+          "modes"
+        ],
+        "properties": {
+          "modes": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/RecognitionModeDescriptor"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "OcrEngineAvailability": {
+        "type": "string",
+        "description": "Availability of one OCR engine in the current runtime. 'ready' means jobs may select it now; 'preparation_required' means the user must prepare a runtime component (see required_component) before use; 'unavailable' means the engine cannot run in this runtime. The catalog expresses capability and state only; it never carries UI display text or the product default.",
+        "enum": [
+          "ready",
+          "preparation_required",
+          "unavailable"
+        ]
+      },
+      "OcrEngineCatalog": {
+        "type": "object",
+        "description": "Structured catalog of selectable plain-text OCR engines, carried by the ocr.engine-selection.v1 capability descriptor. Servers MUST list one descriptor per stable OcrEngineId with no duplicate ids. The catalog is not a frontend default: clients always send the user's explicit choice and fall back to the Backend default only when the field is omitted.",
+        "required": [
+          "engines"
+        ],
+        "properties": {
+          "engines": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/OcrEngineDescriptor"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "OcrEngineDescriptor": {
+        "type": "object",
+        "description": "Capability and availability state of one selectable OCR engine. reason_code is a stable machine-readable cause id that clients localize themselves; the Backend never ships display text. required_component names the runtime component id (runtime.component-repair.v1) the user must prepare, or null.",
+        "required": [
+          "id",
+          "availability",
+          "included_in_base",
+          "reason_code",
+          "required_component"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/OcrEngineId"
+          },
+          "availability": {
+            "$ref": "#/components/schemas/OcrEngineAvailability"
+          },
+          "included_in_base": {
+            "type": "boolean",
+            "description": "Whether the engine ships with the base offline runtime instead of requiring a separate runtime component."
+          },
+          "reason_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "description": "Stable machine-readable reason why the engine is not 'ready'; null when the engine is ready. Clients localize this id and never receive display text."
+          },
+          "required_component": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "description": "Runtime component id the user must prepare before the engine becomes ready; null when no component is required."
+          }
+        },
+        "additionalProperties": false
+      },
+      "OcrEngineId": {
+        "type": "string",
+        "description": "Stable engine ids for the plain-text OCR pipeline. Unknown values MUST fail closed with OCR_ENGINE_UNKNOWN and MUST NOT silently fall back to another engine.",
+        "enum": [
+          "rapidocr",
+          "windows",
+          "paddleocr"
+        ]
+      },
+      "OpenRequest": {
+        "properties": {
+          "path": {
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "OpenResponse": {
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "model": {
+            "$ref": "#/components/schemas/PdfDocumentMirror"
+          }
+        },
+        "required": [
+          "session_id",
+          "model"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "PageListRequest": {
+        "description": "通用页列表请求(摆正/删除文字层/渲染缩略图/预览/检测文字层)。",
+        "properties": {
+          "pages": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Pages",
+            "type": "array"
+          }
+        },
+        "required": [
+          "pages"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "PdfCancelledResponse": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "instance_id",
+          "cancelled"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "cancelled": {
+            "const": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "PdfClosedResponse": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "instance_id",
+          "closed"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "closed": {
+            "const": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "PdfDetectResponse": {
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "text_layers": {
+            "items": {
+              "$ref": "#/components/schemas/TextLayerInfoMirror"
+            },
+            "title": "Text Layers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "schema_version",
+          "instance_id",
+          "text_layers"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "PdfDocumentMirror": {
+        "description": "PDF 文档状态镜像(对应 models.pdf_document.PdfDocument 的可序列化投影)。",
+        "properties": {
+          "file_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "File Path"
+          },
+          "pages": {
+            "items": {
+              "$ref": "#/components/schemas/PdfPageInfoMirror"
+            },
+            "title": "Pages",
+            "type": "array"
+          },
+          "is_modified": {
+            "default": false,
+            "title": "Is Modified",
+            "type": "boolean"
+          },
+          "has_structural_change": {
+            "default": false,
+            "title": "Has Structural Change",
+            "type": "boolean"
+          },
+          "render_dpi": {
+            "default": 300,
+            "title": "Render Dpi",
+            "type": "integer"
+          },
+          "thumbnail_dpi": {
+            "default": 96,
+            "title": "Thumbnail Dpi",
+            "type": "integer"
+          }
+        },
+        "title": "PdfDocumentMirror",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "PdfDocumentResponse": {
+        "description": "PDF 文档状态镜像(对应 models.pdf_document.PdfDocument 的可序列化投影)。",
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "file_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "File Path"
+          },
+          "pages": {
+            "items": {
+              "$ref": "#/components/schemas/PdfPageInfoMirror"
+            },
+            "title": "Pages",
+            "type": "array"
+          },
+          "is_modified": {
+            "default": false,
+            "title": "Is Modified",
+            "type": "boolean"
+          },
+          "has_structural_change": {
+            "default": false,
+            "title": "Has Structural Change",
+            "type": "boolean"
+          },
+          "render_dpi": {
+            "default": 300,
+            "title": "Render Dpi",
+            "type": "integer"
+          },
+          "thumbnail_dpi": {
+            "default": 96,
+            "title": "Thumbnail Dpi",
+            "type": "integer"
+          }
+        },
+        "title": "PdfDocumentMirror",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "instance_id"
+        ]
+      },
+      "PdfMutationResponse": {
+        "description": "通用变更操作响应(旋转/删除/插入/重排/加文字层/重写/摆正)。",
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "diff": {
+            "$ref": "#/components/schemas/ModelDiff"
+          },
+          "extra": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Extra"
+          }
+        },
+        "required": [
+          "schema_version",
+          "instance_id",
+          "diff"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "PdfOpenResponse": {
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "model": {
+            "$ref": "#/components/schemas/PdfDocumentMirror"
+          }
+        },
+        "required": [
+          "schema_version",
+          "instance_id",
+          "session_id",
+          "model"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "PdfPageInfoMirror": {
+        "description": "单页状态镜像(对应 models.pdf_document.PdfPageInfo 的可序列化子集)。\n\nthumbnail: QPixmap 不跨进程,缩略图走独立渲染路由取字节。",
+        "properties": {
+          "page_index": {
+            "title": "Page Index",
+            "type": "integer"
+          },
+          "rotation": {
+            "default": 0,
+            "title": "Rotation",
+            "type": "integer"
+          },
+          "has_text_layer": {
+            "default": false,
+            "title": "Has Text Layer",
+            "type": "boolean"
+          },
+          "text_layers": {
+            "items": {
+              "$ref": "#/components/schemas/TextLayerInfoMirror"
+            },
+            "title": "Text Layers",
+            "type": "array"
+          },
+          "is_scanned": {
+            "default": false,
+            "title": "Is Scanned",
+            "type": "boolean"
+          },
+          "rect": {
+            "default": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "maxItems": 4,
+            "minItems": 4,
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Rect",
+            "type": "array"
+          },
+          "ocr_text_blocks": {
+            "items": {
+              "$ref": "#/components/schemas/TextBlockMirror"
+            },
+            "title": "Ocr Text Blocks",
+            "type": "array"
+          },
+          "ocr_preproc_angle": {
+            "default": 0,
+            "title": "Ocr Preproc Angle",
+            "type": "integer"
+          },
+          "deskewed": {
+            "default": false,
+            "title": "Deskewed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "page_index"
+        ],
+        "title": "PdfPageInfoMirror",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "PdfPathRequest": {
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "PdfPathResponse": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "instance_id",
+          "path"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "PdfResetResponse": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "instance_id",
+          "reset"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reset": {
+            "const": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "PdfSaveResponse": {
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "diff": {
+            "$ref": "#/components/schemas/ModelDiff"
+          }
+        },
+        "required": [
+          "schema_version",
+          "instance_id",
+          "path",
+          "diff"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "PipelineSelection": {
+        "type": "object",
+        "description": "Frozen user-semantic pipeline selection for one logical job. The optional engine field selects the plain-text OCR engine and is only valid when pipeline_id is 'OCR': the server MUST reject it for any other pipeline with OCR_ENGINE_NOT_VALID_FOR_PIPELINE instead of silently ignoring it, and MUST fail closed on unknown values with OCR_ENGINE_UNKNOWN. Clients SHOULD always send the user's current selection; when the field is omitted the server applies its own default engine (rapidocr). The optional mineru block carries the typed MinerU 4 configuration protected by ocr.mineru-config.v1: it is only valid for pipeline_id=MinerU with kind=mineru_parse, and the server MUST reject requests that combine it with non-empty legacy options or the engine field using VALIDATION_ERROR instead of silently dropping either side (server-side conformance case). Clients MUST omit the block entirely when the runtime does not advertise the capability; omitting it keeps the legacy payload shape unchanged.",
+        "required": [
+          "pipeline_id",
+          "options_version",
+          "options"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "pipeline_id": {
+            "$ref": "#/components/schemas/ExecutionPipelineId"
+          },
+          "options_version": {
+            "type": "integer",
+            "const": 1
+          },
+          "options": {
+            "type": "object"
+          },
+          "engine": {
+            "$ref": "#/components/schemas/OcrEngineId"
+          },
+          "mineru": {
+            "$ref": "#/components/schemas/MineruConfig"
+          }
+        }
+      },
+      "PipelineSpec": {
+        "type": "object",
+        "required": [
+          "name",
+          "ttl_seconds",
+          "pinned"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "recognition_mode": {
+            "$ref": "#/components/schemas/RecognitionModeId"
+          },
+          "ttl_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "pinned": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ProgressEvent": {
+        "description": "流式进度事件(SSE / chunked 一行一个 JSON)。",
+        "properties": {
+          "phase": {
+            "$ref": "#/components/schemas/ProgressPhase"
+          },
+          "current": {
+            "default": 0,
+            "title": "Current",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Message"
+          },
+          "page_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Page Index"
+          },
+          "page_payload": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Page Payload"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "ProgressPhase": {
+        "description": "长操作阶段标识,供主进程切换文案/确定 vs 不确定进度条。",
+        "enum": [
+          "load",
+          "render",
+          "ocr",
+          "write",
+          "detect",
+          "correct",
+          "delete",
+          "save",
+          "export",
+          "compress"
+        ],
+        "title": "ProgressPhase",
+        "type": "string"
+      },
+      "QrCodeValue": {
+        "type": "object",
+        "required": [
+          "data",
+          "type",
+          "format",
+          "is_url"
+        ],
+        "properties": {
+          "data": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string"
+          },
+          "is_url": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "QrDecodeRequest": {
+        "type": "object",
+        "required": [
+          "image"
+        ],
+        "properties": {
+          "image": {
+            "type": "string",
+            "contentEncoding": "base64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "QrDecodeResponse": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "instance_id",
+          "codes"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "codes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QrCodeValue"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "QrGenerateRequest": {
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string"
+          },
+          "options": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "QrGenerateResponse": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "instance_id",
+          "image",
+          "format",
+          "media_type"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "image": {
+            "type": "string",
+            "contentEncoding": "base64"
+          },
+          "format": {
+            "type": "string"
+          },
+          "media_type": {
+            "enum": [
+              "image/png",
+              "image/svg+xml"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "RenderPreviewRequest": {
+        "properties": {
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          },
+          "dpi": {
+            "default": 150,
+            "title": "Dpi",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "page"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "RenderThumbnailRequest": {
+        "properties": {
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          },
+          "size": {
+            "default": 160,
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "page"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "ReorderRequest": {
+        "properties": {
+          "new_order": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "New Order",
+            "type": "array"
+          }
+        },
+        "required": [
+          "new_order"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "ResidencyEntry": {
+        "type": "object",
+        "required": [
+          "pipeline",
+          "kind",
+          "active_leases",
+          "remaining_ttl_seconds",
+          "estimated_vram_mb",
+          "eviction_reason"
+        ],
+        "properties": {
+          "pipeline": {
+            "type": "string"
+          },
+          "recognition_mode": {
+            "$ref": "#/components/schemas/RecognitionModeId"
+          },
+          "resource_kind": {
+            "$ref": "#/components/schemas/RecognitionResourceKind"
+          },
+          "resource_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "enum": [
+              "soft_ttl",
+              "pinned",
+              "idle",
+              "evicted"
+            ]
+          },
+          "active_leases": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "remaining_ttl_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "estimated_vram_mb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "eviction_reason": {
+            "enum": [
+              "none",
+              "ttl_expired",
+              "vram_pressure",
+              "explicit_release",
+              "supervisor_shutdown"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ProgressSnapshot": {
+        "type": "object",
+        "required": [
+          "unit",
+          "current"
+        ],
+        "properties": {
+          "unit": {
+            "type": "string",
+            "enum": [
+              "steps",
+              "items",
+              "bytes"
+            ]
+          },
+          "current": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "estimated_remaining_seconds": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "estimated_remaining_seconds"
+              ]
+            },
+            "then": {
+              "required": [
+                "total"
+              ],
+              "properties": {
+                "unit": {
+                  "enum": [
+                    "items",
+                    "bytes"
+                  ]
+                },
+                "total": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "ResidencyStatus": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "default_ttl_seconds",
+          "entries",
+          "pipelines",
+          "vram_total_mb",
+          "vram_used_mb"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "default_ttl_seconds": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResidencyEntry"
+            }
+          },
+          "pipelines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PipelineSpec"
+            }
+          },
+          "vram_total_mb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "vram_used_mb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "RewriteTextLayerRequest": {
+        "properties": {
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          },
+          "text_blocks": {
+            "items": {
+              "$ref": "#/components/schemas/TextBlockMirror"
+            },
+            "title": "Text Blocks",
+            "type": "array"
+          },
+          "preproc_angle": {
+            "default": 0,
+            "title": "Preproc Angle",
+            "type": "integer"
+          },
+          "pdf_settings": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Pdf Settings"
+          }
+        },
+        "required": [
+          "page",
+          "text_blocks"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "RotateRequest": {
+        "properties": {
+          "pages": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Pages",
+            "type": "array"
+          },
+          "angle": {
+            "title": "Angle",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pages",
+          "angle"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "RuntimeInstallPlanRequest": {
+        "type": "object",
+        "description": "Runtime install plan preview request (runtime.install-plan.v1). required_capabilities MUST include runtime.install-plan.v1; a Backend without the capability rejects the preview as explicitly unsupported instead of silently installing. install_component_ids follows runtime.component-selection.v1 semantics: an empty array explicitly selects no optional components while omission selects the Backend default, and unknown ids fail closed with RUNTIME_COMPONENT_UNKNOWN. download_source_ids follows runtime.download-sources.v1 and MUST NOT be empty when present. Omitting accelerator keeps the persistent preference or product default. The preview installs nothing, downloads no dependencies or models, changes no active environment or persistent selection, and creates no maintenance operation; the Backend may retain short-lived plan metadata for later confirmation.",
+        "required": [
+          "required_capabilities"
+        ],
+        "properties": {
+          "accelerator": {
+            "type": "string",
+            "enum": [
+              "cpu",
+              "nvidia_cuda"
+            ]
+          },
+          "install_component_ids": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "download_source_ids": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required_capabilities": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "contains": {
+              "const": "runtime.install-plan.v1"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "RuntimeInstallPlanResponse": {
+        "type": "object",
+        "description": "Runtime install plan preview response. The plan is read-only and creating it is not a maintenance operation. negotiated_capabilities echoes the capabilities the Backend actually negotiated for this preview. Confirming the plan later uses plan_id on an ensure maintenance start or retry, which revalidates the baseline atomically before first execution; replaying the same operation id and plan returns the existing receipt without executing again.",
+        "required": [
+          "schema_version",
+          "plan",
+          "negotiated_capabilities"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "plan": {
+            "$ref": "#/components/schemas/RuntimeInstallPlan"
+          },
+          "negotiated_capabilities": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "RuntimeInstallPlan": {
+        "type": "object",
+        "description": "One read-only Runtime install plan. plan_id is opaque and not a client-computed digest; it expires at expires_at. The Backend revalidates the verified release/lock/product baseline before the plan's first execution and rejects stale, expired, or unknown plans with RUNTIME_INSTALL_PLAN_STALE. requested_component_ids and requested_download_source_ids are nullable echoes of the request: null means the field was omitted (Backend default), an empty array explicitly selected no optional components. components is the union of the effective closure and the actually affected old components; ids across all arrays are unique and use release-catalog stable component ids, never pip package graphs, local paths, or credentials. remove means the component no longer belongs to the active environment once the candidate activates; it never authorizes deleting retained environments, native models, or caches. Native model preparation stays with the engine downloaders and is not part of the known dependency totals in cost.",
+        "required": [
+          "plan_id",
+          "expires_at",
+          "accelerator",
+          "profile_id",
+          "requested_component_ids",
+          "effective_component_ids",
+          "requested_download_source_ids",
+          "effective_download_source_ids",
+          "source",
+          "components",
+          "blockers",
+          "cost"
+        ],
+        "properties": {
+          "plan_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "accelerator": {
+            "type": "string",
+            "enum": [
+              "cpu",
+              "nvidia_cuda"
+            ]
+          },
+          "profile_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "requested_component_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "effective_component_ids": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "requested_download_source_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "effective_download_source_ids": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "source": {
+            "$ref": "#/components/schemas/RuntimeSourceIdentity"
+          },
+          "components": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RuntimeInstallPlanComponent"
+            }
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RuntimeInstallPlanBlocker"
+            }
+          },
+          "cost": {
+            "$ref": "#/components/schemas/RuntimeInstallPlanCost"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RuntimeInstallPlanComponent": {
+        "type": "object",
+        "description": "One component row of the effective install closure union. action describes what confirming this plan does to the component: retain keeps it, install adds it, replace upgrades it in place, and remove means it no longer belongs to the active environment once the candidate activates, without deleting retained environments, native models, or caches. dependency_state reports whether the component's dependencies are satisfied now; entries shared across engines may be satisfied. reason_codes are open machine-readable strings, and entries added to the effective closure beyond the request MUST carry at least one reason code. Device, scope, recognition-mode, and tier differences are separate Backend concerns and never collapse into these fields.",
+        "required": [
+          "component_id",
+          "action",
+          "dependency_state",
+          "reason_codes"
+        ],
+        "properties": {
+          "component_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "retain",
+              "install",
+              "replace",
+              "remove"
+            ]
+          },
+          "dependency_state": {
+            "type": "string",
+            "enum": [
+              "satisfied",
+              "pending"
+            ]
+          },
+          "reason_codes": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "RuntimeInstallPlanBlocker": {
+        "type": "object",
+        "description": "One actual known blocker the Backend honestly reports for the plan, such as platform, ABI, driver, disk space, permission, source, or in-flight task conditions. code is an open stable machine-readable string; next_action names the next user action such as reselect, change_source, free_space, or close_tasks. Confirming a plan with blockers fails closed with RUNTIME_INSTALL_PLAN_BLOCKED.",
+        "required": [
+          "code",
+          "next_action"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1
+          },
+          "component_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "next_action": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "RuntimeInstallPlanCost": {
+        "type": "object",
+        "description": "Plan-wide deduplicated cost totals, never per-component sums. download_bytes and additional_disk_bytes are non-negative integers or null; null means honestly unknown and MUST come with at least one unknown_reason_code instead of a zero placeholder. Unknown native model preparation costs stay with the engine downloaders and belong in the reason codes, not in these dependency totals.",
+        "required": [
+          "download_bytes",
+          "additional_disk_bytes",
+          "unknown_reason_codes"
+        ],
+        "properties": {
+          "download_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "format": "int64"
+          },
+          "additional_disk_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "format": "int64"
+          },
+          "unknown_reason_codes": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "anyOf": [
+                {
+                  "properties": {
+                    "download_bytes": {
+                      "type": "null"
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "additional_disk_bytes": {
+                      "type": "null"
+                    }
+                  }
+                }
+              ]
+            },
+            "then": {
+              "properties": {
+                "unknown_reason_codes": {
+                  "minItems": 1
+                }
+              }
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "RuntimeMaintenanceRequest": {
+        "type": "object",
+        "description": "Runtime maintenance start request. For ensure, install_component_ids is the manual optional-component scope: an empty array explicitly selects no optional components, omission selects the Backend default, and unknown ids fail closed with RUNTIME_COMPONENT_UNKNOWN. download_source_ids snapshots at most one source per kind into the operation; each present kind overrides its current setting/default and kinds not present use the Backend-declared default for that kind. Omitting the field snapshots the current Backend setting/default. Clients MUST omit both fields when their capability is absent; they are invalid for inspect/repair. component_ids keeps its repair-scope meaning. plan_id (runtime.install-plan.v1) confirms a previewed install plan for ensure only: it requires an explicit operation_id and required_capabilities containing runtime.install-plan.v1, is mutually exclusive with profile_id, component_ids, install_component_ids, and download_source_ids, and the Backend revalidates the plan baseline atomically before first execution, rejecting stale, expired, or unknown plans with RUNTIME_INSTALL_PLAN_STALE and blocked plans with RUNTIME_INSTALL_PLAN_BLOCKED. Requests without plan_id keep their legacy semantics and never claim user plan confirmation.",
+        "required": [
+          "operation"
+        ],
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "inspect",
+              "ensure",
+              "repair"
+            ]
+          },
+          "profile_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "plan_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "component_ids": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "install_component_ids": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "download_source_ids": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required_capabilities": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "anyOf": [
+                {
+                  "required": [
+                    "install_component_ids"
+                  ]
+                },
+                {
+                  "required": [
+                    "download_source_ids"
+                  ]
+                }
+              ]
+            },
+            "then": {
+              "properties": {
+                "operation": {
+                  "const": "ensure"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "required": [
+                "plan_id"
+              ]
+            },
+            "then": {
+              "required": [
+                "operation_id",
+                "required_capabilities"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "ensure"
+                },
+                "required_capabilities": {
+                  "contains": {
+                    "const": "runtime.install-plan.v1"
+                  }
+                }
+              },
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "profile_id"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "component_ids"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "install_component_ids"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "download_source_ids"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "RuntimeMaintenanceCommandRequest": {
+        "type": "object",
+        "description": "Runtime maintenance command request. On retry, install_component_ids and download_source_ids may explicitly replace the source operation's normalized component/source intent; download source ids replace the selected kind while kinds not present use the Backend-declared default for that kind. Omission reuses the source operation intent. An empty install_component_ids array explicitly selects no optional components. Selection fields are invalid for cancel and MUST be omitted when their capability is absent. plan_id (runtime.install-plan.v1) may only ride a retry that replaces the source operation's plan confirmation: it is invalid for cancel, mutually exclusive with install_component_ids and download_source_ids, and requires required_capabilities to contain runtime.install-plan.v1. Reusing a plan id after its operation was accepted replays the existing receipt rather than retrying; a genuinely new retry must preview a fresh plan_id together with a new operation id. Commands without plan_id keep their legacy semantics.",
+        "required": [
+          "command_id",
+          "command",
+          "target_operation_id"
+        ],
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "command": {
+            "type": "string",
+            "enum": [
+              "cancel",
+              "retry"
+            ]
+          },
+          "target_operation_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "new_operation_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expected_sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "plan_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "install_component_ids": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "download_source_ids": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required_capabilities": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "command": {
+                  "const": "retry"
+                }
+              },
+              "required": [
+                "command"
+              ]
+            },
+            "then": {
+              "required": [
+                "new_operation_id"
+              ]
+            }
+          },
+          {
+            "if": {
+              "anyOf": [
+                {
+                  "required": [
+                    "install_component_ids"
+                  ]
+                },
+                {
+                  "required": [
+                    "download_source_ids"
+                  ]
+                }
+              ]
+            },
+            "then": {
+              "properties": {
+                "command": {
+                  "const": "retry"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "command": {
+                  "const": "cancel"
+                }
+              },
+              "required": [
+                "command"
+              ]
+            },
+            "then": {
+              "not": {
+                "required": [
+                  "plan_id"
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "required": [
+                "plan_id"
+              ]
+            },
+            "then": {
+              "properties": {
+                "command": {
+                  "const": "retry"
+                },
+                "required_capabilities": {
+                  "contains": {
+                    "const": "runtime.install-plan.v1"
+                  }
+                }
+              },
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "install_component_ids"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "download_source_ids"
+                    ]
+                  }
+                ]
+              },
+              "required": [
+                "required_capabilities"
+              ]
+            }
+          }
+        ],
+        "additionalProperties": false
+      },
+      "RuntimeMaintenanceReceipt": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "operation_id",
+          "snapshot",
+          "negotiated_capabilities"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "operation_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/RuntimeMaintenanceStatus"
+          },
+          "negotiated_capabilities": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "RuntimeMaintenanceEvent": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "event_type",
+          "sequence",
+          "operation",
+          "snapshot",
+          "message_code"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "event_type": {
+            "type": "string",
+            "enum": [
+              "snapshot",
+              "progress",
+              "heartbeat"
+            ]
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "inspect",
+              "ensure",
+              "repair"
+            ]
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/RuntimeMaintenanceStatus"
+          },
+          "message_code": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message_args": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "fallback_message": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "RuntimeMaintenanceUpdate": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "operation_id",
+          "snapshot",
+          "events",
+          "oldest_sequence",
+          "through_sequence",
+          "more",
+          "replay_expires_at"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "operation_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/RuntimeMaintenanceStatus"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RuntimeMaintenanceEvent"
+            }
+          },
+          "oldest_sequence": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "through_sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "more": {
+            "type": "boolean"
+          },
+          "replay_expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RuntimeSourceIdentity": {
+        "type": "object",
+        "required": [
+          "backend_version",
+          "backend_source_sha",
+          "runtime_manifest_sha256",
+          "protocol_version",
+          "protocol_manifest_sha256"
+        ],
+        "properties": {
+          "backend_version": {
+            "type": "string",
+            "minLength": 1
+          },
+          "backend_source_sha": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          },
+          "runtime_manifest_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "protocol_version": {
+            "type": "string",
+            "minLength": 1
+          },
+          "protocol_manifest_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RuntimeComponentState": {
+        "type": "string",
+        "enum": [
+          "not_required",
+          "pending",
+          "installing",
+          "verifying",
+          "ready",
+          "failed",
+          "cancelled"
+        ]
+      },
+      "RuntimeComponentStatus": {
+        "type": "object",
+        "required": [
+          "component_id",
+          "display_name",
+          "state"
+        ],
+        "properties": {
+          "component_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "state": {
+            "$ref": "#/components/schemas/RuntimeComponentState"
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "desired_state": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "not_required"
+            ]
+          },
+          "desired_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "actual_state": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "missing",
+              "drifted",
+              "unknown"
+            ]
+          },
+          "actual_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "drift_reason": {
+            "type": "string",
+            "enum": [
+              "none",
+              "missing",
+              "version_mismatch",
+              "identity_mismatch",
+              "integrity_failed",
+              "unexpected"
+            ]
+          },
+          "repairable": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RuntimeMaintenanceStatus": {
+        "type": "object",
+        "required": [
+          "operation_id",
+          "sequence",
+          "operation",
+          "operation_state",
+          "phase",
+          "profile_id",
+          "updated_at"
+        ],
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_operation_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "inspect",
+              "ensure",
+              "repair"
+            ]
+          },
+          "operation_state": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "validate_binding",
+              "wait_for_lock",
+              "prepare_runtime",
+              "install_profile",
+              "install_backend",
+              "verify_runtime",
+              "commit_runtime"
+            ]
+          },
+          "profile_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "component_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProgressSnapshot"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "message_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requested_component_ids": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "effective_component_ids": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "requested_download_source_ids": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "effective_download_source_ids": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "source": {
+            "$ref": "#/components/schemas/RuntimeSourceIdentity"
+          },
+          "plan_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "RuntimeProfileStatus": {
+        "type": "object",
+        "required": [
+          "profile_id",
+          "accelerator",
+          "components"
+        ],
+        "properties": {
+          "profile_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "accelerator": {
+            "type": "string",
+            "enum": [
+              "cpu",
+              "nvidia_cuda"
+            ]
+          },
+          "components": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RuntimeComponentStatus"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "RuntimeServiceState": {
+        "type": "string",
+        "enum": [
+          "ready",
+          "degraded",
+          "maintenance"
+        ]
+      },
+      "RuntimeStatusSnapshot": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "instance_id",
+          "service_state",
+          "backend_version",
+          "profile",
+          "maintenance"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "service_state": {
+            "$ref": "#/components/schemas/RuntimeServiceState"
+          },
+          "backend_version": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source": {
+            "$ref": "#/components/schemas/RuntimeSourceIdentity"
+          },
+          "profile": {
+            "$ref": "#/components/schemas/RuntimeProfileStatus"
+          },
+          "maintenance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeMaintenanceStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "RuntimePreloadRequest": {
+        "type": "object",
+        "description": "Preload recognition modes whose runtime-declared lifecycle supports preload. Besides model-residency warm-up this includes mineru_document: its preload is the explicit first-time preparation entry (the Backend triggers the native MinerU model preparation and actually parses a controlled sample, then updates the tier catalog by the tiers that succeeded; a failure MUST NOT switch the requested tier or claim an unsuccessfully verified tier as ready; tiers already verified successfully MAY remain ready, and service health alone is never readiness evidence). The response stays ResidencyStatus and clients MUST explicitly re-read the mineru config catalog after completion. recognition_modes is authoritative when ocr.recognition-modes.v1 is negotiated; pipelines remains the required legacy execution projection for Protocol v2 compatibility. The server validates that both fields agree. Preload never changes a mode's lifecycle kind: mineru_document remains process_keep_alive without pinning.",
+        "required": [
+          "pipelines"
+        ],
+        "properties": {
+          "pipelines": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "recognition_modes": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/RecognitionModeId"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "RuntimeReleaseRequest": {
+        "type": "object",
+        "required": [],
+        "properties": {
+          "pipeline": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recognition_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecognitionModeId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "SaveRequest": {
+        "properties": {
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Path"
+          },
+          "pdf_settings": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Pdf Settings"
+          },
+          "rewrite_text_layers": {
+            "default": true,
+            "title": "Rewrite Text Layers",
+            "type": "boolean"
+          }
+        },
+        "type": "object",
+        "additionalProperties": false
+      },
+      "SaveResponse": {
+        "properties": {
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "diff": {
+            "$ref": "#/components/schemas/ModelDiff"
+          }
+        },
+        "required": [
+          "path",
+          "diff"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "SettingsResidency": {
+        "type": "object",
+        "required": [
+          "default_ttl_seconds",
+          "pipelines"
+        ],
+        "properties": {
+          "default_ttl_seconds": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "pipelines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PipelineSpec"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "SettingsSnapshot": {
+        "type": "object",
+        "description": "Backend settings snapshot/exchange. download_source_ids persists at most one selected source per kind; array order has no priority meaning. Each present id overrides the source for its kind, while kinds not present use the Backend-declared default for that kind. Maintenance start snapshots this preference into its operation intent. Clients SHOULD send the current selection when the capability is declared and MUST omit it otherwise; an empty in-memory selection MUST serialize as omission. Omission delegates all kinds to Backend-declared defaults and unknown ids fail closed with DOWNLOAD_SOURCE_UNKNOWN.",
+        "required": [
+          "schema_version",
+          "residency",
+          "extra"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 2
+          },
+          "residency": {
+            "$ref": "#/components/schemas/SettingsResidency"
+          },
+          "extra": {
+            "type": "object",
+            "description": "When ocr.mineru-remote-api.v1 is advertised, mineru_connection selects the instance-wide MinerU connection: an object with mode local or remote, api_url (HTTP(S) service root, optional reverse-proxy path; no userinfo, query or fragment), and optional api_key (Bearer credential without CR/LF). Omission selects local mode. Remote mode requires a nonempty api_url and uses the complete MinerU 4 V1 parsing API without local MinerU dependencies or models. Clients MUST NOT send mineru_connection to runtimes lacking this capability. Invalid settings MUST be rejected without replacing the prior configuration. Active jobs MUST retain their original connection; servers may reject connection changes while jobs are active. Remote failures MUST NOT fall back to local execution. Credentials MUST NOT appear in logs or diagnostics or be forwarded to another origin. Remote service processes and model residency are owned by the remote deployment, not by local preload/release or TTL settings. Other extra keys retain their existing semantics.",
+            "additionalProperties": true
+          },
+          "download_source_ids": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "StageEvent": {
+        "type": "object",
+        "required": [
+          "sequence",
+          "stage",
+          "item_id",
+          "timestamp",
+          "detail"
+        ],
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "stage": {
+            "type": "string"
+          },
+          "item_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "detail": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "progress": {
+            "$ref": "#/components/schemas/ProgressSnapshot"
+          },
+          "message_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "SubmitItem": {
+        "type": "object",
+        "required": [
+          "client_item_key",
+          "ordinal",
+          "display_name",
+          "source"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "client_item_key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "ordinal": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "source": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": [
+                  "type",
+                  "attachment"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
+                    "const": "upload.v1"
+                  },
+                  "attachment": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type",
+                  "session_id",
+                  "session_revision",
+                  "page_index"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
+                    "const": "pdf_page.v1"
+                  },
+                  "session_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "session_revision": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "page_index": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "SubmitRequest": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "request_id",
+          "kind",
+          "priority",
+          "pipeline",
+          "items",
+          "parameters"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "schema_version": {
+            "type": "integer",
+            "const": 2
+          },
+          "request_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "recognition",
+              "pdf_ocr",
+              "mineru_parse"
+            ]
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "interactive",
+              "background"
+            ]
+          },
+          "pipeline": {
+            "$ref": "#/components/schemas/PipelineSelection"
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/SubmitItem"
+            }
+          },
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      "TextBlockMirror": {
+        "description": "单个 OCR 文本块(对应 models.ocr_result.TextBlock 的可序列化投影)。\n\nocr_text_blocks 在 PdfPageInfo 里是 list[TextBlock],跨进程序列化时\n只保留写入 PDF / 预览所需的字段。",
+        "properties": {
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          },
+          "bbox": {
+            "anyOf": [
+              {
+                "maxItems": 4,
+                "minItems": 4,
+                "prefixItems": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ],
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Bbox"
+          },
+          "polygon": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Polygon"
+          },
+          "page_idx": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Page Idx"
+          },
+          "is_manually_edited": {
+            "default": false,
+            "title": "Is Manually Edited",
+            "type": "boolean"
+          },
+          "label": {
+            "default": "text",
+            "title": "Label",
+            "type": "string"
+          },
+          "order": {
+            "default": -1,
+            "title": "Order",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "text",
+          "score"
+        ],
+        "title": "TextBlockMirror",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "TextLayerInfoMirror": {
+        "description": "单个文字层信息(对应 models.pdf_document.TextLayerInfo)。",
+        "properties": {
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "text_preview": {
+            "title": "Text Preview",
+            "type": "string"
+          },
+          "char_count": {
+            "title": "Char Count",
+            "type": "integer"
+          },
+          "bbox": {
+            "maxItems": 4,
+            "minItems": 4,
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Bbox",
+            "type": "array"
+          },
+          "color_id": {
+            "title": "Color Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "index",
+          "text_preview",
+          "char_count",
+          "bbox",
+          "color_id"
+        ],
+        "title": "TextLayerInfoMirror",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "UpdateBlockTextRequest": {
+        "description": "双击编辑文字块(仅更新内存模型,不落盘)。",
+        "properties": {
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          },
+          "block_index": {
+            "title": "Block Index",
+            "type": "integer"
+          },
+          "new_text": {
+            "title": "New Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "page",
+          "block_index",
+          "new_text"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      }
+    }
+  }
+}

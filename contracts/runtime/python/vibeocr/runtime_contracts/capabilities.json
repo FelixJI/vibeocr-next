@@ -1,0 +1,178 @@
+{
+  "version": 2,
+  "capabilities": [
+    "ocr.recognition.v2",
+    "pdf.edit.v2",
+    "qrcode.v2",
+    "export.document.v1",
+    "runtime.settings.v2",
+    "runtime.maintenance.v1",
+    "task.progress.v1",
+    "runtime.maintenance.v2",
+    "runtime.component-repair.v1",
+    "runtime.capability-metadata.v1",
+    "runtime.events.sse.v1",
+    "runtime.events.ndjson.v1",
+    "ocr.engine-selection.v1",
+    "runtime.download-sources.v1",
+    "runtime.component-selection.v1",
+    "ocr.recognition-modes.v1",
+    "ocr.mineru-config.v1",
+    "runtime.install-plan.v1",
+    "ocr.mineru-remote-api.v1"
+  ],
+  "definitions": {
+    "ocr.recognition.v2": {
+      "description": "Submit, observe, cancel, retry, and forget Runtime API v2 OCR jobs.",
+      "lifecycle": "active",
+      "introduced_in": "2.0.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "pdf.edit.v2": {
+      "description": "Open, render, inspect, mutate, stream, and save PDF sessions.",
+      "lifecycle": "active",
+      "introduced_in": "2.0.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "qrcode.v2": {
+      "description": "Decode QR/barcode images and generate QR or SVG image envelopes.",
+      "lifecycle": "active",
+      "introduced_in": "2.0.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "export.document.v1": {
+      "description": "Export OCR content to document formats supported by the Backend.",
+      "lifecycle": "active",
+      "introduced_in": "2.0.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "runtime.settings.v2": {
+      "description": "Inspect residency, preload/release pipelines, and exchange Runtime settings.",
+      "lifecycle": "active",
+      "introduced_in": "2.0.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "runtime.maintenance.v1": {
+      "description": "Observe Runtime Host maintenance over opt-in NDJSON and inspect the authenticated HTTP runtime status snapshot.",
+      "lifecycle": "active",
+      "introduced_in": "2.2.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "task.progress.v1": {
+      "description": "Consume typed units and determinate or indeterminate progress on Runtime jobs and stage events.",
+      "lifecycle": "active",
+      "introduced_in": "2.2.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "runtime.maintenance.v2": {
+      "description": "Use idempotent Runtime maintenance operations, commands, durable sequence cursors, and replay.",
+      "lifecycle": "active",
+      "introduced_in": "2.3.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "runtime.component-repair.v1": {
+      "description": "Inspect desired and actual component drift and request repair by stable component id.",
+      "lifecycle": "active",
+      "introduced_in": "2.3.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "runtime.capability-metadata.v1": {
+      "description": "Negotiate required capabilities and consume lifecycle, deprecation, sunset, and replacement metadata.",
+      "lifecycle": "active",
+      "introduced_in": "2.3.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "runtime.events.sse.v1": {
+      "description": "Replay and follow authenticated Runtime maintenance events as Server-Sent Events after Supervisor readiness.",
+      "lifecycle": "active",
+      "introduced_in": "2.3.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "runtime.events.ndjson.v1": {
+      "description": "Replay and follow authenticated Runtime maintenance events as HTTP NDJSON after Supervisor readiness.",
+      "lifecycle": "active",
+      "introduced_in": "2.3.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "ocr.engine-selection.v1": {
+      "description": "Select the plain-text OCR engine explicitly on job submission and consume the structured engine catalog carried by capability descriptors.",
+      "lifecycle": "active",
+      "introduced_in": "2.6.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "runtime.download-sources.v1": {
+      "description": "Select dependency package indexes and native-engine model-source preferences from the Backend-declared catalog, carried by capability descriptors and exchanged as stable source ids without transferring model-file lifecycle ownership to VibeOCR.",
+      "lifecycle": "active",
+      "introduced_in": "2.7.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "runtime.component-selection.v1": {
+      "description": "Manually select the install scope of optional feature dependencies from the Backend-declared variant catalog, exchanged as install_component_ids with the dependency closure reported honestly.",
+      "lifecycle": "active",
+      "introduced_in": "2.7.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "ocr.recognition-modes.v1": {
+      "description": "Discover user-semantic recognition modes and their exact execution mapping, provisioning, availability, supported options, and honest model-residency or child-process lifecycle capabilities.",
+      "lifecycle": "active",
+      "introduced_in": "2.8.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "ocr.mineru-config.v1": {
+      "description": "Select the typed MinerU 4 tier, OCR mode, canonical page range and language on mineru_parse jobs, negotiated against the Backend-declared tier and language catalog carried by capability descriptors.",
+      "lifecycle": "active",
+      "introduced_in": "2.8.1",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "ocr.mineru-remote-api.v1": {
+      "description": "Configure a self-hosted MinerU 4 V1 parsing service through SettingsSnapshot.extra.mineru_connection without installing local MinerU dependencies or models; retain local mode and never fall back from a failed remote request to local execution.",
+      "lifecycle": "active",
+      "introduced_in": "2.9.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "runtime.install-plan.v1": {
+      "description": "Preview a read-only Runtime install plan for ensure over runtime.maintenance.v2, runtime.component-selection.v1 and runtime.download-sources.v1: requested and effective component/source closures, retain/install/replace/remove actions with machine reason codes, honest blockers with next actions, deduplicated cost totals and expiry, confirmed later via plan_id on maintenance start or retry without installing, downloading, or changing any active environment.",
+      "lifecycle": "active",
+      "introduced_in": "2.9.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    }
+  }
+}

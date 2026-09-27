@@ -9,7 +9,9 @@ Next package locks with an isolated NuGet cache, then proves the committed
 graph restores in locked mode from a second empty cache.
 #>
 [CmdletBinding()]
-param()
+param(
+    [switch]$InternalOnly
+)
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -22,6 +24,26 @@ $dotnet = if ($env:DOTNET_ROOT) {
 }
 if (-not (Test-Path -LiteralPath $dotnet -PathType Leaf)) {
     throw '64-bit dotnet SDK is required'
+}
+
+$internalProjects = @(
+    'tests\dotnet\VibeOCR.Contracts.Tests\VibeOCR.Contracts.Tests.csproj',
+    'tests\dotnet\VibeOCR.Runtime.Client.Tests\VibeOCR.Runtime.Client.Tests.csproj'
+)
+
+if ($InternalOnly) {
+    foreach ($project in $internalProjects) {
+        & $dotnet restore (Join-Path $repo $project) -p:UpdatePackageLocks=true
+        if ($LASTEXITCODE -ne 0) {
+            throw "internal lock regeneration failed: $project"
+        }
+        & $dotnet restore (Join-Path $repo $project) --locked-mode
+        if ($LASTEXITCODE -ne 0) {
+            throw "internal locked restore failed: $project"
+        }
+    }
+    Write-Host 'Internal .NET package locks regenerated and verified.'
+    return
 }
 
 [xml]$packageProps = Get-Content -LiteralPath $packagePropsPath -Raw
@@ -64,7 +86,7 @@ $projects = @(
     'tests\dotnet\VibeOCR.App.Tests\VibeOCR.App.Tests.csproj',
     'src\dotnet\VibeOCR.App\VibeOCR.App.csproj',
     'src\dotnet\VibeOCR.Bootstrapper\VibeOCR.Bootstrapper.csproj'
-)
+) + $internalProjects
 
 if (Test-Path -LiteralPath $feed) {
     Remove-Item -LiteralPath $feed -Recurse -Force
