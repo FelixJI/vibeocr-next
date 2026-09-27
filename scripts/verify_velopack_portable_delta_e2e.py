@@ -1,4 +1,4 @@
-"""Run a real adjacent-delta Velopack Portable apply/restart E2E on Windows."""
+"""Run a real full or delta Velopack Portable apply/restart E2E on Windows."""
 
 from __future__ import annotations
 
@@ -333,7 +333,7 @@ def main() -> int:
         require_package_type=args.require_package_type,
         legacy_state_layout=args.legacy_state_layout,
     )
-    print("Velopack Portable adjacent-delta E2E passed")
+    print(f"Velopack Portable {args.require_package_type} E2E passed")
     return 0
 
 
