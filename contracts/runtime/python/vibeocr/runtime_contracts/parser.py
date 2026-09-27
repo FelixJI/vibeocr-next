@@ -840,17 +840,17 @@ def _parse_runtime_source_identity(payload: Any) -> RuntimeSourceIdentity:
         "backend_version",
         "backend_source_sha",
         "runtime_manifest_sha256",
-        "protocol_version",
-        "protocol_manifest_sha256",
     )
     _require_fields(payload, fields, "runtime source identity")
+    if set(payload) != set(fields):
+        raise ContractError("runtime source identity contains unsupported fields")
     if any(not isinstance(payload[field], str) for field in fields):
         raise ContractError("runtime source identity fields must be strings")
     if len(payload["backend_source_sha"]) != 40 or any(
         char not in "0123456789abcdef" for char in payload["backend_source_sha"]
     ):
         raise ContractError("backend_source_sha must be a full lowercase Git SHA")
-    for field in ("runtime_manifest_sha256", "protocol_manifest_sha256"):
+    for field in ("runtime_manifest_sha256",):
         value = payload[field]
         if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
             raise ContractError(f"{field} must be a lowercase SHA-256 digest")

@@ -1,108 +1,14 @@
 from __future__ import annotations
 
-import hashlib
 import json
-import zipfile
 from typing import TYPE_CHECKING
 
-from scripts.bind_component_releases import bind_product_releases
 from scripts.finalize_product_release import finalize_product_release
 from scripts.product_layout import stage_product_layout
+from tests.runtime.test_internal_product_binding import _candidate
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-def _sha(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
-
-
-def _releases(tmp_path: Path) -> tuple[Path, Path]:
-    protocol = tmp_path / "protocol"
-    protocol.mkdir()
-    protocol_wheel = protocol / "vibeocr_runtime_contracts-2.0.0-py3-none-any.whl"
-    protocol_wheel.write_bytes(b"protocol")
-    protocol_manifest = protocol / "release-manifest.json"
-    protocol_manifest.write_text(
-        json.dumps(
-            {
-                "protocol_version": "2.0.0",
-                "artifacts": {
-                    protocol_wheel.name: {
-                        "sha256": _sha(b"protocol"),
-                        "size": len(b"protocol"),
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    backend = tmp_path / "backend-release"
-    backend.mkdir()
-    backend_wheel = backend / "vibeocr_backend-0.7.0-py3-none-any.whl"
-    backend_wheel.write_bytes(b"backend")
-    copied_protocol_wheel = backend / protocol_wheel.name
-    copied_protocol_wheel.write_bytes(protocol_wheel.read_bytes())
-    copied_manifest = backend / "protocol-release-manifest.json"
-    copied_manifest.write_bytes(protocol_manifest.read_bytes())
-    python = backend / "python.tar.gz"
-    python.write_bytes(b"python")
-    base_lock = backend / "base.lock"
-    base_lock.write_bytes(b"base")
-    cpu_lock = backend / "cpu.lock"
-    cpu_lock.write_bytes(b"cpu")
-    base_pack = backend / "base-pack.zip"
-    base_pack.write_bytes(b"base-pack")
-    installer = backend / "installer.zip"
-    with zipfile.ZipFile(installer, "w") as archive:
-        archive.writestr("runtime-installer/installer.exe", b"installer")
-    runtime_manifest = backend / "runtime-manifest.json"
-    runtime_manifest.write_text(
-        json.dumps(
-            {
-                "backend_version": "0.7.0",
-                "backend_wheel": backend_wheel.name,
-                "backend_sha256": _sha(b"backend"),
-                "protocol_manifest": copied_manifest.name,
-                "protocol_manifest_sha256": _sha(copied_manifest.read_bytes()),
-                "protocol_wheel": copied_protocol_wheel.name,
-                "protocol_sha256": _sha(copied_protocol_wheel.read_bytes()),
-                "python": {"archive": python.name, "sha256": _sha(b"python")},
-                "installer": {
-                    "archive": installer.name,
-                    "sha256": _sha(installer.read_bytes()),
-                    "executable_path": "runtime-installer/installer.exe",
-                    "executable_sha256": _sha(b"installer"),
-                },
-                "profiles": {
-                    "win-x64-base": {
-                        "lock": base_lock.name,
-                        "sha256": _sha(b"base"),
-                        "runtime_pack": [base_pack.name],
-                    },
-                    "win-x64-cpu": {
-                        "lock": cpu_lock.name,
-                        "sha256": _sha(b"cpu"),
-                        "runtime_pack": None,
-                    },
-                },
-                "capabilities": ["ocr.recognition.v2"],
-            }
-        ),
-        encoding="utf-8",
-    )
-    (backend / "release-manifest.json").write_text("{}", encoding="utf-8")
-    (backend / "build-identity.json").write_text("{}", encoding="utf-8")
-    checksums = backend / "SHA256SUMS"
-    checksums.write_text(
-        "".join(
-            f"{_sha(path.read_bytes())}  {path.name}\n"
-            for path in sorted(backend.iterdir(), key=lambda item: item.name)
-            if path.is_file() and path != checksums
-        ),
-        encoding="utf-8",
-    )
-    return protocol, backend
 
 
 def _stage_product(
@@ -130,7 +36,16 @@ def _stage_product(
     ):
         (tmp_path / dependency).write_bytes(dependency.encode())
     identities = tmp_path / f"{name}-identities.json"
-    identities.write_text("{}", encoding="utf-8")
+    identities.write_text(
+        json.dumps(
+            {
+                "project": json.loads(
+                    (backend / "runtime-manifest.json").read_text(encoding="utf-8")
+                )["product"]
+            }
+        ),
+        encoding="utf-8",
+    )
     license_file = tmp_path / f"{name}-LICENSE"
     license_file.write_text("license", encoding="utf-8")
     changelog = tmp_path / f"{name}-CHANGELOG.md"
@@ -150,31 +65,20 @@ def _stage_product(
 
 
 def test_product_finalize_is_deterministic_and_binds_runtime(tmp_path: Path) -> None:
-    protocol, backend = _releases(tmp_path)
-    component_lock = tmp_path / "component-lock.json"
-    bind_product_releases(
-        protocol_release_dir=protocol,
-        backend_release_dir=backend,
-        protocol_repository="FelixJI/vibeocr-protocol",
-        protocol_version="2.0.0",
-        backend_repository="FelixJI/vibeocr-backend",
-        backend_version="0.7.0",
-        accelerator="cpu",
-        required_capabilities=("ocr.recognition.v2",),
-        output=component_lock,
-    )
+    inputs, runtime_manifest = _candidate(tmp_path)
+    backend = runtime_manifest.parent
+    component_lock = inputs["component_lock"]
     manifests = []
     for name in ("first", "second"):
         product = _stage_product(tmp_path, name, backend, component_lock)
         manifests.append(
             finalize_product_release(
                 product_root=product,
-                frontend="classic",
+                frontend="next",
                 frontend_version="0.7.0",
-                source_commit="a" * 40,
+                source_commit="0" * 40,
                 component_lock=component_lock,
-                protocol_release_dir=protocol,
-                backend_release_dir=backend,
+                runtime_dir=backend,
             )
         )
     assert manifests[0].read_bytes() == manifests[1].read_bytes()
@@ -187,19 +91,9 @@ def test_product_finalize_is_deterministic_and_binds_runtime(tmp_path: Path) -> 
 def test_product_finalize_accepts_equivalent_crlf_component_lock(
     tmp_path: Path,
 ) -> None:
-    protocol, backend = _releases(tmp_path)
-    component_lock = tmp_path / "component-lock.json"
-    bind_product_releases(
-        protocol_release_dir=protocol,
-        backend_release_dir=backend,
-        protocol_repository="FelixJI/vibeocr-protocol",
-        protocol_version="2.0.0",
-        backend_repository="FelixJI/vibeocr-backend",
-        backend_version="0.7.0",
-        accelerator="cpu",
-        required_capabilities=("ocr.recognition.v2",),
-        output=component_lock,
-    )
+    inputs, runtime_manifest = _candidate(tmp_path)
+    backend = runtime_manifest.parent
+    component_lock = inputs["component_lock"]
     component_lock.write_bytes(
         component_lock.read_text(encoding="utf-8").replace("\n", "\r\n").encode()
     )
@@ -208,11 +102,10 @@ def test_product_finalize_accepts_equivalent_crlf_component_lock(
     output = finalize_product_release(
         product_root=product,
         frontend="next",
-        frontend_version="0.1.0-preview.1",
-        source_commit="a" * 40,
+        frontend_version="0.7.0",
+        source_commit="0" * 40,
         component_lock=component_lock,
-        protocol_release_dir=protocol,
-        backend_release_dir=backend,
+        runtime_dir=backend,
     )
 
     assert output.is_file()

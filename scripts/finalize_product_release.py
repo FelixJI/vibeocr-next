@@ -1,18 +1,17 @@
-"""Bind verified component releases and finalize the Velopack pack directory."""
+"""Bind the verified Next runtime and finalize the Velopack pack directory."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
-import tempfile
 from pathlib import Path
 
+from vibeocr.runtime.environments.runtime_manifest import load_runtime_manifest
+
 if __package__:
-    from .bind_component_releases import bind_product_releases
     from .product_layout import load_staged_product_layout
 else:
-    from bind_component_releases import bind_product_releases
     from product_layout import load_staged_product_layout
 
 PROHIBITED_ROOTS = {".git", "apps", "contracts", "packages", "supervisor", "tests"}
@@ -37,10 +36,9 @@ def finalize_product_release(
     frontend_version: str,
     source_commit: str,
     component_lock: Path,
-    protocol_release_dir: Path,
-    backend_release_dir: Path,
+    runtime_dir: Path,
 ) -> Path:
-    """Verify component bindings and write the product closure manifest."""
+    """Verify the product binding and write the product closure manifest."""
 
     product_root = product_root.resolve(strict=True)
     if not product_root.is_dir():
@@ -54,34 +52,31 @@ def finalize_product_release(
         raise ValueError(f"prohibited source roots in product layout: {prohibited}")
     lock_path = component_lock.resolve(strict=True)
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    protocol = lock["protocol"]
-    backend = lock["backend"]
-    required_capabilities = tuple(lock["required_capabilities"])
-    with tempfile.TemporaryDirectory(prefix="vibeocr-component-lock-") as temp:
-        generated = Path(temp) / "component-lock.json"
-        bind_product_releases(
-            protocol_release_dir=protocol_release_dir,
-            backend_release_dir=backend_release_dir,
-            protocol_repository=str(protocol["repository"]),
-            protocol_version=str(protocol["version"]),
-            backend_repository=str(backend["repository"]),
-            backend_version=str(backend["version"]),
-            accelerator=str(backend["accelerator"]),
-            required_capabilities=required_capabilities,
-            output=generated,
-        )
-        if json.loads(generated.read_text(encoding="utf-8")) != lock:
-            raise ValueError("committed component lock differs from verified releases")
+    runtime_manifest = load_runtime_manifest(runtime_dir / "runtime-manifest.json")
+    product = lock.get("product")
+    if not isinstance(product, dict) or lock.get("schema_version") != 2:
+        raise ValueError("component lock must bind one Next product")
+    if (
+        product.get("component") != "next"
+        or product.get("repository") != "FelixJI/vibeocr-next"
+        or product.get("version") != frontend_version
+        or product.get("source_sha") != source_commit
+        or product.get("runtime_manifest_sha256") != runtime_manifest.sha256
+        or product.get("accelerator") != "cpu"
+        or runtime_manifest.backend_version != frontend_version
+        or runtime_manifest.source_commit != source_commit
+    ):
+        raise ValueError("component lock does not bind the current Next runtime")
+    if set(lock.get("required_capabilities", ())) - set(runtime_manifest.capabilities):
+        raise ValueError("runtime is missing required capabilities")
 
     layout = load_staged_product_layout(product_root)
     embedded_lock = layout.component_lock
     if json.loads(embedded_lock.read_text(encoding="utf-8")) != lock:
         raise ValueError("staged component lock differs from verified releases")
-    runtime_manifest = json.loads(layout.runtime_manifest.read_text(encoding="utf-8"))
-    if (
-        _sha256(layout.runtime_installer)
-        != runtime_manifest["installer"]["executable_sha256"]
-    ):
+    if layout.runtime_manifest.read_bytes() != runtime_manifest.path.read_bytes():
+        raise ValueError("staged runtime manifest differs from verified runtime")
+    if _sha256(layout.runtime_installer) != runtime_manifest.installer.executable_sha256:
         raise ValueError("extracted Runtime Installer hash mismatch")
 
     files = sorted(
@@ -119,8 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--frontend-version", required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--component-lock", type=Path, required=True)
-    parser.add_argument("--protocol-release-dir", type=Path, required=True)
-    parser.add_argument("--backend-release-dir", type=Path, required=True)
+    parser.add_argument("--runtime-dir", type=Path, required=True)
     args = parser.parse_args(argv)
     print(
         finalize_product_release(
@@ -129,8 +123,7 @@ def main(argv: list[str] | None = None) -> int:
             frontend_version=args.frontend_version,
             source_commit=args.source_commit,
             component_lock=args.component_lock,
-            protocol_release_dir=args.protocol_release_dir,
-            backend_release_dir=args.backend_release_dir,
+            runtime_dir=args.runtime_dir,
         )
     )
     return 0

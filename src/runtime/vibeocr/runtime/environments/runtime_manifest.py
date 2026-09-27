@@ -1,4 +1,4 @@
-"""Validation for released Backend runtime manifests and hash locks."""
+"""Validation for product runtime manifests and hash locks."""
 
 from __future__ import annotations
 
@@ -232,14 +232,8 @@ class RuntimeManifest:
     path: Path
     sha256: str
     backend_version: str
-    backend_wheel: str
-    backend_sha256: str
-    protocol: str
-    protocol_version: str
-    protocol_manifest: str
-    protocol_manifest_sha256: str
-    protocol_wheel: str
-    protocol_sha256: str
+    runtime_wheel: str
+    runtime_sha256: str
     python: PythonRuntime
     installer: InstallerArtifact
     profiles: dict[str, RuntimeProfile]
@@ -314,52 +308,6 @@ def _runtime_pack_binding(
     return runtime_pack, tuple(
         _sha256(item, field=f"{field}.runtime_pack_sha256") for item in raw_shas
     )
-
-
-def _validate_protocol_release_manifest(
-    path: Path,
-    *,
-    protocol_version: str,
-    protocol_wheel: str,
-    protocol_sha256: str,
-) -> None:
-    try:
-        value: Any = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise ManifestError("Protocol release manifest is invalid") from exc
-    if not isinstance(value, dict):
-        raise ManifestError("Protocol release manifest must be an object")
-    schema_version = value.get("schema_version")
-    if schema_version == 1:
-        manifest_version = value.get("protocol_version")
-    elif schema_version == 2:
-        project = value.get("project")
-        protocol = value.get("protocol")
-        release = value.get("release")
-        if (
-            not isinstance(project, dict)
-            or project.get("component") != "protocol"
-            or not isinstance(protocol, dict)
-            or not isinstance(release, dict)
-        ):
-            raise ManifestError("Protocol v2 release identity is incomplete")
-        manifest_version = protocol.get("version")
-        if (
-            not isinstance(manifest_version, str)
-            or release.get("version") != manifest_version
-            or release.get("tag") != f"v{manifest_version}"
-        ):
-            raise ManifestError("Protocol v2 release identity mismatch")
-    else:
-        raise ManifestError("unsupported Protocol release manifest schema_version")
-    if manifest_version != protocol_version:
-        raise ManifestError("Protocol release manifest version mismatch")
-    artifacts = value.get("artifacts")
-    if not isinstance(artifacts, dict):
-        raise ManifestError("Protocol release manifest artifacts are invalid")
-    artifact = artifacts.get(protocol_wheel)
-    if not isinstance(artifact, dict) or artifact.get("sha256") != protocol_sha256:
-        raise ManifestError("Protocol wheel is not bound by its release manifest")
 
 
 def scoped_component_version(
@@ -523,40 +471,22 @@ def load_runtime_manifest(
         data: Any = json.loads(raw_bytes)
     except (ValueError, TypeError) as exc:
         raise ManifestError("runtime manifest is invalid JSON") from exc
-    if not isinstance(data, dict) or data.get("schema_version") != 1:
-        raise ManifestError("runtime manifest schema_version must be 1")
-    version = data.get("backend_version")
+    if not isinstance(data, dict) or data.get("schema_version") != 2:
+        raise ManifestError("runtime manifest schema_version must be 2")
+    product = data.get("product")
+    if (
+        not isinstance(product, dict)
+        or product.get("component") != "next"
+        or product.get("repository") != "FelixJI/vibeocr-next"
+    ):
+        raise ManifestError("runtime manifest must bind the Next product")
+    version = product.get("version")
     if not isinstance(version, str) or not _VERSION_RE.fullmatch(version):
-        raise ManifestError("backend_version must be stable SemVer")
-    wheel = _relative_filename(data.get("backend_wheel"), field="backend_wheel")
-    if not wheel.startswith(f"vibeocr_backend-{version}-"):
-        raise ManifestError("backend_wheel does not match backend_version")
-    backend_sha = _sha256(data.get("backend_sha256"), field="backend_sha256")
-    protocol = data.get("protocol")
-    if not isinstance(protocol, str) or protocol != ">=2.0.0,<3.0.0":
-        raise ManifestError("protocol range must be >=2.0.0,<3.0.0")
-    protocol_wheel = _relative_filename(
-        data.get("protocol_wheel"),
-        field="protocol_wheel",
-    )
-    protocol_wheel_match = re.fullmatch(
-        r"vibeocr_runtime_contracts-(2\.\d+\.\d+)-py3-none-any\.whl",
-        protocol_wheel,
-    )
-    if protocol_wheel_match is None:
-        raise ManifestError("protocol_wheel must bind Protocol v2")
-    protocol_version = protocol_wheel_match.group(1)
-    protocol_sha = _sha256(data.get("protocol_sha256"), field="protocol_sha256")
-    protocol_manifest = _relative_filename(
-        data.get("protocol_manifest"),
-        field="protocol_manifest",
-    )
-    if protocol_manifest != "protocol-release-manifest.json":
-        raise ManifestError("protocol_manifest must be protocol-release-manifest.json")
-    protocol_manifest_sha = _sha256(
-        data.get("protocol_manifest_sha256"),
-        field="protocol_manifest_sha256",
-    )
+        raise ManifestError("product.version must be stable SemVer")
+    wheel = _relative_filename(data.get("runtime_wheel"), field="runtime_wheel")
+    if wheel != f"vibeocr_next_runtime-{version}-py3-none-any.whl":
+        raise ManifestError("runtime_wheel does not match product.version")
+    runtime_sha = _sha256(data.get("runtime_sha256"), field="runtime_sha256")
     python_data = data.get("python")
     if not isinstance(python_data, dict):
         raise ManifestError("python runtime binding is required")
@@ -867,30 +797,18 @@ def load_runtime_manifest(
         or not all(isinstance(item, str) and item for item in capabilities)
     ):
         raise ManifestError("capabilities must be a non-empty string list")
-    source_commit = data.get("source_commit")
+    source_commit = product.get("source_sha")
     if not isinstance(source_commit, str) or not re.fullmatch(
         r"[0-9a-f]{40}", source_commit
     ):
-        raise ManifestError("source_commit must be a full Git SHA")
+        raise ManifestError("product.source_sha must be a full Git SHA")
     workflow = data.get("build_workflow")
     if not isinstance(workflow, str) or not workflow.strip():
         raise ManifestError("build_workflow is required")
     if verify_artifacts:
         wheel_path = manifest_path.parent / wheel
-        if sha256_file(wheel_path) != backend_sha:
-            raise ManifestError("Backend wheel SHA-256 mismatch")
-        protocol_path = manifest_path.parent / protocol_wheel
-        if sha256_file(protocol_path) != protocol_sha:
-            raise ManifestError("Protocol wheel SHA-256 mismatch")
-        protocol_manifest_path = manifest_path.parent / protocol_manifest
-        if sha256_file(protocol_manifest_path) != protocol_manifest_sha:
-            raise ManifestError("Protocol manifest SHA-256 mismatch")
-        _validate_protocol_release_manifest(
-            protocol_manifest_path,
-            protocol_version=protocol_version,
-            protocol_wheel=protocol_wheel,
-            protocol_sha256=protocol_sha,
-        )
+        if sha256_file(wheel_path) != runtime_sha:
+            raise ManifestError("Runtime wheel SHA-256 mismatch")
         if sha256_file(python_runtime.archive_path) != python_runtime.sha256:
             raise ManifestError("Python archive SHA-256 mismatch")
         if sha256_file(installer_artifact.archive_path) != installer_artifact.sha256:
@@ -905,14 +823,8 @@ def load_runtime_manifest(
         path=manifest_path,
         sha256=hashlib.sha256(raw_bytes).hexdigest(),
         backend_version=version,
-        backend_wheel=wheel,
-        backend_sha256=backend_sha,
-        protocol=protocol,
-        protocol_version=protocol_version,
-        protocol_manifest=protocol_manifest,
-        protocol_manifest_sha256=protocol_manifest_sha,
-        protocol_wheel=protocol_wheel,
-        protocol_sha256=protocol_sha,
+        runtime_wheel=wheel,
+        runtime_sha256=runtime_sha,
         python=python_runtime,
         installer=installer_artifact,
         profiles=profiles,

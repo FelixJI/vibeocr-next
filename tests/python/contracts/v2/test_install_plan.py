@@ -302,8 +302,6 @@ def test_plan_nullable_request_echo_distinguishes_null_from_empty() -> None:
                 backend_version="2.8.2",
                 backend_source_sha="0" * 40,
                 runtime_manifest_sha256="0" * 64,
-                protocol_version="2.8.2",
-                protocol_manifest_sha256="0" * 64,
             ),
             cost=dtos.RuntimeInstallPlanCost(0, 0),
             requested_download_source_ids=(),

@@ -2,20 +2,14 @@
   "version": 2,
   "dependencies": {
     "net10.0-windows10.0.17763": {
-      "VibeOCR.Runtime.Client": {
-        "type": "Direct",
-        "requested": "[2.9.0, 2.9.0]",
-        "resolved": "2.9.0",
-        "contentHash": "iWq+Tr0EXVWcSieQrDzMbWvuOTHhqQ1XAhp2VLdQomyFDUHLBjXx9sGXthIaZ4eQpUmWgNRgQ3nO8divRokdaA==",
-        "dependencies": {
-          "VibeOCR.Runtime.Contracts": "2.9.0"
-        }
+      "vibeocr.contracts": {
+        "type": "Project"
       },
-      "VibeOCR.Runtime.Contracts": {
-        "type": "Direct",
-        "requested": "[2.9.0, 2.9.0]",
-        "resolved": "2.9.0",
-        "contentHash": "WTqT9jRbiA63Z4dkJCqp1Afh52EJ3yMkaDEhmV14DD78uAPxkbEfPqc3VQgESQ57HzlR6yTbUcVfGYP4Dx0h0g=="
+      "vibeocr.runtime.client": {
+        "type": "Project",
+        "dependencies": {
+          "VibeOCR.Contracts": "[1.0.0, )"
+        }
       }
     }
   }

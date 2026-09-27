@@ -1787,12 +1787,6 @@ public sealed record RuntimeSourceIdentity
 
     [JsonPropertyName("runtime_manifest_sha256")]
     public required string RuntimeManifestSha256 { get; init; }
-
-    [JsonPropertyName("protocol_version")]
-    public required string ProtocolVersion { get; init; }
-
-    [JsonPropertyName("protocol_manifest_sha256")]
-    public required string ProtocolManifestSha256 { get; init; }
 }
 
 public sealed record RuntimeStatusSnapshot

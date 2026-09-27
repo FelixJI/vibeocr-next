@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import ast
 import hashlib
-import inspect
 import json
 import os
 import shutil
@@ -13,16 +11,10 @@ from pathlib import Path
 import pytest
 
 from scripts.automation_core import CommandRunner
-from scripts.bind_component_releases import bind_product_releases
+from scripts.build_product_binding import REQUIRED_CAPABILITIES
 from scripts.check_quality import main as run_quality
 from scripts.check_quality import resolve_executable
 from scripts.release_smoke import verify
-from scripts.resolve_component_releases import (
-    _api,
-    assert_protocol_compatible,
-    bound_protocol_version,
-    compile_protocol_version,
-)
 from scripts.sync_version import sync_version
 
 
@@ -48,86 +40,8 @@ def _write_velopack_feed(artifacts: Path, version: str) -> None:
     )
 
 
-def test_protocol_compatibility_requires_declared_major_and_minor() -> None:
-    compatibility = {"supported_majors": [2], "minor_compatible": True}
-    assert_protocol_compatible("2.0.0", compatibility)
-    assert_protocol_compatible("2.99.0", compatibility)
-    with pytest.raises(ValueError, match="no fallback"):
-        assert_protocol_compatible("3.0.0", compatibility)
-
-
-def test_compile_sdk_version_is_pinned_independently_from_runtime(
-    tmp_path: Path,
-) -> None:
-    (tmp_path / "Directory.Packages.props").write_text(
-        """<Project><ItemGroup>
-        <PackageVersion Include="VibeOCR.Runtime.Contracts" Version="[2.0.0]" />
-        <PackageVersion Include="VibeOCR.Runtime.Client" Version="[2.0.0]" />
-        </ItemGroup></Project>""",
-        encoding="utf-8",
-    )
-
-    assert compile_protocol_version(tmp_path) == "2.0.0"
-
-
-def test_newer_sdk_and_older_bound_runtime_are_minor_compatible() -> None:
-    compatibility = {"supported_majors": [2], "minor_compatible": True}
-
-    assert_protocol_compatible("2.3.0", compatibility)
-    assert_protocol_compatible("2.0.0", compatibility)
-
-
-def test_reads_backend_bound_protocol_v2_identity(tmp_path: Path) -> None:
-    (tmp_path / "protocol-release-manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 2,
-                "project": {"component": "protocol"},
-                "protocol": {"version": "2.1.0"},
-                "release": {"version": "2.1.0", "tag": "v2.1.0"},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    assert bound_protocol_version(tmp_path) == "2.1.0"
-
-
-def test_resolver_binding_keywords_match_the_binding_api() -> None:
-    root = Path(__file__).parents[2]
-    tree = ast.parse(
-        (root / "scripts/resolve_component_releases.py").read_text(encoding="utf-8")
-    )
-    calls = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "bind_product_releases"
-    ]
-
-    assert len(calls) == 1
-    passed_keywords = {keyword.arg for keyword in calls[0].keywords}
-    accepted_keywords = set(inspect.signature(bind_product_releases).parameters)
-    assert passed_keywords <= accepted_keywords
-
-
-def test_component_resolver_requires_selection_and_mineru_capabilities() -> None:
-    root = Path(__file__).parents[2]
-    tree = ast.parse(
-        (root / "scripts/resolve_component_releases.py").read_text(encoding="utf-8")
-    )
-    call = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "bind_product_releases"
-    )
-    keyword = next(
-        keyword for keyword in call.keywords if keyword.arg == "required_capabilities"
-    )
-    required = ast.literal_eval(keyword.value)
+def test_product_binding_requires_selection_and_mineru_capabilities() -> None:
+    required = REQUIRED_CAPABILITIES
     for capability in (
         "ocr.engine-selection.v1",
         "runtime.download-sources.v1",
@@ -136,37 +50,6 @@ def test_component_resolver_requires_selection_and_mineru_capabilities() -> None
         "ocr.mineru-remote-api.v1",
     ):
         assert capability in required
-
-
-def test_component_resolver_authenticates_api_with_ci_gh_token(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class Response:
-        def __enter__(self) -> Response:
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-        def read(self) -> bytes:
-            return b'{"tag_name":"v1.0.0"}'
-
-    requests: list[object] = []
-    monkeypatch.setenv("GH_TOKEN", "ci-token")
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-
-    def fake_urlopen(request: object, *, timeout: float) -> Response:
-        assert timeout == 60
-        requests.append(request)
-        return Response()
-
-    monkeypatch.setattr(
-        "scripts.resolve_component_releases.urllib.request.urlopen", fake_urlopen
-    )
-
-    assert _api("FelixJI/vibeocr-backend", "/releases/latest") == {"tag_name": "v1.0.0"}
-    assert len(requests) == 1
-    assert requests[0].get_header("Authorization") == "Bearer ci-token"
 
 
 def test_command_runner_resolves_platform_command_shims(
@@ -400,35 +283,31 @@ def _configure_release_smoke_fixture(
     if include_delta:
         (artifacts / "VibeOCRNext-1.2.3-delta.nupkg").write_bytes(b"delta")
     _write_velopack_feed(artifacts, "1.2.3")
+    identity = {
+        "project": {
+            "component": "next",
+            "repository": "FelixJI/vibeocr-next",
+            "version": "1.2.3",
+            "source_sha": "a" * 40,
+        }
+    }
     with zipfile.ZipFile(artifacts / "VibeOCRNext-v1.2.3-win-x64.zip", "w") as package:
         package.writestr("VibeOCR/VibeOCR.exe", b"bootstrapper")
         package.writestr("VibeOCR/app/VibeOCR.WinUI.exe", b"desktop")
+        package.writestr(
+            "VibeOCR/app/metadata/component-identities.json", json.dumps(identity)
+        )
     names = {
         full.name,
         "VibeOCRNext-v1.2.3-win-x64.zip",
         "releases.win.json",
-        "component-lock.json",
-        "component-identities.json",
+        "product-identity.json",
         "SBOM.spdx.json",
     }
     if include_delta:
         names.add("VibeOCRNext-1.2.3-delta.nupkg")
-    (artifacts / "component-identities.json").write_text(
-        json.dumps(
-            {
-                component: {
-                    "version": "2.0.0",
-                    "source_sha": "a" * 40,
-                    **(
-                        {"release_manifest_sha256": "b" * 64}
-                        if component != "backend"
-                        else {}
-                    ),
-                }
-                for component in ("backend", "protocol", "protocol_sdk")
-            }
-        ),
-        encoding="utf-8",
+    (artifacts / "product-identity.json").write_text(
+        json.dumps(identity), encoding="utf-8"
     )
     calls: list[list[str]] = []
     monkeypatch.setattr(
@@ -823,23 +702,17 @@ def test_app_ci_rejects_empty_failed_or_incomplete_trx(
     assert "App test result is incomplete" in completed.stderr
 
 
-def test_project_config_declares_minor_compatible_protocol_and_single_identity_asset() -> (
-    None
-):
+def test_project_config_declares_one_next_product_identity_asset() -> None:
     root = Path(__file__).parents[2]
     config = json.loads((root / ".ci/project.json").read_text(encoding="utf-8"))
-    assert config["project"]["protocol_compatibility"] == {
-        "supported_majors": [2],
-        "minor_compatible": True,
-    }
-    assert config["release"]["identity_asset"] == "component-identities.json"
+    assert "protocol_compatibility" not in config["project"]
+    assert config["release"]["identity_asset"] == "product-identity.json"
     assert config["release"]["required_assets"] == [
         "VibeOCRNext-*-full.nupkg",
         "VibeOCRNext-*-delta.nupkg",
         "VibeOCRNext-v{version}-win-x64.zip",
         "releases.win.json",
-        "component-lock.json",
-        "component-identities.json",
+        "product-identity.json",
         "SBOM.spdx.json",
     ]
     bootstrap = config["ci"]["bootstrap"]
@@ -847,20 +720,7 @@ def test_project_config_declares_minor_compatible_protocol_and_single_identity_a
         command[-3:] == ["pwsh", "-File", "scripts/install_windows_app_runtime.ps1"]
         for command in bootstrap
     )
-    resolver_index = next(
-        index
-        for index, command in enumerate(bootstrap)
-        if "component-resolve" in command
-    )
-    restore_indexes = [
-        index
-        for index, command in enumerate(bootstrap)
-        if "dotnet" in command and "restore" in command
-    ]
-    assert restore_indexes and resolver_index < min(restore_indexes)
-    assert ["python", "scripts/resolve_component_releases.py"] not in config["ci"][
-        "e2e"
-    ]
+    assert all("component-resolve" not in command for command in bootstrap)
     build_script = (root / "scripts/build-release.ps1").read_text(encoding="utf-8")
     assert "prepare_velopack_delta.py" in build_script
     assert "normalize_velopack_feed.py" in build_script
@@ -894,13 +754,9 @@ def test_project_config_declares_minor_compatible_protocol_and_single_identity_a
     assert "LegacyVelopackStateMigration.Migrate" in bootstrapper
     assert build_script.count("build_release_checksums.py") == 1
     assert "dotnet tool run vpk pack" in build_script
-    resolver = (root / "scripts/resolve_component_releases.py").read_text(
-        encoding="utf-8"
-    )
-    assert 'work = root / ".release-input"' in resolver
-    assert "$inputs = Join-Path $root '.release-input'" in build_script
+    assert "scripts/build_internal_runtime.ps1" in build_script
     nuget = (root / "NuGet.Config").read_text(encoding="utf-8")
-    assert 'value=".release-input/protocol-sdk"' in nuget
+    assert ".release-input/protocol-sdk" not in nuget
 
 
 def test_platform_e2e_has_a_bounded_hang_diagnostic() -> None:
@@ -1032,30 +888,6 @@ def test_bootstrapper_prerequisite_self_test_never_launches_the_app() -> None:
     )
 
 
-def test_backend_identity_hashes_runtime_and_optional_release_manifests() -> None:
-    root = Path(__file__).parents[2]
-    resolver = (root / "scripts/resolve_component_releases.py").read_text(
-        encoding="utf-8"
-    )
-
-    assert (
-        '"runtime_manifest_sha256": _sha(work / "backend" / "runtime-manifest.json")'
-        in resolver
-    )
-    assert (
-        '"release_manifest_sha256": _sha(work / "backend" / "release-manifest.json")'
-        not in resolver
-    )
-    assert 'backend_identity["release_manifest_sha256"] = _sha(' in resolver
-    assert "if backend_release_manifest.is_file():" in resolver
-    assert '"protocol_sdk": {' in resolver
-    assert "Protocol SDK {sdk_version} is newer than bound runtime" not in resolver
-    assert (
-        'verify_protocol_release(work / "protocol-sdk", version=sdk_version)'
-        in resolver
-    )
-
-
 def test_sync_version_updates_repository_and_desktop_project(tmp_path: Path) -> None:
     (tmp_path / "src/dotnet/VibeOCR.App").mkdir(parents=True)
     (tmp_path / "repository.json").write_text(
@@ -1076,59 +908,38 @@ def test_sync_version_updates_repository_and_desktop_project(tmp_path: Path) -> 
     assert "<Version>0.2.0</Version>" in project.read_text(encoding="utf-8")
 
 
-def test_release_smoke_binds_native_portable_and_component_identity(
+def test_release_smoke_binds_native_portable_and_product_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (tmp_path / "component-lock.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "component-identities.json").write_text(
-        json.dumps(
-            {
-                "backend": {"version": "1.0.0", "source_sha": "a" * 40},
-                "protocol": {
-                    "version": "2.0.0",
-                    "source_sha": "b" * 40,
-                    "release_manifest_sha256": "c" * 64,
-                },
-                "protocol_sdk": {
-                    "version": "2.3.0",
-                    "source_sha": "d" * 40,
-                    "release_manifest_sha256": "e" * 64,
-                },
-            }
-        ),
-        encoding="utf-8",
+    artifacts, _calls = _configure_release_smoke_fixture(
+        tmp_path, monkeypatch, fail_smoke=False
     )
-    (tmp_path / "SBOM.spdx.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "VibeOCRNext-0.2.0-full.nupkg").write_bytes(b"velopack-package")
-    with zipfile.ZipFile(tmp_path / "VibeOCRNext-v0.2.0-win-x64.zip", "w") as package:
-        package.writestr("VibeOCR.WinUI.exe", b"desktop")
-    _write_velopack_feed(tmp_path, "0.2.0")
-    monkeypatch.setattr(
-        "scripts.release_smoke.subprocess.run", lambda *args, **kwargs: None
-    )
-    verify(tmp_path, "0.2.0")
+    verify(artifacts, "1.2.3")
 
     identity = json.loads(
-        (tmp_path / "component-identities.json").read_text(encoding="utf-8")
+        (artifacts / "product-identity.json").read_text(encoding="utf-8")
     )
-    del identity["protocol_sdk"]
-    (tmp_path / "component-identities.json").write_text(
+    identity["project"]["source_sha"] = "b" * 40
+    (artifacts / "product-identity.json").write_text(
         json.dumps(identity), encoding="utf-8"
     )
-    with pytest.raises(ValueError, match="protocol_sdk"):
-        verify(tmp_path, "0.2.0")
-    identity["protocol_sdk"] = {
-        "version": "2.3.0",
-        "source_sha": "d" * 40,
-        "release_manifest_sha256": "e" * 64,
-    }
-    (tmp_path / "component-identities.json").write_text(
-        json.dumps(identity), encoding="utf-8"
-    )
+    with pytest.raises(ValueError, match="differs from release asset"):
+        verify(artifacts, "1.2.3")
 
-    (tmp_path / "unexpected.txt").write_text("unexpected", encoding="utf-8")
+    (artifacts / "unexpected.txt").write_text("unexpected", encoding="utf-8")
+    monkeypatch.setattr(
+        "scripts.release_smoke.verify_release_assets",
+        lambda *args, **kwargs: {
+            "VibeOCRNext-1.2.3-full.nupkg",
+            "VibeOCRNext-v1.2.3-win-x64.zip",
+            "releases.win.json",
+            "product-identity.json",
+            "SBOM.spdx.json",
+            "unexpected.txt",
+        },
+    )
     with pytest.raises(ValueError, match="release asset set mismatch"):
-        verify(tmp_path, "0.2.0")
+        verify(artifacts, "1.2.3")
 
 
 def test_only_canonical_workflows_remain() -> None:

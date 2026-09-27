@@ -19,8 +19,8 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" />
     <PackageReference Include="Velopack" />
-    <PackageReference Include="VibeOCR.Runtime.Contracts" />
     <ProjectReference Include="../VibeOCR.Platform/VibeOCR.Platform.csproj" />
+    <ProjectReference Include="../VibeOCR.Contracts/VibeOCR.Contracts.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="WebAssets\dist\**\*"

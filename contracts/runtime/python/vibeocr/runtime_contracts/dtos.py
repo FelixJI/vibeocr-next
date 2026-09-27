@@ -739,8 +739,6 @@ class RuntimeSourceIdentity:
     backend_version: str
     backend_source_sha: str
     runtime_manifest_sha256: str
-    protocol_version: str
-    protocol_manifest_sha256: str
 
     def to_payload(self) -> dict[str, str]:
         return asdict(self)

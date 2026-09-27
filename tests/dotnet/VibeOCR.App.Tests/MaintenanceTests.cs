@@ -610,7 +610,7 @@ public sealed class MaintenanceTests
                 ProfileId = "win-x64-cpu", RequestedComponentIds = selection.InstallComponentIds,
                 EffectiveComponentIds = selection.InstallComponentIds ?? [],
                 RequestedDownloadSourceIds = selection.DownloadSourceIds, EffectiveDownloadSourceIds = selection.DownloadSourceIds ?? [],
-                Source = new Host.RuntimeSourceIdentity { BackendVersion = "0.14.0", BackendSourceSha = "test", RuntimeManifestSha256 = "test", ProtocolVersion = "2.8.3", ProtocolManifestSha256 = "test" },
+                Source = new Host.RuntimeSourceIdentity { BackendVersion = "0.14.0", BackendSourceSha = "test", RuntimeManifestSha256 = "test" },
                 Components = [], Blockers = [], Cost = new Host.RuntimeInstallPlanCost { DownloadBytes = null, AdditionalDiskBytes = null, UnknownReasonCodes = [] },
             };
         }
@@ -697,7 +697,7 @@ public sealed class MaintenanceTests
                 effective: [.. (selection?.InstallComponentIds ?? []), "runtime_host"]));
             return new RuntimeLaunch(
                 @"C:\store\python.exe",
-                "vibeocr.backend.supervisor.main",
+                "vibeocr.runtime.host.main",
                 @"C:\store",
                 @"C:\store\models",
                 new Dictionary<string, string>());
@@ -736,7 +736,7 @@ public sealed class MaintenanceTests
                 State: null,
                 Launch: new RuntimeLaunch(
                     @"C:\store\python.exe",
-                    "vibeocr.backend.supervisor.main",
+                    "vibeocr.runtime.host.main",
                     @"C:\store",
                     @"C:\store\models",
                     new Dictionary<string, string>()),

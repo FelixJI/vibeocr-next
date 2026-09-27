@@ -65,18 +65,18 @@
 ## 项目架构与独特约束
 
 - 本仓包含仅 Windows 的 .NET 10 WinUI 桌面端与 Python Runtime，不是 WPF。主应用、平台层与 net472 Bootstrapper 分别位于 `src/dotnet/VibeOCR.App`、`VibeOCR.Platform`、`VibeOCR.Bootstrapper`；WebView2 WebAssets 使用锁定 Node/TypeScript。Runtime 位于 `src/runtime/vibeocr/runtime`，内部 wire 契约位于 `contracts/runtime/python/vibeocr/runtime_contracts`，C# 契约与 HTTP client 源码位于 `src/dotnet`。
-- Runtime 的 host 仅负责启动、鉴权、HTTP 路由与装配；jobs、recognition、documents、codes、environments、processes 分别拥有任务、推理、PDF/导出/表格、二维码、环境与共享进程能力。桌面、Supervisor、Paddle/MinerU/PDF worker 仍为独立进程；跨进程数据由 v2 内部契约约束。根 `pyproject.toml`/`uv.lock` 是单一 Python 开发入口，独立 Protocol SDK 与 Backend Python 发版配置不随源码迁入。
+- Runtime 的 host 仅负责启动、鉴权、HTTP 路由与装配；jobs、recognition、documents、codes、environments、processes 分别拥有任务、推理、PDF/导出/表格、二维码、环境与共享进程能力。桌面、Supervisor、Paddle/MinerU/PDF worker 仍为独立进程；跨进程数据由 v2 内部契约约束。根 `pyproject.toml`/`uv.lock` 是单一 Python 开发入口；`vibeocr-next-runtime` 是唯一内部 wheel（版本由 `repository.json` 派生），作为运行环境隔离安装的实现细节随产品分发，不再有独立 Protocol SDK 或 Backend Python 发版面。
 - `global.json` 固定 .NET SDK 基线并允许 `latestPatch` 前滚；`Directory.Build.props` 强制 warnings-as-errors、deterministic 与 locked restore。NuGet central versions/packages.lock 禁止手改，只通过 `scripts/update_dotnet_locks.ps1` 更新。
-- `.ci/project.json` 的 bootstrap 必须包含 Python dev tools、WebAssets `npm ci`、Windows App Runtime 安装、组件解析和 locked restore；遗漏 Windows App Runtime 会使 WinUI testhost 挂起。
+- `.ci/project.json` 的 bootstrap 必须包含 `uv sync --frozen`、WebAssets `npm ci`、Windows App Runtime 安装、`dotnet tool restore` 和各测试工程 locked restore，不解析旧仓组件 Release；遗漏 Windows App Runtime 会使 WinUI testhost 挂起。
 - quality=`uv run --frozen python scripts/check_quality.py`，覆盖 Next 原有测试、迁入 Runtime/contract 测试、生成一致性和真实 HTTP 路由契约；E2E 运行 Platform/App 与新增内部 C# Contracts/HTTP Client 测试；随后 `scripts/build-release.ps1` 和 `uv run --frozen python scripts/release_smoke.py` 构建并验证真实候选。
-- #86 过渡期间，现有 Desktop 打包仍使用最新正式 Backend 与其绑定的 Protocol runtime，支持 Protocol major 2 且 minor-compatible。编译 SDK 从 `Directory.Packages.props` 的单一精确 pin 读取并下载到 `.release-input/protocol-sdk`；运行时 Protocol 位于 `.release-input/protocol`。两者只要求同 major，不比较 minor 大小；新行为必须按调用点 capability 协商。NuGet 不得从任意外部 feed 获取 `VibeOCR.Runtime.*`。#87 再把 Desktop 引用切换到本仓内部源码并收缩跨仓组件输入。
-- 版本唯一事实源是 `repository.json`，`scripts/sync_version.py` 派生 App csproj。正式资产精确为 Velopack full nupkg、`VibeOCRNext-v{version}-win-x64.zip`、`releases.win.json`、component lock、component identities 与 SPDX SBOM 六项，项目 smoke 必须拒绝 Setup、sidecar 和任何额外资产。Portable 应用通过 Velopack feed 完成应用内下载、应用与 restart，不走 Setup 或手动下载桥接。
-- release publish 必须包含 WinUI `.xbf`/`.pri`、Bootstrapper、Velopack 运行时文件与组件 identity；否则可能出现 `XamlParseException` 或更新入口失效。修改 publish layout、WebAssets、runtime installer 参数或 capabilities 时执行真实打包验证。
+- #87 单产品实施后，Desktop 以 ProjectReference 直接编译本仓 `VibeOCR.Platform`、`VibeOCR.Contracts` 与 `VibeOCR.Runtime.Client`；`Directory.Packages.props` 不再 pin `VibeOCR.Runtime.*`，NuGet 源只剩 nuget.org。构建与发布默认不解析、下载旧 `vibeocr-backend`/`vibeocr-protocol` Release；wire 只保留一个 v2 内部契约，SDK/Backend/Protocol minor 产品矩阵退役，新行为一律按调用点 capability 协商。
+- 版本唯一事实源是 `repository.json`，`scripts/sync_version.py` 派生 App csproj。正式资产精确为 Velopack full nupkg、相邻版本可选 delta nupkg、`VibeOCRNext-v{version}-win-x64.zip`、`releases.win.json`、`product-identity.json` 与 SPDX SBOM，项目 smoke 必须拒绝 Setup、sidecar 和任何额外资产。`scripts/build-release.ps1` 经 `scripts/build_internal_runtime.ps1` 从当前源码产出内部 Runtime 闭包（wheel、冻结 installer、固定第三方 offline base pack、runtime manifest），第三方 CPython 归档与 profile 锁保留在 `config/runtime/`；产品内 `runtime/backend/` 与 `app/metadata/component-lock.json`、`app/metadata/component-identities.json` 只是兼容稳定路径，内容绑定单一 Next 产品，不再单独发布独立组件锁。Portable 应用通过 Velopack feed 完成应用内下载、应用与 restart，不走 Setup 或手动下载桥接。
+- release publish 必须包含 WinUI `.xbf`/`.pri`、Bootstrapper、Velopack 运行时文件与产品内 metadata 绑定文件；否则可能出现 `XamlParseException` 或更新入口失效。修改 publish layout、WebAssets、runtime installer 参数或 capabilities 时执行真实打包验证。
 - Python/PowerShell/TOML 用 4 空格，C#/JSON/YAML 用 2 空格；Python Ruff/Node/.NET 版本以配置为准。不在文档中假定某个 clone 是否安装 Git hook，按工作开始时的实际检查执行，未安装时运行配置对应质量脚本。
 
 ## 六仓关系
 
-- 本仓已持有 Runtime 与内部契约源码；当前 Desktop 正式构建仍过渡消费最新正式 `vibeocr-backend` 及其绑定的 `vibeocr-protocol`。`vibeocr-classic` 仍独立消费旧仓正式组件，两者不互相依赖、不共享发版版本。
-- Protocol v2 minor 兼容必须同时允许较旧 SDK 对接较新 Runtime，以及较新 SDK 对接较旧 Runtime；后者在 capability 缺失时必须隐藏、禁用或 fallback。Backend/Protocol major 改变必须显式升级兼容声明、locks 与客户端实现。
-- Backend 发版不级联触发本仓 CD；本仓下一次 PR/main CI 自然跟踪最新正式 Backend，CD 只发布本仓同一 CI 候选。
+- 本仓已持有 Runtime 与内部契约源码，正式构建直接消费本仓源码，不再把旧 `vibeocr-backend`/`vibeocr-protocol` Release 作为构建输入；源仓历史保留。`vibeocr-classic` 仍独立消费旧仓正式组件，两者不互相依赖、不共享发版版本。
+- 内部 wire 契约只保留一个 v2 major，随本仓同源演进，不再维护跨仓 SDK minor 产品矩阵。capability 缺失时必须隐藏、禁用或 fallback；进程隔离、已安装运行环境的 manifest 绑定与回滚语义保留。wire major 变更必须显式升级契约 schema、生成物、golden 与客户端实现。
+- 旧仓 Release 不再是本仓构建输入，其发版不级联触发本仓 CD；本仓 CI/CD 只消费自身源码，CD 只发布本仓同一 CI 候选。
 - `file-toolbox`、`vibetable` 与本仓无运行时依赖，仅共享自动化治理。

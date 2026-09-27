@@ -425,7 +425,7 @@ def _run_install_command(
 
 
 def _default_accelerator(component_lock: dict[str, Any]) -> str:
-    accelerator = component_lock["backend"].get("accelerator")
+    accelerator = component_lock["product"].get("accelerator")
     if accelerator not in ACCELERATOR_TO_PLAN:
         raise RuntimeInstallError(f"unsupported accelerator: {accelerator}")
     return accelerator
@@ -436,44 +436,27 @@ def _load_component_lock(path: Path) -> dict[str, Any]:
         value: Any = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise RuntimeInstallError(f"invalid component lock: {path}") from exc
-    if not isinstance(value, dict) or value.get("schema_version") != 1:
-        raise RuntimeInstallError("component lock schema_version must be 1")
-    protocol = value.get("protocol")
-    backend = value.get("backend")
-    if not isinstance(protocol, dict) or not isinstance(backend, dict):
-        raise RuntimeInstallError("component lock requires protocol and backend")
-    required = {
-        "repository",
-        "version",
-        "artifact_sha256",
-        "runtime_manifest_sha256",
-        "accelerator",
-    }
-    if not required.issubset(backend):
-        raise RuntimeInstallError("component lock backend binding is incomplete")
-    if not {
-        "repository",
-        "version",
-        "manifest_sha256",
-    }.issubset(protocol):
-        raise RuntimeInstallError("component lock Protocol binding is incomplete")
-    if protocol["repository"] != "FelixJI/vibeocr-protocol":
-        raise RuntimeInstallError("component lock Protocol repository is invalid")
-    if backend["repository"] != "FelixJI/vibeocr-backend":
-        raise RuntimeInstallError("component lock Backend repository is invalid")
-    if not re.fullmatch(r"2\.\d+\.\d+", str(protocol["version"])):
-        raise RuntimeInstallError("component lock Protocol version is invalid")
-    if not re.fullmatch(r"\d+\.\d+\.\d+", str(backend["version"])):
-        raise RuntimeInstallError("component lock Backend version is invalid")
-    for record, field in (
-        (protocol, "manifest_sha256"),
-        (backend, "artifact_sha256"),
-        (backend, "runtime_manifest_sha256"),
+    if not isinstance(value, dict) or value.get("schema_version") != 2:
+        raise RuntimeInstallError("component lock schema_version must be 2")
+    product = value.get("product")
+    if not isinstance(product, dict):
+        raise RuntimeInstallError("component lock requires product binding")
+    if (
+        product.get("component") != "next"
+        or product.get("repository") != "FelixJI/vibeocr-next"
     ):
-        if not _SHA256_RE.fullmatch(str(record[field])):
-            raise RuntimeInstallError(f"component lock {field} is invalid")
-    if backend.get("accelerator") not in ACCELERATOR_TO_PLAN:
-        raise RuntimeInstallError("component lock Backend accelerator is invalid")
+        raise RuntimeInstallError("component lock product identity is invalid")
+    version = product.get("version")
+    if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise RuntimeInstallError("component lock product version is invalid")
+    source_sha = product.get("source_sha")
+    if not isinstance(source_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+        raise RuntimeInstallError("component lock product source_sha is invalid")
+    manifest_sha = product.get("runtime_manifest_sha256")
+    if not isinstance(manifest_sha, str) or not _SHA256_RE.fullmatch(manifest_sha):
+        raise RuntimeInstallError("component lock runtime_manifest_sha256 is invalid")
+    if product.get("accelerator") not in ACCELERATOR_TO_PLAN:
+        raise RuntimeInstallError("component lock product accelerator is invalid")
     capabilities = value.get("required_capabilities")
     if not isinstance(capabilities, list) or not all(
         isinstance(item, str) and item for item in capabilities
@@ -1050,12 +1033,9 @@ def _default_install_runner(
         heartbeat_code="runtime.install_profile",
     )
     artifact_root = manifest.path.parent
-    protocol_wheel = artifact_root / manifest.protocol_wheel
-    backend_wheel = artifact_root / manifest.backend_wheel
-    if not protocol_wheel.is_file() or not backend_wheel.is_file():
-        raise RuntimeInstallError(
-            "release directory must contain the bound Protocol and Backend wheels"
-        )
+    runtime_wheel = artifact_root / manifest.runtime_wheel
+    if not runtime_wheel.is_file():
+        raise RuntimeInstallError("release directory must contain the bound runtime wheel")
     if reporter is not None:
         reporter.advance(
             phase="install_backend",
@@ -1071,8 +1051,8 @@ def _default_install_runner(
             "pip",
             "install",
             "--no-deps",
-            str(protocol_wheel),
-            str(backend_wheel),
+            "--force-reinstall",
+            str(runtime_wheel),
         ],
         timeout=600,
         env=portable_env,
@@ -1452,27 +1432,18 @@ class RuntimeInstaller:
         )
 
     def _validate_binding(self) -> None:
-        protocol = self.component_lock["protocol"]
-        backend = self.component_lock["backend"]
-        protocol_version = protocol.get("version")
-        if (
-            not isinstance(protocol_version, str)
-            or f"-{protocol_version}-" not in self.manifest.protocol_wheel
-        ):
-            raise RuntimeIdentityMismatch("component lock Protocol version mismatch")
-        if protocol["manifest_sha256"] != self.manifest.protocol_manifest_sha256:
-            raise RuntimeIdentityMismatch("component lock Protocol manifest mismatch")
-        if backend["version"] != self.manifest.backend_version:
-            raise RuntimeIdentityMismatch("component lock Backend version mismatch")
-        if backend["artifact_sha256"] != self.manifest.backend_sha256:
-            raise RuntimeIdentityMismatch("component lock Backend artifact mismatch")
-        if backend["runtime_manifest_sha256"] != self.manifest.sha256:
+        product = self.component_lock["product"]
+        if product["version"] != self.manifest.backend_version:
+            raise RuntimeIdentityMismatch("component lock product version mismatch")
+        if product["source_sha"] != self.manifest.source_commit:
+            raise RuntimeIdentityMismatch("component lock product source mismatch")
+        if product["runtime_manifest_sha256"] != self.manifest.sha256:
             raise RuntimeIdentityMismatch("component lock runtime manifest mismatch")
         required = set(self.component_lock["required_capabilities"])
         missing = required.difference(self.manifest.capabilities)
         if missing:
             raise RuntimeCapabilityUnavailable(
-                f"Backend is missing required capabilities: {sorted(missing)}"
+                f"Runtime is missing required capabilities: {sorted(missing)}"
             )
 
     def _marker(self) -> Path:

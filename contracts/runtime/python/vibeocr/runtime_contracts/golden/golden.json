@@ -298,9 +298,7 @@
     "source": {
       "backend_version": "2.8.2",
       "backend_source_sha": "0123456789abcdef0123456789abcdef01234567",
-      "runtime_manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "protocol_version": "2.8.2",
-      "protocol_manifest_sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+      "runtime_manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     },
     "components": [
       {
@@ -348,9 +346,7 @@
     "source": {
       "backend_version": "2.8.2",
       "backend_source_sha": "0123456789abcdef0123456789abcdef01234567",
-      "runtime_manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "protocol_version": "2.8.2",
-      "protocol_manifest_sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+      "runtime_manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     },
     "components": [
       {
@@ -399,9 +395,7 @@
     "source": {
       "backend_version": "2.8.2",
       "backend_source_sha": "0123456789abcdef0123456789abcdef01234567",
-      "runtime_manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "protocol_version": "2.8.2",
-      "protocol_manifest_sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+      "runtime_manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     },
     "components": [],
     "blockers": [],
@@ -432,9 +426,7 @@
     "source": {
       "backend_version": "2.8.2",
       "backend_source_sha": "0123456789abcdef0123456789abcdef01234567",
-      "runtime_manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "protocol_version": "2.8.2",
-      "protocol_manifest_sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+      "runtime_manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     },
     "components": [
       {

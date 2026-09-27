@@ -75,7 +75,7 @@ public sealed class RuntimeInstallerClientTests
             TestContext.Current.CancellationToken);
 
         Assert.Equal(@"C:\store\python.exe", launch.PythonExecutable);
-        Assert.Equal("vibeocr.backend.supervisor.main", launch.SupervisorModule);
+        Assert.Equal("vibeocr.runtime.host.main", launch.SupervisorModule);
         Assert.Equal(@"C:\Next", launch.WorkingDirectory);
         Assert.Equal(@"C:\store", launch.Environment["VIBEOCR_RUNTIME_ROOT"]);
         Assert.Null(client.LastMaintenanceSources);
@@ -1123,7 +1123,7 @@ public sealed class RuntimeInstallerClientTests
           },
           "launch": {
             "python_executable": "C:\\store\\python.exe",
-            "supervisor_module": "vibeocr.backend.supervisor.main",
+            "supervisor_module": "vibeocr.runtime.host.main",
             "working_directory": "C:\\Next",
             "model_root": "C:\\store\\models",
             "environment": {

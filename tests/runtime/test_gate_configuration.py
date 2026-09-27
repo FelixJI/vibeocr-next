@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).parents[4]
+REPO_ROOT = Path(__file__).parents[2]
 
 
 def test_ci_runs_the_unified_full_quality_gate() -> None:
@@ -43,10 +43,11 @@ def test_release_verifies_runtime_candidate_after_build() -> None:
     assert download < stage < publish
     assert config["ci"]["release_build"][0][-1] == "scripts/build-release.ps1"
     assert config["ci"]["release_smoke"][0][-1] == "scripts/release_smoke.py"
-    assert config["release"]["identity_asset"] == "component-identities.json"
+    assert config["release"]["identity_asset"] == "product-identity.json"
     assert "VibeOCRNext-v{version}-win-x64.zip" in config["release"]["required_assets"]
-    assert any(
-        "scripts/resolve_component_releases.py" in command
+    assert all(
+        "scripts/resolve_component_releases.py" not in command
         for command in config["ci"]["bootstrap"]
     )
+    assert "scripts/build_internal_runtime.ps1" in build_script
     assert "VibeOCRNext" in build_script

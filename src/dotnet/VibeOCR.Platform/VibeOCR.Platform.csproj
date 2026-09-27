@@ -4,8 +4,8 @@
     <AssemblyName>VibeOCR.Platform</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="VibeOCR.Runtime.Contracts" />
-    <PackageReference Include="VibeOCR.Runtime.Client" />
+    <ProjectReference Include="../VibeOCR.Contracts/VibeOCR.Contracts.csproj" />
+    <ProjectReference Include="../VibeOCR.Runtime.Client/VibeOCR.Runtime.Client.csproj" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="VibeOCR.Platform.Tests" />

@@ -20,31 +20,28 @@ def test_legacy_winui_build_name_delegates_to_canonical_release() -> None:
         assert prohibited not in script
 
 
-def test_dotnet_lock_update_uses_published_packages_and_isolated_caches() -> None:
+def test_dotnet_lock_update_uses_internal_projects_and_isolated_caches() -> None:
     script = (ROOT / "scripts" / "update_dotnet_locks.ps1").read_text(encoding="utf-8")
     package_props = ET.parse(ROOT / "Directory.Packages.props").getroot()
-    protocol_versions = {
-        node.attrib["Version"]
+    internal_versions = {
+        node.attrib["Include"]
         for node in package_props.iter("PackageVersion")
         if node.attrib.get("Include", "").startswith("VibeOCR.Runtime.")
     }
 
     for required in (
-        "FelixJI/vibeocr-protocol",
-        "gh attestation verify",
         "--force-evaluate",
         "--locked-mode",
         "--no-cache",
         "NUGET_PACKAGES",
         "DOTNET_ROOT",
-        ".release-input\\protocol-sdk",
-        "Directory.Packages.props",
-        "$protocolVersion",
-        "$protocolPackagePattern",
+        "VibeOCR.Contracts.Tests.csproj",
+        "VibeOCR.Runtime.Client.Tests.csproj",
     ):
         assert required in script
-    assert protocol_versions == {"[2.9.0]"}
-    assert "v2.7.1" not in script
+    assert not internal_versions
+    assert "FelixJI/vibeocr-protocol" not in script
+    assert '.release-input\\protocol-sdk' not in script
 
 
 def test_startup_benchmark_only_passes_supported_collector_arguments() -> None:

@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
-import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,10 +14,16 @@ from scripts.product_layout import (
     load_product_layout,
     stage_product_layout,
 )
+from tests.python.runtime.environment.test_runtime_installer import _release
 
-
-def _sha(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
+PADDLE_CPU_LOCK = (
+    Path(__file__).parents[2]
+    / "config/runtime/win-x64-paddle-cpu/requirements-win-x64-paddle-cpu.lock"
+)
+CPU_HOST_LOCK = (
+    Path(__file__).parents[2]
+    / "config/runtime/win-x64-cpu/requirements-win-x64-cpu.lock"
+)
 
 
 def _release_inputs(tmp_path: Path) -> dict[str, Path]:
@@ -45,74 +50,18 @@ def _release_inputs(tmp_path: Path) -> dict[str, Path]:
     (tmp_path / "VibeOCR.Bootstrapper.exe.config").write_text(
         "<configuration />", encoding="utf-8"
     )
-    component_lock = tmp_path / "component-lock.json"
-    component_lock.write_text("{}", encoding="utf-8")
+    backend = tmp_path / "backend-release"
+    manifest_path, component_lock = _release(backend, with_base_pack=True)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     identities = tmp_path / "component-identities.json"
-    identities.write_text('{"product":"vibeocr"}', encoding="utf-8")
+    identities.write_text(
+        json.dumps({"project": manifest["product"]}), encoding="utf-8"
+    )
     license_file = tmp_path / "LICENSE"
     license_file.write_text("license", encoding="utf-8")
     changelog = tmp_path / "CHANGELOG.md"
     changelog.write_text("# Changes", encoding="utf-8")
 
-    backend = tmp_path / "backend-release"
-    backend.mkdir()
-    backend_wheel = backend / "backend.whl"
-    backend_wheel.write_bytes(b"backend")
-    protocol_wheel = backend / "protocol.whl"
-    protocol_wheel.write_bytes(b"protocol")
-    protocol_manifest = backend / "protocol-release-manifest.json"
-    protocol_manifest.write_text("{}", encoding="utf-8")
-    python_archive = backend / "python.tar.gz"
-    python_archive.write_bytes(b"python")
-    base_lock = backend / "base.lock"
-    base_lock.write_bytes(b"base-lock")
-    cpu_lock = backend / "cpu.lock"
-    cpu_lock.write_bytes(b"cpu-lock")
-    cuda_lock = backend / "cuda.lock"
-    cuda_lock.write_bytes(b"cuda-lock")
-    cuda_gpu_lock = backend / "cuda-gpu.lock"
-    cuda_gpu_lock.write_bytes(b"cuda-gpu-lock")
-    base_pack = backend / "vibeocr-runtime-pack-win-x64-base.zip"
-    base_pack.write_bytes(b"base-pack")
-    installer_archive = backend / "installer.zip"
-    with zipfile.ZipFile(installer_archive, "w") as archive:
-        archive.writestr("runtime-installer/installer.exe", b"installer")
-    (backend / "runtime-manifest.json").write_text(
-        json.dumps(
-            {
-                "backend_wheel": backend_wheel.name,
-                "backend_sha256": _sha(b"backend"),
-                "protocol_manifest": protocol_manifest.name,
-                "protocol_wheel": protocol_wheel.name,
-                "python": {
-                    "archive": python_archive.name,
-                    "sha256": _sha(b"python"),
-                },
-                "installer": {
-                    "archive": installer_archive.name,
-                    "executable_path": "runtime-installer/installer.exe",
-                    "executable_sha256": _sha(b"installer"),
-                },
-                "profiles": {
-                    "win-x64-base": {
-                        "lock": base_lock.name,
-                        "runtime_pack": [base_pack.name],
-                    },
-                    "win-x64-cpu": {"lock": cpu_lock.name, "runtime_pack": None},
-                    "win-x64-cu126": {
-                        "lock": cuda_lock.name,
-                        "runtime_pack": None,
-                        "install_scopes": [
-                            {"scope_id": "gpu-runtime", "lock": cuda_gpu_lock.name}
-                        ],
-                    },
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    (backend / "release-manifest.json").write_text("{}", encoding="utf-8")
-    (backend / "build-identity.json").write_text("{}", encoding="utf-8")
     return {
         "app_publish_root": app,
         "bootstrapper_executable": bootstrapper,
@@ -166,9 +115,7 @@ def test_stage_product_layout_embeds_only_the_release_bound_base_runtime_closure
     )
     arbitrary_base_pack = backend / "offline-foundation.part-01.bundle"
     original_base_pack.replace(arbitrary_base_pack)
-    runtime_manifest["profiles"]["win-x64-base"]["runtime_pack"] = [
-        arbitrary_base_pack.name
-    ]
+    runtime_manifest["profiles"]["win-x64-base"]["runtime_pack"] = [arbitrary_base_pack.name]
     advanced_packs = {
         "future-win-x64-base-cpu-profile.pack": b"cpu-full",
         "future-win-x64-base-cu126-profile.pack": b"cuda-full",
@@ -180,18 +127,26 @@ def test_stage_product_layout_embeds_only_the_release_bound_base_runtime_closure
     runtime_manifest["profiles"]["win-x64-cpu"]["runtime_pack"] = [
         "future-win-x64-base-cpu-profile.pack"
     ]
+    runtime_manifest["profiles"]["win-x64-cpu"]["runtime_pack_sha256"] = [
+        hashlib.sha256(b"cpu-full").hexdigest()
+    ]
     runtime_manifest["profiles"]["win-x64-cu126"]["runtime_pack"] = [
         "future-win-x64-base-cu126-profile.pack"
     ]
-    runtime_manifest["profiles"]["win-x64-cpu"]["install_scopes"] = [
-        {
-            "scope_id": "document-parsing",
-            "lock": "cpu.lock",
-            "runtime_pack": [
-                "vibeocr-runtime-pack-paddlex-future.zip",
-                "vibeocr-runtime-pack-mineru-future.zip",
-            ],
-        }
+    runtime_manifest["profiles"]["win-x64-cu126"]["runtime_pack_sha256"] = [
+        hashlib.sha256(b"cuda-full").hexdigest()
+    ]
+    runtime_manifest["profiles"]["win-x64-cpu"]["install_scopes"][0][
+        "runtime_pack"
+    ] = [
+        "vibeocr-runtime-pack-paddlex-future.zip",
+        "vibeocr-runtime-pack-mineru-future.zip",
+    ]
+    runtime_manifest["profiles"]["win-x64-cpu"]["install_scopes"][0][
+        "runtime_pack_sha256"
+    ] = [
+        hashlib.sha256(b"paddlex").hexdigest(),
+        hashlib.sha256(b"mineru").hexdigest(),
     ]
     (backend / "runtime-manifest.json").write_text(
         json.dumps(runtime_manifest), encoding="utf-8"
@@ -204,17 +159,13 @@ def test_stage_product_layout_embeds_only_the_release_bound_base_runtime_closure
     embedded = product_root / "runtime/backend"
     assert {path.name for path in embedded.iterdir()} == {
         "runtime-manifest.json",
-        "release-manifest.json",
-        "build-identity.json",
-        "backend.whl",
-        "protocol.whl",
-        "protocol-release-manifest.json",
-        "python.tar.gz",
-        "installer.zip",
-        "base.lock",
-        "cpu.lock",
-        "cuda.lock",
-        "cuda-gpu.lock",
+        runtime_manifest["runtime_wheel"],
+        runtime_manifest["python"]["archive"],
+        runtime_manifest["installer"]["archive"],
+        runtime_manifest["profiles"]["win-x64-base"]["lock"],
+        runtime_manifest["profiles"]["win-x64-cpu"]["lock"],
+        runtime_manifest["profiles"]["win-x64-cu126"]["lock"],
+        runtime_manifest["profiles"]["win-x64-cu126"]["install_scopes"][0]["lock"],
         "offline-foundation.part-01.bundle",
     }
 
@@ -240,12 +191,12 @@ def test_stage_product_layout_rejects_nonportable_windows_release_filenames(
     inputs = _release_inputs(tmp_path)
     manifest_path = inputs["backend_release_dir"] / "runtime-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["backend_wheel"] = filename
+    manifest["runtime_wheel"] = filename
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(
         ProductLayoutError,
-        match="layout.invalid-descriptor: backend_wheel must be a release filename",
+        match="layout.invalid-descriptor: runtime_wheel must be a release filename",
     ):
         stage_product_layout(product_root=tmp_path / "VibeOCR", **inputs)
 
@@ -271,13 +222,7 @@ def test_stage_product_layout_validates_every_declared_runtime_pack(
     if owner == "profile":
         profile["runtime_pack"] = runtime_pack
     else:
-        profile["install_scopes"] = [
-            {
-                "scope_id": "document-parsing",
-                "lock": "cpu.lock",
-                "runtime_pack": runtime_pack,
-            }
-        ]
+        profile["install_scopes"][0]["runtime_pack"] = runtime_pack
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(
@@ -405,8 +350,16 @@ def test_stage_requires_declared_paddle_environment_lock(
     backend = inputs["backend_release_dir"]
     manifest_path = backend / "runtime-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    host_lock = backend / manifest["profiles"]["win-x64-cpu"]["lock"]
+    host_lock.write_bytes(CPU_HOST_LOCK.read_bytes())
+    host_sha = hashlib.sha256(host_lock.read_bytes()).hexdigest()
+    manifest["profiles"]["win-x64-cpu"]["sha256"] = host_sha
+    for scope in manifest["profiles"]["win-x64-cpu"]["install_scopes"]:
+        if scope["lock"] == host_lock.name:
+            scope["sha256"] = host_sha
     manifest["profiles"]["win-x64-cpu"]["paddle_environment"] = {
-        "lock": "paddle-cpu.lock"
+        "lock": "paddle-cpu.lock",
+        "sha256": hashlib.sha256(PADDLE_CPU_LOCK.read_bytes()).hexdigest(),
     }
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     product = tmp_path / "VibeOCR"
@@ -414,8 +367,8 @@ def test_stage_requires_declared_paddle_environment_lock(
         with pytest.raises(ProductLayoutError, match="closure file is unavailable"):
             stage_product_layout(product_root=product, **inputs)
         return
-    (backend / "paddle-cpu.lock").write_text("paddlepaddle==3.2.0", encoding="utf-8")
+    (backend / "paddle-cpu.lock").write_bytes(PADDLE_CPU_LOCK.read_bytes())
     stage_product_layout(product_root=product, **inputs)
     assert (product / "runtime/backend/paddle-cpu.lock").read_text(
         encoding="utf-8"
-    ) == "paddlepaddle==3.2.0"
+    ) == PADDLE_CPU_LOCK.read_text(encoding="utf-8")

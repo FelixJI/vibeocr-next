@@ -247,13 +247,12 @@ public sealed record ResidencyStatus
     public int? VramUsedMb { get; init; }
 }
 
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record RuntimeSourceIdentity
 {
     public required string BackendVersion { get; init; }
     public required string BackendSourceSha { get; init; }
     public required string RuntimeManifestSha256 { get; init; }
-    public required string ProtocolVersion { get; init; }
-    public required string ProtocolManifestSha256 { get; init; }
 }
 
 public sealed record RuntimeMaintenanceRequest

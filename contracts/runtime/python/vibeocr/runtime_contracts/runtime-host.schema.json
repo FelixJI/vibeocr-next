@@ -746,22 +746,18 @@
       "required": [
         "backend_version",
         "backend_source_sha",
-        "runtime_manifest_sha256",
-        "protocol_version",
-        "protocol_manifest_sha256"
+        "runtime_manifest_sha256"
       ],
       "properties": {
-        "backend_version": { "type": "string", "minLength": 1 },
+        "backend_version": {
+          "type": "string",
+          "minLength": 1
+        },
         "backend_source_sha": {
           "type": "string",
           "pattern": "^[0-9a-f]{40}$"
         },
         "runtime_manifest_sha256": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
-        },
-        "protocol_version": { "type": "string", "minLength": 1 },
-        "protocol_manifest_sha256": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
         }

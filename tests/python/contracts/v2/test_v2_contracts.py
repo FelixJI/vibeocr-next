@@ -405,8 +405,6 @@ def test_runtime_status_round_trips_typed_profile_and_progress() -> None:
         backend_version="0.9.0",
         backend_source_sha="a" * 40,
         runtime_manifest_sha256="b" * 64,
-        protocol_version="2.3.0",
-        protocol_manifest_sha256="c" * 64,
     )
     status = RuntimeStatusSnapshot(
         instance_id="runtime-1",

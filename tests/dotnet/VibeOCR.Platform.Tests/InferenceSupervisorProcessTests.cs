@@ -94,7 +94,7 @@ public sealed class InferenceSupervisorProcessTests
     public void ConstructorRequiresSessionToken()
     {
         var options = new InferenceSupervisorOptions(
-            "python", new[] { "-m", "vibeocr.backend.supervisor.main" }, ".", "log.txt", TimeSpan.FromSeconds(5), BaselineCapabilities);
+            "python", new[] { "-m", "vibeocr.runtime.host.main" }, ".", "log.txt", TimeSpan.FromSeconds(5), BaselineCapabilities);
         Assert.Throws<ArgumentNullException>(() => new InferenceSupervisorProcess(options, null!));
         Assert.Throws<ArgumentException>(() => new InferenceSupervisorProcess(options, "   "));
     }
