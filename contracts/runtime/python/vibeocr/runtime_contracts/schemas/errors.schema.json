@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeocr/protocol/v2/errors.schema.json",
+  "title": "VibeOCR v2 Error Response",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "instance_id",
+    "code",
+    "message",
+    "category",
+    "retryable",
+    "detail",
+    "job_id"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 2
+    },
+    "instance_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "code": {
+      "type": "string",
+      "x-vibeocr-known-values": [
+        "VALIDATION_ERROR",
+        "QUOTA_EXCEEDED",
+        "UNAUTHORIZED",
+        "FORBIDDEN_LOOPBACK",
+        "JOB_NOT_FOUND",
+        "RESOURCE_NOT_FOUND",
+        "JOB_NOT_CANCELLABLE",
+        "JOB_NOT_RETRYABLE",
+        "INPUT_EXPIRED",
+        "PIN_CAPACITY_CONFLICT",
+        "SUPERVISOR_DRAINING",
+        "CANCELLED",
+        "OUT_OF_MEMORY",
+        "TRANSIENT_BACKEND",
+        "BACKEND_UNAVAILABLE",
+        "ADAPTER_PROTOCOL_VIOLATION",
+        "PROTOCOL_MISMATCH",
+        "INTERNAL_ERROR",
+        "RUNTIME_OPERATION_NOT_FOUND",
+        "RUNTIME_OPERATION_ID_CONFLICT",
+        "RUNTIME_COMMAND_ID_CONFLICT",
+        "RUNTIME_OPERATION_NOT_CANCELLABLE",
+        "RUNTIME_OPERATION_NOT_RETRYABLE",
+        "RUNTIME_CURSOR_EXPIRED",
+        "RUNTIME_CAPABILITY_UNAVAILABLE",
+        "RUNTIME_IDENTITY_MISMATCH",
+        "RUNTIME_BUSY",
+        "RUNTIME_INSTALL_FAILED",
+        "RUNTIME_IO_ERROR",
+        "RUNTIME_INSTALL_PLAN_STALE",
+        "RUNTIME_INSTALL_PLAN_BLOCKED",
+        "OCR_ENGINE_UNKNOWN",
+        "OCR_ENGINE_UNAVAILABLE",
+        "OCR_ENGINE_PREPARATION_REQUIRED",
+        "OCR_ENGINE_NOT_VALID_FOR_PIPELINE",
+        "OCR_ENGINE_LANGUAGE_UNAVAILABLE",
+        "DOWNLOAD_SOURCE_UNKNOWN",
+        "RUNTIME_COMPONENT_UNKNOWN",
+        "RECOGNITION_MODE_UNKNOWN",
+        "RECOGNITION_MODE_UNAVAILABLE",
+        "RECOGNITION_MODE_LIFECYCLE_UNSUPPORTED",
+        "RECOGNITION_MODE_PIPELINE_MISMATCH",
+        "MINERU_CONFIG_UNAVAILABLE",
+        "MINERU_CONFIG_MIGRATION_REQUIRED",
+        "MINERU_TIER_UNAVAILABLE",
+        "MINERU_TIER_PREPARATION_REQUIRED"
+      ]
+    },
+    "message": {
+      "type": "string"
+    },
+    "category": {
+      "type": "string",
+      "x-vibeocr-known-values": [
+        "validation",
+        "auth",
+        "not_found",
+        "conflict",
+        "capability",
+        "identity",
+        "cancelled",
+        "oom",
+        "transient",
+        "backend_unavailable",
+        "internal"
+      ]
+    },
+    "retryable": {
+      "type": "boolean"
+    },
+    "retry_after": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "detail": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "job_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

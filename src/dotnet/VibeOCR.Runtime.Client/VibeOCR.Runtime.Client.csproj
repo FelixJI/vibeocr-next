@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>VibeOCR.Runtime.Client</RootNamespace>
+    <AssemblyName>VibeOCR.Runtime.Client</AssemblyName>
+    <Authors>VibeOCR contributors</Authors>
+    <Description>Thin loopback HTTP transport for the VibeOCR Runtime Protocol.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../VibeOCR.Contracts/VibeOCR.Contracts.csproj"/>
+  </ItemGroup>
+</Project>

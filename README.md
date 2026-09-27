@@ -15,9 +15,9 @@
 
 </div>
 
-VibeOCR Next 是 VibeOCR 的 WinUI 3 桌面客户端。它使用 .NET Platform 层管理窗口、运行时与 typed
-Protocol client，并通过 WebView2 承载 React/TypeScript 高级 workbench。OCR/PDF 推理由独立 Backend
-Release 在本机完成。
+VibeOCR Next 包含 WinUI 3 桌面客户端、Python Runtime 与跨进程内部契约。Platform 层管理窗口、
+运行时与 typed HTTP client，WebView2 承载 React/TypeScript workbench。Supervisor、OCR/PDF
+worker 仍在独立进程运行。
 
 ![VibeOCR Next 运行时安装进度](docs/runtime-install-progress.png)
 
@@ -91,7 +91,7 @@ Release 在本机完成。
 flowchart LR
     WinUI["WinUI App / ViewModels"] --> Platform["VibeOCR.Platform"]
     Platform --> Client["Typed InferenceHttpClient"]
-    Client -->|"Protocol v2"| Backend["VibeOCR Backend"]
+    Client -->|"Protocol v2"| Backend["本仓 Python Runtime / Supervisor"]
     WinUI --> WebView["WebView2 Host"]
     WebView --> Bridge["Command codec / handler"]
     Bridge --> React["React Workbench"]
@@ -99,7 +99,10 @@ flowchart LR
 ```
 
 WinUI App 负责用户体验与进程生命周期，Platform 层隔离协议、系统和运行时能力；WebAssets 通过明确的
-bridge command 与桌面交互，不直接访问 Backend。
+bridge command 与桌面交互，不直接访问 Runtime。Runtime 的 host 负责启动、鉴权和 HTTP 适配；
+jobs 管理任务状态与调度；recognition 管理 OCR/MinerU 引擎和 worker；documents 管理 PDF 子进程、
+表格与导出；codes 管理二维码；environments 管理安装、选择、设置与恢复；processes 托管共享的
+Windows 子进程能力。跨进程 wire DTO、schema、golden 与生成物位于 `contracts/runtime`。
 
 ## 仓库地图
 
@@ -108,20 +111,38 @@ src/dotnet/
 ├── VibeOCR.App/                    # WinUI 3 应用
 │   └── WebAssets/                  # React 19 / TypeScript / Vite workbench
 ├── VibeOCR.Platform/               # Protocol、进程与平台 seam
+├── VibeOCR.Contracts/              # 内部 C# wire 契约源码
+├── VibeOCR.Runtime.Client/         # 内部 C# loopback HTTP client 源码
 └── ...Bootstrapper.../             # .NET Framework 4.7.2 启动器
+src/runtime/vibeocr/runtime/       # Python Runtime，内部按功能分组
+contracts/runtime/python/          # Python wire 契约、schema 与生成物
 tests/dotnet/
 ├── VibeOCR.Platform.Tests/         # 平台与 Protocol 测试
-└── VibeOCR.App.Tests/              # WinUI app tests
+├── VibeOCR.App.Tests/              # WinUI app tests
+├── VibeOCR.Contracts.Tests/        # 内部 C# wire 契约测试
+└── VibeOCR.Runtime.Client.Tests/   # 内部 C# HTTP client 测试
+tests/python/                       # Runtime 与契约行为测试
 scripts/
-├── check_quality.py                # Python/Node/.NET 质量编排
+├── check_quality.py                # Python/Node 质量入口
+├── generate_runtime_protocol.py    # 从内部 schema 生成 Python/C# wire 绑定
 ├── install_windows_app_runtime.ps1 # 开发/CI 前置条件
-├── resolve_component_releases.py   # Backend/Protocol 组件解析
+├── resolve_component_releases.py   # 过渡期正式 Backend/Protocol 组件解析
 └── automation.py                   # CI/发布稳定入口
 docs/                               # 架构、截图与源码阅读文档
 .ci/project.json                    # 构建、测试、资产与发布契约
 ```
 
-Bootstrapper 的精确工程名与当前目录以 `rg --files -g '*.csproj'` 为准。
+当前 #86 仍沿用正式 Backend/Protocol 组件作为桌面构建输入；Desktop 的旧 NuGet 引用和
+release 输入绑定在 #87 切换为本仓源码，#88 再完成单产品候选与发布流程。不能把本次源码迁入误作
+已有 Release 直连源码。
+
+Runtime 源自 `FelixJI/vibeocr-backend@7dc0ddf446152ef854901760d5125ad64860975b`；
+wire/C# 契约源自 `FelixJI/vibeocr-protocol@31609e19bee1d44562eb74aff2d74fc75bb93eda`。
+二者与本仓同为 MIT，作者版权见根 `LICENSE`；原仓保留历史。仅旧 Python UI 使用的
+`frontend.py`、无 Runtime/Next 入口的 application facades、`model_bridge`/`ocr_sidecar`、
+完整 Python runtime_client SDK、独立 SDK 发版/治理脚本未迁入。保留了直接消费的 C#
+`RuntimeHttpClient`/`RuntimeClientException`、PDF IPC schema、wire parser 与安装计划行为测试；
+仅旧 Python 客户端发行面的测试和只测试旧仓 CI/CD 配置的用例没有作为产品接口继续维护。
 
 ## 两条核心链路
 
@@ -146,19 +167,20 @@ Protocol v2 与 Backend 通信。ViewModel 不应拼 HTTP 或依赖模型内部�
 ```powershell
 git clone https://github.com/FelixJI/vibeocr-next.git
 cd vibeocr-next
-uv venv .venv
-uv pip install --python .venv\Scripts\python.exe --group dev
-$env:VIRTUAL_ENV = (Resolve-Path .venv).Path
-$env:Path = "$env:VIRTUAL_ENV\Scripts;$env:Path"
+uv sync --frozen
 npm ci --prefix src/dotnet/VibeOCR.App/WebAssets
 $env:RUNNER_TEMP = (New-Item -ItemType Directory -Force build/runner-temp).FullName
 pwsh -File scripts/install_windows_app_runtime.ps1
-uv run --no-sync python scripts/resolve_component_releases.py
+uv run --frozen python scripts/resolve_component_releases.py
 dotnet restore tests/dotnet/VibeOCR.Platform.Tests/VibeOCR.Platform.Tests.csproj --locked-mode
 dotnet restore tests/dotnet/VibeOCR.App.Tests/VibeOCR.App.Tests.csproj --locked-mode
-uv run --no-sync python scripts/check_quality.py
+dotnet restore tests/dotnet/VibeOCR.Contracts.Tests/VibeOCR.Contracts.Tests.csproj --locked-mode
+dotnet restore tests/dotnet/VibeOCR.Runtime.Client.Tests/VibeOCR.Runtime.Client.Tests.csproj --locked-mode
+uv run --frozen python scripts/check_quality.py
 dotnet test tests/dotnet/VibeOCR.Platform.Tests/VibeOCR.Platform.Tests.csproj -c Release --no-restore
 pwsh -File scripts/test_app_ci.ps1
+dotnet test tests/dotnet/VibeOCR.Contracts.Tests/VibeOCR.Contracts.Tests.csproj -c Release --no-restore
+dotnet test tests/dotnet/VibeOCR.Runtime.Client.Tests/VibeOCR.Runtime.Client.Tests.csproj -c Release --no-restore
 ```
 
 这些命令与 [`.ci/project.json`](.ci/project.json) 对齐。完整 PR CI 还会执行 release build、smoke、组件

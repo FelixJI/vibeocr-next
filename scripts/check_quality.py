@@ -14,6 +14,13 @@ except ModuleNotFoundError:  # 直接执行 scripts/check_quality.py
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB_ASSETS = "src/dotnet/VibeOCR.App/WebAssets"
+PYTHON_SOURCES = [
+    "scripts",
+    "src/runtime",
+    "contracts/runtime/python",
+    "tests/runtime",
+    "tests/python",
+]
 
 
 def resolve_executable(command: str) -> str:
@@ -26,7 +33,7 @@ def main() -> int:
     for label, command in (
         (
             "ruff-check",
-            [sys.executable, "-m", "ruff", "check", "scripts", "tests/runtime"],
+            [sys.executable, "-m", "ruff", "check", *PYTHON_SOURCES],
         ),
         (
             "ruff-format",
@@ -36,11 +43,19 @@ def main() -> int:
                 "ruff",
                 "format",
                 "--check",
-                "scripts",
-                "tests/runtime",
+                *PYTHON_SOURCES,
             ],
         ),
-        ("pytest", [sys.executable, "-m", "pytest", "tests/runtime"]),
+        (
+            "protocol-generate",
+            [sys.executable, "scripts/generate_runtime_protocol.py", "--check"],
+        ),
+        ("openapi", [sys.executable, "scripts/check_openapi_quality.py"]),
+        (
+            "protocol-conformance",
+            [sys.executable, "scripts/check_runtime_protocol_conformance.py"],
+        ),
+        ("pytest", [sys.executable, "-m", "pytest", "tests/runtime", "tests/python"]),
         ("web-format", [npm, "run", "format:check", "--prefix", WEB_ASSETS]),
         ("web-lint", [npm, "run", "lint", "--prefix", WEB_ASSETS]),
         ("web-typecheck", [npm, "run", "typecheck", "--prefix", WEB_ASSETS]),

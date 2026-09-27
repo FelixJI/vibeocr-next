@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>VibeOCR.Contracts</RootNamespace>
+    <AssemblyName>VibeOCR.Contracts</AssemblyName>
+    <Authors>VibeOCR contributors</Authors>
+    <Description>Contracts and generated bindings for the VibeOCR Runtime Protocol.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\..\..\contracts\runtime\python\vibeocr\runtime_contracts\generated\RuntimeProtocol.g.cs" Link="Generated\RuntimeProtocol.g.cs"/>
+    <Compile Include="..\..\..\contracts\runtime\python\vibeocr\runtime_contracts\generated\RuntimeWireTypes.g.cs" Link="Generated\RuntimeWireTypes.g.cs"/>
+    <Compile Include="..\..\..\contracts\runtime\python\vibeocr\runtime_contracts\generated\RuntimeHostWireTypes.g.cs" Link="Generated\RuntimeHostWireTypes.g.cs"/>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,1033 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibeocr/protocol/v2/runtime-host.schema.json",
+  "title": "VibeOCR Runtime Host Control Protocol v2",
+  "description": "Authoritative request and response envelopes for the one-shot Runtime Host JSON CLI.",
+  "oneOf": [
+    { "$ref": "#/$defs/RuntimeHostRequest" },
+    { "$ref": "#/$defs/RuntimeMaintenanceCommandRequest" },
+    { "$ref": "#/$defs/RuntimeMaintenanceObserveRequest" },
+    { "$ref": "#/$defs/RuntimeInstallPlanRequest" },
+    { "$ref": "#/$defs/RuntimeMaintenanceEvent" },
+    { "$ref": "#/$defs/RuntimeMaintenanceUpdate" },
+    { "$ref": "#/$defs/RuntimeHostSuccess" },
+    { "$ref": "#/$defs/RuntimeHostFailure" },
+    { "$ref": "#/$defs/RuntimeInstallPlanResponse" }
+  ],
+  "$defs": {
+    "Accelerator": {
+      "type": "string",
+      "enum": ["cpu", "nvidia_cuda"]
+    },
+    "CapabilityDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "lifecycle",
+        "introduced_in",
+        "deprecated_in",
+        "sunset_at",
+        "replacement"
+      ],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "lifecycle": {
+          "type": "string",
+          "enum": ["active", "deprecated"]
+        },
+        "introduced_in": { "type": "string", "minLength": 1 },
+        "deprecated_in": { "type": ["string", "null"] },
+        "sunset_at": { "type": ["string", "null"], "format": "date-time" },
+        "replacement": { "type": ["string", "null"] },
+        "ocr_engine_catalog": { "$ref": "#/$defs/OcrEngineCatalog" },
+        "recognition_mode_catalog": { "$ref": "#/$defs/RecognitionModeCatalog" },
+        "download_source_catalog": { "$ref": "#/$defs/DownloadSourceCatalog" },
+        "component_variant_catalog": { "$ref": "#/$defs/ComponentVariantCatalog" },
+        "mineru_config_catalog": { "$ref": "#/$defs/MineruConfigCatalog" }
+      }
+    },
+    "OcrEngineId": {
+      "type": "string",
+      "enum": ["rapidocr", "windows", "paddleocr"]
+    },
+    "OcrEngineAvailability": {
+      "type": "string",
+      "enum": ["ready", "preparation_required", "unavailable"]
+    },
+    "OcrEngineDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "availability",
+        "included_in_base",
+        "reason_code",
+        "required_component"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/OcrEngineId" },
+        "availability": { "$ref": "#/$defs/OcrEngineAvailability" },
+        "included_in_base": { "type": "boolean" },
+        "reason_code": { "type": ["string", "null"], "minLength": 1 },
+        "required_component": { "type": ["string", "null"], "minLength": 1 }
+      }
+    },
+    "OcrEngineCatalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engines"],
+      "properties": {
+        "engines": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/OcrEngineDescriptor" }
+        }
+      }
+    },
+    "MineruTierId": {
+      "type": "string",
+      "enum": ["flash", "basic", "standard", "advanced"]
+    },
+    "MineruTierAvailability": {
+      "type": "string",
+      "enum": ["ready", "preparation_required", "unavailable"]
+    },
+    "MineruTierDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "availability", "reason_code"],
+      "properties": {
+        "id": { "$ref": "#/$defs/MineruTierId" },
+        "availability": { "$ref": "#/$defs/MineruTierAvailability" },
+        "reason_code": { "type": ["string", "null"], "minLength": 1 }
+      }
+    },
+    "MineruConfigCatalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["default_tier", "tiers", "languages"],
+      "properties": {
+        "default_tier": { "$ref": "#/$defs/MineruTierId" },
+        "tiers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/MineruTierDescriptor" }
+        },
+        "languages": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "ExecutionPipelineId": {
+      "type": "string",
+      "enum": ["OCR", "PP-StructureV3", "MinerU", "PaddleOCR-VL", "TABLE_RECOGNITION", "FORMULA_RECOGNITION"]
+    },
+    "RecognitionModeId": {
+      "type": "string",
+      "enum": ["rapid_text", "windows_text", "paddle_text", "paddle_structure", "paddle_document_vl", "mineru_document", "paddle_table", "paddle_formula"]
+    },
+    "RecognitionModeFamily": {
+      "type": "string",
+      "enum": ["text", "document", "specialized"]
+    },
+    "RecognitionModeProvisioning": {
+      "type": "string",
+      "enum": ["base_runtime", "operating_system", "advanced_component"]
+    },
+    "RecognitionModeAvailability": {
+      "type": "string",
+      "enum": ["ready", "preparation_required", "unavailable"]
+    },
+    "RecognitionModeLifecycleKind": {
+      "type": "string",
+      "enum": ["unmanaged", "model_residency", "process_keep_alive"]
+    },
+    "RecognitionModeLifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "supports_preload", "supports_ttl", "supports_pinning", "supports_release"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/RecognitionModeLifecycleKind" },
+        "supports_preload": { "type": "boolean" },
+        "supports_ttl": { "type": "boolean" },
+        "supports_pinning": { "type": "boolean" },
+        "supports_release": { "type": "boolean" }
+      }
+    },
+    "RecognitionModeDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "family", "pipeline_id", "engine", "provisioning", "availability", "reason_code", "required_component", "supported_options", "lifecycle"],
+      "properties": {
+        "id": { "$ref": "#/$defs/RecognitionModeId" },
+        "family": { "$ref": "#/$defs/RecognitionModeFamily" },
+        "pipeline_id": { "$ref": "#/$defs/ExecutionPipelineId" },
+        "engine": { "anyOf": [{ "$ref": "#/$defs/OcrEngineId" }, { "type": "null" }] },
+        "provisioning": { "$ref": "#/$defs/RecognitionModeProvisioning" },
+        "availability": { "$ref": "#/$defs/RecognitionModeAvailability" },
+        "reason_code": { "type": ["string", "null"], "minLength": 1 },
+        "required_component": { "type": ["string", "null"], "minLength": 1 },
+        "supported_options": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "lifecycle": { "$ref": "#/$defs/RecognitionModeLifecycle" }
+      }
+    },
+    "RecognitionModeCatalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modes"],
+      "properties": {
+        "modes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/RecognitionModeDescriptor" } }
+      }
+    },
+    "DownloadSourceKind": {
+      "type": "string",
+      "description": "Open source-kind identifier. package_index selects a dependency package index; model_registry selects an upstream model-source preference that the Backend may encode for native engine downloaders. This preference does not make VibeOCR responsible for model files, downloads, caches, validation or repair. Clients preserve unknown response values and only offer selection UI for kinds they understand.",
+      "x-vibeocr-known-values": ["package_index", "model_registry"]
+    },
+    "DownloadSourceDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "endpoint"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/DownloadSourceKind" },
+        "id": { "type": "string", "minLength": 1 },
+        "endpoint": { "type": "string", "minLength": 1 }
+      }
+    },
+    "DownloadSourceCatalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sources"],
+      "properties": {
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/DownloadSourceDescriptor" }
+        }
+      }
+    },
+    "ComponentVariantDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["feature_id", "accelerator", "component_id"],
+      "properties": {
+        "feature_id": { "type": "string", "minLength": 1 },
+        "accelerator": { "$ref": "#/$defs/Accelerator" },
+        "component_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ComponentVariantCatalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["variants"],
+      "properties": {
+        "variants": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/ComponentVariantDescriptor" }
+        }
+      }
+    },
+    "RuntimeHostEventStream": {
+      "type": "string",
+      "enum": ["ndjson.v1", "ndjson.v2"]
+    },
+    "RuntimeHostOperation": {
+      "type": "string",
+      "enum": ["inspect", "ensure", "repair"]
+    },
+    "RuntimeStatus": {
+      "type": "string",
+      "enum": ["ready", "missing"]
+    },
+    "IntegrityStatus": {
+      "type": "string",
+      "enum": ["verified", "not-installed"]
+    },
+    "RuntimeHostRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "operation",
+        "product_root",
+        "component_lock",
+        "runtime_manifest"
+      ],
+      "properties": {
+        "protocol_version": { "const": 2 },
+        "operation": { "$ref": "#/$defs/RuntimeHostOperation" },
+        "product_root": { "type": "string", "minLength": 1 },
+        "component_lock": { "type": "string", "minLength": 1 },
+        "runtime_manifest": { "type": "string", "minLength": 1 },
+        "accelerator": {
+          "anyOf": [
+            { "$ref": "#/$defs/Accelerator" },
+            { "type": "null" }
+          ],
+          "default": null
+        },
+        "layout_manifest": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "default": null
+        },
+        "product_id": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "default": null
+        },
+        "operation_id": { "type": "string", "minLength": 1 },
+        "plan_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Confirmed runtime.install-plan.v1 install plan id for ensure only (runtime.install-plan.v1); requires an explicit operation_id, requires required_capabilities to contain runtime.install-plan.v1, and is mutually exclusive with accelerator, component_ids, install_component_ids, and download_source_ids. The product binding fields above keep their mandatory meaning."
+        },
+        "component_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "required_capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "download_source_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Each selected id overrides its source kind; kinds not present use the Backend-declared default for that kind. Omitting the field delegates all kinds to Backend defaults."
+        },
+        "install_component_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "accepted_event_streams": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/RuntimeHostEventStream" },
+          "default": []
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "anyOf": [
+              { "required": ["download_source_ids"] },
+              { "required": ["install_component_ids"] }
+            ]
+          },
+          "then": { "properties": { "operation": { "const": "ensure" } } }
+        },
+        {
+          "if": { "required": ["plan_id"] },
+          "then": {
+            "required": ["operation_id", "required_capabilities"],
+            "properties": { "required_capabilities": { "contains": { "const": "runtime.install-plan.v1" } }, "operation": { "const": "ensure" } },
+            "not": {
+              "anyOf": [
+                { "required": ["accelerator"] },
+                { "required": ["component_ids"] },
+                { "required": ["install_component_ids"] },
+                { "required": ["download_source_ids"] }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "RuntimeMaintenanceCommandKind": {
+      "type": "string",
+      "enum": ["cancel", "retry"]
+    },
+    "RuntimeMaintenanceCommandRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "request_kind",
+        "command",
+        "command_id",
+        "target_operation_id",
+        "product_root",
+        "component_lock",
+        "runtime_manifest"
+      ],
+      "properties": {
+        "protocol_version": { "const": 2 },
+        "request_kind": { "const": "command" },
+        "command": { "$ref": "#/$defs/RuntimeMaintenanceCommandKind" },
+        "command_id": { "type": "string", "minLength": 1 },
+        "target_operation_id": { "type": "string", "minLength": 1 },
+        "new_operation_id": { "type": "string", "minLength": 1 },
+        "expected_sequence": { "type": "integer", "minimum": 0 },
+        "plan_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Fresh runtime.install-plan.v1 install plan id for a retry that replaces the source operation's plan confirmation; invalid for cancel, mutually exclusive with install_component_ids and download_source_ids, and requires required_capabilities to contain runtime.install-plan.v1."
+        },
+        "product_root": { "type": "string", "minLength": 1 },
+        "component_lock": { "type": "string", "minLength": 1 },
+        "runtime_manifest": { "type": "string", "minLength": 1 },
+        "accelerator": { "$ref": "#/$defs/Accelerator" },
+        "layout_manifest": { "type": "string", "minLength": 1 },
+        "product_id": { "type": "string", "minLength": 1 },
+        "download_source_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Each selected id overrides its source kind; kinds not present use the Backend-declared default for that kind. Omitting the field reuses the source operation intent."
+        },
+        "install_component_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "required_capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "accepted_event_streams": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/RuntimeHostEventStream" },
+          "default": []
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "command": { "const": "retry" } },
+            "required": ["command"]
+          },
+          "then": { "required": ["new_operation_id"] }
+        },
+        {
+          "if": {
+            "anyOf": [
+              { "required": ["download_source_ids"] },
+              { "required": ["install_component_ids"] }
+            ]
+          },
+          "then": { "properties": { "command": { "const": "retry" } } }
+        },
+        {
+          "if": {
+            "properties": { "command": { "const": "cancel" } },
+            "required": ["command"]
+          },
+          "then": { "not": { "required": ["plan_id"] } }
+        },
+        {
+          "if": { "required": ["plan_id"] },
+          "then": {
+            "required": ["required_capabilities"],
+            "properties": { "required_capabilities": { "contains": { "const": "runtime.install-plan.v1" } }, "command": { "const": "retry" } },
+            "not": {
+              "anyOf": [
+                { "required": ["install_component_ids"] },
+                { "required": ["download_source_ids"] }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "RuntimeMaintenanceObserveRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "request_kind",
+        "operation_id",
+        "after_sequence",
+        "product_root",
+        "component_lock",
+        "runtime_manifest"
+      ],
+      "properties": {
+        "protocol_version": { "const": 2 },
+        "request_kind": { "const": "observe" },
+        "operation_id": { "type": "string", "minLength": 1 },
+        "after_sequence": { "type": "integer", "minimum": 0 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 512 },
+        "product_root": { "type": "string", "minLength": 1 },
+        "component_lock": { "type": "string", "minLength": 1 },
+        "runtime_manifest": { "type": "string", "minLength": 1 },
+        "accelerator": { "$ref": "#/$defs/Accelerator" },
+        "layout_manifest": { "type": "string", "minLength": 1 },
+        "product_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "RuntimeInstallPlanRequest": {
+      "type": "object",
+      "description": "Cold-start Runtime Host install plan preview request (runtime.install-plan.v1). Uses the same product binding fields as inspect for baseline validation and the same selection semantics as the HTTP install-plan preview. required_capabilities MUST contain runtime.install-plan.v1; the Host MUST NOT run ensure to answer a preview. Clients send this request kind only when the capability is known to exist from the inspect capability_descriptors negotiation.",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "request_kind",
+        "product_root",
+        "component_lock",
+        "runtime_manifest",
+        "required_capabilities"
+      ],
+      "properties": {
+        "protocol_version": { "const": 2 },
+        "request_kind": { "const": "install_plan" },
+        "product_root": { "type": "string", "minLength": 1 },
+        "component_lock": { "type": "string", "minLength": 1 },
+        "runtime_manifest": { "type": "string", "minLength": 1 },
+        "layout_manifest": { "type": "string", "minLength": 1 },
+        "product_id": { "type": "string", "minLength": 1 },
+        "accelerator": { "$ref": "#/$defs/Accelerator" },
+        "install_component_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "download_source_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "required_capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 },
+          "contains": { "const": "runtime.install-plan.v1" }
+        }
+      }
+    },
+    "RuntimeInstallPlanResponse": {
+      "type": "object",
+      "description": "Dedicated Runtime Host install plan preview response. It is deliberately not the success envelope: it carries no ok flag and no legacy operation ambiguity, and failures reuse the existing failure envelope with operation null and error.canonical_code carrying the canonical code such as RUNTIME_INSTALL_PLAN_STALE.",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "response_kind",
+        "plan"
+      ],
+      "properties": {
+        "protocol_version": { "const": 2 },
+        "response_kind": { "const": "install_plan" },
+        "plan": { "$ref": "#/$defs/RuntimeInstallPlan" }
+      }
+    },
+    "RuntimeInstallPlan": {
+      "type": "object",
+      "description": "One read-only install plan shared with the HTTP install-plan preview. plan_id is opaque and expires at expires_at; stale, expired, or unknown plans fail with RUNTIME_INSTALL_PLAN_STALE and blocked plans with RUNTIME_INSTALL_PLAN_BLOCKED (canonical codes on the Host failure envelope). requested_* fields are nullable echoes: null means omitted (Backend default), an empty array explicitly selected no optional components. components is the union of the effective closure and the actually affected old components; remove never authorizes deleting retained environments, native models, or caches.",
+      "additionalProperties": false,
+      "required": [
+        "plan_id",
+        "expires_at",
+        "accelerator",
+        "profile_id",
+        "requested_component_ids",
+        "effective_component_ids",
+        "requested_download_source_ids",
+        "effective_download_source_ids",
+        "source",
+        "components",
+        "blockers",
+        "cost"
+      ],
+      "properties": {
+        "plan_id": { "type": "string", "minLength": 1 },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "accelerator": { "$ref": "#/$defs/Accelerator" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "requested_component_ids": {
+          "type": ["array", "null"],
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "effective_component_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "requested_download_source_ids": {
+          "type": ["array", "null"],
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "effective_download_source_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "source": { "$ref": "#/$defs/RuntimeSourceIdentity" },
+        "components": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/RuntimeInstallPlanComponent" }
+        },
+        "blockers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/RuntimeInstallPlanBlocker" }
+        },
+        "cost": { "$ref": "#/$defs/RuntimeInstallPlanCost" }
+      }
+    },
+    "RuntimeInstallPlanComponent": {
+      "type": "object",
+      "description": "One component row of the effective install closure union; mirrors the HTTP RuntimeInstallPlanComponent semantics.",
+      "additionalProperties": false,
+      "required": ["component_id", "action", "dependency_state", "reason_codes"],
+      "properties": {
+        "component_id": { "type": "string", "minLength": 1 },
+        "action": {
+          "type": "string",
+          "enum": ["retain", "install", "replace", "remove"]
+        },
+        "dependency_state": {
+          "type": "string",
+          "enum": ["satisfied", "pending"]
+        },
+        "reason_codes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "RuntimeInstallPlanBlocker": {
+      "type": "object",
+      "description": "One actual known blocker with an open stable code and a next user action; mirrors the HTTP RuntimeInstallPlanBlocker semantics.",
+      "additionalProperties": false,
+      "required": ["code", "next_action"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "component_id": { "type": "string", "minLength": 1 },
+        "next_action": { "type": "string", "minLength": 1 }
+      }
+    },
+    "RuntimeInstallPlanCost": {
+      "type": "object",
+      "description": "Plan-wide deduplicated cost totals; null totals are honestly unknown and MUST carry unknown_reason_codes; mirrors the HTTP RuntimeInstallPlanCost semantics.",
+      "additionalProperties": false,
+      "required": ["download_bytes", "additional_disk_bytes", "unknown_reason_codes"],
+      "properties": {
+        "download_bytes": { "type": ["integer", "null"], "format": "int64", "minimum": 0 },
+        "additional_disk_bytes": { "type": ["integer", "null"], "format": "int64", "minimum": 0 },
+        "unknown_reason_codes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "anyOf": [
+              { "properties": { "download_bytes": { "type": "null" } } },
+              { "properties": { "additional_disk_bytes": { "type": "null" } } }
+            ]
+          },
+          "then": {
+            "properties": {
+              "unknown_reason_codes": { "minItems": 1 }
+            }
+          }
+        }
+      ]
+    },
+    "ProgressUnit": {
+      "type": "string",
+      "enum": ["steps", "items", "bytes"]
+    },
+    "ProgressSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "current"],
+      "properties": {
+        "unit": { "$ref": "#/$defs/ProgressUnit" },
+        "current": { "type": "integer", "format": "int64", "minimum": 0 },
+        "total": { "type": "integer", "format": "int64", "minimum": 0 },
+        "estimated_remaining_seconds": { "type": "number", "minimum": 0 }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["estimated_remaining_seconds"] },
+          "then": {
+            "required": ["total"],
+            "properties": {
+              "unit": { "enum": ["items", "bytes"] },
+              "total": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      ]
+    },
+    "RuntimeOperationState": {
+      "type": "string",
+      "enum": ["queued", "running", "succeeded", "failed", "cancelled"]
+    },
+    "RuntimeMaintenancePhase": {
+      "type": "string",
+      "enum": [
+        "validate_binding",
+        "wait_for_lock",
+        "prepare_runtime",
+        "install_profile",
+        "install_backend",
+        "verify_runtime",
+        "commit_runtime"
+      ]
+    },
+    "RuntimeComponentDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["component_id", "display_name"],
+      "properties": {
+        "component_id": { "type": "string", "minLength": 1 },
+        "display_name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "state": {
+          "enum": [
+            "not_required",
+            "pending",
+            "installing",
+            "verifying",
+            "ready",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "desired_state": { "enum": ["ready", "not_required"] },
+        "desired_version": { "type": ["string", "null"] },
+        "actual_state": {
+          "enum": ["ready", "missing", "drifted", "unknown"]
+        },
+        "actual_version": { "type": ["string", "null"] },
+        "drift_reason": {
+          "enum": [
+            "none",
+            "missing",
+            "version_mismatch",
+            "identity_mismatch",
+            "integrity_failed",
+            "unexpected"
+          ]
+        },
+        "repairable": { "type": "boolean" }
+      }
+    },
+    "RuntimeProfileDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_id", "accelerator", "components"],
+      "properties": {
+        "profile_id": { "type": "string", "minLength": 1 },
+        "accelerator": { "$ref": "#/$defs/Accelerator" },
+        "components": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/RuntimeComponentDescriptor" }
+        }
+      }
+    },
+    "RuntimeSourceIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backend_version",
+        "backend_source_sha",
+        "runtime_manifest_sha256",
+        "protocol_version",
+        "protocol_manifest_sha256"
+      ],
+      "properties": {
+        "backend_version": { "type": "string", "minLength": 1 },
+        "backend_source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "runtime_manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "protocol_version": { "type": "string", "minLength": 1 },
+        "protocol_manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "RuntimeMaintenanceSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "sequence",
+        "operation",
+        "operation_state",
+        "phase",
+        "profile_id",
+        "updated_at"
+      ],
+      "properties": {
+        "operation_id": { "type": "string", "minLength": 1 },
+        "source_operation_id": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "operation": { "$ref": "#/$defs/RuntimeHostOperation" },
+        "operation_state": { "$ref": "#/$defs/RuntimeOperationState" },
+        "phase": { "$ref": "#/$defs/RuntimeMaintenancePhase" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "component_id": { "type": ["string", "null"], "minLength": 1 },
+        "requested_component_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "effective_component_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "source": { "$ref": "#/$defs/RuntimeSourceIdentity" },
+        "plan_id": { "type": "string", "minLength": 1 },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "progress": {
+          "anyOf": [
+            { "$ref": "#/$defs/ProgressSnapshot" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "RuntimeMaintenanceEventType": {
+      "type": "string",
+      "enum": ["snapshot", "progress", "heartbeat"]
+    },
+    "RuntimeMaintenanceEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "event_version",
+        "event_type",
+        "operation",
+        "snapshot",
+        "message_code"
+      ],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "protocol_version": { "const": 2 },
+        "event_version": { "const": 1 },
+        "event_type": { "$ref": "#/$defs/RuntimeMaintenanceEventType" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "operation": { "$ref": "#/$defs/RuntimeHostOperation" },
+        "snapshot": { "$ref": "#/$defs/RuntimeMaintenanceSnapshot" },
+        "message_code": { "type": "string", "minLength": 1 },
+        "message_args": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "fallback_message": { "type": "string", "minLength": 1 }
+      }
+    },
+    "RuntimeMaintenanceUpdate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "ok",
+        "request_kind",
+        "operation_id",
+        "snapshot",
+        "events",
+        "oldest_sequence",
+        "through_sequence",
+        "more"
+      ],
+      "properties": {
+        "protocol_version": { "const": 2 },
+        "ok": { "const": true },
+        "request_kind": { "const": "observe" },
+        "operation_id": { "type": "string", "minLength": 1 },
+        "snapshot": { "$ref": "#/$defs/RuntimeMaintenanceSnapshot" },
+        "events": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/RuntimeMaintenanceEvent" }
+        },
+        "oldest_sequence": { "type": "integer", "minimum": 1 },
+        "through_sequence": { "type": "integer", "minimum": 0 },
+        "more": { "type": "boolean" },
+        "replay_expires_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        }
+      }
+    },
+    "RuntimeState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime_root",
+        "accelerator",
+        "status",
+        "integrity",
+        "manifest_sha256",
+        "backend_version"
+      ],
+      "properties": {
+        "runtime_root": { "type": "string", "minLength": 1 },
+        "accelerator": { "$ref": "#/$defs/Accelerator" },
+        "status": { "$ref": "#/$defs/RuntimeStatus" },
+        "integrity": { "$ref": "#/$defs/IntegrityStatus" },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "backend_version": { "type": "string", "minLength": 1 },
+        "source": { "$ref": "#/$defs/RuntimeSourceIdentity" }
+      }
+    },
+    "RuntimeLaunch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "python_executable",
+        "supervisor_module",
+        "working_directory",
+        "model_root",
+        "environment"
+      ],
+      "properties": {
+        "python_executable": { "type": "string", "minLength": 1 },
+        "supervisor_module": { "type": "string", "minLength": 1 },
+        "working_directory": { "type": "string", "minLength": 1 },
+        "model_root": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Legacy opaque Portable storage hint retained for Protocol v2 response compatibility. Frontends must not inspect or manage its contents; upstream engines own model download and cache layout."
+        },
+        "environment": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "RuntimeHostSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "ok", "operation", "state"],
+      "properties": {
+        "protocol_version": { "const": 2 },
+        "ok": { "const": true },
+        "operation": { "$ref": "#/$defs/RuntimeHostOperation" },
+        "state": { "$ref": "#/$defs/RuntimeState" },
+        "launch": {
+          "anyOf": [
+            { "$ref": "#/$defs/RuntimeLaunch" },
+            { "type": "null" }
+          ],
+          "default": null
+        },
+        "profile": {
+          "anyOf": [
+            { "$ref": "#/$defs/RuntimeProfileDescriptor" },
+            { "type": "null" }
+          ],
+          "default": null
+        },
+        "maintenance": {
+          "anyOf": [
+            { "$ref": "#/$defs/RuntimeMaintenanceSnapshot" },
+            { "type": "null" }
+          ],
+          "default": null
+        },
+        "negotiated_capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "capability_descriptors": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/CapabilityDescriptor" }
+        }
+      }
+    },
+    "RuntimeHostErrorCode": {
+      "type": "string",
+      "enum": [
+        "invalid_request",
+        "invalid_binding",
+        "install_failed",
+        "lock_timeout",
+        "io_error"
+      ]
+    },
+    "RuntimeHostError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": { "$ref": "#/$defs/RuntimeHostErrorCode" },
+        "message": { "type": "string", "minLength": 1 },
+        "retryable": { "type": "boolean" },
+        "canonical_code": { "type": "string", "minLength": 1 },
+        "category": {
+          "type": "string",
+          "enum": [
+            "validation",
+            "auth",
+            "not_found",
+            "conflict",
+            "capability",
+            "identity",
+            "cancelled",
+            "oom",
+            "transient",
+            "backend_unavailable",
+            "internal"
+          ]
+        },
+        "retry_after": { "type": "integer", "minimum": 0 },
+        "message_code": { "type": "string", "minLength": 1 },
+        "detail": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "RuntimeHostFailure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "ok", "operation", "error"],
+      "properties": {
+        "protocol_version": { "const": 2 },
+        "ok": { "const": false },
+        "operation": {
+          "anyOf": [
+            { "$ref": "#/$defs/RuntimeHostOperation" },
+            { "type": "null" }
+          ]
+        },
+        "error": { "$ref": "#/$defs/RuntimeHostError" },
+        "maintenance": {
+          "anyOf": [
+            { "$ref": "#/$defs/RuntimeMaintenanceSnapshot" },
+            { "type": "null" }
+          ],
+          "default": null
+        }
+      }
+    }
+  }
+}
