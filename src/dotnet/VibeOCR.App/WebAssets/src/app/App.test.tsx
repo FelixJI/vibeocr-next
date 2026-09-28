@@ -83,6 +83,46 @@ describe("AppShell", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
+  it("waits for connected host navigation before changing pages", async () => {
+    window.location.hash = "#/recognition";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const initial: AppViewState = {
+      connected: true,
+      revision: 1,
+      route: "recognition",
+      theme: "light",
+      capabilities: ["qrcode.generate"],
+      features: {},
+      runtimeLabel: "原生宿主已连接",
+    };
+    const { rerender, unmount } = render(
+      <App actions={actions} viewState={initial} />,
+    );
+    const push = vi.spyOn(window.history, "pushState");
+    try {
+      await user.click(screen.getByRole("link", { name: "二维码" }));
+      expect(actions.navigate).toHaveBeenCalledWith("qrcode");
+      expect(push).not.toHaveBeenCalled();
+      expect(window.location.hash).toBe("#/recognition");
+      rerender(
+        <App
+          actions={actions}
+          viewState={{ ...initial, revision: 2, route: "qrcode" }}
+        />,
+      );
+      expect(
+        await screen.findByRole("heading", { name: "二维码工作台" }),
+      ).toBeVisible();
+    } finally {
+      push.mockRestore();
+      unmount();
+    }
+  });
   it("follows an external host route revision", async () => {
     window.location.hash = "#/recognition";
     const actions: AppActions = {
