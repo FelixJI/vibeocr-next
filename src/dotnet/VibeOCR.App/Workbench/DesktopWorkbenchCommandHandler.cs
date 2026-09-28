@@ -375,9 +375,19 @@ public sealed class DesktopWorkbenchCommandHandler :
           false,
           "workbench.error.captureInProgress"));
     }
+    catch (ClipboardBusyException)
+    {
+      return new WorkbenchCommandOutcome(
+        [],
+        new WorkbenchProblem(
+          "clipboard_busy",
+          WorkbenchProblemCategory.Unavailable,
+          true,
+          "workbench.error.clipboardBusy"));
+    }
     catch (Exception error) when (
       error is IOException or UnauthorizedAccessException or InvalidOperationException or
-        ClipboardBusyException or WorkbenchAnnotationAccessException)
+        WorkbenchAnnotationAccessException)
     {
       return new WorkbenchCommandOutcome(
         [],
@@ -869,21 +879,57 @@ public sealed class DesktopWorkbenchCommandHandler :
         cancellationToken));
   }
 
-  /// <summary>Explicit pin intent joins the same session/revision OCR task.</summary>
-  public async Task PreparePinnedTextLayerAsync(
-    Guid sessionId, long revision, string imagePath)
+  /// <summary>
+  /// An active pin joins the editor's task. Once its session is gone, explicit
+  /// pin text recognition uses only that pin's frozen PNG and never publishes
+  /// a result into the current editor session.
+  /// </summary>
+  public async Task<RecognitionTextLayerState?> PreparePinnedTextLayerAsync(
+    Guid sessionId, long revision, string imagePath,
+    CancellationToken cancellationToken = default)
   {
-    ValidateScreenshotSession(sessionId, revision);
-    if (screenshotTextLayer?.Binding is { } binding &&
-      binding.SessionId == sessionId.ToString("N") &&
-      binding.Revision == revision &&
-      screenshotTextLayer.Status is "textlayer.preparing" or "textlayer.ready") return;
-    byte[] png = await File.ReadAllBytesAsync(imagePath);
-    RecognitionWorkbenchState? started = await PrepareScreenshotTextLayerAsync(
-      new PrepareScreenshotTextLayerCommand(string.Empty, sessionId, revision),
-      CancellationToken.None,
-      png);
-    if (started is not null) StateChanged?.Invoke(started);
+    if (screenshotSessionId == sessionId && screenshotSessionRevision == revision)
+    {
+      if (screenshotTextLayer?.Binding is { } binding &&
+        binding.SessionId == sessionId.ToString("N") &&
+        binding.Revision == revision &&
+        screenshotTextLayer.Status is "textlayer.preparing" or "textlayer.ready") return null;
+      byte[] activePng = await File.ReadAllBytesAsync(imagePath, cancellationToken);
+      RecognitionWorkbenchState? started = await PrepareScreenshotTextLayerAsync(
+        new PrepareScreenshotTextLayerCommand(string.Empty, sessionId, revision),
+        CancellationToken.None,
+        activePng);
+      if (started is not null) StateChanged?.Invoke(started);
+      return null;
+    }
+
+    // No session-dependent generation or result cache is read below. The pin
+    // retains its own final PNG lease even after close/new capture/redaction.
+    if (inferenceAttached?.Invoke() == false)
+      throw new InvalidOperationException("本地识别服务尚未就绪。");
+    await EnsureSelectionLoadedAsync(cancellationToken);
+    RecognitionModeOption mode = FindReadyLocalTextMode(out _) ??
+      throw new InvalidOperationException("没有已就绪的本地轻量文字引擎。");
+    byte[] png = await File.ReadAllBytesAsync(imagePath, cancellationToken);
+    string serviceInstance = supervisorInstanceId() ?? string.Empty;
+    RecognitionViewModel viewModel = textLayerRecognitionFactory();
+    viewModel.SetRecognitionMode(mode);
+    await viewModel.RecognizeCapturedInputAsync(
+      new RecognitionInput(png, "image/png", "pinned-text-layer.png", "screenshot-text"),
+      cancellationToken);
+    cancellationToken.ThrowIfCancellationRequested();
+    if ((supervisorInstanceId() ?? string.Empty) != serviceInstance ||
+        inferenceAttached?.Invoke() == false ||
+        FindReadyLocalTextMode(out _)?.Id != mode.Id)
+      throw new InvalidOperationException("本地识别服务已变化，请重新取字。");
+    IReadOnlyList<RecognitionTextLayerLine>? lines =
+      ProjectTextLayerLines(viewModel.Result?.RawBlocks, out _);
+    if (lines is null)
+      throw new InvalidDataException("贴图文字层未返回可选行。");
+    return new RecognitionTextLayerState(
+      "textlayer.ready", null,
+      new RecognitionScreenshotSessionState(sessionId.ToString("N"), revision),
+      mode.Id, serviceInstance, null, lines);
   }
 
   private async Task CompleteScreenshotTextLayerAsync(

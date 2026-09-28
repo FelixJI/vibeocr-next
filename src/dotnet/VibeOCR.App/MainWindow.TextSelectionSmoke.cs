@@ -85,6 +85,7 @@ public sealed partial class MainWindow
       string latin = await SelectMainSubstringAndCopyAsync(
         chinese: false, previewPath: editorPreview);
       string chinese = await SelectMainSubstringAndCopyAsync(chinese: true);
+      await ExerciseWordAndCrossLineSelectionAsync();
       if (string.IsNullOrWhiteSpace(latin) || string.IsNullOrWhiteSpace(chinese))
         throw new InvalidOperationException("Partial Latin/Chinese selection was empty.");
 
@@ -104,6 +105,18 @@ public sealed partial class MainWindow
       {
         await WaitForPinTextAsync(pin, present: true);
       }
+      if (oldPins.Any(pin => !pin.SmokeAlwaysOnTop))
+        throw new InvalidOperationException("A pin is not a native topmost window.");
+      var pinPosition = oldPins[0].SmokePosition;
+      await oldPins[0].SmokeDragTitleBarAsync(40, 30);
+      if (oldPins[0].SmokePosition == pinPosition)
+        throw new InvalidOperationException("Native pin did not move by titlebar drag.");
+      oldPins[0].SmokeInvokeZoomIn();
+      if (oldPins[0].SmokeZoom <= 1)
+        throw new InvalidOperationException("Pin zoom control did not change content scale.");
+      oldPins[0].SmokeSetOpacity(0.65);
+      if (oldPins[0].SmokeNativeAlpha >= 255)
+        throw new InvalidOperationException("Pin opacity did not change native window alpha.");
       string pinnedSelection = await CopyPinSubstringAsync(oldPins[0]);
       await oldPins[0].SmokeCapturePreviewAsync(firstPinPreview);
       await oldPins[1].SmokeCapturePreviewAsync(secondPinPreview);
@@ -140,6 +153,17 @@ public sealed partial class MainWindow
         throw new InvalidOperationException("Edited PNG did not get one new bound OCR layer.");
       foreach (PinnedImageWindow pin in oldPins) await WaitForPinTextAsync(pin, present: false);
 
+      await ClickSmokeButtonAsync("结束会话");
+      await WaitForScreenshotStateAsync(
+        state => state.ScreenshotSession is null, TimeSpan.FromSeconds(15));
+      oldPins[0].SmokeInvokePrepareText();
+      await WaitForPinTextAsync(oldPins[0], present: true);
+      if (smokeSubmitAttempts() != 3 ||
+          (await WaitForScreenshotStateAsync(_ => true, TimeSpan.FromSeconds(5))).TextLayer is not null)
+        throw new InvalidOperationException(
+          "Detached old pin did not OCR only its frozen PNG after editor close.");
+      await WaitForPinTextAsync(oldPins[1], present: false);
+
       foreach (PinnedImageWindow pin in oldPins) pin.Close();
       await WaitForPinCountAsync(0);
       if (oldPins.Any(pin => !pin.SmokeDisposed) ||
@@ -155,7 +179,8 @@ public sealed partial class MainWindow
         pins = 2,
         submit_attempts_after_pure_pins = 0,
         submit_attempts_after_first_layer = 1,
-        submit_attempts_after_edit = smokeSubmitAttempts(),
+        submit_attempts_after_edit = 2,
+        submit_attempts_after_detached_pin = smokeSubmitAttempts(),
         startup_ensure_attempts_before_capture = ensuresBefore,
         startup_ensure_attempts = smokeStartupEnsureAttempts(),
         latin_selection = latin,
@@ -245,25 +270,45 @@ public sealed partial class MainWindow
   private async Task<string> SelectMainSubstringAndCopyAsync(
     bool chinese, string? previewPath = null)
   {
-    string selectedJson = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync($$"""
+    // Range is used only to measure glyph caret coordinates. The actual DOM
+    // selection is made by WebView2 mouse input, as it is for a user.
+    string geometryJson = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync($$"""
       (() => {
         const element = [...document.querySelectorAll('.image-text-glyphs')]
           .find(node => {{(chinese ? "/[\\u4e00-\\u9fff]/.test(node.textContent)" : "/[A-Za-z]{4}/.test(node.textContent)")}});
-        if (!element?.firstChild) return '';
+        if (!element?.firstChild) return null;
         const text = element.firstChild.textContent;
         const start = {{(chinese ? "text.search(/[\\u4e00-\\u9fff]/)" : "Math.min(1, text.length - 1)")}};
         const end = Math.min(text.length, start + {{(chinese ? 1 : 3)}});
-        const range = document.createRange();
-        range.setStart(element.firstChild, start); range.setEnd(element.firstChild, end);
-        const selection = window.getSelection();
-        selection.removeAllRanges(); selection.addRange(range);
-        return selection.toString();
+        const point = offset => {
+          const range = document.createRange();
+          range.setStart(element.firstChild, offset); range.collapse(true);
+          const box = range.getBoundingClientRect();
+          return {x: box.x, y: box.y + box.height / 2};
+        };
+        element.scrollIntoView({block:'center'});
+        return {expected:text.slice(start,end), start:point(start), end:point(end)};
       })()
       """);
-    string selected = JsonSerializer.Deserialize<string>(selectedJson) ?? string.Empty;
-    if (selected.Length == 0)
-      throw new InvalidOperationException("Native DOM substring selection failed.");
-    await WaitForWebConditionAsync("[...document.querySelectorAll('button')].some(b => b.textContent?.trim() === '复制所选')");
+    using JsonDocument geometry = JsonDocument.Parse(geometryJson);
+    JsonElement root = geometry.RootElement;
+    string expected = root.GetProperty("expected").GetString() ?? string.Empty;
+    JsonElement startPoint = root.GetProperty(chinese ? "end" : "start");
+    JsonElement endPoint = root.GetProperty(chinese ? "start" : "end");
+    double sx = startPoint.GetProperty("x").GetDouble();
+    double sy = startPoint.GetProperty("y").GetDouble();
+    double ex = endPoint.GetProperty("x").GetDouble();
+    double ey = endPoint.GetProperty("y").GetDouble();
+    await DispatchMouseAsync("mouseMoved", sx, sy, 0);
+    await DispatchMouseAsync("mousePressed", sx, sy, 1);
+    await DispatchMouseAsync("mouseMoved", ex, ey, 1);
+    await DispatchMouseAsync("mouseReleased", ex, ey, 0);
+    string selected = JsonSerializer.Deserialize<string>(
+      await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+        "window.getSelection()?.toString() ?? ''")) ?? string.Empty;
+    if (selected != expected || selected.Length == 0)
+      throw new InvalidOperationException($"WebView2 mouse selection mismatch: {selected} / {expected}.");
+    await WaitForWebConditionAsync("[...document.querySelectorAll('button')].some(b => b.textContent?.trim() === '复制所选' && !b.disabled)");
     if (previewPath is not null)
     {
       File.Create(previewPath).Dispose();
@@ -273,7 +318,35 @@ public sealed partial class MainWindow
         CoreWebView2CapturePreviewImageFormat.Png, stream);
       await stream.FlushAsync();
     }
-    await ClickSmokeButtonAsync("复制所选");
+    if (chinese)
+    {
+      double contextX = (sx + ex) / 2;
+      double contextY = (sy + ey) / 2;
+      await WorkbenchWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
+        "Input.dispatchMouseEvent", JsonSerializer.Serialize(new
+        {
+          type = "mousePressed", x = contextX, y = contextY, button = "right", buttons = 2, clickCount = 1,
+        }));
+      await WorkbenchWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
+        "Input.dispatchMouseEvent", JsonSerializer.Serialize(new
+        {
+          type = "mouseReleased", x = contextX, y = contextY, button = "right", buttons = 0, clickCount = 1,
+        }));
+      await WaitForWebConditionAsync(
+        "[...document.querySelectorAll('button')].filter(b => b.textContent?.trim() === '复制所选').length >= 2");
+      await ClickTextCopyButtonByMouseAsync();
+    }
+    else
+    {
+      await WorkbenchWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
+        "Input.dispatchKeyEvent", "{\"type\":\"keyDown\",\"key\":\"Control\",\"windowsVirtualKeyCode\":17,\"modifiers\":2}");
+      await WorkbenchWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
+        "Input.dispatchKeyEvent", "{\"type\":\"keyDown\",\"key\":\"c\",\"code\":\"KeyC\",\"windowsVirtualKeyCode\":67,\"modifiers\":2}");
+      await WorkbenchWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
+        "Input.dispatchKeyEvent", "{\"type\":\"keyUp\",\"key\":\"c\",\"code\":\"KeyC\",\"windowsVirtualKeyCode\":67,\"modifiers\":2}");
+      await WorkbenchWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
+        "Input.dispatchKeyEvent", "{\"type\":\"keyUp\",\"key\":\"Control\",\"windowsVirtualKeyCode\":17}");
+    }
     for (int attempt = 0; attempt < 100; attempt++)
     {
       DataPackageView content = Clipboard.GetContent();
@@ -284,28 +357,135 @@ public sealed partial class MainWindow
     throw new InvalidOperationException("Clipboard did not contain only the selected substring.");
   }
 
+  private async Task ClickTextCopyButtonByMouseAsync()
+  {
+    string boxJson = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("""
+      (() => {
+        const button = [...document.querySelectorAll('button')]
+          .filter(node => node.textContent?.trim() === '复制所选').at(-1);
+        if (!button) return null;
+        const box = button.getBoundingClientRect();
+        return {x:box.x+box.width/2,y:box.y+box.height/2};
+      })()
+      """);
+    using JsonDocument box = JsonDocument.Parse(boxJson);
+    double x = box.RootElement.GetProperty("x").GetDouble();
+    double y = box.RootElement.GetProperty("y").GetDouble();
+    await DispatchMouseAsync("mouseMoved", x, y, 0);
+    await DispatchMouseAsync("mousePressed", x, y, 1);
+    await DispatchMouseAsync("mouseReleased", x, y, 0);
+  }
+
+  private async Task ExerciseWordAndCrossLineSelectionAsync()
+  {
+    string geometryJson = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("""
+      (() => {
+        const spans = [...document.querySelectorAll('.image-text-glyphs')]
+          .filter(node => node.firstChild?.textContent.length >= 4);
+        if (spans.length < 2) return null;
+        spans[0].scrollIntoView({block:'center'});
+        const point = (node, offset) => {
+          const range = document.createRange();
+          range.setStart(node.firstChild, offset); range.collapse(true);
+          const box = range.getBoundingClientRect();
+          return {x:box.x,y:box.y+box.height/2};
+        };
+        const first = spans[0], second = spans[1];
+        const start = Math.max(0, first.firstChild.textContent.length-3);
+        const range = document.createRange();
+        range.setStart(first.firstChild,start);
+        range.setEnd(second.firstChild,Math.min(3,second.firstChild.textContent.length));
+        return {word:point(first,1),start:point(first,start),
+          end:point(second,Math.min(3,second.firstChild.textContent.length)),
+          cross:range.toString()};
+      })()
+      """);
+    using JsonDocument geometry = JsonDocument.Parse(geometryJson);
+    JsonElement root = geometry.RootElement;
+    JsonElement word = root.GetProperty("word");
+    double wx = word.GetProperty("x").GetDouble();
+    double wy = word.GetProperty("y").GetDouble();
+    await WorkbenchWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
+      "Input.dispatchMouseEvent", JsonSerializer.Serialize(new
+      {
+        type = "mousePressed", x = wx, y = wy, button = "left", buttons = 1, clickCount = 2,
+      }));
+    await WorkbenchWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
+      "Input.dispatchMouseEvent", JsonSerializer.Serialize(new
+      {
+        type = "mouseReleased", x = wx, y = wy, button = "left", buttons = 0, clickCount = 2,
+      }));
+    string wordSelection = JsonSerializer.Deserialize<string>(
+      await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+        "window.getSelection()?.toString() ?? ''")) ?? string.Empty;
+    if (string.IsNullOrWhiteSpace(wordSelection) || wordSelection.Contains('\n'))
+      throw new InvalidOperationException("WebView2 double-click did not select one word.");
+
+    string expected = root.GetProperty("cross").GetString() ?? string.Empty;
+    JsonElement startPoint = root.GetProperty("start");
+    JsonElement endPoint = root.GetProperty("end");
+    foreach (bool reverse in new[] { false, true })
+    {
+      JsonElement from = reverse ? endPoint : startPoint;
+      JsonElement to = reverse ? startPoint : endPoint;
+      double sx = from.GetProperty("x").GetDouble();
+      double sy = from.GetProperty("y").GetDouble();
+      double ex = to.GetProperty("x").GetDouble();
+      double ey = to.GetProperty("y").GetDouble();
+      await DispatchMouseAsync("mouseMoved", sx, sy, 0);
+      await DispatchMouseAsync("mousePressed", sx, sy, 1);
+      await DispatchMouseAsync("mouseMoved", ex, ey, 1);
+      await DispatchMouseAsync("mouseReleased", ex, ey, 0);
+      string selected = JsonSerializer.Deserialize<string>(
+        await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+          "window.getSelection()?.toString() ?? ''")) ?? string.Empty;
+      if (selected != expected || string.IsNullOrWhiteSpace(selected))
+        throw new InvalidOperationException("WebView2 cross-line mouse selection mismatch.");
+    }
+  }
+
   private static async Task<string> CopyPinSubstringAsync(PinnedImageWindow pin)
   {
-    string selectedJson = await pin.SmokeEvaluateAsync("""
+    string geometryJson = await pin.SmokeEvaluateAsync("""
       (() => {
         const span = [...document.querySelectorAll('.line span')]
           .find(node => node.firstChild?.textContent.length >= 4);
-        if (!span) return '';
-        const range = document.createRange();
-        range.setStart(span.firstChild, 1); range.setEnd(span.firstChild, 4);
-        const selection = window.getSelection();
-        selection.removeAllRanges(); selection.addRange(range);
-        return selection.toString();
+        if (!span) return null;
+        const point = offset => {
+          const range = document.createRange();
+          range.setStart(span.firstChild, offset); range.collapse(true);
+          const box = range.getBoundingClientRect();
+          return {x:box.x,y:box.y+box.height/2};
+        };
+        return {expected:span.firstChild.textContent.slice(1,4),start:point(1),end:point(4)};
       })()
       """);
-    string selected = JsonSerializer.Deserialize<string>(selectedJson) ?? string.Empty;
-    if (selected.Length != 3)
-      throw new InvalidOperationException("Pinned WebView2 substring selection failed.");
-    await pin.SmokeCopySelectionAsync();
+    using JsonDocument geometry = JsonDocument.Parse(geometryJson);
+    JsonElement root = geometry.RootElement;
+    string expected = root.GetProperty("expected").GetString() ?? string.Empty;
+    JsonElement start = root.GetProperty("start");
+    JsonElement end = root.GetProperty("end");
+    double sx = start.GetProperty("x").GetDouble();
+    double sy = start.GetProperty("y").GetDouble();
+    double ex = end.GetProperty("x").GetDouble();
+    double ey = end.GetProperty("y").GetDouble();
+    await pin.SmokeDispatchMouseAsync("mouseMoved", sx, sy, 0);
+    await pin.SmokeDispatchMouseAsync("mousePressed", sx, sy, 1);
+    await pin.SmokeDispatchMouseAsync("mouseMoved", ex, ey, 1);
+    await pin.SmokeDispatchMouseAsync("mouseReleased", ex, ey, 0);
+    string selected = JsonSerializer.Deserialize<string>(
+      await pin.SmokeEvaluateAsync("window.getSelection()?.toString() ?? ''")) ?? string.Empty;
+    if (selected != expected || selected.Length != 3)
+      throw new InvalidOperationException("Pinned WebView2 mouse selection failed.");
+    pin.SmokeInvokeCopySelection();
+    for (int attempt = 0; attempt < 100; attempt++)
+    {
+      DataPackageView pending = Clipboard.GetContent();
+      if (pending.Contains(StandardDataFormats.Text) &&
+          await pending.GetTextAsync() == selected) return selected;
+      await Task.Delay(100);
+    }
     DataPackageView content = Clipboard.GetContent();
-    if (!content.Contains(StandardDataFormats.Text) ||
-        await content.GetTextAsync() != selected)
-      throw new InvalidOperationException("Pinned copy did not preserve the selected substring.");
-    return selected;
+    throw new InvalidOperationException($"Pinned UIAutomation copy failed: {content.Contains(StandardDataFormats.Text)}.");
   }
 }

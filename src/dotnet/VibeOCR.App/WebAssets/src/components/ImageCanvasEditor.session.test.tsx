@@ -283,7 +283,7 @@ describe("screenshot session editor wiring", () => {
     const { unmount } = render(
       <ImageCanvasEditor
         actions={actions}
-        canExport={false}
+        canExport={true}
         canRecognize={true}
         source="https://app.vibeocr/__resource/capture.png"
         session={{ sessionId: "session-a", revision: 0 }}
@@ -353,6 +353,11 @@ describe("screenshot session editor wiring", () => {
       fireEvent.pointerDown(menuButton!);
       fireEvent.click(menuButton!);
       expect(actions.run).toHaveBeenCalledTimes(2);
+      actions.run.mockResolvedValueOnce(false);
+      fireEvent.click(copyButton);
+      await waitFor(() =>
+        expect(screen.getByText(/复制所选文字失败/)).toBeInTheDocument(),
+      );
       unmount();
     } finally {
       document.getSelection()?.removeAllRanges();

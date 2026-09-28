@@ -222,10 +222,12 @@ public sealed class ScreenshotSessionWorkbenchTests
         using (var readyAwaiter = new RecognitionStateAwaiter(
           handler, state => state.TextLayer?.Status == "textlayer.ready"))
         {
-          await handler.PreparePinnedTextLayerAsync(sessionId, 0, pins[0].Path);
+          await handler.PreparePinnedTextLayerAsync(sessionId, 0, pins[0].Path,
+            TestContext.Current.CancellationToken);
           Assert.Equal("rapid_text", (await readyAwaiter.Task).TextLayer?.ModeId);
         }
-        await handler.PreparePinnedTextLayerAsync(sessionId, 0, pins[1].Path);
+        await handler.PreparePinnedTextLayerAsync(sessionId, 0, pins[1].Path,
+          TestContext.Current.CancellationToken);
         Assert.Single(inference.Requests);
 
         string secondPath = pins[1].Path;
@@ -246,6 +248,64 @@ public sealed class ScreenshotSessionWorkbenchTests
     {
       Directory.Delete(root, recursive: true);
     }
+  }
+
+  [Fact]
+  public async Task ClosedSessionPinRecognizesItsFrozenPngWithoutRestoringOldEditorLayer()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new TextLayerRecognitionClient();
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      WorkbenchAnnotationFile? pin = null;
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore, settings,
+        inferenceAttached: () => true,
+        supervisorInstanceId: () => "sup-pin",
+        textLayerRecognitionFactory: () => new RecognitionViewModel(inference, inputs),
+        pinScreenshot: (file, _, _, _) => pin = file);
+      try
+      {
+        using var firstAwaiter = new RecognitionStateAwaiter(
+          handler, state => state.ScreenshotSession is not null && !state.IsBusy);
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        Guid firstSession = Guid.Parse((await firstAwaiter.Task).ScreenshotSession!.SessionId);
+        WorkbenchAnnotationLease lease = UploadAnnotation(annotationStore, AnnotationPng);
+        Assert.Null((await handler.ExecuteAsync(
+          new PinScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, firstSession, 0),
+          TestContext.Current.CancellationToken)).Error);
+        Assert.NotNull(pin);
+        Assert.Empty(inference.Requests);
+
+        await handler.ExecuteAsync(new CloseScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        using var nextAwaiter = new RecognitionStateAwaiter(
+          handler, state => state.ScreenshotSession is not null && !state.IsBusy);
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        Guid nextSession = Guid.Parse((await nextAwaiter.Task).ScreenshotSession!.SessionId);
+        Assert.NotEqual(firstSession, nextSession);
+
+        RecognitionTextLayerState detached = Assert.IsType<RecognitionTextLayerState>(
+          await handler.PreparePinnedTextLayerAsync(
+            firstSession, 0, pin.Path, TestContext.Current.CancellationToken));
+        Assert.Equal("textlayer.ready", detached.Status);
+        Assert.Equal(firstSession.ToString("N"), detached.Binding?.SessionId);
+        Assert.Equal(AnnotationPng, Assert.Single(inference.UploadedContent));
+        Assert.Null(handler.InitialStates.OfType<RecognitionWorkbenchState>()
+          .Single().TextLayer);
+        Assert.Equal(nextSession.ToString("N"), handler.InitialStates
+          .OfType<RecognitionWorkbenchState>().Single().ScreenshotSession?.SessionId);
+      }
+      finally { pin?.Dispose(); }
+    }
+    finally { Directory.Delete(root, recursive: true); }
   }
 
   private static string TemporaryRoot()
@@ -499,9 +559,11 @@ public sealed class ScreenshotSessionWorkbenchTests
       Task.FromResult(true);
 
     public string? CopiedText { get; private set; }
+    public bool TextClipboardBusy { get; set; }
 
     public Task CopyTextAsync(string text, CancellationToken cancellationToken)
     {
+      if (TextClipboardBusy) throw new ClipboardBusyException();
       CopiedText = text;
       return Task.CompletedTask;
     }
@@ -1151,6 +1213,13 @@ public sealed class ScreenshotSessionWorkbenchTests
           TestContext.Current.CancellationToken);
         Assert.Null(copied.Error);
         Assert.Equal("好世", platform.CopiedText);
+        platform.TextClipboardBusy = true;
+        WorkbenchCommandOutcome busy = await handler.ExecuteAsync(
+          new CopyScreenshotSelectionCommand(sessionId, 0, "好世"),
+          TestContext.Current.CancellationToken);
+        Assert.Equal("clipboard_busy", busy.Error?.Code);
+        Assert.Equal("workbench.error.clipboardBusy", busy.Error?.MessageKey);
+        platform.TextClipboardBusy = false;
 
         // 修订前进后：旧 revision 与新 revision 都不能复制旧层内容。
         await handler.ExecuteAsync(

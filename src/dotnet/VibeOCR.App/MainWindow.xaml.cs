@@ -57,6 +57,8 @@ public sealed partial class MainWindow : Window
   private readonly WorkbenchResourceBroker resourceBroker;
   private readonly string resourceRoot;
   private readonly List<PinnedImageWindow> pinnedImages = [];
+  private readonly Dictionary<(Guid SessionId, long Revision),
+    (Task<RecognitionTextLayerState?> Task, CancellationTokenSource Cancellation)> pinTextTasks = [];
   private readonly SyntheticScreenRegionPicker? screenshotSmokePicker;
   private readonly Func<string?>? supervisorInstanceId;
   private readonly Func<int>? smokeSubmitAttempts;
@@ -128,6 +130,7 @@ public sealed partial class MainWindow : Window
     {
       void UpdatePins()
       {
+        if (layer is null) ClearPinTextTasks();
         foreach (PinnedImageWindow pinned in pinnedImages.ToArray())
         {
           pinned.Update(layer);
@@ -508,6 +511,7 @@ public sealed partial class MainWindow : Window
   private async void OnWindowClosed(object sender, WindowEventArgs args)
   {
     Closed -= OnWindowClosed;
+    ClearPinTextTasks();
     foreach (PinnedImageWindow pinned in pinnedImages.ToArray()) pinned.Close();
     webHost.ProtocolViolation -= OnProtocolViolation;
     webHost.RecoveryRequired -= OnRecoveryRequired;
@@ -526,10 +530,57 @@ public sealed partial class MainWindow : Window
       throw new InvalidOperationException("最多同时打开四张贴图，请先关闭一张。");
     }
     var pinned = new PinnedImageWindow(image, sessionId, revision, layer,
-      () => commandHandler.PreparePinnedTextLayerAsync(sessionId, revision, image.Path));
-    pinned.Closed += closed => pinnedImages.Remove(closed);
+      () => PreparePinTextAsync(sessionId, revision, image.Path));
+    pinned.Closed += closed =>
+    {
+      pinnedImages.Remove(closed);
+      if (!pinnedImages.Any(other => other.SessionId == sessionId && other.Revision == revision))
+        RemovePinTextTask((sessionId, revision));
+    };
     pinnedImages.Add(pinned);
     _ = ShowPinnedAsync(pinned);
+  }
+
+  private async Task<RecognitionTextLayerState?> PreparePinTextAsync(
+    Guid sessionId, long revision, string imagePath)
+  {
+    var key = (sessionId, revision);
+    if (!pinTextTasks.TryGetValue(key, out var entry))
+    {
+      var cancellation = new CancellationTokenSource();
+      entry = (commandHandler.PreparePinnedTextLayerAsync(
+        sessionId, revision, imagePath, cancellation.Token), cancellation);
+      pinTextTasks.Add(key, entry);
+    }
+    try
+    {
+      RecognitionTextLayerState? result = await entry.Task;
+      if (result is not null &&
+          result.ServiceInstance != (supervisorInstanceId?.Invoke() ?? string.Empty))
+      {
+        RemovePinTextTask(key);
+        throw new InvalidOperationException("本地识别服务已变化，请重新取字。");
+      }
+      return result;
+    }
+    catch
+    {
+      if (pinTextTasks.TryGetValue(key, out var current) &&
+          ReferenceEquals(current.Task, entry.Task)) RemovePinTextTask(key);
+      throw;
+    }
+  }
+
+  private void RemovePinTextTask((Guid SessionId, long Revision) key)
+  {
+    if (!pinTextTasks.Remove(key, out var entry)) return;
+    entry.Cancellation.Cancel();
+    entry.Cancellation.Dispose();
+  }
+
+  private void ClearPinTextTasks()
+  {
+    foreach (var key in pinTextTasks.Keys.ToArray()) RemovePinTextTask(key);
   }
 
   private static async Task ShowPinnedAsync(PinnedImageWindow pinned)

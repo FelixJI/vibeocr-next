@@ -659,7 +659,7 @@ export function ImageCanvasEditor({
   const panning = tool === "hand" || spaceHeld;
 
   // 取字模式：仅当宿主层就绪且绑定与当前本地修订一致时展示；
-  // 显示的图像就是识别输入的同一最终 PNG，不田旧层映射。
+  // 显示的图像就是识别输入的同一最终 PNG，不拿旧层映射。
   const layerImageRef = textLayer?.image;
   const layerImageUrl = layerImageRef?.url;
   const layerReady =
@@ -740,15 +740,24 @@ export function ImageCanvasEditor({
     text: string;
     key: string;
   }>();
-  function copySelectedText(text = selectionText) {
+  async function copySelectedText(text = selectionText) {
     if (!session || !text || !layerSelectionKey) return;
     setCopyMenu(undefined);
-    void actions.run({
-      type: "recognition.copyScreenshotSelection",
-      sessionId: session.sessionId,
-      revision: localRevision,
-      text,
-    });
+    try {
+      const copied = await actions.run({
+        type: "recognition.copyScreenshotSelection",
+        sessionId: session.sessionId,
+        revision: localRevision,
+        text,
+      });
+      setOperationMessage(
+        copied
+          ? "已复制所选文字。"
+          : "复制所选文字失败；请查看操作错误并重试。",
+      );
+    } catch {
+      setOperationMessage("复制所选文字失败；请查看操作错误并重试。");
+    }
   }
   useEffect(() => {
     if (!layerSelectionKey) return undefined;
@@ -980,6 +989,7 @@ export function ImageCanvasEditor({
         className={`canvas-stage${panning ? " is-panning" : ""}`}
         tabIndex={0}
         style={{
+          ["--editor-zoom" as string]: zoom,
           overflow: "auto",
           maxHeight: "70vh",
           position: "relative",
@@ -1027,18 +1037,18 @@ export function ImageCanvasEditor({
       >
         {layerReady ? (
           <div
+            className="image-text-frame"
             ref={stageRef}
             style={{
               margin: "0 auto",
               position: "relative",
-              width: "fit-content",
             }}
           >
             <img
               alt="截图最终画面"
               className="inspection-canvas"
               src={layerImageUrl}
-              style={{ width: `${780 * zoom}px`, maxWidth: "none" }}
+              style={{ width: "100%" }}
             />
             {layerImage && stageSize && textLayer?.binding && session ? (
               <ImageTextLayer
@@ -1065,8 +1075,6 @@ export function ImageCanvasEditor({
           height={600}
           style={{
             display: layerReady ? "none" : "block",
-            width: `${780 * zoom}px`,
-            maxWidth: "none",
           }}
           onKeyDown={(event) => {
             const modifier = event.ctrlKey || event.metaKey;
