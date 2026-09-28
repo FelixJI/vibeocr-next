@@ -1,6 +1,7 @@
 using System.Text.Json;
 using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Workbench;
+using VibeOCR.App.Services;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 
@@ -10,6 +11,13 @@ public sealed partial class MainWindow
 {
   private const string SmokeEnvironmentA = "Smoke A";
   private const string SmokeEnvironmentB = "Smoke B";
+  private string managedSmokeStage = "starting";
+
+  private void RecordManagedSmokeStage(string stage)
+  {
+    managedSmokeStage = stage;
+    AppLog.Info($"Managed environment smoke: {stage}");
+  }
 
   private async Task CompleteManagedEnvironmentE2eSmokeAsync()
   {
@@ -32,6 +40,7 @@ public sealed partial class MainWindow
           smokeInstallAttempts is null)
         throw new InvalidOperationException("Managed environment smoke dependencies are missing.");
 
+      RecordManagedSmokeStage(phase);
       object evidence = phase switch
       {
         "create" => await CreateSmokeEnvironmentsAsync(),
@@ -54,6 +63,7 @@ public sealed partial class MainWindow
         schema_version = 1,
         state = "failed",
         phase,
+        stage = managedSmokeStage,
         error = error.ToString(),
         install_attempts = smokeInstallAttempts?.Invoke(),
       }));
@@ -141,7 +151,7 @@ public sealed partial class MainWindow
       [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(2));
     ManagedEnvironment a = SmokePair(list)[0];
     ManagedEnvironmentSession session = await WaitForSmokeSessionAsync(a.Id);
-    if (list.ActiveId != a.Id || list.ActiveRevision != session.Revision ||
+    if (list.ActiveId != a.Id || a.Revision != session.Revision ||
         smokeInstallAttempts!() != 0 || !smokeInferenceAttached!())
       throw new InvalidOperationException("Restart did not reuse active A without installation.");
     return new
@@ -155,6 +165,7 @@ public sealed partial class MainWindow
 
   private async Task InstallSmokeRecipeAsync(ManagedEnvironment environment)
   {
+    RecordManagedSmokeStage($"select {environment.Name}");
     await SelectSmokeEnvironmentAsync(environment.Id);
     await SelectSmokeValueAsync("#managed-recipe-select", "rapidocr-cpu");
     await ClickManagedSmokeButtonAsync("预览依赖");
@@ -162,6 +173,7 @@ public sealed partial class MainWindow
       "document.querySelector('.runtime-install-plan')?.textContent.includes('rapidocr-cpu') && " +
       "document.querySelector('.runtime-install-plan')?.textContent.includes('tuna-pypi')",
       TimeSpan.FromMinutes(2));
+    RecordManagedSmokeStage($"install {environment.Name}");
     await ClickManagedSmokeButtonAsync("确认安装依赖");
     using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(45));
     while (true)
@@ -178,9 +190,12 @@ public sealed partial class MainWindow
   private async Task<object> SwitchAndRecognizeSmokeAsync(ManagedEnvironment environment)
   {
     await NavigateSmokeAsync("设置", "#managed-environment-select");
+    RecordManagedSmokeStage($"select {environment.Name}");
     await SelectSmokeEnvironmentAsync(environment.Id);
     await ClickManagedSmokeButtonAsync("切换到此环境");
+    RecordManagedSmokeStage($"wait for service {environment.Name}");
     ManagedEnvironmentSession session = await WaitForSmokeSessionAsync(environment.Id);
+    RecordManagedSmokeStage($"service ready {environment.Name}");
     ManagedEnvironment current = smokeEnvironmentSnapshot!()?.Environments.Single(item =>
       item.Id == environment.Id) ?? throw new InvalidOperationException("Environment disappeared.");
     if (current.Revision != session.Revision || !smokeInferenceAttached!())
@@ -195,6 +210,7 @@ public sealed partial class MainWindow
       state.ScreenshotSession is { } captured &&
       captured.SessionId != previousSessionId && state.Result is null,
       TimeSpan.FromSeconds(30));
+    RecordManagedSmokeStage($"recognize {environment.Name}");
     await ClickManagedSmokeButtonAsync("识别当前图");
     await WaitForScreenshotStateAsync(state => !state.IsBusy && state.Result is not null,
       TimeSpan.FromMinutes(35));
@@ -254,12 +270,21 @@ public sealed partial class MainWindow
 
   private async Task<ManagedEnvironmentSession> WaitForSmokeSessionAsync(string id)
   {
-    using var cancellation = new CancellationTokenSource(TimeSpan.FromMinutes(35));
-    while (true)
+    using var cancellation = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+    try
     {
-      ManagedEnvironmentSession? session = smokeManagedSession!();
-      if (session?.EnvironmentId == id && smokeInferenceAttached!()) return session;
-      await Task.Delay(100, cancellation.Token);
+      while (true)
+      {
+        ManagedEnvironmentSession? session = smokeManagedSession!();
+        if (session?.EnvironmentId == id && smokeInferenceAttached!()) return session;
+        await Task.Delay(100, cancellation.Token);
+      }
+    }
+    catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+    {
+      throw new TimeoutException($"Managed service did not attach: expected={id}, " +
+        $"session={smokeManagedSession!()?.EnvironmentId}, attached={smokeInferenceAttached!()}, " +
+        $"active={smokeEnvironmentSnapshot!()?.ActiveId}.");
     }
   }
 
