@@ -931,7 +931,7 @@ public sealed class DesktopWorkbenchCommandHandler :
             ? state with { StatusCode = "qrcode.invalidInput" }
           : (publishGeneratedImage && currentQrCode.GenerateFailed) ||
             (!publishGeneratedImage && currentQrCode.DecodeFailed)
-            ? state with { StatusCode = "qrcode.failed" }
+            ? state with { StatusCode = publishGeneratedImage ? "qrcode.generateFailed" : "qrcode.failed" }
             : state);
       }
     }
@@ -954,7 +954,7 @@ public sealed class DesktopWorkbenchCommandHandler :
         StateChanged?.Invoke(QrCodeState(qrCode!) with
         {
           IsBusy = false,
-          StatusCode = "qrcode.failed",
+          StatusCode = publishGeneratedImage ? "qrcode.generateFailed" : "qrcode.failed",
         });
       }
     }

@@ -55,7 +55,15 @@ public sealed class QrCodeViewModel(IQrCodeClient qrClient, IQrCodeInput input) 
     public Task DecodeDroppedFileAsync(string path, CancellationToken ct) =>
         DecodeAsync(token => input.ReadDroppedFileAsync(path, token), ct);
 
-    public void Cancel() { lock (_runLock) _activeRun?.Cancel(); }
+    public void Cancel()
+    {
+        lock (_runLock)
+        {
+            Interlocked.Increment(ref _generation);
+            _activeRun?.Cancel();
+        }
+        IsBusy = false;
+    }
     public IReadOnlyList<QrCodeResult> OpenableUrls() => Codes.Where(c => c.IsUrl is true).ToArray();
     public string CopyAll() => string.Join("\n", Codes.Select(c => c.Data));
 

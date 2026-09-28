@@ -199,6 +199,58 @@ public sealed class DesktopWorkbenchCommandHandlerTests
   }
 
   [Fact]
+  public async Task ClearQrCodeDuringGenerationImmediatelyResetsBusyAndBlocksLateResult()
+  {
+    string resourceRoot = Path.Combine(Path.GetTempPath(), $"vibeocr-handler-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      var client = new FirstThenBlockingQrCodeClient();
+      var viewModel = new QrCodeViewModel(client, new EmptyQrCodeInput());
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => viewModel,
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker, resourceRoot, static () => 0, annotationStore);
+      var previewReady = new TaskCompletionSource<QrCodeWorkbenchState>(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+      var published = new List<WorkbenchState>();
+      handler.StateChanged += state =>
+      {
+        published.Add(state);
+        if (state is QrCodeWorkbenchState { IsBusy: false, GeneratedResource: not null } preview)
+          previewReady.TrySetResult(preview);
+      };
+
+      await handler.ExecuteAsync(new GenerateQrCodeCommand("preview"), TestContext.Current.CancellationToken);
+      Assert.NotNull((await previewReady.Task.WaitAsync(
+        TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)).GeneratedResource);
+      await handler.ExecuteAsync(new GenerateQrCodeCommand("pending"), TestContext.Current.CancellationToken);
+      Assert.True(viewModel.IsBusy);
+
+      WorkbenchCommandOutcome cleared = await handler.ExecuteAsync(
+        new ClearQrCodeCommand(), TestContext.Current.CancellationToken);
+      QrCodeWorkbenchState state = Assert.IsType<QrCodeWorkbenchState>(Assert.Single(cleared.States));
+      Assert.False(state.IsBusy);
+      Assert.Null(state.GeneratedResource);
+      Assert.False(viewModel.IsBusy);
+      int publishedBeforeLateResult = published.Count;
+      client.CompletePending();
+      await handler.DisposeAsync();
+      Assert.Equal(publishedBeforeLateResult, published.Count);
+      Assert.Null(viewModel.GeneratedImageBase64);
+    }
+    finally { Directory.Delete(resourceRoot, recursive: true); }
+  }
+
+  [Fact]
   public async Task QrCodeViewModelSwitchesBetweenDecodeAndGenerateWithoutStaleState()
   {
     var blockingDecode = new BlockingDecodeQrCodeClient();
@@ -234,6 +286,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     try
     {
       var client = new DeferredQrCodeClient();
+      var maintenance = new ProductMaintenanceCoordinator();
       using var broker = new WorkbenchResourceBroker(resourceRoot);
       using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
       await using var handler = new DesktopWorkbenchCommandHandler(
@@ -243,12 +296,15 @@ public sealed class DesktopWorkbenchCommandHandlerTests
         static () => throw new InvalidOperationException(),
         static () => throw new InvalidOperationException(),
         static () => throw new InvalidOperationException(),
-        static () => throw new InvalidOperationException(),
+        () => new UpdateViewModel(new CurrentUpdateCoordinator(), productMaintenance: maintenance),
         new DiagnosticsViewModel("test", new PrerequisiteReport([])),
         broker,
         resourceRoot,
         static () => 0,
         annotationStore);
+      await handler.ExecuteAsync(new CheckUpdateCommand(), TestContext.Current.CancellationToken);
+      using IDisposable runtimeLease = maintenance.Acquire(ProductMaintenanceOwner.RuntimeMaintenance, () => { });
+      Assert.Equal(ProductMaintenanceOwner.RuntimeMaintenance, maintenance.State.ActiveOwner);
       await using var application = new WorkbenchApplication(
         ["qrcode.generate", "qrcode.clipboard"], WorkbenchRoute.QrCode, handler);
       using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -292,6 +348,35 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       QrCodeWorkbenchState invalid = Assert.IsType<QrCodeWorkbenchState>(updates.Current.State);
       Assert.Equal("qrcode.invalidInput", invalid.StatusCode);
       Assert.Equal(generated.GeneratedResource, invalid.GeneratedResource);
+
+      client.MarkStartupPending();
+      client.MarkStartupFailed(new InvalidOperationException("startup failed"));
+      WorkbenchCommandReceipt afterFailure = await application.ExecuteAsync(
+        new WorkbenchCommandEnvelope(Guid.NewGuid(), new GenerateQrCodeCommand("after failure")),
+        timeout.Token);
+      Assert.True(afterFailure.Ok);
+      Assert.True(await updates.MoveNextAsync());
+      Assert.True(await updates.MoveNextAsync());
+      Assert.NotNull(Assert.IsType<QrCodeWorkbenchState>(updates.Current.State).GeneratedResource);
+
+      var failingDecode = new FailingDecodeQrCodeClient();
+      client.Attach(failingDecode);
+      WorkbenchCommandReceipt decodeFailure = await application.ExecuteAsync(
+        new WorkbenchCommandEnvelope(Guid.NewGuid(), new DecodeQrCodeClipboardCommand()),
+        timeout.Token);
+      Assert.True(decodeFailure.Ok);
+      Assert.True(await updates.MoveNextAsync());
+      Assert.True(await updates.MoveNextAsync());
+      Assert.Equal("qrcode.failed", Assert.IsType<QrCodeWorkbenchState>(updates.Current.State).StatusCode);
+
+      client.Detach(failingDecode);
+      WorkbenchCommandReceipt afterDetach = await application.ExecuteAsync(
+        new WorkbenchCommandEnvelope(Guid.NewGuid(), new GenerateQrCodeCommand("after detach")),
+        timeout.Token);
+      Assert.True(afterDetach.Ok);
+      Assert.True(await updates.MoveNextAsync());
+      Assert.True(await updates.MoveNextAsync());
+      Assert.NotNull(Assert.IsType<QrCodeWorkbenchState>(updates.Current.State).GeneratedResource);
     }
     finally
     {
@@ -327,7 +412,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
 
       await handler.ExecuteAsync(new GenerateQrCodeCommand("hello"), TestContext.Current.CancellationToken);
       await handler.DisposeAsync();
-      Assert.Contains(published, state => state is QrCodeWorkbenchState qr && qr.StatusCode == "qrcode.failed");
+      Assert.Contains(published, state => state is QrCodeWorkbenchState qr && qr.StatusCode == "qrcode.generateFailed");
       Assert.True(viewModel.GenerateFailed);
       Assert.False(viewModel.GenerateInvalidInput);
       Assert.Equal("二维码生成失败，请重试", viewModel.GenerateStatus);
@@ -613,6 +698,28 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
   }
 
+  private sealed class FirstThenBlockingQrCodeClient : IQrCodeClient
+  {
+    private readonly TaskCompletionSource<QrCodeGeneratedImage> pending = new(
+      TaskCreationOptions.RunContinuationsAsynchronously);
+    private int calls;
+
+    public void CompletePending() => pending.TrySetResult(new QrCodeGeneratedImage(
+      Convert.ToBase64String([4, 5, 6]), "image/png"));
+
+    public Task<IReadOnlyList<QrCodeDecodedItem>> DecodeAsync(
+      string base64Image, CancellationToken cancellationToken) =>
+      Task.FromResult<IReadOnlyList<QrCodeDecodedItem>>([]);
+
+    public Task<QrCodeGeneratedImage> GenerateAsync(
+      string data, string format, CancellationToken cancellationToken) =>
+      Interlocked.Increment(ref calls) == 1
+        ? Task.FromResult(new QrCodeGeneratedImage(Convert.ToBase64String([1, 2, 3]), "image/png"))
+        : pending.Task;
+
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+  }
+
   private sealed class BlockingDecodeQrCodeClient : IQrCodeClient
   {
     private readonly TaskCompletionSource<IReadOnlyList<QrCodeDecodedItem>> completion = new(
@@ -627,6 +734,19 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     public Task<QrCodeGeneratedImage> GenerateAsync(
       string data, string format, CancellationToken cancellationToken) =>
       Task.FromResult(new QrCodeGeneratedImage("AQID", "image/png"));
+
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+  }
+
+  private sealed class FailingDecodeQrCodeClient : IQrCodeClient
+  {
+    public Task<IReadOnlyList<QrCodeDecodedItem>> DecodeAsync(
+      string base64Image, CancellationToken cancellationToken) =>
+      Task.FromException<IReadOnlyList<QrCodeDecodedItem>>(new HttpRequestException("disconnected"));
+
+    public Task<QrCodeGeneratedImage> GenerateAsync(
+      string data, string format, CancellationToken cancellationToken) =>
+      throw new InvalidOperationException("Generate must remain local.");
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
   }
