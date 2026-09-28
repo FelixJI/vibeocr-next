@@ -432,21 +432,30 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     recognition ??= recognitionFactory();
     // 截图单飞：任一截图入口（主窗/热键/悬浮栏/页面按钮）同时只允许一个
-    // 选区会话；重复触发立即拒绝，取消/失败后 guard 释放可重试。
+    // 选区会话；拒绝重复必须先于推进 generation/清会话，同步启动段故障
+    // 则在此释放 guard，否则截图永久 busy。
     if (Interlocked.Exchange(ref captureInFlight, 1) != 0)
     {
       throw new CaptureInProgressException();
     }
 
-    long generation = Interlocked.Increment(ref recognitionGeneration);
-    // 新捕获立即取代旧会话：选取期间旧会话命令一律失效，
-    // 换图/重复点击不会把旧图或旧修订带入新会话。
-    ClearScreenshotSession();
-    recognition.InvalidateResult();
-    resultActions = null;
-    return PublishStartThenTrack(
-      SessionRecognitionState(true, "recognition.running"),
-      () => CompleteScreenshotSessionAsync(generation, cancellationToken));
+    try
+    {
+      long generation = Interlocked.Increment(ref recognitionGeneration);
+      // 新捕获立即取代旧会话：选取期间旧会话命令一律失效，
+      // 换图/重复点击不会把旧图或旧修订带入新会话。
+      ClearScreenshotSession();
+      recognition.InvalidateResult();
+      resultActions = null;
+      return PublishStartThenTrack(
+        SessionRecognitionState(true, "recognition.running"),
+        () => CompleteScreenshotSessionAsync(generation, cancellationToken));
+    }
+    catch
+    {
+      Interlocked.Exchange(ref captureInFlight, 0);
+      throw;
+    }
   }
 
   private async Task CompleteScreenshotSessionAsync(
@@ -516,6 +525,11 @@ public sealed class DesktopWorkbenchCommandHandler :
     finally
     {
       Interlocked.Exchange(ref captureInFlight, 0);
+      // 纯截图会话的真实终态（完成/失败/取消）后显示主窗呈现编辑器：
+      // #109 热键→编辑器路径必需，隐藏主窗不得保留。仅在真正进入后台的
+      // 会话上触发，开始与被拒重入不经过此处；复用同一 ShowWorkbench
+      // 动作，不新增完成接口。
+      shellActions?.TryDispatch(HotkeyActionCatalog.ShowWorkbench);
     }
   }
 
@@ -718,23 +732,37 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     recognition ??= recognitionFactory();
     // 截图类输入与其他入口共用单飞 guard：选区进行中重复触发（同动作或
-    // 跨纯截图/识别）立即拒绝，取消/失败后可重试。
+    // 跨纯截图/识别）先被拒绝，再推进 generation/清会话；同步启动段
+    // 故障在此释放 guard，后台完成由 CompleteRecognitionAsync 的 finally
+    // 释放。
     if (screenCapture && Interlocked.Exchange(ref captureInFlight, 1) != 0)
     {
       throw new CaptureInProgressException();
     }
 
-    long generation = Interlocked.Increment(ref recognitionGeneration);
-    // 新输入（文件/剪贴板/拖入/即时截图识别）取代截图会话：
-    // 旧会话命令立即失效，避免旧图混入新输入。
-    ClearScreenshotSession();
-    return PublishStartThenTrack(
-      RecognitionState(true, "recognition.running"),
-      () => CompleteRecognitionAsync(
-        action,
-        generation,
-        cancellationToken,
-        screenCapture));
+    try
+    {
+      long generation = Interlocked.Increment(ref recognitionGeneration);
+      // 新输入（文件/剪贴板/拖入/即时截图识别）取代截图会话：
+      // 旧会话命令立即失效，避免旧图混入新输入。
+      ClearScreenshotSession();
+      return PublishStartThenTrack(
+        RecognitionState(true, "recognition.running"),
+        () => CompleteRecognitionAsync(
+          action,
+          generation,
+          cancellationToken,
+          screenCapture));
+    }
+    catch
+    {
+      if (screenCapture)
+      {
+        Interlocked.Exchange(ref captureInFlight, 0);
+      }
+
+      throw;
+    }
   }
 
   private RecognitionWorkbenchState RecognitionState(
@@ -850,6 +878,10 @@ public sealed class DesktopWorkbenchCommandHandler :
       if (screenCapture)
       {
         Interlocked.Exchange(ref captureInFlight, 0);
+        // 截图识别终态（完成/失败/取消）后显示主窗呈现结果：仅在真正
+        // 进入后台的会话上触发，拒绝重入的命令不经过此处。复用现有
+        // ShowWorkbench 动作，不新增完成接口或轮询。
+        shellActions?.TryDispatch(HotkeyActionCatalog.ShowWorkbench);
       }
     }
   }

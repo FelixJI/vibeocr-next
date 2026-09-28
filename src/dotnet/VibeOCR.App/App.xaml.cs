@@ -216,9 +216,13 @@ public sealed partial class App : Application
             {
                 [HotkeyActionCatalog.ScreenshotEdit] =
                     () => _window!.CaptureScreenshotForEditAsync(),
-                [HotkeyActionCatalog.ScreenshotRecognize] = RecognizeFromHotkeyAsync,
+                // 直接等待主窗入口：早先的无条件 finally 显示会在选区/遮罩
+                // 尚未结束时提前抢焦点；终态显示由命令层在真正完成后经
+                // ShowWorkbench 动作触发（拒绝重入时不显示）。
+                [HotkeyActionCatalog.ScreenshotRecognize] =
+                    () => _window!.RecognizeScreenshotAsync(),
                 [HotkeyActionCatalog.ClipboardRecognize] =
-                    () => _window!.RecognizeClipboardAsync(),
+                    ShowWorkbenchThenRecognizeClipboardAsync,
                 [HotkeyActionCatalog.ToggleToolbar] = ToggleFloatingToolbarAsync,
                 [HotkeyActionCatalog.ShowWorkbench] = ShowWorkbenchFromShellActionAsync,
             },
@@ -519,27 +523,6 @@ public sealed partial class App : Application
             _ => "显示悬浮工具栏",
         };
 
-    private async Task RecognizeFromHotkeyAsync()
-    {
-        // Do NOT ShowMainWindow up front: ScreenRegionPicker hides the owner
-        // window itself before capturing the desktop, and showing it here would
-        // cause a visible flash (window appears, then gets hidden by the picker).
-        // We activate the window after the screenshot flow finishes instead.
-        try
-        {
-            await _window!.RecognizeScreenshotAsync();
-        }
-        catch (Exception error) when (
-            error is InvalidOperationException or IOException or UnauthorizedAccessException)
-        {
-            // RecognitionViewModel owns localized status; activation must keep the shell alive.
-        }
-        finally
-        {
-            ShowMainWindow();
-        }
-    }
-
     private void ShowMainWindow()
     {
         _window?.AppWindow.Show();
@@ -550,6 +533,16 @@ public sealed partial class App : Application
     {
         ShowMainWindow();
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// 剪贴板识别：非截图动作，从隐藏窗/托盘/热键入口触发时先显式显示
+    /// 工作台（结果呈现位置）再执行，不借用带截图终态语义的包装。
+    /// </summary>
+    private async Task ShowWorkbenchThenRecognizeClipboardAsync()
+    {
+        ShowMainWindow();
+        await _window!.RecognizeClipboardAsync();
     }
 
     private FloatingToolbarSettings CurrentFloatingToolbarSettings() =>

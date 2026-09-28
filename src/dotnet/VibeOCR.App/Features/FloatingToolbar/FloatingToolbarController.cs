@@ -183,10 +183,18 @@ internal sealed class FloatingToolbarController : IDisposable
     /// <summary>
     /// 截图流程前临时让位，避免工具栏被截入选区背景。从 Hidden
     /// （感应条贴边）或 UserHidden 进入时同样撤防感应条，保证截图与
-    /// 截图期间都不会被感应恢复；结束后 Resume 恢复此前状态。
+    /// 截图期间都不会被感应恢复；拖拽中进入则先按既有拖动完成语义
+    /// 收尾（贴边吸附或原位浮动），结束后恢复该合理可见态。
     /// </summary>
     public void Suspend()
     {
+        if (_state == ToolbarState.Dragging)
+        {
+            // 拖拽期间触发热键截图：先按既有拖动完成规则终止拖拽，
+            // 不让把手拖到一半的浮栏入图。
+            CompleteDrag(_view.GetBounds());
+        }
+
         if (_state is not (ToolbarState.Hidden
             or ToolbarState.UserHidden
             or ToolbarState.Revealed
@@ -460,7 +468,11 @@ internal sealed class FloatingToolbarController : IDisposable
         _state = ToolbarState.Dragging;
     }
 
-    private void OnViewDragCompleted(object? sender, PhysicalRectangle bounds)
+    private void OnViewDragCompleted(object? sender, PhysicalRectangle bounds) =>
+        CompleteDrag(bounds);
+
+    /// <summary>拖动收尾：贴边吸附（未占用边）或原位浮动，供松手与避让共用。</summary>
+    private void CompleteDrag(PhysicalRectangle bounds)
     {
         if (_state != ToolbarState.Dragging)
         {

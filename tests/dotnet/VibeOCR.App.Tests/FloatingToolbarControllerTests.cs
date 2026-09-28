@@ -253,6 +253,57 @@ public sealed class FloatingToolbarControllerTests
     }
 
     [Fact]
+    public void SuspendDuringDraggingEndsDragViaExistingSemanticsAndAvoidsCapture()
+    {
+        var persisted = new List<FloatingToolbarSettings>();
+        using FloatingToolbarController controller = CreateController(persisted: persisted);
+        controller.Start();
+        _sensor.RaisePointerEntered();
+        _view.RaiseDragStarted();
+        Assert.Equal(FloatingToolbarController.ToolbarState.Dragging, controller.State);
+
+        // 拖拽中触发热键截图：按既有拖动完成语义收尾后让位，
+        // 浮栏与感应条均不入图。
+        controller.Suspend();
+
+        Assert.Equal(FloatingToolbarController.ToolbarState.Suspended, controller.State);
+        Assert.False(_view.IsVisible);
+        Assert.False(_sensor.IsArmed);
+        // 释放点近顶边（未占用）→ 贴边偏好按既有规则持久化。
+        Assert.Equal(ScreenEdge.Top, Assert.Single(persisted).Edge);
+
+        // 结束恢复合理可见态：自动收起重新布防。
+        controller.Resume();
+
+        Assert.Equal(FloatingToolbarController.ToolbarState.Hidden, controller.State);
+        Assert.False(_view.IsVisible);
+        Assert.True(_sensor.IsArmed);
+    }
+
+    [Fact]
+    public void SuspendDuringDraggingRestoresFloatingPositionAfterCapture()
+    {
+        using FloatingToolbarController controller = CreateController();
+        controller.Start();
+        _sensor.RaisePointerEntered();
+        _view.RaiseDragStarted();
+        // 拖到屏幕中央：无吸附边，按既有语义原位浮动。
+        _view.SimulatedBounds = new PhysicalRectangle(700, 500, 200, 44);
+
+        controller.Suspend();
+
+        Assert.Equal(FloatingToolbarController.ToolbarState.Suspended, controller.State);
+        Assert.False(_view.IsVisible);
+        Assert.False(_sensor.IsArmed);
+
+        controller.Resume();
+
+        Assert.Equal(FloatingToolbarController.ToolbarState.PinnedFloating, controller.State);
+        Assert.True(_view.IsVisible);
+        Assert.Equal(new PhysicalRectangle(700, 500, 200, 44), _view.LastShownBounds);
+    }
+
+    [Fact]
     public void HiddenByUserPreferenceChangedDuringSuspendWinsOnResume()
     {
         using FloatingToolbarController controller = CreateController();
