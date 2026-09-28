@@ -230,7 +230,8 @@ internal sealed class PinnedImageWindow : IDisposable
     if (disposed || !args.IsSuccess || args.NavigationId != activeNavigation) return;
     try
     {
-      view.Visibility = Visibility.Visible;
+      view.Opacity = 1;
+      view.IsHitTestVisible = true;
       await view.ExecuteScriptAsync(
         $"document.body.style.zoom='{zoom.ToString(CultureInfo.InvariantCulture)}';" +
         FitLinesScript);
@@ -325,7 +326,9 @@ internal sealed class PinnedImageWindow : IDisposable
 
   private void Render()
   {
-    view.Visibility = Visibility.Collapsed;
+    // Keep WebView2 in the layout while navigation replaces a stale text layer.
+    view.Opacity = 0;
+    view.IsHitTestVisible = false;
     // OCR supplies line boxes only. Browser glyph layout allows substrings but is approximate.
     var html = new StringBuilder("<!doctype html><html><head><meta charset='utf-8'>")
       .Append("<meta http-equiv='Content-Security-Policy' content=\"default-src 'none'; img-src https://pin.vibeocr; style-src 'unsafe-inline'\">")
