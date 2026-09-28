@@ -350,7 +350,7 @@ describe("AppShell", () => {
     expect(screen.getByRole("button", { name: "复制标注图" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "保存标注图" })).toBeEnabled();
     expect(
-      screen.getByText(/马赛克与模糊会写入复制、保存的图片副本/),
+      screen.getByText(/马赛克.*会写入复制、保存副本及显式识别输入/),
     ).toBeVisible();
     expect(screen.getByLabelText("图片检查画布")).toHaveAttribute(
       "tabindex",

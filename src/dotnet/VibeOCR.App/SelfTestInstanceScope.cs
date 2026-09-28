@@ -11,17 +11,14 @@ internal sealed record SelfTestInstanceScope(
     string? smokeMode,
     string? instanceId)
   {
-    bool isWebReadySmoke = string.Equals(
-      smokeMode,
-      "web-ready",
-      StringComparison.Ordinal);
+    bool isWebReadySmoke = smokeMode is "web-ready" or "screenshot-e2e";
     bool hasInstanceId = !string.IsNullOrWhiteSpace(instanceId);
     if (!isWebReadySmoke)
     {
       if (hasInstanceId)
       {
         throw new InvalidOperationException(
-          "A self-test instance ID is only valid for the web-ready smoke.");
+          "A self-test instance ID requires an isolated UI smoke mode.");
       }
       return new SelfTestInstanceScope($"VibeOCR-{profile}", null);
     }
@@ -29,7 +26,7 @@ internal sealed record SelfTestInstanceScope(
     if (!Guid.TryParseExact(instanceId, "N", out Guid parsedId))
     {
       throw new InvalidOperationException(
-        "The web-ready smoke requires a 32-character GUID instance ID.");
+        "The UI smoke requires a 32-character GUID instance ID.");
     }
 
     string normalizedId = parsedId.ToString("N");

@@ -55,6 +55,12 @@ public sealed partial class MainWindow : Window
   private readonly WebWorkbenchHost webHost;
   private readonly WorkbenchResourceBroker resourceBroker;
   private readonly string resourceRoot;
+  private readonly SyntheticScreenRegionPicker? screenshotSmokePicker;
+  private readonly Func<int>? smokeSubmitAttempts;
+  private readonly Func<string?>? smokeLastJobId;
+  private readonly Func<int>? smokeStartupEnsureAttempts;
+  private readonly Func<bool>? smokeInferenceAttached;
+  private bool screenshotSmokeStarted;
   private bool initialized;
   private WorkbenchRoute currentRoute = WorkbenchRoute.Recognition;
 
@@ -69,7 +75,11 @@ public sealed partial class MainWindow : Window
     Func<ShellViewModel> shellFactory,
     Func<UpdateViewModel> updateFactory,
     WindowLayoutStore layoutStore,
-    Func<bool>? inferenceAttached = null)
+    Func<bool>? inferenceAttached = null,
+    IScreenRegionPicker? screenshotSmokePicker = null,
+    Func<int>? smokeSubmitAttempts = null,
+    Func<string?>? smokeLastJobId = null,
+    Func<int>? smokeStartupEnsureAttempts = null)
   {
     this.diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
     this.layout = layout ?? throw new ArgumentNullException(nameof(layout));
@@ -81,6 +91,11 @@ public sealed partial class MainWindow : Window
     ArgumentNullException.ThrowIfNull(shellFactory);
     ArgumentNullException.ThrowIfNull(updateFactory);
     this.layoutStore = layoutStore ?? throw new ArgumentNullException(nameof(layoutStore));
+    this.screenshotSmokePicker = screenshotSmokePicker as SyntheticScreenRegionPicker;
+    this.smokeSubmitAttempts = smokeSubmitAttempts;
+    this.smokeLastJobId = smokeLastJobId;
+    this.smokeStartupEnsureAttempts = smokeStartupEnsureAttempts;
+    smokeInferenceAttached = inferenceAttached;
 
     resourceRoot = Path.Combine(layout.DataRoot, "web-resources");
     Directory.CreateDirectory(resourceRoot);
@@ -310,6 +325,12 @@ public sealed partial class MainWindow : Window
         WorkbenchWebView.Visibility = Visibility.Visible;
       });
       _ = CompleteWebReadySmokeAsync();
+      if (!screenshotSmokeStarted &&
+          Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "screenshot-e2e")
+      {
+        screenshotSmokeStarted = true;
+        _ = CompleteScreenshotE2eSmokeAsync();
+      }
     }
     AppLog.Info($"Web workbench: {state}");
   }

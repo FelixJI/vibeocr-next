@@ -48,6 +48,8 @@ public sealed partial class App : Application
     private PortableLayout? _supervisorLayout;
     private DiagnosticsViewModel? _supervisorDiagnostics;
     private IRuntimeInstallerClient? _runtimeInstaller;
+    private SyntheticScreenRegionPicker? _screenshotSmokePicker;
+    private int _startupRuntimeEnsureAttempts;
     private FrontendExclusiveLock? _exclusiveLock;
     private WindowMessageService? _windowMessages;
     private TrayIconService? _trayIcon;
@@ -185,13 +187,19 @@ public sealed partial class App : Application
 
         _windowLayoutStore = new WindowLayoutStore(
             Path.Combine(layout.DataRoot, "winui-layout.json"));
+        if (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "screenshot-e2e")
+        {
+            _screenshotSmokePicker = new SyntheticScreenRegionPicker();
+        }
 
         _window = new MainWindow(
           diagnostics,
           layout,
           () => new RecognitionViewModel(
             _inferenceGateway,
-            new InputService(() => WinRT.Interop.WindowNative.GetWindowHandle(_window!))),
+            new InputService(
+              () => WinRT.Interop.WindowNative.GetWindowHandle(_window!),
+              _screenshotSmokePicker)),
           () => new BatchViewModel(
             _inferenceGateway,
             new BatchFileSource(() => WinRT.Interop.WindowNative.GetWindowHandle(_window!))),
@@ -221,7 +229,11 @@ public sealed partial class App : Application
           () => _updateViewModel ??
             throw new InvalidOperationException("Update service is unavailable."),
           _windowLayoutStore,
-          () => _inferenceGateway.IsAttached);
+          () => _inferenceGateway.IsAttached,
+          _screenshotSmokePicker,
+          () => _inferenceGateway.SubmitAttempts,
+          () => _inferenceGateway.LastSubmittedJobId,
+          () => Volatile.Read(ref _startupRuntimeEnsureAttempts));
         _window.AppWindow.Closing += OnAppWindowClosing;
         _window.Closed += OnWindowClosedFallback;
         _window.Activate();
@@ -426,6 +438,7 @@ public sealed partial class App : Application
                 ?? throw new InvalidOperationException("Runtime Installer is unavailable.");
             var maintenanceProgress = new Progress<Host.RuntimeMaintenanceEvent>(
                 _runtimeStatus.ApplyMaintenance);
+            Interlocked.Increment(ref _startupRuntimeEnsureAttempts);
             RuntimeLaunch launch = await StartupRuntimeInstaller.EnsureBaseRuntimeAsync(
                 installer,
                 maintenanceProgress,

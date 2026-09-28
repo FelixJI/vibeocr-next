@@ -29,6 +29,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       "recognition.file",
       "recognition.clipboard",
       "recognition.capture",
+      "recognition.screenshotSession",
       "recognition.results",
       "recognition.annotation",
       "batch.add",
@@ -75,6 +76,10 @@ public sealed class DesktopWorkbenchCommandHandler :
   private readonly Dictionary<int, WorkbenchResourceReference> pdfThumbnails = [];
   private RecognitionViewModel? recognition;
   private ResultActions? resultActions;
+  private Guid? screenshotSessionId;
+  private long screenshotSessionRevision;
+  private WorkbenchResourceReference? screenshotSessionInput;
+  private WorkbenchResourceReference? screenshotSessionResult;
   private BatchViewModel? batch;
   private string? batchTaskEngine;
   private QrCodeViewModel? qrCode;
@@ -196,6 +201,18 @@ public sealed class DesktopWorkbenchCommandHandler :
         CaptureRecognitionScreenCommand => StartRecognition(
           viewModel => viewModel.RecognizeScreenshotAsync(cancellationToken),
           cancellationToken),
+        CaptureScreenshotSessionCommand => StartScreenshotSession(cancellationToken),
+        CloseScreenshotSessionCommand => CloseScreenshotSession(),
+        NotifyScreenshotSessionRevisionCommand notify => NotifyScreenshotRevision(notify),
+        CopyScreenshotImageCommand copy => await CopyScreenshotImageAsync(
+          copy,
+          cancellationToken),
+        SaveScreenshotImageCommand save => await SaveScreenshotImageAsync(
+          save,
+          cancellationToken),
+        RecognizeScreenshotImageCommand recognize => await StartScreenshotRecognitionAsync(
+          recognize,
+          cancellationToken),
         CancelRecognitionCommand => CancelRecognition(),
         CopyRecognitionResultCommand copy => await CopyRecognitionAsync(
           copy,
@@ -305,6 +322,16 @@ public sealed class DesktopWorkbenchCommandHandler :
           false,
           "workbench.error.annotationOperationCancelled"));
     }
+    catch (ScreenshotSessionStaleException)
+    {
+      return new WorkbenchCommandOutcome(
+        [],
+        new WorkbenchProblem(
+          "screenshot_session_stale",
+          WorkbenchProblemCategory.Conflict,
+          false,
+          "workbench.error.screenshotSessionStale"));
+    }
     catch (Exception error) when (
       error is IOException or UnauthorizedAccessException or InvalidOperationException or
         ClipboardBusyException or WorkbenchAnnotationAccessException)
@@ -342,9 +369,312 @@ public sealed class DesktopWorkbenchCommandHandler :
     return CurrentRecognitionState();
   }
 
-  private RecognitionWorkbenchState CurrentRecognitionState() => RecognitionState(
-    false,
-    recognition is null ? "recognition.ready" : RecognitionStatusCode(recognition));
+  private RecognitionWorkbenchState CurrentRecognitionState()
+  {
+    if (screenshotSessionId is not null)
+    {
+      return SessionRecognitionState(
+        false,
+        screenshotSessionResult is null ? "recognition.session" : "recognition.completed");
+    }
+    return RecognitionState(
+      false,
+      recognition is null ? "recognition.ready" : RecognitionStatusCode(recognition));
+  }
+
+  /// <summary>当前截图会话的 wire 投影；无会话时为 null。</summary>
+  private RecognitionScreenshotSessionState? CurrentScreenshotSession() =>
+    screenshotSessionId is { } id
+      ? new RecognitionScreenshotSessionState(id.ToString("N"), screenshotSessionRevision)
+      : null;
+
+  /// <summary>会话状态固定复用缓存的基准图/结果资源，避免重发布新 URL 导致编辑器重置。</summary>
+  private RecognitionWorkbenchState SessionRecognitionState(
+    bool isBusy,
+    string statusCode) => new(
+      isBusy,
+      statusCode,
+      screenshotSessionInput,
+      screenshotSessionResult,
+      RecognitionEngines(),
+      recognition?.TaskEngine,
+      CurrentScreenshotSession());
+
+  private void ValidateScreenshotSession(Guid sessionId, long revision)
+  {
+    if (screenshotSessionId != sessionId || screenshotSessionRevision != revision)
+    {
+      throw new ScreenshotSessionStaleException();
+    }
+  }
+
+  private WorkbenchAnnotationFile TakeScreenshotAnnotation(string resourceUri) =>
+    annotationStore.Take(new Uri(resourceUri));
+
+  private RecognitionWorkbenchState? StartScreenshotSession(CancellationToken cancellationToken)
+  {
+    recognition ??= recognitionFactory();
+    long generation = Interlocked.Increment(ref recognitionGeneration);
+    // 新捕获立即取代旧会话：选取期间旧会话命令一律失效，
+    // 换图/重复点击不会把旧图或旧修订带入新会话。
+    ClearScreenshotSession();
+    recognition.InvalidateResult();
+    resultActions = null;
+    return PublishStartThenTrack(
+      SessionRecognitionState(true, "recognition.running"),
+      () => CompleteScreenshotSessionAsync(generation, cancellationToken));
+  }
+
+  private async Task CompleteScreenshotSessionAsync(
+    long generation,
+    CancellationToken cancellationToken)
+  {
+    try
+    {
+      // 纯截图路径：不加载 Runtime 目录（EnsureSelectionLoadedAsync）、
+      // 不做 requireUsable 模式协商；Supervisor 未连接/维护中同样可完成。
+      await recognition!.CaptureScreenshotSessionAsync(cancellationToken);
+      if (generation != Volatile.Read(ref recognitionGeneration))
+      {
+        return;
+      }
+      if (recognition.CurrentInput is { } captured)
+      {
+        WorkbenchResourceReference input = await PublishBytesAsync(
+          captured.Data,
+          captured.MediaType,
+          ExtensionForMediaType(captured.MediaType),
+          cancellationToken);
+        // PublishBytesAsync 期间取消/新截图会推进 generation：
+        // 旧捕获完成不得复活已被取代的会话。
+        if (generation != Volatile.Read(ref recognitionGeneration))
+        {
+          return;
+        }
+        screenshotSessionId = Guid.NewGuid();
+        screenshotSessionRevision = 0;
+        screenshotSessionInput = input;
+        screenshotSessionResult = null;
+        StateChanged?.Invoke(SessionRecognitionState(false, "recognition.session"));
+      }
+      else
+      {
+        // 用户在选区界面取消：不残留会话与遮罩状态；此前的文件输入保持可见。
+        StateChanged?.Invoke(await CurrentRecognitionStateAsync(
+          "recognition.cancelled",
+          cancellationToken));
+      }
+    }
+    catch (OperationCanceledException)
+    {
+      if (generation == Volatile.Read(ref recognitionGeneration))
+      {
+        StateChanged?.Invoke(await CurrentRecognitionStateAsync(
+          "recognition.cancelled",
+          cancellationToken));
+      }
+    }
+    catch (Exception error)
+    {
+      AppLog.Error("Screenshot session capture failed", error);
+      if (generation == Volatile.Read(ref recognitionGeneration))
+      {
+        StateChanged?.Invoke(SessionRecognitionState(false, "recognition.failed"));
+      }
+    }
+  }
+
+  private RecognitionWorkbenchState NotifyScreenshotRevision(
+    NotifyScreenshotSessionRevisionCommand command)
+  {
+    recognition ??= recognitionFactory();
+    if (screenshotSessionId != command.SessionId ||
+      command.Revision <= screenshotSessionRevision)
+    {
+      // 未知会话或乱序/过期通知：保留宿主权威状态，不回退修订。
+      return SessionRecognitionState(false, SessionStatusCode());
+    }
+    screenshotSessionRevision = command.Revision;
+    // 任何内容修订都使旧识别结果与结果动作失效：迟到响应不得覆盖当前内容。
+    Interlocked.Increment(ref recognitionGeneration);
+    recognition.Cancel();
+    recognition.InvalidateResult();
+    resultActions = null;
+    screenshotSessionResult = null;
+    return SessionRecognitionState(false, "recognition.session");
+  }
+
+  private string SessionStatusCode() => screenshotSessionResult is null
+    ? "recognition.session"
+    : "recognition.completed";
+
+  private async Task<RecognitionWorkbenchState> CopyScreenshotImageAsync(
+    CopyScreenshotImageCommand command,
+    CancellationToken cancellationToken)
+  {
+    // 快照语义：开始时校验会话/修订并冻结本次导出的 PNG，
+    // 原生异步（剪贴板重试）期间允许该快照完成；出口只回报当前投影，
+    // 不回写旧会话状态。
+    ValidateScreenshotSession(command.SessionId, command.Revision);
+    using WorkbenchAnnotationFile annotation = TakeScreenshotAnnotation(command.ResourceUri);
+    await annotatedImagePlatform.CopyPngAsync(annotation.Path, cancellationToken);
+    return CurrentRecognitionState();
+  }
+
+  private async Task<RecognitionWorkbenchState> SaveScreenshotImageAsync(
+    SaveScreenshotImageCommand command,
+    CancellationToken cancellationToken)
+  {
+    // 与复制同一快照语义：FileSavePicker 等待期间允许冻结的导出落盘，
+    // 出口只回报当前投影，不回写旧会话状态。
+    ValidateScreenshotSession(command.SessionId, command.Revision);
+    using WorkbenchAnnotationFile annotation = TakeScreenshotAnnotation(command.ResourceUri);
+    if (!await annotatedImagePlatform.SavePngAsync(annotation.Path, cancellationToken))
+    {
+      throw new AnnotatedImageOperationCancelledException();
+    }
+    return CurrentRecognitionState();
+  }
+
+  private async Task<RecognitionWorkbenchState?> StartScreenshotRecognitionAsync(
+    RecognizeScreenshotImageCommand command,
+    CancellationToken cancellationToken)
+  {
+    recognition ??= recognitionFactory();
+    ValidateScreenshotSession(command.SessionId, command.Revision);
+    using WorkbenchAnnotationFile annotation = TakeScreenshotAnnotation(command.ResourceUri);
+    // 只把编辑器导出的最终 PNG 送入识别；不回退未编辑基准图。
+    byte[] png = await File.ReadAllBytesAsync(annotation.Path, cancellationToken);
+    // 读取租约期间会话/修订变更则拒绝启动，不消费推理配额。
+    ValidateScreenshotSession(command.SessionId, command.Revision);
+    var input = new RecognitionInput(
+      png,
+      "image/png",
+      "screenshot-session-final.png",
+      "screenshot-session");
+    long generation = Interlocked.Increment(ref recognitionGeneration);
+    Guid sessionId = command.SessionId;
+    long revision = command.Revision;
+    resultActions = null;
+    screenshotSessionResult = null;
+    return PublishStartThenTrack(
+      SessionRecognitionState(true, "recognition.running"),
+      () => CompleteScreenshotRecognitionAsync(
+        generation,
+        sessionId,
+        revision,
+        input,
+        cancellationToken));
+  }
+
+  private async Task CompleteScreenshotRecognitionAsync(
+    long generation,
+    Guid sessionId,
+    long revision,
+    RecognitionInput input,
+    CancellationToken cancellationToken)
+  {
+    try
+    {
+      // 只有显式识别才同步 Runtime 目录并做 requireUsable 模式协商。
+      bool deferredSelection = !await EnsureSelectionLoadedAsync(cancellationToken);
+      // 目录加载期间编辑/关闭/换图会推进 generation：
+      // 提交前复查，不把旧图发送给 Runtime。
+      if (generation != Volatile.Read(ref recognitionGeneration))
+      {
+        return;
+      }
+      SynchronizeRecognitionMode(requireUsable: true);
+      await recognition!.RecognizeCapturedInputAsync(input, cancellationToken);
+      if (deferredSelection)
+      {
+        try
+        {
+          await EnsureSelectionLoadedAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+          throw;
+        }
+        catch (Exception)
+        {
+          // 识别已完成；目录补载失败只影响引擎列表，不推翻结果。
+        }
+      }
+      if (generation != Volatile.Read(ref recognitionGeneration))
+      {
+        return;
+      }
+      if (screenshotSessionId == sessionId && screenshotSessionRevision == revision)
+      {
+        if (recognition.Result is not null)
+        {
+          resultActions = recognition.CreateResultActions(
+            new WindowsResultActionPlatform(windowHandle));
+        }
+        WorkbenchResourceReference? result = string.IsNullOrEmpty(recognition.ResultText)
+          ? null
+          : await PublishBytesAsync(
+            Encoding.UTF8.GetBytes(recognition.ResultText),
+            "text/plain; charset=utf-8",
+            ".txt",
+            cancellationToken);
+        // 结果资源发布期间编辑/换图/维护会推进 generation：丢弃迟到结果。
+        if (generation != Volatile.Read(ref recognitionGeneration) ||
+          screenshotSessionId != sessionId ||
+          screenshotSessionRevision != revision)
+        {
+          return;
+        }
+        screenshotSessionResult = result;
+        StateChanged?.Invoke(SessionRecognitionState(
+          false,
+          RecognitionStatusCode(recognition)));
+      }
+      else
+      {
+        // 会话或内容修订已变更：迟到结果丢弃，不覆盖新会话。
+        recognition.InvalidateResult();
+        resultActions = null;
+        screenshotSessionResult = null;
+        StateChanged?.Invoke(SessionRecognitionState(false, "recognition.expired"));
+      }
+    }
+    catch (OperationCanceledException)
+    {
+      if (generation == Volatile.Read(ref recognitionGeneration))
+      {
+        StateChanged?.Invoke(SessionRecognitionState(false, "recognition.cancelled"));
+      }
+    }
+    catch (Exception error)
+    {
+      AppLog.Error("Screenshot session recognition failed", error);
+      if (generation == Volatile.Read(ref recognitionGeneration))
+      {
+        StateChanged?.Invoke(SessionRecognitionState(false, "recognition.failed"));
+      }
+    }
+  }
+
+  private RecognitionWorkbenchState CloseScreenshotSession()
+  {
+    recognition ??= recognitionFactory();
+    Interlocked.Increment(ref recognitionGeneration);
+    recognition.Cancel();
+    recognition.InvalidateResult();
+    resultActions = null;
+    ClearScreenshotSession();
+    return new RecognitionWorkbenchState(false, "recognition.ready");
+  }
+
+  private void ClearScreenshotSession()
+  {
+    screenshotSessionId = null;
+    screenshotSessionRevision = 0;
+    screenshotSessionInput = null;
+    screenshotSessionResult = null;
+  }
 
   private RecognitionWorkbenchState? StartRecognition(
     Func<RecognitionViewModel, Task> action,
@@ -352,6 +682,9 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     recognition ??= recognitionFactory();
     long generation = Interlocked.Increment(ref recognitionGeneration);
+    // 新输入（文件/剪贴板/拖入/即时截图识别）取代截图会话：
+    // 旧会话命令立即失效，避免旧图混入新输入。
+    ClearScreenshotSession();
     return PublishStartThenTrack(
       RecognitionState(true, "recognition.running"),
       () => CompleteRecognitionAsync(action, generation, cancellationToken));
@@ -370,7 +703,8 @@ public sealed class DesktopWorkbenchCommandHandler :
       input,
       result,
       RecognitionEngines(),
-      recognition?.TaskEngine);
+      recognition?.TaskEngine,
+      CurrentScreenshotSession());
   }
 
   /// <summary>
@@ -498,6 +832,14 @@ public sealed class DesktopWorkbenchCommandHandler :
     recognition ??= recognitionFactory();
     Interlocked.Increment(ref recognitionGeneration);
     recognition.Cancel();
+    if (screenshotSessionId is not null)
+    {
+      // 取消保留会话编辑基准；运行中结果丢弃后可重新显式识别。
+      recognition.InvalidateResult();
+      resultActions = null;
+      screenshotSessionResult = null;
+      return SessionRecognitionState(false, "recognition.cancelled");
+    }
     return new RecognitionWorkbenchState(
       false,
       "recognition.cancelled",
@@ -543,6 +885,11 @@ public sealed class DesktopWorkbenchCommandHandler :
     string statusCode,
     CancellationToken cancellationToken)
   {
+    if (screenshotSessionId is not null)
+    {
+      // 会话模式复用缓存资源：重发布新 URL 会重置编辑器历史。
+      return SessionRecognitionState(false, statusCode);
+    }
     RecognitionViewModel viewModel = recognition ??
       throw new InvalidOperationException("Recognition is unavailable.");
     WorkbenchResourceReference? input = viewModel.CurrentInput is { } currentInput
@@ -1165,7 +1512,9 @@ public sealed class DesktopWorkbenchCommandHandler :
     }
     else throw new RuntimeSelectionException(RuntimeSelectionErrorKind.CapabilityMissing,
       "The runtime does not provide a recognition selection catalog.");
-    return RecognitionState(false, RecognitionStatusCode(recognition));
+    return screenshotSessionId is not null
+      ? SessionRecognitionState(recognition.IsBusy, SessionStatusCode())
+      : RecognitionState(false, RecognitionStatusCode(recognition));
   }
 
   private void SynchronizeRecognitionMode(bool requireUsable = false)
@@ -1242,7 +1591,30 @@ public sealed class DesktopWorkbenchCommandHandler :
   private void OnSettingsChanged()
   {
     if (Volatile.Read(ref disposed) == 0 && settings is not null)
+    {
+      InvalidateScreenshotSessionRecognitionOnMaintenance();
       StateChanged?.Invoke(SettingsState(settings));
+    }
+  }
+
+  /// <summary>
+  /// 运行环境维护（含切换）事件使在途截图会话识别失效：迟到结果
+  /// 不得覆盖当前会话。只接现有维护事件，不接管环境状态机。
+  /// </summary>
+  private void InvalidateScreenshotSessionRecognitionOnMaintenance()
+  {
+    if (settings?.Maintenance.State.IsRunning != true ||
+      screenshotSessionId is null ||
+      recognition is not { IsBusy: true })
+    {
+      return;
+    }
+    Interlocked.Increment(ref recognitionGeneration);
+    recognition.Cancel();
+    recognition.InvalidateResult();
+    resultActions = null;
+    screenshotSessionResult = null;
+    StateChanged?.Invoke(SessionRecognitionState(false, "recognition.expired"));
   }
 
   private void OnSettingsPropertyChanged(object? sender, PropertyChangedEventArgs args) => OnSettingsChanged();
@@ -1700,6 +2072,10 @@ public sealed class DesktopWorkbenchCommandHandler :
   }
 
   private sealed class AnnotatedImageOperationCancelledException : Exception
+  {
+  }
+
+  private sealed class ScreenshotSessionStaleException : Exception
   {
   }
 }
