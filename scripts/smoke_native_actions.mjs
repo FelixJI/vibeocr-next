@@ -430,6 +430,7 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence) {
   const before = await canvasOrange(page);
   assert(before.nonBackground > 1000, 'Real screenshot image never decoded in WebView2.');
   await page.getByRole('button', { name: '矩形', exact: true }).click();
+  await page.getByRole('combobox', { name: '线条宽度' }).selectOption('8');
   const box = await editor.boundingBox();
   assert(box && box.width > 100 && box.height > 100, 'Editor canvas has no usable visual bounds.');
   await page.mouse.move(box.x + box.width * 0.35, box.y + box.height * 0.45);
@@ -485,6 +486,8 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence) {
   } finally {
     await page.evaluate(() => window.__nativeActionsRestoreFetch?.()).catch(() => {});
   }
+  fs.writeFileSync(path.join(evidenceRoot, 'synthetic-edited.png'), png);
+  await page.screenshot({ path: path.join(evidenceRoot, 'screenshot-editor.png') });
   const pixels = await pngPixels(page, png);
   assert.equal(pixels.width, button.width, 'Smart region did not select the synthetic button width.');
   assert.equal(pixels.height, button.height, 'Smart region did not select the synthetic button height.');
@@ -493,7 +496,6 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence) {
   const revision = await page.evaluate(() => window.__nativeActionsEvidence);
   assert(revision?.sessionId && revision.revision >= 1,
     'Host screenshot session revision did not advance after editing.');
-  fs.writeFileSync(path.join(evidenceRoot, 'synthetic-edited.png'), png);
   return { hotkey, overlayHandle: overlay.Handle,
     mainHiddenDuringSelection: true, toolbarHiddenDuringSelection: true,
     toolbarRestoredAfterSelection: true,
@@ -597,6 +599,7 @@ async function main() {
     app = await launchApp(candidate, webviewData, instanceId);
     evidence.appPids.push(app.child.pid);
     await verifyRestart(app.page);
+    await app.page.screenshot({ path: path.join(smokeRoot, 'native-actions-settings.png') });
     fixture = await startFixture();
     evidence.capture = await captureThroughHotkey(app, fixture, smokeRoot, evidence);
     evidence.recognitionHotkeyGuard = await verifyRecognitionHotkeyGuard(app, fixture);
