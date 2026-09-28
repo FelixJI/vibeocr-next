@@ -13,7 +13,6 @@ public sealed class WorkbenchApplication : IWorkbenchApplication
     new(StringComparer.Ordinal);
   private readonly HashSet<Channel<WorkbenchStateEnvelope>> _subscriptions = [];
   private readonly IWorkbenchCommandHandler? _commandHandler;
-  private readonly AsyncLocal<CommandDispatch?> _commandDispatch = new();
   private WorkbenchRoute _route;
   private long _revision;
   private bool _disposed;
@@ -84,35 +83,26 @@ public sealed class WorkbenchApplication : IWorkbenchApplication
       return Unsupported(envelope.Id);
     }
 
-    var dispatch = new CommandDispatch();
-    CommandDispatch? previous = _commandDispatch.Value;
-    _commandDispatch.Value = dispatch;
-    try
+    WorkbenchCommandOutcome outcome = await _commandHandler.ExecuteAsync(
+      envelope.Command,
+      cancellationToken);
+    lock (_gate)
     {
-      WorkbenchCommandOutcome outcome = await _commandHandler.ExecuteAsync(
-        envelope.Command,
-        cancellationToken);
-      lock (_gate)
+      ObjectDisposedException.ThrowIf(_disposed, this);
+      if (outcome.Error is not null)
       {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        if (outcome.Error is null)
-        {
-          foreach (WorkbenchState next in outcome.States)
-          {
-            Publish(next);
-          }
-        }
-        CompleteDispatch(dispatch);
         return new WorkbenchCommandReceipt(envelope.Id, _revision, outcome.Error);
       }
-    }
-    finally
-    {
-      lock (_gate)
+      foreach (WorkbenchState next in outcome.States)
       {
-        if (!_disposed) CompleteDispatch(dispatch);
+        _revision++;
+        RecordAndPublish(new WorkbenchStateEnvelope(
+          _revision,
+          next.Scope,
+          WorkbenchStateChange.Replace,
+          next));
       }
-      _commandDispatch.Value = previous;
+      return new WorkbenchCommandReceipt(envelope.Id, _revision, null);
     }
   }
 
@@ -207,38 +197,13 @@ public sealed class WorkbenchApplication : IWorkbenchApplication
     lock (_gate)
     {
       if (_disposed) return;
-      CommandDispatch? dispatch = _commandDispatch.Value;
-      if (dispatch is { Completed: false })
-      {
-        dispatch.States.Add(state);
-        return;
-      }
-      Publish(state);
+      _revision++;
+      RecordAndPublish(new WorkbenchStateEnvelope(
+        _revision,
+        state.Scope,
+        WorkbenchStateChange.Replace,
+        state));
     }
-  }
-
-  private void Publish(WorkbenchState state)
-  {
-    _revision++;
-    RecordAndPublish(new WorkbenchStateEnvelope(
-      _revision,
-      state.Scope,
-      WorkbenchStateChange.Replace,
-      state));
-  }
-
-  private void CompleteDispatch(CommandDispatch dispatch)
-  {
-    if (dispatch.Completed) return;
-    dispatch.Completed = true;
-    foreach (WorkbenchState state in dispatch.States) Publish(state);
-    dispatch.States.Clear();
-  }
-
-  private sealed class CommandDispatch
-  {
-    public bool Completed { get; set; }
-    public List<WorkbenchState> States { get; } = [];
   }
 
   private void EnsureInitialStates()
