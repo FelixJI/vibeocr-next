@@ -285,7 +285,7 @@ public sealed partial class MainWindow
       catch (InvalidOperationException) { }
       await Task.Delay(100);
     }
-    throw new TimeoutException("Pinned WebView2 text state did not update.");
+    throw new TimeoutException($"Pinned WebView2 text state did not update (present={present}): {pin.SmokeNavigationState}.");
   }
 
   private async Task<string> SelectMainSubstringAndCopyAsync(

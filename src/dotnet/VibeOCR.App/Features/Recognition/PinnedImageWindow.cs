@@ -55,6 +55,7 @@ internal sealed class PinnedImageWindow : IDisposable
   private bool disposed;
   private CoreWebView2? core;
   private ulong activeNavigation;
+  private string navigationState = "not_started";
   private double zoom = 1;
   private long textGeneration;
   private bool oldSnapshot;
@@ -62,6 +63,7 @@ internal sealed class PinnedImageWindow : IDisposable
   public event Action<PinnedImageWindow>? Closed;
 
   internal string SmokeImagePath => image.Path;
+  internal string SmokeNavigationState => $"loaded={loaded}; lines={layer?.Lines?.Count}; {navigationState}";
   internal bool SmokeDisposed => disposed;
   internal bool SmokeAlwaysOnTop =>
     window.AppWindow.Presenter is OverlappedPresenter { IsAlwaysOnTop: true };
@@ -96,6 +98,7 @@ internal sealed class PinnedImageWindow : IDisposable
   }
   internal async Task SmokeDragTitleBarAsync(int dx, int dy)
   {
+    window.Activate();
     PointInt32 before = window.AppWindow.Position;
     int x = before.X + window.AppWindow.Size.Width / 2;
     int y = before.Y + 14;
@@ -222,12 +225,20 @@ internal sealed class PinnedImageWindow : IDisposable
   {
     if (args.Uri != "about:blank") args.Cancel = true;
     else activeNavigation = args.NavigationId;
+    navigationState = $"starting: scheme={new Uri(args.Uri).Scheme}, blank={args.Uri == "about:blank"}, user={args.IsUserInitiated}, cancelled={args.Cancel}, id={args.NavigationId}";
   }
 
   private async void OnNavigationCompleted(CoreWebView2 sender,
     CoreWebView2NavigationCompletedEventArgs args)
   {
-    if (disposed || !args.IsSuccess || args.NavigationId != activeNavigation) return;
+    navigationState += $"; completed: success={args.IsSuccess}, status={args.WebErrorStatus}, id={args.NavigationId}, expected={activeNavigation}";
+    if (disposed || args.NavigationId != activeNavigation) return;
+    if (!args.IsSuccess)
+    {
+      status.Text = "贴图加载失败，请关闭后重新打开";
+      AppLog.Warn($"Pinned image navigation failed: {args.WebErrorStatus}");
+      return;
+    }
     try
     {
       view.Opacity = 1;
@@ -347,6 +358,7 @@ internal sealed class PinnedImageWindow : IDisposable
         .Append("cqw'><span>").Append(WebUtility.HtmlEncode(line.Text)).Append("</span>\n</div>");
     }
     html.Append("</div></body></html>");
+    navigationState = $"requested: chars={html.Length}";
     view.NavigateToString(html.ToString());
   }
 
