@@ -17,14 +17,16 @@ public sealed class SelfTestInstanceScopeTests
     Assert.Null(scope.ExclusiveMutexName);
   }
 
-  [Fact]
-  public void WebReadySmokeUsesIsolatedNamedObjects()
+  [Theory]
+  [InlineData("web-ready")]
+  [InlineData("screenshot-e2e")]
+  public void UiSmokeUsesIsolatedNamedObjects(string smokeMode)
   {
     const string instanceId = "c240f369b28e4444b0d45f4a4d331cd0";
 
     SelfTestInstanceScope scope = SelfTestInstanceScope.Resolve(
       "production",
-      "web-ready",
+      smokeMode,
       instanceId);
 
     Assert.Equal(
@@ -38,6 +40,8 @@ public sealed class SelfTestInstanceScopeTests
   [Theory]
   [InlineData("web-ready", null)]
   [InlineData("web-ready", "not-a-guid")]
+  [InlineData("screenshot-e2e", null)]
+  [InlineData("screenshot-e2e", "not-a-guid")]
   [InlineData(null, "c240f369b28e4444b0d45f4a4d331cd0")]
   public void InvalidSelfTestScopeIsRejected(string? smokeMode, string? instanceId) =>
     Assert.Throws<InvalidOperationException>(() => SelfTestInstanceScope.Resolve(

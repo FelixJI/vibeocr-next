@@ -1,0 +1,22 @@
+# Standalone MinerU host, without RapidOCR, PaddleOCR or Torch.
+# ONNX Runtime is pulled transitively by MinerU's document pipeline.
+pillow>=12.3.0
+numpy>=2.3.5
+httpx>=0.28.1
+jsonschema>=4.25.0
+pymupdf>=1.28.0
+pydantic>=2.13.4
+fastapi>=0.139.0
+uvicorn>=0.51.0
+fonttools>=4.63.0
+markdown>=3.10.2
+python-docx>=1.2.0
+openpyxl>=3.1.5
+qrcode[pil]>=8.2
+python-barcode>=0.16.1
+pyzbar>=0.1.9
+pynvml>=11.5.0
+packaging>=26.0
+python-multipart>=0.0.32
+opencv-python>=4.11
+mineru==4.0.2

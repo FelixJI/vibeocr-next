@@ -1,9 +1,24 @@
 export type AnnotationTool =
-  "rectangle" | "ellipse" | "arrow" | "text" | "mosaic" | "blur";
+  | "rectangle"
+  | "ellipse"
+  | "arrow"
+  | "text"
+  | "mosaic"
+  | "blur"
+  | "pen"
+  | "highlighter"
+  | "numbering";
 
 export interface Point {
   readonly x: number;
   readonly y: number;
+}
+
+/** 逐标记样式；缺省回退到编辑器默认，历史条目保留当时样式。 */
+export interface AnnotationStyle {
+  readonly color?: string;
+  readonly strokeWidth?: number;
+  readonly fontSize?: number;
 }
 
 export interface Mark {
@@ -11,6 +26,11 @@ export interface Mark {
   readonly start: Point;
   readonly end: Point;
   readonly text?: string;
+  readonly style?: AnnotationStyle;
+  /** 画笔/荧光笔的采样点（含 start/end）；其他工具为空。 */
+  readonly points?: readonly Point[];
+  /** 序号标记的自动编号（绘制时重建）。 */
+  readonly ordinal?: number;
 }
 
 export interface EditorState {

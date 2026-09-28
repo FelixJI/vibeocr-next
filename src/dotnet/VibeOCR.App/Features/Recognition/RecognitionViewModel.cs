@@ -107,11 +107,55 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     public Task RecognizeDroppedFileAsync(string path, CancellationToken cancellationToken) =>
         RecognizeViaSupervisorAsync(ct => _inputs.ReadDroppedFileAsync(path, ct), cancellationToken);
 
+    /// <summary>
+    /// 纯截图会话：只采集输入并建立本地编辑基准，不提交任何 OCR 任务。
+    /// Supervisor 未连接时同样可用。
+    /// </summary>
+    public Task CaptureScreenshotSessionAsync(CancellationToken cancellationToken) =>
+        RunInputAsync(_inputs.CaptureScreenAsync, cancellationToken,
+            recognize: false, persistCurrentInput: true);
+
+    /// <summary>
+    /// 显式识别截图会话当前导出的最终 PNG；不回退未编辑原图，
+    /// 也不替换编辑器的基准输入（CurrentInput 保持会话基准图）。
+    /// </summary>
+    public Task RecognizeCapturedInputAsync(
+        RecognitionInput input,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        return RunInputAsync(
+            _ => Task.FromResult<RecognitionInput?>(input),
+            cancellationToken,
+            recognize: true,
+            persistCurrentInput: false);
+    }
+
+    /// <summary>清除旧识别结果及其关联（编辑修订/新会话/维护事件后调用）。</summary>
+    public void InvalidateResult()
+    {
+        _result = null;
+        ResultText = string.Empty;
+        if (CurrentInput is not null)
+        {
+            Status = "内容已更新，旧识别结果已失效";
+        }
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Result)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasResult)));
+    }
+
     public void Cancel() => _activeRun?.Cancel();
 
-    public async Task RecognizeViaSupervisorAsync(
+    public Task RecognizeViaSupervisorAsync(
         Func<CancellationToken, Task<RecognitionInput?>> loadInput,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) =>
+        RunInputAsync(loadInput, cancellationToken, recognize: true, persistCurrentInput: true);
+
+    private async Task RunInputAsync(
+        Func<CancellationToken, Task<RecognitionInput?>> loadInput,
+        CancellationToken cancellationToken,
+        bool recognize,
+        bool persistCurrentInput)
     {
         ArgumentNullException.ThrowIfNull(loadInput);
         long generation = Interlocked.Increment(ref _generation);
@@ -143,12 +187,25 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
 
             if (generation == Volatile.Read(ref _generation))
             {
-                CurrentInput = input;
+                if (persistCurrentInput)
+                {
+                    CurrentInput = input;
+                }
                 _result = null;
                 ResultText = string.Empty;
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Result)));
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasResult)));
-                Status = "正在识别";
+                Status = recognize ? "正在识别" : "截图已捕获，可编辑标注";
+            }
+
+            if (!recognize)
+            {
+                // 纯截图：到此为止，不产生任何推理/安装请求。
+                if (generation == Volatile.Read(ref _generation))
+                {
+                    TerminalState = null;
+                }
+                return;
             }
 
             const string clientItemKey = "recognition-input";

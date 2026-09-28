@@ -26,8 +26,12 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
   private readonly SupervisorAttachGate _gate = new(NotAttachedMessage, shutdownToken);
   private readonly object _lock = new();
   private IInferenceClient? _inner;
+  private int _submitAttempts;
+  private string? _lastSubmittedJobId;
 
   public bool IsAttached => _gate.IsAttached;
+  internal int SubmitAttempts => Volatile.Read(ref _submitAttempts);
+  internal string? LastSubmittedJobId => Volatile.Read(ref _lastSubmittedJobId);
 
   public Uri BaseUrl => Current.BaseUrl;
 
@@ -70,7 +74,10 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     CancellationToken cancellationToken)
   {
     await _gate.WaitAsync(cancellationToken);
-    return await Current.SubmitAsync(request, uploads, cancellationToken);
+    Interlocked.Increment(ref _submitAttempts);
+    JobRef job = await Current.SubmitAsync(request, uploads, cancellationToken);
+    Volatile.Write(ref _lastSubmittedJobId, job.JobId);
+    return job;
   }
 
   public async Task<JobUpdate> ObserveAsync(

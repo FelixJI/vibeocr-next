@@ -13,6 +13,7 @@ import {
 import {
   ArrowDown,
   ArrowUp,
+  Aperture,
   Camera,
   ClipboardPaste,
   Copy,
@@ -178,6 +179,25 @@ interface RecognitionEngineState {
   readonly supportsTtl?: boolean;
   readonly supportsPinning?: boolean;
   readonly supportsRelease?: boolean;
+}
+
+interface ScreenshotSessionState {
+  readonly sessionId: string;
+  readonly revision: number;
+}
+
+// 宿主回显的活动纯截图会话：会话 id + 当前内容修订。
+function screenshotSession(value: unknown): ScreenshotSessionState | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return undefined;
+  const candidate = value as Partial<ScreenshotSessionState>;
+  return typeof candidate.sessionId === "string" &&
+    candidate.sessionId.length > 0 &&
+    typeof candidate.revision === "number" &&
+    Number.isSafeInteger(candidate.revision) &&
+    candidate.revision >= 0
+    ? { sessionId: candidate.sessionId, revision: candidate.revision }
+    : undefined;
 }
 
 function feature(
@@ -551,6 +571,8 @@ function statusLabel(value: unknown, fallback: string): string {
     "recognition.running": "正在识别",
     "recognition.completed": "识别完成",
     "recognition.ready": "等待输入",
+    "recognition.session": "已捕获截图；可编辑标注、复制保存或显式识别当前图",
+    "recognition.expired": "内容已修改，旧识别结果已失效；请重新识别当前图",
     "recognition.failed": "识别失败，请检查运行时状态后重试",
     "recognition.cancelled": "识别已取消，可重新选择输入",
     "pdf.open": "PDF 会话已建立",
@@ -633,6 +655,10 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
   const input = resource(state.input);
   const result = resource(state.result);
   const resultText = useResourceText(result);
+  const session = screenshotSession(state.screenshotSession);
+  const sessionCapable = viewState.capabilities.includes(
+    "recognition.screenshotSession",
+  );
   return (
     <Workspace
       eyebrow="WORKBENCH / 01"
@@ -670,6 +696,18 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
           >
             截图识别
           </CapabilityGate>
+          {sessionCapable && (
+            <CapabilityGate
+              appearance="secondary"
+              capability="recognition.screenshotSession"
+              capabilities={viewState.capabilities}
+              action={{ type: "recognition.captureScreenshotSession" }}
+              actions={actions}
+              icon={<Aperture aria-hidden="true" size={16} />}
+            >
+              纯截图
+            </CapabilityGate>
+          )}
           <CapabilityGate
             capability="recognition.capture"
             capabilities={viewState.capabilities}
@@ -701,10 +739,13 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
         <Panel label="INPUT / 01" title="输入图像">
           {input ? (
             <ImageCanvasEditor
+              key={session ? `session-${session.sessionId}` : undefined}
               actions={actions}
               canExport={viewState.capabilities.includes(
                 "recognition.annotation",
               )}
+              canRecognize={sessionCapable}
+              session={session}
               source={input.url}
             />
           ) : (
