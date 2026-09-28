@@ -310,13 +310,17 @@ async def test_submit_rejects_when_attachment_count_is_wrong(
     assert resp.status_code == 400
 
 
+@pytest.mark.parametrize("lock_timeout", [False, True])
 async def test_submit_returns_draining_when_module_rejects(
-    pdf_app, supervisor_token: str, pdf_module: SupervisorModule
+    pdf_app, supervisor_token: str, pdf_module: SupervisorModule, lock_timeout: bool
 ) -> None:
-    """When the module raises ShutdownRequested, the route returns DRAINING."""
+    """Draining or a stale managed environment returns a retryable wire error."""
+    from vibeocr.runtime.environments.runtime_lock import RuntimeLockTimeout
     from vibeocr.runtime.jobs.module import ShutdownRequested
 
     def raise_draining(*a, **k):  # type: ignore[no-untyped-def]
+        if lock_timeout:
+            raise RuntimeLockTimeout("supervisor environment is no longer active")
         raise ShutdownRequested("draining")
 
     pdf_module.submit_request = raise_draining  # type: ignore[assignment]

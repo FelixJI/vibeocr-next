@@ -113,6 +113,15 @@ public sealed record OpenProjectPageCommand : WorkbenchCommand;
 
 public sealed record RefreshRuntimeCommand : WorkbenchCommand;
 
+public sealed record CreateEnvironmentCommand(string Name) : WorkbenchCommand;
+public sealed record PreviewEnvironmentInstallCommand(string EnvironmentId, string Recipe, string SourceId) : WorkbenchCommand;
+public sealed record ConfirmEnvironmentInstallCommand(string PlanId, string SourceId) : WorkbenchCommand;
+public sealed record CancelEnvironmentInstallCommand : WorkbenchCommand;
+public sealed record InvalidateEnvironmentPlanCommand : WorkbenchCommand;
+public sealed record SwitchEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
+public sealed record DeleteEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
+public sealed record RepairEmptyEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
+
 public sealed record SetThemeCommand(WorkbenchTheme Theme) : WorkbenchCommand;
 
 public sealed record SetStartupCommand(bool Enabled) : WorkbenchCommand;
@@ -300,10 +309,46 @@ public sealed record SettingsWorkbenchState(
   double? ProgressPercent = null,
   bool CanPreviewInstall = false,
   VibeOCR.Runtime.Contracts.Generated.Host.RuntimeInstallPlan? InstallPlan = null,
-  SettingsMineruConnectionState? MineruConnection = null) : WorkbenchState
+  SettingsMineruConnectionState? MineruConnection = null,
+  IReadOnlyList<SettingsEnvironmentState>? Environments = null,
+  string? ActiveEnvironmentId = null,
+  SettingsEnvironmentPlanState? EnvironmentPlan = null,
+  string EnvironmentStatus = "",
+  bool EnvironmentBusy = false,
+  IReadOnlyList<string>? EnvironmentPackageSourceIds = null,
+  bool EnvironmentCanCancelInstall = false) : WorkbenchState
 {
   public override string Scope => "settings";
 }
+
+public sealed record SettingsEnvironmentState(
+  string Id,
+  string Name,
+  int Revision,
+  string Kind,
+  string Status,
+  string PythonState,
+  string DependencyState,
+  string EngineState,
+  string ModelState,
+  string ServiceState,
+  IReadOnlyList<string> ConfiguredRecognitionTypes,
+  string? TargetDevice,
+  string? ActualDevice,
+  string? Reason,
+  string? PythonVersion,
+  string? Abi,
+  string? Python,
+  string? Path,
+  long DiskBytes);
+
+public sealed record SettingsEnvironmentPlanState(
+  string PlanId,
+  string EnvironmentId,
+  string Recipe,
+  IReadOnlyList<string> SourceIds,
+  IReadOnlyList<string> Dependencies,
+  string RequestedRecipe);
 
 /// <summary>
 /// MinerU 连接投影；API Key 只以是否已配置出现，明文不进入桥接状态。

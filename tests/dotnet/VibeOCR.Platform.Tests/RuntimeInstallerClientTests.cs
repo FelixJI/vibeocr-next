@@ -12,6 +12,42 @@ namespace VibeOCR.Platform.Tests;
 public sealed class RuntimeInstallerClientTests
 {
     [Fact]
+    public async Task NamedEnvironmentSwitchUsesFrozenManagerBindingAndCasToken()
+    {
+        const string prepared = """{"environment_id":"abc","environment_revision":2,"active_id":"old","active_revision":4,"python":"C:\\venv\\python.exe","requires_supervisor":true,"launch":null}""";
+        var runner = new QueueRunner(
+            new RuntimeInstallerProcessResult(0,
+                """{"protocol_version":2,"response_kind":"environment","action":"prepare_switch","result":""" + prepared + "}", ""),
+            new RuntimeInstallerProcessResult(0,
+                """{"protocol_version":2,"response_kind":"environment","action":"commit_switch","result":{"active_id":"abc","active_revision":5}}""", ""));
+        var client = new RuntimeInstallerClient(Configuration(), runner);
+
+        PreparedEnvironmentSwitch token = await client.PrepareEnvironmentSwitchAsync("abc", TestContext.Current.CancellationToken);
+        CommittedEnvironmentSwitch committed = await client.CommitEnvironmentSwitchAsync(
+            token, new StartedEnvironmentHealth(5432, "sup-test"), TestContext.Current.CancellationToken);
+
+        Assert.Equal("abc", committed.ActiveId);
+        JsonElement request = Request(runner.StartInfos[1]);
+        Assert.Equal("environment", request.GetProperty("request_kind").GetString());
+        Assert.Equal("commit_switch", request.GetProperty("action").GetString());
+        Assert.Equal(4, request.GetProperty("prepared").GetProperty("active_revision").GetInt32());
+        Assert.Equal(2, request.GetProperty("prepared").GetProperty("environment_revision").GetInt32());
+        Assert.Equal(5432, request.GetProperty("started_health").GetProperty("port").GetInt32());
+        Assert.False(request.TryGetProperty("started_python", out _));
+        Assert.False(request.TryGetProperty("accelerator", out _));
+    }
+
+    [Fact]
+    public async Task NamedEnvironmentClientRejectsWrongManagerAction()
+    {
+        var client = new RuntimeInstallerClient(Configuration(), new StubRunner(
+            new RuntimeInstallerProcessResult(0,
+                """{"protocol_version":2,"response_kind":"environment","action":"delete","result":{"active_id":null,"active_revision":0,"environments":[]}}""", "")));
+        await Assert.ThrowsAsync<RuntimeInstallerException>(() =>
+            client.ListEnvironmentsAsync(TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
     public void PublishedSdkReadsMeasuredDownloadProgressBeyondTwoGiB()
     {
         const string json = """{"unit":"bytes","current":3221225472,"total":4294967296}""";

@@ -61,9 +61,11 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         ProductMaintenanceCoordinator? productMaintenance = null,
         Func<CancellationToken, Task>? stopService = null,
         Func<Task>? restoreService = null,
-        string? operationStorePath = null)
+        string? operationStorePath = null,
+        ManagedEnvironmentSettings? environments = null)
     {
         _inference = inference ?? throw new ArgumentNullException(nameof(inference));
+        Environments = environments;
         RuntimeStatus = runtimeStatus ?? new RuntimeStatusViewModel();
         Maintenance = installerFactory is null
             ? new RuntimeMaintenanceCoordinator(
@@ -82,6 +84,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public ObservableCollection<ResidencyEntry> ResidencyEntries { get; } = [];
     public ObservableCollection<PipelineSpec> ResidencyPipelines { get; } = [];
     public RuntimeStatusViewModel RuntimeStatus { get; }
+    public ManagedEnvironmentSettings? Environments { get; }
     public int DefaultTtlSeconds { get; private set; } = 300;
     public int? VramTotalMb { get; private set; }
     public int? VramUsedMb { get; private set; }
@@ -125,6 +128,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     public async Task LoadSnapshotAsync(CancellationToken cancellationToken)
     {
+        if (Environments is not null)
+            await Environments.RefreshAsync(cancellationToken);
         await Maintenance.RestoreAsync(cancellationToken);
         long generation = Interlocked.Increment(ref _generation);
         if (generation == Volatile.Read(ref _generation)) { IsBusy = true; Status = "正在读取模型驻留状态"; }

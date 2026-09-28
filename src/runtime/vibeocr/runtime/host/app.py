@@ -490,6 +490,8 @@ def create_app(
             )
         except ShutdownRequested:
             return _error_response(ErrorCode.SUPERVISOR_DRAINING, instance_id)
+        except RuntimeLockTimeout:
+            return _error_response(ErrorCode.SUPERVISOR_DRAINING, instance_id)
         return ref.to_payload()
 
     @app.get("/v2/jobs/{job_id}/observe", response_model=wire.JobUpdate)
@@ -550,6 +552,8 @@ def create_app(
             )
         except ShutdownRequested:
             return _error_response(ErrorCode.JOB_NOT_CANCELLABLE, instance_id)
+        except RuntimeLockTimeout:
+            return _error_response(ErrorCode.SUPERVISOR_DRAINING, instance_id)
         except (ValueError, TypeError) as exc:
             return _error_response(
                 ErrorCode.VALIDATION_ERROR,

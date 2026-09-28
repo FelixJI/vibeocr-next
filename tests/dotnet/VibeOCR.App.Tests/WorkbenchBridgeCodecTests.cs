@@ -9,6 +9,38 @@ namespace VibeOCR.App.Tests;
 public sealed class WorkbenchBridgeCodecTests
 {
   [Fact]
+  public void EnvironmentPreviewBindsSelectedPackageSource()
+  {
+    Guid sessionId = Guid.NewGuid();
+    string environmentId = Guid.NewGuid().ToString("N");
+    string json = $$"""
+      {
+        "version": 2,
+        "kind": "request",
+        "id": "{{Guid.NewGuid()}}",
+        "type": "app.command",
+        "payload": {
+          "sessionId": "{{sessionId}}",
+          "command": {
+            "scope": "settings",
+            "action": "previewEnvironmentInstall",
+            "arguments": {
+              "environmentId": "{{environmentId}}",
+              "recipe": "rapidocr-cpu",
+              "sourceId": "pypi"
+            }
+          }
+        }
+      }
+      """;
+    var preview = Assert.IsType<PreviewEnvironmentInstallCommand>(
+      WorkbenchBridgeCodec.ParseCommand(json, sessionId).Command);
+    Assert.Equal("pypi", preview.SourceId);
+    Assert.Throws<WorkbenchBridgeProtocolException>(() =>
+      WorkbenchBridgeCodec.ParseCommand(json.Replace("\"pypi\"", "\"untrusted\""), sessionId));
+  }
+
+  [Fact]
   public void SettingsStateSeparatesConfiguredHotkeyFromFailedRegistration()
   {
     var state = new SettingsWorkbenchState(WorkbenchTheme.Light, false, "settings.ready", "cpu", false, "",

@@ -9,10 +9,16 @@ import sys
 import tarfile
 import zipfile
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 import pytest
 from vibeocr.runtime.environments import runtime_maintenance
+from vibeocr.runtime.environments.managed_environments import (
+    ManagedEnvironmentError,
+    ManagedEnvironmentStore,
+)
+from vibeocr.runtime.environments.managed_references import ManagedEnvironmentReferences
 from vibeocr.runtime.environments.runtime_control import RuntimeControl
 from vibeocr.runtime.environments.runtime_installer import (
     RuntimeInstaller,
@@ -44,6 +50,11 @@ from vibeocr.runtime.environments.runtime_manifest import (
     validate_requirements_lock,
 )
 from vibeocr.runtime.environments.runtime_selection import BoundDownloadSource
+
+from scripts.build_runtime_manifest import (
+    _extract_product_runtime_code,
+    build_runtime_manifest,
+)
 
 
 def _sha(data: bytes) -> str:
@@ -81,7 +92,22 @@ def _release(
 ) -> tuple[Path, Path]:
     root.mkdir()
     wheel = root / "vibeocr_next_runtime-0.7.0-py3-none-any.whl"
-    wheel.write_bytes(b"runtime-wheel")
+    with zipfile.ZipFile(wheel, mode="w") as archive:
+        for module in (
+            "vibeocr/runtime/__init__.py",
+            "vibeocr/runtime/host/main.py",
+            "vibeocr/runtime/environments/env_config.py",
+            "vibeocr/runtime/recognition/paddle_worker.py",
+            "vibeocr/runtime/documents/pdf_backend_process.py",
+            "vibeocr/runtime_contracts/__init__.py",
+        ):
+            archive.writestr(module, "")
+        archive.writestr("vibeocr/runtime/environments/dependency_profiles.json", "{}")
+        archive.writestr(
+            "vibeocr_next_runtime-0.7.0.dist-info/METADATA",
+            "Name: vibeocr-next-runtime\nVersion: 0.7.0\n",
+        )
+    _extract_product_runtime_code(wheel, root, "0.7.0")
     python_archive = root / "cpython-3.13.15-win_amd64-install_only.tar.gz"
     python_archive.write_bytes(b"python-archive")
     installer_archive = root / "vibeocr-runtime-installer-v0.7.0-win-x64.zip"
@@ -220,6 +246,672 @@ def _pypi_source() -> tuple[BoundDownloadSource, ...]:
             endpoint="https://pypi.org/simple",
         ),
     )
+
+
+def test_legacy_probe_reuses_frontend_update_but_rejects_runtime_or_abi_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+    product = tmp_path / "product"
+    runtime = product / "runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "python.exe").write_bytes(b"synthetic interpreter")
+    marker_path = runtime / ".installed.json"
+    original_manifest = load_runtime_manifest(manifest)
+    marker = {
+        "schema_version": 1,
+        "backend_version": original_manifest.backend_version,
+        "manifest_sha256": original_manifest.sha256,
+        "accelerator": "cpu",
+        "component_ids": ["rapidocr-base", "runtime_host"],
+    }
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    actual_version = [3, 13, 15]
+
+    def probe(_args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            _args,
+            0,
+            stdout=json.dumps(
+                {
+                    "prefix": str(runtime),
+                    "base_prefix": str(runtime),
+                    "version": actual_version,
+                    "packages": ["fastapi"],
+                    "runtime_version": "0.7.0",
+                }
+            ),
+        )
+
+    monkeypatch.setattr(
+        "vibeocr.runtime.environments.managed_environments.subprocess.run", probe
+    )
+    current = ManagedEnvironmentStore(
+        product_root=product, component_lock=component, runtime_manifest=manifest
+    )
+    assert current.list()["environments"][0]["python_state"] == "ready"
+
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    document["product"]["source_sha"] = "a" * 40
+    document["product"]["version"] = "0.8.0"
+    document["runtime_wheel"] = "vibeocr_next_runtime-0.8.0-py3-none-any.whl"
+    (manifest.parent / document["runtime_wheel"]).write_bytes(b"runtime-wheel")
+    manifest.write_text(json.dumps(document, sort_keys=True) + "\n", encoding="utf-8")
+    binding = json.loads(component.read_text(encoding="utf-8"))
+    binding["product"]["source_sha"] = "a" * 40
+    binding["product"]["version"] = "0.8.0"
+    binding["product"]["runtime_manifest_sha256"] = _sha(manifest.read_bytes())
+    component.write_text(json.dumps(binding, sort_keys=True) + "\n", encoding="utf-8")
+    updated = ManagedEnvironmentStore(
+        product_root=product, component_lock=component, runtime_manifest=manifest
+    )
+    assert updated.list()["environments"][0]["python_state"] == "ready"
+
+    marker["backend_version"] = "0.8.0"
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    incompatible = updated.list()["environments"][0]
+    assert incompatible["reason"] == "legacy_runtime_marker_invalid"
+    assert incompatible["python_state"] == "unavailable"
+    assert incompatible["python_version"] == "3.13.15"
+
+    marker["backend_version"] = original_manifest.backend_version
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    actual_version[:] = [3, 12, 9]
+    changed_abi = updated.list()["environments"][0]
+    assert changed_abi["reason"] == "base_or_abi_changed"
+    assert changed_abi["python_version"] == "3.12.9"
+    assert changed_abi["abi"] == "cp312"
+
+    def timeout(
+        _args: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(_args, 20)
+
+    monkeypatch.setattr(
+        "vibeocr.runtime.environments.managed_environments.subprocess.run", timeout
+    )
+    stalled = updated.list()["environments"][0]
+    assert stalled["reason"] == "python_probe_failed"
+    assert stalled["python_state"] == "unavailable"
+
+
+def test_managed_status_uses_installed_scope_without_legacy_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    created = manager.create("RapidOCR")
+    registry = json.loads(manager._registry.read_text(encoding="utf-8"))
+    record = registry["environments"][created["id"]]
+    record.update(status="installed", recipe="rapidocr-cpu")
+    manager._registry.write_text(json.dumps(registry), encoding="utf-8")
+    root = manager._safe_path(record)
+    assert not (root / ".installed.json").exists()
+    for key, value in manager._launch(record, created["python"])["environment"].items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(
+        runtime_maintenance,
+        "_distribution_versions",
+        lambda _root: {"vibeocr-next-runtime": "0.7.0"},
+    )
+    monkeypatch.setattr(
+        runtime_maintenance,
+        "probe_runtime_components",
+        lambda _root, component_ids, **_kwargs: dict.fromkeys(component_ids, True),
+    )
+    runtime_maintenance._component_probe_cache.clear()
+    status = runtime_status_from_environment("named", "ready")
+    assert status["service_state"] == "ready", status
+    assert status["profile"]["profile_id"] == "win-x64-base"
+
+
+def test_legacy_cuda_launch_preserves_marker_accelerator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+    runtime = tmp_path / "product" / "runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "python.exe").write_bytes(b"synthetic interpreter")
+    marker = {
+        "schema_version": 1,
+        "backend_version": "0.7.0",
+        "manifest_sha256": load_runtime_manifest(manifest).sha256,
+        "accelerator": "nvidia_cuda",
+        "component_ids": ["rapidocr-base", "runtime_host", "mineru-cuda"],
+    }
+    (runtime / ".installed.json").write_text(json.dumps(marker), encoding="utf-8")
+    monkeypatch.setattr(
+        "vibeocr.runtime.environments.managed_environments.subprocess.run",
+        lambda args, **_kwargs: subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=json.dumps(
+                {
+                    "prefix": str(runtime),
+                    "base_prefix": str(runtime),
+                    "version": [3, 13, 15],
+                    "packages": ["fastapi"],
+                    "runtime_version": "0.7.0",
+                }
+            ),
+        ),
+    )
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+    )
+    launch = manager.prepare_switch("legacy")["launch"]
+    assert launch["environment"]["VIBEOCR_RUNTIME_ACCELERATOR"] == "nvidia_cuda"
+    assert launch["environment"]["VIBEOCR_USE_GPU"] == "true"
+
+
+def test_legacy_status_reuses_current_product_code_after_frontend_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path, _ = _release(tmp_path / "release")
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    document["product"]["version"] = "0.8.0"
+    document["product"]["source_sha"] = "a" * 40
+    document["runtime_wheel"] = "vibeocr_next_runtime-0.8.0-py3-none-any.whl"
+    (manifest_path.parent / document["runtime_wheel"]).write_bytes(b"current wheel")
+    manifest_path.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
+    manifest = load_runtime_manifest(manifest_path, verify_artifacts=False)
+    root = tmp_path / "old-runtime"
+    root.mkdir()
+    (root / "python.exe").write_bytes(b"synthetic interpreter")
+    (root / ".installed.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "backend_version": "0.7.0",
+                "manifest_sha256": "1" * 64,
+                "accelerator": "cpu",
+                "component_ids": ["rapidocr-base", "runtime_host"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    old_metadata = root / "Lib/site-packages/vibeocr_next_runtime-0.7.0.dist-info"
+    old_metadata.mkdir(parents=True)
+    (old_metadata / "METADATA").write_text(
+        "Name: vibeocr-next-runtime\nVersion: 0.7.0\n", encoding="utf-8"
+    )
+    code_root = tmp_path / "current-product-code"
+    current_metadata = code_root / "vibeocr_next_runtime-0.8.0.dist-info"
+    current_metadata.mkdir(parents=True)
+    (current_metadata / "METADATA").write_text(
+        "Name: vibeocr-next-runtime\nVersion: 0.8.0\n", encoding="utf-8"
+    )
+    module_file = code_root / "vibeocr/runtime/environments/runtime_maintenance.py"
+    module_file.parent.mkdir(parents=True)
+    module_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(runtime_maintenance, "__file__", str(module_file))
+    monkeypatch.setenv("VIBEOCR_PRODUCT_CODE_ROOT", str(code_root))
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_ID", "legacy")
+    monkeypatch.setattr(runtime_maintenance.sys, "prefix", str(root))
+    monkeypatch.setattr(runtime_maintenance.sys, "version_info", (3, 13, 15))
+    current = runtime_profile_status(
+        manifest,
+        accelerator="cpu",
+        runtime_root=root,
+        probe_results={"rapidocr-base": True, "runtime_host": True},
+    )
+    assert all(
+        component["actual_state"] == "ready" for component in current["components"]
+    )
+    monkeypatch.setenv("VIBEOCR_RUNTIME_MANIFEST", str(manifest_path))
+    monkeypatch.setenv("VIBEOCR_RUNTIME_ROOT", str(root))
+    monkeypatch.setenv("VIBEOCR_RUNTIME_ACCELERATOR", "cpu")
+    monkeypatch.setenv("VIBEOCR_RUNTIME_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setattr(
+        runtime_maintenance,
+        "probe_runtime_components",
+        lambda _root, component_ids, **_kwargs: dict.fromkeys(component_ids, True),
+    )
+    runtime_maintenance._component_probe_cache.clear()
+    assert (
+        runtime_status_from_environment("legacy", "ready")["service_state"] == "ready"
+    )
+    (old_metadata / "METADATA").write_text(
+        "Name: vibeocr-next-runtime\nVersion: 0.6.0\n", encoding="utf-8"
+    )
+    drifted = runtime_profile_status(
+        manifest,
+        accelerator="cpu",
+        runtime_root=root,
+        probe_results={"rapidocr-base": True, "runtime_host": True},
+    )
+    assert any(
+        component["drift_reason"] == "identity_mismatch"
+        for component in drifted["components"]
+    )
+    runtime_maintenance._component_probe_cache.clear()
+    assert (
+        runtime_status_from_environment("legacy", "ready")["service_state"]
+        == "degraded"
+    )
+
+
+def test_product_code_bootstrap_keeps_environment_packages_and_no_bytecode(
+    tmp_path: Path,
+) -> None:
+    environment = tmp_path / "environment"
+    subprocess.run(
+        [sys._base_executable, "-m", "venv", "--without-pip", str(environment)],
+        check=True,
+    )
+    python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    site_packages = environment / (
+        "Lib/site-packages"
+        if os.name == "nt"
+        else f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
+    )
+    site_packages.mkdir(parents=True, exist_ok=True)
+    (site_packages / "engine_only.py").write_text("VALUE = 'environment'\n")
+    old_metadata = site_packages / "vibeocr_next_runtime-0.7.0.dist-info"
+    old_metadata.mkdir()
+    (old_metadata / "METADATA").write_text(
+        "Name: vibeocr-next-runtime\nVersion: 0.7.0\n", encoding="utf-8"
+    )
+    code_root = tmp_path / "product" / "runtime-code"
+    current_metadata = code_root / "vibeocr_next_runtime-0.8.0.dist-info"
+    current_metadata.mkdir(parents=True)
+    (current_metadata / "METADATA").write_text(
+        "Name: vibeocr-next-runtime\nVersion: 0.8.0\n", encoding="utf-8"
+    )
+    modules = (
+        "vibeocr.runtime.host.main",
+        "vibeocr.runtime.recognition.paddle_worker",
+        "vibeocr.runtime.documents.pdf_backend_process",
+    )
+    script = (
+        "import importlib.metadata,json,sys,engine_only;"
+        "print(json.dumps({'file':__file__,'prefix':sys.prefix,"
+        "'runtime':importlib.metadata.version('vibeocr-next-runtime'),"
+        "'engine':engine_only.VALUE}))"
+    )
+    for module in modules:
+        source = code_root.joinpath(*module.split(".")).with_suffix(".py")
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(script, encoding="utf-8")
+        command = (
+            "import os,runpy,sys;"
+            "sys.path.insert(0,os.environ['VIBEOCR_PRODUCT_CODE_ROOT']);"
+            f"runpy.run_module('{module}',run_name='__main__')"
+        )
+        result = subprocess.run(
+            [str(python), "-I", "-B", "-c", command],
+            check=True,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "VIBEOCR_PRODUCT_CODE_ROOT": str(code_root)},
+        )
+        body = json.loads(result.stdout)
+        assert Path(body["file"]) == source
+        assert Path(body["prefix"]) == environment
+        assert body["runtime"] == "0.8.0"
+        assert body["engine"] == "environment"
+    assert not list(code_root.rglob("__pycache__"))
+
+
+def test_named_environments_are_real_empty_venvs_and_switch_is_cas(
+    tmp_path: Path,
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    first = manager.create("空环境一")
+    second = manager.create("空环境二")
+    assert first["python_state"] == second["python_state"] == "ready"
+    assert first["dependency_state"] == "empty"
+    assert first["engine_state"] == "unavailable"
+    assert first["id"] != second["id"]
+    assert not set(first["packages"]).intersection(
+        {"fastapi", "rapidocr", "paddleocr", "mineru", "torch", "onnxruntime"}
+    )
+    assert Path(first["python"]).is_file()
+    assert (
+        len(
+            ManagedEnvironmentStore(
+                product_root=tmp_path / "product",
+                component_lock=component,
+                runtime_manifest=manifest,
+                base_python=sys._base_executable,
+            ).list()["environments"]
+        )
+        == 2
+    )
+    prepared = manager.prepare_switch(first["id"])
+    assert prepared["requires_supervisor"] is False
+    manager.commit_switch(prepared)
+    plan = manager.preview_install(first["id"], "rapidocr-cpu")
+    assert plan["environment_id"] == first["id"]
+    assert plan["source_ids"] == ["tuna-pypi"]
+    assert plan["dependencies"]
+    with pytest.raises(ManagedEnvironmentError, match="stale"):
+        manager.commit_switch(prepared)
+    manager.commit_switch(manager.prepare_switch(second["id"]))
+    assert manager.list()["active_id"] == second["id"]
+
+
+def test_named_environment_registry_rejects_external_python(tmp_path: Path) -> None:
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    item = manager.create("isolated")
+    registry = manager.paths.state_root / "environments.json"
+    value = json.loads(registry.read_text(encoding="utf-8"))
+    value["environments"][item["id"]]["path"] = str(Path(sys._base_executable))
+    registry.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(ManagedEnvironmentError, match="outside managed store"):
+        manager.list()
+
+
+def test_active_job_reference_blocks_switch_install_and_delete(tmp_path: Path) -> None:
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    first = manager.create("running")
+    second = manager.create("target")
+    manager.commit_switch(manager.prepare_switch(first["id"]))
+    references = ManagedEnvironmentReferences(
+        manager._registry,
+        manager._lock,
+        manager._references,
+        first["id"],
+        first["revision"],
+    )
+    prepared = manager.prepare_switch(second["id"])
+    job_id = str(uuid4())
+    references.admit(job_id)
+    try:
+        with pytest.raises(ManagedEnvironmentError, match="active jobs"):
+            manager.commit_switch(prepared)
+        assert manager.list()["active_id"] == first["id"]
+        with pytest.raises(ManagedEnvironmentError, match="active jobs"):
+            manager.prepare_switch(second["id"])
+        with pytest.raises(ManagedEnvironmentError, match="active jobs"):
+            manager.delete(second["id"])
+        plan = manager.preview_install(second["id"], "rapidocr-cpu")
+        with pytest.raises(ManagedEnvironmentError, match="active jobs"):
+            manager.install(
+                plan["plan_id"], second["id"], "rapidocr-cpu", ("tuna-pypi",)
+            )
+    finally:
+        references.release(job_id)
+    manager.commit_switch(prepared)
+    with pytest.raises(RuntimeLockTimeout, match="no longer active"):
+        references.admit(str(uuid4()))
+
+
+def test_installed_switch_rejects_unverified_supervisor_health(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    item = manager.create("installed")
+    registry = manager.paths.state_root / "environments.json"
+    value = json.loads(registry.read_text(encoding="utf-8"))
+    value["environments"][item["id"]].update(
+        {"status": "installed", "recipe": "rapidocr-cpu"}
+    )
+    registry.write_text(json.dumps(value), encoding="utf-8")
+    monkeypatch.setattr(
+        manager,
+        "_probe",
+        lambda record: {"healthy": True, "python": item["python"], "reason": None},
+    )
+    prepared = manager.prepare_switch(item["id"])
+    assert prepared["launch"]["python_executable"] == item["python"]
+    with pytest.raises(ManagedEnvironmentError, match="not healthy"):
+        manager.commit_switch(
+            prepared, started_health={"port": 1, "instance_id": "not-running"}
+        )
+    assert manager.list()["active_id"] is None
+
+
+def test_empty_environment_repairs_changed_python_binding(tmp_path: Path) -> None:
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    item = manager.create("portable")
+    registry = manager.paths.state_root / "environments.json"
+    value = json.loads(registry.read_text(encoding="utf-8"))
+    value["environments"][item["id"]]["python_version"] = "3.13.0"
+    registry.write_text(json.dumps(value), encoding="utf-8")
+    assert manager.list()["environments"][0]["reason"] == "base_or_abi_changed"
+    repaired = manager.repair_empty(item["id"])
+    assert repaired["revision"] == 2
+    assert repaired["python_state"] == "ready"
+    assert repaired["packages"] == []
+
+
+def test_named_environment_probe_does_not_extract_missing_base(tmp_path: Path) -> None:
+    manifest, component = _release(tmp_path / "release")
+    product = tmp_path / "product"
+    creator = ManagedEnvironmentStore(
+        product_root=product,
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    item = creator.create("portable")
+    reader = ManagedEnvironmentStore(
+        product_root=product,
+        component_lock=component,
+        runtime_manifest=manifest,
+    )
+    base = reader.root / "python-base"
+    assert not base.exists()
+    assert reader.list()["environments"][0]["reason"] == "base_or_abi_changed"
+    assert not base.exists()
+    with pytest.raises(ManagedEnvironmentError, match="base_or_abi_changed"):
+        reader.prepare_switch(item["id"])
+    assert not base.exists()
+
+
+def test_failed_named_install_preserves_empty_revision(tmp_path: Path) -> None:
+    manifest, component = _release(tmp_path / "release")
+
+    def fail_install(_python: Path, _scope, _endpoint: str) -> None:
+        raise ManagedEnvironmentError("synthetic install failure")
+
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+        install_runner=fail_install,
+    )
+    item = manager.create("target")
+    manager.commit_switch(manager.prepare_switch(item["id"]))
+    plan = manager.preview_install(item["id"], "rapidocr-cpu")
+    with pytest.raises(runtime_maintenance.RuntimeInstallPlanStale):
+        manager.install(plan["plan_id"], item["id"], "rapidocr-cpu", ("pypi",))
+    with pytest.raises(ManagedEnvironmentError, match="synthetic"):
+        manager.install(plan["plan_id"], item["id"], "rapidocr-cpu", ("tuna-pypi",))
+    with pytest.raises(ManagedEnvironmentError, match="synthetic"):
+        manager.install(plan["plan_id"], item["id"], "rapidocr-cpu", ("tuna-pypi",))
+    surviving = manager.list()["environments"][0]
+    assert surviving["revision"] == 1
+    assert surviving["status"] == "empty"
+    assert surviving["python_state"] == "ready"
+    assert manager.list()["active_id"] == item["id"]
+
+
+def test_new_environment_preview_supersedes_old_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+    installed_sources: list[str] = []
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+        install_runner=lambda _python, _scope, endpoint: installed_sources.append(
+            endpoint
+        ),
+    )
+    current = manager.create("current")
+    target = manager.create("target")
+    manager.commit_switch(manager.prepare_switch(current["id"]))
+    old = manager.preview_install(target["id"], "rapidocr-cpu", ("tuna-pypi",))
+    fresh = manager.preview_install(target["id"], "rapidocr-cpu", ("pypi",))
+
+    with pytest.raises(
+        runtime_maintenance.RuntimeInstallPlanStale, match="preview again"
+    ):
+        manager.install(old["plan_id"], target["id"], "rapidocr-cpu", ("tuna-pypi",))
+    assert manager.list()["active_id"] == current["id"]
+    assert manager.list()["environments"][1]["status"] == "empty"
+
+    monkeypatch.setattr(
+        manager,
+        "_probe",
+        lambda record: {
+            "healthy": True,
+            "python": str(manager._venv_python(manager._safe_path(record))),
+            "reason": None,
+        },
+    )
+    installed = manager.install(
+        fresh["plan_id"], target["id"], "rapidocr-cpu", ("pypi",)
+    )
+    assert installed["revision"] == 2
+    assert installed["status"] == "installed"
+    assert installed_sources == ["https://pypi.org/simple"]
+    assert manager.list()["active_id"] == current["id"]
+
+
+def test_named_recipe_addition_preserves_compatible_engine(tmp_path: Path) -> None:
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    item = manager.create("engines")
+    registry = manager.paths.state_root / "environments.json"
+    value = json.loads(registry.read_text(encoding="utf-8"))
+    value["environments"][item["id"]].update(
+        {"status": "installed", "recipe": "rapidocr-cpu"}
+    )
+    registry.write_text(json.dumps(value), encoding="utf-8")
+    plan = manager.preview_install(item["id"], "mineru-cpu")
+    assert plan["requested_recipe"] == "mineru-cpu"
+    assert plan["recipe"] == "rapidocr+mineru-cpu"
+    with pytest.raises(ManagedEnvironmentError, match="compatible locked recipe"):
+        manager.preview_install(item["id"], "paddleocr-cpu")
+
+
+def test_standalone_mineru_recipe_excludes_rapidocr(tmp_path: Path) -> None:
+    manifest, component = _release(tmp_path / "release")
+    lock = manifest.parent / "mineru-standalone.lock"
+    lock.write_text(
+        "fastapi==1.0.0 \\\n    --hash=sha256:" + "1" * 64 + "\n"
+        "mineru==4.0.2 \\\n    --hash=sha256:" + "2" * 64 + "\n",
+        encoding="utf-8",
+    )
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    value["profiles"]["win-x64-cpu"]["install_scopes"].append(
+        {
+            "scope_id": "mineru-standalone",
+            "component_ids": ["runtime_host", "mineru-cpu"],
+            "lock": lock.name,
+            "sha256": _sha(lock.read_bytes()),
+            "runtime_pack": None,
+        }
+    )
+    manifest.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+    binding = json.loads(component.read_text(encoding="utf-8"))
+    binding["product"]["runtime_manifest_sha256"] = _sha(manifest.read_bytes())
+    component.write_text(json.dumps(binding), encoding="utf-8")
+    assert (
+        load_runtime_manifest(manifest).profiles["win-x64-cpu"].scopes[-1].scope_id
+        == "mineru-standalone"
+    )
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    item = manager.create("mineru")
+    assert manager.preview_install(item["id"], "mineru-cpu")["recipe"] == "mineru-cpu"
+    generated = build_runtime_manifest(
+        runtime_wheel=manifest.parent / value["runtime_wheel"],
+        base_lock=manifest.parent / value["profiles"]["win-x64-base"]["lock"],
+        cpu_lock=manifest.parent / value["profiles"]["win-x64-cpu"]["lock"],
+        cu126_lock=manifest.parent / value["profiles"]["win-x64-cu126"]["lock"],
+        cu126_gpu_lock=manifest.parent / "requirements-win-x64-cu126-gpu.lock",
+        python_archive=manifest.parent / value["python"]["archive"],
+        python_version=value["python"]["version"],
+        python_source_url=value["python"]["source_url"],
+        installer_archive=manifest.parent / value["installer"]["archive"],
+        version="0.7.0",
+        source_commit="0" * 40,
+        build_workflow="tests/runtime",
+        output_dir=tmp_path / "output",
+        capabilities=("ocr.recognition.v2",),
+        mineru_cpu_lock=lock,
+    )
+    assert (generated.parent / "runtime-code/vibeocr/runtime/host/main.py").is_file()
+    assert any(
+        scope.scope_id == "mineru-standalone"
+        for scope in load_runtime_manifest(generated).profiles["win-x64-cpu"].scopes
+    )
+
+
+def test_frozen_manager_exposes_named_environment_list(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+    request = {
+        "protocol_version": 2,
+        "request_kind": "environment",
+        "action": "list",
+        "product_root": str(tmp_path / "product"),
+        "component_lock": str(component),
+        "runtime_manifest": str(manifest),
+    }
+    assert main(["--request-json", json.dumps(request)]) == 0
+    response = json.loads(capsys.readouterr().out)
+    assert response["response_kind"] == "environment"
+    assert response["result"] == {
+        "active_id": None,
+        "active_revision": 0,
+        "package_source_ids": ["tuna-pypi", "pypi"],
+        "environments": [],
+    }
 
 
 def _tar_with(path: Path, member_name: str, content: bytes = b"python") -> None:

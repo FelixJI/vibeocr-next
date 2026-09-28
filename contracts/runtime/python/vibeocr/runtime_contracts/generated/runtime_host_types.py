@@ -61,6 +61,31 @@ class DownloadSourceDescriptor(TypedDict, total=False):
     endpoint: Required[str]
 
 
+class ManagedEnvironmentRequest(TypedDict, total=False):
+    protocol_version: Required[Literal[2]]
+    request_kind: Required[Literal['environment']]
+    product_root: Required[str]
+    component_lock: Required[str]
+    runtime_manifest: Required[str]
+    layout_manifest: NotRequired[str]
+    product_id: NotRequired[str]
+    action: Required[Literal['list', 'create', 'preview_install', 'install', 'prepare_switch', 'commit_switch', 'repair_empty', 'delete']]
+    name: NotRequired[str]
+    environment_id: NotRequired[str]
+    recipe: NotRequired[str]
+    source_ids: NotRequired[list[str]]
+    plan_id: NotRequired[str]
+    prepared: NotRequired[dict[str, Any]]
+    started_health: NotRequired[dict[str, Any]]
+
+
+class ManagedEnvironmentResponse(TypedDict, total=False):
+    protocol_version: Required[Literal[2]]
+    response_kind: Required[Literal['environment']]
+    action: Required[str]
+    result: Required[dict[str, Any]]
+
+
 class MineruConfigCatalog(TypedDict, total=False):
     default_tier: Required[MineruTierId]
     tiers: Required[list[MineruTierDescriptor]]

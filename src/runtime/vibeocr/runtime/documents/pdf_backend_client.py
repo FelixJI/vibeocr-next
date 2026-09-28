@@ -101,6 +101,8 @@ class PdfBackendClient:
 
     def _resolve_python_exe(self) -> str:
         """选择子进程 Python 解释器(对齐 MinerU 范式)。"""
+        if os.environ.get("VIBEOCR_MANAGED_ENVIRONMENT_ID"):
+            return sys.executable
         from vibeocr.runtime.environments.env_manager import (
             get_embedded_python,
             get_project_root,
@@ -176,10 +178,20 @@ class PdfBackendClient:
             port = self._find_free_port()
             self._base_url = f"http://127.0.0.1:{port}"
 
+            product_code = os.environ.get("VIBEOCR_PRODUCT_CODE_ROOT")
+            module_arguments = (
+                [
+                    "-I",
+                    "-B",
+                    "-c",
+                    "import os,runpy,sys;sys.path.insert(0,os.environ['VIBEOCR_PRODUCT_CODE_ROOT']);runpy.run_module('vibeocr.runtime.documents.pdf_backend_process',run_name='__main__')",
+                ]
+                if product_code
+                else ["-m", "vibeocr.runtime.documents.pdf_backend_process"]
+            )
             cmd = [
                 python_exe,
-                "-m",
-                "vibeocr.runtime.documents.pdf_backend_process",
+                *module_arguments,
                 "--host",
                 "127.0.0.1",
                 "--port",

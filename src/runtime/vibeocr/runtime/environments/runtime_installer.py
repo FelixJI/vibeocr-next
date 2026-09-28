@@ -2332,6 +2332,19 @@ def _request(value: object) -> dict[str, Any]:
                 "download_source_ids",
             }
         )
+    elif request_kind == "environment":
+        required = binding_fields | {"request_kind", "action"}
+        allowed = required | {
+            "layout_manifest",
+            "product_id",
+            "name",
+            "environment_id",
+            "recipe",
+            "source_ids",
+            "plan_id",
+            "prepared",
+            "started_health",
+        }
     elif request_kind == "install_plan":
         required = binding_fields | {"request_kind", "required_capabilities"}
         allowed = required | {
@@ -2372,7 +2385,7 @@ def _request(value: object) -> dict[str, Any]:
         )
     else:
         raise RuntimeInstallError("Runtime Host request_kind is invalid")
-    if request_kind == "install_plan" or "plan_id" in value:
+    if request_kind in {"install_plan", "environment"} or "plan_id" in value:
         from jsonschema import Draft202012Validator
         from jsonschema.exceptions import ValidationError
 
@@ -2383,6 +2396,7 @@ def _request(value: object) -> dict[str, Any]:
         )
         definition = {
             "install_plan": "RuntimeInstallPlanRequest",
+            "environment": "ManagedEnvironmentRequest",
             "start": "RuntimeHostRequest",
             "command": "RuntimeMaintenanceCommandRequest",
         }[request_kind]
@@ -2412,6 +2426,56 @@ def _request(value: object) -> dict[str, Any]:
         "repair",
     ):
         raise RuntimeInstallError("Runtime Host operation is invalid")
+    if request_kind == "environment":
+        action = value["action"]
+        fields = {
+            "list": set(),
+            "create": {"name"},
+            "preview_install": {"environment_id", "recipe"},
+            "install": {"plan_id", "environment_id", "recipe", "source_ids"},
+            "prepare_switch": {"environment_id"},
+            "commit_switch": {"prepared"},
+            "repair_empty": {"environment_id"},
+            "delete": {"environment_id"},
+        }
+        if (
+            not isinstance(action, str)
+            or action not in fields
+            or not fields[action].issubset(value)
+        ):
+            raise RuntimeInstallError("Runtime environment action is invalid")
+        extras = (
+            set(value)
+            - binding_fields
+            - {"request_kind", "action", "layout_manifest", "product_id"}
+        )
+        if (
+            extras
+            - fields[action]
+            - ({"source_ids"} if action == "preview_install" else set())
+            - ({"started_health"} if action == "commit_switch" else set())
+        ):
+            raise RuntimeInstallError(
+                "Runtime environment action contains unrelated fields"
+            )
+        for field in ("name", "environment_id", "recipe", "plan_id"):
+            if field in value and (
+                not isinstance(value[field], str) or not value[field]
+            ):
+                raise RuntimeInstallError(f"Runtime environment {field} is invalid")
+        if "source_ids" in value and (
+            not isinstance(value["source_ids"], list)
+            or not value["source_ids"]
+            or any(
+                not isinstance(item, str) or not item for item in value["source_ids"]
+            )
+            or len(set(value["source_ids"])) != len(value["source_ids"])
+        ):
+            raise RuntimeInstallError("Runtime environment source_ids are invalid")
+        if "prepared" in value and not isinstance(value["prepared"], dict):
+            raise RuntimeInstallError("Runtime environment prepared switch is invalid")
+        if "started_health" in value and not isinstance(value["started_health"], dict):
+            raise RuntimeInstallError("Runtime environment health evidence is invalid")
     for field in ("product_root", "component_lock", "runtime_manifest"):
         if not isinstance(value[field], str) or not value[field]:
             raise RuntimeInstallError(f"Runtime Host {field} is invalid")
@@ -2757,6 +2821,57 @@ def main(argv: list[str] | None = None) -> int:
             )
             else None
         )
+        if request_kind == "environment":
+            from vibeocr.runtime.environments.managed_environments import (
+                ManagedEnvironmentStore,
+            )
+
+            manager = ManagedEnvironmentStore(
+                product_root=request["product_root"],
+                component_lock=request["component_lock"],
+                runtime_manifest=request["runtime_manifest"],
+                layout_manifest=request.get("layout_manifest"),
+                product_id=request.get("product_id"),
+            )
+            action = request["action"]
+            if action == "list":
+                payload = manager.list()
+            elif action == "create":
+                payload = manager.create(request["name"])
+            elif action == "preview_install":
+                payload = manager.preview_install(
+                    request["environment_id"],
+                    request["recipe"],
+                    tuple(request.get("source_ids", ["tuna-pypi"])),
+                )
+            elif action == "install":
+                payload = manager.install(
+                    request["plan_id"],
+                    request["environment_id"],
+                    request["recipe"],
+                    tuple(request["source_ids"]),
+                )
+            elif action == "prepare_switch":
+                payload = manager.prepare_switch(request["environment_id"])
+            elif action == "commit_switch":
+                payload = manager.commit_switch(
+                    request["prepared"],
+                    started_health=request.get("started_health"),
+                )
+            elif action == "repair_empty":
+                payload = manager.repair_empty(request["environment_id"])
+            else:
+                manager.delete(request["environment_id"])
+                payload = {"deleted_id": request["environment_id"]}
+            _emit(
+                {
+                    "protocol_version": PROTOCOL_VERSION,
+                    "response_kind": "environment",
+                    "action": action,
+                    "result": payload,
+                }
+            )
+            return 0
         control = _runtime_control_from_request(
             request,
             event_sink=event_sink,

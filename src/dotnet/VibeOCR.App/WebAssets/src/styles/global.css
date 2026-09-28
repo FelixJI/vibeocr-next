@@ -494,6 +494,25 @@ input {
   display: grid;
   gap: 10px;
 }
+.managed-environments {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+.managed-environments .setting-row {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+.managed-environments details {
+  overflow-wrap: anywhere;
+}
+.runtime-install-plan {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--colorNeutralStroke2);
+  border-radius: 6px;
+}
 .install-plan {
   display: grid;
   gap: 8px;

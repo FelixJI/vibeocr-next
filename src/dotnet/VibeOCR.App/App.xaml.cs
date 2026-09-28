@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.UI.Windowing;
@@ -10,7 +9,6 @@ using VibeOCR.App.Features.FloatingToolbar;
 using VibeOCR.App.Features.Pdf;
 using VibeOCR.App.Features.QrCode;
 using VibeOCR.App.Features.Settings;
-using VibeOCR.App.Features.Startup;
 using VibeOCR.App.Features.Maintenance;
 using VibeOCR.App.Inference;
 using VibeOCR.App.Features.Shell;
@@ -21,7 +19,6 @@ using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Migration;
 using VibeOCR.Platform.Inference;
 using VibeOCR.Platform.Windows;
-using Host = VibeOCR.Runtime.Contracts.Generated.Host;
 
 namespace VibeOCR.App;
 
@@ -48,6 +45,9 @@ public sealed partial class App : Application
     private PortableLayout? _supervisorLayout;
     private DiagnosticsViewModel? _supervisorDiagnostics;
     private IRuntimeInstallerClient? _runtimeInstaller;
+    private IManagedEnvironmentClient? _managedEnvironments;
+    private ManagedEnvironmentSettings? _environmentSettings;
+    private ManagedEnvironmentSession? _managedSession;
     private FrontendExclusiveLock? _exclusiveLock;
     private WindowMessageService? _windowMessages;
     private TrayIconService? _trayIcon;
@@ -152,6 +152,7 @@ public sealed partial class App : Application
         }
         _runtimeInstaller = new RuntimeInstallerClient(
             RuntimeInstallerConfiguration.ForNext(layout));
+        _managedEnvironments = (IManagedEnvironmentClient)_runtimeInstaller;
         _runtimeStatus.ApplyProfile(_runtimeInstaller.ReadProfileDescriptor());
         AppLog.Initialize(Path.Combine(layout.DataRoot, "logs"));
         AppLog.Info($"OnLaunched: profile={options.Profile} shellOnly={options.ShellOnly}");
@@ -215,7 +216,14 @@ public sealed partial class App : Application
             () => _runtimeInstaller
               ?? throw new InvalidOperationException("Runtime installer is unavailable."),
             _productMaintenance, StopForMaintenanceAsync, RestoreAfterMaintenanceAsync,
-            Path.Combine(layout.DataRoot, "runtime-maintenance.json")),
+            Path.Combine(layout.DataRoot, "runtime-maintenance.json"),
+            _environmentSettings ??= new ManagedEnvironmentSettings(
+              _managedEnvironments ?? throw new InvalidOperationException("Runtime manager is unavailable."),
+              SwitchManagedEnvironmentAsync,
+              () => _managedSession is { } session
+                ? (session.EnvironmentId, session.Revision) : null,
+              _productMaintenance,
+              () => _managedSession)),
           () => _shellViewModel ??
             throw new InvalidOperationException("Desktop shell is unavailable."),
           () => _updateViewModel ??
@@ -422,69 +430,41 @@ public sealed partial class App : Application
             // calls crossing the detach gap wait for this reconnect.
             _inferenceGateway.MarkStartupPending();
             _qrCodeGateway.MarkStartupPending();
-            IRuntimeInstallerClient installer = _runtimeInstaller
-                ?? throw new InvalidOperationException("Runtime Installer is unavailable.");
-            var maintenanceProgress = new Progress<Host.RuntimeMaintenanceEvent>(
-                _runtimeStatus.ApplyMaintenance);
-            RuntimeLaunch launch = await StartupRuntimeInstaller.EnsureBaseRuntimeAsync(
-                installer,
-                maintenanceProgress,
+            IManagedEnvironmentClient manager = _managedEnvironments
+                ?? throw new InvalidOperationException("Runtime manager is unavailable.");
+            ManagedEnvironmentList environments = await manager.ListEnvironmentsAsync(
                 _applicationShutdown.Token);
-            // T4 记录 runtime ensure 完成：与 T5（Supervisor ready envelope）
-            // 的差值把启动窗口分解为 installer 阶段与 Supervisor 进程阶段。
             RecordMilestone(diagnostics, "T4", _startup.Elapsed);
-            string logPath = Path.Combine(layout.DataRoot, "supervisor.log");
-            string token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
-            bool injectSoakCrash =
-                _soakCrashRequested && !_soakCrashInjected && !isRecovery;
-            if (injectSoakCrash)
+            if (environments.ActiveId is null)
             {
-                _soakCrashInjected = true;
+                var unavailable = new InvalidOperationException(
+                    "尚未选择运行环境。可以在设置中创建空环境或安装依赖。");
+                _inferenceGateway.MarkStartupFailed(unavailable);
+                _qrCodeGateway.MarkStartupFailed(unavailable);
+                _runtimeStatus.ReportServiceUnavailable();
+                diagnostics.UpdateSupervisor(new SupervisorHealth(
+                    SupervisorHealthState.NotReady, null, null, unavailable.Message));
+                RecordMilestone(diagnostics, "T6", _startup.Elapsed);
+                return false;
             }
-            InferenceSupervisorOptions options = BuildSupervisorOptions(
-                launch,
-                logPath,
-                TimeSpan.FromSeconds(layout.Profile == "winui-dev" ? 90 : 15),
-                RuntimeCapabilityRequirements.Read(
-                    layout.ComponentLock),
-                injectSoakCrash);
-
-            // Start the supervisor process.
-            var process = new InferenceSupervisorProcess(options, token);
-            process.UnexpectedExit += OnSupervisorUnexpectedExit;
-            _supervisorProcess = process;
-            SupervisorReadyEnvelope ready = await process.StartAsync(_applicationShutdown.Token);
-
+            bool injectSoakCrash = _soakCrashRequested && !_soakCrashInjected && !isRecovery;
+            if (injectSoakCrash) _soakCrashInjected = true;
+            await ActivateManagedEnvironmentCoreAsync(
+                environments.ActiveId, layout, _applicationShutdown.Token, injectSoakCrash);
             RecordMilestone(diagnostics, "T5", _startup.Elapsed);
-
-            // Construct v2 clients and attach to the deferred gateways.
-            Uri baseUrl = ready.BaseUrl;
-            var inferenceClient = new InferenceHttpClient(baseUrl, token);
-            var qrClient = new QrCodeHttpClient(baseUrl, token);
-            _inferenceGateway.Attach(inferenceClient);
-            _qrCodeGateway.Attach(qrClient);
-            _activeInferenceClient = inferenceClient;
-            _activeQrCodeClient = qrClient;
-
-            try
+            if (_managedSession is { } session)
             {
-                _runtimeStatus.ApplySnapshot(
-                    await inferenceClient.GetRuntimeStatusAsync(_applicationShutdown.Token));
+                SupervisorReadyEnvelope ready = session.Process.Ready;
+                diagnostics.UpdateSupervisor(new SupervisorHealth(
+                    SupervisorHealthState.Ready, ready.InstanceId, ready.ProtocolVersion, null));
+                AppLog.Info($"Supervisor ready: instance={ready.InstanceId} port={ready.Port}");
             }
-            catch (Exception error) when (
-                error is HttpRequestException or InvalidDataException or
-                JsonException or InferenceClientException)
+            else
             {
-                AppLog.Warn(
-                    $"Runtime HTTP status unavailable; keeping installer status: {error.Message}");
+                diagnostics.UpdateSupervisor(new SupervisorHealth(
+                    SupervisorHealthState.NotReady, null, null,
+                    "当前为空环境，未安装服务依赖。"));
             }
-
-            diagnostics.UpdateSupervisor(new SupervisorHealth(
-                SupervisorHealthState.Ready,
-                ready.InstanceId,
-                ready.ProtocolVersion,
-                null));
-            AppLog.Info($"Supervisor ready: instance={ready.InstanceId} port={ready.Port}");
             RecordMilestone(diagnostics, "T6", _startup.Elapsed);
             bool soakCycleComplete = !_soakCrashRequested || isRecovery;
             if (soakCycleComplete)
@@ -516,6 +496,82 @@ public sealed partial class App : Application
         {
             _supervisorLifecycle.Release();
         }
+    }
+
+    private async Task SwitchManagedEnvironmentAsync(
+        string environmentId, CancellationToken cancellationToken)
+    {
+        await _supervisorLifecycle.WaitAsync(cancellationToken);
+        try
+        {
+            if (Volatile.Read(ref _runtimeMaintenanceActive) != 0)
+                throw new InvalidOperationException("运行环境维护尚未结束。");
+            PortableLayout layout = _supervisorLayout
+                ?? throw new InvalidOperationException("Runtime layout is unavailable.");
+            await ActivateManagedEnvironmentCoreAsync(environmentId, layout, cancellationToken);
+            if (_managedSession is { } session)
+            {
+                SupervisorReadyEnvelope ready = session.Process.Ready;
+                _supervisorDiagnostics?.UpdateSupervisor(new SupervisorHealth(
+                    SupervisorHealthState.Ready, ready.InstanceId, ready.ProtocolVersion, null));
+            }
+            else
+            {
+                _supervisorDiagnostics?.UpdateSupervisor(new SupervisorHealth(
+                    SupervisorHealthState.NotReady, null, null,
+                    "当前为空环境，未启动识别服务。"));
+            }
+        }
+        finally { _supervisorLifecycle.Release(); }
+    }
+
+    private async Task ActivateManagedEnvironmentCoreAsync(
+        string environmentId, PortableLayout layout, CancellationToken cancellationToken,
+        bool injectSoakCrash = false)
+    {
+        IManagedEnvironmentClient manager = _managedEnvironments
+            ?? throw new InvalidOperationException("Runtime manager is unavailable.");
+        var coordinator = new ManagedEnvironmentSwitchCoordinator(manager);
+        ManagedEnvironmentSession? session = await coordinator.SwitchAsync(
+            environmentId,
+            _managedSession,
+            PublishManagedEnvironmentSession,
+            Path.Combine(layout.DataRoot, "supervisor.log"),
+            TimeSpan.FromSeconds(layout.Profile == "winui-dev" ? 90 : 15),
+            RuntimeCapabilityRequirements.Read(layout.ComponentLock),
+            cancellationToken,
+            injectSoakCrash);
+        if (session is null)
+        {
+            _runtimeStatus.ReportServiceUnavailable();
+            return;
+        }
+        _runtimeStatus.ApplySnapshot(session.Status);
+    }
+
+    private void PublishManagedEnvironmentSession(ManagedEnvironmentSession? next)
+    {
+        if (_managedSession is { } previous)
+        {
+            previous.Process.UnexpectedExit -= OnSupervisorUnexpectedExit;
+            _inferenceGateway.Detach(previous.Client);
+            _qrCodeGateway.Detach(previous.QrClient);
+        }
+        _managedSession = next;
+        _supervisorProcess = next?.Process;
+        _activeInferenceClient = next?.Client;
+        _activeQrCodeClient = next?.QrClient;
+        if (next is null)
+        {
+            var unavailable = new InvalidOperationException(
+                "当前为空环境，未安装识别服务依赖。");
+            _inferenceGateway.MarkStartupFailed(unavailable);
+            _qrCodeGateway.MarkStartupFailed(unavailable);
+            return;
+        }
+        next.Process.UnexpectedExit += OnSupervisorUnexpectedExit;
+        _inferenceGateway.Attach(next.Client);
+        _qrCodeGateway.Attach(next.QrClient);
     }
 
     private static void WriteSoakResult(bool requested, bool recovered, string? error = null)
@@ -689,6 +745,18 @@ public sealed partial class App : Application
 
     private async Task DisconnectSupervisorResourcesAsync()
     {
+        if (_managedSession is { } managed)
+        {
+            _managedSession = null;
+            _supervisorProcess = null;
+            _activeInferenceClient = null;
+            _activeQrCodeClient = null;
+            managed.Process.UnexpectedExit -= OnSupervisorUnexpectedExit;
+            _inferenceGateway.Detach(managed.Client);
+            _qrCodeGateway.Detach(managed.QrClient);
+            await managed.DisposeAsync();
+            return;
+        }
         IInferenceClient? inferenceClient = _activeInferenceClient;
         _activeInferenceClient = null;
         if (inferenceClient is not null)
@@ -737,6 +805,8 @@ public sealed partial class App : Application
 
     private async Task ShutdownAndExitAsync(AppWindow appWindow)
     {
+        if (_environmentSettings is not null)
+            await _environmentSettings.CancelAndWaitForInstallAsync();
         await _supervisorLifecycle.WaitAsync();
         try
         {

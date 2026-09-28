@@ -39,6 +39,10 @@ public static class WorkbenchBridgeCodec
   private static readonly HashSet<string> SourceArgumentFields = ["kind", "sourceId"];
   private static readonly HashSet<string> AcceleratorArgumentFields = ["accelerator"];
   private static readonly HashSet<string> FeatureArgumentFields = ["featureId", "enabled"];
+  private static readonly HashSet<string> EnvironmentNameArgumentFields = ["name"];
+  private static readonly HashSet<string> EnvironmentIdArgumentFields = ["environmentId"];
+  private static readonly HashSet<string> EnvironmentRecipeArgumentFields = ["environmentId", "recipe", "sourceId"];
+  private static readonly HashSet<string> PlanIdArgumentFields = ["planId", "sourceId"];
   private static readonly HashSet<string> MineruModeArgumentFields = ["mode"];
   private static readonly HashSet<string> MineruRemoteUrlArgumentFields =
     ["mode", "apiUrl"];
@@ -370,6 +374,47 @@ public static class WorkbenchBridgeCodec
       case ("settings", "refreshRuntime"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new RefreshRuntimeCommand();
+      case ("settings", "createEnvironment"):
+        EnsureObjectWithFields(arguments, EnvironmentNameArgumentFields, "command arguments");
+        string? environmentName = arguments.GetProperty("name").GetString();
+        if (string.IsNullOrWhiteSpace(environmentName) || environmentName.Length > 80)
+          throw new WorkbenchBridgeProtocolException("运行环境名称无效。");
+        return new CreateEnvironmentCommand(environmentName);
+      case ("settings", "previewEnvironmentInstall"):
+        EnsureObjectWithFields(arguments, EnvironmentRecipeArgumentFields, "command arguments");
+        string recipeEnvironmentId = ParseEnvironmentId(arguments);
+        string? recipe = arguments.GetProperty("recipe").GetString();
+        if (recipe is not ("rapidocr-cpu" or "paddleocr-cpu" or "paddleocr-cuda" or
+            "mineru-cpu" or "rapidocr+mineru-cpu" or "rapidocr+mineru-cuda"))
+          throw new WorkbenchBridgeProtocolException("运行环境配方无效。");
+        string? previewSourceId = arguments.GetProperty("sourceId").GetString();
+        if (previewSourceId is not ("tuna-pypi" or "pypi"))
+          throw new WorkbenchBridgeProtocolException("依赖来源无效。");
+        return new PreviewEnvironmentInstallCommand(recipeEnvironmentId, recipe, previewSourceId);
+      case ("settings", "confirmEnvironmentInstall"):
+        EnsureObjectWithFields(arguments, PlanIdArgumentFields, "command arguments");
+        string? environmentPlanId = arguments.GetProperty("planId").GetString();
+        if (string.IsNullOrWhiteSpace(environmentPlanId) || environmentPlanId.Length > 64)
+          throw new WorkbenchBridgeProtocolException("环境安装计划无效。");
+        string? confirmedSourceId = arguments.GetProperty("sourceId").GetString();
+        if (confirmedSourceId is not ("tuna-pypi" or "pypi"))
+          throw new WorkbenchBridgeProtocolException("依赖来源无效。");
+        return new ConfirmEnvironmentInstallCommand(environmentPlanId, confirmedSourceId);
+      case ("settings", "cancelEnvironmentInstall"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new CancelEnvironmentInstallCommand();
+      case ("settings", "invalidateEnvironmentPlan"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new InvalidateEnvironmentPlanCommand();
+      case ("settings", "switchEnvironment"):
+        EnsureObjectWithFields(arguments, EnvironmentIdArgumentFields, "command arguments");
+        return new SwitchEnvironmentCommand(ParseEnvironmentId(arguments));
+      case ("settings", "deleteEnvironment"):
+        EnsureObjectWithFields(arguments, EnvironmentIdArgumentFields, "command arguments");
+        return new DeleteEnvironmentCommand(ParseEnvironmentId(arguments));
+      case ("settings", "repairEmptyEnvironment"):
+        EnsureObjectWithFields(arguments, EnvironmentIdArgumentFields, "command arguments");
+        return new RepairEmptyEnvironmentCommand(ParseEnvironmentId(arguments));
       case ("settings", "setTheme"):
         EnsureObjectWithFields(arguments, ThemeArgumentFields, "command arguments");
         return new SetThemeCommand(ParseTheme(
@@ -564,6 +609,14 @@ public static class WorkbenchBridgeCodec
     return new SetMineruConnectionCommand(mode, apiUrl, apiKey);
   }
 
+  private static string ParseEnvironmentId(JsonElement arguments)
+  {
+    string? value = arguments.GetProperty("environmentId").GetString();
+    if (value == "legacy" || (value is not null && Guid.TryParseExact(value, "N", out _)))
+      return value;
+    throw new WorkbenchBridgeProtocolException("运行环境标识无效。");
+  }
+
   private static string? ParseTaskEngine(JsonElement arguments)
   {
     bool hasEngine = !HasExactFields(arguments, EmptyFields);
@@ -688,6 +741,13 @@ public static class WorkbenchBridgeCodec
       settings.ProgressDetail,
       settings.ProgressPercent,
       settings.CanPreviewInstall,
+      environments = settings.Environments ?? [],
+      settings.ActiveEnvironmentId,
+      environmentPlan = settings.EnvironmentPlan,
+      settings.EnvironmentStatus,
+      settings.EnvironmentBusy,
+      environmentPackageSourceIds = settings.EnvironmentPackageSourceIds ?? [],
+      settings.EnvironmentCanCancelInstall,
       mineruConnection = settings.MineruConnection is null ? null : new
       {
         settings.MineruConnection.Supported,
