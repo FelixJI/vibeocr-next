@@ -190,6 +190,50 @@ public sealed class DesktopWorkbenchCommandHandlerTests
   }
 
   [Fact]
+  public async Task QrCodeGenerateWithoutAttachedSupervisorPublishesFailure()
+  {
+    string resourceRoot = Path.Combine(
+      Path.GetTempPath(), $"vibeocr-handler-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      var client = new DeferredQrCodeClient();
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => new QrCodeViewModel(client, new EmptyQrCodeInput()),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker,
+        resourceRoot,
+        static () => 0,
+        annotationStore);
+      var published = new List<WorkbenchState>();
+      handler.StateChanged += published.Add;
+
+      WorkbenchCommandOutcome started = await handler.ExecuteAsync(
+        new GenerateQrCodeCommand("hello"),
+        TestContext.Current.CancellationToken);
+
+      Assert.True(Assert.IsType<QrCodeWorkbenchState>(Assert.Single(started.States)).IsBusy);
+      QrCodeWorkbenchState failed = Assert.IsType<QrCodeWorkbenchState>(
+        Assert.Single(published));
+      Assert.False(failed.IsBusy);
+      Assert.Equal("qrcode.failed", failed.StatusCode);
+      Assert.Null(failed.GeneratedResource);
+    }
+    finally
+    {
+      Directory.Delete(resourceRoot, recursive: true);
+    }
+  }
+
+  [Fact]
   public async Task RecognitionDuringSupervisorStartupWaitsAndCompletesAfterAttach()
   {
     string resourceRoot = Path.Combine(

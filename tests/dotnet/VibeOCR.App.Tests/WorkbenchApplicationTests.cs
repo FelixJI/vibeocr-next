@@ -153,6 +153,57 @@ public sealed class WorkbenchApplicationTests
       Assert.IsType<RecognitionWorkbenchState>(updates.Current.State).StatusCode);
   }
 
+  [Fact]
+  public async Task ImmediateCompletionFollowsCommandStartState()
+  {
+    var handler = new ImmediateCompletionHandler();
+    await using var application = new WorkbenchApplication(
+      ["qrcode.generate"], WorkbenchRoute.QrCode, handler);
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+    WorkbenchBootstrap bootstrap = await application.BootstrapAsync(timeout.Token);
+    await using IAsyncEnumerator<WorkbenchStateEnvelope> updates = application
+      .SubscribeAsync(bootstrap.Revision, timeout.Token)
+      .GetAsyncEnumerator(timeout.Token);
+
+    WorkbenchCommandReceipt receipt = await application.ExecuteAsync(
+      new WorkbenchCommandEnvelope(Guid.NewGuid(), new GenerateQrCodeCommand("hello")),
+      timeout.Token);
+
+    Assert.True(receipt.Ok);
+    Assert.True(await updates.MoveNextAsync());
+    Assert.Equal("qrcode.running",
+      Assert.IsType<QrCodeWorkbenchState>(updates.Current.State).StatusCode);
+    Assert.True(await updates.MoveNextAsync());
+    Assert.Equal("qrcode.failed",
+      Assert.IsType<QrCodeWorkbenchState>(updates.Current.State).StatusCode);
+    Assert.Equal(receipt.Revision, updates.Current.Revision);
+    WorkbenchBootstrap latest = await application.BootstrapAsync(timeout.Token);
+    QrCodeWorkbenchState current = Assert.IsType<QrCodeWorkbenchState>(
+      latest.States.Single(state => state.Scope == "qrcode").State);
+    Assert.False(current.IsBusy);
+  }
+
+  [Fact]
+  public async Task HandlerExceptionReleasesImmediateStateChange()
+  {
+    var handler = new ImmediateCompletionHandler(throwAfterPublish: true);
+    await using var application = new WorkbenchApplication(
+      ["qrcode.generate"], WorkbenchRoute.QrCode, handler);
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+    WorkbenchBootstrap bootstrap = await application.BootstrapAsync(timeout.Token);
+    await using IAsyncEnumerator<WorkbenchStateEnvelope> updates = application
+      .SubscribeAsync(bootstrap.Revision, timeout.Token)
+      .GetAsyncEnumerator(timeout.Token);
+
+    await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+      await application.ExecuteAsync(
+        new WorkbenchCommandEnvelope(Guid.NewGuid(), new GenerateQrCodeCommand("hello")),
+        timeout.Token));
+    Assert.True(await updates.MoveNextAsync());
+    Assert.Equal("qrcode.failed",
+      Assert.IsType<QrCodeWorkbenchState>(updates.Current.State).StatusCode);
+  }
+
   private sealed class StubCommandHandler : IWorkbenchCommandHandler
   {
     public WorkbenchCommand? Command { get; private set; }
@@ -165,6 +216,24 @@ public sealed class WorkbenchApplicationTests
       return ValueTask.FromResult(new WorkbenchCommandOutcome(
         [new RecognitionWorkbenchState(true, "recognition.running", null)],
         null));
+    }
+  }
+
+  private sealed class ImmediateCompletionHandler(bool throwAfterPublish = false) :
+    IWorkbenchCommandHandler, IWorkbenchStateSource
+  {
+    public IReadOnlyList<WorkbenchState> InitialStates =>
+      [new QrCodeWorkbenchState(false, "qrcode.ready", [], null)];
+
+    public event Action<WorkbenchState>? StateChanged;
+
+    public ValueTask<WorkbenchCommandOutcome> ExecuteAsync(
+      WorkbenchCommand command, CancellationToken cancellationToken)
+    {
+      StateChanged?.Invoke(new QrCodeWorkbenchState(false, "qrcode.failed", [], null));
+      if (throwAfterPublish) throw new InvalidOperationException("command failed");
+      return ValueTask.FromResult(new WorkbenchCommandOutcome(
+        [new QrCodeWorkbenchState(true, "qrcode.running", [], null)], null));
     }
   }
 

@@ -923,7 +923,10 @@ public sealed class DesktopWorkbenchCommandHandler :
       if (generation == Volatile.Read(ref qrCodeGeneration))
       {
         generatedQrResource = nextGeneratedResource;
-        StateChanged?.Invoke(QrCodeState(qrCode!));
+        QrCodeWorkbenchState state = QrCodeState(qrCode!);
+        StateChanged?.Invoke(publishGeneratedImage && qrCode!.GenerateFailed
+          ? state with { StatusCode = "qrcode.failed" }
+          : state);
       }
     }
     catch (OperationCanceledException)
