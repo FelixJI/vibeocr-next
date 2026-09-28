@@ -11,15 +11,22 @@ internal sealed class ScreenSelectionSession(int width, int height)
   private PhysicalPoint _origin;
   private int _edges;
   private bool _moving;
+  private IReadOnlyList<PhysicalRectangle> _preview = [];
+  private int _previewIndex;
   public PhysicalRectangle? Selection { get; private set; }
+  public PhysicalRectangle? ActiveSelection => Selection ??
+    (_preview.Count == 0 ? null : _preview[_previewIndex]);
+  public int PreviewIndex => _previewIndex;
+  public bool ManualOnly { get; private set; }
   public bool IsDragging { get; private set; }
-  public bool CanConfirm => !IsDragging && Selection is not null;
+  public bool CanConfirm => !IsDragging && ActiveSelection is not null;
   public bool CanUndo => !IsDragging && _undo.Count > 0;
   public bool CanRedo => !IsDragging && _redo.Count > 0;
 
   public void Begin(PhysicalPoint point, int tolerance)
   {
     if (IsDragging) CancelDrag();
+    ClearPreview();
     _origin = Clamp(point);
     _beforeDrag = Selection;
     _edges = 0;
@@ -86,6 +93,7 @@ internal sealed class ScreenSelectionSession(int width, int height)
   public bool Back()
   {
     if (IsDragging) { CancelDrag(); return false; }
+    if (_preview.Count > 0) { ReturnToManual(); return false; }
     if (Selection is null) return true;
     Remember(Selection);
     Selection = null;
@@ -117,6 +125,31 @@ internal sealed class ScreenSelectionSession(int width, int height)
     _undo.Add(Selection);
     Selection = _redo[^1];
     _redo.RemoveAt(_redo.Count - 1);
+  }
+
+  public void SetPreview(IReadOnlyList<PhysicalRectangle> candidates)
+  {
+    if (ManualOnly || IsDragging || Selection is not null) return;
+    _preview = candidates.ToArray();
+    _previewIndex = Math.Min(_previewIndex, Math.Max(0, _preview.Count - 1));
+  }
+
+  public void CyclePreview()
+  {
+    if (IsDragging || Selection is not null || _preview.Count == 0) return;
+    _previewIndex = (_previewIndex + 1) % _preview.Count;
+  }
+
+  public void ClearPreview()
+  {
+    _preview = [];
+    _previewIndex = 0;
+  }
+
+  public void ReturnToManual()
+  {
+    ManualOnly = true;
+    ClearPreview();
   }
 
   private void Remember(PhysicalRectangle? previous)
