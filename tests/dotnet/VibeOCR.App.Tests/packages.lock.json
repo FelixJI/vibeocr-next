@@ -292,7 +292,8 @@
           "Microsoft.WindowsAppSDK": "[2.4.0, )",
           "Velopack": "[1.2.0, )",
           "VibeOCR.Contracts": "[1.0.0, )",
-          "VibeOCR.Platform": "[1.0.0, )"
+          "VibeOCR.Platform": "[1.0.0, )",
+          "ZXing.Net": "[0.16.11, )"
         }
       },
       "Microsoft.Web.WebView2": {
@@ -324,6 +325,12 @@
         "requested": "[1.2.0, )",
         "resolved": "1.2.0",
         "contentHash": "Rz67gJL619fSBS6omaSINUxyDuwhIxkm5mmubf7uLd5Qgi6LLKaKCha+QFP6n+Bw/UjA0vutnH4JQfYzn6ANtw=="
+      },
+      "ZXing.Net": {
+        "type": "CentralTransitive",
+        "requested": "[0.16.11, )",
+        "resolved": "0.16.11",
+        "contentHash": "OZfAVu88hl87BffQ+rlWCj/vLvAhhCK4QnFaoveeF/MY8SjHNSYBQ3qyUEWlPKNgBQGh1syXhCDg10vUnCsqkg=="
       }
     },
     "net10.0-windows10.0.17763/win-x64": {

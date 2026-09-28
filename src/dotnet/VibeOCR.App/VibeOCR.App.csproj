@@ -19,10 +19,12 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" />
     <PackageReference Include="Velopack" />
+    <PackageReference Include="ZXing.Net" />
     <ProjectReference Include="../VibeOCR.Platform/VibeOCR.Platform.csproj" />
     <ProjectReference Include="../VibeOCR.Contracts/VibeOCR.Contracts.csproj" />
   </ItemGroup>
   <ItemGroup>
+    <Content Include="ThirdPartyNotices.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="WebAssets\dist\**\*"
              Link="WebAssets\%(RecursiveDir)%(Filename)%(Extension)"
              CopyToOutputDirectory="PreserveNewest"

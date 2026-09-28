@@ -1,6 +1,6 @@
-// Deferred QR client mirroring DeferredInferenceClient: waits while a
-// Supervisor startup attempt is pending, throws until Attach otherwise.
+// Decode waits for Supervisor; generation is local and independent of startup.
 using VibeOCR.Platform.Inference;
+using VibeOCR.App.Features.QrCode;
 
 namespace VibeOCR.App.Inference;
 
@@ -12,6 +12,7 @@ public sealed class DeferredQrCodeClient(CancellationToken shutdownToken = defau
     + "Wait for Supervisor startup to complete or inspect diagnostics.";
 
   private readonly SupervisorAttachGate _gate = new(NotAttachedMessage, shutdownToken);
+  private readonly CancellationToken _shutdownToken = shutdownToken;
   private readonly object _lock = new();
   private IQrCodeClient? _inner;
 
@@ -57,8 +58,8 @@ public sealed class DeferredQrCodeClient(CancellationToken shutdownToken = defau
   public async Task<QrCodeGeneratedImage> GenerateAsync(
     string data, string format, CancellationToken ct)
   {
-    await _gate.WaitAsync(ct);
-    return await Current.GenerateAsync(data, format, ct);
+    using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _shutdownToken);
+    return await LocalQrCodeGenerator.GenerateAsync(data, format, linked.Token);
   }
 
   public ValueTask DisposeAsync()
