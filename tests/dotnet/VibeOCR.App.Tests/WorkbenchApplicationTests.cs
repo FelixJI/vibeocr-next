@@ -236,11 +236,11 @@ public sealed class WorkbenchApplicationTests
       WorkbenchCommand command, CancellationToken cancellationToken)
     {
       StateChanged?.Invoke(new SettingsWorkbenchState(
-        WorkbenchTheme.System, true, "settings.validating", "cpu", false, ""));
+        WorkbenchTheme.System, true, "settings.validating", "cpu", false));
       await _release.Task.WaitAsync(cancellationToken);
       return new WorkbenchCommandOutcome(
         [new SettingsWorkbenchState(
-          WorkbenchTheme.System, false, "settings.ready", "cpu", false, "")],
+          WorkbenchTheme.System, false, "settings.ready", "cpu", false)],
         null);
     }
 

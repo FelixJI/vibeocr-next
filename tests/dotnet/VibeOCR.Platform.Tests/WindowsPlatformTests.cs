@@ -53,6 +53,31 @@ public sealed class WindowsPlatformTests
     }
 
     [Fact]
+    public void MultipleHotkeyIdsRegisterAndReleaseIndependently()
+    {
+        var native = new FakeHotkeyNative { CanRegister = true };
+        using var service = new GlobalHotkeyService(native);
+
+        using IDisposable recognize = service.Register(
+            11, HotkeyModifiers.Control | HotkeyModifiers.Alt | HotkeyModifiers.NoRepeat, 0x51);
+        using IDisposable clipboard = service.Register(
+            12, HotkeyModifiers.Control | HotkeyModifiers.Alt | HotkeyModifiers.NoRepeat, 0x43);
+
+        Assert.True(service.IsRegistered(11));
+        Assert.True(service.IsRegistered(12));
+        Assert.False(service.IsRegistered(13));
+
+        // 释放单个注册只影响该 ID，其余动作键位继续有效。
+        recognize.Dispose();
+        Assert.False(service.IsRegistered(11));
+        Assert.True(service.IsRegistered(12));
+        Assert.Equal(11, native.ReleasedIds.Single());
+
+        clipboard.Dispose();
+        Assert.False(service.IsRegistered(12));
+    }
+
+    [Fact]
     public void TrayIconDisposeRemovesIconExactlyOnce()
     {
         var native = new FakeTrayNative();
@@ -157,9 +182,15 @@ public sealed class WindowsPlatformTests
 
     private sealed class FakeHotkeyNative : IHotkeyNativeMethods
     {
+        private readonly List<int> _releasedIds = [];
+
         public bool CanRegister { get; set; }
+
         public int RegisterCalls { get; private set; }
+
         public int UnregisterCalls { get; private set; }
+
+        public IReadOnlyList<int> ReleasedIds => _releasedIds;
 
         public bool Register(nint windowHandle, int id, HotkeyModifiers modifiers, uint virtualKey)
         {
@@ -170,6 +201,7 @@ public sealed class WindowsPlatformTests
         public bool Unregister(nint windowHandle, int id)
         {
             UnregisterCalls++;
+            _releasedIds.Add(id);
             return true;
         }
     }

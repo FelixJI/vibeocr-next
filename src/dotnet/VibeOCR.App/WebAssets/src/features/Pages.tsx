@@ -19,6 +19,8 @@ import {
   Copy,
   Download,
   ExternalLink,
+  Eye,
+  EyeOff,
   FileSpreadsheet,
   FilePlus2,
   FolderOpen,
@@ -26,6 +28,7 @@ import {
   Play,
   QrCode,
   RefreshCw,
+  RotateCcw,
   RotateCw,
   Save,
   ScanText,
@@ -278,6 +281,80 @@ function featureOptions(value: unknown): readonly FeatureOptionState[] {
       typeof option.selected === "boolean"
     );
   });
+}
+
+interface HotkeyActionOptionState {
+  readonly actionId: string;
+  readonly displayName: string;
+  readonly configuredHotkey: string | null;
+  readonly registeredHotkey: string | null;
+  readonly error: string | null;
+  readonly defaultHotkey: string | null;
+}
+
+// 宿主回显的动作键位：configured 是配置值，registered 是实际生效的
+// 系统注册（为空表示被占用/未注册），二者可能不同。
+function hotkeyActions(value: unknown): readonly HotkeyActionOptionState[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is HotkeyActionOptionState => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry))
+      return false;
+    const option = entry as Partial<HotkeyActionOptionState>;
+    return (
+      typeof option.actionId === "string" &&
+      typeof option.displayName === "string" &&
+      (option.configuredHotkey === null ||
+        typeof option.configuredHotkey === "string") &&
+      (option.registeredHotkey === null ||
+        typeof option.registeredHotkey === "string") &&
+      (option.error === null || typeof option.error === "string") &&
+      (option.defaultHotkey === null ||
+        typeof option.defaultHotkey === "string")
+    );
+  });
+}
+
+interface FloatingToolbarOptionState {
+  readonly enabled: boolean;
+  readonly edge: string;
+  readonly autoHide: boolean;
+  readonly visibility: string;
+  readonly error?: string | null;
+}
+
+function toolbarState(value: unknown): FloatingToolbarOptionState | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return undefined;
+  const option = value as Partial<FloatingToolbarOptionState>;
+  return typeof option.enabled === "boolean" &&
+    typeof option.edge === "string" &&
+    typeof option.autoHide === "boolean" &&
+    typeof option.visibility === "string" &&
+    (option.error === undefined ||
+      option.error === null ||
+      typeof option.error === "string")
+    ? (option as FloatingToolbarOptionState)
+    : undefined;
+}
+
+const TOOLBAR_EDGES = ["top", "bottom", "left", "right"] as const;
+
+const TOOLBAR_EDGE_LABELS: Readonly<Record<string, string>> = {
+  top: "顶部",
+  bottom: "底部",
+  left: "左侧",
+  right: "右侧",
+};
+
+function toolbarVisibilityLabel(visibility: string): string {
+  const labels: Readonly<Record<string, string>> = {
+    disabled: "已关闭",
+    userHidden: "已主动隐藏（鼠标路过不恢复）",
+    edgeHidden: "已靠边收起，悬停边缘可唤出",
+    visible: "显示中",
+    suspended: "截图避让中，结束后恢复原状",
+  };
+  return labels[visibility] ?? "等待宿主同步";
 }
 
 function recognitionEngines(value: unknown): readonly RecognitionEngineState[] {
@@ -1360,12 +1437,6 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
 
 export function SettingsPage({ viewState, actions }: FeatureProps) {
   const state = feature(viewState, "settings");
-  const hostHotkey =
-    typeof state.pendingHotkey === "string" && state.pendingHotkey
-      ? state.pendingHotkey
-      : typeof state.hotkey === "string"
-        ? state.hotkey
-        : "Ctrl+Alt+Q";
   const backend =
     typeof state.backend === "string" ? state.backend : "等待宿主同步";
   const backendLabel =
@@ -1414,11 +1485,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
       description="管理快捷操作、运行环境与下载来源。识别模式在对应任务中选择。"
     >
       <div className="settings-grid">
-        <Panel
-          label="APPLICATION"
-          title="应用与快捷键"
-          className="settings-app-panel"
-        >
+        <Panel label="APPLICATION" title="应用" className="settings-app-panel">
           <div className="setting-row">
             <Checkbox
               label="开机自启动"
@@ -1432,21 +1499,34 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
               }
             />
           </div>
-          <HotkeyEditor
-            key={hostHotkey}
-            initialHotkey={hostHotkey}
-            enabled={viewState.capabilities.includes("settings.shell")}
-            actions={actions}
+        </Panel>
+        <Panel
+          label="SHORTCUTS"
+          title="快捷操作"
+          className="settings-shortcuts-panel"
+        >
+          <p className="form-note">
+            全局快捷键在系统任意位置可用，必须包含 Ctrl、Alt 或 Win
+            修饰键，在输入框打字不会误触。修改会先注册新键、保存成功后才替换旧键；冲突或保存失败时原键继续生效。
+          </p>
+          <HotkeyActions
+            actions={hotkeyActions(state.hotkeyActions)}
+            enabled={viewState.capabilities.includes("settings.hotkeys")}
+            dispatch={actions}
           />
-          <p role="status">
-            {typeof state.hotkeyStatus === "string" ? state.hotkeyStatus : ""}
-          </p>
-          <p>
-            当前生效：
-            {typeof state.hotkey === "string" && state.hotkey
-              ? state.hotkey
-              : "未注册"}
-          </p>
+        </Panel>
+        <Panel
+          label="TOOLBAR"
+          title="悬浮工具栏"
+          className="settings-toolbar-panel"
+        >
+          <FloatingToolbarPanel
+            toolbar={toolbarState(state.floatingToolbar)}
+            enabled={viewState.capabilities.includes(
+              "settings.floatingToolbar",
+            )}
+            dispatch={actions}
+          />
         </Panel>
         <Panel
           label="RUNTIME"
@@ -2173,32 +2253,220 @@ function TaskEngineSelector({
   );
 }
 
-function HotkeyEditor({
-  initialHotkey,
+function HotkeyActions({
+  actions: hotkeyOptions,
   enabled,
-  actions,
+  dispatch,
 }: {
-  readonly initialHotkey: string;
+  readonly actions: readonly HotkeyActionOptionState[];
   readonly enabled: boolean;
-  readonly actions: AppActions;
+  readonly dispatch: AppActions;
 }) {
-  const [hotkey, setHotkey] = useState(initialHotkey);
+  if (hotkeyOptions.length === 0) {
+    return (
+      <p className="form-note">
+        {enabled
+          ? "动作目录等待宿主同步。"
+          : "此功能需要宿主能力：settings.hotkeys"}
+      </p>
+    );
+  }
+
   return (
-    <div className="setting-row">
-      <label htmlFor="hotkey">截图快捷键</label>
-      <Input
-        id="hotkey"
-        value={hotkey}
-        onChange={(_, data) => setHotkey(data.value)}
-      />
-      <Button
-        disabled={!enabled}
-        onClick={() => actions.run({ type: "settings.setHotkey", hotkey })}
-        icon={<Save aria-hidden="true" size={16} />}
-      >
-        应用
-      </Button>
+    <div className="hotkey-action-list">
+      {hotkeyOptions.map((option) => (
+        <HotkeyActionRow
+          key={`${option.actionId}:${option.configuredHotkey ?? ""}`}
+          option={option}
+          enabled={enabled}
+          dispatch={dispatch}
+        />
+      ))}
     </div>
+  );
+}
+
+function HotkeyActionRow({
+  option,
+  enabled,
+  dispatch,
+}: {
+  readonly option: HotkeyActionOptionState;
+  readonly enabled: boolean;
+  readonly dispatch: AppActions;
+}) {
+  const [hotkey, setHotkey] = useState(option.configuredHotkey ?? "");
+  // 配置已存但未注册生效（如键位被其他应用占用）必须如实区分。
+  const status = option.registeredHotkey
+    ? `当前生效：${option.registeredHotkey}`
+    : option.configuredHotkey
+      ? `已保存 ${option.configuredHotkey}，但当前未注册生效`
+      : "未绑定";
+  return (
+    <div className="hotkey-action-row">
+      <div className="hotkey-action-head">
+        <strong>{option.displayName}</strong>
+        <span>{status}</span>
+      </div>
+      <div className="setting-row">
+        <label htmlFor={`hotkey-${option.actionId}`}>
+          {`${option.displayName}新快捷键`}
+        </label>
+        <Input
+          id={`hotkey-${option.actionId}`}
+          value={hotkey}
+          placeholder="如 Ctrl+Alt+S"
+          disabled={!enabled}
+          onChange={(_, data) => setHotkey(data.value)}
+        />
+        <Button
+          disabled={!enabled || hotkey.trim() === ""}
+          aria-label={`应用 ${option.displayName}`}
+          onClick={() =>
+            dispatch.run({
+              type: "settings.setActionHotkey",
+              actionId: option.actionId,
+              hotkey: hotkey.trim(),
+            })
+          }
+          icon={<Save aria-hidden="true" size={16} />}
+        >
+          应用
+        </Button>
+        <Button
+          appearance="secondary"
+          disabled={!enabled || !option.configuredHotkey}
+          aria-label={`禁用 ${option.displayName}`}
+          onClick={() =>
+            dispatch.run({
+              type: "settings.setActionHotkey",
+              actionId: option.actionId,
+            })
+          }
+          icon={<X aria-hidden="true" size={16} />}
+        >
+          禁用
+        </Button>
+        {option.defaultHotkey ? (
+          <Button
+            appearance="secondary"
+            disabled={!enabled}
+            aria-label={`恢复默认 ${option.displayName}`}
+            onClick={() =>
+              dispatch.run({
+                type: "settings.resetActionHotkey",
+                actionId: option.actionId,
+              })
+            }
+            icon={<RotateCcw aria-hidden="true" size={16} />}
+          >
+            恢复默认
+          </Button>
+        ) : null}
+      </div>
+      {option.error ? (
+        <p className="form-note" role="alert">
+          {option.error}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function FloatingToolbarPanel({
+  toolbar,
+  enabled,
+  dispatch,
+}: {
+  readonly toolbar: FloatingToolbarOptionState | undefined;
+  readonly enabled: boolean;
+  readonly dispatch: AppActions;
+}) {
+  if (!toolbar) {
+    return (
+      <p className="form-note">
+        {enabled
+          ? "悬浮工具栏状态等待宿主同步。"
+          : "此功能需要宿主能力：settings.floatingToolbar"}
+      </p>
+    );
+  }
+
+  return (
+    <>
+      <div className="setting-row">
+        <Checkbox
+          label="启用悬浮工具栏"
+          checked={toolbar.enabled}
+          disabled={!enabled}
+          onChange={(_, data) =>
+            dispatch.run({
+              type: "settings.setFloatingToolbarEnabled",
+              enabled: data.checked === true,
+            })
+          }
+        />
+      </div>
+      <p className="form-note">
+        当前状态：{toolbarVisibilityLabel(toolbar.visibility)}
+        。主动隐藏不会被鼠标路过唤回，可从本页、托盘菜单或“悬浮栏显示/隐藏”快捷键找回；截图时工具栏与感应条会自动让位，结束后恢复原状。
+      </p>
+      {toolbar.error ? (
+        <p className="form-note" role="alert">
+          {toolbar.error}
+        </p>
+      ) : null}
+      <div className="setting-row">
+        <Button
+          disabled={!enabled || !toolbar.enabled}
+          onClick={() => dispatch.run({ type: "settings.showFloatingToolbar" })}
+          icon={<Eye aria-hidden="true" size={16} />}
+        >
+          显示
+        </Button>
+        <Button
+          appearance="secondary"
+          disabled={!enabled || !toolbar.enabled}
+          onClick={() => dispatch.run({ type: "settings.hideFloatingToolbar" })}
+          icon={<EyeOff aria-hidden="true" size={16} />}
+        >
+          隐藏
+        </Button>
+      </div>
+      <div className="setting-row">
+        <label htmlFor="toolbar-edge">靠边位置</label>
+        <Select
+          id="toolbar-edge"
+          value={toolbar.edge}
+          disabled={!enabled}
+          onChange={(_, data) =>
+            dispatch.run({
+              type: "settings.setFloatingToolbarLayout",
+              edge: String(data.value),
+              autoHide: toolbar.autoHide,
+            })
+          }
+        >
+          {TOOLBAR_EDGES.map((edge) => (
+            <option key={edge} value={edge}>
+              {TOOLBAR_EDGE_LABELS[edge]}
+            </option>
+          ))}
+        </Select>
+        <Checkbox
+          label="鼠标离开后自动收起"
+          checked={toolbar.autoHide}
+          disabled={!enabled}
+          onChange={(_, data) =>
+            dispatch.run({
+              type: "settings.setFloatingToolbarLayout",
+              edge: toolbar.edge,
+              autoHide: data.checked === true,
+            })
+          }
+        />
+      </div>
+    </>
   );
 }
 
