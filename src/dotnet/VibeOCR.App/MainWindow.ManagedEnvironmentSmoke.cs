@@ -316,10 +316,13 @@ public sealed partial class MainWindow
 
   private async Task ClickManagedSmokeButtonAsync(string label)
   {
+    // Readiness and click share one DOM turn: React may replace/disable the
+    // button between two ExecuteScriptAsync calls during a state projection.
     await WaitForSmokeDomAsync(
-      "Array.from(document.querySelectorAll('button')).some(b => b.textContent?.trim() === " +
-      JsonSerializer.Serialize(label) + " && !b.disabled)", TimeSpan.FromSeconds(30));
-    await ClickSmokeButtonAsync(label);
+      "(() => { const b=Array.from(document.querySelectorAll('button')).find(b => " +
+      "b.textContent?.trim() === " + JsonSerializer.Serialize(label) +
+      " && !b.disabled); if (!b) return false; b.click(); return true; })()",
+      TimeSpan.FromSeconds(30));
   }
 
   private async Task SelectSmokeValueAsync(string selector, string value)
