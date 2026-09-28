@@ -658,10 +658,12 @@ def test_active_job_reference_blocks_switch_install_and_delete(tmp_path: Path) -
         references.admit(str(uuid4()))
 
 
-def _omit_pip_for_lock_test(monkeypatch: pytest.MonkeyPatch) -> None:
-    # These tests inject the installer: only the real venv/lock paths matter.
-    # Bootstrapping unused pip before the barrier made CI time out before it
-    # reached the concurrent operations whose one-second deadline we verify.
+def _omit_unused_pip_bootstrap(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These tests inject the installer: only the real venv/lock/probe paths
+    # matter, and the injected runners never invoke pip. Bootstrapping an
+    # unused pip costs seconds of ensurepip per candidate venv, which made CI
+    # time out before it reached the concurrent operations whose one-second
+    # deadline we verify.
     run = subprocess.run
 
     def without_pip(args: list[str], **kwargs):
@@ -675,7 +677,7 @@ def _omit_pip_for_lock_test(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_inactive_install_does_not_block_active_job_admission_or_target_conflict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _omit_pip_for_lock_test(monkeypatch)
+    _omit_unused_pip_bootstrap(monkeypatch)
     manifest, component = _release(tmp_path / "release")
     started = threading.Event()
     finish = threading.Event()
@@ -788,7 +790,7 @@ def test_inactive_install_does_not_block_active_job_admission_or_target_conflict
 def test_inactive_install_commit_rejects_active_pointer_drift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _omit_pip_for_lock_test(monkeypatch)
+    _omit_unused_pip_bootstrap(monkeypatch)
     manifest, component = _release(tmp_path / "release")
     started = threading.Event()
     finish = threading.Event()
@@ -922,6 +924,7 @@ def test_empty_environment_repairs_changed_python_binding(tmp_path: Path) -> Non
 def test_repair_after_failed_install_clears_stale_revision_failure_only_on_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _omit_unused_pip_bootstrap(monkeypatch)
     manifest, component = _release(tmp_path / "release")
 
     def fail_install(_python: Path, _scope, _endpoint: str) -> None:
@@ -996,7 +999,10 @@ def test_named_environment_probe_does_not_extract_missing_base(tmp_path: Path) -
     assert not base.exists()
 
 
-def test_failed_named_install_preserves_empty_revision(tmp_path: Path) -> None:
+def test_failed_named_install_preserves_empty_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _omit_unused_pip_bootstrap(monkeypatch)
     manifest, component = _release(tmp_path / "release")
 
     def fail_install(_python: Path, _scope, _endpoint: str) -> None:
@@ -1046,7 +1052,9 @@ def test_failed_named_install_preserves_empty_revision(tmp_path: Path) -> None:
 
 def test_named_install_failure_redacts_diagnostics_and_interruption_is_durable(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _omit_unused_pip_bootstrap(monkeypatch)
     manifest, component = _release(tmp_path / "release")
 
     def fail(_python: Path, _scope, _source: str) -> None:
@@ -1103,6 +1111,7 @@ def test_named_install_failure_redacts_diagnostics_and_interruption_is_durable(
 def test_new_environment_preview_supersedes_old_plan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _omit_unused_pip_bootstrap(monkeypatch)
     manifest, component = _release(tmp_path / "release")
     installed_sources: list[str] = []
     manager = ManagedEnvironmentStore(
@@ -1189,7 +1198,9 @@ def test_named_preview_includes_direct_url_dependencies(tmp_path: Path) -> None:
 
 def test_named_install_rejects_native_import_failure_without_committing(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _omit_unused_pip_bootstrap(monkeypatch)
     manifest, component = _release(tmp_path / "release")
 
     def install(python: Path, _scope, _source: str) -> None:
@@ -1246,6 +1257,7 @@ def test_named_install_rejects_native_import_failure_without_committing(
 
 def test_named_install_rapidocr_probe_imports_real_transitive_closure(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # 回归 #104：rapidocr 的 __init__ 惰性解析 RapidOCR，旧探针只
     # import pyclipper/onnxruntime（甚至裸 import rapidocr）都能通过，
@@ -1253,6 +1265,7 @@ def test_named_install_rapidocr_probe_imports_real_transitive_closure(
     # ch_ppocr_det → shapely.lib 的原生传递依赖上失败（长路径 DLL load
     # failed）。探针必须运行同一导入闭包，在 install 提交与
     # prepare_switch 之前 fail closed，且不实例化引擎、不下载模型。
+    _omit_unused_pip_bootstrap(monkeypatch)
     manifest, component = _release(tmp_path / "release")
 
     def install(python: Path, _scope, _source: str) -> None:
