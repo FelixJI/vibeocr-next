@@ -269,6 +269,12 @@ public sealed class ScreenshotSessionWorkbenchTests
         supervisorInstanceId: () => "sup-pin",
         textLayerRecognitionFactory: () => new RecognitionViewModel(inference, inputs),
         pinScreenshot: (file, _, _, _) => pin = file);
+      var invalidated = new List<(Guid SessionId, long Revision)>();
+      var detachedSessions = new List<(Guid SessionId, long Revision)>();
+      handler.ScreenshotTextLayerInvalidated += (id, revision) =>
+        invalidated.Add((id, revision));
+      handler.ScreenshotSessionDetached += (id, revision) =>
+        detachedSessions.Add((id, revision));
       try
       {
         using var firstAwaiter = new RecognitionStateAwaiter(
@@ -285,12 +291,15 @@ public sealed class ScreenshotSessionWorkbenchTests
 
         await handler.ExecuteAsync(new CloseScreenshotSessionCommand(),
           TestContext.Current.CancellationToken);
+        Assert.Empty(invalidated);
+        Assert.Contains((firstSession, 0L), detachedSessions);
         using var nextAwaiter = new RecognitionStateAwaiter(
           handler, state => state.ScreenshotSession is not null && !state.IsBusy);
         await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
           TestContext.Current.CancellationToken);
         Guid nextSession = Guid.Parse((await nextAwaiter.Task).ScreenshotSession!.SessionId);
         Assert.NotEqual(firstSession, nextSession);
+        Assert.Empty(invalidated);
 
         RecognitionTextLayerState detached = Assert.IsType<RecognitionTextLayerState>(
           await handler.PreparePinnedTextLayerAsync(
@@ -302,6 +311,10 @@ public sealed class ScreenshotSessionWorkbenchTests
           .Single().TextLayer);
         Assert.Equal(nextSession.ToString("N"), handler.InitialStates
           .OfType<RecognitionWorkbenchState>().Single().ScreenshotSession?.SessionId);
+        await handler.ExecuteAsync(new NotifyScreenshotSessionRevisionCommand(nextSession, 1),
+          TestContext.Current.CancellationToken);
+        Assert.Equal((nextSession, 0L), invalidated[^1]);
+        Assert.DoesNotContain(invalidated, binding => binding.SessionId == firstSession);
       }
       finally { pin?.Dispose(); }
     }
@@ -1023,6 +1036,50 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   [Fact]
+  public async Task EmptyLocalOcrReportsNoSelectableTextForEditorAndDetachedPin()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new TextLayerRecognitionClient(noText: true);
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore, settings,
+        inferenceAttached: () => true,
+        textLayerRecognitionFactory: () => new RecognitionViewModel(inference, inputs));
+      using var capturedAwaiter = new RecognitionStateAwaiter(
+        handler, state => state.ScreenshotSession is not null && !state.IsBusy);
+      await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+        TestContext.Current.CancellationToken);
+      Guid sessionId = Guid.Parse((await capturedAwaiter.Task).ScreenshotSession!.SessionId);
+      WorkbenchAnnotationLease lease = UploadAnnotation(annotationStore, AnnotationPng);
+      using var emptyAwaiter = new RecognitionStateAwaiter(
+        handler, state => state.TextLayer?.Status == "textlayer.empty");
+      await handler.ExecuteAsync(
+        new PrepareScreenshotTextLayerCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0),
+        TestContext.Current.CancellationToken);
+      RecognitionTextLayerState empty = (await emptyAwaiter.Task).TextLayer!;
+      Assert.Equal("textlayer.noLines", empty.Reason);
+      Assert.Null(empty.Lines);
+
+      await handler.ExecuteAsync(new CloseScreenshotSessionCommand(),
+        TestContext.Current.CancellationToken);
+      string imagePath = Path.Combine(root, "empty-pin.png");
+      await File.WriteAllBytesAsync(imagePath, AnnotationPng,
+        TestContext.Current.CancellationToken);
+      PinnedTextPreparationException error = await Assert.ThrowsAsync<PinnedTextPreparationException>(
+        () => handler.PreparePinnedTextLayerAsync(
+          sessionId, 0, imagePath, TestContext.Current.CancellationToken));
+      Assert.Equal("贴图中没有可选择的文字。", error.Message);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
   public async Task PrepareTextLayerDeduplicatesSameRevision()
   {
     string root = TemporaryRoot();
@@ -1384,7 +1441,8 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   /// <summary>Records submissions; outcomes carry real text_blocks geometry.</summary>
-  private class TextLayerRecognitionClient(bool rapidReady = true, bool windowsReady = true)
+  private class TextLayerRecognitionClient(
+    bool rapidReady = true, bool windowsReady = true, bool noText = false)
     : TextModeHealthClient(rapidReady, windowsReady)
   {
     public List<SubmitRequest> Requests { get; } = [];
@@ -1441,9 +1499,11 @@ public sealed class ScreenshotSessionWorkbenchTests
             PayloadType = "ocr.v1",
             Payload = new Dictionary<string, JsonElement>
             {
-              ["raw_text"] = JsonSerializer.SerializeToElement("你好\nworld"),
-              ["text_blocks"] = JsonSerializer.SerializeToElement(
-                JsonSerializer.Deserialize<JsonElement>(""""
+              ["raw_text"] = JsonSerializer.SerializeToElement(noText ? "" : "你好\nworld"),
+              ["text_blocks"] = noText
+                ? JsonSerializer.SerializeToElement(Array.Empty<object>())
+                : JsonSerializer.SerializeToElement(
+                  JsonSerializer.Deserialize<JsonElement>(""""
                   [
                     { "text": "你好", "bbox": [10, 20, 300, 60], "order": 0 },
                     { "text": "world", "bbox": [10, 80, 300, 120], "order": 1 },

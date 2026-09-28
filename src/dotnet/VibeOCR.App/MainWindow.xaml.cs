@@ -130,15 +130,36 @@ public sealed partial class MainWindow : Window
     {
       void UpdatePins()
       {
-        if (layer is null) ClearPinTextTasks();
         foreach (PinnedImageWindow pinned in pinnedImages.ToArray())
-        {
           pinned.Update(layer);
-        }
       }
       if (DispatcherQueue.HasThreadAccess) UpdatePins();
       else DispatcherQueue.TryEnqueue(UpdatePins);
     };
+    commandHandler.ScreenshotTextLayerInvalidated += (sessionId, revision) =>
+    {
+      void InvalidatePins()
+      {
+        RemovePinTextTask((sessionId, revision));
+        foreach (PinnedImageWindow pinned in pinnedImages.ToArray())
+          if (pinned.SessionId == sessionId && pinned.Revision == revision)
+            pinned.Update(null);
+      }
+      if (DispatcherQueue.HasThreadAccess) InvalidatePins();
+      else DispatcherQueue.TryEnqueue(InvalidatePins);
+    };
+    commandHandler.ScreenshotSessionDetached += (sessionId, revision) =>
+    {
+      void MarkPins()
+      {
+        foreach (PinnedImageWindow pinned in pinnedImages.ToArray())
+          if (pinned.SessionId == sessionId && pinned.Revision == revision)
+            pinned.MarkOldSnapshot();
+      }
+      if (DispatcherQueue.HasThreadAccess) MarkPins();
+      else DispatcherQueue.TryEnqueue(MarkPins);
+    };
+    commandHandler.PinnedTextEnvironmentChanged += InvalidatePinnedTextLayers;
     application = new WorkbenchApplication(
       DesktopWorkbenchCommandHandler.Capabilities,
       WorkbenchRoute.Recognition,
@@ -530,7 +551,8 @@ public sealed partial class MainWindow : Window
       throw new InvalidOperationException("最多同时打开四张贴图，请先关闭一张。");
     }
     var pinned = new PinnedImageWindow(image, sessionId, revision, layer,
-      () => PreparePinTextAsync(sessionId, revision, image.Path));
+      () => PreparePinTextAsync(sessionId, revision, image.Path),
+      () => supervisorInstanceId?.Invoke());
     pinned.Closed += closed =>
     {
       pinnedImages.Remove(closed);
@@ -559,7 +581,7 @@ public sealed partial class MainWindow : Window
           result.ServiceInstance != (supervisorInstanceId?.Invoke() ?? string.Empty))
       {
         RemovePinTextTask(key);
-        throw new InvalidOperationException("本地识别服务已变化，请重新取字。");
+        throw new PinnedTextPreparationException("本地识别服务已变化，请重新取字。");
       }
       return result;
     }
@@ -581,6 +603,17 @@ public sealed partial class MainWindow : Window
   private void ClearPinTextTasks()
   {
     foreach (var key in pinTextTasks.Keys.ToArray()) RemovePinTextTask(key);
+  }
+
+  internal void InvalidatePinnedTextLayers()
+  {
+    void Invalidate()
+    {
+      ClearPinTextTasks();
+      foreach (PinnedImageWindow pinned in pinnedImages.ToArray()) pinned.Update(null);
+    }
+    if (DispatcherQueue.HasThreadAccess) Invalidate();
+    else DispatcherQueue.TryEnqueue(Invalidate);
   }
 
   private static async Task ShowPinnedAsync(PinnedImageWindow pinned)

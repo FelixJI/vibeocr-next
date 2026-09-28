@@ -82,9 +82,22 @@ public sealed partial class MainWindow
       string editorPreview = Path.Combine(evidenceRoot, "text-selection-editor.png");
       string firstPinPreview = Path.Combine(evidenceRoot, "text-selection-pin-1.png");
       string secondPinPreview = Path.Combine(evidenceRoot, "text-selection-pin-2.png");
-      string latin = await SelectMainSubstringAndCopyAsync(
-        chinese: false, previewPath: editorPreview);
-      string chinese = await SelectMainSubstringAndCopyAsync(chinese: true);
+      string latin;
+      string chinese;
+      try
+      {
+        latin = await SelectMainSubstringAndCopyAsync(
+          chinese: false, previewPath: editorPreview);
+      }
+      catch (Exception error)
+      {
+        throw new InvalidOperationException("Latin Ctrl+C selection smoke failed.", error);
+      }
+      try { chinese = await SelectMainSubstringAndCopyAsync(chinese: true); }
+      catch (Exception error)
+      {
+        throw new InvalidOperationException("Chinese context-menu selection smoke failed.", error);
+      }
       await ExerciseWordAndCrossLineSelectionAsync();
       if (string.IsNullOrWhiteSpace(latin) || string.IsNullOrWhiteSpace(chinese))
         throw new InvalidOperationException("Partial Latin/Chinese selection was empty.");
@@ -163,6 +176,13 @@ public sealed partial class MainWindow
         throw new InvalidOperationException(
           "Detached old pin did not OCR only its frozen PNG after editor close.");
       await WaitForPinTextAsync(oldPins[1], present: false);
+      await ClickSmokeButtonAsync("纯截图");
+      await WaitForScreenshotStateAsync(
+        state => !state.IsBusy && state.ScreenshotSession is not null,
+        TimeSpan.FromSeconds(30));
+      await WaitForPinTextAsync(oldPins[0], present: true);
+      if (smokeSubmitAttempts() != 3)
+        throw new InvalidOperationException("New pure screenshot re-submitted old pin OCR.");
 
       foreach (PinnedImageWindow pin in oldPins) pin.Close();
       await WaitForPinCountAsync(0);
@@ -218,7 +238,8 @@ public sealed partial class MainWindow
       if (layer?.Binding?.Revision == revision && layer.Status == "textlayer.ready")
         return layer;
       if (layer?.Binding?.Revision == revision &&
-          layer.Status is "textlayer.failed" or "textlayer.unavailable" or "textlayer.cancelled")
+          layer.Status is "textlayer.failed" or "textlayer.empty" or
+            "textlayer.unavailable" or "textlayer.cancelled")
         throw new InvalidOperationException($"Text layer failed: {layer.Status}/{layer.Reason}");
       await Task.Delay(100, timeout.Token);
     }
@@ -347,14 +368,18 @@ public sealed partial class MainWindow
       await WorkbenchWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
         "Input.dispatchKeyEvent", "{\"type\":\"keyUp\",\"key\":\"Control\",\"windowsVirtualKeyCode\":17}");
     }
+    string? lastClipboard = null;
     for (int attempt = 0; attempt < 100; attempt++)
     {
       DataPackageView content = Clipboard.GetContent();
-      if (content.Contains(StandardDataFormats.Text) &&
-          await content.GetTextAsync() == selected) return selected;
+      lastClipboard = content.Contains(StandardDataFormats.Text)
+        ? await content.GetTextAsync() : null;
+      if (lastClipboard == selected) return selected;
       await Task.Delay(100);
     }
-    throw new InvalidOperationException("Clipboard did not contain only the selected substring.");
+    throw new InvalidOperationException(
+      $"{(chinese ? "Chinese context-menu" : "Latin Ctrl+C")} clipboard mismatch: " +
+      $"expected={JsonSerializer.Serialize(selected)}, actual={JsonSerializer.Serialize(lastClipboard)}.");
   }
 
   private async Task ClickTextCopyButtonByMouseAsync()
@@ -390,18 +415,28 @@ public sealed partial class MainWindow
           const box = range.getBoundingClientRect();
           return {x:box.x,y:box.y+box.height/2};
         };
-        const first = spans[0], second = spans[1];
+        const first = spans[0];
+        const firstBox = first.getBoundingClientRect();
+        const second = spans.find(node =>
+          Math.abs(node.getBoundingClientRect().y-firstBox.y) > firstBox.height/2);
+        if (!second) return null;
         const start = Math.max(0, first.firstChild.textContent.length-3);
         const range = document.createRange();
         range.setStart(first.firstChild,start);
         range.setEnd(second.firstChild,Math.min(3,second.firstChild.textContent.length));
         return {word:point(first,1),start:point(first,start),
           end:point(second,Math.min(3,second.firstChild.textContent.length)),
-          cross:range.toString()};
+          cross:range.toString(), firstY:firstBox.y,
+          secondY:second.getBoundingClientRect().y};
       })()
       """);
     using JsonDocument geometry = JsonDocument.Parse(geometryJson);
     JsonElement root = geometry.RootElement;
+    if (root.ValueKind != JsonValueKind.Object)
+      throw new InvalidOperationException("Synthetic OCR did not render two distinct text rows.");
+    if (Math.Abs(root.GetProperty("firstY").GetDouble() -
+          root.GetProperty("secondY").GetDouble()) < 2)
+      throw new InvalidOperationException("Cross-line smoke selected glyphs on one visual row.");
     JsonElement word = root.GetProperty("word");
     double wx = word.GetProperty("x").GetDouble();
     double wy = word.GetProperty("y").GetDouble();

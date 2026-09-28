@@ -44,6 +44,7 @@ internal sealed class PinnedImageWindow : IDisposable
   private readonly WorkbenchAnnotationFile image;
   private readonly IAnnotatedImagePlatform platform;
   private readonly Func<Task<RecognitionTextLayerState?>> prepareText;
+  private readonly Func<string?> currentServiceInstance;
   private readonly List<IRandomAccessStream> responseStreams = [];
   private readonly Guid sessionId;
   private readonly long revision;
@@ -123,13 +124,15 @@ internal sealed class PinnedImageWindow : IDisposable
     Guid sessionId,
     long revision,
     RecognitionTextLayerState? layer,
-    Func<Task<RecognitionTextLayerState?>> prepareText)
+    Func<Task<RecognitionTextLayerState?>> prepareText,
+    Func<string?> currentServiceInstance)
   {
     this.image = image;
     this.sessionId = sessionId;
     this.revision = revision;
     this.layer = layer;
     this.prepareText = prepareText;
+    this.currentServiceInstance = currentServiceInstance;
     platform = new AnnotatedImagePlatform(
       () => WinRT.Interop.WindowNative.GetWindowHandle(window));
     Span<byte> header = stackalloc byte[24];
@@ -241,6 +244,8 @@ internal sealed class PinnedImageWindow : IDisposable
   public void Update(RecognitionTextLayerState? next, bool detached = false)
   {
     if (disposed) return;
+    if (next is not null && (next.Binding?.SessionId != sessionId.ToString("N") ||
+        next.Binding.Revision != revision)) return;
     RecognitionTextLayerState? valid = next is { Status: "textlayer.ready" } &&
       next.Binding?.SessionId == sessionId.ToString("N") &&
       next.Binding.Revision == revision ? next : null;
@@ -261,6 +266,15 @@ internal sealed class PinnedImageWindow : IDisposable
         ? "旧快照：可在贴图上选字复制"
         : "可在图片上选字复制";
     if (loaded) Render();
+  }
+
+  public void MarkOldSnapshot()
+  {
+    if (disposed) return;
+    oldSnapshot = true;
+    status.Text = layer is null
+      ? "旧快照：可按贴图原图取字"
+      : "旧快照：可在贴图上选字复制";
   }
 
   private async void OnImageRequested(CoreWebView2 sender,
@@ -339,6 +353,12 @@ internal sealed class PinnedImageWindow : IDisposable
   private async Task CopySelectionAsync()
   {
     RecognitionTextLayerState? selectedLayer = layer;
+    if (selectedLayer is not null &&
+        selectedLayer.ServiceInstance != (currentServiceInstance() ?? string.Empty))
+    {
+      Update(null);
+      selectedLayer = null;
+    }
     if (selectedLayer is null || !loaded)
     {
       status.Text = "文字层尚未就绪";
@@ -374,9 +394,12 @@ internal sealed class PinnedImageWindow : IDisposable
       {
         if (disposed) return;
         AppLog.Error($"Pinned image action failed: {label}", error);
-        status.Text = error is ClipboardBusyException
-          ? "剪贴板被占用，请重试"
-          : $"{label}失败，请重试";
+        status.Text = error switch
+        {
+          ClipboardBusyException => "剪贴板被占用，请重试",
+          PinnedTextPreparationException preparation => preparation.Message,
+          _ => $"{label}失败，请重试",
+        };
       }
     };
     bar.Children.Add(button);

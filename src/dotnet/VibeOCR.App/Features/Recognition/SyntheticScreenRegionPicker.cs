@@ -53,7 +53,10 @@ internal sealed class SyntheticScreenRegionPicker(string text = "VibeOCR 123") :
         throw new InvalidOperationException("Synthetic WinUI client bounds are unavailable.");
       }
 
-      const uint childStyle = 0x40000000 | 0x10000000 | 0x00000001 | 0x00000200;
+      // SS_CENTERIMAGE makes STATIC render a single centered line; preserve it
+      // for existing one-line smoke, but let bilingual CRLF evidence wrap.
+      uint childStyle = 0x40000000 | 0x10000000 | 0x00000001 |
+        (text.Contains('\n') ? 0u : 0x00000200u);
       child = CreateWindowExW(0, "STATIC", text, childStyle,
         0, 0, client.Right - client.Left, client.Bottom - client.Top,
         handle, 0, 0, 0);

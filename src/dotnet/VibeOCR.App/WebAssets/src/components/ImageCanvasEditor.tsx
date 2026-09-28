@@ -5,7 +5,7 @@ import {
   Toolbar,
   ToolbarButton,
 } from "@fluentui/react-components";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AppActions } from "../app/types";
 import {
   imageTransform,
@@ -100,7 +100,6 @@ const FONT_SIZES = [16, 24, 32, 48] as const;
 export interface ScreenshotSessionHandle {
   readonly sessionId: string;
   readonly revision: number;
-  readonly textSelectionRequested?: boolean;
 }
 
 interface ImageCanvasEditorProps {
@@ -740,7 +739,30 @@ export function ImageCanvasEditor({
     text: string;
     key: string;
   }>();
-  async function copySelectedText(text = selectionText) {
+  const copyButtonSelection = useRef<{ text: string; key: string } | undefined>(
+    undefined,
+  );
+  const readLayerSelection = useCallback(() => {
+    const root = stageRef.current?.querySelector(".image-text-layer");
+    const current = document.getSelection();
+    const range = current?.rangeCount ? current.getRangeAt(0) : undefined;
+    return layerSelectionKey &&
+      root &&
+      range &&
+      current?.anchorNode &&
+      current.focusNode &&
+      root.contains(current.anchorNode) &&
+      root.contains(current.focusNode) &&
+      root.contains(range.commonAncestorContainer)
+      ? range.toString()
+      : "";
+  }, [layerSelectionKey]);
+  async function copySelectedText(frozen?: { text: string; key: string }) {
+    const text = frozen
+      ? frozen.key === layerSelectionKey
+        ? frozen.text
+        : ""
+      : readLayerSelection();
     if (!session || !text || !layerSelectionKey) return;
     setCopyMenu(undefined);
     try {
@@ -762,17 +784,7 @@ export function ImageCanvasEditor({
   useEffect(() => {
     if (!layerSelectionKey) return undefined;
     const readSelection = () => {
-      const root = stageRef.current;
-      const documentSelection = document.getSelection();
-      const anchor = documentSelection?.anchorNode;
-      const text =
-        root &&
-        anchor &&
-        root.contains(anchor) &&
-        documentSelection &&
-        documentSelection.rangeCount > 0
-          ? documentSelection.getRangeAt(0).toString()
-          : "";
+      const text = readLayerSelection();
       setSelection((current) =>
         current?.key === layerSelectionKey && current.text === text
           ? current
@@ -781,7 +793,7 @@ export function ImageCanvasEditor({
     };
     document.addEventListener("selectionchange", readSelection);
     return () => document.removeEventListener("selectionchange", readSelection);
-  }, [layerSelectionKey, layerLines, stageSize]);
+  }, [layerSelectionKey, layerLines, stageSize, readLayerSelection]);
 
   const textLayerHint = textLayerStatusLabel(textLayer);
 
@@ -922,7 +934,17 @@ export function ImageCanvasEditor({
           <Button
             appearance="primary"
             size="small"
-            onClick={() => copySelectedText()}
+            onPointerDown={() => {
+              const text = readLayerSelection();
+              copyButtonSelection.current = text
+                ? { text, key: layerSelectionKey }
+                : undefined;
+            }}
+            onClick={() => {
+              const frozen = copyButtonSelection.current;
+              copyButtonSelection.current = undefined;
+              void copySelectedText(frozen);
+            }}
           >
             复制所选
           </Button>
@@ -996,13 +1018,17 @@ export function ImageCanvasEditor({
           cursor: panning ? "grab" : undefined,
         }}
         onContextMenu={(event) => {
-          if (tool !== "textSelect" || !selectionText) return;
+          const text = readLayerSelection();
+          if (tool !== "textSelect" || !text) {
+            setCopyMenu(undefined);
+            return;
+          }
           event.preventDefault();
           const bounds = event.currentTarget.getBoundingClientRect();
           setCopyMenu({
             x: event.clientX - bounds.left + event.currentTarget.scrollLeft,
             y: event.clientY - bounds.top + event.currentTarget.scrollTop,
-            text: selectionText,
+            text,
             key: layerSelectionKey,
           });
         }}
@@ -1115,7 +1141,7 @@ export function ImageCanvasEditor({
               top: copyMenu.y,
               zIndex: 2,
             }}
-            onClick={() => copySelectedText(copyMenu.text)}
+            onClick={() => copySelectedText(copyMenu)}
           >
             复制所选
           </Button>
@@ -1209,6 +1235,8 @@ function textLayerStatusLabel(
           : "无可用本地轻量文字引擎；自动取字不会安装依赖或使用远程。";
     case "textlayer.cancelled":
       return "已取消准备文字层；可点“重新准备”重试。";
+    case "textlayer.empty":
+      return "图片中没有可选择的文字。";
     case "textlayer.failed":
       return layer.reason === "textlayer.tooLarge"
         ? "识别文本过大，无法安全显示为原位文字层。"

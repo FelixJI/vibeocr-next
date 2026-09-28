@@ -24,6 +24,26 @@ function createActions(): AppActions & { run: ReturnType<typeof vi.fn> } {
 }
 
 describe("screenshot session editor wiring", () => {
+  it("describes an empty local text result without offering retry", () => {
+    const { unmount } = render(
+      <ImageCanvasEditor
+        actions={createActions()}
+        canExport={true}
+        canRecognize={true}
+        source="https://app.vibeocr/__resource/capture.png"
+        session={{ sessionId: "session-empty", revision: 0 }}
+        textLayer={{
+          status: "textlayer.empty",
+          reason: "textlayer.noLines",
+          binding: { sessionId: "session-empty", revision: 0 },
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "取字" }));
+    expect(screen.getByText("图片中没有可选择的文字。")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重新准备文字层" })).toBeNull();
+    unmount();
+  });
   it("keeps hand and Space panning separate from content edits", () => {
     const actions = createActions();
     const { unmount } = render(
@@ -344,6 +364,12 @@ describe("screenshot session editor wiring", () => {
         revision: 0,
         text: "好世",
       });
+      // Native selection has advanced, but React has not processed selectionchange yet.
+      // The context menu must freeze the new DOM substring, not the previous state.
+      range.setStart(firstText, 0);
+      range.setEnd(firstText, 1);
+      selection.removeAllRanges();
+      selection.addRange(range);
       fireEvent.contextMenu(firstText.parentElement!, {
         clientX: 20,
         clientY: 30,
@@ -353,11 +379,20 @@ describe("screenshot session editor wiring", () => {
       fireEvent.pointerDown(menuButton!);
       fireEvent.click(menuButton!);
       expect(actions.run).toHaveBeenCalledTimes(2);
+      expect(actions.run).toHaveBeenLastCalledWith({
+        type: "recognition.copyScreenshotSelection",
+        sessionId: "session-a",
+        revision: 0,
+        text: "你",
+      });
       actions.run.mockResolvedValueOnce(false);
       fireEvent.click(copyButton);
       await waitFor(() =>
         expect(screen.getByText(/复制所选文字失败/)).toBeInTheDocument(),
       );
+      selection.removeAllRanges();
+      fireEvent.click(copyButton);
+      expect(actions.run).toHaveBeenCalledTimes(3);
       unmount();
     } finally {
       document.getSelection()?.removeAllRanges();

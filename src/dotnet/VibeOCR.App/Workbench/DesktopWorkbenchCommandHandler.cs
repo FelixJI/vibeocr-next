@@ -155,6 +155,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       new AnnotatedImagePlatform(this.windowHandle);
     this.inferenceAttached = inferenceAttached;
     this.supervisorInstanceId = supervisorInstanceId ?? (() => null);
+    pinnedServiceInstance = this.supervisorInstanceId() ?? string.Empty;
     this.textLayerRecognitionFactory = textLayerRecognitionFactory ?? recognitionFactory;
     this.pinScreenshot = pinScreenshot;
     this.shellActions = shellActions;
@@ -162,6 +163,8 @@ public sealed class DesktopWorkbenchCommandHandler :
 
   private readonly Func<string?> supervisorInstanceId;
   private readonly Func<RecognitionViewModel> textLayerRecognitionFactory;
+  private string pinnedServiceInstance = string.Empty;
+  private bool pinMaintenanceNotified;
 
   public IReadOnlyList<WorkbenchState> InitialStates =>
   [
@@ -177,6 +180,9 @@ public sealed class DesktopWorkbenchCommandHandler :
 
   public event Action<WorkbenchState>? StateChanged;
   public event Action<RecognitionTextLayerState?>? ScreenshotTextLayerChanged;
+  public event Action<Guid, long>? ScreenshotTextLayerInvalidated;
+  public event Action<Guid, long>? ScreenshotSessionDetached;
+  public event Action? PinnedTextEnvironmentChanged;
 
   public async ValueTask PrepareBootstrapAsync(CancellationToken cancellationToken)
   {
@@ -464,12 +470,13 @@ public sealed class DesktopWorkbenchCommandHandler :
   }
 
   /// <summary>取消在途文字层准备并丢弃旧层；编辑/换图/维护/关闭后调用。</summary>
-  private void InvalidateScreenshotTextLayer()
+  private void InvalidateScreenshotTextLayer(long? editedRevision = null)
   {
     Interlocked.Increment(ref screenshotTextGeneration);
     textLayerRecognition?.Cancel();
     screenshotTextLayer = null;
-    ScreenshotTextLayerChanged?.Invoke(null);
+    if (editedRevision is { } revision && screenshotSessionId is { } id)
+      ScreenshotTextLayerInvalidated?.Invoke(id, revision);
   }
 
   private WorkbenchAnnotationFile TakeScreenshotAnnotation(string resourceUri) =>
@@ -594,12 +601,13 @@ public sealed class DesktopWorkbenchCommandHandler :
       // 未知会话或乱序/过期通知：保留宿主权威状态，不回退修订。
       return SessionRecognitionState(false, SessionStatusCode());
     }
+    long previousRevision = screenshotSessionRevision;
     screenshotSessionRevision = command.Revision;
     // 任何内容修订都使旧识别结果与文字层失效：迟到响应不得覆盖当前内容。
     Interlocked.Increment(ref recognitionGeneration);
     recognition.Cancel();
     recognition.InvalidateResult();
-    InvalidateScreenshotTextLayer();
+    InvalidateScreenshotTextLayer(previousRevision);
     resultActions = null;
     screenshotSessionResult = null;
     return SessionRecognitionState(false, "recognition.session");
@@ -906,10 +914,10 @@ public sealed class DesktopWorkbenchCommandHandler :
     // No session-dependent generation or result cache is read below. The pin
     // retains its own final PNG lease even after close/new capture/redaction.
     if (inferenceAttached?.Invoke() == false)
-      throw new InvalidOperationException("本地识别服务尚未就绪。");
+      throw new PinnedTextPreparationException("本地识别服务尚未就绪。");
     await EnsureSelectionLoadedAsync(cancellationToken);
     RecognitionModeOption mode = FindReadyLocalTextMode(out _) ??
-      throw new InvalidOperationException("没有已就绪的本地轻量文字引擎。");
+      throw new PinnedTextPreparationException("没有已就绪的本地轻量文字引擎，请先在设置中准备。");
     byte[] png = await File.ReadAllBytesAsync(imagePath, cancellationToken);
     string serviceInstance = supervisorInstanceId() ?? string.Empty;
     RecognitionViewModel viewModel = textLayerRecognitionFactory();
@@ -921,11 +929,15 @@ public sealed class DesktopWorkbenchCommandHandler :
     if ((supervisorInstanceId() ?? string.Empty) != serviceInstance ||
         inferenceAttached?.Invoke() == false ||
         FindReadyLocalTextMode(out _)?.Id != mode.Id)
-      throw new InvalidOperationException("本地识别服务已变化，请重新取字。");
+      throw new PinnedTextPreparationException("本地识别服务或引擎已变化，请重新取字。");
+    if (viewModel.Result is null)
+      throw new PinnedTextPreparationException("贴图取字未完成，请重试。");
     IReadOnlyList<RecognitionTextLayerLine>? lines =
-      ProjectTextLayerLines(viewModel.Result?.RawBlocks, out _);
+      ProjectTextLayerLines(viewModel.Result.RawBlocks, out string? lineError);
     if (lines is null)
-      throw new InvalidDataException("贴图文字层未返回可选行。");
+      throw new PinnedTextPreparationException(lineError == "textlayer.tooLarge"
+        ? "文字内容过大，无法安全显示为贴图文字层。"
+        : "贴图中没有可选择的文字。");
     return new RecognitionTextLayerState(
       "textlayer.ready", null,
       new RecognitionScreenshotSessionState(sessionId.ToString("N"), revision),
@@ -1000,7 +1012,8 @@ public sealed class DesktopWorkbenchCommandHandler :
         ProjectTextLayerLines(viewModel.Result.RawBlocks, out string? lineError);
       if (lines is null)
       {
-        PublishTextLayerState("textlayer.failed", lineError ?? "textlayer.noLines");
+        PublishTextLayerState(lineError is null ? "textlayer.empty" : "textlayer.failed",
+          lineError ?? "textlayer.noLines");
         return;
       }
       // 展示资源就是识别输入的同一最终 PNG 字节。
@@ -1226,6 +1239,8 @@ public sealed class DesktopWorkbenchCommandHandler :
 
   private void ClearScreenshotSession()
   {
+    if (screenshotSessionId is { } id)
+      ScreenshotSessionDetached?.Invoke(id, screenshotSessionRevision);
     screenshotSessionId = null;
     screenshotSessionRevision = 0;
     screenshotTextSelectionRequested = false;
@@ -2249,6 +2264,12 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     if (Volatile.Read(ref disposed) == 0 && settings is not null)
     {
+      string service = supervisorInstanceId() ?? string.Empty;
+      bool maintaining = settings.Maintenance.State.IsRunning;
+      if (service != pinnedServiceInstance || (maintaining && !pinMaintenanceNotified))
+        PinnedTextEnvironmentChanged?.Invoke();
+      pinnedServiceInstance = service;
+      pinMaintenanceNotified = maintaining;
       InvalidateScreenshotSessionRecognitionOnMaintenance();
       StateChanged?.Invoke(SettingsState(settings));
     }
@@ -2786,3 +2807,5 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
   }
 }
+
+internal sealed class PinnedTextPreparationException(string message) : Exception(message);
