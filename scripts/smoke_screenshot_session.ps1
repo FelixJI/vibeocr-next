@@ -34,7 +34,7 @@ if (-not $PreparedCandidateRoot) {
 $candidate = (Resolve-Path -LiteralPath $PreparedCandidateRoot).Path.TrimEnd('\')
 $smokeRoot = Split-Path -Parent $candidate
 if ((Split-Path -Leaf $candidate) -ne 'candidate' -or
-    -not (Split-Path -Leaf $smokeRoot).StartsWith('vibeocr-managed-e2e-', [StringComparison]::Ordinal) -or
+    (Split-Path -Leaf $smokeRoot) -cnotmatch '^(?:ve-[0-9a-f]{12}|vibeocr-managed-e2e-[0-9a-f]{32})$' -or
     -not $smokeRoot.StartsWith($work + '\', [StringComparison]::OrdinalIgnoreCase) -or
     -not (Test-Path -LiteralPath (Join-Path $candidate 'state') -PathType Container)) {
     throw 'PreparedCandidateRoot must be the retained candidate from the isolated managed-environment smoke under WorkRoot'
