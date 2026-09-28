@@ -16,7 +16,7 @@ const execFileAsync = promisify(execFile);
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const requireWebAssets = createRequire(path.resolve(scriptDir,
   '../src/dotnet/VibeOCR.App/WebAssets/package.json'));
-const { chromium } = requireWebAssets('@playwright/test');
+const { chromium, expect } = requireWebAssets('@playwright/test');
 const nativeScript = path.join(scriptDir, 'native_actions_fixture.ps1');
 const hotkey = 'Ctrl+Alt+Shift+F10';
 const recognizeHotkey = 'Ctrl+Alt+Shift+F11';
@@ -229,6 +229,13 @@ async function toolbarStatus(page, label) {
   await page.getByText(`当前状态：${label}`, { exact: false }).waitFor();
 }
 
+async function setCheckbox(page, name, checked) {
+  const checkbox = page.getByRole('checkbox', { name });
+  if (await checkbox.isChecked() !== checked) await checkbox.click();
+  // Controlled settings wait for the native bridge acknowledgement.
+  await expect(checkbox).toBeChecked({ checked });
+}
+
 async function configure(page) {
   await openSettings(page);
   const row = page.locator('.hotkey-action-row').filter({ hasText: '截图编辑' });
@@ -241,8 +248,8 @@ async function configure(page) {
   await recognizeRow.getByRole('button', { name: '应用 快捷截图识别' }).click();
   await recognizeRow.getByText(`当前生效：${recognizeHotkey}`).waitFor();
 
-  await page.getByRole('checkbox', { name: '启用悬浮工具栏' }).check();
-  await page.getByRole('checkbox', { name: '鼠标离开后自动收起' }).uncheck();
+  await setCheckbox(page, '启用悬浮工具栏', true);
+  await setCheckbox(page, '鼠标离开后自动收起', false);
   await page.getByRole('button', { name: '显示', exact: true }).click();
   await toolbarStatus(page, '显示中');
   await page.getByRole('button', { name: '隐藏', exact: true }).click();
@@ -312,7 +319,7 @@ async function pngPixels(page, png) {
   }, png.toString('base64'));
 }
 
-async function captureThroughHotkey(app, fixture, evidenceRoot) {
+async function captureThroughHotkey(app, fixture, evidenceRoot, evidence) {
   const { page } = app;
   const toolbarHandles = (await windows(app.child.pid))
     .filter((item) => item.Visible && item.Handle !== app.main.Handle && area(item) > 1000)
@@ -327,7 +334,9 @@ async function captureThroughHotkey(app, fixture, evidenceRoot) {
   await native('focus-fixture', {
     FixturePid: fixture.pid, Handle: fixture.root, X: focusX, Y: focusY,
   });
+  const sentAt = Date.now();
   await native('hotkey', { FixturePid: fixture.pid });
+  evidence.hotkeyDeliveredAt = Date.now() - sentAt;
 
   const button = fixture.buttonRect;
   const x = button.left + Math.floor(button.width / 2);
@@ -346,6 +355,9 @@ async function captureThroughHotkey(app, fixture, evidenceRoot) {
     'Edit hotkey exposed the main window during selection.');
   assert(!duringCapture.some((item) => toolbarHandles.includes(item.Handle) && item.Visible),
     'Toolbar or sensor remained visible during capture.');
+  evidence.overlayProbe = JSON.parse(await native('probe', {
+    AppPid: app.child.pid, FixturePid: fixture.pid, X: x, Y: y,
+  }));
   await native('hover', { AppPid: app.child.pid, X: x, Y: y });
   // The production UIA query has a 200 ms budget. One bounded settle period
   // lets the real overlay consume it; no retry or synthetic command injection.
@@ -508,10 +520,10 @@ async function main() {
     evidence.appPids.push(app.child.pid);
     await verifyRestart(app.page);
     fixture = await startFixture();
-    evidence.capture = await captureThroughHotkey(app, fixture, smokeRoot);
+    evidence.capture = await captureThroughHotkey(app, fixture, smokeRoot, evidence);
     evidence.recognitionHotkeyGuard = await verifyRecognitionHotkeyGuard(app, fixture);
     await openSettings(app.page);
-    await app.page.getByRole('checkbox', { name: '启用悬浮工具栏' }).uncheck();
+    await setCheckbox(app.page, '启用悬浮工具栏', false);
     await toolbarStatus(app.page, '已关闭');
     evidence.fixturePid = fixture.pid;
     evidence.state = 'passed';

@@ -565,6 +565,15 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow) : IScreenRegionPi
     overlay.AppWindow.IsShownInSwitchers = false;
     overlay.AppWindow.MoveAndResize(new RectInt32(desktop.X, desktop.Y, desktop.Width, desktop.Height));
     overlay.Activate();
+    nint overlayHandle = WinRT.Interop.WindowNative.GetWindowHandle(overlay);
+    // A hotkey can open this window while another application remains foreground.
+    // WinUI activation alone does not transfer keyboard focus across processes.
+    if (overlayHandle == nint.Zero ||
+        (!SetForegroundWindow(overlayHandle) && GetForegroundWindow() != overlayHandle))
+    {
+      overlay.Close();
+      throw new InvalidOperationException("无法将截图选区置于前台，请重试截图。");
+    }
     keyboardSink.Focus(FocusState.Programmatic);
     using CancellationTokenRegistration registration = cancellationToken.Register(() =>
     root.DispatcherQueue.TryEnqueue(() => { completion.TrySetCanceled(cancellationToken); overlay.Close(); }));
@@ -678,6 +687,9 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow) : IScreenRegionPi
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetForegroundWindow(nint window);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetForegroundWindow();
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern nint FindWindow(string? lpClassName, string? lpWindowName);

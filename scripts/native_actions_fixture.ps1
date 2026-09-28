@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'hotkey', 'recognize-hotkey', 'foreground', 'hover', 'tab', 'enter', 'escape')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape')][string]$Action,
     [int]$AppPid = 0,
     [int]$FixturePid = 0,
     [int]$ForegroundPid = 0,
@@ -190,6 +190,19 @@ public static class NativeActionsFixture
         return GetForegroundWindow().ToInt64();
     }
 
+    public static object Probe(int appPid, int fixturePid, int x, int y)
+    {
+        IntPtr foreground = GetForegroundWindow();
+        IntPtr hit = WindowFromPoint(new Point { X = x, Y = y });
+        GetWindowThreadProcessId(foreground, out uint foregroundPid);
+        GetWindowThreadProcessId(hit, out uint hitPid);
+        return new {
+            ForegroundHandle = foreground.ToInt64(), ForegroundPid = foregroundPid,
+            HitHandle = hit.ToInt64(), HitPid = hitPid,
+            AppWindows = Windows(appPid), FixtureWindows = Windows(fixturePid),
+        };
+    }
+
     private static void RequirePointOwner(int x, int y, int pid)
     {
         GetWindowThreadProcessId(WindowFromPoint(new Point { X = x, Y = y }), out uint owner);
@@ -290,6 +303,7 @@ try {
         'hotkey' { [NativeActionsFixture]::Hotkey($FixturePid, 0x79) }
         'recognize-hotkey' { [NativeActionsFixture]::Hotkey($ForegroundPid, 0x7A) }
         'foreground' { [NativeActionsFixture]::Foreground($AppPid) }
+        'probe' { [NativeActionsFixture]::Probe($AppPid, $FixturePid, $X, $Y) | ConvertTo-Json -Compress -Depth 5 }
         'hover' { [NativeActionsFixture]::Hover($AppPid, $X, $Y) }
         'tab' { [NativeActionsFixture]::OverlayKey($AppPid, 0x09) }
         'enter' { [NativeActionsFixture]::OverlayKey($AppPid, 0x0D) }
