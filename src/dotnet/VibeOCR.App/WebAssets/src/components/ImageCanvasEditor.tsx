@@ -779,6 +779,7 @@ export function ImageCanvasEditor({
   return (
     <div
       className="canvas-editor"
+      data-screenshot-session={session?.sessionId ?? ""}
       onKeyDown={(event) => {
         const target = event.target as HTMLElement;
         if (

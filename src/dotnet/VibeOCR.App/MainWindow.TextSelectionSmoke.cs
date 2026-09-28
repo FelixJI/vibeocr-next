@@ -48,6 +48,7 @@ public sealed partial class MainWindow
           smokeSubmitAttempts() != 0 ||
           smokeStartupEnsureAttempts() != ensuresBefore)
         throw new InvalidOperationException("Capture submitted OCR or started installation.");
+      await WaitForEditorSessionAsync(captured.ScreenshotSession!.SessionId);
       await WaitForCanvasAsync();
       await ClickSmokeButtonAsync("贴图");
       await WaitForPinCountAsync(1);
@@ -64,6 +65,8 @@ public sealed partial class MainWindow
       captured = await WaitForScreenshotStateAsync(
         state => !state.IsBusy && state.ScreenshotSession?.TextSelectionRequested == true,
         TimeSpan.FromSeconds(30));
+      await WaitForEditorSessionAsync(captured.ScreenshotSession!.SessionId);
+      await WaitForCanvasAsync();
       capture = screenshotSmokePicker.Evidence ??
         throw new InvalidOperationException("Text capture has no synthetic evidence.");
       RecognitionTextLayerState firstLayer = await WaitForReadyTextLayerAsync(0);
@@ -207,6 +210,11 @@ public sealed partial class MainWindow
     }
     throw new TimeoutException($"WebView2 condition did not hold: {expression}");
   }
+
+  private Task WaitForEditorSessionAsync(string sessionId) =>
+    WaitForWebConditionAsync(
+      "document.querySelector('.canvas-editor')?.dataset.screenshotSession === " +
+      JsonSerializer.Serialize(sessionId));
 
   private async Task WaitForPinCountAsync(int count)
   {

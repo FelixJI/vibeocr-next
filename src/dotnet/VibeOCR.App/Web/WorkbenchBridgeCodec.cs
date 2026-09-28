@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using VibeOCR.App.Workbench;
 using VibeOCR.Platform.Bootstrap;
+using VibeOCR.Platform.Windows;
 
 namespace VibeOCR.App.Web;
 
@@ -29,7 +30,11 @@ public static class WorkbenchBridgeCodec
   private static readonly HashSet<string> DegreesArgumentFields = ["degrees"];
   private static readonly HashSet<string> FormatArgumentFields = ["format"];
   private static readonly HashSet<string> EnabledArgumentFields = ["enabled"];
-  private static readonly HashSet<string> HotkeyArgumentFields = ["hotkey"];
+  private static readonly HashSet<string> ActionIdArgumentFields = ["actionId"];
+  private static readonly HashSet<string> ActionHotkeyArgumentFields =
+    ["actionId", "hotkey"];
+  private static readonly HashSet<string> ToolbarLayoutArgumentFields =
+    ["edge", "autoHide"];
   private static readonly HashSet<string> BatchMoveArgumentFields = ["itemId", "delta"];
   private static readonly HashSet<string> BatchItemArgumentFields = ["itemId"];
   private static readonly HashSet<string> PagesArgumentFields = ["pages"];
@@ -444,14 +449,46 @@ public static class WorkbenchBridgeCodec
       case ("settings", "setStartup"):
         EnsureObjectWithFields(arguments, EnabledArgumentFields, "command arguments");
         return new SetStartupCommand(arguments.GetProperty("enabled").GetBoolean());
-      case ("settings", "setHotkey"):
-        EnsureObjectWithFields(arguments, HotkeyArgumentFields, "command arguments");
-        string? hotkey = arguments.GetProperty("hotkey").GetString();
-        if (string.IsNullOrWhiteSpace(hotkey) || hotkey.Length > 64)
+      case ("settings", "setActionHotkey"):
+        bool hasHotkey = !HasExactFields(arguments, ActionIdArgumentFields);
+        if (hasHotkey)
         {
-          throw new WorkbenchBridgeProtocolException("Workbench hotkey is invalid.");
+          EnsureObjectWithFields(arguments, ActionHotkeyArgumentFields, "command arguments");
         }
-        return new SetHotkeyCommand(hotkey);
+        else
+        {
+          EnsureObjectWithFields(arguments, ActionIdArgumentFields, "command arguments");
+        }
+        string? actionHotkey = hasHotkey
+          ? arguments.GetProperty("hotkey").GetString()
+          : null;
+        if (actionHotkey is not null &&
+          (actionHotkey.Length == 0 || actionHotkey.Length > 64))
+        {
+          throw new WorkbenchBridgeProtocolException(
+            "Workbench action hotkey is invalid.");
+        }
+        return new SetActionHotkeyCommand(
+          ParseActionId(arguments),
+          actionHotkey);
+      case ("settings", "resetActionHotkey"):
+        EnsureObjectWithFields(arguments, ActionIdArgumentFields, "command arguments");
+        return new ResetActionHotkeyCommand(ParseActionId(arguments));
+      case ("settings", "setFloatingToolbarEnabled"):
+        EnsureObjectWithFields(arguments, EnabledArgumentFields, "command arguments");
+        return new SetFloatingToolbarEnabledCommand(
+          arguments.GetProperty("enabled").GetBoolean());
+      case ("settings", "setFloatingToolbarLayout"):
+        EnsureObjectWithFields(arguments, ToolbarLayoutArgumentFields, "command arguments");
+        return new SetFloatingToolbarLayoutCommand(
+          ParseToolbarEdge(arguments.GetProperty("edge").GetString()),
+          arguments.GetProperty("autoHide").GetBoolean());
+      case ("settings", "showFloatingToolbar"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new ShowFloatingToolbarCommand();
+      case ("settings", "hideFloatingToolbar"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new HideFloatingToolbarCommand();
       case ("settings", "setSource"):
         bool hasSourceId = !HasExactFields(arguments, SourceKindOnlyFields);
         if (hasSourceId)
@@ -659,6 +696,27 @@ public static class WorkbenchBridgeCodec
     return new SetMineruConnectionCommand(mode, apiUrl, apiKey);
   }
 
+  private static string ParseActionId(JsonElement arguments)
+  {
+    string? actionId = arguments.GetProperty("actionId").GetString();
+    if (string.IsNullOrWhiteSpace(actionId) || actionId.Length > 64)
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench action id is invalid.");
+    }
+    return actionId;
+  }
+
+  private static ScreenEdge ParseToolbarEdge(string? edge) => edge switch
+  {
+    "top" => ScreenEdge.Top,
+    "bottom" => ScreenEdge.Bottom,
+    "left" => ScreenEdge.Left,
+    "right" => ScreenEdge.Right,
+    _ => throw new WorkbenchBridgeProtocolException(
+      "Workbench floating toolbar edge is invalid."),
+  };
+
   private static string? ParseTaskEngine(JsonElement arguments)
   {
     bool hasEngine = !HasExactFields(arguments, EmptyFields);
@@ -788,13 +846,27 @@ public static class WorkbenchBridgeCodec
       settings.StatusCode,
       settings.Backend,
       settings.StartupEnabled,
-      settings.Hotkey,
-      settings.HotkeyStatus,
-      settings.PendingHotkey,
       sources = settings.Sources ?? [],
       settings.PendingBackend,
       settings.CanSwitchBackend,
       features = settings.Features ?? [],
+      hotkeyActions = settings.HotkeyActions is null ? [] : settings.HotkeyActions.Select(action => new
+      {
+        action.ActionId,
+        action.DisplayName,
+        action.ConfiguredHotkey,
+        action.RegisteredHotkey,
+        action.Error,
+        action.DefaultHotkey,
+      }),
+      floatingToolbar = settings.FloatingToolbar is null ? null : new
+      {
+        settings.FloatingToolbar.Enabled,
+        settings.FloatingToolbar.Edge,
+        settings.FloatingToolbar.AutoHide,
+        settings.FloatingToolbar.Visibility,
+        settings.FloatingToolbar.Error,
+      },
       settings.StatusMessage,
       settings.ServiceStatus,
       settings.MaintenanceStatus,

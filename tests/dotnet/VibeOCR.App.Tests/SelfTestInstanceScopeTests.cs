@@ -21,6 +21,7 @@ public sealed class SelfTestInstanceScopeTests
   [InlineData("web-ready")]
   [InlineData("screenshot-e2e")]
   [InlineData("text-selection-e2e")]
+  [InlineData("native-actions-e2e")]
   public void UiSmokeUsesIsolatedNamedObjects(string smokeMode)
   {
     const string instanceId = "c240f369b28e4444b0d45f4a4d331cd0";
@@ -45,6 +46,8 @@ public sealed class SelfTestInstanceScopeTests
   [InlineData("screenshot-e2e", "not-a-guid")]
   [InlineData("text-selection-e2e", null)]
   [InlineData("text-selection-e2e", "not-a-guid")]
+  [InlineData("native-actions-e2e", null)]
+  [InlineData("native-actions-e2e", "not-a-guid")]
   [InlineData(null, "c240f369b28e4444b0d45f4a4d331cd0")]
   public void InvalidSelfTestScopeIsRejected(string? smokeMode, string? instanceId) =>
     Assert.Throws<InvalidOperationException>(() => SelfTestInstanceScope.Resolve(

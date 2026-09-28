@@ -455,7 +455,6 @@ public sealed class MaintenanceTests
             "settings.ready",
             "cpu",
             false,
-            "Ctrl+Alt+Q",
             Maintenance: new SettingsMaintenanceState(
                 true,
                 "running",

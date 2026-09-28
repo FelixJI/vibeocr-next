@@ -1,3 +1,5 @@
+using VibeOCR.Platform.Windows;
+
 namespace VibeOCR.App.Workbench;
 
 public static class WorkbenchProtocol
@@ -183,7 +185,33 @@ public sealed record SetThemeCommand(WorkbenchTheme Theme) : WorkbenchCommand;
 
 public sealed record SetStartupCommand(bool Enabled) : WorkbenchCommand;
 
-public sealed record SetHotkeyCommand(string Hotkey) : WorkbenchCommand;
+/// <summary>
+/// Set the global hotkey for one action in the shell action catalog. A null
+/// hotkey disables the binding; the host registers the new key first and
+/// releases the old one only after the config is persisted, so a failed save
+/// keeps the previous binding active.
+/// </summary>
+public sealed record SetActionHotkeyCommand(string ActionId, string? Hotkey) : WorkbenchCommand;
+
+/// <summary>Restore an action's default hotkey (only the quick recognition action has one).</summary>
+public sealed record ResetActionHotkeyCommand(string ActionId) : WorkbenchCommand;
+
+/// <summary>
+/// Enable or disable the floating toolbar live. Enabling persists the
+/// preference and creates the toolbar; disabling tears it down. The toolbar
+/// can always be found again from settings, the tray menu, or the toolbar
+/// toggle action.
+/// </summary>
+public sealed record SetFloatingToolbarEnabledCommand(bool Enabled) : WorkbenchCommand;
+
+/// <summary>Change the floating toolbar dock edge and auto-hide behavior live.</summary>
+public sealed record SetFloatingToolbarLayoutCommand(ScreenEdge Edge, bool AutoHide) : WorkbenchCommand;
+
+/// <summary>Explicitly show the floating toolbar (recover from user-hidden).</summary>
+public sealed record ShowFloatingToolbarCommand : WorkbenchCommand;
+
+/// <summary>User-hide the floating toolbar (disarms the edge sensor until found again).</summary>
+public sealed record HideFloatingToolbarCommand : WorkbenchCommand;
 
 /// <summary>
 /// Select the package-index dependency source. A null source id clears the
@@ -388,14 +416,11 @@ public sealed record SettingsWorkbenchState(
   string StatusCode,
   string Backend,
   bool StartupEnabled,
-  string Hotkey,
   IReadOnlyList<SettingsSourceOptionState>? Sources = null,
   string PendingBackend = "cpu",
   bool CanSwitchBackend = false,
   IReadOnlyList<SettingsFeatureOptionState>? Features = null,
   SettingsMaintenanceState? Maintenance = null,
-  string HotkeyStatus = "",
-  string PendingHotkey = "",
   string StatusMessage = "",
   string ServiceStatus = "",
   string MaintenanceStatus = "",
@@ -405,10 +430,40 @@ public sealed record SettingsWorkbenchState(
   double? ProgressPercent = null,
   bool CanPreviewInstall = false,
   VibeOCR.Runtime.Contracts.Generated.Host.RuntimeInstallPlan? InstallPlan = null,
-  SettingsMineruConnectionState? MineruConnection = null) : WorkbenchState
+  SettingsMineruConnectionState? MineruConnection = null,
+  IReadOnlyList<SettingsHotkeyActionState>? HotkeyActions = null,
+  SettingsFloatingToolbarState? FloatingToolbar = null) : WorkbenchState
 {
   public override string Scope => "settings";
 }
+
+/// <summary>
+/// One shell action's hotkey projection for the settings page: the configured
+/// combination, the actually registered one (null when registration failed,
+/// e.g. the combination is occupied by another app), the last error, and the
+/// action's default binding (null when the action has no default key).
+/// </summary>
+public sealed record SettingsHotkeyActionState(
+  string ActionId,
+  string DisplayName,
+  string? ConfiguredHotkey,
+  string? RegisteredHotkey,
+  string? Error,
+  string? DefaultHotkey);
+
+/// <summary>
+/// Floating toolbar projection: enabled/edge/auto-hide mirror the persisted
+/// preferences; visibility is the business-level state the UI describes to
+/// the user (disabled / userHidden / edgeHidden / visible / suspended);
+/// error carries the last apply/show/hide failure with the previous state
+/// kept active.
+/// </summary>
+public sealed record SettingsFloatingToolbarState(
+  bool Enabled,
+  string Edge,
+  bool AutoHide,
+  string Visibility,
+  string Error = "");
 
 /// <summary>
 /// MinerU 连接投影；API Key 只以是否已配置出现，明文不进入桥接状态。

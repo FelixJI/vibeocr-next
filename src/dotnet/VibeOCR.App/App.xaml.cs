@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -43,7 +44,7 @@ public sealed partial class App : Application
     private WindowLayoutStore? _windowLayoutStore;
     private SingleInstanceService? _singleInstance;
     private InferenceSupervisorProcess? _supervisorProcess;
-  private string? _supervisorInstanceId;
+    private string? _supervisorInstanceId;
     private IInferenceClient? _activeInferenceClient;
     private IQrCodeClient? _activeQrCodeClient;
     private PortableLayout? _supervisorLayout;
@@ -55,6 +56,8 @@ public sealed partial class App : Application
     private WindowMessageService? _windowMessages;
     private TrayIconService? _trayIcon;
     private WindowsHotkeyRegistrar? _hotkeyRegistrar;
+    private ShellActionDispatcher? _actionDispatcher;
+    private PortableLayout? _shellLayout;
     private FloatingToolbarShell? _floatingToolbar;
     private ShellViewModel? _shellViewModel;
     private UpdateViewModel? _updateViewModel;
@@ -66,6 +69,19 @@ public sealed partial class App : Application
 
     private const uint HotkeyMessage = 0x0312;
     private const uint TrayMessage = 0x8001;
+    private const uint TrayLeftClick = 0x0202;
+    private const uint TrayLeftDoubleClick = 0x0203;
+    private const uint TrayRightClick = 0x0205;
+
+    // 托盘菜单仅本任务实际动作：打开工作台/截图识别/截图编辑/剪贴板识别/
+    // 悬浮栏开关 + 退出；复用既有托盘回调消息，不新增常驻钩子。
+    private const uint MenuFlagString = 0x0000;
+    private const uint MenuFlagSeparator = 0x0800;
+    private const uint TrackPopupRightButton = 0x0002;
+    private const uint TrackPopupReturnCommand = 0x0100;
+    private const int TrayMenuCommandBase = 1000;
+    private const int TrayMenuToggleToolbar = 1004;
+    private const int TrayMenuQuit = 1005;
 
     public App()
     {
@@ -196,6 +212,31 @@ public sealed partial class App : Application
                 "text-selection-e2e" ? "VibeOCR 123\r\n中文 文本 456" : "VibeOCR 123");
         }
 
+        // 统一动作分派器先于主窗创建：热键/托盘/悬浮栏/主窗四入口共用同一
+        // 动作目录，登记器与悬浮栏在桌面壳初始化时经委托解析。
+        _actionDispatcher = new ShellActionDispatcher(
+            () => _hotkeyRegistrar,
+            new Dictionary<string, Func<Task>>(StringComparer.Ordinal)
+            {
+                [HotkeyActionCatalog.ScreenshotEdit] =
+                    () => _window!.CaptureScreenshotForEditAsync(),
+                // 直接等待主窗入口：早先的无条件 finally 显示会在选区/遮罩
+                // 尚未结束时提前抢焦点；终态显示由命令层在真正完成后经
+                // ShowWorkbench 动作触发（拒绝重入时不显示）。
+                [HotkeyActionCatalog.ScreenshotRecognize] =
+                    () => _window!.RecognizeScreenshotAsync(),
+                [HotkeyActionCatalog.ClipboardRecognize] =
+                    ShowWorkbenchThenRecognizeClipboardAsync,
+                [HotkeyActionCatalog.ToggleToolbar] = ToggleFloatingToolbarAsync,
+                [HotkeyActionCatalog.ShowWorkbench] = ShowWorkbenchFromShellActionAsync,
+            },
+            CurrentFloatingToolbarSettings,
+            () => _floatingToolbar?.Visibility ?? FloatingToolbarVisibility.Disabled,
+            TryApplyFloatingToolbarSettings,
+            TryShowFloatingToolbar,
+            TryHideFloatingToolbar,
+            () => _floatingToolbar?.TrySuspendForCapture());
+
         _window = new MainWindow(
           diagnostics,
           layout,
@@ -238,7 +279,8 @@ public sealed partial class App : Application
           _screenshotSmokePicker,
           () => _inferenceGateway.SubmitAttempts,
           () => _inferenceGateway.LastSubmittedJobId,
-          () => Volatile.Read(ref _startupRuntimeEnsureAttempts));
+          () => Volatile.Read(ref _startupRuntimeEnsureAttempts),
+          shellActions: _actionDispatcher);
         _window.AppWindow.Closing += OnAppWindowClosing;
         _window.Closed += OnWindowClosedFallback;
         _window.Activate();
@@ -304,18 +346,25 @@ public sealed partial class App : Application
         _windowMessages.MessageReceived += OnWindowMessage;
         _trayIcon = new TrayIconService(Path.Combine(layout.WebAssetsRoot, "vibeocr.ico"));
         _trayIcon.Show(handle, TrayMessage, "VibeOCR");
+        _shellLayout = layout;
 
-        string hotkey = ReadConfiguredHotkey(layout.ConfigFile) ?? "Ctrl+Alt+Q";
         _hotkeyRegistrar = new WindowsHotkeyRegistrar(
             new GlobalHotkeyService(windowHandle: handle),
             layout);
+        // 多动作登记：仅注册目录内已交付动作；单条失败记入该动作状态，
+        // 供设置页展示与重试，不拋出。
+        _hotkeyRegistrar.InitializeActions();
 
+        string? configuredHotkey = _hotkeyRegistrar.GetActionStatuses()
+            .FirstOrDefault(status => status.ActionId == HotkeyActionCatalog.ScreenshotRecognize)?
+            .ConfiguredHotkey;
         _shellViewModel = new ShellViewModel(
             _hotkeyRegistrar,
             new WindowsStartupRegistrar(layout.ProductEntry),
             () => _window!.AppWindow.Hide(),
             () => _window!.Close(),
-            hotkey);
+            configuredHotkey ?? string.Empty);
+        // 旧单键路径兼容：同键为无操作成功；启动时被占用则重试并回显冲突。
         _shellViewModel.InitializeHotkey();
         _updateViewModel = new UpdateViewModel(
             VelopackUpdateCoordinator.Create(layout.ConfigFile, layout.ProbeWritableStateRoot),
@@ -327,8 +376,7 @@ public sealed partial class App : Application
             Environment.GetEnvironmentVariable("VIBEOCR_FLOATING_TOOLBAR_SELF_TEST") == "1";
         _floatingToolbar = FloatingToolbarShell.TryCreate(
             layout,
-            RecognizeFromHotkeyAsync,
-            ShowMainWindow,
+            _actionDispatcher!.TryDispatch,
             () => _window!.ShowAndNavigate("settings"),
             forceEnabled: floatingToolbarSelfTest);
         if (floatingToolbarSelfTest)
@@ -355,64 +403,308 @@ public sealed partial class App : Application
         }
     }
 
-    private static string? ReadConfiguredHotkey(string configFile)
-    {
-        if (!File.Exists(configFile))
-        {
-            return null;
-        }
-        try
-        {
-            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(configFile));
-            return document.RootElement
-                .GetProperty("hotkeys")
-                .GetProperty("global_screenshot")
-                .GetString();
-        }
-        catch (Exception error) when (error is JsonException or KeyNotFoundException)
-        {
-            return null;
-        }
-    }
-
     private void OnWindowMessage(object? sender, WindowMessage message)
     {
         if (message.Id == HotkeyMessage)
         {
-            _ = RecognizeFromHotkeyAsync();
+            // 按实际注册 ID 解析动作：被替换/未知 ID 不触发任何动作，
+            // 与热键、托盘、悬浮栏、主窗入口同一分派器。
+            if (_hotkeyRegistrar is not null &&
+                _hotkeyRegistrar.TryResolveAction((int)message.WParam, out string? action))
+            {
+                _actionDispatcher?.TryDispatch(action);
+            }
+
             return;
         }
-        if (message.Id == TrayMessage && (uint)message.LParam is 0x0202 or 0x0203 or 0x0205)
+
+        if (message.Id == TrayMessage)
         {
-            ShowMainWindow();
+            switch ((uint)message.LParam)
+            {
+                case TrayLeftClick or TrayLeftDoubleClick:
+                    ShowMainWindow();
+                    break;
+                case TrayRightClick:
+                    ShowTrayContextMenu();
+                    break;
+            }
         }
     }
 
-    private async Task RecognizeFromHotkeyAsync()
+    /// <summary>
+    /// 托盘右键菜单：复用既有托盘回调与窗口消息服务，TrackPopupMenu
+    /// 直接返回选中项；失败/取消时静默保留原状态。
+    /// </summary>
+    private void ShowTrayContextMenu()
     {
-        // Do NOT ShowMainWindow up front: ScreenRegionPicker hides the owner
-        // window itself before capturing the desktop, and showing it here would
-        // cause a visible flash (window appears, then gets hidden by the picker).
-        // We activate the window after the screenshot flow finishes instead.
+        if (_window is null)
+        {
+            return;
+        }
+
+        nint handle = WinRT.Interop.WindowNative.GetWindowHandle(_window);
+        nint menu = CreatePopupMenu();
+        if (menu == 0)
+        {
+            return;
+        }
+
         try
         {
-            await _window!.RecognizeScreenshotAsync();
-        }
-        catch (Exception error) when (
-            error is InvalidOperationException or IOException or UnauthorizedAccessException)
-        {
-            // RecognitionViewModel owns localized status; activation must keep the shell alive.
+            string[] trayActions =
+            [
+                HotkeyActionCatalog.ShowWorkbench,
+                HotkeyActionCatalog.ScreenshotRecognize,
+                HotkeyActionCatalog.ScreenshotEdit,
+                HotkeyActionCatalog.ClipboardRecognize,
+            ];
+            for (int index = 0; index < trayActions.Length; index++)
+            {
+                AppendMenuW(
+                    menu,
+                    MenuFlagString,
+                    (nuint)(TrayMenuCommandBase + index),
+                    HotkeyActionCatalog.DisplayName(trayActions[index]));
+            }
+
+            AppendMenuW(menu, MenuFlagSeparator, 0, null);
+            AppendMenuW(
+                menu,
+                MenuFlagString,
+                (nuint)TrayMenuToggleToolbar,
+                ToolbarToggleMenuLabel());
+            AppendMenuW(menu, MenuFlagSeparator, 0, null);
+            AppendMenuW(menu, MenuFlagString, (nuint)TrayMenuQuit, "退出 VibeOCR");
+
+            SetForegroundWindow(handle);
+            if (!GetCursorPos(out PointL cursor))
+            {
+                return;
+            }
+
+            int selected = TrackPopupMenu(
+                menu,
+                TrackPopupRightButton | TrackPopupReturnCommand,
+                cursor.X,
+                cursor.Y,
+                0,
+                handle,
+                0);
+            if (selected is 0)
+            {
+                return;
+            }
+
+            if (selected == TrayMenuQuit)
+            {
+                _window.Close();
+                return;
+            }
+
+            if (selected == TrayMenuToggleToolbar)
+            {
+                _actionDispatcher?.TryDispatch(HotkeyActionCatalog.ToggleToolbar);
+                return;
+            }
+
+            if (selected >= TrayMenuCommandBase &&
+                selected < TrayMenuCommandBase + trayActions.Length)
+            {
+                _actionDispatcher?.TryDispatch(trayActions[selected - TrayMenuCommandBase]);
+            }
         }
         finally
         {
-            ShowMainWindow();
+            DestroyMenu(menu);
         }
     }
+
+    private string ToolbarToggleMenuLabel() =>
+        (_floatingToolbar?.Visibility ?? FloatingToolbarVisibility.Disabled) switch
+        {
+            FloatingToolbarVisibility.Disabled => "启用悬浮工具栏",
+            FloatingToolbarVisibility.Visible => "隐藏悬浮工具栏",
+            _ => "显示悬浮工具栏",
+        };
 
     private void ShowMainWindow()
     {
         _window?.AppWindow.Show();
         _window?.Activate();
+    }
+
+    private Task ShowWorkbenchFromShellActionAsync()
+    {
+        ShowMainWindow();
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// 剪贴板识别：非截图动作，从隐藏窗/托盘/热键入口触发时先显式显示
+    /// 工作台（结果呈现位置）再执行，不借用带截图终态语义的包装。
+    /// </summary>
+    private async Task ShowWorkbenchThenRecognizeClipboardAsync()
+    {
+        ShowMainWindow();
+        await _window!.RecognizeClipboardAsync();
+    }
+
+    private FloatingToolbarSettings CurrentFloatingToolbarSettings() =>
+        _floatingToolbar is { } toolbar
+            ? toolbar.Settings
+            : _shellLayout is { } layout
+                ? FloatingToolbarSettings.Load(layout)
+                : FloatingToolbarSettings.Default;
+
+    /// <summary>
+    /// 实时应用并持久化悬浮工具栏设置：保存失败保留原状态并返回错误；
+    /// 启用但实例未能创建时返回错误，可见档位仍以实际运行实例为准。
+    /// </summary>
+    private string? TryApplyFloatingToolbarSettings(FloatingToolbarSettings settings)
+    {
+        if (_shellLayout is not { } layout)
+        {
+            return "桌面壳尚未完成初始化，请稍后重试。";
+        }
+
+        try
+        {
+            FloatingToolbarSettings.Save(layout, settings);
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException or JsonException)
+        {
+            AppLog.Warn($"Failed to persist floating toolbar settings: {error.Message}");
+            return $"无法保存悬浮工具栏设置，原设置已保留：{error.Message}";
+        }
+
+        if (!settings.Enabled)
+        {
+            _floatingToolbar?.Dispose();
+            _floatingToolbar = null;
+            return null;
+        }
+
+        if (_floatingToolbar is { } existing)
+        {
+            existing.ApplySettings(settings);
+            return null;
+        }
+
+        // 保存成功但实例创建失败：不把“已启用”当作实际运行成功，如实报错。
+        FloatingToolbarShell? created = FloatingToolbarShell.TryCreate(
+            layout,
+            _actionDispatcher!.TryDispatch,
+            () => _window!.ShowAndNavigate("settings"));
+        if (created is null)
+        {
+            return "悬浮工具栏设置已保存，但本次未能创建窗口；将随下次启动生效。";
+        }
+
+        _floatingToolbar = created;
+        return null;
+    }
+
+    private string? TryShowFloatingToolbar()
+    {
+        if (_floatingToolbar is not { } toolbar)
+        {
+            return "悬浮工具栏已关闭，请先在设置中启用。";
+        }
+
+        try
+        {
+            toolbar.Show();
+            return null;
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException or JsonException)
+        {
+            AppLog.Warn($"Failed to show floating toolbar: {error.Message}");
+            return $"无法保存悬浮工具栏显示设置，原状态已保留：{error.Message}";
+        }
+    }
+
+    private string? TryHideFloatingToolbar()
+    {
+        if (_floatingToolbar is not { } toolbar)
+        {
+            return "悬浮工具栏未在运行，无需隐藏。";
+        }
+
+        try
+        {
+            toolbar.Hide();
+            return null;
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException or JsonException)
+        {
+            AppLog.Warn($"Failed to hide floating toolbar: {error.Message}");
+            return $"无法保存悬浮工具栏隐藏设置，原状态已保留：{error.Message}";
+        }
+    }
+
+    private async Task ToggleFloatingToolbarAsync()
+    {
+        if (_floatingToolbar is { } toolbar)
+        {
+            toolbar.Toggle();
+            return;
+        }
+
+        // 已关闭时明确启用并找回：偏好持久化，重启后保持启用。
+        // 保存/创建失败只记录，热键入口不弹 UI。
+        string? error = TryApplyFloatingToolbarSettings(
+            CurrentFloatingToolbarSettings() with { Enabled = true, HiddenByUser = false });
+        if (error is not null)
+        {
+            AppLog.Warn($"Toggle toolbar failed: {error}");
+            return;
+        }
+
+        _floatingToolbar?.Show();
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern nint CreatePopupMenu();
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DestroyMenu(nint menu);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AppendMenuW(
+        nint menu,
+        uint flags,
+        nuint idNewItem,
+        string? newItem);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(nint window);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int TrackPopupMenu(
+        nint menu,
+        uint flags,
+        int x,
+        int y,
+        int reserved,
+        nint window,
+        nint rect);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetCursorPos(out PointL point);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PointL
+    {
+        public int X;
+        public int Y;
     }
 
     private async Task SmokeExitAsync()

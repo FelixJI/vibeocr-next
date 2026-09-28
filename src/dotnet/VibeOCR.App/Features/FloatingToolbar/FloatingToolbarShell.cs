@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
-using System.Text.Json;
 using Microsoft.UI.Dispatching;
+using VibeOCR.App.Features.Shell;
 using VibeOCR.App.Services;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Windows;
@@ -9,8 +9,9 @@ namespace VibeOCR.App.Features.FloatingToolbar;
 
 /// <summary>
 /// 悬浮工具栏装配：按配置（默认关闭）在 UI 线程创建窗口、感应条与计时器，
-/// 并把工具栏命令桥接到现有入口。截图命令先 Suspend 让位再复用热键同路径，
-/// 完成后 Resume。
+/// 并把工具栏命令桥接到统一动作分派器（与热键/托盘/主窗同一动作目录）。
+/// 截图类动作的避让由分派器统一负责：截图入口先 Suspend 让位，完成后
+/// Resume 恢复原态。
 /// </summary>
 internal sealed class FloatingToolbarShell : IDisposable
 {
@@ -18,22 +19,19 @@ internal sealed class FloatingToolbarShell : IDisposable
 
     private readonly FloatingToolbarController _controller;
     private readonly IFloatingToolbarView _view;
-    private readonly Func<Task> _captureScreenshot;
-    private readonly Action _showMainWindow;
+    private readonly Func<string, bool> _dispatchAction;
     private readonly Action _openSettings;
     private bool _disposed;
 
     private FloatingToolbarShell(
         FloatingToolbarController controller,
         IFloatingToolbarView view,
-        Func<Task> captureScreenshot,
-        Action showMainWindow,
+        Func<string, bool> dispatchAction,
         Action openSettings)
     {
         _controller = controller;
         _view = view;
-        _captureScreenshot = captureScreenshot;
-        _showMainWindow = showMainWindow;
+        _dispatchAction = dispatchAction;
         _openSettings = openSettings;
         view.CommandInvoked += OnCommandInvoked;
     }
@@ -44,12 +42,12 @@ internal sealed class FloatingToolbarShell : IDisposable
     /// </summary>
     public static FloatingToolbarShell? TryCreate(
         PortableLayout layout,
-        Func<Task> captureScreenshot,
-        Action showMainWindow,
+        Func<string, bool> dispatchAction,
         Action openSettings,
         bool forceEnabled = false)
     {
         ArgumentNullException.ThrowIfNull(layout);
+        ArgumentNullException.ThrowIfNull(dispatchAction);
         FloatingToolbarSettings settings = FloatingToolbarSettings.Load(layout);
         if (forceEnabled && !settings.Enabled)
         {
@@ -77,12 +75,11 @@ internal sealed class FloatingToolbarShell : IDisposable
             DesktopScreenQuery.GetTaskbarOccupiedEdges,
             DesktopScreenQuery.GetPrimaryMonitor,
             DesktopScreenQuery.GetMonitorContaining,
-            next => PersistQuietly(layout, next));
+            next => FloatingToolbarSettings.Save(layout, next));
         var shell = new FloatingToolbarShell(
             controller,
             view,
-            captureScreenshot,
-            showMainWindow,
+            dispatchAction,
             openSettings);
         controller.Start();
         return shell;
@@ -108,6 +105,33 @@ internal sealed class FloatingToolbarShell : IDisposable
         return revealed && dismissed;
     }
 
+    public FloatingToolbarSettings Settings => _controller.Settings;
+
+    internal FloatingToolbarController.ToolbarState State => _controller.State;
+
+    internal FloatingToolbarVisibility Visibility => _controller.Visibility;
+
+    public void Show() => _controller.Show();
+
+    public void Hide() => _controller.Hide();
+
+    public void Toggle() => _controller.Toggle();
+
+    public void ApplySettings(FloatingToolbarSettings settings) =>
+        _controller.ApplySettings(settings);
+
+    /// <summary>
+    /// 截图避让：成功进入 Suspended 才返回恢复句柄（释放时恢复原态），
+    /// 当前无需让位时返回 null。所有截图入口共用，重复调用安全。
+    /// </summary>
+    public IDisposable? TrySuspendForCapture()
+    {
+        _controller.Suspend();
+        return _controller.State == FloatingToolbarController.ToolbarState.Suspended
+            ? new ResumeOnDispose(_controller)
+            : null;
+    }
+
     public void Dispose()
     {
         if (_disposed)
@@ -128,17 +152,24 @@ internal sealed class FloatingToolbarShell : IDisposable
             switch (command)
             {
                 case FloatingToolbarCommand.CaptureScreenshot:
-                    _controller.Suspend();
-                    _ = RunCaptureAsync();
+                    _dispatchAction(HotkeyActionCatalog.ScreenshotRecognize);
+                    break;
+                case FloatingToolbarCommand.ScreenshotEdit:
+                    _dispatchAction(HotkeyActionCatalog.ScreenshotEdit);
+                    break;
+                case FloatingToolbarCommand.ClipboardRecognize:
+                    _dispatchAction(HotkeyActionCatalog.ClipboardRecognize);
                     break;
                 case FloatingToolbarCommand.ShowMainWindow:
-                    _showMainWindow();
+                    _dispatchAction(HotkeyActionCatalog.ShowWorkbench);
                     break;
                 case FloatingToolbarCommand.OpenSettings:
                     _openSettings();
                     break;
                 case FloatingToolbarCommand.DismissToolbar:
-                    _controller.Dismiss();
+                    // 旧“收回到边缘”按用户预期改为明确主动隐藏：
+                    // 感应条一并撤防，鼠标路过不恢复。
+                    _controller.Hide();
                     break;
                 default:
                     throw new ArgumentOutOfRangeException(nameof(command), command, null);
@@ -151,37 +182,16 @@ internal sealed class FloatingToolbarShell : IDisposable
         }
     }
 
-    private async Task RunCaptureAsync()
-    {
-        try
-        {
-            await _captureScreenshot();
-        }
-        catch (Exception error) when (
-            error is InvalidOperationException or IOException or UnauthorizedAccessException)
-        {
-            AppLog.Warn($"Floating toolbar capture failed: {error.Message}");
-        }
-        finally
-        {
-            _controller.Resume();
-        }
-    }
-
-    private static void PersistQuietly(PortableLayout layout, FloatingToolbarSettings settings)
-    {
-        try
-        {
-            FloatingToolbarSettings.Save(layout, settings);
-        }
-        catch (Exception error) when (error is IOException or JsonException)
-        {
-            AppLog.Warn($"Failed to persist floating toolbar settings: {error.Message}");
-        }
-    }
-
     [DllImport("user32.dll")]
     private static extern nint SendMessage(nint window, uint message, nuint wParam, nint lParam);
+
+    private sealed class ResumeOnDispose(FloatingToolbarController controller) : IDisposable
+    {
+        private FloatingToolbarController? _controller = controller;
+
+        public void Dispose() =>
+            Interlocked.Exchange(ref _controller, null)?.Resume();
+    }
 }
 
 /// <summary>DispatcherQueue 单发延迟计时器，仅在 linger 窗口期运行。</summary>

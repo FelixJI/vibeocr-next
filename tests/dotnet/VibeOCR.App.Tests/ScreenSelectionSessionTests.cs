@@ -108,4 +108,36 @@ public sealed class ScreenSelectionSessionTests
     Assert.False(session.CanConfirm);
     Assert.False(session.CanUndo);
   }
+
+  [Fact]
+  public void HoverPreviewCyclesWithoutHistoryAndManualDragOverridesIt()
+  {
+    var session = new ScreenSelectionSession(300, 200);
+    session.SetPreview([new(10, 10, 200, 100), new(20, 20, 60, 40)]);
+    Assert.Equal(new PhysicalRectangle(10, 10, 200, 100), session.ActiveSelection);
+    session.CyclePreview();
+    Assert.Equal(new PhysicalRectangle(20, 20, 60, 40), session.ActiveSelection);
+    Assert.True(session.CanConfirm);
+    Assert.False(session.CanUndo);
+
+    session.Begin(new(150, 150), 2);
+    session.End(new(200, 180));
+    Assert.Equal(new PhysicalRectangle(150, 150, 50, 30), session.ActiveSelection);
+    Assert.True(session.CanUndo);
+    session.Undo();
+    Assert.Null(session.ActiveSelection);
+  }
+
+  [Fact]
+  public void BackDropsPreviewBeforeExiting()
+  {
+    var session = new ScreenSelectionSession(200, 100);
+    session.SetPreview([new(10, 10, 50, 40)]);
+    Assert.False(session.Back());
+    Assert.Null(session.ActiveSelection);
+    Assert.True(session.ManualOnly);
+    session.SetPreview([new(20, 20, 30, 20)]);
+    Assert.Null(session.ActiveSelection);
+    Assert.True(session.Back());
+  }
 }
