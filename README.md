@@ -145,7 +145,8 @@ manifest 绑定与回滚语义保留。
 
 Runtime 源自 `FelixJI/vibeocr-backend@7dc0ddf446152ef854901760d5125ad64860975b`；
 wire/C# 契约源自 `FelixJI/vibeocr-protocol@31609e19bee1d44562eb74aff2d74fc75bb93eda`。
-二者与本仓同为 MIT，作者版权见根 `LICENSE`；原仓保留历史。仅旧 Python UI 使用的
+二者与本仓同为 MIT，作者版权见根 `LICENSE`；两源仓及 `vibeocr-classic` 已归档为只读历史，
+本仓的开发、构建与发布不依赖它们的未来提交或发版。仅旧 Python UI 使用的
 `frontend.py`、无 Runtime/Next 入口的 application facades、`model_bridge`/`ocr_sidecar`、
 完整 Python runtime_client SDK、独立 SDK 发版/治理脚本未迁入。保留了直接消费的 C#
 `RuntimeHttpClient`/`RuntimeClientException`、PDF IPC schema、wire parser 与安装计划行为测试；

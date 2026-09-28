@@ -12,6 +12,33 @@
 5. **Python Runtime 与内部契约**：本仓源码内的本地推理服务（Supervisor、OCR/PDF/MinerU
    worker）与唯一 wire v2 跨进程契约，随单产品同源构建。
 
+## 功能职责与权威状态映射
+
+单仓多语言不等于任意语言可做任意事。下表把主要功能映射到权威状态/实现语言、调用边界和保留理由，路径均可在当前仓库定位：
+
+| 功能 | 权威状态 / 实现语言 | 调用边界 | 保留理由 |
+|---|---|---|---|
+| 宿主：窗口、单实例与跨产品互斥、热键、剪贴板/文件授权 | C#/WinUI（`VibeOCR.App`、`VibeOCR.Platform`） | WinUI/Win32 原生；剪贴板/文件命令经 `App/Workbench` 暴露给 Web | 系统级集成与权限仲裁只能在原生层 |
+| 桌面工作流、应用权威状态与更新 | C#（`src/dotnet/VibeOCR.App/Features`、ViewModels） | ViewModel → Platform typed client；更新走 Velopack feed | 权威状态单点，UI 不复制协议/进程细节 |
+| Workbench 展示与局部编辑 | React/TypeScript（`WebAssets/src` 的 `editor`/`features`/`components`） | WebView2 消息桥：`WebAssets/src/bridge` ↔ `App/Web` codec ↔ `App/Workbench` handler | 富交互迭代快；浏览器内容无直接系统/Runtime 权限 |
+| OCR/MinerU 推理、PDF/表格/导出、二维码生成与解码 | Python/CPython（`runtime/recognition`、`documents`、`codes`） | Desktop↔Runtime 唯一 v2 内部 HTTP wire（`contracts/runtime` + `VibeOCR.Runtime.Client`） | 直接消费 OCR/PDF 生态；worker 隔离与引擎生命周期同源 |
+| 任务调度与共享子进程 | Python（`runtime/jobs`、`processes`） | 入口是 host 暴露的 v2 内部 HTTP 路由；Paddle/MinerU/PDF worker 是 Runtime 内部管理的子进程，不经桌面直接调用 | 跨 job 状态与进程复用集中在 Runtime |
+| 运行环境安装事务（组件选择、安装计划、设备就绪、回滚） | Python/CPython（`runtime/environments`，经产品内冻结 Installer 可执行文件交付） | C# 侧由 `Platform/Bootstrap/RuntimeInstallerClient` 以子进程调用冻结 Installer：inspect/ensure/repair/install_plan 与 cancel/retry/observe 都是独立子进程命令（`--request-json` 参数），进度走 stdout NDJSON 事件流（`ndjson.v1/v2`），结果为单个 JSON envelope；安装计划/设备就绪真值只在 Runtime，C#/TS 不复制包依赖推导 | 依赖解析与 manifest 绑定在事务内保持一致 |
+| Windows 构建/打包/安装前置 | PowerShell（`scripts/build-release.ps1`、`build_internal_runtime.ps1`、`install_windows_app_runtime.ps1`） | 本地/CI 命令行 | Windows SDK、Velopack 与 App Runtime 适配 |
+| 通用生成/验证/自动化 | Python（`scripts/check_quality.py`、`generate_runtime_protocol.py`、`automation.py`） | 本地/CI 命令行 | 锁定工具链与稳定 CLI，不为语言统一翻译脚本 |
+
+两个跨边界协议不要混淆：WebView 消息桥（React ↔ `App/Web`/`App/Workbench`）与 Desktop↔Runtime 内部 HTTP
+wire 都有 v2 命名，但编号相同不代表同一协议；前者是浏览器内容与桌面权限的边界，后者是进程间契约
+（`contracts/runtime` 的 schema、golden 与生成物）。安装事务又是另一条边界：桌面通过 Runtime Installer
+子进程命令（NDJSON 事件流 + 最终 envelope）驱动，既不是 WebView 桥也不是 loopback HTTP。修改任一侧
+必须同步对应两侧类型与测试。
+
+后续范围（尚未实施，实施前不写作现状）：#97 计划把码图生成本地化到 C# 宿主，使 Runtime 未启动、
+失败或维护时仍可生成，公开码制、输入/输出与既有接口保持；#98 计划收敛 WebAssets 中仍是 JS 核心 +
+薄 TS 包装的部分（如 `editor/canvas.js`、`command-stack.js`、`geometry.js`），补齐类型检查与消息语义。
+二者均不引入 Python.NET/IronPython、第二套 IPC 或全量原生 UI 重写，不移除 Python OCR/PDF 能力、
+已证明的 worker 隔离、Runtime 安装事务与内部 wire。
+
 ## 20 分钟启动链
 
 1. 读 `global.json`，确认 SDK 锁定策略。
