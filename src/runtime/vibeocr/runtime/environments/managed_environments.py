@@ -606,6 +606,13 @@ class ManagedEnvironmentStore:
                 "rapidocr+mineru-cpu",
                 "rapidocr+mineru-cuda",
             }:
+                # Probe the exact import the Supervisor performs at engine
+                # init. rapidocr's package __init__ resolves RapidOCR lazily,
+                # so bare package imports (or leaf modules such as
+                # pyclipper/onnxruntime) prove nothing about the native
+                # transitive closure (rapidocr.main -> ch_ppocr_det ->
+                # shapely); importing the real symbol loads that closure
+                # without instantiating the engine or downloading models.
                 try:
                     subprocess.run(
                         [
@@ -613,7 +620,7 @@ class ManagedEnvironmentStore:
                             "-I",
                             "-B",
                             "-c",
-                            "import pyclipper, onnxruntime",
+                            "from rapidocr import RapidOCR",
                         ],
                         capture_output=True,
                         text=True,

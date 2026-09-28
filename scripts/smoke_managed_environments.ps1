@@ -28,7 +28,7 @@ if (Test-Path -LiteralPath (Join-Path $source 'state')) {
     throw 'Source candidate must not contain user or previous smoke state'
 }
 
-$smokeRoot = Join-Path $work "vibeocr-managed-e2e-$([guid]::NewGuid().ToString('N'))"
+$smokeRoot = Join-Path $work "ve-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
 $candidate = Join-Path $smokeRoot 'candidate'
 $webViewData = Join-Path $smokeRoot 'webview2'
 New-Item -ItemType Directory -Path $candidate | Out-Null

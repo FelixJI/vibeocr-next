@@ -496,7 +496,7 @@ export function ImageCanvasEditor({
   const fontTool = tool === "text" || tool === "numbering";
 
   return (
-    <div className="canvas-editor">
+    <div className="canvas-editor" data-screenshot-session={session?.sessionId}>
       <Toolbar
         aria-label="图片编辑工具"
         size="small"

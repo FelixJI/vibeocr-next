@@ -209,10 +209,17 @@ public sealed partial class MainWindow
       .States.Select(item => item.State).OfType<RecognitionWorkbenchState>()
       .Single().ScreenshotSession?.SessionId;
     await ClickManagedSmokeButtonAsync("纯截图");
-    await WaitForScreenshotStateAsync(state => !state.IsBusy &&
+    RecognitionWorkbenchState capturedState = await WaitForScreenshotStateAsync(state => !state.IsBusy &&
       state.ScreenshotSession is { } captured &&
       captured.SessionId != previousSessionId && state.Result is null,
       TimeSpan.FromSeconds(30));
+    // Host state arrives before React has necessarily replaced the previous
+    // editor. Wait for this exact session and its pixels before dispatching OCR.
+    await WaitForSmokeDomAsync(
+      "document.querySelector('.canvas-editor')?.dataset.screenshotSession === " +
+      JsonSerializer.Serialize(capturedState.ScreenshotSession!.SessionId),
+      TimeSpan.FromSeconds(30));
+    await WaitForCanvasAsync();
     RecordManagedSmokeStage($"recognize {environment.Name}");
     await ClickManagedSmokeButtonAsync("识别当前图");
     await WaitForScreenshotStateAsync(state => !state.IsBusy && state.Result is not null,

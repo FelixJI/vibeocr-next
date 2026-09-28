@@ -1225,6 +1225,115 @@ def test_named_install_rejects_native_import_failure_without_committing(
     assert "shorter Portable location" in unavailable["reason"]
 
 
+def test_named_install_rapidocr_probe_imports_real_transitive_closure(
+    tmp_path: Path,
+) -> None:
+    # 回归 #104：rapidocr 的 __init__ 惰性解析 RapidOCR，旧探针只
+    # import pyclipper/onnxruntime（甚至裸 import rapidocr）都能通过，
+    # 而 Supervisor 实际执行的 from rapidocr import RapidOCR 会在
+    # ch_ppocr_det → shapely.lib 的原生传递依赖上失败（长路径 DLL load
+    # failed）。探针必须运行同一导入闭包，在 install 提交与
+    # prepare_switch 之前 fail closed，且不实例化引擎、不下载模型。
+    manifest, component = _release(tmp_path / "release")
+
+    def install(python: Path, _scope, _source: str) -> None:
+        site = python.parent.parent / "Lib" / "site-packages"
+        for name in ("fastapi", "rapidocr", "onnxruntime", "shapely"):
+            metadata = site / f"{name}-1.0.dist-info"
+            metadata.mkdir(parents=True)
+            (metadata / "METADATA").write_text(
+                f"Name: {name}\nVersion: 1.0\n", encoding="utf-8"
+            )
+        # 旧探针的叶子依赖必须健康：契约只在 rapidocr 真实导入闭包上失败。
+        for name in ("pyclipper", "onnxruntime"):
+            (site / name).mkdir()
+            (site / name / "__init__.py").write_text("", encoding="utf-8")
+        (site / "rapidocr").mkdir()
+        (site / "rapidocr" / "__init__.py").write_text(
+            "from importlib import import_module\n"
+            "_LAZY_IMPORTS = {'RapidOCR': 'rapidocr.main'}\n"
+            "def __getattr__(name):\n"
+            "    if name in _LAZY_IMPORTS:\n"
+            "        return getattr(import_module(_LAZY_IMPORTS[name]), name)\n"
+            "    raise AttributeError(name)\n",
+            encoding="utf-8",
+        )
+        (site / "rapidocr" / "main.py").write_text(
+            "from rapidocr.ch_ppocr_det import TextDetector\n"
+            "class RapidOCR:\n"
+            "    def __init__(self, *args, **kwargs):\n"
+            "        raise AssertionError('probe must not instantiate the engine')\n",
+            encoding="utf-8",
+        )
+        det = site / "rapidocr" / "ch_ppocr_det"
+        det.mkdir()
+        (det / "__init__.py").write_text(
+            "from .main import TextDetector\n", encoding="utf-8"
+        )
+        (det / "main.py").write_text(
+            "from .utils import DBPostProcess\nclass TextDetector:\n    pass\n",
+            encoding="utf-8",
+        )
+        (det / "utils.py").write_text(
+            "from shapely.geometry import Polygon\nclass DBPostProcess:\n    pass\n",
+            encoding="utf-8",
+        )
+        (site / "shapely").mkdir()
+        (site / "shapely" / "__init__.py").write_text(
+            "from shapely.lib import GEOSException\n", encoding="utf-8"
+        )
+        (site / "shapely" / "lib.py").write_text(
+            "raise ImportError('DLL load failed while importing lib')\n",
+            encoding="utf-8",
+        )
+        (site / "shapely" / "geometry.py").write_text("", encoding="utf-8")
+
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+        install_runner=install,
+    )
+    item = manager.create("closure")
+    manager.commit_switch(manager.prepare_switch(item["id"]))
+    plan = manager.preview_install(item["id"], "rapidocr-cpu")
+    with pytest.raises(ManagedEnvironmentError, match="engine_import_failed"):
+        manager.install(plan["plan_id"], item["id"], "rapidocr-cpu", ("tuna-pypi",))
+    surviving = manager.list()["environments"][0]
+    assert surviving["status"] == "empty"
+    assert surviving["revision"] == 1
+    assert surviving["python_state"] == "ready"
+    assert manager.list()["active_id"] == item["id"]
+    failure = surviving["last_install_failure"]
+    assert failure["reason_code"] == "engine_import_failed"
+    assert failure["phase"] == "failed"
+    assert failure["next_action"] == "repair_environment"
+    assert failure["environment_revision"] == 1
+
+    # 若探针未覆盖真实闭包（旧实现），候选修订会被提交为已安装环境；
+    # 模拟该状态时，list/prepare_switch 也必须按同一探针 fail closed。
+    candidate = next((manager.root / item["id"] / "revisions").glob("2-*"))
+    registry = json.loads(manager._registry.read_text(encoding="utf-8"))
+    registry["environments"][item["id"]].pop("last_install_operation")
+    registry["environments"][item["id"]].update(
+        {
+            "revision": 2,
+            "path": f"{item['id']}/revisions/{candidate.name}",
+            "status": "installed",
+            "recipe": "rapidocr-cpu",
+            "source_ids": ["tuna-pypi"],
+        }
+    )
+    manager._registry.write_text(json.dumps(registry), encoding="utf-8")
+    unavailable = manager.list()["environments"][0]
+    assert unavailable["python_state"] == "ready"
+    assert unavailable["dependency_state"] == "unavailable"
+    assert "engine_import_failed" in unavailable["reason"]
+    with pytest.raises(ManagedEnvironmentError, match="engine_import_failed"):
+        manager.prepare_switch(item["id"])
+
+
 def test_named_revision_path_accepts_old_and_new_random_tails(tmp_path: Path) -> None:
     manifest, component = _release(tmp_path / "release")
     manager = ManagedEnvironmentStore(
