@@ -33,6 +33,7 @@ public sealed class QrCodeViewModel(IQrCodeClient qrClient, IQrCodeInput input) 
     public string DecodeStatus { get => _decodeStatus; private set => SetField(ref _decodeStatus, value); }
     public string? GeneratedImageBase64 { get => _generatedImageBase64; private set => SetField(ref _generatedImageBase64, value); }
     public string GenerateStatus { get => _generateStatus; private set => SetField(ref _generateStatus, value); }
+    public bool GenerateFailed { get; private set; }
     public string GenerateText { get => _generateText; set => SetField(ref _generateText, value); }
     public string GenerateFormat { get => _generateFormat; set => SetField(ref _generateFormat, value); }
     public bool HasCodes => Codes.Count > 0;
@@ -54,20 +55,22 @@ public sealed class QrCodeViewModel(IQrCodeClient qrClient, IQrCodeInput input) 
 
     public async Task GenerateAsync(CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(GenerateText)) { GenerateStatus = "请输入要编码的内容"; return; }
+        if (string.IsNullOrWhiteSpace(GenerateText)) { GenerateFailed = true; GenerateStatus = "请输入要编码的内容"; return; }
         long generation = Interlocked.Increment(ref _generation);
         CancellationTokenSource? previous = Interlocked.Exchange(ref _activeRun, CancellationTokenSource.CreateLinkedTokenSource(cancellationToken));
         previous?.Cancel(); previous?.Dispose();
         CancellationTokenSource run = _activeRun;
         try
         {
+            GenerateFailed = false;
+            GeneratedImageBase64 = null;
             GenerateStatus = "正在生成";
             QrCodeGeneratedImage generated = await qrClient.GenerateAsync(GenerateText, GenerateFormat, run.Token);
             if (generation == Volatile.Read(ref _generation)) { GeneratedImageBase64 = generated.Base64Png; GenerateStatus = "已生成"; }
         }
         catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) GenerateStatus = "已取消"; }
-        catch (InferenceClientException error) { if (generation == Volatile.Read(ref _generation)) GenerateStatus = error.Code is HttpV2ErrorCode.BackendUnavailable or HttpV2ErrorCode.TransientBackend ? "Supervisor 暂不可用" : "生成失败"; }
-        catch (Exception) when (generation == Volatile.Read(ref _generation)) { GenerateStatus = "Supervisor 已断开，请重试"; }
+        catch (InferenceClientException error) { if (generation == Volatile.Read(ref _generation)) { GenerateFailed = true; GenerateStatus = error.Code is HttpV2ErrorCode.BackendUnavailable or HttpV2ErrorCode.TransientBackend ? "Supervisor 暂不可用" : "生成失败"; } }
+        catch (Exception) when (generation == Volatile.Read(ref _generation)) { GenerateFailed = true; GenerateStatus = "Supervisor 已断开，请重试"; }
         finally { if (generation == Volatile.Read(ref _generation) && ReferenceEquals(Interlocked.CompareExchange(ref _activeRun, null, run), run)) run.Dispose(); }
     }
 

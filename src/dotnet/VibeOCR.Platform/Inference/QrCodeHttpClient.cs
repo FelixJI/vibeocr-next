@@ -1,6 +1,5 @@
 // HttpClient-based QR client for the v2 supervisor's /v2/qrcode/* endpoints.
 using System.Text.Json;
-using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Runtime.Client;
 using VibeOCR.Runtime.Contracts.Generated;
 
@@ -10,11 +9,8 @@ namespace VibeOCR.Platform.Inference;
 public sealed class QrCodeHttpClient : IQrCodeClient
 {
     private readonly RuntimeHttpClient _runtime;
-    private readonly JsonSerializerOptions _options;
-
     public QrCodeHttpClient(Uri baseUrl, string sessionToken, HttpMessageHandler? handler = null)
     {
-        _options = HttpV2JsonContext.Default.Options;
         _runtime = new RuntimeHttpClient(baseUrl, sessionToken, handler);
     }
 
@@ -23,8 +19,7 @@ public sealed class QrCodeHttpClient : IQrCodeClient
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(base64Image);
         using StringContent content = _runtime.CreateJsonContent(
-            new { image = base64Image },
-            _options);
+            new { image = base64Image });
         using HttpResponseMessage response = await _runtime.PostAsync(
             RuntimeOperationPaths.DecodeQrCode, content, cancellationToken)
             .ConfigureAwait(false);
@@ -53,8 +48,7 @@ public sealed class QrCodeHttpClient : IQrCodeClient
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(data);
         using StringContent content = _runtime.CreateJsonContent(
-            new { data, format },
-            _options);
+            new { data, format });
         using HttpResponseMessage response = await _runtime.PostAsync(
             RuntimeOperationPaths.GenerateQrCode, content, cancellationToken)
             .ConfigureAwait(false);

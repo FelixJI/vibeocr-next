@@ -196,8 +196,7 @@ public sealed class InferenceHttpClient : IInferenceClient
                 output_path = request.OutputPath,
                 format = request.Format,
                 overwrite = request.Overwrite,
-            },
-            _options);
+            });
         using HttpResponseMessage response = await _runtime.PostAsync(
             RuntimeOperationPaths.ExportOcr, content, cancellationToken)
             .ConfigureAwait(false);
@@ -212,7 +211,7 @@ public sealed class InferenceHttpClient : IInferenceClient
 
     public async Task<PdfSessionOpenResult> OpenPdfSessionAsync(string path, string? password, CancellationToken ct)
     {
-        using StringContent content = _runtime.CreateJsonContent(new { path, password }, _options);
+        using StringContent content = _runtime.CreateJsonContent(new { path, password });
         using HttpResponseMessage resp = await _runtime.PostAsync(
             RuntimeOperationPaths.OpenPdfSession, content, ct);
         await EnsureSuccessAsync(resp, ct);
@@ -233,7 +232,7 @@ public sealed class InferenceHttpClient : IInferenceClient
 
     public async Task<PdfMutateResult> RotatePdfPagesAsync(string sessionId, int[] pages, int angle, CancellationToken ct)
     {
-        using StringContent content = _runtime.CreateJsonContent(new { pages, angle }, _options);
+        using StringContent content = _runtime.CreateJsonContent(new { pages, angle });
         using HttpResponseMessage resp = await _runtime.PostAsync(
             BindSessionPath(RuntimeOperationPaths.RotatePdfPages, sessionId), content, ct);
         await EnsureSuccessAsync(resp, ct);
@@ -243,7 +242,7 @@ public sealed class InferenceHttpClient : IInferenceClient
 
     public async Task<PdfMutateResult> DeletePdfPagesAsync(string sessionId, int[] pages, CancellationToken ct)
     {
-        using StringContent content = _runtime.CreateJsonContent(new { pages }, _options);
+        using StringContent content = _runtime.CreateJsonContent(new { pages });
         using HttpResponseMessage resp = await _runtime.PostAsync(
             BindSessionPath(RuntimeOperationPaths.DeletePdfPages, sessionId), content, ct);
         await EnsureSuccessAsync(resp, ct);
@@ -254,8 +253,7 @@ public sealed class InferenceHttpClient : IInferenceClient
     public async Task<string> SavePdfAsync(string sessionId, string outputPath, CancellationToken ct)
     {
         using StringContent content = _runtime.CreateJsonContent(
-            new { output_path = outputPath },
-            _options);
+            new { output_path = outputPath });
         using HttpResponseMessage resp = await _runtime.PostAsync(
             BindSessionPath(RuntimeOperationPaths.SavePdfSession, sessionId), content, ct);
         await EnsureSuccessAsync(resp, ct);

@@ -447,6 +447,126 @@ public sealed class InferenceHttpClientTests
             () => new InferenceHttpClient(new Uri("http://10.0.0.5:9"), "tok"));
     }
 
+    [Fact]
+    public async Task QrGeneratePostsWirePayloadAndReadsImageAsync()
+    {
+        var handler = new FakeHandler("""
+            {"image":"AQID","media_type":"image/png"}
+            """);
+        await using var client = new QrCodeHttpClient(Base, "tok", handler);
+
+        QrCodeGeneratedImage image = await client.GenerateAsync(
+            "hello", "qrcode", TestContext.Current.CancellationToken);
+
+        Assert.Equal("AQID", image.Base64Png);
+        Assert.Equal("image/png", image.MediaType);
+        Assert.Equal(HttpMethod.Post, handler.LastMethod);
+        Assert.Equal("/v2/qrcode/generate", handler.LastPath);
+        Assert.Equal("Bearer", handler.LastAuthorizationScheme);
+        Assert.Equal("tok", handler.LastAuthorizationParameter);
+        using JsonDocument body = JsonDocument.Parse(handler.LastBody!);
+        Assert.Equal("hello", body.RootElement.GetProperty("data").GetString());
+        Assert.Equal("qrcode", body.RootElement.GetProperty("format").GetString());
+    }
+
+    [Fact]
+    public async Task QrDecodePostsWirePayloadAndReadsCodesAsync()
+    {
+        var handler = new FakeHandler("""
+            {"codes":[{"data":"hello","format":"QR","is_url":false}]}
+            """);
+        await using var client = new QrCodeHttpClient(Base, "tok", handler);
+
+        IReadOnlyList<QrCodeDecodedItem> codes = await client.DecodeAsync(
+            "AQID", TestContext.Current.CancellationToken);
+
+        QrCodeDecodedItem code = Assert.Single(codes);
+        Assert.Equal("hello", code.Data);
+        Assert.Equal("QR", code.Format);
+        Assert.False(code.IsUrl);
+        Assert.Equal("/v2/qrcode/decode", handler.LastPath);
+        using JsonDocument body = JsonDocument.Parse(handler.LastBody!);
+        Assert.Equal("AQID", body.RootElement.GetProperty("image").GetString());
+    }
+
+    [Fact]
+    public async Task ExportPostsSnakeCasePayloadAndReadsResultAsync()
+    {
+        var handler = new FakeHandler("""
+            {"output_path":"C:/out.txt","bytes_written":5}
+            """);
+        await using var client = new InferenceHttpClient(Base, "tok", handler);
+
+        ExportResult result = await client.ExportAsync(
+            new ExportRequest("raw", "markdown", "html", "C:/out.txt", "txt", true),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal("C:/out.txt", result.OutputPath);
+        Assert.Equal(5, result.BytesWritten);
+        Assert.Equal("/v2/export", handler.LastPath);
+        using JsonDocument body = JsonDocument.Parse(handler.LastBody!);
+        Assert.Equal("raw", body.RootElement.GetProperty("raw_text").GetString());
+        Assert.Equal("markdown", body.RootElement.GetProperty("markdown_text").GetString());
+        Assert.Equal("html", body.RootElement.GetProperty("html_text").GetString());
+        Assert.Equal("C:/out.txt", body.RootElement.GetProperty("output_path").GetString());
+        Assert.Equal("txt", body.RootElement.GetProperty("format").GetString());
+        Assert.True(body.RootElement.GetProperty("overwrite").GetBoolean());
+    }
+
+    [Fact]
+    public async Task PdfMutationsPostWirePayloadsAndReadResultsAsync()
+    {
+        var handler = new FakeHandler(
+        [
+            """{"session_id":"pdf-1","page_count":3,"file_path":"C:/in.pdf"}""",
+            """{"page_count":3}""",
+            """{"page_count":2}""",
+            """{"saved_path":"C:/out.pdf"}""",
+        ]);
+        await using var client = new InferenceHttpClient(Base, "tok", handler);
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+
+        PdfSessionOpenResult opened = await client.OpenPdfSessionAsync(
+            "C:/in.pdf", null, cancellationToken);
+        Assert.Equal("pdf-1", opened.SessionId);
+        Assert.Equal(3, opened.PageCount);
+        Assert.Equal("/v2/pdf/sessions/open", handler.LastPath);
+        using (JsonDocument body = JsonDocument.Parse(handler.LastBody!))
+        {
+            Assert.Equal("C:/in.pdf", body.RootElement.GetProperty("path").GetString());
+            Assert.Equal(JsonValueKind.Null, body.RootElement.GetProperty("password").ValueKind);
+        }
+
+        PdfMutateResult rotated = await client.RotatePdfPagesAsync(
+            "pdf-1", [0, 2], 90, cancellationToken);
+        Assert.Equal(3, rotated.PageCount);
+        Assert.Equal("/v2/pdf/sessions/pdf-1/rotate", handler.LastPath);
+        using (JsonDocument body = JsonDocument.Parse(handler.LastBody!))
+        {
+            Assert.Equal([0, 2], body.RootElement.GetProperty("pages")
+                .EnumerateArray().Select(page => page.GetInt32()).ToArray());
+            Assert.Equal(90, body.RootElement.GetProperty("angle").GetInt32());
+        }
+
+        PdfMutateResult deleted = await client.DeletePdfPagesAsync(
+            "pdf-1", [1], cancellationToken);
+        Assert.Equal(2, deleted.PageCount);
+        Assert.Equal("/v2/pdf/sessions/pdf-1/delete_pages", handler.LastPath);
+        using (JsonDocument body = JsonDocument.Parse(handler.LastBody!))
+        {
+            Assert.Equal(1, body.RootElement.GetProperty("pages")[0].GetInt32());
+        }
+
+        string saved = await client.SavePdfAsync(
+            "pdf-1", "C:/out.pdf", cancellationToken);
+        Assert.Equal("C:/out.pdf", saved);
+        Assert.Equal("/v2/pdf/sessions/pdf-1/save", handler.LastPath);
+        using (JsonDocument body = JsonDocument.Parse(handler.LastBody!))
+        {
+            Assert.Equal("C:/out.pdf", body.RootElement.GetProperty("output_path").GetString());
+        }
+    }
+
     private static SubmitRequest UploadRequest() => new()
     {
         RequestId = "request-1",

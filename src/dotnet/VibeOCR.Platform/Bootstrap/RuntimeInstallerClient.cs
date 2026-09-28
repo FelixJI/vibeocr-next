@@ -48,7 +48,9 @@ public sealed record RuntimeInspection(
     [property: JsonPropertyName("manifest_sha256")] string ManifestSha256,
     [property: JsonPropertyName("backend_version")] string BackendVersion,
     [property: JsonPropertyName("integrity")] string Integrity,
-    [property: JsonPropertyName("source")] RuntimeSourceIdentity? Source = null);
+    [property: JsonPropertyName("source")] RuntimeSourceIdentity? Source = null,
+    [property: JsonPropertyName("startup_install_component_ids")]
+    IReadOnlyList<string>? StartupInstallComponentIds = null);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record RuntimeSourceIdentity(
@@ -631,6 +633,9 @@ public sealed partial class RuntimeInstallerClient : IRuntimeInstallerClient
     public async Task<RuntimeInstallSelection> ReadStartupSelectionAsync(CancellationToken cancellationToken = default)
     {
         RuntimeHostEnvelope envelope = await InvokeAsync("inspect", null, cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<string> startupIds = envelope.State?.StartupInstallComponentIds
+            ?? throw new RuntimeInstallerException(
+                "Runtime 检查缺少可安全继承的启动安装范围，未更改运行环境。");
         Host.RuntimeProfileDescriptor profile = envelope.Profile
             ?? throw new RuntimeInstallerException("Runtime 检查缺少组件状态，未更改安装范围。");
         using JsonDocument manifest = JsonDocument.Parse(File.ReadAllBytes(_configuration.RuntimeManifest));
@@ -638,11 +643,20 @@ public sealed partial class RuntimeInstallerClient : IRuntimeInstallerClient
             .GetProperty("components").EnumerateArray()
             .Select(component => component.GetProperty("component_id").GetString()!).ToHashSet(StringComparer.Ordinal);
         if (baseIds.Count == 0) throw new RuntimeInstallerException("Runtime 基础组件声明为空。");
+        HashSet<string> knownIds = profile.Components
+            .Select(component => component.ComponentId).ToHashSet(StringComparer.Ordinal);
+        if (startupIds.Any(componentId =>
+            string.IsNullOrWhiteSpace(componentId) ||
+            baseIds.Contains(componentId) ||
+            !knownIds.Contains(componentId)) ||
+            startupIds.Count != startupIds.Distinct(StringComparer.Ordinal).Count())
+        {
+            throw new RuntimeInstallerException(
+                "Runtime 启动安装范围包含无效组件，未更改运行环境。");
+        }
         return new RuntimeInstallSelection
         {
-            InstallComponentIds = profile.Components
-                .Where(component => !baseIds.Contains(component.ComponentId) && component.ActualState == "ready")
-                .Select(component => component.ComponentId).ToArray(),
+            InstallComponentIds = startupIds.ToArray(),
         };
     }
 

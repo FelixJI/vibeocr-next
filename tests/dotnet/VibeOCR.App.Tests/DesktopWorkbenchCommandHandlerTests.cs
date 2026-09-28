@@ -162,26 +162,85 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       var published = new List<WorkbenchState>();
       handler.StateChanged += published.Add;
 
-      WorkbenchCommandOutcome started = await handler.ExecuteAsync(
-        new GenerateQrCodeCommand("hello"),
-        TestContext.Current.CancellationToken);
-      QrCodeWorkbenchState busy = Assert.IsType<QrCodeWorkbenchState>(
-        Assert.Single(started.States));
-      Assert.True(busy.IsBusy);
-      Assert.Equal("qrcode.running", busy.StatusCode);
+      try
+      {
+        WorkbenchCommandOutcome started = await handler.ExecuteAsync(
+          new GenerateQrCodeCommand("hello"),
+          TestContext.Current.CancellationToken);
+        Assert.Empty(started.States);
+        QrCodeWorkbenchState busy = Assert.IsType<QrCodeWorkbenchState>(
+          Assert.Single(published));
+        Assert.True(busy.IsBusy);
+        Assert.Equal("qrcode.running", busy.StatusCode);
 
-      WorkbenchCommandOutcome cancelled = await handler.ExecuteAsync(
-        new CancelQrCodeCommand(),
-        TestContext.Current.CancellationToken);
-      QrCodeWorkbenchState idle = Assert.IsType<QrCodeWorkbenchState>(
-        Assert.Single(cancelled.States));
-      Assert.False(idle.IsBusy);
-      Assert.Equal("qrcode.cancelled", idle.StatusCode);
-
-      client.CompleteSuccessfully();
+        WorkbenchCommandOutcome cancelled = await handler.ExecuteAsync(
+          new CancelQrCodeCommand(),
+          TestContext.Current.CancellationToken);
+        QrCodeWorkbenchState idle = Assert.IsType<QrCodeWorkbenchState>(
+          Assert.Single(cancelled.States));
+        Assert.False(idle.IsBusy);
+        Assert.Equal("qrcode.cancelled", idle.StatusCode);
+      }
+      finally
+      {
+        client.CompleteSuccessfully();
+      }
       await client.Completion;
       await handler.DisposeAsync();
-      Assert.Empty(published);
+      Assert.Single(published);
+    }
+    finally
+    {
+      Directory.Delete(resourceRoot, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task QrCodeGenerateWithoutAttachedSupervisorPublishesFailure()
+  {
+    string resourceRoot = Path.Combine(
+      Path.GetTempPath(), $"vibeocr-handler-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      var client = new DeferredQrCodeClient();
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => new QrCodeViewModel(client, new EmptyQrCodeInput()),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker,
+        resourceRoot,
+        static () => 0,
+        annotationStore);
+      await using var application = new WorkbenchApplication(
+        ["qrcode.generate"], WorkbenchRoute.QrCode, handler);
+      using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+      await using IAsyncEnumerator<WorkbenchStateEnvelope> updates = application
+        .SubscribeAsync(0, timeout.Token)
+        .GetAsyncEnumerator(timeout.Token);
+
+      WorkbenchCommandReceipt receipt = await application.ExecuteAsync(
+        new WorkbenchCommandEnvelope(Guid.NewGuid(), new GenerateQrCodeCommand("hello")),
+        timeout.Token);
+
+      Assert.True(receipt.Ok);
+      Assert.True(await updates.MoveNextAsync());
+      QrCodeWorkbenchState busy = Assert.IsType<QrCodeWorkbenchState>(updates.Current.State);
+      Assert.True(busy.IsBusy);
+      Assert.Equal("qrcode.running", busy.StatusCode);
+      Assert.True(await updates.MoveNextAsync());
+      QrCodeWorkbenchState failed = Assert.IsType<QrCodeWorkbenchState>(updates.Current.State);
+      Assert.False(failed.IsBusy);
+      Assert.Equal("qrcode.failed", failed.StatusCode);
+      Assert.Null(failed.GeneratedResource);
+      Assert.Equal(receipt.Revision, updates.Current.Revision);
     }
     finally
     {
@@ -221,19 +280,22 @@ public sealed class DesktopWorkbenchCommandHandlerTests
         inferenceAttached: () => deferred.IsAttached);
       var terminal = new TaskCompletionSource<RecognitionWorkbenchState>(
         TaskCreationOptions.RunContinuationsAsynchronously);
+      var published = new List<RecognitionWorkbenchState>();
       handler.StateChanged += state =>
       {
-        if (state is RecognitionWorkbenchState { IsBusy: false } final)
+        if (state is RecognitionWorkbenchState recognitionState)
         {
-          terminal.TrySetResult(final);
+          published.Add(recognitionState);
+          if (recognitionState is { IsBusy: false })
+            terminal.TrySetResult(recognitionState);
         }
       };
 
       WorkbenchCommandOutcome started = await handler.ExecuteAsync(
         new SelectRecognitionImageCommand(),
         TestContext.Current.CancellationToken);
-      Assert.True(Assert.IsType<RecognitionWorkbenchState>(Assert.Single(started.States))
-        .IsBusy);
+      Assert.Empty(started.States);
+      Assert.True(Assert.Single(published).IsBusy);
 
       // 后台识别在启动窗口内采集输入并在网关处等待 Attach，而不是失败。
       await inputs.Captured.Task.WaitAsync(

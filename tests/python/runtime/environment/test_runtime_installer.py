@@ -2284,6 +2284,124 @@ def test_ensure_reinstalls_when_scope_changes(
     assert len(calls) == 2
 
 
+def test_startup_selection_is_base_only_without_an_installed_marker(
+    tmp_path: Path,
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+    installer = RuntimeInstaller(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        accelerator="nvidia_cuda",
+        install_runner=_fake_install,
+    )
+
+    inspection = installer.inspect_snapshot(emit=False)
+
+    assert inspection.state.startup_install_component_ids == ()
+    assert inspection.state.integrity == "not-installed"
+
+
+def test_startup_selection_preserves_paddle_across_manifest_change(
+    tmp_path: Path,
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+    product = tmp_path / "product"
+
+    def probe(_root: Path, ids: tuple[str, ...], _profile: str) -> dict[str, bool]:
+        return dict.fromkeys(ids, True)
+
+    previous = RuntimeInstaller(
+        product_root=product,
+        component_lock=component,
+        runtime_manifest=manifest,
+        accelerator="nvidia_cuda",
+        install_component_ids=("paddleocr-cuda",),
+        install_runner=_fake_install,
+        component_probe=probe,
+    )
+    previous.ensure()
+    old_marker = json.loads(previous._marker().read_text(encoding="utf-8"))
+
+    updated_manifest = json.loads(manifest.read_text(encoding="utf-8"))
+    updated_manifest["product"]["source_sha"] = "1" * 40
+    manifest.write_text(json.dumps(updated_manifest), encoding="utf-8")
+    updated_lock = json.loads(component.read_text(encoding="utf-8"))
+    updated_lock["product"]["source_sha"] = "1" * 40
+    updated_lock["product"]["runtime_manifest_sha256"] = _sha(manifest.read_bytes())
+    component.write_text(json.dumps(updated_lock), encoding="utf-8")
+
+    current = RuntimeInstaller(
+        product_root=product,
+        component_lock=component,
+        runtime_manifest=manifest,
+        accelerator="nvidia_cuda",
+        install_runner=_fake_install,
+        component_probe=probe,
+    )
+    inspection = current.inspect_snapshot(emit=False)
+
+    assert inspection.state.integrity == "not-installed"
+    assert inspection.state.startup_install_component_ids == ("paddleocr-cuda",)
+    selected = RuntimeInstaller(
+        product_root=product,
+        component_lock=component,
+        runtime_manifest=manifest,
+        accelerator="nvidia_cuda",
+        install_component_ids=inspection.state.startup_install_component_ids,
+        install_runner=_fake_install,
+        component_probe=probe,
+    )
+    selected.ensure()
+    marker = json.loads(selected._marker().read_text(encoding="utf-8"))
+    assert marker["requested_component_ids"] == ["paddleocr-cuda"]
+    assert "paddleocr-cuda" in marker["component_ids"]
+    assert marker["manifest_sha256"] != old_marker["manifest_sha256"]
+    rollback = json.loads(
+        (product / "runtime.rollback" / ".installed.json").read_text(encoding="utf-8")
+    )
+    assert rollback["requested_component_ids"] == ["paddleocr-cuda"]
+
+
+@pytest.mark.parametrize("invalid_marker", ["malformed", "unsupported_component"])
+def test_startup_selection_rejects_unusable_prior_intent(
+    tmp_path: Path, invalid_marker: str
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+    previous = RuntimeInstaller(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        accelerator="nvidia_cuda",
+        install_component_ids=("paddleocr-cuda",),
+        install_runner=_fake_install,
+        component_probe=lambda _root, ids, _profile: dict.fromkeys(ids, True),
+    )
+    previous.ensure()
+    marker_path = previous._marker()
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    if invalid_marker == "malformed":
+        marker["component_ids"] = "paddleocr-cuda"
+    else:
+        marker["requested_component_ids"] = ["retired-cuda"]
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+
+    current = RuntimeInstaller(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        accelerator="nvidia_cuda",
+        install_runner=_fake_install,
+    )
+    inspection = current.inspect_snapshot(emit=False)
+    assert inspection.state.integrity == (
+        "not-installed" if invalid_marker == "malformed" else "verified"
+    )
+    assert inspection.state.startup_install_component_ids is None
+    with pytest.raises(RuntimeInstallError, match="installed marker|startup selection"):
+        current.ensure()
+
+
 def test_unknown_install_component_fails_closed(tmp_path: Path) -> None:
     from vibeocr.runtime.environments.runtime_selection import RuntimeSelectionError
     from vibeocr.runtime_contracts import ErrorCode

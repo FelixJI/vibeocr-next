@@ -180,7 +180,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     cancellationToken.ThrowIfCancellationRequested();
     try
     {
-      WorkbenchState state = command switch
+      WorkbenchState? state = command switch
       {
         SelectRecognitionImageCommand => StartRecognition(
           viewModel => viewModel.RecognizeFileAsync(cancellationToken),
@@ -288,7 +288,8 @@ public sealed class DesktopWorkbenchCommandHandler :
         ExportDiagnosticsCommand => await ExportDiagnosticsAsync(cancellationToken),
         _ => throw new InvalidOperationException("Unsupported desktop workbench command."),
       };
-      return new WorkbenchCommandOutcome([state], null);
+      // A null state was already published before its background operation started.
+      return new WorkbenchCommandOutcome(state is null ? [] : [state], null);
     }
     catch (OperationCanceledException)
     {
@@ -345,14 +346,15 @@ public sealed class DesktopWorkbenchCommandHandler :
     false,
     recognition is null ? "recognition.ready" : RecognitionStatusCode(recognition));
 
-  private RecognitionWorkbenchState StartRecognition(
+  private RecognitionWorkbenchState? StartRecognition(
     Func<RecognitionViewModel, Task> action,
     CancellationToken cancellationToken)
   {
     recognition ??= recognitionFactory();
     long generation = Interlocked.Increment(ref recognitionGeneration);
-    Track(CompleteRecognitionAsync(action, generation, cancellationToken));
-    return RecognitionState(true, "recognition.running");
+    return PublishStartThenTrack(
+      RecognitionState(true, "recognition.running"),
+      () => CompleteRecognitionAsync(action, generation, cancellationToken));
   }
 
   private RecognitionWorkbenchState RecognitionState(
@@ -595,19 +597,20 @@ public sealed class DesktopWorkbenchCommandHandler :
     return BatchState(batch);
   }
 
-  private async Task<BatchWorkbenchState> StartBatchAsync(
+  private async Task<BatchWorkbenchState?> StartBatchAsync(
     CancellationToken cancellationToken)
   {
     batch ??= batchFactory();
     await EnsureSelectionLoadedAsync(cancellationToken);
     SynchronizeBatchMode(requireUsable: true);
     long generation = Interlocked.Increment(ref batchGeneration);
-    Track(CompleteBatchAsync(generation, cancellationToken));
-    return new BatchWorkbenchState(
+    BatchWorkbenchState start = new(
       true,
       batch.Items.Count,
       batch.CompletedCount,
       batch.FailedCount);
+    return PublishStartThenTrack(start,
+      () => CompleteBatchAsync(generation, cancellationToken));
   }
 
   private async Task CompleteBatchAsync(
@@ -791,12 +794,12 @@ public sealed class DesktopWorkbenchCommandHandler :
     return PdfState(viewModel);
   }
 
-  private PdfWorkbenchState StartPdfOcr(CancellationToken cancellationToken)
+  private PdfWorkbenchState? StartPdfOcr(CancellationToken cancellationToken)
   {
     pdf ??= pdfFactory();
     long generation = Interlocked.Increment(ref pdfGeneration);
-    Track(CompletePdfOcrAsync(generation, cancellationToken));
-    return PdfState(pdf) with { IsBusy = true };
+    return PublishStartThenTrack(PdfState(pdf) with { IsBusy = true },
+      () => CompletePdfOcrAsync(generation, cancellationToken));
   }
 
   private async Task CompletePdfOcrAsync(
@@ -875,23 +878,21 @@ public sealed class DesktopWorkbenchCommandHandler :
     return await PdfStateAsync(pdf, cancellationToken);
   }
 
-  private QrCodeWorkbenchState StartQrCode(
+  private QrCodeWorkbenchState? StartQrCode(
     Func<QrCodeViewModel, Task> action,
     bool publishGeneratedImage,
     CancellationToken cancellationToken)
   {
     qrCode ??= qrCodeFactory();
     long generation = Interlocked.Increment(ref qrCodeGeneration);
-    Track(CompleteQrCodeAsync(
-      action,
-      publishGeneratedImage,
-      generation,
-      cancellationToken));
-    return QrCodeState(qrCode) with
+    QrCodeWorkbenchState start = QrCodeState(qrCode) with
     {
       IsBusy = true,
       StatusCode = "qrcode.running",
     };
+    return PublishStartThenTrack(start,
+      () => CompleteQrCodeAsync(
+        action, publishGeneratedImage, generation, cancellationToken));
   }
 
   private async Task CompleteQrCodeAsync(
@@ -923,7 +924,10 @@ public sealed class DesktopWorkbenchCommandHandler :
       if (generation == Volatile.Read(ref qrCodeGeneration))
       {
         generatedQrResource = nextGeneratedResource;
-        StateChanged?.Invoke(QrCodeState(qrCode!));
+        QrCodeWorkbenchState state = QrCodeState(qrCode!);
+        StateChanged?.Invoke(publishGeneratedImage && qrCode!.GenerateFailed
+          ? state with { StatusCode = "qrcode.failed" }
+          : state);
       }
     }
     catch (OperationCanceledException)
@@ -1238,11 +1242,11 @@ public sealed class DesktopWorkbenchCommandHandler :
 
   private void OnSettingsPropertyChanged(object? sender, PropertyChangedEventArgs args) => OnSettingsChanged();
 
-  private SettingsWorkbenchState StartRuntimeInstall(string planId, CancellationToken cancellationToken)
+  private SettingsWorkbenchState? StartRuntimeInstall(string planId, CancellationToken cancellationToken)
   {
     settings ??= CreateSettings();
-    Track(CompleteRuntimeInstallAsync(settings, planId, cancellationToken));
-    return SettingsState(settings);
+    return PublishStartThenTrack(SettingsState(settings),
+      () => CompleteRuntimeInstallAsync(settings, planId, cancellationToken));
   }
 
   private async Task CompleteRuntimeInstallAsync(SettingsViewModel model, string planId, CancellationToken cancellationToken)
@@ -1297,11 +1301,11 @@ public sealed class DesktopWorkbenchCommandHandler :
     return UpdateState();
   }
 
-  private UpdateWorkbenchState StartUpdateDownload(CancellationToken cancellationToken)
+  private UpdateWorkbenchState? StartUpdateDownload(CancellationToken cancellationToken)
   {
     long generation = Interlocked.Increment(ref updateGeneration);
-    Track(CompleteUpdateDownloadAsync(generation, cancellationToken));
-    return UpdateState() with { IsBusy = true };
+    return PublishStartThenTrack(UpdateState() with { IsBusy = true },
+      () => CompleteUpdateDownloadAsync(generation, cancellationToken));
   }
 
   private async Task CompleteUpdateDownloadAsync(
@@ -1331,6 +1335,14 @@ public sealed class DesktopWorkbenchCommandHandler :
         StateChanged?.Invoke(UpdateState());
       }
     }
+  }
+
+  private TState? PublishStartThenTrack<TState>(TState start, Func<Task> operation)
+    where TState : WorkbenchState
+  {
+    StateChanged?.Invoke(start);
+    Track(operation());
+    return null;
   }
 
   private void Track(Task operation)

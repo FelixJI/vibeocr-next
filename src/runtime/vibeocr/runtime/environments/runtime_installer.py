@@ -115,6 +115,7 @@ class RuntimeState:
     backend_version: str
     integrity: str
     source: dict[str, str]
+    startup_install_component_ids: tuple[str, ...] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1323,28 +1324,13 @@ class RuntimeInstaller:
         self.plan = ACCELERATOR_TO_PLAN[self.accelerator]
         requested_components = install_component_ids
         marker = self._marker_value()
-        if install_component_ids is None and marker is not None:
-            known_ids = {
-                item.component_id
-                for item in self.manifest.profiles[self.plan].components
-            }
-            base_ids = {
-                item.component_id
-                for item in self.manifest.profiles[BASE_PROFILE].components
-            }
-            suffix = "cuda" if self.accelerator == "nvidia_cuda" else "cpu"
-            previous_ids = migrate_legacy_component_ids(
-                ACCELERATOR_TO_PLAN.get(marker.get("accelerator"), self.plan),
-                tuple(marker.get("component_ids", [])),
-            )
-            mapped = [
-                re.sub(r"-(cpu|cuda)$", f"-{suffix}", item)
-                for item in previous_ids
-                if isinstance(item, str)
-            ]
-            install_component_ids = tuple(
-                item for item in mapped if item in known_ids - base_ids
-            )
+        self._startup_selection_error: RuntimeInstallError | None = None
+        if install_component_ids is None and self._marker().exists():
+            try:
+                install_component_ids = self._startup_install_component_ids(marker)
+            except RuntimeInstallError as exc:
+                self._startup_selection_error = exc
+                install_component_ids = ()
         self._selection = RuntimeSelectionPolicy.from_manifest(
             self.manifest
         ).plan_start(
@@ -1480,6 +1466,76 @@ class RuntimeInstaller:
         except (OSError, ValueError):
             return None
         return value if isinstance(value, dict) else None
+
+    def _startup_install_component_ids(
+        self, marker: dict[str, Any] | None
+    ) -> tuple[str, ...]:
+        """Recover only install intent; never confer current-manifest integrity."""
+        if not self._marker().exists():
+            return ()
+        if (
+            marker is None
+            or marker.get("schema_version") != 1
+            or not isinstance(marker.get("backend_version"), str)
+            or not marker["backend_version"]
+            or not isinstance(marker.get("manifest_sha256"), str)
+            or not _SHA256_RE.fullmatch(marker["manifest_sha256"])
+            or marker.get("accelerator") not in ACCELERATOR_TO_PLAN
+        ):
+            raise RuntimeInstallError("unusable installed marker for startup selection")
+        installed = marker.get("component_ids")
+        requested = marker.get("requested_component_ids")
+        if (
+            not isinstance(installed, list)
+            or not installed
+            or any(not isinstance(item, str) or not item for item in installed)
+            or len(set(installed)) != len(installed)
+            or (
+                requested is not None
+                and (
+                    not isinstance(requested, list)
+                    or any(not isinstance(item, str) or not item for item in requested)
+                    or len(set(requested)) != len(requested)
+                )
+            )
+        ):
+            raise RuntimeInstallError("unusable installed marker for startup selection")
+        previous_plan = ACCELERATOR_TO_PLAN[marker["accelerator"]]
+        previous_ids = migrate_legacy_component_ids(previous_plan, tuple(installed))
+        requested_ids = (
+            previous_ids
+            if requested is None
+            else migrate_legacy_component_ids(previous_plan, tuple(requested))
+        )
+        if requested is not None and not set(requested_ids).issubset(previous_ids):
+            raise RuntimeInstallError("unusable installed marker for startup selection")
+        suffix = "cuda" if self.accelerator == "nvidia_cuda" else "cpu"
+        mapped = tuple(
+            re.sub(r"-(cpu|cuda)$", f"-{suffix}", item) for item in requested_ids
+        )
+        known_ids = {
+            item.component_id for item in self.manifest.profiles[self.plan].components
+        }
+        if any(item not in known_ids for item in mapped):
+            raise RuntimeInstallError(
+                "installed marker startup selection is unsupported by this runtime"
+            )
+        base_ids = {
+            item.component_id
+            for item in self.manifest.profiles[BASE_PROFILE].components
+        }
+        selected = tuple(item for item in mapped if item not in base_ids)
+        try:
+            RuntimeSelectionPolicy.from_manifest(self.manifest).plan_start(
+                accelerator=self.accelerator,
+                install_component_ids=selected,
+                download_source_ids=None,
+            )
+        except RuntimeSelectionError as exc:
+            raise RuntimeInstallError(
+                "installed marker startup selection is unsupported by this runtime"
+            ) from exc
+        return selected
 
     def _integrity_ok(self) -> bool:
         python = _python_in(self.paths.runtime_root)
@@ -1684,6 +1740,12 @@ class RuntimeInstaller:
         ready = self._integrity_ok() and not self._drifted_component_ids(
             probe_results=probe_results
         )
+        try:
+            startup_install_component_ids = self._startup_install_component_ids(
+                self._marker_value()
+            )
+        except RuntimeInstallError:
+            startup_install_component_ids = None
         state = RuntimeState(
             status="ready" if ready else "missing",
             runtime_root=str(self.paths.runtime_root),
@@ -1692,6 +1754,7 @@ class RuntimeInstaller:
             backend_version=self.manifest.backend_version,
             integrity="verified" if ready else "not-installed",
             source=self._source,
+            startup_install_component_ids=startup_install_component_ids,
         )
         if emit and started:
             self._reporter.succeed(
@@ -1881,6 +1944,8 @@ class RuntimeInstaller:
         additional_blockers: tuple[dict[str, str], ...] = (),
         inherit_download_sources: bool = False,
     ) -> dict[str, Any]:
+        if self._startup_selection_error is not None:
+            raise self._startup_selection_error
         if CAPABILITY not in self._required_capabilities:
             raise RuntimeCapabilityUnavailable(
                 "preview requires runtime.install-plan.v1"
@@ -1899,6 +1964,8 @@ class RuntimeInstaller:
         with RuntimeStoreLock(
             self.paths.locks_root / "runtime-store.lock", timeout=self._lock_timeout
         ):
+            if self._startup_selection_error is not None:
+                raise self._startup_selection_error
             if self._plan_record is not None:
                 self._plan_record = read_plan(self.paths.state_root, self._plan_id)
                 bound_operation = self._plan_record.get("operation_id")

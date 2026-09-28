@@ -89,6 +89,79 @@ public sealed class RuntimeInstallerClientTests
     }
 
     [Fact]
+    public async Task StartupSelectionUsesInstallerIntentWhenOldComponentsAreDrifted()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-startup-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string manifest = await WriteStartupManifestAsync(root);
+            var runner = new QueueRunner(
+                new RuntimeInstallerProcessResult(
+                    0, StartupInspectEnvelope("""["paddleocr-cuda"]"""), ""),
+                new RuntimeInstallerProcessResult(0, LaunchEnvelope(), ""));
+            var client = new RuntimeInstallerClient(
+                Configuration() with { RuntimeManifest = manifest }, runner);
+
+            RuntimeInstallSelection selection = await client.ReadStartupSelectionAsync(
+                TestContext.Current.CancellationToken);
+            Assert.Equal(["paddleocr-cuda"], selection.InstallComponentIds);
+            await client.EnsureAsync(
+                selection, "startup-test", cancellationToken: TestContext.Current.CancellationToken);
+            JsonElement request = Request(runner.StartInfos[1]);
+            Assert.Equal(
+                "paddleocr-cuda",
+                request.GetProperty("install_component_ids")[0].GetString());
+        }
+        finally { TestDirectory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public async Task StartupSelectionKeepsFreshInstallBaseOnly()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-startup-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string manifest = await WriteStartupManifestAsync(root);
+            var client = new RuntimeInstallerClient(
+                Configuration() with { RuntimeManifest = manifest },
+                new StubRunner(new RuntimeInstallerProcessResult(
+                    0, StartupInspectEnvelope("[]"), "")));
+
+            RuntimeInstallSelection selection = await client.ReadStartupSelectionAsync(
+                TestContext.Current.CancellationToken);
+
+            Assert.NotNull(selection.InstallComponentIds);
+            Assert.Empty(selection.InstallComponentIds);
+        }
+        finally { TestDirectory.Delete(root, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("""["retired-cuda"]""")]
+    [InlineData("""["paddleocr-cuda","paddleocr-cuda"]""")]
+    public async Task StartupSelectionRejectsMissingOrInvalidInstallerIntent(
+        string? startupIds)
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-startup-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string manifest = await WriteStartupManifestAsync(root);
+            var client = new RuntimeInstallerClient(
+                Configuration() with { RuntimeManifest = manifest },
+                new StubRunner(new RuntimeInstallerProcessResult(
+                    0, StartupInspectEnvelope(startupIds), "")));
+
+            await Assert.ThrowsAsync<RuntimeInstallerException>(
+                () => client.ReadStartupSelectionAsync(TestContext.Current.CancellationToken));
+        }
+        finally { TestDirectory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public async Task EnsureProjectsRawMaintenanceSourceFieldsOutsideTheGeneratedHostDto()
     {
         JsonNode envelope = JsonNode.Parse(LaunchEnvelope())!;
@@ -1106,6 +1179,57 @@ public sealed class RuntimeInstallerClientTests
           "launch": null
         }
         """;
+
+    private static async Task<string> WriteStartupManifestAsync(string root)
+    {
+        string path = Path.Combine(root, "runtime-manifest.json");
+        await File.WriteAllTextAsync(
+            path,
+            """
+            {
+              "capabilities":["runtime.maintenance.v2","runtime.component-selection.v1"],
+              "profiles":{
+                "win-x64-base":{"components":[
+                  {"component_id":"rapidocr-base"},
+                  {"component_id":"runtime_host"}
+                ]},
+                "win-x64-cu126":{"components":[
+                  {"component_id":"rapidocr-base"},
+                  {"component_id":"paddleocr-cuda"},
+                  {"component_id":"runtime_host"}
+                ]}
+              }
+            }
+            """,
+            TestContext.Current.CancellationToken);
+        return path;
+    }
+
+    private static string StartupInspectEnvelope(string? startupIds)
+    {
+        JsonNode envelope = JsonNode.Parse(InspectEnvelope())!;
+        envelope["state"]!["status"] = "missing";
+        envelope["state"]!["integrity"] = "not-installed";
+        envelope["state"]!["accelerator"] = "nvidia_cuda";
+        if (startupIds is not null)
+        {
+            envelope["state"]!["startup_install_component_ids"] =
+                JsonNode.Parse(startupIds);
+        }
+        envelope["profile"] = JsonNode.Parse(
+            """
+            {
+              "profile_id":"win-x64-cu126",
+              "accelerator":"nvidia_cuda",
+              "components":[
+                {"component_id":"rapidocr-base","display_name":"RapidOCR","actual_state":"drifted","drift_reason":"identity_mismatch"},
+                {"component_id":"paddleocr-cuda","display_name":"PaddleOCR","actual_state":"drifted","drift_reason":"identity_mismatch"},
+                {"component_id":"runtime_host","display_name":"Runtime host","actual_state":"drifted","drift_reason":"identity_mismatch"}
+              ]
+            }
+            """);
+        return envelope.ToJsonString();
+    }
 
     private static string LaunchEnvelope(string operation = "ensure") =>
         $$"""
