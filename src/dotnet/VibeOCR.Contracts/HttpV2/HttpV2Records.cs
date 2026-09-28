@@ -84,6 +84,10 @@ public sealed record JobSnapshot
     public string? SourceJobId { get; init; }
     public PipelineSelection? Pipeline { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? EnvironmentId { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? EnvironmentRevision { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public ProgressSnapshot? Progress { get; init; }
 }
 

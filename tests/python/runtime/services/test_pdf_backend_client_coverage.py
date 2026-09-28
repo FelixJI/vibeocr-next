@@ -5,6 +5,7 @@ mock httpx + subprocess，不启动真实后端子进程。
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -15,6 +16,27 @@ from vibeocr.runtime.documents.pdf_backend_client import (
     PdfBackendClient,
     PdfBackendError,
 )
+
+
+def test_managed_pdf_worker_uses_current_code_and_same_venv(monkeypatch):
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_ID", "named")
+    monkeypatch.setenv("VIBEOCR_PRODUCT_CODE_ROOT", "C:\\product\\runtime-code")
+    monkeypatch.setenv("PYTHONPATH", "C:\\untrusted")
+    observed = {}
+
+    def stop_before_start(args, **kwargs):
+        observed.update(args=args, env=kwargs["env"])
+        raise RuntimeError("captured")
+
+    monkeypatch.setattr(
+        "vibeocr.runtime.documents.pdf_backend_client.subprocess.Popen",
+        stop_before_start,
+    )
+    with pytest.raises(RuntimeError, match="captured"):
+        PdfBackendClient().start()
+    assert observed["args"][:4] == [sys.executable, "-I", "-B", "-c"]
+    assert "vibeocr.runtime.documents.pdf_backend_process" in observed["args"][4]
+    assert "PYTHONPATH" not in observed["env"]
 
 
 def _mock_resp(status=200, json_data=None, content=b"", text=None, reason="OK"):

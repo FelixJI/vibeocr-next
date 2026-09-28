@@ -48,6 +48,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       "qrcode.openUrl",
       "about.openProject",
       "runtime.refresh",
+      "runtime.environments",
       "settings.shell",
       "settings.hotkeys",
       "settings.floatingToolbar",
@@ -311,6 +312,22 @@ public sealed class DesktopWorkbenchCommandHandler :
           cancellationToken),
         OpenProjectPageCommand => await OpenProjectPageAsync(cancellationToken),
         RefreshRuntimeCommand => await RefreshRuntimeAsync(cancellationToken),
+        CreateEnvironmentCommand create => await RunEnvironmentAsync(
+          environment => environment.CreateAsync(create.Name, cancellationToken), cancellationToken),
+        PreviewEnvironmentInstallCommand preview => await RunEnvironmentAsync(
+          environment => environment.PreviewAsync(preview.EnvironmentId, preview.Recipe,
+            preview.SourceId, cancellationToken), cancellationToken),
+        ConfirmEnvironmentInstallCommand confirmEnvironment => StartEnvironmentOperation(
+          environment => environment.InstallAsync(confirmEnvironment.PlanId,
+            confirmEnvironment.SourceId, cancellationToken)),
+        CancelEnvironmentInstallCommand => CancelEnvironmentInstall(),
+        InvalidateEnvironmentPlanCommand => InvalidateEnvironmentPlan(),
+        SwitchEnvironmentCommand switchEnvironment => StartEnvironmentOperation(
+          environment => environment.SwitchAsync(switchEnvironment.EnvironmentId, cancellationToken)),
+        DeleteEnvironmentCommand deleteEnvironment => await RunEnvironmentAsync(
+          environment => environment.DeleteAsync(deleteEnvironment.EnvironmentId, cancellationToken), cancellationToken),
+        RepairEmptyEnvironmentCommand repair => await RunEnvironmentAsync(
+          environment => environment.RepairEmptyAsync(repair.EnvironmentId, cancellationToken), cancellationToken),
         SetThemeCommand setTheme => SetTheme(setTheme),
         SetStartupCommand startup => SetStartup(startup),
         SetActionHotkeyCommand setActionHotkey => SetActionHotkey(setActionHotkey),
@@ -393,7 +410,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     }
     catch (Exception error) when (
       error is IOException or UnauthorizedAccessException or InvalidOperationException or
-        WorkbenchAnnotationAccessException)
+        WorkbenchAnnotationAccessException or RuntimeInstallerException)
     {
       return new WorkbenchCommandOutcome(
         [],
@@ -2003,6 +2020,48 @@ public sealed class DesktopWorkbenchCommandHandler :
     return SettingsState(settings);
   }
 
+  private async Task<SettingsWorkbenchState> RunEnvironmentAsync(
+    Func<ManagedEnvironmentSettings, Task> action,
+    CancellationToken cancellationToken)
+  {
+    cancellationToken.ThrowIfCancellationRequested();
+    settings ??= CreateSettings();
+    ManagedEnvironmentSettings environments = settings.Environments
+      ?? throw new InvalidOperationException("运行环境管理器不可用。");
+    await action(environments);
+    return SettingsState(settings);
+  }
+
+  private SettingsWorkbenchState? StartEnvironmentOperation(
+    Func<ManagedEnvironmentSettings, Task> action)
+  {
+    settings ??= CreateSettings();
+    ManagedEnvironmentSettings environments = settings.Environments
+      ?? throw new InvalidOperationException("运行环境管理器不可用。");
+    return PublishStartThenTrack(SettingsState(settings), async () =>
+    {
+      try { await action(environments); }
+      catch (Exception error) when (error is not OperationCanceledException)
+      {
+        AppLog.Warn($"Environment operation failed: {error.GetType().Name}: {error.Message}");
+      }
+    });
+  }
+
+  private SettingsWorkbenchState CancelEnvironmentInstall()
+  {
+    settings ??= CreateSettings();
+    settings.Environments?.CancelInstall();
+    return SettingsState(settings);
+  }
+
+  private SettingsWorkbenchState InvalidateEnvironmentPlan()
+  {
+    settings ??= CreateSettings();
+    settings.Environments?.InvalidatePlan();
+    return SettingsState(settings);
+  }
+
   private SettingsWorkbenchState SetTheme(SetThemeCommand command)
   {
     theme = command.Theme;
@@ -2097,6 +2156,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       command.Kind,
       command.SourceId,
       cancellationToken);
+    if (command.Kind == "package_index") settings.Environments?.InvalidatePlan();
     return SettingsState(settings);
   }
 
@@ -2254,6 +2314,8 @@ public sealed class DesktopWorkbenchCommandHandler :
   private SettingsViewModel CreateSettings()
   {
     SettingsViewModel model = settingsFactory();
+    if (model.Environments is { } environments)
+      environments.StateChanged += OnSettingsChanged;
     model.Maintenance.StateChanged += OnSettingsChanged;
     model.RuntimeStatus.PropertyChanged += OnSettingsPropertyChanged;
     model.PropertyChanged += OnSettingsPropertyChanged;
@@ -2302,6 +2364,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private SettingsWorkbenchState? StartRuntimeInstall(string planId, CancellationToken cancellationToken)
   {
     settings ??= CreateSettings();
+    RejectLegacyMaintenanceForManagedSettings(settings);
     return PublishStartThenTrack(SettingsState(settings),
       () => CompleteRuntimeInstallAsync(settings, planId, cancellationToken));
   }
@@ -2320,6 +2383,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     CancellationToken cancellationToken)
   {
     settings ??= CreateSettings();
+    RejectLegacyMaintenanceForManagedSettings(settings);
     await settings.PreviewInstallAsync(cancellationToken);
     return SettingsState(settings);
   }
@@ -2335,8 +2399,15 @@ public sealed class DesktopWorkbenchCommandHandler :
     CancellationToken cancellationToken)
   {
     settings ??= CreateSettings();
+    RejectLegacyMaintenanceForManagedSettings(settings);
     await settings.RetryMaintenanceAsync(cancellationToken);
     return SettingsState(settings);
+  }
+
+  private static void RejectLegacyMaintenanceForManagedSettings(SettingsViewModel model)
+  {
+    if (model.Environments is not null)
+      throw new InvalidOperationException("请为指定环境预览锁定配方后安装。");
   }
 
   private async Task<UpdateWorkbenchState> CheckUpdateAsync(
@@ -2670,7 +2741,32 @@ public sealed class DesktopWorkbenchCommandHandler :
         connection.Mode,
         connection.ApiUrl,
         connection.HasApiKey)
-      : null);
+      : null,
+    Environments: viewModel.Environments?.Snapshot?.Environments.Select(item =>
+      new SettingsEnvironmentState(
+        item.Id, item.Name, item.Revision, item.Kind, item.Status,
+        item.PythonState, item.DependencyState, item.EngineState, item.ModelState,
+        item.ServiceState,
+        item.ConfiguredRecognitionTypes ?? [],
+        item.TargetDevice, item.ActualDevice, item.Reason,
+        item.PythonVersion, item.Abi, item.Python, item.Path, item.DiskBytes,
+        item.LastInstallFailure is { } failure
+          ? new SettingsEnvironmentInstallFailureState(
+            failure.Phase, failure.EnvironmentRevision, failure.Recipe,
+            failure.ReasonCode, failure.NextAction, failure.Detail)
+          : null)).ToArray(),
+    ActiveEnvironmentId: viewModel.Environments?.Snapshot?.ActiveId,
+    EnvironmentPlan: viewModel.Environments?.Plan is { } environmentPlan
+      ? new SettingsEnvironmentPlanState(
+        environmentPlan.PlanId, environmentPlan.EnvironmentId,
+        environmentPlan.Recipe, environmentPlan.SourceIds,
+        environmentPlan.Dependencies ?? [],
+        environmentPlan.RequestedRecipe ?? environmentPlan.Recipe)
+      : null,
+    EnvironmentStatus: viewModel.Environments?.Status ?? "",
+    EnvironmentBusy: viewModel.Environments?.IsBusy ?? false,
+    EnvironmentPackageSourceIds: viewModel.Environments?.Snapshot?.PackageSourceIds,
+    EnvironmentCanCancelInstall: viewModel.Environments?.CanCancelInstall ?? false);
 
   private UpdateWorkbenchState UpdateState() => new(
     update.Value.IsBusy,
@@ -2767,6 +2863,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     }
     if (settings is not null)
     {
+      if (settings.Environments is { } environments)
+        environments.StateChanged -= OnSettingsChanged;
       settings.Maintenance.StateChanged -= OnSettingsChanged;
       settings.RuntimeStatus.PropertyChanged -= OnSettingsPropertyChanged;
       settings.PropertyChanged -= OnSettingsPropertyChanged;

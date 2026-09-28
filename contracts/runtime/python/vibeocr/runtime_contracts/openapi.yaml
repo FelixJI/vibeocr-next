@@ -2688,6 +2688,20 @@
               "null"
             ]
           },
+          "environment_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1
+          },
+          "environment_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
           "pipeline": {
             "oneOf": [
               {

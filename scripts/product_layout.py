@@ -464,7 +464,42 @@ def _runtime_product_closure(backend_release_dir: Path) -> tuple[Path, ...]:
         )
     names.update(base_packs)
 
-    closure = tuple(source / name for name in sorted(names))
+    code_root = source / "runtime-code"
+    if not code_root.is_dir():
+        raise ProductLayoutError(
+            "layout.invalid-path: runtime code root is unavailable"
+        )
+    if code_root.is_symlink() or getattr(
+        code_root.lstat(), "st_file_attributes", 0
+    ) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+        raise ProductLayoutError(
+            "layout.invalid-path: runtime code root is unavailable"
+        )
+    product = _require_mapping(runtime_manifest.get("product"), "runtime product")
+    version = product.get("version")
+    if not isinstance(version, str):
+        raise ProductLayoutError("layout.invalid-descriptor: runtime product version")
+    required_code = (
+        code_root / "vibeocr/runtime/__init__.py",
+        code_root / "vibeocr/runtime/host/main.py",
+        code_root / "vibeocr/runtime/recognition/paddle_worker.py",
+        code_root / "vibeocr/runtime/documents/pdf_backend_process.py",
+        code_root / "vibeocr/runtime/environments/dependency_profiles.json",
+        code_root / "vibeocr/runtime_contracts/__init__.py",
+        code_root / f"vibeocr_next_runtime-{version}.dist-info/METADATA",
+    )
+    for path in required_code:
+        _require_non_reparse_regular_file(path)
+    code_entries = tuple(code_root.rglob("*"))
+    if any(
+        path.is_symlink()
+        or getattr(path.lstat(), "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        for path in code_entries
+    ):
+        raise ProductLayoutError("layout.invalid-path: runtime code contains a link")
+    code_files = tuple(path for path in code_entries if path.is_file())
+    closure = tuple(source / name for name in sorted(names)) + code_files
     for path in closure:
         _require_non_reparse_regular_file(path)
     load_runtime_manifest(runtime_manifest_path)
@@ -516,8 +551,11 @@ def stage_product_layout(
         shutil.copyfile(license_file.resolve(strict=True), staging / "LICENSE")
         shutil.copyfile(changelog_file.resolve(strict=True), staging / "CHANGELOG.md")
 
-        for path in _runtime_product_closure(backend_release_dir):
-            shutil.copyfile(path, backend_root / path.name)
+        backend_source = backend_release_dir.resolve(strict=True)
+        for path in _runtime_product_closure(backend_source):
+            destination = backend_root / path.relative_to(backend_source)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, destination)
         runtime_manifest = json.loads(
             (backend_root / "runtime-manifest.json").read_text(encoding="utf-8")
         )

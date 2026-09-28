@@ -486,6 +486,20 @@ def parse_job_snapshot(payload: dict[str, Any]) -> JobSnapshot:
         if cancel_mode_raw is not None
         else None
     )
+    environment_id = payload.get("environment_id")
+    environment_revision = payload.get("environment_revision")
+    if (environment_id is None) != (environment_revision is None) or (
+        environment_id is not None
+        and (
+            not isinstance(environment_id, str)
+            or not environment_id
+            or type(environment_revision) is not int
+            or environment_revision < 1
+        )
+    ):
+        raise ContractError(
+            "job environment binding must be an ID and positive revision"
+        )
     return JobSnapshot(
         job_id=payload["job_id"],
         kind=_require_enum(JobKind, payload["kind"], "job kind"),
@@ -508,6 +522,8 @@ def parse_job_snapshot(payload: dict[str, Any]) -> JobSnapshot:
         result_available=bool(payload.get("result_available", False)),
         request_id=payload.get("request_id"),
         source_job_id=payload.get("source_job_id"),
+        environment_id=environment_id,
+        environment_revision=environment_revision,
         pipeline=(
             parse_pipeline_selection(payload["pipeline"])
             if payload.get("pipeline") is not None

@@ -14,6 +14,7 @@ using VibeOCR.App.ViewModels;
 using VibeOCR.App.Web;
 using VibeOCR.App.Workbench;
 using VibeOCR.Platform.Bootstrap;
+using VibeOCR.Platform.Inference;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
 using Windows.Storage;
@@ -65,7 +66,11 @@ public sealed partial class MainWindow : Window
   private readonly Func<string?>? smokeLastJobId;
   private readonly Func<int>? smokeStartupEnsureAttempts;
   private readonly Func<bool>? smokeInferenceAttached;
+  private readonly Func<ManagedEnvironmentList?>? smokeEnvironmentSnapshot;
+  private readonly Func<ManagedEnvironmentSession?>? smokeManagedSession;
+  private readonly Func<int>? smokeInstallAttempts;
   private bool screenshotSmokeStarted;
+  private bool managedEnvironmentSmokeStarted;
   private bool initialized;
   private WorkbenchRoute currentRoute = WorkbenchRoute.Recognition;
 
@@ -86,6 +91,9 @@ public sealed partial class MainWindow : Window
     Func<int>? smokeSubmitAttempts = null,
     Func<string?>? smokeLastJobId = null,
     Func<int>? smokeStartupEnsureAttempts = null,
+    Func<ManagedEnvironmentList?>? smokeEnvironmentSnapshot = null,
+    Func<ManagedEnvironmentSession?>? smokeManagedSession = null,
+    Func<int>? smokeInstallAttempts = null,
     ShellActionDispatcher? shellActions = null)
   {
     this.diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
@@ -103,6 +111,9 @@ public sealed partial class MainWindow : Window
     this.smokeSubmitAttempts = smokeSubmitAttempts;
     this.smokeLastJobId = smokeLastJobId;
     this.smokeStartupEnsureAttempts = smokeStartupEnsureAttempts;
+    this.smokeEnvironmentSnapshot = smokeEnvironmentSnapshot;
+    this.smokeManagedSession = smokeManagedSession;
+    this.smokeInstallAttempts = smokeInstallAttempts;
     smokeInferenceAttached = inferenceAttached;
 
     resourceRoot = Path.Combine(layout.DataRoot, "web-resources");
@@ -403,6 +414,12 @@ public sealed partial class MainWindow : Window
       {
         screenshotSmokeStarted = true;
         _ = CompleteTextSelectionE2eSmokeAsync();
+      }
+      if (!managedEnvironmentSmokeStarted &&
+          Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "managed-environment-e2e")
+      {
+        managedEnvironmentSmokeStarted = true;
+        _ = CompleteManagedEnvironmentE2eSmokeAsync();
       }
     }
     AppLog.Info($"Web workbench: {state}");

@@ -88,6 +88,8 @@ public sealed class HttpV2JobInterfaceContractTests
             State = JobState.Queued,
             RequestId = "req-1",
             SourceJobId = "job-0",
+            EnvironmentId = "env-a",
+            EnvironmentRevision = 2,
             Pipeline = new PipelineSelection { PipelineId = "OCR" },
             Items = [item],
         };
@@ -101,6 +103,8 @@ public sealed class HttpV2JobInterfaceContractTests
         Assert.Null(parsedRef.Items[0].SourceItemId);
         Assert.Equal("req-1", parsedSnapshot.RequestId);
         Assert.Equal("job-0", parsedSnapshot.SourceJobId);
+        Assert.Equal("env-a", parsedSnapshot.EnvironmentId);
+        Assert.Equal(2, parsedSnapshot.EnvironmentRevision);
         Assert.Equal("OCR", parsedSnapshot.Pipeline!.PipelineId);
         Assert.Equal(1, parsedSnapshot.Pipeline.OptionsVersion);
     }

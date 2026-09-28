@@ -78,6 +78,29 @@ def _verify_velopack_feed(artifacts: Path, version: str) -> tuple[Path, Path | N
     return full, delta if delta.is_file() else None
 
 
+def _verify_runtime_code(product_root: Path, version: str) -> None:
+    code_root = product_root / "runtime/backend/runtime-code"
+    script = (
+        "import importlib.metadata,sys\n"
+        "from pathlib import Path\n"
+        "root=Path(sys.argv[1]).resolve()\n"
+        "sys.path.insert(0,str(root))\n"
+        "import vibeocr.runtime.host.main as host\n"
+        "import vibeocr.runtime.environments.env_config as config\n"
+        "import vibeocr.runtime_contracts as contracts\n"
+        "assert all(Path(module.__file__).resolve().is_relative_to(root) "
+        "for module in (host,config,contracts))\n"
+        "assert Path(config.__file__).with_name('dependency_profiles.json').is_file()\n"
+        "assert importlib.metadata.version('vibeocr-next-runtime')==sys.argv[2]\n"
+    )
+    subprocess.run(
+        [sys.executable, "-I", "-B", "-c", script, str(code_root), version],
+        check=True,
+        timeout=30,
+        cwd=product_root,
+    )
+
+
 def verify(artifacts: Path, version: str) -> None:
     portable_name = f"VibeOCRNext-v{version}-win-x64.zip"
     names = verify_release_assets(
@@ -128,6 +151,7 @@ def verify(artifacts: Path, version: str) -> None:
         )
         if embedded_identity != identity:
             raise ValueError("Portable product identity differs from release asset")
+        _verify_runtime_code(product_root, version)
         subprocess.run(
             [
                 str(product_root / "VibeOCR.exe"),

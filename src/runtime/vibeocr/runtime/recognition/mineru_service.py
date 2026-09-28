@@ -189,6 +189,8 @@ class MinerUService(metaclass=SingletonMeta):
         1. 嵌入式 Python（便携模式）
         2. 当前 Python 解释器（开发模式）
         """
+        if os.environ.get("VIBEOCR_MANAGED_ENVIRONMENT_ID"):
+            return Path(sys.executable)
         from vibeocr.runtime.environments.env_manager import (
             get_embedded_python,
             get_project_root,
@@ -227,6 +229,7 @@ class MinerUService(metaclass=SingletonMeta):
         ]
 
         env = os.environ.copy()
+        env.pop("PYTHONPATH", None)
         # A separate home leaves MinerU 3 config and model paths untouched.
         from vibeocr.runtime.environments.env_manager import get_project_root
 

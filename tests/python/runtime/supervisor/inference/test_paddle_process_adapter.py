@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from vibeocr.runtime.recognition.paddle_process_adapter import (
     PaddleProcessAdapter,
+    paddle_python,
 )
 
 
@@ -72,3 +73,25 @@ def test_broken_worker_pipe_discards_process():
     with pytest.raises(BrokenPipeError):
         adapter._exchange({"operation": "recognize"})
     assert adapter._process is None
+
+
+def test_managed_paddle_worker_uses_current_code_and_same_venv(monkeypatch):
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-cpu")
+    monkeypatch.setenv("VIBEOCR_PRODUCT_CODE_ROOT", "C:\\product\\runtime-code")
+    monkeypatch.setenv("PYTHONPATH", "C:\\untrusted")
+    assert paddle_python() == Path(sys.executable)
+    observed = {}
+
+    def stop_before_start(args, **kwargs):
+        observed.update(args=args, env=kwargs["env"])
+        raise RuntimeError("captured")
+
+    monkeypatch.setattr(
+        "vibeocr.runtime.recognition.paddle_process_adapter.subprocess.Popen",
+        stop_before_start,
+    )
+    with pytest.raises(RuntimeError, match="captured"):
+        PaddleProcessAdapter(Path(sys.executable))._start()
+    assert observed["args"][:4] == [sys.executable, "-I", "-B", "-c"]
+    assert "vibeocr.runtime.recognition.paddle_worker" in observed["args"][4]
+    assert "PYTHONPATH" not in observed["env"]

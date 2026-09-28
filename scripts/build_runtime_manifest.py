@@ -13,7 +13,8 @@ import re
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+import zipfile
+from pathlib import Path, PurePosixPath
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src" / "runtime"))
@@ -32,6 +33,51 @@ from vibeocr.runtime.environments.runtime_manifest import (  # noqa: E402
 
 _STABLE_SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 _FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _extract_product_runtime_code(wheel: Path, output_dir: Path, version: str) -> None:
+    """Stage the already bound wheel's Python code once in the product image."""
+    target_root = output_dir / "runtime-code"
+    target_root.mkdir()
+    dist_info = f"vibeocr_next_runtime-{version}.dist-info/"
+    with zipfile.ZipFile(wheel) as archive:
+        selected: set[str] = set()
+        for entry in archive.infolist():
+            name = entry.filename
+            relative = PurePosixPath(name)
+            if (
+                relative.is_absolute()
+                or ".." in relative.parts
+                or "\\" in name
+                or ":" in name
+            ):
+                raise ValueError("Runtime wheel contains an unsafe path")
+            if not name.startswith(
+                ("vibeocr/runtime/", "vibeocr/runtime_contracts/", dist_info)
+            ):
+                continue
+            if entry.is_dir():
+                continue
+            selected.add(name)
+            destination = target_root.joinpath(*relative.parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(entry) as source, destination.open("wb") as output:
+                shutil.copyfileobj(source, output)
+    if (
+        not {
+            "vibeocr/runtime/__init__.py",
+            "vibeocr/runtime/host/main.py",
+            "vibeocr/runtime/recognition/paddle_worker.py",
+            "vibeocr/runtime/documents/pdf_backend_process.py",
+            "vibeocr/runtime/environments/dependency_profiles.json",
+            "vibeocr/runtime_contracts/__init__.py",
+            f"{dist_info}METADATA",
+        }
+        <= selected
+    ):
+        raise ValueError("Runtime wheel lacks product entry modules or metadata")
+
+
 DEFAULT_CAPABILITIES = (
     "export.document.v1",
     "ocr.recognition.v2",
@@ -122,6 +168,7 @@ def _independent_scopes(
     base_packs: list[Path],
     *,
     isolated: bool,
+    mineru_cpu_lock: Path | None = None,
 ) -> list[dict[str, object]]:
     """Compose existing verified host/Paddle domains without new lock resolution."""
     if profile == "win-x64-base":
@@ -163,6 +210,8 @@ def _independent_scopes(
         )
         if cuda:
             add("paddle-gpu-runtime", [*base_ids, paddle, "gpu_runtime"], gpu_lock)
+    if profile == "win-x64-cpu" and mineru_cpu_lock is not None:
+        add("mineru-standalone", ["runtime_host", "mineru-cpu"], mineru_cpu_lock)
     return scopes
 
 
@@ -184,6 +233,7 @@ def build_runtime_manifest(
     capabilities: tuple[str, ...] = DEFAULT_CAPABILITIES,
     runtime_packs: dict[str, list[Path]] | None = None,
     paddle_locks: dict[str, Path] | None = None,
+    mineru_cpu_lock: Path | None = None,
 ) -> Path:
     if not _STABLE_SEMVER.fullmatch(version):
         raise ValueError("version must be stable SemVer")
@@ -218,6 +268,9 @@ def build_runtime_manifest(
         validate_requirements_lock(
             lock, profile=profile.replace("win-x64-", "win-x64-paddle-")
         )
+    if mineru_cpu_lock is not None:
+        mineru_cpu_lock = mineru_cpu_lock.resolve(strict=True)
+        validate_requirements_lock(mineru_cpu_lock, profile="win-x64-mineru-cpu")
     cu126_gpu_lock = cu126_gpu_lock.resolve(strict=True)
     validate_requirements_lock(
         cu126_gpu_lock, profile="win-x64-cu126", paddle_isolated=bool(paddle_locks)
@@ -225,6 +278,7 @@ def build_runtime_manifest(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     copied_runtime = _copy_exact(runtime_wheel, output_dir)
+    _extract_product_runtime_code(copied_runtime, output_dir, version)
     copied_python = _copy_exact(python_archive, output_dir)
     copied_installer = _copy_exact(installer_archive, output_dir)
     pack_inputs = runtime_packs or {}
@@ -244,6 +298,11 @@ def build_runtime_manifest(
     copied_paddle = {
         profile: _copy_exact(lock, output_dir) for profile, lock in paddle_locks.items()
     }
+    copied_mineru_cpu = (
+        _copy_exact(mineru_cpu_lock, output_dir)
+        if mineru_cpu_lock is not None
+        else None
+    )
 
     manifest = {
         "schema_version": 2,
@@ -305,6 +364,7 @@ def build_runtime_manifest(
                     copied_cu126_gpu_lock,
                     copied_packs.get("win-x64-base", []),
                     isolated=profile in copied_paddle,
+                    mineru_cpu_lock=copied_mineru_cpu,
                 ),
             }
             for profile in PROFILE_NAMES
@@ -328,6 +388,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cu126-gpu-lock", type=Path, required=True)
     parser.add_argument("--paddle-cpu-lock", type=Path, required=True)
     parser.add_argument("--paddle-cu126-lock", type=Path, required=True)
+    parser.add_argument("--mineru-cpu-lock", type=Path, required=True)
     parser.add_argument("--python-archive", type=Path, required=True)
     parser.add_argument("--python-version", default="3.13.15")
     parser.add_argument(
@@ -369,6 +430,7 @@ def main(argv: list[str] | None = None) -> int:
             "win-x64-cpu": args.paddle_cpu_lock,
             "win-x64-cu126": args.paddle_cu126_lock,
         },
+        mineru_cpu_lock=args.mineru_cpu_lock,
         python_archive=args.python_archive,
         python_version=args.python_version,
         python_source_url=args.python_source_url,

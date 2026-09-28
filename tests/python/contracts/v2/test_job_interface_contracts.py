@@ -22,6 +22,7 @@ from vibeocr.runtime_contracts import (
     SubmitRequest,
     parse_job_command,
     parse_job_ref,
+    parse_job_snapshot,
     parse_job_update,
     parse_submit_request,
 )
@@ -131,6 +132,8 @@ def test_job_update_roundtrip_is_atomic_and_keyed() -> None:
         ),
         event_sequence=3,
         request_id="req-1",
+        environment_id="env-a",
+        environment_revision=2,
         pipeline=PipelineSelection("OCR"),
     )
     update = JobUpdate(
@@ -152,8 +155,32 @@ def test_job_update_roundtrip_is_atomic_and_keyed() -> None:
 
     assert parsed.through_sequence == 3
     assert parsed.snapshot.request_id == "req-1"
+    assert (parsed.snapshot.environment_id, parsed.snapshot.environment_revision) == (
+        "env-a",
+        2,
+    )
     assert parsed.outcomes[0].item_id == "it-1"
     assert parsed.outcomes[0].payload == {"raw_text": ""}
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        {"environment_id": "env-a"},
+        {"environment_revision": 1},
+        {"environment_id": "env-a", "environment_revision": 0},
+    ],
+)
+def test_job_snapshot_rejects_incomplete_environment_binding(binding: dict) -> None:
+    payload = JobSnapshot(
+        job_id="job-1",
+        kind=JobKind.RECOGNITION,
+        priority=JobPriority.INTERACTIVE,
+        state=JobState.ACCEPTED,
+    ).to_payload()
+    payload.update(binding)
+    with pytest.raises(ContractError, match="environment binding"):
+        parse_job_snapshot(payload)
 
 
 def test_job_update_rejects_empty_success_payload() -> None:

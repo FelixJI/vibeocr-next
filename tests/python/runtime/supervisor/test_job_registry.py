@@ -41,6 +41,30 @@ def test_create_appends_accepted_event_and_id_is_unique() -> None:
     assert rec.events[0].stage == "accepted"
 
 
+def test_snapshot_reports_frozen_managed_environment_binding() -> None:
+    managed = JobRegistry(
+        instance_id="sup-managed", environment_id="env-a", environment_revision=2
+    )
+    record = managed.create(
+        kind=JobKind.RECOGNITION,
+        priority=JobPriority.INTERACTIVE,
+        items=_items(1),
+        progress_total=1,
+    )
+    snapshot = managed.snapshot(record.job_id)
+    assert (snapshot.environment_id, snapshot.environment_revision) == ("env-a", 2)
+    assert snapshot.to_payload()["environment_id"] == "env-a"
+    assert snapshot.to_payload()["environment_revision"] == 2
+
+    unmanaged = _make_registry().create(
+        kind=JobKind.RECOGNITION,
+        priority=JobPriority.INTERACTIVE,
+        items=_items(1),
+        progress_total=1,
+    )
+    assert "environment_id" not in unmanaged.snapshot().to_payload()
+
+
 def test_transition_validates_state_machine() -> None:
     reg = _make_registry()
     rec = reg.create(

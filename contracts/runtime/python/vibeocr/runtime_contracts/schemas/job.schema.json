@@ -51,6 +51,8 @@
     "result_available": {"type": "boolean"},
     "request_id": {"type": ["string", "null"]},
     "source_job_id": {"type": ["string", "null"]},
+    "environment_id": {"type": ["string", "null"], "minLength": 1},
+    "environment_revision": {"type": ["integer", "null"], "minimum": 1},
     "pipeline": {
       "oneOf": [
         {"type": "null"},

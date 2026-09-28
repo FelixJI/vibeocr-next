@@ -209,6 +209,8 @@ class JobSnapshot(TypedDict, total=False):
     result_available: NotRequired[bool]
     request_id: NotRequired[str | None]
     source_job_id: NotRequired[str | None]
+    environment_id: NotRequired[str | None]
+    environment_revision: NotRequired[int | None]
     pipeline: NotRequired[None | PipelineSelection]
 
 
