@@ -180,7 +180,10 @@ public sealed partial class MainWindow
     {
       ManagedEnvironment? current = smokeEnvironmentSnapshot!()?.Environments
         .SingleOrDefault(item => item.Id == environment.Id);
-      if (current?.Status == "installed") return;
+      if (current?.LastInstallFailure is { Phase: "failed" } failure)
+        throw new InvalidOperationException(
+          $"Environment install failed: {failure.ReasonCode}: {failure.Detail}");
+      if (current?.Status == "installed" && current.Revision > environment.Revision) return;
       if (current?.Status is "failed" or "unavailable")
         throw new InvalidOperationException($"Environment install failed: {current.Reason}");
       await Task.Delay(250, timeout.Token);
