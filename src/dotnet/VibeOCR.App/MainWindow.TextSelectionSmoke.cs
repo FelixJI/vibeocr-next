@@ -419,14 +419,16 @@ public sealed partial class MainWindow
         };
         const firstBox = first.getBoundingClientRect();
         const second = spans.find(node =>
-          Math.abs(node.getBoundingClientRect().y-firstBox.y) > firstBox.height/2);
+          node.firstChild.textContent.length > 1 && Math.abs(node.getBoundingClientRect().y-firstBox.y) > firstBox.height/2);
         if (!second) return null;
         const start = Math.max(0, first.firstChild.textContent.length-3);
+        // Stay inside the glyph run: the final caret may lie beyond its clipped OCR box.
+        const end = Math.min(3,second.firstChild.textContent.length-1);
         const range = document.createRange();
         range.setStart(first.firstChild,start);
-        range.setEnd(second.firstChild,Math.min(3,second.firstChild.textContent.length));
+        range.setEnd(second.firstChild,end);
         return {word:point(first,1),start:point(first,start),
-          end:point(second,Math.min(3,second.firstChild.textContent.length)),
+          end:point(second,end),
           cross:range.toString(), firstY:firstBox.y,
           secondY:second.getBoundingClientRect().y};
       })()
@@ -476,7 +478,7 @@ public sealed partial class MainWindow
         await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
           "window.getSelection()?.toString() ?? ''")) ?? string.Empty;
       if (selected != expected || string.IsNullOrWhiteSpace(selected))
-        throw new InvalidOperationException("WebView2 cross-line mouse selection mismatch.");
+        throw new InvalidOperationException($"WebView2 cross-line mouse selection mismatch (reverse={reverse}): {JsonSerializer.Serialize(selected)} / {JsonSerializer.Serialize(expected)}.");
     }
   }
 
