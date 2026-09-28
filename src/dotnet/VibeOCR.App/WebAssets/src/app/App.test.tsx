@@ -52,17 +52,10 @@ describe("AppShell", () => {
       screen.getByText("已保存 Ctrl+Alt+Q，但当前未注册生效"),
     ).toBeVisible();
     expect(screen.getByText(/该组合可能已被其他应用占用/)).toBeVisible();
-    expect(
-      screen.getByText(/全局快捷键在系统任意位置可用/),
-    ).toBeVisible();
+    expect(screen.getByText(/全局快捷键在系统任意位置可用/)).toBeVisible();
 
-    await user.type(
-      screen.getByLabelText("剪贴板识别新快捷键"),
-      "Ctrl+Alt+C",
-    );
-    await user.click(
-      screen.getByRole("button", { name: "应用 剪贴板识别" }),
-    );
+    await user.type(screen.getByLabelText("剪贴板识别新快捷键"), "Ctrl+Alt+C");
+    await user.click(screen.getByRole("button", { name: "应用 剪贴板识别" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.setActionHotkey",
       actionId: "clipboard_recognize",
@@ -138,9 +131,7 @@ describe("AppShell", () => {
       edge: "top",
       autoHide: false,
     });
-    await user.click(
-      screen.getByRole("checkbox", { name: "启用悬浮工具栏" }),
-    );
+    await user.click(screen.getByRole("checkbox", { name: "启用悬浮工具栏" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.setFloatingToolbarEnabled",
       enabled: false,

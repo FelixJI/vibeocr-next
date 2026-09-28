@@ -294,9 +294,7 @@ interface HotkeyActionOptionState {
 
 // 宿主回显的动作键位：configured 是配置值，registered 是实际生效的
 // 系统注册（为空表示被占用/未注册），二者可能不同。
-function hotkeyActions(
-  value: unknown,
-): readonly HotkeyActionOptionState[] {
+function hotkeyActions(value: unknown): readonly HotkeyActionOptionState[] {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is HotkeyActionOptionState => {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry))
@@ -324,9 +322,7 @@ interface FloatingToolbarOptionState {
   readonly error?: string | null;
 }
 
-function toolbarState(
-  value: unknown,
-): FloatingToolbarOptionState | undefined {
+function toolbarState(value: unknown): FloatingToolbarOptionState | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value))
     return undefined;
   const option = value as Partial<FloatingToolbarOptionState>;
@@ -1489,11 +1485,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
       description="管理快捷操作、运行环境与下载来源。识别模式在对应任务中选择。"
     >
       <div className="settings-grid">
-        <Panel
-          label="APPLICATION"
-          title="应用"
-          className="settings-app-panel"
-        >
+        <Panel label="APPLICATION" title="应用" className="settings-app-panel">
           <div className="setting-row">
             <Checkbox
               label="开机自启动"
@@ -2416,7 +2408,8 @@ function FloatingToolbarPanel({
         />
       </div>
       <p className="form-note">
-        当前状态：{toolbarVisibilityLabel(toolbar.visibility)}。主动隐藏不会被鼠标路过唤回，可从本页、托盘菜单或“悬浮栏显示/隐藏”快捷键找回；截图时工具栏与感应条会自动让位，结束后恢复原状。
+        当前状态：{toolbarVisibilityLabel(toolbar.visibility)}
+        。主动隐藏不会被鼠标路过唤回，可从本页、托盘菜单或“悬浮栏显示/隐藏”快捷键找回；截图时工具栏与感应条会自动让位，结束后恢复原状。
       </p>
       {toolbar.error ? (
         <p className="form-note" role="alert">
