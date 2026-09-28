@@ -314,6 +314,10 @@ async function pngPixels(page, png) {
 
 async function captureThroughHotkey(app, fixture, evidenceRoot) {
   const { page } = app;
+  const toolbarHandles = (await windows(app.child.pid))
+    .filter((item) => item.Visible && item.Handle !== app.main.Handle && area(item) > 1000)
+    .map((item) => item.Handle);
+  assert(toolbarHandles.length > 0, 'Enabled toolbar has no visible native window.');
   await watchScreenshotRevision(page);
   await native('hide', { AppPid: app.child.pid, Handle: app.main.Handle });
   assert(!(await windows(app.child.pid)).find((item) =>
@@ -337,6 +341,11 @@ async function captureThroughHotkey(app, fixture, evidenceRoot) {
   assert.equal(overlay.Bounds.Top, fixture.backgroundRect.top);
   assert.equal(overlay.Bounds.Right, fixture.backgroundRect.right);
   assert.equal(overlay.Bounds.Bottom, fixture.backgroundRect.bottom);
+  const duringCapture = await windows(app.child.pid);
+  assert(!duringCapture.some((item) => item.Handle === app.main.Handle && item.Visible),
+    'Edit hotkey exposed the main window during selection.');
+  assert(!duringCapture.some((item) => toolbarHandles.includes(item.Handle) && item.Visible),
+    'Toolbar or sensor remained visible during capture.');
   await native('hover', { AppPid: app.child.pid, X: x, Y: y });
   // The production UIA query has a 200 ms budget. One bounded settle period
   // lets the real overlay consume it; no retry or synthetic command injection.
@@ -357,6 +366,11 @@ async function captureThroughHotkey(app, fixture, evidenceRoot) {
       if (data[i] !== 22 || data[i + 1] !== 22 || data[i + 2] !== 22) changed++;
     return changed > 100;
   }, null, { timeout: 12000 });
+  const restoredWindows = await windows(app.child.pid);
+  assert(restoredWindows.some((item) => item.Handle === app.main.Handle && item.Visible),
+    'Completed edit capture did not show its editor window.');
+  assert(toolbarHandles.every((handle) => restoredWindows.some((item) =>
+    item.Handle === handle && item.Visible)), 'Toolbar did not resume after capture.');
   const before = await canvasOrange(page);
   assert(before.nonBackground > 1000, 'Real screenshot image never decoded in WebView2.');
   await page.getByRole('button', { name: '矩形', exact: true }).click();
@@ -392,6 +406,8 @@ async function captureThroughHotkey(app, fixture, evidenceRoot) {
     'Host screenshot session revision did not advance after editing.');
   fs.writeFileSync(path.join(evidenceRoot, 'synthetic-edited.png'), png);
   return { hotkey, overlayHandle: overlay.Handle,
+    mainHiddenDuringSelection: true, toolbarHiddenDuringSelection: true,
+    toolbarRestoredAfterSelection: true,
     background: fixture.backgroundRect, button, canvasBefore: before,
     canvasAfter: after, png: pixels, sessionId: revision.sessionId,
     revision: revision.revision };
