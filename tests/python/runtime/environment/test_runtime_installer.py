@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tarfile
+import threading
 import zipfile
 from pathlib import Path
 from uuid import uuid4
@@ -648,18 +649,190 @@ def test_active_job_reference_blocks_switch_install_and_delete(tmp_path: Path) -
         assert manager.list()["active_id"] == first["id"]
         with pytest.raises(ManagedEnvironmentError, match="active jobs"):
             manager.prepare_switch(second["id"])
-        with pytest.raises(ManagedEnvironmentError, match="active jobs"):
-            manager.delete(second["id"])
-        plan = manager.preview_install(second["id"], "rapidocr-cpu")
-        with pytest.raises(ManagedEnvironmentError, match="active jobs"):
-            manager.install(
-                plan["plan_id"], second["id"], "rapidocr-cpu", ("tuna-pypi",)
-            )
+        assert manager.preview_install(second["id"], "rapidocr-cpu")
     finally:
         references.release(job_id)
+    assert not (references.reference_root / f"{job_id}.lock").exists()
     manager.commit_switch(prepared)
     with pytest.raises(RuntimeLockTimeout, match="no longer active"):
         references.admit(str(uuid4()))
+
+
+def test_inactive_install_does_not_block_active_job_admission_or_target_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+    started = threading.Event()
+    finish = threading.Event()
+
+    def install(_python: Path, _scope, _source: str) -> None:
+        started.set()
+        assert finish.wait(10)
+
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+        install_runner=install,
+    )
+    active = manager.create("active")
+    target = manager.create("target")
+    manager.commit_switch(manager.prepare_switch(active["id"]))
+    plan = manager.preview_install(target["id"], "rapidocr-cpu")
+    original_probe = manager._probe
+    monkeypatch.setattr(
+        manager,
+        "_probe",
+        lambda record: (
+            {
+                "healthy": True,
+                "reason": None,
+                "python": str(manager._venv_python(manager._safe_path(record))),
+            }
+            if record["status"] == "installed"
+            else original_probe(record)
+        ),
+    )
+    installed: list[object] = []
+    worker = threading.Thread(
+        target=lambda: installed.append(
+            manager.install(
+                plan["plan_id"], target["id"], "rapidocr-cpu", ("tuna-pypi",)
+            )
+        ),
+        daemon=True,
+    )
+    worker.start()
+    admitted = threading.Event()
+    admission_errors: list[Exception] = []
+    references = ManagedEnvironmentReferences(
+        manager._registry,
+        manager._lock,
+        manager._references,
+        active["id"],
+        active["revision"],
+    )
+
+    def admit() -> None:
+        job_id = str(uuid4())
+        try:
+            references.admit(job_id)
+            admitted.set()
+            references.release(job_id)
+        except Exception as error:
+            admission_errors.append(error)
+
+    admission = threading.Thread(target=admit, daemon=True)
+    conflict_finished = threading.Event()
+    conflict_errors: list[Exception] = []
+
+    def delete_target() -> None:
+        try:
+            manager.delete(target["id"])
+        except Exception as error:
+            conflict_errors.append(error)
+        finally:
+            conflict_finished.set()
+
+    conflict = threading.Thread(target=delete_target, daemon=True)
+    try:
+        assert started.wait(5)
+        admission.start()
+        conflict.start()
+        assert admitted.wait(1), "A job admission waited on B's package installation"
+        assert not admission_errors
+        assert conflict_finished.wait(1), "B delete waited on B's installation"
+        assert len(conflict_errors) == 1
+        assert isinstance(conflict_errors[0], ManagedEnvironmentError)
+    finally:
+        finish.set()
+        worker.join(10)
+        admission.join(10)
+        conflict.join(10)
+    assert len(installed) == 1
+    assert manager.list()["active_id"] == active["id"]
+
+
+def test_inactive_install_commit_rejects_active_pointer_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+    started = threading.Event()
+    finish = threading.Event()
+
+    def install(_python: Path, _scope, _source: str) -> None:
+        started.set()
+        assert finish.wait(10)
+
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+        install_runner=install,
+    )
+    active = manager.create("active")
+    target = manager.create("target")
+    replacement = manager.create("replacement")
+    manager.commit_switch(manager.prepare_switch(active["id"]))
+    plan = manager.preview_install(target["id"], "rapidocr-cpu")
+    original_probe = manager._probe
+    monkeypatch.setattr(
+        manager,
+        "_probe",
+        lambda record: (
+            {
+                "healthy": True,
+                "reason": None,
+                "python": str(manager._venv_python(manager._safe_path(record))),
+            }
+            if record["status"] == "installed"
+            else original_probe(record)
+        ),
+    )
+    install_errors: list[Exception] = []
+
+    def run_install() -> None:
+        try:
+            manager.install(
+                plan["plan_id"], target["id"], "rapidocr-cpu", ("tuna-pypi",)
+            )
+        except Exception as error:
+            install_errors.append(error)
+
+    worker = threading.Thread(target=run_install, daemon=True)
+    worker.start()
+    switched = threading.Event()
+    switch_errors: list[Exception] = []
+
+    def switch() -> None:
+        try:
+            manager.commit_switch(manager.prepare_switch(replacement["id"]))
+            switched.set()
+        except Exception as error:
+            switch_errors.append(error)
+
+    switch_worker = threading.Thread(target=switch, daemon=True)
+    try:
+        assert started.wait(5)
+        switch_worker.start()
+        assert switched.wait(1), "Unrelated active-pointer switch waited on B install"
+    finally:
+        finish.set()
+        worker.join(10)
+        switch_worker.join(10)
+    assert not switch_errors
+    assert len(install_errors) == 1
+    assert isinstance(install_errors[0], runtime_maintenance.RuntimeInstallPlanStale)
+    registry = manager.list()
+    assert registry["active_id"] == replacement["id"]
+    assert (
+        next(item for item in registry["environments"] if item["id"] == target["id"])[
+            "status"
+        ]
+        == "empty"
+    )
 
 
 def test_installed_switch_rejects_unverified_supervisor_health(
@@ -829,8 +1002,100 @@ def test_named_recipe_addition_preserves_compatible_engine(tmp_path: Path) -> No
     plan = manager.preview_install(item["id"], "mineru-cpu")
     assert plan["requested_recipe"] == "mineru-cpu"
     assert plan["recipe"] == "rapidocr+mineru-cpu"
+    explicit = manager.preview_install(item["id"], "rapidocr+mineru-cpu")
+    assert explicit["requested_recipe"] == "rapidocr+mineru-cpu"
+    assert explicit["recipe"] == "rapidocr+mineru-cpu"
     with pytest.raises(ManagedEnvironmentError, match="compatible locked recipe"):
         manager.preview_install(item["id"], "paddleocr-cpu")
+
+
+def test_named_preview_includes_direct_url_dependencies(tmp_path: Path) -> None:
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    item = manager.create("cuda")
+    dependencies = manager.preview_install(item["id"], "rapidocr+mineru-cuda")[
+        "dependencies"
+    ]
+    assert "paddlepaddle-gpu @ https://example.invalid/cu126/paddle.whl" in dependencies
+    assert "torch @ https://example.invalid/cu126/torch.whl" in dependencies
+
+
+def test_named_install_rejects_native_import_failure_without_committing(
+    tmp_path: Path,
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+
+    def install(python: Path, _scope, _source: str) -> None:
+        site = python.parent.parent / "Lib" / "site-packages"
+        for name in ("fastapi", "rapidocr", "onnxruntime"):
+            metadata = site / f"{name}-1.0.dist-info"
+            metadata.mkdir(parents=True)
+            (metadata / "METADATA").write_text(
+                f"Name: {name}\nVersion: 1.0\n", encoding="utf-8"
+            )
+        (site / "onnxruntime").mkdir()
+        (site / "onnxruntime" / "__init__.py").write_text("", encoding="utf-8")
+        (site / "pyclipper").mkdir()
+        (site / "pyclipper" / "__init__.py").write_text(
+            "raise ImportError('native extension cannot load')\n", encoding="utf-8"
+        )
+
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+        install_runner=install,
+    )
+    item = manager.create("native")
+    plan = manager.preview_install(item["id"], "rapidocr-cpu")
+    with pytest.raises(ManagedEnvironmentError, match="engine_import_failed"):
+        manager.install(plan["plan_id"], item["id"], "rapidocr-cpu", ("tuna-pypi",))
+    surviving = manager.list()["environments"][0]
+    assert surviving["status"] == "empty"
+    assert surviving["revision"] == 1
+    candidate = next((manager.root / item["id"] / "revisions").glob("2-*"))
+    assert len(candidate.name.split("-", 1)[1]) == 16
+    registry = json.loads(manager._registry.read_text(encoding="utf-8"))
+    registry["environments"][item["id"]].update(
+        {
+            "revision": 2,
+            "path": f"{item['id']}/revisions/{candidate.name}",
+            "status": "installed",
+            "recipe": "rapidocr-cpu",
+            "source_ids": ["tuna-pypi"],
+        }
+    )
+    manager._registry.write_text(json.dumps(registry), encoding="utf-8")
+    unavailable = manager.list()["environments"][0]
+    assert unavailable["python_state"] == "ready"
+    assert unavailable["dependency_state"] == "unavailable"
+    assert unavailable["engine_state"] == "unavailable"
+    assert "engine_import_failed" in unavailable["reason"]
+    assert "shorter Portable location" in unavailable["reason"]
+
+
+def test_named_revision_path_accepts_old_and_new_random_tails(tmp_path: Path) -> None:
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    item = manager.create("portable")
+    for suffix in ("a" * 16, "a" * 32):
+        record = {
+            **item,
+            "revision": 2,
+            "path": f"{item['id']}/revisions/2-{suffix}",
+        }
+        assert manager._safe_path(record) == manager.root / record["path"]
 
 
 def test_standalone_mineru_recipe_excludes_rapidocr(tmp_path: Path) -> None:

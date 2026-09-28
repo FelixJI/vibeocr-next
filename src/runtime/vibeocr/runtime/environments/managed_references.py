@@ -63,6 +63,10 @@ class ManagedEnvironmentReferences:
         lease = self._held.pop(job_id, None)
         if lease is not None:
             lease.release()
+            try:
+                lease.path.unlink()
+            except (FileNotFoundError, PermissionError):
+                pass
 
 
 def environment_has_references(reference_root: Path, env_id: str) -> bool:
