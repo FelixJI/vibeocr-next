@@ -71,7 +71,7 @@ test("1280x800 light annotation workspace with guidance", async ({ page }) => {
     page.getByRole("toolbar", { name: "图片编辑工具" }),
   ).toBeVisible();
   await expect(
-    page.getByText(/马赛克与模糊会写入复制、保存的图片副本/),
+    page.getByText(/马赛克、模糊与打码会写入复制、保存副本及显式识别输入/),
   ).toBeVisible();
   await expect(page).toHaveScreenshot("annotation-light-1280x800.png", {
     fullPage: true,
@@ -134,6 +134,7 @@ test("annotation export keeps source pixels and excludes editor chrome", async (
   });
   const bounds = await canvas.boundingBox();
   expect(bounds).not.toBeNull();
+  expect(bounds!.width / bounds!.height).toBeCloseTo(1.5, 2);
   await page
     .getByRole("button", { name: "矩形" })
     .evaluate((button: HTMLButtonElement) => button.click());
@@ -248,6 +249,58 @@ test("1280x800 light PDF review workspace", async ({ page }) => {
     runtimeLabel: "Runtime 就绪 · CPU",
   });
   await expect(page).toHaveScreenshot("pdf-light-1280x800.png", {
+    fullPage: true,
+  });
+});
+
+test("1024px screenshot session keeps editing and keyboard controls usable", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1024, height: 900 });
+  await mount(page, {
+    connected: true,
+    revision: 4,
+    route: "recognition",
+    theme: "light",
+    capabilities: [
+      "recognition.capture",
+      "recognition.screenshotSession",
+      "recognition.file",
+      "recognition.clipboard",
+      "recognition.annotation",
+    ],
+    features: {
+      recognition: {
+        isBusy: false,
+        statusCode: "recognition.session",
+        screenshotSession: {
+          sessionId: "0123456789abcdef0123456789abcdef",
+          revision: 0,
+        },
+        input: {
+          url: "/vibeocr-64.png",
+          mediaType: "image/png",
+          byteLength: 4096,
+        },
+      },
+    },
+    runtimeLabel: "Runtime 未启动",
+  });
+  await expect(
+    page.getByRole("button", { name: "纯截图", exact: true }),
+  ).toBeEnabled();
+  const color = page.getByRole("combobox", { name: "标注颜色" });
+  await color.focus();
+  await expect(color).toBeFocused();
+  await color.press("ArrowDown");
+  await color.press("Tab");
+  await expect(color).not.toBeFocused();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  await expect(page).toHaveScreenshot("screenshot-session-light-1024x900.png", {
     fullPage: true,
   });
 });

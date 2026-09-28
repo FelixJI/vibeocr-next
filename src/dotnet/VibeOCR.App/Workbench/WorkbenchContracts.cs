@@ -38,6 +38,45 @@ public sealed record NavigateWorkbenchCommand(WorkbenchRoute Route) : WorkbenchC
 
 public sealed record CaptureRecognitionScreenCommand : WorkbenchCommand;
 
+/// <summary>
+/// Pure screenshot capture: open the region picker, publish the captured
+/// pixels as a local editing session, and submit no OCR request. Recognition
+/// happens only through an explicit <see cref="RecognizeScreenshotImageCommand"/>
+/// carrying the session's current revision.
+/// </summary>
+public sealed record CaptureScreenshotSessionCommand : WorkbenchCommand;
+
+public sealed record CloseScreenshotSessionCommand : WorkbenchCommand;
+
+/// <summary>
+/// Editor-side content revision for the active screenshot session. Every
+/// commit/undo/redo publishes a strictly increasing revision; the host drops
+/// the previous OCR result association so late responses cannot pollute the
+/// new content.
+/// </summary>
+public sealed record NotifyScreenshotSessionRevisionCommand(
+    Guid SessionId,
+    long Revision) : WorkbenchCommand;
+
+public sealed record CopyScreenshotImageCommand(
+    string ResourceUri,
+    Guid SessionId,
+    long Revision) : WorkbenchCommand;
+
+public sealed record SaveScreenshotImageCommand(
+    string ResourceUri,
+    Guid SessionId,
+    long Revision) : WorkbenchCommand;
+
+/// <summary>
+/// Explicit recognition of the session's current final PNG (uploaded through
+/// the opaque annotation lease). Never falls back to the unedited capture.
+/// </summary>
+public sealed record RecognizeScreenshotImageCommand(
+    string ResourceUri,
+    Guid SessionId,
+    long Revision) : WorkbenchCommand;
+
 public sealed record SelectRecognitionImageCommand : WorkbenchCommand;
 
 public sealed record RecognizeDroppedFileCommand(string Path) : WorkbenchCommand;
@@ -203,10 +242,20 @@ public sealed record RecognitionWorkbenchState(
   WorkbenchResourceReference? Input = null,
   WorkbenchResourceReference? Result = null,
   IReadOnlyList<RecognitionEngineChoice>? Engines = null,
-  string? TaskEngine = null) : WorkbenchState
+  string? TaskEngine = null,
+  RecognitionScreenshotSessionState? ScreenshotSession = null) : WorkbenchState
 {
   public override string Scope => "recognition";
 }
+
+/// <summary>
+/// Active pure-screenshot editing session: the host-assigned session id and
+/// the current editor content revision. All session image commands must match
+/// both values; mismatched requests fail closed as stale.
+/// </summary>
+public sealed record RecognitionScreenshotSessionState(
+  string SessionId,
+  long Revision);
 
 /// <summary>
 /// One selectable recognition mode on the recognition page. <see cref="Selected"/>

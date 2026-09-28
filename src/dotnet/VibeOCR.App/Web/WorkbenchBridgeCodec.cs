@@ -46,6 +46,10 @@ public static class WorkbenchBridgeCodec
     ["mode", "apiUrl", "apiKey"];
   private static readonly HashSet<string> TaskEngineArgumentFields = ["engine"];
   private static readonly HashSet<string> ResourceUriArgumentFields = ["resourceUri"];
+  private static readonly HashSet<string> SessionRevisionArgumentFields =
+    ["sessionId", "revision"];
+  private static readonly HashSet<string> SessionResourceArgumentFields =
+    ["resourceUri", "sessionId", "revision"];
 
   public static Guid ParseBootstrapRequest(string json)
   {
@@ -259,6 +263,39 @@ public static class WorkbenchBridgeCodec
       case ("recognition", "captureScreen"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new CaptureRecognitionScreenCommand();
+      case ("recognition", "captureScreenshotSession"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new CaptureScreenshotSessionCommand();
+      case ("recognition", "closeScreenshotSession"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new CloseScreenshotSessionCommand();
+      case ("recognition", "notifyScreenshotRevision"):
+        EnsureObjectWithFields(
+          arguments, SessionRevisionArgumentFields, "command arguments");
+        return new NotifyScreenshotSessionRevisionCommand(
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments));
+      case ("recognition", "copyScreenshotImage"):
+        EnsureObjectWithFields(
+          arguments, SessionResourceArgumentFields, "command arguments");
+        return new CopyScreenshotImageCommand(
+          ReadAnnotationResourceUri(arguments),
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments));
+      case ("recognition", "saveScreenshotImage"):
+        EnsureObjectWithFields(
+          arguments, SessionResourceArgumentFields, "command arguments");
+        return new SaveScreenshotImageCommand(
+          ReadAnnotationResourceUri(arguments),
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments));
+      case ("recognition", "recognizeScreenshotImage"):
+        EnsureObjectWithFields(
+          arguments, SessionResourceArgumentFields, "command arguments");
+        return new RecognizeScreenshotImageCommand(
+          ReadAnnotationResourceUri(arguments),
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments));
       case ("recognition", "cancel"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new CancelRecognitionCommand();
@@ -473,6 +510,11 @@ public static class WorkbenchBridgeCodec
   private static string ParseAnnotationResourceUri(JsonElement arguments)
   {
     EnsureObjectWithFields(arguments, ResourceUriArgumentFields, "command arguments");
+    return ReadAnnotationResourceUri(arguments);
+  }
+
+  private static string ReadAnnotationResourceUri(JsonElement arguments)
+  {
     string? value = arguments.GetProperty("resourceUri").GetString();
     if (!Uri.TryCreate(value, UriKind.Absolute, out Uri? uri) ||
         !WorkbenchAnnotationStore.IsResourceUri(uri))
@@ -481,6 +523,17 @@ public static class WorkbenchBridgeCodec
         "Workbench annotated image URI is invalid.");
     }
     return uri.AbsoluteUri;
+  }
+
+  private static long ParseContentRevision(JsonElement arguments)
+  {
+    long revision = arguments.GetProperty("revision").GetInt64();
+    if (revision is < 0 or > 1_000_000_000)
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench screenshot session revision is invalid.");
+    }
+    return revision;
   }
 
   private static RotatePdfCommand ParseRotate(JsonElement arguments)
@@ -636,6 +689,11 @@ public static class WorkbenchBridgeCodec
       recognition.Result,
       engines = recognition.Engines ?? [],
       recognition.TaskEngine,
+      screenshotSession = recognition.ScreenshotSession is null ? null : new
+      {
+        sessionId = recognition.ScreenshotSession.SessionId,
+        revision = recognition.ScreenshotSession.Revision,
+      },
     },
     BatchWorkbenchState batch => new
     {

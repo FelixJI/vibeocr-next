@@ -122,6 +122,105 @@ public sealed class WorkbenchBridgeCodecTests
   }
 
   [Fact]
+  public void ParseScreenshotSessionCommandsValidateSessionFields()
+  {
+    Guid sessionId = Guid.NewGuid();
+    const string resourceUri =
+      "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef";
+
+    NotifyScreenshotSessionRevisionCommand notify = Assert.IsType<NotifyScreenshotSessionRevisionCommand>(
+      WorkbenchBridgeCodec.ParseCommand(
+        CommandJson(
+          sessionId,
+          "recognition",
+          "notifyScreenshotRevision",
+          $$"""{"sessionId":"{{sessionId}}","revision":3}"""),
+        sessionId).Command);
+    Assert.Equal(sessionId, notify.SessionId);
+    Assert.Equal(3, notify.Revision);
+
+    RecognizeScreenshotImageCommand recognize = Assert.IsType<RecognizeScreenshotImageCommand>(
+      WorkbenchBridgeCodec.ParseCommand(
+        CommandJson(
+          sessionId,
+          "recognition",
+          "recognizeScreenshotImage",
+          $$"""{"resourceUri":"{{resourceUri}}","sessionId":"{{sessionId}}","revision":3}"""),
+        sessionId).Command);
+    Assert.Equal(resourceUri, recognize.ResourceUri);
+    Assert.Equal(sessionId, recognize.SessionId);
+    Assert.Equal(3, recognize.Revision);
+
+    CopyScreenshotImageCommand copy = Assert.IsType<CopyScreenshotImageCommand>(
+      WorkbenchBridgeCodec.ParseCommand(
+        CommandJson(
+          sessionId,
+          "recognition",
+          "copyScreenshotImage",
+          $$"""{"resourceUri":"{{resourceUri}}","sessionId":"{{sessionId}}","revision":0}"""),
+        sessionId).Command);
+    Assert.Equal(0, copy.Revision);
+
+    SaveScreenshotImageCommand save = Assert.IsType<SaveScreenshotImageCommand>(
+      WorkbenchBridgeCodec.ParseCommand(
+        CommandJson(
+          sessionId,
+          "recognition",
+          "saveScreenshotImage",
+          $$"""{"resourceUri":"{{resourceUri}}","sessionId":"{{sessionId}}","revision":0}"""),
+        sessionId).Command);
+    Assert.Equal(sessionId, save.SessionId);
+
+    // 负数/越界 revision、缺失字段与越权 URI 一律 fail closed。
+    Assert.Throws<WorkbenchBridgeProtocolException>(() =>
+      WorkbenchBridgeCodec.ParseCommand(
+        CommandJson(
+          sessionId,
+          "recognition",
+          "notifyScreenshotRevision",
+          $$"""{"sessionId":"{{sessionId}}","revision":-1}"""),
+        sessionId));
+    Assert.Throws<WorkbenchBridgeProtocolException>(() =>
+      WorkbenchBridgeCodec.ParseCommand(
+        CommandJson(
+          sessionId,
+          "recognition",
+          "copyScreenshotImage",
+          $$"""{"sessionId":"{{sessionId}}","revision":0}"""),
+        sessionId));
+    Assert.Throws<WorkbenchBridgeProtocolException>(() =>
+      WorkbenchBridgeCodec.ParseCommand(
+        CommandJson(
+          sessionId,
+          "recognition",
+          "recognizeScreenshotImage",
+          $$"""{"resourceUri":"file:///tmp/out.png","sessionId":"{{sessionId}}","revision":0}"""),
+        sessionId));
+  }
+
+  [Fact]
+  public void SerializeRecognitionStateCarriesScreenshotSession()
+  {
+    var state = new RecognitionWorkbenchState(
+      false,
+      "recognition.session",
+      Input: new WorkbenchResourceReference(
+        "https://app.vibeocr/__resource/session-input",
+        "image/png",
+        4),
+      Result: null,
+      ScreenshotSession: new RecognitionScreenshotSessionState(
+        "0123456789abcdef0123456789abcdef",
+        7));
+    using JsonDocument json = JsonDocument.Parse(WorkbenchBridgeCodec.SerializeState(
+      Guid.NewGuid(),
+      new WorkbenchStateEnvelope(1, "recognition", WorkbenchStateChange.Replace, state)));
+    JsonElement session = json.RootElement.GetProperty("payload").GetProperty("state").GetProperty("screenshotSession");
+    Assert.Equal("0123456789abcdef0123456789abcdef", session.GetProperty("sessionId").GetString());
+    Assert.Equal(7, session.GetProperty("revision").GetInt64());
+  }
+
+  [Fact]
   public void ParseCommandSupportsTheClosedWebActionSet()
   {
     Guid sessionId = Guid.NewGuid();
@@ -130,6 +229,8 @@ public sealed class WorkbenchBridgeCodecTests
       ("recognition", "selectImage", "{}", typeof(SelectRecognitionImageCommand)),
       ("recognition", "readClipboard", "{}", typeof(ReadRecognitionClipboardCommand)),
       ("recognition", "captureScreen", "{}", typeof(CaptureRecognitionScreenCommand)),
+      ("recognition", "captureScreenshotSession", "{}", typeof(CaptureScreenshotSessionCommand)),
+      ("recognition", "closeScreenshotSession", "{}", typeof(CloseScreenshotSessionCommand)),
       ("recognition", "copyAnnotatedImage", "{\"resourceUri\":\"https://app.vibeocr/__annotation/00000000000000000000000000000000\"}", typeof(CopyAnnotatedImageCommand)),
       ("recognition", "saveAnnotatedImage", "{\"resourceUri\":\"https://app.vibeocr/__annotation/11111111111111111111111111111111\"}", typeof(SaveAnnotatedImageCommand)),
       ("batch", "addFiles", "{}", typeof(AddBatchFilesCommand)),

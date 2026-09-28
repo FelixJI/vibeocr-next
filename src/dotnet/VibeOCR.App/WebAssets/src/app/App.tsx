@@ -138,7 +138,9 @@ export function App({
           className="demo-notice"
           intent={
             viewState.commandProblem ===
-            "workbench.error.annotationOperationCancelled"
+              "workbench.error.annotationOperationCancelled" ||
+            viewState.commandProblem ===
+              "workbench.error.screenshotSessionStale"
               ? "warning"
               : "error"
           }
@@ -150,7 +152,10 @@ export function App({
               {viewState.commandProblem ===
               "workbench.error.annotationOperationCancelled"
                 ? "操作已取消"
-                : "操作未完成"}
+                : viewState.commandProblem ===
+                    "workbench.error.screenshotSessionStale"
+                  ? "截图会话已更新"
+                  : "操作未完成"}
             </MessageBarTitle>
             {commandProblemLabel(viewState.commandProblem)}
           </MessageBarBody>
@@ -170,6 +175,8 @@ function commandProblemLabel(messageKey: string): string {
       "原生宿主暂时没有响应，请重启应用后重试。",
     "workbench.error.annotationOperationCancelled":
       "未保存标注图片；原图和当前识别结果均未改变。",
+    "workbench.error.screenshotSessionStale":
+      "截图内容或会话已更新；请在新画面上重试复制、保存或识别。",
   };
   return messages[messageKey] ?? "当前操作被原生宿主拒绝，请检查状态后重试。";
 }

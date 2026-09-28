@@ -262,6 +262,16 @@ input {
   min-width: 0;
   padding-inline: 10px;
 }
+.editor-style-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--colorNeutralForeground3);
+}
+.editor-style-control span {
+  white-space: nowrap;
+}
 .editor-toolbar-break {
   width: 100%;
   height: 0;
@@ -604,8 +614,9 @@ input {
 }
 .inspection-canvas {
   display: block;
-  width: 100%;
-  height: min(46vh, 520px);
+  width: min(100%, 69vh, 780px);
+  height: auto;
+  margin-inline: auto;
   touch-action: none;
 }
 .inspection-canvas.tool-rectangle,
