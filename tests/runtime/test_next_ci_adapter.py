@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -277,6 +278,7 @@ def _configure_release_smoke_fixture(
     fail_smoke: bool,
     include_delta: bool = False,
     fail_bootstrapper: bool = False,
+    fail_runtime_code: bool = False,
 ) -> tuple[Path, list[list[str]]]:
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
@@ -321,7 +323,17 @@ def _configure_release_smoke_fixture(
         command: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
         calls.append(command)
-        if command[0].endswith("VibeOCR.exe"):
+        if command[0] == sys.executable:
+            assert command[1:4] == ["-I", "-B", "-c"]
+            assert (
+                Path(command[-2])
+                == Path(str(kwargs["cwd"])) / "runtime/backend/runtime-code"
+            )
+            assert command[-1] == "1.2.3"
+            assert kwargs["timeout"] == 30
+            if fail_runtime_code:
+                raise subprocess.CalledProcessError(32, command)
+        elif command[0].endswith("VibeOCR.exe"):
             assert command[1:] == ["--self-test-prerequisites"]
             assert kwargs["timeout"] == 30
             assert kwargs["cwd"] == Path(command[0]).parent
@@ -351,10 +363,27 @@ def test_release_smoke_executes_the_extracted_product_handshake(
 
     verify(artifacts, "1.2.3")
 
-    assert len(calls) == 2
-    assert calls[0][0].endswith("VibeOCR.exe")
-    assert calls[0][1:] == ["--self-test-prerequisites"]
-    assert calls[1][2].endswith("smoke_web_workbench.ps1")
+    assert len(calls) == 3
+    assert calls[0][0] == sys.executable
+    assert calls[1][0].endswith("VibeOCR.exe")
+    assert calls[1][1:] == ["--self-test-prerequisites"]
+    assert calls[2][2].endswith("smoke_web_workbench.ps1")
+
+
+def test_release_smoke_stops_when_product_runtime_code_cannot_import(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts, calls = _configure_release_smoke_fixture(
+        tmp_path, monkeypatch, fail_smoke=False, fail_runtime_code=True
+    )
+
+    with pytest.raises(subprocess.CalledProcessError) as failure:
+        verify(artifacts, "1.2.3")
+
+    assert failure.value.returncode == 32
+    assert len(calls) == 1
+    assert calls[0][0] == sys.executable
 
 
 def test_release_smoke_propagates_a_failed_public_entry_self_test(
@@ -371,7 +400,7 @@ def test_release_smoke_propagates_a_failed_public_entry_self_test(
     with pytest.raises(subprocess.CalledProcessError):
         verify(artifacts, "1.2.3")
 
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 def test_release_smoke_accepts_and_binds_one_current_delta(
@@ -434,7 +463,7 @@ def test_release_smoke_propagates_a_failed_web_ready_handshake(
     with pytest.raises(subprocess.CalledProcessError):
         verify(artifacts, "1.2.3")
 
-    assert len(calls) == 2
+    assert len(calls) == 3
 
 
 @pytest.mark.parametrize("installed_layout", [False, True])
