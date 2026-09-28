@@ -2,12 +2,14 @@ using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage;
 using Windows.Storage.Pickers;
 using Windows.Storage.Streams;
+using Windows.Graphics.Imaging;
+using VibeOCR.App.Services;
 
 namespace VibeOCR.App.Features.QrCode;
 
 /// <summary>
 /// Platform glue for the QR tab: reads images from the file picker/clipboard/drop,
-/// and the generated image bytes are read back from shared memory for saving.
+/// and saves generated image bytes.
 /// Mirrors the Recognition input service and the Batch file source.
 /// </summary>
 public sealed class QrCodeInputService(Func<nint> windowHandle) : IQrCodeInput
@@ -89,7 +91,7 @@ public interface IQrCodeSavePlatform
 }
 
 /// <summary>
-/// Save commands: resolve the generated image bytes from shared memory and write them
+/// Save commands: decode the generated image bytes and write them
 /// to a user-chosen path. Overwrite confirmation mirrors the recognition export flow.
 /// </summary>
 public sealed class QrCodeSaveCommands(IQrCodeSavePlatform platform)
@@ -129,7 +131,45 @@ public sealed class QrCodeSavePlatform(Func<nint> windowHandle) : IQrCodeSavePla
     public async Task WriteFileAsync(string path, byte[] data, CancellationToken cancellationToken)
     {
         string extension = Path.GetExtension(path).ToLowerInvariant();
-        await File.WriteAllBytesAsync(path, data, cancellationToken);
+        if (extension is ".jpg" or ".jpeg") data = await EncodeJpegAsync(data, cancellationToken);
+        else if (extension != ".png") throw new InvalidDataException("仅支持 PNG 或 JPEG 保存。");
+        cancellationToken.ThrowIfCancellationRequested();
+        AtomicFile.Write(path, stream =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            stream.Write(data);
+            cancellationToken.ThrowIfCancellationRequested();
+        });
+    }
+
+    private static async Task<byte[]> EncodeJpegAsync(byte[] png, CancellationToken cancellationToken)
+    {
+        using var input = new InMemoryRandomAccessStream();
+        using (var writer = new DataWriter(input))
+        {
+            writer.WriteBytes(png);
+            await writer.StoreAsync();
+            writer.DetachStream();
+        }
+        input.Seek(0);
+        BitmapDecoder decoder = await BitmapDecoder.CreateAsync(input);
+        PixelDataProvider source = await decoder.GetPixelDataAsync(
+            BitmapPixelFormat.Bgra8, BitmapAlphaMode.Ignore,
+            new BitmapTransform(), ExifOrientationMode.IgnoreExifOrientation,
+            ColorManagementMode.DoNotColorManage);
+        cancellationToken.ThrowIfCancellationRequested();
+        using var output = new InMemoryRandomAccessStream();
+        BitmapEncoder encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.JpegEncoderId, output);
+        encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Ignore,
+            decoder.PixelWidth, decoder.PixelHeight, 96, 96, source.DetachPixelData());
+        await encoder.FlushAsync();
+        using var reader = new DataReader(output.GetInputStreamAt(0));
+        uint length = checked((uint)output.Size);
+        await reader.LoadAsync(length);
+        byte[] jpeg = new byte[length];
+        reader.ReadBytes(jpeg);
+        cancellationToken.ThrowIfCancellationRequested();
+        return jpeg;
     }
 }
 

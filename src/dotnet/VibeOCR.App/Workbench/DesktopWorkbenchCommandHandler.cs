@@ -911,8 +911,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       WorkbenchResourceReference? nextGeneratedResource = generatedQrResource;
       if (publishGeneratedImage)
       {
-        nextGeneratedResource = null;
-        if (!string.IsNullOrWhiteSpace(qrCode!.GeneratedImageBase64))
+        if (!qrCode!.GenerateFailed && !string.IsNullOrWhiteSpace(qrCode.GeneratedImageBase64))
         {
           nextGeneratedResource = await PublishBytesAsync(
             Convert.FromBase64String(qrCode.GeneratedImageBase64),
@@ -924,10 +923,16 @@ public sealed class DesktopWorkbenchCommandHandler :
       if (generation == Volatile.Read(ref qrCodeGeneration))
       {
         generatedQrResource = nextGeneratedResource;
-        QrCodeWorkbenchState state = QrCodeState(qrCode!);
-        StateChanged?.Invoke(publishGeneratedImage && qrCode!.GenerateFailed
-          ? state with { StatusCode = "qrcode.failed" }
-          : state);
+        QrCodeViewModel currentQrCode = qrCode!;
+        QrCodeWorkbenchState state = QrCodeState(currentQrCode);
+        StateChanged?.Invoke(!publishGeneratedImage && currentQrCode.DecodeUnavailable
+          ? state with { StatusCode = "qrcode.decodeUnavailable" }
+          : publishGeneratedImage && currentQrCode.GenerateInvalidInput
+            ? state with { StatusCode = "qrcode.invalidInput" }
+          : (publishGeneratedImage && currentQrCode.GenerateFailed) ||
+            (!publishGeneratedImage && currentQrCode.DecodeFailed)
+            ? state with { StatusCode = "qrcode.failed" }
+            : state);
       }
     }
     catch (OperationCanceledException)

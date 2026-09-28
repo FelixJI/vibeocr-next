@@ -518,7 +518,9 @@ function statusLabel(value: unknown, fallback: string): string {
     "qrcode.decoded": "识别完成",
     "qrcode.ready": "等待输入",
     "qrcode.running": "正在处理二维码…",
-    "qrcode.failed": "二维码处理失败，请检查运行时状态后重试",
+    "qrcode.failed": "二维码处理失败，请检查输入内容后重试",
+    "qrcode.invalidInput": "内容无法编码为二维码，请检查文本或缩短内容后重试。",
+    "qrcode.decodeUnavailable": "图片识别需要识别运行环境，请启动或恢复后重试",
     "qrcode.cancelled": "二维码处理已取消",
     "settings.ready": "运行环境设置已同步",
     "settings.restartRequired": "更改将在重启后生效",
@@ -1229,12 +1231,12 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
                 保存二维码
               </CapabilityGate>
               <p className="form-note">
-                当前生成接口支持内容与编码格式；颜色、Logo 与标签需要
-                Backend/Protocol 生成选项。
+                二维码在本机直接生成，无需启动识别运行环境。
               </p>
             </div>
           ) : (
             <div className="form-stack">
+              <p className="form-note">图片识别需要识别运行环境就绪。</p>
               <CapabilityGate
                 appearance="primary"
                 capability="qrcode.decode"
