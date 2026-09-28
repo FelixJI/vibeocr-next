@@ -1,3 +1,6 @@
+using System.Net;
+using System.Text;
+using System.Text.Json;
 using VibeOCR.App.Features.Maintenance;
 using VibeOCR.App.Features.Settings;
 using VibeOCR.Platform.Bootstrap;
@@ -154,8 +157,297 @@ public sealed class ManagedEnvironmentSettingsTests
     Assert.IsType<HttpRequestException>(error.InnerException);
     Assert.Equal(1, transport.Calls);
     Assert.Equal("environment", settings.Snapshot?.ActiveId);
+    // 严格刷新失败如实报错，同时活动环境标注未核验而非回退 not_started。
+    Assert.Equal("unverified", settings.Snapshot?.Environments[0].ServiceState);
     Assert.Equal("无法读取活动环境状态，请刷新或重新切换环境。", settings.Status);
     Assert.False(settings.IsBusy);
+  }
+
+  [Fact]
+  public async Task MutatingOperationsKeepRunningEvidenceForActiveEnvironment()
+  {
+    string root = CreateReadyEchoScript();
+    InferenceSupervisorProcess process = CreateReadyEchoProcess(root);
+    try
+    {
+      await process.StartAsync(TestContext.Current.CancellationToken);
+      var client = new InferenceHttpClient(
+        new Uri("http://127.0.0.1:1"), "test", new HealthyTransport());
+      var qr = new QrCodeHttpClient(new Uri("http://127.0.0.1:1"), "test");
+      await using var session = new ManagedEnvironmentSession(
+        "environment", 1, process, client, qr, ReadyStatus());
+      var manager = new MutableManager();
+      var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
+        () => ("environment", 1), new ProductMaintenanceCoordinator(), () => session);
+
+      await settings.RefreshAsync(TestContext.Current.CancellationToken);
+      ManagedEnvironment active = ActiveEnvironment(settings);
+      Assert.Equal("ready", active.EngineState);
+      Assert.Equal("not_applicable", active.ModelState);
+      Assert.Equal("ready", active.ServiceState);
+
+      // 旧代码在 Create/Install/Delete/Repair 后直接重置为管理器列表，
+      // 把仍在运行的活动环境回退成 unverified/not_checked/not_started。
+      await settings.CreateAsync("新建环境", TestContext.Current.CancellationToken);
+      Assert.Equal("ready", ActiveEnvironment(settings).ServiceState);
+      Assert.Contains(settings.Snapshot!.Environments,
+        item => item.Id == "fresh" && item.ServiceState == "not_started");
+
+      await settings.PreviewAsync("fresh", "rapidocr-cpu", "pypi",
+        TestContext.Current.CancellationToken);
+      await settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
+      Assert.Equal("ready", ActiveEnvironment(settings).ServiceState);
+      Assert.Equal("installed",
+        settings.Snapshot!.Environments.Single(item => item.Id == "fresh").Status);
+
+      await settings.RepairEmptyAsync("fresh", TestContext.Current.CancellationToken);
+      Assert.Equal("ready", ActiveEnvironment(settings).ServiceState);
+
+      await settings.DeleteAsync("fresh", TestContext.Current.CancellationToken);
+      Assert.Equal("ready", ActiveEnvironment(settings).ServiceState);
+      Assert.DoesNotContain(settings.Snapshot!.Environments, item => item.Id == "fresh");
+    }
+    finally
+    {
+      process.Dispose();
+      DeleteScriptDirectory(root);
+    }
+  }
+
+  [Fact]
+  public async Task PostActivationRefreshProjectsRunningEvidenceAndSurvivesProbeFailure()
+  {
+    string root = CreateReadyEchoScript();
+    InferenceSupervisorProcess process = CreateReadyEchoProcess(root);
+    try
+    {
+      await process.StartAsync(TestContext.Current.CancellationToken);
+      var client = new InferenceHttpClient(
+        new Uri("http://127.0.0.1:1"), "test", new HealthyTransport());
+      var qr = new QrCodeHttpClient(new Uri("http://127.0.0.1:1"), "test");
+      await using var session = new ManagedEnvironmentSession(
+        "environment", 1, process, client, qr, ReadyStatus());
+      await using var disconnected = new ManagedEnvironmentSession(
+        "environment", 1,
+        new InferenceSupervisorProcess(new InferenceSupervisorOptions(
+          "unused", [], root, Path.Combine(root, "unused.log"),
+          TimeSpan.FromSeconds(1), new HashSet<string>()), "test"),
+        new InferenceHttpClient(new Uri("http://127.0.0.1:12345"), "test",
+          new UnavailableTransport()),
+        new QrCodeHttpClient(new Uri("http://127.0.0.1:12345"), "test"),
+        ReadyStatus());
+      ManagedEnvironmentSession? current = null;
+      var settings = new ManagedEnvironmentSettings(new MutableManager(),
+        (_, _) => Task.CompletedTask, () => ("environment", 1),
+        new ProductMaintenanceCoordinator(), () => current);
+
+      // 启动竞争：设置页在 Supervisor 激活前刷新，只有管理器投影。
+      await settings.RefreshAsync(TestContext.Current.CancellationToken);
+      Assert.Equal("not_started", ActiveEnvironment(settings).ServiceState);
+
+      // 激活完成后的 App 侧刷新补齐真实运行证据。
+      current = session;
+      await App.RefreshEnvironmentSettingsAfterActivationAsync(
+        settings, CancellationToken.None);
+      ManagedEnvironment projected = ActiveEnvironment(settings);
+      Assert.Equal("ready", projected.EngineState);
+      Assert.Equal("ready", projected.ServiceState);
+      Assert.Equal(1, projected.Revision);
+
+      // 刷新失败必须非致命：探针断开不抛出，也不拆已健康会话；活动环境
+      // 如实标注未核验而不是伪造 ready 或回退 not_started。
+      current = disconnected;
+      await App.RefreshEnvironmentSettingsAfterActivationAsync(
+        settings, CancellationToken.None);
+      Assert.False(settings.IsBusy);
+      Assert.Equal("无法读取活动环境状态，请刷新或重新切换环境。", settings.Status);
+      ManagedEnvironment unverifiable = ActiveEnvironment(settings);
+      Assert.Equal("unverified", unverifiable.EngineState);
+      Assert.Equal("unverified", unverifiable.ServiceState);
+      Assert.Equal("无法读取活动环境状态，请刷新或重新切换环境。", unverifiable.Reason);
+    }
+    finally
+    {
+      process.Dispose();
+      DeleteScriptDirectory(root);
+    }
+  }
+
+  private static ManagedEnvironment ActiveEnvironment(ManagedEnvironmentSettings settings) =>
+    settings.Snapshot?.Environments.Single(item => item.Id == "environment")
+      ?? throw new InvalidOperationException("Active environment is missing.");
+
+  private static RuntimeStatusSnapshot ReadyStatus() => new()
+  {
+    InstanceId = "sup-test",
+    ServiceState = RuntimeServiceState.Ready,
+    BackendVersion = "0.7.0",
+    Profile = new RuntimeProfileStatus
+    {
+      ProfileId = "win-x64-cpu",
+      Accelerator = RuntimeAccelerator.Cpu,
+    },
+  };
+
+  private static Wire.Health RapidReadyHealth() => new()
+  {
+    SchemaVersion = 2,
+    InstanceId = "sup-test",
+    ProtocolVersion = 2,
+    Ready = true,
+    Draining = false,
+    Capabilities = [RuntimeSelectionService.EngineSelectionCapability],
+    CapabilityDescriptors = [new Wire.CapabilityDescriptor
+    {
+      Name = RuntimeSelectionService.EngineSelectionCapability,
+      Lifecycle = "active",
+      IntroducedIn = "2.0.0",
+      DeprecatedIn = null,
+      SunsetAt = null,
+      Replacement = null,
+      OcrEngineCatalog = new Wire.OcrEngineCatalog
+      {
+        Engines = [new Wire.OcrEngineDescriptor
+        {
+          Id = Wire.OcrEngineId.Rapidocr,
+          Availability = Wire.OcrEngineAvailability.Ready,
+          IncludedInBase = false,
+          ReasonCode = null,
+          RequiredComponent = null,
+        }],
+      },
+    }],
+  };
+
+  private static string CreateReadyEchoScript()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-managed-settings-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    const string envelope =
+      """{"ready":true,"pid":4321,"port":5432,"instance_id":"sup-test","protocol_version":2,"schema_version":2,"ready_version":1,"capabilities":["ocr.recognition.v2"]}""";
+    File.WriteAllLines(Path.Combine(root, "fake-supervisor.cmd"),
+      ["@echo off", $"echo {envelope}", "ping 127.0.0.1 -n 60 >nul"]);
+    return root;
+  }
+
+  private static InferenceSupervisorProcess CreateReadyEchoProcess(string root)
+  {
+    string commandPrompt = Path.Combine(
+      Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
+    return new InferenceSupervisorProcess(new InferenceSupervisorOptions(
+      commandPrompt, ["/d", "/s", "/c", "fake-supervisor.cmd"], root,
+      Path.Combine(root, "supervisor.log"), TimeSpan.FromSeconds(5),
+      new HashSet<string>()), "tok");
+  }
+
+  /// <summary>
+  /// 与 VibeOCR.Platform.Tests.TestDirectory 相同的清理语义：仅对有真实成因的
+  /// sharing violation（fake supervisor 进程树句柄释放延迟）做有界等待；
+  /// 其余异常如实传播，不吞错。
+  /// </summary>
+  private static void DeleteScriptDirectory(string root)
+  {
+    const int sharingViolationHResult = unchecked((int)0x80070020);
+    for (int attempt = 1; ; attempt++)
+    {
+      try
+      {
+        Directory.Delete(root, recursive: true);
+        return;
+      }
+      catch (IOException error) when (
+          error.HResult == sharingViolationHResult && attempt < 20)
+      {
+        Thread.Sleep(TimeSpan.FromMilliseconds(50));
+      }
+    }
+  }
+
+  /// <summary>
+  /// 回应 /v2/health、/v2/runtime/residency、/v2/runtime/status 的真实探针
+  /// 路由，返回与就绪包一致的 sup-test 实例证据。
+  /// </summary>
+  private sealed class HealthyTransport : HttpMessageHandler
+  {
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
+      CancellationToken cancellationToken)
+    {
+      string json = request.RequestUri?.AbsolutePath switch
+      {
+        "/v2/health" => JsonSerializer.Serialize(RapidReadyHealth()),
+        "/v2/runtime/residency" => HttpV2Json.Serialize(new ResidencyStatus()),
+        "/v2/runtime/status" => HttpV2Json.Serialize(ReadyStatus()),
+        _ => throw new HttpRequestException($"Unexpected probe path: {request.RequestUri}"),
+      };
+      return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+      {
+        Content = new StringContent(json, Encoding.UTF8, "application/json"),
+      });
+    }
+  }
+
+  /// <summary>
+  /// 模拟冻结管理器：每次 list 都返回未叠加运行证据的持久状态，
+  /// 并支持创建/安装/修复/删除变更。
+  /// </summary>
+  private sealed class MutableManager : IManagedEnvironmentClient
+  {
+    private readonly List<ManagedEnvironment> environments =
+    [
+      new ManagedEnvironment("environment", "活动环境", 1, "venv", "installed", "python",
+        "ready", "installed", "unverified", "not_checked", "not_started", null,
+        Recipe: "rapidocr-cpu"),
+    ];
+
+    public Task<ManagedEnvironmentList> ListEnvironmentsAsync(
+      CancellationToken cancellationToken = default) =>
+      Task.FromResult(new ManagedEnvironmentList("environment", 1, [.. environments]));
+
+    public Task<ManagedEnvironment> CreateEnvironmentAsync(
+      string name, CancellationToken cancellationToken = default)
+    {
+      var created = new ManagedEnvironment("fresh", name, 1, "venv", "empty", "python",
+        "ready", "empty", "unverified", "not_checked", "not_started", null);
+      environments.Add(created);
+      return Task.FromResult(created);
+    }
+
+    public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(
+      string environmentId, string recipe, IReadOnlyList<string>? sourceIds = null,
+      CancellationToken cancellationToken = default) =>
+      Task.FromResult(new ManagedEnvironmentPlan("plan", environmentId, 1, 1, recipe,
+        sourceIds ?? []));
+
+    public Task<ManagedEnvironment> InstallEnvironmentAsync(
+      ManagedEnvironmentPlan plan, CancellationToken cancellationToken = default)
+    {
+      int index = environments.FindIndex(item => item.Id == plan.EnvironmentId);
+      environments[index] = environments[index] with
+      {
+        Status = "installed",
+        DependencyState = "installed",
+      };
+      return Task.FromResult(environments[index]);
+    }
+
+    public Task<PreparedEnvironmentSwitch> PrepareEnvironmentSwitchAsync(
+      string environmentId, CancellationToken cancellationToken = default) =>
+      throw new NotSupportedException();
+
+    public Task<CommittedEnvironmentSwitch> CommitEnvironmentSwitchAsync(
+      PreparedEnvironmentSwitch prepared, StartedEnvironmentHealth? startedHealth = null,
+      CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+    public Task<ManagedEnvironment> RepairEmptyEnvironmentAsync(
+      string environmentId, CancellationToken cancellationToken = default) =>
+      Task.FromResult(environments.Single(item => item.Id == environmentId));
+
+    public Task DeleteEnvironmentAsync(string environmentId,
+      CancellationToken cancellationToken = default)
+    {
+      environments.RemoveAll(item => item.Id == environmentId);
+      return Task.CompletedTask;
+    }
   }
 
   private sealed class UnavailableTransport : HttpMessageHandler

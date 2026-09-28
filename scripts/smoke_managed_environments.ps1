@@ -147,7 +147,8 @@ try {
     $restarted = Invoke-ManagedPhase 'restart'
     if ($restarted.install_attempts -ne 0 -or
         $restarted.evidence.active_id -ne $created.evidence.environments[0].id -or
-        $restarted.evidence.service_state -ne 'Ready') {
+        $restarted.evidence.service_state -ne 'Ready' -or
+        $restarted.evidence.projected_service_state -ne 'ready') {
         throw 'Active environment A was not ready after restart without installation'
     }
     Write-Host "Managed environment E2E passed: A/B empty, two RapidOCR installs, two OCR tasks, switch-back and restart without installation."

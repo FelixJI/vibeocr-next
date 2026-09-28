@@ -728,6 +728,19 @@ public sealed partial class App : Application
         DiagnosticsViewModel diagnostics,
         bool isRecovery = false)
     {
+        bool connected = await ConnectSupervisorCoreAsync(layout, diagnostics, isRecovery);
+        if (connected && _managedSession is not null)
+        {
+            await RefreshEnvironmentSettingsAfterActivationAsync();
+        }
+        return connected;
+    }
+
+    private async Task<bool> ConnectSupervisorCoreAsync(
+        PortableLayout layout,
+        DiagnosticsViewModel diagnostics,
+        bool isRecovery)
+    {
         diagnostics.UpdateSupervisor(new SupervisorHealth(
             SupervisorHealthState.Connecting, null, null, null));
         RecordMilestone(diagnostics, "T3", _startup.Elapsed);
@@ -833,6 +846,29 @@ public sealed partial class App : Application
             }
         }
         finally { _supervisorLifecycle.Release(); }
+    }
+
+    // 在 supervisor 门释放后刷新；环境切换持环境门等待 supervisor 门。
+    private Task RefreshEnvironmentSettingsAfterActivationAsync() =>
+        RefreshEnvironmentSettingsAfterActivationAsync(
+            _environmentSettings, _applicationShutdown.Token);
+
+    internal static async Task RefreshEnvironmentSettingsAfterActivationAsync(
+        ManagedEnvironmentSettings? settings, CancellationToken shutdown)
+    {
+        if (settings is null) return;
+        try
+        {
+            await settings.RefreshAsync(shutdown);
+        }
+        catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
+        {
+            // 应用关停取消了刷新；无需任何处理。
+        }
+        catch (Exception error)
+        {
+            AppLog.Warn($"Managed environment refresh after activation failed: {error.Message}");
+        }
     }
 
     private async Task ActivateManagedEnvironmentCoreAsync(

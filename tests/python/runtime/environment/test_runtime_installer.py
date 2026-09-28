@@ -658,9 +658,24 @@ def test_active_job_reference_blocks_switch_install_and_delete(tmp_path: Path) -
         references.admit(str(uuid4()))
 
 
+def _omit_pip_for_lock_test(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These tests inject the installer: only the real venv/lock paths matter.
+    # Bootstrapping unused pip before the barrier made CI time out before it
+    # reached the concurrent operations whose one-second deadline we verify.
+    run = subprocess.run
+
+    def without_pip(args: list[str], **kwargs):
+        if args[1:4] == ["-I", "-m", "venv"] and "--without-pip" not in args:
+            args = [*args[:-1], "--without-pip", args[-1]]
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", without_pip)
+
+
 def test_inactive_install_does_not_block_active_job_admission_or_target_conflict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _omit_pip_for_lock_test(monkeypatch)
     manifest, component = _release(tmp_path / "release")
     started = threading.Event()
     finish = threading.Event()
@@ -754,8 +769,10 @@ def test_inactive_install_does_not_block_active_job_admission_or_target_conflict
     finally:
         finish.set()
         worker.join(10)
-        admission.join(10)
-        conflict.join(10)
+        if admission.ident is not None:
+            admission.join(10)
+        if conflict.ident is not None:
+            conflict.join(10)
     assert len(installed) == 1
     assert manager.list()["active_id"] == active["id"]
     assert (
@@ -771,6 +788,7 @@ def test_inactive_install_does_not_block_active_job_admission_or_target_conflict
 def test_inactive_install_commit_rejects_active_pointer_drift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _omit_pip_for_lock_test(monkeypatch)
     manifest, component = _release(tmp_path / "release")
     started = threading.Event()
     finish = threading.Event()
@@ -835,7 +853,8 @@ def test_inactive_install_commit_rejects_active_pointer_drift(
     finally:
         finish.set()
         worker.join(10)
-        switch_worker.join(10)
+        if switch_worker.ident is not None:
+            switch_worker.join(10)
     assert not switch_errors
     assert len(install_errors) == 1
     assert isinstance(install_errors[0], runtime_maintenance.RuntimeInstallPlanStale)

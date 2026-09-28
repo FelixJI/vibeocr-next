@@ -1,5 +1,6 @@
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.App.Features.Maintenance;
+using VibeOCR.App.Services;
 using VibeOCR.Platform.Inference;
 using VibeOCR.Contracts.HttpV2;
 using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
@@ -18,6 +19,9 @@ public sealed class ManagedEnvironmentSettings(
     private readonly SemaphoreSlim gate = new(1, 1);
     private CancellationTokenSource? activeInstall;
 
+    private const string RunningEvidenceUnavailableMessage =
+        "无法读取活动环境状态，请刷新或重新切换环境。";
+
     public event Action? StateChanged;
     public ManagedEnvironmentList? Snapshot { get; private set; }
     public ManagedEnvironmentPlan? Plan { get; private set; }
@@ -31,9 +35,8 @@ public sealed class ManagedEnvironmentSettings(
 
     public Task RefreshAsync(CancellationToken cancellationToken) => RunAsync(async () =>
     {
-        Snapshot = await manager.ListEnvironmentsAsync(cancellationToken);
-        await ApplyRunningEvidenceAsync(cancellationToken);
-        Status = Snapshot.ActiveId is null
+        await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: true);
+        Status = Snapshot?.ActiveId is null
             ? "尚未启动运行环境；可以创建空环境并稍后安装依赖。"
             : "运行环境状态已更新。";
     }, cancellationToken);
@@ -42,7 +45,7 @@ public sealed class ManagedEnvironmentSettings(
     {
         await manager.CreateEnvironmentAsync(name, cancellationToken);
         Plan = null;
-        Snapshot = await manager.ListEnvironmentsAsync(cancellationToken);
+        await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: false);
         Status = "空环境已创建；未安装识别依赖。";
     }, cancellationToken);
 
@@ -70,17 +73,17 @@ public sealed class ManagedEnvironmentSettings(
             installAttempted?.Invoke();
             await manager.InstallEnvironmentAsync(plan, linked.Token);
             Plan = null;
-            Snapshot = await manager.ListEnvironmentsAsync(linked.Token);
+            await ReloadEnvironmentsAsync(linked.Token, strictEvidence: false);
             Status = "依赖已安装；请切换环境以验证并启动服务。";
         }
         catch (OperationCanceledException) when (linked.IsCancellationRequested)
         {
             Status = "安装已取消；原环境保持不变。";
-            Snapshot = await manager.ListEnvironmentsAsync(CancellationToken.None);
+            await ReloadEnvironmentsAsync(CancellationToken.None, strictEvidence: false);
         }
         catch (Exception)
         {
-            try { Snapshot = await manager.ListEnvironmentsAsync(CancellationToken.None); }
+            try { await ReloadEnvironmentsAsync(CancellationToken.None, strictEvidence: false); }
             catch (Exception) { /* Preserve the original installation error. */ }
             throw;
         }
@@ -119,9 +122,8 @@ public sealed class ManagedEnvironmentSettings(
     {
         await activate(environmentId, cancellationToken);
         Plan = null;
-        Snapshot = await manager.ListEnvironmentsAsync(cancellationToken);
-        await ApplyRunningEvidenceAsync(cancellationToken);
-        Status = Snapshot.ActiveId == environmentId
+        await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: true);
+        Status = Snapshot?.ActiveId == environmentId
             ? "环境已切换。模型与引擎状态以目标服务检查结果为准。"
             : "环境切换未提交。";
     }, cancellationToken);
@@ -150,8 +152,47 @@ public sealed class ManagedEnvironmentSettings(
         }
         catch (Exception error) when (error is HttpRequestException or InferenceClientException or VibeOCR.Runtime.Client.RuntimeClientException)
         {
-            throw new InvalidOperationException("无法读取活动环境状态，请刷新或重新切换环境。", error);
+            throw new InvalidOperationException(RunningEvidenceUnavailableMessage, error);
         }
+    }
+
+    // 列表刷新统一叠加运行证据；变更成功后的探针失败标注为未核验。
+    private async Task ReloadEnvironmentsAsync(CancellationToken cancellationToken, bool strictEvidence)
+    {
+        Snapshot = await manager.ListEnvironmentsAsync(cancellationToken);
+        try
+        {
+            await ApplyRunningEvidenceAsync(cancellationToken);
+        }
+        catch (Exception error) when (error is InvalidOperationException or ObjectDisposedException)
+        {
+            // 变更已成功；运行证据不可读时如实标注，不得伪造 ready，也不得
+            // 静默回退冻结管理器的 not_started 投影。
+            MarkRunningEvidenceUnverified(error);
+            if (strictEvidence) throw;
+        }
+    }
+
+    private void MarkRunningEvidenceUnverified(Exception error)
+    {
+        AppLog.Warn($"Managed environment running evidence unavailable: {error.Message}");
+        ManagedEnvironmentSession? session = currentSession?.Invoke();
+        ManagedEnvironmentList? snapshot = Snapshot;
+        if (session is null || snapshot is null || snapshot.ActiveId != session.EnvironmentId)
+            return;
+        ManagedEnvironment? current = snapshot.Environments.SingleOrDefault(item =>
+            item.Id == session.EnvironmentId && item.Revision == session.Revision);
+        if (current is null) return;
+        Snapshot = snapshot with { Environments = [.. snapshot.Environments.Select(item =>
+            item.Id == current.Id
+                ? item with
+                {
+                    EngineState = "unverified",
+                    ModelState = "not_checked",
+                    ServiceState = "unverified",
+                    Reason = RunningEvidenceUnavailableMessage,
+                }
+                : item)] };
     }
 
     internal static ManagedEnvironment ProjectRunning(
@@ -216,7 +257,7 @@ public sealed class ManagedEnvironmentSettings(
     {
         await manager.DeleteEnvironmentAsync(environmentId, cancellationToken);
         Plan = null;
-        Snapshot = await manager.ListEnvironmentsAsync(cancellationToken);
+        await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: false);
         Status = "环境已删除。";
     }, cancellationToken);
 
@@ -224,7 +265,7 @@ public sealed class ManagedEnvironmentSettings(
     {
         await manager.RepairEmptyEnvironmentAsync(environmentId, cancellationToken);
         Plan = null;
-        Snapshot = await manager.ListEnvironmentsAsync(cancellationToken);
+        await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: false);
         Status = "空环境解释器已修复；仍未安装识别依赖。";
     }, cancellationToken);
 

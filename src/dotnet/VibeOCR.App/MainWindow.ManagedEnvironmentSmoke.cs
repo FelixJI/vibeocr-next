@@ -151,6 +151,13 @@ public sealed partial class MainWindow
       [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(2));
     ManagedEnvironment a = SmokePair(list)[0];
     ManagedEnvironmentSession session = await WaitForSmokeSessionAsync(a.Id);
+    await SelectSmokeEnvironmentAsync(a.Id);
+    await WaitForSmokeDomAsync(
+      "document.querySelector('.settings-runtime-panel')?.textContent.includes('服务 ready') === true",
+      TimeSpan.FromMinutes(2));
+    ManagedEnvironment projected = smokeEnvironmentSnapshot!()!.Environments.Single(item => item.Id == a.Id);
+    if (projected.ServiceState != "ready" || projected.Revision != session.Revision)
+      throw new InvalidOperationException("Running environment projection stayed stale after startup.");
     if (list.ActiveId != a.Id || a.Revision != session.Revision ||
         smokeInstallAttempts!() != 0 || !smokeInferenceAttached!())
       throw new InvalidOperationException("Restart did not reuse active A without installation.");
@@ -160,6 +167,7 @@ public sealed partial class MainWindow
       active_revision = list.ActiveRevision,
       python = a.Python,
       service_state = session.Status.ServiceState.ToString(),
+      projected_service_state = projected.ServiceState,
     };
   }
 
