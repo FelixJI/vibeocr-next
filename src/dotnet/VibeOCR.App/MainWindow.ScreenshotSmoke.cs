@@ -154,17 +154,28 @@ public sealed partial class MainWindow
     Func<RecognitionWorkbenchState, bool> matches, TimeSpan timeout)
   {
     using var cancellation = new CancellationTokenSource(timeout);
-    while (!cancellation.IsCancellationRequested)
+    try
     {
-      WorkbenchBootstrap bootstrap = await application.BootstrapAsync(cancellation.Token);
-      RecognitionWorkbenchState state = bootstrap.States
-        .Select(item => item.State)
-        .OfType<RecognitionWorkbenchState>()
-        .Single();
-      if (matches(state)) return state;
-      await Task.Delay(100, cancellation.Token);
+      while (true)
+      {
+        WorkbenchBootstrap bootstrap = await application.BootstrapAsync(cancellation.Token);
+        RecognitionWorkbenchState state = bootstrap.States
+          .Select(item => item.State)
+          .OfType<RecognitionWorkbenchState>()
+          .Single();
+        if (state.StatusCode == "recognition.failed")
+        {
+          throw new InvalidOperationException(
+            $"Screenshot smoke recognition failed: {screenshotSmokePicker?.Failure ?? state.StatusCode}");
+        }
+        if (matches(state)) return state;
+        await Task.Delay(100, cancellation.Token);
+      }
     }
-    throw new TimeoutException("Screenshot state did not reach the expected phase.");
+    catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+    {
+      throw new TimeoutException("Screenshot state did not reach the expected phase.");
+    }
   }
 
   private async Task<int> WaitForCanvasAsync()
