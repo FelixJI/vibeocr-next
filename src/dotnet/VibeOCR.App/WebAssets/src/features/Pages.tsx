@@ -88,6 +88,64 @@ interface FeatureOptionState {
   readonly selected: boolean;
 }
 
+interface ManagedEnvironmentState {
+  readonly id: string;
+  readonly name: string;
+  readonly revision: number;
+  readonly kind: string;
+  readonly status: string;
+  readonly pythonState: string;
+  readonly dependencyState: string;
+  readonly engineState: string;
+  readonly modelState: string;
+  readonly serviceState: string;
+  readonly configuredRecognitionTypes: readonly string[];
+  readonly targetDevice?: string | null;
+  readonly actualDevice?: string | null;
+  readonly reason?: string | null;
+  readonly lastInstallFailure?: {
+    readonly phase: string;
+    readonly environmentRevision: number;
+    readonly recipe: string;
+    readonly reasonCode: string;
+    readonly nextAction: string;
+    readonly detail: string;
+  } | null;
+  readonly pythonVersion?: string | null;
+  readonly abi?: string | null;
+  readonly python?: string | null;
+  readonly path?: string | null;
+  readonly diskBytes?: number;
+}
+
+interface ManagedEnvironmentPlanState {
+  readonly planId: string;
+  readonly environmentId: string;
+  readonly recipe: string;
+  readonly requestedRecipe: string;
+  readonly sourceIds: readonly string[];
+  readonly dependencies: readonly string[];
+}
+
+const environmentRecipes = [
+  ["rapidocr-cpu", "RapidOCR · CPU"],
+  ["paddleocr-cpu", "PaddleOCR · CPU"],
+  ["paddleocr-cuda", "PaddleOCR · NVIDIA CUDA"],
+  ["mineru-cpu", "MinerU · CPU"],
+  ["rapidocr+mineru-cpu", "RapidOCR + MinerU · CPU"],
+  ["rapidocr+mineru-cuda", "RapidOCR + MinerU · NVIDIA CUDA"],
+] as const;
+
+const environmentRecoveryActions: Readonly<Record<string, string>> = {
+  check_source_and_retry: "检查下载源与网络后重新预览安装",
+  free_disk_space: "释放磁盘空间后重新预览安装",
+  check_directory_permissions: "检查环境目录权限后重试",
+  repair_environment: "检查便携版路径长度或重建该环境",
+  preview_again: "重新预览依赖后重试",
+  inspect_diagnostics: "查看诊断日志后重试",
+  wait: "等待当前安装完成",
+};
+
 interface InstallPlanComponentState {
   readonly componentId: string;
   readonly action: string;
@@ -1564,22 +1622,28 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
           >
             重新检查状态
           </CapabilityGate>
-          <AcceleratorFeatures
-            pendingBackend={stringValue(state.pendingBackend) ?? "cpu"}
-            features={featureOptions(state.features)}
-            enabled={viewState.capabilities.includes("settings.selection")}
-            locked={busy}
-            actions={actions}
-          />
-          <MaintenanceActions
-            maintenance={maintenance}
-            plan={installPlan(state.installPlan)}
-            canPreview={state.canPreviewInstall === true}
-            enabled={viewState.capabilities.includes("runtime.maintenance")}
-            sources={sources}
-            features={featureOptions(state.features)}
-            actions={actions}
-          />
+          {viewState.capabilities.includes("runtime.environments") ? (
+            <ManagedEnvironmentEditor state={state} actions={actions} />
+          ) : (
+            <>
+              <AcceleratorFeatures
+                pendingBackend={stringValue(state.pendingBackend) ?? "cpu"}
+                features={featureOptions(state.features)}
+                enabled={viewState.capabilities.includes("settings.selection")}
+                locked={busy}
+                actions={actions}
+              />
+              <MaintenanceActions
+                maintenance={maintenance}
+                plan={installPlan(state.installPlan)}
+                canPreview={state.canPreviewInstall === true}
+                enabled={viewState.capabilities.includes("runtime.maintenance")}
+                sources={sources}
+                features={featureOptions(state.features)}
+                actions={actions}
+              />
+            </>
+          )}
           <p className="form-note">
             {stringValue(state.statusMessage) ??
               statusLabel(state.statusCode, "运行环境状态已同步。")}
@@ -1616,6 +1680,319 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
         </Panel>
       </div>
     </Workspace>
+  );
+}
+
+function managedEnvironments(
+  value: unknown,
+): readonly ManagedEnvironmentState[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (item): item is ManagedEnvironmentState =>
+      typeof item === "object" &&
+      item !== null &&
+      typeof item.id === "string" &&
+      typeof item.name === "string" &&
+      typeof item.revision === "number" &&
+      typeof item.status === "string",
+  );
+}
+
+function managedEnvironmentPlan(
+  value: unknown,
+): ManagedEnvironmentPlanState | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const plan = value as Record<string, unknown>;
+  if (
+    typeof plan.planId !== "string" ||
+    typeof plan.environmentId !== "string" ||
+    typeof plan.recipe !== "string" ||
+    typeof plan.requestedRecipe !== "string" ||
+    !Array.isArray(plan.sourceIds) ||
+    !Array.isArray(plan.dependencies)
+  )
+    return undefined;
+  return plan as unknown as ManagedEnvironmentPlanState;
+}
+
+function ManagedEnvironmentEditor({
+  state,
+  actions,
+}: {
+  readonly state: Record<string, unknown>;
+  readonly actions: AppActions;
+}) {
+  const environments = managedEnvironments(state.environments);
+  const activeId = stringValue(state.activeEnvironmentId);
+  const [selectedId, setSelectedId] = useState("");
+  const [name, setName] = useState("");
+  const [recipe, setRecipe] = useState<string>(environmentRecipes[0][0]);
+  const packageSourceIds = Array.isArray(state.environmentPackageSourceIds)
+    ? state.environmentPackageSourceIds.filter(
+        (id): id is string => typeof id === "string",
+      )
+    : ["tuna-pypi"];
+  const [sourceId, setSourceId] = useState("tuna-pypi");
+  const selectedSourceId = packageSourceIds.includes(sourceId)
+    ? sourceId
+    : (packageSourceIds[0] ?? "tuna-pypi");
+  const selected =
+    environments.find((environment) => environment.id === selectedId) ??
+    environments.find((environment) => environment.id === activeId) ??
+    environments[0];
+  const plan = managedEnvironmentPlan(state.environmentPlan);
+  const [invalidatedPlanId, setInvalidatedPlanId] = useState<string | null>(
+    null,
+  );
+  const invalidatePreview = () => {
+    setInvalidatedPlanId(plan?.planId ?? null);
+    void actions.run({ type: "settings.invalidateEnvironmentPlan" });
+  };
+  const pendingPlan =
+    plan &&
+    plan.planId !== invalidatedPlanId &&
+    plan.environmentId === selected?.id &&
+    plan.requestedRecipe === recipe &&
+    plan.sourceIds.length === 1 &&
+    plan.sourceIds[0] === selectedSourceId
+      ? plan
+      : undefined;
+  const busy = state.environmentBusy === true;
+  return (
+    <div className="managed-environments">
+      <p className="form-note">
+        每个环境拥有独立的 Python
+        与依赖；新建环境可以保持空白，安装依赖和切换服务是分别确认的操作。
+      </p>
+      <div className="setting-row">
+        <Input
+          aria-label="新环境名称"
+          placeholder="新环境名称"
+          value={name}
+          disabled={busy}
+          onChange={(_, data) => setName(data.value)}
+        />
+        <Button
+          disabled={busy || !name.trim()}
+          onClick={() => {
+            void actions.run({
+              type: "settings.createEnvironment",
+              name: name.trim(),
+            });
+            setName("");
+          }}
+        >
+          创建空环境
+        </Button>
+      </div>
+      {environments.length === 0 ? (
+        <p>尚无环境。可以先创建空环境，稍后安装识别依赖。</p>
+      ) : (
+        <>
+          <label htmlFor="managed-environment-select">目标环境</label>
+          <Select
+            id="managed-environment-select"
+            value={selected?.id ?? ""}
+            disabled={busy}
+            onChange={(event) => {
+              invalidatePreview();
+              setSelectedId(event.target.value);
+            }}
+          >
+            {environments.map((environment) => (
+              <option key={environment.id} value={environment.id}>
+                {environment.name}
+                {environment.id === activeId ? " · 当前使用" : ""}
+              </option>
+            ))}
+          </Select>
+        </>
+      )}
+      {selected ? (
+        <>
+          <p>
+            状态：{selected.status === "empty" ? "空环境" : "已安装依赖"} ·
+            Python {selected.pythonState} · 依赖 {selected.dependencyState}
+          </p>
+          <p>
+            引擎 {selected.engineState} · 模型 {selected.modelState} · 服务{" "}
+            {selected.serviceState}
+          </p>
+          <p>
+            已配置识别：
+            {selected.configuredRecognitionTypes?.join("、") || "无"}
+            ；目标设备：{selected.targetDevice || "未设置"}；实际设备：
+            {selected.actualDevice || "未报告实际执行设备"}
+          </p>
+          <p>
+            解释器：{selected.pythonVersion || "未验证"} · ABI{" "}
+            {selected.abi || "未验证"}
+            ；占用：
+            {typeof selected.diskBytes === "number"
+              ? `${(selected.diskBytes / 1024 / 1024).toFixed(1)} MiB`
+              : "未检查"}
+          </p>
+          <p className="form-note">
+            Python：{selected.python || "未定位"}；环境目录：
+            {selected.path || "未定位"}
+          </p>
+          {selected.reason ? <p role="alert">{selected.reason}</p> : null}
+          {selected.lastInstallFailure ? (
+            <p
+              role={
+                selected.lastInstallFailure.phase === "failed"
+                  ? "alert"
+                  : "status"
+              }
+            >
+              {selected.lastInstallFailure.phase === "failed"
+                ? "上次依赖安装未完成"
+                : "依赖安装进行中"}
+              （环境修订 {selected.lastInstallFailure.environmentRevision}，
+              {selected.lastInstallFailure.recipe}）：
+              {selected.lastInstallFailure.detail}（原因：
+              {selected.lastInstallFailure.reasonCode}；建议：
+              {environmentRecoveryActions[
+                selected.lastInstallFailure.nextAction
+              ] ?? selected.lastInstallFailure.nextAction}
+              ）
+            </p>
+          ) : null}
+          {selected.kind !== "legacy" &&
+          (selected.id !== activeId || selected.status === "empty") ? (
+            <>
+              <label htmlFor="managed-recipe-select">锁定依赖配方</label>
+              <Select
+                id="managed-recipe-select"
+                value={recipe}
+                disabled={busy}
+                onChange={(event) => {
+                  invalidatePreview();
+                  setRecipe(event.target.value);
+                }}
+              >
+                {environmentRecipes.map(([id, label]) => (
+                  <option key={id} value={id}>
+                    {label}
+                  </option>
+                ))}
+              </Select>
+              <label htmlFor="managed-package-source-select">
+                本次依赖下载源
+              </label>
+              <Select
+                id="managed-package-source-select"
+                value={selectedSourceId}
+                disabled={busy}
+                onChange={(event) => {
+                  invalidatePreview();
+                  setSourceId(event.target.value);
+                }}
+              >
+                {packageSourceIds.map((id) => (
+                  <option key={id} value={id}>
+                    {id}
+                  </option>
+                ))}
+              </Select>
+              <div className="setting-row">
+                <Button
+                  disabled={busy}
+                  onClick={() =>
+                    void actions.run({
+                      type: "settings.previewEnvironmentInstall",
+                      environmentId: selected.id,
+                      recipe,
+                      sourceId: selectedSourceId,
+                    })
+                  }
+                >
+                  预览依赖
+                </Button>
+                {selected.status === "empty" &&
+                selected.pythonState !== "ready" ? (
+                  <Button
+                    disabled={busy}
+                    onClick={() =>
+                      void actions.run({
+                        type: "settings.repairEmptyEnvironment",
+                        environmentId: selected.id,
+                      })
+                    }
+                  >
+                    修复空环境 Python
+                  </Button>
+                ) : null}
+                {selected.id !== activeId ? (
+                  <Button
+                    disabled={busy}
+                    onClick={() =>
+                      void actions.run({
+                        type: "settings.deleteEnvironment",
+                        environmentId: selected.id,
+                      })
+                    }
+                  >
+                    删除环境
+                  </Button>
+                ) : null}
+              </div>
+            </>
+          ) : null}
+          {pendingPlan ? (
+            <div className="runtime-install-plan">
+              <p>
+                计划：{pendingPlan.recipe} · 来源：
+                {pendingPlan.sourceIds.join("、")}
+              </p>
+              <details>
+                <summary>
+                  锁定依赖（{pendingPlan.dependencies.length} 项）
+                </summary>
+                <p>{pendingPlan.dependencies.join("、")}</p>
+              </details>
+              <Button
+                disabled={busy}
+                onClick={() =>
+                  void actions.run({
+                    type: "settings.confirmEnvironmentInstall",
+                    planId: pendingPlan.planId,
+                    sourceId: selectedSourceId,
+                  })
+                }
+              >
+                确认安装依赖
+              </Button>
+            </div>
+          ) : null}
+          {selected.id !== activeId ||
+          (selected.status === "installed" &&
+            selected.serviceState !== "ready") ? (
+            <Button
+              disabled={busy}
+              onClick={() =>
+                void actions.run({
+                  type: "settings.switchEnvironment",
+                  environmentId: selected.id,
+                })
+              }
+            >
+              {selected.id === activeId ? "启动并验证当前环境" : "切换到此环境"}
+            </Button>
+          ) : null}
+        </>
+      ) : null}
+      <p role="status">{stringValue(state.environmentStatus) ?? ""}</p>
+      {state.environmentCanCancelInstall === true ? (
+        <Button
+          onClick={() =>
+            void actions.run({ type: "settings.cancelEnvironmentInstall" })
+          }
+        >
+          取消安装
+        </Button>
+      ) : null}
+    </div>
   );
 }
 

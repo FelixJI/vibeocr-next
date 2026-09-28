@@ -179,6 +179,46 @@ describe("AppShell", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
+  it("waits for connected host navigation before changing pages", async () => {
+    window.location.hash = "#/recognition";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const initial: AppViewState = {
+      connected: true,
+      revision: 1,
+      route: "recognition",
+      theme: "light",
+      capabilities: ["qrcode.generate"],
+      features: {},
+      runtimeLabel: "原生宿主已连接",
+    };
+    const { rerender, unmount } = render(
+      <App actions={actions} viewState={initial} />,
+    );
+    const push = vi.spyOn(window.history, "pushState");
+    try {
+      await user.click(screen.getByRole("link", { name: "二维码" }));
+      expect(actions.navigate).toHaveBeenCalledWith("qrcode");
+      expect(push).not.toHaveBeenCalled();
+      expect(window.location.hash).toBe("#/recognition");
+      rerender(
+        <App
+          actions={actions}
+          viewState={{ ...initial, revision: 2, route: "qrcode" }}
+        />,
+      );
+      expect(
+        await screen.findByRole("heading", { name: "二维码工作台" }),
+      ).toBeVisible();
+    } finally {
+      push.mockRestore();
+      unmount();
+    }
+  });
   it("follows an external host route revision", async () => {
     window.location.hash = "#/recognition";
     const actions: AppActions = {
@@ -1645,6 +1685,198 @@ describe("AppShell", () => {
         "本地 MinerU 使用进程保活；仅支持：TTL、释放。远程模型生命周期由服务端管理。",
       ),
     ).toBeVisible();
+    unmount();
+  });
+  it("shows a fresh empty environment without starting OCR and routes explicit installation", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 1,
+      route: "settings",
+      theme: "light",
+      capabilities: ["runtime.environments"],
+      runtimeLabel: "尚未选择环境",
+      features: {
+        settings: {
+          environments: [
+            {
+              id: "env-1",
+              name: "文档",
+              revision: 1,
+              kind: "venv",
+              status: "empty",
+              pythonState: "ready",
+              dependencyState: "empty",
+              engineState: "unverified",
+              modelState: "not_checked",
+              serviceState: "not_started",
+              configuredRecognitionTypes: [],
+              targetDevice: null,
+              actualDevice: null,
+              lastInstallFailure: {
+                phase: "failed",
+                environmentRevision: 1,
+                recipe: "rapidocr-cpu",
+                reasonCode: "network_error",
+                nextAction: "check_source_and_retry",
+                detail: "下载源连接失败。",
+              },
+            },
+          ],
+          activeEnvironmentId: null,
+          environmentPackageSourceIds: ["tuna-pypi", "pypi"],
+          environmentCanCancelInstall: true,
+          environmentPlan: {
+            planId: "plan-1",
+            environmentId: "env-1",
+            recipe: "rapidocr-cpu",
+            requestedRecipe: "rapidocr-cpu",
+            sourceIds: ["tuna-pypi"],
+            dependencies: ["rapidocr==3.6.0"],
+          },
+          environmentStatus: "已预览锁定配方。",
+        },
+      },
+    };
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    expect(screen.getByText(/Python ready · 依赖 empty/)).toBeVisible();
+    expect(screen.getByText(/上次依赖安装未完成/)).toHaveTextContent(
+      "下载源连接失败。",
+    );
+    expect(screen.getByText(/上次依赖安装未完成/)).toHaveTextContent(
+      "检查下载源与网络后重新预览安装",
+    );
+    expect(screen.getByText(/锁定依赖（1 项）/)).toBeVisible();
+    await user.type(screen.getByLabelText("新环境名称"), "资料");
+    await user.click(screen.getByRole("button", { name: "创建空环境" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.createEnvironment",
+      name: "资料",
+    });
+    await user.click(screen.getByRole("button", { name: "确认安装依赖" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.confirmEnvironmentInstall",
+      planId: "plan-1",
+      sourceId: "tuna-pypi",
+    });
+    await user.click(screen.getByRole("button", { name: "切换到此环境" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.switchEnvironment",
+      environmentId: "env-1",
+    });
+    await user.click(screen.getByRole("button", { name: "取消安装" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.cancelEnvironmentInstall",
+    });
+    unmount();
+  });
+  it("keeps a compatible MinerU request confirmable when Runtime resolves a combined recipe", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 2,
+      route: "settings",
+      theme: "light",
+      capabilities: ["runtime.environments"],
+      runtimeLabel: "运行环境",
+      features: {
+        settings: {
+          environments: [
+            {
+              id: "env-1",
+              name: "RapidOCR",
+              revision: 2,
+              kind: "venv",
+              status: "installed",
+              pythonState: "ready",
+              dependencyState: "installed",
+              engineState: "unverified",
+              modelState: "not_checked",
+              serviceState: "not_started",
+              configuredRecognitionTypes: ["text"],
+            },
+          ],
+          environmentPackageSourceIds: ["tuna-pypi"],
+          environmentPlan: {
+            planId: "combined-plan",
+            environmentId: "env-1",
+            requestedRecipe: "mineru-cpu",
+            recipe: "rapidocr+mineru-cpu",
+            sourceIds: ["tuna-pypi"],
+            dependencies: ["rapidocr==3.9.2", "mineru==4.0.2"],
+          },
+        },
+      },
+    };
+    const { unmount, rerender } = render(
+      <App actions={actions} viewState={viewState} />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "确认安装依赖" }),
+    ).not.toBeInTheDocument();
+    await user.selectOptions(
+      screen.getByLabelText("锁定依赖配方"),
+      "mineru-cpu",
+    );
+    expect(
+      screen.queryByRole("button", { name: "确认安装依赖" }),
+    ).not.toBeInTheDocument();
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.invalidateEnvironmentPlan",
+    });
+    await user.selectOptions(
+      screen.getByLabelText("锁定依赖配方"),
+      "rapidocr-cpu",
+    );
+    await user.selectOptions(
+      screen.getByLabelText("锁定依赖配方"),
+      "mineru-cpu",
+    );
+    expect(
+      screen.queryByRole("button", { name: "确认安装依赖" }),
+    ).not.toBeInTheDocument();
+    const settingsState = viewState.features.settings as Record<
+      string,
+      unknown
+    >;
+    const previousPlan = settingsState.environmentPlan as Record<
+      string,
+      unknown
+    >;
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 3,
+          features: {
+            settings: {
+              ...settingsState,
+              environmentPlan: { ...previousPlan, planId: "new-combined-plan" },
+            },
+          },
+        }}
+      />,
+    );
+    expect(screen.getByText(/计划：rapidocr\+mineru-cpu/)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "确认安装依赖" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.confirmEnvironmentInstall",
+      planId: "new-combined-plan",
+      sourceId: "tuna-pypi",
+    });
     unmount();
   });
 });

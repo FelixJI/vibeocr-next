@@ -34,6 +34,10 @@ logger = logging.getLogger(__name__)
 
 
 def paddle_python() -> Path | None:
+    if os.environ.get("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "").startswith(
+        "paddleocr-"
+    ):
+        return Path(sys.executable)
     root = Path(sys.prefix) / "engines" / "paddle"
     return next(
         (
@@ -98,13 +102,19 @@ class PaddleProcessAdapter:
         self._responses = responses
         env = dict(os.environ, PYTHONNOUSERSITE="1", PYTHONUTF8="1")
         env.pop("PYTHONPATH", None)
-        process = subprocess.Popen(
+        product_code = env.get("VIBEOCR_PRODUCT_CODE_ROOT")
+        arguments = (
             [
-                str(self.python),
                 "-I",
-                "-m",
-                "vibeocr.runtime.recognition.paddle_worker",
-            ],
+                "-B",
+                "-c",
+                "import os,runpy,sys;sys.path.insert(0,os.environ['VIBEOCR_PRODUCT_CODE_ROOT']);runpy.run_module('vibeocr.runtime.recognition.paddle_worker',run_name='__main__')",
+            ]
+            if product_code
+            else ["-I", "-m", "vibeocr.runtime.recognition.paddle_worker"]
+        )
+        process = subprocess.Popen(
+            [str(self.python), *arguments],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

@@ -2,6 +2,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$ProductRoot,
     [Parameter(Mandatory = $true)][string]$WorkRoot,
+    [string]$PreparedCandidateRoot,
     [int]$TimeoutMinutes = 45
 )
 
@@ -27,14 +28,36 @@ foreach ($marker in @(
 if (Test-Path -LiteralPath (Join-Path $source 'state')) {
     throw 'Source candidate must not contain user or previous smoke state'
 }
-
-$smokeRoot = Join-Path $work "vibeocr-screenshot-e2e-$([guid]::NewGuid().ToString('N'))"
-$candidate = Join-Path $smokeRoot 'candidate'
+if (-not $PreparedCandidateRoot) {
+    throw 'Standalone screenshot smoke requires a prepared isolated candidate. Run scripts/smoke_managed_environments.ps1 -ProductRoot <candidate> -WorkRoot <isolated-work-root> first, then pass its retained candidate with -PreparedCandidateRoot to this script.'
+}
+$candidate = (Resolve-Path -LiteralPath $PreparedCandidateRoot).Path.TrimEnd('\')
+$smokeRoot = Split-Path -Parent $candidate
+if ((Split-Path -Leaf $candidate) -ne 'candidate' -or
+    (Split-Path -Leaf $smokeRoot) -cnotmatch '^(?:ve-[0-9a-f]{12}|vibeocr-managed-e2e-[0-9a-f]{32})$' -or
+    -not $smokeRoot.StartsWith($work + '\', [StringComparison]::OrdinalIgnoreCase) -or
+    -not (Test-Path -LiteralPath (Join-Path $candidate 'state') -PathType Container)) {
+    throw 'PreparedCandidateRoot must be the retained candidate from the isolated managed-environment smoke under WorkRoot'
+}
+foreach ($marker in @('app\VibeOCR.WinUI.exe', 'app\metadata\product-layout.json')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $candidate $marker) -PathType Leaf)) {
+        throw "Prepared candidate marker missing: $marker"
+    }
+}
+if ((Get-Content -LiteralPath (Join-Path $source 'app\metadata\product-layout.json') -Raw) -ne
+    (Get-Content -LiteralPath (Join-Path $candidate 'app\metadata\product-layout.json') -Raw)) {
+    throw 'Prepared candidate does not match ProductRoot layout'
+}
+$sourceIdentity = Get-Content -LiteralPath (Join-Path $source 'app\metadata\component-identities.json') -Raw | ConvertFrom-Json
+$candidateIdentity = Get-Content -LiteralPath (Join-Path $candidate 'app\metadata\component-identities.json') -Raw | ConvertFrom-Json
+foreach ($field in @('component', 'repository', 'version', 'source_sha')) {
+    if (-not $sourceIdentity.project.$field -or
+        $sourceIdentity.project.$field -ne $candidateIdentity.project.$field) {
+        throw "Prepared candidate product binding differs: $field"
+    }
+}
 $healthPath = Join-Path $smokeRoot 'screenshot-e2e-health.json'
-$webViewData = Join-Path $smokeRoot 'webview2'
-New-Item -ItemType Directory -Path $candidate | Out-Null
-Get-ChildItem -LiteralPath $source -Force |
-    Copy-Item -Destination $candidate -Recurse -Force
+$webViewData = Join-Path $smokeRoot 'screenshot-webview2'
 
 $previousSmoke = $env:VIBEOCR_SELF_TEST_SMOKE
 $previousInstance = $env:VIBEOCR_SELF_TEST_INSTANCE

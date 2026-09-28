@@ -62,6 +62,8 @@ class JobRecord:
     priority: JobPriority
     instance_id: str
     created_at: str
+    environment_id: str | None = None
+    environment_revision: int | None = None
     state: JobState = JobState.ACCEPTED
     started_at: str | None = None
     finished_at: str | None = None
@@ -343,6 +345,8 @@ class JobRecord:
                 request_id=self.request_id,
                 source_job_id=self.source_job_id,
                 pipeline=self.pipeline,
+                environment_id=self.environment_id,
+                environment_revision=self.environment_revision,
             )
 
     # ------------------------------------------------------------------
@@ -363,8 +367,17 @@ class JobRegistry:
     cleans stale staging on startup but does not recover job execution state.
     """
 
-    def __init__(self, instance_id: str, *, schema_version: int = 2) -> None:
+    def __init__(
+        self,
+        instance_id: str,
+        *,
+        schema_version: int = 2,
+        environment_id: str | None = None,
+        environment_revision: int | None = None,
+    ) -> None:
         self._instance_id = instance_id
+        self._environment_id = environment_id
+        self._environment_revision = environment_revision
         self._schema_version = schema_version
         self._jobs: dict[str, JobRecord] = {}
         self._lock = threading.RLock()
@@ -404,6 +417,8 @@ class JobRegistry:
             priority=priority,
             instance_id=self._instance_id,
             created_at=datetime.now(tz=UTC).isoformat(),
+            environment_id=self._environment_id,
+            environment_revision=self._environment_revision,
             progress_total=progress_total,
             stage=stage,
             items=list(items),
@@ -478,6 +493,7 @@ class JobRegistry:
         *,
         kind: JobKind | None = None,
         priority: JobPriority | None = None,
+        job_id: str | None = None,
     ) -> JobRecord:
         """Create a new job retrying only failed/cancelled items of the source."""
         source = self.get(source_job_id)
@@ -512,6 +528,7 @@ class JobRegistry:
             source_item_ids=tuple(source_item_ids),
             request_id=source.request_id,
             pipeline=source.pipeline,
+            job_id=job_id,
         )
 
     # ------------------------------------------------------------------

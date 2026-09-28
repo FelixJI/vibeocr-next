@@ -1506,8 +1506,10 @@ public sealed class RuntimeInstallerCommandRunner : IRuntimeInstallerCommandRunn
             try
             {
                 process.Kill(entireProcessTree: true);
+                using var exitTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                await process.WaitForExitAsync(exitTimeout.Token).ConfigureAwait(false);
             }
-            catch (InvalidOperationException)
+            catch (Exception error) when (error is InvalidOperationException or OperationCanceledException)
             {
             }
             throw;

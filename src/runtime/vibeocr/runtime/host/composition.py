@@ -14,6 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from vibeocr.runtime.environments.managed_references import ManagedEnvironmentReferences
 from vibeocr.runtime.environments.settings_store import RuntimeSettings
 from vibeocr.runtime.host.bootstrap import (
     BootstrapHandle,
@@ -497,6 +498,7 @@ def build_supervisor(
         engine_resolver=engine_resolver,
         recognition_mode_registry=recognition_mode_registry,
         settings_store=settings_store,
+        managed_references=ManagedEnvironmentReferences.from_environment(),
     )
     # Clean stale staging left by a previous crashed instance (plan Phase 2).
     # At startup no jobs are known yet, so every existing dir is stale.

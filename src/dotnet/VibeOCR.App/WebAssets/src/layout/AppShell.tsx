@@ -49,9 +49,11 @@ const utilityNavigation = [
 function NavigationItems({
   items,
   navigate,
+  connected,
 }: {
   readonly items: typeof primaryNavigation | typeof utilityNavigation;
   readonly navigate: AppActions["navigate"];
+  readonly connected: boolean;
 }) {
   return items.map(([route, label, Icon]) => (
     <NavLink
@@ -60,7 +62,10 @@ function NavigationItems({
         `navigation-link${isActive ? " is-active" : ""}`
       }
       key={route}
-      onClick={() => navigate(route)}
+      onClick={(event) => {
+        if (connected) event.preventDefault();
+        navigate(route);
+      }}
       title={label}
       to={`/${route}`}
     >
@@ -87,6 +92,7 @@ export function AppShell({
           <NavigationItems
             items={primaryNavigation}
             navigate={actions.navigate}
+            connected={viewState.connected}
           />
         </nav>
         <nav
@@ -96,6 +102,7 @@ export function AppShell({
           <NavigationItems
             items={utilityNavigation}
             navigate={actions.navigate}
+            connected={viewState.connected}
           />
         </nav>
         <div className="navigation-footnote">离线工作台</div>

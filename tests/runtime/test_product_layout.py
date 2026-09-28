@@ -14,6 +14,7 @@ from scripts.product_layout import (
     load_product_layout,
     stage_product_layout,
 )
+from scripts.release_smoke import _verify_runtime_code
 from tests.python.runtime.environment.test_runtime_installer import _release
 
 PADDLE_CPU_LOCK = (
@@ -95,11 +96,30 @@ def test_stage_product_layout_builds_the_strict_public_tree(tmp_path: Path) -> N
     assert (product_root / "app/metadata/component-lock.json").is_file()
     assert (product_root / "app/metadata/component-identities.json").is_file()
     assert (product_root / "runtime/backend/runtime-manifest.json").is_file()
+    assert (
+        product_root / "runtime/backend/runtime-code/vibeocr/runtime/host/main.py"
+    ).is_file()
     assert (product_root / "runtime/installer/vibeocr-runtime-installer.exe").is_file()
+    _verify_runtime_code(product_root, "0.7.0")
     assert not list(product_root.rglob("*.pdb"))
     assert not list(product_root.rglob("*.exe.config"))
     with pytest.raises(ProductLayoutError, match="layout.missing-entry"):
         load_product_layout(product_root)
+
+
+def test_stage_product_layout_accepts_relative_backend_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs = _release_inputs(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    inputs["backend_release_dir"] = Path("backend-release")
+    product = tmp_path / "VibeOCR"
+
+    stage_product_layout(product_root=product, **inputs)
+
+    assert (
+        product / "runtime/backend/runtime-code/vibeocr/runtime/host/main.py"
+    ).is_file()
 
 
 def test_stage_product_layout_embeds_only_the_release_bound_base_runtime_closure(
@@ -167,6 +187,7 @@ def test_stage_product_layout_embeds_only_the_release_bound_base_runtime_closure
         runtime_manifest["profiles"]["win-x64-cu126"]["lock"],
         runtime_manifest["profiles"]["win-x64-cu126"]["install_scopes"][0]["lock"],
         "offline-foundation.part-01.bundle",
+        "runtime-code",
     }
 
 

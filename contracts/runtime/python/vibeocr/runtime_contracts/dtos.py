@@ -399,6 +399,8 @@ class JobSnapshot:
     request_id: str | None = None
     source_job_id: str | None = None
     pipeline: PipelineSelection | None = None
+    environment_id: str | None = None
+    environment_revision: int | None = None
     progress: ProgressSnapshot | None = None
 
     def to_payload(self) -> dict[str, Any]:
@@ -426,6 +428,9 @@ class JobSnapshot:
             "source_job_id": self.source_job_id,
             "pipeline": self.pipeline.to_payload() if self.pipeline else None,
         }
+        if self.environment_id is not None:
+            payload["environment_id"] = self.environment_id
+            payload["environment_revision"] = self.environment_revision
         if self.progress is not None:
             payload["progress"] = self.progress.to_payload()
         return payload

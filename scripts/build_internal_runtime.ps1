@@ -87,6 +87,7 @@ $manifestArgs = @(
     '--cu126-gpu-lock', (Join-Path $runtimeConfig 'win-x64-cu126-gpu/requirements-win-x64-cu126-gpu.lock'),
     '--paddle-cpu-lock', (Join-Path $runtimeConfig 'win-x64-paddle-cpu/requirements-win-x64-paddle-cpu.lock'),
     '--paddle-cu126-lock', (Join-Path $runtimeConfig 'win-x64-paddle-cu126/requirements-win-x64-paddle-cu126.lock'),
+    '--mineru-cpu-lock', (Join-Path $runtimeConfig 'win-x64-mineru-cpu/requirements-win-x64-mineru-cpu.lock'),
     '--python-archive', $pythonArchive,
     '--python-version', [string]$pythonLock.version,
     '--python-source-url', [string]$pythonLock.source_url,

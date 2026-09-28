@@ -6,11 +6,17 @@ behaviour without any OCR/Paddle/MinerU dependency.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from typing import TYPE_CHECKING
 
 import pytest
+from vibeocr.runtime.environments.managed_references import (
+    ManagedEnvironmentReferences,
+    environment_has_references,
+)
+from vibeocr.runtime.environments.runtime_lock import RuntimeLockTimeout
 from vibeocr.runtime.jobs.module import (
     ShutdownRequested,
     SupervisorModule,
@@ -21,6 +27,7 @@ from vibeocr.runtime.recognition.recognition_modes import (
     RecognitionModeRegistry,
 )
 from vibeocr.runtime_contracts import (
+    TERMINAL_JOB_STATES,
     CancelMode,
     ContractError,
     ItemState,
@@ -144,6 +151,130 @@ def test_submit_returns_accepted_then_completes(module: SupervisorModule) -> Non
     assert snap.summary.succeeded == 2
     assert snap.summary.total == 2
     assert [it.display_name for it in snap.items] == ["a.png", "b.png"]
+
+
+def test_managed_job_binds_revision_until_terminal(tmp_path: Path) -> None:
+    registry = tmp_path / "environments.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "active_id": "managed",
+                "environments": {"managed": {"revision": 3}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    refs = ManagedEnvironmentReferences(
+        registry, tmp_path / "store.lock", tmp_path / "references", "managed", 3
+    )
+    started = threading.Event()
+    finish = threading.Event()
+
+    class HoldingExecutor(FakeExecutor):
+        def execute(self, record, staged) -> None:  # type: ignore[no-untyped-def]
+            started.set()
+            assert finish.wait(5)
+            super().execute(record, staged)
+
+    executor = HoldingExecutor()
+    managed = SupervisorModule(
+        options=SupervisorOptions(instance_id="managed-sup"),
+        stager_root=tmp_path / "staging",
+        executor=executor,
+        managed_references=refs,
+    )
+    job = managed.submit(
+        kind=JobKind.RECOGNITION,
+        priority=JobPriority.INTERACTIVE,
+        uploads=[("page.png", "image/png", b"image")],
+    )
+    assert managed.registry.get(job.job_id).environment_id == "managed"
+    assert managed.registry.get(job.job_id).environment_revision == 3
+    assert started.wait(2)
+    try:
+        assert job.job_id in refs._held
+        assert list((tmp_path / "references" / "managed").glob("*.lock"))
+        assert environment_has_references(tmp_path / "references", "managed")
+    finally:
+        finish.set()
+    _wait_for_terminal(managed, job.job_id)
+    assert not environment_has_references(tmp_path / "references", "managed")
+    registry.write_text(
+        json.dumps(
+            {"active_id": "other", "environments": {"managed": {"revision": 3}}}
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeLockTimeout, match="no longer active"):
+        managed.submit(
+            kind=JobKind.RECOGNITION,
+            priority=JobPriority.INTERACTIVE,
+            uploads=[("next.png", "image/png", b"image")],
+        )
+
+
+def test_managed_admission_releases_lease_when_retry_clone_or_dispatch_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "environments.json"
+    registry.write_text(
+        json.dumps(
+            {"active_id": "managed", "environments": {"managed": {"revision": 1}}}
+        ),
+        encoding="utf-8",
+    )
+    refs = ManagedEnvironmentReferences(
+        registry, tmp_path / "store.lock", tmp_path / "references", "managed", 1
+    )
+
+    class FailingExecutor(FakeExecutor):
+        def execute(self, record, staged) -> None:  # type: ignore[no-untyped-def]
+            record.transition(JobState.RUNNING)
+            for item in record.items:
+                record.transition_item(item.item_id, ItemState.RUNNING)
+                record.transition_item(item.item_id, ItemState.FAILED)
+            record.transition(JobState.FAILED)
+
+    managed = SupervisorModule(
+        options=SupervisorOptions(instance_id="managed-sup"),
+        stager_root=tmp_path / "staging",
+        executor=FailingExecutor(),
+        managed_references=refs,
+    )
+    source = managed.submit(
+        kind=JobKind.RECOGNITION,
+        priority=JobPriority.INTERACTIVE,
+        uploads=[("page.png", "image/png", b"image")],
+    )
+    _wait_for_terminal(managed, source.job_id)
+
+    def fail_clone(**_kwargs):  # type: ignore[no-untyped-def]
+        raise OSError("synthetic clone failure")
+
+    monkeypatch.setattr(managed.stager, "clone_for_retry", fail_clone)
+    with pytest.raises(OSError, match="synthetic clone failure"):
+        managed.retry(source.job_id)
+    retry_id = next(
+        item for item in managed.registry.all_job_ids() if item != source.job_id
+    )
+    assert managed.registry.get(retry_id).state is JobState.FAILED
+    assert not environment_has_references(tmp_path / "references", "managed")
+
+    def fail_dispatch(_record, _staged) -> None:  # type: ignore[no-untyped-def]
+        raise OSError("synthetic dispatch failure")
+
+    monkeypatch.setattr(managed, "_dispatch", fail_dispatch)
+    with pytest.raises(OSError, match="synthetic dispatch failure"):
+        managed.submit(
+            kind=JobKind.RECOGNITION,
+            priority=JobPriority.INTERACTIVE,
+            uploads=[("next.png", "image/png", b"image")],
+        )
+    assert not environment_has_references(tmp_path / "references", "managed")
+    assert all(
+        managed.registry.get(job_id).state in TERMINAL_JOB_STATES
+        for job_id in managed.registry.all_job_ids()
+    )
 
 
 def test_result_preserves_input_order(module: SupervisorModule) -> None:

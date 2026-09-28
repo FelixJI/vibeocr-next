@@ -427,6 +427,13 @@ def validate_requirements_lock(
             raise ManifestError("Paddle CPU environment contains GPU Paddle")
         if profile.endswith("-cu126") and "paddlepaddle-gpu" not in declarations:
             raise ManifestError("Paddle CUDA environment is missing GPU Paddle")
+    elif profile == "win-x64-mineru-cpu":
+        declarations = "\n".join(entry[0].lower() for entry in entries)
+        if "mineru==" not in declarations or "fastapi==" not in declarations:
+            raise ManifestError("standalone MinerU lock lacks engine or Runtime host")
+        for forbidden in ("rapidocr==", "paddleocr==", "paddlepaddle==", "torch=="):
+            if forbidden in declarations:
+                raise ManifestError(f"standalone MinerU lock contains {forbidden}")
     elif profile == "win-x64-cpu":
         if "paddlepaddle-gpu" in lowered or "cu126" in lowered:
             raise ManifestError("CPU lock contains a GPU/cu126 artifact")
@@ -714,7 +721,18 @@ def load_runtime_manifest(
             scope_component_set = frozenset(scope_component_ids)
             if not scope_component_set.issubset(component_ids):
                 raise ManifestError(f"{scope_field}.component_ids must stay in profile")
-            if not base_component_ids.issubset(scope_component_set):
+            standalone_mineru = (
+                name == "win-x64-cpu"
+                and scope_id == "mineru-standalone"
+                and scope_component_set == {"mineru-cpu", "runtime_host"}
+            )
+            if scope_id == "mineru-standalone" and not standalone_mineru:
+                raise ManifestError(
+                    f"{scope_field} has invalid standalone MinerU binding"
+                )
+            if not standalone_mineru and not base_component_ids.issubset(
+                scope_component_set
+            ):
                 raise ManifestError(
                     f"{scope_field}.component_ids must include base components"
                 )
@@ -748,7 +766,9 @@ def load_runtime_manifest(
                 validate_requirements_lock(
                     scope_lock_path,
                     profile=(
-                        name
+                        "win-x64-mineru-cpu"
+                        if standalone_mineru
+                        else name
                         if "gpu_runtime" in scope_component_set
                         or any(
                             item.startswith("mineru-") for item in scope_component_set

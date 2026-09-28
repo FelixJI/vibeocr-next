@@ -154,6 +154,15 @@ public sealed record OpenProjectPageCommand : WorkbenchCommand;
 
 public sealed record RefreshRuntimeCommand : WorkbenchCommand;
 
+public sealed record CreateEnvironmentCommand(string Name) : WorkbenchCommand;
+public sealed record PreviewEnvironmentInstallCommand(string EnvironmentId, string Recipe, string SourceId) : WorkbenchCommand;
+public sealed record ConfirmEnvironmentInstallCommand(string PlanId, string SourceId) : WorkbenchCommand;
+public sealed record CancelEnvironmentInstallCommand : WorkbenchCommand;
+public sealed record InvalidateEnvironmentPlanCommand : WorkbenchCommand;
+public sealed record SwitchEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
+public sealed record DeleteEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
+public sealed record RepairEmptyEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
+
 public sealed record SetThemeCommand(WorkbenchTheme Theme) : WorkbenchCommand;
 
 public sealed record SetStartupCommand(bool Enabled) : WorkbenchCommand;
@@ -375,11 +384,56 @@ public sealed record SettingsWorkbenchState(
   bool CanPreviewInstall = false,
   VibeOCR.Runtime.Contracts.Generated.Host.RuntimeInstallPlan? InstallPlan = null,
   SettingsMineruConnectionState? MineruConnection = null,
+  IReadOnlyList<SettingsEnvironmentState>? Environments = null,
+  string? ActiveEnvironmentId = null,
+  SettingsEnvironmentPlanState? EnvironmentPlan = null,
+  string EnvironmentStatus = "",
+  bool EnvironmentBusy = false,
+  IReadOnlyList<string>? EnvironmentPackageSourceIds = null,
+  bool EnvironmentCanCancelInstall = false,
   IReadOnlyList<SettingsHotkeyActionState>? HotkeyActions = null,
   SettingsFloatingToolbarState? FloatingToolbar = null) : WorkbenchState
 {
   public override string Scope => "settings";
 }
+
+public sealed record SettingsEnvironmentState(
+  string Id,
+  string Name,
+  int Revision,
+  string Kind,
+  string Status,
+  string PythonState,
+  string DependencyState,
+  string EngineState,
+  string ModelState,
+  string ServiceState,
+  IReadOnlyList<string> ConfiguredRecognitionTypes,
+  string? TargetDevice,
+  string? ActualDevice,
+  string? Reason,
+  string? PythonVersion,
+  string? Abi,
+  string? Python,
+  string? Path,
+  long DiskBytes,
+  SettingsEnvironmentInstallFailureState? LastInstallFailure = null);
+
+public sealed record SettingsEnvironmentInstallFailureState(
+  string Phase,
+  int EnvironmentRevision,
+  string Recipe,
+  string ReasonCode,
+  string NextAction,
+  string Detail);
+
+public sealed record SettingsEnvironmentPlanState(
+  string PlanId,
+  string EnvironmentId,
+  string Recipe,
+  IReadOnlyList<string> SourceIds,
+  IReadOnlyList<string> Dependencies,
+  string RequestedRecipe);
 
 /// <summary>
 /// One shell action's hotkey projection for the settings page: the configured

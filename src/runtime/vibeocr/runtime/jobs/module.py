@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
+from vibeocr.runtime.environments.managed_references import ManagedEnvironmentReferences
 from vibeocr.runtime.environments.runtime_lock import RuntimeLockTimeout
 from vibeocr.runtime.environments.runtime_selection import normalize_download_source_ids
 from vibeocr.runtime.environments.settings_store import RuntimeSettings
@@ -130,9 +131,16 @@ class SupervisorModule:
         engine_resolver: OcrEngineResolver | None = None,
         recognition_mode_registry: RecognitionModeRegistry | None = None,
         settings_store: RuntimeSettings | None = None,
+        managed_references: ManagedEnvironmentReferences | None = None,
     ) -> None:
         self.options = options
-        self.registry = JobRegistry(options.instance_id)
+        self.registry = JobRegistry(
+            options.instance_id,
+            environment_id=managed_references.env_id if managed_references else None,
+            environment_revision=managed_references.revision
+            if managed_references
+            else None,
+        )
         self.stager = InputStager(
             root=stager_root,
             max_file_count=options.max_file_count,
@@ -144,7 +152,17 @@ class SupervisorModule:
         )
         # Wire the registry so every terminal transition records its
         # timestamp for the retention policy — executors do not need to know.
-        self.registry.set_terminal_hook(self.retention.mark_terminal)
+        self._managed_references = managed_references
+
+        def on_terminal(record: JobRecord) -> None:
+            self.retention.mark_terminal(record)
+            if (
+                self._managed_references is not None
+                and record.state in TERMINAL_JOB_STATES
+            ):
+                self._managed_references.release(record.job_id)
+
+        self.registry.set_terminal_hook(on_terminal)
         self._executor = executor
         # Optional PDF child-process adapter (Phase 6). When present, the v2
         # PDF session routes proxy through it instead of the legacy
@@ -328,27 +346,43 @@ class SupervisorModule:
                     )
                     for index, item in enumerate(items)
                 ]
-            record = self.registry.create(
-                kind=kind,
-                priority=priority,
-                items=items,
-                progress_total=len(items),
-                stage="queued",
-                job_id=job_id,
-                request_id=request_id,
-                pipeline=pipeline,
-            )
-            record.transition(JobState.QUEUED)
-            record.append_event("queued", detail={"item_count": len(items)})
-            for item in items:
-                if item.state is not None and item.state.value == "failed":
-                    record.commit_item_failure(
-                        item.item_id,
-                        error_code="QUOTA_EXCEEDED",
-                        error=item.error or "staging failed",
-                    )
-            # Kick off the executor in the background.
-            self._dispatch(record, staged)
+            if self._managed_references is not None:
+                try:
+                    self._managed_references.admit(job_id)
+                except BaseException:
+                    self.stager.release(job_id)
+                    raise
+            try:
+                record = self.registry.create(
+                    kind=kind,
+                    priority=priority,
+                    items=items,
+                    progress_total=len(items),
+                    stage="queued",
+                    job_id=job_id,
+                    request_id=request_id,
+                    pipeline=pipeline,
+                )
+            except BaseException:
+                if self._managed_references is not None:
+                    self._managed_references.release(job_id)
+                self.stager.release(job_id)
+                raise
+            try:
+                record.transition(JobState.QUEUED)
+                record.append_event("queued", detail={"item_count": len(items)})
+                for item in items:
+                    if item.state is not None and item.state.value == "failed":
+                        record.commit_item_failure(
+                            item.item_id,
+                            error_code="QUOTA_EXCEEDED",
+                            error=item.error or "staging failed",
+                        )
+                # The executor owns the record only after dispatch succeeds.
+                self._dispatch(record, staged)
+            except BaseException:
+                self._fail_before_dispatch(record)
+                raise
             return JobRef(
                 job_id=record.job_id,
                 instance_id=self.options.instance_id,
@@ -478,26 +512,49 @@ class SupervisorModule:
                 raise InputExpiredError(
                     "retry input expired or unavailable: " + ", ".join(missing)
                 )
-            new_record = self.registry.create_retry(job_id)
-            staged = self.stager.clone_for_retry(
-                source_job_id=job_id,
-                retry_job_id=new_record.job_id,
-                source_to_retry_item_ids=list(
-                    zip(
-                        new_record.source_item_ids,
-                        [item.item_id for item in new_record.items],
-                    )
-                ),
-            )
-            new_record.transition(JobState.QUEUED)
-            new_record.append_event("retry_queued", detail={"source": job_id})
-            self._dispatch(new_record, staged)
+            retry_job_id = new_job_id()
+            if self._managed_references is not None:
+                self._managed_references.admit(retry_job_id)
+            try:
+                new_record = self.registry.create_retry(job_id, job_id=retry_job_id)
+            except BaseException:
+                if self._managed_references is not None:
+                    self._managed_references.release(retry_job_id)
+                raise
+            try:
+                staged = self.stager.clone_for_retry(
+                    source_job_id=job_id,
+                    retry_job_id=new_record.job_id,
+                    source_to_retry_item_ids=list(
+                        zip(
+                            new_record.source_item_ids,
+                            [item.item_id for item in new_record.items],
+                        )
+                    ),
+                )
+                new_record.transition(JobState.QUEUED)
+                new_record.append_event("retry_queued", detail={"source": job_id})
+                self._dispatch(new_record, staged)
+            except BaseException:
+                self._fail_before_dispatch(new_record)
+                raise
             return JobRef(
                 job_id=new_record.job_id,
                 instance_id=self.options.instance_id,
                 state=new_record.state,
                 items=tuple(new_record.items),
             )
+
+    def _fail_before_dispatch(self, record: JobRecord) -> None:
+        try:
+            if record.state is JobState.ACCEPTED:
+                record.transition(JobState.QUEUED)
+            if record.state not in TERMINAL_JOB_STATES:
+                record.transition(JobState.FAILED)
+        finally:
+            if self._managed_references is not None:
+                self._managed_references.release(record.job_id)
+            self.stager.release(record.job_id)
 
     def delete(self, job_id: str) -> None:
         record = self.registry.get(job_id)

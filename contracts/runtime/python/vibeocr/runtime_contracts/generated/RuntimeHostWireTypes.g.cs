@@ -500,6 +500,69 @@ public sealed record DownloadSourceDescriptor
     public required string Endpoint { get; init; }
 }
 
+public sealed record ManagedEnvironmentRequest
+{
+    [JsonPropertyName("protocol_version")]
+    public required int ProtocolVersion { get; init; }
+
+    [JsonPropertyName("request_kind")]
+    public required string RequestKind { get; init; }
+
+    [JsonPropertyName("product_root")]
+    public required string ProductRoot { get; init; }
+
+    [JsonPropertyName("component_lock")]
+    public required string ComponentLock { get; init; }
+
+    [JsonPropertyName("runtime_manifest")]
+    public required string RuntimeManifest { get; init; }
+
+    [JsonPropertyName("layout_manifest")]
+    public string? LayoutManifest { get; init; }
+
+    [JsonPropertyName("product_id")]
+    public string? ProductId { get; init; }
+
+    [JsonPropertyName("action")]
+    public required string Action { get; init; }
+
+    [JsonPropertyName("name")]
+    public string? Name { get; init; }
+
+    [JsonPropertyName("environment_id")]
+    public string? EnvironmentId { get; init; }
+
+    [JsonPropertyName("recipe")]
+    public string? Recipe { get; init; }
+
+    [JsonPropertyName("source_ids")]
+    public IReadOnlyList<string>? SourceIds { get; init; }
+
+    [JsonPropertyName("plan_id")]
+    public string? PlanId { get; init; }
+
+    [JsonPropertyName("prepared")]
+    public IReadOnlyDictionary<string, JsonElement>? Prepared { get; init; }
+
+    [JsonPropertyName("started_health")]
+    public IReadOnlyDictionary<string, JsonElement>? StartedHealth { get; init; }
+}
+
+public sealed record ManagedEnvironmentResponse
+{
+    [JsonPropertyName("protocol_version")]
+    public required int ProtocolVersion { get; init; }
+
+    [JsonPropertyName("response_kind")]
+    public required string ResponseKind { get; init; }
+
+    [JsonPropertyName("action")]
+    public required string Action { get; init; }
+
+    [JsonPropertyName("result")]
+    public required IReadOnlyDictionary<string, JsonElement> Result { get; init; }
+}
+
 public sealed record MineruConfigCatalog
 {
     [JsonPropertyName("default_tier")]
