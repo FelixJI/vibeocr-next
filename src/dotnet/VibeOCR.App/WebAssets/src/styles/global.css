@@ -464,10 +464,38 @@ input {
   align-content: start;
 }
 .settings-app-panel,
+.settings-shortcuts-panel,
+.settings-toolbar-panel,
 .settings-runtime-panel,
 .settings-mineru-panel,
 .settings-download-panel {
   grid-column: 1 / -1;
+}
+.hotkey-action-list {
+  display: grid;
+  gap: 12px;
+}
+.hotkey-action-row {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--colorNeutralStroke2);
+  border-radius: 6px;
+  background: var(--colorNeutralBackground2);
+}
+.hotkey-action-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+.hotkey-action-head strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+.hotkey-action-head span {
+  color: var(--colorNeutralForeground3);
+  font-size: 12px;
 }
 .bundled-capabilities {
   display: grid;
@@ -719,6 +747,8 @@ select {
     grid-template-columns: minmax(0, 1fr);
   }
   .settings-app-panel,
+  .settings-shortcuts-panel,
+  .settings-toolbar-panel,
   .settings-runtime-panel,
   .settings-download-panel {
     grid-column: auto;

@@ -82,10 +82,12 @@ public sealed class FloatingToolbarSettingsTests : IDisposable
 
         FloatingToolbarSettings.Save(
             layout,
-            new FloatingToolbarSettings(true, ScreenEdge.Left, false, 900));
+            new FloatingToolbarSettings(true, ScreenEdge.Left, false, 900, true));
 
         FloatingToolbarSettings loaded = FloatingToolbarSettings.Load(layout);
-        Assert.Equal(new FloatingToolbarSettings(true, ScreenEdge.Left, false, 900), loaded);
+        Assert.Equal(
+            new FloatingToolbarSettings(true, ScreenEdge.Left, false, 900, true),
+            loaded);
 
         using JsonDocument document = JsonDocument.Parse(File.ReadAllText(layout.ConfigFile));
         Assert.Equal(
@@ -93,6 +95,41 @@ public sealed class FloatingToolbarSettingsTests : IDisposable
             document.RootElement.GetProperty("hotkeys")
                 .GetProperty("global_screenshot")
                 .GetString());
+    }
+
+    [Fact]
+    public void HiddenByUserDefaultsFalseAndRoundTrips()
+    {
+        PortableLayout layout = CreateLayout();
+        File.WriteAllText(
+            layout.ConfigFile,
+            """
+            {
+              "floating_toolbar": {
+                "enabled": true,
+                "edge": "left",
+                "auto_hide": false,
+                "linger_ms": 900
+              }
+            }
+            """);
+
+        // 旧配置无 hidden_by_user 字段：等价 false，兼容不迁改。
+        FloatingToolbarSettings legacy = FloatingToolbarSettings.Load(layout);
+        Assert.False(legacy.HiddenByUser);
+        Assert.Equal(
+            new FloatingToolbarSettings(true, ScreenEdge.Left, false, 900),
+            legacy);
+
+        FloatingToolbarSettings.Save(layout, legacy with { HiddenByUser = true });
+
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(layout.ConfigFile));
+        Assert.True(
+            document.RootElement.GetProperty("floating_toolbar")
+                .GetProperty("hidden_by_user")
+                .GetBoolean());
+        Assert.True(FloatingToolbarSettings.Load(layout).HiddenByUser);
+        Assert.False(FloatingToolbarSettings.Default.HiddenByUser);
     }
 
     [Fact]

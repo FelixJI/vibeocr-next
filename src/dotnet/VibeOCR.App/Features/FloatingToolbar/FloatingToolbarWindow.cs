@@ -12,6 +12,8 @@ namespace VibeOCR.App.Features.FloatingToolbar;
 internal enum FloatingToolbarCommand
 {
     CaptureScreenshot,
+    ScreenshotEdit,
+    ClipboardRecognize,
     ShowMainWindow,
     OpenSettings,
     DismissToolbar,
@@ -24,7 +26,7 @@ internal enum FloatingToolbarCommand
 /// </summary>
 internal sealed class FloatingToolbarWindow : IFloatingToolbarView
 {
-    internal const double DesignWidthDip = 188;
+    internal const double DesignWidthDip = 272;
     internal const double DesignHeightDip = 44;
     private const double ButtonSizeDip = 36;
     private const double GripWidthDip = 24;
@@ -174,11 +176,15 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
         bar.Children.Add(CreateCommandButton(
             "\uE722", "截图识别", FloatingToolbarCommand.CaptureScreenshot));
         bar.Children.Add(CreateCommandButton(
-            "\uE8A7", "显示主窗口", FloatingToolbarCommand.ShowMainWindow));
+            "\uE70F", "截图编辑", FloatingToolbarCommand.ScreenshotEdit));
+        bar.Children.Add(CreateCommandButton(
+            "\uE77F", "剪贴板识别", FloatingToolbarCommand.ClipboardRecognize));
+        bar.Children.Add(CreateCommandButton(
+            "\uE8A7", "显示工作台", FloatingToolbarCommand.ShowMainWindow));
         bar.Children.Add(CreateCommandButton(
             "\uE713", "设置", FloatingToolbarCommand.OpenSettings));
         bar.Children.Add(CreateCommandButton(
-            "\uE70E", "收回到边缘", FloatingToolbarCommand.DismissToolbar));
+            "\uE70E", "隐藏悬浮栏", FloatingToolbarCommand.DismissToolbar));
         root.Children.Add(bar);
 
         root.PointerEntered += (_, _) => PointerEntered?.Invoke(this, EventArgs.Empty);

@@ -69,7 +69,7 @@ public sealed partial class MainWindow : Window
   private bool initialized;
   private WorkbenchRoute currentRoute = WorkbenchRoute.Recognition;
 
-  public MainWindow(
+  internal MainWindow(
     DiagnosticsViewModel diagnostics,
     PortableLayout layout,
     Func<RecognitionViewModel> recognitionFactory,
@@ -87,7 +87,8 @@ public sealed partial class MainWindow : Window
     Func<int>? smokeStartupEnsureAttempts = null,
     Func<ManagedEnvironmentList?>? smokeEnvironmentSnapshot = null,
     Func<ManagedEnvironmentSession?>? smokeManagedSession = null,
-    Func<int>? smokeInstallAttempts = null)
+    Func<int>? smokeInstallAttempts = null,
+    ShellActionDispatcher? shellActions = null)
   {
     this.diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
     this.layout = layout ?? throw new ArgumentNullException(nameof(layout));
@@ -125,7 +126,8 @@ public sealed partial class MainWindow : Window
       resourceRoot,
       () => WindowNative.GetWindowHandle(this),
       annotationStore,
-      inferenceAttached: inferenceAttached);
+      inferenceAttached: inferenceAttached,
+      shellActions: shellActions);
     application = new WorkbenchApplication(
       DesktopWorkbenchCommandHandler.Capabilities,
       WorkbenchRoute.Recognition,
@@ -272,6 +274,28 @@ public sealed partial class MainWindow : Window
       new WorkbenchCommandEnvelope(
         Guid.NewGuid(),
         new CaptureRecognitionScreenCommand()),
+      CancellationToken.None);
+  }
+
+  /// <summary>纯截图编辑入口：只截取并进入编辑会话，不提交任何识别请求。</summary>
+  internal async Task CaptureScreenshotForEditAsync()
+  {
+    NavigateTo("recognition");
+    await application.ExecuteAsync(
+      new WorkbenchCommandEnvelope(
+        Guid.NewGuid(),
+        new CaptureScreenshotSessionCommand()),
+      CancellationToken.None);
+  }
+
+  /// <summary>剪贴板识别入口：与页面“读取剪贴板”同一命令。</summary>
+  internal async Task RecognizeClipboardAsync()
+  {
+    NavigateTo("recognition");
+    await application.ExecuteAsync(
+      new WorkbenchCommandEnvelope(
+        Guid.NewGuid(),
+        new ReadRecognitionClipboardCommand()),
       CancellationToken.None);
   }
 

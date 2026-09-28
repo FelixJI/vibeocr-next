@@ -41,16 +41,49 @@ public sealed class WorkbenchBridgeCodecTests
   }
 
   [Fact]
-  public void SettingsStateSeparatesConfiguredHotkeyFromFailedRegistration()
+  public void SettingsStateCarriesActionHotkeysAndFloatingToolbar()
   {
-    var state = new SettingsWorkbenchState(WorkbenchTheme.Light, false, "settings.ready", "cpu", false, "",
-      HotkeyStatus: "快捷键冲突：已占用", PendingHotkey: "Ctrl+Alt+Q");
+    var state = new SettingsWorkbenchState(
+      WorkbenchTheme.Light,
+      false,
+      "settings.ready",
+      "cpu",
+      false,
+      HotkeyActions:
+      [
+        new SettingsHotkeyActionState(
+          "screenshot_recognize",
+          "快捷截图识别",
+          "Ctrl+Alt+Q",
+          RegisteredHotkey: null,
+          "快捷键注册失败：该组合可能已被其他应用占用。",
+          "Ctrl+Alt+Q"),
+      ],
+      FloatingToolbar: new SettingsFloatingToolbarState(
+        true,
+        "left",
+        false,
+        "userHidden",
+        "无法保存悬浮工具栏设置，原设置已保留：disk full"));
     using JsonDocument json = JsonDocument.Parse(WorkbenchBridgeCodec.SerializeState(Guid.NewGuid(),
       new WorkbenchStateEnvelope(1, "settings", WorkbenchStateChange.Replace, state)));
     JsonElement settings = json.RootElement.GetProperty("payload").GetProperty("state");
-    Assert.Equal("", settings.GetProperty("hotkey").GetString());
-    Assert.Equal("Ctrl+Alt+Q", settings.GetProperty("pendingHotkey").GetString());
-    Assert.Contains("已占用", settings.GetProperty("hotkeyStatus").GetString());
+    JsonElement action = Assert.Single(settings.GetProperty("hotkeyActions").EnumerateArray());
+    Assert.Equal("screenshot_recognize", action.GetProperty("actionId").GetString());
+    Assert.Equal("快捷截图识别", action.GetProperty("displayName").GetString());
+    Assert.Equal("Ctrl+Alt+Q", action.GetProperty("configuredHotkey").GetString());
+    // 配置已存但未注册生效必须如实区分，不得冒称当前生效。
+    Assert.Null(action.GetProperty("registeredHotkey").GetString());
+    Assert.Contains("已被其他应用占用", action.GetProperty("error").GetString());
+    Assert.Equal("Ctrl+Alt+Q", action.GetProperty("defaultHotkey").GetString());
+    JsonElement toolbar = settings.GetProperty("floatingToolbar");
+    Assert.True(toolbar.GetProperty("enabled").GetBoolean());
+    Assert.Equal("left", toolbar.GetProperty("edge").GetString());
+    Assert.False(toolbar.GetProperty("autoHide").GetBoolean());
+    Assert.Equal("userHidden", toolbar.GetProperty("visibility").GetString());
+    Assert.Contains(
+      "原设置已保留",
+      toolbar.GetProperty("error").GetString());
   }
   [Fact]
   public void ParseCommandProducesTypedNavigateCommand()
@@ -277,6 +310,12 @@ public sealed class WorkbenchBridgeCodecTests
       ("about", "openProject", "{}", typeof(OpenProjectPageCommand)),
       ("settings", "refreshRuntime", "{}", typeof(RefreshRuntimeCommand)),
       ("settings", "setTheme", "{\"theme\":\"dark\"}", typeof(SetThemeCommand)),
+      ("settings", "setActionHotkey", "{\"actionId\":\"clipboard_recognize\",\"hotkey\":\"Ctrl+Alt+C\"}", typeof(SetActionHotkeyCommand)),
+      ("settings", "resetActionHotkey", "{\"actionId\":\"screenshot_recognize\"}", typeof(ResetActionHotkeyCommand)),
+      ("settings", "setFloatingToolbarEnabled", "{\"enabled\":true}", typeof(SetFloatingToolbarEnabledCommand)),
+      ("settings", "setFloatingToolbarLayout", "{\"edge\":\"left\",\"autoHide\":false}", typeof(SetFloatingToolbarLayoutCommand)),
+      ("settings", "showFloatingToolbar", "{}", typeof(ShowFloatingToolbarCommand)),
+      ("settings", "hideFloatingToolbar", "{}", typeof(HideFloatingToolbarCommand)),
       ("update", "check", "{}", typeof(CheckUpdateCommand)),
       ("diagnostics", "export", "{}", typeof(ExportDiagnosticsCommand)),
     ];
@@ -491,6 +530,39 @@ public sealed class WorkbenchBridgeCodecTests
         new BatchWorkbenchState(false, 500, 40, 0, items)));
 
     Assert.True(Encoding.UTF8.GetByteCount(json) < WorkbenchBridgeCodec.MaxMessageBytes);
+  }
+
+  [Fact]
+  public void ShellActionCommandsRejectInvalidEdgesHotkeysAndActionIds()
+  {
+    Guid sessionId = Guid.NewGuid();
+    (string Action, string Arguments)[] invalid =
+    [
+      ("setFloatingToolbarLayout", "{\"edge\":\"diagonal\",\"autoHide\":true}"),
+      ("setActionHotkey", "{\"actionId\":\"clipboard_recognize\",\"hotkey\":\"\"}"),
+      ("setActionHotkey", "{\"actionId\":\" \"}"),
+      ("resetActionHotkey", "{\"actionId\":\"\"}"),
+    ];
+
+    foreach ((string action, string arguments) in invalid)
+    {
+      Assert.Throws<WorkbenchBridgeProtocolException>(() =>
+        WorkbenchBridgeCodec.ParseCommand(
+          CommandJson(sessionId, "settings", action, arguments),
+          sessionId));
+    }
+
+    // 禁用快捷键不带 hotkey 字段是合法形状。
+    WorkbenchCommandEnvelope disable = WorkbenchBridgeCodec.ParseCommand(
+      CommandJson(
+        sessionId,
+        "settings",
+        "setActionHotkey",
+        "{\"actionId\":\"clipboard_recognize\"}"),
+      sessionId);
+    SetActionHotkeyCommand command = Assert.IsType<SetActionHotkeyCommand>(disable.Command);
+    Assert.Equal("clipboard_recognize", command.ActionId);
+    Assert.Null(command.Hotkey);
   }
 
   private static string CommandJson(
