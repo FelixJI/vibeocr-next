@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text;
+using System.Text.Json;
 using VibeOCR.App.Features.Batch;
 using VibeOCR.App.Features.Pdf;
 using VibeOCR.App.Features.QrCode;
@@ -69,17 +70,22 @@ public sealed class DesktopWorkbenchCommandHandler :
   private readonly Func<nint> windowHandle;
   private readonly WorkbenchAnnotationStore annotationStore;
   private readonly IAnnotatedImagePlatform annotatedImagePlatform;
+  private readonly Action<WorkbenchAnnotationFile, Guid, long, RecognitionTextLayerState?>? pinScreenshot;
   private readonly Func<bool>? inferenceAttached;
   private readonly List<string> generatedFiles = [];
   private readonly HashSet<Task> backgroundOperations = [];
   private readonly HashSet<int> selectedPdfPages = [];
   private readonly Dictionary<int, WorkbenchResourceReference> pdfThumbnails = [];
   private RecognitionViewModel? recognition;
+  private RecognitionViewModel? textLayerRecognition;
   private ResultActions? resultActions;
   private Guid? screenshotSessionId;
   private long screenshotSessionRevision;
+  private bool screenshotTextSelectionRequested;
   private WorkbenchResourceReference? screenshotSessionInput;
   private WorkbenchResourceReference? screenshotSessionResult;
+  private RecognitionTextLayerState? screenshotTextLayer;
+  private long screenshotTextGeneration;
   private BatchViewModel? batch;
   private string? batchTaskEngine;
   private QrCodeViewModel? qrCode;
@@ -110,7 +116,10 @@ public sealed class DesktopWorkbenchCommandHandler :
     Func<nint> windowHandle,
     WorkbenchAnnotationStore annotationStore,
     IAnnotatedImagePlatform? annotatedImagePlatform = null,
-    Func<bool>? inferenceAttached = null)
+    Func<bool>? inferenceAttached = null,
+    Func<string?>? supervisorInstanceId = null,
+    Func<RecognitionViewModel>? textLayerRecognitionFactory = null,
+    Action<WorkbenchAnnotationFile, Guid, long, RecognitionTextLayerState?>? pinScreenshot = null)
   {
     this.recognitionFactory = recognitionFactory ??
       throw new ArgumentNullException(nameof(recognitionFactory));
@@ -139,7 +148,13 @@ public sealed class DesktopWorkbenchCommandHandler :
     this.annotatedImagePlatform = annotatedImagePlatform ??
       new AnnotatedImagePlatform(this.windowHandle);
     this.inferenceAttached = inferenceAttached;
+    this.supervisorInstanceId = supervisorInstanceId ?? (() => null);
+    this.textLayerRecognitionFactory = textLayerRecognitionFactory ?? recognitionFactory;
+    this.pinScreenshot = pinScreenshot;
   }
+
+  private readonly Func<string?> supervisorInstanceId;
+  private readonly Func<RecognitionViewModel> textLayerRecognitionFactory;
 
   public IReadOnlyList<WorkbenchState> InitialStates =>
   [
@@ -162,6 +177,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   ];
 
   public event Action<WorkbenchState>? StateChanged;
+  public event Action<RecognitionTextLayerState?>? ScreenshotTextLayerChanged;
 
   public async ValueTask PrepareBootstrapAsync(CancellationToken cancellationToken)
   {
@@ -201,7 +217,8 @@ public sealed class DesktopWorkbenchCommandHandler :
         CaptureRecognitionScreenCommand => StartRecognition(
           viewModel => viewModel.RecognizeScreenshotAsync(cancellationToken),
           cancellationToken),
-        CaptureScreenshotSessionCommand => StartScreenshotSession(cancellationToken),
+        CaptureScreenshotSessionCommand => StartScreenshotSession(false, cancellationToken),
+        CaptureScreenshotTextSessionCommand => StartScreenshotSession(true, cancellationToken),
         CloseScreenshotSessionCommand => CloseScreenshotSession(),
         NotifyScreenshotSessionRevisionCommand notify => NotifyScreenshotRevision(notify),
         CopyScreenshotImageCommand copy => await CopyScreenshotImageAsync(
@@ -210,8 +227,17 @@ public sealed class DesktopWorkbenchCommandHandler :
         SaveScreenshotImageCommand save => await SaveScreenshotImageAsync(
           save,
           cancellationToken),
+        PinScreenshotImageCommand pin => PinScreenshotImage(pin),
         RecognizeScreenshotImageCommand recognize => await StartScreenshotRecognitionAsync(
           recognize,
+          cancellationToken),
+        PrepareScreenshotTextLayerCommand prepare => await PrepareScreenshotTextLayerAsync(
+          prepare,
+          cancellationToken),
+        CancelScreenshotTextLayerCommand cancelTextLayer => CancelScreenshotTextLayer(
+          cancelTextLayer),
+        CopyScreenshotSelectionCommand copySelection => await CopyScreenshotSelectionAsync(
+          copySelection,
           cancellationToken),
         CancelRecognitionCommand => CancelRecognition(),
         CopyRecognitionResultCommand copy => await CopyRecognitionAsync(
@@ -385,7 +411,8 @@ public sealed class DesktopWorkbenchCommandHandler :
   /// <summary>当前截图会话的 wire 投影；无会话时为 null。</summary>
   private RecognitionScreenshotSessionState? CurrentScreenshotSession() =>
     screenshotSessionId is { } id
-      ? new RecognitionScreenshotSessionState(id.ToString("N"), screenshotSessionRevision)
+      ? new RecognitionScreenshotSessionState(id.ToString("N"), screenshotSessionRevision,
+        screenshotTextSelectionRequested)
       : null;
 
   /// <summary>会话状态固定复用缓存的基准图/结果资源，避免重发布新 URL 导致编辑器重置。</summary>
@@ -398,7 +425,8 @@ public sealed class DesktopWorkbenchCommandHandler :
       screenshotSessionResult,
       RecognitionEngines(),
       recognition?.TaskEngine,
-      CurrentScreenshotSession());
+      CurrentScreenshotSession(),
+      screenshotTextLayer);
 
   private void ValidateScreenshotSession(Guid sessionId, long revision)
   {
@@ -408,25 +436,38 @@ public sealed class DesktopWorkbenchCommandHandler :
     }
   }
 
+  /// <summary>取消在途文字层准备并丢弃旧层；编辑/换图/维护/关闭后调用。</summary>
+  private void InvalidateScreenshotTextLayer()
+  {
+    Interlocked.Increment(ref screenshotTextGeneration);
+    textLayerRecognition?.Cancel();
+    screenshotTextLayer = null;
+    ScreenshotTextLayerChanged?.Invoke(null);
+  }
+
   private WorkbenchAnnotationFile TakeScreenshotAnnotation(string resourceUri) =>
     annotationStore.Take(new Uri(resourceUri));
 
-  private RecognitionWorkbenchState? StartScreenshotSession(CancellationToken cancellationToken)
+  private RecognitionWorkbenchState? StartScreenshotSession(
+    bool textSelectionRequested, CancellationToken cancellationToken)
   {
     recognition ??= recognitionFactory();
     long generation = Interlocked.Increment(ref recognitionGeneration);
     // 新捕获立即取代旧会话：选取期间旧会话命令一律失效，
     // 换图/重复点击不会把旧图或旧修订带入新会话。
     ClearScreenshotSession();
+    InvalidateScreenshotTextLayer();
     recognition.InvalidateResult();
     resultActions = null;
     return PublishStartThenTrack(
       SessionRecognitionState(true, "recognition.running"),
-      () => CompleteScreenshotSessionAsync(generation, cancellationToken));
+      () => CompleteScreenshotSessionAsync(generation, textSelectionRequested,
+        cancellationToken));
   }
 
   private async Task CompleteScreenshotSessionAsync(
     long generation,
+    bool textSelectionRequested,
     CancellationToken cancellationToken)
   {
     try
@@ -453,6 +494,7 @@ public sealed class DesktopWorkbenchCommandHandler :
         }
         screenshotSessionId = Guid.NewGuid();
         screenshotSessionRevision = 0;
+        screenshotTextSelectionRequested = textSelectionRequested;
         screenshotSessionInput = input;
         screenshotSessionResult = null;
         StateChanged?.Invoke(SessionRecognitionState(false, "recognition.session"));
@@ -495,10 +537,11 @@ public sealed class DesktopWorkbenchCommandHandler :
       return SessionRecognitionState(false, SessionStatusCode());
     }
     screenshotSessionRevision = command.Revision;
-    // 任何内容修订都使旧识别结果与结果动作失效：迟到响应不得覆盖当前内容。
+    // 任何内容修订都使旧识别结果与文字层失效：迟到响应不得覆盖当前内容。
     Interlocked.Increment(ref recognitionGeneration);
     recognition.Cancel();
     recognition.InvalidateResult();
+    InvalidateScreenshotTextLayer();
     resultActions = null;
     screenshotSessionResult = null;
     return SessionRecognitionState(false, "recognition.session");
@@ -532,6 +575,30 @@ public sealed class DesktopWorkbenchCommandHandler :
     if (!await annotatedImagePlatform.SavePngAsync(annotation.Path, cancellationToken))
     {
       throw new AnnotatedImageOperationCancelledException();
+    }
+    return CurrentRecognitionState();
+  }
+
+  private RecognitionWorkbenchState PinScreenshotImage(PinScreenshotImageCommand command)
+  {
+    ValidateScreenshotSession(command.SessionId, command.Revision);
+    if (pinScreenshot is null)
+    {
+      throw new InvalidOperationException("Desktop pinning is unavailable.");
+    }
+    WorkbenchAnnotationFile image = TakeScreenshotAnnotation(command.ResourceUri);
+    try
+    {
+      pinScreenshot(image, command.SessionId, command.Revision,
+        screenshotTextLayer is { Status: "textlayer.ready" } layer &&
+        layer.Binding?.SessionId == command.SessionId.ToString("N") &&
+        layer.Binding.Revision == command.Revision &&
+        layer.ServiceInstance == (supervisorInstanceId() ?? string.Empty) ? layer : null);
+    }
+    catch
+    {
+      image.Dispose();
+      throw;
     }
     return CurrentRecognitionState();
   }
@@ -664,14 +731,410 @@ public sealed class DesktopWorkbenchCommandHandler :
     recognition.Cancel();
     recognition.InvalidateResult();
     resultActions = null;
+    InvalidateScreenshotTextLayer();
     ClearScreenshotSession();
     return new RecognitionWorkbenchState(false, "recognition.ready");
+  }
+
+  /// <summary>
+  /// 准备原位选字文字层：只消费编辑器导出的最终 PNG，且只在目录中存在
+  /// ready 的本地轻量文字模式时提交；同一绑定已在准备/已就绪时不重复
+  /// 提交任务。提交固定使用轻量文字配置（OCR 管线 + 所选模式引擎 +
+  /// 空选项/空 mineru），不继承用户任务级 OCR 选项；不会触发依赖安装、
+  /// 远端或重型文档管线。
+  /// </summary>
+  private async Task<RecognitionWorkbenchState?> PrepareScreenshotTextLayerAsync(
+    PrepareScreenshotTextLayerCommand command,
+    CancellationToken cancellationToken,
+    byte[]? pinnedPng = null)
+  {
+    recognition ??= recognitionFactory();
+    ValidateScreenshotSession(command.SessionId, command.Revision);
+    string sessionId = command.SessionId.ToString("N");
+    if (screenshotTextLayer?.Binding is { } existing &&
+      existing.SessionId == sessionId &&
+      existing.Revision == command.Revision &&
+      screenshotTextLayer.Status is "textlayer.preparing" or "textlayer.ready")
+    {
+      return SessionRecognitionState(false, SessionStatusCode());
+    }
+
+    if (inferenceAttached?.Invoke() == false)
+    {
+      screenshotTextLayer = new RecognitionTextLayerState(
+        "textlayer.unavailable", "textlayer.serviceUnavailable",
+        new RecognitionScreenshotSessionState(sessionId, command.Revision),
+        null, supervisorInstanceId(), null);
+      return SessionRecognitionState(false, SessionStatusCode());
+    }
+    await EnsureSelectionLoadedAsync(cancellationToken);
+    RecognitionModeOption? mode = FindReadyLocalTextMode(out string? reason);
+    if (mode is null)
+    {
+      screenshotTextLayer = new RecognitionTextLayerState(
+        "textlayer.unavailable",
+        reason,
+        new RecognitionScreenshotSessionState(sessionId, command.Revision),
+        null,
+        supervisorInstanceId(),
+        null);
+      return SessionRecognitionState(false, SessionStatusCode());
+    }
+
+    byte[] png;
+    if (pinnedPng is null)
+    {
+      using WorkbenchAnnotationFile annotation = TakeScreenshotAnnotation(command.ResourceUri);
+      png = await File.ReadAllBytesAsync(annotation.Path, cancellationToken);
+    }
+    else
+    {
+      png = pinnedPng;
+    }
+    // 读取租约期间会话/修订变更则拒绝启动，不消费推理配额。
+    ValidateScreenshotSession(command.SessionId, command.Revision);
+    var input = new RecognitionInput(
+      png,
+      "image/png",
+      "screenshot-text-layer.png",
+      "screenshot-text");
+    string serviceInstance = supervisorInstanceId() ?? string.Empty;
+    long generation = Interlocked.Increment(ref screenshotTextGeneration);
+    Guid sessionGuid = command.SessionId;
+    long revision = command.Revision;
+    screenshotTextLayer = new RecognitionTextLayerState(
+      "textlayer.preparing",
+      null,
+      new RecognitionScreenshotSessionState(sessionId, revision),
+      mode.Id,
+      serviceInstance,
+      null);
+    return PublishStartThenTrack(
+      SessionRecognitionState(false, SessionStatusCode()),
+      () => CompleteScreenshotTextLayerAsync(
+        generation,
+        sessionGuid,
+        revision,
+        mode.Id,
+        serviceInstance,
+        input,
+        cancellationToken));
+  }
+
+  /// <summary>Explicit pin intent joins the same session/revision OCR task.</summary>
+  public async Task PreparePinnedTextLayerAsync(
+    Guid sessionId, long revision, string imagePath)
+  {
+    ValidateScreenshotSession(sessionId, revision);
+    if (screenshotTextLayer?.Binding is { } binding &&
+      binding.SessionId == sessionId.ToString("N") &&
+      binding.Revision == revision &&
+      screenshotTextLayer.Status is "textlayer.preparing" or "textlayer.ready") return;
+    byte[] png = await File.ReadAllBytesAsync(imagePath);
+    RecognitionWorkbenchState? started = await PrepareScreenshotTextLayerAsync(
+      new PrepareScreenshotTextLayerCommand(string.Empty, sessionId, revision),
+      CancellationToken.None,
+      png);
+    if (started is not null) StateChanged?.Invoke(started);
+  }
+
+  private async Task CompleteScreenshotTextLayerAsync(
+    long generation,
+    Guid sessionId,
+    long revision,
+    string modeId,
+    string serviceInstance,
+    RecognitionInput input,
+    CancellationToken cancellationToken)
+  {
+    try
+    {
+      bool deferredSelection = !await EnsureSelectionLoadedAsync(cancellationToken);
+      if (generation != Volatile.Read(ref screenshotTextGeneration))
+      {
+        return;
+      }
+      RecognitionModeOption? mode = FindReadyLocalTextMode(out _);
+      if (mode?.Id != modeId)
+      {
+        // 目录变化（模式不再 ready）：不静默换引擎冒充同一次准备。
+        PublishTextLayerState("textlayer.unavailable", "textlayer.modeNotReady");
+        return;
+      }
+      RecognitionViewModel viewModel = textLayerRecognition ??=
+        textLayerRecognitionFactory();
+      // 独立提交通道：不读写用户任务级 TaskEngine/SetRecognitionMode。
+      viewModel.SetRecognitionMode(mode);
+      await viewModel.RecognizeCapturedInputAsync(input, cancellationToken);
+      if (deferredSelection)
+      {
+        try
+        {
+          await EnsureSelectionLoadedAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+          throw;
+        }
+        catch (Exception catalogError)
+        {
+          // 仅覆盖目录补载（影响引擎列表），不覆盖识别本身；失败记录在案。
+          AppLog.Warn($"Text layer catalog reload failed: {catalogError.Message}");
+        }
+      }
+      if (generation != Volatile.Read(ref screenshotTextGeneration))
+      {
+        return;
+      }
+      if (screenshotSessionId != sessionId || screenshotSessionRevision != revision ||
+        (supervisorInstanceId() ?? string.Empty) != serviceInstance)
+      {
+        viewModel.InvalidateResult();
+        PublishTextLayerState("textlayer.expired", null);
+        return;
+      }
+      if (viewModel.Result is null)
+      {
+        PublishTextLayerState(
+          viewModel.TerminalState is JobState.Cancelled
+            ? "textlayer.cancelled"
+            : "textlayer.failed",
+          null);
+        return;
+      }
+      IReadOnlyList<RecognitionTextLayerLine>? lines =
+        ProjectTextLayerLines(viewModel.Result.RawBlocks, out string? lineError);
+      if (lines is null)
+      {
+        PublishTextLayerState("textlayer.failed", lineError ?? "textlayer.noLines");
+        return;
+      }
+      // 展示资源就是识别输入的同一最终 PNG 字节。
+      WorkbenchResourceReference image = await PublishBytesAsync(
+        input.Data,
+        "image/png",
+        ".png",
+        cancellationToken);
+      if (generation != Volatile.Read(ref screenshotTextGeneration) ||
+        screenshotSessionId != sessionId ||
+        screenshotSessionRevision != revision ||
+        (supervisorInstanceId() ?? string.Empty) != serviceInstance)
+      {
+        return;
+      }
+      screenshotTextLayer = new RecognitionTextLayerState(
+        "textlayer.ready",
+        null,
+        new RecognitionScreenshotSessionState(sessionId.ToString("N"), revision),
+        modeId,
+        serviceInstance,
+        image,
+        lines);
+      ScreenshotTextLayerChanged?.Invoke(screenshotTextLayer);
+      StateChanged?.Invoke(SessionRecognitionState(false, SessionStatusCode()));
+    }
+    catch (OperationCanceledException)
+    {
+      if (generation == Volatile.Read(ref screenshotTextGeneration))
+      {
+        PublishTextLayerState("textlayer.cancelled", null);
+      }
+    }
+    catch (Exception error)
+    {
+      AppLog.Error("Screenshot text layer preparation failed", error);
+      if (generation == Volatile.Read(ref screenshotTextGeneration))
+      {
+        PublishTextLayerState("textlayer.failed", null);
+      }
+    }
+  }
+
+  private void PublishTextLayerState(string status, string? reason)
+  {
+    RecognitionScreenshotSessionState? binding = screenshotSessionId is { } id
+      ? new RecognitionScreenshotSessionState(id.ToString("N"), screenshotSessionRevision)
+      : null;
+    screenshotTextLayer = new RecognitionTextLayerState(
+      status,
+      reason,
+      binding,
+      screenshotTextLayer?.ModeId,
+      screenshotTextLayer?.ServiceInstance,
+      null);
+    ScreenshotTextLayerChanged?.Invoke(screenshotTextLayer);
+    StateChanged?.Invoke(SessionRecognitionState(false, SessionStatusCode()));
+  }
+
+  private RecognitionWorkbenchState CancelScreenshotTextLayer(
+    CancelScreenshotTextLayerCommand command)
+  {
+    recognition ??= recognitionFactory();
+    if (screenshotSessionId != command.SessionId)
+    {
+      throw new ScreenshotSessionStaleException();
+    }
+    if (screenshotTextLayer is { Status: "textlayer.preparing" })
+    {
+      Interlocked.Increment(ref screenshotTextGeneration);
+      textLayerRecognition?.Cancel();
+      PublishTextLayerState("textlayer.cancelled", null);
+    }
+    return SessionRecognitionState(false, SessionStatusCode());
+  }
+
+  private async Task<RecognitionWorkbenchState> CopyScreenshotSelectionAsync(
+    CopyScreenshotSelectionCommand command,
+    CancellationToken cancellationToken)
+  {
+    ValidateScreenshotSession(command.SessionId, command.Revision);
+    // 复制必须来自当前就绪文字层：旧层/准备中一律 fail closed。
+    if (screenshotTextLayer?.Binding is not { } binding ||
+      binding.SessionId != command.SessionId.ToString("N") ||
+      binding.Revision != command.Revision ||
+      screenshotTextLayer.Status != "textlayer.ready" ||
+      screenshotTextLayer.ServiceInstance != (supervisorInstanceId() ?? string.Empty))
+    {
+      throw new ScreenshotSessionStaleException();
+    }
+    await annotatedImagePlatform.CopyTextAsync(command.Text, cancellationToken);
+    return CurrentRecognitionState();
+  }
+
+  /// <summary>
+  /// 快速取字模式选择：仅目录内 ready 的本地轻量文字模式（base_runtime/
+  /// operating_system）；用户已选的模式若恰好可用则优先。preparation_
+  /// required/unavailable/advanced_component 一律不用于自动准备。
+  /// </summary>
+  private RecognitionModeOption? FindReadyLocalTextMode(out string? reason)
+  {
+    reason = null;
+    RuntimeSelectionService? selection = settings?.RecognitionSelection?.Catalog;
+    if (selection?.SupportsRecognitionModes is not true)
+    {
+      reason = "textlayer.noCatalog";
+      return null;
+    }
+    RecognitionModeOption? preferred = null;
+    RecognitionModeOption? fallback = null;
+    bool anyTextMode = false;
+    foreach (RecognitionModeOption mode in selection.RecognitionModes)
+    {
+      if (mode.Family != "text" || mode.PipelineId != "OCR")
+      {
+        continue;
+      }
+      anyTextMode = true;
+      if (mode.Provisioning is not ("base_runtime" or "operating_system"))
+      {
+        continue;
+      }
+      if (mode.Availability != "ready")
+      {
+        continue;
+      }
+      if (recognition?.TaskEngine == mode.Id)
+      {
+        preferred ??= mode;
+      }
+      fallback ??= mode;
+    }
+    if (preferred is not null || fallback is not null)
+    {
+      return preferred ?? fallback;
+    }
+    reason = anyTextMode ? "textlayer.modeNotReady" : "textlayer.noLocalMode";
+    return null;
+  }
+
+  private const int MaximumTextLayerLines = 2000;
+  private const int MaximumTextLayerCharacters = 100_000;
+
+  /// <summary>把 OCR text_blocks 投影为行级几何；越界/退化框整行丢弃。</summary>
+  private static IReadOnlyList<RecognitionTextLayerLine>? ProjectTextLayerLines(
+    JsonElement[]? blocks, out string? error)
+  {
+    error = null;
+    if (blocks is null || blocks.Length == 0)
+    {
+      return null;
+    }
+    List<RecognitionTextLayerLine> lines = [];
+    int characterCount = 0;
+    foreach (JsonElement block in blocks)
+    {
+      if (lines.Count >= MaximumTextLayerLines)
+      {
+        error = "textlayer.tooLarge";
+        return null;
+      }
+      if (block.ValueKind != JsonValueKind.Object ||
+        !block.TryGetProperty("text", out JsonElement textElement) ||
+        textElement.ValueKind != JsonValueKind.String)
+      {
+        continue;
+      }
+      string? text = textElement.GetString();
+      if (string.IsNullOrWhiteSpace(text))
+      {
+        continue;
+      }
+      if (text.Length > MaximumTextLayerCharacters - characterCount)
+      {
+        error = "textlayer.tooLarge";
+        return null;
+      }
+      if (!block.TryGetProperty("bbox", out JsonElement bboxElement) ||
+        bboxElement.ValueKind != JsonValueKind.Array ||
+        bboxElement.GetArrayLength() != 4)
+      {
+        continue;
+      }
+      double[] bbox = new double[4];
+      bool valid = true;
+      for (int index = 0; index < 4; index++)
+      {
+        JsonElement value = bboxElement[index];
+        if (value.ValueKind != JsonValueKind.Number ||
+          !value.TryGetDouble(out double coordinate) ||
+          !double.IsFinite(coordinate))
+        {
+          valid = false;
+          break;
+        }
+        bbox[index] = coordinate;
+      }
+      if (!valid ||
+        bbox[0] < 0 || bbox[1] < 0 ||
+        bbox[2] > 1000 || bbox[3] > 1000 ||
+        bbox[0] >= bbox[2] || bbox[1] >= bbox[3])
+      {
+        continue;
+      }
+      int? order = null;
+      if (block.TryGetProperty("order", out JsonElement orderElement) &&
+        orderElement.ValueKind == JsonValueKind.Number &&
+        orderElement.TryGetInt32(out int orderValue) &&
+        orderValue >= 0)
+      {
+        order = orderValue;
+      }
+      lines.Add(new RecognitionTextLayerLine(
+        text, bbox[0], bbox[1], bbox[2], bbox[3], order));
+      characterCount += text.Length;
+    }
+    if (lines.Count == 0) return null;
+    bool ordered = lines.All(line => line.Order is not null);
+    return ordered
+      ? [.. lines.OrderBy(line => line.Order).ThenBy(line => line.Y1).ThenBy(line => line.X1)]
+      : [.. lines.OrderBy(line => line.Y1).ThenBy(line => line.X1)];
   }
 
   private void ClearScreenshotSession()
   {
     screenshotSessionId = null;
     screenshotSessionRevision = 0;
+    screenshotTextSelectionRequested = false;
     screenshotSessionInput = null;
     screenshotSessionResult = null;
   }
@@ -685,6 +1148,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     // 新输入（文件/剪贴板/拖入/即时截图识别）取代截图会话：
     // 旧会话命令立即失效，避免旧图混入新输入。
     ClearScreenshotSession();
+    InvalidateScreenshotTextLayer();
     return PublishStartThenTrack(
       RecognitionState(true, "recognition.running"),
       () => CompleteRecognitionAsync(action, generation, cancellationToken));
@@ -834,10 +1298,11 @@ public sealed class DesktopWorkbenchCommandHandler :
     recognition.Cancel();
     if (screenshotSessionId is not null)
     {
-      // 取消保留会话编辑基准；运行中结果丢弃后可重新显式识别。
+      // 取消保留会话编辑基准；运行中结果与文字层准备丢弃后可重新触发。
       recognition.InvalidateResult();
       resultActions = null;
       screenshotSessionResult = null;
+      InvalidateScreenshotTextLayer();
       return SessionRecognitionState(false, "recognition.cancelled");
     }
     return new RecognitionWorkbenchState(
@@ -1605,15 +2070,17 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     if (settings?.Maintenance.State.IsRunning != true ||
       screenshotSessionId is null ||
-      recognition is not { IsBusy: true })
+      (recognition is not { IsBusy: true } &&
+        screenshotTextLayer is null && screenshotSessionResult is null))
     {
       return;
     }
     Interlocked.Increment(ref recognitionGeneration);
-    recognition.Cancel();
-    recognition.InvalidateResult();
+    recognition?.Cancel();
+    recognition?.InvalidateResult();
     resultActions = null;
     screenshotSessionResult = null;
+    InvalidateScreenshotTextLayer();
     StateChanged?.Invoke(SessionRecognitionState(false, "recognition.expired"));
   }
 
@@ -2033,6 +2500,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     Interlocked.Increment(ref qrCodeGeneration);
     Interlocked.Increment(ref updateGeneration);
     recognition?.Cancel();
+    textLayerRecognition?.Cancel();
     batch?.CancelAll();
     qrCode?.Cancel();
     pdf?.Cancel();

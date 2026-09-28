@@ -5,7 +5,7 @@ import {
   Toolbar,
   ToolbarButton,
 } from "@fluentui/react-components";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { AppActions } from "../app/types";
 import {
   imageTransform,
@@ -19,14 +19,44 @@ import {
   type Point,
 } from "./annotationGeometry";
 import { uploadAnnotatedImage } from "./annotationHandoff";
+import { ImageTextLayer } from "./ImageTextLayer";
+import { toImageTextLines } from "./imageTextLayerGeometry";
 
-type Tool = "select" | AnnotationTool | "crop";
+/** 宿主回发的原位文字层状态（recognition.textLayer 投影）。 */
+export interface ScreenshotTextLayerState {
+  readonly status: string;
+  readonly reason?: string | null;
+  readonly binding?: {
+    readonly sessionId: string;
+    readonly revision: number;
+  } | null;
+  readonly modeId?: string | null;
+  readonly image?: {
+    readonly url: string;
+    readonly mediaType: string;
+    readonly byteLength: number;
+  } | null;
+  readonly lines?:
+    | readonly {
+        readonly text: string;
+        readonly x1: number;
+        readonly y1: number;
+        readonly x2: number;
+        readonly y2: number;
+        readonly order?: number | null;
+      }[]
+    | null;
+}
+
+type Tool = "select" | "hand" | "textSelect" | AnnotationTool | "crop";
 
 const EMPTY: EditorState = { rotation: 0, marks: [] };
 const DEFAULT_COLOR = "#f38b35";
 
 const TOOL_LABELS: Readonly<Record<Tool, string>> = {
   select: "选择",
+  hand: "手形",
+  textSelect: "取字",
   rectangle: "矩形",
   ellipse: "椭圆",
   arrow: "箭头",
@@ -41,6 +71,8 @@ const TOOL_LABELS: Readonly<Record<Tool, string>> = {
 
 const TOOL_ORDER: readonly Tool[] = [
   "select",
+  "hand",
+  "textSelect",
   "rectangle",
   "ellipse",
   "arrow",
@@ -68,6 +100,7 @@ const FONT_SIZES = [16, 24, 32, 48] as const;
 export interface ScreenshotSessionHandle {
   readonly sessionId: string;
   readonly revision: number;
+  readonly textSelectionRequested?: boolean;
 }
 
 interface ImageCanvasEditorProps {
@@ -76,6 +109,10 @@ interface ImageCanvasEditorProps {
   readonly canRecognize: boolean;
   readonly source: string;
   readonly session?: ScreenshotSessionHandle;
+  readonly textLayer?: ScreenshotTextLayerState;
+  readonly autoText?: boolean;
+  readonly showAutoTextPreference?: boolean;
+  readonly onAutoTextChange?: (enabled: boolean) => void;
 }
 
 export function ImageCanvasEditor({
@@ -84,6 +121,10 @@ export function ImageCanvasEditor({
   canRecognize,
   source,
   session,
+  textLayer,
+  autoText: autoTextProp,
+  showAutoTextPreference = true,
+  onAutoTextChange,
 }: ImageCanvasEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imageRef = useRef<HTMLImageElement | undefined>(undefined);
@@ -93,6 +134,17 @@ export function ImageCanvasEditor({
   const contentRevisionRef = useRef(session?.revision ?? 0);
   const sessionIdRef = useRef(session?.sessionId);
   const [tool, setTool] = useState<Tool>("select");
+  const [zoom, setZoom] = useState(1);
+  const [spaceHeld, setSpaceHeld] = useState(false);
+  const panStart = useRef<
+    | {
+        x: number;
+        y: number;
+        left: number;
+        top: number;
+      }
+    | undefined
+  >(undefined);
   const [annotationText, setAnnotationText] = useState("文本");
   const [strokeColor, setStrokeColor] = useState<string>(DEFAULT_COLOR);
   const [strokeWidth, setStrokeWidth] = useState<number>(3);
@@ -103,6 +155,11 @@ export function ImageCanvasEditor({
   const [imageRevision, setImageRevision] = useState(0);
   const [isExporting, setIsExporting] = useState(false);
   const [draftMark, setDraftMark] = useState<Mark | undefined>();
+  // 本地修订：编辑提交即时推进，不等宿主回显；文字层绑定据此立即失效。
+  const [localRevision, setLocalRevision] = useState(session?.revision ?? 0);
+  const [localAutoText, setLocalAutoText] = useState(false);
+  const autoText = autoTextProp ?? localAutoText;
+  const [prepareNonce, setPrepareNonce] = useState(0);
   const [operationMessage, setOperationMessage] = useState(
     session
       ? "纯截图会话：标注后可复制、保存或显式识别当前图；不会自动提交 OCR。"
@@ -125,6 +182,7 @@ export function ImageCanvasEditor({
     setSelectedMark(undefined);
     sessionIdRef.current = session?.sessionId;
     contentRevisionRef.current = session?.revision ?? 0;
+    setLocalRevision(session?.revision ?? 0);
   }
 
   // 同会话内宿主回显修订时单调对齐本地计数，避免回退。
@@ -170,6 +228,81 @@ export function ImageCanvasEditor({
     );
   }, [imageRevision, selectedMark, state, draftMark]);
 
+  // 原位取字：会话/修订/工具变化时导出当前最终 PNG 并请求宿主准备文字层。
+  const sessionKeyForLayer = session?.sessionId ?? "";
+  const layerBindingKey = textLayer?.binding
+    ? `${textLayer.binding.sessionId}:${textLayer.binding.revision}`
+    : "";
+  const currentLayerKey = session
+    ? `${sessionKeyForLayer}:${localRevision}`
+    : "";
+  const lastAttempt = useRef<{ key: string; nonce: number }>({
+    key: "",
+    nonce: -1,
+  });
+  const prepareInFlight = useRef(false);
+
+  useEffect(() => {
+    if (
+      !session ||
+      !canRecognize ||
+      isExporting ||
+      (!autoText && tool !== "textSelect")
+    ) {
+      return;
+    }
+    // 同一绑定已有任何宿主状态（含 preparing/ready/unavailable/cancelled）
+    // 不再自动重复提交；重试只能通过工具重入/手动按钮推进 nonce。
+    if (layerBindingKey === currentLayerKey) {
+      return;
+    }
+    const attemptKey = `${currentLayerKey}:${imageRevision}`;
+    if (
+      lastAttempt.current.key === attemptKey &&
+      lastAttempt.current.nonce === prepareNonce
+    ) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      lastAttempt.current = { key: attemptKey, nonce: prepareNonce };
+      void prepareTextLayer();
+    }, 400);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    sessionKeyForLayer,
+    localRevision,
+    prepareNonce,
+    autoText,
+    tool,
+    canRecognize,
+    isExporting,
+    imageRevision,
+    layerBindingKey,
+    currentLayerKey,
+  ]);
+
+  async function prepareTextLayer() {
+    if (!session || prepareInFlight.current || exportInProgressRef.current) {
+      return;
+    }
+    prepareInFlight.current = true;
+    try {
+      const exported = await exportFinalPngIfUnchanged();
+      if (!exported) return;
+      await actions.run({
+        type: "recognition.prepareScreenshotTextLayer",
+        sessionId: exported.sessionId,
+        revision: exported.revision,
+        resourceUri: exported.resourceUri,
+      });
+    } catch {
+      setOperationMessage("无法导出或提交文字层准备，请重试。");
+    } finally {
+      prepareInFlight.current = false;
+    }
+  }
+
   function commit(next: EditorState) {
     setHistory((current) => [...current.slice(0, historyIndex + 1), next]);
     setHistoryIndex((current) => current + 1);
@@ -181,6 +314,7 @@ export function ImageCanvasEditor({
     if (!currentSession) return;
     contentRevisionRef.current += 1;
     const revision = contentRevisionRef.current;
+    setLocalRevision(revision);
     void actions.run({
       type: "recognition.notifyScreenshotRevision",
       sessionId: currentSession,
@@ -237,6 +371,7 @@ export function ImageCanvasEditor({
   }
 
   function pointerDown(event: React.PointerEvent<HTMLCanvasElement>) {
+    if (tool === "textSelect" || tool === "hand" || spaceHeld) return;
     const start = point(event);
     dragStart.current = start;
     if (tool === "select") {
@@ -257,6 +392,7 @@ export function ImageCanvasEditor({
 
   function pointerUp(event: React.PointerEvent<HTMLCanvasElement>) {
     if (!dragStart.current) return;
+    if (tool === "textSelect" || tool === "hand" || spaceHeld) return;
     const end = point(event);
     const start = dragStart.current;
     dragStart.current = undefined;
@@ -461,6 +597,30 @@ export function ImageCanvasEditor({
     }
   }
 
+  async function pinCurrentImage() {
+    if (!session || !canExport || exportInProgressRef.current) return;
+    exportInProgressRef.current = true;
+    setIsExporting(true);
+    try {
+      const exported = await exportFinalPngIfUnchanged();
+      if (!exported?.sessionId) return;
+      const pinned = await actions.run({
+        type: "recognition.pinScreenshotImage",
+        resourceUri: exported.resourceUri,
+        sessionId: exported.sessionId,
+        revision: exported.revision,
+      });
+      setOperationMessage(
+        pinned ? "已创建桌面贴图。" : "贴图未创建，请查看页面提示。",
+      );
+    } catch {
+      setOperationMessage("无法创建贴图，请重试。");
+    } finally {
+      exportInProgressRef.current = false;
+      setIsExporting(false);
+    }
+  }
+
   async function recognizeCurrentImage() {
     if (!session || !canRecognize || exportInProgressRef.current) return;
     exportInProgressRef.current = true;
@@ -490,13 +650,149 @@ export function ImageCanvasEditor({
 
   const shapeTool =
     tool !== "select" &&
+    tool !== "hand" &&
+    tool !== "textSelect" &&
     tool !== "crop" &&
     tool !== "text" &&
     tool !== "numbering";
   const fontTool = tool === "text" || tool === "numbering";
+  const panning = tool === "hand" || spaceHeld;
+
+  // 取字模式：仅当宿主层就绪且绑定与当前本地修订一致时展示；
+  // 显示的图像就是识别输入的同一最终 PNG，不田旧层映射。
+  const layerImageRef = textLayer?.image;
+  const layerImageUrl = layerImageRef?.url;
+  const layerReady =
+    tool === "textSelect" &&
+    textLayer?.status === "textlayer.ready" &&
+    !!textLayer.binding &&
+    textLayer.binding.sessionId === session?.sessionId &&
+    textLayer.binding.revision === localRevision &&
+    !!layerImageUrl;
+  const [decodedLayer, setDecodedLayer] = useState<
+    { url: string; image: HTMLImageElement } | undefined
+  >();
+  const layerImage =
+    decodedLayer && decodedLayer.url === layerImageUrl
+      ? decodedLayer.image
+      : undefined;
+  useEffect(() => {
+    if (!layerReady || !layerImageUrl) return undefined;
+    const image = new Image();
+    image.decoding = "async";
+    image.onload = () => setDecodedLayer({ url: layerImageUrl, image });
+    image.src = layerImageUrl;
+    return () => {
+      image.onload = null;
+    };
+  }, [layerReady, layerImageUrl]);
+
+  const stageRef = useRef<HTMLDivElement>(null);
+  const [measuredSize, setMeasuredSize] = useState<
+    { image: HTMLImageElement; size: CanvasSize } | undefined
+  >();
+  const stageSize = useMemo(
+    () =>
+      measuredSize && measuredSize.image === layerImage && layerImage
+        ? measuredSize.size
+        : layerImage
+          ? { width: layerImage.naturalWidth, height: layerImage.naturalHeight }
+          : undefined,
+    [measuredSize, layerImage],
+  );
+  useEffect(() => {
+    if (!layerReady || !layerImage) return undefined;
+    const element = stageRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return undefined;
+    // 布局尺寸优先；无布局环境回退为最终 PNG 自然尺寸（1:1 显示）。
+    const observer = new ResizeObserver(() => {
+      const width = element.clientWidth;
+      const height = element.clientHeight;
+      if (width > 0 && height > 0) {
+        setMeasuredSize((current) =>
+          current?.image === layerImage &&
+          current.size.width === width &&
+          current.size.height === height
+            ? current
+            : { image: layerImage, size: { width, height } },
+        );
+      }
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [layerReady, layerImage]);
+
+  const layerLines = textLayer?.lines;
+  const [selection, setSelection] = useState<
+    { key: string; text: string } | undefined
+  >();
+  const layerSelectionKey =
+    layerReady && layerImageUrl
+      ? `${layerImageUrl}:${sessionKeyForLayer}:${localRevision}`
+      : "";
+  const selectionText =
+    selection?.key === layerSelectionKey && layerSelectionKey
+      ? selection.text
+      : "";
+  const [copyMenu, setCopyMenu] = useState<{
+    x: number;
+    y: number;
+    text: string;
+    key: string;
+  }>();
+  function copySelectedText(text = selectionText) {
+    if (!session || !text || !layerSelectionKey) return;
+    setCopyMenu(undefined);
+    void actions.run({
+      type: "recognition.copyScreenshotSelection",
+      sessionId: session.sessionId,
+      revision: localRevision,
+      text,
+    });
+  }
+  useEffect(() => {
+    if (!layerSelectionKey) return undefined;
+    const readSelection = () => {
+      const root = stageRef.current;
+      const documentSelection = document.getSelection();
+      const anchor = documentSelection?.anchorNode;
+      const text =
+        root &&
+        anchor &&
+        root.contains(anchor) &&
+        documentSelection &&
+        documentSelection.rangeCount > 0
+          ? documentSelection.getRangeAt(0).toString()
+          : "";
+      setSelection((current) =>
+        current?.key === layerSelectionKey && current.text === text
+          ? current
+          : { key: layerSelectionKey, text },
+      );
+    };
+    document.addEventListener("selectionchange", readSelection);
+    return () => document.removeEventListener("selectionchange", readSelection);
+  }, [layerSelectionKey, layerLines, stageSize]);
+
+  const textLayerHint = textLayerStatusLabel(textLayer);
 
   return (
-    <div className="canvas-editor">
+    <div
+      className="canvas-editor"
+      onKeyDown={(event) => {
+        const target = event.target as HTMLElement;
+        if (
+          event.code === "Space" &&
+          !["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(target.tagName)
+        ) {
+          event.preventDefault();
+          setSpaceHeld(true);
+        }
+      }}
+      onKeyUp={(event) => {
+        if (event.code === "Space") setSpaceHeld(false);
+      }}
+    >
       <Toolbar
         aria-label="图片编辑工具"
         size="small"
@@ -570,6 +866,57 @@ export function ImageCanvasEditor({
           </label>
         )}
         <span aria-hidden="true" className="editor-toolbar-break" />
+        {session && showAutoTextPreference && (
+          <label className="editor-style-control">
+            <input
+              aria-label="自动取字"
+              checked={autoText}
+              onChange={(event) => {
+                setLocalAutoText(event.target.checked);
+                onAutoTextChange?.(event.target.checked);
+              }}
+              type="checkbox"
+            />
+            <span aria-hidden="true">自动取字</span>
+          </label>
+        )}
+        {tool === "textSelect" &&
+          textLayer?.status === "textlayer.preparing" &&
+          session && (
+            <ToolbarButton
+              aria-label="取消准备文字层"
+              onClick={() =>
+                void actions.run({
+                  type: "recognition.cancelScreenshotTextLayer",
+                  sessionId: session.sessionId,
+                  revision: localRevision,
+                })
+              }
+            >
+              取消准备
+            </ToolbarButton>
+          )}
+        {tool === "textSelect" &&
+          (textLayer?.status === "textlayer.unavailable" ||
+            textLayer?.status === "textlayer.failed" ||
+            textLayer?.status === "textlayer.cancelled") && (
+            <ToolbarButton
+              aria-label="重新准备文字层"
+              disabled={!canRecognize}
+              onClick={() => setPrepareNonce((nonce) => nonce + 1)}
+            >
+              重新准备
+            </ToolbarButton>
+          )}
+        {tool === "textSelect" && selectionText.length > 0 && session && (
+          <Button
+            appearance="primary"
+            size="small"
+            onClick={() => copySelectedText()}
+          >
+            复制所选
+          </Button>
+        )}
         <ToolbarButton
           aria-label="旋转 90°"
           onClick={() => {
@@ -606,13 +953,120 @@ export function ImageCanvasEditor({
         </ToolbarButton>
       </Toolbar>
       <p className="editor-guidance">
-        拖拽绘制或裁剪；选择标注后可拖动。画笔与荧光笔沿拖拽轨迹绘制，序号单击放置。马赛克、模糊与打码会写入复制、保存副本及显式识别输入；画面缩放不改变内容。
+        拖拽绘制或裁剪；选择标注后可拖动。手形或按住 Space
+        可平移。画笔与荧光笔沿拖拽轨迹绘制，序号单击放置。马赛克、模糊与打码会写入复制、保存副本及显式识别输入；画面缩放不改变内容。
       </p>
-      <div className="canvas-stage">
+      {tool === "textSelect" && textLayerHint && (
+        <p className="editor-guidance">{textLayerHint}</p>
+      )}
+      <label className="editor-style-control">
+        <span>显示缩放</span>
+        <Select
+          aria-label="显示缩放"
+          size="small"
+          value={String(zoom)}
+          onChange={(_, data) => setZoom(Number(data.value))}
+        >
+          {[0.5, 0.75, 1, 1.25, 1.5, 2].map((value) => (
+            <option key={value} value={String(value)}>
+              {Math.round(value * 100)}%
+            </option>
+          ))}
+        </Select>
+      </label>
+      <div
+        aria-label="图片视口"
+        className={`canvas-stage${panning ? " is-panning" : ""}`}
+        tabIndex={0}
+        style={{
+          overflow: "auto",
+          maxHeight: "70vh",
+          position: "relative",
+          cursor: panning ? "grab" : undefined,
+        }}
+        onContextMenu={(event) => {
+          if (tool !== "textSelect" || !selectionText) return;
+          event.preventDefault();
+          const bounds = event.currentTarget.getBoundingClientRect();
+          setCopyMenu({
+            x: event.clientX - bounds.left + event.currentTarget.scrollLeft,
+            y: event.clientY - bounds.top + event.currentTarget.scrollTop,
+            text: selectionText,
+            key: layerSelectionKey,
+          });
+        }}
+        onPointerDown={(event) => {
+          if (event.button === 0) setCopyMenu(undefined);
+          if (!panning) return;
+          panStart.current = {
+            x: event.clientX,
+            y: event.clientY,
+            left: event.currentTarget.scrollLeft,
+            top: event.currentTarget.scrollTop,
+          };
+          event.currentTarget.setPointerCapture?.(event.pointerId);
+          event.preventDefault();
+        }}
+        onPointerMove={(event) => {
+          const start = panStart.current;
+          if (!start) return;
+          event.currentTarget.scrollLeft =
+            start.left - (event.clientX - start.x);
+          event.currentTarget.scrollTop = start.top - (event.clientY - start.y);
+        }}
+        onPointerUp={(event) => {
+          panStart.current = undefined;
+          if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+          }
+        }}
+        onPointerCancel={() => {
+          panStart.current = undefined;
+        }}
+      >
+        {layerReady ? (
+          <div
+            ref={stageRef}
+            style={{
+              margin: "0 auto",
+              position: "relative",
+              width: "fit-content",
+            }}
+          >
+            <img
+              alt="截图最终画面"
+              className="inspection-canvas"
+              src={layerImageUrl}
+              style={{ width: `${780 * zoom}px`, maxWidth: "none" }}
+            />
+            {layerImage && stageSize && textLayer?.binding && session ? (
+              <ImageTextLayer
+                activeSession={{
+                  sessionId: session.sessionId,
+                  revision: localRevision,
+                }}
+                binding={textLayer.binding}
+                lines={toImageTextLines(
+                  (layerLines ?? []).map((line) => ({
+                    text: line.text,
+                    bbox: [line.x1, line.y1, line.x2, line.y2] as const,
+                    order: line.order ?? undefined,
+                  })),
+                )}
+                viewport={{ image: layerImage, size: stageSize }}
+              />
+            ) : null}
+          </div>
+        ) : null}
         <canvas
           aria-label="图片检查画布"
           className={`inspection-canvas tool-${tool}`}
           height={600}
+          style={{
+            display: layerReady ? "none" : "block",
+            width: `${780 * zoom}px`,
+            maxWidth: "none",
+          }}
           onKeyDown={(event) => {
             const modifier = event.ctrlKey || event.metaKey;
             if (modifier && event.key.toLowerCase() === "z") {
@@ -641,6 +1095,22 @@ export function ImageCanvasEditor({
           tabIndex={0}
           width={900}
         />
+        {copyMenu?.key === layerSelectionKey && copyMenu.text && (
+          <Button
+            appearance="primary"
+            size="small"
+            onPointerDown={(event) => event.stopPropagation()}
+            style={{
+              position: "absolute",
+              left: copyMenu.x,
+              top: copyMenu.y,
+              zIndex: 2,
+            }}
+            onClick={() => copySelectedText(copyMenu.text)}
+          >
+            复制所选
+          </Button>
+        )}
       </div>
       <div className="editor-footer">
         <Button
@@ -659,6 +1129,13 @@ export function ImageCanvasEditor({
         </Button>
         {session && (
           <>
+            <Button
+              size="small"
+              disabled={!canExport || isExporting}
+              onClick={() => void pinCurrentImage()}
+            >
+              贴图
+            </Button>
             <Button
               appearance="primary"
               size="small"
@@ -702,6 +1179,36 @@ export function ImageCanvasEditor({
       </div>
     </div>
   );
+}
+
+function textLayerStatusLabel(
+  layer: ScreenshotTextLayerState | undefined,
+): string | undefined {
+  if (!layer) {
+    return "取字模式：进入或新截图后自动用本地轻量文字引擎准备可选文字层。";
+  }
+  switch (layer.status) {
+    case "textlayer.preparing":
+      return "正在准备原位文字层……可取消；复制/保存图片不受影响。";
+    case "textlayer.ready":
+      return "在图片上拖动选择文字：支持行内中英文子串与跨行；Ctrl+C 或“复制所选”仅复制所选内容。";
+    case "textlayer.unavailable":
+      return layer.reason === "textlayer.serviceUnavailable"
+        ? "本地识别服务尚未就绪；截图和贴图仍可用，连接恢复后可重新准备文字层。"
+        : layer.reason === "textlayer.modeNotReady"
+          ? "本地轻量文字引擎未就绪；自动取字不会安装依赖，可先在设置中完成准备。"
+          : "无可用本地轻量文字引擎；自动取字不会安装依赖或使用远程。";
+    case "textlayer.cancelled":
+      return "已取消准备文字层；可点“重新准备”重试。";
+    case "textlayer.failed":
+      return layer.reason === "textlayer.tooLarge"
+        ? "识别文本过大，无法安全显示为原位文字层。"
+        : "文字层准备失败；可点“重新准备”重试。";
+    case "textlayer.expired":
+      return "内容已更新，旧文字层已失效；等待或重新准备后可继续取字。";
+    default:
+      return undefined;
+  }
 }
 
 function markBounds(mark: Mark) {

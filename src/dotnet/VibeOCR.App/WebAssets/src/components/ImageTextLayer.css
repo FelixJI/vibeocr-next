@@ -1,0 +1,34 @@
+/*
+ * 图片文字层（组件局部样式）：
+ * 叠在画布上、与 OCR 行框对齐的真实文本节点，用于原生 Selection 复制。
+ * 容器必须落在与画布同尺寸的定位祖先内（position 非 static）。
+ * 容器自身不拦截指针事件，避免挡住画布标注；只有行框内可选中。
+ * 文字颜色透明：视觉以图片像素为准，选中高亮仍可见。
+ */
+.image-text-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.image-text-line {
+  position: absolute;
+  overflow: hidden;
+  pointer-events: auto;
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
+  white-space: pre;
+  line-height: 1;
+  color: transparent;
+}
+
+.image-text-glyphs {
+  display: inline-block;
+  transform-origin: left top;
+}
+
+.image-text-line::selection {
+  background: rgba(31, 111, 235, 0.35);
+}

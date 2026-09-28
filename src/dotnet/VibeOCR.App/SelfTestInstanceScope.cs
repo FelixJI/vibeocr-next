@@ -11,7 +11,7 @@ internal sealed record SelfTestInstanceScope(
     string? smokeMode,
     string? instanceId)
   {
-    bool isWebReadySmoke = smokeMode is "web-ready" or "screenshot-e2e";
+    bool isWebReadySmoke = smokeMode is "web-ready" or "screenshot-e2e" or "text-selection-e2e";
     bool hasInstanceId = !string.IsNullOrWhiteSpace(instanceId);
     if (!isWebReadySmoke)
     {

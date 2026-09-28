@@ -10,7 +10,7 @@ namespace VibeOCR.App.Features.Recognition;
 
 // Only constructed by the isolated screenshot-e2e process. Never samples the desktop
 // outside the client area of the synthetic WinUI window it creates.
-internal sealed class SyntheticScreenRegionPicker : IScreenRegionPicker
+internal sealed class SyntheticScreenRegionPicker(string text = "VibeOCR 123") : IScreenRegionPicker
 {
   internal sealed record CaptureEvidence(int Width, int Height, int WhitePixels, int DarkPixels);
 
@@ -54,7 +54,7 @@ internal sealed class SyntheticScreenRegionPicker : IScreenRegionPicker
       }
 
       const uint childStyle = 0x40000000 | 0x10000000 | 0x00000001 | 0x00000200;
-      child = CreateWindowExW(0, "STATIC", "VibeOCR 123", childStyle,
+      child = CreateWindowExW(0, "STATIC", text, childStyle,
         0, 0, client.Right - client.Left, client.Bottom - client.Top,
         handle, 0, 0, 0);
       if (child == 0)

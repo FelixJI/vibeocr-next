@@ -804,6 +804,14 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       }
     }
 
+    public Task CopyTextAsync(string text, CancellationToken cancellationToken)
+    {
+      CopiedText = text;
+      return Task.CompletedTask;
+    }
+
+    public string? CopiedText { get; private set; }
+
     public async Task<bool> SavePngAsync(
       string sourcePath,
       CancellationToken cancellationToken)

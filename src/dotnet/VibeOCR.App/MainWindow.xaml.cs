@@ -52,10 +52,13 @@ public sealed partial class MainWindow : Window
   private readonly PortableLayout layout;
   private readonly WindowLayoutStore layoutStore;
   private readonly WorkbenchApplication application;
+  private readonly DesktopWorkbenchCommandHandler commandHandler;
   private readonly WebWorkbenchHost webHost;
   private readonly WorkbenchResourceBroker resourceBroker;
   private readonly string resourceRoot;
+  private readonly List<PinnedImageWindow> pinnedImages = [];
   private readonly SyntheticScreenRegionPicker? screenshotSmokePicker;
+  private readonly Func<string?>? supervisorInstanceId;
   private readonly Func<int>? smokeSubmitAttempts;
   private readonly Func<string?>? smokeLastJobId;
   private readonly Func<int>? smokeStartupEnsureAttempts;
@@ -76,6 +79,7 @@ public sealed partial class MainWindow : Window
     Func<UpdateViewModel> updateFactory,
     WindowLayoutStore layoutStore,
     Func<bool>? inferenceAttached = null,
+    Func<string?>? supervisorInstanceId = null,
     IScreenRegionPicker? screenshotSmokePicker = null,
     Func<int>? smokeSubmitAttempts = null,
     Func<string?>? smokeLastJobId = null,
@@ -91,6 +95,7 @@ public sealed partial class MainWindow : Window
     ArgumentNullException.ThrowIfNull(shellFactory);
     ArgumentNullException.ThrowIfNull(updateFactory);
     this.layoutStore = layoutStore ?? throw new ArgumentNullException(nameof(layoutStore));
+    this.supervisorInstanceId = supervisorInstanceId;
     this.screenshotSmokePicker = screenshotSmokePicker as SyntheticScreenRegionPicker;
     this.smokeSubmitAttempts = smokeSubmitAttempts;
     this.smokeLastJobId = smokeLastJobId;
@@ -101,7 +106,7 @@ public sealed partial class MainWindow : Window
     Directory.CreateDirectory(resourceRoot);
     resourceBroker = new WorkbenchResourceBroker(resourceRoot);
     var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
-    var commandHandler = new DesktopWorkbenchCommandHandler(
+    commandHandler = new DesktopWorkbenchCommandHandler(
       recognitionFactory,
       batchFactory,
       qrCodeFactory,
@@ -114,7 +119,21 @@ public sealed partial class MainWindow : Window
       resourceRoot,
       () => WindowNative.GetWindowHandle(this),
       annotationStore,
-      inferenceAttached: inferenceAttached);
+      inferenceAttached: inferenceAttached,
+      supervisorInstanceId: supervisorInstanceId,
+      pinScreenshot: PinScreenshot);
+    commandHandler.ScreenshotTextLayerChanged += layer =>
+    {
+      void UpdatePins()
+      {
+        foreach (PinnedImageWindow pinned in pinnedImages.ToArray())
+        {
+          pinned.Update(layer);
+        }
+      }
+      if (DispatcherQueue.HasThreadAccess) UpdatePins();
+      else DispatcherQueue.TryEnqueue(UpdatePins);
+    };
     application = new WorkbenchApplication(
       DesktopWorkbenchCommandHandler.Capabilities,
       WorkbenchRoute.Recognition,
@@ -331,6 +350,12 @@ public sealed partial class MainWindow : Window
         screenshotSmokeStarted = true;
         _ = CompleteScreenshotE2eSmokeAsync();
       }
+      if (!screenshotSmokeStarted &&
+          Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "text-selection-e2e")
+      {
+        screenshotSmokeStarted = true;
+        _ = CompleteTextSelectionE2eSmokeAsync();
+      }
     }
     AppLog.Info($"Web workbench: {state}");
   }
@@ -459,9 +484,37 @@ public sealed partial class MainWindow : Window
   private async void OnWindowClosed(object sender, WindowEventArgs args)
   {
     Closed -= OnWindowClosed;
+    foreach (PinnedImageWindow pinned in pinnedImages.ToArray()) pinned.Close();
     webHost.ProtocolViolation -= OnProtocolViolation;
     webHost.RecoveryRequired -= OnRecoveryRequired;
     webHost.StateChanged -= OnHostStateChanged;
     await webHost.DisposeAsync();
+  }
+
+  private void PinScreenshot(
+    WorkbenchAnnotationFile image,
+    Guid sessionId,
+    long revision,
+    RecognitionTextLayerState? layer)
+  {
+    if (pinnedImages.Count >= 4)
+    {
+      throw new InvalidOperationException("最多同时打开四张贴图，请先关闭一张。");
+    }
+    var pinned = new PinnedImageWindow(image, sessionId, revision, layer,
+      () => commandHandler.PreparePinnedTextLayerAsync(sessionId, revision, image.Path));
+    pinned.Closed += closed => pinnedImages.Remove(closed);
+    pinnedImages.Add(pinned);
+    _ = ShowPinnedAsync(pinned);
+  }
+
+  private static async Task ShowPinnedAsync(PinnedImageWindow pinned)
+  {
+    try { await pinned.ShowAsync(); }
+    catch (Exception error)
+    {
+      AppLog.Error("Pinned image window failed to start", error);
+      pinned.Close();
+    }
   }
 }

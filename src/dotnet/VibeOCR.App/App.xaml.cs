@@ -43,6 +43,7 @@ public sealed partial class App : Application
     private WindowLayoutStore? _windowLayoutStore;
     private SingleInstanceService? _singleInstance;
     private InferenceSupervisorProcess? _supervisorProcess;
+  private string? _supervisorInstanceId;
     private IInferenceClient? _activeInferenceClient;
     private IQrCodeClient? _activeQrCodeClient;
     private PortableLayout? _supervisorLayout;
@@ -187,9 +188,12 @@ public sealed partial class App : Application
 
         _windowLayoutStore = new WindowLayoutStore(
             Path.Combine(layout.DataRoot, "winui-layout.json"));
-        if (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "screenshot-e2e")
+        if (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") is
+            "screenshot-e2e" or "text-selection-e2e")
         {
-            _screenshotSmokePicker = new SyntheticScreenRegionPicker();
+            _screenshotSmokePicker = new SyntheticScreenRegionPicker(
+                Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") ==
+                "text-selection-e2e" ? "VibeOCR 123\r\n中文 文本 456" : "VibeOCR 123");
         }
 
         _window = new MainWindow(
@@ -230,6 +234,7 @@ public sealed partial class App : Application
             throw new InvalidOperationException("Update service is unavailable."),
           _windowLayoutStore,
           () => _inferenceGateway.IsAttached,
+          () => _supervisorInstanceId,
           _screenshotSmokePicker,
           () => _inferenceGateway.SubmitAttempts,
           () => _inferenceGateway.LastSubmittedJobId,
@@ -467,6 +472,7 @@ public sealed partial class App : Application
             process.UnexpectedExit += OnSupervisorUnexpectedExit;
             _supervisorProcess = process;
             SupervisorReadyEnvelope ready = await process.StartAsync(_applicationShutdown.Token);
+            _supervisorInstanceId = ready.InstanceId;
 
             RecordMilestone(diagnostics, "T5", _startup.Elapsed);
 
@@ -720,6 +726,7 @@ public sealed partial class App : Application
 
         InferenceSupervisorProcess? process = _supervisorProcess;
         _supervisorProcess = null;
+        _supervisorInstanceId = null;
         if (process is null)
         {
             return;

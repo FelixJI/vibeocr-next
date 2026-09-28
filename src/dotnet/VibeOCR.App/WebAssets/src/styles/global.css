@@ -612,6 +612,9 @@ input {
   border-radius: 8px;
   background: #161616;
 }
+.canvas-stage.is-panning .image-text-line {
+  pointer-events: none;
+}
 .inspection-canvas {
   display: block;
   width: min(100%, 69vh, 780px);

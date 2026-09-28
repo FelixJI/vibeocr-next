@@ -45,6 +45,7 @@ public sealed record CaptureRecognitionScreenCommand : WorkbenchCommand;
 /// carrying the session's current revision.
 /// </summary>
 public sealed record CaptureScreenshotSessionCommand : WorkbenchCommand;
+public sealed record CaptureScreenshotTextSessionCommand : WorkbenchCommand;
 
 public sealed record CloseScreenshotSessionCommand : WorkbenchCommand;
 
@@ -68,6 +69,11 @@ public sealed record SaveScreenshotImageCommand(
     Guid SessionId,
     long Revision) : WorkbenchCommand;
 
+public sealed record PinScreenshotImageCommand(
+    string ResourceUri,
+    Guid SessionId,
+    long Revision) : WorkbenchCommand;
+
 /// <summary>
 /// Explicit recognition of the session's current final PNG (uploaded through
 /// the opaque annotation lease). Never falls back to the unedited capture.
@@ -76,6 +82,27 @@ public sealed record RecognizeScreenshotImageCommand(
     string ResourceUri,
     Guid SessionId,
     long Revision) : WorkbenchCommand;
+
+/// <summary>
+/// Prepares the in-place selectable text layer for the session's current
+/// final PNG. Runs only a catalog-ready local lightweight text mode; never
+/// installs dependencies or contacts remote services, and does not touch the
+/// user's task-level recognition mode.
+/// </summary>
+public sealed record PrepareScreenshotTextLayerCommand(
+    string ResourceUri,
+    Guid SessionId,
+    long Revision) : WorkbenchCommand;
+
+public sealed record CancelScreenshotTextLayerCommand(
+    Guid SessionId,
+    long Revision) : WorkbenchCommand;
+
+/// <summary>Copies a DOM selection made on the text layer (only the selected text).</summary>
+public sealed record CopyScreenshotSelectionCommand(
+    Guid SessionId,
+    long Revision,
+    string Text) : WorkbenchCommand;
 
 public sealed record SelectRecognitionImageCommand : WorkbenchCommand;
 
@@ -243,7 +270,8 @@ public sealed record RecognitionWorkbenchState(
   WorkbenchResourceReference? Result = null,
   IReadOnlyList<RecognitionEngineChoice>? Engines = null,
   string? TaskEngine = null,
-  RecognitionScreenshotSessionState? ScreenshotSession = null) : WorkbenchState
+  RecognitionScreenshotSessionState? ScreenshotSession = null,
+  RecognitionTextLayerState? TextLayer = null) : WorkbenchState
 {
   public override string Scope => "recognition";
 }
@@ -255,7 +283,35 @@ public sealed record RecognitionWorkbenchState(
 /// </summary>
 public sealed record RecognitionScreenshotSessionState(
   string SessionId,
-  long Revision);
+  long Revision,
+  bool TextSelectionRequested = false);
+
+/// <summary>
+/// In-place selectable text layer bound to one session revision. The lines
+/// come from the recognition run over the same final PNG the layer displays;
+/// any mismatch (revision, mode, service instance) makes the layer stale.
+/// The run always uses the fixed lightweight text configuration: plain OCR
+/// pipeline, the bound catalog-ready local mode's engine, and no user OCR
+/// options (no rotation/deskew inheritance); changing user task settings
+/// never mutates an existing layer.
+/// </summary>
+public sealed record RecognitionTextLayerState(
+  string Status,
+  string? Reason,
+  RecognitionScreenshotSessionState? Binding,
+  string? ModeId,
+  string? ServiceInstance,
+  WorkbenchResourceReference? Image,
+  IReadOnlyList<RecognitionTextLayerLine>? Lines = null);
+
+/// <summary>One OCR text line: [0,1000] normalized line box, no char boxes.</summary>
+public sealed record RecognitionTextLayerLine(
+  string Text,
+  double X1,
+  double Y1,
+  double X2,
+  double Y2,
+  int? Order = null);
 
 /// <summary>
 /// One selectable recognition mode on the recognition page. <see cref="Selected"/>

@@ -155,7 +155,10 @@ public sealed class ScreenshotSessionWorkbenchTests
     WorkbenchAnnotationStore annotationStore,
     SettingsViewModel? settings = null,
     IAnnotatedImagePlatform? platform = null,
-    Func<bool>? inferenceAttached = null) => new(
+    Func<bool>? inferenceAttached = null,
+    Func<string?>? supervisorInstanceId = null,
+    Func<RecognitionViewModel>? textLayerRecognitionFactory = null,
+    Action<WorkbenchAnnotationFile, Guid, long, RecognitionTextLayerState?>? pinScreenshot = null) => new(
       () => recognition,
       static () => throw new InvalidOperationException(),
       static () => throw new InvalidOperationException(),
@@ -171,7 +174,79 @@ public sealed class ScreenshotSessionWorkbenchTests
       static () => 0,
       annotationStore,
       platform,
-      inferenceAttached);
+      inferenceAttached,
+      supervisorInstanceId,
+      textLayerRecognitionFactory,
+      pinScreenshot);
+
+  [Fact]
+  public async Task TwoPinsOwnIndependentImagesAndShareOneExplicitTextTask()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new TextLayerRecognitionClient();
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var textRecognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      var pins = new List<WorkbenchAnnotationFile>();
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore, settings,
+        inferenceAttached: () => true,
+        supervisorInstanceId: () => "sup-pin",
+        textLayerRecognitionFactory: () => textRecognition,
+        pinScreenshot: (file, _, _, _) => pins.Add(file));
+      try
+      {
+        using var capturedAwaiter = new RecognitionStateAwaiter(
+          handler, state => state.ScreenshotSession is not null && !state.IsBusy);
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        Guid sessionId = Guid.Parse((await capturedAwaiter.Task).ScreenshotSession!.SessionId);
+
+        for (int index = 0; index < 2; index++)
+        {
+          WorkbenchAnnotationLease lease = UploadAnnotation(annotationStore, AnnotationPng);
+          WorkbenchCommandOutcome result = await handler.ExecuteAsync(
+            new PinScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0),
+            TestContext.Current.CancellationToken);
+          Assert.Null(result.Error);
+        }
+        Assert.Equal(2, pins.Count);
+        Assert.NotEqual(pins[0].Path, pins[1].Path);
+        Assert.Empty(inference.Requests); // pure pin never starts OCR
+
+        using (var readyAwaiter = new RecognitionStateAwaiter(
+          handler, state => state.TextLayer?.Status == "textlayer.ready"))
+        {
+          await handler.PreparePinnedTextLayerAsync(sessionId, 0, pins[0].Path);
+          Assert.Equal("rapid_text", (await readyAwaiter.Task).TextLayer?.ModeId);
+        }
+        await handler.PreparePinnedTextLayerAsync(sessionId, 0, pins[1].Path);
+        Assert.Single(inference.Requests);
+
+        string secondPath = pins[1].Path;
+        pins[0].Dispose();
+        Assert.True(File.Exists(secondPath));
+        await handler.ExecuteAsync(
+          new NotifyScreenshotSessionRevisionCommand(sessionId, 1),
+          TestContext.Current.CancellationToken);
+        Assert.Null(handler.InitialStates.OfType<RecognitionWorkbenchState>()
+          .Single().TextLayer);
+      }
+      finally
+      {
+        foreach (WorkbenchAnnotationFile pin in pins) pin.Dispose();
+      }
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
 
   private static string TemporaryRoot()
   {
@@ -214,6 +289,47 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   [Fact]
+  public async Task TextCaptureIntentDoesNotLeakIntoNextNativePureCapture()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new ThrowingSubmitClient();
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore,
+        settings: new SettingsViewModel(inference),
+        inferenceAttached: () => true);
+
+      using (var textAwaiter = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.ScreenshotSession?.TextSelectionRequested == true))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotTextSessionCommand(),
+          TestContext.Current.CancellationToken);
+        Assert.True((await textAwaiter.Task).ScreenshotSession!.TextSelectionRequested);
+      }
+      using (var pureAwaiter = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.ScreenshotSession is
+          { TextSelectionRequested: false }))
+      {
+        // The tray/hotkey route calls this command without visiting the page.
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        Assert.False((await pureAwaiter.Task).ScreenshotSession!.TextSelectionRequested);
+      }
+      Assert.Equal(2, inputs.CaptureCalls);
+      Assert.Equal(0, inference.SubmitCalls);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
   public async Task CaptureScreenshotSessionPublishesSessionWithoutAnyOcrSubmit()
   {
     string root = TemporaryRoot();
@@ -245,6 +361,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         RecognitionWorkbenchState captured = await capturedAwaiter.Task;
         Assert.Equal("recognition.session", captured.StatusCode);
         Assert.Equal(0, captured.ScreenshotSession!.Revision);
+        Assert.False(captured.ScreenshotSession.TextSelectionRequested);
         Assert.NotNull(captured.Input);
         Assert.Null(captured.Result);
         Assert.Equal(1, inputs.CaptureCalls);
@@ -380,6 +497,14 @@ public sealed class ScreenshotSessionWorkbenchTests
 
     public Task<bool> SavePngAsync(string sourcePath, CancellationToken cancellationToken) =>
       Task.FromResult(true);
+
+    public string? CopiedText { get; private set; }
+
+    public Task CopyTextAsync(string text, CancellationToken cancellationToken)
+    {
+      CopiedText = text;
+      return Task.CompletedTask;
+    }
   }
 
   [Fact]
@@ -638,12 +763,650 @@ public sealed class ScreenshotSessionWorkbenchTests
     }
   }
 
+  [Fact]
+  public async Task PrepareScreenshotTextLayerRunsFixedLightweightLocalMode()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new TextLayerRecognitionClient();
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var textRecognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition,
+        root,
+        broker,
+        annotationStore,
+        settings,
+        inferenceAttached: () => true,
+        supervisorInstanceId: () => "sup-text",
+        textLayerRecognitionFactory: () => textRecognition);
+
+      Guid sessionId;
+      using (var capturedAwaiter = new RecognitionStateAwaiter(
+        handler,
+        state => !state.IsBusy && state.ScreenshotSession is not null))
+      {
+        await handler.ExecuteAsync(
+          new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        RecognitionWorkbenchState captured = await capturedAwaiter.Task;
+        sessionId = Guid.Parse(captured.ScreenshotSession!.SessionId);
+
+        WorkbenchAnnotationLease lease = UploadAnnotation(annotationStore, AnnotationPng);
+        using (var readyAwaiter = new RecognitionStateAwaiter(
+          handler,
+          state => state.TextLayer?.Status == "textlayer.ready"))
+        {
+          await handler.ExecuteAsync(
+            new PrepareScreenshotTextLayerCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0),
+            TestContext.Current.CancellationToken);
+          RecognitionWorkbenchState ready = await readyAwaiter.Task;
+
+          RecognitionTextLayerState layer = ready.TextLayer!;
+          Assert.Equal("rapid_text", layer.ModeId);
+          Assert.Equal("sup-text", layer.ServiceInstance);
+          Assert.NotNull(layer.Image);
+          Assert.Equal(AnnotationPng.Length, layer.Image!.ByteLength);
+          RecognitionTextLayerLine[] lines = [.. layer.Lines!];
+          Assert.Equal(2, lines.Length);
+          Assert.Equal("你好", lines[0].Text);
+          Assert.Equal(10, lines[0].X1);
+          Assert.Equal(60, lines[0].Y2);
+          Assert.Equal(1, lines[1].Order);
+        }
+      }
+
+      // 固定轻量配置：OCR 管线、rapidocr 引擎、空选项/空 mineru；
+      // 输入只能是编辑器导出的最终 PNG。
+      SubmitRequest submit = Assert.Single(inference.Requests);
+      Assert.Equal(JobKind.Recognition, submit.Kind);
+      Assert.Equal(JobPriority.Interactive, submit.Priority);
+      Assert.Equal("OCR", submit.Pipeline.PipelineId);
+      Assert.Empty(submit.Pipeline.Options);
+      Assert.Equal(OcrEngine.RapidOcr, submit.Pipeline.Engine);
+      Assert.Equal(AnnotationPng, Assert.Single(inference.UploadedContent));
+      // 独立提交通道：用户任务级 TaskEngine 不被污染。
+      Assert.Null(recognition.TaskEngine);
+      Assert.False(recognition.HasResult);
+      Assert.True(textRecognition.HasResult);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task TextLayerPrefersUserTaskEngineAndIgnoresUserChangesAfterReady()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new TextLayerRecognitionClient();
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var textRecognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition,
+        root,
+        broker,
+        annotationStore,
+        settings,
+        inferenceAttached: () => true,
+        textLayerRecognitionFactory: () => textRecognition);
+
+      using (var capturedAwaiter = new RecognitionStateAwaiter(
+        handler,
+        state => !state.IsBusy && state.ScreenshotSession is not null))
+      {
+        await handler.ExecuteAsync(
+          new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        RecognitionWorkbenchState captured = await capturedAwaiter.Task;
+        Guid sessionId = Guid.Parse(captured.ScreenshotSession!.SessionId);
+
+        // 目录加载是任务级偏好写入的前置（纯截图捕获不加载目录）。
+        await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+        // 用户偏好 windows_text：合法的 ready 本地文字模式，优先采用。
+        WorkbenchCommandOutcome taskEngineSet = await handler.ExecuteAsync(
+          new SetTaskEngineCommand("windows_text"),
+          TestContext.Current.CancellationToken);
+        Assert.Null(taskEngineSet.Error);
+        WorkbenchAnnotationLease lease = UploadAnnotation(annotationStore, AnnotationPng);
+        using (var readyAwaiter = new RecognitionStateAwaiter(
+          handler,
+          state => state.TextLayer?.Status == "textlayer.ready"))
+        {
+          await handler.ExecuteAsync(
+            new PrepareScreenshotTextLayerCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0),
+            TestContext.Current.CancellationToken);
+          RecognitionWorkbenchState ready = await readyAwaiter.Task;
+          Assert.Equal("windows_text", ready.TextLayer?.ModeId);
+        }
+        Assert.Equal(OcrEngine.Windows, Assert.Single(inference.Requests).Pipeline.Engine);
+
+        // 准备后改用户任务级选项：既不重跑文字层也不使已就绪层失效（配置固定）。
+        WorkbenchCommandOutcome changed = await handler.ExecuteAsync(
+          new SetTaskEngineCommand("paddle_text"),
+          TestContext.Current.CancellationToken);
+        RecognitionWorkbenchState afterChange = Assert.IsType<RecognitionWorkbenchState>(
+          Assert.Single(changed.States));
+        Assert.Equal("textlayer.ready", afterChange.TextLayer?.Status);
+        Assert.Equal("windows_text", afterChange.TextLayer?.ModeId);
+        Assert.Single(inference.Requests);
+      }
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task PrepareTextLayerWithoutReadyLocalModeReportsUnavailable()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new TextLayerRecognitionClient(rapidReady: false, windowsReady: false);
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition,
+        root,
+        broker,
+        annotationStore,
+        settings,
+        inferenceAttached: () => true);
+
+      using (var capturedAwaiter = new RecognitionStateAwaiter(
+        handler,
+        state => !state.IsBusy && state.ScreenshotSession is not null))
+      {
+        await handler.ExecuteAsync(
+          new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        RecognitionWorkbenchState captured = await capturedAwaiter.Task;
+        Guid sessionId = Guid.Parse(captured.ScreenshotSession!.SessionId);
+
+        WorkbenchAnnotationLease lease = UploadAnnotation(annotationStore, AnnotationPng);
+        WorkbenchCommandOutcome prepared = await handler.ExecuteAsync(
+          new PrepareScreenshotTextLayerCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0),
+          TestContext.Current.CancellationToken);
+        RecognitionWorkbenchState unavailable = Assert.IsType<RecognitionWorkbenchState>(
+          Assert.Single(prepared.States));
+        Assert.Equal("textlayer.unavailable", unavailable.TextLayer?.Status);
+        Assert.Equal("textlayer.modeNotReady", unavailable.TextLayer?.Reason);
+        Assert.Null(unavailable.TextLayer?.Image);
+        Assert.Equal(0, inference.SubmitCalls);
+        // 不可用时不消费上传租约，也不隐式准备依赖。
+        Assert.NotNull(annotationStore.Take(lease.ResourceUri));
+      }
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task PrepareTextLayerDeduplicatesSameRevision()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new TextLayerRecognitionClient();
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var textRecognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition,
+        root,
+        broker,
+        annotationStore,
+        settings,
+        inferenceAttached: () => true,
+        textLayerRecognitionFactory: () => textRecognition);
+
+      using (var capturedAwaiter = new RecognitionStateAwaiter(
+        handler,
+        state => !state.IsBusy && state.ScreenshotSession is not null))
+      {
+        await handler.ExecuteAsync(
+          new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        RecognitionWorkbenchState captured = await capturedAwaiter.Task;
+        Guid sessionId = Guid.Parse(captured.ScreenshotSession!.SessionId);
+
+        WorkbenchAnnotationLease first = UploadAnnotation(annotationStore, AnnotationPng);
+        using (var readyAwaiter = new RecognitionStateAwaiter(
+          handler,
+          state => state.TextLayer?.Status == "textlayer.ready"))
+        {
+          await handler.ExecuteAsync(
+            new PrepareScreenshotTextLayerCommand(first.ResourceUri.AbsoluteUri, sessionId, 0),
+            TestContext.Current.CancellationToken);
+          await readyAwaiter.Task;
+        }
+
+        WorkbenchAnnotationLease second = UploadAnnotation(annotationStore, AnnotationPng);
+        WorkbenchCommandOutcome again = await handler.ExecuteAsync(
+          new PrepareScreenshotTextLayerCommand(second.ResourceUri.AbsoluteUri, sessionId, 0),
+          TestContext.Current.CancellationToken);
+        RecognitionWorkbenchState deduped = Assert.IsType<RecognitionWorkbenchState>(
+          Assert.Single(again.States));
+        Assert.Equal("textlayer.ready", deduped.TextLayer?.Status);
+        Assert.Equal(1, inference.SubmitCalls);
+        // 去重发生在消费租约之前：第二次上传未被消费。
+        Assert.NotNull(annotationStore.Take(second.ResourceUri));
+      }
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task LateTextLayerAfterRevisionChangeIsDropped()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new SubmitBlockingTextLayerClient();
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var textRecognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition,
+        root,
+        broker,
+        annotationStore,
+        settings,
+        inferenceAttached: () => true,
+        textLayerRecognitionFactory: () => textRecognition);
+
+      using (var capturedAwaiter = new RecognitionStateAwaiter(
+        handler,
+        state => !state.IsBusy && state.ScreenshotSession is not null))
+      {
+        await handler.ExecuteAsync(
+          new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        RecognitionWorkbenchState captured = await capturedAwaiter.Task;
+        Guid sessionId = Guid.Parse(captured.ScreenshotSession!.SessionId);
+        WorkbenchAnnotationLease lease = UploadAnnotation(annotationStore, AnnotationPng);
+
+        using (var preparingAwaiter = new RecognitionStateAwaiter(
+          handler,
+          state => state.TextLayer?.Status == "textlayer.preparing"))
+        {
+          await handler.ExecuteAsync(
+            new PrepareScreenshotTextLayerCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0),
+            TestContext.Current.CancellationToken);
+          await preparingAwaiter.Task;
+        }
+
+        // 编辑推进修订：旧层立即清除，在途准备不得回填旧结果。
+        await handler.ExecuteAsync(
+          new NotifyScreenshotSessionRevisionCommand(sessionId, 1),
+          TestContext.Current.CancellationToken);
+
+        var published = new List<RecognitionWorkbenchState>();
+        void OnStateChanged(WorkbenchState state)
+        {
+          if (state is RecognitionWorkbenchState recognitionState)
+            published.Add(recognitionState);
+        }
+        handler.StateChanged += OnStateChanged;
+        try
+        {
+          inference.Release();
+          await handler.DisposeAsync();
+        }
+        finally
+        {
+          handler.StateChanged -= OnStateChanged;
+        }
+        Assert.DoesNotContain(published, state => state.TextLayer?.Status == "textlayer.ready");
+        Assert.DoesNotContain(published, state => state.TextLayer?.Lines is not null);
+      }
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task CopyScreenshotSelectionRequiresReadyLayerForCurrentRevision()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new TextLayerRecognitionClient();
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var textRecognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      var platform = new RecordingAnnotatedImagePlatform();
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition,
+        root,
+        broker,
+        annotationStore,
+        settings,
+        platform,
+        inferenceAttached: () => true,
+        textLayerRecognitionFactory: () => textRecognition);
+
+      using (var capturedAwaiter = new RecognitionStateAwaiter(
+        handler,
+        state => !state.IsBusy && state.ScreenshotSession is not null))
+      {
+        await handler.ExecuteAsync(
+          new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        RecognitionWorkbenchState captured = await capturedAwaiter.Task;
+        Guid sessionId = Guid.Parse(captured.ScreenshotSession!.SessionId);
+
+        // 未就绪时复制选区 fail closed。
+        WorkbenchCommandOutcome tooEarly = await handler.ExecuteAsync(
+          new CopyScreenshotSelectionCommand(sessionId, 0, "旧"),
+          TestContext.Current.CancellationToken);
+        Assert.Equal("screenshot_session_stale", tooEarly.Error?.Code);
+
+        WorkbenchAnnotationLease lease = UploadAnnotation(annotationStore, AnnotationPng);
+        using (var readyAwaiter = new RecognitionStateAwaiter(
+          handler,
+          state => state.TextLayer?.Status == "textlayer.ready"))
+        {
+          await handler.ExecuteAsync(
+            new PrepareScreenshotTextLayerCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0),
+            TestContext.Current.CancellationToken);
+          await readyAwaiter.Task;
+        }
+
+        WorkbenchCommandOutcome copied = await handler.ExecuteAsync(
+          new CopyScreenshotSelectionCommand(sessionId, 0, "好世"),
+          TestContext.Current.CancellationToken);
+        Assert.Null(copied.Error);
+        Assert.Equal("好世", platform.CopiedText);
+
+        // 修订前进后：旧 revision 与新 revision 都不能复制旧层内容。
+        await handler.ExecuteAsync(
+          new NotifyScreenshotSessionRevisionCommand(sessionId, 1),
+          TestContext.Current.CancellationToken);
+        Assert.Equal("screenshot_session_stale", (await handler.ExecuteAsync(
+          new CopyScreenshotSelectionCommand(sessionId, 0, "旧"),
+          TestContext.Current.CancellationToken)).Error?.Code);
+        Assert.Equal("screenshot_session_stale", (await handler.ExecuteAsync(
+          new CopyScreenshotSelectionCommand(sessionId, 1, "旧"),
+          TestContext.Current.CancellationToken)).Error?.Code);
+        Assert.Equal("好世", platform.CopiedText);
+      }
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
   private static async Task RunMaintenanceAsync(SettingsViewModel settings)
   {
     await settings.PreviewInstallAsync(TestContext.Current.CancellationToken);
     await settings.ConfirmInstallAsync(
       settings.Maintenance.Plan!.PlanId,
       TestContext.Current.CancellationToken);
+  }
+
+  private class TextModeHealthClient(bool rapidReady = true, bool windowsReady = true)
+    : InferenceClientStub
+  {
+    public override Task<JobRef> SubmitAsync(
+      SubmitRequest request,
+      IReadOnlyDictionary<string, SubmitUpload> uploads,
+      CancellationToken cancellationToken) =>
+      throw new InvalidOperationException("health-only client must not submit");
+
+    public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken) =>
+      Task.FromResult(new Wire.Health
+      {
+        SchemaVersion = 2,
+        InstanceId = "sup-text",
+        ProtocolVersion = 2,
+        Ready = true,
+        Draining = false,
+        Capabilities = [RuntimeSelectionService.RecognitionModesCapability],
+        CapabilityDescriptors =
+        [
+          new Wire.CapabilityDescriptor
+          {
+            Name = RuntimeSelectionService.RecognitionModesCapability,
+            Lifecycle = "active",
+            IntroducedIn = "2.9.0",
+            DeprecatedIn = null,
+            SunsetAt = null,
+            Replacement = null,
+            RecognitionModeCatalog = new Wire.RecognitionModeCatalog
+            {
+              Modes =
+              [
+                TextMode(Wire.RecognitionModeId.RapidText,
+                  rapidReady
+                    ? Wire.RecognitionModeAvailability.Ready
+                    : Wire.RecognitionModeAvailability.PreparationRequired,
+                  "rapidocr-base"),
+                TextMode(Wire.RecognitionModeId.WindowsText,
+                  windowsReady
+                    ? Wire.RecognitionModeAvailability.Ready
+                    : Wire.RecognitionModeAvailability.Unavailable,
+                  null),
+                TextMode(Wire.RecognitionModeId.PaddleText,
+                  Wire.RecognitionModeAvailability.Ready,
+                  null),
+                TextMode(Wire.RecognitionModeId.PaddleStructure,
+                  Wire.RecognitionModeAvailability.Ready,
+                  null),
+                TextMode(Wire.RecognitionModeId.PaddleDocumentVl,
+                  Wire.RecognitionModeAvailability.Ready,
+                  null),
+                TextMode(Wire.RecognitionModeId.MineruDocument,
+                  Wire.RecognitionModeAvailability.Ready,
+                  null),
+                TextMode(Wire.RecognitionModeId.PaddleTable,
+                  Wire.RecognitionModeAvailability.Ready,
+                  null),
+                TextMode(Wire.RecognitionModeId.PaddleFormula,
+                  Wire.RecognitionModeAvailability.Ready,
+                  null),
+              ],
+            },
+          },
+        ],
+      });
+
+    public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>
+      Task.FromResult(new SettingsSnapshot());
+
+    private static Wire.RecognitionModeDescriptor TextMode(
+      Wire.RecognitionModeId id,
+      Wire.RecognitionModeAvailability availability,
+      string? requiredComponent)
+    {
+      var (family, pipeline, engine, provisioning, lifecycle) = id switch
+      {
+        Wire.RecognitionModeId.RapidText => (Wire.RecognitionModeFamily.Text,
+          Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Rapidocr,
+          Wire.RecognitionModeProvisioning.BaseRuntime,
+          Wire.RecognitionModeLifecycleKind.Unmanaged),
+        Wire.RecognitionModeId.WindowsText => (Wire.RecognitionModeFamily.Text,
+          Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Windows,
+          Wire.RecognitionModeProvisioning.OperatingSystem,
+          Wire.RecognitionModeLifecycleKind.Unmanaged),
+        Wire.RecognitionModeId.PaddleText => (Wire.RecognitionModeFamily.Text,
+          Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Paddleocr,
+          Wire.RecognitionModeProvisioning.AdvancedComponent,
+          Wire.RecognitionModeLifecycleKind.ModelResidency),
+        Wire.RecognitionModeId.PaddleStructure => (Wire.RecognitionModeFamily.Document,
+          Wire.ExecutionPipelineId.PPStructureV3, (Wire.OcrEngineId?)null,
+          Wire.RecognitionModeProvisioning.AdvancedComponent,
+          Wire.RecognitionModeLifecycleKind.ModelResidency),
+        Wire.RecognitionModeId.PaddleDocumentVl => (Wire.RecognitionModeFamily.Document,
+          Wire.ExecutionPipelineId.PaddleOCRVL, (Wire.OcrEngineId?)null,
+          Wire.RecognitionModeProvisioning.AdvancedComponent,
+          Wire.RecognitionModeLifecycleKind.ModelResidency),
+        Wire.RecognitionModeId.MineruDocument => (Wire.RecognitionModeFamily.Document,
+          Wire.ExecutionPipelineId.MinerU, (Wire.OcrEngineId?)null,
+          Wire.RecognitionModeProvisioning.AdvancedComponent,
+          Wire.RecognitionModeLifecycleKind.ProcessKeepAlive),
+        Wire.RecognitionModeId.PaddleTable => (Wire.RecognitionModeFamily.Specialized,
+          Wire.ExecutionPipelineId.TABLERECOGNITION, (Wire.OcrEngineId?)null,
+          Wire.RecognitionModeProvisioning.AdvancedComponent,
+          Wire.RecognitionModeLifecycleKind.ModelResidency),
+        Wire.RecognitionModeId.PaddleFormula => (Wire.RecognitionModeFamily.Specialized,
+          Wire.ExecutionPipelineId.FORMULARECOGNITION, (Wire.OcrEngineId?)null,
+          Wire.RecognitionModeProvisioning.AdvancedComponent,
+          Wire.RecognitionModeLifecycleKind.ModelResidency),
+        _ => throw new ArgumentOutOfRangeException(nameof(id)),
+      };
+      return new Wire.RecognitionModeDescriptor
+      {
+        Id = id,
+        Family = family,
+        PipelineId = pipeline,
+        Engine = engine,
+        Provisioning = provisioning,
+        Availability = availability,
+        ReasonCode = availability == Wire.RecognitionModeAvailability.PreparationRequired
+          ? "runtime_component_missing"
+          : null,
+        RequiredComponent = requiredComponent,
+        SupportedOptions = [],
+        Lifecycle = new Wire.RecognitionModeLifecycle
+        {
+          Kind = lifecycle,
+          SupportsPreload = false,
+          SupportsTtl = false,
+          SupportsPinning = false,
+          SupportsRelease = false,
+        },
+      };
+    }
+  }
+
+  /// <summary>Records submissions; outcomes carry real text_blocks geometry.</summary>
+  private class TextLayerRecognitionClient(bool rapidReady = true, bool windowsReady = true)
+    : TextModeHealthClient(rapidReady, windowsReady)
+  {
+    public List<SubmitRequest> Requests { get; } = [];
+    public List<IReadOnlyList<byte>> UploadedContent { get; } = [];
+    private int submitCalls;
+
+    public int SubmitCalls => submitCalls;
+
+    public override Task<JobRef> SubmitAsync(
+      SubmitRequest request,
+      IReadOnlyDictionary<string, SubmitUpload> uploads,
+      CancellationToken cancellationToken)
+    {
+      Interlocked.Increment(ref submitCalls);
+      Requests.Add(request);
+      UploadedContent.AddRange(uploads.Values.Select(upload => upload.Content));
+      return Task.FromResult(new JobRef
+      {
+        JobId = "job-text",
+        Items =
+        [
+          new JobItem
+          {
+            ItemId = "it-0",
+            ClientItemKey = request.Items[0].ClientItemKey,
+            Ordinal = 0,
+            DisplayName = request.Items[0].DisplayName,
+            State = ItemState.Queued,
+          },
+        ],
+      });
+    }
+
+    public override Task<JobUpdate> ObserveAsync(
+      string jobId,
+      int afterSequence,
+      CancellationToken cancellationToken) => Task.FromResult(new JobUpdate
+      {
+        Snapshot = new JobSnapshot
+        {
+          JobId = jobId,
+          Kind = JobKind.Recognition,
+          Priority = JobPriority.Interactive,
+          State = JobState.Completed,
+        },
+        Events = Array.Empty<StageEvent>(),
+        Outcomes =
+        [
+          new ItemOutcome
+          {
+            ItemId = "it-0",
+            State = ItemState.Succeeded,
+            Attempt = 1,
+            PayloadType = "ocr.v1",
+            Payload = new Dictionary<string, JsonElement>
+            {
+              ["raw_text"] = JsonSerializer.SerializeToElement("你好\nworld"),
+              ["text_blocks"] = JsonSerializer.SerializeToElement(
+                JsonSerializer.Deserialize<JsonElement>(""""
+                  [
+                    { "text": "你好", "bbox": [10, 20, 300, 60], "order": 0 },
+                    { "text": "world", "bbox": [10, 80, 300, 120], "order": 1 },
+                    { "text": "越界框", "bbox": [0, 0, 2000, 100], "order": 2 },
+                    { "text": "退化框", "bbox": [10, 10, 10, 50], "order": 3 }
+                  ]
+                  """")),
+            },
+          },
+        ],
+        ThroughSequence = afterSequence,
+      });
+  }
+
+  private sealed class SubmitBlockingTextLayerClient : TextLayerRecognitionClient
+  {
+    private readonly TaskCompletionSource completion = new(
+      TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public Task Completion => completion.Task;
+
+    public void Release() => completion.TrySetResult();
+
+    public override async Task<JobRef> SubmitAsync(
+      SubmitRequest request,
+      IReadOnlyDictionary<string, SubmitUpload> uploads,
+      CancellationToken cancellationToken)
+    {
+      JobRef submitted = await base.SubmitAsync(request, uploads, cancellationToken);
+      await completion.Task.WaitAsync(cancellationToken);
+      return submitted;
+    }
   }
 
   private sealed class HangingInstallerClient : IRuntimeInstallerClient
