@@ -20,11 +20,5 @@
     "jsx": "react-jsx",
     "types": ["vite/client", "vitest/globals", "@testing-library/jest-dom"]
   },
-  "include": ["src"],
-  "exclude": [
-    "src/bridge.ts",
-    "src/preview.ts",
-    "src/editor/*.ts",
-    "src/result/*.ts"
-  ]
+  "include": ["src"]
 }
