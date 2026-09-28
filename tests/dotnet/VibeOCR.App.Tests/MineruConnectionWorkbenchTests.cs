@@ -294,7 +294,6 @@ public sealed class MineruConnectionWorkbenchTests
       "settings.ready",
       "cpu",
       false,
-      "Ctrl+Alt+Q",
       MineruConnection: new SettingsMineruConnectionState(
         true,
         "remote",

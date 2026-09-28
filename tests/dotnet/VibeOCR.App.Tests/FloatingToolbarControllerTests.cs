@@ -198,11 +198,112 @@ public sealed class FloatingToolbarControllerTests
         Assert.Equal(FloatingToolbarController.ToolbarState.Suspended, controller.State);
         Assert.False(_view.IsVisible);
         Assert.False(_timer.IsRunning);
+        Assert.Equal(0, controller.ArmedSensorHandle);
 
         controller.Resume();
 
         Assert.Equal(FloatingToolbarController.ToolbarState.Hidden, controller.State);
         Assert.True(_sensor.IsArmed);
+    }
+
+    [Fact]
+    public void SuspendFromHiddenRemovesSensorAndResumeRearms()
+    {
+        using FloatingToolbarController controller = CreateController();
+        controller.Start();
+        Assert.Equal(FloatingToolbarController.ToolbarState.Hidden, controller.State);
+
+        // 截图避让从自动收起态进入：感应条也必须撤防，成品无感应条。
+        controller.Suspend();
+
+        Assert.Equal(FloatingToolbarController.ToolbarState.Suspended, controller.State);
+        Assert.False(_view.IsVisible);
+        Assert.False(_sensor.IsArmed);
+        Assert.Equal(0, controller.ArmedSensorHandle);
+        _sensor.RaisePointerEntered();
+        Assert.Equal(FloatingToolbarController.ToolbarState.Suspended, controller.State);
+
+        // 取消/结束后恢复原态：重新贴边布防，不强制显示。
+        controller.Resume();
+
+        Assert.Equal(FloatingToolbarController.ToolbarState.Hidden, controller.State);
+        Assert.False(_view.IsVisible);
+        Assert.True(_sensor.IsArmed);
+        Assert.Equal(new PhysicalRectangle(0, 0, 1920, 2), _sensor.ArmedBounds);
+    }
+
+    [Fact]
+    public void SuspendFromUserHiddenKeepsUserHiddenAfterResume()
+    {
+        using FloatingToolbarController controller = CreateController();
+        controller.Start();
+        controller.Hide();
+        Assert.Equal(FloatingToolbarController.ToolbarState.UserHidden, controller.State);
+
+        controller.Suspend();
+        Assert.Equal(FloatingToolbarController.ToolbarState.Suspended, controller.State);
+        Assert.False(_sensor.IsArmed);
+        Assert.False(_view.IsVisible);
+
+        controller.Resume();
+
+        Assert.Equal(FloatingToolbarController.ToolbarState.UserHidden, controller.State);
+        Assert.False(_sensor.IsArmed);
+        Assert.False(_view.IsVisible);
+    }
+
+    [Fact]
+    public void HiddenByUserPreferenceChangedDuringSuspendWinsOnResume()
+    {
+        using FloatingToolbarController controller = CreateController();
+        controller.Start();
+        controller.Suspend();
+
+        // 截图避让期间实时设置改为主动隐藏：恢复时尊重当前偏好。
+        controller.ApplySettings(new FloatingToolbarSettings(true, ScreenEdge.Top, true, 600, true));
+
+        controller.Resume();
+
+        Assert.Equal(FloatingToolbarController.ToolbarState.UserHidden, controller.State);
+        Assert.False(_sensor.IsArmed);
+        Assert.False(_view.IsVisible);
+    }
+
+    [Fact]
+    public void ResumeAfterHiddenByUserClearedDuringSuspendRearmsSensor()
+    {
+        using FloatingToolbarController controller = CreateController();
+        controller.Start();
+        controller.Hide();
+        controller.Suspend();
+
+        // 避让期间取消主动隐藏：恢复后按新偏好回到自动收起，重新布防。
+        controller.ApplySettings(new FloatingToolbarSettings(true, ScreenEdge.Top, true, 600, false));
+
+        controller.Resume();
+
+        Assert.Equal(FloatingToolbarController.ToolbarState.Hidden, controller.State);
+        Assert.True(_sensor.IsArmed);
+        Assert.False(_view.IsVisible);
+        Assert.Equal(new PhysicalRectangle(0, 0, 1920, 2), _sensor.ArmedBounds);
+    }
+
+    [Fact]
+    public void ResumeAfterHiddenByUserClearedDuringSuspendShowsDockedWhenNotAutoHide()
+    {
+        using FloatingToolbarController controller = CreateController();
+        controller.Start();
+        controller.Hide();
+        controller.Suspend();
+
+        // 避让期间取消主动隐藏且改为常显：恢复后停靠显示。
+        controller.ApplySettings(new FloatingToolbarSettings(true, ScreenEdge.Top, false, 600, false));
+
+        controller.Resume();
+
+        Assert.Equal(FloatingToolbarController.ToolbarState.PinnedDocked, controller.State);
+        Assert.True(_view.IsVisible);
+        Assert.False(_sensor.IsArmed);
     }
 
     [Fact]
@@ -263,6 +364,163 @@ public sealed class FloatingToolbarControllerTests
         Assert.Equal(FloatingToolbarController.ToolbarState.Inactive, controller.State);
         Assert.False(_view.IsVisible);
         Assert.True(_sensor.Disposed);
+    }
+
+    [Fact]
+    public void UserHideDisarmsSensorAndHoverDoesNotReveal()
+    {
+        using FloatingToolbarController controller = CreateController();
+        controller.Start();
+        Assert.True(_sensor.IsArmed);
+
+        controller.Hide();
+
+        Assert.Equal(FloatingToolbarController.ToolbarState.UserHidden, controller.State);
+        Assert.False(_view.IsVisible);
+        Assert.False(_sensor.IsArmed);
+        Assert.Equal(0, controller.ArmedSensorHandle);
+
+        // 主动隐藏态不能被感应 hover 恢复。
+        _sensor.RaisePointerEntered();
+        Assert.Equal(FloatingToolbarController.ToolbarState.UserHidden, controller.State);
+        Assert.False(_view.IsVisible);
+
+        // 感应条保持撤防，后续自动收起/揭示机制不介入。
+        _sensor.RaiseDisplayChanged();
+        Assert.Equal(FloatingToolbarController.ToolbarState.UserHidden, controller.State);
+        Assert.False(_sensor.IsArmed);
+    }
+
+    [Fact]
+    public void UserHidePersistsPreferenceAndRestartStaysUserHidden()
+    {
+        var persisted = new List<FloatingToolbarSettings>();
+        using (FloatingToolbarController first = CreateController(persisted: persisted))
+        {
+            first.Start();
+            first.Hide();
+        }
+
+        FloatingToolbarSettings saved = Assert.Single(persisted);
+        Assert.True(saved.HiddenByUser);
+        Assert.True(saved.Enabled);
+
+        // 重启：按保存的偏好直接进入主动隐藏，不布防感应条。
+        using FloatingToolbarController second = CreateController(settings: saved);
+        second.Start();
+
+        Assert.Equal(FloatingToolbarController.ToolbarState.UserHidden, second.State);
+        Assert.False(_sensor.IsArmed);
+        Assert.False(_view.IsVisible);
+    }
+
+    [Fact]
+    public void ShowFromUserHiddenRevealsAndAutoHideStillWorksAfterwards()
+    {
+        var persisted = new List<FloatingToolbarSettings>();
+        using FloatingToolbarController controller = CreateController(persisted: persisted);
+        controller.Start();
+        controller.Hide();
+        Assert.Equal(FloatingToolbarController.ToolbarState.UserHidden, controller.State);
+
+        controller.Show();
+
+        // 找回：偏好清零并持久化，工具栏显示。
+        Assert.Equal(FloatingToolbarController.ToolbarState.Revealed, controller.State);
+        Assert.True(_view.IsVisible);
+        Assert.Equal(2, persisted.Count);
+        Assert.False(persisted[^1].HiddenByUser);
+
+        // 离开后 linger 收回：回到正常自动收起，感应条重新布防且可再揭示。
+        _view.RaisePointerExited();
+        _timer.Fire();
+        Assert.Equal(FloatingToolbarController.ToolbarState.Hidden, controller.State);
+        Assert.True(_sensor.IsArmed);
+        _sensor.RaisePointerEntered();
+        Assert.Equal(FloatingToolbarController.ToolbarState.Revealed, controller.State);
+    }
+
+    [Fact]
+    public void ShowFromAutoHiddenRevealsWithoutPersisting()
+    {
+        var persisted = new List<FloatingToolbarSettings>();
+        using FloatingToolbarController controller = CreateController(persisted: persisted);
+        controller.Start();
+        Assert.Equal(FloatingToolbarController.ToolbarState.Hidden, controller.State);
+
+        controller.Show();
+
+        // 自动收起态显式显示：偏好本就是 false，不需要写配置。
+        Assert.Equal(FloatingToolbarController.ToolbarState.Revealed, controller.State);
+        Assert.True(_view.IsVisible);
+        Assert.Empty(persisted);
+    }
+
+    [Fact]
+    public void ToggleSwitchesBetweenVisibleAndUserHidden()
+    {
+        using FloatingToolbarController controller = CreateController();
+        controller.Start();
+        _sensor.RaisePointerEntered();
+
+        controller.Toggle();
+        Assert.Equal(FloatingToolbarController.ToolbarState.UserHidden, controller.State);
+        Assert.False(_view.IsVisible);
+        Assert.False(_sensor.IsArmed);
+
+        controller.Toggle();
+        Assert.Equal(FloatingToolbarController.ToolbarState.Revealed, controller.State);
+        Assert.True(_view.IsVisible);
+    }
+
+    [Fact]
+    public void ToggleFromAutoHiddenEntersUserHidden()
+    {
+        using FloatingToolbarController controller = CreateController();
+        controller.Start();
+
+        controller.Toggle();
+
+        Assert.Equal(FloatingToolbarController.ToolbarState.UserHidden, controller.State);
+        Assert.False(_sensor.IsArmed);
+    }
+
+    [Fact]
+    public void ToggleIsIgnoredWhileInactiveAndSuspended()
+    {
+        using FloatingToolbarController controller = CreateController();
+        controller.Toggle();
+        Assert.Equal(FloatingToolbarController.ToolbarState.Inactive, controller.State);
+
+        controller.Start();
+        controller.Suspend();
+        controller.Toggle();
+        Assert.Equal(FloatingToolbarController.ToolbarState.Suspended, controller.State);
+
+        controller.Resume();
+        controller.ApplySettings(new FloatingToolbarSettings(false, ScreenEdge.Top, true, 600));
+        controller.Toggle();
+        Assert.Equal(FloatingToolbarController.ToolbarState.Inactive, controller.State);
+    }
+
+    [Fact]
+    public void ApplySettingsHiddenByUserTransitionsLive()
+    {
+        using FloatingToolbarController controller = CreateController();
+        controller.Start();
+        Assert.Equal(FloatingToolbarController.ToolbarState.Hidden, controller.State);
+
+        controller.ApplySettings(new FloatingToolbarSettings(true, ScreenEdge.Top, true, 600, true));
+
+        Assert.Equal(FloatingToolbarController.ToolbarState.UserHidden, controller.State);
+        Assert.False(_sensor.IsArmed);
+        Assert.False(_view.IsVisible);
+
+        controller.ApplySettings(new FloatingToolbarSettings(true, ScreenEdge.Top, true, 600, false));
+
+        Assert.Equal(FloatingToolbarController.ToolbarState.Hidden, controller.State);
+        Assert.True(_sensor.IsArmed);
+        Assert.False(_view.IsVisible);
     }
 
     [Fact]

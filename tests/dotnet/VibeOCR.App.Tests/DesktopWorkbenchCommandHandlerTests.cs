@@ -1,8 +1,10 @@
 using System.Text.Json;
+using VibeOCR.App.Features.FloatingToolbar;
 using VibeOCR.App.Features.Maintenance;
 using VibeOCR.App.Features.QrCode;
 using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Features.Settings;
+using VibeOCR.App.Features.Shell;
 using VibeOCR.App.Features.Update;
 using VibeOCR.App.Inference;
 using VibeOCR.App.ViewModels;
@@ -11,6 +13,7 @@ using VibeOCR.App.Workbench;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
+using VibeOCR.Platform.Windows;
 using Xunit;
 
 namespace VibeOCR.App.Tests;
@@ -849,5 +852,526 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       IProgress<int>? progress,
       CancellationToken cancellationToken) =>
       Task.FromResult(new UpdateApplyResult(UpdateApplyStatus.Downloaded));
+  }
+
+  [Fact]
+  public async Task HotkeyCommandsProjectRegistrarStateIntoSettings()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-shell-actions-{Guid.NewGuid():N}");
+    string resourceRoot = Path.Combine(root, "resources");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      (ShellActionDispatcher dispatcher, WindowsHotkeyRegistrar registrar, _, _) =
+        CreateShellActions(root);
+      registrar.InitializeActions();
+      var settings = new SettingsViewModel(new CompletedRecognitionInferenceClient());
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => settings,
+        CreateShellViewModel,
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker,
+        resourceRoot,
+        static () => 0,
+        annotationStore,
+        shellActions: dispatcher);
+
+      WorkbenchCommandOutcome bound = await handler.ExecuteAsync(
+        new SetActionHotkeyCommand("clipboard_recognize", "Ctrl+Alt+C"),
+        TestContext.Current.CancellationToken);
+      var boundState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(bound.States));
+      SettingsHotkeyActionState recognize = Assert.Single(
+        boundState.HotkeyActions!, item => item.ActionId == "screenshot_recognize");
+      Assert.Equal("Ctrl+Alt+Q", recognize.RegisteredHotkey);
+      SettingsHotkeyActionState clipboard = Assert.Single(
+        boundState.HotkeyActions!, item => item.ActionId == "clipboard_recognize");
+      Assert.Equal("Ctrl+Alt+C", clipboard.ConfiguredHotkey);
+      Assert.Equal("Ctrl+Alt+C", clipboard.RegisteredHotkey);
+
+      // 重复键位被拒：命令仍成功（设置页以动作状态回显），错误可见且原绑定不变。
+      WorkbenchCommandOutcome conflict = await handler.ExecuteAsync(
+        new SetActionHotkeyCommand("screenshot_edit", "Ctrl+Alt+Q"),
+        TestContext.Current.CancellationToken);
+      Assert.Null(conflict.Error);
+      var conflictState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(conflict.States));
+      SettingsHotkeyActionState edit = Assert.Single(
+        conflictState.HotkeyActions!, item => item.ActionId == "screenshot_edit");
+      Assert.Null(edit.RegisteredHotkey);
+      Assert.Null(edit.ConfiguredHotkey);
+      Assert.Contains("已被动作", edit.Error);
+
+      WorkbenchCommandOutcome reset = await handler.ExecuteAsync(
+        new ResetActionHotkeyCommand("screenshot_recognize"),
+        TestContext.Current.CancellationToken);
+      var resetState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(reset.States));
+      SettingsHotkeyActionState resetRecognize = Assert.Single(
+        resetState.HotkeyActions!, item => item.ActionId == "screenshot_recognize");
+      Assert.Equal("Ctrl+Alt+Q", resetRecognize.RegisteredHotkey);
+      Assert.Null(resetRecognize.Error);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task ToolbarCommandsApplyPreferencesAndProjectVisibility()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-shell-actions-{Guid.NewGuid():N}");
+    string resourceRoot = Path.Combine(root, "resources");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      (ShellActionDispatcher dispatcher, _, List<FloatingToolbarSettings> applied, _) =
+        CreateShellActions(root);
+      var settings = new SettingsViewModel(new CompletedRecognitionInferenceClient());
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => settings,
+        CreateShellViewModel,
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker,
+        resourceRoot,
+        static () => 0,
+        annotationStore,
+        shellActions: dispatcher);
+
+      WorkbenchCommandOutcome enabled = await handler.ExecuteAsync(
+        new SetFloatingToolbarEnabledCommand(true),
+        TestContext.Current.CancellationToken);
+      var enabledState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(enabled.States));
+      Assert.True(enabledState.FloatingToolbar!.Enabled);
+
+      WorkbenchCommandOutcome layout = await handler.ExecuteAsync(
+        new SetFloatingToolbarLayoutCommand(ScreenEdge.Left, false),
+        TestContext.Current.CancellationToken);
+      var layoutState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(layout.States));
+      Assert.Equal("left", layoutState.FloatingToolbar!.Edge);
+      Assert.False(layoutState.FloatingToolbar.AutoHide);
+      Assert.Equal(2, applied.Count);
+      Assert.True(applied[0].Enabled);
+      Assert.Equal(ScreenEdge.Left, applied[1].Edge);
+
+      // 重复偏好不再重复应用。
+      await handler.ExecuteAsync(
+        new SetFloatingToolbarLayoutCommand(ScreenEdge.Left, false),
+        TestContext.Current.CancellationToken);
+      Assert.Equal(2, applied.Count);
+
+      WorkbenchCommandOutcome shown = await handler.ExecuteAsync(
+        new ShowFloatingToolbarCommand(),
+        TestContext.Current.CancellationToken);
+      var shownState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(shown.States));
+      Assert.Equal("visible", shownState.FloatingToolbar!.Visibility);
+      WorkbenchCommandOutcome hidden = await handler.ExecuteAsync(
+        new HideFloatingToolbarCommand(),
+        TestContext.Current.CancellationToken);
+      var hiddenState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(hidden.States));
+      Assert.Equal("visible", hiddenState.FloatingToolbar!.Visibility);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task CaptureScreenSuspendsFloatingToolbarUntilCompletion()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-shell-actions-{Guid.NewGuid():N}");
+    string resourceRoot = Path.Combine(root, "resources");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      var client = new CompletedRecognitionInferenceClient();
+      var inputs = new SignallingInputService();
+      var recognition = new RecognitionViewModel(client, inputs);
+      var settings = new SettingsViewModel(client);
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      var suspension = new TrackingSuspension();
+      var dispatcher = new ShellActionDispatcher(
+        () => null,
+        new Dictionary<string, Func<Task>>(StringComparer.Ordinal),
+        () => FloatingToolbarSettings.Default,
+        () => FloatingToolbarVisibility.Visible,
+        _ => null,
+        () => null,
+        () => null,
+        () => suspension.Suspend());
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        () => recognition,
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => settings,
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker,
+        resourceRoot,
+        static () => 0,
+        annotationStore,
+        shellActions: dispatcher);
+      var terminal = new TaskCompletionSource<RecognitionWorkbenchState>(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+      handler.StateChanged += state =>
+      {
+        if (state is RecognitionWorkbenchState { IsBusy: false } final)
+        {
+          terminal.TrySetResult(final);
+        }
+      };
+
+      await handler.ExecuteAsync(
+        new CaptureRecognitionScreenCommand(),
+        TestContext.Current.CancellationToken);
+
+      // 采集输入时悬浮栏必须仍在让位中，完成（含取消）后才恢复。
+      await inputs.Captured.Task.WaitAsync(
+        TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      Assert.True(suspension.Active);
+      Assert.Equal(0, suspension.ResumedCount);
+
+      await terminal.Task.WaitAsync(
+        TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+      Assert.False(suspension.Active);
+      Assert.Equal(1, suspension.ResumedCount);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task ShellActionCommandsFailClosedWithoutDispatcher()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-shell-actions-{Guid.NewGuid():N}");
+    string resourceRoot = Path.Combine(root, "resources");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      var settings = new SettingsViewModel(new CompletedRecognitionInferenceClient());
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => settings,
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker,
+        resourceRoot,
+        static () => 0,
+        annotationStore);
+
+      WorkbenchCommandOutcome outcome = await handler.ExecuteAsync(
+        new SetActionHotkeyCommand("screenshot_recognize", "Ctrl+Alt+Q"),
+        TestContext.Current.CancellationToken);
+      Assert.Equal("desktop_command_failed", outcome.Error?.Code);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task CaptureEntriesAreSingleFlightAcrossActionsAndRetryAfterCancel()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-shell-actions-{Guid.NewGuid():N}");
+    string resourceRoot = Path.Combine(root, "resources");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      var client = new CompletedRecognitionInferenceClient();
+      var inputs = new BlockingCaptureInputService();
+      var recognition = new RecognitionViewModel(client, inputs);
+      var settings = new SettingsViewModel(client);
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        () => recognition,
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => settings,
+        CreateShellViewModel,
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker,
+        resourceRoot,
+        static () => 0,
+        annotationStore,
+        shellActions: CreateShellActions(root).Dispatcher);
+      var waiter = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+      handler.StateChanged += state =>
+      {
+        if (state is RecognitionWorkbenchState { IsBusy: false } final)
+        {
+          waiter.TrySetResult(final.StatusCode);
+        }
+      };
+
+      WorkbenchCommandOutcome first = await handler.ExecuteAsync(
+        new CaptureScreenshotSessionCommand(),
+        TestContext.Current.CancellationToken);
+      Assert.Null(first.Error);
+
+      // 同动作重复触发与跨纯截图/识别入口都不得再开第二个选区。
+      WorkbenchCommandOutcome repeat = await handler.ExecuteAsync(
+        new CaptureScreenshotSessionCommand(),
+        TestContext.Current.CancellationToken);
+      Assert.Equal("capture_in_progress", repeat.Error?.Code);
+      WorkbenchCommandOutcome cross = await handler.ExecuteAsync(
+        new CaptureRecognitionScreenCommand(),
+        TestContext.Current.CancellationToken);
+      Assert.Equal("capture_in_progress", cross.Error?.Code);
+      Assert.Equal(1, inputs.CaptureCalls);
+
+      // 用户在选区界面取消：guard 释放后可重试。
+      inputs.CancelByUser();
+      Assert.Equal(
+        "recognition.cancelled",
+        await waiter.Task.WaitAsync(
+          TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+
+      waiter = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+      WorkbenchCommandOutcome retry = await handler.ExecuteAsync(
+        new CaptureRecognitionScreenCommand(),
+        TestContext.Current.CancellationToken);
+      Assert.Null(retry.Error);
+      inputs.CancelByUser();
+      Assert.Equal(
+        "recognition.cancelled",
+        await waiter.Task.WaitAsync(
+          TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+      Assert.Equal(2, inputs.CaptureCalls);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task ToolbarFailuresKeepOldStateAndSurfaceErrors()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-shell-actions-{Guid.NewGuid():N}");
+    string resourceRoot = Path.Combine(root, "resources");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      (ShellActionDispatcher dispatcher, _, List<FloatingToolbarSettings> applied, _) =
+        CreateShellActions(
+          root,
+          applyOverride: _ => "无法保存悬浮工具栏设置，原设置已保留：disk full",
+          showOverride: () => "悬浮工具栏已关闭，请先在设置中启用。");
+      var settings = new SettingsViewModel(new CompletedRecognitionInferenceClient());
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => settings,
+        CreateShellViewModel,
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker,
+        resourceRoot,
+        static () => 0,
+        annotationStore,
+        shellActions: dispatcher);
+
+      WorkbenchCommandOutcome failed = await handler.ExecuteAsync(
+        new SetFloatingToolbarEnabledCommand(true),
+        TestContext.Current.CancellationToken);
+      var failedState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(failed.States));
+      Assert.Contains("原设置已保留", failedState.FloatingToolbar!.Error);
+      // 保存失败保旧：偏好未应用、未记录。
+      Assert.False(failedState.FloatingToolbar.Enabled);
+      Assert.Empty(applied);
+
+      // 已关闭时 Show 必须显式报错，不得看似成功。
+      WorkbenchCommandOutcome shown = await handler.ExecuteAsync(
+        new ShowFloatingToolbarCommand(),
+        TestContext.Current.CancellationToken);
+      var shownState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(shown.States));
+      Assert.Contains("请先在设置中启用", shownState.FloatingToolbar!.Error);
+
+      // 成功应用后错误清空。
+      string healthyRoot = Path.Combine(root, "healthy");
+      Directory.CreateDirectory(healthyRoot);
+      (ShellActionDispatcher healthy, _, List<FloatingToolbarSettings> healthyApplied, _) =
+        CreateShellActions(healthyRoot);
+      // 重新接线一个健康 handler 验证错误不残留：直接调用同一 dispatcher。
+      await using var healthyHandler = new DesktopWorkbenchCommandHandler(
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => settings,
+        CreateShellViewModel,
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker,
+        resourceRoot,
+        static () => 0,
+        annotationStore,
+        shellActions: healthy);
+      WorkbenchCommandOutcome ok = await healthyHandler.ExecuteAsync(
+        new SetFloatingToolbarEnabledCommand(true),
+        TestContext.Current.CancellationToken);
+      var okState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(ok.States));
+      Assert.True(okState.FloatingToolbar!.Enabled);
+      Assert.Equal(string.Empty, okState.FloatingToolbar.Error);
+      Assert.Single(healthyApplied);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  private static ShellViewModel CreateShellViewModel() =>
+    new(new NoopHotkeyRegistrar(), new NoopStartupRegistrar());
+
+  private static (ShellActionDispatcher Dispatcher, WindowsHotkeyRegistrar Registrar, List<FloatingToolbarSettings> Applied, TrackingSuspension Suspension) CreateShellActions(
+    string root,
+    Func<FloatingToolbarSettings, string?>? applyOverride = null,
+    Func<string?>? showOverride = null,
+    Func<string?>? hideOverride = null)
+  {
+    PortableLayout layout = PortableLayout.Resolve(
+      Path.Combine(root, "VibeOCR.Next.exe"),
+      "production");
+    layout.EnsurePortableState();
+    var registrar = new WindowsHotkeyRegistrar(
+      new GlobalHotkeyService(new AcceptingHotkeyNative()),
+      layout);
+    var applied = new List<FloatingToolbarSettings>();
+    FloatingToolbarSettings current = FloatingToolbarSettings.Default with { Enabled = false };
+    var suspension = new TrackingSuspension();
+    var dispatcher = new ShellActionDispatcher(
+      () => registrar,
+      new Dictionary<string, Func<Task>>(StringComparer.Ordinal),
+      () => current,
+      () => FloatingToolbarVisibility.Visible,
+      next =>
+      {
+        string? error = applyOverride?.Invoke(next);
+        if (error is not null)
+        {
+          // 保存失败保旧：不应用也不记录。
+          return error;
+        }
+
+        current = next;
+        applied.Add(next);
+        return null;
+      },
+      showOverride ?? (() => null),
+      hideOverride ?? (() => null),
+      () => suspension.Suspend());
+    return (dispatcher, registrar, applied, suspension);
+  }
+
+  private sealed class NoopHotkeyRegistrar : IHotkeyRegistrar
+  {
+    public bool Register(string hotkey, out string? conflict)
+    {
+      conflict = null;
+      return true;
+    }
+
+    public void Unregister()
+    {
+    }
+  }
+
+  private sealed class NoopStartupRegistrar : IStartupRegistrar
+  {
+    public bool SetEnabled(bool enabled) => true;
+  }
+
+  private sealed class TrackingSuspension : IDisposable
+  {
+    private int active;
+
+    public int ResumedCount { get; private set; }
+
+    public bool Active => Volatile.Read(ref active) > 0;
+
+    public IDisposable Suspend()
+    {
+      Interlocked.Increment(ref active);
+      return this;
+    }
+
+    public void Dispose()
+    {
+      Interlocked.Decrement(ref active);
+      ResumedCount++;
+    }
+  }
+
+  private sealed class AcceptingHotkeyNative : IHotkeyNativeMethods
+  {
+    private readonly HashSet<int> activeIds = [];
+
+    public bool Register(nint windowHandle, int id, HotkeyModifiers modifiers, uint virtualKey) =>
+      activeIds.Add(id);
+
+    public bool Unregister(nint windowHandle, int id) => activeIds.Remove(id);
+  }
+
+  /// <summary>
+  /// 选区不结束的输入服务：模拟选区窗口打开，由测试决定何时取消；
+  /// 统计 CaptureScreenAsync 调用次数验证单飞 guard。
+  /// </summary>
+  private sealed class BlockingCaptureInputService : IInputService
+  {
+    private readonly TaskCompletionSource<RecognitionInput?> completion = new(
+      TaskCreationOptions.RunContinuationsAsynchronously);
+    private int captureCalls;
+
+    public int CaptureCalls => captureCalls;
+
+    public void CancelByUser() => completion.TrySetResult(null);
+
+    public Task<RecognitionInput?> PickFileAsync(CancellationToken cancellationToken) =>
+      completion.Task;
+
+    public Task<RecognitionInput?> ReadClipboardAsync(CancellationToken cancellationToken) =>
+      completion.Task;
+
+    public Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken)
+    {
+      Interlocked.Increment(ref captureCalls);
+      return completion.Task;
+    }
+
+    public Task<RecognitionInput?> ReadDroppedFileAsync(
+      string path, CancellationToken cancellationToken) => completion.Task;
   }
 }

@@ -2,6 +2,25 @@ using VibeOCR.Platform.Windows;
 
 namespace VibeOCR.App.Features.FloatingToolbar;
 
+/// <summary>悬浮工具栏对用户呈现的可见档位，供设置页展示业务文案。</summary>
+internal enum FloatingToolbarVisibility
+{
+    /// <summary>已关闭（Enabled=false，无窗口与感应条）。</summary>
+    Disabled,
+
+    /// <summary>用户主动隐藏：感应条撤防，鼠标路过不恢复。</summary>
+    UserHidden,
+
+    /// <summary>靠边自动收起：感应条贴边，悬停可揭示。</summary>
+    EdgeHidden,
+
+    /// <summary>显示中（停靠或浮动）。</summary>
+    Visible,
+
+    /// <summary>截图避让中，结束后恢复此前状态。</summary>
+    Suspended,
+}
+
 /// <summary>悬浮工具栏窗口的行为契约，供控制器注入与测试。</summary>
 internal interface IFloatingToolbarView : IDisposable
 {
@@ -41,8 +60,9 @@ internal interface IFloatingToolbarDelayTimer : IDisposable
 /// <summary>
 /// 悬浮工具栏状态机：Hidden（感应条贴边）⇄ Revealed（工具栏显示，鼠标
 /// 离开 linger 超时收回）⇄ Dragging（拖动，松手吸附或自由浮动），外加
-/// PinnedDocked/PinnedFloating（auto_hide=false 常显）与 Suspended（截图
-/// 期间临时让位）。全部转换由窗口消息/指针事件驱动，空闲零轮询。
+/// PinnedDocked/PinnedFloating（auto_hide=false 常显）、UserHidden（用户
+/// 主动隐藏，感应条撤防、鼠标路过不恢复）与 Suspended（截图期间临时
+/// 让位）。全部转换由窗口消息/指针事件驱动，空闲零轮询。
 /// </summary>
 internal sealed class FloatingToolbarController : IDisposable
 {
@@ -55,6 +75,7 @@ internal sealed class FloatingToolbarController : IDisposable
         PinnedFloating,
         PinnedDocked,
         Suspended,
+        UserHidden,
     }
 
     private readonly IFloatingToolbarView _view;
@@ -104,6 +125,21 @@ internal sealed class FloatingToolbarController : IDisposable
 
     internal FloatingToolbarSettings Settings => _settings;
 
+    /// <summary>当前对用户呈现的可见档位（Inactive 归为已关闭）。</summary>
+    internal FloatingToolbarVisibility Visibility => ToVisibility(_state);
+
+    internal static FloatingToolbarVisibility ToVisibility(ToolbarState state) => state switch
+    {
+        ToolbarState.Hidden => FloatingToolbarVisibility.EdgeHidden,
+        ToolbarState.UserHidden => FloatingToolbarVisibility.UserHidden,
+        ToolbarState.Suspended => FloatingToolbarVisibility.Suspended,
+        ToolbarState.Revealed
+            or ToolbarState.Dragging
+            or ToolbarState.PinnedFloating
+            or ToolbarState.PinnedDocked => FloatingToolbarVisibility.Visible,
+        _ => FloatingToolbarVisibility.Disabled,
+    };
+
     /// <summary>当前贴边的感应条句柄；未启用或已揭示时为 0。</summary>
     internal nint ArmedSensorHandle =>
         _sensor is { IsArmed: true } sensor ? sensor.Handle : 0;
@@ -116,7 +152,13 @@ internal sealed class FloatingToolbarController : IDisposable
         }
 
         _dockedMonitor = _primaryMonitor();
-        if (_settings.AutoHide)
+        if (_settings.HiddenByUser)
+        {
+            // 重启后保持主动隐藏：不布防感应条，鼠标路过不得恢复。
+            _view.Hide();
+            _state = ToolbarState.UserHidden;
+        }
+        else if (_settings.AutoHide)
         {
             HideToEdge();
         }
@@ -138,10 +180,16 @@ internal sealed class FloatingToolbarController : IDisposable
         _state = ToolbarState.Inactive;
     }
 
-    /// <summary>截图流程前临时让位，避免工具栏被截入选区背景。</summary>
+    /// <summary>
+    /// 截图流程前临时让位，避免工具栏被截入选区背景。从 Hidden
+    /// （感应条贴边）或 UserHidden 进入时同样撤防感应条，保证截图与
+    /// 截图期间都不会被感应恢复；结束后 Resume 恢复此前状态。
+    /// </summary>
     public void Suspend()
     {
-        if (_state is not (ToolbarState.Revealed
+        if (_state is not (ToolbarState.Hidden
+            or ToolbarState.UserHidden
+            or ToolbarState.Revealed
             or ToolbarState.PinnedFloating
             or ToolbarState.PinnedDocked))
         {
@@ -151,6 +199,7 @@ internal sealed class FloatingToolbarController : IDisposable
         _suspendedState = _state;
         _suspendedBounds = _view.GetBounds();
         _lingerTimer?.Stop();
+        _sensor?.Disarm();
         _view.Hide();
         _state = ToolbarState.Suspended;
     }
@@ -162,14 +211,23 @@ internal sealed class FloatingToolbarController : IDisposable
             return;
         }
 
-        if (_suspendedState == ToolbarState.PinnedFloating)
+        // 浮动常显位优先原位恢复；避让期间改为主动隐藏则不重现。
+        if (_suspendedState == ToolbarState.PinnedFloating && !_settings.HiddenByUser)
         {
             _view.ShowAt(_suspendedBounds);
             _state = ToolbarState.PinnedFloating;
+            return;
+        }
+
+        // 其余避让前状态（含主动隐藏）一律以当前设置为准恢复：主动隐藏
+        // 保持隐藏；自动收起重布防感应条；auto_hide=false 恢复停靠常显。
+        // 不强制显示。
+        if (_settings.HiddenByUser)
+        {
+            _state = ToolbarState.UserHidden;
         }
         else if (_settings.AutoHide)
         {
-            // Revealed 恢复时鼠标多半已离开，直接收回边缘重新布防。
             HideToEdge();
         }
         else
@@ -198,6 +256,78 @@ internal sealed class FloatingToolbarController : IDisposable
         }
     }
 
+    /// <summary>
+    /// 用户主动隐藏：感应条一并撤防，鼠标路过不恢复，托盘/设置/快捷键经
+    /// Show/Toggle 找回；偏好持久化，重启保持。
+    /// </summary>
+    public void Hide()
+    {
+        if (_state is not (ToolbarState.Hidden
+            or ToolbarState.Revealed
+            or ToolbarState.PinnedFloating
+            or ToolbarState.PinnedDocked))
+        {
+            return;
+        }
+
+        _lingerTimer?.Stop();
+        _sensor?.Disarm();
+        _view.Hide();
+        _state = ToolbarState.UserHidden;
+        PersistHiddenByUser(hidden: true);
+    }
+
+    /// <summary>显式显示：从主动隐藏找回，或从自动收起态直接揭示。</summary>
+    public void Show()
+    {
+        switch (_state)
+        {
+            case ToolbarState.UserHidden:
+            case ToolbarState.Hidden:
+                PersistHiddenByUser(hidden: false);
+                if (_settings.AutoHide)
+                {
+                    _sensor?.Disarm();
+                    ShowDocked(ToolbarState.Revealed);
+                }
+                else
+                {
+                    ShowDocked(ToolbarState.PinnedDocked);
+                }
+
+                break;
+            case ToolbarState.Revealed:
+            case ToolbarState.PinnedFloating:
+            case ToolbarState.PinnedDocked:
+            case ToolbarState.Dragging:
+                PersistHiddenByUser(hidden: false);
+                break;
+            default:
+                // Inactive（Enabled=false 永久关闭）与 Suspended（截图避让）
+                // 不响应；Resume 按此前状态恢复。
+                break;
+        }
+    }
+
+    /// <summary>显式切换：主动隐藏态找回，其余活跃态进入主动隐藏。</summary>
+    public void Toggle()
+    {
+        switch (_state)
+        {
+            case ToolbarState.UserHidden:
+                Show();
+                break;
+            case ToolbarState.Hidden:
+            case ToolbarState.Revealed:
+            case ToolbarState.PinnedFloating:
+            case ToolbarState.PinnedDocked:
+                Hide();
+                break;
+            default:
+                break;
+        }
+    }
+
     internal void ApplySettings(FloatingToolbarSettings next)
     {
         ArgumentNullException.ThrowIfNull(next);
@@ -213,6 +343,35 @@ internal sealed class FloatingToolbarController : IDisposable
         if (wasInactive)
         {
             Start();
+            return;
+        }
+
+        if (_state == ToolbarState.UserHidden)
+        {
+            if (!next.HiddenByUser)
+            {
+                // 实时设置取消主动隐藏：回到正常自动收起/停靠行为。
+                if (next.AutoHide)
+                {
+                    HideToEdge();
+                }
+                else
+                {
+                    ShowDocked(ToolbarState.PinnedDocked);
+                }
+            }
+
+            return;
+        }
+
+        if (next.HiddenByUser
+            && _state is not (ToolbarState.Suspended or ToolbarState.Dragging))
+        {
+            // 实时设置主动隐藏：与 Hide() 同语义。
+            _lingerTimer?.Stop();
+            _sensor?.Disarm();
+            _view.Hide();
+            _state = ToolbarState.UserHidden;
             return;
         }
 
@@ -388,10 +547,21 @@ internal sealed class FloatingToolbarController : IDisposable
 
                 break;
             default:
-                // Revealed/Dragging/PinnedFloating/Suspended：位置已就绪，
-                // 后续自然转换按新设置执行。
+                // Revealed/Dragging/PinnedFloating/Suspended/UserHidden：位置
+                // 已就绪或无可见窗口，后续自然转换按新设置执行。
                 break;
         }
+    }
+
+    private void PersistHiddenByUser(bool hidden)
+    {
+        if (_settings.HiddenByUser == hidden)
+        {
+            return;
+        }
+
+        _settings = _settings with { HiddenByUser = hidden };
+        _persist(_settings);
     }
 
     private IEdgeSensor EnsureSensor()

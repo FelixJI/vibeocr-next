@@ -216,7 +216,6 @@ public sealed class SelectionUiTests
             "settings.ready",
             "cpu",
             false,
-            "Ctrl+Alt+Q",
             [new SettingsSourceOptionState("package_index", "tuna-pypi", "TUNA", true)],
             "nvidia_cuda",
             true,

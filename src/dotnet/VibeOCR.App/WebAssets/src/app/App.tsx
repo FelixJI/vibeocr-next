@@ -140,7 +140,8 @@ export function App({
             viewState.commandProblem ===
               "workbench.error.annotationOperationCancelled" ||
             viewState.commandProblem ===
-              "workbench.error.screenshotSessionStale"
+              "workbench.error.screenshotSessionStale" ||
+            viewState.commandProblem === "workbench.error.captureInProgress"
               ? "warning"
               : "error"
           }
@@ -155,7 +156,10 @@ export function App({
                 : viewState.commandProblem ===
                     "workbench.error.screenshotSessionStale"
                   ? "截图会话已更新"
-                  : "操作未完成"}
+                  : viewState.commandProblem ===
+                      "workbench.error.captureInProgress"
+                    ? "已有截图选区进行中"
+                    : "操作未完成"}
             </MessageBarTitle>
             {commandProblemLabel(viewState.commandProblem)}
           </MessageBarBody>
@@ -177,6 +181,8 @@ function commandProblemLabel(messageKey: string): string {
       "未保存标注图片；原图和当前识别结果均未改变。",
     "workbench.error.screenshotSessionStale":
       "截图内容或会话已更新；请在新画面上重试复制、保存或识别。",
+    "workbench.error.captureInProgress":
+      "已有截图选区正在进行中；请先完成或取消当前选区，再重新触发。",
   };
   return messages[messageKey] ?? "当前操作被原生宿主拒绝，请检查状态后重试。";
 }

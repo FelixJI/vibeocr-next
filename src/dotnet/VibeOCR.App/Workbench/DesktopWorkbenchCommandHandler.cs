@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text;
 using VibeOCR.App.Features.Batch;
+using VibeOCR.App.Features.FloatingToolbar;
 using VibeOCR.App.Features.Pdf;
 using VibeOCR.App.Features.QrCode;
 using VibeOCR.App.Features.Recognition;
@@ -47,6 +48,8 @@ public sealed class DesktopWorkbenchCommandHandler :
       "about.openProject",
       "runtime.refresh",
       "settings.shell",
+      "settings.hotkeys",
+      "settings.floatingToolbar",
       "settings.selection",
       "runtime.maintenance",
       "recognition.engine",
@@ -70,6 +73,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private readonly WorkbenchAnnotationStore annotationStore;
   private readonly IAnnotatedImagePlatform annotatedImagePlatform;
   private readonly Func<bool>? inferenceAttached;
+  private readonly ShellActionDispatcher? shellActions;
   private readonly List<string> generatedFiles = [];
   private readonly HashSet<Task> backgroundOperations = [];
   private readonly HashSet<int> selectedPdfPages = [];
@@ -80,6 +84,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private long screenshotSessionRevision;
   private WorkbenchResourceReference? screenshotSessionInput;
   private WorkbenchResourceReference? screenshotSessionResult;
+  private int captureInFlight;
   private BatchViewModel? batch;
   private string? batchTaskEngine;
   private QrCodeViewModel? qrCode;
@@ -96,7 +101,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private int pdfWindowStart;
   private int disposed;
 
-  public DesktopWorkbenchCommandHandler(
+  internal DesktopWorkbenchCommandHandler(
     Func<RecognitionViewModel> recognitionFactory,
     Func<BatchViewModel> batchFactory,
     Func<QrCodeViewModel> qrCodeFactory,
@@ -110,7 +115,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     Func<nint> windowHandle,
     WorkbenchAnnotationStore annotationStore,
     IAnnotatedImagePlatform? annotatedImagePlatform = null,
-    Func<bool>? inferenceAttached = null)
+    Func<bool>? inferenceAttached = null,
+    ShellActionDispatcher? shellActions = null)
   {
     this.recognitionFactory = recognitionFactory ??
       throw new ArgumentNullException(nameof(recognitionFactory));
@@ -139,6 +145,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     this.annotatedImagePlatform = annotatedImagePlatform ??
       new AnnotatedImagePlatform(this.windowHandle);
     this.inferenceAttached = inferenceAttached;
+    this.shellActions = shellActions;
   }
 
   public IReadOnlyList<WorkbenchState> InitialStates =>
@@ -147,15 +154,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     CurrentBatchState(),
     new PdfWorkbenchState(false, "pdf.empty", 0, -1),
     new QrCodeWorkbenchState(false, "qrcode.ready", [], null),
-    settings is null ? new SettingsWorkbenchState(
-      theme,
-      false,
-      "settings.ready",
-      "unknown",
-      shell.Value.StartWithSystem,
-      shell.Value.RegisteredHotkey,
-      HotkeyStatus: shell.Value.HotkeyStatus,
-      PendingHotkey: shell.Value.PendingHotkey) : SettingsState(settings),
+    settings is null ? SettingsShellState() : SettingsState(settings),
     new UpdateWorkbenchState(false, "update.current", null, false),
     AboutState(),
     DiagnosticsState(),
@@ -200,7 +199,8 @@ public sealed class DesktopWorkbenchCommandHandler :
           cancellationToken),
         CaptureRecognitionScreenCommand => StartRecognition(
           viewModel => viewModel.RecognizeScreenshotAsync(cancellationToken),
-          cancellationToken),
+          cancellationToken,
+          screenCapture: true),
         CaptureScreenshotSessionCommand => StartScreenshotSession(cancellationToken),
         CloseScreenshotSessionCommand => CloseScreenshotSession(),
         NotifyScreenshotSessionRevisionCommand notify => NotifyScreenshotRevision(notify),
@@ -281,7 +281,14 @@ public sealed class DesktopWorkbenchCommandHandler :
         RefreshRuntimeCommand => await RefreshRuntimeAsync(cancellationToken),
         SetThemeCommand setTheme => SetTheme(setTheme),
         SetStartupCommand startup => SetStartup(startup),
-        SetHotkeyCommand hotkey => SetHotkey(hotkey),
+        SetActionHotkeyCommand setActionHotkey => SetActionHotkey(setActionHotkey),
+        ResetActionHotkeyCommand resetActionHotkey => ResetActionHotkey(resetActionHotkey),
+        SetFloatingToolbarEnabledCommand toolbarEnabled => SetFloatingToolbarEnabled(
+          toolbarEnabled),
+        SetFloatingToolbarLayoutCommand toolbarLayout => SetFloatingToolbarLayout(
+          toolbarLayout),
+        ShowFloatingToolbarCommand => ShowFloatingToolbar(),
+        HideFloatingToolbarCommand => HideFloatingToolbar(),
         SetDownloadSourceCommand source => await SetSourceAsync(
           source,
           cancellationToken),
@@ -331,6 +338,16 @@ public sealed class DesktopWorkbenchCommandHandler :
           WorkbenchProblemCategory.Conflict,
           false,
           "workbench.error.screenshotSessionStale"));
+    }
+    catch (CaptureInProgressException)
+    {
+      return new WorkbenchCommandOutcome(
+        [],
+        new WorkbenchProblem(
+          "capture_in_progress",
+          WorkbenchProblemCategory.Conflict,
+          false,
+          "workbench.error.captureInProgress"));
     }
     catch (Exception error) when (
       error is IOException or UnauthorizedAccessException or InvalidOperationException or
@@ -414,6 +431,13 @@ public sealed class DesktopWorkbenchCommandHandler :
   private RecognitionWorkbenchState? StartScreenshotSession(CancellationToken cancellationToken)
   {
     recognition ??= recognitionFactory();
+    // 截图单飞：任一截图入口（主窗/热键/悬浮栏/页面按钮）同时只允许一个
+    // 选区会话；重复触发立即拒绝，取消/失败后 guard 释放可重试。
+    if (Interlocked.Exchange(ref captureInFlight, 1) != 0)
+    {
+      throw new CaptureInProgressException();
+    }
+
     long generation = Interlocked.Increment(ref recognitionGeneration);
     // 新捕获立即取代旧会话：选取期间旧会话命令一律失效，
     // 换图/重复点击不会把旧图或旧修订带入新会话。
@@ -429,40 +453,47 @@ public sealed class DesktopWorkbenchCommandHandler :
     long generation,
     CancellationToken cancellationToken)
   {
+    // 所有截图入口（主窗/热键/悬浮栏）统一让位：截图期间工具栏与感应条
+    // 均不入画面；结束后恢复原态。无论成功、取消或失败都释放单飞 guard。
     try
     {
-      // 纯截图路径：不加载 Runtime 目录（EnsureSelectionLoadedAsync）、
-      // 不做 requireUsable 模式协商；Supervisor 未连接/维护中同样可完成。
-      await recognition!.CaptureScreenshotSessionAsync(cancellationToken);
-      if (generation != Volatile.Read(ref recognitionGeneration))
+      using (shellActions?.SuspendFloatingToolbarForCapture())
       {
-        return;
-      }
-      if (recognition.CurrentInput is { } captured)
-      {
-        WorkbenchResourceReference input = await PublishBytesAsync(
-          captured.Data,
-          captured.MediaType,
-          ExtensionForMediaType(captured.MediaType),
-          cancellationToken);
-        // PublishBytesAsync 期间取消/新截图会推进 generation：
-        // 旧捕获完成不得复活已被取代的会话。
+        // 纯截图路径：不加载 Runtime 目录（EnsureSelectionLoadedAsync）、
+        // 不做 requireUsable 模式协商；Supervisor 未连接/维护中同样可完成。
+        await recognition!.CaptureScreenshotSessionAsync(cancellationToken);
         if (generation != Volatile.Read(ref recognitionGeneration))
         {
           return;
         }
-        screenshotSessionId = Guid.NewGuid();
-        screenshotSessionRevision = 0;
-        screenshotSessionInput = input;
-        screenshotSessionResult = null;
-        StateChanged?.Invoke(SessionRecognitionState(false, "recognition.session"));
-      }
-      else
-      {
-        // 用户在选区界面取消：不残留会话与遮罩状态；此前的文件输入保持可见。
-        StateChanged?.Invoke(await CurrentRecognitionStateAsync(
-          "recognition.cancelled",
-          cancellationToken));
+
+        if (recognition.CurrentInput is { } captured)
+        {
+          WorkbenchResourceReference input = await PublishBytesAsync(
+            captured.Data,
+            captured.MediaType,
+            ExtensionForMediaType(captured.MediaType),
+            cancellationToken);
+          // PublishBytesAsync 期间取消/新截图会推进 generation：
+          // 旧捕获完成不得复活已被取代的会话。
+          if (generation != Volatile.Read(ref recognitionGeneration))
+          {
+            return;
+          }
+
+          screenshotSessionId = Guid.NewGuid();
+          screenshotSessionRevision = 0;
+          screenshotSessionInput = input;
+          screenshotSessionResult = null;
+          StateChanged?.Invoke(SessionRecognitionState(false, "recognition.session"));
+        }
+        else
+        {
+          // 用户在选区界面取消：不残留会话与遮罩状态；此前的文件输入保持可见。
+          StateChanged?.Invoke(await CurrentRecognitionStateAsync(
+            "recognition.cancelled",
+            cancellationToken));
+        }
       }
     }
     catch (OperationCanceledException)
@@ -481,6 +512,10 @@ public sealed class DesktopWorkbenchCommandHandler :
       {
         StateChanged?.Invoke(SessionRecognitionState(false, "recognition.failed"));
       }
+    }
+    finally
+    {
+      Interlocked.Exchange(ref captureInFlight, 0);
     }
   }
 
@@ -678,16 +713,28 @@ public sealed class DesktopWorkbenchCommandHandler :
 
   private RecognitionWorkbenchState? StartRecognition(
     Func<RecognitionViewModel, Task> action,
-    CancellationToken cancellationToken)
+    CancellationToken cancellationToken,
+    bool screenCapture = false)
   {
     recognition ??= recognitionFactory();
+    // 截图类输入与其他入口共用单飞 guard：选区进行中重复触发（同动作或
+    // 跨纯截图/识别）立即拒绝，取消/失败后可重试。
+    if (screenCapture && Interlocked.Exchange(ref captureInFlight, 1) != 0)
+    {
+      throw new CaptureInProgressException();
+    }
+
     long generation = Interlocked.Increment(ref recognitionGeneration);
     // 新输入（文件/剪贴板/拖入/即时截图识别）取代截图会话：
     // 旧会话命令立即失效，避免旧图混入新输入。
     ClearScreenshotSession();
     return PublishStartThenTrack(
       RecognitionState(true, "recognition.running"),
-      () => CompleteRecognitionAsync(action, generation, cancellationToken));
+      () => CompleteRecognitionAsync(
+        action,
+        generation,
+        cancellationToken,
+        screenCapture));
   }
 
   private RecognitionWorkbenchState RecognitionState(
@@ -743,35 +790,42 @@ public sealed class DesktopWorkbenchCommandHandler :
   private async Task CompleteRecognitionAsync(
     Func<RecognitionViewModel, Task> action,
     long generation,
-    CancellationToken cancellationToken)
+    CancellationToken cancellationToken,
+    bool screenCapture)
   {
+    // 截图入口（主窗/热键/悬浮栏）统一让位悬浮工具栏；非截图输入不受影响。
+    // 无论成功、取消或失败都释放截图单飞 guard，保证可重试。
     try
     {
-      bool deferredSelection = !await EnsureSelectionLoadedAsync(cancellationToken);
-      SynchronizeRecognitionMode(requireUsable: true);
-      RecognitionWorkbenchState state = await RunRecognitionAsync(action, cancellationToken);
-      if (deferredSelection)
+      using (screenCapture ? shellActions?.SuspendFloatingToolbarForCapture() : null)
       {
-        // The run started before the Supervisor attached; its submit already
-        // waited for readiness, so the authoritative catalog can load now and
-        // the completion state carries the engine list.
-        try
+        bool deferredSelection = !await EnsureSelectionLoadedAsync(cancellationToken);
+        SynchronizeRecognitionMode(requireUsable: true);
+        RecognitionWorkbenchState state = await RunRecognitionAsync(action, cancellationToken);
+        if (deferredSelection)
         {
-          await EnsureSelectionLoadedAsync(cancellationToken);
-          state = state with { Engines = RecognitionEngines() };
+          // The run started before the Supervisor attached; its submit already
+          // waited for readiness, so the authoritative catalog can load now and
+          // the completion state carries the engine list.
+          try
+          {
+            await EnsureSelectionLoadedAsync(cancellationToken);
+            state = state with { Engines = RecognitionEngines() };
+          }
+          catch (OperationCanceledException)
+          {
+            throw;
+          }
+          catch (Exception)
+          {
+            // 本次识别已完成；目录补载失败只影响引擎列表，不推翻结果。
+          }
         }
-        catch (OperationCanceledException)
+
+        if (generation == Volatile.Read(ref recognitionGeneration))
         {
-          throw;
+          StateChanged?.Invoke(state);
         }
-        catch (Exception)
-        {
-          // 本次识别已完成；目录补载失败只影响引擎列表，不推翻结果。
-        }
-      }
-      if (generation == Volatile.Read(ref recognitionGeneration))
-      {
-        StateChanged?.Invoke(state);
       }
     }
     catch (OperationCanceledException)
@@ -789,6 +843,13 @@ public sealed class DesktopWorkbenchCommandHandler :
       if (generation == Volatile.Read(ref recognitionGeneration))
       {
         StateChanged?.Invoke(new RecognitionWorkbenchState(false, "recognition.failed"));
+      }
+    }
+    finally
+    {
+      if (screenCapture)
+      {
+        Interlocked.Exchange(ref captureInFlight, 0);
       }
     }
   }
@@ -1388,17 +1449,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private SettingsWorkbenchState SetTheme(SetThemeCommand command)
   {
     theme = command.Theme;
-    return settings is null
-      ? new SettingsWorkbenchState(
-        theme,
-        false,
-        "settings.ready",
-        "unknown",
-        shell.Value.StartWithSystem,
-        shell.Value.RegisteredHotkey,
-        HotkeyStatus: shell.Value.HotkeyStatus,
-        PendingHotkey: shell.Value.PendingHotkey)
-      : SettingsState(settings);
+    return settings is null ? SettingsShellState() : SettingsState(settings);
   }
 
   private SettingsWorkbenchState SetStartup(SetStartupCommand command)
@@ -1408,13 +1459,77 @@ public sealed class DesktopWorkbenchCommandHandler :
     return SettingsState(settings);
   }
 
-  private SettingsWorkbenchState SetHotkey(SetHotkeyCommand command)
+  /// <summary>
+  /// 动作键位设置：结果（成功/冲突/保存失败及当前实际注册状态）以设置页
+  /// 的动作状态列表回显，命令本身不因键位被拒而报协议错误。
+  /// </summary>
+  private SettingsWorkbenchState SetActionHotkey(SetActionHotkeyCommand command)
   {
     settings ??= CreateSettings();
-    shell.Value.PendingHotkey = command.Hotkey;
-    shell.Value.ApplyHotkey();
+    ShellActions().TrySetHotkeyAction(command.ActionId, command.Hotkey, out _);
     return SettingsState(settings);
   }
+
+  private SettingsWorkbenchState ResetActionHotkey(ResetActionHotkeyCommand command)
+  {
+    settings ??= CreateSettings();
+    ShellActions().ResetHotkeyAction(command.ActionId, out _);
+    return SettingsState(settings);
+  }
+
+  private SettingsWorkbenchState SetFloatingToolbarEnabled(
+    SetFloatingToolbarEnabledCommand command)
+  {
+    settings ??= CreateSettings();
+    ShellActionDispatcher actions = ShellActions();
+    FloatingToolbarSettings current = actions.ToolbarSettings;
+    string? error = current.Enabled == command.Enabled
+      ? null
+      : ApplyToolbar(actions, current with { Enabled = command.Enabled });
+    return SettingsState(settings, error);
+  }
+
+  private SettingsWorkbenchState SetFloatingToolbarLayout(
+    SetFloatingToolbarLayoutCommand command)
+  {
+    settings ??= CreateSettings();
+    ShellActionDispatcher actions = ShellActions();
+    FloatingToolbarSettings current = actions.ToolbarSettings;
+    string? error = current.Edge == command.Edge && current.AutoHide == command.AutoHide
+      ? null
+      : ApplyToolbar(actions, current with
+      {
+        Edge = command.Edge,
+        AutoHide = command.AutoHide,
+      });
+    return SettingsState(settings, error);
+  }
+
+  private SettingsWorkbenchState ShowFloatingToolbar()
+  {
+    settings ??= CreateSettings();
+    ShellActions().TryShowFloatingToolbar(out string? error);
+    return SettingsState(settings, error);
+  }
+
+  private SettingsWorkbenchState HideFloatingToolbar()
+  {
+    settings ??= CreateSettings();
+    ShellActions().TryHideFloatingToolbar(out string? error);
+    return SettingsState(settings, error);
+  }
+
+  /// <summary>
+  /// 应用悬浮工具栏偏好：保存失败保旧并显式回显错误，不很报成功。
+  /// </summary>
+  private static string? ApplyToolbar(
+    ShellActionDispatcher actions,
+    FloatingToolbarSettings next) =>
+    actions.TryApplyFloatingToolbar(next, out string? error) ? null : error;
+
+  private ShellActionDispatcher ShellActions() =>
+    shellActions ?? throw new InvalidOperationException(
+      "Shell actions are unavailable in this mode.");
 
   private async Task<SettingsWorkbenchState> SetSourceAsync(
     SetDownloadSourceCommand command,
@@ -1900,13 +2015,55 @@ public sealed class DesktopWorkbenchCommandHandler :
       items);
   }
 
-  private SettingsWorkbenchState SettingsState(SettingsViewModel viewModel) => new(
+  private SettingsWorkbenchState SettingsShellState() => new(
+    theme,
+    false,
+    "settings.ready",
+    "unknown",
+    shell.Value.StartWithSystem,
+    Sources: [],
+    HotkeyActions: HotkeyActionStates(),
+    FloatingToolbar: ToolbarProjection());
+
+  private IReadOnlyList<SettingsHotkeyActionState> HotkeyActionStates() =>
+    shellActions is null
+      ? []
+      : [.. shellActions.GetHotkeyActions().Select(status => new SettingsHotkeyActionState(
+        status.ActionId,
+        status.DisplayName,
+        status.ConfiguredHotkey,
+        status.RegisteredHotkey,
+        status.Error,
+        HotkeyActionCatalog.DefaultBinding(status.ActionId)))];
+
+  private SettingsFloatingToolbarState? ToolbarProjection(string? error = null) =>
+    shellActions is null
+      ? null
+      : new SettingsFloatingToolbarState(
+        shellActions.ToolbarSettings.Enabled,
+        FloatingToolbarSettings.EdgeName(shellActions.ToolbarSettings.Edge),
+        shellActions.ToolbarSettings.AutoHide,
+        FormatToolbarVisibility(shellActions.ToolbarVisibility),
+        error ?? "");
+
+  private static string FormatToolbarVisibility(FloatingToolbarVisibility visibility) =>
+    visibility switch
+    {
+      FloatingToolbarVisibility.UserHidden => "userHidden",
+      FloatingToolbarVisibility.EdgeHidden => "edgeHidden",
+      FloatingToolbarVisibility.Visible => "visible",
+      FloatingToolbarVisibility.Suspended => "suspended",
+      _ => "disabled",
+    };
+
+  private SettingsWorkbenchState SettingsState(
+    SettingsViewModel viewModel,
+    string? toolbarError = null) => new(
     theme,
     viewModel.IsBusy,
     viewModel.RestartRequired ? "settings.restartRequired" : "settings.ready",
     viewModel.Backend,
     shell.Value.StartWithSystem,
-    shell.Value.RegisteredHotkey,
     [.. viewModel.Sources.Select(source => new SettingsSourceOptionState(
       source.Kind,
       source.Id,
@@ -1919,8 +2076,8 @@ public sealed class DesktopWorkbenchCommandHandler :
       feature.DisplayName,
       feature.Accelerator,
       feature.Selected))],
-    HotkeyStatus: shell.Value.HotkeyStatus,
-    PendingHotkey: shell.Value.PendingHotkey,
+    HotkeyActions: HotkeyActionStates(),
+    FloatingToolbar: ToolbarProjection(toolbarError),
     Maintenance: new SettingsMaintenanceState(
       viewModel.Maintenance.State.IsRunning,
       viewModel.Maintenance.State.StatusCode,
@@ -2076,6 +2233,11 @@ public sealed class DesktopWorkbenchCommandHandler :
   }
 
   private sealed class ScreenshotSessionStaleException : Exception
+  {
+  }
+
+  /// <summary>另一个截图/选区会话仍在进行；命令层单飞 guard 拒绝重入。</summary>
+  private sealed class CaptureInProgressException : Exception
   {
   }
 }

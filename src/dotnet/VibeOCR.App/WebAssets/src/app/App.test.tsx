@@ -8,7 +8,7 @@ import { App, type AppActions, type AppViewState } from "./App";
 Object.assign(globalThis, { NodeFilter: { FILTER_SKIP: 3 } });
 
 describe("AppShell", () => {
-  it("shows startup hotkey conflicts and allows retrying the configured key", async () => {
+  it("shows per-action hotkey state and drives apply, disable and reset", async () => {
     window.location.hash = "#/settings";
     const user = userEvent.setup();
     const actions: AppActions = {
@@ -21,24 +21,129 @@ describe("AppShell", () => {
       revision: 1,
       route: "settings",
       theme: "light",
-      capabilities: ["settings.shell"],
+      capabilities: ["settings.shell", "settings.hotkeys"],
       runtimeLabel: "运行时已就绪",
       features: {
         settings: {
-          hotkey: "",
-          pendingHotkey: "Ctrl+Alt+Q",
-          hotkeyStatus: "快捷键冲突：已占用",
+          hotkeyActions: [
+            {
+              actionId: "screenshot_recognize",
+              displayName: "快捷截图识别",
+              configuredHotkey: "Ctrl+Alt+Q",
+              registeredHotkey: null,
+              error: "快捷键注册失败：该组合可能已被其他应用占用。",
+              defaultHotkey: "Ctrl+Alt+Q",
+            },
+            {
+              actionId: "clipboard_recognize",
+              displayName: "剪贴板识别",
+              configuredHotkey: null,
+              registeredHotkey: null,
+              error: null,
+              defaultHotkey: null,
+            },
+          ],
         },
       },
     };
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
-    expect(screen.getByText("快捷键冲突：已占用")).toBeVisible();
-    expect(screen.getByText("当前生效：未注册")).toBeVisible();
-    expect(screen.getByLabelText("截图快捷键")).toHaveValue("Ctrl+Alt+Q");
-    await user.click(screen.getByRole("button", { name: "应用" }));
+    // 配置已保存但未注册生效必须如实区分，不得冒称当前生效。
+    expect(
+      screen.getByText("已保存 Ctrl+Alt+Q，但当前未注册生效"),
+    ).toBeVisible();
+    expect(screen.getByText(/该组合可能已被其他应用占用/)).toBeVisible();
+    expect(
+      screen.getByText(/全局快捷键在系统任意位置可用/),
+    ).toBeVisible();
+
+    await user.type(
+      screen.getByLabelText("剪贴板识别新快捷键"),
+      "Ctrl+Alt+C",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "应用 剪贴板识别" }),
+    );
     expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.setHotkey",
-      hotkey: "Ctrl+Alt+Q",
+      type: "settings.setActionHotkey",
+      actionId: "clipboard_recognize",
+      hotkey: "Ctrl+Alt+C",
+    });
+
+    // 未绑定的动作不提供“禁用”；已保存键位的动作可恢复默认。
+    expect(
+      screen.getByRole("button", { name: "禁用 剪贴板识别" }),
+    ).toBeDisabled();
+    await user.click(
+      screen.getByRole("button", { name: "恢复默认 快捷截图识别" }),
+    );
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.resetActionHotkey",
+      actionId: "screenshot_recognize",
+    });
+    unmount();
+  });
+  it("drives the floating toolbar panel and describes its visibility state", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 2,
+      route: "settings",
+      theme: "light",
+      capabilities: ["settings.floatingToolbar"],
+      runtimeLabel: "运行时已就绪",
+      features: {
+        settings: {
+          floatingToolbar: {
+            enabled: true,
+            edge: "top",
+            autoHide: true,
+            visibility: "userHidden",
+          },
+        },
+      },
+    };
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    expect(
+      screen.getByText(/当前状态：已主动隐藏（鼠标路过不恢复）/),
+    ).toBeVisible();
+    expect(
+      screen.getByText(/可从本页、托盘菜单或“悬浮栏显示\/隐藏”快捷键找回/),
+    ).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "显示" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.showFloatingToolbar",
+    });
+    await user.click(screen.getByRole("button", { name: "隐藏" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.hideFloatingToolbar",
+    });
+    await user.selectOptions(screen.getByLabelText("靠边位置"), "left");
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setFloatingToolbarLayout",
+      edge: "left",
+      autoHide: true,
+    });
+    await user.click(
+      screen.getByRole("checkbox", { name: "鼠标离开后自动收起" }),
+    );
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setFloatingToolbarLayout",
+      edge: "top",
+      autoHide: false,
+    });
+    await user.click(
+      screen.getByRole("checkbox", { name: "启用悬浮工具栏" }),
+    );
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setFloatingToolbarEnabled",
+      enabled: false,
     });
     unmount();
   });

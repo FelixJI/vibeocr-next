@@ -61,6 +61,9 @@ public sealed class GlobalHotkeyService : IDisposable
         return registration;
     }
 
+    /// <summary>该 id 当前是否已注册（实际注册状态查询，供上层与测试读取）。</summary>
+    public bool IsRegistered(int id) => _registrations.ContainsKey(id);
+
     private void Release(int id)
     {
         if (_registrations.Remove(id))

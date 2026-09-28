@@ -8,20 +8,23 @@ namespace VibeOCR.App.Features.FloatingToolbar;
 
 /// <summary>
 /// app_settings.json 的 floating_toolbar 节点。默认关闭，不影响存量用户；
-/// 节点缺失或损坏时回退默认值且不改写文件。
+/// 节点缺失或损坏时回退默认值且不改写文件。hidden_by_user 记录用户主动
+/// 隐藏偏好（区别于靠边自动收起），重启后保持主动隐藏、不被感应条恢复；
+/// 旧配置无该字段时等价 false，保持兼容。
 /// </summary>
 internal sealed record FloatingToolbarSettings(
     bool Enabled,
     ScreenEdge Edge,
     bool AutoHide,
-    int LingerMs)
+    int LingerMs,
+    bool HiddenByUser = false)
 {
     public const int DefaultLingerMs = 600;
     public const int MinimumLingerMs = 100;
     public const int MaximumLingerMs = 5000;
 
     public static FloatingToolbarSettings Default { get; } =
-        new(false, ScreenEdge.Top, true, DefaultLingerMs);
+        new(false, ScreenEdge.Top, true, DefaultLingerMs, false);
 
     public static FloatingToolbarSettings Load(PortableLayout layout)
     {
@@ -44,7 +47,8 @@ internal sealed record FloatingToolbarSettings(
                 Enabled: ReadValue(node, "enabled", false),
                 Edge: ReadEdge(node),
                 AutoHide: ReadValue(node, "auto_hide", true),
-                LingerMs: ClampLinger(ReadValue(node, "linger_ms", DefaultLingerMs)));
+                LingerMs: ClampLinger(ReadValue(node, "linger_ms", DefaultLingerMs)),
+                HiddenByUser: ReadValue(node, "hidden_by_user", false));
         }
         catch (Exception error) when (
             error is JsonException or KeyNotFoundException or FormatException
@@ -65,6 +69,7 @@ internal sealed record FloatingToolbarSettings(
             ["edge"] = EdgeName(settings.Edge),
             ["auto_hide"] = settings.AutoHide,
             ["linger_ms"] = ClampLinger(settings.LingerMs),
+            ["hidden_by_user"] = settings.HiddenByUser,
         };
         AppSettingsStore.Write(layout, root);
     }
