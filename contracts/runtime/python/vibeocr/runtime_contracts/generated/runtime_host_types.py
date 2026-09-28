@@ -339,3 +339,4 @@ class RuntimeState(TypedDict, total=False):
     manifest_sha256: Required[str]
     backend_version: Required[str]
     source: NotRequired[RuntimeSourceIdentity]
+    startup_install_component_ids: NotRequired[list[str] | None]

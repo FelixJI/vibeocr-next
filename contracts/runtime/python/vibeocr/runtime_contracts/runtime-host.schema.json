@@ -893,7 +893,18 @@
           "pattern": "^[0-9a-f]{64}$"
         },
         "backend_version": { "type": "string", "minLength": 1 },
-        "source": { "$ref": "#/$defs/RuntimeSourceIdentity" }
+        "source": { "$ref": "#/$defs/RuntimeSourceIdentity" },
+        "startup_install_component_ids": {
+          "description": "Runtime-owned optional component selection for the next startup ensure. Empty means base-only; null means an existing installed marker cannot be safely inherited. This selection does not attest installed integrity.",
+          "anyOf": [
+            {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1 }
+            },
+            { "type": "null" }
+          ]
+        }
       }
     },
     "RuntimeLaunch": {

@@ -1170,4 +1170,7 @@ public sealed record RuntimeState
 
     [JsonPropertyName("source")]
     public RuntimeSourceIdentity? Source { get; init; }
+
+    [JsonPropertyName("startup_install_component_ids")]
+    public IReadOnlyList<string>? StartupInstallComponentIds { get; init; }
 }
