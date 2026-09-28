@@ -129,16 +129,23 @@ public sealed class ManagedEnvironmentSettings(
         ManagedEnvironment? current = snapshot.Environments.SingleOrDefault(item =>
             item.Id == session.EnvironmentId && item.Revision == session.Revision);
         if (current is null) return;
-        Wire.Health health = await session.Client.GetHealthAsync(cancellationToken);
-        ResidencyStatus residency = await session.Client.GetResidencyAsync(cancellationToken);
-        RuntimeStatusSnapshot status = await session.Client.GetRuntimeStatusAsync(cancellationToken);
-        if (currentSession?.Invoke() != session || Snapshot != snapshot) return;
-        if (!health.Ready || health.Draining ||
-            health.InstanceId != session.Process.Ready.InstanceId ||
-            status.InstanceId != session.Process.Ready.InstanceId) return;
-        ManagedEnvironment observed = ProjectRunning(current, health, residency, status);
-        Snapshot = snapshot with { Environments = [.. snapshot.Environments.Select(item =>
-            item.Id == current.Id ? observed : item)] };
+        try
+        {
+            Wire.Health health = await session.Client.GetHealthAsync(cancellationToken);
+            ResidencyStatus residency = await session.Client.GetResidencyAsync(cancellationToken);
+            RuntimeStatusSnapshot status = await session.Client.GetRuntimeStatusAsync(cancellationToken);
+            if (currentSession?.Invoke() != session || Snapshot != snapshot) return;
+            if (!health.Ready || health.Draining ||
+                health.InstanceId != session.Process.Ready.InstanceId ||
+                status.InstanceId != session.Process.Ready.InstanceId) return;
+            ManagedEnvironment observed = ProjectRunning(current, health, residency, status);
+            Snapshot = snapshot with { Environments = [.. snapshot.Environments.Select(item =>
+                item.Id == current.Id ? observed : item)] };
+        }
+        catch (Exception error) when (error is HttpRequestException or InferenceClientException or VibeOCR.Runtime.Client.RuntimeClientException)
+        {
+            throw new InvalidOperationException("无法读取活动环境状态，请刷新或重新切换环境。", error);
+        }
     }
 
     internal static ManagedEnvironment ProjectRunning(
