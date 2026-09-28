@@ -406,16 +406,17 @@ public sealed partial class MainWindow
     string geometryJson = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("""
       (() => {
         const spans = [...document.querySelectorAll('.image-text-glyphs')]
-          .filter(node => node.firstChild?.textContent.length >= 4);
+          .filter(node => node.firstChild?.textContent.length > 0);
         if (spans.length < 2) return null;
-        spans[0].scrollIntoView({block:'center'});
+        const first = spans.find(node => /[A-Za-z]{2}/.test(node.firstChild.textContent));
+        if (!first) return null;
+        first.scrollIntoView({block:'center'});
         const point = (node, offset) => {
           const range = document.createRange();
           range.setStart(node.firstChild, offset); range.collapse(true);
           const box = range.getBoundingClientRect();
           return {x:box.x,y:box.y+box.height/2};
         };
-        const first = spans[0];
         const firstBox = first.getBoundingClientRect();
         const second = spans.find(node =>
           Math.abs(node.getBoundingClientRect().y-firstBox.y) > firstBox.height/2);
