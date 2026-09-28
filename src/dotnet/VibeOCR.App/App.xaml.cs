@@ -652,7 +652,7 @@ public sealed partial class App : Application
         // 已关闭时明确启用并找回：偏好持久化，重启后保持启用。
         // 保存/创建失败只记录，热键入口不弹 UI。
         string? error = TryApplyFloatingToolbarSettings(
-            CurrentFloatingToolbarSettings() with { Enabled = true });
+            CurrentFloatingToolbarSettings() with { Enabled = true, HiddenByUser = false });
         if (error is not null)
         {
             AppLog.Warn($"Toggle toolbar failed: {error}");
