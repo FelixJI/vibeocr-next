@@ -27,7 +27,7 @@
 
 ### CI/CD 架构保护
 
-- 六仓默认只保留 `.github/workflows/ci.yml` 与 `.github/workflows/cd.yml`；公共自动化深模块文件清单为 `scripts/automation.py`、`scripts/automation_core.py` 及 `scripts/automation_{common,ci,candidate,prepare,publish}.py`，相关变更必须六仓协调并保持每个对应文件提交后的 Git blob/字节一致。workflow 共享稳定 CLI、`required` 门禁、候选交接和发布状态机等不变量，但不要求字节一致；VibeTable 可按其多栈构建和 E2E 瓶颈调整 job、lane、缓存及产物交接。
+- 活跃仓（本仓、`file-toolbox`、`vibetable`）默认只保留 `.github/workflows/ci.yml` 与 `.github/workflows/cd.yml`；公共自动化深模块文件清单为 `scripts/automation.py`、`scripts/automation_core.py` 及 `scripts/automation_{common,ci,candidate,prepare,publish}.py`，相关变更必须在活跃仓之间协调并保持每个对应文件提交后的 Git blob/字节一致；已归档仓中的同名文件是冻结历史副本，不需要也不再要求同步维护。workflow 共享稳定 CLI、`required` 门禁、候选交接和发布状态机等不变量，但不要求字节一致；VibeTable 可按其多栈构建和 E2E 瓶颈调整 job、lane、缓存及产物交接。
 - 项目专属命令、测试集合和构建语义优先写在 `.ci/project.json` 及项目脚本中。workflow 可表达项目所需的 runner、job 拓扑、缓存和产物交接，但不重复实现项目命令；需要新依赖或平台步骤时优先扩展 bootstrap/adapter。
 - CI 在 PR 和 `main` push 上完成 `.ci/project.json` 声明的 `bootstrap`、`quality`、`e2e`、`release_build` 与 `release_smoke`，按项目真实依赖串并行编排并 fail closed。PR 必须执行适用的完整 release build/smoke；只有 `main` push 会整理并上传正式候选。只有同一 PR 的陈旧运行可取消，`main` 运行不可互相取消。
 - PR CI 是合并门禁；squash merge 后的 `main` CI 验证合并结果，并额外上传固定名 `release-candidate`。CD 的 publish job 只下载触发它的那次 `main` CI、同一 source SHA 的候选，不重新运行完整 CI，也禁止在 CD 重建、替换或人工上传资产。
@@ -57,7 +57,7 @@
 
 ### Secret 与远端治理
 
-- `RELEASE_TOKEN` 仅用于 release PR prepare；publish 使用 GitHub OIDC/最小权限。镜像凭据只从既有 Secret 注入。不得打印、复制、重命名或探测 Secret 值；Secret 名或权限变化必须六仓协调。
+- `RELEASE_TOKEN` 仅用于 release PR prepare；publish 使用 GitHub OIDC/最小权限。镜像凭据只从既有 Secret 注入。不得打印、复制、重命名或探测 Secret 值；Secret 名或权限变化必须在仍共享该自动化面的活跃仓（本仓、`file-toolbox`、`vibetable`）之间协调，已归档仓不再产生新的同步义务。
 - `release` Environment 无 reviewer；仓库只允许 squash、自动删除已合并分支、线性历史、严格 `required`、管理员同样受保护。不得在代码变更中私自放宽 branch/ruleset/environment。
 
 <!-- END UNIFIED SIX-REPOSITORY PRACTICES -->
@@ -72,11 +72,14 @@
 - #87 单产品实施后，Desktop 以 ProjectReference 直接编译本仓 `VibeOCR.Platform`、`VibeOCR.Contracts` 与 `VibeOCR.Runtime.Client`；`Directory.Packages.props` 不再 pin `VibeOCR.Runtime.*`，NuGet 源只剩 nuget.org。构建与发布默认不解析、下载旧 `vibeocr-backend`/`vibeocr-protocol` Release；wire 只保留一个 v2 内部契约，SDK/Backend/Protocol minor 产品矩阵退役，新行为一律按调用点 capability 协商。
 - 版本唯一事实源是 `repository.json`，`scripts/sync_version.py` 派生 App csproj。正式资产精确为 Velopack full nupkg、相邻版本可选 delta nupkg、`VibeOCRNext-v{version}-win-x64.zip`、`releases.win.json`、`product-identity.json` 与 SPDX SBOM，项目 smoke 必须拒绝 Setup、sidecar 和任何额外资产。`scripts/build-release.ps1` 经 `scripts/build_internal_runtime.ps1` 从当前源码产出内部 Runtime 闭包（wheel、冻结 installer、固定第三方 offline base pack、runtime manifest），第三方 CPython 归档与 profile 锁保留在 `config/runtime/`；产品内 `runtime/backend/` 与 `app/metadata/component-lock.json`、`app/metadata/component-identities.json` 只是兼容稳定路径，内容绑定单一 Next 产品，不再单独发布独立组件锁。Portable 应用通过 Velopack feed 完成应用内下载、应用与 restart，不走 Setup 或手动下载桥接。
 - release publish 必须包含 WinUI `.xbf`/`.pri`、Bootstrapper、Velopack 运行时文件与产品内 metadata 绑定文件；否则可能出现 `XamlParseException` 或更新入口失效。修改 publish layout、WebAssets、runtime installer 参数或 capabilities 时执行真实打包验证。
+- 语言职责边界：C#/WinUI 承担宿主、窗口、单实例与跨产品互斥、热键、剪贴板与文件授权、应用权威状态和更新（`src/dotnet/VibeOCR.App/Features` 与 `VibeOCR.Platform`）；React/TypeScript 仅承担 WebView2 workbench 的展示与局部编辑（`WebAssets`，经 `App/Web`/`App/Workbench` 的 bridge command 交互，不直连 Runtime）；Python/CPython 承担 OCR/PDF/表格导出、二维码、模型/引擎运行、任务调度和运行环境安装事务（`src/runtime/vibeocr/runtime` 各模块）。WebView 消息桥与 Desktop↔Runtime 内部 HTTP wire 是两个不同边界，编号相同不等于同一协议；Runtime 安装计划与设备就绪的真值由 Runtime 提供，C#/TS 不复制包依赖推导。PowerShell 保留 Windows 构建/打包适配，Python 保留通用生成/验证/自动化入口，不为语言统一翻译脚本。功能→语言→边界的完整映射见 `docs/source-reading-guide.md`。
+- 后续语言边界优化按 Issue 推进，实施并合并前不得在文档或交付说明中写成现状：#97 计划把码图生成本地化到 C# 宿主，使 Runtime 未启动、失败或维护时仍可生成，公开码制、输入/输出与既有接口保持；#98 计划收敛 WebAssets 中仍是 JS 核心 + 薄 TS 包装的部分并补齐类型检查与消息语义。不引入 Python.NET/IronPython、第二套 IPC 或全量原生 UI 重写，不移除 Python OCR/PDF 能力、已证明的 worker 隔离、Runtime 安装事务与内部 wire。
 - Python/PowerShell/TOML 用 4 空格，C#/JSON/YAML 用 2 空格；Python Ruff/Node/.NET 版本以配置为准。不在文档中假定某个 clone 是否安装 Git hook，按工作开始时的实际检查执行，未安装时运行配置对应质量脚本。
 
-## 六仓关系
+## 仓库关系：归档历史与活跃协同
 
-- 本仓已持有 Runtime 与内部契约源码，正式构建直接消费本仓源码，不再把旧 `vibeocr-backend`/`vibeocr-protocol` Release 作为构建输入；源仓历史保留。`vibeocr-classic` 仍独立消费旧仓正式组件，两者不互相依赖、不共享发版版本。
+- `vibeocr-backend`、`vibeocr-protocol`、`vibeocr-classic` 均已归档为只读历史：本仓的开发、问题反馈、构建和发布不要求它们未来的任何提交、发版或镜像维护，其中的公共自动化/规则副本是冻结历史快照，不再参与字节一致协同。源仓来源 SHA、许可证与既有 Release/资产说明作为历史事实保留（见 README 来源声明与 `MIGRATION.md`），不把旧事实改写成从未发生。
+- 本仓已持有 Runtime 与内部契约源码，正式构建直接消费本仓源码，不再把旧 `vibeocr-backend`/`vibeocr-protocol` Release 作为构建输入；其发版不级联触发本仓 CD，本仓 CI/CD 只消费自身源码，CD 只发布本仓同一 CI 候选。`vibeocr-classic` 的历史正式版本仍绑定旧仓组件，这只描述既有发布物，不产生新的跨仓义务；两者互不依赖、不共享发版版本。
+- 归档不等于用户已卸载旧 Classic：代码中的跨产品互斥（`VibeOCR.Platform/Windows/FrontendExclusiveLock.cs`）、既有数据迁移（profile 与 legacy state migration）和更新回退保护继续有效，不得仅凭归档状态删除。
 - 内部 wire 契约只保留一个 v2 major，随本仓同源演进，不再维护跨仓 SDK minor 产品矩阵。capability 缺失时必须隐藏、禁用或 fallback；进程隔离、已安装运行环境的 manifest 绑定与回滚语义保留。wire major 变更必须显式升级契约 schema、生成物、golden 与客户端实现。
-- 旧仓 Release 不再是本仓构建输入，其发版不级联触发本仓 CD；本仓 CI/CD 只消费自身源码，CD 只发布本仓同一 CI 候选。
-- `file-toolbox`、`vibetable` 与本仓无运行时依赖，仅共享自动化治理。
+- `file-toolbox`、`vibetable` 是仅存的活跃共享仓：与本仓无运行时依赖，仅共享自动化治理。公共 automation 深模块与 Secret 变更在活跃仓之间协调，保持 Git blob 一致与既有门禁，不因此放宽 squash、required、候选来源、attestation 与独立审阅。
