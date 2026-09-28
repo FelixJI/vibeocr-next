@@ -100,6 +100,14 @@ interface ManagedEnvironmentState {
   readonly targetDevice?: string | null;
   readonly actualDevice?: string | null;
   readonly reason?: string | null;
+  readonly lastInstallFailure?: {
+    readonly phase: string;
+    readonly environmentRevision: number;
+    readonly recipe: string;
+    readonly reasonCode: string;
+    readonly nextAction: string;
+    readonly detail: string;
+  } | null;
   readonly pythonVersion?: string | null;
   readonly abi?: string | null;
   readonly python?: string | null;
@@ -124,6 +132,16 @@ const environmentRecipes = [
   ["rapidocr+mineru-cpu", "RapidOCR + MinerU · CPU"],
   ["rapidocr+mineru-cuda", "RapidOCR + MinerU · NVIDIA CUDA"],
 ] as const;
+
+const environmentRecoveryActions: Readonly<Record<string, string>> = {
+  check_source_and_retry: "检查下载源与网络后重新预览安装",
+  free_disk_space: "释放磁盘空间后重新预览安装",
+  check_directory_permissions: "检查环境目录权限后重试",
+  repair_environment: "检查便携版路径长度或重建该环境",
+  preview_again: "重新预览依赖后重试",
+  inspect_diagnostics: "查看诊断日志后重试",
+  wait: "等待当前安装完成",
+};
 
 interface InstallPlanComponentState {
   readonly componentId: string;
@@ -1739,6 +1757,27 @@ function ManagedEnvironmentEditor({
             {selected.path || "未定位"}
           </p>
           {selected.reason ? <p role="alert">{selected.reason}</p> : null}
+          {selected.lastInstallFailure ? (
+            <p
+              role={
+                selected.lastInstallFailure.phase === "failed"
+                  ? "alert"
+                  : "status"
+              }
+            >
+              {selected.lastInstallFailure.phase === "failed"
+                ? "上次依赖安装未完成"
+                : "依赖安装进行中"}
+              （环境修订 {selected.lastInstallFailure.environmentRevision}，
+              {selected.lastInstallFailure.recipe}）：
+              {selected.lastInstallFailure.detail}（原因：
+              {selected.lastInstallFailure.reasonCode}；建议：
+              {environmentRecoveryActions[
+                selected.lastInstallFailure.nextAction
+              ] ?? selected.lastInstallFailure.nextAction}
+              ）
+            </p>
+          ) : null}
           {selected.kind !== "legacy" &&
           (selected.id !== activeId || selected.status === "empty") ? (
             <>

@@ -23,7 +23,16 @@ public sealed record ManagedEnvironment(
     [property: JsonPropertyName("abi")] string? Abi = null,
     [property: JsonPropertyName("path")] string? Path = null,
     [property: JsonPropertyName("disk_bytes")] long DiskBytes = 0,
-    [property: JsonPropertyName("recipe")] string? Recipe = null);
+    [property: JsonPropertyName("recipe")] string? Recipe = null,
+    [property: JsonPropertyName("last_install_failure")] ManagedEnvironmentInstallFailure? LastInstallFailure = null);
+
+public sealed record ManagedEnvironmentInstallFailure(
+    [property: JsonPropertyName("phase")] string Phase,
+    [property: JsonPropertyName("environment_revision")] int EnvironmentRevision,
+    [property: JsonPropertyName("recipe")] string Recipe,
+    [property: JsonPropertyName("reason_code")] string ReasonCode,
+    [property: JsonPropertyName("next_action")] string NextAction,
+    [property: JsonPropertyName("detail")] string Detail);
 
 public sealed record ManagedEnvironmentList(
     [property: JsonPropertyName("active_id")] string? ActiveId,

@@ -2027,7 +2027,12 @@ public sealed class DesktopWorkbenchCommandHandler :
         item.ServiceState,
         item.ConfiguredRecognitionTypes ?? [],
         item.TargetDevice, item.ActualDevice, item.Reason,
-        item.PythonVersion, item.Abi, item.Python, item.Path, item.DiskBytes)).ToArray(),
+        item.PythonVersion, item.Abi, item.Python, item.Path, item.DiskBytes,
+        item.LastInstallFailure is { } failure
+          ? new SettingsEnvironmentInstallFailureState(
+            failure.Phase, failure.EnvironmentRevision, failure.Recipe,
+            failure.ReasonCode, failure.NextAction, failure.Detail)
+          : null)).ToArray(),
     ActiveEnvironmentId: viewModel.Environments?.Snapshot?.ActiveId,
     EnvironmentPlan: viewModel.Environments?.Plan is { } environmentPlan
       ? new SettingsEnvironmentPlanState(

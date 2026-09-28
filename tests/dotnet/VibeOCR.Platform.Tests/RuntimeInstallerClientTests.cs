@@ -48,6 +48,21 @@ public sealed class RuntimeInstallerClientTests
     }
 
     [Fact]
+    public async Task NamedEnvironmentClientReadsDurableInstallFailureWithoutReplacingHealth()
+    {
+        const string response = """{"protocol_version":2,"response_kind":"environment","action":"list","result":{"active_id":null,"active_revision":0,"environments":[{"id":"abc","name":"A","revision":1,"kind":"venv","status":"empty","python":"python.exe","python_state":"ready","dependency_state":"empty","engine_state":"unavailable","model_state":"not_applicable","service_state":"not_started","reason":null,"last_install_failure":{"phase":"failed","environment_revision":1,"recipe":"rapidocr-cpu","reason_code":"network_error","next_action":"check_source_and_retry","detail":"下载源连接失败。"}}]}}""";
+        var client = new RuntimeInstallerClient(Configuration(), new StubRunner(
+            new RuntimeInstallerProcessResult(0, response, "")));
+
+        ManagedEnvironmentList list = await client.ListEnvironmentsAsync(TestContext.Current.CancellationToken);
+        ManagedEnvironment environment = Assert.Single(list.Environments);
+        Assert.Equal("ready", environment.PythonState);
+        Assert.Null(environment.Reason);
+        Assert.Equal("network_error", environment.LastInstallFailure?.ReasonCode);
+        Assert.Equal("下载源连接失败。", environment.LastInstallFailure?.Detail);
+    }
+
+    [Fact]
     public void PublishedSdkReadsMeasuredDownloadProgressBeyondTwoGiB()
     {
         const string json = """{"unit":"bytes","current":3221225472,"total":4294967296}""";

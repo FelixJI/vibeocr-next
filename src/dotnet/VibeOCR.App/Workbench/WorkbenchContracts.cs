@@ -389,7 +389,16 @@ public sealed record SettingsEnvironmentState(
   string? Abi,
   string? Python,
   string? Path,
-  long DiskBytes);
+  long DiskBytes,
+  SettingsEnvironmentInstallFailureState? LastInstallFailure = null);
+
+public sealed record SettingsEnvironmentInstallFailureState(
+  string Phase,
+  int EnvironmentRevision,
+  string Recipe,
+  string ReasonCode,
+  string NextAction,
+  string Detail);
 
 public sealed record SettingsEnvironmentPlanState(
   string PlanId,

@@ -78,11 +78,17 @@ public sealed class ManagedEnvironmentSettings(
             Status = "安装已取消；原环境保持不变。";
             Snapshot = await manager.ListEnvironmentsAsync(CancellationToken.None);
         }
+        catch (Exception)
+        {
+            try { Snapshot = await manager.ListEnvironmentsAsync(CancellationToken.None); }
+            catch (Exception) { /* Preserve the original installation error. */ }
+            throw;
+        }
         finally
         {
             Volatile.Write(ref activeInstall, null);
         }
-    }, cancellationToken);
+    }, cancellationToken, "安装未完成；失败原因请查看该环境记录。");
 
     public void CancelInstall()
     {
@@ -222,7 +228,8 @@ public sealed class ManagedEnvironmentSettings(
         Status = "空环境解释器已修复；仍未安装识别依赖。";
     }, cancellationToken);
 
-    private async Task RunAsync(Func<Task> action, CancellationToken cancellationToken)
+    private async Task RunAsync(Func<Task> action, CancellationToken cancellationToken,
+        string? failureStatus = null)
     {
         await gate.WaitAsync(cancellationToken);
         IsBusy = true;
@@ -233,7 +240,7 @@ public sealed class ManagedEnvironmentSettings(
         }
         catch (Exception error) when (error is not OperationCanceledException)
         {
-            Status = error.Message;
+            Status = failureStatus ?? error.Message;
             throw;
         }
         finally

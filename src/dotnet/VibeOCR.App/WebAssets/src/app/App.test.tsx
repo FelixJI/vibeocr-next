@@ -1623,6 +1623,14 @@ describe("AppShell", () => {
               configuredRecognitionTypes: [],
               targetDevice: null,
               actualDevice: null,
+              lastInstallFailure: {
+                phase: "failed",
+                environmentRevision: 1,
+                recipe: "rapidocr-cpu",
+                reasonCode: "network_error",
+                nextAction: "check_source_and_retry",
+                detail: "下载源连接失败。",
+              },
             },
           ],
           activeEnvironmentId: null,
@@ -1642,6 +1650,12 @@ describe("AppShell", () => {
     };
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
     expect(screen.getByText(/Python ready · 依赖 empty/)).toBeVisible();
+    expect(screen.getByText(/上次依赖安装未完成/)).toHaveTextContent(
+      "下载源连接失败。",
+    );
+    expect(screen.getByText(/上次依赖安装未完成/)).toHaveTextContent(
+      "检查下载源与网络后重新预览安装",
+    );
     expect(screen.getByText(/锁定依赖（1 项）/)).toBeVisible();
     await user.type(screen.getByLabelText("新环境名称"), "资料");
     await user.click(screen.getByRole("button", { name: "创建空环境" }));

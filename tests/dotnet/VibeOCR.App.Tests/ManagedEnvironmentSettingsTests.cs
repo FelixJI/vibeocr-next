@@ -105,6 +105,29 @@ public sealed class ManagedEnvironmentSettingsTests
   }
 
   [Fact]
+  public async Task FailedInstallRefreshesDurableReasonWithoutShowingRawManagerError()
+  {
+    var failure = new ManagedEnvironmentInstallFailure("failed", 1, "rapidocr-cpu",
+      "network_error", "check_source_and_retry", "下载源连接失败。");
+    var manager = new WaitingManager
+    {
+      InstallError = new InvalidOperationException("https://user:secret@example.invalid C:/private"),
+      Failure = failure,
+    };
+    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
+      () => null, new ProductMaintenanceCoordinator());
+    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi",
+      TestContext.Current.CancellationToken);
+
+    await Assert.ThrowsAsync<InvalidOperationException>(() =>
+      settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken));
+    Assert.Equal("安装未完成；失败原因请查看该环境记录。", settings.Status);
+    Assert.Same(failure, settings.Snapshot?.Environments[0].LastInstallFailure);
+    await settings.RefreshAsync(TestContext.Current.CancellationToken);
+    Assert.Same(failure, settings.Snapshot?.Environments[0].LastInstallFailure);
+  }
+
+  [Fact]
   public async Task DisconnectedRunningProbePreservesEnvironmentAndReturnsRecoverableError()
   {
     var manager = new WaitingManager { ActiveId = "environment" };
@@ -151,11 +174,14 @@ public sealed class ManagedEnvironmentSettingsTests
     public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public bool Cancelled { get; private set; }
     public string? ActiveId { get; init; }
+    public Exception? InstallError { get; init; }
+    public ManagedEnvironmentInstallFailure? Failure { get; init; }
 
     public Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default) =>
       Task.FromResult(new ManagedEnvironmentList(ActiveId, 0, [
         new ManagedEnvironment("environment", "保留环境", 1, "venv", "empty", "python",
-          "ready", "empty", "unavailable", "not_checked", "not_started", null)
+          "ready", "empty", "unavailable", "not_checked", "not_started", null,
+          LastInstallFailure: Failure)
       ]));
 
     public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(
@@ -167,6 +193,7 @@ public sealed class ManagedEnvironmentSettingsTests
     public async Task<ManagedEnvironment> InstallEnvironmentAsync(
       ManagedEnvironmentPlan plan, CancellationToken cancellationToken = default)
     {
+      if (InstallError is not null) throw InstallError;
       Started.SetResult();
       try { await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken); }
       catch (OperationCanceledException)

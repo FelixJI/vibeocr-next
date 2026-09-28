@@ -32,7 +32,11 @@ from vibeocr.runtime.environments.runtime_lock import (
     RuntimeLockTimeout,
     RuntimeStoreLock,
 )
-from vibeocr.runtime.environments.runtime_maintenance import _atomic_json
+from vibeocr.runtime.environments.runtime_maintenance import (
+    _atomic_json,
+    failure_guidance,
+    safe_runtime_detail,
+)
 from vibeocr.runtime.environments.runtime_manifest import (
     ACCELERATOR_TO_PLAN,
     RuntimeInstallScope,
@@ -203,6 +207,47 @@ class ManagedEnvironmentStore:
         finally:
             lock.release()
 
+    def _last_install_failure(self, record: dict) -> dict | None:
+        operation = record.get("last_install_operation")
+        if operation is None:
+            return None
+        if operation["phase"] == "installing":
+            lock = RuntimeStoreLock(
+                self.paths.locks_root
+                / "environment-operations"
+                / f"{record['id']}.lock",
+                timeout=0,
+            )
+            try:
+                lock.acquire()
+            except RuntimeLockTimeout:
+                reason_code = "install_in_progress"
+                detail = "Dependency installation is still running."
+            else:
+                lock.release()
+                reason_code = "install_interrupted"
+                detail = "Dependency installation was interrupted; the previous environment remains available."
+            return {
+                "phase": "installing"
+                if reason_code == "install_in_progress"
+                else "failed",
+                "environment_revision": operation["environment_revision"],
+                "recipe": operation["recipe"],
+                "reason_code": reason_code,
+                "next_action": "wait"
+                if reason_code == "install_in_progress"
+                else "preview_again",
+                "detail": detail,
+            }
+        return {
+            "phase": "failed",
+            "environment_revision": operation["environment_revision"],
+            "recipe": operation["recipe"],
+            "reason_code": operation["reason_code"],
+            "next_action": operation["next_action"],
+            "detail": safe_runtime_detail(operation["detail"]),
+        }
+
     def _read(self) -> dict:
         if self._registry.is_file():
             data = json.loads(self._registry.read_text(encoding="utf-8"))
@@ -305,6 +350,7 @@ class ManagedEnvironmentStore:
                     "abi",
                     "recipe",
                     "source_ids",
+                    "last_install_operation",
                 }
                 or not {
                     "id",
@@ -351,6 +397,53 @@ class ManagedEnvironmentStore:
                 or any(not isinstance(source, str) for source in record["source_ids"])
             ):
                 raise ManagedEnvironmentError("environment source selection is invalid")
+            if "last_install_operation" in record:
+                operation = record["last_install_operation"]
+                if (
+                    record["kind"] != "venv"
+                    or not isinstance(operation, dict)
+                    or set(operation)
+                    != {
+                        "environment_revision",
+                        "plan_id",
+                        "recipe",
+                        "phase",
+                        "reason_code",
+                        "next_action",
+                        "detail",
+                    }
+                    or type(operation["environment_revision"]) is not int
+                    or operation["environment_revision"] != record["revision"]
+                    or not isinstance(operation["plan_id"], str)
+                    or not re.fullmatch(r"[0-9a-f]{32}", operation["plan_id"])
+                    or not isinstance(operation["recipe"], str)
+                    or operation["recipe"]
+                    not in {
+                        "rapidocr-cpu",
+                        "paddleocr-cpu",
+                        "paddleocr-cuda",
+                        "mineru-cpu",
+                        "rapidocr+mineru-cpu",
+                        "rapidocr+mineru-cuda",
+                    }
+                    or not isinstance(operation["phase"], str)
+                    or operation["phase"] not in {"installing", "failed"}
+                    or not isinstance(operation["reason_code"], str)
+                    or not re.fullmatch(r"[a-z0-9_.-]{0,80}", operation["reason_code"])
+                    or not isinstance(operation["next_action"], str)
+                    or not re.fullmatch(r"[a-z0-9_.-]{0,80}", operation["next_action"])
+                    or not isinstance(operation["detail"], str)
+                    or len(operation["detail"]) > 4000
+                    or (
+                        operation["phase"] == "failed"
+                        and (
+                            not operation["reason_code"] or not operation["next_action"]
+                        )
+                    )
+                ):
+                    raise ManagedEnvironmentError(
+                        "environment installation record is invalid"
+                    )
             self._safe_path(record)
 
     def _expected_base_python(self) -> Path:
@@ -602,6 +695,7 @@ class ManagedEnvironmentStore:
                 if probe["reason"] == "engine_import_failed"
                 else probe["reason"]
             ),
+            "last_install_failure": self._last_install_failure(record),
             "packages": probe.get("packages", []),
         }
 
@@ -719,7 +813,11 @@ class ManagedEnvironmentStore:
             if result.returncode:
                 raise ManagedEnvironmentError("could not repair empty environment")
             replacement = {
-                **record,
+                **{
+                    key: value
+                    for key, value in record.items()
+                    if key != "last_install_operation"
+                },
                 "revision": revision,
                 "path": str(Path(env_id) / "revisions" / directory),
                 "python_version": self.manifest.python.version,
@@ -936,54 +1034,113 @@ class ManagedEnvironmentStore:
                 root = self.root / env_id / "revisions" / directory
                 if root.exists():
                     raise ManagedEnvironmentError("candidate revision already exists")
-            base = self._base_python()
-            result = subprocess.run(
-                [str(base), "-I", "-m", "venv", "--copies", str(root)],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            if result.returncode:
-                raise ManagedEnvironmentError("could not prepare candidate environment")
-            self._install_runner(self._venv_python(root), scope, source.endpoint)
-            candidate = {
-                **record,
-                "revision": revision,
-                "path": str(Path(env_id) / "revisions" / directory),
-                "status": "installed",
-                "recipe": plan["recipe"],
-                "source_ids": plan["source_ids"],
-                "python_version": self.manifest.python.version,
-                "abi": self.manifest.python.abi,
-            }
-            probe = self._probe(candidate)
-            if not probe["healthy"]:
-                raise ManagedEnvironmentError(
-                    f"installed environment failed probe: {probe['reason']}; "
-                    "check native dependencies and Portable path length"
+                operation = {
+                    "environment_revision": record["revision"],
+                    "plan_id": plan_id,
+                    "recipe": recipe,
+                    "phase": "installing",
+                    "reason_code": "",
+                    "next_action": "",
+                    "detail": "",
+                }
+                record = {**record, "last_install_operation": operation}
+                data["environments"][env_id] = record
+                _atomic_json(self._registry, data)
+            try:
+                base = self._base_python()
+                result = subprocess.run(
+                    [str(base), "-I", "-m", "venv", "--copies", str(root)],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
                 )
-            with RuntimeStoreLock(self._lock):
-                latest = self._read()
-                try:
-                    current_plan = json.loads(plan_path.read_text(encoding="utf-8"))
-                except (OSError, ValueError) as exc:
-                    raise RuntimeInstallPlanStale(
-                        "environment plan is unavailable"
-                    ) from exc
-                if (
-                    current_plan != plan
-                    or latest["environments"].get(env_id) != record
-                    or latest["active_revision"] != plan["active_revision"]
-                ):
-                    raise RuntimeInstallPlanStale(
-                        "environment or recipe changed; preview again"
+                if result.returncode:
+                    raise ManagedEnvironmentError(
+                        "could not prepare candidate environment",
+                        reason_code="venv_creation_failed",
+                        next_action="check_directory_permissions",
                     )
-                if environment_has_references(self._references, env_id):
-                    raise ManagedEnvironmentError("environment has active jobs")
-                latest["environments"][env_id] = candidate
-                if latest["active_id"] == env_id:
-                    latest["active_revision"] += 1
-                _atomic_json(self._registry, latest)
+                self._install_runner(self._venv_python(root), scope, source.endpoint)
+                candidate = {
+                    key: value
+                    for key, value in record.items()
+                    if key != "last_install_operation"
+                }
+                candidate.update(
+                    {
+                        "revision": revision,
+                        "path": str(Path(env_id) / "revisions" / directory),
+                        "status": "installed",
+                        "recipe": plan["recipe"],
+                        "source_ids": plan["source_ids"],
+                        "python_version": self.manifest.python.version,
+                        "abi": self.manifest.python.abi,
+                    }
+                )
+                probe = self._probe(candidate)
+                if not probe["healthy"]:
+                    raise ManagedEnvironmentError(
+                        f"installed environment failed probe: {probe['reason']}; "
+                        "check native dependencies and Portable path length",
+                        reason_code=probe["reason"],
+                        next_action="repair_environment",
+                    )
+                with RuntimeStoreLock(self._lock):
+                    latest = self._read()
+                    try:
+                        current_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+                    except (OSError, ValueError) as exc:
+                        raise RuntimeInstallPlanStale(
+                            "environment plan is unavailable"
+                        ) from exc
+                    if (
+                        current_plan != plan
+                        or latest["environments"].get(env_id) != record
+                        or latest["active_revision"] != plan["active_revision"]
+                    ):
+                        raise RuntimeInstallPlanStale(
+                            "environment or recipe changed; preview again"
+                        )
+                    if environment_has_references(self._references, env_id):
+                        raise ManagedEnvironmentError("environment has active jobs")
+                    latest["environments"][env_id] = candidate
+                    if latest["active_id"] == env_id:
+                        latest["active_revision"] += 1
+                    _atomic_json(self._registry, latest)
+            except Exception as error:
+                guidance = failure_guidance(error)
+                if isinstance(error, RuntimeInstallPlanStale):
+                    guidance = {
+                        "reason_code": "plan_stale",
+                        "next_action": "preview_again",
+                    }
+                reason_code = guidance["reason_code"]
+                next_action = guidance["next_action"]
+                failed = {
+                    **operation,
+                    "phase": "failed",
+                    "reason_code": reason_code
+                    if re.fullmatch(r"[a-z0-9_.-]{1,80}", reason_code)
+                    else "unknown",
+                    "next_action": next_action
+                    if re.fullmatch(r"[a-z0-9_.-]{1,80}", next_action)
+                    else "inspect_diagnostics",
+                    "detail": safe_runtime_detail(str(error)),
+                }
+                try:
+                    with RuntimeStoreLock(self._lock):
+                        latest = self._read()
+                        if latest["environments"].get(env_id) == record:
+                            latest["environments"][env_id] = {
+                                **record,
+                                "last_install_operation": failed,
+                            }
+                            _atomic_json(self._registry, latest)
+                except OSError:
+                    # The accepted marker remains durable if a full disk blocks
+                    # recording the more specific failure detail.
+                    pass
+                raise
             return self._public_record(candidate, probe)
 
     def _install_scope(

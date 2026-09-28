@@ -738,6 +738,12 @@ def test_inactive_install_does_not_block_active_job_admission_or_target_conflict
     conflict = threading.Thread(target=delete_target, daemon=True)
     try:
         assert started.wait(5)
+        running = next(
+            item
+            for item in manager.list()["environments"]
+            if item["id"] == target["id"]
+        )
+        assert running["last_install_failure"]["reason_code"] == "install_in_progress"
         admission.start()
         conflict.start()
         assert admitted.wait(1), "A job admission waited on B's package installation"
@@ -752,6 +758,14 @@ def test_inactive_install_does_not_block_active_job_admission_or_target_conflict
         conflict.join(10)
     assert len(installed) == 1
     assert manager.list()["active_id"] == active["id"]
+    assert (
+        next(
+            item
+            for item in manager.list()["environments"]
+            if item["id"] == target["id"]
+        )["last_install_failure"]
+        is None
+    )
 
 
 def test_inactive_install_commit_rejects_active_pointer_drift(
@@ -886,6 +900,59 @@ def test_empty_environment_repairs_changed_python_binding(tmp_path: Path) -> Non
     assert repaired["packages"] == []
 
 
+def test_repair_after_failed_install_clears_stale_revision_failure_only_on_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+
+    def fail_install(_python: Path, _scope, _endpoint: str) -> None:
+        raise ManagedEnvironmentError("synthetic install failure")
+
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+        install_runner=fail_install,
+    )
+    item = manager.create("failed then repaired")
+    plan = manager.preview_install(item["id"], "rapidocr-cpu")
+    with pytest.raises(ManagedEnvironmentError, match="synthetic install failure"):
+        manager.install(plan["plan_id"], item["id"], "rapidocr-cpu", ("tuna-pypi",))
+    failure = manager.list()["environments"][0]["last_install_failure"]
+    assert failure["environment_revision"] == 1
+
+    registry = manager.paths.state_root / "environments.json"
+    value = json.loads(registry.read_text(encoding="utf-8"))
+    value["environments"][item["id"]]["python_version"] = "3.13.0"
+    registry.write_text(json.dumps(value), encoding="utf-8")
+
+    def fail_repair() -> Path:
+        raise ManagedEnvironmentError("synthetic repair failure")
+
+    original_base_python = manager._base_python
+    monkeypatch.setattr(manager, "_base_python", fail_repair)
+    with pytest.raises(ManagedEnvironmentError, match="synthetic repair failure"):
+        manager.repair_empty(item["id"])
+    assert manager.list()["environments"][0]["last_install_failure"] == failure
+
+    monkeypatch.setattr(manager, "_base_python", original_base_python)
+    repaired = manager.repair_empty(item["id"])
+    assert repaired["revision"] == 2
+    assert repaired["last_install_failure"] is None
+    assert (
+        ManagedEnvironmentStore(
+            product_root=tmp_path / "product",
+            component_lock=component,
+            runtime_manifest=manifest,
+            base_python=sys._base_executable,
+        ).list()["environments"][0]["last_install_failure"]
+        is None
+    )
+    stored = json.loads(registry.read_text(encoding="utf-8"))
+    assert "last_install_operation" not in stored["environments"][item["id"]]
+
+
 def test_named_environment_probe_does_not_extract_missing_base(tmp_path: Path) -> None:
     manifest, component = _release(tmp_path / "release")
     product = tmp_path / "product"
@@ -937,6 +1004,81 @@ def test_failed_named_install_preserves_empty_revision(tmp_path: Path) -> None:
     assert surviving["status"] == "empty"
     assert surviving["python_state"] == "ready"
     assert manager.list()["active_id"] == item["id"]
+    failure = surviving["last_install_failure"]
+    assert failure["reason_code"] == "unknown"
+    assert failure["phase"] == "failed"
+    assert failure["recipe"] == "rapidocr-cpu"
+    assert failure["environment_revision"] == 1
+    stored = json.loads(manager._registry.read_text(encoding="utf-8"))
+    assert (
+        stored["environments"][item["id"]]["last_install_operation"]["plan_id"]
+        == plan["plan_id"]
+    )
+    assert (
+        ManagedEnvironmentStore(
+            product_root=tmp_path / "product",
+            component_lock=component,
+            runtime_manifest=manifest,
+            base_python=sys._base_executable,
+        ).list()["environments"][0]["last_install_failure"]
+        == failure
+    )
+
+
+def test_named_install_failure_redacts_diagnostics_and_interruption_is_durable(
+    tmp_path: Path,
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+
+    def fail(_python: Path, _scope, _source: str) -> None:
+        raise RuntimeInstallError(
+            "https://user:secret@example.invalid/private C:/private/work "
+            "token=secretvalue",
+            reason_code="network_error",
+            next_action="check_source_and_retry",
+        )
+
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+        install_runner=fail,
+    )
+    first = manager.create("failed")
+    other = manager.create("unaffected")
+    plan = manager.preview_install(first["id"], "rapidocr-cpu")
+    with pytest.raises(RuntimeInstallError):
+        manager.install(plan["plan_id"], first["id"], "rapidocr-cpu", ("tuna-pypi",))
+    registry_text = manager._registry.read_text(encoding="utf-8")
+    assert "secretvalue" not in registry_text
+    assert "example.invalid" not in registry_text
+    assert "C:/private/work" not in registry_text
+    records = {item["id"]: item for item in manager.list()["environments"]}
+    failure = records[first["id"]]["last_install_failure"]
+    assert failure["reason_code"] == "network_error"
+    assert failure["next_action"] == "check_source_and_retry"
+    assert records[other["id"]]["last_install_failure"] is None
+
+    def interrupted(_python: Path, _scope, _source: str) -> None:
+        raise SystemExit(1)
+
+    manager._install_runner = interrupted
+    with pytest.raises(SystemExit):
+        manager.install(plan["plan_id"], first["id"], "rapidocr-cpu", ("tuna-pypi",))
+    recovered = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    ).list()["environments"]
+    by_id = {item["id"]: item for item in recovered}
+    assert by_id[first["id"]]["status"] == "empty"
+    assert (
+        by_id[first["id"]]["last_install_failure"]["reason_code"]
+        == "install_interrupted"
+    )
+    assert by_id[other["id"]]["last_install_failure"] is None
 
 
 def test_new_environment_preview_supersedes_old_plan(
@@ -980,6 +1122,7 @@ def test_new_environment_preview_supersedes_old_plan(
     )
     assert installed["revision"] == 2
     assert installed["status"] == "installed"
+    assert installed["last_install_failure"] is None
     assert installed_sources == ["https://pypi.org/simple"]
     assert manager.list()["active_id"] == current["id"]
 
@@ -1059,9 +1202,11 @@ def test_named_install_rejects_native_import_failure_without_committing(
     surviving = manager.list()["environments"][0]
     assert surviving["status"] == "empty"
     assert surviving["revision"] == 1
+    assert surviving["last_install_failure"]["reason_code"] == "engine_import_failed"
     candidate = next((manager.root / item["id"] / "revisions").glob("2-*"))
     assert len(candidate.name.split("-", 1)[1]) == 16
     registry = json.loads(manager._registry.read_text(encoding="utf-8"))
+    registry["environments"][item["id"]].pop("last_install_operation")
     registry["environments"][item["id"]].update(
         {
             "revision": 2,
@@ -1177,6 +1322,34 @@ def test_frozen_manager_exposes_named_environment_list(
         "package_source_ids": ["tuna-pypi", "pypi"],
         "environments": [],
     }
+
+
+def test_named_environment_error_envelope_redacts_private_details(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+
+    def fail(_manager: ManagedEnvironmentStore) -> dict:
+        raise RuntimeInstallError(
+            "https://user:secret@example.invalid/private C:/private/work "
+            "token=secretvalue"
+        )
+
+    monkeypatch.setattr(ManagedEnvironmentStore, "list", fail)
+    request = {
+        "protocol_version": 2,
+        "request_kind": "environment",
+        "action": "list",
+        "product_root": str(tmp_path / "product"),
+        "component_lock": str(component),
+        "runtime_manifest": str(manifest),
+    }
+    assert main(["--request-json", json.dumps(request)]) == 1
+    output = capsys.readouterr().out
+    assert "secretvalue" not in output
+    assert "example.invalid" not in output
+    assert "C:/private/work" not in output
+    assert "[url]" in output
 
 
 def _tar_with(path: Path, member_name: str, content: bytes = b"python") -> None:

@@ -2806,6 +2806,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--request-json")
     args = parser.parse_args(argv)
     operation: str | None = None
+    request_kind: str | None = None
     control: Any | None = None
     try:
         raw_request = (
@@ -2946,15 +2947,16 @@ def main(argv: list[str] | None = None) -> int:
         RuntimeSelectionError,
         OSError,
     ) as exc:
-        _emit(
-            _failure_envelope(
-                exc,
-                operation=operation,
-                maintenance=(
-                    control.maintenance_snapshot if control is not None else None
-                ),
-            )
+        failure = _failure_envelope(
+            exc,
+            operation=operation,
+            maintenance=(control.maintenance_snapshot if control is not None else None),
         )
+        if request_kind == "environment":
+            failure["error"]["message"] = safe_runtime_detail(
+                failure["error"]["message"]
+            )
+        _emit(failure)
         return 1
     _emit(
         _success_envelope(
