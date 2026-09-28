@@ -23,7 +23,8 @@ public sealed class FloatingToolbarControllerTests
         IReadOnlySet<ScreenEdge>? occupiedEdges = null,
         Func<PhysicalRectangle, PhysicalRectangle>? monitorOf = null,
         Func<PhysicalRectangle>? primaryMonitor = null,
-        List<FloatingToolbarSettings>? persisted = null)
+        List<FloatingToolbarSettings>? persisted = null,
+        Action<FloatingToolbarSettings>? persist = null)
     {
         return new FloatingToolbarController(
             _view,
@@ -34,7 +35,7 @@ public sealed class FloatingToolbarControllerTests
             () => occupiedEdges ?? new HashSet<ScreenEdge> { ScreenEdge.Bottom },
             primaryMonitor ?? (() => Primary),
             monitorOf ?? (_ => Primary),
-            next => persisted?.Add(next));
+            persist ?? (next => persisted?.Add(next)));
     }
 
     [Fact]
@@ -149,6 +150,25 @@ public sealed class FloatingToolbarControllerTests
         FloatingToolbarSettings only = Assert.Single(persisted);
         Assert.Equal(ScreenEdge.Left, only.Edge);
         Assert.Equal(ScreenEdge.Left, controller.Settings.Edge);
+    }
+
+    [Fact]
+    public void FailedDragPositionSaveKeepsPreviousEdgeAndCurrentFloatingPosition()
+    {
+        using FloatingToolbarController controller = CreateController(
+            persist: _ => throw new IOException("settings read-only"));
+        controller.Start();
+        _sensor.RaisePointerEntered();
+        _view.RaiseDragStarted();
+        var dragged = new PhysicalRectangle(1, 500, 200, 44);
+        _view.SimulatedBounds = dragged;
+
+        _view.RaiseDragCompleted();
+
+        Assert.Equal(ScreenEdge.Top, controller.Settings.Edge);
+        Assert.Equal(FloatingToolbarController.ToolbarState.PinnedFloating, controller.State);
+        Assert.True(_view.IsVisible);
+        Assert.Equal(dragged, _view.LastShownBounds);
     }
 
     [Fact]
@@ -463,6 +483,46 @@ public sealed class FloatingToolbarControllerTests
         Assert.Equal(FloatingToolbarController.ToolbarState.UserHidden, second.State);
         Assert.False(_sensor.IsArmed);
         Assert.False(_view.IsVisible);
+    }
+
+    [Fact]
+    public void FailedUserHideKeepsVisibleStateAndPreference()
+    {
+        using FloatingToolbarController controller = CreateController(
+            settings: new FloatingToolbarSettings(true, ScreenEdge.Top, false, 600),
+            persist: _ => throw new IOException("settings read-only"));
+        controller.Start();
+
+        Assert.Throws<IOException>(() => controller.Hide());
+
+        Assert.Equal(FloatingToolbarController.ToolbarState.PinnedDocked, controller.State);
+        Assert.True(_view.IsVisible);
+        Assert.False(controller.Settings.HiddenByUser);
+    }
+
+    [Fact]
+    public void FailedUserShowRemainsHiddenAndCanPersistOnRetry()
+    {
+        bool readOnly = true;
+        var persisted = new List<FloatingToolbarSettings>();
+        using FloatingToolbarController controller = CreateController(
+            settings: new FloatingToolbarSettings(true, ScreenEdge.Top, true, 600, true),
+            persist: next =>
+            {
+                if (readOnly) throw new IOException("settings read-only");
+                persisted.Add(next);
+            });
+        controller.Start();
+
+        Assert.Throws<IOException>(() => controller.Show());
+        Assert.Equal(FloatingToolbarController.ToolbarState.UserHidden, controller.State);
+        Assert.False(_view.IsVisible);
+        Assert.True(controller.Settings.HiddenByUser);
+
+        readOnly = false;
+        controller.Show();
+        Assert.Equal(FloatingToolbarController.ToolbarState.Revealed, controller.State);
+        Assert.False(Assert.Single(persisted).HiddenByUser);
     }
 
     [Fact]

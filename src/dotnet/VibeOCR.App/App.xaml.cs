@@ -608,8 +608,17 @@ public sealed partial class App : Application
             return "悬浮工具栏已关闭，请先在设置中启用。";
         }
 
-        toolbar.Show();
-        return null;
+        try
+        {
+            toolbar.Show();
+            return null;
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException or JsonException)
+        {
+            AppLog.Warn($"Failed to show floating toolbar: {error.Message}");
+            return $"无法保存悬浮工具栏显示设置，原状态已保留：{error.Message}";
+        }
     }
 
     private string? TryHideFloatingToolbar()
@@ -619,8 +628,17 @@ public sealed partial class App : Application
             return "悬浮工具栏未在运行，无需隐藏。";
         }
 
-        toolbar.Hide();
-        return null;
+        try
+        {
+            toolbar.Hide();
+            return null;
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException or JsonException)
+        {
+            AppLog.Warn($"Failed to hide floating toolbar: {error.Message}");
+            return $"无法保存悬浮工具栏隐藏设置，原状态已保留：{error.Message}";
+        }
     }
 
     private async Task ToggleFloatingToolbarAsync()

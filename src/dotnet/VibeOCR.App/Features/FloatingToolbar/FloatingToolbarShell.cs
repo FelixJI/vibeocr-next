@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using System.Text.Json;
 using Microsoft.UI.Dispatching;
 using VibeOCR.App.Features.Shell;
 using VibeOCR.App.Services;
@@ -76,7 +75,7 @@ internal sealed class FloatingToolbarShell : IDisposable
             DesktopScreenQuery.GetTaskbarOccupiedEdges,
             DesktopScreenQuery.GetPrimaryMonitor,
             DesktopScreenQuery.GetMonitorContaining,
-            next => PersistQuietly(layout, next));
+            next => FloatingToolbarSettings.Save(layout, next));
         var shell = new FloatingToolbarShell(
             controller,
             view,
@@ -180,18 +179,6 @@ internal sealed class FloatingToolbarShell : IDisposable
         {
             // 命令失败只记录，悬浮工具栏自身不因此退出。
             AppLog.Warn($"Floating toolbar command {command} failed: {error.Message}");
-        }
-    }
-
-    private static void PersistQuietly(PortableLayout layout, FloatingToolbarSettings settings)
-    {
-        try
-        {
-            FloatingToolbarSettings.Save(layout, settings);
-        }
-        catch (Exception error) when (error is IOException or JsonException)
-        {
-            AppLog.Warn($"Failed to persist floating toolbar settings: {error.Message}");
         }
     }
 

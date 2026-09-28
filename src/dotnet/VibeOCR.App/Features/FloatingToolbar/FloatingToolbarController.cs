@@ -1,3 +1,5 @@
+using System.Text.Json;
+using VibeOCR.App.Services;
 using VibeOCR.Platform.Windows;
 
 namespace VibeOCR.App.Features.FloatingToolbar;
@@ -278,11 +280,11 @@ internal sealed class FloatingToolbarController : IDisposable
             return;
         }
 
+        PersistHiddenByUser(hidden: true);
         _lingerTimer?.Stop();
         _sensor?.Disarm();
         _view.Hide();
         _state = ToolbarState.UserHidden;
-        PersistHiddenByUser(hidden: true);
     }
 
     /// <summary>显式显示：从主动隐藏找回，或从自动收起态直接揭示。</summary>
@@ -483,8 +485,20 @@ internal sealed class FloatingToolbarController : IDisposable
         ScreenEdge? snap = ScreenEdgeGeometry.FindSnapEdge(bounds, monitor);
         if (snap is { } edge && !_occupiedEdges().Contains(edge))
         {
-            _settings = _settings with { Edge = edge };
-            _persist(_settings);
+            FloatingToolbarSettings next = _settings with { Edge = edge };
+            try
+            {
+                _persist(next);
+                _settings = next;
+            }
+            catch (Exception error) when (
+                error is IOException or UnauthorizedAccessException or JsonException)
+            {
+                AppLog.Warn($"Failed to persist floating toolbar position: {error.Message}");
+                _view.ShowAt(bounds);
+                _state = ToolbarState.PinnedFloating;
+                return;
+            }
             _dockedMonitor = monitor;
             if (_settings.AutoHide)
             {
@@ -572,8 +586,9 @@ internal sealed class FloatingToolbarController : IDisposable
             return;
         }
 
-        _settings = _settings with { HiddenByUser = hidden };
-        _persist(_settings);
+        FloatingToolbarSettings next = _settings with { HiddenByUser = hidden };
+        _persist(next);
+        _settings = next;
     }
 
     private IEdgeSensor EnsureSensor()
