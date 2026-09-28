@@ -624,8 +624,6 @@ public sealed class DesktopWorkbenchCommandHandler :
           screenshotSessionId != sessionId ||
           screenshotSessionRevision != revision)
         {
-          recognition.InvalidateResult();
-          resultActions = null;
           return;
         }
         screenshotSessionResult = result;
