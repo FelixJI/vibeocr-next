@@ -50,6 +50,7 @@ public sealed partial class App : Application
     private ManagedEnvironmentSession? _managedSession;
     private SyntheticScreenRegionPicker? _screenshotSmokePicker;
     private int _startupRuntimeEnsureAttempts = 0;
+    private int _managedEnvironmentInstallAttempts;
     private FrontendExclusiveLock? _exclusiveLock;
     private WindowMessageService? _windowMessages;
     private TrayIconService? _trayIcon;
@@ -188,7 +189,8 @@ public sealed partial class App : Application
 
         _windowLayoutStore = new WindowLayoutStore(
             Path.Combine(layout.DataRoot, "winui-layout.json"));
-        if (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "screenshot-e2e")
+        if (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") is
+            "screenshot-e2e" or "managed-environment-e2e")
         {
             _screenshotSmokePicker = new SyntheticScreenRegionPicker();
         }
@@ -231,7 +233,8 @@ public sealed partial class App : Application
               () => _managedSession is { } session
                 ? (session.EnvironmentId, session.Revision) : null,
               _productMaintenance,
-              () => _managedSession)),
+              () => _managedSession,
+              () => Interlocked.Increment(ref _managedEnvironmentInstallAttempts))),
           () => _shellViewModel ??
             throw new InvalidOperationException("Desktop shell is unavailable."),
           () => _updateViewModel ??
@@ -241,7 +244,10 @@ public sealed partial class App : Application
           _screenshotSmokePicker,
           () => _inferenceGateway.SubmitAttempts,
           () => _inferenceGateway.LastSubmittedJobId,
-          () => Volatile.Read(ref _startupRuntimeEnsureAttempts));
+          () => Volatile.Read(ref _startupRuntimeEnsureAttempts),
+          () => _environmentSettings?.Snapshot,
+          () => _managedSession,
+          () => Volatile.Read(ref _managedEnvironmentInstallAttempts));
         _window.AppWindow.Closing += OnAppWindowClosing;
         _window.Closed += OnWindowClosedFallback;
         _window.Activate();

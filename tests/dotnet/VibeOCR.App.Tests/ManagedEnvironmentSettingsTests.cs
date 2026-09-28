@@ -82,8 +82,9 @@ public sealed class ManagedEnvironmentSettingsTests
   {
     var manager = new WaitingManager();
     var maintenance = new ProductMaintenanceCoordinator();
+    int installAttempts = 0;
     var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
-      () => null, maintenance);
+      () => null, maintenance, installAttempted: () => installAttempts++);
     await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi",
       TestContext.Current.CancellationToken);
 
@@ -95,6 +96,7 @@ public sealed class ManagedEnvironmentSettingsTests
     await install.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
     Assert.True(manager.Cancelled);
+    Assert.Equal(1, installAttempts);
     Assert.False(settings.CanCancelInstall);
     Assert.True(maintenance.State.IsIdle);
     Assert.Equal("安装已取消；原环境保持不变。", settings.Status);

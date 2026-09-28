@@ -345,6 +345,8 @@ class JobRecord:
                 request_id=self.request_id,
                 source_job_id=self.source_job_id,
                 pipeline=self.pipeline,
+                environment_id=self.environment_id,
+                environment_revision=self.environment_revision,
             )
 
     # ------------------------------------------------------------------

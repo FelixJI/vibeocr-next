@@ -12,7 +12,8 @@ public sealed class ManagedEnvironmentSettings(
     Func<string, CancellationToken, Task> activate,
     Func<(string Id, int Revision)?> runningSession,
     ProductMaintenanceCoordinator productMaintenance,
-    Func<ManagedEnvironmentSession?>? currentSession = null)
+    Func<ManagedEnvironmentSession?>? currentSession = null,
+    Action? installAttempted = null)
 {
     private readonly SemaphoreSlim gate = new(1, 1);
     private CancellationTokenSource? activeInstall;
@@ -66,6 +67,7 @@ public sealed class ManagedEnvironmentSettings(
         try
         {
             StateChanged?.Invoke();
+            installAttempted?.Invoke();
             await manager.InstallEnvironmentAsync(plan, linked.Token);
             Plan = null;
             Snapshot = await manager.ListEnvironmentsAsync(linked.Token);

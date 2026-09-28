@@ -34,6 +34,8 @@
     "result_available": false,
     "request_id": null,
     "source_job_id": null,
+    "environment_id": "env-golden",
+    "environment_revision": 2,
     "pipeline": null
   },
   "job_snapshot_completed_with_errors": {

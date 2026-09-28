@@ -789,6 +789,12 @@ public sealed record JobSnapshot
     [JsonPropertyName("source_job_id")]
     public string? SourceJobId { get; init; }
 
+    [JsonPropertyName("environment_id")]
+    public string? EnvironmentId { get; init; }
+
+    [JsonPropertyName("environment_revision")]
+    public int? EnvironmentRevision { get; init; }
+
     [JsonPropertyName("pipeline")]
     public PipelineSelection? Pipeline { get; init; }
 }
