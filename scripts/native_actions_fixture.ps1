@@ -265,7 +265,16 @@ public static class NativeActionsFixture
     {
         RequireForeground(appPid);
         RequirePointOwner(x, y, appPid);
-        if (!SetCursorPos(x, y)) throw new InvalidOperationException("Synthetic hover failed.");
+        Send(new[] { new Input
+        {
+            Type = 0,
+            Data = new InputUnion { Mouse = new MouseInput
+            {
+                X = (int)(((long)x - GetSystemMetrics(76)) * 65536 / GetSystemMetrics(78)),
+                Y = (int)(((long)y - GetSystemMetrics(77)) * 65536 / GetSystemMetrics(79)),
+                Flags = 0x0001 | 0x4000 | 0x8000,
+            } },
+        } });
     }
 
     private static void Tap(ushort key)

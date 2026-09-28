@@ -147,8 +147,13 @@ async function forceStop(child) {
     await execFileAsync('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
       timeout: 10000, windowsHide: true,
     });
-  } catch {
-    if (child.exitCode === null) throw new Error(`Owned process ${child.pid} could not be stopped.`);
+  } catch (error) {
+    if (child.exitCode === null) {
+      // Stop our app PID, but do not claim its child process tree was cleaned.
+      child.kill();
+      await waitExit(child, 5000);
+      throw new Error(`Owned process tree cleanup was not confirmed for ${child.pid}: ${error.message}`);
+    }
   }
   assert(await waitExit(child, 5000), `Owned process ${child.pid} survived cleanup.`);
 }
@@ -215,7 +220,11 @@ async function launchApp(candidate, webviewData, instanceId) {
       .sort((a, b) => area(b) - area(a))[0];
     return { child, browser, page, main, port };
   } catch (error) {
-    await forceStop(child);
+    try { await forceStop(child); }
+    catch (cleanupError) {
+      throw new AggregateError([error, cleanupError],
+        `Isolated app startup and owned PID cleanup both failed: ${error.message}; ${cleanupError.message}`);
+    }
     throw error;
   }
 }
@@ -319,6 +328,41 @@ async function pngPixels(page, png) {
   }, png.toString('base64'));
 }
 
+async function observeNextAnnotationUpload(page) {
+  await page.evaluate(() => {
+    const originalFetch = window.fetch;
+    const observed = { count: 0, mimeType: null, byteLength: null,
+      bytes: null, problem: null };
+    window.__nativeActionsUpload = observed;
+    window.fetch = function(input, init) {
+      if (input === '/__annotation' && init?.method === 'POST') {
+        observed.count++;
+        try {
+          const body = init.body;
+          if (!(body instanceof Blob)) observed.problem = 'upload body was not a Blob';
+          else {
+            observed.mimeType = body.type;
+            observed.byteLength = body.size;
+            if (body.size > 8 * 1024 * 1024) observed.problem = 'synthetic PNG exceeded 8 MiB';
+            else body.arrayBuffer().then(
+              (buffer) => { observed.bytes = Array.from(new Uint8Array(buffer)); },
+              () => { observed.problem = 'Blob observation failed'; },
+            );
+          }
+        } catch {
+          observed.problem = 'Blob observation failed';
+        }
+      }
+      return originalFetch.apply(this, arguments);
+    };
+    window.__nativeActionsRestoreFetch = () => {
+      window.fetch = originalFetch;
+      delete window.__nativeActionsRestoreFetch;
+      delete window.__nativeActionsUpload;
+    };
+  });
+}
+
 async function captureThroughHotkey(app, fixture, evidenceRoot, evidence) {
   const { page } = app;
   const toolbarHandles = (await windows(app.child.pid))
@@ -397,17 +441,50 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence) {
   const after = await canvasOrange(page);
   assert(after.orange > before.orange + 50, 'Real WebView2 rectangle edit changed too few pixels.');
 
-  const requestPromise = page.waitForRequest((request) =>
-    request.method() === 'POST' && request.url() === 'https://app.vibeocr/__annotation',
-  { timeout: 10000 });
-  await page.getByRole('button', { name: '复制标注图' }).click();
-  const request = await requestPromise;
-  const response = await request.response();
-  assert.equal(response?.status(), 200, 'Public annotation output was not accepted.');
-  const png = request.postDataBuffer();
-  assert(png?.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])),
-    'Public annotation output is not PNG.');
-  await page.getByText('已复制截图副本', { exact: false }).waitFor();
+  await observeNextAnnotationUpload(page);
+  let png;
+  let uploadBytes;
+  try {
+    const requestPromise = page.waitForRequest((request) =>
+      request.method() === 'POST' && request.url() === 'https://app.vibeocr/__annotation',
+    { timeout: 10000 });
+    await page.getByRole('button', { name: '复制标注图' }).click();
+    const request = await requestPromise;
+    const response = await request.response();
+    assert.equal(response?.status(), 201, 'Public annotation upload was not accepted.');
+    // WebView2 CDP may omit a fetch Blob from request.postDataBuffer(). Observe
+    // that same immutable Blob without changing the arguments sent to fetch.
+    const cdpBytes = request.postDataBuffer()?.length ?? null;
+    try {
+      await page.waitForFunction(() => {
+        const upload = window.__nativeActionsUpload;
+        return upload && (Array.isArray(upload.bytes) || upload.problem !== null);
+      }, null, { timeout: 5000 });
+    } catch (error) {
+      const observed = await page.evaluate(() => {
+        const upload = window.__nativeActionsUpload;
+        return { count: upload?.count ?? 0, mimeType: upload?.mimeType ?? null,
+          byteLength: upload?.byteLength ?? null, problem: upload?.problem ?? null };
+      }).catch(() => null);
+      throw new Error(`Product Blob observation timed out: ${JSON.stringify(observed)}; ` +
+        `CDP body bytes=${cdpBytes ?? 'unavailable'}.`, { cause: error });
+    }
+    const upload = await page.evaluate(() => window.__nativeActionsUpload);
+    assert.equal(upload.count, 1,
+      `Expected one product PNG upload, saw ${upload.count}; CDP body bytes=${cdpBytes ?? 'unavailable'}.`);
+    assert.equal(upload.problem, null,
+      `Product Blob observation failed: ${upload.problem}; CDP body bytes=${cdpBytes ?? 'unavailable'}.`);
+    assert.equal(upload.mimeType, 'image/png', 'Product upload Blob was not image/png.');
+    assert(Array.isArray(upload.bytes) && upload.bytes.length === upload.byteLength,
+      'Product upload Blob size changed during observation.');
+    png = Buffer.from(upload.bytes);
+    uploadBytes = upload.byteLength;
+    assert(png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])),
+      `Product upload Blob is not PNG; bytes=${uploadBytes}, CDP body bytes=${cdpBytes ?? 'unavailable'}.`);
+    await page.getByText('已复制截图副本', { exact: false }).waitFor();
+  } finally {
+    await page.evaluate(() => window.__nativeActionsRestoreFetch?.()).catch(() => {});
+  }
   const pixels = await pngPixels(page, png);
   assert.equal(pixels.width, button.width, 'Smart region did not select the synthetic button width.');
   assert.equal(pixels.height, button.height, 'Smart region did not select the synthetic button height.');
@@ -421,7 +498,8 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence) {
     mainHiddenDuringSelection: true, toolbarHiddenDuringSelection: true,
     toolbarRestoredAfterSelection: true,
     background: fixture.backgroundRect, button, canvasBefore: before,
-    canvasAfter: after, png: pixels, sessionId: revision.sessionId,
+    canvasAfter: after, png: pixels, productUploadBytes: uploadBytes,
+    sessionId: revision.sessionId,
     revision: revision.revision };
 }
 
