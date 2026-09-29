@@ -332,6 +332,10 @@ def _recognize_ocr(
     text_blocks: list[TextBlock] = []
 
     output_list = _consume_generator_safely(output)
+    _logger.info(
+        "[Paddle consumed] predict OCR use_textline_orientation=%s",
+        options.use_textline_orientation,
+    )
 
     # 提取预处理信息：旋转角度和实际预处理后图像
     # 注意：res.img['preprocessed_img'] 是拼接可视化，不用；
@@ -404,6 +408,10 @@ def _recognize_ocr_batch(
                 use_doc_unwarping=options.use_doc_unwarping,
                 use_textline_orientation=options.use_textline_orientation,
             )
+        )
+        _logger.info(
+            "[Paddle consumed] predict OCR use_textline_orientation=%s",
+            options.use_textline_orientation,
         )
         _predict_elapsed = _time.perf_counter() - _predict_start
         _logger.info(

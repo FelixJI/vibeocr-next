@@ -242,11 +242,16 @@ def _create_paddlocr_vl_pipeline(device: str, **kwargs: Any) -> Any:
     """
     from paddleocr import PaddleOCRVL
 
-    return PaddleOCRVL(
+    pipeline = PaddleOCRVL(
         device=device,
         pipeline_version=PADDLEOCR_VL_PIPELINE_VERSION,
         **kwargs,
     )
+    _logger.info(
+        "[Paddle consumed] construct PaddleOCR-VL use_layout_detection=%s",
+        kwargs.get("use_layout_detection"),
+    )
+    return pipeline
 
 
 def _recognize_paddlocr_vl(
@@ -282,6 +287,10 @@ def _recognize_paddlocr_vl(
 
     output = pipeline.predict(input=image, **predict_kwargs)
     output_list = list(output)
+    _logger.info(
+        "[Paddle consumed] predict PaddleOCR-VL use_layout_detection=%s",
+        predict_kwargs["use_layout_detection"],
+    )
 
     markdown_text = ""
     text_blocks: list[TextBlock] = []

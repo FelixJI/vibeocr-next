@@ -229,6 +229,10 @@ def _recognize_table(
 
     output = pipeline.predict(input=image, **predict_kwargs)
     output_list = list(output)
+    _logger.info(
+        "[Paddle consumed] predict TABLE_RECOGNITION use_table_orientation_classify=%s",
+        predict_kwargs["use_table_orientation_classify"],
+    )
 
     text_blocks: list[TextBlock] = []
     # 上游 OCR 提供真实 rec_scores；表格结构块无置信度→None（不伪造）。

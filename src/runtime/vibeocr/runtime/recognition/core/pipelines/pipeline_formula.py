@@ -20,6 +20,9 @@ from typing import Any
 
 from vibeocr.runtime.recognition.core.pipelines.base_options import BasePipelineOptions
 from vibeocr.runtime.recognition.core.pipelines.registry import PipelineSpec
+from vibeocr.runtime.recognition.pipeline_contracts import (
+    FORMULA_RECOGNITION_MODEL_NAMES,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -63,7 +66,14 @@ def _create_formula_pipeline(device: str, **kwargs: Any) -> Any:
     """
     from paddleocr import FormulaRecognitionPipeline
 
-    return FormulaRecognitionPipeline(device=device, **kwargs)
+    pipeline = FormulaRecognitionPipeline(device=device, **kwargs)
+    model_name = kwargs.get("formula_recognition_model_name")
+    if model_name is None or model_name in FORMULA_RECOGNITION_MODEL_NAMES:
+        _logger.info(
+            "[Paddle consumed] construct FORMULA_RECOGNITION formula_recognition_model_name=%s",
+            model_name,
+        )
+    return pipeline
 
 
 def _parse_dt_polys(dt_polys: Any) -> tuple[float, float, float, float] | None:
@@ -110,6 +120,10 @@ def _recognize_formula(
     }
     output = pipeline.predict(input=image, **predict_kwargs)
     output_list = list(output)
+    _logger.info(
+        "[Paddle consumed] predict FORMULA_RECOGNITION use_doc_orientation_classify=%s",
+        predict_kwargs["use_doc_orientation_classify"],
+    )
 
     preproc_angle = 0
     preprocessed_png: bytes | None = None

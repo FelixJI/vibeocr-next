@@ -129,7 +129,12 @@ def _create_pp_structure_pipeline(device: str, **kwargs: Any) -> Any:
     """
     from paddleocr import PPStructureV3
 
-    return PPStructureV3(device=device, **kwargs)
+    pipeline = PPStructureV3(device=device, **kwargs)
+    _logger.info(
+        "[Paddle consumed] construct PP-StructureV3 use_seal_recognition=%s",
+        kwargs.get("use_seal_recognition"),
+    )
+    return pipeline
 
 
 def _recognize_pp_structure(
@@ -164,6 +169,10 @@ def _recognize_pp_structure(
         use_chart_recognition=options.use_chart_recognition,
     )
     output_list = _consume_generator_safely(output)
+    _logger.info(
+        "[Paddle consumed] predict PP-StructureV3 use_seal_recognition=%s",
+        options.use_seal_recognition,
+    )
 
     preproc_angle = 0
     preprocessed_png: bytes | None = None

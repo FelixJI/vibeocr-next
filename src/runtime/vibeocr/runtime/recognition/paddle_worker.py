@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import sys
 from contextlib import ExitStack
@@ -22,6 +23,11 @@ def main() -> None:
             os.environ["PATH"] = str(libs) + os.pathsep + os.environ.get("PATH", "")
     replies = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding="utf-8", buffering=1)
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
     from vibeocr.runtime.jobs.budgets import InputItem
     from vibeocr.runtime.recognition.ocr_service import OCRService
     from vibeocr.runtime.recognition.paddle_adapter import PaddlePipelineAdapter

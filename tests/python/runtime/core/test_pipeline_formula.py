@@ -83,6 +83,46 @@ def test_create_formula_pipeline_uses_locked_class(monkeypatch):
     assert captured["enable_mkldnn"] is False
 
 
+def test_consumed_constructor_model_reaches_parent_log(monkeypatch, caplog):
+    import logging
+    import sys
+    import types
+
+    from vibeocr.runtime.processes.utils.subprocess_log import SubprocessLogForwarder
+
+    received = {}
+
+    class _PaddleFormula:
+        def __init__(self, **kwargs):
+            received.update(kwargs)
+
+    stub = types.ModuleType("paddleocr")
+    stub.FormulaRecognitionPipeline = _PaddleFormula
+    monkeypatch.setitem(sys.modules, "paddleocr", stub)
+    with caplog.at_level(logging.INFO):
+        _create_formula_pipeline(
+            "cpu", formula_recognition_model_name="PP-FormulaNet_plus-L"
+        )
+        worker_record = next(
+            record for record in caplog.records if "[Paddle consumed]" in record.message
+        )
+        line = logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+        ).format(worker_record)
+        SubprocessLogForwarder(
+            logger_name="vibeocr.subprocess.paddle.test",
+            source_label="[Paddle worker]",
+        ).forward(line)
+
+    assert received["formula_recognition_model_name"] == "PP-FormulaNet_plus-L"
+    assert any(
+        record.name == "vibeocr.subprocess.paddle.test"
+        and "construct FORMULA_RECOGNITION formula_recognition_model_name=PP-FormulaNet_plus-L"
+        in record.message
+        for record in caplog.records
+    )
+
+
 class _DictResult(dict):
     """模拟 PaddleX FormulaRecognitionResult：dict 子类。"""
 

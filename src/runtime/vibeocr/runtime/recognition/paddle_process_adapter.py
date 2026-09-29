@@ -15,6 +15,7 @@ from pathlib import Path
 
 from vibeocr.runtime.jobs.budgets import AdapterCapability, InputItem
 from vibeocr.runtime.processes.utils.job_object import JobObjectGuard
+from vibeocr.runtime.processes.utils.subprocess_log import SubprocessLogForwarder
 from vibeocr.runtime.recognition.ocr_engines import (
     REASON_ENGINE_NOT_INSTALLED,
     EngineAvailability,
@@ -136,8 +137,23 @@ class PaddleProcessAdapter:
                 responses.put(None)
 
         def read_logs() -> None:
-            for line in process.stderr:
-                logger.debug("[Paddle worker] %s", line.rstrip())
+            forwarded_logger = logging.getLogger("vibeocr.subprocess.paddle")
+            if not forwarded_logger.handlers:
+                handler = logging.StreamHandler(sys.stderr)
+                handler.setFormatter(logging.Formatter("%(message)s"))
+                forwarded_logger.addHandler(handler)
+            forwarded_logger.setLevel(logging.INFO)
+            forwarded_logger.propagate = False
+            forwarder = SubprocessLogForwarder(
+                logger_name="vibeocr.subprocess.paddle",
+                source_label="[Paddle worker]",
+            )
+            try:
+                for line in process.stderr:
+                    for part in forwarder.split_mixed_lines(line):
+                        forwarder.forward(part)
+            finally:
+                forwarder.flush()
 
         threading.Thread(target=read_replies, daemon=True).start()
         threading.Thread(target=read_logs, daemon=True).start()
