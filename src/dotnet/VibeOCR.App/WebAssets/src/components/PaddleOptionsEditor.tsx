@@ -1,5 +1,5 @@
 import { Button, Input, Select } from "@fluentui/react-components";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { AppActions } from "../app/types";
 
 const BOOLEAN_OPTIONS = {
@@ -61,12 +61,26 @@ export function PaddleOptionsEditor({
   readonly actions: AppActions;
 }) {
   const [options, setOptions] = useState(() => readOptions(values));
+  const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const batchSize = options.formula_recognition_batch_size;
   const valid =
     batchSize === undefined ||
     (Number.isInteger(batchSize) && batchSize >= 1 && batchSize <= 64);
+  // 对比前后都用 readOptions 规范化，键序差异不影响回显匹配。
+  const localKey = JSON.stringify(readOptions(options));
+  const incomingKey = JSON.stringify(readOptions(values));
+  useEffect(() => {
+    if (dirty) {
+      // 存在未保存编辑时不被宿主回显（保存结果、环境默认值或无关状态刷新）
+      // 覆盖；直到回显追平本地值才解除未保存标记。
+      if (localKey === incomingKey) setDirty(false);
+    } else if (localKey !== incomingKey) {
+      // 无未保存编辑时跟随宿主值重新初始化（切模式/环境默认值变化）。
+      setOptions(JSON.parse(incomingKey) as Options);
+    }
+  }, [dirty, localKey, incomingKey]);
   return (
     <details className="recognition-options">
       <summary>识别参数</summary>
@@ -83,14 +97,15 @@ export function PaddleOptionsEditor({
               value={
                 options[key] === undefined ? "default" : String(options[key])
               }
-              onChange={(_, data) =>
+              onChange={(_, data) => {
+                setDirty(true);
                 setOptions((current) => {
                   const next = { ...current };
                   if (data.value === "default") delete next[key];
                   else next[key] = data.value === "true";
                   return next;
-                })
-              }
+                });
+              }}
             >
               <option value="default">使用引擎默认值</option>
               <option value="true">启用</option>
@@ -109,15 +124,16 @@ export function PaddleOptionsEditor({
             step={1}
             value={batchSize === undefined ? "" : String(batchSize)}
             placeholder="使用引擎默认值"
-            onChange={(_, data) =>
+            onChange={(_, data) => {
+              setDirty(true);
               setOptions((current) => {
                 const next = { ...current };
                 if (data.value === "")
                   delete next.formula_recognition_batch_size;
                 else next.formula_recognition_batch_size = Number(data.value);
                 return next;
-              })
-            }
+              });
+            }}
           />
         </div>
       )}
@@ -127,15 +143,16 @@ export function PaddleOptionsEditor({
           <Select
             id={`${modeId}-formula-model`}
             value={options.formula_recognition_model_name ?? ""}
-            onChange={(_, data) =>
+            onChange={(_, data) => {
+              setDirty(true);
               setOptions((current) => {
                 const next = { ...current };
                 if (data.value === "")
                   delete next.formula_recognition_model_name;
                 else next.formula_recognition_model_name = data.value;
                 return next;
-              })
-            }
+              });
+            }}
           >
             <option value="">使用引擎默认模型</option>
             {FORMULA_MODELS.map((model) => (

@@ -3234,8 +3234,11 @@ function TaskEngineSelector({
       )}
       {active?.engine.startsWith("paddle_") &&
         Array.isArray(active.supportedOptions) && (
+          // key 只绑定模式：保存成功后宿主会回显新的 active.options，若把它混入
+          // key，保存瞬间会重挂编辑器并丢失保存提示与展开状态；宿主值同步由
+          // 编辑器在无未保存编辑时自行完成。
           <PaddleOptionsEditor
-            key={`${active.engine}-${JSON.stringify(active.options)}`}
+            key={active.engine}
             modeId={active.engine}
             supportedOptions={active.supportedOptions}
             values={active.options}
