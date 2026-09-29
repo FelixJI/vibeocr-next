@@ -49,6 +49,7 @@ public sealed record CaptureRecognitionScreenCommand : WorkbenchCommand;
 /// </summary>
 public sealed record CaptureScreenshotSessionCommand : WorkbenchCommand;
 public sealed record CaptureScreenshotTextSessionCommand : WorkbenchCommand;
+public sealed record CaptureScrollingScreenshotCommand : WorkbenchCommand;
 
 public sealed record CloseScreenshotSessionCommand : WorkbenchCommand;
 

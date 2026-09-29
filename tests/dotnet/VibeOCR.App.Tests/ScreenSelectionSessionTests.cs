@@ -6,6 +6,26 @@ namespace VibeOCR.App.Tests;
 
 public sealed class ScreenSelectionSessionTests
 {
+  private sealed class StitchedRegionPicker : IScreenRegionPicker
+  {
+    public Task<ScreenRegionSelection?> PickAsync(CancellationToken cancellationToken) =>
+      Task.FromResult<ScreenRegionSelection?>(new ScreenRegionSelection(
+        new PhysicalRectangle(10, 20, 2, 2), Enumerable.Range(0, 40).Select(i => (byte)i).ToArray(), 8, 5));
+  }
+
+  [Fact]
+  public async Task ScrollingInputEncodesTheWholeStitchedHeight()
+  {
+    var inputService = new InputService(static () => 0, scrollingRegionPicker: new StitchedRegionPicker());
+    RecognitionInput input = Assert.IsType<RecognitionInput>(
+      await inputService.CaptureScrollingScreenAsync(TestContext.Current.CancellationToken));
+    Assert.Equal("scrolling-screenshot", input.Origin);
+    Assert.Equal("image/bmp", input.MediaType);
+    Assert.Equal(94, input.Data.Length);
+    Assert.Equal(-5, System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(input.Data.AsSpan(22)));
+    Assert.Equal(Enumerable.Range(0, 40).Select(i => (byte)i), input.Data.Skip(54));
+  }
+
   [Fact]
   public void ReleaseKeepsSelectionForConfirmationAndBackAllowsReselectionBeforeExit()
   {

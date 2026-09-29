@@ -16,7 +16,8 @@ namespace VibeOCR.App.Features.Recognition;
 public sealed record ScreenRegionSelection(
     PhysicalRectangle Bounds,
     byte[] Bgra,
-    int Stride);
+    int Stride,
+    int? PixelHeight = null);
 
 public interface IScreenRegionPicker
 {
@@ -28,7 +29,7 @@ public interface IScreenRegionPicker
 /// single frozen snapshot after hiding the main window, then crops from that
 /// snapshot so the application cannot reappear in the final OCR input.
 /// </summary>
-public sealed class ScreenRegionPicker(Func<nint> ownerWindow) : IScreenRegionPicker
+public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = false) : IScreenRegionPicker
 {
     private const long MaximumCaptureBytes = 256L << 20;
     private const int VirtualScreenX = 76;
@@ -50,14 +51,14 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow) : IScreenRegionPi
             PhysicalRectangle desktop = GetVirtualDesktop();
             SmartScreenCandidates candidates = SmartScreenCandidates.Capture(desktop);
             await using var capture = new ScreenCaptureService(Guid.NewGuid());
-            CapturedFrame frame = capture.Capture(desktop, TimeSpan.FromMinutes(1));
+            CapturedFrame? frame = capture.Capture(desktop, TimeSpan.FromMinutes(1));
             byte[] desktopBgra = capture.Read(frame);
             byte[] desktopBmp = EncodeTopDownBmp(
                 desktopBgra,
                 desktop.Width,
                 desktop.Height,
                 frame.Stride);
-            BitmapImage background = await LoadBitmapAsync(
+            BitmapImage? background = await LoadBitmapAsync(
                 desktopBmp,
                 desktop.Width,
                 desktop.Height);
@@ -70,6 +71,20 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow) : IScreenRegionPi
             if (selected is null)
             {
                 return null;
+            }
+
+            if (scrolling)
+            {
+                // The frozen desktop is only for selection, not a scrolling history.
+                frame = null;
+                desktopBgra = [];
+                desktopBmp = [];
+                background = null;
+                await Task.Delay(180, cancellationToken);
+                CapturedFrame? stitched = await ScrollCaptureSession.CaptureAsync(
+                    owner, selected.Value, cancellationToken);
+                return stitched is null ? null : new ScreenRegionSelection(
+                    selected.Value, stitched.Pixels, stitched.Stride, stitched.Height);
             }
 
             byte[] cropped = CropBgra(desktopBgra, desktop, selected.Value);
@@ -577,7 +592,16 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow) : IScreenRegionPi
     keyboardSink.Focus(FocusState.Programmatic);
     using CancellationTokenRegistration registration = cancellationToken.Register(() =>
     root.DispatcherQueue.TryEnqueue(() => { completion.TrySetCanceled(cancellationToken); overlay.Close(); }));
-    return await completion.Task;
+    try
+    {
+      return await completion.Task;
+    }
+    finally
+    {
+      // Release the frozen desktop before a possible long scrolling session.
+      root.Children.Clear();
+      overlay.Content = null;
+    }
   }
     public static PhysicalRectangle ScaleSelection(
         PhysicalRectangle desktop,
@@ -620,7 +644,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow) : IScreenRegionPi
 
     private static async Task<BitmapImage> LoadBitmapAsync(byte[] data, int physicalWidth, int physicalHeight)
     {
-        var stream = new InMemoryRandomAccessStream();
+        using var stream = new InMemoryRandomAccessStream();
         using (var writer = new DataWriter(stream))
         {
             writer.WriteBytes(data);

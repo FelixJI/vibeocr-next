@@ -290,6 +290,9 @@ public static class WorkbenchBridgeCodec
       case ("recognition", "captureScreenshotTextSession"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new CaptureScreenshotTextSessionCommand();
+      case ("recognition", "captureScrollingScreenshot"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new CaptureScrollingScreenshotCommand();
       case ("recognition", "closeScreenshotSession"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new CloseScreenshotSessionCommand();

@@ -40,6 +40,8 @@ public sealed class ScreenshotSessionWorkbenchTests
   private sealed class FixedCaptureInput : IInputService
   {
     public int CaptureCalls;
+    public bool CancelCapture;
+    public bool FailCapture;
 
     public Task<RecognitionInput?> PickFileAsync(CancellationToken cancellationToken) =>
       Task.FromResult<RecognitionInput?>(new RecognitionInput(CaptureBytes, "image/png", "capture.png", "file"));
@@ -50,9 +52,14 @@ public sealed class ScreenshotSessionWorkbenchTests
     public Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken)
     {
       Interlocked.Increment(ref CaptureCalls);
+      if (FailCapture) throw new IOException("Synthetic capture failed.");
+      if (CancelCapture) return Task.FromResult<RecognitionInput?>(null);
       return Task.FromResult<RecognitionInput?>(
         new RecognitionInput(CaptureBytes, "image/bmp", "screenshot.bmp", "screenshot"));
     }
+
+    public Task<RecognitionInput?> CaptureScrollingScreenAsync(CancellationToken cancellationToken) =>
+      CaptureScreenAsync(cancellationToken);
 
     public Task<RecognitionInput?> ReadDroppedFileAsync(
       string path, CancellationToken cancellationToken) =>
@@ -431,6 +438,49 @@ public sealed class ScreenshotSessionWorkbenchTests
         Assert.False((await pureAwaiter.Task).ScreenshotSession!.TextSelectionRequested);
       }
       Assert.Equal(2, inputs.CaptureCalls);
+      Assert.Equal(0, inference.SubmitCalls);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Theory]
+  [InlineData(false, false)]
+  [InlineData(false, true)]
+  [InlineData(true, false)]
+  [InlineData(true, true)]
+  public async Task RejectedCaptureDoesNotPublishPreviousImage(bool scrolling, bool failed)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new ThrowingSubmitClient();
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(recognition, root, broker, annotationStore,
+        settings: new SettingsViewModel(inference), inferenceAttached: () => false);
+      using (var first = new RecognitionStateAwaiter(handler, state => !state.IsBusy))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        Assert.NotNull((await first.Task).ScreenshotSession);
+      }
+      RecognitionInput? previous = recognition.CurrentInput;
+      inputs.CancelCapture = !failed;
+      inputs.FailCapture = failed;
+      using var rejected = new RecognitionStateAwaiter(handler, state => !state.IsBusy);
+      WorkbenchCommand command = scrolling
+        ? new CaptureScrollingScreenshotCommand()
+        : new CaptureScreenshotSessionCommand();
+      await handler.ExecuteAsync(command, TestContext.Current.CancellationToken);
+      RecognitionWorkbenchState state = await rejected.Task;
+      Assert.Null(state.ScreenshotSession);
+      Assert.Equal(failed ? "recognition.failed" : "recognition.cancelled", state.StatusCode);
+      Assert.Same(previous, recognition.CurrentInput);
       Assert.Equal(0, inference.SubmitCalls);
     }
     finally

@@ -126,6 +126,10 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         RunInputAsync(_inputs.CaptureScreenAsync, cancellationToken,
             recognize: false, persistCurrentInput: true);
 
+    public Task CaptureScrollingScreenshotSessionAsync(CancellationToken cancellationToken) =>
+        RunInputAsync(_inputs.CaptureScrollingScreenAsync, cancellationToken,
+            recognize: false, persistCurrentInput: true);
+
     /// <summary>
     /// 显式识别截图会话当前导出的最终 PNG；不回退未编辑原图，
     /// 也不替换编辑器的基准输入（CurrentInput 保持会话基准图）。

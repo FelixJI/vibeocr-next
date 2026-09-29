@@ -34,6 +34,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       "recognition.clipboard",
       "recognition.capture",
       "recognition.screenshotSession",
+      "recognition.scrollCapture",
       "recognition.results",
       "recognition.annotation",
       "batch.add",
@@ -244,6 +245,7 @@ public sealed class DesktopWorkbenchCommandHandler :
           screenCapture: true),
         CaptureScreenshotSessionCommand => StartScreenshotSession(false, cancellationToken),
         CaptureScreenshotTextSessionCommand => StartScreenshotSession(true, cancellationToken),
+        CaptureScrollingScreenshotCommand => StartScreenshotSession(false, cancellationToken, scrolling: true),
         CloseScreenshotSessionCommand => CloseScreenshotSession(),
         NotifyScreenshotSessionRevisionCommand notify => NotifyScreenshotRevision(notify),
         CopyScreenshotImageCommand copy => await CopyScreenshotImageAsync(
@@ -565,7 +567,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     annotationStore.Take(new Uri(resourceUri));
 
   private RecognitionWorkbenchState? StartScreenshotSession(
-    bool textSelectionRequested, CancellationToken cancellationToken)
+    bool textSelectionRequested, CancellationToken cancellationToken, bool scrolling = false)
   {
     recognition ??= recognitionFactory();
     // 截图单飞：任一截图入口（主窗/热键/悬浮栏/页面按钮）同时只允许一个
@@ -587,7 +589,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       resultActions = null;
       return PublishStartThenTrack(
         SessionRecognitionState(true, "recognition.running"),
-        () => CompleteScreenshotSessionAsync(generation, textSelectionRequested,
+        () => CompleteScreenshotSessionAsync(generation, textSelectionRequested, scrolling,
           cancellationToken));
     }
     catch
@@ -600,6 +602,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private async Task CompleteScreenshotSessionAsync(
     long generation,
     bool textSelectionRequested,
+    bool scrolling,
     CancellationToken cancellationToken)
   {
     // 所有截图入口（主窗/热键/悬浮栏）统一让位：截图期间工具栏与感应条
@@ -610,9 +613,18 @@ public sealed class DesktopWorkbenchCommandHandler :
       {
         // 纯截图路径：不加载 Runtime 目录（EnsureSelectionLoadedAsync）、
         // 不做 requireUsable 模式协商；Supervisor 未连接/维护中同样可完成。
-        await recognition!.CaptureScreenshotSessionAsync(cancellationToken);
+        if (scrolling)
+          await recognition!.CaptureScrollingScreenshotSessionAsync(cancellationToken);
+        else
+          await recognition!.CaptureScreenshotSessionAsync(cancellationToken);
         if (generation != Volatile.Read(ref recognitionGeneration))
         {
+          return;
+        }
+        if (recognition.TerminalState is JobState.Cancelled or JobState.Failed)
+        {
+          StateChanged?.Invoke(SessionRecognitionState(false,
+            recognition.TerminalState is JobState.Failed ? "recognition.failed" : "recognition.cancelled"));
           return;
         }
         if (recognition.CurrentInput is { } captured)

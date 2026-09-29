@@ -8,6 +8,31 @@ import { App, type AppActions, type AppViewState } from "./App";
 Object.assign(globalThis, { NodeFilter: { FILTER_SKIP: 3 } });
 
 describe("AppShell", () => {
+  it("starts scrolling capture without an OCR connection", async () => {
+    window.location.hash = "#/recognition";
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: false,
+      revision: 0,
+      route: "recognition",
+      theme: "light",
+      capabilities: ["recognition.scrollCapture"],
+      features: {},
+      runtimeLabel: "未连接",
+    };
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "长截图" }));
+    expect(actions.run).toHaveBeenCalledExactlyOnceWith({
+      type: "recognition.captureScrollingScreenshot",
+    });
+    unmount();
+  });
   it("shows per-action hotkey state and drives apply, disable and reset", async () => {
     window.location.hash = "#/settings";
     const user = userEvent.setup();

@@ -19,6 +19,7 @@ export type AppActionType =
   | "recognition.captureScreen"
   | "recognition.captureScreenshotSession"
   | "recognition.captureScreenshotTextSession"
+  | "recognition.captureScrollingScreenshot"
   | "recognition.closeScreenshotSession"
   | "recognition.notifyScreenshotRevision"
   | "recognition.copyScreenshotImage"

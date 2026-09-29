@@ -18,6 +18,8 @@ public interface IInputService
     Task<RecognitionInput?> PickFileAsync(CancellationToken cancellationToken);
     Task<RecognitionInput?> ReadClipboardAsync(CancellationToken cancellationToken);
     Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken);
+    Task<RecognitionInput?> CaptureScrollingScreenAsync(CancellationToken cancellationToken) =>
+        Task.FromException<RecognitionInput?>(new NotSupportedException("Scrolling capture is unavailable."));
     Task<RecognitionInput?> ReadDroppedFileAsync(string path, CancellationToken cancellationToken);
 }
 
@@ -26,11 +28,14 @@ public sealed class InputService : IInputService
     private const long MaximumInputBytes = 256L << 20;
     private readonly Func<nint> _windowHandle;
     private readonly IScreenRegionPicker _screenRegionPicker;
+    private readonly IScreenRegionPicker _scrollingRegionPicker;
 
-    public InputService(Func<nint> windowHandle, IScreenRegionPicker? screenRegionPicker = null)
+    public InputService(Func<nint> windowHandle, IScreenRegionPicker? screenRegionPicker = null,
+        IScreenRegionPicker? scrollingRegionPicker = null)
     {
         _windowHandle = windowHandle ?? throw new ArgumentNullException(nameof(windowHandle));
         _screenRegionPicker = screenRegionPicker ?? new ScreenRegionPicker(windowHandle);
+        _scrollingRegionPicker = scrollingRegionPicker ?? new ScreenRegionPicker(windowHandle, scrolling: true);
     }
 
     public async Task<RecognitionInput?> PickFileAsync(CancellationToken cancellationToken)
@@ -79,9 +84,16 @@ public sealed class InputService : IInputService
             "clipboard");
     }
 
-    public async Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken)
+    public Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken) =>
+        CaptureAsync(_screenRegionPicker, "screenshot", cancellationToken);
+
+    public Task<RecognitionInput?> CaptureScrollingScreenAsync(CancellationToken cancellationToken) =>
+        CaptureAsync(_scrollingRegionPicker, "scrolling-screenshot", cancellationToken);
+
+    private static async Task<RecognitionInput?> CaptureAsync(
+        IScreenRegionPicker picker, string origin, CancellationToken cancellationToken)
     {
-        ScreenRegionSelection? selection = await _screenRegionPicker.PickAsync(cancellationToken);
+        ScreenRegionSelection? selection = await picker.PickAsync(cancellationToken);
         if (selection is null)
         {
             return null;
@@ -91,11 +103,11 @@ public sealed class InputService : IInputService
             EncodeTopDownBmp(
                 selection.Bgra,
                 selection.Bounds.Width,
-                selection.Bounds.Height,
+                selection.PixelHeight ?? selection.Bounds.Height,
                 selection.Stride),
             "image/bmp",
-            "screenshot.bmp",
-            "screenshot");
+            origin + ".bmp",
+            origin);
     }
 
     public Task<RecognitionInput?> ReadDroppedFileAsync(
@@ -132,7 +144,7 @@ public sealed class InputService : IInputService
         _ => throw new InvalidDataException("Unsupported image format."),
     };
 
-    private static byte[] EncodeTopDownBmp(byte[] bgra, int width, int height, int stride)
+    internal static byte[] EncodeTopDownBmp(byte[] bgra, int width, int height, int stride)
     {
         int pixelBytes = checked(stride * height);
         if (stride != checked(width * 4) || bgra.Length != pixelBytes)
