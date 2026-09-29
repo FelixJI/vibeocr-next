@@ -33,6 +33,21 @@ _logger = logging.getLogger(__name__)
 PADDLEOCR_VL_PIPELINE_VERSION = "v1.5"
 
 
+def _normalize_vl_block_type(block_type: str) -> str:
+    """在 provider 边界统一公式类型，供 UI 与导出共同消费。"""
+    return "formula" if block_type == "display_formula" else block_type
+
+
+def _strip_latex_display_delimiters(text: str) -> str:
+    """剥离 VL 公式块 text 外层的 ``$$`` 显示分隔符，返回裸 LaTeX。"""
+    stripped = text.strip()
+    if stripped.startswith("$$") and stripped.endswith("$$") and len(stripped) >= 4:
+        inner = stripped[2:-2].strip()
+        if inner:
+            return inner
+    return stripped
+
+
 def _table_block_key(block: dict[str, Any]) -> tuple[Any, ...]:
     """Build a provider-neutral semantic key without relying on source order."""
 
@@ -328,6 +343,12 @@ def _recognize_paddlocr_vl(
                 block.pop("image_path", None)
                 block.pop("src", None)
                 block.pop("image", None)
+                provider_type = block.get("type")
+                contract_type = _normalize_vl_block_type(str(provider_type or "text"))
+                if contract_type != provider_type:
+                    block["type"] = contract_type
+                if contract_type == "formula" and isinstance(block.get("text"), str):
+                    block["text"] = _strip_latex_display_delimiters(block["text"])
                 if block.get("type") == "table":
                     table_id = str(
                         block.get("block_id")
@@ -371,6 +392,9 @@ def _recognize_paddlocr_vl(
                 if not isinstance(block, dict)
                 else block.get("block_label") or block.get("label", "text")
             )
+            label = _normalize_vl_block_type(label)
+            if label == "formula" and isinstance(text, str):
+                text = _strip_latex_display_delimiters(text)
             raw_bbox = (
                 getattr(block, "bbox", None)
                 if not isinstance(block, dict)

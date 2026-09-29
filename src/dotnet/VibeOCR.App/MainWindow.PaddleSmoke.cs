@@ -924,6 +924,13 @@ public sealed partial class MainWindow
         if (ui.GetValueOrDefault("structured_blocks_count") is not int count || count < 1)
           throw new InvalidOperationException(
             $"{mode} finished without structured layout blocks.");
+        if (Path.GetFileName(PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_FIXTURE")) == "document_mixed.png" &&
+            (ui.GetValueOrDefault("structured_table_present") is not true ||
+             ui.GetValueOrDefault("formula_latex_present") is not true ||
+             ui.GetValueOrDefault("formula_rendered") is not true ||
+             ui.GetValueOrDefault("image_block_present") is not true))
+          throw new InvalidOperationException(
+            $"{mode} mixed fixture lost its table, rendered formula, or image preview.");
         break;
     }
   }

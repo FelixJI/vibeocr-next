@@ -135,6 +135,64 @@ def test_recognize_vl_extracts_object_blocks():
     assert result.text_blocks[0].label == "title"
 
 
+def test_recognize_vl_normalizes_display_formula_from_content_list():
+    """回归：VL content_list 的 display_formula 归一为契约 formula + 裸 LaTeX。
+
+    实机（候选53）证据：contents 原样透传 type=display_formula、
+    text=" $$ \\frac{a+b}{c-d} $$ "，UI 只渲染 type=formula
+    （formula_latex_present=false），MD 导出把 LaTeX 按普通文本转义为
+    \\frac\\{a\\+b\\}。修复后在 provider 边界归一化，导出投影走 reducer
+    公式分支，输出 $$\\frac{a+b}{c-d}$$（与 PP-Structure 一致）。
+    """
+    res = _DictResult(
+        {
+            "content_list": [
+                {
+                    "type": "display_formula",
+                    "text": " $$ \\frac{a+b}{c-d} $$ ",
+                    "bbox": [10, 20, 300, 60],
+                }
+            ],
+            "parsing_res_list": [],
+        }
+    )
+    result = _recognize_paddlocr_vl(
+        _FakeService([res]), image=None, options=PaddleOCRVLOptions()
+    )
+
+    formula = result.content_list[0]
+    assert formula["type"] == "formula"
+    assert formula["text"] == "\\frac{a+b}{c-d}"
+    # MD 导出直接写 result.markdown_text：公式分支不转义 LaTeX、无残留 $$
+    assert "$$\\frac{a+b}{c-d}$$" in result.markdown_text
+    assert "\\frac\\{" not in result.markdown_text
+
+
+def test_recognize_vl_normalizes_display_formula_from_parsing_res_list():
+    """parsing_res_list 面同样归一：标签与 text 均走同一规范化入口。"""
+    res = _DictResult(
+        {
+            "parsing_res_list": [
+                _VLBlock(
+                    content=" $$ \\frac{a+b}{c-d} $$ ",
+                    label="display_formula",
+                    global_block_id=4,
+                )
+            ]
+        }
+    )
+    result = _recognize_paddlocr_vl(
+        _FakeService([res]), image=None, options=PaddleOCRVLOptions()
+    )
+
+    assert result.content_list[0]["type"] == "formula"
+    assert result.content_list[0]["text"] == "\\frac{a+b}{c-d}"
+    block = result.text_blocks[0]
+    assert block.label == "formula"
+    assert block.text == "\\frac{a+b}{c-d}"
+    assert "$$\\frac{a+b}{c-d}$$" in result.markdown_text
+
+
 def test_vl_deduplicates_table_across_content_and_parsing_lists():
     table_html = "<table><tr><td>A</td><td>B</td></tr></table>"
     res = _DictResult(
