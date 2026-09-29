@@ -96,6 +96,9 @@ it("copies the selected formula LaTeX through the host bridge handler", async ()
 
   expect(onCopy).toHaveBeenCalledTimes(1);
   expect(onCopy).toHaveBeenCalledWith(1, "latex");
+  // Strict workbench CSP forbids inline styles; use native fraction layout.
+  expect(document.querySelector(".formula-preview math mfrac")).not.toBeNull();
+  expect(document.querySelector(".formula-preview [style]")).toBeNull();
 });
 
 it("keeps an error state when the native copy fails", async () => {

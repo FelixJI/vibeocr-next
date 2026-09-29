@@ -98,7 +98,7 @@ function Formula({
   try {
     markup = katex.renderToString(text, {
       displayMode: true,
-      output: "html",
+      output: "mathml",
       throwOnError: true,
       trust: false,
       maxExpand: 100,
