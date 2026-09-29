@@ -6,6 +6,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 from test_runtime_installer import (
@@ -493,7 +494,9 @@ def test_stdio_set_sources_and_inherited_preview_round_trip(
         for source in envelope["result"]["sources"]
         if source["id"] == "tuna-pypi"
     )
-    assert tuna["endpoint"].startswith("https://mirrors.tuna.tsinghua.edu.cn")
+    endpoint = urlsplit(tuna["endpoint"])
+    assert endpoint.scheme == "https"
+    assert endpoint.hostname == "mirrors.tuna.tsinghua.edu.cn"
     assert "?" not in tuna["endpoint"] and "@" not in tuna["endpoint"]
 
     preview = {
