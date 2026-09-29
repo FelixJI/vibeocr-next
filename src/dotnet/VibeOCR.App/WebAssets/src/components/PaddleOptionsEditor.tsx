@@ -1,5 +1,5 @@
 import { Button, Input, Select } from "@fluentui/react-components";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { AppActions } from "../app/types";
 
 const BOOLEAN_OPTIONS = {
@@ -71,16 +71,11 @@ export function PaddleOptionsEditor({
   // 对比前后都用 readOptions 规范化，键序差异不影响回显匹配。
   const localKey = JSON.stringify(readOptions(options));
   const incomingKey = JSON.stringify(readOptions(values));
-  useEffect(() => {
-    if (dirty) {
-      // 存在未保存编辑时不被宿主回显（保存结果、环境默认值或无关状态刷新）
-      // 覆盖；直到回显追平本地值才解除未保存标记。
-      if (localKey === incomingKey) setDirty(false);
-    } else if (localKey !== incomingKey) {
-      // 无未保存编辑时跟随宿主值重新初始化（切模式/环境默认值变化）。
-      setOptions(JSON.parse(incomingKey) as Options);
-    }
-  }, [dirty, localKey, incomingKey]);
+  if (dirty && localKey === incomingKey) {
+    setDirty(false);
+  } else if (!dirty && localKey !== incomingKey) {
+    setOptions(readOptions(values));
+  }
   return (
     <details className="recognition-options">
       <summary>识别参数</summary>
