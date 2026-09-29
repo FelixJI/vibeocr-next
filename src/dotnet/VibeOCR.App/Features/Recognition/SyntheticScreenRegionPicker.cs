@@ -10,7 +10,7 @@ namespace VibeOCR.App.Features.Recognition;
 
 // Only constructed by the isolated screenshot-e2e process. Never samples the desktop
 // outside the client area of the synthetic WinUI window it creates.
-internal sealed class SyntheticScreenRegionPicker : IScreenRegionPicker
+internal sealed class SyntheticScreenRegionPicker(string text = "VibeOCR 123") : IScreenRegionPicker
 {
   internal sealed record CaptureEvidence(int Width, int Height, int WhitePixels, int DarkPixels);
 
@@ -53,8 +53,11 @@ internal sealed class SyntheticScreenRegionPicker : IScreenRegionPicker
         throw new InvalidOperationException("Synthetic WinUI client bounds are unavailable.");
       }
 
-      const uint childStyle = 0x40000000 | 0x10000000 | 0x00000001 | 0x00000200;
-      child = CreateWindowExW(0, "STATIC", "VibeOCR 123", childStyle,
+      // SS_CENTERIMAGE makes STATIC render a single centered line; preserve it
+      // for existing one-line smoke, but let bilingual CRLF evidence wrap.
+      uint childStyle = 0x40000000 | 0x10000000 | 0x00000001 |
+        (text.Contains('\n') ? 0u : 0x00000200u);
+      child = CreateWindowExW(0, "STATIC", text, childStyle,
         0, 0, client.Right - client.Left, client.Bottom - client.Top,
         handle, 0, 0, 0);
       if (child == 0)

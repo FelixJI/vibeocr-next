@@ -171,6 +171,7 @@ export function App({
 
 function commandProblemLabel(messageKey: string): string {
   const messages: Readonly<Record<string, string>> = {
+    "workbench.error.clipboardBusy": "剪贴板被占用，请稍后重试复制。",
     "workbench.error.desktopCommandFailed":
       "原生操作执行失败。请检查当前输入和运行时状态后重试。",
     "workbench.error.unsupportedCommand":

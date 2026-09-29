@@ -659,12 +659,20 @@ input {
   border-radius: 8px;
   background: #161616;
 }
+.canvas-stage.is-panning .image-text-line {
+  pointer-events: none;
+}
 .inspection-canvas {
   display: block;
   width: min(100%, 69vh, 780px);
   height: auto;
   margin-inline: auto;
   touch-action: none;
+}
+.canvas-stage > .inspection-canvas,
+.canvas-stage > .image-text-frame {
+  width: calc(min(100%, 69vh, 780px) * var(--editor-zoom, 1));
+  max-width: none;
 }
 .inspection-canvas.tool-rectangle,
 .inspection-canvas.tool-arrow,

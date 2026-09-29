@@ -41,6 +41,7 @@ public sealed partial class App : Application
     private WindowLayoutStore? _windowLayoutStore;
     private SingleInstanceService? _singleInstance;
     private InferenceSupervisorProcess? _supervisorProcess;
+    private string? _supervisorInstanceId;
     private IInferenceClient? _activeInferenceClient;
     private IQrCodeClient? _activeQrCodeClient;
     private PortableLayout? _supervisorLayout;
@@ -206,9 +207,11 @@ public sealed partial class App : Application
         _windowLayoutStore = new WindowLayoutStore(
             Path.Combine(layout.DataRoot, "winui-layout.json"));
         if (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") is
-            "screenshot-e2e" or "managed-environment-e2e")
+            "screenshot-e2e" or "text-selection-e2e" or "managed-environment-e2e")
         {
-            _screenshotSmokePicker = new SyntheticScreenRegionPicker();
+            _screenshotSmokePicker = new SyntheticScreenRegionPicker(
+                Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") ==
+                "text-selection-e2e" ? "VibeOCR 123\r\n中文 文本 456" : "VibeOCR 123");
         }
 
         // 统一动作分派器先于主窗创建：热键/托盘/悬浮栏/主窗四入口共用同一
@@ -282,6 +285,7 @@ public sealed partial class App : Application
             throw new InvalidOperationException("Update service is unavailable."),
           _windowLayoutStore,
           () => _inferenceGateway.IsAttached,
+          () => _supervisorInstanceId,
           _screenshotSmokePicker,
           () => _inferenceGateway.SubmitAttempts,
           () => _inferenceGateway.LastSubmittedJobId,
@@ -897,6 +901,8 @@ public sealed partial class App : Application
 
     private void PublishManagedEnvironmentSession(ManagedEnvironmentSession? next)
     {
+        _supervisorInstanceId = next?.Process.Ready.InstanceId;
+        _window?.InvalidatePinnedTextLayers();
         if (_managedSession is { } previous)
         {
             previous.Process.UnexpectedExit -= OnSupervisorUnexpectedExit;
@@ -1091,6 +1097,8 @@ public sealed partial class App : Application
 
     private async Task DisconnectSupervisorResourcesAsync()
     {
+        _supervisorInstanceId = null;
+        _window?.InvalidatePinnedTextLayers();
         if (_managedSession is { } managed)
         {
             _managedSession = null;

@@ -2,6 +2,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$ProductRoot,
     [Parameter(Mandatory = $true)][string]$WorkRoot,
+    [ValidateSet('screenshot-e2e', 'text-selection-e2e')][string]$Mode = 'screenshot-e2e',
     [string]$PreparedCandidateRoot,
     [int]$TimeoutMinutes = 45
 )
@@ -65,7 +66,7 @@ $previousHealth = $env:VIBEOCR_SCREENSHOT_E2E_HEALTH
 $previousWebViewData = $env:WEBVIEW2_USER_DATA_FOLDER
 $process = $null
 try {
-    $env:VIBEOCR_SELF_TEST_SMOKE = 'screenshot-e2e'
+    $env:VIBEOCR_SELF_TEST_SMOKE = $Mode
     $env:VIBEOCR_SELF_TEST_INSTANCE = [guid]::NewGuid().ToString('N')
     $env:VIBEOCR_SCREENSHOT_E2E_HEALTH = $healthPath
     $env:WEBVIEW2_USER_DATA_FOLDER = $webViewData
@@ -88,7 +89,29 @@ try {
     if ($health.schema_version -ne 1 -or $health.state -ne 'passed') {
         throw "Screenshot smoke failed: $($health.error)"
     }
-    if ($process.ExitCode -ne 0 -or
+    if ($Mode -eq 'text-selection-e2e') {
+        if ($process.ExitCode -ne 0 -or
+            $health.capture.Width -le 0 -or $health.capture.Height -le 0 -or
+            $health.capture.WhitePixels -le 10000 -or $health.capture.DarkPixels -le 100 -or
+            -not $health.session_id -or $health.revision -ne 1 -or
+            $health.pins -ne 2 -or $health.closed_leases -ne 2 -or
+            $health.submit_attempts_after_pure_pins -ne 0 -or
+            $health.submit_attempts_after_first_layer -ne 1 -or
+            $health.submit_attempts_after_edit -ne 2 -or
+            $health.startup_ensure_attempts -ne
+                $health.startup_ensure_attempts_before_capture -or
+            -not $health.latin_selection -or -not $health.chinese_selection -or
+            -not $health.pinned_selection -or
+            @($health.ui_previews).Count -ne 3) {
+            throw 'Text selection smoke health evidence is incomplete or inconsistent'
+        }
+        foreach ($preview in $health.ui_previews) {
+            if ($preview -notmatch '^text-selection-(editor|pin-[12])\.png$' -or
+                (Get-Item -LiteralPath (Join-Path $smokeRoot $preview)).Length -le 100) {
+                throw "Text selection UI preview missing or empty: $preview"
+            }
+        }
+    } elseif ($process.ExitCode -ne 0 -or
         $health.capture.Width -le 0 -or $health.capture.Height -le 0 -or
         $health.capture.WhitePixels -le 10000 -or $health.capture.DarkPixels -le 100 -or
         $health.canvas.orange_after -le ($health.canvas.orange_before + 50) -or
@@ -102,7 +125,7 @@ try {
             $health.startup_ensure_attempts_after_recognition) {
         throw 'Screenshot smoke health evidence is incomplete or inconsistent'
     }
-    Write-Host "Screenshot E2E passed: $($health.capture.Width)x$($health.capture.Height), session=$($health.session_id), revision=$($health.revision), task=$($health.task_id)."
+    Write-Host "$Mode passed: $($health.capture.Width)x$($health.capture.Height), session=$($health.session_id), revision=$($health.revision)."
     Write-Host "Isolated evidence retained at: $smokeRoot"
 } finally {
     $env:VIBEOCR_SELF_TEST_SMOKE = $previousSmoke

@@ -300,6 +300,21 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
       () => document.documentElement.scrollWidth <= window.innerWidth,
     ),
   ).toBe(true);
+  const viewport = page.getByLabel("图片视口");
+  const canvas = page.getByLabel("图片检查画布");
+  const fitWidth = await canvas.evaluate(
+    (element) => element.getBoundingClientRect().width,
+  );
+  expect(fitWidth).toBeGreaterThan(0);
+  expect(fitWidth).toBeLessThanOrEqual(
+    await viewport.evaluate((element) => element.clientWidth),
+  );
+  await page.getByRole("combobox", { name: "显示缩放" }).selectOption("2");
+  const zoomWidth = await canvas.evaluate(
+    (element) => element.getBoundingClientRect().width,
+  );
+  expect(zoomWidth).toBeGreaterThan(fitWidth * 1.9);
+  await page.getByRole("combobox", { name: "显示缩放" }).selectOption("1");
   await expect(page).toHaveScreenshot("screenshot-session-light-1024x900.png", {
     fullPage: true,
   });

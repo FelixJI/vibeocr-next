@@ -20,6 +20,7 @@ public sealed class SelfTestInstanceScopeTests
   [Theory]
   [InlineData("web-ready")]
   [InlineData("screenshot-e2e")]
+  [InlineData("text-selection-e2e")]
   [InlineData("managed-environment-e2e")]
   [InlineData("native-actions-e2e")]
   public void UiSmokeUsesIsolatedNamedObjects(string smokeMode)
@@ -44,6 +45,8 @@ public sealed class SelfTestInstanceScopeTests
   [InlineData("web-ready", "not-a-guid")]
   [InlineData("screenshot-e2e", null)]
   [InlineData("screenshot-e2e", "not-a-guid")]
+  [InlineData("text-selection-e2e", null)]
+  [InlineData("text-selection-e2e", "not-a-guid")]
   [InlineData("managed-environment-e2e", null)]
   [InlineData("managed-environment-e2e", "not-a-guid")]
   [InlineData("native-actions-e2e", null)]
