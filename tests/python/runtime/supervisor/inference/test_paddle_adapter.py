@@ -40,7 +40,7 @@ class _FakeOCRService:
         self.cache_manager: Any | None = None
 
     def recognize_batch(
-        self, images: list[np.ndarray], options=None
+        self, images: list[np.ndarray], options=None, *, asset_sinks=None
     ) -> list[OCRResult]:
         self.predict_calls += 1
         self.calls.append(len(images))
@@ -282,7 +282,7 @@ def test_recognize_many_releases_residency_lease() -> None:
 
 def test_result_payload_passes_through_dict_results() -> None:
     class _DictService:
-        def recognize_batch(self, images, options=None):
+        def recognize_batch(self, images, options=None, *, asset_sinks=None):
             return [{"text": "raw"} for _ in images]
 
         def preload_pipelines_sequential(self, pipelines):

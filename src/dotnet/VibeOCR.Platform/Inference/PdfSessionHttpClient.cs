@@ -1,5 +1,12 @@
 // HttpClient-based PDF session client for the v2 supervisor's /v2/pdf/sessions/* routes.
+//
+// All request/response payloads follow the generated v2 wire contracts exactly
+// (OpenRequest, PdfOpenResponse, PdfMutationResponse, PdfDocumentResponse,
+// SaveRequest, SaveResponse): mutation responses carry a ModelDiff (never a
+// page_count), authoritative page counts come from full_model or the existing
+// /model endpoint, and the save request/response field is `path`.
 using System.Text.Json;
+using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Runtime.Client;
 using VibeOCR.Runtime.Contracts.Generated;
 
@@ -8,31 +15,51 @@ namespace VibeOCR.Platform.Inference;
 public sealed class PdfSessionHttpClient : IPdfSessionClient
 {
     private readonly RuntimeHttpClient _runtime;
+    private readonly bool _ownsRuntime;
 
     public PdfSessionHttpClient(Uri baseUrl, string sessionToken, HttpMessageHandler? handler = null)
+        : this(new RuntimeHttpClient(baseUrl, sessionToken, handler), ownsRuntime: true)
     {
-        _runtime = new RuntimeHttpClient(baseUrl, sessionToken, handler);
+    }
+
+    /// <summary>
+    /// Internal seam so <see cref="InferenceHttpClient"/> can delegate its PDF
+    /// session operations to one shared transport instead of duplicating the
+    /// wire parsing. The caller keeps ownership of <paramref name="runtime"/>.
+    /// </summary>
+    internal PdfSessionHttpClient(RuntimeHttpClient runtime, bool ownsRuntime = false)
+    {
+        _runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
+        _ownsRuntime = ownsRuntime;
     }
 
     public async Task<PdfSessionOpenResult> OpenAsync(string path, string? password, CancellationToken ct)
     {
-        using StringContent content = _runtime.CreateJsonContent(new { path, password });
+        // OpenRequest is additionalProperties:false with `path` only; a non-null
+        // password would be rejected by the server, so refuse it up front.
+        if (!string.IsNullOrEmpty(password))
+        {
+            throw new NotSupportedException(
+                "The v2 PDF session open operation does not accept a password.");
+        }
+        using StringContent content = _runtime.CreateJsonContent(new { path });
         using HttpResponseMessage resp = await _runtime.PostAsync(
             RuntimeOperationPaths.OpenPdfSession, content, ct);
-        await _runtime.EnsureSuccessAsync(resp, ct);
+        await EnsureSuccessAsync(resp, ct);
         using JsonDocument doc = await _runtime.ReadJsonDocumentAsync(resp, ct);
         JsonElement root = doc.RootElement;
+        JsonElement model = RequiredProperty(root, "model", "open");
         return new PdfSessionOpenResult(
-            root.GetProperty("session_id").GetString()!,
-            root.GetProperty("page_count").GetInt32(),
-            root.GetProperty("file_path").GetString()!);
+            RequiredString(root, "session_id", "open"),
+            ReadModelPageCount(model, "open"),
+            RequiredString(model, "file_path", "open"));
     }
 
     public async Task<byte[]> RenderAsync(string sessionId, int page, int size, CancellationToken ct)
     {
         using HttpResponseMessage resp = await _runtime.GetAsync(
             $"{BindSessionPath(RuntimeOperationPaths.RenderPdfPage, sessionId)}?page={page}&size={size}", ct);
-        await _runtime.EnsureSuccessAsync(resp, ct);
+        await EnsureSuccessAsync(resp, ct);
         return await _runtime.ReadBinaryAsync(resp, "image/png", ct);
     }
 
@@ -41,9 +68,7 @@ public sealed class PdfSessionHttpClient : IPdfSessionClient
         using StringContent content = _runtime.CreateJsonContent(new { pages, angle });
         using HttpResponseMessage resp = await _runtime.PostAsync(
             BindSessionPath(RuntimeOperationPaths.RotatePdfPages, sessionId), content, ct);
-        await _runtime.EnsureSuccessAsync(resp, ct);
-        using JsonDocument doc = await _runtime.ReadJsonDocumentAsync(resp, ct);
-        return new PdfMutateResult(doc.RootElement.GetProperty("page_count").GetInt32());
+        return await ReadMutationPageCountAsync(sessionId, resp, "rotate", ct);
     }
 
     public async Task<PdfMutateResult> DeletePagesAsync(string sessionId, int[] pages, CancellationToken ct)
@@ -51,32 +76,108 @@ public sealed class PdfSessionHttpClient : IPdfSessionClient
         using StringContent content = _runtime.CreateJsonContent(new { pages });
         using HttpResponseMessage resp = await _runtime.PostAsync(
             BindSessionPath(RuntimeOperationPaths.DeletePdfPages, sessionId), content, ct);
-        await _runtime.EnsureSuccessAsync(resp, ct);
-        using JsonDocument doc = await _runtime.ReadJsonDocumentAsync(resp, ct);
-        return new PdfMutateResult(doc.RootElement.GetProperty("page_count").GetInt32());
+        return await ReadMutationPageCountAsync(sessionId, resp, "delete_pages", ct);
     }
 
     public async Task<string> SaveAsync(string sessionId, string outputPath, CancellationToken ct)
     {
         using StringContent content = _runtime.CreateJsonContent(
-            new { output_path = outputPath });
+            new { path = outputPath });
         using HttpResponseMessage resp = await _runtime.PostAsync(
             BindSessionPath(RuntimeOperationPaths.SavePdfSession, sessionId), content, ct);
-        await _runtime.EnsureSuccessAsync(resp, ct);
+        await EnsureSuccessAsync(resp, ct);
         using JsonDocument doc = await _runtime.ReadJsonDocumentAsync(resp, ct);
-        return doc.RootElement.GetProperty("saved_path").GetString()!;
+        return RequiredString(doc.RootElement, "path", "save");
     }
 
     public async Task CloseAsync(string sessionId, CancellationToken ct)
     {
         using HttpResponseMessage resp = await _runtime.PostAsync(
             BindSessionPath(RuntimeOperationPaths.ClosePdfSession, sessionId), content: null, ct);
-        await _runtime.EnsureSuccessAsync(resp, ct);
+        await EnsureSuccessAsync(resp, ct);
     }
 
     public ValueTask DisposeAsync()
     {
-        return _runtime.DisposeAsync();
+        return _ownsRuntime ? _runtime.DisposeAsync() : ValueTask.CompletedTask;
+    }
+
+    // ------------------------------------------------------------------
+    // v2 wire helpers
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// PdfMutationResponse carries a ModelDiff, never a page count. When the
+    /// diff includes a full_model its pages are authoritative; otherwise the
+    /// existing /model endpoint is read back — local page arithmetic is never
+    /// used to guess the new count.
+    /// </summary>
+    private async Task<PdfMutateResult> ReadMutationPageCountAsync(
+        string sessionId, HttpResponseMessage resp, string operation, CancellationToken ct)
+    {
+        await EnsureSuccessAsync(resp, ct);
+        using JsonDocument doc = await _runtime.ReadJsonDocumentAsync(resp, ct);
+        JsonElement root = doc.RootElement;
+        if (root.ValueKind == JsonValueKind.Object &&
+            root.TryGetProperty("diff", out JsonElement diff) &&
+            diff.ValueKind == JsonValueKind.Object &&
+            diff.TryGetProperty("full_model", out JsonElement fullModel) &&
+            fullModel.ValueKind == JsonValueKind.Object &&
+            fullModel.TryGetProperty("pages", out JsonElement pages) &&
+            pages.ValueKind == JsonValueKind.Array)
+        {
+            return new PdfMutateResult(pages.GetArrayLength());
+        }
+        using HttpResponseMessage modelResp = await _runtime.PostAsync(
+            BindSessionPath(RuntimeOperationPaths.GetPdfSessionModel, sessionId),
+            content: null, ct);
+        await EnsureSuccessAsync(modelResp, ct);
+        using JsonDocument modelDoc = await _runtime.ReadJsonDocumentAsync(modelResp, ct);
+        return new PdfMutateResult(
+            ReadModelPageCount(modelDoc.RootElement, $"{operation} model read-back"));
+    }
+
+    private static int ReadModelPageCount(JsonElement model, string operation) =>
+        model.ValueKind == JsonValueKind.Object &&
+            model.TryGetProperty("pages", out JsonElement pages) &&
+            pages.ValueKind == JsonValueKind.Array
+            ? pages.GetArrayLength()
+            : throw new InferenceClientException(
+                HttpV2ErrorCode.ProtocolMismatch,
+                $"The v2 PDF {operation} response has no authoritative 'pages'.",
+                retryable: false);
+
+    private static JsonElement RequiredProperty(JsonElement parent, string name, string operation) =>
+        parent.ValueKind == JsonValueKind.Object &&
+            parent.TryGetProperty(name, out JsonElement value) &&
+            value.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined)
+            ? value
+            : throw new InferenceClientException(
+                HttpV2ErrorCode.ProtocolMismatch,
+                $"The v2 PDF {operation} response is missing '{name}'.",
+                retryable: false);
+
+    private static string RequiredString(JsonElement parent, string name, string operation)
+    {
+        JsonElement value = RequiredProperty(parent, name, operation);
+        return value.ValueKind == JsonValueKind.String ? value.GetString()!
+            : throw new InferenceClientException(
+            HttpV2ErrorCode.ProtocolMismatch,
+            $"The v2 PDF {operation} response field '{name}' is not a string.",
+            retryable: false);
+    }
+
+    private async Task EnsureSuccessAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _runtime.EnsureSuccessAsync(response, cancellationToken);
+        }
+        catch (RuntimeClientException exc)
+        {
+            throw new InferenceClientException(
+                exc.Code, exc.Message, exc.Retryable, exc.Detail);
+        }
     }
 
     private static string BindSessionPath(string template, string sessionId) =>

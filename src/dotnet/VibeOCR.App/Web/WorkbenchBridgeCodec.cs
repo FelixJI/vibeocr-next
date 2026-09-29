@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using VibeOCR.App.Workbench;
+using VibeOCR.App.Features.Recognition;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Windows;
 
@@ -20,6 +21,7 @@ public static class WorkbenchBridgeCodec
   private static readonly HashSet<string> EnvelopeFields =
     ["version", "kind", "id", "type", "payload"];
   private static readonly HashSet<string> EmptyFields = [];
+  private static readonly HashSet<string> RecognitionOptionsFields = ["modeId", "options"];
   private static readonly HashSet<string> CommandPayloadFields =
     ["sessionId", "command"];
   private static readonly HashSet<string> CommandFields =
@@ -65,6 +67,8 @@ public static class WorkbenchBridgeCodec
     ["sessionId", "revision"];
   private static readonly HashSet<string> SessionResourceArgumentFields =
     ["resourceUri", "sessionId", "revision"];
+  private static readonly HashSet<string> StructuredCopyArgumentFields =
+    ["resourceUri", "blockIndex", "format"];
   private static readonly HashSet<string> SessionSelectionArgumentFields =
     ["sessionId", "revision", "text"];
 
@@ -348,6 +352,8 @@ public static class WorkbenchBridgeCodec
         return new CopyRecognitionResultCommand(ParseFormat(
           arguments,
           ["plain", "markdown", "rich"]));
+      case ("recognition", "copyStructured"):
+        return ParseStructuredCopy(arguments);
       case ("recognition", "export"):
         return new ExportRecognitionResultCommand(ParseFormat(
           arguments,
@@ -390,6 +396,8 @@ public static class WorkbenchBridgeCodec
         return new SetBatchWindowCommand(ParseWindowStart(arguments));
       case ("batch", "setTaskEngine"):
         return new SetBatchTaskEngineCommand(ParseTaskEngine(arguments));
+      case ("pdf", "setTaskEngine"):
+        return new SetPdfTaskEngineCommand(ParseTaskEngine(arguments));
       case ("pdf", "open"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new OpenPdfCommand();
@@ -629,6 +637,15 @@ public static class WorkbenchBridgeCodec
       case ("settings", "retryRuntimeMaintenance"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new RetryRuntimeMaintenanceCommand();
+      case ("recognition", "setOptions"):
+        EnsureObjectWithFields(arguments, RecognitionOptionsFields, "command arguments");
+        string? modeId = arguments.GetProperty("modeId").GetString();
+        if (modeId is not ("paddle_text" or "paddle_table" or "paddle_formula" or "paddle_structure" or "paddle_document_vl"))
+          throw new WorkbenchBridgeProtocolException("Unsupported Paddle recognition mode.");
+        PaddleModeOptions options = arguments.GetProperty("options")
+          .Deserialize<PaddleModeOptions>(PaddleModeOptions.JsonOptions)
+          ?? throw new WorkbenchBridgeProtocolException("Recognition options must be an object.");
+        return new SetRecognitionOptionsCommand(modeId, options);
       case ("recognition", "setTaskEngine"):
         return new SetTaskEngineCommand(ParseTaskEngine(arguments));
       case ("update", "check"):
@@ -650,6 +667,32 @@ public static class WorkbenchBridgeCodec
         throw new WorkbenchBridgeProtocolException(
           "Workbench bridge command type is not supported.");
     }
+  }
+
+  private static CopyStructuredResultCommand ParseStructuredCopy(
+    JsonElement arguments)
+  {
+    EnsureObjectWithFields(arguments, StructuredCopyArgumentFields, "command arguments");
+    string? value = arguments.GetProperty("resourceUri").GetString();
+    if (value is null || !Uri.TryCreate(value, UriKind.Absolute, out Uri? uri) ||
+      !WorkbenchResourceBroker.IsResourceUri(uri))
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench structured result URI is invalid.");
+    }
+    int blockIndex = arguments.GetProperty("blockIndex").GetInt32();
+    if (blockIndex is < 0 or > 4095)
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench structured block index is invalid.");
+    }
+    string? format = arguments.GetProperty("format").GetString();
+    if (format is not ("table" or "latex"))
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench structured copy format is invalid.");
+    }
+    return new CopyStructuredResultCommand(uri.AbsoluteUri, blockIndex, format);
   }
 
   private static string ParseAnnotationResourceUri(JsonElement arguments)
@@ -905,6 +948,7 @@ public static class WorkbenchBridgeCodec
         image = recognition.TextLayer.Image,
         lines = recognition.TextLayer.Lines ?? [],
       },
+      structuredResult = recognition.StructuredResult,
     },
     BatchWorkbenchState batch => new
     {
@@ -916,6 +960,7 @@ public static class WorkbenchBridgeCodec
       batch.WindowStart,
       engines = batch.Engines ?? [],
       batch.TaskEngine,
+      exportIncomplete = batch.ExportIncomplete,
     },
     PdfWorkbenchState pdf => new
     {
@@ -926,6 +971,8 @@ public static class WorkbenchBridgeCodec
       selectedPages = pdf.SelectedPages ?? [],
       pages = pdf.Pages ?? [],
       pdf.WindowStart,
+      engines = pdf.Engines ?? [],
+      taskEngine = pdf.TaskEngine,
     },
     QrCodeWorkbenchState qrCode => new
     {

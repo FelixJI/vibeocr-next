@@ -27,6 +27,26 @@ from vibeocr.runtime.recognition.core.pipelines.registry import PipelineSpec
 
 _logger = logging.getLogger(__name__)
 
+#: 本仓 paddle_document_vl 模式的语义固定为 VL-1.5（发行包同时提供
+#: PaddleOCR-VL-1.6 更新默认）。不跟随上游新默认静默换模型；升级须走
+#: 显式模式合同评审。
+PADDLEOCR_VL_PIPELINE_VERSION = "v1.5"
+
+
+def _normalize_vl_block_type(block_type: str) -> str:
+    """在 provider 边界统一公式类型，供 UI 与导出共同消费。"""
+    return "formula" if block_type == "display_formula" else block_type
+
+
+def _strip_latex_display_delimiters(text: str) -> str:
+    """剥离 VL 公式块 text 外层的 ``$$`` 显示分隔符，返回裸 LaTeX。"""
+    stripped = text.strip()
+    if stripped.startswith("$$") and stripped.endswith("$$") and len(stripped) >= 4:
+        inner = stripped[2:-2].strip()
+        if inner:
+            return inner
+    return stripped
+
 
 def _table_block_key(block: dict[str, Any]) -> tuple[Any, ...]:
     """Build a provider-neutral semantic key without relying on source order."""
@@ -139,14 +159,19 @@ def _extract_block_bbox(
     return None
 
 
-def _get_block_score(res, block: dict) -> float:
-    """从 parsing_res_list 结果中获取 block 的置信度"""
+def _get_block_score(res, block: dict) -> float | None:
+    """从 parsing_res_list 结果中获取 block 的真实置信度。
+
+    布局检测框携带真实 score；无布局框或框内无 score 时返回 None
+    （unknown），不伪造默认分。
+    """
     if hasattr(res, "layout_det_res") and hasattr(res.layout_det_res, "boxes"):
         boxes = res.layout_det_res.boxes
         order = block.get("block_order", -1)
         if 0 <= order < len(boxes):
-            return float(boxes[order].get("score", 0.9))
-    return 0.9
+            score = boxes[order].get("score")
+            return float(score) if score is not None else None
+    return None
 
 
 def _build_ocr_result(
@@ -165,12 +190,16 @@ def _build_ocr_result(
     if text_with_scores is None:
         text_with_scores = []
 
+    # 上游无置信度（None）不参与均值/低置信度统计，也不伪造数值。
+    known_scores = [s for _, s in text_with_scores if s is not None]
     avg_score = 0.0
-    if text_with_scores:
-        avg_score = sum(s for _, s in text_with_scores) / len(text_with_scores)
+    if known_scores:
+        avg_score = sum(known_scores) / len(known_scores)
 
     low_confidence_items = [
-        (text, score) for text, score in text_with_scores if score < 0.80
+        (text, score)
+        for text, score in text_with_scores
+        if score is not None and score < 0.80
     ]
 
     final_html = html_text or raw_text
@@ -193,16 +222,32 @@ def _build_ocr_result(
 class PaddleOCRVLOptions(BasePipelineOptions):
     """PaddleOCR-VL 管道选项
 
-    使用 PaddleOCR-VL 解析文档，支持图片/PDF，提取文本、表格、公式、图表等。
+    使用 PaddleOCR-VL-1.5 解析文档，支持图片/PDF，提取文本、表格、公式、
+    图表等。``use_doc_orientation_classify``/``use_doc_unwarping``/
+    ``vl_use_layout_detection`` 门控构造期子模块初始化（参与构造签名）；
+    chart/seal/ocr_for_image_block 是 predict 参数（锁定版本中不门控
+    模型加载）。
     """
 
     pipeline: str = "PaddleOCR-VL"
     use_doc_orientation_classify: bool = True
-    use_doc_unwarping: bool = True
+    use_doc_unwarping: bool = False
     vl_use_layout_detection: bool = True
     vl_use_chart_recognition: bool = False
     vl_use_seal_recognition: bool = False
     use_ocr_for_image_block: bool = False
+
+
+def _paddlocr_vl_constructor_kwargs(options: Any) -> dict[str, Any]:
+    """把公开选项映射为 PaddleOCRVL 构造参数（仅模型门控项）。
+
+    语义固定 ``pipeline_version="v1.5"``，不随上游默认漂移。
+    """
+    return {
+        "use_doc_orientation_classify": options.use_doc_orientation_classify,
+        "use_doc_unwarping": options.use_doc_unwarping,
+        "use_layout_detection": options.vl_use_layout_detection,
+    }
 
 
 def _create_paddlocr_vl_pipeline(device: str, **kwargs: Any) -> Any:
@@ -212,19 +257,38 @@ def _create_paddlocr_vl_pipeline(device: str, **kwargs: Any) -> Any:
     """
     from paddleocr import PaddleOCRVL
 
-    return PaddleOCRVL(device=device, **kwargs)
+    pipeline = PaddleOCRVL(
+        device=device,
+        pipeline_version=PADDLEOCR_VL_PIPELINE_VERSION,
+        **kwargs,
+    )
+    _logger.info(
+        "[Paddle consumed] construct PaddleOCR-VL use_layout_detection=%s",
+        kwargs.get("use_layout_detection"),
+    )
+    return pipeline
 
 
 def _recognize_paddlocr_vl(
-    service: Any, image: Any, options: PaddleOCRVLOptions
+    service: Any,
+    image: Any,
+    options: PaddleOCRVLOptions,
+    asset_sink: Any | None = None,
 ) -> Any:
     """PaddleOCR-VL 文档解析
 
-    从 OCRService._recognize_paddlocr_vl 迁移而来。
+    从 OCRService._recognize_paddlocr_vl 迁移而来。块级图像
+    （image/seal/chart，布局对象携带 PIL 图）经 asset_sink 写入 job
+    受控目录，content_list 携带 opaque 资产引用（不含本地路径）。
     """
     from vibeocr.runtime.recognition.models.ocr_result import TextBlock
+    from vibeocr.runtime.recognition.result_assets import (
+        REASON_SOURCE_UNAVAILABLE,
+        REASON_STORE_UNAVAILABLE,
+        unavailable_asset,
+    )
 
-    pipeline = service.get_or_create_pipeline("PaddleOCR-VL")
+    pipeline = service.get_or_create_pipeline("PaddleOCR-VL", options=options)
 
     predict_kwargs: dict[str, Any] = {}
     predict_kwargs["use_doc_orientation_classify"] = (
@@ -238,10 +302,17 @@ def _recognize_paddlocr_vl(
 
     output = pipeline.predict(input=image, **predict_kwargs)
     output_list = list(output)
+    _logger.info(
+        "[Paddle consumed] predict PaddleOCR-VL use_layout_detection=%s "
+        "use_chart_recognition=%s",
+        predict_kwargs["use_layout_detection"],
+        predict_kwargs["use_chart_recognition"],
+    )
 
     markdown_text = ""
     text_blocks: list[TextBlock] = []
-    text_with_scores: list[tuple[str, float]] = []
+    # 上游无置信度时以 None 并行占位（内部索引对齐），serializer 跳过。
+    text_with_scores: list[tuple[str, float | None]] = []
     content_list: list[dict[str, Any]] = []
     images: dict[str, Any] = {}
     table_sequence = 0
@@ -267,6 +338,17 @@ def _recognize_paddlocr_vl(
         if cl:
             for source_block in cl:
                 block = dict(source_block)
+                # 禁止本地路径出 wire：provider 的 img_path 不进入结果。
+                block.pop("img_path", None)
+                block.pop("image_path", None)
+                block.pop("src", None)
+                block.pop("image", None)
+                provider_type = block.get("type")
+                contract_type = _normalize_vl_block_type(str(provider_type or "text"))
+                if contract_type != provider_type:
+                    block["type"] = contract_type
+                if contract_type == "formula" and isinstance(block.get("text"), str):
+                    block["text"] = _strip_latex_display_delimiters(block["text"])
                 if block.get("type") == "table":
                     table_id = str(
                         block.get("block_id")
@@ -310,6 +392,9 @@ def _recognize_paddlocr_vl(
                 if not isinstance(block, dict)
                 else block.get("block_label") or block.get("label", "text")
             )
+            label = _normalize_vl_block_type(label)
+            if label == "formula" and isinstance(text, str):
+                text = _strip_latex_display_delimiters(text)
             raw_bbox = (
                 getattr(block, "bbox", None)
                 if not isinstance(block, dict)
@@ -320,6 +405,21 @@ def _recognize_paddlocr_vl(
                 if not isinstance(block, dict)
                 else block.get("block_order", -1)
             )
+            provider_image_entry = (
+                getattr(block, "image", None)
+                if not isinstance(block, dict)
+                else block.get("image") or block.get("block_image")
+            )
+            raw_block_image = (
+                provider_image_entry.get("img")
+                if isinstance(provider_image_entry, dict)
+                else None
+            )
+            raw_block_image_name = (
+                provider_image_entry.get("path")
+                if isinstance(provider_image_entry, dict)
+                else None
+            )
             try:
                 order = int(raw_order) if raw_order is not None else -1
             except (TypeError, ValueError):
@@ -327,7 +427,7 @@ def _recognize_paddlocr_vl(
             bbox = _extract_block_bbox(raw_bbox)
             score = _get_block_score(res, block)
 
-            if text:
+            if text or label in ("image", "chart", "seal"):
                 cl_idx = len(content_list)
                 block_id = f"paddlocr-vl-block-{cl_idx}"
                 projected_text = text
@@ -403,14 +503,28 @@ def _recognize_paddlocr_vl(
                 )
                 text_with_scores.append((projected_text, score))
                 if label != "table":
-                    content_list.append(
-                        {
-                            "type": label,
-                            "text": text,
-                            "bbox": bbox,
-                            "block_id": block_id,
-                        }
-                    )
+                    content_entry = {
+                        "type": label,
+                        "text": text,
+                        "bbox": bbox,
+                        "block_id": block_id,
+                    }
+                    if label in ("image", "seal", "chart"):
+                        provider_image = raw_block_image
+                        if asset_sink is not None and provider_image is not None:
+                            content_entry["image"] = asset_sink.save(
+                                provider_image,
+                                name=raw_block_image_name,
+                            )
+                        elif asset_sink is None:
+                            content_entry["image"] = unavailable_asset(
+                                REASON_STORE_UNAVAILABLE
+                            )
+                        else:
+                            content_entry["image"] = unavailable_asset(
+                                REASON_SOURCE_UNAVAILABLE
+                            )
+                    content_list.append(content_entry)
 
         referenced_indices = {
             text_block.content_index
@@ -422,6 +536,14 @@ def _recognize_paddlocr_vl(
             if content_index in referenced_indices:
                 continue
             block_id = str(source_block["block_id"])
+            if source_block.get("type") in (
+                "image",
+                "seal",
+                "chart",
+            ) and not isinstance(source_block.get("image"), dict):
+                # 布局对象未携带 PIL 的图像块（如 content_list 独有来源）：
+                # 显式标记不可用，不伪造资产，也不静默丢失。
+                source_block["image"] = unavailable_asset(REASON_SOURCE_UNAVAILABLE)
             if source_block.get("type") != "table":
                 projected_text = str(
                     source_block.get("text") or source_block.get("content") or ""
@@ -431,14 +553,14 @@ def _recognize_paddlocr_vl(
                 text_blocks.append(
                     TextBlock(
                         text=projected_text,
-                        score=0.9,
+                        score=None,
                         bbox=_bbox_key(source_block),
                         label=str(source_block.get("type") or "text"),
                         content_index=content_index,
                         content_id=block_id,
                     )
                 )
-                text_with_scores.append((projected_text, 0.9))
+                text_with_scores.append((projected_text, None))
                 continue
             projected_text, table_markdown = _project_canonical_table(source_block)
             if block_id not in projected_table_ids:
@@ -448,14 +570,14 @@ def _recognize_paddlocr_vl(
             text_blocks.append(
                 TextBlock(
                     text=projected_text,
-                    score=0.9,
+                    score=None,
                     bbox=_bbox_key(source_block),
                     label="table",
                     content_index=content_index,
                     content_id=block_id,
                 )
             )
-            text_with_scores.append((projected_text, 0.9))
+            text_with_scores.append((projected_text, None))
 
         reading_indices: list[int] = []
         for text_block in text_blocks[result_text_start:]:
@@ -550,7 +672,7 @@ def _recognize_paddlocr_vl(
         ),
         text_with_scores=text_with_scores,
         pipeline_type="PaddleOCR-VL",
-        images=images if images else None,
+        images=images if images and asset_sink is None else None,
         text_blocks=text_blocks,
         content_list=content_list,
     )
@@ -565,4 +687,5 @@ PADDLEOCR_VL_SPEC = PipelineSpec(
     options_class=PaddleOCRVLOptions,
     create_pipeline=_create_paddlocr_vl_pipeline,
     recognize=_recognize_paddlocr_vl,
+    constructor_kwargs=_paddlocr_vl_constructor_kwargs,
 )

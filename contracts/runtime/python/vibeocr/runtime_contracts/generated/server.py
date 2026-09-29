@@ -168,7 +168,12 @@ REQUEST_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'AddTextLayerRequest': {'addi
                                                                                      '里是 '
                                                                                      'list[TextBlock],跨进程序列化时\n'
                                                                                      '只保留写入 PDF / '
-                                                                                     '预览所需的字段。',
+                                                                                     '预览所需的字段。上游无置信度时 '
+                                                                                     'score=0.0 且\n'
+                                                                                     'score_unknown=true；权威 '
+                                                                                     'unknown 在 '
+                                                                                     'ocr.v1 结果的 '
+                                                                                     'text_blocks[].score=null。',
                                                                       'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                          'minItems': 4,
                                                                                                          'prefixItems': [{'type': 'number'},
@@ -202,6 +207,17 @@ REQUEST_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'AddTextLayerRequest': {'addi
                                                                                                  'title': 'Polygon'},
                                                                                      'score': {'title': 'Score',
                                                                                                'type': 'number'},
+                                                                                     'score_unknown': {'default': False,
+                                                                                                       'description': 'true '
+                                                                                                                      '表示上游未提供置信度（score '
+                                                                                                                      '的 '
+                                                                                                                      '0.0 '
+                                                                                                                      '只是 '
+                                                                                                                      'wire '
+                                                                                                                      '兼容占位）。',
+                                                                                                       'title': 'Score '
+                                                                                                                'Unknown',
+                                                                                                       'type': 'boolean'},
                                                                                      'text': {'title': 'Text',
                                                                                               'type': 'string'}},
                                                                       'required': ['text', 'score'],
@@ -675,7 +691,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                      '只保留写入 '
                                                                                                                                                                                      'PDF '
                                                                                                                                                                                      '/ '
-                                                                                                                                                                                     '预览所需的字段。',
+                                                                                                                                                                                     '预览所需的字段。上游无置信度时 '
+                                                                                                                                                                                     'score=0.0 '
+                                                                                                                                                                                     '且\n'
+                                                                                                                                                                                     'score_unknown=true；权威 '
+                                                                                                                                                                                     'unknown '
+                                                                                                                                                                                     '在 '
+                                                                                                                                                                                     'ocr.v1 '
+                                                                                                                                                                                     '结果的 '
+                                                                                                                                                                                     'text_blocks[].score=null。',
                                                                                                                                                                       'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                                                          'minItems': 4,
                                                                                                                                                                                                          'prefixItems': [{'type': 'number'},
@@ -709,6 +733,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                                  'title': 'Polygon'},
                                                                                                                                                                                      'score': {'title': 'Score',
                                                                                                                                                                                                'type': 'number'},
+                                                                                                                                                                                     'score_unknown': {'default': False,
+                                                                                                                                                                                                       'description': 'true '
+                                                                                                                                                                                                                      '表示上游未提供置信度（score '
+                                                                                                                                                                                                                      '的 '
+                                                                                                                                                                                                                      '0.0 '
+                                                                                                                                                                                                                      '只是 '
+                                                                                                                                                                                                                      'wire '
+                                                                                                                                                                                                                      '兼容占位）。',
+                                                                                                                                                                                                       'title': 'Score '
+                                                                                                                                                                                                                'Unknown',
+                                                                                                                                                                                                       'type': 'boolean'},
                                                                                                                                                                                      'text': {'title': 'Text',
                                                                                                                                                                                               'type': 'string'}},
                                                                                                                                                                       'required': ['text',
@@ -835,7 +870,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                      '只保留写入 '
                                                                                                                                                      'PDF '
                                                                                                                                                      '/ '
-                                                                                                                                                     '预览所需的字段。',
+                                                                                                                                                     '预览所需的字段。上游无置信度时 '
+                                                                                                                                                     'score=0.0 '
+                                                                                                                                                     '且\n'
+                                                                                                                                                     'score_unknown=true；权威 '
+                                                                                                                                                     'unknown '
+                                                                                                                                                     '在 '
+                                                                                                                                                     'ocr.v1 '
+                                                                                                                                                     '结果的 '
+                                                                                                                                                     'text_blocks[].score=null。',
                                                                                                                                       'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                          'minItems': 4,
                                                                                                                                                                          'prefixItems': [{'type': 'number'},
@@ -869,6 +912,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                  'title': 'Polygon'},
                                                                                                                                                      'score': {'title': 'Score',
                                                                                                                                                                'type': 'number'},
+                                                                                                                                                     'score_unknown': {'default': False,
+                                                                                                                                                                       'description': 'true '
+                                                                                                                                                                                      '表示上游未提供置信度（score '
+                                                                                                                                                                                      '的 '
+                                                                                                                                                                                      '0.0 '
+                                                                                                                                                                                      '只是 '
+                                                                                                                                                                                      'wire '
+                                                                                                                                                                                      '兼容占位）。',
+                                                                                                                                                                       'title': 'Score '
+                                                                                                                                                                                'Unknown',
+                                                                                                                                                                       'type': 'boolean'},
                                                                                                                                                      'text': {'title': 'Text',
                                                                                                                                                               'type': 'string'}},
                                                                                                                                       'required': ['text',
@@ -1030,7 +1084,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                           '只保留写入 '
                                                                                                                                                                                           'PDF '
                                                                                                                                                                                           '/ '
-                                                                                                                                                                                          '预览所需的字段。',
+                                                                                                                                                                                          '预览所需的字段。上游无置信度时 '
+                                                                                                                                                                                          'score=0.0 '
+                                                                                                                                                                                          '且\n'
+                                                                                                                                                                                          'score_unknown=true；权威 '
+                                                                                                                                                                                          'unknown '
+                                                                                                                                                                                          '在 '
+                                                                                                                                                                                          'ocr.v1 '
+                                                                                                                                                                                          '结果的 '
+                                                                                                                                                                                          'text_blocks[].score=null。',
                                                                                                                                                                            'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                                                               'minItems': 4,
                                                                                                                                                                                                               'prefixItems': [{'type': 'number'},
@@ -1064,6 +1126,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                                       'title': 'Polygon'},
                                                                                                                                                                                           'score': {'title': 'Score',
                                                                                                                                                                                                     'type': 'number'},
+                                                                                                                                                                                          'score_unknown': {'default': False,
+                                                                                                                                                                                                            'description': 'true '
+                                                                                                                                                                                                                           '表示上游未提供置信度（score '
+                                                                                                                                                                                                                           '的 '
+                                                                                                                                                                                                                           '0.0 '
+                                                                                                                                                                                                                           '只是 '
+                                                                                                                                                                                                                           'wire '
+                                                                                                                                                                                                                           '兼容占位）。',
+                                                                                                                                                                                                            'title': 'Score '
+                                                                                                                                                                                                                     'Unknown',
+                                                                                                                                                                                                            'type': 'boolean'},
                                                                                                                                                                                           'text': {'title': 'Text',
                                                                                                                                                                                                    'type': 'string'}},
                                                                                                                                                                            'required': ['text',
@@ -1190,7 +1263,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                           '只保留写入 '
                                                                                                                                                           'PDF '
                                                                                                                                                           '/ '
-                                                                                                                                                          '预览所需的字段。',
+                                                                                                                                                          '预览所需的字段。上游无置信度时 '
+                                                                                                                                                          'score=0.0 '
+                                                                                                                                                          '且\n'
+                                                                                                                                                          'score_unknown=true；权威 '
+                                                                                                                                                          'unknown '
+                                                                                                                                                          '在 '
+                                                                                                                                                          'ocr.v1 '
+                                                                                                                                                          '结果的 '
+                                                                                                                                                          'text_blocks[].score=null。',
                                                                                                                                            'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                               'minItems': 4,
                                                                                                                                                                               'prefixItems': [{'type': 'number'},
@@ -1224,6 +1305,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                       'title': 'Polygon'},
                                                                                                                                                           'score': {'title': 'Score',
                                                                                                                                                                     'type': 'number'},
+                                                                                                                                                          'score_unknown': {'default': False,
+                                                                                                                                                                            'description': 'true '
+                                                                                                                                                                                           '表示上游未提供置信度（score '
+                                                                                                                                                                                           '的 '
+                                                                                                                                                                                           '0.0 '
+                                                                                                                                                                                           '只是 '
+                                                                                                                                                                                           'wire '
+                                                                                                                                                                                           '兼容占位）。',
+                                                                                                                                                                            'title': 'Score '
+                                                                                                                                                                                     'Unknown',
+                                                                                                                                                                            'type': 'boolean'},
                                                                                                                                                           'text': {'title': 'Text',
                                                                                                                                                                    'type': 'string'}},
                                                                                                                                            'required': ['text',
@@ -1580,7 +1672,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                     '只保留写入 '
                                                                                                                                                                                     'PDF '
                                                                                                                                                                                     '/ '
-                                                                                                                                                                                    '预览所需的字段。',
+                                                                                                                                                                                    '预览所需的字段。上游无置信度时 '
+                                                                                                                                                                                    'score=0.0 '
+                                                                                                                                                                                    '且\n'
+                                                                                                                                                                                    'score_unknown=true；权威 '
+                                                                                                                                                                                    'unknown '
+                                                                                                                                                                                    '在 '
+                                                                                                                                                                                    'ocr.v1 '
+                                                                                                                                                                                    '结果的 '
+                                                                                                                                                                                    'text_blocks[].score=null。',
                                                                                                                                                                      'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                                                         'minItems': 4,
                                                                                                                                                                                                         'prefixItems': [{'type': 'number'},
@@ -1614,6 +1714,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                                 'title': 'Polygon'},
                                                                                                                                                                                     'score': {'title': 'Score',
                                                                                                                                                                                               'type': 'number'},
+                                                                                                                                                                                    'score_unknown': {'default': False,
+                                                                                                                                                                                                      'description': 'true '
+                                                                                                                                                                                                                     '表示上游未提供置信度（score '
+                                                                                                                                                                                                                     '的 '
+                                                                                                                                                                                                                     '0.0 '
+                                                                                                                                                                                                                     '只是 '
+                                                                                                                                                                                                                     'wire '
+                                                                                                                                                                                                                     '兼容占位）。',
+                                                                                                                                                                                                      'title': 'Score '
+                                                                                                                                                                                                               'Unknown',
+                                                                                                                                                                                                      'type': 'boolean'},
                                                                                                                                                                                     'text': {'title': 'Text',
                                                                                                                                                                                              'type': 'string'}},
                                                                                                                                                                      'required': ['text',
@@ -1740,7 +1851,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                     '只保留写入 '
                                                                                                                                                     'PDF '
                                                                                                                                                     '/ '
-                                                                                                                                                    '预览所需的字段。',
+                                                                                                                                                    '预览所需的字段。上游无置信度时 '
+                                                                                                                                                    'score=0.0 '
+                                                                                                                                                    '且\n'
+                                                                                                                                                    'score_unknown=true；权威 '
+                                                                                                                                                    'unknown '
+                                                                                                                                                    '在 '
+                                                                                                                                                    'ocr.v1 '
+                                                                                                                                                    '结果的 '
+                                                                                                                                                    'text_blocks[].score=null。',
                                                                                                                                      'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                         'minItems': 4,
                                                                                                                                                                         'prefixItems': [{'type': 'number'},
@@ -1774,6 +1893,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                 'title': 'Polygon'},
                                                                                                                                                     'score': {'title': 'Score',
                                                                                                                                                               'type': 'number'},
+                                                                                                                                                    'score_unknown': {'default': False,
+                                                                                                                                                                      'description': 'true '
+                                                                                                                                                                                     '表示上游未提供置信度（score '
+                                                                                                                                                                                     '的 '
+                                                                                                                                                                                     '0.0 '
+                                                                                                                                                                                     '只是 '
+                                                                                                                                                                                     'wire '
+                                                                                                                                                                                     '兼容占位）。',
+                                                                                                                                                                      'title': 'Score '
+                                                                                                                                                                               'Unknown',
+                                                                                                                                                                      'type': 'boolean'},
                                                                                                                                                     'text': {'title': 'Text',
                                                                                                                                                              'type': 'string'}},
                                                                                                                                      'required': ['text',
@@ -1898,6 +2028,8 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                          'type': 'object'},
  'exportOcr': {'additionalProperties': False,
                'properties': {'bytes_written': {'minimum': 0, 'type': 'integer'},
+                              'images_missing': {'minimum': 0, 'type': 'integer'},
+                              'incomplete': {'description': '至少一幅结构图像未能写入导出结果。', 'type': 'boolean'},
                               'instance_id': {'minLength': 1, 'type': 'string'},
                               'output_path': {'minLength': 1, 'type': 'string'},
                               'schema_version': {'const': 2}},
@@ -1963,7 +2095,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                        '只保留写入 '
                                                                                                                        'PDF '
                                                                                                                        '/ '
-                                                                                                                       '预览所需的字段。',
+                                                                                                                       '预览所需的字段。上游无置信度时 '
+                                                                                                                       'score=0.0 '
+                                                                                                                       '且\n'
+                                                                                                                       'score_unknown=true；权威 '
+                                                                                                                       'unknown '
+                                                                                                                       '在 '
+                                                                                                                       'ocr.v1 '
+                                                                                                                       '结果的 '
+                                                                                                                       'text_blocks[].score=null。',
                                                                                                         'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                            'minItems': 4,
                                                                                                                                            'prefixItems': [{'type': 'number'},
@@ -1997,6 +2137,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                    'title': 'Polygon'},
                                                                                                                        'score': {'title': 'Score',
                                                                                                                                  'type': 'number'},
+                                                                                                                       'score_unknown': {'default': False,
+                                                                                                                                         'description': 'true '
+                                                                                                                                                        '表示上游未提供置信度（score '
+                                                                                                                                                        '的 '
+                                                                                                                                                        '0.0 '
+                                                                                                                                                        '只是 '
+                                                                                                                                                        'wire '
+                                                                                                                                                        '兼容占位）。',
+                                                                                                                                         'title': 'Score '
+                                                                                                                                                  'Unknown',
+                                                                                                                                         'type': 'boolean'},
                                                                                                                        'text': {'title': 'Text',
                                                                                                                                 'type': 'string'}},
                                                                                                         'required': ['text',
@@ -3858,7 +4009,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                         '只保留写入 '
                                                                                                                                                                                         'PDF '
                                                                                                                                                                                         '/ '
-                                                                                                                                                                                        '预览所需的字段。',
+                                                                                                                                                                                        '预览所需的字段。上游无置信度时 '
+                                                                                                                                                                                        'score=0.0 '
+                                                                                                                                                                                        '且\n'
+                                                                                                                                                                                        'score_unknown=true；权威 '
+                                                                                                                                                                                        'unknown '
+                                                                                                                                                                                        '在 '
+                                                                                                                                                                                        'ocr.v1 '
+                                                                                                                                                                                        '结果的 '
+                                                                                                                                                                                        'text_blocks[].score=null。',
                                                                                                                                                                          'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                                                             'minItems': 4,
                                                                                                                                                                                                             'prefixItems': [{'type': 'number'},
@@ -3892,6 +4051,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                                     'title': 'Polygon'},
                                                                                                                                                                                         'score': {'title': 'Score',
                                                                                                                                                                                                   'type': 'number'},
+                                                                                                                                                                                        'score_unknown': {'default': False,
+                                                                                                                                                                                                          'description': 'true '
+                                                                                                                                                                                                                         '表示上游未提供置信度（score '
+                                                                                                                                                                                                                         '的 '
+                                                                                                                                                                                                                         '0.0 '
+                                                                                                                                                                                                                         '只是 '
+                                                                                                                                                                                                                         'wire '
+                                                                                                                                                                                                                         '兼容占位）。',
+                                                                                                                                                                                                          'title': 'Score '
+                                                                                                                                                                                                                   'Unknown',
+                                                                                                                                                                                                          'type': 'boolean'},
                                                                                                                                                                                         'text': {'title': 'Text',
                                                                                                                                                                                                  'type': 'string'}},
                                                                                                                                                                          'required': ['text',
@@ -4018,7 +4188,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                         '只保留写入 '
                                                                                                                                                         'PDF '
                                                                                                                                                         '/ '
-                                                                                                                                                        '预览所需的字段。',
+                                                                                                                                                        '预览所需的字段。上游无置信度时 '
+                                                                                                                                                        'score=0.0 '
+                                                                                                                                                        '且\n'
+                                                                                                                                                        'score_unknown=true；权威 '
+                                                                                                                                                        'unknown '
+                                                                                                                                                        '在 '
+                                                                                                                                                        'ocr.v1 '
+                                                                                                                                                        '结果的 '
+                                                                                                                                                        'text_blocks[].score=null。',
                                                                                                                                          'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                             'minItems': 4,
                                                                                                                                                                             'prefixItems': [{'type': 'number'},
@@ -4052,6 +4230,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                     'title': 'Polygon'},
                                                                                                                                                         'score': {'title': 'Score',
                                                                                                                                                                   'type': 'number'},
+                                                                                                                                                        'score_unknown': {'default': False,
+                                                                                                                                                                          'description': 'true '
+                                                                                                                                                                                         '表示上游未提供置信度（score '
+                                                                                                                                                                                         '的 '
+                                                                                                                                                                                         '0.0 '
+                                                                                                                                                                                         '只是 '
+                                                                                                                                                                                         'wire '
+                                                                                                                                                                                         '兼容占位）。',
+                                                                                                                                                                          'title': 'Score '
+                                                                                                                                                                                   'Unknown',
+                                                                                                                                                                          'type': 'boolean'},
                                                                                                                                                         'text': {'title': 'Text',
                                                                                                                                                                  'type': 'string'}},
                                                                                                                                          'required': ['text',
@@ -4214,7 +4403,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                             '只保留写入 '
                                                                                                                                                                                             'PDF '
                                                                                                                                                                                             '/ '
-                                                                                                                                                                                            '预览所需的字段。',
+                                                                                                                                                                                            '预览所需的字段。上游无置信度时 '
+                                                                                                                                                                                            'score=0.0 '
+                                                                                                                                                                                            '且\n'
+                                                                                                                                                                                            'score_unknown=true；权威 '
+                                                                                                                                                                                            'unknown '
+                                                                                                                                                                                            '在 '
+                                                                                                                                                                                            'ocr.v1 '
+                                                                                                                                                                                            '结果的 '
+                                                                                                                                                                                            'text_blocks[].score=null。',
                                                                                                                                                                              'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                                                                 'minItems': 4,
                                                                                                                                                                                                                 'prefixItems': [{'type': 'number'},
@@ -4248,6 +4445,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                                         'title': 'Polygon'},
                                                                                                                                                                                             'score': {'title': 'Score',
                                                                                                                                                                                                       'type': 'number'},
+                                                                                                                                                                                            'score_unknown': {'default': False,
+                                                                                                                                                                                                              'description': 'true '
+                                                                                                                                                                                                                             '表示上游未提供置信度（score '
+                                                                                                                                                                                                                             '的 '
+                                                                                                                                                                                                                             '0.0 '
+                                                                                                                                                                                                                             '只是 '
+                                                                                                                                                                                                                             'wire '
+                                                                                                                                                                                                                             '兼容占位）。',
+                                                                                                                                                                                                              'title': 'Score '
+                                                                                                                                                                                                                       'Unknown',
+                                                                                                                                                                                                              'type': 'boolean'},
                                                                                                                                                                                             'text': {'title': 'Text',
                                                                                                                                                                                                      'type': 'string'}},
                                                                                                                                                                              'required': ['text',
@@ -4374,7 +4582,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                             '只保留写入 '
                                                                                                                                                             'PDF '
                                                                                                                                                             '/ '
-                                                                                                                                                            '预览所需的字段。',
+                                                                                                                                                            '预览所需的字段。上游无置信度时 '
+                                                                                                                                                            'score=0.0 '
+                                                                                                                                                            '且\n'
+                                                                                                                                                            'score_unknown=true；权威 '
+                                                                                                                                                            'unknown '
+                                                                                                                                                            '在 '
+                                                                                                                                                            'ocr.v1 '
+                                                                                                                                                            '结果的 '
+                                                                                                                                                            'text_blocks[].score=null。',
                                                                                                                                              'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                                 'minItems': 4,
                                                                                                                                                                                 'prefixItems': [{'type': 'number'},
@@ -4408,6 +4624,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                         'title': 'Polygon'},
                                                                                                                                                             'score': {'title': 'Score',
                                                                                                                                                                       'type': 'number'},
+                                                                                                                                                            'score_unknown': {'default': False,
+                                                                                                                                                                              'description': 'true '
+                                                                                                                                                                                             '表示上游未提供置信度（score '
+                                                                                                                                                                                             '的 '
+                                                                                                                                                                                             '0.0 '
+                                                                                                                                                                                             '只是 '
+                                                                                                                                                                                             'wire '
+                                                                                                                                                                                             '兼容占位）。',
+                                                                                                                                                                              'title': 'Score '
+                                                                                                                                                                                       'Unknown',
+                                                                                                                                                                              'type': 'boolean'},
                                                                                                                                                             'text': {'title': 'Text',
                                                                                                                                                                      'type': 'string'}},
                                                                                                                                              'required': ['text',
@@ -4566,7 +4793,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                  '只保留写入 '
                                                                                                                                                                                  'PDF '
                                                                                                                                                                                  '/ '
-                                                                                                                                                                                 '预览所需的字段。',
+                                                                                                                                                                                 '预览所需的字段。上游无置信度时 '
+                                                                                                                                                                                 'score=0.0 '
+                                                                                                                                                                                 '且\n'
+                                                                                                                                                                                 'score_unknown=true；权威 '
+                                                                                                                                                                                 'unknown '
+                                                                                                                                                                                 '在 '
+                                                                                                                                                                                 'ocr.v1 '
+                                                                                                                                                                                 '结果的 '
+                                                                                                                                                                                 'text_blocks[].score=null。',
                                                                                                                                                                   'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                                                      'minItems': 4,
                                                                                                                                                                                                      'prefixItems': [{'type': 'number'},
@@ -4600,6 +4835,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                              'title': 'Polygon'},
                                                                                                                                                                                  'score': {'title': 'Score',
                                                                                                                                                                                            'type': 'number'},
+                                                                                                                                                                                 'score_unknown': {'default': False,
+                                                                                                                                                                                                   'description': 'true '
+                                                                                                                                                                                                                  '表示上游未提供置信度（score '
+                                                                                                                                                                                                                  '的 '
+                                                                                                                                                                                                                  '0.0 '
+                                                                                                                                                                                                                  '只是 '
+                                                                                                                                                                                                                  'wire '
+                                                                                                                                                                                                                  '兼容占位）。',
+                                                                                                                                                                                                   'title': 'Score '
+                                                                                                                                                                                                            'Unknown',
+                                                                                                                                                                                                   'type': 'boolean'},
                                                                                                                                                                                  'text': {'title': 'Text',
                                                                                                                                                                                           'type': 'string'}},
                                                                                                                                                                   'required': ['text',
@@ -4725,7 +4971,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                  '只保留写入 '
                                                                                                                                                  'PDF '
                                                                                                                                                  '/ '
-                                                                                                                                                 '预览所需的字段。',
+                                                                                                                                                 '预览所需的字段。上游无置信度时 '
+                                                                                                                                                 'score=0.0 '
+                                                                                                                                                 '且\n'
+                                                                                                                                                 'score_unknown=true；权威 '
+                                                                                                                                                 'unknown '
+                                                                                                                                                 '在 '
+                                                                                                                                                 'ocr.v1 '
+                                                                                                                                                 '结果的 '
+                                                                                                                                                 'text_blocks[].score=null。',
                                                                                                                                   'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                      'minItems': 4,
                                                                                                                                                                      'prefixItems': [{'type': 'number'},
@@ -4759,6 +5013,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                              'title': 'Polygon'},
                                                                                                                                                  'score': {'title': 'Score',
                                                                                                                                                            'type': 'number'},
+                                                                                                                                                 'score_unknown': {'default': False,
+                                                                                                                                                                   'description': 'true '
+                                                                                                                                                                                  '表示上游未提供置信度（score '
+                                                                                                                                                                                  '的 '
+                                                                                                                                                                                  '0.0 '
+                                                                                                                                                                                  '只是 '
+                                                                                                                                                                                  'wire '
+                                                                                                                                                                                  '兼容占位）。',
+                                                                                                                                                                   'title': 'Score '
+                                                                                                                                                                            'Unknown',
+                                                                                                                                                                   'type': 'boolean'},
                                                                                                                                                  'text': {'title': 'Text',
                                                                                                                                                           'type': 'string'}},
                                                                                                                                   'required': ['text',
@@ -5897,7 +6162,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                             '只保留写入 '
                                                                                                                                             'PDF '
                                                                                                                                             '/ '
-                                                                                                                                            '预览所需的字段。',
+                                                                                                                                            '预览所需的字段。上游无置信度时 '
+                                                                                                                                            'score=0.0 '
+                                                                                                                                            '且\n'
+                                                                                                                                            'score_unknown=true；权威 '
+                                                                                                                                            'unknown '
+                                                                                                                                            '在 '
+                                                                                                                                            'ocr.v1 '
+                                                                                                                                            '结果的 '
+                                                                                                                                            'text_blocks[].score=null。',
                                                                                                                              'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                 'minItems': 4,
                                                                                                                                                                 'prefixItems': [{'type': 'number'},
@@ -5931,6 +6204,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                         'title': 'Polygon'},
                                                                                                                                             'score': {'title': 'Score',
                                                                                                                                                       'type': 'number'},
+                                                                                                                                            'score_unknown': {'default': False,
+                                                                                                                                                              'description': 'true '
+                                                                                                                                                                             '表示上游未提供置信度（score '
+                                                                                                                                                                             '的 '
+                                                                                                                                                                             '0.0 '
+                                                                                                                                                                             '只是 '
+                                                                                                                                                                             'wire '
+                                                                                                                                                                             '兼容占位）。',
+                                                                                                                                                              'title': 'Score '
+                                                                                                                                                                       'Unknown',
+                                                                                                                                                              'type': 'boolean'},
                                                                                                                                             'text': {'title': 'Text',
                                                                                                                                                      'type': 'string'}},
                                                                                                                              'required': ['text',
@@ -6818,7 +7102,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                      '只保留写入 '
                                                                                                                                                                                      'PDF '
                                                                                                                                                                                      '/ '
-                                                                                                                                                                                     '预览所需的字段。',
+                                                                                                                                                                                     '预览所需的字段。上游无置信度时 '
+                                                                                                                                                                                     'score=0.0 '
+                                                                                                                                                                                     '且\n'
+                                                                                                                                                                                     'score_unknown=true；权威 '
+                                                                                                                                                                                     'unknown '
+                                                                                                                                                                                     '在 '
+                                                                                                                                                                                     'ocr.v1 '
+                                                                                                                                                                                     '结果的 '
+                                                                                                                                                                                     'text_blocks[].score=null。',
                                                                                                                                                                       'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                                                          'minItems': 4,
                                                                                                                                                                                                          'prefixItems': [{'type': 'number'},
@@ -6852,6 +7144,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                                  'title': 'Polygon'},
                                                                                                                                                                                      'score': {'title': 'Score',
                                                                                                                                                                                                'type': 'number'},
+                                                                                                                                                                                     'score_unknown': {'default': False,
+                                                                                                                                                                                                       'description': 'true '
+                                                                                                                                                                                                                      '表示上游未提供置信度（score '
+                                                                                                                                                                                                                      '的 '
+                                                                                                                                                                                                                      '0.0 '
+                                                                                                                                                                                                                      '只是 '
+                                                                                                                                                                                                                      'wire '
+                                                                                                                                                                                                                      '兼容占位）。',
+                                                                                                                                                                                                       'title': 'Score '
+                                                                                                                                                                                                                'Unknown',
+                                                                                                                                                                                                       'type': 'boolean'},
                                                                                                                                                                                      'text': {'title': 'Text',
                                                                                                                                                                                               'type': 'string'}},
                                                                                                                                                                       'required': ['text',
@@ -6978,7 +7281,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                      '只保留写入 '
                                                                                                                                                      'PDF '
                                                                                                                                                      '/ '
-                                                                                                                                                     '预览所需的字段。',
+                                                                                                                                                     '预览所需的字段。上游无置信度时 '
+                                                                                                                                                     'score=0.0 '
+                                                                                                                                                     '且\n'
+                                                                                                                                                     'score_unknown=true；权威 '
+                                                                                                                                                     'unknown '
+                                                                                                                                                     '在 '
+                                                                                                                                                     'ocr.v1 '
+                                                                                                                                                     '结果的 '
+                                                                                                                                                     'text_blocks[].score=null。',
                                                                                                                                       'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                          'minItems': 4,
                                                                                                                                                                          'prefixItems': [{'type': 'number'},
@@ -7012,6 +7323,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                  'title': 'Polygon'},
                                                                                                                                                      'score': {'title': 'Score',
                                                                                                                                                                'type': 'number'},
+                                                                                                                                                     'score_unknown': {'default': False,
+                                                                                                                                                                       'description': 'true '
+                                                                                                                                                                                      '表示上游未提供置信度（score '
+                                                                                                                                                                                      '的 '
+                                                                                                                                                                                      '0.0 '
+                                                                                                                                                                                      '只是 '
+                                                                                                                                                                                      'wire '
+                                                                                                                                                                                      '兼容占位）。',
+                                                                                                                                                                       'title': 'Score '
+                                                                                                                                                                                'Unknown',
+                                                                                                                                                                       'type': 'boolean'},
                                                                                                                                                      'text': {'title': 'Text',
                                                                                                                                                               'type': 'string'}},
                                                                                                                                       'required': ['text',
@@ -7179,7 +7501,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                          '只保留写入 '
                                                                                                                                                                                          'PDF '
                                                                                                                                                                                          '/ '
-                                                                                                                                                                                         '预览所需的字段。',
+                                                                                                                                                                                         '预览所需的字段。上游无置信度时 '
+                                                                                                                                                                                         'score=0.0 '
+                                                                                                                                                                                         '且\n'
+                                                                                                                                                                                         'score_unknown=true；权威 '
+                                                                                                                                                                                         'unknown '
+                                                                                                                                                                                         '在 '
+                                                                                                                                                                                         'ocr.v1 '
+                                                                                                                                                                                         '结果的 '
+                                                                                                                                                                                         'text_blocks[].score=null。',
                                                                                                                                                                           'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                                                              'minItems': 4,
                                                                                                                                                                                                              'prefixItems': [{'type': 'number'},
@@ -7213,6 +7543,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                                      'title': 'Polygon'},
                                                                                                                                                                                          'score': {'title': 'Score',
                                                                                                                                                                                                    'type': 'number'},
+                                                                                                                                                                                         'score_unknown': {'default': False,
+                                                                                                                                                                                                           'description': 'true '
+                                                                                                                                                                                                                          '表示上游未提供置信度（score '
+                                                                                                                                                                                                                          '的 '
+                                                                                                                                                                                                                          '0.0 '
+                                                                                                                                                                                                                          '只是 '
+                                                                                                                                                                                                                          'wire '
+                                                                                                                                                                                                                          '兼容占位）。',
+                                                                                                                                                                                                           'title': 'Score '
+                                                                                                                                                                                                                    'Unknown',
+                                                                                                                                                                                                           'type': 'boolean'},
                                                                                                                                                                                          'text': {'title': 'Text',
                                                                                                                                                                                                   'type': 'string'}},
                                                                                                                                                                           'required': ['text',
@@ -7339,7 +7680,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                          '只保留写入 '
                                                                                                                                                          'PDF '
                                                                                                                                                          '/ '
-                                                                                                                                                         '预览所需的字段。',
+                                                                                                                                                         '预览所需的字段。上游无置信度时 '
+                                                                                                                                                         'score=0.0 '
+                                                                                                                                                         '且\n'
+                                                                                                                                                         'score_unknown=true；权威 '
+                                                                                                                                                         'unknown '
+                                                                                                                                                         '在 '
+                                                                                                                                                         'ocr.v1 '
+                                                                                                                                                         '结果的 '
+                                                                                                                                                         'text_blocks[].score=null。',
                                                                                                                                           'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                              'minItems': 4,
                                                                                                                                                                              'prefixItems': [{'type': 'number'},
@@ -7373,6 +7722,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                      'title': 'Polygon'},
                                                                                                                                                          'score': {'title': 'Score',
                                                                                                                                                                    'type': 'number'},
+                                                                                                                                                         'score_unknown': {'default': False,
+                                                                                                                                                                           'description': 'true '
+                                                                                                                                                                                          '表示上游未提供置信度（score '
+                                                                                                                                                                                          '的 '
+                                                                                                                                                                                          '0.0 '
+                                                                                                                                                                                          '只是 '
+                                                                                                                                                                                          'wire '
+                                                                                                                                                                                          '兼容占位）。',
+                                                                                                                                                                           'title': 'Score '
+                                                                                                                                                                                    'Unknown',
+                                                                                                                                                                           'type': 'boolean'},
                                                                                                                                                          'text': {'title': 'Text',
                                                                                                                                                                   'type': 'string'}},
                                                                                                                                           'required': ['text',
@@ -7531,7 +7891,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                     '只保留写入 '
                                                                                                                                                                                     'PDF '
                                                                                                                                                                                     '/ '
-                                                                                                                                                                                    '预览所需的字段。',
+                                                                                                                                                                                    '预览所需的字段。上游无置信度时 '
+                                                                                                                                                                                    'score=0.0 '
+                                                                                                                                                                                    '且\n'
+                                                                                                                                                                                    'score_unknown=true；权威 '
+                                                                                                                                                                                    'unknown '
+                                                                                                                                                                                    '在 '
+                                                                                                                                                                                    'ocr.v1 '
+                                                                                                                                                                                    '结果的 '
+                                                                                                                                                                                    'text_blocks[].score=null。',
                                                                                                                                                                      'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                                                         'minItems': 4,
                                                                                                                                                                                                         'prefixItems': [{'type': 'number'},
@@ -7565,6 +7933,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                                 'title': 'Polygon'},
                                                                                                                                                                                     'score': {'title': 'Score',
                                                                                                                                                                                               'type': 'number'},
+                                                                                                                                                                                    'score_unknown': {'default': False,
+                                                                                                                                                                                                      'description': 'true '
+                                                                                                                                                                                                                     '表示上游未提供置信度（score '
+                                                                                                                                                                                                                     '的 '
+                                                                                                                                                                                                                     '0.0 '
+                                                                                                                                                                                                                     '只是 '
+                                                                                                                                                                                                                     'wire '
+                                                                                                                                                                                                                     '兼容占位）。',
+                                                                                                                                                                                                      'title': 'Score '
+                                                                                                                                                                                                               'Unknown',
+                                                                                                                                                                                                      'type': 'boolean'},
                                                                                                                                                                                     'text': {'title': 'Text',
                                                                                                                                                                                              'type': 'string'}},
                                                                                                                                                                      'required': ['text',
@@ -7691,7 +8070,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                     '只保留写入 '
                                                                                                                                                     'PDF '
                                                                                                                                                     '/ '
-                                                                                                                                                    '预览所需的字段。',
+                                                                                                                                                    '预览所需的字段。上游无置信度时 '
+                                                                                                                                                    'score=0.0 '
+                                                                                                                                                    '且\n'
+                                                                                                                                                    'score_unknown=true；权威 '
+                                                                                                                                                    'unknown '
+                                                                                                                                                    '在 '
+                                                                                                                                                    'ocr.v1 '
+                                                                                                                                                    '结果的 '
+                                                                                                                                                    'text_blocks[].score=null。',
                                                                                                                                      'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                         'minItems': 4,
                                                                                                                                                                         'prefixItems': [{'type': 'number'},
@@ -7725,6 +8112,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                 'title': 'Polygon'},
                                                                                                                                                     'score': {'title': 'Score',
                                                                                                                                                               'type': 'number'},
+                                                                                                                                                    'score_unknown': {'default': False,
+                                                                                                                                                                      'description': 'true '
+                                                                                                                                                                                     '表示上游未提供置信度（score '
+                                                                                                                                                                                     '的 '
+                                                                                                                                                                                     '0.0 '
+                                                                                                                                                                                     '只是 '
+                                                                                                                                                                                     'wire '
+                                                                                                                                                                                     '兼容占位）。',
+                                                                                                                                                                      'title': 'Score '
+                                                                                                                                                                               'Unknown',
+                                                                                                                                                                      'type': 'boolean'},
                                                                                                                                                     'text': {'title': 'Text',
                                                                                                                                                              'type': 'string'}},
                                                                                                                                      'required': ['text',
@@ -7882,7 +8280,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                     '只保留写入 '
                                                                                                                                                                                     'PDF '
                                                                                                                                                                                     '/ '
-                                                                                                                                                                                    '预览所需的字段。',
+                                                                                                                                                                                    '预览所需的字段。上游无置信度时 '
+                                                                                                                                                                                    'score=0.0 '
+                                                                                                                                                                                    '且\n'
+                                                                                                                                                                                    'score_unknown=true；权威 '
+                                                                                                                                                                                    'unknown '
+                                                                                                                                                                                    '在 '
+                                                                                                                                                                                    'ocr.v1 '
+                                                                                                                                                                                    '结果的 '
+                                                                                                                                                                                    'text_blocks[].score=null。',
                                                                                                                                                                      'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                                                         'minItems': 4,
                                                                                                                                                                                                         'prefixItems': [{'type': 'number'},
@@ -7916,6 +8322,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                                 'title': 'Polygon'},
                                                                                                                                                                                     'score': {'title': 'Score',
                                                                                                                                                                                               'type': 'number'},
+                                                                                                                                                                                    'score_unknown': {'default': False,
+                                                                                                                                                                                                      'description': 'true '
+                                                                                                                                                                                                                     '表示上游未提供置信度（score '
+                                                                                                                                                                                                                     '的 '
+                                                                                                                                                                                                                     '0.0 '
+                                                                                                                                                                                                                     '只是 '
+                                                                                                                                                                                                                     'wire '
+                                                                                                                                                                                                                     '兼容占位）。',
+                                                                                                                                                                                                      'title': 'Score '
+                                                                                                                                                                                                               'Unknown',
+                                                                                                                                                                                                      'type': 'boolean'},
                                                                                                                                                                                     'text': {'title': 'Text',
                                                                                                                                                                                              'type': 'string'}},
                                                                                                                                                                      'required': ['text',
@@ -8042,7 +8459,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                     '只保留写入 '
                                                                                                                                                     'PDF '
                                                                                                                                                     '/ '
-                                                                                                                                                    '预览所需的字段。',
+                                                                                                                                                    '预览所需的字段。上游无置信度时 '
+                                                                                                                                                    'score=0.0 '
+                                                                                                                                                    '且\n'
+                                                                                                                                                    'score_unknown=true；权威 '
+                                                                                                                                                    'unknown '
+                                                                                                                                                    '在 '
+                                                                                                                                                    'ocr.v1 '
+                                                                                                                                                    '结果的 '
+                                                                                                                                                    'text_blocks[].score=null。',
                                                                                                                                      'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                         'minItems': 4,
                                                                                                                                                                         'prefixItems': [{'type': 'number'},
@@ -8076,6 +8501,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                 'title': 'Polygon'},
                                                                                                                                                     'score': {'title': 'Score',
                                                                                                                                                               'type': 'number'},
+                                                                                                                                                    'score_unknown': {'default': False,
+                                                                                                                                                                      'description': 'true '
+                                                                                                                                                                                     '表示上游未提供置信度（score '
+                                                                                                                                                                                     '的 '
+                                                                                                                                                                                     '0.0 '
+                                                                                                                                                                                     '只是 '
+                                                                                                                                                                                     'wire '
+                                                                                                                                                                                     '兼容占位）。',
+                                                                                                                                                                      'title': 'Score '
+                                                                                                                                                                               'Unknown',
+                                                                                                                                                                      'type': 'boolean'},
                                                                                                                                                     'text': {'title': 'Text',
                                                                                                                                                              'type': 'string'}},
                                                                                                                                      'required': ['text',
@@ -8383,7 +8819,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                         '只保留写入 '
                                                                                                                                                                                         'PDF '
                                                                                                                                                                                         '/ '
-                                                                                                                                                                                        '预览所需的字段。',
+                                                                                                                                                                                        '预览所需的字段。上游无置信度时 '
+                                                                                                                                                                                        'score=0.0 '
+                                                                                                                                                                                        '且\n'
+                                                                                                                                                                                        'score_unknown=true；权威 '
+                                                                                                                                                                                        'unknown '
+                                                                                                                                                                                        '在 '
+                                                                                                                                                                                        'ocr.v1 '
+                                                                                                                                                                                        '结果的 '
+                                                                                                                                                                                        'text_blocks[].score=null。',
                                                                                                                                                                          'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                                                             'minItems': 4,
                                                                                                                                                                                                             'prefixItems': [{'type': 'number'},
@@ -8417,6 +8861,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                                     'title': 'Polygon'},
                                                                                                                                                                                         'score': {'title': 'Score',
                                                                                                                                                                                                   'type': 'number'},
+                                                                                                                                                                                        'score_unknown': {'default': False,
+                                                                                                                                                                                                          'description': 'true '
+                                                                                                                                                                                                                         '表示上游未提供置信度（score '
+                                                                                                                                                                                                                         '的 '
+                                                                                                                                                                                                                         '0.0 '
+                                                                                                                                                                                                                         '只是 '
+                                                                                                                                                                                                                         'wire '
+                                                                                                                                                                                                                         '兼容占位）。',
+                                                                                                                                                                                                          'title': 'Score '
+                                                                                                                                                                                                                   'Unknown',
+                                                                                                                                                                                                          'type': 'boolean'},
                                                                                                                                                                                         'text': {'title': 'Text',
                                                                                                                                                                                                  'type': 'string'}},
                                                                                                                                                                          'required': ['text',
@@ -8543,7 +8998,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                         '只保留写入 '
                                                                                                                                                         'PDF '
                                                                                                                                                         '/ '
-                                                                                                                                                        '预览所需的字段。',
+                                                                                                                                                        '预览所需的字段。上游无置信度时 '
+                                                                                                                                                        'score=0.0 '
+                                                                                                                                                        '且\n'
+                                                                                                                                                        'score_unknown=true；权威 '
+                                                                                                                                                        'unknown '
+                                                                                                                                                        '在 '
+                                                                                                                                                        'ocr.v1 '
+                                                                                                                                                        '结果的 '
+                                                                                                                                                        'text_blocks[].score=null。',
                                                                                                                                          'properties': {'bbox': {'anyOf': [{'maxItems': 4,
                                                                                                                                                                             'minItems': 4,
                                                                                                                                                                             'prefixItems': [{'type': 'number'},
@@ -8577,6 +9040,17 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                     'title': 'Polygon'},
                                                                                                                                                         'score': {'title': 'Score',
                                                                                                                                                                   'type': 'number'},
+                                                                                                                                                        'score_unknown': {'default': False,
+                                                                                                                                                                          'description': 'true '
+                                                                                                                                                                                         '表示上游未提供置信度（score '
+                                                                                                                                                                                         '的 '
+                                                                                                                                                                                         '0.0 '
+                                                                                                                                                                                         '只是 '
+                                                                                                                                                                                         'wire '
+                                                                                                                                                                                         '兼容占位）。',
+                                                                                                                                                                          'title': 'Score '
+                                                                                                                                                                                   'Unknown',
+                                                                                                                                                                          'type': 'boolean'},
                                                                                                                                                         'text': {'title': 'Text',
                                                                                                                                                                  'type': 'string'}},
                                                                                                                                          'required': ['text',
@@ -8666,6 +9140,11 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
 
 ROUTE_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {('GET', '/v2/health'): {'responses': {'403': {'$ref': '#/components/responses/Error'}},
                          'security': []},
+ ('GET', '/v2/jobs/{job_id}/items/{item_id}/assets/{asset_id}'): {'responses': {'200': {'$ref': '#/components/responses/Png'},
+                                                                                '400': {'$ref': '#/components/responses/Error'},
+                                                                                '401': {'$ref': '#/components/responses/Error'},
+                                                                                '403': {'$ref': '#/components/responses/Error'},
+                                                                                '404': {'$ref': '#/components/responses/Error'}}},
  ('GET', '/v2/jobs/{job_id}/observe'): {'responses': {'401': {'$ref': '#/components/responses/Error'},
                                                       '403': {'$ref': '#/components/responses/Error'},
                                                       '404': {'$ref': '#/components/responses/Error'}}},

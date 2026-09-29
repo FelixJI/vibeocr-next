@@ -43,6 +43,10 @@ internal abstract class InferenceClientStub : IInferenceClient
         CancellationToken cancellationToken) =>
         throw new NotImplementedException();
 
+    public virtual Task<byte[]> FetchResultAssetAsync(
+        string jobId, string itemId, string assetId, CancellationToken cancellationToken) =>
+        throw new NotImplementedException();
+
     public virtual Task<ExportResult> ExportAsync(
         ExportRequest request,
         CancellationToken cancellationToken) =>

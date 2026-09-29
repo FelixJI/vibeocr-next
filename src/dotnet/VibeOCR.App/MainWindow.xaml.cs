@@ -71,6 +71,7 @@ public sealed partial class MainWindow : Window
   private readonly Func<int>? smokeInstallAttempts;
   private bool screenshotSmokeStarted;
   private bool managedEnvironmentSmokeStarted;
+  private bool paddleModesSmokeStarted;
   private bool initialized;
   private WorkbenchRoute currentRoute = WorkbenchRoute.Recognition;
 
@@ -136,7 +137,8 @@ public sealed partial class MainWindow : Window
       inferenceAttached: inferenceAttached,
       supervisorInstanceId: supervisorInstanceId,
       pinScreenshot: PinScreenshot,
-      shellActions: shellActions);
+      shellActions: shellActions,
+      optionsLayout: layout);
     commandHandler.ScreenshotTextLayerChanged += layer =>
     {
       void UpdatePins()
@@ -310,6 +312,9 @@ public sealed partial class MainWindow : Window
     NavigateTo(destination);
   }
 
+  internal Task RefreshRecognitionCatalogAsync(CancellationToken cancellationToken) =>
+    commandHandler.RefreshRecognitionCatalogAsync(cancellationToken);
+
   internal async Task RecognizeScreenshotAsync()
   {
     NavigateTo("recognition");
@@ -420,6 +425,12 @@ public sealed partial class MainWindow : Window
       {
         managedEnvironmentSmokeStarted = true;
         _ = CompleteManagedEnvironmentE2eSmokeAsync();
+      }
+      if (!paddleModesSmokeStarted &&
+          Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "paddle-modes-e2e")
+      {
+        paddleModesSmokeStarted = true;
+        _ = CompletePaddleModesSmokeAsync();
       }
     }
     AppLog.Info($"Web workbench: {state}");

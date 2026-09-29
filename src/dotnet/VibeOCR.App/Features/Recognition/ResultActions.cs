@@ -9,7 +9,7 @@ namespace VibeOCR.App.Features.Recognition;
 
 public enum ResultCopyFormat { Rich, Markdown, Plain }
 public enum ResultExportFormat { Docx, Html, Markdown, Text, Xlsx }
-public sealed record RecognitionResultContent(string RawText, string MarkdownText, string HtmlText, System.Text.Json.JsonElement[] RawBlocks);
+public sealed record RecognitionResultContent(string RawText, string MarkdownText, string HtmlText, System.Text.Json.JsonElement[] RawBlocks, System.Text.Json.JsonElement[]? ContentBlocks = null);
 public sealed class ClipboardBusyException(Exception? inner = null) : Exception("The clipboard is busy.", inner);
 
 public interface IResultActionPlatform
@@ -24,7 +24,7 @@ public sealed class ResultActions(IInferenceClient inference, IResultActionPlatf
     private readonly Func<TimeSpan, CancellationToken, Task> _delay = delay ?? Task.Delay;
     private RecognitionResultContent? _result;
     public bool HasResult => _result is not null;
-    public void SetResult(RecognizeResponse response) => _result = new(response.RawText ?? response.Text, response.MarkdownText ?? response.Text, response.HtmlText ?? response.Text, response.RawBlocks ?? []);
+    public void SetResult(RecognizeResponse response) => _result = new(response.RawText ?? response.Text, response.MarkdownText ?? response.Text, response.HtmlText ?? response.Text, response.RawBlocks ?? [], response.ContentBlocks ?? []);
 
     public async Task CopyAsync(ResultCopyFormat format, CancellationToken cancellationToken)
     {
@@ -52,7 +52,7 @@ public sealed class ResultActions(IInferenceClient inference, IResultActionPlatf
             _ => "txt",
         };
         return await inference.ExportAsync(new ExportRequest(
-            result.RawText, result.MarkdownText, result.HtmlText, path, fmt, existed), cancellationToken);
+            result.RawText, result.MarkdownText, result.HtmlText, path, fmt, existed, result.ContentBlocks), cancellationToken);
     }
 }
 

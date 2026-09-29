@@ -58,12 +58,16 @@ def _build_ocr_result(
     if text_with_scores is None:
         text_with_scores = []
 
+    # 上游无置信度（None）不参与均值/低置信度统计，也不伪造数值。
+    known_scores = [s for _, s in text_with_scores if s is not None]
     avg_score = 0.0
-    if text_with_scores:
-        avg_score = sum(s for _, s in text_with_scores) / len(text_with_scores)
+    if known_scores:
+        avg_score = sum(known_scores) / len(known_scores)
 
     low_confidence_items = [
-        (text, score) for text, score in text_with_scores if score < 0.80
+        (text, score)
+        for text, score in text_with_scores
+        if score is not None and score < 0.80
     ]
 
     final_html = html_text or raw_text
@@ -86,12 +90,15 @@ def _build_ocr_result(
 class PPStructureV3Options(BasePipelineOptions):
     """PP-StructureV3 管道选项
 
-    文档结构分析，支持表格、公式、印章、图表识别。
+    文档结构分析，支持表格、公式、印章、图表识别。六个模块/预处理开关
+    同时作为构造与 predict 参数：PaddleX 布局解析管线在构造期按这些
+    开关初始化子模块（未初始化的模块在 predict 期开启会直接报错），
+    因此它们参与构造签名，变更会重建管道。
     """
 
     pipeline: str = "PP-StructureV3"
     use_doc_orientation_classify: bool = True
-    use_doc_unwarping: bool = True
+    use_doc_unwarping: bool = False
     use_textline_orientation: bool = False
     use_table_recognition: bool = True
     use_formula_recognition: bool = True
@@ -99,26 +106,59 @@ class PPStructureV3Options(BasePipelineOptions):
     use_chart_recognition: bool = False
 
 
+def _pp_structure_constructor_kwargs(options: Any) -> dict[str, Any]:
+    """把公开选项映射为 PPStructureV3 构造参数（模块初始化门槛）。
+
+    仅返回会门控子模块初始化的参数；use_textline_orientation 是
+    GeneralOCR 子管线的 predict 参数，不参与构造签名（避免无谓重建）。
+    """
+    return {
+        "use_doc_orientation_classify": options.use_doc_orientation_classify,
+        "use_doc_unwarping": options.use_doc_unwarping,
+        "use_table_recognition": options.use_table_recognition,
+        "use_formula_recognition": options.use_formula_recognition,
+        "use_seal_recognition": options.use_seal_recognition,
+        "use_chart_recognition": options.use_chart_recognition,
+    }
+
+
 def _create_pp_structure_pipeline(device: str, **kwargs: Any) -> Any:
     """创建 PP-StructureV3 管道实例
 
-    额外 kwargs 透传给 PPStructureV3（例如 enable_mkldnn）。
+    额外 kwargs 透传给 PPStructureV3（例如 enable_mkldnn 及模块开关）。
     """
     from paddleocr import PPStructureV3
 
-    return PPStructureV3(device=device, **kwargs)
+    pipeline = PPStructureV3(device=device, **kwargs)
+    _logger.info(
+        "[Paddle consumed] construct PP-StructureV3 use_seal_recognition=%s use_chart_recognition=%s",
+        kwargs.get("use_seal_recognition"),
+        kwargs.get("use_chart_recognition"),
+    )
+    return pipeline
 
 
 def _recognize_pp_structure(
-    service: Any, image: Any, options: PPStructureV3Options
+    service: Any,
+    image: Any,
+    options: PPStructureV3Options,
+    asset_sink: Any | None = None,
 ) -> Any:
     """PP-StructureV3 文档结构分析
 
-    从 OCRService._recognize_structure 迁移而来。
+    从 OCRService._recognize_structure 迁移而来。构造与 predict 均消费
+    同一组模块开关：构造期决定子模块初始化，predict 期按请求覆盖。
+    块级图像（image/seal/chart）经 asset_sink 写入 job 受控目录，
+    content_list 携带 opaque 资产引用（不含本地路径）。
     """
     from vibeocr.runtime.recognition.models.ocr_result import TextBlock
+    from vibeocr.runtime.recognition.result_assets import (
+        REASON_SOURCE_UNAVAILABLE,
+        REASON_STORE_UNAVAILABLE,
+        unavailable_asset,
+    )
 
-    pipeline = service.get_or_create_pipeline("PP-StructureV3")
+    pipeline = service.get_or_create_pipeline("PP-StructureV3", options=options)
     output = pipeline.predict(
         input=image,
         use_doc_orientation_classify=options.use_doc_orientation_classify,
@@ -130,6 +170,11 @@ def _recognize_pp_structure(
         use_chart_recognition=options.use_chart_recognition,
     )
     output_list = _consume_generator_safely(output)
+    _logger.info(
+        "[Paddle consumed] predict PP-StructureV3 use_seal_recognition=%s use_chart_recognition=%s",
+        options.use_seal_recognition,
+        options.use_chart_recognition,
+    )
 
     preproc_angle = 0
     preprocessed_png: bytes | None = None
@@ -227,7 +272,7 @@ def _recognize_pp_structure(
                 text_blocks.append(
                     TextBlock(
                         text=table_plain_text,
-                        score=0.9,
+                        score=None,
                         bbox=bbox_tuple,
                         label=label,
                         order=order_index if order_index is not None else -1,
@@ -235,7 +280,7 @@ def _recognize_pp_structure(
                         content_id=table_id,
                     )
                 )
-                text_with_scores.append((table_plain_text, 0.9))
+                text_with_scores.append((table_plain_text, None))
                 content_list.append(canonical_block)
 
             elif label == "formula":
@@ -245,7 +290,7 @@ def _recognize_pp_structure(
                 text_blocks.append(
                     TextBlock(
                         text=content,
-                        score=1.0,
+                        score=None,
                         bbox=bbox_tuple,
                         label=label,
                         order=order_index if order_index is not None else -1,
@@ -253,7 +298,7 @@ def _recognize_pp_structure(
                         content_id=block_id,
                     )
                 )
-                text_with_scores.append((content, 1.0))
+                text_with_scores.append((content, None))
                 content_list.append(
                     {
                         "type": "formula",
@@ -269,7 +314,7 @@ def _recognize_pp_structure(
                 text_blocks.append(
                     TextBlock(
                         text=content,
-                        score=0.9,
+                        score=None,
                         bbox=bbox_tuple,
                         label=label,
                         order=order_index if order_index is not None else -1,
@@ -277,17 +322,36 @@ def _recognize_pp_structure(
                         content_id=block_id,
                     )
                 )
-                text_with_scores.append((content, 0.9))
+                text_with_scores.append((content, None))
                 content_entry: dict[str, Any] = {
                     "type": label,
                     "text": content,
                     "bbox": bbox_tuple,
                     "block_id": block_id,
                 }
-                if block_image and isinstance(block_image, dict):
-                    img_path = block_image.get("path", "")
-                    if img_path:
-                        content_entry["img_path"] = img_path
+                if label in ("image", "seal", "chart"):
+                    provider_image = (
+                        block_image.get("img")
+                        if isinstance(block_image, dict)
+                        else None
+                    )
+                    if asset_sink is not None and provider_image is not None:
+                        content_entry["image"] = asset_sink.save(
+                            provider_image,
+                            name=(
+                                block_image.get("path")
+                                if isinstance(block_image, dict)
+                                else None
+                            ),
+                        )
+                    elif asset_sink is None:
+                        content_entry["image"] = unavailable_asset(
+                            REASON_STORE_UNAVAILABLE
+                        )
+                    else:
+                        content_entry["image"] = unavailable_asset(
+                            REASON_SOURCE_UNAVAILABLE
+                        )
                 content_list.append(content_entry)
 
     raw_text = "\n".join(b.text for b in text_blocks if b.label not in ("table",))
@@ -308,7 +372,7 @@ def _recognize_pp_structure(
         html_text="\n".join(part for part in html_parts if part),
         text_with_scores=text_with_scores,
         pipeline_type="PP-StructureV3",
-        images=images if images else None,
+        images=images if images and asset_sink is None else None,
         text_blocks=text_blocks,
         content_list=content_list,
     )
@@ -327,4 +391,5 @@ PP_STRUCTURE_V3_SPEC = PipelineSpec(
     options_class=PPStructureV3Options,
     create_pipeline=_create_pp_structure_pipeline,
     recognize=_recognize_pp_structure,
+    constructor_kwargs=_pp_structure_constructor_kwargs,
 )

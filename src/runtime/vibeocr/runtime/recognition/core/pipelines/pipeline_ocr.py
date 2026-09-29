@@ -139,14 +139,17 @@ def _build_ocr_result(
     if text_with_scores is None:
         text_with_scores = []
 
-    # 计算平均置信度
+    # 计算平均置信度（仅统计已知置信度；None=unknown 不参与，不伪造）
+    known_scores = [s for _, s in text_with_scores if s is not None]
     avg_score = 0.0
-    if text_with_scores:
-        avg_score = sum(s for _, s in text_with_scores) / len(text_with_scores)
+    if known_scores:
+        avg_score = sum(known_scores) / len(known_scores)
 
-    # 收集低置信度项（低于 80%）
+    # 收集低置信度项（低于 80%；unknown 不参与）
     low_confidence_items = [
-        (text, score) for text, score in text_with_scores if score < 0.80
+        (text, score)
+        for text, score in text_with_scores
+        if score is not None and score < 0.80
     ]
 
     final_html = html_text or raw_text
@@ -297,11 +300,17 @@ def _extract_preproc_info(
     return preproc_angle, preprocessed_png, preproc_w, preproc_h
 
 
-def _recognize_ocr(service: Any, image: Any, options: OCROptions) -> Any:
+def _recognize_ocr(
+    service: Any,
+    image: Any,
+    options: OCROptions,
+    asset_sink: Any | None = None,
+) -> Any:
     """通用 OCR 识别
 
     从 OCRService._recognize_ocr 和 _process_ocr_output_safe 迁移而来。
-    使用 service.get_or_create_pipeline("OCR") 获取管道实例。
+    使用 service.get_or_create_pipeline("OCR") 获取管道实例。文本 OCR 无
+    块级图像，asset_sink 仅保持分发签名一致（不消费）。
     """
     _logger.debug("[_recognize_ocr] 获取 OCR 管道...")
     pipeline = service.get_or_create_pipeline("OCR")
@@ -323,6 +332,10 @@ def _recognize_ocr(service: Any, image: Any, options: OCROptions) -> Any:
     text_blocks: list[TextBlock] = []
 
     output_list = _consume_generator_safely(output)
+    _logger.info(
+        "[Paddle consumed] predict OCR use_textline_orientation=%s",
+        options.use_textline_orientation,
+    )
 
     # 提取预处理信息：旋转角度和实际预处理后图像
     # 注意：res.img['preprocessed_img'] 是拼接可视化，不用；
@@ -364,16 +377,23 @@ def _recognize_ocr(service: Any, image: Any, options: OCROptions) -> Any:
     return result
 
 
-def _recognize_ocr_batch(service: Any, images: list, options: OCROptions) -> list:
+def _recognize_ocr_batch(
+    service: Any,
+    images: list,
+    options: OCROptions,
+    asset_sinks: list | None = None,
+) -> list:
     """通用 OCR 批量识别
 
     将多张图像一次性送入单次 pipeline.predict(list) 调用，由 PaddleOCR 内部
     的 ImageBatchSampler 按 batch_size 分批处理，避免逐张调用的管道开销。
-    返回结果顺序与输入 images 一致。
+    返回结果顺序与输入 images 一致。文本 OCR 无块级图像，asset_sinks 仅
+    保持分发签名一致（不消费）。
 
     每张图像的预处理信息（旋转角度、预处理图尺寸）取自其对应的输出项，
     bbox 归一化由 OCRService._normalize_result_bbox 负责。
     """
+    del asset_sinks
     _logger.debug("[_recognize_ocr_batch] 获取 OCR 管道...")
     pipeline = service.get_or_create_pipeline("OCR")
     _logger.debug("[_recognize_ocr_batch] 执行批量 predict (%d 张)...", len(images))
@@ -388,6 +408,10 @@ def _recognize_ocr_batch(service: Any, images: list, options: OCROptions) -> lis
                 use_doc_unwarping=options.use_doc_unwarping,
                 use_textline_orientation=options.use_textline_orientation,
             )
+        )
+        _logger.info(
+            "[Paddle consumed] predict OCR use_textline_orientation=%s",
+            options.use_textline_orientation,
         )
         _predict_elapsed = _time.perf_counter() - _predict_start
         _logger.info(

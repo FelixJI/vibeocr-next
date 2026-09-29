@@ -270,6 +270,7 @@ internal static class RecognitionOutcomeMapper
             MarkdownText = StringValue(payload, "markdown_text"),
             HtmlText = StringValue(payload, "html_text"),
             RawBlocks = ArrayValue(payload, "text_blocks"),
+            ContentBlocks = ArrayValue(payload, "content_list"),
             Pipeline = pipeline,
         };
     }

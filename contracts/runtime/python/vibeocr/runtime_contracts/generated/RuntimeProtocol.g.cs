@@ -54,6 +54,7 @@ public static class RuntimeProtocol
         new RuntimeOperation[]
         {
         new("GET", "/v2/health", "getRuntimeHealth"),
+        new("GET", "/v2/jobs/{job_id}/items/{item_id}/assets/{asset_id}", "getJobItemAsset"),
         new("GET", "/v2/jobs/{job_id}/observe", "observeJob"),
         new("GET", "/v2/pdf/sessions/{session_id}/render", "renderPdfPage"),
         new("GET", "/v2/runtime/operations/{operation_id}/events", "streamRuntimeMaintenanceEvents"),
@@ -102,6 +103,7 @@ public readonly record struct RuntimeOperation(string Method, string Path, strin
 public static class RuntimeOperationPaths
 {
     public const string GetRuntimeHealth = "/v2/health";
+    public const string GetJobItemAsset = "/v2/jobs/{job_id}/items/{item_id}/assets/{asset_id}";
     public const string ObserveJob = "/v2/jobs/{job_id}/observe";
     public const string RenderPdfPage = "/v2/pdf/sessions/{session_id}/render";
     public const string StreamRuntimeMaintenanceEvents = "/v2/runtime/operations/{operation_id}/events";

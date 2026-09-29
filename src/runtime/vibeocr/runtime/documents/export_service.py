@@ -23,6 +23,28 @@ from vibeocr.runtime.recognition.models.ocr_result import (
 logger = logging.getLogger(__name__)
 
 
+def _xlsx_text_cell(ws, row: int, column: int, value: str) -> None:
+    """把 OCR 文本写入单元格，阻断公式注入。
+
+    openpyxl 对以 ``=`` 开头的字符串会按公式存储，Excel 打开后即执行；
+    OCR 结果是不可信文本，必须始终以字符串写入（data_type="s"）。
+    """
+
+    cell = ws.cell(row=row, column=column, value=value)
+    if isinstance(value, str) and value.startswith("="):
+        cell.data_type = "s"
+
+
+def _xlsx_append_row(ws, values: list) -> None:
+    """按 ws.append 语义追加一行，但逐格阻断公式注入（见上）。"""
+
+    ws.append(values)
+    row = ws.max_row
+    for offset, value in enumerate(values, start=1):
+        if isinstance(value, str) and value.startswith("="):
+            ws.cell(row=row, column=offset).data_type = "s"
+
+
 class ExportService:
     """OCR 结果导出服务"""
 
@@ -96,6 +118,12 @@ class ExportService:
     def _export_markdown(result: OCRResult, output_path: Path) -> bool:
         """导出为 Markdown"""
         content = result.markdown_text or result.raw_text
+        for name, data in result.images.items():
+            if not isinstance(data, bytes):
+                continue
+            content = content.replace(
+                f"]({name})", f"]({output_path.stem}_images/{name})"
+            )
         output_path.write_text(content, encoding="utf-8")
 
         # 保存图片到 images 子目录
@@ -181,7 +209,7 @@ class ExportService:
             if kind == "index":
                 blocks.append({**block, "type": "text"})
             elif (
-                kind in {"chart", "table_unparsed"}
+                kind in {"chart", "seal", "table_unparsed"}
                 or (
                     kind == "image"
                     and ("image_body" in block or "image_footnote" in block)
@@ -206,7 +234,7 @@ class ExportService:
                 body = (
                     block.get("text", "")
                     if kind == "table_unparsed"
-                    else block.get(f"{kind}_body", "")
+                    else block.get(f"{kind}_body") or block.get("text", "")
                 )
                 if body:
                     blocks.append(
@@ -399,7 +427,9 @@ class ExportService:
                         if not has_text:
                             has_text = True
                             ws_text.title = "文本汇总"
-                        ws_text.append([f"[表格标题] {' '.join(table_captions)}"])
+                        _xlsx_append_row(
+                            ws_text, [f"[表格标题] {' '.join(table_captions)}"]
+                        )
                     html = block.get("table_body", "") or block.get("html", "")
                     if block.get("table") or html:
                         written_table_htmls.add(html)
@@ -416,13 +446,15 @@ class ExportService:
                         if not has_text:
                             has_text = True
                             ws_text.title = "文本汇总"
-                        ws_text.append([f"[表格脚注] {' '.join(table_footnotes)}"])
+                        _xlsx_append_row(
+                            ws_text, [f"[表格脚注] {' '.join(table_footnotes)}"]
+                        )
 
                 elif block_type == "title" and text:
                     if not has_text:
                         has_text = True
                         ws_text.title = "文本汇总"
-                    ws_text.append([f"[标题] {text}"])
+                    _xlsx_append_row(ws_text, [f"[标题] {text}"])
 
                 elif block_type == "text" and text:
                     if not has_text:
@@ -430,9 +462,9 @@ class ExportService:
                         ws_text.title = "文本汇总"
                     text_level = block.get("text_level")
                     if text_level:
-                        ws_text.append([f"{'#' * text_level} {text}"])
+                        _xlsx_append_row(ws_text, [f"{'#' * text_level} {text}"])
                     else:
-                        ws_text.append([text])
+                        _xlsx_append_row(ws_text, [text])
 
                 elif block_type in ("image", "figure"):
                     if not has_text:
@@ -443,13 +475,13 @@ class ExportService:
                     )
                     label = " ".join(caption) if caption else text
                     if label:
-                        ws_text.append([f"[图片: {label}"])
+                        _xlsx_append_row(ws_text, [f"[图片: {label}"])
 
                 elif block_type == "equation" and text:
                     if not has_text:
                         has_text = True
                         ws_text.title = "文本汇总"
-                    ws_text.append([f"[公式] {text}"])
+                    _xlsx_append_row(ws_text, [f"[公式] {text}"])
 
                 elif block_type == "list":
                     items = block.get("list_items", [])
@@ -458,7 +490,7 @@ class ExportService:
                             has_text = True
                             ws_text.title = "文本汇总"
                         for item in items:
-                            ws_text.append([f"• {item}"])
+                            _xlsx_append_row(ws_text, [f"• {item}"])
 
                 elif block_type == "code":
                     body = block.get("code_body", "")
@@ -466,7 +498,7 @@ class ExportService:
                         if not has_text:
                             has_text = True
                             ws_text.title = "文本汇总"
-                        ws_text.append([f"[代码] {body}"])
+                        _xlsx_append_row(ws_text, [f"[代码] {body}"])
 
         # 兜底：content_list 无 table 块时，从 html_text/markdown_text/text_blocks
         # 提取表格 HTML，补写为工作表（前后端分离下表格可能只存活在 html_text）。
@@ -492,7 +524,7 @@ class ExportService:
                 result.raw_text or result.markdown_text
             )
             for line in text.split("\n"):
-                ws_text.append([line])
+                _xlsx_append_row(ws_text, [line])
 
         if not has_text and table_count > 0:
             if "Sheet" in wb.sheetnames:
@@ -515,7 +547,7 @@ class ExportService:
         ws = wb.create_sheet(title=f"表格 {table_count}")
         for row_idx, row in enumerate(rows_data):
             for col_idx, cell_text in enumerate(row):
-                ws.cell(row=row_idx + 1, column=col_idx + 1, value=cell_text)
+                _xlsx_text_cell(ws, row_idx + 1, col_idx + 1, cell_text)
         for min_row, min_col, max_row, max_col in table_model.merged_ranges():
             ws.merge_cells(
                 start_row=min_row + 1,

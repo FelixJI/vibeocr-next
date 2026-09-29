@@ -1,93 +1,146 @@
 # src/vibeocr/core/pipelines/pipeline_formula.py
 """公式识别管道选项与规格
 
-定义公式识别管道的选项类和 PipelineSpec，
-基于 PPStructureV3，仅启用公式识别功能。
+基于锁定 PaddleOCR 3.7.0 的 ``FormulaRecognitionPipeline``（独立公式识别
+管线，默认模型 PP-FormulaNet_plus-M；另有单模型 ``FormulaRecognition``
+类，二者不同）。构造参数：模型名/模型目录/批量大小与文档预处理开关；
+predict 参数：方向分类/去畸变。结果从 ``formula_res_list[].rec_formula``
+与 ``dt_polys`` 区域几何解析，按上游输出顺序作为阅读顺序。
+
+上游不提供置信度：TextBlock.score 置 None（真实 unknown），任何下游
+展示不得把它当作 0% 或 100%。
 """
 
 from __future__ import annotations
 
 import io
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from vibeocr.runtime.recognition.core.pipelines.base_options import BasePipelineOptions
 from vibeocr.runtime.recognition.core.pipelines.registry import PipelineSpec
+from vibeocr.runtime.recognition.pipeline_contracts import (
+    FORMULA_RECOGNITION_MODEL_NAMES,
+)
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
 class FormulaRecognitionOptions(BasePipelineOptions):
-    """公式识别管道选项
+    """公式识别管道选项。
 
-    基于 PPStructureV3，仅启用公式识别，禁用表格/印章/图表。
+    ``use_doc_orientation_classify``/``use_doc_unwarping`` 同时作为构造与
+    predict 参数（决定 DocPreprocessor 子管线是否初始化）；模型名/目录/
+    批量大小仅构造时消费（变更会触发管道重建，不复用旧实例）。
     """
 
     pipeline: str = "FORMULA_RECOGNITION"
     use_doc_orientation_classify: bool = True
-    use_doc_unwarping: bool = True
+    use_doc_unwarping: bool = False
     formula_recognition_model_name: str | None = None
     formula_recognition_model_dir: str | None = None
     formula_recognition_batch_size: int = 1
 
 
+def _formula_constructor_kwargs(options: Any) -> dict[str, Any]:
+    """把公开选项映射为 FormulaRecognitionPipeline 构造参数。
+
+    None 值保持透传（底层 create_config_from_structure 会丢弃 None 并
+    回退发行包默认）；非 None 值参与构造签名，变更即重建管道。
+    """
+    return {
+        "use_doc_orientation_classify": options.use_doc_orientation_classify,
+        "use_doc_unwarping": options.use_doc_unwarping,
+        "formula_recognition_model_name": options.formula_recognition_model_name,
+        "formula_recognition_model_dir": options.formula_recognition_model_dir,
+        "formula_recognition_batch_size": options.formula_recognition_batch_size,
+    }
+
+
 def _create_formula_pipeline(device: str, **kwargs: Any) -> Any:
     """创建公式识别管道实例
 
-    PaddleOCR 3.x 没有独立的公式识别管道类，
-    因此使用 PPStructureV3 作为底层引擎。
-    额外 kwargs 透传给 PPStructureV3（例如 enable_mkldnn）。
+    额外 kwargs 透传给 FormulaRecognitionPipeline（例如 enable_mkldnn）。
     """
-    from paddleocr import PPStructureV3
+    from paddleocr import FormulaRecognitionPipeline
 
-    return PPStructureV3(device=device, **kwargs)
+    pipeline = FormulaRecognitionPipeline(device=device, **kwargs)
+    model_name = kwargs.get("formula_recognition_model_name")
+    if model_name is None or model_name in FORMULA_RECOGNITION_MODEL_NAMES:
+        _logger.info(
+            "[Paddle consumed] construct FORMULA_RECOGNITION formula_recognition_model_name=%s",
+            model_name,
+        )
+    return pipeline
+
+
+def _parse_dt_polys(dt_polys: Any) -> tuple[float, float, float, float] | None:
+    """把 formula_res_list[].dt_polys（x1,y1,x2,y2）解析为 bbox 元组。"""
+    if dt_polys is None:
+        return None
+    try:
+        if hasattr(dt_polys, "tolist"):
+            dt_polys = dt_polys.tolist()
+        if not isinstance(dt_polys, (list, tuple)) or len(dt_polys) < 4:
+            return None
+        values = [float(dt_polys[i]) for i in range(4)]
+        x1, y1, x2, y2 = values
+        if x2 < x1:
+            x1, x2 = x2, x1
+        if y2 < y1:
+            y1, y2 = y2, y1
+        return (x1, y1, x2, y2)
+    except (TypeError, ValueError, IndexError):
+        return None
 
 
 def _recognize_formula(
-    service: Any, image: Any, options: FormulaRecognitionOptions
+    service: Any,
+    image: Any,
+    options: FormulaRecognitionOptions,
+    asset_sink: Any | None = None,
 ) -> Any:
     """执行公式识别并返回 OCRResult
 
-    通过 PPStructureV3 进行识别，但仅提取 label=="formula" 的区块，
-    内容以 LaTeX 格式输出，包裹在 $$...$$ 中用于 Markdown 显示。
+    结果键（PaddleX 3.7.2 formula_recognition 管线）：``formula_res_list``
+    每项含 ``rec_formula``（LaTeX）、``formula_region_id``、可选
+    ``dt_polys``；``doc_preprocessor_res`` 含 ``angle``/``output_img``。
+    无置信度字段——score 置 None，不伪造。
     """
     from enum import Enum
 
     from vibeocr.runtime.recognition.models.ocr_result import OCRResult, TextBlock
 
+    # 生产分发（OCRService.recognize_batch）把携带 OCRPipeline 枚举的
+    # OCROptions 原样传给 spec.recognize；直接透传枚举会让
+    # registry.has(枚举) 判否并落入 legacy 创建路径（不支持公式管线）。
+    # 与 _recognize_table 相同：按 Enum.value 规范化为 wire 字符串。
     pipeline_name = (
         options.pipeline.value
         if isinstance(options.pipeline, Enum)
         else options.pipeline
     )
-    pipeline = service.get_or_create_pipeline(pipeline_name)
+    pipeline = service.get_or_create_pipeline(pipeline_name, options=options)
 
     predict_kwargs: dict[str, Any] = {
         "use_doc_orientation_classify": options.use_doc_orientation_classify,
         "use_doc_unwarping": options.use_doc_unwarping,
-        "use_table_recognition": False,
-        "use_formula_recognition": True,
-        "use_seal_recognition": False,
-        "use_chart_recognition": False,
     }
-    if options.formula_recognition_batch_size != 1:
-        predict_kwargs["formula_recognition_batch_size"] = (
-            options.formula_recognition_batch_size
-        )
-
     output = pipeline.predict(input=image, **predict_kwargs)
     output_list = list(output)
-
-    text_blocks: list[TextBlock] = []
-    text_with_scores: list[tuple[str, float]] = []
-    markdown_parts: list[str] = []
-    content_list: list[dict[str, Any]] = []
+    _logger.info(
+        "[Paddle consumed] predict FORMULA_RECOGNITION use_doc_orientation_classify=%s",
+        predict_kwargs["use_doc_orientation_classify"],
+    )
 
     preproc_angle = 0
     preprocessed_png: bytes | None = None
     preproc_w = preproc_h = 0
     if output_list:
         res = output_list[0]
-        dp_res = res.get("doc_preprocessor_res")
+        dp_res = res.get("doc_preprocessor_res") if hasattr(res, "get") else None
         if dp_res is not None:
             preproc_angle = dp_res.get("angle", 0)
             out_arr = dp_res.get("output_img")
@@ -102,61 +155,80 @@ def _recognize_formula(
                 pil_img.save(buf, format="PNG")
                 preprocessed_png = buf.getvalue()
 
+    text_blocks: list[TextBlock] = []
+    # 上游无置信度：text_with_scores 以 None 并行占位（内部索引对齐），
+    # serializer 会跳过 None 项，不会伪造数值。
+    text_with_scores: list[tuple[str, float | None]] = []
+    markdown_parts: list[str] = []
+    content_list: list[dict[str, Any]] = []
+
     for res in output_list:
-        # PaddleX 结果是 dict 子类，parsing_res_list 是 dict key（非属性），
-        # 必须用下标取值；getattr 对 dict 会恒返回默认值 []（属性不存在）。
-        parsing_res_list: list[Any] = []
+        if isinstance(res, dict) and "error" in res:
+            # check_model_settings_valid 失败等上游错误必须显式失败，
+            # 不能静默返回空结果冒充成功。
+            raise RuntimeError(
+                f"公式识别管线返回错误: {res['error']!r}；"
+                "请检查构造参数（方向分类/去畸变/模型配置）是否一致"
+            )
+        formula_res_list: list[Any] = []
         if hasattr(res, "__getitem__"):
-            parsing_res_list = (
-                res["parsing_res_list"]
-                if "parsing_res_list" in (res.keys() if hasattr(res, "keys") else [])
+            formula_res_list = (
+                res["formula_res_list"]
+                if "formula_res_list" in (res.keys() if hasattr(res, "keys") else [])
                 else []
             )
-        if not parsing_res_list and hasattr(res, "parsing_res_list"):
-            parsing_res_list = res.parsing_res_list
-        for block in parsing_res_list:
-            label = getattr(block, "label", "text")
-            bbox = getattr(block, "bbox", None)
-            content = getattr(block, "content", "")
-            order_index = getattr(block, "order_index", -1)
+        if not formula_res_list and hasattr(res, "formula_res_list"):
+            formula_res_list = res.formula_res_list
+        for region in formula_res_list:
+            entry = region if isinstance(region, dict) else {}
+            content = str(entry.get("rec_formula") or "")
             if not content:
                 continue
-            if label != "formula":
-                continue
+            region_id = entry.get("formula_region_id")
+            try:
+                order = int(region_id) if region_id is not None else -1
+            except (TypeError, ValueError):
+                order = -1
+            bbox = _parse_dt_polys(entry.get("dt_polys"))
 
             cl_idx = len(content_list)
-            bbox_tuple = (
-                (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
-                if bbox
-                else None
-            )
+            block_id = f"formula-recognition-block-{cl_idx}"
             formula_md = f"$${content}$$"
             markdown_parts.append(formula_md)
             text_blocks.append(
                 TextBlock(
                     text=content,
-                    score=1.0,
-                    bbox=bbox_tuple,
-                    label=label,
-                    order=order_index or -1,
+                    score=None,
+                    bbox=bbox,
+                    label="formula",
+                    order=order,
                     content_index=cl_idx,
+                    content_id=block_id,
                 )
             )
-            text_with_scores.append((content, 1.0))
+            text_with_scores.append((content, None))
             content_list.append(
-                {"type": "formula", "text": content, "bbox": bbox_tuple}
+                {
+                    "type": "formula",
+                    "text": content,
+                    "bbox": list(bbox) if bbox else None,
+                    "block_id": block_id,
+                }
             )
 
-    raw_text = "\n".join(b.text for b in text_blocks)
+    raw_text = "\n".join(block.text for block in text_blocks)
     markdown_text = "\n\n".join(markdown_parts) if markdown_parts else raw_text
 
     from vibeocr.runtime.documents.utils.markdown_converter import markdown_to_html
 
+    known_scores = [score for _, score in text_with_scores if score is not None]
     result = OCRResult(
         raw_text=raw_text,
         markdown_text=markdown_text,
         html_text=markdown_to_html(markdown_text) if markdown_text else "",
         text_with_scores=text_with_scores,
+        avg_score=(sum(known_scores) / len(known_scores) if known_scores else 0.0),
+        low_confidence_items=[],
         pipeline_type="FORMULA_RECOGNITION",
         text_blocks=text_blocks,
         content_list=content_list,
@@ -175,4 +247,5 @@ FORMULA_RECOGNITION_SPEC = PipelineSpec(
     options_class=FormulaRecognitionOptions,
     create_pipeline=_create_formula_pipeline,
     recognize=_recognize_formula,
+    constructor_kwargs=_formula_constructor_kwargs,
 )

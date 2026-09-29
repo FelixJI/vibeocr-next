@@ -90,6 +90,9 @@ class OCRService(metaclass=SingletonMeta):
     """
 
     _pipelines: dict[str, Any] = {}  # 管道缓存：{pipeline_name: pipeline_instance}
+    _pipeline_signatures: dict[
+        str, tuple
+    ] = {}  # 管道构造参数签名：{pipeline_name: signature}
     _lock = threading.Lock()
     _initialized = False
     _status_callback: Callable | None = None  # 状态回调函数
@@ -159,6 +162,7 @@ class OCRService(metaclass=SingletonMeta):
         """
         with cls._lock:
             cls._pipelines = {}
+            cls._pipeline_signatures = {}
             cls._initialized = False
             cls._status_callback = None
             cls._preload_progress_callback = None
@@ -169,6 +173,10 @@ class OCRService(metaclass=SingletonMeta):
             instance = SingletonMeta._instances.get(cls)
             if instance is not None:
                 instance.__dict__.pop("_cache_manager", None)
+                # 测试可能直接种入实例级缓存/签名（遮蔽类属性），必须同步
+                # 清理，否则残留签名会让下一个测试误判可复用。
+                instance.__dict__.pop("_pipelines", None)
+                instance.__dict__.pop("_pipeline_signatures", None)
             cls._preloaded_pipelines = set()
             cls._is_preloading = False
             # oneDNN 判定缓存必须随重置清空，否则测试间会泄漏上一个探测结果，
@@ -739,22 +747,54 @@ class OCRService(metaclass=SingletonMeta):
         """
         return self.get_or_create_pipeline(pipeline.value)
 
-    def get_or_create_pipeline(self, pipeline_name: str) -> Any:
-        """根据管道名获取或创建管道实例
+    def get_or_create_pipeline(
+        self, pipeline_name: str, options: Any | None = None
+    ) -> Any:
+        """根据管道名获取或创建管道实例（构造参数签名感知）。
 
         先尝试从注册表获取 PipelineSpec 并使用其 create_pipeline 工厂，
         回退到旧式 _create_pipeline 以保持向后兼容。
 
+        构造参数变化不能复用旧实例：以 spec.constructor_kwargs(options)
+        生成的签名比对缓存，签名不同则先经 cache_manager.release_one 释放
+        旧实例（沿用既有 lease/TTL/容量预算，不新建平行缓存），再重建。
+        调用方（worker 循环）串行调用，重建时不会有并发旧实例在用。
+
         Args:
             pipeline_name: 管道名称字符串 (e.g. "OCR", "PP-StructureV3")
+            options: 本次请求的 provider options；None 时使用 spec 默认选项
+                （preload 路径），保证与默认请求复用同一实例。
 
         Returns:
             管道实例
         """
-        if pipeline_name not in self._pipelines:
+        signature = self._pipeline_constructor_signature(pipeline_name, options)
+
+        def _reusable() -> bool:
+            """缓存实例可否复用：实例存在且记录的构造签名与本次一致。
+
+            生产写入点只有本方法（创建后立即记录签名）；无签名记录的
+            实例只能来自外部直接种入私有缓存，来源不明一律 fail-closed
+            重建，不猜测其构造参数。构造参数变化绝不变相复用旧模型。
+            """
+            return (
+                pipeline_name in self._pipelines
+                and self._pipeline_signatures.get(pipeline_name) == signature
+            )
+
+        if not _reusable():
             with self._lock:
-                if pipeline_name not in self._pipelines:  # 双重检查
+                if not _reusable():
                     self._setup_cuda_dll_path()
+                    if pipeline_name in self._pipelines:
+                        _logger.info(
+                            "[get_or_create_pipeline] 构造参数变化，释放并重建管道 %s"
+                            "（旧签名=%s 新签名=%s）",
+                            pipeline_name,
+                            self._pipeline_signatures.get(pipeline_name),
+                            signature,
+                        )
+                        self.cache_manager.release_one(pipeline_name)
                     self.cache_manager.prepare_load(pipeline_name)
                     _logger.debug(
                         "[get_or_create_pipeline] 创建管道 %s，已加载管道: %s",
@@ -773,6 +813,13 @@ class OCRService(metaclass=SingletonMeta):
                         kwargs = (
                             {"enable_mkldnn": enable_mkldnn} if device == "cpu" else {}
                         )
+                        if spec.constructor_kwargs is not None:
+                            # 与签名计算使用同一份 options（None → spec 默认），
+                            # 确保签名与实际构造参数一致。
+                            resolved = (
+                                options if options is not None else spec.options_class()
+                            )
+                            kwargs.update(spec.constructor_kwargs(resolved))
                         self._pipelines[pipeline_name] = spec.create_pipeline(
                             device, **kwargs
                         )
@@ -786,6 +833,7 @@ class OCRService(metaclass=SingletonMeta):
                         self._pipelines[pipeline_name] = self._create_pipeline(
                             pipeline_enum
                         )
+                    self._pipeline_signatures[pipeline_name] = signature
                     _logger.debug(
                         "[get_or_create_pipeline] 管道 %s 创建完成", pipeline_name
                     )
@@ -795,6 +843,30 @@ class OCRService(metaclass=SingletonMeta):
         except Exception as e:
             _logger.debug("[get_or_create_pipeline] cache_manager 操作失败: %s", e)
         return self._pipelines[pipeline_name]
+
+    def _pipeline_constructor_signature(
+        self, pipeline_name: str, options: Any | None
+    ) -> tuple:
+        """计算管道构造参数签名（排序后的 kwargs 元组）。"""
+        from vibeocr.runtime.recognition.core.pipelines import get_registry
+
+        registry = get_registry()
+        if not registry.has(pipeline_name):
+            return ()
+        spec = registry.get(pipeline_name)
+        if spec.constructor_kwargs is None:
+            return ()
+        resolved = options if options is not None else spec.options_class()
+        try:
+            ctor_kwargs = spec.constructor_kwargs(resolved)
+        except Exception as e:
+            _logger.error(
+                "[get_or_create_pipeline] 管道 %s 构造参数映射失败: %s",
+                pipeline_name,
+                e,
+            )
+            raise
+        return tuple(sorted((key, value) for key, value in ctor_kwargs.items()))
 
     @classmethod
     def release_pipelines(cls, heavy_only: bool = True) -> list[str]:
@@ -888,6 +960,7 @@ class OCRService(metaclass=SingletonMeta):
         self,
         images: list[np.ndarray],
         options: OCROptions | None = None,
+        asset_sinks: list[Any] | None = None,
     ) -> list[OCRResult]:
         """对一组图像批量执行 OCR 识别（单次 predict 调用，利用 PaddleOCR 批处理）。
 
@@ -895,16 +968,21 @@ class OCRService(metaclass=SingletonMeta):
         predict(list)，由其内部的 ImageBatchSampler 按 batch_size 分批，
         避免每张图重复的管道开销，显著提升 PDF 等多页场景的吞吐。
 
-        输入图像需为 numpy 数组（RGB，与单次识别路径一致）。结果顺序与输入一致。
+        输入图像需为 numpy 数组（RGB，与单次识别路径一致）。结果顺序与输入
+        一致。``asset_sinks``（可选）与 images 逐位对齐：结构类管线用它把
+        块级图像写入 job 私有受控目录，产生 opaque 资产引用；None 项表示
+        该输入不落资产（管线标记 available=false）。
 
         Args:
             images: 输入图像列表（numpy 数组）。
             options: OCR 识别选项（所有图像共享同一组选项）。
+            asset_sinks: 结果资产写入器列表（与 images 对齐，可为 None）。
 
         Returns:
             OCRResult 列表，顺序与 images 一致。
         """
         actual_options = options if options is not None else OCROptions()
+        sinks = list(asset_sinks) if asset_sinks is not None else None
 
         # 统一获取管道名称（处理枚举和字符串两种类型）
         pipeline_name = actual_options.pipeline.value
@@ -925,7 +1003,7 @@ class OCRService(metaclass=SingletonMeta):
             ):
                 spec = registry.get(pipeline_name)
                 return spec.recognize_batch(  # type: ignore[misc,no-any-return]
-                    self, images, actual_options
+                    self, images, actual_options, asset_sinks=sinks
                 )
 
             _logger.debug(
@@ -933,7 +1011,15 @@ class OCRService(metaclass=SingletonMeta):
                 pipeline_name,
             )
             spec = registry.get(pipeline_name)
-            return [spec.recognize(self, img, actual_options) for img in images]
+            return [
+                spec.recognize(
+                    self,
+                    img,
+                    actual_options,
+                    asset_sink=sinks[index] if sinks is not None else None,
+                )
+                for index, img in enumerate(images)
+            ]
 
         # 根据管道类型分发
         try:
@@ -1288,14 +1374,17 @@ class OCRService(metaclass=SingletonMeta):
         if text_with_scores is None:
             text_with_scores = []
 
-        # 计算平均置信度
+        # 计算平均置信度（仅统计已知置信度；None=unknown 不参与，不伪造）
+        known_scores = [s for _, s in text_with_scores if s is not None]
         avg_score = 0.0
-        if text_with_scores:
-            avg_score = sum(s for _, s in text_with_scores) / len(text_with_scores)
+        if known_scores:
+            avg_score = sum(known_scores) / len(known_scores)
 
-        # 收集低置信度项（低于 80%）
+        # 收集低置信度项（低于 80%；unknown 不参与）
         low_confidence_items = [
-            (text, score) for text, score in text_with_scores if score < 0.80
+            (text, score)
+            for text, score in text_with_scores
+            if score is not None and score < 0.80
         ]
 
         final_html = html_text or raw_text

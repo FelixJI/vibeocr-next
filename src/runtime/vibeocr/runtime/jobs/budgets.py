@@ -39,6 +39,10 @@ class InputItem:
     display_name: str = ""
     data: bytes = b""
     content_type: str = ""
+    asset_dir: str = ""
+    """受控结果资产目录（job staging 下的 results/，由 executor 从 stager
+    受信路径派生，经内部 worker IPC 传递）。空字符串表示本次不出资产。
+    永不接受 Web/客户端提供；PaddleProcessAdapter 序列化仅限内部 stdio。"""
 
 
 @dataclass(frozen=True, slots=True)

@@ -319,3 +319,78 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
     fullPage: true,
   });
 });
+
+test("mode selector stays above batch and PDF panel grids", async ({
+  context,
+}) => {
+  for (const route of ["batch", "pdf"] as const) {
+    const page = await context.newPage();
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await mount(page, {
+      connected: true,
+      revision: 1,
+      route,
+      theme: "light",
+      capabilities: ["recognition.engine", "pdf.open", "batch.add"],
+      features: {
+        [route]: {
+          engines: [
+            {
+              engine: "paddle_structure",
+              displayName: "文档结构识别",
+              availability: "ready",
+              selected: false,
+              requiresDownload: false,
+              isTaskOverride: true,
+              supportedOptions: ["use_seal_recognition"],
+            },
+          ],
+          taskEngine: "paddle_structure",
+          ...(route === "batch"
+            ? {
+                itemCount: 1,
+                completedCount: 1,
+                items: [
+                  {
+                    id: "table-1",
+                    name: "table_merged_zh_en.png",
+                    statusCode: "batch.item.completed",
+                    structuredResult: {
+                      url: "/structured-table.json",
+                      mediaType: "application/json",
+                      byteLength: 128,
+                    },
+                  },
+                ],
+              }
+            : {}),
+        },
+      },
+      runtimeLabel: "Runtime 就绪 · CPU",
+    });
+    if (route === "batch") {
+      const name = page.locator(".batch-item-copy");
+      await expect(name).toBeVisible();
+      expect((await name.boundingBox())!.width).toBeGreaterThan(100);
+      const queue = page.locator(".batch-queue");
+      expect(
+        await queue.evaluate(
+          (element) => element.scrollWidth <= element.clientWidth,
+        ),
+      ).toBe(true);
+    }
+    const selector = page.locator(".recognition-mode-settings");
+    await expect(selector).toBeVisible();
+    const grid = page.locator(
+      route === "pdf" ? ".pdf-workspace" : ".collection-workspace",
+    );
+    const selectorBox = await selector.boundingBox();
+    const gridBox = await grid.boundingBox();
+    expect(selectorBox).not.toBeNull();
+    expect(gridBox).not.toBeNull();
+    expect(selectorBox!.y + selectorBox!.height).toBeLessThanOrEqual(
+      gridBox!.y,
+    );
+    await page.close();
+  }
+});

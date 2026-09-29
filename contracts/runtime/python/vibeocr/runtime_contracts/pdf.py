@@ -217,6 +217,7 @@ class TextLayerInfoMirror(_JsonResponse):
 class TextBlockMirror(_JsonResponse):
     text: str
     score: float
+    score_unknown: bool = False
     bbox: tuple[float, float, float, float] | None = None
     polygon: tuple[float, ...] | None = None
     page_idx: int | None = None
@@ -230,6 +231,7 @@ class TextBlockMirror(_JsonResponse):
         {
             "text",
             "score",
+            "score_unknown",
             "bbox",
             "polygon",
             "page_idx",
@@ -250,6 +252,9 @@ class TextBlockMirror(_JsonResponse):
         return cls(
             text=_string(_required(payload, "text", cls._label), "text"),
             score=_number(_required(payload, "score", cls._label), "score"),
+            score_unknown=_boolean(
+                payload.get("score_unknown", False), "score_unknown"
+            ),
             bbox=None if bbox is None else (bbox[0], bbox[1], bbox[2], bbox[3]),
             polygon=polygon,
             page_idx=(
@@ -268,6 +273,7 @@ class TextBlockMirror(_JsonResponse):
             {
                 "text": self.text,
                 "score": self.score,
+                "score_unknown": self.score_unknown,
                 "bbox": list(self.bbox) if self.bbox is not None else None,
                 "polygon": list(self.polygon) if self.polygon is not None else None,
                 "page_idx": self.page_idx,

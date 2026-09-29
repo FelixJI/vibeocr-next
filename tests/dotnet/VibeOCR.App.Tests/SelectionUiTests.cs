@@ -58,6 +58,26 @@ public sealed class SelectionUiTests
     }
 
     [Fact]
+    public async Task EnvironmentChangeReplacesCatalogAndClearsItWhenRefreshFails()
+    {
+        var fake = new SelectionInferenceClient { Health = SelectionHealth() };
+        var viewModel = new SettingsViewModel(fake);
+        await viewModel.LoadSelectionAsync(TestContext.Current.CancellationToken);
+        RuntimeSelectionService previous = Assert.IsType<RuntimeSelectionService>(viewModel.Selection);
+
+        fake.Health = fake.Health with { InstanceId = "sup-2" };
+        await viewModel.RefreshSelectionAsync(TestContext.Current.CancellationToken);
+        Assert.NotSame(previous, viewModel.Selection);
+        Assert.Same(viewModel.Selection, viewModel.RecognitionSelection?.Catalog);
+
+        fake.HealthError = new InvalidOperationException("new service unavailable");
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            viewModel.RefreshSelectionAsync(TestContext.Current.CancellationToken));
+        Assert.Null(viewModel.Selection);
+        Assert.Null(viewModel.RecognitionSelection);
+    }
+
+    [Fact]
     public async Task SetSourceWritesValidatedSelectionToBackendSettings()
     {
         var fake = new SelectionInferenceClient { Health = SelectionHealth() };
@@ -417,6 +437,8 @@ public sealed class SelectionUiTests
 
         public SettingsSnapshot Settings { get; set; } = new();
 
+        public Exception? HealthError { get; set; }
+
         public SettingsSnapshot? LastUpdate { get; private set; }
 
         public int UpdateCalls { get; private set; }
@@ -425,7 +447,7 @@ public sealed class SelectionUiTests
             CancellationToken cancellationToken) => Task.FromResult(new ResidencyStatus());
 
         public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken) =>
-            Task.FromResult(Health);
+            HealthError is { } error ? Task.FromException<Wire.Health>(error) : Task.FromResult(Health);
 
         public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>
             Task.FromResult(Settings);

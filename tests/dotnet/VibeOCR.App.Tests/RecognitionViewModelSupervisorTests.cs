@@ -17,6 +17,24 @@ namespace VibeOCR.App.Tests;
 public sealed class RecognitionViewModelSupervisorTests
 {
     [Fact]
+    public void StructuredOutcomesPreserveContentSeparatelyFromTextGeometry()
+    {
+        using JsonDocument document = JsonDocument.Parse("""
+            {"content_list":[{"type":"table","rows":2,"cells":[{"text":"中文","rowspan":2}]}],
+             "text_blocks":[{"text":"中文","box":[[0,0],[20,0],[20,10],[0,10]]}]}
+            """);
+        RecognizeResponse response = RecognitionOutcomeMapper.ToResponse(new ItemOutcome
+        {
+            ItemId = "table-1", State = ItemState.Succeeded, Attempt = 1,
+            Payload = document.RootElement.EnumerateObject()
+                .ToDictionary(property => property.Name, property => property.Value),
+        }, "TableRecognition");
+        document.Dispose();
+        Assert.Equal("中文", Assert.Single(response.RawBlocks!).GetProperty("text").GetString());
+        JsonElement table = Assert.Single(response.ContentBlocks!);
+        Assert.Equal(2, table.GetProperty("cells")[0].GetProperty("rowspan").GetInt32());
+    }
+    [Fact]
     public async Task SupervisorPathSubmitsOneElementJobAndPublishesResult()
     {
         var fakeInference = new FakeInferenceClient("hello from supervisor");
@@ -96,6 +114,90 @@ public sealed class RecognitionViewModelSupervisorTests
         Assert.Null(fakeInference.LastRequest?.Pipeline.Engine);
     }
 
+    [Fact]
+    public async Task ModeAndOptionsAreFrozenBeforeInputLoading()
+    {
+        var inference = new FakeInferenceClient("formula");
+        var inputs = new StubInputService();
+        var viewModel = new RecognitionViewModel(inference, inputs);
+        var mode = new RecognitionModeOption("paddle_formula", "specialized", "FORMULA_RECOGNITION",
+            null, "advanced_component", "ready", null, "paddleocr-cpu",
+            ["formula_recognition_batch_size"], "model_residency", true, true, true, true);
+        viewModel.SetRecognitionMode(mode, options: new PaddleModeOptions { FormulaRecognitionBatchSize = 2 });
+        await viewModel.RecognizeViaSupervisorAsync(async ct =>
+        {
+            viewModel.SetRecognitionMode(null);
+            return await inputs.PickFileAsync(ct);
+        }, CancellationToken.None);
+        Assert.Equal("FORMULA_RECOGNITION", inference.LastRequest!.Pipeline.PipelineId);
+        Assert.Equal(2, inference.LastRequest.Pipeline.Options["formula_recognition_batch_size"].GetInt32());
+    }
+
+    [Fact]
+    public async Task UnsupportedModeOptionRejectsSubmissionInsteadOfSilentDrop()
+    {
+        // 回归契约（#110 AC2）：绑定的选项含当前模式不支持的字段时，
+        // 提交必须明确拒绝并携带精确原因，而不是静默丢弃后仍提交。
+        var inference = new FakeInferenceClient("must not submit");
+        var inputs = new StubInputService();
+        var viewModel = new RecognitionViewModel(inference, inputs);
+        var mode = new RecognitionModeOption("paddle_formula", "specialized", "FORMULA_RECOGNITION",
+            null, "advanced_component", "ready", null, "paddleocr-cpu",
+            ["formula_recognition_batch_size"], "model_residency", true, true, true, true);
+        viewModel.SetRecognitionMode(mode, options: new PaddleModeOptions
+        {
+            FormulaRecognitionBatchSize = 2,
+            UseTableRecognition = true, // 不属于该模式合同
+        });
+
+        await viewModel.RecognizeViaSupervisorAsync(ct => inputs.PickFileAsync(ct), CancellationToken.None);
+
+        Assert.Equal(0, inference.SubmitCalls);
+        Assert.Equal(JobState.Failed, viewModel.TerminalState);
+        Assert.StartsWith("识别选项无效，已拒绝提交", viewModel.Status);
+        Assert.Contains("use_table_recognition", viewModel.Status);
+        Assert.False(viewModel.HasResult);
+    }
+
+    [Fact]
+    public async Task OutOfRangeModeOptionRejectsSubmissionWithPreciseParameter()
+    {
+        // 回归契约（#110 AC2）：越界的范围值同样明确拒绝并点名参数。
+        var inference = new FakeInferenceClient("must not submit");
+        var inputs = new StubInputService();
+        var viewModel = new RecognitionViewModel(inference, inputs);
+        var mode = new RecognitionModeOption("paddle_formula", "specialized", "FORMULA_RECOGNITION",
+            null, "advanced_component", "ready", null, "paddleocr-cpu",
+            ["formula_recognition_batch_size"], "model_residency", true, true, true, true);
+        viewModel.SetRecognitionMode(mode, options: new PaddleModeOptions { FormulaRecognitionBatchSize = 0 });
+
+        await viewModel.RecognizeViaSupervisorAsync(ct => inputs.PickFileAsync(ct), CancellationToken.None);
+
+        Assert.Equal(0, inference.SubmitCalls);
+        Assert.Equal(JobState.Failed, viewModel.TerminalState);
+        Assert.StartsWith("识别选项无效，已拒绝提交", viewModel.Status);
+        Assert.Contains("FormulaRecognitionBatchSize", viewModel.Status);
+    }
+
+    [Theory]
+    [InlineData("{\"use_doc_unwarping\":1}")]
+    [InlineData("{\"unrecognized\":true}")]
+    [InlineData("{\"formula_recognition_model_dir\":\"C:/untrusted\"}")]
+    public void PaddleOptionsRejectInvalidTypesAndWebModelPaths(string json)
+    {
+        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<PaddleModeOptions>(
+            json, PaddleModeOptions.JsonOptions));
+    }
+
+    [Fact]
+    public void PaddleOptionsRejectOptionsOutsideSelectedCatalogMode()
+    {
+        var mode = new RecognitionModeOption("paddle_formula", "specialized", "FORMULA_RECOGNITION",
+            null, "advanced_component", "ready", null, "paddleocr-cpu",
+            ["formula_recognition_batch_size"], "model_residency", true, true, true, true);
+        Assert.Throws<ArgumentException>(() => new PaddleModeOptions { UseTableRecognition = true }.ToWire(mode));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new PaddleModeOptions { FormulaRecognitionBatchSize = 0 }.ToWire(mode));
+    }
     [Fact]
     public async Task SupervisorPathLocalizesTypedError()
     {

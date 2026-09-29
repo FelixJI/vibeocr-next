@@ -13,6 +13,7 @@ class RuntimeOperation:
 
 OPERATION_IDS: dict[tuple[str, str], str] = {
     ("GET", "/v2/health"): "getRuntimeHealth",
+    ("GET", "/v2/jobs/{job_id}/items/{item_id}/assets/{asset_id}"): "getJobItemAsset",
     ("GET", "/v2/jobs/{job_id}/observe"): "observeJob",
     ("GET", "/v2/pdf/sessions/{session_id}/render"): "renderPdfPage",
     ("GET", "/v2/runtime/operations/{operation_id}/events"): "streamRuntimeMaintenanceEvents",
@@ -56,6 +57,7 @@ OPERATION_IDS: dict[tuple[str, str], str] = {
 }
 OPERATIONS: tuple[RuntimeOperation, ...] = (
     RuntimeOperation("GET", "/v2/health", "getRuntimeHealth"),
+    RuntimeOperation("GET", "/v2/jobs/{job_id}/items/{item_id}/assets/{asset_id}", "getJobItemAsset"),
     RuntimeOperation("GET", "/v2/jobs/{job_id}/observe", "observeJob"),
     RuntimeOperation("GET", "/v2/pdf/sessions/{session_id}/render", "renderPdfPage"),
     RuntimeOperation("GET", "/v2/runtime/operations/{operation_id}/events", "streamRuntimeMaintenanceEvents"),

@@ -34,11 +34,16 @@ class TextBlockMirror(BaseModel):
     """单个 OCR 文本块(对应 models.ocr_result.TextBlock 的可序列化投影)。
 
     ocr_text_blocks 在 PdfPageInfo 里是 list[TextBlock],跨进程序列化时
-    只保留写入 PDF / 预览所需的字段。
+    只保留写入 PDF / 预览所需的字段。上游无置信度时 score=0.0 且
+    score_unknown=true；权威 unknown 在 ocr.v1 结果的 text_blocks[].score=null。
     """
 
     text: str
     score: float
+    score_unknown: bool = Field(
+        default=False,
+        description="true 表示上游未提供置信度（score 的 0.0 只是 wire 兼容占位）。",
+    )
     bbox: tuple[float, float, float, float] | None = None
     polygon: tuple[float, ...] | None = (
         None  # 4 点检测多边形 [x,y,...]，归一化 [0,1000]

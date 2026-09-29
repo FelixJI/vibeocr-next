@@ -219,6 +219,19 @@ class InputStager:
             entry = self._staged_by_job.get(job_id, {}).get(item_id)
             return bool(entry is not None and entry.path.exists())
 
+    def job_dir(self, job_id: str) -> Path | None:
+        """返回 job 私有目录（未 stage/已释放时 None）。
+
+        结果资产读取方用它派生固定 ``<job_dir>/results`` 子目录；
+        目录名由服务端生成（staging 归一），不经客户端。
+        """
+        with self._lock:
+            entries = self._staged_by_job.get(job_id, {})
+            if not entries:
+                return None
+            first = next(iter(entries.values()))
+            return first.path.parent
+
     # ------------------------------------------------------------------
     # Release
     # ------------------------------------------------------------------

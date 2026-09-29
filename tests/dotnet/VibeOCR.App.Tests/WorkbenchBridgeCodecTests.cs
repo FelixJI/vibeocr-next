@@ -415,6 +415,7 @@ public sealed class WorkbenchBridgeCodecTests
       ("recognition", "closeScreenshotSession", "{}", typeof(CloseScreenshotSessionCommand)),
       ("recognition", "copyAnnotatedImage", "{\"resourceUri\":\"https://app.vibeocr/__annotation/00000000000000000000000000000000\"}", typeof(CopyAnnotatedImageCommand)),
       ("recognition", "saveAnnotatedImage", "{\"resourceUri\":\"https://app.vibeocr/__annotation/11111111111111111111111111111111\"}", typeof(SaveAnnotatedImageCommand)),
+      ("recognition", "copyStructured", "{\"resourceUri\":\"https://app.vibeocr/__resource/22222222222222222222222222222222\",\"blockIndex\":1,\"format\":\"latex\"}", typeof(CopyStructuredResultCommand)),
       ("batch", "addFiles", "{}", typeof(AddBatchFilesCommand)),
       ("batch", "exportAll", "{\"format\":\"markdown\"}", typeof(ExportBatchCommand)),
       ("batch", "setWindow", "{\"start\":40}", typeof(SetBatchWindowCommand)),
@@ -596,6 +597,41 @@ public sealed class WorkbenchBridgeCodecTests
   }
 
   [Fact]
+  public void ParseStructuredCopyAcceptsOnlyOpaqueResourcesAndKnownFormats()
+  {
+    Guid sessionId = Guid.NewGuid();
+    CopyStructuredResultCommand command = Assert.IsType<CopyStructuredResultCommand>(
+      WorkbenchBridgeCodec.ParseCommand(
+        CommandJson(
+          sessionId,
+          "recognition",
+          "copyStructured",
+          """{"resourceUri":"https://app.vibeocr/__resource/33333333333333333333333333333333","blockIndex":0,"format":"table"}"""),
+        sessionId).Command);
+    Assert.Equal(
+      "https://app.vibeocr/__resource/33333333333333333333333333333333",
+      command.ResourceUri);
+    Assert.Equal(0, command.BlockIndex);
+    Assert.Equal("table", command.Format);
+
+    string[] invalid =
+    [
+      """{"resourceUri":"https://app.vibeocr/__annotation/33333333333333333333333333333333","blockIndex":0,"format":"table"}""",
+      """{"resourceUri":"file:///tmp/out.json","blockIndex":0,"format":"table"}""",
+      """{"resourceUri":"https://app.vibeocr/__resource/33333333333333333333333333333333","blockIndex":-1,"format":"table"}""",
+      """{"resourceUri":"https://app.vibeocr/__resource/33333333333333333333333333333333","blockIndex":0,"format":"html"}""",
+      """{"resourceUri":"https://app.vibeocr/__resource/33333333333333333333333333333333","format":"table"}""",
+    ];
+    foreach (string arguments in invalid)
+    {
+      Assert.Throws<WorkbenchBridgeProtocolException>(() =>
+        WorkbenchBridgeCodec.ParseCommand(
+          CommandJson(sessionId, "recognition", "copyStructured", arguments),
+          sessionId));
+    }
+  }
+
+  [Fact]
   public void SerializeCollectionWindowsAndAboutMetadata()
   {
     Guid sessionId = Guid.NewGuid();
@@ -611,6 +647,96 @@ public sealed class WorkbenchBridgeCodecTests
       40,
       batch.RootElement.GetProperty("payload").GetProperty("state")
         .GetProperty("windowStart").GetInt32());
+    // 结构化预览与导出不完整标志必须进入 wire，否则 Web 端无法呈现。
+    string structuredBatchJson = WorkbenchBridgeCodec.SerializeState(
+      sessionId,
+      new WorkbenchStateEnvelope(
+        7,
+        "batch",
+        WorkbenchStateChange.Replace,
+        new BatchWorkbenchState(
+          false,
+          1,
+          1,
+          0,
+          [new BatchWorkbenchItem(
+            Guid.NewGuid(),
+            "table.png",
+            "batch.item.completed",
+            "表格",
+            new WorkbenchResourceReference(
+              "https://app.vibeocr/__resource/44444444444444444444444444444444",
+              "application/json; charset=utf-8",
+              128))],
+          ExportIncomplete: true)));
+    using JsonDocument structuredBatch = JsonDocument.Parse(structuredBatchJson);
+    JsonElement batchState = structuredBatch.RootElement
+      .GetProperty("payload").GetProperty("state");
+    Assert.Equal(
+      "https://app.vibeocr/__resource/44444444444444444444444444444444",
+      batchState.GetProperty("items")[0].GetProperty("structuredResult")
+        .GetProperty("url").GetString());
+    Assert.True(batchState.GetProperty("exportIncomplete").GetBoolean());
+
+    string pdfJson = WorkbenchBridgeCodec.SerializeState(
+      sessionId,
+      new WorkbenchStateEnvelope(
+        8,
+        "pdf",
+        WorkbenchStateChange.Replace,
+        new PdfWorkbenchState(
+          false,
+          "pdf.open",
+          1,
+          0,
+          [0],
+          [new PdfWorkbenchPage(
+            0,
+            "pdf.page.done",
+            null,
+            new WorkbenchResourceReference(
+              "https://app.vibeocr/__resource/55555555555555555555555555555555",
+              "application/json; charset=utf-8",
+              64))],
+          Engines: [new RecognitionEngineChoice(
+            "paddle_table",
+            "表格",
+            true,
+            true,
+            "ready",
+            false)],
+          TaskEngine: "paddle_table")));
+    using JsonDocument pdf = JsonDocument.Parse(pdfJson);
+    JsonElement pdfState = pdf.RootElement.GetProperty("payload").GetProperty("state");
+    Assert.Equal(
+      "https://app.vibeocr/__resource/55555555555555555555555555555555",
+      pdfState.GetProperty("pages")[0].GetProperty("structuredResult")
+        .GetProperty("url").GetString());
+    Assert.Equal(
+      "paddle_table",
+      pdfState.GetProperty("taskEngine").GetString());
+    Assert.Equal(
+      "paddle_table",
+      pdfState.GetProperty("engines")[0].GetProperty("engine").GetString());
+
+    string recognitionJson = WorkbenchBridgeCodec.SerializeState(
+      sessionId,
+      new WorkbenchStateEnvelope(
+        9,
+        "recognition",
+        WorkbenchStateChange.Replace,
+        new RecognitionWorkbenchState(
+          false,
+          "recognition.completed",
+          StructuredResult: new WorkbenchResourceReference(
+            "https://app.vibeocr/__resource/66666666666666666666666666666666",
+            "application/json; charset=utf-8",
+            32))));
+    using JsonDocument recognition = JsonDocument.Parse(recognitionJson);
+    Assert.Equal(
+      "https://app.vibeocr/__resource/66666666666666666666666666666666",
+      recognition.RootElement.GetProperty("payload").GetProperty("state")
+        .GetProperty("structuredResult").GetProperty("url").GetString());
 
     string aboutJson = WorkbenchBridgeCodec.SerializeState(
       sessionId,

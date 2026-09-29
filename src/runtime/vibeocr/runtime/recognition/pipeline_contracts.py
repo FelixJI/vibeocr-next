@@ -63,6 +63,34 @@ class RecognitionModeLifecycleKind(StrEnum):
     PROCESS_KEEP_ALIVE = "process_keep_alive"
 
 
+class PipelineOptionKind(StrEnum):
+    """supported_options 中每个选项的合法值类型（wire v1 冻结）。
+
+    ``bool`` 严格区分整型（JSON ``0``/``1`` 不是布尔）；``int`` 带闭区间
+    范围；``enum`` 限定锁定版本发行包内实际存在的取值；``str_list`` 为
+    非空字符串数组；``path_in_model_root`` 只接受位于宿主授权模型根
+    （``PADDLE_PDX_CACHE_HOME``）之内的绝对路径，null 表示"跟随默认"。
+    """
+
+    BOOL = "bool"
+    INT = "int"
+    ENUM = "enum"
+    STR_LIST = "str_list"
+    PATH_IN_MODEL_ROOT = "path_in_model_root"
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineOptionSpec:
+    """一个 supported_option 的类型/范围合同（Parser 严格校验的数据源）。"""
+
+    name: str
+    kind: PipelineOptionKind
+    minimum: int | None = None
+    maximum: int | None = None
+    choices: tuple[str, ...] = ()
+    nullable: bool = False
+
+
 @dataclass(frozen=True, slots=True)
 class RecognitionModeLifecycle:
     kind: RecognitionModeLifecycleKind
@@ -209,6 +237,116 @@ _PIPELINE_METADATA: dict[OCRPipeline, dict[str, Any]] = {
 }
 
 
+_BOOL = PipelineOptionKind.BOOL
+_INT = PipelineOptionKind.INT
+_ENUM = PipelineOptionKind.ENUM
+_STR_LIST = PipelineOptionKind.STR_LIST
+_MODEL_DIR = PipelineOptionKind.PATH_IN_MODEL_ROOT
+
+# PaddleX 3.7.2 发行包 configs/modules/formula_recognition 内真实存在的
+# 公式识别模型名（只读核对，不跟随上游新版本扩充；新增须走合同评审）。
+FORMULA_RECOGNITION_MODEL_NAMES: tuple[str, ...] = (
+    "LaTeX_OCR_rec",
+    "PP-FormulaNet-L",
+    "PP-FormulaNet-S",
+    "PP-FormulaNet_plus-L",
+    "PP-FormulaNet_plus-M",
+    "PP-FormulaNet_plus-S",
+    "UniMERNet",
+)
+
+# 公式批量大小上限：构造参数（FormulaRecognitionPipeline 构造器），
+# 下限 1；上限防止内存放大，锁定版本默认 5。
+FORMULA_RECOGNITION_BATCH_SIZE_RANGE = (1, 64)
+
+_MINERU_PARSE_METHODS = ("auto", "txt", "ocr")
+_MINERU_BACKENDS = ("hybrid-engine", "vlm-engine", "pipeline")
+_MINERU_EFFORTS = ("medium", "high")
+
+
+def _bool_spec(name: str) -> PipelineOptionSpec:
+    return PipelineOptionSpec(name=name, kind=_BOOL)
+
+
+_PIPELINE_OPTION_SPECS: dict[OCRPipeline, dict[str, PipelineOptionSpec]] = {
+    OCRPipeline.OCR: {
+        name: _bool_spec(name)
+        for name in (
+            "use_doc_orientation_classify",
+            "use_doc_unwarping",
+            "use_textline_orientation",
+        )
+    },
+    OCRPipeline.PP_STRUCTURE_V3: {
+        name: _bool_spec(name)
+        for name in (
+            "use_doc_orientation_classify",
+            "use_doc_unwarping",
+            "use_textline_orientation",
+            "use_table_recognition",
+            "use_formula_recognition",
+            "use_seal_recognition",
+            "use_chart_recognition",
+        )
+    },
+    OCRPipeline.DOCUMENT_PARSING: {
+        "parse_method": PipelineOptionSpec(
+            "parse_method", _ENUM, choices=_MINERU_PARSE_METHODS
+        ),
+        "backend": PipelineOptionSpec("backend", _ENUM, choices=_MINERU_BACKENDS),
+        "effort": PipelineOptionSpec("effort", _ENUM, choices=_MINERU_EFFORTS),
+        "enable_formula": _bool_spec("enable_formula"),
+        "enable_table": _bool_spec("enable_table"),
+        "lang_list": PipelineOptionSpec("lang_list", _STR_LIST),
+        "start_page_id": PipelineOptionSpec(
+            "start_page_id", _INT, minimum=0, maximum=100000
+        ),
+        "end_page_id": PipelineOptionSpec(
+            "end_page_id", _INT, minimum=0, maximum=100000, nullable=True
+        ),
+    },
+    OCRPipeline.PADDLEOCR_VL: {
+        name: _bool_spec(name)
+        for name in (
+            "use_doc_orientation_classify",
+            "use_doc_unwarping",
+            "vl_use_layout_detection",
+            "vl_use_chart_recognition",
+            "vl_use_seal_recognition",
+            "use_ocr_for_image_block",
+        )
+    },
+    OCRPipeline.TABLE_RECOGNITION: {
+        name: _bool_spec(name)
+        for name in (
+            "use_doc_orientation_classify",
+            "use_doc_unwarping",
+            "use_table_orientation_classify",
+            "use_ocr_results_with_table_cells",
+        )
+    },
+    OCRPipeline.FORMULA_RECOGNITION: {
+        "use_doc_orientation_classify": _bool_spec("use_doc_orientation_classify"),
+        "use_doc_unwarping": _bool_spec("use_doc_unwarping"),
+        "formula_recognition_batch_size": PipelineOptionSpec(
+            "formula_recognition_batch_size",
+            _INT,
+            minimum=FORMULA_RECOGNITION_BATCH_SIZE_RANGE[0],
+            maximum=FORMULA_RECOGNITION_BATCH_SIZE_RANGE[1],
+        ),
+        "formula_recognition_model_name": PipelineOptionSpec(
+            "formula_recognition_model_name",
+            _ENUM,
+            choices=FORMULA_RECOGNITION_MODEL_NAMES,
+            nullable=True,
+        ),
+        "formula_recognition_model_dir": PipelineOptionSpec(
+            "formula_recognition_model_dir", _MODEL_DIR, nullable=True
+        ),
+    },
+}
+
+
 _RECOGNITION_MODE_DEFINITIONS: dict[RecognitionMode, RecognitionModeDefinition] = {
     RecognitionMode.RAPID_TEXT: RecognitionModeDefinition(
         mode=RecognitionMode.RAPID_TEXT,
@@ -341,6 +479,12 @@ def get_pipeline_supported_options(pipeline: OCRPipeline) -> list[str]:
     return list(_metadata(pipeline).get("supported_options", []))
 
 
+def get_pipeline_option_specs(pipeline: OCRPipeline) -> dict[str, PipelineOptionSpec]:
+    """返回该管道每个 supported_option 的冻结类型/范围合同副本。"""
+
+    return dict(_PIPELINE_OPTION_SPECS.get(pipeline, {}))
+
+
 def get_all_pipelines() -> list[OCRPipeline]:
     return list(OCRPipeline)
 
@@ -378,7 +522,11 @@ def is_option_supported(pipeline: OCRPipeline, option_name: str) -> bool:
 
 
 __all__ = [
+    "FORMULA_RECOGNITION_BATCH_SIZE_RANGE",
+    "FORMULA_RECOGNITION_MODEL_NAMES",
     "OCRPipeline",
+    "PipelineOptionKind",
+    "PipelineOptionSpec",
     "RecognitionMode",
     "RecognitionModeDefinition",
     "RecognitionModeFamily",
@@ -392,6 +540,7 @@ __all__ = [
     "get_paddle_pipelines",
     "get_pipeline_description",
     "get_pipeline_display_name",
+    "get_pipeline_option_specs",
     "get_pipeline_short_name",
     "get_pipeline_supported_options",
     "get_preloadable_pipelines",

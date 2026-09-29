@@ -99,6 +99,24 @@ public sealed class WorkbenchResourceBroker : IDisposable
     }
   }
 
+  /// <summary>
+  /// Validates that a URI addresses an opaque broker resource (same origin,
+  /// resource route, 32-hex token). Bridge commands use this to fail closed
+  /// on arbitrary paths before the handler resolves its own registry.
+  /// </summary>
+  public static bool IsResourceUri(Uri uri)
+  {
+    try
+    {
+      _ = ParseToken(uri);
+      return true;
+    }
+    catch (WorkbenchResourceAccessException)
+    {
+      return false;
+    }
+  }
+
   public ValueTask<WorkbenchResourceResponse> OpenAsync(
     Uri requestUri,
     CancellationToken cancellationToken = default)

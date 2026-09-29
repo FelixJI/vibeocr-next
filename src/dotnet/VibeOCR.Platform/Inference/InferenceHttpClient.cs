@@ -17,8 +17,10 @@ namespace VibeOCR.Platform.Inference;
 /// </summary>
 public sealed class InferenceHttpClient : IInferenceClient
 {
+    private const int MaxResultAssetBytes = 8 * 1024 * 1024;
     private readonly RuntimeHttpClient _runtime;
     private readonly JsonSerializerOptions _options;
+    private readonly PdfSessionHttpClient _pdf;
 
     /// <summary>
     /// Create a client. The base URL MUST be loopback; the session token is
@@ -28,9 +30,41 @@ public sealed class InferenceHttpClient : IInferenceClient
     {
         _options = HttpV2JsonContext.Default.Options;
         _runtime = new RuntimeHttpClient(baseUrl, sessionToken, handler);
+        // Share one transport and one wire parser for all PDF session calls
+        // (contract-shaped in PdfSessionHttpClient) instead of drifting copies.
+        _pdf = new PdfSessionHttpClient(_runtime);
     }
 
     public Uri BaseUrl => _runtime.BaseUrl;
+
+    public async Task<byte[]> FetchResultAssetAsync(
+        string jobId, string itemId, string assetId, CancellationToken cancellationToken)
+    {
+        static string Segment(string value) =>
+            !string.IsNullOrWhiteSpace(value) && value.All(character =>
+                char.IsAsciiLetterOrDigit(character) || character is '-' or '_')
+                ? value : throw new ArgumentException("Invalid result asset identifier.");
+        string path = $"/v2/jobs/{Segment(jobId)}/items/{Segment(itemId)}/assets/{Segment(assetId)}";
+        using HttpResponseMessage response = await _runtime.GetAsync(path, cancellationToken)
+            .ConfigureAwait(false);
+        await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+        if (response.Content.Headers.ContentType?.MediaType != "image/png" ||
+            response.Content.Headers.ContentLength is > MaxResultAssetBytes)
+            throw new InvalidDataException("Result asset is not a bounded PNG.");
+        await using Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken)
+            .ConfigureAwait(false);
+        using var output = new MemoryStream();
+        byte[] buffer = new byte[64 * 1024];
+        while (true)
+        {
+            int count = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            if (count == 0) break;
+            if (output.Length + count > MaxResultAssetBytes)
+                throw new InvalidDataException("Result asset exceeds 8 MiB.");
+            output.Write(buffer, 0, count);
+        }
+        return output.ToArray();
+    }
 
     public async Task<JobRef> SubmitAsync(
         SubmitRequest request,
@@ -196,6 +230,7 @@ public sealed class InferenceHttpClient : IInferenceClient
                 output_path = request.OutputPath,
                 format = request.Format,
                 overwrite = request.Overwrite,
+                raw_blocks = request.ContentBlocks ?? [],
             });
         using HttpResponseMessage response = await _runtime.PostAsync(
             RuntimeOperationPaths.ExportOcr, content, cancellationToken)
@@ -206,67 +241,28 @@ public sealed class InferenceHttpClient : IInferenceClient
             .ConfigureAwait(false);
         return new ExportResult(
             doc.RootElement.GetProperty("output_path").GetString() ?? string.Empty,
-            doc.RootElement.TryGetProperty("bytes_written", out JsonElement bw) ? bw.GetInt64() : 0);
+            doc.RootElement.TryGetProperty("bytes_written", out JsonElement bw) ? bw.GetInt64() : 0,
+            doc.RootElement.TryGetProperty("incomplete", out JsonElement incomplete) && incomplete.GetBoolean(),
+            doc.RootElement.TryGetProperty("images_missing", out JsonElement missing) ? missing.GetInt32() : 0);
     }
 
-    public async Task<PdfSessionOpenResult> OpenPdfSessionAsync(string path, string? password, CancellationToken ct)
-    {
-        using StringContent content = _runtime.CreateJsonContent(new { path, password });
-        using HttpResponseMessage resp = await _runtime.PostAsync(
-            RuntimeOperationPaths.OpenPdfSession, content, ct);
-        await EnsureSuccessAsync(resp, ct);
-        using JsonDocument doc = await _runtime.ReadJsonDocumentAsync(resp, ct);
-        return new PdfSessionOpenResult(
-            doc.RootElement.GetProperty("session_id").GetString()!,
-            doc.RootElement.GetProperty("page_count").GetInt32(),
-            doc.RootElement.GetProperty("file_path").GetString()!);
-    }
+    public Task<PdfSessionOpenResult> OpenPdfSessionAsync(string path, string? password, CancellationToken ct)
+        => _pdf.OpenAsync(path, password, ct);
 
-    public async Task<byte[]> RenderPdfPageAsync(string sessionId, int page, int size, CancellationToken ct)
-    {
-        using HttpResponseMessage resp = await _runtime.GetAsync(
-            $"{BindSessionPath(RuntimeOperationPaths.RenderPdfPage, sessionId)}?page={page}&size={size}", ct);
-        await EnsureSuccessAsync(resp, ct);
-        return await _runtime.ReadBinaryAsync(resp, "image/png", ct);
-    }
+    public Task<byte[]> RenderPdfPageAsync(string sessionId, int page, int size, CancellationToken ct)
+        => _pdf.RenderAsync(sessionId, page, size, ct);
 
-    public async Task<PdfMutateResult> RotatePdfPagesAsync(string sessionId, int[] pages, int angle, CancellationToken ct)
-    {
-        using StringContent content = _runtime.CreateJsonContent(new { pages, angle });
-        using HttpResponseMessage resp = await _runtime.PostAsync(
-            BindSessionPath(RuntimeOperationPaths.RotatePdfPages, sessionId), content, ct);
-        await EnsureSuccessAsync(resp, ct);
-        using JsonDocument doc = await _runtime.ReadJsonDocumentAsync(resp, ct);
-        return new PdfMutateResult(doc.RootElement.GetProperty("page_count").GetInt32());
-    }
+    public Task<PdfMutateResult> RotatePdfPagesAsync(string sessionId, int[] pages, int angle, CancellationToken ct)
+        => _pdf.RotateAsync(sessionId, pages, angle, ct);
 
-    public async Task<PdfMutateResult> DeletePdfPagesAsync(string sessionId, int[] pages, CancellationToken ct)
-    {
-        using StringContent content = _runtime.CreateJsonContent(new { pages });
-        using HttpResponseMessage resp = await _runtime.PostAsync(
-            BindSessionPath(RuntimeOperationPaths.DeletePdfPages, sessionId), content, ct);
-        await EnsureSuccessAsync(resp, ct);
-        using JsonDocument doc = await _runtime.ReadJsonDocumentAsync(resp, ct);
-        return new PdfMutateResult(doc.RootElement.GetProperty("page_count").GetInt32());
-    }
+    public Task<PdfMutateResult> DeletePdfPagesAsync(string sessionId, int[] pages, CancellationToken ct)
+        => _pdf.DeletePagesAsync(sessionId, pages, ct);
 
-    public async Task<string> SavePdfAsync(string sessionId, string outputPath, CancellationToken ct)
-    {
-        using StringContent content = _runtime.CreateJsonContent(
-            new { output_path = outputPath });
-        using HttpResponseMessage resp = await _runtime.PostAsync(
-            BindSessionPath(RuntimeOperationPaths.SavePdfSession, sessionId), content, ct);
-        await EnsureSuccessAsync(resp, ct);
-        using JsonDocument doc = await _runtime.ReadJsonDocumentAsync(resp, ct);
-        return doc.RootElement.GetProperty("saved_path").GetString()!;
-    }
+    public Task<string> SavePdfAsync(string sessionId, string outputPath, CancellationToken ct)
+        => _pdf.SaveAsync(sessionId, outputPath, ct);
 
-    public async Task ClosePdfSessionAsync(string sessionId, CancellationToken ct)
-    {
-        using HttpResponseMessage resp = await _runtime.PostAsync(
-            BindSessionPath(RuntimeOperationPaths.ClosePdfSession, sessionId), content: null, ct);
-        await EnsureSuccessAsync(resp, ct);
-    }
+    public Task ClosePdfSessionAsync(string sessionId, CancellationToken ct)
+        => _pdf.CloseAsync(sessionId, ct);
 
     public async ValueTask DisposeAsync()
     {
@@ -276,10 +272,6 @@ public sealed class InferenceHttpClient : IInferenceClient
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
-
-    private static string BindSessionPath(string template, string sessionId) =>
-        template.Replace(
-            "{session_id}", Uri.EscapeDataString(sessionId), StringComparison.Ordinal);
 
     private async Task EnsureSuccessAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {

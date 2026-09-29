@@ -246,7 +246,9 @@ public sealed partial class App : Application
             _inferenceGateway,
             new InputService(
               () => WinRT.Interop.WindowNative.GetWindowHandle(_window!),
-              _screenshotSmokePicker)),
+              Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "paddle-modes-e2e"
+                ? new MainWindow.SyntheticFixtureRegionPicker()
+                : _screenshotSmokePicker)),
           () => new BatchViewModel(
             _inferenceGateway,
             new BatchFileSource(() => WinRT.Interop.WindowNative.GetWindowHandle(_window!))),
@@ -736,6 +738,18 @@ public sealed partial class App : Application
         if (connected && _managedSession is not null)
         {
             await RefreshEnvironmentSettingsAfterActivationAsync();
+            if (_window is not null)
+            {
+                try
+                {
+                    await _window.RefreshRecognitionCatalogAsync(_applicationShutdown.Token);
+                }
+                catch (OperationCanceledException) when (_applicationShutdown.IsCancellationRequested) { }
+                catch (Exception error)
+                {
+                    AppLog.Warn($"Recognition catalog refresh after attach failed: {error.Message}");
+                }
+            }
         }
         return connected;
     }

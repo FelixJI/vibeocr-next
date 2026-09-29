@@ -224,3 +224,34 @@ def test_ocr_text_block_rejects_invalid_typed_fields(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         OcrTextBlockV1.from_payload(payload)
+
+
+# ---------------------------------------------------------------------------
+# 未知置信度（score=null）
+# ---------------------------------------------------------------------------
+
+
+def test_ocr_text_block_accepts_null_score_as_unknown() -> None:
+    """上游无置信度：score=null 是合法 unknown，不得伪造数值。"""
+    block = OcrTextBlockV1.from_payload({"text": "a^2", "score": None})
+
+    assert block.score is None
+    assert block.to_payload()["score"] is None
+
+
+def test_ocr_result_carries_null_scores_through_payload() -> None:
+    payload = {
+        "raw_text": "a^2",
+        "text_blocks": [
+            {"text": "a^2", "score": None, "label": "formula"},
+            {"text": "hello", "score": 0.9},
+        ],
+    }
+
+    result = OcrResultV1.from_payload(payload)
+
+    assert result.text_blocks[0].score is None
+    assert result.text_blocks[1].score == 0.9
+    out = result.to_payload()
+    assert [block["score"] for block in out["text_blocks"]] == [None, 0.9]
+    assert out["text_blocks"][0]["label"] == "formula"

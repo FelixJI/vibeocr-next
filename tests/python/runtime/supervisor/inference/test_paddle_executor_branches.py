@@ -88,7 +88,7 @@ class _ConfiguringService:
     def __init__(self) -> None:
         self.configured: list[SettingsSnapshot] = []
 
-    def recognize_batch(self, images, options=None):  # type: ignore[no-untyped-def]
+    def recognize_batch(self, images, options=None, *, asset_sinks=None):  # type: ignore[no-untyped-def]
         return [{"text": "ok"} for _ in images]
 
     def preload_pipelines_sequential(self, pipelines):  # type: ignore[no-untyped-def]

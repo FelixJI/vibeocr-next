@@ -122,6 +122,8 @@ class ExportResponse(TypedDict, total=False):
     instance_id: Required[str]
     output_path: Required[str]
     bytes_written: Required[int]
+    incomplete: NotRequired[bool]
+    images_missing: NotRequired[int]
 
 
 class Health(TypedDict, total=False):
@@ -731,6 +733,7 @@ class SubmitRequest(TypedDict, total=False):
 class TextBlockMirror(TypedDict, total=False):
     text: Required[str]
     score: Required[float]
+    score_unknown: NotRequired[bool]
     bbox: NotRequired[list[Any] | None]
     polygon: NotRequired[list[float] | None]
     page_idx: NotRequired[int | None]

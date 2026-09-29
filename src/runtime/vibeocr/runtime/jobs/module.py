@@ -478,6 +478,68 @@ class SupervisorModule:
             )
         return out
 
+    def resolve_result_asset(
+        self, job_id: str, item_id: str, asset_id: str
+    ) -> tuple[bytes, str] | None:
+        """读取一条已完成结果的图像资产（受控目录 + 权威引用校验）。
+
+        校验链：job 存在 → item 存在且 SUCCEEDED → 资产 id 出现在该 item
+        成功结果 payload 的 content_list 引用中（不可猜测、不跨 job）→
+        文件位于本 job staging 目录固定 results/ 子目录且真实存在。
+        任一环不满足返回 None（调用方映射 RESOURCE_NOT_FOUND）；job 不
+        存在抛 JobNotFoundError。
+        """
+        from vibeocr.runtime.recognition.result_assets import is_safe_asset_id
+
+        record = self.registry.get(job_id)
+        if not is_safe_asset_id(item_id) or not is_safe_asset_id(asset_id):
+            return None
+        item = next((entry for entry in record.items if entry.item_id == item_id), None)
+        from vibeocr.runtime_contracts import ItemState
+
+        if item is None or item.state is not ItemState.SUCCEEDED:
+            return None
+        payload = record.results.get(item_id)
+        if not isinstance(payload, dict):
+            return None
+        ref = None
+        for block in payload.get("content_list") or []:
+            if not isinstance(block, dict):
+                continue
+            image = block.get("image")
+            if (
+                isinstance(image, dict)
+                and image.get("asset_id") == asset_id
+                and image.get("job_id") == job_id
+                and image.get("item_id") == item_id
+                and image.get("available") is not False
+            ):
+                ref = image
+                break
+        if ref is None:
+            return None
+        job_dir = self.stager.job_dir(job_id)
+        if job_dir is None:
+            return None
+        if (job_dir / "results").is_symlink():
+            return None
+        results_dir = (job_dir / "results").resolve()
+        target = (results_dir / f"{item_id}-{asset_id}.png").resolve()
+        if results_dir not in target.parents:
+            return None
+        if not target.is_file():
+            return None
+        try:
+            from vibeocr.runtime.recognition.result_assets import MAX_ASSET_IMAGE_BYTES
+
+            if target.stat().st_size > MAX_ASSET_IMAGE_BYTES:
+                return None
+            data = target.read_bytes()
+        except OSError:
+            return None
+        media_type = str(ref.get("media_type") or "image/png")
+        return data, media_type
+
     # ------------------------------------------------------------------
     # Cancel / retry / delete
     # ------------------------------------------------------------------

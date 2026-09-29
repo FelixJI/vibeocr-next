@@ -47,15 +47,16 @@ def test_error_json_schema_matches_the_formal_openapi_component() -> None:
     }
 
 
-def test_formal_spec_is_openapi_31_with_real_41_operation_surface() -> None:
+def test_formal_spec_is_openapi_31_with_real_42_operation_surface() -> None:
     spec = _spec()
     operations = _operations(spec)
     assert spec["openapi"] == "3.1.0"
-    assert len(operations) == 41
+    assert len(operations) == 42
     assert {(method.upper(), path) for method, path, _ in operations} == {
         ("GET", "/v2/health"),
         ("POST", "/v2/jobs"),
         ("GET", "/v2/jobs/{job_id}/observe"),
+        ("GET", "/v2/jobs/{job_id}/items/{item_id}/assets/{asset_id}"),
         ("POST", "/v2/jobs/command"),
         ("GET", "/v2/runtime/residency"),
         ("GET", "/v2/runtime/status"),
@@ -644,8 +645,13 @@ def test_codegen_covers_wire_dtos_errors_and_operation_signatures() -> None:
     }
     assert all(hasattr(wire_types, name) for name in object_schemas)
     assert typing.get_type_hints(wire_types.Health)["protocol_version"] is not None
-    assert len(OPERATIONS) == 41
-    assert len({operation.operation_id for operation in OPERATIONS}) == 41
+    assert len(OPERATIONS) == 42
+    assert len({operation.operation_id for operation in OPERATIONS}) == 42
+    assert any(
+        operation.operation_id == "getJobItemAsset"
+        and operation.path == "/v2/jobs/{job_id}/items/{item_id}/assets/{asset_id}"
+        for operation in OPERATIONS
+    )
     registry = json.loads((V2 / "errors.json").read_text(encoding="utf-8"))
     assert {code.value for code in RuntimeErrorCode} == {
         entry["code"] for entry in registry["codes"]

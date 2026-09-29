@@ -331,7 +331,30 @@ class AdapterExecutor:
                     error="adapter returned an empty or non-object payload",
                 )
                 continue
+            self._bind_asset_refs(payload, record.job_id, input_item.item_id)
             self._commit_payload(record, input_item, payload_type, payload)
+
+    @staticmethod
+    def _bind_asset_refs(payload: dict, job_id: str, item_id: str) -> None:
+        """把 job/item 权威绑定补进 content_list 的结果资产引用。
+
+        worker 侧 sink 只产生随机 asset_id；job/item 绑定由 supervisor 侧
+        （知晓 job_id 与 payload↔item 顺序对齐）在提交成功结果前补齐，
+        供资产 GET 路由校验“属于已完成结果的当前 item”。
+        """
+
+        content_list = payload.get("content_list")
+        if not isinstance(content_list, list):
+            return
+        for block in content_list:
+            if not isinstance(block, dict):
+                continue
+            image = block.get("image")
+            if not isinstance(image, dict) or image.get("available") is False:
+                continue
+            if "asset_id" in image:
+                image["item_id"] = item_id
+                image["job_id"] = job_id
 
     def _commit_payload(
         self, record: Any, item: InputItem, payload_type: str, payload: dict
@@ -430,7 +453,13 @@ class AdapterExecutor:
 
     @staticmethod
     def _staged_to_items(staged: Any) -> list[InputItem]:
-        """Convert StagedInput list → InputItem list carrying raw bytes."""
+        """Convert StagedInput list → InputItem list carrying raw bytes.
+
+        每项同时携带受控结果资产目录：staged.path.parent（stager 分配的
+        job 私有目录）下固定 ``results/`` 子目录。路径由服务端从受信 staged
+        路径派生，不经客户端；staging 目录的 delete/purge/shutdown 生命
+        周期即资产生命周期。
+        """
         out: list[InputItem] = []
         for entry in staged or []:
             data = entry.path.read_bytes() if hasattr(entry, "path") else b""
@@ -442,6 +471,11 @@ class AdapterExecutor:
                     decoded_pixels = int(image.width) * int(image.height)
             except Exception:
                 pass
+            asset_dir = ""
+            if hasattr(entry, "path"):
+                results_dir = entry.path.parent / "results"
+                results_dir.mkdir(parents=True, exist_ok=True)
+                asset_dir = str(results_dir)
             out.append(
                 InputItem(
                     item_id=getattr(entry, "item_id", f"it-{len(out)}"),
@@ -451,6 +485,7 @@ class AdapterExecutor:
                     display_name=getattr(entry, "display_name", "input"),
                     data=data,
                     content_type=getattr(entry, "content_type", None) or "",
+                    asset_dir=asset_dir,
                 )
             )
         return out

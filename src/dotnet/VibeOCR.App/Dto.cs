@@ -11,6 +11,7 @@ public sealed record RecognizeResponse
     public string? MarkdownText { get; init; }
     public string? HtmlText { get; init; }
     public System.Text.Json.JsonElement[]? RawBlocks { get; init; }
+    public System.Text.Json.JsonElement[]? ContentBlocks { get; init; }
 }
 
 public sealed record QrCodeResult

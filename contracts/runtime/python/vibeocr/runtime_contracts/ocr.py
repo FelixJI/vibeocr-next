@@ -45,6 +45,12 @@ def _number(value: object, label: str) -> float:
     return float(value)
 
 
+def _optional_number(value: object, label: str) -> float | None:
+    """``null`` 表示上游未提供置信度（unknown），不是 0%。"""
+
+    return None if value is None else _number(value, label)
+
+
 def _optional_integer(value: object, label: str) -> int | None:
     return None if value is None else _integer(value, label)
 
@@ -108,10 +114,15 @@ def _content_blocks(value: object) -> tuple[JsonObject, ...]:
 
 @dataclass(frozen=True, slots=True)
 class OcrTextBlockV1:
-    """One text block carried by an ``ocr.v1`` result."""
+    """One text block carried by an ``ocr.v1`` result.
+
+    ``score`` is ``None`` when the upstream provider supplies no confidence
+    (formula/table structure blocks): consumers must render "unknown", not
+    0% or 100%.
+    """
 
     text: str
-    score: float
+    score: float | None
     bbox: tuple[float, float, float, float] | None = None
     polygon: tuple[float, ...] | None = None
     page_idx: int | None = None
@@ -154,7 +165,7 @@ class OcrTextBlockV1:
             raise ContractError("is_manually_edited must be a boolean")
         return cls(
             text=_string(payload["text"], "text"),
-            score=_number(payload["score"], "score"),
+            score=_optional_number(payload["score"], "score"),
             bbox=None if bbox is None else (bbox[0], bbox[1], bbox[2], bbox[3]),
             polygon=polygon,
             page_idx=_optional_integer(payload.get("page_idx"), "page_idx"),
