@@ -467,7 +467,7 @@ async function copySessionPng(app, evidenceRoot) {
     await app.page.getByRole('button', { name: '复制标注图' }).click();
     const request = await requestPromise;
     const response = await request.response();
-    assert.equal(response?.status, 201, 'Public annotation upload was not accepted.');
+    assert.equal(response?.status(), 201, 'Public annotation upload was not accepted.');
     await app.page.waitForFunction(() => {
       const upload = window.__scrollCaptureUpload;
       return upload && (Array.isArray(upload.bytes) || upload.problem !== null);

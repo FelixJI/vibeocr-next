@@ -600,7 +600,6 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     {
       // Release the frozen desktop before a possible long scrolling session.
       root.Children.Clear();
-      overlay.Content = null;
     }
   }
     public static PhysicalRectangle ScaleSelection(
