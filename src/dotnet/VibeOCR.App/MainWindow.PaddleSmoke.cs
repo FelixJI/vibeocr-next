@@ -805,6 +805,36 @@ public sealed partial class MainWindow
         blocksCount, System.Globalization.CultureInfo.InvariantCulture);
       await AssertPaddleStructureEvidenceAsync(mode, ui);
       ui["copies"] = await ClickPaddleCopyButtonsAsync(tokens);
+      paddleSmokePartialEvidence = new { job = jobEvidence, capture, ui };
+      if (mode == "paddle_formula")
+      {
+        const string choice = ".structured-result section:has(.structured-formula) select";
+        int count = int.Parse(await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+          $"document.querySelector({JsonSerializer.Serialize(choice)})?.options.length ?? 0"),
+          System.Globalization.CultureInfo.InvariantCulture);
+        if (count < 2)
+          throw new InvalidOperationException("Multi-formula fixture produced fewer than two selectable formulas.");
+        var formulas = new List<object>();
+        ui["formula_selections"] = formulas;
+        for (int index = 0; index < count; index++)
+        {
+          await SelectSmokeValueAsync(choice, index.ToString(System.Globalization.CultureInfo.InvariantCulture));
+          await WaitForSmokeDomAsync(
+            "document.querySelector('.structured-result section:has(.structured-formula) label')" +
+            $"?.textContent?.trim().startsWith('公式 {index + 1}/{count}')",
+            TimeSpan.FromSeconds(5));
+          string? latex = await PaddleSmokeDomTextAsync(".structured-formula code");
+          bool rendered = await PaddleSmokeDomBoolAsync(
+            "(() => { const m=document.querySelector('.structured-formula math'); " +
+            "return !!m && m.getBoundingClientRect().width > 0 && " +
+            "m.getBoundingClientRect().height > 0; })()");
+          await ClickPaddleCopyButtonsAsync([]);
+          string? copied = await ReadPaddleClipboardAsync("复制 LaTeX");
+          formulas.Add(new { index, latex, rendered, copied });
+          if (string.IsNullOrWhiteSpace(latex) || copied != latex || !rendered)
+            throw new InvalidOperationException($"Formula {index + 1} selection/render/native copy failed.");
+        }
+      }
       // 引用可变 ui 的兑底快照：后续导出失败时 copies 与已完成 exports
       // 仍在失败 health 的 partial_evidence 中。
       paddleSmokePartialEvidence = new { job = jobEvidence, capture, ui };
@@ -1043,16 +1073,7 @@ public sealed partial class MainWindow
     nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
     try
     {
-      await FocusPaddleDialogAsync(dialog);
-      foreach (char c in fixture)
-      {
-        PaddleSmokeNative.SendChar(c);
-        await Task.Delay(10);
-      }
-      await Task.Delay(150);
-      PaddleSmokeNative.SendKey(0x0D);
-      await WaitForPaddleConditionAsync(
-        () => !PaddleSmokeNative.IsWindowVisible(dialog), TimeSpan.FromSeconds(30));
+      await CompletePaddlePickerAsync(dialog, fixture);
     }
     catch
     {
@@ -1089,15 +1110,7 @@ public sealed partial class MainWindow
     nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
     try
     {
-      await FocusPaddleDialogAsync(dialog);
-      foreach (char c in exportDir)
-      {
-        PaddleSmokeNative.SendChar(c);
-        await Task.Delay(10);
-      }
-      PaddleSmokeNative.SendKey(0x0D);
-      await WaitForPaddleConditionAsync(
-        () => !PaddleSmokeNative.IsWindowVisible(dialog), TimeSpan.FromSeconds(30));
+      await CompletePaddlePickerAsync(dialog, exportDir);
     }
     catch
     {
@@ -1144,15 +1157,7 @@ public sealed partial class MainWindow
     nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
     try
     {
-      await FocusPaddleDialogAsync(dialog);
-      foreach (char c in target)
-      {
-        PaddleSmokeNative.SendChar(c);
-        await Task.Delay(10);
-      }
-      PaddleSmokeNative.SendKey(0x0D);
-      await WaitForPaddleConditionAsync(
-        () => !PaddleSmokeNative.IsWindowVisible(dialog), TimeSpan.FromSeconds(30));
+      await CompletePaddlePickerAsync(dialog, target);
     }
     catch
     {
@@ -1169,8 +1174,8 @@ public sealed partial class MainWindow
   /// <summary>
   /// 真实公共 UI 导出：点击导出按钮后只操作“被本实例主窗口直接 owned”
   /// 的 FileSavePicker（#32770，WinRT broker 独立进程承载）；归属不明立
-  /// 即停止。键盘输入隔离根内固定新文件名并回车确认；确认后再出现意外
-  /// 弹窗按 ESC 取消并记失败。不新增生产任意路径入口。
+  /// 即停止。定向设置原生文件名控件并点击确认；确认后再出现意外
+  /// 弹窗定向取消并记失败。不新增生产任意路径入口。
   /// </summary>
   private async Task<object> RunPaddleUiExportAsync(string buttonLabel)
   {
@@ -1198,22 +1203,12 @@ public sealed partial class MainWindow
     Exception? dialogError = null;
     try
     {
-      await FocusPaddleDialogAsync(dialog);
-      // 焦点默认在文件名输入框；逐字符 UNICODE 注入完整隔离路径后回车。
-      foreach (char c in target)
-      {
-        PaddleSmokeNative.SendChar(c);
-        await Task.Delay(10);
-      }
-      await Task.Delay(150);
-      PaddleSmokeNative.SendKey(0x0D); // Enter
-      await WaitForPaddleConditionAsync(
-        () => !PaddleSmokeNative.IsWindowVisible(dialog), TimeSpan.FromSeconds(30));
+      await CompletePaddlePickerAsync(dialog, target);
     }
     catch (Exception error)
     {
       dialogError = error;
-      CancelPaddleDialog(dialog); // ESC：取消本次保存，不留半开的弹窗。
+      CancelPaddleDialog(dialog); // 只取消本次 owned picker。
     }
     await Task.Delay(500);
     // 确认后残留/新出现的同属保存弹窗（如覆盖确认）视为异常：取消并失败。
@@ -1245,29 +1240,63 @@ public sealed partial class MainWindow
       button_label = buttonLabel,
       file = target,
       bytes = length,
+      status = await PaddleSmokeDomTextAsync(".status-line"),
       saved_via = "ui-file-save-picker",
     };
   }
 
-  private async Task FocusPaddleDialogAsync(nint dialog)
+  private async Task CompletePaddlePickerAsync(nint dialog, string path)
   {
-    // A visible broker dialog can precede activation. Wait for its actual
-    // foreground state, retaining the same direct-owner boundary on every poll.
+    nint edit = 0;
+    nint confirm = 0;
+    // Shell picker focus is local to its broker thread; Windows may keep a
+    // different app foreground. Address only our owned native controls instead
+    // of sending global keyboard input. 1001/1148 are observed filename edits.
     await WaitForPaddleConditionAsync(() =>
     {
       if (FindPaddleSaveDialog() != dialog)
         throw new InvalidOperationException("Picker dialog ownership changed.");
-      if (PaddleSmokeNative.GetForegroundWindow() == dialog) return true;
-      PaddleSmokeNative.SetForegroundWindow(dialog);
-      return PaddleSmokeNative.GetForegroundWindow() == dialog;
+      var edits = new List<nint>();
+      confirm = 0;
+      PaddleSmokeNative.EnumChildWindows(dialog, (child, _) =>
+      {
+        if (!PaddleSmokeNative.IsWindowVisible(child)) return true;
+        int id = PaddleSmokeNative.GetDlgCtrlID(child);
+        string kind = PaddleSmokeNative.GetWindowClassName(child);
+        if (kind == "Edit" && id is 1001 or 1148) edits.Add(child);
+        if (kind == "Button" && id == 1) confirm = child;
+        return true;
+      }, 0);
+      if (edits.Count > 1)
+        throw new InvalidOperationException("Picker filename control is ambiguous.");
+      edit = edits.Count == 1 ? edits[0] : 0;
+      return edit != 0 && confirm != 0;
     }, TimeSpan.FromSeconds(10));
+    if (FindPaddleSaveDialog() != dialog || !PaddleSmokeNative.IsChild(dialog, edit))
+      throw new InvalidOperationException("Picker filename control ownership changed.");
+    if (PaddleSmokeNative.SetText(edit, 0x000C, 0, path, 2, 1000, out nint accepted) == 0 || accepted == 0)
+      throw new InvalidOperationException("Picker filename input failed.");
+    var actual = new System.Text.StringBuilder(path.Length + 2);
+    if (PaddleSmokeNative.ReadText(edit, 0x000D, actual.Capacity, actual, 2, 1000, out _) == 0 ||
+        !string.Equals(actual.ToString(), path, StringComparison.Ordinal))
+      throw new InvalidOperationException("Picker filename did not retain the isolated path.");
+    await WaitForPaddleConditionAsync(() =>
+    {
+      if (FindPaddleSaveDialog() != dialog || !PaddleSmokeNative.IsChild(dialog, confirm))
+        throw new InvalidOperationException("Picker confirmation ownership changed.");
+      return PaddleSmokeNative.IsWindowEnabled(confirm);
+    }, TimeSpan.FromSeconds(10));
+    // WM_COMMAND / IDOK / BN_CLICKED, with the real button handle.
+    if (!PaddleSmokeNative.PostMessageW(dialog, 0x0111, 1, confirm))
+      throw new InvalidOperationException("Picker confirmation failed.");
+    await WaitForPaddleConditionAsync(
+      () => !PaddleSmokeNative.IsWindowVisible(dialog), TimeSpan.FromSeconds(30));
   }
 
   private void CancelPaddleDialog(nint dialog)
   {
-    if (FindPaddleSaveDialog() == dialog &&
-        PaddleSmokeNative.GetForegroundWindow() == dialog)
-      PaddleSmokeNative.SendKey(0x1B);
+    if (FindPaddleSaveDialog() == dialog)
+      PaddleSmokeNative.PostMessageW(dialog, 0x0111, 2, 0); // IDCANCEL
   }
 
   private async Task<nint> WaitForPaddleSaveDialogAsync(TimeSpan timeout)
@@ -1596,13 +1625,6 @@ public sealed partial class MainWindow
     public static extern bool IsWindowVisible(nint hwnd);
 
     [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool SetForegroundWindow(nint window);
-
-    [DllImport("user32.dll")]
-    public static extern nint GetForegroundWindow();
-
-    [DllImport("user32.dll")]
     public static extern bool GetClientRect(nint handle, out Rect rect);
 
     [DllImport("user32.dll")]
@@ -1717,65 +1739,27 @@ public sealed partial class MainWindow
       return bitmap;
     }
 
-    // SendInput INPUT 在 x64 上为 40 字节：type + padding + 最大联合体
-    // （MOUSEINPUT 32 字节）。KEYBDINPUT 用 wScan 承载 UNICODE 字符。
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MOUSEINPUT
-    {
-      public int Dx, Dy;
-      public uint MouseData, Flags, Time;
-      public nint ExtraInfo;
-    }
+    [DllImport("user32.dll")]
+    public static extern bool EnumChildWindows(nint parent, EnumWindowsProc proc, nint lParam);
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct KEYBDINPUT
-    {
-      public ushort Vk, Scan;
-      public uint Flags, Time;
-      public nint ExtraInfo;
-    }
+    [DllImport("user32.dll")]
+    public static extern int GetDlgCtrlID(nint window);
 
-    [StructLayout(LayoutKind.Explicit)]
-    private struct INPUTUNION
-    {
-      [FieldOffset(0)] public MOUSEINPUT Mouse;
-      [FieldOffset(0)] public KEYBDINPUT Keyboard;
-    }
+    [DllImport("user32.dll")]
+    public static extern bool IsChild(nint parent, nint child);
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct INPUT
-    {
-      public int Type;
-      public INPUTUNION Union;
-    }
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowEnabled(nint window);
 
-    private const uint KeyEventFUnicode = 0x0004;
-    private const uint KeyEventFKeyUp = 0x0002;
+    [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", CharSet = CharSet.Unicode)]
+    public static extern nint SetText(nint window, uint message, nint wParam,
+      string text, uint flags, uint timeout, out nint result);
 
-    public static void SendChar(char c)
-    {
-      INPUT down = KeyboardInput(0, c, KeyEventFUnicode);
-      INPUT up = KeyboardInput(0, c, KeyEventFUnicode | KeyEventFKeyUp);
-      SendInput(2, [down, up], Marshal.SizeOf<INPUT>());
-    }
-
-    public static void SendKey(ushort vk)
-    {
-      INPUT down = KeyboardInput(vk, 0, 0);
-      INPUT up = KeyboardInput(vk, 0, KeyEventFKeyUp);
-      SendInput(2, [down, up], Marshal.SizeOf<INPUT>());
-    }
-
-    private static INPUT KeyboardInput(ushort vk, ushort scan, uint flags) => new()
-    {
-      Type = 1,
-      Union = new INPUTUNION
-      {
-        Keyboard = new KEYBDINPUT { Vk = vk, Scan = scan, Flags = flags },
-      },
-    };
+    [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", CharSet = CharSet.Unicode)]
+    public static extern nint ReadText(nint window, uint message, nint wParam,
+      System.Text.StringBuilder text, uint flags, uint timeout, out nint result);
 
     [DllImport("user32.dll", SetLastError = true)]
-    private static extern uint SendInput(int count, INPUT[] inputs, int size);
+    public static extern bool PostMessageW(nint window, uint message, nint wParam, nint lParam);
   }
 }
