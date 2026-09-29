@@ -299,7 +299,7 @@ try {
                 'VIBEOCR_PADDLE_SMOKE_OPTION_KIND' = $spec.Kind
                 'VIBEOCR_PADDLE_SMOKE_TOKENS' = $spec.Tokens
                 'VIBEOCR_PADDLE_SMOKE_EXPORT_BUTTONS' = $spec.Export
-                'VIBEOCR_PADDLE_SMOKE_EXPORT_DIR' = $exports
+                'VIBEOCR_PADDLE_SMOKE_EXPORT_DIR' = (Join-Path $exports $phaseName)
                 'VIBEOCR_PADDLE_SMOKE_TIMEOUT_MINUTES' = "$ModeTimeoutMinutes"
             } $phaseName ($ModeTimeoutMinutes + 10)
             $results += [pscustomobject]@{
