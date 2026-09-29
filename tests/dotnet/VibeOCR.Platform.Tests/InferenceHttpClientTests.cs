@@ -537,12 +537,19 @@ public sealed class InferenceHttpClientTests
     [Fact]
     public async Task PdfMutationsPostWirePayloadsAndReadResultsAsync()
     {
+        // Responses are shaped exactly like the generated v2 wire contracts:
+        // open -> PdfOpenResponse {session_id, model{file_path, pages}},
+        // rotate/delete -> PdfMutationResponse {diff{full_model?}}; without a
+        // full_model the authoritative page count comes from the existing
+        // /model endpoint, and save -> SaveResponse {path}.
         var handler = new FakeHandler(
         [
-            """{"session_id":"pdf-1","page_count":3,"file_path":"C:/in.pdf"}""",
-            """{"page_count":3}""",
-            """{"page_count":2}""",
-            """{"saved_path":"C:/out.pdf"}""",
+            """{"schema_version":2,"instance_id":"sup-1","session_id":"pdf-1","model":{"file_path":"C:/in.pdf","pages":[{"page_index":0},{"page_index":1},{"page_index":2}]}}""",
+            """{"schema_version":2,"instance_id":"sup-1","diff":{"structural_change":true,"full_model":{"file_path":"C:/in.pdf","pages":[{"page_index":0},{"page_index":1},{"page_index":2}]}},"extra":null}""",
+            """{"schema_version":2,"instance_id":"sup-1","diff":{"structural_change":true},"extra":null}""",
+            """{"schema_version":2,"instance_id":"sup-1","file_path":"C:/in.pdf","pages":[{"page_index":0},{"page_index":2}]}""",
+            """{"schema_version":2,"instance_id":"sup-1","path":"C:/out.pdf","diff":{"replaced_pages":[]}}""",
+            """{"schema_version":2,"instance_id":"sup-1","closed":true}""",
         ]);
         await using var client = new InferenceHttpClient(Base, "tok", handler);
         CancellationToken cancellationToken = TestContext.Current.CancellationToken;
@@ -551,11 +558,14 @@ public sealed class InferenceHttpClientTests
             "C:/in.pdf", null, cancellationToken);
         Assert.Equal("pdf-1", opened.SessionId);
         Assert.Equal(3, opened.PageCount);
+        Assert.Equal("C:/in.pdf", opened.FilePath);
+        Assert.Equal(HttpMethod.Post, handler.LastMethod);
         Assert.Equal("/v2/pdf/sessions/open", handler.LastPath);
         using (JsonDocument body = JsonDocument.Parse(handler.LastBody!))
         {
+            // OpenRequest is additionalProperties:false with `path` only.
             Assert.Equal("C:/in.pdf", body.RootElement.GetProperty("path").GetString());
-            Assert.Equal(JsonValueKind.Null, body.RootElement.GetProperty("password").ValueKind);
+            Assert.False(body.RootElement.TryGetProperty("password", out _));
         }
 
         PdfMutateResult rotated = await client.RotatePdfPagesAsync(
@@ -571,11 +581,17 @@ public sealed class InferenceHttpClientTests
 
         PdfMutateResult deleted = await client.DeletePdfPagesAsync(
             "pdf-1", [1], cancellationToken);
+        // The delete diff carries no full_model, so the authoritative count
+        // comes from the existing /model endpoint, not local page arithmetic.
         Assert.Equal(2, deleted.PageCount);
-        Assert.Equal("/v2/pdf/sessions/pdf-1/delete_pages", handler.LastPath);
-        using (JsonDocument body = JsonDocument.Parse(handler.LastBody!))
+        Assert.Equal("/v2/pdf/sessions/pdf-1/model", handler.LastPath);
+        // The /model read-back is a body-less POST (matching the real route),
+        // so the delete payload is the second-to-last recorded body.
+        string deleteBody = handler.Bodies[^2]!;
+        using (JsonDocument body = JsonDocument.Parse(deleteBody))
         {
             Assert.Equal(1, body.RootElement.GetProperty("pages")[0].GetInt32());
+            Assert.False(body.RootElement.TryGetProperty("angle", out _));
         }
 
         string saved = await client.SavePdfAsync(
@@ -584,8 +600,41 @@ public sealed class InferenceHttpClientTests
         Assert.Equal("/v2/pdf/sessions/pdf-1/save", handler.LastPath);
         using (JsonDocument body = JsonDocument.Parse(handler.LastBody!))
         {
-            Assert.Equal("C:/out.pdf", body.RootElement.GetProperty("output_path").GetString());
+            // SaveRequest uses `path`, never `output_path`.
+            Assert.Equal("C:/out.pdf", body.RootElement.GetProperty("path").GetString());
+            Assert.False(body.RootElement.TryGetProperty("output_path", out _));
         }
+
+        await client.ClosePdfSessionAsync("pdf-1", cancellationToken);
+        Assert.Equal("/v2/pdf/sessions/pdf-1/close", handler.LastPath);
+        Assert.Equal(HttpMethod.Post, handler.LastMethod);
+    }
+
+    [Fact]
+    public async Task OpenPdfSessionRejectsPasswordWithoutRequestAsync()
+    {
+        // OpenRequest has no password field; a non-empty password must be
+        // refused locally instead of being sent into a server-side 400.
+        var handler = new FakeHandler("{}");
+        await using var client = new InferenceHttpClient(Base, "tok", handler);
+
+        await Assert.ThrowsAsync<NotSupportedException>(
+            () => client.OpenPdfSessionAsync(
+                "C:/in.pdf", "secret", TestContext.Current.CancellationToken));
+
+        Assert.Null(handler.LastPath);
+    }
+
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("{\"session_id\":5,\"model\":{\"pages\":[],\"file_path\":\"a.pdf\"}}")]
+    [InlineData("{\"session_id\":\"pdf-1\",\"model\":[]}")]
+    public async Task MalformedPdfOpenResponseReportsProtocolMismatch(string response)
+    {
+        await using var client = new InferenceHttpClient(Base, "tok", new FakeHandler(response));
+        var error = await Assert.ThrowsAsync<InferenceClientException>(
+            () => client.OpenPdfSessionAsync("a.pdf", null, TestContext.Current.CancellationToken));
+        Assert.Equal(HttpV2ErrorCode.ProtocolMismatch, error.Code);
     }
 
     private static SubmitRequest UploadRequest() => new()
@@ -629,6 +678,7 @@ public sealed class InferenceHttpClientTests
         }
 
         public HttpMethod? LastMethod { get; private set; }
+        public List<string?> Bodies { get; } = [];
         public string? LastPath { get; private set; }
         public string? LastQuery { get; private set; }
         public string? LastAuthorizationScheme { get; private set; }
@@ -649,6 +699,7 @@ public sealed class InferenceHttpClientTests
             LastBody = request.Content is null
                 ? null
                 : await request.Content.ReadAsStringAsync(cancellationToken);
+            Bodies.Add(LastBody);
             string body = _bodies.Count > 1 ? _bodies.Dequeue() : _bodies.Peek();
             var content = new StringContent(body);
             content.Headers.ContentType = new(_mediaType);
