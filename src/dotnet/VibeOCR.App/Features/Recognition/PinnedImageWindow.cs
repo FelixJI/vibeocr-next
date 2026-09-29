@@ -56,6 +56,7 @@ internal sealed class PinnedImageWindow : IDisposable
   private CoreWebView2? core;
   private ulong activeNavigation;
   private string navigationState = "not_started";
+  private string? documentUri;
   private double zoom = 1;
   private long textGeneration;
   private bool oldSnapshot;
@@ -223,7 +224,7 @@ internal sealed class PinnedImageWindow : IDisposable
   private void OnNavigationStarting(CoreWebView2 sender,
     CoreWebView2NavigationStartingEventArgs args)
   {
-    if (args.Uri != "about:blank") args.Cancel = true;
+    if (!IsDocumentNavigationAllowed(args.Uri, documentUri, args.IsUserInitiated)) args.Cancel = true;
     else activeNavigation = args.NavigationId;
     navigationState = $"starting: scheme={new Uri(args.Uri).Scheme}, blank={args.Uri == "about:blank"}, user={args.IsUserInitiated}, cancelled={args.Cancel}, id={args.NavigationId}";
   }
@@ -359,8 +360,12 @@ internal sealed class PinnedImageWindow : IDisposable
     }
     html.Append("</div></body></html>");
     navigationState = $"requested: chars={html.Length}";
-    view.NavigateToString(html.ToString());
+    documentUri = "data:text/html;charset=utf-8;base64," + Convert.ToBase64String(Encoding.UTF8.GetBytes(html.ToString()));
+    core!.Navigate(documentUri);
   }
+
+  internal static bool IsDocumentNavigationAllowed(string uri, string? expected, bool userInitiated) =>
+    !userInitiated && expected is not null && string.Equals(uri, expected, StringComparison.Ordinal);
 
   private static string Percent(double normalized) =>
     (normalized / 10).ToString("F4", CultureInfo.InvariantCulture);

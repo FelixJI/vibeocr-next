@@ -21,6 +21,18 @@ namespace VibeOCR.App.Tests;
 /// </summary>
 public sealed class ScreenshotSessionWorkbenchTests
 {
+  [Theory]
+  [InlineData("data:text/html;charset=utf-8;base64,PGI+dGVzdDwvYj4=", false, true)]
+  [InlineData("data:text/html;charset=utf-8;base64,PGI+dGVzdDwvYj4=", true, false)]
+  [InlineData("data:text/html,<script>alert(1)</script>", false, false)]
+  [InlineData("https://example.invalid", false, false)]
+  [InlineData("about:blank", false, false)]
+  public void PinnedNavigationAcceptsOnlyTheHostGeneratedDocument(string uri, bool userInitiated, bool allowed)
+  {
+    const string expected = "data:text/html;charset=utf-8;base64,PGI+dGVzdDwvYj4=";
+    Assert.Equal(allowed, PinnedImageWindow.IsDocumentNavigationAllowed(uri, expected, userInitiated));
+    Assert.False(PinnedImageWindow.IsDocumentNavigationAllowed(uri, null, userInitiated));
+  }
   private static readonly byte[] AnnotationPng = Convert.FromBase64String(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
   private static readonly byte[] CaptureBytes = [9, 8, 7, 6, 5];
