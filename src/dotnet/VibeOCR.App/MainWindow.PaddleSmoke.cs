@@ -501,7 +501,7 @@ public sealed partial class MainWindow
     if (!Path.GetExtension(fixture).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
       throw new InvalidOperationException("PDF input requires a PDF fixture.");
     RecordPaddleSmokeStage($"pdf select mode {mode}");
-    await NavigateSmokeAsync("PDF 工作台", "button");
+    await NavigateSmokeAsync("PDF", "button");
     await WaitForPaddleModeAsync("#pdf-task-engine", mode);
     await SelectSmokeValueAsync("#pdf-task-engine", mode);
     RecordPaddleSmokeStage("open PDF via public picker");
@@ -1043,9 +1043,7 @@ public sealed partial class MainWindow
     nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
     try
     {
-      if (!PaddleSmokeNative.SetForegroundWindow(dialog) ||
-          PaddleSmokeNative.GetForegroundWindow() != dialog)
-        throw new InvalidOperationException("Open dialog could not take foreground.");
+      await FocusPaddleDialogAsync(dialog);
       foreach (char c in fixture)
       {
         PaddleSmokeNative.SendChar(c);
@@ -1058,7 +1056,7 @@ public sealed partial class MainWindow
     }
     catch
     {
-      PaddleSmokeNative.SendKey(0x1B);
+      CancelPaddleDialog(dialog);
       throw;
     }
     if (FindPaddleSaveDialog() != 0)
@@ -1091,9 +1089,7 @@ public sealed partial class MainWindow
     nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
     try
     {
-      if (!PaddleSmokeNative.SetForegroundWindow(dialog) ||
-          PaddleSmokeNative.GetForegroundWindow() != dialog)
-        throw new InvalidOperationException("Folder dialog could not take foreground.");
+      await FocusPaddleDialogAsync(dialog);
       foreach (char c in exportDir)
       {
         PaddleSmokeNative.SendChar(c);
@@ -1105,7 +1101,7 @@ public sealed partial class MainWindow
     }
     catch
     {
-      PaddleSmokeNative.SendKey(0x1B);
+      CancelPaddleDialog(dialog);
       throw;
     }
     string[] created = [];
@@ -1148,9 +1144,7 @@ public sealed partial class MainWindow
     nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
     try
     {
-      if (!PaddleSmokeNative.SetForegroundWindow(dialog) ||
-          PaddleSmokeNative.GetForegroundWindow() != dialog)
-        throw new InvalidOperationException("PDF save dialog could not take foreground.");
+      await FocusPaddleDialogAsync(dialog);
       foreach (char c in target)
       {
         PaddleSmokeNative.SendChar(c);
@@ -1162,7 +1156,7 @@ public sealed partial class MainWindow
     }
     catch
     {
-      PaddleSmokeNative.SendKey(0x1B);
+      CancelPaddleDialog(dialog);
       throw;
     }
     await WaitForPaddleConditionAsync(() =>
@@ -1204,9 +1198,7 @@ public sealed partial class MainWindow
     Exception? dialogError = null;
     try
     {
-      if (!PaddleSmokeNative.SetForegroundWindow(dialog) ||
-          PaddleSmokeNative.GetForegroundWindow() != dialog)
-        throw new InvalidOperationException("Save dialog could not take foreground.");
+      await FocusPaddleDialogAsync(dialog);
       // 焦点默认在文件名输入框；逐字符 UNICODE 注入完整隔离路径后回车。
       foreach (char c in target)
       {
@@ -1221,14 +1213,14 @@ public sealed partial class MainWindow
     catch (Exception error)
     {
       dialogError = error;
-      PaddleSmokeNative.SendKey(0x1B); // ESC：取消本次保存，不留半开的弹窗。
+      CancelPaddleDialog(dialog); // ESC：取消本次保存，不留半开的弹窗。
     }
     await Task.Delay(500);
     // 确认后残留/新出现的同属保存弹窗（如覆盖确认）视为异常：取消并失败。
     nint extra = FindPaddleSaveDialog();
     if (extra != 0)
     {
-      PaddleSmokeNative.SendKey(0x1B);
+      CancelPaddleDialog(extra);
       throw new InvalidOperationException(
         $"Unexpected save dialog after confirming {target}.", dialogError);
     }
@@ -1255,6 +1247,27 @@ public sealed partial class MainWindow
       bytes = length,
       saved_via = "ui-file-save-picker",
     };
+  }
+
+  private async Task FocusPaddleDialogAsync(nint dialog)
+  {
+    // A visible broker dialog can precede activation. Wait for its actual
+    // foreground state, retaining the same direct-owner boundary on every poll.
+    await WaitForPaddleConditionAsync(() =>
+    {
+      if (FindPaddleSaveDialog() != dialog)
+        throw new InvalidOperationException("Picker dialog ownership changed.");
+      if (PaddleSmokeNative.GetForegroundWindow() == dialog) return true;
+      PaddleSmokeNative.SetForegroundWindow(dialog);
+      return PaddleSmokeNative.GetForegroundWindow() == dialog;
+    }, TimeSpan.FromSeconds(10));
+  }
+
+  private void CancelPaddleDialog(nint dialog)
+  {
+    if (FindPaddleSaveDialog() == dialog &&
+        PaddleSmokeNative.GetForegroundWindow() == dialog)
+      PaddleSmokeNative.SendKey(0x1B);
   }
 
   private async Task<nint> WaitForPaddleSaveDialogAsync(TimeSpan timeout)
