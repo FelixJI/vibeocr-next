@@ -384,23 +384,27 @@ public sealed class VerticalScrollStitcherTests
   [Fact]
   public void AppendHonorsCancellationDuringCandidateScanAndKeepsState()
   {
-    // 周期帧 + 单行破坏：候选 s≡4 (mod 8) 需完整验证数千行才在破坏行失败，
-    // 扫描总量数 GB 字节比较，1ms 取消必然落在扫描循环内。
-    const int width = 128;
-    const int height = 16384;
-    var stitcher = new VerticalScrollStitcher(PeriodicFrame(width, height, 8, 0));
-    CapturedFrame next = PeriodicFrame(width, height, 8, 4);
-    const int corruptedRow = 6000;
-    next.Pixels.AsSpan(corruptedRow * width * 4, 4).Fill(0xEE);
+    CapturedFrame first = PeriodicFrame(Width, FrameHeight, 8, 0);
+    var stitcher = new VerticalScrollStitcher(first);
+    CapturedFrame next = PeriodicFrame(Width, FrameHeight, 8, 4);
+    using var source = new CancellationTokenSource();
+    int visited = 0;
 
-    using var source = new CancellationTokenSource(TimeSpan.FromMilliseconds(1));
-    Assert.Throws<OperationCanceledException>(() => stitcher.Append(next, source.Token));
+    // 已完成一个候选后同步取消；不假设线程池定时器会在某个毫秒内运行。
+    Assert.Throws<OperationCanceledException>(() => stitcher.AppendCore(next, source.Token, scroll =>
+    {
+      visited = scroll;
+      if (scroll == 2) source.Cancel();
+    }));
+    Assert.Equal(2, visited);
     Assert.Equal(1, stitcher.FrameCount);
-    Assert.Equal(height, stitcher.Height);
+    Assert.Equal(FrameHeight, stitcher.Height);
+    Assert.Equal(first.Pixels, stitcher.BuildFrame().Pixels);
 
-    // 未取消时同输入可完成扫描并正确判定歧义，证明取消只是提前退出而非绕过匹配。
+    // 同一输入不取消时仍完整判定歧义，取消没有改变已接受的图像或匹配语义。
     Assert.Equal(ScrollAppendStatus.Ambiguous, stitcher.Append(next, TestContext.Current.CancellationToken).Status);
     Assert.Equal(1, stitcher.FrameCount);
+    Assert.Equal(first.Pixels, stitcher.BuildFrame().Pixels);
   }
 
   [Fact]
