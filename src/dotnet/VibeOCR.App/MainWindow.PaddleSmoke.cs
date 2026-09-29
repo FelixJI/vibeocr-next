@@ -4,9 +4,6 @@ using Microsoft.UI.Windowing;
 using Microsoft.Web.WebView2.Core;
 using Windows.Storage;
 using Windows.Storage.Streams;
-using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
 using Windows.Graphics.Imaging;
@@ -36,6 +33,9 @@ public sealed partial class MainWindow
   // 钩子一并声明（见交付说明），本文件只引用不声明，避免未读告警。
   private string paddleSmokeStage = "starting";
   private string paddleSmokeOutcome = "failed";
+  // 本次合成输入已获取证据的兑底快照（job/outcomes/copies/exports 引用），
+  // 仅供失败 health 保留取证；成功路径不写入最终 JSON，合同不变。
+  private object? paddleSmokePartialEvidence;
 
   private static string? PaddleSmokeEnv(string name) =>
     Environment.GetEnvironmentVariable(name);
@@ -118,6 +118,32 @@ public sealed partial class MainWindow
     catch (Exception error)
     {
       paddleSmokeOutcome = "failed";
+      // 失败路径保全：尽力保留本次合成输入已获取的证据与 workbench 预览
+      // PNG；预览/写盘的任何异常都不掩盖原始失败（不新增报告框架）。
+      string? failurePreviewPath = null;
+      if (phase != "install")
+      {
+        try
+        {
+          string preview = Path.ChangeExtension(path, ".png");
+          if (!File.Exists(preview))
+          {
+            using (new FileStream(preview, FileMode.CreateNew)) { }
+            StorageFile previewFile = await StorageFile.GetFileFromPathAsync(preview);
+            using IRandomAccessStream previewStream =
+              await previewFile.OpenAsync(FileAccessMode.ReadWrite);
+            await WorkbenchWebView.CoreWebView2.CapturePreviewAsync(
+              CoreWebView2CapturePreviewImageFormat.Png, previewStream);
+            await previewStream.FlushAsync();
+          }
+          failurePreviewPath = preview;
+        }
+        catch
+        {
+          // 预览保全失败不掩盖原失败，也不删除现场文件。
+          failurePreviewPath = null;
+        }
+      }
       File.WriteAllText(path, JsonSerializer.Serialize(new
       {
         schema_version = 1,
@@ -126,6 +152,9 @@ public sealed partial class MainWindow
         stage = paddleSmokeStage,
         mode = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_MODE"),
         error = error.ToString(),
+        // 已获取的原始 job/outcomes/clipboard/capture（若任何）。
+        partial_evidence = paddleSmokePartialEvidence,
+        preview_path = failurePreviewPath,
       }));
     }
     finally
@@ -713,6 +742,9 @@ public sealed partial class MainWindow
         // broker JSON 随 App 退出被清理，证据落 health 文件供核对上游结构。
         outcomes = observed.Outcomes,
       };
+      // 失败兑底快照：后续 UI 验证/导出异常时，已获取的 job/outcomes 不
+      // 随顶层 catch 只留 error 字符串而丢失；成功路径 health 合同不变。
+      paddleSmokePartialEvidence = new { job = jobEvidence, capture };
     }
 
     // ---- 公共 UI 结果链：token 命中、结构化预览、真实按钮复制/导出 ----
@@ -750,12 +782,16 @@ public sealed partial class MainWindow
         blocksCount, System.Globalization.CultureInfo.InvariantCulture);
       await AssertPaddleStructureEvidenceAsync(mode, ui);
       ui["copies"] = await ClickPaddleCopyButtonsAsync(tokens);
+      // 引用可变 ui 的兑底快照：后续导出失败时 copies 与已完成 exports
+      // 仍在失败 health 的 partial_evidence 中。
+      paddleSmokePartialEvidence = new { job = jobEvidence, capture, ui };
       var exports = new List<object?>();
+      // 先挂引用再逐项导出：中途失败时已完成项保留，成功值不变。
+      ui["exports"] = exports;
       foreach (string label in exportButtons)
       {
         exports.Add(await RunPaddleUiExportAsync(label));
       }
-      ui["exports"] = exports;
     }
 
     // 提交被目录/环境显式拒绝（无 job）= blocked；真实 job 失败 = failed。
@@ -1017,7 +1053,7 @@ public sealed partial class MainWindow
     {
       "导出 Markdown" or "导出全部 Markdown" => "markdown",
       "导出 Word" or "导出全部 Word" => "docx",
-      "导出 XLSX" or "导出全部 Excel" => "xlsx",
+      "导出 Excel" or "导出全部 Excel" => "xlsx",
       _ => throw new InvalidOperationException($"Unexpected batch export label: {buttonLabel}"),
     };
     string publicLabel = format switch
@@ -1114,10 +1150,10 @@ public sealed partial class MainWindow
   }
 
   /// <summary>
-  /// 真实公共 UI 导出：点击导出按钮后只操作“同进程且被主窗口 owned”的
-  /// FileSavePicker（#32770）；归属不明立即停止。键盘输入隔离根内固定新
-  /// 文件名并回车确认；确认后再出现意外弹窗按 ESC 取消并记失败。不新增
-  /// 生产任意路径入口。
+  /// 真实公共 UI 导出：点击导出按钮后只操作“被本实例主窗口直接 owned”
+  /// 的 FileSavePicker（#32770，WinRT broker 独立进程承载）；归属不明立
+  /// 即停止。键盘输入隔离根内固定新文件名并回车确认；确认后再出现意外
+  /// 弹窗按 ESC 取消并记失败。不新增生产任意路径入口。
   /// </summary>
   private async Task<object> RunPaddleUiExportAsync(string buttonLabel)
   {
@@ -1131,7 +1167,7 @@ public sealed partial class MainWindow
     {
       "导出 Markdown" => ".md",
       "导出 Word" => ".docx",
-      "导出 XLSX" => ".xlsx",
+      "导出 Excel" => ".xlsx",
       _ => throw new InvalidOperationException($"Unknown export label: {buttonLabel}"),
     };
     string fileName = $"paddle-{mode}-ui-export{extension}";
@@ -1142,7 +1178,7 @@ public sealed partial class MainWindow
     RecordPaddleSmokeStage($"ui export {buttonLabel}");
     await ClickManagedSmokeButtonAsync(buttonLabel);
     nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
-    string? dialogError = null;
+    Exception? dialogError = null;
     try
     {
       if (!PaddleSmokeNative.SetForegroundWindow(dialog) ||
@@ -1161,7 +1197,7 @@ public sealed partial class MainWindow
     }
     catch (Exception error)
     {
-      dialogError = error.Message;
+      dialogError = error;
       PaddleSmokeNative.SendKey(0x1B); // ESC：取消本次保存，不留半开的弹窗。
     }
     await Task.Delay(500);
@@ -1170,10 +1206,11 @@ public sealed partial class MainWindow
     if (extra != 0)
     {
       PaddleSmokeNative.SendKey(0x1B);
-      throw new InvalidOperationException($"Unexpected save dialog after confirming {target}.");
+      throw new InvalidOperationException(
+        $"Unexpected save dialog after confirming {target}.", dialogError);
     }
     if (dialogError is not null)
-      throw new InvalidOperationException($"UI save failed: {dialogError}");
+      throw new InvalidOperationException($"UI save failed: {dialogError.Message}", dialogError);
     long length = 0;
     try
     {
@@ -1315,11 +1352,11 @@ public sealed partial class MainWindow
   // ---------------- 合成 fixture 选区器（不读取真实桌面） ----------------
 
   /// <summary>
-  /// 只渲染并捕获本选区器自己创建的置顶窗口客户区：fixture PNG 经
-  /// BitmapDecoder 解码 BGRA8，按实际工作区/客户区只缩不放适配成
-  /// 32bpp DIB，用原生 STATIC SS_BITMAP 子窗口绘制（XAML Image 组合在
-  /// 隔离候选中两轮实机均呈全白，见 #110），再由真实屏幕捕获服务采集
-  /// 像素后清理窗口与 GDI 句柄。
+  /// 只渲染并捕获本选区器自建的纯 Win32 顶层位图窗口：fixture PNG 经
+  /// BitmapDecoder 解码 BGRA8，按实际工作区只缩不放适配成 32bpp DIB，
+  /// 用 WS_EX_TOPMOST|WS_EX_TOOLWINDOW 的 WS_POPUP STATIC SS_BITMAP 窗口
+  /// 直接 GDI 绘制（XAML/WinUI 宿主组合实机不稳定呈全白，含原生子窗，
+  /// 见 #110），验证捕获区顶层归属后由真实屏幕捕获服务采集像素。
   /// </summary>
   internal sealed class SyntheticFixtureRegionPicker : IScreenRegionPicker
   {
@@ -1335,61 +1372,33 @@ public sealed partial class MainWindow
       if (string.IsNullOrWhiteSpace(fixture) || !File.Exists(fixture))
         throw new FileNotFoundException("Paddle smoke fixture is missing.", fixture);
       (int sourceWidth, int sourceHeight) = PngPixelSize(fixture);
-      // #110 实机：XAML Image + BitmapImage（fileUri 与 SetSourceAsync 两轮）
-      // 在隔离候选中组合呈现全白；改用已验证的原生 GDI 路径——
-      // BitmapDecoder 解码 BGRA8 → 只缩不放适配的 32bpp DIB → STATIC
-      // SS_BITMAP 子窗口绘制（同 SyntheticScreenRegionPicker），宿主仍是
-      // 本选区器创建的置顶窗口，捕获只覆盖该子窗口客户区。
-      var window = new Window
-      {
-        Content = new Grid
-        {
-          Background = new SolidColorBrush(Microsoft.UI.Colors.White),
-        },
-      };
-      nint child = 0;
+      LastCapture = null;
+      // #110 实机：XAML Image 两轮全白；12:36 重跑证明即使原生 STATIC
+      // 子窗放进 WinUI/XAML 宿主组合仍可能整屏纯白（同 fixture 首跑成功、
+      // 重跑 nonWhite=0）。改为本选区器自建的纯 Win32 顶层位图窗口（无
+      // 任何 XAML/WinUI 宿主）：BitmapDecoder→只缩不放 DIB→WS_POPUP
+      // STATIC SS_BITMAP 直接 GDI 绘制，捕获只覆盖自身客户区。
+      nint windowHandle = 0;
       nint bitmap = 0;
-      WindowMessageService? messages = null;
-      nint? OnWindowMessage(WindowMessage message)
-      {
-        // STATIC 背景固定纯白，避免默认灰底混入像素证据。
-        if (message.Id != 0x0138 || message.LParam != child)
-          return null;
-        nint deviceContext = (nint)message.WParam;
-        PaddleSmokeNative.SetBkColor(deviceContext, 0x00FFFFFF);
-        PaddleSmokeNative.SetTextColor(deviceContext, 0);
-        return PaddleSmokeNative.GetStockObject(0);
-      }
       try
       {
         cancellationToken.ThrowIfCancellationRequested();
-        ((OverlappedPresenter)window.AppWindow.Presenter).IsAlwaysOnTop = true;
-        window.Activate();
-        nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
-        uint dpi = PaddleSmokeNative.GetDpiForWindow(handle);
-        double scale = dpi / 96.0;
+        // WS_POPUP 顶层 STATIC：无标题栏/边框，客户区即窗口；位图 1:1
+        // 物理像素，不做 DPI 放大。
+        windowHandle = PaddleSmokeNative.CreateWindowExW(
+          0x00000008u | 0x00000080u, "STATIC", null,
+          0x80000000u | 0x0000000Eu, 0, 0, 1, 1, nint.Zero, 0, 0, 0);
+        if (windowHandle == 0)
+          throw new InvalidOperationException(
+            $"Synthetic bitmap window creation failed: {Marshal.GetLastPInvokeError()}.");
+        uint dpi = PaddleSmokeNative.GetDpiForWindow(windowHandle);
         RectInt32 work = DisplayArea.GetFromWindowId(
-          window.AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
-        // STATIC 对位图不做 DPI 放大：外框先按 fixture 原始像素 1:1 预估
-        // 并钳制在工作区内（预留标题栏/边框余量），最终显示尺寸再按真实
-        // 客户区只缩不放，保证 fixture 完整可见且不超出工作区。
-        int chromeWidth = (int)Math.Ceiling(32 * scale) * 2;
-        int chromeHeight = (int)Math.Ceiling(96 * scale);
-        int outerWidth = Math.Max(160,
-          Math.Min(sourceWidth + chromeWidth, work.Width - 60));
-        int outerHeight = Math.Max(160,
-          Math.Min(sourceHeight + chromeHeight, work.Height - 60));
-        window.AppWindow.MoveAndResize(new RectInt32(
-          work.X + 30, work.Y + 30, outerWidth, outerHeight));
-        await Task.Delay(200, cancellationToken);
-        if (!PaddleSmokeNative.GetClientRect(handle, out PaddleSmokeNative.Rect client))
-          throw new InvalidOperationException("Fixture window client bounds are unavailable.");
-        int clientWidth = client.Right - client.Left;
-        int clientHeight = client.Bottom - client.Top;
-        if (clientWidth <= 0 || clientHeight <= 0)
-          throw new InvalidOperationException("Fixture window client area is empty.");
+          Microsoft.UI.Win32Interop.GetWindowIdFromWindow(windowHandle),
+          DisplayAreaFallback.Nearest).WorkArea;
+        // 按实际工作区只缩不放（留边距），fixture 完整可见且不超出屏幕。
         double fitScale = Math.Min(1.0, Math.Min(
-          clientWidth / (double)sourceWidth, clientHeight / (double)sourceHeight));
+          Math.Max(160, work.Width - 60) / (double)sourceWidth,
+          Math.Max(160, work.Height - 60) / (double)sourceHeight));
         int displayWidth = Math.Max(1, (int)Math.Round(sourceWidth * fitScale));
         int displayHeight = Math.Max(1, (int)Math.Round(sourceHeight * fitScale));
 
@@ -1425,32 +1434,37 @@ public sealed partial class MainWindow
         if (bitmap == 0)
           throw new InvalidOperationException(
             $"Fixture DIB creation failed: {Marshal.GetLastPInvokeError()}.");
-        messages = new WindowMessageService(handle);
-        messages.MessageHandled += OnWindowMessage;
-        // SS_BITMAP 子窗口精确等于位图尺寸并在客户区居中，其客户区像素即
-        // fixture 本身；窗口其余区域为白色背景，不读取真实桌面。
-        child = PaddleSmokeNative.CreateWindowExW(0, "STATIC", null,
-          0x40000000u | 0x10000000u | 0x0000000Eu | 0x00000200u,
-          (clientWidth - displayWidth) / 2, (clientHeight - displayHeight) / 2,
-          displayWidth, displayHeight, handle, 0, 0, 0);
-        if (child == 0)
+        if (PaddleSmokeNative.SendMessageW(windowHandle, 0x0172, 0, bitmap) != 0)
+          throw new InvalidOperationException("Synthetic bitmap window rejected the DIB.");
+        // 显示 + 同步重绘：顶层窗口大小即位图大小，置于工作区内偏移处。
+        if (!PaddleSmokeNative.SetWindowPos(windowHandle, -1,
+              work.X + 30, work.Y + 30, displayWidth, displayHeight, 0x0040u))
           throw new InvalidOperationException(
-            $"Fixture bitmap control creation failed: {Marshal.GetLastPInvokeError()}.");
-        if (PaddleSmokeNative.SendMessageW(child, 0x0172, 0, bitmap) != 0)
-          throw new InvalidOperationException("Fixture bitmap control rejected the DIB.");
-        if (!PaddleSmokeNative.UpdateWindow(child) &&
-            !PaddleSmokeNative.IsWindowVisible(child))
-          throw new InvalidOperationException("Fixture bitmap control is not visible.");
-        if (!PaddleSmokeNative.GetClientRect(child, out PaddleSmokeNative.Rect childClient))
+            $"Synthetic bitmap window positioning failed: {Marshal.GetLastPInvokeError()}.");
+        if (!PaddleSmokeNative.UpdateWindow(windowHandle) &&
+            !PaddleSmokeNative.IsWindowVisible(windowHandle))
+          throw new InvalidOperationException("Synthetic bitmap window is not visible.");
+        if (!PaddleSmokeNative.GetClientRect(windowHandle, out PaddleSmokeNative.Rect client))
           throw new InvalidOperationException(
-            "Fixture bitmap control bounds are unavailable.");
+            "Synthetic bitmap window bounds are unavailable.");
         PaddleSmokeNative.Point origin = new();
-        if (!PaddleSmokeNative.ClientToScreen(child, ref origin))
+        if (!PaddleSmokeNative.ClientToScreen(windowHandle, ref origin))
           throw new InvalidOperationException(
-            "Fixture bitmap control origin is unavailable.");
+            "Synthetic bitmap window origin is unavailable.");
         var bounds = new PhysicalRectangle(
           origin.X, origin.Y,
-          childClient.Right - childClient.Left, childClient.Bottom - childClient.Top);
+          client.Right - client.Left, client.Bottom - client.Top);
+        await Task.Delay(200, cancellationToken);
+        // 捕获区顶层归属必须是自身窗口：被 XAML/其它窗口覆盖即 fail closed。
+        PaddleSmokeNative.Point center = new()
+        {
+          X = bounds.X + bounds.Width / 2,
+          Y = bounds.Y + bounds.Height / 2,
+        };
+        if (PaddleSmokeNative.WindowFromPoint(center) != windowHandle)
+          throw new InvalidOperationException(
+            $"Synthetic bitmap window is not the top-level window at its center " +
+            $"(dpi={dpi}, fitScale={fitScale:0.###}, bounds={bounds.Width}x{bounds.Height}).");
 
         ScreenRegionSelection? selection = null;
         await using (var capture = new ScreenCaptureService(Guid.NewGuid()))
@@ -1477,10 +1491,18 @@ public sealed partial class MainWindow
               break;
             }
             if (attempt == 59)
+            {
+              PaddleSmokeNative.Point retryCenter = new()
+              {
+                X = bounds.X + bounds.Width / 2,
+                Y = bounds.Y + bounds.Height / 2,
+              };
+              nint hit = PaddleSmokeNative.WindowFromPoint(retryCenter);
               throw new InvalidOperationException(
                 $"Fixture pixels did not render on screen: nonWhite={nonWhite}, " +
                 $"white={white}, bounds={bounds.Width}x{bounds.Height}, dpi={dpi}, " +
-                $"fitScale={fitScale:0.###}.");
+                $"fitScale={fitScale:0.###}, hitOwnWindow={hit == windowHandle}.");
+            }
             await Task.Delay(250, cancellationToken);
           }
         }
@@ -1488,16 +1510,10 @@ public sealed partial class MainWindow
       }
       finally
       {
-        if (messages is not null)
-        {
-          messages.MessageHandled -= OnWindowMessage;
-          messages.Dispose();
-        }
-        if (child != 0)
-          PaddleSmokeNative.DestroyWindow(child);
+        if (windowHandle != 0)
+          PaddleSmokeNative.DestroyWindow(windowHandle);
         if (bitmap != 0)
           PaddleSmokeNative.DeleteObject(bitmap);
-        window.Close();
       }
     }
 
@@ -1601,6 +1617,14 @@ public sealed partial class MainWindow
 
     [DllImport("gdi32.dll")]
     public static extern nint GetStockObject(int index);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetWindowPos(
+      nint window, nint insertAfter, int x, int y, int width, int height, uint flags);
+
+    [DllImport("user32.dll")]
+    public static extern nint WindowFromPoint(Point point);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct BitmapInfoHeader

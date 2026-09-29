@@ -145,7 +145,7 @@ $modeSpec = @{
     'paddle_table' = @{
         Fixture = 'table_merged_zh_en.png'; Pipeline = 'TABLE_RECOGNITION'
         Option = 'use_table_orientation_classify'; Value = 'false'; Kind = 'bool'
-        Tokens = 'GOAL103|1120'; Export = '导出 XLSX|导出 Markdown'
+        Tokens = 'GOAL103|1120'; Export = '导出 Excel|导出 Markdown'
     }
     'paddle_formula' = @{
         Fixture = 'formulas_multi.png'; Pipeline = 'FORMULA_RECOGNITION'
@@ -155,7 +155,7 @@ $modeSpec = @{
     'paddle_structure' = @{
         Fixture = 'document_mixed.png'; Pipeline = 'PP-StructureV3'
         Option = 'use_seal_recognition'; Value = 'true'; Kind = 'bool'
-        Tokens = 'GOAL103|1120'; Export = '导出 Markdown|导出 XLSX'
+        Tokens = 'GOAL103|1120'; Export = '导出 Markdown|导出 Excel'
     }
     'paddle_document_vl' = @{
         Fixture = 'document_mixed.png'; Pipeline = 'PaddleOCR-VL'
