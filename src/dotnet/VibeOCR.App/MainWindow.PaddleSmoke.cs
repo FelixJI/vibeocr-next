@@ -1303,8 +1303,11 @@ public sealed partial class MainWindow
         throw new InvalidOperationException("Picker confirmation ownership changed.");
       return PaddleSmokeNative.IsWindowEnabled(confirm);
     }, TimeSpan.FromSeconds(10));
-    // WM_COMMAND / IDOK / BN_CLICKED, with the real button handle.
-    if (!PaddleSmokeNative.PostMessageW(dialog, 0x0111, 1, confirm))
+    // FolderPicker requires the button click path; file pickers accept IDOK.
+    bool confirmed = isFolder
+      ? PaddleSmokeNative.Click(confirm, 0x00F5, 0, 0, 2, 1000, out _) != 0
+      : PaddleSmokeNative.PostMessageW(dialog, 0x0111, 1, confirm);
+    if (!confirmed)
       throw new InvalidOperationException("Picker confirmation failed.");
     await WaitForPaddleConditionAsync(
       () => !PaddleSmokeNative.IsWindowVisible(dialog), TimeSpan.FromSeconds(30));
@@ -1775,6 +1778,10 @@ public sealed partial class MainWindow
     [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", CharSet = CharSet.Unicode)]
     public static extern nint ReadText(nint window, uint message, nint wParam,
       System.Text.StringBuilder text, uint flags, uint timeout, out nint result);
+
+    [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW")]
+    public static extern nint Click(nint window, uint message, nint wParam,
+      nint lParam, uint flags, uint timeout, out nint result);
 
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool PostMessageW(nint window, uint message, nint wParam, nint lParam);
