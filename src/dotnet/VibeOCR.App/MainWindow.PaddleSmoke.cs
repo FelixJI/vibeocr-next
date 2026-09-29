@@ -1298,6 +1298,11 @@ public sealed partial class MainWindow
       string? fixture = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_FIXTURE");
       if (string.IsNullOrWhiteSpace(fixture) || !File.Exists(fixture))
         throw new FileNotFoundException("Paddle smoke fixture is missing.", fixture);
+      StorageFile fixtureFile = await StorageFile.GetFileFromPathAsync(fixture);
+      using IRandomAccessStream fixtureStream = await fixtureFile.OpenReadAsync();
+      var bitmap = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage();
+      await bitmap.SetSourceAsync(fixtureStream);
+      cancellationToken.ThrowIfCancellationRequested();
       var window = new Window
       {
         Content = new Grid
@@ -1307,7 +1312,7 @@ public sealed partial class MainWindow
           {
             new Image
             {
-              Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(fixture)),
+              Source = bitmap,
               // Uniform：按工作区适配等比缩放（fit=1 时仍为像素 1:1）。
               Stretch = Stretch.Uniform,
               HorizontalAlignment = HorizontalAlignment.Center,
