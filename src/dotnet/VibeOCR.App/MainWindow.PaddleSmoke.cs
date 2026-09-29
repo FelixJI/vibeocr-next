@@ -479,11 +479,7 @@ public sealed partial class MainWindow
     if (mode == "paddle_table" && !copies.ContainsKey("复制表格 HTML / TSV"))
       throw new InvalidOperationException("Batch table copy control is unavailable.");
     var exports = new List<object>();
-    if (PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_EXPORT_BUTTONS") is { Length: > 0 } labels)
-      foreach (string label in labels.Split('|', StringSplitOptions.RemoveEmptyEntries))
-        exports.Add(await RunPaddleBatchExportAsync(label));
-    paddleSmokeOutcome = "passed";
-    return new
+    var evidence = new
     {
       input_kind = "batch", mode, fixture_paths = new[] { fixture, second },
       option = new { name = optionName, value = optionValue },
@@ -492,6 +488,12 @@ public sealed partial class MainWindow
         terminal.FailedCount, terminal.Items, dom_text = queueText },
       structured_inspected = inspected, copies, exports,
     };
+    paddleSmokePartialEvidence = evidence;
+    if (PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_EXPORT_BUTTONS") is { Length: > 0 } labels)
+      foreach (string label in labels.Split('|', StringSplitOptions.RemoveEmptyEntries))
+        exports.Add(await RunPaddleBatchExportAsync(label));
+    paddleSmokeOutcome = "passed";
+    return evidence;
   }
 
   private async Task<object> RunPaddlePdfInputAsync(
@@ -539,6 +541,12 @@ public sealed partial class MainWindow
       optionName, optionValue, before, 1);
     bool inspected = await InspectPaddlePdfStructureAsync(mode);
     var copies = await ClickPaddleCopyButtonsAsync([]);
+    paddleSmokePartialEvidence = new
+    {
+      input_kind = "pdf", mode, job,
+      pdf = new { opened.PageCount, terminal.SelectedPages, terminal.Pages },
+      structured_inspected = inspected, copies,
+    };
     object saved = await RunPaddlePdfSaveAsync();
     paddleSmokeOutcome = "passed";
     return new
@@ -787,9 +795,8 @@ public sealed partial class MainWindow
       ui["structured_table_present"] = await PaddleSmokeDomBoolAsync(
         "!!document.querySelector('.structured-result .structured-table-scroll table')");
       ui["structured_merged_cell_present"] = await PaddleSmokeDomBoolAsync(
-        "!!document.querySelector('.structured-result table td[rowspan], " +
-        ".structured-result table td[colspan], .structured-result table th[rowspan], " +
-        ".structured-result table th[colspan]')");
+        "Array.from(document.querySelectorAll('.structured-result table td, " +
+        ".structured-result table th')).some(cell => cell.rowSpan > 1 || cell.colSpan > 1)");
       ui["formula_latex_present"] = await PaddleSmokeDomBoolAsync(
         "!!document.querySelector('.structured-formula code') && " +
         "(document.querySelector('.structured-formula code')?.textContent ?? '').length > 0");
@@ -1120,7 +1127,7 @@ public sealed partial class MainWindow
     nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
     try
     {
-      await CompletePaddlePickerAsync(dialog, exportDir);
+      await CompletePaddlePickerAsync(dialog, exportDir, isFolder: true);
     }
     catch
     {
@@ -1255,13 +1262,13 @@ public sealed partial class MainWindow
     };
   }
 
-  private async Task CompletePaddlePickerAsync(nint dialog, string path)
+  private async Task CompletePaddlePickerAsync(nint dialog, string path, bool isFolder = false)
   {
     nint edit = 0;
     nint confirm = 0;
     // Shell picker focus is local to its broker thread; Windows may keep a
     // different app foreground. Address only our owned native controls instead
-    // of sending global keyboard input. 1001/1148 are observed filename edits.
+    // of sending global keyboard input. Observed edits: file 1001/1148, folder 1152.
     await WaitForPaddleConditionAsync(() =>
     {
       if (FindPaddleSaveDialog() != dialog)
@@ -1273,7 +1280,7 @@ public sealed partial class MainWindow
         if (!PaddleSmokeNative.IsWindowVisible(child)) return true;
         int id = PaddleSmokeNative.GetDlgCtrlID(child);
         string kind = PaddleSmokeNative.GetWindowClassName(child);
-        if (kind == "Edit" && id is 1001 or 1148) edits.Add(child);
+        if (kind == "Edit" && (isFolder ? id == 1152 : id is 1001 or 1148)) edits.Add(child);
         if (kind == "Button" && id == 1) confirm = child;
         return true;
       }, 0);
