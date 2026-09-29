@@ -361,23 +361,43 @@ def draw_document_mixed(out: Path) -> dict[str, object]:
         draw.text((120, 240 + index * 90), line, fill="black", font=body)
 
     grid = _table_grid()
+    table_font = load_font(36)
     top = 560
     for row, cells in enumerate(grid[:4]):
         y = top + row * 110
         for col, text in enumerate(cells):
             if not text:
                 continue
-            draw.text((140 + col * 360, y + 20), text, fill="black", font=body)
+            draw.text((140 + col * 360, y + 20), text, fill="black", font=table_font)
     for row in range(5):
         y = top + row * 110
-        draw.line([(120, y), (1560, y)], fill="black", width=3)
+        draw.line([(480 if row == 3 else 120, y), (1560, y)], fill="black", width=3)
     for gx in (120, 480, 840, 1200, 1560):
-        draw.line([(gx, top), (gx, top + 4 * 110)], fill="black", width=3)
+        draw.line(
+            [(gx, top if gx in (120, 1560) else top + 110), (gx, top + 4 * 110)],
+            fill="black",
+            width=3,
+        )
 
-    y = 1180
-    draw.text((140, y - 20), "a + b", fill="black", font=body)
-    draw.line([(140, y + 60), (380, y + 60)], fill="black", width=4)
-    draw.text((160, y + 80), "c − d", fill="black", font=body)
+    # 正常居中的数学字形与紧邻分数线，避免把宽松的正文排版当作公式。
+    math_font = load_math_font(80, italic=True)
+    center, axis_y = 850, 1220
+    numerator, denominator = "a + b", "c − d"
+    width = max(math_font.getlength(numerator), math_font.getlength(denominator))
+    for text, baseline in ((numerator, axis_y - 15), (denominator, axis_y + 95)):
+        draw.text(
+            (center - math_font.getlength(text) / 2, baseline),
+            text,
+            fill="black",
+            font=math_font,
+            anchor="ls",
+        )
+    draw.line(
+        [(center - width / 2, axis_y), (center + width / 2, axis_y)],
+        fill="black",
+        width=5,
+    )
+    draw.text((1480, axis_y - 20), "(1)", fill="black", font=body)
 
     _draw_chart(draw, 120, 1420)
     _draw_seal(draw, 1200, 1500)

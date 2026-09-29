@@ -786,7 +786,7 @@ public sealed partial class MainWindow
       ui["structured_merged_cell_present"] = await PaddleSmokeDomBoolAsync(
         "!!document.querySelector('.structured-result table td[rowspan], " +
         ".structured-result table td[colspan], .structured-result table th[rowspan], " +
-        ".structured-result table th[colspan])");
+        ".structured-result table th[colspan]')");
       ui["formula_latex_present"] = await PaddleSmokeDomBoolAsync(
         "!!document.querySelector('.structured-formula code') && " +
         "(document.querySelector('.structured-formula code')?.textContent ?? '').length > 0");
