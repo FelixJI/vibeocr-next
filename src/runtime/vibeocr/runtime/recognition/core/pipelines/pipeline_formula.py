@@ -109,9 +109,19 @@ def _recognize_formula(
     ``dt_polys``；``doc_preprocessor_res`` 含 ``angle``/``output_img``。
     无置信度字段——score 置 None，不伪造。
     """
+    from enum import Enum
+
     from vibeocr.runtime.recognition.models.ocr_result import OCRResult, TextBlock
 
-    pipeline_name = options.pipeline
+    # 生产分发（OCRService.recognize_batch）把携带 OCRPipeline 枚举的
+    # OCROptions 原样传给 spec.recognize；直接透传枚举会让
+    # registry.has(枚举) 判否并落入 legacy 创建路径（不支持公式管线）。
+    # 与 _recognize_table 相同：按 Enum.value 规范化为 wire 字符串。
+    pipeline_name = (
+        options.pipeline.value
+        if isinstance(options.pipeline, Enum)
+        else options.pipeline
+    )
     pipeline = service.get_or_create_pipeline(pipeline_name, options=options)
 
     predict_kwargs: dict[str, Any] = {

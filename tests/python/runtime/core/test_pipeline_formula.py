@@ -238,6 +238,62 @@ def test_recognize_formula_predict_only_orientation_and_unwarping():
     assert passed is opts
 
 
+def test_recognize_formula_normalizes_enum_pipeline_from_ocr_options():
+    """生产 OCROptions 枚举分发回归（真实 07b 公式模式故障）。
+
+    OCRService.recognize_batch 以 ``pipeline.value`` 查注册表，随后把携带
+    ``OCRPipeline.FORMULA_RECOGNITION`` 枚举的 OCROptions 原样传给
+    ``spec.recognize``。旧实现把枚举直接交给 get_or_create_pipeline：
+    registry.has(枚举) 判否，落入 legacy 创建路径后抛
+    ``ValueError: 不支持的管道类型``。修复后须按 Enum.value 规范化为
+    wire 字符串（与 _recognize_table 语义一致）。
+    服务桩复刻真实注册表路由判定，不 mock 待检验的管道名。
+    """
+    from vibeocr.runtime.recognition.core.pipelines import get_registry
+    from vibeocr.runtime.recognition.models.ocr_options import OCROptions
+    from vibeocr.runtime.recognition.pipeline_contracts import OCRPipeline
+
+    class _RegistryRoutingService:
+        """复刻 get_or_create_pipeline 的注册表命中/legacy 失败语义。"""
+
+        def __init__(self, pipeline):
+            self._pipeline = pipeline
+            self.requests: list[tuple[object, object]] = []
+
+        def get_or_create_pipeline(self, name, options=None):
+            self.requests.append((name, options))
+            if not get_registry().has(name):
+                raise ValueError(f"不支持的管道类型: {name}")
+            return self._pipeline
+
+    res = _formula_result([(r"E = mc^2", [1.0, 2.0, 3.0, 4.0])])
+    service = _RegistryRoutingService(_FakePipeline([res]))
+    options = OCROptions(
+        pipeline=OCRPipeline.FORMULA_RECOGNITION,
+        formula_recognition_model_name="PP-FormulaNet_plus-S",
+        formula_recognition_batch_size=4,
+    )
+    result = _recognize_formula(service, image=None, options=options)
+
+    # 管道名必须是 wire 字符串：枚举在旧实现上触发注册表 miss → ValueError
+    name, passed = service.requests[0]
+    assert isinstance(name, str)
+    assert name == "FORMULA_RECOGNITION"
+    # 生产 options 原样透传缓存层（构造签名可见非默认模型/批量）
+    assert passed is options
+    ctor_kwargs = _formula_constructor_kwargs(options)
+    assert ctor_kwargs["formula_recognition_model_name"] == "PP-FormulaNet_plus-S"
+    assert ctor_kwargs["formula_recognition_batch_size"] == 4
+    # 非默认模型/批量是构造参数，不得混入 predict
+    predict_kwargs = service._pipeline.predict_calls[0]
+    assert set(predict_kwargs) == {
+        "use_doc_orientation_classify",
+        "use_doc_unwarping",
+    }
+    assert result.pipeline_type == "FORMULA_RECOGNITION"
+    assert result.text_blocks[0].text == r"E = mc^2"
+
+
 def test_recognize_formula_with_preprocessed_output_img():
     """doc_preprocessor_res 含 output_img 时提取预处理图与角度。"""
     res = _formula_result([(r"x = 1", None)], angle=90)
