@@ -78,7 +78,7 @@ def _table_grid() -> list[list[str]]:
         ["Paddle 表格验收 GOAL103", "", "", ""],
         ["项目 Item", "数量 Qty", "单价 Price", "备注 Note"],
         ["合并单元 Merged", "3", "12.50", "English mix"],
-        ["", "7", "0.99", "中文备注"],
+        ["", "7", "0.99", "中文备注\n第二行"],
         ["合计 Total", "10", "45.47", "END 1120"],
     ]
 
@@ -91,7 +91,7 @@ def draw_table(out: Path, wireless: bool) -> dict[str, object]:
     header_font = load_font(54)
     grid = _table_grid()
     margin_x, top, row_height = 100, 80, 160
-    columns = [560, 820, 1080, 1400]
+    columns = [680, 1020, 1380, 1780]
     for row, cells in enumerate(grid):
         y = top + row * row_height
         for col, text in enumerate(cells):
@@ -101,21 +101,21 @@ def draw_table(out: Path, wireless: bool) -> dict[str, object]:
             # 表头整行合并：按整行宽度居中绘制。
             if row == 0:
                 draw.text(
-                    (margin_x + 560, y + 40), text, fill="black", font=header_font
+                    (margin_x + 440, y + 40), text, fill="black", font=header_font
                 )
                 break
-            draw.text((x + 16, y + 48), text, fill="black", font=font)
+            draw.text((x + 16, y + 28), text, fill="black", font=font)
     if not wireless:
         line = {"fill": "black", "width": 4}
         for row in range(len(grid) + 1):
             y = top + row * row_height
-            draw.line([(margin_x, y), (columns[-1] + 380, y)], **line)
-        for x in [margin_x, *columns, columns[-1] + 380]:
+            draw.line([(margin_x, y), (columns[-1], y)], **line)
+        for x in [margin_x, *columns]:
             draw.line([(x, top), (x, top + len(grid) * row_height)], **line)
         # 合并单元格：只擦除被合并跨越的内部线段（细矩形对准线条本身，
-        # 不碰单元格内容）：表头跨 4 列 → 擦除行内 4 条竖线；首列第 3-4
-        # 行跨 2 行 → 擦除中间横线段与该列右边界竖线段。
-        for x in columns:
+        # 不碰单元格内容）：表头跨 4 列 → 擦除行内 3 条竖线；首列第 3-4
+        # 行跨 2 行 → 仅擦除中间横线段，保留列边界。
+        for x in columns[:-1]:
             draw.rectangle((x - 3, top + 3, x + 3, top + row_height - 3), fill="white")
         draw.rectangle(
             (
@@ -123,15 +123,6 @@ def draw_table(out: Path, wireless: bool) -> dict[str, object]:
                 top + 3 * row_height - 3,
                 columns[0] - 3,
                 top + 3 * row_height + 3,
-            ),
-            fill="white",
-        )
-        draw.rectangle(
-            (
-                columns[0] - 3,
-                top + 2 * row_height + 3,
-                columns[0] + 3,
-                top + 4 * row_height - 3,
             ),
             fill="white",
         )
