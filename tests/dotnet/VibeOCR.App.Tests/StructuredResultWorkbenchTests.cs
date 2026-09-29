@@ -291,6 +291,8 @@ public sealed class StructuredResultWorkbenchTests
           new InvalidDataException("Result asset is not a bounded PNG.")),
         "asset-detached" => Task.FromException<byte[]>(
           new VibeOCR.App.Inference.InferenceClientNotAttachedException("not attached")),
+        "asset-timeout" => Task.FromException<byte[]>(new TaskCanceledException(
+          "HTTP request timed out", new TimeoutException(), CancellationToken.None)),
         _ => Task.FromResult(AssetPng),
       })
       {
@@ -300,6 +302,7 @@ public sealed class StructuredResultWorkbenchTests
           Block("asset-runtime"),
           Block("asset-invalid"),
           Block("asset-detached"),
+          Block("asset-timeout"),
           new
           {
             type = "image",
@@ -332,12 +335,12 @@ public sealed class StructuredResultWorkbenchTests
         Assert.IsType<BatchWorkbenchState>(Assert.Single(outcome.States)).Items!)
         .StructuredResult;
       Assert.NotNull(structured);
-      // 五次可取回尝试：四个故障 id + 一个成功 id；缺 asset id 不发起取回。
-      Assert.Equal(5, client.AssetFetches);
+      // 五个故障 id + 一个成功 id；缺 asset id 不发起取回。
+      Assert.Equal(6, client.AssetFetches);
 
       using JsonDocument document = await ReadStructuredJsonAsync(broker, structured!.Url);
       JsonElement root = document.RootElement;
-      foreach (int index in new[] { 0, 1, 2, 3 })
+      foreach (int index in new[] { 0, 1, 2, 3, 4 })
       {
         JsonElement image = root[index].GetProperty("image");
         Assert.False(image.GetProperty("available").GetBoolean());
@@ -345,10 +348,10 @@ public sealed class StructuredResultWorkbenchTests
         Assert.False(image.TryGetProperty("resource", out _), $"block {index} keeps a resource");
       }
       // 缺 asset id：wire 原样携带的不可信 resource 不得透传。
-      JsonElement unbound = root[4].GetProperty("image");
+      JsonElement unbound = root[5].GetProperty("image");
       Assert.False(unbound.TryGetProperty("resource", out _));
       // 取回成功：宿主权威 resource 覆盖 wire 副本。
-      JsonElement replaced = root[5].GetProperty("image");
+      JsonElement replaced = root[6].GetProperty("image");
       Assert.True(replaced.GetProperty("available").GetBoolean());
       string url = replaced.GetProperty("resource").GetProperty("url").GetString()!;
       var uri = new Uri(url);

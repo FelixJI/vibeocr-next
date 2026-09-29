@@ -2916,12 +2916,13 @@ public sealed class DesktopWorkbenchCommandHandler :
               byteLength = reference.ByteLength,
             });
           }
-          catch (OperationCanceledException) { throw; }
-          // 传输、图片校验或网关脱离失败仅影响该图；取消仍向上传播。
+          // HttpClient 超时按图片降级；调用者取消仍向上传播。
           catch (Exception error) when (error is IOException or
             ArgumentException or NotSupportedException or InferenceClientException or
             HttpRequestException or VibeOCR.Runtime.Client.RuntimeClientException or
-            InvalidDataException or InferenceClientNotAttachedException)
+            InvalidDataException or InferenceClientNotAttachedException ||
+            error is OperationCanceledException { InnerException: TimeoutException } &&
+            !cancellationToken.IsCancellationRequested)
           {
             asset["available"] = false;
             asset["reason"] = "结果图片已失效或无法读取";
