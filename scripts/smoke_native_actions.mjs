@@ -22,6 +22,13 @@ const hotkey = 'Ctrl+Alt+Shift+F10';
 const recognizeHotkey = 'Ctrl+Alt+Shift+F11';
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function taskbarState() {
+  const { stdout } = await execFileAsync('pwsh', ['-NoProfile', '-NonInteractive',
+    '-File', path.join(scriptDir, 'scroll_capture_fixture.ps1'), '-Action', 'taskbar-state'],
+  { timeout: 20000, windowsHide: true });
+  return Number(stdout.trim());
+}
+
 function option(name) {
   const index = process.argv.indexOf(name);
   assert(index > 0 && index + 1 < process.argv.length,
@@ -406,8 +413,18 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence) {
   // The production UIA query has a 200 ms budget. One bounded settle period
   // lets the real overlay consume it; no retry or synthetic command injection.
   await delay(350);
-  await native('tab', { AppPid: app.child.pid });
-  await native('tab', { AppPid: app.child.pid });
+  assert.equal(await taskbarState(), evidence.taskbarStateBefore,
+    'Screenshot selection changed the Windows taskbar preference.');
+  const selectionStates = [];
+  for (let index = 0; index < 8; index++) {
+    const label = await native('selection', { AppPid: app.child.pid, Handle: overlay.Handle });
+    selectionStates.push(label);
+    if (index > 0 && label.includes(` · ${button.width} × ${button.height} px · Enter`)) break;
+    await native('tab', { AppPid: app.child.pid });
+  }
+  evidence.smartSelectionStates = selectionStates;
+  assert(selectionStates.at(-1)?.includes(` · ${button.width} × ${button.height} px · Enter`),
+    `Smart picker did not expose the synthetic button: ${JSON.stringify(selectionStates)}`);
   await native('enter', { AppPid: app.child.pid });
 
   await page.getByRole('heading', { name: '单次识别' }).waitFor({ timeout: 12000 });
@@ -589,6 +606,7 @@ async function main() {
   fs.cpSync(source, candidate, { recursive: true, errorOnExist: true, force: false });
   let app, fixture;
   const evidence = { schema_version: 1, state: 'failed', smokeRoot, appPids: [] };
+  evidence.taskbarStateBefore = await taskbarState();
   try {
     app = await launchApp(candidate, webviewData, instanceId);
     evidence.appPids.push(app.child.pid);
@@ -607,6 +625,9 @@ async function main() {
     await setCheckbox(app.page, '启用悬浮工具栏', false);
     await toolbarStatus(app.page, '已关闭');
     evidence.fixturePid = fixture.pid;
+    evidence.taskbarStateAfter = await taskbarState();
+    assert.equal(evidence.taskbarStateAfter, evidence.taskbarStateBefore,
+      'Screenshot completion or cancellation changed the Windows taskbar preference.');
     evidence.state = 'passed';
     console.log(`Native actions E2E passed; synthetic evidence: ${smokeRoot}`);
   } catch (error) {

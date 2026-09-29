@@ -938,6 +938,18 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
               纯截图
             </CapabilityGate>
           )}
+          {viewState.capabilities.includes("recognition.scrollCapture") && (
+            <CapabilityGate
+              appearance="secondary"
+              capability="recognition.scrollCapture"
+              capabilities={viewState.capabilities}
+              action={{ type: "recognition.captureScrollingScreenshot" }}
+              actions={actions}
+              icon={<ArrowDown aria-hidden="true" size={16} />}
+            >
+              长截图
+            </CapabilityGate>
+          )}
           {sessionCapable && (
             <CapabilityGate
               appearance="secondary"

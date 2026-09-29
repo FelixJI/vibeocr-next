@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection')][string]$Action,
     [int]$AppPid = 0,
     [int]$FixturePid = 0,
     [int]$ForegroundPid = 0,
@@ -10,6 +10,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
@@ -304,6 +305,18 @@ if ($oldDpi -eq [IntPtr]::Zero) { throw 'Per Monitor V2 native control context u
 try {
     switch ($Action) {
         'fixture' { [NativeActionsFixture]::RunFixture() }
+        'selection' {
+            if (-not ([NativeActionsFixture]::Windows($AppPid) | Where-Object { $_.Handle -eq $Handle -and $_.Visible })) {
+                throw 'Selection window is outside the owned app.'
+            }
+            Add-Type -AssemblyName UIAutomationClient
+            Add-Type -AssemblyName UIAutomationTypes
+            $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Handle)
+            $nodes = $root.FindAll([System.Windows.Automation.TreeScope]::Subtree, [System.Windows.Automation.Condition]::TrueCondition)
+            $labels = @($nodes | ForEach-Object { $_.Current.Name } | Where-Object { $_ -match ' · \d+ × \d+ px · Enter' })
+            if ($labels.Count -ne 1) { throw 'Owned picker selection label is unavailable or ambiguous.' }
+            $labels[0]
+        }
         'windows' { [NativeActionsFixture]::Windows($AppPid) | ConvertTo-Json -Compress -Depth 4 }
         'hide' { [NativeActionsFixture]::Hide($Handle, $AppPid) }
         'close' { [NativeActionsFixture]::Close($Handle, $AppPid) }

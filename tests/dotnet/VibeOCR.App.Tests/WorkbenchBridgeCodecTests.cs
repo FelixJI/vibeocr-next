@@ -411,6 +411,7 @@ public sealed class WorkbenchBridgeCodecTests
       ("recognition", "readClipboard", "{}", typeof(ReadRecognitionClipboardCommand)),
       ("recognition", "captureScreen", "{}", typeof(CaptureRecognitionScreenCommand)),
       ("recognition", "captureScreenshotSession", "{}", typeof(CaptureScreenshotSessionCommand)),
+      ("recognition", "captureScrollingScreenshot", "{}", typeof(CaptureScrollingScreenshotCommand)),
       ("recognition", "captureScreenshotTextSession", "{}", typeof(CaptureScreenshotTextSessionCommand)),
       ("recognition", "closeScreenshotSession", "{}", typeof(CloseScreenshotSessionCommand)),
       ("recognition", "copyAnnotatedImage", "{\"resourceUri\":\"https://app.vibeocr/__annotation/00000000000000000000000000000000\"}", typeof(CopyAnnotatedImageCommand)),
