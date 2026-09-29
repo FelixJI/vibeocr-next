@@ -52,6 +52,7 @@ internal sealed class PinnedImageWindow : IDisposable
   private readonly int imageHeight;
   private RecognitionTextLayerState? layer;
   private bool loaded;
+  private bool documentReady;
   private bool disposed;
   private CoreWebView2? core;
   private ulong activeNavigation;
@@ -66,6 +67,7 @@ internal sealed class PinnedImageWindow : IDisposable
   internal string SmokeImagePath => image.Path;
   internal string SmokeNavigationState => $"loaded={loaded}; lines={layer?.Lines?.Count}; {navigationState}";
   internal bool SmokeDisposed => disposed;
+  internal bool SmokeDocumentReady => documentReady;
   internal bool SmokeAlwaysOnTop =>
     window.AppWindow.Presenter is OverlappedPresenter { IsAlwaysOnTop: true };
   internal double SmokeZoom => zoom;
@@ -224,7 +226,7 @@ internal sealed class PinnedImageWindow : IDisposable
   private void OnNavigationStarting(CoreWebView2 sender,
     CoreWebView2NavigationStartingEventArgs args)
   {
-    if (!IsDocumentNavigationAllowed(args.Uri, documentUri, args.IsUserInitiated)) args.Cancel = true;
+    if (!IsDocumentNavigationAllowed(args.Uri, documentUri)) args.Cancel = true;
     else activeNavigation = args.NavigationId;
     navigationState = $"starting: scheme={new Uri(args.Uri).Scheme}, blank={args.Uri == "about:blank"}, user={args.IsUserInitiated}, cancelled={args.Cancel}, id={args.NavigationId}";
   }
@@ -247,6 +249,9 @@ internal sealed class PinnedImageWindow : IDisposable
       await view.ExecuteScriptAsync(
         $"document.body.style.zoom='{zoom.ToString(CultureInfo.InvariantCulture)}';" +
         FitLinesScript);
+      if (disposed || args.NavigationId != activeNavigation) return;
+      documentReady = true;
+      copySelectionButton.IsEnabled = layer is not null;
     }
     catch (Exception error)
     {
@@ -338,6 +343,9 @@ internal sealed class PinnedImageWindow : IDisposable
 
   private void Render()
   {
+    documentReady = false;
+    activeNavigation = 0;
+    copySelectionButton.IsEnabled = false;
     // Keep WebView2 in the layout while navigation replaces a stale text layer.
     view.Opacity = 0;
     view.IsHitTestVisible = false;
@@ -364,8 +372,8 @@ internal sealed class PinnedImageWindow : IDisposable
     core!.Navigate(documentUri);
   }
 
-  internal static bool IsDocumentNavigationAllowed(string uri, string? expected, bool userInitiated) =>
-    !userInitiated && expected is not null && string.Equals(uri, expected, StringComparison.Ordinal);
+  internal static bool IsDocumentNavigationAllowed(string uri, string? expected) =>
+    expected is not null && string.Equals(uri, expected, StringComparison.Ordinal);
 
   private static string Percent(double normalized) =>
     (normalized / 10).ToString("F4", CultureInfo.InvariantCulture);
@@ -379,7 +387,7 @@ internal sealed class PinnedImageWindow : IDisposable
       Update(null);
       selectedLayer = null;
     }
-    if (selectedLayer is null || !loaded)
+    if (selectedLayer is null || !loaded || !documentReady)
     {
       status.Text = "文字层尚未就绪";
       return;

@@ -280,7 +280,7 @@ public sealed partial class MainWindow
       {
         bool hasText = await pin.SmokeEvaluateAsync(
           "document.querySelectorAll('.line span').length > 0") == "true";
-        if (hasText == present) return;
+        if (pin.SmokeDocumentReady && hasText == present) return;
       }
       catch (InvalidOperationException) { }
       await Task.Delay(100);
