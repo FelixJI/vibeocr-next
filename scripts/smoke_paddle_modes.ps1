@@ -143,22 +143,22 @@ $modeSpec = @{
         Tokens = 'GOAL103|1120|2244'; Export = '导出 Markdown'
     }
     'paddle_table' = @{
-        Fixture = 'table_merged_zh_en.png'; Pipeline = 'TABLERECOGNITION'
+        Fixture = 'table_merged_zh_en.png'; Pipeline = 'TABLE_RECOGNITION'
         Option = 'use_table_orientation_classify'; Value = 'false'; Kind = 'bool'
         Tokens = 'GOAL103|1120'; Export = '导出 XLSX|导出 Markdown'
     }
     'paddle_formula' = @{
-        Fixture = 'formulas_multi.png'; Pipeline = 'FORMULARECOGNITION'
+        Fixture = 'formulas_multi.png'; Pipeline = 'FORMULA_RECOGNITION'
         Option = 'formula_recognition_model_name'; Value = 'PP-FormulaNet_plus-L'; Kind = 'enum'
         Tokens = ''; Export = '导出 Markdown'
     }
     'paddle_structure' = @{
-        Fixture = 'document_mixed.png'; Pipeline = 'PPStructureV3'
+        Fixture = 'document_mixed.png'; Pipeline = 'PP-StructureV3'
         Option = 'use_seal_recognition'; Value = 'true'; Kind = 'bool'
         Tokens = 'GOAL103|1120'; Export = '导出 Markdown|导出 XLSX'
     }
     'paddle_document_vl' = @{
-        Fixture = 'document_mixed.png'; Pipeline = 'PaddleOCRVL'
+        Fixture = 'document_mixed.png'; Pipeline = 'PaddleOCR-VL'
         Option = 'vl_use_chart_recognition'; Value = 'true'; Kind = 'bool'
         Tokens = 'GOAL103|1120'; Export = '导出 Markdown'
     }
