@@ -318,6 +318,10 @@ public sealed partial class MainWindow
       ".includes('参数已保存') === true",
       TimeSpan.FromSeconds(15));
 
+    await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+      "(() => { const d=document.querySelector('details.recognition-options'); " +
+      "if(d?.open) d.querySelector('summary')?.click(); return true; })()");
+
     if (inputs)
       return await RunPaddleSmokeInputsAsync(mode, expectedPipeline, fixture,
         optionName, optionValue, availability ?? "", tokens, exportButtons,
@@ -695,9 +699,6 @@ public sealed partial class MainWindow
     string? jobId,
     SyntheticFixtureRegionPicker.CaptureEvidence? capture)
   {
-    string? resultDocument = await PaddleSmokeDomTextAsync(".result-document");
-    string? structuredBlocks = await PaddleSmokeDomTextAsync(
-      ".structured-result ol.structured-blocks");
     bool succeeded = terminal.Result is not null;
     object? jobEvidence = null;
     if (succeeded)
@@ -747,6 +748,28 @@ public sealed partial class MainWindow
       paddleSmokePartialEvidence = new { job = jobEvidence, capture };
     }
 
+    // Host completion precedes the WebView resource fetch; wait for the actual
+    // result DOM, including table/formula views, before reading or copying it.
+    if (succeeded)
+    {
+      string selector = mode switch
+      {
+        "paddle_table" => ".structured-result table td, .structured-result table th",
+        "paddle_formula" => ".structured-formula code",
+        "paddle_structure" or "paddle_document_vl" => ".structured-blocks li",
+        _ => ".result-document",
+      };
+      await WaitForSmokeDomAsync(
+        "(() => { const result=document.querySelector(" + JsonSerializer.Serialize(selector) +
+        "); if(!result?.textContent?.trim()) return false; " +
+        "const text=[...document.querySelectorAll('.result-document, .structured-result')]" +
+        ".map(e=>e.textContent ?? '').join(' ').toLowerCase(); " +
+        "const tokens=" + JsonSerializer.Serialize(tokens) + "; " +
+        "return !tokens.length || tokens.some(t=>text.includes(t.toLowerCase())); })()",
+        TimeSpan.FromSeconds(15));
+    }
+    string? resultDocument = await PaddleSmokeDomTextAsync(".result-document");
+    string? structuredBlocks = await PaddleSmokeDomTextAsync(".structured-result");
     // ---- 公共 UI 结果链：token 命中、结构化预览、真实按钮复制/导出 ----
     bool tokenVisible = tokens.Length == 0 || tokens.Any(token =>
       (resultDocument?.Contains(token, StringComparison.OrdinalIgnoreCase) ?? false) ||
@@ -1387,7 +1410,8 @@ public sealed partial class MainWindow
         // 物理像素，不做 DPI 放大。
         windowHandle = PaddleSmokeNative.CreateWindowExW(
           0x00000008u | 0x00000080u, "STATIC", null,
-          0x80000000u | 0x0000000Eu, 0, 0, 1, 1, nint.Zero, 0, 0, 0);
+          // SS_NOTIFY makes hit-testing return this STATIC instead of HTTRANSPARENT.
+          0x80000000u | 0x0000000Eu | 0x00000100u, 0, 0, 1, 1, nint.Zero, 0, 0, 0);
         if (windowHandle == 0)
           throw new InvalidOperationException(
             $"Synthetic bitmap window creation failed: {Marshal.GetLastPInvokeError()}.");
