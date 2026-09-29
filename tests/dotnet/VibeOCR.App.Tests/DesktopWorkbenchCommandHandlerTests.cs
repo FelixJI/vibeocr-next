@@ -1672,7 +1672,9 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     PortableLayout layout = PortableLayout.Resolve(
       Path.Combine(root, "VibeOCR.Next.exe"),
       "production");
-    layout.EnsurePortableState();
+    // These command tests need a settings directory, not the production
+    // write/rename/delete probe covered by PortableLayoutTests.
+    Directory.CreateDirectory(Path.GetDirectoryName(layout.ConfigFile)!);
     var registrar = new WindowsHotkeyRegistrar(
       new GlobalHotkeyService(new AcceptingHotkeyNative()),
       layout);
