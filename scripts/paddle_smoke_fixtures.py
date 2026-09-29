@@ -31,6 +31,20 @@ SYMBOL_FONT_PRIORITY = (
     r"C:\Windows\Fonts\simhei.ttf",
 )
 
+# 数学字形：优先专业数学字体，回退 Cambria/Times；斜体变量单独一链。
+MATH_FONT_PRIORITY = (
+    r"C:\Windows\Fonts\DejaVuMathTeXGyre.ttf",
+    r"C:\Windows\Fonts\cambria.ttc",
+    r"C:\Windows\Fonts\times.ttf",
+    r"C:\Windows\Fonts\msyh.ttc",
+)
+MATH_ITALIC_PRIORITY = (
+    r"C:\Windows\Fonts\DejaVuSerif-Italic.ttf",
+    r"C:\Windows\Fonts\timesi.ttf",
+    r"C:\Windows\Fonts\cambriai.ttf",
+    r"C:\Windows\Fonts\msyh.ttc",
+)
+
 
 def load_font(size: int, symbol: bool = False) -> ImageFont.FreeTypeFont:
     for candidate in SYMBOL_FONT_PRIORITY if symbol else FONT_PRIORITY:
@@ -139,36 +153,173 @@ def draw_table(out: Path, wireless: bool) -> dict[str, object]:
     }
 
 
+def load_math_font(size: int, italic: bool = False) -> ImageFont.FreeTypeFont:
+    """数学字形：优先专业数学字体，回退 Cambria/Times；斜体变量单独一链。"""
+    priority = MATH_ITALIC_PRIORITY if italic else MATH_FONT_PRIORITY
+    for candidate in priority:
+        if Path(candidate).is_file():
+            return ImageFont.truetype(candidate, size)
+    raise SystemExit(f"未找到可用数学字体：{candidate}")
+
+
 def draw_formulas(out: Path) -> dict[str, object]:
-    """paddle_formula：分式、根式、上下标三个手排公式。"""
-    image, draw = new_page(1800, 700)
-    base = load_font(72)
-    sym = load_font(72, symbol=True)
+    """paddle_formula：正常排版数学页（分式、根式+上标、上下标求和 3 式）。
 
-    # 公式 1：分式 (a + b) / (c - d)，手排分数线。
-    x = 120
-    draw.text((x, 100), "a + b", fill="black", font=base)
-    draw.line([(x, 260), (x + 260, 260)], fill="black", width=6)
-    draw.text((x + 20, 300), "c − d", fill="black", font=base)
+    A4 竖版固定坐标 + Pillow 原生基线锚点（anchor="ls"）直绘：标题、
+    正文与居中显示公式（编号 (1)-(3)）交替。
+    """
+    page_w, page_h = 1240, 1754  # A4 @150dpi
+    image = Image.new("RGB", (page_w, page_h), "white")
+    draw = ImageDraw.Draw(image)
+    margin, axis_x, size = 100, page_w // 2, 60
+    sup_size = size * 66 // 100  # 脚本字号（TeX 风格 66%）
+    title_font = load_font(58)
+    body_font = load_font(46)
+    num_font = load_math_font(44)
+    math = load_math_font(size)
+    var = load_math_font(size, italic=True)
+    sup = load_math_font(sup_size)
+    sup_var = load_math_font(sup_size, italic=True)
+    big = load_math_font(size * 2)
 
-    # 公式 2：根式 √(x² + 1)：根号字符 + 上画线。
-    x = 620
-    draw.text((x, 240), "√", fill="black", font=sym)
-    draw.line([(x + 70, 250), (x + 330, 250)], fill="black", width=6)
-    draw.text((x + 80, 260), "x² + 1", fill="black", font=base)
+    def cjk_line(text: str, font: ImageFont.FreeTypeFont, y: int, center: bool) -> int:
+        width = int(font.getlength(text))
+        x = axis_x - width // 2 if center else margin
+        draw.text((x, y), text, font=font, fill="black")
+        return y + font.size + 14
 
-    # 公式 3：上下标求和：Σ 从 i=1 到 n 的 x_i^2。
-    x = 1140
-    draw.text((x, 150), "n", fill="black", font=base)
-    draw.text((x, 300), "Σ", fill="black", font=sym)
-    draw.text((x, 520), "i = 1", fill="black", font=base)
-    draw.text((x + 160, 180), "x²", fill="black", font=base)
-    draw.text((x + 160, 420), "i", fill="black", font=base)
+    def formula_number(y_center: int, number: str) -> None:
+        width = int(num_font.getlength(number))
+        draw.text(
+            (page_w - margin - width, y_center - 22),
+            number,
+            font=num_font,
+            fill="black",
+        )
+
+    def run_width(pieces: list[tuple[str, ImageFont.FreeTypeFont, int]]) -> float:
+        return sum(font.getlength(text) for text, font, _ in pieces)
+
+    def draw_run(pieces, x: float, baseline: int) -> float:
+        """基线锚点顺序绘制 (text, font, dy) 片段，返回游标终点。"""
+        for text, font, dy in pieces:
+            draw.text((x, baseline + dy), text, font=font, fill="black", anchor="ls")
+            x += font.getlength(text)
+        return x
+
+    def draw_fraction(numer, denom, axis_y: int, center_x: float) -> tuple[int, int]:
+        """分子/分数线/分母围绕 axis_y 水平居中；返回块顶/底 y。"""
+        rule, gap = 5, 12
+        width = max(run_width(numer), run_width(denom)) + 8
+        ascent, descent = math.getmetrics()
+        draw_run(numer, center_x - run_width(numer) / 2, axis_y - rule // 2 - gap)
+        draw.line(
+            [(center_x - width / 2, axis_y), (center_x + width / 2, axis_y)],
+            fill="black",
+            width=rule,
+        )
+        draw_run(
+            denom, center_x - run_width(denom) / 2, axis_y + rule // 2 + gap + ascent
+        )
+        return (
+            axis_y - rule // 2 - gap - ascent,
+            axis_y + rule // 2 + gap + ascent + descent,
+        )
+
+    y = 96
+    y = cjk_line("数学公式识别样例", title_font, y, center=True) + 42
+    y = (
+        cjk_line("下列公式包含分式、根式与上下标求和结构。", body_font, y, center=False)
+        + 58
+    )
+
+    # (1) 分式：(a + b) / (c − d)。
+    top, bottom = draw_fraction(
+        [("a", var, 0), (" + ", math, 0), ("b", var, 0)],
+        [("c", var, 0), (" \u2212 ", math, 0), ("d", var, 0)],
+        axis_y=380,
+        center_x=axis_x,
+    )
+    formula_number((top + bottom) // 2, "(1)")
+
+    y = cjk_line("第二式含根式与平方上标：", body_font, bottom + 46, center=False) + 40
+
+    # (2) x = √(b² − 4ac)：大根号 + 原生锚点上标（基线上移 0.40em）。
+    y2 = 700
+    pieces = [
+        ("b", var, 0),
+        ("2", sup, -size * 40 // 100),
+        ("\u2212", math, 0),
+        ("4", math, 0),
+        ("a", var, 0),
+        ("c", var, 0),
+    ]
+    prefix = [("x", var, 0), (" = ", math, 0)]
+    rad = "\u221a"
+    total = run_width(prefix) + big.getlength(rad) + 4 + run_width(pieces)
+    x = axis_x - total / 2
+    x = draw_run(prefix, x, y2)
+    rad_box = draw.textbbox((x, y2), rad, font=big, anchor="ls")
+    draw.text((x, y2), rad, font=big, fill="black", anchor="ls")
+    x += big.getlength(rad)
+    end = draw_run(pieces, x + 4, y2)
+    draw.line(
+        [(x - 4, rad_box[1] + 2), (end + 2, rad_box[1] + 2)], fill="black", width=5
+    )
+    formula_number((rad_box[1] + y2 + math.getmetrics()[1]) // 2, "(2)")
+
+    y = cjk_line("第三式为带上下限的求和：", body_font, y2 + 96, center=False) + 46
+
+    # (3) Σ(i=1..n) i² = n(n+1)(2n+1)/6：Σ 上下限 + 分式右端。
+    y3 = 1060
+    sigma = "\u2211"
+    upper = [("n", sup_var, 0)]
+    lower = [("i", sup_var, 0), (" = 1", sup, 0)]
+    body = [("i", var, 0), ("2", sup, -size * 40 // 100), (" = ", math, 0)]
+    numer = [
+        ("n", var, 0),
+        ("(", math, 0),
+        ("n", var, 0),
+        (" + 1)", math, 0),
+        ("(", math, 0),
+        ("2", math, 0),
+        ("n", var, 0),
+        (" + 1)", math, 0),
+    ]
+    denom = [("6", math, 0)]
+    sig_box = draw.textbbox((0, y3), sigma, font=big, anchor="ls")
+    sig_w = big.getlength(sigma)
+    sig_block = max(sig_w, run_width(upper), run_width(lower))
+    frac_w = max(run_width(numer), run_width(denom)) + 8
+    total = sig_block + 18 + run_width(body) + 12 + frac_w
+    x = axis_x - total / 2
+    draw.text(
+        (x + (sig_block - sig_w) / 2, y3), sigma, font=big, fill="black", anchor="ls"
+    )
+    draw_run(upper, x + (sig_block - run_width(upper)) / 2, sig_box[1] - 8)
+    draw_run(
+        lower,
+        x + (sig_block - run_width(lower)) / 2,
+        sig_box[3] + 8 + sup.getmetrics()[0],
+    )
+    x += sig_block + 18
+    x = draw_run(body, x, y3)
+    top, bottom = draw_fraction(
+        numer, denom, axis_y=y3 - size // 3, center_x=x + 12 + frac_w / 2
+    )
+    formula_number((sig_box[1] - 8 - sup_var.getmetrics()[0] + bottom) // 2, "(3)")
+
+    cjk_line(
+        "样例公式页完 END OF SHEET",
+        body_font,
+        min(bottom + 60, page_h - 120),
+        center=False,
+    )
 
     path = out / "formulas_multi.png"
     image.save(path)
     return {
-        "purpose": "paddle_formula 分式/根式/上下标多公式",
+        "purpose": "paddle_formula 分式/根式上标/上下标求和正常排版数学页",
         "size": image.size,
         "formula_count": 3,
         "tokens": [],
