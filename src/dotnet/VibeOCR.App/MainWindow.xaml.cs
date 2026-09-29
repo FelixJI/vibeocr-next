@@ -53,10 +53,15 @@ public sealed partial class MainWindow : Window
   private readonly PortableLayout layout;
   private readonly WindowLayoutStore layoutStore;
   private readonly WorkbenchApplication application;
+  private readonly DesktopWorkbenchCommandHandler commandHandler;
   private readonly WebWorkbenchHost webHost;
   private readonly WorkbenchResourceBroker resourceBroker;
   private readonly string resourceRoot;
+  private readonly List<PinnedImageWindow> pinnedImages = [];
+  private readonly Dictionary<(Guid SessionId, long Revision),
+    (Task<RecognitionTextLayerState?> Task, CancellationTokenSource Cancellation)> pinTextTasks = [];
   private readonly SyntheticScreenRegionPicker? screenshotSmokePicker;
+  private readonly Func<string?>? supervisorInstanceId;
   private readonly Func<int>? smokeSubmitAttempts;
   private readonly Func<string?>? smokeLastJobId;
   private readonly Func<int>? smokeStartupEnsureAttempts;
@@ -82,6 +87,7 @@ public sealed partial class MainWindow : Window
     Func<UpdateViewModel> updateFactory,
     WindowLayoutStore layoutStore,
     Func<bool>? inferenceAttached = null,
+    Func<string?>? supervisorInstanceId = null,
     IScreenRegionPicker? screenshotSmokePicker = null,
     Func<int>? smokeSubmitAttempts = null,
     Func<string?>? smokeLastJobId = null,
@@ -101,6 +107,7 @@ public sealed partial class MainWindow : Window
     ArgumentNullException.ThrowIfNull(shellFactory);
     ArgumentNullException.ThrowIfNull(updateFactory);
     this.layoutStore = layoutStore ?? throw new ArgumentNullException(nameof(layoutStore));
+    this.supervisorInstanceId = supervisorInstanceId;
     this.screenshotSmokePicker = screenshotSmokePicker as SyntheticScreenRegionPicker;
     this.smokeSubmitAttempts = smokeSubmitAttempts;
     this.smokeLastJobId = smokeLastJobId;
@@ -114,7 +121,7 @@ public sealed partial class MainWindow : Window
     Directory.CreateDirectory(resourceRoot);
     resourceBroker = new WorkbenchResourceBroker(resourceRoot);
     var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
-    var commandHandler = new DesktopWorkbenchCommandHandler(
+    commandHandler = new DesktopWorkbenchCommandHandler(
       recognitionFactory,
       batchFactory,
       qrCodeFactory,
@@ -128,8 +135,44 @@ public sealed partial class MainWindow : Window
       () => WindowNative.GetWindowHandle(this),
       annotationStore,
       inferenceAttached: inferenceAttached,
+      supervisorInstanceId: supervisorInstanceId,
+      pinScreenshot: PinScreenshot,
       shellActions: shellActions,
       optionsLayout: layout);
+    commandHandler.ScreenshotTextLayerChanged += layer =>
+    {
+      void UpdatePins()
+      {
+        foreach (PinnedImageWindow pinned in pinnedImages.ToArray())
+          pinned.Update(layer);
+      }
+      if (DispatcherQueue.HasThreadAccess) UpdatePins();
+      else DispatcherQueue.TryEnqueue(UpdatePins);
+    };
+    commandHandler.ScreenshotTextLayerInvalidated += (sessionId, revision) =>
+    {
+      void InvalidatePins()
+      {
+        RemovePinTextTask((sessionId, revision));
+        foreach (PinnedImageWindow pinned in pinnedImages.ToArray())
+          if (pinned.SessionId == sessionId && pinned.Revision == revision)
+            pinned.Update(null);
+      }
+      if (DispatcherQueue.HasThreadAccess) InvalidatePins();
+      else DispatcherQueue.TryEnqueue(InvalidatePins);
+    };
+    commandHandler.ScreenshotSessionDetached += (sessionId, revision) =>
+    {
+      void MarkPins()
+      {
+        foreach (PinnedImageWindow pinned in pinnedImages.ToArray())
+          if (pinned.SessionId == sessionId && pinned.Revision == revision)
+            pinned.MarkOldSnapshot();
+      }
+      if (DispatcherQueue.HasThreadAccess) MarkPins();
+      else DispatcherQueue.TryEnqueue(MarkPins);
+    };
+    commandHandler.PinnedTextEnvironmentChanged += InvalidatePinnedTextLayers;
     application = new WorkbenchApplication(
       DesktopWorkbenchCommandHandler.Capabilities,
       WorkbenchRoute.Recognition,
@@ -368,6 +411,12 @@ public sealed partial class MainWindow : Window
         screenshotSmokeStarted = true;
         _ = CompleteScreenshotE2eSmokeAsync();
       }
+      if (!screenshotSmokeStarted &&
+          Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "text-selection-e2e")
+      {
+        screenshotSmokeStarted = true;
+        _ = CompleteTextSelectionE2eSmokeAsync();
+      }
       if (!managedEnvironmentSmokeStarted &&
           Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "managed-environment-e2e")
       {
@@ -508,9 +557,97 @@ public sealed partial class MainWindow : Window
   private async void OnWindowClosed(object sender, WindowEventArgs args)
   {
     Closed -= OnWindowClosed;
+    ClearPinTextTasks();
+    foreach (PinnedImageWindow pinned in pinnedImages.ToArray()) pinned.Close();
     webHost.ProtocolViolation -= OnProtocolViolation;
     webHost.RecoveryRequired -= OnRecoveryRequired;
     webHost.StateChanged -= OnHostStateChanged;
     await webHost.DisposeAsync();
+  }
+
+  private void PinScreenshot(
+    WorkbenchAnnotationFile image,
+    Guid sessionId,
+    long revision,
+    RecognitionTextLayerState? layer)
+  {
+    if (pinnedImages.Count >= 4)
+    {
+      throw new InvalidOperationException("最多同时打开四张贴图，请先关闭一张。");
+    }
+    var pinned = new PinnedImageWindow(image, sessionId, revision, layer,
+      () => PreparePinTextAsync(sessionId, revision, image.Path),
+      () => supervisorInstanceId?.Invoke());
+    pinned.Closed += closed =>
+    {
+      pinnedImages.Remove(closed);
+      if (!pinnedImages.Any(other => other.SessionId == sessionId && other.Revision == revision))
+        RemovePinTextTask((sessionId, revision));
+    };
+    pinnedImages.Add(pinned);
+    _ = ShowPinnedAsync(pinned);
+  }
+
+  private async Task<RecognitionTextLayerState?> PreparePinTextAsync(
+    Guid sessionId, long revision, string imagePath)
+  {
+    var key = (sessionId, revision);
+    if (!pinTextTasks.TryGetValue(key, out var entry))
+    {
+      var cancellation = new CancellationTokenSource();
+      entry = (commandHandler.PreparePinnedTextLayerAsync(
+        sessionId, revision, imagePath, cancellation.Token), cancellation);
+      pinTextTasks.Add(key, entry);
+    }
+    try
+    {
+      RecognitionTextLayerState? result = await entry.Task;
+      if (result is not null &&
+          result.ServiceInstance != (supervisorInstanceId?.Invoke() ?? string.Empty))
+      {
+        RemovePinTextTask(key);
+        throw new PinnedTextPreparationException("本地识别服务已变化，请重新取字。");
+      }
+      return result;
+    }
+    catch
+    {
+      if (pinTextTasks.TryGetValue(key, out var current) &&
+          ReferenceEquals(current.Task, entry.Task)) RemovePinTextTask(key);
+      throw;
+    }
+  }
+
+  private void RemovePinTextTask((Guid SessionId, long Revision) key)
+  {
+    if (!pinTextTasks.Remove(key, out var entry)) return;
+    entry.Cancellation.Cancel();
+    entry.Cancellation.Dispose();
+  }
+
+  private void ClearPinTextTasks()
+  {
+    foreach (var key in pinTextTasks.Keys.ToArray()) RemovePinTextTask(key);
+  }
+
+  internal void InvalidatePinnedTextLayers()
+  {
+    void Invalidate()
+    {
+      ClearPinTextTasks();
+      foreach (PinnedImageWindow pinned in pinnedImages.ToArray()) pinned.Update(null);
+    }
+    if (DispatcherQueue.HasThreadAccess) Invalidate();
+    else DispatcherQueue.TryEnqueue(Invalidate);
+  }
+
+  private static async Task ShowPinnedAsync(PinnedImageWindow pinned)
+  {
+    try { await pinned.ShowAsync(); }
+    catch (Exception error)
+    {
+      AppLog.Error("Pinned image window failed to start", error);
+      pinned.Close();
+    }
   }
 }

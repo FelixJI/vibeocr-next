@@ -44,6 +44,7 @@ import { CapabilityGate } from "../components/CapabilityGate";
 import { ImageCanvasEditor } from "../components/ImageCanvasEditor";
 import { PaddleOptionsEditor } from "../components/PaddleOptionsEditor";
 import { StructuredResult } from "../components/StructuredResult";
+import type { ScreenshotTextLayerState } from "../components/ImageCanvasEditor";
 import { EmptyStage, Workspace } from "../components/Workspace";
 
 interface FeatureProps {
@@ -212,6 +213,7 @@ interface RecognitionEngineState {
 interface ScreenshotSessionState {
   readonly sessionId: string;
   readonly revision: number;
+  readonly textSelectionRequested: boolean;
 }
 
 // 宿主回显的活动纯截图会话：会话 id + 当前内容修订。
@@ -224,8 +226,59 @@ function screenshotSession(value: unknown): ScreenshotSessionState | undefined {
     typeof candidate.revision === "number" &&
     Number.isSafeInteger(candidate.revision) &&
     candidate.revision >= 0
-    ? { sessionId: candidate.sessionId, revision: candidate.revision }
+    ? {
+        sessionId: candidate.sessionId,
+        revision: candidate.revision,
+        textSelectionRequested: candidate.textSelectionRequested === true,
+      }
     : undefined;
+}
+
+interface TextLayerLineState {
+  readonly text: string;
+  readonly x1: number;
+  readonly y1: number;
+  readonly x2: number;
+  readonly y2: number;
+  readonly order?: number | null;
+}
+
+function textLayerLines(value: unknown): readonly TextLayerLineState[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is TextLayerLineState => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry))
+      return false;
+    const line = entry as Partial<TextLayerLineState>;
+    return (
+      typeof line.text === "string" &&
+      line.text.length > 0 &&
+      [line.x1, line.y1, line.x2, line.y2].every(
+        (coordinate) =>
+          typeof coordinate === "number" && Number.isFinite(coordinate),
+      )
+    );
+  });
+}
+
+// 宿主回发的原位文字层状态；字段不完整时按无层处理。
+function screenshotTextLayer(
+  value: unknown,
+): ScreenshotTextLayerState | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return undefined;
+  const candidate = value as Partial<ScreenshotTextLayerState>;
+  if (typeof candidate.status !== "string" || candidate.status.length === 0)
+    return undefined;
+  const binding = screenshotSession(candidate.binding);
+  const image = resource(candidate.image);
+  return {
+    status: candidate.status,
+    reason: typeof candidate.reason === "string" ? candidate.reason : undefined,
+    binding,
+    modeId: typeof candidate.modeId === "string" ? candidate.modeId : null,
+    image,
+    lines: candidate.lines === null ? null : textLayerLines(candidate.lines),
+  };
 }
 
 function feature(
@@ -765,6 +818,9 @@ function StatusLine({ children }: { readonly children: React.ReactNode }) {
 }
 
 export function RecognitionPage({ viewState, actions }: FeatureProps) {
+  // The host owns each capture's intent; this user preference survives keyed
+  // editor remounts and only applies to sessions explicitly captured for text.
+  const [autoTextPreference, setAutoTextPreference] = useState(true);
   const state = feature(viewState, "recognition");
   const input = resource(state.input);
   const result = resource(state.result);
@@ -772,6 +828,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
   const structured = resource(state.structuredResult);
   const structuredText = useResourceText(structured);
   const session = screenshotSession(state.screenshotSession);
+  const textLayer = screenshotTextLayer(state.textLayer);
   const sessionCapable = viewState.capabilities.includes(
     "recognition.screenshotSession",
   );
@@ -824,6 +881,18 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
               纯截图
             </CapabilityGate>
           )}
+          {sessionCapable && (
+            <CapabilityGate
+              appearance="secondary"
+              capability="recognition.screenshotSession"
+              capabilities={viewState.capabilities}
+              action={{ type: "recognition.captureScreenshotTextSession" }}
+              actions={actions}
+              icon={<ScanText aria-hidden="true" size={16} />}
+            >
+              截图取字
+            </CapabilityGate>
+          )}
           <CapabilityGate
             capability="recognition.capture"
             capabilities={viewState.capabilities}
@@ -863,6 +932,12 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
               canRecognize={sessionCapable}
               session={session}
               source={input.url}
+              textLayer={textLayer}
+              autoText={
+                session?.textSelectionRequested === true && autoTextPreference
+              }
+              showAutoTextPreference={session?.textSelectionRequested === true}
+              onAutoTextChange={setAutoTextPreference}
             />
           ) : (
             <EmptyStage

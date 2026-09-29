@@ -807,6 +807,14 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       }
     }
 
+    public Task CopyTextAsync(string text, CancellationToken cancellationToken)
+    {
+      CopiedText = text;
+      return Task.CompletedTask;
+    }
+
+    public string? CopiedText { get; private set; }
+
     public async Task<bool> SavePngAsync(
       string sourcePath,
       CancellationToken cancellationToken)
@@ -1143,6 +1151,10 @@ public sealed class DesktopWorkbenchCommandHandlerTests
         new CaptureScreenshotSessionCommand(),
         TestContext.Current.CancellationToken);
       Assert.Equal("capture_in_progress", repeat.Error?.Code);
+      WorkbenchCommandOutcome textCapture = await handler.ExecuteAsync(
+        new CaptureScreenshotTextSessionCommand(),
+        TestContext.Current.CancellationToken);
+      Assert.Equal("capture_in_progress", textCapture.Error?.Code);
       WorkbenchCommandOutcome cross = await handler.ExecuteAsync(
         new CaptureRecognitionScreenCommand(),
         TestContext.Current.CancellationToken);

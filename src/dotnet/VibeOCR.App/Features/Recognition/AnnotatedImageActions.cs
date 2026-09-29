@@ -11,6 +11,8 @@ public interface IAnnotatedImagePlatform
   Task CopyPngAsync(string sourcePath, CancellationToken cancellationToken);
 
   Task<bool> SavePngAsync(string sourcePath, CancellationToken cancellationToken);
+
+  Task CopyTextAsync(string text, CancellationToken cancellationToken);
 }
 
 public sealed class AnnotatedImagePlatform(Func<nint> windowHandle) : IAnnotatedImagePlatform
@@ -26,6 +28,36 @@ public sealed class AnnotatedImagePlatform(Func<nint> windowHandle) : IAnnotated
       RequestedOperation = DataPackageOperation.Copy,
     };
     package.SetBitmap(RandomAccessStreamReference.CreateFromFile(source));
+    for (int attempt = 0; ; attempt++)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      try
+      {
+        Clipboard.SetContent(package);
+        Clipboard.Flush();
+        return;
+      }
+      catch (COMException) when (attempt < 4)
+      {
+        await Task.Delay(TimeSpan.FromMilliseconds(40 * (attempt + 1)), cancellationToken);
+      }
+      catch (COMException error)
+      {
+        throw new ClipboardBusyException(error);
+      }
+    }
+  }
+
+  public async Task CopyTextAsync(
+    string text,
+    CancellationToken cancellationToken)
+  {
+    ArgumentException.ThrowIfNullOrWhiteSpace(text);
+    var package = new DataPackage
+    {
+      RequestedOperation = DataPackageOperation.Copy,
+    };
+    package.SetText(text);
     for (int attempt = 0; ; attempt++)
     {
       cancellationToken.ThrowIfCancellationRequested();

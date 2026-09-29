@@ -63,6 +63,8 @@ public static class WorkbenchBridgeCodec
     ["resourceUri", "sessionId", "revision"];
   private static readonly HashSet<string> StructuredCopyArgumentFields =
     ["resourceUri", "blockIndex", "format"];
+  private static readonly HashSet<string> SessionSelectionArgumentFields =
+    ["sessionId", "revision", "text"];
 
   public static Guid ParseBootstrapRequest(string json)
   {
@@ -279,6 +281,9 @@ public static class WorkbenchBridgeCodec
       case ("recognition", "captureScreenshotSession"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new CaptureScreenshotSessionCommand();
+      case ("recognition", "captureScreenshotTextSession"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new CaptureScreenshotTextSessionCommand();
       case ("recognition", "closeScreenshotSession"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new CloseScreenshotSessionCommand();
@@ -302,6 +307,13 @@ public static class WorkbenchBridgeCodec
           ReadAnnotationResourceUri(arguments),
           ParseGuidArgument(arguments, "sessionId"),
           ParseContentRevision(arguments));
+      case ("recognition", "pinScreenshotImage"):
+        EnsureObjectWithFields(
+          arguments, SessionResourceArgumentFields, "command arguments");
+        return new PinScreenshotImageCommand(
+          ReadAnnotationResourceUri(arguments),
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments));
       case ("recognition", "recognizeScreenshotImage"):
         EnsureObjectWithFields(
           arguments, SessionResourceArgumentFields, "command arguments");
@@ -309,6 +321,24 @@ public static class WorkbenchBridgeCodec
           ReadAnnotationResourceUri(arguments),
           ParseGuidArgument(arguments, "sessionId"),
           ParseContentRevision(arguments));
+      case ("recognition", "prepareScreenshotTextLayer"):
+        EnsureObjectWithFields(
+          arguments, SessionResourceArgumentFields, "command arguments");
+        return new PrepareScreenshotTextLayerCommand(
+          ReadAnnotationResourceUri(arguments),
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments));
+      case ("recognition", "cancelScreenshotTextLayer"):
+        EnsureObjectWithFields(
+          arguments, SessionRevisionArgumentFields, "command arguments");
+        return new CancelScreenshotTextLayerCommand(
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments));
+      case ("recognition", "copyScreenshotSelection"):
+        return new CopyScreenshotSelectionCommand(
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments),
+          ParseSelectionText(arguments));
       case ("recognition", "cancel"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new CancelRecognitionCommand();
@@ -661,6 +691,18 @@ public static class WorkbenchBridgeCodec
     return revision;
   }
 
+  private static string ParseSelectionText(JsonElement arguments)
+  {
+    EnsureObjectWithFields(arguments, SessionSelectionArgumentFields, "command arguments");
+    string? text = arguments.GetProperty("text").GetString();
+    if (string.IsNullOrWhiteSpace(text) || text.Length > 16_384)
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench screenshot selection text is invalid.");
+    }
+    return text;
+  }
+
   private static RotatePdfCommand ParseRotate(JsonElement arguments)
   {
     HashSet<string> fields = arguments.ValueKind == JsonValueKind.Object
@@ -847,6 +889,21 @@ public static class WorkbenchBridgeCodec
       {
         sessionId = recognition.ScreenshotSession.SessionId,
         revision = recognition.ScreenshotSession.Revision,
+        textSelectionRequested = recognition.ScreenshotSession.TextSelectionRequested,
+      },
+      textLayer = recognition.TextLayer is null ? null : new
+      {
+        status = recognition.TextLayer.Status,
+        reason = recognition.TextLayer.Reason,
+        binding = recognition.TextLayer.Binding is null ? null : new
+        {
+          sessionId = recognition.TextLayer.Binding.SessionId,
+          revision = recognition.TextLayer.Binding.Revision,
+        },
+        modeId = recognition.TextLayer.ModeId,
+        serviceInstance = recognition.TextLayer.ServiceInstance,
+        image = recognition.TextLayer.Image,
+        lines = recognition.TextLayer.Lines ?? [],
       },
       structuredResult = recognition.StructuredResult,
     },

@@ -12,7 +12,7 @@ internal sealed record SelfTestInstanceScope(
     string? instanceId)
   {
     bool isUiSmoke = smokeMode is "web-ready" or "screenshot-e2e" or
-      "managed-environment-e2e" or "native-actions-e2e" or "paddle-modes-e2e";
+      "text-selection-e2e" or "managed-environment-e2e" or "native-actions-e2e" or "paddle-modes-e2e";
     bool hasInstanceId = !string.IsNullOrWhiteSpace(instanceId);
     if (!isUiSmoke)
     {
