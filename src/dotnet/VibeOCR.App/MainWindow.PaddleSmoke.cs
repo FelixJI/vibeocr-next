@@ -149,7 +149,7 @@ public sealed partial class MainWindow
     await WaitForSmokeDomAsync(
       "!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
       "document.querySelector('.runtime-install-plan')?.textContent.includes('paddleocr-cpu') && " +
-      "document.querySelector('.runtime-install-plan')?.textContent.includes('tuna-pypi')",
+      "document.querySelector('.runtime-install-plan')?.textContent.includes('TUNA PyPI 镜像')",
       TimeSpan.FromMinutes(2));
     string planText = await PaddleSmokeDomTextAsync(".runtime-install-plan") ?? "";
     RecordPaddleSmokeStage("confirm install");
@@ -873,7 +873,7 @@ public sealed partial class MainWindow
         double physicalWidth = width * scale;
         double physicalHeight = height * scale;
         double fitScale = Math.Min(1.0,
-          maxClientWidth / physicalWidth, maxClientHeight / physicalHeight);
+          Math.Min(maxClientWidth / physicalWidth, maxClientHeight / physicalHeight));
         int targetClientWidth = Math.Max(64, (int)Math.Ceiling(physicalWidth * fitScale));
         int targetClientHeight = Math.Max(64, (int)Math.Ceiling(physicalHeight * fitScale));
         // 预留标题栏/边框余量（DPI 缩放）；超出目标的客户区为白色边距，
