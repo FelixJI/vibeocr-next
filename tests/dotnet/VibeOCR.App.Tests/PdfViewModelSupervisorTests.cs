@@ -1,5 +1,6 @@
 using System.Text.Json;
 using VibeOCR.App.Features.Pdf;
+using VibeOCR.App.Features.Recognition;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
@@ -69,6 +70,39 @@ public sealed class PdfViewModelSupervisorTests
 
         Assert.Equal("PP-StructureV3", fake.LastRequest?.Pipeline.PipelineId);
         Assert.Null(fake.LastRequest?.Pipeline.Engine);
+    }
+
+    [Fact]
+    public async Task UnsupportedModeOptionRejectsPdfOcrInsteadOfSilentDrop()
+    {
+        // 回归契约（#110 AC2）：选项违反模式合同时，PDF OCR 在渲染/提交前
+        // 明确拒绝并携带精确原因，不静默丢弃后仍提交。
+        var fake = new FakePdfInference();
+        var viewModel = new PdfViewModel(fake, new StubPdfSource());
+        viewModel.SetRecognitionMode(new RecognitionModeOption(
+            "paddle_formula",
+            "specialized",
+            "FORMULA_RECOGNITION",
+            null,
+            "advanced_component",
+            "ready",
+            null,
+            "paddleocr-cpu",
+            ["formula_recognition_batch_size"],
+            "model_residency",
+            true,
+            true,
+            true,
+            true), options: new PaddleModeOptions { UseTableRecognition = true });
+        await viewModel.OpenPathAsync("test.pdf", CancellationToken.None);
+
+        await viewModel.StartOcrAsync([0], false, CancellationToken.None);
+
+        Assert.Equal(0, fake.RenderCalls);
+        Assert.Equal(0, fake.SubmitCalls);
+        Assert.StartsWith("识别选项无效，已拒绝提交", viewModel.Status);
+        Assert.Contains("use_table_recognition", viewModel.Status);
+        Assert.Equal(PdfPageState.None, viewModel.Pages[0].State);
     }
 
     private sealed class StubPdfSource : IPdfFileSource

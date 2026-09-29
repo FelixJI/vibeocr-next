@@ -161,19 +161,19 @@ public static class StructuredResultClipboard
     columns = 0;
     if (block.ValueKind != JsonValueKind.Object ||
       !block.TryGetProperty("type", out JsonElement type) ||
+      type.ValueKind != JsonValueKind.String ||
       type.GetString() != "table" ||
       !block.TryGetProperty("table", out JsonElement table) ||
       table.ValueKind != JsonValueKind.Object ||
       !table.TryGetProperty("schema_version", out JsonElement schema) ||
       schema.ValueKind != JsonValueKind.Number ||
-      schema.GetInt32() != 1 ||
+      !schema.TryGetInt32(out int version) || version != 1 ||
       !table.TryGetProperty("row_count", out JsonElement rowCount) ||
       !table.TryGetProperty("column_count", out JsonElement columnCount) ||
       rowCount.ValueKind != JsonValueKind.Number ||
-      columnCount.ValueKind != JsonValueKind.Number)
+      columnCount.ValueKind != JsonValueKind.Number ||
+      !rowCount.TryGetInt32(out rows) || !columnCount.TryGetInt32(out columns))
       return false;
-    rows = rowCount.GetInt32();
-    columns = columnCount.GetInt32();
     if (rows is < 1 or > MaxRows || columns is < 1 or > MaxColumns ||
       !table.TryGetProperty("cells", out JsonElement cellArray) ||
       cellArray.ValueKind != JsonValueKind.Array)
@@ -189,14 +189,15 @@ public static class StructuredResultClipboard
         row.ValueKind != JsonValueKind.Number ||
         column.ValueKind != JsonValueKind.Number ||
         rowspan.ValueKind != JsonValueKind.Number ||
-        colspan.ValueKind != JsonValueKind.Number)
+        colspan.ValueKind != JsonValueKind.Number ||
+        !row.TryGetInt32(out int cellRow) ||
+        !column.TryGetInt32(out int cellColumn) ||
+        !rowspan.TryGetInt32(out int cellRowspan) ||
+        !colspan.TryGetInt32(out int cellColspan))
         return false;
-      int cellRow = row.GetInt32();
-      int cellColumn = column.GetInt32();
-      int cellRowspan = rowspan.GetInt32();
-      int cellColspan = colspan.GetInt32();
       if (cellRow < 0 || cellColumn < 0 || cellRowspan < 1 || cellColspan < 1 ||
-        cellRow + cellRowspan > rows || cellColumn + cellColspan > columns ||
+        cellRow >= rows || cellColumn >= columns ||
+        cellRowspan > rows - cellRow || cellColspan > columns - cellColumn ||
         !element.TryGetProperty("text", out JsonElement text) ||
         text.ValueKind != JsonValueKind.String)
         return false;

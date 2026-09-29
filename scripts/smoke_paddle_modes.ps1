@@ -23,20 +23,31 @@ Goal #110 隔离候选专用 Paddle 五模式实机冒烟。
 .PARAMETER Modes
 默认五种 paddle 模式；可用子集逐个交付。
 
+.PARAMETER ResumeRoot
+恢复模式：复用本脚本已创建的隔离根继续未完成的模式；与 ProductRoot/
+WorkRoot 互斥。已有 health 证据不覆盖（passed 保留跳过，failed/blocked
+保留并计入退出码）；恢复前校验候选 markers、fixture manifest 生成器
+与既有 paddle 证据。
+
 .EXAMPLE
 pwsh -File scripts/smoke_paddle_modes.ps1 -ProductRoot .release-build\publish -WorkRoot D:\goal103-smoke
+
+.EXAMPLE
+pwsh -File scripts/smoke_paddle_modes.ps1 -ResumeRoot D:\goal103-smoke\pm-abc123 -Modes paddle_formula
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$ProductRoot,
-    [Parameter(Mandatory = $true)][string]$WorkRoot,
+    [string]$ProductRoot,
+    [string]$WorkRoot,
+    # 恢复模式：复用本脚本已创建的隔离根（与 ProductRoot/WorkRoot 互斥）。
+    # 已有 health 证据不覆盖：passed 保留跳过，failed/blocked 保留并计入退出码。
+    [string]$ResumeRoot,
     [string[]]$Modes = @(
         'paddle_text', 'paddle_table', 'paddle_formula',
         'paddle_structure', 'paddle_document_vl'
     ),
     [int]$ModeTimeoutMinutes = 40,
     [int]$InstallTimeoutMinutes = 60,
-    [switch]$SkipInstall,
     [switch]$IncludeWireless
 )
 
@@ -44,27 +55,76 @@ $ErrorActionPreference = 'Stop'
 if ($ModeTimeoutMinutes -le 0 -or $InstallTimeoutMinutes -le 0) {
     throw 'All timeout parameters must be positive'
 }
-$source = (Resolve-Path -LiteralPath $ProductRoot).Path.TrimEnd('\')
-$work = (Resolve-Path -LiteralPath $WorkRoot).Path.TrimEnd('\')
-if ($source.Equals($work, [StringComparison]::OrdinalIgnoreCase) -or
-    $source.StartsWith($work + '\', [StringComparison]::OrdinalIgnoreCase) -or
-    $work.StartsWith($source + '\', [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'ProductRoot and WorkRoot must not nest'
+if ($ResumeRoot) {
+    if ($ProductRoot -or $WorkRoot) {
+        throw 'ResumeRoot 与 ProductRoot/WorkRoot 互斥，只能二选一'
+    }
+} elseif (-not $ProductRoot -or -not $WorkRoot) {
+    throw '需要 ProductRoot + WorkRoot（全新隔离）或 ResumeRoot（恢复）'
 }
-foreach ($marker in @(
+$candidateMarkers = @(
     'app\VibeOCR.WinUI.exe',
     'app\metadata\product-layout.json',
     'runtime\backend\runtime-manifest.json',
     'runtime\installer\vibeocr-runtime-installer.exe'
-)) {
-    if (-not (Test-Path -LiteralPath (Join-Path $source $marker) -PathType Leaf)) {
-        throw "Candidate marker missing: $marker"
+)
+$isResume = [bool]$ResumeRoot
+if ($isResume) {
+    # 恢复模式：严格校验这是本脚本创建的隔离根 —— 候选 markers、我们
+    # 的 fixture manifest（生成器标识）、至少一份 paddle health 证据；
+    # 不接受真实用户目录（真实产品目录不会有这些本脚本产物）。
+    $smokeRoot = (Resolve-Path -LiteralPath $ResumeRoot).Path.TrimEnd('\')
+    $candidate = Join-Path $smokeRoot 'candidate'
+    $fixtures = Join-Path $smokeRoot 'fixtures'
+    $exports = Join-Path $smokeRoot 'ui-exports'
+    $webViewData = Join-Path $smokeRoot 'webview2'
+    foreach ($marker in $candidateMarkers) {
+        if (-not (Test-Path -LiteralPath (Join-Path $candidate $marker) -PathType Leaf)) {
+            throw "ResumeRoot 候选 marker 缺失: $marker"
+        }
     }
+    $manifestPath = Join-Path $fixtures 'manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw 'ResumeRoot 缺少 fixtures\manifest.json（非本脚本创建的隔离根）'
+    }
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if ($manifest.generator -ne 'scripts/paddle_smoke_fixtures.py') {
+        throw "ResumeRoot manifest 生成器不匹配: $($manifest.generator)"
+    }
+    $knownHealth = Get-ChildItem -LiteralPath $smokeRoot -Filter 'paddle-*.json' -File `
+        -ErrorAction SilentlyContinue
+    if ($knownHealth.Count -eq 0) {
+        throw 'ResumeRoot 内无任何 paddle-*.json 证据（无法证明为本脚本隔离根）'
+    }
+    New-Item -ItemType Directory -Path $exports -Force | Out-Null
+    # 恢复模式不重新生成 fixture（Python 入口只读）；所需文件存在性在
+    # modeSpec 定义之后统一校验。
+} else {
+    $source = (Resolve-Path -LiteralPath $ProductRoot).Path.TrimEnd('\')
+    $work = (Resolve-Path -LiteralPath $WorkRoot).Path.TrimEnd('\')
+    if ($source.Equals($work, [StringComparison]::OrdinalIgnoreCase) -or
+        $source.StartsWith($work + '\', [StringComparison]::OrdinalIgnoreCase) -or
+        $work.StartsWith($source + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'ProductRoot and WorkRoot must not nest'
+    }
+    foreach ($marker in $candidateMarkers) {
+        if (-not (Test-Path -LiteralPath (Join-Path $source $marker) -PathType Leaf)) {
+            throw "Candidate marker missing: $marker"
+        }
+    }
+    if (Test-Path -LiteralPath (Join-Path $source 'state')) {
+        throw 'Source candidate must not contain user or previous smoke state'
+    }
+    $smokeRoot = Join-Path $work "pm-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
+    $candidate = Join-Path $smokeRoot 'candidate'
+    $fixtures = Join-Path $smokeRoot 'fixtures'
+    $exports = Join-Path $smokeRoot 'ui-exports'
+    $webViewData = Join-Path $smokeRoot 'webview2'
+    New-Item -ItemType Directory -Path $candidate | Out-Null
+    Get-ChildItem -LiteralPath $source -Force |
+        Copy-Item -Destination $candidate -Recurse -Force
+    New-Item -ItemType Directory -Path $exports | Out-Null
 }
-if (Test-Path -LiteralPath (Join-Path $source 'state')) {
-    throw 'Source candidate must not contain user or previous smoke state'
-}
-$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 
 # 模式 → fixture / 非默认选项 / 期望管线 / 结果 token / 公共 UI 导出按钮。
 # 选项均为真实构造/预测参数默认值之外的有效取值（默认值见
@@ -100,6 +160,20 @@ $modeSpec = @{
 foreach ($mode in $Modes) {
     if (-not $modeSpec.ContainsKey($mode)) { throw "Unknown smoke mode: $mode" }
 }
+if ($isResume) {
+    foreach ($mode in $Modes) {
+        $needed = @($modeSpec[$mode].Fixture)
+        if ($mode -eq 'paddle_table' -and $IncludeWireless) {
+            $needed += 'table_wireless.png'
+        }
+        foreach ($fixtureName in $needed) {
+            if (-not (Test-Path -LiteralPath (Join-Path $fixtures $fixtureName) -PathType Leaf)) {
+                throw "ResumeRoot fixture 缺失: $fixtureName"
+            }
+        }
+    }
+}
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 
 $smokeRoot = Join-Path $work "pm-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
 $candidate = Join-Path $smokeRoot 'candidate'
@@ -112,13 +186,16 @@ Get-ChildItem -LiteralPath $source -Force |
 New-Item -ItemType Directory -Path $exports | Out-Null
 
 # fixture 生成统一走仓库锁定环境（uv run --frozen python），不接入任意
-# 系统 Python，也不新增 runtime 依赖。
-Push-Location $repoRoot
-try {
-    uv run --frozen python (Join-Path $repoRoot 'scripts\paddle_smoke_fixtures.py') --out $fixtures
-    if ($LASTEXITCODE -ne 0) { throw 'Fixture generation failed' }
-} finally { Pop-Location }
-$manifest = Get-Content -LiteralPath (Join-Path $fixtures 'manifest.json') -Raw | ConvertFrom-Json
+# 系统 Python，也不新增 runtime 依赖；恢复模式不重新生成，复用并按
+# manifest 已验证的既有 fixtures。
+if (-not $isResume) {
+    Push-Location $repoRoot
+    try {
+        uv run --frozen python (Join-Path $repoRoot 'scripts\paddle_smoke_fixtures.py') --out $fixtures
+        if ($LASTEXITCODE -ne 0) { throw 'Fixture generation failed' }
+    } finally { Pop-Location }
+    $manifest = Get-Content -LiteralPath (Join-Path $fixtures 'manifest.json') -Raw | ConvertFrom-Json
+}
 
 $previous = @{}
 foreach ($name in @(
@@ -165,8 +242,25 @@ function Invoke-PaddlePhase([hashtable]$extra, [string]$phaseName, [int]$capMinu
 
 $results = @()
 $exitCode = 0
+function Set-PaddleOutcome([string]$state) {
+    # 退出码优先级：failed(1) 永远不被后续 blocked(3) 覆盖。
+    if ($state -eq 'failed') { $script:exitCode = 1 }
+    elseif ($state -eq 'blocked' -and $script:exitCode -eq 0) { $script:exitCode = 3 }
+}
 try {
-    if (-not $SkipInstall) {
+    $installHealthPath = Join-Path $smokeRoot 'paddle-install.json'
+    $installReused = $false
+    if (Test-Path -LiteralPath $installHealthPath -PathType Leaf) {
+        # 已有 install 证据不覆盖：passed 直接复用；非 passed 拒绝恢复
+        # （重跑需要覆盖 health，与固定输出不可覆盖规则冲突）。
+        $kept = Get-Content -LiteralPath $installHealthPath -Raw | ConvertFrom-Json
+        if ($kept.state -ne 'passed') {
+            throw "paddle-install 既有证据非 passed（$($kept.state)）且不可覆盖，拒绝恢复"
+        }
+        $installReused = $true
+        Write-Host "Install evidence reused (kept): $installHealthPath"
+    }
+    if (-not $installReused) {
         $install = Invoke-PaddlePhase @{
             'VIBEOCR_PADDLE_SMOKE_PHASE' = 'install'
             'VIBEOCR_PADDLE_SMOKE_INSTALL_TIMEOUT_MINUTES' = "$InstallTimeoutMinutes"
@@ -185,6 +279,19 @@ try {
         }
         foreach ($run in $runs) {
             $phaseName = "paddle-$mode$($run.Suffix)"
+            $healthPath = Join-Path $smokeRoot "$phaseName.json"
+            if (Test-Path -LiteralPath $healthPath -PathType Leaf) {
+                # 已有证据不覆盖：passed 保留跳过；failed/blocked 保留并计入退出码。
+                $kept = Get-Content -LiteralPath $healthPath -Raw | ConvertFrom-Json
+                $results += [pscustomobject]@{
+                    phase = $phaseName; mode = $mode; fixture = $run.Fixture
+                    state = "kept:$($kept.state)"; stage = $kept.stage
+                    error = $kept.error
+                }
+                Write-Host "KEPT    $phaseName state=$($kept.state)（证据已保留，不重跑不覆盖）"
+                Set-PaddleOutcome $kept.state
+                continue
+            }
             $health = Invoke-PaddlePhase @{
                 'VIBEOCR_PADDLE_SMOKE_PHASE' = 'recognize'
                 'VIBEOCR_PADDLE_SMOKE_MODE' = $mode
@@ -207,10 +314,10 @@ try {
                 Write-Host "PASSED $phaseName (task=$($health.evidence.job.task_id))"
             } elseif ($health.state -eq 'blocked') {
                 Write-Host "BLOCKED $phaseName stage=$($health.stage)（提交被环境/目录显式拒绝，证据见 $smokeRoot）"
-                $exitCode = 3
+                Set-PaddleOutcome 'blocked'
             } else {
                 Write-Host "FAILED  $phaseName stage=$($health.stage) $($health.error)"
-                $exitCode = 1
+                Set-PaddleOutcome 'failed'
             }
         }
     }

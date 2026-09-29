@@ -376,6 +376,9 @@ public sealed partial class MainWindow
         pipeline_id = pipelineId,
         engine = observed.Snapshot.Pipeline?.Engine?.ToString(),
         options = options,
+        // 明确局限：这里是 job 请求侧 wire 记录，证明选项随请求到达
+        // supervisor 并归属该 job；不等于 worker 内部消费证据。
+        options_evidence_note = "request-side wire record; worker-side consumption not proven by this smoke",
         environment_id = observed.Snapshot.EnvironmentId,
         environment_revision = observed.Snapshot.EnvironmentRevision,
         summary = observed.Snapshot.Summary,
@@ -406,6 +409,11 @@ public sealed partial class MainWindow
         "!!document.querySelector('.structured-formula .formula-preview')");
       ui["image_block_present"] = await PaddleSmokeDomBoolAsync(
         "!!document.querySelector('.structured-result img')");
+      string blocksCount = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+        "document.querySelectorAll('.structured-result ol.structured-blocks li').length");
+      ui["structured_blocks_count"] = int.Parse(
+        blocksCount, System.Globalization.CultureInfo.InvariantCulture);
+      await AssertPaddleStructureEvidenceAsync(mode, ui);
       ui["copies"] = await ClickPaddleCopyButtonsAsync(tokens);
       var exports = new List<object?>();
       foreach (string label in exportButtons)
@@ -448,6 +456,49 @@ public sealed partial class MainWindow
         gpu = "UNVERIFIED",
       },
     };
+  }
+
+  /// <summary>
+  /// 结构级断言（不硬编码识别精度）：table 模式必须有含单元格的结构化
+  /// 表格预览；formula 模式必须有可复制 LaTeX 且（已渲染 或 明确保留
+  /// 原文的渲染失败提示）；structure/VL 模式必须有真实版面区块，不允
+  /// 许 0 结构却 passed。
+  /// </summary>
+  private async Task AssertPaddleStructureEvidenceAsync(
+    string mode, Dictionary<string, object?> ui)
+  {
+    switch (mode)
+    {
+      case "paddle_table":
+        if (ui.GetValueOrDefault("structured_table_present") is not true)
+          throw new InvalidOperationException(
+            "paddle_table finished without a structured table preview.");
+        if (!await PaddleSmokeDomBoolAsync(
+              "document.querySelectorAll('.structured-result .structured-table-scroll table td, " +
+              ".structured-result .structured-table-scroll table th').length > 0"))
+          throw new InvalidOperationException("paddle_table table preview has no cells.");
+        break;
+      case "paddle_formula":
+        if (ui.GetValueOrDefault("formula_latex_present") is not true)
+          throw new InvalidOperationException(
+            "paddle_formula finished without copyable LaTeX.");
+        if (ui.GetValueOrDefault("formula_rendered") is not true)
+        {
+          string? structuredText = await PaddleSmokeDomTextAsync(".structured-result");
+          bool renderErrorKept = structuredText?.Contains(
+            "公式无法渲染", StringComparison.Ordinal) ?? false;
+          if (!renderErrorKept)
+            throw new InvalidOperationException(
+              "paddle_formula LaTeX neither rendered nor retained with an explicit render error.");
+        }
+        break;
+      case "paddle_structure":
+      case "paddle_document_vl":
+        if (ui.GetValueOrDefault("structured_blocks_count") is not int count || count < 1)
+          throw new InvalidOperationException(
+            $"{mode} finished without structured layout blocks.");
+        break;
+    }
   }
 
   /// <summary>
@@ -775,7 +826,8 @@ public sealed partial class MainWindow
   internal sealed class SyntheticFixtureRegionPicker : IScreenRegionPicker
   {
     internal sealed record CaptureEvidence(
-      string Fixture, int Width, int Height, long WhitePixels, long NonWhitePixels);
+      string Fixture, int Width, int Height, long WhitePixels, long NonWhitePixels,
+      double FitScale);
 
     internal static CaptureEvidence? LastCapture { get; private set; }
 
@@ -794,9 +846,10 @@ public sealed partial class MainWindow
             new Image
             {
               Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(fixture)),
-              Stretch = Stretch.None,
-              HorizontalAlignment = HorizontalAlignment.Left,
-              VerticalAlignment = VerticalAlignment.Top,
+              // Uniform：按工作区适配等比缩放（fit=1 时仍为像素 1:1）。
+              Stretch = Stretch.Uniform,
+              HorizontalAlignment = HorizontalAlignment.Center,
+              VerticalAlignment = VerticalAlignment.Center,
             },
           },
         },
@@ -809,12 +862,30 @@ public sealed partial class MainWindow
         uint dpi = PaddleSmokeNative.GetDpiForWindow(handle);
         double scale = dpi / 96.0;
         (int width, int height) = PngPixelSize(fixture);
-        // 物理像素外框（含标题栏/边框余量），确保高 DPI 下图像完整落在
-        // 客户区内；捕获目标为整个客户区，多余部分是白色边距。
+        // 按实际显示器工作区适配：大图（如 1700x2200 混排页）在高 DPI
+        // 下 1:1 物理尺寸可能超出屏幕；用 Stretch.Uniform 等比缩到
+        // 可用区内，fixture 完整可见且捕获始终只覆盖自身客户区，
+        // 不读取真实桌面背景。
+        RectInt32 work = DisplayArea.GetFromWindowId(
+          window.AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
+        int maxClientWidth = Math.Max(160, work.Width - 80);
+        int maxClientHeight = Math.Max(160, work.Height - 80);
+        double physicalWidth = width * scale;
+        double physicalHeight = height * scale;
+        double fitScale = Math.Min(1.0,
+          maxClientWidth / physicalWidth, maxClientHeight / physicalHeight);
+        int targetClientWidth = Math.Max(64, (int)Math.Ceiling(physicalWidth * fitScale));
+        int targetClientHeight = Math.Max(64, (int)Math.Ceiling(physicalHeight * fitScale));
+        // 预留标题栏/边框余量（DPI 缩放）；超出目标的客户区为白色边距，
+        // Uniform 居中保持比例完整显示 fixture。外框整体钳制在工作区内，
+        // 客户区因此不小于 fitScale 目标时 fixture 1:1，略小时 Uniform 再
+        // 等比缩小，始终完整可见。
+        int chromeWidth = (int)Math.Ceiling(32 * scale) * 2;
+        int chromeHeight = (int)Math.Ceiling(96 * scale);
+        int outerWidth = Math.Min(targetClientWidth + chromeWidth, work.Width - 60);
+        int outerHeight = Math.Min(targetClientHeight + chromeHeight, work.Height - 60);
         window.AppWindow.MoveAndResize(new RectInt32(
-          60, 60,
-          Math.Max(64, (int)Math.Ceiling(width * scale)) + 96,
-          Math.Max(64, (int)Math.Ceiling(height * scale)) + 144));
+          work.X + 30, work.Y + 30, outerWidth, outerHeight));
         await Task.Delay(200, cancellationToken);
         if (!PaddleSmokeNative.GetClientRect(handle, out PaddleSmokeNative.Rect client))
           throw new InvalidOperationException("Fixture window client bounds are unavailable.");
@@ -844,14 +915,16 @@ public sealed partial class MainWindow
             long total = (long)bounds.Width * bounds.Height;
             if (nonWhite >= 2000 && nonWhite <= total * 6 / 10)
             {
-              LastCapture = new CaptureEvidence(fixture, frame.Width, frame.Height, white, nonWhite);
+              LastCapture = new CaptureEvidence(
+                fixture, frame.Width, frame.Height, white, nonWhite, fitScale);
               selection = new ScreenRegionSelection(bounds, pixels, frame.Stride);
               break;
             }
             if (attempt == 59)
               throw new InvalidOperationException(
                 $"Fixture pixels did not render on screen: nonWhite={nonWhite}, " +
-                $"white={white}, bounds={bounds.Width}x{bounds.Height}, dpi={dpi}.");
+                $"white={white}, bounds={bounds.Width}x{bounds.Height}, dpi={dpi}, " +
+                $"fitScale={fitScale:0.###}.");
             await Task.Delay(250, cancellationToken);
           }
         }

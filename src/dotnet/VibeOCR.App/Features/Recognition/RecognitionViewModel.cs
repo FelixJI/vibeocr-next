@@ -22,7 +22,7 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     private string? _taskEngine;
     private RecognitionModeOption? _taskRecognitionMode;
     private MineruConfig? _taskMineruConfig;
-    private IReadOnlyDictionary<string, System.Text.Json.JsonElement>? _taskOptions;
+    private PaddleModeOptions? _taskOptions;
 
     public RecognitionViewModel(
         IInferenceClient inference,
@@ -60,8 +60,10 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 绑定任务级识别模式及其类型化 MinerU 4 配置（仅目录声明
-    /// ocr.mineru-config.v1 时由宿主提供；null 完全省略 mineru 块）。
+    /// 绑定任务级识别模式、其类型化 MinerU 4 配置与原始 typed 模式选项
+    /// （仅目录声明 ocr.mineru-config.v1 时由宿主提供；null 完全省略
+    /// mineru 块）。选项在提交冻结点按绑定模式严格 ToWire：不支持或
+    /// 越界字段明确拒绝提交，不静默丢弃（#110 AC2）。
     /// 提交时若 TaskEngine 已显式选择模式而 mode 未能绑定（目录缺失/环境
     /// 切换），EffectiveEngine 会拒绝提交，不静默回退通用文字识别。
     /// </summary>
@@ -70,7 +72,7 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         MineruConfig? mineruConfig = null,
         PaddleModeOptions? options = null)
     {
-        _taskOptions = taskMode is null ? null : options?.ProjectWire(taskMode);
+        _taskOptions = taskMode is null ? null : options;
         _taskRecognitionMode = taskMode;
         _taskMineruConfig = taskMode is null ? null : mineruConfig;
     }
@@ -170,7 +172,23 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         string pipeline = recognize ? EffectivePipeline : Pipeline;
         OcrEngine? engine = recognize ? EffectiveEngine : null;
         MineruConfig? mineru = _taskMineruConfig;
-        IReadOnlyDictionary<string, System.Text.Json.JsonElement>? options = _taskOptions;
+        // 提交冻结点（输入 await 前）：按冻结的模式对原始 typed 选项严格
+        // ToWire；不支持或越界字段在这里明确拒绝整个提交，不静默丢弃后
+        // 仍提交（#110 AC2）。状态展示过滤走 ProjectWire，与此分开。
+        IReadOnlyDictionary<string, System.Text.Json.JsonElement>? options = null;
+        if (recognize && _taskOptions is not null)
+        {
+            try
+            {
+                options = _taskOptions.ToWire(_taskRecognitionMode!);
+            }
+            catch (ArgumentException error)
+            {
+                TerminalState = JobState.Failed;
+                Status = $"识别选项无效，已拒绝提交：{error.Message}";
+                return;
+            }
+        }
         long generation = Interlocked.Increment(ref _generation);
         CancellationTokenSource? previous = Interlocked.Exchange(
             ref _activeRun,

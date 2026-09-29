@@ -162,3 +162,30 @@ it("previews image assets on chart and seal blocks", () => {
   );
   expect(screen.getByText("图片不可用：资产已过期")).toBeInTheDocument();
 });
+
+it("orders table cells by column and ignores malformed cell entries", () => {
+  render(
+    <StructuredResult
+      source={JSON.stringify([
+        {
+          type: "table",
+          table: {
+            schema_version: 1,
+            row_count: 1,
+            column_count: 2,
+            cells: [
+              null,
+              { row: 0, column: 1, rowspan: 1, colspan: 1, text: "right" },
+              { row: 0, column: 0, rowspan: 1, colspan: 1, text: "left" },
+            ],
+          },
+        },
+      ])}
+      onCopy={vi.fn(async () => true)}
+    />,
+  );
+  expect(screen.getAllByRole("cell").map((cell) => cell.textContent)).toEqual([
+    "left",
+    "right",
+  ]);
+});

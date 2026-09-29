@@ -5,6 +5,7 @@
 // maps typed outcomes by client item key rather than response position.
 using System.Text.Json;
 using VibeOCR.App.Features.Batch;
+using VibeOCR.App.Features.Recognition;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
@@ -79,6 +80,42 @@ public sealed class BatchViewModelSupervisorTests
         Assert.Equal(JobKind.MineruParse, fake.LastRequest?.Kind);
         Assert.Null(fake.LastRequest?.Pipeline.Engine);
         Assert.Equal(MineruTier.Basic, fake.LastRequest?.Pipeline.Mineru?.Tier);
+    }
+
+    [Fact]
+    public async Task UnsupportedModeOptionRejectsBatchSubmissionInsteadOfSilentDrop()
+    {
+        // 回归契约（#110 AC2）：选项违反模式合同时，整批提交明确拒绝，
+        // 不静默丢弃不支持字段后仍提交。
+        var files = new FakeBatchFileSource();
+        var fake = new FakeBatchInferenceClient();
+        var viewModel = new BatchViewModel(fake, files);
+        viewModel.SetRecognitionMode(new RecognitionModeOption(
+            "paddle_formula",
+            "specialized",
+            "FORMULA_RECOGNITION",
+            null,
+            "advanced_component",
+            "ready",
+            null,
+            "paddleocr-cpu",
+            ["formula_recognition_batch_size"],
+            "model_residency",
+            true,
+            true,
+            true,
+            true), options: new PaddleModeOptions { UseTableRecognition = true });
+        viewModel.AddFiles([CreateTempPng("bad")]);
+
+        await viewModel.StartAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, fake.SubmitCalls);
+        Assert.Equal(BatchItemState.Failed, viewModel.Items[0].State);
+        Assert.StartsWith("INVALID_MODE_OPTIONS", viewModel.Items[0].Error);
+        Assert.Contains("use_table_recognition", viewModel.Items[0].Error);
+        Assert.Equal(1, viewModel.FailedCount);
+        Assert.Equal(0, viewModel.CompletedCount);
+        Assert.False(viewModel.IsRunning);
     }
 
     [Fact]

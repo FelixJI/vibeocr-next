@@ -23,7 +23,7 @@ public sealed class BatchViewModel(
     private RecognitionModeOption? _recognitionMode;
     private MineruConfig? _mineruConfig;
     private string? _taskModeId;
-    private IReadOnlyDictionary<string, System.Text.Json.JsonElement>? _options;
+    private PaddleModeOptions? _options;
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public ObservableCollection<BatchItemViewModel> Items { get; } = [];
@@ -38,6 +38,8 @@ public sealed class BatchViewModel(
     /// 必须携带目录默认 tier 的 typed 配置，不发送遗留 engine 选项。
     /// taskModeId 是用户显式选择的模式 id：非空而 mode 为 null（目录缺失/
     /// 环境切换）时 StartAsync 必须拒绝，不静默回退通用文字 OCR。
+    /// 选项原样冻结，提交时按绑定模式严格 ToWire：不支持或越界字段明确
+    /// 拒绝整批提交，不静默丢弃（#110 AC2）。
     /// </summary>
     public void SetRecognitionMode(
         RecognitionModeOption? mode,
@@ -45,7 +47,7 @@ public sealed class BatchViewModel(
         PaddleModeOptions? options = null,
         string? taskModeId = null)
     {
-        _options = mode is null ? null : options?.ProjectWire(mode);
+        _options = mode is null ? null : options;
         _recognitionMode = mode;
         _mineruConfig = mode is null ? null : mineruConfig;
         _taskModeId = taskModeId;
@@ -73,7 +75,26 @@ public sealed class BatchViewModel(
         string pipeline = _recognitionMode?.PipelineId ?? "OCR";
         OcrEngine? engine = _recognitionMode?.Engine;
         MineruConfig? mineru = _mineruConfig;
-        IReadOnlyDictionary<string, System.Text.Json.JsonElement>? options = _options;
+        // 提交冻结点（读取文件 await 前）：按绑定的模式对原始 typed 选项
+        // 严格 ToWire；不支持或越界字段明确拒绝整批提交并按既有条目失败
+        // seam 呈现精确原因，不静默丢弃后仍提交（#110 AC2）。
+        IReadOnlyDictionary<string, System.Text.Json.JsonElement>? options;
+        try
+        {
+            options = _options?.ToWire(_recognitionMode!);
+        }
+        catch (ArgumentException error)
+        {
+            FailedCount = 0;
+            foreach (BatchItemViewModel item in Items.Where(
+                item => item.State is BatchItemState.Pending or BatchItemState.Failed or BatchItemState.Cancelled))
+            {
+                item.Error = $"INVALID_MODE_OPTIONS: {error.Message}";
+                item.State = BatchItemState.Failed;
+                IncrementFailed();
+            }
+            return;
+        }
         BatchItemViewModel[] pending = Items.Where(item => item.State is BatchItemState.Pending or BatchItemState.Failed or BatchItemState.Cancelled).ToArray();
         if (pending.Length == 0) return;
         long generation = Interlocked.Increment(ref _generation);

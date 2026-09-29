@@ -438,7 +438,6 @@ def test_vl_keeps_image_block_without_ocr_text(tmp_path):
     from types import SimpleNamespace
 
     from PIL import Image
-
     from vibeocr.runtime.recognition.result_assets import ResultAssetSink
 
     block = SimpleNamespace(

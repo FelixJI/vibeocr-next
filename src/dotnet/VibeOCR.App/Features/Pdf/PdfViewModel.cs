@@ -24,7 +24,7 @@ public sealed class PdfViewModel(
     private int _selectedPage = -1;
     private RecognitionModeOption? _recognitionMode;
     private string? _taskModeId;
-    private IReadOnlyDictionary<string, System.Text.Json.JsonElement>? _options;
+    private PaddleModeOptions? _options;
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public ObservableCollection<PdfPageViewModel> Pages { get; } = [];
@@ -40,13 +40,15 @@ public sealed class PdfViewModel(
     /// 绑定 PDF OCR 的任务级识别模式；taskModeId 是用户显式选择的模式 id。
     /// 非空而 mode 为 null（目录缺失/环境切换）时 StartOcrAsync 必须拒绝，
     /// 不静默回退通用文字 OCR——PDF 与单次/批量共享同一模式合同。
+    /// 选项原样冻结，提交时按绑定模式严格 ToWire：不支持或越界字段明确
+    /// 拒绝提交，不静默丢弃（#110 AC2）。
     /// </summary>
     public void SetRecognitionMode(
         RecognitionModeOption? mode,
         PaddleModeOptions? options = null,
         string? taskModeId = null)
     {
-        _options = mode is null ? null : options?.ProjectWire(mode);
+        _options = mode is null ? null : options;
         _recognitionMode = mode;
         _taskModeId = taskModeId;
     }
@@ -120,7 +122,19 @@ public sealed class PdfViewModel(
         }
         string pipeline = _recognitionMode?.PipelineId ?? "OCR";
         OcrEngine? engine = _recognitionMode?.Engine;
-        IReadOnlyDictionary<string, System.Text.Json.JsonElement>? options = _options;
+        // 提交冻结点（页面渲染 await 前）：按绑定的模式对原始 typed 选项
+        // 严格 ToWire；不支持或越界字段在这里明确拒绝提交，不静默丢弃后
+        // 仍渲染/提交（#110 AC2）。
+        IReadOnlyDictionary<string, System.Text.Json.JsonElement>? options;
+        try
+        {
+            options = _options?.ToWire(_recognitionMode!);
+        }
+        catch (ArgumentException error)
+        {
+            Status = $"识别选项无效，已拒绝提交：{error.Message}";
+            return;
+        }
         CancelActiveRun();
         long generation = Volatile.Read(ref _generation);
         var run = CancellationTokenSource.CreateLinkedTokenSource(ct);

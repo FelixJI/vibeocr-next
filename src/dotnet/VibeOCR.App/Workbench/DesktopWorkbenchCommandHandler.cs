@@ -1558,7 +1558,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       RecognitionStatusCode(recognition),
       input,
       result,
-      StructuredResult: structured);
+      structured: structured);
   }
 
   private RecognitionWorkbenchState CancelRecognition()

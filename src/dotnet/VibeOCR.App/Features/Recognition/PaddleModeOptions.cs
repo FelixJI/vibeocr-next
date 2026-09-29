@@ -89,9 +89,12 @@ public sealed record PaddleModeOptions
     }
 
     /// <summary>
-    /// 提交/状态投影用的安全投影：持久化的选项在环境切换后可能不再被当前
-    /// catalog 支持（旧选项被移除、范围收紧）；不满足当前模式合同的字段被
-    /// 丢弃而不是抛异常——模式本身绝不因此静默降级，仅选项回到 Runtime 默认。
+    /// 状态展示投影专用（如工作台模式信息）：持久化的选项在环境切换后
+    /// 可能不再被当前 catalog 支持（旧选项被移除、范围收紧）；不满足
+    /// 当前模式合同的字段被过滤而不是抛异常——模式本身绝不因此静默
+    /// 降级，仅展示回到 Runtime 默认。任务提交禁止使用本投影：必须以
+    /// 冻结模式对原始 typed 选项调用 <see cref="ToWire"/>，不支持或
+    /// 越界字段明确拒绝（#110 AC2）。
     /// </summary>
     internal IReadOnlyDictionary<string, JsonElement> ProjectWire(RecognitionModeOption mode)
     {

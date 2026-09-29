@@ -133,6 +133,52 @@ public sealed class RecognitionViewModelSupervisorTests
         Assert.Equal(2, inference.LastRequest.Pipeline.Options["formula_recognition_batch_size"].GetInt32());
     }
 
+    [Fact]
+    public async Task UnsupportedModeOptionRejectsSubmissionInsteadOfSilentDrop()
+    {
+        // 回归契约（#110 AC2）：绑定的选项含当前模式不支持的字段时，
+        // 提交必须明确拒绝并携带精确原因，而不是静默丢弃后仍提交。
+        var inference = new FakeInferenceClient("must not submit");
+        var inputs = new StubInputService();
+        var viewModel = new RecognitionViewModel(inference, inputs);
+        var mode = new RecognitionModeOption("paddle_formula", "specialized", "FORMULA_RECOGNITION",
+            null, "advanced_component", "ready", null, "paddleocr-cpu",
+            ["formula_recognition_batch_size"], "model_residency", true, true, true, true);
+        viewModel.SetRecognitionMode(mode, options: new PaddleModeOptions
+        {
+            FormulaRecognitionBatchSize = 2,
+            UseTableRecognition = true, // 不属于该模式合同
+        });
+
+        await viewModel.RecognizeViaSupervisorAsync(ct => inputs.PickFileAsync(ct), CancellationToken.None);
+
+        Assert.Equal(0, inference.SubmitCalls);
+        Assert.Equal(JobState.Failed, viewModel.TerminalState);
+        Assert.StartsWith("识别选项无效，已拒绝提交", viewModel.Status);
+        Assert.Contains("use_table_recognition", viewModel.Status);
+        Assert.False(viewModel.HasResult);
+    }
+
+    [Fact]
+    public async Task OutOfRangeModeOptionRejectsSubmissionWithPreciseParameter()
+    {
+        // 回归契约（#110 AC2）：越界的范围值同样明确拒绝并点名参数。
+        var inference = new FakeInferenceClient("must not submit");
+        var inputs = new StubInputService();
+        var viewModel = new RecognitionViewModel(inference, inputs);
+        var mode = new RecognitionModeOption("paddle_formula", "specialized", "FORMULA_RECOGNITION",
+            null, "advanced_component", "ready", null, "paddleocr-cpu",
+            ["formula_recognition_batch_size"], "model_residency", true, true, true, true);
+        viewModel.SetRecognitionMode(mode, options: new PaddleModeOptions { FormulaRecognitionBatchSize = 0 });
+
+        await viewModel.RecognizeViaSupervisorAsync(ct => inputs.PickFileAsync(ct), CancellationToken.None);
+
+        Assert.Equal(0, inference.SubmitCalls);
+        Assert.Equal(JobState.Failed, viewModel.TerminalState);
+        Assert.StartsWith("识别选项无效，已拒绝提交", viewModel.Status);
+        Assert.Contains("FormulaRecognitionBatchSize", viewModel.Status);
+    }
+
     [Theory]
     [InlineData("{\"use_doc_unwarping\":1}")]
     [InlineData("{\"unrecognized\":true}")]

@@ -71,6 +71,8 @@ function tableCells(block: Block): Cell[] {
     return [];
   return table.cells.filter(
     (cell) =>
+      cell !== null &&
+      typeof cell === "object" &&
       Number.isSafeInteger(cell.row) &&
       Number.isSafeInteger(cell.column) &&
       Number.isSafeInteger(cell.rowspan) &&
@@ -185,6 +187,7 @@ export function StructuredResult({
                     <tr key={row}>
                       {tableCells(activeTable.block)
                         .filter((cell) => cell.row === row)
+                        .sort((a, b) => a.column - b.column)
                         .map((cell, index) =>
                           cell.is_header ? (
                             <th

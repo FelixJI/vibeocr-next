@@ -532,14 +532,14 @@ public sealed class MineruConnectionWorkbenchTests
       Assert.Null((await handler.ExecuteAsync(new RefreshRuntimeCommand(), cancellationToken)).Error);
       WorkbenchCommandOutcome start = await handler.ExecuteAsync(
         new StartBatchCommand(), cancellationToken);
-      Assert.Equal("desktop_command_failed", start.Error?.Code);
+      Assert.Equal("recognition_mode_unavailable", start.Error?.Code);
       Assert.Empty(start.States);
 
       Assert.Null((await handler.ExecuteAsync(
         new SetBatchTaskEngineCommand(null), cancellationToken)).Error);
       WorkbenchCommandOutcome select = await handler.ExecuteAsync(
         new SetBatchTaskEngineCommand("mineru_document"), cancellationToken);
-      Assert.Equal("desktop_command_failed", select.Error?.Code);
+      Assert.Equal("recognition_mode_unavailable", select.Error?.Code);
       Assert.Empty(select.States);
     }
     finally
@@ -591,7 +591,7 @@ public sealed class MineruConnectionWorkbenchTests
       AssertMineruMode(recognitionState, "unavailable", requiresDownload: false);
       AssertMineruMode(batchState, "unavailable", requiresDownload: false);
       Assert.Null((await handler.ExecuteAsync(new SetBatchWindowCommand(0), cancellationToken)).Error);
-      Assert.Equal("desktop_command_failed", (await handler.ExecuteAsync(
+      Assert.Equal("recognition_mode_unavailable", (await handler.ExecuteAsync(
         new StartBatchCommand(), cancellationToken)).Error?.Code);
 
       Assert.Null((await handler.ExecuteAsync(
@@ -603,8 +603,8 @@ public sealed class MineruConnectionWorkbenchTests
         new SetTaskEngineCommand("mineru_document"), cancellationToken);
       WorkbenchCommandOutcome batch = await handler.ExecuteAsync(
         new SetBatchTaskEngineCommand("mineru_document"), cancellationToken);
-      Assert.Equal("desktop_command_failed", recognition.Error?.Code);
-      Assert.Equal("desktop_command_failed", batch.Error?.Code);
+      Assert.Equal("recognition_mode_unavailable", recognition.Error?.Code);
+      Assert.Equal("recognition_mode_unavailable", batch.Error?.Code);
 
       Assert.Null((await handler.ExecuteAsync(new RefreshRuntimeCommand(), cancellationToken)).Error);
       recognitionState = Assert.IsType<RecognitionWorkbenchState>(

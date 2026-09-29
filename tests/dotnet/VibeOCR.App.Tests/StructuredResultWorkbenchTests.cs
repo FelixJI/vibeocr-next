@@ -61,6 +61,17 @@ public sealed class StructuredResultWorkbenchTests
       notATable.RootElement, out _, out _));
     Assert.Null(tsv);
     Assert.Null(html);
+    foreach (string malformed in new[]
+    {
+      """{"type":42,"table":{}}""",
+      """{"type":"table","table":{"schema_version":1,"row_count":1.5,"column_count":1,"cells":[]}}""",
+      """{"type":"table","table":{"schema_version":1,"row_count":2147483648,"column_count":1,"cells":[]}}""",
+      """{"type":"table","table":{"schema_version":1,"row_count":1,"column_count":1,"cells":[{"row":2147483647,"column":0,"rowspan":2,"colspan":1,"text":"x"}]}}""",
+    })
+    {
+      using JsonDocument invalid = JsonDocument.Parse(malformed);
+      Assert.False(StructuredResultClipboard.TryBuildTable(invalid.RootElement, out _, out _));
+    }
   }
 
   [Fact]
