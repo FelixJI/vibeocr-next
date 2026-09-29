@@ -102,6 +102,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private RecognitionTextLayerState? screenshotTextLayer;
   private long screenshotTextGeneration;
   private int captureInFlight;
+  private int environmentSwitching;
   private BatchViewModel? batch;
   private string? batchTaskEngine;
   private bool batchExportIncomplete;
@@ -350,7 +351,8 @@ public sealed class DesktopWorkbenchCommandHandler :
         CancelEnvironmentInstallCommand => CancelEnvironmentInstall(),
         InvalidateEnvironmentPlanCommand => InvalidateEnvironmentPlan(),
         SwitchEnvironmentCommand switchEnvironment => StartEnvironmentOperation(
-          environment => environment.SwitchAsync(switchEnvironment.EnvironmentId, cancellationToken)),
+          environment => environment.SwitchAsync(switchEnvironment.EnvironmentId, cancellationToken),
+          refreshCatalog: true),
         DeleteEnvironmentCommand deleteEnvironment => await RunEnvironmentAsync(
           environment => environment.DeleteAsync(deleteEnvironment.EnvironmentId, cancellationToken), cancellationToken),
         RepairEmptyEnvironmentCommand repair => await RunEnvironmentAsync(
@@ -2261,17 +2263,53 @@ public sealed class DesktopWorkbenchCommandHandler :
   }
 
   private SettingsWorkbenchState? StartEnvironmentOperation(
-    Func<ManagedEnvironmentSettings, Task> action)
+    Func<ManagedEnvironmentSettings, Task> action,
+    bool refreshCatalog = false)
   {
     settings ??= CreateSettings();
     ManagedEnvironmentSettings environments = settings.Environments
       ?? throw new InvalidOperationException("运行环境管理器不可用。");
+    if (refreshCatalog)
+    {
+      Interlocked.Exchange(ref environmentSwitching, 1);
+      settings.ClearSelection();
+    }
     return PublishStartThenTrack(SettingsState(settings), async () =>
     {
-      try { await action(environments); }
+      bool completed = false;
+      try
+      {
+        if (refreshCatalog)
+          await RefreshRecognitionCatalogStatesAsync(CancellationToken.None);
+        await action(environments);
+        completed = true;
+      }
       catch (Exception error) when (error is not OperationCanceledException)
       {
         AppLog.Warn($"Environment operation failed: {error.GetType().Name}: {error.Message}");
+      }
+      finally
+      {
+        if (refreshCatalog)
+        {
+          try
+          {
+            if (Volatile.Read(ref disposed) == 0)
+            {
+              if (completed) await RefreshRecognitionCatalogAsync(CancellationToken.None);
+              else
+              {
+                settings.ClearSelection();
+                await RefreshRecognitionCatalogStatesAsync(CancellationToken.None);
+              }
+            }
+          }
+          catch (Exception error) when (error is not OperationCanceledException)
+          {
+            AppLog.Warn($"Recognition catalog refresh failed: {error.GetType().Name}: {error.Message}");
+          }
+          finally { Interlocked.Exchange(ref environmentSwitching, 0); }
+        }
       }
     });
   }
@@ -2440,6 +2478,26 @@ public sealed class DesktopWorkbenchCommandHandler :
       TaskEngine = recognition.TaskEngine,
     });
     StateChanged?.Invoke(CurrentBatchState());
+    StateChanged?.Invoke(pdf is null
+      ? new PdfWorkbenchState(false, "pdf.empty", 0, -1,
+          Engines: PdfEngines(), TaskEngine: pdfTaskEngine)
+      : PdfState(pdf));
+  }
+
+  internal async Task RefreshRecognitionCatalogAsync(CancellationToken cancellationToken)
+  {
+    settings ??= CreateSettings();
+    settings.ClearSelection();
+    try
+    {
+      if (inferenceAttached?.Invoke() != false)
+        await settings.RefreshSelectionAsync(cancellationToken);
+    }
+    finally
+    {
+      if (Volatile.Read(ref disposed) == 0)
+        await RefreshRecognitionCatalogStatesAsync(cancellationToken);
+    }
   }
 
   private BatchWorkbenchState CurrentBatchState() => batch is null
@@ -2587,6 +2645,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private async Task<bool> EnsureSelectionLoadedAsync(CancellationToken cancellationToken)
   {
     settings ??= CreateSettings();
+    if (Volatile.Read(ref environmentSwitching) != 0) return false;
     if (inferenceAttached?.Invoke() == false)
     {
       return false;

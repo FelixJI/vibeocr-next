@@ -14,6 +14,7 @@ using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 using VibeOCR.Platform.Windows;
+using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 using Xunit;
 
 namespace VibeOCR.App.Tests;
@@ -22,6 +23,58 @@ public sealed class DesktopWorkbenchCommandHandlerTests
 {
   private static readonly byte[] AnnotationPng = Convert.FromBase64String(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+
+  [Fact]
+  public async Task SwitchEnvironmentPublishesNewRecognitionCatalogToAllPages()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-switch-catalog-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      var inference = new SwitchCatalogInferenceClient { Health = SwitchHealth(Wire.OcrEngineId.Rapidocr) };
+      var manager = new SwitchCatalogManager();
+      var environments = new ManagedEnvironmentSettings(manager, (id, _) =>
+      {
+        manager.ActiveId = id;
+        inference.Health = SwitchHealth(Wire.OcrEngineId.Paddleocr);
+        return Task.CompletedTask;
+      }, () => null, new ProductMaintenanceCoordinator());
+      var settings = new SettingsViewModel(inference, environments: environments);
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      RuntimeSelectionService previous = Assert.IsType<RuntimeSelectionService>(settings.Selection);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        () => new RecognitionViewModel(inference, new SignallingInputService()),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => settings, CreateShellViewModel,
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker, root, static () => 0, annotations);
+      var published = new List<WorkbenchState>();
+      var refreshed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      handler.StateChanged += state =>
+      {
+        published.Add(state);
+        if (state is PdfWorkbenchState { Engines: { } engines } &&
+            engines.Any(choice => choice.Engine == "paddleocr"))
+          refreshed.TrySetResult();
+      };
+
+      await handler.ExecuteAsync(new SwitchEnvironmentCommand("paddle"),
+        TestContext.Current.CancellationToken);
+      await refreshed.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+      Assert.NotSame(previous, settings.Selection);
+      Assert.Contains(published, state => state is RecognitionWorkbenchState { Engines: { } engines } &&
+        engines.Any(choice => choice.Engine == "paddleocr"));
+      Assert.Contains(published, state => state is BatchWorkbenchState { Engines: { } engines } &&
+        engines.Any(choice => choice.Engine == "paddleocr"));
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
 
   [Fact]
   public async Task AnnotatedImageCopyConsumesOpaqueUploadOnlyAfterNativeSuccess()
@@ -1555,6 +1608,60 @@ public sealed class DesktopWorkbenchCommandHandlerTests
 
   private static ShellViewModel CreateShellViewModel() =>
     new(new NoopHotkeyRegistrar(), new NoopStartupRegistrar());
+
+  private static Wire.Health SwitchHealth(Wire.OcrEngineId engine) => new()
+  {
+    SchemaVersion = 2, InstanceId = engine.ToString(), ProtocolVersion = 2,
+    Ready = true, Draining = false,
+    Capabilities = [RuntimeSelectionService.EngineSelectionCapability],
+    CapabilityDescriptors = [new Wire.CapabilityDescriptor
+    {
+      Name = RuntimeSelectionService.EngineSelectionCapability,
+      Lifecycle = "active", IntroducedIn = "2.6.0",
+      DeprecatedIn = null, SunsetAt = null, Replacement = null,
+      OcrEngineCatalog = new Wire.OcrEngineCatalog { Engines = [new Wire.OcrEngineDescriptor
+      {
+        Id = engine, Availability = Wire.OcrEngineAvailability.Ready,
+        IncludedInBase = true, ReasonCode = null, RequiredComponent = null,
+      }] },
+    }],
+  };
+
+  private sealed class SwitchCatalogInferenceClient : InferenceClientStub
+  {
+    public required Wire.Health Health { get; set; }
+    public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken) =>
+      Task.FromResult(Health);
+    public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>
+      Task.FromResult(new SettingsSnapshot());
+  }
+
+  private sealed class SwitchCatalogManager : IManagedEnvironmentClient
+  {
+    public string ActiveId { get; set; } = "rapid";
+    public Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default) =>
+      Task.FromResult(new ManagedEnvironmentList(ActiveId, 1, []));
+    public Task<ManagedEnvironment> CreateEnvironmentAsync(string name, CancellationToken cancellationToken = default) =>
+      throw new NotSupportedException();
+    public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(string? environmentId,
+      string? packageSourceId, string? modelSourceId, CancellationToken cancellationToken = default) =>
+      throw new NotSupportedException();
+    public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(string environmentId,
+      string recipe, IReadOnlyList<string>? sourceIds = null, CancellationToken cancellationToken = default) =>
+      throw new NotSupportedException();
+    public Task<ManagedEnvironment> InstallEnvironmentAsync(ManagedEnvironmentPlan plan,
+      IReadOnlyList<string>? sourceIds = null, CancellationToken cancellationToken = default) =>
+      throw new NotSupportedException();
+    public Task<PreparedEnvironmentSwitch> PrepareEnvironmentSwitchAsync(string environmentId,
+      CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<CommittedEnvironmentSwitch> CommitEnvironmentSwitchAsync(PreparedEnvironmentSwitch prepared,
+      StartedEnvironmentHealth? startedHealth = null, CancellationToken cancellationToken = default) =>
+      throw new NotSupportedException();
+    public Task<ManagedEnvironment> RepairEmptyEnvironmentAsync(string environmentId,
+      CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task DeleteEnvironmentAsync(string environmentId,
+      CancellationToken cancellationToken = default) => throw new NotSupportedException();
+  }
 
   private static (ShellActionDispatcher Dispatcher, WindowsHotkeyRegistrar Registrar, List<FloatingToolbarSettings> Applied, TrackingSuspension Suspension, DispatchRecorder Dispatched) CreateShellActions(
     string root,

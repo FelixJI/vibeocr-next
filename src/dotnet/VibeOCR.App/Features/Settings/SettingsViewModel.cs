@@ -39,6 +39,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private readonly IInferenceClient _inference;
     private readonly SemaphoreSlim _settingsGate = new(1, 1);
     private long _generation;
+    private long _selectionGeneration;
     private bool _isBusy;
     private string _status = "正在读取设置";
     private string _backend = "cpu";
@@ -186,6 +187,16 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     public Task LoadSelectionAsync(CancellationToken cancellationToken) =>
         LoadSelectionSerializedAsync(forceReload: false, cancellationToken);
+
+    public Task RefreshSelectionAsync(CancellationToken cancellationToken) =>
+        LoadSelectionSerializedAsync(forceReload: true, cancellationToken);
+
+    public void ClearSelection()
+    {
+        Interlocked.Increment(ref _selectionGeneration);
+        _selection = null;
+        Volatile.Write(ref _recognitionSelection, null);
+    }
 
     /// <summary>
     /// Persist the per-kind source selection in Backend settings (the
@@ -454,8 +465,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                 // The restored Supervisor owns the current device and engine availability.
                 // Do not let recognition reuse the pre-maintenance catalog if refresh fails.
                 string outcome = Status;
-                _selection = null;
-                Volatile.Write(ref _recognitionSelection, null);
+                ClearSelection();
                 if (Maintenance.State.StatusCode == "succeeded") _selectionStaged = false;
                 await LoadSnapshotAsync(CancellationToken.None);
                 if (_selection is not null) Status = outcome;
@@ -511,6 +521,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             {
                 return;
             }
+            if (forceReload) ClearSelection();
             await LoadSelectionCoreAsync(cancellationToken);
         }
         finally
@@ -521,12 +532,14 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     private async Task LoadSelectionCoreAsync(CancellationToken cancellationToken)
     {
+        long selectionGeneration = Volatile.Read(ref _selectionGeneration);
         try
         {
             Wire.Health health = await _inference.GetHealthAsync(cancellationToken);
             RuntimeSelectionService selection = new(health);
             SettingsSnapshot settings = await _inference.GetSettingsAsync(cancellationToken);
             IReadOnlyList<string> selectedSourceIds = settings.DownloadSourceIds ?? [];
+            if (selectionGeneration != Volatile.Read(ref _selectionGeneration)) return;
 
             // Commit one complete catalog snapshot only after every remote read
             // succeeds. Concurrent bootstrap/execution callers then observe the

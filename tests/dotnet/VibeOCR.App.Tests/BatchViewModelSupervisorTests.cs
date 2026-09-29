@@ -15,6 +15,19 @@ namespace VibeOCR.App.Tests;
 
 public sealed class BatchViewModelSupervisorTests
 {
+    [Theory]
+    [InlineData("xlsx", ".xlsx")]
+    [InlineData("docx", ".docx")]
+    public void OfficeBatchExportsKeepTheirFormatAndDistinctNames(string format, string extension)
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-export-{Guid.NewGuid():N}");
+        var reserved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(Path.Combine(root, "table" + extension),
+            BatchCommands.UniqueOutputPath(root, "table.png", format, reserved));
+        Assert.Equal(Path.Combine(root, "table_1" + extension),
+            BatchCommands.UniqueOutputPath(root, "table.jpg", format, reserved));
+    }
+
     [Fact]
     public async Task SupervisorPathSubmitsAllInputsAsOneJobAndMapsPerItemResults()
     {

@@ -312,6 +312,9 @@ public sealed partial class MainWindow : Window
     NavigateTo(destination);
   }
 
+  internal Task RefreshRecognitionCatalogAsync(CancellationToken cancellationToken) =>
+    commandHandler.RefreshRecognitionCatalogAsync(cancellationToken);
+
   internal async Task RecognizeScreenshotAsync()
   {
     NavigateTo("recognition");

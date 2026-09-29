@@ -44,7 +44,7 @@ public static class BatchCommands
 
     public static string UniqueOutputPath(string directory, string sourcePath, string format, ISet<string> reserved)
     {
-        string extension = format switch { "markdown" => ".md", "html" => ".html", _ => ".txt" };
+        string extension = format switch { "markdown" => ".md", "html" => ".html", "docx" => ".docx", "xlsx" => ".xlsx", _ => ".txt" };
         string stem = Path.GetFileNameWithoutExtension(sourcePath);
         string candidate = Path.Combine(directory, stem + extension);
         for (int suffix = 1; File.Exists(candidate) || !reserved.Add(candidate); suffix++) candidate = Path.Combine(directory, $"{stem}_{suffix}{extension}");

@@ -23,6 +23,10 @@ Goal #110 隔离候选专用 Paddle 五模式实机冒烟。
 .PARAMETER Modes
 默认五种 paddle 模式；可用子集逐个交付。
 
+.PARAMETER InputKinds
+额外真实输入入口：file/batch 使用表格模式，pdf 使用文档结构模式。
+默认不运行；可与 Modes 空数组组合单独执行。
+
 .PARAMETER ResumeRoot
 恢复模式：复用本脚本已创建的隔离根继续未完成的模式；与 ProductRoot/
 WorkRoot 互斥。已有 health 证据不覆盖（passed 保留跳过，failed/blocked
@@ -46,6 +50,8 @@ param(
         'paddle_text', 'paddle_table', 'paddle_formula',
         'paddle_structure', 'paddle_document_vl'
     ),
+    [ValidateSet("file", "batch", "pdf")]
+    [string[]]$InputKinds = @(),
     [int]$ModeTimeoutMinutes = 40,
     [int]$InstallTimeoutMinutes = 60,
     [switch]$IncludeWireless
@@ -192,6 +198,7 @@ foreach ($name in @(
     'VIBEOCR_SELF_TEST_SMOKE', 'VIBEOCR_SELF_TEST_INSTANCE',
     'VIBEOCR_PADDLE_SMOKE_HEALTH', 'VIBEOCR_PADDLE_SMOKE_PHASE',
     'VIBEOCR_PADDLE_SMOKE_MODE', 'VIBEOCR_PADDLE_SMOKE_PIPELINE',
+    'VIBEOCR_PADDLE_SMOKE_INPUT_KIND', 'VIBEOCR_PADDLE_SMOKE_SECOND_FIXTURE',
     'VIBEOCR_PADDLE_SMOKE_FIXTURE', 'VIBEOCR_PADDLE_SMOKE_OPTION_NAME',
     'VIBEOCR_PADDLE_SMOKE_OPTION_VALUE', 'VIBEOCR_PADDLE_SMOKE_OPTION_KIND',
     'VIBEOCR_PADDLE_SMOKE_TOKENS', 'VIBEOCR_PADDLE_SMOKE_EXPORT_BUTTONS',
@@ -310,6 +317,46 @@ try {
                 Set-PaddleOutcome 'failed'
             }
         }
+    }
+    foreach ($inputKind in $InputKinds) {
+        $inputMode = if ($inputKind -eq 'pdf') { 'paddle_structure' } else { 'paddle_table' }
+        $spec = $modeSpec[$inputMode]
+        $fixtureName = if ($inputKind -eq 'pdf') { 'document_mixed.pdf' } else { $spec.Fixture }
+        $phaseName = "paddle-input-$inputKind"
+        $healthPath = Join-Path $smokeRoot "$phaseName.json"
+        if (Test-Path -LiteralPath $healthPath -PathType Leaf) {
+            $health = Get-Content -LiteralPath $healthPath -Raw | ConvertFrom-Json
+            Write-Host "KEPT $phaseName state=$($health.state)"
+        } else {
+            foreach ($needed in @($fixtureName, 'table_wireless.png')) {
+                if (-not (Test-Path -LiteralPath (Join-Path $fixtures $needed) -PathType Leaf)) {
+                    throw "Input fixture missing: $needed"
+                }
+            }
+            $inputExports = Join-Path $exports "input-$inputKind"
+            New-Item -ItemType Directory -Path $inputExports -Force | Out-Null
+            $health = Invoke-PaddlePhase @{
+                'VIBEOCR_PADDLE_SMOKE_PHASE' = 'inputs'
+                'VIBEOCR_PADDLE_SMOKE_INPUT_KIND' = $inputKind
+                'VIBEOCR_PADDLE_SMOKE_MODE' = $inputMode
+                'VIBEOCR_PADDLE_SMOKE_PIPELINE' = $spec.Pipeline
+                'VIBEOCR_PADDLE_SMOKE_FIXTURE' = (Join-Path $fixtures $fixtureName)
+                'VIBEOCR_PADDLE_SMOKE_SECOND_FIXTURE' = (Join-Path $fixtures 'table_wireless.png')
+                'VIBEOCR_PADDLE_SMOKE_OPTION_NAME' = $spec.Option
+                'VIBEOCR_PADDLE_SMOKE_OPTION_VALUE' = $spec.Value
+                'VIBEOCR_PADDLE_SMOKE_OPTION_KIND' = $spec.Kind
+                'VIBEOCR_PADDLE_SMOKE_TOKENS' = $spec.Tokens
+                'VIBEOCR_PADDLE_SMOKE_EXPORT_BUTTONS' = $spec.Export
+                'VIBEOCR_PADDLE_SMOKE_EXPORT_DIR' = $inputExports
+                'VIBEOCR_PADDLE_SMOKE_TIMEOUT_MINUTES' = "$ModeTimeoutMinutes"
+            } $phaseName ($ModeTimeoutMinutes + 10)
+        }
+        $results += [pscustomobject]@{
+            phase = $phaseName; mode = $inputMode; fixture = $fixtureName
+            state = $health.state; stage = $health.stage; error = $health.error
+        }
+        Write-Host "$($health.state) $phaseName stage=$($health.stage) $($health.error)"
+        Set-PaddleOutcome $health.state
     }
 } finally {
     foreach ($entry in $previous.GetEnumerator()) {

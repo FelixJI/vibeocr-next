@@ -738,6 +738,18 @@ public sealed partial class App : Application
         if (connected && _managedSession is not null)
         {
             await RefreshEnvironmentSettingsAfterActivationAsync();
+            if (_window is not null)
+            {
+                try
+                {
+                    await _window.RefreshRecognitionCatalogAsync(_applicationShutdown.Token);
+                }
+                catch (OperationCanceledException) when (_applicationShutdown.IsCancellationRequested) { }
+                catch (Exception error)
+                {
+                    AppLog.Warn($"Recognition catalog refresh after attach failed: {error.Message}");
+                }
+            }
         }
         return connected;
     }

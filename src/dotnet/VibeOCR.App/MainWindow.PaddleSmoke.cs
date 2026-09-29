@@ -6,6 +6,8 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
+using VibeOCR.App.Features.Batch;
+using VibeOCR.App.Features.Pdf;
 using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Workbench;
 using VibeOCR.App.Services;
@@ -18,8 +20,8 @@ namespace VibeOCR.App;
 /// <summary>
 /// Goal #110 隔离候选专用五模式冒烟入口（VIBEOCR_SELF_TEST_SMOKE=paddle-modes-e2e）。
 /// 复用 ManagedEnvironmentSmoke/ScreenshotSmoke 的真实 helpers 与公共按钮/
-/// 选择入口；输入只来自本进程创建的置顶合成窗口（合成 fixture），不读取
-/// 真实桌面内容。CPU/缺模型导致的真实拒绝按 blocked/failed 如实记录，
+/// 选择入口；截图输入来自本进程创建的置顶合成窗口，文件/批量/PDF 输入
+/// 来自隔离根内的合成 fixture，不读取真实桌面内容。CPU/缺模型导致的真实拒绝按 blocked/failed 如实记录，
 /// 不伪造通过；GPU 仅在另有实证槽验证，本冒烟保持 UNVERIFIED。
 /// </summary>
 public sealed partial class MainWindow
@@ -72,7 +74,7 @@ public sealed partial class MainWindow
       }
       healthPath = full;
     }
-    if (healthPath is null || phase is not ("install" or "recognize"))
+    if (healthPath is null || phase is not ("install" or "recognize" or "inputs"))
     {
       Close();
       return;
@@ -86,7 +88,7 @@ public sealed partial class MainWindow
         throw new InvalidOperationException("Paddle smoke dependencies are missing.");
       object evidence = phase == "install"
         ? await RunPaddleSmokeInstallAsync()
-        : await RunPaddleSmokeRecognizeAsync();
+        : await RunPaddleSmokeRecognizeAsync(phase == "inputs");
       File.WriteAllText(path, JsonSerializer.Serialize(new
       {
         schema_version = 1,
@@ -184,7 +186,7 @@ public sealed partial class MainWindow
 
   // ------------------------ phase: recognize ------------------------
 
-  private async Task<object> RunPaddleSmokeRecognizeAsync()
+  private async Task<object> RunPaddleSmokeRecognizeAsync(bool inputs)
   {
     string mode = RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_MODE");
     string expectedPipeline = RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_PIPELINE");
@@ -224,10 +226,7 @@ public sealed partial class MainWindow
 
     RecordPaddleSmokeStage($"select mode {mode}");
     await NavigateSmokeAsync("单次识别", "button");
-    await WaitForSmokeDomAsync(
-      "Array.from(document.querySelector('#recognition-task-engine')?.options ?? [])" +
-      $".some(o => o.value === {JsonSerializer.Serialize(mode)})",
-      TimeSpan.FromMinutes(2));
+    await WaitForPaddleModeAsync("#recognition-task-engine", mode);
     string? availability = await PaddleSmokeDomTextAsync(
       "(() => { const o = Array.from(document.querySelector('#recognition-task-engine').options)" +
       $".find(o => o.value === {JsonSerializer.Serialize(mode)}); return o ? o.textContent : ''; }})()");
@@ -260,11 +259,23 @@ public sealed partial class MainWindow
     {
       await SelectSmokeValueAsync(optionSelector, optionValue);
     }
+    if (mode == "paddle_structure")
+    {
+      await WaitForSmokeDomAsync(
+        "!!document.querySelector('#paddle_structure-use_chart_recognition')",
+        TimeSpan.FromSeconds(15));
+      await SelectSmokeValueAsync("#paddle_structure-use_chart_recognition", "true");
+    }
     await ClickManagedSmokeButtonAsync("保存参数");
     await WaitForSmokeDomAsync(
       "document.querySelector('details.recognition-options output')?.textContent" +
       ".includes('参数已保存') === true",
       TimeSpan.FromSeconds(15));
+
+    if (inputs)
+      return await RunPaddleSmokeInputsAsync(mode, expectedPipeline, fixture,
+        optionName, optionValue, availability ?? "", tokens, exportButtons,
+        session, timeoutMinutes);
 
     RecordPaddleSmokeStage("capture synthetic fixture");
     int submitsBefore = smokeSubmitAttempts!();
@@ -297,6 +308,297 @@ public sealed partial class MainWindow
     return await CollectPaddleRecognitionEvidenceAsync(
       mode, expectedPipeline, optionName, optionValue, availability ?? throw new InvalidOperationException("Mode availability is missing."), tokens,
       exportButtons, session, submitsBefore, terminal, smokeLastJobId!(), capture);
+  }
+
+  private async Task WaitForPaddleModeAsync(string selector, string mode)
+  {
+    try
+    {
+      await WaitForSmokeDomAsync(
+        $"Array.from(document.querySelector({JsonSerializer.Serialize(selector)})?.options ?? [])" +
+        $".some(o => o.value === {JsonSerializer.Serialize(mode)})",
+        TimeSpan.FromMinutes(2));
+    }
+    catch (OperationCanceledException error)
+    {
+      string? dom = await PaddleSmokeDomTextAsync(
+        "(() => JSON.stringify({options:Array.from(document.querySelector('" +
+        selector + "')?.options ?? []).map(o => ({value:o.value,text:o.textContent}))," +
+        "page:(document.body?.innerText ?? '').slice(0,1200)}))()");
+      RecognitionWorkbenchState state = (await application.BootstrapAsync(
+        CancellationToken.None)).States.Select(item => item.State)
+        .OfType<RecognitionWorkbenchState>().Single();
+      string engines = JsonSerializer.Serialize(state.Engines?.Select(engine => new
+      {
+        engine.Engine, engine.Availability, engine.ReasonCode,
+      }));
+      throw new InvalidOperationException(
+        $"Mode {mode} absent from {selector} after 2 minutes. DOM={dom}; " +
+        $"bootstrap recognition engines={engines}", error);
+    }
+  }
+
+  private async Task<object> RunPaddleSmokeInputsAsync(
+    string mode, string pipeline, string fixture, string optionName,
+    string optionValue, string availability, string[] tokens,
+    string[] exportButtons, ManagedEnvironmentSession session,
+    int timeoutMinutes)
+  {
+    string kind = RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_INPUT_KIND");
+    return kind switch
+    {
+      "file" => await RunPaddleFileInputAsync(mode, pipeline, fixture,
+        optionName, optionValue, availability, tokens, exportButtons,
+        session, timeoutMinutes),
+      "batch" => await RunPaddleBatchInputAsync(mode, pipeline, fixture,
+        optionName, optionValue, session, timeoutMinutes),
+      "pdf" => await RunPaddlePdfInputAsync(mode, pipeline, fixture,
+        optionName, optionValue, session, timeoutMinutes),
+      _ => throw new InvalidOperationException($"Unknown Paddle input kind: {kind}"),
+    };
+  }
+
+  private async Task<object> RunPaddleFileInputAsync(
+    string mode, string pipeline, string fixture, string optionName,
+    string optionValue, string availability, string[] tokens,
+    string[] exportButtons, ManagedEnvironmentSession session,
+    int timeoutMinutes)
+  {
+    if (Path.GetExtension(fixture).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
+      throw new InvalidOperationException("Single-file input requires an image fixture.");
+    int before = smokeSubmitAttempts!();
+    RecordPaddleSmokeStage("select image via public picker");
+    await ClickManagedSmokeButtonAsync("选择图片");
+    await CompletePaddleOpenPickerAsync(fixture);
+    RecordPaddleSmokeStage($"wait file recognition {mode}");
+    using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMinutes));
+    RecognitionWorkbenchState terminal = await PollPaddleTerminalAsync(before, timeout.Token);
+    return await CollectPaddleRecognitionEvidenceAsync(mode, pipeline,
+      optionName, optionValue, availability, tokens, exportButtons, session,
+      before, terminal, smokeLastJobId!(), null);
+  }
+
+  private async Task<object> RunPaddleBatchInputAsync(
+    string mode, string pipeline, string fixture, string optionName,
+    string optionValue, ManagedEnvironmentSession session, int timeoutMinutes)
+  {
+    string second = ValidatePaddleSmokeOwnedPath(
+      RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_SECOND_FIXTURE"),
+      "second fixture");
+    if (!File.Exists(second) || string.Equals(second, fixture,
+          StringComparison.OrdinalIgnoreCase))
+      throw new InvalidOperationException("Batch requires two distinct image fixtures.");
+    RecordPaddleSmokeStage($"batch select mode {mode}");
+    await NavigateSmokeAsync("批量识别", "button");
+    await WaitForPaddleModeAsync("#batch-task-engine", mode);
+    await SelectSmokeValueAsync("#batch-task-engine", mode);
+    foreach (string path in new[] { fixture, second })
+    {
+      RecordPaddleSmokeStage($"batch add {Path.GetFileName(path)}");
+      await ClickManagedSmokeButtonAsync("添加图片");
+      await CompletePaddleOpenPickerAsync(path);
+    }
+    BatchWorkbenchState queued = await WaitForPaddleBatchAsync(
+      state => state.ItemCount == 2 && !state.IsRunning,
+      TimeSpan.FromSeconds(30));
+    if (queued.Items?.Select(item => item.Name).Order().SequenceEqual(
+          new[] { Path.GetFileName(fixture), Path.GetFileName(second) }.Order()) != true)
+      throw new InvalidOperationException("Public batch queue does not contain both fixtures.");
+    int before = smokeSubmitAttempts!();
+    RecordPaddleSmokeStage($"batch recognize {mode}");
+    await ClickManagedSmokeButtonAsync("开始识别");
+    BatchWorkbenchState terminal = await WaitForPaddleBatchAsync(
+      state => !state.IsRunning && state.CompletedCount + state.FailedCount == 2,
+      TimeSpan.FromMinutes(timeoutMinutes));
+    if (terminal.CompletedCount != 2 || terminal.FailedCount != 0 ||
+        terminal.Items?.Count != 2 ||
+        terminal.Items.Any(item => item.StatusCode != "batch.item.completed") == true)
+      throw new InvalidOperationException($"Batch incomplete: {JsonSerializer.Serialize(terminal)}");
+    object job = await ObservePaddleInputJobAsync(session, pipeline,
+      optionName, optionValue, before, 2);
+    string? queueText = await PaddleSmokeDomTextAsync(".batch-queue");
+    if (string.IsNullOrWhiteSpace(queueText))
+      throw new InvalidOperationException("Completed batch queue is absent from public UI.");
+    bool inspected = await InspectPaddleStructuredItemAsync(
+      $"查看 {Path.GetFileName(fixture)} 的结构化结果", mode);
+    if (!inspected && mode is ("paddle_table" or "paddle_formula" or
+        "paddle_structure" or "paddle_document_vl"))
+      throw new InvalidOperationException($"Batch {mode} has no inspectable structured result.");
+    Dictionary<string, object?> copies = inspected
+      ? await ClickPaddleCopyButtonsAsync([]) : new();
+    if (mode == "paddle_table" && !copies.ContainsKey("复制表格 HTML / TSV"))
+      throw new InvalidOperationException("Batch table copy control is unavailable.");
+    var exports = new List<object>();
+    if (PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_EXPORT_BUTTONS") is { Length: > 0 } labels)
+      foreach (string label in labels.Split('|', StringSplitOptions.RemoveEmptyEntries))
+        exports.Add(await RunPaddleBatchExportAsync(label));
+    paddleSmokeOutcome = "passed";
+    return new
+    {
+      input_kind = "batch", mode, fixture_paths = new[] { fixture, second },
+      option = new { name = optionName, value = optionValue },
+      submit_attempts = smokeSubmitAttempts!(), job,
+      queue = new { terminal.ItemCount, terminal.CompletedCount,
+        terminal.FailedCount, terminal.Items, dom_text = queueText },
+      structured_inspected = inspected, copies, exports,
+    };
+  }
+
+  private async Task<object> RunPaddlePdfInputAsync(
+    string mode, string pipeline, string fixture, string optionName,
+    string optionValue, ManagedEnvironmentSession session, int timeoutMinutes)
+  {
+    if (!Path.GetExtension(fixture).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
+      throw new InvalidOperationException("PDF input requires a PDF fixture.");
+    RecordPaddleSmokeStage($"pdf select mode {mode}");
+    await NavigateSmokeAsync("PDF 工作台", "button");
+    await WaitForPaddleModeAsync("#pdf-task-engine", mode);
+    await SelectSmokeValueAsync("#pdf-task-engine", mode);
+    RecordPaddleSmokeStage("open PDF via public picker");
+    await ClickManagedSmokeButtonAsync("打开 PDF");
+    await CompletePaddleOpenPickerAsync(fixture);
+    PdfWorkbenchState opened = await WaitForPaddlePdfAsync(
+      state => !state.IsBusy && state.PageCount > 0,
+      TimeSpan.FromMinutes(2));
+    if (opened.SelectedPages is null || !opened.SelectedPages.Contains(0))
+    {
+      await WaitForSmokeDomAsync(
+        "!!document.querySelector('[aria-label=\"选择第 1 页\"]')",
+        TimeSpan.FromSeconds(30));
+      string clicked = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+        "(() => { const e=document.querySelector('[aria-label=\"选择第 1 页\"]'); " +
+        "if(!e) return false; e.click(); return true; })()");
+      if (clicked != "true")
+        throw new InvalidOperationException("First PDF page selection is unavailable.");
+      opened = await WaitForPaddlePdfAsync(
+        state => state.SelectedPages?.Contains(0) == true,
+        TimeSpan.FromSeconds(30));
+    }
+    int before = smokeSubmitAttempts!();
+    RecordPaddleSmokeStage($"pdf recognize first page {mode}");
+    await ClickManagedSmokeButtonAsync("OCR 选中页");
+    PdfWorkbenchState terminal = await WaitForPaddlePdfAsync(
+      state => !state.IsBusy &&
+        state.Pages?.FirstOrDefault(page => page.Index == 0)?.StatusCode
+          is ("pdf.page.done" or "pdf.page.failed"),
+      TimeSpan.FromMinutes(timeoutMinutes));
+    if (terminal.Pages?.FirstOrDefault(page => page.Index == 0)
+          ?.StatusCode != "pdf.page.done")
+      throw new InvalidOperationException($"PDF page OCR failed: {JsonSerializer.Serialize(terminal)}");
+    object job = await ObservePaddleInputJobAsync(session, pipeline,
+      optionName, optionValue, before, 1);
+    bool inspected = await InspectPaddlePdfStructureAsync(mode);
+    var copies = await ClickPaddleCopyButtonsAsync([]);
+    object saved = await RunPaddlePdfSaveAsync();
+    paddleSmokeOutcome = "passed";
+    return new
+    {
+      input_kind = "pdf", mode, fixture_path = fixture,
+      option = new { name = optionName, value = optionValue },
+      submit_attempts = smokeSubmitAttempts!(), job,
+      pdf = new { opened.PageCount, terminal.SelectedPages, terminal.Pages },
+      structured_inspected = inspected, copies, saved,
+    };
+  }
+
+  private async Task<BatchWorkbenchState> WaitForPaddleBatchAsync(
+    Func<BatchWorkbenchState, bool> done, TimeSpan timeout)
+  {
+    using var cancellation = new CancellationTokenSource(timeout);
+    while (true)
+    {
+      BatchWorkbenchState state = (await application.BootstrapAsync(cancellation.Token))
+        .States.Select(item => item.State).OfType<BatchWorkbenchState>().Single();
+      if (done(state)) return state;
+      await Task.Delay(250, cancellation.Token);
+    }
+  }
+
+  private async Task<PdfWorkbenchState> WaitForPaddlePdfAsync(
+    Func<PdfWorkbenchState, bool> done, TimeSpan timeout)
+  {
+    using var cancellation = new CancellationTokenSource(timeout);
+    while (true)
+    {
+      PdfWorkbenchState state = (await application.BootstrapAsync(cancellation.Token))
+        .States.Select(item => item.State).OfType<PdfWorkbenchState>().Single();
+      if (done(state)) return state;
+      await Task.Delay(250, cancellation.Token);
+    }
+  }
+
+  private async Task<object> ObservePaddleInputJobAsync(
+    ManagedEnvironmentSession session, string pipeline, string optionName,
+    string optionValue, int before, int itemCount)
+  {
+    string? jobId = smokeLastJobId!();
+    if (smokeSubmitAttempts!() != before + 1 || string.IsNullOrWhiteSpace(jobId))
+      throw new InvalidOperationException(
+        $"Expected one submitted job: before={before}, after={smokeSubmitAttempts()}, id={jobId}");
+    var observed = await session.Client.ObserveAsync(jobId, 0, CancellationToken.None);
+    var snapshot = observed.Snapshot;
+    var selection = snapshot.Pipeline;
+    bool optionRecorded = selection?.Options is { } options &&
+      options.TryGetValue(optionName, out JsonElement value) &&
+      NormalizePaddleSmokeJson(value) == optionValue;
+    bool chartRecorded = RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_MODE") !=
+      "paddle_structure" || selection?.Options is { } chartOptions &&
+      chartOptions.TryGetValue("use_chart_recognition", out JsonElement chart) &&
+      NormalizePaddleSmokeJson(chart) == "true";
+    if (selection?.PipelineId.ToString() != pipeline ||
+        snapshot.EnvironmentId != session.EnvironmentId ||
+        snapshot.EnvironmentRevision != session.Revision ||
+        !optionRecorded || !chartRecorded ||
+        snapshot.Items.Count != itemCount || snapshot.Summary.Succeeded != itemCount ||
+        snapshot.Summary.Failed != 0)
+      throw new InvalidOperationException(
+        $"Input job mode/options/environment/items mismatch: {JsonSerializer.Serialize(snapshot)}");
+    return new
+    {
+      task_id = jobId, snapshot.State, snapshot.Pipeline,
+      snapshot.EnvironmentId, snapshot.EnvironmentRevision,
+      snapshot.Summary, snapshot.Items,
+    };
+  }
+
+  private async Task<bool> InspectPaddleStructuredItemAsync(string label, string mode)
+  {
+    if (mode is "paddle_table" or "paddle_formula" or
+        "paddle_structure" or "paddle_document_vl")
+      await WaitForSmokeDomAsync(
+        "!!document.querySelector('button[aria-label=" +
+        JsonSerializer.Serialize(label) + "]')",
+        TimeSpan.FromSeconds(30));
+    string script = "(() => { const b=document.querySelector('button[aria-label=" +
+      JsonSerializer.Serialize(label) + "]'); if(!b || b.disabled) return false; " +
+      "b.click(); return true; })()";
+    if (await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(script) != "true")
+      return false;
+    await WaitForSmokeDomAsync(
+      "!!document.querySelector('.structured-result ol.structured-blocks')",
+      TimeSpan.FromSeconds(30));
+    if (mode is "paddle_table" or "paddle_structure" or "paddle_document_vl")
+    {
+      string predicate = mode == "paddle_table"
+        ? "!!document.querySelector('.structured-result table td, .structured-result table th')"
+        : "document.querySelectorAll('.structured-result ol.structured-blocks li').length > 0";
+      if (!await PaddleSmokeDomBoolAsync(predicate))
+        throw new InvalidOperationException($"Batch {mode} has no structured preview.");
+    }
+    return true;
+  }
+
+  private async Task<bool> InspectPaddlePdfStructureAsync(string mode)
+  {
+    await WaitForSmokeDomAsync(
+      "!!document.querySelector('.pdf-main .structured-result ol.structured-blocks')",
+      TimeSpan.FromSeconds(30));
+    string predicate = mode == "paddle_table"
+      ? "!!document.querySelector('.pdf-main .structured-result table td, .pdf-main .structured-result table th')"
+      : "document.querySelectorAll('.pdf-main .structured-result ol.structured-blocks li').length > 0";
+    if (!await PaddleSmokeDomBoolAsync(predicate))
+      throw new InvalidOperationException($"PDF {mode} has no structured preview.");
+    return true;
   }
 
   /// <summary>
@@ -342,7 +644,7 @@ public sealed partial class MainWindow
     int submitsBefore,
     RecognitionWorkbenchState terminal,
     string? jobId,
-    SyntheticFixtureRegionPicker.CaptureEvidence capture)
+    SyntheticFixtureRegionPicker.CaptureEvidence? capture)
   {
     string? resultDocument = await PaddleSmokeDomTextAsync(".result-document");
     string? structuredBlocks = await PaddleSmokeDomTextAsync(
@@ -363,9 +665,14 @@ public sealed partial class MainWindow
       bool optionConsumed = options is not null &&
         options.TryGetValue(optionName, out System.Text.Json.JsonElement value) &&
         NormalizePaddleSmokeJson(value) == optionValue;
-      if (!optionConsumed)
+      bool chartConsumed = mode != "paddle_structure" ||
+        options is not null &&
+        options.TryGetValue("use_chart_recognition", out JsonElement chart) &&
+        NormalizePaddleSmokeJson(chart) == "true";
+      if (!optionConsumed || !chartConsumed)
         throw new InvalidOperationException(
-          $"Non-default option {optionName}={optionValue} was not recorded on the job for {mode}.");
+          $"Non-default options were not recorded on the job for {mode}: " +
+          $"{optionName}={optionValue}, chart={chartConsumed}.");
       if (observed.Snapshot.EnvironmentId != session.EnvironmentId ||
           observed.Snapshot.EnvironmentRevision != session.Revision)
         throw new InvalidOperationException($"Job environment binding mismatch for {jobId}.");
@@ -618,6 +925,140 @@ public sealed partial class MainWindow
       throw new InvalidOperationException("UI dispatcher is unavailable.");
     }
     return await completion.Task;
+  }
+
+  private async Task CompletePaddleOpenPickerAsync(string fixture)
+  {
+    nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
+    try
+    {
+      if (!PaddleSmokeNative.SetForegroundWindow(dialog) ||
+          PaddleSmokeNative.GetForegroundWindow() != dialog)
+        throw new InvalidOperationException("Open dialog could not take foreground.");
+      foreach (char c in fixture)
+      {
+        PaddleSmokeNative.SendChar(c);
+        await Task.Delay(10);
+      }
+      await Task.Delay(150);
+      PaddleSmokeNative.SendKey(0x0D);
+      await WaitForPaddleConditionAsync(
+        () => !PaddleSmokeNative.IsWindowVisible(dialog), TimeSpan.FromSeconds(30));
+    }
+    catch
+    {
+      PaddleSmokeNative.SendKey(0x1B);
+      throw;
+    }
+    if (FindPaddleSaveDialog() != 0)
+      throw new InvalidOperationException("Unexpected picker dialog after file selection.");
+  }
+
+  private async Task<object> RunPaddleBatchExportAsync(string buttonLabel)
+  {
+    string? exportDir = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_EXPORT_DIR");
+    if (string.IsNullOrWhiteSpace(exportDir))
+      throw new InvalidOperationException("Batch export directory is missing.");
+    exportDir = ValidatePaddleSmokeOwnedPath(exportDir, "batch export dir");
+    Directory.CreateDirectory(exportDir);
+    string format = buttonLabel switch
+    {
+      "导出 Markdown" or "导出全部 Markdown" => "markdown",
+      "导出 Word" or "导出全部 Word" => "docx",
+      "导出 XLSX" or "导出全部 Excel" => "xlsx",
+      _ => throw new InvalidOperationException($"Unexpected batch export label: {buttonLabel}"),
+    };
+    string publicLabel = format switch
+    {
+      "markdown" => "导出全部 Markdown",
+      "docx" => "导出全部 Word",
+      _ => "导出全部 Excel",
+    };
+    string[] before = Directory.GetFiles(exportDir);
+    RecordPaddleSmokeStage($"batch export {publicLabel}");
+    await ClickManagedSmokeButtonAsync(publicLabel);
+    nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
+    try
+    {
+      if (!PaddleSmokeNative.SetForegroundWindow(dialog) ||
+          PaddleSmokeNative.GetForegroundWindow() != dialog)
+        throw new InvalidOperationException("Folder dialog could not take foreground.");
+      foreach (char c in exportDir)
+      {
+        PaddleSmokeNative.SendChar(c);
+        await Task.Delay(10);
+      }
+      PaddleSmokeNative.SendKey(0x0D);
+      await WaitForPaddleConditionAsync(
+        () => !PaddleSmokeNative.IsWindowVisible(dialog), TimeSpan.FromSeconds(30));
+    }
+    catch
+    {
+      PaddleSmokeNative.SendKey(0x1B);
+      throw;
+    }
+    string[] created = [];
+    string extension = format switch
+    {
+      "markdown" => ".md",
+      "docx" => ".docx",
+      _ => ".xlsx",
+    };
+    await WaitForPaddleConditionAsync(() =>
+    {
+      created = Directory.GetFiles(exportDir)
+        .Except(before, StringComparer.OrdinalIgnoreCase).ToArray();
+      return created.Length == 2 && created.All(path =>
+        Path.GetExtension(path).Equals(extension, StringComparison.OrdinalIgnoreCase) &&
+        new FileInfo(path).Length > 0);
+    }, TimeSpan.FromMinutes(2));
+    bool incomplete = await PaddleSmokeDomBoolAsync(
+      "!!document.querySelector('[role=alert].form-note')?.textContent?.includes('部分图片缺失')");
+    if (incomplete)
+      throw new InvalidOperationException($"Batch {format} export reported missing images.");
+    return new { button_label = publicLabel, format, files = created,
+      bytes = created.Select(path => new FileInfo(path).Length).ToArray(),
+      incomplete };
+  }
+
+  private async Task<object> RunPaddlePdfSaveAsync()
+  {
+    string? exportDir = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_EXPORT_DIR");
+    if (string.IsNullOrWhiteSpace(exportDir))
+      throw new InvalidOperationException("PDF save directory is missing.");
+    exportDir = ValidatePaddleSmokeOwnedPath(exportDir, "pdf save dir");
+    Directory.CreateDirectory(exportDir);
+    string target = Path.Combine(exportDir,
+      $"paddle-{RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_MODE")}-ui-save.pdf");
+    if (File.Exists(target))
+      throw new InvalidOperationException($"PDF save target already exists: {target}");
+    RecordPaddleSmokeStage("save PDF via public picker");
+    await ClickManagedSmokeButtonAsync("保存");
+    nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
+    try
+    {
+      if (!PaddleSmokeNative.SetForegroundWindow(dialog) ||
+          PaddleSmokeNative.GetForegroundWindow() != dialog)
+        throw new InvalidOperationException("PDF save dialog could not take foreground.");
+      foreach (char c in target)
+      {
+        PaddleSmokeNative.SendChar(c);
+        await Task.Delay(10);
+      }
+      PaddleSmokeNative.SendKey(0x0D);
+      await WaitForPaddleConditionAsync(
+        () => !PaddleSmokeNative.IsWindowVisible(dialog), TimeSpan.FromSeconds(30));
+    }
+    catch
+    {
+      PaddleSmokeNative.SendKey(0x1B);
+      throw;
+    }
+    await WaitForPaddleConditionAsync(() =>
+      File.Exists(target) && new FileInfo(target).Length > 0,
+      TimeSpan.FromMinutes(2));
+    return new { button_label = "保存", file = target,
+      bytes = new FileInfo(target).Length, saved_via = "ui-file-save-picker" };
   }
 
   /// <summary>
