@@ -25,11 +25,18 @@ public sealed class PdfViewModel(
     private RecognitionModeOption? _recognitionMode;
     private string? _taskModeId;
     private PaddleModeOptions? _options;
+    private PdfIssueKind? _issue;
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public ObservableCollection<PdfPageViewModel> Pages { get; } = [];
     public bool IsBusy { get => _isBusy; private set => SetField(ref _isBusy, value); }
     public string Status { get => _status; private set => SetField(ref _status, value); }
+    /// <summary>
+    /// 上一次已结束操作的原生语义问题码；null 表示无待呈现问题（成功/空闲/关闭）。
+    /// workbench 据此映射固定 pdf.* 状态码，不解析 <see cref="Status"/> 中文文案
+    /// （其中含本地保存路径/异常细节，不得直接发往 Web）。
+    /// </summary>
+    public PdfIssueKind? TerminalIssue { get => _issue; private set => SetField(ref _issue, value); }
     public string? SessionId { get => _sessionId; private set => SetField(ref _sessionId, value); }
     public string? FilePath { get => _filePath; private set => SetField(ref _filePath, value); }
     public int PageCount { get => _pageCount; private set => SetField(ref _pageCount, value); }
@@ -61,7 +68,7 @@ public sealed class PdfViewModel(
         long generation = Volatile.Read(ref _generation);
         var run = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _activeRun = run;
-        IsBusy = true; Status = "正在打开";
+        TerminalIssue = null; IsBusy = true; Status = "正在打开";
         try
         {
             PdfSessionOpenResult result = await inference.OpenPdfSessionAsync(path, null, run.Token);
@@ -70,9 +77,9 @@ public sealed class PdfViewModel(
             Pages.Clear(); for (int i = 0; i < PageCount; i++) Pages.Add(new PdfPageViewModel { Index = i });
             Status = $"已打开 {PageCount} 页";
         }
-        catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) Status = "已取消"; }
-        catch (InferenceClientException e) { if (generation == Volatile.Read(ref _generation)) Status = LocalizeV2(e.Code); }
-        catch (Exception) when (generation == Volatile.Read(ref _generation)) { Status = "打开失败"; }
+        catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) { TerminalIssue = PdfIssueKind.Cancelled; Status = "已取消"; } }
+        catch (InferenceClientException e) { if (generation == Volatile.Read(ref _generation)) { TerminalIssue = IssueFromV2(e.Code); Status = LocalizeV2(e.Code); } }
+        catch (Exception) when (generation == Volatile.Read(ref _generation)) { TerminalIssue = PdfIssueKind.Failed; Status = "打开失败"; }
         finally
         {
             if (generation == Volatile.Read(ref _generation))
@@ -139,7 +146,7 @@ public sealed class PdfViewModel(
         long generation = Volatile.Read(ref _generation);
         var run = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _activeRun = run;
-        IsBusy = true; Status = "正在识别";
+        TerminalIssue = null; IsBusy = true; Status = "正在识别";
         foreach (int idx in pages) if (idx < Pages.Count) Pages[idx].State = PdfPageState.Processing;
         try
         {
@@ -172,7 +179,7 @@ public sealed class PdfViewModel(
                 engine: engine);
             JobSnapshot snap = job.Snapshot;
             if (generation != Volatile.Read(ref _generation)) return;
-            if (snap.State is JobState.Cancelled) { foreach (int idx in pages) if (idx < Pages.Count) Pages[idx].State = PdfPageState.None; Status = "已取消"; return; }
+            if (snap.State is JobState.Cancelled) { TerminalIssue = PdfIssueKind.Cancelled; foreach (int idx in pages) if (idx < Pages.Count) Pages[idx].State = PdfPageState.None; Status = "已取消"; return; }
             int s = 0, f = 0;
             foreach (int idx in pages)
             {
@@ -199,9 +206,9 @@ public sealed class PdfViewModel(
             }
             Status = $"OCR 完成：成功 {s} 页，失败 {f} 页";
         }
-        catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) { foreach (int idx in pages) if (idx < Pages.Count) Pages[idx].State = PdfPageState.None; Status = "已取消"; } }
-        catch (InferenceClientException e) { if (generation == Volatile.Read(ref _generation)) Status = LocalizeV2(e.Code); }
-        catch (Exception) when (generation == Volatile.Read(ref _generation)) { Status = "OCR 失败"; }
+        catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) { TerminalIssue = PdfIssueKind.Cancelled; foreach (int idx in pages) if (idx < Pages.Count) Pages[idx].State = PdfPageState.None; Status = "已取消"; } }
+        catch (InferenceClientException e) { if (generation == Volatile.Read(ref _generation)) { TerminalIssue = IssueFromV2(e.Code); Status = LocalizeV2(e.Code); } }
+        catch (Exception) when (generation == Volatile.Read(ref _generation)) { TerminalIssue = PdfIssueKind.Failed; Status = "OCR 失败"; }
         finally
         {
             if (generation == Volatile.Read(ref _generation))
@@ -221,33 +228,38 @@ public sealed class PdfViewModel(
     {
         if (SessionId is null) return;
         long generation = Volatile.Read(ref _generation);
-        IsBusy = true; Status = "正在保存";
+        TerminalIssue = null; IsBusy = true; Status = "正在保存";
         try { string saved = await inference.SavePdfAsync(SessionId, path, ct); if (generation == Volatile.Read(ref _generation)) Status = $"已保存到 {saved}"; }
-        catch (InferenceClientException e) { if (generation == Volatile.Read(ref _generation)) Status = LocalizeV2(e.Code); }
-        catch (Exception) when (generation == Volatile.Read(ref _generation)) { Status = "保存失败"; }
+        catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) { TerminalIssue = PdfIssueKind.Cancelled; Status = "已取消"; } }
+        catch (InferenceClientException e) { if (generation == Volatile.Read(ref _generation)) { TerminalIssue = IssueFromV2(e.Code); Status = LocalizeV2(e.Code); } }
+        catch (Exception) when (generation == Volatile.Read(ref _generation)) { TerminalIssue = PdfIssueKind.Failed; Status = "保存失败"; }
         finally { if (generation == Volatile.Read(ref _generation)) IsBusy = false; }
     }
 
     public void Cancel() => CancelActiveRun();
-    public void CloseSession() { CancelActiveRun(); SessionId = null; FilePath = null; PageCount = 0; Pages.Clear(); Status = "请选择 PDF"; }
+    public void CloseSession() { CancelActiveRun(); SessionId = null; FilePath = null; PageCount = 0; Pages.Clear(); TerminalIssue = null; Status = "请选择 PDF"; }
 
     private async Task MutateAsync(Func<CancellationToken, Task<int>> action, string runningStatus, CancellationToken ct)
     {
         if (SessionId is null) return;
         long generation = Volatile.Read(ref _generation);
-        IsBusy = true; Status = runningStatus;
+        TerminalIssue = null; IsBusy = true; Status = runningStatus;
         try { int count = await action(ct); if (generation == Volatile.Read(ref _generation)) { PageCount = count; Status = "完成"; } }
-        catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) Status = "已取消"; }
-        catch (InferenceClientException e) { if (generation == Volatile.Read(ref _generation)) Status = LocalizeV2(e.Code); }
-        catch (Exception) when (generation == Volatile.Read(ref _generation)) { Status = "操作失败"; }
+        catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) { TerminalIssue = PdfIssueKind.Cancelled; Status = "已取消"; } }
+        catch (InferenceClientException e) { if (generation == Volatile.Read(ref _generation)) { TerminalIssue = IssueFromV2(e.Code); Status = LocalizeV2(e.Code); } }
+        catch (Exception) when (generation == Volatile.Read(ref _generation)) { TerminalIssue = PdfIssueKind.Failed; Status = "操作失败"; }
         finally { if (generation == Volatile.Read(ref _generation)) IsBusy = false; }
     }
 
     private void CancelActiveRun() { Interlocked.Increment(ref _generation); var run = Interlocked.Exchange(ref _activeRun, null); if (run is not null) { run.Cancel(); run.Dispose(); } }
 
     private static string LocalizeV2(HttpV2ErrorCode code) => code switch { HttpV2ErrorCode.OutOfMemory => "内存或显存不足", HttpV2ErrorCode.BackendUnavailable or HttpV2ErrorCode.TransientBackend => "Supervisor 暂不可用", HttpV2ErrorCode.Cancelled => "已取消", _ => "操作失败" };
+    private static PdfIssueKind IssueFromV2(HttpV2ErrorCode code) => code switch { HttpV2ErrorCode.OutOfMemory => PdfIssueKind.OutOfMemory, HttpV2ErrorCode.BackendUnavailable or HttpV2ErrorCode.TransientBackend => PdfIssueKind.BackendUnavailable, HttpV2ErrorCode.Cancelled => PdfIssueKind.Cancelled, _ => PdfIssueKind.Failed };
     private void SetField<T>(ref T field, T value, [CallerMemberName] string? name = null) { if (EqualityComparer<T>.Default.Equals(field, value)) return; field = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name)); }
 }
+
+/// <summary>PDF 操作的原生语义终态问题码；v2 错误映射与 <see cref="PdfViewModel"/> 的 LocalizeV2 一致。</summary>
+public enum PdfIssueKind { Cancelled, Failed, BackendUnavailable, OutOfMemory }
 
 public enum PdfPageState { None, Processing, Done, Failed }
 

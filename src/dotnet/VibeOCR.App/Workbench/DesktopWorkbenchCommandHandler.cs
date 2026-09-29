@@ -2016,7 +2016,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     await EnsureSelectionLoadedAsync(cancellationToken);
     SynchronizePdfMode(requireUsable: true);
     long generation = Interlocked.Increment(ref pdfGeneration);
-    return PublishStartThenTrack(PdfState(pdf) with { IsBusy = true },
+    return PublishStartThenTrack(
+      PdfState(pdf) with { IsBusy = true, StatusCode = PdfStatusCode(pdf, isBusy: true) },
       () => CompletePdfOcrAsync(generation, cancellationToken));
   }
 
@@ -3044,7 +3045,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     pdfWindowStart = ClampWindowStart(pdfWindowStart, viewModel.PageCount, 64);
     return new PdfWorkbenchState(
       viewModel.IsBusy,
-      viewModel.PageCount > 0 ? "pdf.open" : "pdf.empty",
+      PdfStatusCode(viewModel),
       viewModel.PageCount,
       viewModel.SelectedPage,
       selectedPdfPages.Order().ToArray(),
@@ -3064,6 +3065,28 @@ public sealed class DesktopWorkbenchCommandHandler :
       pdfWindowStart,
       PdfEngines(),
       pdfTaskEngine);
+  }
+
+  /// <summary>
+  /// PDF workbench 状态码：上次已结束操作的原生语义问题码（open/save/
+  /// mutate/OCR 的失败/取消）优先于 PageCount 会话投影，不再被 pdf.empty/
+  /// pdf.open 抹掉；运行中沿用既有会话投影。仅消费固定语义码，不解析中文
+  /// Status，也不把含本地保存路径/异常细节的 Status 发送给 Web。
+  /// </summary>
+  private static string PdfStatusCode(PdfViewModel viewModel, bool? isBusy = null)
+  {
+    if (isBusy ?? viewModel.IsBusy)
+    {
+      return viewModel.PageCount > 0 ? "pdf.open" : "pdf.empty";
+    }
+    return viewModel.TerminalIssue switch
+    {
+      PdfIssueKind.BackendUnavailable => "pdf.backendUnavailable",
+      PdfIssueKind.OutOfMemory => "pdf.outOfMemory",
+      PdfIssueKind.Cancelled => "pdf.cancelled",
+      PdfIssueKind.Failed => "pdf.failed",
+      _ => viewModel.PageCount > 0 ? "pdf.open" : "pdf.empty",
+    };
   }
 
   private IReadOnlyList<RecognitionEngineChoice>? PdfEngines() =>

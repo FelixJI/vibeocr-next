@@ -572,6 +572,9 @@ public sealed partial class MainWindow
     {
       PdfWorkbenchState state = (await application.BootstrapAsync(cancellation.Token))
         .States.Select(item => item.State).OfType<PdfWorkbenchState>().Single();
+      if (!state.IsBusy && state.StatusCode is
+          "pdf.failed" or "pdf.backendUnavailable" or "pdf.outOfMemory" or "pdf.cancelled")
+        throw new InvalidOperationException($"PDF operation stopped: {state.StatusCode}");
       if (done(state)) return state;
       await Task.Delay(250, cancellation.Token);
     }
