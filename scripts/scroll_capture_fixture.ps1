@@ -3,9 +3,9 @@
 # the fixture process it started or the app PID supplied by the harness.
 param(
     [Parameter(Mandatory = $true)][ValidateSet(
-        'fixture', 'windows', 'probe', 'foreground', 'focus', 'wheel',
+        'fixture', 'windows', 'taskbar-state', 'probe', 'foreground', 'focus', 'raise', 'wheel', 'scenario',
         'mouse-move', 'mouse-down', 'mouse-up', 'key', 'hide', 'close', 'quit',
-        'uia-find', 'uia-invoke', 'uia-bar-text')][string]$Action,
+        'uia-find', 'uia-invoke', 'uia-bar-text', 'metrics', 'save-file', 'frame', 'geometry', 'window-text')][string]$Action,
     [int]$AppPid = 0,
     [int]$FixturePid = 0,
     [long]$Handle = 0,
@@ -13,11 +13,18 @@ param(
     [int]$X = 0,
     [int]$Y = 0,
     [int]$Delta = -120,
+    [ValidateSet('normal', 'low-texture', 'dynamic', 'jump', 'move')][string]$Scenario = 'normal',
     [string]$Key = 'enter',
-    [string]$AutomationId = ''
+    [string]$AutomationId = '',
+    [string]$OutputPath = '',
+    [string]$EvidenceRoot = '',
+    [int]$Width = 0,
+    [int]$Height = 0
 )
 
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName UIAutomationClient
@@ -33,6 +40,15 @@ using System.Windows.Forms;
 
 public static class ScrollCaptureNative
 {
+    [StructLayout(LayoutKind.Sequential)]
+    private struct AppBarData { public uint Size; public IntPtr Window; public uint Callback, Edge; public Rect Bounds; public IntPtr Param; }
+    [DllImport("shell32.dll")]
+    private static extern UIntPtr SHAppBarMessage(uint message, ref AppBarData data);
+    public static uint TaskbarState()
+    {
+        var data = new AppBarData { Size = (uint)Marshal.SizeOf<AppBarData>() };
+        return (uint)SHAppBarMessage(4, ref data).ToUInt64();
+    }
     [StructLayout(LayoutKind.Sequential)]
     public struct Rect { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)]
@@ -51,6 +67,8 @@ public static class ScrollCaptureNative
     {
         public long Handle { get; set; }
         public bool Visible { get; set; }
+        public bool Enabled { get; set; }
+        public long ExtendedStyle { get; set; }
         public Rect Bounds { get; set; }
     }
     [StructLayout(LayoutKind.Sequential)]
@@ -92,6 +110,7 @@ public static class ScrollCaptureNative
     [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(NativePoint point);
     [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr window, uint flags);
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
     [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
@@ -99,6 +118,81 @@ public static class ScrollCaptureNative
     [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
     [DllImport("user32.dll")] private static extern bool ScreenToClient(IntPtr window, ref NativePoint point);
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+
+    [DllImport("user32.dll")] private static extern IntPtr GetWindowLongPtrW(IntPtr window, int index);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassNameW(IntPtr window, System.Text.StringBuilder name, int count);
+    [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr parent, EnumWindowCallback callback, IntPtr state);
+    [DllImport("user32.dll")] private static extern int GetDlgCtrlID(IntPtr window);
+    [DllImport("user32.dll")] private static extern bool IsWindowEnabled(IntPtr window);
+    [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", CharSet = CharSet.Unicode)]
+    private static extern IntPtr SetText(IntPtr window, uint message, IntPtr wp, string text, uint flags, uint timeout, out IntPtr result);
+    [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", CharSet = CharSet.Unicode)]
+    private static extern IntPtr ReadText(IntPtr window, uint message, int count, System.Text.StringBuilder text, uint flags, uint timeout, out IntPtr result);
+    private static string ClassName(IntPtr window) {
+        var value = new System.Text.StringBuilder(128);
+        GetClassNameW(window, value, value.Capacity);
+        return value.ToString();
+    }
+    public static void SaveFile(long mainHandle, int appPid, string output) {
+        RequireOwner(mainHandle, appPid);
+        var main = new IntPtr(mainHandle);
+        IntPtr dialog = IntPtr.Zero, edit = IntPtr.Zero, confirm = IntPtr.Zero;
+        var until = DateTime.UtcNow.AddSeconds(12);
+        while (DateTime.UtcNow < until) {
+            EnumWindows((window, _) => {
+                if (IsWindowVisible(window) && ClassName(window) == "#32770" && GetWindowLongPtrW(window, -8) == main) {
+                    dialog = window; return false;
+                }
+                return true;
+            }, IntPtr.Zero);
+            if (dialog != IntPtr.Zero) break;
+            System.Threading.Thread.Sleep(100);
+        }
+        if (dialog == IntPtr.Zero) throw new InvalidOperationException("Owned save picker not found.");
+        EnumChildWindows(dialog, (child, _) => {
+            if (!IsWindowVisible(child)) return true;
+            int id = GetDlgCtrlID(child);
+            if (ClassName(child) == "Edit" && (id == 1001 || id == 1148)) {
+                if (edit != IntPtr.Zero) throw new InvalidOperationException("Ambiguous filename field.");
+                edit = child;
+            }
+            if (ClassName(child) == "Button" && id == 1) confirm = child;
+            return true;
+        }, IntPtr.Zero);
+        if (edit == IntPtr.Zero || confirm == IntPtr.Zero || GetWindowLongPtrW(dialog, -8) != main)
+            throw new InvalidOperationException("Owned save controls unavailable.");
+        if (SetText(edit, 0x000C, IntPtr.Zero, output, 2, 1000, out IntPtr result) == IntPtr.Zero || result == IntPtr.Zero)
+            throw new InvalidOperationException("Save filename rejected.");
+        var readBack = new System.Text.StringBuilder(output.Length + 2);
+        if (ReadText(edit, 0x000D, readBack.Capacity, readBack, 2, 1000, out _) == IntPtr.Zero || readBack.ToString() != output)
+            throw new InvalidOperationException("Save filename mismatch.");
+        until = DateTime.UtcNow.AddSeconds(5);
+        while (!IsWindowEnabled(confirm) && DateTime.UtcNow < until) System.Threading.Thread.Sleep(100);
+        if (!IsWindowEnabled(confirm) || GetWindowLongPtrW(dialog, -8) != main ||
+            !PostMessage(dialog, 0x0111, new IntPtr(1), confirm))
+            throw new InvalidOperationException("Save confirmation failed.");
+    }
+
+    [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr window, out Rect rect);
+    [DllImport("user32.dll")] private static extern bool ClientToScreen(IntPtr window, ref NativePoint point);
+    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr window);
+    public static object Geometry(long handle, int fixturePid) {
+        RequireOwner(handle, fixturePid);
+        var window = new IntPtr(handle);
+        GetWindowRect(window, out Rect outer);
+        GetClientRect(window, out Rect inner);
+        var point = new NativePoint(); ClientToScreen(window, ref point);
+        return new { outer, client = new { X=point.X, Y=point.Y, Width=inner.Right, Height=inner.Bottom }, dpi=GetDpiForWindow(window) };
+    }
+    public static void CaptureOwned(long handle, int fixturePid, int x, int y, int width, int height, string output) {
+        RequireOwner(handle, fixturePid);
+        if(width<=0||height<=0||(long)width*height>8000000) throw new InvalidOperationException("Invalid owned frame size.");
+        RequirePointOwner(x,y,fixturePid);RequirePointOwner(x+width-1,y+height-1,fixturePid);
+        using(var bitmap=new Bitmap(width,height)) {
+            using(var graphics=Graphics.FromImage(bitmap)) graphics.CopyFromScreen(x,y,0,0,new Size(width,height));
+            bitmap.Save(output,System.Drawing.Imaging.ImageFormat.Png);
+        }
+    }
 
     private static string Bounds(IntPtr window)
     {
@@ -111,11 +205,11 @@ public static class ScrollCaptureNative
     {
         if (SetThreadDpiAwarenessContext(new IntPtr(-4)) == IntPtr.Zero)
             throw new InvalidOperationException("Per Monitor V2 scroll fixture context unavailable.");
-        if (GetSystemMetrics(78) < 700 || GetSystemMetrics(79) < 500)
-            throw new InvalidOperationException("Scroll smoke requires a 700x500 physical desktop.");
+        if (GetSystemMetrics(78) < 700 || GetSystemMetrics(79) < 720)
+            throw new InvalidOperationException("Scroll smoke requires a 700x720 physical desktop.");
         using (var form = new ScrollFixtureForm())
         {
-            form.Location = new Point(GetSystemMetrics(76) + 120, GetSystemMetrics(77) + 120);
+            form.Location = new Point(GetSystemMetrics(76) + 120, GetSystemMetrics(77) + Math.Min(700, GetSystemMetrics(79) - 420));
             _ = form.Handle; // Force handle creation so client screen coordinates are exact.
             Point client = form.PointToScreen(Point.Empty);
             UpdateWindow(form.Handle);
@@ -138,7 +232,7 @@ public static class ScrollCaptureNative
         {
             GetWindowThreadProcessId(window, out uint owner);
             if (owner == (uint)pid && GetWindowRect(window, out Rect bounds))
-                found.Add(new WindowInfo { Handle = window.ToInt64(), Visible = IsWindowVisible(window), Bounds = bounds });
+                found.Add(new WindowInfo { Handle = window.ToInt64(), Visible = IsWindowVisible(window), Enabled = IsWindowEnabled(window), ExtendedStyle = GetWindowLongPtrW(window, -20).ToInt64(), Bounds = bounds });
             return true;
         }, IntPtr.Zero);
         return found.ToArray();
@@ -202,17 +296,42 @@ public static class ScrollCaptureNative
             throw new InvalidOperationException("Scroll fixture quit failed.");
     }
 
+    public static void Scenario(long handle, int pid, int mode)
+    {
+        RequireOwner(handle, pid);
+        if (mode < 0 || mode > 4 || !PostMessage(new IntPtr(handle), 0x8001, new IntPtr(mode), IntPtr.Zero))
+            throw new InvalidOperationException("Owned fixture scenario failed.");
+    }
+
+    public static void Raise(long handle, int pid)
+    {
+        RequireOwner(handle, pid);
+        if (!SetWindowPos(new IntPtr(handle), new IntPtr(-1), 0, 0, 0, 0, 0x0053))
+            throw new InvalidOperationException("Owned fixture raise failed.");
+    }
+
     public static void FocusFixture(long handle, int fixturePid, int x, int y)
     {
         RequireOwner(handle, fixturePid);
-        RequirePointOwner(x, y, fixturePid);
-        if (GetAncestor(WindowFromPoint(new NativePoint { X = x, Y = y }), 2) != new IntPtr(handle))
-            throw new InvalidOperationException("Focus point is outside the scroll fixture root.");
-        if (!SetCursorPos(x, y)) throw new InvalidOperationException("Cursor move failed.");
-        SetForegroundWindow(new IntPtr(handle));
-        try { Send(new[] { Mouse(0x0002) }); }
-        finally { Send(new[] { Mouse(0x0004) }); }
-        RequireForegroundInternal(fixturePid);
+        bool wasTopmost = (GetWindowLongPtrW(new IntPtr(handle), -20).ToInt64() & 8) != 0;
+        if (!SetWindowPos(new IntPtr(handle), new IntPtr(-1), 0, 0, 0, 0, 0x0003))
+            throw new InvalidOperationException("Owned window activation failed.");
+        try
+        {
+            SetForegroundWindow(new IntPtr(handle));
+            System.Threading.Thread.Sleep(200);
+            if (GetAncestor(WindowFromPoint(new NativePoint { X = x, Y = y }), 2) != new IntPtr(handle))
+                throw new InvalidOperationException("Focus point is outside the owned window root.");
+            if (!SetCursorPos(x, y)) throw new InvalidOperationException("Cursor move failed.");
+            SetForegroundWindow(new IntPtr(handle));
+            try { Send(new[] { Mouse(0x0002) }); }
+            finally { Send(new[] { Mouse(0x0004) }); }
+            RequireForegroundInternal(fixturePid);
+        }
+        finally
+        {
+            if (!wasTopmost) SetWindowPos(new IntPtr(handle), new IntPtr(-2), 0, 0, 0, 0, 0x0003);
+        }
     }
 
     private static void RequireForegroundInternal(int pid)
@@ -227,8 +346,6 @@ public static class ScrollCaptureNative
         RequireOwner(handle, fixturePid);
         IntPtr root = new IntPtr(handle);
         NativePoint point = new NativePoint { X = x, Y = y };
-        if (!ScreenToClient(root, ref point))
-            throw new InvalidOperationException("Wheel point conversion failed.");
         IntPtr wParam = new IntPtr(((long)(short)delta << 16) & 0xFFFFFFFF);
         IntPtr lParam = new IntPtr(((point.Y & 0xFFFF) << 16) | (point.X & 0xFFFF));
         if (!PostMessage(root, 0x020A, wParam, lParam))
@@ -240,8 +357,8 @@ public static class ScrollCaptureNative
         Type = 0,
         Data = new InputUnion { Mouse = new MouseInput
         {
-            X = (int)(((long)x - GetSystemMetrics(76)) * 65536 / GetSystemMetrics(78)),
-            Y = (int)(((long)y - GetSystemMetrics(77)) * 65536 / GetSystemMetrics(79)),
+            X = (int)((((long)x - GetSystemMetrics(76)) * 65536 + 32768) / GetSystemMetrics(78)),
+            Y = (int)((((long)y - GetSystemMetrics(77)) * 65536 + 32768) / GetSystemMetrics(79)),
             Flags = 0x0001 | 0x4000 | 0x8000,
         } },
     };
@@ -300,12 +417,14 @@ public sealed class ScrollFixtureForm : Form
     public const int FixtureClientWidth = 460;
     public const int FixtureClientHeight = 336;
     private const int WM_MOUSEWHEEL = 0x020A;
-    private static readonly string RowText =
-        "行 {0:D4} · line {0:D4} · VibeOCR 滚动拼接校验 ScrollStitch abc-0123456789";
     private int _scrollOffset;
+    private int _paintMode;
+    private int _phase;
+    private readonly System.Windows.Forms.Timer _animation = new System.Windows.Forms.Timer { Interval = 100 };
 
     public ScrollFixtureForm()
     {
+        _animation.Tick += (_, _) => { _phase = (_phase + 1) % 239; Invalidate(); };
         DoubleBuffered = true;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
@@ -324,7 +443,8 @@ public sealed class ScrollFixtureForm : Form
     {
         base.OnPaint(e);
         Graphics g = e.Graphics;
-        g.Clear(Color.White);
+        g.Clear(_paintMode == 2 ? Color.FromArgb(_phase, 128, 200) : Color.White);
+        if (_paintMode != 0) return;
         int first = Math.Max(0, _scrollOffset / RowHeight - 1);
         int last = Math.Min(RowCount - 1, (_scrollOffset + ClientSize.Height) / RowHeight + 1);
         for (int row = first; row <= last; row++)
@@ -335,12 +455,35 @@ public sealed class ScrollFixtureForm : Form
             {
                 g.FillRectangle(stripe, 0, y, StripeWidth, RowHeight);
             }
-            g.DrawString(string.Format(RowText, row), Font, Brushes.Black, TextLeft, y + 9);
+            g.DrawLine(Pens.Gray, StripeWidth, y, ClientSize.Width, y);
+            g.DrawLine(Pens.Gray, 180, y, 180, y + RowHeight);
+            g.DrawString($"行 {row:D4} / Row", Font, Brushes.Black, TextLeft, y + 9);
+            g.DrawString($"中文 · line {row:D4} · VibeOCR", Font, Brushes.Black, 188, y + 9);
         }
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        _animation.Dispose();
+        base.OnFormClosed(e);
     }
 
     protected override void WndProc(ref Message m)
     {
+        if (m.Msg == 0x8001)
+        {
+            int mode = m.WParam.ToInt32();
+            if (mode >= 0 && mode <= 2)
+            {
+                _paintMode = mode;
+                _animation.Enabled = mode == 2;
+                if (mode == 0) _scrollOffset = 0;
+            }
+            else if (mode == 3) _scrollOffset = Math.Min(RowCount * RowHeight - ClientSize.Height, _scrollOffset + 1000);
+            else if (mode == 4) Left += 8;
+            Invalidate();
+            return;
+        }
         if (m.Msg == WM_MOUSEWHEEL)
         {
             int delta = (short)(((long)m.WParam >> 16) & 0xFFFF);
@@ -403,9 +546,46 @@ if ($oldDpi -eq [IntPtr]::Zero) { throw 'Per Monitor V2 helper context unavailab
 try {
     switch ($Action) {
         'fixture' { [ScrollCaptureNative]::RunScrollFixture() }
+        'taskbar-state' { [ScrollCaptureNative]::TaskbarState() }
+        'save-file' {
+            $rootPath = [IO.Path]::GetFullPath($EvidenceRoot).TrimEnd('\') + '\'
+            $target = [IO.Path]::GetFullPath($OutputPath)
+            if (-not $target.StartsWith($rootPath, [StringComparison]::OrdinalIgnoreCase) -or
+                [IO.Path]::GetExtension($target) -ne '.png' -or (Test-Path -LiteralPath $target)) {
+                throw 'Save target must be a new PNG inside this smoke evidence directory'
+            }
+            [ScrollCaptureNative]::SaveFile($Handle, $AppPid, $target)
+        }
+        'window-text' {
+            [ScrollCaptureNative]::RequireOwner($Handle, $AppPid)
+            $windowRoot = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Handle)
+            $nodes = $windowRoot.FindAll([System.Windows.Automation.TreeScope]::Subtree, [System.Windows.Automation.Condition]::TrueCondition)
+            @($nodes | ForEach-Object { $_.Current.Name } | Where-Object { $_ } | Select-Object -First 40) | ConvertTo-Json -Compress
+        }
+        'geometry' { [ScrollCaptureNative]::Geometry($Handle, $FixturePid) | ConvertTo-Json -Compress -Depth 4 }
+        'frame' {
+            $rootPath = [IO.Path]::GetFullPath($EvidenceRoot).TrimEnd('\') + '\'
+            $target = [IO.Path]::GetFullPath($OutputPath)
+            if (-not $target.StartsWith($rootPath, [StringComparison]::OrdinalIgnoreCase) -or
+                [IO.Path]::GetExtension($target) -ne '.png' -or (Test-Path -LiteralPath $target)) { throw 'Invalid new evidence frame path' }
+            [ScrollCaptureNative]::CaptureOwned($Handle, $FixturePid, $X, $Y, $Width, $Height, $target)
+        }
+        'metrics' {
+            if ($AppPid -le 0) { throw 'Owned app PID is required' }
+            $process = [Diagnostics.Process]::GetProcessById($AppPid)
+            $process.Refresh()
+            @{ pid = $AppPid; observedUtc = [DateTime]::UtcNow.ToString('O'); workingSetBytes = $process.WorkingSet64;
+               peakWorkingSetBytes = $process.PeakWorkingSet64; privateBytes = $process.PrivateMemorySize64;
+               scope = 'WinUI app process only; OS lifetime peak includes startup, excludes WebView2/Runtime children' } | ConvertTo-Json -Compress
+        }
         'windows' { [ScrollCaptureNative]::Windows($AppPid) | ConvertTo-Json -Compress -Depth 4 }
         'probe' { [ScrollCaptureNative]::Probe($AppPid, $FixturePid, $X, $Y) | ConvertTo-Json -Compress -Depth 5 }
         'foreground' { [ScrollCaptureNative]::Foreground($FixturePid) }
+        'raise' { [ScrollCaptureNative]::Raise($Handle, $FixturePid) }
+        'scenario' {
+            $mode = switch ($Scenario) { 'normal' { 0 }; 'low-texture' { 1 }; 'dynamic' { 2 }; 'jump' { 3 }; 'move' { 4 } }
+            [ScrollCaptureNative]::Scenario($Handle, $FixturePid, $mode)
+        }
         'focus' { [ScrollCaptureNative]::FocusFixture($Handle, $FixturePid, $X, $Y) }
         'wheel' { [ScrollCaptureNative]::Wheel($Handle, $FixturePid, $X, $Y, $Delta) }
         'mouse-move' { [ScrollCaptureNative]::MouseMove($AppPid, $X, $Y) }
@@ -436,8 +616,9 @@ try {
             }
             $invokable = $found.Element.GetCurrentPattern(
                 [System.Windows.Automation.InvokePattern]::Pattern)
+            $evidence = Convert-ElementToEvidence $found
             $invokable.Invoke()
-            Convert-ElementToEvidence $found | ConvertTo-Json -Compress
+            $evidence | ConvertTo-Json -Compress
         }
         'uia-bar-text' {
             $found = Find-AppElementById $AppPid $AutomationId

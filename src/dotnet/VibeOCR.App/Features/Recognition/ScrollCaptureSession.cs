@@ -44,6 +44,7 @@ internal static class ScrollCaptureSession
     // 内容持续变化超过 DynamicContentTimeoutMs 判为动态失败。
     private const int StableComparisonsRequired = 1;
     private const int DynamicContentTimeoutMs = 5000; // 持续变化上限，避免无限忙循环。
+    private const int ForegroundRestoreTimeoutMs = 5000; // 完成采样等待源窗口恢复前台的上限，防止无限挂起。
     private const int MinSelectionWidthPx = 32; // 首帧分配前的最小选区宽度。
     private const int MinSelectionHeightPx = 64; // 首帧分配前的最小选区高度。
     private const int PlacementGapPx = 16; // 控制窗与选区间距（physical px）。
@@ -337,6 +338,8 @@ internal static class ScrollCaptureSession
         await using var capture = new ScreenCaptureService(Guid.NewGuid());
         _lastStableWitness = Environment.TickCount64;
         _elapsed.Start();
+        // 完成采样等待源窗口恢复前台的截止时刻；仅本循环线程读写，无需跨线程同步。
+        long finishForegroundDeadline = 0;
         while (true)
         {
           _lifecycle.Token.ThrowIfCancellationRequested();
@@ -348,25 +351,52 @@ internal static class ScrollCaptureSession
           if (_finishRequested && !_finishSamplingStarted)
           {
             _finishSamplingStarted = true;
-            _lastCaptured = null;
-            _stableStreak = 0;
+            DiscardStableWitness();
             _appendedForCurrentStreak = false;
+            // 恢复源窗口外观后重新采样；系统拒绝切换时按下面的期限失败。
+            SetForegroundWindow(_source);
+            finishForegroundDeadline = Environment.TickCount64 + ForegroundRestoreTimeoutMs;
           }
-          string? violation = GuardBeforeCapture();
+          nint foreground = GetForegroundWindow();
+          string? violation = GuardBeforeCapture(foreground);
           if (violation is not null)
           {
             Fail(new InvalidOperationException(violation));
             return;
+          }
+
+          if (foreground != _source)
+          {
+            // 控制窗交互期间暂停采样和动态计时，仍执行窗口/遮挡守卫。
+            DiscardStableWitness();
+            if (_finishSamplingStarted && Environment.TickCount64 >= finishForegroundDeadline)
+            {
+              Fail(new InvalidOperationException(
+                  "无法将源窗口恢复前台以完成收尾采样（前台切换被系统拒绝），请重试滚动截图。"));
+              return;
+            }
+
+            await Task.Delay(CaptureIntervalMs, _lifecycle.Token);
+            continue;
           }
 
           CapturedFrame frame = capture.Capture(_bounds, TimeSpan.FromMinutes(1));
 
           // 采集后复用完整守卫：前台/遮挡/几何任一变化都立即停止。
-          violation = GuardBeforeCapture();
+          foreground = GetForegroundWindow();
+          violation = GuardBeforeCapture(foreground);
           if (violation is not null)
           {
             Fail(new InvalidOperationException(violation));
             return;
+          }
+
+          if (foreground != _source)
+          {
+            // 丢弃采集中途控制窗获焦时的过渡帧。
+            DiscardStableWitness();
+            await Task.Delay(CaptureIntervalMs, _lifecycle.Token);
+            continue;
           }
 
           CapturedFrame? previous = _lastCaptured;
@@ -421,12 +451,22 @@ internal static class ScrollCaptureSession
       }
     }
 
-    /// <summary>采集前后守卫：前台归属、控制窗未压选区、源窗口几何、上方遮挡。</summary>
-    private string? GuardBeforeCapture()
+    /// <summary>丢弃过渡帧并重新计算内容稳定时间。</summary>
+    private void DiscardStableWitness()
     {
-      nint foreground = GetForegroundWindow();
-      if (foreground != _source && foreground != _controlHandle)
+      _lastCaptured = null;
+      _stableStreak = 0;
+      _lastStableWitness = Environment.TickCount64;
+    }
+
+    /// <summary>采集前后守卫：前台归属、控制窗未压选区、源窗口几何、上方遮挡。</summary>
+    private string? GuardBeforeCapture(nint foreground)
+    {
+      // 主动收尾切换时 Windows 可短暂返回 NULL；循环在原截止时间内等待，期间不采集。
+      if (foreground != _source && foreground != _controlHandle &&
+          !(foreground == 0 && _finishSamplingStarted))
       {
+        AppLog.Warn($"scroll-capture foreground guard: actual={foreground}, source={_source}, control={_controlHandle}, finishing={_finishSamplingStarted}");
         return "源窗口已失去前台（其他窗口被激活），已停止采集。";
       }
 
@@ -686,6 +726,8 @@ internal static class ScrollCaptureSession
       {
         _errorText.Text = error.Message;
         _errorText.Visibility = Visibility.Visible;
+        // 固定高度窗口中为错误说明和取消按钮腾出空间。
+        _previewImage.Visibility = Visibility.Collapsed;
         _startButton.IsEnabled = false;
         _finishButton.IsEnabled = false;
         _cancelButton.IsEnabled = true;
@@ -721,7 +763,7 @@ internal static class ScrollCaptureSession
 
       _finishButton.IsEnabled = false;
       _finishRequested = true;
-      _statusText.Text = "正在收尾：请停止滚动，等待最后一帧稳定。";
+      _statusText.Text = "正在收尾：正在把源窗口恢复前台，请停止滚动，等待最后一帧稳定。";
     }
 
     private void OnCancel(object sender, RoutedEventArgs args) => CancelFromUi();
