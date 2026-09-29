@@ -319,3 +319,49 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
     fullPage: true,
   });
 });
+
+test("mode selector stays above batch and PDF panel grids", async ({
+  context,
+}) => {
+  for (const route of ["batch", "pdf"] as const) {
+    const page = await context.newPage();
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await mount(page, {
+      connected: true,
+      revision: 1,
+      route,
+      theme: "light",
+      capabilities: ["recognition.engine", "pdf.open", "batch.add"],
+      features: {
+        [route]: {
+          engines: [
+            {
+              engine: "paddle_structure",
+              displayName: "文档结构识别",
+              availability: "ready",
+              selected: false,
+              requiresDownload: false,
+              isTaskOverride: true,
+              supportedOptions: ["use_seal_recognition"],
+            },
+          ],
+          taskEngine: "paddle_structure",
+        },
+      },
+      runtimeLabel: "Runtime 就绪 · CPU",
+    });
+    const selector = page.locator(".recognition-mode-settings");
+    await expect(selector).toBeVisible();
+    const grid = page.locator(
+      route === "pdf" ? ".pdf-workspace" : ".collection-workspace",
+    );
+    const selectorBox = await selector.boundingBox();
+    const gridBox = await grid.boundingBox();
+    expect(selectorBox).not.toBeNull();
+    expect(gridBox).not.toBeNull();
+    expect(selectorBox!.y + selectorBox!.height).toBeLessThanOrEqual(
+      gridBox!.y,
+    );
+    await page.close();
+  }
+});

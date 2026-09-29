@@ -1141,16 +1141,16 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
         </>
       }
     >
+      <TaskEngineSelector
+        engines={engines}
+        taskEngine={stringValue(state.taskEngine)}
+        enabled={
+          viewState.capabilities.includes("recognition.engine") && !running
+        }
+        actions={actions}
+        scope="batch"
+      />
       <div className="collection-workspace">
-        <TaskEngineSelector
-          engines={engines}
-          taskEngine={stringValue(state.taskEngine)}
-          enabled={
-            viewState.capabilities.includes("recognition.engine") && !running
-          }
-          actions={actions}
-          scope="batch"
-        />
         <Panel label="QUEUE" title="文件队列">
           <div className="queue-summary">
             <span>{itemCount} 个文件</span>
@@ -1391,17 +1391,17 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
         </>
       }
     >
+      <TaskEngineSelector
+        engines={engines}
+        taskEngine={stringValue(state.taskEngine)}
+        enabled={
+          viewState.capabilities.includes("recognition.engine") &&
+          !booleanValue(state.isBusy)
+        }
+        actions={actions}
+        scope="pdf"
+      />
       <div className="pdf-workspace">
-        <TaskEngineSelector
-          engines={engines}
-          taskEngine={stringValue(state.taskEngine)}
-          enabled={
-            viewState.capabilities.includes("recognition.engine") &&
-            !booleanValue(state.isBusy)
-          }
-          actions={actions}
-          scope="pdf"
-        />
         <Panel label="PAGES" title="页面">
           {pages.length === 0 ? (
             <EmptyStage
