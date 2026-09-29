@@ -20,12 +20,13 @@ internal sealed class SyntheticScreenRegionPicker(string text = "VibeOCR 123") :
   public async Task<ScreenRegionSelection?> PickAsync(CancellationToken cancellationToken)
   {
     Failure = null;
+    Grid host = new()
+    {
+      Background = new SolidColorBrush(Microsoft.UI.Colors.White),
+    };
     var window = new Window
     {
-      Content = new Grid
-      {
-        Background = new SolidColorBrush(Microsoft.UI.Colors.White),
-      },
+      Content = host,
     };
     nint child = 0;
     nint font = 0;
@@ -43,7 +44,22 @@ internal sealed class SyntheticScreenRegionPicker(string text = "VibeOCR 123") :
     {
       ((OverlappedPresenter)window.AppWindow.Presenter).IsAlwaysOnTop = true;
       window.AppWindow.MoveAndResize(new RectInt32(100, 100, 1000, 300));
-      window.Activate();
+      // A new WS_CHILD starts at the bottom of the sibling Z-order; wait for
+      // the host to finish Loaded before creating the STATIC, then raise it.
+      var hostLoaded = new TaskCompletionSource<bool>(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+      void OnHostLoaded(object sender, RoutedEventArgs args) => hostLoaded.TrySetResult(true);
+      host.Loaded += OnHostLoaded;
+      try
+      {
+        window.Activate();
+        if (!host.IsLoaded)
+          await hostLoaded.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
+      }
+      finally
+      {
+        host.Loaded -= OnHostLoaded;
+      }
       nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
       messages = new WindowMessageService(handle);
       messages.MessageHandled += OnWindowMessage;
@@ -55,7 +71,9 @@ internal sealed class SyntheticScreenRegionPicker(string text = "VibeOCR 123") :
 
       // SS_CENTERIMAGE makes STATIC render a single centered line; preserve it
       // for existing one-line smoke, but let bilingual CRLF evidence wrap.
-      uint childStyle = 0x40000000 | 0x10000000 | 0x00000001 |
+      // SS_NOTIFY makes WindowFromPoint hit-test the STATIC itself instead of
+      // returning the window below it (same as the Paddle smoke bitmap window).
+      uint childStyle = 0x40000000 | 0x10000000 | 0x00000001 | 0x00000100 |
         (text.Contains('\n') ? 0u : 0x00000200u);
       child = CreateWindowExW(0, "STATIC", text, childStyle,
         0, 0, client.Right - client.Left, client.Bottom - client.Top,
@@ -64,6 +82,12 @@ internal sealed class SyntheticScreenRegionPicker(string text = "VibeOCR 123") :
       {
         throw new InvalidOperationException(
           $"Synthetic text control creation failed: {Marshal.GetLastPInvokeError()}.");
+      }
+      // HWND_TOP with SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE.
+      if (!SetWindowPos(child, 0, 0, 0, 0, 0, 0x0001u | 0x0002u | 0x0010u))
+      {
+        throw new InvalidOperationException(
+          $"Synthetic text control raise failed: {Marshal.GetLastPInvokeError()}");
       }
       font = CreateFontW(-72, 0, 0, 0, 700, 0, 0, 0, 1, 0, 0, 0, 0, "Segoe UI");
       if (font == 0)
@@ -78,6 +102,8 @@ internal sealed class SyntheticScreenRegionPicker(string text = "VibeOCR 123") :
         if (!IsWindowVisible(child))
           throw new InvalidOperationException("Synthetic text control is not visible.");
       }
+      // Compositor sync: present the raised, painted STATIC before capture.
+      Marshal.ThrowExceptionForHR(DwmFlush());
 
       if (!GetClientRect(child, out Rect childClient))
         throw new InvalidOperationException("Synthetic text control bounds are unavailable.");
@@ -88,6 +114,35 @@ internal sealed class SyntheticScreenRegionPicker(string text = "VibeOCR 123") :
         origin.X, origin.Y,
         childClient.Right - childClient.Left, childClient.Bottom - childClient.Top);
       cancellationToken.ThrowIfCancellationRequested();
+      // SS_NOTIFY makes the STATIC hit-testable: before sampling, the center and
+      // inset corners must hit this child itself. Anything else (XAML bridge or
+      // a foreign window) fails closed without reading its title or text.
+      Point center = new()
+      {
+        X = bounds.X + bounds.Width / 2,
+        Y = bounds.Y + bounds.Height / 2,
+      };
+      Point[] probes =
+      {
+        center,
+        new() { X = bounds.X + 1, Y = bounds.Y + 1 },
+        new() { X = bounds.X + bounds.Width - 2, Y = bounds.Y + 1 },
+        new() { X = bounds.X + 1, Y = bounds.Y + bounds.Height - 2 },
+        new() { X = bounds.X + bounds.Width - 2, Y = bounds.Y + bounds.Height - 2 },
+      };
+      nint hit = child;
+      foreach (Point probe in probes)
+      {
+        hit = WindowFromPoint(probe);
+        if (hit != child)
+        {
+          throw new InvalidOperationException(
+            $"Synthetic capture region is not owned by the text control: " +
+            $"probe=({probe.X},{probe.Y}), hit={hit}, child={child}, " +
+            $"childVisible={IsWindowVisible(child)}, " +
+            $"bounds={bounds.Width}x{bounds.Height}.");
+        }
+      }
       await using var capture = new ScreenCaptureService(Guid.NewGuid());
       CapturedFrame frame = capture.Capture(bounds, TimeSpan.FromMinutes(1));
       byte[] pixels = capture.Read(frame);
@@ -102,16 +157,14 @@ internal sealed class SyntheticScreenRegionPicker(string text = "VibeOCR 123") :
       }
       if (white < 10000 || dark < 100)
       {
-        Point center = new()
-        {
-          X = bounds.X + bounds.Width / 2,
-          Y = bounds.Y + bounds.Height / 2,
-        };
-        nint hit = WindowFromPoint(center);
+        var hitClass = new System.Text.StringBuilder(256);
+        if (GetClassNameW(hit, hitClass, hitClass.Capacity) == 0)
+          hitClass.Clear().Append("<unknown>");
         throw new InvalidDataException(
           $"Synthetic Win32 text pixels did not render: white={white}, dark={dark}, " +
           $"bounds={bounds.Width}x{bounds.Height}, dpi={GetDpiForWindow(handle)}, " +
-          $"childVisible={IsWindowVisible(child)}, hitOwnChild={hit == child}.");
+          $"childVisible={IsWindowVisible(child)}, hitOwnChild={hit == child}, " +
+          $"hitClass={hitClass.ToString()}.");
       }
       Evidence = new CaptureEvidence(frame.Width, frame.Height, white, dark);
       return new ScreenRegionSelection(bounds, pixels, frame.Stride);
@@ -199,4 +252,16 @@ internal sealed class SyntheticScreenRegionPicker(string text = "VibeOCR 123") :
 
   [DllImport("user32.dll")]
   private static extern nint WindowFromPoint(Point point);
+
+  [DllImport("user32.dll", SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool SetWindowPos(
+    nint handle, nint insertAfter, int x, int y, int width, int height, uint flags);
+
+  [DllImport("user32.dll", EntryPoint = "GetClassNameW", CharSet = CharSet.Unicode)]
+  private static extern int GetClassNameW(
+    nint handle, System.Text.StringBuilder name, int maxCount);
+
+  [DllImport("dwmapi.dll")]
+  private static extern int DwmFlush();
 }

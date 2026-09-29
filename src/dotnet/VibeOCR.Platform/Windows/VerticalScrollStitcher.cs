@@ -101,7 +101,12 @@ public sealed class VerticalScrollStitcher
   /// </summary>
   /// <returns>The status of the attempt and, for <see cref="ScrollAppendStatus.Added"/>, the appended row count.</returns>
   /// <exception cref="OperationCanceledException">The cancellation token fired during validation or scanning.</exception>
-  public ScrollAppendResult Append(CapturedFrame next, CancellationToken cancellationToken = default)
+  public ScrollAppendResult Append(CapturedFrame next, CancellationToken cancellationToken = default) =>
+    AppendCore(next, cancellationToken, beforeCandidate: null);
+
+  // A synchronous scan boundary lets regression tests cancel without timer/thread-pool races.
+  internal ScrollAppendResult AppendCore(
+    CapturedFrame next, CancellationToken cancellationToken, Action<int>? beforeCandidate)
   {
     ArgumentNullException.ThrowIfNull(next);
     ValidateFrameGeometry(next, nameof(next));
@@ -142,6 +147,7 @@ public sealed class VerticalScrollStitcher
     ReadOnlySpan<byte> previous = _previousFrame;
     for (int scroll = 1; scroll <= maxScroll; scroll++)
     {
+      beforeCandidate?.Invoke(scroll);
       cancellationToken.ThrowIfCancellationRequested();
       if (VerifyAlignment(previous, packed, scroll, _frameRowBytes, _frameHeight, cancellationToken))
       {
