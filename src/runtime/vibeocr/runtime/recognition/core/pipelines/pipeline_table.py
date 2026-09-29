@@ -332,9 +332,16 @@ def _recognize_table(
             # 该值既用于下方过滤重复文本，也挂回表格块自身的 bbox（替代
             # 早期写死的 None），让左侧画布能正确绘制表格 bbox。
             # 归一化到 [0,1000] 由 service 层 _normalize_result_bbox 统一完成。
-            cell_box_list = (
+            # 无线 E2E 路径（use_e2e_wireless_table_rec_model=True）的
+            # cell_box_list 是 np.clip 后的 2-D ndarray（直接做布尔判断会抛
+            # "truth value ... ambiguous"，实机无线表格即崩在此），有线路径
+            # 经 sort_table_cells_boxes 则是 Python list。在 provider 唯一
+            # 入口统一展开为行列表（每行仍可为 ndarray，由 _parse_cell_box
+            # 的 tolist 解析），两条路径的下游消费者保持一致。
+            raw_cell_box_list = (
                 table_res.get("cell_box_list") if hasattr(table_res, "get") else None
             )
+            cell_box_list = [] if raw_cell_box_list is None else list(raw_cell_box_list)
             current_bbox: tuple[float, float, float, float] | None = None
             if cell_box_list:
                 valid_cell_boxes = [

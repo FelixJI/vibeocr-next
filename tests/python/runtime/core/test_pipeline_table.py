@@ -652,6 +652,42 @@ def test_recognize_table_backfills_empty_cell_from_ocr():
     assert not any(b.get("text") == "漏掉的字" for b in text_blocks)
 
 
+def test_recognize_table_accepts_ndarray_cell_box_list():
+    """回归：无线表格 E2E 路径的 cell_box_list 是 numpy 2-D ndarray。
+
+    实机（候选53）无线表格在 ``if cell_box_list:`` 处抛 "The truth value
+    of an array with more than one element is ambiguous"，有线同参数成功：
+    PaddleX 3.7.2 无线 E2E 后处理返回 ndarray，有线经
+    sort_table_cells_boxes 返回 Python list。修复后 ndarray 展开为行列表，
+    bbox 并集推导与空格回填照常工作。
+    """
+    import numpy as np
+
+    pred_html = "<table><tr><td></td><td>已填</td></tr></table>"
+    cell_boxes = np.array(
+        [
+            [10.0, 10.0, 100.0, 50.0],
+            [100.0, 10.0, 200.0, 50.0],
+        ]
+    )
+    # OCR 文本中心 (55,30) 落在空单元格内
+    poly = np.array([[40, 20], [70, 20], [70, 40], [40, 40]], dtype=float)
+    res = _make_table_result(
+        pred_html=pred_html,
+        ocr_texts=["漏掉的字"],
+        cell_box_list=cell_boxes,
+        ocr_polys=[poly],
+    )
+    result = _recognize_table(
+        _FakeService([res]), image=None, options=TableRecognitionOptions()
+    )
+
+    table_block = result.text_blocks[0]
+    assert table_block.label == "table"
+    assert table_block.bbox == (10.0, 10.0, 200.0, 50.0)
+    assert "漏掉的字" in result.content_list[0]["table_body"]
+
+
 def test_recognize_table_consumes_each_ocr_item_at_most_once():
     import numpy as np
 
