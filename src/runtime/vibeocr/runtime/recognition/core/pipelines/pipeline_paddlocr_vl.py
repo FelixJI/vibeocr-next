@@ -288,8 +288,10 @@ def _recognize_paddlocr_vl(
     output = pipeline.predict(input=image, **predict_kwargs)
     output_list = list(output)
     _logger.info(
-        "[Paddle consumed] predict PaddleOCR-VL use_layout_detection=%s",
+        "[Paddle consumed] predict PaddleOCR-VL use_layout_detection=%s "
+        "use_chart_recognition=%s",
         predict_kwargs["use_layout_detection"],
+        predict_kwargs["use_chart_recognition"],
     )
 
     markdown_text = ""

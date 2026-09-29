@@ -159,7 +159,7 @@ $modeSpec = @{
     }
     'paddle_document_vl' = @{
         Fixture = 'document_mixed.png'; Pipeline = 'PaddleOCRVL'
-        Option = 'vl_use_layout_detection'; Value = 'false'; Kind = 'bool'
+        Option = 'vl_use_chart_recognition'; Value = 'true'; Kind = 'bool'
         Tokens = 'GOAL103|1120'; Export = '导出 Markdown'
     }
 }
