@@ -7,7 +7,7 @@ import os
 import re
 import subprocess
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Callable, Iterator
 from urllib.error import URLError
@@ -44,11 +44,25 @@ from vibeocr.runtime.environments.runtime_manifest import (
     sha256_file,
 )
 from vibeocr.runtime.environments.runtime_selection import (
+    DOWNLOAD_SOURCE_KIND_MODEL_REGISTRY,
+    DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX,
+    RuntimeSelectionError,
     RuntimeSelectionPolicy,
+    default_download_sources,
     download_source_catalog_payload,
+    download_source_display_name,
+    sanitize_download_endpoint,
 )
 
 _NAME = re.compile(r"^[^\\/\x00-\x1f]{1,80}$")
+_SOURCE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
+_SOURCE_KINDS = (
+    DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX,
+    DOWNLOAD_SOURCE_KIND_MODEL_REGISTRY,
+)
+# 注册表可选新增键：旧 schema_version=1 记录缺失时按空配置/0 读取。
+_REGISTRY_OPTIONAL_KEYS = {"default_source_ids", "source_config_revision"}
+_OPERATION_OPTIONAL_KEYS = {"requested_source_ids", "effective_source_ids"}
 _FORBIDDEN_EMPTY = (
     "fastapi",
     "rapidocr",
@@ -175,6 +189,13 @@ class ManagedEnvironmentStore:
             environment["VIBEOCR_PRODUCT_CODE_ROOT"] = str(code_root)
         if record["kind"] == "venv":
             environment["VIBEOCR_MANAGED_ENVIRONMENT_RECIPE"] = record["recipe"]
+        # 模型来源偏好按既有官方 env 投影给 _launch 消费；解析只读注册表
+        # （调用方已持有 store 锁）。原生 downloader 的实际端点未知，不伪造。
+        environment.update(
+            self._plan_selection(
+                self._read(), record, accelerator, None
+            ).model_source_environment()
+        )
         return {
             "python_executable": python,
             "supervisor_module": "vibeocr.runtime.host.main",
@@ -182,6 +203,190 @@ class ManagedEnvironmentStore:
             "model_root": str(state / "models"),
             "environment": environment,
         }
+
+    def _source_catalog(self) -> list[dict[str, str]]:
+        return download_source_catalog_payload()["sources"]
+
+    def _kind_source_map(
+        self, source_ids: tuple[str, ...] | list[str]
+    ) -> dict[str, str]:
+        """已知目录的 id 列表 → kind→id；未知 id 交给上层标注，不在此 fail closed。"""
+        catalog = {source["id"]: source for source in self._source_catalog()}
+        resolved: dict[str, str] = {}
+        for source_id in source_ids:
+            source = catalog.get(source_id)
+            if source is not None and source["kind"] not in resolved:
+                resolved[source["kind"]] = source_id
+        return resolved
+
+    def _unknown_source_ids(self, source_ids: tuple[str, ...] | list[str]) -> list[str]:
+        catalog = {source["id"] for source in self._source_catalog()}
+        return [source_id for source_id in source_ids if source_id not in catalog]
+
+    def _resolved_defaults(
+        self, data: dict, record: dict | None = None
+    ) -> dict[str, str | None]:
+        """全局默认 → 环境override 的每 kind 解析；未覆盖 kind 回退产品默认。
+
+        package_index 的产品默认是 TUNA；model_registry 无覆盖时为 None，
+        即引擎官方原生默认（实际端点未知），不伪造。
+        """
+        merged: dict[str, str] = {}
+        merged.update(self._kind_source_map(data.get("default_source_ids") or ()))
+        if record is not None:
+            merged.update(
+                self._kind_source_map(record.get("override_source_ids") or ())
+            )
+        resolved: dict[str, str | None] = {
+            kind: merged.get(kind) for kind in _SOURCE_KINDS
+        }
+        for source in default_download_sources():
+            if resolved.get(source["kind"]) is None:
+                resolved[source["kind"]] = source["id"]
+        return resolved
+
+    def _policy_for(
+        self, data: dict, record: dict | None = None
+    ) -> RuntimeSelectionPolicy:
+        resolved = self._resolved_defaults(data, record)
+        catalog = self._source_catalog()
+        defaults = tuple(
+            source["id"]
+            for source in catalog
+            if resolved.get(source["kind"]) == source["id"]
+        )
+        return (
+            RuntimeSelectionPolicy.from_manifest(
+                self.manifest, default_download_source_ids=defaults
+            )
+            if defaults
+            else RuntimeSelectionPolicy.from_manifest(self.manifest)
+        )
+
+    def _plan_selection(
+        self,
+        data: dict,
+        record: dict,
+        accelerator: str,
+        requested: tuple[str, ...] | None,
+    ):
+        try:
+            return self._policy_for(data, record).plan_start(
+                accelerator=accelerator,
+                install_component_ids=(),
+                download_source_ids=requested,
+            )
+        except RuntimeSelectionError as error:
+            raise ManagedEnvironmentError(str(error)) from error
+
+    def _source_origin(self, data: dict, record: dict | None, source_id: str) -> str:
+        overrides = (
+            self._kind_source_map(record.get("override_source_ids") or ())
+            if record is not None
+            else {}
+        )
+        defaults = self._kind_source_map(data.get("default_source_ids") or ())
+        catalog = {source["id"]: source for source in self._source_catalog()}
+        kind = catalog[source_id]["kind"]
+        if overrides.get(kind) == source_id:
+            return "environment_override"
+        if defaults.get(kind) == source_id:
+            return "global_default"
+        return "product_default"
+
+    def _source_entries(self, data: dict, record: dict | None, selection) -> list[dict]:
+        """计划/环境解析的来源投影：名称/类型/脱敏端点/继承来源/用途。"""
+        requested = selection.requested_download_source_ids
+        entries: list[dict] = []
+        for source in selection.effective_download_sources:
+            entry = {
+                "id": source.source_id,
+                "kind": source.kind,
+                "display_name": download_source_display_name(source.source_id),
+                "endpoint": sanitize_download_endpoint(source.endpoint),
+                "requested": (requested is not None and source.source_id in requested),
+                "inherited_from": self._source_origin(data, record, source.source_id),
+            }
+            if source.kind == DOWNLOAD_SOURCE_KIND_MODEL_REGISTRY:
+                # 模型源只是偏好投影；原生 downloader 的真实端点未知。
+                entry["usage"] = "model_preference"
+                entry["actual_endpoint"] = None
+            else:
+                entry["usage"] = "online_index"
+            entries.append(entry)
+        return entries
+
+    def _resolved_source_entries(self, data: dict, record: dict | None) -> list[dict]:
+        resolved = self._resolved_defaults(data, record)
+        entries: list[dict] = []
+        for kind in _SOURCE_KINDS:
+            source_id = resolved.get(kind)
+            entry: dict = {"kind": kind, "id": source_id, "origin": "product_default"}
+            if source_id is not None:
+                entry["display_name"] = download_source_display_name(source_id)
+                entry["origin"] = self._source_origin(data, record, source_id)
+            else:
+                # 仅 model_registry 可能：官方原生默认，无目录 id 可指认。
+                entry["display_name"] = None
+            entries.append(entry)
+        return entries
+
+    def set_sources(
+        self,
+        env_id: str | None,
+        package_source_id: str | None,
+        model_source_id: str | None,
+    ) -> dict:
+        """保存全局默认或单环境override；null 表示清除该 kind 回退继承。
+
+        只写配置：不下载、不安装、不重启；同环境在途操作会被 target
+        operation lock 拒绝，保存 A 不会修改 B。
+        """
+        catalog = {source["id"]: source for source in self._source_catalog()}
+        requested = {
+            DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX: package_source_id,
+            DOWNLOAD_SOURCE_KIND_MODEL_REGISTRY: model_source_id,
+        }
+        for kind, source_id in requested.items():
+            if source_id is None:
+                continue
+            source = catalog.get(source_id)
+            if source is None or source["kind"] != kind:
+                raise ManagedEnvironmentError(
+                    f"unknown {kind} download source: {source_id}"
+                )
+        target_lock = (
+            self._target_operation(env_id) if env_id is not None else nullcontext()
+        )
+        with target_lock, RuntimeStoreLock(self._lock):
+            data = self._read()
+            key = "default_source_ids" if env_id is None else "override_source_ids"
+            target: dict = data
+            if env_id is not None:
+                record = data["environments"].get(env_id)
+                if record is None:
+                    raise ManagedEnvironmentError("unknown environment")
+                target = record
+            current = self._kind_source_map(target.get(key) or ())
+            for kind, source_id in requested.items():
+                if source_id is None:
+                    current.pop(kind, None)
+                else:
+                    current[kind] = source_id
+            merged_ids = tuple(
+                source["id"]
+                for source in self._source_catalog()
+                if current.get(source["kind"]) == source["id"]
+            )
+            data["source_config_revision"] = (
+                int(data.get("source_config_revision") or 0) + 1
+            )
+            if merged_ids:
+                target[key] = list(merged_ids)
+            else:
+                target.pop(key, None)
+            _atomic_json(self._registry, data)
+        return self.list()
 
     def _reject_referenced(self, data: dict) -> None:
         if any(
@@ -211,6 +416,15 @@ class ManagedEnvironmentStore:
         operation = record.get("last_install_operation")
         if operation is None:
             return None
+        # 旧记录没有来源绑定；进程中断与显式失败共用已冻结的来源投影。
+        source_evidence = (
+            {
+                "requested_source_ids": operation["requested_source_ids"],
+                "effective_source_ids": operation["effective_source_ids"],
+            }
+            if "effective_source_ids" in operation
+            else {}
+        )
         if operation["phase"] == "installing":
             lock = RuntimeStoreLock(
                 self.paths.locks_root
@@ -238,6 +452,7 @@ class ManagedEnvironmentStore:
                 if reason_code == "install_in_progress"
                 else "preview_again",
                 "detail": detail,
+                **source_evidence,
             }
         return {
             "phase": "failed",
@@ -246,6 +461,7 @@ class ManagedEnvironmentStore:
             "reason_code": operation["reason_code"],
             "next_action": operation["next_action"],
             "detail": safe_runtime_detail(operation["detail"]),
+            **source_evidence,
         }
 
     def _read(self) -> dict:
@@ -257,6 +473,8 @@ class ManagedEnvironmentStore:
             "schema_version": 1,
             "active_id": None,
             "active_revision": 0,
+            "default_source_ids": [],
+            "source_config_revision": 0,
             "environments": {},
         }
         legacy = self.paths.runtime_root
@@ -319,12 +537,28 @@ class ManagedEnvironmentStore:
     def _validate_registry(self, data: object) -> None:
         if (
             not isinstance(data, dict)
-            or set(data)
-            != {"schema_version", "active_id", "active_revision", "environments"}
+            or not {
+                "schema_version",
+                "active_id",
+                "active_revision",
+                "environments",
+            }.union(_REGISTRY_OPTIONAL_KEYS).issuperset(set(data))
+            or not {
+                "schema_version",
+                "active_id",
+                "active_revision",
+                "environments",
+            }.issubset(data)
             or data["schema_version"] != 1
             or type(data["active_revision"]) is not int
             or data["active_revision"] < 0
             or not isinstance(data["environments"], dict)
+        ):
+            raise ManagedEnvironmentError("environment registry is invalid")
+        self._validate_source_ids(data.get("default_source_ids"), "default sources")
+        if "source_config_revision" in data and (
+            type(data["source_config_revision"]) is not int
+            or data["source_config_revision"] < 0
         ):
             raise ManagedEnvironmentError("environment registry is invalid")
         environments = data["environments"]
@@ -350,6 +584,7 @@ class ManagedEnvironmentStore:
                     "abi",
                     "recipe",
                     "source_ids",
+                    "override_source_ids",
                     "last_install_operation",
                 }
                 or not {
@@ -397,13 +632,16 @@ class ManagedEnvironmentStore:
                 or any(not isinstance(source, str) for source in record["source_ids"])
             ):
                 raise ManagedEnvironmentError("environment source selection is invalid")
+            if "override_source_ids" in record:
+                self._validate_source_ids(
+                    record["override_source_ids"], "environment source overrides"
+                )
             if "last_install_operation" in record:
                 operation = record["last_install_operation"]
                 if (
                     record["kind"] != "venv"
                     or not isinstance(operation, dict)
-                    or set(operation)
-                    != {
+                    or not {
                         "environment_revision",
                         "plan_id",
                         "recipe",
@@ -411,7 +649,16 @@ class ManagedEnvironmentStore:
                         "reason_code",
                         "next_action",
                         "detail",
-                    }
+                    }.issubset(operation)
+                    or not {
+                        "environment_revision",
+                        "plan_id",
+                        "recipe",
+                        "phase",
+                        "reason_code",
+                        "next_action",
+                        "detail",
+                    }.union(_OPERATION_OPTIONAL_KEYS).issuperset(set(operation))
                     or type(operation["environment_revision"]) is not int
                     or operation["environment_revision"] != record["revision"]
                     or not isinstance(operation["plan_id"], str)
@@ -440,11 +687,39 @@ class ManagedEnvironmentStore:
                             not operation["reason_code"] or not operation["next_action"]
                         )
                     )
+                    or not self._valid_operation_sources(operation)
                 ):
                     raise ManagedEnvironmentError(
                         "environment installation record is invalid"
                     )
             self._safe_path(record)
+
+    @staticmethod
+    def _validate_source_ids(value: object, label: str) -> None:
+        """来源偏好列表的结构校验：目录语义（未知 id、同 kind 多选）在解析时标注。"""
+        if value is None:
+            return
+        if not isinstance(value, list) or not (
+            all(isinstance(item, str) and _SOURCE_ID.fullmatch(item) for item in value)
+        ):
+            raise ManagedEnvironmentError(f"{label} are invalid")
+        if len(set(value)) != len(value):
+            raise ManagedEnvironmentError(f"{label} are invalid")
+
+    @staticmethod
+    def _valid_operation_sources(operation: dict) -> bool:
+        requested = operation.get("requested_source_ids")
+        if requested is not None and (
+            not isinstance(requested, list)
+            or not all(isinstance(item, str) for item in requested)
+        ):
+            return False
+        effective = operation.get("effective_source_ids")
+        return effective is None or (
+            isinstance(effective, list)
+            and all(isinstance(item, str) for item in effective)
+            and bool(effective)
+        )
 
     def _expected_base_python(self) -> Path:
         if self._base_override is not None:
@@ -645,7 +920,9 @@ class ManagedEnvironmentStore:
             "packages": sorted(packages),
         }
 
-    def _public_record(self, record: dict, probe: dict) -> dict:
+    def _public_record(
+        self, record: dict, probe: dict, data: dict | None = None
+    ) -> dict:
         installed = record["status"] == "installed"
         python_ok = probe["reason"] not in {
             "python_missing",
@@ -704,6 +981,25 @@ class ManagedEnvironmentStore:
             ),
             "last_install_failure": self._last_install_failure(record),
             "packages": probe.get("packages", []),
+            **self._source_projection(data, record),
+        }
+
+    def _source_projection(self, data: dict | None, record: dict) -> dict:
+        """环境记录的来源解析投影；无注册表上下文时只回退安装证据。"""
+        if data is None:
+            return {
+                "override_source_ids": list(record.get("override_source_ids") or ())
+            }
+        resolved = self._resolved_source_entries(data, record)
+        return {
+            "override_source_ids": list(record.get("override_source_ids") or ()),
+            "unknown_source_ids": self._unknown_source_ids(
+                record.get("override_source_ids") or ()
+            ),
+            "resolved_sources": resolved,
+            "resolved_source_ids": [
+                entry["id"] for entry in resolved if entry["id"] is not None
+            ],
         }
 
     def _disk_usage(self, root: Path) -> int:
@@ -726,16 +1022,30 @@ class ManagedEnvironmentStore:
     def list(self) -> dict:
         with RuntimeStoreLock(self._lock):
             data = self._read()
+            catalog = self._source_catalog()
+            default_ids = list(data.get("default_source_ids") or ())
             return {
                 "active_id": data["active_id"],
                 "active_revision": data["active_revision"],
+                "sources": [
+                    {
+                        "id": source["id"],
+                        "kind": source["kind"],
+                        "display_name": download_source_display_name(source["id"]),
+                        "endpoint": sanitize_download_endpoint(source["endpoint"]),
+                    }
+                    for source in catalog
+                ],
+                "default_source_ids": default_ids,
+                "unknown_default_source_ids": self._unknown_source_ids(default_ids),
+                "source_config_revision": int(data.get("source_config_revision") or 0),
                 "package_source_ids": [
                     source["id"]
-                    for source in download_source_catalog_payload()["sources"]
-                    if source["kind"] == "package_index"
+                    for source in catalog
+                    if source["kind"] == DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX
                 ],
                 "environments": [
-                    self._public_record(record, self._probe(record))
+                    self._public_record(record, self._probe(record), data)
                     for record in data["environments"].values()
                 ],
             }
@@ -781,7 +1091,7 @@ class ManagedEnvironmentStore:
                 )
             data["environments"][env_id] = record
             _atomic_json(self._registry, data)
-            return self._public_record(record, probe)
+            return self._public_record(record, probe, data)
 
     def repair_empty(self, env_id: str) -> dict:
         """Recreate only an empty venv after a Portable path or Python ABI change."""
@@ -799,7 +1109,7 @@ class ManagedEnvironmentStore:
                     "only a managed empty environment can be repaired"
                 )
             if self._probe(record)["healthy"]:
-                return self._public_record(record, self._probe(record))
+                return self._public_record(record, self._probe(record), data)
             revision = record["revision"] + 1
             directory = f"{revision}-{uuid4().hex[:16]}"
             root = self.root / env_id / "revisions" / directory
@@ -839,7 +1149,7 @@ class ManagedEnvironmentStore:
             if data["active_id"] == env_id:
                 data["active_revision"] += 1
             _atomic_json(self._registry, data)
-            return self._public_record(replacement, probe)
+            return self._public_record(replacement, probe, data)
 
     def _recipe(self, recipe: str) -> tuple[RuntimeInstallScope, str]:
         if recipe == "rapidocr-cpu":
@@ -906,7 +1216,7 @@ class ManagedEnvironmentStore:
         return self._recipe(recipe)
 
     def preview_install(
-        self, env_id: str, recipe: str, source_ids: tuple[str, ...] = ("tuna-pypi",)
+        self, env_id: str, recipe: str, source_ids: tuple[str, ...] | None = None
     ) -> dict:
         with self._target_operation(env_id), RuntimeStoreLock(self._lock):
             data = self._read()
@@ -940,22 +1250,26 @@ class ManagedEnvironmentStore:
                     "standalone CUDA MinerU recipe is not bound by the current release"
                 )
             scope, accelerator = self._recipe(recipe)
-            selection = RuntimeSelectionPolicy.from_manifest(self.manifest).plan_start(
-                accelerator=accelerator,
-                install_component_ids=(),
-                download_source_ids=source_ids,
-            )
+            selection = self._plan_selection(data, record, accelerator, source_ids)
             if (
                 len(
                     [
                         source
                         for source in selection.effective_download_sources
-                        if source.kind == "package_index"
+                        if source.kind == DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX
                     ]
                 )
                 != 1
             ):
                 raise ManagedEnvironmentError("one package index source is required")
+            sources = self._source_entries(data, record, selection)
+            for source in sources:
+                if source["kind"] == DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX:
+                    # 随包离线包存在时依赖不走在线索引；缺失离线包安装时会
+                    # fail closed，不静默改用网络源。
+                    source["usage"] = (
+                        "bundled_pack" if scope.runtime_pack else "online_index"
+                    )
             plan = {
                 "plan_id": uuid4().hex,
                 "environment_id": env_id,
@@ -964,7 +1278,20 @@ class ManagedEnvironmentStore:
                 "requested_recipe": requested_recipe,
                 "recipe": recipe,
                 "recipe_lock": scope.sha256,
-                "source_ids": list(source_ids),
+                # 请求源（本次显式）与生效源（显式+继承叠加）分开冻结；
+                # None 表示本次未显式指定、完全继承环境/全局配置。
+                "requested_source_ids": (
+                    None
+                    if selection.requested_download_source_ids is None
+                    else sorted(selection.requested_download_source_ids)
+                ),
+                "source_ids": [
+                    source.source_id for source in selection.effective_download_sources
+                ],
+                "effective_source_ids": [
+                    source.source_id for source in selection.effective_download_sources
+                ],
+                "source_config_revision": int(data.get("source_config_revision") or 0),
                 "runtime_manifest": self.manifest.sha256,
             }
             dependencies = []
@@ -977,15 +1304,32 @@ class ManagedEnvironmentStore:
                 self.paths.state_root / "environment-plans" / f"{env_id}.json",
                 plan,
             )
-            return {**plan, "dependencies": dependencies}
+            return {
+                **plan,
+                "dependencies": dependencies,
+                "sources": sources,
+                # 资产来源分类：固定解释器归档与内部 wheel 随产品分发；
+                # 依赖来自随包离线包或锁定的在线索引；模型只是偏好，
+                # 实际下载端点未知，缓存命中不计为新下载。
+                "python_origin": "product_bundle",
+                "runtime_wheel_origin": "product_bundle",
+                "dependency_origin": (
+                    "bundled_pack" if scope.runtime_pack else "online_index"
+                ),
+            }
 
     def install(
-        self, plan_id: str, env_id: str, recipe: str, source_ids: tuple[str, ...]
+        self,
+        plan_id: str,
+        env_id: str,
+        recipe: str,
+        source_ids: tuple[str, ...] | None = None,
     ) -> dict:
         if not re.fullmatch(r"[0-9a-f]{32}", plan_id) or not re.fullmatch(
             r"[0-9a-f]{32}", env_id
         ):
             raise RuntimeInstallPlanStale("invalid environment plan")
+        requested_ids = None if source_ids is None else tuple(sorted(set(source_ids)))
         with self._target_operation(env_id):
             plan_path = self.paths.state_root / "environment-plans" / f"{env_id}.json"
             with RuntimeStoreLock(self._lock):
@@ -1010,7 +1354,8 @@ class ManagedEnvironmentStore:
                     plan.get("plan_id") != plan_id
                     or plan.get("environment_id") != env_id
                     or plan.get("recipe") != recipe
-                    or plan.get("source_ids") != list(source_ids)
+                    or plan.get("requested_source_ids")
+                    != (None if requested_ids is None else list(requested_ids))
                     or record is None
                     or record["kind"] != "venv"
                     or record["revision"] != plan.get("environment_revision")
@@ -1018,23 +1363,29 @@ class ManagedEnvironmentStore:
                     or (data["active_id"] == env_id and record["status"] != "empty")
                     or plan.get("recipe_lock") != scope.sha256
                     or plan.get("runtime_manifest") != self.manifest.sha256
+                    # 来源配置修订变化 → 旧计划失效；在途操作不受影响
+                    # （这里发生在冻结前，配置变化后 confirm 必须重新预览）。
+                    or plan.get("source_config_revision")
+                    != int(data.get("source_config_revision") or 0)
                 ):
                     raise RuntimeInstallPlanStale(
                         "environment or recipe changed; preview again"
                     )
                 if environment_has_references(self._references, env_id):
                     raise ManagedEnvironmentError("environment has active jobs")
-                selection = RuntimeSelectionPolicy.from_manifest(
-                    self.manifest
-                ).plan_start(
-                    accelerator=accelerator,
-                    install_component_ids=(),
-                    download_source_ids=tuple(plan["source_ids"]),
+                selection = self._plan_selection(
+                    data, record, accelerator, requested_ids
                 )
+                if [
+                    source.source_id for source in selection.effective_download_sources
+                ] != list(plan["source_ids"]):
+                    raise RuntimeInstallPlanStale(
+                        "source configuration changed; preview again"
+                    )
                 source = next(
                     source
                     for source in selection.effective_download_sources
-                    if source.kind == "package_index"
+                    if source.kind == DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX
                 )
                 revision = record["revision"] + 1
                 directory = f"{revision}-{uuid4().hex[:16]}"
@@ -1049,6 +1400,9 @@ class ManagedEnvironmentStore:
                     "reason_code": "",
                     "next_action": "",
                     "detail": "",
+                    # 操作启动即冻结请求/生效来源；失败/取消/重启后仍可查。
+                    "requested_source_ids": plan.get("requested_source_ids"),
+                    "effective_source_ids": list(plan["source_ids"]),
                 }
                 record = {**record, "last_install_operation": operation}
                 data["environments"][env_id] = record
@@ -1148,7 +1502,7 @@ class ManagedEnvironmentStore:
                     # recording the more specific failure detail.
                     pass
                 raise
-            return self._public_record(candidate, probe)
+            return self._public_record(candidate, probe, latest)
 
     def _install_scope(
         self, python: Path, scope: RuntimeInstallScope, endpoint: str

@@ -63,6 +63,7 @@ export type AppActionType =
   | "settings.createEnvironment"
   | "settings.previewEnvironmentInstall"
   | "settings.confirmEnvironmentInstall"
+  | "settings.setEnvironmentSources"
   | "settings.cancelEnvironmentInstall"
   | "settings.invalidateEnvironmentPlan"
   | "settings.switchEnvironment"

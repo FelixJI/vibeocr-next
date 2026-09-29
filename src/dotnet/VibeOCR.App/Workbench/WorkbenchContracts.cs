@@ -202,8 +202,9 @@ public sealed record OpenProjectPageCommand : WorkbenchCommand;
 public sealed record RefreshRuntimeCommand : WorkbenchCommand;
 
 public sealed record CreateEnvironmentCommand(string Name) : WorkbenchCommand;
-public sealed record PreviewEnvironmentInstallCommand(string EnvironmentId, string Recipe, string SourceId) : WorkbenchCommand;
-public sealed record ConfirmEnvironmentInstallCommand(string PlanId, string SourceId) : WorkbenchCommand;
+public sealed record PreviewEnvironmentInstallCommand(string EnvironmentId, string Recipe, string? SourceId) : WorkbenchCommand;
+public sealed record ConfirmEnvironmentInstallCommand(string PlanId, string? SourceId) : WorkbenchCommand;
+public sealed record SetEnvironmentSourcesCommand(string? EnvironmentId, string? PackageSourceId, string? ModelSourceId) : WorkbenchCommand;
 public sealed record CancelEnvironmentInstallCommand : WorkbenchCommand;
 public sealed record InvalidateEnvironmentPlanCommand : WorkbenchCommand;
 public sealed record SwitchEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
@@ -476,6 +477,9 @@ public sealed record SettingsWorkbenchState(
   SettingsEnvironmentPlanState? EnvironmentPlan = null,
   string EnvironmentStatus = "",
   bool EnvironmentBusy = false,
+  IReadOnlyList<SettingsEnvironmentSourceState>? EnvironmentSources = null,
+  IReadOnlyList<string>? EnvironmentDefaultSourceIds = null,
+  IReadOnlyList<string>? EnvironmentUnknownDefaultSourceIds = null,
   IReadOnlyList<string>? EnvironmentPackageSourceIds = null,
   bool EnvironmentCanCancelInstall = false,
   IReadOnlyList<SettingsHotkeyActionState>? HotkeyActions = null,
@@ -504,7 +508,25 @@ public sealed record SettingsEnvironmentState(
   string? Python,
   string? Path,
   long DiskBytes,
+  IReadOnlyList<string>? SourceIds = null,
+  IReadOnlyList<string>? OverrideSourceIds = null,
+  IReadOnlyList<string>? UnknownSourceIds = null,
+  IReadOnlyList<SettingsEnvironmentResolvedSourceState>? ResolvedSources = null,
   SettingsEnvironmentInstallFailureState? LastInstallFailure = null);
+
+/// <summary>目录内下载源投影：展示名 + 脱敏端点。</summary>
+public sealed record SettingsEnvironmentSourceState(
+  string Id,
+  string Kind,
+  string DisplayName,
+  string Endpoint);
+
+/// <summary>每 kind 解析：Id 为 null 表示产品默认（模型源无覆盖时官方原生默认，端点未知）。</summary>
+public sealed record SettingsEnvironmentResolvedSourceState(
+  string Kind,
+  string? Id,
+  string? DisplayName,
+  string Origin);
 
 public sealed record SettingsEnvironmentInstallFailureState(
   string Phase,
@@ -512,7 +534,9 @@ public sealed record SettingsEnvironmentInstallFailureState(
   string Recipe,
   string ReasonCode,
   string NextAction,
-  string Detail);
+  string Detail,
+  IReadOnlyList<string>? RequestedSourceIds = null,
+  IReadOnlyList<string>? EffectiveSourceIds = null);
 
 public sealed record SettingsEnvironmentPlanState(
   string PlanId,
@@ -520,7 +544,24 @@ public sealed record SettingsEnvironmentPlanState(
   string Recipe,
   IReadOnlyList<string> SourceIds,
   IReadOnlyList<string> Dependencies,
-  string RequestedRecipe);
+  string RequestedRecipe,
+  IReadOnlyList<string>? RequestedSourceIds = null,
+  int EnvironmentRevision = 0,
+  IReadOnlyList<SettingsEnvironmentPlanSourceState>? Sources = null,
+  string? DependencyOrigin = null,
+  string? PythonOrigin = null,
+  string? RuntimeWheelOrigin = null);
+
+/// <summary>计划内单来源：请求/继承标记、用途分类与脱敏端点。</summary>
+public sealed record SettingsEnvironmentPlanSourceState(
+  string Id,
+  string Kind,
+  string DisplayName,
+  string Endpoint,
+  bool Requested,
+  string InheritedFrom,
+  string Usage,
+  string? ActualEndpoint = null);
 
 /// <summary>
 /// One shell action's hotkey projection for the settings page: the configured

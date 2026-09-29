@@ -57,6 +57,15 @@ _DOWNLOAD_SOURCES: tuple[dict[str, str], ...] = (
 )
 _DEFAULT_DOWNLOAD_SOURCE_IDS = ("tuna-pypi",)
 
+# 展示名映射：目录 payload 仍只携带 kind/id/endpoint（wire 契约不变），
+# 管理通道的名称投影由此处单点提供，避免各端重复硬编码。
+_DOWNLOAD_SOURCE_DISPLAY_NAMES: dict[str, str] = {
+    "tuna-pypi": "TUNA PyPI 镜像",
+    "pypi": "PyPI 官方源",
+    "huggingface": "Hugging Face",
+    "modelscope": "ModelScope",
+}
+
 _MODEL_SOURCE_ENVIRONMENT: dict[str, dict[str, str]] = {
     "huggingface": {
         "PADDLE_PDX_MODEL_SOURCE": "huggingface",
@@ -371,6 +380,37 @@ def default_download_sources() -> tuple[dict[str, str], ...]:
     return tuple(source for source in _DOWNLOAD_SOURCES if source["id"] in defaults)
 
 
+def download_source_display_name(source_id: str) -> str:
+    """目录内源 id 的公开展示名；目录外 id 原样返回交由上层标注未知。"""
+    return _DOWNLOAD_SOURCE_DISPLAY_NAMES.get(source_id, source_id)
+
+
+def sanitize_download_endpoint(endpoint: str) -> str:
+    """Endpoint 只保留 scheme://host[:port]/path：去掉 userinfo、query、fragment。
+
+    签名/令牌通常在 query 或 userinfo 中；目录 endpoint 本身不含凭据，
+    该投影统一保证即使未来目录携带参数也不会外泄。解析失败（含非法
+    端口、非法主机、IPv6 未加括号等）返回空串，由调用方按“未知端点”
+    呈现。IPv6 主机重新加回方括号，保持合法 netloc。
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    try:
+        parts = urlsplit(endpoint.strip())
+        # .port/.hostname 对非法端口/主机抛 ValueError，先取值再拼接。
+        port = parts.port
+        host = parts.hostname
+    except ValueError:
+        return ""
+    scheme = parts.scheme.lower()
+    if scheme not in {"http", "https"} or not host:
+        return ""
+    host = host.lower()
+    host_part = f"[{host}]" if ":" in host else host
+    port_part = f":{port}" if port is not None else ""
+    return urlunsplit((scheme, f"{host_part}{port_part}", parts.path or "", "", ""))
+
+
 def download_source_catalog_payload(
     sources: Sequence[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
@@ -576,10 +616,12 @@ __all__ = [
     "component_variant_catalog_payload",
     "default_download_sources",
     "download_source_catalog_payload",
+    "download_source_display_name",
     "durable_selection_fields",
     "normalize_download_source_ids",
     "normalize_install_component_ids",
     "normalized_selection_fields",
+    "sanitize_download_endpoint",
     "selectable_component_ids",
     "selectable_component_ids_across_catalog",
 ]

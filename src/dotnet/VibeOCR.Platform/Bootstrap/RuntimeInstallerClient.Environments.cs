@@ -24,7 +24,26 @@ public sealed record ManagedEnvironment(
     [property: JsonPropertyName("path")] string? Path = null,
     [property: JsonPropertyName("disk_bytes")] long DiskBytes = 0,
     [property: JsonPropertyName("recipe")] string? Recipe = null,
+    [property: JsonPropertyName("source_ids")] IReadOnlyList<string>? SourceIds = null,
+    [property: JsonPropertyName("override_source_ids")] IReadOnlyList<string>? OverrideSourceIds = null,
+    [property: JsonPropertyName("unknown_source_ids")] IReadOnlyList<string>? UnknownSourceIds = null,
+    [property: JsonPropertyName("resolved_sources")] IReadOnlyList<ManagedEnvironmentResolvedSource>? ResolvedSources = null,
+    [property: JsonPropertyName("resolved_source_ids")] IReadOnlyList<string>? ResolvedSourceIds = null,
     [property: JsonPropertyName("last_install_failure")] ManagedEnvironmentInstallFailure? LastInstallFailure = null);
+
+/// <summary>目录内下载源：id/kind/展示名与脱敏端点（模型源实际下载端点未知）。</summary>
+public sealed record ManagedDownloadSource(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("display_name")] string DisplayName,
+    [property: JsonPropertyName("endpoint")] string Endpoint);
+
+/// <summary>单环境每 kind 的解析结果：id 为 null 表示产品默认（模型源无覆盖时官方原生默认）。</summary>
+public sealed record ManagedEnvironmentResolvedSource(
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("id")] string? Id,
+    [property: JsonPropertyName("display_name")] string? DisplayName = null,
+    [property: JsonPropertyName("origin")] string Origin = "product_default");
 
 public sealed record ManagedEnvironmentInstallFailure(
     [property: JsonPropertyName("phase")] string Phase,
@@ -32,12 +51,18 @@ public sealed record ManagedEnvironmentInstallFailure(
     [property: JsonPropertyName("recipe")] string Recipe,
     [property: JsonPropertyName("reason_code")] string ReasonCode,
     [property: JsonPropertyName("next_action")] string NextAction,
-    [property: JsonPropertyName("detail")] string Detail);
+    [property: JsonPropertyName("detail")] string Detail,
+    [property: JsonPropertyName("requested_source_ids")] IReadOnlyList<string>? RequestedSourceIds = null,
+    [property: JsonPropertyName("effective_source_ids")] IReadOnlyList<string>? EffectiveSourceIds = null);
 
 public sealed record ManagedEnvironmentList(
     [property: JsonPropertyName("active_id")] string? ActiveId,
     [property: JsonPropertyName("active_revision")] int ActiveRevision,
     [property: JsonPropertyName("environments")] IReadOnlyList<ManagedEnvironment> Environments,
+    [property: JsonPropertyName("sources")] IReadOnlyList<ManagedDownloadSource>? Sources = null,
+    [property: JsonPropertyName("default_source_ids")] IReadOnlyList<string>? DefaultSourceIds = null,
+    [property: JsonPropertyName("unknown_default_source_ids")] IReadOnlyList<string>? UnknownDefaultSourceIds = null,
+    [property: JsonPropertyName("source_config_revision")] int SourceConfigRevision = 0,
     [property: JsonPropertyName("package_source_ids")] IReadOnlyList<string>? PackageSourceIds = null);
 
 public sealed record ManagedEnvironmentPlan(
@@ -48,7 +73,24 @@ public sealed record ManagedEnvironmentPlan(
     [property: JsonPropertyName("recipe")] string Recipe,
     [property: JsonPropertyName("source_ids")] IReadOnlyList<string> SourceIds,
     [property: JsonPropertyName("dependencies")] IReadOnlyList<string>? Dependencies = null,
-    [property: JsonPropertyName("requested_recipe")] string? RequestedRecipe = null);
+    [property: JsonPropertyName("requested_recipe")] string? RequestedRecipe = null,
+    [property: JsonPropertyName("requested_source_ids")] IReadOnlyList<string>? RequestedSourceIds = null,
+    [property: JsonPropertyName("source_config_revision")] int SourceConfigRevision = 0,
+    [property: JsonPropertyName("sources")] IReadOnlyList<ManagedEnvironmentPlanSource>? Sources = null,
+    [property: JsonPropertyName("dependency_origin")] string? DependencyOrigin = null,
+    [property: JsonPropertyName("python_origin")] string? PythonOrigin = null,
+    [property: JsonPropertyName("runtime_wheel_origin")] string? RuntimeWheelOrigin = null);
+
+/// <summary>计划内单来源：请求/继承标记、用途与脱敏端点。</summary>
+public sealed record ManagedEnvironmentPlanSource(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("display_name")] string DisplayName,
+    [property: JsonPropertyName("endpoint")] string Endpoint,
+    [property: JsonPropertyName("requested")] bool Requested,
+    [property: JsonPropertyName("inherited_from")] string InheritedFrom,
+    [property: JsonPropertyName("usage")] string Usage,
+    [property: JsonPropertyName("actual_endpoint")] string? ActualEndpoint = null);
 
 public sealed record PreparedEnvironmentSwitch(
     [property: JsonPropertyName("environment_id")] string EnvironmentId,
@@ -71,11 +113,15 @@ public interface IManagedEnvironmentClient
 {
     Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default);
     Task<ManagedEnvironment> CreateEnvironmentAsync(string name, CancellationToken cancellationToken = default);
+    Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
+        string? environmentId, string? packageSourceId, string? modelSourceId,
+        CancellationToken cancellationToken = default);
     Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(
         string environmentId, string recipe, IReadOnlyList<string>? sourceIds = null,
         CancellationToken cancellationToken = default);
     Task<ManagedEnvironment> InstallEnvironmentAsync(
-        ManagedEnvironmentPlan plan, CancellationToken cancellationToken = default);
+        ManagedEnvironmentPlan plan, IReadOnlyList<string>? sourceIds = null,
+        CancellationToken cancellationToken = default);
     Task<PreparedEnvironmentSwitch> PrepareEnvironmentSwitchAsync(
         string environmentId, CancellationToken cancellationToken = default);
     Task<CommittedEnvironmentSwitch> CommitEnvironmentSwitchAsync(
@@ -94,17 +140,29 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
     public Task<ManagedEnvironment> CreateEnvironmentAsync(string name, CancellationToken cancellationToken = default) =>
         InvokeEnvironmentAsync<ManagedEnvironment>("create", new() { ["name"] = name }, cancellationToken);
 
+    public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
+        string? environmentId, string? packageSourceId, string? modelSourceId,
+        CancellationToken cancellationToken = default) =>
+        InvokeEnvironmentAsync<ManagedEnvironmentList>("set_sources", new()
+        {
+            ["environment_id"] = environmentId,
+            ["package_source_id"] = packageSourceId,
+            ["model_source_id"] = modelSourceId,
+        }, cancellationToken);
+
     public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(
         string environmentId, string recipe, IReadOnlyList<string>? sourceIds = null,
         CancellationToken cancellationToken = default)
     {
         var fields = new Dictionary<string, object?> { ["environment_id"] = environmentId, ["recipe"] = recipe };
+        // source_ids 省略 ≠ null：省略表示本次显式“跟随配置”，null 用于确认阶段。
         if (sourceIds is not null) fields["source_ids"] = sourceIds;
         return InvokeEnvironmentAsync<ManagedEnvironmentPlan>("preview_install", fields, cancellationToken);
     }
 
     public Task<ManagedEnvironment> InstallEnvironmentAsync(
-        ManagedEnvironmentPlan plan, CancellationToken cancellationToken = default)
+        ManagedEnvironmentPlan plan, IReadOnlyList<string>? sourceIds = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(plan);
         return InvokeEnvironmentAsync<ManagedEnvironment>("install", new()
@@ -112,7 +170,7 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
             ["plan_id"] = plan.PlanId,
             ["environment_id"] = plan.EnvironmentId,
             ["recipe"] = plan.Recipe,
-            ["source_ids"] = plan.SourceIds,
+            ["source_ids"] = sourceIds,
         }, cancellationToken);
     }
 

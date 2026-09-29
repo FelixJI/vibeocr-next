@@ -168,6 +168,11 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             catch (InferenceClientException error) { Status = LocalizeV2(error.Code); }
             await LoadSelectionSerializedAsync(forceReload: true, cancellationToken);
         }
+        catch (VibeOCR.App.Inference.InferenceClientNotAttachedException)
+        {
+            if (generation == Volatile.Read(ref _generation))
+                Status = "尚未连接运行环境；可配置来源或准备依赖。";
+        }
         catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) Status = "已取消"; }
         catch (RuntimeSelectionException error) { if (generation == Volatile.Read(ref _generation)) Status = LocalizeSelection(error); }
         catch (InferenceClientException error) { if (generation == Volatile.Read(ref _generation)) Status = LocalizeV2(error.Code); }
