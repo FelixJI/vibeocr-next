@@ -713,7 +713,12 @@ public sealed partial class MainWindow
         "!!document.querySelector('.structured-formula code') && " +
         "(document.querySelector('.structured-formula code')?.textContent ?? '').length > 0");
       ui["formula_rendered"] = await PaddleSmokeDomBoolAsync(
-        "!!document.querySelector('.structured-formula .formula-preview')");
+        "(() => { const math = document.querySelector('.structured-formula .formula-preview math'); " +
+        "if (!math || math.closest('.formula-preview').querySelector('[style]')) return false; " +
+        "const box = math.getBoundingClientRect(); " +
+        "return box.width > 0 && box.height > 0 && " +
+        "[...math.querySelectorAll('mfrac')].every(f => f.children.length === 2 && " +
+        "f.children[0].getBoundingClientRect().y < f.children[1].getBoundingClientRect().y); })()");
       ui["image_block_present"] = await PaddleSmokeDomBoolAsync(
         "!!document.querySelector('.structured-result img')");
       string blocksCount = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
