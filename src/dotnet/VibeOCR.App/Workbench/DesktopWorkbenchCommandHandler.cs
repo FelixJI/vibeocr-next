@@ -2889,6 +2889,9 @@ public sealed class DesktopWorkbenchCommandHandler :
       if (node is not JsonObject item) continue;
       if (item["image"] is JsonObject asset)
       {
+        // resource 只承载宿主发布的 opaque 资源引用：wire 原样携带的
+        // 不可信副本先清除，成功取回后再写回权威引用。
+        asset.Remove("resource");
         if (++imageCount > 32)
         {
           asset["available"] = false;
@@ -2914,8 +2917,11 @@ public sealed class DesktopWorkbenchCommandHandler :
             });
           }
           catch (OperationCanceledException) { throw; }
+          // 传输、图片校验或网关脱离失败仅影响该图；取消仍向上传播。
           catch (Exception error) when (error is IOException or
-            ArgumentException or NotSupportedException or InferenceClientException)
+            ArgumentException or NotSupportedException or InferenceClientException or
+            HttpRequestException or VibeOCR.Runtime.Client.RuntimeClientException or
+            InvalidDataException or InferenceClientNotAttachedException)
           {
             asset["available"] = false;
             asset["reason"] = "结果图片已失效或无法读取";

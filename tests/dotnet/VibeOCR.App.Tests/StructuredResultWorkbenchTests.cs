@@ -268,6 +268,188 @@ public sealed class StructuredResultWorkbenchTests
     }
   }
 
+  [Fact]
+  public async Task TransientAssetFetchFailuresDegradePerImageWithoutFailingTheResult()
+  {
+    string resourceRoot = Path.Combine(
+      Path.GetTempPath(), $"vibeocr-structured-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      string png = CreateTempPng();
+      // 逐图降级：瞬断传输/类型化传输错误/非受控 PNG/网关脱离都只把该图
+      // 标记为不可用；旧实现会让 HttpRequestException 等直接透出，把
+      // 已成功的识别误报成整次失败。
+      var client = new AssetFaultInferenceClient((assetId, _) => assetId switch
+      {
+        "asset-http" => Task.FromException<byte[]>(
+          new HttpRequestException("connection reset")),
+        "asset-runtime" => Task.FromException<byte[]>(
+          new VibeOCR.Runtime.Client.RuntimeClientException(
+            HttpV2ErrorCode.InternalError, "runtime asset call failed", retryable: true)),
+        "asset-invalid" => Task.FromException<byte[]>(
+          new InvalidDataException("Result asset is not a bounded PNG.")),
+        "asset-detached" => Task.FromException<byte[]>(
+          new VibeOCR.App.Inference.InferenceClientNotAttachedException("not attached")),
+        _ => Task.FromResult(AssetPng),
+      })
+      {
+        Blocks =
+        [
+          Block("asset-http"),
+          Block("asset-runtime"),
+          Block("asset-invalid"),
+          Block("asset-detached"),
+          new
+          {
+            type = "image",
+            image = new
+            {
+              available = true,
+              job_id = "job-1",
+              item_id = "it-0",
+              resource = LeakResource,
+            },
+          },
+          Block("asset-ok"),
+        ],
+      };
+      var deferred = new VibeOCR.App.Inference.DeferredInferenceClient();
+      deferred.Attach(client);
+      var batch = new BatchViewModel(deferred, new DiskBatchFileSource());
+      batch.AddFiles([png]);
+      await batch.StartAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      await using var handler = CreateBatchStructuredHandler(
+        () => batch, resourceRoot, broker, annotationStore);
+
+      WorkbenchCommandOutcome outcome = await handler.ExecuteAsync(
+        new SetBatchWindowCommand(0),
+        TestContext.Current.CancellationToken);
+      Assert.Null(outcome.Error);
+      WorkbenchResourceReference? structured = Assert.Single(
+        Assert.IsType<BatchWorkbenchState>(Assert.Single(outcome.States)).Items!)
+        .StructuredResult;
+      Assert.NotNull(structured);
+      // 五次可取回尝试：四个故障 id + 一个成功 id；缺 asset id 不发起取回。
+      Assert.Equal(5, client.AssetFetches);
+
+      using JsonDocument document = await ReadStructuredJsonAsync(broker, structured!.Url);
+      JsonElement root = document.RootElement;
+      foreach (int index in new[] { 0, 1, 2, 3 })
+      {
+        JsonElement image = root[index].GetProperty("image");
+        Assert.False(image.GetProperty("available").GetBoolean());
+        Assert.Equal("结果图片已失效或无法读取", image.GetProperty("reason").GetString());
+        Assert.False(image.TryGetProperty("resource", out _), $"block {index} keeps a resource");
+      }
+      // 缺 asset id：wire 原样携带的不可信 resource 不得透传。
+      JsonElement unbound = root[4].GetProperty("image");
+      Assert.False(unbound.TryGetProperty("resource", out _));
+      // 取回成功：宿主权威 resource 覆盖 wire 副本。
+      JsonElement replaced = root[5].GetProperty("image");
+      Assert.True(replaced.GetProperty("available").GetBoolean());
+      string url = replaced.GetProperty("resource").GetProperty("url").GetString()!;
+      var uri = new Uri(url);
+      Assert.Equal("https", uri.Scheme);
+      Assert.Equal("app.vibeocr", uri.Host);
+      Assert.StartsWith("/__resource/", uri.AbsolutePath);
+      Assert.NotEqual(LeakUrl, url);
+    }
+    finally
+    {
+      Directory.Delete(resourceRoot, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task CancelledAssetFetchStillPropagates()
+  {
+    string resourceRoot = Path.Combine(
+      Path.GetTempPath(), $"vibeocr-structured-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      string png = CreateTempPng();
+      var client = new AssetFaultInferenceClient((_, cancellationToken) =>
+        Task.FromException<byte[]>(new OperationCanceledException(cancellationToken)))
+      {
+        Blocks = [Block("asset-cancel")],
+      };
+      var deferred = new VibeOCR.App.Inference.DeferredInferenceClient();
+      deferred.Attach(client);
+      var batch = new BatchViewModel(deferred, new DiskBatchFileSource());
+      batch.AddFiles([png]);
+      await batch.StartAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      await using var handler = CreateBatchStructuredHandler(
+        () => batch, resourceRoot, broker, annotationStore);
+
+      // 逐图降级不得吞取消：取消仍从命令边界原样透出（ExecuteAsync 为 ValueTask）。
+      await Assert.ThrowsAsync<OperationCanceledException>(async () => await handler.ExecuteAsync(
+        new SetBatchWindowCommand(0),
+        TestContext.Current.CancellationToken));
+    }
+    finally
+    {
+      Directory.Delete(resourceRoot, recursive: true);
+    }
+  }
+
+  private const string LeakUrl = "https://untrusted.example/leak.png";
+
+  /// <summary>批量结构化发布路径的公共构造：仅 batch factory 因测试而异。</summary>
+  private static DesktopWorkbenchCommandHandler CreateBatchStructuredHandler(
+    Func<BatchViewModel> batchFactory,
+    string resourceRoot,
+    WorkbenchResourceBroker broker,
+    WorkbenchAnnotationStore annotationStore) => new(
+    static () => throw new InvalidOperationException(),
+    batchFactory,
+    static () => throw new InvalidOperationException(),
+    static () => throw new InvalidOperationException(),
+    static () => throw new InvalidOperationException(),
+    static () => throw new InvalidOperationException(),
+    static () => throw new InvalidOperationException(),
+    new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+    broker,
+    resourceRoot,
+    static () => 0,
+    annotationStore,
+    structuredClipboard: new RecordingStructuredClipboard());
+
+  private static object LeakResource => new
+  {
+    url = LeakUrl,
+    mediaType = "image/png",
+    byteLength = 4,
+  };
+
+  private static object Block(string assetId) => new
+  {
+    type = "image",
+    image = new
+    {
+      available = true,
+      job_id = "job-1",
+      item_id = "it-0",
+      asset_id = assetId,
+      resource = LeakResource,
+    },
+  };
+
+  private static async Task<JsonDocument> ReadStructuredJsonAsync(
+    WorkbenchResourceBroker broker,
+    string url)
+  {
+    await using WorkbenchResourceResponse resource = await broker.OpenAsync(
+      new Uri(url), TestContext.Current.CancellationToken);
+    return await JsonDocument.ParseAsync(
+      resource.Content, cancellationToken: TestContext.Current.CancellationToken);
+  }
+
   private static string CreateTempPng()
   {
     string path = Path.Combine(
@@ -296,11 +478,11 @@ public sealed class StructuredResultWorkbenchTests
   /// Fake supervisor returning one structured outcome (table + formula +
   /// authorized image asset) for every submitted item.
   /// </summary>
-  private sealed class StructuredOutcomeInferenceClient : InferenceClientStub
+  private class StructuredOutcomeInferenceClient : InferenceClientStub
   {
-    private IReadOnlyList<JobItem> _items = [];
+    protected IReadOnlyList<JobItem> _items = [];
 
-    public int AssetFetches { get; private set; }
+    public int AssetFetches { get; protected set; }
 
     public override Task<JobRef> SubmitAsync(
       SubmitRequest request,
@@ -392,6 +574,54 @@ public sealed class StructuredResultWorkbenchTests
         },
       }),
     };
+  }
+
+  /// <summary>
+  /// Reuses <see cref="StructuredOutcomeInferenceClient"/>'s submit/items
+  /// fixture; outcome blocks and result-asset fetch faults are configurable.
+  /// </summary>
+  private sealed class AssetFaultInferenceClient(
+    Func<string, CancellationToken, Task<byte[]>> fetch)
+    : StructuredOutcomeInferenceClient
+  {
+    public IReadOnlyList<object> Blocks { get; init; } = [];
+
+    public override Task<JobUpdate> ObserveAsync(
+      string jobId,
+      int afterSequence,
+      CancellationToken cancellationToken) => Task.FromResult(new JobUpdate
+      {
+        Events = [],
+        ThroughSequence = afterSequence + 1,
+        Snapshot = new JobSnapshot
+        {
+          JobId = jobId,
+          Kind = JobKind.Recognition,
+          Priority = JobPriority.Background,
+          State = JobState.Completed,
+          Items = _items,
+          EventSequence = afterSequence + 1,
+        },
+        Outcomes = _items.Select(item => new ItemOutcome
+        {
+          ItemId = item.ItemId,
+          State = ItemState.Succeeded,
+          Attempt = 1,
+          PayloadType = "ocr.v1",
+          Payload = new Dictionary<string, JsonElement>
+          {
+            ["raw_text"] = JsonSerializer.SerializeToElement("结构化结果"),
+            ["content_list"] = JsonSerializer.SerializeToElement(Blocks),
+          },
+        }).ToArray(),
+      });
+
+    public override Task<byte[]> FetchResultAssetAsync(
+      string jobId, string itemId, string assetId, CancellationToken cancellationToken)
+    {
+      AssetFetches++;
+      return fetch(assetId, cancellationToken);
+    }
   }
 
   private sealed class RecordingStructuredClipboard : IStructuredClipboardPlatform
