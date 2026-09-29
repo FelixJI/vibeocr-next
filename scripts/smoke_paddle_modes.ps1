@@ -175,16 +175,6 @@ if ($isResume) {
 }
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 
-$smokeRoot = Join-Path $work "pm-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
-$candidate = Join-Path $smokeRoot 'candidate'
-$fixtures = Join-Path $smokeRoot 'fixtures'
-$exports = Join-Path $smokeRoot 'ui-exports'
-$webViewData = Join-Path $smokeRoot 'webview2'
-New-Item -ItemType Directory -Path $candidate | Out-Null
-Get-ChildItem -LiteralPath $source -Force |
-    Copy-Item -Destination $candidate -Recurse -Force
-New-Item -ItemType Directory -Path $exports | Out-Null
-
 # fixture 生成统一走仓库锁定环境（uv run --frozen python），不接入任意
 # 系统 Python，也不新增 runtime 依赖；恢复模式不重新生成，复用并按
 # manifest 已验证的既有 fixtures。
