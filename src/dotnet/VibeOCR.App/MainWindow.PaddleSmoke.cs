@@ -9,6 +9,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
+using Windows.Graphics.Imaging;
 using VibeOCR.App.Features.Batch;
 using VibeOCR.App.Features.Pdf;
 using VibeOCR.App.Features.Recognition;
@@ -574,6 +575,9 @@ public sealed partial class MainWindow
       task_id = jobId, snapshot.State, snapshot.Pipeline,
       snapshot.EnvironmentId, snapshot.EnvironmentRevision,
       snapshot.Summary, snapshot.Items,
+      // 仅合成输入：ItemOutcome 原始返回（ItemId/PayloadType/Payload），
+      // broker JSON 随 App 退出被清理，证据落 health 文件供核对上游结构。
+      outcomes = observed.Outcomes,
     };
   }
 
@@ -705,6 +709,9 @@ public sealed partial class MainWindow
         environment_id = observed.Snapshot.EnvironmentId,
         environment_revision = observed.Snapshot.EnvironmentRevision,
         summary = observed.Snapshot.Summary,
+        // 仅合成输入：ItemOutcome 原始返回（ItemId/PayloadType/Payload），
+        // broker JSON 随 App 退出被清理，证据落 health 文件供核对上游结构。
+        outcomes = observed.Outcomes,
       };
     }
 
@@ -830,8 +837,10 @@ public sealed partial class MainWindow
   }
 
   /// <summary>
-  /// 复制走真实公共按钮 + 系统剪贴板，读回标准 HtmlFormat/文本核验片段；
-  /// 出现“复制失败”提示即证据（不重试）。
+  /// 复制走真实公共按钮 + 系统剪贴板：先确认目标按钮存在，再以原生
+  /// Clipboard.Clear 把剪贴板置空（不写入任何目标格式内容），点击后
+  /// 读回标准 HtmlFormat/文本核验片段；出现“复制失败”提示即证据
+  /// （不重试）。
   /// </summary>
   private async Task<Dictionary<string, object?>> ClickPaddleCopyButtonsAsync(
     string[] tokens)
@@ -839,15 +848,27 @@ public sealed partial class MainWindow
     var evidence = new Dictionary<string, object?>();
     foreach (string label in new[] { "复制文本", "复制表格 HTML / TSV", "复制 LaTeX" })
     {
-      // 点击前记录剪贴板基线：轮询以“内容变化”为准，避免把上一次复制
-      // 的残留（如表格 TSV 文本）误认成本次结果。
-      string? baseline = await ReadPaddleClipboardAsync(label);
+      // 先确认目标按钮存在；不存在/禁用时跳过该标签（公共 UI 未提供该
+      // 复制能力不算复制失败），存在后才准备剪贴板。
+      string present = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+        "(() => { const b=Array.from(document.querySelectorAll('button')).find(b => " +
+        $"b.textContent?.trim() === {JsonSerializer.Serialize(label)}); " +
+        "return !!b && !b.disabled; })()");
+      if (present != "true") continue;
+      // 原生 Clear 而非读基线比对：合法的重复复制会产生与上次相同的内
+      // 容，“内容必须变化”会把真成功误判为超时；Clear 后目标格式出现即
+      // 本次复制的结果，也不把预写内容冒充通过。Clear 失败即失败。
+      await RunOnPaddleUiThreadAsync(() =>
+      {
+        Clipboard.Clear();
+        return true;
+      });
       string found = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
         "(() => { const b=Array.from(document.querySelectorAll('button')).find(b => " +
         $"b.textContent?.trim() === {JsonSerializer.Serialize(label)}); " +
         "if(!b || b.disabled) return false; b.click(); return true; })()");
       if (found != "true") continue;
-      evidence[label] = await VerifyPaddleClipboardCopyAsync(label, tokens, baseline);
+      evidence[label] = await VerifyPaddleClipboardCopyAsync(label, tokens);
       await WaitForSmokeDomAsync(
         "(() => { const alerts=Array.from(document.querySelectorAll('[role=alert]')); " +
         "return !alerts.some(a => (a.textContent ?? '').includes('复制失败')); })()",
@@ -857,18 +878,20 @@ public sealed partial class MainWindow
   }
 
   /// <summary>
-  /// 轮询剪贴板直到目标格式出现且与基线不同：表格 → 标准 HtmlFormat 含
-  /// table/td 片段；LaTeX/文本 → 非空纯文本。剪贴板访问固定回 UI 线程队列。
+  /// 轮询剪贴板直到目标格式出现（点击前已原生 Clear，出现即本次复制结
+  /// 果）：表格 → 标准 HtmlFormat 含 table/td 片段；LaTeX/文本 → 非空纯
+  /// 文本。均保留本次自有内容全文供比对（非真实原有剪贴板内容）；剪贴
+  /// 板访问固定回 UI 线程队列。
   /// </summary>
   private async Task<object?> VerifyPaddleClipboardCopyAsync(
-    string label, string[] tokens, string? baseline)
+    string label, string[] tokens)
   {
     bool expectHtml = label == "复制表格 HTML / TSV";
     using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(8));
     while (true)
     {
       string? snapshot = await ReadPaddleClipboardAsync(label);
-      if (snapshot is { Length: > 0 } value && value != baseline)
+      if (snapshot is { Length: > 0 } value)
       {
         if (expectHtml)
         {
@@ -877,15 +900,23 @@ public sealed partial class MainWindow
             throw new InvalidOperationException(
               $"{label}: clipboard HtmlFormat lacks table fragment: " +
               value[..Math.Min(200, value.Length)]);
-          return new { format = "CF_HTML", table_fragment = true, html_chars = value.Length };
+          return new
+          {
+            format = "CF_HTML",
+            table_fragment = true,
+            html_chars = value.Length,
+            html = value,
+          };
         }
         return new
         {
           format = "text",
           chars = value.Length,
+          // 点击前已 Clear，value 即本次按钮写入的自有内容，保留全文
+          // （TSV/LaTeX/文本）供主代理与上游 Outcomes 比对。
+          text = value,
           token_hit = tokens.Length == 0 ? (bool?)null :
             tokens.Any(token => value.Contains(token, StringComparison.OrdinalIgnoreCase)),
-          preview = value[..Math.Min(80, value.Length)],
         };
       }
       await Task.Delay(150, cancellation.Token);
@@ -1178,8 +1209,11 @@ public sealed partial class MainWindow
   }
 
   /// <summary>
-  /// FileSavePicker 归属规则：同进程 AND 被主窗口 owned 的 #32770 对话框；
-  /// 不满足即返回 0，由调用方按“归属不明”失败，绝不操作其它窗口。
+  /// FileSavePicker 归属规则：可见 AND #32770 AND 直接 owner 是本实例主
+  /// 窗口。WinRT picker 由 broker 独立进程承载（实测对话框 pid ≠ App 进
+  /// 程 pid、owner 仍指向本实例主窗口），故不做同 PID 要求；不按标题/
+  /// 前台放行，也不接受无 owner 窗口。不满足即返回 0，由调用方按
+  /// “归属不明”失败，绝不操作其它窗口。
   /// </summary>
   private nint FindPaddleSaveDialog()
   {
@@ -1190,8 +1224,7 @@ public sealed partial class MainWindow
       if (!PaddleSmokeNative.IsWindowVisible(hwnd)) return true;
       if (PaddleSmokeNative.GetWindowClassName(hwnd) != "#32770") return true;
       if (PaddleSmokeNative.GetWindowLongPtr(hwnd, -8) != main) return true;
-      PaddleSmokeNative.GetWindowThreadProcessId(hwnd, out uint pid);
-      if (pid != (uint)Environment.ProcessId) return true;
+      // PickerHost 可跨进程承载；直接 owner 必须仍为本实例主窗口。
       found = hwnd;
       return false;
     });
@@ -1282,8 +1315,11 @@ public sealed partial class MainWindow
   // ---------------- 合成 fixture 选区器（不读取真实桌面） ----------------
 
   /// <summary>
-  /// 只渲染并捕获本选区器自己创建的置顶窗口客户区：把冒烟 fixture PNG
-  /// 显示在独立 WinUI 窗口内，用真实屏幕捕获服务采集像素后关闭窗口。
+  /// 只渲染并捕获本选区器自己创建的置顶窗口客户区：fixture PNG 经
+  /// BitmapDecoder 解码 BGRA8，按实际工作区/客户区只缩不放适配成
+  /// 32bpp DIB，用原生 STATIC SS_BITMAP 子窗口绘制（XAML Image 组合在
+  /// 隔离候选中两轮实机均呈全白，见 #110），再由真实屏幕捕获服务采集
+  /// 像素后清理窗口与 GDI 句柄。
   /// </summary>
   internal sealed class SyntheticFixtureRegionPicker : IScreenRegionPicker
   {
@@ -1298,70 +1334,123 @@ public sealed partial class MainWindow
       string? fixture = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_FIXTURE");
       if (string.IsNullOrWhiteSpace(fixture) || !File.Exists(fixture))
         throw new FileNotFoundException("Paddle smoke fixture is missing.", fixture);
-      StorageFile fixtureFile = await StorageFile.GetFileFromPathAsync(fixture);
-      using IRandomAccessStream fixtureStream = await fixtureFile.OpenReadAsync();
-      var bitmap = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage();
-      await bitmap.SetSourceAsync(fixtureStream);
-      cancellationToken.ThrowIfCancellationRequested();
+      (int sourceWidth, int sourceHeight) = PngPixelSize(fixture);
+      // #110 实机：XAML Image + BitmapImage（fileUri 与 SetSourceAsync 两轮）
+      // 在隔离候选中组合呈现全白；改用已验证的原生 GDI 路径——
+      // BitmapDecoder 解码 BGRA8 → 只缩不放适配的 32bpp DIB → STATIC
+      // SS_BITMAP 子窗口绘制（同 SyntheticScreenRegionPicker），宿主仍是
+      // 本选区器创建的置顶窗口，捕获只覆盖该子窗口客户区。
       var window = new Window
       {
         Content = new Grid
         {
           Background = new SolidColorBrush(Microsoft.UI.Colors.White),
-          Children =
-          {
-            new Image
-            {
-              Source = bitmap,
-              // Uniform：按工作区适配等比缩放（fit=1 时仍为像素 1:1）。
-              Stretch = Stretch.Uniform,
-              HorizontalAlignment = HorizontalAlignment.Center,
-              VerticalAlignment = VerticalAlignment.Center,
-            },
-          },
         },
       };
+      nint child = 0;
+      nint bitmap = 0;
+      WindowMessageService? messages = null;
+      nint? OnWindowMessage(WindowMessage message)
+      {
+        // STATIC 背景固定纯白，避免默认灰底混入像素证据。
+        if (message.Id != 0x0138 || message.LParam != child)
+          return null;
+        nint deviceContext = (nint)message.WParam;
+        PaddleSmokeNative.SetBkColor(deviceContext, 0x00FFFFFF);
+        PaddleSmokeNative.SetTextColor(deviceContext, 0);
+        return PaddleSmokeNative.GetStockObject(0);
+      }
       try
       {
+        cancellationToken.ThrowIfCancellationRequested();
         ((OverlappedPresenter)window.AppWindow.Presenter).IsAlwaysOnTop = true;
         window.Activate();
         nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
         uint dpi = PaddleSmokeNative.GetDpiForWindow(handle);
         double scale = dpi / 96.0;
-        (int width, int height) = PngPixelSize(fixture);
-        // 按实际显示器工作区适配：大图（如 1700x2200 混排页）在高 DPI
-        // 下 1:1 物理尺寸可能超出屏幕；用 Stretch.Uniform 等比缩到
-        // 可用区内，fixture 完整可见且捕获始终只覆盖自身客户区，
-        // 不读取真实桌面背景。
         RectInt32 work = DisplayArea.GetFromWindowId(
           window.AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
-        int maxClientWidth = Math.Max(160, work.Width - 80);
-        int maxClientHeight = Math.Max(160, work.Height - 80);
-        double physicalWidth = width * scale;
-        double physicalHeight = height * scale;
-        double fitScale = Math.Min(1.0,
-          Math.Min(maxClientWidth / physicalWidth, maxClientHeight / physicalHeight));
-        int targetClientWidth = Math.Max(64, (int)Math.Ceiling(physicalWidth * fitScale));
-        int targetClientHeight = Math.Max(64, (int)Math.Ceiling(physicalHeight * fitScale));
-        // 预留标题栏/边框余量（DPI 缩放）；超出目标的客户区为白色边距，
-        // Uniform 居中保持比例完整显示 fixture。外框整体钳制在工作区内，
-        // 客户区因此不小于 fitScale 目标时 fixture 1:1，略小时 Uniform 再
-        // 等比缩小，始终完整可见。
+        // STATIC 对位图不做 DPI 放大：外框先按 fixture 原始像素 1:1 预估
+        // 并钳制在工作区内（预留标题栏/边框余量），最终显示尺寸再按真实
+        // 客户区只缩不放，保证 fixture 完整可见且不超出工作区。
         int chromeWidth = (int)Math.Ceiling(32 * scale) * 2;
         int chromeHeight = (int)Math.Ceiling(96 * scale);
-        int outerWidth = Math.Min(targetClientWidth + chromeWidth, work.Width - 60);
-        int outerHeight = Math.Min(targetClientHeight + chromeHeight, work.Height - 60);
+        int outerWidth = Math.Max(160,
+          Math.Min(sourceWidth + chromeWidth, work.Width - 60));
+        int outerHeight = Math.Max(160,
+          Math.Min(sourceHeight + chromeHeight, work.Height - 60));
         window.AppWindow.MoveAndResize(new RectInt32(
           work.X + 30, work.Y + 30, outerWidth, outerHeight));
         await Task.Delay(200, cancellationToken);
         if (!PaddleSmokeNative.GetClientRect(handle, out PaddleSmokeNative.Rect client))
           throw new InvalidOperationException("Fixture window client bounds are unavailable.");
+        int clientWidth = client.Right - client.Left;
+        int clientHeight = client.Bottom - client.Top;
+        if (clientWidth <= 0 || clientHeight <= 0)
+          throw new InvalidOperationException("Fixture window client area is empty.");
+        double fitScale = Math.Min(1.0, Math.Min(
+          clientWidth / (double)sourceWidth, clientHeight / (double)sourceHeight));
+        int displayWidth = Math.Max(1, (int)Math.Round(sourceWidth * fitScale));
+        int displayHeight = Math.Max(1, (int)Math.Round(sourceHeight * fitScale));
+
+        // BGRA8 解码；需要缩小时经 WIC 变换降采样（不放大）。
+        StorageFile fixtureFile = await StorageFile.GetFileFromPathAsync(fixture);
+        using IRandomAccessStream fixtureStream = await fixtureFile.OpenReadAsync();
+        BitmapDecoder decoder = await BitmapDecoder.CreateAsync(fixtureStream);
+        var transform = new BitmapTransform
+        {
+          ScaledWidth = (uint)displayWidth,
+          ScaledHeight = (uint)displayHeight,
+          InterpolationMode = fitScale < 1.0
+            ? BitmapInterpolationMode.Fant : BitmapInterpolationMode.NearestNeighbor,
+        };
+        PixelDataProvider decoded = await decoder.GetPixelDataAsync(
+          BitmapPixelFormat.Bgra8, BitmapAlphaMode.Ignore, transform,
+          ExifOrientationMode.IgnoreExifOrientation, ColorManagementMode.DoNotColorManage);
+        byte[] sourcePixels = decoded.DetachPixelData();
+        cancellationToken.ThrowIfCancellationRequested();
+        if (decoder.PixelWidth != (uint)sourceWidth ||
+            decoder.PixelHeight != (uint)sourceHeight ||
+            sourcePixels.Length != checked(displayWidth * displayHeight * 4))
+          throw new InvalidOperationException(
+            $"Fixture decode mismatch: header={sourceWidth}x{sourceHeight}, " +
+            $"decoded={decoder.PixelWidth}x{decoder.PixelHeight}, " +
+            $"bytes={sourcePixels.Length}.");
+        // comctl32 v6 STATIC 按位图 alpha 合成 32bpp DIB；Ignore 模式返回
+        // 的 0 alpha 会让整图不可见，统一置为不透明。
+        for (int offset = 3; offset < sourcePixels.Length; offset += 4)
+          sourcePixels[offset] = 255;
+        bitmap = PaddleSmokeNative.CreateOpaqueTopDownBitmap(
+          sourcePixels, displayWidth, displayHeight);
+        if (bitmap == 0)
+          throw new InvalidOperationException(
+            $"Fixture DIB creation failed: {Marshal.GetLastPInvokeError()}.");
+        messages = new WindowMessageService(handle);
+        messages.MessageHandled += OnWindowMessage;
+        // SS_BITMAP 子窗口精确等于位图尺寸并在客户区居中，其客户区像素即
+        // fixture 本身；窗口其余区域为白色背景，不读取真实桌面。
+        child = PaddleSmokeNative.CreateWindowExW(0, "STATIC", null,
+          0x40000000u | 0x10000000u | 0x0000000Eu | 0x00000200u,
+          (clientWidth - displayWidth) / 2, (clientHeight - displayHeight) / 2,
+          displayWidth, displayHeight, handle, 0, 0, 0);
+        if (child == 0)
+          throw new InvalidOperationException(
+            $"Fixture bitmap control creation failed: {Marshal.GetLastPInvokeError()}.");
+        if (PaddleSmokeNative.SendMessageW(child, 0x0172, 0, bitmap) != 0)
+          throw new InvalidOperationException("Fixture bitmap control rejected the DIB.");
+        if (!PaddleSmokeNative.UpdateWindow(child) &&
+            !PaddleSmokeNative.IsWindowVisible(child))
+          throw new InvalidOperationException("Fixture bitmap control is not visible.");
+        if (!PaddleSmokeNative.GetClientRect(child, out PaddleSmokeNative.Rect childClient))
+          throw new InvalidOperationException(
+            "Fixture bitmap control bounds are unavailable.");
         PaddleSmokeNative.Point origin = new();
-        if (!PaddleSmokeNative.ClientToScreen(handle, ref origin))
-          throw new InvalidOperationException("Fixture window origin is unavailable.");
+        if (!PaddleSmokeNative.ClientToScreen(child, ref origin))
+          throw new InvalidOperationException(
+            "Fixture bitmap control origin is unavailable.");
         var bounds = new PhysicalRectangle(
           origin.X, origin.Y,
-          client.Right - client.Left, client.Bottom - client.Top);
+          childClient.Right - childClient.Left, childClient.Bottom - childClient.Top);
 
         ScreenRegionSelection? selection = null;
         await using (var capture = new ScreenCaptureService(Guid.NewGuid()))
@@ -1399,6 +1488,15 @@ public sealed partial class MainWindow
       }
       finally
       {
+        if (messages is not null)
+        {
+          messages.MessageHandled -= OnWindowMessage;
+          messages.Dispose();
+        }
+        if (child != 0)
+          PaddleSmokeNative.DestroyWindow(child);
+        if (bitmap != 0)
+          PaddleSmokeNative.DeleteObject(bitmap);
         window.Close();
       }
     }
@@ -1470,6 +1568,93 @@ public sealed partial class MainWindow
 
     public static nint GetWindowLongPtr(nint hwnd, int index) =>
       GetWindowLongPtrW(hwnd, index);
+
+    // ------- 合成 fixture GDI 位图路径（#110：XAML Image 呈现全白） -------
+
+    [DllImport("user32.dll", EntryPoint = "CreateWindowExW", CharSet = CharSet.Unicode,
+      SetLastError = true)]
+    public static extern nint CreateWindowExW(
+      uint extendedStyle, string className, string? windowName, uint style,
+      int x, int y, int width, int height,
+      nint parent, nint menu, nint instance, nint parameter);
+
+    [DllImport("user32.dll", EntryPoint = "SendMessageW")]
+    public static extern nint SendMessageW(nint handle, uint message, nint wParam, nint lParam);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool UpdateWindow(nint handle);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DestroyWindow(nint handle);
+
+    [DllImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DeleteObject(nint handle);
+
+    [DllImport("gdi32.dll")]
+    public static extern uint SetBkColor(nint deviceContext, uint color);
+
+    [DllImport("gdi32.dll")]
+    public static extern uint SetTextColor(nint deviceContext, uint color);
+
+    [DllImport("gdi32.dll")]
+    public static extern nint GetStockObject(int index);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BitmapInfoHeader
+    {
+      public uint Size;
+      public int Width, Height;
+      public ushort Planes, BitCount;
+      public uint Compression, ImageSize;
+      public int XPelsPerMeter, YPelsPerMeter;
+      public uint ColorsUsed, ColorsImportant;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BitmapInfo
+    {
+      public BitmapInfoHeader Header;
+      public uint Colors;
+    }
+
+    [DllImport("gdi32.dll", SetLastError = true)]
+    private static extern nint CreateDIBSection(
+      nint deviceContext, ref BitmapInfo info, uint usage,
+      out nint bits, nint fileMapping, uint fileOffset);
+
+    /// <summary>
+    /// 创建 top-down 32bpp DIB（负高：首行即顶部，与解码行序一致）并拷入
+    /// BGRA 像素；任何失败返回 0，由调用方 fail closed。
+    /// </summary>
+    public static nint CreateOpaqueTopDownBitmap(byte[] bgra, int width, int height)
+    {
+      var info = new BitmapInfo
+      {
+        Header = new BitmapInfoHeader
+        {
+          Size = (uint)Marshal.SizeOf<BitmapInfoHeader>(),
+          Width = width,
+          Height = -height,
+          Planes = 1,
+          BitCount = 32,
+          Compression = 0,
+          ImageSize = (uint)checked(width * height * 4),
+        },
+      };
+      nint bitmap = CreateDIBSection(nint.Zero, ref info, 0,
+        out nint bits, nint.Zero, 0);
+      if (bitmap == 0) return 0;
+      if (bits == nint.Zero)
+      {
+        DeleteObject(bitmap);
+        return 0;
+      }
+      Marshal.Copy(bgra, 0, bits, bgra.Length);
+      return bitmap;
+    }
 
     // SendInput INPUT 在 x64 上为 40 字节：type + padding + 最大联合体
     // （MOUSEINPUT 32 字节）。KEYBDINPUT 用 wScan 承载 UNICODE 字符。
