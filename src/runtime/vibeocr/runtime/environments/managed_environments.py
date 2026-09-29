@@ -416,6 +416,15 @@ class ManagedEnvironmentStore:
         operation = record.get("last_install_operation")
         if operation is None:
             return None
+        # 旧记录没有来源绑定；进程中断与显式失败共用已冻结的来源投影。
+        source_evidence = (
+            {
+                "requested_source_ids": operation["requested_source_ids"],
+                "effective_source_ids": operation["effective_source_ids"],
+            }
+            if "effective_source_ids" in operation
+            else {}
+        )
         if operation["phase"] == "installing":
             lock = RuntimeStoreLock(
                 self.paths.locks_root
@@ -443,6 +452,7 @@ class ManagedEnvironmentStore:
                 if reason_code == "install_in_progress"
                 else "preview_again",
                 "detail": detail,
+                **source_evidence,
             }
         return {
             "phase": "failed",
@@ -451,15 +461,7 @@ class ManagedEnvironmentStore:
             "reason_code": operation["reason_code"],
             "next_action": operation["next_action"],
             "detail": safe_runtime_detail(operation["detail"]),
-            # 旧 #104 记录没有来源绑定；缺失时如实省略，不伪造继承语义。
-            **(
-                {
-                    "requested_source_ids": operation["requested_source_ids"],
-                    "effective_source_ids": operation["effective_source_ids"],
-                }
-                if "effective_source_ids" in operation
-                else {}
-            ),
+            **source_evidence,
         }
 
     def _read(self) -> dict:

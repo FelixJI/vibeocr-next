@@ -438,9 +438,12 @@ def test_sanitize_download_endpoint_strips_credentials_and_survives_bad_input() 
         sanitize_download_endpoint,
     )
 
-    assert sanitize_download_endpoint(
-        "https://user:secret@mirrors.example.org/pypi/simple/?sig=abc#f"
-    ) == "https://mirrors.example.org/pypi/simple/"
+    assert (
+        sanitize_download_endpoint(
+            "https://user:secret@mirrors.example.org/pypi/simple/?sig=abc#f"
+        )
+        == "https://mirrors.example.org/pypi/simple/"
+    )
     assert sanitize_download_endpoint("http://EXAMPLE.org:8080/x") == (
         "http://example.org:8080/x"
     )
@@ -507,3 +510,40 @@ def test_stdio_set_sources_and_inherited_preview_round_trip(
     assert payload["source_ids"] == ["pypi"]
     assert payload["sources"][0]["inherited_from"] == "global_default"
     assert re.fullmatch(r"[0-9a-f]{32}", payload["plan_id"])
+
+
+@pytest.mark.parametrize("requested", [None, ["pypi"]])
+def test_interrupted_install_retains_frozen_sources_after_restart(
+    tmp_path: Path, requested: list[str] | None
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+    manager = _open(tmp_path, manifest, component)
+    record = _write_record(
+        manager,
+        "a" * 32,
+        last_install_operation={
+            "environment_revision": 1,
+            "plan_id": "b" * 32,
+            "recipe": "rapidocr-cpu",
+            "phase": "installing",
+            "reason_code": "",
+            "next_action": "",
+            "detail": "",
+            "requested_source_ids": requested,
+            "effective_source_ids": ["pypi"],
+        },
+    )
+    # A stopped installer leaves its journal in installing; new preferences
+    # must not rewrite the source evidence when a restarted reader recovers it.
+    manager.set_sources(None, "tuna-pypi", None)
+    restarted = _open(tmp_path, manifest, component)
+    failure = restarted.list()["environments"][0]["last_install_failure"]
+    assert failure["phase"] == "failed"
+    assert failure["reason_code"] == "install_interrupted"
+    assert failure["requested_source_ids"] == requested
+    assert failure["effective_source_ids"] == ["pypi"]
+    with manager._target_operation(record["id"]):
+        running = restarted.list()["environments"][0]["last_install_failure"]
+        assert running["reason_code"] == "install_in_progress"
+        assert running["requested_source_ids"] == requested
+        assert running["effective_source_ids"] == ["pypi"]
