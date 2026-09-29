@@ -2342,6 +2342,8 @@ def _request(value: object) -> dict[str, Any]:
             "recipe",
             "source_ids",
             "plan_id",
+            "package_source_id",
+            "model_source_id",
             "prepared",
             "started_health",
         }
@@ -2431,6 +2433,7 @@ def _request(value: object) -> dict[str, Any]:
         fields = {
             "list": set(),
             "create": {"name"},
+            "set_sources": {"package_source_id", "model_source_id"},
             "preview_install": {"environment_id", "recipe"},
             "install": {"plan_id", "environment_id", "recipe", "source_ids"},
             "prepare_switch": {"environment_id"},
@@ -2453,25 +2456,49 @@ def _request(value: object) -> dict[str, Any]:
             extras
             - fields[action]
             - ({"source_ids"} if action == "preview_install" else set())
+            - ({"environment_id"} if action == "set_sources" else set())
             - ({"started_health"} if action == "commit_switch" else set())
         ):
             raise RuntimeInstallError(
                 "Runtime environment action contains unrelated fields"
             )
         for field in ("name", "environment_id", "recipe", "plan_id"):
-            if field in value and (
-                not isinstance(value[field], str) or not value[field]
-            ):
+            if field not in value:
+                continue
+            item = value[field]
+            if action == "set_sources" and field == "environment_id":
+                # null/省略 → 全局默认；只拒绝非法非字符串值。
+                if item is not None and (not isinstance(item, str) or not item):
+                    raise RuntimeInstallError(
+                        "Runtime environment environment_id is invalid"
+                    )
+                continue
+            if not isinstance(item, str) or not item:
                 raise RuntimeInstallError(f"Runtime environment {field} is invalid")
-        if "source_ids" in value and (
-            not isinstance(value["source_ids"], list)
-            or not value["source_ids"]
-            or any(
-                not isinstance(item, str) or not item for item in value["source_ids"]
+        if (
+            "source_ids" in value
+            and value["source_ids"] is not None
+            and (
+                not isinstance(value["source_ids"], list)
+                or not value["source_ids"]
+                or any(
+                    not isinstance(item, str) or not item
+                    for item in value["source_ids"]
+                )
+                or len(set(value["source_ids"])) != len(value["source_ids"])
             )
-            or len(set(value["source_ids"])) != len(value["source_ids"])
         ):
             raise RuntimeInstallError("Runtime environment source_ids are invalid")
+        for field in ("package_source_id", "model_source_id"):
+            if (
+                field in value
+                and value[field] is not None
+                and (
+                    not isinstance(value[field], str)
+                    or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,40}", value[field])
+                )
+            ):
+                raise RuntimeInstallError(f"Runtime environment {field} is invalid")
         if "prepared" in value and not isinstance(value["prepared"], dict):
             raise RuntimeInstallError("Runtime environment prepared switch is invalid")
         if "started_health" in value and not isinstance(value["started_health"], dict):
@@ -2839,18 +2866,28 @@ def main(argv: list[str] | None = None) -> int:
                 payload = manager.list()
             elif action == "create":
                 payload = manager.create(request["name"])
+            elif action == "set_sources":
+                payload = manager.set_sources(
+                    request.get("environment_id"),
+                    request.get("package_source_id"),
+                    request.get("model_source_id"),
+                )
             elif action == "preview_install":
                 payload = manager.preview_install(
                     request["environment_id"],
                     request["recipe"],
-                    tuple(request.get("source_ids", ["tuna-pypi"])),
+                    tuple(request["source_ids"])
+                    if request.get("source_ids") is not None
+                    else None,
                 )
             elif action == "install":
                 payload = manager.install(
                     request["plan_id"],
                     request["environment_id"],
                     request["recipe"],
-                    tuple(request["source_ids"]),
+                    tuple(request["source_ids"])
+                    if request.get("source_ids") is not None
+                    else None,
                 )
             elif action == "prepare_switch":
                 payload = manager.prepare_switch(request["environment_id"])

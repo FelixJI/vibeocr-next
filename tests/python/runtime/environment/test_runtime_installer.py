@@ -696,7 +696,7 @@ def test_inactive_install_does_not_block_active_job_admission_or_target_conflict
     active = manager.create("active")
     target = manager.create("target")
     manager.commit_switch(manager.prepare_switch(active["id"]))
-    plan = manager.preview_install(target["id"], "rapidocr-cpu")
+    plan = manager.preview_install(target["id"], "rapidocr-cpu", ("tuna-pypi",))
     original_probe = manager._probe
     monkeypatch.setattr(
         manager,
@@ -810,7 +810,7 @@ def test_inactive_install_commit_rejects_active_pointer_drift(
     target = manager.create("target")
     replacement = manager.create("replacement")
     manager.commit_switch(manager.prepare_switch(active["id"]))
-    plan = manager.preview_install(target["id"], "rapidocr-cpu")
+    plan = manager.preview_install(target["id"], "rapidocr-cpu", ("tuna-pypi",))
     original_probe = manager._probe
     monkeypatch.setattr(
         manager,
@@ -938,7 +938,7 @@ def test_repair_after_failed_install_clears_stale_revision_failure_only_on_succe
         install_runner=fail_install,
     )
     item = manager.create("failed then repaired")
-    plan = manager.preview_install(item["id"], "rapidocr-cpu")
+    plan = manager.preview_install(item["id"], "rapidocr-cpu", ("tuna-pypi",))
     with pytest.raises(ManagedEnvironmentError, match="synthetic install failure"):
         manager.install(plan["plan_id"], item["id"], "rapidocr-cpu", ("tuna-pypi",))
     failure = manager.list()["environments"][0]["last_install_failure"]
@@ -1017,7 +1017,7 @@ def test_failed_named_install_preserves_empty_revision(
     )
     item = manager.create("target")
     manager.commit_switch(manager.prepare_switch(item["id"]))
-    plan = manager.preview_install(item["id"], "rapidocr-cpu")
+    plan = manager.preview_install(item["id"], "rapidocr-cpu", ("tuna-pypi",))
     with pytest.raises(runtime_maintenance.RuntimeInstallPlanStale):
         manager.install(plan["plan_id"], item["id"], "rapidocr-cpu", ("pypi",))
     with pytest.raises(ManagedEnvironmentError, match="synthetic"):
@@ -1074,7 +1074,7 @@ def test_named_install_failure_redacts_diagnostics_and_interruption_is_durable(
     )
     first = manager.create("failed")
     other = manager.create("unaffected")
-    plan = manager.preview_install(first["id"], "rapidocr-cpu")
+    plan = manager.preview_install(first["id"], "rapidocr-cpu", ("tuna-pypi",))
     with pytest.raises(RuntimeInstallError):
         manager.install(plan["plan_id"], first["id"], "rapidocr-cpu", ("tuna-pypi",))
     registry_text = manager._registry.read_text(encoding="utf-8")
@@ -1226,7 +1226,7 @@ def test_named_install_rejects_native_import_failure_without_committing(
         install_runner=install,
     )
     item = manager.create("native")
-    plan = manager.preview_install(item["id"], "rapidocr-cpu")
+    plan = manager.preview_install(item["id"], "rapidocr-cpu", ("tuna-pypi",))
     with pytest.raises(ManagedEnvironmentError, match="engine_import_failed"):
         manager.install(plan["plan_id"], item["id"], "rapidocr-cpu", ("tuna-pypi",))
     surviving = manager.list()["environments"][0]
@@ -1329,7 +1329,7 @@ def test_named_install_rapidocr_probe_imports_real_transitive_closure(
     )
     item = manager.create("closure")
     manager.commit_switch(manager.prepare_switch(item["id"]))
-    plan = manager.preview_install(item["id"], "rapidocr-cpu")
+    plan = manager.preview_install(item["id"], "rapidocr-cpu", ("tuna-pypi",))
     with pytest.raises(ManagedEnvironmentError, match="engine_import_failed"):
         manager.install(plan["plan_id"], item["id"], "rapidocr-cpu", ("tuna-pypi",))
     surviving = manager.list()["environments"][0]
@@ -1460,6 +1460,35 @@ def test_frozen_manager_exposes_named_environment_list(
     assert response["result"] == {
         "active_id": None,
         "active_revision": 0,
+        "sources": [
+            {
+                "id": "tuna-pypi",
+                "kind": "package_index",
+                "display_name": "TUNA PyPI 镜像",
+                "endpoint": "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/",
+            },
+            {
+                "id": "pypi",
+                "kind": "package_index",
+                "display_name": "PyPI 官方源",
+                "endpoint": "https://pypi.org/simple",
+            },
+            {
+                "id": "huggingface",
+                "kind": "model_registry",
+                "display_name": "Hugging Face",
+                "endpoint": "https://huggingface.co",
+            },
+            {
+                "id": "modelscope",
+                "kind": "model_registry",
+                "display_name": "ModelScope",
+                "endpoint": "https://www.modelscope.cn",
+            },
+        ],
+        "default_source_ids": [],
+        "unknown_default_source_ids": [],
+        "source_config_revision": 0,
         "package_source_ids": ["tuna-pypi", "pypi"],
         "environments": [],
     }

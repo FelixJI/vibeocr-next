@@ -104,6 +104,14 @@ public sealed class SettingsViewModelSupervisorTests
     }
 
     // ------------------------------------------------------------------
+    [Fact]
+    public async Task EmptyEnvironmentCanShowSettingsWithoutReportingFailure()
+    {
+        var viewModel = new SettingsViewModel(new VibeOCR.App.Inference.DeferredInferenceClient());
+        await viewModel.LoadSnapshotAsync(TestContext.Current.CancellationToken);
+        Assert.Equal("尚未连接运行环境；可配置来源或准备依赖。", viewModel.Status);
+        Assert.False(viewModel.IsBusy);
+    }
     // Fakes
     // ------------------------------------------------------------------
 

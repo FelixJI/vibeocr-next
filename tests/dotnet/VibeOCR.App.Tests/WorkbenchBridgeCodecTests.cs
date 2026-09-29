@@ -36,8 +36,122 @@ public sealed class WorkbenchBridgeCodecTests
     var preview = Assert.IsType<PreviewEnvironmentInstallCommand>(
       WorkbenchBridgeCodec.ParseCommand(json, sessionId).Command);
     Assert.Equal("pypi", preview.SourceId);
+    // 桥只校验 id 形状，不硬编码目录成员；目录成员由管理器 fail closed。
     Assert.Throws<WorkbenchBridgeProtocolException>(() =>
-      WorkbenchBridgeCodec.ParseCommand(json.Replace("\"pypi\"", "\"untrusted\""), sessionId));
+      WorkbenchBridgeCodec.ParseCommand(json.Replace("\"pypi\"", "\"un trusted!\""), sessionId));
+  }
+
+  [Fact]
+  public void EnvironmentPreviewAndConfirmAllowFollowWithoutExplicitSource()
+  {
+    Guid sessionId = Guid.NewGuid();
+    string environmentId = Guid.NewGuid().ToString("N");
+    string previewJson = $$"""
+      {
+        "version": 2,
+        "kind": "request",
+        "id": "{{Guid.NewGuid()}}",
+        "type": "app.command",
+        "payload": {
+          "sessionId": "{{sessionId}}",
+          "command": {
+            "scope": "settings",
+            "action": "previewEnvironmentInstall",
+            "arguments": {
+              "environmentId": "{{environmentId}}",
+              "recipe": "rapidocr-cpu"
+            }
+          }
+        }
+      }
+      """;
+    var preview = Assert.IsType<PreviewEnvironmentInstallCommand>(
+      WorkbenchBridgeCodec.ParseCommand(previewJson, sessionId).Command);
+    Assert.Null(preview.SourceId);
+
+    string confirmJson = $$"""
+      {
+        "version": 2,
+        "kind": "request",
+        "id": "{{Guid.NewGuid()}}",
+        "type": "app.command",
+        "payload": {
+          "sessionId": "{{sessionId}}",
+          "command": {
+            "scope": "settings",
+            "action": "confirmEnvironmentInstall",
+            "arguments": {
+              "planId": "{{new string('a', 32)}}"
+            }
+          }
+        }
+      }
+      """;
+    var confirm = Assert.IsType<ConfirmEnvironmentInstallCommand>(
+      WorkbenchBridgeCodec.ParseCommand(confirmJson, sessionId).Command);
+    Assert.Null(confirm.SourceId);
+  }
+
+  [Fact]
+  public void SetEnvironmentSourcesRoutesGlobalAndScopedSaves()
+  {
+    Guid sessionId = Guid.NewGuid();
+    string environmentId = Guid.NewGuid().ToString("N");
+    string globalJson = $$"""
+      {
+        "version": 2,
+        "kind": "request",
+        "id": "{{Guid.NewGuid()}}",
+        "type": "app.command",
+        "payload": {
+          "sessionId": "{{sessionId}}",
+          "command": {
+            "scope": "settings",
+            "action": "setEnvironmentSources",
+            "arguments": {
+              "packageSourceId": "pypi",
+              "modelSourceId": null
+            }
+          }
+        }
+      }
+      """;
+    var global = Assert.IsType<SetEnvironmentSourcesCommand>(
+      WorkbenchBridgeCodec.ParseCommand(globalJson, sessionId).Command);
+    Assert.Null(global.EnvironmentId);
+    Assert.Equal("pypi", global.PackageSourceId);
+    Assert.Null(global.ModelSourceId);
+
+    string scopedJson = $$"""
+      {
+        "version": 2,
+        "kind": "request",
+        "id": "{{Guid.NewGuid()}}",
+        "type": "app.command",
+        "payload": {
+          "sessionId": "{{sessionId}}",
+          "command": {
+            "scope": "settings",
+            "action": "setEnvironmentSources",
+            "arguments": {
+              "environmentId": "{{environmentId}}",
+              "packageSourceId": null,
+              "modelSourceId": "modelscope"
+            }
+          }
+        }
+      }
+      """;
+    var scoped = Assert.IsType<SetEnvironmentSourcesCommand>(
+      WorkbenchBridgeCodec.ParseCommand(scopedJson, sessionId).Command);
+    Assert.Equal(environmentId, scoped.EnvironmentId);
+    Assert.Null(scoped.PackageSourceId);
+    Assert.Equal("modelscope", scoped.ModelSourceId);
+
+    Assert.Throws<WorkbenchBridgeProtocolException>(() =>
+      WorkbenchBridgeCodec.ParseCommand(
+        globalJson.Replace("\"modelscope\"", "\"bad id\"").Replace("\"pypi\"", "\"bad id\""),
+        sessionId));
   }
 
   [Fact]

@@ -25,7 +25,7 @@ public sealed partial class MainWindow
     string? phase = Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_ENVIRONMENT_E2E_PHASE");
     string expected = Path.Combine(Directory.GetParent(layout.InstallRoot)!.FullName,
       $"managed-environment-{phase}.json");
-    if (phase is not ("create" or "install" or "restart") || path is null ||
+    if (phase is not ("create" or "install" or "restart" or "sources") || path is null ||
         !string.Equals(Path.GetFullPath(path), expected, StringComparison.OrdinalIgnoreCase))
     {
       Close();
@@ -45,6 +45,7 @@ public sealed partial class MainWindow
       {
         "create" => await CreateSmokeEnvironmentsAsync(),
         "install" => await InstallAndSwitchSmokeEnvironmentsAsync(),
+        "sources" => await CompleteSourceSettingsSmokeAsync(),
         _ => await VerifyRestartedSmokeEnvironmentAsync(),
       };
       File.WriteAllText(path, JsonSerializer.Serialize(new
@@ -179,7 +180,7 @@ public sealed partial class MainWindow
     await ClickManagedSmokeButtonAsync("预览依赖");
     await WaitForSmokeDomAsync("!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
       "document.querySelector('.runtime-install-plan')?.textContent.includes('rapidocr-cpu') && " +
-      "document.querySelector('.runtime-install-plan')?.textContent.includes('tuna-pypi')",
+      "document.querySelector('.runtime-install-plan')?.textContent.includes('TUNA PyPI 镜像')",
       TimeSpan.FromMinutes(2));
     RecordManagedSmokeStage($"install {environment.Name}");
     await ClickManagedSmokeButtonAsync("确认安装依赖");

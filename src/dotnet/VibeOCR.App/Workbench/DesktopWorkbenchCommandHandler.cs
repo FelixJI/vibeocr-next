@@ -314,6 +314,10 @@ public sealed class DesktopWorkbenchCommandHandler :
         RefreshRuntimeCommand => await RefreshRuntimeAsync(cancellationToken),
         CreateEnvironmentCommand create => await RunEnvironmentAsync(
           environment => environment.CreateAsync(create.Name, cancellationToken), cancellationToken),
+        SetEnvironmentSourcesCommand setEnvironmentSources => await RunEnvironmentAsync(
+          environment => environment.SetSourcesAsync(setEnvironmentSources.EnvironmentId,
+            setEnvironmentSources.PackageSourceId, setEnvironmentSources.ModelSourceId,
+            cancellationToken), cancellationToken),
         PreviewEnvironmentInstallCommand preview => await RunEnvironmentAsync(
           environment => environment.PreviewAsync(preview.EnvironmentId, preview.Recipe,
             preview.SourceId, cancellationToken), cancellationToken),
@@ -2750,10 +2754,16 @@ public sealed class DesktopWorkbenchCommandHandler :
         item.ConfiguredRecognitionTypes ?? [],
         item.TargetDevice, item.ActualDevice, item.Reason,
         item.PythonVersion, item.Abi, item.Python, item.Path, item.DiskBytes,
+        item.SourceIds ?? [],
+        item.OverrideSourceIds ?? [],
+        item.UnknownSourceIds ?? [],
+        item.ResolvedSources?.Select(source => new SettingsEnvironmentResolvedSourceState(
+          source.Kind, source.Id, source.DisplayName, source.Origin)).ToArray(),
         item.LastInstallFailure is { } failure
           ? new SettingsEnvironmentInstallFailureState(
             failure.Phase, failure.EnvironmentRevision, failure.Recipe,
-            failure.ReasonCode, failure.NextAction, failure.Detail)
+            failure.ReasonCode, failure.NextAction, failure.Detail,
+            failure.RequestedSourceIds, failure.EffectiveSourceIds)
           : null)).ToArray(),
     ActiveEnvironmentId: viewModel.Environments?.Snapshot?.ActiveId,
     EnvironmentPlan: viewModel.Environments?.Plan is { } environmentPlan
@@ -2761,10 +2771,22 @@ public sealed class DesktopWorkbenchCommandHandler :
         environmentPlan.PlanId, environmentPlan.EnvironmentId,
         environmentPlan.Recipe, environmentPlan.SourceIds,
         environmentPlan.Dependencies ?? [],
-        environmentPlan.RequestedRecipe ?? environmentPlan.Recipe)
+        environmentPlan.RequestedRecipe ?? environmentPlan.Recipe,
+        environmentPlan.RequestedSourceIds,
+        environmentPlan.EnvironmentRevision,
+        environmentPlan.Sources?.Select(source => new SettingsEnvironmentPlanSourceState(
+          source.Id, source.Kind, source.DisplayName, source.Endpoint,
+          source.Requested, source.InheritedFrom, source.Usage, source.ActualEndpoint)).ToArray(),
+        environmentPlan.DependencyOrigin, environmentPlan.PythonOrigin,
+        environmentPlan.RuntimeWheelOrigin)
       : null,
     EnvironmentStatus: viewModel.Environments?.Status ?? "",
     EnvironmentBusy: viewModel.Environments?.IsBusy ?? false,
+    EnvironmentSources: viewModel.Environments?.Snapshot?.Sources?.Select(source =>
+      new SettingsEnvironmentSourceState(
+        source.Id, source.Kind, source.DisplayName, source.Endpoint)).ToArray(),
+    EnvironmentDefaultSourceIds: viewModel.Environments?.Snapshot?.DefaultSourceIds,
+    EnvironmentUnknownDefaultSourceIds: viewModel.Environments?.Snapshot?.UnknownDefaultSourceIds,
     EnvironmentPackageSourceIds: viewModel.Environments?.Snapshot?.PackageSourceIds,
     EnvironmentCanCancelInstall: viewModel.Environments?.CanCancelInstall ?? false);
 

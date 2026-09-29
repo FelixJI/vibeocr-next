@@ -49,19 +49,27 @@ public sealed class ManagedEnvironmentSettings(
         Status = "空环境已创建；未安装识别依赖。";
     }, cancellationToken);
 
-    public Task PreviewAsync(string environmentId, string recipe, string sourceId, CancellationToken cancellationToken) => RunAsync(async () =>
+    public Task PreviewAsync(string environmentId, string recipe, string? sourceId, CancellationToken cancellationToken) => RunAsync(async () =>
     {
         Plan = null;
         Plan = await manager.PreviewEnvironmentInstallAsync(
-            environmentId, recipe, [sourceId], cancellationToken);
-        Status = $"已预览 {Plan.Recipe} 锁定配方；确认后才会安装。";
+            environmentId, recipe,
+            sourceId is null ? null : [sourceId], cancellationToken);
+        string sourceSummary = Plan.RequestedSourceIds is null
+            ? $"继承当前配置（生效：{string.Join("、", Plan.SourceIds)}）"
+            : string.Join("、", Plan.SourceIds);
+        Status = $"已预览 {Plan.Recipe} 锁定配方；来源：{sourceSummary}。确认后才会安装。";
     }, cancellationToken);
 
-    public Task InstallAsync(string planId, string sourceId, CancellationToken cancellationToken) => RunAsync(async () =>
+    public Task InstallAsync(string planId, string? sourceId, CancellationToken cancellationToken) => RunAsync(async () =>
     {
         ManagedEnvironmentPlan plan = Plan
             ?? throw new InvalidOperationException("请先预览此环境的锁定配方。");
-        if (plan.PlanId != planId || plan.SourceIds.Count != 1 || plan.SourceIds[0] != sourceId)
+        // 确认与预览一致：继承预览只能以继承确认，显式预览只能以同源确认。
+        if (plan.PlanId != planId ||
+            (plan.RequestedSourceIds is null) != (sourceId is null) ||
+            (sourceId is not null &&
+             (plan.RequestedSourceIds?.Count != 1 || plan.RequestedSourceIds[0] != sourceId)))
             throw new InvalidOperationException("安装计划已变化，请重新预览。");
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         using IDisposable lease = productMaintenance.Acquire(
@@ -71,14 +79,15 @@ public sealed class ManagedEnvironmentSettings(
         {
             StateChanged?.Invoke();
             installAttempted?.Invoke();
-            await manager.InstallEnvironmentAsync(plan, linked.Token);
+            await manager.InstallEnvironmentAsync(
+                plan, sourceId is null ? null : [sourceId], linked.Token);
             Plan = null;
             await ReloadEnvironmentsAsync(linked.Token, strictEvidence: false);
             Status = "依赖已安装；请切换环境以验证并启动服务。";
         }
         catch (OperationCanceledException) when (linked.IsCancellationRequested)
         {
-            Status = "安装已取消；原环境保持不变。";
+            Status = "安装已取消；原环境保持不变，取消详情可在该环境记录中查看。";
             await ReloadEnvironmentsAsync(CancellationToken.None, strictEvidence: false);
         }
         catch (Exception)
@@ -92,6 +101,26 @@ public sealed class ManagedEnvironmentSettings(
             Volatile.Write(ref activeInstall, null);
         }
     }, cancellationToken, "安装未完成；失败原因请查看该环境记录。");
+
+    /// <summary>保存全局默认或单环境 override 来源偏好：只写配置，不下载/不安装/不重启。</summary>
+    public Task SetSourcesAsync(
+        string? environmentId, string? packageSourceId, string? modelSourceId,
+        CancellationToken cancellationToken) => RunAsync(async () =>
+    {
+        ManagedEnvironmentList updated = await manager.SetEnvironmentSourcesAsync(
+            environmentId, packageSourceId, modelSourceId, cancellationToken);
+        Snapshot = updated;
+        // 来源配置变化使旧预览失效（confirm 时管理器也会拒绝旧计划）。
+        Plan = null;
+        await ApplyRunningEvidenceAsync(cancellationToken);
+        bool touchesModel = modelSourceId is not null;
+        bool targetRunning = environmentId is not null &&
+            currentSession?.Invoke() is { } session && session.EnvironmentId == environmentId;
+        string scope = environmentId is null ? "全局默认来源" : "该环境的来源 override";
+        Status = $"已保存{scope}；仅影响后续安装与继承，不会下载或安装任何内容。";
+        if (touchesModel && targetRunning)
+            Status += "模型来源将在该环境下次启动时生效，不会改变当前运行中的服务。";
+    }, cancellationToken);
 
     public void CancelInstall()
     {

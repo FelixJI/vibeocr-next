@@ -104,6 +104,10 @@ interface ManagedEnvironmentState {
   readonly targetDevice?: string | null;
   readonly actualDevice?: string | null;
   readonly reason?: string | null;
+  readonly sourceIds?: readonly string[] | null;
+  readonly overrideSourceIds?: readonly string[] | null;
+  readonly unknownSourceIds?: readonly string[] | null;
+  readonly resolvedSources?: readonly ManagedResolvedSourceState[] | null;
   readonly lastInstallFailure?: {
     readonly phase: string;
     readonly environmentRevision: number;
@@ -111,6 +115,8 @@ interface ManagedEnvironmentState {
     readonly reasonCode: string;
     readonly nextAction: string;
     readonly detail: string;
+    readonly requestedSourceIds?: readonly string[] | null;
+    readonly effectiveSourceIds?: readonly string[] | null;
   } | null;
   readonly pythonVersion?: string | null;
   readonly abi?: string | null;
@@ -119,13 +125,60 @@ interface ManagedEnvironmentState {
   readonly diskBytes?: number;
 }
 
+interface ManagedSourceOptionState {
+  readonly id: string;
+  readonly kind: string;
+  readonly displayName: string;
+  readonly endpoint: string;
+}
+
+interface ManagedResolvedSourceState {
+  readonly kind: string;
+  readonly id: string | null;
+  readonly displayName: string | null;
+  readonly origin: string;
+}
+
+interface ManagedPlanSourceState {
+  readonly id: string;
+  readonly kind: string;
+  readonly displayName: string;
+  readonly endpoint: string;
+  readonly requested: boolean;
+  readonly inheritedFrom: string;
+  readonly usage: string;
+  readonly actualEndpoint?: string | null;
+}
+
 interface ManagedEnvironmentPlanState {
   readonly planId: string;
   readonly environmentId: string;
+  readonly environmentRevision: number;
   readonly recipe: string;
   readonly requestedRecipe: string;
   readonly sourceIds: readonly string[];
   readonly dependencies: readonly string[];
+  readonly requestedSourceIds?: readonly string[] | null;
+  readonly sources?: readonly ManagedPlanSourceState[] | null;
+  readonly dependencyOrigin?: string | null;
+  readonly pythonOrigin?: string | null;
+  readonly runtimeWheelOrigin?: string | null;
+}
+
+const sourceOriginLabels: Readonly<Record<string, string>> = {
+  product_default: "产品默认",
+  global_default: "全局默认",
+  environment_override: "本环境覆盖",
+};
+
+const sourceUsageLabels: Readonly<Record<string, string>> = {
+  online_index: "在线索引（哈希锁定）",
+  bundled_pack: "随包离线包",
+  model_preference: "模型偏好（实际下载端点未知）",
+};
+
+function sourceKindLabel(kind: string): string {
+  return kind === "model_registry" ? "模型来源" : "依赖包来源";
 }
 
 const environmentRecipes = [
@@ -1742,16 +1795,25 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
           title="下载来源"
           className="settings-download-panel"
         >
-          <SourceSelector
-            sources={sources}
-            loaded={sourcesLoaded}
-            enabled={viewState.capabilities.includes("settings.selection")}
-            locked={busy}
-            actions={actions}
-          />
-          <p className="form-note">
-            依赖包来源用于安装运行环境；模型原生来源由引擎使用。更换来源不会安装组件或提前准备模型。
-          </p>
+          {viewState.capabilities.includes("runtime.environments") ? (
+            <p className="form-note">
+              下载来源已并入“环境与依赖”：全局默认、单环境覆盖与本次安装选择
+              统一在那里配置。
+            </p>
+          ) : (
+            <>
+              <SourceSelector
+                sources={sources}
+                loaded={sourcesLoaded}
+                enabled={viewState.capabilities.includes("settings.selection")}
+                locked={busy}
+                actions={actions}
+              />
+              <p className="form-note">
+                依赖包来源用于安装运行环境；模型原生来源由引擎使用。更换来源不会安装组件或提前准备模型。
+              </p>
+            </>
+          )}
         </Panel>
       </div>
     </Workspace>
@@ -1781,6 +1843,7 @@ function managedEnvironmentPlan(
   if (
     typeof plan.planId !== "string" ||
     typeof plan.environmentId !== "string" ||
+    typeof plan.environmentRevision !== "number" ||
     typeof plan.recipe !== "string" ||
     typeof plan.requestedRecipe !== "string" ||
     !Array.isArray(plan.sourceIds) ||
@@ -1788,6 +1851,36 @@ function managedEnvironmentPlan(
   )
     return undefined;
   return plan as unknown as ManagedEnvironmentPlanState;
+}
+
+function managedSourceOptions(
+  value: unknown,
+): readonly ManagedSourceOptionState[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (entry): entry is ManagedSourceOptionState =>
+      entry !== null &&
+      typeof entry === "object" &&
+      !Array.isArray(entry) &&
+      typeof (entry as Partial<ManagedSourceOptionState>).id === "string" &&
+      typeof (entry as Partial<ManagedSourceOptionState>).kind === "string" &&
+      typeof (entry as Partial<ManagedSourceOptionState>).displayName ===
+        "string",
+  );
+}
+
+function managedResolvedSources(
+  value: unknown,
+): readonly ManagedResolvedSourceState[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (entry): entry is ManagedResolvedSourceState =>
+      entry !== null &&
+      typeof entry === "object" &&
+      !Array.isArray(entry) &&
+      typeof (entry as Partial<ManagedResolvedSourceState>).kind === "string" &&
+      (entry as Partial<ManagedResolvedSourceState>).id !== undefined,
+  );
 }
 
 function ManagedEnvironmentEditor({
@@ -1802,15 +1895,28 @@ function ManagedEnvironmentEditor({
   const [selectedId, setSelectedId] = useState("");
   const [name, setName] = useState("");
   const [recipe, setRecipe] = useState<string>(environmentRecipes[0][0]);
-  const packageSourceIds = Array.isArray(state.environmentPackageSourceIds)
-    ? state.environmentPackageSourceIds.filter(
-        (id): id is string => typeof id === "string",
-      )
-    : ["tuna-pypi"];
-  const [sourceId, setSourceId] = useState("tuna-pypi");
-  const selectedSourceId = packageSourceIds.includes(sourceId)
-    ? sourceId
-    : (packageSourceIds[0] ?? "tuna-pypi");
+  // 目录优先；旧宿主无目录时回退到 package id 列表（显示名即 id）。
+  const catalog = managedSourceOptions(state.environmentSources);
+  const packageSources = catalog.length
+    ? catalog.filter((source) => source.kind === "package_index")
+    : stringValues(state.environmentPackageSourceIds).map((id) => ({
+        id,
+        kind: "package_index",
+        displayName: id,
+        endpoint: "",
+      }));
+  const modelSources = catalog.filter(
+    (source) => source.kind === "model_registry",
+  );
+  const sourceName = (id: string | null | undefined): string =>
+    id == null || id === ""
+      ? "官方默认（端点未知）"
+      : (catalog.find((source) => source.id === id)?.displayName ?? id);
+  const packageIds = packageSources.map((source) => source.id);
+  const [sourceId, setSourceId] = useState("");
+  // "" = 本次跟随环境配置（环境 override → 全局默认 → 产品默认）。
+  const selectedSourceId =
+    sourceId === "" || packageIds.includes(sourceId) ? sourceId : "";
   const selected =
     environments.find((environment) => environment.id === selectedId) ??
     environments.find((environment) => environment.id === activeId) ??
@@ -1823,16 +1929,49 @@ function ManagedEnvironmentEditor({
     setInvalidatedPlanId(plan?.planId ?? null);
     void actions.run({ type: "settings.invalidateEnvironmentPlan" });
   };
+  const requestMatches =
+    plan?.requestedSourceIds == null
+      ? selectedSourceId === ""
+      : plan.requestedSourceIds.length === 1 &&
+        plan.requestedSourceIds[0] === selectedSourceId;
   const pendingPlan =
     plan &&
     plan.planId !== invalidatedPlanId &&
     plan.environmentId === selected?.id &&
     plan.requestedRecipe === recipe &&
-    plan.sourceIds.length === 1 &&
-    plan.sourceIds[0] === selectedSourceId
+    requestMatches
       ? plan
       : undefined;
   const busy = state.environmentBusy === true;
+  // 全局默认与单环境 override 的选择：未编辑时跟随持久化值；保存成功后
+  // 清空本地编辑，回显宿主回传的真值。
+  const defaultIds = stringValues(state.environmentDefaultSourceIds);
+  const globalPackageId =
+    defaultIds.find((id) => packageIds.includes(id)) ?? "";
+  const modelIds = modelSources.map((source) => source.id);
+  const globalModelId = defaultIds.find((id) => modelIds.includes(id)) ?? "";
+  const [globalEdit, setGlobalEdit] = useState<{
+    packageId?: string;
+    modelId?: string;
+  }>({});
+  const globalPackageValue = globalEdit.packageId ?? globalPackageId;
+  const globalModelValue = globalEdit.modelId ?? globalModelId;
+  const [envEdit, setEnvEdit] = useState<{
+    envId: string;
+    packageId?: string;
+    modelId?: string;
+  }>({ envId: "" });
+  const overrideIds = stringValues(selected?.overrideSourceIds);
+  const envOverridePackageRecord =
+    overrideIds.find((id) => packageIds.includes(id)) ?? "";
+  const envOverrideModelRecord =
+    overrideIds.find((id) => modelIds.includes(id)) ?? "";
+  const envOverridePackage =
+    (envEdit.envId === selected?.id ? envEdit.packageId : undefined) ??
+    envOverridePackageRecord;
+  const envOverrideModel =
+    (envEdit.envId === selected?.id ? envEdit.modelId : undefined) ??
+    envOverrideModelRecord;
   return (
     <div className="managed-environments">
       <p className="form-note">
@@ -1931,8 +2070,140 @@ function ManagedEnvironmentEditor({
                 selected.lastInstallFailure.nextAction
               ] ?? selected.lastInstallFailure.nextAction}
               ）
+              {selected.lastInstallFailure.effectiveSourceIds?.length
+                ? `；请求源：${
+                    selected.lastInstallFailure.requestedSourceIds == null
+                      ? "跟随配置"
+                      : selected.lastInstallFailure.requestedSourceIds
+                          .map((id) => sourceName(id))
+                          .join("、")
+                  }；生效源：${selected.lastInstallFailure.effectiveSourceIds
+                    .map((id) => sourceName(id))
+                    .join("、")}`
+                : ""}
             </p>
           ) : null}
+          <details className="managed-source-config">
+            <summary>来源配置（默认、覆盖与已生效值）</summary>
+            {managedResolvedSources(selected.resolvedSources).map((entry) => (
+              <p key={entry.kind}>
+                {sourceKindLabel(entry.kind)}：
+                {entry.displayName ?? "官方默认（端点未知）"}（
+                {sourceOriginLabels[entry.origin] ?? entry.origin}）
+              </p>
+            ))}
+            {selected.sourceIds?.length ? (
+              <p className="form-note">
+                已安装依赖来源：
+                {selected.sourceIds.map((id) => sourceName(id)).join("、")}
+                （该环境安装时锁定）
+              </p>
+            ) : null}
+            {selected.unknownSourceIds?.length ? (
+              <p role="note">
+                未知来源：{selected.unknownSourceIds.join("、")}
+                （当前版本目录不含，解析已回退继承）
+              </p>
+            ) : null}
+            {packageSources.length + modelSources.length === 0 ? (
+              <p className="form-note">
+                下载源目录尚未同步；可点击“重新检查状态”后再配置。
+              </p>
+            ) : (
+              <>
+                {catalog.length > 0 && modelSources.length === 0 ? (
+                  <p className="form-note">
+                    当前目录没有可选的模型来源；模型偏好保持官方默认（端点未知）。
+                  </p>
+                ) : null}
+                <div className="setting-row">
+                  <label htmlFor="managed-env-package-source">
+                    本环境依赖包来源
+                  </label>
+                  <Select
+                    id="managed-env-package-source"
+                    value={envOverridePackage}
+                    disabled={busy}
+                    onChange={(_, data) =>
+                      setEnvEdit((current) => ({
+                        envId: selected.id,
+                        packageId: String(data.value),
+                        modelId:
+                          current.envId === selected.id
+                            ? current.modelId
+                            : undefined,
+                      }))
+                    }
+                  >
+                    <option value="">
+                      跟随全局默认（当前 {sourceName(globalPackageId)}）
+                    </option>
+                    {packageSources.map((source) => (
+                      <option key={source.id} value={source.id}>
+                        {source.displayName}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              </>
+            )}
+            {modelSources.length > 0 ? (
+              <div className="setting-row">
+                <label htmlFor="managed-env-model-source">本环境模型来源</label>
+                <Select
+                  id="managed-env-model-source"
+                  value={envOverrideModel}
+                  disabled={busy}
+                  onChange={(_, data) =>
+                    setEnvEdit((current) => ({
+                      envId: selected.id,
+                      modelId: String(data.value),
+                      packageId:
+                        current.envId === selected.id
+                          ? current.packageId
+                          : undefined,
+                    }))
+                  }
+                >
+                  <option value="">
+                    跟随全局默认（当前 {sourceName(globalModelId)}）
+                  </option>
+                  {modelSources.map((source) => (
+                    <option key={source.id} value={source.id}>
+                      {source.displayName}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            ) : null}
+            <div className="setting-row">
+              <Button
+                disabled={
+                  busy || packageSources.length + modelSources.length === 0
+                }
+                onClick={async () => {
+                  const ok = await actions.run({
+                    type: "settings.setEnvironmentSources",
+                    environmentId: selected.id,
+                    packageSourceId: envOverridePackage || null,
+                    modelSourceId: envOverrideModel || null,
+                  });
+                  if (ok) setEnvEdit({ envId: "" });
+                }}
+              >
+                保存本环境来源
+              </Button>
+              {selected.id === activeId && selected.status === "installed" ? (
+                <span className="form-note">
+                  该环境正在使用；模型来源修改将在下次启动时生效。
+                </span>
+              ) : null}
+            </div>
+            <p className="form-note">
+              保存只写配置：不下载、不安装、不重启；只影响后续安装与继承，
+              保存环境 A 不会修改环境 B。
+            </p>
+          </details>
           {selected.kind !== "legacy" &&
           (selected.id !== activeId || selected.status === "empty") ? (
             <>
@@ -1964,9 +2235,16 @@ function ManagedEnvironmentEditor({
                   setSourceId(event.target.value);
                 }}
               >
-                {packageSourceIds.map((id) => (
-                  <option key={id} value={id}>
-                    {id}
+                <option value="">
+                  跟随环境配置（当前解析为{" "}
+                  {managedResolvedSources(selected.resolvedSources).find(
+                    (entry) => entry.kind === "package_index",
+                  )?.displayName ?? "TUNA PyPI 镜像（产品默认）"}
+                  ）
+                </option>
+                {packageSources.map((source) => (
+                  <option key={source.id} value={source.id}>
+                    {source.displayName}
                   </option>
                 ))}
               </Select>
@@ -1978,7 +2256,9 @@ function ManagedEnvironmentEditor({
                       type: "settings.previewEnvironmentInstall",
                       environmentId: selected.id,
                       recipe,
-                      sourceId: selectedSourceId,
+                      ...(selectedSourceId
+                        ? { sourceId: selectedSourceId }
+                        : {}),
                     })
                   }
                 >
@@ -2017,8 +2297,18 @@ function ManagedEnvironmentEditor({
           {pendingPlan ? (
             <div className="runtime-install-plan">
               <p>
-                计划：{pendingPlan.recipe} · 来源：
-                {pendingPlan.sourceIds.join("、")}
+                计划：{pendingPlan.recipe} · 目标
+                {environments.find(
+                  (environment) => environment.id === pendingPlan.environmentId,
+                )?.name ?? pendingPlan.environmentId}
+                （环境修订 {pendingPlan.environmentRevision}）· 请求源：
+                {pendingPlan.requestedSourceIds == null
+                  ? "跟随配置"
+                  : pendingPlan.requestedSourceIds
+                      .map((id) => sourceName(id))
+                      .join("、")}
+                ；生效源：
+                {pendingPlan.sourceIds.map((id) => sourceName(id)).join("、")}
               </p>
               <details>
                 <summary>
@@ -2026,13 +2316,42 @@ function ManagedEnvironmentEditor({
                 </summary>
                 <p>{pendingPlan.dependencies.join("、")}</p>
               </details>
+              <details>
+                <summary>来源与资产明细</summary>
+                {(pendingPlan.sources ?? []).map((source) => (
+                  <p key={source.id}>
+                    {source.displayName}（{sourceKindLabel(source.kind)}，
+                    {source.requested
+                      ? "本次指定"
+                      : `继承（${
+                          sourceOriginLabels[source.inheritedFrom] ??
+                          source.inheritedFrom
+                        }）`}
+                    ；{sourceUsageLabels[source.usage] ?? source.usage}
+                    {source.endpoint ? `；端点 ${source.endpoint}` : ""}
+                    ；实际下载端点
+                    {source.actualEndpoint ?? "未知"}）
+                  </p>
+                ))}
+                <p className="form-note">
+                  依赖来源：
+                  {pendingPlan.dependencyOrigin === "bundled_pack"
+                    ? "随包离线包"
+                    : "锁定在线索引（哈希锁定）"}
+                  ；解释器固定归档与内部 Runtime wheel 随产品分发并经清单校验。
+                </p>
+                <p className="form-note">
+                  模型源仅为偏好投影，实际下载端点与成本未知；缓存命中
+                  不会计入新下载，实际下载情况安装后才可知。
+                </p>
+              </details>
               <Button
                 disabled={busy}
                 onClick={() =>
                   void actions.run({
                     type: "settings.confirmEnvironmentInstall",
                     planId: pendingPlan.planId,
-                    sourceId: selectedSourceId,
+                    ...(selectedSourceId ? { sourceId: selectedSourceId } : {}),
                   })
                 }
               >
@@ -2057,6 +2376,93 @@ function ManagedEnvironmentEditor({
           ) : null}
         </>
       ) : null}
+      <details className="managed-source-defaults">
+        <summary>全局默认来源（所有环境继承）</summary>
+        {stringValues(state.environmentUnknownDefaultSourceIds).length ? (
+          <p role="note">
+            全局配置含未知来源：
+            {stringValues(state.environmentUnknownDefaultSourceIds).join("、")}
+            （当前版本目录不含，已回退产品默认）
+          </p>
+        ) : null}
+        {packageSources.length + modelSources.length === 0 ? (
+          <p className="form-note">
+            下载源目录尚未同步；可点击“重新检查状态”后再配置。
+          </p>
+        ) : (
+          <>
+            {catalog.length > 0 && modelSources.length === 0 ? (
+              <p className="form-note">
+                当前目录没有可选的模型来源；模型偏好保持官方默认（端点未知）。
+              </p>
+            ) : null}
+            <div className="setting-row">
+              <label htmlFor="managed-global-package-source">
+                全局依赖包来源
+              </label>
+              <Select
+                id="managed-global-package-source"
+                value={globalPackageValue}
+                disabled={busy}
+                onChange={(_, data) =>
+                  setGlobalEdit((current) => ({
+                    ...current,
+                    packageId: String(data.value),
+                  }))
+                }
+              >
+                <option value="">产品默认（TUNA PyPI 镜像）</option>
+                {packageSources.map((source) => (
+                  <option key={source.id} value={source.id}>
+                    {source.displayName}
+                  </option>
+                ))}
+              </Select>
+            </div>
+          </>
+        )}
+        {modelSources.length > 0 ? (
+          <div className="setting-row">
+            <label htmlFor="managed-global-model-source">全局模型来源</label>
+            <Select
+              id="managed-global-model-source"
+              value={globalModelValue}
+              disabled={busy}
+              onChange={(_, data) =>
+                setGlobalEdit((current) => ({
+                  ...current,
+                  modelId: String(data.value),
+                }))
+              }
+            >
+              <option value="">产品默认（官方原生默认，端点未知）</option>
+              {modelSources.map((source) => (
+                <option key={source.id} value={source.id}>
+                  {source.displayName}
+                </option>
+              ))}
+            </Select>
+          </div>
+        ) : null}
+        <div className="setting-row">
+          <Button
+            disabled={busy || packageSources.length + modelSources.length === 0}
+            onClick={async () => {
+              const ok = await actions.run({
+                type: "settings.setEnvironmentSources",
+                packageSourceId: globalPackageValue || null,
+                modelSourceId: globalModelValue || null,
+              });
+              if (ok) setGlobalEdit({});
+            }}
+          >
+            保存全局默认来源
+          </Button>
+          <span className="form-note">
+            只影响后续继承与旧计划有效性，不会篡改在途安装操作。
+          </span>
+        </div>
+      </details>
       <p role="status">{stringValue(state.environmentStatus) ?? ""}</p>
       {state.environmentCanCancelInstall === true ? (
         <Button
