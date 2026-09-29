@@ -242,3 +242,45 @@ def test_non_dict_images_attribute_is_ignored_safely() -> None:
     object.__setattr__(result, "images", ["not", "a", "dict"])
     payload = ocr_result_to_payload(result)
     assert payload["images"] == {}
+
+
+# ---------------------------------------------------------------------------
+# 未知置信度（score=None → wire null）
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_score_serializes_as_null_not_fabricated() -> None:
+    """上游无置信度：text_blocks[].score=null；不伪造 0/1（旧实现会失败）。"""
+    result = OCRResult(
+        raw_text="a^2+b^2",
+        text_with_scores=[("a^2+b^2", None)],
+        text_blocks=[TextBlock(text="a^2+b^2", score=None, bbox=None, label="formula")],
+    )
+    payload = ocr_result_to_payload(result)
+    assert payload["text_blocks"][0]["score"] is None
+    # text_with_scores 只保留真实置信度条目
+    assert payload["text_with_scores"] == []
+
+
+def test_mixed_scores_keep_known_and_null_unknown() -> None:
+    result = OCRResult(
+        text_with_scores=[("known", 0.9), ("unknown", None)],
+        text_blocks=[
+            TextBlock(text="known", score=0.9, bbox=None),
+            TextBlock(text="unknown", score=None, bbox=None),
+        ],
+    )
+    payload = ocr_result_to_payload(result)
+    assert payload["text_with_scores"] == [["known", 0.9]]
+    assert [b["score"] for b in payload["text_blocks"]] == [0.9, None]
+
+
+def test_ocr_result_from_payload_roundtrips_null_score() -> None:
+    payload = {
+        "raw_text": "x",
+        "text_blocks": [{"text": "x", "score": None, "label": "formula"}],
+    }
+    result = ocr_result_from_payload(payload)
+    assert result.text_blocks[0].score is None
+    # 再序列化仍是 null
+    assert ocr_result_to_payload(result)["text_blocks"][0]["score"] is None

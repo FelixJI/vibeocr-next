@@ -190,7 +190,7 @@ class _FakeService:
     def __init__(self, result_list):
         self._pipeline = _FakePipeline(result_list)
 
-    def get_or_create_pipeline(self, name):
+    def get_or_create_pipeline(self, name, options=None):
         return self._pipeline
 
 
@@ -898,7 +898,7 @@ def test_recognize_table_emits_canonical_table_with_stable_ids():
     )
     assert first_result.text_blocks[0].content_id == first["block_id"]
     assert first_result.text_blocks[0].text == "Name\tAge"
-    assert first_result.text_with_scores[0] == ("Name\tAge", 0.9)
+    assert first_result.text_with_scores[0] == ("Name\tAge", None)
 
 
 def test_recognize_table_html_projection_preserves_rowspan():

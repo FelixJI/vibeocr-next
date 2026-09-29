@@ -103,7 +103,8 @@ def _text_layer_to_mirror(tl: TextLayerInfo) -> TextLayerInfoMirror:
 def _text_block_to_mirror(b: TextBlock) -> TextBlockMirror:
     return TextBlockMirror(
         text=b.text,
-        score=b.score,
+        score=0.0 if b.score is None else b.score,
+        score_unknown=b.score is None,
         bbox=b.bbox,
         polygon=b.polygon,
         page_idx=b.page_idx,
@@ -728,7 +729,7 @@ def rewrite_text_layer(sid: str, req: RewriteTextLayerRequest) -> MutateResponse
         blocks = [
             TextBlock(
                 text=b.text,
-                score=b.score,
+                score=None if b.score_unknown else b.score,
                 bbox=b.bbox,
                 polygon=b.polygon,
                 page_idx=b.page_idx,

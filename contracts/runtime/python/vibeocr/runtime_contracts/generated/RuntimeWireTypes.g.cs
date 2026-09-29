@@ -581,6 +581,12 @@ public sealed record ExportResponse
 
     [JsonPropertyName("bytes_written")]
     public required int BytesWritten { get; init; }
+
+    [JsonPropertyName("incomplete")]
+    public bool? Incomplete { get; init; }
+
+    [JsonPropertyName("images_missing")]
+    public int? ImagesMissing { get; init; }
 }
 
 public sealed record Health
@@ -1934,6 +1940,9 @@ public sealed record TextBlockMirror
 
     [JsonPropertyName("score")]
     public required double Score { get; init; }
+
+    [JsonPropertyName("score_unknown")]
+    public bool? ScoreUnknown { get; init; }
 
     [JsonPropertyName("bbox")]
     public IReadOnlyList<JsonElement>? Bbox { get; init; }

@@ -211,8 +211,13 @@ def build_result_projections(
                 if block_type == "table_unparsed"
                 else block.get("image_body") or block.get("chart_body") or ""
             )
+            image_ref = block.get("image")
             source = (
-                block.get("img_path") or block.get("image_path") or block.get("src")
+                image_ref.get("name")
+                if isinstance(image_ref, dict)
+                else block.get("img_path")
+                or block.get("image_path")
+                or block.get("src")
             )
             if include_markdown:
                 caption_text = _markdown_text(" ".join(captions))

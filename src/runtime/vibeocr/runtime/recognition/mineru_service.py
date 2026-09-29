@@ -645,7 +645,7 @@ class MinerUService(metaclass=SingletonMeta):
             text_blocks.append(
                 TextBlock(
                     text=text,
-                    score=1.0,  # MineRU content_list 不提供 confidence
+                    score=None,  # MineRU content_list 不提供 confidence（真实 unknown，不伪造）
                     bbox=normalize_bbox(bbox[:4]) if bbox else None,
                     page_idx=block.get("page_idx"),
                     content_index=i,
@@ -654,11 +654,8 @@ class MinerUService(metaclass=SingletonMeta):
             )
 
         text_with_scores = [(b.text, b.score) for b in text_blocks]
-        avg_score = (
-            sum(s for _, s in text_with_scores) / len(text_with_scores)
-            if text_with_scores
-            else 0.0
-        )
+        known_scores = [s for _, s in text_with_scores if s is not None]
+        avg_score = sum(known_scores) / len(known_scores) if known_scores else 0.0
 
         result = OCRResult(
             raw_text=raw_text,

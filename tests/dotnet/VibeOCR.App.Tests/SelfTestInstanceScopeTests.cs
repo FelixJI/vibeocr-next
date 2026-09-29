@@ -22,6 +22,7 @@ public sealed class SelfTestInstanceScopeTests
   [InlineData("screenshot-e2e")]
   [InlineData("managed-environment-e2e")]
   [InlineData("native-actions-e2e")]
+  [InlineData("paddle-modes-e2e")]
   public void UiSmokeUsesIsolatedNamedObjects(string smokeMode)
   {
     const string instanceId = "c240f369b28e4444b0d45f4a4d331cd0";
@@ -47,6 +48,8 @@ public sealed class SelfTestInstanceScopeTests
   [InlineData("managed-environment-e2e", null)]
   [InlineData("managed-environment-e2e", "not-a-guid")]
   [InlineData("native-actions-e2e", null)]
+  [InlineData("paddle-modes-e2e", null)]
+  [InlineData("paddle-modes-e2e", "not-a-guid")]
   [InlineData("native-actions-e2e", "not-a-guid")]
   [InlineData(null, "c240f369b28e4444b0d45f4a4d331cd0")]
   public void InvalidSelfTestScopeIsRejected(string? smokeMode, string? instanceId) =>

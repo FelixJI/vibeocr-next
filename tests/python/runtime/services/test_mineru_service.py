@@ -262,7 +262,7 @@ class TestBuildOcrResult:
         api_resp = _make_api_response(md_content="t", content_list=content_list)
         result = service._build_ocr_result(api_resp, "input.pdf", data=None)
         assert result.text_blocks[0].text == "A\tB"
-        assert result.text_with_scores[0] == ("A\tB", 1.0)
+        assert result.text_with_scores[0] == ("A\tB", None)
 
     def test_table_block_emits_canonical_table_and_stable_content_id(self):
         service = self._make_service()
@@ -317,8 +317,9 @@ class TestBuildOcrResult:
         api_resp = _make_api_response(md_content="A B", content_list=content_list)
         result = service._build_ocr_result(api_resp, "input.pdf", data=None)
         assert len(result.text_with_scores) == 2
-        assert result.text_with_scores[0] == ("A", 1.0)
-        assert result.avg_score == 1.0
+        # MinerU 上游不提供 confidence：None=unknown，不伪造 1.0
+        assert result.text_with_scores[0] == ("A", None)
+        assert result.avg_score == 0.0
         for text_block in result.text_blocks:
             content = result.content_list[text_block.content_index]
             assert content["block_id"] == text_block.content_id

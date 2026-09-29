@@ -22,6 +22,7 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     private string? _taskEngine;
     private RecognitionModeOption? _taskRecognitionMode;
     private MineruConfig? _taskMineruConfig;
+    private IReadOnlyDictionary<string, System.Text.Json.JsonElement>? _taskOptions;
 
     public RecognitionViewModel(
         IInferenceClient inference,
@@ -44,6 +45,10 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     public string? Language { get; set; }
     public RecognizeResponse? Result => _result;
 
+    public Task<byte[]> FetchResultAssetAsync(
+        string jobId, string itemId, string assetId, CancellationToken cancellationToken) =>
+        _inference.FetchResultAssetAsync(jobId, itemId, assetId, cancellationToken);
+
     /// <summary>
     /// Task-level recognition-mode id, or a legacy wire engine id when the
     /// runtime does not expose Protocol 2.8 recognition modes.
@@ -57,11 +62,15 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     /// <summary>
     /// 绑定任务级识别模式及其类型化 MinerU 4 配置（仅目录声明
     /// ocr.mineru-config.v1 时由宿主提供；null 完全省略 mineru 块）。
+    /// 提交时若 TaskEngine 已显式选择模式而 mode 未能绑定（目录缺失/环境
+    /// 切换），EffectiveEngine 会拒绝提交，不静默回退通用文字识别。
     /// </summary>
     public void SetRecognitionMode(
         RecognitionModeOption? taskMode,
-        MineruConfig? mineruConfig = null)
+        MineruConfig? mineruConfig = null,
+        PaddleModeOptions? options = null)
     {
+        _taskOptions = taskMode is null ? null : options?.ProjectWire(taskMode);
         _taskRecognitionMode = taskMode;
         _taskMineruConfig = taskMode is null ? null : mineruConfig;
     }
@@ -79,8 +88,8 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
             }
             if (TaskEngine is not null)
             {
-                throw new InvalidOperationException(
-                    $"任务识别模式 {TaskEngine} 尚未绑定 Runtime catalog，不能静默降级。");
+                throw new RecognitionModeUnavailableException(
+                    $"任务识别模式 {TaskEngine} 尚未绑定 Runtime catalog，已拒绝回退通用文字识别；请在设置中检查运行环境后重试。");
             }
             return null;
         }
@@ -158,6 +167,10 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         bool persistCurrentInput)
     {
         ArgumentNullException.ThrowIfNull(loadInput);
+        string pipeline = recognize ? EffectivePipeline : Pipeline;
+        OcrEngine? engine = recognize ? EffectiveEngine : null;
+        MineruConfig? mineru = _taskMineruConfig;
+        IReadOnlyDictionary<string, System.Text.Json.JsonElement>? options = _taskOptions;
         long generation = Interlocked.Increment(ref _generation);
         CancellationTokenSource? previous = Interlocked.Exchange(
             ref _activeRun,
@@ -209,8 +222,6 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
             }
 
             const string clientItemKey = "recognition-input";
-            string pipeline = EffectivePipeline;
-            OcrEngine? engine = EffectiveEngine;
             InferenceJobRun job = await _jobs.RunRecognitionAsync(
                 pipeline,
                 JobPriority.Interactive,
@@ -221,10 +232,10 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
                         input.MediaType,
                         input.Data),
                 ],
-                options: null,
+                options: options,
                 cancellationToken: run.Token,
                 engine: engine,
-                mineru: pipeline == "MinerU" ? _taskMineruConfig : null);
+                mineru: pipeline == "MinerU" ? mineru : null);
             JobSnapshot snapshot = job.Snapshot;
 
             if (generation != Volatile.Read(ref _generation)) return;

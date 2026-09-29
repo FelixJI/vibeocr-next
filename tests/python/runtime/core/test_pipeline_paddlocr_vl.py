@@ -20,16 +20,20 @@ class _DictResult(dict):
 class _FakePipeline:
     def __init__(self, result_list):
         self._result_list = result_list
+        self.predict_calls: list[dict] = []
 
     def predict(self, input, **kwargs):  # noqa: A002 — 模拟 PaddleOCR API（input 关键字参数）
+        self.predict_calls.append(dict(kwargs))
         return list(self._result_list)
 
 
 class _FakeService:
     def __init__(self, result_list):
         self._pipeline = _FakePipeline(result_list)
+        self.requests: list[tuple[str, object]] = []
 
-    def get_or_create_pipeline(self, name):
+    def get_or_create_pipeline(self, name, options=None):
+        self.requests.append((name, options))
         return self._pipeline
 
 
@@ -161,7 +165,7 @@ def test_vl_deduplicates_table_across_content_and_parsing_lists():
     assert result.text_blocks[0].content_index == 0
     assert result.text_blocks[0].content_id == tables[0]["block_id"]
     assert result.text_blocks[0].text == "A\tB"
-    assert result.text_with_scores[0] == ("A\tB", 0.9)
+    assert result.text_with_scores[0] == ("A\tB", None)
     assert result.markdown_text == "| A | B |\n| --- | --- |"
 
 
@@ -335,8 +339,8 @@ class TestVlPureHelpers:
             _get_block_score,
         )
 
-        # 无 layout_det_res → 默认 0.9
-        assert _get_block_score({}, {"block_order": 0}) == 0.9
+        # 无 layout_det_res → 无真实置信度（None=unknown，不伪造 0.9）
+        assert _get_block_score({}, {"block_order": 0}) is None
 
     def test_get_block_score_from_layout_det_res(self):
         from vibeocr.runtime.recognition.core.pipelines.pipeline_paddlocr_vl import (
@@ -372,3 +376,86 @@ class TestVlPureHelpers:
         assert isinstance(result, tuple)
         assert len(result) == 2
         assert all(isinstance(x, str) for x in result)
+
+
+# ---- 构造参数：版本固定 VL-1.5 与门控项 ----
+
+
+def test_vl_constructor_kwargs_only_gating_flags():
+    from vibeocr.runtime.recognition.core.pipelines.pipeline_paddlocr_vl import (
+        _paddlocr_vl_constructor_kwargs,
+    )
+
+    kwargs = _paddlocr_vl_constructor_kwargs(PaddleOCRVLOptions())
+    assert kwargs == {
+        "use_doc_orientation_classify": True,
+        "use_doc_unwarping": False,
+        "use_layout_detection": True,
+    }
+
+
+def test_create_vl_pipeline_pins_v15(monkeypatch):
+    """回归：锁定版本默认 pipeline_version=v1.6，必须显式固定 v1.5（旧实现会失败）。"""
+    import sys
+    import types
+
+    captured: dict = {}
+
+    class _Captured:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def predict(self, *args, **kwargs):
+            return []
+
+    stub = types.ModuleType("paddleocr")
+    stub.PaddleOCRVL = _Captured
+    monkeypatch.setitem(sys.modules, "paddleocr", stub)
+
+    from vibeocr.runtime.recognition.core.pipelines.pipeline_paddlocr_vl import (
+        _create_paddlocr_vl_pipeline,
+    )
+
+    _create_paddlocr_vl_pipeline("cpu", enable_mkldnn=False)
+    assert captured["pipeline_version"] == "v1.5"
+    assert captured["device"] == "cpu"
+
+
+def test_vl_options_forwarded_to_cache_layer():
+
+    opts = PaddleOCRVLOptions(vl_use_seal_recognition=True)
+    service = _FakeService([])
+    _recognize_paddlocr_vl(service, image=None, options=opts)
+    name, passed = service.requests[0]
+    assert name == "PaddleOCR-VL"
+    assert passed is opts
+    # chart/seal/ocr_for_image_block 是 predict 参数
+    predict_kwargs = service._pipeline.predict_calls[0]
+    assert predict_kwargs["use_seal_recognition"] is True
+
+
+def test_vl_keeps_image_block_without_ocr_text(tmp_path):
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from vibeocr.runtime.recognition.result_assets import ResultAssetSink
+
+    block = SimpleNamespace(
+        label="image",
+        content="",
+        bbox=[0, 0, 12, 8],
+        global_block_id=0,
+        image={"img": Image.new("RGB", (12, 8), "red"), "path": "provider.png"},
+    )
+    result = _recognize_paddlocr_vl(
+        _FakeService([_DictResult(parsing_res_list=[block])]),
+        image=None,
+        options=PaddleOCRVLOptions(),
+        asset_sink=ResultAssetSink(tmp_path, "it-0"),
+    )
+    assert len(result.content_list) == 1
+    reference = result.content_list[0]["image"]
+    assert reference["media_type"] == "image/png"
+    assert (tmp_path / f"it-0-{reference['asset_id']}.png").is_file()
+    assert reference["name"] in result.markdown_text

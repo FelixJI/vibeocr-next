@@ -661,7 +661,8 @@ class PdfBackendClient:
         blocks = [
             TextBlockMirror(
                 text=b.text,
-                score=b.score,
+                score=0.0 if b.score is None else b.score,
+                score_unknown=b.score is None,
                 bbox=b.bbox,
                 polygon=b.polygon,
                 page_idx=b.page_idx,

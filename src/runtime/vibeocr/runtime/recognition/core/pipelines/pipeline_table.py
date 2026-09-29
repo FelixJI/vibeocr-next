@@ -105,7 +105,10 @@ class TableRecognitionOptions(BasePipelineOptions):
 
     pipeline: str = "TABLE_RECOGNITION"
     use_doc_orientation_classify: bool = True
-    use_doc_unwarping: bool = True
+    use_doc_unwarping: bool = False
+    # 注意：wired/wireless 表格结构模型名是构造参数（TableRecognitionPipelineV2
+    # 构造器），不是 predict 参数；默认值与发行包 table_recognition_v2.yaml
+    # 一致（SLANeXt_wired / SLANeXt_wireless），无需在 predict 期透传。
     use_wireless_table: bool = True
     wireless_table_model_name: str = "SLANeXt_wireless"
     wired_table_model_name: str = "SLANeXt_wired"
@@ -171,7 +174,12 @@ def _create_table_pipeline(device: str, **kwargs: Any) -> Any:
         raise
 
 
-def _recognize_table(service: Any, image: Any, options: TableRecognitionOptions) -> Any:
+def _recognize_table(
+    service: Any,
+    image: Any,
+    options: TableRecognitionOptions,
+    asset_sink: Any | None = None,
+) -> Any:
     """执行表格识别并返回 OCRResult"""
     from enum import Enum
 
@@ -182,7 +190,7 @@ def _recognize_table(service: Any, image: Any, options: TableRecognitionOptions)
         if isinstance(options.pipeline, Enum)
         else options.pipeline
     )
-    pipeline = service.get_or_create_pipeline(pipeline_name)
+    pipeline = service.get_or_create_pipeline(pipeline_name, options=options)
 
     predict_kwargs: dict[str, Any] = {}
     predict_kwargs["use_doc_orientation_classify"] = (
@@ -208,15 +216,6 @@ def _recognize_table(service: Any, image: Any, options: TableRecognitionOptions)
         options.use_e2e_wireless_table_rec_model
     )
 
-    # 同时传入有线和无线模型名，管道内部的表格分类器
-    # (PP-LCNet_x1_0_table_cls) 会自动判断表格类型并选用对应模型。
-    predict_kwargs["wireless_table_structure_recognition_model_name"] = (
-        options.wireless_table_model_name
-    )
-    predict_kwargs["wired_table_structure_recognition_model_name"] = (
-        options.wired_table_model_name
-    )
-
     if options.text_det_limit_side_len is not None:
         predict_kwargs["text_det_limit_side_len"] = options.text_det_limit_side_len
     if options.text_det_thresh is not None:
@@ -232,7 +231,8 @@ def _recognize_table(service: Any, image: Any, options: TableRecognitionOptions)
     output_list = list(output)
 
     text_blocks: list[TextBlock] = []
-    text_with_scores: list[tuple[str, float]] = []
+    # 上游 OCR 提供真实 rec_scores；表格结构块无置信度→None（不伪造）。
+    text_with_scores: list[tuple[str, float | None]] = []
     markdown_parts: list[str] = []
     content_list: list[dict[str, Any]] = []
     table_sequence = 0
@@ -284,7 +284,7 @@ def _recognize_table(service: Any, image: Any, options: TableRecognitionOptions)
                     score = (
                         float(rec_scores[i])
                         if rec_scores and i < len(rec_scores)
-                        else 0.9
+                        else None
                     )
                     poly = rec_polys[i] if rec_polys and i < len(rec_polys) else None
                     bbox_tuple = None
@@ -468,7 +468,7 @@ def _recognize_table(service: Any, image: Any, options: TableRecognitionOptions)
             text_blocks.append(
                 TextBlock(
                     text=table_plain_text,
-                    score=0.9,
+                    score=None,
                     bbox=current_bbox,
                     label="table",
                     order=idx,
@@ -476,7 +476,7 @@ def _recognize_table(service: Any, image: Any, options: TableRecognitionOptions)
                     content_id=table_id,
                 )
             )
-            text_with_scores.append((table_plain_text, 0.9))
+            text_with_scores.append((table_plain_text, None))
             content_list.append(canonical_block)
 
         # 表格外的普通文字（overall_ocr_res）：截图场景多为整图表格，此处通常为空，

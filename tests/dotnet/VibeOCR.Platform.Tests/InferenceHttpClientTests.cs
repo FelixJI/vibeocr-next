@@ -493,16 +493,18 @@ public sealed class InferenceHttpClientTests
     public async Task ExportPostsSnakeCasePayloadAndReadsResultAsync()
     {
         var handler = new FakeHandler("""
-            {"output_path":"C:/out.txt","bytes_written":5}
+            {"output_path":"C:/out.txt","bytes_written":5,"incomplete":true,"images_missing":2}
             """);
         await using var client = new InferenceHttpClient(Base, "tok", handler);
 
         ExportResult result = await client.ExportAsync(
-            new ExportRequest("raw", "markdown", "html", "C:/out.txt", "txt", true),
+            new ExportRequest("raw", "markdown", "html", "C:/out.txt", "txt", true, [JsonSerializer.SerializeToElement(new { type = "table", rows = 2 })]),
             TestContext.Current.CancellationToken);
 
         Assert.Equal("C:/out.txt", result.OutputPath);
         Assert.Equal(5, result.BytesWritten);
+        Assert.True(result.Incomplete);
+        Assert.Equal(2, result.ImagesMissing);
         Assert.Equal("/v2/export", handler.LastPath);
         using JsonDocument body = JsonDocument.Parse(handler.LastBody!);
         Assert.Equal("raw", body.RootElement.GetProperty("raw_text").GetString());
@@ -511,6 +513,25 @@ public sealed class InferenceHttpClientTests
         Assert.Equal("C:/out.txt", body.RootElement.GetProperty("output_path").GetString());
         Assert.Equal("txt", body.RootElement.GetProperty("format").GetString());
         Assert.True(body.RootElement.GetProperty("overwrite").GetBoolean());
+        Assert.Equal(2, body.RootElement.GetProperty("raw_blocks")[0].GetProperty("rows").GetInt32());
+    }
+
+    [Fact]
+    public async Task ResultAssetUsesAuthorizedJobBoundRoute()
+    {
+        var handler = new FakeHandler("PNG", mediaType: "image/png");
+        await using var client = new InferenceHttpClient(Base, "tok", handler);
+
+        byte[] image = await client.FetchResultAssetAsync(
+            "job-1", "it-2", "abcdef0123456789abcdef0123456789",
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal("PNG", System.Text.Encoding.UTF8.GetString(image));
+        Assert.Equal("/v2/jobs/job-1/items/it-2/assets/abcdef0123456789abcdef0123456789", handler.LastPath);
+        Assert.Equal("Bearer", handler.LastAuthorizationScheme);
+        Assert.Equal("tok", handler.LastAuthorizationParameter);
+        await Assert.ThrowsAsync<ArgumentException>(() => client.FetchResultAssetAsync(
+            "../wrong", "it-2", "asset", TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -593,16 +614,18 @@ public sealed class InferenceHttpClientTests
     {
         private readonly Queue<string> _bodies;
         private readonly HttpStatusCode _status;
+        private readonly string _mediaType;
 
-        public FakeHandler(string body, HttpStatusCode statusCode = HttpStatusCode.OK)
-            : this([body], statusCode)
+        public FakeHandler(string body, HttpStatusCode statusCode = HttpStatusCode.OK, string mediaType = "application/json")
+            : this([body], statusCode, mediaType)
         {
         }
 
-        public FakeHandler(string[] bodies, HttpStatusCode statusCode = HttpStatusCode.OK)
+        public FakeHandler(string[] bodies, HttpStatusCode statusCode = HttpStatusCode.OK, string mediaType = "application/json")
         {
             _bodies = new Queue<string>(bodies);
             _status = statusCode;
+            _mediaType = mediaType;
         }
 
         public HttpMethod? LastMethod { get; private set; }
@@ -628,7 +651,7 @@ public sealed class InferenceHttpClientTests
                 : await request.Content.ReadAsStringAsync(cancellationToken);
             string body = _bodies.Count > 1 ? _bodies.Dequeue() : _bodies.Peek();
             var content = new StringContent(body);
-            content.Headers.ContentType = new("application/json");
+            content.Headers.ContentType = new(_mediaType);
             return new HttpResponseMessage(_status) { Content = content };
         }
     }

@@ -22,6 +22,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
@@ -55,7 +56,10 @@ class _OCRServiceLike(Protocol):
     """Minimal slice of :class:`OCRService` we depend on."""
 
     def recognize_batch(
-        self, images: list[Any], options: Any | None = ...
+        self,
+        images: list[Any],
+        options: Any | None = ...,
+        asset_sinks: list[Any] | None = ...,
     ) -> list[Any]: ...
 
     def preload_pipelines_sequential(self, pipelines: list[Any]) -> dict[str, bool]: ...
@@ -185,6 +189,7 @@ class PaddlePipelineAdapter:
         try:
             images = [self._to_ndarray(self._raw_bytes(it)) for it in items]
             service_options = self._service_options(options)
+            asset_sinks = self._build_asset_sinks(items)
             manager = self._physical_cache_manager()
             lease = (
                 manager.lease(pipeline_name)
@@ -192,7 +197,9 @@ class PaddlePipelineAdapter:
                 else contextlib.nullcontext()
             )
             with lease:
-                results = self.service.recognize_batch(images, service_options)
+                results = self.service.recognize_batch(
+                    images, service_options, asset_sinks=asset_sinks
+                )
             payloads = [self._result_to_payload(r) for r in results]
         except Exception:
             logger.exception(
@@ -223,6 +230,30 @@ class PaddlePipelineAdapter:
         return OCROptions.from_dict(
             {"pipeline": options.pipeline_id, **options.options}
         )
+
+    @staticmethod
+    def _build_asset_sinks(items: list[InputItem]) -> list[Any] | None:
+        """为携带受控资产目录的 item 构造结果资产写入器。
+
+        目录由 executor 从 stager 受信路径派生并经内部 IPC 传入；无目录的
+        item 得到 None sink（管线标记 available=false，不落盘）。同一批
+        共享一个 job 级字节预算。
+        """
+        from vibeocr.runtime.recognition.result_assets import (
+            ResultAssetBudget,
+            ResultAssetSink,
+        )
+
+        asset_items = [item for item in items if getattr(item, "asset_dir", "")]
+        if not asset_items:
+            return None
+        budget = ResultAssetBudget(asset_dir=Path(asset_items[0].asset_dir))
+        return [
+            ResultAssetSink(item.asset_dir, item.item_id, budget)
+            if getattr(item, "asset_dir", "")
+            else None
+            for item in items
+        ]
 
     # ------------------------------------------------------------------
     # Residency passthrough

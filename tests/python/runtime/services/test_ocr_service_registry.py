@@ -149,9 +149,139 @@ class TestGetOrCreatePipeline:
         service = OCRService()
         mock_pipeline = MagicMock(name="cached_ocr_pipeline")
         service._pipelines = {"OCR": mock_pipeline}
+        # OCR 是纯 predict 参数管道：真实签名为空元组。生产写入点总会同时
+        # 记录签名；直接种入私有缓存的测试必须同步种入真实签名，否则
+        # fail-closed 重建。
+        service._pipeline_signatures = {"OCR": ()}
 
         result = service.get_or_create_pipeline("OCR")
         assert result is mock_pipeline
+
+    def _signature_registry(self, options_a, options_b):
+        """构造带 constructor_kwargs 的 mock registry（PP-StructureV3 语义）。"""
+        mock_spec = MagicMock()
+        mock_spec.options_class.return_value = options_a.__class__()
+        mock_spec.constructor_kwargs = lambda options: dict(vars(options))
+        mock_registry = MagicMock()
+        mock_registry.has.return_value = True
+        mock_registry.get.return_value = mock_spec
+        return mock_registry, mock_spec
+
+    def test_constructor_options_change_rebuilds_pipeline(self):
+        """构造参数变化必须释放并重建，不得复用旧实例（旧实现会失败）。"""
+        from types import SimpleNamespace
+
+        service = OCRService()
+        service._pipelines = {}
+        service._cache_manager = PipelineCacheManager(service, {}, max_heavy=1)
+
+        options_a = SimpleNamespace(use_seal_recognition=False)
+        options_b = SimpleNamespace(use_seal_recognition=True)
+        mock_registry, mock_spec = self._signature_registry(options_a, options_b)
+        mock_spec.create_pipeline.side_effect = [
+            MagicMock(name="pp_no_seal"),
+            MagicMock(name="pp_with_seal"),
+        ]
+
+        with (
+            patch(
+                "vibeocr.runtime.recognition.ocr_service.OCRService._setup_cuda_dll_path"
+            ),
+            patch(
+                "vibeocr.runtime.recognition.ocr_service.OCRService._get_device",
+                return_value="cpu",
+            ),
+            patch(
+                "vibeocr.runtime.recognition.core.pipelines.get_registry",
+                return_value=mock_registry,
+            ),
+            patch(
+                "vibeocr.runtime.processes.utils.cpu_info.can_safely_enable_onednn",
+                return_value=(False, "mocked"),
+            ),
+        ):
+            first = service.get_or_create_pipeline("PP-StructureV3", options_a)
+            second = service.get_or_create_pipeline("PP-StructureV3", options_b)
+
+        assert first is not second
+        assert mock_spec.create_pipeline.call_count == 2
+        # 第二次构造收到新构造参数
+        _, kwargs = mock_spec.create_pipeline.call_args
+        assert kwargs["use_seal_recognition"] is True
+        assert service._pipeline_signatures["PP-StructureV3"] == (
+            ("use_seal_recognition", True),
+        )
+
+    def test_same_constructor_options_reuse_pipeline(self):
+        """构造参数不变时复用同一实例（不重建）。"""
+        from types import SimpleNamespace
+
+        service = OCRService()
+        service._pipelines = {}
+        service._cache_manager = PipelineCacheManager(service, {}, max_heavy=1)
+
+        options_a = SimpleNamespace(use_seal_recognition=False)
+        mock_registry, mock_spec = self._signature_registry(options_a, options_a)
+        mock_spec.create_pipeline.return_value = MagicMock(name="pp_pipeline")
+
+        with (
+            patch(
+                "vibeocr.runtime.recognition.ocr_service.OCRService._setup_cuda_dll_path"
+            ),
+            patch(
+                "vibeocr.runtime.recognition.ocr_service.OCRService._get_device",
+                return_value="cpu",
+            ),
+            patch(
+                "vibeocr.runtime.recognition.core.pipelines.get_registry",
+                return_value=mock_registry,
+            ),
+            patch(
+                "vibeocr.runtime.processes.utils.cpu_info.can_safely_enable_onednn",
+                return_value=(False, "mocked"),
+            ),
+        ):
+            first = service.get_or_create_pipeline("PP-StructureV3", options_a)
+            second = service.get_or_create_pipeline(
+                "PP-StructureV3", SimpleNamespace(use_seal_recognition=False)
+            )
+
+        assert first is second
+        mock_spec.create_pipeline.assert_called_once()
+
+    def test_unsigned_seeded_instance_is_fail_closed_rebuilt(self):
+        """无签名记录的种入实例来源不明：fail-closed 重建，不猜测复用。"""
+        from types import SimpleNamespace
+
+        service = OCRService()
+        service._pipelines = {"PP-StructureV3": MagicMock(name="seeded")}
+        service._cache_manager = PipelineCacheManager(service, {}, max_heavy=1)
+
+        options_a = SimpleNamespace(use_seal_recognition=False)
+        mock_registry, mock_spec = self._signature_registry(options_a, options_a)
+        fresh = MagicMock(name="rebuilt")
+        mock_spec.create_pipeline.return_value = fresh
+
+        with (
+            patch(
+                "vibeocr.runtime.recognition.ocr_service.OCRService._setup_cuda_dll_path"
+            ),
+            patch(
+                "vibeocr.runtime.recognition.ocr_service.OCRService._get_device",
+                return_value="cpu",
+            ),
+            patch(
+                "vibeocr.runtime.recognition.core.pipelines.get_registry",
+                return_value=mock_registry,
+            ),
+            patch(
+                "vibeocr.runtime.processes.utils.cpu_info.can_safely_enable_onednn",
+                return_value=(False, "mocked"),
+            ),
+        ):
+            result = service.get_or_create_pipeline("PP-StructureV3", options_a)
+
+        assert result is fresh
 
     def test_creates_pipeline_via_registry(self):
         """Uses spec.create_pipeline from registry when pipeline is registered.
@@ -372,6 +502,7 @@ class TestGetPipelineBackwardCompat:
         service = OCRService()
         mock_pipeline = MagicMock(name="ocr_pipeline")
         service._pipelines = {"OCR": mock_pipeline}
+        service._pipeline_signatures = {"OCR": ()}
 
         result = service.get_pipeline(OCRPipeline.OCR)
         assert result is mock_pipeline
@@ -381,6 +512,20 @@ class TestGetPipelineBackwardCompat:
         service = OCRService()
         mock_pipeline = MagicMock(name="pp_structure_pipeline")
         service._pipelines = {"PP-StructureV3": mock_pipeline}
+        # 种入与默认构造参数一致的签名，否则签名感知缓存会保守重建
+        from vibeocr.runtime.recognition.core.pipelines import (
+            PP_STRUCTURE_V3_SPEC,
+        )
+
+        service._pipeline_signatures = {
+            "PP-StructureV3": tuple(
+                sorted(
+                    PP_STRUCTURE_V3_SPEC.constructor_kwargs(
+                        PP_STRUCTURE_V3_SPEC.options_class()
+                    ).items()
+                )
+            )
+        }
 
         result = service.get_pipeline(OCRPipeline.PP_STRUCTURE_V3)
         assert result is mock_pipeline
@@ -778,7 +923,7 @@ class TestRecognizeBatch:
 
         dispatch_count = 0
 
-        def recognize_batch(svc, _images, _options):
+        def recognize_batch(svc, _images, _options, *, asset_sinks=None):
             nonlocal dispatch_count
             dispatch_count += 1
             svc.get_or_create_pipeline("OCR")
@@ -861,6 +1006,7 @@ class TestRecognizeBatch:
 
         service = OCRService()
         service._pipelines = {"OCR": FailingPipeline()}
+        service._pipeline_signatures = {"OCR": ()}
 
         with pytest.raises(RuntimeError, match="generator decode failed"):
             service.recognize_batch(
@@ -882,6 +1028,16 @@ class TestRecognizeBatch:
 
         service = OCRService()
         service._pipelines = {"PP-StructureV3": FailingPipeline()}
+        from vibeocr.runtime.recognition.core.pipelines import (
+            PP_STRUCTURE_V3_SPEC,
+        )
+
+        request_options = OCROptions(pipeline=OCRPipeline.PP_STRUCTURE_V3)
+        service._pipeline_signatures = {
+            "PP-StructureV3": tuple(
+                sorted(PP_STRUCTURE_V3_SPEC.constructor_kwargs(request_options).items())
+            )
+        }
 
         with pytest.raises(RuntimeError, match="structure generator failed"):
             service.recognize_batch(
@@ -900,7 +1056,7 @@ class TestRecognizeBatch:
         mock_spec = MagicMock()
         mock_spec.create_pipeline.side_effect = [MagicMock(), MagicMock()]
 
-        def recognize_batch(svc, _images, _options):
+        def recognize_batch(svc, _images, _options, *, asset_sinks=None):
             svc.get_or_create_pipeline("OCR")
             raise _known_onednn_pir_error()
 

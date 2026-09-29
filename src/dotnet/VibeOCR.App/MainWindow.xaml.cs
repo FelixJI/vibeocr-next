@@ -66,6 +66,7 @@ public sealed partial class MainWindow : Window
   private readonly Func<int>? smokeInstallAttempts;
   private bool screenshotSmokeStarted;
   private bool managedEnvironmentSmokeStarted;
+  private bool paddleModesSmokeStarted;
   private bool initialized;
   private WorkbenchRoute currentRoute = WorkbenchRoute.Recognition;
 
@@ -127,7 +128,8 @@ public sealed partial class MainWindow : Window
       () => WindowNative.GetWindowHandle(this),
       annotationStore,
       inferenceAttached: inferenceAttached,
-      shellActions: shellActions);
+      shellActions: shellActions,
+      optionsLayout: layout);
     application = new WorkbenchApplication(
       DesktopWorkbenchCommandHandler.Capabilities,
       WorkbenchRoute.Recognition,
@@ -371,6 +373,12 @@ public sealed partial class MainWindow : Window
       {
         managedEnvironmentSmokeStarted = true;
         _ = CompleteManagedEnvironmentE2eSmokeAsync();
+      }
+      if (!paddleModesSmokeStarted &&
+          Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "paddle-modes-e2e")
+      {
+        paddleModesSmokeStarted = true;
+        _ = CompletePaddleModesSmokeAsync();
       }
     }
     AppLog.Info($"Web workbench: {state}");

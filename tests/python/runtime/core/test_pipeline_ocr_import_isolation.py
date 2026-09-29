@@ -50,19 +50,22 @@ def test_create_ocr_pipeline_delegates_model_discovery_to_paddle(
 
 
 @pytest.mark.parametrize(
-    ("factory", "consumer", "constructor_name", "binding_key"),
+    ("factory", "consumer", "constructor_name", "binding_key", "fixed_kwargs"),
     [
         (
             _create_pp_structure_pipeline,
             "pp_structure",
             "PPStructureV3",
             "layout_detection_model_dir",
+            {},
         ),
         (
             _create_paddlocr_vl_pipeline,
             "paddleocr_vl",
             "PaddleOCRVL",
             "vl_rec_model_dir",
+            # 语义固定 VL-1.5：不跟随上游新默认（锁定版本默认 v1.6）
+            {"pipeline_version": "v1.5"},
         ),
     ],
 )
@@ -73,6 +76,7 @@ def test_document_pipeline_factories_delegate_model_discovery_to_paddle(
     consumer: str,
     constructor_name: str,
     binding_key: str,
+    fixed_kwargs: dict,
 ) -> None:
     model_dir = tmp_path / consumer
     model_dir.mkdir()
@@ -97,4 +101,4 @@ def test_document_pipeline_factories_delegate_model_discovery_to_paddle(
     assert callable(factory)
     factory("cpu")
 
-    assert captured == {"device": "cpu"}
+    assert captured == {"device": "cpu", **fixed_kwargs}

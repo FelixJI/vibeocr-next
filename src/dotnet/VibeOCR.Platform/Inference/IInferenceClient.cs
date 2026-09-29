@@ -85,6 +85,11 @@ public interface IInferenceClient : IAsyncDisposable
     /// <summary>Export OCR result to a file (txt/markdown/html) via the supervisor.</summary>
     Task<ExportResult> ExportAsync(ExportRequest request, CancellationToken cancellationToken);
 
+    /// <summary>Fetch an authorized, job-bound PNG result asset.</summary>
+    Task<byte[]> FetchResultAssetAsync(
+        string jobId, string itemId, string assetId, CancellationToken cancellationToken) =>
+        Task.FromException<byte[]>(new NotSupportedException("Result assets are unavailable."));
+
     // PDF session operations (v2 — proxied through supervisor)
     Task<PdfSessionOpenResult> OpenPdfSessionAsync(string path, string? password, CancellationToken ct);
     Task<byte[]> RenderPdfPageAsync(string sessionId, int page, int size, CancellationToken ct);
@@ -114,7 +119,9 @@ public sealed record JobCommandResult(
 /// <summary>Export request mirroring the v2 /v2/export endpoint.</summary>
 public sealed record ExportRequest(
     string RawText, string MarkdownText, string HtmlText,
-    string OutputPath, string Format, bool Overwrite);
+    string OutputPath, string Format, bool Overwrite,
+    IReadOnlyList<System.Text.Json.JsonElement>? ContentBlocks = null);
 
 /// <summary>Export result from the v2 supervisor.</summary>
-public sealed record ExportResult(string OutputPath, long BytesWritten);
+public sealed record ExportResult(
+    string OutputPath, long BytesWritten, bool Incomplete = false, int ImagesMissing = 0);

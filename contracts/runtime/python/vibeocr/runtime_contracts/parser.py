@@ -16,13 +16,17 @@ shape we actually put on the wire.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from vibeocr.runtime.recognition.pipeline_contracts import (
     OCRPipeline,
+    PipelineOptionKind,
+    get_pipeline_option_specs,
     get_pipeline_supported_options,
 )
 
@@ -246,6 +250,89 @@ def _parse_mineru_config(payload: Any) -> MineruConfig:
     )
 
 
+def _validate_option_value(pipeline: OCRPipeline, name: str, value: Any) -> None:
+    """严格校验单个 pipeline option 的类型/范围。
+
+    wire v1 冻结：布尔不接受 0/1；整数不接受 bool；枚举限定锁定版本内
+    实际存在的取值；``formula_recognition_model_dir`` 只接受宿主授权模型根
+    （``PADDLE_PDX_CACHE_HOME``）内的绝对路径，其余一律拒绝，防止网页任意
+    路径注入。详细边界见 :mod:`vibeocr.runtime.recognition.pipeline_contracts`。
+    """
+
+    spec = get_pipeline_option_specs(pipeline).get(name)
+    if spec is None:  # pragma: no cover - supported_options 全部有 spec
+        raise ContractError(f"unsupported option(s) for {pipeline.value}: {name}")
+    if value is None:
+        if not spec.nullable:
+            raise ContractError(
+                f"pipeline option {name} must not be null for {pipeline.value}"
+            )
+        return
+    if spec.kind is PipelineOptionKind.BOOL:
+        if not isinstance(value, bool):
+            raise ContractError(
+                f"pipeline option {name} must be a boolean, got {value!r}"
+            )
+        return
+    if spec.kind is PipelineOptionKind.INT:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ContractError(
+                f"pipeline option {name} must be an integer, got {value!r}"
+            )
+        if (spec.minimum is not None and value < spec.minimum) or (
+            spec.maximum is not None and value > spec.maximum
+        ):
+            raise ContractError(
+                f"pipeline option {name} must be within "
+                f"[{spec.minimum}, {spec.maximum}], got {value!r}"
+            )
+        return
+    if spec.kind is PipelineOptionKind.ENUM:
+        if not isinstance(value, str) or value not in spec.choices:
+            raise ContractError(
+                f"pipeline option {name} must be one of "
+                f"{list(spec.choices)}, got {value!r}"
+            )
+        return
+    if spec.kind is PipelineOptionKind.STR_LIST:
+        if not isinstance(value, list) or any(
+            not isinstance(item, str) or not item for item in value
+        ):
+            raise ContractError(
+                f"pipeline option {name} must be a list of non-empty strings"
+            )
+        return
+    if spec.kind is PipelineOptionKind.PATH_IN_MODEL_ROOT:
+        if not isinstance(value, str) or not value:
+            raise ContractError(
+                f"pipeline option {name} must be a non-empty path string"
+            )
+        model_root = os.environ.get("PADDLE_PDX_CACHE_HOME", "")
+        if not model_root:
+            raise ContractError(
+                f"pipeline option {name} requires the host-authorized model "
+                "root (PADDLE_PDX_CACHE_HOME); arbitrary model paths are "
+                "not accepted"
+            )
+        try:
+            resolved = Path(value).resolve()
+            root = Path(model_root).resolve()
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            raise ContractError(
+                f"pipeline option {name} must stay inside the authorized "
+                f"model root {model_root}"
+            ) from None
+        if not resolved.is_dir():
+            raise ContractError(
+                f"pipeline option {name} is not an existing model directory"
+            )
+        return
+    raise ContractError(  # pragma: no cover - kind 枚举封闭
+        f"pipeline option {name} has an unsupported value kind"
+    )
+
+
 def parse_pipeline_selection(payload: dict[str, Any]) -> PipelineSelection:
     if not isinstance(payload, dict):
         raise ContractError("pipeline selection must be a JSON object")
@@ -276,6 +363,8 @@ def parse_pipeline_selection(payload: dict[str, Any]) -> PipelineSelection:
         raise ContractError(
             f"unsupported option(s) for {pipeline.value}: {', '.join(unknown_options)}"
         )
+    for name, value in sorted(options.items()):
+        _validate_option_value(pipeline, name, value)
     if "mineru" in payload and "engine" in payload:
         raise ContractError(
             "mineru config cannot be combined with the engine field; "

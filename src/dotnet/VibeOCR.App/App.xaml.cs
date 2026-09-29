@@ -243,7 +243,9 @@ public sealed partial class App : Application
             _inferenceGateway,
             new InputService(
               () => WinRT.Interop.WindowNative.GetWindowHandle(_window!),
-              _screenshotSmokePicker)),
+              Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "paddle-modes-e2e"
+                ? new MainWindow.SyntheticFixtureRegionPicker()
+                : _screenshotSmokePicker)),
           () => new BatchViewModel(
             _inferenceGateway,
             new BatchFileSource(() => WinRT.Interop.WindowNative.GetWindowHandle(_window!))),

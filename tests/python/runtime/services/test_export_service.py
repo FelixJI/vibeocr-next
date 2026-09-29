@@ -382,3 +382,52 @@ class TestUniqueOutputPath:
         (tmp_path / "report_2.md").write_text("b")
         result = ExportService.get_unique_output_path(tmp_path / "report.md")
         assert result == tmp_path / "report_1.md"
+
+
+# --- XLSX 公式注入防护 ---
+
+
+class TestXlsxFormulaInjection:
+    """OCR 文本是不可信输入：'=...' 不得作为可执行公式写入单元格。"""
+
+    def test_table_cell_formula_like_text_stays_string(self, tmp_path):
+        """回归：openpyxl 对 '=' 开头字符串默认按公式存储（旧实现会失败）。"""
+        content_list = [
+            {
+                "type": "table",
+                "table_body": (
+                    '<tr><td>=SUM(A1:A2)</td><td>=HYPERLINK("http://evil")</td></tr>'
+                    "<tr><td>=1+1</td><td>普通值</td></tr>"
+                ),
+            },
+        ]
+        result = _make_ocr_result(content_list=content_list)
+        out = tmp_path / "inject.xlsx"
+        assert ExportService.export(result, out, "xlsx")
+
+        from openpyxl import load_workbook
+
+        wb = load_workbook(str(out))
+        ws = wb["表格 1"]
+        for row, col in ((1, 1), (1, 2), (2, 1)):
+            cell = ws.cell(row, col)
+            assert cell.data_type == "s", (
+                f"({row},{col}) 应为字符串，实际 {cell.data_type}"
+            )
+            assert isinstance(cell.value, str)
+        assert ws.cell(1, 1).value == "=SUM(A1:A2)"
+        assert ws.cell(2, 2).value == "普通值"
+
+    def test_text_summary_formula_like_line_stays_string(self, tmp_path):
+        result = _make_ocr_result(
+            content_list=[{"type": "text", "text": "=cmd|' /C calc'!A0"}]
+        )
+        out = tmp_path / "inject-text.xlsx"
+        assert ExportService.export(result, out, "xlsx")
+
+        from openpyxl import load_workbook
+
+        wb = load_workbook(str(out))
+        ws = wb.active
+        assert ws.cell(1, 1).data_type == "s"
+        assert ws.cell(1, 1).value == "=cmd|' /C calc'!A0"

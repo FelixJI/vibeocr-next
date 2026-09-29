@@ -222,10 +222,14 @@ def normalize_content_list(raw: list | None) -> list[dict]:
 
 @dataclass
 class TextBlock:
-    """单个文本块，含文本、置信度和位置信息"""
+    """单个文本块，含文本、置信度和位置信息。
+
+    ``score`` 为 None 表示上游未提供置信度（真实 unknown，例如公式/
+    表格结构块）：消费方不得把它当作 0% 或 100%，也不得伪造数值。
+    """
 
     text: str
-    score: float
+    score: float | None
     bbox: tuple[float, float, float, float] | None  # 归一化 [0, 1000] 坐标
     polygon: tuple[float, ...] | None = (
         None  # 4 点检测多边形 [x,y,...]，归一化 [0,1000]
@@ -246,9 +250,10 @@ class OCRResult:
         raw_text: 纯文本内容
         markdown_text: Markdown 格式内容（包含表格、公式等）
         html_text: HTML 格式内容（用于富文本显示）
-        text_with_scores: 文本块及置信度列表 [(文本, 置信度), ...]
-        avg_score: 平均置信度
-        low_confidence_items: 低置信度文本块列表 [(文本, 置信度), ...]
+        text_with_scores: 文本块及置信度列表 [(文本, 置信度|None), ...]；
+            None 表示上游无置信度（与 text_blocks 索引对齐）
+        avg_score: 平均置信度（仅统计已知置信度；无任何已知值时为 0.0）
+        low_confidence_items: 低置信度文本块列表（仅已知置信度 < 0.80）
         pipeline_type: 管道类型名称
         images: 图像字典（如 markdown_images）
     """
@@ -256,7 +261,7 @@ class OCRResult:
     raw_text: str = ""
     markdown_text: str = ""
     html_text: str = ""
-    text_with_scores: list[tuple[str, float]] = field(default_factory=list)
+    text_with_scores: list[tuple[str, float | None]] = field(default_factory=list)
     avg_score: float = 0.0
     low_confidence_items: list[tuple[str, float]] = field(default_factory=list)
     pipeline_type: str = "OCR"

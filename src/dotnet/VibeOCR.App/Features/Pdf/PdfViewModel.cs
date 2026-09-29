@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using VibeOCR.App.Inference;
+using VibeOCR.App.Features.Recognition;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
@@ -22,6 +23,8 @@ public sealed class PdfViewModel(
     private int _pageCount;
     private int _selectedPage = -1;
     private RecognitionModeOption? _recognitionMode;
+    private string? _taskModeId;
+    private IReadOnlyDictionary<string, System.Text.Json.JsonElement>? _options;
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public ObservableCollection<PdfPageViewModel> Pages { get; } = [];
@@ -33,7 +36,20 @@ public sealed class PdfViewModel(
     public int SelectedPage { get => _selectedPage; set => SetField(ref _selectedPage, value); }
     public bool HasSession => _sessionId is not null;
 
-    public void SetRecognitionMode(RecognitionModeOption? mode) => _recognitionMode = mode;
+    /// <summary>
+    /// 绑定 PDF OCR 的任务级识别模式；taskModeId 是用户显式选择的模式 id。
+    /// 非空而 mode 为 null（目录缺失/环境切换）时 StartOcrAsync 必须拒绝，
+    /// 不静默回退通用文字 OCR——PDF 与单次/批量共享同一模式合同。
+    /// </summary>
+    public void SetRecognitionMode(
+        RecognitionModeOption? mode,
+        PaddleModeOptions? options = null,
+        string? taskModeId = null)
+    {
+        _options = mode is null ? null : options?.ProjectWire(mode);
+        _recognitionMode = mode;
+        _taskModeId = taskModeId;
+    }
 
     public async Task OpenAsync(CancellationToken ct) { string? path = await files.PickFileAsync(ct); if (path is null) { Status = "已取消选择"; return; } await OpenPathAsync(path, ct); }
 
@@ -77,6 +93,11 @@ public sealed class PdfViewModel(
         catch { return null; }
     }
 
+    /// <summary>授权取回某页识别结果的图片资产（与单次/批量同一接缝）。</summary>
+    public Task<byte[]> FetchResultAssetAsync(
+        string jobId, string itemId, string assetId, CancellationToken ct) =>
+        inference.FetchResultAssetAsync(jobId, itemId, assetId, ct);
+
     public async Task RotateAsync(int[] pages, int angle, CancellationToken ct)
     {
         if (SessionId is null || pages.Length == 0) { Status = "请先选中要旋转的页面"; return; }
@@ -92,6 +113,14 @@ public sealed class PdfViewModel(
     public async Task StartOcrAsync(int[] pages, bool overwrite, CancellationToken ct)
     {
         if (SessionId is null || pages.Length == 0) { Status = "请先打开 PDF"; return; }
+        if (_taskModeId is not null && _recognitionMode is null)
+        {
+            throw new RecognitionModeUnavailableException(
+                $"PDF 识别模式 {_taskModeId} 在当前环境不可用，已拒绝按通用文字识别执行；请在设置中检查运行环境后重试。");
+        }
+        string pipeline = _recognitionMode?.PipelineId ?? "OCR";
+        OcrEngine? engine = _recognitionMode?.Engine;
+        IReadOnlyDictionary<string, System.Text.Json.JsonElement>? options = _options;
         CancelActiveRun();
         long generation = Volatile.Read(ref _generation);
         var run = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -120,13 +149,11 @@ public sealed class PdfViewModel(
                     image);
             }
 
-            string pipeline = _recognitionMode?.PipelineId ?? "OCR";
-            OcrEngine? engine = _recognitionMode?.Engine;
             InferenceJobRun job = await _jobs.RunRecognitionAsync(
                 pipeline,
                 JobPriority.Background,
                 inputs,
-                options: null,
+                options: options,
                 cancellationToken: run.Token,
                 engine: engine);
             JobSnapshot snap = job.Snapshot;
@@ -140,7 +167,9 @@ public sealed class PdfViewModel(
                 ItemOutcome outcome = job.OutcomesByClientItemKey[$"page-{idx}"];
                 if (outcome.State is ItemState.Succeeded)
                 {
-                    Pages[idx].OcrText = RecognitionOutcomeMapper.ToResponse(outcome, pipeline).Text;
+                    RecognizeResponse result = RecognitionOutcomeMapper.ToResponse(outcome, pipeline);
+                    Pages[idx].Result = result;
+                    Pages[idx].OcrText = result.Text;
                     Pages[idx].State = PdfPageState.Done;
                     s++;
                 }
@@ -214,6 +243,7 @@ public sealed class PdfPageViewModel : INotifyPropertyChanged
     private string _ocrText = string.Empty;
     public event PropertyChangedEventHandler? PropertyChanged;
     public int Index { get; init; }
+    public RecognizeResponse? Result { get; internal set; }
     public PdfPageState State { get => _state; set { if (_state != value) { _state = value; PropertyChanged?.Invoke(this, new(nameof(State))); } } }
     public string OcrText { get => _ocrText; set { if (_ocrText != value) { _ocrText = value; PropertyChanged?.Invoke(this, new(nameof(OcrText))); } } }
 }

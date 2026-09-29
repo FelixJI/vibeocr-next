@@ -159,6 +159,23 @@
         }
       }
     },
+    "/v2/jobs/{job_id}/items/{item_id}/assets/{asset_id}": {
+      "get": {
+        "operationId": "getJobItemAsset",
+        "parameters": [
+          { "$ref": "#/components/parameters/JobId" },
+          { "name": "item_id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "asset_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/Png" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/v2/jobs/command": {
       "post": {
         "operationId": "commandJob",
@@ -2194,6 +2211,14 @@
             "minLength": 1
           },
           "bytes_written": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "incomplete": {
+            "type": "boolean",
+            "description": "至少一幅结构图像未能写入导出结果。"
+          },
+          "images_missing": {
             "type": "integer",
             "minimum": 0
           }
@@ -5589,7 +5614,7 @@
         }
       },
       "TextBlockMirror": {
-        "description": "单个 OCR 文本块(对应 models.ocr_result.TextBlock 的可序列化投影)。\n\nocr_text_blocks 在 PdfPageInfo 里是 list[TextBlock],跨进程序列化时\n只保留写入 PDF / 预览所需的字段。",
+        "description": "单个 OCR 文本块(对应 models.ocr_result.TextBlock 的可序列化投影)。\n\nocr_text_blocks 在 PdfPageInfo 里是 list[TextBlock],跨进程序列化时\n只保留写入 PDF / 预览所需的字段。上游无置信度时 score=0.0 且\nscore_unknown=true；权威 unknown 在 ocr.v1 结果的 text_blocks[].score=null。",
         "properties": {
           "text": {
             "title": "Text",
@@ -5598,6 +5623,12 @@
           "score": {
             "title": "Score",
             "type": "number"
+          },
+          "score_unknown": {
+            "default": false,
+            "description": "true 表示上游未提供置信度（score 的 0.0 只是 wire 兼容占位）。",
+            "title": "Score Unknown",
+            "type": "boolean"
           },
           "bbox": {
             "anyOf": [

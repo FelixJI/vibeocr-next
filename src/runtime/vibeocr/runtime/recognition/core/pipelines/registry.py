@@ -31,6 +31,11 @@ class PipelineSpec:
         recognize_batch: 批量识别的函数，签名
             (service, images: list, options) -> list[result]。
             None 表示该管道不支持批量识别（调用方需回退逐张）。
+        constructor_kwargs: 把 provider options 映射为底层管道构造器 kwargs
+            的函数，签名 (options | None) -> dict。返回值参与管道实例缓存签名：
+            构造参数变化时不会复用旧实例。None 表示该管道的公开选项全部
+            是 predict 参数（构造签名恒为空）。options 为 None 时必须返回
+            该管道默认选项对应的构造 kwargs（供 preload 复用同一实例）。
     """
 
     name: str
@@ -40,6 +45,7 @@ class PipelineSpec:
     create_pipeline: Callable[..., Any]
     recognize: Callable[..., Any]
     recognize_batch: Callable[..., Any] | None = None
+    constructor_kwargs: Callable[[Any], dict[str, Any]] | None = None
 
 
 class PipelineRegistry:

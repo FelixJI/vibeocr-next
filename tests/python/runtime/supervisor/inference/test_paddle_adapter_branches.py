@@ -42,7 +42,7 @@ class _FakeService:
         self._preload_results = preload_results if preload_results is not None else {}
         self._preload_raises = preload_raises
 
-    def recognize_batch(self, images, options=None):  # type: ignore[no-untyped-def]
+    def recognize_batch(self, images, options=None, *, asset_sinks=None):  # type: ignore[no-untyped-def]
         self.calls.append(len(images))
         return [{"text": "ok"} for _ in images]
 

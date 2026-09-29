@@ -1,4 +1,5 @@
 using VibeOCR.Platform.Windows;
+using VibeOCR.App.Features.Recognition;
 
 namespace VibeOCR.App.Workbench;
 
@@ -89,6 +90,18 @@ public sealed record CancelRecognitionCommand : WorkbenchCommand;
 
 public sealed record CopyRecognitionResultCommand(string Format) : WorkbenchCommand;
 
+/// <summary>
+/// Copy one block of a host-published structured result resource through the
+/// native clipboard. The web side only passes the opaque resource URI it was
+/// given plus the block index and the desired representation ("table" writes
+/// HTML+TSV, "latex" writes the raw formula text); the host re-reads the
+/// authoritative file and builds the payload itself.
+/// </summary>
+public sealed record CopyStructuredResultCommand(
+  string ResourceUri,
+  int BlockIndex,
+  string Format) : WorkbenchCommand;
+
 public sealed record ExportRecognitionResultCommand(string Format) : WorkbenchCommand;
 
 public sealed record CopyAnnotatedImageCommand(string ResourceUri) : WorkbenchCommand;
@@ -115,6 +128,13 @@ public sealed record RemoveBatchItemCommand(Guid ItemId) : WorkbenchCommand;
 public sealed record SetBatchWindowCommand(int Start) : WorkbenchCommand;
 
 public sealed record SetBatchTaskEngineCommand(string? Engine) : WorkbenchCommand;
+
+/// <summary>
+/// Set the task-level recognition mode for the PDF workbench; null clears the
+/// override. PDF page OCR shares the same mode/options contract as the
+/// recognition and batch pages.
+/// </summary>
+public sealed record SetPdfTaskEngineCommand(string? Engine) : WorkbenchCommand;
 
 public sealed record OpenPdfCommand : WorkbenchCommand;
 
@@ -234,6 +254,7 @@ public sealed record PrepareMineruConnectionCommand : WorkbenchCommand;
 /// the override and delegates to the Runtime default.
 /// </summary>
 public sealed record SetTaskEngineCommand(string? Engine) : WorkbenchCommand;
+public sealed record SetRecognitionOptionsCommand(string ModeId, PaddleModeOptions Options) : WorkbenchCommand;
 
 /// <summary>Start ensure with the staged explicit component/source intent.</summary>
 public sealed record InstallRuntimeCommand : WorkbenchCommand;
@@ -280,7 +301,8 @@ public sealed record RecognitionWorkbenchState(
   WorkbenchResourceReference? Result = null,
   IReadOnlyList<RecognitionEngineChoice>? Engines = null,
   string? TaskEngine = null,
-  RecognitionScreenshotSessionState? ScreenshotSession = null) : WorkbenchState
+  RecognitionScreenshotSessionState? ScreenshotSession = null,
+  WorkbenchResourceReference? StructuredResult = null) : WorkbenchState
 {
   public override string Scope => "recognition";
 }
@@ -310,7 +332,11 @@ public sealed record RecognitionEngineChoice(
   bool SupportsPreload = false,
   bool SupportsTtl = false,
   bool SupportsPinning = false,
-  bool SupportsRelease = false);
+  bool SupportsRelease = false,
+  string? Family = null,
+  IReadOnlyList<string>? SupportedOptions = null,
+  IReadOnlyDictionary<string, System.Text.Json.JsonElement>? Options = null,
+  string? ReasonCode = null);
 
 public sealed record BatchWorkbenchState(
   bool IsRunning,
@@ -320,7 +346,8 @@ public sealed record BatchWorkbenchState(
   IReadOnlyList<BatchWorkbenchItem>? Items = null,
   int WindowStart = 0,
   IReadOnlyList<RecognitionEngineChoice>? Engines = null,
-  string? TaskEngine = null) : WorkbenchState
+  string? TaskEngine = null,
+  bool ExportIncomplete = false) : WorkbenchState
 {
   public override string Scope => "batch";
 }
@@ -329,7 +356,8 @@ public sealed record BatchWorkbenchItem(
   Guid Id,
   string Name,
   string StatusCode,
-  string? ResultSummary);
+  string? ResultSummary,
+  WorkbenchResourceReference? StructuredResult = null);
 
 public sealed record PdfWorkbenchState(
   bool IsBusy,
@@ -338,7 +366,9 @@ public sealed record PdfWorkbenchState(
   int SelectedPage,
   IReadOnlyList<int>? SelectedPages = null,
   IReadOnlyList<PdfWorkbenchPage>? Pages = null,
-  int WindowStart = 0) : WorkbenchState
+  int WindowStart = 0,
+  IReadOnlyList<RecognitionEngineChoice>? Engines = null,
+  string? TaskEngine = null) : WorkbenchState
 {
   public override string Scope => "pdf";
 }
@@ -346,7 +376,8 @@ public sealed record PdfWorkbenchState(
 public sealed record PdfWorkbenchPage(
   int Index,
   string StatusCode,
-  WorkbenchResourceReference? Thumbnail);
+  WorkbenchResourceReference? Thumbnail,
+  WorkbenchResourceReference? StructuredResult = null);
 
 public sealed record QrCodeWorkbenchState(
   bool IsBusy,

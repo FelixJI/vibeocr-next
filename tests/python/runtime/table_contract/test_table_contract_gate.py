@@ -42,7 +42,9 @@ class _FixtureService:
     def __init__(self, responses: list[object]) -> None:
         self._pipeline = _FixturePipeline(responses)
 
-    def get_or_create_pipeline(self, _name: str) -> _FixturePipeline:
+    def get_or_create_pipeline(
+        self, _name: str, options: object = None
+    ) -> _FixturePipeline:
         return self._pipeline
 
 

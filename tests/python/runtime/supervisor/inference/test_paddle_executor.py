@@ -27,7 +27,7 @@ class _FakeService:
         self._fail = fail
 
     def recognize_batch(
-        self, images: list[Any], options: Any | None = None
+        self, images: list[Any], options: Any | None = None, *, asset_sinks=None
     ) -> list[dict[str, Any]]:
         if self._fail:
             raise RuntimeError("OOM during predict")

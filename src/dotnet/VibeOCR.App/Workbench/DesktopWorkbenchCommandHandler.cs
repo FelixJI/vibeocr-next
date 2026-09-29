@@ -1,5 +1,7 @@
 using System.ComponentModel;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using VibeOCR.App.Features.Batch;
 using VibeOCR.App.Features.FloatingToolbar;
 using VibeOCR.App.Features.Pdf;
@@ -13,6 +15,7 @@ using VibeOCR.App.Services;
 using VibeOCR.App.Web;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
+using VibeOCR.Platform.Inference;
 using Windows.Storage;
 using Windows.Storage.Pickers;
 using Windows.System;
@@ -54,6 +57,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       "settings.selection",
       "runtime.maintenance",
       "recognition.engine",
+      "recognition.options",
       "update.check",
       "update.install",
       "diagnostics.export",
@@ -70,6 +74,8 @@ public sealed class DesktopWorkbenchCommandHandler :
   private readonly VibeOCR.App.ViewModels.DiagnosticsViewModel diagnostics;
   private readonly WorkbenchResourceBroker resourceBroker;
   private readonly string resourceRoot;
+  private readonly PortableLayout? optionsLayout;
+  private readonly Dictionary<string, PaddleModeOptions> modeOptions = new(StringComparer.Ordinal);
   private readonly Func<nint> windowHandle;
   private readonly WorkbenchAnnotationStore annotationStore;
   private readonly IAnnotatedImagePlatform annotatedImagePlatform;
@@ -79,15 +85,22 @@ public sealed class DesktopWorkbenchCommandHandler :
   private readonly HashSet<Task> backgroundOperations = [];
   private readonly HashSet<int> selectedPdfPages = [];
   private readonly Dictionary<int, WorkbenchResourceReference> pdfThumbnails = [];
+  private readonly Dictionary<string, string> structuredResourceFiles = new(StringComparer.Ordinal);
+  private readonly Dictionary<Guid, (RecognizeResponse Result, WorkbenchResourceReference Reference)> batchStructured = [];
+  private readonly Dictionary<int, (RecognizeResponse Result, WorkbenchResourceReference Reference)> pdfStructured = [];
+  private readonly IStructuredClipboardPlatform structuredClipboard;
   private RecognitionViewModel? recognition;
   private ResultActions? resultActions;
   private Guid? screenshotSessionId;
   private long screenshotSessionRevision;
   private WorkbenchResourceReference? screenshotSessionInput;
   private WorkbenchResourceReference? screenshotSessionResult;
+  private WorkbenchResourceReference? screenshotSessionStructuredResult;
   private int captureInFlight;
   private BatchViewModel? batch;
   private string? batchTaskEngine;
+  private bool batchExportIncomplete;
+  private string? pdfTaskEngine;
   private QrCodeViewModel? qrCode;
   private PdfViewModel? pdf;
   private SettingsViewModel? settings;
@@ -117,7 +130,9 @@ public sealed class DesktopWorkbenchCommandHandler :
     WorkbenchAnnotationStore annotationStore,
     IAnnotatedImagePlatform? annotatedImagePlatform = null,
     Func<bool>? inferenceAttached = null,
-    ShellActionDispatcher? shellActions = null)
+    ShellActionDispatcher? shellActions = null,
+    PortableLayout? optionsLayout = null,
+    IStructuredClipboardPlatform? structuredClipboard = null)
   {
     this.recognitionFactory = recognitionFactory ??
       throw new ArgumentNullException(nameof(recognitionFactory));
@@ -145,8 +160,11 @@ public sealed class DesktopWorkbenchCommandHandler :
       throw new ArgumentNullException(nameof(annotationStore));
     this.annotatedImagePlatform = annotatedImagePlatform ??
       new AnnotatedImagePlatform(this.windowHandle);
+    this.structuredClipboard = structuredClipboard ??
+      new WindowsStructuredClipboardPlatform();
     this.inferenceAttached = inferenceAttached;
     this.shellActions = shellActions;
+    this.optionsLayout = optionsLayout;
   }
 
   public IReadOnlyList<WorkbenchState> InitialStates =>
@@ -218,6 +236,9 @@ public sealed class DesktopWorkbenchCommandHandler :
         CopyRecognitionResultCommand copy => await CopyRecognitionAsync(
           copy,
           cancellationToken),
+        CopyStructuredResultCommand copyStructured => await CopyStructuredResultAsync(
+          copyStructured,
+          cancellationToken),
         ExportRecognitionResultCommand export => await ExportRecognitionAsync(
           export,
           cancellationToken),
@@ -228,15 +249,18 @@ public sealed class DesktopWorkbenchCommandHandler :
           save,
           cancellationToken),
         AddBatchFilesCommand => await AddBatchFilesAsync(cancellationToken),
-        AddDroppedBatchFilesCommand dropped => AddDroppedBatchFiles(dropped),
+        AddDroppedBatchFilesCommand dropped => await AddDroppedBatchFilesAsync(
+          dropped,
+          cancellationToken),
         ExportBatchCommand export => await ExportBatchAsync(export, cancellationToken),
         StartBatchCommand => await StartBatchAsync(cancellationToken),
         CancelBatchCommand => CancelBatch(),
         ClearBatchCommand => ClearBatch(),
-        MoveBatchItemCommand move => MoveBatchItem(move),
-        RemoveBatchItemCommand remove => RemoveBatchItem(remove),
-        SetBatchWindowCommand window => SetBatchWindow(window),
+        MoveBatchItemCommand move => await MoveBatchItemAsync(move, cancellationToken),
+        RemoveBatchItemCommand remove => await RemoveBatchItemAsync(remove, cancellationToken),
+        SetBatchWindowCommand window => await SetBatchWindowAsync(window, cancellationToken),
         SetBatchTaskEngineCommand taskEngine => SetBatchTaskEngine(taskEngine),
+        SetPdfTaskEngineCommand pdfTaskEngine => SetPdfTaskEngine(pdfTaskEngine),
         OpenPdfCommand => await OpenPdfAsync(cancellationToken),
         OpenDroppedPdfCommand dropped => await OpenDroppedPdfAsync(
           dropped,
@@ -244,7 +268,7 @@ public sealed class DesktopWorkbenchCommandHandler :
         RotatePdfCommand rotate => await RotatePdfAsync(rotate, cancellationToken),
         ClosePdfCommand => ClosePdf(),
         DeletePdfPagesCommand => await DeletePdfPagesAsync(cancellationToken),
-        OcrPdfPagesCommand => StartPdfOcr(cancellationToken),
+        OcrPdfPagesCommand => await StartPdfOcr(cancellationToken),
         SavePdfCommand => await SavePdfAsync(cancellationToken),
         SelectPdfPagesCommand select => SelectPdfPages(select),
         SetPdfWindowCommand window => await SetPdfWindowAsync(
@@ -317,6 +341,7 @@ public sealed class DesktopWorkbenchCommandHandler :
         PrepareMineruConnectionCommand => await PrepareMineruConnectionAsync(
           cancellationToken),
         SetTaskEngineCommand taskEngine => SetTaskEngine(taskEngine),
+        SetRecognitionOptionsCommand options => SetRecognitionOptions(options),
         InstallRuntimeCommand => await InstallRuntimeAsync(cancellationToken),
         ConfirmRuntimeInstallCommand confirm => StartRuntimeInstall(confirm.PlanId, cancellationToken),
         CancelRuntimeMaintenanceCommand => CancelRuntimeMaintenance(),
@@ -336,7 +361,28 @@ public sealed class DesktopWorkbenchCommandHandler :
     {
       throw;
     }
-    catch (AnnotatedImageOperationCancelledException)
+    catch (RecognitionModeUnavailableException error)
+    {
+      // 严格模式合同：显式选择的模式在当前环境不可用时，提交可恢复地失败
+      // 并指向环境；不静默回退通用文字识别。
+      AppLog.Warn($"Recognition mode override refused: {error.Message}");
+      return new WorkbenchCommandOutcome([], new WorkbenchProblem(
+        "recognition_mode_unavailable", WorkbenchProblemCategory.Unavailable, true,
+        "workbench.error.recognitionModeUnavailable"));
+    }
+    catch (RuntimeSelectionException error)
+    {
+      AppLog.Warn($"Recognition mode selection refused: {error.Message}");
+      return new WorkbenchCommandOutcome([], new WorkbenchProblem(
+        "recognition_mode_unavailable", WorkbenchProblemCategory.Unavailable, true,
+        "workbench.error.recognitionModeUnavailable"));
+    }
+    catch (ArgumentException) when (command is SetRecognitionOptionsCommand)
+    {
+      return new WorkbenchCommandOutcome([], new WorkbenchProblem(
+        "recognition_options_invalid", WorkbenchProblemCategory.InvalidCommand, false,
+        "workbench.error.invalidCommand"));
+    }    catch (AnnotatedImageOperationCancelledException)
     {
       return new WorkbenchCommandOutcome(
         [],
@@ -368,7 +414,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     }
     catch (Exception error) when (
       error is IOException or UnauthorizedAccessException or InvalidOperationException or
-        ClipboardBusyException or WorkbenchAnnotationAccessException or RuntimeInstallerException)
+        ClipboardBusyException or WorkbenchAnnotationAccessException or WorkbenchResourceAccessException or RuntimeInstallerException)
     {
       return new WorkbenchCommandOutcome(
         [],
@@ -416,6 +462,19 @@ public sealed class DesktopWorkbenchCommandHandler :
       recognition is null ? "recognition.ready" : RecognitionStatusCode(recognition));
   }
 
+  /// <summary>
+  /// 严格模式合同的终态：显式选择的模式不可用时保留引擎目录、用户选择与
+  /// 截图会话基准，状态指向环境修复；不发布虚假成功或丢失选择。
+  /// </summary>
+  private RecognitionWorkbenchState ModeUnavailableRecognitionState() => new(
+    false,
+    "recognition.modeUnavailable",
+    screenshotSessionId is null ? null : screenshotSessionInput,
+    screenshotSessionId is null ? null : screenshotSessionResult,
+    RecognitionEngines(),
+    recognition?.TaskEngine,
+    CurrentScreenshotSession());
+
   /// <summary>当前截图会话的 wire 投影；无会话时为 null。</summary>
   private RecognitionScreenshotSessionState? CurrentScreenshotSession() =>
     screenshotSessionId is { } id
@@ -432,7 +491,8 @@ public sealed class DesktopWorkbenchCommandHandler :
       screenshotSessionResult,
       RecognitionEngines(),
       recognition?.TaskEngine,
-      CurrentScreenshotSession());
+      CurrentScreenshotSession(),
+      screenshotSessionResult is null ? null : screenshotSessionStructuredResult);
 
   private void ValidateScreenshotSession(Guid sessionId, long revision)
   {
@@ -685,6 +745,8 @@ public sealed class DesktopWorkbenchCommandHandler :
             "text/plain; charset=utf-8",
             ".txt",
             cancellationToken);
+        WorkbenchResourceReference? structured = await PublishStructuredResultAsync(
+          recognition, cancellationToken);
         // 结果资源发布期间编辑/换图/维护会推进 generation：丢弃迟到结果。
         if (generation != Volatile.Read(ref recognitionGeneration) ||
           screenshotSessionId != sessionId ||
@@ -693,6 +755,7 @@ public sealed class DesktopWorkbenchCommandHandler :
           return;
         }
         screenshotSessionResult = result;
+        screenshotSessionStructuredResult = structured;
         StateChanged?.Invoke(SessionRecognitionState(
           false,
           RecognitionStatusCode(recognition)));
@@ -711,6 +774,22 @@ public sealed class DesktopWorkbenchCommandHandler :
       if (generation == Volatile.Read(ref recognitionGeneration))
       {
         StateChanged?.Invoke(SessionRecognitionState(false, "recognition.cancelled"));
+      }
+    }
+    catch (RecognitionModeUnavailableException error)
+    {
+      AppLog.Warn($"Screenshot recognition mode refused: {error.Message}");
+      if (generation == Volatile.Read(ref recognitionGeneration))
+      {
+        StateChanged?.Invoke(ModeUnavailableRecognitionState());
+      }
+    }
+    catch (RuntimeSelectionException error)
+    {
+      AppLog.Warn($"Screenshot recognition selection refused: {error.Message}");
+      if (generation == Volatile.Read(ref recognitionGeneration))
+      {
+        StateChanged?.Invoke(ModeUnavailableRecognitionState());
       }
     }
     catch (Exception error)
@@ -786,7 +865,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     bool isBusy,
     string statusCode,
     WorkbenchResourceReference? input = null,
-    WorkbenchResourceReference? result = null)
+    WorkbenchResourceReference? result = null,
+    WorkbenchResourceReference? structured = null)
   {
     SynchronizeRecognitionMode();
     return new(
@@ -796,7 +876,8 @@ public sealed class DesktopWorkbenchCommandHandler :
       result,
       RecognitionEngines(),
       recognition?.TaskEngine,
-      CurrentScreenshotSession());
+      CurrentScreenshotSession(),
+      structured);
   }
 
   /// <summary>
@@ -819,7 +900,7 @@ public sealed class DesktopWorkbenchCommandHandler :
         TryProjectMineruConfig(selection, mode.Id, out _) ? mode.Availability : "unavailable",
         mode.Availability == "preparation_required" && mode.RequiredComponent is not null,
         mode.LifecycleKind,
-        mode.SupportsPreload, mode.SupportsTtl, mode.SupportsPinning, mode.SupportsRelease))];
+        mode.SupportsPreload, mode.SupportsTtl, mode.SupportsPinning, mode.SupportsRelease, mode.Family, mode.SupportedOptions, GetModeOptions(mode)?.ProjectWire(mode), mode.ReasonCode))];
     }
     bool isOverride = recognition.TaskEngine is not null;
     return [.. selection.EngineOptions.Select(option => new RecognitionEngineChoice(
@@ -882,6 +963,23 @@ public sealed class DesktopWorkbenchCommandHandler :
           "recognition.cancelled"));
       }
     }
+    catch (RecognitionModeUnavailableException error)
+    {
+      // 严格模式合同：模式不可用时保留引擎目录与用户选择，指向环境修复。
+      AppLog.Warn($"Recognition mode override refused: {error.Message}");
+      if (generation == Volatile.Read(ref recognitionGeneration))
+      {
+        StateChanged?.Invoke(ModeUnavailableRecognitionState());
+      }
+    }
+    catch (RuntimeSelectionException error)
+    {
+      AppLog.Warn($"Recognition mode selection refused: {error.Message}");
+      if (generation == Volatile.Read(ref recognitionGeneration))
+      {
+        StateChanged?.Invoke(ModeUnavailableRecognitionState());
+      }
+    }
     catch (Exception error)
     {
       AppLog.Error("Recognition workbench operation failed", error);
@@ -925,6 +1023,8 @@ public sealed class DesktopWorkbenchCommandHandler :
         "text/plain; charset=utf-8",
         ".txt",
         cancellationToken);
+    WorkbenchResourceReference? structured = await PublishStructuredResultAsync(
+      recognition, cancellationToken);
     if (recognition.Result is not null)
     {
       resultActions = recognition.CreateResultActions(
@@ -934,7 +1034,8 @@ public sealed class DesktopWorkbenchCommandHandler :
       recognition.IsBusy,
       RecognitionStatusCode(recognition),
       input,
-      result);
+      result,
+      structured);
   }
 
   private RecognitionWorkbenchState CancelRecognition()
@@ -973,6 +1074,65 @@ public sealed class DesktopWorkbenchCommandHandler :
     return await CurrentRecognitionStateAsync("recognition.copied", cancellationToken);
   }
 
+  /// <summary>
+  /// 结构化区块的原生剪贴板复制：Web 只提交宿主发布过的 opaque 资源 URI、
+  /// 区块序号与格式；宿主重读权威文件构建 TSV/HTML/LaTeX 负载并经平台
+  /// 剪贴板写入（含 busy 重试）。未知资源/越界序号/类型不符一律拒绝，
+  /// 不把任意网页文本写入系统剪贴板。
+  /// </summary>
+  private async Task<RecognitionWorkbenchState?> CopyStructuredResultAsync(
+    CopyStructuredResultCommand command,
+    CancellationToken cancellationToken)
+  {
+    if (!structuredResourceFiles.TryGetValue(command.ResourceUri, out string? path) ||
+      !File.Exists(path))
+    {
+      throw new InvalidOperationException(
+        "The structured result resource is no longer available.");
+    }
+    await using WorkbenchResourceResponse resource = await resourceBroker.OpenAsync(
+      new Uri(command.ResourceUri), cancellationToken);
+    JsonDocument document;
+    try
+    {
+      document = await JsonDocument.ParseAsync(resource.Content, cancellationToken: cancellationToken);
+    }
+    catch (Exception error) when (error is JsonException or ArgumentException)
+    {
+      throw new InvalidOperationException(
+        "The structured result resource is no longer readable.",
+        error);
+    }
+    using (document)
+    {
+      JsonElement root = document.RootElement;
+      if (root.ValueKind != JsonValueKind.Array ||
+        command.BlockIndex >= root.GetArrayLength())
+      {
+        throw new InvalidOperationException("The structured block is no longer available.");
+      }
+      JsonElement block = root[command.BlockIndex];
+      if (command.Format == "table")
+      {
+        if (!StructuredResultClipboard.TryBuildTable(block, out string? tsv, out string? html))
+        {
+          throw new InvalidOperationException("The structured block is not a valid table.");
+        }
+        await structuredClipboard.WriteTableAsync(tsv!, html!, cancellationToken);
+      }
+      else if (!StructuredResultClipboard.TryGetFormulaText(block, out string? latex) ||
+        string.IsNullOrWhiteSpace(latex))
+      {
+        throw new InvalidOperationException("The structured block is not a valid formula.");
+      }
+      else
+      {
+        await structuredClipboard.WriteTextAsync(latex!, cancellationToken);
+      }
+    }
+    return null;
+  }
+
   private async Task<RecognitionWorkbenchState> ExportRecognitionAsync(
     ExportRecognitionResultCommand command,
     CancellationToken cancellationToken)
@@ -987,8 +1147,10 @@ public sealed class DesktopWorkbenchCommandHandler :
       "xlsx" => ResultExportFormat.Xlsx,
       _ => ResultExportFormat.Text,
     };
-    await actions.ExportAsync(format, cancellationToken);
-    return await CurrentRecognitionStateAsync("recognition.exported", cancellationToken);
+    ExportResult? export = await actions.ExportAsync(format, cancellationToken);
+    return await CurrentRecognitionStateAsync(
+      export?.Incomplete is true ? "recognition.exportedIncomplete" : "recognition.exported",
+      cancellationToken);
   }
 
   private async Task<RecognitionWorkbenchState> CurrentRecognitionStateAsync(
@@ -1016,7 +1178,9 @@ public sealed class DesktopWorkbenchCommandHandler :
         "text/plain; charset=utf-8",
         ".txt",
         cancellationToken);
-    return new RecognitionWorkbenchState(false, statusCode, input, result);
+    WorkbenchResourceReference? structured = await PublishStructuredResultAsync(
+      viewModel, cancellationToken);
+    return RecognitionState(false, statusCode, input, result, structured);
   }
 
   private async Task<BatchWorkbenchState> AddBatchFilesAsync(
@@ -1024,15 +1188,16 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     batch ??= batchFactory();
     await batch.PickFilesAsync(cancellationToken);
-    return BatchState(batch);
+    return await BatchStateAsync(batch, cancellationToken);
   }
 
-  private BatchWorkbenchState AddDroppedBatchFiles(
-    AddDroppedBatchFilesCommand command)
+  private async Task<BatchWorkbenchState> AddDroppedBatchFilesAsync(
+    AddDroppedBatchFilesCommand command,
+    CancellationToken cancellationToken)
   {
     batch ??= batchFactory();
     batch.AddFiles(command.Paths);
-    return BatchState(batch);
+    return await BatchStateAsync(batch, cancellationToken);
   }
 
   private async Task<BatchWorkbenchState> ExportBatchAsync(
@@ -1049,9 +1214,11 @@ public sealed class DesktopWorkbenchCommandHandler :
     StorageFolder? folder = await picker.PickSingleFolderAsync();
     if (folder is not null)
     {
-      await batch.ExportAllAsync(folder.Path, command.Format, cancellationToken);
+      IReadOnlyList<ExportResult> exports = await batch.ExportAllAsync(
+        folder.Path, command.Format, cancellationToken);
+      batchExportIncomplete = exports.Any(result => result.Incomplete is true);
     }
-    return BatchState(batch);
+    return await BatchStateAsync(batch, cancellationToken);
   }
 
   private async Task<BatchWorkbenchState?> StartBatchAsync(
@@ -1077,7 +1244,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     try
     {
       await batch!.StartAsync(cancellationToken);
-      BatchWorkbenchState state = BatchState(batch);
+      BatchWorkbenchState state = await BatchStateAsync(batch, cancellationToken);
       if (generation == Volatile.Read(ref batchGeneration))
       {
         StateChanged?.Invoke(state);
@@ -1113,11 +1280,15 @@ public sealed class DesktopWorkbenchCommandHandler :
     batch ??= batchFactory();
     Interlocked.Increment(ref batchGeneration);
     batch.ResetTemporaryQueue();
+    batchExportIncomplete = false;
     batchWindowStart = 0;
+    batchStructured.Clear();
     return BatchState(batch);
   }
 
-  private BatchWorkbenchState MoveBatchItem(MoveBatchItemCommand command)
+  private async Task<BatchWorkbenchState> MoveBatchItemAsync(
+    MoveBatchItemCommand command,
+    CancellationToken cancellationToken)
   {
     batch ??= batchFactory();
     if (batch.IsRunning)
@@ -1125,21 +1296,26 @@ public sealed class DesktopWorkbenchCommandHandler :
       throw new InvalidOperationException("A running batch cannot be reordered.");
     }
     batch.Move(command.ItemId, command.Delta);
-    return BatchState(batch);
+    return await BatchStateAsync(batch, cancellationToken);
   }
 
-  private BatchWorkbenchState RemoveBatchItem(RemoveBatchItemCommand command)
+  private async Task<BatchWorkbenchState> RemoveBatchItemAsync(
+    RemoveBatchItemCommand command,
+    CancellationToken cancellationToken)
   {
     batch ??= batchFactory();
     batch.Remove(command.ItemId);
-    return BatchState(batch);
+    batchStructured.Remove(command.ItemId);
+    return await BatchStateAsync(batch, cancellationToken);
   }
 
-  private BatchWorkbenchState SetBatchWindow(SetBatchWindowCommand command)
+  private async Task<BatchWorkbenchState> SetBatchWindowAsync(
+    SetBatchWindowCommand command,
+    CancellationToken cancellationToken)
   {
     batch ??= batchFactory();
     batchWindowStart = ClampWindowStart(command.Start, batch.Items.Count, 40);
-    return BatchState(batch);
+    return await BatchStateAsync(batch, cancellationToken);
   }
 
   private BatchWorkbenchState SetBatchTaskEngine(SetBatchTaskEngineCommand command)
@@ -1165,17 +1341,60 @@ public sealed class DesktopWorkbenchCommandHandler :
     RuntimeSelectionService? selection = settings?.RecognitionSelection?.Catalog;
     if (batch is null || selection?.SupportsRecognitionModes is not true)
     {
-      batch?.SetRecognitionMode(null);
+      if (requireUsable) EnsureUsableModeOverrideOrThrow(selection, batchTaskEngine);
+      batch?.SetRecognitionMode(null, taskModeId: batchTaskEngine);
       return;
     }
     RecognitionModeOption? mode = batchTaskEngine is null ? null : requireUsable
       ? selection.SelectRecognitionMode(batchTaskEngine)
-      : selection.FindRecognitionMode(batchTaskEngine);
+      : TryFindRecognitionMode(selection, batchTaskEngine);
     MineruConfig? config = requireUsable
       ? selection.MineruConfigFor(mode?.Id)
       : TryProjectMineruConfig(selection, mode?.Id, out MineruConfig? projected)
         ? projected : null;
-    batch.SetRecognitionMode(mode, config);
+    batch.SetRecognitionMode(mode, config, GetModeOptions(mode), batchTaskEngine);
+  }
+
+  /// <summary>
+  /// PDF 页面 OCR 与单次/批量共享同一模式合同：切换目录/环境后重投影，
+  /// 提交前 requireUsable 严格协商；显式选择的模式在当前环境不可用时
+  /// 拒绝提交并指向环境，不静默回退通用文字识别。
+  /// </summary>
+  private void SynchronizePdfMode(bool requireUsable = false)
+  {
+    RuntimeSelectionService? selection = settings?.RecognitionSelection?.Catalog;
+    if (pdf is null || selection?.SupportsRecognitionModes is not true)
+    {
+      if (requireUsable) EnsureUsableModeOverrideOrThrow(selection, pdfTaskEngine);
+      pdf?.SetRecognitionMode(null, taskModeId: pdfTaskEngine);
+      return;
+    }
+    RecognitionModeOption? mode = pdfTaskEngine is null ? null : requireUsable
+      ? selection.SelectRecognitionMode(pdfTaskEngine)
+      : TryFindRecognitionMode(selection, pdfTaskEngine);
+    MineruConfig? config = requireUsable
+      ? selection.MineruConfigFor(mode?.Id)
+      : TryProjectMineruConfig(selection, mode?.Id, out MineruConfig? projected)
+        ? projected : null;
+    pdf.SetRecognitionMode(mode, GetModeOptions(mode), pdfTaskEngine);
+  }
+
+  private PdfWorkbenchState SetPdfTaskEngine(SetPdfTaskEngineCommand command)
+  {
+    pdf ??= pdfFactory();
+    if (pdf.IsBusy) throw new InvalidOperationException("A running PDF OCR cannot change recognition mode.");
+    RuntimeSelectionService? selection = settings?.RecognitionSelection?.Catalog;
+    if (command.Engine is not null)
+    {
+      if (selection?.SupportsRecognitionModes is not true)
+        throw new RuntimeSelectionException(RuntimeSelectionErrorKind.CapabilityMissing,
+          "The runtime does not provide recognition modes.");
+      RecognitionModeOption mode = selection.SelectRecognitionMode(command.Engine);
+      selection.MineruConfigFor(mode.Id);
+    }
+    pdfTaskEngine = command.Engine;
+    SynchronizePdfMode();
+    return PdfState(pdf);
   }
 
   private async Task<PdfWorkbenchState> OpenPdfAsync(CancellationToken cancellationToken)
@@ -1210,6 +1429,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     {
       await viewModel.RotateAsync(pages, command.Degrees, cancellationToken);
       pdfThumbnails.Clear();
+      pdfStructured.Clear();
     }
     return await PdfStateAsync(viewModel, cancellationToken);
   }
@@ -1251,9 +1471,14 @@ public sealed class DesktopWorkbenchCommandHandler :
     return PdfState(viewModel);
   }
 
-  private PdfWorkbenchState? StartPdfOcr(CancellationToken cancellationToken)
+  private async Task<PdfWorkbenchState?> StartPdfOcr(CancellationToken cancellationToken)
   {
     pdf ??= pdfFactory();
+    // 与单次/批量相同：提交前加载权威目录并严格协商可用模式；用户已显式
+    // 选择 Paddle 模式而目录/环境不可用时，这里会抛出可恢复的
+    // RecognitionModeUnavailableException，拒绝按默认 OCR 静默提交。
+    await EnsureSelectionLoadedAsync(cancellationToken);
+    SynchronizePdfMode(requireUsable: true);
     long generation = Interlocked.Increment(ref pdfGeneration);
     return PublishStartThenTrack(PdfState(pdf) with { IsBusy = true },
       () => CompletePdfOcrAsync(generation, cancellationToken));
@@ -1700,6 +1925,29 @@ public sealed class DesktopWorkbenchCommandHandler :
       IsTaskOverride = choice.Engine == batchTaskEngine,
     }).ToArray();
 
+  private PaddleModeOptions? GetModeOptions(RecognitionModeOption? mode)
+  {
+    if (mode?.Id.StartsWith("paddle_", StringComparison.Ordinal) is not true) return null;
+    if (!modeOptions.TryGetValue(mode.Id, out PaddleModeOptions? options))
+    {
+      options = optionsLayout is null ? new() : PaddleModeOptions.Load(optionsLayout, mode.Id);
+      modeOptions.Add(mode.Id, options);
+    }
+    return options;
+  }
+
+  private RecognitionWorkbenchState SetRecognitionOptions(SetRecognitionOptionsCommand command)
+  {
+    settings ??= CreateSettings();
+    RecognitionModeOption mode = settings.RecognitionSelection?.Catalog.FindRecognitionMode(command.ModeId)
+      ?? throw new InvalidOperationException("Recognition mode is absent from this environment.");
+    command.Options.ToWire(mode);
+    if (optionsLayout is not null) command.Options.Save(optionsLayout, mode.Id);
+    modeOptions[mode.Id] = command.Options;
+    SynchronizeRecognitionMode();
+    SynchronizeBatchMode();
+    return CurrentRecognitionState();
+  }
   private RecognitionWorkbenchState SetTaskEngine(SetTaskEngineCommand command)
   {
     recognition ??= recognitionFactory();
@@ -1729,6 +1977,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     RecognitionSelectionSnapshot? snapshot = settings?.RecognitionSelection;
     if (recognition is null || snapshot?.Catalog.SupportsRecognitionModes is not true)
     {
+      if (requireUsable) EnsureUsableModeOverrideOrThrow(snapshot?.Catalog, recognition?.TaskEngine);
       recognition?.SetRecognitionMode(null);
       return;
     }
@@ -1737,14 +1986,14 @@ public sealed class DesktopWorkbenchCommandHandler :
       ? null
       : requireUsable
         ? selection.SelectRecognitionMode(id)
-        : selection.FindRecognitionMode(id);
+        : TryFindRecognitionMode(selection, id);
     RecognitionModeOption? mode = Resolve(recognition.TaskEngine);
     // mineru_document 任务随目录默认 tier 携带类型化 MinerU 4 配置。
     MineruConfig? config = requireUsable
       ? selection.MineruConfigFor(mode?.Id)
       : TryProjectMineruConfig(selection, mode?.Id, out MineruConfig? projected)
         ? projected : null;
-    recognition.SetRecognitionMode(mode, config);
+    recognition.SetRecognitionMode(mode, config, GetModeOptions(mode));
   }
 
   private static bool TryProjectMineruConfig(
@@ -1762,6 +2011,40 @@ public sealed class DesktopWorkbenchCommandHandler :
       config = null;
       return false;
     }
+  }
+
+  private static RecognitionModeOption? TryFindRecognitionMode(
+    RuntimeSelectionService selection,
+    string modeId)
+  {
+    try
+    {
+      return selection.FindRecognitionMode(modeId);
+    }
+    catch (RuntimeSelectionException)
+    {
+      // 环境切换后旧选择可能不在新目录：状态投影不崩溃；提交路径由
+      // requireUsable 协商拒绝，不静默降级。
+      return null;
+    }
+  }
+
+  /// <summary>
+  /// 显式选择的识别模式（非 legacy 引擎 id）在模式目录缺失/不可用时拒绝
+  /// 提交：可恢复失败并指向环境，绝不静默回退通用文字识别。仅未选择
+  /// （Runtime 默认）或旧版引擎 id 的兼容路径允许默认管线提交。
+  /// </summary>
+  private static void EnsureUsableModeOverrideOrThrow(
+    RuntimeSelectionService? selection,
+    string? taskEngine)
+  {
+    if (string.IsNullOrWhiteSpace(taskEngine) || OcrEngineWire.Parse(taskEngine) is not null)
+    {
+      return;
+    }
+    throw new RecognitionModeUnavailableException(selection is null
+      ? $"任务识别模式 {taskEngine} 需要的识别模式目录尚未加载（运行环境可能未就绪），已拒绝按通用文字识别执行；请在设置中检查运行环境后重试。"
+      : $"当前运行环境不支持识别模式 {taskEngine}，已拒绝按通用文字识别执行；请切换或准备对应运行环境。");
   }
 
   /// <summary>
@@ -1983,7 +2266,85 @@ public sealed class DesktopWorkbenchCommandHandler :
     return DiagnosticsState();
   }
 
+  private Task<WorkbenchResourceReference?> PublishStructuredResultAsync(
+    RecognitionViewModel viewModel,
+    CancellationToken cancellationToken) =>
+    PublishStructuredResultAsync(
+      viewModel.Result?.ContentBlocks,
+      viewModel.FetchResultAssetAsync,
+      cancellationToken);
+
+  /// <summary>
+  /// 结构化结果与授权图片资产的唯一发布路径：单次/批量项/PDF 页共用，
+  /// 不复制三套。图片经 job/item/asset 授权取回后以 opaque 资源发布；
+  /// 最终 JSON 也注册进剪贴板复制的资源表，供 CopyStructuredResultAsync
+  /// 重读权威内容。
+  /// </summary>
+  private async Task<WorkbenchResourceReference?> PublishStructuredResultAsync(
+    System.Text.Json.JsonElement[]? blocks,
+    Func<string, string, string, CancellationToken, Task<byte[]>>? fetchAsset,
+    CancellationToken cancellationToken)
+  {
+    if (blocks is not { Length: > 0 } content) return null;
+    JsonArray json = [];
+    int imageCount = 0;
+    foreach (JsonElement block in content)
+    {
+      JsonNode? node = JsonNode.Parse(block.GetRawText());
+      if (node is not JsonObject item) continue;
+      if (item["image"] is JsonObject asset)
+      {
+        if (++imageCount > 32)
+        {
+          asset["available"] = false;
+          asset["reason"] = "本项图片数量超过 32 张预览上限";
+        }
+        else if (asset["available"]?.GetValue<bool>() is not false &&
+          fetchAsset is not null &&
+          asset["job_id"] is JsonValue job && job.TryGetValue<string>(out string? jobId) &&
+          asset["item_id"] is JsonValue sourceItem && sourceItem.TryGetValue<string>(out string? itemId) &&
+          asset["asset_id"] is JsonValue identity && identity.TryGetValue<string>(out string? assetId))
+        {
+          try
+          {
+            byte[] bytes = await fetchAsset(
+              jobId!, itemId!, assetId!, cancellationToken);
+            WorkbenchResourceReference reference = await PublishBytesAsync(
+              bytes, "image/png", ".png", cancellationToken);
+            asset["resource"] = JsonSerializer.SerializeToNode(new
+            {
+              url = reference.Url,
+              mediaType = reference.MediaType,
+              byteLength = reference.ByteLength,
+            });
+          }
+          catch (OperationCanceledException) { throw; }
+          catch (Exception error) when (error is IOException or
+            ArgumentException or NotSupportedException or InferenceClientException)
+          {
+            asset["available"] = false;
+            asset["reason"] = "结果图片已失效或无法读取";
+          }
+        }
+      }
+      json.Add(item);
+    }
+    (WorkbenchResourceReference structured, string structuredPath) =
+      await PublishFileAsync(
+        Encoding.UTF8.GetBytes(json.ToJsonString()),
+        "application/json; charset=utf-8", ".json", cancellationToken);
+    structuredResourceFiles[structured.Url] = structuredPath;
+    return structured;
+  }
+
   private async Task<WorkbenchResourceReference> PublishBytesAsync(
+    byte[] data,
+    string mediaType,
+    string extension,
+    CancellationToken cancellationToken) =>
+    (await PublishFileAsync(data, mediaType, extension, cancellationToken)).Reference;
+
+  private async Task<(WorkbenchResourceReference Reference, string Path)> PublishFileAsync(
     byte[] data,
     string mediaType,
     string extension,
@@ -1998,10 +2359,10 @@ public sealed class DesktopWorkbenchCommandHandler :
       relative,
       mediaType,
       TimeSpan.FromHours(1));
-    return new WorkbenchResourceReference(
+    return (new WorkbenchResourceReference(
       lease.Uri.AbsoluteUri,
       mediaType,
-      data.LongLength);
+      data.LongLength), destination);
   }
 
   private BatchWorkbenchState BatchState(BatchViewModel viewModel)
@@ -2020,15 +2381,58 @@ public sealed class DesktopWorkbenchCommandHandler :
         item.Id,
         Truncate(item.Name, 80),
         $"batch.item.{item.State.ToString().ToLowerInvariant()}",
-        item.Result is null ? null : Truncate(item.Result.Text, 120)))
+        item.Result is null ? null : Truncate(item.Result.Text, 120),
+        item.State == BatchItemState.Completed && item.Result is not null
+          ? batchStructured.GetValueOrDefault(item.Id).Reference
+          : null))
       .ToArray(),
     batchWindowStart,
     BatchEngines(),
-    batchTaskEngine);
+    batchTaskEngine,
+    batchExportIncomplete);
+  }
+
+  /// <summary>
+  /// 可视窗口内已完成项的结构化结果发布：以 Result 对象身份为键缓存，
+  /// 重跑/移除后旧引用不再复用；与单次/PDF 共用同一发布路径。
+  /// </summary>
+  private async Task<BatchWorkbenchState> BatchStateAsync(
+    BatchViewModel viewModel,
+    CancellationToken cancellationToken)
+  {
+    batchWindowStart = ClampWindowStart(batchWindowStart, viewModel.Items.Count, 40);
+    foreach (BatchItemViewModel item in viewModel.Items.Skip(batchWindowStart).Take(40))
+    {
+      if (item.State != BatchItemState.Completed ||
+        item.Result?.ContentBlocks is not { Length: > 0 })
+      {
+        batchStructured.Remove(item.Id);
+        continue;
+      }
+      if (batchStructured.TryGetValue(item.Id, out var cached) &&
+        ReferenceEquals(cached.Result, item.Result))
+      {
+        continue;
+      }
+      WorkbenchResourceReference? reference = await PublishStructuredResultAsync(
+        item.Result.ContentBlocks,
+        viewModel.FetchResultAssetAsync,
+        cancellationToken);
+      if (reference is null)
+      {
+        batchStructured.Remove(item.Id);
+      }
+      else
+      {
+        batchStructured[item.Id] = (item.Result, reference);
+      }
+    }
+    return BatchState(viewModel);
   }
 
   private PdfWorkbenchState PdfState(PdfViewModel viewModel)
   {
+    SynchronizePdfMode();
     pdfWindowStart = ClampWindowStart(pdfWindowStart, viewModel.PageCount, 64);
     return new PdfWorkbenchState(
       viewModel.IsBusy,
@@ -2042,10 +2446,24 @@ public sealed class DesktopWorkbenchCommandHandler :
       .Select(index => new PdfWorkbenchPage(
         index,
         PdfPageStatus(viewModel, index),
-        pdfThumbnails.GetValueOrDefault(index)))
+        pdfThumbnails.GetValueOrDefault(index),
+        index < viewModel.Pages.Count &&
+          viewModel.Pages[index].State == PdfPageState.Done &&
+          viewModel.Pages[index].Result is not null
+          ? pdfStructured.GetValueOrDefault(index).Reference
+          : null))
       .ToArray(),
-      pdfWindowStart);
+      pdfWindowStart,
+      PdfEngines(),
+      pdfTaskEngine);
   }
+
+  private IReadOnlyList<RecognitionEngineChoice>? PdfEngines() =>
+    RecognitionEngines()?.Select(choice => choice with
+    {
+      Selected = choice.Engine == pdfTaskEngine,
+      IsTaskOverride = choice.Engine == pdfTaskEngine,
+    }).ToArray();
 
   private async Task<PdfWorkbenchState> PdfStateAsync(
     PdfViewModel viewModel,
@@ -2066,6 +2484,35 @@ public sealed class DesktopWorkbenchCommandHandler :
           cancellationToken);
       }
     }
+    // 已完成页的结构化结果与缩略图同窗口发布：以 Result 对象身份缓存，
+    // 旋转/删除/重开文档时整体失效，与单次/批量共用同一发布路径。
+    for (int index = pdfWindowStart; index < visiblePageEnd; index++)
+    {
+      if (index >= viewModel.Pages.Count) break;
+      RecognizeResponse? result = viewModel.Pages[index].Result;
+      if (result?.ContentBlocks is not { Length: > 0 })
+      {
+        pdfStructured.Remove(index);
+        continue;
+      }
+      if (pdfStructured.TryGetValue(index, out var cached) &&
+        ReferenceEquals(cached.Result, result))
+      {
+        continue;
+      }
+      WorkbenchResourceReference? reference = await PublishStructuredResultAsync(
+        result.ContentBlocks,
+        viewModel.FetchResultAssetAsync,
+        cancellationToken);
+      if (reference is null)
+      {
+        pdfStructured.Remove(index);
+      }
+      else
+      {
+        pdfStructured[index] = (result, reference);
+      }
+    }
     return PdfState(viewModel);
   }
 
@@ -2078,6 +2525,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     selectedPdfPages.Clear();
     pdfThumbnails.Clear();
+    pdfStructured.Clear();
     pdfWindowStart = 0;
     if (selectFirstPage && pdf is { PageCount: > 0 })
     {
@@ -2356,6 +2804,9 @@ public sealed class DesktopWorkbenchCommandHandler :
       }
     }
     generatedFiles.Clear();
+    structuredResourceFiles.Clear();
+    batchStructured.Clear();
+    pdfStructured.Clear();
   }
 
   private sealed class AnnotatedImageOperationCancelledException : Exception

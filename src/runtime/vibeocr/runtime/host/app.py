@@ -508,6 +508,42 @@ def create_app(
                 job_id=job_id,
             )
 
+    @app.get(
+        "/v2/jobs/{job_id}/items/{item_id}/assets/{asset_id}",
+    )
+    async def get_job_item_asset(job_id: str, item_id: str, asset_id: str) -> Response:
+        """读取一条已完成结果的图像资产（PNG 字节，opaque 引用）。
+
+        权威链见 ``SupervisorModule.resolve_result_asset``：job 存在、item
+        SUCCEEDED、asset id 出现在该 item 结果 content_list、文件位于本
+        job staging 目录固定 results/ 子目录。复用全局 Bearer+loopback
+        guard；不暴露任何本地路径。
+        """
+        from vibeocr.runtime.recognition.result_assets import is_safe_asset_id
+
+        if not (is_safe_asset_id(item_id) and is_safe_asset_id(asset_id)):
+            return _error_response(
+                ErrorCode.VALIDATION_ERROR,
+                instance_id,
+                detail={"reason": "invalid item or asset id"},
+                job_id=job_id,
+            )
+        try:
+            resolved = module.resolve_result_asset(job_id, item_id, asset_id)
+        except JobNotFoundError:
+            return _error_response(ErrorCode.JOB_NOT_FOUND, instance_id, job_id=job_id)
+        except Exception:
+            return _error_response(ErrorCode.INTERNAL_ERROR, instance_id, job_id=job_id)
+        if resolved is None:
+            return _error_response(
+                ErrorCode.RESOURCE_NOT_FOUND,
+                instance_id,
+                detail={"reason": "result asset not found"},
+                job_id=job_id,
+            )
+        data, media_type = resolved
+        return Response(content=data, media_type=media_type)
+
     @app.post("/v2/jobs/command", response_model=wire.CommandResult)
     async def command_job(request: Request) -> JsonResult:
         try:
@@ -959,6 +995,7 @@ def create_app(
             return _error_response(ErrorCode.VALIDATION_ERROR, instance_id)
         from vibeocr.runtime.documents.export import (
             parse_export_request,
+            resolve_export_images,
             write_export,
         )
 
@@ -970,8 +1007,15 @@ def create_app(
                 instance_id,
                 detail={"reason": "invalid export request"},
             )
+        # 图像资产引用在 Runtime 本地解析（零字节回传）；未解析数必须上报，
+        # 不得用占位图声称完整成功。
+        images, images_missing = resolve_export_images(
+            req.raw_blocks, module.resolve_result_asset
+        )
+        if req.format.lower() in {"txt", "xlsx"}:
+            images_missing += len(images)
         try:
-            bytes_written = write_export(req)
+            bytes_written = write_export(req, images=images)
             if bytes_written is None:
                 return _error_response(
                     ErrorCode.INTERNAL_ERROR,
@@ -987,6 +1031,8 @@ def create_app(
             "instance_id": instance_id,
             "output_path": str(req.output_path),
             "bytes_written": bytes_written,
+            "incomplete": images_missing > 0,
+            "images_missing": images_missing,
         }
 
     # ------------------------------------------------------------------

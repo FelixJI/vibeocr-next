@@ -297,7 +297,7 @@ def project_document(document: MineruDocument) -> OCRResult:
                     texts.append(
                         TextBlock(
                             text=text,
-                            score=1.0,
+                            score=None,  # MinerU 上游不提供 confidence（真实 unknown）
                             bbox=normalize_bbox(bbox) if bbox is not None else None,
                             page_idx=page_idx,
                             content_index=len(blocks) - 1,
@@ -309,7 +309,7 @@ def project_document(document: MineruDocument) -> OCRResult:
         markdown_text=document.markdown,
         html_text="",
         text_with_scores=[(block.text, block.score) for block in texts],
-        avg_score=1.0 if texts else 0.0,
+        avg_score=0.0,
         low_confidence_items=[],
         pipeline_type="MinerU",
         images=images,

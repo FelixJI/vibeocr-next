@@ -139,6 +139,13 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     return await Current.ExportAsync(request, cancellationToken);
   }
 
+  public async Task<byte[]> FetchResultAssetAsync(
+    string jobId, string itemId, string assetId, CancellationToken cancellationToken)
+  {
+    await _gate.WaitAsync(cancellationToken);
+    return await Current.FetchResultAssetAsync(jobId, itemId, assetId, cancellationToken);
+  }
+
   public async Task<PdfSessionOpenResult> OpenPdfSessionAsync(
     string path, string? password, CancellationToken ct)
   {

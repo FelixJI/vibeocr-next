@@ -516,6 +516,10 @@ class PipelineCacheManager:
     def _release_one(self, pipeline_name: str) -> None:
         """释放单个管道；调用方已持有可重入 state lock。"""
         self._service._pipelines.pop(pipeline_name, None)
+        signatures = getattr(self._service, "_pipeline_signatures", None)
+        if isinstance(signatures, dict):
+            # 与实例同步清理，避免残留签名让下复用判定误判。
+            signatures.pop(pipeline_name, None)
         self._last_used.pop(pipeline_name, None)
         self._active_counts.pop(pipeline_name, None)
         if self._is_paddle(pipeline_name):

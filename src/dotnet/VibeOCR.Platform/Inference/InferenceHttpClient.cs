@@ -17,6 +17,7 @@ namespace VibeOCR.Platform.Inference;
 /// </summary>
 public sealed class InferenceHttpClient : IInferenceClient
 {
+    private const int MaxResultAssetBytes = 8 * 1024 * 1024;
     private readonly RuntimeHttpClient _runtime;
     private readonly JsonSerializerOptions _options;
 
@@ -31,6 +32,35 @@ public sealed class InferenceHttpClient : IInferenceClient
     }
 
     public Uri BaseUrl => _runtime.BaseUrl;
+
+    public async Task<byte[]> FetchResultAssetAsync(
+        string jobId, string itemId, string assetId, CancellationToken cancellationToken)
+    {
+        static string Segment(string value) =>
+            !string.IsNullOrWhiteSpace(value) && value.All(character =>
+                char.IsAsciiLetterOrDigit(character) || character is '-' or '_')
+                ? value : throw new ArgumentException("Invalid result asset identifier.");
+        string path = $"/v2/jobs/{Segment(jobId)}/items/{Segment(itemId)}/assets/{Segment(assetId)}";
+        using HttpResponseMessage response = await _runtime.GetAsync(path, cancellationToken)
+            .ConfigureAwait(false);
+        await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+        if (response.Content.Headers.ContentType?.MediaType != "image/png" ||
+            response.Content.Headers.ContentLength is > MaxResultAssetBytes)
+            throw new InvalidDataException("Result asset is not a bounded PNG.");
+        await using Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken)
+            .ConfigureAwait(false);
+        using var output = new MemoryStream();
+        byte[] buffer = new byte[64 * 1024];
+        while (true)
+        {
+            int count = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            if (count == 0) break;
+            if (output.Length + count > MaxResultAssetBytes)
+                throw new InvalidDataException("Result asset exceeds 8 MiB.");
+            output.Write(buffer, 0, count);
+        }
+        return output.ToArray();
+    }
 
     public async Task<JobRef> SubmitAsync(
         SubmitRequest request,
@@ -196,6 +226,7 @@ public sealed class InferenceHttpClient : IInferenceClient
                 output_path = request.OutputPath,
                 format = request.Format,
                 overwrite = request.Overwrite,
+                raw_blocks = request.ContentBlocks ?? [],
             });
         using HttpResponseMessage response = await _runtime.PostAsync(
             RuntimeOperationPaths.ExportOcr, content, cancellationToken)
@@ -206,7 +237,9 @@ public sealed class InferenceHttpClient : IInferenceClient
             .ConfigureAwait(false);
         return new ExportResult(
             doc.RootElement.GetProperty("output_path").GetString() ?? string.Empty,
-            doc.RootElement.TryGetProperty("bytes_written", out JsonElement bw) ? bw.GetInt64() : 0);
+            doc.RootElement.TryGetProperty("bytes_written", out JsonElement bw) ? bw.GetInt64() : 0,
+            doc.RootElement.TryGetProperty("incomplete", out JsonElement incomplete) && incomplete.GetBoolean(),
+            doc.RootElement.TryGetProperty("images_missing", out JsonElement missing) ? missing.GetInt32() : 0);
     }
 
     public async Task<PdfSessionOpenResult> OpenPdfSessionAsync(string path, string? password, CancellationToken ct)

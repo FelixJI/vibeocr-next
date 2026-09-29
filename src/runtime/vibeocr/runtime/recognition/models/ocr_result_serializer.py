@@ -45,12 +45,16 @@ def text_block_to_dict(block: Any) -> dict[str, Any]:
     works against either the client-py or backend copy of the dataclass.
     ``bbox`` (4-tuple) and ``polygon`` (N-tuple) are tuples in the dataclass
     but become JSON lists here so they round-trip through ``json.dumps``.
+    ``score`` is ``null`` when the upstream provider supplied no confidence
+    (e.g. formula/table structure blocks) — consumers must treat ``null`` as
+    unknown, never as 0% or 100%.
     """
     bbox = getattr(block, "bbox", None)
     polygon = getattr(block, "polygon", None)
+    score = getattr(block, "score", None)
     return {
         "text": getattr(block, "text", ""),
-        "score": float(getattr(block, "score", 0.0)),
+        "score": None if score is None else float(score),
         "bbox": list(bbox) if isinstance(bbox, (tuple, list)) else bbox,
         "polygon": list(polygon) if isinstance(polygon, (tuple, list)) else polygon,
         "page_idx": getattr(block, "page_idx", None),
@@ -89,11 +93,17 @@ def ocr_result_to_payload(result: Any) -> dict[str, Any]:
         for b in getattr(result, "text_blocks", []) or []
         if b is not None
     ]
+    # ``text_with_scores`` 仅保留真实置信度条目；上游无置信度的块由
+    # ``text_blocks[].score=null`` 表达（unknown），不伪造数值。
     text_with_scores = [
-        [t, float(s)] for t, s in (getattr(result, "text_with_scores", []) or [])
+        [t, float(s)]
+        for t, s in (getattr(result, "text_with_scores", []) or [])
+        if s is not None
     ]
     low_confidence_items = [
-        [t, float(s)] for t, s in (getattr(result, "low_confidence_items", []) or [])
+        [t, float(s)]
+        for t, s in (getattr(result, "low_confidence_items", []) or [])
+        if s is not None
     ]
 
     # images: do NOT inline raw bytes. Surface only structural information so
@@ -138,10 +148,11 @@ def ocr_result_from_payload(payload: dict[str, Any]) -> Any:
             continue
         bbox = raw.get("bbox")
         polygon = raw.get("polygon")
+        raw_score = raw.get("score")
         blocks.append(
             TextBlock(
                 text=str(raw.get("text", "")),
-                score=float(raw.get("score", 0.0)),
+                score=None if raw_score is None else float(raw_score),
                 bbox=tuple(bbox) if isinstance(bbox, list) else None,
                 polygon=(tuple(polygon) if isinstance(polygon, list) else None),
                 page_idx=raw.get("page_idx"),

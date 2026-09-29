@@ -85,7 +85,7 @@ def test_pp_structure_emits_canonical_table_and_keeps_content_index():
             return [{"parsing_res_list": [block]}]
 
     class Service:
-        def get_or_create_pipeline(self, _name):
+        def get_or_create_pipeline(self, _name, options=None):
             return Pipeline()
 
     result = _recognize_pp_structure(
@@ -102,7 +102,7 @@ def test_pp_structure_emits_canonical_table_and_keeps_content_index():
     assert result.text_blocks[0].content_id == table_block["block_id"]
     assert result.text_blocks[0].order == 0
     assert result.text_blocks[0].text == "A\tB\nC"
-    assert result.text_with_scores[0] == ("A\tB\nC", 0.9)
+    assert result.text_with_scores[0] == ("A\tB\nC", None)
     assert result.raw_text == "A\tB\nC"
     assert 'rowspan="2"' in result.html_text
 
@@ -137,7 +137,7 @@ class TestRecognizePpStructureBlockTypes:
                 return [res]
 
         class _Service:
-            def get_or_create_pipeline(self, _name):
+            def get_or_create_pipeline(self, _name, options=None):
                 return _Pipeline()
 
         result = _recognize_pp_structure(
@@ -170,7 +170,7 @@ class TestRecognizePpStructureBlockTypes:
                 return [res]
 
         class _Service:
-            def get_or_create_pipeline(self, _name):
+            def get_or_create_pipeline(self, _name, options=None):
                 return _Pipeline()
 
         result = _recognize_pp_structure(
@@ -178,7 +178,11 @@ class TestRecognizePpStructureBlockTypes:
         )
         img_blocks = [b for b in result.content_list if b.get("type") == "image"]
         assert img_blocks
-        assert img_blocks[0].get("img_path") == "imgs/fig0.png"
+        assert "img_path" not in img_blocks[0]
+        assert img_blocks[0]["image"] == {
+            "available": False,
+            "reason": "asset_store_unavailable",
+        }
 
     def test_text_block(self):
         from vibeocr.runtime.recognition.core.pipelines.pipeline_pp_structure import (
@@ -203,7 +207,7 @@ class TestRecognizePpStructureBlockTypes:
                 return [res]
 
         class _Service:
-            def get_or_create_pipeline(self, _name):
+            def get_or_create_pipeline(self, _name, options=None):
                 return _Pipeline()
 
         result = _recognize_pp_structure(
@@ -235,7 +239,7 @@ class TestRecognizePpStructureBlockTypes:
                 return [res]
 
         class _Service:
-            def get_or_create_pipeline(self, _name):
+            def get_or_create_pipeline(self, _name, options=None):
                 return _Pipeline()
 
         result = _recognize_pp_structure(
@@ -264,7 +268,7 @@ class TestRecognizePpStructureBlockTypes:
                 return [res]
 
         class _Service:
-            def get_or_create_pipeline(self, _name):
+            def get_or_create_pipeline(self, _name, options=None):
                 return _Pipeline()
 
         result = _recognize_pp_structure(
@@ -273,3 +277,56 @@ class TestRecognizePpStructureBlockTypes:
         assert result.preproc_angle == 90
         assert result.preproc_img_w == 3
         assert result.preprocessed_image is not None
+
+
+# ---- 构造参数：模块开关必须同时到达构造与 predict（锁定版本约束）----
+
+
+def test_pp_structure_constructor_kwargs_map_module_gates():
+    """六个模块/预处理开关参与构造签名（模型初始化门槛）。"""
+    from vibeocr.runtime.recognition.core.pipelines.pipeline_pp_structure import (
+        _pp_structure_constructor_kwargs,
+    )
+
+    kwargs = _pp_structure_constructor_kwargs(
+        PPStructureV3Options(use_seal_recognition=True, use_chart_recognition=True)
+    )
+    assert kwargs == {
+        "use_doc_orientation_classify": True,
+        "use_doc_unwarping": False,
+        "use_table_recognition": True,
+        "use_formula_recognition": True,
+        "use_seal_recognition": True,
+        "use_chart_recognition": True,
+    }
+
+
+def test_pp_structure_options_reach_cache_and_predict():
+    """回归：旧实现 predict 才传模块开关、构造裸建——锁定版本会报
+    “models are not initialized”。现在 options 必须同时传给缓存层。"""
+    captured: dict = {}
+
+    class Pipeline:
+        def predict(self, **kwargs):
+            captured["predict"] = dict(kwargs)
+            return []
+
+    class Service:
+        def __init__(self):
+            self.requests = []
+
+        def get_or_create_pipeline(self, name, options=None):
+            self.requests.append((name, options))
+            return Pipeline()
+
+    service = Service()
+    opts = PPStructureV3Options(use_seal_recognition=True)
+    _recognize_pp_structure(service, image=None, options=opts)
+
+    name, passed = service.requests[0]
+    assert name == "PP-StructureV3"
+    assert passed is opts
+    # predict 同样消费六个开关 + textline
+    assert captured["predict"]["use_seal_recognition"] is True
+    assert captured["predict"]["use_table_recognition"] is True
+    assert captured["predict"]["use_textline_orientation"] is False

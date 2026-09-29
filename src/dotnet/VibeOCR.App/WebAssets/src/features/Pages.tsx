@@ -42,6 +42,8 @@ import { useEffect, useRef, useState } from "react";
 import type { AppActions, AppViewState } from "../app/types";
 import { CapabilityGate } from "../components/CapabilityGate";
 import { ImageCanvasEditor } from "../components/ImageCanvasEditor";
+import { PaddleOptionsEditor } from "../components/PaddleOptionsEditor";
+import { StructuredResult } from "../components/StructuredResult";
 import { EmptyStage, Workspace } from "../components/Workspace";
 
 interface FeatureProps {
@@ -60,12 +62,14 @@ interface BatchItemState {
   readonly name: string;
   readonly statusCode: string;
   readonly resultSummary?: string | null;
+  readonly structuredResult?: ResourceReference | null;
 }
 
 interface PdfPageState {
   readonly index: number;
   readonly statusCode: string;
   readonly thumbnail?: ResourceReference | null;
+  readonly structuredResult?: ResourceReference | null;
 }
 
 interface QrResultState {
@@ -200,6 +204,9 @@ interface RecognitionEngineState {
   readonly supportsTtl?: boolean;
   readonly supportsPinning?: boolean;
   readonly supportsRelease?: boolean;
+  readonly supportedOptions?: readonly string[];
+  readonly options?: unknown;
+  readonly reasonCode?: string | null;
 }
 
 interface ScreenshotSessionState {
@@ -269,7 +276,10 @@ function batchItems(value: unknown): readonly BatchItemState[] {
       typeof item.statusCode === "string" &&
       (item.resultSummary === undefined ||
         item.resultSummary === null ||
-        typeof item.resultSummary === "string")
+        typeof item.resultSummary === "string") &&
+      (item.structuredResult === undefined ||
+        item.structuredResult === null ||
+        resource(item.structuredResult) !== undefined)
     );
   });
 }
@@ -292,7 +302,11 @@ function pdfPages(value: unknown): readonly PdfPageState[] {
       return false;
     const page = entry as Partial<PdfPageState>;
     return (
-      typeof page.index === "number" && typeof page.statusCode === "string"
+      typeof page.index === "number" &&
+      typeof page.statusCode === "string" &&
+      (page.structuredResult === undefined ||
+        page.structuredResult === null ||
+        resource(page.structuredResult) !== undefined)
     );
   });
 }
@@ -670,6 +684,11 @@ function statusLabel(value: unknown, fallback: string): string {
     "recognition.expired": "内容已修改，旧识别结果已失效；请重新识别当前图",
     "recognition.failed": "识别失败，请检查运行时状态后重试",
     "recognition.cancelled": "识别已取消，可重新选择输入",
+    "recognition.modeUnavailable":
+      "所选识别模式在当前环境不可用；请检查模型、设备与运行环境",
+    "recognition.exported": "结果已导出",
+    "recognition.exportedIncomplete":
+      "文件已保存，但部分图片缺失或该格式无法容纳图片；请检查原始结果",
     "pdf.open": "PDF 会话已建立",
     "pdf.empty": "尚未建立 PDF 会话",
     "qrcode.decoded": "识别完成",
@@ -750,6 +769,8 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
   const input = resource(state.input);
   const result = resource(state.result);
   const resultText = useResourceText(result);
+  const structured = resource(state.structuredResult);
+  const structuredText = useResourceText(structured);
   const session = screenshotSession(state.screenshotSession);
   const sessionCapable = viewState.capabilities.includes(
     "recognition.screenshotSession",
@@ -851,7 +872,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
           )}
         </Panel>
         <Panel label="OUTPUT / 02" title="识别结果">
-          {result ? (
+          {result || structured ? (
             <>
               <Toolbar aria-label="识别结果操作" size="small">
                 <CapabilityGate
@@ -891,9 +912,28 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
                   导出 Excel
                 </CapabilityGate>
               </Toolbar>
-              <pre className="result-document">
-                {resultText || "正在读取结果…"}
-              </pre>
+              {structured && (
+                <StructuredResult
+                  key={structured.url}
+                  source={structuredText}
+                  onCopy={(blockIndex, format) =>
+                    actions.run({
+                      type: "recognition.copyStructured",
+                      resourceUri: structured.url,
+                      blockIndex,
+                      format,
+                    })
+                  }
+                />
+              )}
+              {result && (
+                <details open={!structured}>
+                  <summary>原始文本</summary>
+                  <pre className="result-document">
+                    {resultText || "正在读取结果…"}
+                  </pre>
+                </details>
+              )}
             </>
           ) : (
             <EmptyStage
@@ -916,6 +956,12 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
   const items = batchItems(state.items);
   const windowStart = Math.max(0, numberValue(state.windowStart));
   const engines = recognitionEngines(state.engines);
+  const exportIncomplete = booleanValue(state.exportIncomplete);
+  // 单选待检查项：仅挂载所选结构化结果，避免窗口内几十项同时拉取。
+  const [inspectId, setInspectId] = useState<string | null>(null);
+  const inspected = items.find((item) => item.id === inspectId);
+  const inspectedStructured = resource(inspected?.structuredResult);
+  const inspectedText = useResourceText(inspectedStructured);
   return (
     <Workspace
       eyebrow="QUEUE / 02"
@@ -1010,6 +1056,15 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
                       {item.resultSummary && <em>{item.resultSummary}</em>}
                     </span>
                     <span className="batch-item-actions">
+                      {resource(item.structuredResult) && (
+                        <Button
+                          appearance="subtle"
+                          aria-label={`查看 ${item.name} 的结构化结果`}
+                          onClick={() => setInspectId(item.id)}
+                        >
+                          <ScanText aria-hidden="true" size={15} />
+                        </Button>
+                      )}
                       <Button
                         appearance="subtle"
                         aria-label={`上移 ${item.name}`}
@@ -1095,12 +1150,32 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
           )}
         </Panel>
         <Panel label="INSPECT" title="文件预览">
-          <EmptyStage
-            title="未选择文件"
-            detail="从队列中选择一个项目以检查输入。"
-          />
+          {inspected && inspectedStructured ? (
+            <StructuredResult
+              key={inspectedStructured.url}
+              source={inspectedText}
+              onCopy={(blockIndex, format) =>
+                actions.run({
+                  type: "recognition.copyStructured",
+                  resourceUri: inspectedStructured.url,
+                  blockIndex,
+                  format,
+                })
+              }
+            />
+          ) : (
+            <EmptyStage
+              title="未选择文件"
+              detail="从队列中选择带结构化结果的项目，检查表格、公式与版面区块。"
+            />
+          )}
         </Panel>
         <Panel label="RESULT" title="识别结果">
+          {exportIncomplete && (
+            <p role="alert" className="form-note">
+              文件已保存，但部分图片缺失或目标格式无法容纳图片；请检查原始结果。
+            </p>
+          )}
           <EmptyStage title="尚无结果" detail="批处理完成后在此检查文本。" />
           <CapabilityGate
             capability="batch.export"
@@ -1140,6 +1215,7 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
 
 export function PdfPage({ viewState, actions }: FeatureProps) {
   const state = feature(viewState, "pdf");
+  const engines = recognitionEngines(state.engines);
   const pageCount = numberValue(state.pageCount);
   const selectedPage = numberValue(state.selectedPage);
   const pages = pdfPages(state.pages);
@@ -1151,6 +1227,8 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
     : [];
   const selected = new Set(selectedPages);
   const activePage = pages.find((page) => page.index === selectedPage);
+  const activeStructured = resource(activePage?.structuredResult);
+  const activeStructuredText = useResourceText(activeStructured);
   return (
     <Workspace
       eyebrow="DOCUMENT / 03"
@@ -1182,6 +1260,16 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
       }
     >
       <div className="pdf-workspace">
+        <TaskEngineSelector
+          engines={engines}
+          taskEngine={stringValue(state.taskEngine)}
+          enabled={
+            viewState.capabilities.includes("recognition.engine") &&
+            !booleanValue(state.isBusy)
+          }
+          actions={actions}
+          scope="pdf"
+        />
         <Panel label="PAGES" title="页面">
           {pages.length === 0 ? (
             <EmptyStage
@@ -1321,6 +1409,20 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
                   pageCount > 0
                     ? `已选 ${selectedPages.length} 页`
                     : "选择页面后显示渲染预览与 OCR 状态。"
+                }
+              />
+            )}
+            {activeStructured && (
+              <StructuredResult
+                key={activeStructured.url}
+                source={activeStructuredText}
+                onCopy={(blockIndex, format) =>
+                  actions.run({
+                    type: "recognition.copyStructured",
+                    resourceUri: activeStructured.url,
+                    blockIndex,
+                    format,
+                  })
                 }
               />
             )}
@@ -2590,7 +2692,7 @@ function TaskEngineSelector({
   readonly taskEngine: string | undefined;
   readonly enabled: boolean;
   readonly actions: AppActions;
-  readonly scope?: "recognition" | "batch";
+  readonly scope?: "recognition" | "batch" | "pdf";
 }) {
   if (engines.length === 0) {
     return null;
@@ -2599,7 +2701,7 @@ function TaskEngineSelector({
     engines.find((engine) => engine.isTaskOverride) ??
     engines.find((engine) => engine.selected);
   return (
-    <div className="setting-row">
+    <div className="setting-row recognition-mode-settings">
       <label htmlFor={`${scope}-task-engine`}>本次识别模式</label>
       <Select
         id={`${scope}-task-engine`}
@@ -2615,14 +2717,50 @@ function TaskEngineSelector({
         }
       >
         <option value="">使用 Runtime 默认模式</option>
-        {engines.map((engine) => (
-          <option key={engine.engine} value={engine.engine}>
-            {`${engine.displayName}（${availabilityLabel(engine.availability)}${
-              engine.requiresDownload ? "，需下载" : ""
-            }）`}
-          </option>
-        ))}
+        {(
+          [
+            ["文字", ["paddle_text"]],
+            ["表格", ["paddle_table"]],
+            ["公式", ["paddle_formula"]],
+            ["文档结构", ["paddle_structure", "paddle_document_vl"]],
+            ["其他引擎", []],
+          ] as const
+        ).map(([label, ids]) => {
+          const choices = engines.filter((engine) =>
+            ids.length === 0
+              ? ![
+                  "paddle_text",
+                  "paddle_table",
+                  "paddle_formula",
+                  "paddle_structure",
+                  "paddle_document_vl",
+                ].includes(engine.engine)
+              : (ids as readonly string[]).includes(engine.engine),
+          );
+          return choices.length ? (
+            <optgroup key={label} label={label}>
+              {choices.map((engine) => (
+                <option key={engine.engine} value={engine.engine}>
+                  {`${engine.displayName}（${availabilityLabel(engine.availability)}${engine.requiresDownload ? "，需下载" : ""}）`}
+                </option>
+              ))}
+            </optgroup>
+          ) : null;
+        })}
       </Select>
+      {active?.reasonCode && (
+        <p className="form-note">当前环境：{active.reasonCode}</p>
+      )}
+      {active?.engine.startsWith("paddle_") &&
+        Array.isArray(active.supportedOptions) && (
+          <PaddleOptionsEditor
+            key={`${active.engine}-${JSON.stringify(active.options)}`}
+            modeId={active.engine}
+            supportedOptions={active.supportedOptions}
+            values={active.options}
+            actions={actions}
+          />
+        )}{" "}
       {lifecycleHint(active) ? (
         <p className="form-note">{lifecycleHint(active)}</p>
       ) : null}
