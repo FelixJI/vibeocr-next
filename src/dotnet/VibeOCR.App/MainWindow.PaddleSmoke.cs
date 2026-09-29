@@ -1,6 +1,9 @@
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.UI.Windowing;
+using Microsoft.Web.WebView2.Core;
+using Windows.Storage;
+using Windows.Storage.Streams;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -89,6 +92,17 @@ public sealed partial class MainWindow
       object evidence = phase == "install"
         ? await RunPaddleSmokeInstallAsync()
         : await RunPaddleSmokeRecognizeAsync(phase == "inputs");
+      string? previewPath = null;
+      if (phase != "install")
+      {
+        previewPath = Path.ChangeExtension(path, ".png");
+        using (new FileStream(previewPath, FileMode.CreateNew)) { }
+        StorageFile previewFile = await StorageFile.GetFileFromPathAsync(previewPath);
+        using IRandomAccessStream preview = await previewFile.OpenAsync(FileAccessMode.ReadWrite);
+        await WorkbenchWebView.CoreWebView2.CapturePreviewAsync(
+          CoreWebView2CapturePreviewImageFormat.Png, preview);
+        await preview.FlushAsync();
+      }
       File.WriteAllText(path, JsonSerializer.Serialize(new
       {
         schema_version = 1,
@@ -96,6 +110,7 @@ public sealed partial class MainWindow
         phase,
         stage = paddleSmokeStage,
         mode = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_MODE"),
+        preview_path = previewPath,
         evidence,
       }));
     }
@@ -218,7 +233,8 @@ public sealed partial class MainWindow
       throw new InvalidOperationException(
         $"Environment is not installed with {PaddleSmokeRecipe}: {environment.Status}.");
     await SelectSmokeEnvironmentAsync(environment.Id);
-    await ClickManagedSmokeButtonAsync("切换到此环境");
+    if (list.ActiveId != environment.Id)
+      await ClickManagedSmokeButtonAsync("切换到此环境");
     ManagedEnvironmentSession session = await WaitForSmokeSessionAsync(environment.Id);
     await WaitForSmokeDomAsync(
       "document.querySelector('.settings-runtime-panel')?.textContent.includes('服务 ready') === true",
