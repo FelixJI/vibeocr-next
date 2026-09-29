@@ -64,6 +64,12 @@ public sealed class ScreenshotSessionWorkbenchTests
   {
     public List<IReadOnlyList<byte>> UploadedContent { get; } = [];
 
+    /// <summary>成功 outcome 的 payload；子类可覆盖以模拟空文本/纯结构化结果。</summary>
+    protected virtual Dictionary<string, JsonElement> OutcomePayload() => new()
+    {
+      ["raw_text"] = JsonSerializer.SerializeToElement("session text"),
+    };
+
     public override Task<JobRef> SubmitAsync(
       SubmitRequest request,
       IReadOnlyDictionary<string, SubmitUpload> uploads,
@@ -108,14 +114,33 @@ public sealed class ScreenshotSessionWorkbenchTests
             State = ItemState.Succeeded,
             Attempt = 1,
             PayloadType = "ocr.v1",
-            Payload = new Dictionary<string, JsonElement>
-            {
-              ["raw_text"] = JsonSerializer.SerializeToElement("session text"),
-            },
+            Payload = OutcomePayload(),
           },
         ],
         ThroughSequence = afterSequence,
       });
+  }
+
+  /// <summary>#110：真实成功但 raw_text 为空（如公式零输出）。</summary>
+  private sealed class EmptyTextRecognitionClient : RecordingRecognitionClient
+  {
+    protected override Dictionary<string, JsonElement> OutcomePayload() => new()
+    {
+      ["raw_text"] = JsonSerializer.SerializeToElement(""),
+    };
+  }
+
+  /// <summary>#110：空文本且仅有非文本结构化区块（公式）。</summary>
+  private sealed class EmptyTextStructuredRecognitionClient : RecordingRecognitionClient
+  {
+    protected override Dictionary<string, JsonElement> OutcomePayload() => new()
+    {
+      ["raw_text"] = JsonSerializer.SerializeToElement(""),
+      ["content_list"] = JsonSerializer.SerializeToElement(new object[]
+      {
+        new { type = "formula", text = "a+b", bbox = (int[]?)null, block_id = "formula-0" },
+      }),
+    };
   }
 
   private sealed class SubmitBlockingRecognitionClient : RecordingRecognitionClient
@@ -643,6 +668,122 @@ public sealed class ScreenshotSessionWorkbenchTests
           Assert.Equal(inputBytes, completed.Input?.ByteLength);
           Assert.NotNull(completed.ScreenshotSession);
           Assert.Equal(1, completed.ScreenshotSession.Revision);
+        }
+      }
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task CompletedSessionRecognitionWithEmptyTextStaysTerminalWithoutFabricatedContent()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new EmptyTextRecognitionClient();
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition,
+        root,
+        broker,
+        annotationStore,
+        settings: new SettingsViewModel(inference),
+        inferenceAttached: () => false);
+
+      using (var capturedAwaiter = new RecognitionStateAwaiter(
+        handler,
+        state => !state.IsBusy && state.ScreenshotSession is not null))
+      {
+        await handler.ExecuteAsync(
+          new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        RecognitionWorkbenchState captured = await capturedAwaiter.Task;
+        Guid sessionId = Guid.Parse(captured.ScreenshotSession!.SessionId);
+
+        WorkbenchAnnotationLease lease = UploadAnnotation(annotationStore, AnnotationPng);
+        using (var completedAwaiter = new RecognitionStateAwaiter(
+          handler,
+          state => !state.IsBusy && state.Result is not null))
+        {
+          await handler.ExecuteAsync(
+            new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0),
+            TestContext.Current.CancellationToken);
+          RecognitionWorkbenchState completed = await completedAwaiter.Task;
+          Assert.Equal("recognition.completed", completed.StatusCode);
+          // 结果资源承载真实空文本：不造文本，也不得丢失终态可见性。
+          Assert.Equal(0, completed.Result!.ByteLength);
+          Assert.Null(completed.StructuredResult);
+        }
+
+        // 重算投影（命令出口的 SessionStatusCode）同样必须看到完成，
+        // 不得退回 recognition.session 伪装仍在会话编辑中。
+        WorkbenchCommandOutcome refreshed = await handler.ExecuteAsync(
+          new SetTaskEngineCommand(null), TestContext.Current.CancellationToken);
+        RecognitionWorkbenchState projected = Assert.IsType<RecognitionWorkbenchState>(
+          Assert.Single(refreshed.States));
+        Assert.Equal("recognition.completed", projected.StatusCode);
+        Assert.NotNull(projected.Result);
+      }
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task SessionStructuredBlocksSurviveEmptyTextResult()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new EmptyTextStructuredRecognitionClient();
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition,
+        root,
+        broker,
+        annotationStore,
+        settings: new SettingsViewModel(inference),
+        inferenceAttached: () => false);
+
+      using (var capturedAwaiter = new RecognitionStateAwaiter(
+        handler,
+        state => !state.IsBusy && state.ScreenshotSession is not null))
+      {
+        await handler.ExecuteAsync(
+          new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        RecognitionWorkbenchState captured = await capturedAwaiter.Task;
+        Guid sessionId = Guid.Parse(captured.ScreenshotSession!.SessionId);
+
+        WorkbenchAnnotationLease lease = UploadAnnotation(annotationStore, AnnotationPng);
+        using (var completedAwaiter = new RecognitionStateAwaiter(
+          handler,
+          state => !state.IsBusy && state.Result is not null))
+        {
+          await handler.ExecuteAsync(
+            new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0),
+            TestContext.Current.CancellationToken);
+          RecognitionWorkbenchState completed = await completedAwaiter.Task;
+          Assert.Equal("recognition.completed", completed.StatusCode);
+          // 空文本不得抑制非文本结构化区块（公式 LaTeX 区块）。
+          Assert.NotNull(completed.StructuredResult);
+          Assert.True(completed.StructuredResult!.ByteLength > 0);
+          string structuredJson = await File.ReadAllTextAsync(
+            Directory.EnumerateFiles(Path.Combine(root, "session"), "*.json").Single(),
+            TestContext.Current.CancellationToken);
+          using JsonDocument blocks = JsonDocument.Parse(structuredJson);
+          Assert.Equal("a+b", blocks.RootElement[0].GetProperty("text").GetString());
         }
       }
     }

@@ -827,7 +827,10 @@ public sealed class DesktopWorkbenchCommandHandler :
           resultActions = recognition.CreateResultActions(
             new WindowsResultActionPlatform(windowHandle));
         }
-        WorkbenchResourceReference? result = string.IsNullOrEmpty(recognition.ResultText)
+        // 完成结果即使文本为空也发布真实（可能为空的）文本资源：会话终态
+        // 可见性（SessionStatusCode 与 StructuredResult 门控）绑定
+        // screenshotSessionResult，空文本不得伪装成仍在会话编辑中（#110）。
+        WorkbenchResourceReference? result = recognition.Result is null
           ? null
           : await PublishBytesAsync(
             Encoding.UTF8.GetBytes(recognition.ResultText),
@@ -1545,7 +1548,9 @@ public sealed class DesktopWorkbenchCommandHandler :
         ExtensionForMediaType(currentInput.MediaType),
         cancellationToken);
     }
-    WorkbenchResourceReference? result = string.IsNullOrEmpty(recognition.ResultText)
+    // 完成结果即使文本为空也保留真实（可能为空的）文本资源：Result 非空
+    // 合同绑定真实识别结果，而不是文本长度（#110）。
+    WorkbenchResourceReference? result = recognition.Result is null
       ? null
       : await PublishBytesAsync(
         Encoding.UTF8.GetBytes(recognition.ResultText),
@@ -1701,7 +1706,8 @@ public sealed class DesktopWorkbenchCommandHandler :
         ExtensionForMediaType(currentInput.MediaType),
         cancellationToken)
       : null;
-    WorkbenchResourceReference? result = string.IsNullOrEmpty(viewModel.ResultText)
+    // 同上：真实完成结果即使文本为空也保留结果资源（#110）。
+    WorkbenchResourceReference? result = viewModel.Result is null
       ? null
       : await PublishBytesAsync(
         Encoding.UTF8.GetBytes(viewModel.ResultText),
