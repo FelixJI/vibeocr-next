@@ -84,8 +84,12 @@ public sealed class ManagedEnvironmentSwitchCoordinatorTests
             string environmentId, string recipe, IReadOnlyList<string>? sourceIds = null,
             CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<ManagedEnvironment> InstallEnvironmentAsync(
-            ManagedEnvironmentPlan plan, CancellationToken cancellationToken = default) =>
+            ManagedEnvironmentPlan plan, IReadOnlyList<string>? sourceIds = null,
+            CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
+        public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
+            string? environmentId, string? packageSourceId, string? modelSourceId,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<ManagedEnvironment> RepairEmptyEnvironmentAsync(
             string environmentId, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();

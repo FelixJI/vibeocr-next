@@ -81,6 +81,23 @@ public sealed class ManagedEnvironmentSettingsTests
     Assert.Equal("ready", ready.ServiceState);
   }
 
+  [Theory]
+  [InlineData(null)]
+  [InlineData("pypi")]
+  public async Task StaleConfirmationCannotInstallTheCurrentPreview(string? sourceId)
+  {
+    var manager = new WaitingManager();
+    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
+      () => null, new ProductMaintenanceCoordinator());
+    await settings.PreviewAsync("environment", "rapidocr-cpu", sourceId,
+      TestContext.Current.CancellationToken);
+
+    await Assert.ThrowsAsync<InvalidOperationException>(() =>
+      settings.InstallAsync("previous-plan", sourceId, TestContext.Current.CancellationToken));
+
+    Assert.False(manager.Started.Task.IsCompleted);
+    Assert.Equal("plan", settings.Plan?.PlanId);
+  }
   [Fact]
   public async Task CancelInstallStopsManagerAndReleasesProductLease()
   {
@@ -103,7 +120,7 @@ public sealed class ManagedEnvironmentSettingsTests
     Assert.Equal(1, installAttempts);
     Assert.False(settings.CanCancelInstall);
     Assert.True(maintenance.State.IsIdle);
-    Assert.Equal("安装已取消；原环境保持不变。", settings.Status);
+    Assert.Equal("安装已取消；原环境保持不变，取消详情可在该环境记录中查看。", settings.Status);
     Assert.Equal("environment", settings.Snapshot?.Environments[0].Id);
   }
 
@@ -273,6 +290,48 @@ public sealed class ManagedEnvironmentSettingsTests
     }
   }
 
+  [Fact]
+  public async Task SetSourcesSavesWithoutDownloadingAndMarksRunningModelNextLaunch()
+  {
+    string root = CreateReadyEchoScript();
+    InferenceSupervisorProcess process = CreateReadyEchoProcess(root);
+    try
+    {
+      await process.StartAsync(TestContext.Current.CancellationToken);
+      var client = new InferenceHttpClient(
+        new Uri("http://127.0.0.1:1"), "test", new HealthyTransport());
+      var qr = new QrCodeHttpClient(new Uri("http://127.0.0.1:1"), "test");
+      await using var session = new ManagedEnvironmentSession(
+        "environment", 1, process, client, qr, ReadyStatus());
+      var manager = new MutableManager();
+      var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
+        () => ("environment", 1), new ProductMaintenanceCoordinator(), () => session);
+
+      await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi",
+        TestContext.Current.CancellationToken);
+      Assert.NotNull(settings.Plan);
+
+      // 只写配置：不下载/不安装/不重启；运行中环境的模型偏好标注下次启动生效。
+      await settings.SetSourcesAsync("environment", null, "modelscope",
+        TestContext.Current.CancellationToken);
+      Assert.Equal("environment|<null>|modelscope", manager.SourceSaves.Single());
+      Assert.Null(settings.Plan);
+      Assert.Contains("不会下载或安装", settings.Status);
+      Assert.Contains("下次启动", settings.Status);
+
+      // 全局默认保存不针对运行中的环境，不叠加下次启动提示。
+      await settings.SetSourcesAsync(null, "pypi", null,
+        TestContext.Current.CancellationToken);
+      Assert.Equal("<global>|pypi|<null>", manager.SourceSaves[1]);
+      Assert.DoesNotContain("下次启动", settings.Status);
+    }
+    finally
+    {
+      process.Dispose();
+      DeleteScriptDirectory(root);
+    }
+  }
+
   private static ManagedEnvironment ActiveEnvironment(ManagedEnvironmentSettings settings) =>
     settings.Snapshot?.Environments.Single(item => item.Id == "environment")
       ?? throw new InvalidOperationException("Active environment is missing.");
@@ -392,11 +451,18 @@ public sealed class ManagedEnvironmentSettingsTests
   /// </summary>
   private sealed class MutableManager : IManagedEnvironmentClient
   {
+    public List<string> SourceSaves { get; } = [];
+
     private readonly List<ManagedEnvironment> environments =
     [
       new ManagedEnvironment("environment", "活动环境", 1, "venv", "installed", "python",
         "ready", "installed", "unverified", "not_checked", "not_started", null,
-        Recipe: "rapidocr-cpu"),
+        Recipe: "rapidocr-cpu",
+        ResolvedSources:
+        [
+          new ManagedEnvironmentResolvedSource("package_index", "tuna-pypi", "TUNA PyPI 镜像", "product_default"),
+          new ManagedEnvironmentResolvedSource("model_registry", null, null, "product_default"),
+        ]),
     ];
 
     public Task<ManagedEnvironmentList> ListEnvironmentsAsync(
@@ -412,14 +478,36 @@ public sealed class ManagedEnvironmentSettingsTests
       return Task.FromResult(created);
     }
 
+    public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
+      string? environmentId, string? packageSourceId, string? modelSourceId,
+      CancellationToken cancellationToken = default)
+    {
+      SourceSaves.Add(
+        $"{environmentId ?? "<global>"}|{packageSourceId ?? "<null>"}|{modelSourceId ?? "<null>"}");
+      return Task.FromResult(new ManagedEnvironmentList("environment", 1, [.. environments],
+        DefaultSourceIds: packageSourceId is null ? [] : [packageSourceId]));
+    }
+
     public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(
       string environmentId, string recipe, IReadOnlyList<string>? sourceIds = null,
       CancellationToken cancellationToken = default) =>
       Task.FromResult(new ManagedEnvironmentPlan("plan", environmentId, 1, 1, recipe,
-        sourceIds ?? []));
+        sourceIds ?? ["tuna-pypi"], RequestedSourceIds: sourceIds,
+        Sources:
+        [
+          new ManagedEnvironmentPlanSource(
+            (sourceIds ?? ["tuna-pypi"])[0], "package_index",
+            sourceIds is null ? "TUNA PyPI 镜像" : "PyPI 官方源",
+            "https://example.invalid", sourceIds is not null,
+            sourceIds is null ? "product_default" : "environment_override",
+            "online_index"),
+        ],
+        DependencyOrigin: "online_index", PythonOrigin: "product_bundle",
+        RuntimeWheelOrigin: "product_bundle"));
 
     public Task<ManagedEnvironment> InstallEnvironmentAsync(
-      ManagedEnvironmentPlan plan, CancellationToken cancellationToken = default)
+      ManagedEnvironmentPlan plan, IReadOnlyList<string>? sourceIds = null,
+      CancellationToken cancellationToken = default)
     {
       int index = environments.FindIndex(item => item.Id == plan.EnvironmentId);
       environments[index] = environments[index] with
@@ -480,10 +568,11 @@ public sealed class ManagedEnvironmentSettingsTests
       string environmentId, string recipe, IReadOnlyList<string>? sourceIds = null,
       CancellationToken cancellationToken = default) =>
       Task.FromResult(new ManagedEnvironmentPlan("plan", environmentId, 1, 0, recipe,
-        sourceIds ?? []));
+        sourceIds ?? ["tuna-pypi"], RequestedSourceIds: sourceIds));
 
     public async Task<ManagedEnvironment> InstallEnvironmentAsync(
-      ManagedEnvironmentPlan plan, CancellationToken cancellationToken = default)
+      ManagedEnvironmentPlan plan, IReadOnlyList<string>? sourceIds = null,
+      CancellationToken cancellationToken = default)
     {
       if (InstallError is not null) throw InstallError;
       Started.SetResult();
@@ -495,6 +584,10 @@ public sealed class ManagedEnvironmentSettingsTests
       }
       throw new InvalidOperationException("Install unexpectedly completed.");
     }
+
+    public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
+      string? environmentId, string? packageSourceId, string? modelSourceId,
+      CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
     public Task<ManagedEnvironment> CreateEnvironmentAsync(string name, CancellationToken cancellationToken = default) =>
       throw new NotSupportedException();

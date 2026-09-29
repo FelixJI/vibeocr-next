@@ -538,6 +538,12 @@ public sealed record ManagedEnvironmentRequest
     [JsonPropertyName("source_ids")]
     public IReadOnlyList<string>? SourceIds { get; init; }
 
+    [JsonPropertyName("package_source_id")]
+    public string? PackageSourceId { get; init; }
+
+    [JsonPropertyName("model_source_id")]
+    public string? ModelSourceId { get; init; }
+
     [JsonPropertyName("plan_id")]
     public string? PlanId { get; init; }
 
