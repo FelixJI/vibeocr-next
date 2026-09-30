@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.6.2
+
+### Features
+
+- **capture:** 接入有界纵向长截图与统一图片会话 (#117) (cd73761)
+- **paddle:** 贯通多类型识别参数与结构化结果 (6d43c45)
+- **environments:** 展示并绑定环境安装来源 (8c5fab4)
+- **workbench:** 支持截图原位选字与桌面贴图 (#114) (84d71f2)
+- **runtime:** 引入具名虚拟环境与安全切换 (#113) (0afc80c)
+- **shell:** 统一原生快捷动作与智能截图入口 (#112) (204da48)
+- **capture:** 增加独立截图编辑会话与最终像素识别 (#111) (39dfcf4)
+
+### Bug Fixes
+
+- **desktop:** 核实安装取消终态并排除滚动控制窗污染 (#131) (7980df2)
+- **workbench:** 回收 PDF 状态与小窗口布局修复 (#130) (9978bc1)
+- **runtime:** 对齐受管理环境启动与探针预算 (#126) (709535d)
+- **environment:** 保留环境创建失败的脱敏诊断 (#124) (2714678)
+
+### Dependencies
+
+- **deps:** bump undici from 8.10.0 to 8.11.2 in /src/dotnet/VibeOCR.App/WebAssets (#120) (fbcde89)
+- **deps:** 移除未使用的 Python 开发与构建依赖 (#128) (76fec48)
+
 ## 0.6.1
 
 ### Features
