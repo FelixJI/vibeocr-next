@@ -46,12 +46,12 @@ internal static class WindowGeometryPolicy
   {
     int width = Math.Clamp(
       geometry.Width,
-      minWidthPhysical,
-      Math.Max(minWidthPhysical, workArea.Width));
+      Math.Min(minWidthPhysical, workArea.Width),
+      workArea.Width);
     int height = Math.Clamp(
       geometry.Height,
-      minHeightPhysical,
-      Math.Max(minHeightPhysical, workArea.Height));
+      Math.Min(minHeightPhysical, workArea.Height),
+      workArea.Height);
     int x = Math.Clamp(
       geometry.X,
       workArea.X - width + VisibleEdgePx,
