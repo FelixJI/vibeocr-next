@@ -467,9 +467,11 @@ def test_release_smoke_propagates_a_failed_web_ready_handshake(
 
 
 @pytest.mark.parametrize("installed_layout", [False, True])
+@pytest.mark.parametrize("layout_verified", [False, True])
 def test_web_ready_smoke_runs_an_isolated_production_profile(
     tmp_path: Path,
     installed_layout: bool,
+    layout_verified: bool,
 ) -> None:
     root = Path(__file__).parents[2]
     product = tmp_path / "product"
@@ -577,7 +579,7 @@ function Start-Process {
     } | ConvertTo-Json | Set-Content -LiteralPath $Launch
     New-Item -ItemType Directory -Path $env:WEBVIEW2_USER_DATA_FOLDER |
         Out-Null
-    '{"schema_version":1,"state":"bridge-ready","resources":"verified"}' |
+    '{"schema_version":1,"state":"bridge-ready","resources":"verified","layout_sizes_verified":2}' |
         Set-Content -LiteralPath $env:VIBEOCR_WEB_READY_FILE
     $process = [pscustomobject]@{ ExitCode = 0 }
     $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
@@ -596,7 +598,15 @@ $global:webViewCleanupAttempts | Set-Content -LiteralPath $Cleanup
         encoding="utf-8",
     )
 
-    subprocess.run(
+    if not layout_verified:
+        wrapper.write_text(
+            wrapper.read_text(encoding="utf-8").replace(
+                ',"layout_sizes_verified":2', ""
+            ),
+            encoding="utf-8",
+        )
+
+    result = subprocess.run(
         [
             resolve_executable("pwsh"),
             "-NoProfile",
@@ -607,8 +617,15 @@ $global:webViewCleanupAttempts | Set-Content -LiteralPath $Cleanup
             str(launch),
             str(cleanup),
         ],
-        check=True,
+        capture_output=True,
+        text=True,
     )
+
+    if not layout_verified:
+        assert result.returncode != 0
+        assert "Web workbench health signal is invalid" in result.stderr
+        return
+    assert result.returncode == 0, result.stderr
 
     launched = json.loads(launch.read_text(encoding="utf-8-sig"))
     assert Path(launched["file"]).parent != product
