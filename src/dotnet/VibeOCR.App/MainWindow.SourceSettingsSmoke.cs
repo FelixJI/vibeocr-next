@@ -78,6 +78,7 @@ public sealed partial class MainWindow
     RecordManagedSmokeStage("confirm then cancel");
     // 通过公开按钮确认/取消；只读操作日志用于确认实际安装已启动，
     // 避免定时猜测启动速度，也不以重试隐藏取消抢跑。
+    string planId = await ReadSmokeInstallPlanIdAsync(pair[0].Id);
     await ClickManagedSmokeButtonAsync("确认安装依赖");
     string journal = Path.Combine(layout.StateRoot, "state", "environments.json");
     using (var started = new CancellationTokenSource(TimeSpan.FromMinutes(1)))
@@ -86,15 +87,28 @@ public sealed partial class MainWindow
       {
         using JsonDocument registry = JsonDocument.Parse(await File.ReadAllTextAsync(journal, started.Token));
         JsonElement record = registry.RootElement.GetProperty("environments").GetProperty(pair[0].Id);
+        int revision = record.GetProperty("revision").GetInt32();
+        if (revision != pair[0].Revision)
+          // 成功提交会剔除 last_install_operation 并推进 revision：
+          // 立即失败，不等取消路径超时。
+          throw new InvalidOperationException(
+            $"Install committed before cancel: revision={revision}.");
         if (record.TryGetProperty("last_install_operation", out JsonElement operation) &&
-            operation.GetProperty("phase").GetString() == "installing") break;
+            operation.GetProperty("plan_id").GetString() == planId)
+        {
+          string? phase = operation.GetProperty("phase").GetString();
+          if (phase == "installing") break;
+          if (phase == "failed")
+            throw new InvalidOperationException(
+              $"Install failed before cancel: reason_code=" +
+              $"{operation.GetProperty("reason_code").GetString()}, " +
+              $"detail={operation.GetProperty("detail").GetString()}.");
+        }
         await Task.Delay(100, started.Token);
       }
     }
-    await ClickManagedSmokeButtonAsync("取消安装");
-    ManagedEnvironmentList cancelled = await WaitForSmokeSnapshotAsync(list =>
-      BySmokeId(list, pair[0].Id).LastInstallFailure is { Phase: "failed", ReasonCode: "install_interrupted" },
-      TimeSpan.FromMinutes(3));
+    ManagedEnvironmentList cancelled = await CancelSmokeInstallAndWaitForOutcomeAsync(
+      pair[0].Id, planId, pair[0].Revision);
     ManagedEnvironment interrupted = BySmokeId(cancelled, pair[0].Id);
     var interruptedFailure = interrupted.LastInstallFailure!;
     if (smokeInstallAttempts!() != 1 || interrupted.Status != "empty" ||
@@ -149,6 +163,7 @@ public sealed partial class MainWindow
       {
         phase = interruptedFailure.Phase,
         reason_code = interruptedFailure.ReasonCode,
+        plan_id = interruptedFailure.PlanId,
         requested_source_ids = interruptedFailure.RequestedSourceIds,
         effective_source_ids = interruptedFailure.EffectiveSourceIds ?? [],
       },
@@ -159,6 +174,64 @@ public sealed partial class MainWindow
 
   private static ManagedEnvironment BySmokeId(ManagedEnvironmentList list, string id) =>
     list.Environments.Single(item => item.Id == id);
+
+  private async Task<string> ReadSmokeInstallPlanIdAsync(string environmentId)
+  {
+    string planJournal = Path.Combine(
+      layout.StateRoot, "state", "environment-plans", $"{environmentId}.json");
+    using JsonDocument plan = JsonDocument.Parse(await File.ReadAllTextAsync(planJournal));
+    return plan.RootElement.GetProperty("plan_id").GetString()
+      ?? throw new InvalidOperationException("Source smoke plan id is missing.");
+  }
+
+  /// <summary>
+  /// #123：取消后的终态分类。以本次预览的 plan_id 绑定安装记录：
+  /// 真实中断才继续；先于取消的自然失败或已提交的成功立即以明确
+  /// 错误报告，不空等 install_interrupted 超时，也不把自然失败算通过。
+  /// </summary>
+  private async Task<ManagedEnvironmentList> CancelSmokeInstallAndWaitForOutcomeAsync(
+    string environmentId, string planId, int startRevision)
+  {
+    using var cancellation = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+    bool cancelSent = false;
+    while (true)
+    {
+      ManagedEnvironmentList? list = smokeEnvironmentSnapshot!();
+      ManagedEnvironment? current = list?.Environments
+        .SingleOrDefault(item => item.Id == environmentId);
+      if (current?.LastInstallFailure is { PlanId: string failurePlanId } failure &&
+          failurePlanId == planId &&
+          failure.Phase == "failed" &&
+          failure.EnvironmentRevision == startRevision)
+      {
+        if (cancelSent && failure.ReasonCode == "install_interrupted" &&
+            current.Revision == startRevision)
+          return list!;
+        throw new InvalidOperationException(
+          $"Cancel did not interrupt this install; durable record: phase={failure.Phase}, " +
+          $"reason_code={failure.ReasonCode}, detail={failure.Detail}.");
+      }
+      // 未知 phase 或无法归属的记录：不报失败/中断，继续有界等待诊断。
+      if (current is not null && (current.Revision != startRevision || current.Status != "empty"))
+        throw new InvalidOperationException(
+          $"Cancel raced with a committed install: revision={current.Revision}, " +
+          $"status={current.Status}, recipe={current.Recipe}.");
+      if (!cancelSent)
+        cancelSent = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+          "(() => { const b=Array.from(document.querySelectorAll('button')).find(b => " +
+          "b.textContent?.trim() === '取消安装' && !b.disabled); " +
+          "if (!b) return false; b.click(); return true; })()") == "true";
+      try { await Task.Delay(100, cancellation.Token); }
+      catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+      {
+        throw new TimeoutException(
+          $"Source settings smoke cancel outcome timed out: plan_id={planId}, " +
+          $"revision={current?.Revision.ToString() ?? "<missing>"}, " +
+          $"status={current?.Status ?? "<missing>"}, " +
+          $"failure={current?.LastInstallFailure?.ReasonCode ?? "<none>"}.");
+      }
+    }
+  }
 
   private static string? ResolvedSmokeSource(ManagedEnvironment environment, string kind) =>
     environment.ResolvedSources?.FirstOrDefault(item => item.Kind == kind)?.Id;

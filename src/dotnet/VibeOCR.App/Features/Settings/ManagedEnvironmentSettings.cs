@@ -33,6 +33,9 @@ public sealed class ManagedEnvironmentSettings(
         runningSession() is { } session && session.Id == environment.Id &&
         session.Revision == environment.Revision;
 
+    /// <summary>取消后读取持久终态的有界预算；测试可缩短以同步验证超时分支。</summary>
+    internal TimeSpan InstallCancelConfirmTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
     public Task RefreshAsync(CancellationToken cancellationToken) => RunAsync(async () =>
     {
         await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: true);
@@ -75,20 +78,17 @@ public sealed class ManagedEnvironmentSettings(
         using IDisposable lease = productMaintenance.Acquire(
             ProductMaintenanceOwner.RuntimeMaintenance, linked.Cancel);
         Volatile.Write(ref activeInstall, linked);
+        bool cancelled = false;
         try
         {
             StateChanged?.Invoke();
             installAttempted?.Invoke();
             await manager.InstallEnvironmentAsync(
                 plan, sourceId is null ? null : [sourceId], linked.Token);
-            Plan = null;
-            await ReloadEnvironmentsAsync(linked.Token, strictEvidence: false);
-            Status = "依赖已安装；请切换环境以验证并启动服务。";
         }
         catch (OperationCanceledException) when (linked.IsCancellationRequested)
         {
-            Status = "安装已取消；原环境保持不变，取消详情可在该环境记录中查看。";
-            await ReloadEnvironmentsAsync(CancellationToken.None, strictEvidence: false);
+            cancelled = true;
         }
         catch (Exception)
         {
@@ -98,7 +98,29 @@ public sealed class ManagedEnvironmentSettings(
         }
         finally
         {
+            // #123：安装事务一结束就关闭取消入口；成功后的刷新只是结果展示。
             Volatile.Write(ref activeInstall, null);
+            StateChanged?.Invoke();
+        }
+        if (cancelled)
+        {
+            await ConfirmCancelledInstallAsync(plan);
+            return;
+        }
+        Plan = null;
+        try
+        {
+            await ReloadEnvironmentsAsync(linked.Token, strictEvidence: false);
+            Status = "依赖已安装；请切换环境以验证并启动服务。";
+        }
+        catch (OperationCanceledException)
+        {
+            // 事务已提交成功；刷新取消只影响展示，不得改判为安装取消/失败。
+            Status = "依赖已安装；结果刷新已取消，请刷新列表查看最新状态。";
+        }
+        catch (Exception)
+        {
+            Status = "依赖已安装；结果刷新失败，请刷新列表查看最新状态。";
         }
     }, cancellationToken, "安装未完成；失败原因请查看该环境记录。");
 
@@ -121,6 +143,66 @@ public sealed class ManagedEnvironmentSettings(
         if (touchesModel && targetRunning)
             Status += "模型来源将在该环境下次启动时生效，不会改变当前运行中的服务。";
     }, cancellationToken);
+
+    // #123：取消后以 plan_id 绑定读取持久终态；无法归属的结果一律未确认，
+    // 不凭 revision 增长宣布成功，不把自然失败改写成取消，不把中断归因用户。
+    private async Task ConfirmCancelledInstallAsync(ManagedEnvironmentPlan plan)
+    {
+        using var deadline = new CancellationTokenSource(InstallCancelConfirmTimeout);
+        while (true)
+        {
+            try
+            {
+                await ReloadEnvironmentsAsync(deadline.Token, strictEvidence: false);
+            }
+            catch (Exception error)
+            {
+                Status = $"已请求取消；最终状态读取失败（{error.Message}），结果未确认，请稍后刷新查看。";
+                return;
+            }
+            ManagedEnvironment? environment = Snapshot?.Environments
+                .FirstOrDefault(item => item.Id == plan.EnvironmentId);
+            if (environment is null)
+            {
+                Status = "已请求取消；目标环境已不存在，本次结果未确认。";
+                return;
+            }
+            if (environment.LastInstallFailure is { PlanId: string failurePlanId } failure &&
+                failurePlanId == plan.PlanId)
+            {
+                if (failure.Phase == "installing")
+                {
+                    // 操作锁尚未释放；有界重读，超时转未确认。
+                    try { await Task.Delay(TimeSpan.FromMilliseconds(250), deadline.Token); }
+                    catch (OperationCanceledException)
+                    {
+                        Status = "已请求取消；安装可能仍在进行或已中断，结果未确认，请稍后刷新查看。";
+                        return;
+                    }
+                    continue;
+                }
+                if (failure.Phase == "failed" &&
+                    failure.EnvironmentRevision == plan.EnvironmentRevision)
+                {
+                    if (failure.ReasonCode == "install_interrupted")
+                    {
+                        if (environment.Revision == plan.EnvironmentRevision)
+                        {
+                            Status = "安装已中断；原环境保持不变，详情可在该环境记录中查看。";
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        Status = $"安装已经失败（{failure.ReasonCode}）；失败详情保留在该环境记录中，取消未改变该结果。";
+                        return;
+                    }
+                }
+            }
+            break;
+        }
+        Status = "已请求取消；本次安装结果未确认，请刷新列表查看。";
+    }
 
     public void CancelInstall()
     {

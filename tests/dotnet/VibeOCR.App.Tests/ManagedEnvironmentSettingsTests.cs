@@ -120,8 +120,202 @@ public sealed class ManagedEnvironmentSettingsTests
     Assert.Equal(1, installAttempts);
     Assert.False(settings.CanCancelInstall);
     Assert.True(maintenance.State.IsIdle);
-    Assert.Equal("安装已取消；原环境保持不变，取消详情可在该环境记录中查看。", settings.Status);
+    Assert.Equal("安装已中断；原环境保持不变，详情可在该环境记录中查看。", settings.Status);
     Assert.Equal("environment", settings.Snapshot?.Environments[0].Id);
+    Assert.Equal("install_interrupted",
+      settings.Snapshot?.Environments[0].LastInstallFailure?.ReasonCode);
+  }
+
+  [Fact]
+  public async Task CancelClickDuringPostInstallRefreshIsIgnoredAndInstallStaysCommitted()
+  {
+    var manager = new RefreshGateManager();
+    var maintenance = new ProductMaintenanceCoordinator();
+    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
+      () => null, maintenance);
+    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi",
+      TestContext.Current.CancellationToken);
+
+    Task install = settings.InstallAsync("plan", "pypi", CancellationToken.None);
+    await manager.RefreshEntered.Task.WaitAsync(TimeSpan.FromSeconds(5),
+      TestContext.Current.CancellationToken);
+
+    // 安装事务一结束取消入口立即关闭；刷新期间的取消点击必须是 no-op。
+    Assert.False(settings.CanCancelInstall);
+    settings.CancelInstall();
+    manager.RefreshGate.SetResult();
+    await install.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+    Assert.False(manager.RefreshTokenCancelled);
+    Assert.True(install.IsCompletedSuccessfully);
+    Assert.Equal("依赖已安装；请切换环境以验证并启动服务。", settings.Status);
+    ManagedEnvironment committed = settings.Snapshot!.Environments[0];
+    Assert.Equal("installed", committed.Status);
+    Assert.Equal(2, committed.Revision);
+    Assert.True(maintenance.State.IsIdle);
+    Assert.False(settings.CanCancelInstall);
+  }
+
+  [Fact]
+  public async Task RefreshCancellationAfterCommittedInstallKeepsInstalledResult()
+  {
+    var manager = new RefreshGateManager { CancelRefreshByToken = true };
+    var maintenance = new ProductMaintenanceCoordinator();
+    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
+      () => null, maintenance);
+    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi",
+      TestContext.Current.CancellationToken);
+
+    using var user = new CancellationTokenSource();
+    Task install = settings.InstallAsync("plan", "pypi", user.Token);
+    await manager.RefreshEntered.Task.WaitAsync(TimeSpan.FromSeconds(5),
+      TestContext.Current.CancellationToken);
+    Assert.False(settings.CanCancelInstall);
+
+    user.Cancel();
+    await install.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+    // #123：提交成功后的刷新取消不得改判安装结果，也不得拖垮操作。
+    Assert.True(install.IsCompletedSuccessfully);
+    Assert.Equal("依赖已安装；结果刷新已取消，请刷新列表查看最新状态。", settings.Status);
+    Assert.DoesNotContain("安装已取消", settings.Status);
+    Assert.True(maintenance.State.IsIdle);
+    Assert.False(settings.CanCancelInstall);
+    Assert.False(settings.IsBusy);
+  }
+
+  [Fact]
+  public async Task CancelRacingNaturalInstallFailurePreservesDurableFailure()
+  {
+    var manager = new WaitingManager { CancelFailureReasonCode = "venv_creation_failed" };
+    var maintenance = new ProductMaintenanceCoordinator();
+    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
+      () => null, maintenance);
+    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi",
+      TestContext.Current.CancellationToken);
+
+    Task install = settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
+    await manager.Started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    await settings.CancelAndWaitForInstallAsync();
+    await install.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+    // 失败先于取消落盘：真实失败必须保留，不得改称取消或环境未变。
+    Assert.True(install.IsCompletedSuccessfully);
+    Assert.Contains("安装已经失败（venv_creation_failed）", settings.Status);
+    Assert.DoesNotContain("原环境保持不变", settings.Status);
+    Assert.Equal("venv_creation_failed",
+      settings.Snapshot?.Environments[0].LastInstallFailure?.ReasonCode);
+    Assert.Equal("plan", settings.Snapshot?.Environments[0].LastInstallFailure?.PlanId);
+    Assert.True(maintenance.State.IsIdle);
+    Assert.False(settings.CanCancelInstall);
+  }
+
+  [Theory]
+  [InlineData(null)]
+  [InlineData("previous-plan")]
+  public async Task CancelWithoutMatchingDurableRecordStaysUnconfirmed(string? failurePlanId)
+  {
+    var manager = new WaitingManager
+    {
+      CancelFailureReasonCode = null,
+      Failure = failurePlanId is null ? null : new ManagedEnvironmentInstallFailure(
+        "failed", 1, "rapidocr-cpu", "install_interrupted", "preview_again", "Previous attempt",
+        PlanId: failurePlanId),
+    };
+    var maintenance = new ProductMaintenanceCoordinator();
+    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
+      () => null, maintenance);
+    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi",
+      TestContext.Current.CancellationToken);
+
+    Task install = settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
+    await manager.Started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    await settings.CancelAndWaitForInstallAsync();
+    await install.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+    // #123：revision 未变但缺本次记录，不能声称“已取消/未提交更改”。
+    Assert.True(install.IsCompletedSuccessfully);
+    Assert.Equal("已请求取消；本次安装结果未确认，请刷新列表查看。", settings.Status);
+    Assert.Equal(failurePlanId, settings.Snapshot?.Environments[0].LastInstallFailure?.PlanId);
+    Assert.Equal(1, settings.Snapshot?.Environments[0].Revision);
+    Assert.True(maintenance.State.IsIdle);
+  }
+
+  [Fact]
+  public async Task CancelAfterCommitDoesNotClaimSuccessOrCancellation()
+  {
+    var manager = new WaitingManager { CommitBeforeCancel = true, CancelFailureReasonCode = null };
+    var maintenance = new ProductMaintenanceCoordinator();
+    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
+      () => null, maintenance);
+    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi",
+      TestContext.Current.CancellationToken);
+
+    Task install = settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
+    await manager.Started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    await settings.CancelAndWaitForInstallAsync();
+    await install.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+    // revision+1/recipe 相同不能证明本次 plan 成功：未关联成功一律未确认。
+    Assert.True(install.IsCompletedSuccessfully);
+    Assert.Equal("已请求取消；本次安装结果未确认，请刷新列表查看。", settings.Status);
+    ManagedEnvironment durable = settings.Snapshot!.Environments[0];
+    Assert.Equal("installed", durable.Status);
+    Assert.Equal(2, durable.Revision);
+    Assert.True(maintenance.State.IsIdle);
+  }
+
+  [Fact]
+  public async Task CancelConfirmReadFailureReportsUnconfirmedResult()
+  {
+    var manager = new WaitingManager { FailListAfterCancel = true };
+    var maintenance = new ProductMaintenanceCoordinator();
+    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
+      () => null, maintenance);
+    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi",
+      TestContext.Current.CancellationToken);
+
+    Task install = settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
+    await manager.Started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    await settings.CancelAndWaitForInstallAsync();
+    await install.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+    // 读取失败：如实未确认，不虚构环境未变，也不拖垮操作。
+    Assert.True(install.IsCompletedSuccessfully);
+    Assert.Contains("已请求取消", settings.Status);
+    Assert.Contains("最终状态读取失败", settings.Status);
+    Assert.Contains("结果未确认", settings.Status);
+    Assert.DoesNotContain("安装已取消", settings.Status);
+    Assert.True(maintenance.State.IsIdle);
+    Assert.False(settings.CanCancelInstall);
+    Assert.False(settings.IsBusy);
+  }
+
+  [Fact]
+  public async Task CancelConfirmReadIsBoundedByDeadlineAndTimesOutUnconfirmed()
+  {
+    var manager = new WaitingManager { BlockListAfterCancel = true };
+    var maintenance = new ProductMaintenanceCoordinator();
+    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
+      () => null, maintenance)
+    { InstallCancelConfirmTimeout = TimeSpan.FromMilliseconds(200) };
+    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi",
+      TestContext.Current.CancellationToken);
+
+    Task install = settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
+    await manager.Started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    // 不用无界的 CancelAndWaitForInstallAsync：旧实现会无限读取，
+    // 测试自身用 WaitAsync 时限保证有界失败。
+    settings.CancelInstall();
+    await install.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+    // 读取预算由 deadline 约束：超时转未确认，不无限等下去。
+    Assert.True(install.IsCompletedSuccessfully);
+    Assert.Contains("已请求取消", settings.Status);
+    Assert.Contains("结果未确认", settings.Status);
+    Assert.DoesNotContain("安装已取消", settings.Status);
+    Assert.True(maintenance.State.IsIdle);
+    Assert.False(settings.IsBusy);
   }
 
   [Fact]
@@ -549,20 +743,35 @@ public sealed class ManagedEnvironmentSettingsTests
     }
   }
 
+  /// <summary>
+  /// 可控时序的冻结管理器：安装可阻塞到取消，取消时可模拟持久层已
+  /// 写入的终态（中断投影、先于取消的自然失败、已提交记录、读取故障）。
+  /// </summary>
   private sealed class WaitingManager : IManagedEnvironmentClient
   {
     public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public bool Cancelled { get; private set; }
     public string? ActiveId { get; init; }
     public Exception? InstallError { get; init; }
-    public ManagedEnvironmentInstallFailure? Failure { get; init; }
+    public ManagedEnvironmentInstallFailure? Failure { get; set; }
+    public string? CancelFailureReasonCode { get; init; } = "install_interrupted";
+    public bool CommitBeforeCancel { get; init; }
+    public bool FailListAfterCancel { get; init; }
+    public bool BlockListAfterCancel { get; init; }
 
-    public Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default) =>
-      Task.FromResult(new ManagedEnvironmentList(ActiveId, 0, [
-        new ManagedEnvironment("environment", "保留环境", 1, "venv", "empty", "python",
-          "ready", "empty", "unavailable", "not_checked", "not_started", null,
-          LastInstallFailure: Failure)
-      ]));
+    private ManagedEnvironment current = new("environment", "保留环境", 1, "venv", "empty", "python",
+      "ready", "empty", "unavailable", "not_checked", "not_started", null);
+
+    public async Task<ManagedEnvironmentList> ListEnvironmentsAsync(
+      CancellationToken cancellationToken = default)
+    {
+      if (BlockListAfterCancel && Cancelled)
+        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+      if (FailListAfterCancel && Cancelled)
+        throw new HttpRequestException("environments list unavailable");
+      return new ManagedEnvironmentList(ActiveId, 0,
+        [current with { LastInstallFailure = Failure }]);
+    }
 
     public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(
       string environmentId, string recipe, IReadOnlyList<string>? sourceIds = null,
@@ -576,10 +785,26 @@ public sealed class ManagedEnvironmentSettingsTests
     {
       if (InstallError is not null) throw InstallError;
       Started.SetResult();
+      if (CommitBeforeCancel)
+        current = current with
+        {
+          Revision = plan.EnvironmentRevision + 1,
+          Status = "installed",
+          DependencyState = "installed",
+          Recipe = plan.Recipe,
+        };
       try { await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken); }
       catch (OperationCanceledException)
       {
         Cancelled = true;
+        if (CancelFailureReasonCode is { } reason)
+          Failure = new ManagedEnvironmentInstallFailure(
+            "failed", plan.EnvironmentRevision, plan.Recipe, reason,
+            reason == "install_interrupted" ? "preview_again" : "check_directory_permissions",
+            reason == "install_interrupted"
+              ? "Dependency installation was interrupted."
+              : "could not prepare candidate environment: venv exit 1",
+            null, ["tuna-pypi"], PlanId: plan.PlanId);
         throw;
       }
       throw new InvalidOperationException("Install unexpectedly completed.");
@@ -588,6 +813,72 @@ public sealed class ManagedEnvironmentSettingsTests
     public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
       string? environmentId, string? packageSourceId, string? modelSourceId,
       CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+    public Task<ManagedEnvironment> CreateEnvironmentAsync(string name, CancellationToken cancellationToken = default) =>
+      throw new NotSupportedException();
+    public Task<PreparedEnvironmentSwitch> PrepareEnvironmentSwitchAsync(string environmentId,
+      CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<CommittedEnvironmentSwitch> CommitEnvironmentSwitchAsync(
+      PreparedEnvironmentSwitch prepared, StartedEnvironmentHealth? startedHealth = null,
+      CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<ManagedEnvironment> RepairEmptyEnvironmentAsync(string environmentId,
+      CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task DeleteEnvironmentAsync(string environmentId, CancellationToken cancellationToken = default) =>
+      throw new NotSupportedException();
+  }
+
+  /// <summary>
+  /// 控制安装提交后结果刷新的时序：install 返回即标记已安装并进入刷新
+  /// 阻塞点，验证取消入口关闭与刷新取消不改判安装结果。
+  /// </summary>
+  private sealed class RefreshGateManager : IManagedEnvironmentClient
+  {
+    public TaskCompletionSource RefreshEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource RefreshGate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public bool RefreshTokenCancelled { get; private set; }
+    public bool CancelRefreshByToken { get; init; }
+
+    private ManagedEnvironment current = new("environment", "环境", 1, "venv", "empty", "python",
+      "ready", "empty", "unavailable", "not_checked", "not_started", null);
+    private int installReturned;
+
+    public async Task<ManagedEnvironmentList> ListEnvironmentsAsync(
+      CancellationToken cancellationToken = default)
+    {
+      if (Volatile.Read(ref installReturned) == 0)
+        return new ManagedEnvironmentList(null, 0, [current]);
+      RefreshEntered.TrySetResult();
+      if (CancelRefreshByToken)
+        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+      await RefreshGate.Task.WaitAsync(cancellationToken);
+      RefreshTokenCancelled = cancellationToken.IsCancellationRequested;
+      return new ManagedEnvironmentList(null, 0, [current]);
+    }
+
+    public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(
+      string environmentId, string recipe, IReadOnlyList<string>? sourceIds = null,
+      CancellationToken cancellationToken = default) =>
+      Task.FromResult(new ManagedEnvironmentPlan("plan", environmentId, 1, 0, recipe,
+        sourceIds ?? ["tuna-pypi"], RequestedSourceIds: sourceIds));
+
+    public Task<ManagedEnvironment> InstallEnvironmentAsync(
+      ManagedEnvironmentPlan plan, IReadOnlyList<string>? sourceIds = null,
+      CancellationToken cancellationToken = default)
+    {
+      current = current with
+      {
+        Revision = plan.EnvironmentRevision + 1,
+        Status = "installed",
+        DependencyState = "installed",
+        Recipe = plan.Recipe,
+      };
+      Volatile.Write(ref installReturned, 1);
+      return Task.FromResult(current);
+    }
+
+    public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
+        string? environmentId, string? packageSourceId, string? modelSourceId,
+        CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
     public Task<ManagedEnvironment> CreateEnvironmentAsync(string name, CancellationToken cancellationToken = default) =>
       throw new NotSupportedException();

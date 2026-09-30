@@ -53,7 +53,10 @@ public sealed record ManagedEnvironmentInstallFailure(
     [property: JsonPropertyName("next_action")] string NextAction,
     [property: JsonPropertyName("detail")] string Detail,
     [property: JsonPropertyName("requested_source_ids")] IReadOnlyList<string>? RequestedSourceIds = null,
-    [property: JsonPropertyName("effective_source_ids")] IReadOnlyList<string>? EffectiveSourceIds = null);
+    [property: JsonPropertyName("effective_source_ids")] IReadOnlyList<string>? EffectiveSourceIds = null,
+    // 只读回放操作启动时冻结的 plan_id；历史记录缺失时为 null，
+    // 调用方据此把失败/中断终态绑定回发起的安装计划，不得凭 revision 冒认。
+    [property: JsonPropertyName("plan_id")] string? PlanId = null);
 
 public sealed record ManagedEnvironmentList(
     [property: JsonPropertyName("active_id")] string? ActiveId,
