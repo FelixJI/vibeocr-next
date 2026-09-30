@@ -550,3 +550,36 @@ def test_interrupted_install_retains_frozen_sources_after_restart(
         assert running["reason_code"] == "install_in_progress"
         assert running["requested_source_ids"] == requested
         assert running["effective_source_ids"] == ["pypi"]
+
+
+@pytest.mark.parametrize("returncode", [1, -1])
+def test_venv_failure_retains_sanitized_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, returncode: int
+) -> None:
+    import subprocess
+
+    manifest, component = _release(tmp_path / "release")
+    manager = _open(tmp_path, manifest, component)
+    record = _write_record(manager, "a" * 32)
+    plan = manager.preview_install(record["id"], "rapidocr-cpu")
+    diagnostic = (
+        "x" * 5000 + "\nvenv failed\nC:\\private\\fixture\npassword=fixture-secret"
+    )
+
+    def failed_venv(args, **kwargs):
+        assert "venv" in args
+        return subprocess.CompletedProcess(args, returncode, "", diagnostic)
+
+    monkeypatch.setattr(subprocess, "run", failed_venv)
+    with pytest.raises(ManagedEnvironmentError, match=f"exit {returncode}"):
+        manager.install(plan["plan_id"], record["id"], "rapidocr-cpu")
+    persisted = manager._read()["environments"][record["id"]]
+    failure = persisted["last_install_operation"]
+    assert failure["reason_code"] == "venv_creation_failed"
+    assert "venv failed" in failure["detail"]
+    assert f"exit {returncode}" in failure["detail"]
+    assert len(failure["detail"]) <= 4000
+    assert "private" not in failure["detail"]
+    assert "fixture-secret" not in failure["detail"]
+    assert persisted["revision"] == record["revision"]
+    assert persisted["path"] == record["path"]

@@ -1417,7 +1417,8 @@ class ManagedEnvironmentStore:
                 )
                 if result.returncode:
                     raise ManagedEnvironmentError(
-                        "could not prepare candidate environment",
+                        "could not prepare candidate environment:\n"
+                        f"{safe_runtime_detail(result.stderr)}\nvenv exit {result.returncode}",
                         reason_code="venv_creation_failed",
                         next_action="check_directory_permissions",
                     )
