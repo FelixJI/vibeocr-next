@@ -515,6 +515,9 @@ async function startScrollSession(app, fixture) {
   await dragSelection(app, fixture, selection, overlay.Handle);
   const start = await waitForControlBar(app.child.pid, 'scroll-capture-start', 15000);
   assert(start.enabled, 'scroll-capture-start is disabled.');
+  // A topmost source can hide the controller's compositor shadow and mask #127.
+  // Keep the real source in the normal window band for capture verification.
+  await native('lower', { FixturePid: fixture.pid, Handle: fixture.root });
   assert.equal(Number(await native('taskbar-state')), app.evidence.taskbarStateBefore,
     'Opening the scroll controller changed the Windows taskbar preference.');
   const barBounds = { left: start.left, top: start.top, right: start.right, bottom: start.bottom };

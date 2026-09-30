@@ -190,6 +190,26 @@ public sealed class VerticalScrollStitcherTests
   }
 
   [Fact]
+  public void BottomEdgeContaminationIsRejectedWithoutChangingAcceptedFrame()
+  {
+    const int height = 305;
+    byte[] document = RenderDocument(Width, height + 120);
+    CapturedFrame first = FrameFromDocument(document, Width, 0, height);
+    CapturedFrame next = FrameFromDocument(document, Width, 120, height);
+    foreach (CapturedFrame frame in new[] { first, next })
+      for (int y = height - 6; y < height; y++)
+        for (int x = 0; x < Width; x++)
+          frame.Pixels[y * frame.Stride + x * 4] ^= 1;
+    var stitcher = new VerticalScrollStitcher(first);
+
+    Assert.Equal(ScrollAppendStatus.NoOverlap,
+      stitcher.Append(next, TestContext.Current.CancellationToken).Status);
+    Assert.Equal(1, stitcher.FrameCount);
+    Assert.Equal(height, stitcher.Height);
+    Assert.Equal(first.Pixels, stitcher.BuildFrame().Pixels);
+  }
+
+  [Fact]
   public void PeriodicContentIsAmbiguous()
   {
     // 周期 8、位移 10：候选偏移 2、10、18… 全部可完整验证，必须判为歧义而不是错拼。
