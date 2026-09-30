@@ -24,12 +24,12 @@ namespace VibeOCR.App;
 
 public sealed partial class MainWindow : Window
 {
-  // 默认/最小尺寸均为逻辑像素（DIP），与前端 CSS 的 min-width/min-height 一致；
+  // 默认/最小尺寸均为逻辑像素（DIP）；Web 布局还需适配扣除窗口边框后的可用尺寸。
   // 写入 AppWindow/WM_GETMINMAXINFO 前由 WindowGeometryPolicy 按 DPI 换算为物理像素。
   private const int DefaultWidth = 1280;
   private const int DefaultHeight = 800;
-  private const int MinWidth = 1024;
-  private const int MinHeight = 720;
+  private const int MinWidth = 640;
+  private const int MinHeight = 480;
 
   [DllImport("user32.dll")]
   private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
@@ -402,12 +402,12 @@ public sealed partial class MainWindow : Window
   {
     if (state == "bridge-ready")
     {
-      DispatcherQueue.TryEnqueue(() =>
+      DispatcherQueue.TryEnqueue(async () =>
       {
         RecoveryPanel.Visibility = Visibility.Collapsed;
         WorkbenchWebView.Visibility = Visibility.Visible;
+        await CompleteWebReadySmokeAsync();
       });
-      _ = CompleteWebReadySmokeAsync();
       if (!screenshotSmokeStarted &&
           Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "screenshot-e2e")
       {
@@ -486,11 +486,40 @@ public sealed partial class MainWindow : Window
       {
         throw new InvalidOperationException($"Web workbench resource smoke failed: {result}");
       }
+      // Exercise the packaged bundle in the real WebView2 client area. A ready
+      // bridge alone cannot detect fixed-width content or a blank React root.
+      foreach (SizeInt32 size in new[] { new SizeInt32(640, 480), new SizeInt32(1280, 800) })
+      {
+        double scale = WindowGeometryPolicy.GetWindowScale(WindowNative.GetWindowHandle(this));
+        AppWindow.Resize(new SizeInt32(
+          WindowGeometryPolicy.ScaleToPhysical(size.Width, scale),
+          WindowGeometryPolicy.ScaleToPhysical(size.Height, scale)));
+        await Task.Delay(100);
+        bool ready = false;
+        for (int attempt = 0; attempt < 50; attempt++)
+        {
+          string layoutResult = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("""
+            (() => {
+              const main = document.querySelector('main');
+              const heading = main?.querySelector('h1');
+              const root = document.querySelector('#root > .fluent-root');
+              return !!heading && !!root && main.clientWidth > 0 && main.clientHeight > 0 &&
+                Math.abs(root.getBoundingClientRect().height - innerHeight) <= 1 &&
+                root.getBoundingClientRect().height <= innerHeight + 1 &&
+                document.documentElement.scrollWidth <= innerWidth + 1 &&
+                main.scrollWidth <= main.clientWidth + 1;
+            })()
+            """);
+          if (layoutResult == "true") { ready = true; break; }
+          await Task.Delay(100);
+        }
+        if (!ready) throw new InvalidOperationException("Packaged workbench layout did not fit its client area.");
+      }
       resourceBroker.Revoke(lease);
       if (!string.IsNullOrWhiteSpace(healthFile))
       {
         File.WriteAllText(healthFile,
-          "{\"schema_version\":1,\"state\":\"bridge-ready\",\"resources\":\"verified\"}");
+          "{\"schema_version\":1,\"state\":\"bridge-ready\",\"resources\":\"verified\",\"layout_sizes_verified\":2}");
       }
       Environment.Exit(0);
     }

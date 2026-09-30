@@ -14,6 +14,7 @@ using Microsoft.Web.WebView2.Core;
 using VibeOCR.App.Services;
 using VibeOCR.App.Web;
 using VibeOCR.App.Workbench;
+using VibeOCR.Platform.Windows;
 using Windows.Graphics;
 using Windows.Storage;
 using Windows.Storage.Streams;
@@ -34,6 +35,15 @@ internal sealed class PinnedImageWindow : IDisposable
   private const int GwlExStyle = -20;
   private const long WsExLayered = 0x00080000;
   private const uint LwaAlpha = 0x00000002;
+  private const uint WmNcHitTest = 0x0084;
+  private const uint WmNcLButtonDown = 0x00A1;
+  private const int HtCaption = 2;
+  private const uint GaRoot = 2;
+  private const int SmCyCaption = 4;
+  private const int SmCySizeFrame = 33;
+  private const int SmCxPaddedBorder = 92;
+  private const uint MouseEventFLeftDown = 0x0002;
+  private const uint MouseEventFLeftUp = 0x0004;
   private readonly Window window = new();
   private readonly WebView2 view = new();
   private readonly TextBlock status = new() { VerticalAlignment = VerticalAlignment.Center };
@@ -101,19 +111,75 @@ internal sealed class PinnedImageWindow : IDisposable
   }
   internal async Task SmokeDragTitleBarAsync(int dx, int dy)
   {
+    // Real-mouse-path drag: Activate only raises the pin (WinUI Activate does not
+    // guarantee foreground). Verify the point really hits this pin's caption before
+    // the native press, then move the cursor only after this window received
+    // WM_NCLBUTTONDOWN (the original point is already fixed in that message) and the
+    // press actually activated it, and release only after the window really moved.
+    // Never wait for WM_ENTERSIZEMOVE before moving: it may only arrive after the
+    // drag threshold is crossed, which would self-lock the drag.
+    nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
     window.Activate();
-    PointInt32 before = window.AppWindow.Position;
-    int x = before.X + window.AppWindow.Size.Width / 2;
-    int y = before.Y + 14;
+    if (!GetWindowRect(handle, out RectL bounds))
+      throw new Win32Exception(Marshal.GetLastWin32Error());
+    uint dpi = GetDpiForWindow(handle);
+    if (dpi == 0) throw new InvalidOperationException("Pin DPI is unavailable.");
+    int Metric(int index) => GetSystemMetricsForDpi(index, dpi);
+    // DPI-scaled caption midline; a hardcoded 14px offset drifts with scaling or frame.
+    int x = bounds.Left + (bounds.Right - bounds.Left) / 2;
+    int y = bounds.Top + Metric(SmCySizeFrame) + Metric(SmCxPaddedBorder) +
+      Metric(SmCyCaption) / 2;
+    string geometry = $"handle=0x{(long)handle:X}, rect=({bounds.Left},{bounds.Top}," +
+      $"{bounds.Right},{bounds.Bottom}), dpi={dpi}, point=({x},{y})";
+    nint hitTest = SendMessage(handle, WmNcHitTest, 0,
+      (nint)(((uint)y << 16) | ((uint)x & 0xFFFF)));
+    nint hitRoot = GetAncestor(WindowFromPoint(new PointL { X = x, Y = y }), GaRoot);
+    if (hitTest != HtCaption || hitRoot != handle)
+      throw new InvalidOperationException($"Pin drag point is not its caption: " +
+        $"{geometry}, hitTest={hitTest}, hitRoot=0x{(long)hitRoot:X}.");
     if (!SetCursorPos(x, y)) throw new Win32Exception(Marshal.GetLastWin32Error());
-    MouseEvent(0x0002, 0, 0, 0, 0);
+    var pressed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var messages = new WindowMessageService(handle);
+    EventHandler<WindowMessage> onMessage = (_, message) =>
+    {
+      if (message.Id == WmNcLButtonDown && message.WParam == (nuint)HtCaption)
+        pressed.TrySetResult();
+    };
+    messages.MessageReceived += onMessage;
+    bool down = false;
     try
     {
+      MouseEvent(MouseEventFLeftDown, 0, 0, 0, 0);
+      down = true;
+      try { await pressed.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
+      catch (TimeoutException error)
+      {
+        throw new InvalidOperationException(
+          $"Pin caption press was not delivered: {geometry}.", error);
+      }
+      nint foreground = GetForegroundWindow();
+      if (foreground != handle)
+        throw new InvalidOperationException($"Pin press did not activate it: " +
+          $"{geometry}, fg=0x{(long)foreground:X}.");
       if (!SetCursorPos(x + dx, y + dy))
         throw new Win32Exception(Marshal.GetLastWin32Error());
-      await Task.Delay(100);
+      for (int attempt = 0; ; attempt++)
+      {
+        if (!GetWindowRect(handle, out RectL moved))
+          throw new Win32Exception(Marshal.GetLastWin32Error());
+        if (moved.Left != bounds.Left || moved.Top != bounds.Top) break;
+        if (attempt >= 200)
+          throw new InvalidOperationException($"Pin did not follow the drag: {geometry}, " +
+            $"cursor=({x + dx},{y + dy}), now=({moved.Left},{moved.Top}).");
+        await Task.Delay(25);
+      }
     }
-    finally { MouseEvent(0x0004, 0, 0, 0, 0); }
+    finally
+    {
+      if (down) MouseEvent(MouseEventFLeftUp, 0, 0, 0, 0);
+      messages.MessageReceived -= onMessage;
+      messages.Dispose();
+    }
   }
   internal async Task SmokeCapturePreviewAsync(string path)
   {
@@ -499,4 +565,42 @@ internal sealed class PinnedImageWindow : IDisposable
 
   [DllImport("user32.dll", EntryPoint = "mouse_event")]
   private static extern void MouseEvent(uint flags, uint dx, uint dy, uint data, nuint extraInfo);
+
+  [DllImport("user32.dll")]
+  private static extern nint GetForegroundWindow();
+
+  [DllImport("user32.dll", SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool GetWindowRect(nint window, out RectL rect);
+
+  [DllImport("user32.dll")]
+  private static extern uint GetDpiForWindow(nint window);
+
+  [DllImport("user32.dll")]
+  private static extern int GetSystemMetricsForDpi(int index, uint dpi);
+
+  [DllImport("user32.dll")]
+  private static extern nint WindowFromPoint(PointL point);
+
+  [DllImport("user32.dll")]
+  private static extern nint GetAncestor(nint window, uint flags);
+
+  [DllImport("user32.dll", EntryPoint = "SendMessageW")]
+  private static extern nint SendMessage(nint window, uint message, nuint wParam, nint lParam);
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct RectL
+  {
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct PointL
+  {
+    public int X;
+    public int Y;
+  }
 }

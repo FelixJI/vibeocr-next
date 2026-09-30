@@ -194,6 +194,9 @@ Protocol v2 与 Backend 通信。ViewModel 不应拼 HTTP 或依赖模型内部�
 完整路线见 [源码阅读指南](docs/source-reading-guide.md)。Web workbench 的 bridge 设计见
 [`docs/web-workbench-architecture.md`](docs/web-workbench-architecture.md)。
 
+2026-09-07 的历史审阅与验证记录：[可维护性审阅](docs/maintainability-readiness-audit.md)、
+[窗口布局验证](docs/e2e-layout-validation.md)。当前验证状态以对应 PR 为准。
+
 ## 开发与验证
 
 需要 Windows、仓库锁定的 [.NET SDK](global.json)、[uv](https://docs.astral.sh/uv/) 与 WebAssets

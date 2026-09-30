@@ -81,7 +81,7 @@ try {
     }
     $health = Get-Content -LiteralPath $healthFile -Raw | ConvertFrom-Json
     if ($health.schema_version -ne 1 -or $health.state -ne 'bridge-ready' -or
-        $health.resources -ne 'verified') {
+        $health.resources -ne 'verified' -or $health.layout_sizes_verified -ne 2) {
         throw 'Web workbench health signal is invalid'
     }
     Write-Host 'Web workbench smoke verified: bridge-ready, resource GET and annotation POST.'
