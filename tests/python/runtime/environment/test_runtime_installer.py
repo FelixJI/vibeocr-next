@@ -761,6 +761,7 @@ def test_inactive_install_does_not_block_active_job_admission_or_target_conflict
             if item["id"] == target["id"]
         )
         assert running["last_install_failure"]["reason_code"] == "install_in_progress"
+        assert running["last_install_failure"]["plan_id"] == plan["plan_id"]
         admission.start()
         conflict.start()
         assert admitted.wait(1), "A job admission waited on B's package installation"
@@ -1085,6 +1086,7 @@ def test_named_install_failure_redacts_diagnostics_and_interruption_is_durable(
     failure = records[first["id"]]["last_install_failure"]
     assert failure["reason_code"] == "network_error"
     assert failure["next_action"] == "check_source_and_retry"
+    assert failure["plan_id"] == plan["plan_id"]
     assert records[other["id"]]["last_install_failure"] is None
 
     def interrupted(_python: Path, _scope, _source: str) -> None:
@@ -1105,6 +1107,8 @@ def test_named_install_failure_redacts_diagnostics_and_interruption_is_durable(
         by_id[first["id"]]["last_install_failure"]["reason_code"]
         == "install_interrupted"
     )
+    # 中断投影也携带 plan_id：调用方据此把终态归属回本次安装计划。
+    assert by_id[first["id"]]["last_install_failure"]["plan_id"] == plan["plan_id"]
     assert by_id[other["id"]]["last_install_failure"] is None
 
 

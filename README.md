@@ -24,6 +24,7 @@ worker 仍在独立进程运行。
 > [!IMPORTANT]
 > Next 仅支持 Windows 10/11 x64，桌面技术栈是 WinUI 3，不是 WPF。Release 只发布由本仓当前
 > 源码构建并绑定的单 Next 产品候选，不再消费独立 Backend/Protocol Release。
+> 滚动截图需要 Windows 10 2004（build 19041）或更高版本，以排除控制窗及其阴影。
 
 ## 主要能力
 

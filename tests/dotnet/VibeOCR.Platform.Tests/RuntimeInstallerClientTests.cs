@@ -60,6 +60,22 @@ public sealed class RuntimeInstallerClientTests
         Assert.Null(environment.Reason);
         Assert.Equal("network_error", environment.LastInstallFailure?.ReasonCode);
         Assert.Equal("下载源连接失败。", environment.LastInstallFailure?.Detail);
+        // 历史记录缺失 plan_id 时为 null，不冒认归属。
+        Assert.Null(environment.LastInstallFailure?.PlanId);
+    }
+
+    [Fact]
+    public async Task NamedEnvironmentClientRoundTripsInstallFailurePlanBinding()
+    {
+        const string response = """{"protocol_version":2,"response_kind":"environment","action":"list","result":{"active_id":null,"active_revision":0,"environments":[{"id":"abc","name":"A","revision":1,"kind":"venv","status":"empty","python":"python.exe","python_state":"ready","dependency_state":"empty","engine_state":"unavailable","model_state":"not_applicable","service_state":"not_started","reason":null,"last_install_failure":{"phase":"failed","environment_revision":1,"recipe":"rapidocr-cpu","reason_code":"install_interrupted","next_action":"preview_again","detail":"Dependency installation was interrupted.","plan_id":"0123456789abcdef0123456789abcdef","requested_source_ids":null,"effective_source_ids":["pypi"]}}]}}""";
+        var client = new RuntimeInstallerClient(Configuration(), new StubRunner(
+            new RuntimeInstallerProcessResult(0, response, "")));
+
+        ManagedEnvironmentList list = await client.ListEnvironmentsAsync(TestContext.Current.CancellationToken);
+        ManagedEnvironment environment = Assert.Single(list.Environments);
+        Assert.Equal("0123456789abcdef0123456789abcdef",
+            environment.LastInstallFailure?.PlanId);
+        Assert.Equal(["pypi"], environment.LastInstallFailure?.EffectiveSourceIds);
     }
 
     [Fact]

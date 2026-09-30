@@ -105,6 +105,8 @@ internal static class ScrollCaptureSession
       }
 
       _external.ThrowIfCancellationRequested();
+      if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041))
+        throw new PlatformNotSupportedException("滚动截图需要 Windows 10 2004 或更高版本，以排除控制窗及阴影。");
       _bounds.Validate();
       ValidateSelectionSize();
       _desktop = SmartScreenCandidates.CurrentDesktop();
@@ -249,6 +251,13 @@ internal static class ScrollCaptureSession
       _window.AppWindow.SetPresenter(presenter);
       _window.AppWindow.IsShownInSwitchers = false;
       _controlHandle = WinRT.Interop.WindowNative.GetWindowHandle(_window);
+      // Keep the controller and its compositor shadow out of captured pixels.
+      if (!SetWindowDisplayAffinity(_controlHandle, 0x00000011)) // WDA_EXCLUDEFROMCAPTURE
+      {
+        int error = Marshal.GetLastPInvokeError();
+        _window.Close();
+        throw new System.ComponentModel.Win32Exception(error, "无法将滚动截图控制窗排除出屏幕采集。");
+      }
       root.Measure(new Windows.Foundation.Size(WindowLogicalWidth, double.PositiveInfinity));
       double scale = _sourceDpi > 0 ? _sourceDpi / 96.0 : 1.0;
       int width = (int)Math.Ceiling(WindowLogicalWidth * scale) + WindowChromeSlackPx;
@@ -889,6 +898,10 @@ internal static class ScrollCaptureSession
 
     [DllImport("user32.dll")]
     private static extern uint GetDpiForWindow(nint window);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowDisplayAffinity(nint window, uint affinity);
 
     [DllImport("user32.dll")]
     private static extern nint GetForegroundWindow();

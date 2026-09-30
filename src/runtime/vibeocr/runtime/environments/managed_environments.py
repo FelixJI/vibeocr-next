@@ -425,6 +425,12 @@ class ManagedEnvironmentStore:
             if "effective_source_ids" in operation
             else {}
         )
+        # 只读投影操作已冻结的 plan_id：调用方用它把读回的失败/中断终态
+        # 绑定回发起的安装计划，避免同 revision/recipe 的旧记录被冒认。
+        # 历史记录缺失该键时不输出，调用方按不可归属处理。
+        plan_evidence = (
+            {"plan_id": operation["plan_id"]} if "plan_id" in operation else {}
+        )
         if operation["phase"] == "installing":
             lock = RuntimeStoreLock(
                 self.paths.locks_root
@@ -452,6 +458,7 @@ class ManagedEnvironmentStore:
                 if reason_code == "install_in_progress"
                 else "preview_again",
                 "detail": detail,
+                **plan_evidence,
                 **source_evidence,
             }
         return {
@@ -461,6 +468,7 @@ class ManagedEnvironmentStore:
             "reason_code": operation["reason_code"],
             "next_action": operation["next_action"],
             "detail": safe_runtime_detail(operation["detail"]),
+            **plan_evidence,
             **source_evidence,
         }
 

@@ -4,7 +4,7 @@
 param(
     [Parameter(Mandatory = $true)][ValidateSet(
         'fixture', 'windows', 'taskbar-state', 'probe', 'foreground', 'focus', 'raise', 'wheel', 'scenario',
-        'mouse-move', 'mouse-down', 'mouse-up', 'key', 'hide', 'close', 'quit',
+        'mouse-move', 'mouse-down', 'mouse-up', 'key', 'hide', 'lower', 'close', 'quit',
         'uia-find', 'uia-invoke', 'uia-bar-text', 'metrics', 'save-file', 'frame', 'geometry', 'window-text')][string]$Action,
     [int]$AppPid = 0,
     [int]$FixturePid = 0,
@@ -310,6 +310,13 @@ public static class ScrollCaptureNative
             throw new InvalidOperationException("Owned fixture raise failed.");
     }
 
+    public static void Lower(long handle, int pid)
+    {
+        RequireOwner(handle, pid);
+        if (!SetWindowPos(new IntPtr(handle), new IntPtr(-2), 0, 0, 0, 0, 0x0013))
+            throw new InvalidOperationException("Owned fixture demotion failed.");
+    }
+
     public static void FocusFixture(long handle, int fixturePid, int x, int y)
     {
         RequireOwner(handle, fixturePid);
@@ -582,6 +589,7 @@ try {
         'probe' { [ScrollCaptureNative]::Probe($AppPid, $FixturePid, $X, $Y) | ConvertTo-Json -Compress -Depth 5 }
         'foreground' { [ScrollCaptureNative]::Foreground($FixturePid) }
         'raise' { [ScrollCaptureNative]::Raise($Handle, $FixturePid) }
+        'lower' { [ScrollCaptureNative]::Lower($Handle, $FixturePid) }
         'scenario' {
             $mode = switch ($Scenario) { 'normal' { 0 }; 'low-texture' { 1 }; 'dynamic' { 2 }; 'jump' { 3 }; 'move' { 4 } }
             [ScrollCaptureNative]::Scenario($Handle, $FixturePid, $mode)
