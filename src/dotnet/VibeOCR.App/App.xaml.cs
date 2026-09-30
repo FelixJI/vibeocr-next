@@ -896,12 +896,13 @@ public sealed partial class App : Application
         IManagedEnvironmentClient manager = _managedEnvironments
             ?? throw new InvalidOperationException("Runtime manager is unavailable.");
         var coordinator = new ManagedEnvironmentSwitchCoordinator(manager);
+        // 真实 Paddle 导入探针允许 60 秒；启动预算还需覆盖解释器和装配开销。
         ManagedEnvironmentSession? session = await coordinator.SwitchAsync(
             environmentId,
             _managedSession,
             PublishManagedEnvironmentSession,
             Path.Combine(layout.DataRoot, "supervisor.log"),
-            TimeSpan.FromSeconds(layout.Profile == "winui-dev" ? 90 : 15),
+            TimeSpan.FromSeconds(90),
             RuntimeCapabilityRequirements.Read(layout.ComponentLock),
             cancellationToken,
             injectSoakCrash);
