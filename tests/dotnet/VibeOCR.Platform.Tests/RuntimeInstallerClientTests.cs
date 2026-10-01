@@ -12,6 +12,62 @@ namespace VibeOCR.Platform.Tests;
 public sealed class RuntimeInstallerClientTests
 {
     [Fact]
+    public async Task CompatibleQueryUsesRuntimeRecipeAndPreservesTypedResult()
+    {
+        const string response = """
+            {"protocol_version":2,"response_kind":"environment","action":"find_compatible","result":{
+              "recipe":"rapidocr-cpu","recipe_lock":"bound-lock",
+              "recipes":[{"id":"rapidocr-cpu","display_name":"RapidOCR · CPU",
+                "configured_recognition_types":["text"],"accelerator":"cpu","target_device":"cpu",
+                "python_version":"3.13.15","abi":"cp313","platform":"win_amd64","scope_id":"base",
+                "component_ids":["runtime_host","rapidocr-base"],"recipe_lock":"bound-lock",
+                "dependencies":["rapidocr==3.7.0"],"dependency_origin":"bundled_pack",
+                "python_origin":"product_bundle","runtime_wheel_origin":"product_bundle"}],
+              "selected":{"environment_id":"abc","environment_revision":2,"recipe":"rapidocr-cpu",
+                "selection_reason":"active_environment"},
+              "environments":[{"environment_id":"abc","name":"用户名称","revision":2,"status":"installed",
+                "recipe":"rapidocr-cpu","active":true,"selected":true,"reason_code":"selected_active_environment"}]
+            }}
+            """;
+        var runner = new QueueRunner(
+            new RuntimeInstallerProcessResult(0, response, ""),
+            new RuntimeInstallerProcessResult(0,
+                """
+                {"protocol_version":2,"response_kind":"environment","action":"list","result":{
+                  "active_id":null,"active_revision":0,"environments":[],
+                  "recipes":[{"id":"rapidocr-cpu","display_name":"RapidOCR · CPU","target_device":"cpu"}]
+                }}
+                """, ""));
+        var client = new RuntimeInstallerClient(Configuration(), runner);
+
+        ManagedEnvironmentQueryResult result = await client.FindCompatibleEnvironmentAsync(
+            "rapidocr-cpu", TestContext.Current.CancellationToken);
+
+        JsonElement request = Request(Assert.Single(runner.StartInfos));
+        Assert.Equal("environment", request.GetProperty("request_kind").GetString());
+        Assert.Equal("find_compatible", request.GetProperty("action").GetString());
+        Assert.Equal("rapidocr-cpu", request.GetProperty("recipe").GetString());
+        Assert.False(request.TryGetProperty("source_ids", out _));
+        Assert.Equal("abc", result.Selected?.EnvironmentId);
+        Assert.Equal(2, result.Selected?.EnvironmentRevision);
+        Assert.Equal("active_environment", result.Selected?.SelectionReason);
+        ManagedEnvironmentRecipe recipe = Assert.Single(result.Recipes!);
+        Assert.Equal(["rapidocr==3.7.0"], recipe.Dependencies);
+        Assert.Equal("win_amd64", recipe.Platform);
+        Assert.Equal("cpu", recipe.TargetDevice);
+        Assert.Equal("bundled_pack", recipe.DependencyOrigin);
+        ManagedEnvironmentQueryMatch match = Assert.Single(result.Environments!);
+        Assert.Equal("用户名称", match.Name);
+        Assert.True(match.Active);
+        Assert.True(match.Selected);
+        Assert.Equal("selected_active_environment", match.ReasonCode);
+
+        ManagedEnvironmentList list = await client.ListEnvironmentsAsync(TestContext.Current.CancellationToken);
+        Assert.Equal("rapidocr-cpu", Assert.Single(list.Recipes!).Id);
+        Assert.Equal("list", Request(runner.StartInfos[1]).GetProperty("action").GetString());
+    }
+
+    [Fact]
     public async Task NamedEnvironmentSwitchUsesFrozenManagerBindingAndCasToken()
     {
         const string prepared = """{"environment_id":"abc","environment_revision":2,"active_id":"old","active_revision":4,"python":"C:\\venv\\python.exe","requires_supervisor":true,"launch":null}""";

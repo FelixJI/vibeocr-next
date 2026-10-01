@@ -66,7 +66,8 @@ public sealed record ManagedEnvironmentList(
     [property: JsonPropertyName("default_source_ids")] IReadOnlyList<string>? DefaultSourceIds = null,
     [property: JsonPropertyName("unknown_default_source_ids")] IReadOnlyList<string>? UnknownDefaultSourceIds = null,
     [property: JsonPropertyName("source_config_revision")] int SourceConfigRevision = 0,
-    [property: JsonPropertyName("package_source_ids")] IReadOnlyList<string>? PackageSourceIds = null);
+    [property: JsonPropertyName("package_source_ids")] IReadOnlyList<string>? PackageSourceIds = null,
+    [property: JsonPropertyName("recipes")] IReadOnlyList<ManagedEnvironmentRecipe>? Recipes = null);
 
 public sealed record ManagedEnvironmentPlan(
     [property: JsonPropertyName("plan_id")] string PlanId,
@@ -112,6 +113,50 @@ public sealed record StartedEnvironmentHealth(
     [property: JsonPropertyName("port")] int Port,
     [property: JsonPropertyName("instance_id")] string InstanceId);
 
+/// <summary>Runtime 权威配方目录条目：仅搬运 Runtime 投影的锁/用途/设备与来源真值，C# 不另算依赖图。</summary>
+public sealed record ManagedEnvironmentRecipe(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("display_name")] string DisplayName,
+    [property: JsonPropertyName("configured_recognition_types")] IReadOnlyList<string>? ConfiguredRecognitionTypes = null,
+    [property: JsonPropertyName("accelerator")] string? Accelerator = null,
+    [property: JsonPropertyName("target_device")] string? TargetDevice = null,
+    [property: JsonPropertyName("python_version")] string? PythonVersion = null,
+    [property: JsonPropertyName("abi")] string? Abi = null,
+    [property: JsonPropertyName("platform")] string? Platform = null,
+    [property: JsonPropertyName("scope_id")] string? ScopeId = null,
+    [property: JsonPropertyName("component_ids")] IReadOnlyList<string>? ComponentIds = null,
+    [property: JsonPropertyName("recipe_lock")] string? RecipeLock = null,
+    [property: JsonPropertyName("dependencies")] IReadOnlyList<string>? Dependencies = null,
+    [property: JsonPropertyName("dependency_origin")] string? DependencyOrigin = null,
+    [property: JsonPropertyName("python_origin")] string? PythonOrigin = null,
+    [property: JsonPropertyName("runtime_wheel_origin")] string? RuntimeWheelOrigin = null);
+
+/// <summary>兼容环境查询命中：被选中的环境与选择依据（优先活动，其次稳定 id 序）。</summary>
+public sealed record ManagedEnvironmentSelection(
+    [property: JsonPropertyName("environment_id")] string EnvironmentId,
+    [property: JsonPropertyName("environment_revision")] int EnvironmentRevision,
+    [property: JsonPropertyName("recipe")] string Recipe,
+    [property: JsonPropertyName("selection_reason")] string SelectionReason);
+
+/// <summary>单环境对查询的评估：selected 标记选中项；reason_code 说明缺失/不兼容/未验证原因。</summary>
+public sealed record ManagedEnvironmentQueryMatch(
+    [property: JsonPropertyName("environment_id")] string EnvironmentId,
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("revision")] int Revision,
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("recipe")] string? Recipe = null,
+    [property: JsonPropertyName("active")] bool Active = false,
+    [property: JsonPropertyName("selected")] bool Selected = false,
+    [property: JsonPropertyName("reason_code")] string? ReasonCode = null);
+
+/// <summary>find_compatible 结果：请求配方、完整配方目录、选中环境与逐环境评估，均为 Runtime 真值。</summary>
+public sealed record ManagedEnvironmentQueryResult(
+    [property: JsonPropertyName("recipe")] string Recipe,
+    [property: JsonPropertyName("recipe_lock")] string? RecipeLock = null,
+    [property: JsonPropertyName("recipes")] IReadOnlyList<ManagedEnvironmentRecipe>? Recipes = null,
+    [property: JsonPropertyName("selected")] ManagedEnvironmentSelection? Selected = null,
+    [property: JsonPropertyName("environments")] IReadOnlyList<ManagedEnvironmentQueryMatch>? Environments = null);
+
 public interface IManagedEnvironmentClient
 {
     Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default);
@@ -122,6 +167,9 @@ public interface IManagedEnvironmentClient
     Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(
         string environmentId, string recipe, IReadOnlyList<string>? sourceIds = null,
         CancellationToken cancellationToken = default);
+    Task<ManagedEnvironmentQueryResult> FindCompatibleEnvironmentAsync(
+        string recipe, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("当前 Runtime 不支持兼容环境查询，请先更新 Runtime。");
     Task<ManagedEnvironment> InstallEnvironmentAsync(
         ManagedEnvironmentPlan plan, IReadOnlyList<string>? sourceIds = null,
         CancellationToken cancellationToken = default);
@@ -162,6 +210,11 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
         if (sourceIds is not null) fields["source_ids"] = sourceIds;
         return InvokeEnvironmentAsync<ManagedEnvironmentPlan>("preview_install", fields, cancellationToken);
     }
+
+    public Task<ManagedEnvironmentQueryResult> FindCompatibleEnvironmentAsync(
+        string recipe, CancellationToken cancellationToken = default) =>
+        InvokeEnvironmentAsync<ManagedEnvironmentQueryResult>("find_compatible",
+            new() { ["recipe"] = recipe }, cancellationToken);
 
     public Task<ManagedEnvironment> InstallEnvironmentAsync(
         ManagedEnvironmentPlan plan, IReadOnlyList<string>? sourceIds = null,

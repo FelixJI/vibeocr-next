@@ -1795,6 +1795,9 @@ class RuntimeInstaller:
             "UV_CACHE_DIR": str(state / "cache" / "uv"),
             "HF_HOME": str(state / "cache" / "huggingface"),
             "MODELSCOPE_CACHE": str(state / "cache" / "modelscope"),
+            "MODELSCOPE_HOME": str(state / "cache" / "modelscope-home"),
+            "MODELSCOPE_CREDENTIALS_PATH": str(state / "cache" / "modelscope-home"),
+            "VIBEOCR_SHARED_MODEL_CACHE": str(state / "model-cache"),
             "PADDLE_PDX_CACHE_HOME": str(state / "cache" / "paddlex"),
             "MINERU_HOME": str(state / "mineru4"),
             "TEMP": str(state / "temp"),
@@ -2258,6 +2261,8 @@ class RuntimeInstaller:
             "UV_CACHE_DIR",
             "HF_HOME",
             "MODELSCOPE_CACHE",
+            "MODELSCOPE_HOME",
+            "VIBEOCR_SHARED_MODEL_CACHE",
             "PADDLE_PDX_CACHE_HOME",
             "TEMP",
             "TMP",
@@ -2435,6 +2440,7 @@ def _request(value: object) -> dict[str, Any]:
             "create": {"name"},
             "set_sources": {"package_source_id", "model_source_id"},
             "preview_install": {"environment_id", "recipe"},
+            "find_compatible": {"recipe"},
             "install": {"plan_id", "environment_id", "recipe", "source_ids"},
             "prepare_switch": {"environment_id"},
             "commit_switch": {"prepared"},
@@ -2889,6 +2895,8 @@ def main(argv: list[str] | None = None) -> int:
                     if request.get("source_ids") is not None
                     else None,
                 )
+            elif action == "find_compatible":
+                payload = manager.find_compatible(request["recipe"])
             elif action == "prepare_switch":
                 payload = manager.prepare_switch(request["environment_id"])
             elif action == "commit_switch":

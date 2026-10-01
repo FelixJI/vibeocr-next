@@ -11,6 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from vibeocr.runtime.environments.model_cache import paddle_model_cache
 from vibeocr.runtime.recognition.core.pipelines import OCRPipeline
 from vibeocr.runtime.recognition.core.singleton_meta import SingletonMeta
 from vibeocr.runtime.recognition.models.ocr_options import OCROptions
@@ -720,15 +721,18 @@ class OCRService(metaclass=SingletonMeta):
         if pipeline == OCRPipeline.OCR:
             from paddleocr import PaddleOCR
 
-            instance = PaddleOCR(device=device, **kwargs)
+            with paddle_model_cache():
+                instance = PaddleOCR(device=device, **kwargs)
         elif pipeline == OCRPipeline.PP_STRUCTURE_V3:
             from paddleocr import PPStructureV3
 
-            instance = PPStructureV3(device=device, **kwargs)
+            with paddle_model_cache():
+                instance = PPStructureV3(device=device, **kwargs)
         elif pipeline == OCRPipeline.PADDLEOCR_VL:
             from paddleocr import PaddleOCRVL
 
-            instance = PaddleOCRVL(device=device, **kwargs)  # type: ignore[call-arg]
+            with paddle_model_cache():
+                instance = PaddleOCRVL(device=device, **kwargs)  # type: ignore[call-arg]
         else:
             msg = f"不支持的管道类型: {pipeline}"
             raise ValueError(msg)
@@ -820,9 +824,10 @@ class OCRService(metaclass=SingletonMeta):
                                 options if options is not None else spec.options_class()
                             )
                             kwargs.update(spec.constructor_kwargs(resolved))
-                        self._pipelines[pipeline_name] = spec.create_pipeline(
-                            device, **kwargs
-                        )
+                        with paddle_model_cache():
+                            self._pipelines[pipeline_name] = spec.create_pipeline(
+                                device, **kwargs
+                            )
                     else:
                         # 回退到旧式创建（通过 OCRPipeline 枚举）
                         try:
