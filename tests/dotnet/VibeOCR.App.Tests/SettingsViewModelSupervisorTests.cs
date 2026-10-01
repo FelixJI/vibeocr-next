@@ -8,6 +8,7 @@ using VibeOCR.App.Features.Settings;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Inference;
 using Xunit;
+using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 
 namespace VibeOCR.App.Tests;
 
@@ -217,6 +218,90 @@ public sealed class SettingsViewModelSupervisorTests
         Assert.False(viewModel.IsBusy);
         Assert.Null(viewModel.Backend);
         Assert.Equal("服务实例已更换，状态待重新检查。", viewModel.Status);
+    }
+
+    [Fact]
+    public async Task StaleResidencyFailureCannotOverwriteInvalidatedState()
+    {
+        var client = new GatedReadsClient();
+        client.RuntimeStatus.SetResult(ReadyRuntimeStatus());
+        client.Health.SetResult(SelectionHealthSnapshot());
+        var viewModel = new SettingsViewModel(client);
+
+        Task load = viewModel.LoadSnapshotAsync(CancellationToken.None);
+        // 驻留读取仍在途时实例更换：旧读取稍后以失败完成，不得把失效
+        // 文案改写成旧实例的故障文案。
+        viewModel.InvalidateSnapshot();
+        client.Residency.SetException(new InferenceClientException(
+            HttpV2ErrorCode.BackendUnavailable, "stale instance", retryable: true));
+        await load;
+
+        Assert.Equal("服务实例已更换，状态待重新检查。", viewModel.Status);
+        Assert.Null(viewModel.Backend);
+        Assert.False(viewModel.IsBusy);
+        // 已失效流程不得继续接管 selection：不触发任何 health 读取。
+        Assert.Equal(0, client.HealthCalls);
+    }
+
+    [Fact]
+    public async Task StaleSelectionFailureCannotOverwriteNewerState()
+    {
+        var client = new GatedReadsClient();
+        var viewModel = new SettingsViewModel(client);
+
+        Task selection = viewModel.LoadSelectionAsync(CancellationToken.None);
+        // 目录读取在途时实例更换：InvalidateSnapshot 新增的选择代递增使旧
+        // 读取的迟到失败（连同成功）一并作废。
+        viewModel.InvalidateSnapshot();
+        client.Health.SetException(new InferenceClientException(
+            HttpV2ErrorCode.BackendUnavailable, "stale instance", retryable: true));
+        await Assert.ThrowsAsync<InferenceClientException>(
+            () => selection);
+
+        // 旧实例的迟到失败不得覆盖失效占位文案（锁定本次新增的
+        // InvalidateSnapshot 选择代修复）。
+        Assert.Equal("服务实例已更换，状态待重新检查。", viewModel.Status);
+    }
+
+    private static Wire.Health SelectionHealthSnapshot() => new()
+    {
+        SchemaVersion = 2,
+        InstanceId = "sup-test",
+        ProtocolVersion = 2,
+        Ready = true,
+        Draining = false,
+        Capabilities = [],
+    };
+
+    private sealed class GatedReadsClient : InferenceClientStub, IInferenceClient
+    {
+        public int HealthCalls { get; private set; }
+
+        public TaskCompletionSource<RuntimeStatusSnapshot> RuntimeStatus { get; } =
+            NewSource<RuntimeStatusSnapshot>();
+        public TaskCompletionSource<ResidencyStatus> Residency { get; } =
+            NewSource<ResidencyStatus>();
+        public TaskCompletionSource<Wire.Health> Health { get; } =
+            NewSource<Wire.Health>();
+
+        public Task<RuntimeStatusSnapshot> GetRuntimeStatusAsync(
+            CancellationToken cancellationToken) => RuntimeStatus.Task;
+
+        public override Task<ResidencyStatus> GetResidencyAsync(
+            CancellationToken cancellationToken) => Residency.Task;
+
+        public override Task<Wire.Health> GetHealthAsync(
+            CancellationToken cancellationToken)
+        {
+            HealthCalls++;
+            return Health.Task;
+        }
+
+        public override Task<SettingsSnapshot> GetSettingsAsync(
+            CancellationToken cancellationToken) => Task.FromResult(new SettingsSnapshot());
+
+        private static TaskCompletionSource<T> NewSource<T>() => new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
     private static TaskCompletionSource<RuntimeStatusSnapshot> TaskCompletionSourceFor(

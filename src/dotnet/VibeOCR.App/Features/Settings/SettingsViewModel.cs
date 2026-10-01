@@ -187,9 +187,21 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                 PropertyChanged?.Invoke(this, new(nameof(VramUsedMb)));
                 Status = $"默认 TTL {status.DefaultTtlSeconds}s；已驻留管线 {status.Entries.Count} 个";
             }
-            catch (NotSupportedException) { Status = "当前运行环境不提供模型驻留控制。"; }
-            catch (InferenceClientException error) { Status = LocalizeV2(error.Code); }
-            await LoadSelectionSerializedAsync(forceReload: true, cancellationToken);
+            catch (NotSupportedException)
+            {
+                // 旧实例的迟到失败与迟到成功同样不得覆盖新状态。
+                if (generation == Volatile.Read(ref _generation))
+                    Status = "当前运行环境不提供模型驻留控制。";
+            }
+            catch (InferenceClientException error)
+            {
+                if (generation == Volatile.Read(ref _generation))
+                    Status = LocalizeV2(error.Code);
+            }
+            // 已失效的旧 runtime/residency 流程不得继续接管 selection：
+            // 否则其 forceReload 会清掉后续新代的选择代并以新代身份投影。
+            if (generation != Volatile.Read(ref _generation)) return;
+            await LoadSelectionSerializedAsync(forceReload: true, cancellationToken, generation);
         }
         catch (VibeOCR.App.Inference.InferenceClientNotAttachedException)
         {
@@ -241,6 +253,9 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         lock (_busyGuard)
         {
             _generation++;
+            // 实例更换同样作废在途目录读取的选择代：旧实例 selection 的
+            // 迟到成功/失败都不得越过新状态（与 ClearSelection 同一语义）。
+            Interlocked.Increment(ref _selectionGeneration);
             IsBusy = false;
             Backend = null;
             Status = "服务实例已更换，状态待重新检查。";
@@ -561,11 +576,19 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     private async Task LoadSelectionSerializedAsync(
         bool forceReload,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        long? snapshotGeneration = null)
     {
         await _settingsGate.WaitAsync(cancellationToken);
         try
         {
+            if (snapshotGeneration is { } generation &&
+                generation != Volatile.Read(ref _generation))
+            {
+                // 旧快照流程在等门期间被失效（实例更换/新读取）：不得清掉
+                // 新代的 selection 并以新代身份继续读取投影。
+                return;
+            }
             if (!forceReload && RecognitionSelection is not null)
             {
                 return;
@@ -614,12 +637,16 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
         catch (RuntimeSelectionException error)
         {
-            Status = LocalizeSelection(error);
+            if (selectionGeneration == Volatile.Read(ref _selectionGeneration))
+                Status = LocalizeSelection(error);
             throw;
         }
         catch (InferenceClientException error)
         {
-            Status = LocalizeV2(error.Code);
+            // 迟到失败与迟到成功同一代际闸门：旧实例/旧目录读取的失败
+            // 不得覆盖新实例状态。
+            if (selectionGeneration == Volatile.Read(ref _selectionGeneration))
+                Status = LocalizeV2(error.Code);
             throw;
         }
     }
