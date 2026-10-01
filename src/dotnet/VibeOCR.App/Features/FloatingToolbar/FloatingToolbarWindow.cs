@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Microsoft.UI.System;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -21,9 +22,11 @@ internal enum FloatingToolbarCommand
 }
 
 /// <summary>
-/// 悬浮工具栏窗口：无边框、置顶、不进任务栏/Alt+Tab；子类化拦截
-/// WM_MOUSEACTIVATE 返回 MA_NOACTIVATE，显示走 SW_SHOWNOACTIVATE，悬停与
-/// 点击都不抢前台焦点。左侧把手拖动重定位，松手由控制器判定贴边吸附。
+/// 悬浮工具栏窗口：无边框、置顶、不进任务栏/Alt+Tab；扩展样式声明
+/// WS_EX_NOACTIVATE（窗口级不激活，点击不成为前台，同贴边感应条先例），
+/// 子类化拦截 WM_MOUSEACTIVATE 返回 MA_NOACTIVATE，显示走
+/// SW_SHOWNOACTIVATE，悬停、点击与拖动都不抢前台焦点。左侧把手拖动重定位，
+/// 松手由控制器判定贴边吸附。
 /// 主题经 root RequestedTheme 走原生 ThemeResource：命令按钮/图标继承
 /// Fluent 主题化前景与悬停态，高对比时回落系统可见资源；系统变化仅在
 /// 窗口生命周期内订阅一次并封送 UI 线程，不修改用户系统主题。
@@ -53,7 +56,7 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     private readonly Border _grip;
     private readonly Grid _root = new();
     private readonly UISettings _uiSettings = new();
-    private readonly AccessibilitySettings _accessibility = new();
+    private readonly ThemeSettings _themeSettings;
     private readonly WindowMessageService _messages;
     private readonly nint _handle;
     private Windows.Foundation.Point? _dragOrigin;
@@ -86,12 +89,13 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
         _window.AppWindow.SetPresenter(presenter);
         _window.AppWindow.IsShownInSwitchers = false;
         _handle = WinRT.Interop.WindowNative.GetWindowHandle(_window);
+        _themeSettings = ThemeSettings.CreateForWindowId(_window.AppWindow.Id);
         AddToolWindowStyle();
         _messages = new WindowMessageService(_handle);
         _messages.MessageHandled += OnMessageHandled;
         // 主题跟随：窗口生命周期内各订阅一次；系统线程回调封送 UI 线程。
         _root.ActualThemeChanged += OnRootActualThemeChanged;
-        _accessibility.HighContrastChanged += OnSystemHighContrastChanged;
+        _themeSettings.Changed += OnSystemHighContrastChanged;
         // Window 创建后保持隐藏，显示一律走 ShowAt。
         _window.AppWindow.Hide();
     }
@@ -191,7 +195,7 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     }
 
     private bool IsSystemHighContrast() =>
-        Microsoft.UI.System.ThemeSettings.CreateForWindowId(_window.AppWindow.Id).HighContrast;
+        _themeSettings.HighContrast;
 
     /// <summary>
     /// System 跟随系统；手动 Light/Dark 固定不被系统 light/dark 覆盖；
@@ -224,7 +228,7 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
         ApplyResolvedTheme();
     }
 
-    private void OnSystemHighContrastChanged(AccessibilitySettings sender, object args)
+    private void OnSystemHighContrastChanged(ThemeSettings sender, object args)
     {
         // 系统线程回调：封送 UI 线程；已释放或入队失败时安全跳过，
         // 绝不显示窗口、不抢焦点。
@@ -244,7 +248,7 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
         }
 
         _disposed = true;
-        _accessibility.HighContrastChanged -= OnSystemHighContrastChanged;
+        _themeSettings.Changed -= OnSystemHighContrastChanged;
         _root.ActualThemeChanged -= OnRootActualThemeChanged;
         _messages.MessageHandled -= OnMessageHandled;
         _messages.Dispose();
@@ -392,8 +396,11 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     {
         const int GwlExStyle = -20;
         const long WsExToolWindow = 0x00000080;
+        // WS_EX_NOACTIVATE：窗口级不激活，点击/拖动不把工具栏提为前台
+        // （同 EdgeSensor 先例），补齐 show/move 参数与 MA_NOACTIVATE 的语义。
+        const long WsExNoActivate = 0x08000000;
         long style = GetWindowLongPtrW(_handle, GwlExStyle);
-        SetWindowLongPtrW(_handle, GwlExStyle, (nint)(style | WsExToolWindow));
+        SetWindowLongPtrW(_handle, GwlExStyle, (nint)(style | WsExToolWindow | WsExNoActivate));
     }
 
     private static bool TryGetCursorLocation(out Windows.Foundation.Point location)

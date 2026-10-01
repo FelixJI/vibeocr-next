@@ -656,7 +656,13 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(`Native actions E2E failed: ${error.name}: ${error.message}`);
-  process.exitCode = 1;
-});
+export { native, windows, waitForWindows, area, inside, delay, startFixture,
+  launchApp, openSettings, toolbarStatus, setCheckbox, stopOwned, configure,
+  captureThroughHotkey, taskbarState, pngPixels };
+
+if (path.resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(`Native actions E2E failed: ${error.name}: ${error.message}`);
+    process.exitCode = 1;
+  });
+}

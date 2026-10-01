@@ -486,6 +486,8 @@ public sealed class DesktopWorkbenchCommandHandler :
       error is IOException or UnauthorizedAccessException or InvalidOperationException or
         WorkbenchAnnotationAccessException or WorkbenchResourceAccessException or RuntimeInstallerException)
     {
+      if (command is SetFloatingToolbarPreferencesCommand)
+        AppLog.Error("Floating toolbar preferences failed", error);
       return new WorkbenchCommandOutcome(
         [],
         new WorkbenchProblem(
