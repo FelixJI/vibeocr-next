@@ -53,6 +53,8 @@ export type AppActionType =
   | "pdf.selectPages"
   | "pdf.setWindow"
   | "qrcode.generate"
+  | "qrcode.decodeCurrent"
+  | "qrcode.copyImage"
   | "qrcode.decode"
   | "qrcode.decodeClipboard"
   | "qrcode.cancel"
