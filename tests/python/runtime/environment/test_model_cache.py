@@ -550,3 +550,33 @@ def test_mineru_prepare_uses_product_code_and_service_configuration(
     assert env.get("MINERU_MODEL_BASE_DIR") != "old-generation"
     assert module.MinerUService._model_root == str(prepared)
     assert shutdowns == [True]
+
+
+def test_paddle_native_hf_endpoint_is_preserved_for_listing_and_payload(
+    tmp_path, monkeypatch, provider_server
+):
+    sdk = pytest.importorskip("huggingface_hub")
+    endpoint, payloads, counts = provider_server
+    monkeypatch.setitem(
+        sys.modules,
+        "paddlex.utils.flags",
+        types.SimpleNamespace(HUGGING_FACE_ENDPOINT=endpoint),
+    )
+    real_api, real_download = sdk.HfApi, sdk.hf_hub_download
+
+    def api(**kwargs):
+        assert kwargs.get("endpoint") == endpoint
+        return real_api(token=False, **kwargs)
+
+    def download(*args, **kwargs):
+        assert kwargs.get("endpoint") == endpoint
+        return real_download(*args, token=False, **kwargs)
+
+    monkeypatch.setattr(sdk, "HfApi", api)
+    monkeypatch.setattr(sdk, "hf_hub_download", download)
+    asset = cache.ModelAsset("paddlex-3.7.2", "huggingface", "org/model")
+    prepared = cache.prepare_models(
+        [asset], tmp_path / "view", shared_root=tmp_path / "shared"
+    )
+    assert counts == {name: len(data) for name, data in payloads.items()}
+    assert (prepared.root / "weights.bin").read_bytes() == payloads["weights.bin"]

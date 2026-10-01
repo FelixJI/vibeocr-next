@@ -136,11 +136,21 @@ def _validate_manifest(value: object, asset: ModelAsset) -> dict:
     return value
 
 
+def _hf_options(asset: ModelAsset) -> dict[str, str]:
+    if asset.namespace == "paddlex-3.7.2":
+        from paddlex.utils.flags import HUGGING_FACE_ENDPOINT
+
+        # Preserve PaddleX's native endpoint for both metadata and payload.
+        # Mirrors select transport, never model identity.
+        return {"endpoint": HUGGING_FACE_ENDPOINT}
+    return {}
+
+
 def _remote_manifest(asset: ModelAsset) -> dict:
     if asset.source == "huggingface":
         from huggingface_hub import HfApi
 
-        api = HfApi()
+        api = HfApi(**_hf_options(asset))
         revision = api.repo_info(asset.repo_id).sha
         entries = []
         for entry in api.list_repo_tree(
@@ -282,6 +292,7 @@ def _download(root: Path, asset: ModelAsset, manifest: dict, entry: dict) -> Pat
                 cache_dir=cache,
                 local_dir=local,
                 force_download=(local / entry["path"]).is_file(),
+                **_hf_options(asset),
             )
         )
     from modelscope_hub import HubApi
