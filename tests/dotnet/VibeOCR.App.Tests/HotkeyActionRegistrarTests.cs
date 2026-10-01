@@ -625,6 +625,251 @@ public sealed class HotkeyActionRegistrarTests : IDisposable
         }
     }
 
+    [Fact]
+    public void BeginRecordingSuspendsRegistrationsWithoutTouchingConfig()
+    {
+        (WindowsHotkeyRegistrar registrar, PortableLayout layout) = CreateRegistrar();
+        using (registrar)
+        {
+            WriteConfig(
+                layout,
+                "{\"hotkeys\": {\"global_screenshot\": \"Ctrl+Alt+Q\"}}");
+            registrar.InitializeActions();
+            Assert.True(registrar.SetActionHotkey(
+                HotkeyActionCatalog.ClipboardRecognize, "Ctrl+Alt+C", out string? error));
+            Assert.Null(error);
+            int[] oldIds = _native.ActiveIds.ToArray();
+            string configAtBegin = File.ReadAllText(layout.ConfigFile);
+
+            registrar.BeginRecording();
+
+            // 挂起：本应用全部注册与 ID 映射释放，旧 ID 不再触发任何动作。
+            Assert.True(registrar.IsRecording);
+            Assert.Empty(_native.ActiveIds);
+            foreach (int id in oldIds)
+            {
+                Assert.False(registrar.TryResolveAction(id, out _));
+            }
+
+            // Configured 与配置文件均不被录入挂起修改。
+            HotkeyActionStatus recognize = StatusOf(
+                registrar, HotkeyActionCatalog.ScreenshotRecognize);
+            HotkeyActionStatus clipboard = StatusOf(
+                registrar, HotkeyActionCatalog.ClipboardRecognize);
+            Assert.Equal("Ctrl+Alt+Q", recognize.ConfiguredHotkey);
+            Assert.Null(recognize.RegisteredHotkey);
+            Assert.Equal("Ctrl+Alt+C", clipboard.ConfiguredHotkey);
+            Assert.Null(clipboard.RegisteredHotkey);
+            Assert.Equal(configAtBegin, File.ReadAllText(layout.ConfigFile));
+
+            // 幂等：重复 Begin 不产生新状态或新注册。
+            registrar.BeginRecording();
+            Assert.True(registrar.IsRecording);
+            Assert.Empty(_native.ActiveIds);
+            Assert.Equal(configAtBegin, File.ReadAllText(layout.ConfigFile));
+        }
+    }
+
+    [Fact]
+    public void EndRecordingRestoresConfiguredWithFreshMonotonicIds()
+    {
+        (WindowsHotkeyRegistrar registrar, PortableLayout layout) = CreateRegistrar();
+        using (registrar)
+        {
+            WriteConfig(
+                layout,
+                "{\"hotkeys\": {\"global_screenshot\": \"Ctrl+Alt+Q\"}}");
+            registrar.InitializeActions();
+            Assert.True(registrar.SetActionHotkey(
+                HotkeyActionCatalog.ClipboardRecognize, "Ctrl+Alt+C", out _));
+            int[] oldIds = _native.ActiveIds.ToArray();
+            string configAtBegin = File.ReadAllText(layout.ConfigFile);
+
+            registrar.BeginRecording();
+            registrar.EndRecording();
+
+            // 恢复：新 ID 与旧 ID 不重叠，各自解析回原动作，配置未写入。
+            Assert.False(registrar.IsRecording);
+            int[] newIds = _native.ActiveIds.ToArray();
+            Assert.Equal(2, newIds.Length);
+            Assert.All(newIds, id => Assert.DoesNotContain(id, oldIds));
+            foreach (int id in newIds)
+            {
+                Assert.True(registrar.TryResolveAction(id, out string? action));
+                Assert.Contains(action, HotkeyActionCatalog.Actions);
+            }
+
+            foreach (HotkeyActionStatus status in registrar.GetActionStatuses())
+            {
+                Assert.Equal(status.ConfiguredHotkey, status.RegisteredHotkey);
+                Assert.Null(status.Error);
+            }
+
+            Assert.Equal(configAtBegin, File.ReadAllText(layout.ConfigFile));
+
+            // 幂等：未挂起时 End 是无操作。
+            registrar.EndRecording();
+            Assert.False(registrar.IsRecording);
+            Assert.Equal(newIds, _native.ActiveIds.ToArray());
+        }
+    }
+
+    [Fact]
+    public void EndRecordingReportsOccupiedComboHonestlyAndRetryRestores()
+    {
+        (WindowsHotkeyRegistrar registrar, PortableLayout layout) = CreateRegistrar();
+        using (registrar)
+        {
+            WriteConfig(
+                layout,
+                "{\"hotkeys\": {\"global_screenshot\": \"Ctrl+Alt+Q\"}}");
+            registrar.InitializeActions();
+            string configAtBegin = File.ReadAllText(layout.ConfigFile);
+
+            registrar.BeginRecording();
+            _native.CanRegister = false;
+            registrar.EndRecording();
+
+            // 恢复失败：Registered 如实为空并携带错误，Configured 保留，
+            // 不把配置伪装成有效注册，也不写配置。
+            HotkeyActionStatus recognize = StatusOf(
+                registrar, HotkeyActionCatalog.ScreenshotRecognize);
+            Assert.Equal("Ctrl+Alt+Q", recognize.ConfiguredHotkey);
+            Assert.Null(recognize.RegisteredHotkey);
+            Assert.Contains("占用", recognize.Error);
+            Assert.Equal(configAtBegin, File.ReadAllText(layout.ConfigFile));
+
+            // 占用解除后重试同一键位：恢复成功且状态清错。
+            _native.CanRegister = true;
+            Assert.True(registrar.SetActionHotkey(
+                HotkeyActionCatalog.ScreenshotRecognize, "Ctrl+Alt+Q", out string? error));
+            Assert.Null(error);
+            HotkeyActionStatus restored = StatusOf(
+                registrar, HotkeyActionCatalog.ScreenshotRecognize);
+            Assert.Equal("Ctrl+Alt+Q", restored.RegisteredHotkey);
+            Assert.Null(restored.Error);
+        }
+    }
+
+    [Fact]
+    public void SetActionDuringRecordingEndsRecordingThenAppliesRegularTransaction()
+    {
+        (WindowsHotkeyRegistrar registrar, PortableLayout layout) = CreateRegistrar();
+        using (registrar)
+        {
+            WriteConfig(
+                layout,
+                "{\"hotkeys\": {\"global_screenshot\": \"Ctrl+Alt+Q\"}}");
+            registrar.InitializeActions();
+            int oldId = Assert.Single(_native.ActiveIds);
+
+            registrar.BeginRecording();
+            Assert.True(registrar.SetActionHotkey(
+                HotkeyActionCatalog.ScreenshotRecognize, "Ctrl+Shift+P", out string? error));
+            Assert.Null(error);
+
+            // 保存事务本身结束了录入：换键成功、持久化完成、新 ID 生效。
+            Assert.False(registrar.IsRecording);
+            int newId = Assert.Single(_native.ActiveIds);
+            Assert.NotEqual(oldId, newId);
+            Assert.True(registrar.TryResolveAction(newId, out string? action));
+            Assert.Equal(HotkeyActionCatalog.ScreenshotRecognize, action);
+            HotkeyActionStatus recognize = StatusOf(
+                registrar, HotkeyActionCatalog.ScreenshotRecognize);
+            Assert.Equal("Ctrl+Shift+P", recognize.ConfiguredHotkey);
+            Assert.Equal("Ctrl+Shift+P", recognize.RegisteredHotkey);
+
+            using JsonDocument document = JsonDocument.Parse(
+                File.ReadAllText(layout.ConfigFile));
+            Assert.Equal(
+                "Ctrl+Shift+P",
+                document.RootElement.GetProperty("hotkeys")
+                    .GetProperty("actions")
+                    .GetProperty("screenshot_recognize")
+                    .GetString());
+        }
+    }
+
+    [Fact]
+    public void SetActionFailureDuringRecordingKeepsOldBindingEffective()
+    {
+        (WindowsHotkeyRegistrar registrar, PortableLayout layout) = CreateRegistrar();
+        using (registrar)
+        {
+            WriteConfig(
+                layout,
+                "{\"hotkeys\": {\"global_screenshot\": \"Ctrl+Alt+Q\"}}");
+            registrar.InitializeActions();
+            string configAtBegin = File.ReadAllText(layout.ConfigFile);
+
+            registrar.BeginRecording();
+
+            // 仅新组合被其他应用占用：先按 Configured 恢复旧键，再换键失败；
+            // 旧绑定继续有效（已重新注册），配置与错误如实。
+            _native.RefusedCombos.Add((HotkeyModifiers.Control | HotkeyModifiers.Shift, 'P'));
+            Assert.False(registrar.SetActionHotkey(
+                HotkeyActionCatalog.ScreenshotRecognize, "Ctrl+Shift+P", out string? error));
+            Assert.Contains("占用", error);
+            Assert.False(registrar.IsRecording);
+            HotkeyActionStatus recognize = StatusOf(
+                registrar, HotkeyActionCatalog.ScreenshotRecognize);
+            Assert.Equal("Ctrl+Alt+Q", recognize.ConfiguredHotkey);
+            Assert.Equal("Ctrl+Alt+Q", recognize.RegisteredHotkey);
+            Assert.Equal(configAtBegin, File.ReadAllText(layout.ConfigFile));
+
+            _native.CanRegister = true;
+            int restoredId = Assert.Single(_native.ActiveIds);
+            Assert.True(registrar.TryResolveAction(restoredId, out string? action));
+            Assert.Equal(HotkeyActionCatalog.ScreenshotRecognize, action);
+        }
+    }
+
+    [Fact]
+    public void SaveFailureDuringRecordingKeepsOldBindingRegistered()
+    {
+        (WindowsHotkeyRegistrar registrar, PortableLayout layout) = CreateRegistrar();
+        using (registrar)
+        {
+            WriteConfig(
+                layout,
+                "{\"hotkeys\": {\"global_screenshot\": \"Ctrl+Alt+Q\"}}");
+            registrar.InitializeActions();
+
+            registrar.BeginRecording();
+            File.WriteAllText(layout.ConfigFile, "{\"hotkeys\": not-json");
+
+            // 保存异常：录入先被结束并恢复旧键，换键在持久化时失败；旧
+            // 绑定（已恢复的注册与 Configured）继续有效。
+            Assert.False(registrar.SetActionHotkey(
+                HotkeyActionCatalog.ScreenshotRecognize, "Ctrl+Shift+P", out string? error));
+            Assert.Contains("配置文件已损坏", error);
+            Assert.False(registrar.IsRecording);
+            int restoredId = Assert.Single(_native.ActiveIds);
+            Assert.True(registrar.TryResolveAction(restoredId, out string? action));
+            Assert.Equal(HotkeyActionCatalog.ScreenshotRecognize, action);
+            HotkeyActionStatus recognize = StatusOf(
+                registrar, HotkeyActionCatalog.ScreenshotRecognize);
+            Assert.Equal("Ctrl+Alt+Q", recognize.ConfiguredHotkey);
+            Assert.Equal("Ctrl+Alt+Q", recognize.RegisteredHotkey);
+            Assert.Equal("{\"hotkeys\": not-json", File.ReadAllText(layout.ConfigFile));
+        }
+    }
+
+    [Fact]
+    public void DisposeDuringRecordingReleasesWithoutLeakingRegistrations()
+    {
+        (WindowsHotkeyRegistrar registrar, PortableLayout layout) = CreateRegistrar();
+        WriteConfig(
+            layout,
+            "{\"hotkeys\": {\"global_screenshot\": \"Ctrl+Alt+Q\"}}");
+        registrar.InitializeActions();
+        registrar.BeginRecording();
+
+        // 挂起中 Dispose：注册已释放，不抛出、不残留。
+        registrar.Dispose();
+        Assert.Empty(_native.ActiveIds);
+    }
+
     public void Dispose()
     {
         try
@@ -643,13 +888,17 @@ public sealed class HotkeyActionRegistrarTests : IDisposable
 
         public bool CanRegister { get; set; } = true;
 
+        /// <summary>模拟被其他应用占用的具体组合（忽略 NoRepeat 位）。</summary>
+        public HashSet<(HotkeyModifiers Modifiers, uint VirtualKey)> RefusedCombos { get; } = [];
+
         public IReadOnlyCollection<int> ActiveIds => _activeIds.Order().ToArray();
 
         public List<(int Id, HotkeyModifiers Modifiers, uint VirtualKey)> Registrations { get; } = [];
 
         public bool Register(nint windowHandle, int id, HotkeyModifiers modifiers, uint virtualKey)
         {
-            if (!CanRegister)
+            if (!CanRegister
+                || RefusedCombos.Contains((modifiers & ~HotkeyModifiers.NoRepeat, virtualKey)))
             {
                 return false;
             }
