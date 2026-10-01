@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI.Xaml.Shapes;
 using VibeOCR.Platform.Windows;
+using VibeOCR.App.Services;
 using Windows.Graphics;
 using Windows.Storage.Streams;
 using Windows.System;
@@ -180,6 +181,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     SmartScreenCandidates.Window? hoveredWindow = null;
     PhysicalPoint hoveredPoint = default;
     long hoverGeneration = 0;
+    bool diagnoseSmartQueries = Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "native-actions-e2e";
     bool queryWaiting = false;
     bool uiaTimedOut = false;
     bool confirming = false;
@@ -200,7 +202,11 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       if (queryWaiting || uiaTimedOut || confirming || completion.Task.IsCompleted ||
           hoveredWindow is null || session.ManualOnly ||
           session.Selection is not null || session.IsPointerActive)
+      {
+        if (diagnoseSmartQueries)
+          AppLog.Info($"Smart query skipped: window={hoveredWindow?.Handle} point={hoveredPoint} generation={hoverGeneration} waiting={queryWaiting} timedOut={uiaTimedOut} confirming={confirming} completed={completion.Task.IsCompleted} manual={session.ManualOnly} selection={session.Selection} pointerActive={session.IsPointerActive}");
         return;
+      }
       _ = QueryControlsAsync();
     }
     async Task QueryControlsAsync()
@@ -209,6 +215,9 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       PhysicalPoint point = hoveredPoint;
       long generation = hoverGeneration;
       queryWaiting = true;
+      if (diagnoseSmartQueries)
+        AppLog.Info($"Smart query started: window={window.Handle} bounds={window.Bounds} point={point} generation={generation}");
+      System.Diagnostics.Stopwatch? queryTimer = diagnoseSmartQueries ? System.Diagnostics.Stopwatch.StartNew() : null;
       IReadOnlyList<SmartControlCandidate> controls;
       bool timedOut = false;
       try
@@ -222,9 +231,13 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
         timedOut = true;
         controls = [];
       }
+      queryTimer?.Stop();
+      if (diagnoseSmartQueries)
+        AppLog.Info($"Smart query completed: window={window.Handle} point={point} generation={generation} elapsedMs={queryTimer!.Elapsed.TotalMilliseconds:F3} count={controls.Count} timedOut={timedOut}");
       root.DispatcherQueue.TryEnqueue(() =>
       {
         queryWaiting = false;
+        bool accepted = false;
         if (timedOut) uiaTimedOut = true;
         if (!timedOut && generation == hoverGeneration && !confirming &&
             !completion.Task.IsCompleted && !session.ManualOnly &&
@@ -238,7 +251,17 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
           foreach (SmartControlCandidate control in previewControls)
             regions.Add(candidates.ToLocal(control.Bounds));
           session.SetPreview(regions);
+          accepted = true;
           Render();
+        }
+        if (diagnoseSmartQueries)
+        {
+          string reason = accepted ? "accepted" : timedOut ? "timeout" :
+            generation != hoverGeneration ? "generation-changed" : confirming ? "confirming" :
+            completion.Task.IsCompleted ? "completed" : session.ManualOnly ? "manual-only" :
+            session.Selection is not null ? "manual-selection" : session.IsPointerActive ? "pointer-active" :
+            "window-stale-or-unclippable";
+          AppLog.Info($"Smart query callback: window={window.Handle} point={point} generation={generation} currentGeneration={hoverGeneration} elapsedMs={queryTimer!.Elapsed.TotalMilliseconds:F3} count={controls.Count} visibleCount={previewControls.Count} timedOut={timedOut} accepted={accepted} reason={reason}");
         }
         if (generation != hoverGeneration) QueueControlQuery();
       });

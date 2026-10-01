@@ -51,7 +51,7 @@ async function freeLocalPort() {
 }
 
 async function native(action, options = {}) {
-  const pointerAction = ['mouse-move', 'mouse-down', 'mouse-up'].includes(action);
+  const pointerAction = ['mouse-move', 'mouse-down', 'mouse-up', 'frame', 'geometry'].includes(action);
   const script = pointerAction ? path.join(scriptDir, 'scroll_capture_fixture.ps1') : nativeScript;
   const args = ['-NoProfile', '-NonInteractive', '-File', script,
     '-Action', action];
@@ -289,14 +289,14 @@ async function verifyRestart(page) {
 
 async function watchScreenshotRevision(page) {
   await page.evaluate(() => {
-    window.__nativeActionsEvidence = { sessionId: null, revision: null };
+    window.__nativeActionsEvidence = { sessionId: null, revision: null, inputUrl: null };
     window.chrome.webview.addEventListener('message', ({ data }) => {
       if (data?.kind !== 'event' || data?.type !== 'app.state' ||
           data?.payload?.scope !== 'recognition') return;
       const session = data.payload.state?.screenshotSession;
       if (typeof session?.sessionId === 'string' && Number.isSafeInteger(session.revision))
         window.__nativeActionsEvidence = {
-          sessionId: session.sessionId, revision: session.revision,
+          sessionId: session.sessionId, revision: session.revision, inputUrl: data.payload.state?.input?.url ?? null,
         };
     });
   });
@@ -316,10 +316,10 @@ async function canvasOrange(page) {
   });
 }
 
-async function pngPixels(page, png) {
-  return page.evaluate(async (encoded) => {
+async function pngPixels(page, png, mediaType = 'image/png') {
+  return page.evaluate(async ({ encoded, mediaType }) => {
     const bytes = Uint8Array.from(atob(encoded), (letter) => letter.charCodeAt(0));
-    const image = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+    const image = await createImageBitmap(new Blob([bytes], { type: mediaType }));
     const canvas = document.createElement('canvas');
     canvas.width = image.width;
     canvas.height = image.height;
@@ -334,7 +334,7 @@ async function pngPixels(page, png) {
       if (data[i] > 170 && data[i + 1] > 170 && data[i + 2] > 170) light++;
     }
     return { width: image.width, height: image.height, orange, dark, light };
-  }, png.toString('base64'));
+  }, { encoded: png.toString('base64'), mediaType });
 }
 
 async function observeNextAnnotationUpload(page) {
@@ -387,6 +387,17 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
   await native('focus-fixture', {
     FixturePid: fixture.pid, Handle: fixture.root, X: focusX, Y: focusY,
   });
+  const fixtureFrame = path.join(evidenceRoot, manual ? 'manual-fixture-button.png' : 'fixture-button.png');
+  const pixelEvidence = { mode: manual ? 'manual' : 'smart', fixtureFrame,
+    buttonGeometry: JSON.parse(await native('geometry', { FixturePid: fixture.pid, Handle: fixture.button })),
+    rootGeometry: JSON.parse(await native('geometry', { FixturePid: fixture.pid, Handle: fixture.root })),
+    observedAt: new Date().toISOString() };
+  (evidence.capturePixels ??= []).push(pixelEvidence);
+  await native('frame', { FixturePid: fixture.pid, Handle: fixture.button,
+    X: fixture.buttonRect.left, Y: fixture.buttonRect.top,
+    Width: fixture.buttonRect.width, Height: fixture.buttonRect.height,
+    EvidenceRoot: evidenceRoot, OutputPath: fixtureFrame });
+  pixelEvidence.fixturePixels = await pngPixels(page, fs.readFileSync(fixtureFrame));
   const sentAt = Date.now();
   await native('hotkey', { FixturePid: fixture.pid });
   evidence.hotkeyDeliveredAt = Date.now() - sentAt;
@@ -394,6 +405,11 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
   const button = fixture.buttonRect;
   const x = button.left + Math.floor(button.width / 2);
   const y = button.top + Math.floor(button.height / 2);
+  evidence.smartQueryFixture = {
+    rootRect: fixture.rootRect, buttonRect: fixture.buttonRect, editRect: fixture.editRect,
+    activationPointer: { x: focusX, y: focusY }, requestedHoverPointer: { x, y },
+    observedAt: new Date().toISOString(),
+  };
   const overlays = await waitForWindows(app.child.pid,
     (item) => item.Visible && item.Handle !== app.main.Handle &&
       area(item) > fixture.rootRect.width * fixture.rootRect.height * 2 &&
@@ -485,7 +501,40 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
     'Completed edit capture did not show its editor window.');
   assert(toolbarHandles.every((handle) => restoredWindows.some((item) =>
     item.Handle === handle && item.Visible)), 'Toolbar did not resume after capture.');
+  await page.waitForFunction(() => typeof window.__nativeActionsEvidence?.inputUrl === 'string',
+    null, { timeout: 5000 });
+  const inputUrl = await page.evaluate(() => window.__nativeActionsEvidence.inputUrl);
+  const resource = new URL(inputUrl);
+  assert(resource.origin === 'https://app.vibeocr' && resource.pathname.startsWith('/__resource/'),
+    'Screenshot input is not the product resource observed from native state.');
+  const input = await page.evaluate(async (url) => {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Screenshot resource returned ${response.status}`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.length > 1024 * 1024) throw new Error('Synthetic screenshot resource exceeded 1 MiB');
+    return { mediaType: response.headers.get('content-type'), bytes: Array.from(bytes) };
+  }, inputUrl);
+  assert.equal(input.mediaType, 'image/bmp', 'Native screenshot resource is not BMP.');
+  const bmp = Buffer.from(input.bytes);
+  pixelEvidence.originalBmp = path.join(evidenceRoot, manual ? 'manual-original.bmp' : 'original.bmp');
+  fs.writeFileSync(pixelEvidence.originalBmp, bmp);
+  assert(bmp.length >= 54 && bmp.toString('ascii', 0, 2) === 'BM' &&
+    bmp.readInt16LE(28) === 32 && bmp.readInt32LE(30) === 0, 'Expected product 32-bit RGB BMP.');
+  const width = bmp.readInt32LE(18), height = Math.abs(bmp.readInt32LE(22));
+  const offset = bmp.readUInt32LE(10);
+  assert.equal(width, selectedRegion.width);
+  assert.equal(height, selectedRegion.height);
+  assert.equal(bmp.length - offset, width * height * 4);
+  let black = 0, dark = 0, light = 0;
+  for (let i = offset; i < bmp.length; i += 4) {
+    if (bmp[i] === 0 && bmp[i + 1] === 0 && bmp[i + 2] === 0) black++;
+    if (bmp[i] < 100 && bmp[i + 1] < 100 && bmp[i + 2] < 100) dark++;
+    if (bmp[i] > 170 && bmp[i + 1] > 170 && bmp[i + 2] > 170) light++;
+  }
+  pixelEvidence.rawBmpPixels = { width, height, black, dark, light };
+  pixelEvidence.decodedBmpPixels = await pngPixels(page, bmp, 'image/bmp');
   const before = await canvasOrange(page);
+  pixelEvidence.canvasBefore = before;
   assert(before.nonBackground > 1000, 'Real screenshot image never decoded in WebView2.');
   await page.getByRole('button', { name: '矩形', exact: true }).click();
   await page.getByRole('combobox', { name: '线条宽度' }).selectOption('8');
@@ -547,6 +596,8 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
   fs.writeFileSync(path.join(evidenceRoot, manual ? 'manual-edited.png' : 'synthetic-edited.png'), png);
   await page.screenshot({ path: path.join(evidenceRoot, manual ? 'manual-screenshot-editor.png' : 'screenshot-editor.png') });
   const pixels = await pngPixels(page, png);
+  pixelEvidence.editedPngPixels = pixels;
+  pixelEvidence.gesture = gesture;
   assert.equal(pixels.width, selectedRegion.width, 'Final crop differs from the selected physical width.');
   assert.equal(pixels.height, selectedRegion.height, 'Final crop differs from the selected physical height.');
   assert(pixels.orange > 20 && pixels.dark > 10 && pixels.light > 100,
