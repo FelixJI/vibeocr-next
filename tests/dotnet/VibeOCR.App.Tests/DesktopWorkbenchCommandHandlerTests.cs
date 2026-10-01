@@ -1087,6 +1087,21 @@ public sealed class DesktopWorkbenchCommandHandlerTests
         TestContext.Current.CancellationToken);
       Assert.Equal(2, applied.Count);
 
+      WorkbenchCommandOutcome preferences = await handler.ExecuteAsync(
+        new SetFloatingToolbarPreferencesCommand(5000, "dark"),
+        TestContext.Current.CancellationToken);
+      var preferencesState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(preferences.States));
+      Assert.Equal(5000, preferencesState.FloatingToolbar!.LingerMs);
+      Assert.Equal("dark", preferencesState.FloatingToolbar.Theme);
+      Assert.Equal(3, applied.Count);
+      WorkbenchCommandOutcome invalid = await handler.ExecuteAsync(
+        new SetFloatingToolbarPreferencesCommand(99, "dark"),
+        TestContext.Current.CancellationToken);
+      var invalidState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(invalid.States));
+      Assert.Equal(5000, invalidState.FloatingToolbar!.LingerMs);
+      Assert.Contains("原设置已保留", invalidState.FloatingToolbar.Error);
+      Assert.Equal(3, applied.Count);
+
       WorkbenchCommandOutcome shown = await handler.ExecuteAsync(
         new ShowFloatingToolbarCommand(),
         TestContext.Current.CancellationToken);
@@ -1617,6 +1632,14 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       Assert.Contains("原设置已保留", failedState.FloatingToolbar!.Error);
       // 保存失败保旧：偏好未应用、未记录。
       Assert.False(failedState.FloatingToolbar.Enabled);
+      Assert.Empty(applied);
+      WorkbenchCommandOutcome preferencesFailed = await handler.ExecuteAsync(
+        new SetFloatingToolbarPreferencesCommand(900, "light"),
+        TestContext.Current.CancellationToken);
+      var preferencesFailedState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(preferencesFailed.States));
+      Assert.Equal(300, preferencesFailedState.FloatingToolbar!.LingerMs);
+      Assert.Equal("system", preferencesFailedState.FloatingToolbar.Theme);
+      Assert.Contains("原设置已保留", preferencesFailedState.FloatingToolbar.Error);
       Assert.Empty(applied);
 
       // 已关闭时 Show 必须显式报错，不得看似成功。

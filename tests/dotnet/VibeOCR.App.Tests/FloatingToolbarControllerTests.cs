@@ -24,7 +24,8 @@ public sealed class FloatingToolbarControllerTests
         Func<PhysicalRectangle, PhysicalRectangle>? monitorOf = null,
         Func<PhysicalRectangle>? primaryMonitor = null,
         List<FloatingToolbarSettings>? persisted = null,
-        Action<FloatingToolbarSettings>? persist = null)
+        Action<FloatingToolbarSettings>? persist = null,
+        TimeProvider? clock = null)
     {
         return new FloatingToolbarController(
             _view,
@@ -35,7 +36,8 @@ public sealed class FloatingToolbarControllerTests
             () => occupiedEdges ?? new HashSet<ScreenEdge> { ScreenEdge.Bottom },
             primaryMonitor ?? (() => Primary),
             monitorOf ?? (_ => Primary),
-            persist ?? (next => persisted?.Add(next)));
+            persist ?? (next => persisted?.Add(next)),
+            clock);
     }
 
     [Fact]
@@ -717,6 +719,38 @@ public sealed class FloatingToolbarControllerTests
         controller.ApplySettings(new FloatingToolbarSettings(true, ScreenEdge.Top, true, 2500));
         _view.RaisePointerExited();
         Assert.Equal(TimeSpan.FromMilliseconds(2500), _timer.PendingDelay);
+    }
+
+    [Fact]
+    public void PendingLingerUsesOriginalExitDeadlineAndStopsWhenAutoHideTurnsOff()
+    {
+        var clock = new ManualClock();
+        using FloatingToolbarController controller = CreateController(clock: clock);
+        controller.Start();
+        _sensor.RaisePointerEntered();
+        _view.RaisePointerExited();
+        clock.Advance(TimeSpan.FromMilliseconds(200));
+        controller.ApplySettings(controller.Settings with { LingerMs = 500 });
+        Assert.Equal(TimeSpan.FromMilliseconds(300), _timer.PendingDelay);
+        controller.ApplySettings(controller.Settings with { LingerMs = 100 });
+        Assert.Equal(FloatingToolbarController.ToolbarState.Hidden, controller.State);
+        Assert.False(_timer.IsRunning);
+
+        _sensor.RaisePointerEntered();
+        _view.RaisePointerExited();
+        controller.ApplySettings(controller.Settings with { AutoHide = false });
+        _timer.Fire();
+        Assert.Equal(FloatingToolbarController.ToolbarState.PinnedDocked, controller.State);
+        Assert.True(_view.IsVisible);
+        Assert.False(_timer.IsRunning);
+    }
+
+    private sealed class ManualClock : TimeProvider
+    {
+        private long _timestamp;
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override long GetTimestamp() => _timestamp;
+        public void Advance(TimeSpan duration) => _timestamp += duration.Ticks;
     }
 
     private sealed class FakeToolbarView : IFloatingToolbarView

@@ -384,6 +384,8 @@ public sealed class DesktopWorkbenchCommandHandler :
           toolbarEnabled),
         SetFloatingToolbarLayoutCommand toolbarLayout => SetFloatingToolbarLayout(
           toolbarLayout),
+        SetFloatingToolbarPreferencesCommand toolbarPreferences => SetFloatingToolbarPreferences(
+          toolbarPreferences),
         ShowFloatingToolbarCommand => ShowFloatingToolbar(),
         HideFloatingToolbarCommand => HideFloatingToolbar(),
         SetDownloadSourceCommand source => await SetSourceAsync(
@@ -2433,6 +2435,24 @@ public sealed class DesktopWorkbenchCommandHandler :
     return SettingsState(settings, error);
   }
 
+  private SettingsWorkbenchState SetFloatingToolbarPreferences(
+    SetFloatingToolbarPreferencesCommand command)
+  {
+    settings ??= CreateSettings();
+    if (command.LingerMs is < FloatingToolbarSettings.MinimumLingerMs or > FloatingToolbarSettings.MaximumLingerMs ||
+      command.Theme is not ("system" or "light" or "dark"))
+    {
+      return SettingsState(settings, "收起时间须为 100–5000 毫秒，主题须为跟随系统、亮色或深色；原设置已保留。");
+    }
+    ShellActionDispatcher actions = ShellActions();
+    FloatingToolbarSettings current = actions.ToolbarSettings;
+    FloatingToolbarTheme theme = FloatingToolbarSettings.ParseTheme(command.Theme);
+    string? error = current.LingerMs == command.LingerMs && current.Theme == theme
+      ? null
+      : ApplyToolbar(actions, current with { LingerMs = command.LingerMs, Theme = theme });
+    return SettingsState(settings, error);
+  }
+
   private SettingsWorkbenchState ShowFloatingToolbar()
   {
     settings ??= CreateSettings();
@@ -3272,7 +3292,9 @@ public sealed class DesktopWorkbenchCommandHandler :
         FloatingToolbarSettings.EdgeName(shellActions.ToolbarSettings.Edge),
         shellActions.ToolbarSettings.AutoHide,
         FormatToolbarVisibility(shellActions.ToolbarVisibility),
-        error ?? "");
+        error ?? "",
+        shellActions.ToolbarSettings.LingerMs,
+        FloatingToolbarSettings.ThemeName(shellActions.ToolbarSettings.Theme));
 
   private static string FormatToolbarVisibility(FloatingToolbarVisibility visibility) =>
     visibility switch

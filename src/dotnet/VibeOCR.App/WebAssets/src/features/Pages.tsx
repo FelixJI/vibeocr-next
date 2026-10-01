@@ -493,6 +493,8 @@ function hotkeyActions(value: unknown): readonly HotkeyActionOptionState[] {
 }
 
 interface FloatingToolbarOptionState {
+  readonly lingerMs: number;
+  readonly theme: "system" | "light" | "dark";
   readonly enabled: boolean;
   readonly edge: string;
   readonly autoHide: boolean;
@@ -504,7 +506,13 @@ function toolbarState(value: unknown): FloatingToolbarOptionState | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value))
     return undefined;
   const option = value as Partial<FloatingToolbarOptionState>;
-  return typeof option.enabled === "boolean" &&
+  return Number.isInteger(option.lingerMs) &&
+    option.lingerMs! >= 100 &&
+    option.lingerMs! <= 5000 &&
+    (option.theme === "system" ||
+      option.theme === "light" ||
+      option.theme === "dark") &&
+    typeof option.enabled === "boolean" &&
     typeof option.edge === "string" &&
     typeof option.autoHide === "boolean" &&
     typeof option.visibility === "string" &&
@@ -3404,6 +3412,22 @@ function FloatingToolbarPanel({
   readonly enabled: boolean;
   readonly dispatch: AppActions;
 }) {
+  const [draft, setDraft] = useState({
+    value: String(toolbar?.lingerMs ?? ""),
+    savedDelay: toolbar?.lingerMs,
+    savedError: toolbar?.error,
+  });
+  const delayDraft =
+    draft.savedDelay === toolbar?.lingerMs &&
+    draft.savedError === toolbar?.error
+      ? draft.value
+      : String(toolbar?.lingerMs ?? "");
+  const delay = Number(delayDraft);
+  const delayValid =
+    delayDraft.trim() !== "" &&
+    Number.isInteger(delay) &&
+    delay >= 100 &&
+    delay <= 5000;
   if (!toolbar) {
     return (
       <p className="form-note">
@@ -3487,6 +3511,63 @@ function FloatingToolbarPanel({
             })
           }
         />
+      </div>
+      <div className="setting-row">
+        <label htmlFor="toolbar-delay">收起时间（毫秒）</label>
+        <Input
+          id="toolbar-delay"
+          type="number"
+          min={100}
+          max={5000}
+          step={1}
+          value={delayDraft}
+          disabled={!enabled || !toolbar.autoHide}
+          aria-invalid={!delayValid}
+          aria-describedby="toolbar-delay-note"
+          onChange={(_, data) =>
+            setDraft({
+              value: data.value,
+              savedDelay: toolbar.lingerMs,
+              savedError: toolbar.error,
+            })
+          }
+        />
+        <Button
+          disabled={!enabled || !toolbar.autoHide || !delayValid}
+          onClick={() =>
+            dispatch.run({
+              type: "settings.setFloatingToolbarPreferences",
+              lingerMs: delay,
+              theme: toolbar.theme,
+            })
+          }
+        >
+          保存时间
+        </Button>
+      </div>
+      <p className="form-note" id="toolbar-delay-note">
+        {delayValid
+          ? "100–5000 毫秒，仅在鼠标离开后自动收起时生效。"
+          : "请输入 100–5000 范围内的整数毫秒；尚未保存。"}
+      </p>
+      <div className="setting-row">
+        <label htmlFor="toolbar-theme">工具栏主题</label>
+        <Select
+          id="toolbar-theme"
+          value={toolbar.theme}
+          disabled={!enabled}
+          onChange={(_, data) =>
+            dispatch.run({
+              type: "settings.setFloatingToolbarPreferences",
+              lingerMs: toolbar.lingerMs,
+              theme: String(data.value),
+            })
+          }
+        >
+          <option value="system">跟随系统</option>
+          <option value="light">亮色</option>
+          <option value="dark">深色</option>
+        </Select>
       </div>
     </>
   );

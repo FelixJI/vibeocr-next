@@ -37,6 +37,8 @@ public static class WorkbenchBridgeCodec
     ["actionId", "hotkey"];
   private static readonly HashSet<string> ToolbarLayoutArgumentFields =
     ["edge", "autoHide"];
+  private static readonly HashSet<string> ToolbarPreferencesArgumentFields =
+    ["lingerMs", "theme"];
   private static readonly HashSet<string> BatchMoveArgumentFields = ["itemId", "delta"];
   private static readonly HashSet<string> BatchItemArgumentFields = ["itemId"];
   private static readonly HashSet<string> PagesArgumentFields = ["pages"];
@@ -572,6 +574,16 @@ public static class WorkbenchBridgeCodec
         return new SetFloatingToolbarLayoutCommand(
           ParseToolbarEdge(arguments.GetProperty("edge").GetString()),
           arguments.GetProperty("autoHide").GetBoolean());
+      case ("settings", "setFloatingToolbarPreferences"):
+        EnsureObjectWithFields(arguments, ToolbarPreferencesArgumentFields, "command arguments");
+        JsonElement delayArgument = arguments.GetProperty("lingerMs");
+        string? toolbarTheme = arguments.GetProperty("theme").GetString();
+        if (delayArgument.ValueKind != JsonValueKind.Number || !delayArgument.TryGetInt32(out int lingerMs) ||
+          lingerMs is < 100 or > 5000 || toolbarTheme is not ("system" or "light" or "dark"))
+        {
+          throw new WorkbenchBridgeProtocolException("Workbench floating toolbar preference is invalid.");
+        }
+        return new SetFloatingToolbarPreferencesCommand(lingerMs, toolbarTheme);
       case ("settings", "showFloatingToolbar"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new ShowFloatingToolbarCommand();
@@ -1010,6 +1022,8 @@ public static class WorkbenchBridgeCodec
         settings.FloatingToolbar.Enabled,
         settings.FloatingToolbar.Edge,
         settings.FloatingToolbar.AutoHide,
+        settings.FloatingToolbar.LingerMs,
+        settings.FloatingToolbar.Theme,
         settings.FloatingToolbar.Visibility,
         settings.FloatingToolbar.Error,
       },

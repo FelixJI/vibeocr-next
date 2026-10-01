@@ -194,6 +194,8 @@ public sealed class WorkbenchBridgeCodecTests
     Assert.True(toolbar.GetProperty("enabled").GetBoolean());
     Assert.Equal("left", toolbar.GetProperty("edge").GetString());
     Assert.False(toolbar.GetProperty("autoHide").GetBoolean());
+    Assert.Equal(300, toolbar.GetProperty("lingerMs").GetInt32());
+    Assert.Equal("system", toolbar.GetProperty("theme").GetString());
     Assert.Equal("userHidden", toolbar.GetProperty("visibility").GetString());
     Assert.Contains(
       "原设置已保留",
@@ -459,6 +461,7 @@ public sealed class WorkbenchBridgeCodecTests
       ("settings", "resetActionHotkey", "{\"actionId\":\"screenshot_recognize\"}", typeof(ResetActionHotkeyCommand)),
       ("settings", "setFloatingToolbarEnabled", "{\"enabled\":true}", typeof(SetFloatingToolbarEnabledCommand)),
       ("settings", "setFloatingToolbarLayout", "{\"edge\":\"left\",\"autoHide\":false}", typeof(SetFloatingToolbarLayoutCommand)),
+      ("settings", "setFloatingToolbarPreferences", "{\"lingerMs\":100,\"theme\":\"light\"}", typeof(SetFloatingToolbarPreferencesCommand)),
       ("settings", "showFloatingToolbar", "{}", typeof(ShowFloatingToolbarCommand)),
       ("settings", "hideFloatingToolbar", "{}", typeof(HideFloatingToolbarCommand)),
       ("update", "check", "{}", typeof(CheckUpdateCommand)),
@@ -809,6 +812,10 @@ public sealed class WorkbenchBridgeCodecTests
     (string Action, string Arguments)[] invalid =
     [
       ("setFloatingToolbarLayout", "{\"edge\":\"diagonal\",\"autoHide\":true}"),
+      ("setFloatingToolbarPreferences", "{\"lingerMs\":99,\"theme\":\"system\"}"),
+      ("setFloatingToolbarPreferences", "{\"lingerMs\":5001,\"theme\":\"dark\"}"),
+      ("setFloatingToolbarPreferences", "{\"lingerMs\":300.5,\"theme\":\"light\"}"),
+      ("setFloatingToolbarPreferences", "{\"lingerMs\":300,\"theme\":\"unknown\"}"),
       ("setActionHotkey", "{\"actionId\":\"clipboard_recognize\",\"hotkey\":\"\"}"),
       ("setActionHotkey", "{\"actionId\":\" \"}"),
       ("resetActionHotkey", "{\"actionId\":\"\"}"),
