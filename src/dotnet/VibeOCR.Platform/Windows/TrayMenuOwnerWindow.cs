@@ -5,8 +5,8 @@ namespace VibeOCR.Platform.Windows;
 
 /// <summary>
 /// Win32 seam for the tray menu owner window, fakeable in unit tests.
-/// 仅因 TrackPopupMenu 模态阻塞与 SetForegroundWindow 抢占前台而无法真窗
-/// 自动化，才为菜单握手契约保留此 seam（与 ITrayIconNativeMethods 同例）。
+/// 普通 CI 通过 seam 覆盖失败握手，避免影响交互桌面的前台/输入；实际
+/// WinUI 菜单行为由显式启用的 smoke_tray_shell.mjs 验证。
 /// </summary>
 public interface ITrayMenuOwnerNativeMethods
 {

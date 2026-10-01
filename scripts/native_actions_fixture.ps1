@@ -1,12 +1,13 @@
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection', 'minimize', 'restore', 'tray-state', 'tray-click', 'taskbar-created', 'down', 'tray-fixture', 'tray-keyboard', 'tray-expose', 'tray-left-click', 'tray-double-click', 'tray-gone', 'tray-menu-quit')][string]$Action,
     [int]$AppPid = 0,
     [int]$FixturePid = 0,
     [int]$ForegroundPid = 0,
     [long]$Handle = 0,
     [uint32]$ThreadId = 0,
     [int]$X = 0,
-    [int]$Y = 0
+    [int]$Y = 0,
+    [Guid]$IconGuid = [Guid]::Empty
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,6 +38,9 @@ public static class NativeActionsFixture
     {
         public long Handle { get; set; }
         public bool Visible { get; set; }
+        public bool Iconic { get; set; }
+        public string ClassName { get; set; }
+        public uint Dpi { get; set; }
         public Rect Bounds { get; set; }
     }
     [StructLayout(LayoutKind.Sequential)]
@@ -92,6 +96,132 @@ public static class NativeActionsFixture
     [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
 
+    [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr window);
+    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr window);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, System.Text.StringBuilder text, int size);
+    [DllImport("user32.dll")] private static extern IntPtr GetWindowLongPtrW(IntPtr window, int index);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern uint RegisterWindowMessage(string name);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IconIdentifier { public uint Size; public IntPtr Window; public uint Id; public Guid Guid; }
+    [DllImport("shell32.dll")] private static extern int Shell_NotifyIconGetRect(ref IconIdentifier identifier, out Rect rectangle);
+
+    private static string ClassName(IntPtr window)
+    {
+        var text = new System.Text.StringBuilder(256);
+        GetClassName(window, text, text.Capacity);
+        return text.ToString();
+    }
+
+    public static void Show(long handle, int pid, int command)
+    {
+        RequireOwner(handle, pid);
+        ShowWindow(new IntPtr(handle), command);
+    }
+
+    public static object TrayState(int appPid, int fixturePid, long mainHandle)
+    {
+        RequireOwner(mainHandle, appPid);
+        var windows = Windows(appPid);
+        var owners = Array.FindAll(windows, w => string.Equals(w.ClassName, "STATIC", StringComparison.OrdinalIgnoreCase) &&
+            !w.Visible && w.Bounds.Left == w.Bounds.Right && w.Bounds.Top == w.Bounds.Bottom &&
+            (GetWindowLongPtrW(new IntPtr(w.Handle), -20).ToInt64() & 0x80) != 0);
+        if (owners.Length != 1) throw new InvalidOperationException("Isolated tray owner is missing or ambiguous.");
+        IntPtr foreground = GetForegroundWindow();
+        GetWindowThreadProcessId(foreground, out uint foregroundPid);
+        return new {
+            Main = Array.Find(windows, w => w.Handle == mainHandle), Owner = owners[0],
+            Menus = Array.FindAll(windows, w => w.ClassName == "#32768" && w.Visible),
+            ForegroundHandle = foreground.ToInt64(), ForegroundPid = foregroundPid,
+            ForegroundOwned = foregroundPid == (uint)appPid || foregroundPid == (uint)fixturePid
+        };
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr FindWindow(string className, string name);
+    public static long TrayShellRoot(long handle, int appPid, Guid iconGuid)
+    {
+        Rect rectangle = TrayRect(handle, appPid, iconGuid);
+        IntPtr hit = WindowFromPoint(new Point { X = (rectangle.Left + rectangle.Right) / 2, Y = (rectangle.Top + rectangle.Bottom) / 2 });
+        GetWindowThreadProcessId(hit, out uint hitPid);
+        GetWindowThreadProcessId(FindWindow("Shell_TrayWnd", null), out uint shellPid);
+        if (shellPid == 0 || hitPid != shellPid) throw new InvalidOperationException("Owned GUID point is not on the Shell.");
+        return GetAncestor(hit, 2).ToInt64();
+    }
+
+    public static Rect TrayRect(long handle, int appPid, Guid iconGuid)
+    {
+        RequireOwner(handle, appPid);
+        if (iconGuid == Guid.Empty) throw new InvalidOperationException("Owned tray probe requires its known isolated GUID.");
+        var identifier = new IconIdentifier { Size = (uint)Marshal.SizeOf<IconIdentifier>(), Window = new IntPtr(handle), Id = 1, Guid = iconGuid };
+        int result = Shell_NotifyIconGetRect(ref identifier, out Rect rectangle);
+        if (result != 0) throw new InvalidOperationException("Owned tray icon rectangle unavailable: HRESULT " + result.ToString("X8"));
+        return rectangle;
+    }
+
+    public static object TrayClick(long handle, int appPid, Guid iconGuid, bool left = false, bool doubleClick = false)
+    {
+        Rect rectangle = TrayRect(handle, appPid, iconGuid);
+
+        int x = (rectangle.Left + rectangle.Right) / 2, y = (rectangle.Top + rectangle.Bottom) / 2;
+        // The sole system window touched is the Shell point belonging to this icon.
+        string hitClass = ClassName(WindowFromPoint(new Point { X = x, Y = y }));
+        TrayShellRoot(handle, appPid, iconGuid);
+        if (!SetCursorPos(x, y)) throw new InvalidOperationException("Synthetic cursor move failed.");
+        uint down = left ? 0x0002u : 0x0008u, up = left ? 0x0004u : 0x0010u;
+        try { Send(new[] { Mouse(down) }); }
+        finally { Send(new[] { Mouse(up) }); }
+        if (doubleClick)
+        {
+            try { Send(new[] { Mouse(down) }); }
+            finally { Send(new[] { Mouse(up) }); }
+        }
+        return new { IconRect = rectangle, HitClass = hitClass };
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MenuBarInfo { public uint Size; public Rect Bounds; public IntPtr Menu, Window; public uint Flags; }
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool GetMenuBarInfo(IntPtr window, int objectId, int item, ref MenuBarInfo info);
+    [DllImport("user32.dll")] private static extern int GetMenuItemCount(IntPtr menu);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetMenuStringW(IntPtr menu, uint item, System.Text.StringBuilder text, int size, uint flags);
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool GetMenuItemRect(IntPtr window, IntPtr menu, uint item, out Rect rectangle);
+
+    public static object ClickExitMenu(long handle, int appPid)
+    {
+        RequireOwner(handle, appPid);
+        RequireForeground(appPid);
+        IntPtr window = new IntPtr(handle);
+        if (ClassName(window) != "#32768" || !IsWindowVisible(window)) throw new InvalidOperationException("Visible owned menu is required.");
+        var info = new MenuBarInfo { Size = (uint)Marshal.SizeOf<MenuBarInfo>() };
+        // Documented OBJID_CLIENT retrieves this popup's HMENU, without Shell/UIA enumeration.
+        if (!GetMenuBarInfo(window, -4, 0, ref info) || info.Menu == IntPtr.Zero)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Owned popup menu metadata unavailable.");
+        int count = GetMenuItemCount(info.Menu);
+        if (count < 1 || count > 16) throw new InvalidOperationException("Unexpected owned menu item count.");
+        var text = new System.Text.StringBuilder(256);
+        GetMenuStringW(info.Menu, (uint)(count - 1), text, text.Capacity, 0x400);
+        if (text.ToString() != "退出 VibeOCR") throw new InvalidOperationException("Last owned menu item is not Exit.");
+        if (!GetMenuItemRect(IntPtr.Zero, info.Menu, (uint)(count - 1), out Rect rectangle))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Owned Exit item bounds unavailable.");
+        int x = (rectangle.Left + rectangle.Right) / 2, y = (rectangle.Top + rectangle.Bottom) / 2;
+        RequirePointOwner(x, y, appPid);
+        if (!SetCursorPos(x, y)) throw new InvalidOperationException("Owned menu cursor move failed.");
+        try { Send(new[] { Mouse(0x0002) }); }
+        finally { Send(new[] { Mouse(0x0004) }); }
+        return new { MenuHandle = handle, ItemRect = rectangle, ItemCount = count };
+    }
+    public static object TrayGone(long handle, Guid iconGuid)
+    {
+        if (iconGuid == Guid.Empty) throw new InvalidOperationException("Known isolated icon GUID is required.");
+        var identifier = new IconIdentifier { Size = (uint)Marshal.SizeOf<IconIdentifier>(), Guid = iconGuid };
+        return new { OwnerGone = !IsWindow(new IntPtr(handle)), IconGone = Shell_NotifyIconGetRect(ref identifier, out _) != 0 };
+    }
+
+    public static void TaskbarCreated(long handle, int appPid)
+    {
+        RequireOwner(handle, appPid);
+        if (!PostMessage(new IntPtr(handle), RegisterWindowMessage("TaskbarCreated"), IntPtr.Zero, IntPtr.Zero))
+            throw new InvalidOperationException("Owned TaskbarCreated post failed.");
+    }
+
     private static string Bounds(IntPtr window)
     {
         if (!GetWindowRect(window, out Rect rect))
@@ -99,7 +229,7 @@ public static class NativeActionsFixture
         return rect.Left + "," + rect.Top + "," + rect.Right + "," + rect.Bottom;
     }
 
-    public static void RunFixture()
+    public static void RunFixture(bool tray = false)
     {
         const uint visible = 0x10000000, child = 0x40000000;
         const uint popup = 0x80000000, overlapped = 0x00CF0000;
@@ -116,7 +246,7 @@ public static class NativeActionsFixture
         IntPtr root = IntPtr.Zero;
         try
         {
-            if (!SetWindowPos(background, new IntPtr(-1), desktopX, desktopY,
+            if (!tray && !SetWindowPos(background, new IntPtr(-1), desktopX, desktopY,
                     desktopW, desktopH, showNoActivate))
                 throw new InvalidOperationException("Synthetic background show failed.");
             UpdateWindow(background);
@@ -135,7 +265,7 @@ public static class NativeActionsFixture
                 child | visible | border, 30, 120, 180, 38,
                 group, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
             if (group == IntPtr.Zero || button == IntPtr.Zero || edit == IntPtr.Zero ||
-                !SetWindowPos(root, new IntPtr(-1), x, y, 500, 320, showNoActivate))
+                !SetWindowPos(root, new IntPtr(tray ? 0 : -1), x, y, 500, 320, showNoActivate))
                 throw new InvalidOperationException("Synthetic UIA controls or show failed.");
             UpdateWindow(root);
             Console.WriteLine(Environment.ProcessId + "|" + GetCurrentThreadId() + "|" +
@@ -164,7 +294,7 @@ public static class NativeActionsFixture
         {
             GetWindowThreadProcessId(window, out uint owner);
             if (owner == (uint)pid && GetWindowRect(window, out Rect bounds))
-                found.Add(new WindowInfo { Handle = window.ToInt64(), Visible = IsWindowVisible(window), Bounds = bounds });
+                found.Add(new WindowInfo { Handle = window.ToInt64(), Visible = IsWindowVisible(window), Iconic = IsIconic(window), ClassName = ClassName(window), Dpi = GetDpiForWindow(window), Bounds = bounds });
             return true;
         }, IntPtr.Zero);
         return found.ToArray();
@@ -292,6 +422,15 @@ public static class NativeActionsFixture
         finally { Send(new[] { Key(key, true), Key(0x10, true), Key(0x12, true), Key(0x11, true) }); }
     }
 
+    public static void NotificationMenuKey()
+    {
+        GetWindowThreadProcessId(GetForegroundWindow(), out uint foregroundPid);
+        GetWindowThreadProcessId(FindWindow("Shell_TrayWnd", null), out uint shellPid);
+        if (shellPid == 0 || foregroundPid != shellPid) throw new InvalidOperationException("Keyboard foreground is not the owned icon's Shell.");
+        try { Send(new[] { Key(0x10, false), Key(0x79, false) }); }
+        finally { Send(new[] { Key(0x79, true), Key(0x10, true) }); }
+    }
+
     public static void OverlayKey(int appPid, ushort key)
     {
         RequireForeground(appPid);
@@ -300,10 +439,35 @@ public static class NativeActionsFixture
 }
 '@
 
+function Get-OwnedTrayTarget {
+    $rect = [NativeActionsFixture]::TrayRect($Handle, $AppPid, $IconGuid)
+    $rootHandle = [NativeActionsFixture]::TrayShellRoot($Handle, $AppPid, $IconGuid)
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$rootHandle)
+    # Query only our tooltip and fixed Shell labels; never collect other icon names.
+    $names = @('VibeOCR', '显示隐藏的图标', '隐藏的图标菜单', 'Show hidden icons', 'Hidden icon menu')
+    $conditions = [System.Windows.Automation.Condition[]]@($names | ForEach-Object {
+        [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty, $_)
+    })
+    $matches = $root.FindAll([System.Windows.Automation.TreeScope]::Subtree,
+        [System.Windows.Automation.OrCondition]::new($conditions))
+    $centerX = ($rect.Left + $rect.Right) / 2
+    $centerY = ($rect.Top + $rect.Bottom) / 2
+    $targets = @($matches | Where-Object {
+        $bounds = $_.Current.BoundingRectangle
+        $bounds.Left -le $centerX -and $bounds.Right -ge $centerX -and
+        $bounds.Top -le $centerY -and $bounds.Bottom -ge $centerY
+    })
+    if ($targets.Count -ne 1) { throw 'Owned GUID notification target is missing or ambiguous.' }
+    @{ Element = $targets[0]; Rect = $rect; IsChevron = $targets[0].Current.Name -ne 'VibeOCR' }
+}
+
 $oldDpi = [NativeActionsFixture]::SetThreadDpiAwarenessContext([IntPtr]::new(-4))
 if ($oldDpi -eq [IntPtr]::Zero) { throw 'Per Monitor V2 native control context unavailable' }
 try {
     switch ($Action) {
+        'tray-fixture' { [NativeActionsFixture]::RunFixture($true) }
         'fixture' { [NativeActionsFixture]::RunFixture() }
         'selection' {
             if (-not ([NativeActionsFixture]::Windows($AppPid) | Where-Object { $_.Handle -eq $Handle -and $_.Visible })) {
@@ -318,6 +482,33 @@ try {
             $labels[0]
         }
         'windows' { [NativeActionsFixture]::Windows($AppPid) | ConvertTo-Json -Compress -Depth 4 }
+        'minimize' { [NativeActionsFixture]::Show($Handle, $AppPid, 6) }
+        'restore' { [NativeActionsFixture]::Show($Handle, $AppPid, 9) }
+        'tray-state' { [NativeActionsFixture]::TrayState($AppPid, $FixturePid, $Handle) | ConvertTo-Json -Compress -Depth 5 }
+        'tray-expose' {
+            $target = Get-OwnedTrayTarget
+            if ($target.IsChevron) {
+                $target.Element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+            }
+            @{ IconRect = $target.Rect; IsChevron = $target.IsChevron } | ConvertTo-Json -Compress -Depth 3
+        }
+        'tray-keyboard' {
+            $target = Get-OwnedTrayTarget
+            if ($target.IsChevron) { throw 'Owned icon must be exposed before keyboard interaction.' }
+            $target.Element.SetFocus()
+            [NativeActionsFixture]::NotificationMenuKey()
+            @{ IconRect = $target.Rect; Keyboard = $true } | ConvertTo-Json -Compress -Depth 3
+        }
+        { $_ -in @('tray-click', 'tray-left-click', 'tray-double-click') } {
+            $target = Get-OwnedTrayTarget
+            if ($target.IsChevron) { throw 'Owned icon must be exposed before mouse interaction.' }
+            [NativeActionsFixture]::TrayClick($Handle, $AppPid, $IconGuid, $Action -ne 'tray-click', $Action -eq 'tray-double-click') |
+                ConvertTo-Json -Compress -Depth 3
+        }
+        'tray-gone' { [NativeActionsFixture]::TrayGone($Handle, $IconGuid) | ConvertTo-Json -Compress }
+        'tray-menu-quit' { [NativeActionsFixture]::ClickExitMenu($Handle, $AppPid) | ConvertTo-Json -Compress -Depth 3 }
+        'taskbar-created' { [NativeActionsFixture]::TaskbarCreated($Handle, $AppPid) }
+        'down' { [NativeActionsFixture]::OverlayKey($AppPid, 0x28) }
         'hide' { [NativeActionsFixture]::Hide($Handle, $AppPid) }
         'close' { [NativeActionsFixture]::Close($Handle, $AppPid) }
         'quit' { [NativeActionsFixture]::Quit($Handle, $FixturePid, $ThreadId) }

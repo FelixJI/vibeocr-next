@@ -6,10 +6,9 @@ using Xunit;
 namespace VibeOCR.Platform.Tests;
 
 /// <summary>
-/// seam 级契约：TrackPopupMenu 模态阻塞、SetForegroundWindow 会真实抢占
-/// 前台，菜单握手（owner 前台 + 结束 WM_NULL，绝不用主窗）无法在自动化
-/// 测试里用真窗复现，故仅保留握手与建窗失败两条 fake 契约；其余行为见
-/// 下方真实 Win32 集成测试。
+/// 普通 CI 以 fake 覆盖 owner 握手与 Win32 失败边界，不触碰前台/输入。
+/// 真实宿主建窗、消息路由与释放由下方 Win32 集成测试覆盖；实际 WinUI
+/// 菜单行为由显式启用的 scripts/smoke_tray_shell.mjs 验证。
 /// </summary>
 public sealed class TrayMenuOwnerWindowTests
 {
@@ -157,6 +156,21 @@ public sealed class TrayMenuOwnerWindowTests
 
 public sealed class TrayIconReattachTests
 {
+    [Theory]
+    [InlineData("1", "native-actions-e2e", "0123456789abcdef0123456789abcdef", true)]
+    [InlineData(null, "native-actions-e2e", "0123456789abcdef0123456789abcdef", false)]
+    [InlineData("1", "production", "0123456789abcdef0123456789abcdef", false)]
+    [InlineData("1", "native-actions-e2e", "01234567-89ab-cdef-0123-456789abcdef", false)]
+    [InlineData("1", "native-actions-e2e", "00000000000000000000000000000000", false)]
+    public void KnownIconGuidRequiresBothOptInsAndAnIsolatedNFormatInstance(
+        string? enabled, string mode, string instance, bool expected)
+    {
+        // 纯输入契约：不修改进程环境，允许与其他 Platform 测试并发。
+        Guid id = TrayIconService.ResolveIconId(enabled, mode, instance);
+        Assert.Equal(expected, id == Guid.Parse("0123456789abcdef0123456789abcdef"));
+        Assert.NotEqual(Guid.Empty, id);
+    }
+
     [Fact]
     public void ReattachAfterTaskbarRecreatedReaddsSameGuidAndDeletesOnce()
     {
@@ -185,6 +199,8 @@ public sealed class TrayIconReattachTests
         Assert.Throws<InvalidOperationException>(service.Reattach);
     }
 
+    // v0 真实事件：右键与键盘菜单键同为 WM_RBUTTONUP；WM_CONTEXTMENU 仅
+    // NOTIFYICON_VERSION_4 发送，容错保留不作为 v0 键盘入口证据。
     [Theory]
     [InlineData(TrayIconCallback.RightButtonUp, true)]
     [InlineData(TrayIconCallback.ContextMenu, true)]
