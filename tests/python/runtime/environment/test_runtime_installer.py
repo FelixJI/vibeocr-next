@@ -4564,6 +4564,13 @@ def test_document_parsing_ensure_passes_selected_model_source_to_native_clients(
     assert Path(launch.model_root).is_dir()
     assert Path(launch.environment["HF_HOME"]).is_relative_to(state_root)
     assert Path(launch.environment["MODELSCOPE_CACHE"]).is_relative_to(state_root)
+    assert Path(launch.environment["MODELSCOPE_HOME"]).is_relative_to(state_root)
+    assert (
+        launch.environment["MODELSCOPE_CREDENTIALS_PATH"]
+        == (launch.environment["MODELSCOPE_HOME"])
+    )
+    shared_models = Path(launch.environment["VIBEOCR_SHARED_MODEL_CACHE"])
+    assert shared_models == state_root / "model-cache"
     assert Path(launch.environment["PADDLE_PDX_CACHE_HOME"]).is_relative_to(state_root)
     assert launch.environment["PIP_INDEX_URL"] == (
         "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/"
