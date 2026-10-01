@@ -42,7 +42,6 @@ const qrTests = [
 ];
 const statusCopied = '已复制当前预览图片';
 const statusDecoded = '识别完成';
-const statusRunning = '正在处理二维码…';
 const statusNoCodes = '当前预览中未识别到支持的二维码或条码';
 const statusUnavailable = '图片识别需要识别运行环境，请启动或恢复后重试';
 
@@ -104,14 +103,20 @@ function area(window) {
   return Math.max(0, r.Right - r.Left) * Math.max(0, r.Bottom - r.Top);
 }
 
-async function waitExit(child, timeoutMs) {
-  if (!child || child.exitCode !== null) return true;
-  return Promise.race([
-    once(child, 'exit').then(() => true),
-    delay(timeoutMs).then(() => false),
-  ]);
+async function exitWithin(child, timeoutMs) {
+  let timer;
+  try {
+    return await Promise.race([
+      once(child, 'close').then(([code]) => ({ code })),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); }),
+    ]);
+  } finally { clearTimeout(timer); }
 }
 
+async function waitExit(child, timeoutMs) {
+  if (!child || child.exitCode !== null) return true;
+  return (await exitWithin(child, timeoutMs)) !== null;
+}
 async function forceStop(child) {
   if (!child?.pid || child.exitCode !== null) return;
   try {
@@ -399,10 +404,8 @@ async function ensureBaseOffline(candidate, layout, smokeRoot) {
   let stderr = '';
   child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
   child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
-  let exit = await Promise.race([
-    once(child, 'exit').then(([code]) => code),
-    delay(ensureTimeoutMs).then(() => null),
-  ]);
+  const completed = await exitWithin(child, ensureTimeoutMs);
+  const exit = completed?.code ?? null;
   if (exit === null) {
     await forceStop(child);
     throw new Error(`Offline base Ensure timed out after ${ensureTimeoutMs} ms.`);
@@ -531,32 +534,55 @@ async function qrStatus(page) {
   return (await page.locator('output.status-line').innerText({ timeout: 10000 })).trim();
 }
 
-// Records every rendered QR status-line text. A decode run always publishes
-// the transient running status, so the log distinguishes a real re-run from
-// a skipped no-op and a repeated auto decode from a stable one.
+// Observe real bridge traffic: React may coalesce the brief running UI state.
+// Requests still flow unchanged through the production postMessage method.
 async function watchStatus(page) {
   await page.evaluate(() => {
     window.__codesSmokeStatusLog = [];
-    const record = () => {
-      const output = document.querySelector('output.status-line');
-      const text = (output?.textContent ?? '').trim();
-      const log = window.__codesSmokeStatusLog;
-      if (text && log[log.length - 1] !== text) log.push(text);
+    window.__codesSmokeRequest = null;
+    if (window.__codesSmokeBridgeObserver) return;
+    window.__codesSmokeBridgeObserver = true;
+    const channel = window.chrome.webview;
+    const post = channel.postMessage.bind(channel);
+    channel.postMessage = (data) => {
+      if (data?.payload?.command?.scope === 'qrcode' &&
+          data.payload.command.action === 'decodeCurrent')
+        window.__codesSmokeRequest = { id: data.id, action: data.payload.command.action };
+      return post(data);
     };
-    window.__codesSmokeObserver?.disconnect();
-    window.__codesSmokeObserver = new MutationObserver(record);
-    window.__codesSmokeObserver.observe(document.body,
-      { subtree: true, childList: true, characterData: true });
+    channel.addEventListener('message', ({ data }) => {
+      if (data?.type !== 'app.state' && data?.type !== 'app.command') return;
+      window.__codesSmokeStatusLog.push({ kind: data.kind, type: data.type, id: data.id,
+        scope: data.payload?.scope, ok: data.payload?.ok,
+        problem: data.payload?.problem ?? null,
+        statusCode: data.payload?.state?.statusCode,
+        previewRevision: data.payload?.state?.previewRevision });
+      window.__codesSmokeStatusLog = window.__codesSmokeStatusLog.slice(-64);
+    });
   });
 }
 
 async function readStatusLog(page) {
-  return page.evaluate(() => {
-    window.__codesSmokeObserver?.disconnect();
-    return window.__codesSmokeStatusLog ?? [];
-  });
+  return page.evaluate(() => ({ request: window.__codesSmokeRequest,
+    messages: window.__codesSmokeStatusLog ?? [] }));
 }
 
+async function waitManualDecode(page) {
+  await page.waitForFunction(() => {
+    const request = window.__codesSmokeRequest;
+    const messages = window.__codesSmokeStatusLog ?? [];
+    const receipt = request && messages.find((m) =>
+      m.kind === 'response' && m.type === 'app.command' && m.id === request.id);
+    return receipt && (receipt.ok === false || messages.some((m) => m.scope === 'qrcode' && m.statusCode === 'qrcode.decoded'));
+  }, null, { timeout: decodeTimeoutMs });
+  const log = await readStatusLog(page);
+  const receipt = log.messages.find((m) => m.kind === 'response' && m.id === log.request?.id);
+  assert.equal(receipt?.ok, true, `Manual decode receipt failed: ${JSON.stringify(log)}`);
+  assert(log.messages.some((m) => m.scope === 'qrcode' && m.statusCode === 'qrcode.running'),
+    `No native running state for manual decode: ${JSON.stringify(log)}`);
+  await page.getByText(statusDecoded, { exact: true }).waitFor({ timeout: decodeTimeoutMs });
+  return log;
+}
 async function qrResults(page) {
   return page.locator('ul.decoded-results > li').evaluateAll((items) => items.map((item) => {
     const spans = item.querySelectorAll('span');
@@ -695,13 +721,7 @@ async function main() {
         await native('foreground', { AppPid: app.child.pid });
         await watchStatus(page);
         await page.getByRole('button', { name: '识别当前预览 / 重新识别', exact: true }).click();
-        await page.waitForFunction(([done, running]) =>
-          document.querySelector('output.status-line')?.textContent?.trim() === done &&
-          window.__codesSmokeStatusLog?.includes(running),
-        [statusDecoded, statusRunning], { timeout: decodeTimeoutMs });
-        const manualLog = await readStatusLog(page);
-        assert(manualLog.includes(statusRunning),
-          `Manual re-recognition did not run again: ${JSON.stringify(manualLog)}`);
+        const manualLog = await waitManualDecode(page);
         const manualResults = await qrResults(page);
         assert(manualResults.some((item) => item.data === test.expected),
           `Manual re-recognition missed ${test.format} payload: ${JSON.stringify(manualResults)}`);
@@ -713,7 +733,7 @@ async function main() {
         await page.getByRole('tab', { name: '识别', exact: true }).click();
         await delay(900);
         const switchLog = await readStatusLog(page);
-        assert(!switchLog.includes(statusRunning),
+        assert(!switchLog.request && !switchLog.messages.some((m) => m.scope === 'qrcode' && m.statusCode === 'qrcode.running'),
           `Tab switching re-triggered an automatic decode: ${JSON.stringify(switchLog)}`);
         assert.equal(await qrStatus(page), statusDecoded,
           'Tab switching re-triggered or disturbed the decode status.');
@@ -723,7 +743,7 @@ async function main() {
           'Tab switching changed the decoded results.');
         await page.screenshot({ path: path.join(stage2Root, `${test.format}-decoded.png`) });
         evidence.stage2.cases.push({ ...test, autoResults, pastedResults, manualResults,
-          manualStatusLog: manualLog, tabSwitchStatusLog: switchLog,
+          manualBridge: manualLog, tabSwitchBridge: switchLog,
           nativeClipboardPixelsEqual: true });
       }
 
@@ -789,13 +809,7 @@ async function main() {
         await native('foreground', { AppPid: app.child.pid });
         await watchStatus(page);
         await page.getByRole('button', { name: '识别当前预览 / 重新识别', exact: true }).click();
-        await page.waitForFunction(([done, running]) =>
-          document.querySelector('output.status-line')?.textContent?.trim() === done &&
-          window.__codesSmokeStatusLog?.includes(running),
-        [statusDecoded, statusRunning], { timeout: decodeTimeoutMs });
-        const recoveryLog = await readStatusLog(page);
-        assert(recoveryLog.includes(statusRunning),
-          `Post-recovery re-recognition did not run again: ${JSON.stringify(recoveryLog)}`);
+        const recoveryLog = await waitManualDecode(page);
         assert.equal(await page.getByAltText('当前二维码与条码预览').getAttribute('src'), multiUrl,
           'Recovery changed the current preview revision.');
         const recoveredResults = await qrResults(page);
@@ -803,10 +817,17 @@ async function main() {
           recoveredResults.some((item) => item.data === 'VIBE-128'),
         `Post-recovery decode missed payloads: ${JSON.stringify(recoveredResults)}`);
         await page.screenshot({ path: path.join(stage2Root, 'recovery-decoded.png') });
-        evidence.stage2.recovery.statusLog = recoveryLog;
+        evidence.stage2.recovery.bridge = recoveryLog;
         evidence.stage2.recovery.resultsAfterRecovery = recoveredResults;
       }
       evidence.stage2.state = 'passed';
+    } catch (error) {
+      if (app) {
+        evidence.stage2.bridgeAtFailure = await readStatusLog(app.page).catch(() => null);
+        evidence.stage2.statusAtFailure = await qrStatus(app.page).catch(() => null);
+        await app.page.screenshot({ path: path.join(stage2Root, 'failure.png') }).catch(() => {});
+      }
+      throw error;
     } finally {
       if (app) {
         let cleanupError = null;
