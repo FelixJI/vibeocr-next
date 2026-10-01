@@ -2210,6 +2210,12 @@ describe("AppShell", () => {
     expect(
       screen.getByText(/可直接复用环境「文档环境」（修订 3，按稳定顺序选中）/),
     ).toBeVisible();
+    // AC8：切换语义如实说明（重新启动并验证；运行中任务时被拒绝）。
+    expect(
+      screen.getAllByText(
+        /切换会重新启动并验证识别服务；有运行中任务时切换会被拒绝/,
+      ).length,
+    ).toBeGreaterThan(0);
     await user.click(
       screen.getByRole("button", { name: "切换到此环境并启动验证" }),
     );
@@ -2294,6 +2300,13 @@ describe("AppShell", () => {
           id: "rapidocr-cpu",
           displayName: "RapidOCR · CPU",
           configuredRecognitionTypes: ["text"],
+          accelerator: "cpu",
+          targetDevice: "cpu",
+        },
+        {
+          id: "mineru-cpu",
+          displayName: "MinerU · CPU",
+          configuredRecognitionTypes: ["document"],
           accelerator: "cpu",
           targetDevice: "cpu",
         },
@@ -2450,11 +2463,327 @@ describe("AppShell", () => {
         /计划：rapidocr-cpu · 目标RapidOCR · CPU（环境修订 1）· 请求源：跟随配置；生效源：TUNA PyPI 镜像/,
       ),
     ).toBeVisible();
+    // AC8：安装只写入目标环境、不停止当前识别服务（活动保护以 Runtime 为准）。
+    expect(
+      screen.getByText(/依赖安装只写入此目标环境，不会停止当前识别服务/),
+    ).toBeVisible();
+    // 同一待准备未确认前不再提供重复 create：指向既有高级确认。
+    expect(
+      screen.queryByRole("button", { name: "准备此配置" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/请在下方“高级：环境与依赖”核对锁定依赖并确认安装/),
+    ).toBeVisible();
     await user.click(screen.getByRole("button", { name: "确认安装依赖" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.confirmEnvironmentInstall",
       planId: "p-9",
     });
+    // 选择失效后仍可新建：切到另一用途后重新可以准备（不重复旧待准备）。
+    await user.selectOptions(screen.getByLabelText("识别用途"), "document");
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 24,
+          features: {
+            settings: {
+              ...settingsBase,
+              environments: [
+                {
+                  id: "env-new",
+                  name: "RapidOCR · CPU",
+                  revision: 1,
+                  kind: "venv",
+                  status: "empty",
+                  pythonState: "ready",
+                  dependencyState: "empty",
+                  engineState: "unverified",
+                  modelState: "not_checked",
+                  serviceState: "not_started",
+                  configuredRecognitionTypes: [],
+                },
+              ],
+              environmentCompatibility: {
+                recipe: "mineru-cpu",
+                selectedEnvironmentId: null,
+                selectedEnvironmentRevision: null,
+                selectionReason: null,
+              },
+            },
+          },
+        }}
+      />,
+    );
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenCalledWith({
+        type: "settings.findCompatibleEnvironment",
+        recipe: "mineru-cpu",
+      }),
+    );
+    expect(
+      screen.getByRole("button", { name: "准备此配置" }),
+    ).toBeInTheDocument();
+    unmount();
+  });
+  it("keeps compatibility lookup single-flight with explicit retry and no stale overwrite", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn().mockResolvedValue(true),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const settingsBase = {
+      environments: [
+        {
+          id: "env-1",
+          name: "文档环境",
+          revision: 3,
+          kind: "venv",
+          status: "installed",
+          pythonState: "ready",
+          dependencyState: "installed",
+          engineState: "ready",
+          modelState: "ready",
+          serviceState: "not_started",
+          configuredRecognitionTypes: ["text"],
+          targetDevice: "cpu",
+        },
+      ],
+      activeEnvironmentId: null,
+      environmentRecipes: [
+        {
+          id: "rapidocr-cpu",
+          displayName: "RapidOCR · CPU",
+          configuredRecognitionTypes: ["text"],
+          accelerator: "cpu",
+          targetDevice: "cpu",
+        },
+        {
+          id: "mineru-cpu",
+          displayName: "MinerU · CPU",
+          configuredRecognitionTypes: ["document"],
+          accelerator: "cpu",
+          targetDevice: "cpu",
+        },
+      ],
+      environmentHardware: { nvidiaDriverStatus: "unknown" },
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 30,
+      route: "settings",
+      theme: "light",
+      capabilities: ["runtime.environments"],
+      runtimeLabel: "运行环境",
+      features: { settings: settingsBase },
+    };
+    const countQueries = (recipe: string) =>
+      vi
+        .mocked(actions.run)
+        .mock.calls.filter(
+          ([action]) =>
+            action?.type === "settings.findCompatibleEnvironment" &&
+            action?.recipe === recipe,
+        ).length;
+    const { unmount, rerender } = render(
+      <App actions={actions} viewState={viewState} />,
+    );
+    await waitFor(() =>
+      expect(countQueries("rapidocr-cpu")).toBeGreaterThanOrEqual(1),
+    );
+    // 查询失败（宿主未回传结果）+ busy/状态推送多次重渲染：同一配方不得
+    // 自动重发（每次查询都会冻结一个 Installer 子进程）。
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 31,
+          features: {
+            settings: { ...settingsBase, environmentBusy: true },
+          },
+        }}
+      />,
+    );
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 32,
+          features: {
+            settings: {
+              ...settingsBase,
+              environmentStatus: "查询失败：运行环境操作失败。",
+            },
+          },
+        }}
+      />,
+    );
+    rerender(
+      <App actions={actions} viewState={{ ...viewState, revision: 33 }} />,
+    );
+    expect(countQueries("rapidocr-cpu")).toBe(1);
+    // 失败后如实提示并允许显式重试。
+    expect(screen.getByText(/兼容性查询未完成/)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "重新查询兼容环境" }));
+    expect(countQueries("rapidocr-cpu")).toBe(2);
+    // 迟到的旧选择结果不覆盖新选择：切到文档解析后，旧 rapidocr-cpu 结果
+    // 只按配方 id 绑定，不冒充当前选择的查询结果。
+    await user.selectOptions(screen.getByLabelText("识别用途"), "document");
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 34,
+          features: {
+            settings: {
+              ...settingsBase,
+              environmentCompatibility: {
+                recipe: "rapidocr-cpu",
+                selectedEnvironmentId: "env-1",
+                selectedEnvironmentRevision: 3,
+                selectionReason: "deterministic_id_order",
+              },
+            },
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.queryByText(/可直接复用环境「文档环境」/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "切换到此环境并启动验证" }),
+    ).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(countQueries("mineru-cpu")).toBeGreaterThanOrEqual(1),
+    );
+    // 切回文字识别：旧结果（未选中任何环境）如实呈现“没有可直接复用”。
+    await user.selectOptions(screen.getByLabelText("识别用途"), "text");
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 35,
+          features: {
+            settings: {
+              ...settingsBase,
+              environmentCompatibility: {
+                recipe: "rapidocr-cpu",
+                selectedEnvironmentId: null,
+                selectedEnvironmentRevision: null,
+                selectionReason: null,
+              },
+            },
+          },
+        }}
+      />,
+    );
+    expect(screen.getByText(/没有可直接复用的已安装环境/)).toBeVisible();
+    const installedBase = countQueries("rapidocr-cpu");
+    // 安装进行中：宿主已清空兼容结果且环境修订推进，但 busy 时不补发。
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 36,
+          features: {
+            settings: {
+              ...settingsBase,
+              environmentBusy: true,
+              environments: [{ ...settingsBase.environments[0], revision: 4 }],
+            },
+          },
+        }}
+      />,
+    );
+    expect(countQueries("rapidocr-cpu")).toBe(installedBase);
+    expect(screen.getByText(/正在查询可复用环境/)).toBeVisible();
+    // 安装成功结束：兼容结果仍被宿主清空且环境状态已变——自动补发一次新
+    // 查询（成功安装后需要新的兼容查询），不永久卡在“查询未完成”；
+    // 重复状态推送也不再多发。
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 37,
+          features: {
+            settings: {
+              ...settingsBase,
+              environments: [{ ...settingsBase.environments[0], revision: 4 }],
+            },
+          },
+        }}
+      />,
+    );
+    await waitFor(() =>
+      expect(countQueries("rapidocr-cpu")).toBe(installedBase + 1),
+    );
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 38,
+          features: {
+            settings: {
+              ...settingsBase,
+              environments: [{ ...settingsBase.environments[0], revision: 4 }],
+            },
+          },
+        }}
+      />,
+    );
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 39,
+          features: {
+            settings: {
+              ...settingsBase,
+              environments: [{ ...settingsBase.environments[0], revision: 4 }],
+            },
+          },
+        }}
+      />,
+    );
+    expect(countQueries("rapidocr-cpu")).toBe(installedBase + 1);
+    // 新结果绑定后如实指向修订 4 的可复用环境，不再卡在“查询未完成”。
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 40,
+          features: {
+            settings: {
+              ...settingsBase,
+              environments: [{ ...settingsBase.environments[0], revision: 4 }],
+              environmentCompatibility: {
+                recipe: "rapidocr-cpu",
+                selectedEnvironmentId: "env-1",
+                selectedEnvironmentRevision: 4,
+                selectionReason: "deterministic_id_order",
+              },
+            },
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.getByText(/可直接复用环境「文档环境」（修订 4，按稳定顺序选中）/),
+    ).toBeVisible();
+    expect(screen.queryByText(/兼容性查询未完成/)).not.toBeInTheDocument();
     unmount();
   });
   it("keeps a compatible MinerU request confirmable when Runtime resolves a combined recipe", async () => {
@@ -2728,8 +3057,8 @@ describe("AppShell", () => {
     expect(
       screen.getByText(/该环境正在使用；模型来源修改将在下次启动时生效/),
     ).toBeVisible();
-    // 管理模式下旧 Backend 下载源入口不冒充全局。
-    expect(screen.getByText(/已并入“环境与依赖”/)).toBeVisible();
+    // 管理模式下 DOWNLOADS 卡片整体不渲染（来源已在“环境与依赖”内配置）。
+    expect(screen.queryByText("下载来源")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Python 包下载源")).not.toBeInTheDocument();
 
     // 切到 B：B 的覆盖与 A 互不影响；保存只针对目标环境。

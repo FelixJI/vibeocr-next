@@ -2115,31 +2115,26 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             actions={actions}
           />
         </Panel>
-        <Panel
-          label="DOWNLOADS"
-          title="下载来源"
-          className="settings-download-panel"
-        >
-          {viewState.capabilities.includes("runtime.environments") ? (
+        {/* #136：管理模式下 DOWNLOADS 卡片已迁移删除（来源全部在“环境与依赖”
+            内配置）；无该 capability 的旧宿主路径完整保留 SourceSelector。 */}
+        {viewState.capabilities.includes("runtime.environments") ? null : (
+          <Panel
+            label="DOWNLOADS"
+            title="下载来源"
+            className="settings-download-panel"
+          >
+            <SourceSelector
+              sources={sources}
+              loaded={sourcesLoaded}
+              enabled={viewState.capabilities.includes("settings.selection")}
+              locked={busy}
+              actions={actions}
+            />
             <p className="form-note">
-              下载来源已并入“环境与依赖”：全局默认、单环境覆盖与本次安装选择
-              统一在那里配置。
+              依赖包来源用于安装运行环境；模型原生来源由引擎使用。更换来源不会安装组件或提前准备模型。
             </p>
-          ) : (
-            <>
-              <SourceSelector
-                sources={sources}
-                loaded={sourcesLoaded}
-                enabled={viewState.capabilities.includes("settings.selection")}
-                locked={busy}
-                actions={actions}
-              />
-              <p className="form-note">
-                依赖包来源用于安装运行环境；模型原生来源由引擎使用。更换来源不会安装组件或提前准备模型。
-              </p>
-            </>
-          )}
-        </Panel>
+          </Panel>
+        )}
       </div>
     </Workspace>
   );
@@ -2676,17 +2671,24 @@ function ManagedEnvironmentEditor({
           {selected.id !== activeId ||
           (selected.status === "installed" &&
             selected.serviceState !== "ready") ? (
-            <Button
-              disabled={busy}
-              onClick={() =>
-                void actions.run({
-                  type: "settings.switchEnvironment",
-                  environmentId: selected.id,
-                })
-              }
-            >
-              {selected.id === activeId ? "启动并验证当前环境" : "切换到此环境"}
-            </Button>
+            <>
+              <Button
+                disabled={busy}
+                onClick={() =>
+                  void actions.run({
+                    type: "settings.switchEnvironment",
+                    environmentId: selected.id,
+                  })
+                }
+              >
+                {selected.id === activeId
+                  ? "启动并验证当前环境"
+                  : "切换到此环境"}
+              </Button>
+              <p className="form-note">
+                切换会重新启动并验证识别服务；有运行中任务时切换会被拒绝。
+              </p>
+            </>
           ) : null}
         </>
       ) : null}
@@ -2854,6 +2856,11 @@ function EnvironmentPlanPanel({
           不会计入新下载，实际下载情况安装后才可知。
         </p>
       </details>
+      {/* AC8：确认前直接可见的真实说明，不藏在折叠明细里。 */}
+      <p className="form-note">
+        依赖安装只写入此目标环境，不会停止当前识别服务；活动环境的安装保护以
+        Runtime 实际状态为准（空白首装也不需要先停止任何服务）。
+      </p>
       <Button
         disabled={busy}
         onClick={() =>
@@ -2943,6 +2950,10 @@ function EnvironmentRecommendation({
     return "暂不可选：GPU 状态未探测（可稍后重新检查状态）";
   };
   const blockedReason = target ? hardwareBlockReason(target) : null;
+  // 真实选择由配方 id 决定：target 对象每次渲染都是新引用，不能作依赖；
+  // 查询去重也只看 id，不复刻对象身份。
+  const targetId = target?.id ?? "";
+  const compatibilityRecipe = compatibility?.recipe ?? "";
   const queryResult =
     compatibility && target && compatibility.recipe === target.id
       ? compatibility
@@ -2980,16 +2991,100 @@ function EnvironmentRecommendation({
       recipe: pendingPrepare.recipe,
     });
   }, [pendingPrepare, environments, actions]);
-  // 选择即查询：当前目标有目录条目、未被硬件阻断且没有对应结果时，
-  // 只读发起一次 findCompatible；结果按配方 id 绑定，旧结果不覆盖新选择。
+  // 选择即查询（单飞）：同一配方在同一环境状态下的自动查询只发一次——
+  // 在途（含显式重试空窗，以命令回执结算为准）或失败未回结果都不
+  // 自动重发（每次查询都会占用 Runtime 存储锁、冻结 Installer 子进程，
+  // 失败重试必须由用户显式触发）；结果按配方 id 绑定，旧选择的迟到结果
+  // 不覆盖新选择。宿主在真实环境变更（创建/安装/切换/删除/来源）时会
+  // 清空兼容结果，此时环境指纹变化允许一次新的自动查询：安装成功后
+  // 不会永久卡在“查询未完成”。指纹只取身份+修订+状态，不含易变的
+  // 运行证据字段；纯刷新（结果仍绑定）不触发重复查询。
+  const environmentsFingerprint = environments
+    .map(
+      (environment) =>
+        `${environment.id}:${environment.revision}:${environment.status}`,
+    )
+    .join("|");
+  const [dispatchedQuery, setDispatchedQuery] = useState<{
+    recipe: string;
+    fingerprint: string;
+  } | null>(null);
+  // 在途闸门只供 effect/事件处理器读写，不在渲染中读取（react-hooks/refs）。
+  const inFlightQuery = useRef<string | null>(null);
   useEffect(() => {
-    if (!target || busy || blockedReason) return;
-    if (compatibility?.recipe === target.id) return;
-    void actions.run({
-      type: "settings.findCompatibleEnvironment",
-      recipe: target.id,
+    if (!targetId || busy || blockedReason) return;
+    if (compatibilityRecipe === targetId) return;
+    if (
+      dispatchedQuery?.recipe === targetId &&
+      dispatchedQuery.fingerprint === environmentsFingerprint
+    )
+      return;
+    if (inFlightQuery.current === targetId) return;
+    setDispatchedQuery({
+      recipe: targetId,
+      fingerprint: environmentsFingerprint,
     });
-  }, [target, busy, blockedReason, compatibility, actions]);
+    inFlightQuery.current = targetId;
+    const settle = () => {
+      if (inFlightQuery.current === targetId) inFlightQuery.current = null;
+    };
+    void Promise.resolve(
+      actions.run({
+        type: "settings.findCompatibleEnvironment",
+        recipe: targetId,
+      }),
+    ).then(settle, settle);
+  }, [
+    targetId,
+    busy,
+    blockedReason,
+    compatibilityRecipe,
+    environmentsFingerprint,
+    dispatchedQuery,
+    actions,
+  ]);
+  const retryQuery = () => {
+    if (!targetId || inFlightQuery.current === targetId) return;
+    setDispatchedQuery({
+      recipe: targetId,
+      fingerprint: environmentsFingerprint,
+    });
+    inFlightQuery.current = targetId;
+    const settle = () => {
+      if (inFlightQuery.current === targetId) inFlightQuery.current = null;
+    };
+    void Promise.resolve(
+      actions.run({
+        type: "settings.findCompatibleEnvironment",
+        recipe: targetId,
+      }),
+    ).then(settle, settle);
+  };
+  const queryPending =
+    !!targetId &&
+    dispatchedQuery?.recipe === targetId &&
+    compatibilityRecipe !== targetId;
+  // 宿主清空结果且环境状态已变（马上会自动补发一次新查询）时，如实显示
+  // “正在查询”，不闪现误导性的“查询未完成”重试入口。
+  const queryDispatchExpected =
+    !!targetId &&
+    !busy &&
+    !blockedReason &&
+    compatibilityRecipe !== targetId &&
+    (dispatchedQuery?.recipe !== targetId ||
+      dispatchedQuery.fingerprint !== environmentsFingerprint);
+  // 同一待准备（未确认）指向既有高级确认：已创建/在途的环境未离开空态前
+  // 阻止重复 create；选择失效（用途/设备变化）后仍可新建。
+  const preparedEnvironment =
+    pendingPrepare && pendingPrepare.recipe === targetId
+      ? environments.find(
+          (environment) => environment.name === pendingPrepare.name,
+        )
+      : undefined;
+  const preparedPending =
+    !!pendingPrepare &&
+    pendingPrepare.recipe === targetId &&
+    (!preparedEnvironment || preparedEnvironment.status === "empty");
   const clearPendingPrepare = () => onPendingPrepare(null);
   const plan = managedEnvironmentPlan(state.environmentPlan);
   // 推荐流程自建的准备计划：只用于指引说明，计划与确认安装统一在
@@ -3102,6 +3197,17 @@ function EnvironmentRecommendation({
                 ) : (
                   <p>没有可直接复用的已安装环境（均为空、不匹配或未验证）。</p>
                 )
+              ) : queryPending ? (
+                busy || queryDispatchExpected ? (
+                  <p className="form-note">正在查询可复用环境…</p>
+                ) : (
+                  <div className="setting-row">
+                    <span className="form-note">
+                      兼容性查询未完成（未收到结果）；可重试。
+                    </span>
+                    <Button onClick={retryQuery}>重新查询兼容环境</Button>
+                  </div>
+                )
               ) : (
                 <p className="form-note">正在查询可复用环境…</p>
               )}
@@ -3110,20 +3216,25 @@ function EnvironmentRecommendation({
                   该兼容环境已是当前环境并通过启动验证，无需重装。
                 </p>
               ) : compatibleEnvironment ? (
-                <Button
-                  disabled={busy}
-                  onClick={() =>
-                    void actions.run({
-                      type: "settings.switchEnvironment",
-                      environmentId: compatibleEnvironment.id,
-                    })
-                  }
-                >
-                  {compatibleEnvironment.id === activeId
-                    ? "启动并验证当前环境"
-                    : "切换到此环境并启动验证"}
-                </Button>
-              ) : queryResult ? (
+                <>
+                  <Button
+                    disabled={busy}
+                    onClick={() =>
+                      void actions.run({
+                        type: "settings.switchEnvironment",
+                        environmentId: compatibleEnvironment.id,
+                      })
+                    }
+                  >
+                    {compatibleEnvironment.id === activeId
+                      ? "启动并验证当前环境"
+                      : "切换到此环境并启动验证"}
+                  </Button>
+                  <p className="form-note">
+                    切换会重新启动并验证识别服务；有运行中任务时切换会被拒绝。
+                  </p>
+                </>
+              ) : queryResult && !preparedPending ? (
                 <div className="setting-row">
                   <Button
                     disabled={busy || !prepareName}
@@ -3157,6 +3268,11 @@ function EnvironmentRecommendation({
             <p role="status">
               已创建空环境「{pendingPrepare?.name}」并预览 {preparePlan.recipe}
               依赖；请在下方“高级：环境与依赖”核对锁定依赖并确认安装。
+            </p>
+          ) : preparedPending ? (
+            <p role="status">
+              已创建空环境「{pendingPrepare?.name}」；同一配置只准备一次，
+              请在下方“高级：环境与依赖”核对并确认安装，无需重复准备。
             </p>
           ) : null}
         </>
