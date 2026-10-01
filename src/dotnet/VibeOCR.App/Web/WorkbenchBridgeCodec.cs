@@ -39,6 +39,7 @@ public static class WorkbenchBridgeCodec
     ["edge", "autoHide"];
   private static readonly HashSet<string> ToolbarPreferencesArgumentFields =
     ["lingerMs", "theme"];
+  private static readonly HashSet<string> ToolbarDelayArgumentFields = ["lingerMs"];
   private static readonly HashSet<string> BatchMoveArgumentFields = ["itemId", "delta"];
   private static readonly HashSet<string> BatchItemArgumentFields = ["itemId"];
   private static readonly HashSet<string> PagesArgumentFields = ["pages"];
@@ -575,13 +576,28 @@ public static class WorkbenchBridgeCodec
           ParseToolbarEdge(arguments.GetProperty("edge").GetString()),
           arguments.GetProperty("autoHide").GetBoolean());
       case ("settings", "setFloatingToolbarPreferences"):
-        EnsureObjectWithFields(arguments, ToolbarPreferencesArgumentFields, "command arguments");
-        JsonElement delayArgument = arguments.GetProperty("lingerMs");
-        string? toolbarTheme = arguments.GetProperty("theme").GetString();
-        if (delayArgument.ValueKind != JsonValueKind.Number || !delayArgument.TryGetInt32(out int lingerMs) ||
-          lingerMs is < 100 or > 5000 || toolbarTheme is not ("system" or "light" or "dark"))
+        EnsureObjectWithFields(arguments,
+          HasExactFields(arguments, ToolbarDelayArgumentFields) ? ToolbarDelayArgumentFields :
+          HasExactFields(arguments, ThemeArgumentFields) ? ThemeArgumentFields : ToolbarPreferencesArgumentFields,
+          "command arguments");
+        int? lingerMs = null;
+        string? toolbarTheme = null;
+        if (arguments.TryGetProperty("lingerMs", out JsonElement delayArgument))
         {
-          throw new WorkbenchBridgeProtocolException("Workbench floating toolbar preference is invalid.");
+          if (delayArgument.ValueKind != JsonValueKind.Number || !delayArgument.TryGetInt32(out int delay) ||
+            delay is < 100 or > 5000)
+          {
+            throw new WorkbenchBridgeProtocolException("Workbench floating toolbar preference is invalid.");
+          }
+          lingerMs = delay;
+        }
+        if (arguments.TryGetProperty("theme", out JsonElement themeArgument))
+        {
+          toolbarTheme = themeArgument.GetString();
+          if (toolbarTheme is not ("system" or "light" or "dark"))
+          {
+            throw new WorkbenchBridgeProtocolException("Workbench floating toolbar preference is invalid.");
+          }
         }
         return new SetFloatingToolbarPreferencesCommand(lingerMs, toolbarTheme);
       case ("settings", "showFloatingToolbar"):

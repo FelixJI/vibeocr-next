@@ -3538,7 +3538,6 @@ function FloatingToolbarPanel({
             dispatch.run({
               type: "settings.setFloatingToolbarPreferences",
               lingerMs: delay,
-              theme: toolbar.theme,
             })
           }
         >
@@ -3559,7 +3558,6 @@ function FloatingToolbarPanel({
           onChange={(_, data) =>
             dispatch.run({
               type: "settings.setFloatingToolbarPreferences",
-              lingerMs: toolbar.lingerMs,
               theme: String(data.value),
             })
           }

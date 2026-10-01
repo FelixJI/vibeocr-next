@@ -816,6 +816,14 @@ public sealed class WorkbenchBridgeCodecTests
       ("setFloatingToolbarPreferences", "{\"lingerMs\":5001,\"theme\":\"dark\"}"),
       ("setFloatingToolbarPreferences", "{\"lingerMs\":300.5,\"theme\":\"light\"}"),
       ("setFloatingToolbarPreferences", "{\"lingerMs\":300,\"theme\":\"unknown\"}"),
+      ("setFloatingToolbarPreferences", "{}"),
+      ("setFloatingToolbarPreferences", "{\"lingerMs\":null}"),
+      ("setFloatingToolbarPreferences", "{\"theme\":null}"),
+      ("setFloatingToolbarPreferences", "{\"lingerMs\":99}"),
+      ("setFloatingToolbarPreferences", "{\"lingerMs\":5001}"),
+      ("setFloatingToolbarPreferences", "{\"lingerMs\":300.5}"),
+      ("setFloatingToolbarPreferences", "{\"theme\":\"unknown\"}"),
+      ("setFloatingToolbarPreferences", "{\"theme\":\"dark\",\"enabled\":true}"),
       ("setActionHotkey", "{\"actionId\":\"clipboard_recognize\",\"hotkey\":\"\"}"),
       ("setActionHotkey", "{\"actionId\":\" \"}"),
       ("resetActionHotkey", "{\"actionId\":\"\"}"),
@@ -840,6 +848,22 @@ public sealed class WorkbenchBridgeCodecTests
     SetActionHotkeyCommand command = Assert.IsType<SetActionHotkeyCommand>(disable.Command);
     Assert.Equal("clipboard_recognize", command.ActionId);
     Assert.Null(command.Hotkey);
+  }
+
+  [Theory]
+  [InlineData("{\"lingerMs\":100}", 100, null)]
+  [InlineData("{\"lingerMs\":5000}", 5000, null)]
+  [InlineData("{\"theme\":\"system\"}", null, "system")]
+  [InlineData("{\"theme\":\"light\"}", null, "light")]
+  [InlineData("{\"theme\":\"dark\"}", null, "dark")]
+  public void ToolbarPreferencesAcceptSingleFieldPatches(string arguments, int? lingerMs, string? theme)
+  {
+    Guid sessionId = Guid.NewGuid();
+    WorkbenchCommandEnvelope envelope = WorkbenchBridgeCodec.ParseCommand(
+      CommandJson(sessionId, "settings", "setFloatingToolbarPreferences", arguments), sessionId);
+    SetFloatingToolbarPreferencesCommand command = Assert.IsType<SetFloatingToolbarPreferencesCommand>(envelope.Command);
+    Assert.Equal(lingerMs, command.LingerMs);
+    Assert.Equal(theme, command.Theme);
   }
 
   private static string CommandJson(

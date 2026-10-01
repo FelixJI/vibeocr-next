@@ -1094,13 +1094,25 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       Assert.Equal(5000, preferencesState.FloatingToolbar!.LingerMs);
       Assert.Equal("dark", preferencesState.FloatingToolbar.Theme);
       Assert.Equal(3, applied.Count);
+      // 两次编辑不等待 bridge 快照：单字段补丁合并执行时的真实配置。
+      await handler.ExecuteAsync(
+        new SetFloatingToolbarPreferencesCommand(LingerMs: 900),
+        TestContext.Current.CancellationToken);
+      Assert.Equal(FloatingToolbarTheme.Dark, applied[^1].Theme);
+      WorkbenchCommandOutcome themeOnly = await handler.ExecuteAsync(
+        new SetFloatingToolbarPreferencesCommand(Theme: "light"),
+        TestContext.Current.CancellationToken);
+      var mergedState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(themeOnly.States));
+      Assert.Equal(900, mergedState.FloatingToolbar!.LingerMs);
+      Assert.Equal("light", mergedState.FloatingToolbar.Theme);
+      Assert.Equal(5, applied.Count);
       WorkbenchCommandOutcome invalid = await handler.ExecuteAsync(
         new SetFloatingToolbarPreferencesCommand(99, "dark"),
         TestContext.Current.CancellationToken);
       var invalidState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(invalid.States));
-      Assert.Equal(5000, invalidState.FloatingToolbar!.LingerMs);
+      Assert.Equal(900, invalidState.FloatingToolbar!.LingerMs);
       Assert.Contains("原设置已保留", invalidState.FloatingToolbar.Error);
-      Assert.Equal(3, applied.Count);
+      Assert.Equal(5, applied.Count);
 
       WorkbenchCommandOutcome shown = await handler.ExecuteAsync(
         new ShowFloatingToolbarCommand(),
@@ -1112,6 +1124,71 @@ public sealed class DesktopWorkbenchCommandHandlerTests
         TestContext.Current.CancellationToken);
       var hiddenState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(hidden.States));
       Assert.Equal("visible", hiddenState.FloatingToolbar!.Visibility);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Theory]
+  [InlineData(false, false)]
+  [InlineData(true, false)]
+  [InlineData(true, true)]
+  public async Task ExternalToolbarTogglePublishesActualSettingsAndUnsubscribes(bool initializeSettings, bool fail)
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-toolbar-toggle-{Guid.NewGuid():N}");
+    string resourceRoot = Path.Combine(root, "resources");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      (ShellActionDispatcher dispatcher, _, _, _, _) = CreateShellActions(root,
+        toggleOverride: fail ? () => throw new IOException("保存失败") : null);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => new SettingsViewModel(new CompletedRecognitionInferenceClient()),
+        CreateShellViewModel,
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker, resourceRoot, static () => 0, annotationStore, shellActions: dispatcher);
+      if (initializeSettings)
+        await handler.ExecuteAsync(new SetFloatingToolbarPreferencesCommand(900, "dark"),
+          TestContext.Current.CancellationToken);
+      await using var application = new WorkbenchApplication(
+        ["settings.floatingToolbar"], WorkbenchRoute.Settings, handler);
+      using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+      await using IAsyncEnumerator<WorkbenchStateEnvelope> updates = application
+        .SubscribeAsync(0, timeout.Token).GetAsyncEnumerator(timeout.Token);
+
+      Assert.True(dispatcher.TryDispatch(HotkeyActionCatalog.ToggleToolbar));
+      Assert.True(await updates.MoveNextAsync());
+      SettingsFloatingToolbarState toolbar = Assert.IsType<SettingsWorkbenchState>(updates.Current.State).FloatingToolbar!;
+      Assert.Equal(!fail, toolbar.Enabled);
+      Assert.Equal(fail ? "disabled" : "visible", toolbar.Visibility);
+      Assert.Equal(initializeSettings ? 900 : 300, toolbar.LingerMs);
+      Assert.Equal(initializeSettings ? "dark" : "system", toolbar.Theme);
+      if (!fail)
+      {
+        Assert.True(dispatcher.TryDispatch(HotkeyActionCatalog.ToggleToolbar));
+        Assert.True(await updates.MoveNextAsync());
+        toolbar = Assert.IsType<SettingsWorkbenchState>(updates.Current.State).FloatingToolbar!;
+        Assert.True(toolbar.Enabled);
+        Assert.Equal("userHidden", toolbar.Visibility);
+        Assert.True(dispatcher.TryDispatch(HotkeyActionCatalog.ToggleToolbar));
+        Assert.True(await updates.MoveNextAsync());
+        Assert.Equal("visible", Assert.IsType<SettingsWorkbenchState>(updates.Current.State).FloatingToolbar!.Visibility);
+      }
+
+      int notifications = 0;
+      handler.StateChanged += _ => notifications++;
+      await handler.DisposeAsync();
+      Assert.True(dispatcher.TryDispatch(HotkeyActionCatalog.ToggleToolbar));
+      Assert.Equal(0, notifications);
     }
     finally
     {
@@ -1633,14 +1710,21 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       // 保存失败保旧：偏好未应用、未记录。
       Assert.False(failedState.FloatingToolbar.Enabled);
       Assert.Empty(applied);
-      WorkbenchCommandOutcome preferencesFailed = await handler.ExecuteAsync(
+      foreach (SetFloatingToolbarPreferencesCommand preference in new[]
+      {
         new SetFloatingToolbarPreferencesCommand(900, "light"),
-        TestContext.Current.CancellationToken);
-      var preferencesFailedState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(preferencesFailed.States));
-      Assert.Equal(300, preferencesFailedState.FloatingToolbar!.LingerMs);
-      Assert.Equal("system", preferencesFailedState.FloatingToolbar.Theme);
-      Assert.Contains("原设置已保留", preferencesFailedState.FloatingToolbar.Error);
-      Assert.Empty(applied);
+        new SetFloatingToolbarPreferencesCommand(LingerMs: 900),
+        new SetFloatingToolbarPreferencesCommand(Theme: "light"),
+      })
+      {
+        WorkbenchCommandOutcome preferencesFailed = await handler.ExecuteAsync(
+          preference, TestContext.Current.CancellationToken);
+        var preferencesFailedState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(preferencesFailed.States));
+        Assert.Equal(300, preferencesFailedState.FloatingToolbar!.LingerMs);
+        Assert.Equal("system", preferencesFailedState.FloatingToolbar.Theme);
+        Assert.Contains("原设置已保留", preferencesFailedState.FloatingToolbar.Error);
+        Assert.Empty(applied);
+      }
 
       // 已关闭时 Show 必须显式报错，不得看似成功。
       WorkbenchCommandOutcome shown = await handler.ExecuteAsync(
@@ -1770,7 +1854,8 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     string root,
     Func<FloatingToolbarSettings, string?>? applyOverride = null,
     Func<string?>? showOverride = null,
-    Func<string?>? hideOverride = null)
+    Func<string?>? hideOverride = null,
+    Func<Task>? toggleOverride = null)
   {
     PortableLayout layout = PortableLayout.Resolve(
       Path.Combine(root, "VibeOCR.Next.exe"),
@@ -1792,9 +1877,17 @@ public sealed class DesktopWorkbenchCommandHandlerTests
         // 可观测的 ShowWorkbench：命令层终态显示经分派器计数，
         // 与生产路径同一入口。
         [HotkeyActionCatalog.ShowWorkbench] = recorder.RecordShowWorkbench,
+        [HotkeyActionCatalog.ToggleToolbar] = toggleOverride ?? (() =>
+        {
+          current = current.Enabled
+            ? current with { HiddenByUser = !current.HiddenByUser }
+            : current with { Enabled = true, HiddenByUser = false };
+          return Task.CompletedTask;
+        }),
       },
       () => current,
-      () => FloatingToolbarVisibility.Visible,
+      () => !current.Enabled ? FloatingToolbarVisibility.Disabled :
+        current.HiddenByUser ? FloatingToolbarVisibility.UserHidden : FloatingToolbarVisibility.Visible,
       next =>
       {
         string? error = applyOverride?.Invoke(next);

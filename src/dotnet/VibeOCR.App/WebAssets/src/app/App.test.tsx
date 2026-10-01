@@ -169,13 +169,11 @@ describe("AppShell", () => {
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.setFloatingToolbarPreferences",
       lingerMs: 900,
-      theme: "system",
     });
-    // 主题修改沿宿主已保存值；不把尚未确认的输入草稿当实际配置。
+    // 宿主快照尚未确认 900ms 时切换主题，不回传陈旧的 600ms。
     await user.selectOptions(screen.getByLabelText("工具栏主题"), "dark");
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.setFloatingToolbarPreferences",
-      lingerMs: 600,
       theme: "dark",
     });
     await user.click(screen.getByRole("checkbox", { name: "启用悬浮工具栏" }));

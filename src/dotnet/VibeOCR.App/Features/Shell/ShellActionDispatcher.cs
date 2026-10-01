@@ -23,6 +23,9 @@ internal sealed class ShellActionDispatcher
     private readonly Func<string?> _hideToolbar;
     private readonly Func<IDisposable?> _suspendToolbarForCapture;
 
+    /// <summary>托盘/热键切换结束后同步实际配置与可见性，失败时同样保旧刷新。</summary>
+    public event Action? ToolbarStateChanged;
+
     public ShellActionDispatcher(
         Func<WindowsHotkeyRegistrar?> registrar,
         IReadOnlyDictionary<string, Func<Task>> handlers,
@@ -131,7 +134,7 @@ internal sealed class ShellActionDispatcher
     /// </summary>
     public IDisposable? SuspendFloatingToolbarForCapture() => _suspendToolbarForCapture();
 
-    private static async void RunQuietly(Func<Task> handler, string actionId)
+    private async void RunQuietly(Func<Task> handler, string actionId)
     {
         try
         {
@@ -145,6 +148,11 @@ internal sealed class ShellActionDispatcher
         catch (Exception error)
         {
             AppLog.Error($"Shell action '{actionId}' crashed", error);
+        }
+        finally
+        {
+            if (actionId == HotkeyActionCatalog.ToggleToolbar)
+                ToolbarStateChanged?.Invoke();
         }
     }
 }

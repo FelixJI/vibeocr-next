@@ -238,8 +238,8 @@ public sealed record SetFloatingToolbarEnabledCommand(bool Enabled) : WorkbenchC
 /// <summary>Change the floating toolbar dock edge and auto-hide behavior live.</summary>
 public sealed record SetFloatingToolbarLayoutCommand(ScreenEdge Edge, bool AutoHide) : WorkbenchCommand;
 
-/// <summary>Change the existing collapse delay and native theme preference live.</summary>
-public sealed record SetFloatingToolbarPreferencesCommand(int LingerMs, string Theme) : WorkbenchCommand;
+/// <summary>Patch the collapse delay or native theme preference against the current settings.</summary>
+public sealed record SetFloatingToolbarPreferencesCommand(int? LingerMs = null, string? Theme = null) : WorkbenchCommand;
 
 /// <summary>Explicitly show the floating toolbar (recover from user-hidden).</summary>
 public sealed record ShowFloatingToolbarCommand : WorkbenchCommand;
