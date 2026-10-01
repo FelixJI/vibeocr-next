@@ -207,11 +207,14 @@ public sealed class DesktopWorkbenchCommandHandler :
 
   /// <summary>
   /// Supervisor 连接/就绪/失败终态变更时同步广播诊断投影：宿主快照不
-  /// 得滞留在 bootstrap 时的“正在连接”。
+  /// 得滞留在 bootstrap 时的“正在连接”。仅监听代表健康变更的
+  /// SupervisorStatus 单属性，避免一次 UpdateSupervisor 的四个通知各
+  /// 广播一次。
   /// </summary>
   private void OnDiagnosticsPropertyChanged(object? sender, PropertyChangedEventArgs args)
   {
-    if (Volatile.Read(ref disposed) == 0)
+    if (Volatile.Read(ref disposed) == 0 &&
+      args.PropertyName == nameof(VibeOCR.App.ViewModels.DiagnosticsViewModel.SupervisorStatus))
     {
       StateChanged?.Invoke(DiagnosticsState());
     }

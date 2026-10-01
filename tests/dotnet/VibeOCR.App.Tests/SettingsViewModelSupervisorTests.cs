@@ -138,6 +138,27 @@ public sealed class SettingsViewModelSupervisorTests
 
         Assert.Null(viewModel.Backend);
         Assert.False(viewModel.IsBusy);
+        // 旧实例的状态文案不再冒充当前状态；用户配置（sources/MinerU）不清空。
+        Assert.Equal("服务实例已更换，状态待重新检查。", viewModel.Status);
+    }
+
+    [Fact]
+    public async Task InvalidatedLoadReleasesBusyOwnershipForTheNextRead()
+    {
+        var pending = new TaskCompletionSource<RuntimeStatusSnapshot>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var fake = new GatedRuntimeStatusClient(pending);
+        var viewModel = new SettingsViewModel(fake);
+        Task first = viewModel.LoadSnapshotAsync(CancellationToken.None);
+        viewModel.InvalidateSnapshot();
+        pending.SetResult(ReadyRuntimeStatus());
+        await first;
+
+        // 失效后的新读取正常接管并释放 busy（P2-2 拥有者闭合）。
+        await viewModel.LoadSnapshotAsync(CancellationToken.None);
+
+        Assert.False(viewModel.IsBusy);
+        Assert.Equal("cpu", viewModel.Backend);
     }
 
     [Fact]
@@ -148,6 +169,54 @@ public sealed class SettingsViewModelSupervisorTests
         var viewModel = new SettingsViewModel(fake);
         await viewModel.LoadSnapshotAsync(CancellationToken.None);
         Assert.Equal("cpu", viewModel.Backend);
+    }
+
+    [Fact]
+    public async Task StaleLoadCompletionKeepsTheNewerReadsBusy()
+    {
+        var client = new SequencedRuntimeStatusClient();
+        TaskCompletionSource<RuntimeStatusSnapshot> firstGate = client.Enqueue();
+        TaskCompletionSource<RuntimeStatusSnapshot> secondGate = client.Enqueue();
+        var viewModel = new SettingsViewModel(client);
+
+        Task first = viewModel.LoadSnapshotAsync(CancellationToken.None);
+        Task second = viewModel.LoadSnapshotAsync(CancellationToken.None);
+
+        // 旧读取（first，代际已被 second 递增作废）迟到完成：不得把新读取
+        // 的 busy 一并清除（新读取仍在进行中）。
+        firstGate.SetResult(ReadyRuntimeStatus());
+        await first;
+        Assert.True(viewModel.IsBusy);
+
+        secondGate.SetResult(ReadyRuntimeStatus());
+        await second;
+        Assert.False(viewModel.IsBusy);
+        Assert.Equal("cpu", viewModel.Backend);
+    }
+
+    [Fact]
+    public async Task ReentrantInvalidationDuringBusyStartDoesNotWriteStaleStatus()
+    {
+        var pending = new TaskCompletionSource<RuntimeStatusSnapshot>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var fake = new GatedRuntimeStatusClient(pending);
+        var viewModel = new SettingsViewModel(fake);
+        // 模拟同步 PropertyChanged 链上的实例更换失效（重入）：busy 置位
+        // 事件内直接作废旧代。
+        viewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(SettingsViewModel.IsBusy) && viewModel.IsBusy)
+                viewModel.InvalidateSnapshot();
+        };
+
+        Task load = viewModel.LoadSnapshotAsync(CancellationToken.None);
+        pending.SetResult(ReadyRuntimeStatus());
+        await load;
+
+        // 重入失效后不得再写回加载文案/旧状态：终态保持失效语义。
+        Assert.False(viewModel.IsBusy);
+        Assert.Null(viewModel.Backend);
+        Assert.Equal("服务实例已更换，状态待重新检查。", viewModel.Status);
     }
 
     private static TaskCompletionSource<RuntimeStatusSnapshot> TaskCompletionSourceFor(
@@ -177,6 +246,25 @@ public sealed class SettingsViewModelSupervisorTests
     {
         public Task<RuntimeStatusSnapshot> GetRuntimeStatusAsync(
             CancellationToken cancellationToken) => pending.Task;
+
+        public override Task<ResidencyStatus> GetResidencyAsync(
+            CancellationToken cancellationToken) => Task.FromResult(new ResidencyStatus());
+    }
+
+    private sealed class SequencedRuntimeStatusClient : InferenceClientStub, IInferenceClient
+    {
+        private readonly Queue<TaskCompletionSource<RuntimeStatusSnapshot>> _pending = new();
+
+        public TaskCompletionSource<RuntimeStatusSnapshot> Enqueue()
+        {
+            var source = new TaskCompletionSource<RuntimeStatusSnapshot>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            _pending.Enqueue(source);
+            return source;
+        }
+
+        public Task<RuntimeStatusSnapshot> GetRuntimeStatusAsync(
+            CancellationToken cancellationToken) => _pending.Dequeue().Task;
 
         public override Task<ResidencyStatus> GetResidencyAsync(
             CancellationToken cancellationToken) => Task.FromResult(new ResidencyStatus());

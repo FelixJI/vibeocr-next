@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Collections.ObjectModel;
 using System.Runtime.CompilerServices;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -28,6 +27,8 @@ public sealed record StartupMilestone(string Name, double ElapsedMilliseconds);
 public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
 {
     private readonly Func<PrerequisiteStatus, CancellationToken, Task> _repair;
+    private readonly object _milestoneLock = new();
+    private readonly List<StartupMilestone> _milestones = [];
     private SupervisorHealth _supervisor = new(SupervisorHealthState.NotReady, null, null, null);
 
     public DiagnosticsViewModel(
@@ -56,7 +57,14 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
 
     public string SupervisorInstanceId => _supervisor.InstanceId ?? "未知";
 
-    public ObservableCollection<StartupMilestone> Milestones { get; } = [];
+    /// <summary>
+    /// 启动里程碑的线程安全快照：后台连接线程可并发写入（RecordMilestone），
+    /// 桥接/导出读者每次拿到独立数组，永不与写入者共享可变集合。
+    /// </summary>
+    public IReadOnlyList<StartupMilestone> Milestones
+    {
+        get { lock (_milestoneLock) return [.. _milestones]; }
+    }
 
     public string SupervisorStatus => _supervisor.State switch
     {
@@ -67,6 +75,9 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
         SupervisorHealthState.Faulted => "连接失败",
         _ => "未知",
     };
+
+    /// <summary>当前 supervisor 健康记录（只读快照，供取证轨迹等消费）。</summary>
+    public SupervisorHealth Supervisor => _supervisor;
 
     public string ProtocolStatus => _supervisor.ProtocolVersion is int supervisorVersion
         ? $"客户端 v{ProtocolConstants.Version} / Supervisor v{supervisorVersion}"
@@ -93,13 +104,11 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
             throw new ArgumentException("Milestone must be T0 through T6.", nameof(name));
         }
 
-        StartupMilestone? existing = Milestones.SingleOrDefault(item => item.Name == name);
-        if (existing is not null)
+        lock (_milestoneLock)
         {
-            Milestones.Remove(existing);
+            _milestones.RemoveAll(item => item.Name == name);
+            _milestones.Add(new StartupMilestone(name, elapsed.TotalMilliseconds));
         }
-
-        Milestones.Add(new StartupMilestone(name, elapsed.TotalMilliseconds));
     }
 
     public Task RepairAsync(PrerequisiteKind kind, CancellationToken cancellationToken)

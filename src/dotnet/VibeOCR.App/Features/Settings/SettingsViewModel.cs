@@ -38,6 +38,9 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     private readonly IInferenceClient _inference;
     private readonly SemaphoreSlim _settingsGate = new(1, 1);
+    // 设置快照代际与 busy 的唯一串行化点：LoadSnapshot 起始段、
+    // InvalidateSnapshot、finally 复位全部在同一把锁内原子完成。
+    private readonly object _busyGuard = new();
     private long _generation;
     private long _selectionGeneration;
     private bool _isBusy;
@@ -137,8 +140,22 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         if (Environments is not null)
             await Environments.RefreshAsync(cancellationToken);
         await Maintenance.RestoreAsync(cancellationToken);
-        long generation = Interlocked.Increment(ref _generation);
-        if (generation == Volatile.Read(ref _generation)) { IsBusy = true; Status = "正在读取模型驻留状态"; }
+        // 起始段原子化：generation 递增与 busy/文案写入在同一把锁内完成，
+        // 不存在“已递增但尚未接管”的窗口，旧读取不可能覆盖新读取后再
+        // 错误清除其 busy（无二级拥有者状态）。
+        long generation;
+        lock (_busyGuard)
+        {
+            generation = ++_generation;
+            IsBusy = true;
+            // IsBusy 的同步 PropertyChanged（实例更换失效链）可能已重入
+            // 递增 generation 并复位 busy：此时本次读取立即过期，不得再
+            // 写加载文案。
+            if (generation == _generation)
+            {
+                Status = "正在读取模型驻留状态";
+            }
+        }
         try
         {
             try
@@ -187,7 +204,18 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             AppLog.Warn($"Settings refresh failed: {error.GetType().Name}: {error.Message}");
             Status = "设置状态读取失败，请重试或打开诊断与修复。";
         }
-        finally { if (generation == Volatile.Read(ref _generation)) IsBusy = false; }
+        finally
+        {
+            // 与起始段/失效同一把锁：仅当仍是当前代时复位 busy；被新读取
+            // 或失效接管时不越权清除。
+            lock (_busyGuard)
+            {
+                if (generation == _generation)
+                {
+                    IsBusy = false;
+                }
+            }
+        }
     }
 
     public Task LoadSelectionAsync(CancellationToken cancellationToken) =>
@@ -205,14 +233,18 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     /// <summary>
     /// 环境切换或服务实例更换时作废旧快照：在途读取不得再投影，旧的
-    /// 目标加速器也不再冒充当前状态；Backend 保持未读取直至下一次真实
-    /// 快照。
+    /// 目标加速器与旧实例的状态文案也不再冒充当前状态；Sources/
+    /// MineruConnection 是用户配置而非实例状态，不清空以免丢失。
     /// </summary>
     public void InvalidateSnapshot()
     {
-        Interlocked.Increment(ref _generation);
-        IsBusy = false;
-        Backend = null;
+        lock (_busyGuard)
+        {
+            _generation++;
+            IsBusy = false;
+            Backend = null;
+            Status = "服务实例已更换，状态待重新检查。";
+        }
     }
 
     /// <summary>
