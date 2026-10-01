@@ -5,6 +5,10 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import os
+import shutil
+import socket
+import subprocess
 import sys
 import threading
 import types
@@ -40,7 +44,7 @@ def provider_server():
             path = parsed.path
             name = None
             if "/resolve/" in path:
-                name = path.rsplit("/", 1)[-1]
+                name = path.split("/resolve/", 1)[1].split("/", 1)[1]
             elif path.endswith("/repo"):
                 name = parse_qs(parsed.query)["FilePath"][0]
             if name in payloads:
@@ -51,12 +55,12 @@ def provider_server():
                 self.send_header("X-Repo-Commit", commit)
                 self.end_headers()
                 if not head:
-                    counts[name] += len(data)
+                    counts[name] = counts.get(name, 0) + len(data)
                     self.wfile.write(data)
                 return
-            if path == "/api/models/org/model":
-                value = {"id": "org/model", "sha": commit}
-            elif path.startswith("/api/models/org/model/tree/"):
+            if path.startswith("/api/models/") and "/tree/" not in path:
+                value = {"id": path.removeprefix("/api/models/"), "sha": commit}
+            elif path.startswith("/api/models/") and "/tree/" in path:
                 value = [
                     {
                         "type": "file",
@@ -71,7 +75,7 @@ def provider_server():
                     }
                     for name, data in payloads.items()
                 ]
-            elif path == "/api/v1/models/org/model/repo/files":
+            elif path.startswith("/api/v1/models/") and path.endswith("/repo/files"):
                 value = {
                     "Code": 200,
                     "Success": True,
@@ -580,3 +584,218 @@ def test_paddle_native_hf_endpoint_is_preserved_for_listing_and_payload(
     )
     assert counts == {name: len(data) for name, data in payloads.items()}
     assert (prepared.root / "weights.bin").read_bytes() == payloads["weights.bin"]
+
+
+_NATIVE_ADAPTER_CHECK = """
+import json
+from importlib.metadata import distribution, version
+from pathlib import Path
+from vibeocr.runtime.environments.model_cache import paddle_model_cache
+adapter = __import__('os').environ['FIXTURE_ADAPTER']
+versions = {}
+for name in ('paddlex', 'mineru', 'huggingface-hub', 'modelscope-hub'):
+    try:
+        dist = distribution(name)
+        versions[name] = {'version': dist.version, 'metadata': str(dist._path)}
+    except __import__('importlib').metadata.PackageNotFoundError:
+        pass
+assert versions['huggingface-hub']['version'] == '1.32.0', versions
+assert versions['modelscope-hub']['version'] == '0.4.3', versions
+if __import__('os').environ['MINERU_MODEL_SOURCE'] == 'modelscope':
+    from modelscope_hub import constants
+    assert constants.API_TIMEOUT == constants.API_CONNECT_TIMEOUT == 1
+    assert constants.API_MAX_RETRIES == constants.DOWNLOAD_RETRY_TIMES == 1
+    assert constants.DOWNLOAD_TIMEOUT == 1
+markers = 0
+if adapter == 'paddle':
+    assert version('paddlex') == '3.7.2'
+    from paddlex.inference.utils.official_models import official_models
+    name = official_models.model_list[0]
+    with paddle_model_cache():
+        root = Path(official_models.get_model_path(name))
+    assert (root / 'config.json').is_file()
+    assert (root / 'weights.bin').is_file()
+else:
+    assert version('mineru') == '4.0.2'
+    from vibeocr.runtime.recognition.mineru_service import MinerUService
+    service = object.__new__(MinerUService)
+    service._prepare_cached_models('basic', lambda: False)
+    root = Path(service._model_root)
+    from mineru.config import config
+    from mineru.model.registry import model_repos_for_tier
+    from mineru.model.download import MODEL_COMPLETE_MARKER, verify_model_repo
+    config.model.base_dir = str(root)
+    repos = model_repos_for_tier('basic')
+    assert all(verify_model_repo(repo).ready for repo in repos)
+    name = [repo.name for repo in repos]
+    for repo in repos:
+        for path in repo.required_paths():
+            local = path.local_path()
+            if local.is_dir():
+                marker = local / MODEL_COMPLETE_MARKER
+                assert marker.is_file()
+                marker.unlink()
+                assert not verify_model_repo(repo).ready
+                marker.touch()
+                markers += 1
+    assert markers > 0, 'fixture must exercise native directory completion markers'
+print(json.dumps({'root': str(root), 'sdk': versions, 'models': name, 'markers': markers}))
+"""
+
+
+@pytest.mark.parametrize("adapter", ["paddle", "mineru"])
+@pytest.mark.parametrize("source", ["huggingface", "modelscope"])
+def test_native_adapter_cold_hot_offline_missing_and_repair(
+    tmp_path, provider_server, adapter, source
+):
+    """Opt-in native SDK integration: real manager, service child, registry and verifier."""
+    if os.environ.get("VIBEOCR_NATIVE_MODEL_TESTS") != "1":
+        pytest.skip("requires the locked native SDK test harness")
+    endpoint, payloads, counts = provider_server
+    shared = tmp_path / "shared"
+    if adapter == "mineru":
+        from mineru.model.registry import model_repos_for_tier
+
+        # Consume the real registry; infer directory fixture payloads from paths.
+        repos = model_repos_for_tier("basic", small_backend="torch")
+        payloads.clear()
+        counts.clear()
+        for repo in repos:
+            for path in repo.required_paths():
+                name = path.relative_path
+                if not Path(name).suffix:
+                    name += "/asset.bin"
+                payloads[name] = f"fixture:{name}".encode()
+    total = {name: len(data) for name, data in payloads.items()}
+
+    def prepare(private, address=endpoint, *, success=True):
+        private.mkdir()
+        config = private / "mineru.yaml"
+        config.write_text(
+            "model:\n  small_backend: torch\n"
+            f"  source: {source}\n  base_dir: {str(private / 'legacy')!r}\n",
+            encoding="utf-8",
+        )
+        env = {
+            **os.environ,
+            "FIXTURE_ADAPTER": adapter,
+            "PYTHONUTF8": "1",
+            "PYTHONIOENCODING": "utf-8",
+            "VIBEOCR_SHARED_MODEL_CACHE": str(shared),
+            "VIBEOCR_MANAGED_ENVIRONMENT_ID": "native-model-fixture",
+            "VIBEOCR_PRODUCT_CODE_ROOT": str(
+                Path(__file__).resolve().parents[4] / "src/runtime"
+            ),
+            "MINERU_HOME": str(private / "mineru"),
+            "MINERU_CONFIG": str(config),
+            "MINERU_MODEL_SOURCE": source,
+            "PADDLE_PDX_MODEL_SOURCE": source,
+            "PADDLE_PDX_CACHE_HOME": str(private / "paddlex"),
+            "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "1",
+            "PADDLE_PDX_HUGGING_FACE_ENDPOINT": address,
+            "HF_ENDPOINT": address,
+            "HF_HOME": str(private / "hf"),
+            "HF_HUB_DISABLE_TELEMETRY": "1",
+            "HF_HUB_ETAG_TIMEOUT": "1",
+            "HF_HUB_DOWNLOAD_TIMEOUT": "1",
+            "HF_TOKEN": "",
+            "MODELSCOPE_ENDPOINT": address,
+            "MODELSCOPE_API_TOKEN": "",
+            "MODELSCOPE_API_TIMEOUT": "1",
+            "MODELSCOPE_API_CONNECT_TIMEOUT": "1",
+            "MODELSCOPE_API_MAX_RETRIES": "1",
+            "MODELSCOPE_DOWNLOAD_TIMEOUT": "1",
+            "MODELSCOPE_DOWNLOAD_MAX_RETRIES": "1",
+            "MODELSCOPE_HOME": str(private / "ms-home"),
+            "MODELSCOPE_CACHE": str(private / "ms-cache"),
+            "HOME": str(private),
+            "USERPROFILE": str(private),
+        }
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", _NATIVE_ADAPTER_CHECK],
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+        if success:
+            assert result.returncode == 0, result.stderr
+            return json.loads(result.stdout.strip().splitlines()[-1])
+        assert result.returncode != 0, result.stdout
+        assert not list(private.rglob("current.json"))
+        return {"rejected": True, "error": result.stderr[-1500:]}
+
+    one = prepare(tmp_path / "one")
+    assert counts == total
+    two = prepare(tmp_path / "two")
+    assert counts == total
+    assert one["root"] != two["root"]
+    first_file = next(Path(one["root"]).rglob(next(iter(payloads)).rsplit("/", 1)[-1]))
+    second_file = next(Path(two["root"]).rglob(first_file.name))
+    assert not first_file.samefile(second_file)
+
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        offline = f"http://127.0.0.1:{listener.getsockname()[1]}"
+        # Bound without listening: the native transport gets connection refused.
+        complete = prepare(tmp_path / "offline-complete", offline)
+        assert counts == total
+        missing = next(shared.rglob("payload")) / next(iter(payloads))
+        assert missing.is_file()
+        missing.unlink()
+        downloads = missing.parents[len(Path(next(iter(payloads))).parts)] / "downloads"
+        # Only this fresh fixture asset's SDK download cache is removed.
+        assert downloads.is_relative_to(shared)
+        if downloads.exists():
+            shutil.rmtree(downloads)
+        rejected = prepare(tmp_path / "offline-missing", offline, success=False)
+        assert counts == total
+
+    repaired = prepare(tmp_path / "missing-repaired")
+    missing_name = next(iter(payloads))
+    assert counts == {
+        name: size * (2 if name == missing_name else 1) for name, size in total.items()
+    }
+    payload_root = next(shared.rglob("payload"))
+    corrupt_name = list(payloads)[-1]
+    (payload_root / corrupt_name).write_bytes(b"x" * total[corrupt_name])
+    repaired_corruption = prepare(tmp_path / "corruption-repaired")
+    expected = {
+        name: size * (1 + (name == missing_name) + (name == corrupt_name))
+        for name, size in total.items()
+    }
+    assert counts == expected
+    evidence = {
+        "adapter": adapter,
+        "source": source,
+        "cold_payload_bytes": sum(total.values()),
+        "second_private_payload_bytes": 0,
+        "offline_payload_bytes": 0,
+        "counts": counts,
+        "cold": one,
+        "hot": two,
+        "offline": complete,
+        "missing": rejected,
+        "missing_repaired": repaired,
+        "corruption_repaired": repaired_corruption,
+    }
+    (tmp_path / "native-adapter-evidence.json").write_text(
+        json.dumps(evidence, indent=2), encoding="utf-8"
+    )
+    print(
+        json.dumps(
+            {
+                key: evidence[key]
+                for key in (
+                    "adapter",
+                    "source",
+                    "cold_payload_bytes",
+                    "second_private_payload_bytes",
+                    "offline_payload_bytes",
+                    "counts",
+                )
+            }
+        )
+    )
