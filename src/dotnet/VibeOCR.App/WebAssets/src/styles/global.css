@@ -490,6 +490,61 @@ input {
   border-radius: 6px;
   background: var(--colorNeutralBackground2);
 }
+/* 快捷键行的操作列固定；提示与错误在输入下方，不改变按钮位置。 */
+.hotkey-action-row .setting-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) repeat(3, 64px) 104px;
+  align-items: start;
+}
+.hotkey-recorder {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+.hotkey-recorder label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.hotkey-recorder input {
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 1px solid var(--colorNeutralStroke1);
+  border-radius: 4px;
+  background: var(--colorNeutralBackground1);
+  color: var(--colorNeutralForeground1);
+}
+.hotkey-recorder input:focus-visible {
+  outline: 2px solid var(--colorBrandStroke1);
+  outline-offset: 2px;
+}
+.hotkey-recorder input:disabled {
+  color: var(--colorNeutralForegroundDisabled);
+  background: var(--colorNeutralBackgroundDisabled);
+}
+.hotkey-recorder input[aria-invalid="true"] {
+  border-color: var(--colorPaletteRedBorder2);
+}
+.hotkey-recorder [role="status"] {
+  min-height: 16px;
+  font-size: 12px;
+  color: var(--colorNeutralForeground3);
+  overflow-wrap: anywhere;
+}
+@media (max-width: 760px) {
+  .hotkey-action-row .setting-row {
+    grid-template-columns: repeat(3, 64px) 104px;
+    justify-content: start;
+  }
+  .hotkey-action-row .hotkey-recorder {
+    grid-column: 1 / -1;
+  }
+}
 .hotkey-action-head {
   display: flex;
   align-items: baseline;

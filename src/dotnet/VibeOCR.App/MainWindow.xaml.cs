@@ -189,6 +189,7 @@ public sealed partial class MainWindow : Window
     Title = "VibeOCR";
     ApplyPersistedOrDefaultGeometry();
     Closed += OnWindowClosed;
+    Activated += OnWindowActivated;
   }
 
   private async void OnWorkbenchLoaded(object sender, RoutedEventArgs args)
@@ -288,6 +289,7 @@ public sealed partial class MainWindow : Window
       AppLog.Warn(
         $"Navigation destination '{destination}' is unavailable; falling back to recognition.");
     }
+    commandHandler.EndHotkeyRecording();
     currentRoute = route;
     _ = NavigateAsync(route);
   }
@@ -398,8 +400,18 @@ public sealed partial class MainWindow : Window
     DispatcherQueue.TryEnqueue(() => ShowRecovery(
       "WebView2 连续失败，已停止自动恢复以避免重载循环。"));
 
+  private void OnWindowActivated(object sender, WindowActivatedEventArgs args)
+  {
+    if (args.WindowActivationState == WindowActivationState.Deactivated)
+      commandHandler.EndHotkeyRecording();
+  }
+
   private void OnHostStateChanged(string state)
   {
+    if (state == "navigation-starting" ||
+        state.StartsWith("process-failed:", StringComparison.Ordinal) ||
+        state.StartsWith("bridge-command-failed:", StringComparison.Ordinal))
+      commandHandler.EndHotkeyRecording();
     if (state == "bridge-ready")
     {
       DispatcherQueue.TryEnqueue(async () =>
@@ -589,6 +601,8 @@ public sealed partial class MainWindow : Window
   private async void OnWindowClosed(object sender, WindowEventArgs args)
   {
     Closed -= OnWindowClosed;
+    Activated -= OnWindowActivated;
+    commandHandler.EndHotkeyRecording();
     ClearPinTextTasks();
     foreach (PinnedImageWindow pinned in pinnedImages.ToArray()) pinned.Close();
     webHost.ProtocolViolation -= OnProtocolViolation;

@@ -378,6 +378,8 @@ public sealed class DesktopWorkbenchCommandHandler :
           environment => environment.RepairEmptyAsync(repair.EnvironmentId, cancellationToken), cancellationToken),
         SetThemeCommand setTheme => SetTheme(setTheme),
         SetStartupCommand startup => SetStartup(startup),
+        BeginHotkeyRecordingCommand recording => BeginHotkeyRecording(recording),
+        EndHotkeyRecordingCommand recording => EndHotkeyRecording(recording),
         SetActionHotkeyCommand setActionHotkey => SetActionHotkey(setActionHotkey),
         ResetActionHotkeyCommand resetActionHotkey => ResetActionHotkey(resetActionHotkey),
         SetFloatingToolbarEnabledCommand toolbarEnabled => SetFloatingToolbarEnabled(
@@ -2385,6 +2387,25 @@ public sealed class DesktopWorkbenchCommandHandler :
     settings ??= CreateSettings();
     shell.Value.SetStartWithSystem(command.Enabled);
     return SettingsState(settings);
+  }
+
+  private SettingsWorkbenchState BeginHotkeyRecording(BeginHotkeyRecordingCommand command)
+  {
+    ShellActions().BeginHotkeyRecording(command.RecordingId);
+    return settings is null ? SettingsShellState() : SettingsState(settings);
+  }
+
+  private SettingsWorkbenchState EndHotkeyRecording(EndHotkeyRecordingCommand command)
+  {
+    ShellActions().EndHotkeyRecording(command.RecordingId);
+    return settings is null ? SettingsShellState() : SettingsState(settings);
+  }
+
+  internal void EndHotkeyRecording()
+  {
+    if (shellActions?.IsHotkeyRecording != true) return;
+    shellActions.EndHotkeyRecording();
+    StateChanged?.Invoke(settings is null ? SettingsShellState() : SettingsState(settings));
   }
 
   /// <summary>

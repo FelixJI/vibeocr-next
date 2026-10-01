@@ -252,15 +252,39 @@ async function setCheckbox(page, name, checked) {
   await expect(checkbox).toBeChecked({ checked });
 }
 
-async function configure(page) {
+async function configure(app) {
+  const { page } = app;
   await openSettings(page);
   const row = page.locator('.hotkey-action-row').filter({ hasText: '截图编辑' });
-  await row.getByRole('textbox', { name: '截图编辑新快捷键' }).fill(hotkey);
+  const editInput = row.getByRole('textbox', { name: '截图编辑新快捷键' });
+  await editInput.click();
+  await row.getByRole('status').filter({ hasText: '请按下新的组合键' }).waitFor();
+  // FixturePid is the existing hotkey command's foreground-owner guard; here it owns the app.
+  await native('hotkey', { FixturePid: app.child.pid });
+  await expect(editInput).toHaveValue(hotkey);
   await row.getByRole('button', { name: '应用 截图编辑' }).click();
   await row.getByText(`当前生效：${hotkey}`).waitFor();
+  // Re-record our now-registered F10 from an empty draft: seeing the complete
+  // combo proves the old OS registration released it to this real WebView2 input.
+  await row.getByRole('button', { name: '清空 截图编辑' }).click();
+  await expect(editInput).toHaveValue('');
+  await editInput.click();
+  await row.getByRole('status').filter({ hasText: '请按下新的组合键' }).waitFor();
+  await native('hotkey', { FixturePid: app.child.pid });
+  await expect(editInput).toHaveValue(hotkey);
+  assert((await windows(app.child.pid)).some(item =>
+    item.Handle === app.main.Handle && item.Visible),
+  'Recording an already-registered key unexpectedly hid the main window.');
+  await native('escape', { AppPid: app.child.pid });
+  await expect(editInput).toHaveValue('');
+  await row.getByText(`当前生效：${hotkey}`).waitFor();
+
   const recognizeRow = page.locator('.hotkey-action-row').filter({ hasText: '快捷截图识别' });
-  await recognizeRow.getByRole('textbox', { name: '快捷截图识别新快捷键' })
-    .fill(recognizeHotkey);
+  const recognizeInput = recognizeRow.getByRole('textbox', { name: '快捷截图识别新快捷键' });
+  await recognizeInput.click();
+  await recognizeRow.getByRole('status').filter({ hasText: '请按下新的组合键' }).waitFor();
+  await native('recognize-hotkey', { ForegroundPid: app.child.pid });
+  await expect(recognizeInput).toHaveValue(recognizeHotkey);
   await recognizeRow.getByRole('button', { name: '应用 快捷截图识别' }).click();
   await recognizeRow.getByText(`当前生效：${recognizeHotkey}`).waitFor();
 
@@ -610,7 +634,7 @@ async function main() {
   try {
     app = await launchApp(candidate, webviewData, instanceId);
     evidence.appPids.push(app.child.pid);
-    await configure(app.page);
+    await configure(app);
     const firstMain = app.main.Handle;
     await stopOwned(app.child, 'close', { AppPid: app.child.pid, Handle: firstMain });
     await app.browser.close().catch(() => {});

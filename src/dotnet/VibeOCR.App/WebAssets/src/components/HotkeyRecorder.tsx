@@ -45,9 +45,9 @@ export interface HotkeyRecorderProps {
    * 聚焦后调用；resolve 即宿主端到端确认已释放本应用全局注册，此后才
    * 接完整组合；reject 或同步 throw 时显示错误且不接键。缺省时立即捕获。
    */
-  readonly onStart?: () => Promise<void>;
+  readonly onStart?: (recordingId: string) => Promise<void>;
   /** 录入结束（失焦/Esc/Tab/卸载/页面隐藏/迟到 ack 补偿）时尽力调用；宿主侧必须幂等，拒绝会在状态区呈现。 */
-  readonly onEnd?: () => void | Promise<void>;
+  readonly onEnd?: (recordingId: string) => void | Promise<void>;
 }
 
 type RecorderPhase = "idle" | "starting" | "capturing";
@@ -106,6 +106,7 @@ export function HotkeyRecorder({
   const originalRef = useRef("");
   const lastComboRef = useRef<string | null>(null);
   const sessionRef = useRef(0);
+  const recordingIdRef = useRef("");
   const valueRef = useRef(value);
   const disabledRef = useRef(disabled);
   const callbacksRef = useRef({ onChange, onCancel, onStart, onEnd });
@@ -130,7 +131,7 @@ export function HotkeyRecorder({
     }
   }, []);
 
-  const notifyEnd = useCallback(() => {
+  const notifyEnd = useCallback((recordingId: string) => {
     const end = callbacksRef.current.onEnd;
     if (!end) {
       return;
@@ -144,7 +145,7 @@ export function HotkeyRecorder({
       );
     };
     try {
-      void Promise.resolve(end()).catch(reportFailure);
+      void Promise.resolve(end(recordingId)).catch(reportFailure);
     } catch (error) {
       reportFailure(error);
     }
@@ -160,7 +161,7 @@ export function HotkeyRecorder({
     if (draftRef.current !== null) {
       applyDraft(lastComboRef.current ?? originalRef.current);
     }
-    notifyEnd();
+    notifyEnd(recordingIdRef.current);
   }, [applyDraft, applyPhase, notifyEnd]);
 
   const startRecording = useCallback(() => {
@@ -168,6 +169,8 @@ export function HotkeyRecorder({
       return;
     }
     const session = (sessionRef.current += 1);
+    const recordingId = crypto.randomUUID();
+    recordingIdRef.current = recordingId;
     originalRef.current = draftRef.current ?? valueRef.current;
     lastComboRef.current = null;
     setErrorMessage(null);
@@ -191,7 +194,7 @@ export function HotkeyRecorder({
     // 同步 throw 与拒绝走同一失败路径，避免崩溃 React 事件处理。
     let ack: Promise<void>;
     try {
-      ack = start();
+      ack = start(recordingId);
     } catch (error) {
       failStart(error);
       return;
@@ -205,7 +208,7 @@ export function HotkeyRecorder({
         if (sessionRef.current !== session && phaseRef.current === "idle") {
           // 迟到的 ack：宿主可能在本会话结束之后才真正开始挂起，
           // 再次 onEnd 补偿；更新的会话由其自身生命周期负责结束。
-          notifyEnd();
+          notifyEnd(recordingId);
         }
       })
       .catch(failStart);

@@ -41,6 +41,7 @@ import { useEffect, useRef, useState } from "react";
 
 import type { AppActions, AppViewState } from "../app/types";
 import { CapabilityGate } from "../components/CapabilityGate";
+import { HotkeyRecorder } from "../components/HotkeyRecorder";
 import { ImageCanvasEditor } from "../components/ImageCanvasEditor";
 import { PaddleOptionsEditor } from "../components/PaddleOptionsEditor";
 import { StructuredResult } from "../components/StructuredResult";
@@ -3331,18 +3332,38 @@ function HotkeyActionRow({
         <span>{status}</span>
       </div>
       <div className="setting-row">
-        <label htmlFor={`hotkey-${option.actionId}`}>
-          {`${option.displayName}新快捷键`}
-        </label>
-        <Input
-          id={`hotkey-${option.actionId}`}
+        <HotkeyRecorder
+          label={option.displayName + "新快捷键"}
           value={hotkey}
-          placeholder="如 Ctrl+Alt+S"
           disabled={!enabled}
-          onChange={(_, data) => setHotkey(data.value)}
+          onChange={setHotkey}
+          onStart={async (recordingId) => {
+            if (
+              !(await dispatch.run({
+                type: "settings.beginHotkeyRecording",
+                recordingId,
+              }))
+            )
+              throw new Error("宿主未能开始快捷键录入，请重试。");
+          }}
+          onEnd={async (recordingId) => {
+            if (
+              !(await dispatch.run({
+                type: "settings.endHotkeyRecording",
+                recordingId,
+              }))
+            )
+              throw new Error("宿主未能恢复快捷键注册，请重试。");
+          }}
         />
         <Button
-          disabled={!enabled || hotkey.trim() === ""}
+          disabled={
+            !enabled ||
+            hotkey.trim() === "" ||
+            hotkey
+              .split("+")
+              .every((key) => ["Ctrl", "Alt", "Shift", "Win"].includes(key))
+          }
           aria-label={`应用 ${option.displayName}`}
           onClick={() =>
             dispatch.run({
@@ -3354,6 +3375,14 @@ function HotkeyActionRow({
           icon={<Save aria-hidden="true" size={16} />}
         >
           应用
+        </Button>
+        <Button
+          appearance="secondary"
+          disabled={!enabled || hotkey === ""}
+          aria-label={"清空 " + option.displayName}
+          onClick={() => setHotkey("")}
+        >
+          清空
         </Button>
         <Button
           appearance="secondary"

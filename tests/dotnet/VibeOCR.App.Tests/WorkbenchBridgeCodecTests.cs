@@ -454,6 +454,8 @@ public sealed class WorkbenchBridgeCodecTests
       ("qrcode", "cancel", "{}", typeof(CancelQrCodeCommand)),
       ("about", "openProject", "{}", typeof(OpenProjectPageCommand)),
       ("settings", "refreshRuntime", "{}", typeof(RefreshRuntimeCommand)),
+      ("settings", "beginHotkeyRecording", "{\"recordingId\":\"12345678-1234-1234-1234-123456789abc\"}", typeof(BeginHotkeyRecordingCommand)),
+      ("settings", "endHotkeyRecording", "{\"recordingId\":\"12345678-1234-1234-1234-123456789abc\"}", typeof(EndHotkeyRecordingCommand)),
       ("settings", "setTheme", "{\"theme\":\"dark\"}", typeof(SetThemeCommand)),
       ("settings", "setActionHotkey", "{\"actionId\":\"clipboard_recognize\",\"hotkey\":\"Ctrl+Alt+C\"}", typeof(SetActionHotkeyCommand)),
       ("settings", "resetActionHotkey", "{\"actionId\":\"screenshot_recognize\"}", typeof(ResetActionHotkeyCommand)),
@@ -812,6 +814,9 @@ public sealed class WorkbenchBridgeCodecTests
       ("setActionHotkey", "{\"actionId\":\"clipboard_recognize\",\"hotkey\":\"\"}"),
       ("setActionHotkey", "{\"actionId\":\" \"}"),
       ("resetActionHotkey", "{\"actionId\":\"\"}"),
+      ("beginHotkeyRecording", "{\"recordingId\":\"bad-id\"}"),
+      ("endHotkeyRecording", "{}"),
+      ("endHotkeyRecording", "{\"recordingId\":\"12345678-1234-1234-1234-123456789abc\",\"extra\":true}"),
     ];
 
     foreach ((string action, string arguments) in invalid)

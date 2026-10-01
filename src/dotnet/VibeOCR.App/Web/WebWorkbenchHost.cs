@@ -153,7 +153,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     settings.IsWebMessageEnabled = true;
   }
 
-  private static void OnNavigationStarting(
+  private void OnNavigationStarting(
     CoreWebView2 sender,
     CoreWebView2NavigationStartingEventArgs args)
   {
@@ -161,7 +161,10 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
         !IsNavigationAllowed(uri))
     {
       args.Cancel = true;
+      return;
     }
+    sessionId = null;
+    StateChanged?.Invoke("navigation-starting");
   }
 
   private void OnNavigationCompleted(

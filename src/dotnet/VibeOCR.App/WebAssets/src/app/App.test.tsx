@@ -1,4 +1,4 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -37,7 +37,7 @@ describe("AppShell", () => {
     window.location.hash = "#/settings";
     const user = userEvent.setup();
     const actions: AppActions = {
-      run: vi.fn(),
+      run: vi.fn().mockResolvedValue(true),
       navigate: vi.fn(),
       setTheme: vi.fn(),
     };
@@ -79,13 +79,33 @@ describe("AppShell", () => {
     expect(screen.getByText(/该组合可能已被其他应用占用/)).toBeVisible();
     expect(screen.getByText(/全局快捷键在系统任意位置可用/)).toBeVisible();
 
-    await user.type(screen.getByLabelText("剪贴板识别新快捷键"), "Ctrl+Alt+C");
+    const input = screen.getByLabelText("剪贴板识别新快捷键");
+    await user.click(input);
+    const start = vi.mocked(actions.run).mock.calls.at(-1)![0];
+    expect(start.type).toBe("settings.beginHotkeyRecording");
+    fireEvent.keyDown(input, { key: "Control", ctrlKey: true });
+    expect(input).toHaveValue("Ctrl");
+    expect(
+      screen.getByRole("button", { name: "应用 剪贴板识别" }),
+    ).toBeDisabled();
+    fireEvent.keyDown(input, { key: "c", ctrlKey: true, altKey: true });
+    expect(input).toHaveValue("Ctrl+Alt+C");
     await user.click(screen.getByRole("button", { name: "应用 剪贴板识别" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.setActionHotkey",
       actionId: "clipboard_recognize",
       hotkey: "Ctrl+Alt+C",
     });
+
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.endHotkeyRecording",
+      recordingId: start.recordingId,
+    });
+    await user.click(screen.getByRole("button", { name: "清空 剪贴板识别" }));
+    expect(input).toHaveValue("");
+    expect(
+      screen.getByRole("button", { name: "应用 剪贴板识别" }),
+    ).toBeDisabled();
 
     // 未绑定的动作不提供“禁用”；已保存键位的动作可恢复默认。
     expect(

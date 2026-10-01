@@ -48,7 +48,7 @@ const keyUp = (input: HTMLElement, key: string, init: object = {}) =>
   fireEvent.keyUp(input, { key, ...init });
 
 function pendingStart(): {
-  readonly onStart: () => Promise<void>;
+  readonly onStart: (recordingId: string) => Promise<void>;
   resolve: () => void;
 } {
   let resolveAck: (() => void) | undefined;
@@ -297,4 +297,35 @@ it("does not record when disabled", async () => {
   keyDown(input, "Control", { ctrlKey: true });
   expect(onChange).not.toHaveBeenCalled();
   expect(input.value).toBe("Ctrl+Alt+Q");
+});
+
+it("ends a late acknowledgement with its original id after another recorder starts", async () => {
+  const user = userEvent.setup();
+  const { onStart, resolve } = pendingStart();
+  const oldEnd = vi.fn();
+  const newStart = vi.fn().mockResolvedValue(undefined);
+  const old = recorder({ onStart, onEnd: oldEnd });
+  await user.click(old.input);
+  old.view.unmount();
+  const originalId = vi.mocked(onStart).mock.calls[0]![0];
+
+  const next = recorder({ onStart: newStart });
+  await user.click(next.input);
+  expect(newStart.mock.calls[0]![0]).not.toBe(originalId);
+  await act(async () => resolve());
+  expect(oldEnd).toHaveBeenLastCalledWith(originalId);
+  keyDown(next.input, "s", { ctrlKey: true });
+  expect(next.input).toHaveValue("Ctrl+S");
+  expect(next.onEnd).not.toHaveBeenCalled();
+});
+
+it("uses the layout key and supports Win modifiers and function keys", async () => {
+  const { input } = recorder();
+  await userEvent.setup().click(input);
+  fireEvent.keyDown(input, { key: "z", code: "KeyY", ctrlKey: true });
+  expect(input).toHaveValue("Ctrl+Z");
+  keyDown(input, "Meta", { metaKey: true });
+  expect(input).toHaveValue("Win");
+  keyDown(input, "F24", { altKey: true, metaKey: true });
+  expect(input).toHaveValue("Alt+Win+F24");
 });
