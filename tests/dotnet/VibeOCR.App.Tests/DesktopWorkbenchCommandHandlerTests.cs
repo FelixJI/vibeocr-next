@@ -401,6 +401,8 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     Directory.CreateDirectory(resourceRoot);
     try
     {
+      var imported = await LocalQrCodeGenerator.GenerateAsync("IMPORT-128", "code128", TestContext.Current.CancellationToken);
+      byte[] importedBytes = Convert.FromBase64String(imported.Base64Png);
       var client = new DeferredQrCodeClient();
       var maintenance = new ProductMaintenanceCoordinator();
       using var broker = new WorkbenchResourceBroker(resourceRoot);
@@ -408,7 +410,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       await using var handler = new DesktopWorkbenchCommandHandler(
         static () => throw new InvalidOperationException(),
         static () => throw new InvalidOperationException(),
-        () => new QrCodeViewModel(client, new FixedQrCodeInput()),
+        () => new QrCodeViewModel(client, new FixedQrCodeInput(new QrCodeInput(importedBytes, "image/png", "synthetic-import.png"))),
         static () => throw new InvalidOperationException(),
         static () => throw new InvalidOperationException(),
         static () => throw new InvalidOperationException(),
@@ -443,6 +445,16 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       Assert.Equal("qrcode.ready", generated.StatusCode);
       Assert.NotNull(generated.GeneratedResource);
       Assert.True(updates.Current.Revision >= receipt.Revision);
+      async Task<byte[]> ReadPreviewBytesAsync(WorkbenchResourceReference preview)
+      {
+        await using WorkbenchResourceResponse response = await broker.OpenAsync(new Uri(preview.Url), timeout.Token);
+        using var bytes = new MemoryStream();
+        await response.Content.CopyToAsync(bytes, timeout.Token);
+        return bytes.ToArray();
+      }
+      byte[] generatedBytes = await ReadPreviewBytesAsync(generated.GeneratedResource!);
+      (byte[] generatedPixels, uint generatedWidth, uint generatedHeight) = await DecodePreviewPixelsAsync(Convert.ToBase64String(generatedBytes));
+      Assert.Equal("hello", DecodePreviewBarcode(generatedPixels, generatedWidth, generatedHeight));
 
       WorkbenchCommandReceipt decodeReceipt = await application.ExecuteAsync(
         new WorkbenchCommandEnvelope(Guid.NewGuid(), new DecodeQrCodeClipboardCommand()),
@@ -454,6 +466,10 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       Assert.False(unavailable.IsBusy);
       Assert.Equal("qrcode.decodeUnavailable", unavailable.StatusCode);
       Assert.NotNull(unavailable.GeneratedResource);
+      Assert.NotEqual(generated.GeneratedResource, unavailable.GeneratedResource);
+      Assert.Equal(importedBytes, await ReadPreviewBytesAsync(unavailable.GeneratedResource!));
+      (byte[] importedPixels, uint importedWidth, uint importedHeight) = await DecodePreviewPixelsAsync(imported.Base64Png);
+      Assert.Equal("IMPORT-128", DecodePreviewBarcode(importedPixels, importedWidth, importedHeight));
 
       WorkbenchCommandReceipt invalidReceipt = await application.ExecuteAsync(
         new WorkbenchCommandEnvelope(Guid.NewGuid(), new GenerateQrCodeCommand("")),
@@ -463,7 +479,8 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       Assert.True(await updates.MoveNextAsync());
       QrCodeWorkbenchState invalid = Assert.IsType<QrCodeWorkbenchState>(updates.Current.State);
       Assert.Equal("qrcode.invalidInput", invalid.StatusCode);
-      Assert.Equal(generated.GeneratedResource, invalid.GeneratedResource);
+      Assert.Equal(unavailable.GeneratedResource, invalid.GeneratedResource);
+      Assert.Equal(importedBytes, await ReadPreviewBytesAsync(invalid.GeneratedResource!));
 
       client.MarkStartupPending();
       client.MarkStartupFailed(new InvalidOperationException("startup failed"));
@@ -1189,18 +1206,18 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       CancellationToken cancellationToken) => Task.FromResult<QrCodeInput?>(null);
   }
 
-  private sealed class FixedQrCodeInput : IQrCodeInput
+  private sealed class FixedQrCodeInput(QrCodeInput? suppliedImage = null) : IQrCodeInput
   {
     private static readonly QrCodeInput Image = new([1, 2, 3], "image/png", "test.png");
 
     public Task<QrCodeInput?> PickFileAsync(CancellationToken cancellationToken) =>
-      Task.FromResult<QrCodeInput?>(Image);
+      Task.FromResult<QrCodeInput?>(suppliedImage ?? Image);
 
     public Task<QrCodeInput?> ReadClipboardAsync(CancellationToken cancellationToken) =>
-      Task.FromResult<QrCodeInput?>(Image);
+      Task.FromResult<QrCodeInput?>(suppliedImage ?? Image);
 
     public Task<QrCodeInput?> ReadDroppedFileAsync(string path, CancellationToken cancellationToken) =>
-      Task.FromResult<QrCodeInput?>(Image);
+      Task.FromResult<QrCodeInput?>(suppliedImage ?? Image);
   }
 
   private sealed class CurrentUpdateCoordinator : IUpdateCoordinator

@@ -2223,7 +2223,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     qrCode ??= qrCodeFactory();
     Interlocked.Increment(ref qrCodeGeneration);
     qrCode.Cancel();
-    await CompleteQrCodeAsync(_ => Task.CompletedTask, false, Volatile.Read(ref qrCodeGeneration), cancellationToken);
+    if (qrCode.HasPreview && publishedQrRevision != qrCode.PreviewRevision)
+      await CompleteQrCodeAsync(_ => Task.CompletedTask, false, Volatile.Read(ref qrCodeGeneration), cancellationToken);
     return QrCodeState(qrCode) with
     {
       IsBusy = false,

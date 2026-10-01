@@ -135,6 +135,7 @@ public sealed class QrCodeSavePlatform(Func<nint> windowHandle) : IQrCodeSavePla
 
     internal static async Task<byte[]> EncodeImageAsync(byte[] png, Guid encoderId, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         using var input = new InMemoryRandomAccessStream();
         using (var writer = new DataWriter(input))
         {
@@ -144,6 +145,8 @@ public sealed class QrCodeSavePlatform(Func<nint> windowHandle) : IQrCodeSavePla
         }
         input.Seek(0);
         BitmapDecoder decoder = await BitmapDecoder.CreateAsync(input);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (encoderId == BitmapEncoder.PngEncoderId && decoder.DecoderInformation.CodecId == BitmapDecoder.PngDecoderId) return png;
         BitmapAlphaMode alpha = encoderId == BitmapEncoder.PngEncoderId ? BitmapAlphaMode.Straight : BitmapAlphaMode.Ignore;
         PixelDataProvider source = await decoder.GetPixelDataAsync(
             BitmapPixelFormat.Bgra8, alpha,
