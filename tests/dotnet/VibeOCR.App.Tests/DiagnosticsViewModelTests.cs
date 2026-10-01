@@ -156,7 +156,7 @@ public sealed class DiagnosticsViewModelTests
       "test",
       new PrerequisiteReport([]),
       deviceEvidence: () => ("sup-1", (IReadOnlyList<string>)[
-        "[Paddle worker] [GPU] 验证失败: token=abc123 path=C:\\Users\\felix\\models，回退到 CPU",
+        "[Paddle worker] [GPU] token=abc123 " + new string('x', 500) + " 验证失败: path=C:\\Users\\felix\\models，回退到 CPU",
       ]));
     viewModel.UpdateSupervisor(new SupervisorHealth(
       SupervisorHealthState.Ready, "sup-1", 2, null));
@@ -166,6 +166,7 @@ public sealed class DiagnosticsViewModelTests
     Assert.DoesNotContain("C:\\Users", line);
     Assert.Contains("<redacted>", line);
     Assert.Contains("[Paddle worker]", line);
+    Assert.True(line.Length <= 401);
   }
 
   [Fact]

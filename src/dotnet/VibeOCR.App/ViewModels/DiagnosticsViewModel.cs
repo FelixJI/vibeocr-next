@@ -223,8 +223,10 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
                     line.Contains("[Paddle worker]", StringComparison.Ordinal) &&
                     (line.Contains("[推理设备]", StringComparison.Ordinal) ||
                      line.Contains("[GPU]", StringComparison.Ordinal)))
-                .Select(line => Redact(line)!)
                 .TakeLast(DeviceEvidenceMaxLines)
+                // bridge 总消息限制 64 KiB；20 条 × 400 字符即使全部 JSON 转义也有余量。
+                .Select(line => Redact(line)!)
+                .Select(line => line.Length > 400 ? line[..400] + "…" : line)
                 .ToArray();
     }
 
