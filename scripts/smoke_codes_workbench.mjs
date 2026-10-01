@@ -43,7 +43,7 @@ const qrTests = [
 const statusCopied = '已复制当前预览图片';
 const statusDecoded = '识别完成';
 const statusRunning = '正在处理二维码…';
-const statusNoCodes = '当前预览中未识别到支持的二维码或条形码';
+const statusNoCodes = '当前预览中未识别到支持的二维码或条码';
 const statusUnavailable = '图片识别需要识别运行环境，请启动或恢复后重试';
 
 function option(name) {
@@ -695,9 +695,10 @@ async function main() {
         await native('foreground', { AppPid: app.child.pid });
         await watchStatus(page);
         await page.getByRole('button', { name: '识别当前预览 / 重新识别', exact: true }).click();
-        await page.waitForFunction((expected) =>
-          document.querySelector('output.status-line')?.textContent?.trim() === expected,
-        statusDecoded, { timeout: decodeTimeoutMs });
+        await page.waitForFunction(([done, running]) =>
+          document.querySelector('output.status-line')?.textContent?.trim() === done &&
+          window.__codesSmokeStatusLog?.includes(running),
+        [statusDecoded, statusRunning], { timeout: decodeTimeoutMs });
         const manualLog = await readStatusLog(page);
         assert(manualLog.includes(statusRunning),
           `Manual re-recognition did not run again: ${JSON.stringify(manualLog)}`);
@@ -788,9 +789,10 @@ async function main() {
         await native('foreground', { AppPid: app.child.pid });
         await watchStatus(page);
         await page.getByRole('button', { name: '识别当前预览 / 重新识别', exact: true }).click();
-        await page.waitForFunction((expected) =>
-          document.querySelector('output.status-line')?.textContent?.trim() === expected,
-        statusDecoded, { timeout: decodeTimeoutMs });
+        await page.waitForFunction(([done, running]) =>
+          document.querySelector('output.status-line')?.textContent?.trim() === done &&
+          window.__codesSmokeStatusLog?.includes(running),
+        [statusDecoded, statusRunning], { timeout: decodeTimeoutMs });
         const recoveryLog = await readStatusLog(page);
         assert(recoveryLog.includes(statusRunning),
           `Post-recovery re-recognition did not run again: ${JSON.stringify(recoveryLog)}`);
