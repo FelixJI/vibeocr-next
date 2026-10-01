@@ -51,7 +51,9 @@ async function freeLocalPort() {
 }
 
 async function native(action, options = {}) {
-  const args = ['-NoProfile', '-NonInteractive', '-File', nativeScript,
+  const pointerAction = ['mouse-move', 'mouse-down', 'mouse-up'].includes(action);
+  const script = pointerAction ? path.join(scriptDir, 'scroll_capture_fixture.ps1') : nativeScript;
+  const args = ['-NoProfile', '-NonInteractive', '-File', script,
     '-Action', action];
   for (const [key, value] of Object.entries(options))
     args.push(`-${key}`, String(value));
@@ -370,7 +372,7 @@ async function observeNextAnnotationUpload(page) {
   });
 }
 
-async function captureThroughHotkey(app, fixture, evidenceRoot, evidence) {
+async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual = false) {
   const { page } = app;
   const toolbarHandles = (await windows(app.child.pid))
     .filter((item) => item.Visible && item.Handle !== app.main.Handle && area(item) > 1000)
@@ -409,23 +411,62 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence) {
   evidence.overlayProbe = JSON.parse(await native('probe', {
     AppPid: app.child.pid, FixturePid: fixture.pid, X: x, Y: y,
   }));
-  await native('hover', { AppPid: app.child.pid, X: x, Y: y });
+  let selectedRegion = button;
+  const gesture = { mode: manual ? 'manual-drag-resize-click' : 'smart-click', events: [] };
+  if (manual) {
+    const start = { AppPid: app.child.pid, X: button.left + 4, Y: button.top + 4 };
+    const end = { AppPid: app.child.pid, X: button.right - 4, Y: button.bottom - 4 };
+    await native('mouse-move', start);
+    await native('mouse-down', start);
+    try { await native('mouse-move', end); }
+    finally { await native('mouse-up', end); }
+    const dragLabel = await native('selection', { AppPid: app.child.pid, Handle: overlay.Handle });
+    assert(dragLabel.includes(`手动 · ${button.width - 8} × ${button.height - 8} px`),
+      `First drag was confirmed or selected different pixels: ${dragLabel}`);
+    gesture.events.push({ event: 'drag-released', label: dragLabel, observedAt: new Date().toISOString() });
+    const handle = { ...end, X: end.X + 3, Y: end.Y + 3 };
+    const resized = { ...end, X: end.X + 13, Y: end.Y + 13 };
+    await native('mouse-move', handle);
+    await native('mouse-down', handle);
+    try { await native('mouse-move', resized); }
+    finally { await native('mouse-up', resized); }
+    const resizeLabel = await native('selection', { AppPid: app.child.pid, Handle: overlay.Handle });
+    assert(resizeLabel.includes(`手动 · ${button.width + 2} × ${button.height + 2} px`),
+      `Offset handle resize jumped or confirmed: ${resizeLabel}`);
+    gesture.events.push({ event: 'resize-released', label: resizeLabel, observedAt: new Date().toISOString() });
+    selectedRegion = { left: start.X, top: start.Y, width: button.width + 2, height: button.height + 2 };
+  } else {
+    await native('hover', { AppPid: app.child.pid, X: x, Y: y });
+  }
   // The production UIA query has a 200 ms budget. One bounded settle period
   // lets the real overlay consume it; no retry or synthetic command injection.
   await delay(350);
   assert.equal(await taskbarState(), evidence.taskbarStateBefore,
     'Screenshot selection changed the Windows taskbar preference.');
   const selectionStates = [];
-  for (let index = 0; index < 8; index++) {
-    const label = await native('selection', { AppPid: app.child.pid, Handle: overlay.Handle });
-    selectionStates.push(label);
-    if (index > 0 && label.includes(` · ${button.width} × ${button.height} px · Enter`)) break;
-    await native('tab', { AppPid: app.child.pid });
+  if (!manual) {
+    for (let index = 0; index < 8; index++) {
+      const label = await native('selection', { AppPid: app.child.pid, Handle: overlay.Handle });
+      selectionStates.push(label);
+      if (index > 0 && label.includes(` · ${button.width} × ${button.height} px · Enter`)) break;
+      await native('tab', { AppPid: app.child.pid });
+    }
+    evidence.smartSelectionStates = selectionStates;
+    assert(selectionStates.at(-1)?.includes(` · ${button.width} × ${button.height} px · Enter`),
+      `Smart picker did not expose the synthetic button: ${JSON.stringify(selectionStates)}`);
   }
-  evidence.smartSelectionStates = selectionStates;
-  assert(selectionStates.at(-1)?.includes(` · ${button.width} × ${button.height} px · Enter`),
-    `Smart picker did not expose the synthetic button: ${JSON.stringify(selectionStates)}`);
-  await native('enter', { AppPid: app.child.pid });
+  const click = { AppPid: app.child.pid,
+    X: selectedRegion.left + Math.floor(selectedRegion.width / 2),
+    Y: selectedRegion.top + Math.floor(selectedRegion.height / 2) };
+  // Smart Tab selection keeps the current mouse point; moving it would select a new candidate.
+  if (manual) await native('mouse-move', click);
+  await native('mouse-down', click);
+  try {
+    assert((await windows(app.child.pid)).some((item) => item.Handle === overlay.Handle && item.Visible),
+      'A press confirmed before release.');
+    gesture.events.push({ event: 'click-pressed', observedAt: new Date().toISOString() });
+  } finally { await native('mouse-up', click); }
+  gesture.events.push({ event: 'click-released', observedAt: new Date().toISOString() });
 
   await page.getByRole('heading', { name: '单次识别' }).waitFor({ timeout: 12000 });
   const editor = page.getByLabel('图片检查画布');
@@ -503,11 +544,11 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence) {
   } finally {
     await page.evaluate(() => window.__nativeActionsRestoreFetch?.()).catch(() => {});
   }
-  fs.writeFileSync(path.join(evidenceRoot, 'synthetic-edited.png'), png);
-  await page.screenshot({ path: path.join(evidenceRoot, 'screenshot-editor.png') });
+  fs.writeFileSync(path.join(evidenceRoot, manual ? 'manual-edited.png' : 'synthetic-edited.png'), png);
+  await page.screenshot({ path: path.join(evidenceRoot, manual ? 'manual-screenshot-editor.png' : 'screenshot-editor.png') });
   const pixels = await pngPixels(page, png);
-  assert.equal(pixels.width, button.width, 'Smart region did not select the synthetic button width.');
-  assert.equal(pixels.height, button.height, 'Smart region did not select the synthetic button height.');
+  assert.equal(pixels.width, selectedRegion.width, 'Final crop differs from the selected physical width.');
+  assert.equal(pixels.height, selectedRegion.height, 'Final crop differs from the selected physical height.');
   assert(pixels.orange > 20 && pixels.dark > 10 && pixels.light > 100,
     `Synthetic PNG pixels are incomplete: ${JSON.stringify(pixels)}`);
   const revision = await page.evaluate(() => window.__nativeActionsEvidence);
@@ -516,7 +557,7 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence) {
   return { hotkey, overlayHandle: overlay.Handle,
     mainHiddenDuringSelection: true, toolbarHiddenDuringSelection: true,
     toolbarRestoredAfterSelection: true,
-    background: fixture.backgroundRect, button, canvasBefore: before,
+    background: fixture.backgroundRect, button, selectedRegion, gesture, canvasBefore: before,
     canvasAfter: after, png: pixels, productUploadBytes: uploadBytes,
     sessionId: revision.sessionId,
     revision: revision.revision };
@@ -620,6 +661,7 @@ async function main() {
     await app.page.screenshot({ path: path.join(smokeRoot, 'native-actions-settings.png') });
     fixture = await startFixture();
     evidence.capture = await captureThroughHotkey(app, fixture, smokeRoot, evidence);
+    evidence.manualCapture = await captureThroughHotkey(app, fixture, smokeRoot, evidence, true);
     evidence.recognitionHotkeyGuard = await verifyRecognitionHotkeyGuard(app, fixture);
     await openSettings(app.page);
     await setCheckbox(app.page, '启用悬浮工具栏', false);
