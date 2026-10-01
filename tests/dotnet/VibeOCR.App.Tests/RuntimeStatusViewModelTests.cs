@@ -260,4 +260,125 @@ public sealed class RuntimeStatusViewModelTests
         Assert.True(viewModel.IsProgressIndeterminate);
         Assert.NotEqual(100, viewModel.ProgressValue);
     }
+
+    [Fact]
+    public void IdleAndReadyStatesDoNotReportAnActiveOperation()
+    {
+        var model = new RuntimeStatusViewModel();
+        Assert.False(model.IsOperationActive);
+
+        model.ApplySnapshot(Ready());
+        Assert.False(model.IsOperationActive);
+
+        model.ReportServiceUnavailable();
+        Assert.False(model.IsOperationActive);
+    }
+
+    [Fact]
+    public void MaintenanceLifecycleDrivesActiveProgressAndTerminalsExit()
+    {
+        var model = new RuntimeStatusViewModel();
+        model.BeginMaintenance("ui-op-active");
+        Assert.True(model.IsOperationActive);
+
+        model.ApplyMaintenance(Maintenance(1, Host.RuntimeOperationState.Running) with
+        {
+            Snapshot = new Host.RuntimeMaintenanceSnapshot
+            {
+                OperationId = "ui-op-active",
+                Sequence = 1,
+                Operation = Host.RuntimeHostOperation.Ensure,
+                OperationState = Host.RuntimeOperationState.Running,
+                Phase = Host.RuntimeMaintenancePhase.InstallBackend,
+                ProfileId = "win-x64-cpu",
+                UpdatedAt = "2026-10-01T00:00:00Z",
+            },
+        });
+        Assert.True(model.IsOperationActive);
+
+        model.ApplyMaintenance(Maintenance(2, Host.RuntimeOperationState.Cancelled) with
+        {
+            Snapshot = new Host.RuntimeMaintenanceSnapshot
+            {
+                OperationId = "ui-op-active",
+                Sequence = 2,
+                Operation = Host.RuntimeHostOperation.Ensure,
+                OperationState = Host.RuntimeOperationState.Cancelled,
+                Phase = Host.RuntimeMaintenancePhase.InstallBackend,
+                ProfileId = "win-x64-cpu",
+                UpdatedAt = "2026-10-01T00:00:01Z",
+            },
+        });
+        // 取消是终态：退出活动动画，保留准确终态文案。
+        Assert.False(model.IsOperationActive);
+        Assert.Equal("运行时安装已取消", model.Status);
+
+        model.ApplySnapshot(Ready());
+        Assert.False(model.IsOperationActive);
+        Assert.Equal("运行时安装已取消", model.Status);
+    }
+
+    [Fact]
+    public void SnapshotMaintenanceDrivesActiveState()
+    {
+        var model = new RuntimeStatusViewModel();
+        model.ApplySnapshot(Ready() with
+        {
+            Maintenance = new Http.RuntimeMaintenanceStatus
+            {
+                OperationId = "sup-op-1",
+                Sequence = 4,
+                Operation = Http.RuntimeMaintenanceOperation.Ensure,
+                OperationState = Http.RuntimeOperationState.Running,
+                Phase = Http.RuntimeMaintenancePhase.PrepareRuntime,
+                ProfileId = "win-x64-cpu",
+                UpdatedAt = "2026-10-01T00:00:00Z",
+            },
+        });
+        Assert.True(model.IsOperationActive);
+
+        model.ApplySnapshot(Ready() with
+        {
+            Maintenance = new Http.RuntimeMaintenanceStatus
+            {
+                OperationId = "sup-op-1",
+                Sequence = 5,
+                Operation = Http.RuntimeMaintenanceOperation.Ensure,
+                OperationState = Http.RuntimeOperationState.Succeeded,
+                Phase = Http.RuntimeMaintenancePhase.CommitRuntime,
+                ProfileId = "win-x64-cpu",
+                UpdatedAt = "2026-10-01T00:00:02Z",
+            },
+        });
+        Assert.False(model.IsOperationActive);
+        Assert.Equal("维护操作已完成", model.Status);
+    }
+
+    [Fact]
+    public void ServiceMaintenanceWithoutLocalOperationStaysActiveUntilReady()
+    {
+        var model = new RuntimeStatusViewModel();
+        model.ApplySnapshot(Ready() with
+        {
+            ServiceState = Http.RuntimeServiceState.Maintenance,
+        });
+        Assert.True(model.IsOperationActive);
+        Assert.Equal("正在维护运行时", model.Status);
+
+        model.ApplySnapshot(Ready());
+        Assert.False(model.IsOperationActive);
+    }
+
+    [Fact]
+    public void InFlightLocalOperationSurvivesUnrelatedSnapshotChurn()
+    {
+        var model = new RuntimeStatusViewModel();
+        model.BeginMaintenance("ui-op-2");
+        model.ApplySnapshot(Ready());
+        // 本地在途操作未被快照终绪：活动动画保持，等待安装器事件终绪。
+        Assert.True(model.IsOperationActive);
+
+        model.CompleteMaintenance("failed");
+        Assert.False(model.IsOperationActive);
+    }
 }

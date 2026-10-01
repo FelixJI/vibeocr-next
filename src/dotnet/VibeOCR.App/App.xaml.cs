@@ -74,6 +74,9 @@ public sealed partial class App : Application
     private const uint TrayLeftDoubleClick = 0x0203;
     private const uint TrayRightClick = 0x0205;
 
+    /// <summary>连接/恢复等待生命周期门的有界预算（覆盖一次 90 秒激活）。</summary>
+    private static readonly TimeSpan SupervisorGateWaitTimeout = TimeSpan.FromSeconds(120);
+
     // 托盘菜单仅本任务实际动作：打开工作台/截图识别/截图编辑/剪贴板识别/
     // 悬浮栏开关 + 退出；复用既有托盘回调消息，不新增常驻钩子。
     private const uint MenuFlagString = 0x0000;
@@ -729,6 +732,27 @@ public sealed partial class App : Application
         Environment.Exit(0);
     }
 
+    /// <summary>
+    /// 等待 Supervisor 生命周期门：可被调用方令牌取消且有界超时。界取
+    /// 一次激活的 90 秒引擎启动预算加余量；运行环境安装不持门，只在拆
+    /// 线/提交时短暂占用。
+    /// </summary>
+    private async Task WaitSupervisorLifecycleGateAsync(CancellationToken cancellationToken)
+    {
+        using var bound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        bound.CancelAfter(SupervisorGateWaitTimeout);
+        try
+        {
+            await _supervisorLifecycle.WaitAsync(bound.Token);
+        }
+        catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new InvalidOperationException(
+                $"等待运行环境生命周期门超时（{(int)SupervisorGateWaitTimeout.TotalSeconds} 秒），连接尝试未能开始。",
+                error);
+        }
+    }
+
     private async Task<bool> ConnectSupervisorAfterFirstWindowAsync(
         PortableLayout layout,
         DiagnosticsViewModel diagnostics,
@@ -759,14 +783,45 @@ public sealed partial class App : Application
         DiagnosticsViewModel diagnostics,
         bool isRecovery)
     {
-        diagnostics.UpdateSupervisor(new SupervisorHealth(
-            SupervisorHealthState.Connecting, null, null, null));
-        RecordMilestone(diagnostics, "T3", _startup.Elapsed);
-
-        await _supervisorLifecycle.WaitAsync();
+        // 门等待可取消且有界：占用方（另一次启动/切换/维护拆线）异常滞留
+        // 时，等待方以准确终态退出，不得无限悬挂。等待期间不发布
+        // Connecting，避免占用方把“正在连接”滞留成永久状态。
         try
         {
-            if (Volatile.Read(ref _runtimeMaintenanceActive) != 0) return false;
+            await WaitSupervisorLifecycleGateAsync(_applicationShutdown.Token);
+        }
+        catch (OperationCanceledException) when (_applicationShutdown.IsCancellationRequested)
+        {
+            return false;
+        }
+        catch (Exception error)
+        {
+            _inferenceGateway.MarkStartupFailed(error);
+            _qrCodeGateway.MarkStartupFailed(error);
+            _runtimeStatus.ReportServiceUnavailable();
+            diagnostics.UpdateSupervisor(new SupervisorHealth(
+                SupervisorHealthState.Faulted, null, null, error.Message));
+            return false;
+        }
+        try
+        {
+            if (Volatile.Read(ref _runtimeMaintenanceActive) != 0)
+            {
+                // 维护互斥早退必须发布终态：识别服务因维护暂停，等待中的
+                // 网关调用携带原因退出；恢复仍由维护结束后的 Restore 路径
+                // 完成。
+                var maintenance = new InvalidOperationException("运行环境维护尚未结束，识别服务保持暂停。");
+                _inferenceGateway.MarkStartupFailed(maintenance);
+                _qrCodeGateway.MarkStartupFailed(maintenance);
+                _runtimeStatus.ReportServicePausedForMaintenance();
+                diagnostics.UpdateSupervisor(new SupervisorHealth(
+                    SupervisorHealthState.NotReady, null, null, "运行环境维护尚未结束。"));
+                return false;
+            }
+            // 拿到门且确认开始后才发布 Connecting。
+            diagnostics.UpdateSupervisor(new SupervisorHealth(
+                SupervisorHealthState.Connecting, null, null, null));
+            RecordMilestone(diagnostics, "T3", _startup.Elapsed);
             // Recovery reuses this entry point; re-announce the attempt so
             // calls crossing the detach gap wait for this reconnect.
             _inferenceGateway.MarkStartupPending();
@@ -1043,7 +1098,7 @@ public sealed partial class App : Application
     {
         try
         {
-            await _supervisorLifecycle.WaitAsync(_applicationShutdown.Token);
+            await WaitSupervisorLifecycleGateAsync(_applicationShutdown.Token);
             try
             {
                 await DisconnectSupervisorResourcesAsync();

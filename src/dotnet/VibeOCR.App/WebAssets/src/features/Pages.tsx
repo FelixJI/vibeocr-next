@@ -1741,12 +1741,13 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
 
 export function SettingsPage({ viewState, actions }: FeatureProps) {
   const state = feature(viewState, "settings");
-  const backend =
-    typeof state.backend === "string" ? state.backend : "等待宿主同步";
+  // backend 是运行时 profile 声明的目标加速器，不是实测执行设备；
+  // 未读取真实快照前不冒充任何设备。
+  const backend = typeof state.backend === "string" ? state.backend : "";
   const backendLabel =
     backend === "cpu" || backend === "nvidia_cuda"
       ? acceleratorLabel(backend)
-      : backend;
+      : null;
   const maintenance = maintenanceState(state.maintenance);
   const busy = maintenance?.isRunning === true;
   const sources = sourceOptions(state.sources);
@@ -1838,18 +1839,21 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
           className="settings-runtime-panel"
         >
           <div className="runtime-summary">
-            <strong>{backendLabel}</strong>
+            <strong>{`目标推理设备：${backendLabel ?? "尚未读取"}`}</strong>
             <p>当前服务：{serviceText}</p>
             <p>本次维护：{maintenanceLine}</p>
-            <ProgressBar
-              value={
-                typeof state.progressPercent === "number" &&
-                Number.isFinite(state.progressPercent)
-                  ? state.progressPercent / 100
-                  : undefined
-              }
-              aria-label="运行环境维护进度"
-            />
+            {/* 只有真实进行中的维护操作才渲染进度；设置刷新不是维护。 */}
+            {state.progressActive === true ? (
+              <ProgressBar
+                value={
+                  typeof state.progressPercent === "number" &&
+                  Number.isFinite(state.progressPercent)
+                    ? state.progressPercent / 100
+                    : undefined
+                }
+                aria-label="运行环境维护进度"
+              />
+            ) : null}
             {progressText ? <p>{progressText}</p> : null}
             {stringValue(state.progressDetail) ? (
               <details>

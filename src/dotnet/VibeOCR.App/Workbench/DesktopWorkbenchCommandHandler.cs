@@ -162,6 +162,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       return viewModel;
     });
     this.diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
+    this.diagnostics.PropertyChanged += OnDiagnosticsPropertyChanged;
     this.resourceBroker = resourceBroker ??
       throw new ArgumentNullException(nameof(resourceBroker));
     this.resourceRoot = Path.GetFullPath(resourceRoot);
@@ -203,6 +204,18 @@ public sealed class DesktopWorkbenchCommandHandler :
   public event Action<Guid, long>? ScreenshotTextLayerInvalidated;
   public event Action<Guid, long>? ScreenshotSessionDetached;
   public event Action? PinnedTextEnvironmentChanged;
+
+  /// <summary>
+  /// Supervisor 连接/就绪/失败终态变更时同步广播诊断投影：宿主快照不
+  /// 得滞留在 bootstrap 时的“正在连接”。
+  /// </summary>
+  private void OnDiagnosticsPropertyChanged(object? sender, PropertyChangedEventArgs args)
+  {
+    if (Volatile.Read(ref disposed) == 0)
+    {
+      StateChanged?.Invoke(DiagnosticsState());
+    }
+  }
 
   public async ValueTask PrepareBootstrapAsync(CancellationToken cancellationToken)
   {
@@ -2292,6 +2305,9 @@ public sealed class DesktopWorkbenchCommandHandler :
     {
       Interlocked.Exchange(ref environmentSwitching, 1);
       settings.ClearSelection();
+      // 环境切换开始即作废旧实例的在途设置快照：迟到读数不得覆盖切换
+      // 后的新服务状态。
+      settings.InvalidateSnapshot();
     }
     return PublishStartThenTrack(SettingsState(settings), async () =>
     {
@@ -2315,7 +2331,13 @@ public sealed class DesktopWorkbenchCommandHandler :
           {
             if (Volatile.Read(ref disposed) == 0)
             {
-              if (completed) await RefreshRecognitionCatalogAsync(CancellationToken.None);
+              if (completed)
+              {
+                await RefreshRecognitionCatalogAsync(CancellationToken.None);
+                // 以新环境重新读取设置快照：Backend/驻留等旧实例投影不得
+                // 继续冒充当前状态。
+                await settings.LoadSnapshotAsync(CancellationToken.None);
+              }
               else
               {
                 settings.ClearSelection();
@@ -2692,10 +2714,17 @@ public sealed class DesktopWorkbenchCommandHandler :
     {
       string service = supervisorInstanceId() ?? string.Empty;
       bool maintaining = settings.Maintenance.State.IsRunning;
-      if (service != pinnedServiceInstance || (maintaining && !pinMaintenanceNotified))
+      bool instanceChanged = service != pinnedServiceInstance;
+      if (instanceChanged || (maintaining && !pinMaintenanceNotified))
         PinnedTextEnvironmentChanged?.Invoke();
       pinnedServiceInstance = service;
       pinMaintenanceNotified = maintaining;
+      if (instanceChanged)
+      {
+        // 服务实例更换（切换/维护停止/崩溃恢复）：旧实例的在途快照与加速
+        // 器目标不得继续作为当前状态投影。
+        settings.InvalidateSnapshot();
+      }
       InvalidateScreenshotSessionRecognitionOnMaintenance();
       StateChanged?.Invoke(SettingsState(settings));
     }
@@ -3288,6 +3317,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     ServiceStatus: viewModel.RuntimeStatus.ServiceStatus,
     MaintenanceStatus: viewModel.RuntimeStatus.Status,
     MaintenancePhase: viewModel.RuntimeStatus.Phase,
+    ProgressActive: viewModel.RuntimeStatus.IsOperationActive,
     ProgressText: viewModel.RuntimeStatus.ProgressText,
     ProgressDetail: viewModel.RuntimeStatus.ProgressDetail,
     ProgressPercent: viewModel.RuntimeStatus.IsProgressIndeterminate ? null : viewModel.RuntimeStatus.ProgressValue,
@@ -3446,6 +3476,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       settings.PropertyChanged -= OnSettingsPropertyChanged;
       settings.CancelMaintenance();
     }
+    diagnostics.PropertyChanged -= OnDiagnosticsPropertyChanged;
     Task[] operations;
     lock (backgroundOperations)
     {

@@ -1020,6 +1020,7 @@ public static class WorkbenchBridgeCodec
       settings.ProgressText,
       settings.ProgressDetail,
       settings.ProgressPercent,
+      progressActive = settings.ProgressActive,
       settings.CanPreviewInstall,
       environments = settings.Environments ?? [],
       settings.ActiveEnvironmentId,

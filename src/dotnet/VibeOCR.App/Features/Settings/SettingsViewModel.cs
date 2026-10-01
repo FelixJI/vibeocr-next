@@ -42,7 +42,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private long _selectionGeneration;
     private bool _isBusy;
     private string _status = "正在读取设置";
-    private string _backend = "cpu";
+    private string? _backend;
     private string _pendingBackend = "cpu";
     private bool _restartRequired;
     private bool _gpuAvailable;
@@ -91,11 +91,16 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public int? VramUsedMb { get; private set; }
     public bool IsBusy { get => _isBusy; private set => SetField(ref _isBusy, value); }
     public string Status { get => _status; private set => SetField(ref _status, value); }
-    public string Backend { get => _backend; private set => SetField(ref _backend, value); }
+
+    /// <summary>
+    /// 当前运行时 profile 声明的目标加速器（cpu/nvidia_cuda）；在首次真
+    /// 实快照前为 null，不得把默认目标 cpu 冒充为实际运行设备。
+    /// </summary>
+    public string? Backend { get => _backend; private set => SetField(ref _backend, value); }
     public string PendingBackend { get => _pendingBackend; set => SetField(ref _pendingBackend, value); }
     public bool RestartRequired { get => _restartRequired; private set => SetField(ref _restartRequired, value); }
     public bool GpuAvailable { get => _gpuAvailable; private set => SetField(ref _gpuAvailable, value); }
-    public bool CanSwitchBackend => !IsBusy && !string.Equals(Backend, PendingBackend, StringComparison.Ordinal);
+    public bool CanSwitchBackend => !IsBusy && Backend is not null && !string.Equals(Backend, PendingBackend, StringComparison.Ordinal);
 
     public IReadOnlyList<SettingsSourceOption> Sources
     {
@@ -196,6 +201,18 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         Interlocked.Increment(ref _selectionGeneration);
         _selection = null;
         Volatile.Write(ref _recognitionSelection, null);
+    }
+
+    /// <summary>
+    /// 环境切换或服务实例更换时作废旧快照：在途读取不得再投影，旧的
+    /// 目标加速器也不再冒充当前状态；Backend 保持未读取直至下一次真实
+    /// 快照。
+    /// </summary>
+    public void InvalidateSnapshot()
+    {
+        Interlocked.Increment(ref _generation);
+        IsBusy = false;
+        Backend = null;
     }
 
     /// <summary>

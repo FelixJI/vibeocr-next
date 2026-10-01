@@ -112,6 +112,75 @@ public sealed class SettingsViewModelSupervisorTests
         Assert.Equal("尚未连接运行环境；可配置来源或准备依赖。", viewModel.Status);
         Assert.False(viewModel.IsBusy);
     }
+
+    [Fact]
+    public void UnloadedBackendIsNotProjectedAsATargetDevice()
+    {
+        var viewModel = new SettingsViewModel(new FakeSettingsInferenceClient());
+        Assert.Null(viewModel.Backend);
+        // 默认目标 cpu 只是待选值，未读取真实快照前不得冒充当前设备。
+        Assert.False(viewModel.CanSwitchBackend);
+    }
+
+    [Fact]
+    public async Task InvalidateSnapshotDiscardsInFlightRuntimeRead()
+    {
+        var pending = new TaskCompletionSource<RuntimeStatusSnapshot>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var fake = new GatedRuntimeStatusClient(pending);
+        var viewModel = new SettingsViewModel(fake);
+        Task load = viewModel.LoadSnapshotAsync(CancellationToken.None);
+
+        // 环境切换/服务实例更换使旧读取失效：迟到读数不得再投影。
+        viewModel.InvalidateSnapshot();
+        pending.SetResult(ReadyRuntimeStatus());
+        await load;
+
+        Assert.Null(viewModel.Backend);
+        Assert.False(viewModel.IsBusy);
+    }
+
+    [Fact]
+    public async Task SnapshotReadProjectsBackendFromRealProfile()
+    {
+        var fake = new GatedRuntimeStatusClient(TaskCompletionSourceFor(
+            ReadyRuntimeStatus()));
+        var viewModel = new SettingsViewModel(fake);
+        await viewModel.LoadSnapshotAsync(CancellationToken.None);
+        Assert.Equal("cpu", viewModel.Backend);
+    }
+
+    private static TaskCompletionSource<RuntimeStatusSnapshot> TaskCompletionSourceFor(
+        RuntimeStatusSnapshot snapshot)
+    {
+        var source = new TaskCompletionSource<RuntimeStatusSnapshot>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        source.SetResult(snapshot);
+        return source;
+    }
+
+    private static RuntimeStatusSnapshot ReadyRuntimeStatus() => new()
+    {
+        InstanceId = "sup-test",
+        ServiceState = RuntimeServiceState.Ready,
+        BackendVersion = "0.14.0",
+        Profile = new RuntimeProfileStatus
+        {
+            ProfileId = "win-x64-cpu",
+            Accelerator = RuntimeAccelerator.Cpu,
+            Components = [],
+        },
+    };
+
+    private sealed class GatedRuntimeStatusClient(
+        TaskCompletionSource<RuntimeStatusSnapshot> pending) : InferenceClientStub, IInferenceClient
+    {
+        public Task<RuntimeStatusSnapshot> GetRuntimeStatusAsync(
+            CancellationToken cancellationToken) => pending.Task;
+
+        public override Task<ResidencyStatus> GetResidencyAsync(
+            CancellationToken cancellationToken) => Task.FromResult(new ResidencyStatus());
+    }
     // Fakes
     // ------------------------------------------------------------------
 
