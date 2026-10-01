@@ -9,11 +9,33 @@ public interface ITrayIconNativeMethods
     bool Delete(Guid id, nint windowHandle);
 }
 
+/// <summary>
+/// NOTIFYICON uVersion=0 回调约定：托盘回调消息的 lParam 携带以下鼠标/键盘
+/// 事件（键盘菜单键经 WM_CONTEXTMENU 到达）。供宿主应用在同一约定下分派
+/// 左键、双击、右键与键盘菜单入口。
+/// </summary>
+public static class TrayIconCallback
+{
+    public const uint LeftButtonUp = 0x0202;
+
+    public const uint LeftDoubleClick = 0x0203;
+
+    public const uint RightButtonUp = 0x0205;
+
+    public const uint ContextMenu = 0x007C;
+
+    /// <summary>lParam 是否为右键/键盘菜单请求（应弹托盘菜单而非显示主窗）。</summary>
+    public static bool IsContextMenuRequest(uint callbackLParam) =>
+        callbackLParam is RightButtonUp or ContextMenu;
+}
+
 public sealed class TrayIconService : IDisposable
 {
     private readonly Guid _id = Guid.NewGuid();
     private readonly ITrayIconNativeMethods _native;
     private nint _windowHandle;
+    private uint _callbackMessage;
+    private string _tooltip = string.Empty;
     private bool _visible;
     private bool _disposed;
 
@@ -42,7 +64,29 @@ public sealed class TrayIconService : IDisposable
         }
 
         _windowHandle = windowHandle;
+        _callbackMessage = callbackMessage;
+        _tooltip = tooltip;
         _visible = true;
+    }
+
+    /// <summary>
+    /// TaskbarCreated（Explorer/任务栏重建）后以同一 GUID 重新挂载图标：
+    /// GUID 即托盘标识，重挂不产生重复图标；窗口句柄、回调消息与提示不变。
+    /// </summary>
+    public void Reattach()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (!_visible)
+        {
+            throw new InvalidOperationException("Tray icon is not visible.");
+        }
+
+        if (!_native.Add(_id, _windowHandle, _callbackMessage, _tooltip))
+        {
+            throw new Win32Exception(
+                Marshal.GetLastPInvokeError(),
+                "Failed to reattach tray icon after taskbar recreation.");
+        }
     }
 
     public void Dispose()
