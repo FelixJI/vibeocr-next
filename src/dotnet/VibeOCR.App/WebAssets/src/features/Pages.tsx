@@ -884,7 +884,9 @@ function statusLabel(value: unknown, fallback: string): string {
     "qrcode.running": "正在处理二维码…",
     "qrcode.failed": "图片识别失败，请检查输入图片和识别运行环境后重试",
     "qrcode.generateFailed": "二维码生成失败，请重试",
-    "qrcode.invalidInput": "内容无法编码为二维码，请检查文本或缩短内容后重试。",
+    "qrcode.invalidInput": "内容不符合所选编码格式，请检查下方提示。",
+    "qrcode.copied": "已复制当前预览图片",
+    "qrcode.noCodes": "当前预览中未识别到支持的二维码或条码",
     "qrcode.decodeUnavailable": "图片识别需要识别运行环境，请启动或恢复后重试",
     "qrcode.cancelled": "二维码处理已取消",
     "settings.ready": "运行环境设置已同步",
@@ -1661,15 +1663,40 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
 export function QrCodePage({ viewState, actions }: FeatureProps) {
   const [tab, setTab] = useState<"generate" | "decode">("generate");
   const [qrText, setQrText] = useState("");
+  const [format, setFormat] = useState("qrcode");
+  const [captionMode, setCaptionMode] = useState("off");
+  const [captionText, setCaptionText] = useState("");
+  const autoDecoded = useRef(0);
   const state = feature(viewState, "qrcode");
   const generated = resource(state.generatedResource);
+  const previewRevision =
+    typeof state.previewRevision === "number" ? state.previewRevision : 0;
+  useEffect(() => {
+    if (
+      tab === "decode" &&
+      generated &&
+      state.needsPreviewDecode === true &&
+      !state.isBusy &&
+      previewRevision > autoDecoded.current
+    ) {
+      autoDecoded.current = previewRevision;
+      void actions.run({ type: "qrcode.decodeCurrent", force: false });
+    }
+  }, [
+    tab,
+    generated,
+    state.needsPreviewDecode,
+    state.isBusy,
+    previewRevision,
+    actions,
+  ]);
   const results = qrResults(state.items);
   const isBusy = booleanValue(state.isBusy);
   return (
     <Workspace
       eyebrow="CODE / 04"
-      title="二维码工作台"
-      description="生成二维码，或从图片中读取二维码与条形码。"
+      title="二维码与条码"
+      description="本地生成二维码与条码，或识别当前预览中的编码。"
     >
       <div className="qr-workspace">
         <Panel label={tab === "generate" ? "GENERATE" : "DECODE"} title="预览">
@@ -1677,7 +1704,7 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
             <img
               className="qr-resource-preview"
               src={generated.url}
-              alt="生成的二维码"
+              alt="当前二维码与条码预览"
             />
           ) : (
             <EmptyStage
@@ -1696,40 +1723,73 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
             onTabSelect={(_, data) =>
               setTab(data.value as "generate" | "decode")
             }
-            aria-label="二维码模式"
+            aria-label="二维码与条码模式"
           >
             <Tab value="generate">生成</Tab>
             <Tab value="decode">识别</Tab>
           </TabList>
           {tab === "generate" ? (
             <div className="form-stack">
+              <label htmlFor="qr-format">生成格式</label>
+              <Select
+                id="qr-format"
+                value={format}
+                onChange={(_, data) => setFormat(data.value)}
+              >
+                <option value="qrcode">QR Code</option>
+                <option value="code128">Code 128</option>
+                <option value="ean13">EAN-13</option>
+              </Select>
+              <p className="form-note">
+                {format === "qrcode"
+                  ? "支持中文、Unicode 和换行，例如：你好 🌏。"
+                  : format === "code128"
+                    ? "仅接受 ASCII 字符（0–127），例如：VIBE-128。"
+                    : "输入 12 位 ASCII 数字自动补校验位，或 13 位含正确校验位，例如：590123412345。"}
+              </p>
               <label htmlFor="qr-content">输入内容</label>
-              <Input
+              <textarea
                 id="qr-content"
                 placeholder="输入要编码的内容"
                 value={qrText}
-                onChange={(_, data) => setQrText(data.value)}
+                onChange={(event) => setQrText(event.target.value)}
               />
+              <label htmlFor="qr-caption-mode">底部文字</label>
+              <Select
+                id="qr-caption-mode"
+                value={captionMode}
+                onChange={(_, data) => setCaptionMode(data.value)}
+              >
+                <option value="off">关闭</option>
+                <option value="payload">显示编码内容</option>
+                <option value="custom">独立说明</option>
+              </Select>
+              {captionMode === "custom" && (
+                <>
+                  <label htmlFor="qr-caption">独立说明</label>
+                  <textarea
+                    id="qr-caption"
+                    value={captionText}
+                    onChange={(event) => setCaptionText(event.target.value)}
+                  />
+                </>
+              )}
               <CapabilityGate
                 appearance="primary"
                 capability="qrcode.generate"
                 capabilities={viewState.capabilities}
-                action={{ type: "qrcode.generate", text: qrText }}
+                action={{
+                  type: "qrcode.generate",
+                  text: qrText,
+                  format,
+                  captionMode,
+                  captionText,
+                }}
                 actions={actions}
                 disabled={qrText.trim().length === 0 || isBusy}
                 icon={<QrCode aria-hidden="true" size={16} />}
               >
-                生成二维码
-              </CapabilityGate>
-              <CapabilityGate
-                capability="qrcode.save"
-                capabilities={viewState.capabilities}
-                action={{ type: "qrcode.save" }}
-                actions={actions}
-                disabled={!generated}
-                icon={<Save aria-hidden="true" size={16} />}
-              >
-                保存二维码
+                生成图片
               </CapabilityGate>
               <p className="form-note">
                 二维码在本机直接生成，无需启动识别运行环境。
@@ -1737,7 +1797,19 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
             </div>
           ) : (
             <div className="form-stack">
-              <p className="form-note">图片识别需要识别运行环境就绪。</p>
+              <p className="form-note">
+                识别由 Runtime 的 pyzbar 读取图片像素；已验证 QR Code、Code
+                128、EAN-13。其他格式取决于已安装解码器，生成成功不保证识别成功。
+              </p>
+              <CapabilityGate
+                capability="qrcode.decode"
+                capabilities={viewState.capabilities}
+                action={{ type: "qrcode.decodeCurrent", force: true }}
+                actions={actions}
+                disabled={!generated || isBusy}
+              >
+                识别当前预览 / 重新识别
+              </CapabilityGate>
               <CapabilityGate
                 appearance="primary"
                 capability="qrcode.decode"
@@ -1797,6 +1869,29 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
               )}
             </div>
           )}
+          <CapabilityGate
+            capability="qrcode.copyImage"
+            capabilities={viewState.capabilities}
+            action={{ type: "qrcode.copyImage" }}
+            actions={actions}
+            disabled={!generated || isBusy}
+            icon={<Copy aria-hidden="true" size={16} />}
+          >
+            复制图片
+          </CapabilityGate>
+          <CapabilityGate
+            capability="qrcode.save"
+            capabilities={viewState.capabilities}
+            action={{ type: "qrcode.save" }}
+            actions={actions}
+            disabled={!generated || isBusy}
+            icon={<Save aria-hidden="true" size={16} />}
+          >
+            保存图片
+          </CapabilityGate>
+          {state.statusCode === "qrcode.invalidInput" && (
+            <p role="alert">{stringValue(state.statusMessage)}</p>
+          )}
           <Button
             appearance="secondary"
             disabled={!isBusy}
@@ -1808,7 +1903,7 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
           <StatusLine>
             {statusLabel(
               state.statusCode,
-              isBusy ? "正在处理二维码…" : "二维码工作台已就绪。",
+              isBusy ? "正在处理二维码与条码…" : "二维码与条码已就绪。",
             )}
           </StatusLine>
         </section>

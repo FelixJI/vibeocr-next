@@ -183,10 +183,10 @@ describe("AppShell", () => {
 
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
 
-    await user.click(screen.getByRole("link", { name: "二维码" }));
+    await user.click(screen.getByRole("link", { name: "二维码与条码" }));
     expect(actions.navigate).toHaveBeenCalledWith("qrcode");
     expect(
-      await screen.findByRole("heading", { name: "二维码工作台" }),
+      await screen.findByRole("heading", { name: "二维码与条码" }),
     ).toBeVisible();
 
     await user.click(screen.getByRole("link", { name: "批量识别" }));
@@ -226,7 +226,7 @@ describe("AppShell", () => {
     );
     const push = vi.spyOn(window.history, "pushState");
     try {
-      await user.click(screen.getByRole("link", { name: "二维码" }));
+      await user.click(screen.getByRole("link", { name: "二维码与条码" }));
       expect(actions.navigate).toHaveBeenCalledWith("qrcode");
       expect(push).not.toHaveBeenCalled();
       expect(window.location.hash).toBe("#/recognition");
@@ -237,7 +237,7 @@ describe("AppShell", () => {
         />,
       );
       expect(
-        await screen.findByRole("heading", { name: "二维码工作台" }),
+        await screen.findByRole("heading", { name: "二维码与条码" }),
       ).toBeVisible();
     } finally {
       push.mockRestore();
@@ -298,12 +298,88 @@ describe("AppShell", () => {
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
 
     await user.type(screen.getByLabelText("输入内容"), "中文识别结果");
-    await user.click(screen.getByRole("button", { name: "生成二维码" }));
+    await user.click(screen.getByRole("button", { name: "生成图片" }));
 
     expect(actions.run).toHaveBeenCalledWith({
       type: "qrcode.generate",
       text: "中文识别结果",
+      format: "qrcode",
+      captionMode: "off",
+      captionText: "",
     });
+    unmount();
+  });
+
+  it("decodes the shared preview once automatically and allows manual retry and image copy", async () => {
+    window.location.hash = "#/qrcode";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn().mockResolvedValue(true),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 1,
+      route: "qrcode",
+      theme: "light",
+      capabilities: [
+        "qrcode.generate",
+        "qrcode.decode",
+        "qrcode.copyImage",
+        "qrcode.save",
+      ],
+      features: {
+        qrcode: {
+          isBusy: false,
+          previewRevision: 1,
+          needsPreviewDecode: true,
+          generatedResource: {
+            url: "https://app.vibeocr/__resource/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            mediaType: "image/png",
+            byteLength: 10,
+          },
+        },
+      },
+      runtimeLabel: "就绪",
+    };
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    await user.selectOptions(screen.getByLabelText("生成格式"), "ean13");
+    await user.selectOptions(screen.getByLabelText("底部文字"), "custom");
+    await user.type(screen.getByLabelText("独立说明"), "标签");
+    await user.type(screen.getByLabelText("输入内容"), "590123412345");
+    await user.click(screen.getByRole("button", { name: "生成图片" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "qrcode.generate",
+      text: "590123412345",
+      format: "ean13",
+      captionMode: "custom",
+      captionText: "标签",
+    });
+    await user.click(screen.getByRole("tab", { name: "识别" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "qrcode.decodeCurrent",
+      force: false,
+    });
+    await user.click(screen.getByRole("tab", { name: "生成" }));
+    await user.click(screen.getByRole("tab", { name: "识别" }));
+    expect(
+      vi
+        .mocked(actions.run)
+        .mock.calls.filter(
+          ([action]) =>
+            action.type === "qrcode.decodeCurrent" && action.force === false,
+        ),
+    ).toHaveLength(1);
+    await user.click(
+      screen.getByRole("button", { name: "识别当前预览 / 重新识别" }),
+    );
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "qrcode.decodeCurrent",
+      force: true,
+    });
+    await user.click(screen.getByRole("button", { name: "复制图片" }));
+    expect(actions.run).toHaveBeenCalledWith({ type: "qrcode.copyImage" });
     unmount();
   });
 

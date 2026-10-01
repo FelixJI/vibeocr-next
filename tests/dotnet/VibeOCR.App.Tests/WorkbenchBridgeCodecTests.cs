@@ -658,6 +658,25 @@ public sealed class WorkbenchBridgeCodecTests
   }
 
   [Fact]
+  public void ParseCodeOptionsAndRejectInvalidOrExtraFields()
+  {
+    Guid session = Guid.NewGuid();
+    GenerateQrCodeCommand generate = Assert.IsType<GenerateQrCodeCommand>(WorkbenchBridgeCodec.ParseCommand(
+      CommandJson(session, "qrcode", "generate", "{\"text\":\"590123412345\",\"format\":\"ean13\",\"captionMode\":\"custom\",\"captionText\":\"说明\"}"), session).Command);
+    Assert.Equal(new GenerateQrCodeCommand("590123412345", "ean13", "custom", "说明"), generate);
+    Assert.True(Assert.IsType<DecodeCurrentQrCodeCommand>(WorkbenchBridgeCodec.ParseCommand(
+      CommandJson(session, "qrcode", "decodeCurrent", "{\"force\":true}"), session).Command).Force);
+    Assert.IsType<CopyQrCodeImageCommand>(WorkbenchBridgeCodec.ParseCommand(
+      CommandJson(session, "qrcode", "copyImage", "{}"), session).Command);
+    foreach (string arguments in new[] {
+      "{\"text\":\"x\",\"format\":\"unknown\",\"captionMode\":\"off\",\"captionText\":\"\"}",
+      "{\"text\":\"x\",\"format\":\"qrcode\",\"captionMode\":\"unknown\",\"captionText\":\"\"}",
+      "{\"text\":\"x\",\"format\":\"qrcode\",\"captionMode\":\"off\",\"captionText\":\"\",\"path\":\"x\"}" })
+      Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(
+        CommandJson(session, "qrcode", "generate", arguments), session));
+  }
+
+  [Fact]
   public void ParseCommandAcceptsPdfSelectionAndOnlySafeQrUrls()
   {
     Guid sessionId = Guid.NewGuid();

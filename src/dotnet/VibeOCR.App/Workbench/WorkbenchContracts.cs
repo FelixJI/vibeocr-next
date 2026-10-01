@@ -182,7 +182,11 @@ public sealed record SelectPdfPagesCommand(IReadOnlyList<int> Pages) : Workbench
 
 public sealed record SetPdfWindowCommand(int Start) : WorkbenchCommand;
 
-public sealed record GenerateQrCodeCommand(string Text) : WorkbenchCommand;
+public sealed record GenerateQrCodeCommand(string Text, string Format = "qrcode", string CaptionMode = "off", string CaptionText = "") : WorkbenchCommand;
+
+public sealed record DecodeCurrentQrCodeCommand(bool Force = false) : WorkbenchCommand;
+
+public sealed record CopyQrCodeImageCommand : WorkbenchCommand;
 
 public sealed record DecodeQrCodeCommand : WorkbenchCommand;
 
@@ -444,7 +448,10 @@ public sealed record QrCodeWorkbenchState(
   string StatusCode,
   IReadOnlyList<string> Results,
   WorkbenchResourceReference? GeneratedResource,
-  IReadOnlyList<QrCodeWorkbenchResult>? Items = null) : WorkbenchState
+  IReadOnlyList<QrCodeWorkbenchResult>? Items = null,
+  long PreviewRevision = 0,
+  bool NeedsPreviewDecode = false,
+  string? StatusMessage = null) : WorkbenchState
 {
   public override string Scope => "qrcode";
 }
