@@ -258,6 +258,30 @@ public sealed class LocalQrCodeGeneratorTests
   }
 
   [Fact]
+  public async Task LongUnbrokenCaptionKeepsAllGlyphPixelsBelowUnchangedCodeAsync()
+  {
+    const string suffix = "\n中文👨‍👩‍👧‍👦e\u0301\nEND";
+    string caption = new string('W', 100) + suffix;
+    string explicitLines = string.Join("\n", Enumerable.Repeat(new string('W', 10), 10)) + suffix;
+    var plain = await LocalQrCodeGenerator.GenerateAsync("WRAP-100", "code128", TestContext.Current.CancellationToken);
+    var captioned = await LocalQrCodeGenerator.AppendCaptionAsync(plain, caption, TestContext.Current.CancellationToken);
+    var reference = await LocalQrCodeGenerator.AppendCaptionAsync(plain, explicitLines, TestContext.Current.CancellationToken);
+    (byte[] codePixels, uint width, uint codeHeight) = await DecodePngAsync(plain.Base64Png);
+    (byte[] pixels, uint actualWidth, uint height) = await DecodePngAsync(captioned.Base64Png);
+    (byte[] referencePixels, _, _) = await DecodePngAsync(reference.Base64Png);
+    Assert.Equal(width, actualWidth);
+    Assert.True(height > codeHeight + 100, $"Unbroken caption was clipped into too few lines: {height - codeHeight}px");
+    Assert.Equal(codePixels, pixels.AsSpan(0, codePixels.Length).ToArray());
+    int start = checked((int)(width * (codeHeight + 8) * 4));
+    static int InkPixels(byte[] image, int first) => Enumerable.Range(first / 4, (image.Length - first) / 4)
+      .Count(index => image[index * 4] < 220 || image[index * 4 + 1] < 220 || image[index * 4 + 2] < 220);
+    // Explicit short lines cannot clip: the same 100 W glyphs and Unicode suffix
+    // must all survive automatic wrapping, irrespective of line placement.
+    Assert.Equal(InkPixels(referencePixels, start), InkPixels(pixels, start));
+    Assert.Equal("WRAP-100", await DecodeWithReaderAsync(captioned.Base64Png));
+  }
+
+  [Fact]
   public async Task PayloadCaptionShowsEncodedTextAndCustomBlankFallsBackToNoCaptionAsync()
   {
     var payloadCaption = await LocalQrCodeGenerator.GenerateAsync(

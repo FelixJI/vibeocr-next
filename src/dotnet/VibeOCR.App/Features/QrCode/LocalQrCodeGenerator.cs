@@ -246,8 +246,7 @@ internal static class LocalQrCodeGenerator
   {
     int innerWidth = width - 2 * QrCodeCaptionRenderer.SidePadding;
     if (innerWidth < 24) return (pixels, height);
-    int textHeight = QrCodeCaptionRenderer.MeasureHeight(innerWidth, text);
-    byte[] strip = QrCodeCaptionRenderer.Render(width, textHeight, text);
+    (byte[] strip, int textHeight) = QrCodeCaptionRenderer.RenderStrip(width, text);
     int newHeight = height + CaptionGapPixels + textHeight;
     byte[] composed = new byte[width * newHeight * 4];
     Array.Fill(composed, (byte)255);

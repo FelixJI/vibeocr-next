@@ -1,4 +1,6 @@
 using System.ComponentModel;
+using System.Globalization;
+using System.Text;
 using System.Runtime.InteropServices;
 
 namespace VibeOCR.App.Features.QrCode;
@@ -22,44 +24,17 @@ internal static class QrCodeCaptionRenderer
   private const uint BackgroundTransparent = 1;
   private const uint Whiteness = 0x00FF0062;
   private const uint DrawCenter = 0x0001;
-  private const uint DrawWordBreak = 0x0010;
+  private const uint DrawSingleLine = 0x0020;
   private const uint DrawCalcRect = 0x0400;
   private const uint DrawNoPrefix = 0x0800;
   private const uint DrawEditControl = 0x2000;
-  private const uint WrapFlags = DrawWordBreak | DrawEditControl | DrawNoPrefix;
+  private const uint TextFlags = DrawEditControl | DrawNoPrefix;
 
-  /// <summary>Measure the wrapped height of <paramref name="text"/> constrained to the given inner width.</summary>
-  public static int MeasureHeight(int innerWidth, string text)
-  {
-    ArgumentException.ThrowIfNullOrEmpty(text);
-    ArgumentOutOfRangeException.ThrowIfLessThan(innerWidth, 1);
-    nint screen = GetDC(0);
-    if (screen == 0) throw new Win32Exception(Marshal.GetLastPInvokeError(), "GetDC failed.");
-    nint memory = 0;
-    nint font = 0;
-    nint previousFont = 0;
-    try
-    {
-      (memory, font, previousFont) = CreateTextSurface(screen);
-      var rect = new Rect { Left = 0, Top = 0, Right = innerWidth, Bottom = int.MaxValue };
-      int height = DrawText(memory, text, text.Length, ref rect, WrapFlags | DrawCalcRect);
-      if (height <= 0) throw new Win32Exception(Marshal.GetLastPInvokeError(), "DrawTextW measurement failed.");
-      return height;
-    }
-    finally
-    {
-      ReleaseTextSurface(memory, font, previousFont);
-      ReleaseDC(0, screen);
-    }
-  }
-
-  /// <summary>Render <paramref name="text"/> onto a white BGRA strip of the given size, wrapped within the side padding.</summary>
-  public static byte[] Render(int width, int height, string text)
+  /// <summary>Measure and draw the same explicitly wrapped grapheme lines on one native text surface.</summary>
+  public static (byte[] Pixels, int Height) RenderStrip(int width, string text)
   {
     ArgumentException.ThrowIfNullOrEmpty(text);
     ArgumentOutOfRangeException.ThrowIfLessThan(width, 2 * SidePadding + 1);
-    ArgumentOutOfRangeException.ThrowIfLessThan(height, 1);
-    byte[] pixels = new byte[checked(width * height * 4)];
     nint screen = GetDC(0);
     if (screen == 0) throw new Win32Exception(Marshal.GetLastPInvokeError(), "GetDC failed.");
     nint memory = 0;
@@ -70,6 +45,11 @@ internal static class QrCodeCaptionRenderer
     try
     {
       (memory, font, previousFont) = CreateTextSurface(screen);
+      string wrapped = WrapText(memory, width - 2 * SidePadding, text);
+      var measured = new Rect { Right = width - 2 * SidePadding, Bottom = int.MaxValue };
+      int height = DrawText(memory, wrapped, wrapped.Length, ref measured, TextFlags | DrawCalcRect);
+      if (height <= 0) throw new Win32Exception(Marshal.GetLastPInvokeError(), "DrawTextW measurement failed.");
+      byte[] pixels = new byte[checked(width * height * 4)];
       bitmap = CreateCompatibleBitmap(screen, width, height);
       if (bitmap == 0) throw new Win32Exception(Marshal.GetLastPInvokeError(), "CreateCompatibleBitmap failed.");
       previousBitmap = SelectObject(memory, bitmap);
@@ -78,7 +58,7 @@ internal static class QrCodeCaptionRenderer
       if (!PatBlt(memory, 0, 0, width, height, Whiteness))
         throw new Win32Exception(Marshal.GetLastPInvokeError(), "PatBlt failed.");
       var rect = new Rect { Left = SidePadding, Top = 0, Right = width - SidePadding, Bottom = height };
-      int drawn = DrawText(memory, text, text.Length, ref rect, WrapFlags | DrawCenter);
+      int drawn = DrawText(memory, wrapped, wrapped.Length, ref rect, TextFlags | DrawCenter);
       if (drawn <= 0) throw new Win32Exception(Marshal.GetLastPInvokeError(), "DrawTextW produced no output.");
 
       var info = new BitmapInfo
@@ -97,7 +77,7 @@ internal static class QrCodeCaptionRenderer
       int scanLines = GetDIBits(memory, bitmap, 0, (uint)height, pixels, ref info, 0);
       if (scanLines != height)
         throw new Win32Exception(Marshal.GetLastPInvokeError(), "GetDIBits failed.");
-      return pixels;
+      return (pixels, height);
     }
     finally
     {
@@ -108,6 +88,39 @@ internal static class QrCodeCaptionRenderer
       if (memory != 0) DeleteDC(memory);
       ReleaseDC(0, screen);
     }
+  }
+
+  private static string WrapText(nint memory, int innerWidth, string text)
+  {
+    var wrapped = new StringBuilder();
+    foreach (string paragraph in text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
+    {
+
+      string line = "";
+      TextElementEnumerator elements = StringInfo.GetTextElementEnumerator(paragraph);
+      while (elements.MoveNext())
+      {
+        string element = elements.GetTextElement();
+        string candidate = line + element;
+        var bounds = new Rect { Right = innerWidth, Bottom = int.MaxValue };
+        int measured = DrawText(memory, candidate, candidate.Length, ref bounds,
+          DrawSingleLine | DrawNoPrefix | DrawCalcRect);
+        if (measured <= 0) throw new Win32Exception(Marshal.GetLastPInvokeError(), "DrawTextW line measurement failed.");
+        if (bounds.Right > innerWidth)
+        {
+          if (line.Length == 0) throw new ArgumentException("底部说明的单个字符超出图片宽度，请使用更宽的图片。", nameof(text));
+          wrapped.Append(line).Append('\n');
+          line = element;
+          bounds = new Rect { Right = innerWidth, Bottom = int.MaxValue };
+          if (DrawText(memory, line, line.Length, ref bounds, DrawSingleLine | DrawNoPrefix | DrawCalcRect) <= 0)
+            throw new Win32Exception(Marshal.GetLastPInvokeError(), "DrawTextW character measurement failed.");
+          if (bounds.Right > innerWidth) throw new ArgumentException("底部说明的单个字符超出图片宽度，请使用更宽的图片。", nameof(text));
+        }
+        else line = candidate;
+      }
+      wrapped.Append(line).Append('\n');
+    }
+    return wrapped.ToString(0, wrapped.Length - 1);
   }
 
   private static (nint Memory, nint Font, nint PreviousFont) CreateTextSurface(nint screen)
