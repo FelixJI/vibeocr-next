@@ -9,6 +9,33 @@ namespace VibeOCR.App.Tests;
 
 public sealed class LocalQrCodeGeneratorTests
 {
+  [Fact]
+  public async Task SaveImportedJpegAsPngUsesRealPngEncodingAsync()
+  {
+    var generated = await LocalQrCodeGenerator.GenerateAsync("save test", "qrcode", TestContext.Current.CancellationToken);
+    string directory = Path.Combine(Path.GetTempPath(), $"vibeocr-code-save-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(directory);
+    string jpeg = Path.Combine(directory, "input.jpg");
+    string png = Path.Combine(directory, "output.png");
+    try
+    {
+      var platform = new QrCodeSavePlatform(() => 0);
+      await platform.WriteFileAsync(jpeg, Convert.FromBase64String(generated.Base64Png), TestContext.Current.CancellationToken);
+      await platform.WriteFileAsync(png, await File.ReadAllBytesAsync(jpeg, TestContext.Current.CancellationToken), TestContext.Current.CancellationToken);
+      using var stream = new InMemoryRandomAccessStream();
+      using (var writer = new DataWriter(stream))
+      {
+        writer.WriteBytes(await File.ReadAllBytesAsync(png, TestContext.Current.CancellationToken));
+        await writer.StoreAsync();
+        writer.DetachStream();
+      }
+      stream.Seek(0);
+      BitmapDecoder decoder = await BitmapDecoder.CreateAsync(stream);
+      Assert.Equal(BitmapDecoder.PngDecoderId, decoder.DecoderInformation.CodecId);
+    }
+    finally { File.Delete(jpeg); File.Delete(png); Directory.Delete(directory); }
+  }
+
   private static async Task<(byte[] Pixels, uint Width, uint Height)> DecodePngAsync(string base64Png)
   {
     byte[] png = Convert.FromBase64String(base64Png);

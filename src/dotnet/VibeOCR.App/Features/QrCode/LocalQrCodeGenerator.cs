@@ -72,6 +72,7 @@ internal static class LocalQrCodeGenerator
       {
         throw new ArgumentException("文本包含无效的 Unicode 字符。", nameof(data), error);
       }
+      data = NormalizePayload(data, format);
       (byte[] Pixels, int Width, int Height) image = format.Trim().ToLowerInvariant() switch
       {
         "qrcode" => RenderQrCode(data, targetWidth, cancellationToken),
@@ -211,6 +212,13 @@ internal static class LocalQrCodeGenerator
           $"EAN-13 校验位不正确：第 13 位应为 {expected}，实际为 {actual}。请修正校验位，或仅输入前 12 位由系统计算。",
           nameof(data));
     }
+  }
+
+  internal static string NormalizePayload(string data, string format)
+  {
+    if (!string.Equals(format.Trim(), "ean13", StringComparison.OrdinalIgnoreCase)) return data;
+    ValidateEan13(data);
+    return data.Length == 12 ? data + ComputeEan13CheckDigit(data) : data;
   }
 
   private static int ComputeEan13CheckDigit(string twelveDigits)

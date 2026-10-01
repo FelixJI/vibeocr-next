@@ -556,8 +556,10 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     Assert.True(viewModel.NeedsPreviewDecode);
     Assert.Equal(previewBeforeFailure, viewModel.GeneratedImageBase64);
 
-    // The service stays optional: retry works on the retained preview without regenerating.
+    // Automatic attempts do not loop when the service is unavailable; explicit retry works.
     await viewModel.DecodeCurrentPreviewAsync(TestContext.Current.CancellationToken);
+    Assert.Equal(1, client.DecodeCalls);
+    await viewModel.DecodeCurrentPreviewAsync(force: true, TestContext.Current.CancellationToken);
     Assert.False(viewModel.DecodeUnavailable);
     Assert.Equal("after retry", viewModel.Codes.Single().Data);
     Assert.False(viewModel.NeedsPreviewDecode);
@@ -579,7 +581,26 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     viewModel.GenerateText = "replace";
     await viewModel.GenerateAsync(TestContext.Current.CancellationToken);
     Assert.Equal(Convert.ToBase64String([9, 9, 9]), viewModel.GeneratedImageBase64);
+    Assert.Empty(viewModel.Codes);
     Assert.True(viewModel.NeedsPreviewDecode);
+  }
+
+  [Fact]
+  public async Task EanPayloadCaptionShowsTheFinalThirteenDigits()
+  {
+    var viewModel = new QrCodeViewModel(new DeferredQrCodeClient(), new EmptyQrCodeInput())
+    {
+      GenerateText = "590123412345", GenerateFormat = "ean13", CaptionMode = QrCodeCaptionMode.Payload,
+    };
+    await viewModel.GenerateAsync(TestContext.Current.CancellationToken);
+    var expected = await LocalQrCodeGenerator.GenerateAsync("5901234123457", "ean13",
+      new QrCodeCaption(QrCodeCaptionMode.Custom, "5901234123457"), TestContext.Current.CancellationToken);
+    (byte[] pixels, uint width, uint height) = await DecodePreviewPixelsAsync(viewModel.GeneratedImageBase64!);
+    (byte[] expectedPixels, uint expectedWidth, uint expectedHeight) = await DecodePreviewPixelsAsync(expected.Base64Png);
+    Assert.Equal(expectedWidth, width);
+    Assert.Equal(expectedHeight, height);
+    Assert.Equal(expectedPixels, pixels);
+    Assert.Equal("5901234123457", DecodePreviewBarcode(pixels, width, height));
   }
 
   [Fact]

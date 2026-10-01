@@ -38,6 +38,7 @@ public sealed class QrCodeViewModel(IQrCodeClient qrClient, IQrCodeInput input) 
     private string _previewMediaType = "image/png";
     private long _previewRevision;
     private long _lastDecodedRevision;
+    private long _lastAutoDecodeRevision;
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public ObservableCollection<QrCodeResult> Codes { get; } = [];
@@ -88,7 +89,8 @@ public sealed class QrCodeViewModel(IQrCodeClient qrClient, IQrCodeInput input) 
             DecodeStatus = "当前没有可识别的预览图片";
             return;
         }
-        if (!force && !NeedsPreviewDecode) return;
+        long currentRevision = PreviewRevision;
+        if (!force && (!NeedsPreviewDecode || Interlocked.Exchange(ref _lastAutoDecodeRevision, currentRevision) == currentRevision)) return;
         (CancellationTokenSource run, long generation) = BeginRun(ct);
         if (generation == Volatile.Read(ref _generation)) { IsBusy = true; DecodeStatus = "正在识别"; }
         try
@@ -143,7 +145,7 @@ public sealed class QrCodeViewModel(IQrCodeClient qrClient, IQrCodeInput input) 
             if (captionMode != QrCodeCaptionMode.Off)
             {
                 // The caption always describes this run's real payload.
-                string captionText = captionMode == QrCodeCaptionMode.Payload ? text : captionCustom;
+                string captionText = captionMode == QrCodeCaptionMode.Payload ? LocalQrCodeGenerator.NormalizePayload(text, format) : captionCustom;
                 if (!string.IsNullOrWhiteSpace(captionText))
                 {
                     generated = await LocalQrCodeGenerator.AppendCaptionAsync(generated, captionText, run.Token);
@@ -204,6 +206,7 @@ public sealed class QrCodeViewModel(IQrCodeClient qrClient, IQrCodeInput input) 
             if (generation != Volatile.Read(ref _generation)) return;
             SetPreview(imageInput.Data, string.IsNullOrWhiteSpace(imageInput.MediaType) ? "image/png" : imageInput.MediaType);
             long revision = Interlocked.Read(ref _previewRevision);
+            Interlocked.Exchange(ref _lastAutoDecodeRevision, revision);
             DecodeStatus = "正在识别";
             await DecodePreviewCoreAsync(imageInput.Data, revision, run, generation);
         }
@@ -237,6 +240,7 @@ public sealed class QrCodeViewModel(IQrCodeClient qrClient, IQrCodeInput input) 
 
     private void SetPreview(byte[] data, string mediaType)
     {
+        Codes.Clear();
         Volatile.Write(ref _previewData, data);
         _previewMediaType = mediaType;
         Interlocked.Increment(ref _previewRevision);
