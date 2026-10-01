@@ -2309,9 +2309,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     {
       Interlocked.Exchange(ref environmentSwitching, 1);
       settings.ClearSelection();
-      // 环境切换开始即作废旧实例的在途设置快照：迟到读数不得覆盖切换
-      // 后的新服务状态。
-      settings.InvalidateSnapshot();
+      // 切换尚未提交，失效文案不得声称实例已更换；结束后按实际当前服务回读。
+      settings.InvalidateSnapshot("服务状态待重新检查。");
     }
     return PublishStartThenTrack(SettingsState(settings), async () =>
     {
@@ -2344,7 +2343,9 @@ public sealed class DesktopWorkbenchCommandHandler :
               }
               else
               {
-                settings.ClearSelection();
+                // 失败同样按实际当前服务回读；不刷环境列表，
+                // 避免其中性成功文案覆盖切换失败的根因。
+                await settings.LoadSnapshotAsync(refreshEnvironments: false, CancellationToken.None);
                 await RefreshRecognitionCatalogStatesAsync(CancellationToken.None);
               }
             }

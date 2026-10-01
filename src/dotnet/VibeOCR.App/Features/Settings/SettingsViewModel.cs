@@ -135,9 +135,13 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     /// <summary>Durable maintenance operations driven by the staged selection.</summary>
     public RuntimeMaintenanceCoordinator Maintenance { get; }
 
-    public async Task LoadSnapshotAsync(CancellationToken cancellationToken)
+    public Task LoadSnapshotAsync(CancellationToken cancellationToken) =>
+        LoadSnapshotAsync(refreshEnvironments: true, cancellationToken);
+
+    /// <summary>refreshEnvironments=false 不刷环境列表，保留其根因失败文案。</summary>
+    public async Task LoadSnapshotAsync(bool refreshEnvironments, CancellationToken cancellationToken)
     {
-        if (Environments is not null)
+        if (refreshEnvironments && Environments is not null)
             await Environments.RefreshAsync(cancellationToken);
         await Maintenance.RestoreAsync(cancellationToken);
         long generation = BeginBusy("正在读取模型驻留状态");
@@ -241,8 +245,9 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     /// 环境切换或服务实例更换时作废旧快照：在途读取不得再投影，旧的
     /// 目标加速器与旧实例的状态文案也不再冒充当前状态；Sources/
     /// MineruConnection 是用户配置而非实例状态，不清空以免丢失。
+    /// status 覆盖默认文案：操作开始处结果未知，用中性的待重检文案。
     /// </summary>
-    public void InvalidateSnapshot()
+    public void InvalidateSnapshot(string? status = null)
     {
         lock (_busyGuard)
         {
@@ -252,7 +257,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             Interlocked.Increment(ref _selectionGeneration);
             IsBusy = false;
             Backend = null;
-            Status = "服务实例已更换，状态待重新检查。";
+            Status = status ?? "服务实例已更换，状态待重新检查。";
         }
     }
 
