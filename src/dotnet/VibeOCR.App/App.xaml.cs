@@ -872,7 +872,8 @@ public sealed partial class App : Application
                 ExitStartupSmokeT6();
                 return false;
             }
-            bool injectSoakCrash = _soakCrashRequested && !_soakCrashInjected && !isRecovery;
+            bool injectSoakCrash = _soakCrashRequested && !_soakCrashInjected && !isRecovery &&
+                Environment.GetEnvironmentVariable("VIBEOCR_SOAK_EXTERNAL_CRASH") != "1";
             if (injectSoakCrash) _soakCrashInjected = true;
             await ActivateManagedEnvironmentCoreAsync(
                 environments.ActiveId, layout, _applicationShutdown.Token, injectSoakCrash);
@@ -1045,34 +1046,6 @@ public sealed partial class App : Application
             instance_before = _soakCrashedInstanceId,
             instance_after = _supervisorInstanceId,
         }));
-    }
-
-    internal static InferenceSupervisorOptions BuildSupervisorOptions(
-        RuntimeLaunch launch,
-        string logPath,
-        TimeSpan startupTimeout,
-        IReadOnlySet<string> requiredCapabilities,
-        bool injectSoakCrash = false)
-    {
-        ArgumentNullException.ThrowIfNull(launch);
-        ArgumentNullException.ThrowIfNull(requiredCapabilities);
-        var environment = launch.Environment.ToDictionary(
-            item => item.Key,
-            item => item.Value,
-            StringComparer.OrdinalIgnoreCase);
-        if (injectSoakCrash &&
-            Environment.GetEnvironmentVariable("VIBEOCR_SOAK_EXTERNAL_CRASH") != "1")
-        {
-            environment["VIBEOCR_SUPERVISOR_SOAK_CRASH_AFTER_READY"] = "1";
-        }
-        return new InferenceSupervisorOptions(
-            launch.PythonExecutable,
-            ["-m", launch.SupervisorModule],
-            launch.WorkingDirectory,
-            logPath,
-            startupTimeout,
-            requiredCapabilities,
-            environment);
     }
 
     private void FailSoakRun(string error)
