@@ -77,6 +77,60 @@ public sealed class DesktopWorkbenchCommandHandlerTests
   }
 
   [Fact]
+  public async Task SwitchEnvironmentFailureReReadsSnapshotFromCurrentService()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-switch-failure-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      var inference = new SwitchFailureInferenceClient
+      {
+        Health = SwitchHealth(Wire.OcrEngineId.Rapidocr),
+      };
+      var manager = new SwitchCatalogManager();
+      var environments = new ManagedEnvironmentSettings(manager, (_, _) =>
+        throw new InvalidOperationException("切换失败：目标环境不存在。"),
+        () => null, new ProductMaintenanceCoordinator());
+      var settings = new SettingsViewModel(inference, environments: environments);
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      Assert.NotNull(settings.Selection);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        () => new RecognitionViewModel(inference, new SignallingInputService()),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => settings, CreateShellViewModel,
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker, root, static () => 0, annotations);
+      // 开始前的预刷新与失败终态的重投影各发布一轮 Pdf 状态：第二次
+      // 到达即切换失败终态已落定。
+      int pdfStates = 0;
+      var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      handler.StateChanged += state =>
+      {
+        if (state is PdfWorkbenchState && Interlocked.Increment(ref pdfStates) == 2)
+          finished.TrySetResult();
+      };
+
+      await handler.ExecuteAsync(new SwitchEnvironmentCommand("paddle"),
+        TestContext.Current.CancellationToken);
+      await finished.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+      // 失败同样按实际当前服务回读：Backend/状态不得停留在开始失效后的
+      // 空投影，也不得声称实例已更换；选择沿既有刷新路径重建。
+      Assert.Equal("cpu", settings.Backend);
+      Assert.DoesNotContain("服务实例已更换", settings.Status);
+      Assert.NotNull(settings.Selection);
+      // 切换失败根因保留在环境管理器状态里，不被刷新的成功文案覆盖。
+      Assert.Equal("切换失败：目标环境不存在。", environments.Status);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
   public async Task AnnotatedImageCopyConsumesOpaqueUploadOnlyAfterNativeSuccess()
   {
     string resourceRoot = Path.Combine(
@@ -1634,6 +1688,32 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       Task.FromResult(Health);
     public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>
       Task.FromResult(new SettingsSnapshot());
+  }
+
+  /// <summary>提供真实 runtime/residency 读数；必须重列 IInferenceClient 才能占住
+  /// GetRuntimeStatusAsync 接口槽，否则走接口默认实现抛 NotSupportedException。</summary>
+  private sealed class SwitchFailureInferenceClient : InferenceClientStub, IInferenceClient
+  {
+    public required Wire.Health Health { get; set; }
+    public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken) =>
+      Task.FromResult(Health);
+    public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>
+      Task.FromResult(new SettingsSnapshot());
+    public override Task<ResidencyStatus> GetResidencyAsync(CancellationToken cancellationToken) =>
+      Task.FromResult(new ResidencyStatus());
+    public Task<RuntimeStatusSnapshot> GetRuntimeStatusAsync(CancellationToken cancellationToken) =>
+      Task.FromResult(new RuntimeStatusSnapshot
+      {
+        InstanceId = "sup-switch-failure",
+        ServiceState = RuntimeServiceState.Ready,
+        BackendVersion = "0.14.0",
+        Profile = new RuntimeProfileStatus
+        {
+          ProfileId = "win-x64-cpu",
+          Accelerator = RuntimeAccelerator.Cpu,
+          Components = [],
+        },
+      });
   }
 
   private sealed class SwitchCatalogManager : IManagedEnvironmentClient

@@ -87,6 +87,13 @@ public sealed partial class MainWindow
     ManagedEnvironment[] environments = SmokePair(list);
     if (environments.Any(item => item.Status != "empty" || item.PythonState != "ready"))
       throw new InvalidOperationException("Named environments are not executable empty environments.");
+    // 空闲（无服务/无维护）不得渲染滚动维护进度；目标设备未读取真实
+    // 快照前不得冒充任何设备（AC1）。
+    await WaitForSmokeDomAsync(
+      "(() => { const panel = document.querySelector('.settings-runtime-panel'); return !!panel && " +
+      "panel.textContent.includes('目标推理设备：尚未读取') && " +
+      "!panel.querySelector('[role=progressbar]'); })()",
+      TimeSpan.FromSeconds(30));
     return new { active_id = list.ActiveId, environments = environments.Select(SmokeEnvironmentEvidence) };
   }
 
@@ -192,7 +199,15 @@ public sealed partial class MainWindow
       if (current?.LastInstallFailure is { Phase: "failed" } failure)
         throw new InvalidOperationException(
           $"Environment install failed: {failure.ReasonCode}: {failure.Detail}");
-      if (current?.Status == "installed" && current.Revision > environment.Revision) return;
+      if (current?.Status == "installed" && current.Revision > environment.Revision)
+      {
+        // 安装终态后维护进度动画必须退出，不得残留空闲滚动（AC2）。
+        await WaitForSmokeDomAsync(
+          "(() => { const panel = document.querySelector('.settings-runtime-panel'); return !!panel && " +
+          "!panel.querySelector('[role=progressbar]'); })()",
+          TimeSpan.FromSeconds(30));
+        return;
+      }
       if (current?.Status is "failed" or "unavailable")
         throw new InvalidOperationException($"Environment install failed: {current.Reason}");
       await Task.Delay(250, timeout.Token);

@@ -162,6 +162,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       return viewModel;
     });
     this.diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
+    this.diagnostics.PropertyChanged += OnDiagnosticsPropertyChanged;
     this.resourceBroker = resourceBroker ??
       throw new ArgumentNullException(nameof(resourceBroker));
     this.resourceRoot = Path.GetFullPath(resourceRoot);
@@ -203,6 +204,22 @@ public sealed class DesktopWorkbenchCommandHandler :
   public event Action<Guid, long>? ScreenshotTextLayerInvalidated;
   public event Action<Guid, long>? ScreenshotSessionDetached;
   public event Action? PinnedTextEnvironmentChanged;
+
+  /// <summary>
+  /// Supervisor 连接/就绪/失败终态变更时同步广播诊断投影：宿主快照不
+  /// 得滞留在 bootstrap 时的“正在连接”。仅监听代表健康变更的
+  /// SupervisorStatus 单属性，避免一次 UpdateSupervisor 的四个通知各
+  /// 广播一次。
+  /// </summary>
+  private void OnDiagnosticsPropertyChanged(object? sender, PropertyChangedEventArgs args)
+  {
+    if (Volatile.Read(ref disposed) == 0 &&
+      args.PropertyName is nameof(VibeOCR.App.ViewModels.DiagnosticsViewModel.SupervisorStatus)
+        or nameof(VibeOCR.App.ViewModels.DiagnosticsViewModel.DeviceEvidence))
+    {
+      StateChanged?.Invoke(DiagnosticsState());
+    }
+  }
 
   public async ValueTask PrepareBootstrapAsync(CancellationToken cancellationToken)
   {
@@ -2292,6 +2309,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     {
       Interlocked.Exchange(ref environmentSwitching, 1);
       settings.ClearSelection();
+      // 切换尚未提交，失效文案不得声称实例已更换；结束后按实际当前服务回读。
+      settings.InvalidateSnapshot("服务状态待重新检查。");
     }
     return PublishStartThenTrack(SettingsState(settings), async () =>
     {
@@ -2315,10 +2334,18 @@ public sealed class DesktopWorkbenchCommandHandler :
           {
             if (Volatile.Read(ref disposed) == 0)
             {
-              if (completed) await RefreshRecognitionCatalogAsync(CancellationToken.None);
+              if (completed)
+              {
+                await RefreshRecognitionCatalogAsync(CancellationToken.None);
+                // 以新环境重新读取设置快照：Backend/驻留等旧实例投影不得
+                // 继续冒充当前状态。
+                await settings.LoadSnapshotAsync(CancellationToken.None);
+              }
               else
               {
-                settings.ClearSelection();
+                // 失败同样按实际当前服务回读；不刷环境列表，
+                // 避免其中性成功文案覆盖切换失败的根因。
+                await settings.LoadSnapshotAsync(refreshEnvironments: false, CancellationToken.None);
                 await RefreshRecognitionCatalogStatesAsync(CancellationToken.None);
               }
             }
@@ -2692,10 +2719,17 @@ public sealed class DesktopWorkbenchCommandHandler :
     {
       string service = supervisorInstanceId() ?? string.Empty;
       bool maintaining = settings.Maintenance.State.IsRunning;
-      if (service != pinnedServiceInstance || (maintaining && !pinMaintenanceNotified))
+      bool instanceChanged = service != pinnedServiceInstance;
+      if (instanceChanged || (maintaining && !pinMaintenanceNotified))
         PinnedTextEnvironmentChanged?.Invoke();
       pinnedServiceInstance = service;
       pinMaintenanceNotified = maintaining;
+      if (instanceChanged)
+      {
+        // 服务实例更换（切换/维护停止/崩溃恢复）：旧实例的在途快照与加速
+        // 器目标不得继续作为当前状态投影。
+        settings.InvalidateSnapshot();
+      }
       InvalidateScreenshotSessionRecognitionOnMaintenance();
       StateChanged?.Invoke(SettingsState(settings));
     }
@@ -3288,6 +3322,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     ServiceStatus: viewModel.RuntimeStatus.ServiceStatus,
     MaintenanceStatus: viewModel.RuntimeStatus.Status,
     MaintenancePhase: viewModel.RuntimeStatus.Phase,
+    ProgressActive: viewModel.RuntimeStatus.IsOperationActive,
     ProgressText: viewModel.RuntimeStatus.ProgressText,
     ProgressDetail: viewModel.RuntimeStatus.ProgressDetail,
     ProgressPercent: viewModel.RuntimeStatus.IsProgressIndeterminate ? null : viewModel.RuntimeStatus.ProgressValue,
@@ -3372,7 +3407,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     diagnostics.Milestones
       .OrderBy(milestone => milestone.Name)
       .Select(milestone => milestone.Name)
-      .ToArray());
+      .ToArray(),
+    diagnostics.DeviceEvidence);
 
   private static string RecognitionStatusCode(
     RecognitionViewModel viewModel, bool? isBusy = null) =>
@@ -3446,6 +3482,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       settings.PropertyChanged -= OnSettingsPropertyChanged;
       settings.CancelMaintenance();
     }
+    diagnostics.PropertyChanged -= OnDiagnosticsPropertyChanged;
     Task[] operations;
     lock (backgroundOperations)
     {

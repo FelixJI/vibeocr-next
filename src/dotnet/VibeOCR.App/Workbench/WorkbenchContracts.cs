@@ -456,7 +456,7 @@ public sealed record SettingsWorkbenchState(
   WorkbenchTheme Theme,
   bool IsBusy,
   string StatusCode,
-  string Backend,
+  string? Backend,
   bool StartupEnabled,
   IReadOnlyList<SettingsSourceOptionState>? Sources = null,
   string PendingBackend = "cpu",
@@ -467,6 +467,7 @@ public sealed record SettingsWorkbenchState(
   string ServiceStatus = "",
   string MaintenanceStatus = "",
   string MaintenancePhase = "",
+  bool ProgressActive = false,
   string ProgressText = "",
   string ProgressDetail = "",
   double? ProgressPercent = null,
@@ -655,7 +656,8 @@ public sealed record DiagnosticsWorkbenchState(
   string SupervisorStatus,
   string ProtocolStatus,
   bool IsReady,
-  IReadOnlyList<string> Milestones) : WorkbenchState
+  IReadOnlyList<string> Milestones,
+  IReadOnlyList<string>? DeviceEvidence = null) : WorkbenchState
 {
   public override string Scope => "diagnostics";
 }

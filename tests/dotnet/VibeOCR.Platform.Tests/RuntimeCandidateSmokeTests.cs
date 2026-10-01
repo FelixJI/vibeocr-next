@@ -142,7 +142,7 @@ public sealed class RuntimeCandidateSmokeTests
             Path.GetFullPath(productRoot),
             Path.GetFullPath(launch.WorkingDirectory));
 
-        // 与 App.BuildSupervisorOptions 相同:launch.Environment 全量继承,
+        // 与 ManagedEnvironmentSwitchCoordinator 相同:launch.Environment 全量继承,
         // 会话令牌仅经环境变量传递。
         IReadOnlySet<string> requiredCapabilities =
             RuntimeCapabilityRequirements.Read(layout.ComponentLock);

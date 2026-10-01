@@ -8,6 +8,7 @@ using VibeOCR.App.Features.Settings;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Inference;
 using Xunit;
+using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 
 namespace VibeOCR.App.Tests;
 
@@ -111,6 +112,247 @@ public sealed class SettingsViewModelSupervisorTests
         await viewModel.LoadSnapshotAsync(TestContext.Current.CancellationToken);
         Assert.Equal("尚未连接运行环境；可配置来源或准备依赖。", viewModel.Status);
         Assert.False(viewModel.IsBusy);
+    }
+
+    [Fact]
+    public void UnloadedBackendIsNotProjectedAsATargetDevice()
+    {
+        var viewModel = new SettingsViewModel(new FakeSettingsInferenceClient());
+        Assert.Null(viewModel.Backend);
+        // 默认目标 cpu 只是待选值，未读取真实快照前不得冒充当前设备。
+        Assert.False(viewModel.CanSwitchBackend);
+    }
+
+    [Fact]
+    public async Task InvalidateSnapshotDiscardsInFlightRuntimeRead()
+    {
+        var pending = new TaskCompletionSource<RuntimeStatusSnapshot>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var fake = new GatedRuntimeStatusClient(pending);
+        var viewModel = new SettingsViewModel(fake);
+        Task load = viewModel.LoadSnapshotAsync(CancellationToken.None);
+
+        // 环境切换/服务实例更换使旧读取失效：迟到读数不得再投影。
+        viewModel.InvalidateSnapshot();
+        pending.SetResult(ReadyRuntimeStatus());
+        await load;
+
+        Assert.Null(viewModel.Backend);
+        Assert.False(viewModel.IsBusy);
+        // 旧实例的状态文案不再冒充当前状态；用户配置（sources/MinerU）不清空。
+        Assert.Equal("服务实例已更换，状态待重新检查。", viewModel.Status);
+    }
+
+    [Fact]
+    public async Task InvalidatedLoadReleasesBusyOwnershipForTheNextRead()
+    {
+        var pending = new TaskCompletionSource<RuntimeStatusSnapshot>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var fake = new GatedRuntimeStatusClient(pending);
+        var viewModel = new SettingsViewModel(fake);
+        Task first = viewModel.LoadSnapshotAsync(CancellationToken.None);
+        viewModel.InvalidateSnapshot();
+        pending.SetResult(ReadyRuntimeStatus());
+        await first;
+
+        // 失效后的新读取正常接管并释放 busy（P2-2 拥有者闭合）。
+        await viewModel.LoadSnapshotAsync(CancellationToken.None);
+
+        Assert.False(viewModel.IsBusy);
+        Assert.Equal("cpu", viewModel.Backend);
+    }
+
+    [Fact]
+    public async Task SnapshotReadProjectsBackendFromRealProfile()
+    {
+        var fake = new GatedRuntimeStatusClient(TaskCompletionSourceFor(
+            ReadyRuntimeStatus()));
+        var viewModel = new SettingsViewModel(fake);
+        await viewModel.LoadSnapshotAsync(CancellationToken.None);
+        Assert.Equal("cpu", viewModel.Backend);
+    }
+
+    [Fact]
+    public async Task StaleLoadCompletionKeepsTheNewerReadsBusy()
+    {
+        var client = new SequencedRuntimeStatusClient();
+        TaskCompletionSource<RuntimeStatusSnapshot> firstGate = client.Enqueue();
+        TaskCompletionSource<RuntimeStatusSnapshot> secondGate = client.Enqueue();
+        var viewModel = new SettingsViewModel(client);
+
+        Task first = viewModel.LoadSnapshotAsync(CancellationToken.None);
+        Task second = viewModel.LoadSnapshotAsync(CancellationToken.None);
+
+        // 旧读取（first，代际已被 second 递增作废）迟到完成：不得把新读取
+        // 的 busy 一并清除（新读取仍在进行中）。
+        firstGate.SetResult(ReadyRuntimeStatus());
+        await first;
+        Assert.True(viewModel.IsBusy);
+
+        secondGate.SetResult(ReadyRuntimeStatus());
+        await second;
+        Assert.False(viewModel.IsBusy);
+        Assert.Equal("cpu", viewModel.Backend);
+    }
+
+    [Fact]
+    public async Task ReentrantInvalidationDuringBusyStartDoesNotWriteStaleStatus()
+    {
+        var pending = new TaskCompletionSource<RuntimeStatusSnapshot>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var fake = new GatedRuntimeStatusClient(pending);
+        var viewModel = new SettingsViewModel(fake);
+        // 模拟同步 PropertyChanged 链上的实例更换失效（重入）：busy 置位
+        // 事件内直接作废旧代。
+        viewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(SettingsViewModel.IsBusy) && viewModel.IsBusy)
+                viewModel.InvalidateSnapshot();
+        };
+
+        Task load = viewModel.LoadSnapshotAsync(CancellationToken.None);
+        pending.SetResult(ReadyRuntimeStatus());
+        await load;
+
+        // 重入失效后不得再写回加载文案/旧状态：终态保持失效语义。
+        Assert.False(viewModel.IsBusy);
+        Assert.Null(viewModel.Backend);
+        Assert.Equal("服务实例已更换，状态待重新检查。", viewModel.Status);
+    }
+
+    [Fact]
+    public async Task StaleResidencyFailureCannotOverwriteInvalidatedState()
+    {
+        var client = new GatedReadsClient();
+        client.RuntimeStatus.SetResult(ReadyRuntimeStatus());
+        client.Health.SetResult(SelectionHealthSnapshot());
+        var viewModel = new SettingsViewModel(client);
+
+        Task load = viewModel.LoadSnapshotAsync(CancellationToken.None);
+        // 驻留读取仍在途时实例更换：旧读取稍后以失败完成，不得把失效
+        // 文案改写成旧实例的故障文案。
+        viewModel.InvalidateSnapshot();
+        client.Residency.SetException(new InferenceClientException(
+            HttpV2ErrorCode.BackendUnavailable, "stale instance", retryable: true));
+        await load;
+
+        Assert.Equal("服务实例已更换，状态待重新检查。", viewModel.Status);
+        Assert.Null(viewModel.Backend);
+        Assert.False(viewModel.IsBusy);
+        // 已失效流程不得继续接管 selection：不触发任何 health 读取。
+        Assert.Equal(0, client.HealthCalls);
+    }
+
+    [Fact]
+    public async Task StaleSelectionFailureCannotOverwriteNewerState()
+    {
+        var client = new GatedReadsClient();
+        var viewModel = new SettingsViewModel(client);
+
+        Task selection = viewModel.LoadSelectionAsync(CancellationToken.None);
+        // 目录读取在途时实例更换：InvalidateSnapshot 新增的选择代递增使旧
+        // 读取的迟到失败（连同成功）一并作废。
+        viewModel.InvalidateSnapshot();
+        client.Health.SetException(new InferenceClientException(
+            HttpV2ErrorCode.BackendUnavailable, "stale instance", retryable: true));
+        await Assert.ThrowsAsync<InferenceClientException>(
+            () => selection);
+
+        // 旧实例的迟到失败不得覆盖失效占位文案（锁定本次新增的
+        // InvalidateSnapshot 选择代修复）。
+        Assert.Equal("服务实例已更换，状态待重新检查。", viewModel.Status);
+    }
+
+    private static Wire.Health SelectionHealthSnapshot() => new()
+    {
+        SchemaVersion = 2,
+        InstanceId = "sup-test",
+        ProtocolVersion = 2,
+        Ready = true,
+        Draining = false,
+        Capabilities = [],
+    };
+
+    private sealed class GatedReadsClient : InferenceClientStub, IInferenceClient
+    {
+        public int HealthCalls { get; private set; }
+
+        public TaskCompletionSource<RuntimeStatusSnapshot> RuntimeStatus { get; } =
+            NewSource<RuntimeStatusSnapshot>();
+        public TaskCompletionSource<ResidencyStatus> Residency { get; } =
+            NewSource<ResidencyStatus>();
+        public TaskCompletionSource<Wire.Health> Health { get; } =
+            NewSource<Wire.Health>();
+
+        public Task<RuntimeStatusSnapshot> GetRuntimeStatusAsync(
+            CancellationToken cancellationToken) => RuntimeStatus.Task;
+
+        public override Task<ResidencyStatus> GetResidencyAsync(
+            CancellationToken cancellationToken) => Residency.Task;
+
+        public override Task<Wire.Health> GetHealthAsync(
+            CancellationToken cancellationToken)
+        {
+            HealthCalls++;
+            return Health.Task;
+        }
+
+        public override Task<SettingsSnapshot> GetSettingsAsync(
+            CancellationToken cancellationToken) => Task.FromResult(new SettingsSnapshot());
+
+        private static TaskCompletionSource<T> NewSource<T>() => new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    private static TaskCompletionSource<RuntimeStatusSnapshot> TaskCompletionSourceFor(
+        RuntimeStatusSnapshot snapshot)
+    {
+        var source = new TaskCompletionSource<RuntimeStatusSnapshot>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        source.SetResult(snapshot);
+        return source;
+    }
+
+    private static RuntimeStatusSnapshot ReadyRuntimeStatus() => new()
+    {
+        InstanceId = "sup-test",
+        ServiceState = RuntimeServiceState.Ready,
+        BackendVersion = "0.14.0",
+        Profile = new RuntimeProfileStatus
+        {
+            ProfileId = "win-x64-cpu",
+            Accelerator = RuntimeAccelerator.Cpu,
+            Components = [],
+        },
+    };
+
+    private sealed class GatedRuntimeStatusClient(
+        TaskCompletionSource<RuntimeStatusSnapshot> pending) : InferenceClientStub, IInferenceClient
+    {
+        public Task<RuntimeStatusSnapshot> GetRuntimeStatusAsync(
+            CancellationToken cancellationToken) => pending.Task;
+
+        public override Task<ResidencyStatus> GetResidencyAsync(
+            CancellationToken cancellationToken) => Task.FromResult(new ResidencyStatus());
+    }
+
+    private sealed class SequencedRuntimeStatusClient : InferenceClientStub, IInferenceClient
+    {
+        private readonly Queue<TaskCompletionSource<RuntimeStatusSnapshot>> _pending = new();
+
+        public TaskCompletionSource<RuntimeStatusSnapshot> Enqueue()
+        {
+            var source = new TaskCompletionSource<RuntimeStatusSnapshot>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            _pending.Enqueue(source);
+            return source;
+        }
+
+        public Task<RuntimeStatusSnapshot> GetRuntimeStatusAsync(
+            CancellationToken cancellationToken) => _pending.Dequeue().Task;
+
+        public override Task<ResidencyStatus> GetResidencyAsync(
+            CancellationToken cancellationToken) => Task.FromResult(new ResidencyStatus());
     }
     // Fakes
     // ------------------------------------------------------------------

@@ -620,6 +620,44 @@ public sealed class MineruConnectionWorkbenchTests
     }
   }
 
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task StaleRemotePreparationCannotReplaceNewerRead(bool fail)
+  {
+    var preload = new TaskCompletionSource<ResidencyStatus>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var residency = new TaskCompletionSource<ResidencyStatus>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var fake = new MineruInferenceClient
+    {
+      Health = MineruModeHealth(ready: true),
+      Settings = RemoteConnectionSnapshot(),
+      PreloadTask = preload.Task,
+    };
+    var viewModel = new SettingsViewModel(fake);
+    await viewModel.LoadSnapshotAsync(TestContext.Current.CancellationToken);
+    Task preparation = viewModel.PrepareMineruRemoteAsync(TestContext.Current.CancellationToken);
+    viewModel.InvalidateSnapshot();
+    fake.ResidencyTask = residency.Task;
+    Task newerRead = viewModel.LoadSnapshotAsync(TestContext.Current.CancellationToken);
+    string newerStatus = viewModel.Status;
+    int healthCalls = fake.HealthCalls;
+    try
+    {
+      if (fail) preload.SetException(new InferenceClientException(
+        HttpV2ErrorCode.BackendUnavailable, "old instance", retryable: true));
+      else preload.SetResult(new ResidencyStatus());
+      await preparation.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      Assert.True(viewModel.IsBusy);
+      Assert.Equal(newerStatus, viewModel.Status);
+      Assert.Equal(healthCalls, fake.HealthCalls);
+    }
+    finally
+    {
+      residency.TrySetResult(new ResidencyStatus());
+      await newerRead.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    }
+  }
+
   private static Wire.Health MineruModeHealthWithTier(Wire.MineruTierAvailability availability)
   {
     Wire.Health health = MineruModeHealth(ready: true);
@@ -824,6 +862,10 @@ public sealed class MineruConnectionWorkbenchTests
 
     public int PreloadCalls { get; private set; }
 
+    public Task<ResidencyStatus>? PreloadTask { get; init; }
+
+    public Task<ResidencyStatus>? ResidencyTask { get; set; }
+
     public override Task<JobRef> SubmitAsync(
       SubmitRequest request,
       IReadOnlyDictionary<string, SubmitUpload> uploads,
@@ -873,7 +915,7 @@ public sealed class MineruConnectionWorkbenchTests
       });
 
     public override Task<ResidencyStatus> GetResidencyAsync(
-      CancellationToken cancellationToken) => Task.FromResult(new ResidencyStatus());
+      CancellationToken cancellationToken) => ResidencyTask ?? Task.FromResult(new ResidencyStatus());
 
     public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
     {
@@ -905,7 +947,7 @@ public sealed class MineruConnectionWorkbenchTests
     {
       PreloadCalls++;
       if (HealthAfterPreload is not null) Health = HealthAfterPreload;
-      return Task.FromResult(new ResidencyStatus());
+      return PreloadTask ?? Task.FromResult(new ResidencyStatus());
     }
   }
 

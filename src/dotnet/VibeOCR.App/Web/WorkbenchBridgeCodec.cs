@@ -1020,6 +1020,7 @@ public static class WorkbenchBridgeCodec
       settings.ProgressText,
       settings.ProgressDetail,
       settings.ProgressPercent,
+      progressActive = settings.ProgressActive,
       settings.CanPreviewInstall,
       environments = settings.Environments ?? [],
       settings.ActiveEnvironmentId,
@@ -1083,6 +1084,7 @@ public static class WorkbenchBridgeCodec
       diagnostics.ProtocolStatus,
       diagnostics.IsReady,
       diagnostics.Milestones,
+      diagnostics.DeviceEvidence,
     },
     null => null,
     _ => throw new WorkbenchBridgeProtocolException(

@@ -125,6 +125,11 @@ public sealed class InferenceSupervisorProcess : IDisposable
     /// </summary>
     public event EventHandler<SupervisorUnexpectedExitEventArgs>? UnexpectedExit;
 
+    public event EventHandler<string>? LogReceived;
+
+    /// <summary>The process ID owned by this launcher, independent of the ready payload.</summary>
+    public int? ProcessId => _process?.Id;
+
     /// <summary>The parsed ready envelope (valid after <see cref="StartAsync"/> succeeds).</summary>
     public SupervisorReadyEnvelope Ready
         => Volatile.Read(ref _ready)
@@ -391,6 +396,7 @@ public sealed class InferenceSupervisorProcess : IDisposable
         {
             _logLines.Add($"[{channel}] {line}");
         }
+        LogReceived?.Invoke(this, line);
         try
         {
             File.AppendAllText(

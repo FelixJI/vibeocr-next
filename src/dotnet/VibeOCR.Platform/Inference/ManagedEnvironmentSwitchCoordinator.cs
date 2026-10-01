@@ -39,6 +39,19 @@ public sealed class ManagedEnvironmentSwitchCoordinator(IManagedEnvironmentClien
             ? ["-I", "-B", "-c", "import os,runpy,sys;sys.path.insert(0,os.environ['VIBEOCR_PRODUCT_CODE_ROOT']);runpy.run_module('vibeocr.runtime.host.main',run_name='__main__')"]
             : ["-m", launch.SupervisorModule];
 
+    internal static InferenceSupervisorOptions BuildSupervisorOptions(
+        RuntimeLaunch launch, string logPath, TimeSpan startupTimeout,
+        IReadOnlySet<string> requiredCapabilities, bool injectSoakCrash = false)
+    {
+        var environment = launch.Environment.ToDictionary(
+            item => item.Key, item => item.Value, StringComparer.OrdinalIgnoreCase);
+        if (injectSoakCrash)
+            environment["VIBEOCR_SUPERVISOR_SOAK_CRASH_AFTER_READY"] = "1";
+        return new InferenceSupervisorOptions(
+            launch.PythonExecutable, RuntimeArguments(launch), launch.WorkingDirectory,
+            logPath, startupTimeout, requiredCapabilities, environment);
+    }
+
     public async Task<ManagedEnvironmentSession?> SwitchAsync(
         string environmentId,
         ManagedEnvironmentSession? current,
@@ -64,18 +77,8 @@ public sealed class ManagedEnvironmentSwitchCoordinator(IManagedEnvironmentClien
                 if (!string.Equals(launch.PythonExecutable, prepared.Python, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidDataException("Runtime launch Python differs from the prepared revision.");
                 string token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
-                var environment = launch.Environment.ToDictionary(
-                    item => item.Key, item => item.Value, StringComparer.OrdinalIgnoreCase);
-                if (injectSoakCrash)
-                    environment["VIBEOCR_SUPERVISOR_SOAK_CRASH_AFTER_READY"] = "1";
-                var options = new InferenceSupervisorOptions(
-                    launch.PythonExecutable,
-                    RuntimeArguments(launch),
-                    launch.WorkingDirectory,
-                    logPath,
-                    startupTimeout,
-                    requiredCapabilities,
-                    environment);
+                InferenceSupervisorOptions options = BuildSupervisorOptions(
+                    launch, logPath, startupTimeout, requiredCapabilities, injectSoakCrash);
                 var process = new InferenceSupervisorProcess(options, token);
                 InferenceHttpClient? client = null;
                 QrCodeHttpClient? qrClient = null;

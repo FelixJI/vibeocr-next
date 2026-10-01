@@ -1741,12 +1741,13 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
 
 export function SettingsPage({ viewState, actions }: FeatureProps) {
   const state = feature(viewState, "settings");
-  const backend =
-    typeof state.backend === "string" ? state.backend : "等待宿主同步";
+  // backend 是运行时 profile 声明的目标加速器，不是实测执行设备；
+  // 未读取真实快照前不冒充任何设备。
+  const backend = typeof state.backend === "string" ? state.backend : "";
   const backendLabel =
     backend === "cpu" || backend === "nvidia_cuda"
       ? acceleratorLabel(backend)
-      : backend;
+      : null;
   const maintenance = maintenanceState(state.maintenance);
   const busy = maintenance?.isRunning === true;
   const sources = sourceOptions(state.sources);
@@ -1838,18 +1839,24 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
           className="settings-runtime-panel"
         >
           <div className="runtime-summary">
-            <strong>{backendLabel}</strong>
+            <strong>{`目标推理设备：${backendLabel ?? "尚未读取"}`}</strong>
+            <p>
+              实际执行设备：尚无实测值。Paddle 设备决策与 GPU 回退见诊断页。
+            </p>
             <p>当前服务：{serviceText}</p>
             <p>本次维护：{maintenanceLine}</p>
-            <ProgressBar
-              value={
-                typeof state.progressPercent === "number" &&
-                Number.isFinite(state.progressPercent)
-                  ? state.progressPercent / 100
-                  : undefined
-              }
-              aria-label="运行环境维护进度"
-            />
+            {/* 只有真实进行中的维护操作才渲染进度；设置刷新不是维护。 */}
+            {state.progressActive === true ? (
+              <ProgressBar
+                value={
+                  typeof state.progressPercent === "number" &&
+                  Number.isFinite(state.progressPercent)
+                    ? state.progressPercent / 100
+                    : undefined
+                }
+                aria-label="运行环境维护进度"
+              />
+            ) : null}
             {progressText ? <p>{progressText}</p> : null}
             {stringValue(state.progressDetail) ? (
               <details>
@@ -3580,6 +3587,7 @@ export function AboutPage({ viewState, actions }: FeatureProps) {
 export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
   const state = feature(viewState, "diagnostics");
   const milestones = stringValues(state.milestones);
+  const deviceEvidence = stringValues(state.deviceEvidence);
   return (
     <Workspace
       eyebrow="SUPPORT / 07"
@@ -3615,6 +3623,14 @@ export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
                 : "等待连接"}
             </Badge>
           </div>
+        </Panel>
+        <Panel label="DEVICE" title="当前实例的 Paddle 设备日志">
+          <p>设备决策与回退日志；不表示识别作业已成功执行。</p>
+          {deviceEvidence.length > 0 ? (
+            <pre>{deviceEvidence.join("\n")}</pre>
+          ) : (
+            <p>尚无设备证据。</p>
+          )}
         </Panel>
         <Panel label="MILESTONES" title="启动里程碑">
           {milestones.length > 0 ? (
