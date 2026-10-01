@@ -30,7 +30,7 @@
         "runtime_manifest": { "type": "string", "minLength": 1 },
         "layout_manifest": { "type": "string", "minLength": 1 },
         "product_id": { "type": "string", "minLength": 1 },
-        "action": { "type": "string", "enum": ["list", "create", "set_sources", "preview_install", "install", "prepare_switch", "commit_switch", "repair_empty", "delete"] },
+        "action": { "type": "string", "enum": ["list", "create", "set_sources", "preview_install", "install", "prepare_switch", "commit_switch", "repair_empty", "delete", "find_compatible"] },
         "name": { "type": "string", "minLength": 1 },
         "environment_id": {
           "anyOf": [
@@ -39,7 +39,11 @@
           ],
           "description": "Target environment id. Null (or absent where the action allows it) addresses the global source defaults and is only legal for set_sources."
         },
-        "recipe": { "type": "string", "minLength": 1 },
+        "recipe": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Locked engine recipe id (authoritative Runtime catalog) for preview_install/install/find_compatible."
+        },
         "source_ids": {
           "anyOf": [
             {

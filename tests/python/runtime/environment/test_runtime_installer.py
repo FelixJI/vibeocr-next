@@ -1200,6 +1200,498 @@ def test_named_preview_includes_direct_url_dependencies(tmp_path: Path) -> None:
     assert "torch @ https://example.invalid/cu126/torch.whl" in dependencies
 
 
+def _all_recipes_release(root: Path) -> tuple[Path, Path]:
+    """默认 release + mineru-standalone scope + Paddle 隔离锁：六配方全部可解析。"""
+    manifest, component = _release(root)
+    lock = manifest.parent / "mineru-standalone.lock"
+    lock.write_text(
+        "fastapi==1.0.0 \\\n    --hash=sha256:" + "1" * 64 + "\n"
+        "mineru==4.0.2 \\\n    --hash=sha256:" + "2" * 64 + "\n",
+        encoding="utf-8",
+    )
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    value["profiles"]["win-x64-cpu"]["install_scopes"].append(
+        {
+            "scope_id": "mineru-standalone",
+            "component_ids": ["runtime_host", "mineru-cpu"],
+            "lock": lock.name,
+            "sha256": _sha(lock.read_bytes()),
+            "runtime_pack": None,
+        }
+    )
+    paddle_cpu = manifest.parent / "requirements-win-x64-paddle-cpu.lock"
+    paddle_cpu.write_text(
+        "paddlepaddle==3.3.1 \\\n    --hash=sha256:" + "7" * 64 + "\n",
+        encoding="utf-8",
+    )
+    paddle_cu126 = manifest.parent / "requirements-win-x64-paddle-cu126.lock"
+    paddle_cu126.write_text(
+        "paddlepaddle-gpu @ https://example.invalid/cu126/paddle.whl \\\n"
+        "    --hash=sha256:" + "8" * 64 + "\n",
+        encoding="utf-8",
+    )
+    value["profiles"]["win-x64-cpu"]["paddle_environment"] = {
+        "lock": paddle_cpu.name,
+        "sha256": _sha(paddle_cpu.read_bytes()),
+    }
+    value["profiles"]["win-x64-cu126"]["paddle_environment"] = {
+        "lock": paddle_cu126.name,
+        "sha256": _sha(paddle_cu126.read_bytes()),
+    }
+    manifest.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+    binding = json.loads(component.read_text(encoding="utf-8"))
+    binding["product"]["runtime_manifest_sha256"] = _sha(manifest.read_bytes())
+    component.write_text(json.dumps(binding, sort_keys=True) + "\n", encoding="utf-8")
+    return manifest, component
+
+
+def _write_record(manager: ManagedEnvironmentStore, env_id: str, **overrides) -> dict:
+    """直接写入注册表记录：不建真实 venv，兼容查询只关心身份与证据。"""
+    from vibeocr.runtime.environments.runtime_maintenance import _atomic_json
+
+    with RuntimeStoreLock(manager._lock):
+        data = manager._read()
+        record = {
+            "id": env_id,
+            "name": f"env-{env_id[:4]}",
+            "revision": 1,
+            "kind": "venv",
+            "path": str(Path(env_id) / "revisions" / "1"),
+            "status": "empty",
+            "python_version": manager.manifest.python.version,
+            "abi": manager.manifest.python.abi,
+            **overrides,
+        }
+        data["environments"][env_id] = record
+        _atomic_json(manager._registry, data)
+        return record
+
+
+def _pinned_versions(manager: ManagedEnvironmentStore, recipe: str) -> dict[str, str]:
+    scope, _accelerator = manager._recipe(recipe)
+    return {
+        name: version
+        for name, _display, version in ManagedEnvironmentStore._scope_pins(scope)
+        if version is not None
+    }
+
+
+def test_recipe_catalog_projects_manifest_bound_scopes(tmp_path: Path) -> None:
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    # 未绑定 standalone scope/Paddle 隔离锁的 manifest 不提供对应配方（与 preview 同源）。
+    assert [entry["id"] for entry in manager.recipe_catalog()] == [
+        "rapidocr-cpu",
+        "rapidocr+mineru-cpu",
+        "rapidocr+mineru-cuda",
+    ]
+
+    standalone_manifest, standalone_component = _all_recipes_release(
+        tmp_path / "standalone"
+    )
+    full = ManagedEnvironmentStore(
+        product_root=tmp_path / "standalone-product",
+        component_lock=standalone_component,
+        runtime_manifest=standalone_manifest,
+        base_python=sys._base_executable,
+    )
+    catalog = full.recipe_catalog()
+    assert full.list()["recipes"] == catalog
+    assert [entry["id"] for entry in catalog] == [
+        "rapidocr-cpu",
+        "paddleocr-cpu",
+        "paddleocr-cuda",
+        "mineru-cpu",
+        "rapidocr+mineru-cpu",
+        "rapidocr+mineru-cuda",
+    ]
+    entry = {item["id"]: item for item in catalog}
+    assert entry["rapidocr-cpu"]["display_name"] == "RapidOCR · CPU"
+    assert entry["rapidocr-cpu"]["configured_recognition_types"] == ["text"]
+    assert entry["rapidocr-cpu"]["accelerator"] == "cpu"
+    assert entry["rapidocr-cpu"]["target_device"] == "cpu"
+    assert entry["rapidocr-cpu"]["python_version"] == "3.13.15"
+    assert entry["rapidocr-cpu"]["abi"] == "cp313"
+    assert entry["rapidocr-cpu"]["platform"] == "win_amd64"
+    assert entry["paddleocr-cuda"]["display_name"] == "PaddleOCR · NVIDIA CUDA"
+    assert entry["paddleocr-cuda"]["configured_recognition_types"] == [
+        "text",
+        "table",
+        "formula",
+        "structure",
+        "document_vl",
+    ]
+    assert entry["paddleocr-cuda"]["accelerator"] == "nvidia_cuda"
+    assert entry["paddleocr-cuda"]["target_device"] == "cuda"
+    assert entry["mineru-cpu"]["configured_recognition_types"] == ["document"]
+    assert entry["mineru-cpu"]["scope_id"] == "mineru-standalone"
+    assert "paddlepaddle==3.3.1" in entry["rapidocr+mineru-cpu"]["dependencies"]
+    assert (
+        "paddlepaddle-gpu @ https://example.invalid/cu126/paddle.whl"
+        in entry["rapidocr+mineru-cuda"]["dependencies"]
+    )
+
+    # 目录与 preview 同源：锁、pin 与来源分类完全一致，前台不得另算。
+    target = _write_record(full, "a" * 32)
+    for recipe in ("rapidocr-cpu", "rapidocr+mineru-cuda", "mineru-cpu"):
+        plan = full.preview_install(target["id"], recipe)
+        assert entry[recipe]["recipe_lock"] == plan["recipe_lock"]
+        assert entry[recipe]["dependencies"] == plan["dependencies"]
+        assert entry[recipe]["dependency_origin"] == plan["dependency_origin"]
+        assert entry[recipe]["python_origin"] == plan["python_origin"]
+
+
+def test_find_compatible_prefers_active_then_stable_id_and_reports_reasons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    scope, _accelerator = manager._recipe("rapidocr-cpu")
+    pinned = _pinned_versions(manager, "rapidocr-cpu")
+
+    def healthy_probe(record: dict) -> dict:
+        return {
+            "healthy": True,
+            "reason": None,
+            "python": str(manager._venv_python(manager._safe_path(record))),
+            "versions": dict(pinned),
+            "platform": "win_amd64",
+        }
+
+    monkeypatch.setattr(manager, "_probe", healthy_probe)
+    a = _write_record(
+        manager,
+        "a" * 32,
+        status="installed",
+        recipe="rapidocr-cpu",
+        recipe_lock=scope.sha256,
+    )
+    b = _write_record(
+        manager,
+        "b" * 32,
+        status="installed",
+        recipe="rapidocr-cpu",
+        recipe_lock=scope.sha256,
+    )
+    empty = _write_record(manager, "c" * 32)
+    legacy_no_evidence = _write_record(
+        manager, "d" * 32, status="installed", recipe="rapidocr-cpu"
+    )
+    _write_record(
+        manager,
+        "e" * 32,
+        status="installed",
+        recipe="paddleocr-cpu",
+        recipe_lock="f" * 64,
+    )
+    from vibeocr.runtime.environments.runtime_maintenance import _atomic_json
+
+    with RuntimeStoreLock(manager._lock):
+        data = manager._read()
+        data["environments"]["legacy"] = {
+            "id": "legacy",
+            "name": "原有环境",
+            "revision": 1,
+            "kind": "legacy",
+            "path": "runtime",
+            "status": "installed",
+            "python_version": manager.manifest.python.version,
+            "abi": manager.manifest.python.abi,
+        }
+        _atomic_json(manager._registry, data)
+
+    before = manager._registry.read_bytes()
+    result = manager.find_compatible("rapidocr-cpu")
+    assert manager._registry.read_bytes() == before
+    assert result["recipe"] == "rapidocr-cpu"
+    assert result["recipe_lock"] == scope.sha256
+    assert result["selected"] == {
+        "environment_id": a["id"],
+        "environment_revision": 1,
+        "recipe": "rapidocr-cpu",
+        "selection_reason": "deterministic_id_order",
+    }
+    assert [item["environment_id"] for item in result["environments"]] == [
+        a["id"],
+        b["id"],
+        empty["id"],
+        legacy_no_evidence["id"],
+        "e" * 32,
+        "legacy",
+    ]
+    assert {
+        item["environment_id"]: item["reason_code"] for item in result["environments"]
+    } == {
+        a["id"]: "selected_compatible_environment",
+        b["id"]: "compatible_lower_priority",
+        empty["id"]: "environment_empty",
+        legacy_no_evidence["id"]: "lock_evidence_missing",
+        "e" * 32: "recipe_mismatch",
+        "legacy": "legacy_environment",
+    }
+
+    # 活动环境优先；同配方低优先级环境如实标记。
+    with RuntimeStoreLock(manager._lock):
+        data = manager._read()
+        data["active_id"] = b["id"]
+        data["active_revision"] += 1
+        _atomic_json(manager._registry, data)
+    result = manager.find_compatible("rapidocr-cpu")
+    assert result["selected"]["environment_id"] == b["id"]
+    assert result["selected"]["selection_reason"] == "active_environment"
+    by_id = {item["environment_id"]: item for item in result["environments"]}
+    assert by_id[b["id"]]["reason_code"] == "selected_active_environment"
+    assert by_id[b["id"]]["active"] is True
+    assert by_id[a["id"]]["reason_code"] == "compatible_lower_priority"
+    assert by_id[a["id"]]["active"] is False
+
+    monkeypatch.setattr(
+        manager,
+        "_probe",
+        lambda record: {**healthy_probe(record), "platform": "win_arm64"},
+    )
+    wrong_platform = manager.find_compatible("rapidocr-cpu")
+    assert wrong_platform["selected"] is None
+    assert {
+        item["reason_code"]
+        for item in wrong_platform["environments"]
+        if item["environment_id"] in {a["id"], b["id"]}
+    } == {"platform_mismatch"}
+
+    # 安装后版本漂移：探针健康但 pin 不匹配，不得选中。
+    monkeypatch.setattr(
+        manager,
+        "_probe",
+        lambda record: {
+            **healthy_probe(record),
+            "versions": {**pinned, "fastapi": "2.0.0"},
+        },
+    )
+    drifted = manager.find_compatible("rapidocr-cpu")
+    assert drifted["selected"] is None
+    assert {
+        item["reason_code"]
+        for item in drifted["environments"]
+        if item["environment_id"] in {a["id"], b["id"]}
+    } == {"locked_version_mismatch"}
+
+    # 探针不健康：原因原样透传，不选中。
+    monkeypatch.setattr(
+        manager,
+        "_probe",
+        lambda record: {
+            "healthy": False,
+            "reason": "engine_import_failed",
+            "python": str(manager._venv_python(manager._safe_path(record))),
+        },
+    )
+    broken = manager.find_compatible("rapidocr-cpu")
+    assert broken["selected"] is None
+    assert {
+        item["reason_code"]
+        for item in broken["environments"]
+        if item["environment_id"] in {a["id"], b["id"]}
+    } == {"engine_import_failed"}
+
+    # 无锁证据的旧环境：query 不验证，但 list 与手工切换保持可用。
+    monkeypatch.setattr(manager, "_probe", healthy_probe)
+    prepared = manager.prepare_switch(legacy_no_evidence["id"])
+    assert prepared["environment_id"] == legacy_no_evidence["id"]
+    assert (
+        next(
+            item
+            for item in manager.list()["environments"]
+            if item["id"] == legacy_no_evidence["id"]
+        )["status"]
+        == "installed"
+    )
+
+    # 未知配方拒绝。
+    with pytest.raises(ManagedEnvironmentError, match="unknown engine recipe"):
+        manager.find_compatible("not-a-recipe")
+
+
+@pytest.mark.parametrize(
+    ("url", "expected_version", "installed_version", "reason"),
+    [
+        (
+            "https://example.invalid/Paddle_GPU-3.3.1-cp313-cp313-win_amd64.whl",
+            "3.3.1",
+            "3.3.1",
+            "selected_compatible_environment",
+        ),
+        (
+            "https://example.invalid/Paddle_GPU-3.3.1-cp313-cp313-win_amd64.whl",
+            "3.3.1",
+            "3.3.0",
+            "locked_version_mismatch",
+        ),
+        ("https://example.invalid/paddle.whl", None, "3.3.1", "locked_version_unknown"),
+        (
+            "https://example.invalid/other-3.3.1-cp313-cp313-win_amd64.whl",
+            None,
+            "3.3.1",
+            "locked_version_unknown",
+        ),
+    ],
+)
+def test_compatible_query_checks_wheel_version_and_normalized_distribution_name(
+    tmp_path, monkeypatch, url, expected_version, installed_version, reason
+):
+    from dataclasses import replace
+
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    scope, accelerator = manager._recipe("rapidocr-cpu")
+    lock = tmp_path / "query.lock"
+    lock.write_text(f"Paddle.GPU @ {url}\n", encoding="utf-8")
+    scope = replace(scope, lock_path=lock, sha256=_sha(lock.read_bytes()))
+    monkeypatch.setattr(manager, "_recipe", lambda _recipe: (scope, accelerator))
+    _write_record(
+        manager,
+        "a" * 32,
+        status="installed",
+        recipe="rapidocr-cpu",
+        recipe_lock=scope.sha256,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_probe",
+        lambda record: {
+            "healthy": True,
+            "reason": None,
+            "platform": "win_amd64",
+            "versions": {"paddle-gpu": installed_version},
+        },
+    )
+    assert manager._scope_pins(scope) == [
+        ("paddle-gpu", f"Paddle.GPU @ {url}", expected_version)
+    ]
+    result = manager.find_compatible("rapidocr-cpu")
+    assert result["environments"][0]["reason_code"] == reason
+    assert (result["selected"] is not None) == (
+        reason == "selected_compatible_environment"
+    )
+
+
+def test_install_freezes_recipe_lock_and_query_round_trips_cli(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _omit_unused_pip_bootstrap(monkeypatch)
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+        install_runner=lambda _python, _scope, _endpoint: None,
+    )
+    pinned = _pinned_versions(manager, "rapidocr-cpu")
+    monkeypatch.setattr(
+        manager,
+        "_probe",
+        lambda record: (
+            {
+                "healthy": True,
+                "reason": None,
+                "python": str(manager._venv_python(manager._safe_path(record))),
+                "versions": dict(pinned),
+                "platform": "win_amd64",
+            }
+            if record["status"] == "installed"
+            else ManagedEnvironmentStore._probe(manager, record)
+        ),
+    )
+    item = manager.create("reusable")
+    plan = manager.preview_install(item["id"], "rapidocr-cpu", ("tuna-pypi",))
+    installed = manager.install(
+        plan["plan_id"], item["id"], "rapidocr-cpu", ("tuna-pypi",)
+    )
+    assert installed["status"] == "installed"
+    record = manager._read()["environments"][item["id"]]
+    assert record["recipe_lock"] == plan["recipe_lock"]
+
+    # 重启后按锁证据命中同一环境。
+    reopened = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    monkeypatch.setattr(
+        reopened,
+        "_probe",
+        lambda record: {
+            "healthy": True,
+            "reason": None,
+            "python": str(reopened._venv_python(reopened._safe_path(record))),
+            "versions": dict(pinned),
+            "platform": "win_amd64",
+        },
+    )
+    assert (
+        reopened.find_compatible("rapidocr-cpu")["selected"]["environment_id"]
+        == (item["id"])
+    )
+
+    base = {
+        "product_root": str(tmp_path / "product"),
+        "component_lock": str(component),
+        "runtime_manifest": str(manifest),
+    }
+    request = {
+        "protocol_version": 2,
+        "request_kind": "environment",
+        "action": "find_compatible",
+        "recipe": "rapidocr-cpu",
+        **base,
+    }
+    # CLI 在新 store 实例上运行真实探针；本测试的合成 venv 无包，
+    # 用类级 stub 保持与上方同一健康投影。
+    monkeypatch.setattr(
+        ManagedEnvironmentStore,
+        "_probe",
+        lambda self, record: {
+            "healthy": True,
+            "reason": None,
+            "python": str(self._venv_python(self._safe_path(record))),
+            "versions": dict(pinned),
+            "platform": "win_amd64",
+        },
+    )
+    assert main(["--request-json", json.dumps(request)]) == 0
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["response_kind"] == "environment"
+    assert envelope["action"] == "find_compatible"
+    assert envelope["result"]["selected"]["environment_id"] == item["id"]
+    assert [recipe["id"] for recipe in envelope["result"]["recipes"]][0] == (
+        "rapidocr-cpu"
+    )
+
+    unknown = {**request, "recipe": "not-a-recipe"}
+    assert main(["--request-json", json.dumps(unknown)]) == 1
+    failure = json.loads(capsys.readouterr().out)
+    assert failure["ok"] is False
+    assert "unknown engine recipe" in failure["error"]["message"]
+
+
 def test_named_install_rejects_native_import_failure_without_committing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1370,6 +1862,49 @@ def test_named_install_rapidocr_probe_imports_real_transitive_closure(
         manager.prepare_switch(item["id"])
 
 
+def test_mineru_probe_imports_server_binding_without_starting_or_downloading(
+    tmp_path, monkeypatch
+):
+    manifest, component = _all_recipes_release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    item = manager.create("mineru")
+    record = manager._read()["environments"][item["id"]]
+    record.update(status="installed", recipe="mineru-cpu")
+    site = (
+        manager._venv_python(manager._safe_path(record)).parent.parent
+        / "Lib/site-packages"
+    )
+    for name in ("fastapi", "mineru"):
+        metadata = site / f"{name}-1.0.dist-info"
+        metadata.mkdir(parents=True)
+        (metadata / "METADATA").write_text(f"Name: {name}\nVersion: 1.0\n")
+    parser = site / "mineru/parser"
+    parser.mkdir(parents=True)
+    (parser.parent / "__init__.py").write_text("")
+    (parser / "__init__.py").write_text("")
+    server = parser / "api_server.py"
+    private_home = manager.paths.state_root / "environments" / item["id"] / "mineru4"
+    monkeypatch.setenv("MINERU_HOME", str(tmp_path / "unrelated"))
+    server.write_text(
+        "import os\n"
+        f"assert os.environ['MINERU_HOME'] == {str(private_home)!r}\n"
+        "def create_app(*args, **kwargs):\n"
+        "    raise AssertionError('probe must not initialize models or a server')\n"
+        "if __name__ == '__main__':\n"
+        "    raise AssertionError('probe must not run the server')\n"
+    )
+    assert manager._probe(record)["healthy"] is True
+    # 包级导入仍成功，但真实 server 闭包损坏必须报告失败。
+    server.write_text("raise ImportError('server dependency missing')\n")
+    assert manager._probe(record)["reason"] == "engine_import_failed"
+    assert not private_home.exists()
+
+
 def test_named_revision_path_accepts_old_and_new_random_tails(tmp_path: Path) -> None:
     manifest, component = _release(tmp_path / "release")
     manager = ManagedEnvironmentStore(
@@ -1461,6 +1996,11 @@ def test_frozen_manager_exposes_named_environment_list(
     assert main(["--request-json", json.dumps(request)]) == 0
     response = json.loads(capsys.readouterr().out)
     assert response["response_kind"] == "environment"
+    assert [entry["id"] for entry in response["result"].pop("recipes")] == [
+        "rapidocr-cpu",
+        "rapidocr+mineru-cpu",
+        "rapidocr+mineru-cuda",
+    ]
     assert response["result"] == {
         "active_id": None,
         "active_revision": 0,

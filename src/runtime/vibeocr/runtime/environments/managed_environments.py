@@ -11,9 +11,11 @@ from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Callable, Iterator
 from urllib.error import URLError
+from urllib.parse import unquote, urlsplit
 from urllib.request import ProxyHandler, build_opener
 from uuid import uuid4
 
+from packaging.utils import InvalidWheelFilename, parse_wheel_filename
 from vibeocr.runtime.environments.managed_references import environment_has_references
 from vibeocr.runtime.environments.runtime_install_plan import (
     RuntimeInstallPlanStale,
@@ -23,6 +25,7 @@ from vibeocr.runtime.environments.runtime_installer import (
     _extract_python_archive,
     _extract_runtime_pack,
     _load_component_lock,
+    _normalize_dist_name,
     _prepare_online_artifacts,
     _python_in,
     _run_install_command,
@@ -71,6 +74,34 @@ _FORBIDDEN_EMPTY = (
     "torch",
     "onnxruntime",
 )
+# 六种锁定配方是 Runtime 的唯一权威目录：展示名、真实用途（识别类型）与
+# 设备要求沿 manifest scope 锁投影；C#/TS 只消费目录，不得重算依赖图。
+_RECIPE_IDS = (
+    "rapidocr-cpu",
+    "paddleocr-cpu",
+    "paddleocr-cuda",
+    "mineru-cpu",
+    "rapidocr+mineru-cpu",
+    "rapidocr+mineru-cuda",
+)
+_RECIPE_DISPLAY_NAMES = {
+    "rapidocr-cpu": "RapidOCR · CPU",
+    "paddleocr-cpu": "PaddleOCR · CPU",
+    "paddleocr-cuda": "PaddleOCR · NVIDIA CUDA",
+    "mineru-cpu": "MinerU · CPU",
+    "rapidocr+mineru-cpu": "RapidOCR + MinerU · CPU",
+    "rapidocr+mineru-cuda": "RapidOCR + MinerU · NVIDIA CUDA",
+}
+# 探针运行 Supervisor 实际执行的引擎导入：不实例化引擎、不下载模型。
+# rapidocr 必须导入真实符号，包级 __init__ 惰性解析无法证明原生闭包可用。
+_RECIPE_IMPORT_PROBES = {
+    "rapidocr-cpu": "from rapidocr import RapidOCR",
+    "paddleocr-cpu": "from paddleocr import PaddleOCR",
+    "paddleocr-cuda": "from paddleocr import PaddleOCR",
+    "mineru-cpu": "from mineru.parser.api_server import create_app",
+    "rapidocr+mineru-cpu": "from mineru.parser.api_server import create_app; from rapidocr import RapidOCR",
+    "rapidocr+mineru-cuda": "from mineru.parser.api_server import create_app; from rapidocr import RapidOCR",
+}
 
 
 class ManagedEnvironmentError(RuntimeInstallError):
@@ -591,6 +622,7 @@ class ManagedEnvironmentStore:
                     "python_version",
                     "abi",
                     "recipe",
+                    "recipe_lock",
                     "source_ids",
                     "override_source_ids",
                     "last_install_operation",
@@ -624,17 +656,16 @@ class ManagedEnvironmentStore:
                 raise ManagedEnvironmentError("environment record is invalid")
             if "recipe" in record and (
                 not isinstance(record["recipe"], str)
-                or record["recipe"]
-                not in {
-                    "rapidocr-cpu",
-                    "paddleocr-cpu",
-                    "paddleocr-cuda",
-                    "mineru-cpu",
-                    "rapidocr+mineru-cpu",
-                    "rapidocr+mineru-cuda",
-                }
+                or record["recipe"] not in _RECIPE_IDS
             ):
                 raise ManagedEnvironmentError("environment recipe is invalid")
+            # 安装时冻结的 manifest scope 锁证据（旧 schema_version=1 记录
+            # 缺失该键：list/手工切换不受影响，兼容查询按未验证处理）。
+            if "recipe_lock" in record and (
+                not isinstance(record["recipe_lock"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", record["recipe_lock"])
+            ):
+                raise ManagedEnvironmentError("environment recipe lock is invalid")
             if "source_ids" in record and (
                 not isinstance(record["source_ids"], list)
                 or any(not isinstance(source, str) for source in record["source_ids"])
@@ -672,15 +703,7 @@ class ManagedEnvironmentStore:
                     or not isinstance(operation["plan_id"], str)
                     or not re.fullmatch(r"[0-9a-f]{32}", operation["plan_id"])
                     or not isinstance(operation["recipe"], str)
-                    or operation["recipe"]
-                    not in {
-                        "rapidocr-cpu",
-                        "paddleocr-cpu",
-                        "paddleocr-cuda",
-                        "mineru-cpu",
-                        "rapidocr+mineru-cpu",
-                        "rapidocr+mineru-cuda",
-                    }
+                    or operation["recipe"] not in _RECIPE_IDS
                     or not isinstance(operation["phase"], str)
                     or operation["phase"] not in {"installing", "failed"}
                     or not isinstance(operation["reason_code"], str)
@@ -782,11 +805,13 @@ class ManagedEnvironmentStore:
         if not python.is_file():
             return {"healthy": False, "reason": "python_missing", "python": str(python)}
         code = (
-            "import json,sys; from importlib.metadata import distributions; "
+            "import json,sys,sysconfig; from importlib.metadata import distributions; "
             "installed=list(distributions()); "
             "print(json.dumps({'prefix':sys.prefix,'base_prefix':sys.base_prefix,"
+            "'platform':sysconfig.get_platform(),"
             "'version':sys.version_info[:3],'packages':sorted(d.metadata['Name'].lower() "
-            "for d in installed),'runtime_version':next((d.version for d in installed "
+            "for d in installed),'versions':{d.metadata['Name'].lower():d.version "
+            "for d in installed},'runtime_version':next((d.version for d in installed "
             "if d.metadata['Name'].lower()=='vibeocr-next-runtime'),None)}))"
         )
         try:
@@ -856,7 +881,7 @@ class ManagedEnvironmentStore:
                 "python_version": actual_version,
                 "abi": actual_abi,
             }
-        packages = set(details["packages"])
+        packages = {_normalize_dist_name(name) for name in details["packages"]}
         if record["status"] == "empty" and packages.intersection(_FORBIDDEN_EMPTY):
             return {
                 "healthy": False,
@@ -884,18 +909,16 @@ class ManagedEnvironmentStore:
                     "reason": "engine_packages_missing",
                     "python": str(python),
                 }
-            if recipe in {
-                "rapidocr-cpu",
-                "rapidocr+mineru-cpu",
-                "rapidocr+mineru-cuda",
-            }:
+            import_probe = _RECIPE_IMPORT_PROBES.get(recipe)
+            if import_probe is not None:
                 # Probe the exact import the Supervisor performs at engine
-                # init. rapidocr's package __init__ resolves RapidOCR lazily,
-                # so bare package imports (or leaf modules such as
-                # pyclipper/onnxruntime) prove nothing about the native
-                # transitive closure (rapidocr.main -> ch_ppocr_det ->
-                # shapely); importing the real symbol loads that closure
-                # without instantiating the engine or downloading models.
+                # init, for every engine the recipe activates. rapidocr's
+                # package __init__ resolves RapidOCR lazily, so bare package
+                # imports (or leaf modules such as pyclipper/onnxruntime)
+                # prove nothing about the native transitive closure
+                # (rapidocr.main -> ch_ppocr_det -> shapely); importing the
+                # real symbols loads that closure without instantiating the
+                # engine or downloading models.
                 try:
                     subprocess.run(
                         [
@@ -903,8 +926,14 @@ class ManagedEnvironmentStore:
                             "-I",
                             "-B",
                             "-c",
-                            "from rapidocr import RapidOCR",
+                            import_probe,
                         ],
+                        # 与实际 Supervisor 使用同一私有配置/环境投影。
+                        # _launch 只投影参数；不启动进程、创建模型或写入缓存。
+                        env={
+                            **os.environ,
+                            **self._launch(record, str(python))["environment"],
+                        },
                         capture_output=True,
                         text=True,
                         timeout=20,
@@ -926,7 +955,50 @@ class ManagedEnvironmentStore:
             "python_version": actual_version,
             "abi": actual_abi,
             "packages": sorted(packages),
+            "versions": {
+                _normalize_dist_name(name): version
+                for name, version in (details.get("versions") or {}).items()
+            },
+            "platform": str(details.get("platform") or "").replace("-", "_"),
         }
+
+    @staticmethod
+    def _recipe_modes(recipe: str) -> list[str]:
+        """配方 → 真实可用的识别类型（目录与公共记录共用同一投影）。"""
+        if recipe.startswith("paddleocr"):
+            return ["text", "table", "formula", "structure", "document_vl"]
+        if recipe.startswith("rapidocr+mineru"):
+            return ["text", "document"]
+        if recipe == "rapidocr-cpu":
+            return ["text"]
+        if recipe == "mineru-cpu":
+            return ["document"]
+        return []
+
+    @staticmethod
+    def _scope_pins(scope: RuntimeInstallScope) -> list[tuple[str, str, str | None]]:
+        """锁文件 pin 列表：(规范小写名, 展示 pin, 锁定版本或 None)。
+
+        直接 URL 只接受可解析且包名一致的 wheel 版本；未知版本不参与复用。
+        """
+        pins: list[tuple[str, str, str | None]] = []
+        for line in scope.lock_path.read_text(encoding="utf-8").splitlines():
+            if match := re.match(r"^([A-Za-z0-9_.-]+)==([^\s\\]+)", line):
+                name, version = match.group(1), match.group(2)
+                pins.append((_normalize_dist_name(name), f"{name}=={version}", version))
+            elif match := re.match(r"^([A-Za-z0-9_.-]+)\s+@\s+([^\s\\]+)", line):
+                name, url = match.group(1), match.group(2)
+                version = None
+                try:
+                    wheel_name, wheel_version, _build, _tags = parse_wheel_filename(
+                        unquote(urlsplit(url).path.rsplit("/", 1)[-1])
+                    )
+                    if _normalize_dist_name(name) == wheel_name:
+                        version = str(wheel_version)
+                except InvalidWheelFilename:
+                    pass
+                pins.append((_normalize_dist_name(name), f"{name} @ {url}", version))
+        return pins
 
     def _public_record(
         self, record: dict, probe: dict, data: dict | None = None
@@ -950,16 +1022,7 @@ class ManagedEnvironmentStore:
             else "unknown"
         )
         recipe = record.get("recipe", "")
-        if recipe.startswith("paddleocr"):
-            modes = ["text", "table", "formula", "structure", "document_vl"]
-        elif recipe.startswith("rapidocr+mineru"):
-            modes = ["text", "document"]
-        elif recipe == "rapidocr-cpu":
-            modes = ["text"]
-        elif recipe == "mineru-cpu":
-            modes = ["document"]
-        else:
-            modes = []
+        modes = self._recipe_modes(recipe)
         return {
             **record,
             "path": str(self._safe_path(record)),
@@ -1035,6 +1098,7 @@ class ManagedEnvironmentStore:
             return {
                 "active_id": data["active_id"],
                 "active_revision": data["active_revision"],
+                "recipes": self.recipe_catalog(),
                 "sources": [
                     {
                         "id": source["id"],
@@ -1302,12 +1366,9 @@ class ManagedEnvironmentStore:
                 "source_config_revision": int(data.get("source_config_revision") or 0),
                 "runtime_manifest": self.manifest.sha256,
             }
-            dependencies = []
-            for line in scope.lock_path.read_text(encoding="utf-8").splitlines():
-                if match := re.match(r"^([A-Za-z0-9_.-]+)==([^\s\\]+)", line):
-                    dependencies.append(f"{match.group(1)}=={match.group(2)}")
-                elif match := re.match(r"^([A-Za-z0-9_.-]+)\s+@\s+([^\s\\]+)", line):
-                    dependencies.append(f"{match.group(1)} @ {match.group(2)}")
+            dependencies = [
+                display for _name, display, _version in self._scope_pins(scope)
+            ]
             _atomic_json(
                 self.paths.state_root / "environment-plans" / f"{env_id}.json",
                 plan,
@@ -1324,6 +1385,139 @@ class ManagedEnvironmentStore:
                 "dependency_origin": (
                     "bundled_pack" if scope.runtime_pack else "online_index"
                 ),
+            }
+
+    def recipe_catalog(self) -> list[dict]:
+        """唯一权威配方目录：沿当前 manifest 绑定的 scope 锁直接投影。
+
+        未被 manifest 绑定的配方不进入目录（与 preview_install 同一真相源），
+        前台推荐配置只消费本目录，不得自行推导依赖或来源。
+        """
+        entries: list[dict] = []
+        for recipe in _RECIPE_IDS:
+            try:
+                scope, accelerator = self._recipe(recipe)
+            except ManagedEnvironmentError:
+                continue
+            entries.append(
+                {
+                    "id": recipe,
+                    "display_name": _RECIPE_DISPLAY_NAMES[recipe],
+                    "configured_recognition_types": self._recipe_modes(recipe),
+                    "accelerator": accelerator,
+                    "target_device": (
+                        "cuda" if accelerator == "nvidia_cuda" else "cpu"
+                    ),
+                    "python_version": self.manifest.python.version,
+                    "abi": self.manifest.python.abi,
+                    "platform": self.manifest.python.platform,
+                    "scope_id": scope.scope_id,
+                    "component_ids": list(scope.component_ids),
+                    "recipe_lock": scope.sha256,
+                    "dependencies": [
+                        display for _name, display, _version in self._scope_pins(scope)
+                    ],
+                    "dependency_origin": (
+                        "bundled_pack" if scope.runtime_pack else "online_index"
+                    ),
+                    "python_origin": "product_bundle",
+                    "runtime_wheel_origin": "product_bundle",
+                }
+            )
+        return entries
+
+    def find_compatible(self, recipe: str) -> dict:
+        """按配方寻找可直接复用的已安装健康环境；只读，不安装/不切换。
+
+        身份只认真实 scope 锁（manifest scope.sha256 字节契约 + 安装时
+        冻结的锁证据）、ABI/Python 基线/平台与设备要求；名称与下载镜像
+        不参与。选择优先当前活动环境，其余按稳定 id 序。旧记录缺少锁
+        证据时如实标记 query 不验证，list/手工切换保持可用。
+        """
+        with RuntimeStoreLock(self._lock):
+            data = self._read()
+            scope, _accelerator = self._recipe(recipe)
+            pins = {
+                name: version for name, _display, version in self._scope_pins(scope)
+            }
+            ordered = sorted(
+                data["environments"].values(),
+                key=lambda record: (
+                    record["id"] != data["active_id"],
+                    record["id"],
+                ),
+            )
+            evaluations: list[dict] = []
+            selected: dict | None = None
+            for record in ordered:
+                evaluation = {
+                    "environment_id": record["id"],
+                    "name": record["name"],
+                    "revision": record["revision"],
+                    "status": record["status"],
+                    "recipe": record.get("recipe")
+                    if record["kind"] == "venv"
+                    else None,
+                    "active": record["id"] == data["active_id"],
+                    "selected": False,
+                    "reason_code": None,
+                }
+                reason: str | None
+                if record["kind"] == "legacy":
+                    reason = "legacy_environment"
+                elif record["status"] != "installed":
+                    reason = "environment_empty"
+                elif record.get("recipe") != recipe:
+                    reason = "recipe_mismatch"
+                elif "recipe_lock" not in record:
+                    reason = "lock_evidence_missing"
+                elif record["recipe_lock"] != scope.sha256:
+                    reason = "lock_evidence_mismatch"
+                else:
+                    reason = None
+                if reason is None:
+                    probe = self._probe(record)
+                    if not probe["healthy"]:
+                        reason = probe["reason"]
+                    elif probe.get("platform") != self.manifest.python.platform:
+                        reason = "platform_mismatch"
+                    elif any(version is None for version in pins.values()):
+                        reason = "locked_version_unknown"
+                    else:
+                        installed_versions = probe.get("versions") or {}
+                        if any(
+                            installed_versions.get(name) != version
+                            for name, version in pins.items()
+                        ):
+                            reason = "locked_version_mismatch"
+                if reason is None and selected is not None:
+                    reason = "compatible_lower_priority"
+                evaluation["reason_code"] = reason
+                if reason is None:
+                    evaluation["selected"] = True
+                    selection_reason = (
+                        "active_environment"
+                        if record["id"] == data["active_id"]
+                        else "deterministic_id_order"
+                    )
+                    evaluation["reason_code"] = (
+                        "selected_active_environment"
+                        if selection_reason == "active_environment"
+                        else "selected_compatible_environment"
+                    )
+                    selected = {
+                        "environment_id": record["id"],
+                        "environment_revision": record["revision"],
+                        "recipe": recipe,
+                        "selection_reason": selection_reason,
+                    }
+                evaluations.append(evaluation)
+            return {
+                "recipe": recipe,
+                "recipe_lock": scope.sha256,
+                "recipes": self.recipe_catalog(),
+                "selected": selected,
+                "environments": evaluations,
             }
 
     def install(
@@ -1442,6 +1636,8 @@ class ManagedEnvironmentStore:
                         "path": str(Path(env_id) / "revisions" / directory),
                         "status": "installed",
                         "recipe": plan["recipe"],
+                        # 安装时冻结的 scope 锁证据（旧记录缺省该键）。
+                        "recipe_lock": scope.sha256,
                         "source_ids": plan["source_ids"],
                         "python_version": self.manifest.python.version,
                         "abi": self.manifest.python.abi,

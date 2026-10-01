@@ -2435,6 +2435,7 @@ def _request(value: object) -> dict[str, Any]:
             "create": {"name"},
             "set_sources": {"package_source_id", "model_source_id"},
             "preview_install": {"environment_id", "recipe"},
+            "find_compatible": {"recipe"},
             "install": {"plan_id", "environment_id", "recipe", "source_ids"},
             "prepare_switch": {"environment_id"},
             "commit_switch": {"prepared"},
@@ -2889,6 +2890,8 @@ def main(argv: list[str] | None = None) -> int:
                     if request.get("source_ids") is not None
                     else None,
                 )
+            elif action == "find_compatible":
+                payload = manager.find_compatible(request["recipe"])
             elif action == "prepare_switch":
                 payload = manager.prepare_switch(request["environment_id"])
             elif action == "commit_switch":
