@@ -29,6 +29,7 @@ from vibeocr.runtime.environments.runtime_installer import (
     _prepare_online_artifacts,
     _python_in,
     _run_install_command,
+    probe_nvidia_driver,
 )
 from vibeocr.runtime.environments.runtime_layout import resolve_runtime_store
 from vibeocr.runtime.environments.runtime_lock import (
@@ -1094,6 +1095,10 @@ class ManagedEnvironmentStore:
         return total
 
     def list(self) -> dict:
+        # 硬件真值只由 Runtime 探测一次（与安装预检同一 helper）：
+        # unsupported 携带原因，unknown 只代表探测超时/未完成。探测不触碰
+        # 注册表，在锁外执行，避免把 nvidia-smi 的超时预算计入存储锁。
+        hardware = {"nvidia_driver": probe_nvidia_driver()}
         with RuntimeStoreLock(self._lock):
             data = self._read()
             catalog = self._source_catalog()
@@ -1102,6 +1107,7 @@ class ManagedEnvironmentStore:
                 "active_id": data["active_id"],
                 "active_revision": data["active_revision"],
                 "recipes": self.recipe_catalog(),
+                "hardware": hardware,
                 "sources": [
                     {
                         "id": source["id"],

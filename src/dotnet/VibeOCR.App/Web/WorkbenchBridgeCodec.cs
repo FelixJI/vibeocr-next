@@ -50,6 +50,7 @@ public static class WorkbenchBridgeCodec
   private static readonly HashSet<string> EnvironmentIdArgumentFields = ["environmentId"];
   private static readonly HashSet<string> EnvironmentRecipeArgumentFields = ["environmentId", "recipe", "sourceId"];
   private static readonly HashSet<string> EnvironmentRecipeOnlyArgumentFields = ["environmentId", "recipe"];
+  private static readonly HashSet<string> RecipeOnlyArgumentFields = ["recipe"];
   private static readonly HashSet<string> PlanIdArgumentFields = ["planId", "sourceId"];
   private static readonly HashSet<string> PlanIdOnlyArgumentFields = ["planId"];
   private static readonly HashSet<string> EnvironmentSourceDefaultsArgumentFields =
@@ -531,6 +532,17 @@ public static class WorkbenchBridgeCodec
       case ("settings", "repairEmptyEnvironment"):
         EnsureObjectWithFields(arguments, EnvironmentIdArgumentFields, "command arguments");
         return new RepairEmptyEnvironmentCommand(ParseEnvironmentId(arguments));
+      case ("settings", "findCompatibleEnvironment"):
+      {
+        // 桥只做协议 id 类型守卫（与 preview 同一锁定 id 集）；目录真值由
+        // 宿主按 Runtime 目录核验，未知输入拒绝，不降 input validation。
+        EnsureObjectWithFields(arguments, RecipeOnlyArgumentFields, "command arguments");
+        string? compatibleRecipe = arguments.GetProperty("recipe").GetString();
+        if (compatibleRecipe is not ("rapidocr-cpu" or "paddleocr-cpu" or "paddleocr-cuda" or
+            "mineru-cpu" or "rapidocr+mineru-cpu" or "rapidocr+mineru-cuda"))
+          throw new WorkbenchBridgeProtocolException("运行环境配方无效。");
+        return new FindCompatibleEnvironmentCommand(compatibleRecipe);
+      }
       case ("settings", "setTheme"):
         EnsureObjectWithFields(arguments, ThemeArgumentFields, "command arguments");
         return new SetThemeCommand(ParseTheme(
@@ -1032,6 +1044,21 @@ public static class WorkbenchBridgeCodec
       environmentUnknownDefaultSourceIds = settings.EnvironmentUnknownDefaultSourceIds ?? [],
       environmentPackageSourceIds = settings.EnvironmentPackageSourceIds ?? [],
       settings.EnvironmentCanCancelInstall,
+      environmentRecipes = settings.EnvironmentRecipes ?? [],
+      environmentHardware = settings.EnvironmentHardware is null ? null : new
+      {
+        nvidiaDriverStatus = settings.EnvironmentHardware.NvidiaDriverStatus,
+        nvidiaDriverReason = settings.EnvironmentHardware.NvidiaDriverReason,
+        nvidiaDriverVersion = settings.EnvironmentHardware.NvidiaDriverVersion,
+      },
+      environmentCompatibility = settings.EnvironmentCompatibility is null ? null : new
+      {
+        settings.EnvironmentCompatibility.Recipe,
+        selectedEnvironmentId = settings.EnvironmentCompatibility.SelectedEnvironmentId,
+        selectedEnvironmentRevision = settings.EnvironmentCompatibility.SelectedEnvironmentRevision,
+        selectionReason = settings.EnvironmentCompatibility.SelectionReason,
+        environments = settings.EnvironmentCompatibility.Environments ?? [],
+      },
       mineruConnection = settings.MineruConnection is null ? null : new
       {
         settings.MineruConnection.Supported,

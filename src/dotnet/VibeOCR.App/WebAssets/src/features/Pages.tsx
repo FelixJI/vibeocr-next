@@ -185,14 +185,92 @@ function sourceKindLabel(kind: string): string {
   return kind === "model_registry" ? "模型来源" : "依赖包来源";
 }
 
-const environmentRecipes = [
-  ["rapidocr-cpu", "RapidOCR · CPU"],
-  ["paddleocr-cpu", "PaddleOCR · CPU"],
-  ["paddleocr-cuda", "PaddleOCR · NVIDIA CUDA"],
-  ["mineru-cpu", "MinerU · CPU"],
-  ["rapidocr+mineru-cpu", "RapidOCR + MinerU · CPU"],
-  ["rapidocr+mineru-cuda", "RapidOCR + MinerU · NVIDIA CUDA"],
-] as const;
+interface ManagedEnvironmentRecipeState {
+  readonly id: string;
+  readonly displayName: string;
+  readonly configuredRecognitionTypes?: readonly string[] | null;
+  readonly accelerator?: string | null;
+  readonly targetDevice?: string | null;
+  readonly pythonVersion?: string | null;
+  readonly abi?: string | null;
+  readonly platform?: string | null;
+  readonly dependencies?: readonly string[] | null;
+  readonly dependencyOrigin?: string | null;
+}
+
+interface ManagedEnvironmentHardwareState {
+  /** ok/unsupported/unknown；缺失按 unknown（未探测）呈现，不臆造可用性。 */
+  readonly nvidiaDriverStatus: string;
+  readonly nvidiaDriverReason?: string | null;
+  readonly nvidiaDriverVersion?: string | null;
+}
+
+interface ManagedEnvironmentCompatibilityState {
+  readonly recipe: string;
+  readonly selectedEnvironmentId?: string | null;
+  readonly selectedEnvironmentRevision?: number | null;
+  readonly selectionReason?: string | null;
+}
+
+function managedEnvironmentRecipes(
+  value: unknown,
+): readonly ManagedEnvironmentRecipeState[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (entry): entry is ManagedEnvironmentRecipeState =>
+      entry !== null &&
+      typeof entry === "object" &&
+      !Array.isArray(entry) &&
+      typeof (entry as Partial<ManagedEnvironmentRecipeState>).id ===
+        "string" &&
+      typeof (entry as Partial<ManagedEnvironmentRecipeState>).displayName ===
+        "string",
+  );
+}
+
+function managedEnvironmentHardware(
+  value: unknown,
+): ManagedEnvironmentHardwareState {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return { nvidiaDriverStatus: "unknown" };
+  const candidate = value as Partial<ManagedEnvironmentHardwareState>;
+  return typeof candidate.nvidiaDriverStatus === "string" &&
+    candidate.nvidiaDriverStatus.length > 0
+    ? (candidate as ManagedEnvironmentHardwareState)
+    : { nvidiaDriverStatus: "unknown" };
+}
+
+function managedEnvironmentCompatibility(
+  value: unknown,
+): ManagedEnvironmentCompatibilityState | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const candidate = value as Partial<ManagedEnvironmentCompatibilityState>;
+  return typeof candidate.recipe === "string" && candidate.recipe.length > 0
+    ? (candidate as ManagedEnvironmentCompatibilityState)
+    : undefined;
+}
+
+// 有界自动命名：与已列名字 ordinal-ignore-case 比较，找不到即放弃，
+// 不首目盲重试 create，也不修改既有用户命名。
+function autoEnvironmentName(
+  base: string,
+  existingNames: readonly string[],
+): string | null {
+  const taken = new Set(existingNames.map((name) => name.toLowerCase()));
+  if (!taken.has(base.toLowerCase())) return base;
+  for (let ordinal = 2; ordinal <= 99; ordinal += 1) {
+    const candidate = `${base} ${ordinal}`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+  return null;
+}
+
+function recognitionPurposeLabel(types: readonly string[]): string {
+  const labels = types.map((type) =>
+    type === "text" ? "文字识别" : type === "document" ? "文档解析" : type,
+  );
+  return labels.join(" + ");
+}
 
 const environmentRecoveryActions: Readonly<Record<string, string>> = {
   check_source_and_retry: "检查下载源与网络后重新预览安装",
@@ -1741,6 +1819,14 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
 
 export function SettingsPage({ viewState, actions }: FeatureProps) {
   const state = feature(viewState, "settings");
+  // 推荐流程的自动创建环境：创建后高级区自动展开并选中该环境，
+  // 预览计划与确认安装始终在既有编辑器里完成，不另建第二套入口。
+  const [pendingPrepare, setPendingPrepare] = useState<{
+    name: string;
+    recipe: string;
+  } | null>(null);
+  const advancedRef = useRef<HTMLDetailsElement>(null);
+  const openAdvanced = () => advancedRef.current?.setAttribute("open", "");
   // backend 是运行时 profile 声明的目标加速器，不是实测执行设备；
   // 未读取真实快照前不冒充任何设备。
   const backend = typeof state.backend === "string" ? state.backend : "";
@@ -1865,7 +1951,6 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
               </details>
             ) : null}
           </div>
-          <BundledCapabilities capabilities={viewState.capabilities} />
           <CapabilityGate
             capability="runtime.refresh"
             capabilities={viewState.capabilities}
@@ -1876,7 +1961,27 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             重新检查状态
           </CapabilityGate>
           {viewState.capabilities.includes("runtime.environments") ? (
-            <ManagedEnvironmentEditor state={state} actions={actions} />
+            <>
+              <EnvironmentRecommendation
+                state={state}
+                actions={actions}
+                pendingPrepare={pendingPrepare}
+                onPendingPrepare={setPendingPrepare}
+                onPrepareStarted={openAdvanced}
+              />
+              <details
+                ref={advancedRef}
+                className="managed-environment-advanced"
+              >
+                <summary>高级：环境与依赖管理</summary>
+                <ManagedEnvironmentEditor
+                  state={state}
+                  actions={actions}
+                  focusEnvironmentName={pendingPrepare?.name}
+                  focusRecipe={pendingPrepare?.recipe}
+                />
+              </details>
+            </>
           ) : (
             <>
               <AcceleratorFeatures
@@ -2011,15 +2116,34 @@ function managedResolvedSources(
 function ManagedEnvironmentEditor({
   state,
   actions,
+  focusEnvironmentName,
+  focusRecipe,
 }: {
   readonly state: Record<string, unknown>;
   readonly actions: AppActions;
+  readonly focusEnvironmentName?: string;
+  readonly focusRecipe?: string;
 }) {
   const environments = managedEnvironments(state.environments);
   const activeId = stringValue(state.activeEnvironmentId);
   const [selectedId, setSelectedId] = useState("");
   const [name, setName] = useState("");
-  const [recipe, setRecipe] = useState<string>(environmentRecipes[0][0]);
+  // 配方目录只来自 Runtime 投影（state.environmentRecipes）；未同步时为空，
+  // 不回落到前端臆造的固定组合，预览入口诚实禁用。
+  const recipes = managedEnvironmentRecipes(state.environmentRecipes);
+  const [recipeChoice, setRecipeChoice] = useState<string>("");
+  // 推荐流程创建的环境成为焦点：用户显式选择仍最优先；配方在用户
+  // 未选择前跟随焦点的准备配方。
+  const focusEnvironment = focusEnvironmentName
+    ? environments.find(
+        (environment) => environment.name === focusEnvironmentName,
+      )
+    : undefined;
+  const recipe = recipes.some((entry) => entry.id === recipeChoice)
+    ? recipeChoice
+    : (recipes.find((entry) => entry.id === focusRecipe)?.id ??
+      recipes[0]?.id ??
+      "");
   // 目录优先；旧宿主无目录时回退到 package id 列表（显示名即 id）。
   const catalog = managedSourceOptions(state.environmentSources);
   const packageSources = catalog.length
@@ -2044,6 +2168,7 @@ function ManagedEnvironmentEditor({
     sourceId === "" || packageIds.includes(sourceId) ? sourceId : "";
   const selected =
     environments.find((environment) => environment.id === selectedId) ??
+    focusEnvironment ??
     environments.find((environment) => environment.id === activeId) ??
     environments[0];
   const plan = managedEnvironmentPlan(state.environmentPlan);
@@ -2068,6 +2193,13 @@ function ManagedEnvironmentEditor({
       ? plan
       : undefined;
   const busy = state.environmentBusy === true;
+  // 名称可留空：自动命名基于已列名字有界推导，不反复盲试 create。
+  const createName =
+    name.trim() ||
+    autoEnvironmentName(
+      "新环境",
+      environments.map((env) => env.name),
+    );
   // 全局默认与单环境 override 的选择：未编辑时跟随持久化值；保存成功后
   // 清空本地编辑，回显宿主回传的真值。
   const defaultIds = stringValues(state.environmentDefaultSourceIds);
@@ -2105,18 +2237,19 @@ function ManagedEnvironmentEditor({
       </p>
       <div className="setting-row">
         <Input
-          aria-label="新环境名称"
-          placeholder="新环境名称"
+          aria-label="新环境名称（留空自动命名）"
+          placeholder="新环境名称（留空自动命名）"
           value={name}
           disabled={busy}
           onChange={(_, data) => setName(data.value)}
         />
         <Button
-          disabled={busy || !name.trim()}
+          disabled={busy || !createName}
           onClick={() => {
+            if (!createName) return;
             void actions.run({
               type: "settings.createEnvironment",
-              name: name.trim(),
+              name: createName,
             });
             setName("");
           }}
@@ -2210,13 +2343,23 @@ function ManagedEnvironmentEditor({
           ) : null}
           <details className="managed-source-config">
             <summary>来源配置（默认、覆盖与已生效值）</summary>
-            {managedResolvedSources(selected.resolvedSources).map((entry) => (
-              <p key={entry.kind}>
-                {sourceKindLabel(entry.kind)}：
-                {entry.displayName ?? "官方默认（端点未知）"}（
-                {sourceOriginLabels[entry.origin] ?? entry.origin}）
-              </p>
-            ))}
+            {managedResolvedSources(selected.resolvedSources).map((entry) => {
+              // 主展示用目录 displayName + 脱敏端点；继承只回显解析结果，
+              // 模型源无覆盖时端点如实未知，不把 PyPI 与模型混为单源。
+              const endpoint =
+                entry.id == null
+                  ? null
+                  : (catalog.find((source) => source.id === entry.id)
+                      ?.endpoint ?? null);
+              return (
+                <p key={entry.kind}>
+                  {sourceKindLabel(entry.kind)}：
+                  {entry.displayName ?? "官方默认（端点未知）"}（
+                  {sourceOriginLabels[entry.origin] ?? entry.origin}
+                  {endpoint ? `；端点 ${endpoint}` : ""}）
+                </p>
+              );
+            })}
             {selected.sourceIds?.length ? (
               <p className="form-note">
                 已安装依赖来源：
@@ -2333,21 +2476,27 @@ function ManagedEnvironmentEditor({
           (selected.id !== activeId || selected.status === "empty") ? (
             <>
               <label htmlFor="managed-recipe-select">锁定依赖配方</label>
-              <Select
-                id="managed-recipe-select"
-                value={recipe}
-                disabled={busy}
-                onChange={(event) => {
-                  invalidatePreview();
-                  setRecipe(event.target.value);
-                }}
-              >
-                {environmentRecipes.map(([id, label]) => (
-                  <option key={id} value={id}>
-                    {label}
-                  </option>
-                ))}
-              </Select>
+              {recipes.length === 0 ? (
+                <p className="form-note">
+                  配方目录尚未同步（无法预览依赖）；可点击“重新检查状态”后再试。
+                </p>
+              ) : (
+                <Select
+                  id="managed-recipe-select"
+                  value={recipe}
+                  disabled={busy}
+                  onChange={(event) => {
+                    invalidatePreview();
+                    setRecipeChoice(event.target.value);
+                  }}
+                >
+                  {recipes.map((entry) => (
+                    <option key={entry.id} value={entry.id}>
+                      {entry.displayName}
+                    </option>
+                  ))}
+                </Select>
+              )}
               <label htmlFor="managed-package-source-select">
                 本次依赖下载源
               </label>
@@ -2375,7 +2524,7 @@ function ManagedEnvironmentEditor({
               </Select>
               <div className="setting-row">
                 <Button
-                  disabled={busy}
+                  disabled={busy || !recipe}
                   onClick={() =>
                     void actions.run({
                       type: "settings.previewEnvironmentInstall",
@@ -2420,69 +2569,14 @@ function ManagedEnvironmentEditor({
             </>
           ) : null}
           {pendingPlan ? (
-            <div className="runtime-install-plan">
-              <p>
-                计划：{pendingPlan.recipe} · 目标
-                {environments.find(
-                  (environment) => environment.id === pendingPlan.environmentId,
-                )?.name ?? pendingPlan.environmentId}
-                （环境修订 {pendingPlan.environmentRevision}）· 请求源：
-                {pendingPlan.requestedSourceIds == null
-                  ? "跟随配置"
-                  : pendingPlan.requestedSourceIds
-                      .map((id) => sourceName(id))
-                      .join("、")}
-                ；生效源：
-                {pendingPlan.sourceIds.map((id) => sourceName(id)).join("、")}
-              </p>
-              <details>
-                <summary>
-                  锁定依赖（{pendingPlan.dependencies.length} 项）
-                </summary>
-                <p>{pendingPlan.dependencies.join("、")}</p>
-              </details>
-              <details>
-                <summary>来源与资产明细</summary>
-                {(pendingPlan.sources ?? []).map((source) => (
-                  <p key={source.id}>
-                    {source.displayName}（{sourceKindLabel(source.kind)}，
-                    {source.requested
-                      ? "本次指定"
-                      : `继承（${
-                          sourceOriginLabels[source.inheritedFrom] ??
-                          source.inheritedFrom
-                        }）`}
-                    ；{sourceUsageLabels[source.usage] ?? source.usage}
-                    {source.endpoint ? `；端点 ${source.endpoint}` : ""}
-                    ；实际下载端点
-                    {source.actualEndpoint ?? "未知"}）
-                  </p>
-                ))}
-                <p className="form-note">
-                  依赖来源：
-                  {pendingPlan.dependencyOrigin === "bundled_pack"
-                    ? "随包离线包"
-                    : "锁定在线索引（哈希锁定）"}
-                  ；解释器固定归档与内部 Runtime wheel 随产品分发并经清单校验。
-                </p>
-                <p className="form-note">
-                  模型源仅为偏好投影，实际下载端点与成本未知；缓存命中
-                  不会计入新下载，实际下载情况安装后才可知。
-                </p>
-              </details>
-              <Button
-                disabled={busy}
-                onClick={() =>
-                  void actions.run({
-                    type: "settings.confirmEnvironmentInstall",
-                    planId: pendingPlan.planId,
-                    ...(selectedSourceId ? { sourceId: selectedSourceId } : {}),
-                  })
-                }
-              >
-                确认安装依赖
-              </Button>
-            </div>
+            <EnvironmentPlanPanel
+              plan={pendingPlan}
+              environments={environments}
+              sourceName={sourceName}
+              busy={busy}
+              actions={actions}
+              confirmSourceId={selectedSourceId}
+            />
           ) : null}
           {selected.id !== activeId ||
           (selected.status === "installed" &&
@@ -2598,6 +2692,380 @@ function ManagedEnvironmentEditor({
           取消安装
         </Button>
       ) : null}
+    </div>
+  );
+}
+
+// 安装计划面板：推荐配置的“准备此配置”与高级编辑器共用同一确认入口，
+// 由用户确认后才真正安装（confirmSourceId 必须与预览的请求源语义一致）。
+function EnvironmentPlanPanel({
+  plan,
+  environments,
+  sourceName,
+  busy,
+  actions,
+  confirmSourceId,
+}: {
+  readonly plan: ManagedEnvironmentPlanState;
+  readonly environments: readonly ManagedEnvironmentState[];
+  readonly sourceName: (id: string | null | undefined) => string;
+  readonly busy: boolean;
+  readonly actions: AppActions;
+  readonly confirmSourceId?: string;
+}) {
+  return (
+    <div className="runtime-install-plan">
+      <p>
+        计划：{plan.recipe} · 目标
+        {environments.find(
+          (environment) => environment.id === plan.environmentId,
+        )?.name ?? plan.environmentId}
+        （环境修订 {plan.environmentRevision}）· 请求源：
+        {plan.requestedSourceIds == null
+          ? "跟随配置"
+          : plan.requestedSourceIds.map((id) => sourceName(id)).join("、")}
+        ；生效源：
+        {plan.sourceIds.map((id) => sourceName(id)).join("、")}
+      </p>
+      <details>
+        <summary>锁定依赖（{plan.dependencies.length} 项）</summary>
+        <p>{plan.dependencies.join("、")}</p>
+      </details>
+      <details>
+        <summary>来源与资产明细</summary>
+        {(plan.sources ?? []).map((source) => (
+          <p key={source.id}>
+            {source.displayName}（{sourceKindLabel(source.kind)}，
+            {source.requested
+              ? "本次指定"
+              : `继承（${
+                  sourceOriginLabels[source.inheritedFrom] ??
+                  source.inheritedFrom
+                }）`}
+            ；{sourceUsageLabels[source.usage] ?? source.usage}
+            {source.endpoint ? `；端点 ${source.endpoint}` : ""}
+            ；实际下载端点{source.actualEndpoint ?? "未知"}）
+          </p>
+        ))}
+        <p className="form-note">
+          依赖来源：
+          {plan.dependencyOrigin === "bundled_pack"
+            ? "随包离线包"
+            : "锁定在线索引（哈希锁定）"}
+          ；解释器固定归档与内部 Runtime wheel 随产品分发并经清单校验。
+        </p>
+        <p className="form-note">
+          模型源仅为偏好投影，实际下载端点与成本未知；缓存命中
+          不会计入新下载，实际下载情况安装后才可知。
+        </p>
+      </details>
+      <Button
+        disabled={busy}
+        onClick={() =>
+          void actions.run({
+            type: "settings.confirmEnvironmentInstall",
+            planId: plan.planId,
+            ...(confirmSourceId ? { sourceId: confirmSourceId } : {}),
+          })
+        }
+      >
+        确认安装依赖
+      </Button>
+    </div>
+  );
+}
+
+// 推荐配置区：用途/设备只是待选目标，选择仅触发只读兼容查询；
+// 有兼容环境→切换并启动验证，无兼容环境→自动命名创建空环境+真实预览，
+// 安装始终由用户确认。当前运行任务与实际环境不受选择影响。
+function EnvironmentRecommendation({
+  state,
+  actions,
+  pendingPrepare,
+  onPendingPrepare,
+  onPrepareStarted,
+}: {
+  readonly state: Readonly<Record<string, unknown>>;
+  readonly actions: AppActions;
+  readonly pendingPrepare: { name: string; recipe: string } | null;
+  readonly onPendingPrepare: (
+    pending: { name: string; recipe: string } | null,
+  ) => void;
+  readonly onPrepareStarted: () => void;
+}) {
+  const recipes = managedEnvironmentRecipes(state.environmentRecipes);
+  const hardware = managedEnvironmentHardware(state.environmentHardware);
+  const environments = managedEnvironments(state.environments);
+  const activeId = stringValue(state.activeEnvironmentId);
+  const busy = state.environmentBusy === true;
+  const compatibility = managedEnvironmentCompatibility(
+    state.environmentCompatibility,
+  );
+  // 目的分组：配方目录的 configured_recognition_types 即真实用途；
+  // 设备分组：accelerator（cpu/nvidia_cuda），CPU 始终可选。
+  const purposes = [
+    ...new Set(
+      recipes.map((recipe) =>
+        [...(recipe.configuredRecognitionTypes ?? [])].sort().join("|"),
+      ),
+    ),
+  ];
+  const [purposeKey, setPurposeKey] = useState<string>("");
+  const [device, setDevice] = useState<string>("cpu");
+  const effectivePurpose = purposes.includes(purposeKey)
+    ? purposeKey
+    : (purposes[0] ?? "");
+  const purposeRecipes = recipes.filter(
+    (recipe) =>
+      [...(recipe.configuredRecognitionTypes ?? [])].sort().join("|") ===
+      effectivePurpose,
+  );
+  const devices: readonly string[] = [
+    ...new Set(
+      purposeRecipes.map((recipe) =>
+        recipe.accelerator === "nvidia_cuda" ? "nvidia_cuda" : "cpu",
+      ),
+    ),
+  ];
+  const effectiveDevice = devices.includes(device)
+    ? device
+    : (devices[0] ?? "");
+  const target = purposeRecipes.find(
+    (recipe) =>
+      (recipe.accelerator === "nvidia_cuda" ? "nvidia_cuda" : "cpu") ===
+      effectiveDevice,
+  );
+  // GPU 门禁只消费 Runtime 硬件投影：真正不支持时明确禁用并给出原因；
+  // 未探测/超时诚实显示 unknown，也不默认可选。
+  const hardwareBlockReason = (recipe: ManagedEnvironmentRecipeState) => {
+    if (recipe.accelerator !== "nvidia_cuda") return null;
+    if (hardware.nvidiaDriverStatus === "ok") return null;
+    if (hardware.nvidiaDriverStatus === "unsupported") {
+      return hardware.nvidiaDriverReason === "nvidia_driver_incompatible"
+        ? `不支持：NVIDIA 驱动 ${hardware.nvidiaDriverVersion ?? ""} 低于 CUDA 12.x 下限（需 ≥ 528.33）`
+        : "不支持：未检测到可用的 NVIDIA 驱动";
+    }
+    return "暂不可选：GPU 状态未探测（可稍后重新检查状态）";
+  };
+  const blockedReason = target ? hardwareBlockReason(target) : null;
+  const queryResult =
+    compatibility && target && compatibility.recipe === target.id
+      ? compatibility
+      : undefined;
+  const compatibleEnvironment = queryResult?.selectedEnvironmentId
+    ? environments.find(
+        (environment) => environment.id === queryResult.selectedEnvironmentId,
+      )
+    : undefined;
+  const activeReady =
+    compatibleEnvironment &&
+    compatibleEnvironment.id === activeId &&
+    compatibleEnvironment.status === "installed" &&
+    compatibleEnvironment.serviceState === "ready";
+  // 准备此配置：自动命名创建空环境，创建成功后对同一环境真实预览；
+  // 计划与确认安装在下方高级编辑器完成（由外层展开并聚焦）。
+  // effect 只补发预览命令，去重靠环境 id ref，不在 effect 里同步 setState。
+  const dispatchedPrepareEnvironment = useRef<string | null>(null);
+  const prepareName = target
+    ? autoEnvironmentName(
+        target.displayName,
+        environments.map((environment) => environment.name),
+      )
+    : null;
+  useEffect(() => {
+    if (!pendingPrepare) return;
+    const created = environments.find(
+      (environment) => environment.name === pendingPrepare.name,
+    );
+    if (!created || dispatchedPrepareEnvironment.current === created.id) return;
+    dispatchedPrepareEnvironment.current = created.id;
+    void actions.run({
+      type: "settings.previewEnvironmentInstall",
+      environmentId: created.id,
+      recipe: pendingPrepare.recipe,
+    });
+  }, [pendingPrepare, environments, actions]);
+  // 选择即查询：当前目标有目录条目、未被硬件阻断且没有对应结果时，
+  // 只读发起一次 findCompatible；结果按配方 id 绑定，旧结果不覆盖新选择。
+  useEffect(() => {
+    if (!target || busy || blockedReason) return;
+    if (compatibility?.recipe === target.id) return;
+    void actions.run({
+      type: "settings.findCompatibleEnvironment",
+      recipe: target.id,
+    });
+  }, [target, busy, blockedReason, compatibility, actions]);
+  const clearPendingPrepare = () => onPendingPrepare(null);
+  const plan = managedEnvironmentPlan(state.environmentPlan);
+  // 推荐流程自建的准备计划：只用于指引说明，计划与确认安装统一在
+  // 高级编辑器里回显，不重复渲染第二份确认入口。
+  const preparePlan =
+    plan &&
+    target &&
+    pendingPrepare &&
+    pendingPrepare.recipe === target.id &&
+    (() => {
+      const created = environments.find(
+        (environment) => environment.name === pendingPrepare.name,
+      );
+      return created && plan.environmentId === created.id ? plan : undefined;
+    })();
+  const driverLabel =
+    hardware.nvidiaDriverStatus === "ok"
+      ? `可用（驱动 ${hardware.nvidiaDriverVersion ?? "未知版本"}）`
+      : hardware.nvidiaDriverStatus === "unsupported"
+        ? "不支持"
+        : "未探测";
+  return (
+    <div className="environment-recommendation" aria-label="推荐配置">
+      <p className="form-note">
+        按用途与设备选择推荐配置：选择只做只读兼容查询，不会安装或切换；
+        已兼容的环境可直接切换并启动验证，无兼容环境时先准备空环境并
+        预览依赖，安装由你确认。当前运行任务不受选择影响。
+      </p>
+      {recipes.length === 0 ? (
+        <p className="form-note">
+          运行环境目录尚未同步，暂无法推荐配置；可点击“重新检查状态”后再试。
+        </p>
+      ) : (
+        <>
+          <div className="setting-row">
+            <label htmlFor="environment-purpose-select">识别用途</label>
+            <Select
+              id="environment-purpose-select"
+              value={effectivePurpose}
+              disabled={busy}
+              onChange={(_, data) => {
+                void actions.run({
+                  type: "settings.invalidateEnvironmentPlan",
+                });
+                clearPendingPrepare();
+                setPurposeKey(String(data.value));
+              }}
+            >
+              {purposes.map((key) => (
+                <option key={key} value={key}>
+                  {recognitionPurposeLabel(key ? key.split("|") : [])}
+                </option>
+              ))}
+            </Select>
+          </div>
+          <div className="setting-row">
+            <label htmlFor="environment-device-select">目标设备</label>
+            <Select
+              id="environment-device-select"
+              value={effectiveDevice}
+              disabled={busy || devices.length === 0}
+              onChange={(_, data) => {
+                void actions.run({
+                  type: "settings.invalidateEnvironmentPlan",
+                });
+                clearPendingPrepare();
+                setDevice(String(data.value));
+              }}
+            >
+              {devices.map((key) => (
+                <option key={key} value={key}>
+                  {key === "nvidia_cuda" ? "NVIDIA CUDA" : "CPU"}
+                </option>
+              ))}
+            </Select>
+          </div>
+          {target ? (
+            <p>
+              目标配置：{target.displayName}（
+              {(target.configuredRecognitionTypes ?? []).length > 0
+                ? recognitionPurposeLabel(
+                    target.configuredRecognitionTypes ?? [],
+                  )
+                : "用途未知"}
+              ，设备 {target.targetDevice ?? "未知"}，Python{" "}
+              {target.pythonVersion ?? "未知"}）
+            </p>
+          ) : null}
+          <p className="environment-hardware-note">
+            GPU 状态（Runtime 探测）：{driverLabel}
+            {hardware.nvidiaDriverStatus === "unsupported" &&
+            hardware.nvidiaDriverReason
+              ? `（原因：${hardware.nvidiaDriverReason}）`
+              : ""}
+          </p>
+          {blockedReason ? (
+            <p role="alert">{blockedReason}；该配置当前不可选。</p>
+          ) : target ? (
+            <>
+              {queryResult ? (
+                compatibleEnvironment ? (
+                  <p>
+                    可直接复用环境「{compatibleEnvironment.name}」（修订{" "}
+                    {compatibleEnvironment.revision}，
+                    {queryResult.selectionReason === "active_environment"
+                      ? "当前活动环境"
+                      : "按稳定顺序选中"}
+                    ）；切换前不安装任何内容。
+                  </p>
+                ) : (
+                  <p>没有可直接复用的已安装环境（均为空、不匹配或未验证）。</p>
+                )
+              ) : (
+                <p className="form-note">正在查询可复用环境…</p>
+              )}
+              {activeReady ? (
+                <p role="status">
+                  该兼容环境已是当前环境并通过启动验证，无需重装。
+                </p>
+              ) : compatibleEnvironment ? (
+                <Button
+                  disabled={busy}
+                  onClick={() =>
+                    void actions.run({
+                      type: "settings.switchEnvironment",
+                      environmentId: compatibleEnvironment.id,
+                    })
+                  }
+                >
+                  {compatibleEnvironment.id === activeId
+                    ? "启动并验证当前环境"
+                    : "切换到此环境并启动验证"}
+                </Button>
+              ) : queryResult ? (
+                <div className="setting-row">
+                  <Button
+                    disabled={busy || !prepareName}
+                    onClick={async () => {
+                      if (!prepareName) return;
+                      const ok = await actions.run({
+                        type: "settings.createEnvironment",
+                        name: prepareName,
+                      });
+                      if (ok) {
+                        onPendingPrepare({
+                          name: prepareName,
+                          recipe: target.id,
+                        });
+                        onPrepareStarted();
+                      }
+                    }}
+                  >
+                    准备此配置
+                  </Button>
+                  <span className="form-note">
+                    {prepareName
+                      ? `将自动创建空环境「${prepareName}」并预览依赖；确认后才会安装。`
+                      : "自动命名空间已满，请在高级区手动创建。"}
+                  </span>
+                </div>
+              ) : null}
+            </>
+          ) : null}
+          {preparePlan ? (
+            <p role="status">
+              已创建空环境「{pendingPrepare?.name}」并预览 {preparePlan.recipe}
+              依赖；请在下方“高级：环境与依赖”核对锁定依赖并确认安装。
+            </p>
+          ) : null}
+        </>
+      )}
     </div>
   );
 }
@@ -3156,32 +3624,6 @@ function InstallPlanSection({
         </details>
       ) : null}
     </section>
-  );
-}
-
-function BundledCapabilities({
-  capabilities,
-}: {
-  readonly capabilities: readonly string[];
-}) {
-  const qrReady =
-    capabilities.includes("qrcode.generate") &&
-    capabilities.includes("qrcode.decode");
-  return (
-    <div className="bundled-capabilities" aria-label="随包基础能力">
-      <span className="bundled-capabilities-title">随包基础能力</span>
-      <div className="bundled-capability-row">
-        <div>
-          <strong>二维码与条形码</strong>
-          <p className="form-note">
-            生成与识别独立运行，可从二维码工具直接使用。
-          </p>
-        </div>
-        <Badge appearance="outline">
-          {qrReady ? "随包可用" : "当前运行环境不可用"}
-        </Badge>
-      </div>
-    </div>
   );
 }
 

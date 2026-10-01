@@ -376,6 +376,8 @@ public sealed class DesktopWorkbenchCommandHandler :
           environment => environment.DeleteAsync(deleteEnvironment.EnvironmentId, cancellationToken), cancellationToken),
         RepairEmptyEnvironmentCommand repair => await RunEnvironmentAsync(
           environment => environment.RepairEmptyAsync(repair.EnvironmentId, cancellationToken), cancellationToken),
+        FindCompatibleEnvironmentCommand findCompatible => await RunEnvironmentAsync(
+          environment => environment.FindCompatibleAsync(findCompatible.Recipe, cancellationToken), cancellationToken),
         SetThemeCommand setTheme => SetTheme(setTheme),
         SetStartupCommand startup => SetStartup(startup),
         SetActionHotkeyCommand setActionHotkey => SetActionHotkey(setActionHotkey),
@@ -3377,7 +3379,31 @@ public sealed class DesktopWorkbenchCommandHandler :
     EnvironmentDefaultSourceIds: viewModel.Environments?.Snapshot?.DefaultSourceIds,
     EnvironmentUnknownDefaultSourceIds: viewModel.Environments?.Snapshot?.UnknownDefaultSourceIds,
     EnvironmentPackageSourceIds: viewModel.Environments?.Snapshot?.PackageSourceIds,
-    EnvironmentCanCancelInstall: viewModel.Environments?.CanCancelInstall ?? false);
+    EnvironmentCanCancelInstall: viewModel.Environments?.CanCancelInstall ?? false,
+    EnvironmentRecipes: viewModel.Environments?.Snapshot?.Recipes?.Select(recipe =>
+      new SettingsEnvironmentRecipeState(
+        recipe.Id, recipe.DisplayName, recipe.ConfiguredRecognitionTypes,
+        recipe.Accelerator, recipe.TargetDevice, recipe.PythonVersion, recipe.Abi,
+        recipe.Platform, recipe.ScopeId, recipe.ComponentIds, recipe.RecipeLock,
+        recipe.Dependencies, recipe.DependencyOrigin, recipe.PythonOrigin,
+        recipe.RuntimeWheelOrigin)).ToArray(),
+    EnvironmentHardware: viewModel.Environments?.Snapshot?.Hardware is { } hardware
+      ? new SettingsEnvironmentHardwareState(
+        hardware.NvidiaDriver?.Status ?? "unknown",
+        hardware.NvidiaDriver?.ReasonCode,
+        hardware.NvidiaDriver?.DriverVersion)
+      // 旧 Runtime payload 无 hardware：诚实按未探测呈现，不臆造可用性。
+      : new SettingsEnvironmentHardwareState("unknown"),
+    EnvironmentCompatibility: viewModel.Environments?.Compatibility is { } compatibility
+      ? new SettingsEnvironmentCompatibilityState(
+        compatibility.Recipe,
+        compatibility.Selected?.EnvironmentId,
+        compatibility.Selected?.EnvironmentRevision,
+        compatibility.Selected?.SelectionReason,
+        compatibility.Environments?.Select(match => new SettingsEnvironmentQueryMatchState(
+          match.EnvironmentId, match.Name, match.Revision, match.Status,
+          match.Active, match.Selected, match.ReasonCode)).ToArray())
+      : null);
 
   private UpdateWorkbenchState UpdateState() => new(
     update.Value.IsBusy,
