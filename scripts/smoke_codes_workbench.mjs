@@ -824,7 +824,7 @@ async function main() {
           const supervisorPid = Number(lastReady.process_id);
           if (!await waitForPidExit(supervisorPid, 15000)) {
             evidence.stage2.supervisorStillAlivePid = supervisorPid;
-            throw cleanupError;
+            throw new Error(`Owned Supervisor ${supervisorPid} survived App teardown.`);
           }
         }
       }
