@@ -29,7 +29,7 @@ for (const size of [
             enabled: true,
             edge: "top",
             autoHide: true,
-            visibility: "revealed",
+            visibility: "visible",
             lingerMs: 300,
             theme: "system",
           },
