@@ -40,6 +40,10 @@ internal interface IFloatingToolbarView : IDisposable
 
     nint Handle { get; }
 
+    /// <summary>应用用户主题偏好（跟随系统/浅色/深色）：纯视觉更新，
+    /// 不改变可见性、窗口样式或焦点。</summary>
+    void ApplyTheme(FloatingToolbarTheme theme);
+
     PhysicalRectangle GetPreferredSize();
 
     PhysicalRectangle GetBounds();
@@ -153,6 +157,8 @@ internal sealed class FloatingToolbarController : IDisposable
             return;
         }
 
+        // 首次显示前应用主题，保证任何后续 ShowAt 都是正确主题。
+        _view.ApplyTheme(_settings.Theme);
         _dockedMonitor = _primaryMonitor();
         if (_settings.HiddenByUser)
         {
@@ -355,6 +361,10 @@ internal sealed class FloatingToolbarController : IDisposable
             Start();
             return;
         }
+
+        // 主题变化只重涂外观：不取消当前状态、不布防/撤防感应条、
+        // 不影响 linger 计时与既有 persist-first 错误语义。
+        _view.ApplyTheme(next.Theme);
 
         if (_state == ToolbarState.UserHidden)
         {

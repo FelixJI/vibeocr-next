@@ -32,7 +32,10 @@ public sealed class FloatingToolbarSettingsTests : IDisposable
         Assert.False(settings.Enabled);
         Assert.Equal(ScreenEdge.Top, settings.Edge);
         Assert.True(settings.AutoHide);
-        Assert.Equal(600, settings.LingerMs);
+        // 新无配置默认 300ms；已显式保存值不迁改。
+        Assert.Equal(FloatingToolbarSettings.DefaultLingerMs, settings.LingerMs);
+        Assert.Equal(300, settings.LingerMs);
+        Assert.Equal(FloatingToolbarTheme.System, settings.Theme);
     }
 
     [Fact]
@@ -70,6 +73,51 @@ public sealed class FloatingToolbarSettingsTests : IDisposable
         Assert.Equal(ScreenEdge.Top, settings.Edge);
         Assert.False(settings.AutoHide);
         Assert.Equal(FloatingToolbarSettings.MaximumLingerMs, settings.LingerMs);
+    }
+
+    [Fact]
+    public void LoadKeepsExplicitlySavedLingerIncludingLegacySixHundred()
+    {
+        PortableLayout layout = CreateLayout();
+        File.WriteAllText(
+            layout.ConfigFile,
+            """
+            {
+              "floating_toolbar": {
+                "enabled": true,
+                "edge": "top",
+                "auto_hide": true,
+                "linger_ms": 600
+              }
+            }
+            """);
+
+        FloatingToolbarSettings settings = FloatingToolbarSettings.Load(layout);
+
+        // 旧默认 600 已被显式保存：不因新默认 300 被静默改写。
+        Assert.Equal(600, settings.LingerMs);
+    }
+
+    [Theory]
+    [InlineData(100, 100)]
+    [InlineData(5000, 5000)]
+    [InlineData(50, 100)]
+    public void LoadAcceptsLingerBoundsAndClampsBelowMinimum(int saved, int expected)
+    {
+        PortableLayout layout = CreateLayout();
+        File.WriteAllText(
+            layout.ConfigFile,
+            $$"""
+            {
+              "floating_toolbar": {
+                "linger_ms": {{saved}}
+              }
+            }
+            """);
+
+        FloatingToolbarSettings settings = FloatingToolbarSettings.Load(layout);
+
+        Assert.Equal(expected, settings.LingerMs);
     }
 
     [Fact]
@@ -130,6 +178,84 @@ public sealed class FloatingToolbarSettingsTests : IDisposable
                 .GetBoolean());
         Assert.True(FloatingToolbarSettings.Load(layout).HiddenByUser);
         Assert.False(FloatingToolbarSettings.Default.HiddenByUser);
+    }
+
+    [Fact]
+    public void ThemeDefaultsToSystemWhenFieldMissingAndIsNotMigrated()
+    {
+        PortableLayout layout = CreateLayout();
+        File.WriteAllText(
+            layout.ConfigFile,
+            """
+            {
+              "floating_toolbar": {
+                "enabled": true,
+                "edge": "left",
+                "auto_hide": false,
+                "linger_ms": 900,
+                "hidden_by_user": true
+              }
+            }
+            """);
+
+        FloatingToolbarSettings legacy = FloatingToolbarSettings.Load(layout);
+
+        // 旧配置无 theme 字段：等价 system，兼容不迁改文件。
+        Assert.Equal(FloatingToolbarTheme.System, legacy.Theme);
+        Assert.Equal(
+            new FloatingToolbarSettings(true, ScreenEdge.Left, false, 900, true),
+            legacy);
+        Assert.DoesNotContain("theme", File.ReadAllText(layout.ConfigFile));
+    }
+
+    [Fact]
+    public void ThemeRoundTripsManualLightAndDark()
+    {
+        PortableLayout layout = CreateLayout();
+
+        FloatingToolbarSettings.Save(
+            layout,
+            new FloatingToolbarSettings(true, ScreenEdge.Top, true, 300, false, FloatingToolbarTheme.Light));
+        Assert.Equal(FloatingToolbarTheme.Light, FloatingToolbarSettings.Load(layout).Theme);
+
+        FloatingToolbarSettings.Save(
+            layout,
+            new FloatingToolbarSettings(true, ScreenEdge.Top, true, 300, false, FloatingToolbarTheme.Dark));
+        Assert.Equal(FloatingToolbarTheme.Dark, FloatingToolbarSettings.Load(layout).Theme);
+
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(layout.ConfigFile));
+        Assert.Equal(
+            "dark",
+            document.RootElement.GetProperty("floating_toolbar")
+                .GetProperty("theme")
+                .GetString());
+    }
+
+    [Fact]
+    public void LoadFallsBackToSystemForUnknownThemeAndKeepsOtherFields()
+    {
+        PortableLayout layout = CreateLayout();
+        File.WriteAllText(
+            layout.ConfigFile,
+            """
+            {
+              "floating_toolbar": {
+                "enabled": true,
+                "edge": "bottom",
+                "auto_hide": false,
+                "linger_ms": 900,
+                "theme": "purple"
+              }
+            }
+            """);
+
+        FloatingToolbarSettings settings = FloatingToolbarSettings.Load(layout);
+
+        // 非法 theme 值字段级回退 system，不拖垮其他已保存字段。
+        Assert.Equal(FloatingToolbarTheme.System, settings.Theme);
+        Assert.True(settings.Enabled);
+        Assert.Equal(ScreenEdge.Bottom, settings.Edge);
+        Assert.Equal(900, settings.LingerMs);
     }
 
     [Fact]

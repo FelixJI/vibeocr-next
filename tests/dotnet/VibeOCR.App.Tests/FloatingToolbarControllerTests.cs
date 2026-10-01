@@ -645,6 +645,80 @@ public sealed class FloatingToolbarControllerTests
         Assert.Equal(new PhysicalRectangle(1918, 0, 2, 1080), _sensor.ArmedBounds);
     }
 
+    [Fact]
+    public void StartAppliesConfiguredThemeToView()
+    {
+        using FloatingToolbarController controller = CreateController(
+            new FloatingToolbarSettings(true, ScreenEdge.Top, true, 600, false, FloatingToolbarTheme.Dark));
+
+        controller.Start();
+
+        Assert.Equal(FloatingToolbarController.ToolbarState.Hidden, controller.State);
+        Assert.Equal([FloatingToolbarTheme.Dark], _view.AppliedThemes);
+    }
+
+    [Fact]
+    public void ThemeOnlySettingsChangeKeepsStateSensorAndLingerSemantics()
+    {
+        using FloatingToolbarController controller = CreateController();
+        controller.Start();
+        _sensor.RaisePointerEntered();
+
+        controller.ApplySettings(new FloatingToolbarSettings(
+            true, ScreenEdge.Top, true, 600, false, FloatingToolbarTheme.Dark));
+
+        // 主题变化只重涂外观：状态、可见性与 linger 语义全部保持，
+        // 不布防/撤防感应条、不重启计时。
+        Assert.Equal(FloatingToolbarController.ToolbarState.Revealed, controller.State);
+        Assert.True(_view.IsVisible);
+        Assert.Equal(FloatingToolbarTheme.Dark, _view.AppliedThemes[^1]);
+
+        _view.RaisePointerExited();
+        Assert.Equal(TimeSpan.FromMilliseconds(600), _timer.PendingDelay);
+    }
+
+    [Fact]
+    public void ThemeChangeDuringSuspensionDoesNotCancelSuspensionOrResume()
+    {
+        using FloatingToolbarController controller = CreateController();
+        controller.Start();
+
+        controller.Suspend();
+        controller.ApplySettings(new FloatingToolbarSettings(
+            true, ScreenEdge.Top, true, 600, false, FloatingToolbarTheme.Light));
+
+        // 截图避让不因主题变化取消：感应条保持撤防，成品无污染。
+        Assert.Equal(FloatingToolbarController.ToolbarState.Suspended, controller.State);
+        Assert.False(_view.IsVisible);
+        Assert.False(_sensor.IsArmed);
+
+        controller.Resume();
+
+        Assert.Equal(FloatingToolbarController.ToolbarState.Hidden, controller.State);
+        Assert.True(_sensor.IsArmed);
+        Assert.Equal(FloatingToolbarTheme.Light, _view.AppliedThemes[^1]);
+    }
+
+    [Fact]
+    public void NewDefaultLingerDrivesTimeoutAndLingerUpdateAppliesOnNextExit()
+    {
+        using FloatingToolbarController controller = CreateController(
+            FloatingToolbarSettings.Default with { Enabled = true });
+        controller.Start();
+        _sensor.RaisePointerEntered();
+
+        // 新无配置默认 300ms 驱动离开计时，不误用于展开/其他延迟。
+        _view.RaisePointerExited();
+        Assert.Equal(TimeSpan.FromMilliseconds(300), _timer.PendingDelay);
+        _view.RaisePointerEntered();
+        Assert.False(_timer.IsRunning);
+
+        // 新 linger 值下次离开生效。
+        controller.ApplySettings(new FloatingToolbarSettings(true, ScreenEdge.Top, true, 2500));
+        _view.RaisePointerExited();
+        Assert.Equal(TimeSpan.FromMilliseconds(2500), _timer.PendingDelay);
+    }
+
     private sealed class FakeToolbarView : IFloatingToolbarView
     {
         public event EventHandler? PointerEntered;
@@ -658,6 +732,8 @@ public sealed class FloatingToolbarControllerTests
         public event EventHandler<FloatingToolbarCommand>? CommandInvoked;
 
         public bool IsVisible { get; private set; }
+
+        public List<FloatingToolbarTheme> AppliedThemes { get; } = [];
 
         public PhysicalRectangle LastShownBounds { get; private set; }
 
@@ -677,6 +753,8 @@ public sealed class FloatingToolbarControllerTests
         }
 
         public void Hide() => IsVisible = false;
+
+        public void ApplyTheme(FloatingToolbarTheme theme) => AppliedThemes.Add(theme);
 
         public void Dispose()
         {

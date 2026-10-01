@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using VibeOCR.Platform.Windows;
 using Windows.Graphics;
+using Windows.UI.ViewManagement;
 
 namespace VibeOCR.App.Features.FloatingToolbar;
 
@@ -23,6 +24,9 @@ internal enum FloatingToolbarCommand
 /// 悬浮工具栏窗口：无边框、置顶、不进任务栏/Alt+Tab；子类化拦截
 /// WM_MOUSEACTIVATE 返回 MA_NOACTIVATE，显示走 SW_SHOWNOACTIVATE，悬停与
 /// 点击都不抢前台焦点。左侧把手拖动重定位，松手由控制器判定贴边吸附。
+/// 主题经 root RequestedTheme 走原生 ThemeResource：命令按钮/图标继承
+/// Fluent 主题化前景与悬停态，高对比时回落系统可见资源；系统变化仅在
+/// 窗口生命周期内订阅一次并封送 UI 线程，不修改用户系统主题。
 /// </summary>
 internal sealed class FloatingToolbarWindow : IFloatingToolbarView
 {
@@ -39,10 +43,21 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     private const uint SwpNoActivate = 0x0010;
 
     private readonly Window _window = new();
-    private readonly WindowMessageService _messages;
+    private readonly FontIcon _gripIcon = new()
+    {
+        Glyph = "\uE700",
+        FontSize = 12,
+        Opacity = 0.7,
+        Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 235, 235, 235)),
+    };
     private readonly Border _grip;
+    private readonly Grid _root = new();
+    private readonly UISettings _uiSettings = new();
+    private readonly AccessibilitySettings _accessibility = new();
+    private readonly WindowMessageService _messages;
     private readonly nint _handle;
     private Windows.Foundation.Point? _dragOrigin;
+    private FloatingToolbarTheme _theme = FloatingToolbarTheme.System;
     private bool _disposed;
 
     public event EventHandler? PointerEntered;
@@ -74,6 +89,9 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
         AddToolWindowStyle();
         _messages = new WindowMessageService(_handle);
         _messages.MessageHandled += OnMessageHandled;
+        // 主题跟随：窗口生命周期内各订阅一次；系统线程回调封送 UI 线程。
+        _root.ActualThemeChanged += OnRootActualThemeChanged;
+        _accessibility.HighContrastChanged += OnSystemHighContrastChanged;
         // Window 创建后保持隐藏，显示一律走 ShowAt。
         _window.AppWindow.Hide();
     }
@@ -128,6 +146,96 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
         IsVisible = false;
     }
 
+    /// <summary>
+    /// 应用用户主题偏好：System 走原生默认（跟随系统 light/dark，且天然
+    /// 使用高对比资源），Light/Dark 固定元素主题、不随系统变化覆盖；高对比
+    /// 激活时一律回落 Default 以保住系统可见资源。纯视觉更新，不显示窗口、
+    /// 不抢焦点、不影响 no-activate/任务栏/Alt+Tab 行为。
+    /// </summary>
+    public void ApplyTheme(FloatingToolbarTheme theme)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _theme = theme;
+        ApplyResolvedTheme();
+    }
+
+    /// <summary>按当前设置与系统状态重涂：RequestedTheme + 少量铬色。</summary>
+    private void ApplyResolvedTheme()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        bool highContrast = IsSystemHighContrast();
+        _root.RequestedTheme = ResolveRequestedTheme(_theme, highContrast);
+        Windows.UI.Color background;
+        Windows.UI.Color foreground;
+        if (highContrast)
+        {
+            // 高对比：直接取系统可见的前景/背景配对。
+            background = _uiSettings.GetColorValue(UIColorType.Background);
+            foreground = _uiSettings.GetColorValue(UIColorType.Foreground);
+        }
+        else if (_root.ActualTheme == ElementTheme.Dark)
+        {
+            (background, foreground) = ResolveChromeColors(dark: true);
+        }
+        else
+        {
+            (background, foreground) = ResolveChromeColors(dark: false);
+        }
+
+        _root.Background = new SolidColorBrush(background);
+        _gripIcon.Foreground = new SolidColorBrush(foreground);
+    }
+
+    private bool IsSystemHighContrast() =>
+        Microsoft.UI.System.ThemeSettings.CreateForWindowId(_window.AppWindow.Id).HighContrast;
+
+    /// <summary>
+    /// System 跟随系统；手动 Light/Dark 固定不被系统 light/dark 覆盖；
+    /// 高对比优先回落系统资源（Default）。
+    /// </summary>
+    internal static ElementTheme ResolveRequestedTheme(
+        FloatingToolbarTheme theme,
+        bool highContrast)
+    {
+        if (highContrast || theme == FloatingToolbarTheme.System)
+        {
+            return ElementTheme.Default;
+        }
+
+        return theme == FloatingToolbarTheme.Light
+            ? ElementTheme.Light
+            : ElementTheme.Dark;
+    }
+
+    /// <summary>非高对比铬色：深色沿用既有值，浅色提供可辨浅底深字。</summary>
+    internal static (Windows.UI.Color Background, Windows.UI.Color Foreground) ResolveChromeColors(
+        bool dark) => dark
+        ? (Windows.UI.Color.FromArgb(238, 24, 24, 24), Windows.UI.Color.FromArgb(255, 235, 235, 235))
+        : (Windows.UI.Color.FromArgb(238, 249, 249, 249), Windows.UI.Color.FromArgb(255, 36, 36, 36));
+
+    private void OnRootActualThemeChanged(FrameworkElement sender, object args)
+    {
+        // 系统 light/dark 翻转（仅 System 模式会改变 ActualTheme）：原生
+        // UI 线程回调，重涂铬色；手动主题下 ActualTheme 不变、不触发。
+        ApplyResolvedTheme();
+    }
+
+    private void OnSystemHighContrastChanged(AccessibilitySettings sender, object args)
+    {
+        // 系统线程回调：封送 UI 线程；已释放或入队失败时安全跳过，
+        // 绝不显示窗口、不抢焦点。
+        if (_disposed)
+        {
+            return;
+        }
+
+        _ = _window.DispatcherQueue.TryEnqueue(ApplyResolvedTheme);
+    }
+
     public void Dispose()
     {
         if (_disposed)
@@ -136,12 +244,14 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
         }
 
         _disposed = true;
+        _accessibility.HighContrastChanged -= OnSystemHighContrastChanged;
+        _root.ActualThemeChanged -= OnRootActualThemeChanged;
         _messages.MessageHandled -= OnMessageHandled;
         _messages.Dispose();
         _window.Close();
     }
 
-    private static Border BuildGrip()
+    private Border BuildGrip()
     {
         return new Border
         {
@@ -150,22 +260,14 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
             VerticalAlignment = VerticalAlignment.Center,
             Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0, 0, 0, 0)),
             CornerRadius = new CornerRadius(6),
-            Child = new FontIcon
-            {
-                Glyph = "\uE700",
-                FontSize = 12,
-                Opacity = 0.7,
-                Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 235, 235, 235)),
-            },
+            Child = _gripIcon,
         };
     }
 
     private void BuildContent()
     {
-        var root = new Grid
-        {
-            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(238, 24, 24, 24)),
-        };
+        // 初始铬色沿用既有深色，ApplyTheme 在首次显示前按设置重涂。
+        _root.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(238, 24, 24, 24));
         var bar = new StackPanel
         {
             Orientation = Orientation.Horizontal,
@@ -185,15 +287,15 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
             "\uE713", "设置", FloatingToolbarCommand.OpenSettings));
         bar.Children.Add(CreateCommandButton(
             "\uE70E", "隐藏悬浮栏", FloatingToolbarCommand.DismissToolbar));
-        root.Children.Add(bar);
+        _root.Children.Add(bar);
 
-        root.PointerEntered += (_, _) => PointerEntered?.Invoke(this, EventArgs.Empty);
-        root.PointerExited += (_, _) => PointerExited?.Invoke(this, EventArgs.Empty);
+        _root.PointerEntered += (_, _) => PointerEntered?.Invoke(this, EventArgs.Empty);
+        _root.PointerExited += (_, _) => PointerExited?.Invoke(this, EventArgs.Empty);
         _grip.PointerPressed += OnGripPointerPressed;
         _grip.PointerMoved += OnGripPointerMoved;
         _grip.PointerReleased += OnGripPointerReleased;
         _grip.PointerCaptureLost += OnGripPointerEnded;
-        _window.Content = root;
+        _window.Content = _root;
     }
 
     private Button CreateCommandButton(string glyph, string tooltip, FloatingToolbarCommand command)
@@ -210,7 +312,6 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
             {
                 Glyph = glyph,
                 FontSize = 16,
-                Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 235, 235, 235)),
             },
         };
         ToolTipService.SetToolTip(button, tooltip);
