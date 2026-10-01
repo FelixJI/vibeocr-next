@@ -1840,6 +1840,9 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
         >
           <div className="runtime-summary">
             <strong>{`目标推理设备：${backendLabel ?? "尚未读取"}`}</strong>
+            <p>
+              实际执行设备：尚无实测值。Paddle 设备决策与 GPU 回退见诊断页。
+            </p>
             <p>当前服务：{serviceText}</p>
             <p>本次维护：{maintenanceLine}</p>
             {/* 只有真实进行中的维护操作才渲染进度；设置刷新不是维护。 */}
@@ -3584,6 +3587,7 @@ export function AboutPage({ viewState, actions }: FeatureProps) {
 export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
   const state = feature(viewState, "diagnostics");
   const milestones = stringValues(state.milestones);
+  const deviceEvidence = stringValues(state.deviceEvidence);
   return (
     <Workspace
       eyebrow="SUPPORT / 07"
@@ -3619,6 +3623,14 @@ export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
                 : "等待连接"}
             </Badge>
           </div>
+        </Panel>
+        <Panel label="DEVICE" title="当前实例的 Paddle 设备日志">
+          <p>设备决策与回退日志；不表示识别作业已成功执行。</p>
+          {deviceEvidence.length > 0 ? (
+            <pre>{deviceEvidence.join("\n")}</pre>
+          ) : (
+            <p>尚无设备证据。</p>
+          )}
         </Panel>
         <Panel label="MILESTONES" title="启动里程碑">
           {milestones.length > 0 ? (

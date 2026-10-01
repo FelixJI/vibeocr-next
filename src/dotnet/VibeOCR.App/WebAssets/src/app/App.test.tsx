@@ -1622,6 +1622,37 @@ describe("AppShell", () => {
     unmount();
   });
 
+  it("shows current instance device evidence without claiming a completed execution", () => {
+    window.location.hash = "#/diagnostics";
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 36,
+      route: "diagnostics",
+      theme: "light",
+      capabilities: [],
+      features: {
+        diagnostics: {
+          deviceEvidence: ["[Paddle worker] [GPU] 验证失败，回退到 CPU"],
+          milestones: [],
+        },
+      },
+      runtimeLabel: "原生宿主已连接",
+    };
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    expect(
+      screen.getByText("[Paddle worker] [GPU] 验证失败，回退到 CPU"),
+    ).toBeVisible();
+    expect(
+      screen.getByText("设备决策与回退日志；不表示识别作业已成功执行。"),
+    ).toBeVisible();
+    unmount();
+  });
+
   it("gates the maintenance progress bar on the active operation with a real total", () => {
     window.location.hash = "#/settings";
     const actions: AppActions = {

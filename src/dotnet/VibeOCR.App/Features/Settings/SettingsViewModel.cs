@@ -140,22 +140,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         if (Environments is not null)
             await Environments.RefreshAsync(cancellationToken);
         await Maintenance.RestoreAsync(cancellationToken);
-        // 起始段原子化：generation 递增与 busy/文案写入在同一把锁内完成，
-        // 不存在“已递增但尚未接管”的窗口，旧读取不可能覆盖新读取后再
-        // 错误清除其 busy（无二级拥有者状态）。
-        long generation;
-        lock (_busyGuard)
-        {
-            generation = ++_generation;
-            IsBusy = true;
-            // IsBusy 的同步 PropertyChanged（实例更换失效链）可能已重入
-            // 递增 generation 并复位 busy：此时本次读取立即过期，不得再
-            // 写加载文案。
-            if (generation == _generation)
-            {
-                Status = "正在读取模型驻留状态";
-            }
-        }
+        long generation = BeginBusy("正在读取模型驻留状态");
         try
         {
             try
@@ -216,17 +201,26 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             AppLog.Warn($"Settings refresh failed: {error.GetType().Name}: {error.Message}");
             Status = "设置状态读取失败，请重试或打开诊断与修复。";
         }
-        finally
+        finally { EndBusy(generation); }
+    }
+
+    private long BeginBusy(string status)
+    {
+        lock (_busyGuard)
         {
-            // 与起始段/失效同一把锁：仅当仍是当前代时复位 busy；被新读取
-            // 或失效接管时不越权清除。
-            lock (_busyGuard)
-            {
-                if (generation == _generation)
-                {
-                    IsBusy = false;
-                }
-            }
+            long generation = ++_generation;
+            IsBusy = true;
+            // 同步通知可能重入失效；失效后不再写本次旧文案。
+            if (generation == _generation) Status = status;
+            return generation;
+        }
+    }
+
+    private void EndBusy(long generation)
+    {
+        lock (_busyGuard)
+        {
+            if (generation == _generation) IsBusy = false;
         }
     }
 
@@ -400,10 +394,10 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             Status = "当前运行时声明 mineru_document 不支持预加载，请更新 Backend。";
             return;
         }
-        IsBusy = true;
-        Status = "正在验证并准备远程 MinerU 服务…";
+        long generation = BeginBusy("正在验证并准备远程 MinerU 服务…");
         try
         {
+            if (generation != Volatile.Read(ref _generation)) return;
             await _inference.PreloadRuntimeAsync(
                 new Wire.RuntimePreloadRequest
                 {
@@ -412,17 +406,20 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                 },
                 cancellationToken);
             // 准备完成必须回读：tier/能力目录以刷新后的 Backend 目录为准。
-            await LoadSelectionSerializedAsync(forceReload: true, cancellationToken);
-            Status = "远程 MinerU 准备已执行并刷新目录；tier 可用性以识别任务实际结果为准。";
+            if (generation != Volatile.Read(ref _generation)) return;
+            await LoadSelectionSerializedAsync(forceReload: true, cancellationToken, generation);
+            if (generation == Volatile.Read(ref _generation))
+                Status = "远程 MinerU 准备已执行并刷新目录；tier 可用性以识别任务实际结果为准。";
         }
-        catch (OperationCanceledException) { Status = "已取消"; }
+        catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) Status = "已取消"; }
         catch (NotSupportedException)
         {
-            Status = "当前 Supervisor 不支持运行时预加载，请更新运行环境。";
+            if (generation == Volatile.Read(ref _generation))
+                Status = "当前 Supervisor 不支持运行时预加载，请更新运行环境。";
         }
-        catch (InferenceClientException error) { Status = LocalizeV2(error.Code); }
-        catch (RuntimeSelectionException error) { Status = LocalizeSelection(error); }
-        finally { IsBusy = false; }
+        catch (InferenceClientException error) { if (generation == Volatile.Read(ref _generation)) Status = LocalizeV2(error.Code); }
+        catch (RuntimeSelectionException error) { if (generation == Volatile.Read(ref _generation)) Status = LocalizeSelection(error); }
+        finally { EndBusy(generation); }
     }
 
     /// <summary>Stage the accelerator for the pending feature selection.</summary>

@@ -656,7 +656,8 @@ public sealed record DiagnosticsWorkbenchState(
   string SupervisorStatus,
   string ProtocolStatus,
   bool IsReady,
-  IReadOnlyList<string> Milestones) : WorkbenchState
+  IReadOnlyList<string> Milestones,
+  IReadOnlyList<string>? DeviceEvidence = null) : WorkbenchState
 {
   public override string Scope => "diagnostics";
 }

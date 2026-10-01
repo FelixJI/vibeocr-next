@@ -84,7 +84,7 @@ $previous = @{}
 foreach ($name in @(
   'VIBEOCR_SELF_TEST_SMOKE', 'VIBEOCR_SELF_TEST_INSTANCE',
   'VIBEOCR_SELF_TEST_MAINTENANCE_EARLY_EXIT', 'VIBEOCR_SOAK_INJECT_CRASH',
-  'VIBEOCR_SOAK_RESULT', 'VIBEOCR_STARTUP_TRACE',
+  'VIBEOCR_SOAK_RESULT', 'VIBEOCR_SOAK_EXTERNAL_CRASH', 'VIBEOCR_STARTUP_TRACE',
   'VIBEOCR_SUPERVISOR_HEALTH_TRACE', 'WEBVIEW2_USER_DATA_FOLDER'
 )) { $previous[$name] = [Environment]::GetEnvironmentVariable($name) }
 
@@ -101,6 +101,7 @@ function Restore-SoakEnvironment {
 $healthPath = Join-Path $smokeRoot 'supervisor-health.jsonl'
 $tracePath = Join-Path $smokeRoot 'trace.jsonl'
 $soakPath = Join-Path $smokeRoot 'soak.json'
+$process = $null
 try {
   if ($Mode -eq 'fail') {
     # 只破坏激活期才读取的 component-lock：OnLaunched 不读它（ReadProfileDescriptor
@@ -118,6 +119,7 @@ try {
   if ($Mode -eq 'maintenance') { $env:VIBEOCR_SELF_TEST_MAINTENANCE_EARLY_EXIT = '1' }
   if ($Mode -eq 'crash') {
     $env:VIBEOCR_SOAK_INJECT_CRASH = '1'
+    $env:VIBEOCR_SOAK_EXTERNAL_CRASH = '1'
     $env:VIBEOCR_SOAK_RESULT = $soakPath
   }
   if ($Mode -eq 'fail') { $env:VIBEOCR_SOAK_RESULT = $soakPath }
@@ -127,7 +129,35 @@ try {
     -ArgumentList "--profile production --install-root `"$runRoot`"" `
     -WorkingDirectory (Split-Path -Parent $executable) `
     -WindowStyle Hidden -PassThru
-  if (-not $process.WaitForExit($TimeoutMinutes * 60000)) {
+  $deadline = [DateTime]::UtcNow.AddMinutes($TimeoutMinutes)
+  if ($Mode -eq 'crash') {
+    # ready stdout 不是 HTTP 握手完成。只在宿主发布 Ready 且绑定恢复订阅后，
+    # 终止宿主实际拥有的 Python 子进程；不调用 planned-termination 路径。
+    $ready = $null
+    while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+      if (Test-Path -LiteralPath $healthPath -PathType Leaf) {
+        $text = [IO.File]::ReadAllText($healthPath)
+        $completeLines = $text.Substring(0, $text.LastIndexOf("`n") + 1) -split "`n"
+        $ready = $completeLines | Where-Object { $_.Trim() } |
+          ForEach-Object { $_ | ConvertFrom-Json -ErrorAction Stop } |
+          Where-Object { $_.state -eq 'Ready' -and $_.process_id -gt 0 } |
+          Select-Object -Last 1
+        if ($null -ne $ready) { break }
+      }
+      Start-Sleep -Milliseconds 200
+    }
+    if ($null -eq $ready) { throw 'Crash injection never reached the host Ready handshake' }
+    $child = Get-CimInstance Win32_Process -Filter "ProcessId = $($ready.process_id)"
+    if ($null -eq $child -or $child.ParentProcessId -ne $process.Id -or
+        [string]::IsNullOrWhiteSpace($child.ExecutablePath) -or
+        -not $child.ExecutablePath.StartsWith($runRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or
+        [IO.Path]::GetFileName($child.ExecutablePath) -ne 'python.exe') {
+      throw 'Crash target is not this isolated app own Python child'
+    }
+    Stop-Process -Id $child.ProcessId -Force -ErrorAction Stop
+  }
+  $remaining = [Math]::Max(0, [int]($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+  if (-not $process.WaitForExit($remaining)) {
     $process.Kill($true)
     if (-not $process.WaitForExit(5000)) {
       throw "Soak $Mode process tree did not exit after forced termination"
@@ -199,5 +229,12 @@ try {
   }
   Write-Host "Isolated evidence retained at: $smokeRoot"
 } finally {
-  Restore-SoakEnvironment
+  try {
+    if ($null -ne $process -and -not $process.HasExited) {
+      $process.Kill($true)
+      if (-not $process.WaitForExit(5000)) { throw 'Owned soak process tree did not exit' }
+    }
+  } finally {
+    Restore-SoakEnvironment
+  }
 }

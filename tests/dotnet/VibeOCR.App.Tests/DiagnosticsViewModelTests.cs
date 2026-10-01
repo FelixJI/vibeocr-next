@@ -1,3 +1,4 @@
+using System.Text.Json;
 using VibeOCR.App.ViewModels;
 using VibeOCR.App.Web;
 using VibeOCR.App.Workbench;
@@ -36,6 +37,260 @@ public sealed class DiagnosticsViewModelTests
       SupervisorHealthState.Ready, "sup-1", 2, null));
     Assert.Equal(SupervisorHealthState.Ready, viewModel.Supervisor.State);
     Assert.Equal("sup-1", viewModel.Supervisor.InstanceId);
+  }
+
+  [Fact]
+  public void DeviceEvidenceFiltersToCurrentInstancePaddleDeviceLines()
+  {
+    int providerCalls = 0;
+    var viewModel = new DiagnosticsViewModel(
+      "test",
+      new PrerequisiteReport([]),
+      deviceEvidence: () =>
+      {
+        providerCalls++;
+        return ("sup-1", (IReadOnlyList<string>)[
+          "普通启动日志，不涉及设备",
+          "[Paddle worker] 加载模型完成，无设备关键字",
+          "[推理设备] 有设备关键字但没有 worker 来源标签",
+          "[Paddle worker] [推理设备] CPU（未启用 GPU，VIBEOCR_USE_GPU != true）",
+          "[Paddle worker] [GPU] GPU 可用性验证失败: boom，回退到 CPU",
+        ]);
+      });
+
+    // 健康快照未指向任何实例（NotReady，InstanceId 为空）时不消费 provider。
+    Assert.Empty(viewModel.DeviceEvidence);
+    Assert.Equal(0, providerCalls);
+
+    viewModel.UpdateSupervisor(new SupervisorHealth(
+      SupervisorHealthState.Ready, "sup-1", 2, null));
+    Assert.Equal([
+      "[Paddle worker] [推理设备] CPU（未启用 GPU，VIBEOCR_USE_GPU != true）",
+      "[Paddle worker] [GPU] GPU 可用性验证失败: boom，回退到 CPU",
+    ], viewModel.DeviceEvidence);
+    Assert.Equal(1, providerCalls);
+  }
+
+  [Fact]
+  public void DeviceEvidenceCapsToLastTwentyMatchingLines()
+  {
+    var lines = Enumerable.Range(1, 30)
+      .Select(index => $"[Paddle worker] [推理设备] 第 {index} 行")
+      .ToList();
+    var viewModel = new DiagnosticsViewModel(
+      "test",
+      new PrerequisiteReport([]),
+      deviceEvidence: () => ("sup-1", lines));
+    viewModel.UpdateSupervisor(new SupervisorHealth(
+      SupervisorHealthState.Ready, "sup-1", 2, null));
+
+    // 只保留匹配行的末尾 20 条，顺序不变。
+    IReadOnlyList<string> evidence = viewModel.DeviceEvidence;
+    Assert.Equal(20, evidence.Count);
+    Assert.Equal("[Paddle worker] [推理设备] 第 11 行", evidence[0]);
+    Assert.Equal("[Paddle worker] [推理设备] 第 30 行", evidence[^1]);
+  }
+
+  [Fact]
+  public void DeviceEvidenceIsStaleInstanceSafe()
+  {
+    var viewModel = new DiagnosticsViewModel(
+      "test",
+      new PrerequisiteReport([]),
+      deviceEvidence: () => ("sup-old", (IReadOnlyList<string>)[
+        "[Paddle worker] [GPU] 旧实例日志，不得泄漏",
+      ]));
+    viewModel.UpdateSupervisor(new SupervisorHealth(
+      SupervisorHealthState.Ready, "sup-1", 2, null));
+
+    Assert.Empty(viewModel.DeviceEvidence);
+  }
+
+  [Fact]
+  public void DeviceEvidenceIsEmptyWhenEitherInstanceIdIsMissing()
+  {
+    var staleProvider = new DiagnosticsViewModel(
+      "test",
+      new PrerequisiteReport([]),
+      deviceEvidence: () => ((string?)null, (IReadOnlyList<string>)[
+        "[Paddle worker] [推理设备] provider 实例缺失",
+      ]));
+    staleProvider.UpdateSupervisor(new SupervisorHealth(
+      SupervisorHealthState.Ready, "sup-1", 2, null));
+    Assert.Empty(staleProvider.DeviceEvidence);
+
+    // 健康侧实例为空时同样为空，即使 provider 有实例日志。
+    var noSupervisor = new DiagnosticsViewModel(
+      "test",
+      new PrerequisiteReport([]),
+      deviceEvidence: () => ("sup-1", (IReadOnlyList<string>)[
+        "[Paddle worker] [GPU] supervisor 实例缺失",
+      ]));
+    Assert.Empty(noSupervisor.DeviceEvidence);
+  }
+
+  [Fact]
+  public void DeviceEvidenceWithoutProviderOrLinesIsEmpty()
+  {
+    var viewModel = new DiagnosticsViewModel("test", new PrerequisiteReport([]));
+    viewModel.UpdateSupervisor(new SupervisorHealth(
+      SupervisorHealthState.Ready, "sup-1", 2, null));
+
+    // 未注入 provider（默认）时为空列表而不是 null。
+    Assert.NotNull(viewModel.DeviceEvidence);
+    Assert.Empty(viewModel.DeviceEvidence);
+
+    var emptyProvider = new DiagnosticsViewModel(
+      "test",
+      new PrerequisiteReport([]),
+      deviceEvidence: () => ("sup-1", (IReadOnlyList<string>)[]));
+    emptyProvider.UpdateSupervisor(new SupervisorHealth(
+      SupervisorHealthState.Ready, "sup-1", 2, null));
+    Assert.Empty(emptyProvider.DeviceEvidence);
+  }
+
+  [Fact]
+  public void DeviceEvidenceRedactsSecretsAndPaths()
+  {
+    var viewModel = new DiagnosticsViewModel(
+      "test",
+      new PrerequisiteReport([]),
+      deviceEvidence: () => ("sup-1", (IReadOnlyList<string>)[
+        "[Paddle worker] [GPU] 验证失败: token=abc123 path=C:\\Users\\felix\\models，回退到 CPU",
+      ]));
+    viewModel.UpdateSupervisor(new SupervisorHealth(
+      SupervisorHealthState.Ready, "sup-1", 2, null));
+
+    string line = Assert.Single(viewModel.DeviceEvidence);
+    Assert.DoesNotContain("abc123", line);
+    Assert.DoesNotContain("C:\\Users", line);
+    Assert.Contains("<redacted>", line);
+    Assert.Contains("[Paddle worker]", line);
+  }
+
+  [Fact]
+  public void NotifyDeviceEvidenceChangedRaisesOnlyDeviceEvidence()
+  {
+    var viewModel = new DiagnosticsViewModel("test", new PrerequisiteReport([]));
+    var events = new List<string?>();
+    viewModel.PropertyChanged += (_, args) => events.Add(args.PropertyName);
+
+    viewModel.NotifyDeviceEvidenceChanged();
+
+    Assert.Equal([nameof(DiagnosticsViewModel.DeviceEvidence)], events);
+  }
+
+  [Fact]
+  public async Task ExportEmbedsDeviceEvidenceFromSameHealthSnapshot()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-diag-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      int providerCalls = 0;
+      var viewModel = new DiagnosticsViewModel(
+        "test",
+        new PrerequisiteReport([]),
+        deviceEvidence: () =>
+        {
+          providerCalls++;
+          return ("sup-1", (IReadOnlyList<string>)[
+            "普通启动日志，不涉及设备",
+            "[Paddle worker] [推理设备] CPU（未启用 GPU，VIBEOCR_USE_GPU != true）",
+          ]);
+        });
+      viewModel.UpdateSupervisor(new SupervisorHealth(
+        SupervisorHealthState.Ready, "sup-1", 2, null));
+
+      string destination = Path.Combine(root, "diagnostics.json");
+      await viewModel.ExportAsync(destination, TestContext.Current.CancellationToken);
+
+      using JsonDocument document = JsonDocument.Parse(
+        await File.ReadAllTextAsync(destination, TestContext.Current.CancellationToken));
+      JsonElement supervisor = document.RootElement.GetProperty("supervisor");
+      Assert.Equal("sup-1", supervisor.GetProperty("instance_id").GetString());
+      JsonElement evidence = document.RootElement.GetProperty("device_evidence");
+      Assert.Equal(
+        "[Paddle worker] [推理设备] CPU（未启用 GPU，VIBEOCR_USE_GPU != true）",
+        Assert.Single(evidence.GetProperty("lines").EnumerateArray()).GetString());
+      Assert.Contains("不等于作业成功的实测设备",
+        evidence.GetProperty("note").GetString());
+      // 导出只读一次 health 和一次 provider，不做二次拉取或轮询。
+      Assert.Equal(1, providerCalls);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task ExportDoesNotReuseStaleEvidenceAfterProviderRolls()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-diag-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      int providerCalls = 0;
+      var viewModel = new DiagnosticsViewModel(
+        "test",
+        new PrerequisiteReport([]),
+        deviceEvidence: () => ++providerCalls == 1
+          ? ("sup-1", (IReadOnlyList<string>)["[Paddle worker] [GPU] 首次实例日志"])
+          : ("sup-2", (IReadOnlyList<string>)["[Paddle worker] [GPU] 新实例日志"]));
+      viewModel.UpdateSupervisor(new SupervisorHealth(
+        SupervisorHealthState.Ready, "sup-1", 2, null));
+
+      Assert.Equal(["[Paddle worker] [GPU] 首次实例日志"], viewModel.DeviceEvidence);
+
+      // 导出时 provider 已滚动到新实例：导出重新拉取一次，不复用属性读结果，
+      // 两侧日志都不泄漏，supervisor 段仍是同一健康快照。
+      string destination = Path.Combine(root, "diagnostics.json");
+      await viewModel.ExportAsync(destination, TestContext.Current.CancellationToken);
+
+      using JsonDocument document = JsonDocument.Parse(
+        await File.ReadAllTextAsync(destination, TestContext.Current.CancellationToken));
+      Assert.Equal("sup-1",
+        document.RootElement.GetProperty("supervisor").GetProperty("instance_id").GetString());
+      JsonElement evidence = document.RootElement.GetProperty("device_evidence");
+      Assert.Empty(evidence.GetProperty("lines").EnumerateArray());
+      Assert.Equal(2, providerCalls);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task ExportDeviceEvidenceEmptyForStaleInstance()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-diag-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      var viewModel = new DiagnosticsViewModel(
+        "test",
+        new PrerequisiteReport([]),
+        deviceEvidence: () => ("sup-old", (IReadOnlyList<string>)[
+          "[Paddle worker] [GPU] 旧实例日志，导出也不得泄漏",
+        ]));
+      viewModel.UpdateSupervisor(new SupervisorHealth(
+        SupervisorHealthState.Ready, "sup-1", 2, null));
+
+      string destination = Path.Combine(root, "diagnostics.json");
+      await viewModel.ExportAsync(destination, TestContext.Current.CancellationToken);
+
+      using JsonDocument document = JsonDocument.Parse(
+        await File.ReadAllTextAsync(destination, TestContext.Current.CancellationToken));
+      JsonElement evidence = document.RootElement.GetProperty("device_evidence");
+      Assert.Empty(evidence.GetProperty("lines").EnumerateArray());
+      Assert.NotNull(evidence.GetProperty("note").GetString());
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
   }
 
   [Fact]
@@ -83,6 +338,14 @@ public sealed class DiagnosticsViewModelTests
         SupervisorHealthState.Faulted, null, null, "连接失败"));
       var faulted = Assert.IsType<DiagnosticsWorkbenchState>(Assert.Single(broadcasts));
       Assert.Equal("连接失败", faulted.SupervisorStatus);
+
+      broadcasts.Clear();
+      // 健康变更本身不广播证据；只有真实日志事件经 Notify 重投影，
+      // 且未接 provider 时证据为空。
+      diagnostics.NotifyDeviceEvidenceChanged();
+      var notified = Assert.IsType<DiagnosticsWorkbenchState>(Assert.Single(broadcasts));
+      Assert.NotNull(notified.DeviceEvidence);
+      Assert.Empty(notified.DeviceEvidence);
       await handler.DisposeAsync();
     }
     finally

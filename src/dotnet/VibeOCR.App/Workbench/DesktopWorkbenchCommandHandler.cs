@@ -214,7 +214,8 @@ public sealed class DesktopWorkbenchCommandHandler :
   private void OnDiagnosticsPropertyChanged(object? sender, PropertyChangedEventArgs args)
   {
     if (Volatile.Read(ref disposed) == 0 &&
-      args.PropertyName == nameof(VibeOCR.App.ViewModels.DiagnosticsViewModel.SupervisorStatus))
+      args.PropertyName is nameof(VibeOCR.App.ViewModels.DiagnosticsViewModel.SupervisorStatus)
+        or nameof(VibeOCR.App.ViewModels.DiagnosticsViewModel.DeviceEvidence))
     {
       StateChanged?.Invoke(DiagnosticsState());
     }
@@ -3405,7 +3406,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     diagnostics.Milestones
       .OrderBy(milestone => milestone.Name)
       .Select(milestone => milestone.Name)
-      .ToArray());
+      .ToArray(),
+    diagnostics.DeviceEvidence);
 
   private static string RecognitionStatusCode(
     RecognitionViewModel viewModel, bool? isBusy = null) =>

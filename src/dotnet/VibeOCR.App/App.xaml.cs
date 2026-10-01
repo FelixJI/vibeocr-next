@@ -206,7 +206,10 @@ public sealed partial class App : Application
                     await Windows.System.Launcher.LaunchUriAsync(uri);
                 }
             },
-            _runtimeStatus);
+            _runtimeStatus,
+            () => _supervisorProcess is { } process
+                ? (process.Ready.InstanceId, process.LogLines)
+                : (null, Array.Empty<string>()));
         // 可选取证轨迹（默认关闭）：仅显式设置环境变量时才订阅，不引入新配置系统。
         if (!string.IsNullOrWhiteSpace(
                 Environment.GetEnvironmentVariable("VIBEOCR_SUPERVISOR_HEALTH_TRACE")))
@@ -1004,6 +1007,7 @@ public sealed partial class App : Application
         if (_managedSession is { } previous)
         {
             previous.Process.UnexpectedExit -= OnSupervisorUnexpectedExit;
+            previous.Process.LogReceived -= OnSupervisorLogReceived;
             _inferenceGateway.Detach(previous.Client);
             _qrCodeGateway.Detach(previous.QrClient);
         }
@@ -1020,6 +1024,7 @@ public sealed partial class App : Application
             return;
         }
         next.Process.UnexpectedExit += OnSupervisorUnexpectedExit;
+        next.Process.LogReceived += OnSupervisorLogReceived;
         _inferenceGateway.Attach(next.Client);
         _qrCodeGateway.Attach(next.QrClient);
     }
@@ -1055,7 +1060,8 @@ public sealed partial class App : Application
             item => item.Key,
             item => item.Value,
             StringComparer.OrdinalIgnoreCase);
-        if (injectSoakCrash)
+        if (injectSoakCrash &&
+            Environment.GetEnvironmentVariable("VIBEOCR_SOAK_EXTERNAL_CRASH") != "1")
         {
             environment["VIBEOCR_SUPERVISOR_SOAK_CRASH_AFTER_READY"] = "1";
         }
@@ -1134,6 +1140,7 @@ public sealed partial class App : Application
                 instance_id = health.InstanceId,
                 protocol_version = health.ProtocolVersion,
                 detail = health.Detail,
+                process_id = _supervisorProcess?.ProcessId,
             });
             lock (_supervisorHealthTraceLock)
             {
@@ -1145,6 +1152,20 @@ public sealed partial class App : Application
         {
             // 取证轨迹尽力而为；不得影响连接状态机本身。
         }
+    }
+
+    private void OnSupervisorLogReceived(object? sender, string line)
+    {
+        if (!ReferenceEquals(sender, _supervisorProcess) ||
+            !line.Contains("[Paddle worker]", StringComparison.Ordinal) ||
+            !(line.Contains("[推理设备]", StringComparison.Ordinal) ||
+              line.Contains("[GPU]", StringComparison.Ordinal))) return;
+        void Notify()
+        {
+            if (ReferenceEquals(sender, _supervisorProcess))
+                _supervisorDiagnostics?.NotifyDeviceEvidenceChanged();
+        }
+        if (_window?.DispatcherQueue.TryEnqueue(Notify) != true) Notify();
     }
 
     private void OnSupervisorUnexpectedExit(
@@ -1268,6 +1289,7 @@ public sealed partial class App : Application
             _activeInferenceClient = null;
             _activeQrCodeClient = null;
             managed.Process.UnexpectedExit -= OnSupervisorUnexpectedExit;
+            managed.Process.LogReceived -= OnSupervisorLogReceived;
             _inferenceGateway.Detach(managed.Client);
             _qrCodeGateway.Detach(managed.QrClient);
             await managed.DisposeAsync();
@@ -1296,6 +1318,7 @@ public sealed partial class App : Application
             return;
         }
         process.UnexpectedExit -= OnSupervisorUnexpectedExit;
+        process.LogReceived -= OnSupervisorLogReceived;
         try
         {
             process.Dispose();

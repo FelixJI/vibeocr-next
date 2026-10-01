@@ -1084,6 +1084,7 @@ public static class WorkbenchBridgeCodec
       diagnostics.ProtocolStatus,
       diagnostics.IsReady,
       diagnostics.Milestones,
+      diagnostics.DeviceEvidence,
     },
     null => null,
     _ => throw new WorkbenchBridgeProtocolException(
