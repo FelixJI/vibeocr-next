@@ -1068,7 +1068,7 @@ async function main() {
 
 export { native, windows, waitForWindows, area, inside, delay, startFixture,
   launchApp, openSettings, toolbarStatus, setCheckbox, stopOwned, configure,
-  captureThroughHotkey, taskbarState, pngPixels };
+  captureThroughHotkey, taskbarState, pngPixels, focusRecorder };
 
 if (path.resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
   main().catch((error) => {

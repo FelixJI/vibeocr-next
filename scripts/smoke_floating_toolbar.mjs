@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   native, windows, waitForWindows, area, delay, startFixture, launchApp,
   openSettings, toolbarStatus, setCheckbox, stopOwned, configure,
-  captureThroughHotkey, taskbarState, pngPixels,
+  captureThroughHotkey, taskbarState, pngPixels, focusRecorder,
 } from './smoke_native_actions.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -31,7 +31,9 @@ const identity = JSON.parse(fs.readFileSync(path.join(source, 'app/metadata/comp
 const evidence = { schema_version: 1, state: 'failed', sourceSha: identity.source_sha, version: identity.version,
   candidateNote: process.argv.includes('--candidate-note') ? process.argv[process.argv.indexOf('--candidate-note') + 1] : 'Build from source identity above.',
   candidate, appPids: [], screenshots: [], gaps: [
-    'System light/dark transition, high contrast and multiple DPI require authorized system changes; not exercised.',
+    'System light/dark theme transition and real high contrast need authorized system changes and are not exercised here; recorded independently in the af140-theme-receipt-root.txt and af140-contrast-once-root.txt evidence trees.',
+    'Multiple DPI and multi-monitor layouts are human-exempted for this gate; this run asserts only the single desktop DPI it observes (recorded per window) and claims no other DPI coverage.',
+    'Linger granularity across 100/200/500/1000 ms is recorded independently in af140-linger-current-root.txt; this script asserts only its persisted 1000 ms exit window.',
     'Native toolbar commands have no disabled/busy state in production; no disabled visual state was manufactured.',
     'Tray menu physical invocation and actual Alt+Tab switcher inspection are not exercised.',
     'Timer/subscription disposal is covered by repository tests; external GUI can observe window/process cleanup only.',
@@ -41,10 +43,37 @@ const configFile = path.join(candidate, 'state/config/app_settings.json');
 const settings = () => JSON.parse(fs.readFileSync(configFile, 'utf8')).floating_toolbar;
 const point = (window, dx = 0.5, dy = 0.5) => ({ X: Math.round(window.Bounds.Left + (window.Bounds.Right - window.Bounds.Left) * dx),
   Y: Math.round(window.Bounds.Top + (window.Bounds.Bottom - window.Bounds.Top) * dy) });
+// The popup host outer frame carries a DPI-scaled border; the XAML toolbar is
+// the OwnedPopup client, so hit points, frames and relocation use client geometry.
+const clientPoint = (client, dx = 0.5, dy = 0.5) => ({ X: Math.round(client.X + client.Width * dx),
+  Y: Math.round(client.Y + client.Height * dy) });
+async function clientGeometry(handle) {
+  return JSON.parse(await native('geometry', { FixturePid: app.child.pid, Handle: handle }));
+}
 async function toolbar() {
-  return (await waitForWindows(app.child.pid, (w) => w.Visible && w.Handle !== app.main.Handle &&
-    Math.abs((w.Bounds.Right - w.Bounds.Left) / (w.Dpi / 96) - 272) < 3 &&
-    Math.abs((w.Bounds.Bottom - w.Bounds.Top) / (w.Dpi / 96) - 44) < 3))[0];
+  const until = Date.now() + 10000;
+  while (Date.now() < until) {
+    const candidates = await waitForWindows(app.child.pid, (w) => w.Visible && w.Handle !== app.main.Handle &&
+      w.ClassName === 'WinUIDesktopWin32WindowClass' && (w.ExtendedStyle & 0x80) !== 0);
+    for (const candidate of candidates) {
+      const { client, dpi } = await clientGeometry(candidate.Handle);
+      const scale = dpi / 96;
+      if (Math.abs(client.Width / scale - 272) < 3 && Math.abs(client.Height / scale - 44) < 3)
+        return { ...candidate, client, dpi };
+    }
+    await delay(180);
+  }
+  throw new Error('Owned toolbar popup host with a 272x44 logical client did not appear.');
+}
+async function waitForInputValue(locator, value, timeoutMs = 5000) {
+  const until = Date.now() + timeoutMs;
+  let observed = null;
+  while (Date.now() < until) {
+    observed = await locator.inputValue().catch(() => null);
+    if (observed === value) return observed;
+    await delay(150);
+  }
+  throw new Error(`Hotkey recorder did not acknowledge ${value}; last observed value: ${observed}.`);
 }
 async function savePreference(action) {
   const previousId = await app.page.evaluate(() => window.__toolbarSmokeRequests.filter((request) =>
@@ -78,11 +107,11 @@ async function show() {
 }
 async function frame(window, name) {
   const file = path.join(work, name);
-  const r = window.Bounds;
+  const { client } = await clientGeometry(window.Handle);
   await exec('pwsh', ['-NoProfile', '-NonInteractive', '-File', path.join(scriptDir, 'scroll_capture_fixture.ps1'),
     '-Action', 'frame', '-FixturePid', String(app.child.pid), '-Handle', String(window.Handle),
-    '-X', String(r.Left), '-Y', String(r.Top), '-Width', String(r.Right - r.Left),
-    '-Height', String(r.Bottom - r.Top), '-EvidenceRoot', work, '-OutputPath', file],
+    '-X', String(client.X), '-Y', String(client.Y), '-Width', String(client.Width),
+    '-Height', String(client.Height), '-EvidenceRoot', work, '-OutputPath', file],
   { timeout: 15000, windowsHide: true });
   evidence.screenshots.push(file);
   return pngPixels(app.page, fs.readFileSync(file));
@@ -168,7 +197,7 @@ try {
     assert.equal(settings().theme, theme);
     const beforeFocus = await native('foreground', { AppPid: app.child.pid });
     const idle = await frame(bar, `toolbar-${theme}.png`);
-    await native('hover', { AppPid: app.child.pid, ...point(bar, 0.19) });
+    await native('hover', { AppPid: app.child.pid, ...clientPoint(bar.client, 0.19) });
     await delay(120);
     const hover = await frame(bar, `toolbar-${theme}-hover.png`);
     assert.equal(await native('foreground', { AppPid: app.child.pid }), beforeFocus);
@@ -176,21 +205,49 @@ try {
     evidence.themes[theme] = { idle, hover, retainedForeground: true };
     await native('hover', { AppPid: app.child.pid, ...outside });
   }
-  const grip = point(bar, 0.075);
+  const grip = clientPoint(bar.client, 0.075);
   const dragForeground = await native('foreground', { AppPid: app.child.pid });
-  await native('toolbar-drag', { AppPid: app.child.pid, ...grip, OutsideX: outside.X, OutsideY: outside.Y });
+  const drag = JSON.parse(await native('toolbar-drag', { AppPid: app.child.pid, FixturePid: app.child.pid,
+    X: grip.X, Y: grip.Y, OutsideX: outside.X, OutsideY: outside.Y }));
   assert.equal(await native('foreground', { AppPid: app.child.pid }), dragForeground, 'Toolbar grip stole main foreground.');
   const dragged = (await windows(app.child.pid)).find((w) => w.Handle === bar.Handle);
   assert(dragged.Visible && dragged.Bounds.Top !== bar.Bounds.Top, 'Real grip drag did not relocate toolbar.');
+  const draggedClient = (await clientGeometry(bar.Handle)).client;
+  assert.deepEqual({ dx: draggedClient.X - bar.client.X, dy: draggedClient.Y - bar.client.Y },
+    { dx: drag.EndX - drag.StartX, dy: drag.EndY - drag.StartY },
+    'Toolbar client must follow the real main-foreground grip drag exactly.');
   await delay(1200);
   assert((await windows(app.child.pid)).find((w) => w.Handle === bar.Handle).Visible, 'Pinned toolbar hid after drag.');
-  evidence.drag = dragged;
+  evidence.drag = { cursor: drag, host: dragged, client: draggedClient };
   await app.page.getByRole('button', { name: '隐藏', exact: true }).click();
   await toolbarStatus(app.page, '已主动隐藏（鼠标路过不恢复）');
   assert.equal(settings().hidden_by_user, true);
   assert(!(await windows(app.child.pid)).some((w) => w.Visible && w.Handle !== app.main.Handle && area(w) > 100));
   const hotkeyRow = app.page.locator('.hotkey-action-row').filter({ hasText: '悬浮栏显示/隐藏' });
-  await hotkeyRow.getByRole('textbox').fill('Ctrl+Alt+Shift+F12');
+  // The recorder input is read-only by design; only a real native combo is
+  // accepted, delivered after the owned WebView owns Windows foreground.
+  const hotkeyInput = hotkeyRow.getByRole('textbox');
+  await app.page.evaluate(() => {
+    window.__toolbarHotkeyEvents = [];
+    for (const type of ['keydown', 'keyup']) {
+      document.addEventListener(type, (event) => {
+        const input = event.target;
+        if (!(input instanceof HTMLInputElement) || !input.closest('.hotkey-recorder')) return;
+        window.__toolbarHotkeyEvents.push({ type, key: event.key, code: event.code, trusted: event.isTrusted,
+          ctrl: event.ctrlKey, alt: event.altKey, shift: event.shiftKey, value: input.value });
+        window.__toolbarHotkeyEvents = window.__toolbarHotkeyEvents.slice(-16);
+      }, true);
+    }
+  });
+  await hotkeyInput.click();
+  await hotkeyRow.getByRole('status').filter({ hasText: '请按下新的组合键' }).waitFor();
+  await focusRecorder(app, hotkeyInput);
+  await native('toolbar-hotkey', { ForegroundPid: app.child.pid });
+  await waitForInputValue(hotkeyInput, 'Ctrl+Alt+Shift+F12');
+  evidence.toolbarHotkeyEvents = await app.page.evaluate(() => window.__toolbarHotkeyEvents);
+  assert(evidence.toolbarHotkeyEvents.some((event) => event.trusted && event.type === 'keydown' &&
+    event.key === 'F12' && event.ctrl && event.alt && event.shift),
+  'Native toolbar hotkey recording did not observe a trusted Ctrl+Alt+Shift+F12 keydown.');
   await hotkeyRow.getByRole('button', { name: '应用 悬浮栏显示/隐藏' }).click();
   await hotkeyRow.getByText('当前生效：Ctrl+Alt+Shift+F12').waitFor();
   await native('toolbar-hotkey', { ForegroundPid: app.child.pid });
@@ -209,11 +266,36 @@ try {
   evidence.restart = { lingerMs: settings().linger_ms, theme: settings().theme, hiddenByUser: settings().hidden_by_user };
   await app.page.screenshot({ path: path.join(work, 'toolbar-settings.png') });
   evidence.screenshots.push(path.join(work, 'toolbar-settings.png'));
-  await configure(app.page);
+  await configure(app, evidence);
   await show();
   fixture = await startFixture();
   evidence.taskbarStateBefore = await taskbarState();
   evidence.capture = await captureThroughHotkey(app, fixture, work, evidence);
+  // External-foreground drag: the owned synthetic fixture root owns the
+  // foreground and the drop point; its full-desktop background is hidden so
+  // the toolbar keeps an app-owned hit test at the grip. No user window is
+  // ever activated, clicked or dragged over.
+  await native('hide', { AppPid: fixture.pid, Handle: fixture.background });
+  const rootFocus = { X: fixture.rootRect.left + Math.floor(fixture.rootRect.width * 0.45),
+    Y: fixture.rootRect.top + Math.floor(fixture.rootRect.height * 0.9) };
+  await native('focus-fixture', { FixturePid: fixture.pid, Handle: fixture.root, X: rootFocus.X, Y: rootFocus.Y });
+  const externalForeground = Number(await native('foreground', { AppPid: fixture.pid }));
+  bar = await toolbar();
+  const externalGrip = clientPoint(bar.client, 0.075);
+  const externalDrop = { X: fixture.rootRect.left + Math.floor(fixture.rootRect.width * 0.6),
+    Y: fixture.rootRect.top + Math.floor(fixture.rootRect.height * 0.5) };
+  const externalDrag = JSON.parse(await native('toolbar-drag', { AppPid: app.child.pid, FixturePid: fixture.pid,
+    X: externalGrip.X, Y: externalGrip.Y, OutsideX: externalDrop.X, OutsideY: externalDrop.Y }));
+  assert.equal(Number(await native('foreground', { AppPid: fixture.pid })), externalForeground,
+    'External-foreground toolbar drag stole the owned fixture foreground.');
+  const externalClient = (await clientGeometry(bar.Handle)).client;
+  assert.deepEqual({ dx: externalClient.X - bar.client.X, dy: externalClient.Y - bar.client.Y },
+    { dx: externalDrag.EndX - externalDrag.StartX, dy: externalDrag.EndY - externalDrag.StartY },
+    'Toolbar client must follow the external-foreground grip drag exactly.');
+  assert((await windows(app.child.pid)).some((w) => w.Handle === bar.Handle && w.Visible),
+    'Toolbar hid after the external-foreground drag.');
+  evidence.externalDrag = { cursor: externalDrag, clientFrom: bar.client, clientTo: externalClient,
+    foreground: externalForeground };
   await openSettings(app.page);
   await setCheckbox(app.page, '启用悬浮工具栏', false);
   await toolbarStatus(app.page, '已关闭');

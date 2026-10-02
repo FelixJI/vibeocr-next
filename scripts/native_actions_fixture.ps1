@@ -399,19 +399,45 @@ public static class NativeActionsFixture
             HiddenAfterSecondExit = !IsWindowVisible(new IntPtr(handle)), SecondExitElapsedMs = watch.ElapsedMilliseconds };
     }
 
-    public static void ToolbarDrag(int appPid, int x, int y, int outsideX, int outsideY)
+    [DllImport("user32.dll")] private static extern bool GetCursorPos(out Point point);
+
+    private static Input MoveTo(int x, int y) => new Input
     {
-        RequireForeground(appPid);
+        Type = 0,
+        Data = new InputUnion { Mouse = new MouseInput
+        {
+            X = (int)(((long)x - GetSystemMetrics(76)) * 65536 / GetSystemMetrics(78)),
+            Y = (int)(((long)y - GetSystemMetrics(77)) * 65536 / GetSystemMetrics(79)),
+            Flags = 0x0001 | 0x4000 | 0x8000,
+        } },
+    };
+
+    // Real SendInput drag. Absolute injected moves generate the complete
+    // WM_MOUSEMOVE stream the owned popup grip needs; SetCursorPos alone
+    // never produced it. Ownership stays explicit and owned: appPid owns the
+    // grip start point, fixturePid owns the foreground and the drop point.
+    public static object ToolbarDrag(int appPid, int fixturePid, int x, int y, int outsideX, int outsideY)
+    {
+        RequireForeground(fixturePid);
         RequirePointOwner(x, y, appPid);
-        RequirePointOwner(outsideX, outsideY, appPid);
-        Hover(appPid, x, y);
-        try {
+        Send(new[] { MoveTo(x, y) });
+        RequireForeground(fixturePid);
+        RequirePointOwner(x, y, appPid);
+        if (!GetCursorPos(out Point dragStart)) throw new InvalidOperationException("Owned drag start cursor is unavailable.");
+        Point dragEnd = dragStart;
+        try
+        {
             Send(new[] { Mouse(0x0002) });
             System.Threading.Thread.Sleep(80);
-            if (!SetCursorPos(outsideX, outsideY)) throw new InvalidOperationException("Owned toolbar drag failed.");
-            System.Threading.Thread.Sleep(100);
+            RequireForeground(fixturePid);
+            RequirePointOwner(outsideX, outsideY, fixturePid);
+            Send(new[] { MoveTo(outsideX, outsideY) });
+            System.Threading.Thread.Sleep(120);
+            RequireForeground(fixturePid);
+            if (!GetCursorPos(out dragEnd)) throw new InvalidOperationException("Owned drag end cursor is unavailable.");
         }
         finally { Send(new[] { Mouse(0x0004) }); }
+        return new { StartX = dragStart.X, StartY = dragStart.Y, EndX = dragEnd.X, EndY = dragEnd.Y };
     }
 
     public static void Hotkey(int foregroundPid, ushort key)
@@ -473,7 +499,7 @@ try {
         'probe' { [NativeActionsFixture]::Probe($AppPid, $FixturePid, $X, $Y) | ConvertTo-Json -Compress -Depth 5 }
         'hover' { [NativeActionsFixture]::Hover($AppPid, $X, $Y) }
         'toolbar-sequence' { [NativeActionsFixture]::ToolbarSequence($Handle, $AppPid, $X, $Y, $OutsideX, $OutsideY, $LingerMs) | ConvertTo-Json -Compress }
-        'toolbar-drag' { [NativeActionsFixture]::ToolbarDrag($AppPid, $X, $Y, $OutsideX, $OutsideY) }
+        'toolbar-drag' { [NativeActionsFixture]::ToolbarDrag($AppPid, $FixturePid, $X, $Y, $OutsideX, $OutsideY) | ConvertTo-Json -Compress }
         'toolbar-hotkey' { [NativeActionsFixture]::Hotkey($ForegroundPid, 0x7B) }
         'tab' { [NativeActionsFixture]::OverlayKey($AppPid, 0x09) }
         'enter' { [NativeActionsFixture]::OverlayKey($AppPid, 0x0D) }
