@@ -218,6 +218,40 @@ test("inpaint preview applies real CPU worker pixels to export and keeps outside
   await expect.poll(() => uploads.length).toBe(3);
   const undone = await decodeUpload(page, uploads[2]!.body, "image/png");
   expect(undone.pixels).toEqual(baseline.pixels);
+
+  // 修补与屏蔽共存：真实屏蔽预览、文件及识别管线必须使用相同像素。
+  await page.getByRole("button", { name: "重做", exact: true }).click();
+  await page.getByRole("button", { name: "屏蔽", exact: true }).click();
+  await dragOnCanvas(page, { x: 10, y: 84 }, { x: 140, y: 160 });
+  const maskedPreview = page.getByAltText("屏蔽导出预览");
+  await expect(maskedPreview).toBeVisible();
+  await expect
+    .poll(() =>
+      maskedPreview.evaluate((node) => (node as HTMLImageElement).naturalWidth),
+    )
+    .toBe(96);
+  const preview = await maskedPreview.evaluate((node) => {
+    const image = node as HTMLImageElement;
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("2d context unavailable");
+    context.drawImage(image, 0, 0);
+    return {
+      width: canvas.width,
+      height: canvas.height,
+      pixels: Array.from(
+        context.getImageData(0, 0, canvas.width, canvas.height).data,
+      ),
+    };
+  });
+  expect(pixelAt(preview, 48, 20)).toEqual(pixelAt(applied, 48, 20));
+  expect(pixelAt(preview, 5, 5)).toEqual([255, 255, 255, 255]);
+  await page.getByRole("button", { name: "保存屏蔽副本", exact: true }).click();
+  await expect.poll(() => uploads.length).toBe(4);
+  const masked = await decodeUpload(page, uploads[3]!.body, "image/png");
+  expect(masked.pixels).toEqual(preview.pixels);
 });
 
 test("cancel and re-edit during processing terminate the worker so late results cannot commit", async ({

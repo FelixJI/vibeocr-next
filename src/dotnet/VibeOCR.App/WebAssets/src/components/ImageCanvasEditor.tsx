@@ -612,6 +612,7 @@ export function ImageCanvasEditor({
             format: outputFormat,
             quality: jpegQuality,
             bakeExclusions: true,
+            inpaint: { patches: appliedInpaintPatches },
           });
           const url = URL.createObjectURL(blob);
           const decoded = new Image();
@@ -644,7 +645,13 @@ export function ImageCanvasEditor({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [state, outputFormat, jpegQuality, maskedPreviewKey]);
+  }, [
+    state,
+    outputFormat,
+    jpegQuality,
+    maskedPreviewKey,
+    appliedInpaintPatches,
+  ]);
 
   const maskedPreviewUrl = maskedPreview?.url;
   useEffect(() => {
