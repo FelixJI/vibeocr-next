@@ -238,6 +238,10 @@ public sealed record SetActionHotkeyCommand(string ActionId, string? Hotkey) : W
 /// <summary>Restore an action's default hotkey (only the quick recognition action has one).</summary>
 public sealed record ResetActionHotkeyCommand(string ActionId) : WorkbenchCommand;
 
+public sealed record BeginHotkeyRecordingCommand(Guid RecordingId) : WorkbenchCommand;
+
+public sealed record EndHotkeyRecordingCommand(Guid RecordingId) : WorkbenchCommand;
+
 /// <summary>
 /// Enable or disable the floating toolbar live. Enabling persists the
 /// preference and creates the toolbar; disabling tears it down. The toolbar

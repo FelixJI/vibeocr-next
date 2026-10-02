@@ -1274,6 +1274,38 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       Assert.Equal("Ctrl+Alt+C", clipboard.ConfiguredHotkey);
       Assert.Equal("Ctrl+Alt+C", clipboard.RegisteredHotkey);
 
+      Guid firstRecording = Guid.NewGuid();
+      Guid nextRecording = Guid.NewGuid();
+      WorkbenchCommandOutcome started = await handler.ExecuteAsync(
+        new BeginHotkeyRecordingCommand(firstRecording),
+        TestContext.Current.CancellationToken);
+      Assert.Null(started.Error);
+      var startedState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(started.States));
+      Assert.True(dispatcher.IsHotkeyRecording);
+      Assert.All(startedState.HotkeyActions!, action => Assert.Null(action.RegisteredHotkey));
+      Assert.Equal("Ctrl+Alt+Q", Assert.Single(
+        startedState.HotkeyActions!, action => action.ActionId == "screenshot_recognize").ConfiguredHotkey);
+      await handler.ExecuteAsync(new BeginHotkeyRecordingCommand(nextRecording),
+        TestContext.Current.CancellationToken);
+      await handler.ExecuteAsync(new EndHotkeyRecordingCommand(firstRecording),
+        TestContext.Current.CancellationToken);
+      Assert.True(dispatcher.IsHotkeyRecording); // 旧控件迟到结束不影响新录入。
+      WorkbenchCommandOutcome ended = await handler.ExecuteAsync(
+        new EndHotkeyRecordingCommand(nextRecording),
+        TestContext.Current.CancellationToken);
+      Assert.False(dispatcher.IsHotkeyRecording);
+      Assert.Equal("Ctrl+Alt+C", Assert.Single(
+        Assert.IsType<SettingsWorkbenchState>(Assert.Single(ended.States)).HotkeyActions!,
+        action => action.ActionId == "clipboard_recognize").RegisteredHotkey);
+
+      dispatcher.BeginHotkeyRecording(Guid.NewGuid());
+      SettingsWorkbenchState? restored = null;
+      handler.StateChanged += state => restored = state as SettingsWorkbenchState;
+      handler.EndHotkeyRecording(); // 窗口失活/重载/崩溃/关闭共用的宿主恢复入口。
+      Assert.False(dispatcher.IsHotkeyRecording);
+      Assert.Equal("Ctrl+Alt+Q", Assert.Single(restored!.HotkeyActions!,
+        action => action.ActionId == "screenshot_recognize").RegisteredHotkey);
+
       // 重复键位被拒：命令仍成功（设置页以动作状态回显），错误可见且原绑定不变。
       WorkbenchCommandOutcome conflict = await handler.ExecuteAsync(
         new SetActionHotkeyCommand("screenshot_edit", "Ctrl+Alt+Q"),

@@ -35,6 +35,7 @@ public static class WorkbenchBridgeCodec
   private static readonly HashSet<string> FormatArgumentFields = ["format"];
   private static readonly HashSet<string> EnabledArgumentFields = ["enabled"];
   private static readonly HashSet<string> ActionIdArgumentFields = ["actionId"];
+  private static readonly HashSet<string> RecordingArgumentFields = ["recordingId"];
   private static readonly HashSet<string> ActionHotkeyArgumentFields =
     ["actionId", "hotkey"];
   private static readonly HashSet<string> ToolbarLayoutArgumentFields =
@@ -575,6 +576,12 @@ public static class WorkbenchBridgeCodec
       case ("settings", "setStartup"):
         EnsureObjectWithFields(arguments, EnabledArgumentFields, "command arguments");
         return new SetStartupCommand(arguments.GetProperty("enabled").GetBoolean());
+      case ("settings", "beginHotkeyRecording"):
+        EnsureObjectWithFields(arguments, RecordingArgumentFields, "command arguments");
+        return new BeginHotkeyRecordingCommand(ParseGuidArgument(arguments, "recordingId"));
+      case ("settings", "endHotkeyRecording"):
+        EnsureObjectWithFields(arguments, RecordingArgumentFields, "command arguments");
+        return new EndHotkeyRecordingCommand(ParseGuidArgument(arguments, "recordingId"));
       case ("settings", "setActionHotkey"):
         bool hasHotkey = !HasExactFields(arguments, ActionIdArgumentFields);
         if (hasHotkey)

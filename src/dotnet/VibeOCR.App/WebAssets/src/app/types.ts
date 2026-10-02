@@ -76,6 +76,8 @@ export type AppActionType =
   | "settings.repairEmptyEnvironment"
   | "settings.findCompatibleEnvironment"
   | "settings.setStartup"
+  | "settings.beginHotkeyRecording"
+  | "settings.endHotkeyRecording"
   | "settings.setActionHotkey"
   | "settings.resetActionHotkey"
   | "settings.setFloatingToolbarEnabled"

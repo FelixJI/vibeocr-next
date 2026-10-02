@@ -333,11 +333,12 @@ input {
 }
 /* 快捷操作行：说明 | 键位输入 | 动作区 三列；动作区定宽并从左缘对齐，
    有无“恢复默认”的行应用/禁用列起点一致（AC5，对齐由 e2e 几何断言
-   实测，不以本注释为证据）；录入与注册语义不变。 */
+   实测，不以本注释为证据）；录入与注册语义不变。顶部对齐：录入组件的
+   提示/错误在输入下方换行时，按钮簇不随行高增长下漂。 */
 .hotkey-edit-row {
   display: grid;
-  align-items: center;
-  grid-template-columns: minmax(0, 1fr) minmax(150px, 220px) 328px;
+  align-items: start;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 220px) 420px;
   gap: 8px;
 }
 .hotkey-edit-row .setting-actions {
@@ -543,6 +544,56 @@ input {
   border: 1px solid var(--colorNeutralStroke2);
   border-radius: 6px;
   background: var(--colorNeutralBackground2);
+}
+/* 录入组件自带 label/输入/状态：跨前两列内部 subgrid，输入与状态对齐
+   固定输入列；说明列承接行头语境（动作名已在上方行头展示）。 */
+.hotkey-edit-row .hotkey-recorder {
+  grid-column: 1 / 3;
+  grid-template-columns: subgrid;
+}
+.hotkey-edit-row .hotkey-recorder input,
+.hotkey-edit-row .hotkey-recorder [role="status"] {
+  grid-column: 2;
+}
+.hotkey-recorder {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+.hotkey-recorder label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.hotkey-recorder input {
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 1px solid var(--colorNeutralStroke1);
+  border-radius: 4px;
+  background: var(--colorNeutralBackground1);
+  color: var(--colorNeutralForeground1);
+}
+.hotkey-recorder input:focus-visible {
+  outline: 2px solid var(--colorBrandStroke1);
+  outline-offset: 2px;
+}
+.hotkey-recorder input:disabled {
+  color: var(--colorNeutralForegroundDisabled);
+  background: var(--colorNeutralBackgroundDisabled);
+}
+.hotkey-recorder input[aria-invalid="true"] {
+  border-color: var(--colorPaletteRedBorder2);
+}
+.hotkey-recorder [role="status"] {
+  min-height: 16px;
+  font-size: 12px;
+  color: var(--colorNeutralForeground3);
+  overflow-wrap: anywhere;
 }
 .hotkey-action-head {
   display: flex;

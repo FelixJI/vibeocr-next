@@ -15,6 +15,7 @@ namespace VibeOCR.App.Features.Shell;
 internal sealed class ShellActionDispatcher
 {
     private readonly Func<WindowsHotkeyRegistrar?> _registrar;
+    private Guid? _recordingId;
     private readonly IReadOnlyDictionary<string, Func<Task>> _handlers;
     private readonly Func<FloatingToolbarSettings> _toolbarSettings;
     private readonly Func<FloatingToolbarVisibility> _toolbarVisibility;
@@ -64,6 +65,24 @@ internal sealed class ShellActionDispatcher
         return true;
     }
 
+    public bool IsHotkeyRecording => _registrar()?.IsRecording == true;
+
+    public void BeginHotkeyRecording(Guid recordingId)
+    {
+        WindowsHotkeyRegistrar registrar = _registrar() ??
+            throw new InvalidOperationException("快捷键服务尚未就绪，请稍后重试。");
+        registrar.BeginRecording();
+        _recordingId = recordingId;
+    }
+
+    public void EndHotkeyRecording(Guid? recordingId = null)
+    {
+        // 旧页面/控件的迟到结束不能恢复新会话的注册。
+        if (recordingId is not null && _recordingId != recordingId) return;
+        _recordingId = null;
+        _registrar()?.EndRecording();
+    }
+
     /// <summary>全部动作的配置与实际注册状态；登记器未就绪时为空列表。</summary>
     public IReadOnlyList<HotkeyActionStatus> GetHotkeyActions() =>
         _registrar()?.GetActionStatuses() ?? [];
@@ -81,6 +100,7 @@ internal sealed class ShellActionDispatcher
             return false;
         }
 
+        EndHotkeyRecording();
         return registrar.SetActionHotkey(actionId, hotkey, out error);
     }
 
@@ -94,6 +114,7 @@ internal sealed class ShellActionDispatcher
             return false;
         }
 
+        EndHotkeyRecording();
         return registrar.ResetActionToDefault(actionId, out error);
     }
 

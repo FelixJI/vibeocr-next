@@ -245,15 +245,89 @@ async function setCheckbox(page, name, checked) {
   await expect(checkbox).toBeChecked({ checked });
 }
 
-async function configure(page) {
+async function focusRecorder(app, input) {
+  // CDP input focus does not establish Windows foreground ownership.
+  const bounds = JSON.parse(await native('webview-bounds', {
+    AppPid: app.child.pid, Handle: app.main.Handle,
+  }));
+  const box = await input.boundingBox();
+  assert(box, 'Recorder has no visible bounds.');
+  const view = await app.page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+  const sx = (bounds.Right - bounds.Left) / view.width;
+  const sy = (bounds.Bottom - bounds.Top) / view.height;
+  assert(sx > 0 && sy > 0 && Math.abs(sx - sy) < 0.03,
+    'Owned WebView must have a uniform measured scale.');
+  await native('focus-fixture', {
+    FixturePid: app.child.pid, Handle: app.main.Handle,
+    X: Math.round(bounds.Left + (box.x + box.width / 2) * sx),
+    Y: Math.round(bounds.Top + (box.y + box.height / 2) * sy),
+  });
+}
+
+async function configure(app, evidence) {
+  const { page } = app;
   await openSettings(page);
+  await page.evaluate(() => {
+    window.__hotkeyRecordingEvents = [];
+    for (const type of ['keydown', 'keyup', 'focusin', 'focusout']) {
+      document.addEventListener(type, event => {
+        const input = event.target;
+        if (!(input instanceof HTMLInputElement) || !input.closest('.hotkey-recorder')) return;
+        window.__hotkeyRecordingEvents.push({
+          type, key: event.key, code: event.code, trusted: event.isTrusted,
+          ctrl: event.ctrlKey, alt: event.altKey, shift: event.shiftKey, meta: event.metaKey,
+          value: input.value, status: input.closest('.hotkey-recorder').innerText,
+        });
+        window.__hotkeyRecordingEvents = window.__hotkeyRecordingEvents.slice(-32);
+      }, true);
+    }
+  });
+  evidence.stage = 'edit-first-recording';
   const row = page.locator('.hotkey-action-row').filter({ hasText: '截图编辑' });
-  await row.getByRole('textbox', { name: '截图编辑新快捷键' }).fill(hotkey);
+  const editInput = row.getByRole('textbox', { name: '截图编辑新快捷键' });
+  await editInput.click();
+  await row.getByRole('status').filter({ hasText: '请按下新的组合键' }).waitFor();
+  await focusRecorder(app, editInput);
+  // FixturePid is the existing hotkey command's foreground-owner guard; here it owns the app.
+  await native('hotkey', { FixturePid: app.child.pid });
+  await expect(editInput).toHaveValue(hotkey);
   await row.getByRole('button', { name: '应用 截图编辑' }).click();
   await row.getByText(`当前生效：${hotkey}`).waitFor();
+  evidence.stage = 'edit-registered-rerecording';
+  // Re-record our now-registered F10 from an empty draft: seeing the complete
+  // combo proves the old OS registration released it to this real WebView2 input.
+  await row.getByRole('button', { name: '清空 截图编辑' }).click();
+  await expect(editInput).toHaveValue('');
+  await editInput.click();
+  await row.getByRole('status').filter({ hasText: '请按下新的组合键' }).waitFor();
+  await focusRecorder(app, editInput);
+  await native('hotkey', { FixturePid: app.child.pid });
+  await expect(editInput).toHaveValue(hotkey);
+  assert((await windows(app.child.pid)).some(item =>
+    item.Handle === app.main.Handle && item.Visible),
+  'Recording an already-registered key unexpectedly hid the main window.');
+  evidence.stage = 'edit-rerecording-escape';
+  evidence.beforeEscape = JSON.parse(await native('probe', {
+    AppPid: app.child.pid, FixturePid: app.child.pid, X: 0, Y: 0,
+  }));
+  evidence.webviewBeforeEscape = await page.evaluate(() => ({
+    focused: document.hasFocus(), visibility: document.visibilityState,
+  }));
+  await native('escape', { AppPid: app.child.pid });
+  evidence.afterEscape = JSON.parse(await native('probe', {
+    AppPid: app.child.pid, FixturePid: app.child.pid, X: 0, Y: 0,
+  }));
+  await expect(editInput).toHaveValue('');
+  await row.getByText(`当前生效：${hotkey}`).waitFor();
+
   const recognizeRow = page.locator('.hotkey-action-row').filter({ hasText: '快捷截图识别' });
-  await recognizeRow.getByRole('textbox', { name: '快捷截图识别新快捷键' })
-    .fill(recognizeHotkey);
+  evidence.stage = 'recognition-recording';
+  const recognizeInput = recognizeRow.getByRole('textbox', { name: '快捷截图识别新快捷键' });
+  await recognizeInput.click();
+  await recognizeRow.getByRole('status').filter({ hasText: '请按下新的组合键' }).waitFor();
+  await focusRecorder(app, recognizeInput);
+  await native('recognize-hotkey', { ForegroundPid: app.child.pid });
+  await expect(recognizeInput).toHaveValue(recognizeHotkey);
   await recognizeRow.getByRole('button', { name: '应用 快捷截图识别' }).click();
   await recognizeRow.getByText(`当前生效：${recognizeHotkey}`).waitFor();
 
@@ -931,7 +1005,7 @@ async function main() {
   try {
     app = await launchApp(candidate, webviewData, instanceId);
     evidence.appPids.push(app.child.pid);
-    await configure(app.page);
+    await configure(app, evidence);
     const firstMain = app.main.Handle;
     await stopOwned(app.child, 'close', { AppPid: app.child.pid, Handle: firstMain });
     await app.browser.close().catch(() => {});
@@ -954,6 +1028,20 @@ async function main() {
     console.log(`Native actions E2E passed; synthetic evidence: ${smokeRoot}`);
   } catch (error) {
     evidence.error = `${error.name}: ${error.message}`;
+    if (app?.child.exitCode === null) {
+      try {
+        evidence.recordingDOM = await app.page.evaluate(() => ({
+          events: window.__hotkeyRecordingEvents ?? [],
+          active: document.activeElement?.outerHTML,
+          rows: [...document.querySelectorAll('.hotkey-action-row')].map(row => ({
+            text: row.innerText, value: row.querySelector('input')?.value,
+          })),
+        }));
+        await app.page.screenshot({ path: path.join(smokeRoot, 'native-actions-failure.png') });
+      } catch (diagnosticError) {
+        evidence.diagnosticError = diagnosticError.message;
+      }
+    }
     throw error;
   } finally {
     const cleanupErrors = [];
