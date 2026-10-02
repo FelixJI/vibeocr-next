@@ -17,11 +17,19 @@ import {
   type CanvasSize,
   type EditorState,
   type Mark,
+  type PixelPatch,
   type Point,
 } from "./annotationGeometry";
 import { uploadAnnotatedImage } from "./annotationHandoff";
 import { ImageTextLayer } from "./ImageTextLayer";
 import { toImageTextLines } from "./imageTextLayerGeometry";
+import type { InpaintRect, InpaintResponse } from "./inpaint/inpaint";
+import {
+  describeInpaintFailure,
+  naturalRectToDisplay,
+  preflightSelection,
+  selectionToNaturalRect,
+} from "./inpaint/inpaintSelection";
 
 /** 宿主回发的原位文字层状态（recognition.textLayer 投影）。 */
 export interface ScreenshotTextLayerState {
@@ -49,7 +57,8 @@ export interface ScreenshotTextLayerState {
     | null;
 }
 
-type Tool = "select" | "hand" | "textSelect" | AnnotationTool | "crop";
+type Tool =
+  "select" | "hand" | "textSelect" | AnnotationTool | "crop" | "inpaint";
 
 const EMPTY: EditorState = { rotation: 0, marks: [] };
 const DEFAULT_COLOR = "#f38b35";
@@ -68,6 +77,7 @@ const TOOL_LABELS: Readonly<Record<Tool, string>> = {
   highlighter: "荧光笔",
   numbering: "序号",
   crop: "裁剪",
+  inpaint: "去水印",
 };
 
 const TOOL_ORDER: readonly Tool[] = [
@@ -84,6 +94,7 @@ const TOOL_ORDER: readonly Tool[] = [
   "highlighter",
   "numbering",
   "crop",
+  "inpaint",
 ];
 
 const STROKE_COLORS = [
@@ -109,6 +120,28 @@ const MAX_OUTPUT_PIXELS = 64_000_000;
 export interface ScreenshotSessionHandle {
   readonly sessionId: string;
   readonly revision: number;
+}
+
+/** 去水印预览结果：仅存在干组件状态，绝不进入历史；明确应用才 commit。 */
+interface InpaintPreviewResult {
+  readonly generation: number;
+  readonly naturalRect: InpaintRect;
+  readonly canvas: HTMLCanvasElement;
+  readonly wallMs: number;
+  readonly transferBytes: number;
+}
+
+/** draw()/exportCanvas 共用的补丁绘制层：矩形为原图（未旋转）像素空间。 */
+export interface InpaintDrawLayer {
+  readonly patches?: readonly {
+    readonly rect: InpaintRect;
+    readonly canvas: HTMLCanvasElement;
+  }[];
+  readonly preview?: {
+    readonly rect: InpaintRect;
+    readonly canvas: HTMLCanvasElement;
+  };
+  readonly selection?: { readonly start: Point; readonly end: Point };
 }
 
 interface ImageCanvasEditorProps {
@@ -173,6 +206,27 @@ export function ImageCanvasEditor({
     decodedSourceSize?.source === source ? decodedSourceSize.size : undefined;
   const [isExporting, setIsExporting] = useState(false);
   const [draftMark, setDraftMark] = useState<Mark | undefined>();
+  // 去水印（Beta）：拖拽草稿/确定选区均为显示空间坐标；预览结果仅在
+  // 明确应用时进入历史，取消/迟到结果不触碰当前图片。
+  const [inpaintDraft, setInpaintDraft] = useState<
+    { start: Point; end: Point } | undefined
+  >();
+  const [inpaintSelection, setInpaintSelection] = useState<
+    { start: Point; end: Point } | undefined
+  >();
+  const inpaintSelectionRef = useRef<{ start: Point; end: Point } | undefined>(
+    undefined,
+  );
+  const [inpaintPreview, setInpaintPreview] = useState<InpaintPreviewResult>();
+  const [inpaintBusy, setInpaintBusy] = useState(false);
+  const [inpaintCompare, setInpaintCompare] = useState<"after" | "before">(
+    "after",
+  );
+  // Worker/补丁存储全部走 ref：像素不进 React 状态，避免多余拷贝。
+  const inpaintWorkerRef = useRef<Worker | undefined>(undefined);
+  const inpaintGenerationRef = useRef(0);
+  const inpaintPatchStore = useRef(new Map<number, HTMLCanvasElement>());
+  const inpaintPatchIdRef = useRef(0);
   // 本地修订：编辑提交即时推进，不等宿主回显；文字层绑定据此立即失效。
   const [localRevision, setLocalRevision] = useState(session?.revision ?? 0);
   const [localAutoText, setLocalAutoText] = useState(false);
@@ -223,6 +277,15 @@ export function ImageCanvasEditor({
     sessionIdRef.current = session?.sessionId;
     contentRevisionRef.current = session?.revision ?? 0;
     setLocalRevision(session?.revision ?? 0);
+    // 换图/换会话：作废在途修补请求与迟到响应，丢弃全部补丁像素。
+    inpaintGenerationRef.current += 1;
+    inpaintWorkerRef.current?.terminate();
+    inpaintWorkerRef.current = undefined;
+    inpaintPatchStore.current.clear();
+    setInpaintDraft(undefined);
+    setInpaintSelection(undefined);
+    setInpaintPreview(undefined);
+    setInpaintBusy(false);
   }
 
   // 同会话内宿主回显修订时单调对齐本地计数，避免回退。
@@ -262,6 +325,82 @@ export function ImageCanvasEditor({
     };
   }, [source]);
 
+  // 去水印绘制层：应用补丁从存储解析；预览仅在对比为“修补后”时叠加；
+  // 选区高亮按映射后的有效范围回投显示，用户看到的就是实际修改范围。
+  const displayCanvasRef = canvasRef.current;
+  const imageForLayer = imageRef.current;
+  // 已应用补丁只随编辑历史变化；导出/预览编码共用同一份解析结果。
+  const appliedInpaintPatches = useMemo<
+    readonly { rect: PixelPatch; canvas: HTMLCanvasElement }[]
+  >(
+    () =>
+      (state.patches ?? [])
+        .map((patch) => ({
+          rect: patch,
+          canvas: inpaintPatchStore.current.get(patch.id),
+        }))
+        .filter(
+          (
+            entry,
+          ): entry is {
+            rect: PixelPatch;
+            canvas: HTMLCanvasElement;
+          } => !!entry.canvas,
+        ),
+    [state],
+  );
+  const inpaintLayer = useMemo<InpaintDrawLayer>(() => {
+    const preview =
+      inpaintPreview && inpaintCompare === "after" ? inpaintPreview : undefined;
+    let selection: { start: Point; end: Point } | undefined;
+    const drag = inpaintDraft ?? inpaintSelection;
+    if (
+      tool === "inpaint" &&
+      drag &&
+      imageForLayer &&
+      displayCanvasRef &&
+      imageForLayer.naturalWidth > 0 &&
+      imageForLayer.naturalHeight > 0
+    ) {
+      const displaySize = {
+        width: displayCanvasRef.width,
+        height: displayCanvasRef.height,
+      };
+      const rect = selectionToNaturalRect(
+        drag.start,
+        drag.end,
+        imageForLayer,
+        state.rotation,
+        displaySize,
+      );
+      if (rect.width > 0 && rect.height > 0) {
+        selection = naturalRectToDisplay(
+          rect,
+          imageForLayer,
+          state.rotation,
+          displaySize,
+        );
+      }
+    }
+    return {
+      patches: appliedInpaintPatches,
+      preview: preview
+        ? { rect: preview.naturalRect, canvas: preview.canvas }
+        : undefined,
+      selection,
+    };
+  }, [
+    state,
+    tool,
+    imageForLayer,
+    displayCanvasRef,
+    inpaintDraft,
+    inpaintSelection,
+    inpaintPreview,
+    inpaintCompare,
+    appliedInpaintPatches,
+  ]);
+
   useEffect(() => {
     draw(
       canvasRef.current,
@@ -273,8 +412,44 @@ export function ImageCanvasEditor({
       1,
       // 预览背底与导出一致：JPEG 白底合成透明，PNG 沿用原有深色合成。
       outputFormat === "image/jpeg" ? "#ffffff" : "#161616",
+      inpaintLayer,
     );
-  }, [imageRevision, selectedMark, state, draftMark, outputFormat]);
+  }, [
+    imageRevision,
+    selectedMark,
+    state,
+    draftMark,
+    outputFormat,
+    inpaintLayer,
+  ]);
+
+  // 选区镜像：Worker 响应到达时用 ref 比对最新选区，不依赖旧闭包。
+  useEffect(() => {
+    inpaintSelectionRef.current = inpaintSelection;
+  }, [inpaintSelection]);
+
+  // 补丁像素仅保留仍被历史（含撤销/重做分支）引用的条目。
+  useEffect(() => {
+    const alive = new Set<number>();
+    for (const entry of history) {
+      for (const patch of entry.patches ?? []) alive.add(patch.id);
+    }
+    for (const id of [...inpaintPatchStore.current.keys()]) {
+      if (!alive.has(id)) inpaintPatchStore.current.delete(id);
+    }
+  }, [history]);
+
+  // 卸载：终止在途 Worker 并释放补丁像素；不触碰宿主状态。
+  useEffect(() => {
+    const store = inpaintPatchStore.current;
+    const workerRef = inpaintWorkerRef;
+    return () => {
+      inpaintGenerationRef.current += 1;
+      workerRef.current?.terminate();
+      workerRef.current = undefined;
+      store.clear();
+    };
+  }, []);
 
   // 导出/信息行共用的当前输出尺寸；值不变时保持引用稳定，避免无关编辑
   // 重置用户正在输入的宽高草稿。
@@ -341,6 +516,7 @@ export function ImageCanvasEditor({
           const blob = await exportCanvas(image, canvasRef.current, state, {
             format: outputFormat,
             quality: jpegQuality,
+            inpaint: { patches: appliedInpaintPatches },
           });
           const url = URL.createObjectURL(blob);
           const decoded = new Image();
@@ -374,7 +550,13 @@ export function ImageCanvasEditor({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [state, outputFormat, jpegQuality, finalPreviewKey]);
+  }, [
+    state,
+    outputFormat,
+    jpegQuality,
+    finalPreviewKey,
+    appliedInpaintPatches,
+  ]);
 
   // 换新预览或卸载时释放旧 blob URL，避免像素与临时资源泄漏。
   const finalPreviewUrl = finalPreview?.url;
@@ -469,6 +651,9 @@ export function ImageCanvasEditor({
     contentRevisionRef.current += 1;
     const revision = contentRevisionRef.current;
     setLocalRevision(revision);
+    // 任何内容变化（含应用修补本身）都作废未提交的去水印预览/选区与
+    // 在途请求：迟到结果绝不追认提交。
+    cancelInpaintPending();
     const currentSession = sessionIdRef.current;
     if (!currentSession) return;
     void actions.run({
@@ -476,6 +661,202 @@ export function ImageCanvasEditor({
       sessionId: currentSession,
       revision,
     });
+  }
+
+  /** 作废未提交的去水印工作状态：终止 Worker、推进代数、清空预览/选区。 */
+  function cancelInpaintPending(message?: string) {
+    inpaintGenerationRef.current += 1;
+    if (inpaintWorkerRef.current) {
+      inpaintWorkerRef.current.terminate();
+      inpaintWorkerRef.current = undefined;
+    }
+    setInpaintDraft(undefined);
+    setInpaintSelection(undefined);
+    setInpaintPreview(undefined);
+    setInpaintBusy(false);
+    if (message) setOperationMessage(message);
+  }
+
+  /** 用当前基线（原图 + 已应用补丁）发起 CPU Worker 修补预览。 */
+  function startInpaintPreview() {
+    if (inpaintBusy || inpaintPreview) return;
+    const image = imageRef.current;
+    const canvas = canvasRef.current;
+    const selection = inpaintSelection;
+    if (!image || !canvas || !image.naturalWidth || !image.naturalHeight) {
+      setOperationMessage("图片尚未解码完成，无法修补；请稍后重试。");
+      return;
+    }
+    if (!selection) {
+      setOperationMessage("请先拖拽框选要去水印的区域。");
+      return;
+    }
+    if (typeof Worker !== "function") {
+      setOperationMessage("当前环境不支持后台修补（Web Worker 不可用）。");
+      return;
+    }
+    const displaySize = { width: canvas.width, height: canvas.height };
+    const rect = selectionToNaturalRect(
+      selection.start,
+      selection.end,
+      image,
+      state.rotation,
+      displaySize,
+    );
+    const preflight = preflightSelection(rect, image);
+    if (!preflight.ok) {
+      setOperationMessage(
+        describeInpaintFailure(preflight.code, preflight.message),
+      );
+      return;
+    }
+    // 基线合成到原图尺寸离屏画布：透明/已修补像素一起作为修补输入。
+    const base = document.createElement("canvas");
+    base.width = image.naturalWidth;
+    base.height = image.naturalHeight;
+    const baseContext = base.getContext("2d", { willReadFrequently: true });
+    if (!baseContext) {
+      setOperationMessage("无法读取画布像素，修补未开始。");
+      return;
+    }
+    baseContext.drawImage(image, 0, 0);
+    for (const patch of state.patches ?? []) {
+      const stored = inpaintPatchStore.current.get(patch.id);
+      if (stored) baseContext.drawImage(stored, patch.x, patch.y);
+    }
+    const pixels = baseContext.getImageData(0, 0, base.width, base.height);
+    const generation = inpaintGenerationRef.current + 1;
+    inpaintGenerationRef.current = generation;
+    inpaintWorkerRef.current?.terminate();
+    const worker = new Worker(
+      new URL("./inpaint/inpaint.worker.ts", import.meta.url),
+      { type: "module" },
+    );
+    inpaintWorkerRef.current = worker;
+    const frozen = {
+      key: currentKeyRef.current,
+      sessionId: sessionIdRef.current,
+      contentVersion: contentRevisionRef.current,
+      image,
+      selection,
+      generation,
+    };
+    const startedAt = performance.now();
+    worker.onmessage = (event: MessageEvent<InpaintResponse>) => {
+      const response = event.data;
+      if (response.generation !== inpaintGenerationRef.current) return;
+      if (
+        frozen.key !== currentKeyRef.current ||
+        frozen.sessionId !== sessionIdRef.current ||
+        frozen.contentVersion !== contentRevisionRef.current ||
+        frozen.image !== imageRef.current
+      ) {
+        setInpaintBusy(false);
+        setOperationMessage(
+          "内容或会话已变化，本次修补结果已丢弃；请重新预览。",
+        );
+        return;
+      }
+      if (frozen.selection !== inpaintSelectionRef.current) {
+        setInpaintBusy(false);
+        setOperationMessage("选区已变化，本次修补结果已丢弃；请重新预览。");
+        return;
+      }
+      if (!response.ok) {
+        setInpaintBusy(false);
+        setOperationMessage(
+          describeInpaintFailure(response.error.code, response.error.message),
+        );
+        return;
+      }
+      const full = document.createElement("canvas");
+      full.width = base.width;
+      full.height = base.height;
+      const fullContext = full.getContext("2d");
+      const patch = document.createElement("canvas");
+      patch.width = rect.width;
+      patch.height = rect.height;
+      const patchContext = patch.getContext("2d");
+      if (!fullContext || !patchContext) {
+        setInpaintBusy(false);
+        setOperationMessage("无法生成修补预览，当前图片未被修改。");
+        return;
+      }
+      fullContext.putImageData(
+        new ImageData(
+          new Uint8ClampedArray(response.rgba),
+          base.width,
+          base.height,
+        ),
+        0,
+        0,
+      );
+      patchContext.drawImage(
+        full,
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        0,
+        0,
+        rect.width,
+        rect.height,
+      );
+      const wallMs = performance.now() - startedAt;
+      setInpaintPreview({
+        generation,
+        naturalRect: rect,
+        canvas: patch,
+        wallMs,
+        transferBytes,
+      });
+      setInpaintBusy(false);
+      setInpaintCompare("after");
+      setOperationMessage(
+        `修补预览完成（Worker 实际耗时 ${Math.round(wallMs)} ms，请求/响应传输约 ${formatBytes(transferBytes)}）。请对比前后效果，确认后“应用修补”。`,
+      );
+    };
+    worker.onerror = () => {
+      if (generation !== inpaintGenerationRef.current) return;
+      setInpaintBusy(false);
+      setOperationMessage(
+        "本地修补 Worker 异常终止，当前图片未被修改；请重试。",
+      );
+    };
+    setInpaintBusy(true);
+    setInpaintPreview(undefined);
+    setOperationMessage(
+      "正在本地修补选中区域……期间可取消，当前图片不会被修改。",
+    );
+    // 传输字节必须在 transfer 前读取：postMessage 后 buffer 被 detach。
+    const transferBytes = pixels.data.byteLength * 2;
+    const buffer = pixels.data.buffer;
+    worker.postMessage(
+      {
+        generation,
+        rgba: buffer,
+        width: base.width,
+        height: base.height,
+        rect,
+      },
+      [buffer],
+    );
+  }
+
+  /** 明确应用预览：恰好一次 commit 追加补丁，随历史可撤销/重做。 */
+  function applyInpaintPreview() {
+    const preview = inpaintPreview;
+    if (!preview) return;
+    const id = inpaintPatchIdRef.current + 1;
+    inpaintPatchIdRef.current = id;
+    inpaintPatchStore.current.set(id, preview.canvas);
+    commit({
+      ...state,
+      patches: [...(state.patches ?? []), { id, ...preview.naturalRect }],
+    });
+    setOperationMessage(
+      `已应用去水印修补（${preview.naturalRect.width}×${preview.naturalRect.height} px）；可用撤销恢复原图，复制/保存/识别使用修补后像素。`,
+    );
   }
 
   function select(index: number | undefined) {
@@ -603,6 +984,13 @@ export function ImageCanvasEditor({
 
   function pointerMove(event: React.PointerEvent<HTMLCanvasElement>) {
     if (!dragStart.current) return;
+    if (tool === "inpaint") {
+      const at = point(event);
+      setInpaintDraft((current) =>
+        current ? { ...current, end: at } : current,
+      );
+      return;
+    }
     if (tool !== "pen" && tool !== "highlighter") return;
     const at = point(event);
     setDraftMark((current) => {
@@ -622,6 +1010,15 @@ export function ImageCanvasEditor({
     dragStart.current = start;
     if (tool === "select") {
       select(findMark(state.marks, start));
+    } else if (tool === "inpaint") {
+      // 重新框选即作废上一轮预览与在途请求；新选区在松开时确定。
+      if (inpaintPreview || inpaintBusy) {
+        cancelInpaintPending("已放弃上一次修补，请重新框选并预览。");
+      } else {
+        setInpaintDraft(undefined);
+        setInpaintSelection(undefined);
+      }
+      setInpaintDraft({ start, end: start });
     } else if (tool === "pen" || tool === "highlighter") {
       setDraftMark({
         tool,
@@ -701,6 +1098,26 @@ export function ImageCanvasEditor({
       });
       return;
     }
+    if (tool === "inpaint") {
+      setInpaintDraft(undefined);
+      if (Math.hypot(end.x - start.x, end.y - start.y) >= 8) {
+        setInpaintSelection({
+          start: {
+            x: Math.min(start.x, end.x),
+            y: Math.min(start.y, end.y),
+          },
+          end: {
+            x: Math.max(start.x, end.x),
+            y: Math.max(start.y, end.y),
+          },
+        });
+        setInpaintCompare("after");
+        setOperationMessage(
+          "已框选修补区域；可重新框选，或点击“预览修补”查看效果。",
+        );
+      }
+      return;
+    }
     if (Math.hypot(end.x - start.x, end.y - start.y) >= 8) {
       if (tool === "crop") commit({ ...state, crop: { start, end } });
       else
@@ -775,6 +1192,7 @@ export function ImageCanvasEditor({
     const blob = await exportCanvas(frozen.image, canvasRef.current, state, {
       format: outputFormat,
       quality: jpegQuality,
+      inpaint: { patches: appliedInpaintPatches },
     });
     const resourceUri = await uploadAnnotatedImage(blob);
     if (!exportContextUnchanged(frozen)) {
@@ -1213,6 +1631,71 @@ export function ImageCanvasEditor({
             复制所选
           </Button>
         )}
+        {tool === "inpaint" && (
+          <>
+            <ToolbarButton
+              appearance="primary"
+              aria-label="预览修补"
+              disabled={!inpaintSelection || inpaintBusy || !!inpaintPreview}
+              onClick={startInpaintPreview}
+            >
+              预览修补
+            </ToolbarButton>
+            {inpaintBusy ? (
+              <ToolbarButton
+                aria-label="取消修补"
+                onClick={() =>
+                  cancelInpaintPending("已取消修补；当前图片未被修改。")
+                }
+              >
+                取消修补
+              </ToolbarButton>
+            ) : inpaintPreview ? (
+              <>
+                <ToolbarButton
+                  appearance="primary"
+                  aria-label="应用修补"
+                  onClick={applyInpaintPreview}
+                >
+                  应用修补
+                </ToolbarButton>
+                <ToolbarButton
+                  aria-label="放弃修补预览"
+                  onClick={() =>
+                    cancelInpaintPending("已放弃修补预览；当前图片未被修改。")
+                  }
+                >
+                  放弃预览
+                </ToolbarButton>
+                <label className="editor-style-control">
+                  <span aria-hidden="true">对比</span>
+                  <Select
+                    aria-label="修补对比"
+                    size="small"
+                    value={inpaintCompare}
+                    onChange={(_, data) =>
+                      setInpaintCompare(
+                        data.value === "before" ? "before" : "after",
+                      )
+                    }
+                  >
+                    <option value="after">修补后</option>
+                    <option value="before">修补前（原图）</option>
+                  </Select>
+                </label>
+              </>
+            ) : inpaintSelection ? (
+              <ToolbarButton
+                aria-label="清除修补选区"
+                onClick={() =>
+                  cancelInpaintPending("已清除修补选区；当前图片未被修改。")
+                }
+              >
+                清除选区
+              </ToolbarButton>
+            ) : null}
+          </>
+        )}
         <ToolbarButton
           aria-label="旋转 90°"
           onClick={() => {
@@ -1334,6 +1817,13 @@ export function ImageCanvasEditor({
         拖拽绘制或裁剪；选择标注后可拖动。手形或按住 Space
         可平移。画笔与荧光笔沿拖拽轨迹绘制，序号单击放置。马赛克、模糊与打码会写入复制、保存副本及显式识别输入；画面缩放不改变内容。
       </p>
+      {tool === "inpaint" && (
+        <p className="editor-guidance">
+          去水印（Beta）：拖拽框选要去水印的区域，先“预览修补”对比前后效果，确认后“应用修补”才写入编辑历史（可撤销，原图始终保留）；应用前可随时取消。
+          本地 CPU
+          修补基于周边颜色扩散，复杂纹理或大面积覆盖效果有限，不是无损还原。
+        </p>
+      )}
       <p className="editor-guidance">
         {sourceSize && currentOutputSize
           ? `原图 ${sourceSize.width}×${sourceSize.height}${
@@ -1584,7 +2074,8 @@ export function ImageCanvasEditor({
             state.marks.length === 0 &&
             state.rotation === 0 &&
             !state.crop &&
-            !state.resize
+            !state.resize &&
+            !state.patches?.length
           }
           onClick={() => {
             select(undefined);
@@ -1680,6 +2171,7 @@ function draw(
   showEditorChrome = true,
   markScale = 1,
   background = "#161616",
+  inpaintLayer?: InpaintDrawLayer,
 ) {
   const context = canvas?.getContext("2d");
   if (!canvas || !context) return;
@@ -1716,6 +2208,23 @@ function draw(
       image.naturalWidth * scale,
       image.naturalHeight * scale,
     );
+    // 已应用补丁与未提交预览在同一图像本地坐标系内叠加：矩形为
+    // 原图（未旋转）像素空间，缩放/旋转与上图一致，导出时 1:1 无重采样。
+    const drawPatch = (source: HTMLCanvasElement, rect: InpaintRect): void => {
+      context.drawImage(
+        source,
+        (-image.naturalWidth * scale) / 2 + rect.x * scale,
+        (-image.naturalHeight * scale) / 2 + rect.y * scale,
+        rect.width * scale,
+        rect.height * scale,
+      );
+    };
+    for (const entry of inpaintLayer?.patches ?? []) {
+      drawPatch(entry.canvas, entry.rect);
+    }
+    if (inpaintLayer?.preview) {
+      drawPatch(inpaintLayer.preview.canvas, inpaintLayer.preview.rect);
+    }
     context.restore();
   }
   context.restore();
@@ -1841,6 +2350,19 @@ function draw(
       state.crop.end.y - state.crop.start.y,
     );
   }
+  if (showEditorChrome && inpaintLayer?.selection) {
+    // 选区高亮按映射后的有效修补范围回投显示（含外扩取整部分）。
+    const selection = inpaintLayer.selection;
+    context.setLineDash([6, 4]);
+    context.lineWidth = 1.5 * markScale;
+    context.strokeStyle = "#12a150";
+    context.strokeRect(
+      Math.min(selection.start.x, selection.end.x),
+      Math.min(selection.start.y, selection.end.y),
+      Math.abs(selection.end.x - selection.start.x),
+      Math.abs(selection.end.y - selection.start.y),
+    );
+  }
   context.setLineDash([]);
 }
 
@@ -1931,6 +2453,8 @@ function clampRect(rect: ReturnType<typeof normalizedRect>, size: CanvasSize) {
 interface ExportCanvasOptions {
   readonly format: OutputImageFormat;
   readonly quality: number;
+  /** 导出只包含已应用补丁；未提交预览绝不进入导出/复制/识别像素。 */
+  readonly inpaint?: InpaintDrawLayer;
 }
 
 /** 编码器必须真实产出目标格式：类型与文件签名不一致时拒绝，不得只改后缀。 */
@@ -2000,6 +2524,7 @@ async function exportCanvas(
     1 / displayScale,
     // JPEG 无透明：透明区域在导出时合成白色背景，与预览一致。
     options.format === "image/jpeg" ? "#ffffff" : "#161616",
+    { patches: options.inpaint?.patches },
   );
 
   const mappedCrop = state.crop
