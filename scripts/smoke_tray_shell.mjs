@@ -164,10 +164,10 @@ async function main() {
         assert.notEqual(after.ForegroundHandle, mainHandle, 'Menu cancellation brought back the main window.');
       }
       record.explicitOpen = await openMenu('mouse');
-      await native('down', { AppPid: app.pid });
-      await native('enter', { AppPid: app.pid });
+      record.explicitOpen.click = JSON.parse(await native('tray-menu-open', { AppPid: app.pid, Handle: record.explicitOpen.during.Menus[0].Handle }));
       record.open = await waitFor(async () => {
         const snapshot = await state();
+        record.lastOpenState = snapshot;
         return snapshot.Main.Visible && !snapshot.Main.Iconic && snapshot.ForegroundHandle === mainHandle && snapshot;
       }, `${mode}: explicit Open Workbench did not restore and activate the main window`);
     }
