@@ -177,6 +177,9 @@ try {
   await app.page.getByLabel('收起时间（毫秒）').fill('1000');
   let bar = await show();
   const outside = point(app.main, 0.6, 0.6);
+  // CDP settings clicks do not establish native foreground ownership.
+  await native('focus-fixture', { FixturePid: app.child.pid, Handle: app.main.Handle,
+    X: Math.round((app.main.Bounds.Left + app.main.Bounds.Right) / 2), Y: app.main.Bounds.Top + 20 });
   evidence.timer = JSON.parse(await native('toolbar-sequence', { AppPid: app.child.pid, Handle: bar.Handle,
     ...point(bar), OutsideX: outside.X, OutsideY: outside.Y, LingerMs: 1000 }));
   assert(evidence.timer.BeforeReentry && evidence.timer.ReentryCancelled && evidence.timer.HiddenAfterSecondExit);
