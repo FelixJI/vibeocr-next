@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import io
+import itertools
 import json
 import os
 import shutil
@@ -13,6 +14,7 @@ import zipfile
 from ctypes import wintypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from vibeocr.runtime.environments import runtime_installer as installer
@@ -185,6 +187,13 @@ def test_resolver_cleans_descendants_even_after_parent_exit(
 def test_resolver_heartbeats_do_not_prevent_idle_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Control only the installer's clock: process startup on a loaded Windows
+    # runner must not consume the heartbeat window under test. The real child
+    # and Job Object cleanup remain exercised.
+    clock = itertools.count(step=0.05)
+    monkeypatch.setattr(
+        installer, "time", SimpleNamespace(monotonic=lambda: next(clock))
+    )
     monkeypatch.setattr(installer, "_CHILD_HEARTBEAT_INTERVAL_SECONDS", 0.05)
     events = []
     reporter = _reporter(tmp_path, events.append)
