@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'webview-bounds', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection', 'cursor', 'magnifier', 'minimize', 'restore', 'tray-state', 'tray-click', 'taskbar-created', 'down', 'tray-fixture', 'tray-keyboard', 'tray-keyboard-resume', 'tray-expose', 'tray-left-click', 'tray-double-click', 'tray-gone', 'tray-menu-quit', 'tray-menu-open')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'webview-bounds', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection', 'cursor', 'magnifier', 'minimize', 'restore', 'tray-state', 'tray-click', 'taskbar-created', 'down', 'tray-fixture', 'tray-keyboard', 'tray-keyboard-resume', 'tray-expose', 'tray-left-click', 'tray-double-click', 'tray-gone', 'tray-menu-quit', 'tray-menu-open', 'tray-menu-toggle')][string]$Action,
     [int]$AppPid = 0,
     [int]$FixturePid = 0,
     [int]$ForegroundPid = 0,
@@ -185,7 +185,7 @@ public static class NativeActionsFixture
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetMenuStringW(IntPtr menu, uint item, System.Text.StringBuilder text, int size, uint flags);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool GetMenuItemRect(IntPtr window, IntPtr menu, uint item, out Rect rectangle);
 
-    public static object ClickMenuItem(long handle, int appPid, string expectedLabel)
+    public static object ClickMenuItem(long handle, int appPid, string expectedLabel, bool keyboard = false)
     {
         RequireOwner(handle, appPid);
         RequireForeground(appPid);
@@ -197,16 +197,34 @@ public static class NativeActionsFixture
             throw new Win32Exception(Marshal.GetLastWin32Error(), "Owned popup menu metadata unavailable.");
         int count = GetMenuItemCount(info.Menu);
         if (count < 1 || count > 16) throw new InvalidOperationException("Unexpected owned menu item count.");
-        int selected = -1;
+        int selected = -1, precedingItems = 0, namedItems = 0;
+        string selectedLabel = string.Empty;
         for (int index = 0; index < count; index++)
         {
             var text = new System.Text.StringBuilder(256);
             GetMenuStringW(info.Menu, (uint)index, text, text.Capacity, 0x400);
-            if (text.ToString() != expectedLabel) continue;
+            string label = text.ToString();
+            bool match = expectedLabel == "悬浮工具栏"
+                ? label == "启用悬浮工具栏" || label == "显示悬浮工具栏" || label == "隐藏悬浮工具栏"
+                : label == expectedLabel;
+            if (!match)
+            {
+                if (label.Length > 0) namedItems++;
+                continue;
+            }
             if (selected >= 0) throw new InvalidOperationException("Owned menu label is ambiguous.");
             selected = index;
+            selectedLabel = label;
+            precedingItems = namedItems;
         }
         if (selected < 0) throw new InvalidOperationException("Expected owned menu item is missing.");
+        if (keyboard)
+        {
+            Tap(0x24); // Home selects the first enabled item; separators are not navigation stops.
+            for (int index = 0; index < precedingItems; index++) Tap(0x28);
+            Tap(0x0D);
+            return new { MenuHandle = handle, ItemCount = count, Label = selectedLabel, Keyboard = true };
+        }
         if (!GetMenuItemRect(IntPtr.Zero, info.Menu, (uint)selected, out Rect rectangle))
             throw new Win32Exception(Marshal.GetLastWin32Error(), "Owned menu item bounds unavailable.");
         int x = (rectangle.Left + rectangle.Right) / 2, y = (rectangle.Top + rectangle.Bottom) / 2;
@@ -609,6 +627,7 @@ try {
         'tray-gone' { [NativeActionsFixture]::TrayGone($Handle, $IconGuid) | ConvertTo-Json -Compress }
         'tray-menu-quit' { [NativeActionsFixture]::ClickMenuItem($Handle, $AppPid, '退出 VibeOCR') | ConvertTo-Json -Compress -Depth 3 }
         'tray-menu-open' { [NativeActionsFixture]::ClickMenuItem($Handle, $AppPid, '打开工作台') | ConvertTo-Json -Compress -Depth 3 }
+        'tray-menu-toggle' { [NativeActionsFixture]::ClickMenuItem($Handle, $AppPid, '悬浮工具栏', $true) | ConvertTo-Json -Compress -Depth 3 }
         'taskbar-created' { [NativeActionsFixture]::TaskbarCreated($Handle, $AppPid) }
         'down' { [NativeActionsFixture]::OverlayKey($AppPid, 0x28) }
         'hide' { [NativeActionsFixture]::Hide($Handle, $AppPid) }

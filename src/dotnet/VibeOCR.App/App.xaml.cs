@@ -544,7 +544,6 @@ public sealed partial class App : Application
             int selected = owner.TrackContextMenu(menu, cursor.X, cursor.Y);
             if (selected is 0)
             {
-                _trayIcon?.RestoreFocusAfterMenu();
                 return;
             }
 
@@ -573,6 +572,14 @@ public sealed partial class App : Application
         finally
         {
             DestroyMenu(menu);
+            try
+            {
+                _trayIcon?.RestoreFocusAfterMenu();
+            }
+            catch (Win32Exception error)
+            {
+                AppLog.Error("Tray notification focus restore failed", error);
+            }
         }
     }
 

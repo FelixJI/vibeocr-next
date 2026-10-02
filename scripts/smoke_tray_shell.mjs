@@ -179,6 +179,18 @@ async function main() {
           }, `${mode}: repeated Esc did not restore notification focus`);
         }
       }
+      record.toggle = await openMenu('keyboard');
+      record.toggle.input = JSON.parse(await native('tray-menu-toggle', { AppPid: app.pid, Handle: record.toggle.during.Menus[0].Handle }));
+      record.toggle.after = await waitFor(async () => {
+        const snapshot = await state();
+        return snapshot.Menus.length === 0 && snapshot.ForegroundHandle !== snapshot.Owner.Handle && snapshot;
+      }, `${mode}: toolbar menu action did not restore notification focus`);
+      assert.equal(record.toggle.after.Main.Visible, before.Main.Visible);
+      assert.equal(record.toggle.after.Main.Iconic, before.Main.Iconic);
+      record.toggle.resumeInput = JSON.parse(await native('tray-keyboard-resume', icon));
+      await waitFor(async () => (await state()).Menus.length === 1, `${mode}: menu did not reopen after toolbar action`);
+      await native('escape', { AppPid: app.pid });
+      await waitFor(async () => (await state()).Menus.length === 0, `${mode}: resumed toolbar menu did not close`);
       record.explicitOpen = await openMenu('mouse');
       record.explicitOpen.click = JSON.parse(await native('tray-menu-open', { AppPid: app.pid, Handle: record.explicitOpen.during.Menus[0].Handle }));
       record.open = await waitFor(async () => {
