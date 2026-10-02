@@ -72,6 +72,7 @@ export type AppActionType =
   | "settings.switchEnvironment"
   | "settings.deleteEnvironment"
   | "settings.repairEmptyEnvironment"
+  | "settings.findCompatibleEnvironment"
   | "settings.setStartup"
   | "settings.setActionHotkey"
   | "settings.resetActionHotkey"

@@ -67,7 +67,8 @@ public sealed record ManagedEnvironmentList(
     [property: JsonPropertyName("unknown_default_source_ids")] IReadOnlyList<string>? UnknownDefaultSourceIds = null,
     [property: JsonPropertyName("source_config_revision")] int SourceConfigRevision = 0,
     [property: JsonPropertyName("package_source_ids")] IReadOnlyList<string>? PackageSourceIds = null,
-    [property: JsonPropertyName("recipes")] IReadOnlyList<ManagedEnvironmentRecipe>? Recipes = null);
+    [property: JsonPropertyName("recipes")] IReadOnlyList<ManagedEnvironmentRecipe>? Recipes = null,
+    [property: JsonPropertyName("hardware")] ManagedEnvironmentHardware? Hardware = null);
 
 public sealed record ManagedEnvironmentPlan(
     [property: JsonPropertyName("plan_id")] string PlanId,
@@ -130,6 +131,19 @@ public sealed record ManagedEnvironmentRecipe(
     [property: JsonPropertyName("dependency_origin")] string? DependencyOrigin = null,
     [property: JsonPropertyName("python_origin")] string? PythonOrigin = null,
     [property: JsonPropertyName("runtime_wheel_origin")] string? RuntimeWheelOrigin = null);
+
+/// <summary>list.hardware 投影：nvidia 驱动真值只由 Runtime 探测，宿主/前端只消费不检测。</summary>
+public sealed record ManagedEnvironmentHardware(
+    [property: JsonPropertyName("nvidia_driver")] ManagedEnvironmentNvidiaDriver? NvidiaDriver = null);
+
+/// <summary>
+/// status：ok＝驱动满足 CUDA 12.x 下限；unsupported＝命令明确无驱动/驱动过旧
+/// （reason_code 给出原因）；unknown＝探测超时，不得当作已支持或已否定。
+/// </summary>
+public sealed record ManagedEnvironmentNvidiaDriver(
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("reason_code")] string? ReasonCode = null,
+    [property: JsonPropertyName("driver_version")] string? DriverVersion = null);
 
 /// <summary>兼容环境查询命中：被选中的环境与选择依据（优先活动，其次稳定 id 序）。</summary>
 public sealed record ManagedEnvironmentSelection(

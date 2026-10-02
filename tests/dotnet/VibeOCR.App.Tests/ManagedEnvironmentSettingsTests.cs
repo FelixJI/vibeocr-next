@@ -127,6 +127,28 @@ public sealed class ManagedEnvironmentSettingsTests
   }
 
   [Fact]
+  public async Task FindCompatibleValidatesCatalogAndInvalidationClearsResult()
+  {
+    var manager = new MutableManager();
+    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
+      () => null, new ProductMaintenanceCoordinator());
+    await settings.RefreshAsync(TestContext.Current.CancellationToken);
+
+    await settings.FindCompatibleAsync("rapidocr-cpu", TestContext.Current.CancellationToken);
+
+    Assert.Equal("rapidocr-cpu", settings.Compatibility?.Recipe);
+    Assert.Equal("environment", settings.Compatibility?.Selected?.EnvironmentId);
+    Assert.Contains("可直接复用", settings.Status);
+    // 未知配方在宿主按 Runtime 目录 fail closed 拒绝，不透传给管理器。
+    await Assert.ThrowsAsync<InvalidOperationException>(() =>
+      settings.FindCompatibleAsync("made-up-recipe", TestContext.Current.CancellationToken));
+    // 与预览同一失效入口：选择变化后旧兼容结果不得冒充新选择。
+    settings.InvalidatePlan();
+    Assert.Null(settings.Compatibility);
+    Assert.Null(settings.Plan);
+  }
+
+  [Fact]
   public async Task CancelClickDuringPostInstallRefreshIsIgnoredAndInstallStaysCommitted()
   {
     var manager = new RefreshGateManager();
@@ -647,6 +669,13 @@ public sealed class ManagedEnvironmentSettingsTests
   {
     public List<string> SourceSaves { get; } = [];
 
+    // 与生产 list payload 一致：配方目录随列表同步，宿主据此核验未知配方。
+    private static readonly IReadOnlyList<ManagedEnvironmentRecipe> Catalog =
+    [
+      new ManagedEnvironmentRecipe("rapidocr-cpu", "RapidOCR · CPU",
+        ["text"], "cpu", "cpu"),
+    ];
+
     private readonly List<ManagedEnvironment> environments =
     [
       new ManagedEnvironment("environment", "活动环境", 1, "venv", "installed", "python",
@@ -661,7 +690,8 @@ public sealed class ManagedEnvironmentSettingsTests
 
     public Task<ManagedEnvironmentList> ListEnvironmentsAsync(
       CancellationToken cancellationToken = default) =>
-      Task.FromResult(new ManagedEnvironmentList("environment", 1, [.. environments]));
+      Task.FromResult(new ManagedEnvironmentList("environment", 1, [.. environments],
+        Recipes: Catalog));
 
     public Task<ManagedEnvironment> CreateEnvironmentAsync(
       string name, CancellationToken cancellationToken = default)
@@ -679,7 +709,7 @@ public sealed class ManagedEnvironmentSettingsTests
       SourceSaves.Add(
         $"{environmentId ?? "<global>"}|{packageSourceId ?? "<null>"}|{modelSourceId ?? "<null>"}");
       return Task.FromResult(new ManagedEnvironmentList("environment", 1, [.. environments],
-        DefaultSourceIds: packageSourceId is null ? [] : [packageSourceId]));
+        DefaultSourceIds: packageSourceId is null ? [] : [packageSourceId], Recipes: Catalog));
     }
 
     public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(
@@ -698,6 +728,19 @@ public sealed class ManagedEnvironmentSettingsTests
         ],
         DependencyOrigin: "online_index", PythonOrigin: "product_bundle",
         RuntimeWheelOrigin: "product_bundle"));
+
+    public Task<ManagedEnvironmentQueryResult> FindCompatibleEnvironmentAsync(
+      string recipe, CancellationToken cancellationToken = default) =>
+      Task.FromResult(new ManagedEnvironmentQueryResult(
+        recipe,
+        Recipes: Catalog,
+        Selected: new ManagedEnvironmentSelection("environment", 1, recipe, "active_environment"),
+        Environments:
+        [
+          new ManagedEnvironmentQueryMatch("environment", "活动环境", 1, "installed",
+            Recipe: recipe, Active: true, Selected: true,
+            ReasonCode: "selected_active_environment"),
+        ]));
 
     public Task<ManagedEnvironment> InstallEnvironmentAsync(
       ManagedEnvironmentPlan plan, IReadOnlyList<string>? sourceIds = null,
@@ -770,7 +813,8 @@ public sealed class ManagedEnvironmentSettingsTests
       if (FailListAfterCancel && Cancelled)
         throw new HttpRequestException("environments list unavailable");
       return new ManagedEnvironmentList(ActiveId, 0,
-        [current with { LastInstallFailure = Failure }]);
+        [current with { LastInstallFailure = Failure }],
+        Recipes: [new ManagedEnvironmentRecipe("rapidocr-cpu", "RapidOCR · CPU")]);
     }
 
     public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(
@@ -846,13 +890,15 @@ public sealed class ManagedEnvironmentSettingsTests
       CancellationToken cancellationToken = default)
     {
       if (Volatile.Read(ref installReturned) == 0)
-        return new ManagedEnvironmentList(null, 0, [current]);
+        return new ManagedEnvironmentList(null, 0, [current],
+          Recipes: [new ManagedEnvironmentRecipe("rapidocr-cpu", "RapidOCR · CPU")]);
       RefreshEntered.TrySetResult();
       if (CancelRefreshByToken)
         await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
       await RefreshGate.Task.WaitAsync(cancellationToken);
       RefreshTokenCancelled = cancellationToken.IsCancellationRequested;
-      return new ManagedEnvironmentList(null, 0, [current]);
+      return new ManagedEnvironmentList(null, 0, [current],
+        Recipes: [new ManagedEnvironmentRecipe("rapidocr-cpu", "RapidOCR · CPU")]);
     }
 
     public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(
