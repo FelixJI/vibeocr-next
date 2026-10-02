@@ -13,9 +13,9 @@
       },
       "Microsoft.Windows.SDK.Contracts": {
         "type": "Direct",
-        "requested": "[10.0.28000.2526, )",
-        "resolved": "10.0.28000.2526",
-        "contentHash": "XUggCmxQ1CKPSrl02Ia4+T3xHAeotFuh2eyUoNCUg9UYm5nWQcdIf5jOo/e9uhVuTIDzC1Sgu/Y/BCfWei+HNw==",
+        "requested": "[10.0.28000.2705, )",
+        "resolved": "10.0.28000.2705",
+        "contentHash": "BdNxUYozG2zuV7Iomu7sk9nplKYnmcJujq92523BSbbRHbDoO5Tqm0itxOofc5ND3N1BvRfcYFE+30dp6odsbw==",
         "dependencies": {
           "System.Runtime.InteropServices.WindowsRuntime": "4.3.0",
           "System.Runtime.WindowsRuntime": "4.6.0",
@@ -24,9 +24,9 @@
       },
       "Velopack": {
         "type": "Direct",
-        "requested": "[1.2.0, )",
-        "resolved": "1.2.0",
-        "contentHash": "Rz67gJL619fSBS6omaSINUxyDuwhIxkm5mmubf7uLd5Qgi6LLKaKCha+QFP6n+Bw/UjA0vutnH4JQfYzn6ANtw==",
+        "requested": "[1.2.161, )",
+        "resolved": "1.2.161",
+        "contentHash": "OpHNacIumnkhaaX3ZlQ/TCR4YPOJvud2/PAOoWb6o+mIrLwIVA275I5wAgt4q/1O2VrJeDwR1qFQyqzG4lUArg==",
         "dependencies": {
           "Newtonsoft.Json": "13.0.4"
         }

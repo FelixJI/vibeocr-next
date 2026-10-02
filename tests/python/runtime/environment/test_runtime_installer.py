@@ -110,7 +110,7 @@ def _release(
             "Name: vibeocr-next-runtime\nVersion: 0.7.0\n",
         )
     _extract_product_runtime_code(wheel, root, "0.7.0")
-    python_archive = root / "cpython-3.13.15-win_amd64-install_only.tar.gz"
+    python_archive = root / "cpython-3.13.16-win_amd64-install_only.tar.gz"
     python_archive.write_bytes(b"python-archive")
     installer_archive = root / "vibeocr-runtime-installer-v0.7.0-win-x64.zip"
     with zipfile.ZipFile(installer_archive, mode="w") as archive:
@@ -186,13 +186,13 @@ def _release(
         "runtime_wheel": wheel.name,
         "runtime_sha256": _sha(wheel.read_bytes()),
         "python": {
-            "version": "3.13.15",
+            "version": "3.13.16",
             "abi": "cp313",
             "platform": "win_amd64",
             "source_url": (
                 "https://github.com/astral-sh/python-build-standalone/releases/"
-                "download/20260807/"
-                "cpython-3.13.15+20260807-x86_64-pc-windows-msvc"
+                "download/20261001/"
+                "cpython-3.13.16+20261001-x86_64-pc-windows-msvc"
                 "-install_only.tar.gz"
             ),
             "archive": python_archive.name,
@@ -268,7 +268,7 @@ def test_legacy_probe_reuses_frontend_update_but_rejects_runtime_or_abi_change(
         "component_ids": ["rapidocr-base", "runtime_host"],
     }
     marker_path.write_text(json.dumps(marker), encoding="utf-8")
-    actual_version = [3, 13, 15]
+    actual_version = [3, 13, 16]
 
     def probe(_args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(
@@ -314,7 +314,7 @@ def test_legacy_probe_reuses_frontend_update_but_rejects_runtime_or_abi_change(
     incompatible = updated.list()["environments"][0]
     assert incompatible["reason"] == "legacy_runtime_marker_invalid"
     assert incompatible["python_state"] == "unavailable"
-    assert incompatible["python_version"] == "3.13.15"
+    assert incompatible["python_version"] == "3.13.16"
 
     marker["backend_version"] = original_manifest.backend_version
     marker_path.write_text(json.dumps(marker), encoding="utf-8")
@@ -396,7 +396,7 @@ def test_legacy_cuda_launch_preserves_marker_accelerator(
                 {
                     "prefix": str(runtime),
                     "base_prefix": str(runtime),
-                    "version": [3, 13, 15],
+                    "version": [3, 13, 16],
                     "packages": ["fastapi"],
                     "runtime_version": "0.7.0",
                 }
@@ -457,7 +457,7 @@ def test_legacy_status_reuses_current_product_code_after_frontend_update(
     monkeypatch.setenv("VIBEOCR_PRODUCT_CODE_ROOT", str(code_root))
     monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_ID", "legacy")
     monkeypatch.setattr(runtime_maintenance.sys, "prefix", str(root))
-    monkeypatch.setattr(runtime_maintenance.sys, "version_info", (3, 13, 15))
+    monkeypatch.setattr(runtime_maintenance.sys, "version_info", (3, 13, 16))
     current = runtime_profile_status(
         manifest,
         accelerator="cpu",
@@ -1316,7 +1316,7 @@ def test_recipe_catalog_projects_manifest_bound_scopes(tmp_path: Path) -> None:
     assert entry["rapidocr-cpu"]["configured_recognition_types"] == ["text"]
     assert entry["rapidocr-cpu"]["accelerator"] == "cpu"
     assert entry["rapidocr-cpu"]["target_device"] == "cpu"
-    assert entry["rapidocr-cpu"]["python_version"] == "3.13.15"
+    assert entry["rapidocr-cpu"]["python_version"] == "3.13.16"
     assert entry["rapidocr-cpu"]["abi"] == "cp313"
     assert entry["rapidocr-cpu"]["platform"] == "win_amd64"
     assert entry["paddleocr-cuda"]["display_name"] == "PaddleOCR · NVIDIA CUDA"
@@ -2308,7 +2308,7 @@ def test_manifest_rejects_old_schema(tmp_path: Path) -> None:
 def test_manifest_rejects_tampered_python_archive(tmp_path: Path) -> None:
     manifest_path, _ = _release(tmp_path / "release")
     (
-        manifest_path.parent / "cpython-3.13.15-win_amd64-install_only.tar.gz"
+        manifest_path.parent / "cpython-3.13.16-win_amd64-install_only.tar.gz"
     ).write_bytes(b"tampered")
     with pytest.raises(ManifestError, match="Python archive SHA-256 mismatch"):
         load_runtime_manifest(manifest_path)
