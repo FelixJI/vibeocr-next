@@ -19,4 +19,4 @@ pynvml>=11.5.0
 packaging>=26.0
 python-multipart>=0.0.32
 opencv-python>=4.11
-mineru==4.0.2
+mineru==4.0.10
