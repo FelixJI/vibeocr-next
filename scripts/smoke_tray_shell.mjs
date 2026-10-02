@@ -52,12 +52,15 @@ async function main() {
   assert(!contained(source, work) && !contained(work, source), 'Product and work roots must not nest.');
   assert(!fs.existsSync(path.join(source, 'state')), 'Source candidate must have no state.');
   assert(fs.existsSync(path.join(source, 'app/VibeOCR.WinUI.exe')), 'Current-tree candidate is missing.');
+  const sourceIdentity = JSON.parse(fs.readFileSync(path.join(source, 'app/metadata/component-identities.json'), 'utf8')).project;
+  const { stdout: head } = await exec('git', ['rev-parse', 'HEAD'], { cwd: path.join(directory, '..') });
+  assert.equal(sourceIdentity.source_sha, head.trim(), 'Tray smoke requires a candidate built from this checkout HEAD.');
   const smokeRoot = path.join(work, `vibeocr-tray-shell-${crypto.randomUUID()}`);
   const candidate = path.join(smokeRoot, 'candidate');
   fs.mkdirSync(smokeRoot);
   fs.cpSync(source, candidate, { recursive: true, errorOnExist: true, force: false });
   const evidence = { schema_version: 1, state: 'failed', smokeRoot, nodeVersion: process.version, sessions: [],
-    sourceTree: 'current checkout plus uncommitted task implementation',
+    sourceIdentity,
     unsupported: ['100/125/150/200% DPI', 'mixed-monitor DPI', 'actual Explorer restart', 'menu screenshot: existing owned-point capture guard refused the menu corners'] };
   let app, fixture, mainHandle, helper;
   const instanceId = crypto.randomUUID().replaceAll('-', '');
