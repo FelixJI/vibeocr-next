@@ -693,6 +693,9 @@ public static class WorkbenchBridgeCodec
       case ("diagnostics", "export"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new ExportDiagnosticsCommand();
+      case ("diagnostics", "copy"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new CopyDiagnosticsCommand();
       default:
         throw new WorkbenchBridgeProtocolException(
           "Workbench bridge command type is not supported.");

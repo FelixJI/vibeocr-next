@@ -96,7 +96,8 @@ export type AppActionType =
   | "update.download"
   | "update.cancel"
   | "update.cancelRuntimeMaintenance"
-  | "diagnostics.export";
+  | "diagnostics.export"
+  | "diagnostics.copy";
 
 export interface AppAction {
   readonly type: AppActionType;

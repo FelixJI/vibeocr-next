@@ -388,7 +388,7 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
     private static string OperationStateText(Host.RuntimeOperationState state) => state switch
     {
         Host.RuntimeOperationState.Queued => "维护任务排队中",
-        Host.RuntimeOperationState.Running => "正在准备 Backend 运行时",
+        Host.RuntimeOperationState.Running => "正在准备识别服务运行时",
         Host.RuntimeOperationState.Succeeded => "维护操作已完成",
         Host.RuntimeOperationState.Failed => "运行时安装失败",
         Host.RuntimeOperationState.Cancelled => "运行时安装已取消",
@@ -401,7 +401,7 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
         Host.RuntimeMaintenancePhase.WaitForLock => "等待安装锁",
         Host.RuntimeMaintenancePhase.PrepareRuntime => "准备 Python 运行时",
         Host.RuntimeMaintenancePhase.InstallProfile => "安装重依赖",
-        Host.RuntimeMaintenancePhase.InstallBackend => "安装 Backend",
+        Host.RuntimeMaintenancePhase.InstallBackend => "安装识别服务运行时",
         Host.RuntimeMaintenancePhase.VerifyRuntime => "验证运行时",
         Host.RuntimeMaintenancePhase.CommitRuntime => "提交运行时切换",
         _ => "处理运行时",
@@ -413,7 +413,7 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
         Http.RuntimeMaintenancePhase.WaitForLock => "等待安装锁",
         Http.RuntimeMaintenancePhase.PrepareRuntime => "准备 Python 运行时",
         Http.RuntimeMaintenancePhase.InstallProfile => "安装重依赖",
-        Http.RuntimeMaintenancePhase.InstallBackend => "安装 Backend",
+        Http.RuntimeMaintenancePhase.InstallBackend => "安装识别服务运行时",
         Http.RuntimeMaintenancePhase.VerifyRuntime => "验证运行时",
         Http.RuntimeMaintenancePhase.CommitRuntime => "提交运行时切换",
         _ => "处理运行时",
