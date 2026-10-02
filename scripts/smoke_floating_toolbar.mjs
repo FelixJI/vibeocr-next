@@ -36,7 +36,7 @@ const evidence = { schema_version: 1, state: 'failed', sourceSha: identity.sourc
     'Linger granularity across 100/200/500/1000 ms is recorded independently in af140-linger-current-root.txt; this script asserts only its persisted 1000 ms exit window.',
     'Native toolbar commands have no disabled/busy state in production; no disabled visual state was manufactured.',
     'Tray menu physical invocation and actual Alt+Tab switcher inspection are not exercised.',
-    'Timer/subscription disposal is covered by repository tests; external GUI can observe window/process cleanup only.',
+    'Repository tests cover timer Stop and state transitions; event unsubscription/disposal is reviewed in code, while GUI observes window/process cleanup.',
   ] };
 let app, fixture;
 const configFile = path.join(candidate, 'state/config/app_settings.json');
