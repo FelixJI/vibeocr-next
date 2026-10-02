@@ -444,8 +444,6 @@ public static class NativeActionsFixture
     private static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
 
     [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr parent, EnumWindowCallback callback, IntPtr state);
-    [DllImport("user32.dll", EntryPoint = "GetClassNameW", CharSet = CharSet.Unicode)]
-    private static extern int GetClassName(IntPtr window, StringBuilder name, int length);
 
     public static Rect WebViewBounds(long handle, int appPid)
     {

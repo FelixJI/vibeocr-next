@@ -38,11 +38,11 @@ async function waitFor(check, message, timeout = 10000) {
   throw new Error(message);
 }
 async function exitOwned(child, action, options) {
-  if (!child || child.exitCode !== null) return;
+  if (!child || (child.exitCode !== null || child.signalCode !== null)) return;
   try { await native(action, options); } catch { /* Terminate only this run's held process handle below. */ }
-  if (!await waitFor(() => child.exitCode !== null, 'owned close timeout', 4000).catch(() => false)) {
+  if (!await waitFor(() => (child.exitCode !== null || child.signalCode !== null), 'owned close timeout', 4000).catch(() => false)) {
     child.kill();
-    await waitFor(() => child.exitCode !== null, `Owned process ${child.pid} survived cleanup`, 5000);
+    await waitFor(() => (child.exitCode !== null || child.signalCode !== null), `Owned process ${child.pid} survived cleanup`, 5000);
   }
 }
 
@@ -92,14 +92,15 @@ async function main() {
     lines.close();
     assert.equal(Number(fields[0]), fixture.pid);
     helper = { pid: fixture.pid, thread: Number(fields[1]), handle: Number(fields[2]),
-      bounds: fields[7].split(',').map(Number) };
+      bounds: fields[7].split(',').map(Number), editBounds: fields[10].split(',').map(Number) };
     evidence.fixturePid = helper.pid;
     const parameters = { AppPid: app.pid, FixturePid: helper.pid, Handle: mainHandle };
     const state = async () => JSON.parse(await native('tray-state', parameters));
     const focusHelper = async () => {
       await native('restore', { AppPid: helper.pid, Handle: helper.handle });
       await native('focus-fixture', { FixturePid: helper.pid, Handle: helper.handle,
-        X: helper.bounds[0] + 10, Y: helper.bounds[1] + 10 });
+        X: Math.round((helper.editBounds[0] + helper.editBounds[2]) / 2),
+        Y: Math.round((helper.editBounds[1] + helper.editBounds[3]) / 2) });
     };
     const initial = await state();
     if (!process.argv.includes('--exit-only')) {
@@ -197,7 +198,7 @@ async function main() {
     try { await exitOwned(app, 'close', { AppPid: app?.pid, Handle: mainHandle ?? 0 }); }
     catch (error) { failures.push(error.message); }
     if (failures.length) { evidence.state = 'failed'; evidence.cleanupError = failures; }
-    evidence.ownedPidsExited = [app, fixture].filter(Boolean).every(child => child.exitCode !== null);
+    evidence.ownedPidsExited = [app, fixture].filter(Boolean).every(child => (child.exitCode !== null || child.signalCode !== null));
     fs.writeFileSync(path.join(smokeRoot, 'tray-shell-health.json'), JSON.stringify(evidence, null, 2));
     if (failures.length) throw new Error(failures.join('; '));
   }
