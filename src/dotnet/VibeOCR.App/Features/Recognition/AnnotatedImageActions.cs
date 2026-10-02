@@ -8,16 +8,16 @@ namespace VibeOCR.App.Features.Recognition;
 
 public interface IAnnotatedImagePlatform
 {
-  Task CopyPngAsync(string sourcePath, CancellationToken cancellationToken);
+  Task CopyImageAsync(string sourcePath, CancellationToken cancellationToken);
 
-  Task<bool> SavePngAsync(string sourcePath, CancellationToken cancellationToken);
+  Task<bool> SaveImageAsync(string sourcePath, CancellationToken cancellationToken);
 
   Task CopyTextAsync(string text, CancellationToken cancellationToken);
 }
 
 public sealed class AnnotatedImagePlatform(Func<nint> windowHandle) : IAnnotatedImagePlatform
 {
-  public async Task CopyPngAsync(
+  public async Task CopyImageAsync(
     string sourcePath,
     CancellationToken cancellationToken)
   {
@@ -78,7 +78,7 @@ public sealed class AnnotatedImagePlatform(Func<nint> windowHandle) : IAnnotated
     }
   }
 
-  public async Task<bool> SavePngAsync(
+  public async Task<bool> SaveImageAsync(
     string sourcePath,
     CancellationToken cancellationToken)
   {
@@ -88,7 +88,8 @@ public sealed class AnnotatedImagePlatform(Func<nint> windowHandle) : IAnnotated
       SuggestedStartLocation = PickerLocationId.PicturesLibrary,
       SuggestedFileName = "vibeocr-annotated",
     };
-    picker.FileTypeChoices.Add("PNG 图片", [".png"]);
+    bool jpeg = string.Equals(Path.GetExtension(sourcePath), ".jpg", StringComparison.OrdinalIgnoreCase);
+    picker.FileTypeChoices.Add(jpeg ? "JPEG 图片" : "PNG 图片", [jpeg ? ".jpg" : ".png"]);
     WinRT.Interop.InitializeWithWindow.Initialize(picker, windowHandle());
     StorageFile? destinationFile = await picker.PickSaveFileAsync();
     if (destinationFile is null)
@@ -96,17 +97,36 @@ public sealed class AnnotatedImagePlatform(Func<nint> windowHandle) : IAnnotated
       return false;
     }
 
-    await using FileStream source = new(
-      sourcePath,
-      FileMode.Open,
-      FileAccess.Read,
-      FileShare.Read,
-      bufferSize: 64 * 1024,
-      FileOptions.Asynchronous | FileOptions.SequentialScan);
-    await using Stream destination = await destinationFile.OpenStreamForWriteAsync();
-    destination.SetLength(0);
-    await source.CopyToAsync(destination, cancellationToken);
-    await destination.FlushAsync(cancellationToken);
+    string expectedExtension = jpeg ? ".jpg" : ".png";
+    if (!string.Equals(Path.GetExtension(destinationFile.Path), expectedExtension, StringComparison.OrdinalIgnoreCase))
+      throw new InvalidDataException("保存文件扩展名必须与当前图片格式一致。");
+
+    await WriteImageCopyAsync(sourcePath, destinationFile.Path, cancellationToken);
     return true;
+  }
+
+  internal static async Task WriteImageCopyAsync(
+    string sourcePath, string destinationPath, CancellationToken cancellationToken)
+  {
+    string temporaryPath = Path.Combine(Path.GetDirectoryName(destinationPath)!,
+      $".vibeocr-{Guid.NewGuid():N}.tmp");
+    try
+    {
+      await using (FileStream source = File.OpenRead(sourcePath))
+      await using (FileStream destination = new(temporaryPath, FileMode.CreateNew, FileAccess.Write,
+        FileShare.None, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+      {
+        await source.CopyToAsync(destination, cancellationToken);
+        await destination.FlushAsync(cancellationToken);
+      }
+      cancellationToken.ThrowIfCancellationRequested();
+      File.Move(temporaryPath, destinationPath, overwrite: true);
+    }
+    finally
+    {
+      try { File.Delete(temporaryPath); }
+      catch (IOException) { }
+      catch (UnauthorizedAccessException) { }
+    }
   }
 }

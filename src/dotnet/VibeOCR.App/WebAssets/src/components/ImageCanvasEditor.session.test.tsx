@@ -529,6 +529,272 @@ describe("screenshot session editor wiring", () => {
     }
   });
 
+  it("applies scaling with revision history and format-driven invalidation", async () => {
+    class FakeImage {
+      readonly naturalWidth = 1600;
+      readonly naturalHeight = 900;
+      decoding = "";
+      src = "";
+      onload: (() => void) | null = null;
+
+      constructor() {
+        setTimeout(() => this.onload?.(), 0);
+      }
+    }
+    vi.stubGlobal("Image", FakeImage);
+
+    const actions = createActions();
+    const { unmount } = render(
+      <ImageCanvasEditor
+        actions={actions}
+        canExport={false}
+        canRecognize={false}
+        source="https://app.vibeocr/__resource/capture.png"
+        session={{ sessionId: "session-a", revision: 0 }}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText(/原图 1600×900/)).toBeInTheDocument(),
+    );
+    fireEvent.change(screen.getByLabelText("等比缩放"), {
+      target: { value: "50" },
+    });
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "recognition.notifyScreenshotRevision",
+      sessionId: "session-a",
+      revision: 1,
+    });
+    await waitFor(() =>
+      expect(screen.getByText(/输出 800×450/)).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "recognition.notifyScreenshotRevision",
+      sessionId: "session-a",
+      revision: 2,
+    });
+    await waitFor(() =>
+      expect(screen.getByText(/输出 1600×900/)).toBeInTheDocument(),
+    );
+
+    fireEvent.change(screen.getByLabelText("输出格式"), {
+      target: { value: "image/jpeg" },
+    });
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "recognition.notifyScreenshotRevision",
+      sessionId: "session-a",
+      revision: 3,
+    });
+    expect(screen.getByText(/透明区域将合成白色背景/)).toBeInTheDocument();
+    unmount();
+  });
+
+  it("keeps the current state when a resize target exceeds the output limits", async () => {
+    class FakeImage {
+      readonly naturalWidth = 1600;
+      readonly naturalHeight = 900;
+      decoding = "";
+      src = "";
+      onload: (() => void) | null = null;
+
+      constructor() {
+        setTimeout(() => this.onload?.(), 0);
+      }
+    }
+    vi.stubGlobal("Image", FakeImage);
+
+    const actions = createActions();
+    const { unmount } = render(
+      <ImageCanvasEditor
+        actions={actions}
+        canExport={true}
+        canRecognize={false}
+        source="https://app.vibeocr/__resource/capture.png"
+        session={{ sessionId: "session-a", revision: 0 }}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText(/原图 1600×900/)).toBeInTheDocument(),
+    );
+    fireEvent.change(screen.getByLabelText("输出宽度"), {
+      target: { value: "99999" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "应用尺寸" }));
+    expect(screen.getByText(/输出尺寸超出上限/)).toBeInTheDocument();
+    expect(actions.run).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it("rejects stale file-session exports after format or geometry changes", async () => {
+    // jsdom 无 2d 上下文/图片解码：用最小 fake 驱动真实导出→上传路径；
+    // toBlob 按请求类型返回对应签名，模拟真实编码器行为。
+    class FakeImage {
+      readonly naturalWidth = 1600;
+      readonly naturalHeight = 900;
+      decoding = "";
+      src = "";
+      onload: (() => void) | null = null;
+
+      constructor() {
+        setTimeout(() => this.onload?.(), 0);
+      }
+    }
+    vi.stubGlobal("Image", FakeImage);
+    const fakeContext = () =>
+      new Proxy<Record<string | symbol, unknown>>(
+        {},
+        {
+          get: (target, property) =>
+            property in target ? target[property] : () => undefined,
+          set: () => true,
+        },
+      );
+    const getContextDescriptor = Object.getOwnPropertyDescriptor(
+      HTMLCanvasElement.prototype,
+      "getContext",
+    )!;
+    const toBlobDescriptor = Object.getOwnPropertyDescriptor(
+      HTMLCanvasElement.prototype,
+      "toBlob",
+    );
+    Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
+      configurable: true,
+      value: vi.fn(() => fakeContext()),
+    });
+    Object.defineProperty(HTMLCanvasElement.prototype, "toBlob", {
+      configurable: true,
+      value: (callback: (blob: Blob | null) => void, type?: string) => {
+        const jpeg = type === "image/jpeg";
+        callback(
+          new Blob(
+            [
+              new Uint8Array(
+                jpeg
+                  ? [0xff, 0xd8, 0xff, 0xe0, 0, 16, 74, 70]
+                  : [137, 80, 78, 71, 13, 10, 26, 10],
+              ),
+            ],
+            { type: jpeg ? "image/jpeg" : "image/png" },
+          ),
+        );
+      },
+    });
+    const pendingUploads: {
+      resolve: (response: Response) => void;
+    }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            pendingUploads.push({ resolve });
+          }),
+      ),
+    );
+    const okUpload = () =>
+      new Response(
+        JSON.stringify({
+          resourceUri:
+            "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+        }),
+        { status: 201, headers: { "Content-Type": "application/json" } },
+      );
+
+    const actions = createActions();
+    const { unmount } = render(
+      <ImageCanvasEditor
+        actions={actions}
+        canExport={true}
+        canRecognize={false}
+        source="https://app.vibeocr/__resource/capture.png"
+      />,
+    );
+    try {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      });
+
+      // 阶段一：上传在途时切换输出格式，旧 PNG 不得贴新设置发出。
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "复制标注图" }));
+        await Promise.resolve();
+      });
+      expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        fireEvent.change(screen.getByLabelText("输出格式"), {
+          target: { value: "image/jpeg" },
+        });
+        pendingUploads[0]!.resolve(okUpload());
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      });
+      expect(actions.run).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "recognition.copyAnnotatedImage" }),
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByText(/导出期间内容或会话已变化，本次未发送/),
+        ).toBeVisible(),
+      );
+
+      // 阶段二：几何编辑（无会话）同样拒绝迟到导出。
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "保存标注图" }));
+      });
+      await waitFor(() => expect(pendingUploads.length).toBe(2));
+      fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+      const canvas = screen.getByLabelText("图片检查画布");
+      fireEvent.pointerDown(canvas, {
+        pointerId: 1,
+        clientX: 100,
+        clientY: 100,
+      });
+      fireEvent.pointerUp(canvas, {
+        pointerId: 1,
+        clientX: 400,
+        clientY: 300,
+      });
+      await act(async () => {
+        pendingUploads[1]!.resolve(okUpload());
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      });
+      expect(actions.run).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "recognition.saveAnnotatedImage" }),
+      );
+
+      // 无变更的干净重试可以发出。
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "保存标注图" }));
+      });
+      await waitFor(() => expect(pendingUploads.length).toBe(3));
+      await act(async () => {
+        pendingUploads[2]!.resolve(okUpload());
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      });
+      expect(actions.run).toHaveBeenCalledWith({
+        type: "recognition.saveAnnotatedImage",
+        resourceUri:
+          "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+      });
+      unmount();
+    } finally {
+      Object.defineProperty(
+        HTMLCanvasElement.prototype,
+        "getContext",
+        getContextDescriptor,
+      );
+      if (toBlobDescriptor) {
+        Object.defineProperty(
+          HTMLCanvasElement.prototype,
+          "toBlob",
+          toBlobDescriptor,
+        );
+      }
+    }
+  });
+
   it("does not send the exported PNG when the session changes during a delayed upload", async () => {
     // jsdom 无 2d 上下文/图片解码：用最小 fake 驱动真实导出→上传路径。
     class FakeImage {

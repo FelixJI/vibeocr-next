@@ -1,7 +1,10 @@
 using System.Buffers.Binary;
 using System.Text;
 using VibeOCR.App.Web;
+using VibeOCR.App.Features.Recognition;
 using Xunit;
+using Windows.Graphics.Imaging;
+using Windows.Storage.Streams;
 
 namespace VibeOCR.App.Tests;
 
@@ -16,6 +19,60 @@ public sealed class WorkbenchAnnotationStoreTests : IDisposable
   public WorkbenchAnnotationStoreTests()
   {
     Directory.CreateDirectory(resourceRoot);
+  }
+
+  [Fact]
+  public async Task SaveWritesTheExactSnapshotAndCancellationKeepsExistingImage()
+  {
+    string source = Path.Combine(resourceRoot, "source.png");
+    string destination = Path.Combine(resourceRoot, "existing.png");
+    byte[] original = [4, 5, 6];
+    await File.WriteAllBytesAsync(source, Png, TestContext.Current.CancellationToken);
+    await File.WriteAllBytesAsync(destination, original, TestContext.Current.CancellationToken);
+    using var cancelled = new CancellationTokenSource();
+    cancelled.Cancel();
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+      AnnotatedImagePlatform.WriteImageCopyAsync(source, destination, cancelled.Token));
+    Assert.Equal(original, await File.ReadAllBytesAsync(destination, TestContext.Current.CancellationToken));
+    Assert.Equal(Png, await File.ReadAllBytesAsync(source, TestContext.Current.CancellationToken));
+    Assert.Empty(Directory.GetFiles(resourceRoot, "*.tmp"));
+    await AnnotatedImagePlatform.WriteImageCopyAsync(source, destination,
+      TestContext.Current.CancellationToken);
+    Assert.Equal(Png, await File.ReadAllBytesAsync(destination, TestContext.Current.CancellationToken));
+    Assert.Equal(Png, await File.ReadAllBytesAsync(source, TestContext.Current.CancellationToken));
+  }
+
+  [Fact]
+  public async Task JpegUploadDecodesPixelsAndRetainsItsRealFormatAndDimensions()
+  {
+    using var encoded = new InMemoryRandomAccessStream();
+    BitmapEncoder encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.JpegEncoderId, encoded);
+    encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Ignore,
+      2, 1, 96, 96, [0, 0, 255, 255, 0, 255, 0, 255]);
+    await encoder.FlushAsync();
+    encoded.Seek(0);
+    using var upload = encoded.AsStreamForRead();
+    using var store = new WorkbenchAnnotationStore(resourceRoot);
+    WorkbenchAnnotationLease lease = await store.UploadImageAsync(upload, "image/jpeg",
+      TestContext.Current.CancellationToken);
+    using WorkbenchAnnotationFile image = store.Take(lease.ResourceUri);
+    Assert.Equal("image/jpeg", image.MediaType);
+    Assert.EndsWith(".jpg", image.Path, StringComparison.Ordinal);
+    Assert.Equal(2, image.Width);
+    Assert.Equal(1, image.Height);
+    await using FileStream file = File.OpenRead(image.Path);
+    using var random = file.AsRandomAccessStream();
+    BitmapDecoder decoder = await BitmapDecoder.CreateAsync(random);
+    Assert.Equal(BitmapDecoder.JpegDecoderId, decoder.DecoderInformation.CodecId);
+    Assert.Equal(8, (await decoder.GetPixelDataAsync(BitmapPixelFormat.Bgra8,
+      BitmapAlphaMode.Ignore, new BitmapTransform(), ExifOrientationMode.IgnoreExifOrientation,
+      ColorManagementMode.DoNotColorManage)).DetachPixelData().Length);
+    await Assert.ThrowsAsync<WorkbenchAnnotationAccessException>(() =>
+      store.UploadImageAsync(new MemoryStream(Png), "image/jpeg",
+        TestContext.Current.CancellationToken));
+    await Assert.ThrowsAsync<WorkbenchAnnotationAccessException>(() =>
+      store.UploadImageAsync(new MemoryStream([0xff, 0xd8, 0xff, 0xe0, 0, 16]),
+        "image/jpeg", TestContext.Current.CancellationToken));
   }
 
   [Fact]

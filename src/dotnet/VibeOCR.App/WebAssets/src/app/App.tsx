@@ -11,6 +11,7 @@ import {
   Routes,
   useLocation,
   useNavigate,
+  Outlet,
 } from "react-router";
 import { useEffect, useState } from "react";
 
@@ -20,6 +21,7 @@ import {
   PdfPage,
   QrCodePage,
   RecognitionPage,
+  ImageEditPage,
   SettingsPage,
 } from "../features/Pages";
 import { AppShell } from "../layout/AppShell";
@@ -33,7 +35,8 @@ function RouteSync({ viewState }: { readonly viewState: AppViewState }) {
   const navigate = useNavigate();
 
   useEffect(() => {
-    if (!viewState.connected) return;
+    if (!viewState.connected || window.location.hash.includes("?scene=1"))
+      return;
     // 关于与诊断合并后，宿主仍可能持久化旧 about 路由：与重定向目标对齐，
     // 避免 RouteSync 把 #/about 拉回造成与 #/diagnostics 重定向循环。
     const expected =
@@ -42,6 +45,14 @@ function RouteSync({ viewState }: { readonly viewState: AppViewState }) {
   }, [location.pathname, navigate, viewState.connected, viewState.route]);
 
   return null;
+}
+
+function SceneOutlet() {
+  return (
+    <main className="page-region" style={{ height: "100%" }}>
+      <Outlet />
+    </main>
+  );
 }
 
 export function App({
@@ -76,12 +87,16 @@ export function App({
         <Routes>
           <Route
             element={
-              <AppShell
-                actions={actions}
-                onThemeChange={actions.setTheme}
-                theme={viewState.theme}
-                viewState={viewState}
-              />
+              window.location.hash.includes("?scene=1") ? (
+                <SceneOutlet />
+              ) : (
+                <AppShell
+                  actions={actions}
+                  onThemeChange={actions.setTheme}
+                  theme={viewState.theme}
+                  viewState={viewState}
+                />
+              )
             }
           >
             <Route
@@ -92,6 +107,12 @@ export function App({
               path="recognition"
               element={
                 <RecognitionPage actions={actions} viewState={viewState} />
+              }
+            />
+            <Route
+              path="imageEdit"
+              element={
+                <ImageEditPage actions={actions} viewState={viewState} />
               }
             />
             <Route
