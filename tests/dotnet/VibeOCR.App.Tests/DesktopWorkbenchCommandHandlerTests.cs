@@ -607,7 +607,9 @@ public sealed class DesktopWorkbenchCommandHandlerTests
   {
     var viewModel = new QrCodeViewModel(new DeferredQrCodeClient(), new EmptyQrCodeInput())
     {
-      GenerateText = "590123412345", GenerateFormat = "ean13", CaptionMode = QrCodeCaptionMode.Payload,
+      GenerateText = "590123412345",
+      GenerateFormat = "ean13",
+      CaptionMode = QrCodeCaptionMode.Payload,
     };
     await viewModel.GenerateAsync(TestContext.Current.CancellationToken);
     var expected = await LocalQrCodeGenerator.GenerateAsync("5901234123457", "ean13",
@@ -1165,7 +1167,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
 
     public Exception? CopyError { get; init; }
 
-    public async Task CopyPngAsync(
+    public async Task CopyImageAsync(
       string sourcePath,
       CancellationToken cancellationToken)
     {
@@ -1184,7 +1186,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
 
     public string? CopiedText { get; private set; }
 
-    public async Task<bool> SavePngAsync(
+    public async Task<bool> SaveImageAsync(
       string sourcePath,
       CancellationToken cancellationToken)
     {
@@ -1533,17 +1535,15 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       // 开始 capture 与重入被拒不显示工作台。
       Assert.Equal(0, shows.ShowWorkbench);
 
-      // 用户在选区界面取消：guard 释放后可重试；取消也是纯截图会话的
-      // 真实终态，显示一次呈现编辑器入口。
+      // 纯截图取消释放 guard，不显示原先隐藏的主工作台。
       inputs.CancelByUser();
       Assert.Equal(
         "recognition.cancelled",
         await waiter.Task.WaitAsync(
           TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
-      Assert.Equal(1, await WaitForCountAsync(
-        () => shows.ShowWorkbench, 1, TimeSpan.FromSeconds(5)));
+      Assert.Equal(0, shows.ShowWorkbench);
 
-      // 截图识别入口重试：同样只在真实终态后显示。
+      // 截图识别入口仍在真实终态后显示结果。
       waiter = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
       WorkbenchCommandOutcome retry = await handler.ExecuteAsync(
         new CaptureRecognitionScreenCommand(),
@@ -1555,8 +1555,8 @@ public sealed class DesktopWorkbenchCommandHandlerTests
         await waiter.Task.WaitAsync(
           TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
       Assert.Equal(2, inputs.CaptureCalls);
-      Assert.Equal(2, await WaitForCountAsync(
-        () => shows.ShowWorkbench, 2, TimeSpan.FromSeconds(5)));
+      Assert.Equal(1, await WaitForCountAsync(
+        () => shows.ShowWorkbench, 1, TimeSpan.FromSeconds(5)));
     }
     finally
     {
@@ -1565,7 +1565,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
   }
 
   [Fact]
-  public async Task SessionCaptureShowsWorkbenchOnlyAfterTerminalCompletion()
+  public async Task SessionCaptureOpensSceneAfterCompletionWithoutShowingWorkbench()
   {
     string root = Path.Combine(Path.GetTempPath(), $"vibeocr-shell-actions-{Guid.NewGuid():N}");
     string resourceRoot = Path.Combine(root, "resources");
@@ -1611,14 +1611,17 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       // 选区进行中：不显示工作台，不抢遮罩焦点。
       Assert.Equal(0, shows.ShowWorkbench);
 
-      // 真正完成（确认选区建立编辑会话）后才显示。
+      var sceneReady = new TaskCompletionSource<Guid>(TaskCreationOptions.RunContinuationsAsynchronously);
+      handler.ScreenshotSessionReady += (id, _) => sceneReady.TrySetResult(id);
+      // 确认选区只打开共享现场编辑宿主，原主窗保持隐藏。
       inputs.CompleteByUser();
       Assert.Equal(
         "recognition.session",
         await terminal.Task.WaitAsync(
           TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
-      Assert.Equal(1, await WaitForCountAsync(
-        () => shows.ShowWorkbench, 1, TimeSpan.FromSeconds(5)));
+      Assert.Equal(handler.CurrentImageSessionId, await sceneReady.Task.WaitAsync(
+        TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+      Assert.Equal(0, shows.ShowWorkbench);
     }
     finally
     {
@@ -1927,8 +1930,11 @@ public sealed class DesktopWorkbenchCommandHandlerTests
 
   private static Wire.Health SwitchHealth(Wire.OcrEngineId engine) => new()
   {
-    SchemaVersion = 2, InstanceId = engine.ToString(), ProtocolVersion = 2,
-    Ready = true, Draining = false,
+    SchemaVersion = 2,
+    InstanceId = engine.ToString(),
+    ProtocolVersion = 2,
+    Ready = true,
+    Draining = false,
     Capabilities = [RuntimeSelectionService.EngineSelectionCapability],
     CapabilityDescriptors = [new Wire.CapabilityDescriptor
     {

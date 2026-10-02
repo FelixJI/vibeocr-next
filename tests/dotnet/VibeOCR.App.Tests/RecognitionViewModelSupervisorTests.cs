@@ -16,444 +16,468 @@ namespace VibeOCR.App.Tests;
 
 public sealed class RecognitionViewModelSupervisorTests
 {
-    [Fact]
-    public void StructuredOutcomesPreserveContentSeparatelyFromTextGeometry()
+  [Theory]
+  [InlineData("file")]
+  [InlineData("clipboard")]
+  [InlineData("drop")]
+  public async Task ImageEditInputsNeverSubmitOrNegotiateUnavailableRecognitionMode(string origin)
+  {
+    var inference = new FakeInferenceClient("must not submit");
+    var viewModel = new RecognitionViewModel(inference, new StubInputService())
     {
-        using JsonDocument document = JsonDocument.Parse("""
+      TaskEngine = "unbound-mode",
+    };
+    if (origin == "file") await viewModel.OpenImageForEditAsync(TestContext.Current.CancellationToken);
+    else if (origin == "clipboard") await viewModel.PasteImageForEditAsync(TestContext.Current.CancellationToken);
+    else await viewModel.DropImageForEditAsync("synthetic.png", TestContext.Current.CancellationToken);
+    Assert.NotNull(viewModel.CurrentInput);
+    Assert.False(viewModel.IsBusy);
+    Assert.Null(viewModel.TerminalState);
+    Assert.Equal(0, inference.SubmitCalls);
+    viewModel.ReleaseInput();
+    Assert.Null(viewModel.CurrentInput);
+  }
+
+  [Fact]
+  public void StructuredOutcomesPreserveContentSeparatelyFromTextGeometry()
+  {
+    using JsonDocument document = JsonDocument.Parse("""
             {"content_list":[{"type":"table","rows":2,"cells":[{"text":"中文","rowspan":2}]}],
              "text_blocks":[{"text":"中文","box":[[0,0],[20,0],[20,10],[0,10]]}]}
             """);
-        RecognizeResponse response = RecognitionOutcomeMapper.ToResponse(new ItemOutcome
-        {
-            ItemId = "table-1", State = ItemState.Succeeded, Attempt = 1,
-            Payload = document.RootElement.EnumerateObject()
-                .ToDictionary(property => property.Name, property => property.Value),
-        }, "TableRecognition");
-        document.Dispose();
-        Assert.Equal("中文", Assert.Single(response.RawBlocks!).GetProperty("text").GetString());
-        JsonElement table = Assert.Single(response.ContentBlocks!);
-        Assert.Equal(2, table.GetProperty("cells")[0].GetProperty("rowspan").GetInt32());
-    }
-    [Fact]
-    public async Task SupervisorPathSubmitsOneElementJobAndPublishesResult()
+    RecognizeResponse response = RecognitionOutcomeMapper.ToResponse(new ItemOutcome
     {
-        var fakeInference = new FakeInferenceClient("hello from supervisor");
-        var inputs = new StubInputService();
-        var viewModel = new RecognitionViewModel(fakeInference, inputs);
+      ItemId = "table-1",
+      State = ItemState.Succeeded,
+      Attempt = 1,
+      Payload = document.RootElement.EnumerateObject()
+            .ToDictionary(property => property.Name, property => property.Value),
+    }, "TableRecognition");
+    document.Dispose();
+    Assert.Equal("中文", Assert.Single(response.RawBlocks!).GetProperty("text").GetString());
+    JsonElement table = Assert.Single(response.ContentBlocks!);
+    Assert.Equal(2, table.GetProperty("cells")[0].GetProperty("rowspan").GetInt32());
+  }
+  [Fact]
+  public async Task SupervisorPathSubmitsOneElementJobAndPublishesResult()
+  {
+    var fakeInference = new FakeInferenceClient("hello from supervisor");
+    var inputs = new StubInputService();
+    var viewModel = new RecognitionViewModel(fakeInference, inputs);
 
-        await viewModel.RecognizeViaSupervisorAsync(ct => inputs.PickFileAsync(ct), CancellationToken.None);
+    await viewModel.RecognizeViaSupervisorAsync(ct => inputs.PickFileAsync(ct), CancellationToken.None);
 
-        Assert.Equal("hello from supervisor", viewModel.ResultText);
-        Assert.Equal("识别完成", viewModel.Status);
-        Assert.True(viewModel.HasResult);
-        // Exactly one submit with exactly one upload (single = one-element job).
-        Assert.Equal(1, fakeInference.SubmitCalls);
-        Assert.NotNull(fakeInference.LastRequest);
-        Assert.Equal(JobKind.Recognition, fakeInference.LastRequest!.Kind);
-        Assert.Equal(JobPriority.Interactive, fakeInference.LastRequest.Priority);
-        Assert.Equal("OCR", fakeInference.LastRequest.Pipeline.PipelineId);
-        Assert.Single(fakeInference.LastRequest.Items);
-        Assert.Equal("recognition-input", fakeInference.LastRequest.Items[0].ClientItemKey);
-        Assert.Equal("file.png", fakeInference.LastRequest.Items[0].DisplayName);
-        IReadOnlyDictionary<string, SubmitUpload> uploads = Assert.IsAssignableFrom<
-            IReadOnlyDictionary<string, SubmitUpload>>(fakeInference.LastUploads);
-        Assert.Single(uploads);
-        Assert.Equal(new byte[] { 1, 2, 3, 4 }, uploads["input-0"].Content);
+    Assert.Equal("hello from supervisor", viewModel.ResultText);
+    Assert.Equal("识别完成", viewModel.Status);
+    Assert.True(viewModel.HasResult);
+    // Exactly one submit with exactly one upload (single = one-element job).
+    Assert.Equal(1, fakeInference.SubmitCalls);
+    Assert.NotNull(fakeInference.LastRequest);
+    Assert.Equal(JobKind.Recognition, fakeInference.LastRequest!.Kind);
+    Assert.Equal(JobPriority.Interactive, fakeInference.LastRequest.Priority);
+    Assert.Equal("OCR", fakeInference.LastRequest.Pipeline.PipelineId);
+    Assert.Single(fakeInference.LastRequest.Items);
+    Assert.Equal("recognition-input", fakeInference.LastRequest.Items[0].ClientItemKey);
+    Assert.Equal("file.png", fakeInference.LastRequest.Items[0].DisplayName);
+    IReadOnlyDictionary<string, SubmitUpload> uploads = Assert.IsAssignableFrom<
+        IReadOnlyDictionary<string, SubmitUpload>>(fakeInference.LastUploads);
+    Assert.Single(uploads);
+    Assert.Equal(new byte[] { 1, 2, 3, 4 }, uploads["input-0"].Content);
+  }
+
+  [Fact]
+  public async Task RecognitionModeSubmitsItsBoundPipelineAndEngine()
+  {
+    var fakeInference = new FakeInferenceClient("structured result");
+    var inputs = new StubInputService();
+    var viewModel = new RecognitionViewModel(fakeInference, inputs);
+    viewModel.SetRecognitionMode(
+        new RecognitionModeOption(
+            "paddle_structure",
+            "document",
+            "PP-StructureV3",
+            null,
+            "advanced_component",
+            "ready",
+            null,
+            "paddleocr-cpu",
+            [],
+            "model_residency",
+            true,
+            true,
+            true,
+            true));
+
+    await viewModel.RecognizeViaSupervisorAsync(
+        ct => inputs.PickFileAsync(ct),
+        CancellationToken.None);
+
+    Assert.NotNull(fakeInference.LastRequest);
+    Assert.Equal("PP-StructureV3", fakeInference.LastRequest!.Pipeline.PipelineId);
+    Assert.Null(fakeInference.LastRequest.Pipeline.Engine);
+  }
+
+  [Fact]
+  public async Task MineruModeSubmitsTypedConfigWithoutLocalEngine()
+  {
+    var fakeInference = new FakeInferenceClient("remote result");
+    var inputs = new StubInputService();
+    var viewModel = new RecognitionViewModel(fakeInference, inputs);
+    viewModel.SetRecognitionMode(new RecognitionModeOption(
+        "mineru_document", "document", "MinerU", null,
+        "advanced_component", "ready", null, "mineru", [],
+        "unmanaged", false, false, false, false),
+        new MineruConfig(MineruTier.Basic));
+
+    await viewModel.RecognizeViaSupervisorAsync(
+        ct => inputs.PickFileAsync(ct), CancellationToken.None);
+
+    Assert.Equal("MinerU", fakeInference.LastRequest?.Pipeline.PipelineId);
+    Assert.Equal(JobKind.MineruParse, fakeInference.LastRequest?.Kind);
+    Assert.Equal(MineruTier.Basic, fakeInference.LastRequest?.Pipeline.Mineru?.Tier);
+    Assert.Null(fakeInference.LastRequest?.Pipeline.Engine);
+  }
+
+  [Fact]
+  public async Task ModeAndOptionsAreFrozenBeforeInputLoading()
+  {
+    var inference = new FakeInferenceClient("formula");
+    var inputs = new StubInputService();
+    var viewModel = new RecognitionViewModel(inference, inputs);
+    var mode = new RecognitionModeOption("paddle_formula", "specialized", "FORMULA_RECOGNITION",
+        null, "advanced_component", "ready", null, "paddleocr-cpu",
+        ["formula_recognition_batch_size"], "model_residency", true, true, true, true);
+    viewModel.SetRecognitionMode(mode, options: new PaddleModeOptions { FormulaRecognitionBatchSize = 2 });
+    await viewModel.RecognizeViaSupervisorAsync(async ct =>
+    {
+      viewModel.SetRecognitionMode(null);
+      return await inputs.PickFileAsync(ct);
+    }, CancellationToken.None);
+    Assert.Equal("FORMULA_RECOGNITION", inference.LastRequest!.Pipeline.PipelineId);
+    Assert.Equal(2, inference.LastRequest.Pipeline.Options["formula_recognition_batch_size"].GetInt32());
+  }
+
+  [Fact]
+  public async Task UnsupportedModeOptionRejectsSubmissionInsteadOfSilentDrop()
+  {
+    // 回归契约（#110 AC2）：绑定的选项含当前模式不支持的字段时，
+    // 提交必须明确拒绝并携带精确原因，而不是静默丢弃后仍提交。
+    var inference = new FakeInferenceClient("must not submit");
+    var inputs = new StubInputService();
+    var viewModel = new RecognitionViewModel(inference, inputs);
+    var mode = new RecognitionModeOption("paddle_formula", "specialized", "FORMULA_RECOGNITION",
+        null, "advanced_component", "ready", null, "paddleocr-cpu",
+        ["formula_recognition_batch_size"], "model_residency", true, true, true, true);
+    viewModel.SetRecognitionMode(mode, options: new PaddleModeOptions
+    {
+      FormulaRecognitionBatchSize = 2,
+      UseTableRecognition = true, // 不属于该模式合同
+    });
+
+    await viewModel.RecognizeViaSupervisorAsync(ct => inputs.PickFileAsync(ct), CancellationToken.None);
+
+    Assert.Equal(0, inference.SubmitCalls);
+    Assert.Equal(JobState.Failed, viewModel.TerminalState);
+    Assert.StartsWith("识别选项无效，已拒绝提交", viewModel.Status);
+    Assert.Contains("use_table_recognition", viewModel.Status);
+    Assert.False(viewModel.HasResult);
+  }
+
+  [Fact]
+  public async Task OutOfRangeModeOptionRejectsSubmissionWithPreciseParameter()
+  {
+    // 回归契约（#110 AC2）：越界的范围值同样明确拒绝并点名参数。
+    var inference = new FakeInferenceClient("must not submit");
+    var inputs = new StubInputService();
+    var viewModel = new RecognitionViewModel(inference, inputs);
+    var mode = new RecognitionModeOption("paddle_formula", "specialized", "FORMULA_RECOGNITION",
+        null, "advanced_component", "ready", null, "paddleocr-cpu",
+        ["formula_recognition_batch_size"], "model_residency", true, true, true, true);
+    viewModel.SetRecognitionMode(mode, options: new PaddleModeOptions { FormulaRecognitionBatchSize = 0 });
+
+    await viewModel.RecognizeViaSupervisorAsync(ct => inputs.PickFileAsync(ct), CancellationToken.None);
+
+    Assert.Equal(0, inference.SubmitCalls);
+    Assert.Equal(JobState.Failed, viewModel.TerminalState);
+    Assert.StartsWith("识别选项无效，已拒绝提交", viewModel.Status);
+    Assert.Contains("FormulaRecognitionBatchSize", viewModel.Status);
+  }
+
+  [Theory]
+  [InlineData("{\"use_doc_unwarping\":1}")]
+  [InlineData("{\"unrecognized\":true}")]
+  [InlineData("{\"formula_recognition_model_dir\":\"C:/untrusted\"}")]
+  public void PaddleOptionsRejectInvalidTypesAndWebModelPaths(string json)
+  {
+    Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<PaddleModeOptions>(
+        json, PaddleModeOptions.JsonOptions));
+  }
+
+  [Fact]
+  public void PaddleOptionsRejectOptionsOutsideSelectedCatalogMode()
+  {
+    var mode = new RecognitionModeOption("paddle_formula", "specialized", "FORMULA_RECOGNITION",
+        null, "advanced_component", "ready", null, "paddleocr-cpu",
+        ["formula_recognition_batch_size"], "model_residency", true, true, true, true);
+    Assert.Throws<ArgumentException>(() => new PaddleModeOptions { UseTableRecognition = true }.ToWire(mode));
+    Assert.Throws<ArgumentOutOfRangeException>(() => new PaddleModeOptions { FormulaRecognitionBatchSize = 0 }.ToWire(mode));
+  }
+  [Fact]
+  public async Task SupervisorPathLocalizesTypedError()
+  {
+    var fakeInference = new FakeInferenceClient(
+        "ignored",
+        submitThrows: new InferenceClientException(HttpV2ErrorCode.OutOfMemory, "oom", true));
+    var inputs = new StubInputService();
+    var viewModel = new RecognitionViewModel(fakeInference, inputs);
+
+    await viewModel.RecognizeViaSupervisorAsync(ct => inputs.PickFileAsync(ct), CancellationToken.None);
+
+    Assert.Equal("内存或显存不足", viewModel.Status);
+    Assert.False(viewModel.HasResult);
+  }
+
+  [Fact]
+  public async Task SupervisorPathReportsCancellationWhenJobCancelled()
+  {
+    // The fake returns a CANCELLED snapshot, modelling an honest terminal
+    // state after a cancel request (not a socket disconnect).
+    var fakeInference = new FakeInferenceClient("ignored", terminalState: JobState.Cancelled);
+    var inputs = new StubInputService();
+    var viewModel = new RecognitionViewModel(fakeInference, inputs);
+
+    await viewModel.RecognizeViaSupervisorAsync(ct => inputs.PickFileAsync(ct), CancellationToken.None);
+
+    Assert.Equal("已取消", viewModel.Status);
+    Assert.False(viewModel.HasResult);
+  }
+
+  [Fact]
+  public async Task SupervisorPathPollsAtomicJobUpdatesBySequence()
+  {
+    var fakeInference = new FakeInferenceClient(
+        "sequenced",
+        runningUpdatesBeforeTerminal: 1);
+    var inputs = new StubInputService();
+    var viewModel = new RecognitionViewModel(fakeInference, inputs);
+
+    await viewModel.RecognizeViaSupervisorAsync(
+        ct => inputs.PickFileAsync(ct),
+        CancellationToken.None);
+
+    Assert.Equal([0, 1], fakeInference.ObservedAfterSequences);
+    Assert.Equal("sequenced", viewModel.ResultText);
+  }
+
+  [Fact]
+  public async Task LocalCancellationUsesGenericCancelCommand()
+  {
+    var fakeInference = new FakeInferenceClient("ignored");
+    var inputs = new StubInputService();
+    var viewModel = new RecognitionViewModel(fakeInference, inputs);
+    using var cancellation = new CancellationTokenSource();
+    cancellation.Cancel();
+
+    await viewModel.RecognizeViaSupervisorAsync(
+        ct => inputs.PickFileAsync(ct),
+        cancellation.Token);
+
+    Assert.NotNull(fakeInference.LastCommand);
+    Assert.Equal(JobCommandKind.Cancel, fakeInference.LastCommand!.Kind);
+    Assert.Equal("job-1", fakeInference.LastCommand.JobId);
+  }
+
+  [Fact]
+  public async Task SupervisorPathSecondRunWinsAfterFirstCompletes()
+  {
+    // Generation guard: two sequential runs both complete; the second one's
+    // result is what the UI shows (the first's result is superseded, not
+    // merged). This is the deterministic core of the discard-late-results
+    // invariant without flaky concurrency.
+    var inputs = new StubInputService();
+    var fake = new FakeInferenceClient("first");
+    var viewModel = new RecognitionViewModel(fake, inputs);
+
+    await viewModel.RecognizeViaSupervisorAsync(ct => inputs.PickFileAsync(ct), CancellationToken.None);
+    Assert.Equal("first", viewModel.ResultText);
+
+    fake.QueueTerminalJob("second");
+    await viewModel.RecognizeViaSupervisorAsync(ct => inputs.PickFileAsync(ct), CancellationToken.None);
+    Assert.Equal("second", viewModel.ResultText);
+    Assert.Equal("识别完成", viewModel.Status);
+  }
+
+  [Fact]
+  public async Task PendingSupervisorStartupDefersSubmitButNotInputAcquisition()
+  {
+    // 回归契约：截图/剪贴板输入必须立即采集，只有提交在网关处等待
+    // Supervisor 启动完成——否则延迟启动期间截到的是就绪后的屏幕。
+    var deferred = new DeferredInferenceClient();
+    deferred.MarkStartupPending();
+    var inputs = new SignallingInputService();
+    var viewModel = new RecognitionViewModel(deferred, inputs);
+
+    Task run = viewModel.RecognizeViaSupervisorAsync(
+        ct => inputs.CaptureScreenAsync(ct),
+        CancellationToken.None);
+
+    await inputs.Captured.Task.WaitAsync(
+        TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    Assert.False(deferred.IsAttached);
+    Assert.False(run.IsCompleted);
+
+    deferred.Attach(new FakeInferenceClient("late attach"));
+    await run.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+    Assert.Equal("late attach", viewModel.ResultText);
+    Assert.Equal("识别完成", viewModel.Status);
+  }
+
+  [Fact]
+  public async Task NullInputReturnsCancelSelection()
+  {
+    var viewModel = new RecognitionViewModel(new DeferredInferenceClient(), new StubInputService());
+    await viewModel.RecognizeViaSupervisorAsync(
+        ct => Task.FromResult<RecognitionInput?>(null), CancellationToken.None);
+    // No exception, just "已取消选择" status
+    Assert.True(true);
+  }
+
+  // ------------------------------------------------------------------
+  // Fakes
+  // ------------------------------------------------------------------
+
+  private sealed class StubInputService : IInputService
+  {
+    public Task<RecognitionInput?> PickFileAsync(CancellationToken cancellationToken)
+        => Task.FromResult<RecognitionInput?>(new RecognitionInput([1, 2, 3, 4], "image/png", "file.png", "file"));
+
+    public Task<RecognitionInput?> ReadClipboardAsync(CancellationToken cancellationToken)
+        => PickFileAsync(cancellationToken);
+
+    public Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken)
+        => PickFileAsync(cancellationToken);
+
+    public Task<RecognitionInput?> ReadDroppedFileAsync(string path, CancellationToken cancellationToken)
+        => PickFileAsync(cancellationToken);
+  }
+
+  /// <summary>Signals the moment an input is acquired so tests can assert
+  /// capture ordering against gateway attachment.</summary>
+  private sealed class SignallingInputService : IInputService
+  {
+    public TaskCompletionSource Captured { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public Task<RecognitionInput?> PickFileAsync(CancellationToken cancellationToken) => Acquire();
+
+    public Task<RecognitionInput?> ReadClipboardAsync(CancellationToken cancellationToken) => Acquire();
+
+    public Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken) => Acquire();
+
+    public Task<RecognitionInput?> ReadDroppedFileAsync(
+        string path, CancellationToken cancellationToken) => Acquire();
+
+    private Task<RecognitionInput?> Acquire()
+    {
+      Captured.TrySetResult();
+      return Task.FromResult<RecognitionInput?>(
+          new RecognitionInput([1, 2, 3, 4], "image/png", "shot.png", "screenshot"));
+    }
+  }
+
+  /// <summary>
+  /// Fake v2 supervisor. By default the first submitted job returns a terminal
+  /// Completed JobUpdate on the first ObserveAsync probe; result text is
+  /// carried by the typed outcome's "raw_text" payload key. Tests can opt
+  /// into a hanging job, a custom
+  /// terminal state, or a queue of follow-up jobs.
+  /// </summary>
+  private sealed class FakeInferenceClient : InferenceClientStub
+  {
+    private readonly string _text;
+    private readonly bool _neverTerminal;
+    private readonly JobState _terminalState;
+    private readonly InferenceClientException? _submitThrows;
+    private readonly Queue<string> _queuedTexts = new();
+    private string _currentJobText;
+    private int _runningUpdatesRemaining;
+
+    public FakeInferenceClient(
+        string text,
+        bool neverTerminal = false,
+        JobState terminalState = JobState.Completed,
+        InferenceClientException? submitThrows = null,
+        int runningUpdatesBeforeTerminal = 0)
+    {
+      _text = text;
+      _currentJobText = text;
+      _neverTerminal = neverTerminal;
+      _terminalState = terminalState;
+      _submitThrows = submitThrows;
+      _runningUpdatesRemaining = runningUpdatesBeforeTerminal;
     }
 
-    [Fact]
-    public async Task RecognitionModeSubmitsItsBoundPipelineAndEngine()
+    public int SubmitCalls { get; private set; }
+    private IReadOnlyList<JobItem> _items = Array.Empty<JobItem>();
+
+    public SubmitRequest? LastRequest { get; private set; }
+    public IReadOnlyDictionary<string, SubmitUpload>? LastUploads { get; private set; }
+    public JobCommand? LastCommand { get; private set; }
+    public List<int> ObservedAfterSequences { get; } = [];
+
+    public void QueueTerminalJob(string text) => _queuedTexts.Enqueue(text);
+
+    public override Task<JobRef> SubmitAsync(
+        SubmitRequest request,
+        IReadOnlyDictionary<string, SubmitUpload> uploads,
+        CancellationToken cancellationToken)
     {
-        var fakeInference = new FakeInferenceClient("structured result");
-        var inputs = new StubInputService();
-        var viewModel = new RecognitionViewModel(fakeInference, inputs);
-        viewModel.SetRecognitionMode(
-            new RecognitionModeOption(
-                "paddle_structure",
-                "document",
-                "PP-StructureV3",
-                null,
-                "advanced_component",
-                "ready",
-                null,
-                "paddleocr-cpu",
-                [],
-                "model_residency",
-                true,
-                true,
-                true,
-                true));
+      if (_submitThrows is not null)
+      {
+        throw _submitThrows;
+      }
 
-        await viewModel.RecognizeViaSupervisorAsync(
-            ct => inputs.PickFileAsync(ct),
-            CancellationToken.None);
+      SubmitCalls++;
+      LastUploads = uploads;
+      LastRequest = request;
+      if (_queuedTexts.Count > 0)
+      {
+        _currentJobText = _queuedTexts.Dequeue();
+      }
 
-        Assert.NotNull(fakeInference.LastRequest);
-        Assert.Equal("PP-StructureV3", fakeInference.LastRequest!.Pipeline.PipelineId);
-        Assert.Null(fakeInference.LastRequest.Pipeline.Engine);
+      _items = request.Items.Select((item, index) => new JobItem
+      {
+        ItemId = $"it-{index}",
+        ClientItemKey = item.ClientItemKey,
+        Ordinal = item.Ordinal,
+        DisplayName = item.DisplayName,
+        State = ItemState.Queued,
+      }).ToArray();
+      return Task.FromResult(new JobRef
+      {
+        JobId = $"job-{SubmitCalls}",
+        Items = _items,
+      });
     }
 
-    [Fact]
-    public async Task MineruModeSubmitsTypedConfigWithoutLocalEngine()
+    public override Task<JobUpdate> ObserveAsync(
+        string jobId,
+        int afterSequence,
+        CancellationToken cancellationToken)
     {
-        var fakeInference = new FakeInferenceClient("remote result");
-        var inputs = new StubInputService();
-        var viewModel = new RecognitionViewModel(fakeInference, inputs);
-        viewModel.SetRecognitionMode(new RecognitionModeOption(
-            "mineru_document", "document", "MinerU", null,
-            "advanced_component", "ready", null, "mineru", [],
-            "unmanaged", false, false, false, false),
-            new MineruConfig(MineruTier.Basic));
-
-        await viewModel.RecognizeViaSupervisorAsync(
-            ct => inputs.PickFileAsync(ct), CancellationToken.None);
-
-        Assert.Equal("MinerU", fakeInference.LastRequest?.Pipeline.PipelineId);
-        Assert.Equal(JobKind.MineruParse, fakeInference.LastRequest?.Kind);
-        Assert.Equal(MineruTier.Basic, fakeInference.LastRequest?.Pipeline.Mineru?.Tier);
-        Assert.Null(fakeInference.LastRequest?.Pipeline.Engine);
-    }
-
-    [Fact]
-    public async Task ModeAndOptionsAreFrozenBeforeInputLoading()
-    {
-        var inference = new FakeInferenceClient("formula");
-        var inputs = new StubInputService();
-        var viewModel = new RecognitionViewModel(inference, inputs);
-        var mode = new RecognitionModeOption("paddle_formula", "specialized", "FORMULA_RECOGNITION",
-            null, "advanced_component", "ready", null, "paddleocr-cpu",
-            ["formula_recognition_batch_size"], "model_residency", true, true, true, true);
-        viewModel.SetRecognitionMode(mode, options: new PaddleModeOptions { FormulaRecognitionBatchSize = 2 });
-        await viewModel.RecognizeViaSupervisorAsync(async ct =>
-        {
-            viewModel.SetRecognitionMode(null);
-            return await inputs.PickFileAsync(ct);
-        }, CancellationToken.None);
-        Assert.Equal("FORMULA_RECOGNITION", inference.LastRequest!.Pipeline.PipelineId);
-        Assert.Equal(2, inference.LastRequest.Pipeline.Options["formula_recognition_batch_size"].GetInt32());
-    }
-
-    [Fact]
-    public async Task UnsupportedModeOptionRejectsSubmissionInsteadOfSilentDrop()
-    {
-        // 回归契约（#110 AC2）：绑定的选项含当前模式不支持的字段时，
-        // 提交必须明确拒绝并携带精确原因，而不是静默丢弃后仍提交。
-        var inference = new FakeInferenceClient("must not submit");
-        var inputs = new StubInputService();
-        var viewModel = new RecognitionViewModel(inference, inputs);
-        var mode = new RecognitionModeOption("paddle_formula", "specialized", "FORMULA_RECOGNITION",
-            null, "advanced_component", "ready", null, "paddleocr-cpu",
-            ["formula_recognition_batch_size"], "model_residency", true, true, true, true);
-        viewModel.SetRecognitionMode(mode, options: new PaddleModeOptions
-        {
-            FormulaRecognitionBatchSize = 2,
-            UseTableRecognition = true, // 不属于该模式合同
-        });
-
-        await viewModel.RecognizeViaSupervisorAsync(ct => inputs.PickFileAsync(ct), CancellationToken.None);
-
-        Assert.Equal(0, inference.SubmitCalls);
-        Assert.Equal(JobState.Failed, viewModel.TerminalState);
-        Assert.StartsWith("识别选项无效，已拒绝提交", viewModel.Status);
-        Assert.Contains("use_table_recognition", viewModel.Status);
-        Assert.False(viewModel.HasResult);
-    }
-
-    [Fact]
-    public async Task OutOfRangeModeOptionRejectsSubmissionWithPreciseParameter()
-    {
-        // 回归契约（#110 AC2）：越界的范围值同样明确拒绝并点名参数。
-        var inference = new FakeInferenceClient("must not submit");
-        var inputs = new StubInputService();
-        var viewModel = new RecognitionViewModel(inference, inputs);
-        var mode = new RecognitionModeOption("paddle_formula", "specialized", "FORMULA_RECOGNITION",
-            null, "advanced_component", "ready", null, "paddleocr-cpu",
-            ["formula_recognition_batch_size"], "model_residency", true, true, true, true);
-        viewModel.SetRecognitionMode(mode, options: new PaddleModeOptions { FormulaRecognitionBatchSize = 0 });
-
-        await viewModel.RecognizeViaSupervisorAsync(ct => inputs.PickFileAsync(ct), CancellationToken.None);
-
-        Assert.Equal(0, inference.SubmitCalls);
-        Assert.Equal(JobState.Failed, viewModel.TerminalState);
-        Assert.StartsWith("识别选项无效，已拒绝提交", viewModel.Status);
-        Assert.Contains("FormulaRecognitionBatchSize", viewModel.Status);
-    }
-
-    [Theory]
-    [InlineData("{\"use_doc_unwarping\":1}")]
-    [InlineData("{\"unrecognized\":true}")]
-    [InlineData("{\"formula_recognition_model_dir\":\"C:/untrusted\"}")]
-    public void PaddleOptionsRejectInvalidTypesAndWebModelPaths(string json)
-    {
-        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<PaddleModeOptions>(
-            json, PaddleModeOptions.JsonOptions));
-    }
-
-    [Fact]
-    public void PaddleOptionsRejectOptionsOutsideSelectedCatalogMode()
-    {
-        var mode = new RecognitionModeOption("paddle_formula", "specialized", "FORMULA_RECOGNITION",
-            null, "advanced_component", "ready", null, "paddleocr-cpu",
-            ["formula_recognition_batch_size"], "model_residency", true, true, true, true);
-        Assert.Throws<ArgumentException>(() => new PaddleModeOptions { UseTableRecognition = true }.ToWire(mode));
-        Assert.Throws<ArgumentOutOfRangeException>(() => new PaddleModeOptions { FormulaRecognitionBatchSize = 0 }.ToWire(mode));
-    }
-    [Fact]
-    public async Task SupervisorPathLocalizesTypedError()
-    {
-        var fakeInference = new FakeInferenceClient(
-            "ignored",
-            submitThrows: new InferenceClientException(HttpV2ErrorCode.OutOfMemory, "oom", true));
-        var inputs = new StubInputService();
-        var viewModel = new RecognitionViewModel(fakeInference, inputs);
-
-        await viewModel.RecognizeViaSupervisorAsync(ct => inputs.PickFileAsync(ct), CancellationToken.None);
-
-        Assert.Equal("内存或显存不足", viewModel.Status);
-        Assert.False(viewModel.HasResult);
-    }
-
-    [Fact]
-    public async Task SupervisorPathReportsCancellationWhenJobCancelled()
-    {
-        // The fake returns a CANCELLED snapshot, modelling an honest terminal
-        // state after a cancel request (not a socket disconnect).
-        var fakeInference = new FakeInferenceClient("ignored", terminalState: JobState.Cancelled);
-        var inputs = new StubInputService();
-        var viewModel = new RecognitionViewModel(fakeInference, inputs);
-
-        await viewModel.RecognizeViaSupervisorAsync(ct => inputs.PickFileAsync(ct), CancellationToken.None);
-
-        Assert.Equal("已取消", viewModel.Status);
-        Assert.False(viewModel.HasResult);
-    }
-
-    [Fact]
-    public async Task SupervisorPathPollsAtomicJobUpdatesBySequence()
-    {
-        var fakeInference = new FakeInferenceClient(
-            "sequenced",
-            runningUpdatesBeforeTerminal: 1);
-        var inputs = new StubInputService();
-        var viewModel = new RecognitionViewModel(fakeInference, inputs);
-
-        await viewModel.RecognizeViaSupervisorAsync(
-            ct => inputs.PickFileAsync(ct),
-            CancellationToken.None);
-
-        Assert.Equal([0, 1], fakeInference.ObservedAfterSequences);
-        Assert.Equal("sequenced", viewModel.ResultText);
-    }
-
-    [Fact]
-    public async Task LocalCancellationUsesGenericCancelCommand()
-    {
-        var fakeInference = new FakeInferenceClient("ignored");
-        var inputs = new StubInputService();
-        var viewModel = new RecognitionViewModel(fakeInference, inputs);
-        using var cancellation = new CancellationTokenSource();
-        cancellation.Cancel();
-
-        await viewModel.RecognizeViaSupervisorAsync(
-            ct => inputs.PickFileAsync(ct),
-            cancellation.Token);
-
-        Assert.NotNull(fakeInference.LastCommand);
-        Assert.Equal(JobCommandKind.Cancel, fakeInference.LastCommand!.Kind);
-        Assert.Equal("job-1", fakeInference.LastCommand.JobId);
-    }
-
-    [Fact]
-    public async Task SupervisorPathSecondRunWinsAfterFirstCompletes()
-    {
-        // Generation guard: two sequential runs both complete; the second one's
-        // result is what the UI shows (the first's result is superseded, not
-        // merged). This is the deterministic core of the discard-late-results
-        // invariant without flaky concurrency.
-        var inputs = new StubInputService();
-        var fake = new FakeInferenceClient("first");
-        var viewModel = new RecognitionViewModel(fake, inputs);
-
-        await viewModel.RecognizeViaSupervisorAsync(ct => inputs.PickFileAsync(ct), CancellationToken.None);
-        Assert.Equal("first", viewModel.ResultText);
-
-        fake.QueueTerminalJob("second");
-        await viewModel.RecognizeViaSupervisorAsync(ct => inputs.PickFileAsync(ct), CancellationToken.None);
-        Assert.Equal("second", viewModel.ResultText);
-        Assert.Equal("识别完成", viewModel.Status);
-    }
-
-    [Fact]
-    public async Task PendingSupervisorStartupDefersSubmitButNotInputAcquisition()
-    {
-        // 回归契约：截图/剪贴板输入必须立即采集，只有提交在网关处等待
-        // Supervisor 启动完成——否则延迟启动期间截到的是就绪后的屏幕。
-        var deferred = new DeferredInferenceClient();
-        deferred.MarkStartupPending();
-        var inputs = new SignallingInputService();
-        var viewModel = new RecognitionViewModel(deferred, inputs);
-
-        Task run = viewModel.RecognizeViaSupervisorAsync(
-            ct => inputs.CaptureScreenAsync(ct),
-            CancellationToken.None);
-
-        await inputs.Captured.Task.WaitAsync(
-            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-        Assert.False(deferred.IsAttached);
-        Assert.False(run.IsCompleted);
-
-        deferred.Attach(new FakeInferenceClient("late attach"));
-        await run.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-
-        Assert.Equal("late attach", viewModel.ResultText);
-        Assert.Equal("识别完成", viewModel.Status);
-    }
-
-    [Fact]
-    public async Task NullInputReturnsCancelSelection()
-    {
-        var viewModel = new RecognitionViewModel(new DeferredInferenceClient(), new StubInputService());
-        await viewModel.RecognizeViaSupervisorAsync(
-            ct => Task.FromResult<RecognitionInput?>(null), CancellationToken.None);
-        // No exception, just "已取消选择" status
-        Assert.True(true);
-    }
-
-    // ------------------------------------------------------------------
-    // Fakes
-    // ------------------------------------------------------------------
-
-    private sealed class StubInputService : IInputService
-    {
-        public Task<RecognitionInput?> PickFileAsync(CancellationToken cancellationToken)
-            => Task.FromResult<RecognitionInput?>(new RecognitionInput([1, 2, 3, 4], "image/png", "file.png", "file"));
-
-        public Task<RecognitionInput?> ReadClipboardAsync(CancellationToken cancellationToken)
-            => PickFileAsync(cancellationToken);
-
-        public Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken)
-            => PickFileAsync(cancellationToken);
-
-        public Task<RecognitionInput?> ReadDroppedFileAsync(string path, CancellationToken cancellationToken)
-            => PickFileAsync(cancellationToken);
-    }
-
-    /// <summary>Signals the moment an input is acquired so tests can assert
-    /// capture ordering against gateway attachment.</summary>
-    private sealed class SignallingInputService : IInputService
-    {
-        public TaskCompletionSource Captured { get; } = new(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public Task<RecognitionInput?> PickFileAsync(CancellationToken cancellationToken) => Acquire();
-
-        public Task<RecognitionInput?> ReadClipboardAsync(CancellationToken cancellationToken) => Acquire();
-
-        public Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken) => Acquire();
-
-        public Task<RecognitionInput?> ReadDroppedFileAsync(
-            string path, CancellationToken cancellationToken) => Acquire();
-
-        private Task<RecognitionInput?> Acquire()
-        {
-            Captured.TrySetResult();
-            return Task.FromResult<RecognitionInput?>(
-                new RecognitionInput([1, 2, 3, 4], "image/png", "shot.png", "screenshot"));
-        }
-    }
-
-    /// <summary>
-    /// Fake v2 supervisor. By default the first submitted job returns a terminal
-    /// Completed JobUpdate on the first ObserveAsync probe; result text is
-    /// carried by the typed outcome's "raw_text" payload key. Tests can opt
-    /// into a hanging job, a custom
-    /// terminal state, or a queue of follow-up jobs.
-    /// </summary>
-    private sealed class FakeInferenceClient : InferenceClientStub
-    {
-        private readonly string _text;
-        private readonly bool _neverTerminal;
-        private readonly JobState _terminalState;
-        private readonly InferenceClientException? _submitThrows;
-        private readonly Queue<string> _queuedTexts = new();
-        private string _currentJobText;
-        private int _runningUpdatesRemaining;
-
-        public FakeInferenceClient(
-            string text,
-            bool neverTerminal = false,
-            JobState terminalState = JobState.Completed,
-            InferenceClientException? submitThrows = null,
-            int runningUpdatesBeforeTerminal = 0)
-        {
-            _text = text;
-            _currentJobText = text;
-            _neverTerminal = neverTerminal;
-            _terminalState = terminalState;
-            _submitThrows = submitThrows;
-            _runningUpdatesRemaining = runningUpdatesBeforeTerminal;
-        }
-
-        public int SubmitCalls { get; private set; }
-        private IReadOnlyList<JobItem> _items = Array.Empty<JobItem>();
-
-        public SubmitRequest? LastRequest { get; private set; }
-        public IReadOnlyDictionary<string, SubmitUpload>? LastUploads { get; private set; }
-        public JobCommand? LastCommand { get; private set; }
-        public List<int> ObservedAfterSequences { get; } = [];
-
-        public void QueueTerminalJob(string text) => _queuedTexts.Enqueue(text);
-
-        public override Task<JobRef> SubmitAsync(
-            SubmitRequest request,
-            IReadOnlyDictionary<string, SubmitUpload> uploads,
-            CancellationToken cancellationToken)
-        {
-            if (_submitThrows is not null)
-            {
-                throw _submitThrows;
-            }
-
-            SubmitCalls++;
-            LastUploads = uploads;
-            LastRequest = request;
-            if (_queuedTexts.Count > 0)
-            {
-                _currentJobText = _queuedTexts.Dequeue();
-            }
-
-            _items = request.Items.Select((item, index) => new JobItem
-            {
-                ItemId = $"it-{index}",
-                ClientItemKey = item.ClientItemKey,
-                Ordinal = item.Ordinal,
-                DisplayName = item.DisplayName,
-                State = ItemState.Queued,
-            }).ToArray();
-            return Task.FromResult(new JobRef
-            {
-                JobId = $"job-{SubmitCalls}",
-                Items = _items,
-            });
-        }
-
-        public override Task<JobUpdate> ObserveAsync(
-            string jobId,
-            int afterSequence,
-            CancellationToken cancellationToken)
-        {
-            ObservedAfterSequences.Add(afterSequence);
-            bool running = _neverTerminal || _runningUpdatesRemaining > 0;
-            if (_runningUpdatesRemaining > 0)
-            {
-                _runningUpdatesRemaining--;
-            }
-            JobState state = running ? JobState.Running : _terminalState;
-            ItemOutcome[] outcomes = running
-                ? Array.Empty<ItemOutcome>()
-                :
-                [
-                    new ItemOutcome
+      ObservedAfterSequences.Add(afterSequence);
+      bool running = _neverTerminal || _runningUpdatesRemaining > 0;
+      if (_runningUpdatesRemaining > 0)
+      {
+        _runningUpdatesRemaining--;
+      }
+      JobState state = running ? JobState.Running : _terminalState;
+      ItemOutcome[] outcomes = running
+          ? Array.Empty<ItemOutcome>()
+          :
+          [
+              new ItemOutcome
                     {
                         ItemId = _items[0].ItemId,
                         State = state switch
@@ -474,41 +498,41 @@ public sealed class RecognitionViewModelSupervisorTests
                             : null,
                         ErrorCode = state is JobState.Failed ? "BACKEND_UNAVAILABLE" : null,
                     },
-                ];
-            return Task.FromResult(new JobUpdate
-            {
-                Snapshot = new JobSnapshot
-                {
-                    JobId = jobId,
-                    Kind = JobKind.Recognition,
-                    Priority = JobPriority.Interactive,
-                    State = state,
-                    Items = _items,
-                    EventSequence = afterSequence + 1,
-                },
-                Events = Array.Empty<StageEvent>(),
-                Outcomes = outcomes,
-                ThroughSequence = afterSequence + 1,
-            });
-        }
-
-        public override Task<JobCommandResult> CommandAsync(
-            JobCommand command,
-            CancellationToken cancellationToken)
+          ];
+      return Task.FromResult(new JobUpdate
+      {
+        Snapshot = new JobSnapshot
         {
-            LastCommand = command;
-            return Task.FromResult(new JobCommandResult(
-                command.CommandId,
-                command.Kind,
-                CancelMode.Cooperative,
-                null));
-        }
-
-        public override Task<ResidencyStatus> GetResidencyAsync(CancellationToken cancellationToken)
-            => Task.FromResult(new ResidencyStatus());
-
-        public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken)
-            => Task.FromResult(new SettingsSnapshot());
+          JobId = jobId,
+          Kind = JobKind.Recognition,
+          Priority = JobPriority.Interactive,
+          State = state,
+          Items = _items,
+          EventSequence = afterSequence + 1,
+        },
+        Events = Array.Empty<StageEvent>(),
+        Outcomes = outcomes,
+        ThroughSequence = afterSequence + 1,
+      });
     }
+
+    public override Task<JobCommandResult> CommandAsync(
+        JobCommand command,
+        CancellationToken cancellationToken)
+    {
+      LastCommand = command;
+      return Task.FromResult(new JobCommandResult(
+          command.CommandId,
+          command.Kind,
+          CancelMode.Cooperative,
+          null));
+    }
+
+    public override Task<ResidencyStatus> GetResidencyAsync(CancellationToken cancellationToken)
+        => Task.FromResult(new ResidencyStatus());
+
+    public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken)
+        => Task.FromResult(new SettingsSnapshot());
+  }
 
 }

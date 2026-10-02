@@ -148,7 +148,7 @@ public sealed class WorkbenchResourceBroker : IDisposable
           entry.SourcePath,
           FileMode.Open,
           FileAccess.Read,
-          FileShare.Read,
+          FileShare.Read | FileShare.Delete,
           bufferSize: 64 * 1024,
           FileOptions.Asynchronous | FileOptions.SequentialScan);
         WorkbenchResourceResponse response = new(
