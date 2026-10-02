@@ -245,6 +245,25 @@ async function setCheckbox(page, name, checked) {
   await expect(checkbox).toBeChecked({ checked });
 }
 
+async function focusRecorder(app, input) {
+  // CDP input focus does not establish Windows foreground ownership.
+  const bounds = JSON.parse(await native('webview-bounds', {
+    AppPid: app.child.pid, Handle: app.main.Handle,
+  }));
+  const box = await input.boundingBox();
+  assert(box, 'Recorder has no visible bounds.');
+  const view = await app.page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+  const sx = (bounds.Right - bounds.Left) / view.width;
+  const sy = (bounds.Bottom - bounds.Top) / view.height;
+  assert(sx > 0 && sy > 0 && Math.abs(sx - sy) < 0.03,
+    'Owned WebView must have a uniform measured scale.');
+  await native('focus-fixture', {
+    FixturePid: app.child.pid, Handle: app.main.Handle,
+    X: Math.round(bounds.Left + (box.x + box.width / 2) * sx),
+    Y: Math.round(bounds.Top + (box.y + box.height / 2) * sy),
+  });
+}
+
 async function configure(app, evidence) {
   const { page } = app;
   await openSettings(page);
@@ -268,6 +287,7 @@ async function configure(app, evidence) {
   const editInput = row.getByRole('textbox', { name: '截图编辑新快捷键' });
   await editInput.click();
   await row.getByRole('status').filter({ hasText: '请按下新的组合键' }).waitFor();
+  await focusRecorder(app, editInput);
   // FixturePid is the existing hotkey command's foreground-owner guard; here it owns the app.
   await native('hotkey', { FixturePid: app.child.pid });
   await expect(editInput).toHaveValue(hotkey);
@@ -280,13 +300,23 @@ async function configure(app, evidence) {
   await expect(editInput).toHaveValue('');
   await editInput.click();
   await row.getByRole('status').filter({ hasText: '请按下新的组合键' }).waitFor();
+  await focusRecorder(app, editInput);
   await native('hotkey', { FixturePid: app.child.pid });
   await expect(editInput).toHaveValue(hotkey);
   assert((await windows(app.child.pid)).some(item =>
     item.Handle === app.main.Handle && item.Visible),
   'Recording an already-registered key unexpectedly hid the main window.');
   evidence.stage = 'edit-rerecording-escape';
+  evidence.beforeEscape = JSON.parse(await native('probe', {
+    AppPid: app.child.pid, FixturePid: app.child.pid, X: 0, Y: 0,
+  }));
+  evidence.webviewBeforeEscape = await page.evaluate(() => ({
+    focused: document.hasFocus(), visibility: document.visibilityState,
+  }));
   await native('escape', { AppPid: app.child.pid });
+  evidence.afterEscape = JSON.parse(await native('probe', {
+    AppPid: app.child.pid, FixturePid: app.child.pid, X: 0, Y: 0,
+  }));
   await expect(editInput).toHaveValue('');
   await row.getByText(`当前生效：${hotkey}`).waitFor();
 
@@ -295,6 +325,7 @@ async function configure(app, evidence) {
   const recognizeInput = recognizeRow.getByRole('textbox', { name: '快捷截图识别新快捷键' });
   await recognizeInput.click();
   await recognizeRow.getByRole('status').filter({ hasText: '请按下新的组合键' }).waitFor();
+  await focusRecorder(app, recognizeInput);
   await native('recognize-hotkey', { ForegroundPid: app.child.pid });
   await expect(recognizeInput).toHaveValue(recognizeHotkey);
   await recognizeRow.getByRole('button', { name: '应用 快捷截图识别' }).click();
