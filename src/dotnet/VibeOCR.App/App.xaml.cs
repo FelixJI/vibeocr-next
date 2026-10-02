@@ -544,6 +544,7 @@ public sealed partial class App : Application
             int selected = owner.TrackContextMenu(menu, cursor.X, cursor.Y);
             if (selected is 0)
             {
+                _trayIcon?.RestoreFocusAfterMenu();
                 return;
             }
 

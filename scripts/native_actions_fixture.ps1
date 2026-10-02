@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'webview-bounds', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection', 'cursor', 'magnifier', 'minimize', 'restore', 'tray-state', 'tray-click', 'taskbar-created', 'down', 'tray-fixture', 'tray-keyboard', 'tray-expose', 'tray-left-click', 'tray-double-click', 'tray-gone', 'tray-menu-quit', 'tray-menu-open')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'webview-bounds', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection', 'cursor', 'magnifier', 'minimize', 'restore', 'tray-state', 'tray-click', 'taskbar-created', 'down', 'tray-fixture', 'tray-keyboard', 'tray-keyboard-resume', 'tray-expose', 'tray-left-click', 'tray-double-click', 'tray-gone', 'tray-menu-quit', 'tray-menu-open')][string]$Action,
     [int]$AppPid = 0,
     [int]$FixturePid = 0,
     [int]$ForegroundPid = 0,
@@ -590,6 +590,15 @@ try {
             $target.Element.SetFocus()
             [NativeActionsFixture]::NotificationMenuKey()
             @{ IconRect = $target.Rect; Keyboard = $true } | ConvertTo-Json -Compress -Depth 3
+        }
+        'tray-keyboard-resume' {
+            $target = Get-OwnedTrayTarget
+            if ($target.IsChevron -or -not $target.Element.Current.HasKeyboardFocus) {
+                throw 'Menu cancellation did not return keyboard focus to the owned tray icon.'
+            }
+            # Deliberately do not call SetFocus: verify Esc preserved continuous keyboard use.
+            [NativeActionsFixture]::NotificationMenuKey()
+            @{ IconRect = $target.Rect; Keyboard = $true; Refocused = $false } | ConvertTo-Json -Compress -Depth 3
         }
         { $_ -in @('tray-click', 'tray-left-click', 'tray-double-click') } {
             $target = Get-OwnedTrayTarget

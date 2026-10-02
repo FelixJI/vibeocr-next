@@ -7,6 +7,8 @@ public interface ITrayIconNativeMethods
 {
     bool Add(Guid id, nint windowHandle, uint callbackMessage, string tooltip);
     bool Delete(Guid id, nint windowHandle);
+    nint GetForeground();
+    bool SetFocus(Guid id, nint windowHandle);
 }
 
 /// <summary>
@@ -101,6 +103,17 @@ public sealed class TrayIconService : IDisposable
         }
     }
 
+    public void RestoreFocusAfterMenu()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        // Esc leaves our hidden owner foreground; an outside click must keep its new focus.
+        if (_visible && _native.GetForeground() == _windowHandle &&
+            !_native.SetFocus(_id, _windowHandle))
+        {
+            throw new Win32Exception("Failed to return focus to the notification area.");
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed)
@@ -163,6 +176,18 @@ public sealed class TrayIconService : IDisposable
             data.Flags = GuidFlag;
             return ShellNotifyIcon(DeleteMessage, ref data);
         }
+
+        public nint GetForeground() => GetForegroundWindow();
+
+        public bool SetFocus(Guid id, nint windowHandle)
+        {
+            NotifyIconData data = CreateData(id, windowHandle);
+            data.Flags = GuidFlag;
+            return ShellNotifyIcon(3, ref data); // NIM_SETFOCUS
+        }
+
+        [DllImport("user32.dll")]
+        private static extern nint GetForegroundWindow();
 
         public void Dispose()
         {

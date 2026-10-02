@@ -156,12 +156,25 @@ async function main() {
         else await focusHelper();
         const after = await waitFor(async () => {
           const snapshot = await state();
-          return snapshot.Menus.length === 0 && snapshot;
+          return snapshot.Menus.length === 0 && snapshot.ForegroundHandle !== snapshot.Owner.Handle && snapshot;
         }, `${mode}: ${cancel} did not close the owned menu`);
         attempt.after = after;
         assert.equal(after.Main.Visible, before.Main.Visible);
         assert.equal(after.Main.Iconic, before.Main.Iconic);
         assert.notEqual(after.ForegroundHandle, mainHandle, 'Menu cancellation brought back the main window.');
+        if (cancel === 'outside') assert.equal(after.ForegroundHandle, helper.handle);
+        if (trigger === 'keyboard' && cancel === 'escape') {
+          attempt.resumeInput = JSON.parse(await native('tray-keyboard-resume', icon));
+          attempt.resumed = await waitFor(async () => {
+            const snapshot = await state();
+            return snapshot.Menus.length === 1 && snapshot;
+          }, `${mode}: keyboard menu did not reopen without refocusing`);
+          await native('escape', { AppPid: app.pid });
+          attempt.resumedAfter = await waitFor(async () => {
+            const snapshot = await state();
+            return snapshot.Menus.length === 0 && snapshot.ForegroundHandle !== snapshot.Owner.Handle && snapshot;
+          }, `${mode}: repeated Esc did not restore notification focus`);
+        }
       }
       record.explicitOpen = await openMenu('mouse');
       record.explicitOpen.click = JSON.parse(await native('tray-menu-open', { AppPid: app.pid, Handle: record.explicitOpen.during.Menus[0].Handle }));

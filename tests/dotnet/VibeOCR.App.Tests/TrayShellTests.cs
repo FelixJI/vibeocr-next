@@ -88,6 +88,9 @@ public sealed class TrayShellTests
 
         public List<nint> AddedWindows { get; } = [];
 
+        public nint GetForeground() => 0;
+        public bool SetFocus(Guid id, nint windowHandle) => true;
+
         public bool Add(Guid id, nint windowHandle, uint callbackMessage, string tooltip)
         {
             AddCalls++;

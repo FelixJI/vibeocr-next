@@ -191,6 +191,24 @@ public sealed class TrayIconReattachTests
         Assert.All(native.AddedTooltips, tooltip => Assert.Equal("VibeOCR", tooltip));
     }
 
+    [Theory]
+    [InlineData(0x1111, true)]
+    [InlineData(0x2222, false)]
+    public void MenuCancellationReturnsFocusOnlyWhileTrayOwnerIsForeground(int foreground, bool expected)
+    {
+        var native = new FakeTrayNative { Foreground = foreground };
+        using var tray = new TrayIconService(native);
+        tray.Show(0x1111, 0x8001, "VibeOCR");
+
+        tray.RestoreFocusAfterMenu();
+
+        Assert.Equal(expected ? 1 : 0, native.FocusCalls.Count);
+        if (expected)
+        {
+            Assert.Equal((native.AddedIds.Single(), (nint)0x1111), native.FocusCalls.Single());
+        }
+    }
+
     [Fact]
     public void ReattachRequiresVisibleIcon()
     {
@@ -224,6 +242,15 @@ public sealed class TrayIconReattachTests
         public List<uint> AddedCallbacks { get; } = [];
 
         public List<string> AddedTooltips { get; } = [];
+
+        public nint Foreground { get; set; }
+        public List<(Guid Id, nint Window)> FocusCalls { get; } = [];
+        public nint GetForeground() => Foreground;
+        public bool SetFocus(Guid id, nint windowHandle)
+        {
+            FocusCalls.Add((id, windowHandle));
+            return true;
+        }
 
         public bool Add(Guid id, nint windowHandle, uint callbackMessage, string tooltip)
         {
