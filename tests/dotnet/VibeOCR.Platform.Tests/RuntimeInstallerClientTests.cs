@@ -1111,6 +1111,17 @@ public sealed class RuntimeInstallerClientTests
     }
 
     [Fact]
+    public async Task CommandRunnerHonorsCancellationBeforeReadingInstallerBindings()
+    {
+        var runner = new RuntimeInstallerCommandRunner();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => runner.RunAsync(new ProcessStartInfo(), cancellation.Token));
+    }
+
+    [Fact]
     public async Task CommandRunnerRejectsTamperedBoundInstallerBeforeExecution()
     {
         string root = Path.Combine(
