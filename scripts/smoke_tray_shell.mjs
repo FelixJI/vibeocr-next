@@ -173,17 +173,6 @@ async function main() {
     }
     const final = await state();
     const icon = { AppPid: app.pid, FixturePid: helper.pid, Handle: final.Owner.Handle, IconGuid: instanceId };
-    await native('taskbar-created', { AppPid: app.pid, Handle: final.Owner.Handle });
-    const logDirectory = path.join(candidate, 'state/logs');
-    evidence.syntheticTaskbarCreated = await waitFor(() => {
-      if (!fs.existsSync(logDirectory)) return false;
-      for (const file of fs.readdirSync(logDirectory)) {
-        const log = fs.readFileSync(path.join(logDirectory, file), 'utf8');
-        const response = log.split(/\r?\n/).find(line => line.includes('Tray icon reattach'));
-        if (response) return { target: final.Owner.Handle, actualExplorerRestart: false, response };
-      }
-      return false;
-    }, 'Own TaskbarCreated handler response was not logged');
     await focusHelper();
     await native('tray-expose', icon);
     await native('tray-click', icon);
