@@ -152,21 +152,12 @@ async function waitExit(child, timeoutMs) {
 
 async function forceStop(child) {
   if (!child?.pid || child.exitCode !== null) return;
-  try {
-    await execFileAsync('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
-      timeout: 10000, windowsHide: true,
-    });
-  } catch (error) {
-    if (child.exitCode === null) {
-      // Stop our app PID, but do not claim its child process tree was cleaned.
-      child.kill();
-      await waitExit(child, 5000);
-      throw new Error(`Owned process tree cleanup was not confirmed for ${child.pid}: ${error.message}`);
-    }
-  }
+  // ChildProcess keeps the Windows process handle. A fresh PID/PPID tree can
+  // belong to another instance after exit; terminate only this owned handle.
+  // The app's Supervisor descendants remain owned by its kill-on-close Job.
+  child.kill();
   assert(await waitExit(child, 5000), `Owned process ${child.pid} survived cleanup.`);
 }
-
 async function stopOwned(child, closeAction, options) {
   if (!child || child.exitCode !== null) return;
   try { await native(closeAction, options); } catch { /* bounded PID cleanup below */ }
@@ -966,7 +957,14 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(`Native actions E2E failed: ${error.name}: ${error.message}`);
-  process.exitCode = 1;
-});
+export {
+  launchApp, openSettings, setCheckbox, native, windows, waitForWindows,
+  startFixture, stopOwned, delay,
+};
+
+if (path.resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(`Native actions E2E failed: ${error.name}: ${error.message}`);
+    process.exitCode = 1;
+  });
+}
