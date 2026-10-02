@@ -1261,6 +1261,70 @@ def _extract_runtime_pack(
     return destination
 
 
+def probe_nvidia_driver() -> dict[str, str | None]:
+    """只读探测 NVIDIA 驱动与 CUDA 12.x 兼容下限，供两处消费。
+
+    - ``_installation_blockers``：安装预检 fail-closed 真值（非 ok 即阻断）；
+    - managed environments ``list()`` 的 ``hardware`` 投影：前台据此如实
+      禁用不支持的 CUDA 配方，CPU 配方始终可选。
+
+    status 语义：``ok``＝命令可用且全部驱动版本≥下限；``unsupported``＝
+    命令明确无驱动/驱动过旧（``reason_code`` 给出原因）；``unknown``＝探测
+    超时，不得当作已支持或已否定。探测只在 Runtime 侧进行一次，C#/TS
+    只消费投影，不自行检测硬件。
+    """
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=driver_version",
+                "--format=csv,noheader",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "unknown",
+            "reason_code": None,
+            "driver_version": None,
+        }
+    except OSError:
+        # nvidia-smi 不存在/无法执行：命令层面明确没有可用 NVIDIA 驱动。
+        return {
+            "status": "unsupported",
+            "reason_code": "nvidia_driver_unavailable",
+            "driver_version": None,
+        }
+    # CUDA 12.x Windows minor compatibility has a 528.33 floor:
+    # docs.nvidia.com/cuda/archive/12.6.0/cuda-toolkit-release-notes/
+    versions = [
+        tuple(int(part) for part in line.strip().split("."))
+        for line in result.stdout.splitlines()
+        if re.fullmatch(r"[0-9]+\.[0-9]+", line.strip())
+    ]
+    if result.returncode != 0 or not versions:
+        return {
+            "status": "unsupported",
+            "reason_code": "nvidia_driver_unavailable",
+            "driver_version": None,
+        }
+    driver_version = next(
+        line.strip()
+        for line in result.stdout.splitlines()
+        if re.fullmatch(r"[0-9]+\.[0-9]+", line.strip())
+    )
+    if any(version < (528, 33) for version in versions):
+        return {
+            "status": "unsupported",
+            "reason_code": "nvidia_driver_incompatible",
+            "driver_version": driver_version,
+        }
+    return {"status": "ok", "reason_code": None, "driver_version": driver_version}
+
+
 class RuntimeInstaller:
     def __init__(
         self,
@@ -1795,6 +1859,9 @@ class RuntimeInstaller:
             "UV_CACHE_DIR": str(state / "cache" / "uv"),
             "HF_HOME": str(state / "cache" / "huggingface"),
             "MODELSCOPE_CACHE": str(state / "cache" / "modelscope"),
+            "MODELSCOPE_HOME": str(state / "cache" / "modelscope-home"),
+            "MODELSCOPE_CREDENTIALS_PATH": str(state / "cache" / "modelscope-home"),
+            "VIBEOCR_SHARED_MODEL_CACHE": str(state / "model-cache"),
             "PADDLE_PDX_CACHE_HOME": str(state / "cache" / "paddlex"),
             "MINERU_HOME": str(state / "mineru4"),
             "TEMP": str(state / "temp"),
@@ -1873,38 +1940,13 @@ class RuntimeInstaller:
                 and self._desired_scope_ids()
                 != self.manifest.profiles[BASE_PROFILE].scopes[0].component_ids
             ):
-                try:
-                    result = subprocess.run(
-                        [
-                            "nvidia-smi",
-                            "--query-gpu=driver_version",
-                            "--format=csv,noheader",
-                        ],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                        check=False,
-                    )
-                    # CUDA 12.x Windows minor compatibility has a 528.33 floor:
-                    # docs.nvidia.com/cuda/archive/12.6.0/cuda-toolkit-release-notes/
-                    versions = [
-                        tuple(int(part) for part in line.strip().split("."))
-                        for line in result.stdout.splitlines()
-                        if re.fullmatch(r"[0-9]+\.[0-9]+", line.strip())
-                    ]
-                    driver_available = result.returncode == 0 and bool(versions)
-                    driver_compatible = driver_available and all(
-                        version >= (528, 33) for version in versions
-                    )
-                except (OSError, subprocess.TimeoutExpired):
-                    driver_available = False
-                    driver_compatible = False
-                if not driver_compatible:
+                probe = probe_nvidia_driver()
+                if probe["status"] != "ok":
+                    # 探测超时（unknown）与命令失败同样按 fail-closed 处理，
+                    # 与抽 helper 前的 blocker 语义逐分支等价。
                     blockers.append(
                         {
-                            "code": "nvidia_driver_incompatible"
-                            if driver_available
-                            else "nvidia_driver_unavailable",
+                            "code": probe["reason_code"] or "nvidia_driver_unavailable",
                             "next_action": "install_supported_driver",
                         }
                     )
@@ -2258,6 +2300,8 @@ class RuntimeInstaller:
             "UV_CACHE_DIR",
             "HF_HOME",
             "MODELSCOPE_CACHE",
+            "MODELSCOPE_HOME",
+            "VIBEOCR_SHARED_MODEL_CACHE",
             "PADDLE_PDX_CACHE_HOME",
             "TEMP",
             "TMP",
@@ -2435,6 +2479,7 @@ def _request(value: object) -> dict[str, Any]:
             "create": {"name"},
             "set_sources": {"package_source_id", "model_source_id"},
             "preview_install": {"environment_id", "recipe"},
+            "find_compatible": {"recipe"},
             "install": {"plan_id", "environment_id", "recipe", "source_ids"},
             "prepare_switch": {"environment_id"},
             "commit_switch": {"prepared"},
@@ -2889,6 +2934,8 @@ def main(argv: list[str] | None = None) -> int:
                     if request.get("source_ids") is not None
                     else None,
                 )
+            elif action == "find_compatible":
+                payload = manager.find_compatible(request["recipe"])
             elif action == "prepare_switch":
                 payload = manager.prepare_switch(request["environment_id"])
             elif action == "commit_switch":

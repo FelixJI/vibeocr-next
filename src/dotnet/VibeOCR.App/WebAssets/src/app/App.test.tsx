@@ -1,4 +1,4 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -183,10 +183,10 @@ describe("AppShell", () => {
 
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
 
-    await user.click(screen.getByRole("link", { name: "二维码" }));
+    await user.click(screen.getByRole("link", { name: "二维码与条码" }));
     expect(actions.navigate).toHaveBeenCalledWith("qrcode");
     expect(
-      await screen.findByRole("heading", { name: "二维码工作台" }),
+      await screen.findByRole("heading", { name: "二维码与条码" }),
     ).toBeVisible();
 
     await user.click(screen.getByRole("link", { name: "批量识别" }));
@@ -226,7 +226,7 @@ describe("AppShell", () => {
     );
     const push = vi.spyOn(window.history, "pushState");
     try {
-      await user.click(screen.getByRole("link", { name: "二维码" }));
+      await user.click(screen.getByRole("link", { name: "二维码与条码" }));
       expect(actions.navigate).toHaveBeenCalledWith("qrcode");
       expect(push).not.toHaveBeenCalled();
       expect(window.location.hash).toBe("#/recognition");
@@ -237,7 +237,7 @@ describe("AppShell", () => {
         />,
       );
       expect(
-        await screen.findByRole("heading", { name: "二维码工作台" }),
+        await screen.findByRole("heading", { name: "二维码与条码" }),
       ).toBeVisible();
     } finally {
       push.mockRestore();
@@ -298,12 +298,88 @@ describe("AppShell", () => {
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
 
     await user.type(screen.getByLabelText("输入内容"), "中文识别结果");
-    await user.click(screen.getByRole("button", { name: "生成二维码" }));
+    await user.click(screen.getByRole("button", { name: "生成图片" }));
 
     expect(actions.run).toHaveBeenCalledWith({
       type: "qrcode.generate",
       text: "中文识别结果",
+      format: "qrcode",
+      captionMode: "off",
+      captionText: "",
     });
+    unmount();
+  });
+
+  it("decodes the shared preview once automatically and allows manual retry and image copy", async () => {
+    window.location.hash = "#/qrcode";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn().mockResolvedValue(true),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 1,
+      route: "qrcode",
+      theme: "light",
+      capabilities: [
+        "qrcode.generate",
+        "qrcode.decode",
+        "qrcode.copyImage",
+        "qrcode.save",
+      ],
+      features: {
+        qrcode: {
+          isBusy: false,
+          previewRevision: 1,
+          needsPreviewDecode: true,
+          generatedResource: {
+            url: "https://app.vibeocr/__resource/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            mediaType: "image/png",
+            byteLength: 10,
+          },
+        },
+      },
+      runtimeLabel: "就绪",
+    };
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    await user.selectOptions(screen.getByLabelText("生成格式"), "ean13");
+    await user.selectOptions(screen.getByLabelText("底部文字"), "custom");
+    await user.type(screen.getByLabelText("独立说明"), "标签");
+    await user.type(screen.getByLabelText("输入内容"), "590123412345");
+    await user.click(screen.getByRole("button", { name: "生成图片" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "qrcode.generate",
+      text: "590123412345",
+      format: "ean13",
+      captionMode: "custom",
+      captionText: "标签",
+    });
+    await user.click(screen.getByRole("tab", { name: "识别" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "qrcode.decodeCurrent",
+      force: false,
+    });
+    await user.click(screen.getByRole("tab", { name: "生成" }));
+    await user.click(screen.getByRole("tab", { name: "识别" }));
+    expect(
+      vi
+        .mocked(actions.run)
+        .mock.calls.filter(
+          ([action]) =>
+            action.type === "qrcode.decodeCurrent" && action.force === false,
+        ),
+    ).toHaveLength(1);
+    await user.click(
+      screen.getByRole("button", { name: "识别当前预览 / 重新识别" }),
+    );
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "qrcode.decodeCurrent",
+      force: true,
+    });
+    await user.click(screen.getByRole("button", { name: "复制图片" }));
+    expect(actions.run).toHaveBeenCalledWith({ type: "qrcode.copyImage" });
     unmount();
   });
 
@@ -758,9 +834,9 @@ describe("AppShell", () => {
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
 
     expect(screen.queryByLabelText("默认模式")).not.toBeInTheDocument();
-    expect(screen.getByText("二维码与条形码")).toBeVisible();
-    expect(screen.getByText("随包可用")).toBeVisible();
-    expect(screen.getByText(/从二维码工具直接使用/)).toBeVisible();
+    // 随包基础能力展示已移除（纯视觉）：二维码能力不受设置页影响。
+    expect(screen.queryByText("二维码与条形码")).not.toBeInTheDocument();
+    expect(screen.queryByText("随包可用")).not.toBeInTheDocument();
     expect(screen.getByText(/识别模式在对应任务中选择/)).toBeVisible();
 
     const packageSource = screen.getByLabelText("Python 包下载源");
@@ -1143,7 +1219,8 @@ describe("AppShell", () => {
 
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
 
-    expect(screen.getByText("当前运行环境不可用")).toBeVisible();
+    // 随包能力展示已移除（纯视觉）：二维码能力不受设置页影响。
+    expect(screen.queryByText("当前运行环境不可用")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "预览安装范围" }));
     expect(confirmSpy).not.toHaveBeenCalled();
     expect(actions.run).not.toHaveBeenCalledWith(
@@ -1944,6 +2021,16 @@ describe("AppShell", () => {
             },
           ],
           activeEnvironmentId: null,
+          environmentRecipes: [
+            {
+              id: "rapidocr-cpu",
+              displayName: "RapidOCR · CPU",
+              configuredRecognitionTypes: ["text"],
+              accelerator: "cpu",
+              targetDevice: "cpu",
+            },
+          ],
+          environmentHardware: { nvidiaDriverStatus: "unknown" },
           environmentSources: [
             {
               id: "tuna-pypi",
@@ -1975,6 +2062,8 @@ describe("AppShell", () => {
       },
     };
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    // 高级区默认折叠：先展开再操作原编辑器全部路径。
+    await user.click(screen.getByText("高级：环境与依赖管理"));
     expect(screen.getByText(/Python ready · 依赖 empty/)).toBeVisible();
     expect(screen.getByText(/上次依赖安装未完成/)).toHaveTextContent(
       "下载源连接失败。",
@@ -1992,7 +2081,10 @@ describe("AppShell", () => {
         /计划：rapidocr-cpu · 目标文档（环境修订 1）· 请求源：跟随配置；生效源：TUNA PyPI 镜像/,
       ),
     ).toBeVisible();
-    await user.type(screen.getByLabelText("新环境名称"), "资料");
+    await user.type(
+      screen.getByLabelText("新环境名称（留空自动命名）"),
+      "资料",
+    );
     await user.click(screen.getByRole("button", { name: "创建空环境" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.createEnvironment",
@@ -2012,6 +2104,686 @@ describe("AppShell", () => {
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.cancelEnvironmentInstall",
     });
+    unmount();
+  });
+  it("recommends catalog recipes with honest hardware gating and read-only reuse lookup", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn().mockResolvedValue(true),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const recipes = [
+      {
+        id: "rapidocr-cpu",
+        displayName: "RapidOCR · CPU",
+        configuredRecognitionTypes: ["text"],
+        accelerator: "cpu",
+        targetDevice: "cpu",
+      },
+      {
+        id: "rapidocr+mineru-cpu",
+        displayName: "RapidOCR + MinerU · CPU",
+        configuredRecognitionTypes: ["text", "document"],
+        accelerator: "cpu",
+        targetDevice: "cpu",
+      },
+      {
+        id: "rapidocr+mineru-cuda",
+        displayName: "RapidOCR + MinerU · NVIDIA CUDA",
+        configuredRecognitionTypes: ["text", "document"],
+        accelerator: "nvidia_cuda",
+        targetDevice: "cuda",
+      },
+    ];
+    const settingsBase = {
+      environments: [
+        {
+          id: "env-1",
+          name: "文档环境",
+          revision: 3,
+          kind: "venv",
+          status: "installed",
+          pythonState: "ready",
+          dependencyState: "installed",
+          engineState: "ready",
+          modelState: "ready",
+          serviceState: "not_started",
+          configuredRecognitionTypes: ["text"],
+          targetDevice: "cpu",
+        },
+      ],
+      activeEnvironmentId: null,
+      environmentRecipes: recipes,
+      // 真正不支持时明确禁用并给出原因（AC3）：驱动过旧。
+      environmentHardware: {
+        nvidiaDriverStatus: "unsupported",
+        nvidiaDriverReason: "nvidia_driver_incompatible",
+        nvidiaDriverVersion: "527.00",
+      },
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 10,
+      route: "settings",
+      theme: "light",
+      capabilities: ["runtime.environments"],
+      runtimeLabel: "运行环境",
+      features: { settings: settingsBase },
+    };
+    const { unmount, rerender } = render(
+      <App actions={actions} viewState={viewState} />,
+    );
+    // 选择即查询：默认用途/设备只读触发一次兼容查询，不创建不安装。
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenCalledWith({
+        type: "settings.findCompatibleEnvironment",
+        recipe: "rapidocr-cpu",
+      }),
+    );
+    expect(screen.getByText(/GPU 状态（Runtime 探测）：不支持/)).toBeVisible();
+    // 目录分组来自 Runtime 投影，无前端臆造组合。
+    expect(
+      screen.getByText(/目标配置：RapidOCR · CPU（文字识别，设备 cpu/),
+    ).toBeVisible();
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 11,
+          features: {
+            settings: {
+              ...settingsBase,
+              environmentCompatibility: {
+                recipe: "rapidocr-cpu",
+                selectedEnvironmentId: "env-1",
+                selectedEnvironmentRevision: 3,
+                selectionReason: "deterministic_id_order",
+              },
+            },
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.getByText(/可直接复用环境「文档环境」（修订 3，按稳定顺序选中）/),
+    ).toBeVisible();
+    // AC8：切换语义如实说明（重新启动并验证；运行中任务时被拒绝）。
+    expect(
+      screen.getAllByText(
+        /切换会重新启动并验证识别服务；有运行中任务时切换会被拒绝/,
+      ).length,
+    ).toBeGreaterThan(0);
+    await user.click(
+      screen.getByRole("button", { name: "切换到此环境并启动验证" }),
+    );
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.switchEnvironment",
+      environmentId: "env-1",
+    });
+    // active 且已验证时不伪重装：只说明现状，不再提供切换/准备按钮。
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 12,
+          features: {
+            settings: {
+              ...settingsBase,
+              activeEnvironmentId: "env-1",
+              environments: [
+                {
+                  ...settingsBase.environments[0],
+                  serviceState: "ready",
+                },
+              ],
+              environmentCompatibility: {
+                recipe: "rapidocr-cpu",
+                selectedEnvironmentId: "env-1",
+                selectedEnvironmentRevision: 3,
+                selectionReason: "active_environment",
+              },
+            },
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.getByText(/已是当前环境并通过启动验证，无需重装/),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "切换到此环境并启动验证" }),
+    ).not.toBeInTheDocument();
+    // 切换用途：旧选择失效 + 新配方的只读查询。
+    await user.selectOptions(
+      screen.getByLabelText("识别用途"),
+      "document|text",
+    );
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.invalidateEnvironmentPlan",
+    });
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenCalledWith({
+        type: "settings.findCompatibleEnvironment",
+        recipe: "rapidocr+mineru-cpu",
+      }),
+    );
+    // 真正不支持的 GPU 配方明确禁用并给出原因，不发起查询。
+    await user.selectOptions(screen.getByLabelText("目标设备"), "nvidia_cuda");
+    expect(
+      screen.getByText(
+        /不支持：NVIDIA 驱动 527\.00 低于 CUDA 12\.x 下限（需 ≥ 528\.33）；该配置当前不可选。/,
+      ),
+    ).toBeVisible();
+    expect(actions.run).not.toHaveBeenCalledWith({
+      type: "settings.findCompatibleEnvironment",
+      recipe: "rapidocr+mineru-cuda",
+    });
+    unmount();
+  });
+  it("prepares an unavailable recipe via auto-named create and a real preview without silent install", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn().mockResolvedValue(true),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const settingsBase = {
+      environments: [],
+      activeEnvironmentId: null,
+      environmentRecipes: [
+        {
+          id: "rapidocr-cpu",
+          displayName: "RapidOCR · CPU",
+          configuredRecognitionTypes: ["text"],
+          accelerator: "cpu",
+          targetDevice: "cpu",
+        },
+        {
+          id: "mineru-cpu",
+          displayName: "MinerU · CPU",
+          configuredRecognitionTypes: ["document"],
+          accelerator: "cpu",
+          targetDevice: "cpu",
+        },
+      ],
+      environmentHardware: { nvidiaDriverStatus: "unknown" },
+      environmentSources: [
+        {
+          id: "tuna-pypi",
+          kind: "package_index",
+          displayName: "TUNA PyPI 镜像",
+          endpoint: "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/",
+        },
+      ],
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 20,
+      route: "settings",
+      theme: "light",
+      capabilities: ["runtime.environments"],
+      runtimeLabel: "运行环境",
+      features: { settings: settingsBase },
+    };
+    const { unmount, rerender } = render(
+      <App actions={actions} viewState={viewState} />,
+    );
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenCalledWith({
+        type: "settings.findCompatibleEnvironment",
+        recipe: "rapidocr-cpu",
+      }),
+    );
+    // 查询无命中：只读结果如实呈现“没有可直接复用”，准备按钮可用。
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 21,
+          features: {
+            settings: {
+              ...settingsBase,
+              environmentCompatibility: {
+                recipe: "rapidocr-cpu",
+                selectedEnvironmentId: null,
+                selectedEnvironmentRevision: null,
+                selectionReason: null,
+              },
+            },
+          },
+        }}
+      />,
+    );
+    expect(screen.getByText(/没有可直接复用的已安装环境/)).toBeVisible();
+    expect(
+      screen.getByText(/将自动创建空环境「RapidOCR · CPU」并预览依赖/),
+    ).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "准备此配置" }));
+    // 自动命名沿目录展示名；创建成功后对同一环境真实预览（跟随配置）。
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.createEnvironment",
+      name: "RapidOCR · CPU",
+    });
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 22,
+          features: {
+            settings: {
+              ...settingsBase,
+              environments: [
+                {
+                  id: "env-new",
+                  name: "RapidOCR · CPU",
+                  revision: 1,
+                  kind: "venv",
+                  status: "empty",
+                  pythonState: "ready",
+                  dependencyState: "empty",
+                  engineState: "unverified",
+                  modelState: "not_checked",
+                  serviceState: "not_started",
+                  configuredRecognitionTypes: [],
+                },
+              ],
+              environmentCompatibility: {
+                recipe: "rapidocr-cpu",
+                selectedEnvironmentId: null,
+                selectedEnvironmentRevision: null,
+                selectionReason: null,
+              },
+            },
+          },
+        }}
+      />,
+    );
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenCalledWith({
+        type: "settings.previewEnvironmentInstall",
+        environmentId: "env-new",
+        recipe: "rapidocr-cpu",
+      }),
+    );
+    // 计划回显在推荐区：新增依赖如实列出，由用户确认安装。
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 23,
+          features: {
+            settings: {
+              ...settingsBase,
+              environments: [
+                {
+                  id: "env-new",
+                  name: "RapidOCR · CPU",
+                  revision: 1,
+                  kind: "venv",
+                  status: "empty",
+                  pythonState: "ready",
+                  dependencyState: "empty",
+                  engineState: "unverified",
+                  modelState: "not_checked",
+                  serviceState: "not_started",
+                  configuredRecognitionTypes: [],
+                },
+              ],
+              environmentCompatibility: {
+                recipe: "rapidocr-cpu",
+                selectedEnvironmentId: null,
+                selectedEnvironmentRevision: null,
+                selectionReason: null,
+              },
+              environmentPlan: {
+                planId: "p-9",
+                environmentId: "env-new",
+                environmentRevision: 1,
+                recipe: "rapidocr-cpu",
+                requestedRecipe: "rapidocr-cpu",
+                sourceIds: ["tuna-pypi"],
+                requestedSourceIds: null,
+                dependencies: ["rapidocr==3.9.2"],
+              },
+            },
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.getByText(
+        /计划：rapidocr-cpu · 目标RapidOCR · CPU（环境修订 1）· 请求源：跟随配置；生效源：TUNA PyPI 镜像/,
+      ),
+    ).toBeVisible();
+    // AC8：安装只写入目标环境、不停止当前识别服务（活动保护以 Runtime 为准）。
+    expect(
+      screen.getByText(/依赖安装只写入此目标环境，不会停止当前识别服务/),
+    ).toBeVisible();
+    // 同一待准备未确认前不再提供重复 create：指向既有高级确认。
+    expect(
+      screen.queryByRole("button", { name: "准备此配置" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/请在下方“高级：环境与依赖”核对锁定依赖并确认安装/),
+    ).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "确认安装依赖" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.confirmEnvironmentInstall",
+      planId: "p-9",
+    });
+    // 选择失效后仍可新建：切到另一用途后重新可以准备（不重复旧待准备）。
+    await user.selectOptions(screen.getByLabelText("识别用途"), "document");
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 24,
+          features: {
+            settings: {
+              ...settingsBase,
+              environments: [
+                {
+                  id: "env-new",
+                  name: "RapidOCR · CPU",
+                  revision: 1,
+                  kind: "venv",
+                  status: "empty",
+                  pythonState: "ready",
+                  dependencyState: "empty",
+                  engineState: "unverified",
+                  modelState: "not_checked",
+                  serviceState: "not_started",
+                  configuredRecognitionTypes: [],
+                },
+              ],
+              environmentCompatibility: {
+                recipe: "mineru-cpu",
+                selectedEnvironmentId: null,
+                selectedEnvironmentRevision: null,
+                selectionReason: null,
+              },
+            },
+          },
+        }}
+      />,
+    );
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenCalledWith({
+        type: "settings.findCompatibleEnvironment",
+        recipe: "mineru-cpu",
+      }),
+    );
+    expect(
+      screen.getByRole("button", { name: "准备此配置" }),
+    ).toBeInTheDocument();
+    unmount();
+  });
+  it("keeps compatibility lookup single-flight with explicit retry and no stale overwrite", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn().mockResolvedValue(true),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const settingsBase = {
+      environments: [
+        {
+          id: "env-1",
+          name: "文档环境",
+          revision: 3,
+          kind: "venv",
+          status: "installed",
+          pythonState: "ready",
+          dependencyState: "installed",
+          engineState: "ready",
+          modelState: "ready",
+          serviceState: "not_started",
+          configuredRecognitionTypes: ["text"],
+          targetDevice: "cpu",
+        },
+      ],
+      activeEnvironmentId: null,
+      environmentRecipes: [
+        {
+          id: "rapidocr-cpu",
+          displayName: "RapidOCR · CPU",
+          configuredRecognitionTypes: ["text"],
+          accelerator: "cpu",
+          targetDevice: "cpu",
+        },
+        {
+          id: "mineru-cpu",
+          displayName: "MinerU · CPU",
+          configuredRecognitionTypes: ["document"],
+          accelerator: "cpu",
+          targetDevice: "cpu",
+        },
+      ],
+      environmentHardware: { nvidiaDriverStatus: "unknown" },
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 30,
+      route: "settings",
+      theme: "light",
+      capabilities: ["runtime.environments"],
+      runtimeLabel: "运行环境",
+      features: { settings: settingsBase },
+    };
+    const countQueries = (recipe: string) =>
+      vi
+        .mocked(actions.run)
+        .mock.calls.filter(
+          ([action]) =>
+            action?.type === "settings.findCompatibleEnvironment" &&
+            action?.recipe === recipe,
+        ).length;
+    const { unmount, rerender } = render(
+      <App actions={actions} viewState={viewState} />,
+    );
+    await waitFor(() =>
+      expect(countQueries("rapidocr-cpu")).toBeGreaterThanOrEqual(1),
+    );
+    // 查询失败（宿主未回传结果）+ busy/状态推送多次重渲染：同一配方不得
+    // 自动重发（每次查询都会冻结一个 Installer 子进程）。
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 31,
+          features: {
+            settings: { ...settingsBase, environmentBusy: true },
+          },
+        }}
+      />,
+    );
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 32,
+          features: {
+            settings: {
+              ...settingsBase,
+              environmentStatus: "查询失败：运行环境操作失败。",
+            },
+          },
+        }}
+      />,
+    );
+    rerender(
+      <App actions={actions} viewState={{ ...viewState, revision: 33 }} />,
+    );
+    expect(countQueries("rapidocr-cpu")).toBe(1);
+    // 失败后如实提示并允许显式重试。
+    expect(screen.getByText(/兼容性查询未完成/)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "重新查询兼容环境" }));
+    expect(countQueries("rapidocr-cpu")).toBe(2);
+    // 迟到的旧选择结果不覆盖新选择：切到文档解析后，旧 rapidocr-cpu 结果
+    // 只按配方 id 绑定，不冒充当前选择的查询结果。
+    await user.selectOptions(screen.getByLabelText("识别用途"), "document");
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 34,
+          features: {
+            settings: {
+              ...settingsBase,
+              environmentCompatibility: {
+                recipe: "rapidocr-cpu",
+                selectedEnvironmentId: "env-1",
+                selectedEnvironmentRevision: 3,
+                selectionReason: "deterministic_id_order",
+              },
+            },
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.queryByText(/可直接复用环境「文档环境」/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "切换到此环境并启动验证" }),
+    ).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(countQueries("mineru-cpu")).toBeGreaterThanOrEqual(1),
+    );
+    // 切回文字识别：旧结果（未选中任何环境）如实呈现“没有可直接复用”。
+    await user.selectOptions(screen.getByLabelText("识别用途"), "text");
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 35,
+          features: {
+            settings: {
+              ...settingsBase,
+              environmentCompatibility: {
+                recipe: "rapidocr-cpu",
+                selectedEnvironmentId: null,
+                selectedEnvironmentRevision: null,
+                selectionReason: null,
+              },
+            },
+          },
+        }}
+      />,
+    );
+    expect(screen.getByText(/没有可直接复用的已安装环境/)).toBeVisible();
+    const installedBase = countQueries("rapidocr-cpu");
+    // 安装进行中：宿主已清空兼容结果且环境修订推进，但 busy 时不补发。
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 36,
+          features: {
+            settings: {
+              ...settingsBase,
+              environmentBusy: true,
+              environments: [{ ...settingsBase.environments[0], revision: 4 }],
+            },
+          },
+        }}
+      />,
+    );
+    expect(countQueries("rapidocr-cpu")).toBe(installedBase);
+    expect(screen.getByText(/正在查询可复用环境/)).toBeVisible();
+    // 安装成功结束：兼容结果仍被宿主清空且环境状态已变——自动补发一次新
+    // 查询（成功安装后需要新的兼容查询），不永久卡在“查询未完成”；
+    // 重复状态推送也不再多发。
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 37,
+          features: {
+            settings: {
+              ...settingsBase,
+              environments: [{ ...settingsBase.environments[0], revision: 4 }],
+            },
+          },
+        }}
+      />,
+    );
+    await waitFor(() =>
+      expect(countQueries("rapidocr-cpu")).toBe(installedBase + 1),
+    );
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 38,
+          features: {
+            settings: {
+              ...settingsBase,
+              environments: [{ ...settingsBase.environments[0], revision: 4 }],
+            },
+          },
+        }}
+      />,
+    );
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 39,
+          features: {
+            settings: {
+              ...settingsBase,
+              environments: [{ ...settingsBase.environments[0], revision: 4 }],
+            },
+          },
+        }}
+      />,
+    );
+    expect(countQueries("rapidocr-cpu")).toBe(installedBase + 1);
+    // 新结果绑定后如实指向修订 4 的可复用环境，不再卡在“查询未完成”。
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 40,
+          features: {
+            settings: {
+              ...settingsBase,
+              environments: [{ ...settingsBase.environments[0], revision: 4 }],
+              environmentCompatibility: {
+                recipe: "rapidocr-cpu",
+                selectedEnvironmentId: "env-1",
+                selectedEnvironmentRevision: 4,
+                selectionReason: "deterministic_id_order",
+              },
+            },
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.getByText(/可直接复用环境「文档环境」（修订 4，按稳定顺序选中）/),
+    ).toBeVisible();
+    expect(screen.queryByText(/兼容性查询未完成/)).not.toBeInTheDocument();
     unmount();
   });
   it("keeps a compatible MinerU request confirmable when Runtime resolves a combined recipe", async () => {
@@ -2046,6 +2818,23 @@ describe("AppShell", () => {
               configuredRecognitionTypes: ["text"],
             },
           ],
+          environmentRecipes: [
+            {
+              id: "rapidocr-cpu",
+              displayName: "RapidOCR · CPU",
+              configuredRecognitionTypes: ["text"],
+              accelerator: "cpu",
+              targetDevice: "cpu",
+            },
+            {
+              id: "mineru-cpu",
+              displayName: "MinerU · CPU",
+              configuredRecognitionTypes: ["document"],
+              accelerator: "cpu",
+              targetDevice: "cpu",
+            },
+          ],
+          environmentHardware: { nvidiaDriverStatus: "unknown" },
           environmentPackageSourceIds: ["tuna-pypi"],
           environmentPlan: {
             planId: "combined-plan",
@@ -2063,6 +2852,7 @@ describe("AppShell", () => {
     const { unmount, rerender } = render(
       <App actions={actions} viewState={viewState} />,
     );
+    await user.click(screen.getByText("高级：环境与依赖管理"));
     expect(
       screen.queryByRole("button", { name: "确认安装依赖" }),
     ).not.toBeInTheDocument();
@@ -2199,6 +2989,16 @@ describe("AppShell", () => {
             },
           ],
           activeEnvironmentId: "env-a",
+          environmentRecipes: [
+            {
+              id: "rapidocr-cpu",
+              displayName: "RapidOCR · CPU",
+              configuredRecognitionTypes: ["text"],
+              accelerator: "cpu",
+              targetDevice: "cpu",
+            },
+          ],
+          environmentHardware: { nvidiaDriverStatus: "unknown" },
           environmentSources: [
             {
               id: "tuna-pypi",
@@ -2231,13 +3031,18 @@ describe("AppShell", () => {
       },
     };
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    // 高级区默认折叠：先展开再操作原编辑器路径。
+    await user.click(screen.getByText("高级：环境与依赖管理"));
     // 折叠详情展开后再断言内部内容。
     await user.click(screen.getByText("来源配置（默认、覆盖与已生效值）"));
     await user.click(screen.getByText("全局默认来源（所有环境继承）"));
 
-    // 目录展示名，不再堆 raw id；默认/覆盖/已生效值分开标注。
+    // 目录展示名 + 脱敏端点（AC5）；默认/覆盖/已生效值分开标注，
+    // 模型源无覆盖时端点如实未知，不与 PyPI 混为单源。
     expect(
-      screen.getByText("依赖包来源：TUNA PyPI 镜像（全局默认）"),
+      screen.getByText(
+        "依赖包来源：TUNA PyPI 镜像（全局默认；端点 https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/）",
+      ),
     ).toBeVisible();
     expect(
       screen.getByText("模型来源：官方默认（端点未知）（产品默认）"),
@@ -2252,14 +3057,16 @@ describe("AppShell", () => {
     expect(
       screen.getByText(/该环境正在使用；模型来源修改将在下次启动时生效/),
     ).toBeVisible();
-    // 管理模式下旧 Backend 下载源入口不冒充全局。
-    expect(screen.getByText(/已并入“环境与依赖”/)).toBeVisible();
+    // 管理模式下 DOWNLOADS 卡片整体不渲染（来源已在“环境与依赖”内配置）。
+    expect(screen.queryByText("下载来源")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Python 包下载源")).not.toBeInTheDocument();
 
     // 切到 B：B 的覆盖与 A 互不影响；保存只针对目标环境。
     await user.selectOptions(screen.getByLabelText("目标环境"), "env-b");
     expect(
-      screen.getByText("模型来源：ModelScope（本环境覆盖）"),
+      screen.getByText(
+        "模型来源：ModelScope（本环境覆盖；端点 https://www.modelscope.cn）",
+      ),
     ).toBeVisible();
     await user.selectOptions(screen.getByLabelText("本环境依赖包来源"), "pypi");
     await user.click(screen.getByRole("button", { name: "保存本环境来源" }));
@@ -2318,6 +3125,16 @@ describe("AppShell", () => {
             },
           ],
           activeEnvironmentId: null,
+          environmentRecipes: [
+            {
+              id: "rapidocr-cpu",
+              displayName: "RapidOCR · CPU",
+              configuredRecognitionTypes: ["text"],
+              accelerator: "cpu",
+              targetDevice: "cpu",
+            },
+          ],
+          environmentHardware: { nvidiaDriverStatus: "unknown" },
           environmentSources: [
             {
               id: "tuna-pypi",
@@ -2339,6 +3156,7 @@ describe("AppShell", () => {
     const { rerender, unmount } = render(
       <App actions={actions} viewState={viewState} />,
     );
+    await user.click(screen.getByText("高级：环境与依赖管理"));
     const sourceSelect = screen.getByLabelText("本次依赖下载源");
     expect(sourceSelect).toHaveValue("");
     expect(

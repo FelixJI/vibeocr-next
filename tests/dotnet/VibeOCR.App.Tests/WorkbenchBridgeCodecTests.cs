@@ -200,6 +200,91 @@ public sealed class WorkbenchBridgeCodecTests
       toolbar.GetProperty("error").GetString());
   }
   [Fact]
+  public void SettingsStateProjectsEnvironmentCatalogHardwareAndCompatibility()
+  {
+    var state = new SettingsWorkbenchState(
+      WorkbenchTheme.Light,
+      false,
+      "settings.ready",
+      "cpu",
+      false,
+      EnvironmentRecipes:
+      [
+        new SettingsEnvironmentRecipeState(
+          "rapidocr-cpu", "RapidOCR · CPU",
+          ["text"], "cpu", "cpu", "3.13.15", "cp313", "win_amd64",
+          "base", ["runtime_host", "rapidocr-base"], "locked-sha",
+          ["rapidocr==3.7.0"], "bundled_pack", "product_bundle", "product_bundle"),
+      ],
+      EnvironmentHardware: new SettingsEnvironmentHardwareState(
+        "unsupported", "nvidia_driver_incompatible", "527.00"),
+      EnvironmentCompatibility: new SettingsEnvironmentCompatibilityState(
+        "rapidocr-cpu",
+        SelectedEnvironmentId: "abc",
+        SelectedEnvironmentRevision: 2,
+        SelectionReason: "active_environment",
+        Environments:
+        [
+          new SettingsEnvironmentQueryMatchState(
+            "abc", "用户环境", 2, "installed", Active: true, Selected: true,
+            ReasonCode: "selected_active_environment"),
+        ]));
+    using JsonDocument json = JsonDocument.Parse(WorkbenchBridgeCodec.SerializeState(
+      Guid.NewGuid(),
+      new WorkbenchStateEnvelope(9, "settings", WorkbenchStateChange.Replace, state)));
+    JsonElement settings = json.RootElement.GetProperty("payload").GetProperty("state");
+    // 配方目录/硬件/兼容结果都只投影 Runtime 真值，前台不另算依赖或检测硬件。
+    JsonElement recipe = Assert.Single(settings.GetProperty("environmentRecipes").EnumerateArray());
+    Assert.Equal("rapidocr-cpu", recipe.GetProperty("id").GetString());
+    Assert.Equal("RapidOCR · CPU", recipe.GetProperty("displayName").GetString());
+    Assert.Equal("cpu", recipe.GetProperty("accelerator").GetString());
+    JsonElement hardware = settings.GetProperty("environmentHardware");
+    Assert.Equal("unsupported", hardware.GetProperty("nvidiaDriverStatus").GetString());
+    Assert.Equal("nvidia_driver_incompatible", hardware.GetProperty("nvidiaDriverReason").GetString());
+    Assert.Equal("527.00", hardware.GetProperty("nvidiaDriverVersion").GetString());
+    JsonElement compatibility = settings.GetProperty("environmentCompatibility");
+    Assert.Equal("rapidocr-cpu", compatibility.GetProperty("recipe").GetString());
+    Assert.Equal("abc", compatibility.GetProperty("selectedEnvironmentId").GetString());
+    JsonElement match = Assert.Single(compatibility.GetProperty("environments").EnumerateArray());
+    Assert.Equal("selected_active_environment", match.GetProperty("reasonCode").GetString());
+  }
+
+  [Fact]
+  public void FindCompatibleEnvironmentDecodesRecipeAndRejectsUnknownIds()
+  {
+    Guid sessionId = Guid.NewGuid();
+    string json = $$"""
+      {
+        "version": 2,
+        "kind": "request",
+        "id": "{{Guid.NewGuid()}}",
+        "type": "app.command",
+        "payload": {
+          "sessionId": "{{sessionId}}",
+          "command": {
+            "scope": "settings",
+            "action": "findCompatibleEnvironment",
+            "arguments": {
+              "recipe": "rapidocr+mineru-cuda"
+            }
+          }
+        }
+      }
+      """;
+    var find = Assert.IsType<FindCompatibleEnvironmentCommand>(
+      WorkbenchBridgeCodec.ParseCommand(json, sessionId).Command);
+    Assert.Equal("rapidocr+mineru-cuda", find.Recipe);
+    // 桥只做协议 id 类型守卫；未知输入拒绝，不降 input validation。
+    Assert.Throws<WorkbenchBridgeProtocolException>(() =>
+      WorkbenchBridgeCodec.ParseCommand(
+        json.Replace("rapidocr+mineru-cuda", "made-up-recipe"), sessionId));
+    Assert.Throws<WorkbenchBridgeProtocolException>(() =>
+      WorkbenchBridgeCodec.ParseCommand(
+        json.Replace("\"recipe\": \"rapidocr+mineru-cuda\"", "\"environmentId\": \"abc\""),
+        sessionId));
+  }
+
+  [Fact]
   public void SettingsStateProjectsProgressActivityAndNullableBackend()
   {
     var state = new SettingsWorkbenchState(
@@ -570,6 +655,25 @@ public sealed class WorkbenchBridgeCodecTests
         sessionId).Command);
 
     Assert.Equal(format, command.Format);
+  }
+
+  [Fact]
+  public void ParseCodeOptionsAndRejectInvalidOrExtraFields()
+  {
+    Guid session = Guid.NewGuid();
+    GenerateQrCodeCommand generate = Assert.IsType<GenerateQrCodeCommand>(WorkbenchBridgeCodec.ParseCommand(
+      CommandJson(session, "qrcode", "generate", "{\"text\":\"590123412345\",\"format\":\"ean13\",\"captionMode\":\"custom\",\"captionText\":\"说明\"}"), session).Command);
+    Assert.Equal(new GenerateQrCodeCommand("590123412345", "ean13", "custom", "说明"), generate);
+    Assert.True(Assert.IsType<DecodeCurrentQrCodeCommand>(WorkbenchBridgeCodec.ParseCommand(
+      CommandJson(session, "qrcode", "decodeCurrent", "{\"force\":true}"), session).Command).Force);
+    Assert.IsType<CopyQrCodeImageCommand>(WorkbenchBridgeCodec.ParseCommand(
+      CommandJson(session, "qrcode", "copyImage", "{}"), session).Command);
+    foreach (string arguments in new[] {
+      "{\"text\":\"x\",\"format\":\"unknown\",\"captionMode\":\"off\",\"captionText\":\"\"}",
+      "{\"text\":\"x\",\"format\":\"qrcode\",\"captionMode\":\"unknown\",\"captionText\":\"\"}",
+      "{\"text\":\"x\",\"format\":\"qrcode\",\"captionMode\":\"off\",\"captionText\":\"\",\"path\":\"x\"}" })
+      Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(
+        CommandJson(session, "qrcode", "generate", arguments), session));
   }
 
   [Fact]

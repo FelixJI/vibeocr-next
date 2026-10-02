@@ -48,6 +48,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       "qrcode.decode",
       "qrcode.clipboard",
       "qrcode.save",
+      "qrcode.copyImage",
       "qrcode.openUrl",
       "about.openProject",
       "runtime.refresh",
@@ -117,6 +118,8 @@ public sealed class DesktopWorkbenchCommandHandler :
   private long batchGeneration;
   private long pdfGeneration;
   private long qrCodeGeneration;
+  private long publishedQrRevision;
+  private string? qrPreviewPath;
   private long updateGeneration;
   private int batchWindowStart;
   private int pdfWindowStart;
@@ -329,9 +332,17 @@ public sealed class DesktopWorkbenchCommandHandler :
           viewModel =>
           {
             viewModel.GenerateText = generate.Text;
+            viewModel.GenerateFormat = generate.Format;
+            viewModel.CaptionMode = generate.CaptionMode switch { "payload" => QrCodeCaptionMode.Payload, "custom" => QrCodeCaptionMode.Custom, _ => QrCodeCaptionMode.Off };
+            viewModel.CaptionText = generate.CaptionText;
             return viewModel.GenerateAsync(cancellationToken);
           },
           publishGeneratedImage: true,
+          cancellationToken),
+        CopyQrCodeImageCommand => await CopyQrCodeImageAsync(cancellationToken),
+        DecodeCurrentQrCodeCommand current => StartQrCode(
+          viewModel => viewModel.DecodeCurrentPreviewAsync(current.Force, cancellationToken),
+          publishGeneratedImage: false,
           cancellationToken),
         DecodeQrCodeCommand => StartQrCode(
           viewModel => viewModel.DecodeAsync(QrCodeInputKind.File, cancellationToken),
@@ -347,7 +358,7 @@ public sealed class DesktopWorkbenchCommandHandler :
             cancellationToken),
           publishGeneratedImage: false,
           cancellationToken),
-        CancelQrCodeCommand => CancelQrCode(),
+        CancelQrCodeCommand => await CancelQrCodeAsync(cancellationToken),
         ClearQrCodeCommand => ClearQrCode(),
         SaveQrCodeCommand => await SaveQrCodeAsync(cancellationToken),
         OpenQrCodeUrlCommand openUrl => await OpenQrCodeUrlAsync(
@@ -376,6 +387,8 @@ public sealed class DesktopWorkbenchCommandHandler :
           environment => environment.DeleteAsync(deleteEnvironment.EnvironmentId, cancellationToken), cancellationToken),
         RepairEmptyEnvironmentCommand repair => await RunEnvironmentAsync(
           environment => environment.RepairEmptyAsync(repair.EnvironmentId, cancellationToken), cancellationToken),
+        FindCompatibleEnvironmentCommand findCompatible => await RunEnvironmentAsync(
+          environment => environment.FindCompatibleAsync(findCompatible.Recipe, cancellationToken), cancellationToken),
         SetThemeCommand setTheme => SetTheme(setTheme),
         SetStartupCommand startup => SetStartup(startup),
         SetActionHotkeyCommand setActionHotkey => SetActionHotkey(setActionHotkey),
@@ -2157,20 +2170,19 @@ public sealed class DesktopWorkbenchCommandHandler :
         return;
       }
       WorkbenchResourceReference? nextGeneratedResource = generatedQrResource;
-      if (publishGeneratedImage)
+      long previewRevision = qrCode!.PreviewRevision;
+      string? nextPreviewPath = qrPreviewPath;
+      if (previewRevision != publishedQrRevision && qrCode.GeneratedImageBase64 is { } preview)
       {
-        if (!qrCode!.GenerateFailed && !string.IsNullOrWhiteSpace(qrCode.GeneratedImageBase64))
-        {
-          nextGeneratedResource = await PublishBytesAsync(
-            Convert.FromBase64String(qrCode.GeneratedImageBase64),
-            "image/png",
-            ".png",
-            cancellationToken);
-        }
+        (nextGeneratedResource, nextPreviewPath) = await PublishFileAsync(
+          Convert.FromBase64String(preview), qrCode.PreviewMediaType,
+          qrCode.PreviewMediaType == "image/jpeg" ? ".jpg" : ".png", cancellationToken);
       }
       if (generation == Volatile.Read(ref qrCodeGeneration))
       {
         generatedQrResource = nextGeneratedResource;
+        qrPreviewPath = nextPreviewPath;
+        publishedQrRevision = previewRevision;
         QrCodeViewModel currentQrCode = qrCode!;
         QrCodeWorkbenchState state = QrCodeState(currentQrCode);
         StateChanged?.Invoke(!publishGeneratedImage && currentQrCode.DecodeUnavailable
@@ -2208,11 +2220,13 @@ public sealed class DesktopWorkbenchCommandHandler :
     }
   }
 
-  private QrCodeWorkbenchState CancelQrCode()
+  private async Task<QrCodeWorkbenchState> CancelQrCodeAsync(CancellationToken cancellationToken)
   {
     qrCode ??= qrCodeFactory();
     Interlocked.Increment(ref qrCodeGeneration);
     qrCode.Cancel();
+    if (qrCode.HasPreview && publishedQrRevision != qrCode.PreviewRevision)
+      await CompleteQrCodeAsync(_ => Task.CompletedTask, false, Volatile.Read(ref qrCodeGeneration), cancellationToken);
     return QrCodeState(qrCode) with
     {
       IsBusy = false,
@@ -2228,7 +2242,16 @@ public sealed class DesktopWorkbenchCommandHandler :
     qrCode.Codes.Clear();
     qrCode.ReleaseGeneratedImage();
     generatedQrResource = null;
+    qrPreviewPath = null;
     return QrCodeState(qrCode);
+  }
+
+  private async Task<QrCodeWorkbenchState> CopyQrCodeImageAsync(CancellationToken cancellationToken)
+  {
+    qrCode ??= qrCodeFactory();
+    if (qrPreviewPath is null || publishedQrRevision != qrCode.PreviewRevision) throw new InvalidOperationException("当前没有可复制的预览图片。");
+    await annotatedImagePlatform.CopyPngAsync(qrPreviewPath, cancellationToken);
+    return QrCodeState(qrCode) with { StatusCode = "qrcode.copied" };
   }
 
   private async Task<QrCodeWorkbenchState> SaveQrCodeAsync(
@@ -3237,10 +3260,13 @@ public sealed class DesktopWorkbenchCommandHandler :
       .ToArray();
     return new QrCodeWorkbenchState(
       viewModel.IsBusy,
-      items.Length > 0 ? "qrcode.decoded" : "qrcode.ready",
+      items.Length > 0 ? "qrcode.decoded" : viewModel.HasPreview && !viewModel.NeedsPreviewDecode ? "qrcode.noCodes" : "qrcode.ready",
       [],
       generatedQrResource,
-      items);
+      items,
+      viewModel.PreviewRevision,
+      viewModel.NeedsPreviewDecode,
+      viewModel.GenerateInvalidInput ? viewModel.GenerateStatus : viewModel.DecodeStatus);
   }
 
   private SettingsWorkbenchState SettingsShellState() => new(
@@ -3377,7 +3403,31 @@ public sealed class DesktopWorkbenchCommandHandler :
     EnvironmentDefaultSourceIds: viewModel.Environments?.Snapshot?.DefaultSourceIds,
     EnvironmentUnknownDefaultSourceIds: viewModel.Environments?.Snapshot?.UnknownDefaultSourceIds,
     EnvironmentPackageSourceIds: viewModel.Environments?.Snapshot?.PackageSourceIds,
-    EnvironmentCanCancelInstall: viewModel.Environments?.CanCancelInstall ?? false);
+    EnvironmentCanCancelInstall: viewModel.Environments?.CanCancelInstall ?? false,
+    EnvironmentRecipes: viewModel.Environments?.Snapshot?.Recipes?.Select(recipe =>
+      new SettingsEnvironmentRecipeState(
+        recipe.Id, recipe.DisplayName, recipe.ConfiguredRecognitionTypes,
+        recipe.Accelerator, recipe.TargetDevice, recipe.PythonVersion, recipe.Abi,
+        recipe.Platform, recipe.ScopeId, recipe.ComponentIds, recipe.RecipeLock,
+        recipe.Dependencies, recipe.DependencyOrigin, recipe.PythonOrigin,
+        recipe.RuntimeWheelOrigin)).ToArray(),
+    EnvironmentHardware: viewModel.Environments?.Snapshot?.Hardware is { } hardware
+      ? new SettingsEnvironmentHardwareState(
+        hardware.NvidiaDriver?.Status ?? "unknown",
+        hardware.NvidiaDriver?.ReasonCode,
+        hardware.NvidiaDriver?.DriverVersion)
+      // 旧 Runtime payload 无 hardware：诚实按未探测呈现，不臆造可用性。
+      : new SettingsEnvironmentHardwareState("unknown"),
+    EnvironmentCompatibility: viewModel.Environments?.Compatibility is { } compatibility
+      ? new SettingsEnvironmentCompatibilityState(
+        compatibility.Recipe,
+        compatibility.Selected?.EnvironmentId,
+        compatibility.Selected?.EnvironmentRevision,
+        compatibility.Selected?.SelectionReason,
+        compatibility.Environments?.Select(match => new SettingsEnvironmentQueryMatchState(
+          match.EnvironmentId, match.Name, match.Revision, match.Status,
+          match.Active, match.Selected, match.ReasonCode)).ToArray())
+      : null);
 
   private UpdateWorkbenchState UpdateState() => new(
     update.Value.IsBusy,
