@@ -614,10 +614,37 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     overlay.AppWindow.MoveAndResize(new RectInt32(desktop.X, desktop.Y, desktop.Width, desktop.Height));
     overlay.Activate();
     nint overlayHandle = WinRT.Interop.WindowNative.GetWindowHandle(overlay);
+    try
+    {
+      if (overlayHandle == nint.Zero)
+        throw new InvalidOperationException("无法获取截图选区窗口。");
+      // A borderless overlapped window can still have non-client insets. Match
+      // the frozen desktop to the client area, where XAML pointer positions live.
+      overlay.AppWindow.ResizeClient(new SizeInt32(desktop.Width, desktop.Height));
+      NativePoint origin = new();
+      if (!ClientToScreen(overlayHandle, ref origin))
+        throw new InvalidOperationException("无法读取截图选区客户区原点。");
+      PointInt32 position = overlay.AppWindow.Position;
+      overlay.AppWindow.Move(new PointInt32(
+        checked(position.X + desktop.X - origin.X),
+        checked(position.Y + desktop.Y - origin.Y)));
+      origin = new();
+      if (!ClientToScreen(overlayHandle, ref origin) ||
+          !GetClientRect(overlayHandle, out NativeRect client))
+        throw new InvalidOperationException("无法校验截图选区客户区。");
+      if (origin.X != desktop.X || origin.Y != desktop.Y ||
+          client.Right - client.Left != desktop.Width ||
+          client.Bottom - client.Top != desktop.Height)
+        throw new InvalidOperationException("截图选区客户区与虚拟桌面不一致。");
+    }
+    catch
+    {
+      overlay.Close();
+      throw;
+    }
     // A hotkey can open this window while another application remains foreground.
     // WinUI activation alone does not transfer keyboard focus across processes.
-    if (overlayHandle == nint.Zero ||
-        (!SetForegroundWindow(overlayHandle) && GetForegroundWindow() != overlayHandle))
+    if (!SetForegroundWindow(overlayHandle) && GetForegroundWindow() != overlayHandle)
     {
       overlay.Close();
       throw new InvalidOperationException("无法将截图选区置于前台，请重试截图。");
@@ -732,6 +759,20 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
         }
         return desktop;
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint { public int X, Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect { public int Left, Top, Right, Bottom; }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ClientToScreen(nint window, ref NativePoint point);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetClientRect(nint window, out NativeRect rect);
 
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int index);

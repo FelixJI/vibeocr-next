@@ -372,6 +372,193 @@ async function observeNextAnnotationUpload(page) {
   });
 }
 
+const handleCursorShapes = ['sizeNWSE', 'sizeNS', 'sizeNESW', 'sizeWE', 'sizeWE', 'sizeNESW', 'sizeNS', 'sizeNWSE'];
+const magnifierLabelPattern = /^(-?\d+), (-?\d+)\r?\n#([0-9A-F]{6})\r?\nRGB (\d+), (\d+), (\d+)$/;
+
+function manualHandleAnchors(rect) {
+  const midX = rect.left + rect.width / 2;
+  const midY = rect.top + rect.height / 2;
+  const right = rect.left + rect.width;
+  const bottom = rect.top + rect.height;
+  return [
+    { x: rect.left, y: rect.top }, { x: midX, y: rect.top }, { x: right, y: rect.top },
+    { x: rect.left, y: midY }, { x: right, y: midY },
+    { x: rect.left, y: bottom }, { x: midX, y: bottom }, { x: right, y: bottom },
+  ];
+}
+
+// Real-pointer acceptance evidence for the frozen product picker: eight-handle
+// hit with per-direction cursors, hover invariance, click/drag no-confirm,
+// exact resize geometry, screen-edge clamping and a tiny 4x4 probe. It only
+// reuses the owned-window primitives and always returns to the exact manual
+// selection so the shipped pixel assertions stay valid. Returned magnifier
+// observations are cross-checked against the final BMP crop by the caller.
+async function verifyManualHandleEvidence(app, overlay, desktop, button, gesture) {
+  const appPid = app.child.pid;
+  const overlayHandle = overlay.Handle;
+  const desktopX = desktop.X;
+  const desktopY = desktop.Y;
+  const rect = { left: button.left + 4, top: button.top + 4,
+    width: button.width - 8, height: button.height - 8 };
+  assert(rect.width > 24 && rect.width % 2 === 0 && rect.height > 24 && rect.height % 2 === 0,
+    'Handle evidence needs an even, comfortably sized manual selection.');
+  const manualLabel = (width, height) => `手动 · ${width} × ${height} px · Enter`;
+  const point = (x, y) => ({ AppPid: appPid, X: x, Y: y });
+  const pickerVisible = async () => (await windows(appPid))
+    .some((item) => item.Handle === overlayHandle && item.Visible);
+  const readPickerLabel = () => native('selection', { AppPid: appPid, Handle: overlayHandle });
+  const observations = [];
+  const record = (event, data) => gesture.events.push({ event, ...data, observedAt: new Date().toISOString() });
+
+  async function observe(hover, cursorShape, sample, context, tolerance = 0) {
+    await native('mouse-move', point(hover.x, hover.y));
+    await delay(150);
+    const cursor = JSON.parse(await native('cursor'));
+    assert(cursor.shown && Math.abs(cursor.x - hover.x) <= 1 && Math.abs(cursor.y - hover.y) <= 1,
+      `OS cursor is not resting at ${hover.x},${hover.y}: ${JSON.stringify(cursor)}`);
+    assert(cursor[cursorShape] === true,
+      `${context} did not show the ${cursorShape} cursor: ${JSON.stringify(cursor)}`);
+    const label = await native('magnifier', { AppPid: appPid, Handle: overlayHandle });
+    const match = magnifierLabelPattern.exec(label);
+    assert(match, `${context} magnifier label is not frozen-pixel evidence: ${JSON.stringify(label)}`);
+    const observed = {
+      context,
+      pointer: { x: hover.x, y: hover.y },
+      sample: { x: Number(match[1]), y: Number(match[2]) },
+      hex: `#${match[3]}`,
+      rgb: [Number(match[4]), Number(match[5]), Number(match[6])],
+      cursor: { shape: cursorShape, handle: cursor.handle },
+    };
+    for (let channel = 0; channel < 3; channel++)
+      assert.equal(parseInt(observed.hex.slice(1 + channel * 2, 3 + channel * 2), 16),
+        observed.rgb[channel], `${context} magnifier hex and RGB channels disagree.`);
+    assert(Math.abs(observed.sample.x - sample.x) <= tolerance &&
+      Math.abs(observed.sample.y - sample.y) <= tolerance,
+      `${context} magnifier sampled ${observed.sample.x},${observed.sample.y} ` +
+      `instead of ${sample.x},${sample.y}.`);
+    observations.push(observed);
+    record('pointer-observe', observed);
+    return observed;
+  }
+
+  async function dragHandle(from, to) {
+    await native('mouse-move', point(from.x, from.y));
+    await native('mouse-down', point(from.x, from.y));
+    try { await native('mouse-move', point(to.x, to.y)); }
+    finally { await native('mouse-up', point(to.x, to.y)); }
+    await delay(150);
+    return readPickerLabel();
+  }
+
+  // Eight-handle hit: every anchor switches the OS cursor to its resize
+  // direction and snaps the magnifier to the frozen anchor pixel, while pure
+  // hovering leaves the selection untouched.
+  const anchors = manualHandleAnchors(rect);
+  const inclusive = [
+    { x: rect.left, y: rect.top }, { x: rect.left + rect.width / 2, y: rect.top },
+    { x: rect.left + rect.width - 1, y: rect.top },
+    { x: rect.left, y: rect.top + rect.height / 2 },
+    { x: rect.left + rect.width - 1, y: rect.top + rect.height / 2 },
+    { x: rect.left, y: rect.top + rect.height - 1 },
+    { x: rect.left + rect.width / 2, y: rect.top + rect.height - 1 },
+    { x: rect.left + rect.width - 1, y: rect.top + rect.height - 1 },
+  ];
+  for (let index = 0; index < anchors.length; index++)
+    await observe({ x: anchors[index].x + 2, y: anchors[index].y + 2 },
+      handleCursorShapes[index], inclusive[index], `handle-${index}`);
+  const afterHover = await readPickerLabel();
+  assert(afterHover.includes(manualLabel(rect.width, rect.height)),
+    `Hovering the eight handles changed the selection: ${afterHover}`);
+
+  // Leaving every hit range restores raw-pointer sampling and the cross cursor.
+  await observe({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
+    'cross', { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
+    'off-handle-center', 1);
+
+  // Pressing and releasing on a handle must never confirm the selection.
+  await native('mouse-move', point(anchors[0].x + 2, anchors[0].y + 2));
+  await native('mouse-down', point(anchors[0].x + 2, anchors[0].y + 2));
+  assert(await pickerVisible(), 'A handle press closed the picker.');
+  await native('mouse-up', point(anchors[0].x + 2, anchors[0].y + 2));
+  await delay(150);
+  assert(await pickerVisible(), 'A handle click confirmed the selection.');
+  const afterHandleClick = await readPickerLabel();
+  assert(afterHandleClick.includes(manualLabel(rect.width, rect.height)),
+    `A handle click changed the selection: ${afterHandleClick}`);
+  record('handle-click-no-confirm', { label: afterHandleClick });
+
+  // One resize drag per cursor group. Exact resulting sizes prove each edge
+  // moves only in its own direction and the drag never jumps at its start.
+  let current = { ...rect };
+  for (const step of [{ handle: 0, dx: -10, dy: -10 }, { handle: 1, dx: 0, dy: -8 },
+    { handle: 4, dx: 8, dy: 0 }, { handle: 5, dx: -10, dy: 10 }]) {
+    const anchor = manualHandleAnchors(current)[step.handle];
+    const from = { x: anchor.x + 2, y: anchor.y + 2 };
+    const observed = await dragHandle(from, { x: from.x + step.dx, y: from.y + step.dy });
+    const mask = [5, 4, 6, 1, 2, 9, 8, 10][step.handle];
+    const left = (mask & 1) !== 0 ? current.left + step.dx : current.left;
+    const right = (mask & 2) !== 0 ? current.left + current.width + step.dx : current.left + current.width;
+    const top = (mask & 4) !== 0 ? current.top + step.dy : current.top;
+    const bottom = (mask & 8) !== 0 ? current.top + current.height + step.dy : current.top + current.height;
+    assert(observed.includes(manualLabel(right - left, bottom - top)),
+      `Handle ${step.handle} drag (${step.dx},${step.dy}) jumped or confirmed: ${observed}`);
+    assert(await pickerVisible(), 'A handle drag confirmed the selection.');
+    record('handle-drag', { handle: step.handle, dx: step.dx, dy: step.dy, label: observed });
+    current = { left, top, width: right - left, height: bottom - top };
+  }
+
+  // Back to the exact manual selection for the remaining edge and tiny checks.
+  await native('escape', { AppPid: appPid });
+  await delay(150);
+  const redrawn = await dragHandle({ x: rect.left, y: rect.top },
+    { x: rect.left + rect.width, y: rect.top + rect.height });
+  assert(redrawn.includes(manualLabel(rect.width, rect.height)),
+    `Manual selection was not restored: ${redrawn}`);
+
+  // Screen edge: resizing far past the desktop origin clamps at the physical
+  // origin and the magnifier samples the exact frozen corner pixel. That pixel
+  // lies outside the final crop, so it is excluded from the BMP cross-check.
+  const origin = manualHandleAnchors(rect)[0];
+  const edgeCorner = { x: desktopX + 2, y: desktopY + 2 };
+  const edge = await dragHandle({ x: origin.x + 2, y: origin.y + 2 }, edgeCorner);
+  assert(edge.includes(manualLabel(origin.x + rect.width - desktopX,
+    origin.y + rect.height - desktopY)),
+    `Screen-edge resize did not clamp to the desktop origin: ${edge}`);
+  record('screen-edge-drag', { label: edge });
+  const edgeObservation = await observe(edgeCorner, 'sizeNWSE',
+    { x: desktopX, y: desktopY }, 'screen-edge-corner');
+  edgeObservation.crossCheck = false;
+  const edgeRestored = await dragHandle(edgeCorner, { x: origin.x + 2, y: origin.y + 2 });
+  assert(edgeRestored.includes(manualLabel(rect.width, rect.height)),
+    `Screen-edge restore drifted: ${edgeRestored}`);
+  record('screen-edge-restore', { label: edgeRestored });
+
+  // Tiny 4x4 selection: all eight handles overlap; the nearest-anchor rule
+  // still switches between the two inclusive corner pixels deterministically.
+  await native('escape', { AppPid: appPid });
+  await delay(150);
+  const tx = rect.left + 20, ty = rect.top + 10;
+  const tinySeed = await dragHandle({ x: tx, y: ty }, { x: tx + 20, y: ty + 20 });
+  assert(tinySeed.includes(manualLabel(20, 20)), `Tiny seed selection failed: ${tinySeed}`);
+  const tinyNarrow = await dragHandle({ x: tx + 22, y: ty + 12 }, { x: tx + 6, y: ty + 12 });
+  assert(tinyNarrow.includes(manualLabel(4, 20)), `Tiny width shrink failed: ${tinyNarrow}`);
+  const tinyShort = await dragHandle({ x: tx + 2, y: ty + 22 }, { x: tx + 2, y: ty + 6 });
+  assert(tinyShort.includes(manualLabel(4, 4)), `Tiny height shrink failed: ${tinyShort}`);
+  record('tiny-selection', { labels: [tinySeed, tinyNarrow, tinyShort] });
+  await observe({ x: tx, y: ty }, 'sizeNWSE', { x: tx, y: ty }, 'tiny-top-left');
+  await observe({ x: tx + 4, y: ty + 4 }, 'sizeNWSE', { x: tx + 3, y: ty + 3 }, 'tiny-bottom-right');
+
+  // Restore the exact manual selection so the shipped pixel assertions hold.
+  await native('escape', { AppPid: appPid });
+  await delay(150);
+  const restored = await dragHandle({ x: rect.left, y: rect.top },
+    { x: rect.left + rect.width, y: rect.top + rect.height });
+  assert(restored.includes(manualLabel(rect.width, rect.height)),
+    `Manual selection was not restored after the tiny probe: ${restored}`);
+  record('manual-restored', { label: restored });
+  return observations;
+}
+
 async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual = false) {
   const { page } = app;
   const toolbarHandles = (await windows(app.child.pid))
@@ -415,10 +602,17 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
       area(item) > fixture.rootRect.width * fixture.rootRect.height * 2 &&
       inside(item, x, y), 12000);
   const overlay = overlays.sort((a, b) => area(b) - area(a))[0];
-  assert.equal(overlay.Bounds.Left, fixture.backgroundRect.left);
-  assert.equal(overlay.Bounds.Top, fixture.backgroundRect.top);
-  assert.equal(overlay.Bounds.Right, fixture.backgroundRect.right);
-  assert.equal(overlay.Bounds.Bottom, fixture.backgroundRect.bottom);
+  pixelEvidence.overlayGeometry = JSON.parse(await native('geometry', {
+    FixturePid: app.child.pid, Handle: overlay.Handle,
+  }));
+  const client = pixelEvidence.overlayGeometry.client;
+  assert.deepEqual(client, { X: fixture.backgroundRect.left, Y: fixture.backgroundRect.top,
+    Width: fixture.backgroundRect.width, Height: fixture.backgroundRect.height },
+    'The picker client must cover the frozen desktop without inset or scaling.');
+  assert(overlay.Bounds.Left <= client.X && overlay.Bounds.Top <= client.Y &&
+    overlay.Bounds.Right >= client.X + client.Width &&
+    overlay.Bounds.Bottom >= client.Y + client.Height,
+    'The picker frame must contain its desktop-aligned client.');
   const duringCapture = await windows(app.child.pid);
   assert(!duringCapture.some((item) => item.Handle === app.main.Handle && item.Visible),
     'Edit hotkey exposed the main window during selection.');
@@ -429,10 +623,12 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
   }));
   let selectedRegion = button;
   const gesture = { mode: manual ? 'manual-drag-resize-click' : 'smart-click', events: [] };
+  pixelEvidence.gesture = gesture;
   if (manual) {
     const start = { AppPid: app.child.pid, X: button.left + 4, Y: button.top + 4 };
     const end = { AppPid: app.child.pid, X: button.right - 4, Y: button.bottom - 4 };
     await native('mouse-move', start);
+    gesture.events.push({ event: 'manual-start-cursor', cursor: JSON.parse(await native('cursor')) });
     await native('mouse-down', start);
     try { await native('mouse-move', end); }
     finally { await native('mouse-up', end); }
@@ -440,6 +636,7 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
     assert(dragLabel.includes(`手动 · ${button.width - 8} × ${button.height - 8} px`),
       `First drag was confirmed or selected different pixels: ${dragLabel}`);
     gesture.events.push({ event: 'drag-released', label: dragLabel, observedAt: new Date().toISOString() });
+    gesture.manualHandleEvidence = await verifyManualHandleEvidence(app, overlay, client, button, gesture);
     const handle = { ...end, X: end.X + 3, Y: end.Y + 3 };
     const resized = { ...end, X: end.X + 13, Y: end.Y + 13 };
     await native('mouse-move', handle);
@@ -533,6 +730,26 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
   }
   pixelEvidence.rawBmpPixels = { width, height, black, dark, light };
   pixelEvidence.decodedBmpPixels = await pngPixels(page, bmp, 'image/bmp');
+  if (manual && gesture.manualHandleEvidence) {
+    // The magnifier reads the same frozen desktop array the crop came from, so
+    // every in-crop observation must match the shipped BMP byte for byte.
+    const cropLeft = selectedRegion.left, cropTop = selectedRegion.top;
+    const checkable = gesture.manualHandleEvidence
+      .filter((item) => item.crossCheck !== false);
+    assert.equal(gesture.manualHandleEvidence.length - checkable.length, 1,
+      'Exactly the screen-edge magnifier observation may fall outside the crop.');
+    for (const observed of checkable) {
+      const px = observed.sample.x - cropLeft, py = observed.sample.y - cropTop;
+      assert(px >= 0 && py >= 0 && px < width && py < height,
+        `Magnifier sample escaped the final crop: ${JSON.stringify(observed)}`);
+      const index = offset + (py * width + px) * 4;
+      const cropped = `#${[bmp[index + 2], bmp[index + 1], bmp[index]]
+        .map((channel) => channel.toString(16).toUpperCase().padStart(2, '0')).join('')}`;
+      assert.equal(observed.hex, cropped,
+        `Magnifier pixel differs from the cropped BMP at ${observed.sample.x},${observed.sample.y}.`);
+    }
+    pixelEvidence.magnifierCrossChecks = checkable.length;
+  }
   const before = await canvasOrange(page);
   pixelEvidence.canvasBefore = before;
   assert(before.nonBackground > 1000, 'Real screenshot image never decoded in WebView2.');
