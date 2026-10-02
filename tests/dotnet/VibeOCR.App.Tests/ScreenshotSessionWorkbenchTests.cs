@@ -1,4 +1,6 @@
 using System.Text.Json;
+using Windows.Graphics.Imaging;
+using Windows.Storage.Streams;
 using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Features.Settings;
 using VibeOCR.App.Features.Shell;
@@ -70,6 +72,7 @@ public sealed class ScreenshotSessionWorkbenchTests
   private class RecordingRecognitionClient : InferenceClientStub
   {
     public List<IReadOnlyList<byte>> UploadedContent { get; } = [];
+    public List<string?> UploadedMediaTypes { get; } = [];
 
     /// <summary>成功 outcome 的 payload；子类可覆盖以模拟空文本/纯结构化结果。</summary>
     protected virtual Dictionary<string, JsonElement> OutcomePayload() => new()
@@ -83,6 +86,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       CancellationToken cancellationToken)
     {
       UploadedContent.AddRange(uploads.Values.Select(upload => upload.Content));
+      UploadedMediaTypes.AddRange(uploads.Values.Select(upload => upload.ContentType));
       return Task.FromResult(new JobRef
       {
         JobId = "job-session",
@@ -430,7 +434,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       }
       using (var pureAwaiter = new RecognitionStateAwaiter(handler,
         state => !state.IsBusy && state.ScreenshotSession is
-          { TextSelectionRequested: false }))
+        { TextSelectionRequested: false }))
       {
         // The tray/hotkey route calls this command without visiting the page.
         await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
@@ -557,6 +561,91 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   [Fact]
+  public async Task JpegCopyAndRecognitionConsumeTheSameEncodedSnapshot()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      using var encoded = new InMemoryRandomAccessStream();
+      BitmapEncoder encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.JpegEncoderId, encoded);
+      encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Ignore,
+        2, 1, 96, 96, [0, 0, 255, 255, 0, 255, 0, 255]);
+      await encoder.FlushAsync();
+      encoded.Seek(0);
+      using var stream = encoded.AsStreamForRead();
+      using var bytes = new MemoryStream();
+      await stream.CopyToAsync(bytes, TestContext.Current.CancellationToken);
+      byte[] jpeg = bytes.ToArray();
+      var inference = new RecordingRecognitionClient();
+      var recognition = new RecognitionViewModel(inference, new FixedCaptureInput());
+      var platform = new RecordingAnnotatedImagePlatform();
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(recognition, root, broker, annotations,
+        new SettingsViewModel(inference), platform);
+      Guid sessionId;
+      using (var ready = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.ScreenshotSession is not null))
+      {
+        await handler.ExecuteAsync(new SelectImageEditFileCommand(), TestContext.Current.CancellationToken);
+        sessionId = Guid.Parse((await ready.Task).ScreenshotSession!.SessionId);
+      }
+      WorkbenchAnnotationLease copy = await annotations.UploadImageAsync(new MemoryStream(jpeg),
+        "image/jpeg", TestContext.Current.CancellationToken);
+      Assert.Null((await handler.ExecuteAsync(new CopyScreenshotImageCommand(copy.ResourceUri.AbsoluteUri,
+        sessionId, 0), TestContext.Current.CancellationToken)).Error);
+      Assert.Equal(jpeg, platform.CopiedBytes);
+      WorkbenchAnnotationLease ocr = await annotations.UploadImageAsync(new MemoryStream(jpeg),
+        "image/jpeg", TestContext.Current.CancellationToken);
+      using var completed = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.Result is not null);
+      Assert.Null((await handler.ExecuteAsync(new RecognizeScreenshotImageCommand(ocr.ResourceUri.AbsoluteUri,
+        sessionId, 0), TestContext.Current.CancellationToken)).Error);
+      await completed.Task;
+      Assert.Equal(jpeg, Assert.Single(inference.UploadedContent));
+      Assert.Equal("image/jpeg", Assert.Single(inference.UploadedMediaTypes));
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
+  public async Task FileEditorUsesTheSameRevisionContractWithoutOpeningCaptureScene()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new RecordingRecognitionClient();
+      var recognition = new RecognitionViewModel(inference, new FixedCaptureInput());
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(recognition, root, broker, annotations);
+      int scenes = 0;
+      handler.ScreenshotSessionReady += (_, _) => scenes++;
+      using var ready = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.ScreenshotSession is not null);
+      await handler.ExecuteAsync(new SelectImageEditFileCommand(),
+        TestContext.Current.CancellationToken);
+      RecognitionWorkbenchState state = await ready.Task;
+      Assert.False(state.ScreenshotSession!.SceneEditing);
+      Assert.NotNull(state.Input);
+      Assert.Empty(inference.UploadedContent);
+      Assert.Equal(0, scenes);
+      Guid sessionId = Guid.Parse(state.ScreenshotSession.SessionId);
+      var changed = await handler.ExecuteAsync(new NotifyScreenshotSessionRevisionCommand(sessionId, 1),
+        TestContext.Current.CancellationToken);
+      Assert.Equal(1, Assert.IsType<RecognitionWorkbenchState>(Assert.Single(changed.States)).ScreenshotSession!.Revision);
+      await handler.ExecuteAsync(new CloseScreenshotSessionCommand(),
+        TestContext.Current.CancellationToken);
+      Assert.Null(recognition.CurrentInput);
+      Assert.Null(handler.CurrentImageSessionId);
+      var late = await handler.ExecuteAsync(new NotifyScreenshotSessionRevisionCommand(sessionId, 2),
+        TestContext.Current.CancellationToken);
+      Assert.Null(Assert.IsType<RecognitionWorkbenchState>(Assert.Single(late.States)).ScreenshotSession);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
   public async Task RevisionNotifyInvalidatesResultAndRejectsStaleSessionCommands()
   {
     string root = TemporaryRoot();
@@ -650,12 +739,12 @@ public sealed class ScreenshotSessionWorkbenchTests
   {
     public byte[]? CopiedBytes { get; private set; }
 
-    public async Task CopyPngAsync(string sourcePath, CancellationToken cancellationToken)
+    public async Task CopyImageAsync(string sourcePath, CancellationToken cancellationToken)
     {
       CopiedBytes = await File.ReadAllBytesAsync(sourcePath, cancellationToken);
     }
 
-    public Task<bool> SavePngAsync(string sourcePath, CancellationToken cancellationToken) =>
+    public Task<bool> SaveImageAsync(string sourcePath, CancellationToken cancellationToken) =>
       Task.FromResult(true);
 
     public string? CopiedText { get; private set; }
@@ -1282,6 +1371,135 @@ public sealed class ScreenshotSessionWorkbenchTests
     finally { Directory.Delete(root, recursive: true); }
   }
 
+  [Theory]
+  [InlineData("revision")]
+  [InlineData("close")]
+  [InlineData("replace")]
+  public async Task ExpiringTextLayerReleasesItsFileAndLeaseWithoutReleasingTheCurrentInput(string action)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new TextLayerRecognitionClient();
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(recognition, root, broker, annotations,
+        new SettingsViewModel(inference), inferenceAttached: () => true,
+        textLayerRecognitionFactory: () => new RecognitionViewModel(inference, inputs));
+      RecognitionWorkbenchState captured;
+      using (var capture = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.ScreenshotSession is not null))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+        captured = await capture.Task;
+      }
+      Guid id = Guid.Parse(captured.ScreenshotSession!.SessionId);
+      WorkbenchAnnotationLease upload = UploadAnnotation(annotations, AnnotationPng);
+      RecognitionWorkbenchState ready;
+      using (var layer = new RecognitionStateAwaiter(handler, state => state.TextLayer?.Status == "textlayer.ready"))
+      {
+        await handler.ExecuteAsync(new PrepareScreenshotTextLayerCommand(upload.ResourceUri.AbsoluteUri, id, 0),
+          TestContext.Current.CancellationToken);
+        ready = await layer.Task;
+      }
+      WorkbenchResourceReference image = ready.TextLayer!.Image!;
+      Assert.NotEqual(captured.Input!.Url, image.Url);
+      string layerPath = Directory.GetFiles(Path.Combine(root, "session"), "*.png").Single();
+      await using WorkbenchResourceResponse inFlight = await broker.OpenAsync(new Uri(image.Url),
+        TestContext.Current.CancellationToken);
+      RecognitionWorkbenchState current;
+      if (action == "replace")
+      {
+        using var replacement = new RecognitionStateAwaiter(handler,
+          state => !state.IsBusy && state.ScreenshotSession is { } session &&
+            session.SessionId != captured.ScreenshotSession.SessionId);
+        await handler.ExecuteAsync(new SelectImageEditFileCommand(), TestContext.Current.CancellationToken);
+        current = await replacement.Task;
+      }
+      else
+      {
+        WorkbenchCommand command = action == "close" ? new CloseScreenshotSessionCommand()
+          : new NotifyScreenshotSessionRevisionCommand(id, 1);
+        var outcome = await handler.ExecuteAsync(command, TestContext.Current.CancellationToken);
+        current = Assert.IsType<RecognitionWorkbenchState>(Assert.Single(outcome.States));
+      }
+      Assert.Null(current.TextLayer);
+      await Assert.ThrowsAsync<WorkbenchResourceAccessException>(async () =>
+        await broker.OpenAsync(new Uri(image.Url), TestContext.Current.CancellationToken));
+      using var oldBytes = new MemoryStream();
+      await inFlight.Content.CopyToAsync(oldBytes, TestContext.Current.CancellationToken);
+      Assert.Equal(AnnotationPng, oldBytes.ToArray());
+      await inFlight.DisposeAsync();
+      Assert.False(File.Exists(layerPath));
+      if (action != "close")
+      {
+        Assert.NotNull(current.Input);
+        if (action == "revision") Assert.Equal(captured.Input.Url, current.Input!.Url);
+        await using var input = await broker.OpenAsync(new Uri(current.Input!.Url),
+          TestContext.Current.CancellationToken);
+        using var currentBytes = new MemoryStream();
+        await input.Content.CopyToAsync(currentBytes, TestContext.Current.CancellationToken);
+        Assert.Equal(CaptureBytes, currentBytes.ToArray());
+      }
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  private sealed class LeaseClock : TimeProvider
+  {
+    public Action? BeforeLease;
+    public override DateTimeOffset GetUtcNow()
+    {
+      Action? callback = Interlocked.Exchange(ref BeforeLease, null);
+      callback?.Invoke();
+      return DateTimeOffset.UtcNow;
+    }
+  }
+
+  [Fact]
+  public async Task RevisionChangingDuringTextImagePublicationDeletesTheLateFile()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new TextLayerRecognitionClient();
+      var inputs = new FixedCaptureInput();
+      var clock = new LeaseClock();
+      using var broker = new WorkbenchResourceBroker(root, clock);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(new RecognitionViewModel(inference, inputs),
+        root, broker, annotations, new SettingsViewModel(inference), inferenceAttached: () => true,
+        textLayerRecognitionFactory: () => new RecognitionViewModel(inference, inputs));
+      RecognitionWorkbenchState captured;
+      using (var capture = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.ScreenshotSession is not null))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+        captured = await capture.Task;
+      }
+      Guid id = Guid.Parse(captured.ScreenshotSession!.SessionId);
+      using var watcher = new FileSystemWatcher(Path.Combine(root, "session"), "*.png");
+      var deleted = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+      watcher.Deleted += (_, args) => deleted.TrySetResult(args.FullPath);
+      watcher.EnableRaisingEvents = true;
+      clock.BeforeLease = () => handler.ExecuteAsync(new NotifyScreenshotSessionRevisionCommand(id, 1),
+        TestContext.Current.CancellationToken).GetAwaiter().GetResult();
+      WorkbenchAnnotationLease upload = UploadAnnotation(annotations, AnnotationPng);
+      await handler.ExecuteAsync(new PrepareScreenshotTextLayerCommand(upload.ResourceUri.AbsoluteUri, id, 0),
+        TestContext.Current.CancellationToken);
+      string staleFile = await deleted.Task.WaitAsync(TimeSpan.FromSeconds(5),
+        TestContext.Current.CancellationToken);
+      Assert.False(File.Exists(staleFile));
+      Assert.Empty(Directory.GetFiles(Path.Combine(root, "session"), "*.png"));
+      await using var baseline = await broker.OpenAsync(new Uri(captured.Input!.Url),
+        TestContext.Current.CancellationToken);
+      Assert.Equal(CaptureBytes.Length, baseline.ContentLength);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
   [Fact]
   public async Task PrepareTextLayerDeduplicatesSameRevision()
   {
@@ -1650,6 +1868,7 @@ public sealed class ScreenshotSessionWorkbenchTests
   {
     public List<SubmitRequest> Requests { get; } = [];
     public List<IReadOnlyList<byte>> UploadedContent { get; } = [];
+    public List<string?> UploadedMediaTypes { get; } = [];
     private int submitCalls;
 
     public int SubmitCalls => submitCalls;
@@ -1662,6 +1881,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       Interlocked.Increment(ref submitCalls);
       Requests.Add(request);
       UploadedContent.AddRange(uploads.Values.Select(upload => upload.Content));
+      UploadedMediaTypes.AddRange(uploads.Values.Select(upload => upload.ContentType));
       return Task.FromResult(new JobRef
       {
         JobId = "job-text",

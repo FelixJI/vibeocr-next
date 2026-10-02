@@ -11,6 +11,7 @@ public static class WorkbenchProtocol
 public enum WorkbenchRoute
 {
   Recognition,
+  ImageEdit,
   Batch,
   QrCode,
   Pdf,
@@ -38,6 +39,10 @@ public enum WorkbenchProblemCategory
 public abstract record WorkbenchCommand;
 
 public sealed record NavigateWorkbenchCommand(WorkbenchRoute Route) : WorkbenchCommand;
+
+public sealed record SelectImageEditFileCommand : WorkbenchCommand;
+public sealed record ReadImageEditClipboardCommand : WorkbenchCommand;
+public sealed record OpenDroppedImageEditFileCommand(string Path) : WorkbenchCommand;
 
 public sealed record CaptureRecognitionScreenCommand : WorkbenchCommand;
 
@@ -362,7 +367,8 @@ public sealed record RecognitionWorkbenchState(
 public sealed record RecognitionScreenshotSessionState(
   string SessionId,
   long Revision,
-  bool TextSelectionRequested = false);
+  bool TextSelectionRequested = false,
+  bool SceneEditing = false);
 
 /// <summary>
 /// In-place selectable text layer bound to one session revision. The lines

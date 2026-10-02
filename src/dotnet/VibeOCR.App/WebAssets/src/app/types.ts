@@ -14,6 +14,8 @@ export interface AppViewState {
 }
 
 export type AppActionType =
+  | "imageEdit.selectImage"
+  | "imageEdit.readClipboard"
   | "recognition.selectImage"
   | "recognition.readClipboard"
   | "recognition.captureScreen"

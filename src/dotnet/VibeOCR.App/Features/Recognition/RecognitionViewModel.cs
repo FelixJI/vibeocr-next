@@ -122,6 +122,20 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     /// 纯截图会话：只采集输入并建立本地编辑基准，不提交任何 OCR 任务。
     /// Supervisor 未连接时同样可用。
     /// </summary>
+    public Task OpenImageForEditAsync(CancellationToken cancellationToken) =>
+        RunInputAsync(_inputs.PickFileAsync, cancellationToken,
+            recognize: false, persistCurrentInput: true);
+
+    public Task PasteImageForEditAsync(CancellationToken cancellationToken) =>
+        RunInputAsync(_inputs.ReadClipboardAsync, cancellationToken,
+            recognize: false, persistCurrentInput: true);
+
+    public Task DropImageForEditAsync(string path, CancellationToken cancellationToken) =>
+        RunInputAsync(ct => _inputs.ReadDroppedFileAsync(path, ct), cancellationToken,
+            recognize: false, persistCurrentInput: true);
+
+    public void ReleaseInput() => CurrentInput = null;
+
     public Task CaptureScreenshotSessionAsync(CancellationToken cancellationToken) =>
         RunInputAsync(_inputs.CaptureScreenAsync, cancellationToken,
             recognize: false, persistCurrentInput: true);

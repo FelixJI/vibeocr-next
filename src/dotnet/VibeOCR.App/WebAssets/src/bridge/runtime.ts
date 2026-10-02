@@ -9,6 +9,7 @@ import type {
 
 const APP_ROUTES = new Set<AppRoute>([
   "recognition",
+  "imageEdit",
   "batch",
   "qrcode",
   "pdf",

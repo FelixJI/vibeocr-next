@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AppActions } from "../app/types";
 import {
   imageTransform,
+  finalOutputSize,
   outputSize,
   projectPoint,
   rotateEditorState,
@@ -96,6 +97,14 @@ const STROKE_COLORS = [
 const STROKE_WIDTHS = [2, 3, 5, 8] as const;
 const FONT_SIZES = [16, 24, 32, 48] as const;
 
+/** 最终编码格式：blob.type 决定真实编码器，扩展名/MIME 与文件签名一致。 */
+export type OutputImageFormat = "image/png" | "image/jpeg";
+const JPEG_QUALITIES = [0.6, 0.75, 0.85, 0.9, 0.95] as const;
+const SCALE_PERCENTS = [25, 50, 75, 100, 150, 200] as const;
+/** 输出画布上限：单边与总像素均留在浏览器 canvas 面积上限内。 */
+const MAX_OUTPUT_DIMENSION = 16384;
+const MAX_OUTPUT_PIXELS = 64_000_000;
+
 /** 活动纯截图会话句柄；宿主回显当前内容修订。 */
 export interface ScreenshotSessionHandle {
   readonly sessionId: string;
@@ -107,6 +116,8 @@ interface ImageCanvasEditorProps {
   readonly canExport: boolean;
   readonly canRecognize: boolean;
   readonly source: string;
+  /** 原图体积（字节）；宿主可选提供，缺省时只显示尺寸不显示原图体积。 */
+  readonly sourceByteLength?: number;
   readonly session?: ScreenshotSessionHandle;
   readonly textLayer?: ScreenshotTextLayerState;
   readonly autoText?: boolean;
@@ -119,6 +130,7 @@ export function ImageCanvasEditor({
   canExport,
   canRecognize,
   source,
+  sourceByteLength,
   session,
   textLayer,
   autoText: autoTextProp,
@@ -152,11 +164,39 @@ export function ImageCanvasEditor({
   const [history, setHistory] = useState<readonly EditorState[]>([EMPTY]);
   const [historyIndex, setHistoryIndex] = useState(0);
   const [imageRevision, setImageRevision] = useState(0);
+  // 源图尺寸按 source 键控：换图后旧尺寸立即失效，不在 effect 内同步重置。
+  const [decodedSourceSize, setDecodedSourceSize] = useState<{
+    source: string;
+    size: CanvasSize;
+  }>();
+  const sourceSize =
+    decodedSourceSize?.source === source ? decodedSourceSize.size : undefined;
   const [isExporting, setIsExporting] = useState(false);
   const [draftMark, setDraftMark] = useState<Mark | undefined>();
   // 本地修订：编辑提交即时推进，不等宿主回显；文字层绑定据此立即失效。
   const [localRevision, setLocalRevision] = useState(session?.revision ?? 0);
   const [localAutoText, setLocalAutoText] = useState(false);
+  // 输出设置属于会话内容的一部分：改动推进修订、使旧文字层/识别结果失效，
+  // 但不入编辑历史（撤销只回退几何编辑，含尺寸变更）。
+  const [outputFormat, setOutputFormat] =
+    useState<OutputImageFormat>("image/png");
+  const [jpegQuality, setJpegQuality] = useState<number>(0.9);
+  // 权威最新值：导出 await 归来后的比较读 ref，不依赖旧闭包。
+  const outputFormatRef = useRef<OutputImageFormat>(outputFormat);
+  const jpegQualityRef = useRef<number>(jpegQuality);
+  // 真实最终输出预览：按当前设置真实编码 blob 后再解码显示，与导出同源。
+  const [finalPreview, setFinalPreview] = useState<{
+    key: string;
+    url: string;
+    mediaType: OutputImageFormat;
+    byteLength: number;
+    width: number;
+    height: number;
+  }>();
+  const [sizeDraft, setSizeDraft] = useState<{
+    width: string;
+    height: string;
+  }>({ width: "", height: "" });
   const autoText = autoTextProp ?? localAutoText;
   const [prepareNonce, setPrepareNonce] = useState(0);
   const [operationMessage, setOperationMessage] = useState(
@@ -179,6 +219,7 @@ export function ImageCanvasEditor({
     setDraftMark(undefined);
     selectedMarkRef.current = undefined;
     setSelectedMark(undefined);
+    setFinalPreview(undefined);
     sessionIdRef.current = session?.sessionId;
     contentRevisionRef.current = session?.revision ?? 0;
     setLocalRevision(session?.revision ?? 0);
@@ -208,6 +249,10 @@ export function ImageCanvasEditor({
     image.decoding = "async";
     image.onload = () => {
       imageRef.current = image;
+      setDecodedSourceSize({
+        source,
+        size: { width: image.naturalWidth, height: image.naturalHeight },
+      });
       setImageRevision((current) => current + 1);
     };
     image.src = source;
@@ -224,8 +269,119 @@ export function ImageCanvasEditor({
       state,
       selectedMark,
       draftMark ? [...state.marks, draftMark] : state.marks,
+      true,
+      1,
+      // 预览背底与导出一致：JPEG 白底合成透明，PNG 沿用原有深色合成。
+      outputFormat === "image/jpeg" ? "#ffffff" : "#161616",
     );
-  }, [imageRevision, selectedMark, state, draftMark]);
+  }, [imageRevision, selectedMark, state, draftMark, outputFormat]);
+
+  // 导出/信息行共用的当前输出尺寸；值不变时保持引用稳定，避免无关编辑
+  // 重置用户正在输入的宽高草稿。
+  const lastOutputSize = useRef<CanvasSize | undefined>(undefined);
+  const currentOutputSize = useMemo<CanvasSize | undefined>(() => {
+    const decoded = decodedSourceSize;
+    const image = imageRef.current;
+    if (
+      !decoded ||
+      decoded.source !== source ||
+      !image ||
+      !image.naturalWidth ||
+      !image.naturalHeight
+    ) {
+      return undefined;
+    }
+    const canvas = canvasRef.current;
+    const size = finalOutputSize(image, state, {
+      width: canvas?.width ?? 900,
+      height: canvas?.height ?? 600,
+    });
+    const previous = lastOutputSize.current;
+    if (
+      previous &&
+      previous.width === size.width &&
+      previous.height === size.height
+    ) {
+      return previous;
+    }
+    lastOutputSize.current = size;
+    return size;
+  }, [state, decodedSourceSize, source]);
+
+  // 尺寸输入草稿只在真实输出尺寸变化时刷新（渲染期随值调整，不打断输入）。
+  const [appliedDraftSize, setAppliedDraftSize] = useState<
+    CanvasSize | undefined
+  >();
+  if (currentOutputSize && appliedDraftSize !== currentOutputSize) {
+    setAppliedDraftSize(currentOutputSize);
+    setSizeDraft({
+      width: String(currentOutputSize.width),
+      height: String(currentOutputSize.height),
+    });
+  }
+
+  // 真实最终输出预览：编辑稳定后用导出同源的真实编码器产出 blob，
+  // 再交回浏览器原生解码显示；不把预压缩画布伪装成最终像素。
+  const [failedPreviewKey, setFailedPreviewKey] = useState<string>();
+  const finalPreviewKey = `${resetKey}|${imageRevision}|${outputFormat}|${jpegQuality}|${contentRevisionRef.current}`;
+  useEffect(() => {
+    const image = imageRef.current;
+    if (!image) return;
+    let cancelled = false;
+    const failPreview = () => {
+      if (cancelled) return;
+      setFailedPreviewKey(finalPreviewKey);
+      setOperationMessage(
+        "最终输出预览暂不可用，编辑内容已保留；调整输出设置后重试。",
+      );
+    };
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const blob = await exportCanvas(image, canvasRef.current, state, {
+            format: outputFormat,
+            quality: jpegQuality,
+          });
+          const url = URL.createObjectURL(blob);
+          const decoded = new Image();
+          decoded.decoding = "async";
+          decoded.onload = () => {
+            if (cancelled) {
+              URL.revokeObjectURL(url);
+              return;
+            }
+            setFinalPreview({
+              key: finalPreviewKey,
+              url,
+              mediaType:
+                blob.type === "image/jpeg" ? "image/jpeg" : "image/png",
+              byteLength: blob.size,
+              width: decoded.naturalWidth,
+              height: decoded.naturalHeight,
+            });
+          };
+          decoded.onerror = () => {
+            URL.revokeObjectURL(url);
+            failPreview();
+          };
+          decoded.src = url;
+        } catch {
+          failPreview();
+        }
+      })();
+    }, 500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [state, outputFormat, jpegQuality, finalPreviewKey]);
+
+  // 换新预览或卸载时释放旧 blob URL，避免像素与临时资源泄漏。
+  const finalPreviewUrl = finalPreview?.url;
+  useEffect(() => {
+    if (!finalPreviewUrl) return;
+    return () => URL.revokeObjectURL(finalPreviewUrl);
+  }, [finalPreviewUrl]);
 
   // 原位取字：会话/修订/工具变化时导出当前最终 PNG 并请求宿主准备文字层。
   const sessionKeyForLayer = session?.sessionId ?? "";
@@ -287,7 +443,7 @@ export function ImageCanvasEditor({
     }
     prepareInFlight.current = true;
     try {
-      const exported = await exportFinalPngIfUnchanged();
+      const exported = await exportFinalImageIfUnchanged();
       if (!exported) return;
       await actions.run({
         type: "recognition.prepareScreenshotTextLayer",
@@ -309,11 +465,12 @@ export function ImageCanvasEditor({
   }
 
   function notifyContentRevision() {
-    const currentSession = sessionIdRef.current;
-    if (!currentSession) return;
+    // 本地内容版本始终推进：文件会话没有宿主修订回显，也要能拒绝迟到导出。
     contentRevisionRef.current += 1;
     const revision = contentRevisionRef.current;
     setLocalRevision(revision);
+    const currentSession = sessionIdRef.current;
+    if (!currentSession) return;
     void actions.run({
       type: "recognition.notifyScreenshotRevision",
       sessionId: currentSession,
@@ -352,6 +509,96 @@ export function ImageCanvasEditor({
 
   function currentStyle(): Mark["style"] {
     return { color: strokeColor, strokeWidth, fontSize };
+  }
+
+  function isValidOutputSize(size: { width: number; height: number }): boolean {
+    return (
+      Number.isInteger(size.width) &&
+      Number.isInteger(size.height) &&
+      size.width >= 1 &&
+      size.height >= 1 &&
+      size.width <= MAX_OUTPUT_DIMENSION &&
+      size.height <= MAX_OUTPUT_DIMENSION &&
+      size.width * size.height <= MAX_OUTPUT_PIXELS
+    );
+  }
+
+  /** 尺寸变更入历史、推进修订；无效目标保持原图可恢复状态。 */
+  function applyResize(
+    next: { width: number; height: number } | undefined,
+    label: string,
+  ) {
+    const image = imageRef.current;
+    if (!image) {
+      setOperationMessage("图片尚未解码完成，无法调整输出尺寸。");
+      return;
+    }
+    if (next && !isValidOutputSize(next)) {
+      setOperationMessage(
+        `输出尺寸超出上限（单边≤${MAX_OUTPUT_DIMENSION}px，总像素≤${MAX_OUTPUT_PIXELS / 1_000_000}MP），已保持当前尺寸。`,
+      );
+      return;
+    }
+    commit({ ...state, resize: next });
+    setOperationMessage(
+      next
+        ? `已设置输出尺寸 ${next.width}×${next.height}（${label}）；可用撤销恢复。`
+        : "已恢复原始输出尺寸；可用撤销恢复。",
+    );
+  }
+
+  function applyScalePercent(percent: number) {
+    const base = currentOutputSize;
+    if (!base) {
+      setOperationMessage("图片尚未解码完成，无法调整输出尺寸。");
+      return;
+    }
+    if (percent === 100) {
+      applyResize(undefined, "原始尺寸");
+      return;
+    }
+    applyResize(
+      {
+        width: Math.max(1, Math.round((base.width * percent) / 100)),
+        height: Math.max(1, Math.round((base.height * percent) / 100)),
+      },
+      `等比 ${percent}%`,
+    );
+  }
+
+  function applySpecifiedSize() {
+    const width = Number(sizeDraft.width);
+    const height = Number(sizeDraft.height);
+    if (
+      sizeDraft.width.trim() === "" ||
+      sizeDraft.height.trim() === "" ||
+      !Number.isInteger(width) ||
+      !Number.isInteger(height)
+    ) {
+      setOperationMessage("请输入不小于 1 的整数宽高后再应用。");
+      return;
+    }
+    applyResize({ width, height }, "指定尺寸");
+  }
+
+  function changeOutputFormat(format: OutputImageFormat) {
+    if (format === outputFormat) return;
+    outputFormatRef.current = format;
+    setOutputFormat(format);
+    setOperationMessage(
+      format === "image/jpeg"
+        ? "输出格式已切换为 JPEG：透明区域将以白色背景合成，可在“JPEG 质量”中调整压缩。"
+        : "输出格式已切换为 PNG。",
+    );
+    // 格式改变最终像素：推进修订使旧文字层/识别结果失效，在途导出被拒绝。
+    notifyContentRevision();
+  }
+
+  function changeJpegQuality(quality: number) {
+    if (quality === jpegQuality) return;
+    jpegQualityRef.current = quality;
+    setJpegQuality(quality);
+    notifyContentRevision();
   }
 
   function pointerMove(event: React.PointerEvent<HTMLCanvasElement>) {
@@ -479,41 +726,56 @@ export function ImageCanvasEditor({
   interface FrozenExportContext {
     readonly key: string;
     readonly sessionId: string | undefined;
-    readonly revision: number | undefined;
+    readonly contentVersion: number;
     readonly image: HTMLImageElement | undefined;
+    readonly output: {
+      readonly format: OutputImageFormat;
+      readonly quality: number;
+    };
   }
 
   function freezeExportContext(): FrozenExportContext {
-    const sessionId = sessionIdRef.current;
     return {
       key: currentKeyRef.current,
-      sessionId,
-      revision: sessionId ? contentRevisionRef.current : undefined,
+      sessionId: sessionIdRef.current,
+      contentVersion: contentRevisionRef.current,
       image: imageRef.current,
+      output: {
+        format: outputFormatRef.current,
+        quality: jpegQualityRef.current,
+      },
     };
   }
 
   function exportContextUnchanged(frozen: FrozenExportContext): boolean {
-    if (
-      frozen.key !== currentKeyRef.current ||
-      frozen.sessionId !== sessionIdRef.current ||
-      frozen.image !== imageRef.current
-    ) {
-      return false;
-    }
-    // 上传期间发生编辑（修订前进）同样禁止把旧像素贴上新修订。
+    // 全部读 ref：上传期间用户切换格式/质量或几何编辑（含无会话的文件
+    // 模式）都推进内容版本，旧像素不得贴上新设置发出。
     return (
-      frozen.sessionId === undefined ||
-      frozen.revision === contentRevisionRef.current
+      frozen.key === currentKeyRef.current &&
+      frozen.sessionId === sessionIdRef.current &&
+      frozen.image === imageRef.current &&
+      frozen.contentVersion === contentRevisionRef.current &&
+      frozen.output.format === outputFormatRef.current &&
+      frozen.output.quality === jpegQualityRef.current
     );
   }
 
-  /** 三出口共用的安全导出：上传归来后校验未变；变化则不发送。 */
-  async function exportFinalPngIfUnchanged(): Promise<
-    { resourceUri: string; sessionId?: string; revision?: number } | undefined
+  /** 多出口共用的安全导出：上传归来后校验未变；变化则不发送。 */
+  async function exportFinalImageIfUnchanged(): Promise<
+    | {
+        resourceUri: string;
+        sessionId?: string;
+        revision?: number;
+        mediaType: OutputImageFormat;
+        byteLength: number;
+      }
+    | undefined
   > {
     const frozen = freezeExportContext();
-    const blob = await exportCanvas(frozen.image, canvasRef.current, state);
+    const blob = await exportCanvas(frozen.image, canvasRef.current, state, {
+      format: outputFormat,
+      quality: jpegQuality,
+    });
     const resourceUri = await uploadAnnotatedImage(blob);
     if (!exportContextUnchanged(frozen)) {
       setOperationMessage(
@@ -524,7 +786,9 @@ export function ImageCanvasEditor({
     return {
       resourceUri,
       sessionId: frozen.sessionId,
-      revision: frozen.revision,
+      revision: frozen.sessionId ? frozen.contentVersion : undefined,
+      mediaType: blob.type === "image/jpeg" ? "image/jpeg" : "image/png",
+      byteLength: blob.size,
     };
   }
 
@@ -534,7 +798,7 @@ export function ImageCanvasEditor({
     setIsExporting(true);
     try {
       setOperationMessage("正在生成并复制标注图片……");
-      const exported = await exportFinalPngIfUnchanged();
+      const exported = await exportFinalImageIfUnchanged();
       if (!exported) return;
       const copied = exported.sessionId
         ? await actions.run({
@@ -550,8 +814,8 @@ export function ImageCanvasEditor({
       setOperationMessage(
         copied
           ? exported.sessionId
-            ? "已复制截图副本；显式识别只会使用当前最终画面。"
-            : "已复制标注图片副本。识别结果保持不变。"
+            ? `已复制截图副本（${formatLabel(exported)}）；显式识别只会使用当前最终画面。`
+            : `已复制标注图片副本（${formatLabel(exported)}）。识别结果保持不变。`
           : "复制未完成，请查看页面提示后重试。",
       );
     } catch {
@@ -568,7 +832,7 @@ export function ImageCanvasEditor({
     setIsExporting(true);
     try {
       setOperationMessage("正在生成标注图片并打开系统保存窗口……");
-      const exported = await exportFinalPngIfUnchanged();
+      const exported = await exportFinalImageIfUnchanged();
       if (!exported) return;
       const saved = exported.sessionId
         ? await actions.run({
@@ -584,8 +848,8 @@ export function ImageCanvasEditor({
       setOperationMessage(
         saved
           ? exported.sessionId
-            ? "已保存截图副本；显式识别只会使用当前最终画面。"
-            : "已保存标注图片副本。识别结果保持不变。"
+            ? `已保存截图副本（${formatLabel(exported)}）；显式识别只会使用当前最终画面。`
+            : `已保存标注图片副本（${formatLabel(exported)}）。识别结果保持不变。`
           : "保存未完成，请查看页面提示后重试。",
       );
     } catch {
@@ -601,7 +865,7 @@ export function ImageCanvasEditor({
     exportInProgressRef.current = true;
     setIsExporting(true);
     try {
-      const exported = await exportFinalPngIfUnchanged();
+      const exported = await exportFinalImageIfUnchanged();
       if (!exported?.sessionId) return;
       const pinned = await actions.run({
         type: "recognition.pinScreenshotImage",
@@ -626,7 +890,7 @@ export function ImageCanvasEditor({
     setIsExporting(true);
     try {
       setOperationMessage("正在导出当前最终画面并提交显式识别……");
-      const exported = await exportFinalPngIfUnchanged();
+      const exported = await exportFinalImageIfUnchanged();
       if (!exported) return;
       const started = await actions.run({
         type: "recognition.recognizeScreenshotImage",
@@ -636,7 +900,7 @@ export function ImageCanvasEditor({
       });
       setOperationMessage(
         started
-          ? "已提交识别当前图；完成后结果显示在右侧。"
+          ? `已提交识别当前图（${formatLabel(exported)}）；完成后结果显示在右侧。`
           : "识别未开始：内容已更新或会话已失效，请重试。",
       );
     } catch {
@@ -984,9 +1248,114 @@ export function ImageCanvasEditor({
           重做
         </ToolbarButton>
       </Toolbar>
+      <Toolbar aria-label="输出设置" size="small" className="editor-toolbar">
+        <label className="editor-style-control">
+          <span aria-hidden="true">输出格式</span>
+          <Select
+            aria-label="输出格式"
+            size="small"
+            value={outputFormat}
+            onChange={(_, data) =>
+              changeOutputFormat(
+                data.value === "image/jpeg" ? "image/jpeg" : "image/png",
+              )
+            }
+          >
+            <option value="image/png">PNG（无损）</option>
+            <option value="image/jpeg">JPEG（白底）</option>
+          </Select>
+        </label>
+        {outputFormat === "image/jpeg" && (
+          <label className="editor-style-control">
+            <span aria-hidden="true">JPEG 质量</span>
+            <Select
+              aria-label="JPEG 质量"
+              size="small"
+              value={String(jpegQuality)}
+              onChange={(_, data) => changeJpegQuality(Number(data.value))}
+            >
+              {JPEG_QUALITIES.map((quality) => (
+                <option key={quality} value={String(quality)}>
+                  {Math.round(quality * 100)}%
+                </option>
+              ))}
+            </Select>
+          </label>
+        )}
+        <label className="editor-style-control">
+          <span aria-hidden="true">等比缩放</span>
+          <Select
+            aria-label="等比缩放"
+            size="small"
+            value=""
+            onChange={(_, data) => {
+              if (data.value) applyScalePercent(Number(data.value));
+            }}
+          >
+            <option value="">选择比例</option>
+            {SCALE_PERCENTS.map((percent) => (
+              <option key={percent} value={String(percent)}>
+                {percent === 100 ? "100%（原始）" : `${percent}%`}
+              </option>
+            ))}
+          </Select>
+        </label>
+        <label className="editor-style-control">
+          <span aria-hidden="true">输出尺寸</span>
+          <Input
+            aria-label="输出宽度"
+            min={1}
+            size="small"
+            style={{ width: 76 }}
+            type="number"
+            value={sizeDraft.width}
+            onChange={(_, data) =>
+              setSizeDraft((current) => ({ ...current, width: data.value }))
+            }
+          />
+          <span aria-hidden="true">×</span>
+          <Input
+            aria-label="输出高度"
+            min={1}
+            size="small"
+            style={{ width: 76 }}
+            type="number"
+            value={sizeDraft.height}
+            onChange={(_, data) =>
+              setSizeDraft((current) => ({ ...current, height: data.value }))
+            }
+          />
+          <ToolbarButton aria-label="应用尺寸" onClick={applySpecifiedSize}>
+            应用
+          </ToolbarButton>
+        </label>
+      </Toolbar>
       <p className="editor-guidance">
         拖拽绘制或裁剪；选择标注后可拖动。手形或按住 Space
         可平移。画笔与荧光笔沿拖拽轨迹绘制，序号单击放置。马赛克、模糊与打码会写入复制、保存副本及显式识别输入；画面缩放不改变内容。
+      </p>
+      <p className="editor-guidance">
+        {sourceSize && currentOutputSize
+          ? `原图 ${sourceSize.width}×${sourceSize.height}${
+              typeof sourceByteLength === "number"
+                ? ` · ${formatBytes(sourceByteLength)}`
+                : ""
+            } → 输出 ${currentOutputSize.width}×${currentOutputSize.height} · ${
+              outputFormat === "image/jpeg"
+                ? `JPEG 质量 ${Math.round(jpegQuality * 100)}%`
+                : "PNG 无损"
+            } · ${
+              finalPreview && finalPreview.key === finalPreviewKey
+                ? `实际体积 ${formatBytes(finalPreview.byteLength)}`
+                : failedPreviewKey === finalPreviewKey
+                  ? "实际体积暂不可用"
+                  : "实际体积生成中（按当前设置真实编码）"
+            }。${
+              outputFormat === "image/jpeg"
+                ? "JPEG 不保留透明：透明区域将合成白色背景。"
+                : ""
+            }`
+          : "图片解码完成后显示原图与输出尺寸及实际体积。"}
       </p>
       {tool === "textSelect" && textLayerHint && (
         <p className="editor-guidance">{textLayerHint}</p>
@@ -1147,6 +1516,21 @@ export function ImageCanvasEditor({
           </Button>
         )}
       </div>
+      {finalPreview && (
+        <div>
+          <p className="editor-guidance">
+            最终输出预览（{finalPreview.mediaType} · {finalPreview.width}×
+            {finalPreview.height} · 实际 {formatBytes(finalPreview.byteLength)}
+            ）：由最近一次设置真实编码后再解码显示，不是预压缩画布；复制、保存与显式识别走同一导出管线。
+          </p>
+          <img
+            alt="最终输出预览"
+            className="inspection-canvas"
+            src={finalPreview.url}
+            style={{ maxWidth: "100%" }}
+          />
+        </div>
+      )}
       <div className="editor-footer">
         <Button
           size="small"
@@ -1197,7 +1581,10 @@ export function ImageCanvasEditor({
           appearance="transparent"
           size="small"
           disabled={
-            state.marks.length === 0 && state.rotation === 0 && !state.crop
+            state.marks.length === 0 &&
+            state.rotation === 0 &&
+            !state.crop &&
+            !state.resize
           }
           onClick={() => {
             select(undefined);
@@ -1214,6 +1601,20 @@ export function ImageCanvasEditor({
       </div>
     </div>
   );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes} B`;
+}
+
+/** 导出完成后的真实体积描述；体积来自实际编码后的 blob。 */
+function formatLabel(exported: {
+  mediaType: string;
+  byteLength: number;
+}): string {
+  return `${exported.mediaType} · ${formatBytes(exported.byteLength)}`;
 }
 
 function textLayerStatusLabel(
@@ -1278,12 +1679,13 @@ function draw(
   marksOverride?: readonly Mark[],
   showEditorChrome = true,
   markScale = 1,
+  background = "#161616",
 ) {
   const context = canvas?.getContext("2d");
   if (!canvas || !context) return;
   const marks = marksOverride ?? state.marks;
   context.clearRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = "#161616";
+  context.fillStyle = background;
   context.fillRect(0, 0, canvas.width, canvas.height);
   context.save();
   if (state.crop) {
@@ -1526,13 +1928,40 @@ function clampRect(rect: ReturnType<typeof normalizedRect>, size: CanvasSize) {
   return { x, y, width: right - x, height: bottom - y };
 }
 
-function exportCanvas(
+interface ExportCanvasOptions {
+  readonly format: OutputImageFormat;
+  readonly quality: number;
+}
+
+/** 编码器必须真实产出目标格式：类型与文件签名不一致时拒绝，不得只改后缀。 */
+async function verifyEncodedBlob(
+  blob: Blob,
+  format: OutputImageFormat,
+): Promise<void> {
+  if (blob.type !== format) {
+    throw new Error(`canvas encoder did not produce ${format}`);
+  }
+  const signature = new Uint8Array(await blob.slice(0, 4).arrayBuffer());
+  const isPng =
+    signature[0] === 0x89 &&
+    signature[1] === 0x50 &&
+    signature[2] === 0x4e &&
+    signature[3] === 0x47;
+  const isJpeg =
+    signature[0] === 0xff && signature[1] === 0xd8 && signature[2] === 0xff;
+  if (format === "image/png" ? !isPng : !isJpeg) {
+    throw new Error(`encoded bytes do not match ${format}`);
+  }
+}
+
+async function exportCanvas(
   image: HTMLImageElement | undefined,
   displayCanvas: HTMLCanvasElement | null,
   state: EditorState,
+  options: ExportCanvasOptions,
 ): Promise<Blob> {
   if (!image || !displayCanvas || !image.naturalWidth || !image.naturalHeight) {
-    return Promise.reject(new Error("source image is unavailable"));
+    throw new Error("source image is unavailable");
   }
   const displaySize = {
     width: displayCanvas.width,
@@ -1569,6 +1998,8 @@ function exportCanvas(
     undefined,
     false,
     1 / displayScale,
+    // JPEG 无透明：透明区域在导出时合成白色背景，与预览一致。
+    options.format === "image/jpeg" ? "#ffffff" : "#161616",
   );
 
   const mappedCrop = state.crop
@@ -1581,15 +2012,19 @@ function exportCanvas(
       )
     : { x: 0, y: 0, ...naturalSize };
   if (mappedCrop.width < 1 || mappedCrop.height < 1) {
-    return Promise.reject(new Error("crop area is empty"));
+    throw new Error("crop area is empty");
   }
+  // 裁剪与指定输出尺寸同一次 drawImage 完成；无 resize 时 1:1 拷贝。
+  const target = finalOutputSize(image, state, displaySize);
   const output = document.createElement("canvas");
-  output.width = Math.max(1, Math.round(mappedCrop.width));
-  output.height = Math.max(1, Math.round(mappedCrop.height));
+  output.width = target.width;
+  output.height = target.height;
   const context = output.getContext("2d");
   if (!context) {
-    return Promise.reject(new Error("canvas export is unavailable"));
+    throw new Error("canvas export is unavailable");
   }
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
   context.drawImage(
     rendered,
     mappedCrop.x,
@@ -1601,12 +2036,22 @@ function exportCanvas(
     output.width,
     output.height,
   );
-  return new Promise((resolve, reject) => {
-    output.toBlob((blob) => {
-      if (blob) resolve(blob);
-      else reject(new Error("PNG export failed"));
-    }, "image/png");
+  const blob = await new Promise<Blob | null>((resolve) => {
+    output.toBlob(
+      (value) => resolve(value),
+      options.format,
+      options.format === "image/jpeg" ? options.quality : undefined,
+    );
   });
+  if (!blob) {
+    throw new Error(
+      options.format === "image/jpeg"
+        ? "JPEG export failed"
+        : "PNG export failed",
+    );
+  }
+  await verifyEncodedBlob(blob, options.format);
+  return blob;
 }
 
 function findMark(marks: readonly Mark[], point: Point): number | undefined {

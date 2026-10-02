@@ -57,6 +57,12 @@ public sealed partial class MainWindow : Window
   private readonly WebWorkbenchHost webHost;
   private readonly WorkbenchResourceBroker resourceBroker;
   private readonly string resourceRoot;
+  private readonly WorkbenchAnnotationStore annotationStore;
+  private ImageEditWindow? imageEditor;
+  private bool shuttingDown;
+  internal Microsoft.UI.Xaml.Controls.WebView2? SceneWebView => imageEditor?.WebView;
+  internal Guid? SceneSessionId => imageEditor?.SessionId;
+  private Microsoft.UI.Xaml.Controls.WebView2 SmokeEditorWebView => SceneWebView ?? WorkbenchWebView;
   private readonly List<PinnedImageWindow> pinnedImages = [];
   private readonly Dictionary<(Guid SessionId, long Revision),
     (Task<RecognitionTextLayerState?> Task, CancellationTokenSource Cancellation)> pinTextTasks = [];
@@ -73,7 +79,6 @@ public sealed partial class MainWindow : Window
   private bool managedEnvironmentSmokeStarted;
   private bool paddleModesSmokeStarted;
   private bool initialized;
-  private WorkbenchRoute currentRoute = WorkbenchRoute.Recognition;
 
   internal MainWindow(
     DiagnosticsViewModel diagnostics,
@@ -120,7 +125,7 @@ public sealed partial class MainWindow : Window
     resourceRoot = Path.Combine(layout.DataRoot, "web-resources");
     Directory.CreateDirectory(resourceRoot);
     resourceBroker = new WorkbenchResourceBroker(resourceRoot);
-    var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+    annotationStore = new WorkbenchAnnotationStore(resourceRoot);
     commandHandler = new DesktopWorkbenchCommandHandler(
       recognitionFactory,
       batchFactory,
@@ -132,13 +137,14 @@ public sealed partial class MainWindow : Window
       diagnostics,
       resourceBroker,
       resourceRoot,
-      () => WindowNative.GetWindowHandle(this),
+      () => imageEditor is { } editor ? WindowNative.GetWindowHandle(editor) : WindowNative.GetWindowHandle(this),
       annotationStore,
       inferenceAttached: inferenceAttached,
       supervisorInstanceId: supervisorInstanceId,
       pinScreenshot: PinScreenshot,
       shellActions: shellActions,
       optionsLayout: layout);
+    commandHandler.ScreenshotSessionReady += ShowImageEditor;
     commandHandler.ScreenshotTextLayerChanged += layer =>
     {
       void UpdatePins()
@@ -165,6 +171,11 @@ public sealed partial class MainWindow : Window
     {
       void MarkPins()
       {
+        if (imageEditor is { } editor && editor.SessionId == sessionId)
+        {
+          imageEditor = null;
+          editor.Close();
+        }
         foreach (PinnedImageWindow pinned in pinnedImages.ToArray())
           if (pinned.SessionId == sessionId && pinned.Revision == revision)
             pinned.MarkOldSnapshot();
@@ -270,11 +281,34 @@ public sealed partial class MainWindow : Window
       maximized);
   }
 
+  private void ShowImageEditor(Guid sessionId, VibeOCR.Platform.Windows.PhysicalRectangle? bounds)
+  {
+    if (shuttingDown || commandHandler.CurrentImageSessionId != sessionId) return;
+    if (imageEditor is { } previous)
+    {
+      imageEditor = null;
+      previous.Close();
+    }
+    var editor = new ImageEditWindow(sessionId, application, resourceBroker, annotationStore,
+      layout.WebAssetsRoot, bounds);
+    imageEditor = editor;
+    editor.Closed += async (_, _) =>
+    {
+      if (!ReferenceEquals(imageEditor, editor)) return;
+      imageEditor = null;
+      if (!shuttingDown && commandHandler.CurrentImageSessionId == sessionId)
+        await application.ExecuteAsync(new WorkbenchCommandEnvelope(Guid.NewGuid(),
+          new CloseScreenshotSessionCommand()), CancellationToken.None);
+    };
+    editor.Activate();
+  }
+
   internal void NavigateTo(string? destination)
   {
     WorkbenchRoute route = destination switch
     {
       "recognition" => WorkbenchRoute.Recognition,
+      "imageEdit" => WorkbenchRoute.ImageEdit,
       "batch" => WorkbenchRoute.Batch,
       "qrcode" => WorkbenchRoute.QrCode,
       "pdf" => WorkbenchRoute.Pdf,
@@ -290,7 +324,6 @@ public sealed partial class MainWindow : Window
         $"Navigation destination '{destination}' is unavailable; falling back to recognition.");
     }
     commandHandler.EndHotkeyRecording();
-    currentRoute = route;
     _ = NavigateAsync(route);
   }
 
@@ -330,7 +363,6 @@ public sealed partial class MainWindow : Window
   /// <summary>纯截图编辑入口：只截取并进入编辑会话，不提交任何识别请求。</summary>
   internal async Task CaptureScreenshotForEditAsync()
   {
-    NavigateTo("recognition");
     await application.ExecuteAsync(
       new WorkbenchCommandEnvelope(
         Guid.NewGuid(),
@@ -371,8 +403,9 @@ public sealed partial class MainWindow : Window
       {
         return;
       }
-      WorkbenchCommand command = currentRoute switch
+      WorkbenchCommand command = application.CurrentRoute switch
       {
+        WorkbenchRoute.ImageEdit => new OpenDroppedImageEditFileCommand(paths[0]),
         WorkbenchRoute.Batch => new AddDroppedBatchFilesCommand(paths),
         WorkbenchRoute.QrCode => new DecodeDroppedQrCodeCommand(paths[0]),
         WorkbenchRoute.Pdf => new OpenDroppedPdfCommand(paths[0]),
@@ -603,6 +636,14 @@ public sealed partial class MainWindow : Window
     Closed -= OnWindowClosed;
     Activated -= OnWindowActivated;
     commandHandler.EndHotkeyRecording();
+    shuttingDown = true;
+    commandHandler.ScreenshotSessionReady -= ShowImageEditor;
+    if (imageEditor is { } editor)
+    {
+      imageEditor = null;
+      await editor.DisposeAsync();
+      editor.Close();
+    }
     ClearPinTextTasks();
     foreach (PinnedImageWindow pinned in pinnedImages.ToArray()) pinned.Close();
     webHost.ProtocolViolation -= OnProtocolViolation;

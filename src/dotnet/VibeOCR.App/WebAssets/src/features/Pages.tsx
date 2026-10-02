@@ -347,6 +347,7 @@ interface ScreenshotSessionState {
   readonly sessionId: string;
   readonly revision: number;
   readonly textSelectionRequested: boolean;
+  readonly sceneEditing: boolean;
 }
 
 // 宿主回显的活动纯截图会话：会话 id + 当前内容修订。
@@ -363,6 +364,7 @@ function screenshotSession(value: unknown): ScreenshotSessionState | undefined {
         sessionId: candidate.sessionId,
         revision: candidate.revision,
         textSelectionRequested: candidate.textSelectionRequested === true,
+        sceneEditing: candidate.sceneEditing === true,
       }
     : undefined;
 }
@@ -956,6 +958,96 @@ function StatusLine({ children }: { readonly children: React.ReactNode }) {
   );
 }
 
+export function ImageEditPage({ viewState, actions }: FeatureProps) {
+  const [autoTextPreference, setAutoTextPreference] = useState(true);
+  const state = feature(viewState, "recognition");
+  const input = resource(state.input);
+  const session = screenshotSession(state.screenshotSession);
+  const scene = window.location.hash.includes("?scene=1");
+  const busy = booleanValue(state.isBusy);
+  const result = resource(state.result);
+  const resultText = useResourceText(result);
+  return (
+    <Workspace
+      eyebrow={scene ? "CAPTURE" : "IMAGE"}
+      title={scene ? "截图现场编辑" : "图片编辑"}
+      description="本地编辑、缩放与真实格式转换；识别仅在明确点击时执行。"
+      actions={
+        <>
+          {!scene && (
+            <>
+              <Button
+                disabled={!viewState.connected || busy}
+                onClick={() => actions.run({ type: "imageEdit.selectImage" })}
+                icon={<ImagePlus aria-hidden="true" size={16} />}
+              >
+                选择图片
+              </Button>
+              <Button
+                disabled={!viewState.connected || busy}
+                onClick={() => actions.run({ type: "imageEdit.readClipboard" })}
+                icon={<ClipboardPaste aria-hidden="true" size={16} />}
+              >
+                粘贴图片
+              </Button>
+            </>
+          )}
+        </>
+      }
+    >
+      <StatusLine>
+        {busy
+          ? "正在读取图片…"
+          : state.statusCode === "recognition.inputFailed"
+            ? "无法读取图片；当前编辑已保留，请检查格式、尺寸和访问权限。"
+            : input
+              ? "原图保留；默认另存副本。"
+              : "选择、粘贴或拖入图片。"}
+      </StatusLine>
+      {session?.sceneEditing && !scene ? (
+        <EmptyStage
+          title="正在截图现场编辑"
+          detail="请在截图现场窗口继续编辑当前图片。"
+        />
+      ) : input ? (
+        <ImageCanvasEditor
+          key={session ? `session-${session.sessionId}` : input.url}
+          actions={actions}
+          canExport={viewState.capabilities.includes("recognition.annotation")}
+          canRecognize={viewState.capabilities.includes(
+            "recognition.screenshotSession",
+          )}
+          source={input.url}
+          sourceByteLength={input.byteLength}
+          session={session}
+          textLayer={screenshotTextLayer(state.textLayer)}
+          autoText={
+            session?.textSelectionRequested === true && autoTextPreference
+          }
+          showAutoTextPreference={session?.textSelectionRequested === true}
+          onAutoTextChange={setAutoTextPreference}
+        />
+      ) : (
+        <EmptyStage title="等待图片" detail="选择、粘贴或直接拖入图片" />
+      )}
+      {result && (
+        <Panel label="OUTPUT" title="识别结果">
+          <CapabilityGate
+            capability="recognition.results"
+            capabilities={viewState.capabilities}
+            action={{ type: "recognition.copy", format: "plain" }}
+            actions={actions}
+            icon={<Copy aria-hidden="true" size={16} />}
+          >
+            复制文本
+          </CapabilityGate>
+          <pre className="result-document">{resultText || "正在读取结果…"}</pre>
+        </Panel>
+      )}
+    </Workspace>
+  );
+}
+
 export function RecognitionPage({ viewState, actions }: FeatureProps) {
   // The host owns each capture's intent; this user preference survives keyed
   // editor remounts and only applies to sessions explicitly captured for text.
@@ -1073,7 +1165,12 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
       />
       <div className="inspection-grid">
         <Panel label="INPUT / 01" title="输入图像">
-          {input ? (
+          {session?.sceneEditing ? (
+            <EmptyStage
+              title="正在截图现场编辑"
+              detail="请在截图现场窗口继续编辑当前图片。"
+            />
+          ) : input ? (
             <ImageCanvasEditor
               key={session ? `session-${session.sessionId}` : undefined}
               actions={actions}
@@ -1083,6 +1180,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
               canRecognize={sessionCapable}
               session={session}
               source={input.url}
+              sourceByteLength={input.byteLength}
               textLayer={textLayer}
               autoText={
                 session?.textSelectionRequested === true && autoTextPreference
