@@ -7,6 +7,45 @@ namespace VibeOCR.Platform.Tests;
 public sealed class ManagedEnvironmentSwitchCoordinatorTests
 {
     [Fact]
+    public void SupervisorOptionsUseInstallerLaunchContractVerbatim()
+    {
+        var launch = new RuntimeLaunch(
+            @"D:\shared\runtimes\python.exe",
+            "custom.backend.supervisor",
+            @"D:\products\next",
+            @"D:\shared\models",
+            new Dictionary<string, string>
+            {
+                ["VIBEOCR_RUNTIME_ROOT"] = @"D:\shared\runtimes",
+                ["PADDLE_PDX_CACHE_HOME"] = @"D:\shared\paddlex-cache",
+            });
+
+        InferenceSupervisorOptions options = ManagedEnvironmentSwitchCoordinator.BuildSupervisorOptions(
+            launch,
+            @"D:\products\next\data\supervisor.log",
+            TimeSpan.FromSeconds(42),
+            new HashSet<string>(["ocr.recognition.v2"], StringComparer.Ordinal),
+            injectSoakCrash: true);
+
+        Assert.Equal(launch.PythonExecutable, options.FileName);
+        Assert.Equal(["-m", launch.SupervisorModule], options.Arguments);
+        Assert.Equal(launch.WorkingDirectory, options.WorkingDirectory);
+        Assert.Equal(
+            launch.Environment["VIBEOCR_RUNTIME_ROOT"],
+            options.EnvironmentOverrides!["VIBEOCR_RUNTIME_ROOT"]);
+        Assert.Equal(
+            "1",
+            options.EnvironmentOverrides["VIBEOCR_SUPERVISOR_SOAK_CRASH_AFTER_READY"]);
+        Assert.Equal(
+            launch.Environment.Count + 1,
+            options.EnvironmentOverrides.Count);
+        Assert.Equal(
+            launch.Environment["PADDLE_PDX_CACHE_HOME"],
+            options.EnvironmentOverrides["PADDLE_PDX_CACHE_HOME"]);
+        Assert.Contains("ocr.recognition.v2", options.RequiredCapabilities!);
+    }
+
+    [Fact]
     public void ProductRuntimeLaunchUsesIsolatedCurrentCodeWithoutBytecodeWrites()
     {
         var launch = new RuntimeLaunch("C:\\env\\python.exe", "vibeocr.runtime.host.main",

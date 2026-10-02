@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -73,6 +74,15 @@ public sealed partial class App : Application
     private const uint TrayLeftClick = 0x0202;
     private const uint TrayLeftDoubleClick = 0x0203;
     private const uint TrayRightClick = 0x0205;
+
+    /// <summary>连接/恢复等待生命周期门的有界预算（覆盖一次 90 秒激活）。</summary>
+    private static readonly TimeSpan SupervisorGateWaitTimeout = TimeSpan.FromSeconds(120);
+
+    /// <summary>supervisor 健康轨迹写锁；仅显式设置 VIBEOCR_SUPERVISOR_HEALTH_TRACE 时启用。</summary>
+    private readonly object _supervisorHealthTraceLock = new();
+
+    /// <summary>soak 崩溃注入时观测到的崩溃前 supervisor 实例 id。</summary>
+    private string? _soakCrashedInstanceId;
 
     // 托盘菜单仅本任务实际动作：打开工作台/截图识别/截图编辑/剪贴板识别/
     // 悬浮栏开关 + 退出；复用既有托盘回调消息，不新增常驻钩子。
@@ -196,7 +206,16 @@ public sealed partial class App : Application
                     await Windows.System.Launcher.LaunchUriAsync(uri);
                 }
             },
-            _runtimeStatus);
+            _runtimeStatus,
+            () => _supervisorProcess is { } process
+                ? (process.Ready.InstanceId, process.LogLines)
+                : (null, Array.Empty<string>()));
+        // 可选取证轨迹（默认关闭）：仅显式设置环境变量时才订阅，不引入新配置系统。
+        if (!string.IsNullOrWhiteSpace(
+                Environment.GetEnvironmentVariable("VIBEOCR_SUPERVISOR_HEALTH_TRACE")))
+        {
+            diagnostics.PropertyChanged += OnSupervisorHealthTraceChanged;
+        }
         _supervisorLayout = layout;
         _supervisorDiagnostics = diagnostics;
         _soakCrashRequested =
@@ -729,6 +748,28 @@ public sealed partial class App : Application
         Environment.Exit(0);
     }
 
+    /// <summary>
+    /// 等待 Supervisor 生命周期门：可被调用方令牌取消且有界超时。界取
+    /// 一次激活的 90 秒引擎启动预算加余量；运行环境安装不持门，只在拆
+    /// 线/提交时短暂占用。关停路径保持无令牌等待：所有持门方均已
+    /// 有界/可被关停令牌取消，销毁共享资源前不与在途写入者并发。
+    /// </summary>
+    private async Task WaitSupervisorLifecycleGateAsync(CancellationToken cancellationToken)
+    {
+        using var bound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        bound.CancelAfter(SupervisorGateWaitTimeout);
+        try
+        {
+            await _supervisorLifecycle.WaitAsync(bound.Token);
+        }
+        catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new InvalidOperationException(
+                $"等待运行环境生命周期门超时（{(int)SupervisorGateWaitTimeout.TotalSeconds} 秒），连接尝试未能开始。",
+                error);
+        }
+    }
+
     private async Task<bool> ConnectSupervisorAfterFirstWindowAsync(
         PortableLayout layout,
         DiagnosticsViewModel diagnostics,
@@ -759,14 +800,54 @@ public sealed partial class App : Application
         DiagnosticsViewModel diagnostics,
         bool isRecovery)
     {
-        diagnostics.UpdateSupervisor(new SupervisorHealth(
-            SupervisorHealthState.Connecting, null, null, null));
-        RecordMilestone(diagnostics, "T3", _startup.Elapsed);
-
-        await _supervisorLifecycle.WaitAsync();
+        // 门等待可取消且有界：占用方（另一次启动/切换/维护拆线）异常滞留
+        // 时，等待方以准确终态退出，不得无限悬挂。等待期间不发布
+        // Connecting，避免占用方把“正在连接”滞留成永久状态。
         try
         {
-            if (Volatile.Read(ref _runtimeMaintenanceActive) != 0) return false;
+            await WaitSupervisorLifecycleGateAsync(_applicationShutdown.Token);
+        }
+        catch (OperationCanceledException) when (_applicationShutdown.IsCancellationRequested)
+        {
+            return false;
+        }
+        catch (Exception error)
+        {
+            _inferenceGateway.MarkStartupFailed(error);
+            _qrCodeGateway.MarkStartupFailed(error);
+            _runtimeStatus.ReportServiceUnavailable();
+            diagnostics.UpdateSupervisor(new SupervisorHealth(
+                SupervisorHealthState.Faulted, null, null, error.Message));
+            return false;
+        }
+        try
+        {
+            bool injectedMaintenanceMutex = MaintenanceMutexEarlyExitSelfTestRequested(isRecovery) &&
+                Volatile.Read(ref _runtimeMaintenanceActive) == 0;
+            if (Volatile.Read(ref _runtimeMaintenanceActive) != 0 || injectedMaintenanceMutex)
+            {
+                // 维护互斥早退必须发布终态：识别服务因维护暂停，等待中的
+                // 网关调用携带原因退出；恢复仍由维护结束后的 Restore 路径
+                // 完成。
+                var maintenance = new InvalidOperationException("运行环境维护尚未结束，识别服务保持暂停。");
+                _inferenceGateway.MarkStartupFailed(maintenance);
+                _qrCodeGateway.MarkStartupFailed(maintenance);
+                _runtimeStatus.ReportServicePausedForMaintenance();
+                diagnostics.UpdateSupervisor(new SupervisorHealth(
+                    SupervisorHealthState.NotReady, null, null, "运行环境维护尚未结束。"));
+                if (injectedMaintenanceMutex)
+                {
+                    // selftest-only 注入路径同样以 t6 终态自退，产出可验证的
+                    // NotReady+维护原因证据；真实维护早退不得中断在途安装。
+                    RecordMilestone(diagnostics, "T6", _startup.Elapsed);
+                    ExitStartupSmokeT6();
+                }
+                return false;
+            }
+            // 拿到门且确认开始后才发布 Connecting。
+            diagnostics.UpdateSupervisor(new SupervisorHealth(
+                SupervisorHealthState.Connecting, null, null, null));
+            RecordMilestone(diagnostics, "T3", _startup.Elapsed);
             // Recovery reuses this entry point; re-announce the attempt so
             // calls crossing the detach gap wait for this reconnect.
             _inferenceGateway.MarkStartupPending();
@@ -786,9 +867,13 @@ public sealed partial class App : Application
                 diagnostics.UpdateSupervisor(new SupervisorHealth(
                     SupervisorHealthState.NotReady, null, null, unavailable.Message));
                 RecordMilestone(diagnostics, "T6", _startup.Elapsed);
+                // 未建/无活动环境是稳定终态：t6 冒烟同样自退并产出完整
+                // T0–T6 轨迹，而不是悬挂到外部超时。
+                ExitStartupSmokeT6();
                 return false;
             }
-            bool injectSoakCrash = _soakCrashRequested && !_soakCrashInjected && !isRecovery;
+            bool injectSoakCrash = _soakCrashRequested && !_soakCrashInjected && !isRecovery &&
+                Environment.GetEnvironmentVariable("VIBEOCR_SOAK_EXTERNAL_CRASH") != "1";
             if (injectSoakCrash) _soakCrashInjected = true;
             await ActivateManagedEnvironmentCoreAsync(
                 environments.ActiveId, layout, _applicationShutdown.Token, injectSoakCrash);
@@ -842,7 +927,9 @@ public sealed partial class App : Application
     private async Task SwitchManagedEnvironmentAsync(
         string environmentId, CancellationToken cancellationToken)
     {
-        await _supervisorLifecycle.WaitAsync(cancellationToken);
+        // 同一有界门等待：排队在异常滞留的启动/拆线之后时以准确失败
+        // 终态退出，而不是无限悬挂。
+        await WaitSupervisorLifecycleGateAsync(cancellationToken);
         try
         {
             if (Volatile.Read(ref _runtimeMaintenanceActive) != 0)
@@ -921,6 +1008,7 @@ public sealed partial class App : Application
         if (_managedSession is { } previous)
         {
             previous.Process.UnexpectedExit -= OnSupervisorUnexpectedExit;
+            previous.Process.LogReceived -= OnSupervisorLogReceived;
             _inferenceGateway.Detach(previous.Client);
             _qrCodeGateway.Detach(previous.QrClient);
         }
@@ -937,44 +1025,27 @@ public sealed partial class App : Application
             return;
         }
         next.Process.UnexpectedExit += OnSupervisorUnexpectedExit;
+        next.Process.LogReceived += OnSupervisorLogReceived;
         _inferenceGateway.Attach(next.Client);
         _qrCodeGateway.Attach(next.QrClient);
     }
 
-    private static void WriteSoakResult(bool requested, bool recovered, string? error = null)
+    private void WriteSoakResult(bool requested, bool recovered, string? error = null)
     {
         string? resultPath = Environment.GetEnvironmentVariable("VIBEOCR_SOAK_RESULT");
         if (string.IsNullOrWhiteSpace(resultPath)) return;
         string fullPath = Path.GetFullPath(resultPath);
         Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
-        File.WriteAllText(fullPath, JsonSerializer.Serialize(new { crash_requested = requested, recovered, error }));
-    }
-
-    internal static InferenceSupervisorOptions BuildSupervisorOptions(
-        RuntimeLaunch launch,
-        string logPath,
-        TimeSpan startupTimeout,
-        IReadOnlySet<string> requiredCapabilities,
-        bool injectSoakCrash = false)
-    {
-        ArgumentNullException.ThrowIfNull(launch);
-        ArgumentNullException.ThrowIfNull(requiredCapabilities);
-        var environment = launch.Environment.ToDictionary(
-            item => item.Key,
-            item => item.Value,
-            StringComparer.OrdinalIgnoreCase);
-        if (injectSoakCrash)
+        // 实例证据：崩溃前与恢复后的 supervisor 实例 id，证明是新实例
+        // 重连而非仅置位 recovered 标志。
+        File.WriteAllText(fullPath, JsonSerializer.Serialize(new
         {
-            environment["VIBEOCR_SUPERVISOR_SOAK_CRASH_AFTER_READY"] = "1";
-        }
-        return new InferenceSupervisorOptions(
-            launch.PythonExecutable,
-            ["-m", launch.SupervisorModule],
-            launch.WorkingDirectory,
-            logPath,
-            startupTimeout,
-            requiredCapabilities,
-            environment);
+            crash_requested = requested,
+            recovered,
+            error,
+            instance_before = _soakCrashedInstanceId,
+            instance_after = _supervisorInstanceId,
+        }));
     }
 
     private void FailSoakRun(string error)
@@ -1008,6 +1079,68 @@ public sealed partial class App : Application
         File.AppendAllText(fullPath, JsonSerializer.Serialize(_startupMilestones) + Environment.NewLine);
     }
 
+    /// <summary>selftest-only：仅在 t6 冒烟且显式设置环境变量时注入维护互斥早退。</summary>
+    private static bool MaintenanceMutexEarlyExitSelfTestRequested(bool isRecovery) =>
+        !isRecovery &&
+        Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "t6" &&
+        Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_MAINTENANCE_EARLY_EXIT") == "1";
+
+    /// <summary>稳定终态（无环境/注入的维护互斥）下 t6 冒烟自退并落盘轨迹。</summary>
+    private void ExitStartupSmokeT6()
+    {
+        if (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") != "t6") return;
+        FlushStartupTrace();
+        Environment.Exit(0);
+    }
+
+    /// <summary>
+    /// 可选 supervisor 健康轨迹（默认关闭）：仅在显式设置
+    /// VIBEOCR_SUPERVISOR_HEALTH_TRACE 时，把每次连接健康变更逐行追加
+    /// 到指定 JSONL 文件供隔离自测取证；写入失败静默，不影响状态机。
+    /// </summary>
+    private void OnSupervisorHealthTraceChanged(object? sender, PropertyChangedEventArgs args)
+    {
+        if (args.PropertyName != nameof(DiagnosticsViewModel.SupervisorStatus)) return;
+        try
+        {
+            string? path = Environment.GetEnvironmentVariable("VIBEOCR_SUPERVISOR_HEALTH_TRACE");
+            if (string.IsNullOrWhiteSpace(path) || _supervisorDiagnostics is not { } source) return;
+            SupervisorHealth health = source.Supervisor;
+            string line = JsonSerializer.Serialize(new
+            {
+                timestamp = DateTimeOffset.UtcNow.ToString("O"),
+                state = health.State.ToString(),
+                instance_id = health.InstanceId,
+                protocol_version = health.ProtocolVersion,
+                detail = health.Detail,
+                process_id = _supervisorProcess?.ProcessId,
+            });
+            lock (_supervisorHealthTraceLock)
+            {
+                File.AppendAllText(Path.GetFullPath(path), line + Environment.NewLine);
+            }
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            // 取证轨迹尽力而为；不得影响连接状态机本身。
+        }
+    }
+
+    private void OnSupervisorLogReceived(object? sender, string line)
+    {
+        if (!ReferenceEquals(sender, _supervisorProcess) ||
+            !line.Contains("[Paddle worker]", StringComparison.Ordinal) ||
+            !(line.Contains("[推理设备]", StringComparison.Ordinal) ||
+              line.Contains("[GPU]", StringComparison.Ordinal))) return;
+        void Notify()
+        {
+            if (ReferenceEquals(sender, _supervisorProcess))
+                _supervisorDiagnostics?.NotifyDeviceEvidenceChanged();
+        }
+        if (_window?.DispatcherQueue.TryEnqueue(Notify) != true) Notify();
+    }
+
     private void OnSupervisorUnexpectedExit(
         object? sender,
         SupervisorUnexpectedExitEventArgs eventArgs)
@@ -1023,8 +1156,11 @@ public sealed partial class App : Application
         AppLog.Warn(
             $"Supervisor exited unexpectedly (code={eventArgs.ExitCode?.ToString() ?? "unknown"}); "
             + "scheduling one reconnect attempt.");
+        _soakCrashedInstanceId = _supervisorInstanceId;
         void ScheduleRecovery()
         {
+            // 服务已消失：恢复期间不得残留“运行时已就绪”投影。
+            _runtimeStatus.ReportServiceUnavailable();
             _supervisorDiagnostics?.UpdateSupervisor(new SupervisorHealth(
                 SupervisorHealthState.Faulted,
                 null,
@@ -1043,7 +1179,7 @@ public sealed partial class App : Application
     {
         try
         {
-            await _supervisorLifecycle.WaitAsync(_applicationShutdown.Token);
+            await WaitSupervisorLifecycleGateAsync(_applicationShutdown.Token);
             try
             {
                 await DisconnectSupervisorResourcesAsync();
@@ -1071,6 +1207,9 @@ public sealed partial class App : Application
         catch (Exception error)
         {
             AppLog.Error("Supervisor recovery failed", error);
+            // 恢复失败（含门等待超时）必须同步退出“运行时已就绪”残留，
+            // 与连接路径的故障终态保持一致。
+            _runtimeStatus.ReportServiceUnavailable();
             _supervisorDiagnostics?.UpdateSupervisor(new SupervisorHealth(
                 SupervisorHealthState.Faulted, null, null, error.Message));
             FailSoakRun(error.Message);
@@ -1084,7 +1223,9 @@ public sealed partial class App : Application
     private async Task StopForMaintenanceAsync(CancellationToken cancellationToken)
     {
         Interlocked.Exchange(ref _runtimeMaintenanceActive, 1);
-        await _supervisorLifecycle.WaitAsync(cancellationToken);
+        // 与连接/恢复/切换同一有界门等待：占用方异常滞留时以失败终态
+        // 退出（ConfirmAsync 会把安装置为 failed 并经 Restore 重连）。
+        await WaitSupervisorLifecycleGateAsync(cancellationToken);
         try
         {
             await DisconnectSupervisorResourcesAsync();
@@ -1121,6 +1262,7 @@ public sealed partial class App : Application
             _activeInferenceClient = null;
             _activeQrCodeClient = null;
             managed.Process.UnexpectedExit -= OnSupervisorUnexpectedExit;
+            managed.Process.LogReceived -= OnSupervisorLogReceived;
             _inferenceGateway.Detach(managed.Client);
             _qrCodeGateway.Detach(managed.QrClient);
             await managed.DisposeAsync();
@@ -1149,6 +1291,7 @@ public sealed partial class App : Application
             return;
         }
         process.UnexpectedExit -= OnSupervisorUnexpectedExit;
+        process.LogReceived -= OnSupervisorLogReceived;
         try
         {
             process.Dispose();

@@ -36,7 +36,7 @@ interface AppShellProps {
 const primaryNavigation = [
   ["recognition", "单次识别", ScanLine],
   ["batch", "批量识别", ListChecks],
-  ["qrcode", "二维码", Sparkles],
+  ["qrcode", "二维码与条码", Sparkles],
   ["pdf", "PDF", FileText],
 ] as const;
 

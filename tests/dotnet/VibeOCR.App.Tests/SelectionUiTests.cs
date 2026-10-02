@@ -423,7 +423,7 @@ public sealed class SelectionUiTests
         ],
     };
 
-    private class SelectionInferenceClient : InferenceClientStub
+    private class SelectionInferenceClient : InferenceClientStub, IInferenceClient
     {
         public Wire.Health Health { get; set; } = new()
         {
@@ -445,6 +445,21 @@ public sealed class SelectionUiTests
 
         public override Task<ResidencyStatus> GetResidencyAsync(
             CancellationToken cancellationToken) => Task.FromResult(new ResidencyStatus());
+
+        // 提供真实运行时快照：Backend 只能来自真实 profile 读数，不是默认目标。
+        Task<RuntimeStatusSnapshot> IInferenceClient.GetRuntimeStatusAsync(
+            CancellationToken cancellationToken) => Task.FromResult(new RuntimeStatusSnapshot
+            {
+                InstanceId = "sup-1",
+                ServiceState = RuntimeServiceState.Ready,
+                BackendVersion = "0.14.0",
+                Profile = new RuntimeProfileStatus
+                {
+                    ProfileId = "win-x64-cpu",
+                    Accelerator = RuntimeAccelerator.Cpu,
+                    Components = [],
+                },
+            });
 
         public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken) =>
             HealthError is { } error ? Task.FromException<Wire.Health>(error) : Task.FromResult(Health);

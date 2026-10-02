@@ -69,7 +69,7 @@ class ManagedEnvironmentRequest(TypedDict, total=False):
     runtime_manifest: Required[str]
     layout_manifest: NotRequired[str]
     product_id: NotRequired[str]
-    action: Required[Literal['list', 'create', 'set_sources', 'preview_install', 'install', 'prepare_switch', 'commit_switch', 'repair_empty', 'delete']]
+    action: Required[Literal['list', 'create', 'set_sources', 'preview_install', 'install', 'prepare_switch', 'commit_switch', 'repair_empty', 'delete', 'find_compatible']]
     name: NotRequired[str]
     environment_id: NotRequired[str | None]
     recipe: NotRequired[str]

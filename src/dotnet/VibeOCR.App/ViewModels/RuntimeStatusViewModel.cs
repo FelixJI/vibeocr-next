@@ -58,6 +58,7 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
     private string _sourceIdentity = "";
     private double _progressValue;
     private bool _isProgressIndeterminate = true;
+    private bool _isOperationActive;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -85,6 +86,17 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
     {
         get => _isProgressIndeterminate;
         private set => SetField(ref _isProgressIndeterminate, value);
+    }
+
+    /// <summary>
+    /// 是否存在真实进行中的运行环境维护操作。空闲、成功、失败、取消等
+    /// 终态都必须退出活动进度动画；不确定进度只表示“无总量的进行中
+    /// 操作”，不得作为空闲默认。
+    /// </summary>
+    public bool IsOperationActive
+    {
+        get => _isOperationActive;
+        private set => SetField(ref _isOperationActive, value);
     }
     public string ProgressDetail { get => _progressDetail; private set => SetField(ref _progressDetail, value); }
     public string SourceIdentity
@@ -125,11 +137,13 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
         ProgressText = "";
         ProgressDetail = "";
         IsProgressIndeterminate = true;
+        IsOperationActive = true;
     }
 
     public void CompleteMaintenance(string state)
     {
         _terminal = true;
+        IsOperationActive = false;
         Status = state switch
         {
             "succeeded" => "维护操作已完成",
@@ -155,6 +169,7 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
         ArgumentNullException.ThrowIfNull(update);
         Host.RuntimeMaintenanceSnapshot snapshot = update.Snapshot;
         if (!Accept(snapshot.OperationId, snapshot.Sequence)) return;
+        IsOperationActive = true;
         Phase = PhaseText(snapshot.Phase);
         ProgressDetail = ProgressDetailText(update.MessageArgs);
         Status = OperationStateText(snapshot.OperationState);
@@ -211,11 +226,22 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
         if (snapshot.Maintenance is { } maintenance &&
             Accept(maintenance.OperationId, maintenance.Sequence))
         {
+            IsOperationActive = true;
             Status = OperationStateText(Enum.Parse<Host.RuntimeOperationState>(maintenance.OperationState.ToString()));
             Phase = PhaseText(maintenance.Phase);
             ApplyProgress(maintenance.Progress);
             if (maintenance.OperationState is Http.RuntimeOperationState.Succeeded or Http.RuntimeOperationState.Failed or Http.RuntimeOperationState.Cancelled)
                 CompleteMaintenance(maintenance.OperationState.ToString().ToLowerInvariant());
+        }
+        else if (snapshot.ServiceState == Http.RuntimeServiceState.Maintenance && _operationId is null)
+        {
+            // Backend 自身处于维护态且本地无在途操作：这是真实活动，保持
+            // 活动进度；其余无维护快照的终局都退出活动动画。
+            IsOperationActive = true;
+        }
+        else if (_operationId is null || _terminal)
+        {
+            IsOperationActive = false;
         }
     }
 

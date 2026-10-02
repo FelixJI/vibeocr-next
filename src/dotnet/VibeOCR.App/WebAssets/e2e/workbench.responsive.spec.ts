@@ -23,7 +23,7 @@ for (const size of [
     for (const name of [
       "单次识别",
       "批量识别",
-      "二维码",
+      "二维码与条码",
       "PDF",
       "设置",
       "关于",

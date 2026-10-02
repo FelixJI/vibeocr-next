@@ -30,12 +30,14 @@ from vibeocr.runtime.documents.tables.contracts import TableProvenanceV1
 from vibeocr.runtime.documents.tables.projections import table_model_to_plain_text
 from vibeocr.runtime.documents.tables.reducer import rebuild_result_projections
 from vibeocr.runtime.documents.utils.mime_types import mime_to_extension
+from vibeocr.runtime.environments.runtime_maintenance import safe_runtime_detail
 from vibeocr.runtime.processes.utils.job_object import JobObjectGuard
 from vibeocr.runtime.recognition.core.constants import Constants
 from vibeocr.runtime.recognition.core.singleton_meta import SingletonMeta
 from vibeocr.runtime.recognition.mineru_api import (
     MineruApiClient,
     MineruApiError,
+    MineruCancelled,
     MineruDocument,
 )
 from vibeocr.runtime.recognition.mineru_config import migrate_legacy_options
@@ -77,6 +79,7 @@ class MinerUService(metaclass=SingletonMeta):
     _language = "ch"
     _server_tier = "basic"
     _job_guard: JobObjectGuard | None = None
+    _model_root: str | None = None
 
     def __init__(self):
         if not self._initialized:
@@ -103,6 +106,7 @@ class MinerUService(metaclass=SingletonMeta):
                 cls._api_process = None
             cls._api_url = ""
             cls._initialized = False
+            cls._model_root = None
 
     @staticmethod
     def _parse_api_log_level(text: str) -> int:
@@ -203,6 +207,42 @@ class MinerUService(metaclass=SingletonMeta):
 
         return Path(sys.executable)
 
+    @staticmethod
+    def _local_environment() -> dict[str, str]:
+        env = os.environ.copy()
+        env.pop("PYTHONPATH", None)
+        # A separate home leaves MinerU 3 config and model paths untouched.
+        from vibeocr.runtime.environments.env_manager import get_project_root
+
+        home = Path(
+            env.get("MINERU_HOME") or get_project_root() / "data" / "mineru4"
+        ).resolve()
+        home.mkdir(parents=True, exist_ok=True)
+        config_path = Path(env.get("MINERU_CONFIG") or home / "config.yaml").resolve()
+        if "MINERU_CONFIG" in env and not config_path.is_file():
+            raise ValueError("MINERU_CONFIG must reference an existing config file")
+        if not config_path.exists():
+            config_path.write_text(
+                "model:\n  small_backend: onnx\n  vlm:\n    engine: llama-cpp\n",
+                encoding="utf-8",
+            )
+        env["MINERU_HOME"] = str(home)
+        env["MINERU_CONFIG"] = str(config_path)
+        # 设备意图：accelerator 权威，缺失时回退 legacy VIBEOCR_USE_GPU。CPU 时
+        # 仅在子进程 env 隐藏设备（llama-cpp 默认 n_gpu_layers=99 会抢占 GPU，
+        # VlmConfig 无该字段）；GGML 空设备列表须用单空格（空串在 Windows 等于删除）。
+        accelerator = env.get("VIBEOCR_RUNTIME_ACCELERATOR")
+        gpu_selected = (
+            accelerator == "nvidia_cuda"
+            if accelerator is not None
+            else env.get("VIBEOCR_USE_GPU", "").lower() == "true"
+        )
+        if not gpu_selected:
+            env["CUDA_VISIBLE_DEVICES"] = "-1"
+            env["GGML_VK_VISIBLE_DEVICES"] = " "
+
+        return env
+
     def _start_api(self) -> None:
         """启动 mineru-api 进程"""
         python_exe = self._resolve_python_executable()
@@ -228,45 +268,17 @@ class MinerUService(metaclass=SingletonMeta):
             self.__class__._language,
         ]
 
-        env = os.environ.copy()
-        env.pop("PYTHONPATH", None)
-        # A separate home leaves MinerU 3 config and model paths untouched.
-        from vibeocr.runtime.environments.env_manager import get_project_root
-
-        home = Path(
-            env.get("MINERU_HOME") or get_project_root() / "data" / "mineru4"
-        ).resolve()
-        home.mkdir(parents=True, exist_ok=True)
-        config_path = Path(env.get("MINERU_CONFIG") or home / "config.yaml").resolve()
-        if "MINERU_CONFIG" in env and not config_path.is_file():
-            raise ValueError("MINERU_CONFIG must reference an existing config file")
-        if not config_path.exists():
-            config_path.write_text(
-                "model:\n  small_backend: onnx\n  vlm:\n    engine: llama-cpp\n",
-                encoding="utf-8",
-            )
-        env["MINERU_HOME"] = str(home)
-        env["MINERU_CONFIG"] = str(config_path)
-
-        # 设备意图：accelerator 权威，缺失时回退 legacy VIBEOCR_USE_GPU。CPU 时
-        # 仅在子进程 env 隐藏设备（llama-cpp 默认 n_gpu_layers=99 会抢占 GPU，
-        # VlmConfig 无该字段）；GGML 空设备列表须用单空格（空串在 Windows 等于删除）。
-        accelerator = env.get("VIBEOCR_RUNTIME_ACCELERATOR")
-        gpu_selected = (
-            accelerator == "nvidia_cuda"
-            if accelerator is not None
-            else env.get("VIBEOCR_USE_GPU", "").lower() == "true"
-        )
-        if not gpu_selected:
-            env["CUDA_VISIBLE_DEVICES"] = "-1"
-            env["GGML_VK_VISIBLE_DEVICES"] = " "
+        env = self._local_environment()
+        if self.__class__._model_root is not None:
+            env["MINERU_MODEL_BASE_DIR"] = self.__class__._model_root
+            env["MINERU_MODEL_SOURCE"] = "local"
 
         self.__class__._api_process = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             env=env,
-            cwd=home,
+            cwd=Path(env["MINERU_HOME"]),
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
 
@@ -294,6 +306,79 @@ class MinerUService(metaclass=SingletonMeta):
         raise RuntimeError(
             f"mineru-api 启动超时（{int(Constants.Timeout.MINERU_API_START)}秒）"
         )
+
+    def _prepare_cached_models(self, tier: str, cancelled: Callable[[], bool]) -> None:
+        if not os.environ.get("VIBEOCR_SHARED_MODEL_CACHE"):
+            return
+        if cancelled():
+            raise MineruCancelled("MinerU job canceled before model preparation")
+        python = self._resolve_python_executable()
+        if python is None:
+            raise MineruApiError("MinerU interpreter is unavailable")
+        env = self._local_environment()
+        arguments = (
+            [
+                "-I",
+                "-B",
+                "-c",
+                "import os,runpy,sys;sys.path.insert(0,os.environ['VIBEOCR_PRODUCT_CODE_ROOT']);runpy.run_module('vibeocr.runtime.environments.model_cache',run_name='__main__')",
+            ]
+            if env.get("VIBEOCR_PRODUCT_CODE_ROOT")
+            else ["-m", "vibeocr.runtime.environments.model_cache"]
+        )
+        process = subprocess.Popen(
+            [str(python), *arguments, tier],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        guard = JobObjectGuard()
+        started = time.monotonic()
+        try:
+            guard.assign_from_popen(process)
+            while True:
+                if cancelled():
+                    raise MineruCancelled(
+                        "MinerU job canceled during model preparation"
+                    )
+                if time.monotonic() - started > Constants.Timeout.MINERU_MODEL_DOWNLOAD:
+                    raise MineruApiError("MinerU model preparation timed out")
+                try:
+                    stdout, stderr = process.communicate(timeout=0.2)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            if process.returncode != 0:
+                raise MineruApiError(
+                    "MinerU model preparation failed: "
+                    + safe_runtime_detail(stderr.decode("utf-8", errors="replace"))[
+                        -2000:
+                    ]
+                )
+            if cancelled():
+                raise MineruCancelled("MinerU job canceled after model preparation")
+            try:
+                result = json.loads(stdout.decode("utf-8").strip().splitlines()[-1])
+                root = result["model_root"]
+                if not isinstance(root, str) or not Path(root).is_dir():
+                    raise ValueError("Model directory is unavailable")
+            except (ValueError, KeyError, IndexError, TypeError) as exc:
+                raise MineruApiError(
+                    "MinerU model preparation returned an invalid result"
+                ) from exc
+            if root != self.__class__._model_root:
+                self.shutdown()
+                self.__class__._model_root = root
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate()
+            guard.close()
 
     def _ensure_api_running(self) -> None:
         """确保 mineru-api 正在运行"""
@@ -373,6 +458,8 @@ class MinerUService(metaclass=SingletonMeta):
                 if config.tier in (MineruTier.STANDARD, MineruTier.ADVANCED)
                 else "basic"
             )
+            if config.tier != MineruTier.FLASH:
+                self._prepare_cached_models(tier, cancelled)
             if (
                 self.__class__._language != config.language
                 or self.__class__._server_tier != tier

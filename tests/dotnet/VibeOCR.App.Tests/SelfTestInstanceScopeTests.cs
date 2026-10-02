@@ -41,6 +41,36 @@ public sealed class SelfTestInstanceScopeTests
       scope.ExclusiveMutexName);
   }
 
+  [Fact]
+  public void T6SmokeKeepsLegacyNamedObjectsWithoutInstance()
+  {
+    SelfTestInstanceScope scope = SelfTestInstanceScope.Resolve(
+      "production",
+      smokeMode: "t6",
+      instanceId: null);
+
+    Assert.Equal("VibeOCR-production", scope.SingleInstanceName);
+    Assert.Null(scope.ExclusiveMutexName);
+  }
+
+  [Fact]
+  public void T6SmokeUsesIsolatedNamedObjectsWithExplicitInstance()
+  {
+    const string instanceId = "c240f369b28e4444b0d45f4a4d331cd0";
+
+    SelfTestInstanceScope scope = SelfTestInstanceScope.Resolve(
+      "production",
+      smokeMode: "t6",
+      instanceId);
+
+    Assert.Equal(
+      $"VibeOCR-production-self-test-{instanceId}",
+      scope.SingleInstanceName);
+    Assert.Equal(
+      $@"Local\VibeOCR.Frontend.Exclusive.v2.{instanceId}",
+      scope.ExclusiveMutexName);
+  }
+
   [Theory]
   [InlineData("web-ready", null)]
   [InlineData("web-ready", "not-a-guid")]
@@ -55,6 +85,8 @@ public sealed class SelfTestInstanceScopeTests
   [InlineData("paddle-modes-e2e", "not-a-guid")]
   [InlineData("native-actions-e2e", "not-a-guid")]
   [InlineData(null, "c240f369b28e4444b0d45f4a4d331cd0")]
+  [InlineData("t6", "not-a-guid")]
+  [InlineData("t3", "c240f369b28e4444b0d45f4a4d331cd0")]
   public void InvalidSelfTestScopeIsRejected(string? smokeMode, string? instanceId) =>
     Assert.Throws<InvalidOperationException>(() => SelfTestInstanceScope.Resolve(
       "production",

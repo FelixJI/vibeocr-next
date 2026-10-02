@@ -38,14 +38,16 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     private readonly IInferenceClient _inference;
     private readonly SemaphoreSlim _settingsGate = new(1, 1);
+    // 设置快照代际与 busy 的唯一串行化点：LoadSnapshot 起始段、
+    // InvalidateSnapshot、finally 复位全部在同一把锁内原子完成。
+    private readonly object _busyGuard = new();
     private long _generation;
     private long _selectionGeneration;
     private bool _isBusy;
     private string _status = "正在读取设置";
-    private string _backend = "cpu";
+    private string? _backend;
     private string _pendingBackend = "cpu";
     private bool _restartRequired;
-    private bool _gpuAvailable;
     private bool _selectionStaged;
     private HashSet<string> _installedComponentIds = new(StringComparer.Ordinal);
     private RuntimeSelectionService? _selection;
@@ -91,11 +93,15 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public int? VramUsedMb { get; private set; }
     public bool IsBusy { get => _isBusy; private set => SetField(ref _isBusy, value); }
     public string Status { get => _status; private set => SetField(ref _status, value); }
-    public string Backend { get => _backend; private set => SetField(ref _backend, value); }
+
+    /// <summary>
+    /// 当前运行时 profile 声明的目标加速器（cpu/nvidia_cuda）；在首次真
+    /// 实快照前为 null，不得把默认目标 cpu 冒充为实际运行设备。
+    /// </summary>
+    public string? Backend { get => _backend; private set => SetField(ref _backend, value); }
     public string PendingBackend { get => _pendingBackend; set => SetField(ref _pendingBackend, value); }
     public bool RestartRequired { get => _restartRequired; private set => SetField(ref _restartRequired, value); }
-    public bool GpuAvailable { get => _gpuAvailable; private set => SetField(ref _gpuAvailable, value); }
-    public bool CanSwitchBackend => !IsBusy && !string.Equals(Backend, PendingBackend, StringComparison.Ordinal);
+    public bool CanSwitchBackend => !IsBusy && Backend is not null && !string.Equals(Backend, PendingBackend, StringComparison.Ordinal);
 
     public IReadOnlyList<SettingsSourceOption> Sources
     {
@@ -127,13 +133,16 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     /// <summary>Durable maintenance operations driven by the staged selection.</summary>
     public RuntimeMaintenanceCoordinator Maintenance { get; }
 
-    public async Task LoadSnapshotAsync(CancellationToken cancellationToken)
+    public Task LoadSnapshotAsync(CancellationToken cancellationToken) =>
+        LoadSnapshotAsync(refreshEnvironments: true, cancellationToken);
+
+    /// <summary>refreshEnvironments=false 不刷环境列表，保留其根因失败文案。</summary>
+    public async Task LoadSnapshotAsync(bool refreshEnvironments, CancellationToken cancellationToken)
     {
-        if (Environments is not null)
+        if (refreshEnvironments && Environments is not null)
             await Environments.RefreshAsync(cancellationToken);
         await Maintenance.RestoreAsync(cancellationToken);
-        long generation = Interlocked.Increment(ref _generation);
-        if (generation == Volatile.Read(ref _generation)) { IsBusy = true; Status = "正在读取模型驻留状态"; }
+        long generation = BeginBusy("正在读取模型驻留状态");
         try
         {
             try
@@ -165,9 +174,21 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                 PropertyChanged?.Invoke(this, new(nameof(VramUsedMb)));
                 Status = $"默认 TTL {status.DefaultTtlSeconds}s；已驻留管线 {status.Entries.Count} 个";
             }
-            catch (NotSupportedException) { Status = "当前运行环境不提供模型驻留控制。"; }
-            catch (InferenceClientException error) { Status = LocalizeV2(error.Code); }
-            await LoadSelectionSerializedAsync(forceReload: true, cancellationToken);
+            catch (NotSupportedException)
+            {
+                // 旧实例的迟到失败与迟到成功同样不得覆盖新状态。
+                if (generation == Volatile.Read(ref _generation))
+                    Status = "当前运行环境不提供模型驻留控制。";
+            }
+            catch (InferenceClientException error)
+            {
+                if (generation == Volatile.Read(ref _generation))
+                    Status = LocalizeV2(error.Code);
+            }
+            // 已失效的旧 runtime/residency 流程不得继续接管 selection：
+            // 否则其 forceReload 会清掉后续新代的选择代并以新代身份投影。
+            if (generation != Volatile.Read(ref _generation)) return;
+            await LoadSelectionSerializedAsync(forceReload: true, cancellationToken, generation);
         }
         catch (VibeOCR.App.Inference.InferenceClientNotAttachedException)
         {
@@ -182,7 +203,27 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             AppLog.Warn($"Settings refresh failed: {error.GetType().Name}: {error.Message}");
             Status = "设置状态读取失败，请重试或打开诊断与修复。";
         }
-        finally { if (generation == Volatile.Read(ref _generation)) IsBusy = false; }
+        finally { EndBusy(generation); }
+    }
+
+    private long BeginBusy(string status)
+    {
+        lock (_busyGuard)
+        {
+            long generation = ++_generation;
+            IsBusy = true;
+            // 同步通知可能重入失效；失效后不再写本次旧文案。
+            if (generation == _generation) Status = status;
+            return generation;
+        }
+    }
+
+    private void EndBusy(long generation)
+    {
+        lock (_busyGuard)
+        {
+            if (generation == _generation) IsBusy = false;
+        }
     }
 
     public Task LoadSelectionAsync(CancellationToken cancellationToken) =>
@@ -196,6 +237,26 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         Interlocked.Increment(ref _selectionGeneration);
         _selection = null;
         Volatile.Write(ref _recognitionSelection, null);
+    }
+
+    /// <summary>
+    /// 环境切换或服务实例更换时作废旧快照：在途读取不得再投影，旧的
+    /// 目标加速器与旧实例的状态文案也不再冒充当前状态；Sources/
+    /// MineruConnection 是用户配置而非实例状态，不清空以免丢失。
+    /// status 覆盖默认文案：操作开始处结果未知，用中性的待重检文案。
+    /// </summary>
+    public void InvalidateSnapshot(string? status = null)
+    {
+        lock (_busyGuard)
+        {
+            _generation++;
+            // 实例更换同样作废在途目录读取的选择代：旧实例 selection 的
+            // 迟到成功/失败都不得越过新状态（与 ClearSelection 同一语义）。
+            Interlocked.Increment(ref _selectionGeneration);
+            IsBusy = false;
+            Backend = null;
+            Status = status ?? "服务实例已更换，状态待重新检查。";
+        }
     }
 
     /// <summary>
@@ -336,10 +397,10 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             Status = "当前运行时声明 mineru_document 不支持预加载，请更新 Backend。";
             return;
         }
-        IsBusy = true;
-        Status = "正在验证并准备远程 MinerU 服务…";
+        long generation = BeginBusy("正在验证并准备远程 MinerU 服务…");
         try
         {
+            if (generation != Volatile.Read(ref _generation)) return;
             await _inference.PreloadRuntimeAsync(
                 new Wire.RuntimePreloadRequest
                 {
@@ -348,17 +409,20 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                 },
                 cancellationToken);
             // 准备完成必须回读：tier/能力目录以刷新后的 Backend 目录为准。
-            await LoadSelectionSerializedAsync(forceReload: true, cancellationToken);
-            Status = "远程 MinerU 准备已执行并刷新目录；tier 可用性以识别任务实际结果为准。";
+            if (generation != Volatile.Read(ref _generation)) return;
+            await LoadSelectionSerializedAsync(forceReload: true, cancellationToken, generation);
+            if (generation == Volatile.Read(ref _generation))
+                Status = "远程 MinerU 准备已执行并刷新目录；tier 可用性以识别任务实际结果为准。";
         }
-        catch (OperationCanceledException) { Status = "已取消"; }
+        catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) Status = "已取消"; }
         catch (NotSupportedException)
         {
-            Status = "当前 Supervisor 不支持运行时预加载，请更新运行环境。";
+            if (generation == Volatile.Read(ref _generation))
+                Status = "当前 Supervisor 不支持运行时预加载，请更新运行环境。";
         }
-        catch (InferenceClientException error) { Status = LocalizeV2(error.Code); }
-        catch (RuntimeSelectionException error) { Status = LocalizeSelection(error); }
-        finally { IsBusy = false; }
+        catch (InferenceClientException error) { if (generation == Volatile.Read(ref _generation)) Status = LocalizeV2(error.Code); }
+        catch (RuntimeSelectionException error) { if (generation == Volatile.Read(ref _generation)) Status = LocalizeSelection(error); }
+        finally { EndBusy(generation); }
     }
 
     /// <summary>Stage the accelerator for the pending feature selection.</summary>
@@ -507,16 +571,23 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
     }
 
-    public void DetectGpu(bool available) { GpuAvailable = available; if (!available && PendingBackend == "nvidia_cuda") PendingBackend = "cpu"; }
     public void Cancel() { }
 
     private async Task LoadSelectionSerializedAsync(
         bool forceReload,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        long? snapshotGeneration = null)
     {
         await _settingsGate.WaitAsync(cancellationToken);
         try
         {
+            if (snapshotGeneration is { } generation &&
+                generation != Volatile.Read(ref _generation))
+            {
+                // 旧快照流程在等门期间被失效（实例更换/新读取）：不得清掉
+                // 新代的 selection 并以新代身份继续读取投影。
+                return;
+            }
             if (!forceReload && RecognitionSelection is not null)
             {
                 return;
@@ -565,12 +636,16 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
         catch (RuntimeSelectionException error)
         {
-            Status = LocalizeSelection(error);
+            if (selectionGeneration == Volatile.Read(ref _selectionGeneration))
+                Status = LocalizeSelection(error);
             throw;
         }
         catch (InferenceClientException error)
         {
-            Status = LocalizeV2(error.Code);
+            // 迟到失败与迟到成功同一代际闸门：旧实例/旧目录读取的失败
+            // 不得覆盖新实例状态。
+            if (selectionGeneration == Volatile.Read(ref _selectionGeneration))
+                Status = LocalizeV2(error.Code);
             throw;
         }
     }

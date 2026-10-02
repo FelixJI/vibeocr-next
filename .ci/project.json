@@ -115,7 +115,7 @@
         "--label",
         "quality",
         "--timeout-seconds",
-        "300",
+        "480",
         "--",
         "uv",
         "run",

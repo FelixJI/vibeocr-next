@@ -504,30 +504,6 @@ input {
   color: var(--colorNeutralForeground3);
   font-size: 12px;
 }
-.bundled-capabilities {
-  display: grid;
-  gap: 8px;
-  padding: 10px;
-  border: 1px solid var(--colorNeutralStroke2);
-  border-radius: 6px;
-  background: var(--colorNeutralBackground2);
-}
-.bundled-capabilities-title {
-  color: var(--colorNeutralForeground3);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-}
-.bundled-capability-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-.bundled-capability-row strong {
-  font-size: 13px;
-  font-weight: 600;
-}
 .setting-row {
   min-height: 36px;
 }
@@ -538,6 +514,31 @@ input {
 .runtime-summary {
   display: grid;
   gap: 10px;
+}
+.environment-recommendation {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--colorNeutralStroke2);
+  border-radius: 6px;
+  background: var(--colorNeutralBackground2);
+}
+.environment-recommendation .setting-row {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+.environment-recommendation details {
+  overflow-wrap: anywhere;
+}
+.environment-hardware-note {
+  color: var(--colorNeutralForeground3);
+  font-size: 12px;
+}
+.managed-environment-advanced > summary {
+  cursor: pointer;
+  color: var(--colorNeutralForeground3);
+  font-size: 12px;
 }
 .managed-environments {
   display: grid;
@@ -802,7 +803,6 @@ select {
     row-gap: 4px;
   }
   .setting-row,
-  .bundled-capability-row,
   .health-row {
     flex-wrap: wrap;
   }
