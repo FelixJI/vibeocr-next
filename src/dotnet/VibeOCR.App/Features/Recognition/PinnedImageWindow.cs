@@ -1,4 +1,3 @@
-using System.Buffers.Binary;
 using System.ComponentModel;
 using System.Globalization;
 using System.Net;
@@ -24,7 +23,7 @@ namespace VibeOCR.App.Features.Recognition;
 /// <summary>A standalone topmost image snapshot. It owns only its PNG lease and WebView.</summary>
 internal sealed class PinnedImageWindow : IDisposable
 {
-  private const string ImageUrl = "https://pin.vibeocr/image.png";
+  private readonly string imageUrl;
   private const string FitLinesScript =
     "requestAnimationFrame(()=>{for(const line of document.querySelectorAll('.line')){" +
     "const glyphs=line.querySelector('span');" +
@@ -200,6 +199,7 @@ internal sealed class PinnedImageWindow : IDisposable
     Func<string?> currentServiceInstance)
   {
     this.image = image;
+    imageUrl = "https://pin.vibeocr/image" + Path.GetExtension(image.Path);
     this.sessionId = sessionId;
     this.revision = revision;
     this.layer = layer;
@@ -207,13 +207,8 @@ internal sealed class PinnedImageWindow : IDisposable
     this.currentServiceInstance = currentServiceInstance;
     platform = new AnnotatedImagePlatform(
       () => WinRT.Interop.WindowNative.GetWindowHandle(window));
-    Span<byte> header = stackalloc byte[24];
-    using (FileStream source = File.OpenRead(image.Path))
-    {
-      source.ReadExactly(header);
-    }
-    imageWidth = BinaryPrimitives.ReadInt32BigEndian(header[16..20]);
-    imageHeight = BinaryPrimitives.ReadInt32BigEndian(header[20..24]);
+    imageWidth = image.Width;
+    imageHeight = image.Height;
 
     var root = new Grid();
     root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -221,7 +216,7 @@ internal sealed class PinnedImageWindow : IDisposable
     var toolbar = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
     AddButton(toolbar, "复制图片", async () =>
     {
-      await platform.CopyPngAsync(image.Path, CancellationToken.None);
+      await platform.CopyImageAsync(image.Path, CancellationToken.None);
       status.Text = "已复制图片";
     });
     prepareTextButton = AddButton(toolbar, "取字", async () =>
@@ -235,7 +230,7 @@ internal sealed class PinnedImageWindow : IDisposable
     copySelectionButton = AddButton(toolbar, "复制所选", CopySelectionAsync);
     AddButton(toolbar, "保存", async () =>
     {
-      status.Text = await platform.SavePngAsync(image.Path, CancellationToken.None)
+      status.Text = await platform.SaveImageAsync(image.Path, CancellationToken.None)
         ? "已保存图片" : "已取消保存";
     });
     AddButton(toolbar, "缩小", () => ChangeZoomAsync(-0.1));
@@ -273,7 +268,7 @@ internal sealed class PinnedImageWindow : IDisposable
     core.PermissionRequested += OnPermissionRequested;
     core.NavigationStarting += OnNavigationStarting;
     core.NavigationCompleted += OnNavigationCompleted;
-    core.AddWebResourceRequestedFilter(ImageUrl, CoreWebView2WebResourceContext.Image);
+    core.AddWebResourceRequestedFilter(imageUrl, CoreWebView2WebResourceContext.Image);
     core.WebResourceRequested += OnImageRequested;
     loaded = true;
     Render();
@@ -379,7 +374,7 @@ internal sealed class PinnedImageWindow : IDisposable
       }
       responseStreams.Add(stream);
       args.Response = sender.Environment.CreateWebResourceResponse(
-        stream, 200, "OK", "Content-Type: image/png");
+        stream, 200, "OK", "Content-Type: " + image.MediaType);
     }
     catch (Exception error)
     {
@@ -421,7 +416,7 @@ internal sealed class PinnedImageWindow : IDisposable
       .Append("<style>body{margin:0;background:#202020;overflow:auto}#stage{position:relative;width:100%;aspect-ratio:")
       .Append(imageWidth).Append('/').Append(imageHeight)
       .Append(";container-type:inline-size}img{width:100%;display:block}.line{position:absolute;overflow:hidden;color:transparent;white-space:pre;line-height:1;user-select:text;cursor:text}.line span{display:inline-block;transform-origin:left top}.line::selection{background:#1f6feb70}</style></head><body><div id='stage'><img src='")
-      .Append(ImageUrl).Append("' alt='贴图'>");
+      .Append(imageUrl).Append("' alt='贴图'>");
     foreach (RecognitionTextLayerLine line in layer?.Lines ?? [])
     {
       double fontCqw = (line.Y2 - line.Y1) / 10 * imageHeight / imageWidth;

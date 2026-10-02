@@ -551,7 +551,7 @@ async function verifyManualHandleEvidence(app, overlay, desktop, button, gesture
 }
 
 async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual = false) {
-  const { page } = app;
+  let page = app.page;
   const toolbarHandles = (await windows(app.child.pid))
     .filter((item) => item.Visible && item.Handle !== app.main.Handle && area(item) > 1000)
     .map((item) => item.Handle);
@@ -672,7 +672,21 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
   } finally { await native('mouse-up', click); }
   gesture.events.push({ event: 'click-released', observedAt: new Date().toISOString() });
 
-  await page.getByRole('heading', { name: '单次识别' }).waitFor({ timeout: 12000 });
+  // The screenshot editor has its own WebView; the workbench stays hidden.
+  const sceneDeadline = Date.now() + 12000;
+  while (Date.now() < sceneDeadline) {
+    const candidate = app.browser.contexts().flatMap(context => context.pages())
+      .find(item => item !== app.page && item.url().includes('#/imageEdit?scene=1'));
+    if (candidate) { page = candidate; break; }
+    await delay(100);
+  }
+  assert(page !== app.page, 'Screenshot scene WebView did not appear.');
+  await page.getByRole('heading', { name: '截图现场编辑' }).waitFor({ timeout: 12000 });
+  await watchScreenshotRevision(page);
+  // Bootstrap may have completed before CDP attached to the scene. Carry only
+  // the actual native state already observed by the shared workbench host.
+  await page.evaluate(state => { window.__nativeActionsEvidence = state; },
+    await app.page.evaluate(() => window.__nativeActionsEvidence));
   const editor = page.getByLabel('图片检查画布');
   await editor.waitFor({ timeout: 12000 });
   await page.waitForFunction(() => {
@@ -685,8 +699,8 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
     return changed > 100;
   }, null, { timeout: 12000 });
   const restoredWindows = await windows(app.child.pid);
-  assert(restoredWindows.some((item) => item.Handle === app.main.Handle && item.Visible),
-    'Completed edit capture did not show its editor window.');
+  assert(!restoredWindows.some((item) => item.Handle === app.main.Handle && item.Visible),
+    'Completed edit capture forced the hidden workbench to appear.');
   assert(toolbarHandles.every((handle) => restoredWindows.some((item) =>
     item.Handle === handle && item.Visible)), 'Toolbar did not resume after capture.');
   await page.waitForFunction(() => typeof window.__nativeActionsEvidence?.inputUrl === 'string',
@@ -813,7 +827,14 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
   const revision = await page.evaluate(() => window.__nativeActionsEvidence);
   assert(revision?.sessionId && revision.revision >= 1,
     'Host screenshot session revision did not advance after editing.');
+  const sceneClosed = page.waitForEvent('close', { timeout: 10000 });
+  await page.getByRole('button', { name: '结束会话', exact: true }).click();
+  await sceneClosed;
+  assert(!(await windows(app.child.pid)).some(item =>
+    item.Handle === app.main.Handle && item.Visible),
+  'Closing the screenshot scene forced the hidden workbench to appear.');
   return { hotkey, overlayHandle: overlay.Handle,
+    sceneClosed: true, mainHiddenAfterSelection: true,
     mainHiddenDuringSelection: true, toolbarHiddenDuringSelection: true,
     toolbarRestoredAfterSelection: true,
     background: fixture.backgroundRect, button, selectedRegion, gesture, canvasBefore: before,

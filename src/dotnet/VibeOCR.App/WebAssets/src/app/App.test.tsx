@@ -8,6 +8,72 @@ import { App, type AppActions, type AppViewState } from "./App";
 Object.assign(globalThis, { NodeFilter: { FILTER_SKIP: 3 } });
 
 describe("AppShell", () => {
+  it("keeps the capture editor isolated from main navigation", async () => {
+    window.location.hash = "#/imageEdit?scene=1";
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 1,
+      route: "recognition",
+      theme: "light",
+      capabilities: [],
+      features: {},
+      runtimeLabel: "原生宿主已连接",
+    };
+    const { rerender, unmount } = render(
+      <App actions={actions} viewState={viewState} />,
+    );
+    expect(
+      await screen.findByRole("heading", { name: "截图现场编辑" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("complementary", { name: "主导航" }),
+    ).not.toBeInTheDocument();
+    rerender(
+      <App
+        actions={actions}
+        viewState={{ ...viewState, revision: 2, route: "pdf" }}
+      />,
+    );
+    expect(
+      screen.getByRole("heading", { name: "截图现场编辑" }),
+    ).toBeInTheDocument();
+    expect(window.location.hash).toBe("#/imageEdit?scene=1");
+    unmount();
+  });
+
+  it("opens files and clipboard images for editing without recognition commands", async () => {
+    window.location.hash = "#/imageEdit";
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 1,
+      route: "imageEdit",
+      theme: "light",
+      capabilities: ["recognition.annotation"],
+      features: {},
+      runtimeLabel: "原生宿主已连接",
+    };
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "选择图片" }));
+    await user.click(screen.getByRole("button", { name: "粘贴图片" }));
+    expect(actions.run).toHaveBeenNthCalledWith(1, {
+      type: "imageEdit.selectImage",
+    });
+    expect(actions.run).toHaveBeenNthCalledWith(2, {
+      type: "imageEdit.readClipboard",
+    });
+    unmount();
+  });
   it("starts scrolling capture without an OCR connection", async () => {
     window.location.hash = "#/recognition";
     const actions: AppActions = {

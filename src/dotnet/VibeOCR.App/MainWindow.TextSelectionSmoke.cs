@@ -137,7 +137,7 @@ public sealed partial class MainWindow
         throw new InvalidOperationException("Two pins caused duplicate OCR submissions.");
 
       await ClickSmokeButtonAsync("马赛克");
-      string canvasBox = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+      string canvasBox = await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync(
         "(() => { const c=document.querySelector('canvas[aria-label=\"图片检查画布\"]'); " +
         "c.scrollIntoView({block:'center'}); const r=c.getBoundingClientRect(); " +
         "return {x:r.x,y:r.y,width:r.width,height:r.height}; })()");
@@ -250,7 +250,8 @@ public sealed partial class MainWindow
   {
     for (int attempt = 0; attempt < 100; attempt++)
     {
-      if (await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(expression) == "true")
+      if (SmokeEditorWebView.CoreWebView2 is not null &&
+          await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync(expression) == "true")
         return;
       await Task.Delay(100);
     }
@@ -293,7 +294,7 @@ public sealed partial class MainWindow
   {
     // Range is used only to measure glyph caret coordinates. The actual DOM
     // selection is made by WebView2 mouse input, as it is for a user.
-    string geometryJson = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync($$"""
+    string geometryJson = await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync($$"""
       (() => {
         const element = [...document.querySelectorAll('.image-text-glyphs')]
           .find(node => {{(chinese ? "/[\\u4e00-\\u9fff]/.test(node.textContent)" : "/[A-Za-z]{4}/.test(node.textContent)")}});
@@ -325,7 +326,7 @@ public sealed partial class MainWindow
     await DispatchMouseAsync("mouseMoved", ex, ey, 1);
     await DispatchMouseAsync("mouseReleased", ex, ey, 0);
     string selected = JsonSerializer.Deserialize<string>(
-      await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+      await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync(
         "window.getSelection()?.toString() ?? ''")) ?? string.Empty;
     if (selected != expected || selected.Length == 0)
       throw new InvalidOperationException($"WebView2 mouse selection mismatch: {selected} / {expected}.");
@@ -335,7 +336,7 @@ public sealed partial class MainWindow
       File.Create(previewPath).Dispose();
       StorageFile file = await StorageFile.GetFileFromPathAsync(previewPath);
       using IRandomAccessStream stream = await file.OpenAsync(FileAccessMode.ReadWrite);
-      await WorkbenchWebView.CoreWebView2.CapturePreviewAsync(
+      await SmokeEditorWebView.CoreWebView2.CapturePreviewAsync(
         CoreWebView2CapturePreviewImageFormat.Png, stream);
       await stream.FlushAsync();
     }
@@ -343,12 +344,12 @@ public sealed partial class MainWindow
     {
       double contextX = (sx + ex) / 2;
       double contextY = (sy + ey) / 2;
-      await WorkbenchWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
+      await SmokeEditorWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
         "Input.dispatchMouseEvent", JsonSerializer.Serialize(new
         {
           type = "mousePressed", x = contextX, y = contextY, button = "right", buttons = 2, clickCount = 1,
         }));
-      await WorkbenchWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
+      await SmokeEditorWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
         "Input.dispatchMouseEvent", JsonSerializer.Serialize(new
         {
           type = "mouseReleased", x = contextX, y = contextY, button = "right", buttons = 0, clickCount = 1,
@@ -359,13 +360,13 @@ public sealed partial class MainWindow
     }
     else
     {
-      await WorkbenchWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
+      await SmokeEditorWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
         "Input.dispatchKeyEvent", "{\"type\":\"keyDown\",\"key\":\"Control\",\"windowsVirtualKeyCode\":17,\"modifiers\":2}");
-      await WorkbenchWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
+      await SmokeEditorWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
         "Input.dispatchKeyEvent", "{\"type\":\"keyDown\",\"key\":\"c\",\"code\":\"KeyC\",\"windowsVirtualKeyCode\":67,\"modifiers\":2}");
-      await WorkbenchWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
+      await SmokeEditorWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
         "Input.dispatchKeyEvent", "{\"type\":\"keyUp\",\"key\":\"c\",\"code\":\"KeyC\",\"windowsVirtualKeyCode\":67,\"modifiers\":2}");
-      await WorkbenchWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
+      await SmokeEditorWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
         "Input.dispatchKeyEvent", "{\"type\":\"keyUp\",\"key\":\"Control\",\"windowsVirtualKeyCode\":17}");
     }
     string? lastClipboard = null;
@@ -384,7 +385,7 @@ public sealed partial class MainWindow
 
   private async Task ClickTextCopyButtonByMouseAsync()
   {
-    string boxJson = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("""
+    string boxJson = await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync("""
       (() => {
         const button = [...document.querySelectorAll('button')]
           .filter(node => node.textContent?.trim() === '复制所选').at(-1);
@@ -403,7 +404,7 @@ public sealed partial class MainWindow
 
   private async Task ExerciseWordAndCrossLineSelectionAsync()
   {
-    string geometryJson = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("""
+    string geometryJson = await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync("""
       (() => {
         const spans = [...document.querySelectorAll('.image-text-glyphs')]
           .filter(node => node.firstChild?.textContent.length > 0);
@@ -443,18 +444,18 @@ public sealed partial class MainWindow
     JsonElement word = root.GetProperty("word");
     double wx = word.GetProperty("x").GetDouble();
     double wy = word.GetProperty("y").GetDouble();
-    await WorkbenchWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
+    await SmokeEditorWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
       "Input.dispatchMouseEvent", JsonSerializer.Serialize(new
       {
         type = "mousePressed", x = wx, y = wy, button = "left", buttons = 1, clickCount = 2,
       }));
-    await WorkbenchWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
+    await SmokeEditorWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
       "Input.dispatchMouseEvent", JsonSerializer.Serialize(new
       {
         type = "mouseReleased", x = wx, y = wy, button = "left", buttons = 0, clickCount = 2,
       }));
     string wordSelection = JsonSerializer.Deserialize<string>(
-      await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+      await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync(
         "window.getSelection()?.toString() ?? ''")) ?? string.Empty;
     if (string.IsNullOrWhiteSpace(wordSelection) || wordSelection.Contains('\n'))
       throw new InvalidOperationException("WebView2 double-click did not select one word.");
@@ -475,7 +476,7 @@ public sealed partial class MainWindow
       await DispatchMouseAsync("mouseMoved", ex, ey, 1);
       await DispatchMouseAsync("mouseReleased", ex, ey, 0);
       string selected = JsonSerializer.Deserialize<string>(
-        await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+        await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync(
           "window.getSelection()?.toString() ?? ''")) ?? string.Empty;
       if (selected != expected || string.IsNullOrWhiteSpace(selected))
         throw new InvalidOperationException($"WebView2 cross-line mouse selection mismatch (reverse={reverse}): {JsonSerializer.Serialize(selected)} / {JsonSerializer.Serialize(expected)}.");

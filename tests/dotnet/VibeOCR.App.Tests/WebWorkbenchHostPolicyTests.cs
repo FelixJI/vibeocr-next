@@ -1,5 +1,6 @@
 using System.Text;
 using VibeOCR.App.Web;
+using VibeOCR.App.Workbench;
 using Windows.Storage.Streams;
 using Xunit;
 
@@ -7,6 +8,41 @@ namespace VibeOCR.App.Tests;
 
 public sealed class WebWorkbenchHostPolicyTests
 {
+  [Fact]
+  public async Task SceneHostProjectsItsRouteAndDisposesOnlyItsOwnSubscription()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-scene-host-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      await using var app = new WorkbenchApplication([], WorkbenchRoute.Recognition);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      var scene = new WebWorkbenchHost(app, broker, annotations,
+        applicationOwner: false, fixedRoute: WorkbenchRoute.ImageEdit);
+      WorkbenchBootstrap bootstrap = await app.BootstrapAsync(TestContext.Current.CancellationToken);
+      WorkbenchBootstrap projected = scene.ProjectBootstrap(bootstrap);
+      Assert.Equal(WorkbenchRoute.ImageEdit, projected.Route);
+      Assert.Equal(WorkbenchRoute.Recognition, bootstrap.Route);
+      Assert.Equal(WorkbenchRoute.ImageEdit, Assert.IsType<ShellWorkbenchState>(
+        projected.States.Single(item => item.Scope == "shell").State).Route);
+      var navigation = new WorkbenchStateEnvelope(1, "shell", WorkbenchStateChange.Replace,
+        new ShellWorkbenchState(WorkbenchRoute.Pdf));
+      Assert.Equal(WorkbenchRoute.ImageEdit,
+        Assert.IsType<ShellWorkbenchState>(scene.ProjectState(navigation).State).Route);
+
+      await scene.DisposeAsync();
+      Assert.Equal(WorkbenchRoute.Recognition,
+        (await app.BootstrapAsync(TestContext.Current.CancellationToken)).Route);
+      string path = Path.Combine(root, "active.txt");
+      await File.WriteAllTextAsync(path, "still owned by main", TestContext.Current.CancellationToken);
+      WorkbenchResourceLease lease = broker.Lease("active.txt", "text/plain", TimeSpan.FromMinutes(1));
+      await using var response = await broker.OpenAsync(lease.Uri, TestContext.Current.CancellationToken);
+      Assert.Equal("text/plain", response.ContentType);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
   [Fact]
   public async Task PackagedAssetsServeOnlyExactSameOriginBundleFiles()
   {
@@ -58,6 +94,7 @@ public sealed class WebWorkbenchHostPolicyTests
 
   [Theory]
   [InlineData("https://app.vibeocr/__annotation", "POST", "image/png", true)]
+  [InlineData("https://app.vibeocr/__annotation", "POST", "image/jpeg", true)]
   [InlineData("https://app.vibeocr/__annotation", "GET", "image/png", false)]
   [InlineData("https://app.vibeocr/__annotation/", "POST", "image/png", false)]
   [InlineData("https://app.vibeocr/__annotation?debug=1", "POST", "image/png", false)]

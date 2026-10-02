@@ -54,7 +54,7 @@ public sealed partial class MainWindow
       int orangeBefore = await WaitForCanvasAsync();
 
       await ClickSmokeButtonAsync("矩形");
-      string canvasBox = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+      string canvasBox = await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync(
         "(() => { const c = document.querySelector('canvas[aria-label=\"图片检查画布\"]'); " +
         "c.scrollIntoView({block:'center'}); const r=c.getBoundingClientRect(); " +
         "return {x:r.x,y:r.y,width:r.width,height:r.height}; })()");
@@ -146,7 +146,9 @@ public sealed partial class MainWindow
     string script = "(() => { const b=Array.from(document.querySelectorAll('button'))" +
       ".find(b => b.textContent?.trim() === " + JsonSerializer.Serialize(label) +
       "); if (!b || b.disabled) return false; b.click(); return true; })()";
-    if (await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(script) != "true")
+    var surface = label is "纯截图" or "截图取字" or "长截图" or "截图识别"
+      ? WorkbenchWebView : SmokeEditorWebView;
+    if (await surface.CoreWebView2.ExecuteScriptAsync(script) != "true")
       throw new InvalidOperationException($"Screenshot smoke button unavailable: {label}");
   }
 
@@ -202,7 +204,8 @@ public sealed partial class MainWindow
 
   private async Task<int> CountOrangePixelsAsync(bool requireImage = false)
   {
-    string result = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+    if (SmokeEditorWebView.CoreWebView2 is null) return -1;
+    string result = await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync(
       "(() => { const c=document.querySelector('canvas[aria-label=\"图片检查画布\"]'); " +
       "if(!c) return -1; const d=c.getContext('2d').getImageData(0,0,c.width,c.height).data; " +
       "let n=0,w=0,k=0; for(let i=0;i<d.length;i+=4) { " +
@@ -214,7 +217,7 @@ public sealed partial class MainWindow
   }
 
   private async Task DispatchMouseAsync(string type, double x, double y, int buttons) =>
-    await WorkbenchWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
+    await SmokeEditorWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
       "Input.dispatchMouseEvent",
       JsonSerializer.Serialize(new
       {

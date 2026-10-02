@@ -86,6 +86,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private readonly Func<bool>? inferenceAttached;
   private readonly ShellActionDispatcher? shellActions;
   private readonly List<string> generatedFiles = [];
+  private readonly Dictionary<string, string> resourceFiles = new(StringComparer.Ordinal);
   private readonly HashSet<Task> backgroundOperations = [];
   private readonly HashSet<int> selectedPdfPages = [];
   private readonly Dictionary<int, WorkbenchResourceReference> pdfThumbnails = [];
@@ -99,6 +100,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private Guid? screenshotSessionId;
   private long screenshotSessionRevision;
   private bool screenshotTextSelectionRequested;
+  private bool screenshotSceneEditing;
   private WorkbenchResourceReference? screenshotSessionInput;
   private WorkbenchResourceReference? screenshotSessionResult;
   private WorkbenchResourceReference? screenshotSessionStructuredResult;
@@ -210,6 +212,8 @@ public sealed class DesktopWorkbenchCommandHandler :
   public event Action<Guid, long>? ScreenshotTextLayerInvalidated;
   public event Action<Guid, long>? ScreenshotSessionDetached;
   public event Action? PinnedTextEnvironmentChanged;
+  public event Action<Guid, VibeOCR.Platform.Windows.PhysicalRectangle?>? ScreenshotSessionReady;
+  internal Guid? CurrentImageSessionId => screenshotSessionId;
 
   /// <summary>
   /// Supervisor 连接/就绪/失败终态变更时同步广播诊断投影：宿主快照不
@@ -266,6 +270,12 @@ public sealed class DesktopWorkbenchCommandHandler :
           viewModel => viewModel.RecognizeScreenshotAsync(cancellationToken),
           cancellationToken,
           screenCapture: true),
+        SelectImageEditFileCommand => StartImageEdit(
+          viewModel => viewModel.OpenImageForEditAsync(cancellationToken), cancellationToken),
+        ReadImageEditClipboardCommand => StartImageEdit(
+          viewModel => viewModel.PasteImageForEditAsync(cancellationToken), cancellationToken),
+        OpenDroppedImageEditFileCommand drop => StartImageEdit(
+          viewModel => viewModel.DropImageForEditAsync(drop.Path, cancellationToken), cancellationToken),
         CaptureScreenshotSessionCommand => StartScreenshotSession(false, cancellationToken),
         CaptureScreenshotTextSessionCommand => StartScreenshotSession(true, cancellationToken),
         CaptureScrollingScreenshotCommand => StartScreenshotSession(false, cancellationToken, scrolling: true),
@@ -519,7 +529,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     using WorkbenchAnnotationFile annotation = annotationStore.Take(
       new Uri(command.ResourceUri));
-    await annotatedImagePlatform.CopyPngAsync(annotation.Path, cancellationToken);
+    await annotatedImagePlatform.CopyImageAsync(annotation.Path, cancellationToken);
     return CurrentRecognitionState();
   }
 
@@ -529,7 +539,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     using WorkbenchAnnotationFile annotation = annotationStore.Take(
       new Uri(command.ResourceUri));
-    if (!await annotatedImagePlatform.SavePngAsync(annotation.Path, cancellationToken))
+    if (!await annotatedImagePlatform.SaveImageAsync(annotation.Path, cancellationToken))
     {
       throw new AnnotatedImageOperationCancelledException();
     }
@@ -566,7 +576,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private RecognitionScreenshotSessionState? CurrentScreenshotSession() =>
     screenshotSessionId is { } id
       ? new RecognitionScreenshotSessionState(id.ToString("N"), screenshotSessionRevision,
-        screenshotTextSelectionRequested)
+        screenshotTextSelectionRequested, screenshotSceneEditing)
       : null;
 
   /// <summary>会话状态固定复用缓存的基准图/结果资源，避免重发布新 URL 导致编辑器重置。</summary>
@@ -596,6 +606,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     Interlocked.Increment(ref screenshotTextGeneration);
     textLayerRecognition?.Cancel();
+    if (screenshotTextLayer?.Image is { } image) ReleaseResource(image);
     screenshotTextLayer = null;
     if (editedRevision is { } revision && screenshotSessionId is { } id)
       ScreenshotTextLayerInvalidated?.Invoke(id, revision);
@@ -603,6 +614,56 @@ public sealed class DesktopWorkbenchCommandHandler :
 
   private WorkbenchAnnotationFile TakeScreenshotAnnotation(string resourceUri) =>
     annotationStore.Take(new Uri(resourceUri));
+
+  private RecognitionWorkbenchState? StartImageEdit(
+    Func<RecognitionViewModel, Task> loadImage, CancellationToken cancellationToken)
+  {
+    recognition ??= recognitionFactory();
+    long generation = Interlocked.Increment(ref recognitionGeneration);
+    return PublishStartThenTrack(
+      SessionRecognitionState(true, "recognition.running"),
+      () => CompleteImageEditAsync(loadImage, generation, cancellationToken));
+  }
+
+  private async Task CompleteImageEditAsync(
+    Func<RecognitionViewModel, Task> loadImage, long generation,
+    CancellationToken cancellationToken)
+  {
+    try
+    {
+      await loadImage(recognition!);
+      if (generation != Volatile.Read(ref recognitionGeneration)) return;
+      if (recognition!.TerminalState is JobState.Cancelled or JobState.Failed)
+      {
+        StateChanged?.Invoke(recognition.TerminalState == JobState.Failed
+          ? SessionRecognitionState(false, "recognition.inputFailed")
+          : CurrentRecognitionState());
+        return;
+      }
+      if (recognition.CurrentInput is not { } image) return;
+      WorkbenchResourceReference input = await PublishBytesAsync(image.Data, image.MediaType,
+        ExtensionForMediaType(image.MediaType), cancellationToken);
+      if (generation != Volatile.Read(ref recognitionGeneration))
+      {
+        ReleaseResource(input);
+        return;
+      }
+      ClearScreenshotSession();
+      InvalidateScreenshotTextLayer();
+      resultActions = null;
+      screenshotSessionId = Guid.NewGuid();
+      screenshotSessionRevision = 0;
+      screenshotSessionInput = input;
+      StateChanged?.Invoke(SessionRecognitionState(false, "recognition.session"));
+    }
+    catch (Exception error) when (error is IOException or UnauthorizedAccessException or
+      OperationCanceledException)
+    {
+      AppLog.Error("Image edit input failed", error);
+      if (generation == Volatile.Read(ref recognitionGeneration))
+        StateChanged?.Invoke(SessionRecognitionState(false, "recognition.inputFailed"));
+    }
+  }
 
   private RecognitionWorkbenchState? StartScreenshotSession(
     bool textSelectionRequested, CancellationToken cancellationToken, bool scrolling = false)
@@ -676,12 +737,14 @@ public sealed class DesktopWorkbenchCommandHandler :
           // 旧捕获完成不得复活已被取代的会话。
           if (generation != Volatile.Read(ref recognitionGeneration))
           {
+            ReleaseResource(input);
             return;
           }
 
           screenshotSessionId = Guid.NewGuid();
           screenshotSessionRevision = 0;
           screenshotTextSelectionRequested = textSelectionRequested;
+          screenshotSceneEditing = true;
           screenshotSessionInput = input;
           screenshotSessionResult = null;
           StateChanged?.Invoke(SessionRecognitionState(false, "recognition.session"));
@@ -715,11 +778,9 @@ public sealed class DesktopWorkbenchCommandHandler :
     finally
     {
       Interlocked.Exchange(ref captureInFlight, 0);
-      // 纯截图会话的真实终态（完成/失败/取消）后显示主窗呈现编辑器：
-      // #109 热键→编辑器路径必需，隐藏主窗不得保留。仅在真正进入后台的
-      // 会话上触发，开始与被拒重入不经过此处；复用同一 ShowWorkbench
-      // 动作，不新增完成接口。
-      shellActions?.TryDispatch(HotkeyActionCatalog.ShowWorkbench);
+      if (generation == Volatile.Read(ref recognitionGeneration) &&
+          screenshotSessionId is { } id)
+        ScreenshotSessionReady?.Invoke(id, recognition?.CurrentInput?.CaptureBounds);
     }
   }
 
@@ -758,7 +819,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     // 不回写旧会话状态。
     ValidateScreenshotSession(command.SessionId, command.Revision);
     using WorkbenchAnnotationFile annotation = TakeScreenshotAnnotation(command.ResourceUri);
-    await annotatedImagePlatform.CopyPngAsync(annotation.Path, cancellationToken);
+    await annotatedImagePlatform.CopyImageAsync(annotation.Path, cancellationToken);
     return CurrentRecognitionState();
   }
 
@@ -770,7 +831,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     // 出口只回报当前投影，不回写旧会话状态。
     ValidateScreenshotSession(command.SessionId, command.Revision);
     using WorkbenchAnnotationFile annotation = TakeScreenshotAnnotation(command.ResourceUri);
-    if (!await annotatedImagePlatform.SavePngAsync(annotation.Path, cancellationToken))
+    if (!await annotatedImagePlatform.SaveImageAsync(annotation.Path, cancellationToken))
     {
       throw new AnnotatedImageOperationCancelledException();
     }
@@ -814,8 +875,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     ValidateScreenshotSession(command.SessionId, command.Revision);
     var input = new RecognitionInput(
       png,
-      "image/png",
-      "screenshot-session-final.png",
+      annotation.MediaType,
+      "screenshot-session-final" + Path.GetExtension(annotation.Path),
       "screenshot-session");
     long generation = Interlocked.Increment(ref recognitionGeneration);
     Guid sessionId = command.SessionId;
@@ -950,6 +1011,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     Interlocked.Increment(ref recognitionGeneration);
     recognition.Cancel();
     recognition.InvalidateResult();
+    recognition.ReleaseInput();
     resultActions = null;
     InvalidateScreenshotTextLayer();
     ClearScreenshotSession();
@@ -966,7 +1028,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private async Task<RecognitionWorkbenchState?> PrepareScreenshotTextLayerAsync(
     PrepareScreenshotTextLayerCommand command,
     CancellationToken cancellationToken,
-    byte[]? pinnedPng = null)
+    byte[]? pinnedPng = null, string pinnedMediaType = "image/png")
   {
     recognition ??= recognitionFactory();
     ValidateScreenshotSession(command.SessionId, command.Revision);
@@ -1002,10 +1064,12 @@ public sealed class DesktopWorkbenchCommandHandler :
     }
 
     byte[] png;
+    string mediaType = pinnedMediaType;
     if (pinnedPng is null)
     {
       using WorkbenchAnnotationFile annotation = TakeScreenshotAnnotation(command.ResourceUri);
       png = await File.ReadAllBytesAsync(annotation.Path, cancellationToken);
+      mediaType = annotation.MediaType;
     }
     else
     {
@@ -1015,8 +1079,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     ValidateScreenshotSession(command.SessionId, command.Revision);
     var input = new RecognitionInput(
       png,
-      "image/png",
-      "screenshot-text-layer.png",
+      mediaType,
+      "screenshot-text-layer" + ExtensionForMediaType(mediaType),
       "screenshot-text");
     string serviceInstance = supervisorInstanceId() ?? string.Empty;
     long generation = Interlocked.Increment(ref screenshotTextGeneration);
@@ -1060,7 +1124,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       RecognitionWorkbenchState? started = await PrepareScreenshotTextLayerAsync(
         new PrepareScreenshotTextLayerCommand(string.Empty, sessionId, revision),
         CancellationToken.None,
-        activePng);
+        activePng, Path.GetExtension(imagePath) == ".jpg" ? "image/jpeg" : "image/png");
       if (started is not null) StateChanged?.Invoke(started);
       return null;
     }
@@ -1077,7 +1141,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     RecognitionViewModel viewModel = textLayerRecognitionFactory();
     viewModel.SetRecognitionMode(mode);
     await viewModel.RecognizeCapturedInputAsync(
-      new RecognitionInput(png, "image/png", "pinned-text-layer.png", "screenshot-text"),
+      new RecognitionInput(png, Path.GetExtension(imagePath) == ".jpg" ? "image/jpeg" : "image/png", "pinned-text-layer" + Path.GetExtension(imagePath), "screenshot-text"),
       cancellationToken);
     cancellationToken.ThrowIfCancellationRequested();
     if ((supervisorInstanceId() ?? string.Empty) != serviceInstance ||
@@ -1173,14 +1237,15 @@ public sealed class DesktopWorkbenchCommandHandler :
       // 展示资源就是识别输入的同一最终 PNG 字节。
       WorkbenchResourceReference image = await PublishBytesAsync(
         input.Data,
-        "image/png",
-        ".png",
+        input.MediaType,
+        ExtensionForMediaType(input.MediaType),
         cancellationToken);
       if (generation != Volatile.Read(ref screenshotTextGeneration) ||
         screenshotSessionId != sessionId ||
         screenshotSessionRevision != revision ||
         (supervisorInstanceId() ?? string.Empty) != serviceInstance)
       {
+        ReleaseResource(image);
         return;
       }
       screenshotTextLayer = new RecognitionTextLayerState(
@@ -1213,6 +1278,7 @@ public sealed class DesktopWorkbenchCommandHandler :
 
   private void PublishTextLayerState(string status, string? reason)
   {
+    if (screenshotTextLayer?.Image is { } image) ReleaseResource(image);
     RecognitionScreenshotSessionState? binding = screenshotSessionId is { } id
       ? new RecognitionScreenshotSessionState(id.ToString("N"), screenshotSessionRevision)
       : null;
@@ -1395,9 +1461,15 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     if (screenshotSessionId is { } id)
       ScreenshotSessionDetached?.Invoke(id, screenshotSessionRevision);
+    if (screenshotSessionInput is { } input)
+      ReleaseResource(input);
+    if (screenshotSessionResult is { } result) ReleaseResource(result);
+    if (screenshotSessionStructuredResult is { } structured) ReleaseResource(structured);
+    screenshotSessionStructuredResult = null;
     screenshotSessionId = null;
     screenshotSessionRevision = 0;
     screenshotTextSelectionRequested = false;
+    screenshotSceneEditing = false;
     screenshotSessionInput = null;
     screenshotSessionResult = null;
   }
@@ -2258,7 +2330,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     qrCode ??= qrCodeFactory();
     if (qrPreviewPath is null || publishedQrRevision != qrCode.PreviewRevision) throw new InvalidOperationException("当前没有可复制的预览图片。");
-    await annotatedImagePlatform.CopyPngAsync(qrPreviewPath, cancellationToken);
+    await annotatedImagePlatform.CopyImageAsync(qrPreviewPath, cancellationToken);
     return QrCodeState(qrCode) with { StatusCode = "qrcode.copied" };
   }
 
@@ -3063,6 +3135,24 @@ public sealed class DesktopWorkbenchCommandHandler :
     return structured;
   }
 
+  private void ReleaseResource(WorkbenchResourceReference resource)
+  {
+    if (!Uri.TryCreate(resource.Url, UriKind.Absolute, out Uri? uri)) return;
+    resourceBroker.Revoke(new WorkbenchResourceLease(uri, DateTimeOffset.MaxValue));
+    // Published input files belong to the app and are retained only while leased.
+    if (resourceFiles.TryGetValue(resource.Url, out string? path))
+    {
+      try
+      {
+        File.Delete(path);
+        resourceFiles.Remove(resource.Url);
+        generatedFiles.Remove(path);
+      }
+      catch (IOException) { }
+      catch (UnauthorizedAccessException) { }
+    }
+  }
+
   private async Task<WorkbenchResourceReference> PublishBytesAsync(
     byte[] data,
     string mediaType,
@@ -3085,6 +3175,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       relative,
       mediaType,
       TimeSpan.FromHours(1));
+    resourceFiles[lease.Uri.AbsoluteUri] = destination;
     return (new WorkbenchResourceReference(
       lease.Uri.AbsoluteUri,
       mediaType,

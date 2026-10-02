@@ -47,15 +47,23 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   private Task? subscription;
   private Guid? sessionId;
   private bool disposed;
+  private readonly bool applicationOwner;
+  private readonly WorkbenchRoute? fixedRoute;
+  private readonly CancellationTokenSource lifetime = new();
+  private readonly List<Uri> uploadedAnnotations = [];
 
   public WebWorkbenchHost(
     IWorkbenchApplication application,
     WorkbenchResourceBroker resourceBroker,
-    WorkbenchAnnotationStore annotationStore)
+    WorkbenchAnnotationStore annotationStore,
+    bool applicationOwner = true,
+    WorkbenchRoute? fixedRoute = null)
   {
     this.application = application ?? throw new ArgumentNullException(nameof(application));
     this.resourceBroker = resourceBroker ?? throw new ArgumentNullException(nameof(resourceBroker));
     this.annotationStore = annotationStore ?? throw new ArgumentNullException(nameof(annotationStore));
+    this.applicationOwner = applicationOwner;
+    this.fixedRoute = fixedRoute;
   }
 
   public event Action<string>? StateChanged;
@@ -91,7 +99,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     string.IsNullOrEmpty(uri.Fragment) &&
     string.Equals(uri.AbsolutePath, "/__annotation", StringComparison.Ordinal) &&
     string.Equals(method, "POST", StringComparison.Ordinal) &&
-    string.Equals(contentType?.Trim(), "image/png", StringComparison.OrdinalIgnoreCase);
+    (string.Equals(contentType?.Trim(), "image/png", StringComparison.OrdinalIgnoreCase) ||
+      string.Equals(contentType?.Trim(), "image/jpeg", StringComparison.OrdinalIgnoreCase));
 
   public async Task InitializeAsync(WebView2 webView, string assetFolder)
   {
@@ -114,6 +123,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
 
     dispatcher = webView.DispatcherQueue;
     await webView.EnsureCoreWebView2Async();
+    lifetime.Token.ThrowIfCancellationRequested();
     CoreWebView2 next = webView.CoreWebView2;
     // WebView2 does not raise WebResourceRequested for a mapped virtual host.
     // Serve the packaged bundle and opaque resources through one same-origin route.
@@ -131,7 +141,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       CoreWebView2WebResourceContext.All);
     next.WebResourceRequested += OnWebResourceRequested;
     core = next;
-    next.Navigate(StartUri.AbsoluteUri);
+    next.Navigate(fixedRoute is null ? StartUri.AbsoluteUri : StartUri.AbsoluteUri + "#/imageEdit?scene=1");
   }
 
   public void Reload()
@@ -197,6 +207,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     CoreWebView2 sender,
     CoreWebView2WebMessageReceivedEventArgs args)
   {
+    if (disposed) return;
     try
     {
       string message = args.WebMessageAsJson;
@@ -204,7 +215,9 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       {
         Guid requestId = WorkbenchBridgeCodec.ParseBootstrapRequest(message);
         WorkbenchBootstrap bootstrap = await application.BootstrapAsync(
-          CancellationToken.None);
+          lifetime.Token);
+        bootstrap = ProjectBootstrap(bootstrap);
+        if (disposed) return;
         sessionId = bootstrap.SessionId;
         sender.PostWebMessageAsJson(
           WorkbenchBridgeCodec.SerializeBootstrap(requestId, bootstrap));
@@ -219,10 +232,12 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       WorkbenchCommandEnvelope envelope = WorkbenchBridgeCodec.ParseCommand(
         message,
         activeSession);
+      if (fixedRoute is not null && envelope.Command is NavigateWorkbenchCommand)
+        throw new WorkbenchBridgeProtocolException("Scene navigation cannot change the workbench route.");
       WorkbenchCommandReceipt receipt = await application.ExecuteAsync(
         envelope,
-        CancellationToken.None);
-      sender.PostWebMessageAsJson(WorkbenchBridgeCodec.SerializeReceipt(receipt));
+        lifetime.Token);
+      if (!disposed) sender.PostWebMessageAsJson(WorkbenchBridgeCodec.SerializeReceipt(receipt));
     }
     catch (Exception error) when (
       error is WorkbenchBridgeProtocolException or OperationCanceledException)
@@ -236,6 +251,15 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       RecoveryRequired?.Invoke();
     }
   }
+
+  internal WorkbenchBootstrap ProjectBootstrap(WorkbenchBootstrap bootstrap) => fixedRoute is { } route
+    ? bootstrap with { Route = route, States = bootstrap.States.Select(ProjectState).ToArray() }
+    : bootstrap;
+
+  internal WorkbenchStateEnvelope ProjectState(WorkbenchStateEnvelope state) =>
+    fixedRoute is { } route && state.State is ShellWorkbenchState
+      ? state with { State = new ShellWorkbenchState(route) }
+      : state;
 
   private static bool IsBootstrap(string json)
   {
@@ -276,7 +300,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
         afterRevision,
         cancellationToken))
       {
-        string json = WorkbenchBridgeCodec.SerializeState(activeSession, state);
+        string json = WorkbenchBridgeCodec.SerializeState(activeSession, ProjectState(state));
         dispatcher?.TryEnqueue(() => core?.PostWebMessageAsJson(json));
       }
     }
@@ -308,6 +332,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     CoreWebView2 sender,
     CoreWebView2WebResourceRequestedEventArgs args)
   {
+    if (disposed) return;
     var deferral = args.GetDeferral();
     IRandomAccessStream? buffered = null;
     try
@@ -326,9 +351,15 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       if (IsAnnotationUploadRequest(uri, args.Request.Method, contentType))
       {
         using Stream upload = args.Request.Content.AsStreamForRead();
-        WorkbenchAnnotationLease lease = await annotationStore.UploadPngAsync(
-          upload,
-          CancellationToken.None);
+        WorkbenchAnnotationLease lease = await annotationStore.UploadImageAsync(
+          upload, contentType.ToLowerInvariant().Trim(),
+          lifetime.Token);
+        if (disposed)
+        {
+          annotationStore.Revoke(lease.ResourceUri);
+          return;
+        }
+        uploadedAnnotations.Add(lease.ResourceUri);
         byte[] payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
         {
           resourceUri = lease.ResourceUri.AbsoluteUri,
@@ -438,6 +469,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       return;
     }
     disposed = true;
+    lifetime.Cancel();
     subscriptionCancellation?.Cancel();
     if (subscription is not null)
     {
@@ -463,8 +495,14 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       current.ProcessFailed -= OnProcessFailed;
       current.WebResourceRequested -= OnWebResourceRequested;
     }
-    await application.DisposeAsync();
-    annotationStore.Dispose();
-    resourceBroker.Dispose();
+    foreach (Uri uri in uploadedAnnotations) annotationStore.Revoke(uri);
+    uploadedAnnotations.Clear();
+    lifetime.Dispose();
+    if (applicationOwner)
+    {
+      await application.DisposeAsync();
+      annotationStore.Dispose();
+      resourceBroker.Dispose();
+    }
   }
 }

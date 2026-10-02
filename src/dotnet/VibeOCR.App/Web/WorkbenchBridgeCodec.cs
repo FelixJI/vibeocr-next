@@ -260,6 +260,7 @@ public static class WorkbenchBridgeCodec
   private static WorkbenchRoute ParseRoute(string? route) => route switch
   {
     "recognition" => WorkbenchRoute.Recognition,
+    "imageEdit" => WorkbenchRoute.ImageEdit,
     "batch" => WorkbenchRoute.Batch,
     "qrcode" => WorkbenchRoute.QrCode,
     "pdf" => WorkbenchRoute.Pdf,
@@ -281,6 +282,12 @@ public static class WorkbenchBridgeCodec
         EnsureObjectWithFields(arguments, RouteArgumentFields, "command arguments");
         return new NavigateWorkbenchCommand(
           ParseRoute(arguments.GetProperty("route").GetString()));
+      case ("imageEdit", "selectImage"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new SelectImageEditFileCommand();
+      case ("imageEdit", "readClipboard"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new ReadImageEditClipboardCommand();
       case ("recognition", "selectImage"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new SelectRecognitionImageCommand();
@@ -968,6 +975,7 @@ public static class WorkbenchBridgeCodec
   private static string FormatRoute(WorkbenchRoute route) => route switch
   {
     WorkbenchRoute.Recognition => "recognition",
+    WorkbenchRoute.ImageEdit => "imageEdit",
     WorkbenchRoute.Batch => "batch",
     WorkbenchRoute.QrCode => "qrcode",
     WorkbenchRoute.Pdf => "pdf",
@@ -994,6 +1002,7 @@ public static class WorkbenchBridgeCodec
         sessionId = recognition.ScreenshotSession.SessionId,
         revision = recognition.ScreenshotSession.Revision,
         textSelectionRequested = recognition.ScreenshotSession.TextSelectionRequested,
+        sceneEditing = recognition.ScreenshotSession.SceneEditing,
       },
       textLayer = recognition.TextLayer is null ? null : new
       {
