@@ -8,10 +8,14 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AppActions } from "../app/types";
 import {
-  imageTransform,
+  exclusionCoversOutput,
+  exclusionNormalizedRects,
   finalOutputSize,
+  imageTransform,
+  isExclusionMark,
   outputSize,
   projectPoint,
+  rectIntersectsBox,
   rotateEditorState,
   type AnnotationTool,
   type CanvasSize,
@@ -76,6 +80,7 @@ const TOOL_LABELS: Readonly<Record<Tool, string>> = {
   pen: "画笔",
   highlighter: "荧光笔",
   numbering: "序号",
+  exclude: "屏蔽",
   crop: "裁剪",
   inpaint: "去水印",
 };
@@ -93,6 +98,7 @@ const TOOL_ORDER: readonly Tool[] = [
   "pen",
   "highlighter",
   "numbering",
+  "exclude",
   "crop",
   "inpaint",
 ];
@@ -122,13 +128,11 @@ export interface ScreenshotSessionHandle {
   readonly revision: number;
 }
 
-/** 去水印预览结果：仅存在干组件状态，绝不进入历史；明确应用才 commit。 */
+/** 去水印预览结果：仅存在于组件状态，绝不进入历史；明确应用才 commit。 */
 interface InpaintPreviewResult {
   readonly generation: number;
   readonly naturalRect: InpaintRect;
   readonly canvas: HTMLCanvasElement;
-  readonly wallMs: number;
-  readonly transferBytes: number;
 }
 
 /** draw()/exportCanvas 共用的补丁绘制层：矩形为原图（未旋转）像素空间。 */
@@ -175,6 +179,15 @@ export function ImageCanvasEditor({
   const dragStart = useRef<Point | undefined>(undefined);
   const selectedMarkRef = useRef<number | undefined>(undefined);
   const exportInProgressRef = useRef(false);
+  // 选定屏蔽矩形的八点缩放拖拽：origin 冻结拖前几何，resizeDraft 驱动实时预览。
+  const resizeRef = useRef<
+    | {
+        readonly index: number;
+        readonly handle: ExclusionResizeHandle;
+        readonly origin: Mark;
+      }
+    | undefined
+  >(undefined);
   const contentRevisionRef = useRef(session?.revision ?? 0);
   const sessionIdRef = useRef(session?.sessionId);
   const [tool, setTool] = useState<Tool>("select");
@@ -227,6 +240,9 @@ export function ImageCanvasEditor({
   const inpaintGenerationRef = useRef(0);
   const inpaintPatchStore = useRef(new Map<number, HTMLCanvasElement>());
   const inpaintPatchIdRef = useRef(0);
+  const [resizeDraft, setResizeDraft] = useState<
+    { readonly index: number; readonly mark: Mark } | undefined
+  >();
   // 本地修订：编辑提交即时推进，不等宿主回显；文字层绑定据此立即失效。
   const [localRevision, setLocalRevision] = useState(session?.revision ?? 0);
   const [localAutoText, setLocalAutoText] = useState(false);
@@ -259,6 +275,7 @@ export function ImageCanvasEditor({
       : "标注只影响复制或保存的图片副本，不会重新识别。",
   );
   const state = history[historyIndex] ?? EMPTY;
+  const hasExclusions = state.marks.some(isExclusionMark);
 
   // 换图（新截图、新输入文件或迟到源替换）或会话切换时重置编辑历史：
   // 旧图标注/裁剪不得导出到新图。按 React 推荐在渲染期随 props 调整状态，
@@ -407,11 +424,18 @@ export function ImageCanvasEditor({
       imageRef.current,
       state,
       selectedMark,
-      draftMark ? [...state.marks, draftMark] : state.marks,
+      resizeDraft
+        ? state.marks.map((mark, index) =>
+            index === resizeDraft.index ? resizeDraft.mark : mark,
+          )
+        : draftMark
+          ? [...state.marks, draftMark]
+          : state.marks,
       true,
       1,
       // 预览背底与导出一致：JPEG 白底合成透明，PNG 沿用原有深色合成。
       outputFormat === "image/jpeg" ? "#ffffff" : "#161616",
+      false,
       inpaintLayer,
     );
   }, [
@@ -419,6 +443,7 @@ export function ImageCanvasEditor({
     selectedMark,
     state,
     draftMark,
+    resizeDraft,
     outputFormat,
     inpaintLayer,
   ]);
@@ -565,6 +590,68 @@ export function ImageCanvasEditor({
     return () => URL.revokeObjectURL(finalPreviewUrl);
   }, [finalPreviewUrl]);
 
+  // 屏蔽导出预览：与识别输入/显式屏蔽副本同一导出管线（烘焙白色像素），
+  // 只在存在排除区时生成；证明预览、文件与再次识别输入一致。
+  const [maskedPreview, setMaskedPreview] = useState<{
+    key: string;
+    url: string;
+    byteLength: number;
+    width: number;
+    height: number;
+  }>();
+  const maskedPreviewKey = hasExclusions ? `${finalPreviewKey}|masked` : "";
+  useEffect(() => {
+    if (!maskedPreviewKey) return;
+    const image = imageRef.current;
+    if (!image) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const blob = await exportCanvas(image, canvasRef.current, state, {
+            format: outputFormat,
+            quality: jpegQuality,
+            bakeExclusions: true,
+          });
+          const url = URL.createObjectURL(blob);
+          const decoded = new Image();
+          decoded.decoding = "async";
+          decoded.onload = () => {
+            if (cancelled) {
+              URL.revokeObjectURL(url);
+              return;
+            }
+            setMaskedPreview({
+              key: maskedPreviewKey,
+              url,
+              byteLength: blob.size,
+              width: decoded.naturalWidth,
+              height: decoded.naturalHeight,
+            });
+          };
+          decoded.onerror = () => URL.revokeObjectURL(url);
+          decoded.src = url;
+        } catch {
+          if (!cancelled) {
+            setMaskedPreview((current) =>
+              current?.key === maskedPreviewKey ? current : undefined,
+            );
+          }
+        }
+      })();
+    }, 500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [state, outputFormat, jpegQuality, maskedPreviewKey]);
+
+  const maskedPreviewUrl = maskedPreview?.url;
+  useEffect(() => {
+    if (!maskedPreviewUrl) return;
+    return () => URL.revokeObjectURL(maskedPreviewUrl);
+  }, [maskedPreviewUrl]);
+
   // 原位取字：会话/修订/工具变化时导出当前最终 PNG 并请求宿主准备文字层。
   const sessionKeyForLayer = session?.sessionId ?? "";
   const layerBindingKey = textLayer?.binding
@@ -623,9 +710,11 @@ export function ImageCanvasEditor({
     if (!session || prepareInFlight.current || exportInProgressRef.current) {
       return;
     }
+    if (refuseIfFullyMasked("textLayer")) return;
     prepareInFlight.current = true;
     try {
-      const exported = await exportFinalImageIfUnchanged();
+      // 文字层与识别同源：屏蔽区写入白色像素，被屏蔽文字不可进入可选层。
+      const exported = await exportFinalImageIfUnchanged(true);
       if (!exported) return;
       await actions.run({
         type: "recognition.prepareScreenshotTextLayer",
@@ -692,7 +781,7 @@ export function ImageCanvasEditor({
       return;
     }
     if (typeof Worker !== "function") {
-      setOperationMessage("当前环境不支持后台修补（Web Worker 不可用）。");
+      setOperationMessage("当前环境不支持本地修补，当前图片未被修改。");
       return;
     }
     const displaySize = { width: canvas.width, height: canvas.height };
@@ -722,16 +811,28 @@ export function ImageCanvasEditor({
     baseContext.drawImage(image, 0, 0);
     for (const patch of state.patches ?? []) {
       const stored = inpaintPatchStore.current.get(patch.id);
-      if (stored) baseContext.drawImage(stored, patch.x, patch.y);
+      if (!stored) continue;
+      // 替换式叠加：先清除该矩形再写入补丁像素，二次修补的输入不含
+      // 旧像素残留，补丁自身的半透明 alpha 也原样保留。
+      baseContext.clearRect(patch.x, patch.y, patch.width, patch.height);
+      baseContext.drawImage(stored, patch.x, patch.y);
     }
     const pixels = baseContext.getImageData(0, 0, base.width, base.height);
     const generation = inpaintGenerationRef.current + 1;
     inpaintGenerationRef.current = generation;
     inpaintWorkerRef.current?.terminate();
-    const worker = new Worker(
-      new URL("./inpaint/inpaint.worker.ts", import.meta.url),
-      { type: "module" },
-    );
+    let worker: Worker;
+    try {
+      worker = new Worker(
+        new URL("./inpaint/inpaint.worker.ts", import.meta.url),
+        { type: "module" },
+      );
+    } catch {
+      // 同步构造失败（如环境限制）：保留原图，允许重试，不留半途状态。
+      inpaintWorkerRef.current = undefined;
+      setOperationMessage("无法启动本地修补，当前图片未被修改；请重试。");
+      return;
+    }
     inpaintWorkerRef.current = worker;
     const frozen = {
       key: currentKeyRef.current,
@@ -741,7 +842,6 @@ export function ImageCanvasEditor({
       selection,
       generation,
     };
-    const startedAt = performance.now();
     worker.onmessage = (event: MessageEvent<InpaintResponse>) => {
       const response = event.data;
       if (response.generation !== inpaintGenerationRef.current) return;
@@ -802,34 +902,25 @@ export function ImageCanvasEditor({
         rect.width,
         rect.height,
       );
-      const wallMs = performance.now() - startedAt;
       setInpaintPreview({
         generation,
         naturalRect: rect,
         canvas: patch,
-        wallMs,
-        transferBytes,
       });
       setInpaintBusy(false);
       setInpaintCompare("after");
-      setOperationMessage(
-        `修补预览完成（Worker 实际耗时 ${Math.round(wallMs)} ms，请求/响应传输约 ${formatBytes(transferBytes)}）。请对比前后效果，确认后“应用修补”。`,
-      );
+      setOperationMessage("修补预览完成。请对比前后效果，确认后再“应用修补”。");
     };
     worker.onerror = () => {
       if (generation !== inpaintGenerationRef.current) return;
       setInpaintBusy(false);
-      setOperationMessage(
-        "本地修补 Worker 异常终止，当前图片未被修改；请重试。",
-      );
+      setOperationMessage("本地修补意外失败，当前图片未被修改；请重试。");
     };
     setInpaintBusy(true);
     setInpaintPreview(undefined);
     setOperationMessage(
       "正在本地修补选中区域……期间可取消，当前图片不会被修改。",
     );
-    // 传输字节必须在 transfer 前读取：postMessage 后 buffer 被 detach。
-    const transferBytes = pixels.data.byteLength * 2;
     const buffer = pixels.data.buffer;
     worker.postMessage(
       {
@@ -855,7 +946,7 @@ export function ImageCanvasEditor({
       patches: [...(state.patches ?? []), { id, ...preview.naturalRect }],
     });
     setOperationMessage(
-      `已应用去水印修补（${preview.naturalRect.width}×${preview.naturalRect.height} px）；可用撤销恢复原图，复制/保存/识别使用修补后像素。`,
+      "已应用修补；可用撤销恢复原图，复制/保存/识别使用修补后的画面。",
     );
   }
 
@@ -991,6 +1082,19 @@ export function ImageCanvasEditor({
       );
       return;
     }
+    if (resizeRef.current) {
+      const at = point(event);
+      const start = dragStart.current;
+      setResizeDraft({
+        index: resizeRef.current.index,
+        mark: resizeExclusionMark(
+          resizeRef.current.origin,
+          resizeRef.current.handle,
+          { x: at.x - start.x, y: at.y - start.y },
+        ),
+      });
+      return;
+    }
     if (tool !== "pen" && tool !== "highlighter") return;
     const at = point(event);
     setDraftMark((current) => {
@@ -1009,7 +1113,18 @@ export function ImageCanvasEditor({
     const start = point(event);
     dragStart.current = start;
     if (tool === "select") {
-      select(findMark(state.marks, start));
+      // 选定屏蔽矩形优先命中八点缩放手柄；其余行为与旧选择工具一致。
+      const index = selectedMarkRef.current;
+      const selected = index !== undefined ? state.marks[index] : undefined;
+      const handle =
+        index !== undefined && selected && isExclusionMark(selected)
+          ? exclusionResizeHandle(selected, start)
+          : undefined;
+      if (index !== undefined && selected && handle) {
+        resizeRef.current = { index, handle, origin: selected };
+      } else {
+        select(findMark(state.marks, start));
+      }
     } else if (tool === "inpaint") {
       // 重新框选即作废上一轮预览与在途请求；新选区在松开时确定。
       if (inpaintPreview || inpaintBusy) {
@@ -1039,6 +1154,23 @@ export function ImageCanvasEditor({
     const end = point(event);
     const start = dragStart.current;
     dragStart.current = undefined;
+    if (resizeRef.current) {
+      const { index, handle, origin } = resizeRef.current;
+      resizeRef.current = undefined;
+      setResizeDraft(undefined);
+      commit({
+        ...state,
+        marks: state.marks.map((mark, markIndex) =>
+          markIndex === index
+            ? resizeExclusionMark(origin, handle, {
+                x: end.x - start.x,
+                y: end.y - start.y,
+              })
+            : mark,
+        ),
+      });
+      return;
+    }
     if (tool === "select") {
       const index = selectedMarkRef.current;
       if (index === undefined) return;
@@ -1120,7 +1252,15 @@ export function ImageCanvasEditor({
     }
     if (Math.hypot(end.x - start.x, end.y - start.y) >= 8) {
       if (tool === "crop") commit({ ...state, crop: { start, end } });
-      else
+      else if (
+        tool === "exclude" &&
+        state.marks.filter(isExclusionMark).length >= MAX_EXCLUSION_MARKS
+      ) {
+        // 与桥上限一致：达到上限提示并拒绝新增，保留既有标记与修订。
+        setOperationMessage(
+          `屏蔽区已达上限 ${MAX_EXCLUSION_MARKS} 个；请先删除或清空后再新增。`,
+        );
+      } else
         commit({
           ...state,
           marks: [
@@ -1177,8 +1317,9 @@ export function ImageCanvasEditor({
     );
   }
 
-  /** 多出口共用的安全导出：上传归来后校验未变；变化则不发送。 */
-  async function exportFinalImageIfUnchanged(): Promise<
+  /** 多出口共用的安全导出：上传归来后校验未变；变化则不发送。
+   * bake=true 时把排除区写入不透明白色像素（识别输入与显式屏蔽副本）。 */
+  async function exportFinalImageIfUnchanged(bakeExclusions = false): Promise<
     | {
         resourceUri: string;
         sessionId?: string;
@@ -1193,6 +1334,7 @@ export function ImageCanvasEditor({
       format: outputFormat,
       quality: jpegQuality,
       inpaint: { patches: appliedInpaintPatches },
+      bakeExclusions,
     });
     const resourceUri = await uploadAnnotatedImage(blob);
     if (!exportContextUnchanged(frozen)) {
@@ -1210,13 +1352,15 @@ export function ImageCanvasEditor({
     };
   }
 
-  async function copyAnnotatedImage() {
+  async function copyAnnotatedImage(masked = false) {
     if (!canExport || exportInProgressRef.current) return;
     exportInProgressRef.current = true;
     setIsExporting(true);
     try {
-      setOperationMessage("正在生成并复制标注图片……");
-      const exported = await exportFinalImageIfUnchanged();
+      setOperationMessage(
+        masked ? "正在生成并复制屏蔽副本……" : "正在生成并复制标注图片……",
+      );
+      const exported = await exportFinalImageIfUnchanged(masked);
       if (!exported) return;
       const copied = exported.sessionId
         ? await actions.run({
@@ -1232,8 +1376,12 @@ export function ImageCanvasEditor({
       setOperationMessage(
         copied
           ? exported.sessionId
-            ? `已复制截图副本（${formatLabel(exported)}）；显式识别只会使用当前最终画面。`
-            : `已复制标注图片副本（${formatLabel(exported)}）。识别结果保持不变。`
+            ? masked
+              ? `已复制屏蔽副本（${formatLabel(exported)}）：屏蔽区为真实白色像素；原图与普通副本不受影响。`
+              : `已复制截图副本（${formatLabel(exported)}）；屏蔽区不会写入本副本，仅识别输入与显式屏蔽副本使用白色覆盖。`
+            : masked
+              ? `已复制屏蔽副本（${formatLabel(exported)}）：屏蔽区为真实白色像素；原图与普通副本不受影响。`
+              : `已复制标注图片副本（${formatLabel(exported)}）。识别结果保持不变。`
           : "复制未完成，请查看页面提示后重试。",
       );
     } catch {
@@ -1244,13 +1392,17 @@ export function ImageCanvasEditor({
     }
   }
 
-  async function saveAnnotatedImage() {
+  async function saveAnnotatedImage(masked = false) {
     if (!canExport || exportInProgressRef.current) return;
     exportInProgressRef.current = true;
     setIsExporting(true);
     try {
-      setOperationMessage("正在生成标注图片并打开系统保存窗口……");
-      const exported = await exportFinalImageIfUnchanged();
+      setOperationMessage(
+        masked
+          ? "正在生成屏蔽副本并打开系统保存窗口……"
+          : "正在生成标注图片并打开系统保存窗口……",
+      );
+      const exported = await exportFinalImageIfUnchanged(masked);
       if (!exported) return;
       const saved = exported.sessionId
         ? await actions.run({
@@ -1266,8 +1418,12 @@ export function ImageCanvasEditor({
       setOperationMessage(
         saved
           ? exported.sessionId
-            ? `已保存截图副本（${formatLabel(exported)}）；显式识别只会使用当前最终画面。`
-            : `已保存标注图片副本（${formatLabel(exported)}）。识别结果保持不变。`
+            ? masked
+              ? `已保存屏蔽副本（${formatLabel(exported)}）：屏蔽区为真实白色像素；原图与普通副本不受影响。`
+              : `已保存截图副本（${formatLabel(exported)}）；屏蔽区不会写入本副本，仅识别输入与显式屏蔽副本使用白色覆盖。`
+            : masked
+              ? `已保存屏蔽副本（${formatLabel(exported)}）：屏蔽区为真实白色像素；原图与普通副本不受影响。`
+              : `已保存标注图片副本（${formatLabel(exported)}）。识别结果保持不变。`
           : "保存未完成，请查看页面提示后重试。",
       );
     } catch {
@@ -1280,16 +1436,22 @@ export function ImageCanvasEditor({
 
   async function pinCurrentImage() {
     if (!session || !canExport || exportInProgressRef.current) return;
+    if (refuseIfFullyMasked("textLayer")) return;
     exportInProgressRef.current = true;
     setIsExporting(true);
     try {
-      const exported = await exportFinalImageIfUnchanged();
+      // 贴图是可取字的识别面：其冻结像素必须与掩膜识别输入一致，
+      // 否则贴图重取字会从原像素找回被屏蔽文字（AC4）。
+      const exported = await exportFinalImageIfUnchanged(true);
       if (!exported?.sessionId) return;
       const pinned = await actions.run({
         type: "recognition.pinScreenshotImage",
         resourceUri: exported.resourceUri,
         sessionId: exported.sessionId,
         revision: exported.revision,
+        // 归一化排除矩形：宿主对贴图文字层执行同一正面积相交丢弃策略，
+        // 保持与原位行过滠除跨边界行以外的一致。
+        excludeBoxes: currentExclusionBoxes(),
       });
       setOperationMessage(
         pinned ? "已创建桌面贴图。" : "贴图未创建，请查看页面提示。",
@@ -1302,13 +1464,51 @@ export function ImageCanvasEditor({
     }
   }
 
+  /** 当前排除区的 [0,1000] 归一化矩形（供宿主过滤贴图文字层）。 */
+  function currentExclusionBoxes() {
+    const image = imageRef.current;
+    const canvas = canvasRef.current;
+    if (!image || !canvas) return [];
+    return exclusionNormalizedRects(image, state, {
+      width: canvas.width,
+      height: canvas.height,
+    }).map((rect) => ({
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+    }));
+  }
+
+  /** 整图屏蔽拒绝：没有可识别内容时不提交，原图与屏蔽草稿保持不变。 */
+  function refuseIfFullyMasked(kind: "recognition" | "textLayer"): boolean {
+    const image = imageRef.current;
+    const canvas = canvasRef.current;
+    if (!image || !canvas) return false;
+    if (
+      !exclusionCoversOutput(image, state, {
+        width: canvas.width,
+        height: canvas.height,
+      })
+    ) {
+      return false;
+    }
+    setOperationMessage(
+      kind === "recognition"
+        ? "整张图都在屏蔽区内：没有可识别内容，已取消本次识别；原图与屏蔽区保持不变，可撤销后重试。"
+        : "整张图都在屏蔽区内：没有可取文字，已取消文字层准备；可撤销后重试。",
+    );
+    return true;
+  }
+
   async function recognizeCurrentImage() {
     if (!session || !canRecognize || exportInProgressRef.current) return;
+    if (refuseIfFullyMasked("recognition")) return;
     exportInProgressRef.current = true;
     setIsExporting(true);
     try {
-      setOperationMessage("正在导出当前最终画面并提交显式识别……");
-      const exported = await exportFinalImageIfUnchanged();
+      setOperationMessage("正在导出含屏蔽的识别输入并提交显式识别……");
+      const exported = await exportFinalImageIfUnchanged(true);
       if (!exported) return;
       const started = await actions.run({
         type: "recognition.recognizeScreenshotImage",
@@ -1318,7 +1518,7 @@ export function ImageCanvasEditor({
       });
       setOperationMessage(
         started
-          ? `已提交识别当前图（${formatLabel(exported)}）；完成后结果显示在右侧。`
+          ? `已提交识别当前图（${formatLabel(exported)}）；屏蔽区已写入白色像素，完成后结果显示在右侧。`
           : "识别未开始：内容已更新或会话已失效，请重试。",
       );
     } catch {
@@ -1335,7 +1535,8 @@ export function ImageCanvasEditor({
     tool !== "textSelect" &&
     tool !== "crop" &&
     tool !== "text" &&
-    tool !== "numbering";
+    tool !== "numbering" &&
+    tool !== "exclude";
   const fontTool = tool === "text" || tool === "numbering";
   const panning = tool === "hand" || spaceHeld;
 
@@ -1404,6 +1605,16 @@ export function ImageCanvasEditor({
   }, [layerReady, layerImage]);
 
   const layerLines = textLayer?.lines;
+  // 边界相交策略：行框与任一排除矩形有正面积重叠即整体丢弃（仅贴边不算），
+  // 不臆造引擎缺失坐标；被屏蔽文字因输入像素已覆盖本就不可进入层。
+  // 行框是 [0,1000] 归一化坐标（参考最终输出 PNG），排除矩形同步归一化。
+  const layerExclusionRects =
+    layerReady && imageRef.current && canvasRef.current
+      ? exclusionNormalizedRects(imageRef.current, state, {
+          width: canvasRef.current.width,
+          height: canvasRef.current.height,
+        })
+      : undefined;
   const [selection, setSelection] = useState<
     { key: string; text: string } | undefined
   >();
@@ -1680,7 +1891,7 @@ export function ImageCanvasEditor({
                     }
                   >
                     <option value="after">修补后</option>
-                    <option value="before">修补前（原图）</option>
+                    <option value="before">本次修补前</option>
                   </Select>
                 </label>
               </>
@@ -1715,6 +1926,23 @@ export function ImageCanvasEditor({
           }}
         >
           旋转 90°
+        </ToolbarButton>
+        <ToolbarButton
+          aria-label="清空屏蔽"
+          disabled={!hasExclusions}
+          onClick={() => {
+            // 只移除排除区：普通标注保留，几何变更入历史可撤销。
+            select(undefined);
+            setResizeDraft(undefined);
+            resizeRef.current = undefined;
+            commit({
+              ...state,
+              marks: state.marks.filter((mark) => !isExclusionMark(mark)),
+            });
+            setOperationMessage("已清空全部屏蔽区；可用撤销恢复。");
+          }}
+        >
+          清空屏蔽
         </ToolbarButton>
         <ToolbarButton
           aria-label="撤销"
@@ -1820,10 +2048,12 @@ export function ImageCanvasEditor({
       {tool === "inpaint" && (
         <p className="editor-guidance">
           去水印（Beta）：拖拽框选要去水印的区域，先“预览修补”对比前后效果，确认后“应用修补”才写入编辑历史（可撤销，原图始终保留）；应用前可随时取消。
-          本地 CPU
-          修补基于周边颜色扩散，复杂纹理或大面积覆盖效果有限，不是无损还原。
+          本地修补基于周边颜色扩散，复杂纹理或大面积覆盖效果有限，不是无损还原。
         </p>
       )}
+      <p className="editor-guidance">
+        屏蔽区只用于识别及屏蔽副本；普通复制/保存保留原图内容，贴图使用屏蔽副本。整图被屏蔽时无法识别。
+      </p>
       <p className="editor-guidance">
         {sourceSize && currentOutputSize
           ? `原图 ${sourceSize.width}×${sourceSize.height}${
@@ -1943,11 +2173,23 @@ export function ImageCanvasEditor({
                 }}
                 binding={textLayer.binding}
                 lines={toImageTextLines(
-                  (layerLines ?? []).map((line) => ({
-                    text: line.text,
-                    bbox: [line.x1, line.y1, line.x2, line.y2] as const,
-                    order: line.order ?? undefined,
-                  })),
+                  (layerLines ?? [])
+                    .filter(
+                      (line) =>
+                        !layerExclusionRects?.some((rect) =>
+                          rectIntersectsBox(rect, {
+                            x1: Math.min(line.x1, line.x2),
+                            y1: Math.min(line.y1, line.y2),
+                            x2: Math.max(line.x1, line.x2),
+                            y2: Math.max(line.y1, line.y2),
+                          }),
+                        ),
+                    )
+                    .map((line) => ({
+                      text: line.text,
+                      bbox: [line.x1, line.y1, line.x2, line.y2] as const,
+                      order: line.order ?? undefined,
+                    })),
                 )}
                 viewport={{ image: layerImage, size: stageSize }}
               />
@@ -1979,8 +2221,15 @@ export function ImageCanvasEditor({
               select(undefined);
             } else if (event.key === "Escape") {
               select(undefined);
+              resizeRef.current = undefined;
+              setResizeDraft(undefined);
               setTool("select");
             }
+          }}
+          onPointerCancel={() => {
+            dragStart.current = undefined;
+            resizeRef.current = undefined;
+            setResizeDraft(undefined);
           }}
           onPointerDown={pointerDown}
           onPointerMove={pointerMove}
@@ -2021,6 +2270,21 @@ export function ImageCanvasEditor({
           />
         </div>
       )}
+      {maskedPreview && maskedPreview.key === maskedPreviewKey && (
+        <div>
+          <p className="editor-guidance">
+            屏蔽导出预览（{maskedPreview.width}×{maskedPreview.height} · 实际
+            {formatBytes(maskedPreview.byteLength)}
+            ）：与“识别当前图”提交的输入及屏蔽副本导出同一管线，屏蔽区为真实白色像素；未屏蔽区域与上方预览一致，贴图取字同样使用该屏蔽像素。
+          </p>
+          <img
+            alt="屏蔽导出预览"
+            className="inspection-canvas"
+            src={maskedPreview.url}
+            style={{ maxWidth: "100%" }}
+          />
+        </div>
+      )}
       <div className="editor-footer">
         <Button
           size="small"
@@ -2029,6 +2293,15 @@ export function ImageCanvasEditor({
         >
           复制标注图
         </Button>
+        {hasExclusions && (
+          <Button
+            size="small"
+            disabled={!canExport || isExporting}
+            onClick={() => void copyAnnotatedImage(true)}
+          >
+            复制屏蔽副本
+          </Button>
+        )}
         <Button
           size="small"
           disabled={!canExport || isExporting}
@@ -2036,6 +2309,15 @@ export function ImageCanvasEditor({
         >
           保存标注图
         </Button>
+        {hasExclusions && (
+          <Button
+            size="small"
+            disabled={!canExport || isExporting}
+            onClick={() => void saveAnnotatedImage(true)}
+          >
+            保存屏蔽副本
+          </Button>
+        )}
         {session && (
           <>
             <Button
@@ -2171,6 +2453,7 @@ function draw(
   showEditorChrome = true,
   markScale = 1,
   background = "#161616",
+  bakeExclusions = false,
   inpaintLayer?: InpaintDrawLayer,
 ) {
   const context = canvas?.getContext("2d");
@@ -2211,13 +2494,20 @@ function draw(
     // 已应用补丁与未提交预览在同一图像本地坐标系内叠加：矩形为
     // 原图（未旋转）像素空间，缩放/旋转与上图一致，导出时 1:1 无重采样。
     const drawPatch = (source: HTMLCanvasElement, rect: InpaintRect): void => {
-      context.drawImage(
-        source,
-        (-image.naturalWidth * scale) / 2 + rect.x * scale,
-        (-image.naturalHeight * scale) / 2 + rect.y * scale,
-        rect.width * scale,
-        rect.height * scale,
-      );
+      const dx = (-image.naturalWidth * scale) / 2 + rect.x * scale;
+      const dy = (-image.naturalHeight * scale) / 2 + rect.y * scale;
+      const dw = rect.width * scale;
+      const dh = rect.height * scale;
+      // 替换式绘制：先在补丁矩形内回填导出底色，再叠加补丁像素；
+      // 半透明补丁透出的是底色而非被修补前的原图（无鬼影、无 alpha 叠加）。
+      context.save();
+      context.beginPath();
+      context.rect(dx, dy, dw, dh);
+      context.clip();
+      context.fillStyle = background;
+      context.fillRect(dx, dy, dw, dh);
+      context.drawImage(source, dx, dy, dw, dh);
+      context.restore();
     };
     for (const entry of inpaintLayer?.patches ?? []) {
       drawPatch(entry.canvas, entry.rect);
@@ -2310,6 +2600,26 @@ function draw(
       }
       context.stroke();
       context.restore();
+    } else if (mark.tool === "exclude") {
+      if (showEditorChrome) {
+        // 预览专用外观：红色虚线 + 斜纹，明确区别于普通标注；不入导出。
+        drawExclusionChrome(context, mark, selectedMark === index);
+      } else if (bakeExclusions) {
+        // 识别/屏蔽副本输入：外扩取整后的不透明白色硬覆盖，
+        // 严格不保留原始文字像素（与 exclusionNaturalRects 同一取整）。
+        const area = normalizedRect(mark);
+        const x = Math.floor(area.x);
+        const y = Math.floor(area.y);
+        context.setLineDash([]);
+        context.fillStyle = "#ffffff";
+        context.fillRect(
+          x,
+          y,
+          Math.ceil(area.x + area.width) - x,
+          Math.ceil(area.y + area.height) - y,
+        );
+      }
+      // 普通导出（bake=false）完全跳过：屏蔽不改变复制/保存/贴图像素。
     } else if (mark.tool === "numbering") {
       const size = (mark.style?.fontSize ?? 24) * markScale;
       const radius = Math.max(size * 0.68, 8 * markScale);
@@ -2364,6 +2674,120 @@ function draw(
     );
   }
   context.setLineDash([]);
+}
+
+/** 屏蔽区预览外观：半透明红底 + 斜纹 + 红色虚线框；选中时叠加八点缩放手柄。 */
+function drawExclusionChrome(
+  context: CanvasRenderingContext2D,
+  mark: Mark,
+  selected: boolean,
+) {
+  const area = normalizedRect(mark);
+  if (area.width <= 0 || area.height <= 0) return;
+  context.save();
+  context.fillStyle = "rgba(224, 32, 32, 0.12)";
+  context.fillRect(area.x, area.y, area.width, area.height);
+  context.strokeStyle = "rgba(224, 32, 32, 0.7)";
+  context.lineWidth = 1;
+  context.setLineDash([]);
+  context.beginPath();
+  const step = 12;
+  for (let x = area.x - area.height; x < area.x + area.width; x += step) {
+    context.moveTo(Math.max(x, area.x), area.y);
+    context.lineTo(
+      Math.min(x + area.height, area.x + area.width),
+      area.y + area.height,
+    );
+  }
+  context.stroke();
+  context.setLineDash([6, 4]);
+  context.strokeStyle = "#e02020";
+  context.strokeRect(area.x, area.y, area.width, area.height);
+  if (selected) {
+    context.setLineDash([]);
+    context.fillStyle = "#ffffff";
+    context.strokeStyle = "#e02020";
+    for (const handle of EXCLUSION_RESIZE_HANDLES) {
+      const at = exclusionHandlePoint(area, handle);
+      context.fillRect(at.x - 4, at.y - 4, 8, 8);
+      context.strokeRect(at.x - 4, at.y - 4, 8, 8);
+    }
+  }
+  context.restore();
+}
+
+const EXCLUSION_RESIZE_HANDLES = [
+  "nw",
+  "n",
+  "ne",
+  "e",
+  "se",
+  "s",
+  "sw",
+  "w",
+] as const;
+
+type ExclusionResizeHandle = (typeof EXCLUSION_RESIZE_HANDLES)[number];
+
+/** 手柄在未归一化 start/end 矩形上的命中半径（画布内都坐标）。 */
+const EXCLUSION_HANDLE_RADIUS = 12;
+
+function exclusionHandlePoint(
+  area: ReturnType<typeof normalizedRect>,
+  handle: ExclusionResizeHandle,
+): Point {
+  return {
+    x: handle.includes("w")
+      ? area.x
+      : handle.includes("e")
+        ? area.x + area.width
+        : area.x + area.width / 2,
+    y: handle.includes("n")
+      ? area.y
+      : handle.includes("s")
+        ? area.y + area.height
+        : area.y + area.height / 2,
+  };
+}
+
+function exclusionResizeHandle(
+  mark: Mark,
+  at: Point,
+): ExclusionResizeHandle | undefined {
+  const area = normalizedRect(mark);
+  if (area.width <= 0 || area.height <= 0) return undefined;
+  for (const handle of EXCLUSION_RESIZE_HANDLES) {
+    const point = exclusionHandlePoint(area, handle);
+    if (Math.hypot(at.x - point.x, at.y - point.y) <= EXCLUSION_HANDLE_RADIUS) {
+      return handle;
+    }
+  }
+  return undefined;
+}
+
+/** 拖动手柄调整屏蔽矩形：反向拖拽自动翻转，不产生负尺寸。 */
+function resizeExclusionMark(
+  mark: Mark,
+  handle: ExclusionResizeHandle,
+  delta: Point,
+): Mark {
+  const left = Math.min(mark.start.x, mark.end.x);
+  const right = Math.max(mark.start.x, mark.end.x);
+  const top = Math.min(mark.start.y, mark.end.y);
+  const bottom = Math.max(mark.start.y, mark.end.y);
+  let west = left;
+  let east = right;
+  let north = top;
+  let south = bottom;
+  if (handle.includes("w")) west += delta.x;
+  if (handle.includes("e")) east += delta.x;
+  if (handle.includes("n")) north += delta.y;
+  if (handle.includes("s")) south += delta.y;
+  return {
+    ...mark,
+    start: { x: Math.min(west, east), y: Math.min(north, south) },
+    end: { x: Math.max(west, east), y: Math.max(north, south) },
+  };
 }
 
 function normalizedRect(mark: Pick<Mark, "start" | "end">) {
@@ -2455,6 +2879,8 @@ interface ExportCanvasOptions {
   readonly quality: number;
   /** 导出只包含已应用补丁；未提交预览绝不进入导出/复制/识别像素。 */
   readonly inpaint?: InpaintDrawLayer;
+  /** 识别/屏蔽副本输入：把排除区写入不透明白色像素；普通导出保持 false。 */
+  readonly bakeExclusions?: boolean;
 }
 
 /** 编码器必须真实产出目标格式：类型与文件签名不一致时拒绝，不得只改后缀。 */
@@ -2524,6 +2950,7 @@ async function exportCanvas(
     1 / displayScale,
     // JPEG 无透明：透明区域在导出时合成白色背景，与预览一致。
     options.format === "image/jpeg" ? "#ffffff" : "#161616",
+    options.bakeExclusions === true,
     { patches: options.inpaint?.patches },
   );
 
@@ -2578,6 +3005,10 @@ async function exportCanvas(
   await verifyEncodedBlob(blob, options.format);
   return blob;
 }
+
+/** 排除矩形数量上限：与桥 WorkbenchBridgeCodec.MaximumExclusionBoxes 一致；
+ * 达到上限时提示并拒绝新增，不丢弃既有标记，也不静默截断 payload。 */
+const MAX_EXCLUSION_MARKS = 64;
 
 function findMark(marks: readonly Mark[], point: Point): number | undefined {
   for (let index = marks.length - 1; index >= 0; index -= 1) {

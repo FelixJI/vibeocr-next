@@ -230,16 +230,14 @@ describe("inpaint tool wiring", () => {
       await act(async () => {
         worker.succeed();
       });
-      expect(
-        screen.getByText(/修补预览完成（Worker 实际耗时/),
-      ).toBeInTheDocument();
+      expect(screen.getByText(/修补预览完成/)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "应用修补" })).toBeEnabled();
       expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
 
       await act(async () => {
         fireEvent.click(screen.getByRole("button", { name: "应用修补" }));
       });
-      expect(screen.getByText(/已应用去水印修补/)).toBeInTheDocument();
+      expect(screen.getByText(/已应用修补/)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "撤销" })).toBeEnabled();
       expect(actions.run).toHaveBeenCalledWith({
         type: "recognition.notifyScreenshotRevision",

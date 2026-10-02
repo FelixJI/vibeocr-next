@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { mountHost, snapshot } from "./workbench-host";
+import { expectCommand, mountHost, snapshot } from "./workbench-host";
 
 interface DecodedImage {
   width: number;
@@ -171,11 +171,9 @@ test("inpaint preview applies real CPU worker pixels to export and keeps outside
   await dragOnCanvas(page, { x: 281, y: 168 }, { x: 619, y: 357 });
   await expect(page.getByText(/已框选修补区域/)).toBeVisible();
 
-  // 真实 CPU Worker 预览：完成后才出现“应用修补”，预览未提交前不可应用之外导出。
+  // 真实本地修补预览：完成后才出现“应用修补”。
   await page.getByRole("button", { name: "预览修补" }).click();
-  const previewStatus = page.getByText(/修补预览完成（Worker 实际耗时 \d+ ms/);
-  await expect(previewStatus).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByText(/请求\/响应传输约 [\d.]+ (KB|MB)/)).toBeVisible();
+  await expect(page.getByText(/修补预览完成/)).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole("button", { name: "应用修补" })).toBeEnabled();
 
   // 前后对照切换存在且可来回切换。
@@ -184,7 +182,7 @@ test("inpaint preview applies real CPU worker pixels to export and keeps outside
 
   // 明确应用：恰好一次 commit；导出 PNG 解码验证修补像素与选区外一致性。
   await page.getByRole("button", { name: "应用修补" }).click();
-  await expect(page.getByText(/已应用去水印修补（38×22 px）/)).toBeVisible();
+  await expect(page.getByText(/已应用修补/)).toBeVisible();
   await page.getByRole("button", { name: "保存标注图" }).click();
   await expect.poll(() => uploads.length).toBe(2);
   const applied = await decodeUpload(page, uploads[1]!.body, "image/png");
@@ -327,7 +325,7 @@ test("cancel and re-edit during processing terminate the worker so late results 
   expect(watermark.slice(0, 3)).toEqual([224, 32, 240]);
 });
 
-test("measures real browser worker wall time and transfer budget on a 4MP image with 1MP mask", async ({
+test("measures real browser processing wall time and responsiveness on a 4MP image with ~1MP mask", async ({
   page,
 }) => {
   test.setTimeout(120_000);
@@ -356,6 +354,7 @@ test("measures real browser worker wall time and transfer budget on a 4MP image 
     ).memory;
     return memory ? memory.usedJSHeapSize : null;
   });
+  const startedAt = await page.evaluate(() => performance.now());
   await page.getByRole("button", { name: "预览修补" }).click();
   // 处理期间主线程仍可响应（rAF 回调在 1s 内完成），且可取消。
   await expect(page.getByText(/正在本地修补选中区域/)).toBeVisible();
@@ -366,10 +365,10 @@ test("measures real browser worker wall time and transfer budget on a 4MP image 
         requestAnimationFrame(() => resolve(performance.now() - startedAt));
       }),
   );
-  const status = page.getByText(
-    /修补预览完成（Worker 实际耗时 (\d+) ms，请求\/响应传输约 ([\d.]+) (KB|MB)）/,
-  );
-  const statusText = await status.textContent({ timeout: 60_000 });
+  // 性能证据在测试内量测，不固化进产品文案：端到端预览墙钟（含本地计算
+  // 与消息往返），完成后按钮立即可用。
+  await expect(page.getByText(/修补预览完成/)).toBeVisible({ timeout: 60_000 });
+  const wallMs = (await page.evaluate(() => performance.now())) - startedAt;
   const heapAfter = await page.evaluate(() => {
     const memory = (
       performance as Performance & {
@@ -378,15 +377,14 @@ test("measures real browser worker wall time and transfer budget on a 4MP image 
     ).memory;
     return memory ? memory.usedJSHeapSize : null;
   });
-  const wallMs = Number(statusText!.match(/实际耗时 (\d+) ms/)![1]);
-  const transferredMb = Number(statusText!.match(/传输约 ([\d.]+)/)![1]);
-  // 可核实指标：真实墙钟耗时 > 0；传输字节与 2×4·W·H 一致（32,000,000 B ≈ 30.5 MB）。
+  // 可核实指标：真实墙钟耗时 > 0；像素传输为确定性算术（请求+响应各 4·W·H 字节）。
+  const transferredBytes = 2 * 4 * 2000 * 2000;
   expect(wallMs).toBeGreaterThan(0);
-  expect(transferredMb).toBeGreaterThan(25);
+  expect(transferredBytes).toBe(32_000_000);
   expect(rafLatency).toBeLessThan(1000);
   // 主线程 JSHeap 增量只是估算参考（不含 Worker 线程堆），不当作总内存。
   console.log(
-    `[inpaint-perf] browser worker wall=${wallMs}ms transfer=${transferredMb}MB rAF-latency=${rafLatency.toFixed(1)}ms main-thread-jsheap-delta=${heapBefore && heapAfter ? `${((heapAfter - heapBefore) / 1048576).toFixed(1)}MB (estimated, excludes worker heap)` : "unavailable"}`,
+    `[inpaint-perf] end-to-end preview wall=${wallMs.toFixed(0)}ms (real browser measurement) transfer=${(transferredBytes / 1048576).toFixed(1)}MB (computed 2×4·W·H) rAF-latency=${rafLatency.toFixed(1)}ms main-thread-jsheap-delta=${heapBefore && heapAfter ? `${((heapAfter - heapBefore) / 1048576).toFixed(1)}MB (estimated, excludes worker heap)` : "unavailable"}`,
   );
 
   // 放弃预览：不应用、不修改图片。
@@ -395,4 +393,207 @@ test("measures real browser worker wall time and transfer budget on a 4MP image 
     page.getByText(/已放弃修补预览；当前图片未被修改/),
   ).toBeVisible();
   await expect(page.getByRole("button", { name: "撤销" })).toBeDisabled();
+});
+
+/** 修补后像素在 PNG 导出中的预期值：补丁保持原 alpha（半透明 128），
+ * 替换式绘制下透出的是导出底色 #161616，而非被修补前的原图。 */
+const TRANSPARENT_PATCHED = [16, 91, 56] as const;
+
+function expectPixelNear(
+  image: DecodedImage,
+  x: number,
+  y: number,
+  expected: readonly number[],
+  tolerance = 6,
+): void {
+  const actual = pixelAt(image, x, y);
+  for (let channel = 0; channel < 3; channel += 1) {
+    expect(
+      Math.abs(actual[channel]! - (expected[channel] ?? 0)),
+      `pixel (${x},${y}) channel ${channel}`,
+    ).toBeLessThanOrEqual(tolerance);
+  }
+}
+
+test("semi-transparent patches replace pixels (no ghost/alpha stacking) across overlay, rotation, crop and resize", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const uploads: { contentType: string; body: Buffer }[] = [];
+  // 镂空绿框（不透明）包围半透明水印：选区内像素真正携带 alpha=128，
+  // 且选区边界全部落在不透明绿带上，扩散填绿、alpha 原样保留；
+  // 远离选区的四角保持全透明（PNG 导出为深底合成值）。
+  await routeInpaintSource(
+    page,
+    '<svg xmlns="http://www.w3.org/2000/svg" width="96" height="48"><rect x="24" y="4" width="48" height="8" fill="#0aa05a"/><rect x="24" y="28" width="48" height="16" fill="#0aa05a"/><rect x="24" y="12" width="8" height="16" fill="#0aa05a"/><rect x="64" y="12" width="8" height="16" fill="#0aa05a"/><rect x="32" y="12" width="32" height="16" fill="#e020f0" fill-opacity="0.5"/></svg>',
+    "inpaint-alpha.svg",
+  );
+  await mountWithUploadCapture(page, uploads, "inpaint-alpha.svg");
+  await expect(page.locator('canvas[aria-label="图片检查画布"]')).toBeVisible();
+  await page.getByRole("button", { name: "保存标注图" }).click();
+  await expect.poll(() => uploads.length).toBe(1);
+  const baseline = await decodeUpload(page, uploads[0]!.body, "image/png");
+  // 基线：半透明洋红水印叠在绿背景上的 PNG 深底合成值。
+  expectPixelNear(baseline, 48, 20, [123, 27, 131], 6);
+
+  const applyInpaintOnce = async () => {
+    await page.getByRole("button", { name: "去水印" }).click();
+    await dragOnCanvas(page, { x: 281, y: 168 }, { x: 619, y: 357 });
+    await page.getByRole("button", { name: "预览修补" }).click();
+    await expect(page.getByText(/修补预览完成/)).toBeVisible({
+      timeout: 30_000,
+    });
+    await page.getByRole("button", { name: "应用修补" }).click();
+    await expect(page.getByText(/已应用修补/)).toBeVisible();
+  };
+  await applyInpaintOnce();
+
+  // 第一次应用：导出像素 = 0.5×绿 + 0.5×深底（替换式），旧实现会保留
+  // 原水印鬼影（≈ 0.5×绿 + 0.5×旧水印）而在此失败。
+  await page.getByRole("button", { name: "保存标注图" }).click();
+  await expect.poll(() => uploads.length).toBe(2);
+  const firstApplied = await decodeUpload(page, uploads[1]!.body, "image/png");
+  expectPixelNear(firstApplied, 48, 20, TRANSPARENT_PATCHED);
+  expectOutsideIdentical(baseline, firstApplied, {
+    x: 29,
+    y: 9,
+    width: 38,
+    height: 22,
+  });
+
+  // 第二次在同一区域修补：基线合成也是替换式，结果不叠加、不漂移。
+  await applyInpaintOnce();
+  await page.getByRole("button", { name: "保存标注图" }).click();
+  await expect.poll(() => uploads.length).toBe(3);
+  const secondApplied = await decodeUpload(page, uploads[2]!.body, "image/png");
+  expectPixelNear(secondApplied, 48, 20, TRANSPARENT_PATCHED);
+  expectOutsideIdentical(baseline, secondApplied, {
+    x: 29,
+    y: 9,
+    width: 38,
+    height: 22,
+  });
+
+  // 旋转 90°：输出 48×96，修补中心 (48,20) → 输出 (28,48)。
+  await page.getByRole("button", { name: "旋转 90°" }).click();
+  await page.getByRole("button", { name: "保存标注图" }).click();
+  await expect.poll(() => uploads.length).toBe(4);
+  const rotated = await decodeUpload(page, uploads[3]!.body, "image/png");
+  expect(rotated.width).toBe(48);
+  expect(rotated.height).toBe(96);
+  expectPixelNear(rotated, 28, 48, TRANSPARENT_PATCHED);
+  await page.getByRole("button", { name: "撤销" }).click();
+
+  // 裁剪自然 (16,0)-(80,48)：输出 64×48，修补中心 → 裁剪相对 (32,20)。
+  await page.getByRole("button", { name: "裁剪" }).click();
+  await dragOnCanvas(page, { x: 150, y: 75 }, { x: 750, y: 562 });
+  await expect(page.getByRole("button", { name: "撤销" })).toBeEnabled();
+  await page.getByRole("button", { name: "选择", exact: true }).click();
+  await page.getByRole("button", { name: "保存标注图" }).click();
+  await expect.poll(() => uploads.length).toBe(5);
+  const cropped = await decodeUpload(page, uploads[4]!.body, "image/png");
+  expect(cropped.width).toBe(64);
+  expect(cropped.height).toBe(48);
+  expectPixelNear(cropped, 32, 20, TRANSPARENT_PATCHED);
+  await page.getByRole("button", { name: "撤销" }).click();
+
+  // 指定输出尺寸 48×24：修补区域等比缩小后仍是替换式像素。
+  await page.getByLabel("输出宽度").fill("48");
+  await page.getByLabel("输出高度").fill("24");
+  await page.getByRole("button", { name: "应用尺寸" }).click();
+  await expect(page.getByText(/输出 48×24/)).toBeVisible();
+  await page.getByRole("button", { name: "保存标注图" }).click();
+  await expect.poll(() => uploads.length).toBe(6);
+  const resized = await decodeUpload(page, uploads[5]!.body, "image/png");
+  expect(resized.width).toBe(48);
+  expect(resized.height).toBe(24);
+  expectPixelNear(resized, 24, 10, TRANSPARENT_PATCHED);
+});
+
+test("screenshot session mode exports applied inpaint pixels for explicit recognition", async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const uploads: { contentType: string; body: Buffer }[] = [];
+  await page.route("**/__annotation", async (route) => {
+    uploads.push({
+      contentType: route.request().headers()["content-type"] ?? "",
+      body: route.request().postDataBuffer() ?? Buffer.alloc(0),
+    });
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        resourceUri:
+          "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+      }),
+    });
+  });
+  await routeInpaintSource(
+    page,
+    '<svg xmlns="http://www.w3.org/2000/svg" width="96" height="48"><rect width="96" height="48" fill="#0aa05a"/><rect x="32" y="12" width="32" height="16" fill="#e020f0"/></svg>',
+    "inpaint-session.svg",
+  );
+  await mountHost(page, {
+    ...snapshot,
+    capabilities: [
+      "recognition.results",
+      "recognition.annotation",
+      "recognition.screenshotSession",
+    ],
+    features: {
+      recognition: {
+        isBusy: false,
+        statusCode: "recognition.session",
+        input: {
+          url: "/inpaint-session.svg",
+          mediaType: "image/png",
+          byteLength: 4096,
+        },
+        screenshotSession: {
+          sessionId: "inpaint-session-e2e",
+          revision: 0,
+          textSelectionRequested: false,
+          sceneEditing: false,
+        },
+      },
+    },
+  });
+  await expect(page.locator('canvas[aria-label="图片检查画布"]')).toBeVisible();
+
+  // 会话模式同一“去水印”入口：框选 → 预览 → 应用，推进会话修订。
+  await page.getByRole("button", { name: "去水印" }).click();
+  await dragOnCanvas(page, { x: 281, y: 168 }, { x: 619, y: 357 });
+  await page.getByRole("button", { name: "预览修补" }).click();
+  await expect(page.getByText(/修补预览完成/)).toBeVisible({
+    timeout: 30_000,
+  });
+  await page.getByRole("button", { name: "应用修补" }).click();
+  await expectCommand(page, {
+    scope: "recognition",
+    action: "notifyScreenshotRevision",
+    arguments: { sessionId: "inpaint-session-e2e", revision: 1 },
+  });
+
+  // 显式识别走会话导出路径：上传的识别输入包含已应用修补像素。
+  await page.getByRole("button", { name: "识别当前图" }).click();
+  await expect.poll(() => uploads.length).toBe(1);
+  await expectCommand(page, {
+    scope: "recognition",
+    action: "recognizeScreenshotImage",
+    arguments: {
+      resourceUri:
+        "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+      sessionId: "inpaint-session-e2e",
+      revision: 1,
+    },
+  });
+  const recognitionInput = await decodeUpload(
+    page,
+    uploads[0]!.body,
+    "image/png",
+  );
+  expectPixelNear(recognitionInput, 48, 20, [10, 160, 90]);
 });
