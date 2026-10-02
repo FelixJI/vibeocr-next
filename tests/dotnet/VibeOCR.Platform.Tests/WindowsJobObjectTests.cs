@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using VibeOCR.Platform.Inference;
 using Xunit;
 
@@ -210,70 +211,94 @@ public sealed class WindowsJobObjectTests
     return process;
   }
 
-  // A three-level tree: powershell root -> helper test host middle -> ping
-  // grandchild. The helper reports its own PID through the root, and the
-  // grandchild PID through the inherited stdout pipe, so both are known
-  // deterministically before the job assignment starts.
+  // A three-level fixture: managed root helper -> parent-helper middle ->
+  // ping grandchild. The root helper is the single writer of its stdout and
+  // reports both ids serially, so the ready protocol needs no shared pipe.
   private static Process StartRootWithMiddleHelper(string workingDirectory)
   {
-    string powershell = Path.Combine(
-      Environment.GetFolderPath(Environment.SpecialFolder.System),
-      "WindowsPowerShell", "v1.0", "powershell.exe");
-    string testHost = Path.Combine(
-      AppContext.BaseDirectory,
-      "VibeOCR.Platform.Tests.exe");
     var process = new Process
     {
       StartInfo = new ProcessStartInfo
       {
-        FileName = powershell,
+        FileName = Path.Combine(
+          AppContext.BaseDirectory,
+          "VibeOCR.Platform.Tests.exe"),
         WorkingDirectory = workingDirectory,
         UseShellExecute = false,
         RedirectStandardOutput = true,
         RedirectStandardError = true,
       },
     };
-    process.StartInfo.ArgumentList.Add("-NoProfile");
-    process.StartInfo.ArgumentList.Add("-Command");
-    process.StartInfo.ArgumentList.Add(
-      $"$h = Start-Process -FilePath '{testHost}' " +
-      $"-ArgumentList '--job-object-parent-helper' -PassThru -NoNewWindow; " +
-      $"\"middle=$($h.Id)\"; Wait-Process -Id $h.Id");
+    process.StartInfo.ArgumentList.Add("--job-object-root-helper");
     Assert.True(process.Start());
     return process;
   }
 
+  // Reads the two serial ready lines with bounded waits. Failure evidence
+  // always combines the stop reason (timeout vs end of stream), the root
+  // exit state and drained stderr: descendants may keep the inherited pipe
+  // open, so root exit alone does not guarantee end of stream and no single
+  // signal is trusted on its own.
   private static async Task<(int MiddleId, int GrandchildId)> ReadTreeIdsAsync(
     Process rootProcess)
   {
+    var received = new List<string>();
+    var rootError = new ConcurrentQueue<string>();
+    rootProcess.ErrorDataReceived += (_, eventArgs) =>
+    {
+      if (eventArgs.Data is not null)
+      {
+        rootError.Enqueue(eventArgs.Data);
+      }
+    };
+    rootProcess.BeginErrorReadLine();
+
     int? middleId = null;
     int? grandchildId = null;
+    string? stopReason = null;
     while (middleId is null || grandchildId is null)
     {
-      string? line = await rootProcess.StandardOutput
-        .ReadLineAsync(TestContext.Current.CancellationToken)
-        .AsTask()
-        .WaitAsync(
-          TimeSpan.FromSeconds(15),
-          TestContext.Current.CancellationToken);
-      if (line is null)
+      string? line;
+      try
       {
+        line = await rootProcess.StandardOutput
+          .ReadLineAsync(TestContext.Current.CancellationToken)
+          .AsTask()
+          .WaitAsync(
+            TimeSpan.FromSeconds(15),
+            TestContext.Current.CancellationToken);
+      }
+      catch (TimeoutException)
+      {
+        stopReason = "timed out after 15s waiting for the next ready line";
         break;
       }
+      if (line is null)
+      {
+        stopReason = "stdout reached end of stream";
+        break;
+      }
+      received.Add(line);
       if (line.StartsWith("middle=", StringComparison.Ordinal)
         && int.TryParse(line["middle=".Length..], out int parsedMiddle))
       {
         middleId = parsedMiddle;
       }
-      else if (int.TryParse(line, out int parsedGrandchild))
+      else if (line.StartsWith("grandchild=", StringComparison.Ordinal)
+        && int.TryParse(line["grandchild=".Length..], out int parsedGrandchild))
       {
         grandchildId = parsedGrandchild;
       }
     }
 
+    string exitState = rootProcess.HasExited
+      ? $"root exited with code {rootProcess.ExitCode}"
+      : "root still running";
     Assert.True(
       middleId is not null && grandchildId is not null,
-      "The helper process tree did not report its ids.");
+      $"Three-level fixture did not become ready: {stopReason ?? "protocol lines missing"}; " +
+        $"{exitState}; received lines [{string.Join(" | ", received)}]; " +
+        $"root stderr [{string.Join(Environment.NewLine, rootError)}].");
     return (middleId!.Value, grandchildId!.Value);
   }
 
