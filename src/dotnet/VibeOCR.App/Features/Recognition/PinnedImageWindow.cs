@@ -53,6 +53,7 @@ internal sealed class PinnedImageWindow : IDisposable
   private readonly WorkbenchAnnotationFile image;
   private readonly IAnnotatedImagePlatform platform;
   private readonly Func<Task<RecognitionTextLayerState?>> prepareText;
+  private readonly IReadOnlyList<WorkbenchExclusionBox> excludeBoxes = [];
   private readonly Func<string?> currentServiceInstance;
   private readonly List<IRandomAccessStream> responseStreams = [];
   private readonly Guid sessionId;
@@ -60,6 +61,22 @@ internal sealed class PinnedImageWindow : IDisposable
   private readonly int imageWidth;
   private readonly int imageHeight;
   private RecognitionTextLayerState? layer;
+
+  /// <summary>按冻结的归一化排除矩形丢弃正面积相交行；无层/无矩形原样返回。</summary>
+  private static RecognitionTextLayerState? FilterExcludedLines(
+    RecognitionTextLayerState? layer, IReadOnlyList<WorkbenchExclusionBox> boxes)
+  {
+    if (layer is null || boxes.Count == 0 || layer.Lines is not { Count: > 0 }) return layer;
+    List<RecognitionTextLayerLine> kept = [];
+    foreach (RecognitionTextLayerLine line in layer.Lines)
+    {
+      bool intersects = boxes.Any(box =>
+        WorkbenchExclusionBox.LineIntersectsBox(line, box));
+      if (!intersects) kept.Add(line);
+    }
+    return kept.Count == layer.Lines.Count ? layer : layer with { Lines = kept };
+  }
+
   private bool loaded;
   private bool documentReady;
   private bool disposed;
@@ -195,6 +212,7 @@ internal sealed class PinnedImageWindow : IDisposable
     Guid sessionId,
     long revision,
     RecognitionTextLayerState? layer,
+    IReadOnlyList<WorkbenchExclusionBox> excludeBoxes,
     Func<Task<RecognitionTextLayerState?>> prepareText,
     Func<string?> currentServiceInstance)
   {
@@ -202,7 +220,10 @@ internal sealed class PinnedImageWindow : IDisposable
     imageUrl = "https://pin.vibeocr/image" + Path.GetExtension(image.Path);
     this.sessionId = sessionId;
     this.revision = revision;
-    this.layer = layer;
+    // 冻结的排除矩形：贴图重取字（含会话失效后的冻结路径）返回的行
+    // 也按同一正面积相交策略过滤，不因重新识别找回跨边界行。
+    this.excludeBoxes = excludeBoxes;
+    this.layer = FilterExcludedLines(layer, excludeBoxes);
     this.prepareText = prepareText;
     this.currentServiceInstance = currentServiceInstance;
     platform = new AnnotatedImagePlatform(
@@ -325,6 +346,8 @@ internal sealed class PinnedImageWindow : IDisposable
     if (disposed) return;
     if (next is not null && (next.Binding?.SessionId != sessionId.ToString("N") ||
         next.Binding.Revision != revision)) return;
+    // 重取字结果与初始层同一过滤策略：正面积相交的行不进入贴图。
+    next = FilterExcludedLines(next, excludeBoxes);
     RecognitionTextLayerState? valid = next is { Status: "textlayer.ready" } &&
       next.Binding?.SessionId == sessionId.ToString("N") &&
       next.Binding.Revision == revision ? next : null;
