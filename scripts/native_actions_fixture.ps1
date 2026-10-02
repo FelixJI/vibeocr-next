@@ -422,7 +422,7 @@ public static class NativeActionsFixture
     private static Input Key(ushort key, bool up) => new Input
     {
         Type = 1,
-        Data = new InputUnion { Key = new KeyInput { Scan = (ushort)MapVirtualKeyW(key, 0), Flags = 0x0008u | (up ? 2u : 0u) } }
+        Data = new InputUnion { Key = new KeyInput { Scan = (ushort)MapVirtualKeyW(key, 0), Flags = 0x0008u | (key >= 0x21 && key <= 0x28 ? 1u : 0u) | (up ? 2u : 0u) } }
     };
     private static Input Mouse(uint flag) => new Input
     {

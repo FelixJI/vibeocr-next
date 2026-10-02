@@ -179,6 +179,8 @@ async function main() {
           }, `${mode}: repeated Esc did not restore notification focus`);
         }
       }
+      const settingsPath = path.join(candidate, 'state/config/app_settings.json');
+      const toolbarBefore = fs.existsSync(settingsPath) ? JSON.parse(fs.readFileSync(settingsPath, 'utf8')).floating_toolbar : null;
       record.toggle = await openMenu('keyboard');
       record.toggle.input = JSON.parse(await native('tray-menu-toggle', { AppPid: app.pid, Handle: record.toggle.during.Menus[0].Handle }));
       record.toggle.after = await waitFor(async () => {
@@ -187,6 +189,12 @@ async function main() {
       }, `${mode}: toolbar menu action did not restore notification focus`);
       assert.equal(record.toggle.after.Main.Visible, before.Main.Visible);
       assert.equal(record.toggle.after.Main.Iconic, before.Main.Iconic);
+      record.toggle.settings = await waitFor(() => {
+        if (!fs.existsSync(settingsPath)) return false;
+        const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')).floating_toolbar;
+        const expectedHidden = toolbarBefore?.enabled ? !toolbarBefore.hidden_by_user : false;
+        return settings?.enabled === true && settings.hidden_by_user === expectedHidden && settings;
+      }, `${mode}: selected toolbar menu command did not update authoritative settings`);
       record.toggle.resumeInput = JSON.parse(await native('tray-keyboard-resume', icon));
       await waitFor(async () => (await state()).Menus.length === 1, `${mode}: menu did not reopen after toolbar action`);
       await native('escape', { AppPid: app.pid });
