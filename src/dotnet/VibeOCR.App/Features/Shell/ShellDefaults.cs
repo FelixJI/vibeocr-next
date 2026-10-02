@@ -30,6 +30,7 @@ internal sealed class WindowsHotkeyRegistrar(
     private readonly Dictionary<string, ActionBinding> _bindings = [];
     private readonly Dictionary<int, string> _idToAction = [];
     private bool _catalogLoaded;
+    private bool _recording;
     private int _nextId;
 
     private sealed class ActionBinding
@@ -197,6 +198,12 @@ internal sealed class WindowsHotkeyRegistrar(
             }
 
             ActionBinding binding = _bindings[actionId];
+            // 录入挂起期间应用/禁用/恢复默认：先结束录入、按现有 Configured
+            // 恢复注册，再走既有换键事务（先注册新键、持久化成功才释放旧
+            // 键）；后续任一步失败时旧绑定（Configured 及已恢复的注册）继续
+            // 有效。
+            EndRecordingLocked();
+
             if (combo is null)
             {
                 return DisableLocked(binding, out error);
@@ -209,6 +216,94 @@ internal sealed class WindowsHotkeyRegistrar(
     /// <summary>恢复动作默认键位（仅 screenshot_recognize 有默认绑定）。</summary>
     public bool ResetActionToDefault(string actionId, out string? error) =>
         SetActionHotkey(actionId, HotkeyActionCatalog.DefaultBinding(actionId), out error);
+
+    /// <summary>当前是否处于快捷键录入挂起状态（本应用注册已临时释放）。</summary>
+    public bool IsRecording
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _recording;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 进入快捷键录入：只临时释放本应用自己的全部 WM_HOTKEY 注册与 ID
+    /// 映射，避免录入按键被旧注册吞掉或触发截图等动作；不修改任何动作的
+    /// Configured，也不写配置文件。幂等：重复调用无效果。宿主随后必须
+    /// 调用 <see cref="EndRecording"/>（或触发 SetActionHotkey）恢复注册。
+    /// </summary>
+    public void BeginRecording()
+    {
+        lock (_sync)
+        {
+            if (_recording)
+            {
+                return;
+            }
+
+            foreach (ActionBinding binding in _bindings.Values)
+            {
+                ReleaseLocked(binding);
+            }
+
+            _idToAction.Clear();
+            _recording = true;
+        }
+    }
+
+    /// <summary>
+    /// 结束快捷键录入：按各动作现有 Configured 重新注册（ID 单调分配、
+    /// 不复用旧 ID，被替换的旧 ID 永不触发动作）。某动作注册失败时如实
+    /// 保持其 Registered 为空并记录 Error，Configured 原样保留，不把
+    /// Configured 伪装成有效注册；不写配置。幂等：未在录入时调用无效果。
+    /// </summary>
+    public void EndRecording()
+    {
+        lock (_sync)
+        {
+            EndRecordingLocked();
+        }
+    }
+
+    private void EndRecordingLocked()
+    {
+        if (!_recording)
+        {
+            return;
+        }
+
+        _recording = false;
+        foreach (string actionId in HotkeyActionCatalog.Actions)
+        {
+            if (!_bindings.TryGetValue(actionId, out ActionBinding? binding)
+                || binding.Configured is not { Length: > 0 } combo
+                || binding.Registration is not null)
+            {
+                continue;
+            }
+
+            try
+            {
+                (HotkeyModifiers modifiers, uint virtualKey) = Parse(combo);
+                int id = Interlocked.Increment(ref _nextId);
+                IDisposable registration = _service.Register(
+                    id,
+                    modifiers | HotkeyModifiers.NoRepeat,
+                    virtualKey);
+                AdoptLocked(actionId, binding, combo, registration, id);
+            }
+            catch (Exception error) when (
+                error is ArgumentException or HotkeyRegistrationException or InvalidOperationException)
+            {
+                binding.Error = error is HotkeyRegistrationException
+                    ? "快捷键注册失败：该组合可能已被其他应用占用。"
+                    : error.Message;
+            }
+        }
+    }
 
     private bool ReplaceLocked(
         string actionId,

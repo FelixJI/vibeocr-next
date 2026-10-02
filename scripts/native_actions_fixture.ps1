@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection', 'cursor', 'magnifier')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'webview-bounds', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection', 'cursor', 'magnifier')][string]$Action,
     [int]$AppPid = 0,
     [int]$FixturePid = 0,
     [int]$ForegroundPid = 0,
@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Text;
 
 public static class NativeActionsFixture
 {
@@ -262,10 +263,11 @@ public static class NativeActionsFixture
             throw new InvalidOperationException("Synthetic fixture quit failed.");
     }
 
+    [DllImport("user32.dll")] private static extern uint MapVirtualKeyW(uint code, uint type);
     private static Input Key(ushort key, bool up) => new Input
     {
         Type = 1,
-        Data = new InputUnion { Key = new KeyInput { Key = key, Flags = up ? 2u : 0u } }
+        Data = new InputUnion { Key = new KeyInput { Scan = (ushort)MapVirtualKeyW(key, 0), Flags = 0x0008u | (up ? 2u : 0u) } }
     };
     private static Input Mouse(uint flag) => new Input
     {
@@ -281,14 +283,57 @@ public static class NativeActionsFixture
     public static void FocusFixture(long handle, int fixturePid, int x, int y)
     {
         RequireOwner(handle, fixturePid);
-        RequirePointOwner(x, y, fixturePid);
-        if (GetAncestor(WindowFromPoint(new Point { X = x, Y = y }), 2) != new IntPtr(handle))
-            throw new InvalidOperationException("Synthetic focus point is outside the small fixture root.");
-        if (!SetCursorPos(x, y)) throw new InvalidOperationException("Synthetic cursor move failed.");
-        SetForegroundWindow(new IntPtr(handle));
-        try { Send(new[] { Mouse(0x0002) }); }
-        finally { Send(new[] { Mouse(0x0004) }); }
-        RequireForeground(fixturePid);
+        IntPtr window = new IntPtr(handle);
+        bool wasTopmost = (GetWindowLongPtr(window, -20).ToInt64() & 8) != 0;
+        if (!SetWindowPos(window, new IntPtr(-1), 0, 0, 0, 0, 0x0013))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Owned test window could not be exposed.");
+        try
+        {
+            RequirePointOwner(x, y, fixturePid);
+            if (GetAncestor(WindowFromPoint(new Point { X = x, Y = y }), 2) != window)
+                throw new InvalidOperationException("Synthetic focus point is outside the owned fixture root.");
+            if (!SetCursorPos(x, y)) throw new InvalidOperationException("Synthetic cursor move failed.");
+            RequirePointOwner(x, y, fixturePid);
+            try { Send(new[] { Mouse(0x0002) }); }
+            finally { Send(new[] { Mouse(0x0004) }); }
+            for (int attempt = 0; attempt < 50; attempt++)
+            {
+                GetWindowThreadProcessId(GetForegroundWindow(), out uint foregroundPid);
+                if (foregroundPid == (uint)fixturePid) break;
+                System.Threading.Thread.Sleep(20);
+            }
+            RequireForeground(fixturePid);
+        }
+        finally
+        {
+            if (!wasTopmost && !SetWindowPos(window, new IntPtr(-2), 0, 0, 0, 0, 0x0013))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Owned test window topmost state could not be restored.");
+        }
+    }
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    private static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
+
+    [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr parent, EnumWindowCallback callback, IntPtr state);
+    [DllImport("user32.dll", EntryPoint = "GetClassNameW", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr window, StringBuilder name, int length);
+
+    public static Rect WebViewBounds(long handle, int appPid)
+    {
+        RequireOwner(handle, appPid);
+        var matches = new List<Rect>();
+        EnumChildWindows(new IntPtr(handle), (child, _) => {
+            var name = new StringBuilder(256);
+            GetClassName(child, name, name.Capacity);
+            GetWindowThreadProcessId(child, out uint owner);
+            if (owner == (uint)appPid && IsWindowVisible(child) &&
+                name.ToString() == "Microsoft.UI.Content.DesktopChildSiteBridge" &&
+                GetAncestor(child, 2).ToInt64() == handle && GetWindowRect(child, out Rect bounds))
+                matches.Add(bounds);
+            return true;
+        }, IntPtr.Zero);
+        if (matches.Count != 1)
+            throw new InvalidOperationException("Expected exactly one visible owned WebView host.");
+        return matches[0];
     }
 
     public static void Hover(int appPid, int x, int y)
@@ -364,6 +409,7 @@ try {
         'close' { [NativeActionsFixture]::Close($Handle, $AppPid) }
         'quit' { [NativeActionsFixture]::Quit($Handle, $FixturePid, $ThreadId) }
         'focus-fixture' { [NativeActionsFixture]::FocusFixture($Handle, $FixturePid, $X, $Y) }
+        'webview-bounds' { [NativeActionsFixture]::WebViewBounds($Handle, $AppPid) | ConvertTo-Json -Compress }
         'hotkey' { [NativeActionsFixture]::Hotkey($FixturePid, 0x79) }
         'recognize-hotkey' { [NativeActionsFixture]::Hotkey($ForegroundPid, 0x7A) }
         'foreground' { [NativeActionsFixture]::Foreground($AppPid) }
