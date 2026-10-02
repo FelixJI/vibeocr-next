@@ -35,12 +35,10 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
 {
     private sealed class SelectionCanvas : Canvas
     {
-      private InputSystemCursorShape? _shape;
       public void SetCursor(InputSystemCursorShape shape)
       {
-        if (_shape == shape) return;
+        // Pointer capture can change the native cursor without changing the requested shape.
         ProtectedCursor = InputSystemCursor.Create(shape);
-        _shape = shape;
       }
     }
 
@@ -278,13 +276,18 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     void UpdateSmartPreview(PhysicalPoint local)
     {
       if (session.ManualOnly || session.Selection is not null || session.IsPointerActive) return;
+      PhysicalPoint point = new(checked(local.X + desktop.X), checked(local.Y + desktop.Y));
+      SmartScreenCandidates.Window? window = candidates.Hit(point);
+      PhysicalRectangle? clipped = window is not null &&
+        candidates.IsCurrent(window, SmartScreenCandidates.CurrentDesktop(),
+          SmartScreenCandidates.TryReadWindowBounds)
+        ? candidates.ClipToCapture(window.Bounds, window) : null;
+      // Repeated PointerMoved events must not discard the current Tab-selected control.
+      if (clipped is not null && window == hoveredWindow && point == hoveredPoint) return;
       hoverGeneration++;
       previewControls = [];
-      hoveredPoint = new PhysicalPoint(checked(local.X + desktop.X), checked(local.Y + desktop.Y));
-      SmartScreenCandidates.Window? window = candidates.Hit(hoveredPoint);
-      if (window is null || !candidates.IsCurrent(window, SmartScreenCandidates.CurrentDesktop(),
-            SmartScreenCandidates.TryReadWindowBounds) ||
-          candidates.ClipToCapture(window.Bounds, window) is not { } clipped)
+      hoveredPoint = point;
+      if (window is null || clipped is not { } bounds)
       {
         hoveredWindow = null;
         session.ClearPreview();
@@ -292,7 +295,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       else
       {
         hoveredWindow = window;
-        session.SetPreview([candidates.ToLocal(clipped)]);
+        session.SetPreview([candidates.ToLocal(bounds)]);
         QueueControlQuery();
       }
     }

@@ -273,7 +273,7 @@ try {
   await show();
   fixture = await startFixture();
   evidence.taskbarStateBefore = await taskbarState();
-  evidence.capture = await captureThroughHotkey(app, fixture, work, evidence);
+  evidence.capture = await captureThroughHotkey(app, fixture, work, evidence, process.argv.includes('--manual-capture'));
   // External-foreground drag: the owned synthetic fixture root owns the
   // foreground and the drop point; its full-desktop background is hidden so
   // the toolbar keeps an app-owned hit test at the grip. No user window is
