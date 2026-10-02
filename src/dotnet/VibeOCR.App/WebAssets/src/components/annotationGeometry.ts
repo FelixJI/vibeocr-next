@@ -7,7 +7,9 @@ export type AnnotationTool =
   | "blur"
   | "pen"
   | "highlighter"
-  | "numbering";
+  | "numbering"
+  /** 识别排除区：只影响识别输入与显式屏蔽副本，不写入普通导出。 */
+  | "exclude";
 
 export interface Point {
   readonly x: number;
@@ -44,6 +46,18 @@ export interface EditorState {
 export interface CanvasSize {
   readonly width: number;
   readonly height: number;
+}
+
+/** 左上角 + 宽高的轴对齐矩形；屏蔽几何的公共交换形状。 */
+export interface Rect {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+export function isExclusionMark(mark: Mark): boolean {
+  return mark.tool === "exclude";
 }
 
 export function imageTransform(
@@ -175,4 +189,221 @@ export function finalOutputSize(
     width: Math.max(1, Math.round(width)),
     height: Math.max(1, Math.round(height)),
   };
+}
+
+/** 显示空间裁剪映射到自然输出空间并裁剪到画布内；与 finalOutputSize 同源。 */
+function mappedCropRect(
+  image: HTMLImageElement,
+  state: EditorState,
+  displaySize: CanvasSize,
+): Rect {
+  const naturalSize = outputSize(image, state.rotation);
+  if (!state.crop) {
+    return { x: 0, y: 0, width: naturalSize.width, height: naturalSize.height };
+  }
+  const mapPoint = (point: Point) =>
+    projectPoint(
+      point,
+      image,
+      state.rotation,
+      displaySize,
+      state.rotation,
+      naturalSize,
+    );
+  const start = mapPoint(state.crop.start);
+  const end = mapPoint(state.crop.end);
+  const left = Math.max(
+    0,
+    Math.min(naturalSize.width, Math.min(start.x, end.x)),
+  );
+  const top = Math.max(
+    0,
+    Math.min(naturalSize.height, Math.min(start.y, end.y)),
+  );
+  const right = Math.max(
+    left,
+    Math.min(naturalSize.width, Math.max(start.x, end.x)),
+  );
+  const bottom = Math.max(
+    top,
+    Math.min(naturalSize.height, Math.max(start.y, end.y)),
+  );
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+/** 任意浮点矩形外扩取整（floor/ceil）：白色填充不得在边缘残留原始文字像素。
+ * 确定性代价是每个矩形最多向外扩张 1px。 */
+function snapRectOutward(rect: Rect): Rect {
+  const x = Math.floor(rect.x);
+  const y = Math.floor(rect.y);
+  return {
+    x,
+    y,
+    width: Math.ceil(rect.x + rect.width) - x,
+    height: Math.ceil(rect.y + rect.height) - y,
+  };
+}
+
+/** 屏蔽矩形在自然（旋转后、裁剪前）输出空间的整数外扩包围盒。
+ * 与导出时 draw() 的白色填充使用同一映射与取整，保证判定与实际像素一致。 */
+export function exclusionNaturalRects(
+  image: HTMLImageElement,
+  state: EditorState,
+  displaySize: CanvasSize,
+): readonly Rect[] {
+  const naturalSize = outputSize(image, state.rotation);
+  const mapPoint = (point: Point) =>
+    projectPoint(
+      point,
+      image,
+      state.rotation,
+      displaySize,
+      state.rotation,
+      naturalSize,
+    );
+  const rects: Rect[] = [];
+  for (const mark of state.marks) {
+    if (!isExclusionMark(mark)) continue;
+    const start = mapPoint(mark.start);
+    const end = mapPoint(mark.end);
+    const snapped = snapRectOutward({
+      x: Math.min(start.x, end.x),
+      y: Math.min(start.y, end.y),
+      width: Math.abs(end.x - start.x),
+      height: Math.abs(end.y - start.y),
+    });
+    // 越界草稿裁剪到画布；取整后为空（极小/贴边区域）的矩形不产生掩膜。
+    const x = Math.max(0, snapped.x);
+    const y = Math.max(0, snapped.y);
+    const right = Math.min(naturalSize.width, snapped.x + snapped.width);
+    const bottom = Math.min(naturalSize.height, snapped.y + snapped.height);
+    if (right - x > 0 && bottom - y > 0) {
+      rects.push({ x, y, width: right - x, height: bottom - y });
+    }
+  }
+  return rects;
+}
+
+/** 屏蔽矩形在最终输出（裁剪 + 缩放后）空间的浮点投影；与文字层行框同坐标系。 */
+export function exclusionOutputRects(
+  image: HTMLImageElement,
+  state: EditorState,
+  displaySize: CanvasSize,
+): readonly Rect[] {
+  const crop = mappedCropRect(image, state, displaySize);
+  if (crop.width <= 0 || crop.height <= 0) return [];
+  const output = finalOutputSize(image, state, displaySize);
+  const scaleX = output.width / crop.width;
+  const scaleY = output.height / crop.height;
+  return exclusionNaturalRects(image, state, displaySize)
+    .map((rect) => ({
+      x: Math.max(rect.x, crop.x),
+      y: Math.max(rect.y, crop.y),
+      right: Math.min(rect.x + rect.width, crop.x + crop.width),
+      bottom: Math.min(rect.y + rect.height, crop.y + crop.height),
+    }))
+    .filter((rect) => rect.right > rect.x && rect.bottom > rect.y)
+    .map((rect) => ({
+      x: (rect.x - crop.x) * scaleX,
+      y: (rect.y - crop.y) * scaleY,
+      width: (rect.right - rect.x) * scaleX,
+      height: (rect.bottom - rect.y) * scaleY,
+    }));
+}
+
+/** 屏蔽矩形投影到最终输出的 [0,1000] 归一化坐标，与文字层行框同参考系。 */
+export function exclusionNormalizedRects(
+  image: HTMLImageElement,
+  state: EditorState,
+  displaySize: CanvasSize,
+): readonly Rect[] {
+  const output = finalOutputSize(image, state, displaySize);
+  return exclusionOutputRects(image, state, displaySize).map((rect) => ({
+    x: (rect.x / output.width) * 1000,
+    y: (rect.y / output.height) * 1000,
+    width: (rect.width / output.width) * 1000,
+    height: (rect.height / output.height) * 1000,
+  }));
+}
+
+/** 坐标压缩判定矩形并集是否完整覆盖目标区域（整数网格，无采样误差）。
+ * 实现：x 扫线（相邻边组成板）+ 每板 y 区间合并；无额外几何框架，
+ * 复杂度 O(n^2 log n)，n 为排除矩形数（用户拖拽量级，单次识别前调用一次）。 */
+export function rectsCoverArea(rects: readonly Rect[], area: Rect): boolean {
+  if (area.width <= 0 || area.height <= 0) return true;
+  const covering = rects.filter((rect) => rect.width > 0 && rect.height > 0);
+  if (covering.length === 0) return false;
+  const xEdges = [
+    ...new Set<number>([
+      area.x,
+      area.x + area.width,
+      ...covering.flatMap((rect) => [rect.x, rect.x + rect.width]),
+    ]),
+  ].sort((a, b) => a - b);
+  for (let i = 0; i < xEdges.length - 1; i += 1) {
+    const left = xEdges[i]!;
+    const right = xEdges[i + 1]!;
+    // 只需覆盖落在目标区域内的 x 范围；区域外掩膜不影响判定。
+    const overlapLeft = Math.max(left, area.x);
+    const overlapRight = Math.min(right, area.x + area.width);
+    if (overlapRight <= overlapLeft) continue;
+    // 收集横跨本板且与目标 y 范围相交的 y 区间，排序后合并求覆盖长度。
+    const spans: (readonly [number, number])[] = covering
+      .filter(
+        (rect) => rect.x <= overlapLeft && rect.x + rect.width >= overlapRight,
+      )
+      .map(
+        (rect) =>
+          [
+            Math.max(rect.y, area.y),
+            Math.min(rect.y + rect.height, area.y + area.height),
+          ] as const,
+      )
+      .filter(([from, to]) => to > from)
+      .sort((a, b) => a[0] - b[0]);
+    let covered = 0;
+    let reach = Number.NEGATIVE_INFINITY;
+    for (const [from, to] of spans) {
+      if (from > reach) {
+        covered += to - from;
+        reach = to;
+      } else if (to > reach) {
+        covered += to - reach;
+        reach = to;
+      }
+    }
+    if (covered < area.height) return false;
+  }
+  return true;
+}
+
+/** 整图屏蔽判定：外扩取整后的屏蔽并集覆盖外扩取整后的裁剪输出区域。 */
+export function exclusionCoversOutput(
+  image: HTMLImageElement,
+  state: EditorState,
+  displaySize: CanvasSize,
+): boolean {
+  const crop = mappedCropRect(image, state, displaySize);
+  return rectsCoverArea(
+    exclusionNaturalRects(image, state, displaySize),
+    snapRectOutward(crop),
+  );
+}
+
+/** 半开区间相交：行框与任一排除矩形有正面积重叠即命中；仅贴边不算。 */
+export function rectIntersectsBox(
+  rect: Rect,
+  box: {
+    readonly x1: number;
+    readonly y1: number;
+    readonly x2: number;
+    readonly y2: number;
+  },
+): boolean {
+  return (
+    box.x2 > rect.x &&
+    box.x1 < rect.x + rect.width &&
+    box.y2 > rect.y &&
+    box.y1 < rect.y + rect.height
+  );
 }

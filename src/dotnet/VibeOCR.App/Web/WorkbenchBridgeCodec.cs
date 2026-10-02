@@ -71,6 +71,8 @@ public static class WorkbenchBridgeCodec
     ["sessionId", "revision"];
   private static readonly HashSet<string> SessionResourceArgumentFields =
     ["resourceUri", "sessionId", "revision"];
+  private static readonly HashSet<string> PinResourceArgumentFields =
+    ["resourceUri", "sessionId", "revision", "excludeBoxes"];
   private static readonly HashSet<string> StructuredCopyArgumentFields =
     ["resourceUri", "blockIndex", "format"];
   private static readonly HashSet<string> SessionSelectionArgumentFields =
@@ -328,12 +330,19 @@ public static class WorkbenchBridgeCodec
           ParseGuidArgument(arguments, "sessionId"),
           ParseContentRevision(arguments));
       case ("recognition", "pinScreenshotImage"):
+      {
+        // excludeBoxes 可选：无该字段保持旧命令形状（空排除区）。
+        bool withExclusions = !HasExactFields(arguments, SessionResourceArgumentFields);
         EnsureObjectWithFields(
-          arguments, SessionResourceArgumentFields, "command arguments");
+          arguments,
+          withExclusions ? PinResourceArgumentFields : SessionResourceArgumentFields,
+          "command arguments");
         return new PinScreenshotImageCommand(
           ReadAnnotationResourceUri(arguments),
           ParseGuidArgument(arguments, "sessionId"),
-          ParseContentRevision(arguments));
+          ParseContentRevision(arguments),
+          withExclusions ? ParseExclusionBoxes(arguments) : []);
+      }
       case ("recognition", "recognizeScreenshotImage"):
         EnsureObjectWithFields(
           arguments, SessionResourceArgumentFields, "command arguments");
@@ -769,6 +778,49 @@ public static class WorkbenchBridgeCodec
         "Workbench screenshot session revision is invalid.");
     }
     return revision;
+  }
+
+  private const int MaximumExclusionBoxes = 64;
+  private static readonly HashSet<string> ExclusionBoxFields = ["x", "y", "width", "height"];
+
+  /// <summary>
+  /// 解析可选 excludeBoxes：[0,1000] 归一化矩形，正面积为限；
+  /// 每个盒子字段精确匹配（与顶层 trustboundary 一致），数值必须有限，
+  /// 越界、退化、非对象和超量整体拒绝，不静默截断用户掩膜。
+  /// </summary>
+  private static IReadOnlyList<WorkbenchExclusionBox> ParseExclusionBoxes(
+    JsonElement arguments)
+  {
+    JsonElement boxes = arguments.GetProperty("excludeBoxes");
+    if (boxes.ValueKind != JsonValueKind.Array || boxes.GetArrayLength() > MaximumExclusionBoxes)
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench pin exclusion boxes are invalid.");
+    }
+    List<WorkbenchExclusionBox> parsed = [];
+    foreach (JsonElement box in boxes.EnumerateArray())
+    {
+      EnsureObjectWithFields(box, ExclusionBoxFields, "pin exclusion box");
+      double boxX = box.GetProperty("x").GetDouble();
+      double boxY = box.GetProperty("y").GetDouble();
+      double boxWidth = box.GetProperty("width").GetDouble();
+      double boxHeight = box.GetProperty("height").GetDouble();
+      if (!double.IsFinite(boxX) || !double.IsFinite(boxY) ||
+        !double.IsFinite(boxWidth) || !double.IsFinite(boxHeight))
+      {
+        throw new WorkbenchBridgeProtocolException(
+          "Workbench pin exclusion box is invalid.");
+      }
+      if (boxX < 0 || boxY < 0 ||
+        boxX + boxWidth > 1000 || boxY + boxHeight > 1000 ||
+        boxWidth <= 0 || boxHeight <= 0)
+      {
+        throw new WorkbenchBridgeProtocolException(
+          "Workbench pin exclusion box is out of range.");
+      }
+      parsed.Add(new WorkbenchExclusionBox(boxX, boxY, boxWidth, boxHeight));
+    }
+    return parsed;
   }
 
   private static string ParseSelectionText(JsonElement arguments)
