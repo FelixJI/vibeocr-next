@@ -149,7 +149,7 @@ npm run build --prefix src/dotnet/VibeOCR.App/WebAssets
 
 ```powershell
 dotnet restore tests/dotnet/VibeOCR.Platform.Tests/VibeOCR.Platform.Tests.csproj --locked-mode
-dotnet test tests/dotnet/VibeOCR.Platform.Tests/VibeOCR.Platform.Tests.csproj -c Release --no-restore
+dotnet test --project tests/dotnet/VibeOCR.Platform.Tests/VibeOCR.Platform.Tests.csproj -c Release --no-restore
 ```
 
 ### App/混合边界改动
