@@ -73,71 +73,293 @@ internal sealed class WindowsJobObject : IDisposable
         int rootProcessId = process.Id;
         Assign(process);
 
-        for (int pass = 0; pass < MaxTreeEnrollmentPasses; pass++)
+        // The root handle belongs to the caller's Process instance: keep it
+        // pinned for the whole traversal but never dispose it here.
+        long rootCreationTime = ReadProcessTreeRootCreationTime(process, rootProcessId);
+        var verifiedProcesses = new Dictionary<int, VerifiedProcess>
         {
-            bool enrolledProcess = false;
-            foreach (int processId in CaptureDescendantProcessIds(rootProcessId))
+            [rootProcessId] = new VerifiedProcess(
+                process.SafeHandle, rootCreationTime, rootProcessId, ownsHandle: false),
+        };
+        try
+        {
+            // The outer passes follow process-tree changes between snapshots;
+            // each snapshot is expanded to a fixed point so neither entry
+            // ordering nor intermediate depth consumes tree-change passes.
+            for (int pass = 0; pass < MaxTreeEnrollmentPasses; pass++)
             {
-                enrolledProcess |= TryAssignExistingProcess(processId);
+                bool assignedProcess = false;
+                List<ProcessEntry> entries = CaptureProcessEntries(
+                    rootProcessId,
+                    candidateProcessId: null,
+                    parentProcessId: null,
+                    pass,
+                    "capture-pass-snapshot");
+                var attemptedProcessIds = new HashSet<int>();
+                bool expanded;
+                do
+                {
+                    expanded = false;
+                    foreach (ProcessEntry entry in entries)
+                    {
+                        int processId = checked((int)entry.ProcessId);
+                        if (verifiedProcesses.ContainsKey(processId)
+                            || attemptedProcessIds.Contains(processId))
+                        {
+                            continue;
+                        }
+                        if (!verifiedProcesses.TryGetValue(
+                                checked((int)entry.ParentProcessId),
+                                out VerifiedProcess? parent))
+                        {
+                            continue;
+                        }
+                        CandidateEnrollmentResult result = TryAssignVerifiedProcess(
+                            verifiedProcesses, processId, parent, rootProcessId, pass);
+                        if (result == CandidateEnrollmentResult.NotEnrolled)
+                        {
+                            attemptedProcessIds.Add(processId);
+                            continue;
+                        }
+                        expanded = true;
+                        assignedProcess |= result == CandidateEnrollmentResult.Assigned;
+                    }
+                }
+                while (expanded);
+                if (!assignedProcess)
+                {
+                    return;
+                }
             }
-            if (!enrolledProcess)
+
+            throw new InvalidOperationException(
+                "Supervisor process tree did not stabilize during Job Object enrollment.");
+        }
+        finally
+        {
+            foreach (VerifiedProcess verified in verifiedProcesses.Values)
             {
-                return;
+                if (verified.OwnsHandle)
+                {
+                    verified.Handle.Dispose();
+                }
             }
         }
-
-        throw new InvalidOperationException(
-            "Supervisor process tree did not stabilize during Job Object enrollment.");
     }
 
-    private bool TryAssignExistingProcess(int processId)
+    private CandidateEnrollmentResult TryAssignVerifiedProcess(
+        Dictionary<int, VerifiedProcess> verifiedProcesses,
+        int processId,
+        VerifiedProcess parent,
+        int rootProcessId,
+        int pass)
     {
-        using SafeProcessHandle processHandle = OpenProcess(
-            ProcessTerminate | ProcessSetQuota | ProcessQueryLimitedInformation,
+        Win32Exception Failure(string stage, uint? requestedAccess, int error)
+            => CreateEnrollmentException(
+                rootProcessId,
+                processId,
+                parent.ProcessId,
+                pass,
+                stage,
+                requestedAccess,
+                error);
+
+        // A query handle pins the exact process instance: while it stays open
+        // the PID cannot be reused, so every identity fact gathered below
+        // belongs to the candidate observed in the traversal snapshot.
+        SafeProcessHandle identityHandle = OpenProcess(
+            ProcessQueryLimitedInformation,
             inheritHandle: false,
             (uint)processId);
-        if (processHandle.IsInvalid)
+        if (identityHandle.IsInvalid)
         {
             int error = Marshal.GetLastWin32Error();
+            identityHandle.Dispose();
             if (error == ErrorInvalidParameter)
             {
-                return false;
+                // The candidate exited before its instance could be pinned.
+                return CandidateEnrollmentResult.NotEnrolled;
             }
-            throw new Win32Exception(error);
+            throw Failure(
+                "open-candidate-identity", ProcessQueryLimitedInformation, error);
         }
 
-        if (IsProcessAssigned(processHandle))
+        bool handleTransferred = false;
+        try
         {
-            return false;
-        }
-        if (AssignProcessToJobObject(_handle, processHandle))
-        {
-            return true;
-        }
+            if (!GetProcessTimes(
+                    identityHandle,
+                    out long creationTime,
+                    out _,
+                    out _,
+                    out _))
+            {
+                throw Failure(
+                    "read-candidate-creation-time",
+                    null,
+                    Marshal.GetLastWin32Error());
+            }
 
-        int assignmentError = Marshal.GetLastWin32Error();
-        if (assignmentError == ErrorInvalidParameter)
-        {
-            return false;
+            // Refresh the snapshot while the identity handle is open so the
+            // reported parent is checked against the current PID owner.
+            ProcessEntry? currentEntry = FindProcessEntry(
+                CaptureProcessEntries(
+                    rootProcessId,
+                    processId,
+                    parent.ProcessId,
+                    pass,
+                    "confirm-candidate-parent"),
+                processId);
+            if (!IsVerifiedDescendantInstance(
+                    parent.CreationTime,
+                    creationTime,
+                    currentEntry?.ParentProcessId,
+                    parent.ProcessId))
+            {
+                // Stale edge or reused PID: exclude it and never expand it.
+                return CandidateEnrollmentResult.NotEnrolled;
+            }
+
+            if (!IsProcessInJob(identityHandle, _handle, out bool inJob))
+            {
+                throw Failure("query-job-membership", null, Marshal.GetLastWin32Error());
+            }
+            if (!inJob)
+            {
+                // Only processes still missing from the job need the stronger
+                // control handle; job members keep the identity handle only.
+                using SafeProcessHandle controlHandle = OpenProcess(
+                    ProcessTerminate | ProcessSetQuota,
+                    inheritHandle: false,
+                    (uint)processId);
+                if (controlHandle.IsInvalid)
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    if (error == ErrorInvalidParameter)
+                    {
+                        return CandidateEnrollmentResult.NotEnrolled;
+                    }
+                    throw Failure(
+                        "open-candidate-control", ProcessTerminate | ProcessSetQuota, error);
+                }
+                if (!AssignProcessToJobObject(_handle, controlHandle))
+                {
+                    int assignmentError = Marshal.GetLastWin32Error();
+                    if (assignmentError == ErrorInvalidParameter)
+                    {
+                        return CandidateEnrollmentResult.NotEnrolled;
+                    }
+                    throw Failure(
+                        "assign-candidate", ProcessTerminate | ProcessSetQuota, assignmentError);
+                }
+            }
+
+            verifiedProcesses.Add(
+                processId,
+                new VerifiedProcess(
+                    identityHandle, creationTime, processId, ownsHandle: true));
+            handleTransferred = true;
+            return inJob
+                ? CandidateEnrollmentResult.AlreadyInJob
+                : CandidateEnrollmentResult.Assigned;
         }
-        throw new Win32Exception(assignmentError);
+        finally
+        {
+            if (!handleTransferred)
+            {
+                identityHandle.Dispose();
+            }
+        }
     }
 
-    private bool IsProcessAssigned(SafeProcessHandle processHandle)
+    /// <summary>
+    /// Judges whether a snapshot edge identifies a descendant of the pinned
+    /// parent instance: the candidate must postdate the parent instance and a
+    /// refreshed snapshot must still attribute the candidate PID to that same
+    /// parent. Stale PPID edges left behind by PID reuse fail one of the two
+    /// checks and must not be enrolled.
+    /// </summary>
+    internal static bool IsVerifiedDescendantInstance(
+        long parentCreationTime,
+        long candidateCreationTime,
+        uint? currentParentProcessId,
+        int verifiedParentProcessId)
     {
-        if (!IsProcessInJob(processHandle, _handle, out bool assigned))
+        if (candidateCreationTime < parentCreationTime)
         {
-            throw new Win32Exception(Marshal.GetLastWin32Error());
+            return false;
         }
-        return assigned;
+        return currentParentProcessId == (uint)verifiedParentProcessId;
     }
 
-    private static IReadOnlyList<int> CaptureDescendantProcessIds(int rootProcessId)
+    private static long ReadProcessTreeRootCreationTime(Process process, int rootProcessId)
+    {
+        SafeProcessHandle rootHandle;
+        try
+        {
+            rootHandle = process.SafeHandle;
+        }
+        catch (Win32Exception exception)
+        {
+            throw CreateEnrollmentException(
+                rootProcessId,
+                candidateProcessId: rootProcessId,
+                parentProcessId: null,
+                pass: 0,
+                "open-root-identity",
+                null,
+                exception.NativeErrorCode);
+        }
+
+        if (!GetProcessTimes(rootHandle, out long creationTime, out _, out _, out _))
+        {
+            throw CreateEnrollmentException(
+                rootProcessId,
+                candidateProcessId: rootProcessId,
+                parentProcessId: null,
+                pass: 0,
+                "read-root-creation-time",
+                null,
+                Marshal.GetLastWin32Error());
+        }
+        return creationTime;
+    }
+
+    private static Win32Exception CreateEnrollmentException(
+        int rootProcessId,
+        int? candidateProcessId,
+        int? parentProcessId,
+        int pass,
+        string stage,
+        uint? requestedAccess,
+        int error)
+    {
+        string accessText = requestedAccess is null
+            ? "inherited"
+            : $"0x{requestedAccess.Value:X4}";
+        return new Win32Exception(
+            error,
+            $"Job Object process tree enrollment failed: root process {rootProcessId}, candidate {candidateProcessId?.ToString() ?? "none"}, parent {parentProcessId?.ToString() ?? "none"}, pass {pass}, stage {stage}, access {accessText}, win32 error {error}.");
+    }
+
+    private static List<ProcessEntry> CaptureProcessEntries(
+        int rootProcessId,
+        int? candidateProcessId,
+        int? parentProcessId,
+        int pass,
+        string stage)
     {
         using SafeFileHandle snapshot = CreateToolhelp32Snapshot(SnapshotProcesses, 0);
         if (snapshot.IsInvalid)
         {
-            throw new Win32Exception(Marshal.GetLastWin32Error());
+            throw CreateEnrollmentException(
+                rootProcessId,
+                candidateProcessId,
+                parentProcessId,
+                pass,
+                stage,
+                requestedAccess: null,
+                Marshal.GetLastWin32Error());
         }
 
         var entries = new List<ProcessEntry>();
@@ -156,29 +378,47 @@ internal sealed class WindowsJobObject : IDisposable
         }
         else
         {
-            throw new Win32Exception(Marshal.GetLastWin32Error());
+            throw CreateEnrollmentException(
+                rootProcessId,
+                candidateProcessId,
+                parentProcessId,
+                pass,
+                stage,
+                requestedAccess: null,
+                Marshal.GetLastWin32Error());
         }
+        return entries;
+    }
 
-        var processTree = new HashSet<int> { rootProcessId };
-        bool changed;
-        do
+    private static ProcessEntry? FindProcessEntry(List<ProcessEntry> entries, int processId)
+    {
+        foreach (ProcessEntry entry in entries)
         {
-            changed = false;
-            foreach (ProcessEntry candidate in entries)
+            if (checked((int)entry.ProcessId) == processId)
             {
-                int processId = checked((int)candidate.ProcessId);
-                int parentProcessId = checked((int)candidate.ParentProcessId);
-                if (processId != rootProcessId
-                    && processTree.Contains(parentProcessId)
-                    && processTree.Add(processId))
-                {
-                    changed = true;
-                }
+                return entry;
             }
         }
-        while (changed);
-        processTree.Remove(rootProcessId);
-        return processTree.ToArray();
+        return null;
+    }
+
+    private enum CandidateEnrollmentResult
+    {
+        NotEnrolled,
+        AlreadyInJob,
+        Assigned,
+    }
+
+    private sealed class VerifiedProcess(
+        SafeProcessHandle handle,
+        long creationTime,
+        int processId,
+        bool ownsHandle)
+    {
+        public SafeProcessHandle Handle { get; } = handle;
+        public long CreationTime { get; } = creationTime;
+        public int ProcessId { get; } = processId;
+        public bool OwnsHandle { get; } = ownsHandle;
     }
 
     public bool TerminateAndWait(TimeSpan timeout)
@@ -248,6 +488,15 @@ internal sealed class WindowsJobObject : IDisposable
         uint desiredAccess,
         [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
         uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetProcessTimes(
+        SafeProcessHandle process,
+        out long creationTime,
+        out long exitTime,
+        out long kernelTime,
+        out long userTime);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
