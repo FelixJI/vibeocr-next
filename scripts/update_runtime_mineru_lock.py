@@ -25,6 +25,7 @@ def main() -> int:
         str(SOURCE.relative_to(ROOT)),
         "--no-config",
         "--no-sources",
+        "--upgrade",
         "--python-version",
         "3.13",
         "--python-platform",
