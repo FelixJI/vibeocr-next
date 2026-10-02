@@ -104,6 +104,7 @@ public sealed partial class App : Application
         object sender,
         Microsoft.UI.Xaml.UnhandledExceptionEventArgs args)
     {
+        _actionDispatcher?.EndHotkeyRecording();
         AppLog.Error("Unhandled WinUI exception", args.Exception);
         WriteSoakResult(
             Environment.GetEnvironmentVariable("VIBEOCR_SOAK_INJECT_CRASH") == "1",
@@ -445,7 +446,7 @@ public sealed partial class App : Application
         {
             // 按实际注册 ID 解析动作：被替换/未知 ID 不触发任何动作，
             // 与热键、托盘、悬浮栏、主窗入口同一分派器。
-            if (_hotkeyRegistrar is not null &&
+            if (_hotkeyRegistrar is { IsRecording: false } &&
                 _hotkeyRegistrar.TryResolveAction((int)message.WParam, out string? action))
             {
                 _actionDispatcher?.TryDispatch(action);
@@ -1331,6 +1332,7 @@ public sealed partial class App : Application
         }
 
         args.Cancel = true;
+        _actionDispatcher?.EndHotkeyRecording();
         _shutdownStarted = true;
         _applicationShutdown.Cancel();
         _ = ShutdownAndExitAsync(sender);
