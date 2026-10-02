@@ -1,4 +1,5 @@
 using System.Text.Json;
+using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.ViewModels;
 using VibeOCR.App.Web;
 using VibeOCR.App.Workbench;
@@ -352,6 +353,81 @@ public sealed class DiagnosticsViewModelTests
     finally
     {
       Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task CopyDiagnosticsReusesRedactedExportDocumentThroughClipboardSeam()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-diag-copy-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      var clipboard = new RecordingStructuredClipboard();
+      var diagnostics = new DiagnosticsViewModel(
+        "test",
+        new PrerequisiteReport([]),
+        deviceEvidence: () => ("sup-1", (IReadOnlyList<string>)[
+          "[Paddle worker] [GPU] token=abc123 验证失败: path=C:\\Users\\felix\\models，回退到 CPU",
+        ]));
+      diagnostics.UpdateSupervisor(new SupervisorHealth(
+        SupervisorHealthState.Ready, "sup-1", 2, "token=abc detail"));
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        diagnostics,
+        broker,
+        root,
+        static () => 0,
+        annotations,
+        structuredClipboard: clipboard);
+
+      WorkbenchCommandOutcome outcome = await handler.ExecuteAsync(
+        new CopyDiagnosticsCommand(),
+        TestContext.Current.CancellationToken);
+
+      // 复制复用导出的同一脱敏文档：剪贴板文本与导出文件一致，且不泄漏密钥或本地路径。
+      Assert.Null(outcome.Error);
+      Assert.NotNull(clipboard.Text);
+      string destination = Path.Combine(root, "diagnostics.json");
+      await diagnostics.ExportAsync(destination, TestContext.Current.CancellationToken);
+      Assert.Equal(
+        await File.ReadAllTextAsync(destination, TestContext.Current.CancellationToken),
+        clipboard.Text);
+      Assert.DoesNotContain("abc123", clipboard.Text);
+      Assert.DoesNotContain("abc ", clipboard.Text);
+      Assert.DoesNotContain("C:\\Users", clipboard.Text);
+      Assert.Contains("<redacted>", clipboard.Text);
+      using JsonDocument document = JsonDocument.Parse(clipboard.Text!);
+      Assert.Equal(2, document.RootElement.GetProperty("schema_version").GetInt32());
+      await handler.DisposeAsync();
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  private sealed class RecordingStructuredClipboard : IStructuredClipboardPlatform
+  {
+    public string? Text { get; private set; }
+
+    public Task WriteTableAsync(string tsv, string html, CancellationToken cancellationToken)
+    {
+      throw new InvalidOperationException("Diagnostics copy must not write table formats.");
+    }
+
+    public Task WriteTextAsync(string text, CancellationToken cancellationToken)
+    {
+      Text = text;
+      return Task.CompletedTask;
     }
   }
 }

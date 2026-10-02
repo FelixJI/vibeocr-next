@@ -764,7 +764,7 @@ describe("AppShell", () => {
   });
 
   it("shows host About metadata and opens the fixed project page", async () => {
-    window.location.hash = "#/about";
+    window.location.hash = "#/diagnostics";
     const user = userEvent.setup();
     const actions: AppActions = {
       run: vi.fn(),
@@ -774,14 +774,20 @@ describe("AppShell", () => {
     const viewState: AppViewState = {
       connected: true,
       revision: 14,
-      route: "about",
+      route: "diagnostics",
       theme: "light",
-      capabilities: ["about.openProject"],
+      capabilities: ["about.openProject", "diagnostics.export"],
       features: {
         about: {
           version: "0.2.0",
           license: "Proprietary",
           projectUrl: "https://github.com/felji/VibeOCR",
+        },
+        diagnostics: {
+          supervisorStatus: "已就绪",
+          protocolStatus: "客户端 v2 / Supervisor v2",
+          milestones: [],
+          deviceEvidence: [],
         },
       },
       runtimeLabel: "原生宿主已连接",
@@ -792,6 +798,63 @@ describe("AppShell", () => {
     expect(screen.getByText("Proprietary")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "打开项目主页" }));
     expect(actions.run).toHaveBeenCalledWith({ type: "about.openProject" });
+    unmount();
+  });
+
+  it("merges about and diagnostics into one entry and redirects legacy #/about", async () => {
+    window.location.hash = "#/about";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    // 宿主仍持久化旧 about 路由：RouteSync 对齐到 /diagnostics，与重定向目标一致。
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 15,
+      route: "about",
+      theme: "light",
+      capabilities: [
+        "about.openProject",
+        "diagnostics.export",
+        "diagnostics.copy",
+      ],
+      features: {
+        about: { version: "0.2.0", license: "Proprietary", projectUrl: "" },
+        diagnostics: {
+          supervisorStatus: "正在连接",
+          protocolStatus: "客户端 v2 / Supervisor 未知",
+          milestones: ["T0"],
+          deviceEvidence: ["[Paddle worker] [GPU] 回退到 CPU"],
+        },
+      },
+      runtimeLabel: "原生宿主已连接",
+    };
+
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+
+    // 旧入口落到合并后的唯一页面，不再出现第二个内容重复页面。
+    expect(
+      await screen.findByRole("heading", { name: "关于与诊断" }),
+    ).toBeVisible();
+    expect(window.location.hash).toBe("#/diagnostics");
+    expect(screen.queryByText("关于 VibeOCR")).not.toBeInTheDocument();
+    // 导航不再标注“离线工作台”，也不虚构在线/离线模式。
+    expect(screen.queryByText("离线工作台")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "关于" }),
+    ).not.toBeInTheDocument();
+    // 产品语义的健康行保留；协议版本只出现在折叠技术详情里。
+    expect(screen.getByText("识别服务")).toBeVisible();
+    expect(screen.getByText("客户端 v2 / Supervisor 未知")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "复制诊断详情" }));
+    expect(actions.run).toHaveBeenCalledWith({ type: "diagnostics.copy" });
+    // 服务未就绪时修复入口可见并指向设置页的既有能力。
+    await user.click(
+      screen.getByRole("button", { name: "打开设置的修复入口" }),
+    );
+    expect(actions.navigate).toHaveBeenCalledWith("settings");
     unmount();
   });
 
@@ -1101,9 +1164,9 @@ describe("AppShell", () => {
       screen.getByRole("option", { name: "远程（自部署服务）" }),
     ).toBeDisabled();
     expect(
-      screen.getByText(/当前 Backend 未声明 ocr\.mineru-remote-api\.v1/),
+      screen.getByText(/当前识别服务未声明 ocr\.mineru-remote-api\.v1/),
     ).toBeVisible();
-    // 本地模式在旧 Backend 上仍可保存（它是缺省状态）。
+    // 本地模式在旧识别服务上仍可保存（它是缺省状态）。
     await user.click(screen.getByRole("button", { name: "保存 MinerU 配置" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.setMineruConnection",
@@ -1184,7 +1247,7 @@ describe("AppShell", () => {
 
     expect(screen.getByText(/尚未加载/)).toBeVisible();
     expect(
-      screen.queryByText(/Backend 未提供下载源目录/),
+      screen.queryByText(/识别服务未提供下载源目录/),
     ).not.toBeInTheDocument();
     unmount();
   });
@@ -1748,12 +1811,16 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    // 设备证据属于排错信息：默认折叠在技术详情里，内容仍在文档中可展开。
     expect(
       screen.getByText("[Paddle worker] [GPU] 验证失败，回退到 CPU"),
-    ).toBeVisible();
+    ).toBeInTheDocument();
     expect(
       screen.getByText("设备决策与回退日志；不表示识别作业已成功执行。"),
-    ).toBeVisible();
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("技术详情（内部协议与排错证据）"),
+    ).toBeInTheDocument();
     unmount();
   });
 
@@ -1774,7 +1841,7 @@ describe("AppShell", () => {
       sources: [],
       features: [],
       serviceStatus: "运行时已就绪",
-      maintenanceStatus: "正在准备 Backend 运行时",
+      maintenanceStatus: "正在准备识别服务运行时",
       maintenancePhase: "安装重依赖",
       progressActive: true,
       progressText: "已完成 1024 bytes · 总量未知",

@@ -316,6 +316,13 @@ public sealed record CancelRuntimeForUpdateCommand : WorkbenchCommand;
 
 public sealed record ExportDiagnosticsCommand : WorkbenchCommand;
 
+/// <summary>
+/// Copy the same redacted diagnostics document as the export to the system
+/// clipboard through the host clipboard seam; the web layer never touches
+/// navigator.clipboard.
+/// </summary>
+public sealed record CopyDiagnosticsCommand : WorkbenchCommand;
+
 public enum WorkbenchTheme
 {
   System,

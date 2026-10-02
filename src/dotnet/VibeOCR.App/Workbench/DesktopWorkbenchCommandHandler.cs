@@ -63,6 +63,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       "update.check",
       "update.install",
       "diagnostics.export",
+      "diagnostics.copy",
     ],
     StringComparer.Ordinal);
 
@@ -423,6 +424,7 @@ public sealed class DesktopWorkbenchCommandHandler :
         CancelUpdateCommand => CancelUpdate(),
         CancelRuntimeForUpdateCommand => await CancelRuntimeForUpdateAsync(cancellationToken),
         ExportDiagnosticsCommand => await ExportDiagnosticsAsync(cancellationToken),
+        CopyDiagnosticsCommand => await CopyDiagnosticsAsync(cancellationToken),
         _ => throw new InvalidOperationException("Unsupported desktop workbench command."),
       };
       // A null state was already published before its background operation started.
@@ -2955,6 +2957,19 @@ public sealed class DesktopWorkbenchCommandHandler :
       Path.GetDirectoryName(resourceRoot) ?? resourceRoot,
       $"vibeocr-diagnostics-{DateTimeOffset.Now:yyyyMMdd-HHmmss}.json");
     await diagnostics.ExportAsync(destination, cancellationToken);
+    return DiagnosticsState();
+  }
+
+  /// <summary>
+  /// 复制诊断详情：复用导出的同一脱敏文档，经既有平台剪贴板接缝写入；
+  /// busy 失败走既有 clipboard_busy 问题反馈，不新增第二条剪贴板路径。
+  /// </summary>
+  private async Task<DiagnosticsWorkbenchState> CopyDiagnosticsAsync(
+    CancellationToken cancellationToken)
+  {
+    await structuredClipboard.WriteTextAsync(
+      diagnostics.BuildRedactedExportJson(),
+      cancellationToken);
     return DiagnosticsState();
   }
 
