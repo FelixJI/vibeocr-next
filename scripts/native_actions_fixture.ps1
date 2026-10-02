@@ -138,6 +138,7 @@ public static class NativeActionsFixture
     }
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr FindWindow(string className, string name);
+    public static long TaskbarHandle() => FindWindow("Shell_TrayWnd", null).ToInt64();
     public static long TrayShellRoot(long handle, int appPid, Guid iconGuid)
     {
         Rect rectangle = TrayRect(handle, appPid, iconGuid);
@@ -185,7 +186,7 @@ public static class NativeActionsFixture
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetMenuStringW(IntPtr menu, uint item, System.Text.StringBuilder text, int size, uint flags);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool GetMenuItemRect(IntPtr window, IntPtr menu, uint item, out Rect rectangle);
 
-    public static object ClickMenuItem(long handle, int appPid, string expectedLabel, bool keyboard = false)
+    public static object ClickMenuItem(long handle, int appPid, string expectedLabel)
     {
         RequireOwner(handle, appPid);
         RequireForeground(appPid);
@@ -197,7 +198,7 @@ public static class NativeActionsFixture
             throw new Win32Exception(Marshal.GetLastWin32Error(), "Owned popup menu metadata unavailable.");
         int count = GetMenuItemCount(info.Menu);
         if (count < 1 || count > 16) throw new InvalidOperationException("Unexpected owned menu item count.");
-        int selected = -1, precedingItems = 0, namedItems = 0;
+        int selected = -1;
         string selectedLabel = string.Empty;
         for (int index = 0; index < count; index++)
         {
@@ -209,22 +210,13 @@ public static class NativeActionsFixture
                 : label == expectedLabel;
             if (!match)
             {
-                if (label.Length > 0) namedItems++;
                 continue;
             }
             if (selected >= 0) throw new InvalidOperationException("Owned menu label is ambiguous.");
             selected = index;
             selectedLabel = label;
-            precedingItems = namedItems;
         }
         if (selected < 0) throw new InvalidOperationException("Expected owned menu item is missing.");
-        if (keyboard)
-        {
-            Tap(0x24); // Home selects the first enabled item; separators are not navigation stops.
-            for (int index = 0; index < precedingItems; index++) Tap(0x28);
-            Tap(0x0D);
-            return new { MenuHandle = handle, ItemCount = count, Label = selectedLabel, Keyboard = true };
-        }
         if (!GetMenuItemRect(IntPtr.Zero, info.Menu, (uint)selected, out Rect rectangle))
             throw new Win32Exception(Marshal.GetLastWin32Error(), "Owned menu item bounds unavailable.");
         int x = (rectangle.Left + rectangle.Right) / 2, y = (rectangle.Top + rectangle.Bottom) / 2;
@@ -232,7 +224,7 @@ public static class NativeActionsFixture
         if (!SetCursorPos(x, y)) throw new InvalidOperationException("Owned menu cursor move failed.");
         try { Send(new[] { Mouse(0x0002) }); }
         finally { Send(new[] { Mouse(0x0004) }); }
-        return new { MenuHandle = handle, ItemRect = rectangle, ItemCount = count, Label = expectedLabel };
+        return new { MenuHandle = handle, ItemRect = rectangle, ItemCount = count, Label = selectedLabel };
     }
     public static object TrayGone(long handle, Guid iconGuid)
     {
@@ -596,7 +588,32 @@ try {
         'restore' { [NativeActionsFixture]::Show($Handle, $AppPid, 9) }
         'tray-state' { [NativeActionsFixture]::TrayState($AppPid, $FixturePid, $Handle) | ConvertTo-Json -Compress -Depth 5 }
         'tray-expose' {
-            $target = Get-OwnedTrayTarget
+            try { $target = Get-OwnedTrayTarget }
+            catch {
+                if ($_.Exception.Message -notlike '*Owned GUID point is not on the Shell*') { throw }
+                # Hidden overflow can retain an icon rectangle while its popup is closed.
+                Add-Type -AssemblyName UIAutomationClient
+                Add-Type -AssemblyName UIAutomationTypes
+                $taskbar = [NativeActionsFixture]::TaskbarHandle()
+                if (!$taskbar) { throw 'Shell taskbar is absent' }
+                $shell = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$taskbar)
+                $conditions = [System.Windows.Automation.Condition[]]@(@('显示隐藏的图标','隐藏的图标菜单','Show hidden icons','Hidden icon menu') | ForEach-Object {
+                    [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,$_)
+                })
+                $chevrons = $shell.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.OrCondition]::new($conditions))
+                if ($chevrons.Count -ne 1 -or $chevrons[0].Current.IsOffscreen) { throw 'Visible Shell overflow control missing or ambiguous' }
+                $chevrons[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+                $deadline = [DateTime]::UtcNow.AddSeconds(3)
+                do {
+                    try { $target = Get-OwnedTrayTarget; break }
+                    catch {
+                        if ($_.Exception.Message -notlike '*Owned GUID point is not on the Shell*' -and
+                            $_.Exception.Message -notlike '*Owned GUID notification target is missing or ambiguous*') { throw }
+                        if ([DateTime]::UtcNow -ge $deadline) { throw }
+                        Start-Sleep -Milliseconds 100
+                    }
+                } while ($true)
+            }
             if ($target.IsChevron) {
                 $target.Element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
             }
@@ -627,7 +644,7 @@ try {
         'tray-gone' { [NativeActionsFixture]::TrayGone($Handle, $IconGuid) | ConvertTo-Json -Compress }
         'tray-menu-quit' { [NativeActionsFixture]::ClickMenuItem($Handle, $AppPid, '退出 VibeOCR') | ConvertTo-Json -Compress -Depth 3 }
         'tray-menu-open' { [NativeActionsFixture]::ClickMenuItem($Handle, $AppPid, '打开工作台') | ConvertTo-Json -Compress -Depth 3 }
-        'tray-menu-toggle' { [NativeActionsFixture]::ClickMenuItem($Handle, $AppPid, '悬浮工具栏', $true) | ConvertTo-Json -Compress -Depth 3 }
+        'tray-menu-toggle' { [NativeActionsFixture]::ClickMenuItem($Handle, $AppPid, '悬浮工具栏') | ConvertTo-Json -Compress -Depth 3 }
         'taskbar-created' { [NativeActionsFixture]::TaskbarCreated($Handle, $AppPid) }
         'down' { [NativeActionsFixture]::OverlayKey($AppPid, 0x28) }
         'hide' { [NativeActionsFixture]::Hide($Handle, $AppPid) }
