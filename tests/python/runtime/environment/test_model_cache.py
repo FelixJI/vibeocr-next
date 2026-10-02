@@ -616,7 +616,7 @@ if adapter == 'paddle':
     assert (root / 'config.json').is_file()
     assert (root / 'weights.bin').is_file()
 else:
-    assert version('mineru') == '4.0.2'
+    assert version('mineru') == '4.0.10'
     from vibeocr.runtime.recognition.mineru_service import MinerUService
     service = object.__new__(MinerUService)
     service._prepare_cached_models('basic', lambda: False)

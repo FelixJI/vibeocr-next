@@ -136,16 +136,15 @@ try {
         throw 'Runtime candidate smoke restore failed'
     }
     $testArguments = @(
-        'test', $project,
+        'test', '--project', $project,
         '-c', 'Release',
         '--no-restore',
         '--filter', 'FullyQualifiedName~VibeOCR.Platform.Tests.RuntimeCandidateSmokeTests',
-        '--logger', 'trx;LogFileName=runtime-candidate-smoke.trx',
-        '--logger', 'console;verbosity=normal',
+        '--report-trx', '--report-trx-filename', 'runtime-candidate-smoke.trx',
         '--results-directory', $resultsDirectory,
-        '--blame-hang',
-        '--blame-hang-timeout', "$BlameHangTimeoutMinutes`m",
-        '--blame-hang-dump-type', 'none'
+        '--hangdump',
+        '--hangdump-timeout', "$BlameHangTimeoutMinutes`m",
+        '--hangdump-type', 'none'
     )
     & dotnet @testArguments
     if ($LASTEXITCODE -ne 0) {
