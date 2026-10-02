@@ -57,7 +57,7 @@ def test_source_checkout_uses_engine_profile_not_root_dev_dependencies(
     specs = env_manager._load_dep_specs()
 
     assert specs["paddleocr"] == "paddleocr[doc-parser]>=3.7.0"
-    assert specs["mineru"] == "mineru==4.0.2"
+    assert specs["mineru"] == "mineru==4.0.10"
     assert (
         env_config.validate_dep_check_consistency(
             runtime_layout.resolve_app_paths().install_root

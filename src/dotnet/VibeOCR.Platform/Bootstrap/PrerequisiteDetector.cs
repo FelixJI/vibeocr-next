@@ -35,7 +35,9 @@ public sealed record PrerequisiteReport(IReadOnlyList<PrerequisiteStatus> Items)
 public sealed class PrerequisiteDetector
 {
     public const string MinimumDotNetDesktopVersion = "10.0.0";
-    public const string MinimumWindowsAppRuntimeVersion = "2.2.0";
+    // Framework-dependent Windows App SDK pin (Directory.Packages.props
+    // Microsoft.WindowsAppSDK); the app cannot start on an older runtime.
+    public const string MinimumWindowsAppRuntimeVersion = "2.5.1";
     private readonly Func<PortableLayout, PrerequisiteSnapshot> _capture;
 
     public PrerequisiteDetector()
@@ -130,13 +132,21 @@ internal static class WindowsPrerequisiteProbe
         try
         {
             var manager = new PackageManager();
+            // Multiple runtime packages (older majors, CBS bootstrappers) can
+            // coexist; the highest compatible one decides readiness so an old
+            // install cannot shadow the version the app actually needs.
             Package? package = manager.FindPackagesForUser(string.Empty)
                 .Where(item => IsCompatibleWindowsAppRuntimePackage(
                     item.Id.Name,
                     item.Id.Version.Major,
                     item.Id.Version.Minor))
                 .Where(item => item.Id.Architecture is ProcessorArchitecture.X64 or ProcessorArchitecture.Neutral)
-                .FirstOrDefault(item => item.Status.VerifyIsOK());
+                .Where(item => item.Status.VerifyIsOK())
+                .OrderByDescending(item => item.Id.Version.Major)
+                .ThenByDescending(item => item.Id.Version.Minor)
+                .ThenByDescending(item => item.Id.Version.Build)
+                .ThenByDescending(item => item.Id.Version.Revision)
+                .FirstOrDefault();
             if (package is null)
             {
                 return null;
@@ -151,13 +161,18 @@ internal static class WindowsPrerequisiteProbe
         }
     }
 
+    private static readonly Version MinimumWindowsAppRuntimePackageBand =
+        Version.Parse(PrerequisiteDetector.MinimumWindowsAppRuntimeVersion);
+
     internal static bool IsCompatibleWindowsAppRuntimePackage(
         string name,
         ushort major,
         ushort minor) =>
         (name.Equals("Microsoft.WindowsAppRuntime.2", StringComparison.OrdinalIgnoreCase) ||
             name.Equals("Microsoft.WindowsAppRuntime.CBS.2", StringComparison.OrdinalIgnoreCase)) &&
-        (major > 2 || (major == 2 && minor >= 2));
+        (major > MinimumWindowsAppRuntimePackageBand.Major ||
+            (major == MinimumWindowsAppRuntimePackageBand.Major &&
+                minor >= MinimumWindowsAppRuntimePackageBand.Minor));
 
     private static string? FindWebView2Version()
     {

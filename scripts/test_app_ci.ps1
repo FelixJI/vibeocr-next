@@ -14,17 +14,17 @@ if (Test-Path -LiteralPath $results) {
 }
 New-Item -ItemType Directory -Path $results -Force | Out-Null
 
+# .NET 10 dotnet test runs the Microsoft.Testing.Platform (MTP) experience
+# (global.json "test" runner); hang protection and TRX reporting use the
+# native MTP options without the legacy VSTest argument separator.
 $arguments = @(
     'test',
-    $project,
+    '--project', $project,
     '-c', 'Release',
     '--no-restore',
-    '--blame-hang',
-    '--blame-hang-timeout', '2m',
-    '--blame-hang-dump-type', 'none',
-    '--logger', 'console;verbosity=detailed',
-    '--logger', 'trx;LogFileName=app-tests.trx',
-    '--results-directory', $results
+    '--results-directory', $results,
+    '--hangdump', '--hangdump-timeout', '2m', '--hangdump-type', 'none',
+    '--report-trx', '--report-trx-filename', 'app-tests.trx'
 )
 if (-not [string]::IsNullOrWhiteSpace($Filter)) {
     $arguments += @('--filter', $Filter)

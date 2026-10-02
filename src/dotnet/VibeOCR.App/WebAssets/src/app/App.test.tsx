@@ -3024,7 +3024,7 @@ describe("AppShell", () => {
             recipe: "rapidocr+mineru-cpu",
             sourceIds: ["tuna-pypi"],
             requestedSourceIds: null,
-            dependencies: ["rapidocr==3.9.2", "mineru==4.0.2"],
+            dependencies: ["rapidocr==3.9.2", "mineru==4.0.10"],
           },
         },
       },

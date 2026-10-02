@@ -72,7 +72,7 @@ internal static class Program
         : new string?[]
         {
           HasDotNetDesktop10() ? null : ".NET Desktop Runtime 10 x64",
-          HasWindowsAppRuntime22() ? null : "Windows App Runtime 2.2 x64",
+          HasWindowsAppRuntime() ? null : "Windows App Runtime 2.5 x64",
           HasWebView2(layout) ? null : "Microsoft Edge WebView2 Evergreen Runtime",
           HasBoundRuntimeAssets(layout) ? null : "VibeOCR bound Runtime assets",
         })
@@ -152,12 +152,17 @@ internal static class Program
         .Any(value => Version.TryParse(value, out Version version) && version.Major >= 10);
   }
 
-  private static bool HasWindowsAppRuntime22()
+  // Keep in sync with VibeOCR.Platform's PrerequisiteDetector.MinimumWindowsAppRuntimeVersion
+  // (the framework-dependent WindowsAppSDK pin); older runtimes must not satisfy the bootstrapper.
+  private const ushort MinimumWindowsAppRuntimeMajor = 2;
+  private const ushort MinimumWindowsAppRuntimeMinor = 5;
+
+  private static bool HasWindowsAppRuntime()
   {
     try
     {
       return new PackageManager().FindPackagesForUser(string.Empty).Any(package =>
-          IsWindowsAppRuntime22(package.Id.Name, package.Id.Version) &&
+          IsWindowsAppRuntimeSatisfied(package.Id.Name, package.Id.Version) &&
           (package.Id.Architecture == ProcessorArchitecture.X64 ||
               package.Id.Architecture == ProcessorArchitecture.Neutral) &&
           package.Status.VerifyIsOK());
@@ -168,10 +173,12 @@ internal static class Program
     }
   }
 
-  private static bool IsWindowsAppRuntime22(string name, PackageVersion version) =>
+  private static bool IsWindowsAppRuntimeSatisfied(string name, PackageVersion version) =>
         (name.Equals("Microsoft.WindowsAppRuntime.2", StringComparison.OrdinalIgnoreCase) ||
             name.Equals("Microsoft.WindowsAppRuntime.CBS.2", StringComparison.OrdinalIgnoreCase)) &&
-      (version.Major > 2 || (version.Major == 2 && version.Minor >= 2));
+      (version.Major > MinimumWindowsAppRuntimeMajor ||
+          (version.Major == MinimumWindowsAppRuntimeMajor &&
+              version.Minor >= MinimumWindowsAppRuntimeMinor));
 
   private static bool HasWebView2(ResolvedProductLayout layout)
   {

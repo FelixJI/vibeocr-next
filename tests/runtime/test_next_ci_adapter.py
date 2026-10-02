@@ -814,14 +814,12 @@ def test_platform_e2e_has_a_bounded_hang_diagnostic() -> None:
         command for command in config["ci"]["e2e"] if "platform-tests" in command
     )
 
-    assert platform_test[-7:] == [
-        "--blame-hang",
-        "--blame-hang-timeout",
+    assert platform_test[-5:] == [
+        "--hangdump",
+        "--hangdump-timeout",
         "2m",
-        "--blame-hang-dump-type",
-        "none",
-        "--logger",
-        "console;verbosity=detailed",
+        "--hangdump-type",
+        "None",
     ]
 
 

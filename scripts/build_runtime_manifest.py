@@ -390,13 +390,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--paddle-cu126-lock", type=Path, required=True)
     parser.add_argument("--mineru-cpu-lock", type=Path, required=True)
     parser.add_argument("--python-archive", type=Path, required=True)
-    parser.add_argument("--python-version", default="3.13.15")
+    parser.add_argument("--python-version", default="3.13.16")
     parser.add_argument(
         "--python-source-url",
         default=(
             "https://github.com/astral-sh/python-build-standalone/releases/"
-            "download/20260807/"
-            "cpython-3.13.15+20260807-x86_64-pc-windows-msvc"
+            "download/20261001/"
+            "cpython-3.13.16+20261001-x86_64-pc-windows-msvc"
             "-install_only.tar.gz"
         ),
     )
