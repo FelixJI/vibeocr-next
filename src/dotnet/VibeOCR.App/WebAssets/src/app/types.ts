@@ -53,6 +53,8 @@ export type AppActionType =
   | "pdf.selectPages"
   | "pdf.setWindow"
   | "qrcode.generate"
+  | "qrcode.decodeCurrent"
+  | "qrcode.copyImage"
   | "qrcode.decode"
   | "qrcode.decodeClipboard"
   | "qrcode.cancel"
@@ -70,6 +72,7 @@ export type AppActionType =
   | "settings.switchEnvironment"
   | "settings.deleteEnvironment"
   | "settings.repairEmptyEnvironment"
+  | "settings.findCompatibleEnvironment"
   | "settings.setStartup"
   | "settings.setActionHotkey"
   | "settings.resetActionHotkey"
@@ -94,7 +97,8 @@ export type AppActionType =
   | "update.download"
   | "update.cancel"
   | "update.cancelRuntimeMaintenance"
-  | "diagnostics.export";
+  | "diagnostics.export"
+  | "diagnostics.copy";
 
 export interface AppAction {
   readonly type: AppActionType;

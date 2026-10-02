@@ -111,11 +111,6 @@ input {
   background: var(--colorBrandBackground);
   content: "";
 }
-.navigation-footnote {
-  padding: 2px 8px 0;
-  color: var(--colorNeutralForeground3);
-  font-size: 12px;
-}
 .shell-content {
   display: grid;
   min-width: 0;
@@ -312,13 +307,42 @@ input {
   gap: 14px;
 }
 .queue-summary,
-.health-row,
-.setting-row {
+.health-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   font-size: 13px;
+}
+/* 统一设置行：左侧说明区自然伸展，控件/操作稳定靠右；说明变多行时
+   靠右的按钮列不漂移。操作按钮统一收进 .setting-actions 簇。 */
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 36px;
+  font-size: 13px;
+}
+.setting-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+/* 快捷操作行：说明 | 键位输入 | 动作区 三列；动作区定宽并从左缘对齐，
+   有无“恢复默认”的行应用/禁用列起点一致（AC5，对齐由 e2e 几何断言
+   实测，不以本注释为证据）；录入与注册语义不变。 */
+.hotkey-edit-row {
+  display: grid;
+  align-items: center;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 220px) 328px;
+  gap: 8px;
+}
+.hotkey-edit-row .setting-actions {
+  justify-self: start;
+  margin-left: 0;
 }
 .batch-scheduling-note {
   margin: 8px 0 0;
@@ -463,12 +487,42 @@ input {
   line-height: 18px;
 }
 .settings-grid,
-.about-grid,
 .diagnostics-grid {
   display: grid;
   gap: 14px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-content: start;
+}
+.diagnostics-health-panel {
+  grid-column: 1 / -1;
+}
+.diagnostics-tech-details {
+  display: grid;
+  gap: 10px;
+}
+.diagnostics-tech-details > summary {
+  cursor: pointer;
+  user-select: none;
+  color: var(--colorNeutralForeground2);
+  font-size: 12px;
+}
+.diagnostics-tech-details h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.diagnostics-tech-details pre {
+  min-width: 0;
+  max-height: 240px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--colorNeutralStroke2);
+  border-radius: 6px;
+  background: var(--colorNeutralBackground2);
+  font-size: 12px;
 }
 .settings-app-panel,
 .settings-shortcuts-panel,
@@ -504,33 +558,6 @@ input {
   color: var(--colorNeutralForeground3);
   font-size: 12px;
 }
-.bundled-capabilities {
-  display: grid;
-  gap: 8px;
-  padding: 10px;
-  border: 1px solid var(--colorNeutralStroke2);
-  border-radius: 6px;
-  background: var(--colorNeutralBackground2);
-}
-.bundled-capabilities-title {
-  color: var(--colorNeutralForeground3);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-}
-.bundled-capability-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-.bundled-capability-row strong {
-  font-size: 13px;
-  font-weight: 600;
-}
-.setting-row {
-  min-height: 36px;
-}
 .setting-row > span {
   color: var(--colorNeutralForeground3);
   font-size: 12px;
@@ -538,6 +565,31 @@ input {
 .runtime-summary {
   display: grid;
   gap: 10px;
+}
+.environment-recommendation {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--colorNeutralStroke2);
+  border-radius: 6px;
+  background: var(--colorNeutralBackground2);
+}
+.environment-recommendation .setting-row {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+.environment-recommendation details {
+  overflow-wrap: anywhere;
+}
+.environment-hardware-note {
+  color: var(--colorNeutralForeground3);
+  font-size: 12px;
+}
+.managed-environment-advanced > summary {
+  cursor: pointer;
+  color: var(--colorNeutralForeground3);
+  font-size: 12px;
 }
 .managed-environments {
   display: grid;
@@ -747,8 +799,7 @@ select {
     justify-content: center;
   }
   .brand-lockup > :last-child,
-  .navigation-link span,
-  .navigation-footnote {
+  .navigation-link span {
     display: none;
   }
   .navigation-link {
@@ -759,7 +810,6 @@ select {
   .collection-workspace,
   .qr-workspace,
   .settings-grid,
-  .about-grid,
   .diagnostics-grid {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -767,7 +817,9 @@ select {
   .settings-shortcuts-panel,
   .settings-toolbar-panel,
   .settings-runtime-panel,
-  .settings-download-panel {
+  .settings-mineru-panel,
+  .settings-download-panel,
+  .diagnostics-health-panel {
     grid-column: auto;
   }
   .collection-workspace .work-panel:nth-child(2),
@@ -802,9 +854,16 @@ select {
     row-gap: 4px;
   }
   .setting-row,
-  .bundled-capability-row,
   .health-row {
     flex-wrap: wrap;
+  }
+  /* 窄窗口下快捷操作行降为两列，按钮簇整行换行，仍保持同一对齐规格。 */
+  .hotkey-edit-row {
+    grid-template-columns: minmax(0, 1fr) minmax(140px, 200px);
+  }
+  .hotkey-edit-row .setting-actions {
+    grid-column: 1 / -1;
+    margin-left: 0;
   }
   .app-toolbar .toolbar-context,
   .app-toolbar > [role="separator"] {

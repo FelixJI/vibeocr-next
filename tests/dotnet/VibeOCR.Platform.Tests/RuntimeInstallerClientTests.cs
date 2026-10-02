@@ -35,7 +35,8 @@ public sealed class RuntimeInstallerClientTests
                 """
                 {"protocol_version":2,"response_kind":"environment","action":"list","result":{
                   "active_id":null,"active_revision":0,"environments":[],
-                  "recipes":[{"id":"rapidocr-cpu","display_name":"RapidOCR · CPU","target_device":"cpu"}]
+                  "recipes":[{"id":"rapidocr-cpu","display_name":"RapidOCR · CPU","target_device":"cpu"}],
+                  "hardware":{"nvidia_driver":{"status":"unsupported","reason_code":"nvidia_driver_incompatible","driver_version":"527.00"}}
                 }}
                 """, ""));
         var client = new RuntimeInstallerClient(Configuration(), runner);
@@ -64,7 +65,24 @@ public sealed class RuntimeInstallerClientTests
 
         ManagedEnvironmentList list = await client.ListEnvironmentsAsync(TestContext.Current.CancellationToken);
         Assert.Equal("rapidocr-cpu", Assert.Single(list.Recipes!).Id);
+        // 硬件真值只由 Runtime 探测：宿主消费投影，不自行检测。
+        Assert.Equal("unsupported", list.Hardware?.NvidiaDriver?.Status);
+        Assert.Equal("nvidia_driver_incompatible", list.Hardware?.NvidiaDriver?.ReasonCode);
+        Assert.Equal("527.00", list.Hardware?.NvidiaDriver?.DriverVersion);
         Assert.Equal("list", Request(runner.StartInfos[1]).GetProperty("action").GetString());
+    }
+
+    [Fact]
+    public async Task NamedEnvironmentListTreatsMissingHardwareAsUnknown()
+    {
+        var client = new RuntimeInstallerClient(Configuration(), new StubRunner(
+            new RuntimeInstallerProcessResult(0,
+                """{"protocol_version":2,"response_kind":"environment","action":"list","result":{"active_id":null,"active_revision":0,"environments":[],"recipes":[]}}""", "")));
+
+        ManagedEnvironmentList list = await client.ListEnvironmentsAsync(TestContext.Current.CancellationToken);
+
+        // 旧 Runtime payload 不含 hardware：按未探测（unknown）处理，不臆造可用性。
+        Assert.Null(list.Hardware);
     }
 
     [Fact]

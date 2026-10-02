@@ -25,6 +25,9 @@ public sealed class ManagedEnvironmentSettings(
     public event Action? StateChanged;
     public ManagedEnvironmentList? Snapshot { get; private set; }
     public ManagedEnvironmentPlan? Plan { get; private set; }
+    /// <summary>当前选择配方的兼容查询结果；仅由 FindCompatibleAsync 写入，
+    /// 任何环境变更/失效都清空，防止旧结果覆盖新选择。</summary>
+    public ManagedEnvironmentQueryResult? Compatibility { get; private set; }
     public bool IsBusy { get; private set; }
     public bool CanCancelInstall => Volatile.Read(ref activeInstall) is not null;
     public string Status { get; private set; } = "尚未读取运行环境";
@@ -48,12 +51,14 @@ public sealed class ManagedEnvironmentSettings(
     {
         await manager.CreateEnvironmentAsync(name, cancellationToken);
         Plan = null;
+        Compatibility = null;
         await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: false);
         Status = "空环境已创建；未安装识别依赖。";
     }, cancellationToken);
 
     public Task PreviewAsync(string environmentId, string recipe, string? sourceId, CancellationToken cancellationToken) => RunAsync(async () =>
     {
+        await EnsureCatalogAsync(recipe, cancellationToken);
         Plan = null;
         Plan = await manager.PreviewEnvironmentInstallAsync(
             environmentId, recipe,
@@ -63,6 +68,39 @@ public sealed class ManagedEnvironmentSettings(
             : string.Join("、", Plan.SourceIds);
         Status = $"已预览 {Plan.Recipe} 锁定配方；来源：{sourceSummary}。确认后才会安装。";
     }, cancellationToken);
+
+    /// <summary>
+    /// 推荐配置选择：按 Runtime 权威目录核验配方后只读查询可直接复用的
+    /// 已安装环境；不创建、不安装、不切换，也不占用运行中的任务。
+    /// </summary>
+    public Task FindCompatibleAsync(string recipe, CancellationToken cancellationToken) => RunAsync(async () =>
+    {
+        await EnsureCatalogAsync(recipe, cancellationToken);
+        Compatibility = await manager.FindCompatibleEnvironmentAsync(recipe, cancellationToken);
+        Status = Compatibility.Selected is { } selected
+            ? $"{recipe} 有可直接复用的环境（{SelectionSummary(selected)}）；切换前不会安装任何内容。"
+            : $"{recipe} 暂无可直接复用的环境；可自动创建空环境并预览依赖，确认后才会安装。";
+    }, cancellationToken);
+
+    private static string SelectionSummary(ManagedEnvironmentSelection selection) =>
+        selection.SelectionReason == "active_environment"
+            ? "当前活动环境"
+            : "按稳定顺序选中";
+
+    /// <summary>
+    /// 宿主对 Runtime 目录的核验：桥的配方 id 协议类型不是目录真值，未知
+    /// 配方在这里 fail closed 拒绝（Runtime 端 _recipe 仍会再拒绝一次）。
+    /// 快照尚未加载时先只读补一次列表，不依赖前端刷新时序。
+    /// </summary>
+    private async Task EnsureCatalogAsync(string recipe, CancellationToken cancellationToken)
+    {
+        if (Snapshot?.Recipes is not { Count: > 0 })
+            await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: false);
+        if (Snapshot?.Recipes is not { Count: > 0 } recipes ||
+            recipes.All(item => !string.Equals(item.Id, recipe, StringComparison.Ordinal)))
+            throw new InvalidOperationException(
+                "配方不在当前 Runtime 目录中，请刷新后重试。");
+    }
 
     public Task InstallAsync(string planId, string? sourceId, CancellationToken cancellationToken) => RunAsync(async () =>
     {
@@ -74,6 +112,7 @@ public sealed class ManagedEnvironmentSettings(
             (sourceId is not null &&
              (plan.RequestedSourceIds?.Count != 1 || plan.RequestedSourceIds[0] != sourceId)))
             throw new InvalidOperationException("安装计划已变化，请重新预览。");
+        Compatibility = null;
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         using IDisposable lease = productMaintenance.Acquire(
             ProductMaintenanceOwner.RuntimeMaintenance, linked.Cancel);
@@ -134,6 +173,7 @@ public sealed class ManagedEnvironmentSettings(
         Snapshot = updated;
         // 来源配置变化使旧预览失效（confirm 时管理器也会拒绝旧计划）。
         Plan = null;
+        Compatibility = null;
         await ApplyRunningEvidenceAsync(cancellationToken);
         bool touchesModel = modelSourceId is not null;
         bool targetRunning = environmentId is not null &&
@@ -226,6 +266,8 @@ public sealed class ManagedEnvironmentSettings(
     public void InvalidatePlan()
     {
         Plan = null;
+        // 与预览同一失效入口：选择变化后旧兼容查询结果不得继续冒充新选择。
+        Compatibility = null;
         StateChanged?.Invoke();
     }
 
@@ -233,6 +275,7 @@ public sealed class ManagedEnvironmentSettings(
     {
         await activate(environmentId, cancellationToken);
         Plan = null;
+        Compatibility = null;
         await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: true);
         Status = Snapshot?.ActiveId == environmentId
             ? "环境已切换。模型与引擎状态以目标服务检查结果为准。"
@@ -368,6 +411,7 @@ public sealed class ManagedEnvironmentSettings(
     {
         await manager.DeleteEnvironmentAsync(environmentId, cancellationToken);
         Plan = null;
+        Compatibility = null;
         await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: false);
         Status = "环境已删除。";
     }, cancellationToken);
@@ -376,6 +420,7 @@ public sealed class ManagedEnvironmentSettings(
     {
         await manager.RepairEmptyEnvironmentAsync(environmentId, cancellationToken);
         Plan = null;
+        Compatibility = null;
         await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: false);
         Status = "空环境解释器已修复；仍未安装识别依赖。";
     }, cancellationToken);

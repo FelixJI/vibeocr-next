@@ -27,6 +27,7 @@ from vibeocr.runtime.environments.runtime_installer import (
     _extract_python_archive,
     _run_install_command,
     main,
+    probe_nvidia_driver,
 )
 from vibeocr.runtime.environments.runtime_layout import (
     LayoutError,
@@ -1346,6 +1347,85 @@ def test_recipe_catalog_projects_manifest_bound_scopes(tmp_path: Path) -> None:
         assert entry[recipe]["python_origin"] == plan["python_origin"]
 
 
+@pytest.mark.parametrize(
+    "stdout,returncode,raises,status,reason,version",
+    [
+        ("552.44\n", 0, None, "ok", None, "552.44"),
+        ("610.88\n545.92\n", 0, None, "ok", None, "610.88"),
+        ("527.00\n", 0, None, "unsupported", "nvidia_driver_incompatible", "527.00"),
+        ("no devices\n", 1, None, "unsupported", "nvidia_driver_unavailable", None),
+        ("garbage\n", 0, None, "unsupported", "nvidia_driver_unavailable", None),
+        (
+            "",
+            0,
+            FileNotFoundError("nvidia-smi"),
+            "unsupported",
+            "nvidia_driver_unavailable",
+            None,
+        ),
+        (
+            "",
+            0,
+            subprocess.TimeoutExpired(cmd="nvidia-smi", timeout=10),
+            "unknown",
+            None,
+            None,
+        ),
+    ],
+)
+def test_probe_nvidia_driver_reports_honest_hardware_truth(
+    monkeypatch: pytest.MonkeyPatch,
+    stdout: str,
+    returncode: int,
+    raises: Exception | None,
+    status: str,
+    reason: str | None,
+    version: str | None,
+) -> None:
+    from types import SimpleNamespace
+
+    def fake_run(*_args: object, **_kwargs: object) -> object:
+        if raises is not None:
+            raise raises
+        return SimpleNamespace(returncode=returncode, stdout=stdout)
+
+    monkeypatch.setattr(
+        "vibeocr.runtime.environments.runtime_installer.subprocess.run", fake_run
+    )
+    assert probe_nvidia_driver() == {
+        "status": status,
+        "reason_code": reason,
+        "driver_version": version,
+    }
+
+
+def test_managed_environment_list_projects_runtime_hardware_truth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+
+    def missing_driver(*_args: object, **_kwargs: object) -> object:
+        raise FileNotFoundError("nvidia-smi")
+
+    monkeypatch.setattr(
+        "vibeocr.runtime.environments.runtime_installer.subprocess.run",
+        missing_driver,
+    )
+    assert manager.list()["hardware"] == {
+        "nvidia_driver": {
+            "status": "unsupported",
+            "reason_code": "nvidia_driver_unavailable",
+            "driver_version": None,
+        }
+    }
+
+
 def test_find_compatible_prefers_active_then_stable_id_and_reports_reasons(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1982,9 +2062,18 @@ def test_standalone_mineru_recipe_excludes_rapidocr(tmp_path: Path) -> None:
 
 
 def test_frozen_manager_exposes_named_environment_list(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manifest, component = _release(tmp_path / "release")
+
+    def nvidia_ok(*_args: object, **_kwargs: object) -> object:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(returncode=0, stdout="552.44\n")
+
+    monkeypatch.setattr(
+        "vibeocr.runtime.environments.runtime_installer.subprocess.run", nvidia_ok
+    )
     request = {
         "protocol_version": 2,
         "request_kind": "environment",
@@ -2001,6 +2090,14 @@ def test_frozen_manager_exposes_named_environment_list(
         "rapidocr+mineru-cpu",
         "rapidocr+mineru-cuda",
     ]
+    # 硬件投影与安装预检同一真相源：只读探测，不安装、不缓存。
+    assert response["result"].pop("hardware") == {
+        "nvidia_driver": {
+            "status": "ok",
+            "reason_code": None,
+            "driver_version": "552.44",
+        }
+    }
     assert response["result"] == {
         "active_id": None,
         "active_revision": 0,
