@@ -508,8 +508,12 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
         previewControls = [];
       }
     }
+    // WinUI can route stale pointer events from another window to the overlay.
+    bool IsPickerPointer(PointerRoutedEventArgs args) =>
+      args.OriginalSource is UIElement source && source.XamlRoot == root.XamlRoot;
     void CancelPointer(PointerRoutedEventArgs args)
     {
+      if (!IsPickerPointer(args)) return;
       if (activePointerId != args.Pointer.PointerId) return;
       activePointerId = null;
       session.CancelDrag();
@@ -517,6 +521,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     }
     canvas.PointerPressed += (_, args) =>
     {
+      if (!IsPickerPointer(args)) return;
       if (!args.GetCurrentPoint(canvas).Properties.IsLeftButtonPressed || args.Handled ||
           confirming || completion.Task.IsCompleted || activePointerId is not null) return;
       // Child buttons and the help panel must not start or confirm a selection.
@@ -541,11 +546,13 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     };
     root.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, args) =>
     {
+      if (!IsPickerPointer(args)) return;
       if (!args.GetCurrentPoint(canvas).Properties.IsRightButtonPressed) return;
       Back(); Render(); args.Handled = true;
     }), true);
     canvas.PointerMoved += (_, args) =>
     {
+      if (!IsPickerPointer(args)) return;
       if (activePointerId is { } id && id != args.Pointer.PointerId) return;
       Windows.Foundation.Point point = args.GetCurrentPoint(canvas).Position;
       lastPoint = point;
@@ -555,6 +562,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     };
     canvas.PointerReleased += (_, args) =>
     {
+      if (!IsPickerPointer(args)) return;
       if (activePointerId != args.Pointer.PointerId ||
           args.GetCurrentPoint(canvas).Properties.IsLeftButtonPressed) return;
       Windows.Foundation.Point point = args.GetCurrentPoint(canvas).Position;

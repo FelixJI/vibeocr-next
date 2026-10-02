@@ -312,6 +312,8 @@ async function configure(app, evidence) {
   }));
   evidence.webviewBeforeEscape = await page.evaluate(() => ({
     focused: document.hasFocus(), visibility: document.visibilityState,
+    activeElement: document.activeElement?.id,
+    events: window.__hotkeyRecordingEvents,
   }));
   await native('escape', { AppPid: app.child.pid });
   evidence.afterEscape = JSON.parse(await native('probe', {

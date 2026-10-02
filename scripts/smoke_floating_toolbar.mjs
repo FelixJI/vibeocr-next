@@ -299,6 +299,15 @@ try {
     'Toolbar hid after the external-foreground drag.');
   evidence.externalDrag = { cursor: externalDrag, clientFrom: bar.client, clientTo: externalClient,
     foreground: externalForeground };
+  // captureThroughHotkey intentionally leaves the originally hidden main window
+  // hidden. Restore only this owned fixture window before cleanup UI actions.
+  for (const action of ['raise', 'lower']) {
+    await exec('pwsh', ['-NoProfile', '-NonInteractive', '-File',
+      path.join(scriptDir, 'scroll_capture_fixture.ps1'), '-Action', action,
+      '-FixturePid', String(app.child.pid), '-Handle', String(app.main.Handle)],
+    { timeout: 15000, windowsHide: true });
+  }
+  assert((await windows(app.child.pid)).some((w) => w.Handle === app.main.Handle && w.Visible));
   await openSettings(app.page);
   await setCheckbox(app.page, '启用悬浮工具栏', false);
   await toolbarStatus(app.page, '已关闭');
@@ -312,6 +321,7 @@ try {
     evidence.messages = await app.page.evaluate(() => window.__toolbarSmokeMessages).catch(() => null);
     evidence.requests = await app.page.evaluate(() => window.__toolbarSmokeRequests).catch(() => null);
     evidence.pageText = await app.page.locator('body').innerText().catch(() => null);
+    evidence.hotkeyRecordingEvents = await app.page.evaluate(() => window.__hotkeyRecordingEvents).catch(() => null);
     await app.page.screenshot({ path: path.join(work, 'toolbar-failure.png') }).catch(() => {});
     if (fs.existsSync(path.join(work, 'toolbar-failure.png'))) evidence.screenshots.push(path.join(work, 'toolbar-failure.png'));
   }
