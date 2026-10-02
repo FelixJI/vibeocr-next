@@ -35,12 +35,25 @@ export interface Mark {
   readonly ordinal?: number;
 }
 
+/** 已应用的本地像素修补：原图（未旋转）像素空间的整数矩形。
+ * 像素数据保存在编辑器侧补丁存储（按 id 索引），不进入历史序列化；
+ * 矩形属于图像本体空间，旋转/裁剪/缩放等视图或输出变换不改变它。 */
+export interface PixelPatch {
+  readonly id: number;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
 export interface EditorState {
   readonly rotation: number;
   readonly marks: readonly Mark[];
   readonly crop?: { readonly start: Point; readonly end: Point };
   /** 最终输出像素尺寸；缺省为旋转/裁剪后的原始尺寸，随历史可撤销。 */
   readonly resize?: CanvasSize;
+  /** 已应用（明确提交）的像素修补；每次应用恰好追加一项，随历史撤销/重做。 */
+  readonly patches?: readonly PixelPatch[];
 }
 
 export interface CanvasSize {
@@ -127,6 +140,8 @@ export function rotateEditorState(
       : {}),
     // 指定输出尺寸是绝对目标：旋转内容不改变用户设置的输出宽高。
     ...(state.resize ? { resize: state.resize } : {}),
+    // 像素修补固定在原图（未旋转）空间：旋转视图不需要重映射补丁坐标。
+    ...(state.patches ? { patches: state.patches } : {}),
   };
 }
 
