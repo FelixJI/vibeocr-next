@@ -656,13 +656,14 @@ public sealed partial class MainWindow : Window
     WorkbenchAnnotationFile image,
     Guid sessionId,
     long revision,
-    RecognitionTextLayerState? layer)
+    RecognitionTextLayerState? layer,
+    IReadOnlyList<WorkbenchExclusionBox> excludeBoxes)
   {
     if (pinnedImages.Count >= 4)
     {
       throw new InvalidOperationException("最多同时打开四张贴图，请先关闭一张。");
     }
-    var pinned = new PinnedImageWindow(image, sessionId, revision, layer,
+    var pinned = new PinnedImageWindow(image, sessionId, revision, layer, excludeBoxes,
       () => PreparePinTextAsync(sessionId, revision, image.Path),
       () => supervisorInstanceId?.Invoke());
     pinned.Closed += closed =>

@@ -81,7 +81,32 @@ public sealed record SaveScreenshotImageCommand(
 public sealed record PinScreenshotImageCommand(
     string ResourceUri,
     Guid SessionId,
-    long Revision) : WorkbenchCommand;
+    long Revision,
+    IReadOnlyList<WorkbenchExclusionBox> ExcludeBoxes) : WorkbenchCommand;
+
+/// <summary>
+/// [0,1000] normalized recognition-exclusion rectangle supplied with a pin
+/// request. The host drops any text-layer line whose box has positive-area
+/// overlap with any rectangle, mirroring the workbench in-place layer filter,
+/// so pinned selection cannot resurrect boundary-straddling masked lines.
+/// </summary>
+public sealed record WorkbenchExclusionBox(
+    double X,
+    double Y,
+    double Width,
+    double Height)
+{
+  /// <summary>
+  /// 行框与排除矩形是否正面积相交（仅贴边不算）：同一判定供原位层与
+  /// 贴图层消费，避免两份语义漂移。
+  /// </summary>
+  public static bool LineIntersectsBox(
+    RecognitionTextLayerLine line, WorkbenchExclusionBox box) =>
+    Math.Max(line.X1, line.X2) > box.X &&
+    Math.Min(line.X1, line.X2) < box.X + box.Width &&
+    Math.Max(line.Y1, line.Y2) > box.Y &&
+    Math.Min(line.Y1, line.Y2) < box.Y + box.Height;
+}
 
 /// <summary>
 /// Explicit recognition of the session's current final PNG (uploaded through

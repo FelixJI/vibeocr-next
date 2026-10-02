@@ -1144,6 +1144,29 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
               截图取字
             </CapabilityGate>
           )}
+          {/* 先编辑后识别：复用 imageEdit 输入链（宿主创建同一截图会话与修订），
+           * 载入后在共享画布中标注/屏蔽，再用“识别当前图”显式提交掩膜输入。
+           * 保留上方直接识别入口；不新增协议，仅既有命令。 */}
+          <CapabilityGate
+            appearance="secondary"
+            capability="recognition.file"
+            capabilities={viewState.capabilities}
+            action={{ type: "imageEdit.selectImage" }}
+            actions={actions}
+            icon={<ImagePlus aria-hidden="true" size={16} />}
+          >
+            选图编辑
+          </CapabilityGate>
+          <CapabilityGate
+            appearance="secondary"
+            capability="recognition.clipboard"
+            capabilities={viewState.capabilities}
+            action={{ type: "imageEdit.readClipboard" }}
+            actions={actions}
+            icon={<ClipboardPaste aria-hidden="true" size={16} />}
+          >
+            粘贴编辑
+          </CapabilityGate>
           <CapabilityGate
             capability="recognition.capture"
             capabilities={viewState.capabilities}

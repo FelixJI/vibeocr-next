@@ -206,7 +206,8 @@ public sealed class ScreenshotSessionWorkbenchTests
     Func<bool>? inferenceAttached = null,
     Func<string?>? supervisorInstanceId = null,
     Func<RecognitionViewModel>? textLayerRecognitionFactory = null,
-    Action<WorkbenchAnnotationFile, Guid, long, RecognitionTextLayerState?>? pinScreenshot = null) => new(
+    Action<WorkbenchAnnotationFile, Guid, long, RecognitionTextLayerState?,
+      IReadOnlyList<WorkbenchExclusionBox>>? pinScreenshot = null) => new(
       () => recognition,
       static () => throw new InvalidOperationException(),
       static () => throw new InvalidOperationException(),
@@ -228,6 +229,144 @@ public sealed class ScreenshotSessionWorkbenchTests
       pinScreenshot);
 
   [Fact]
+  public void BridgeParsesPinExclusionBoxesWithLegacyShapeAndStrictValidation()
+  {
+    Guid sessionId = Guid.NewGuid();
+    string ResourceArguments(string? boxesJson) =>
+      "{\"resourceUri\":\"https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef\"," +
+      $"\"sessionId\":\"{sessionId}\",\"revision\":0{boxesJson}}}";
+    WorkbenchCommandEnvelope Parse(string argumentsJson) =>
+      VibeOCR.App.Web.WorkbenchBridgeCodec.ParseCommand(
+        JsonSerializer.Serialize(new
+        {
+          version = 2,
+          kind = "request",
+          id = Guid.NewGuid(),
+          type = "app.command",
+          payload = new
+          {
+            sessionId,
+            command = new
+            {
+              scope = "recognition",
+              action = "pinScreenshotImage",
+              arguments = JsonDocument.Parse(argumentsJson).RootElement,
+            },
+          },
+        }),
+        sessionId);
+
+    // 真实 ParseCommand：带合法归一化盒子的新形状。
+    PinScreenshotImageCommand parsed = Assert.IsType<PinScreenshotImageCommand>(
+      Parse(ResourceArguments(
+        ""","excludeBoxes":[{"x":1.5,"y":2,"width":3,"height":4}]"""))
+      .Command);
+    WorkbenchExclusionBox box = Assert.Single(parsed.ExcludeBoxes);
+    Assert.Equal(new WorkbenchExclusionBox(1.5, 2, 3, 4), box);
+
+    // 旧形状（无 excludeBoxes 字段）保持兼容：空排除区。
+    PinScreenshotImageCommand legacy = Assert.IsType<PinScreenshotImageCommand>(
+      Parse(ResourceArguments(null)).Command);
+    Assert.Empty(legacy.ExcludeBoxes);
+
+    // 非数组、非对象盒子、未知/缺失字段、越界、退化、非有限值、65 盒
+    // 全部整体拒绝，不静默截断。
+    string overflow = string.Join(",",
+      Enumerable.Range(0, 65).Select(_ => "{\"x\":1,\"y\":1,\"width\":1,\"height\":1}"));
+    string[] invalid =
+    [
+      ResourceArguments(""","excludeBoxes":{}"""),
+      ResourceArguments(""","excludeBoxes":[{"x":1,"y":1}]"""),
+      ResourceArguments(
+        ""","excludeBoxes":[{"x":1,"y":1,"width":1,"height":1,"z":0}]"""),
+      ResourceArguments(
+        ""","excludeBoxes":[{"x":900,"y":1,"width":200,"height":1}]"""),
+      ResourceArguments(
+        ""","excludeBoxes":[{"x":1,"y":1,"width":0,"height":1}]"""),
+      ResourceArguments(
+        ""","excludeBoxes":[{"x":1,"y":1,"width":1e999,"height":1}]"""),
+      ResourceArguments($""","excludeBoxes":[{overflow}]"""),
+    ];
+    foreach (string argumentsJson in invalid)
+    {
+      Assert.Throws<WorkbenchBridgeProtocolException>(() => Parse(argumentsJson));
+    }
+  }
+
+  [Fact]
+  public async Task PinDropsLinesIntersectingExclusionBoxesFromReadyLayer()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new TextLayerRecognitionClient();
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var textRecognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      RecognitionTextLayerState? pinnedLayer = null;
+      IReadOnlyList<WorkbenchExclusionBox>? pinnedBoxes = null;
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore, settings,
+        inferenceAttached: () => true,
+        supervisorInstanceId: () => "sup-pin-filter",
+        textLayerRecognitionFactory: () => textRecognition,
+        pinScreenshot: (file, _, _, layer, boxes) =>
+        {
+          file.Dispose();
+          pinnedLayer = layer;
+          pinnedBoxes = boxes;
+        });
+      using (var capturedAwaiter = new RecognitionStateAwaiter(
+        handler, state => state.ScreenshotSession is not null && !state.IsBusy))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        Guid sessionId = Guid.Parse((await capturedAwaiter.Task).ScreenshotSession!.SessionId);
+
+        // 合成结果：行“你好”[10,20,300,60] 与“world”[10,80,300,120]。
+        using (var readyAwaiter = new RecognitionStateAwaiter(
+          handler, state => state.TextLayer?.Status == "textlayer.ready"))
+        {
+          WorkbenchAnnotationLease prepareLease = UploadAnnotation(annotationStore, AnnotationPng);
+          await handler.ExecuteAsync(new PrepareScreenshotTextLayerCommand(
+            prepareLease.ResourceUri.AbsoluteUri, sessionId, 0),
+            TestContext.Current.CancellationToken);
+          RecognitionWorkbenchState ready = await readyAwaiter.Task;
+          Assert.NotNull(ready.TextLayer?.Lines);
+          Assert.Equal(2, ready.TextLayer.Lines.Count);
+        }
+
+        // 排除矩形 [5,75]-[305,125] 与“world”正面积相交，与“你好”仅隔离。
+        WorkbenchAnnotationLease lease = UploadAnnotation(annotationStore, AnnotationPng);
+        Assert.Null((await handler.ExecuteAsync(new PinScreenshotImageCommand(
+          lease.ResourceUri.AbsoluteUri, sessionId, 0,
+          [new WorkbenchExclusionBox(5, 75, 300, 50)]),
+          TestContext.Current.CancellationToken)).Error);
+        Assert.NotNull(pinnedLayer);
+        Assert.NotNull(pinnedLayer!.Lines);
+        RecognitionTextLayerLine line = Assert.Single(pinnedLayer.Lines);
+        Assert.Equal("你好", line.Text);
+        Assert.Single(pinnedBoxes!);
+
+        // 无排除矩形时保持旧行为：完整层传入。
+        WorkbenchAnnotationLease plainLease = UploadAnnotation(annotationStore, AnnotationPng);
+        Assert.Null((await handler.ExecuteAsync(new PinScreenshotImageCommand(
+          plainLease.ResourceUri.AbsoluteUri, sessionId, 0, []),
+          TestContext.Current.CancellationToken)).Error);
+        Assert.NotNull(pinnedLayer!.Lines);
+        Assert.Equal(2, pinnedLayer.Lines.Count);
+      }
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
   public async Task TwoPinsOwnIndependentImagesAndShareOneExplicitTextTask()
   {
     string root = TemporaryRoot();
@@ -246,7 +385,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         inferenceAttached: () => true,
         supervisorInstanceId: () => "sup-pin",
         textLayerRecognitionFactory: () => textRecognition,
-        pinScreenshot: (file, _, _, _) => pins.Add(file));
+        pinScreenshot: (file, _, _, _, _) => pins.Add(file));
       try
       {
         using var capturedAwaiter = new RecognitionStateAwaiter(
@@ -259,7 +398,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         {
           WorkbenchAnnotationLease lease = UploadAnnotation(annotationStore, AnnotationPng);
           WorkbenchCommandOutcome result = await handler.ExecuteAsync(
-            new PinScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0),
+            new PinScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0, []),
             TestContext.Current.CancellationToken);
           Assert.Null(result.Error);
         }
@@ -316,7 +455,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         inferenceAttached: () => true,
         supervisorInstanceId: () => "sup-pin",
         textLayerRecognitionFactory: () => new RecognitionViewModel(inference, inputs),
-        pinScreenshot: (file, _, _, _) => pin = file);
+        pinScreenshot: (file, _, _, _, _) => pin = file);
       var invalidated = new List<(Guid SessionId, long Revision)>();
       var detachedSessions = new List<(Guid SessionId, long Revision)>();
       handler.ScreenshotTextLayerInvalidated += (id, revision) =>
@@ -332,7 +471,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         Guid firstSession = Guid.Parse((await firstAwaiter.Task).ScreenshotSession!.SessionId);
         WorkbenchAnnotationLease lease = UploadAnnotation(annotationStore, AnnotationPng);
         Assert.Null((await handler.ExecuteAsync(
-          new PinScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, firstSession, 0),
+          new PinScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, firstSession, 0, []),
           TestContext.Current.CancellationToken)).Error);
         Assert.NotNull(pin);
         Assert.Empty(inference.Requests);

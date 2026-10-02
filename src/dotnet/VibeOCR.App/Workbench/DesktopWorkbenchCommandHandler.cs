@@ -82,7 +82,8 @@ public sealed class DesktopWorkbenchCommandHandler :
   private readonly Func<nint> windowHandle;
   private readonly WorkbenchAnnotationStore annotationStore;
   private readonly IAnnotatedImagePlatform annotatedImagePlatform;
-  private readonly Action<WorkbenchAnnotationFile, Guid, long, RecognitionTextLayerState?>? pinScreenshot;
+  private readonly Action<WorkbenchAnnotationFile, Guid, long, RecognitionTextLayerState?,
+    IReadOnlyList<WorkbenchExclusionBox>>? pinScreenshot;
   private readonly Func<bool>? inferenceAttached;
   private readonly ShellActionDispatcher? shellActions;
   private readonly List<string> generatedFiles = [];
@@ -145,7 +146,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     Func<bool>? inferenceAttached = null,
     Func<string?>? supervisorInstanceId = null,
     Func<RecognitionViewModel>? textLayerRecognitionFactory = null,
-    Action<WorkbenchAnnotationFile, Guid, long, RecognitionTextLayerState?>? pinScreenshot = null,
+    Action<WorkbenchAnnotationFile, Guid, long, RecognitionTextLayerState?,
+      IReadOnlyList<WorkbenchExclusionBox>>? pinScreenshot = null,
     ShellActionDispatcher? shellActions = null,
     PortableLayout? optionsLayout = null,
     IStructuredClipboardPlatform? structuredClipboard = null)
@@ -850,11 +852,16 @@ public sealed class DesktopWorkbenchCommandHandler :
     WorkbenchAnnotationFile image = TakeScreenshotAnnotation(command.ResourceUri);
     try
     {
-      pinScreenshot(image, command.SessionId, command.Revision,
-        screenshotTextLayer is { Status: "textlayer.ready" } layer &&
-        layer.Binding?.SessionId == command.SessionId.ToString("N") &&
-        layer.Binding.Revision == command.Revision &&
-        layer.ServiceInstance == (supervisorInstanceId() ?? string.Empty) ? layer : null);
+      // 与原位行同一正面积相交策略：跨边界的行不进入贴图可选层；
+      // 被完全屏蔽的文字因输入像素已覆盖本就不在层内。
+      RecognitionTextLayerState? layer =
+        screenshotTextLayer is { Status: "textlayer.ready" } ready &&
+        ready.Binding?.SessionId == command.SessionId.ToString("N") &&
+        ready.Binding.Revision == command.Revision &&
+        ready.ServiceInstance == (supervisorInstanceId() ?? string.Empty)
+          ? FilterLayerLines(ready, command.ExcludeBoxes)
+          : null;
+      pinScreenshot(image, command.SessionId, command.Revision, layer, command.ExcludeBoxes);
     }
     catch
     {
@@ -862,6 +869,23 @@ public sealed class DesktopWorkbenchCommandHandler :
       throw;
     }
     return CurrentRecognitionState();
+  }
+
+  /// <summary>按归一化排除矩形丢弃正面积相交的行；无排除时原样返回。</summary>
+  private static RecognitionTextLayerState? FilterLayerLines(
+    RecognitionTextLayerState layer, IReadOnlyList<WorkbenchExclusionBox> boxes)
+  {
+    if (boxes.Count == 0 || layer.Lines is not { Count: > 0 }) return layer;
+    List<RecognitionTextLayerLine> kept = [];
+    foreach (RecognitionTextLayerLine line in layer.Lines)
+    {
+      bool intersects = boxes.Any(box =>
+        WorkbenchExclusionBox.LineIntersectsBox(line, box));
+      if (!intersects) kept.Add(line);
+    }
+    return kept.Count == layer.Lines.Count
+      ? layer
+      : layer with { Lines = kept };
   }
 
   private async Task<RecognitionWorkbenchState?> StartScreenshotRecognitionAsync(
