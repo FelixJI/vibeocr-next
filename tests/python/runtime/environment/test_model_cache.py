@@ -599,8 +599,8 @@ for name in ('paddlex', 'mineru', 'huggingface-hub', 'modelscope-hub'):
         versions[name] = {'version': dist.version, 'metadata': str(dist._path)}
     except __import__('importlib').metadata.PackageNotFoundError:
         pass
-assert versions['huggingface-hub']['version'] == '1.32.0', versions
-assert versions['modelscope-hub']['version'] == '0.4.3', versions
+assert versions['huggingface-hub']['version'] == '1.33.0', versions
+assert versions['modelscope-hub']['version'] == '0.4.5', versions
 if __import__('os').environ['MINERU_MODEL_SOURCE'] == 'modelscope':
     from modelscope_hub import constants
     assert constants.API_TIMEOUT == constants.API_CONNECT_TIMEOUT == 1
