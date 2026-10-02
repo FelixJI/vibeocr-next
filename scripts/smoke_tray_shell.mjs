@@ -39,10 +39,10 @@ async function waitFor(check, message, timeout = 10000) {
 }
 async function exitOwned(child, action, options) {
   if (!child || child.exitCode !== null) return;
-  try { await native(action, options); } catch { /* Force only this run's PID below. */ }
+  try { await native(action, options); } catch { /* Terminate only this run's held process handle below. */ }
   if (!await waitFor(() => child.exitCode !== null, 'owned close timeout', 4000).catch(() => false)) {
-    await exec('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 10000 });
-    await waitFor(() => child.exitCode !== null, `Owned PID ${child.pid} survived cleanup`, 5000);
+    child.kill();
+    await waitFor(() => child.exitCode !== null, `Owned process ${child.pid} survived cleanup`, 5000);
   }
 }
 
