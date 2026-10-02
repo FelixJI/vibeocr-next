@@ -15,7 +15,6 @@ import {
 import { useEffect, useState } from "react";
 
 import {
-  AboutPage,
   BatchPage,
   DiagnosticsPage,
   PdfPage,
@@ -35,7 +34,10 @@ function RouteSync({ viewState }: { readonly viewState: AppViewState }) {
 
   useEffect(() => {
     if (!viewState.connected) return;
-    const expected = `/${viewState.route}`;
+    // 关于与诊断合并后，宿主仍可能持久化旧 about 路由：与重定向目标对齐，
+    // 避免 RouteSync 把 #/about 拉回造成与 #/diagnostics 重定向循环。
+    const expected =
+      viewState.route === "about" ? "/diagnostics" : `/${viewState.route}`;
     if (location.pathname !== expected) navigate(expected, { replace: true });
   }, [location.pathname, navigate, viewState.connected, viewState.route]);
 
@@ -108,9 +110,10 @@ export function App({
               path="settings"
               element={<SettingsPage actions={actions} viewState={viewState} />}
             />
+            {/* 关于与诊断已合并；保留 #/about 兼容重定向，直接跳转/旧收藏不落空页。 */}
             <Route
               path="about"
-              element={<AboutPage actions={actions} viewState={viewState} />}
+              element={<Navigate replace to="/diagnostics" />}
             />
             <Route
               path="diagnostics"

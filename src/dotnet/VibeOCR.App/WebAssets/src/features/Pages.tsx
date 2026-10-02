@@ -32,6 +32,7 @@ import {
   RotateCw,
   Save,
   ScanText,
+  Settings,
   Sheet,
   Square,
   Trash2,
@@ -2022,7 +2023,8 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
           <div className="runtime-summary">
             <strong>{`目标推理设备：${backendLabel ?? "尚未读取"}`}</strong>
             <p>
-              实际执行设备：尚无实测值。Paddle 设备决策与 GPU 回退见诊断页。
+              实际执行设备：尚无实测值。Paddle 设备决策与 GPU
+              回退见“关于与诊断”页。
             </p>
             <p>当前服务：{serviceText}</p>
             <p>本次维护：{maintenanceLine}</p>
@@ -3304,7 +3306,7 @@ function SourceSelector({
     return (
       <p className="form-note">
         {loaded
-          ? "当前 Backend 未提供下载源目录。"
+          ? "当前识别服务未提供下载源目录。"
           : "运行环境目录尚未加载，正在等待宿主同步。"}
       </p>
     );
@@ -3365,7 +3367,7 @@ function SourceKindSelector({
               })
         }
       >
-        <option value="">跟随 Backend 默认</option>
+        <option value="">跟随识别服务默认</option>
         {sources.map((source) => (
           <option key={source.id} value={source.id}>
             {source.displayName}
@@ -3509,8 +3511,8 @@ function MineruConnectionEditor({
       </div>
       {loaded && !remoteSupported ? (
         <p className="form-note" role="note">
-          当前 Backend 未声明 ocr.mineru-remote-api.v1，远程模式不可用；请更新
-          Backend 后再配置远程连接。
+          当前识别服务未声明 ocr.mineru-remote-api.v1，远程模式不可用；请更新
+          识别服务后再配置远程连接。
         </p>
       ) : null}
       {remote ? (
@@ -3552,8 +3554,8 @@ function MineruConnectionEditor({
           ) : null}
           <p className="form-note">
             {hasStoredKey
-              ? "Backend 已保存 API Key；留空保存会保留它，勾选上方清除项后保存可移除。"
-              : "Backend 未保存 API Key。"}
+              ? "识别服务已保存 API Key；留空保存会保留它，勾选上方清除项后保存可移除。"
+              : "识别服务未保存 API Key。"}
           </p>
         </>
       ) : null}
@@ -3590,12 +3592,12 @@ function MineruConnectionEditor({
         </div>
       ) : null}
       <p className="form-note">
-        远程模式由 Backend 将解析请求转发到自部署的 MinerU 4 服务，不要求本地
+        远程模式由识别服务将解析请求转发到自部署的 MinerU 4 服务，不要求本地
         MinerU 组件、模型或
         GPU；保存只写入配置，不验证服务连通性，实际效果以识别任务结果为准。
       </p>
       <p className="form-note">
-        “验证并准备远程服务”由 Backend
+        “验证并准备远程服务”由识别服务
         首次调用远程服务完成准备并刷新可用性；不宣称未验证的连接可解析。
       </p>
       <p className="form-note">
@@ -3626,35 +3628,37 @@ function MaintenanceActions({
   return (
     <>
       <div className="setting-row">
-        <Button
-          disabled={!enabled || busy || !canPreview}
-          onClick={() => actions.run({ type: "settings.installRuntime" })}
-          icon={<Play aria-hidden="true" size={16} />}
-        >
-          预览安装范围
-        </Button>
-        {maintenance?.canCancel === true ? (
+        <span className="setting-actions">
           <Button
-            disabled={!enabled}
-            onClick={() =>
-              actions.run({ type: "settings.cancelRuntimeMaintenance" })
-            }
-            icon={<Square aria-hidden="true" size={16} />}
+            disabled={!enabled || busy || !canPreview}
+            onClick={() => actions.run({ type: "settings.installRuntime" })}
+            icon={<Play aria-hidden="true" size={16} />}
           >
-            取消安装
+            预览安装范围
           </Button>
-        ) : null}
-        {maintenance?.canRetry === true ? (
-          <Button
-            disabled={!enabled || busy}
-            onClick={() =>
-              actions.run({ type: "settings.retryRuntimeMaintenance" })
-            }
-            icon={<RefreshCw aria-hidden="true" size={16} />}
-          >
-            重新预览上次选择
-          </Button>
-        ) : null}
+          {maintenance?.canCancel === true ? (
+            <Button
+              disabled={!enabled}
+              onClick={() =>
+                actions.run({ type: "settings.cancelRuntimeMaintenance" })
+              }
+              icon={<Square aria-hidden="true" size={16} />}
+            >
+              取消安装
+            </Button>
+          ) : null}
+          {maintenance?.canRetry === true ? (
+            <Button
+              disabled={!enabled || busy}
+              onClick={() =>
+                actions.run({ type: "settings.retryRuntimeMaintenance" })
+              }
+              icon={<RefreshCw aria-hidden="true" size={16} />}
+            >
+              重新预览上次选择
+            </Button>
+          ) : null}
+        </span>
       </div>
       {busy ? (
         <p className="form-note">
@@ -3773,7 +3777,7 @@ function InstallPlanSection({
     <section className="install-plan" aria-label="运行环境安装计划">
       <h3>核对安装范围</h3>
       <p className="form-note">
-        推理设备：{plan.accelerator}。以下范围由 Backend
+        推理设备：{plan.accelerator}。以下范围由识别服务
         预览，确认前不会修改本机组件或停止当前服务。
       </p>
       <ul className="plan-components">
@@ -3783,7 +3787,7 @@ function InstallPlanSection({
       </ul>
       <p className="form-note">
         下载来源：
-        {sourceNames.length > 0 ? sourceNames.join("、") : "跟随 Backend 默认"}
+        {sourceNames.length > 0 ? sourceNames.join("、") : "跟随识别服务默认"}
       </p>
       <p className="form-note">
         预计下载 {downloadText}；新增磁盘占用 {diskText}。
@@ -3983,7 +3987,7 @@ function HotkeyActionRow({
         <strong>{option.displayName}</strong>
         <span>{status}</span>
       </div>
-      <div className="setting-row">
+      <div className="setting-row hotkey-edit-row">
         <label htmlFor={`hotkey-${option.actionId}`}>
           {`${option.displayName}新快捷键`}
         </label>
@@ -3994,50 +3998,53 @@ function HotkeyActionRow({
           disabled={!enabled}
           onChange={(_, data) => setHotkey(data.value)}
         />
-        <Button
-          disabled={!enabled || hotkey.trim() === ""}
-          aria-label={`应用 ${option.displayName}`}
-          onClick={() =>
-            dispatch.run({
-              type: "settings.setActionHotkey",
-              actionId: option.actionId,
-              hotkey: hotkey.trim(),
-            })
-          }
-          icon={<Save aria-hidden="true" size={16} />}
-        >
-          应用
-        </Button>
-        <Button
-          appearance="secondary"
-          disabled={!enabled || !option.configuredHotkey}
-          aria-label={`禁用 ${option.displayName}`}
-          onClick={() =>
-            dispatch.run({
-              type: "settings.setActionHotkey",
-              actionId: option.actionId,
-            })
-          }
-          icon={<X aria-hidden="true" size={16} />}
-        >
-          禁用
-        </Button>
-        {option.defaultHotkey ? (
+        {/* 应用/禁用/恢复默认同一操作簇：各行按钮列对齐，不随状态行换行漂移。 */}
+        <span className="setting-actions">
           <Button
-            appearance="secondary"
-            disabled={!enabled}
-            aria-label={`恢复默认 ${option.displayName}`}
+            disabled={!enabled || hotkey.trim() === ""}
+            aria-label={`应用 ${option.displayName}`}
             onClick={() =>
               dispatch.run({
-                type: "settings.resetActionHotkey",
+                type: "settings.setActionHotkey",
+                actionId: option.actionId,
+                hotkey: hotkey.trim(),
+              })
+            }
+            icon={<Save aria-hidden="true" size={16} />}
+          >
+            应用
+          </Button>
+          <Button
+            appearance="secondary"
+            disabled={!enabled || !option.configuredHotkey}
+            aria-label={`禁用 ${option.displayName}`}
+            onClick={() =>
+              dispatch.run({
+                type: "settings.setActionHotkey",
                 actionId: option.actionId,
               })
             }
-            icon={<RotateCcw aria-hidden="true" size={16} />}
+            icon={<X aria-hidden="true" size={16} />}
           >
-            恢复默认
+            禁用
           </Button>
-        ) : null}
+          {option.defaultHotkey ? (
+            <Button
+              appearance="secondary"
+              disabled={!enabled}
+              aria-label={`恢复默认 ${option.displayName}`}
+              onClick={() =>
+                dispatch.run({
+                  type: "settings.resetActionHotkey",
+                  actionId: option.actionId,
+                })
+              }
+              icon={<RotateCcw aria-hidden="true" size={16} />}
+            >
+              恢复默认
+            </Button>
+          ) : null}
+        </span>
       </div>
       {option.error ? (
         <p className="form-note" role="alert">
@@ -4092,21 +4099,27 @@ function FloatingToolbarPanel({
         </p>
       ) : null}
       <div className="setting-row">
-        <Button
-          disabled={!enabled || !toolbar.enabled}
-          onClick={() => dispatch.run({ type: "settings.showFloatingToolbar" })}
-          icon={<Eye aria-hidden="true" size={16} />}
-        >
-          显示
-        </Button>
-        <Button
-          appearance="secondary"
-          disabled={!enabled || !toolbar.enabled}
-          onClick={() => dispatch.run({ type: "settings.hideFloatingToolbar" })}
-          icon={<EyeOff aria-hidden="true" size={16} />}
-        >
-          隐藏
-        </Button>
+        <span className="setting-actions">
+          <Button
+            disabled={!enabled || !toolbar.enabled}
+            onClick={() =>
+              dispatch.run({ type: "settings.showFloatingToolbar" })
+            }
+            icon={<Eye aria-hidden="true" size={16} />}
+          >
+            显示
+          </Button>
+          <Button
+            appearance="secondary"
+            disabled={!enabled || !toolbar.enabled}
+            onClick={() =>
+              dispatch.run({ type: "settings.hideFloatingToolbar" })
+            }
+            icon={<EyeOff aria-hidden="true" size={16} />}
+          >
+            隐藏
+          </Button>
+        </span>
       </div>
       <div className="setting-row">
         <label htmlFor="toolbar-edge">靠边位置</label>
@@ -4145,22 +4158,57 @@ function FloatingToolbarPanel({
   );
 }
 
-export function AboutPage({ viewState, actions }: FeatureProps) {
-  const update = feature(viewState, "update");
+export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
+  const state = feature(viewState, "diagnostics");
   const about = feature(viewState, "about");
+  const update = feature(viewState, "update");
+  const milestones = stringValues(state.milestones);
+  const deviceEvidence = stringValues(state.deviceEvidence);
   const version =
     typeof about.version === "string" ? about.version : "等待宿主同步";
   const license =
     typeof about.license === "string" ? about.license : "等待宿主同步";
   const projectUrl =
     typeof about.projectUrl === "string" ? about.projectUrl : "";
+  // 修复入口不另造能力：运行环境重试与空环境修复是设置页的既有命令，
+  // 这里只导航过去；演示模式（无宿主桥）用本地哈希跳转保持入口可用。
+  const openSettings = () => {
+    if (viewState.connected) {
+      actions.navigate("settings");
+      return;
+    }
+    window.location.hash = "#/settings";
+  };
   return (
     <Workspace
-      eyebrow="ABOUT / 06"
-      title="关于 VibeOCR"
-      description="本地 OCR、PDF 处理与二维码工具。"
+      eyebrow="SUPPORT / 06"
+      title="关于与诊断"
+      description="产品信息、更新与服务健康检查集中在一个入口；内部协议与排错证据折叠在技术详情里，可复制或导出脱敏内容。"
+      actions={
+        <>
+          <CapabilityGate
+            capability="diagnostics.export"
+            capabilities={viewState.capabilities}
+            action={{ type: "diagnostics.export" }}
+            actions={actions}
+            icon={<Download aria-hidden="true" size={16} />}
+          >
+            导出脱敏诊断
+          </CapabilityGate>
+          <CapabilityGate
+            appearance="secondary"
+            capability="diagnostics.copy"
+            capabilities={viewState.capabilities}
+            action={{ type: "diagnostics.copy" }}
+            actions={actions}
+            icon={<Copy aria-hidden="true" size={16} />}
+          >
+            复制诊断详情
+          </CapabilityGate>
+        </>
+      }
     >
-      <div className="about-grid">
+      <div className="diagnostics-grid">
         <Panel label="PRODUCT" title="VibeOCR">
           <p>基于 PaddleOCR 的 Windows 本地处理工作台。</p>
           <dl className="detail-list">
@@ -4232,72 +4280,65 @@ export function AboutPage({ viewState, actions }: FeatureProps) {
             </CapabilityGate>
           ) : null}
         </Panel>
-      </div>
-    </Workspace>
-  );
-}
-
-export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
-  const state = feature(viewState, "diagnostics");
-  const milestones = stringValues(state.milestones);
-  const deviceEvidence = stringValues(state.deviceEvidence);
-  return (
-    <Workspace
-      eyebrow="SUPPORT / 07"
-      title="诊断与修复"
-      description="检查本机运行时、依赖与启动健康状态。"
-      actions={
-        <CapabilityGate
-          capability="diagnostics.export"
-          capabilities={viewState.capabilities}
-          action={{ type: "diagnostics.export" }}
-          actions={actions}
-          icon={<Download aria-hidden="true" size={16} />}
+        <Panel
+          label="HEALTH"
+          title="服务健康"
+          className="diagnostics-health-panel"
         >
-          导出脱敏诊断
-        </CapabilityGate>
-      }
-    >
-      <div className="diagnostics-grid">
-        <Panel label="HEALTH" title="运行时">
           <div className="health-row">
-            <span>Supervisor</span>
+            <span>识别服务</span>
             <Badge appearance="tint">
               {typeof state.supervisorStatus === "string"
                 ? state.supervisorStatus
                 : "等待连接"}
             </Badge>
           </div>
-          <div className="health-row">
-            <span>Protocol</span>
-            <Badge appearance="tint">
-              {typeof state.protocolStatus === "string"
-                ? state.protocolStatus
-                : "等待连接"}
-            </Badge>
+          <p className="form-note">
+            识别服务未就绪时，可打开设置的运行环境分区重新检查状态、重试上次维护或修复空环境。
+          </p>
+          <div className="setting-row">
+            <Button
+              onClick={openSettings}
+              icon={<Settings aria-hidden="true" size={16} />}
+            >
+              打开设置的修复入口
+            </Button>
           </div>
-        </Panel>
-        <Panel label="DEVICE" title="当前实例的 Paddle 设备日志">
-          <p>设备决策与回退日志；不表示识别作业已成功执行。</p>
-          {deviceEvidence.length > 0 ? (
-            <pre>{deviceEvidence.join("\n")}</pre>
-          ) : (
-            <p>尚无设备证据。</p>
-          )}
-        </Panel>
-        <Panel label="MILESTONES" title="启动里程碑">
-          {milestones.length > 0 ? (
-            <ol className="milestone-list">
-              {milestones.map((milestone) => (
-                <li key={milestone}>{milestone}</li>
-              ))}
-            </ol>
-          ) : (
-            <EmptyStage
-              title="没有诊断快照"
-              detail="宿主连接后显示 T0–T6 的启动耗时与修复入口。"
-            />
-          )}
+          {/* 技术详情默认折叠：原生 details 可键盘展开；内部协议与实例证据
+              只服务排错，不在普通界面与产品信息并列。 */}
+          <details className="diagnostics-tech-details">
+            <summary>技术详情（内部协议与排错证据）</summary>
+            <div className="health-row">
+              <span>内部协议</span>
+              <span>
+                {typeof state.protocolStatus === "string"
+                  ? state.protocolStatus
+                  : "等待连接"}
+              </span>
+            </div>
+            <div>
+              <p className="form-note">
+                设备决策与回退日志；不表示识别作业已成功执行。
+              </p>
+              {deviceEvidence.length > 0 ? (
+                <pre>{deviceEvidence.join("\n")}</pre>
+              ) : (
+                <p className="form-note">尚无设备证据。</p>
+              )}
+            </div>
+            <div>
+              <h3>启动里程碑</h3>
+              {milestones.length > 0 ? (
+                <ol className="milestone-list">
+                  {milestones.map((milestone) => (
+                    <li key={milestone}>{milestone}</li>
+                  ))}
+                </ol>
+              ) : (
+                <p className="form-note">尚无启动里程碑快照。</p>
+              )}
+            </div>
+          </details>
         </Panel>
       </div>
     </Workspace>
