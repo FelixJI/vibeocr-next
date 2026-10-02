@@ -52,9 +52,8 @@ public sealed class QrCodeInputService(Func<nint> windowHandle) : IQrCodeInput
         byte[] data = new byte[size];
         reader.ReadBytes(data);
         return new QrCodeInput(
-            data,
-            string.IsNullOrWhiteSpace(stream.ContentType) ? "image/png" : stream.ContentType,
-            "clipboard");
+            await QrCodeSavePlatform.EncodeImageAsync(data, BitmapEncoder.PngEncoderId, cancellationToken),
+            "image/png", "clipboard");
     }
 
     public static async Task<QrCodeInput?> ReadFileAsync(string path, CancellationToken cancellationToken)
@@ -64,22 +63,14 @@ public sealed class QrCodeInputService(Func<nint> windowHandle) : IQrCodeInput
         if (!info.Exists) throw new FileNotFoundException("Input image was not found.", path);
         if (info.Length > MaximumInputBytes) throw new InvalidDataException("Input image exceeds 256 MiB.");
         byte[] data = await File.ReadAllBytesAsync(path, cancellationToken);
-        return new QrCodeInput(data, MediaType(path), info.Name);
+        return new QrCodeInput(await QrCodeSavePlatform.EncodeImageAsync(
+            data, BitmapEncoder.PngEncoderId, cancellationToken), "image/png", info.Name);
     }
 
     Task<QrCodeInput?> IQrCodeInput.ReadDroppedFileAsync(string path, CancellationToken cancellationToken)
         => ReadFileAsync(path, cancellationToken);
 
-    private static string MediaType(string path) => Path.GetExtension(path).ToLowerInvariant() switch
-    {
-        ".png" => "image/png",
-        ".jpg" or ".jpeg" => "image/jpeg",
-        ".bmp" => "image/bmp",
-        ".webp" => "image/webp",
-        ".gif" => "image/gif",
-        ".tif" or ".tiff" => "image/tiff",
-        _ => "application/octet-stream",
-    };
+
 }
 
 /// <summary>Platform abstraction for saving the generated image.</summary>
@@ -131,8 +122,8 @@ public sealed class QrCodeSavePlatform(Func<nint> windowHandle) : IQrCodeSavePla
     public async Task WriteFileAsync(string path, byte[] data, CancellationToken cancellationToken)
     {
         string extension = Path.GetExtension(path).ToLowerInvariant();
-        if (extension is ".jpg" or ".jpeg") data = await EncodeJpegAsync(data, cancellationToken);
-        else if (extension != ".png") throw new InvalidDataException("仅支持 PNG 或 JPEG 保存。");
+        if (extension is not (".jpg" or ".jpeg" or ".png")) throw new InvalidDataException("仅支持 PNG 或 JPEG 保存。");
+        data = await EncodeImageAsync(data, extension == ".png" ? BitmapEncoder.PngEncoderId : BitmapEncoder.JpegEncoderId, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         AtomicFile.Write(path, stream =>
         {
@@ -142,8 +133,9 @@ public sealed class QrCodeSavePlatform(Func<nint> windowHandle) : IQrCodeSavePla
         });
     }
 
-    private static async Task<byte[]> EncodeJpegAsync(byte[] png, CancellationToken cancellationToken)
+    internal static async Task<byte[]> EncodeImageAsync(byte[] png, Guid encoderId, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         using var input = new InMemoryRandomAccessStream();
         using (var writer = new DataWriter(input))
         {
@@ -153,14 +145,17 @@ public sealed class QrCodeSavePlatform(Func<nint> windowHandle) : IQrCodeSavePla
         }
         input.Seek(0);
         BitmapDecoder decoder = await BitmapDecoder.CreateAsync(input);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (encoderId == BitmapEncoder.PngEncoderId && decoder.DecoderInformation.CodecId == BitmapDecoder.PngDecoderId) return png;
+        BitmapAlphaMode alpha = encoderId == BitmapEncoder.PngEncoderId ? BitmapAlphaMode.Straight : BitmapAlphaMode.Ignore;
         PixelDataProvider source = await decoder.GetPixelDataAsync(
-            BitmapPixelFormat.Bgra8, BitmapAlphaMode.Ignore,
+            BitmapPixelFormat.Bgra8, alpha,
             new BitmapTransform(), ExifOrientationMode.IgnoreExifOrientation,
             ColorManagementMode.DoNotColorManage);
         cancellationToken.ThrowIfCancellationRequested();
         using var output = new InMemoryRandomAccessStream();
-        BitmapEncoder encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.JpegEncoderId, output);
-        encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Ignore,
+        BitmapEncoder encoder = await BitmapEncoder.CreateAsync(encoderId, output);
+        encoder.SetPixelData(BitmapPixelFormat.Bgra8, alpha,
             decoder.PixelWidth, decoder.PixelHeight, 96, 96, source.DetachPixelData());
         await encoder.FlushAsync();
         using var reader = new DataReader(output.GetInputStreamAt(0));

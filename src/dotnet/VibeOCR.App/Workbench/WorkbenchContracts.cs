@@ -182,7 +182,11 @@ public sealed record SelectPdfPagesCommand(IReadOnlyList<int> Pages) : Workbench
 
 public sealed record SetPdfWindowCommand(int Start) : WorkbenchCommand;
 
-public sealed record GenerateQrCodeCommand(string Text) : WorkbenchCommand;
+public sealed record GenerateQrCodeCommand(string Text, string Format = "qrcode", string CaptionMode = "off", string CaptionText = "") : WorkbenchCommand;
+
+public sealed record DecodeCurrentQrCodeCommand(bool Force = false) : WorkbenchCommand;
+
+public sealed record CopyQrCodeImageCommand : WorkbenchCommand;
 
 public sealed record DecodeQrCodeCommand : WorkbenchCommand;
 
@@ -211,6 +215,8 @@ public sealed record InvalidateEnvironmentPlanCommand : WorkbenchCommand;
 public sealed record SwitchEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
 public sealed record DeleteEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
 public sealed record RepairEmptyEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
+/// <summary>推荐配置选择：只读查询配方兼容环境，不创建/不安装/不切换。</summary>
+public sealed record FindCompatibleEnvironmentCommand(string Recipe) : WorkbenchCommand;
 
 public sealed record SetThemeCommand(WorkbenchTheme Theme) : WorkbenchCommand;
 
@@ -446,7 +452,10 @@ public sealed record QrCodeWorkbenchState(
   string StatusCode,
   IReadOnlyList<string> Results,
   WorkbenchResourceReference? GeneratedResource,
-  IReadOnlyList<QrCodeWorkbenchResult>? Items = null) : WorkbenchState
+  IReadOnlyList<QrCodeWorkbenchResult>? Items = null,
+  long PreviewRevision = 0,
+  bool NeedsPreviewDecode = false,
+  string? StatusMessage = null) : WorkbenchState
 {
   public override string Scope => "qrcode";
 }
@@ -488,6 +497,9 @@ public sealed record SettingsWorkbenchState(
   IReadOnlyList<string>? EnvironmentUnknownDefaultSourceIds = null,
   IReadOnlyList<string>? EnvironmentPackageSourceIds = null,
   bool EnvironmentCanCancelInstall = false,
+  IReadOnlyList<SettingsEnvironmentRecipeState>? EnvironmentRecipes = null,
+  SettingsEnvironmentHardwareState? EnvironmentHardware = null,
+  SettingsEnvironmentCompatibilityState? EnvironmentCompatibility = null,
   IReadOnlyList<SettingsHotkeyActionState>? HotkeyActions = null,
   SettingsFloatingToolbarState? FloatingToolbar = null) : WorkbenchState
 {
@@ -526,6 +538,54 @@ public sealed record SettingsEnvironmentSourceState(
   string Kind,
   string DisplayName,
   string Endpoint);
+
+/// <summary>
+/// Runtime 权威配方目录投影（list.recipes）：用途/设备分组与 GPU 门禁在
+/// 前端仅消费本投影；目录未同步时为空，不回落臆造组合。
+/// </summary>
+public sealed record SettingsEnvironmentRecipeState(
+  string Id,
+  string DisplayName,
+  IReadOnlyList<string>? ConfiguredRecognitionTypes = null,
+  string? Accelerator = null,
+  string? TargetDevice = null,
+  string? PythonVersion = null,
+  string? Abi = null,
+  string? Platform = null,
+  string? ScopeId = null,
+  IReadOnlyList<string>? ComponentIds = null,
+  string? RecipeLock = null,
+  IReadOnlyList<string>? Dependencies = null,
+  string? DependencyOrigin = null,
+  string? PythonOrigin = null,
+  string? RuntimeWheelOrigin = null);
+
+/// <summary>
+/// 硬件可用性投影（list.hardware）：nvidia 驱动真值只由 Runtime 探测，
+/// 宿主/前端不检测硬件；状态缺失时按未探测（unknown）呈现。
+/// </summary>
+public sealed record SettingsEnvironmentHardwareState(
+  string NvidiaDriverStatus,
+  string? NvidiaDriverReason = null,
+  string? NvidiaDriverVersion = null);
+
+/// <summary>当前选择配方的 find_compatible 只读结果（绑定配方 id，防止旧结果覆盖新选择）。</summary>
+public sealed record SettingsEnvironmentCompatibilityState(
+  string Recipe,
+  string? SelectedEnvironmentId = null,
+  int? SelectedEnvironmentRevision = null,
+  string? SelectionReason = null,
+  IReadOnlyList<SettingsEnvironmentQueryMatchState>? Environments = null);
+
+/// <summary>单环境对查询的评估：selected 标记选中项；reason_code 说明原因。</summary>
+public sealed record SettingsEnvironmentQueryMatchState(
+  string EnvironmentId,
+  string Name,
+  int Revision,
+  string Status,
+  bool Active = false,
+  bool Selected = false,
+  string? ReasonCode = null);
 
 /// <summary>每 kind 解析：Id 为 null 表示产品默认（模型源无覆盖时官方原生默认，端点未知）。</summary>
 public sealed record SettingsEnvironmentResolvedSourceState(

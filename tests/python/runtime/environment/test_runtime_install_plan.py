@@ -325,6 +325,31 @@ def test_cuda_preview_checks_driver_compatibility_floor(
     assert any(code.startswith("nvidia_driver_") for code in codes) is blocked
 
 
+def test_cuda_blockers_stay_fail_closed_when_probe_times_out(tmp_path, monkeypatch):
+    import subprocess
+
+    control, factory, _, _, _ = _control(tmp_path)
+    installer = factory(
+        accelerator="nvidia_cuda", install_component_ids=("paddleocr-cuda",)
+    )
+    installer._runner_reports_phases = True
+    monkeypatch.setattr(
+        "vibeocr.runtime.environments.runtime_installer.platform.machine",
+        lambda: "AMD64",
+    )
+
+    def hang(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="nvidia-smi", timeout=10)
+
+    monkeypatch.setattr(
+        "vibeocr.runtime.environments.runtime_installer.subprocess.run", hang
+    )
+    # 探测超时投影为 unknown，但安装预检不得降级：仍按
+    # nvidia_driver_unavailable fail closed（与抽出共享 helper 前一致）。
+    codes = [item["code"] for item in installer._installation_blockers()]
+    assert "nvidia_driver_unavailable" in codes
+
+
 def test_successful_noop_plan_cannot_be_confirmed_with_another_operation(tmp_path):
     control, _, calls, _, _ = _control(tmp_path)
     control.execute(operation="ensure", install_component_ids=())

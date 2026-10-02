@@ -48,7 +48,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private string? _backend;
     private string _pendingBackend = "cpu";
     private bool _restartRequired;
-    private bool _gpuAvailable;
     private bool _selectionStaged;
     private HashSet<string> _installedComponentIds = new(StringComparer.Ordinal);
     private RuntimeSelectionService? _selection;
@@ -102,7 +101,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public string? Backend { get => _backend; private set => SetField(ref _backend, value); }
     public string PendingBackend { get => _pendingBackend; set => SetField(ref _pendingBackend, value); }
     public bool RestartRequired { get => _restartRequired; private set => SetField(ref _restartRequired, value); }
-    public bool GpuAvailable { get => _gpuAvailable; private set => SetField(ref _gpuAvailable, value); }
     public bool CanSwitchBackend => !IsBusy && Backend is not null && !string.Equals(Backend, PendingBackend, StringComparison.Ordinal);
 
     public IReadOnlyList<SettingsSourceOption> Sources
@@ -573,7 +571,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
     }
 
-    public void DetectGpu(bool available) { GpuAvailable = available; if (!available && PendingBackend == "nvidia_cuda") PendingBackend = "cpu"; }
     public void Cancel() { }
 
     private async Task LoadSelectionSerializedAsync(
