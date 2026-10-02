@@ -548,6 +548,7 @@ public sealed class WorkbenchBridgeCodecTests
       ("settings", "hideFloatingToolbar", "{}", typeof(HideFloatingToolbarCommand)),
       ("update", "check", "{}", typeof(CheckUpdateCommand)),
       ("diagnostics", "export", "{}", typeof(ExportDiagnosticsCommand)),
+      ("diagnostics", "copy", "{}", typeof(CopyDiagnosticsCommand)),
     ];
 
     foreach ((string scope, string action, string arguments, Type type) in cases)

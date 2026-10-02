@@ -14,7 +14,6 @@ import {
 import {
   Camera,
   FileText,
-  Info,
   ListChecks,
   MoonStar,
   ScanLine,
@@ -42,8 +41,8 @@ const primaryNavigation = [
 
 const utilityNavigation = [
   ["settings", "设置", Settings],
-  ["about", "关于", Info],
-  ["diagnostics", "诊断与修复", ShieldCheck],
+  // 关于与诊断合并后的唯一常规入口；旧 #/about 路由在 App 路由层重定向到这里。
+  ["diagnostics", "关于与诊断", ShieldCheck],
 ] as const;
 
 function NavigationItems({
@@ -105,7 +104,6 @@ export function AppShell({
             connected={viewState.connected}
           />
         </nav>
-        <div className="navigation-footnote">离线工作台</div>
       </aside>
       <div className="shell-content">
         <Toolbar aria-label="应用命令" className="app-toolbar">

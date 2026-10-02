@@ -147,6 +147,41 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
         // 健康与 provider 各读取一次，保证 supervisor 段与 device_evidence 段对应同一次快照。
         SupervisorHealth health = _supervisor;
         IReadOnlyList<string> deviceEvidence = SelectDeviceEvidence(health, _deviceEvidence);
+        string? directory = Path.GetDirectoryName(Path.GetFullPath(destination));
+        if (directory is not null)
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        await using FileStream stream = File.Create(destination);
+        await JsonSerializer.SerializeAsync(
+            stream,
+            BuildDocument(health, deviceEvidence),
+            ExportJsonOptions,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// 剪贴板复制用的脱敏诊断文本：与 <see cref="ExportAsync"/> 导出文件是同一份文档、
+    /// 同一脱敏规则与同一快照语义（健康与证据各读一次），复制不会放大泄漏面。
+    /// </summary>
+    public string BuildRedactedExportJson()
+    {
+        SupervisorHealth health = _supervisor;
+        IReadOnlyList<string> deviceEvidence = SelectDeviceEvidence(health, _deviceEvidence);
+        return JsonSerializer.Serialize(BuildDocument(health, deviceEvidence), ExportJsonOptions);
+    }
+
+    private static readonly JsonSerializerOptions ExportJsonOptions = new()
+    {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        WriteIndented = true,
+    };
+
+    private object BuildDocument(
+        SupervisorHealth health,
+        IReadOnlyList<string> deviceEvidence)
+    {
         var document = new
         {
             schema_version = 2,
@@ -174,22 +209,7 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
             }),
             milestones = Milestones.OrderBy(item => item.Name),
         };
-        string? directory = Path.GetDirectoryName(Path.GetFullPath(destination));
-        if (directory is not null)
-        {
-            Directory.CreateDirectory(directory);
-        }
-
-        await using FileStream stream = File.Create(destination);
-        await JsonSerializer.SerializeAsync(
-            stream,
-            document,
-            new JsonSerializerOptions
-            {
-                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-                WriteIndented = true,
-            },
-            cancellationToken);
+        return document;
     }
 
     /// <summary>按 provider 当前实例与同一健康快照的一致性筛选设备决策日志；

@@ -26,8 +26,7 @@ for (const size of [
       "二维码与条码",
       "PDF",
       "设置",
-      "关于",
-      "诊断与修复",
+      "关于与诊断",
     ]) {
       await page.getByRole("link", { name, exact: true }).click();
       await expect(
