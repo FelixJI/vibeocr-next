@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection', 'toolbar-sequence', 'toolbar-drag', 'toolbar-hotkey', 'pump')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection', 'cursor', 'magnifier', 'toolbar-sequence', 'toolbar-drag', 'toolbar-hotkey', 'pump')][string]$Action,
     [int]$AppPid = 0,
     [int]$FixturePid = 0,
     [int]$ForegroundPid = 0,
@@ -226,6 +226,35 @@ public static class NativeActionsFixture
         };
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CursorInfo
+    {
+        public uint Size, Flags;
+        public IntPtr Handle;
+        public Point Position;
+    }
+    [DllImport("user32.dll")] private static extern bool GetCursorInfo(ref CursorInfo info);
+    [DllImport("user32.dll", EntryPoint = "LoadCursorW")] private static extern IntPtr LoadCursor(IntPtr instance, int id);
+
+    // Read-only observation of the global cursor, compared against the shared
+    // handles of the standard system cursors. No input is injected here.
+    public static object CursorState()
+    {
+        var info = new CursorInfo { Size = (uint)Marshal.SizeOf<CursorInfo>(), Flags = 1 };
+        if (!GetCursorInfo(ref info))
+            throw new InvalidOperationException("Global cursor observation failed.");
+        bool Standard(int id) =>
+            info.Handle != IntPtr.Zero && info.Handle == LoadCursor(IntPtr.Zero, id);
+        return new {
+            shown = (info.Flags & 1) != 0,
+            handle = info.Handle.ToInt64(),
+            x = info.Position.X, y = info.Position.Y,
+            arrow = Standard(32512), cross = Standard(32515),
+            sizeNWSE = Standard(32642), sizeNESW = Standard(32643),
+            sizeWE = Standard(32644), sizeNS = Standard(32645), sizeAll = Standard(32646),
+        };
+    }
+
     private static void RequirePointOwner(int x, int y, int pid)
     {
         GetWindowThreadProcessId(WindowFromPoint(new Point { X = x, Y = y }), out uint owner);
@@ -373,6 +402,19 @@ try {
             if ($labels.Count -ne 1) { throw 'Owned picker selection label is unavailable or ambiguous.' }
             $labels[0]
         }
+        'cursor' { [NativeActionsFixture]::CursorState() | ConvertTo-Json -Compress }
+        'magnifier' {
+            if (-not ([NativeActionsFixture]::Windows($AppPid) | Where-Object { $_.Handle -eq $Handle -and $_.Visible })) {
+                throw 'Magnifier observation window is outside the owned app.'
+            }
+            Add-Type -AssemblyName UIAutomationClient
+            Add-Type -AssemblyName UIAutomationTypes
+            $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Handle)
+            $nodes = $root.FindAll([System.Windows.Automation.TreeScope]::Subtree, [System.Windows.Automation.Condition]::TrueCondition)
+            $labels = @($nodes | ForEach-Object { $_.Current.Name } | Where-Object { $_ -match '^-?\d+, -?\d+\r?\n#[0-9A-F]{6}\r?\nRGB \d+, \d+, \d+$' })
+            if ($labels.Count -ne 1) { throw 'Owned picker magnifier label is unavailable or ambiguous.' }
+            $labels[0]
+        }
         'windows' { [NativeActionsFixture]::Windows($AppPid) | ConvertTo-Json -Compress -Depth 4 }
         'hide' { [NativeActionsFixture]::Hide($Handle, $AppPid) }
         'close' { [NativeActionsFixture]::Close($Handle, $AppPid) }
@@ -394,3 +436,4 @@ try {
 } finally {
     [void][NativeActionsFixture]::SetThreadDpiAwarenessContext($oldDpi)
 }
+
