@@ -34,6 +34,11 @@ public sealed class WorkbenchApplication : IWorkbenchApplication
     }
   }
 
+  internal WorkbenchRoute CurrentRoute
+  {
+    get { lock (_gate) return _route; }
+  }
+
   public async ValueTask<WorkbenchBootstrap> BootstrapAsync(
     CancellationToken cancellationToken)
   {

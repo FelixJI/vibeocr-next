@@ -16,6 +16,27 @@ public sealed class WorkbenchResourceBrokerTests : IDisposable
   }
 
   [Fact]
+  public async Task RevokedImageCanBeDeletedWhileAnExistingReadFinishes()
+  {
+    string path = Path.Combine(resourceRoot, "snapshot.png");
+    byte[] bytes = [1, 2, 3, 4];
+    await File.WriteAllBytesAsync(path, bytes, TestContext.Current.CancellationToken);
+    using var broker = new WorkbenchResourceBroker(resourceRoot);
+    WorkbenchResourceLease lease = broker.Lease("snapshot.png", "image/png", TimeSpan.FromMinutes(1));
+    await using WorkbenchResourceResponse current = await broker.OpenAsync(lease.Uri,
+      TestContext.Current.CancellationToken);
+    Assert.True(broker.Revoke(lease));
+    File.Delete(path);
+    await Assert.ThrowsAsync<WorkbenchResourceAccessException>(async () =>
+      await broker.OpenAsync(lease.Uri, TestContext.Current.CancellationToken));
+    using var copy = new MemoryStream();
+    await current.Content.CopyToAsync(copy, TestContext.Current.CancellationToken);
+    Assert.Equal(bytes, copy.ToArray());
+    await current.DisposeAsync();
+    Assert.False(File.Exists(path));
+  }
+
+  [Fact]
   public async Task LeaseUsesOpaqueUriAndOpensReadOnlyContent()
   {
     string sourcePath = Path.Combine(resourceRoot, "preview.png");

@@ -54,6 +54,9 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     public async Task<ScreenRegionSelection?> PickAsync(CancellationToken cancellationToken)
     {
         nint owner = _ownerWindow();
+        bool visible = IsWindowVisible(owner);
+        bool minimized = IsIconic(owner);
+        nint foreground = GetForegroundWindow();
         ShowWindow(owner, 0);
         try
         {
@@ -105,8 +108,14 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
         }
         finally
         {
-            ShowWindow(owner, 9);
-            SetForegroundWindow(owner);
+            if (visible)
+            {
+                ShowWindow(owner, minimized ? 7 : 8);
+            }
+            if (foreground != 0)
+            {
+                SetForegroundWindow(foreground);
+            }
         }
     }
 
@@ -780,6 +789,12 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool ShowWindow(nint window, int command);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(nint window);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(nint window);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

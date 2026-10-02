@@ -37,6 +37,8 @@ export interface EditorState {
   readonly rotation: number;
   readonly marks: readonly Mark[];
   readonly crop?: { readonly start: Point; readonly end: Point };
+  /** 最终输出像素尺寸；缺省为旋转/裁剪后的原始尺寸，随历史可撤销。 */
+  readonly resize?: CanvasSize;
 }
 
 export interface CanvasSize {
@@ -109,6 +111,8 @@ export function rotateEditorState(
           },
         }
       : {}),
+    // 指定输出尺寸是绝对目标：旋转内容不改变用户设置的输出宽高。
+    ...(state.resize ? { resize: state.resize } : {}),
   };
 }
 
@@ -120,5 +124,55 @@ export function outputSize(
   return {
     width: quarterTurn ? image.naturalHeight : image.naturalWidth,
     height: quarterTurn ? image.naturalWidth : image.naturalHeight,
+  };
+}
+
+/** 导出与尺寸信息共用的最终输出尺寸：旋转 → 裁剪 → 指定尺寸。 */
+export function finalOutputSize(
+  image: HTMLImageElement,
+  state: EditorState,
+  displaySize: CanvasSize,
+): CanvasSize {
+  const naturalSize = outputSize(image, state.rotation);
+  let width = naturalSize.width;
+  let height = naturalSize.height;
+  if (state.crop) {
+    const mapPoint = (point: Point) =>
+      projectPoint(
+        point,
+        image,
+        state.rotation,
+        displaySize,
+        state.rotation,
+        naturalSize,
+      );
+    const start = mapPoint(state.crop.start);
+    const end = mapPoint(state.crop.end);
+    const left = Math.max(
+      0,
+      Math.min(naturalSize.width, Math.min(start.x, end.x)),
+    );
+    const top = Math.max(
+      0,
+      Math.min(naturalSize.height, Math.min(start.y, end.y)),
+    );
+    const right = Math.max(
+      left,
+      Math.min(naturalSize.width, Math.max(start.x, end.x)),
+    );
+    const bottom = Math.max(
+      top,
+      Math.min(naturalSize.height, Math.max(start.y, end.y)),
+    );
+    width = right - left;
+    height = bottom - top;
+  }
+  if (state.resize) {
+    width = state.resize.width;
+    height = state.resize.height;
+  }
+  return {
+    width: Math.max(1, Math.round(width)),
+    height: Math.max(1, Math.round(height)),
   };
 }

@@ -34,6 +34,7 @@ public sealed class WorkbenchApplicationTests
     Assert.Equal(WorkbenchStateChange.Replace, updates.Current.Change);
     ShellWorkbenchState shell = Assert.IsType<ShellWorkbenchState>(updates.Current.State);
     Assert.Equal(WorkbenchRoute.Pdf, shell.Route);
+    Assert.Equal(shell.Route, application.CurrentRoute);
   }
 
   [Fact]

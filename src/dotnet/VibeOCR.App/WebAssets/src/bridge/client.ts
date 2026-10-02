@@ -13,6 +13,7 @@ export interface BridgeEnvelope {
 
 export type AppRoute =
   | "recognition"
+  | "imageEdit"
   | "batch"
   | "qrcode"
   | "pdf"
@@ -294,6 +295,7 @@ function isBridgeEnvelope(value: unknown): value is BridgeEnvelope {
 
 const APP_ROUTES = new Set<AppRoute>([
   "recognition",
+  "imageEdit",
   "batch",
   "qrcode",
   "pdf",

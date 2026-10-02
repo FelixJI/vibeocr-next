@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using Windows.Graphics.Imaging;
 
 namespace VibeOCR.App.Web;
 
@@ -12,12 +13,17 @@ public sealed class WorkbenchAnnotationFile : IDisposable
 {
   private string? path;
 
-  internal WorkbenchAnnotationFile(string path)
+  internal WorkbenchAnnotationFile(string path, int width, int height)
   {
     this.path = path;
+    Width = width;
+    Height = height;
   }
 
   public string Path => path ?? throw new ObjectDisposedException(nameof(WorkbenchAnnotationFile));
+  public int Width { get; }
+  public int Height { get; }
+  public string MediaType => System.IO.Path.GetExtension(Path) == ".jpg" ? "image/jpeg" : "image/png";
 
   public void Dispose()
   {
@@ -40,7 +46,7 @@ public sealed class WorkbenchAnnotationFile : IDisposable
 }
 
 /// <summary>
-/// One-session, one-shot store for annotated PNGs uploaded by the workbench.
+/// One-session, one-shot store for annotated PNG/JPEG images uploaded by the workbench.
 /// The Web bridge only receives an opaque same-origin URI; local paths never
 /// cross the JSON protocol boundary.
 /// </summary>
@@ -114,10 +120,18 @@ public sealed class WorkbenchAnnotationStore : IDisposable
     this.maximumSessionPngBytes = maximumSessionPngBytes;
   }
 
-  public async Task<WorkbenchAnnotationLease> UploadPngAsync(
+  public Task<WorkbenchAnnotationLease> UploadPngAsync(
     Stream content,
+    CancellationToken cancellationToken = default) =>
+    UploadImageAsync(content, "image/png", cancellationToken);
+
+  public async Task<WorkbenchAnnotationLease> UploadImageAsync(
+    Stream content,
+    string mediaType,
     CancellationToken cancellationToken = default)
   {
+    if (mediaType is not ("image/png" or "image/jpeg"))
+      throw new WorkbenchAnnotationAccessException("Unsupported annotation image format.");
     ArgumentNullException.ThrowIfNull(content);
     cancellationToken.ThrowIfCancellationRequested();
     Guid uploadId = Guid.NewGuid();
@@ -140,7 +154,7 @@ public sealed class WorkbenchAnnotationStore : IDisposable
 
     string token = Guid.NewGuid().ToString("N");
     string temporaryPath = System.IO.Path.Combine(sessionRoot, $"{token}.tmp");
-    string destinationPath = System.IO.Path.Combine(sessionRoot, $"{token}.png");
+    string destinationPath = System.IO.Path.Combine(sessionRoot, token + (mediaType == "image/jpeg" ? ".jpg" : ".png"));
     long written = 0;
     try
     {
@@ -168,7 +182,19 @@ public sealed class WorkbenchAnnotationStore : IDisposable
         }
       }
 
-      await ValidatePngStructureAsync(temporaryPath, cancellationToken);
+      int width;
+      int height;
+      if (mediaType == "image/png")
+      {
+        await ValidatePngStructureAsync(temporaryPath, cancellationToken);
+        byte[] header = new byte[24];
+        await using FileStream stream = File.OpenRead(temporaryPath);
+        await stream.ReadExactlyAsync(header, cancellationToken);
+        width = BinaryPrimitives.ReadInt32BigEndian(header.AsSpan(16, 4));
+        height = BinaryPrimitives.ReadInt32BigEndian(header.AsSpan(20, 4));
+      }
+      else
+        (width, height) = await ValidateJpegAsync(temporaryPath, cancellationToken);
       File.Move(temporaryPath, destinationPath);
       DateTimeOffset expiresAt = timeProvider.GetUtcNow() + DefaultLifetime;
       lock (gate)
@@ -182,7 +208,7 @@ public sealed class WorkbenchAnnotationStore : IDisposable
             "Workbench annotation upload reservation is inconsistent.");
         }
         pendingBytes -= reserved;
-        entries.Add(token, new AnnotationEntry(destinationPath, expiresAt, written));
+        entries.Add(token, new AnnotationEntry(destinationPath, expiresAt, written, width, height));
         ownedFiles.Add(destinationPath);
         unconsumedBytes += written;
       }
@@ -228,7 +254,41 @@ public sealed class WorkbenchAnnotationStore : IDisposable
           "Annotated image is unavailable.");
       }
       ownedFiles.Remove(entry.Path);
-      return new WorkbenchAnnotationFile(entry.Path);
+      return new WorkbenchAnnotationFile(entry.Path, entry.Width, entry.Height);
+    }
+  }
+
+  public void Revoke(Uri resourceUri)
+  {
+    string token = ParseToken(resourceUri);
+    lock (gate)
+    {
+      if (!entries.Remove(token, out AnnotationEntry? entry)) return;
+      unconsumedBytes -= entry.Length;
+      if (TryDelete(entry.Path)) ownedFiles.Remove(entry.Path);
+    }
+  }
+
+  private static async Task<(int Width, int Height)> ValidateJpegAsync(string path, CancellationToken cancellationToken)
+  {
+    try
+    {
+      await using FileStream stream = File.OpenRead(path);
+      using var random = stream.AsRandomAccessStream();
+      BitmapDecoder decoder = await BitmapDecoder.CreateAsync(random).AsTask(cancellationToken);
+      if (decoder.DecoderInformation.CodecId != BitmapDecoder.JpegDecoderId)
+        throw new WorkbenchAnnotationAccessException("Annotated image is not JPEG.");
+      if (decoder.PixelWidth == 0 || decoder.PixelHeight == 0 ||
+          decoder.PixelWidth > MaximumDimensionPixels || decoder.PixelHeight > MaximumDimensionPixels ||
+          (long)decoder.PixelWidth * decoder.PixelHeight > MaximumImagePixels)
+        throw new WorkbenchAnnotationAccessException("Annotated JPEG dimensions exceed image bounds.");
+      // WIC decodes the complete image; a signature/SOF alone cannot validate JPEG.
+      _ = await decoder.GetPixelDataAsync().AsTask(cancellationToken);
+      return (checked((int)decoder.PixelWidth), checked((int)decoder.PixelHeight));
+    }
+    catch (Exception error) when (error is not (WorkbenchAnnotationAccessException or OperationCanceledException))
+    {
+      throw new WorkbenchAnnotationAccessException("Annotated JPEG cannot be decoded.", error);
     }
   }
 
@@ -537,5 +597,5 @@ public sealed class WorkbenchAnnotationStore : IDisposable
   private sealed record AnnotationEntry(
     string Path,
     DateTimeOffset ExpiresAt,
-    long Length);
+    long Length, int Width, int Height);
 }

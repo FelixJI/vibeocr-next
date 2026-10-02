@@ -1,4 +1,6 @@
 using System.Buffers.Binary;
+using Windows.Graphics.Imaging;
+using VibeOCR.App.Web;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage;
 using Windows.Storage.Pickers;
@@ -11,7 +13,7 @@ public sealed record RecognitionInput(
     byte[] Data,
     string MediaType,
     string DisplayName,
-    string Origin);
+    string Origin, PhysicalRectangle? CaptureBounds = null);
 
 public interface IInputService
 {
@@ -77,6 +79,7 @@ public sealed class InputService : IInputService
         await reader.LoadAsync(size);
         byte[] data = new byte[size];
         reader.ReadBytes(data);
+        await ValidateImageAsync(data, cancellationToken);
         return new RecognitionInput(
             data,
             string.IsNullOrWhiteSpace(stream.ContentType) ? "image/png" : stream.ContentType,
@@ -107,7 +110,7 @@ public sealed class InputService : IInputService
                 selection.Stride),
             "image/bmp",
             origin + ".bmp",
-            origin);
+            origin, selection.Bounds);
     }
 
     public Task<RecognitionInput?> ReadDroppedFileAsync(
@@ -132,7 +135,28 @@ public sealed class InputService : IInputService
         }
 
         byte[] data = await File.ReadAllBytesAsync(path, cancellationToken);
+        await ValidateImageAsync(data, cancellationToken);
         return new RecognitionInput(data, MediaType(path), info.Name, origin);
+    }
+
+    private static async Task ValidateImageAsync(byte[] data, CancellationToken cancellationToken)
+    {
+        using var stream = new MemoryStream(data);
+        using var random = stream.AsRandomAccessStream();
+        try
+        {
+            BitmapDecoder decoder = await BitmapDecoder.CreateAsync(random).AsTask(cancellationToken);
+            if (decoder.PixelWidth == 0 || decoder.PixelHeight == 0 ||
+                decoder.PixelWidth > WorkbenchAnnotationStore.MaximumDimensionPixels ||
+                decoder.PixelHeight > WorkbenchAnnotationStore.MaximumDimensionPixels ||
+                (long)decoder.PixelWidth * decoder.PixelHeight > WorkbenchAnnotationStore.MaximumImagePixels)
+                throw new InvalidDataException("图片像素尺寸超出支持范围。");
+            _ = await decoder.GetPixelDataAsync().AsTask(cancellationToken);
+        }
+        catch (Exception error) when (error is not (InvalidDataException or OperationCanceledException))
+        {
+            throw new InvalidDataException("无法解码图片。", error);
+        }
     }
 
     private static string MediaType(string path) => Path.GetExtension(path).ToLowerInvariant() switch
