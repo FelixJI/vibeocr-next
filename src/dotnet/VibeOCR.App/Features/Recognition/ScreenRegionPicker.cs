@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using Microsoft.UI.Windowing;
+using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -7,6 +8,7 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI.Xaml.Shapes;
 using VibeOCR.Platform.Windows;
+using VibeOCR.App.Services;
 using Windows.Graphics;
 using Windows.Storage.Streams;
 using Windows.System;
@@ -31,6 +33,17 @@ public interface IScreenRegionPicker
 /// </summary>
 public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = false) : IScreenRegionPicker
 {
+    private sealed class SelectionCanvas : Canvas
+    {
+      private InputSystemCursorShape? _shape;
+      public void SetCursor(InputSystemCursorShape shape)
+      {
+        if (_shape == shape) return;
+        ProtectedCursor = InputSystemCursor.Create(shape);
+        _shape = shape;
+      }
+    }
+
     private const long MaximumCaptureBytes = 256L << 20;
     private const int VirtualScreenX = 76;
     private const int VirtualScreenY = 77;
@@ -109,7 +122,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     var overlay = new Window();
     var root = new Grid { RequestedTheme = ElementTheme.Dark };
     root.Children.Add(new Image { Source = background, Stretch = Stretch.Fill });
-    var canvas = new Canvas { Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };
+    var canvas = new SelectionCanvas { Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };
     root.Children.Add(canvas);
     // Four shades leave the selected pixels unobscured.
     Rectangle[] shades = Enumerable.Range(0, 4).Select(_ => new Rectangle
@@ -138,7 +151,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     var sizeLabel = new TextBlock();
     var help = new TextBlock
     {
-      Text = "悬停智能取框，Tab 切换窗口/控件/父级；拖动手动框选\nEnter 确认 · 右键 / Esc 返回或退出 · 方向键微调 · Shift ×10 · Ctrl+方向键缩放\nCtrl+Z 撤销 · Ctrl+Y / Ctrl+Shift+Z 重做 · M 放大镜 · Ctrl+C 复制色号",
+      Text = "悬停智能取框，Tab 切换窗口/控件/父级；拖动手动框选\n单击选区 / Enter 确认 · 右键 / Esc 返回或退出 · 方向键微调 · Shift ×10 · Ctrl+方向键缩放\nCtrl+Z 撤销 · Ctrl+Y / Ctrl+Shift+Z 重做 · M 放大镜 · Ctrl+C 复制色号",
       IsHitTestVisible = false,
     };
     var toolbar = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
@@ -161,12 +174,14 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       toolbar.Children.Add(button);
       return button;
     }
+    uint? activePointerId = null;
     Button confirm = null!;
     Button undo = null!;
     Button redo = null!;
     SmartScreenCandidates.Window? hoveredWindow = null;
     PhysicalPoint hoveredPoint = default;
     long hoverGeneration = 0;
+    bool diagnoseSmartQueries = Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "native-actions-e2e";
     bool queryWaiting = false;
     bool uiaTimedOut = false;
     bool confirming = false;
@@ -186,8 +201,12 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     {
       if (queryWaiting || uiaTimedOut || confirming || completion.Task.IsCompleted ||
           hoveredWindow is null || session.ManualOnly ||
-          session.Selection is not null || session.IsDragging)
+          session.Selection is not null || session.IsPointerActive)
+      {
+        if (diagnoseSmartQueries)
+          AppLog.Info($"Smart query skipped: window={hoveredWindow?.Handle} point={hoveredPoint} generation={hoverGeneration} waiting={queryWaiting} timedOut={uiaTimedOut} confirming={confirming} completed={completion.Task.IsCompleted} manual={session.ManualOnly} selection={session.Selection} pointerActive={session.IsPointerActive}");
         return;
+      }
       _ = QueryControlsAsync();
     }
     async Task QueryControlsAsync()
@@ -196,6 +215,9 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       PhysicalPoint point = hoveredPoint;
       long generation = hoverGeneration;
       queryWaiting = true;
+      if (diagnoseSmartQueries)
+        AppLog.Info($"Smart query started: window={window.Handle} bounds={window.Bounds} point={point} generation={generation}");
+      System.Diagnostics.Stopwatch? queryTimer = diagnoseSmartQueries ? System.Diagnostics.Stopwatch.StartNew() : null;
       IReadOnlyList<SmartControlCandidate> controls;
       bool timedOut = false;
       try
@@ -209,13 +231,17 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
         timedOut = true;
         controls = [];
       }
+      queryTimer?.Stop();
+      if (diagnoseSmartQueries)
+        AppLog.Info($"Smart query completed: window={window.Handle} point={point} generation={generation} elapsedMs={queryTimer!.Elapsed.TotalMilliseconds:F3} count={controls.Count} timedOut={timedOut}");
       root.DispatcherQueue.TryEnqueue(() =>
       {
         queryWaiting = false;
+        bool accepted = false;
         if (timedOut) uiaTimedOut = true;
         if (!timedOut && generation == hoverGeneration && !confirming &&
             !completion.Task.IsCompleted && !session.ManualOnly &&
-            session.Selection is null && !session.IsDragging &&
+            session.Selection is null && !session.IsPointerActive &&
             candidates.IsCurrent(window, SmartScreenCandidates.CurrentDesktop(),
               SmartScreenCandidates.TryReadWindowBounds) &&
             candidates.ClipToCapture(window.Bounds, window) is { } clippedWindow)
@@ -225,14 +251,24 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
           foreach (SmartControlCandidate control in previewControls)
             regions.Add(candidates.ToLocal(control.Bounds));
           session.SetPreview(regions);
+          accepted = true;
           Render();
+        }
+        if (diagnoseSmartQueries)
+        {
+          string reason = accepted ? "accepted" : timedOut ? "timeout" :
+            generation != hoverGeneration ? "generation-changed" : confirming ? "confirming" :
+            completion.Task.IsCompleted ? "completed" : session.ManualOnly ? "manual-only" :
+            session.Selection is not null ? "manual-selection" : session.IsPointerActive ? "pointer-active" :
+            "window-stale-or-unclippable";
+          AppLog.Info($"Smart query callback: window={window.Handle} point={point} generation={generation} currentGeneration={hoverGeneration} elapsedMs={queryTimer!.Elapsed.TotalMilliseconds:F3} count={controls.Count} visibleCount={previewControls.Count} timedOut={timedOut} accepted={accepted} reason={reason}");
         }
         if (generation != hoverGeneration) QueueControlQuery();
       });
     }
     void UpdateSmartPreview(PhysicalPoint local)
     {
-      if (session.ManualOnly || session.Selection is not null || session.IsDragging) return;
+      if (session.ManualOnly || session.Selection is not null || session.IsPointerActive) return;
       hoverGeneration++;
       previewControls = [];
       hoveredPoint = new PhysicalPoint(checked(local.X + desktop.X), checked(local.Y + desktop.Y));
@@ -327,15 +363,9 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       hoverGeneration++;
       hoveredWindow = null;
       previewControls = [];
+      activePointerId = null;
       canvas.ReleasePointerCaptures();
     }
-    confirm = AddButton("确认 (Enter)", () => Finish(true));
-    undo = AddButton("撤销", session.Undo);
-    redo = AddButton("重做", session.Redo);
-    AddButton("重选", () => { if (session.ActiveSelection is not null || session.IsDragging) Back(); });
-    AddButton("退出 (Esc)", () => Finish(false));
-    foreach (Button button in toolbar.Children.OfType<Button>()) button.Click += (_, _) => Render();
-
     var magnifierCanvas = new Canvas { Width = 99, Height = 99 };
     SolidColorBrush[] pixelBrushes = Enumerable.Range(0, 121).Select(_ => new SolidColorBrush()).ToArray();
     for (int i = 0; i < pixelBrushes.Length; i++)
@@ -371,13 +401,32 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     bool showMagnifier = true;
     string? colorHex = null;
     Windows.Foundation.Point? lastPoint = null;
+    confirm = AddButton("确认 (Enter)", () => Finish(true));
+    undo = AddButton("撤销", session.Undo);
+    redo = AddButton("重做", session.Redo);
+    AddButton("重选", () => { if (session.ActiveSelection is not null || session.IsPointerActive) Back(); });
+    AddButton("退出 (Esc)", () => Finish(false));
+    foreach (Button button in toolbar.Children.OfType<Button>()) button.Click += (_, _) => Render();
+
     PhysicalPoint ToPhysical(Windows.Foundation.Point point) => new(
         (int)Math.Round(point.X * desktop.Width / Math.Max(1, canvas.ActualWidth)),
         (int)Math.Round(point.Y * desktop.Height / Math.Max(1, canvas.ActualHeight)));
     void UpdateMagnifier(Windows.Foundation.Point point)
     {
       lastPoint = point;
-      PhysicalPoint location = ToPhysical(point);
+      double pixelsPerDipX = desktop.Width / Math.Max(1, canvas.ActualWidth);
+      double pixelsPerDipY = desktop.Height / Math.Max(1, canvas.ActualHeight);
+      int handle = session.IsPointerActive ? session.ActiveHandle :
+        session.HitHandle(new(point.X, point.Y), pixelsPerDipX, pixelsPerDipY);
+      canvas.SetCursor(handle switch
+      {
+        0 or 7 => InputSystemCursorShape.SizeNorthwestSoutheast,
+        2 or 5 => InputSystemCursorShape.SizeNortheastSouthwest,
+        1 or 6 => InputSystemCursorShape.SizeNorthSouth,
+        3 or 4 => InputSystemCursorShape.SizeWestEast,
+        _ => InputSystemCursorShape.Cross,
+      });
+      PhysicalPoint location = session.SamplePoint(ToPhysical(point), handle);
       int x = Math.Clamp(location.X, 0, desktop.Width - 1);
       int y = Math.Clamp(location.Y, 0, desktop.Height - 1);
       for (int i = 0; i < pixelBrushes.Length; i++)
@@ -412,20 +461,19 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       Place(shades[3], 0, bottom, w, h - bottom);
       selection.Visibility = rect is null ? Visibility.Collapsed : Visibility.Visible;
       Place(selection, left, top, right - left, bottom - top);
-      (double X, double Y)[] points = [(left, top), ((left + right) / 2, top), (right, top),
-                (left, (top + bottom) / 2), (right, (top + bottom) / 2),
-                (left, bottom), ((left + right) / 2, bottom), (right, bottom)];
+      (double X, double Y)[] points = rect is { } bounds
+        ? ScreenSelectionSession.HandlePoints(bounds) : new (double, double)[8];
       for (int i = 0; i < handles.Length; i++)
       {
         handles[i].Visibility = rect is null ? Visibility.Collapsed : Visibility.Visible;
-        Canvas.SetLeft(handles[i], points[i].X - 3.5);
-        Canvas.SetTop(handles[i], points[i].Y - 3.5);
+        Canvas.SetLeft(handles[i], points[i].X * sx - 3.5);
+        Canvas.SetTop(handles[i], points[i].Y * sy - 3.5);
       }
       string source = session.Selection is not null ? "手动" :
         session.ActiveSelection is null ? "" :
         session.PreviewIndex == 0 ? "窗口候选" : $"控件候选 · 层级 {session.PreviewIndex}";
       sizeLabel.Text = rect is { } r
-        ? $"{source} · {r.Width} × {r.Height} px · Enter 确认" : "请选择区域";
+        ? $"{source} · {r.Width} × {r.Height} px · Enter 确认 / 单击" : "请选择区域";
       confirm.IsEnabled = session.CanConfirm && !confirming;
       undo.IsEnabled = session.CanUndo;
       redo.IsEnabled = session.CanRedo;
@@ -435,22 +483,47 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       Canvas.SetTop(panelBorder, rect is null ? Math.Max(0, h - ph - 20) :
           bottom + ph + 12 <= h ? bottom + 12 : Math.Max(0, top - ph - 12));
       panelBorder.Visibility = session.IsDragging ? Visibility.Collapsed : Visibility.Visible;
+      if (lastPoint is { } point) UpdateMagnifier(point);
+    }
+    void UpdateGesture(Windows.Foundation.Point point)
+    {
+      bool wasDragging = session.IsDragging;
+      session.Move(ToPhysical(point), new(point.X, point.Y));
+      if (!wasDragging && session.IsDragging)
+      {
+        hoverGeneration++;
+        hoveredWindow = null;
+        previewControls = [];
+      }
+    }
+    void CancelPointer(PointerRoutedEventArgs args)
+    {
+      if (activePointerId != args.Pointer.PointerId) return;
+      activePointerId = null;
+      session.CancelDrag();
+      Render();
     }
     canvas.PointerPressed += (_, args) =>
     {
-      if (!args.GetCurrentPoint(canvas).Properties.IsLeftButtonPressed || args.Handled) return;
-      // Child buttons and the help panel must not start a new selection.
+      if (!args.GetCurrentPoint(canvas).Properties.IsLeftButtonPressed || args.Handled ||
+          confirming || completion.Task.IsCompleted || activePointerId is not null) return;
+      // Child buttons and the help panel must not start or confirm a selection.
       if (args.OriginalSource is DependencyObject source)
       {
         for (DependencyObject? node = source; node is not null; node = VisualTreeHelper.GetParent(node))
           if (node == panelBorder) return;
       }
-      hoverGeneration++;
-      hoveredWindow = null;
-      previewControls = [];
-      session.Begin(ToPhysical(args.GetCurrentPoint(canvas).Position),
-                  Math.Max(1, (int)Math.Ceiling(6 * desktop.Width / Math.Max(1, canvas.ActualWidth))));
-      canvas.CapturePointer(args.Pointer);
+      Windows.Foundation.Point point = args.GetCurrentPoint(canvas).Position;
+      lastPoint = point;
+      session.Begin(ToPhysical(point), new(point.X, point.Y),
+        desktop.Width / Math.Max(1, canvas.ActualWidth),
+        desktop.Height / Math.Max(1, canvas.ActualHeight));
+      activePointerId = args.Pointer.PointerId;
+      if (!canvas.CapturePointer(args.Pointer))
+      {
+        activePointerId = null;
+        session.CancelDrag();
+      }
       Render();
       args.Handled = true;
     };
@@ -461,22 +534,29 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     }), true);
     canvas.PointerMoved += (_, args) =>
     {
+      if (activePointerId is { } id && id != args.Pointer.PointerId) return;
       Windows.Foundation.Point point = args.GetCurrentPoint(canvas).Position;
-      PhysicalPoint physical = ToPhysical(point);
-      session.Move(physical);
-      UpdateSmartPreview(physical);
-      UpdateMagnifier(point);
+      lastPoint = point;
+      UpdateGesture(point);
+      if (!confirming) UpdateSmartPreview(ToPhysical(point));
       Render();
     };
     canvas.PointerReleased += (_, args) =>
     {
-      if (!session.IsDragging || args.GetCurrentPoint(canvas).Properties.IsLeftButtonPressed) return;
-      session.End(ToPhysical(args.GetCurrentPoint(canvas).Position));
+      if (activePointerId != args.Pointer.PointerId ||
+          args.GetCurrentPoint(canvas).Properties.IsLeftButtonPressed) return;
+      Windows.Foundation.Point point = args.GetCurrentPoint(canvas).Position;
+      lastPoint = point;
+      UpdateGesture(point);
+      bool confirmClick = session.End(ToPhysical(point), new(point.X, point.Y));
+      activePointerId = null;
       canvas.ReleasePointerCapture(args.Pointer);
-      Render(); args.Handled = true;
+      Render();
+      args.Handled = true;
+      if (confirmClick) Finish(true);
     };
-    canvas.PointerCaptureLost += (_, _) => { session.CancelDrag(); Render(); };
-    canvas.PointerCanceled += (_, _) => { session.CancelDrag(); Render(); };
+    canvas.PointerCaptureLost += (_, args) => CancelPointer(args);
+    canvas.PointerCanceled += (_, args) => CancelPointer(args);
     var keyboardSink = new Button
     {
       Width = 1,
@@ -534,10 +614,37 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     overlay.AppWindow.MoveAndResize(new RectInt32(desktop.X, desktop.Y, desktop.Width, desktop.Height));
     overlay.Activate();
     nint overlayHandle = WinRT.Interop.WindowNative.GetWindowHandle(overlay);
+    try
+    {
+      if (overlayHandle == nint.Zero)
+        throw new InvalidOperationException("无法获取截图选区窗口。");
+      // A borderless overlapped window can still have non-client insets. Match
+      // the frozen desktop to the client area, where XAML pointer positions live.
+      overlay.AppWindow.ResizeClient(new SizeInt32(desktop.Width, desktop.Height));
+      NativePoint origin = new();
+      if (!ClientToScreen(overlayHandle, ref origin))
+        throw new InvalidOperationException("无法读取截图选区客户区原点。");
+      PointInt32 position = overlay.AppWindow.Position;
+      overlay.AppWindow.Move(new PointInt32(
+        checked(position.X + desktop.X - origin.X),
+        checked(position.Y + desktop.Y - origin.Y)));
+      origin = new();
+      if (!ClientToScreen(overlayHandle, ref origin) ||
+          !GetClientRect(overlayHandle, out NativeRect client))
+        throw new InvalidOperationException("无法校验截图选区客户区。");
+      if (origin.X != desktop.X || origin.Y != desktop.Y ||
+          client.Right - client.Left != desktop.Width ||
+          client.Bottom - client.Top != desktop.Height)
+        throw new InvalidOperationException("截图选区客户区与虚拟桌面不一致。");
+    }
+    catch
+    {
+      overlay.Close();
+      throw;
+    }
     // A hotkey can open this window while another application remains foreground.
     // WinUI activation alone does not transfer keyboard focus across processes.
-    if (overlayHandle == nint.Zero ||
-        (!SetForegroundWindow(overlayHandle) && GetForegroundWindow() != overlayHandle))
+    if (!SetForegroundWindow(overlayHandle) && GetForegroundWindow() != overlayHandle)
     {
       overlay.Close();
       throw new InvalidOperationException("无法将截图选区置于前台，请重试截图。");
@@ -652,6 +759,20 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
         }
         return desktop;
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint { public int X, Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect { public int Left, Top, Right, Bottom; }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ClientToScreen(nint window, ref NativePoint point);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetClientRect(nint window, out NativeRect rect);
 
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int index);
