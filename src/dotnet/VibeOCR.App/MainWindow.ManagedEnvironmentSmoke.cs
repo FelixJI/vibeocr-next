@@ -74,11 +74,16 @@ public sealed partial class MainWindow
 
   private async Task<object> CreateSmokeEnvironmentsAsync()
   {
-    await NavigateSmokeAsync("设置", "input[aria-label='新环境名称']");
-    await EnterSmokeTextAsync("input[aria-label='新环境名称']", SmokeEnvironmentA);
+    await NavigateSmokeAsync("设置", "input[aria-label='新环境名称（留空自动命名）']");
+    // F4: 冷启动 managed-environment 清单投影未到时 environmentBusy 会禁用创建控件，
+    // 可能超过下方 30s 按钮就绪等待。复用 Paddle smoke 的首快照就绪等待：首个权威
+    // 清单投影到达即冷清单往返完成。这不是 environmentBusy=false 的严格证明；
+    // 按钮自身的 enabled 守卫仍保持权威。
+    await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
+    await EnterSmokeTextAsync("input[aria-label='新环境名称（留空自动命名）']", SmokeEnvironmentA);
     await ClickManagedSmokeButtonAsync("创建空环境");
     await WaitForSmokeEnvironmentsAsync([SmokeEnvironmentA], TimeSpan.FromMinutes(5));
-    await EnterSmokeTextAsync("input[aria-label='新环境名称']", SmokeEnvironmentB);
+    await EnterSmokeTextAsync("input[aria-label='新环境名称（留空自动命名）']", SmokeEnvironmentB);
     await ClickManagedSmokeButtonAsync("创建空环境");
     ManagedEnvironmentList list = await WaitForSmokeEnvironmentsAsync(
       [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(5));
@@ -110,15 +115,17 @@ public sealed partial class MainWindow
     if (captured.Result is not null || smokeSubmitAttempts!() != 0 || smokeInstallAttempts!() != 0)
       throw new InvalidOperationException("Empty-environment screenshot submitted OCR or installed dependencies.");
 
-    await NavigateSmokeAsync("二维码", "#qr-content");
+    await NavigateSmokeAsync("二维码与条码", "#qr-content");
     await EnterSmokeTextAsync("#qr-content", "VibeOCR managed environment smoke 123");
-    await ClickManagedSmokeButtonAsync("生成二维码");
+    await ClickManagedSmokeButtonAsync("生成图片");
     await WaitForSmokeDomAsync("document.querySelector('.qr-resource-preview')?.naturalWidth > 0",
       TimeSpan.FromSeconds(15));
     if (smokeInferenceAttached() || smokeInstallAttempts() != 0)
       throw new InvalidOperationException("Local QR generation installed or started a service.");
 
-    await NavigateSmokeAsync("设置", "#managed-environment-select");
+    // 导航证明用稳定 runtime 面板：冷启动权威清单未到时 React 不渲染
+    // #managed-environment-select（environments.length===0），名单由随后等待覆盖。
+    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     ManagedEnvironmentList empty = await WaitForSmokeEnvironmentsAsync(
       [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(2));
     ManagedEnvironment[] initial = SmokePair(empty);
@@ -134,7 +141,7 @@ public sealed partial class MainWindow
     object first = await SwitchAndRecognizeSmokeAsync(initial[0]);
     object second = await SwitchAndRecognizeSmokeAsync(initial[1]);
     int beforeSwitchBack = smokeInstallAttempts();
-    await NavigateSmokeAsync("设置", "#managed-environment-select");
+    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     await SelectSmokeEnvironmentAsync(initial[0].Id);
     await ClickManagedSmokeButtonAsync("切换到此环境");
     ManagedEnvironmentSession returned = await WaitForSmokeSessionAsync(initial[0].Id);
@@ -154,14 +161,16 @@ public sealed partial class MainWindow
 
   private async Task<object> VerifyRestartedSmokeEnvironmentAsync()
   {
-    await NavigateSmokeAsync("设置", "#managed-environment-select");
+    // 同上：稳定面板作导航证明，冷启动清单由随后的权威名单等待吸收（F7：
+    // restart 冷入口 30s 内 managedSelect 仍为 null 而面板已渲染）。
+    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     ManagedEnvironmentList list = await WaitForSmokeEnvironmentsAsync(
       [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(2));
     ManagedEnvironment a = SmokePair(list)[0];
     ManagedEnvironmentSession session = await WaitForSmokeSessionAsync(a.Id);
     await SelectSmokeEnvironmentAsync(a.Id);
     await WaitForSmokeDomAsync(
-      "document.querySelector('.settings-runtime-panel')?.textContent.includes('服务 ready') === true",
+      "document.querySelector('.settings-runtime-panel')?.textContent.includes('运行时已就绪') === true",
       TimeSpan.FromMinutes(2));
     ManagedEnvironment projected = smokeEnvironmentSnapshot!()!.Environments.Single(item => item.Id == a.Id);
     if (projected.ServiceState != "ready" || projected.Revision != session.Revision)
@@ -216,7 +225,7 @@ public sealed partial class MainWindow
 
   private async Task<object> SwitchAndRecognizeSmokeAsync(ManagedEnvironment environment)
   {
-    await NavigateSmokeAsync("设置", "#managed-environment-select");
+    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     RecordManagedSmokeStage($"select {environment.Name}");
     await SelectSmokeEnvironmentAsync(environment.Id);
     await ClickManagedSmokeButtonAsync("切换到此环境");
@@ -239,13 +248,16 @@ public sealed partial class MainWindow
       TimeSpan.FromSeconds(30));
     // Host state arrives before React has necessarily replaced the previous
     // editor. Wait for this exact session and its pixels before dispatching OCR.
+    // sceneEditing 会话的 canvas-editor 与“识别当前图”只在现场窗口渲染（主窗是
+    // EmptyStage）；session DOM 查现场面，识别结果仍在主窗。
     await WaitForSmokeDomAsync(
       "document.querySelector('.canvas-editor')?.dataset.screenshotSession === " +
       JsonSerializer.Serialize(capturedState.ScreenshotSession!.SessionId),
-      TimeSpan.FromSeconds(30));
+      TimeSpan.FromSeconds(30),
+      editorSurface: true);
     await WaitForCanvasAsync();
     RecordManagedSmokeStage($"recognize {environment.Name}");
-    await ClickManagedSmokeButtonAsync("识别当前图");
+    await ClickSmokeButtonAsync("识别当前图");
     await WaitForScreenshotStateAsync(state => !state.IsBusy && state.Result is not null,
       TimeSpan.FromMinutes(35));
     await WaitForSmokeDomAsync("(document.querySelector('.result-document')?.textContent ?? '').includes('VibeOCR') && (document.querySelector('.result-document')?.textContent ?? '').includes('123')",
@@ -335,7 +347,7 @@ public sealed partial class MainWindow
   private async Task EnterSmokeTextAsync(string selector, string value)
   {
     string script = "(() => { const e=document.querySelector(" + JsonSerializer.Serialize(selector) +
-      "); if(!e) return false; const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set; " +
+      "); if(!e) return false; const proto=e instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:e instanceof HTMLInputElement?HTMLInputElement.prototype:null; if(!proto) return false; const setter=Object.getOwnPropertyDescriptor(proto,'value').set; " +
       "setter.call(e," + JsonSerializer.Serialize(value) + "); e.dispatchEvent(new Event('input',{bubbles:true})); return true; })()";
     if (await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(script) != "true")
       throw new InvalidOperationException($"Smoke input unavailable: {selector}");
@@ -358,23 +370,51 @@ public sealed partial class MainWindow
 
   private async Task SelectSmokeValueAsync(string selector, string value)
   {
-    string script = "(() => { const e=document.querySelector(" + JsonSerializer.Serialize(selector) +
-      "); if(!e || !Array.from(e.options).some(o => o.value === " + JsonSerializer.Serialize(value) +
-      ")) return false; e.value=" + JsonSerializer.Serialize(value) +
-      "; e.dispatchEvent(new Event('change',{bubbles:true})); return true; })()";
-    if (await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(script) != "true")
-      throw new InvalidOperationException($"Smoke selection unavailable: {selector}={value}");
+    // 设置页刷新期间 Select 合法禁用；就绪（存在+option+enabled）与赋值+change
+    // 在同一 DOM turn 完成，避免两次 ExecuteScript 之间的竞态。
+    await WaitForSmokeDomAsync(
+      "(() => { const e=document.querySelector(" + JsonSerializer.Serialize(selector) +
+      "); if(!e || e.disabled || !Array.from(e.options).some(o => o.value === " +
+      JsonSerializer.Serialize(value) + ")) return false; e.value=" + JsonSerializer.Serialize(value) +
+      "; e.dispatchEvent(new Event('change',{bubbles:true})); return true; })()",
+      TimeSpan.FromMinutes(2));
     await Task.Delay(100);
+    // 后置等待：选择触发的 invalidate 会同步清空兼容结果，自动 compat 查询
+    // 可能在选择之后补发并重新 busy 禁用控件；等待控件保持目标值且可交互。
+    await WaitForSmokeDomAsync(
+      "(() => { const e=document.querySelector(" + JsonSerializer.Serialize(selector) +
+      "); return !!e && e.value === " + JsonSerializer.Serialize(value) +
+      " && !e.disabled; })()",
+      TimeSpan.FromMinutes(2));
   }
 
-  private async Task WaitForSmokeDomAsync(string predicate, TimeSpan timeout)
+  private async Task WaitForSmokeDomAsync(string predicate, TimeSpan timeout,
+    bool editorSurface = false)
   {
     using var cancellation = new CancellationTokenSource(timeout);
     while (true)
     {
-      if (await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync($"(() => !!({predicate}))()") == "true")
+      // 现场面逐次读取：scene 窗口由 DispatcherQueue 异步创建，早绑定会冻结
+      // fallback；CoreWebView2 未初始化时继续轮询，不当作 DOM 证据。
+      if ((editorSurface ? SmokeEditorWebView : WorkbenchWebView).CoreWebView2 is { } view &&
+          await view.ExecuteScriptAsync($"(() => !!({predicate}))()") == "true")
         return;
-      await Task.Delay(100, cancellation.Token);
+      try { await Task.Delay(100, cancellation.Token); }
+      catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+      {
+        // 最小超时诊断：predicate + 该 surface 下 managed Select 值/disabled 与
+        // 按钮标签/disabled 概览；不含整页 body 或凭据类内容。
+        string probe = "probe-unavailable";
+        if ((editorSurface ? SmokeEditorWebView : WorkbenchWebView).CoreWebView2 is { } failed)
+          probe = await failed.ExecuteScriptAsync(
+            "(() => { const s=document.querySelector('#managed-environment-select'); " +
+            "return { managedSelect: s ? { value: s.value, disabled: s.disabled } : null, " +
+            "buttons: Array.from(document.querySelectorAll('button')).map(b => " +
+            "({ label: (b.textContent || '').trim(), disabled: b.disabled })) }; })()");
+        throw new TimeoutException(
+          $"Smoke DOM wait timed out after {timeout} on " +
+          $"{(editorSurface ? "editor" : "workbench")} surface; predicate={predicate}; probe={probe}");
+      }
     }
   }
 }

@@ -168,12 +168,12 @@ public sealed partial class MainWindow
   private async Task<object> RunPaddleSmokeInstallAsync()
   {
     RecordPaddleSmokeStage("wait environments");
-    await NavigateSmokeAsync("设置", "input[aria-label='新环境名称']");
+    await NavigateSmokeAsync("设置", "input[aria-label='新环境名称（留空自动命名）']");
     ManagedEnvironmentList list = await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
     if (!list.Environments.Any(item => item.Name == PaddleSmokeEnvironmentName))
     {
       RecordPaddleSmokeStage("create empty environment");
-      await EnterSmokeTextAsync("input[aria-label='新环境名称']", PaddleSmokeEnvironmentName);
+      await EnterSmokeTextAsync("input[aria-label='新环境名称（留空自动命名）']", PaddleSmokeEnvironmentName);
       await ClickManagedSmokeButtonAsync("创建空环境");
       list = await WaitForSmokeEnvironmentsAsync(
         [PaddleSmokeEnvironmentName], TimeSpan.FromMinutes(5));
@@ -254,7 +254,8 @@ public sealed partial class MainWindow
     int timeoutMinutes = ParsePaddleSmokeMinutes("VIBEOCR_PADDLE_SMOKE_TIMEOUT_MINUTES", 40);
 
     RecordPaddleSmokeStage("switch environment");
-    await NavigateSmokeAsync("设置", "#managed-environment-select");
+    // 稳定 runtime 面板作导航证明：冷启动清单未到时不渲染环境 Select。
+    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     ManagedEnvironmentList list = await WaitForSmokeEnvironmentsAsync(
       [PaddleSmokeEnvironmentName], TimeSpan.FromMinutes(2));
     ManagedEnvironment environment = list.Environments
@@ -267,7 +268,7 @@ public sealed partial class MainWindow
       await ClickManagedSmokeButtonAsync("切换到此环境");
     ManagedEnvironmentSession session = await WaitForSmokeSessionAsync(environment.Id);
     await WaitForSmokeDomAsync(
-      "document.querySelector('.settings-runtime-panel')?.textContent.includes('服务 ready') === true",
+      "document.querySelector('.settings-runtime-panel')?.textContent.includes('运行时已就绪') === true",
       TimeSpan.FromMinutes(2));
 
     RecordPaddleSmokeStage($"select mode {mode}");
@@ -341,10 +342,12 @@ public sealed partial class MainWindow
       SyntheticFixtureRegionPicker.LastCapture;
     if (capture is null)
       throw new InvalidOperationException("Synthetic fixture capture has no evidence.");
+    // sceneEditing 会话的 canvas-editor 只在现场窗口渲染；session DOM 查现场面。
     await WaitForSmokeDomAsync(
       "document.querySelector('.canvas-editor')?.dataset.screenshotSession === " +
       JsonSerializer.Serialize(captured.ScreenshotSession!.SessionId),
-      TimeSpan.FromSeconds(30));
+      TimeSpan.FromSeconds(30),
+      editorSurface: true);
     await WaitForCanvasAsync();
 
     RecordPaddleSmokeStage($"recognize {mode}");
@@ -369,7 +372,7 @@ public sealed partial class MainWindow
         $".some(o => o.value === {JsonSerializer.Serialize(mode)})",
         TimeSpan.FromMinutes(2));
     }
-    catch (OperationCanceledException error)
+    catch (Exception error) when (error is OperationCanceledException or TimeoutException)
     {
       string? dom = await PaddleSmokeDomTextAsync(
         "(() => JSON.stringify({options:Array.from(document.querySelector('" +
