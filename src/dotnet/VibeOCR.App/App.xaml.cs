@@ -56,6 +56,7 @@ public sealed partial class App : Application
     private int _managedEnvironmentInstallAttempts;
     private FrontendExclusiveLock? _exclusiveLock;
     private WindowMessageService? _windowMessages;
+    private TrayMenuOwnerWindow? _trayOwner;
     private TrayIconService? _trayIcon;
     private WindowsHotkeyRegistrar? _hotkeyRegistrar;
     private ShellActionDispatcher? _actionDispatcher;
@@ -71,9 +72,6 @@ public sealed partial class App : Application
 
     private const uint HotkeyMessage = 0x0312;
     private const uint TrayMessage = 0x8001;
-    private const uint TrayLeftClick = 0x0202;
-    private const uint TrayLeftDoubleClick = 0x0203;
-    private const uint TrayRightClick = 0x0205;
 
     /// <summary>连接/恢复等待生命周期门的有界预算（覆盖一次 90 秒激活）。</summary>
     private static readonly TimeSpan SupervisorGateWaitTimeout = TimeSpan.FromSeconds(120);
@@ -85,11 +83,10 @@ public sealed partial class App : Application
     private string? _soakCrashedInstanceId;
 
     // 托盘菜单仅本任务实际动作：打开工作台/截图识别/截图编辑/剪贴板识别/
-    // 悬浮栏开关 + 退出；复用既有托盘回调消息，不新增常驻钩子。
+    // 悬浮栏开关 + 退出；复用既有托盘回调消息，不新增常驻钩子。lParam
+    // 事件分派统一经 Platform 的 TrayIconCallback（v0 键盘与右键同一路径）。
     private const uint MenuFlagString = 0x0000;
     private const uint MenuFlagSeparator = 0x0800;
-    private const uint TrackPopupRightButton = 0x0002;
-    private const uint TrackPopupReturnCommand = 0x0100;
     private const int TrayMenuCommandBase = 1000;
     private const int TrayMenuToggleToolbar = 1004;
     private const int TrayMenuQuit = 1005;
@@ -379,8 +376,13 @@ public sealed partial class App : Application
         nint handle = WinRT.Interop.WindowNative.GetWindowHandle(_window!);
         _windowMessages = new WindowMessageService(handle);
         _windowMessages.MessageReceived += OnWindowMessage;
+        // 托盘回调、TaskbarCreated 与菜单 owner 独立于主窗：右键/键盘菜单
+        // 绝不激活主窗；owner 是真实隐藏顶层 ToolWindow（非 HWND_MESSAGE）。
+        _trayOwner = new TrayMenuOwnerWindow();
+        _trayOwner.MessageReceived += OnWindowMessage;
+        _trayOwner.TaskbarCreated += OnTaskbarCreated;
         _trayIcon = new TrayIconService(Path.Combine(layout.WebAssetsRoot, "vibeocr.ico"));
-        _trayIcon.Show(handle, TrayMessage, "VibeOCR");
+        _trayIcon.Show(_trayOwner.Handle, TrayMessage, "VibeOCR");
         _shellLayout = layout;
 
         _hotkeyRegistrar = new WindowsHotkeyRegistrar(
@@ -455,30 +457,51 @@ public sealed partial class App : Application
 
         if (message.Id == TrayMessage)
         {
-            switch ((uint)message.LParam)
+            // v0 lParam 回调约定：按官方文档，右键与键盘菜单键同样发送
+            // WM_RBUTTONUP，故同一入口弹菜单；WM_CONTEXTMENU 仅 v4 发送，
+            // 容错保留；左键/双击才是明确打开主窗的动作。
+            uint callback = (uint)message.LParam;
+            if (TrayIconCallback.IsContextMenuRequest(callback))
             {
-                case TrayLeftClick or TrayLeftDoubleClick:
-                    ShowMainWindow();
-                    break;
-                case TrayRightClick:
-                    ShowTrayContextMenu();
-                    break;
+                ShowTrayContextMenu();
+            }
+            else if (callback is TrayIconCallback.LeftButtonUp or
+                TrayIconCallback.LeftDoubleClick)
+            {
+                ShowMainWindow();
             }
         }
     }
 
     /// <summary>
-    /// 托盘右键菜单：复用既有托盘回调与窗口消息服务，TrackPopupMenu
-    /// 直接返回选中项；失败/取消时静默保留原状态。
+    /// Explorer/任务栏重建：同 GUID 重挂托盘图标；失败如实记入 AppLog，
+    /// 不让异常炸掉消息分发线程。
+    /// </summary>
+    private void OnTaskbarCreated(object? sender, EventArgs args)
+    {
+        try
+        {
+            _trayIcon?.Reattach();
+            AppLog.Info("Tray icon reattached after taskbar recreation.");
+        }
+        catch (Exception error)
+        {
+            AppLog.Error("Tray icon reattach after taskbar recreation failed", error);
+        }
+    }
+
+    /// <summary>
+    /// 托盘上下文菜单：菜单宿主是隐藏的 TrayMenuOwnerWindow（SetForeground +
+    /// TrackPopupMenu + 结束 WM_NULL 全部只针对 owner，绝不激活主窗）；
+    /// TrackPopupMenu 直接返回选中项，失败/取消时静默保留原状态。
     /// </summary>
     private void ShowTrayContextMenu()
     {
-        if (_window is null)
+        if (_trayOwner is not { } owner)
         {
             return;
         }
 
-        nint handle = WinRT.Interop.WindowNative.GetWindowHandle(_window);
         nint menu = CreatePopupMenu();
         if (menu == 0)
         {
@@ -512,20 +535,13 @@ public sealed partial class App : Application
             AppendMenuW(menu, MenuFlagSeparator, 0, null);
             AppendMenuW(menu, MenuFlagString, (nuint)TrayMenuQuit, "退出 VibeOCR");
 
-            SetForegroundWindow(handle);
             if (!GetCursorPos(out PointL cursor))
             {
                 return;
             }
 
-            int selected = TrackPopupMenu(
-                menu,
-                TrackPopupRightButton | TrackPopupReturnCommand,
-                cursor.X,
-                cursor.Y,
-                0,
-                handle,
-                0);
+            // 握手全部落在 owner：前台、模态菜单、结束 WM_NULL。
+            int selected = owner.TrackContextMenu(menu, cursor.X, cursor.Y);
             if (selected is 0)
             {
                 return;
@@ -533,7 +549,7 @@ public sealed partial class App : Application
 
             if (selected == TrayMenuQuit)
             {
-                _window.Close();
+                _window?.Close();
                 return;
             }
 
@@ -549,9 +565,21 @@ public sealed partial class App : Application
                 _actionDispatcher?.TryDispatch(trayActions[selected - TrayMenuCommandBase]);
             }
         }
+        catch (Win32Exception error)
+        {
+            AppLog.Error("Tray context menu failed", error);
+        }
         finally
         {
             DestroyMenu(menu);
+            try
+            {
+                _trayIcon?.RestoreFocusAfterMenu();
+            }
+            catch (Win32Exception error)
+            {
+                AppLog.Error("Tray notification focus restore failed", error);
+            }
         }
     }
 
@@ -565,8 +593,19 @@ public sealed partial class App : Application
 
     private void ShowMainWindow()
     {
-        _window?.AppWindow.Show();
-        _window?.Activate();
+        if (_window is not { } window)
+        {
+            return;
+        }
+
+        window.AppWindow.Show();
+        window.Activate();
+        // 仅明确打开主窗的用户动作执行；托盘菜单展示/取消不经过此入口。
+        // SetForegroundWindow 不承诺 last error，拒绝时只记录实际结果。
+        if (!SetForegroundWindow(WinRT.Interop.WindowNative.GetWindowHandle(window)))
+        {
+            AppLog.Warn("Main window foreground request was denied.");
+        }
     }
 
     private Task ShowWorkbenchFromShellActionAsync()
@@ -720,16 +759,6 @@ public sealed partial class App : Application
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetForegroundWindow(nint window);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern int TrackPopupMenu(
-        nint menu,
-        uint flags,
-        int x,
-        int y,
-        int reserved,
-        nint window,
-        nint rect);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -1349,8 +1378,16 @@ public sealed partial class App : Application
         _floatingToolbar = null;
         _hotkeyRegistrar?.Dispose();
         _hotkeyRegistrar = null;
+        // 先删托盘图标，再拆 owner 事件并销毁：各释放一次，图标不残留。
         _trayIcon?.Dispose();
         _trayIcon = null;
+        if (_trayOwner is not null)
+        {
+            _trayOwner.MessageReceived -= OnWindowMessage;
+            _trayOwner.TaskbarCreated -= OnTaskbarCreated;
+            _trayOwner.Dispose();
+            _trayOwner = null;
+        }
         if (_windowMessages is not null)
         {
             _windowMessages.MessageReceived -= OnWindowMessage;
