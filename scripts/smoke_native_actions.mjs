@@ -214,7 +214,13 @@ async function stopOwned(child, closeAction, options) {
   assert(Number.isSafeInteger(child.pid) && child.pid > 0,
     'Owned cleanup requires a spawned ChildProcess with a positive pid.');
   if (exited(child)) return;
-  try { await native(closeAction, options); } catch { /* bounded PID cleanup below */ }
+  // The native close/quit actions post to an owned window handle. A
+  // windowless child has no HWND at all; the fixture would only reject the
+  // useless handle-0 request after a full pwsh start, so skip the futile
+  // native attempt and go straight to the bounded same-handle kill path.
+  // Production callers always pass a real owned Handle and are unchanged.
+  if (options?.Handle)
+    try { await native(closeAction, options); } catch { /* bounded PID cleanup below */ }
   if (await waitExit(child, 5000)) return;
   await forceStop(child);
 }
