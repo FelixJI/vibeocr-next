@@ -109,10 +109,16 @@ try {
 } finally {
   try {
     if (app) {
-      await stopOwned(app.child, 'close', { AppPid: app.child.pid, Handle: app.main.Handle });
-      await app.browser.close().catch(() => {});
+      // stopOwned and this run's own CDP transport close independently: a
+      // cleanup failure must not skip the browser connection, and neither
+      // may mask the primary error already recorded above.
+      try {
+        await stopOwned(app.child, 'close', { AppPid: app.child.pid, Handle: app.main.Handle });
+      } finally {
+        await app.browser.close().catch(() => {});
+      }
+      evidence.ownedProcessesStopped = true;
     }
-    evidence.ownedProcessesStopped = true;
   } catch (error) { evidence.cleanupError = error.message; process.exitCode = 1; evidence.state = 'failed'; }
   fs.writeFileSync(path.join(work, 'toolbar-startup-pinned-health.json'), JSON.stringify(evidence, null, 2));
   console.log(`Floating toolbar pinned cold-start smoke ${evidence.state}; evidence: ${work}`);
