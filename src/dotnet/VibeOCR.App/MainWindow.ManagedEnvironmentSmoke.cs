@@ -74,11 +74,11 @@ public sealed partial class MainWindow
 
   private async Task<object> CreateSmokeEnvironmentsAsync()
   {
-    await NavigateSmokeAsync("设置", "input[aria-label='新环境名称']");
-    await EnterSmokeTextAsync("input[aria-label='新环境名称']", SmokeEnvironmentA);
+    await NavigateSmokeAsync("设置", "input[aria-label='新环境名称（留空自动命名）']");
+    await EnterSmokeTextAsync("input[aria-label='新环境名称（留空自动命名）']", SmokeEnvironmentA);
     await ClickManagedSmokeButtonAsync("创建空环境");
     await WaitForSmokeEnvironmentsAsync([SmokeEnvironmentA], TimeSpan.FromMinutes(5));
-    await EnterSmokeTextAsync("input[aria-label='新环境名称']", SmokeEnvironmentB);
+    await EnterSmokeTextAsync("input[aria-label='新环境名称（留空自动命名）']", SmokeEnvironmentB);
     await ClickManagedSmokeButtonAsync("创建空环境");
     ManagedEnvironmentList list = await WaitForSmokeEnvironmentsAsync(
       [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(5));
@@ -110,9 +110,9 @@ public sealed partial class MainWindow
     if (captured.Result is not null || smokeSubmitAttempts!() != 0 || smokeInstallAttempts!() != 0)
       throw new InvalidOperationException("Empty-environment screenshot submitted OCR or installed dependencies.");
 
-    await NavigateSmokeAsync("二维码", "#qr-content");
+    await NavigateSmokeAsync("二维码与条码", "#qr-content");
     await EnterSmokeTextAsync("#qr-content", "VibeOCR managed environment smoke 123");
-    await ClickManagedSmokeButtonAsync("生成二维码");
+    await ClickManagedSmokeButtonAsync("生成图片");
     await WaitForSmokeDomAsync("document.querySelector('.qr-resource-preview')?.naturalWidth > 0",
       TimeSpan.FromSeconds(15));
     if (smokeInferenceAttached() || smokeInstallAttempts() != 0)
@@ -161,7 +161,7 @@ public sealed partial class MainWindow
     ManagedEnvironmentSession session = await WaitForSmokeSessionAsync(a.Id);
     await SelectSmokeEnvironmentAsync(a.Id);
     await WaitForSmokeDomAsync(
-      "document.querySelector('.settings-runtime-panel')?.textContent.includes('服务 ready') === true",
+      "document.querySelector('.settings-runtime-panel')?.textContent.includes('运行时已就绪') === true",
       TimeSpan.FromMinutes(2));
     ManagedEnvironment projected = smokeEnvironmentSnapshot!()!.Environments.Single(item => item.Id == a.Id);
     if (projected.ServiceState != "ready" || projected.Revision != session.Revision)

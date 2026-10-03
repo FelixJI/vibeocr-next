@@ -168,12 +168,12 @@ public sealed partial class MainWindow
   private async Task<object> RunPaddleSmokeInstallAsync()
   {
     RecordPaddleSmokeStage("wait environments");
-    await NavigateSmokeAsync("设置", "input[aria-label='新环境名称']");
+    await NavigateSmokeAsync("设置", "input[aria-label='新环境名称（留空自动命名）']");
     ManagedEnvironmentList list = await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
     if (!list.Environments.Any(item => item.Name == PaddleSmokeEnvironmentName))
     {
       RecordPaddleSmokeStage("create empty environment");
-      await EnterSmokeTextAsync("input[aria-label='新环境名称']", PaddleSmokeEnvironmentName);
+      await EnterSmokeTextAsync("input[aria-label='新环境名称（留空自动命名）']", PaddleSmokeEnvironmentName);
       await ClickManagedSmokeButtonAsync("创建空环境");
       list = await WaitForSmokeEnvironmentsAsync(
         [PaddleSmokeEnvironmentName], TimeSpan.FromMinutes(5));
@@ -267,7 +267,7 @@ public sealed partial class MainWindow
       await ClickManagedSmokeButtonAsync("切换到此环境");
     ManagedEnvironmentSession session = await WaitForSmokeSessionAsync(environment.Id);
     await WaitForSmokeDomAsync(
-      "document.querySelector('.settings-runtime-panel')?.textContent.includes('服务 ready') === true",
+      "document.querySelector('.settings-runtime-panel')?.textContent.includes('运行时已就绪') === true",
       TimeSpan.FromMinutes(2));
 
     RecordPaddleSmokeStage($"select mode {mode}");
