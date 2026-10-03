@@ -142,8 +142,13 @@ async function startFixture() {
   }
 }
 
+// A signal exit leaves exitCode null; its already-fired exit event will not recur.
+function exited(child) {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
 async function waitExit(child, timeoutMs) {
-  if (!child || child.exitCode !== null) return true;
+  if (!child || exited(child)) return true;
   return Promise.race([
     once(child, 'exit').then(() => true),
     delay(timeoutMs).then(() => false),
@@ -151,7 +156,7 @@ async function waitExit(child, timeoutMs) {
 }
 
 async function forceStop(child) {
-  if (!child?.pid || child.exitCode !== null) return;
+  if (!child?.pid || exited(child)) return;
   // ChildProcess keeps the Windows process handle. A fresh PID/PPID tree can
   // belong to another instance after exit; terminate only this owned handle.
   // The app's Supervisor descendants remain owned by its kill-on-close Job.
@@ -159,7 +164,7 @@ async function forceStop(child) {
   assert(await waitExit(child, 5000), `Owned process ${child.pid} survived cleanup.`);
 }
 async function stopOwned(child, closeAction, options) {
-  if (!child || child.exitCode !== null) return;
+  if (!child || exited(child)) return;
   try { await native(closeAction, options); } catch { /* bounded PID cleanup below */ }
   if (await waitExit(child, 5000)) return;
   await forceStop(child);
