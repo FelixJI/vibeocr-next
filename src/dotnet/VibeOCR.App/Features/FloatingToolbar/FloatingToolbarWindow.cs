@@ -66,6 +66,7 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     HorizontalOffset = 0,
     VerticalOffset = 0,
   };
+  private readonly Grid _host = new();
   private readonly UISettings _uiSettings = new();
   private readonly ThemeSettings _themeSettings;
   private readonly WindowMessageService _messages;
@@ -73,6 +74,7 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
   private Windows.Foundation.Point? _dragOrigin;
   private FloatingToolbarTheme _theme = FloatingToolbarTheme.System;
   private bool _disposed;
+  private bool _popupOpenPending;
 
   public event EventHandler? PointerEntered;
 
@@ -164,13 +166,75 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
         checked(position.X + bounds.X - origin.X),
         checked(position.Y + bounds.Y - origin.Y)));
     ShowWindow(_handle, SwShowNoActivate);
-    _popup.IsOpen = true;
     IsVisible = true;
+    OpenPopupWhenHostReady();
+  }
+
+  /// <summary>
+  /// Popup 必须绑定宿主 XamlRoot 才能打开：冷启动（OnLaunched 同步
+  /// ShowDocked）时窗口内容尚未 Loaded、XamlRoot 为 null，直接设
+  /// IsOpen 会抛 0x8000FFFF「unparented popup」。未就绪时等宿主一次
+  /// 真实 Loaded 再开（同 SyntheticScreenRegionPicker 先例）；内容
+  /// 已加载的常规揭示/恢复路径保持原有立即打开。
+  /// </summary>
+  private void OpenPopupWhenHostReady()
+  {
+    if (TryOpenPopup())
+    {
+      return;
+    }
+
+    if (!_popupOpenPending)
+    {
+      _popupOpenPending = true;
+      _host.Loaded += OnHostLoadedOpenPopup;
+    }
+  }
+
+  private bool TryOpenPopup()
+  {
+    if (_popup.XamlRoot is null && _host.XamlRoot is { } hostRoot)
+    {
+      _popup.XamlRoot = hostRoot;
+    }
+
+    if (_popup.XamlRoot is null)
+    {
+      return false;
+    }
+
+    _popup.IsOpen = true;
+    return true;
+  }
+
+  private void OnHostLoadedOpenPopup(object sender, RoutedEventArgs args)
+  {
+    CancelPendingPopupOpen();
+    // 等待期间 Hide/Dispose 已发生则不再迟到重开。
+    if (_disposed || !IsVisible)
+    {
+      return;
+    }
+
+    TryOpenPopup();
+  }
+
+  /// <summary>取消尚未发生的首次打开，并退订等待：不重复订阅、不迟到重开。</summary>
+  private void CancelPendingPopupOpen()
+  {
+    if (!_popupOpenPending)
+    {
+      return;
+    }
+
+    _popupOpenPending = false;
+    _host.Loaded -= OnHostLoadedOpenPopup;
   }
 
   public void Hide()
   {
     ObjectDisposedException.ThrowIf(_disposed, this);
+    CancelPendingPopupOpen();
     _popup.IsOpen = false;
     ShowWindow(_handle, SwHide);
     IsVisible = false;
@@ -274,6 +338,7 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     }
 
     _disposed = true;
+    CancelPendingPopupOpen();
     _popup.IsOpen = false;
     _themeSettings.Changed -= OnSystemHighContrastChanged;
     _root.ActualThemeChanged -= OnRootActualThemeChanged;
@@ -331,9 +396,8 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     _grip.PointerCaptureLost += OnGripPointerEnded;
     // Windowed Popup preserves the foreground while receiving pointer input.
     _popup.Child = _root;
-    var host = new Grid();
-    host.Children.Add(_popup);
-    _window.Content = host;
+    _host.Children.Add(_popup);
+    _window.Content = _host;
   }
 
   private Button CreateCommandButton(string glyph, string tooltip, FloatingToolbarCommand command)
