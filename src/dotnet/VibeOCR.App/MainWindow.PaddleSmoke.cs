@@ -371,7 +371,7 @@ public sealed partial class MainWindow
         $".some(o => o.value === {JsonSerializer.Serialize(mode)})",
         TimeSpan.FromMinutes(2));
     }
-    catch (OperationCanceledException error)
+    catch (Exception error) when (error is OperationCanceledException or TimeoutException)
     {
       string? dom = await PaddleSmokeDomTextAsync(
         "(() => JSON.stringify({options:Array.from(document.querySelector('" +

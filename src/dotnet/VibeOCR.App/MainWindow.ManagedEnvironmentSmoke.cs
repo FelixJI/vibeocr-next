@@ -366,12 +366,14 @@ public sealed partial class MainWindow
 
   private async Task SelectSmokeValueAsync(string selector, string value)
   {
-    string script = "(() => { const e=document.querySelector(" + JsonSerializer.Serialize(selector) +
-      "); if(!e || !Array.from(e.options).some(o => o.value === " + JsonSerializer.Serialize(value) +
-      ")) return false; e.value=" + JsonSerializer.Serialize(value) +
-      "; e.dispatchEvent(new Event('change',{bubbles:true})); return true; })()";
-    if (await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(script) != "true")
-      throw new InvalidOperationException($"Smoke selection unavailable: {selector}={value}");
+    // 设置页刷新期间 Select 合法禁用；就绪（存在+option+enabled）与赋值+change
+    // 在同一 DOM turn 完成，避免两次 ExecuteScript 之间的竞态。
+    await WaitForSmokeDomAsync(
+      "(() => { const e=document.querySelector(" + JsonSerializer.Serialize(selector) +
+      "); if(!e || e.disabled || !Array.from(e.options).some(o => o.value === " +
+      JsonSerializer.Serialize(value) + ")) return false; e.value=" + JsonSerializer.Serialize(value) +
+      "; e.dispatchEvent(new Event('change',{bubbles:true})); return true; })()",
+      TimeSpan.FromMinutes(2));
     await Task.Delay(100);
   }
 
@@ -386,7 +388,22 @@ public sealed partial class MainWindow
       if ((editorSurface ? SmokeEditorWebView : WorkbenchWebView).CoreWebView2 is { } view &&
           await view.ExecuteScriptAsync($"(() => !!({predicate}))()") == "true")
         return;
-      await Task.Delay(100, cancellation.Token);
+      try { await Task.Delay(100, cancellation.Token); }
+      catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+      {
+        // 最小超时诊断：predicate + 该 surface 下 managed Select 值/disabled 与
+        // 按钮标签/disabled 概览；不含整页 body 或凭据类内容。
+        string probe = "probe-unavailable";
+        if ((editorSurface ? SmokeEditorWebView : WorkbenchWebView).CoreWebView2 is { } failed)
+          probe = await failed.ExecuteScriptAsync(
+            "(() => { const s=document.querySelector('#managed-environment-select'); " +
+            "return { managedSelect: s ? { value: s.value, disabled: s.disabled } : null, " +
+            "buttons: Array.from(document.querySelectorAll('button')).map(b => " +
+            "({ label: (b.textContent || '').trim(), disabled: b.disabled })) }; })()");
+        throw new TimeoutException(
+          $"Smoke DOM wait timed out after {timeout} on " +
+          $"{(editorSurface ? "editor" : "workbench")} surface; predicate={predicate}; probe={probe}");
+      }
     }
   }
 }
