@@ -123,7 +123,9 @@ public sealed partial class MainWindow
     if (smokeInferenceAttached() || smokeInstallAttempts() != 0)
       throw new InvalidOperationException("Local QR generation installed or started a service.");
 
-    await NavigateSmokeAsync("设置", "#managed-environment-select");
+    // 导航证明用稳定 runtime 面板：冷启动权威清单未到时 React 不渲染
+    // #managed-environment-select（environments.length===0），名单由随后等待覆盖。
+    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     ManagedEnvironmentList empty = await WaitForSmokeEnvironmentsAsync(
       [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(2));
     ManagedEnvironment[] initial = SmokePair(empty);
@@ -139,7 +141,7 @@ public sealed partial class MainWindow
     object first = await SwitchAndRecognizeSmokeAsync(initial[0]);
     object second = await SwitchAndRecognizeSmokeAsync(initial[1]);
     int beforeSwitchBack = smokeInstallAttempts();
-    await NavigateSmokeAsync("设置", "#managed-environment-select");
+    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     await SelectSmokeEnvironmentAsync(initial[0].Id);
     await ClickManagedSmokeButtonAsync("切换到此环境");
     ManagedEnvironmentSession returned = await WaitForSmokeSessionAsync(initial[0].Id);
@@ -159,7 +161,9 @@ public sealed partial class MainWindow
 
   private async Task<object> VerifyRestartedSmokeEnvironmentAsync()
   {
-    await NavigateSmokeAsync("设置", "#managed-environment-select");
+    // 同上：稳定面板作导航证明，冷启动清单由随后的权威名单等待吸收（F7：
+    // restart 冷入口 30s 内 managedSelect 仍为 null 而面板已渲染）。
+    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     ManagedEnvironmentList list = await WaitForSmokeEnvironmentsAsync(
       [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(2));
     ManagedEnvironment a = SmokePair(list)[0];
@@ -221,7 +225,7 @@ public sealed partial class MainWindow
 
   private async Task<object> SwitchAndRecognizeSmokeAsync(ManagedEnvironment environment)
   {
-    await NavigateSmokeAsync("设置", "#managed-environment-select");
+    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     RecordManagedSmokeStage($"select {environment.Name}");
     await SelectSmokeEnvironmentAsync(environment.Id);
     await ClickManagedSmokeButtonAsync("切换到此环境");

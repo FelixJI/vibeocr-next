@@ -254,7 +254,8 @@ public sealed partial class MainWindow
     int timeoutMinutes = ParsePaddleSmokeMinutes("VIBEOCR_PADDLE_SMOKE_TIMEOUT_MINUTES", 40);
 
     RecordPaddleSmokeStage("switch environment");
-    await NavigateSmokeAsync("设置", "#managed-environment-select");
+    // 稳定 runtime 面板作导航证明：冷启动清单未到时不渲染环境 Select。
+    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     ManagedEnvironmentList list = await WaitForSmokeEnvironmentsAsync(
       [PaddleSmokeEnvironmentName], TimeSpan.FromMinutes(2));
     ManagedEnvironment environment = list.Environments
