@@ -335,7 +335,7 @@ public sealed partial class MainWindow
   private async Task EnterSmokeTextAsync(string selector, string value)
   {
     string script = "(() => { const e=document.querySelector(" + JsonSerializer.Serialize(selector) +
-      "); if(!e) return false; const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set; " +
+      "); if(!e) return false; const proto=e instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:e instanceof HTMLInputElement?HTMLInputElement.prototype:null; if(!proto) return false; const setter=Object.getOwnPropertyDescriptor(proto,'value').set; " +
       "setter.call(e," + JsonSerializer.Serialize(value) + "); e.dispatchEvent(new Event('input',{bubbles:true})); return true; })()";
     if (await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(script) != "true")
       throw new InvalidOperationException($"Smoke input unavailable: {selector}");
