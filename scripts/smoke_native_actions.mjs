@@ -51,8 +51,9 @@ async function freeLocalPort() {
 }
 
 async function native(action, options = {}) {
-  const pointerAction = ['mouse-move', 'mouse-down', 'mouse-up', 'frame', 'geometry'].includes(action);
-  const script = pointerAction ? path.join(scriptDir, 'scroll_capture_fixture.ps1') : nativeScript;
+  const sharedScript = ['mouse-move', 'mouse-down', 'mouse-up', 'frame', 'geometry',
+    'raise', 'lower'].includes(action);
+  const script = sharedScript ? path.join(scriptDir, 'scroll_capture_fixture.ps1') : nativeScript;
   const args = ['-NoProfile', '-NonInteractive', '-File', script,
     '-Action', action];
   for (const [key, value] of Object.entries(options))
@@ -142,8 +143,15 @@ async function startFixture() {
   }
 }
 
+// A child terminated by signal reports signalCode with exitCode null; both
+// normal and signal exits count as done, otherwise waitExit races an
+// already-fired exit event and mistakes the owned child for alive.
+function exited(child) {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
 async function waitExit(child, timeoutMs) {
-  if (!child || child.exitCode !== null) return true;
+  if (!child || exited(child)) return true;
   return Promise.race([
     once(child, 'exit').then(() => true),
     delay(timeoutMs).then(() => false),
@@ -151,7 +159,7 @@ async function waitExit(child, timeoutMs) {
 }
 
 async function forceStop(child) {
-  if (!child?.pid || child.exitCode !== null) return;
+  if (!child?.pid || exited(child)) return;
   // ChildProcess keeps the Windows process handle. A fresh PID/PPID tree can
   // belong to another instance after exit; terminate only this owned handle.
   // The app's Supervisor descendants remain owned by its kill-on-close Job.
@@ -159,7 +167,7 @@ async function forceStop(child) {
   assert(await waitExit(child, 5000), `Owned process ${child.pid} survived cleanup.`);
 }
 async function stopOwned(child, closeAction, options) {
-  if (!child || child.exitCode !== null) return;
+  if (!child || exited(child)) return;
   try { await native(closeAction, options); } catch { /* bounded PID cleanup below */ }
   if (await waitExit(child, 5000)) return;
   await forceStop(child);
@@ -257,11 +265,18 @@ async function focusRecorder(app, input) {
   const sy = (bounds.Bottom - bounds.Top) / view.height;
   assert(sx > 0 && sy > 0 && Math.abs(sx - sy) < 0.03,
     'Owned WebView must have a uniform measured scale.');
-  await native('focus-fixture', {
-    FixturePid: app.child.pid, Handle: app.main.Handle,
-    X: Math.round(bounds.Left + (box.x + box.width / 2) * sx),
-    Y: Math.round(bounds.Top + (box.y + box.height / 2) * sy),
-  });
+  // Raise only the owned main window before input-point ownership validation.
+  // Restore its normal z-order even when guarded focus fails.
+  await native('raise', { FixturePid: app.child.pid, Handle: app.main.Handle });
+  try {
+    await native('focus-fixture', {
+      FixturePid: app.child.pid, Handle: app.main.Handle,
+      X: Math.round(bounds.Left + (box.x + box.width / 2) * sx),
+      Y: Math.round(bounds.Top + (box.y + box.height / 2) * sy),
+    });
+  } finally {
+    await native('lower', { FixturePid: app.child.pid, Handle: app.main.Handle });
+  }
 }
 
 async function configure(app, evidence) {
