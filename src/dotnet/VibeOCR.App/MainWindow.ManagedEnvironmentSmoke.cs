@@ -75,6 +75,11 @@ public sealed partial class MainWindow
   private async Task<object> CreateSmokeEnvironmentsAsync()
   {
     await NavigateSmokeAsync("设置", "input[aria-label='新环境名称（留空自动命名）']");
+    // F4: 冷启动 managed-environment 清单投影未到时 environmentBusy 会禁用创建控件，
+    // 可能超过下方 30s 按钮就绪等待。复用 Paddle smoke 的首快照就绪等待：首个权威
+    // 清单投影到达即冷清单往返完成。这不是 environmentBusy=false 的严格证明；
+    // 按钮自身的 enabled 守卫仍保持权威。
+    await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
     await EnterSmokeTextAsync("input[aria-label='新环境名称（留空自动命名）']", SmokeEnvironmentA);
     await ClickManagedSmokeButtonAsync("创建空环境");
     await WaitForSmokeEnvironmentsAsync([SmokeEnvironmentA], TimeSpan.FromMinutes(5));
