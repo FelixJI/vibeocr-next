@@ -244,13 +244,16 @@ public sealed partial class MainWindow
       TimeSpan.FromSeconds(30));
     // Host state arrives before React has necessarily replaced the previous
     // editor. Wait for this exact session and its pixels before dispatching OCR.
+    // sceneEditing 会话的 canvas-editor 与“识别当前图”只在现场窗口渲染（主窗是
+    // EmptyStage）；session DOM 查现场面，识别结果仍在主窗。
     await WaitForSmokeDomAsync(
       "document.querySelector('.canvas-editor')?.dataset.screenshotSession === " +
       JsonSerializer.Serialize(capturedState.ScreenshotSession!.SessionId),
-      TimeSpan.FromSeconds(30));
+      TimeSpan.FromSeconds(30),
+      editorSurface: true);
     await WaitForCanvasAsync();
     RecordManagedSmokeStage($"recognize {environment.Name}");
-    await ClickManagedSmokeButtonAsync("识别当前图");
+    await ClickSmokeButtonAsync("识别当前图");
     await WaitForScreenshotStateAsync(state => !state.IsBusy && state.Result is not null,
       TimeSpan.FromMinutes(35));
     await WaitForSmokeDomAsync("(document.querySelector('.result-document')?.textContent ?? '').includes('VibeOCR') && (document.querySelector('.result-document')?.textContent ?? '').includes('123')",
@@ -372,12 +375,16 @@ public sealed partial class MainWindow
     await Task.Delay(100);
   }
 
-  private async Task WaitForSmokeDomAsync(string predicate, TimeSpan timeout)
+  private async Task WaitForSmokeDomAsync(string predicate, TimeSpan timeout,
+    bool editorSurface = false)
   {
     using var cancellation = new CancellationTokenSource(timeout);
     while (true)
     {
-      if (await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync($"(() => !!({predicate}))()") == "true")
+      // 现场面逐次读取：scene 窗口由 DispatcherQueue 异步创建，早绑定会冻结
+      // fallback；CoreWebView2 未初始化时继续轮询，不当作 DOM 证据。
+      if ((editorSurface ? SmokeEditorWebView : WorkbenchWebView).CoreWebView2 is { } view &&
+          await view.ExecuteScriptAsync($"(() => !!({predicate}))()") == "true")
         return;
       await Task.Delay(100, cancellation.Token);
     }

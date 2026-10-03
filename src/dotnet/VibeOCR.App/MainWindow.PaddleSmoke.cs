@@ -341,10 +341,12 @@ public sealed partial class MainWindow
       SyntheticFixtureRegionPicker.LastCapture;
     if (capture is null)
       throw new InvalidOperationException("Synthetic fixture capture has no evidence.");
+    // sceneEditing 会话的 canvas-editor 只在现场窗口渲染；session DOM 查现场面。
     await WaitForSmokeDomAsync(
       "document.querySelector('.canvas-editor')?.dataset.screenshotSession === " +
       JsonSerializer.Serialize(captured.ScreenshotSession!.SessionId),
-      TimeSpan.FromSeconds(30));
+      TimeSpan.FromSeconds(30),
+      editorSurface: true);
     await WaitForCanvasAsync();
 
     RecordPaddleSmokeStage($"recognize {mode}");
