@@ -189,6 +189,18 @@
         "-c",
         "Release",
         "--no-restore"
+      ],
+      [
+        "python",
+        "scripts/run_ci_command.py",
+        "--label",
+        "native-smoke-contract",
+        "--timeout-seconds",
+        "90",
+        "--",
+        "node",
+        "--test",
+        "tests/node/smoke_native_actions.test.mjs"
       ]
     ],
     "release_build": [

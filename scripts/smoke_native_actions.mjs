@@ -143,32 +143,85 @@ async function startFixture() {
   }
 }
 
-// A child terminated by signal reports signalCode with exitCode null; both
-// normal and signal exits count as done, otherwise waitExit races an
-// already-fired exit event and mistakes the owned child for alive.
+// A signal exit leaves exitCode null; its already-fired exit event will not recur.
 function exited(child) {
   return child.exitCode !== null || child.signalCode !== null;
 }
 
 async function waitExit(child, timeoutMs) {
   if (!child || exited(child)) return true;
-  return Promise.race([
-    once(child, 'exit').then(() => true),
-    delay(timeoutMs).then(() => false),
-  ]);
+  // events.once also watches 'error' while waiting; an abandoned race leaves
+  // that listener behind to swallow a later synchronous kill error as an
+  // unhandled rejection. Aborting the wait unsubscribes both of its own
+  // listeners; the timer is always dropped and other subscriptions stay.
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), timeoutMs);
+  try {
+    await once(child, 'exit', { signal: deadline.signal });
+    return true;
+  } catch (error) {
+    if (deadline.signal.aborted) return false;
+    throw error;
+  } finally {
+    deadline.abort();
+    clearTimeout(timer);
+  }
+}
+
+// Private seam over the original ChildProcess.kill() on the spawn-owned
+// handle: a failed kill can emit a transient synchronous 'error', so capture
+// it for the fail-closed decision and always unsubscribe again.
+function ownedKill(child, signal) {
+  const errors = [];
+  const onError = (error) => errors.push(error);
+  child.once('error', onError);
+  try {
+    return { accepted: child.kill(signal), errors };
+  } finally {
+    child.removeListener('error', onError);
+  }
 }
 
 async function forceStop(child) {
-  if (!child?.pid || exited(child)) return;
+  // Same-handle termination only works for a successfully spawned process;
+  // an unspawned PID-less object must be rejected, not reported as cleaned.
+  assert(Number.isSafeInteger(child?.pid) && child.pid > 0,
+    'Owned cleanup requires a spawned ChildProcess with a positive pid.');
+  if (exited(child)) return;
   // ChildProcess keeps the Windows process handle. A fresh PID/PPID tree can
   // belong to another instance after exit; terminate only this owned handle.
   // The app's Supervisor descendants remain owned by its kill-on-close Job.
-  child.kill();
-  assert(await waitExit(child, 5000), `Owned process ${child.pid} survived cleanup.`);
+  const kill = ownedKill(child);
+  assert.equal(kill.errors.length, 0,
+    `Owned kill of process ${child.pid} failed: ${kill.errors.map((error) => error.message).join('; ')}`);
+  if (await waitExit(child, 5000)) return;
+  // The force notification deadline passed without a JS exit event (the
+  // observed WinUI failure mode). One signal-0 endpoint probe on the same
+  // spawn-owned Windows handle is the only extra evidence; only a no-error
+  // "exited" answer on the original handle confirms actual termination.
+  // Exceptions, any error and a still-alive answer all fail closed.
+  assert.equal(process.platform, 'win32',
+    'signal-0 endpoint confirmation requires the Windows original-handle contract.');
+  const probe = ownedKill(child, 0);
+  console.warn(`Owned process ${child.pid}: exit notification missing ` +
+    `(exitCode=${child.exitCode}, signalCode=${child.signalCode}); same-handle signal-0 probe ` +
+    `accepted=${probe.accepted}, errors=${probe.errors.length}.`);
+  assert.equal(probe.errors.length, 0,
+    `Owned process ${child.pid} endpoint probe failed: ${probe.errors.map((error) => error.message).join('; ')}`);
+  assert.equal(probe.accepted, false, `Owned process ${child.pid} survived cleanup.`);
 }
 async function stopOwned(child, closeAction, options) {
-  if (!child || exited(child)) return;
-  try { await native(closeAction, options); } catch { /* bounded PID cleanup below */ }
+  if (!child) return;
+  assert(Number.isSafeInteger(child.pid) && child.pid > 0,
+    'Owned cleanup requires a spawned ChildProcess with a positive pid.');
+  if (exited(child)) return;
+  // The native close/quit actions post to an owned window handle. A
+  // windowless child has no HWND at all; the fixture would only reject the
+  // useless handle-0 request after a full pwsh start, so skip the futile
+  // native attempt and go straight to the bounded same-handle kill path.
+  // Production callers always pass a real owned Handle and are unchanged.
+  if (options?.Handle)
+    try { await native(closeAction, options); } catch { /* bounded PID cleanup below */ }
   if (await waitExit(child, 5000)) return;
   await forceStop(child);
 }
