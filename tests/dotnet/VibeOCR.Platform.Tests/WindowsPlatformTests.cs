@@ -211,6 +211,9 @@ public sealed class WindowsPlatformTests
         public int AddCalls { get; private set; }
         public int DeleteCalls { get; private set; }
 
+        public nint GetForeground() => 0;
+        public bool SetFocus(Guid id, nint windowHandle) => true;
+
         public bool Add(Guid id, nint windowHandle, uint callbackMessage, string tooltip)
         {
             AddCalls++;

@@ -48,9 +48,11 @@ def test_resolver_timeout_preserves_stage_and_elapsed() -> None:
 
 @pytest.mark.parametrize("active", [False, True])
 def test_resolver_idle_timeout_distinguishes_real_progress(active: bool) -> None:
+    # Windows containment starts two interpreters before the first progress line.
+    # Keep startup allowance above observed contention; noise still outlives idle.
     script = (
         "import time\n"
-        "for i in range(8):\n"
+        "for i in range(30):\n"
         + (
             " print(f'Collecting package-{i}', flush=True)\n"
             if active
@@ -61,8 +63,8 @@ def test_resolver_idle_timeout_distinguishes_real_progress(active: bool) -> None
     if active:
         _run_install_command(
             [sys.executable, "-c", script],
-            timeout=4,
-            idle_timeout=0.4,
+            timeout=12,
+            idle_timeout=2.0,
             env=dict(os.environ),
             reporter=None,
             heartbeat_code="runtime.resolve_packages",
@@ -71,8 +73,8 @@ def test_resolver_idle_timeout_distinguishes_real_progress(active: bool) -> None
         with pytest.raises(RuntimeInstallError, match="reason=idle_timeout"):
             _run_install_command(
                 [sys.executable, "-c", script],
-                timeout=4,
-                idle_timeout=0.4,
+                timeout=12,
+                idle_timeout=2.0,
                 env=dict(os.environ),
                 reporter=None,
                 heartbeat_code="runtime.resolve_packages",
@@ -213,12 +215,14 @@ def test_resolver_heartbeats_do_not_prevent_idle_timeout(
 
 
 def test_continuous_activity_still_has_total_deadline() -> None:
+    # Allow the same Windows startup chain without consuming the idle budget.
+    # Total must still expire while genuine progress continues.
     script = "import time\nfor i in range(100):\n print(f'Collecting pkg-{i}',flush=True)\n time.sleep(.05)\n"
     with pytest.raises(RuntimeInstallError, match="reason=total_timeout"):
         _run_install_command(
             [sys.executable, "-c", script],
-            timeout=0.7,
-            idle_timeout=0.4,
+            timeout=3.0,
+            idle_timeout=2.0,
             env=dict(os.environ),
             reporter=None,
             heartbeat_code="runtime.resolve_packages",
