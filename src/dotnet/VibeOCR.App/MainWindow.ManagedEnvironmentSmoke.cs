@@ -379,6 +379,13 @@ public sealed partial class MainWindow
       "; e.dispatchEvent(new Event('change',{bubbles:true})); return true; })()",
       TimeSpan.FromMinutes(2));
     await Task.Delay(100);
+    // 后置等待：选择触发的 invalidate 会同步清空兼容结果，自动 compat 查询
+    // 可能在选择之后补发并重新 busy 禁用控件；等待控件保持目标值且可交互。
+    await WaitForSmokeDomAsync(
+      "(() => { const e=document.querySelector(" + JsonSerializer.Serialize(selector) +
+      "); return !!e && e.value === " + JsonSerializer.Serialize(value) +
+      " && !e.disabled; })()",
+      TimeSpan.FromMinutes(2));
   }
 
   private async Task WaitForSmokeDomAsync(string predicate, TimeSpan timeout,
