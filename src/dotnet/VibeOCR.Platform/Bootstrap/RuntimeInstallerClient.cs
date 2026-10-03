@@ -1486,7 +1486,11 @@ public sealed class RuntimeInstallerCommandRunner : IRuntimeInstallerCommandRunn
         Action<string>? standardOutputLine,
         CancellationToken cancellationToken)
     {
+        // Verification and CreateProcess are synchronous and must not block the UI caller.
+        await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+        cancellationToken.ThrowIfCancellationRequested();
         VerifyBoundExecutable(startInfo);
+        cancellationToken.ThrowIfCancellationRequested();
         using Process process = Process.Start(startInfo) ??
             throw new RuntimeInstallerException("Could not start Runtime Installer.");
         var stdoutBuffer = new StringBuilder();

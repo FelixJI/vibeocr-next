@@ -19,7 +19,23 @@ for (const size of [
     await page.setViewportSize(size);
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
-    await mountHost(page, snapshot);
+    await mountHost(page, {
+      ...snapshot,
+      capabilities: [...snapshot.capabilities, "settings.floatingToolbar"],
+      features: {
+        ...snapshot.features,
+        settings: {
+          floatingToolbar: {
+            enabled: true,
+            edge: "top",
+            autoHide: true,
+            visibility: "visible",
+            lingerMs: 300,
+            theme: "system",
+          },
+        },
+      },
+    });
     for (const name of [
       "单次识别",
       "批量识别",
@@ -47,6 +63,18 @@ for (const size of [
           .locator(".workspace")
           .evaluate((element) => element.getBoundingClientRect().width),
       ).toBeLessThanOrEqual(1920);
+      if (name === "设置") {
+        for (const label of ["收起时间（毫秒）", "工具栏主题"]) {
+          const control = page.getByLabel(label, { exact: true });
+          await control.scrollIntoViewIfNeeded();
+          await expect(control).toBeInViewport();
+          await expect(control).toBeEnabled();
+        }
+        await page.screenshot({
+          path: `test-results/toolbar-settings-${size.width}x${size.height}.png`,
+          fullPage: true,
+        });
+      }
       const lastControl = main
         .locator("button:visible, input:visible, a:visible")
         .last();

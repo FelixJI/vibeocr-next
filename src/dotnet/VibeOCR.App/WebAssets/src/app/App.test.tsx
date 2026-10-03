@@ -215,6 +215,8 @@ describe("AppShell", () => {
             edge: "top",
             autoHide: true,
             visibility: "userHidden",
+            lingerMs: 600,
+            theme: "system",
           },
         },
       },
@@ -248,6 +250,24 @@ describe("AppShell", () => {
       type: "settings.setFloatingToolbarLayout",
       edge: "top",
       autoHide: false,
+    });
+    const delayInput = screen.getByLabelText("收起时间（毫秒）");
+    expect(delayInput).toHaveValue(600);
+    await user.clear(delayInput);
+    await user.type(delayInput, "99");
+    expect(screen.getByRole("button", { name: "保存时间" })).toBeDisabled();
+    await user.clear(delayInput);
+    await user.type(delayInput, "900");
+    await user.click(screen.getByRole("button", { name: "保存时间" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setFloatingToolbarPreferences",
+      lingerMs: 900,
+    });
+    // 宿主快照尚未确认 900ms 时切换主题，不回传陈旧的 600ms。
+    await user.selectOptions(screen.getByLabelText("工具栏主题"), "dark");
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setFloatingToolbarPreferences",
+      theme: "dark",
     });
     await user.click(screen.getByRole("checkbox", { name: "启用悬浮工具栏" }));
     expect(actions.run).toHaveBeenCalledWith({

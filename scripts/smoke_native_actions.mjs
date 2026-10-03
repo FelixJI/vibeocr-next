@@ -312,6 +312,8 @@ async function configure(app, evidence) {
   }));
   evidence.webviewBeforeEscape = await page.evaluate(() => ({
     focused: document.hasFocus(), visibility: document.visibilityState,
+    activeElement: document.activeElement?.id,
+    events: window.__hotkeyRecordingEvents,
   }));
   await native('escape', { AppPid: app.child.pid });
   evidence.afterEscape = JSON.parse(await native('probe', {
@@ -1066,10 +1068,9 @@ async function main() {
   }
 }
 
-export {
-  launchApp, openSettings, setCheckbox, native, windows, waitForWindows,
-  startFixture, stopOwned, delay,
-};
+export { native, windows, waitForWindows, area, inside, delay, startFixture,
+  launchApp, openSettings, toolbarStatus, setCheckbox, stopOwned, configure,
+  captureThroughHotkey, taskbarState, pngPixels, focusRecorder };
 
 if (path.resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
@@ -1077,3 +1078,4 @@ if (path.resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
     process.exitCode = 1;
   });
 }
+

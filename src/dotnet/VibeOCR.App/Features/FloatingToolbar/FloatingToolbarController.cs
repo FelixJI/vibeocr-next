@@ -40,6 +40,10 @@ internal interface IFloatingToolbarView : IDisposable
 
     nint Handle { get; }
 
+    /// <summary>应用用户主题偏好（跟随系统/浅色/深色）：纯视觉更新，
+    /// 不改变可见性、窗口样式或焦点。</summary>
+    void ApplyTheme(FloatingToolbarTheme theme);
+
     PhysicalRectangle GetPreferredSize();
 
     PhysicalRectangle GetBounds();
@@ -88,6 +92,8 @@ internal sealed class FloatingToolbarController : IDisposable
     private readonly Func<PhysicalRectangle> _primaryMonitor;
     private readonly Func<PhysicalRectangle, PhysicalRectangle> _monitorOf;
     private readonly Action<FloatingToolbarSettings> _persist;
+    private readonly TimeProvider _clock;
+    private long? _pointerExitedAt;
     private FloatingToolbarSettings _settings;
     private IEdgeSensor? _sensor;
     private IFloatingToolbarDelayTimer? _lingerTimer;
@@ -105,8 +111,10 @@ internal sealed class FloatingToolbarController : IDisposable
         Func<IReadOnlySet<ScreenEdge>> occupiedEdges,
         Func<PhysicalRectangle> primaryMonitor,
         Func<PhysicalRectangle, PhysicalRectangle> monitorOf,
-        Action<FloatingToolbarSettings> persist)
+        Action<FloatingToolbarSettings> persist,
+        TimeProvider? clock = null)
     {
+        _clock = clock ?? TimeProvider.System;
         _view = view ?? throw new ArgumentNullException(nameof(view));
         _sensorFactory = sensorFactory ?? throw new ArgumentNullException(nameof(sensorFactory));
         _timerFactory = timerFactory ?? throw new ArgumentNullException(nameof(timerFactory));
@@ -153,6 +161,8 @@ internal sealed class FloatingToolbarController : IDisposable
             return;
         }
 
+        // 首次显示前应用主题，保证任何后续 ShowAt 都是正确主题。
+        _view.ApplyTheme(_settings.Theme);
         _dockedMonitor = _primaryMonitor();
         if (_settings.HiddenByUser)
         {
@@ -172,7 +182,7 @@ internal sealed class FloatingToolbarController : IDisposable
 
     public void Stop()
     {
-        _lingerTimer?.Stop();
+        StopLinger();
         DestroySensor();
         if (_state != ToolbarState.Inactive)
         {
@@ -208,7 +218,7 @@ internal sealed class FloatingToolbarController : IDisposable
 
         _suspendedState = _state;
         _suspendedBounds = _view.GetBounds();
-        _lingerTimer?.Stop();
+        StopLinger();
         _sensor?.Disarm();
         _view.Hide();
         _state = ToolbarState.Suspended;
@@ -281,7 +291,7 @@ internal sealed class FloatingToolbarController : IDisposable
         }
 
         PersistHiddenByUser(hidden: true);
-        _lingerTimer?.Stop();
+        StopLinger();
         _sensor?.Disarm();
         _view.Hide();
         _state = ToolbarState.UserHidden;
@@ -348,6 +358,7 @@ internal sealed class FloatingToolbarController : IDisposable
             return;
         }
 
+        bool delayChanged = _settings.LingerMs != next.LingerMs;
         bool wasInactive = _state == ToolbarState.Inactive;
         _settings = next;
         if (wasInactive)
@@ -355,6 +366,10 @@ internal sealed class FloatingToolbarController : IDisposable
             Start();
             return;
         }
+
+        // 主题变化只重涂外观：不取消当前状态、不布防/撤防感应条、
+        // 不影响 linger 计时与既有 persist-first 错误语义。
+        _view.ApplyTheme(next.Theme);
 
         if (_state == ToolbarState.UserHidden)
         {
@@ -378,7 +393,7 @@ internal sealed class FloatingToolbarController : IDisposable
             && _state is not (ToolbarState.Suspended or ToolbarState.Dragging))
         {
             // 实时设置主动隐藏：与 Hide() 同语义。
-            _lingerTimer?.Stop();
+            StopLinger();
             _sensor?.Disarm();
             _view.Hide();
             _state = ToolbarState.UserHidden;
@@ -386,6 +401,20 @@ internal sealed class FloatingToolbarController : IDisposable
         }
 
         ReapplyLayout();
+        if (delayChanged && _state == ToolbarState.Revealed && _pointerExitedAt is { } leftAt)
+        {
+            // 已经离开时更新同一截止点，不从保存时刻重新计满时长。
+            TimeSpan remaining = TimeSpan.FromMilliseconds(next.LingerMs) - _clock.GetElapsedTime(leftAt);
+            if (remaining <= TimeSpan.Zero)
+            {
+                StopLinger();
+                HideToEdge();
+            }
+            else
+            {
+                _lingerTimer!.Start(remaining);
+            }
+        }
     }
 
     public void Dispose() => Stop();
@@ -430,7 +459,7 @@ internal sealed class FloatingToolbarController : IDisposable
     {
         if (_state == ToolbarState.Revealed)
         {
-            _lingerTimer?.Stop();
+            StopLinger();
         }
     }
 
@@ -442,6 +471,7 @@ internal sealed class FloatingToolbarController : IDisposable
         }
 
         _lingerTimer ??= CreateLingerTimer();
+        _pointerExitedAt = _clock.GetTimestamp();
         _lingerTimer.Start(TimeSpan.FromMilliseconds(_settings.LingerMs));
     }
 
@@ -452,7 +482,7 @@ internal sealed class FloatingToolbarController : IDisposable
             return;
         }
 
-        _lingerTimer?.Stop();
+        StopLinger();
         HideToEdge();
     }
 
@@ -465,7 +495,7 @@ internal sealed class FloatingToolbarController : IDisposable
             return;
         }
 
-        _lingerTimer?.Stop();
+        StopLinger();
         _sensor?.Disarm();
         _state = ToolbarState.Dragging;
     }
@@ -516,6 +546,12 @@ internal sealed class FloatingToolbarController : IDisposable
         _state = ToolbarState.PinnedFloating;
     }
 
+    private void StopLinger()
+    {
+        _pointerExitedAt = null;
+        _lingerTimer?.Stop();
+    }
+
     private IFloatingToolbarDelayTimer CreateLingerTimer()
     {
         IFloatingToolbarDelayTimer timer = _timerFactory();
@@ -547,6 +583,10 @@ internal sealed class FloatingToolbarController : IDisposable
     {
         switch (_state)
         {
+            case ToolbarState.Revealed when !_settings.AutoHide:
+                StopLinger();
+                ShowDocked(ToolbarState.PinnedDocked);
+                break;
             case ToolbarState.Hidden:
                 if (_settings.AutoHide)
                 {

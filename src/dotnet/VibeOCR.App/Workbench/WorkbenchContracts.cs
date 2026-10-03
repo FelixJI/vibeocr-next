@@ -278,6 +278,9 @@ public sealed record SetFloatingToolbarEnabledCommand(bool Enabled) : WorkbenchC
 /// <summary>Change the floating toolbar dock edge and auto-hide behavior live.</summary>
 public sealed record SetFloatingToolbarLayoutCommand(ScreenEdge Edge, bool AutoHide) : WorkbenchCommand;
 
+/// <summary>Patch the collapse delay or native theme preference against the current settings.</summary>
+public sealed record SetFloatingToolbarPreferencesCommand(int? LingerMs = null, string? Theme = null) : WorkbenchCommand;
+
 /// <summary>Explicitly show the floating toolbar (recover from user-hidden).</summary>
 public sealed record ShowFloatingToolbarCommand : WorkbenchCommand;
 
@@ -693,7 +696,9 @@ public sealed record SettingsFloatingToolbarState(
   string Edge,
   bool AutoHide,
   string Visibility,
-  string Error = "");
+  string Error = "",
+  int LingerMs = 300,
+  string Theme = "system");
 
 /// <summary>
 /// MinerU 连接投影；API Key 只以是否已配置出现，明文不进入桥接状态。

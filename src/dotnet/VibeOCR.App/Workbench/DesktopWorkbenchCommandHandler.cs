@@ -187,6 +187,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     this.textLayerRecognitionFactory = textLayerRecognitionFactory ?? recognitionFactory;
     this.pinScreenshot = pinScreenshot;
     this.shellActions = shellActions;
+    if (shellActions is not null)
+      shellActions.ToolbarStateChanged += OnToolbarStateChanged;
     this.optionsLayout = optionsLayout;
   }
 
@@ -412,6 +414,8 @@ public sealed class DesktopWorkbenchCommandHandler :
           toolbarEnabled),
         SetFloatingToolbarLayoutCommand toolbarLayout => SetFloatingToolbarLayout(
           toolbarLayout),
+        SetFloatingToolbarPreferencesCommand toolbarPreferences => SetFloatingToolbarPreferences(
+          toolbarPreferences),
         ShowFloatingToolbarCommand => ShowFloatingToolbar(),
         HideFloatingToolbarCommand => HideFloatingToolbar(),
         SetDownloadSourceCommand source => await SetSourceAsync(
@@ -511,6 +515,8 @@ public sealed class DesktopWorkbenchCommandHandler :
       error is IOException or UnauthorizedAccessException or InvalidOperationException or
         WorkbenchAnnotationAccessException or WorkbenchResourceAccessException or RuntimeInstallerException)
     {
+      if (command is SetFloatingToolbarPreferencesCommand)
+        AppLog.Error("Floating toolbar preferences failed", error);
       return new WorkbenchCommandOutcome(
         [],
         new WorkbenchProblem(
@@ -2575,6 +2581,27 @@ public sealed class DesktopWorkbenchCommandHandler :
     return SettingsState(settings, error);
   }
 
+  private SettingsWorkbenchState SetFloatingToolbarPreferences(
+    SetFloatingToolbarPreferencesCommand command)
+  {
+    settings ??= CreateSettings();
+    if ((command.LingerMs is null && command.Theme is null) ||
+      command.LingerMs is < FloatingToolbarSettings.MinimumLingerMs or > FloatingToolbarSettings.MaximumLingerMs ||
+      command.Theme is not (null or "system" or "light" or "dark"))
+    {
+      return SettingsState(settings, "收起时间须为 100–5000 毫秒，主题须为跟随系统、亮色或深色；原设置已保留。");
+    }
+    ShellActionDispatcher actions = ShellActions();
+    FloatingToolbarSettings current = actions.ToolbarSettings;
+    int lingerMs = command.LingerMs ?? current.LingerMs;
+    FloatingToolbarTheme theme = command.Theme is null
+      ? current.Theme : FloatingToolbarSettings.ParseTheme(command.Theme);
+    string? error = current.LingerMs == lingerMs && current.Theme == theme
+      ? null
+      : ApplyToolbar(actions, current with { LingerMs = lingerMs, Theme = theme });
+    return SettingsState(settings, error);
+  }
+
   private SettingsWorkbenchState ShowFloatingToolbar()
   {
     settings ??= CreateSettings();
@@ -2875,6 +2902,12 @@ public sealed class DesktopWorkbenchCommandHandler :
       InvalidateScreenshotSessionRecognitionOnMaintenance();
       StateChanged?.Invoke(SettingsState(settings));
     }
+  }
+
+  private void OnToolbarStateChanged()
+  {
+    if (Volatile.Read(ref disposed) == 0)
+      StateChanged?.Invoke(settings is null ? SettingsShellState() : SettingsState(settings));
   }
 
   /// <summary>
@@ -3449,7 +3482,9 @@ public sealed class DesktopWorkbenchCommandHandler :
         FloatingToolbarSettings.EdgeName(shellActions.ToolbarSettings.Edge),
         shellActions.ToolbarSettings.AutoHide,
         FormatToolbarVisibility(shellActions.ToolbarVisibility),
-        error ?? "");
+        error ?? "",
+        shellActions.ToolbarSettings.LingerMs,
+        FloatingToolbarSettings.ThemeName(shellActions.ToolbarSettings.Theme));
 
   private static string FormatToolbarVisibility(FloatingToolbarVisibility visibility) =>
     visibility switch
@@ -3684,6 +3719,8 @@ public sealed class DesktopWorkbenchCommandHandler :
       settings.CancelMaintenance();
     }
     diagnostics.PropertyChanged -= OnDiagnosticsPropertyChanged;
+    if (shellActions is not null)
+      shellActions.ToolbarStateChanged -= OnToolbarStateChanged;
     Task[] operations;
     lock (backgroundOperations)
     {

@@ -249,6 +249,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     }
     catch (Exception error)
     {
+      VibeOCR.App.Services.AppLog.Error("Workbench command failed", error);
       StateChanged?.Invoke($"bridge-command-failed:{error.GetType().Name}");
       RecoveryRequired?.Invoke();
     }

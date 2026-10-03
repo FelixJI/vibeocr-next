@@ -82,6 +82,7 @@ export type AppActionType =
   | "settings.resetActionHotkey"
   | "settings.setFloatingToolbarEnabled"
   | "settings.setFloatingToolbarLayout"
+  | "settings.setFloatingToolbarPreferences"
   | "settings.showFloatingToolbar"
   | "settings.hideFloatingToolbar"
   | "settings.setSource"

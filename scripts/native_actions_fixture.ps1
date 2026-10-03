@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'webview-bounds', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection', 'cursor', 'magnifier', 'minimize', 'restore', 'tray-state', 'tray-click', 'taskbar-created', 'down', 'tray-fixture', 'tray-keyboard', 'tray-keyboard-resume', 'tray-expose', 'tray-left-click', 'tray-double-click', 'tray-gone', 'tray-menu-quit', 'tray-menu-open', 'tray-menu-toggle')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'webview-bounds', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection', 'cursor', 'magnifier', 'toolbar-sequence', 'toolbar-drag', 'toolbar-hotkey', 'pump', 'minimize', 'restore', 'tray-state', 'tray-click', 'taskbar-created', 'down', 'tray-fixture', 'tray-keyboard', 'tray-keyboard-resume', 'tray-expose', 'tray-left-click', 'tray-double-click', 'tray-gone', 'tray-menu-quit', 'tray-menu-open', 'tray-menu-toggle')][string]$Action,
     [int]$AppPid = 0,
     [int]$FixturePid = 0,
     [int]$ForegroundPid = 0,
@@ -7,6 +7,9 @@ param(
     [uint32]$ThreadId = 0,
     [int]$X = 0,
     [int]$Y = 0,
+    [int]$OutsideX = 0,
+    [int]$OutsideY = 0,
+    [ValidateRange(100, 5000)][int]$LingerMs = 300,
     [Guid]$IconGuid = [Guid]::Empty
 )
 
@@ -43,6 +46,7 @@ public static class NativeActionsFixture
         public string ClassName { get; set; }
         public uint Dpi { get; set; }
         public Rect Bounds { get; set; }
+        public long ExtendedStyle { get; set; }
     }
     [StructLayout(LayoutKind.Sequential)]
     private struct Input { public uint Type; public InputUnion Data; }
@@ -72,6 +76,8 @@ public static class NativeActionsFixture
     [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr window, out Rect bounds);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr window);
+    [DllImport("user32.dll")] private static extern IntPtr GetWindowLongPtrW(IntPtr window, int index);
+    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr window);
     [DllImport("user32.dll", EntryPoint = "CreateWindowExW", CharSet = CharSet.Unicode)]
     private static extern IntPtr CreateWindowEx(uint extended, string className, string text,
         uint style, int x, int y, int width, int height, IntPtr parent,
@@ -94,13 +100,12 @@ public static class NativeActionsFixture
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
     [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] private static extern bool PostThreadMessage(uint threadId, uint message, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr SendMessageTimeout(IntPtr window, uint message, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out UIntPtr result);
     [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
 
     [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr window);
-    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr window);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, System.Text.StringBuilder text, int size);
-    [DllImport("user32.dll")] private static extern IntPtr GetWindowLongPtrW(IntPtr window, int index);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern uint RegisterWindowMessage(string name);
     [StructLayout(LayoutKind.Sequential)]
     private struct IconIdentifier { public uint Size; public IntPtr Window; public uint Id; public Guid Guid; }
@@ -312,7 +317,7 @@ public static class NativeActionsFixture
         {
             GetWindowThreadProcessId(window, out uint owner);
             if (owner == (uint)pid && GetWindowRect(window, out Rect bounds))
-                found.Add(new WindowInfo { Handle = window.ToInt64(), Visible = IsWindowVisible(window), Iconic = IsIconic(window), ClassName = ClassName(window), Dpi = GetDpiForWindow(window), Bounds = bounds });
+                found.Add(new WindowInfo { Handle = window.ToInt64(), Visible = IsWindowVisible(window), Iconic = IsIconic(window), ClassName = ClassName(window), Dpi = GetDpiForWindow(window), Bounds = bounds, ExtendedStyle = GetWindowLongPtrW(window, -20).ToInt64() });
             return true;
         }, IntPtr.Zero);
         return found.ToArray();
@@ -337,6 +342,13 @@ public static class NativeActionsFixture
     {
         RequireForeground(appPid);
         return GetForegroundWindow().ToInt64();
+    }
+
+    public static object Pump(long handle, int appPid)
+    {
+        RequireOwner(handle, appPid);
+        bool responsive = SendMessageTimeout(new IntPtr(handle), 0, IntPtr.Zero, IntPtr.Zero, 2, 300, out _) != IntPtr.Zero;
+        return new { Responsive = responsive, Error = responsive ? 0 : Marshal.GetLastWin32Error() };
     }
 
     public static object Probe(int appPid, int fixturePid, int x, int y)
@@ -503,6 +515,66 @@ public static class NativeActionsFixture
         finally { Send(new[] { Key(key, true) }); }
     }
 
+    public static object ToolbarSequence(long handle, int appPid, int x, int y, int outsideX, int outsideY, int lingerMs)
+    {
+        RequireOwner(handle, appPid);
+        Hover(appPid, x, y);
+        System.Threading.Thread.Sleep(80);
+        Hover(appPid, outsideX, outsideY);
+        System.Threading.Thread.Sleep(Math.Min(100, lingerMs / 3));
+        bool beforeReentry = IsWindowVisible(new IntPtr(handle));
+        Hover(appPid, x, y);
+        System.Threading.Thread.Sleep(lingerMs + 150);
+        bool reentryCancelled = IsWindowVisible(new IntPtr(handle));
+        Hover(appPid, outsideX, outsideY);
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        while (IsWindowVisible(new IntPtr(handle)) && watch.ElapsedMilliseconds < lingerMs + 1500)
+            System.Threading.Thread.Sleep(10);
+        return new { BeforeReentry = beforeReentry, ReentryCancelled = reentryCancelled,
+            HiddenAfterSecondExit = !IsWindowVisible(new IntPtr(handle)), SecondExitElapsedMs = watch.ElapsedMilliseconds };
+    }
+
+    [DllImport("user32.dll")] private static extern bool GetCursorPos(out Point point);
+
+    private static Input MoveTo(int x, int y) => new Input
+    {
+        Type = 0,
+        Data = new InputUnion { Mouse = new MouseInput
+        {
+            X = (int)(((long)x - GetSystemMetrics(76)) * 65536 / GetSystemMetrics(78)),
+            Y = (int)(((long)y - GetSystemMetrics(77)) * 65536 / GetSystemMetrics(79)),
+            Flags = 0x0001 | 0x4000 | 0x8000,
+        } },
+    };
+
+    // Real SendInput drag. Absolute injected moves generate the complete
+    // WM_MOUSEMOVE stream the owned popup grip needs; SetCursorPos alone
+    // never produced it. Ownership stays explicit and owned: appPid owns the
+    // grip start point, fixturePid owns the foreground and the drop point.
+    public static object ToolbarDrag(int appPid, int fixturePid, int x, int y, int outsideX, int outsideY)
+    {
+        RequireForeground(fixturePid);
+        RequirePointOwner(x, y, appPid);
+        Send(new[] { MoveTo(x, y) });
+        RequireForeground(fixturePid);
+        RequirePointOwner(x, y, appPid);
+        if (!GetCursorPos(out Point dragStart)) throw new InvalidOperationException("Owned drag start cursor is unavailable.");
+        Point dragEnd = dragStart;
+        try
+        {
+            Send(new[] { Mouse(0x0002) });
+            System.Threading.Thread.Sleep(80);
+            RequireForeground(fixturePid);
+            RequirePointOwner(outsideX, outsideY, fixturePid);
+            Send(new[] { MoveTo(outsideX, outsideY) });
+            System.Threading.Thread.Sleep(120);
+            RequireForeground(fixturePid);
+            if (!GetCursorPos(out dragEnd)) throw new InvalidOperationException("Owned drag end cursor is unavailable.");
+        }
+        finally { Send(new[] { Mouse(0x0004) }); }
+        return new { StartX = dragStart.X, StartY = dragStart.Y, EndX = dragEnd.X, EndY = dragEnd.Y };
+    }
+
     public static void Hotkey(int foregroundPid, ushort key)
     {
         RequireForeground(foregroundPid);
@@ -655,8 +727,12 @@ try {
         'hotkey' { [NativeActionsFixture]::Hotkey($FixturePid, 0x79) }
         'recognize-hotkey' { [NativeActionsFixture]::Hotkey($ForegroundPid, 0x7A) }
         'foreground' { [NativeActionsFixture]::Foreground($AppPid) }
+        'pump' { [NativeActionsFixture]::Pump($Handle, $AppPid) | ConvertTo-Json -Compress }
         'probe' { [NativeActionsFixture]::Probe($AppPid, $FixturePid, $X, $Y) | ConvertTo-Json -Compress -Depth 5 }
         'hover' { [NativeActionsFixture]::Hover($AppPid, $X, $Y) }
+        'toolbar-sequence' { [NativeActionsFixture]::ToolbarSequence($Handle, $AppPid, $X, $Y, $OutsideX, $OutsideY, $LingerMs) | ConvertTo-Json -Compress }
+        'toolbar-drag' { [NativeActionsFixture]::ToolbarDrag($AppPid, $FixturePid, $X, $Y, $OutsideX, $OutsideY) | ConvertTo-Json -Compress }
+        'toolbar-hotkey' { [NativeActionsFixture]::Hotkey($ForegroundPid, 0x7B) }
         'tab' { [NativeActionsFixture]::OverlayKey($AppPid, 0x09) }
         'enter' { [NativeActionsFixture]::OverlayKey($AppPid, 0x0D) }
         'escape' { [NativeActionsFixture]::OverlayKey($AppPid, 0x1B) }
@@ -664,3 +740,4 @@ try {
 } finally {
     [void][NativeActionsFixture]::SetThreadDpiAwarenessContext($oldDpi)
 }
+
