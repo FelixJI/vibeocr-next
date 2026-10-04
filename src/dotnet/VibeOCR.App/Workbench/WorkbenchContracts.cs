@@ -239,7 +239,10 @@ public sealed record RefreshRuntimeCommand : WorkbenchCommand;
 public sealed record CreateEnvironmentCommand(string Name) : WorkbenchCommand;
 public sealed record PreviewEnvironmentInstallCommand(string EnvironmentId, string Recipe, string? SourceId) : WorkbenchCommand;
 public sealed record ConfirmEnvironmentInstallCommand(string PlanId, string? SourceId) : WorkbenchCommand;
-public sealed record SetEnvironmentSourcesCommand(string? EnvironmentId, string? PackageSourceId, string? ModelSourceId) : WorkbenchCommand;
+public sealed record SetEnvironmentSourcesCommand(
+  string? EnvironmentId, string? PackageSourceId, string? ModelSourceId,
+  string? PaddleocrModelSourceId = null, string? MineruModelSourceId = null,
+  bool IndependentModelSources = false) : WorkbenchCommand;
 public sealed record CancelEnvironmentInstallCommand : WorkbenchCommand;
 public sealed record InvalidateEnvironmentPlanCommand : WorkbenchCommand;
 public sealed record SwitchEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
@@ -536,6 +539,7 @@ public sealed record SettingsWorkbenchState(
   IReadOnlyList<SettingsEnvironmentSourceState>? EnvironmentSources = null,
   IReadOnlyList<string>? EnvironmentDefaultSourceIds = null,
   IReadOnlyList<string>? EnvironmentUnknownDefaultSourceIds = null,
+  IReadOnlyList<SettingsEnvironmentResolvedSourceState>? EnvironmentResolvedDefaultSources = null,
   IReadOnlyList<string>? EnvironmentPackageSourceIds = null,
   bool EnvironmentCanCancelInstall = false,
   IReadOnlyList<SettingsEnvironmentRecipeState>? EnvironmentRecipes = null,
@@ -578,7 +582,8 @@ public sealed record SettingsEnvironmentSourceState(
   string Id,
   string Kind,
   string DisplayName,
-  string Endpoint);
+  string Endpoint,
+  bool IsDefault = false);
 
 /// <summary>
 /// Runtime 权威配方目录投影（list.recipes）：用途/设备分组与 GPU 门禁在

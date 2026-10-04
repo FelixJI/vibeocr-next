@@ -384,9 +384,13 @@ public sealed class DesktopWorkbenchCommandHandler :
         CreateEnvironmentCommand create => await RunEnvironmentAsync(
           environment => environment.CreateAsync(create.Name, cancellationToken), cancellationToken),
         SetEnvironmentSourcesCommand setEnvironmentSources => await RunEnvironmentAsync(
-          environment => environment.SetSourcesAsync(setEnvironmentSources.EnvironmentId,
-            setEnvironmentSources.PackageSourceId, setEnvironmentSources.ModelSourceId,
-            cancellationToken), cancellationToken),
+          environment => setEnvironmentSources.IndependentModelSources
+            ? environment.SetSourcesAsync(setEnvironmentSources.EnvironmentId,
+                setEnvironmentSources.PackageSourceId, setEnvironmentSources.PaddleocrModelSourceId,
+                setEnvironmentSources.MineruModelSourceId, cancellationToken)
+            : environment.SetSourcesAsync(setEnvironmentSources.EnvironmentId,
+                setEnvironmentSources.PackageSourceId, setEnvironmentSources.ModelSourceId,
+                cancellationToken), cancellationToken),
         PreviewEnvironmentInstallCommand preview => await RunEnvironmentAsync(
           environment => environment.PreviewAsync(preview.EnvironmentId, preview.Recipe,
             preview.SourceId, cancellationToken), cancellationToken),
@@ -1603,11 +1607,12 @@ public sealed class DesktopWorkbenchCommandHandler :
     // 无论成功、取消或失败都释放截图单飞 guard，保证可重试。
     try
     {
+      RecognitionWorkbenchState state;
       using (screenCapture ? shellActions?.SuspendFloatingToolbarForCapture() : null)
       {
         bool deferredSelection = !await EnsureSelectionLoadedAsync(cancellationToken);
         SynchronizeRecognitionMode(requireUsable: true);
-        RecognitionWorkbenchState state = await RunRecognitionAsync(action, cancellationToken);
+        state = await RunRecognitionAsync(action, cancellationToken);
         if (deferredSelection)
         {
           // The run started before the Supervisor attached; its submit already
@@ -1628,10 +1633,11 @@ public sealed class DesktopWorkbenchCommandHandler :
           }
         }
 
-        if (generation == Volatile.Read(ref recognitionGeneration))
-        {
-          StateChanged?.Invoke(state);
-        }
+      }
+      // 完成状态发布前恢复悬浮栏，调用方看到终态时截图让位已结束。
+      if (generation == Volatile.Read(ref recognitionGeneration))
+      {
+        StateChanged?.Invoke(state);
       }
     }
     catch (OperationCanceledException)
@@ -3585,8 +3591,10 @@ public sealed class DesktopWorkbenchCommandHandler :
     EnvironmentBusy: viewModel.Environments?.IsBusy ?? false,
     EnvironmentSources: viewModel.Environments?.Snapshot?.Sources?.Select(source =>
       new SettingsEnvironmentSourceState(
-        source.Id, source.Kind, source.DisplayName, source.Endpoint)).ToArray(),
+        source.Id, source.Kind, source.DisplayName, source.Endpoint, source.IsDefault)).ToArray(),
     EnvironmentDefaultSourceIds: viewModel.Environments?.Snapshot?.DefaultSourceIds,
+    EnvironmentResolvedDefaultSources: viewModel.Environments?.Snapshot?.ResolvedDefaultSources?.Select(source =>
+      new SettingsEnvironmentResolvedSourceState(source.Kind, source.Id, source.DisplayName, source.Origin)).ToArray(),
     EnvironmentUnknownDefaultSourceIds: viewModel.Environments?.Snapshot?.UnknownDefaultSourceIds,
     EnvironmentPackageSourceIds: viewModel.Environments?.Snapshot?.PackageSourceIds,
     EnvironmentCanCancelInstall: viewModel.Environments?.CanCancelInstall ?? false,

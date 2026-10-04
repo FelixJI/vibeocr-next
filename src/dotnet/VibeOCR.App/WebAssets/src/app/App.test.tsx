@@ -3093,7 +3093,7 @@ describe("AppShell", () => {
     window.location.hash = "#/settings";
     const user = userEvent.setup();
     const actions: AppActions = {
-      run: vi.fn().mockResolvedValue(true),
+      run: vi.fn().mockResolvedValue(false),
       navigate: vi.fn(),
       setTheme: vi.fn(),
     };
@@ -3132,9 +3132,9 @@ describe("AppShell", () => {
                   origin: "global_default",
                 },
                 {
-                  kind: "model_registry",
-                  id: null,
-                  displayName: null,
+                  kind: "paddleocr_model_registry",
+                  id: "paddleocr-huggingface",
+                  displayName: "Hugging Face",
                   origin: "product_default",
                 },
               ],
@@ -3151,7 +3151,7 @@ describe("AppShell", () => {
               modelState: "not_applicable",
               serviceState: "not_started",
               configuredRecognitionTypes: [],
-              overrideSourceIds: ["modelscope"],
+              overrideSourceIds: ["paddleocr-modelscope"],
               resolvedSources: [
                 {
                   kind: "package_index",
@@ -3160,8 +3160,8 @@ describe("AppShell", () => {
                   origin: "global_default",
                 },
                 {
-                  kind: "model_registry",
-                  id: "modelscope",
+                  kind: "paddleocr_model_registry",
+                  id: "paddleocr-modelscope",
                   displayName: "ModelScope",
                   origin: "environment_override",
                 },
@@ -3182,6 +3182,7 @@ describe("AppShell", () => {
           environmentSources: [
             {
               id: "tuna-pypi",
+              isDefault: true,
               kind: "package_index",
               displayName: "TUNA PyPI 镜像",
               endpoint: "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/",
@@ -3193,19 +3194,61 @@ describe("AppShell", () => {
               endpoint: "https://pypi.org/simple",
             },
             {
-              id: "huggingface",
-              kind: "model_registry",
+              id: "paddleocr-huggingface",
+              kind: "paddleocr_model_registry",
               displayName: "Hugging Face",
               endpoint: "https://huggingface.co",
             },
             {
-              id: "modelscope",
-              kind: "model_registry",
+              id: "paddleocr-modelscope",
+              kind: "paddleocr_model_registry",
+              displayName: "ModelScope",
+              endpoint: "https://www.modelscope.cn",
+            },
+            {
+              id: "paddleocr-bos",
+              kind: "paddleocr_model_registry",
+              displayName: "百度 BOS",
+              endpoint: "https://paddle-model-ecology.bj.bcebos.com",
+            },
+            {
+              id: "mineru-huggingface",
+              kind: "mineru_model_registry",
+              displayName: "Hugging Face",
+              endpoint: "https://huggingface.co",
+            },
+            {
+              id: "mineru-modelscope",
+              kind: "mineru_model_registry",
               displayName: "ModelScope",
               endpoint: "https://www.modelscope.cn",
             },
           ],
-          environmentDefaultSourceIds: ["tuna-pypi"],
+          environmentDefaultSourceIds: [
+            "tuna-pypi",
+            "paddleocr-huggingface",
+            "mineru-huggingface",
+          ],
+          environmentResolvedDefaultSources: [
+            {
+              kind: "package_index",
+              id: "tuna-pypi",
+              displayName: "TUNA PyPI 镜像",
+              origin: "product_default",
+            },
+            {
+              kind: "paddleocr_model_registry",
+              id: "paddleocr-huggingface",
+              displayName: "Hugging Face",
+              origin: "product_default",
+            },
+            {
+              kind: "mineru_model_registry",
+              id: "mineru-huggingface",
+              displayName: "Hugging Face",
+              origin: "product_default",
+            },
+          ],
           environmentUnknownDefaultSourceIds: [],
         },
       },
@@ -3225,7 +3268,9 @@ describe("AppShell", () => {
       ),
     ).toBeVisible();
     expect(
-      screen.getByText("模型来源：官方默认（端点未知）（产品默认）"),
+      screen.getByText(
+        "PaddleOCR 模型来源：Hugging Face（产品默认；端点 https://huggingface.co）",
+      ),
     ).toBeVisible();
     expect(screen.getByText(/已安装依赖来源：TUNA PyPI 镜像/)).toBeVisible();
     expect(
@@ -3245,7 +3290,7 @@ describe("AppShell", () => {
     await user.selectOptions(screen.getByLabelText("目标环境"), "env-b");
     expect(
       screen.getByText(
-        "模型来源：ModelScope（本环境覆盖；端点 https://www.modelscope.cn）",
+        "PaddleOCR 模型来源：ModelScope（本环境覆盖；端点 https://www.modelscope.cn）",
       ),
     ).toBeVisible();
     await user.selectOptions(screen.getByLabelText("本环境依赖包来源"), "pypi");
@@ -3254,20 +3299,54 @@ describe("AppShell", () => {
       type: "settings.setEnvironmentSources",
       environmentId: "env-b",
       packageSourceId: "pypi",
-      modelSourceId: "modelscope",
+      paddleocrModelSourceId: "paddleocr-modelscope",
+      mineruModelSourceId: null,
     });
 
+    expect(screen.getByLabelText("全局依赖包来源")).toHaveValue("tuna-pypi");
+    expect(
+      screen.queryByRole("option", { name: "产品默认（TUNA PyPI 镜像）" }),
+    ).not.toBeInTheDocument();
+    await user.selectOptions(
+      screen.getByLabelText("本环境 PaddleOCR 模型来源"),
+      "paddleocr-bos",
+    );
+    await user.selectOptions(
+      screen.getByLabelText("本环境 MinerU 模型来源"),
+      "mineru-modelscope",
+    );
+    await user.click(screen.getByRole("button", { name: "保存本环境来源" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setEnvironmentSources",
+      environmentId: "env-b",
+      packageSourceId: "pypi",
+      paddleocrModelSourceId: "paddleocr-bos",
+      mineruModelSourceId: "mineru-modelscope",
+    });
+    await user.selectOptions(
+      screen.getByLabelText("本环境 PaddleOCR 模型来源"),
+      "",
+    );
+    await user.click(screen.getByRole("button", { name: "保存本环境来源" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setEnvironmentSources",
+      environmentId: "env-b",
+      packageSourceId: "pypi",
+      paddleocrModelSourceId: null,
+      mineruModelSourceId: "mineru-modelscope",
+    });
     // 全局默认保存不带环境 id，不会触碰任何单环境 override。
     await user.selectOptions(screen.getByLabelText("全局依赖包来源"), "pypi");
     await user.selectOptions(
-      screen.getByLabelText("全局模型来源"),
-      "huggingface",
+      screen.getByLabelText("全局 PaddleOCR 模型来源"),
+      "paddleocr-huggingface",
     );
     await user.click(screen.getByRole("button", { name: "保存全局默认来源" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.setEnvironmentSources",
       packageSourceId: "pypi",
-      modelSourceId: "huggingface",
+      paddleocrModelSourceId: "paddleocr-huggingface",
+      mineruModelSourceId: "mineru-huggingface",
     });
     unmount();
   });

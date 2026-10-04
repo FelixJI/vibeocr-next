@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -36,9 +37,10 @@ public sealed record ManagedDownloadSource(
     [property: JsonPropertyName("id")] string Id,
     [property: JsonPropertyName("kind")] string Kind,
     [property: JsonPropertyName("display_name")] string DisplayName,
-    [property: JsonPropertyName("endpoint")] string Endpoint);
+    [property: JsonPropertyName("endpoint")] string Endpoint,
+    [property: JsonPropertyName("is_default")] bool IsDefault = false);
 
-/// <summary>单环境每 kind 的解析结果：id 为 null 表示产品默认（模型源无覆盖时官方原生默认）。</summary>
+/// <summary>单环境每 kind 的权威解析结果；模型偏好与原生下载器的实际端点分别表达。</summary>
 public sealed record ManagedEnvironmentResolvedSource(
     [property: JsonPropertyName("kind")] string Kind,
     [property: JsonPropertyName("id")] string? Id,
@@ -68,7 +70,8 @@ public sealed record ManagedEnvironmentList(
     [property: JsonPropertyName("source_config_revision")] int SourceConfigRevision = 0,
     [property: JsonPropertyName("package_source_ids")] IReadOnlyList<string>? PackageSourceIds = null,
     [property: JsonPropertyName("recipes")] IReadOnlyList<ManagedEnvironmentRecipe>? Recipes = null,
-    [property: JsonPropertyName("hardware")] ManagedEnvironmentHardware? Hardware = null);
+    [property: JsonPropertyName("hardware")] ManagedEnvironmentHardware? Hardware = null,
+    [property: JsonPropertyName("resolved_default_sources")] IReadOnlyList<ManagedEnvironmentResolvedSource>? ResolvedDefaultSources = null);
 
 public sealed record ManagedEnvironmentPlan(
     [property: JsonPropertyName("plan_id")] string PlanId,
@@ -174,6 +177,12 @@ public sealed record ManagedEnvironmentQueryResult(
 public interface IManagedEnvironmentClient
 {
     Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default);
+    Task<ManagedEnvironmentList> InitializeDefaultEnvironmentAsync(CancellationToken cancellationToken = default) =>
+        ListEnvironmentsAsync(cancellationToken);
+    Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
+        string? environmentId, string? packageSourceId, string? paddleocrModelSourceId,
+        string? mineruModelSourceId, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("当前 Runtime 客户端不支持独立模型来源，请先更新 Runtime。");
     Task<ManagedEnvironment> CreateEnvironmentAsync(string name, CancellationToken cancellationToken = default);
     Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
         string? environmentId, string? packageSourceId, string? modelSourceId,
@@ -201,6 +210,20 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
 {
     public Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default) =>
         InvokeEnvironmentAsync<ManagedEnvironmentList>("list", [], cancellationToken);
+
+    public Task<ManagedEnvironmentList> InitializeDefaultEnvironmentAsync(CancellationToken cancellationToken = default) =>
+        InvokeEnvironmentAsync<ManagedEnvironmentList>("initialize_default", [], cancellationToken);
+
+    public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
+        string? environmentId, string? packageSourceId, string? paddleocrModelSourceId,
+        string? mineruModelSourceId, CancellationToken cancellationToken = default) =>
+        InvokeEnvironmentAsync<ManagedEnvironmentList>("set_sources", new()
+        {
+            ["environment_id"] = environmentId,
+            ["package_source_id"] = packageSourceId,
+            ["paddleocr_model_source_id"] = paddleocrModelSourceId,
+            ["mineru_model_source_id"] = mineruModelSourceId,
+        }, cancellationToken);
 
     public Task<ManagedEnvironment> CreateEnvironmentAsync(string name, CancellationToken cancellationToken = default) =>
         InvokeEnvironmentAsync<ManagedEnvironment>("create", new() { ["name"] = name }, cancellationToken);
@@ -276,7 +299,13 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
         request["request_kind"] = "environment";
         request["action"] = action;
         foreach ((string key, object? value) in fields) request[key] = value;
-        RuntimeInstallerProcessResult result = await _runner.RunAsync(StartInfo(request), cancellationToken)
+        ProcessStartInfo startInfo = StartInfo(request);
+        if (action is "install" or "initialize_default")
+        {
+            startInfo.RedirectStandardInput = true;
+            startInfo.ArgumentList.Add("--environment-cancel-control");
+        }
+        RuntimeInstallerProcessResult result = await _runner.RunAsync(startInfo, cancellationToken)
             .ConfigureAwait(false);
         string? json = FinalEnvelopeJson(result.StandardOutput);
         RuntimeHostError? error = ParseHostError(json);

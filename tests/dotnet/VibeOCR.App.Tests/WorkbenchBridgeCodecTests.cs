@@ -121,6 +121,15 @@ public sealed class WorkbenchBridgeCodecTests
     Assert.Null(global.EnvironmentId);
     Assert.Equal("pypi", global.PackageSourceId);
     Assert.Null(global.ModelSourceId);
+    string independentJson = globalJson.Replace("\"modelSourceId\": null",
+      "\"paddleocrModelSourceId\": \"paddleocr-bos\", \"mineruModelSourceId\": \"mineru-modelscope\"");
+    var independent = Assert.IsType<SetEnvironmentSourcesCommand>(
+      WorkbenchBridgeCodec.ParseCommand(independentJson, sessionId).Command);
+    Assert.True(independent.IndependentModelSources);
+    Assert.Equal("paddleocr-bos", independent.PaddleocrModelSourceId);
+    Assert.Equal("mineru-modelscope", independent.MineruModelSourceId);
+    Assert.Null(independent.ModelSourceId);
+
 
     string scopedJson = $$"""
       {

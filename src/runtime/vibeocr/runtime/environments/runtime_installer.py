@@ -1280,6 +1280,7 @@ def probe_nvidia_driver() -> dict[str, str | None]:
                 "--query-gpu=driver_version",
                 "--format=csv,noheader",
             ],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=10,
@@ -2334,8 +2335,41 @@ class RuntimeInstaller:
         return lease
 
 
+_OUTPUT_LOCK = threading.Lock()
+
+
 def _emit(value: object) -> None:
-    print(json.dumps(value, ensure_ascii=False, sort_keys=True))
+    with _OUTPUT_LOCK:
+        print(json.dumps(value, ensure_ascii=False, sort_keys=True), flush=True)
+
+
+def _environment_cancel_receipt(accepted: bool) -> None:
+    value = b"accepted" if accepted else b"rejected"
+    # The control daemon must not own a buffered stdout lock during shutdown,
+    # including the case where a terminal commit has already won the race.
+    with _OUTPUT_LOCK:
+        os.write(sys.stdout.fileno(), b'{"environment_cancel":"' + value + b'"}\n')
+
+
+def _listen_environment_cancel(
+    cancel: Callable[[Callable[[bool], None]], None],
+) -> None:
+    # Raw fd reads avoid a daemon holding stdin's buffered lock at interpreter
+    # shutdown. The inherited pipe also crosses the frozen bootloader boundary.
+    command = bytearray()
+    try:
+        while len(command) < 64:
+            value = os.read(sys.stdin.fileno(), 1)
+            if not value:
+                return
+            if value == b"\n":
+                if command.strip() == b"cancel":
+                    cancel(_environment_cancel_receipt)
+                return
+            command.extend(value)
+    except (OSError, ValueError):
+        # No receipt means cancellation was not confirmed by this process.
+        return
 
 
 def _configure_utf8_standard_streams() -> None:
@@ -2388,6 +2422,8 @@ def _request(value: object) -> dict[str, Any]:
             "plan_id",
             "package_source_id",
             "model_source_id",
+            "paddleocr_model_source_id",
+            "mineru_model_source_id",
             "prepared",
             "started_health",
         }
@@ -2476,8 +2512,9 @@ def _request(value: object) -> dict[str, Any]:
         action = value["action"]
         fields = {
             "list": set(),
+            "initialize_default": set(),
             "create": {"name"},
-            "set_sources": {"package_source_id", "model_source_id"},
+            "set_sources": {"package_source_id"},
             "preview_install": {"environment_id", "recipe"},
             "find_compatible": {"recipe"},
             "install": {"plan_id", "environment_id", "recipe", "source_ids"},
@@ -2501,7 +2538,16 @@ def _request(value: object) -> dict[str, Any]:
             extras
             - fields[action]
             - ({"source_ids"} if action == "preview_install" else set())
-            - ({"environment_id"} if action == "set_sources" else set())
+            - (
+                {
+                    "environment_id",
+                    "model_source_id",
+                    "paddleocr_model_source_id",
+                    "mineru_model_source_id",
+                }
+                if action == "set_sources"
+                else set()
+            )
             - ({"started_health"} if action == "commit_switch" else set())
         ):
             raise RuntimeInstallError(
@@ -2534,7 +2580,12 @@ def _request(value: object) -> dict[str, Any]:
             )
         ):
             raise RuntimeInstallError("Runtime environment source_ids are invalid")
-        for field in ("package_source_id", "model_source_id"):
+        for field in (
+            "package_source_id",
+            "model_source_id",
+            "paddleocr_model_source_id",
+            "mineru_model_source_id",
+        ):
             if (
                 field in value
                 and value[field] is not None
@@ -2876,6 +2927,7 @@ def main(argv: list[str] | None = None) -> int:
     _configure_utf8_standard_streams()
     parser = argparse.ArgumentParser(prog="vibeocr-runtime-installer")
     parser.add_argument("--request-json")
+    parser.add_argument("--environment-cancel-control", action="store_true")
     args = parser.parse_args(argv)
     operation: str | None = None
     request_kind: str | None = None
@@ -2907,15 +2959,34 @@ def main(argv: list[str] | None = None) -> int:
                 product_id=request.get("product_id"),
             )
             action = request["action"]
+            if args.environment_cancel_control and action in {
+                "install",
+                "initialize_default",
+            }:
+                threading.Thread(
+                    target=_listen_environment_cancel,
+                    args=(manager.cancel_install,),
+                    daemon=True,
+                ).start()
             if action == "list":
                 payload = manager.list()
+            elif action == "initialize_default":
+                payload = manager.initialize_default()
             elif action == "create":
                 payload = manager.create(request["name"])
             elif action == "set_sources":
                 payload = manager.set_sources(
                     request.get("environment_id"),
                     request.get("package_source_id"),
-                    request.get("model_source_id"),
+                    **{
+                        field: request[field]
+                        for field in (
+                            "model_source_id",
+                            "paddleocr_model_source_id",
+                            "mineru_model_source_id",
+                        )
+                        if field in request
+                    },
                 )
             elif action == "preview_install":
                 payload = manager.preview_install(

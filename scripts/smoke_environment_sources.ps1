@@ -53,7 +53,7 @@ try {
     $env:WEBVIEW2_USER_DATA_FOLDER = $webViewData
     $executable = Join-Path $candidate 'app\VibeOCR.WinUI.exe'
     $process = Start-Process -FilePath $executable `
-        -ArgumentList "--profile production --install-root `"$candidate`"" `
+        -ArgumentList "--profile production --shell-only --install-root `"$candidate`"" `
         -WorkingDirectory (Split-Path -Parent $executable) `
         -WindowStyle Hidden -PassThru
     if (-not $process.WaitForExit($TimeoutMinutes * 60000)) {
@@ -79,8 +79,10 @@ try {
     if ($evidence.service_attached) {
         throw 'Source settings smoke must not start an OCR service'
     }
-    if (@($evidence.default_source_ids).Count -ne 1 -or
-        $evidence.default_source_ids[0] -ne 'pypi') {
+    if (@($evidence.default_source_ids).Count -ne 3 -or
+        @($evidence.default_source_ids) -notcontains 'pypi' -or
+        @($evidence.default_source_ids) -notcontains 'paddleocr-huggingface' -or
+        @($evidence.default_source_ids) -notcontains 'mineru-huggingface') {
         throw 'Global package default was not saved as PyPI'
     }
     if ($evidence.a.status -ne 'empty' -or $evidence.a.revision -ne 1 -or
@@ -91,14 +93,18 @@ try {
     if ($evidence.b.status -ne 'empty' -or $evidence.b.revision -ne 1 -or
         $evidence.b.resolved_package -ne 'tuna-pypi' -or
         $evidence.b.resolved_package_origin -ne 'environment_override' -or
-        @($evidence.b.override_source_ids).Count -ne 1) {
+        @($evidence.b.override_source_ids).Count -ne 2 -or
+        $evidence.b.resolved_paddleocr_model -ne 'paddleocr-huggingface' -or
+        $evidence.b.resolved_mineru_model -ne 'mineru-modelscope') {
         throw "Environment B override was not isolated: $($evidence.b | ConvertTo-Json -Compress)"
     }
     $failure = $evidence.a_failure
     if ($failure.phase -ne 'failed' -or $failure.reason_code -ne 'install_interrupted' -or
         $null -ne $failure.requested_source_ids -or
-        @($failure.effective_source_ids).Count -ne 1 -or
-        $failure.effective_source_ids[0] -ne 'pypi') {
+        @($failure.effective_source_ids).Count -ne 3 -or
+        @($failure.effective_source_ids) -notcontains 'pypi' -or
+        @($failure.effective_source_ids) -notcontains 'paddleocr-huggingface' -or
+        @($failure.effective_source_ids) -notcontains 'mineru-huggingface') {
         throw "Cancelled install lost its frozen source evidence: $($failure | ConvertTo-Json -Compress)"
     }
     Write-Host 'Environment source settings E2E passed: global default, isolated override, follow preview, cancel durability, unchanged peer.'

@@ -24,6 +24,8 @@ from vibeocr.runtime_contracts import ErrorCode
 
 DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX = "package_index"
 DOWNLOAD_SOURCE_KIND_MODEL_REGISTRY = "model_registry"
+DOWNLOAD_SOURCE_KIND_PADDLEOCR_MODEL_REGISTRY = "paddleocr_model_registry"
+DOWNLOAD_SOURCE_KIND_MINERU_MODEL_REGISTRY = "mineru_model_registry"
 
 # 可选组件目录只描述 full 档位：base 档位的闭包是必备项，不可选择。
 VARIANT_ACCELERATORS = ("cpu", "nvidia_cuda")
@@ -55,6 +57,20 @@ _DOWNLOAD_SOURCES: tuple[dict[str, str], ...] = (
         "endpoint": "https://www.modelscope.cn",
     },
 )
+_DOWNLOAD_SOURCES += tuple(
+    {
+        "kind": f"{engine}_model_registry",
+        "id": f"{engine}-{source}",
+        "endpoint": endpoint,
+    }
+    for engine, source, endpoint in (
+        ("paddleocr", "huggingface", "https://huggingface.co"),
+        ("paddleocr", "modelscope", "https://www.modelscope.cn"),
+        ("paddleocr", "bos", "https://paddle-model-ecology.bj.bcebos.com"),
+        ("mineru", "huggingface", "https://huggingface.co"),
+        ("mineru", "modelscope", "https://www.modelscope.cn"),
+    )
+)
 _DEFAULT_DOWNLOAD_SOURCE_IDS = ("tuna-pypi",)
 
 # 展示名映射：目录 payload 仍只携带 kind/id/endpoint（wire 契约不变），
@@ -76,6 +92,44 @@ _MODEL_SOURCE_ENVIRONMENT: dict[str, dict[str, str]] = {
         "MINERU_MODEL_SOURCE": "modelscope",
     },
 }
+
+
+for _source in _DOWNLOAD_SOURCES:
+    if _source["kind"] in {
+        DOWNLOAD_SOURCE_KIND_PADDLEOCR_MODEL_REGISTRY,
+        DOWNLOAD_SOURCE_KIND_MINERU_MODEL_REGISTRY,
+    }:
+        _engine, _provider = _source["id"].split("-", 1)
+        _MODEL_SOURCE_ENVIRONMENT[_source["id"]] = {
+            "PADDLE_PDX_MODEL_SOURCE"
+            if _engine == "paddleocr"
+            else "MINERU_MODEL_SOURCE": _provider
+        }
+        _DOWNLOAD_SOURCE_DISPLAY_NAMES[_source["id"]] = {
+            "huggingface": "Hugging Face",
+            "modelscope": "ModelScope",
+            "bos": "百度 BOS",
+        }[_provider]
+
+
+def expand_legacy_model_sources(source_ids: Sequence[str]) -> tuple[str, ...]:
+    """Expand historical shared preferences; explicit engine preferences take precedence."""
+    result = [
+        source_id
+        for source_id in source_ids
+        if source_id not in {"huggingface", "modelscope"}
+    ]
+    for source_id in source_ids:
+        if source_id in {"huggingface", "modelscope"}:
+            for engine in ("paddleocr", "mineru"):
+                engine_ids = {
+                    source["id"]
+                    for source in _DOWNLOAD_SOURCES
+                    if source["kind"] == f"{engine}_model_registry"
+                }
+                if not engine_ids.intersection(result):
+                    result.append(f"{engine}-{source_id}")
+    return tuple(result)
 
 
 class RuntimeSelectionError(ValueError):
@@ -114,10 +168,10 @@ class ResolvedRuntimeSelection:
 
     def model_source_environment(self) -> dict[str, str]:
         """Project an optional source preference into official native client env."""
+        environment: dict[str, str] = {}
         for source in self.effective_download_sources:
-            if source.kind == DOWNLOAD_SOURCE_KIND_MODEL_REGISTRY:
-                return dict(_MODEL_SOURCE_ENVIRONMENT[source.source_id])
-        return {}
+            environment.update(_MODEL_SOURCE_ENVIRONMENT.get(source.source_id, {}))
+        return environment
 
     def durable_intent_fields(self) -> dict[str, list[str] | None]:
         return durable_selection_fields(
@@ -375,8 +429,12 @@ class RuntimeSelectionPolicy:
         )
 
 
-def default_download_sources() -> tuple[dict[str, str], ...]:
+def default_download_sources(
+    *, include_model_sources: bool = False
+) -> tuple[dict[str, str], ...]:
     defaults = set(_DEFAULT_DOWNLOAD_SOURCE_IDS)
+    if include_model_sources:
+        defaults.update(("paddleocr-huggingface", "mineru-huggingface"))
     return tuple(source for source in _DOWNLOAD_SOURCES if source["id"] in defaults)
 
 
@@ -422,6 +480,8 @@ def download_source_catalog_payload(
         if source_kind not in {
             DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX,
             DOWNLOAD_SOURCE_KIND_MODEL_REGISTRY,
+            DOWNLOAD_SOURCE_KIND_PADDLEOCR_MODEL_REGISTRY,
+            DOWNLOAD_SOURCE_KIND_MINERU_MODEL_REGISTRY,
         }:
             raise RuntimeSelectionError(
                 ErrorCode.VALIDATION_ERROR,
@@ -429,7 +489,7 @@ def download_source_catalog_payload(
             )
         source_id = source["id"]
         if (
-            source_kind == DOWNLOAD_SOURCE_KIND_MODEL_REGISTRY
+            source_kind != DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX
             and source_id not in _MODEL_SOURCE_ENVIRONMENT
         ):
             raise RuntimeSelectionError(
@@ -608,6 +668,9 @@ __all__ = [
     "BASE_PROFILE",
     "BoundDownloadSource",
     "DOWNLOAD_SOURCE_KIND_MODEL_REGISTRY",
+    "DOWNLOAD_SOURCE_KIND_PADDLEOCR_MODEL_REGISTRY",
+    "DOWNLOAD_SOURCE_KIND_MINERU_MODEL_REGISTRY",
+    "expand_legacy_model_sources",
     "DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX",
     "ResolvedRuntimeSelection",
     "RuntimeSelectionError",

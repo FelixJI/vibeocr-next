@@ -63,6 +63,10 @@ public static class WorkbenchBridgeCodec
     ["packageSourceId", "modelSourceId"];
   private static readonly HashSet<string> EnvironmentSourcesArgumentFields =
     ["environmentId", "packageSourceId", "modelSourceId"];
+  private static readonly HashSet<string> IndependentSourceDefaultsArgumentFields =
+    ["packageSourceId", "paddleocrModelSourceId", "mineruModelSourceId"];
+  private static readonly HashSet<string> IndependentEnvironmentSourcesArgumentFields =
+    ["environmentId", "packageSourceId", "paddleocrModelSourceId", "mineruModelSourceId"];
   private static readonly HashSet<string> MineruModeArgumentFields = ["mode"];
   private static readonly HashSet<string> MineruRemoteUrlArgumentFields =
     ["mode", "apiUrl"];
@@ -541,16 +545,22 @@ public static class WorkbenchBridgeCodec
       }
       case ("settings", "setEnvironmentSources"):
       {
-        bool scoped = !HasExactFields(arguments, EnvironmentSourceDefaultsArgumentFields);
-        EnsureObjectWithFields(
-          arguments,
-          scoped ? EnvironmentSourcesArgumentFields : EnvironmentSourceDefaultsArgumentFields,
-          "command arguments");
+        bool independent = arguments.TryGetProperty("paddleocrModelSourceId", out _) ||
+          arguments.TryGetProperty("mineruModelSourceId", out _);
+        HashSet<string> defaultsFields = independent
+          ? IndependentSourceDefaultsArgumentFields : EnvironmentSourceDefaultsArgumentFields;
+        HashSet<string> scopedFields = independent
+          ? IndependentEnvironmentSourcesArgumentFields : EnvironmentSourcesArgumentFields;
+        bool scoped = !HasExactFields(arguments, defaultsFields);
+        EnsureObjectWithFields(arguments, scoped ? scopedFields : defaultsFields, "command arguments");
         string? sourceEnvironmentId = scoped ? ParseEnvironmentId(arguments) : null;
         return new SetEnvironmentSourcesCommand(
           sourceEnvironmentId,
           ParseSourceId(arguments.GetProperty("packageSourceId")),
-          ParseSourceId(arguments.GetProperty("modelSourceId")));
+          independent ? null : ParseSourceId(arguments.GetProperty("modelSourceId")),
+          independent ? ParseSourceId(arguments.GetProperty("paddleocrModelSourceId")) : null,
+          independent ? ParseSourceId(arguments.GetProperty("mineruModelSourceId")) : null,
+          independent);
       }
       case ("settings", "cancelEnvironmentInstall"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");

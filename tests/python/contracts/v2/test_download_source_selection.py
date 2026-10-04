@@ -33,7 +33,12 @@ from vibeocr.runtime_contracts.generated.error_codes import (
 
 ROOT = Path(__file__).resolve().parents[4]
 V2 = ROOT / "contracts/runtime/python/vibeocr/runtime_contracts"
-DOWNLOAD_SOURCE_KINDS = ("package_index", "model_registry")
+DOWNLOAD_SOURCE_KINDS = (
+    "package_index",
+    "model_registry",
+    "paddleocr_model_registry",
+    "mineru_model_registry",
+)
 DOWNLOAD_SOURCE_ERRORS = {
     "DOWNLOAD_SOURCE_UNKNOWN": ("validation", 400, False),
 }

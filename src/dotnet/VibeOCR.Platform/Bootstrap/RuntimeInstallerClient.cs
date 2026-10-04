@@ -1491,47 +1491,145 @@ public sealed class RuntimeInstallerCommandRunner : IRuntimeInstallerCommandRunn
         cancellationToken.ThrowIfCancellationRequested();
         VerifyBoundExecutable(startInfo);
         cancellationToken.ThrowIfCancellationRequested();
+        return await RunProcessAsync(startInfo, standardOutputLine, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal static async Task<RuntimeInstallerProcessResult> RunProcessAsync(
+        ProcessStartInfo startInfo,
+        Action<string>? standardOutputLine,
+        CancellationToken cancellationToken)
+    {
         using Process process = Process.Start(startInfo) ??
             throw new RuntimeInstallerException("Could not start Runtime Installer.");
+        bool controlledCancellation = startInfo.ArgumentList.Contains("--environment-cancel-control");
+        var receipt = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var stdoutBuffer = new StringBuilder();
+        using var streamsLifetime = new CancellationTokenSource();
         Task stdout = ReadStandardOutputAsync(
             process.StandardOutput,
             stdoutBuffer,
             standardOutputLine,
-            cancellationToken);
-        Task<string> stderr = process.StandardError.ReadToEndAsync(cancellationToken);
+            streamsLifetime.Token,
+            controlledCancellation ? receipt : null);
+        Task<string> stderr = process.StandardError.ReadToEndAsync(streamsLifetime.Token);
+        Task exited = process.WaitForExitAsync();
         try
-        {
-            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-            await stdout.ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
         {
             try
             {
-                process.Kill(entireProcessTree: true);
-                using var exitTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                await process.WaitForExitAsync(exitTimeout.Token).ConfigureAwait(false);
+                await exited.WaitAsync(cancellationToken).ConfigureAwait(false);
+                await stdout.WaitAsync(cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception error) when (error is InvalidOperationException or OperationCanceledException)
+            catch (OperationCanceledException)
+            {
+                bool accepted = true;
+                if (controlledCancellation)
+                {
+                    try
+                    {
+                        accepted = await ConfirmEnvironmentCancellationAsync(process, exited, stdout, receipt)
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception error) when (error is IOException or InvalidOperationException or TimeoutException)
+                    {
+                        await StopProcessAsync(process).ConfigureAwait(false);
+                        throw new RuntimeInstallerException($"运行环境取消未获确认：{error.Message}");
+                    }
+                }
+                if (accepted)
+                {
+                    await StopProcessAsync(process).ConfigureAwait(false);
+                    throw;
+                }
+                // A terminal commit won the race. Preserve its actual envelope,
+                // including a natural failure, despite the caller's cancelled token.
+            }
+            await stdout.ConfigureAwait(false);
+            return new RuntimeInstallerProcessResult(
+                process.ExitCode,
+                stdoutBuffer.ToString(),
+                await stderr.ConfigureAwait(false));
+        }
+        finally
+        {
+            await streamsLifetime.CancelAsync().ConfigureAwait(false);
+            try
+            {
+                await Task.WhenAll(stdout, stderr).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (streamsLifetime.IsCancellationRequested)
             {
             }
-            throw;
         }
-        return new RuntimeInstallerProcessResult(
-            process.ExitCode,
-            stdoutBuffer.ToString(),
-            await stderr.ConfigureAwait(false));
+    }
+
+    private static async Task<bool> ConfirmEnvironmentCancellationAsync(
+        Process process, Task exited, Task stdout, TaskCompletionSource<bool> receipt)
+    {
+        TimeSpan timeout = TimeSpan.FromSeconds(10);
+        if (!process.HasExited)
+        {
+            try
+            {
+                await process.StandardInput.WriteLineAsync("cancel").ConfigureAwait(false);
+                await process.StandardInput.FlushAsync().ConfigureAwait(false);
+            }
+            catch (IOException) when (process.HasExited)
+            {
+                // The final envelope still decides the completed operation.
+            }
+        }
+        Task first = await Task.WhenAny(receipt.Task, exited).WaitAsync(timeout).ConfigureAwait(false);
+        if (first == receipt.Task && await receipt.Task.ConfigureAwait(false)) return true;
+        await exited.WaitAsync(timeout).ConfigureAwait(false);
+        await stdout.WaitAsync(timeout).ConfigureAwait(false);
+        return receipt.Task.IsCompletedSuccessfully && receipt.Task.Result;
+    }
+
+    private static async Task StopProcessAsync(Process process)
+    {
+        try
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+        }
+        catch (InvalidOperationException) when (process.HasExited)
+        {
+        }
+        catch (TimeoutException)
+        {
+            throw new RuntimeInstallerException("运行环境安装进程未能在取消后退出，取消状态尚未确认。");
+        }
     }
 
     private static async Task ReadStandardOutputAsync(
         StreamReader reader,
         StringBuilder buffer,
         Action<string>? standardOutputLine,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TaskCompletionSource<bool>? cancellationReceipt = null)
     {
         while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
         {
+            if (cancellationReceipt is not null)
+            {
+                try
+                {
+                    using JsonDocument document = JsonDocument.Parse(line);
+                    if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                        document.RootElement.TryGetProperty("environment_cancel", out JsonElement receipt) &&
+                        receipt.ValueKind == JsonValueKind.String &&
+                        receipt.GetString() is "accepted" or "rejected")
+                    {
+                        cancellationReceipt.TrySetResult(receipt.GetString() == "accepted");
+                        continue;
+                    }
+                }
+                catch (JsonException)
+                {
+                }
+            }
             buffer.AppendLine(line);
             standardOutputLine?.Invoke(line);
         }

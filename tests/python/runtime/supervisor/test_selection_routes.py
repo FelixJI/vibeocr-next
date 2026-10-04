@@ -95,8 +95,18 @@ async def test_health_declares_selection_capability_catalogs(
         "pypi",
         "huggingface",
         "modelscope",
+        "paddleocr-huggingface",
+        "paddleocr-modelscope",
+        "paddleocr-bos",
+        "mineru-huggingface",
+        "mineru-modelscope",
     }
-    assert {s["kind"] for s in sources} == {"package_index", "model_registry"}
+    assert {s["kind"] for s in sources} == {
+        "package_index",
+        "model_registry",
+        "paddleocr_model_registry",
+        "mineru_model_registry",
+    }
 
     variants = variant_descriptor["component_variant_catalog"]["variants"]
     assert variants == component_variant_catalog_payload()["variants"]

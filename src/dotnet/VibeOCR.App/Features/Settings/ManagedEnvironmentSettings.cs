@@ -184,6 +184,26 @@ public sealed class ManagedEnvironmentSettings(
             Status += "模型来源将在该环境下次启动时生效，不会改变当前运行中的服务。";
     }, cancellationToken);
 
+    public Task SetSourcesAsync(
+        string? environmentId, string? packageSourceId, string? paddleocrModelSourceId,
+        string? mineruModelSourceId,
+        CancellationToken cancellationToken) => RunAsync(async () =>
+    {
+        ManagedEnvironmentList updated = await manager.SetEnvironmentSourcesAsync(
+            environmentId, packageSourceId, paddleocrModelSourceId, mineruModelSourceId, cancellationToken);
+        Snapshot = updated;
+        // 来源配置变化使旧预览失效（confirm 时管理器也会拒绝旧计划）。
+        Plan = null;
+        Compatibility = null;
+        await ApplyRunningEvidenceAsync(cancellationToken);
+        bool targetRunning = environmentId is not null &&
+            currentSession?.Invoke() is { } session && session.EnvironmentId == environmentId;
+        string scope = environmentId is null ? "全局默认来源" : "该环境的来源 override";
+        Status = $"已保存{scope}；仅影响后续安装与继承，不会下载或安装任何内容。";
+        if (targetRunning)
+            Status += "模型来源将在该环境下次启动时生效，不会改变当前运行中的服务。";
+    }, cancellationToken);
+
     // #123：取消后以 plan_id 绑定读取持久终态；无法归属的结果一律未确认，
     // 不凭 revision 增长宣布成功，不把自然失败改写成取消，不把中断归因用户。
     private async Task ConfirmCancelledInstallAsync(ManagedEnvironmentPlan plan)

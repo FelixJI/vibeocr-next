@@ -1121,6 +1121,84 @@ public sealed class RuntimeInstallerClientTests
             () => runner.RunAsync(new ProcessStartInfo(), cancellation.Token));
     }
 
+    [Theory]
+    [InlineData("accepted", 0)]
+    [InlineData("rejected", 7)]
+    [InlineData("completed", 0)]
+    [InlineData("missing", 0)]
+    public async Task EnvironmentCancellationWaitsForReceiptAndPreservesTerminalResult(
+        string outcome, int exitCode)
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-cancel-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        using var cancellation = new CancellationTokenSource();
+        Process? installerProcess = null;
+        try
+        {
+            string script = Path.Combine(root, "installer.ps1");
+            await File.WriteAllTextAsync(script, $$"""
+                param([Parameter(ValueFromRemainingArguments=$true)][string[]] $remaining)
+                [Console]::WriteLine("pid:$PID")
+                [Console]::WriteLine('null')
+                [Console]::WriteLine('ready')
+                $command = [Console]::ReadLine()
+                if ($command -ne 'cancel') { exit 90 }
+                if ('{{outcome}}' -in @('accepted', 'rejected')) {
+                    [Console]::WriteLine('{"environment_cancel":"{{outcome}}"}')
+                }
+                if ('{{outcome}}' -in @('accepted', 'missing')) { Start-Sleep -Seconds 60 }
+                [Console]::WriteLine('terminal-envelope')
+                exit {{exitCode}}
+                """, TestContext.Current.CancellationToken);
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
+                    "WindowsPowerShell", "v1.0", "powershell.exe"),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            foreach (string argument in new[] { "-NoProfile", "-NonInteractive", "-File", script,
+                "--environment-cancel-control" }) startInfo.ArgumentList.Add(argument);
+            Task<RuntimeInstallerProcessResult> running = RuntimeInstallerCommandRunner.RunProcessAsync(
+                startInfo, line =>
+                {
+                    if (line.StartsWith("pid:", StringComparison.Ordinal))
+                        installerProcess = Process.GetProcessById(int.Parse(line[4..],
+                            System.Globalization.CultureInfo.InvariantCulture));
+                    if (line == "ready") cancellation.Cancel();
+                }, cancellation.Token);
+            if (outcome == "accepted")
+            {
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                    () => running.WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken));
+            }
+            else if (outcome == "missing")
+            {
+                RuntimeInstallerException error = await Assert.ThrowsAsync<RuntimeInstallerException>(
+                    () => running.WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken));
+                Assert.Contains("取消未获确认", error.Message);
+            }
+            else
+            {
+                RuntimeInstallerProcessResult result = await running.WaitAsync(
+                    TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+                Assert.Equal(exitCode, result.ExitCode);
+                Assert.Contains("terminal-envelope", result.StandardOutput);
+                Assert.DoesNotContain("environment_cancel", result.StandardOutput);
+            }
+            Assert.NotNull(installerProcess);
+            Assert.True(installerProcess.HasExited);
+        }
+        finally
+        {
+            installerProcess?.Dispose();
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task CommandRunnerRejectsTamperedBoundInstallerBeforeExecution()
     {
@@ -1289,6 +1367,43 @@ public sealed class RuntimeInstallerClientTests
             @"C:\Next\backend\runtime-manifest.json",
             configuration.RuntimeManifest);
         Assert.Equal("nvidia_cuda", configuration.Accelerator);
+    }
+
+    [Theory]
+    [InlineData("initialize_default", true)]
+    [InlineData("list", false)]
+    public async Task DefaultInitializationPreservesManagerBindingAndRejectsWrongAction(string action, bool succeeds)
+    {
+        var runner = new StubRunner(new RuntimeInstallerProcessResult(0,
+            $"{{\"protocol_version\":2,\"response_kind\":\"environment\",\"action\":\"{action}\",\"result\":{{\"active_id\":null,\"active_revision\":0,\"environments\":[]}}}}", ""));
+        var client = new RuntimeInstallerClient(Configuration(), runner);
+        if (succeeds)
+            Assert.Empty((await client.InitializeDefaultEnvironmentAsync(TestContext.Current.CancellationToken)).Environments);
+        else
+            await Assert.ThrowsAsync<RuntimeInstallerException>(() => client.InitializeDefaultEnvironmentAsync(TestContext.Current.CancellationToken));
+        JsonElement request = Request(runner.LastStartInfo!);
+        Assert.Equal("initialize_default", request.GetProperty("action").GetString());
+        Assert.Equal("environment", request.GetProperty("request_kind").GetString());
+        Assert.Equal(Configuration().ProductRoot, request.GetProperty("product_root").GetString());
+        Assert.Equal(Configuration().ComponentLock, request.GetProperty("component_lock").GetString());
+        Assert.Equal(Configuration().RuntimeManifest, request.GetProperty("runtime_manifest").GetString());
+        Assert.False(request.TryGetProperty("environment_id", out _));
+    }
+
+    [Fact]
+    public async Task IndependentSourcePreferencesRoundTripWithoutSharedField()
+    {
+        var runner = new StubRunner(new RuntimeInstallerProcessResult(0,
+            """{"protocol_version":2,"response_kind":"environment","action":"set_sources","result":{"active_id":null,"active_revision":0,"environments":[],"resolved_default_sources":[{"kind":"paddleocr_model_registry","id":"paddleocr-bos","display_name":"百度 BOS","origin":"global_default"}]}}""", ""));
+        var client = new RuntimeInstallerClient(Configuration(), runner);
+        ManagedEnvironmentList result = await client.SetEnvironmentSourcesAsync(
+            "abc", "pypi", "paddleocr-bos", "mineru-modelscope", TestContext.Current.CancellationToken);
+        JsonElement request = Request(runner.LastStartInfo!);
+        Assert.Equal("abc", request.GetProperty("environment_id").GetString());
+        Assert.Equal("paddleocr-bos", request.GetProperty("paddleocr_model_source_id").GetString());
+        Assert.Equal("mineru-modelscope", request.GetProperty("mineru_model_source_id").GetString());
+        Assert.False(request.TryGetProperty("model_source_id", out _));
+        Assert.Equal("paddleocr-bos", Assert.Single(result.ResolvedDefaultSources!).Id);
     }
 
     private static RuntimeInstallerConfiguration Configuration() =>

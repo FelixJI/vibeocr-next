@@ -598,7 +598,11 @@ def test_named_environments_are_real_empty_venvs_and_switch_is_cas(
     manager.commit_switch(prepared)
     plan = manager.preview_install(first["id"], "rapidocr-cpu")
     assert plan["environment_id"] == first["id"]
-    assert plan["source_ids"] == ["tuna-pypi"]
+    assert plan["source_ids"] == [
+        "tuna-pypi",
+        "paddleocr-huggingface",
+        "mineru-huggingface",
+    ]
     assert plan["dependencies"]
     with pytest.raises(ManagedEnvironmentError, match="stale"):
         manager.commit_switch(prepared)
@@ -2103,28 +2107,96 @@ def test_frozen_manager_exposes_named_environment_list(
         "active_revision": 0,
         "sources": [
             {
+                "id": source_id,
+                "kind": kind,
+                "display_name": display_name,
+                "endpoint": endpoint,
+                "is_default": is_default,
+            }
+            for source_id, kind, display_name, endpoint, is_default in (
+                (
+                    "tuna-pypi",
+                    "package_index",
+                    "TUNA PyPI 镜像",
+                    "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/",
+                    True,
+                ),
+                (
+                    "pypi",
+                    "package_index",
+                    "PyPI 官方源",
+                    "https://pypi.org/simple",
+                    False,
+                ),
+                (
+                    "huggingface",
+                    "model_registry",
+                    "Hugging Face",
+                    "https://huggingface.co",
+                    False,
+                ),
+                (
+                    "modelscope",
+                    "model_registry",
+                    "ModelScope",
+                    "https://www.modelscope.cn",
+                    False,
+                ),
+                (
+                    "paddleocr-huggingface",
+                    "paddleocr_model_registry",
+                    "Hugging Face",
+                    "https://huggingface.co",
+                    True,
+                ),
+                (
+                    "paddleocr-modelscope",
+                    "paddleocr_model_registry",
+                    "ModelScope",
+                    "https://www.modelscope.cn",
+                    False,
+                ),
+                (
+                    "paddleocr-bos",
+                    "paddleocr_model_registry",
+                    "百度 BOS",
+                    "https://paddle-model-ecology.bj.bcebos.com",
+                    False,
+                ),
+                (
+                    "mineru-huggingface",
+                    "mineru_model_registry",
+                    "Hugging Face",
+                    "https://huggingface.co",
+                    True,
+                ),
+                (
+                    "mineru-modelscope",
+                    "mineru_model_registry",
+                    "ModelScope",
+                    "https://www.modelscope.cn",
+                    False,
+                ),
+            )
+        ],
+        "resolved_default_sources": [
+            {
+                "kind": "package_index",
                 "id": "tuna-pypi",
-                "kind": "package_index",
                 "display_name": "TUNA PyPI 镜像",
-                "endpoint": "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/",
+                "origin": "product_default",
             },
             {
-                "id": "pypi",
-                "kind": "package_index",
-                "display_name": "PyPI 官方源",
-                "endpoint": "https://pypi.org/simple",
-            },
-            {
-                "id": "huggingface",
-                "kind": "model_registry",
+                "kind": "paddleocr_model_registry",
+                "id": "paddleocr-huggingface",
                 "display_name": "Hugging Face",
-                "endpoint": "https://huggingface.co",
+                "origin": "product_default",
             },
             {
-                "id": "modelscope",
-                "kind": "model_registry",
-                "display_name": "ModelScope",
-                "endpoint": "https://www.modelscope.cn",
+                "kind": "mineru_model_registry",
+                "id": "mineru-huggingface",
+                "display_name": "Hugging Face",
+                "origin": "product_default",
             },
         ],
         "default_source_ids": [],

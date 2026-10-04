@@ -825,6 +825,27 @@ public sealed partial class App : Application
         return connected;
     }
 
+    internal static async Task PrepareDefaultEnvironmentAsync(
+        IManagedEnvironmentClient manager, ProductMaintenanceCoordinator productMaintenance,
+        CancellationToken shutdown)
+    {
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdown);
+        IDisposable lease;
+        try
+        {
+            lease = productMaintenance.Acquire(
+                ProductMaintenanceOwner.RuntimeMaintenance, cancellation.Cancel);
+        }
+        catch (ProductMaintenanceConflictException)
+        {
+            // 用户安装或更新正在进行时，跳过幂等初始化，保留服务恢复路径。
+            AppLog.Warn("Default environment initialization deferred during product maintenance.");
+            return;
+        }
+        using (lease)
+            await manager.InitializeDefaultEnvironmentAsync(cancellation.Token);
+    }
+
     private async Task<bool> ConnectSupervisorCoreAsync(
         PortableLayout layout,
         DiagnosticsViewModel diagnostics,
@@ -835,6 +856,13 @@ public sealed partial class App : Application
         // Connecting，避免占用方把“正在连接”滞留成永久状态。
         try
         {
+            // 默认环境安装可能耗时较长，不占用 Supervisor 生命周期门；
+            // 产品维护 lease 让更新/其他安装快速得到互斥状态并支持取消。
+            if (Volatile.Read(ref _runtimeMaintenanceActive) == 0 &&
+                !MaintenanceMutexEarlyExitSelfTestRequested(isRecovery))
+                await PrepareDefaultEnvironmentAsync(
+                    _managedEnvironments ?? throw new InvalidOperationException("Runtime manager is unavailable."),
+                    _productMaintenance, _applicationShutdown.Token);
             await WaitSupervisorLifecycleGateAsync(_applicationShutdown.Token);
         }
         catch (OperationCanceledException) when (_applicationShutdown.IsCancellationRequested)
@@ -884,6 +912,7 @@ public sealed partial class App : Application
             _qrCodeGateway.MarkStartupPending();
             IManagedEnvironmentClient manager = _managedEnvironments
                 ?? throw new InvalidOperationException("Runtime manager is unavailable.");
+            // 安装期间用户可能已切换环境；取门后重新读取权威活动选择。
             ManagedEnvironmentList environments = await manager.ListEnvironmentsAsync(
                 _applicationShutdown.Token);
             RecordMilestone(diagnostics, "T4", _startup.Elapsed);

@@ -34,6 +34,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     {
         "package_index",
         "model_registry",
+        "paddleocr_model_registry",
+        "mineru_model_registry",
     };
 
     private readonly IInferenceClient _inference;
@@ -718,8 +720,9 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     {
         "tuna-pypi" => "TUNA PyPI 镜像",
         "pypi" => "PyPI 官方源",
-        "huggingface" => "Hugging Face",
-        "modelscope" => "ModelScope",
+        "huggingface" or "paddleocr-huggingface" or "mineru-huggingface" => "Hugging Face",
+        "modelscope" or "paddleocr-modelscope" or "mineru-modelscope" => "ModelScope",
+        "paddleocr-bos" => "百度 BOS",
         _ => source.Id,
     };
 
