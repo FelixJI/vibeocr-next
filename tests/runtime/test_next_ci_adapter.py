@@ -1016,3 +1016,96 @@ def test_publish_checkout_keeps_job_token_for_git_tag_push() -> None:
     assert "persist-credentials: true" in checkout
     assert "persist-credentials: false" not in checkout
     assert "token:" not in checkout
+
+
+@pytest.mark.parametrize(
+    "outcome", ["failed", "pending", "ready_without_exit", "diagnostic_io_failure"]
+)
+def test_web_smoke_preserves_failure_stage_before_cleanup(
+    tmp_path: Path, outcome: str
+) -> None:
+    root = Path(__file__).parents[2]
+    product = tmp_path / "product"
+    product.mkdir()
+    (product / "VibeOCR.WinUI.exe").write_bytes(b"test process fixture")
+    diagnostics = tmp_path / "diagnostics"
+    if outcome == "diagnostic_io_failure":
+        diagnostics.write_text(
+            "file blocks diagnostic directory creation", encoding="utf-8"
+        )
+    wrapper = tmp_path / "run-smoke.ps1"
+    wrapper.write_text(
+        r"""param($Smoke, $Product, $Diagnostics, $Outcome)
+$ErrorActionPreference = 'Stop'
+$global:outcome = $Outcome
+function Get-CimInstance { param($Filter) @() }
+function Start-Process {
+    param($FilePath, $ArgumentList, $WorkingDirectory, $WindowStyle, [switch]$PassThru)
+    $state = if ($global:outcome -eq 'pending') { 'starting' } elseif ($global:outcome -eq 'ready_without_exit') { 'bridge-ready' } else { 'failed' }
+    @{
+        schema_version=1; state=$state; stage='webview-initializing'
+        error_type='InvalidOperationException'; error_code=-2146233079
+        private_detail='fixture-secret-must-not-survive'
+    } | ConvertTo-Json | Set-Content -LiteralPath $env:VIBEOCR_WEB_READY_FILE
+    $logs = Join-Path $WorkingDirectory 'state/logs'
+    New-Item -ItemType Directory -Path $logs -Force | Out-Null
+    @(
+        '01:02:03.004 [INFO ] OnLaunched: profile=production shellOnly=True',
+        '01:02:03.005 [INFO ] Web workbench: webview-initialized',
+        '01:02:03.006 [ERROR] unrelated fixture-secret-must-not-survive'
+    ) | Set-Content -LiteralPath (Join-Path $logs 'winui-dev-fixture.log')
+    $process = [pscustomobject]@{ ExitCode=1; HasExited=$false; Waits=0 }
+    $process | Add-Member ScriptMethod WaitForExit {
+        param($Milliseconds)
+        $this.Waits++
+        if ($global:outcome -in @('pending', 'ready_without_exit') -and $this.Waits -eq 1) { return $false }
+        $this.HasExited=$true
+        return $true
+    }
+    $process | Add-Member ScriptMethod Kill { param($EntireTree) $this.HasExited=$true; $this.ExitCode=-1 }
+    return $process
+}
+& $Smoke -ProductRoot $Product -TimeoutSeconds 1 -DiagnosticsRoot $Diagnostics
+""",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            resolve_executable("pwsh"),
+            "-NoProfile",
+            "-File",
+            str(wrapper),
+            str(root / "scripts/smoke_web_workbench.ps1"),
+            str(product),
+            str(diagnostics),
+            outcome,
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=20,
+    )
+    assert result.returncode != 0
+    if outcome == "diagnostic_io_failure":
+        assert "diagnostic capture failed" in result.stdout
+        assert "smoke exited with code 1" in result.stderr
+        return
+    reports = list(diagnostics.glob("*/failure.json"))
+    assert len(reports) == 1
+    raw = reports[0].read_text(encoding="utf-8-sig")
+    assert "fixture-secret" not in raw
+    report = json.loads(raw)
+    assert report["process_exited"] is True
+    assert report["stage"] == "webview-initializing"
+    assert report["error_type"] == "InvalidOperationException"
+    assert len(report["app_signals"]) == 2
+    if outcome == "failed":
+        assert report["failure_kind"] == "process-or-health-failure"
+        assert report["state"] == "failed"
+    else:
+        assert report["failure_kind"] == "deadline-exceeded"
+        assert report["state"] == (
+            "starting" if outcome == "pending" else "bridge-ready"
+        )
+    assert "Web workbench diagnostic evidence:" in result.stdout
