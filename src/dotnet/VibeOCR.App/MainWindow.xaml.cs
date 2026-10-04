@@ -210,6 +210,7 @@ public sealed partial class MainWindow : Window
       return;
     }
     initialized = true;
+    WebReadySmokeStatus.Stage("webview-initializing");
     try
     {
       await webHost.InitializeAsync(
@@ -217,9 +218,10 @@ public sealed partial class MainWindow : Window
         layout.WebAssetsRoot);
     }
     catch (Exception error) when (
-      error is InvalidOperationException or DirectoryNotFoundException)
+      WebReadySmokeStatus.Enabled || error is InvalidOperationException or DirectoryNotFoundException)
     {
       AppLog.Error("Web workbench initialization failed", error);
+      WebReadySmokeStatus.Fail("webview-initializing", error);
       ShowRecovery($"工作台初始化失败：{error.GetType().Name}");
     }
   }
@@ -426,6 +428,7 @@ public sealed partial class MainWindow : Window
   private void OnProtocolViolation(Exception error)
   {
     AppLog.Error("Workbench bridge protocol violation", error);
+    WebReadySmokeStatus.Fail("bridge-protocol", error);
     RecoveryStatus.Text = "页面消息被安全拒绝；如果界面无响应，请重新加载。";
   }
 
@@ -441,6 +444,7 @@ public sealed partial class MainWindow : Window
 
   private void OnHostStateChanged(string state)
   {
+    WebReadySmokeStatus.Stage(state);
     if (state == "navigation-starting" ||
         state.StartsWith("process-failed:", StringComparison.Ordinal) ||
         state.StartsWith("bridge-command-failed:", StringComparison.Ordinal))
@@ -491,8 +495,10 @@ public sealed partial class MainWindow : Window
       "VIBEOCR_WEB_READY_FILE");
     string relative = $"web-ready-{Guid.NewGuid():N}.txt";
     string path = Path.Combine(resourceRoot, relative);
+    string smokeStage = "resource-verification";
     try
     {
+      WebReadySmokeStatus.Stage(smokeStage);
       await File.WriteAllTextAsync(path, "web-resource-ok");
       WorkbenchResourceLease lease = resourceBroker.Lease(
         relative, "text/plain; charset=utf-8", TimeSpan.FromMinutes(1));
@@ -535,6 +541,8 @@ public sealed partial class MainWindow : Window
       // bridge alone cannot detect fixed-width content or a blank React root.
       foreach (SizeInt32 size in new[] { new SizeInt32(640, 480), new SizeInt32(1280, 800) })
       {
+        smokeStage = $"layout-verification-{size.Width}x{size.Height}";
+        WebReadySmokeStatus.Stage(smokeStage);
         double scale = WindowGeometryPolicy.GetWindowScale(WindowNative.GetWindowHandle(this));
         AppWindow.Resize(new SizeInt32(
           WindowGeometryPolicy.ScaleToPhysical(size.Width, scale),
@@ -571,16 +579,7 @@ public sealed partial class MainWindow : Window
     catch (Exception error)
     {
       AppLog.Error("Web workbench resource smoke failed", error);
-      if (!string.IsNullOrWhiteSpace(healthFile))
-      {
-        File.WriteAllText(healthFile, JsonSerializer.Serialize(new
-        {
-          schema_version = 1,
-          state = "failed",
-          error = error.Message,
-        }));
-      }
-      Environment.Exit(1);
+      WebReadySmokeStatus.Fail(smokeStage, error);
     }
     finally
     {

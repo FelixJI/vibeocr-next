@@ -125,6 +125,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     await webView.EnsureCoreWebView2Async();
     lifetime.Token.ThrowIfCancellationRequested();
     CoreWebView2 next = webView.CoreWebView2;
+    StateChanged?.Invoke("webview-initialized");
     // WebView2 does not raise WebResourceRequested for a mapped virtual host.
     // Serve the packaged bundle and opaque resources through one same-origin route.
     packagedAssets = new PackagedWebAssets(assets);
@@ -217,6 +218,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       if (IsBootstrap(message))
       {
         Guid requestId = WorkbenchBridgeCodec.ParseBootstrapRequest(message);
+        StateChanged?.Invoke("bootstrap-received");
         WorkbenchBootstrap bootstrap = await application.BootstrapAsync(
           lifetime.Token);
         bootstrap = ProjectBootstrap(bootstrap);

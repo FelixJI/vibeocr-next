@@ -184,6 +184,7 @@ public sealed partial class App : Application
         _runtimeStatus.ApplyProfile(_runtimeInstaller.ReadProfileDescriptor());
         AppLog.Initialize(Path.Combine(layout.DataRoot, "logs"));
         AppLog.Info($"OnLaunched: profile={options.Profile} shellOnly={options.ShellOnly}");
+        WebReadySmokeStatus.Stage("app-launched");
         if (layout.Profile == "production" && File.Exists(layout.ConfigFile))
         {
             MigrationResult migration = ProfileMigrationClient.MigrateConfig(layout);
