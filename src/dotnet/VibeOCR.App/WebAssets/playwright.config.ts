@@ -19,7 +19,9 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
-    command: "npm run dev -- --host 127.0.0.1 --port 4174",
+    // e2e 运行预构建生产资产；构建在 npm script 层完成（fail-closed），
+    // webServer 30s 预算只覆盖静态 preview 服务就绪，不掩盖构建/启动故障。
+    command: "npm run preview -- --host 127.0.0.1 --port 4174 --strictPort",
     url: "http://127.0.0.1:4174",
     reuseExistingServer: false,
     timeout: 30_000,
