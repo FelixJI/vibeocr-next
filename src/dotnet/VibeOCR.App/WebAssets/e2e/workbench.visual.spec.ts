@@ -1,27 +1,20 @@
 import { expect, test, type Page } from "@playwright/test";
 
-interface VisualState {
-  readonly connected: boolean;
-  readonly revision: number;
-  readonly route: string;
-  readonly theme: "system" | "light" | "dark";
-  readonly capabilities: readonly string[];
-  readonly features: Readonly<Record<string, unknown>>;
-  readonly runtimeLabel: string;
-}
+import type { AppSnapshot } from "../src/bridge/client";
+import { mountHost } from "./workbench-host";
 
-async function mount(page: Page, state: VisualState): Promise<void> {
-  await page.addInitScript((value) => {
-    window.__VIBEOCR_VISUAL_STATE__ = value;
-  }, state);
-  await page.goto(`/#/${state.route}`);
-  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+/** 经真实 bridge 通道装载视图状态（生产构建同样可用）；
+ *  runtimeLabel 在 bridge 投影中恒为“原生宿主已连接”，快照锁定真实传输行为。 */
+async function mount(
+  page: Page,
+  state: Omit<AppSnapshot, "sessionId">,
+): Promise<void> {
+  await mountHost(page, { sessionId: "visual-e2e", ...state });
 }
 
 test("1280x800 light recognition workspace", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await mount(page, {
-    connected: true,
     revision: 1,
     route: "recognition",
     theme: "light",
@@ -33,7 +26,6 @@ test("1280x800 light recognition workspace", async ({ page }) => {
     features: {
       recognition: { isBusy: false, statusCode: "recognition.ready" },
     },
-    runtimeLabel: "Runtime 就绪 · GPU",
   });
   await expect(page).toHaveScreenshot("recognition-light-1280x800.png", {
     fullPage: true,
@@ -43,7 +35,6 @@ test("1280x800 light recognition workspace", async ({ page }) => {
 test("1280x800 light annotation workspace with guidance", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await mount(page, {
-    connected: true,
     revision: 2,
     route: "recognition",
     theme: "light",
@@ -65,7 +56,6 @@ test("1280x800 light annotation workspace with guidance", async ({ page }) => {
         },
       },
     },
-    runtimeLabel: "Runtime 就绪 · GPU",
   });
   await expect(
     page.getByRole("toolbar", { name: "图片编辑工具" }),
@@ -108,7 +98,6 @@ test("annotation export keeps source pixels and excludes editor chrome", async (
     }),
   );
   await mount(page, {
-    connected: true,
     revision: 3,
     route: "recognition",
     theme: "light",
@@ -124,7 +113,6 @@ test("annotation export keeps source pixels and excludes editor chrome", async (
         },
       },
     },
-    runtimeLabel: "Runtime 就绪 · GPU",
   });
 
   const canvas = page.locator('canvas[aria-label="图片检查画布"]');
@@ -191,7 +179,6 @@ test("annotation export keeps source pixels and excludes editor chrome", async (
 test("1024x720 dark batch running workspace", async ({ page }) => {
   await page.setViewportSize({ width: 1024, height: 720 });
   await mount(page, {
-    connected: true,
     revision: 4,
     route: "batch",
     theme: "dark",
@@ -215,7 +202,6 @@ test("1024x720 dark batch running workspace", async ({ page }) => {
         ],
       },
     },
-    runtimeLabel: "正在处理 · 2 / 3",
   });
   await expect(page).toHaveScreenshot("batch-dark-1024x720.png", {
     fullPage: true,
@@ -225,7 +211,6 @@ test("1024x720 dark batch running workspace", async ({ page }) => {
 test("1280x800 light PDF review workspace", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await mount(page, {
-    connected: true,
     revision: 7,
     route: "pdf",
     theme: "light",
@@ -246,7 +231,6 @@ test("1280x800 light PDF review workspace", async ({ page }) => {
         ],
       },
     },
-    runtimeLabel: "Runtime 就绪 · CPU",
   });
   await expect(page).toHaveScreenshot("pdf-light-1280x800.png", {
     fullPage: true,
@@ -258,7 +242,6 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
 }) => {
   await page.setViewportSize({ width: 1024, height: 900 });
   await mount(page, {
-    connected: true,
     revision: 4,
     route: "recognition",
     theme: "light",
@@ -284,7 +267,6 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
         },
       },
     },
-    runtimeLabel: "Runtime 未启动",
   });
   await expect(
     page.getByRole("button", { name: "纯截图", exact: true }),
@@ -295,6 +277,8 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
   await color.press("ArrowDown");
   await color.press("Tab");
   await expect(color).not.toBeFocused();
+  // 等待当前输出的编码完成和预览布局就绪，再测量缩放、截取稳定画面。
+  await expect(page.getByText(/实际体积 [\d.]+ (B|KB|MB)/)).toBeVisible();
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth,
@@ -302,19 +286,28 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
   ).toBe(true);
   const viewport = page.getByLabel("图片视口");
   const canvas = page.getByLabel("图片检查画布");
-  const fitWidth = await canvas.evaluate(
-    (element) => element.getBoundingClientRect().width,
-  );
-  expect(fitWidth).toBeGreaterThan(0);
+  // fit 布局就绪信号：画布宽度非零且不超过视口，避免读到 React 提交前的旧布局。
+  let fitWidth = 0;
+  await expect
+    .poll(async () => {
+      fitWidth = await canvas.evaluate(
+        (element) => element.getBoundingClientRect().width,
+      );
+      return fitWidth;
+    })
+    .toBeGreaterThan(0);
   expect(fitWidth).toBeLessThanOrEqual(
     await viewport.evaluate((element) => element.clientWidth),
   );
   await page.getByRole("combobox", { name: "显示缩放" }).selectOption("2");
-  const zoomWidth = await canvas.evaluate(
-    (element) => element.getBoundingClientRect().width,
-  );
-  expect(zoomWidth).toBeGreaterThan(fitWidth * 1.9);
+  // 缩放应用与 React 提交存在异步窗口，轮询布局而非一次性读取。
+  await expect
+    .poll(() =>
+      canvas.evaluate((element) => element.getBoundingClientRect().width),
+    )
+    .toBeGreaterThan(fitWidth * 1.9);
   await page.getByRole("combobox", { name: "显示缩放" }).selectOption("1");
+  await expect(page.getByText(/实际体积 [\d.]+ (B|KB|MB)/)).toBeVisible();
   await expect(page).toHaveScreenshot("screenshot-session-light-1024x900.png", {
     fullPage: true,
   });
@@ -327,7 +320,6 @@ test("mode selector stays above batch and PDF panel grids", async ({
     const page = await context.newPage();
     await page.setViewportSize({ width: 1280, height: 800 });
     await mount(page, {
-      connected: true,
       revision: 1,
       route,
       theme: "light",
@@ -366,7 +358,6 @@ test("mode selector stays above batch and PDF panel grids", async ({
             : {}),
         },
       },
-      runtimeLabel: "Runtime 就绪 · CPU",
     });
     if (route === "batch") {
       const name = page.locator(".batch-item-copy");
