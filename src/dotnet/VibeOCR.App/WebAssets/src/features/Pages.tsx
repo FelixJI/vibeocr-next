@@ -132,6 +132,7 @@ interface ManagedEnvironmentState {
 }
 
 interface ManagedSourceOptionState {
+  readonly isDefault?: boolean;
   readonly id: string;
   readonly kind: string;
   readonly displayName: string;
@@ -184,7 +185,15 @@ const sourceUsageLabels: Readonly<Record<string, string>> = {
 };
 
 function sourceKindLabel(kind: string): string {
-  return kind === "model_registry" ? "模型来源" : "依赖包来源";
+  return (
+    (
+      {
+        paddleocr_model_registry: "PaddleOCR 模型来源",
+        mineru_model_registry: "MinerU 模型来源",
+        model_registry: "模型来源",
+      } as Record<string, string>
+    )[kind] ?? "依赖包来源"
+  );
 }
 
 interface ManagedEnvironmentRecipeState {
@@ -2375,9 +2384,14 @@ function ManagedEnvironmentEditor({
         kind: "package_index",
         displayName: id,
         endpoint: "",
+        isDefault: false,
       }));
-  const modelSources = catalog.filter(
-    (source) => source.kind === "model_registry",
+  const modelKinds = [
+    { kind: "paddleocr_model_registry", engine: "PaddleOCR" },
+    { kind: "mineru_model_registry", engine: "MinerU" },
+  ];
+  const modelSources = catalog.filter((source) =>
+    modelKinds.some(({ kind }) => kind === source.kind),
   );
   const sourceName = (id: string | null | undefined): string =>
     id == null || id === ""
@@ -2426,31 +2440,42 @@ function ManagedEnvironmentEditor({
   // 清空本地编辑，回显宿主回传的真值。
   const defaultIds = stringValues(state.environmentDefaultSourceIds);
   const globalPackageId =
-    defaultIds.find((id) => packageIds.includes(id)) ?? "";
-  const modelIds = modelSources.map((source) => source.id);
-  const globalModelId = defaultIds.find((id) => modelIds.includes(id)) ?? "";
-  const [globalEdit, setGlobalEdit] = useState<{
-    packageId?: string;
-    modelId?: string;
-  }>({});
+    defaultIds.find((id) => packageIds.includes(id)) ??
+    managedResolvedSources(state.environmentResolvedDefaultSources).find(
+      (source) => source.kind === "package_index",
+    )?.id ??
+    packageSources.find((source) => source.isDefault)?.id ??
+    "";
+  const globalModelId = (kind: string) =>
+    defaultIds.find((id) =>
+      catalog.some((source) => source.id === id && source.kind === kind),
+    ) ??
+    managedResolvedSources(state.environmentResolvedDefaultSources).find(
+      (source) => source.kind === kind,
+    )?.id ??
+    catalog.find((source) => source.kind === kind && source.isDefault)?.id ??
+    "";
+  const [globalEdit, setGlobalEdit] = useState<Record<string, string>>({});
   const globalPackageValue = globalEdit.packageId ?? globalPackageId;
-  const globalModelValue = globalEdit.modelId ?? globalModelId;
+  const globalModelValue = (kind: string) =>
+    globalEdit[kind] ?? globalModelId(kind);
   const [envEdit, setEnvEdit] = useState<{
     envId: string;
     packageId?: string;
-    modelId?: string;
+    models?: Record<string, string>;
   }>({ envId: "" });
   const overrideIds = stringValues(selected?.overrideSourceIds);
   const envOverridePackageRecord =
     overrideIds.find((id) => packageIds.includes(id)) ?? "";
-  const envOverrideModelRecord =
-    overrideIds.find((id) => modelIds.includes(id)) ?? "";
   const envOverridePackage =
     (envEdit.envId === selected?.id ? envEdit.packageId : undefined) ??
     envOverridePackageRecord;
-  const envOverrideModel =
-    (envEdit.envId === selected?.id ? envEdit.modelId : undefined) ??
-    envOverrideModelRecord;
+  const envOverrideModel = (kind: string) =>
+    (envEdit.envId === selected?.id ? envEdit.models?.[kind] : undefined) ??
+    overrideIds.find((id) =>
+      catalog.some((source) => source.id === id && source.kind === kind),
+    ) ??
+    "";
   return (
     <div className="managed-environments">
       <p className="form-note">
@@ -2618,9 +2643,9 @@ function ManagedEnvironmentEditor({
                       setEnvEdit((current) => ({
                         envId: selected.id,
                         packageId: String(data.value),
-                        modelId:
+                        models:
                           current.envId === selected.id
-                            ? current.modelId
+                            ? current.models
                             : undefined,
                       }))
                     }
@@ -2637,35 +2662,48 @@ function ManagedEnvironmentEditor({
                 </div>
               </>
             )}
-            {modelSources.length > 0 ? (
-              <div className="setting-row">
-                <label htmlFor="managed-env-model-source">本环境模型来源</label>
-                <Select
-                  id="managed-env-model-source"
-                  value={envOverrideModel}
-                  disabled={busy}
-                  onChange={(_, data) =>
-                    setEnvEdit((current) => ({
-                      envId: selected.id,
-                      modelId: String(data.value),
-                      packageId:
-                        current.envId === selected.id
-                          ? current.packageId
-                          : undefined,
-                    }))
-                  }
-                >
-                  <option value="">
-                    跟随全局默认（当前 {sourceName(globalModelId)}）
-                  </option>
-                  {modelSources.map((source) => (
-                    <option key={source.id} value={source.id}>
-                      {source.displayName}
+            {modelKinds.map(({ kind, engine }) => {
+              const options = modelSources.filter(
+                (source) => source.kind === kind,
+              );
+              if (!options.length) return null;
+              return (
+                <div className="setting-row" key={kind}>
+                  <label htmlFor={`managed-env-${kind}`}>
+                    本环境 {engine} 模型来源
+                  </label>
+                  <Select
+                    id={`managed-env-${kind}`}
+                    value={envOverrideModel(kind)}
+                    disabled={busy}
+                    onChange={(_, data) =>
+                      setEnvEdit((current) => ({
+                        envId: selected.id,
+                        packageId:
+                          current.envId === selected.id
+                            ? current.packageId
+                            : undefined,
+                        models: {
+                          ...(current.envId === selected.id
+                            ? current.models
+                            : {}),
+                          [kind]: String(data.value),
+                        },
+                      }))
+                    }
+                  >
+                    <option value="">
+                      跟随全局默认（当前 {sourceName(globalModelId(kind))}）
                     </option>
-                  ))}
-                </Select>
-              </div>
-            ) : null}
+                    {options.map((source) => (
+                      <option key={source.id} value={source.id}>
+                        {source.displayName}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              );
+            })}
             <div className="setting-row">
               <Button
                 disabled={
@@ -2676,7 +2714,10 @@ function ManagedEnvironmentEditor({
                     type: "settings.setEnvironmentSources",
                     environmentId: selected.id,
                     packageSourceId: envOverridePackage || null,
-                    modelSourceId: envOverrideModel || null,
+                    paddleocrModelSourceId:
+                      envOverrideModel("paddleocr_model_registry") || null,
+                    mineruModelSourceId:
+                      envOverrideModel("mineru_model_registry") || null,
                   });
                   if (ok) setEnvEdit({ envId: "" });
                 }}
@@ -2859,39 +2900,44 @@ function ManagedEnvironmentEditor({
                   }))
                 }
               >
-                <option value="">产品默认（TUNA PyPI 镜像）</option>
                 {packageSources.map((source) => (
                   <option key={source.id} value={source.id}>
                     {source.displayName}
+                    {source.isDefault ? "（默认）" : ""}
                   </option>
                 ))}
               </Select>
             </div>
           </>
         )}
-        {modelSources.length > 0 ? (
-          <div className="setting-row">
-            <label htmlFor="managed-global-model-source">全局模型来源</label>
-            <Select
-              id="managed-global-model-source"
-              value={globalModelValue}
-              disabled={busy}
-              onChange={(_, data) =>
-                setGlobalEdit((current) => ({
-                  ...current,
-                  modelId: String(data.value),
-                }))
-              }
-            >
-              <option value="">产品默认（官方原生默认，端点未知）</option>
-              {modelSources.map((source) => (
-                <option key={source.id} value={source.id}>
-                  {source.displayName}
-                </option>
-              ))}
-            </Select>
-          </div>
-        ) : null}
+        {modelKinds.map(({ kind, engine }) => {
+          const options = modelSources.filter((source) => source.kind === kind);
+          if (!options.length) return null;
+          return (
+            <div className="setting-row" key={kind}>
+              <label htmlFor={`managed-global-${kind}`}>
+                全局 {engine} 模型来源
+              </label>
+              <Select
+                id={`managed-global-${kind}`}
+                value={globalModelValue(kind)}
+                disabled={busy}
+                onChange={(_, data) =>
+                  setGlobalEdit((current) => ({
+                    ...current,
+                    [kind]: String(data.value),
+                  }))
+                }
+              >
+                {options.map((source) => (
+                  <option key={source.id} value={source.id}>
+                    {source.displayName}
+                  </option>
+                ))}
+              </Select>
+            </div>
+          );
+        })}
         <div className="setting-row">
           <Button
             disabled={busy || packageSources.length + modelSources.length === 0}
@@ -2899,7 +2945,10 @@ function ManagedEnvironmentEditor({
               const ok = await actions.run({
                 type: "settings.setEnvironmentSources",
                 packageSourceId: globalPackageValue || null,
-                modelSourceId: globalModelValue || null,
+                paddleocrModelSourceId:
+                  globalModelValue("paddleocr_model_registry") || null,
+                mineruModelSourceId:
+                  globalModelValue("mineru_model_registry") || null,
               });
               if (ok) setGlobalEdit({});
             }}
@@ -3429,8 +3478,19 @@ function SourceSelector({
   const packageSources = sources.filter(
     (source) => source.kind === "package_index",
   );
-  const modelSources = sources.filter(
-    (source) => source.kind === "model_registry",
+  const modelKinds = [
+    { kind: "paddleocr_model_registry", label: "PaddleOCR 模型来源" },
+    { kind: "mineru_model_registry", label: "MinerU 模型来源" },
+    ...(!sources.some(
+      (source) =>
+        source.kind === "paddleocr_model_registry" ||
+        source.kind === "mineru_model_registry",
+    )
+      ? [{ kind: "model_registry", label: "模型下载源" }]
+      : []),
+  ];
+  const modelSources = sources.filter((source) =>
+    modelKinds.some(({ kind }) => source.kind === kind),
   );
   if (packageSources.length === 0 && modelSources.length === 0) {
     return (
@@ -3451,14 +3511,17 @@ function SourceSelector({
         locked={locked}
         actions={actions}
       />
-      <SourceKindSelector
-        kind="model_registry"
-        label="模型下载源"
-        sources={modelSources}
-        enabled={enabled}
-        locked={locked}
-        actions={actions}
-      />
+      {modelKinds.map(({ kind, label }) => (
+        <SourceKindSelector
+          key={kind}
+          kind={kind}
+          label={label}
+          sources={modelSources.filter((source) => source.kind === kind)}
+          enabled={enabled}
+          locked={locked}
+          actions={actions}
+        />
+      ))}
     </>
   );
 }

@@ -8,6 +8,7 @@
 // closed on timeout, non-success terminal state, or an empty recognition
 // result. Nothing under the smoke root is deleted: the isolated state is the
 // acceptance evidence.
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.Json;
 using VibeOCR.Contracts.HttpV2;
@@ -79,7 +80,7 @@ public sealed class RuntimeCandidateSmokeTests
         RuntimeInstallerConfiguration configuration =
             RuntimeInstallerConfiguration.ForNext(layout, accelerator: "cpu");
         Assert.Equal(Path.GetFullPath(productRoot), configuration.ProductRoot);
-        var client = new RuntimeInstallerClient(configuration);
+        var client = new RuntimeInstallerClient(configuration, new DiagnosticInstallerRunner(smokeRoot));
 
         using CancellationTokenSource ensureCancellation =
             CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
@@ -100,23 +101,25 @@ public sealed class RuntimeCandidateSmokeTests
             ReadBaseComponentIds(layout.RuntimeManifest),
             plan.EffectiveComponentIds.ToHashSet(StringComparer.Ordinal));
 
-        // 生产启动路径:隔离副本是全新安装,启动选择为空(仅基础组件),
-        // ensure 把基础运行环境安装进隔离副本(候选自带离线 base 包)。
-        RuntimeInstallSelection startupSelection =
-            await client.ReadStartupSelectionAsync(ensureToken);
-        IReadOnlyList<string>? startupComponents = startupSelection.InstallComponentIds;
-        Assert.NotNull(startupComponents);
-        Assert.Empty(startupComponents);
-        RuntimeLaunch launch = await client.EnsureAsync(
-            startupSelection,
-            $"smoke-{Guid.NewGuid():N}",
-            progress: null,
-            ensureToken);
+        // 真实生产启动路径：默认具名环境由随包离线配方初始化，并可重复调用。
+        ManagedEnvironmentList initialized = await client.InitializeDefaultEnvironmentAsync(ensureToken);
+        ManagedEnvironment defaultEnvironment = Assert.Single(initialized.Environments);
+        Assert.Equal("默认环境", defaultEnvironment.Name);
+        Assert.Equal("rapidocr-cpu", defaultEnvironment.Recipe);
+        Assert.Equal(defaultEnvironment.Id, initialized.ActiveId);
+        Assert.Equal("installed", defaultEnvironment.Status);
+        ManagedEnvironmentList repeated = await client.InitializeDefaultEnvironmentAsync(ensureToken);
+        Assert.Equal(defaultEnvironment.Id, Assert.Single(repeated.Environments).Id);
+        Assert.Equal(defaultEnvironment.Revision, Assert.Single(repeated.Environments).Revision);
+        PreparedEnvironmentSwitch prepared = await client.PrepareEnvironmentSwitchAsync(
+            defaultEnvironment.Id, ensureToken);
+        Assert.NotNull(prepared.Launch);
+        RuntimeLaunch launch = prepared.Launch;
         Assert.True(File.Exists(launch.PythonExecutable), $"缺少 Python: {launch.PythonExecutable}");
         Assert.True(
             Directory.Exists(launch.WorkingDirectory),
             $"缺少工作目录: {launch.WorkingDirectory}");
-        Assert.True(Directory.Exists(launch.ModelRoot), $"缺少模型根: {launch.ModelRoot}");
+        // 具名环境的模型根只声明私有路径；RapidOCR 读取 wheel 内置模型。
         Assert.NotEmpty(launch.Environment);
         // Python/模型/运行时存储必须锚定在隔离的 state 存储内。
         AssertIsUnder(layout.DataRoot, launch.PythonExecutable, "python executable");
@@ -173,6 +176,9 @@ public sealed class RuntimeCandidateSmokeTests
             Assert.Equal(RuntimeProtocol.ProtocolVersion, health.ProtocolVersion);
             Assert.True(health.Ready, "Supervisor health 未就绪。");
             Assert.False(health.Draining, "Supervisor health 处于 draining。");
+            CommittedEnvironmentSwitch committed = await client.CommitEnvironmentSwitchAsync(
+                prepared, new StartedEnvironmentHealth(ready.Port, ready.InstanceId), ensureToken);
+            Assert.Equal(defaultEnvironment.Id, committed.ActiveId);
             Assert.Subset(
                 health.Capabilities.ToHashSet(StringComparer.Ordinal),
                 requiredCapabilities.ToHashSet(StringComparer.Ordinal));
@@ -242,6 +248,42 @@ public sealed class RuntimeCandidateSmokeTests
         {
             // 仅处置本次 smoke 拉起的子进程树;隔离证据全部保留。
             supervisor.Dispose();
+        }
+    }
+
+    private sealed class DiagnosticInstallerRunner(string smokeRoot) : IRuntimeInstallerCommandRunner
+    {
+        private readonly RuntimeInstallerCommandRunner inner = new();
+        private int initializationCount;
+
+        public Task<RuntimeInstallerProcessResult> RunAsync(
+            ProcessStartInfo startInfo, CancellationToken cancellationToken) =>
+            RunAsync(startInfo, null, cancellationToken);
+
+        public async Task<RuntimeInstallerProcessResult> RunAsync(
+            ProcessStartInfo startInfo, Action<string>? standardOutputLine,
+            CancellationToken cancellationToken)
+        {
+            // Preserve the production executable binding, streams, cancellation
+            // handshake and arguments. Record only initialization diagnostics;
+            // supervisor launch responses and process environments may contain secrets.
+            RuntimeInstallerProcessResult result = await inner.RunAsync(
+                startInfo, standardOutputLine, cancellationToken);
+            int requestIndex = startInfo.ArgumentList.IndexOf("--request-json");
+            if (requestIndex >= 0 && requestIndex + 1 < startInfo.ArgumentList.Count)
+            {
+                using JsonDocument request = JsonDocument.Parse(startInfo.ArgumentList[requestIndex + 1]);
+                if (request.RootElement.TryGetProperty("action", out JsonElement action) &&
+                    action.GetString() == "initialize_default")
+                {
+                    string directory = Path.Combine(smokeRoot, "installer-diagnostics");
+                    Directory.CreateDirectory(directory);
+                    int sequence = Interlocked.Increment(ref initializationCount);
+                    File.WriteAllText(Path.Combine(directory, $"initialize-default-{sequence}.json"),
+                        JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
+                }
+            }
+            return result;
         }
     }
 

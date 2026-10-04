@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 from contextlib import contextmanager, nullcontext
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Iterator
 from urllib.error import URLError
@@ -48,13 +49,15 @@ from vibeocr.runtime.environments.runtime_manifest import (
     sha256_file,
 )
 from vibeocr.runtime.environments.runtime_selection import (
-    DOWNLOAD_SOURCE_KIND_MODEL_REGISTRY,
+    DOWNLOAD_SOURCE_KIND_MINERU_MODEL_REGISTRY,
     DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX,
+    DOWNLOAD_SOURCE_KIND_PADDLEOCR_MODEL_REGISTRY,
     RuntimeSelectionError,
     RuntimeSelectionPolicy,
     default_download_sources,
     download_source_catalog_payload,
     download_source_display_name,
+    expand_legacy_model_sources,
     sanitize_download_endpoint,
 )
 
@@ -62,10 +65,15 @@ _NAME = re.compile(r"^[^\\/\x00-\x1f]{1,80}$")
 _SOURCE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
 _SOURCE_KINDS = (
     DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX,
-    DOWNLOAD_SOURCE_KIND_MODEL_REGISTRY,
+    DOWNLOAD_SOURCE_KIND_PADDLEOCR_MODEL_REGISTRY,
+    DOWNLOAD_SOURCE_KIND_MINERU_MODEL_REGISTRY,
 )
+_UNSET_SOURCE = object()
 # 注册表可选新增键：旧 schema_version=1 记录缺失时按空配置/0 读取。
-_REGISTRY_OPTIONAL_KEYS = {"default_source_ids", "source_config_revision"}
+_REGISTRY_OPTIONAL_KEYS = {
+    "default_source_ids",
+    "source_config_revision",
+}
 _OPERATION_OPTIONAL_KEYS = {"requested_source_ids", "effective_source_ids"}
 _FORBIDDEN_EMPTY = (
     "fastapi",
@@ -107,6 +115,10 @@ _RECIPE_IMPORT_PROBES = {
 
 class ManagedEnvironmentError(RuntimeInstallError):
     """A named-environment operation cannot safely complete."""
+
+
+class ManagedEnvironmentInstallCancelled(ManagedEnvironmentError):
+    """Cancellation was accepted before the installation's terminal commit."""
 
 
 class ManagedEnvironmentStore:
@@ -153,6 +165,29 @@ class ManagedEnvironmentStore:
         # the manifest-bound archive into a reusable, read-only base location.
         self._base_override = Path(base_python).resolve() if base_python else None
         self._install_runner = install_runner or self._install_scope
+        self._install_cancelled = False
+        self._install_terminal = False
+
+    def cancel_install(self, acknowledge: Callable[[bool], None]) -> None:
+        """Acknowledge before kill, serialized with both terminal registry writes.
+
+        This manager belongs to one CLI process. The in-memory flag prevents its
+        worker from replacing the durable installing journal after cancellation;
+        no new registry field is needed by older versions after rollback.
+        """
+        with RuntimeStoreLock(self._lock):
+            accepted = not self._install_terminal
+            if accepted:
+                self._install_cancelled = True
+            acknowledge(accepted)
+
+    def _check_install_cancelled(self) -> None:
+        if self._install_cancelled:
+            raise ManagedEnvironmentInstallCancelled(
+                "environment installation was cancelled",
+                reason_code="install_interrupted",
+                next_action="preview_again",
+            )
 
     def _launch(self, record: dict, python: str) -> dict | None:
         if record["status"] == "empty":
@@ -248,7 +283,7 @@ class ManagedEnvironmentStore:
         """已知目录的 id 列表 → kind→id；未知 id 交给上层标注，不在此 fail closed。"""
         catalog = {source["id"]: source for source in self._source_catalog()}
         resolved: dict[str, str] = {}
-        for source_id in source_ids:
+        for source_id in expand_legacy_model_sources(source_ids):
             source = catalog.get(source_id)
             if source is not None and source["kind"] not in resolved:
                 resolved[source["kind"]] = source_id
@@ -263,8 +298,8 @@ class ManagedEnvironmentStore:
     ) -> dict[str, str | None]:
         """全局默认 → 环境override 的每 kind 解析；未覆盖 kind 回退产品默认。
 
-        package_index 的产品默认是 TUNA；model_registry 无覆盖时为 None，
-        即引擎官方原生默认（实际端点未知），不伪造。
+        默认依赖包源是 TUNA，PaddleOCR 与 MinerU 各自默认 Hugging Face。
+        旧共享模型偏好在读取时展开；原生 downloader 的实际端点仍未知。
         """
         merged: dict[str, str] = {}
         merged.update(self._kind_source_map(data.get("default_source_ids") or ()))
@@ -275,7 +310,7 @@ class ManagedEnvironmentStore:
         resolved: dict[str, str | None] = {
             kind: merged.get(kind) for kind in _SOURCE_KINDS
         }
-        for source in default_download_sources():
+        for source in default_download_sources(include_model_sources=True):
             if resolved.get(source["kind"]) is None:
                 resolved[source["kind"]] = source["id"]
         return resolved
@@ -306,11 +341,18 @@ class ManagedEnvironmentStore:
         requested: tuple[str, ...] | None,
     ):
         try:
-            return self._policy_for(data, record).plan_start(
+            if requested is not None and len(set(requested)) != len(requested):
+                raise ManagedEnvironmentError(
+                    "download_source_ids must not contain duplicates"
+                )
+            selection = self._policy_for(data, record).plan_start(
                 accelerator=accelerator,
                 install_component_ids=(),
-                download_source_ids=requested,
+                download_source_ids=None
+                if requested is None
+                else expand_legacy_model_sources(requested),
             )
+            return replace(selection, requested_download_source_ids=requested)
         except RuntimeSelectionError as error:
             raise ManagedEnvironmentError(str(error)) from error
 
@@ -332,6 +374,9 @@ class ManagedEnvironmentStore:
     def _source_entries(self, data: dict, record: dict | None, selection) -> list[dict]:
         """计划/环境解析的来源投影：名称/类型/脱敏端点/继承来源/用途。"""
         requested = selection.requested_download_source_ids
+        requested = (
+            None if requested is None else expand_legacy_model_sources(requested)
+        )
         entries: list[dict] = []
         for source in selection.effective_download_sources:
             entry = {
@@ -342,7 +387,7 @@ class ManagedEnvironmentStore:
                 "requested": (requested is not None and source.source_id in requested),
                 "inherited_from": self._source_origin(data, record, source.source_id),
             }
-            if source.kind == DOWNLOAD_SOURCE_KIND_MODEL_REGISTRY:
+            if source.kind != DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX:
                 # 模型源只是偏好投影；原生 downloader 的真实端点未知。
                 entry["usage"] = "model_preference"
                 entry["actual_endpoint"] = None
@@ -370,7 +415,10 @@ class ManagedEnvironmentStore:
         self,
         env_id: str | None,
         package_source_id: str | None,
-        model_source_id: str | None,
+        model_source_id: str | None | object = _UNSET_SOURCE,
+        *,
+        paddleocr_model_source_id: str | None | object = _UNSET_SOURCE,
+        mineru_model_source_id: str | None | object = _UNSET_SOURCE,
     ) -> dict:
         """保存全局默认或单环境override；null 表示清除该 kind 回退继承。
 
@@ -378,13 +426,32 @@ class ManagedEnvironmentStore:
         operation lock 拒绝，保存 A 不会修改 B。
         """
         catalog = {source["id"]: source for source in self._source_catalog()}
-        requested = {
+        requested: dict[str, str | None | object] = {
             DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX: package_source_id,
-            DOWNLOAD_SOURCE_KIND_MODEL_REGISTRY: model_source_id,
         }
+        if model_source_id is not _UNSET_SOURCE:
+            if model_source_id is not None and model_source_id not in {
+                "huggingface",
+                "modelscope",
+            }:
+                raise ManagedEnvironmentError(
+                    f"unknown model_registry download source: {model_source_id}"
+                )
+            for engine in ("paddleocr", "mineru"):
+                requested[f"{engine}_model_registry"] = (
+                    None if model_source_id is None else f"{engine}-{model_source_id}"
+                )
+        for kind, source_id in (
+            (DOWNLOAD_SOURCE_KIND_PADDLEOCR_MODEL_REGISTRY, paddleocr_model_source_id),
+            (DOWNLOAD_SOURCE_KIND_MINERU_MODEL_REGISTRY, mineru_model_source_id),
+        ):
+            if source_id is not _UNSET_SOURCE:
+                requested[kind] = source_id
         for kind, source_id in requested.items():
             if source_id is None:
                 continue
+            if not isinstance(source_id, str):
+                raise ManagedEnvironmentError(f"invalid {kind} download source")
             source = catalog.get(source_id)
             if source is None or source["kind"] != kind:
                 raise ManagedEnvironmentError(
@@ -406,7 +473,7 @@ class ManagedEnvironmentStore:
             for kind, source_id in requested.items():
                 if source_id is None:
                     current.pop(kind, None)
-                else:
+                elif isinstance(source_id, str):
                     current[kind] = source_id
             merged_ids = tuple(
                 source["id"]
@@ -821,6 +888,7 @@ class ManagedEnvironmentStore:
         try:
             result = subprocess.run(
                 [str(python), "-I", "-c", code],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=20,
@@ -938,6 +1006,7 @@ class ManagedEnvironmentStore:
                             **os.environ,
                             **self._launch(record, str(python))["environment"],
                         },
+                        stdin=subprocess.DEVNULL,
                         capture_output=True,
                         text=True,
                         timeout=20,
@@ -1063,11 +1132,15 @@ class ManagedEnvironmentStore:
         """环境记录的来源解析投影；无注册表上下文时只回退安装证据。"""
         if data is None:
             return {
-                "override_source_ids": list(record.get("override_source_ids") or ())
+                "override_source_ids": list(
+                    expand_legacy_model_sources(record.get("override_source_ids") or ())
+                )
             }
         resolved = self._resolved_source_entries(data, record)
         return {
-            "override_source_ids": list(record.get("override_source_ids") or ()),
+            "override_source_ids": list(
+                expand_legacy_model_sources(record.get("override_source_ids") or ())
+            ),
             "unknown_source_ids": self._unknown_source_ids(
                 record.get("override_source_ids") or ()
             ),
@@ -1102,7 +1175,9 @@ class ManagedEnvironmentStore:
         with RuntimeStoreLock(self._lock):
             data = self._read()
             catalog = self._source_catalog()
-            default_ids = list(data.get("default_source_ids") or ())
+            default_ids = list(
+                expand_legacy_model_sources(data.get("default_source_ids") or ())
+            )
             return {
                 "active_id": data["active_id"],
                 "active_revision": data["active_revision"],
@@ -1114,10 +1189,13 @@ class ManagedEnvironmentStore:
                         "kind": source["kind"],
                         "display_name": download_source_display_name(source["id"]),
                         "endpoint": sanitize_download_endpoint(source["endpoint"]),
+                        "is_default": source
+                        in default_download_sources(include_model_sources=True),
                     }
                     for source in catalog
                 ],
                 "default_source_ids": default_ids,
+                "resolved_default_sources": self._resolved_source_entries(data, None),
                 "unknown_default_source_ids": self._unknown_source_ids(default_ids),
                 "source_config_revision": int(data.get("source_config_revision") or 0),
                 "package_source_ids": [
@@ -1131,22 +1209,105 @@ class ManagedEnvironmentStore:
                 ],
             }
 
+    def initialize_default(self) -> dict:
+        """首次无环境时安装离线基础配方；升级沿用已有环境，失败可续装。
+
+        初始化状态独立保存，避免改变旧版仍需读取的注册表格式。独立锁
+        覆盖创建/安装，store 锁只覆盖注册表提交；完成后不自动重建。
+        """
+        marker = self.paths.state_root / "default-environment.json"
+        with RuntimeStoreLock(self.paths.locks_root / "default-environment.lock"):
+            if marker.is_file():
+                state = json.loads(marker.read_text(encoding="utf-8"))
+                if (
+                    not isinstance(state, dict)
+                    or set(state) != {"environment_id", "created"}
+                    or type(state["created"]) is not bool
+                    or (
+                        state["environment_id"] is not None
+                        and (
+                            not isinstance(state["environment_id"], str)
+                            or not re.fullmatch(
+                                r"[0-9a-f]{32}", state["environment_id"]
+                            )
+                        )
+                    )
+                ):
+                    raise ManagedEnvironmentError(
+                        "default environment initialization is invalid"
+                    )
+            else:
+                with RuntimeStoreLock(self._lock):
+                    existing = bool(self._read()["environments"])
+                state = {
+                    "environment_id": None if existing else uuid4().hex,
+                    "created": existing,
+                }
+                _atomic_json(marker, state)
+            default_id = state["environment_id"]
+            if default_id is not None:
+                with RuntimeStoreLock(self._lock):
+                    record = self._read()["environments"].get(default_id)
+                if record is None and not state["created"]:
+                    record = self._create(
+                        "默认环境", as_default=True, environment_id=default_id
+                    )
+                if record is not None:
+                    state["created"] = True
+                    _atomic_json(marker, state)
+                    if record["status"] == "empty":
+                        scope, _accelerator = self._recipe("rapidocr-cpu")
+                        if not scope.runtime_pack:
+                            raise ManagedEnvironmentError(
+                                "default environment requires the bundled offline base pack"
+                            )
+                        plan = self.preview_install(default_id, "rapidocr-cpu")
+                        self.install(plan["plan_id"], default_id, "rapidocr-cpu")
+                    with RuntimeStoreLock(self._lock):
+                        data = self._read()
+                        record = data["environments"].get(default_id)
+                        if record is not None and record["status"] == "installed":
+                            if data["active_id"] is None:
+                                data["active_id"] = default_id
+                                data["active_revision"] += 1
+                                _atomic_json(self._registry, data)
+                # 已创建但被用户删除、或创建前已有其他环境时，尊重用户选择。
+                _atomic_json(marker, {"environment_id": None, "created": True})
+        return self.list()
+
     def create(self, name: str) -> dict:
+        created = self._create(name)
+        assert created is not None
+        return created
+
+    def _create(
+        self, name: str, *, as_default: bool = False, environment_id: str | None = None
+    ) -> dict | None:
         name = name.strip()
         if not _NAME.fullmatch(name) or name in {".", ".."}:
             raise ManagedEnvironmentError("environment name is invalid")
         with RuntimeStoreLock(self._lock):
             data = self._read()
+            if as_default and data["environments"]:
+                return None
             if any(
                 item["name"].casefold() == name.casefold()
                 for item in data["environments"].values()
             ):
                 raise ManagedEnvironmentError("environment name already exists")
-            env_id = uuid4().hex
-            root = self.root / env_id / "revisions" / "1"
+            env_id = environment_id or uuid4().hex
+            root = self._safe_path(
+                {
+                    "id": env_id,
+                    "kind": "venv",
+                    "path": str(Path(env_id) / "revisions" / "1"),
+                    "revision": 1,
+                }
+            )
             base = self._base_python()
             result = subprocess.run(
                 [str(base), "-I", "-m", "venv", "--copies", "--without-pip", str(root)],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=120,
@@ -1204,6 +1365,7 @@ class ManagedEnvironmentStore:
                     "--without-pip",
                     str(root),
                 ],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=120,
@@ -1544,6 +1706,8 @@ class ManagedEnvironmentStore:
         with self._target_operation(env_id):
             plan_path = self.paths.state_root / "environment-plans" / f"{env_id}.json"
             with RuntimeStoreLock(self._lock):
+                self._check_install_cancelled()
+                self._install_terminal = False
                 try:
                     plan = json.loads(plan_path.read_text(encoding="utf-8"))
                 except (OSError, ValueError) as exc:
@@ -1622,6 +1786,7 @@ class ManagedEnvironmentStore:
                 base = self._base_python()
                 result = subprocess.run(
                     [str(base), "-I", "-m", "venv", "--copies", str(root)],
+                    stdin=subprocess.DEVNULL,
                     capture_output=True,
                     text=True,
                     timeout=120,
@@ -1633,7 +1798,9 @@ class ManagedEnvironmentStore:
                         reason_code="venv_creation_failed",
                         next_action="check_directory_permissions",
                     )
+                self._check_install_cancelled()
                 self._install_runner(self._venv_python(root), scope, source.endpoint)
+                self._check_install_cancelled()
                 candidate = {
                     key: value
                     for key, value in record.items()
@@ -1661,6 +1828,7 @@ class ManagedEnvironmentStore:
                         next_action="repair_environment",
                     )
                 with RuntimeStoreLock(self._lock):
+                    self._check_install_cancelled()
                     latest = self._read()
                     try:
                         current_plan = json.loads(plan_path.read_text(encoding="utf-8"))
@@ -1682,6 +1850,7 @@ class ManagedEnvironmentStore:
                     if latest["active_id"] == env_id:
                         latest["active_revision"] += 1
                     _atomic_json(self._registry, latest)
+                    self._install_terminal = True
             except Exception as error:
                 guidance = failure_guidance(error)
                 if isinstance(error, RuntimeInstallPlanStale):
@@ -1704,6 +1873,7 @@ class ManagedEnvironmentStore:
                 }
                 try:
                     with RuntimeStoreLock(self._lock):
+                        self._check_install_cancelled()
                         latest = self._read()
                         if latest["environments"].get(env_id) == record:
                             latest["environments"][env_id] = {
@@ -1711,6 +1881,7 @@ class ManagedEnvironmentStore:
                                 "last_install_operation": failed,
                             }
                             _atomic_json(self._registry, latest)
+                        self._install_terminal = True
                 except OSError:
                     # The accepted marker remains durable if a full disk blocks
                     # recording the more specific failure detail.

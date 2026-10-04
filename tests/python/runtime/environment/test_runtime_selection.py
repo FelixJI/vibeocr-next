@@ -14,6 +14,7 @@ from vibeocr.runtime.environments.runtime_selection import (
     component_variant_catalog_payload,
     default_download_sources,
     download_source_catalog_payload,
+    expand_legacy_model_sources,
     normalize_download_source_ids,
     normalize_install_component_ids,
     selectable_component_ids,
@@ -92,10 +93,17 @@ def test_download_source_catalog_declares_default_and_unique_business_keys() -> 
         "pypi",
         "huggingface",
         "modelscope",
+        "paddleocr-huggingface",
+        "paddleocr-modelscope",
+        "paddleocr-bos",
+        "mineru-huggingface",
+        "mineru-modelscope",
     }
     assert {source["kind"] for source in sources} == {
         "package_index",
         "model_registry",
+        "paddleocr_model_registry",
+        "mineru_model_registry",
     }
     for source in sources:
         assert set(source) == {"kind", "id", "endpoint"}
@@ -388,3 +396,15 @@ def test_paddle_selection_never_adds_mineru_or_torch(accelerator, suffix):
         f"paddleocr-{suffix}",
     }
     assert selection.install_scope.scope_id == "paddle"
+
+
+def test_legacy_sources_do_not_lose_valid_preference_to_unknown_engine_id() -> None:
+    assert expand_legacy_model_sources(("modelscope", "paddleocr-future")) == (
+        "paddleocr-future",
+        "paddleocr-modelscope",
+        "mineru-modelscope",
+    )
+    assert expand_legacy_model_sources(("modelscope", "paddleocr-bos")) == (
+        "paddleocr-bos",
+        "mineru-modelscope",
+    )

@@ -34,13 +34,20 @@ public sealed partial class MainWindow
       "document.querySelector('#managed-package-source-select')?.textContent.includes('PyPI 官方源') === true",
       TimeSpan.FromSeconds(30));
 
+    await WaitForSmokeDomAsync(
+      "document.querySelector('#managed-global-package-source')?.value === 'tuna-pypi' && " +
+      "Array.from(document.querySelector('#managed-global-package-source').options).every(o => o.value !== '') && " +
+      "document.querySelector('#managed-global-paddleocr_model_registry')?.textContent.includes('百度 BOS') === true && " +
+      "document.querySelector('#managed-global-mineru_model_registry')?.textContent.includes('百度 BOS') === false",
+      TimeSpan.FromSeconds(30));
+
     RecordManagedSmokeStage("global default");
     // 全局默认 → PyPI：A/B 均继承全局，且不触发下载/安装/服务。
     await WaitForSmokeDomAsync("(() => { const d=document.querySelector('details.managed-source-defaults'); if(!d)return false;if(!d.open)d.querySelector('summary').click();return d.open;})()", TimeSpan.FromSeconds(30));
     await SelectSmokeValueAsync("#managed-global-package-source", "pypi");
     await ClickManagedSmokeButtonAsync("保存全局默认来源");
     ManagedEnvironmentList globalSaved = await WaitForSmokeSnapshotAsync(list =>
-      (list.DefaultSourceIds ?? []).Count == 1 && list.DefaultSourceIds![0] == "pypi" &&
+      (list.DefaultSourceIds ?? []).Order().SequenceEqual(new[] { "pypi", "paddleocr-huggingface", "mineru-huggingface" }.Order()) &&
       list.Environments.All(item =>
         ResolvedSmokeSource(item, "package_index") == "pypi" &&
         ResolvedSmokeOrigin(item, "package_index") == "global_default"),
@@ -58,6 +65,22 @@ public sealed partial class MainWindow
       ResolvedSmokeSource(BySmokeId(list, pair[1].Id), "package_index") == "tuna-pypi" &&
       ResolvedSmokeOrigin(BySmokeId(list, pair[1].Id), "package_index") == "environment_override" &&
       ResolvedSmokeSource(BySmokeId(list, pair[0].Id), "package_index") == "pypi",
+      TimeSpan.FromSeconds(30));
+    await SelectSmokeValueAsync("#managed-env-paddleocr_model_registry", "paddleocr-bos");
+    await SelectSmokeValueAsync("#managed-env-mineru_model_registry", "mineru-modelscope");
+    await ClickManagedSmokeButtonAsync("保存本环境来源");
+    await WaitForSmokeSnapshotAsync(list =>
+      ResolvedSmokeSource(BySmokeId(list, pair[1].Id), "paddleocr_model_registry") == "paddleocr-bos" &&
+      ResolvedSmokeSource(BySmokeId(list, pair[1].Id), "mineru_model_registry") == "mineru-modelscope",
+      TimeSpan.FromSeconds(30));
+    // Clear only PaddleOCR: MinerU must keep its independent override.
+    await SelectSmokeValueAsync("#managed-env-paddleocr_model_registry", "");
+    await ClickManagedSmokeButtonAsync("保存本环境来源");
+    overrideSaved = await WaitForSmokeSnapshotAsync(list =>
+      ResolvedSmokeSource(BySmokeId(list, pair[1].Id), "paddleocr_model_registry") == "paddleocr-huggingface" &&
+      ResolvedSmokeOrigin(BySmokeId(list, pair[1].Id), "paddleocr_model_registry") == "global_default" &&
+      ResolvedSmokeSource(BySmokeId(list, pair[1].Id), "mineru_model_registry") == "mineru-modelscope" &&
+      ResolvedSmokeOrigin(BySmokeId(list, pair[1].Id), "mineru_model_registry") == "environment_override",
       TimeSpan.FromSeconds(30));
     ManagedEnvironment beforePreview = BySmokeId(overrideSaved, pair[1].Id);
     if (beforePreview.Revision != pair[1].Revision || beforePreview.Status != "empty" ||
@@ -115,8 +138,8 @@ public sealed partial class MainWindow
         interrupted.Revision != pair[0].Revision)
       throw new InvalidOperationException(
         "Cancelled install changed the environment beyond the durable failure record.");
-    if ((interruptedFailure.EffectiveSourceIds ?? []).Count != 1 ||
-        interruptedFailure.EffectiveSourceIds![0] != "pypi" ||
+    if (!(interruptedFailure.EffectiveSourceIds ?? []).Order().SequenceEqual(
+          new[] { "pypi", "paddleocr-huggingface", "mineru-huggingface" }.Order()) ||
         interruptedFailure.RequestedSourceIds is not null)
       throw new InvalidOperationException(
         "Cancelled install lost its frozen requested/effective source evidence.");
@@ -136,7 +159,9 @@ public sealed partial class MainWindow
     if (finalB.Revision != beforePreview.Revision || finalB.Status != "empty" ||
         finalB.LastInstallFailure is not null ||
         ResolvedSmokeSource(finalB, "package_index") != "tuna-pypi" ||
-        ResolvedSmokeOrigin(finalB, "package_index") != "environment_override")
+        ResolvedSmokeOrigin(finalB, "package_index") != "environment_override" ||
+        ResolvedSmokeSource(finalB, "paddleocr_model_registry") != "paddleocr-huggingface" ||
+        ResolvedSmokeSource(finalB, "mineru_model_registry") != "mineru-modelscope")
       throw new InvalidOperationException("Environment B changed during A's preview/cancel cycle.");
 
     return new
@@ -156,6 +181,8 @@ public sealed partial class MainWindow
         revision = finalB.Revision,
         status = finalB.Status,
         override_source_ids = finalB.OverrideSourceIds ?? [],
+        resolved_paddleocr_model = ResolvedSmokeSource(finalB, "paddleocr_model_registry"),
+        resolved_mineru_model = ResolvedSmokeSource(finalB, "mineru_model_registry"),
         resolved_package = ResolvedSmokeSource(finalB, "package_index"),
         resolved_package_origin = ResolvedSmokeOrigin(finalB, "package_index"),
       },

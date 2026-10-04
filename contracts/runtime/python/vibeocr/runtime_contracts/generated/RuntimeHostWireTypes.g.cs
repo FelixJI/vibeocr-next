@@ -544,6 +544,12 @@ public sealed record ManagedEnvironmentRequest
     [JsonPropertyName("model_source_id")]
     public string? ModelSourceId { get; init; }
 
+    [JsonPropertyName("paddleocr_model_source_id")]
+    public string? PaddleocrModelSourceId { get; init; }
+
+    [JsonPropertyName("mineru_model_source_id")]
+    public string? MineruModelSourceId { get; init; }
+
     [JsonPropertyName("plan_id")]
     public string? PlanId { get; init; }
 

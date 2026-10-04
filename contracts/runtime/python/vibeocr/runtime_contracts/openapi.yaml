@@ -2031,10 +2031,12 @@
       },
       "DownloadSourceKind": {
         "type": "string",
-        "description": "Open source-kind identifier. package_index selects a dependency package index; model_registry selects an upstream model-source preference that the Backend may encode for native engine downloaders. This preference does not make VibeOCR responsible for model files, downloads, caches, validation or repair. Clients preserve unknown response values and only offer selection UI for kinds they understand.",
+        "description": "Open source-kind identifier. package_index selects a dependency package index; model_registry selects an upstream model-source preference that the Backend may encode for native engine downloaders. This preference does not make VibeOCR responsible for model files, downloads, caches, validation or repair. paddleocr_model_registry and mineru_model_registry independently select native engine preferences; model_registry is a legacy shared preference. Clients preserve unknown response values and only offer selection UI for kinds they understand.",
         "x-vibeocr-known-values": [
           "package_index",
-          "model_registry"
+          "model_registry",
+          "paddleocr_model_registry",
+          "mineru_model_registry"
         ]
       },
       "Error": {

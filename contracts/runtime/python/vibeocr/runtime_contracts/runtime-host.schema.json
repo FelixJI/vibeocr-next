@@ -30,7 +30,7 @@
         "runtime_manifest": { "type": "string", "minLength": 1 },
         "layout_manifest": { "type": "string", "minLength": 1 },
         "product_id": { "type": "string", "minLength": 1 },
-        "action": { "type": "string", "enum": ["list", "create", "set_sources", "preview_install", "install", "prepare_switch", "commit_switch", "repair_empty", "delete", "find_compatible"] },
+        "action": { "type": "string", "enum": ["list", "initialize_default", "create", "set_sources", "preview_install", "install", "prepare_switch", "commit_switch", "repair_empty", "delete", "find_compatible"] },
         "name": { "type": "string", "minLength": 1 },
         "environment_id": {
           "anyOf": [
@@ -65,6 +65,14 @@
           "type": ["string", "null"],
           "minLength": 1,
           "description": "set_sources only: model_registry source id to persist, or null to clear that kind. Model sources are a preference projected to engine-owned native downloaders; actual endpoints stay unknown."
+        },
+        "paddleocr_model_source_id": {
+          "type": ["string", "null"], "minLength": 1,
+          "description": "set_sources only: independent PaddleOCR preference; null clears this engine override, absent preserves it."
+        },
+        "mineru_model_source_id": {
+          "type": ["string", "null"], "minLength": 1,
+          "description": "set_sources only: independent MinerU preference; null clears this engine override, absent preserves it."
         },
         "plan_id": { "type": "string", "minLength": 1 },
         "prepared": { "type": "object" },
@@ -262,8 +270,8 @@
     },
     "DownloadSourceKind": {
       "type": "string",
-      "description": "Open source-kind identifier. package_index selects a dependency package index; model_registry selects an upstream model-source preference that the Backend may encode for native engine downloaders. This preference does not make VibeOCR responsible for model files, downloads, caches, validation or repair. Clients preserve unknown response values and only offer selection UI for kinds they understand.",
-      "x-vibeocr-known-values": ["package_index", "model_registry"]
+      "description": "Open source-kind identifier. package_index selects a dependency package index; model_registry selects an upstream model-source preference that the Backend may encode for native engine downloaders. This preference does not make VibeOCR responsible for model files, downloads, caches, validation or repair. paddleocr_model_registry and mineru_model_registry independently select native engine preferences; model_registry is a legacy shared preference. Clients preserve unknown response values and only offer selection UI for kinds they understand.",
+      "x-vibeocr-known-values": ["package_index", "model_registry", "paddleocr_model_registry", "mineru_model_registry"]
     },
     "DownloadSourceDescriptor": {
       "type": "object",
