@@ -532,14 +532,23 @@ public sealed class ManagedEnvironmentSettingsTests
         TestContext.Current.CancellationToken);
       Assert.Equal("environment|<null>|modelscope", manager.SourceSaves.Single());
       Assert.Null(settings.Plan);
+      Assert.Contains("仅用于安装依赖与下载模型", settings.Status);
       Assert.Contains("不会下载或安装", settings.Status);
       Assert.Contains("下次启动", settings.Status);
 
-      // 全局默认保存不针对运行中的环境，不叠加下次启动提示。
+      // 全局保存（environmentId=null）同样改变运行中环境的模型来源解析：
+      // 有活动会话且请求包含模型来源时提示下次启动生效；未触碰模型来源
+      // 时不叠加提示。
       await settings.SetSourcesAsync(null, "pypi", null,
         TestContext.Current.CancellationToken);
       Assert.Equal("<global>|pypi|<null>", manager.SourceSaves[1]);
       Assert.DoesNotContain("下次启动", settings.Status);
+
+      await settings.SetSourcesAsync(null, "tuna-pypi", "modelscope",
+        TestContext.Current.CancellationToken);
+      Assert.Equal("<global>|tuna-pypi|modelscope", manager.SourceSaves[2]);
+      Assert.Contains("下载来源已保存并统一所有环境", settings.Status);
+      Assert.Contains("下次启动", settings.Status);
     }
     finally
     {

@@ -95,8 +95,8 @@ def test_source_resolution_chain_overrides_are_isolated(tmp_path: Path) -> None:
     }
     assert _entry(env_a["resolved_sources"], "paddleocr_model_registry") == {
         "kind": "paddleocr_model_registry",
-        "id": "paddleocr-huggingface",
-        "display_name": "Hugging Face",
+        "id": "paddleocr-modelscope",
+        "display_name": "ModelScope",
         "origin": "product_default",
     }
 
@@ -235,7 +235,7 @@ def test_saved_sources_survive_restart_and_legacy_schema_stays_readable(
     assert _entry(legacy_env["resolved_sources"], "package_index")["id"] == "tuna-pypi"
     assert (
         _entry(legacy_env["resolved_sources"], "paddleocr_model_registry")["id"]
-        == "paddleocr-huggingface"
+        == "paddleocr-modelscope"
     )
 
 
@@ -250,13 +250,13 @@ def test_preview_binds_requested_effective_and_config_revision(
     assert inherited["requested_source_ids"] is None
     assert inherited["source_ids"] == [
         "tuna-pypi",
-        "paddleocr-huggingface",
-        "mineru-huggingface",
+        "paddleocr-modelscope",
+        "mineru-modelscope",
     ]
     assert inherited["effective_source_ids"] == [
         "tuna-pypi",
-        "paddleocr-huggingface",
-        "mineru-huggingface",
+        "paddleocr-modelscope",
+        "mineru-modelscope",
     ]
     assert inherited["source_config_revision"] == 0
     assert inherited["python_origin"] == "product_bundle"
@@ -276,8 +276,8 @@ def test_preview_binds_requested_effective_and_config_revision(
     assert explicit["requested_source_ids"] == ["pypi"]
     assert explicit["source_ids"] == [
         "pypi",
-        "paddleocr-huggingface",
-        "mineru-huggingface",
+        "paddleocr-modelscope",
+        "mineru-modelscope",
     ]
     assert _entry(explicit["sources"], "package_index")["requested"] is True
 
@@ -340,8 +340,8 @@ def test_install_freezes_sources_and_failure_evidence_is_durable(
     assert failure["requested_source_ids"] == ["pypi"]
     assert failure["effective_source_ids"] == [
         "pypi",
-        "paddleocr-huggingface",
-        "mineru-huggingface",
+        "paddleocr-modelscope",
+        "mineru-modelscope",
     ]
 
     # 后续新预览不冲掉旧来源证据。
@@ -366,8 +366,8 @@ def test_install_freezes_sources_and_failure_evidence_is_durable(
     assert installed["status"] == "installed"
     assert installed["source_ids"] == [
         "pypi",
-        "paddleocr-huggingface",
-        "mineru-huggingface",
+        "paddleocr-modelscope",
+        "mineru-modelscope",
     ]
     assert attempts == ["https://pypi.org/simple"] * 2
     assert (
@@ -397,14 +397,14 @@ def test_inherited_install_uses_resolved_defaults(
     assert plan["requested_source_ids"] is None
     assert plan["source_ids"] == [
         "tuna-pypi",
-        "paddleocr-huggingface",
-        "mineru-huggingface",
+        "paddleocr-modelscope",
+        "mineru-modelscope",
     ]
     installed = manager.install(plan["plan_id"], a["id"], "rapidocr-cpu")
     assert installed["source_ids"] == [
         "tuna-pypi",
-        "paddleocr-huggingface",
-        "mineru-huggingface",
+        "paddleocr-modelscope",
+        "mineru-modelscope",
     ]
     assert endpoints == ["https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/"]
 
@@ -426,8 +426,8 @@ def test_launch_projects_model_source_environment(
     monkeypatch.setattr(manager, "_probe", healthy_probe)
 
     prepared = manager.prepare_switch(a["id"])
-    assert prepared["launch"]["environment"]["PADDLE_PDX_MODEL_SOURCE"] == "huggingface"
-    assert prepared["launch"]["environment"]["MINERU_MODEL_SOURCE"] == "huggingface"
+    assert prepared["launch"]["environment"]["PADDLE_PDX_MODEL_SOURCE"] == "modelscope"
+    assert prepared["launch"]["environment"]["MINERU_MODEL_SOURCE"] == "modelscope"
 
     manager.set_sources(None, None, "modelscope")
     prepared = manager.prepare_switch(a["id"])
@@ -555,8 +555,8 @@ def test_stdio_set_sources_and_inherited_preview_round_trip(
     assert payload["requested_source_ids"] is None
     assert payload["source_ids"] == [
         "pypi",
-        "paddleocr-huggingface",
-        "mineru-huggingface",
+        "paddleocr-modelscope",
+        "mineru-modelscope",
     ]
     assert payload["sources"][0]["inherited_from"] == "global_default"
     assert re.fullmatch(r"[0-9a-f]{32}", payload["plan_id"])
@@ -717,7 +717,7 @@ def test_stdio_independent_engine_sources_preserve_absent_fields(
     assert result["default_source_ids"] == ["tuna-pypi", "mineru-modelscope"]
     assert (
         _entry(result["resolved_default_sources"], "paddleocr_model_registry")["id"]
-        == "paddleocr-huggingface"
+        == "paddleocr-modelscope"
     )
     assert (
         _entry(result["resolved_default_sources"], "mineru_model_registry")["id"]
@@ -725,8 +725,8 @@ def test_stdio_independent_engine_sources_preserve_absent_fields(
     )
     assert {source["id"] for source in result["sources"] if source["is_default"]} == {
         "tuna-pypi",
-        "paddleocr-huggingface",
-        "mineru-huggingface",
+        "paddleocr-modelscope",
+        "mineru-modelscope",
     }
 
 

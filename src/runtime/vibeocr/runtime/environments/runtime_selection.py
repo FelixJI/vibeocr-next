@@ -34,7 +34,9 @@ BASE_PROFILE = "win-x64-base"
 # Backend release 声明的候选源。Protocol 允许同 kind 多候选；单次选择
 # TUNA 是发布/运行时默认 package index，官方 PyPI 保留为显式候选，
 # 不做静默 fallback。模型源选择只投影到 PaddleX/MinerU 官方环境值；
-# 上游原生 downloader 继续拥有模型下载与文件生命周期。
+# 上游原生 downloader 继续拥有模型下载与文件生命周期。历史共享
+# model_registry 条目保留在目录中供旧计划/意图/设置解析（UI 已隐藏），
+# 默认模型源为 ModelScope（仅代表安装依赖与下载模型）。
 _DOWNLOAD_SOURCES: tuple[dict[str, str], ...] = (
     {
         "kind": DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX,
@@ -72,6 +74,7 @@ _DOWNLOAD_SOURCES += tuple(
     )
 )
 _DEFAULT_DOWNLOAD_SOURCE_IDS = ("tuna-pypi",)
+_DEFAULT_MODEL_SOURCE_IDS = ("paddleocr-modelscope", "mineru-modelscope")
 
 # 展示名映射：目录 payload 仍只携带 kind/id/endpoint（wire 契约不变），
 # 管理通道的名称投影由此处单点提供，避免各端重复硬编码。
@@ -434,7 +437,7 @@ def default_download_sources(
 ) -> tuple[dict[str, str], ...]:
     defaults = set(_DEFAULT_DOWNLOAD_SOURCE_IDS)
     if include_model_sources:
-        defaults.update(("paddleocr-huggingface", "mineru-huggingface"))
+        defaults.update(_DEFAULT_MODEL_SOURCE_IDS)
     return tuple(source for source in _DOWNLOAD_SOURCES if source["id"] in defaults)
 
 

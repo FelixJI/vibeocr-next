@@ -25,6 +25,7 @@ import {
   type Point,
 } from "./annotationGeometry";
 import { uploadAnnotatedImage } from "./annotationHandoff";
+import { captureSceneStyle, nativeCaptureScene } from "./captureSceneLayout";
 import { ImageTextLayer } from "./ImageTextLayer";
 import { toImageTextLines } from "./imageTextLayerGeometry";
 import type { InpaintRect, InpaintResponse } from "./inpaint/inpaint";
@@ -174,6 +175,26 @@ export function ImageCanvasEditor({
   showAutoTextPreference = true,
   onAutoTextChange,
 }: ImageCanvasEditorProps) {
+  const captureGeometry = nativeCaptureScene();
+  const [sceneViewport, setSceneViewport] = useState(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }));
+  useEffect(() => {
+    if (!captureGeometry) return undefined;
+    const resize = () =>
+      setSceneViewport({
+        width: window.innerWidth,
+        height: window.innerHeight,
+      });
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, [captureGeometry]);
+  const captureStyle = captureSceneStyle(
+    captureGeometry,
+    sceneViewport.width,
+    sceneViewport.height,
+  );
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imageRef = useRef<HTMLImageElement | undefined>(undefined);
   const dragStart = useRef<Point | undefined>(undefined);
@@ -1699,10 +1720,24 @@ export function ImageCanvasEditor({
 
   return (
     <div
-      className="canvas-editor"
+      className={`canvas-editor${captureStyle ? " capture-scene-editor" : ""}`}
+      style={captureStyle}
       data-screenshot-session={session?.sessionId ?? ""}
       onKeyDown={(event) => {
         const target = event.target as HTMLElement;
+        if (
+          captureStyle &&
+          session &&
+          event.key === "Escape" &&
+          tool === "select" &&
+          selectedMark === undefined &&
+          !isExporting &&
+          !["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)
+        ) {
+          event.preventDefault();
+          void actions.run({ type: "recognition.closeScreenshotSession" });
+          return;
+        }
         if (
           event.code === "Space" &&
           !["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(target.tagName)
@@ -2206,9 +2241,10 @@ export function ImageCanvasEditor({
         <canvas
           aria-label="图片检查画布"
           className={`inspection-canvas tool-${tool}`}
-          height={600}
+          height={captureStyle ? captureGeometry?.height : 600}
           style={{
             display: layerReady ? "none" : "block",
+            opacity: captureStyle && !sourceSize ? 0 : undefined,
           }}
           onKeyDown={(event) => {
             const modifier = event.ctrlKey || event.metaKey;
@@ -2243,7 +2279,7 @@ export function ImageCanvasEditor({
           onPointerUp={pointerUp}
           ref={canvasRef}
           tabIndex={0}
-          width={900}
+          width={captureStyle ? captureGeometry?.width : 900}
         />
         {copyMenu?.key === layerSelectionKey && copyMenu.text && (
           <Button

@@ -43,6 +43,12 @@ public sealed class ScreenEdgeGeometryTests
         Assert.Equal(
             new PhysicalRectangle(0, 0, 1, 1),
             ScreenEdgeGeometry.GetSensorRectangle(tiny, ScreenEdge.Left, thickness: 8));
+        Assert.Equal(
+            new PhysicalRectangle(0, 0, 20, 3),
+            ScreenEdgeGeometry.GetSensorRectangle(new(0, 0, 20, 3), ScreenEdge.Bottom, thickness: 8));
+        Assert.Equal(
+            new PhysicalRectangle(0, 0, 3, 20),
+            ScreenEdgeGeometry.GetSensorRectangle(new(0, 0, 3, 20), ScreenEdge.Right, thickness: 8));
     }
 
     [Fact]

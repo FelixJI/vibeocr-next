@@ -5,9 +5,9 @@ param(
     [int]$TimeoutMinutes = 45
 )
 
-# #105 环境级安装来源 smoke：真实 Windows/WebView2 公开 UI，从两个空环境完成
-# 全局默认/单环境覆盖保存 → 跟随配置预览 → 确认 → 取消（合成中断）→ 重新预览，
-# 验证失败终态来源证据持久、另一环境配置不变；全程不完整安装、不启动 OCR。
+# 下载来源 smoke：真实 Windows/WebView2 公开 UI，从两个空环境完成
+# 统一来源保存 → 跟随配置预览 → 确认 → 取消（合成中断）→ 重新预览，
+# 验证统一设置与失败终态来源证据持久；全程不完整安装、不启动 OCR。
 $ErrorActionPreference = 'Stop'
 if ($TimeoutMinutes -le 0) { throw 'TimeoutMinutes must be positive' }
 $source = (Resolve-Path -LiteralPath $ProductRoot).Path.TrimEnd('\')
@@ -81,9 +81,9 @@ try {
     }
     if (@($evidence.default_source_ids).Count -ne 3 -or
         @($evidence.default_source_ids) -notcontains 'pypi' -or
-        @($evidence.default_source_ids) -notcontains 'paddleocr-huggingface' -or
-        @($evidence.default_source_ids) -notcontains 'mineru-huggingface') {
-        throw 'Global package default was not saved as PyPI'
+        @($evidence.default_source_ids) -notcontains 'paddleocr-modelscope' -or
+        @($evidence.default_source_ids) -notcontains 'mineru-modelscope') {
+        throw 'Unified sources were not saved as PyPI and ModelScope'
     }
     if ($evidence.a.status -ne 'empty' -or $evidence.a.revision -ne 1 -or
         $evidence.a.resolved_package -ne 'pypi' -or
@@ -91,23 +91,22 @@ try {
         throw "Environment A did not inherit the global default: $($evidence.a | ConvertTo-Json -Compress)"
     }
     if ($evidence.b.status -ne 'empty' -or $evidence.b.revision -ne 1 -or
-        $evidence.b.resolved_package -ne 'tuna-pypi' -or
-        $evidence.b.resolved_package_origin -ne 'environment_override' -or
-        @($evidence.b.override_source_ids).Count -ne 2 -or
-        $evidence.b.resolved_paddleocr_model -ne 'paddleocr-huggingface' -or
+        $evidence.b.resolved_package -ne 'pypi' -or
+        @($evidence.b.override_source_ids).Count -ne 0 -or
+        $evidence.b.resolved_paddleocr_model -ne 'paddleocr-modelscope' -or
         $evidence.b.resolved_mineru_model -ne 'mineru-modelscope') {
-        throw "Environment B override was not isolated: $($evidence.b | ConvertTo-Json -Compress)"
+        throw "Environment B did not follow unified sources: $($evidence.b | ConvertTo-Json -Compress)"
     }
     $failure = $evidence.a_failure
     if ($failure.phase -ne 'failed' -or $failure.reason_code -ne 'install_interrupted' -or
         $null -ne $failure.requested_source_ids -or
         @($failure.effective_source_ids).Count -ne 3 -or
         @($failure.effective_source_ids) -notcontains 'pypi' -or
-        @($failure.effective_source_ids) -notcontains 'paddleocr-huggingface' -or
-        @($failure.effective_source_ids) -notcontains 'mineru-huggingface') {
+        @($failure.effective_source_ids) -notcontains 'paddleocr-modelscope' -or
+        @($failure.effective_source_ids) -notcontains 'mineru-modelscope') {
         throw "Cancelled install lost its frozen source evidence: $($failure | ConvertTo-Json -Compress)"
     }
-    Write-Host 'Environment source settings E2E passed: global default, isolated override, follow preview, cancel durability, unchanged peer.'
+    Write-Host 'Environment source settings E2E passed: unified sources, follow preview, cancel durability, unchanged peer installation.'
     Write-Host "Isolated evidence retained at: $smokeRoot"
 } finally {
     $env:VIBEOCR_SELF_TEST_SMOKE = $previousSmoke

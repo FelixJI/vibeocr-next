@@ -6,6 +6,41 @@ namespace VibeOCR.App.Tests;
 
 public sealed class ScreenSelectionSessionTests
 {
+  [Fact]
+  public void ReplacementSceneRestoresOriginalOwnerOnlyWhenFinalSceneCloses()
+  {
+    int originalRestores = 0, hiddenOwnerRestores = 0;
+    var original = new ScreenshotOwnerRestoration();
+    var replacement = new ScreenshotOwnerRestoration();
+    var final = new ScreenshotOwnerRestoration();
+    original.Set(() => originalRestores++);
+    replacement.Set(() => hiddenOwnerRestores++);
+    final.Set(() => hiddenOwnerRestores++);
+    original.TransferTo(replacement);
+    original.Restore();
+    replacement.TransferTo(final);
+    replacement.Restore();
+    Assert.Equal(0, originalRestores);
+    Assert.Equal(0, hiddenOwnerRestores);
+    final.Restore();
+    final.Restore();
+    Assert.Equal(1, originalRestores);
+    Assert.Equal(0, hiddenOwnerRestores);
+  }
+
+  [Fact]
+  public void ClosedSuccessorRestoresTransferredOwnerImmediately()
+  {
+    int restores = 0;
+    var previous = new ScreenshotOwnerRestoration();
+    var alreadyClosed = new ScreenshotOwnerRestoration();
+    previous.Set(() => restores++);
+    alreadyClosed.Restore();
+    previous.TransferTo(alreadyClosed);
+    previous.Restore();
+    Assert.Equal(1, restores);
+  }
+
   private sealed class StitchedRegionPicker : IScreenRegionPicker
   {
     public Task<ScreenRegionSelection?> PickAsync(CancellationToken cancellationToken) =>

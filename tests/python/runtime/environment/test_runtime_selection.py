@@ -88,6 +88,15 @@ def test_download_source_catalog_declares_default_and_unique_business_keys() -> 
     ids = [source["id"] for source in sources]
     assert len(set(ids)) == len(ids)
     assert [source["id"] for source in default_download_sources()] == ["tuna-pypi"]
+    # 默认：依赖包 TUNA，模型 ModelScope（仅代表安装依赖与下载模型）。
+    assert [
+        source["id"] for source in default_download_sources(include_model_sources=True)
+    ] == [
+        "tuna-pypi",
+        "paddleocr-modelscope",
+        "mineru-modelscope",
+    ]
+    # 历史共享 model_registry 条目保留在目录中供旧计划/意图解析（UI 隐藏）。
     assert {source["id"] for source in sources} == {
         "tuna-pypi",
         "pypi",

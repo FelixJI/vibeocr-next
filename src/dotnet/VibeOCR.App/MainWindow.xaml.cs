@@ -137,7 +137,7 @@ public sealed partial class MainWindow : Window
       diagnostics,
       resourceBroker,
       resourceRoot,
-      () => imageEditor is { } editor ? WindowNative.GetWindowHandle(editor) : WindowNative.GetWindowHandle(this),
+      () => imageEditor is { } editor ? editor.Handle : WindowNative.GetWindowHandle(this),
       annotationStore,
       inferenceAttached: inferenceAttached,
       supervisorInstanceId: supervisorInstanceId,
@@ -145,6 +145,8 @@ public sealed partial class MainWindow : Window
       shellActions: shellActions,
       optionsLayout: layout);
     commandHandler.ScreenshotSessionReady += ShowImageEditor;
+    commandHandler.ScreenshotCaptureStarting += () => imageEditor?.HideForCapture();
+    commandHandler.ScreenshotCaptureFinished += () => imageEditor?.RestoreAfterCapture();
     commandHandler.ScreenshotTextLayerChanged += layer =>
     {
       void UpdatePins()
@@ -173,6 +175,7 @@ public sealed partial class MainWindow : Window
       {
         if (imageEditor is { } editor && editor.SessionId == sessionId)
         {
+          editor.TransferOwnerRestorationTo(commandHandler.PendingScreenshotCaptureScene);
           imageEditor = null;
           editor.Close();
         }
@@ -286,13 +289,24 @@ public sealed partial class MainWindow : Window
   private void ShowImageEditor(Guid sessionId, VibeOCR.Platform.Windows.PhysicalRectangle? bounds)
   {
     if (shuttingDown || commandHandler.CurrentImageSessionId != sessionId) return;
+    ScreenshotCaptureScene? captureScene = commandHandler.TakeScreenshotCaptureScene(sessionId);
     if (imageEditor is { } previous)
     {
+      previous.TransferOwnerRestorationTo(captureScene);
       imageEditor = null;
       previous.Close();
     }
-    var editor = new ImageEditWindow(sessionId, application, resourceBroker, annotationStore,
-      layout.WebAssetsRoot, bounds);
+    ImageEditWindow editor;
+    try
+    {
+      editor = new ImageEditWindow(sessionId, application, resourceBroker, annotationStore,
+        layout.WebAssetsRoot, bounds, captureScene);
+    }
+    catch
+    {
+      captureScene?.Dispose();
+      throw;
+    }
     imageEditor = editor;
     editor.Closed += async (_, _) =>
     {

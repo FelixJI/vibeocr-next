@@ -8,6 +8,33 @@ namespace VibeOCR.App.Tests;
 
 public sealed class WorkbenchBridgeCodecTests
 {
+  [Theory]
+  [InlineData("rapidocr-cpu")]
+  [InlineData("文字识别 CPU-2")]
+  [InlineData("0123456789abcdef0123456789abcdef")]
+  public void EnvironmentCommandsAcceptRuntimeReadableIds(string environmentId)
+  {
+    Guid sessionId = Guid.NewGuid();
+    string arguments = JsonSerializer.Serialize(new { environmentId, recipe = "rapidocr-cpu" });
+    var command = Assert.IsType<PreviewEnvironmentInstallCommand>(
+      WorkbenchBridgeCodec.ParseCommand(CommandJson(sessionId, "settings", "previewEnvironmentInstall", arguments), sessionId).Command);
+    Assert.Equal(environmentId, command.EnvironmentId);
+  }
+
+  [Theory]
+  [InlineData("../environment")]
+  [InlineData("..")]
+  [InlineData("environment\\other")]
+  [InlineData("C:environment")]
+  [InlineData("environment.")]
+  public void EnvironmentCommandsRejectPathSegments(string environmentId)
+  {
+    Guid sessionId = Guid.NewGuid();
+    string arguments = JsonSerializer.Serialize(new { environmentId, recipe = "rapidocr-cpu" });
+    Assert.Throws<WorkbenchBridgeProtocolException>(() =>
+      WorkbenchBridgeCodec.ParseCommand(CommandJson(sessionId, "settings", "previewEnvironmentInstall", arguments), sessionId));
+  }
+
   [Fact]
   public void EnvironmentPreviewBindsSelectedPackageSource()
   {
@@ -187,7 +214,7 @@ public sealed class WorkbenchBridgeCodecTests
         "left",
         false,
         "userHidden",
-        "无法保存悬浮工具栏设置，原设置已保留：disk full"));
+        "无法保存悬浮工具栏设置，原设置已保留：disk full", PeekPixels: 8));
     using JsonDocument json = JsonDocument.Parse(WorkbenchBridgeCodec.SerializeState(Guid.NewGuid(),
       new WorkbenchStateEnvelope(1, "settings", WorkbenchStateChange.Replace, state)));
     JsonElement settings = json.RootElement.GetProperty("payload").GetProperty("state");
@@ -204,6 +231,7 @@ public sealed class WorkbenchBridgeCodecTests
     Assert.Equal("left", toolbar.GetProperty("edge").GetString());
     Assert.False(toolbar.GetProperty("autoHide").GetBoolean());
     Assert.Equal(300, toolbar.GetProperty("lingerMs").GetInt32());
+    Assert.Equal(8, toolbar.GetProperty("peekPixels").GetInt32());
     Assert.Equal("system", toolbar.GetProperty("theme").GetString());
     Assert.Equal("userHidden", toolbar.GetProperty("visibility").GetString());
     Assert.Contains(
@@ -933,6 +961,10 @@ public sealed class WorkbenchBridgeCodecTests
       ("setFloatingToolbarPreferences", "{\"lingerMs\":300.5,\"theme\":\"light\"}"),
       ("setFloatingToolbarPreferences", "{\"lingerMs\":300,\"theme\":\"unknown\"}"),
       ("setFloatingToolbarPreferences", "{}"),
+      ("setFloatingToolbarPreferences", "{\"peekPixels\":0}"),
+      ("setFloatingToolbarPreferences", "{\"peekPixels\":21}"),
+      ("setFloatingToolbarPreferences", "{\"peekPixels\":2.5}"),
+      ("setFloatingToolbarPreferences", "{\"peekPixels\":null}"),
       ("setFloatingToolbarPreferences", "{\"lingerMs\":null}"),
       ("setFloatingToolbarPreferences", "{\"theme\":null}"),
       ("setFloatingToolbarPreferences", "{\"lingerMs\":99}"),
@@ -983,6 +1015,18 @@ public sealed class WorkbenchBridgeCodecTests
     SetFloatingToolbarPreferencesCommand command = Assert.IsType<SetFloatingToolbarPreferencesCommand>(envelope.Command);
     Assert.Equal(lingerMs, command.LingerMs);
     Assert.Equal(theme, command.Theme);
+  }
+
+  [Fact]
+  public void ToolbarPreferencesAcceptPeekPixelsPatch()
+  {
+    Guid sessionId = Guid.NewGuid();
+    WorkbenchCommandEnvelope envelope = WorkbenchBridgeCodec.ParseCommand(
+      CommandJson(sessionId, "settings", "setFloatingToolbarPreferences", "{\"peekPixels\":8}"), sessionId);
+    var command = Assert.IsType<SetFloatingToolbarPreferencesCommand>(envelope.Command);
+    Assert.Equal(8, command.PeekPixels);
+    Assert.Null(command.LingerMs);
+    Assert.Null(command.Theme);
   }
 
   private static string CommandJson(

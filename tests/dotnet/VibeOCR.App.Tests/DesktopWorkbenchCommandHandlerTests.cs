@@ -1384,10 +1384,11 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       Assert.Equal(2, applied.Count);
 
       WorkbenchCommandOutcome preferences = await handler.ExecuteAsync(
-        new SetFloatingToolbarPreferencesCommand(5000, "dark"),
+        new SetFloatingToolbarPreferencesCommand(5000, "dark", PeekPixels: 8),
         TestContext.Current.CancellationToken);
       var preferencesState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(preferences.States));
       Assert.Equal(5000, preferencesState.FloatingToolbar!.LingerMs);
+      Assert.Equal(8, preferencesState.FloatingToolbar.PeekPixels);
       Assert.Equal("dark", preferencesState.FloatingToolbar.Theme);
       Assert.Equal(3, applied.Count);
       // 两次编辑不等待 bridge 快照：单字段补丁合并执行时的真实配置。
@@ -1401,6 +1402,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       var mergedState = Assert.IsType<SettingsWorkbenchState>(Assert.Single(themeOnly.States));
       Assert.Equal(900, mergedState.FloatingToolbar!.LingerMs);
       Assert.Equal("light", mergedState.FloatingToolbar.Theme);
+      Assert.Equal(8, mergedState.FloatingToolbar.PeekPixels);
       Assert.Equal(5, applied.Count);
       WorkbenchCommandOutcome invalid = await handler.ExecuteAsync(
         new SetFloatingToolbarPreferencesCommand(99, "dark"),

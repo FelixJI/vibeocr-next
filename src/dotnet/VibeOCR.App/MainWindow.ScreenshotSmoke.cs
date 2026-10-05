@@ -52,6 +52,22 @@ public sealed partial class MainWindow
       }
       int ensureAfterCapture = smokeStartupEnsureAttempts();
       int orangeBefore = await WaitForCanvasAsync();
+      if (imageEditor?.ReusesCaptureOverlay != true)
+        throw new InvalidOperationException("Screenshot editor did not reuse the selection overlay.");
+      string geometryJson = await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync(
+        "(() => { const c=document.querySelector('canvas[aria-label=\"图片检查画布\"]');" +
+        "const r=c.getBoundingClientRect(); const s=window.vibeocrCaptureScene;" +
+        "return {x:r.x,y:r.y,width:r.width,height:r.height," +
+        "expectedX:s.x*innerWidth/s.desktopWidth,expectedY:s.y*innerHeight/s.desktopHeight," +
+        "expectedWidth:s.width*innerWidth/s.desktopWidth,expectedHeight:s.height*innerHeight/s.desktopHeight};})()");
+      using JsonDocument geometry = JsonDocument.Parse(geometryJson);
+      foreach (string dimension in new[] { "x", "y", "width", "height" })
+      {
+        string expectedDimension = "expected" + char.ToUpperInvariant(dimension[0]) + dimension[1..];
+        if (Math.Abs(geometry.RootElement.GetProperty(dimension).GetDouble() -
+          geometry.RootElement.GetProperty(expectedDimension).GetDouble()) > 1)
+          throw new InvalidOperationException("Screenshot canvas left the original selection bounds.");
+      }
 
       await ClickSmokeButtonAsync("矩形");
       string canvasBox = await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync(
@@ -65,9 +81,9 @@ public sealed partial class MainWindow
       double width = rect.GetProperty("width").GetDouble();
       double height = rect.GetProperty("height").GetDouble();
       double x1 = x + width * 100 / 900;
-      double y1 = y + height * 230 / 600;
+      double y1 = y + height * 0.05;
       double x2 = x + width * 260 / 900;
-      double y2 = y + height * 350 / 600;
+      double y2 = y + height * 0.20;
       await DispatchMouseAsync("mouseMoved", x1, y1, 0);
       await DispatchMouseAsync("mousePressed", x1, y1, 1);
       await DispatchMouseAsync("mouseMoved", x2, y2, 1);
@@ -117,6 +133,8 @@ public sealed partial class MainWindow
         state = "passed",
         capture,
         canvas = new { orange_before = orangeBefore, orange_after = orangeAfter },
+        capture_overlay_reused = true,
+        capture_geometry = geometry.RootElement,
         session_id = recognizedSession.SessionId,
         revision = recognizedSession.Revision,
         task_id = smokeLastJobId(),

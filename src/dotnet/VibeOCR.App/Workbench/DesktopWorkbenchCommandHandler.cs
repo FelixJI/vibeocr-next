@@ -215,7 +215,12 @@ public sealed class DesktopWorkbenchCommandHandler :
   public event Action<Guid, long>? ScreenshotSessionDetached;
   public event Action? PinnedTextEnvironmentChanged;
   public event Action<Guid, VibeOCR.Platform.Windows.PhysicalRectangle?>? ScreenshotSessionReady;
+  internal event Action? ScreenshotCaptureStarting;
+  internal event Action? ScreenshotCaptureFinished;
   internal Guid? CurrentImageSessionId => screenshotSessionId;
+  internal ScreenshotCaptureScene? PendingScreenshotCaptureScene => recognition?.CurrentInput?.CaptureScene;
+  internal ScreenshotCaptureScene? TakeScreenshotCaptureScene(Guid sessionId) =>
+    screenshotSessionId == sessionId ? recognition?.CurrentInput?.TakeCaptureScene() : null;
 
   /// <summary>
   /// Supervisor 连接/就绪/失败终态变更时同步广播诊断投影：宿主快照不
@@ -688,12 +693,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     try
     {
       long generation = Interlocked.Increment(ref recognitionGeneration);
-      // 新捕获立即取代旧会话：选取期间旧会话命令一律失效，
-      // 换图/重复点击不会把旧图或旧修订带入新会话。
-      ClearScreenshotSession();
-      InvalidateScreenshotTextLayer();
-      recognition.InvalidateResult();
-      resultActions = null;
+      // 框选取消或失败时保留旧图、标注、结果与修订；成功捕获才替换。
+      ScreenshotCaptureStarting?.Invoke();
       return PublishStartThenTrack(
         SessionRecognitionState(true, "recognition.running"),
         () => CompleteScreenshotSessionAsync(generation, textSelectionRequested, scrolling,
@@ -714,6 +715,8 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     // 所有截图入口（主窗/热键/悬浮栏）统一让位：截图期间工具栏与感应条
     // 均不入画面；结束后恢复原态。无论成功、取消或失败都释放单飞 guard。
+    bool publishedSession = false;
+    RecognitionInput? capturedInput = null;
     try
     {
       using (shellActions?.SuspendFloatingToolbarForCapture())
@@ -736,6 +739,7 @@ public sealed class DesktopWorkbenchCommandHandler :
         }
         if (recognition.CurrentInput is { } captured)
         {
+          capturedInput = captured;
           WorkbenchResourceReference input = await PublishBytesAsync(
             captured.Data,
             captured.MediaType,
@@ -749,20 +753,24 @@ public sealed class DesktopWorkbenchCommandHandler :
             return;
           }
 
+          ClearScreenshotSession();
+          InvalidateScreenshotTextLayer();
+          resultActions = null;
           screenshotSessionId = Guid.NewGuid();
           screenshotSessionRevision = 0;
           screenshotTextSelectionRequested = textSelectionRequested;
           screenshotSceneEditing = true;
           screenshotSessionInput = input;
           screenshotSessionResult = null;
+          publishedSession = true;
           StateChanged?.Invoke(SessionRecognitionState(false, "recognition.session"));
         }
         else
         {
           // 用户在选区界面取消：不残留会话与遮罩状态；此前的文件输入保持可见。
-          StateChanged?.Invoke(await CurrentRecognitionStateAsync(
-            "recognition.cancelled",
-            cancellationToken));
+          StateChanged?.Invoke(screenshotSessionId is not null
+            ? SessionRecognitionState(false, "recognition.cancelled")
+            : await CurrentRecognitionStateAsync("recognition.cancelled", cancellationToken));
         }
       }
     }
@@ -770,9 +778,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     {
       if (generation == Volatile.Read(ref recognitionGeneration))
       {
-        StateChanged?.Invoke(await CurrentRecognitionStateAsync(
-          "recognition.cancelled",
-          cancellationToken));
+        StateChanged?.Invoke(SessionRecognitionState(false, "recognition.cancelled"));
       }
     }
     catch (Exception error)
@@ -786,9 +792,17 @@ public sealed class DesktopWorkbenchCommandHandler :
     finally
     {
       Interlocked.Exchange(ref captureInFlight, 0);
-      if (generation == Volatile.Read(ref recognitionGeneration) &&
-          screenshotSessionId is { } id)
-        ScreenshotSessionReady?.Invoke(id, recognition?.CurrentInput?.CaptureBounds);
+      try
+      {
+        if (publishedSession && generation == Volatile.Read(ref recognitionGeneration) &&
+            screenshotSessionId is { } id)
+          ScreenshotSessionReady?.Invoke(id, recognition?.CurrentInput?.CaptureBounds);
+      }
+      finally
+      {
+        capturedInput?.DisposeCaptureScene();
+        ScreenshotCaptureFinished?.Invoke();
+      }
     }
   }
 
@@ -2591,20 +2605,22 @@ public sealed class DesktopWorkbenchCommandHandler :
     SetFloatingToolbarPreferencesCommand command)
   {
     settings ??= CreateSettings();
-    if ((command.LingerMs is null && command.Theme is null) ||
+    if ((command.LingerMs is null && command.Theme is null && command.PeekPixels is null) ||
+      command.PeekPixels is < 1 or > FloatingToolbarSettings.MaximumPeekPixels ||
       command.LingerMs is < FloatingToolbarSettings.MinimumLingerMs or > FloatingToolbarSettings.MaximumLingerMs ||
       command.Theme is not (null or "system" or "light" or "dark"))
     {
-      return SettingsState(settings, "收起时间须为 100–5000 毫秒，主题须为跟随系统、亮色或深色；原设置已保留。");
+      return SettingsState(settings, "收起时间须为 100–5000 毫秒，露出像素须为 1–20，主题须为跟随系统、亮色或深色；原设置已保留。");
     }
     ShellActionDispatcher actions = ShellActions();
     FloatingToolbarSettings current = actions.ToolbarSettings;
     int lingerMs = command.LingerMs ?? current.LingerMs;
+    int peekPixels = command.PeekPixels ?? current.PeekPixels;
     FloatingToolbarTheme theme = command.Theme is null
       ? current.Theme : FloatingToolbarSettings.ParseTheme(command.Theme);
-    string? error = current.LingerMs == lingerMs && current.Theme == theme
+    string? error = current.LingerMs == lingerMs && current.Theme == theme && current.PeekPixels == peekPixels
       ? null
-      : ApplyToolbar(actions, current with { LingerMs = lingerMs, Theme = theme });
+      : ApplyToolbar(actions, current with { LingerMs = lingerMs, Theme = theme, PeekPixels = peekPixels });
     return SettingsState(settings, error);
   }
 
@@ -3490,7 +3506,8 @@ public sealed class DesktopWorkbenchCommandHandler :
         FormatToolbarVisibility(shellActions.ToolbarVisibility),
         error ?? "",
         shellActions.ToolbarSettings.LingerMs,
-        FloatingToolbarSettings.ThemeName(shellActions.ToolbarSettings.Theme));
+        FloatingToolbarSettings.ThemeName(shellActions.ToolbarSettings.Theme),
+        shellActions.ToolbarSettings.PeekPixels);
 
   private static string FormatToolbarVisibility(FloatingToolbarVisibility visibility) =>
     visibility switch

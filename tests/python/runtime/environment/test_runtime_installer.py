@@ -600,8 +600,8 @@ def test_named_environments_are_real_empty_venvs_and_switch_is_cas(
     assert plan["environment_id"] == first["id"]
     assert plan["source_ids"] == [
         "tuna-pypi",
-        "paddleocr-huggingface",
-        "mineru-huggingface",
+        "paddleocr-modelscope",
+        "mineru-modelscope",
     ]
     assert plan["dependencies"]
     with pytest.raises(ManagedEnvironmentError, match="stale"):
@@ -2147,14 +2147,14 @@ def test_frozen_manager_exposes_named_environment_list(
                     "paddleocr_model_registry",
                     "Hugging Face",
                     "https://huggingface.co",
-                    True,
+                    False,
                 ),
                 (
                     "paddleocr-modelscope",
                     "paddleocr_model_registry",
                     "ModelScope",
                     "https://www.modelscope.cn",
-                    False,
+                    True,
                 ),
                 (
                     "paddleocr-bos",
@@ -2168,14 +2168,14 @@ def test_frozen_manager_exposes_named_environment_list(
                     "mineru_model_registry",
                     "Hugging Face",
                     "https://huggingface.co",
-                    True,
+                    False,
                 ),
                 (
                     "mineru-modelscope",
                     "mineru_model_registry",
                     "ModelScope",
                     "https://www.modelscope.cn",
-                    False,
+                    True,
                 ),
             )
         ],
@@ -2188,14 +2188,14 @@ def test_frozen_manager_exposes_named_environment_list(
             },
             {
                 "kind": "paddleocr_model_registry",
-                "id": "paddleocr-huggingface",
-                "display_name": "Hugging Face",
+                "id": "paddleocr-modelscope",
+                "display_name": "ModelScope",
                 "origin": "product_default",
             },
             {
                 "kind": "mineru_model_registry",
-                "id": "mineru-huggingface",
-                "display_name": "Hugging Face",
+                "id": "mineru-modelscope",
+                "display_name": "ModelScope",
                 "origin": "product_default",
             },
         ],

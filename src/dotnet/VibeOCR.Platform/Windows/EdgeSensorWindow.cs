@@ -20,6 +20,12 @@ public interface IEdgeSensorNativeMethods
     /// <summary>Destroys the window and unregisters its per-instance class.</summary>
     bool DestroySensorWindow(nint window, string className);
 
+    nint HookEvent(uint eventId, nint callback);
+
+    bool UnhookEvent(nint hook);
+
+    nint ForegroundWindow();
+
     nint DefaultWindowProc(nint window, uint message, nuint wParam, nint lParam);
 }
 
@@ -29,6 +35,10 @@ public interface IEdgeSensor : IDisposable
     event EventHandler? PointerEntered;
 
     event EventHandler? DisplayChanged;
+
+    event EventHandler? ForegroundContextChanged;
+
+    bool TracksForegroundChanges { get; }
 
     bool IsArmed { get; }
 
@@ -40,8 +50,8 @@ public interface IEdgeSensor : IDisposable
 }
 
 /// <summary>
-/// 贴边感应条：停靠隐藏时贴屏幕边缘的 2px 不可见 Tool 窗口。
-/// 以 WS_EX_LAYERED + alpha=1 实现“视觉为零但可命中”，收到鼠标消息即触发
+/// 贴边感应条：停靠隐藏时在工具栏对应位置保留可见的窄条。
+/// 以 WS_EX_LAYERED 呈现半透明系统强调色，收到鼠标消息即触发
 /// PointerEntered；WS_EX_NOACTIVATE 与 WM_MOUSEACTIVATE→MA_NOACTIVATE 保证
 /// 不抢前台焦点。注意感应条必须可命中，不能返回 HTTRANSPARENT——那会让它
 /// 对鼠标完全透明、收不到任何消息，揭示机制失效。
@@ -51,6 +61,8 @@ public sealed class EdgeSensorWindow : IEdgeSensor
     private const uint WmDisplayChange = 0x007E;
     private const uint WmMouseActivate = 0x0021;
     private const uint WmMouseMove = 0x0200;
+    private const uint EventSystemForeground = 0x0003;
+    private const uint EventObjectLocationChange = 0x800B;
     private const nint MaNoActivate = 3;
 
     private readonly IEdgeSensorNativeMethods _native;
@@ -58,11 +70,20 @@ public sealed class EdgeSensorWindow : IEdgeSensor
     // 字段持有委托防止 GC 回收原生函数指针。
     private readonly SensorWindowProc _windowProc;
     private readonly nint _handle;
+    private readonly ForegroundEventProc _foregroundProc;
+    private nint _foregroundHook;
+    private nint _locationHook;
     private bool _disposed;
 
     public event EventHandler? PointerEntered;
 
     public event EventHandler? DisplayChanged;
+
+    public event EventHandler? ForegroundContextChanged;
+
+    public bool TracksForegroundChanges => _foregroundHook != 0 && _locationHook != 0;
+
+    public Exception? ForegroundTrackingFailure { get; private set; }
 
     public bool IsArmed { get; private set; }
 
@@ -74,6 +95,7 @@ public sealed class EdgeSensorWindow : IEdgeSensor
         _native = native ?? new EdgeSensorNativeMethods();
         _className = $"VibeOCR.EdgeSensor.{Guid.NewGuid():N}";
         _windowProc = WindowProc;
+        _foregroundProc = OnForegroundEvent;
         _handle = _native.CreateSensorWindow(
             _className,
             Marshal.GetFunctionPointerForDelegate(_windowProc));
@@ -84,14 +106,23 @@ public sealed class EdgeSensorWindow : IEdgeSensor
                 "Failed to create the edge sensor window.");
         }
 
-        // alpha=1/255：人眼不可见但命中测试仍落在窗口上；alpha=0 会被系统
-        // 视为完全透明而穿透命中，感应失效。
-        if (!_native.SetAlpha(_handle, 1))
+        // 可见提示条与命中区域一致；alpha=0 会穿透命中而失去感应。
+        if (!_native.SetAlpha(_handle, 160))
         {
             _native.DestroySensorWindow(_handle, _className);
             throw new Win32Exception(
                 Marshal.GetLastPInvokeError(),
                 "Failed to make the edge sensor window translucent.");
+        }
+        nint callback = Marshal.GetFunctionPointerForDelegate(_foregroundProc);
+        _foregroundHook = _native.HookEvent(EventSystemForeground, callback);
+        if (_foregroundHook != 0)
+            _locationHook = _native.HookEvent(EventObjectLocationChange, callback);
+        if (!TracksForegroundChanges)
+        {
+            ForegroundTrackingFailure = new InvalidOperationException(
+                "无法订阅前台窗口变化；全屏感应条退避不可用，保留原有揭示保护。");
+            ReleaseForegroundHooks();
         }
     }
 
@@ -119,9 +150,29 @@ public sealed class EdgeSensorWindow : IEdgeSensor
         }
 
         _disposed = true;
+        ReleaseForegroundHooks();
         _native.HideWindow(_handle);
         _native.DestroySensorWindow(_handle, _className);
         IsArmed = false;
+    }
+
+    private void ReleaseForegroundHooks()
+    {
+        if (_foregroundHook != 0) _native.UnhookEvent(_foregroundHook);
+        if (_locationHook != 0) _native.UnhookEvent(_locationHook);
+        _foregroundHook = _locationHook = 0;
+    }
+
+    // WINEVENT_OUTOFCONTEXT 将回调派发到注册线程；Shell 在 WinUI UI 线程创建 sensor。
+    // 隐藏感应窗时继续监听，退出全屏无需鼠标命中隐藏窗口或后台轮询。
+    internal void OnForegroundEvent(nint hook, uint eventId, nint window,
+        int objectId, int childId, uint eventThread, uint eventTime)
+    {
+        if (_disposed || !TracksForegroundChanges) return;
+        if (eventId == EventSystemForeground ||
+            (eventId == EventObjectLocationChange && objectId == 0 && childId == 0 &&
+             window != 0 && window == _native.ForegroundWindow()))
+            ForegroundContextChanged?.Invoke(this, EventArgs.Empty);
     }
 
     // internal 供单测直接注入窗口消息。
@@ -130,7 +181,7 @@ public sealed class EdgeSensorWindow : IEdgeSensor
         switch (message)
         {
             case WmMouseMove:
-                PointerEntered?.Invoke(this, EventArgs.Empty);
+                if (IsArmed) PointerEntered?.Invoke(this, EventArgs.Empty);
                 return 0;
             case WmMouseActivate:
                 return MaNoActivate;
@@ -143,6 +194,9 @@ public sealed class EdgeSensorWindow : IEdgeSensor
     }
 
     private delegate nint SensorWindowProc(nint window, uint message, nuint wParam, nint lParam);
+
+    private delegate void ForegroundEventProc(nint hook, uint eventId, nint window,
+        int objectId, int childId, uint eventThread, uint eventTime);
 }
 
 internal sealed class EdgeSensorNativeMethods : IEdgeSensorNativeMethods
@@ -167,6 +221,7 @@ internal sealed class EdgeSensorNativeMethods : IEdgeSensorNativeMethods
             LpfnWndProc = windowProc,
             HInstance = instance,
             HCursor = LoadCursor(0, ArrowCursor),
+            HbrBackground = GetSysColorBrush(13),
             LpszClassName = className,
         };
         if (RegisterClassW(ref windowClass) == 0)
@@ -191,6 +246,13 @@ internal sealed class EdgeSensorNativeMethods : IEdgeSensorNativeMethods
 
     public bool SetAlpha(nint window, byte alpha) =>
         SetLayeredWindowAttributes(window, 0, alpha, LwaAlpha);
+
+    public nint HookEvent(uint eventId, nint callback) =>
+        SetWinEventHook(eventId, eventId, 0, callback, 0, 0, 0 /* WINEVENT_OUTOFCONTEXT */);
+
+    public bool UnhookEvent(nint hook) => UnhookWinEvent(hook);
+
+    public nint ForegroundWindow() => GetForegroundWindow();
 
     public bool PlaceTopMost(nint window, PhysicalRectangle bounds) =>
         SetWindowPos(
@@ -233,6 +295,9 @@ internal sealed class EdgeSensorNativeMethods : IEdgeSensorNativeMethods
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     private static extern nint GetModuleHandle(string? moduleName);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetSysColorBrush(int index);
 
     [DllImport("user32.dll")]
     private static extern nint LoadCursor(nint instance, nint cursorName);
@@ -280,4 +345,15 @@ internal sealed class EdgeSensorNativeMethods : IEdgeSensorNativeMethods
     [DllImport("user32.dll")]
     private static extern nint DefWindowProcW(
         nint window, uint message, nuint wParam, nint lParam);
+
+    [DllImport("user32.dll")]
+    private static extern nint SetWinEventHook(uint eventMin, uint eventMax,
+        nint module, nint callback, uint processId, uint threadId, uint flags);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UnhookWinEvent(nint hook);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetForegroundWindow();
 }

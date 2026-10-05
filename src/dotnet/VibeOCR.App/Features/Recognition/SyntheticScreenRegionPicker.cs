@@ -43,7 +43,8 @@ internal sealed class SyntheticScreenRegionPicker(string text = "VibeOCR 123") :
     try
     {
       ((OverlappedPresenter)window.AppWindow.Presenter).IsAlwaysOnTop = true;
-      window.AppWindow.MoveAndResize(new RectInt32(100, 100, 1000, 300));
+      // 原位编辑需要给浮动工具栏与真实鼠标绘制各留空间。
+      window.AppWindow.MoveAndResize(new RectInt32(100, 100, 1000, 900));
       // A new WS_CHILD starts at the bottom of the sibling Z-order; wait for
       // the host to finish Loaded before creating the STATIC, then raise it.
       var hostLoaded = new TaskCompletionSource<bool>(
@@ -167,7 +168,9 @@ internal sealed class SyntheticScreenRegionPicker(string text = "VibeOCR 123") :
           $"hitClass={hitClass.ToString()}.");
       }
       Evidence = new CaptureEvidence(frame.Width, frame.Height, white, dark);
-      return new ScreenRegionSelection(bounds, pixels, frame.Stride);
+      ScreenshotCaptureScene scene = await ScreenRegionPicker.CreateSyntheticSceneAsync(
+        bounds, pixels, frame.Stride, cancellationToken);
+      return new ScreenRegionSelection(bounds, pixels, frame.Stride) { CaptureScene = scene };
     }
     catch (Exception error)
     {

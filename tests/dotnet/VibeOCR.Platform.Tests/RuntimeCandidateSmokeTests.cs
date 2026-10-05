@@ -104,6 +104,7 @@ public sealed class RuntimeCandidateSmokeTests
         // 真实生产启动路径：默认具名环境由随包离线配方初始化，并可重复调用。
         ManagedEnvironmentList initialized = await client.InitializeDefaultEnvironmentAsync(ensureToken);
         ManagedEnvironment defaultEnvironment = Assert.Single(initialized.Environments);
+        Assert.Equal("rapidocr-cpu", defaultEnvironment.Id);
         Assert.Equal("默认环境", defaultEnvironment.Name);
         Assert.Equal("rapidocr-cpu", defaultEnvironment.Recipe);
         Assert.Equal(defaultEnvironment.Id, initialized.ActiveId);

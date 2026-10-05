@@ -38,6 +38,8 @@ internal interface IFloatingToolbarView : IDisposable
 
     bool IsVisible { get; }
 
+    bool IsPointerOver { get; }
+
     nint Handle { get; }
 
     /// <summary>应用用户主题偏好（跟随系统/浅色/深色）：纯视觉更新，
@@ -68,7 +70,8 @@ internal interface IFloatingToolbarDelayTimer : IDisposable
 /// 离开 linger 超时收回）⇄ Dragging（拖动，松手吸附或自由浮动），外加
 /// PinnedDocked/PinnedFloating（auto_hide=false 常显）、UserHidden（用户
 /// 主动隐藏，感应条撤防、鼠标路过不恢复）与 Suspended（截图期间临时
-/// 让位）。全部转换由窗口消息/指针事件驱动，空闲零轮询。
+/// 让位）。隐藏时仅监听感应条；可见期间由窗口校验真实鼠标位置，
+/// 避免 Popup 指针事件遗漏或子控件事件导致错误收起。
 /// </summary>
 internal sealed class FloatingToolbarController : IDisposable
 {
@@ -426,21 +429,15 @@ internal sealed class FloatingToolbarController : IDisposable
             return;
         }
 
-        // 全屏应用（游戏/视频）期间不揭示、不遮挡；感应条保持贴边，
-        // 下一次事件再评估，维持事件驱动。
+        // 保留命中时的校验，覆盖前台 WinEvent 尚未送达的间隙。
         if (_fullscreenGuard(_dockedMonitor))
         {
+            if (_sensor?.TracksForegroundChanges == true) _sensor.Disarm();
             return;
         }
 
         _sensor?.Disarm();
-        PhysicalRectangle size = _view.GetPreferredSize();
-        _view.ShowAt(ScreenEdgeGeometry.GetDockedToolbarRectangle(
-            _dockedMonitor,
-            _settings.Edge,
-            size.Width,
-            size.Height));
-        _state = ToolbarState.Revealed;
+        ShowDocked(ToolbarState.Revealed);
     }
 
     private void OnSensorDisplayChanged(object? sender, EventArgs eventArgs)
@@ -452,7 +449,25 @@ internal sealed class FloatingToolbarController : IDisposable
         }
 
         _dockedMonitor = _monitorOf(_dockedMonitor);
-        _sensor?.Arm(ScreenEdgeGeometry.GetSensorRectangle(_dockedMonitor, _settings.Edge));
+        RefreshHiddenSensor(updateLayout: true);
+    }
+
+    private void OnSensorForegroundContextChanged(object? sender, EventArgs eventArgs)
+    {
+        if (_state == ToolbarState.Hidden) RefreshHiddenSensor();
+    }
+
+    private void RefreshHiddenSensor(bool updateLayout = false)
+    {
+        IEdgeSensor sensor = EnsureSensor();
+        if (sensor.TracksForegroundChanges && _fullscreenGuard(_dockedMonitor))
+        {
+            if (sensor.IsArmed) sensor.Disarm();
+        }
+        else if (!sensor.IsArmed || updateLayout)
+        {
+            sensor.Arm(GetSensorBounds());
+        }
     }
 
     private void OnViewPointerEntered(object? sender, EventArgs eventArgs)
@@ -465,7 +480,7 @@ internal sealed class FloatingToolbarController : IDisposable
 
     private void OnViewPointerExited(object? sender, EventArgs eventArgs)
     {
-        if (_state != ToolbarState.Revealed)
+        if (_state != ToolbarState.Revealed || _pointerExitedAt is not null)
         {
             return;
         }
@@ -483,6 +498,10 @@ internal sealed class FloatingToolbarController : IDisposable
         }
 
         StopLinger();
+        if (_view.IsPointerOver)
+        {
+            return;
+        }
         HideToEdge();
     }
 
@@ -561,11 +580,18 @@ internal sealed class FloatingToolbarController : IDisposable
 
     private void HideToEdge()
     {
+        StopLinger();
         _view.Hide();
-        EnsureSensor().Arm(ScreenEdgeGeometry.GetSensorRectangle(
-            _dockedMonitor,
-            _settings.Edge));
         _state = ToolbarState.Hidden;
+        RefreshHiddenSensor(updateLayout: true);
+    }
+
+    private PhysicalRectangle GetSensorBounds()
+    {
+        PhysicalRectangle size = _view.GetPreferredSize();
+        PhysicalRectangle docked = ScreenEdgeGeometry.GetDockedToolbarRectangle(
+            _dockedMonitor, _settings.Edge, size.Width, size.Height);
+        return ScreenEdgeGeometry.GetSensorRectangle(docked, _settings.Edge, _settings.PeekPixels);
     }
 
     private void ShowDocked(ToolbarState next)
@@ -577,6 +603,10 @@ internal sealed class FloatingToolbarController : IDisposable
             size.Width,
             size.Height));
         _state = next;
+        if (next == ToolbarState.Revealed)
+        {
+            OnViewPointerExited(this, EventArgs.Empty);
+        }
     }
 
     private void ReapplyLayout()
@@ -590,9 +620,7 @@ internal sealed class FloatingToolbarController : IDisposable
             case ToolbarState.Hidden:
                 if (_settings.AutoHide)
                 {
-                    EnsureSensor().Arm(ScreenEdgeGeometry.GetSensorRectangle(
-                        _dockedMonitor,
-                        _settings.Edge));
+                    RefreshHiddenSensor(updateLayout: true);
                 }
                 else
                 {
@@ -638,6 +666,9 @@ internal sealed class FloatingToolbarController : IDisposable
             _sensor = _sensorFactory();
             _sensor.PointerEntered += OnSensorPointerEntered;
             _sensor.DisplayChanged += OnSensorDisplayChanged;
+            _sensor.ForegroundContextChanged += OnSensorForegroundContextChanged;
+            if (_sensor is EdgeSensorWindow { ForegroundTrackingFailure: { } error })
+                AppLog.Error("Floating toolbar foreground tracking failed", error);
         }
 
         return _sensor;
@@ -652,6 +683,7 @@ internal sealed class FloatingToolbarController : IDisposable
 
         _sensor.PointerEntered -= OnSensorPointerEntered;
         _sensor.DisplayChanged -= OnSensorDisplayChanged;
+        _sensor.ForegroundContextChanged -= OnSensorForegroundContextChanged;
         _sensor.Dispose();
         _sensor = null;
     }
