@@ -968,6 +968,215 @@ public sealed class RuntimeInstallerClientTests
     }
 
     [Fact]
+    public async Task V2CancellationBeforeRegistrationTerminatesOwnedRunWithoutInstall()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(),
+            $"vibeocr-v2-cancel-unregistered-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string manifest = Path.Combine(root, "runtime-manifest.json");
+            await File.WriteAllTextAsync(
+                manifest,
+                """{"capabilities":["runtime.maintenance.v2"]}""",
+                TestContext.Current.CancellationToken);
+            var runner = new PreRegistrationCancellationRunner();
+            using (runner)
+            {
+                var client = new RuntimeInstallerClient(
+                    Configuration() with { RuntimeManifest = manifest },
+                    runner);
+                using var cancellation = new CancellationTokenSource();
+                Task<RuntimeLaunch> operation = client.EnsureAsync(
+                    "stable-op",
+                    cancellationToken: cancellation.Token);
+                await runner.Started.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+                cancellation.Cancel();
+
+                OperationCanceledException cancelled =
+                    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
+                Assert.Equal(cancellation.Token, cancelled.CancellationToken);
+                // owned token 必须取消：未注册的 run 仅在安全确认后被终止。
+                Assert.True(runner.OwnedToken.IsCancellationRequested);
+                Assert.Equal(2, runner.StartInfos.Count);
+                Assert.Contains(
+                    "--maintenance-cancel-control",
+                    runner.StartInfos[0].ArgumentList);
+                // 握手需要 stdin 控制通道：未重定向会在发送 cancel 时抛错。
+                Assert.True(runner.StartInfos[0].RedirectStandardInput);
+                JsonElement command = Request(runner.StartInfos[1]);
+                Assert.Equal("cancel", command.GetProperty("command").GetString());
+                Assert.Equal("cancel-stable-op", command.GetProperty("command_id").GetString());
+
+                // 注册 gate 释放后，被终止的 run 不得推进到安装。
+                runner.ReleaseRegistrationGate();
+                Assert.True(runner.GateReleased);
+                Assert.False(runner.InstallStarted);
+            }
+        }
+        finally
+        {
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task V2NotFoundDuringCommitRaceKeepsNaturalSuccessAuthoritative()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(),
+            $"vibeocr-v2-cancel-race-commit-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string manifest = Path.Combine(root, "runtime-manifest.json");
+            await File.WriteAllTextAsync(
+                manifest,
+                """{"capabilities":["runtime.maintenance.v2"]}""",
+                TestContext.Current.CancellationToken);
+            // NOT_FOUND 的 store 读取发生在注册前，但响应延迟期间 run 已注册
+            // 并完成 commit：真实终态必须保持权威，不得被改写为取消。
+            var runner = new NotFoundDelayRaceRunner(new RuntimeInstallerProcessResult(
+                0,
+                V2LaunchEnvelope("ensure"),
+                string.Empty));
+            var client = new RuntimeInstallerClient(
+                Configuration() with { RuntimeManifest = manifest },
+                runner);
+            using var cancellation = new CancellationTokenSource();
+            Task<RuntimeLaunch> operation = client.EnsureAsync(
+                "stable-op",
+                cancellationToken: cancellation.Token);
+            await runner.Started.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+            cancellation.Cancel();
+
+            RuntimeLaunch launch = await operation.WaitAsync(
+                TimeSpan.FromSeconds(20),
+                TestContext.Current.CancellationToken);
+            Assert.Equal("C:\\store\\python.exe", launch.PythonExecutable);
+            Assert.True(runner.InstallStarted);
+            Assert.Equal(2, runner.StartInfos.Count);
+        }
+        finally
+        {
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task V2NotFoundDuringFailureRaceSurfacesRealFailure()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(),
+            $"vibeocr-v2-cancel-race-failure-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string manifest = Path.Combine(root, "runtime-manifest.json");
+            await File.WriteAllTextAsync(
+                manifest,
+                """{"capabilities":["runtime.maintenance.v2"]}""",
+                TestContext.Current.CancellationToken);
+            // 终止与自然失败竞态：真实失败必须原样浮出，不得被改写为取消。
+            var runner = new NotFoundDelayRaceRunner(new RuntimeInstallerProcessResult(
+                1,
+                """{"protocol_version":2,"ok":false,"operation":"ensure","error":{"code":"install_failed","canonical_code":"RUNTIME_INSTALL_FAILED","category":"install","message":"network unavailable","retryable":false}}""",
+                string.Empty));
+            var client = new RuntimeInstallerClient(
+                Configuration() with { RuntimeManifest = manifest },
+                runner);
+            using var cancellation = new CancellationTokenSource();
+            Task<RuntimeLaunch> operation = client.EnsureAsync(
+                "stable-op",
+                cancellationToken: cancellation.Token);
+            await runner.Started.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+            cancellation.Cancel();
+
+            RuntimeInstallerException error = await Assert.ThrowsAsync<RuntimeInstallerException>(
+                () => operation);
+            Assert.Contains("network unavailable", error.Message);
+            Assert.Equal("RUNTIME_INSTALL_FAILED", error.CanonicalCode);
+            Assert.Equal(2, runner.StartInfos.Count);
+        }
+        finally
+        {
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task V2NotFoundAfterCooperativeCancelConfirmsDurableCancelledTerminal()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(),
+            $"vibeocr-v2-cancel-race-coop-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string manifest = Path.Combine(root, "runtime-manifest.json");
+            await File.WriteAllTextAsync(
+                manifest,
+                """{"capabilities":["runtime.maintenance.v2"]}""",
+                TestContext.Current.CancellationToken);
+            // 注册在 cancel 命令读取之后完成，stdin 回调协作 request_cancel：
+            // 自然 cancelled envelope 不能单独改写调用方结果，必须用同 op
+            // 的 durable 终态 Cancelled 确认后才映射为取消。
+            var runner = new NotFoundDelayRaceRunner(new RuntimeInstallerProcessResult(
+                1,
+                """{"protocol_version":2,"ok":false,"operation":"ensure","error":{"code":"cancelled","canonical_code":"CANCELLED","category":"cancelled","message":"Runtime operation was cancelled","retryable":false}}""",
+                string.Empty));
+            var client = new RuntimeInstallerClient(
+                Configuration() with { RuntimeManifest = manifest },
+                runner);
+            using var cancellation = new CancellationTokenSource();
+            Task<RuntimeLaunch> operation = client.EnsureAsync(
+                "stable-op",
+                cancellationToken: cancellation.Token);
+            await runner.Started.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+            cancellation.Cancel();
+
+            OperationCanceledException cancelled =
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
+            Assert.Equal(cancellation.Token, cancelled.CancellationToken);
+            Assert.Equal(3, runner.StartInfos.Count);
+            Assert.Equal("observe", Request(runner.StartInfos[2]).GetProperty("request_kind").GetString());
+        }
+        finally
+        {
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DirectCancelOfUnknownOperationStillSurfacesNotFound()
+    {
+        var runner = new StubRunner(new RuntimeInstallerProcessResult(
+            1,
+            """{"protocol_version":2,"ok":false,"error":{"code":"invalid_request","canonical_code":"RUNTIME_OPERATION_NOT_FOUND","category":"not_found","message":"Runtime operation is not registered","retryable":false}}""",
+            string.Empty));
+        var client = new RuntimeInstallerClient(Configuration(), runner);
+
+        // 直接收敛的公开 CancelAsync 不在 in-flight 取消路径上：真正不存在的
+        // 任务必须保留 NOT_FOUND，不得被吞或改写。
+        RuntimeInstallerException error = await Assert.ThrowsAsync<RuntimeInstallerException>(
+            () => client.CancelAsync(
+                "ghost-op",
+                "cancel-command-1",
+                cancellationToken: TestContext.Current.CancellationToken));
+
+        Assert.Equal("RUNTIME_OPERATION_NOT_FOUND", error.CanonicalCode);
+        Assert.Equal("not_found", error.Category);
+        JsonElement request = Request(runner.LastStartInfo!);
+        Assert.Equal("cancel", request.GetProperty("command").GetString());
+        Assert.Equal("ghost-op", request.GetProperty("target_operation_id").GetString());
+    }
+
+    [Fact]
     public async Task V2CancellationRaceReturnsSuccessWhenTerminalSnapshotSucceeded()
     {
         string root = Path.Combine(Path.GetTempPath(), $"vibeocr-v2-cancel-race-{Guid.NewGuid():N}");
@@ -1119,6 +1328,272 @@ public sealed class RuntimeInstallerClientTests
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => runner.RunAsync(new ProcessStartInfo(), cancellation.Token));
+    }
+
+    [Fact]
+    public async Task RealRunnerPreRegistrationReceiptTerminatesWithoutInstall()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(),
+            $"vibeocr-maint-cancel-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        Process? child = null;
+        Task<RuntimeInstallerProcessResult>? running = null;
+        try
+        {
+            string script = Path.Combine(root, "installer.ps1");
+            string started = Path.Combine(root, "started.pid");
+            string gate = Path.Combine(root, "gate.release");
+            string installMarker = Path.Combine(root, "install.started");
+            await File.WriteAllTextAsync(script, """
+                param([string]$StartedMarker, [string]$GateFile, [string]$InstallMarker)
+                Set-Content -Path $StartedMarker -Value $PID
+                $command = [Console]::In.ReadLine()
+                if ($command -eq 'cancel') {
+                    [Console]::WriteLine('{"maintenance_cancel":"pre_registration"}')
+                    exit 0
+                }
+                if ($command -eq 'go' -and (Test-Path $GateFile)) {
+                    Set-Content -Path $InstallMarker -Value 'install'
+                    exit 0
+                }
+                exit 90
+                """, TestContext.Current.CancellationToken);
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
+                    "WindowsPowerShell", "v1.0", "powershell.exe"),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            foreach (string argument in new[] { "-NoProfile", "-NonInteractive", "-File", script,
+                "-StartedMarker", started, "-GateFile", gate, "-InstallMarker", installMarker,
+                "--maintenance-cancel-control" })
+                startInfo.ArgumentList.Add(argument);
+            using var cancellation = new CancellationTokenSource();
+            running = RuntimeInstallerCommandRunner.RunProcessAsync(
+                startInfo, standardOutputLine: null, cancellation.Token);
+            string pid = await AwaitFileAsync(started, TimeSpan.FromSeconds(20));
+            child = Process.GetProcessById(int.Parse(pid,
+                System.Globalization.CultureInfo.InvariantCulture));
+
+            cancellation.Cancel();
+
+            // pre_registration 回执：安全终止，run 以取消结束。子进程在回执后
+            // 立即 exit 0——无论 exited 还是 receipt 先完成 WhenAny，都 必须
+            // 在 drain 输出后观察到已接受的回执并映射为取消，不得退回自然
+            // exit 0 结果。
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => running);
+            Assert.True(child.HasExited);
+            // 释放注册 gate 后也不启动安装：进程已终止，无入可反应。
+            await File.WriteAllTextAsync(gate, "release", TestContext.Current.CancellationToken);
+            await Task.Delay(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+            Assert.False(File.Exists(installMarker));
+        }
+        finally
+        {
+            await ReapCancellationFixtureAsync(child, running);
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RealRunnerLatePreRegistrationReceiptStillTerminates()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(),
+            $"vibeocr-maint-late-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        Process? child = null;
+        Task<RuntimeInstallerProcessResult>? running = null;
+        try
+        {
+            string script = Path.Combine(root, "installer.ps1");
+            string started = Path.Combine(root, "started.pid");
+            string installMarker = Path.Combine(root, "install.started");
+            await File.WriteAllTextAsync(script, """
+                param([string]$StartedMarker, [string]$InstallMarker)
+                Set-Content -Path $StartedMarker -Value $PID
+                Start-Sleep -Seconds 12
+                $command = [Console]::In.ReadLine()
+                if ($command -ne 'cancel') { exit 90 }
+                [Console]::WriteLine('{"maintenance_cancel":"pre_registration"}')
+                Start-Sleep -Seconds 120
+                Set-Content -Path $InstallMarker -Value 'install'
+                exit 0
+                """, TestContext.Current.CancellationToken);
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
+                    "WindowsPowerShell", "v1.0", "powershell.exe"),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            foreach (string argument in new[] { "-NoProfile", "-NonInteractive", "-File", script,
+                "-StartedMarker", started, "-InstallMarker", installMarker,
+                "--maintenance-cancel-control" })
+                startInfo.ArgumentList.Add(argument);
+            using var cancellation = new CancellationTokenSource();
+            running = RuntimeInstallerCommandRunner.RunProcessAsync(
+                startInfo, standardOutputLine: null, cancellation.Token);
+            string pid = await AwaitFileAsync(started, TimeSpan.FromSeconds(20));
+            child = Process.GetProcessById(int.Parse(pid,
+                System.Globalization.CultureInfo.InvariantCulture));
+
+            cancellation.Cancel();
+
+            // 回执晚于 10s 握手窗口且进程仍活着：持续观察迟到回执并执行
+            // 既有 bounded kill/reap，映射为取消，不退化为只等退出。
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                running.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+            Assert.True(child.HasExited);
+            Assert.False(File.Exists(installMarker));
+        }
+        finally
+        {
+            await ReapCancellationFixtureAsync(child, running);
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RealRunnerReceiptDrainedAfterExitStillCancels()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-maint-drain-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        Process? child = null;
+        Task<RuntimeInstallerProcessResult>? running = null;
+        try
+        {
+            string script = Path.Combine(root, "installer.ps1");
+            await File.WriteAllTextAsync(script, """
+                [Console]::WriteLine("reader-gate:$PID")
+                if ([Console]::In.ReadLine() -ne 'cancel') { exit 90 }
+                [Console]::WriteLine('{"maintenance_cancel":"pre_registration"}')
+                [Console]::WriteLine('{"protocol_version":2,"ok":false,"error":{"canonical_code":"CANCELLED"}}')
+                exit 1
+                """, TestContext.Current.CancellationToken);
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
+                    "WindowsPowerShell", "v1.0", "powershell.exe"),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            foreach (string argument in new[] { "-NoProfile", "-NonInteractive", "-File", script,
+                "--maintenance-cancel-control" })
+                startInfo.ArgumentList.Add(argument);
+            var reading = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var cancellation = new CancellationTokenSource();
+            running = RuntimeInstallerCommandRunner.RunProcessAsync(startInfo, line =>
+            {
+                const string prefix = "reader-gate:";
+                if (!line.StartsWith(prefix, StringComparison.Ordinal)) return;
+                reading.TrySetResult(int.Parse(line[prefix.Length..],
+                    System.Globalization.CultureInfo.InvariantCulture));
+                // The host exits while its receipt is still behind a slow output consumer.
+                Thread.Sleep(TimeSpan.FromSeconds(12));
+            }, cancellation.Token);
+            int pid = await reading.Task.WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+            child = Process.GetProcessById(pid);
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                running.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+            Assert.True(child.HasExited);
+        }
+        finally
+        {
+            await ReapCancellationFixtureAsync(child, running);
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task ReapCancellationFixtureAsync(
+        Process? child, Task<RuntimeInstallerProcessResult>? running)
+    {
+        if (child is not null)
+        {
+            if (!child.HasExited) child.Kill(entireProcessTree: true);
+            await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            child.Dispose();
+        }
+        if (running is not null)
+        {
+            try { await running.WaitAsync(TimeSpan.FromSeconds(20)); }
+            catch (OperationCanceledException) { }
+        }
+    }
+
+    [Fact]
+    public async Task RealRunnerRegisteredReceiptPreservesNaturalCommitResult()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(),
+            $"vibeocr-maint-registered-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        Process? child = null;
+        Task<RuntimeInstallerProcessResult>? running = null;
+        try
+        {
+            string script = Path.Combine(root, "installer.ps1");
+            string started = Path.Combine(root, "started.pid");
+            string commitMarker = Path.Combine(root, "commit.completed");
+            await File.WriteAllTextAsync(script, """
+                param([string]$StartedMarker, [string]$CommitMarker)
+                Set-Content -Path $StartedMarker -Value $PID
+                $command = [Console]::In.ReadLine()
+                if ($command -ne 'cancel') { exit 90 }
+                [Console]::WriteLine('{"maintenance_cancel":"registered"}')
+                Set-Content -Path $CommitMarker -Value 'commit'
+                [Console]::WriteLine('{"protocol_version":2,"ok":true,"operation":"ensure"}')
+                exit 0
+                """, TestContext.Current.CancellationToken);
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
+                    "WindowsPowerShell", "v1.0", "powershell.exe"),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            foreach (string argument in new[] { "-NoProfile", "-NonInteractive", "-File", script,
+                "-StartedMarker", started, "-CommitMarker", commitMarker,
+                "--maintenance-cancel-control" })
+                startInfo.ArgumentList.Add(argument);
+            using var cancellation = new CancellationTokenSource();
+            running = RuntimeInstallerCommandRunner.RunProcessAsync(
+                startInfo, standardOutputLine: null, cancellation.Token);
+            string pid = await AwaitFileAsync(started, TimeSpan.FromSeconds(20));
+            child = Process.GetProcessById(int.Parse(pid,
+                System.Globalization.CultureInfo.InvariantCulture));
+
+            cancellation.Cancel();
+
+            // registered 回执：不得终止提交中的 run；保留自然退出与真实 envelope。
+            RuntimeInstallerProcessResult result = await running.WaitAsync(
+                TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+            Assert.Equal(0, result.ExitCode);
+            // receipt 行按协议被 runner 消费，不入 StandardOutput；自然结果
+            // 与 commit marker 保留即证明 registered 未被终止。
+            Assert.Contains("\"ok\":true", result.StandardOutput);
+            Assert.True(File.Exists(commitMarker));
+        }
+        finally
+        {
+            await ReapCancellationFixtureAsync(child, running);
+            TestDirectory.Delete(root, recursive: true);
+        }
     }
 
     [Theory]
@@ -1580,6 +2055,20 @@ public sealed class RuntimeInstallerClientTests
     private static string Sha256(byte[] value) =>
         Convert.ToHexStringLower(SHA256.HashData(value));
 
+    private static async Task<string> AwaitFileAsync(string path, TimeSpan timeout)
+    {
+        DateTime deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (File.Exists(path))
+            {
+                return await File.ReadAllTextAsync(path, TestContext.Current.CancellationToken);
+            }
+            await Task.Delay(TimeSpan.FromMilliseconds(50), TestContext.Current.CancellationToken);
+        }
+        throw new TimeoutException($"Timed out waiting for marker file {path}.");
+    }
+
     private sealed class StubRunner(RuntimeInstallerProcessResult result)
         : IRuntimeInstallerCommandRunner
     {
@@ -1708,6 +2197,137 @@ public sealed class RuntimeInstallerClientTests
             OwnedToken = cancellationToken;
             Started.TrySetResult();
             return _operation.Task;
+        }
+    }
+
+    /// <summary>
+    /// 模拟注册 gate 尚未完成的 ensure run：run 进程已启动（客户端已接受），
+    /// 但 durable operation 尚未注册，v2 cancel 只能得到 NOT_FOUND。
+    /// owned token 取消代表终止已发出：若 run 在终止前自然到达终态
+    /// （RacedResult），其真实 envelope 保持权威；否则 run 以取消结束。
+    /// gate 释放代表进程完成注册并准备安装；owned token 已取消时进程已被
+    /// 终止，不得再启动安装。
+    /// </summary>
+    private sealed class PreRegistrationCancellationRunner : IRuntimeInstallerCommandRunner, IDisposable
+    {
+        private readonly TaskCompletionSource<RuntimeInstallerProcessResult> _run =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private CancellationTokenRegistration _registration;
+
+        public TaskCompletionSource Started { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public List<ProcessStartInfo> StartInfos { get; } = [];
+        public CancellationToken OwnedToken { get; private set; }
+        public bool InstallStarted { get; private set; }
+        public bool GateReleased { get; private set; }
+        public RuntimeInstallerProcessResult? RacedResult { get; set; }
+
+        public Task<RuntimeInstallerProcessResult> RunAsync(
+            ProcessStartInfo startInfo,
+            CancellationToken cancellationToken)
+        {
+            StartInfos.Add(startInfo);
+            return Task.FromResult(new RuntimeInstallerProcessResult(
+                1,
+                """{"protocol_version":2,"ok":false,"error":{"code":"invalid_request","canonical_code":"RUNTIME_OPERATION_NOT_FOUND","category":"not_found","message":"Runtime operation is not registered","retryable":false}}""",
+                string.Empty));
+        }
+
+        public Task<RuntimeInstallerProcessResult> RunAsync(
+            ProcessStartInfo startInfo,
+            Action<string>? standardOutputLine,
+            CancellationToken cancellationToken)
+        {
+            StartInfos.Add(startInfo);
+            OwnedToken = cancellationToken;
+            // 注册未完成：不流式任何 maintenance 事件；run 停在 gate 上，
+            // 只有 owned token 取消才会像被终止的进程一样结束。
+            _registration = cancellationToken.Register(() =>
+            {
+                if (RacedResult is { } raced)
+                {
+                    InstallStarted = true;
+                    _run.TrySetResult(raced);
+                    return;
+                }
+                _run.TrySetCanceled(cancellationToken);
+            });
+            Started.TrySetResult();
+            return _run.Task;
+        }
+
+        public void ReleaseRegistrationGate()
+        {
+            GateReleased = true;
+            if (OwnedToken.IsCancellationRequested)
+            {
+                return;
+            }
+            InstallStarted = true;
+            _run.TrySetResult(new RuntimeInstallerProcessResult(
+                0,
+                V2LaunchEnvelope("ensure"),
+                string.Empty));
+        }
+
+        public void Dispose()
+        {
+            _registration.Dispose();
+            _run.TrySetCanceled();
+        }
+    }
+
+    /// <summary>
+    /// NOT_FOUND 的 store 读取发生在注册前，但响应延迟期间 ensure run 已注册
+    /// 并到达自然终态（成功/失败/协作取消）：真实终态必须保持权威。
+    /// cancel 命令返回时顺带完成 run 任务；协作取消场景还需 observe 返回
+    /// cancelled 终态页。
+    /// </summary>
+    private sealed class NotFoundDelayRaceRunner : IRuntimeInstallerCommandRunner
+    {
+        private readonly TaskCompletionSource<RuntimeInstallerProcessResult> _run =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly RuntimeInstallerProcessResult _racedResult;
+
+        public NotFoundDelayRaceRunner(RuntimeInstallerProcessResult racedResult) =>
+            _racedResult = racedResult;
+
+        public TaskCompletionSource Started { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public List<ProcessStartInfo> StartInfos { get; } = [];
+        public bool InstallStarted => true;
+
+        public Task<RuntimeInstallerProcessResult> RunAsync(
+            ProcessStartInfo startInfo,
+            CancellationToken cancellationToken)
+        {
+            StartInfos.Add(startInfo);
+            JsonElement request = Request(startInfo);
+            if (request.TryGetProperty("request_kind", out JsonElement kind) &&
+                kind.GetString() == "observe")
+            {
+                return Task.FromResult(new RuntimeInstallerProcessResult(
+                    0,
+                    $$"""{"protocol_version":2,"ok":true,"request_kind":"observe","operation_id":"stable-op","snapshot":{"operation_id":"stable-op","sequence":2,"operation":"ensure","operation_state":"cancelled","phase":"install_profile","profile_id":"win-x64-cpu","updated_at":"2026-08-05T00:00:02Z"},"events":[{{MaintenanceEvent(2)}}],"oldest_sequence":1,"through_sequence":2,"more":false,"replay_expires_at":null}""",
+                    string.Empty));
+            }
+            // 响应延迟期间：注册完成，run 到达自然终态；随后才返回 NOT_FOUND。
+            _run.TrySetResult(_racedResult);
+            return Task.FromResult(new RuntimeInstallerProcessResult(
+                1,
+                """{"protocol_version":2,"ok":false,"error":{"code":"invalid_request","canonical_code":"RUNTIME_OPERATION_NOT_FOUND","category":"not_found","message":"Runtime operation is not registered","retryable":false}}""",
+                string.Empty));
+        }
+
+        public Task<RuntimeInstallerProcessResult> RunAsync(
+            ProcessStartInfo startInfo,
+            Action<string>? standardOutputLine,
+            CancellationToken cancellationToken)
+        {
+            StartInfos.Add(startInfo);
+            standardOutputLine?.Invoke(MaintenanceEvent(1)); // 已注册并进入 commit
+            Started.TrySetResult();
+            return _run.Task;
         }
     }
 

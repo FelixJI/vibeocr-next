@@ -845,8 +845,10 @@ def test_cancel_control_uses_unbuffered_process_pipes(
         )
         writer.write(b"cancel\r\n")
         writer.flush()
+        # listener 只接零参回调；receipt emitter 由各自协议的 typed wrapper
+        # 闭包携带（与 main() 中环境/维护两种接线一致）。
         runtime_installer._listen_environment_cancel(
-            lambda acknowledge: acknowledge(accepted)
+            lambda: runtime_installer._environment_cancel_receipt(accepted)
         )
         assert json.loads(reader.readline()) == {
             "environment_cancel": "accepted" if accepted else "rejected"

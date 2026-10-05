@@ -769,11 +769,11 @@ public sealed partial class RuntimeInstallerClient : IRuntimeInstallerClient
             startInfo,
             HandleOutputLine,
             ownedCancellation?.Token ?? cancellationToken);
-        RuntimeInstallerProcessResult result;
+        RuntimeInstallerProcessResult? runResult = null;
         bool cancellationWasRequested = false;
         try
         {
-            result = supportsV2
+            runResult = supportsV2
                 ? await run.WaitAsync(cancellationToken).ConfigureAwait(false)
                 : await run.ConfigureAwait(false);
         }
@@ -782,6 +782,7 @@ public sealed partial class RuntimeInstallerClient : IRuntimeInstallerClient
         {
             cancellationWasRequested = true;
             long sequence = Volatile.Read(ref lastSequence);
+            bool durableTerminalPath = true;
             try
             {
                 await CancelAsync(
@@ -803,37 +804,88 @@ public sealed partial class RuntimeInstallerClient : IRuntimeInstallerClient
                 // snapshot instead of turning a successful commit into a
                 // client-side failure.
             }
-            Host.RuntimeMaintenanceSnapshot terminal = await AwaitTerminalSnapshotAsync(
-                operationId,
-                sequence,
-                progress).ConfigureAwait(false);
-            try
+            catch (RuntimeInstallerException error) when (
+                string.Equals(
+                    error.CanonicalCode,
+                    "RUNTIME_OPERATION_NOT_FOUND",
+                    StringComparison.Ordinal))
             {
-                result = await run.WaitAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(false);
-            }
-            catch (TimeoutException) when (
-                terminal.OperationState == Host.RuntimeOperationState.Cancelled)
-            {
+                // The durable journal has no record for this run: it was either
+                // terminated before registration (the startup handshake only
+                // faults this task with cancellation once pre-registration was
+                // confirmed safe — bounded by the handshake plus reap) or the
+                // run registered/committed after the cancel command read the
+                // store. Never kill blindly: hold the invocation — and with it
+                // the caller's maintenance lease — until the owned process
+                // reaches its real exit, keeping its authoritative outcome. No
+                // bounded termination is claimed for the unconfirmed path.
+                durableTerminalPath = false;
                 ownedCancellation?.Cancel();
                 try
                 {
-                    await run.ConfigureAwait(false);
+                    runResult = await run.ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
+                    throw new OperationCanceledException(cancellationToken);
                 }
-                throw new OperationCanceledException(cancellationToken);
+                RuntimeHostError? naturalError = ParseHostError(
+                    FinalEnvelopeJson(runResult!.StandardOutput));
+                if (string.Equals(
+                    naturalError?.CanonicalCode,
+                    "CANCELLED",
+                    StringComparison.Ordinal))
+                {
+                    // A cancelled envelope alone must not rewrite the caller's
+                    // outcome: confirm the same operation's durable terminal
+                    // state first.
+                    Host.RuntimeMaintenanceSnapshot terminal = await AwaitTerminalSnapshotAsync(
+                        operationId,
+                        sequence,
+                        progress).ConfigureAwait(false);
+                    if (terminal.OperationState == Host.RuntimeOperationState.Cancelled)
+                    {
+                        throw new OperationCanceledException(cancellationToken);
+                    }
+                }
             }
-            catch (TimeoutException)
+            if (durableTerminalPath)
             {
-                throw new RuntimeInstallerException(
-                    "Runtime reached a terminal state but its installer process did not exit.");
-            }
-            if (terminal.OperationState == Host.RuntimeOperationState.Cancelled)
-            {
-                throw new OperationCanceledException(cancellationToken);
+                Host.RuntimeMaintenanceSnapshot terminal = await AwaitTerminalSnapshotAsync(
+                    operationId,
+                    sequence,
+                    progress).ConfigureAwait(false);
+                try
+                {
+                    runResult = await run.WaitAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(false);
+                }
+                catch (TimeoutException) when (
+                    terminal.OperationState == Host.RuntimeOperationState.Cancelled)
+                {
+                    ownedCancellation?.Cancel();
+                    try
+                    {
+                        await run.ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                    }
+                    throw new OperationCanceledException(cancellationToken);
+                }
+                catch (TimeoutException)
+                {
+                    throw new RuntimeInstallerException(
+                        "Runtime reached a terminal state but its installer process did not exit.");
+                }
+                if (terminal.OperationState == Host.RuntimeOperationState.Cancelled)
+                {
+                    throw new OperationCanceledException(cancellationToken);
+                }
             }
         }
+        RuntimeInstallerProcessResult result = runResult ??
+            throw new RuntimeInstallerException(
+                "Runtime Installer invocation produced no result.");
         if (Volatile.Read(ref streamedEvents) == 0)
         {
             foreach (string line in OutputLines(result.StandardOutput))
@@ -1004,6 +1056,7 @@ public sealed partial class RuntimeInstallerClient : IRuntimeInstallerClient
             WorkingDirectory = _configuration.ProductRoot,
             UseShellExecute = false,
             CreateNoWindow = true,
+            RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
@@ -1044,6 +1097,12 @@ public sealed partial class RuntimeInstallerClient : IRuntimeInstallerClient
             request["required_capabilities"] = new[] { InstallPlanCapability };
         }
         AddOption(startInfo, "--request-json", JsonSerializer.Serialize(request));
+        if (SupportsCapability("runtime.maintenance.v2"))
+        {
+            // 内部进程控制（非 v2 wire schema）：启用注册前取消握手，宿主
+            // 仅在 pre_registration 回执后才可终止本进程。
+            startInfo.ArgumentList.Add("--maintenance-cancel-control");
+        }
         return startInfo;
     }
 
@@ -1502,7 +1561,8 @@ public sealed class RuntimeInstallerCommandRunner : IRuntimeInstallerCommandRunn
     {
         using Process process = Process.Start(startInfo) ??
             throw new RuntimeInstallerException("Could not start Runtime Installer.");
-        bool controlledCancellation = startInfo.ArgumentList.Contains("--environment-cancel-control");
+        bool environmentCancellation = startInfo.ArgumentList.Contains("--environment-cancel-control");
+        bool maintenanceCancellation = startInfo.ArgumentList.Contains("--maintenance-cancel-control");
         var receipt = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var stdoutBuffer = new StringBuilder();
         using var streamsLifetime = new CancellationTokenSource();
@@ -1511,7 +1571,7 @@ public sealed class RuntimeInstallerCommandRunner : IRuntimeInstallerCommandRunn
             stdoutBuffer,
             standardOutputLine,
             streamsLifetime.Token,
-            controlledCancellation ? receipt : null);
+            environmentCancellation || maintenanceCancellation ? receipt : null);
         Task<string> stderr = process.StandardError.ReadToEndAsync(streamsLifetime.Token);
         Task exited = process.WaitForExitAsync();
         try
@@ -1523,12 +1583,12 @@ public sealed class RuntimeInstallerCommandRunner : IRuntimeInstallerCommandRunn
             }
             catch (OperationCanceledException)
             {
-                bool accepted = true;
-                if (controlledCancellation)
+                bool safeToTerminate = true;
+                if (environmentCancellation)
                 {
                     try
                     {
-                        accepted = await ConfirmEnvironmentCancellationAsync(process, exited, stdout, receipt)
+                        safeToTerminate = await ConfirmEnvironmentCancellationAsync(process, exited, stdout, receipt)
                             .ConfigureAwait(false);
                     }
                     catch (Exception error) when (error is IOException or InvalidOperationException or TimeoutException)
@@ -1537,7 +1597,16 @@ public sealed class RuntimeInstallerCommandRunner : IRuntimeInstallerCommandRunn
                         throw new RuntimeInstallerException($"运行环境取消未获确认：{error.Message}");
                     }
                 }
-                if (accepted)
+                else if (maintenanceCancellation)
+                {
+                    // A timeout or failed control pipe carries no safe
+                    // confirmation: never terminate a possibly committing run.
+                    // Keep the process, drain its output, and await its real
+                    // exit so the authoritative outcome survives.
+                    safeToTerminate = await ConfirmMaintenanceStartupCancellationAsync(
+                        process, exited, stdout, receipt).ConfigureAwait(false);
+                }
+                if (safeToTerminate)
                 {
                     await StopProcessAsync(process).ConfigureAwait(false);
                     throw;
@@ -1545,6 +1614,10 @@ public sealed class RuntimeInstallerCommandRunner : IRuntimeInstallerCommandRunn
                 // A terminal commit won the race. Preserve its actual envelope,
                 // including a natural failure, despite the caller's cancelled token.
             }
+            // Exit must be observed before pipes and ExitCode: a child that
+            // closes its output early while still running must not produce a
+            // premature exit code.
+            await exited.ConfigureAwait(false);
             await stdout.ConfigureAwait(false);
             return new RuntimeInstallerProcessResult(
                 process.ExitCode,
@@ -1562,6 +1635,45 @@ public sealed class RuntimeInstallerCommandRunner : IRuntimeInstallerCommandRunn
             {
             }
         }
+    }
+
+    private static async Task<bool> ConfirmMaintenanceStartupCancellationAsync(
+        Process process,
+        Task exited,
+        Task stdout,
+        TaskCompletionSource<bool> safeToTerminate)
+    {
+        if (!process.HasExited)
+        {
+            try
+            {
+                await process.StandardInput.WriteLineAsync("cancel").ConfigureAwait(false);
+                await process.StandardInput.FlushAsync().ConfigureAwait(false);
+            }
+            catch (Exception error) when (
+                error is IOException or
+                ObjectDisposedException or
+                InvalidOperationException)
+            {
+                // 控制通道不可用不丢弃可能在途的回执：继续同时观察回执与
+                // 真实退出；未确认状态始终不授权终止。
+            }
+        }
+        // 持续同时观察回执与真实退出（不设握手超时）：初始化/锁等待可能让
+        // 回执晚于任意固定窗口，迟到有效 pre_registration 仍执行既有
+        // bounded kill/reap；未确认/registered 始终不授权终止。
+        Task first = await Task.WhenAny(safeToTerminate.Task, exited)
+            .ConfigureAwait(false);
+        if (first == safeToTerminate.Task && safeToTerminate.Task.IsCompletedSuccessfully)
+        {
+            // pre_registration → true（fence 已封死，可终止）；
+            // registered → false（只能协作 durable 取消）。
+            return safeToTerminate.Task.Result;
+        }
+        // A receipt can still be in flight after exit. The caller also awaits
+        // stdout, so drain it before deciding instead of dropping a late receipt.
+        await stdout.ConfigureAwait(false);
+        return safeToTerminate.Task.IsCompletedSuccessfully && safeToTerminate.Task.Result;
     }
 
     private static async Task<bool> ConfirmEnvironmentCancellationAsync(
@@ -1617,13 +1729,24 @@ public sealed class RuntimeInstallerCommandRunner : IRuntimeInstallerCommandRunn
                 try
                 {
                     using JsonDocument document = JsonDocument.Parse(line);
-                    if (document.RootElement.ValueKind == JsonValueKind.Object &&
-                        document.RootElement.TryGetProperty("environment_cancel", out JsonElement receipt) &&
-                        receipt.ValueKind == JsonValueKind.String &&
-                        receipt.GetString() is "accepted" or "rejected")
+                    JsonElement root = document.RootElement;
+                    if (root.ValueKind == JsonValueKind.Object)
                     {
-                        cancellationReceipt.TrySetResult(receipt.GetString() == "accepted");
-                        continue;
+                        if (root.TryGetProperty("environment_cancel", out JsonElement receipt) &&
+                            receipt.ValueKind == JsonValueKind.String &&
+                            receipt.GetString() is "accepted" or "rejected")
+                        {
+                            cancellationReceipt.TrySetResult(receipt.GetString() == "accepted");
+                            continue;
+                        }
+                        if (root.TryGetProperty("maintenance_cancel", out JsonElement startup) &&
+                            startup.ValueKind == JsonValueKind.String &&
+                            startup.GetString() is "pre_registration" or "registered")
+                        {
+                            cancellationReceipt.TrySetResult(
+                                startup.GetString() == "pre_registration");
+                            continue;
+                        }
                     }
                 }
                 catch (JsonException)
