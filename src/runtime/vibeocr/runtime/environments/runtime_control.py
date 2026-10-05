@@ -570,5 +570,9 @@ class RuntimeControl:
             limit=limit,
         )
 
+    def request_cancel(self, operation_id: str) -> dict[str, Any]:
+        """Cooperatively request durable cancellation of a registered operation."""
+        return self._store.request_cancel(operation_id)
+
 
 __all__ = ["RuntimeControl", "RuntimeControlResult"]

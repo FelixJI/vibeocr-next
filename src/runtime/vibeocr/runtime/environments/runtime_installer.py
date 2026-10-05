@@ -30,7 +30,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, TextIO
+from typing import TYPE_CHECKING, Any, TextIO
 from uuid import uuid4
 
 import httpx
@@ -63,6 +63,7 @@ from vibeocr.runtime.environments.runtime_maintenance import (
     RuntimeOperationNotRetryable,
     RuntimeOperationStore,
     RuntimeSourceIdentityMismatch,
+    StartupCancellation,
     declared_installed_closure,
     probe_runtime_components,
     profile_descriptor,
@@ -1347,6 +1348,7 @@ class RuntimeInstaller:
         install_component_ids: tuple[str, ...] | None = None,
         download_source_ids: tuple[str, ...] | None = None,
         plan_id: str | None = None,
+        startup_cancellation: StartupCancellation | None = None,
     ) -> None:
         self.product_root = Path(product_root).resolve()
         self._product_id = product_id
@@ -1466,6 +1468,10 @@ class RuntimeInstaller:
         else:
             self._install_runner = install_runner
         self._lock_timeout = lock_timeout
+        self._startup_cancellation = startup_cancellation
+        # Plan 绑定延迟到注册 fence 内执行：pre-registration 终止不能把
+        # 绑定遗留到不存在的 operation。
+        self._pending_plan_record: dict[str, Any] | None = None
         self._validate_binding()
         self._reporter = RuntimeMaintenanceReporter(
             state_root=self.paths.state_root,
@@ -1474,6 +1480,7 @@ class RuntimeInstaller:
                 accelerator=self.accelerator,
             ),
             event_sink=event_sink,
+            startup_cancellation=startup_cancellation,
         )
 
     @property
@@ -1757,6 +1764,20 @@ class RuntimeInstaller:
         *,
         effective_component_ids: tuple[str, ...] = (),
     ) -> bool:
+        before_registration: Callable[[], None] | None = None
+        if self._pending_plan_record is not None:
+
+            def before_registration() -> None:
+                # Plan 绑定与 durable 注册在同一个 fence 边界内执行：
+                # pre-registration 终止不会留下指向不存在 operation 的绑定，
+                # 无 guard 的普通调用也保持原有绑定语义。
+                bind_plan(
+                    self.paths.state_root,
+                    self._pending_plan_record,
+                    self._operation_id,
+                )
+                self._pending_plan_record = None
+
         # ensure 的 requested 回显可选组件安装范围（None=缺省省略、
         # []=显式 base-only）；inspect/repair 保持 component_ids 语义，
         # 空集仍省略。
@@ -1781,6 +1802,7 @@ class RuntimeInstaller:
             required_capabilities=self._required_capabilities,
             plan_id=self._plan_id if operation == "ensure" else None,
             product_binding=self.product_binding if self._plan_id else None,
+            before_registration=before_registration,
         )
 
     def inspect_snapshot(self, *, emit: bool = True) -> RuntimeInspection:
@@ -2035,7 +2057,7 @@ class RuntimeInstaller:
                     raise RuntimeInstallPlanBlocked(
                         "preflight changed; resolve blockers and preview again"
                     )
-                bind_plan(self.paths.state_root, self._plan_record, self._operation_id)
+                self._pending_plan_record = self._plan_record
             return self._ensure_locked()
 
     def _ensure_locked(self) -> RuntimeLaunch | None:
@@ -2337,6 +2359,9 @@ class RuntimeInstaller:
 
 _OUTPUT_LOCK = threading.Lock()
 
+if TYPE_CHECKING:
+    from vibeocr.runtime.environments.runtime_control import RuntimeControl
+
 
 def _emit(value: object) -> None:
     with _OUTPUT_LOCK:
@@ -2351,9 +2376,16 @@ def _environment_cancel_receipt(accepted: bool) -> None:
         os.write(sys.stdout.fileno(), b'{"environment_cancel":"' + value + b'"}\n')
 
 
-def _listen_environment_cancel(
-    cancel: Callable[[Callable[[bool], None]], None],
-) -> None:
+def _maintenance_cancel_receipt(state: str) -> None:
+    value = b"pre_registration" if state == "pre_registration" else b"registered"
+    # Same raw-fd receipt channel: pre_registration authorizes the host to
+    # terminate this process; registered means only cooperative durable
+    # cancellation may proceed.
+    with _OUTPUT_LOCK:
+        os.write(sys.stdout.fileno(), b'{"maintenance_cancel":"' + value + b'"}\n')
+
+
+def _listen_environment_cancel(on_cancel: Callable[[], None]) -> None:
     # Raw fd reads avoid a daemon holding stdin's buffered lock at interpreter
     # shutdown. The inherited pipe also crosses the frozen bootloader boundary.
     command = bytearray()
@@ -2364,7 +2396,7 @@ def _listen_environment_cancel(
                 return
             if value == b"\n":
                 if command.strip() == b"cancel":
-                    cancel(_environment_cancel_receipt)
+                    on_cancel()
                 return
             command.extend(value)
     except (OSError, ValueError):
@@ -2673,6 +2705,7 @@ def _installer_from_request(
     download_source_ids: tuple[str, ...] | None = None,
     plan_id: str | None = None,
     accelerator: str | None = None,
+    startup_cancellation: StartupCancellation | None = None,
 ) -> RuntimeInstaller:
     return RuntimeInstaller(
         product_root=request["product_root"],
@@ -2682,6 +2715,7 @@ def _installer_from_request(
         if accelerator is not None
         else request.get("accelerator"),
         plan_id=plan_id,
+        startup_cancellation=startup_cancellation,
         layout_manifest=request.get("layout_manifest"),
         product_id=request.get("product_id"),
         event_sink=event_sink,
@@ -2768,11 +2802,17 @@ def _runtime_control_from_request(
     request: dict[str, Any],
     *,
     event_sink: EventSink | None,
+    startup_cancellation: StartupCancellation | None = None,
 ) -> Any:
     from vibeocr.runtime.environments.runtime_control import RuntimeControl
 
     def installer_factory(**kwargs: Any) -> RuntimeInstaller:
-        return _installer_from_request(request, event_sink=event_sink, **kwargs)
+        return _installer_from_request(
+            request,
+            event_sink=event_sink,
+            startup_cancellation=startup_cancellation,
+            **kwargs,
+        )
 
     return RuntimeControl.from_installer_factory(installer_factory)
 
@@ -2928,6 +2968,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="vibeocr-runtime-installer")
     parser.add_argument("--request-json")
     parser.add_argument("--environment-cancel-control", action="store_true")
+    parser.add_argument("--maintenance-cancel-control", action="store_true")
     args = parser.parse_args(argv)
     operation: str | None = None
     request_kind: str | None = None
@@ -2965,7 +3006,7 @@ def main(argv: list[str] | None = None) -> int:
             }:
                 threading.Thread(
                     target=_listen_environment_cancel,
-                    args=(manager.cancel_install,),
+                    args=(lambda: manager.cancel_install(_environment_cancel_receipt),),
                     daemon=True,
                 ).start()
             if action == "list":
@@ -3028,10 +3069,39 @@ def main(argv: list[str] | None = None) -> int:
                 }
             )
             return 0
+        startup_cancellation: StartupCancellation | None = None
+        control_slot: list[RuntimeControl] = []
+        if request_kind == "start" and args.maintenance_cancel_control:
+            # 注册 fence 在 request 校验后、control 构造前就绪：取消决策与
+            # durable 注册串行化，宿主只在 pre_registration 回执后才终止。
+            startup_cancellation = StartupCancellation(ack=_maintenance_cancel_receipt)
+
+            def _request_maintenance_cancel() -> None:
+                state = startup_cancellation.cancel()
+                if state == "registered":
+                    # 已注册：回执在锁外发布，取消只能走协作 durable 路径。
+                    _maintenance_cancel_receipt(state)
+                    operation_id = request.get("operation_id")
+                    control = control_slot[0] if control_slot else None
+                    if control is None or not isinstance(operation_id, str):
+                        return
+                    try:
+                        control.request_cancel(operation_id)
+                    except (RuntimeOperationError, OSError):
+                        # 提交中/终态/竞态：真实结果保持权威，不升级为进程终止。
+                        pass
+
+            threading.Thread(
+                target=_listen_environment_cancel,
+                args=(_request_maintenance_cancel,),
+                daemon=True,
+            ).start()
         control = _runtime_control_from_request(
             request,
             event_sink=event_sink,
+            startup_cancellation=startup_cancellation,
         )
+        control_slot.append(control)
         if request_kind == "install_plan":
             preview = control.preview_install_plan(
                 accelerator=request.get("accelerator"),

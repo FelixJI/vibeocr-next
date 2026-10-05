@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { expectCommand, mountHost, snapshot } from "./workbench-host";
 
@@ -81,9 +81,16 @@ async function readPreview(
   return info;
 }
 
-test("JPEG and PNG outputs encode real decodable pixels with declared sizes", async ({
-  page,
-}) => {
+interface AnnotationFormatHost {
+  uploads: { contentType: string; body: Buffer }[];
+  previewImg: Locator;
+}
+
+/** 两个编码测试共享的前置：视口、真实上传收集与 80×40 半透明 SVG 源挂载，
+ *  确认画布、原图信息行与初始预览可见。 */
+async function setupAnnotationFormatHost(
+  page: Page,
+): Promise<AnnotationFormatHost> {
   await page.setViewportSize({ width: 1280, height: 800 });
   const uploads: { contentType: string; body: Buffer }[] = [];
   await page.route("**/__annotation", async (route) => {
@@ -130,6 +137,13 @@ test("JPEG and PNG outputs encode real decodable pixels with declared sizes", as
   await expect(page.getByText(/实际体积/)).toBeVisible();
   const previewImg = page.locator('img[alt="最终输出预览"]');
   await expect(previewImg).toBeVisible();
+  return { uploads, previewImg };
+}
+
+test("JPEG and PNG outputs encode real decodable pixels with declared sizes", async ({
+  page,
+}) => {
+  const { uploads, previewImg } = await setupAnnotationFormatHost(page);
 
   // 指定尺寸 + JPEG：真实编码（类型、签名）、白底透明合成与声明尺寸一致。
   await page.getByLabel("输出格式").selectOption("image/jpeg");
@@ -214,6 +228,34 @@ test("JPEG and PNG outputs encode real decodable pixels with declared sizes", as
   const decodedPng = await decodeUpload(page, pngBytes, "image/png");
   expect(pixelAt(decodedPng, 8, 10)).toEqual([22, 22, 22]);
   expect(pixelAt(decodedPng, 32, 10)).toEqual([224, 32, 32]);
+});
+
+test("undo restores original output size with matching PNG headers", async ({
+  page,
+}) => {
+  const { uploads, previewImg } = await setupAnnotationFormatHost(page);
+
+  // 默认 PNG：应用指定尺寸并保存，前态为真实 40×20 PNG。
+  await page.getByLabel("输出宽度").fill("40");
+  await page.getByLabel("输出高度").fill("20");
+  await page.getByRole("button", { name: "应用尺寸" }).click();
+  await expect(page.getByText(/输出 40×20/)).toBeVisible();
+  await page.getByRole("button", { name: "保存标注图" }).click();
+  await expect.poll(() => uploads.length).toBe(1);
+  expect(uploads[0]!.contentType).toBe("image/png");
+  expect(uploads[0]!.body.readUInt32BE(16)).toBe(40);
+  expect(uploads[0]!.body.readUInt32BE(20)).toBe(20);
+  // 确认预览已离开初始 80×40，避免撤销断言命中尚未更新的旧预览。
+  await expect
+    .poll(() =>
+      previewImg.evaluate((el) => (el as HTMLImageElement).naturalWidth),
+    )
+    .toBe(40);
+  await expect
+    .poll(() =>
+      previewImg.evaluate((el) => (el as HTMLImageElement).naturalHeight),
+    )
+    .toBe(20);
 
   // 撤销尺寸：回到原始输出尺寸，PNG 头部与声明一致。
   await page.getByRole("button", { name: "撤销" }).click();
@@ -224,9 +266,9 @@ test("JPEG and PNG outputs encode real decodable pixels with declared sizes", as
     )
     .toBe(80);
   await page.getByRole("button", { name: "保存标注图" }).click();
-  await expect.poll(() => uploads.length).toBe(3);
-  expect(uploads[2]!.body.readUInt32BE(16)).toBe(80);
-  expect(uploads[2]!.body.readUInt32BE(20)).toBe(40);
+  await expect.poll(() => uploads.length).toBe(2);
+  expect(uploads[1]!.body.readUInt32BE(16)).toBe(80);
+  expect(uploads[1]!.body.readUInt32BE(20)).toBe(40);
 });
 
 test("failed output preview preserves editing and reports failure without staying busy", async ({

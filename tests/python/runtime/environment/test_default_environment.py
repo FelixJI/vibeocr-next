@@ -174,7 +174,7 @@ import subprocess
 import sys
 import threading
 from vibeocr.runtime.environments.managed_environments import ManagedEnvironmentStore
-from vibeocr.runtime.environments.runtime_installer import _listen_environment_cancel
+from vibeocr.runtime.environments.runtime_installer import _listen_environment_cancel, _environment_cancel_receipt
 
 manager = ManagedEnvironmentStore(
     product_root=sys.argv[1], component_lock=sys.argv[2], runtime_manifest=sys.argv[3],
@@ -190,8 +190,8 @@ def bounded_run(*args, **kwargs):
     return real_run(*args, **kwargs)
 subprocess.run = bounded_run
 received = threading.Event()
-def cancel(acknowledge):
-    manager.cancel_install(acknowledge)
+def cancel():
+    manager.cancel_install(_environment_cancel_receipt)
     received.set()
 threading.Thread(target=_listen_environment_cancel, args=(cancel,), daemon=True).start()
 created = manager.create('live-control-pipe')

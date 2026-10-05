@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -125,6 +126,63 @@ class RuntimeOperationNotFound(RuntimeOperationError):
 
 class RuntimeOperationCancelled(RuntimeOperationError):
     """Cooperative cancellation reached an operation checkpoint."""
+
+
+class StartupCancellation:
+    """Serialize pre-registration cancellation with durable registration.
+
+    A maintenance start process owned by the host exposes this fence on its
+    control stdin. ``pending`` means no durable write has been attempted: a
+    cancel request seals the fence (``pre_registration``) and authorizes the
+    host to terminate the process. The optional ``ack`` publishes the
+    pre-registration receipt while the seal is still held, so registration can
+    never observe the seal before the receipt attempt completed. Once
+    registration is attempted the state is ``registered`` forever — including
+    partial durable failures, which must never re-authorize termination — and
+    cancellation continues through the durable ``request_cancel`` path only.
+    """
+
+    def __init__(self, *, ack: Callable[[str], None] | None = None) -> None:
+        self._lock = threading.Lock()
+        self._state = "pending"
+        self._ack = ack
+
+    @property
+    def state(self) -> str:
+        with self._lock:
+            return self._state
+
+    def cancel(self) -> str:
+        """Request cancellation; report whether pre-registration kill is safe."""
+        with self._lock:
+            if self._state == "registered":
+                return "registered"
+            # Idempotent: repeated sealed requests keep reporting
+            # pre_registration instead of flipping to registered. The receipt
+            # publishes under the seal: the registration path blocks on this
+            # lock and cannot observe cancellation before the receipt attempt
+            # has completed, so the host never falls back to querying a
+            # non-existent durable operation for a sealed run.
+            self._state = "cancelled"
+            if self._ack is not None:
+                self._ack("pre_registration")
+            return "pre_registration"
+
+    @contextmanager
+    def registration(self):
+        """Hold the fence across one durable registration attempt."""
+        with self._lock:
+            if self._state == "cancelled":
+                raise RuntimeOperationCancelled(
+                    "Runtime operation was cancelled before registration"
+                )
+            # Attempting the durable write must flip the state immediately: a
+            # partial registration failure can never fall back to a state that
+            # authorizes termination. The lock stays held across the write so a
+            # concurrent cancel() only reports ``registered`` once the record
+            # is durably visible.
+            self._state = "registered"
+            yield
 
 
 class RuntimeOperationNotCancellable(RuntimeOperationError):
@@ -1366,11 +1424,13 @@ class RuntimeMaintenanceReporter:
         state_root: Path,
         profile: RuntimeProfileDescriptor,
         event_sink: EventSink | None = None,
+        startup_cancellation: StartupCancellation | None = None,
     ) -> None:
         self._state_root = state_root
         self._store = RuntimeOperationStore(state_root)
         self._profile = profile
         self._event_sink = event_sink
+        self._startup_cancellation = startup_cancellation
         self._operation: str | None = None
         self._operation_id: str | None = None
         self._sequence = 0
@@ -1418,6 +1478,7 @@ class RuntimeMaintenanceReporter:
         required_capabilities: tuple[str, ...] = (),
         plan_id: str | None = None,
         product_binding: dict[str, str | None] | None = None,
+        before_registration: Callable[[], None] | None = None,
     ) -> bool:
         self._started_at = time.monotonic()
         self._last_activity_at = self._started_at
@@ -1486,13 +1547,32 @@ class RuntimeMaintenanceReporter:
         )
         projection_error = None
         try:
-            started = self._store.start(
-                self._operation_id,
-                intent,
-                source_operation_id=source_operation_id,
-                initial_snapshot=initial_snapshot,
-                initial_message_code="runtime.validate_binding",
-            )
+            if self._startup_cancellation is None:
+                if before_registration is not None:
+                    before_registration()
+                started = self._store.start(
+                    self._operation_id,
+                    intent,
+                    source_operation_id=source_operation_id,
+                    initial_snapshot=initial_snapshot,
+                    initial_message_code="runtime.validate_binding",
+                )
+            else:
+                # One short fence boundary covers the pre-registration binding
+                # and the durable write together: a cancel arriving inside the
+                # window blocks until the record exists, then continues on the
+                # cooperative durable path. The stdout event projection below
+                # stays outside the lock.
+                with self._startup_cancellation.registration():
+                    if before_registration is not None:
+                        before_registration()
+                    started = self._store.start(
+                        self._operation_id,
+                        intent,
+                        source_operation_id=source_operation_id,
+                        initial_snapshot=initial_snapshot,
+                        initial_message_code="runtime.validate_binding",
+                    )
         except _CommittedEventProjectionError as exc:
             # The operation was accepted even though its projection failed.
             # Adopt its durable identity before recording the startup failure.
@@ -1931,6 +2011,7 @@ __all__ = [
     "RuntimeOperationError",
     "RuntimeOperationNotFound",
     "RuntimeOperationNotCancellable",
+    "StartupCancellation",
     "RuntimeOperationNotRetryable",
     "RuntimeOperationStart",
     "RuntimeOperationStore",
