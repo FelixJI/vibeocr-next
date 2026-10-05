@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import zipfile
 from ctypes import wintypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -141,9 +142,23 @@ def _windows_process_running(pid: int) -> bool:
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job Object integration")
 @pytest.mark.parametrize("cancel", [False, True])
+@pytest.mark.parametrize("assignment_delay", [0, 0.5])
 def test_resolver_cleans_descendants_even_after_parent_exit(
-    tmp_path: Path, cancel: bool
+    tmp_path: Path,
+    cancel: bool,
+    assignment_delay: float,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    original_popen = subprocess.Popen
+
+    def delayed_popen(*args, **kwargs):
+        # Let the venv launcher start the real interpreter before parent-side
+        # containment; this ordering occurs intermittently on loaded CI hosts.
+        process = original_popen(*args, **kwargs)
+        time.sleep(assignment_delay)
+        return process
+
+    monkeypatch.setattr(installer.subprocess, "Popen", delayed_popen)
     pid_path = tmp_path / "owned-pid.txt"
     store = RuntimeOperationStore(tmp_path / "state")
 
@@ -395,6 +410,37 @@ def test_uncontained_command_is_never_started(
             heartbeat_code="runtime.resolve_packages",
         )
     assert not marker.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows venv containment gate")
+def test_install_command_keeps_selected_venv() -> None:
+    _run_install_command(
+        [sys.executable, "-c", f"import sys; assert sys.prefix == {sys.prefix!r}"],
+        timeout=5,
+        env=dict(os.environ),
+        reporter=None,
+        heartbeat_code="runtime.resolve_packages",
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows venv containment gate")
+def test_invalid_venv_base_fails_before_command_start(tmp_path: Path) -> None:
+    scripts = tmp_path / "Scripts"
+    scripts.mkdir()
+    (tmp_path / "pyvenv.cfg").write_text("home = missing-base\n", encoding="utf-8")
+    with pytest.raises(RuntimeInstallError) as failure:
+        _run_install_command(
+            [
+                str(scripts / "python.exe"),
+                "-c",
+                "raise AssertionError('not contained')",
+            ],
+            timeout=5,
+            env=dict(os.environ),
+            reporter=None,
+            heartbeat_code="runtime.resolve_packages",
+        )
+    assert failure.value.reason_code == "process_containment_failed"
 
 
 def test_finished_resolver_diagnostic_does_not_leak_into_download_cancel(
