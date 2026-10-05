@@ -191,7 +191,7 @@ public sealed partial class MainWindow
 
     RecordPaddleSmokeStage("preview install plan");
     await SelectSmokeEnvironmentAsync(environment.Id);
-    await SelectSmokeValueAsync("#managed-recipe-select", PaddleSmokeRecipe);
+    await SelectSmokeValueAsync("#environment-purpose-select", "document|document_vl|formula|structure|table|text");
     await ClickManagedSmokeButtonAsync("预览依赖");
     await WaitForSmokeDomAsync(
       "!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +

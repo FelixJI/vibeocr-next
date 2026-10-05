@@ -774,6 +774,70 @@ input {
 .canvas-stage.is-panning .image-text-line {
   pointer-events: none;
 }
+/* 原生冻结桌面继续作为背景，WebView 仅在原选区绘图并提供浮动工具。 */
+html[data-capture-scene="true"],
+html[data-capture-scene="true"] body,
+html[data-capture-scene="true"] #root > .fluent-root {
+  background: transparent;
+}
+html[data-capture-scene="true"] .page-region,
+html[data-capture-scene="true"] .workspace {
+  padding: 0;
+  max-width: none;
+  overflow: hidden;
+  background: transparent;
+}
+html[data-capture-scene="true"] .workspace-header,
+html[data-capture-scene="true"] .workspace > .status-line {
+  display: none;
+}
+html[data-capture-scene="true"] .workspace > .work-panel {
+  position: fixed;
+  right: 16px;
+  top: 16px;
+  width: min(450px, calc(100vw - 32px));
+  max-height: 70vh;
+  overflow: auto;
+  z-index: 2;
+  box-shadow: 0 6px 24px #0004;
+}
+.capture-scene-editor {
+  position: fixed;
+  left: var(--capture-tools-left);
+  top: var(--capture-tools-top);
+  width: min(880px, 100vw);
+  max-height: var(--capture-tools-height);
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--colorNeutralStroke1);
+  border-radius: 8px;
+  background: var(--colorNeutralBackground1);
+  box-shadow: 0 6px 24px #0004;
+}
+.capture-scene-editor > :not(.canvas-stage) {
+  position: relative;
+  z-index: 1;
+}
+.capture-scene-editor .editor-guidance {
+  display: none;
+}
+.capture-scene-editor > .canvas-stage {
+  position: fixed !important;
+  left: var(--capture-x);
+  top: var(--capture-y);
+  width: var(--capture-width);
+  height: var(--capture-height);
+  min-height: 0;
+  max-height: none !important;
+  border-radius: 0;
+  background: transparent;
+  z-index: 0;
+}
+.capture-scene-editor .canvas-stage > .inspection-canvas,
+.capture-scene-editor .canvas-stage > .image-text-frame {
+  width: calc(var(--capture-width) * var(--editor-zoom, 1));
+  margin: 0;
+}
 .inspection-canvas {
   display: block;
   width: min(100%, 69vh, 780px);

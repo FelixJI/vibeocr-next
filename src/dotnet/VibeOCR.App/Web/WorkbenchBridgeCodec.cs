@@ -41,8 +41,7 @@ public static class WorkbenchBridgeCodec
   private static readonly HashSet<string> ToolbarLayoutArgumentFields =
     ["edge", "autoHide"];
   private static readonly HashSet<string> ToolbarPreferencesArgumentFields =
-    ["lingerMs", "theme"];
-  private static readonly HashSet<string> ToolbarDelayArgumentFields = ["lingerMs"];
+    ["lingerMs", "theme", "peekPixels"];
   private static readonly HashSet<string> BatchMoveArgumentFields = ["itemId", "delta"];
   private static readonly HashSet<string> BatchItemArgumentFields = ["itemId"];
   private static readonly HashSet<string> PagesArgumentFields = ["pages"];
@@ -636,11 +635,13 @@ public static class WorkbenchBridgeCodec
           ParseToolbarEdge(arguments.GetProperty("edge").GetString()),
           arguments.GetProperty("autoHide").GetBoolean());
       case ("settings", "setFloatingToolbarPreferences"):
-        EnsureObjectWithFields(arguments,
-          HasExactFields(arguments, ToolbarDelayArgumentFields) ? ToolbarDelayArgumentFields :
-          HasExactFields(arguments, ThemeArgumentFields) ? ThemeArgumentFields : ToolbarPreferencesArgumentFields,
-          "command arguments");
+        if (arguments.ValueKind != JsonValueKind.Object || !arguments.EnumerateObject().Any() ||
+          arguments.EnumerateObject().Any(field => !ToolbarPreferencesArgumentFields.Contains(field.Name)))
+        {
+          throw new WorkbenchBridgeProtocolException("Workbench floating toolbar preference is invalid.");
+        }
         int? lingerMs = null;
+        int? peekPixels = null;
         string? toolbarTheme = null;
         if (arguments.TryGetProperty("lingerMs", out JsonElement delayArgument))
         {
@@ -659,7 +660,16 @@ public static class WorkbenchBridgeCodec
             throw new WorkbenchBridgeProtocolException("Workbench floating toolbar preference is invalid.");
           }
         }
-        return new SetFloatingToolbarPreferencesCommand(lingerMs, toolbarTheme);
+        if (arguments.TryGetProperty("peekPixels", out JsonElement peekArgument))
+        {
+          if (peekArgument.ValueKind != JsonValueKind.Number || !peekArgument.TryGetInt32(out int pixels) ||
+            pixels is < 1 or > 20)
+          {
+            throw new WorkbenchBridgeProtocolException("Workbench floating toolbar preference is invalid.");
+          }
+          peekPixels = pixels;
+        }
+        return new SetFloatingToolbarPreferencesCommand(lingerMs, toolbarTheme, peekPixels);
       case ("settings", "showFloatingToolbar"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new ShowFloatingToolbarCommand();
@@ -957,7 +967,10 @@ public static class WorkbenchBridgeCodec
   private static string ParseEnvironmentId(JsonElement arguments)
   {
     string? value = arguments.GetProperty("environmentId").GetString();
-    if (value == "legacy" || (value is not null && Guid.TryParseExact(value, "N", out _)))
+    // 环境标识由 Runtime 分配，支持可读名称及历史 UUID；这里仅约束
+    // 单个目录段的消息形状，目录成员、重名与保留名由 Runtime 校验。
+    if (value is { Length: > 0 and <= 64 } && value == value.Trim().TrimEnd('.') &&
+        value is not ("." or "..") && value.IndexOfAny(Path.GetInvalidFileNameChars()) < 0)
       return value;
     throw new WorkbenchBridgeProtocolException("运行环境标识无效。");
   }
@@ -1150,6 +1163,7 @@ public static class WorkbenchBridgeCodec
         settings.FloatingToolbar.Edge,
         settings.FloatingToolbar.AutoHide,
         settings.FloatingToolbar.LingerMs,
+        settings.FloatingToolbar.PeekPixels,
         settings.FloatingToolbar.Theme,
         settings.FloatingToolbar.Visibility,
         settings.FloatingToolbar.Error,
@@ -1170,6 +1184,7 @@ public static class WorkbenchBridgeCodec
       settings.EnvironmentBusy,
       environmentSources = settings.EnvironmentSources ?? [],
       environmentDefaultSourceIds = settings.EnvironmentDefaultSourceIds ?? [],
+      environmentResolvedDefaultSources = settings.EnvironmentResolvedDefaultSources ?? [],
       environmentUnknownDefaultSourceIds = settings.EnvironmentUnknownDefaultSourceIds ?? [],
       environmentPackageSourceIds = settings.EnvironmentPackageSourceIds ?? [],
       settings.EnvironmentCanCancelInstall,

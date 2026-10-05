@@ -12,13 +12,13 @@ public sealed class EdgeSensorWindowTests
     private const uint WmMouseMove = 0x0200;
 
     [Fact]
-    public void CreateAppliesMinimalAlphaImmediately()
+    public void CreateAppliesVisibleHintAlphaImmediately()
     {
         var native = new FakeSensorNative();
         using var sensor = new EdgeSensorWindow(native);
 
         Assert.Equal(0x1234, sensor.Handle);
-        Assert.Contains("alpha:1", native.Calls);
+        Assert.Contains("alpha:160", native.Calls);
         Assert.False(sensor.IsArmed);
     }
 
@@ -44,11 +44,24 @@ public sealed class EdgeSensorWindowTests
         using var sensor = new EdgeSensorWindow(native);
         int entered = 0;
         sensor.PointerEntered += (_, _) => entered++;
+        sensor.Arm(new PhysicalRectangle(860, 0, 200, 2));
 
         nint result = sensor.WindowProc(sensor.Handle, WmMouseMove, 0, 0);
 
         Assert.Equal(0, result);
         Assert.Equal(1, entered);
+    }
+
+    [Fact]
+    public void DisarmedSensorIgnoresQueuedMouseMove()
+    {
+        using var sensor = new EdgeSensorWindow(new FakeSensorNative());
+        int entered = 0;
+        sensor.PointerEntered += (_, _) => entered++;
+        sensor.Arm(new PhysicalRectangle(860, 0, 200, 2));
+        sensor.Disarm();
+        sensor.WindowProc(sensor.Handle, WmMouseMove, 0, 0);
+        Assert.Equal(0, entered);
     }
 
     [Fact]
@@ -86,7 +99,7 @@ public sealed class EdgeSensorWindowTests
 
         Assert.True(sensor.IsArmed);
         Assert.Equal(bounds, native.PlacedBounds);
-        Assert.Equal("alpha:1|topmost|show", string.Join('|', native.Calls));
+        Assert.Equal("alpha:160|topmost|show", string.Join('|', native.Calls));
     }
 
     [Fact]
@@ -111,9 +124,42 @@ public sealed class EdgeSensorWindowTests
         sensor.Dispose();
         sensor.Dispose();
 
-        Assert.Equal("alpha:1|hide|destroy", string.Join('|', native.Calls));
+        Assert.Equal("alpha:160|hide|destroy", string.Join('|', native.Calls));
         Assert.Throws<ObjectDisposedException>(() => sensor.Arm(new PhysicalRectangle(0, 0, 1, 1)));
         Assert.Throws<ObjectDisposedException>(() => sensor.Disarm());
+        Assert.Equal(2, native.Unhooked.Count);
+    }
+
+    [Fact]
+    public void ForegroundAndForegroundWindowGeometryNotifyWhileSensorIsHidden()
+    {
+        var native = new FakeSensorNative { Foreground = 0x5678 };
+        using var sensor = new EdgeSensorWindow(native);
+        int changes = 0;
+        sensor.ForegroundContextChanged += (_, _) => changes++;
+        Assert.Equal(new uint[] { 0x0003, 0x800B }, native.HookedEvents);
+        sensor.OnForegroundEvent(1, 0x0003, native.Foreground, 0, 0, 0, 0);
+        sensor.OnForegroundEvent(2, 0x800B, native.Foreground, 0, 0, 0, 0);
+        sensor.OnForegroundEvent(2, 0x800B, 0x9999, 0, 0, 0, 0);
+        sensor.OnForegroundEvent(2, 0x800B, native.Foreground, -4, 0, 0, 0);
+        sensor.OnForegroundEvent(2, 0x800B, native.Foreground, 0, 1, 0, 0);
+        Assert.Equal(2, changes);
+        Assert.False(sensor.IsArmed);
+        sensor.Dispose();
+        sensor.OnForegroundEvent(1, 0x0003, native.Foreground, 0, 0, 0, 0);
+        Assert.Equal(2, changes);
+    }
+
+    [Fact]
+    public void FailedSubscriptionReportsFaultAndReleasesPartialHook()
+    {
+        var native = new FakeSensorNative { FailHookEvent = 0x800B };
+        using var sensor = new EdgeSensorWindow(native);
+        Assert.False(sensor.TracksForegroundChanges);
+        Assert.NotNull(sensor.ForegroundTrackingFailure);
+        Assert.Single(native.Unhooked);
+        sensor.Arm(new PhysicalRectangle(0, 0, 200, 2));
+        Assert.True(sensor.IsArmed);
     }
 
     private sealed class FakeSensorNative : IEdgeSensorNativeMethods
@@ -129,6 +175,18 @@ public sealed class EdgeSensorWindowTests
         public string? CreatedClass { get; private set; }
 
         public nint CreatedProc { get; private set; }
+
+        public nint Foreground { get; init; }
+        public uint? FailHookEvent { get; init; }
+        public List<uint> HookedEvents { get; } = [];
+        public List<nint> Unhooked { get; } = [];
+        public nint HookEvent(uint eventId, nint callback)
+        {
+            HookedEvents.Add(eventId);
+            return FailHookEvent == eventId ? 0 : (nint)HookedEvents.Count;
+        }
+        public bool UnhookEvent(nint hook) { Unhooked.Add(hook); return true; }
+        public nint ForegroundWindow() => Foreground;
 
         public nint CreateSensorWindow(string className, nint windowProc)
         {
@@ -195,6 +253,7 @@ public sealed class EdgeSensorWindowWin32Tests
         sensor.Arm(new PhysicalRectangle(0, 0, 1600, ScreenEdgeGeometry.SensorThicknessPx));
         int entered = 0;
         sensor.PointerEntered += (_, _) => entered++;
+        sensor.Arm(new PhysicalRectangle(860, 0, 200, 2));
 
         nint result = SendMessage(sensor.Handle, WmMouseMove, 0, 0);
 

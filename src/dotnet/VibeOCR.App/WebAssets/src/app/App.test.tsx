@@ -252,6 +252,11 @@ describe("AppShell", () => {
       autoHide: false,
     });
     const delayInput = screen.getByLabelText("收起时间（毫秒）");
+    await user.selectOptions(screen.getByLabelText("收起后露出像素"), "8");
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setFloatingToolbarPreferences",
+      peekPixels: 8,
+    });
     expect(delayInput).toHaveValue(600);
     await user.clear(delayInput);
     await user.type(delayInput, "99");
@@ -470,6 +475,9 @@ describe("AppShell", () => {
       captionText: "标签",
     });
     await user.click(screen.getByRole("tab", { name: "识别" }));
+    // 解码能力说明基于预装解码器的真实支持清单，不再误导“取决于已安装解码器”。
+    expect(screen.getByText(/解码能力已随产品预装/)).toBeVisible();
+    expect(screen.queryByText(/取决于已安装解码器/)).not.toBeInTheDocument();
     expect(actions.run).toHaveBeenCalledWith({
       type: "qrcode.decodeCurrent",
       force: false,
@@ -2244,6 +2252,11 @@ describe("AppShell", () => {
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
     // 高级区默认折叠：先展开再操作原编辑器全部路径。
     await user.click(screen.getByText("高级：环境与依赖管理"));
+    // 快照已同步但无活动环境：展示默认配置“尚未启动”，不误写“尚未读取”，
+    // 也不伪造就绪。
+    expect(
+      screen.getByText("默认运行环境：RapidOCR · CPU（尚未启动）"),
+    ).toBeVisible();
     expect(screen.getByText(/Python ready · 依赖 empty/)).toBeVisible();
     expect(screen.getByText(/上次依赖安装未完成/)).toHaveTextContent(
       "下载源连接失败。",
@@ -2258,7 +2271,7 @@ describe("AppShell", () => {
     expect(screen.getByText(/锁定依赖（1 项）/)).toBeVisible();
     expect(
       screen.getByText(
-        /计划：rapidocr-cpu · 目标文档（环境修订 1）· 请求源：跟随配置；生效源：TUNA PyPI 镜像/,
+        /计划：rapidocr-cpu · 目标文档（环境修订 1）· 下载来源：TUNA PyPI 镜像/,
       ),
     ).toBeVisible();
     await user.type(
@@ -2640,7 +2653,7 @@ describe("AppShell", () => {
     );
     expect(
       screen.getByText(
-        /计划：rapidocr-cpu · 目标RapidOCR · CPU（环境修订 1）· 请求源：跟随配置；生效源：TUNA PyPI 镜像/,
+        /计划：rapidocr-cpu · 目标RapidOCR · CPU（环境修订 1）· 下载来源：TUNA PyPI 镜像/,
       ),
     ).toBeVisible();
     // AC8：安装只写入目标环境、不停止当前识别服务（活动保护以 Runtime 为准）。
@@ -3036,27 +3049,21 @@ describe("AppShell", () => {
     expect(
       screen.queryByRole("button", { name: "确认安装依赖" }),
     ).not.toBeInTheDocument();
-    await user.selectOptions(
-      screen.getByLabelText("锁定依赖配方"),
-      "mineru-cpu",
-    );
+    // 配方选择统一为用途+设备：切到文档解析后，同一选择指向 mineru-cpu，
+    // 旧计划随之失效（requestedRecipe 不再匹配当前目标）。
+    await user.selectOptions(screen.getByLabelText("识别用途"), "document");
     expect(
       screen.queryByRole("button", { name: "确认安装依赖" }),
     ).not.toBeInTheDocument();
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.invalidateEnvironmentPlan",
     });
-    await user.selectOptions(
-      screen.getByLabelText("锁定依赖配方"),
-      "rapidocr-cpu",
-    );
-    await user.selectOptions(
-      screen.getByLabelText("锁定依赖配方"),
-      "mineru-cpu",
-    );
-    expect(
-      screen.queryByRole("button", { name: "确认安装依赖" }),
-    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "预览依赖" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.previewEnvironmentInstall",
+      environmentId: "env-1",
+      recipe: "mineru-cpu",
+    });
     const settingsState = viewState.features.settings as Record<
       string,
       unknown
@@ -3093,7 +3100,7 @@ describe("AppShell", () => {
     window.location.hash = "#/settings";
     const user = userEvent.setup();
     const actions: AppActions = {
-      run: vi.fn().mockResolvedValue(false),
+      run: vi.fn().mockResolvedValue(true),
       navigate: vi.fn(),
       setTheme: vi.fn(),
     };
@@ -3253,98 +3260,77 @@ describe("AppShell", () => {
         },
       },
     };
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
-    // 高级区默认折叠：先展开再操作原编辑器路径。
-    await user.click(screen.getByText("高级：环境与依赖管理"));
-    // 折叠详情展开后再断言内部内容。
-    await user.click(screen.getByText("来源配置（默认、覆盖与已生效值）"));
-    await user.click(screen.getByText("全局默认来源（所有环境继承）"));
-
-    // 目录展示名 + 脱敏端点（AC5）；默认/覆盖/已生效值分开标注，
-    // 模型源无覆盖时端点如实未知，不与 PyPI 混为单源。
+    const { unmount, rerender } = render(
+      <App actions={actions} viewState={viewState} />,
+    );
+    // 来源收敛为一个简单设置：目录展示名直出，默认值跟随 Runtime 解析；
+    // 不再提供“来源配置/全局默认来源”两处重复入口与 override 三层。
+    const packages = screen.getByLabelText("依赖包来源");
+    expect(packages).toHaveValue("tuna-pypi");
     expect(
-      screen.getByText(
-        "依赖包来源：TUNA PyPI 镜像（全局默认；端点 https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/）",
-      ),
-    ).toBeVisible();
+      within(packages).getByRole("option", { name: "TUNA PyPI 镜像（默认）" }),
+    ).toBeInTheDocument();
+    const model = screen.getByLabelText("模型来源");
+    expect(model).toHaveValue("huggingface");
+    expect(within(model).getAllByRole("option")).toHaveLength(2);
     expect(
-      screen.getByText(
-        "PaddleOCR 模型来源：Hugging Face（产品默认；端点 https://huggingface.co）",
-      ),
-    ).toBeVisible();
-    expect(screen.getByText(/已安装依赖来源：TUNA PyPI 镜像/)).toBeVisible();
+      within(model).getByRole("option", { name: "Hugging Face" }),
+    ).toBeInTheDocument();
     expect(
-      screen.getByText(
-        /未知来源：gone-model（当前版本目录不含，解析已回退继承）/,
-      ),
-    ).toBeVisible();
-    // 运行中环境的模型偏好标注下次启动生效。
+      within(model).getByRole("option", { name: "ModelScope（魔搭）" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("本环境依赖包来源")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("全局依赖包来源")).not.toBeInTheDocument();
     expect(
-      screen.getByText(/该环境正在使用；模型来源修改将在下次启动时生效/),
-    ).toBeVisible();
-    // 管理模式下 DOWNLOADS 卡片整体不渲染（来源已在“环境与依赖”内配置）。
+      screen.queryByText("来源配置（默认、覆盖与已生效值）"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("全局默认来源（所有环境继承）"),
+    ).not.toBeInTheDocument();
+    // 管理模式下 DOWNLOADS 卡片整体不渲染（来源已收敛进运行环境面板）。
     expect(screen.queryByText("下载来源")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Python 包下载源")).not.toBeInTheDocument();
 
-    // 切到 B：B 的覆盖与 A 互不影响；保存只针对目标环境。
-    await user.selectOptions(screen.getByLabelText("目标环境"), "env-b");
-    expect(
-      screen.getByText(
-        "PaddleOCR 模型来源：ModelScope（本环境覆盖；端点 https://www.modelscope.cn）",
-      ),
-    ).toBeVisible();
-    await user.selectOptions(screen.getByLabelText("本环境依赖包来源"), "pypi");
-    await user.click(screen.getByRole("button", { name: "保存本环境来源" }));
+    // 保存只写全局下载来源：依赖与模型一次保存，不按环境覆盖。
+    await user.selectOptions(packages, "pypi");
+    await user.selectOptions(model, "modelscope");
+    await user.click(screen.getByRole("button", { name: "保存下载来源" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.setEnvironmentSources",
-      environmentId: "env-b",
       packageSourceId: "pypi",
       paddleocrModelSourceId: "paddleocr-modelscope",
-      mineruModelSourceId: null,
+      mineruModelSourceId: "mineru-modelscope",
     });
 
-    expect(screen.getByLabelText("全局依赖包来源")).toHaveValue("tuna-pypi");
+    // 引擎间不一致的存量配置如实标注，选择后保存统一为同一提供方。
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 41,
+          features: {
+            settings: {
+              ...(viewState.features.settings as Record<string, unknown>),
+              environmentDefaultSourceIds: [
+                "tuna-pypi",
+                "paddleocr-bos",
+                "mineru-modelscope",
+              ],
+            },
+          },
+        }}
+      />,
+    );
+    expect(model).toHaveValue("");
     expect(
-      screen.queryByRole("option", { name: "产品默认（TUNA PyPI 镜像）" }),
-    ).not.toBeInTheDocument();
-    await user.selectOptions(
-      screen.getByLabelText("本环境 PaddleOCR 模型来源"),
-      "paddleocr-bos",
-    );
-    await user.selectOptions(
-      screen.getByLabelText("本环境 MinerU 模型来源"),
-      "mineru-modelscope",
-    );
-    await user.click(screen.getByRole("button", { name: "保存本环境来源" }));
-    expect(actions.run).toHaveBeenCalledWith({
+      screen.getByText(/当前 PaddleOCR 与 MinerU 的模型来源不一致/),
+    ).toBeVisible();
+    await user.selectOptions(model, "huggingface");
+    await user.click(screen.getByRole("button", { name: "保存下载来源" }));
+    expect(actions.run).toHaveBeenLastCalledWith({
       type: "settings.setEnvironmentSources",
-      environmentId: "env-b",
-      packageSourceId: "pypi",
-      paddleocrModelSourceId: "paddleocr-bos",
-      mineruModelSourceId: "mineru-modelscope",
-    });
-    await user.selectOptions(
-      screen.getByLabelText("本环境 PaddleOCR 模型来源"),
-      "",
-    );
-    await user.click(screen.getByRole("button", { name: "保存本环境来源" }));
-    expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.setEnvironmentSources",
-      environmentId: "env-b",
-      packageSourceId: "pypi",
-      paddleocrModelSourceId: null,
-      mineruModelSourceId: "mineru-modelscope",
-    });
-    // 全局默认保存不带环境 id，不会触碰任何单环境 override。
-    await user.selectOptions(screen.getByLabelText("全局依赖包来源"), "pypi");
-    await user.selectOptions(
-      screen.getByLabelText("全局 PaddleOCR 模型来源"),
-      "paddleocr-huggingface",
-    );
-    await user.click(screen.getByRole("button", { name: "保存全局默认来源" }));
-    expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.setEnvironmentSources",
-      packageSourceId: "pypi",
+      packageSourceId: "tuna-pypi",
       paddleocrModelSourceId: "paddleocr-huggingface",
       mineruModelSourceId: "mineru-huggingface",
     });
@@ -3416,18 +3402,10 @@ describe("AppShell", () => {
       <App actions={actions} viewState={viewState} />,
     );
     await user.click(screen.getByText("高级：环境与依赖管理"));
-    const sourceSelect = screen.getByLabelText("本次依赖下载源");
-    expect(sourceSelect).toHaveValue("");
-    expect(
-      within(sourceSelect).getByRole("option", {
-        name: /跟随环境配置（当前解析为 TUNA PyPI 镜像（产品默认））/,
-      }),
-    ).toBeInTheDocument();
-    expect(
-      within(sourceSelect).getByRole("option", { name: "PyPI 官方源" }),
-    ).toBeInTheDocument();
+    // 统一选择后预览不再有“本次依赖下载源”按次覆盖入口。
+    expect(screen.queryByLabelText("本次依赖下载源")).not.toBeInTheDocument();
 
-    // 跟随配置预览：不带 sourceId。
+    // 预览跟随已保存的下载来源：不携带 sourceId。
     await user.click(screen.getByRole("button", { name: "预览依赖" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.previewEnvironmentInstall",
@@ -3435,20 +3413,7 @@ describe("AppShell", () => {
       recipe: "rapidocr-cpu",
     });
 
-    // 显式选择预览：携带 sourceId，并作废旧计划。
-    await user.selectOptions(sourceSelect, "pypi");
-    expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.invalidateEnvironmentPlan",
-    });
-    await user.click(screen.getByRole("button", { name: "预览依赖" }));
-    expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.previewEnvironmentInstall",
-      environmentId: "env-1",
-      recipe: "rapidocr-cpu",
-      sourceId: "pypi",
-    });
-
-    // 显式计划的请求/生效/继承标记与资产来源分类。
+    // 计划只展示实际使用的下载来源与资产分类。
     const settings = viewState.features.settings as Record<string, unknown>;
     rerender(
       <App
@@ -3460,22 +3425,23 @@ describe("AppShell", () => {
             settings: {
               ...settings,
               environmentPlan: {
-                planId: "plan-explicit",
+                planId: "plan-follow",
                 environmentId: "env-1",
                 environmentRevision: 1,
                 recipe: "rapidocr-cpu",
                 requestedRecipe: "rapidocr-cpu",
-                sourceIds: ["pypi"],
-                requestedSourceIds: ["pypi"],
+                sourceIds: ["tuna-pypi"],
+                requestedSourceIds: null,
                 dependencies: ["rapidocr==3.9.2"],
                 sources: [
                   {
-                    id: "pypi",
+                    id: "tuna-pypi",
                     kind: "package_index",
-                    displayName: "PyPI 官方源",
-                    endpoint: "https://pypi.org/simple",
-                    requested: true,
-                    inheritedFrom: "product_default",
+                    displayName: "TUNA PyPI 镜像",
+                    endpoint:
+                      "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/",
+                    requested: false,
+                    inheritedFrom: "global_default",
                     usage: "online_index",
                     actualEndpoint: null,
                   },
@@ -3491,17 +3457,16 @@ describe("AppShell", () => {
     );
     expect(
       screen.getByText(
-        /计划：rapidocr-cpu · 目标空白（环境修订 1）· 请求源：PyPI 官方源；生效源：PyPI 官方源/,
+        /计划：rapidocr-cpu · 目标空白（环境修订 1）· 下载来源：TUNA PyPI 镜像/,
       ),
     ).toBeVisible();
     await user.click(screen.getByText("来源与资产明细"));
-    expect(screen.getByText(/PyPI 官方源（依赖包来源，本次指定/)).toBeVisible();
-    expect(screen.getByText(/缓存命中\s*不会计入新下载/)).toBeVisible();
+    expect(screen.getByText(/TUNA PyPI 镜像（依赖包来源/)).toBeVisible();
+    expect(screen.getByText(/已缓存模型直接复用/)).toBeVisible();
     await user.click(screen.getByRole("button", { name: "确认安装依赖" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.confirmEnvironmentInstall",
-      planId: "plan-explicit",
-      sourceId: "pypi",
+      planId: "plan-follow",
     });
     unmount();
   });

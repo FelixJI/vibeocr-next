@@ -594,7 +594,7 @@ public sealed class ScreenshotSessionWorkbenchTests
   [InlineData(false, true)]
   [InlineData(true, false)]
   [InlineData(true, true)]
-  public async Task RejectedCaptureDoesNotPublishPreviousImage(bool scrolling, bool failed)
+  public async Task RejectedCapturePreservesPreviousSessionAndItsInput(bool scrolling, bool failed)
   {
     string root = TemporaryRoot();
     try
@@ -606,11 +606,15 @@ public sealed class ScreenshotSessionWorkbenchTests
       using var annotationStore = new WorkbenchAnnotationStore(root);
       await using var handler = CreateHandler(recognition, root, broker, annotationStore,
         settings: new SettingsViewModel(inference), inferenceAttached: () => false);
+      RecognitionScreenshotSessionState previousSession;
+      WorkbenchResourceReference previousInput;
       using (var first = new RecognitionStateAwaiter(handler, state => !state.IsBusy))
       {
         await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
           TestContext.Current.CancellationToken);
-        Assert.NotNull((await first.Task).ScreenshotSession);
+        RecognitionWorkbenchState previousState = await first.Task;
+        previousSession = Assert.IsType<RecognitionScreenshotSessionState>(previousState.ScreenshotSession);
+        previousInput = Assert.IsType<WorkbenchResourceReference>(previousState.Input);
       }
       RecognitionInput? previous = recognition.CurrentInput;
       inputs.CancelCapture = !failed;
@@ -621,7 +625,8 @@ public sealed class ScreenshotSessionWorkbenchTests
         : new CaptureScreenshotSessionCommand();
       await handler.ExecuteAsync(command, TestContext.Current.CancellationToken);
       RecognitionWorkbenchState state = await rejected.Task;
-      Assert.Null(state.ScreenshotSession);
+      Assert.Equal(previousSession, state.ScreenshotSession);
+      Assert.Equal(previousInput, state.Input);
       Assert.Equal(failed ? "recognition.failed" : "recognition.cancelled", state.StatusCode);
       Assert.Same(previous, recognition.CurrentInput);
       Assert.Equal(0, inference.SubmitCalls);

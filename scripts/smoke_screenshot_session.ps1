@@ -112,6 +112,7 @@ try {
             }
         }
     } elseif ($process.ExitCode -ne 0 -or
+        -not $health.capture_overlay_reused -or
         $health.capture.Width -le 0 -or $health.capture.Height -le 0 -or
         $health.capture.WhitePixels -le 10000 -or $health.capture.DarkPixels -le 100 -or
         $health.canvas.orange_after -le ($health.canvas.orange_before + 50) -or

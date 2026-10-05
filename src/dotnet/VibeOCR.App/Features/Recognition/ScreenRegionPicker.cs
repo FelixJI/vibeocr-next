@@ -19,7 +19,76 @@ public sealed record ScreenRegionSelection(
     PhysicalRectangle Bounds,
     byte[] Bgra,
     int Stride,
-    int? PixelHeight = null);
+    int? PixelHeight = null)
+{
+    internal ScreenshotCaptureScene? CaptureScene { get; init; }
+}
+
+/// <summary>冻结桌面仅属于本次截图；确认后移交给同一窗口的编辑器。</summary>
+internal sealed class ScreenshotCaptureScene : IDisposable
+{
+    private readonly ScreenshotOwnerRestoration ownerRestoration = new();
+    private bool closed;
+    internal ScreenshotCaptureScene(Window window, Grid root,
+        PhysicalRectangle desktop, PhysicalRectangle bounds)
+    {
+        Window = window;
+        Root = root;
+        Desktop = desktop;
+        Bounds = bounds;
+        Window.Closed += OnClosed;
+    }
+    internal Window Window { get; }
+    internal Grid Root { get; }
+    internal PhysicalRectangle Desktop { get; }
+    internal PhysicalRectangle Bounds { get; }
+
+    internal void RestoreOwnerOnClose(Action restore)
+    {
+        ownerRestoration.Set(restore);
+    }
+
+    internal void TransferOwnerRestorationTo(ScreenshotCaptureScene successor) =>
+        ownerRestoration.TransferTo(successor.ownerRestoration);
+
+    private void OnClosed(object sender, WindowEventArgs args)
+    {
+        Window.Closed -= OnClosed;
+        closed = true;
+        Root.Children.Clear();
+        ownerRestoration.Restore();
+    }
+
+    public void Dispose()
+    {
+        if (closed) return;
+        Window.Close();
+    }
+}
+
+internal sealed class ScreenshotOwnerRestoration
+{
+    private Action? restore;
+    private bool restored;
+
+    internal void Set(Action callback)
+    {
+        if (restored) { callback(); return; }
+        restore = callback;
+    }
+
+    internal void TransferTo(ScreenshotOwnerRestoration successor)
+    {
+        if (ReferenceEquals(this, successor)) return;
+        if (Interlocked.Exchange(ref restore, null) is { } callback) successor.Set(callback);
+    }
+
+    internal void Restore()
+    {
+        restored = true;
+        Interlocked.Exchange(ref restore, null)?.Invoke();
+    }
+}
 
 public interface IScreenRegionPicker
 {
@@ -55,6 +124,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
         bool visible = IsWindowVisible(owner);
         bool minimized = IsIconic(owner);
         nint foreground = GetForegroundWindow();
+        ScreenshotCaptureScene? scene = null;
         ShowWindow(owner, 0);
         try
         {
@@ -73,17 +143,20 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
                 desktopBmp,
                 desktop.Width,
                 desktop.Height);
-            PhysicalRectangle? selected = await ShowOverlayAsync(
+            OverlaySelection? selection = await ShowOverlayAsync(
                 desktop,
                 background,
                 desktopBgra,
                 candidates,
+                keepForEditing: !scrolling,
                 cancellationToken);
-            if (selected is null)
+            if (selection is null)
             {
                 return null;
             }
 
+            PhysicalRectangle selected = selection.Bounds;
+            scene = selection.Scene;
             if (scrolling)
             {
                 // The frozen desktop is only for selection, not a scrolling history.
@@ -93,38 +166,65 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
                 background = null;
                 await Task.Delay(180, cancellationToken);
                 CapturedFrame? stitched = await ScrollCaptureSession.CaptureAsync(
-                    owner, selected.Value, cancellationToken);
+                    owner, selected, cancellationToken);
                 return stitched is null ? null : new ScreenRegionSelection(
-                    selected.Value, stitched.Pixels, stitched.Stride, stitched.Height);
+                    selected, stitched.Pixels, stitched.Stride, stitched.Height);
             }
 
-            byte[] cropped = CropBgra(desktopBgra, desktop, selected.Value);
+            byte[] cropped = CropBgra(desktopBgra, desktop, selected);
             return new ScreenRegionSelection(
-                selected.Value,
+                selected,
                 cropped,
-                selected.Value.Width * 4);
+                selected.Width * 4) { CaptureScene = scene };
+        }
+        catch
+        {
+            scene?.Dispose();
+            scene = null;
+            throw;
         }
         finally
         {
-            if (visible)
+            void RestoreOwner()
             {
-                ShowWindow(owner, minimized ? 7 : 8);
+                if (visible) ShowWindow(owner, minimized ? 7 : 8);
+                if (foreground != 0) SetForegroundWindow(foreground);
             }
-            if (foreground != 0)
-            {
-                SetForegroundWindow(foreground);
-            }
+            // 确认选区与加载编辑器之间不闪回主窗口。
+            if (scene is null) RestoreOwner();
+            else scene.RestoreOwnerOnClose(RestoreOwner);
         }
     }
 
-  private static async Task<PhysicalRectangle?> ShowOverlayAsync(
+  private sealed record OverlaySelection(PhysicalRectangle Bounds, ScreenshotCaptureScene? Scene);
+
+  // 自检仅复用已经捕获的 synthetic 子窗口像素，不采样其他桌面区域。
+  internal static async Task<ScreenshotCaptureScene> CreateSyntheticSceneAsync(
+    PhysicalRectangle bounds, byte[] pixels, int stride, CancellationToken cancellationToken)
+  {
+    BitmapImage background = await LoadBitmapAsync(
+      EncodeTopDownBmp(pixels, bounds.Width, bounds.Height, stride), bounds.Width, bounds.Height);
+    OverlaySelection? selected = await ShowOverlayAsync(bounds, background, pixels,
+      SmartScreenCandidates.Capture(bounds), keepForEditing: true, cancellationToken,
+      automaticSelection: true);
+    ScreenshotCaptureScene scene = selected?.Scene ??
+      throw new InvalidOperationException("Synthetic screenshot overlay was cancelled.");
+    scene.RestoreOwnerOnClose(static () => { });
+    return scene;
+  }
+
+  private static async Task<OverlaySelection?> ShowOverlayAsync(
     PhysicalRectangle desktop,
     BitmapImage background,
     byte[] pixels,
     SmartScreenCandidates candidates,
-    CancellationToken cancellationToken)
+    bool keepForEditing,
+    CancellationToken cancellationToken,
+    bool automaticSelection = false)
   {
-    var completion = new TaskCompletionSource<PhysicalRectangle?>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var completion = new TaskCompletionSource<OverlaySelection?>(TaskCreationOptions.RunContinuationsAsynchronously);
+    Windows.Foundation.TypedEventHandler<object, WindowEventArgs> closeHandler =
+      (_, _) => completion.TrySetResult(null);
     var session = new ScreenSelectionSession(desktop.Width, desktop.Height);
     var overlay = new Window();
     var root = new Grid { RequestedTheme = ElementTheme.Dark };
@@ -304,8 +404,31 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     {
       PhysicalRectangle? result = accept && session.ActiveSelection is { } rect
           ? rect with { X = rect.X + desktop.X, Y = rect.Y + desktop.Y } : null;
-      completion.TrySetResult(result);
-      overlay.Close();
+      if (result is { } bounds && keepForEditing)
+      {
+        overlay.Closed -= closeHandler;
+        canvas.ReleasePointerCaptures();
+        // 将纯背景移交给新 root，丢弃选区事件闭包及完整 BGRA 缓冲。
+        var sceneRoot = new Grid { RequestedTheme = ElementTheme.Dark };
+        UIElement frozenImage = root.Children[0];
+        root.Children.Remove(frozenImage);
+        sceneRoot.Children.Add(frozenImage);
+        var sceneShade = new Canvas { IsHitTestVisible = false };
+        foreach (Rectangle shade in shades.Append(selection))
+        {
+          canvas.Children.Remove(shade);
+          sceneShade.Children.Add(shade);
+        }
+        sceneRoot.Children.Add(sceneShade);
+        overlay.Content = sceneRoot;
+        completion.TrySetResult(new OverlaySelection(bounds,
+          new ScreenshotCaptureScene(overlay, sceneRoot, desktop, bounds)));
+      }
+      else
+      {
+        completion.TrySetResult(result is { } accepted ? new OverlaySelection(accepted, null) : null);
+        overlay.Close();
+      }
     }
     async Task FinishAsync(bool accept)
     {
@@ -546,7 +669,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     };
     root.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, args) =>
     {
-      if (!IsPickerPointer(args)) return;
+      if (completion.Task.IsCompleted || !IsPickerPointer(args)) return;
       if (!args.GetCurrentPoint(canvas).Properties.IsRightButtonPressed) return;
       Back(); Render(); args.Handled = true;
     }), true);
@@ -589,6 +712,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     root.Children.Add(keyboardSink);
     root.AddHandler(UIElement.PreviewKeyDownEvent, new KeyEventHandler((_, args) =>
         {
+          if (completion.Task.IsCompleted) return;
           bool control = (Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control) & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0;
           bool shift = (Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift) & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0;
           int step = shift ? 10 : 1;
@@ -624,7 +748,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
         }), true);
     canvas.SizeChanged += (_, _) => Render();
     overlay.Content = root;
-    overlay.Closed += (_, _) => completion.TrySetResult(null);
+    overlay.Closed += closeHandler;
     OverlappedPresenter presenter = OverlappedPresenter.Create();
     presenter.SetBorderAndTitleBar(false, false);
     presenter.IsAlwaysOnTop = true;
@@ -664,14 +788,26 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     }
     // A hotkey can open this window while another application remains foreground.
     // WinUI activation alone does not transfer keyboard focus across processes.
-    if (!SetForegroundWindow(overlayHandle) && GetForegroundWindow() != overlayHandle)
+    // Synthetic smoke confirms its selection without input; hidden test launches
+    // cannot acquire foreground permission and do not need keyboard ownership.
+    if (!automaticSelection &&
+        !SetForegroundWindow(overlayHandle) && GetForegroundWindow() != overlayHandle)
     {
       overlay.Close();
       throw new InvalidOperationException("无法将截图选区置于前台，请重试截图。");
     }
-    keyboardSink.Focus(FocusState.Programmatic);
+    if (!automaticSelection) keyboardSink.Focus(FocusState.Programmatic);
     using CancellationTokenRegistration registration = cancellationToken.Register(() =>
     root.DispatcherQueue.TryEnqueue(() => { completion.TrySetCanceled(cancellationToken); overlay.Close(); }));
+    if (automaticSelection)
+    {
+      session.Begin(new(0, 0));
+      session.End(new(desktop.Width, desktop.Height));
+      Render();
+      // 自检只捕获自己的子窗口，不是整个虚拟桌面；几何已在上方校验。
+      // 直接复用确认后的 HWND 移交，不套用真实桌面的变化/候选检查。
+      CompleteSelection(true);
+    }
     try
     {
       return await completion.Task;

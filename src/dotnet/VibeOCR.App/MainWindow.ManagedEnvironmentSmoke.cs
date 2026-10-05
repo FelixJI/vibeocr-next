@@ -96,7 +96,7 @@ public sealed partial class MainWindow
     // 快照前不得冒充任何设备（AC1）。
     await WaitForSmokeDomAsync(
       "(() => { const panel = document.querySelector('.settings-runtime-panel'); return !!panel && " +
-      "panel.textContent.includes('目标推理设备：尚未读取') && " +
+      "panel.textContent.includes('默认运行环境：RapidOCR · CPU（尚未启动）') && " +
       "!panel.querySelector('[role=progressbar]'); })()",
       TimeSpan.FromSeconds(30));
     return new { active_id = list.ActiveId, environments = environments.Select(SmokeEnvironmentEvidence) };
@@ -192,7 +192,7 @@ public sealed partial class MainWindow
   {
     RecordManagedSmokeStage($"select {environment.Name}");
     await SelectSmokeEnvironmentAsync(environment.Id);
-    await SelectSmokeValueAsync("#managed-recipe-select", "rapidocr-cpu");
+    await SelectSmokeValueAsync("#environment-purpose-select", "text");
     await ClickManagedSmokeButtonAsync("预览依赖");
     await WaitForSmokeDomAsync("!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
       "document.querySelector('.runtime-install-plan')?.textContent.includes('rapidocr-cpu') && " +

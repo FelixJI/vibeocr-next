@@ -13,7 +13,17 @@ public sealed record RecognitionInput(
     byte[] Data,
     string MediaType,
     string DisplayName,
-    string Origin, PhysicalRectangle? CaptureBounds = null);
+    string Origin, PhysicalRectangle? CaptureBounds = null)
+{
+    internal ScreenshotCaptureScene? CaptureScene { get; set; }
+    internal ScreenshotCaptureScene? TakeCaptureScene()
+    {
+        ScreenshotCaptureScene? scene = CaptureScene;
+        CaptureScene = null;
+        return scene;
+    }
+    internal void DisposeCaptureScene() => TakeCaptureScene()?.Dispose();
+}
 
 public interface IInputService
 {
@@ -102,15 +112,23 @@ public sealed class InputService : IInputService
             return null;
         }
 
-        return new RecognitionInput(
-            EncodeTopDownBmp(
-                selection.Bgra,
-                selection.Bounds.Width,
-                selection.PixelHeight ?? selection.Bounds.Height,
-                selection.Stride),
-            "image/bmp",
-            origin + ".bmp",
-            origin, selection.Bounds);
+        try
+        {
+            return new RecognitionInput(
+                EncodeTopDownBmp(
+                    selection.Bgra,
+                    selection.Bounds.Width,
+                    selection.PixelHeight ?? selection.Bounds.Height,
+                    selection.Stride),
+                "image/bmp",
+                origin + ".bmp",
+                origin, selection.Bounds) { CaptureScene = selection.CaptureScene };
+        }
+        catch
+        {
+            selection.CaptureScene?.Dispose();
+            throw;
+        }
     }
 
     public Task<RecognitionInput?> ReadDroppedFileAsync(

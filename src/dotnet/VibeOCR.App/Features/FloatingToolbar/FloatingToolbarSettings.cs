@@ -32,11 +32,13 @@ internal sealed record FloatingToolbarSettings(
     bool AutoHide,
     int LingerMs,
     bool HiddenByUser = false,
-    FloatingToolbarTheme Theme = FloatingToolbarTheme.System)
+    FloatingToolbarTheme Theme = FloatingToolbarTheme.System,
+    int PeekPixels = 2)
 {
     public const int DefaultLingerMs = 300;
     public const int MinimumLingerMs = 100;
     public const int MaximumLingerMs = 5000;
+    public const int MaximumPeekPixels = 20;
 
     public static FloatingToolbarSettings Default { get; } =
         new(false, ScreenEdge.Top, true, DefaultLingerMs, false, FloatingToolbarTheme.System);
@@ -64,7 +66,8 @@ internal sealed record FloatingToolbarSettings(
                 AutoHide: ReadValue(node, "auto_hide", true),
                 LingerMs: ClampLinger(ReadValue(node, "linger_ms", DefaultLingerMs)),
                 HiddenByUser: ReadValue(node, "hidden_by_user", false),
-                Theme: ReadTheme(node));
+                Theme: ReadTheme(node),
+                PeekPixels: Math.Clamp(ReadValue(node, "peek_pixels", 2), 1, MaximumPeekPixels));
         }
         catch (Exception error) when (
             error is JsonException or KeyNotFoundException or FormatException
@@ -87,6 +90,7 @@ internal sealed record FloatingToolbarSettings(
             ["linger_ms"] = ClampLinger(settings.LingerMs),
             ["hidden_by_user"] = settings.HiddenByUser,
             ["theme"] = ThemeName(settings.Theme),
+            ["peek_pixels"] = Math.Clamp(settings.PeekPixels, 1, MaximumPeekPixels),
         };
         AppSettingsStore.Write(layout, root);
     }

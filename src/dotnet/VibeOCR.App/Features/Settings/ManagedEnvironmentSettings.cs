@@ -63,10 +63,7 @@ public sealed class ManagedEnvironmentSettings(
         Plan = await manager.PreviewEnvironmentInstallAsync(
             environmentId, recipe,
             sourceId is null ? null : [sourceId], cancellationToken);
-        string sourceSummary = Plan.RequestedSourceIds is null
-            ? $"继承当前配置（生效：{string.Join("、", Plan.SourceIds)}）"
-            : string.Join("、", Plan.SourceIds);
-        Status = $"已预览 {Plan.Recipe} 锁定配方；来源：{sourceSummary}。确认后才会安装。";
+        Status = $"已预览 {Plan.Recipe} 锁定配方；下载来源：{string.Join("、", Plan.SourceIds)}。确认后才会安装。";
     }, cancellationToken);
 
     /// <summary>
@@ -176,10 +173,14 @@ public sealed class ManagedEnvironmentSettings(
         Compatibility = null;
         await ApplyRunningEvidenceAsync(cancellationToken);
         bool touchesModel = modelSourceId is not null;
-        bool targetRunning = environmentId is not null &&
-            currentSession?.Invoke() is { } session && session.EnvironmentId == environmentId;
-        string scope = environmentId is null ? "全局默认来源" : "该环境的来源 override";
-        Status = $"已保存{scope}；仅影响后续安装与继承，不会下载或安装任何内容。";
+        // 全局保存（environmentId=null）也会改变运行中环境的模型来源解析，
+        // 只要有活动会话就如实提示下次启动生效。
+        bool targetRunning = currentSession?.Invoke() is { } session &&
+            (environmentId is null || session.EnvironmentId == environmentId);
+        // 单产品语义：来源仅用于安装依赖与下载模型；全局保存由 Runtime
+        // 原子清除各环境旧 override，界面所示即实际解析值。
+        string scope = environmentId is null ? "下载来源已保存并统一所有环境" : "该环境的来源已保存";
+        Status = $"{scope}；仅用于安装依赖与下载模型，不会下载或安装任何内容。";
         if (touchesModel && targetRunning)
             Status += "模型来源将在该环境下次启动时生效，不会改变当前运行中的服务。";
     }, cancellationToken);
@@ -196,10 +197,14 @@ public sealed class ManagedEnvironmentSettings(
         Plan = null;
         Compatibility = null;
         await ApplyRunningEvidenceAsync(cancellationToken);
-        bool targetRunning = environmentId is not null &&
-            currentSession?.Invoke() is { } session && session.EnvironmentId == environmentId;
-        string scope = environmentId is null ? "全局默认来源" : "该环境的来源 override";
-        Status = $"已保存{scope}；仅影响后续安装与继承，不会下载或安装任何内容。";
+        // 全局保存（environmentId=null）也会改变运行中环境的模型来源解析，
+        // 只要有活动会话就如实提示下次启动生效。
+        bool targetRunning = currentSession?.Invoke() is { } session &&
+            (environmentId is null || session.EnvironmentId == environmentId);
+        // 单产品语义：来源仅用于安装依赖与下载模型；全局保存由 Runtime
+        // 原子清除各环境旧 override，界面所示即实际解析值。
+        string scope = environmentId is null ? "下载来源已保存并统一所有环境" : "该环境的来源已保存";
+        Status = $"{scope}；仅用于安装依赖与下载模型，不会下载或安装任何内容。";
         if (targetRunning)
             Status += "模型来源将在该环境下次启动时生效，不会改变当前运行中的服务。";
     }, cancellationToken);

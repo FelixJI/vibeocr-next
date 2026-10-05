@@ -134,7 +134,11 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         RunInputAsync(ct => _inputs.ReadDroppedFileAsync(path, ct), cancellationToken,
             recognize: false, persistCurrentInput: true);
 
-    public void ReleaseInput() => CurrentInput = null;
+    public void ReleaseInput()
+    {
+        CurrentInput?.DisposeCaptureScene();
+        CurrentInput = null;
+    }
 
     public Task CaptureScreenshotSessionAsync(CancellationToken cancellationToken) =>
         RunInputAsync(_inputs.CaptureScreenAsync, cancellationToken,
@@ -234,10 +238,18 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
                 return;
             }
 
+            if (generation != Volatile.Read(ref _generation))
+            {
+                input.DisposeCaptureScene();
+                return;
+            }
+            if (recognize) input.DisposeCaptureScene();
+
             if (generation == Volatile.Read(ref _generation))
             {
                 if (persistCurrentInput)
                 {
+                    if (!ReferenceEquals(CurrentInput, input)) CurrentInput?.DisposeCaptureScene();
                     CurrentInput = input;
                 }
                 _result = null;

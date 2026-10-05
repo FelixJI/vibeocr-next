@@ -112,6 +112,59 @@ _RECIPE_IMPORT_PROBES = {
     "rapidocr+mineru-cuda": "from mineru.parser.api_server import create_app; from rapidocr import RapidOCR",
 }
 
+# 前后端同源一体发布后环境目录不需要 UUID：新环境目录用名称（用户创建）
+# 或用途/设备（默认环境）派生的可读 slug，碰撞追加 -2/-3 后缀；历史
+# uuid 记录原样兼容，安装事务、manifest 与回滚语义不变。
+_ENVIRONMENT_DIRECTORY_FORBIDDEN = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+_ENVIRONMENT_DIRECTORY_MAX = 48
+# Windows 保留设备名 + 管理存储自身的固定目录（python-base 解释器池、
+# legacy 运行时）不可被环境目录占用。
+_ENVIRONMENT_RESERVED_DIRECTORIES = frozenset(
+    {
+        "legacy",
+        "python-base",
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        *(f"com{index}" for index in range(1, 10)),
+        *(f"lpt{index}" for index in range(1, 10)),
+    }
+)
+# 默认环境的用途/设备即目录名：RapidOCR + CPU。
+_DEFAULT_ENVIRONMENT_SLUG = "rapidocr-cpu"
+
+
+def _is_reserved_directory_name(value: str) -> bool:
+    """目录名是否占用管理存储固定目录或 Windows 保留设备名。"""
+    stem = value.split(".", 1)[0].strip(" .").lower()
+    return not stem or stem in _ENVIRONMENT_RESERVED_DIRECTORIES
+
+
+def _environment_directory_slug(name: str) -> str | None:
+    """从环境名称派生安全可读的存储目录名；无法派生时返回 None。"""
+    slug = _ENVIRONMENT_DIRECTORY_FORBIDDEN.sub("-", name.strip())
+    slug = re.sub(r"\s+", " ", slug).strip(" .")
+    if len(slug) > _ENVIRONMENT_DIRECTORY_MAX:
+        slug = slug[:_ENVIRONMENT_DIRECTORY_MAX].strip(" .")
+    return slug or None
+
+
+def _is_valid_environment_id(value: str) -> bool:
+    """环境 id 接受历史 uuid 与可读 slug 两种形式（slug 须是安全目录名）。"""
+    if re.fullmatch(r"[0-9a-f]{32}", value):
+        return True
+    if (
+        not value.strip()
+        or len(value) > _ENVIRONMENT_DIRECTORY_MAX + len("-100")
+        or value != value.strip()
+        or value != value.strip(" .")
+        or _ENVIRONMENT_DIRECTORY_FORBIDDEN.search(value)
+        or _is_reserved_directory_name(value)
+    ):
+        return False
+    return True
+
 
 class ManagedEnvironmentError(RuntimeInstallError):
     """A named-environment operation cannot safely complete."""
@@ -243,7 +296,11 @@ class ManagedEnvironmentStore:
             "PYTHONNOUSERSITE": "1",
             "PYTHONUTF8": "1",
         }
-        code_root = self.product_root / "runtime" / "backend" / "runtime-code"
+        # runtime-code 与 runtime-manifest 由同一构建步骤同目录产出；
+        # Velopack current/ 布局下 product_root 是 bundle 根（只有
+        # current/packages/state），不能从 product_root 硬拼，以已验证的
+        # manifest 位置为权威锚点（与 _install_scope 取 wheel 同一模式）。
+        code_root = self.manifest.path.parent / "runtime-code"
         if self.layout_manifest or code_root.is_dir():
             for relative in (
                 "vibeocr/runtime/__init__.py",
@@ -298,8 +355,8 @@ class ManagedEnvironmentStore:
     ) -> dict[str, str | None]:
         """全局默认 → 环境override 的每 kind 解析；未覆盖 kind 回退产品默认。
 
-        默认依赖包源是 TUNA，PaddleOCR 与 MinerU 各自默认 Hugging Face。
-        旧共享模型偏好在读取时展开；原生 downloader 的实际端点仍未知。
+        默认依赖包源是 TUNA，PaddleOCR 与 MinerU 各自默认 ModelScope。
+        来源只代表安装依赖与下载模型；旧共享模型偏好在读取时展开。
         """
         merged: dict[str, str] = {}
         merged.update(self._kind_source_map(data.get("default_source_ids") or ()))
@@ -424,6 +481,14 @@ class ManagedEnvironmentStore:
 
         只写配置：不下载、不安装、不重启；同环境在途操作会被 target
         operation lock 拒绝，保存 A 不会修改 B。
+
+        显式保存全局默认（``env_id is None``）时，本次提交的 kinds 会
+        同步清除所有环境的旧 override：新 UI 只有一个全局设置入口，
+        残留的旧 override 会隐性遮蔽新全局默认。清除与全局保存在同一
+        次 store 锁内原子提交，``source_config_revision`` 只递增一次，
+        旧预览随之失效；在途安装的来源已在操作启动时冻结，不受影响。
+        未知来源 id 无法判定 kind，保留并沿用旧标注语义。环境级
+        ``env_id`` 接口保留供旧数据/兼容；未显式提交的 kinds 不动旧配置。
         """
         catalog = {source["id"]: source for source in self._source_catalog()}
         requested: dict[str, str | None | object] = {
@@ -475,6 +540,29 @@ class ManagedEnvironmentStore:
                     current.pop(kind, None)
                 elif isinstance(source_id, str):
                     current[kind] = source_id
+            if env_id is None:
+                submitted_kinds = set(requested)
+                kind_by_id = {
+                    source_id: source["kind"] for source_id, source in catalog.items()
+                }
+                for record in data["environments"].values():
+                    raw_overrides = record.get("override_source_ids")
+                    if not raw_overrides:
+                        continue
+                    # 历史共享模型 id（裸 huggingface/modelscope）先展开成
+                    # 每引擎标准形式再判 kind，否则会逃过 submitted kinds
+                    # 清除并在读取时继续遮蔽新全局默认；保存也用标准形式。
+                    expanded = list(expand_legacy_model_sources(raw_overrides))
+                    kept = [
+                        source_id
+                        for source_id in expanded
+                        if kind_by_id.get(source_id) not in submitted_kinds
+                    ]
+                    if kept != list(raw_overrides):
+                        if kept:
+                            record["override_source_ids"] = kept
+                        else:
+                            record.pop("override_source_ids", None)
             merged_ids = tuple(
                 source["id"]
                 for source in self._source_catalog()
@@ -499,7 +587,7 @@ class ManagedEnvironmentStore:
 
     @contextmanager
     def _target_operation(self, env_id: str) -> Iterator[None]:
-        if env_id != "legacy" and not re.fullmatch(r"[0-9a-f]{32}", env_id):
+        if env_id != "legacy" and not _is_valid_environment_id(env_id):
             raise ManagedEnvironmentError("unknown environment")
         lock = RuntimeStoreLock(
             self.paths.locks_root / "environment-operations" / f"{env_id}.lock",
@@ -680,7 +768,7 @@ class ManagedEnvironmentStore:
         for env_id, record in environments.items():
             if (
                 not isinstance(env_id, str)
-                or (env_id != "legacy" and not re.fullmatch(r"[0-9a-f]{32}", env_id))
+                or (env_id != "legacy" and not _is_valid_environment_id(env_id))
                 or not isinstance(record, dict)
                 or set(record)
                 - {
@@ -1214,6 +1302,10 @@ class ManagedEnvironmentStore:
 
         初始化状态独立保存，避免改变旧版仍需读取的注册表格式。独立锁
         覆盖创建/安装，store 锁只覆盖注册表提交；完成后不自动重建。
+
+        默认环境固定为 RapidOCR · CPU，依赖必须来自随包离线 base pack：
+        缺离线包代表发布闭包错误，保持 fail closed，不静默改用网络源。
+        只有真实安装或探针失败才保留可重试的失败证据。
         """
         marker = self.paths.state_root / "default-environment.json"
         with RuntimeStoreLock(self.paths.locks_root / "default-environment.lock"):
@@ -1227,9 +1319,7 @@ class ManagedEnvironmentStore:
                         state["environment_id"] is not None
                         and (
                             not isinstance(state["environment_id"], str)
-                            or not re.fullmatch(
-                                r"[0-9a-f]{32}", state["environment_id"]
-                            )
+                            or not _is_valid_environment_id(state["environment_id"])
                         )
                     )
                 ):
@@ -1240,7 +1330,7 @@ class ManagedEnvironmentStore:
                 with RuntimeStoreLock(self._lock):
                     existing = bool(self._read()["environments"])
                 state = {
-                    "environment_id": None if existing else uuid4().hex,
+                    "environment_id": (None if existing else _DEFAULT_ENVIRONMENT_SLUG),
                     "created": existing,
                 }
                 _atomic_json(marker, state)
@@ -1280,6 +1370,34 @@ class ManagedEnvironmentStore:
         assert created is not None
         return created
 
+    def _new_environment_id(self, name: str, data: dict) -> str:
+        """为新环境选择可读目录 id；永不回退 uuid。
+
+        无法从名称派生时用 ``environment``；保留目录名加 ``environment-``
+        前缀；碰撞按 -2/-3 顺序递增并截断保持长度有界。目录名在
+        Windows 大小写不敏感：与既有 id（casefold）与磁盘现状双重判重。
+        """
+        base = _environment_directory_slug(name) or "environment"
+        if _is_reserved_directory_name(base):
+            base = f"environment-{base}"
+        base = base[:_ENVIRONMENT_DIRECTORY_MAX].strip(" .") or "environment"
+        taken = {record_id.casefold() for record_id in data["environments"]}
+        candidate = base
+        suffix = 1
+        while (
+            candidate.casefold() in taken
+            or _is_reserved_directory_name(candidate)
+            or (self.root / candidate).exists()
+        ):
+            suffix += 1
+            tail = f"-{suffix}"
+            trimmed = (
+                base[: _ENVIRONMENT_DIRECTORY_MAX - len(tail)].strip(" .")
+                or "environment"
+            )
+            candidate = f"{trimmed}{tail}"
+        return candidate
+
     def _create(
         self, name: str, *, as_default: bool = False, environment_id: str | None = None
     ) -> dict | None:
@@ -1295,7 +1413,7 @@ class ManagedEnvironmentStore:
                 for item in data["environments"].values()
             ):
                 raise ManagedEnvironmentError("environment name already exists")
-            env_id = environment_id or uuid4().hex
+            env_id = environment_id or self._new_environment_id(name, data)
             root = self._safe_path(
                 {
                     "id": env_id,
@@ -1481,9 +1599,12 @@ class ManagedEnvironmentStore:
                 and current != recipe
                 and not (
                     current in {"rapidocr-cpu", "mineru-cpu"}
-                    and recipe == "rapidocr+mineru-cpu"
+                    and recipe in {"rapidocr+mineru-cpu", "rapidocr+mineru-cuda"}
                 )
             ):
+                # 单 venv 同时装 base 与 Paddle 隔离锁会让 opencv-python 与
+                # opencv-contrib-python 冲突（旧安装器为此用独立解释器），
+                # 未绑定的组合如实拒绝，不声称可用。
                 raise ManagedEnvironmentError(
                     "engine combination has no compatible locked recipe; "
                     "create another environment"
@@ -1698,8 +1819,8 @@ class ManagedEnvironmentStore:
         recipe: str,
         source_ids: tuple[str, ...] | None = None,
     ) -> dict:
-        if not re.fullmatch(r"[0-9a-f]{32}", plan_id) or not re.fullmatch(
-            r"[0-9a-f]{32}", env_id
+        if not re.fullmatch(r"[0-9a-f]{32}", plan_id) or not _is_valid_environment_id(
+            env_id
         ):
             raise RuntimeInstallPlanStale("invalid environment plan")
         requested_ids = None if source_ids is None else tuple(sorted(set(source_ids)))

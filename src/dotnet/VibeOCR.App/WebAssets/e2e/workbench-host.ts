@@ -10,6 +10,7 @@ import type {
 export async function mountHost(
   page: Page,
   snapshot: AppSnapshot,
+  entryPath = "/",
 ): Promise<void> {
   await page.addInitScript((initial) => {
     let revision = initial.revision;
@@ -86,8 +87,12 @@ export async function mountHost(
       },
     });
   }, snapshot);
-  await page.goto("/");
-  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+  await page.goto(entryPath);
+  if (entryPath.includes("?scene=1"))
+    await expect(
+      page.getByRole("toolbar", { name: "图片编辑工具" }),
+    ).toBeVisible();
+  else await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
 }
 
 type TestHostWindow = Window & {

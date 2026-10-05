@@ -6,9 +6,9 @@ namespace VibeOCR.App;
 public sealed partial class MainWindow
 {
   /// <summary>
-  /// #105 来源配置 smoke：真实 WebView2 公开 UI 从两个空环境完成
-  /// 选源 → 预览 → 确认 → 取消（合成中断）→ 重新预览，
-  /// 并验证另一环境的配置与状态不变；全程无 Supervisor、无完整安装。
+  /// #105 来源设置 smoke（收敛后的简单设置）：真实 WebView2 公开 UI 从两个
+  /// 空环境完成统一来源保存 → 预览 → 确认 → 取消（合成中断）→ 重新预览，
+  /// 并验证另一环境的解析与状态不变；全程无 Supervisor、无完整安装。
   /// </summary>
   private async Task<object> CompleteSourceSettingsSmokeAsync()
   {
@@ -27,75 +27,58 @@ public sealed partial class MainWindow
       throw new InvalidOperationException(
         "Source smoke requires two fresh empty environments without a service.");
 
-    RecordManagedSmokeStage("catalog names");
-    // 目录展示名（非 raw id）出现在公开下拉中。
+    RecordManagedSmokeStage("simple source setting");
+    // 收敛后的简单设置：依赖与模型各一个全局选择；目录展示名直出；
+    // 模型只列两类引擎共同支持的提供方（无百度 BOS），不再渲染单环境
+    // override 或第二处“全局默认来源”入口，也没有按次下载源选择。
     await WaitForSmokeDomAsync(
-      "document.querySelector('#managed-package-source-select')?.textContent.includes('TUNA PyPI 镜像') === true && " +
-      "document.querySelector('#managed-package-source-select')?.textContent.includes('PyPI 官方源') === true",
+      "document.querySelector('#settings-package-source')?.textContent.includes('TUNA PyPI 镜像') === true && " +
+      "document.querySelector('#settings-package-source')?.textContent.includes('PyPI 官方源') === true && " +
+      "document.querySelector('#settings-model-source')?.textContent.includes('魔搭') === true && " +
+      "document.querySelector('#settings-model-source')?.textContent.includes('百度 BOS') === false",
+      TimeSpan.FromSeconds(30));
+    await WaitForSmokeDomAsync(
+      "Array.from(document.querySelector('#settings-package-source').options).every(o => o.value !== '') && " +
+      "Array.from(document.querySelector('#settings-model-source').options).every(o => o.value !== '') && " +
+      "document.querySelector('details.managed-source-config') === null && " +
+      "document.querySelector('details.managed-source-defaults') === null && " +
+      "document.querySelector('#managed-recipe-select') === null && " +
+      "document.querySelector('#managed-package-source-select') === null",
+      TimeSpan.FromSeconds(30));
+    // 新状态的 Runtime 默认与界面默认必须同时为 TUNA / 魔搭。
+    if (ResolvedSmokeSource(pair[0], "paddleocr_model_registry") != "paddleocr-modelscope" ||
+        ResolvedSmokeSource(pair[0], "mineru_model_registry") != "mineru-modelscope")
+      throw new InvalidOperationException("Runtime model defaults must use ModelScope.");
+    await WaitForSmokeDomAsync(
+      "document.querySelector('#settings-package-source')?.value === 'tuna-pypi' && " +
+      "document.querySelector('#settings-model-source')?.value === 'modelscope'",
       TimeSpan.FromSeconds(30));
 
-    await WaitForSmokeDomAsync(
-      "document.querySelector('#managed-global-package-source')?.value === 'tuna-pypi' && " +
-      "Array.from(document.querySelector('#managed-global-package-source').options).every(o => o.value !== '') && " +
-      "document.querySelector('#managed-global-paddleocr_model_registry')?.textContent.includes('百度 BOS') === true && " +
-      "document.querySelector('#managed-global-mineru_model_registry')?.textContent.includes('百度 BOS') === false",
-      TimeSpan.FromSeconds(30));
-
-    RecordManagedSmokeStage("global default");
-    // 全局默认 → PyPI：A/B 均继承全局，且不触发下载/安装/服务。
-    await WaitForSmokeDomAsync("(() => { const d=document.querySelector('details.managed-source-defaults'); if(!d)return false;if(!d.open)d.querySelector('summary').click();return d.open;})()", TimeSpan.FromSeconds(30));
-    await SelectSmokeValueAsync("#managed-global-package-source", "pypi");
-    await ClickManagedSmokeButtonAsync("保存全局默认来源");
-    ManagedEnvironmentList globalSaved = await WaitForSmokeSnapshotAsync(list =>
-      (list.DefaultSourceIds ?? []).Order().SequenceEqual(new[] { "pypi", "paddleocr-huggingface", "mineru-huggingface" }.Order()) &&
+    RecordManagedSmokeStage("save unified sources");
+    // 保存统一来源 → PyPI + 魔搭：所有环境解析跟随（无残留 override），
+    // 且不触发下载/安装/服务。
+    await SelectSmokeValueAsync("#settings-package-source", "pypi");
+    await SelectSmokeValueAsync("#settings-model-source", "modelscope");
+    await ClickManagedSmokeButtonAsync("保存下载来源");
+    await WaitForSmokeSnapshotAsync(list =>
+      (list.DefaultSourceIds ?? []).Order().SequenceEqual(
+        new[] { "pypi", "paddleocr-modelscope", "mineru-modelscope" }.Order()) &&
       list.Environments.All(item =>
         ResolvedSmokeSource(item, "package_index") == "pypi" &&
-        ResolvedSmokeOrigin(item, "package_index") == "global_default"),
+        ResolvedSmokeSource(item, "paddleocr_model_registry") == "paddleocr-modelscope" &&
+        ResolvedSmokeSource(item, "mineru_model_registry") == "mineru-modelscope" &&
+        (item.OverrideSourceIds ?? []).Count == 0),
       TimeSpan.FromSeconds(30));
     if (smokeInstallAttempts!() != 0 || smokeInferenceAttached!())
-      throw new InvalidOperationException("Saving source defaults installed or started anything.");
-
-    RecordManagedSmokeStage("environment override");
-    // 环境 B 覆盖依赖包来源 → TUNA；A 的解析与状态保持不变。
-    await SelectSmokeEnvironmentAsync(pair[1].Id);
-    await WaitForSmokeDomAsync("(() => { const d=document.querySelector('details.managed-source-config'); if(!d)return false;if(!d.open)d.querySelector('summary').click();return d.open;})()", TimeSpan.FromSeconds(30));
-    await SelectSmokeValueAsync("#managed-env-package-source", "tuna-pypi");
-    await ClickManagedSmokeButtonAsync("保存本环境来源");
-    ManagedEnvironmentList overrideSaved = await WaitForSmokeSnapshotAsync(list =>
-      ResolvedSmokeSource(BySmokeId(list, pair[1].Id), "package_index") == "tuna-pypi" &&
-      ResolvedSmokeOrigin(BySmokeId(list, pair[1].Id), "package_index") == "environment_override" &&
-      ResolvedSmokeSource(BySmokeId(list, pair[0].Id), "package_index") == "pypi",
-      TimeSpan.FromSeconds(30));
-    await SelectSmokeValueAsync("#managed-env-paddleocr_model_registry", "paddleocr-bos");
-    await SelectSmokeValueAsync("#managed-env-mineru_model_registry", "mineru-modelscope");
-    await ClickManagedSmokeButtonAsync("保存本环境来源");
-    await WaitForSmokeSnapshotAsync(list =>
-      ResolvedSmokeSource(BySmokeId(list, pair[1].Id), "paddleocr_model_registry") == "paddleocr-bos" &&
-      ResolvedSmokeSource(BySmokeId(list, pair[1].Id), "mineru_model_registry") == "mineru-modelscope",
-      TimeSpan.FromSeconds(30));
-    // Clear only PaddleOCR: MinerU must keep its independent override.
-    await SelectSmokeValueAsync("#managed-env-paddleocr_model_registry", "");
-    await ClickManagedSmokeButtonAsync("保存本环境来源");
-    overrideSaved = await WaitForSmokeSnapshotAsync(list =>
-      ResolvedSmokeSource(BySmokeId(list, pair[1].Id), "paddleocr_model_registry") == "paddleocr-huggingface" &&
-      ResolvedSmokeOrigin(BySmokeId(list, pair[1].Id), "paddleocr_model_registry") == "global_default" &&
-      ResolvedSmokeSource(BySmokeId(list, pair[1].Id), "mineru_model_registry") == "mineru-modelscope" &&
-      ResolvedSmokeOrigin(BySmokeId(list, pair[1].Id), "mineru_model_registry") == "environment_override",
-      TimeSpan.FromSeconds(30));
-    ManagedEnvironment beforePreview = BySmokeId(overrideSaved, pair[1].Id);
-    if (beforePreview.Revision != pair[1].Revision || beforePreview.Status != "empty" ||
-        (BySmokeId(overrideSaved, pair[0].Id).OverrideSourceIds ?? []).Count != 0)
-      throw new InvalidOperationException("Saving B's override mutated A or B's revision.");
+      throw new InvalidOperationException("Saving unified sources installed or started anything.");
 
     RecordManagedSmokeStage("preview follow");
-    // 空环境 A、跟随配置预览：计划显示请求源=跟随、生效源=PyPI。
+    // 空环境 A、统一选择默认“文字识别 · CPU”：预览跟随已保存的统一来源。
     await SelectSmokeEnvironmentAsync(pair[0].Id);
-    await SelectSmokeValueAsync("#managed-recipe-select", "rapidocr-cpu");
-    await SelectSmokeValueAsync("#managed-package-source-select", "");
     await ClickManagedSmokeButtonAsync("预览依赖");
     await WaitForSmokeDomAsync(
-      "document.querySelector('.runtime-install-plan')?.textContent.includes('请求源：跟随配置') === true && " +
-      "document.querySelector('.runtime-install-plan')?.textContent.includes('生效源：PyPI 官方源') === true",
+      "document.querySelector('.runtime-install-plan')?.textContent.includes('下载来源：PyPI 官方源') === true && " +
+      "document.querySelector('.runtime-install-plan')?.textContent.includes('ModelScope') === true",
       TimeSpan.FromMinutes(2));
 
     RecordManagedSmokeStage("confirm then cancel");
@@ -139,16 +122,15 @@ public sealed partial class MainWindow
       throw new InvalidOperationException(
         "Cancelled install changed the environment beyond the durable failure record.");
     if (!(interruptedFailure.EffectiveSourceIds ?? []).Order().SequenceEqual(
-          new[] { "pypi", "paddleocr-huggingface", "mineru-huggingface" }.Order()) ||
+          new[] { "pypi", "paddleocr-modelscope", "mineru-modelscope" }.Order()) ||
         interruptedFailure.RequestedSourceIds is not null)
       throw new InvalidOperationException(
         "Cancelled install lost its frozen requested/effective source evidence.");
 
     RecordManagedSmokeStage("re-preview keeps evidence");
-    await SelectSmokeValueAsync("#managed-package-source-select", "");
     await ClickManagedSmokeButtonAsync("预览依赖");
     await WaitForSmokeDomAsync(
-      "document.querySelector('.runtime-install-plan')?.textContent.includes('请求源：跟随配置') === true",
+      "document.querySelector('.runtime-install-plan')?.textContent.includes('下载来源：PyPI 官方源') === true",
       TimeSpan.FromMinutes(2));
     ManagedEnvironmentList repreviewed = await WaitForSmokeSnapshotAsync(list =>
       JsonElement.DeepEquals(
@@ -156,17 +138,18 @@ public sealed partial class MainWindow
         JsonSerializer.SerializeToElement(interruptedFailure)),
       TimeSpan.FromSeconds(30));
     ManagedEnvironment finalB = BySmokeId(repreviewed, pair[1].Id);
-    if (finalB.Revision != beforePreview.Revision || finalB.Status != "empty" ||
+    if (finalB.Revision != pair[1].Revision || finalB.Status != "empty" ||
         finalB.LastInstallFailure is not null ||
-        ResolvedSmokeSource(finalB, "package_index") != "tuna-pypi" ||
-        ResolvedSmokeOrigin(finalB, "package_index") != "environment_override" ||
-        ResolvedSmokeSource(finalB, "paddleocr_model_registry") != "paddleocr-huggingface" ||
-        ResolvedSmokeSource(finalB, "mineru_model_registry") != "mineru-modelscope")
+        ResolvedSmokeSource(finalB, "package_index") != "pypi" ||
+        ResolvedSmokeSource(finalB, "paddleocr_model_registry") != "paddleocr-modelscope" ||
+        ResolvedSmokeSource(finalB, "mineru_model_registry") != "mineru-modelscope" ||
+        (finalB.OverrideSourceIds ?? []).Count != 0)
       throw new InvalidOperationException("Environment B changed during A's preview/cancel cycle.");
 
     return new
     {
       default_source_ids = repreviewed.DefaultSourceIds ?? [],
+      unified_model_provider = "modelscope",
       a = new
       {
         id = pair[0].Id,
@@ -181,10 +164,9 @@ public sealed partial class MainWindow
         revision = finalB.Revision,
         status = finalB.Status,
         override_source_ids = finalB.OverrideSourceIds ?? [],
+        resolved_package = ResolvedSmokeSource(finalB, "package_index"),
         resolved_paddleocr_model = ResolvedSmokeSource(finalB, "paddleocr_model_registry"),
         resolved_mineru_model = ResolvedSmokeSource(finalB, "mineru_model_registry"),
-        resolved_package = ResolvedSmokeSource(finalB, "package_index"),
-        resolved_package_origin = ResolvedSmokeOrigin(finalB, "package_index"),
       },
       a_failure = new
       {

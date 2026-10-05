@@ -8,6 +8,13 @@ namespace VibeOCR.App.Tests;
 
 public sealed class FloatingToolbarSettingsTests : IDisposable
 {
+    [Fact]
+    public void PeekPixelsRoundTripPreservesUserChoice()
+    {
+        PortableLayout layout = CreateLayout();
+        FloatingToolbarSettings.Save(layout, FloatingToolbarSettings.Default with { PeekPixels = 8 });
+        Assert.Equal(8, FloatingToolbarSettings.Load(layout).PeekPixels);
+    }
     private readonly string _root = Path.Combine(
         Path.GetTempPath(), $"vibeocr-floating-toolbar-{Guid.NewGuid():N}");
 

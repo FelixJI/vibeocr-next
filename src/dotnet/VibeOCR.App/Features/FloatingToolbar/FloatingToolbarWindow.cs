@@ -75,6 +75,8 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
   private FloatingToolbarTheme _theme = FloatingToolbarTheme.System;
   private bool _disposed;
   private bool _popupOpenPending;
+  private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _pointerTimer;
+  private bool? _pointerOver;
 
   public event EventHandler? PointerEntered;
 
@@ -87,6 +89,17 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
   public event EventHandler<FloatingToolbarCommand>? CommandInvoked;
 
   public bool IsVisible { get; private set; }
+
+  public bool IsPointerOver
+  {
+    get
+    {
+      if (!IsVisible || !GetCursorPos(out PointL point)) return false;
+      PhysicalRectangle bounds = GetBounds();
+      return point.X >= bounds.X && point.X < bounds.Right
+        && point.Y >= bounds.Y && point.Y < bounds.Bottom;
+    }
+  }
 
   /// <summary>原生窗口句柄，供自检注入消息。</summary>
   public nint Handle => _handle;
@@ -106,6 +119,11 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     AddToolWindowStyle();
     _messages = new WindowMessageService(_handle);
     _messages.MessageHandled += OnMessageHandled;
+    // Popup 的 XAML 进入/离开事件可能缺失或来自子控件；仅可见期间校验
+    // 真实屏幕坐标，隐藏、截图避让及释放时停止，不在后台轮询。
+    _pointerTimer = _window.DispatcherQueue.CreateTimer();
+    _pointerTimer.Interval = TimeSpan.FromMilliseconds(100);
+    _pointerTimer.Tick += (_, _) => UpdatePointerPresence();
     // 主题跟随：窗口生命周期内各订阅一次；系统线程回调封送 UI 线程。
     _root.ActualThemeChanged += OnRootActualThemeChanged;
     _themeSettings.Changed += OnSystemHighContrastChanged;
@@ -167,6 +185,8 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
         checked(position.Y + bounds.Y - origin.Y)));
     ShowWindow(_handle, SwShowNoActivate);
     IsVisible = true;
+    _pointerOver = null;
+    _pointerTimer.Start();
     OpenPopupWhenHostReady();
   }
 
@@ -234,6 +254,8 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
   public void Hide()
   {
     ObjectDisposedException.ThrowIf(_disposed, this);
+    _pointerTimer.Stop();
+    _pointerOver = null;
     CancelPendingPopupOpen();
     _popup.IsOpen = false;
     ShowWindow(_handle, SwHide);
@@ -338,6 +360,7 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     }
 
     _disposed = true;
+    _pointerTimer.Stop();
     CancelPendingPopupOpen();
     _popup.IsOpen = false;
     _themeSettings.Changed -= OnSystemHighContrastChanged;
@@ -388,8 +411,8 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
         "\uE70E", "隐藏悬浮栏", FloatingToolbarCommand.DismissToolbar));
     _root.Children.Add(bar);
 
-    _root.PointerEntered += (_, _) => PointerEntered?.Invoke(this, EventArgs.Empty);
-    _root.PointerExited += (_, _) => PointerExited?.Invoke(this, EventArgs.Empty);
+    _root.PointerEntered += (_, _) => UpdatePointerPresence();
+    _root.PointerExited += (_, _) => UpdatePointerPresence();
     _grip.PointerPressed += OnGripPointerPressed;
     _grip.PointerMoved += OnGripPointerMoved;
     _grip.PointerReleased += OnGripPointerReleased;
@@ -421,6 +444,16 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     ToolTipService.SetToolTip(button, tooltip);
     button.Click += (_, _) => CommandInvoked?.Invoke(this, command);
     return button;
+  }
+
+  private void UpdatePointerPresence()
+  {
+    if (_disposed || !IsVisible) return;
+    bool over = IsPointerOver;
+    if (_pointerOver == over) return;
+    _pointerOver = over;
+    if (over) PointerEntered?.Invoke(this, EventArgs.Empty);
+    else PointerExited?.Invoke(this, EventArgs.Empty);
   }
 
   private void OnGripPointerPressed(object sender, PointerRoutedEventArgs args)

@@ -29,7 +29,7 @@ public static class ScreenEdgeGeometry
         int thickness = SensorThicknessPx)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(thickness, 1);
-        int clamped = Math.Min(thickness, monitor.Width);
+        int clamped = Math.Min(thickness, monitor.Height);
         return edge switch
         {
             ScreenEdge.Top => new PhysicalRectangle(
@@ -37,10 +37,10 @@ public static class ScreenEdgeGeometry
             ScreenEdge.Bottom => new PhysicalRectangle(
                 monitor.X, monitor.Bottom - clamped, monitor.Width, clamped),
             ScreenEdge.Left => new PhysicalRectangle(
-                monitor.X, monitor.Y, Math.Min(thickness, monitor.Height), monitor.Height),
+                monitor.X, monitor.Y, Math.Min(thickness, monitor.Width), monitor.Height),
             ScreenEdge.Right => new PhysicalRectangle(
-                monitor.Right - Math.Min(thickness, monitor.Height), monitor.Y,
-                Math.Min(thickness, monitor.Height), monitor.Height),
+                monitor.Right - Math.Min(thickness, monitor.Width), monitor.Y,
+                Math.Min(thickness, monitor.Width), monitor.Height),
             _ => throw new ArgumentOutOfRangeException(nameof(edge), edge, null),
         };
     }

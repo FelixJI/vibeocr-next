@@ -49,8 +49,42 @@ public sealed class FloatingToolbarControllerTests
 
         Assert.Equal(FloatingToolbarController.ToolbarState.Hidden, controller.State);
         Assert.True(_sensor.IsArmed);
-        Assert.Equal(new PhysicalRectangle(0, 0, 1920, 2), _sensor.ArmedBounds);
+        Assert.Equal(new PhysicalRectangle(860, 0, 200, 2), _sensor.ArmedBounds);
         Assert.False(_view.IsVisible);
+    }
+
+    [Fact]
+    public void ExplicitShowWithoutPointerEntryStillRetracts()
+    {
+        using FloatingToolbarController controller = CreateController();
+        controller.Start();
+        controller.Show();
+        Assert.True(_timer.IsRunning);
+        _timer.Fire();
+        Assert.Equal(FloatingToolbarController.ToolbarState.Hidden, controller.State);
+    }
+
+    [Fact]
+    public void PendingRetractionChecksActualPointerBeforeHiding()
+    {
+        using FloatingToolbarController controller = CreateController();
+        controller.Start();
+        controller.Show();
+        _view.IsPointerOver = true;
+        _timer.Fire();
+        Assert.Equal(FloatingToolbarController.ToolbarState.Revealed, controller.State);
+        _view.RaisePointerExited();
+        _timer.Fire();
+        Assert.Equal(FloatingToolbarController.ToolbarState.Hidden, controller.State);
+    }
+
+    [Fact]
+    public void PeekPixelsChangesOnlyToolbarSizedSensor()
+    {
+        using FloatingToolbarController controller = CreateController();
+        controller.Start();
+        controller.ApplySettings(controller.Settings with { PeekPixels = 8 });
+        Assert.Equal(new PhysicalRectangle(860, 0, 200, 8), _sensor.ArmedBounds);
     }
 
     [Fact]
@@ -83,7 +117,7 @@ public sealed class FloatingToolbarControllerTests
     }
 
     [Fact]
-    public void SensorEntryIsIgnoredWhileForegroundIsFullscreen()
+    public void StartWhileFullscreenHidesSensorAndDoesNotRevealToolbar()
     {
         using FloatingToolbarController controller = CreateController(fullscreenGuard: _ => true);
         controller.Start();
@@ -91,6 +125,56 @@ public sealed class FloatingToolbarControllerTests
         _sensor.RaisePointerEntered();
 
         Assert.Equal(FloatingToolbarController.ToolbarState.Hidden, controller.State);
+        Assert.False(_sensor.IsArmed);
+        Assert.False(_view.IsVisible);
+    }
+
+    [Fact]
+    public void ForegroundChangesHideSensorAndRestoreItAfterLeavingFullscreen()
+    {
+        bool fullscreen = false;
+        using FloatingToolbarController controller = CreateController(fullscreenGuard: _ => fullscreen);
+        controller.Start();
+        fullscreen = true;
+        _sensor.RaiseForegroundContextChanged();
+        Assert.False(_sensor.IsArmed);
+        Assert.False(_view.IsVisible);
+        Assert.Equal(FloatingToolbarController.ToolbarState.Hidden, controller.State);
+        fullscreen = false;
+        _sensor.RaiseForegroundContextChanged();
+        Assert.True(_sensor.IsArmed);
+        Assert.False(_view.IsVisible);
+        _sensor.RaisePointerEntered();
+        Assert.True(_view.IsVisible);
+    }
+
+    [Fact]
+    public void ForegroundChangesCannotReviveUserHiddenOrCaptureSuspendedSensors()
+    {
+        bool fullscreen = true;
+        using FloatingToolbarController controller = CreateController(fullscreenGuard: _ => fullscreen);
+        controller.Start();
+        controller.Suspend();
+        fullscreen = false;
+        _sensor.RaiseForegroundContextChanged();
+        Assert.False(_sensor.IsArmed);
+        controller.Resume();
+        Assert.True(_sensor.IsArmed);
+        controller.Hide();
+        _sensor.RaiseForegroundContextChanged();
+        Assert.False(_sensor.IsArmed);
+        controller.Stop();
+        _sensor.RaiseForegroundContextChanged();
+        Assert.False(_view.IsVisible);
+    }
+
+    [Fact]
+    public void MissingForegroundSubscriptionKeepsPointerGuardWithoutPermanentDisarm()
+    {
+        _sensor.TracksForegroundChanges = false;
+        using FloatingToolbarController controller = CreateController(fullscreenGuard: _ => true);
+        controller.Start();
+        _sensor.RaisePointerEntered();
         Assert.True(_sensor.IsArmed);
         Assert.False(_view.IsVisible);
     }
@@ -127,7 +211,7 @@ public sealed class FloatingToolbarControllerTests
         Assert.Equal(FloatingToolbarController.ToolbarState.Hidden, controller.State);
         Assert.False(_view.IsVisible);
         Assert.True(_sensor.IsArmed);
-        Assert.Equal(new PhysicalRectangle(0, 0, 1920, 2), _sensor.ArmedBounds);
+        Assert.Equal(new PhysicalRectangle(860, 0, 200, 2), _sensor.ArmedBounds);
     }
 
     [Fact]
@@ -148,7 +232,7 @@ public sealed class FloatingToolbarControllerTests
         Assert.False(_view.IsVisible);
         Assert.True(_sensor.IsArmed);
         // 左边感应条：贴左缘、竖跨全屏。
-        Assert.Equal(new PhysicalRectangle(0, 0, 2, 1080), _sensor.ArmedBounds);
+        Assert.Equal(new PhysicalRectangle(0, 518, 2, 44), _sensor.ArmedBounds);
         FloatingToolbarSettings only = Assert.Single(persisted);
         Assert.Equal(ScreenEdge.Left, only.Edge);
         Assert.Equal(ScreenEdge.Left, controller.Settings.Edge);
@@ -251,7 +335,7 @@ public sealed class FloatingToolbarControllerTests
         Assert.Equal(FloatingToolbarController.ToolbarState.Hidden, controller.State);
         Assert.False(_view.IsVisible);
         Assert.True(_sensor.IsArmed);
-        Assert.Equal(new PhysicalRectangle(0, 0, 1920, 2), _sensor.ArmedBounds);
+        Assert.Equal(new PhysicalRectangle(860, 0, 200, 2), _sensor.ArmedBounds);
     }
 
     [Fact]
@@ -358,7 +442,7 @@ public sealed class FloatingToolbarControllerTests
         Assert.Equal(FloatingToolbarController.ToolbarState.Hidden, controller.State);
         Assert.True(_sensor.IsArmed);
         Assert.False(_view.IsVisible);
-        Assert.Equal(new PhysicalRectangle(0, 0, 1920, 2), _sensor.ArmedBounds);
+        Assert.Equal(new PhysicalRectangle(860, 0, 200, 2), _sensor.ArmedBounds);
     }
 
     [Fact]
@@ -419,11 +503,11 @@ public sealed class FloatingToolbarControllerTests
         var remapped = new PhysicalRectangle(1920, 0, 1920, 1080);
         using FloatingToolbarController controller = CreateController(monitorOf: _ => remapped);
         controller.Start();
-        Assert.Equal(new PhysicalRectangle(0, 0, 1920, 2), _sensor.ArmedBounds);
+        Assert.Equal(new PhysicalRectangle(860, 0, 200, 2), _sensor.ArmedBounds);
 
         _sensor.RaiseDisplayChanged();
 
-        Assert.Equal(new PhysicalRectangle(1920, 0, 1920, 2), _sensor.ArmedBounds);
+        Assert.Equal(new PhysicalRectangle(2780, 0, 200, 2), _sensor.ArmedBounds);
     }
 
     [Fact]
@@ -644,7 +728,7 @@ public sealed class FloatingToolbarControllerTests
 
         controller.ApplySettings(new FloatingToolbarSettings(true, ScreenEdge.Right, true, 600));
 
-        Assert.Equal(new PhysicalRectangle(1918, 0, 2, 1080), _sensor.ArmedBounds);
+        Assert.Equal(new PhysicalRectangle(1918, 518, 2, 44), _sensor.ArmedBounds);
     }
 
     [Fact]
@@ -767,6 +851,8 @@ public sealed class FloatingToolbarControllerTests
 
         public bool IsVisible { get; private set; }
 
+        public bool IsPointerOver { get; set; }
+
         public List<FloatingToolbarTheme> AppliedThemes { get; } = [];
 
         public PhysicalRectangle LastShownBounds { get; private set; }
@@ -794,11 +880,17 @@ public sealed class FloatingToolbarControllerTests
         {
         }
 
-        public void RaisePointerEntered() =>
+        public void RaisePointerEntered()
+        {
+            IsPointerOver = true;
             PointerEntered?.Invoke(this, EventArgs.Empty);
+        }
 
-        public void RaisePointerExited() =>
+        public void RaisePointerExited()
+        {
+            IsPointerOver = false;
             PointerExited?.Invoke(this, EventArgs.Empty);
+        }
 
         public void RaiseDragStarted() =>
             DragStarted?.Invoke(this, SimulatedBounds);
@@ -815,6 +907,10 @@ public sealed class FloatingToolbarControllerTests
         public event EventHandler? PointerEntered;
 
         public event EventHandler? DisplayChanged;
+
+        public event EventHandler? ForegroundContextChanged;
+
+        public bool TracksForegroundChanges { get; set; } = true;
 
         public bool IsArmed { get; private set; }
 
@@ -845,6 +941,9 @@ public sealed class FloatingToolbarControllerTests
 
         public void RaiseDisplayChanged() =>
             DisplayChanged?.Invoke(this, EventArgs.Empty);
+
+        public void RaiseForegroundContextChanged() =>
+            ForegroundContextChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private sealed class FakeDelayTimer : IFloatingToolbarDelayTimer
