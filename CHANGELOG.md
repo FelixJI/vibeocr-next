@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.1
+
+### Features
+
+- **environments:** 提供默认 RapidOCR 环境并拆分模型来源 (#173) (0697bcb)
+
+### Bug Fixes
+
+- **runtime:** 修复安装注册前取消与回执竞态 (#176) (0965fb9)
+- **smoke:** 保留工作台启动失败阶段与诊断 (#175) (890df46)
+- **e2e:** 使用生产产物隔离网页冷启动 (#174) (c74cb6a)
+
 ## 0.7.0
 
 ### Features
