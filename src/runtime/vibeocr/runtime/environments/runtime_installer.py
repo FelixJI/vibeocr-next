@@ -242,6 +242,26 @@ def _drain_child_lines(
         done.set()
 
 
+def _install_gate_python(executable: str) -> str:
+    # Windows venv executables are launchers, not the interpreter. Run only the
+    # containment gate with the base interpreter; the actual command retains
+    # its selected environment and dependencies.
+    python = Path(executable)
+    config = python.parent.parent / "pyvenv.cfg"
+    if python.parent.name.lower() != "scripts" or not config.is_file():
+        return executable
+    for line in config.read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.strip().lower() == "home":
+            base_python = Path(value.strip()) / "python.exe"
+            if base_python.is_file():
+                return str(base_python)
+    raise RuntimeInstallError(
+        "Cannot locate the venv base interpreter for process containment",
+        reason_code="process_containment_failed",
+    )
+
+
 def _run_install_command(
     command: list[str],
     *,
@@ -253,7 +273,9 @@ def _run_install_command(
 ) -> None:
     """Supervise one Python command with bounded diagnostics and owned cleanup.
 
-    On Windows a Python gate waits on stdin until its anonymous Job is assigned.
+    On Windows a base Python gate waits on stdin until its anonymous Job is
+    assigned. A venv launcher cannot serve as the gate: it can start the real
+    interpreter before the launcher itself is assigned.
     Only then can pip or its build children start. Closing the Job also kills
     descendants whose parent has already exited; unrelated operations are safe.
     """
@@ -282,11 +304,10 @@ def _run_install_command(
         reporter.child_status_detail(
             message_code=heartbeat_code, fallback_message=diagnostic("started")
         )
-    guard = JobObjectGuard(allow_breakaway=False)
     launched = command
     if os.name == "nt":
         launched = [
-            command[0],
+            _install_gate_python(command[0]),
             "-c",
             (
                 "import subprocess,sys; "
@@ -296,6 +317,7 @@ def _run_install_command(
             ),
             *command,
         ]
+    guard = JobObjectGuard(allow_breakaway=False)
     try:
         process = subprocess.Popen(
             launched,
