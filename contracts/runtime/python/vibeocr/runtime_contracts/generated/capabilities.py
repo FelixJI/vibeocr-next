@@ -20,6 +20,7 @@ OCR_RECOGNITION_MODES_V1 = "ocr.recognition-modes.v1"
 OCR_MINERU_CONFIG_V1 = "ocr.mineru-config.v1"
 RUNTIME_INSTALL_PLAN_V1 = "runtime.install-plan.v1"
 OCR_MINERU_REMOTE_API_V1 = "ocr.mineru-remote-api.v1"
+OCR_DEFAULT_RECOGNITION_MODE_V1 = "ocr.default-recognition-mode.v1"
 
 ALL_CAPABILITIES: tuple[str, ...] = (
     'ocr.recognition.v2',
@@ -41,6 +42,7 @@ ALL_CAPABILITIES: tuple[str, ...] = (
     'ocr.mineru-config.v1',
     'runtime.install-plan.v1',
     'ocr.mineru-remote-api.v1',
+    'ocr.default-recognition-mode.v1',
 )
 READY_ENVELOPE_VERSION = 1
 PROTOCOL_VERSION = 2

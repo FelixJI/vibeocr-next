@@ -7,7 +7,7 @@ capability 与错误枚举投影到 wire。
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -109,6 +109,41 @@ class RecognitionModeError(ValueError):
             "reason_code": reason_code,
             **(detail or {}),
         }
+
+
+DEFAULT_RECOGNITION_MODE_EXTRA_KEY = "default_recognition_mode"
+"""SettingsSnapshot.extra 内持久化默认识别模式的唯一键。"""
+
+COMPAT_DEFAULT_RECOGNITION_MODE = RecognitionModeId.RAPID_TEXT
+"""缺键时的兼容默认：与既有无 engine 提交的 Runtime 缺省一致。"""
+
+
+def resolve_default_recognition_mode(
+    extra: Mapping[str, Any] | None,
+    registry: RecognitionModeRegistry,
+    *,
+    require_available: bool,
+) -> RecognitionModeId:
+    """解析 SettingsSnapshot.extra 的默认识别模式。
+
+    仅缺键回退兼容默认 rapid_text；显式 null/非字符串与未知 id
+    fail closed；``require_available`` 时非 ready 同样拒绝，绝不静默
+    改用另一种识别。
+    """
+    if extra is None or DEFAULT_RECOGNITION_MODE_EXTRA_KEY not in extra:
+        return COMPAT_DEFAULT_RECOGNITION_MODE
+    raw = extra[DEFAULT_RECOGNITION_MODE_EXTRA_KEY]
+    if not isinstance(raw, str):
+        raise RecognitionModeError(
+            "RECOGNITION_MODE_UNKNOWN",
+            recognition_mode=None,
+            reason_code="recognition_mode_default_invalid_type",
+            detail={"field": f"extra.{DEFAULT_RECOGNITION_MODE_EXTRA_KEY}"},
+        )
+    definition = registry.definition(raw)
+    if require_available:
+        registry.ensure_mode_available(definition.mode_id)
+    return definition.mode_id
 
 
 _DEFAULT_REQUIRED_COMPONENTS = {
@@ -227,6 +262,14 @@ class RecognitionModeRegistry:
                 reason_code=availability.reason_code or "recognition_mode_unavailable",
                 detail=detail,
             )
+
+    def ensure_mode_available(
+        self, recognition_mode: RecognitionModeId | str
+    ) -> RecognitionModeDefinition:
+        """公开的可用性门禁：非 ready 抛 RECOGNITION_MODE_UNAVAILABLE。"""
+        definition = self.definition(recognition_mode)
+        self._ensure_available(definition)
+        return definition
 
     def validate_lifecycle(
         self, recognition_mode: RecognitionModeId | str, operation: str
@@ -389,6 +432,8 @@ class RecognitionModeRegistry:
 
 
 __all__ = [
+    "COMPAT_DEFAULT_RECOGNITION_MODE",
+    "DEFAULT_RECOGNITION_MODE_EXTRA_KEY",
     "LifecycleKind",
     "ModeAvailability",
     "ProvisioningKind",
@@ -399,4 +444,5 @@ __all__ = [
     "RecognitionModeId",
     "RecognitionModeLifecycle",
     "RecognitionModeRegistry",
+    "resolve_default_recognition_mode",
 ]

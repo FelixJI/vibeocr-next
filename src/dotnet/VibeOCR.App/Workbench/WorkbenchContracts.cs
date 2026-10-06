@@ -335,6 +335,15 @@ public sealed record PrepareMineruConnectionCommand : WorkbenchCommand;
 public sealed record SetTaskEngineCommand(string? Engine) : WorkbenchCommand;
 public sealed record SetRecognitionOptionsCommand(string ModeId, PaddleModeOptions Options) : WorkbenchCommand;
 
+/// <summary>
+/// Persist the default recognition mode in Backend settings
+/// extra.default_recognition_mode（ocr.default-recognition-mode.v1）。
+/// The runtime capability gate, catalog id and ready availability are all
+/// enforced host-side before any write; runtimes without the capability are
+/// never sent the key.
+/// </summary>
+public sealed record SetDefaultRecognitionModeCommand(string ModeId) : WorkbenchCommand;
+
 /// <summary>Start ensure with the staged explicit component/source intent.</summary>
 public sealed record InstallRuntimeCommand : WorkbenchCommand;
 public sealed record ConfirmRuntimeInstallCommand(string PlanId) : WorkbenchCommand;
@@ -436,7 +445,8 @@ public sealed record RecognitionTextLayerLine(
 /// <summary>
 /// One selectable recognition mode on the recognition page. <see cref="Selected"/>
 /// and <see cref="IsTaskOverride"/> are true only for an explicit task choice;
-/// otherwise the Runtime default remains selected by omission.
+/// <see cref="IsDefault"/> independently marks the committed runtime default so
+/// the inherit option can keep showing it under an override.
 /// </summary>
 public sealed record RecognitionEngineChoice(
   string Engine,
@@ -453,7 +463,8 @@ public sealed record RecognitionEngineChoice(
   string? Family = null,
   IReadOnlyList<string>? SupportedOptions = null,
   IReadOnlyDictionary<string, System.Text.Json.JsonElement>? Options = null,
-  string? ReasonCode = null);
+  string? ReasonCode = null,
+  bool IsDefault = false);
 
 public sealed record BatchWorkbenchState(
   bool IsRunning,
@@ -536,6 +547,8 @@ public sealed record SettingsWorkbenchState(
   bool CanPreviewInstall = false,
   VibeOCR.Runtime.Contracts.Generated.Host.RuntimeInstallPlan? InstallPlan = null,
   SettingsMineruConnectionState? MineruConnection = null,
+  SettingsDefaultRecognitionModeState? DefaultRecognitionMode = null,
+  IReadOnlyList<SettingsRecognitionModeOptionState>? RecognitionModes = null,
   IReadOnlyList<SettingsEnvironmentState>? Environments = null,
   string? ActiveEnvironmentId = null,
   SettingsEnvironmentPlanState? EnvironmentPlan = null,
@@ -719,6 +732,24 @@ public sealed record SettingsMineruConnectionState(
     string Mode,
     string ApiUrl,
     bool HasApiKey);
+
+/// <summary>
+/// 默认识别模式投影（#188）：Supported=Backend 是否声明
+/// ocr.default-recognition-mode.v1；ModeId 为 Runtime 回显的已提交默认
+/// （null=能力未声明或首读未完成，Stored 区分键是否存在）。目录有效性由
+/// RecognitionModes 列表交叉判定，不在桥接层复制。
+/// </summary>
+public sealed record SettingsDefaultRecognitionModeState(
+    bool Supported,
+    string? ModeId,
+    bool Stored);
+
+/// <summary>设置页可选的识别模式目录项（来自 ocr.recognition-modes.v1）。</summary>
+public sealed record SettingsRecognitionModeOptionState(
+    string Id,
+    string DisplayName,
+    string Availability,
+    string? ReasonCode);
 
 /// <summary>
 /// Durable maintenance operation projection: requested/effective component

@@ -275,18 +275,22 @@ public sealed class DesktopWorkbenchCommandHandler :
       WorkbenchState? state = command switch
       {
         SelectRecognitionImageCommand => StartRecognition(
-          viewModel => viewModel.RecognizeFileAsync(cancellationToken),
+          viewModel => viewModel.RecognizeFileAsync(
+            cancellationToken, AwaitSelectionBeforeFreeze()),
           cancellationToken),
         RecognizeDroppedFileCommand dropped => StartRecognition(
           viewModel => viewModel.RecognizeDroppedFileAsync(
             dropped.Path,
-            cancellationToken),
+            cancellationToken,
+            AwaitSelectionBeforeFreeze()),
           cancellationToken),
         ReadRecognitionClipboardCommand => StartRecognition(
-          viewModel => viewModel.RecognizeClipboardAsync(cancellationToken),
+          viewModel => viewModel.RecognizeClipboardAsync(
+            cancellationToken, AwaitSelectionBeforeFreeze()),
           cancellationToken),
         CaptureRecognitionScreenCommand => StartRecognition(
-          viewModel => viewModel.RecognizeScreenshotAsync(cancellationToken),
+          viewModel => viewModel.RecognizeScreenshotAsync(
+            cancellationToken, AwaitSelectionBeforeFreeze()),
           cancellationToken,
           screenCapture: true),
         SelectImageEditFileCommand => StartImageEdit(
@@ -446,6 +450,9 @@ public sealed class DesktopWorkbenchCommandHandler :
         SetRuntimeFeatureCommand feature => SetFeature(feature),
         SetMineruConnectionCommand mineru => await SetMineruConnectionAsync(
           mineru,
+          cancellationToken),
+        SetDefaultRecognitionModeCommand defaultMode => await SetDefaultRecognitionModeAsync(
+          defaultMode,
           cancellationToken),
         PrepareMineruConnectionCommand => await PrepareMineruConnectionAsync(
           cancellationToken),
@@ -1236,30 +1243,25 @@ public sealed class DesktopWorkbenchCommandHandler :
     try
     {
       // 只有显式识别才同步 Runtime 目录并做 requireUsable 模式协商。
-      bool deferredSelection = !await EnsureSelectionLoadedAsync(cancellationToken);
+      // 输入（会话导出图）已就绪：未 attach 时等待权威目录；环境切换窗口
+      // 取消本次提交，不以空快照提交（Rapid 回退）。
+      bool selectionUnavailable =
+        !await EnsureSelectionLoadedForSubmitAsync(cancellationToken);
       // 目录加载期间编辑/关闭/换图会推进 generation：
       // 提交前复查，不把旧图发送给 Runtime。
       if (generation != Volatile.Read(ref recognitionGeneration))
       {
         return;
       }
+      if (selectionUnavailable)
+      {
+        recognition?.InvalidateResult();
+        resultActions = null;
+        StateChanged?.Invoke(SessionRecognitionState(false, "recognition.cancelled"));
+        return;
+      }
       SynchronizeRecognitionMode(requireUsable: true);
       await recognition!.RecognizeCapturedInputAsync(input, cancellationToken);
-      if (deferredSelection)
-      {
-        try
-        {
-          await EnsureSelectionLoadedAsync(cancellationToken);
-        }
-        catch (OperationCanceledException)
-        {
-          throw;
-        }
-        catch (Exception)
-        {
-          // 识别已完成；目录补载失败只影响引擎列表，不推翻结果。
-        }
-      }
       if (generation != Volatile.Read(ref recognitionGeneration))
       {
         return;
@@ -1868,9 +1870,44 @@ public sealed class DesktopWorkbenchCommandHandler :
       StructuredResult: structured);
   }
 
+  /// <summary>Runtime 回显的已提交默认识别模式 id；仅 Bound 状态非空。</summary>
+  private string? RuntimeDefaultModeId =>
+    settings?.RecognitionSelection?.DefaultRecognitionModeId;
+
+  /// <summary>
+  /// 单次/批量/PDF 共用的继承解析：显式本次 override 优先；能力已声明时
+  /// 绑定回显默认，Invalid/Unread 在提交协商时明确拒绝并指向设置修复，
+  /// 不猜 rapid_text；仅能力缺失走旧语义。
+  /// </summary>
+  internal static string? EffectiveModeIdOrDefault(
+    RecognitionSelectionSnapshot? snapshot,
+    string? taskEngine,
+    bool requireUsable)
+  {
+    if (taskEngine is not null || snapshot is null)
+    {
+      return taskEngine;
+    }
+    switch (snapshot.DefaultMode)
+    {
+      case RuntimeDefaultModeBinding.Bound:
+        return snapshot.DefaultRecognitionModeId;
+      case RuntimeDefaultModeBinding.NotApplicable:
+        return null;
+      default:
+        if (requireUsable)
+        {
+          throw new RecognitionModeUnavailableException(
+            "当前默认识别模式无效或尚未读取，已拒绝按通用文字识别执行；请在设置 · 识别默认模式中重新选择并保存。");
+        }
+        return null;
+    }
+  }
+
   /// <summary>
   /// Project catalog modes for the recognition page. Only an explicit task
-  /// override is selected; an empty choice delegates to the Runtime default.
+  /// override is IsTaskOverride; the committed runtime default is Selected
+  /// while no override is present, and an empty choice still delegates to it.
   /// </summary>
   private IReadOnlyList<RecognitionEngineChoice>? RecognitionEngines()
   {
@@ -1883,12 +1920,15 @@ public sealed class DesktopWorkbenchCommandHandler :
     if (selection.SupportsRecognitionModes)
     {
       string? task = recognition.TaskEngine;
+      string? defaultId = RuntimeDefaultModeId;
       return [.. selection.RecognitionModes.Select(mode => new RecognitionEngineChoice(
-        mode.Id, SettingsViewModel.DisplayName(mode.Id), task == mode.Id, task == mode.Id,
+        mode.Id, SettingsViewModel.DisplayName(mode.Id),
+        task == mode.Id || (task is null && mode.Id == defaultId), task == mode.Id,
         TryProjectMineruConfig(selection, mode.Id, out _) ? mode.Availability : "unavailable",
         mode.Availability == "preparation_required" && mode.RequiredComponent is not null,
         mode.LifecycleKind,
-        mode.SupportsPreload, mode.SupportsTtl, mode.SupportsPinning, mode.SupportsRelease, mode.Family, mode.SupportedOptions, GetModeOptions(mode)?.ProjectWire(mode), mode.ReasonCode))];
+        mode.SupportsPreload, mode.SupportsTtl, mode.SupportsPinning, mode.SupportsRelease, mode.Family, mode.SupportedOptions, GetModeOptions(mode)?.ProjectWire(mode), mode.ReasonCode,
+        IsDefault: mode.Id == defaultId))];
     }
     bool isOverride = recognition.TaskEngine is not null;
     return [.. selection.EngineOptions.Select(option => new RecognitionEngineChoice(
@@ -2219,7 +2259,13 @@ public sealed class DesktopWorkbenchCommandHandler :
     CancellationToken cancellationToken)
   {
     batch ??= batchFactory();
-    await EnsureSelectionLoadedAsync(cancellationToken);
+    // 提交前取得权威目录与已提交默认：未 attach 时等待 Supervisor 启动；
+    // 环境切换窗口取消本次提交，不以空快照冻结批量提交参数。
+    if (!await EnsureSelectionLoadedForSubmitAsync(cancellationToken))
+    {
+      Interlocked.Increment(ref batchGeneration);
+      return BatchState(batch);
+    }
     SynchronizeBatchMode(requireUsable: true);
     long generation = Interlocked.Increment(ref batchGeneration);
     BatchWorkbenchState start = new(
@@ -2332,16 +2378,19 @@ public sealed class DesktopWorkbenchCommandHandler :
 
   private void SynchronizeBatchMode(bool requireUsable = false)
   {
-    RuntimeSelectionService? selection = settings?.RecognitionSelection?.Catalog;
-    if (batch is null || selection?.SupportsRecognitionModes is not true)
+    RecognitionSelectionSnapshot? snapshot = settings?.RecognitionSelection;
+    if (batch is null || snapshot?.Catalog.SupportsRecognitionModes is not true)
     {
-      if (requireUsable) EnsureUsableModeOverrideOrThrow(selection, batchTaskEngine);
+      if (requireUsable) EnsureUsableModeOverrideOrThrow(selection: snapshot?.Catalog, taskEngine: batchTaskEngine);
       batch?.SetRecognitionMode(null, taskModeId: batchTaskEngine);
       return;
     }
-    RecognitionModeOption? mode = batchTaskEngine is null ? null : requireUsable
-      ? selection.SelectRecognitionMode(batchTaskEngine)
-      : TryFindRecognitionMode(selection, batchTaskEngine);
+    RuntimeSelectionService selection = snapshot.Catalog;
+    string? effectiveId = EffectiveModeIdOrDefault(
+      snapshot, batchTaskEngine, requireUsable);
+    RecognitionModeOption? mode = string.IsNullOrWhiteSpace(effectiveId) ? null : requireUsable
+      ? selection.SelectRecognitionMode(effectiveId)
+      : TryFindRecognitionMode(selection, effectiveId);
     MineruConfig? config = requireUsable
       ? selection.MineruConfigFor(mode?.Id)
       : TryProjectMineruConfig(selection, mode?.Id, out MineruConfig? projected)
@@ -2356,16 +2405,19 @@ public sealed class DesktopWorkbenchCommandHandler :
   /// </summary>
   private void SynchronizePdfMode(bool requireUsable = false)
   {
-    RuntimeSelectionService? selection = settings?.RecognitionSelection?.Catalog;
-    if (pdf is null || selection?.SupportsRecognitionModes is not true)
+    RecognitionSelectionSnapshot? snapshot = settings?.RecognitionSelection;
+    if (pdf is null || snapshot?.Catalog.SupportsRecognitionModes is not true)
     {
-      if (requireUsable) EnsureUsableModeOverrideOrThrow(selection, pdfTaskEngine);
+      if (requireUsable) EnsureUsableModeOverrideOrThrow(snapshot?.Catalog, pdfTaskEngine);
       pdf?.SetRecognitionMode(null, taskModeId: pdfTaskEngine);
       return;
     }
-    RecognitionModeOption? mode = pdfTaskEngine is null ? null : requireUsable
-      ? selection.SelectRecognitionMode(pdfTaskEngine)
-      : TryFindRecognitionMode(selection, pdfTaskEngine);
+    RuntimeSelectionService selection = snapshot.Catalog;
+    string? effectiveId = EffectiveModeIdOrDefault(
+      snapshot, pdfTaskEngine, requireUsable);
+    RecognitionModeOption? mode = string.IsNullOrWhiteSpace(effectiveId) ? null : requireUsable
+      ? selection.SelectRecognitionMode(effectiveId)
+      : TryFindRecognitionMode(selection, effectiveId);
     MineruConfig? config = requireUsable
       ? selection.MineruConfigFor(mode?.Id)
       : TryProjectMineruConfig(selection, mode?.Id, out MineruConfig? projected)
@@ -2471,7 +2523,12 @@ public sealed class DesktopWorkbenchCommandHandler :
     // 与单次/批量相同：提交前加载权威目录并严格协商可用模式；用户已显式
     // 选择 Paddle 模式而目录/环境不可用时，这里会抛出可恢复的
     // RecognitionModeUnavailableException，拒绝按默认 OCR 静默提交。
-    await EnsureSelectionLoadedAsync(cancellationToken);
+    if (!await EnsureSelectionLoadedForSubmitAsync(cancellationToken))
+    {
+      // 环境切换窗口：取消本次提交，不以空快照提交（Rapid 回退）。
+      Interlocked.Increment(ref pdfGeneration);
+      return PdfState(pdf);
+    }
     SynchronizePdfMode(requireUsable: true);
     long generation = Interlocked.Increment(ref pdfGeneration);
     return PublishStartThenTrack(
@@ -2981,6 +3038,23 @@ public sealed class DesktopWorkbenchCommandHandler :
     return SettingsState(settings);
   }
 
+  /// <summary>
+  /// 保存默认识别模式：能力门禁 + 目录 ready 校验在
+  /// SettingsViewModel 内 fail closed；保存成功后重发任务页状态，继承
+  /// 选项立即回显新默认，在跑/排队任务参数不受影响。
+  /// </summary>
+  private async Task<SettingsWorkbenchState> SetDefaultRecognitionModeAsync(
+    SetDefaultRecognitionModeCommand command,
+    CancellationToken cancellationToken)
+  {
+    settings ??= CreateSettings();
+    await settings.SetDefaultRecognitionModeAsync(
+      command.ModeId,
+      cancellationToken);
+    await RefreshRecognitionCatalogStatesAsync(cancellationToken);
+    return SettingsState(settings);
+  }
+
   private async Task<SettingsWorkbenchState> PrepareMineruConnectionAsync(
     CancellationToken cancellationToken)
   {
@@ -3031,12 +3105,17 @@ public sealed class DesktopWorkbenchCommandHandler :
     ? new BatchWorkbenchState(false, 0, 0, 0, Engines: BatchEngines())
     : BatchState(batch);
 
-  private IReadOnlyList<RecognitionEngineChoice>? BatchEngines() =>
-    RecognitionEngines()?.Select(choice => choice with
+  private IReadOnlyList<RecognitionEngineChoice>? BatchEngines()
+  {
+    string? defaultId = RuntimeDefaultModeId;
+    return RecognitionEngines()?.Select(choice => choice with
     {
-      Selected = choice.Engine == batchTaskEngine,
+      // IsDefault 从目录投影继承；Selected 仅显式选择或（未覆盖时）默认。
+      Selected = choice.Engine == batchTaskEngine ||
+        (batchTaskEngine is null && choice.Engine == defaultId),
       IsTaskOverride = choice.Engine == batchTaskEngine,
     }).ToArray();
+  }
 
   private PaddleModeOptions? GetModeOptions(RecognitionModeOption? mode)
   {
@@ -3104,12 +3183,14 @@ public sealed class DesktopWorkbenchCommandHandler :
       return;
     }
     RuntimeSelectionService selection = snapshot.Catalog;
+    string? effectiveId = EffectiveModeIdOrDefault(
+      snapshot, recognition.TaskEngine, requireUsable);
     RecognitionModeOption? Resolve(string? id) => string.IsNullOrWhiteSpace(id)
       ? null
       : requireUsable
         ? selection.SelectRecognitionMode(id)
         : TryFindRecognitionMode(selection, id);
-    RecognitionModeOption? mode = Resolve(recognition.TaskEngine);
+    RecognitionModeOption? mode = Resolve(effectiveId);
     // mineru_document 任务随目录默认 tier 携带类型化 MinerU 4 配置。
     MineruConfig? config = requireUsable
       ? selection.MineruConfigFor(mode?.Id)
@@ -3172,11 +3253,10 @@ public sealed class DesktopWorkbenchCommandHandler :
   /// <summary>
   /// Load the authoritative runtime selection catalog. While the Supervisor
   /// client is unattached the load is skipped: bootstrap must not block the
-  /// window, and a recognition run must capture screenshot/clipboard input
-  /// immediately — cold start has no cached catalog and therefore no engine
-  /// override, so the default pipeline stays authoritative while the submit
-  /// path waits for the Supervisor at the gateway. Returns whether the catalog
-  /// was (re)loaded.
+  /// window, and recognition commands re-load through
+  /// <see cref="EnsureSelectionLoadedForSubmitAsync"/> before freezing submit
+  /// parameters, so no submit path depends on the gateway default. Returns
+  /// whether the catalog was (re)loaded.
   /// </summary>
   private async Task<bool> EnsureSelectionLoadedAsync(CancellationToken cancellationToken)
   {
@@ -3188,9 +3268,50 @@ public sealed class DesktopWorkbenchCommandHandler :
     }
     // Always cross SettingsViewModel's single-flight gate. A refresh may be
     // replacing an older snapshot even while Selection remains non-null.
-    await settings.LoadSelectionAsync(cancellationToken);
-    return true;
+    return await settings.LoadSelectionAsync(cancellationToken);
   }
+
+  /// <summary>
+  /// 提交路径的目录加载：Supervisor 未 attach 时等待启动完成（Deferred
+  /// 网关内建等待）取得权威目录与已提交默认后才冻结提交参数；读取被
+  /// 代际失效丢弃或仍处切换窗口时返回 false，由调用方取消提交而非
+  /// 猜默认（不重试）。
+  /// </summary>
+  private async Task<bool> EnsureSelectionLoadedForSubmitAsync(
+    CancellationToken cancellationToken)
+  {
+    settings ??= CreateSettings();
+    if (Volatile.Read(ref environmentSwitching) != 0)
+      return false;
+    return await settings.LoadSelectionAsync(cancellationToken) &&
+      Volatile.Read(ref environmentSwitching) == 0;
+  }
+
+  /// <summary>
+  /// 采集型识别的延迟冻结回调：输入采集后按启动时意图（跟随默认，忽略
+  /// 等待期间的新 UI 选择）在权威目录上解析提交参数；环境切换窗口返回
+  /// null 取消本次提交；目录不支持模式时保持旧 Backend 的 OCR 缺省兼容。
+  /// </summary>
+  private Func<CancellationToken, Task<RecognitionSubmitSelection?>>
+    AwaitSelectionBeforeFreeze() => async ct =>
+  {
+    if (!await EnsureSelectionLoadedForSubmitAsync(ct))
+      return null;
+    RecognitionSelectionSnapshot? snapshot = settings?.RecognitionSelection;
+    if (snapshot?.Catalog.SupportsRecognitionModes is not true)
+      return new RecognitionSubmitSelection("OCR", null, null, null);
+    RuntimeSelectionService selection = snapshot.Catalog;
+    string? defaultId = EffectiveModeIdOrDefault(
+      snapshot, taskEngine: null, requireUsable: true);
+    RecognitionModeOption? mode = string.IsNullOrWhiteSpace(defaultId)
+      ? null
+      : selection.SelectRecognitionMode(defaultId);
+    MineruConfig? config = mode is null ? null : selection.MineruConfigFor(mode.Id);
+    IReadOnlyDictionary<string, System.Text.Json.JsonElement>? options =
+      mode is null ? null : GetModeOptions(mode)?.ToWire(mode);
+    return new RecognitionSubmitSelection(
+      mode?.PipelineId ?? "OCR", mode?.Engine, config, options);
+  };
 
   private SettingsViewModel CreateSettings()
   {
@@ -3663,12 +3784,17 @@ public sealed class DesktopWorkbenchCommandHandler :
     };
   }
 
-  private IReadOnlyList<RecognitionEngineChoice>? PdfEngines() =>
-    RecognitionEngines()?.Select(choice => choice with
+  private IReadOnlyList<RecognitionEngineChoice>? PdfEngines()
+  {
+    string? defaultId = RuntimeDefaultModeId;
+    return RecognitionEngines()?.Select(choice => choice with
     {
-      Selected = choice.Engine == pdfTaskEngine,
+      // IsDefault 从目录投影继承；Selected 仅显式选择或（未覆盖时）默认。
+      Selected = choice.Engine == pdfTaskEngine ||
+        (pdfTaskEngine is null && choice.Engine == defaultId),
       IsTaskOverride = choice.Engine == pdfTaskEngine,
     }).ToArray();
+  }
 
   private async Task<PdfWorkbenchState> PdfStateAsync(
     PdfViewModel viewModel,
@@ -3868,6 +3994,19 @@ public sealed class DesktopWorkbenchCommandHandler :
         connection.Mode,
         connection.ApiUrl,
         connection.HasApiKey)
+      : null,
+    DefaultRecognitionMode: viewModel.DefaultRecognitionMode is { } defaultMode
+      ? new SettingsDefaultRecognitionModeState(
+        defaultMode.Supported,
+        defaultMode.ModeId,
+        defaultMode.Stored)
+      : null,
+    RecognitionModes: viewModel.Selection?.SupportsRecognitionModes is true
+      ? [.. viewModel.Selection.RecognitionModes.Select(mode => new SettingsRecognitionModeOptionState(
+          mode.Id,
+          SettingsViewModel.DisplayName(mode.Id),
+          mode.Availability,
+          mode.ReasonCode))]
       : null,
     Environments: viewModel.Environments?.Snapshot?.Environments.Select(item =>
       new SettingsEnvironmentState(
