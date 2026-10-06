@@ -19,6 +19,8 @@ flowchart LR
 
 `WorkbenchApplication` 是稳定 interface。Web 只发送白名单命令并订阅语义状态；C# 拥有 route、任务、持久设置、资源租约与恢复状态。焦点、hover、菜单、未提交表单草稿等纯展示状态归 Web。
 
+图像编辑预览由 `ImageCanvasEditor` 按动画帧合并绘制最新草稿；换图、换会话和卸载取消旧帧与拖拽。已提交文档仍是撤销、重做和全尺寸导出的共同来源；交互绘制不编码、不传输整图，只有明确输出或按需检查才编码。
+
 ## 协议不变量
 
 - bridge protocol 与 Desktop↔Runtime 内部 HTTP wire（`contracts/runtime` 的唯一 v2 契约）
