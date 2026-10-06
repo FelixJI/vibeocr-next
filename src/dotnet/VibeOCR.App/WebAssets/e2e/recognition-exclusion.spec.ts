@@ -54,28 +54,6 @@ function pixelAt(
   ];
 }
 
-/** blob URL 预览图不污染 canvas，可直接取样。 */
-async function readPreviewPixels(
-  element: Locator,
-): Promise<DecodedImage & { src: string }> {
-  return element.evaluate((node) => {
-    const element = node as HTMLImageElement;
-    const canvas = document.createElement("canvas");
-    canvas.width = element.naturalWidth;
-    canvas.height = element.naturalHeight;
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("2d context unavailable");
-    context.drawImage(element, 0, 0);
-    const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
-    return {
-      src: element.src,
-      width: element.naturalWidth,
-      height: element.naturalHeight,
-      pixels: Array.from(data),
-    };
-  });
-}
-
 /** 把 160×80 原图坐标换算为页面 client 坐标（画布 900×600 内等比居中）。 */
 async function naturalToClient(
   canvas: Locator,
@@ -190,29 +168,14 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
     arguments: { sessionId: "exclusion-e2e", revision: 1 },
   });
 
-  // 屏蔽副本入口出现；屏蔽导出预览为真实白色像素。
+  // 屏蔽副本入口出现；掩膜/普通像素正确性由下方识别输入与两份保存
+  // 副本的上传字节断言（不再依赖已移除的常驻预览图）。
   await expect(
     page.getByRole("button", { name: "保存屏蔽副本" }),
   ).toBeVisible();
-  const maskedPreview = page.locator('img[alt="屏蔽导出预览"]');
-  await expect(maskedPreview).toBeVisible();
-  await expect
-    .poll(() => maskedPreview.evaluate((el) => el.naturalWidth))
-    .toBe(160);
-  const maskedPreviewPixels = await readPreviewPixels(maskedPreview);
-  expect(pixelAt(maskedPreviewPixels, 40, 40)).toEqual([255, 255, 255]);
-  expect(pixelAt(maskedPreviewPixels, 120, 40)).toEqual([224, 32, 32]);
 
-  // 普通最终输出预览不包含掩膜：左半保持原黑底。
-  const finalPreview = page.locator('img[alt="最终输出预览"]');
-  await expect(finalPreview).toBeVisible();
-  await expect
-    .poll(() => finalPreview.evaluate((el) => el.naturalWidth))
-    .toBe(160);
-  const finalPreviewPixels = await readPreviewPixels(finalPreview);
-  expect(pixelAt(finalPreviewPixels, 40, 40)).toEqual([16, 16, 16]);
-
-  // 识别当前图：上传副本中屏蔽区为纯白，未屏蔽像素保持原样。
+  // 识别当前图：上传的是未烘焙遮罩的普通最终像素；白色遮罩 OCR 输入
+  // 由宿主按 excludeBoxes 生成（C# 单测覆盖），不在上传副本里烧白。
   await page.getByRole("button", { name: "识别当前图" }).click();
   await expect.poll(() => uploads.length).toBe(1);
   expect(uploads[0]!.contentType).toBe("image/png");
@@ -223,22 +186,44 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
   );
   expect(recognitionInput.width).toBe(160);
   expect(recognitionInput.height).toBe(80);
-  // 屏蔽区中心与边缘均不含原始文字像素。
-  expect(pixelAt(recognitionInput, 40, 40)).toEqual([255, 255, 255]);
-  expect(pixelAt(recognitionInput, 79, 79)).toEqual([255, 255, 255]);
+  // 屏蔽区在普通上传中保持原像素（与普通保存一致）。
+  expect(pixelAt(recognitionInput, 40, 40)).toEqual([16, 16, 16]);
+  expect(pixelAt(recognitionInput, 79, 79)).toEqual([16, 16, 16]);
   // 屏蔽区之外不发生非预期变更：红块与右半白底保持。
   expect(pixelAt(recognitionInput, 120, 40)).toEqual([224, 32, 32]);
   expect(pixelAt(recognitionInput, 150, 70)).toEqual([255, 255, 255]);
-  await expectCommand(page, {
-    scope: "recognition",
-    action: "recognizeScreenshotImage",
-    arguments: {
-      resourceUri:
-        "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
-      sessionId: "exclusion-e2e",
-      revision: 1,
-    },
-  });
+  // 命令携带归一化排除框：宿主自行生成遮罩 OCR 输入，上传保持普通像素。
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (
+          window as unknown as {
+            __testHost: {
+              commands: {
+                scope: string;
+                action: string;
+                arguments: Record<string, unknown>;
+              }[];
+            };
+          }
+        ).__testHost.commands.filter(
+          (command) => command.action === "recognizeScreenshotImage",
+        ),
+      ),
+    )
+    .toEqual([
+      {
+        scope: "recognition",
+        action: "recognizeScreenshotImage",
+        arguments: expect.objectContaining({
+          resourceUri:
+            "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+          sessionId: "exclusion-e2e",
+          revision: 1,
+          excludeBoxes: [expect.any(Object)],
+        }),
+      },
+    ]);
   await expect(page.getByText(/已提交识别当前图（image\/png/)).toBeVisible();
 
   // 普通保存：原图像素保留，屏蔽区不写入。

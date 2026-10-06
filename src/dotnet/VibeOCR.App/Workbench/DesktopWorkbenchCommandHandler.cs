@@ -105,6 +105,8 @@ public sealed class DesktopWorkbenchCommandHandler :
   private WorkbenchResourceReference? screenshotSessionInput;
   private WorkbenchResourceReference? screenshotSessionResult;
   private WorkbenchResourceReference? screenshotSessionStructuredResult;
+  /// <summary>冻结显示基准附带的归一化排除框：仅供前端初始重建屏蔽标记。</summary>
+  private IReadOnlyList<WorkbenchExclusionBox> screenshotSessionExcludeBoxes = [];
   private RecognitionTextLayerState? screenshotTextLayer;
   private long screenshotTextGeneration;
   private int captureInFlight;
@@ -217,6 +219,8 @@ public sealed class DesktopWorkbenchCommandHandler :
   public event Action<Guid, VibeOCR.Platform.Windows.PhysicalRectangle?>? ScreenshotSessionReady;
   internal event Action? ScreenshotCaptureStarting;
   internal event Action? ScreenshotCaptureFinished;
+  /// <summary>scene 会话显式提交识别后的内部交接：宿主关闭 scene 编辑窗并导航主窗口；会话与任务保留。</summary>
+  internal event Action<Guid>? ScreenshotSceneRecognitionHandoff;
   internal Guid? CurrentImageSessionId => screenshotSessionId;
   internal ScreenshotCaptureScene? PendingScreenshotCaptureScene => recognition?.CurrentInput?.CaptureScene;
   internal ScreenshotCaptureScene? TakeScreenshotCaptureScene(Guid sessionId) =>
@@ -589,7 +593,8 @@ public sealed class DesktopWorkbenchCommandHandler :
   private RecognitionScreenshotSessionState? CurrentScreenshotSession() =>
     screenshotSessionId is { } id
       ? new RecognitionScreenshotSessionState(id.ToString("N"), screenshotSessionRevision,
-        screenshotTextSelectionRequested, screenshotSceneEditing)
+        screenshotTextSelectionRequested, screenshotSceneEditing,
+        screenshotSessionExcludeBoxes)
       : null;
 
   /// <summary>会话状态固定复用缓存的基准图/结果资源，避免重发布新 URL 导致编辑器重置。</summary>
@@ -762,6 +767,7 @@ public sealed class DesktopWorkbenchCommandHandler :
           screenshotSceneEditing = true;
           screenshotSessionInput = input;
           screenshotSessionResult = null;
+          screenshotSessionExcludeBoxes = [];
           publishedSession = true;
           StateChanged?.Invoke(SessionRecognitionState(false, "recognition.session"));
         }
@@ -913,28 +919,75 @@ public sealed class DesktopWorkbenchCommandHandler :
     recognition ??= recognitionFactory();
     ValidateScreenshotSession(command.SessionId, command.Revision);
     using WorkbenchAnnotationFile annotation = TakeScreenshotAnnotation(command.ResourceUri);
-    // 只把编辑器导出的最终 PNG 送入识别；不回退未编辑基准图。
-    byte[] png = await File.ReadAllBytesAsync(annotation.Path, cancellationToken);
+    // 上传的是未烘焙遮罩的普通最终像素：同一份字节兼当新的显示基准，
+    // 也是无遮罩时的 OCR 输入；不重复全图上传。
+    byte[] normalBytes = await File.ReadAllBytesAsync(annotation.Path, cancellationToken);
     // 读取租约期间会话/修订变更则拒绝启动，不消费推理配额。
     ValidateScreenshotSession(command.SessionId, command.Revision);
-    var input = new RecognitionInput(
-      png,
-      annotation.MediaType,
-      "screenshot-session-final" + Path.GetExtension(annotation.Path),
-      "screenshot-session");
-    long generation = Interlocked.Increment(ref recognitionGeneration);
-    Guid sessionId = command.SessionId;
-    long revision = command.Revision;
-    resultActions = null;
-    screenshotSessionResult = null;
-    return PublishStartThenTrack(
-      SessionRecognitionState(true, "recognition.running"),
-      () => CompleteScreenshotRecognitionAsync(
-        generation,
-        sessionId,
-        revision,
-        input,
-        cancellationToken));
+    // 冻结普通显示基准：发布同字节新资源（遮罩绝不烧入）。
+    WorkbenchResourceReference frozen = await PublishBytesAsync(
+      normalBytes, annotation.MediaType,
+      ExtensionForMediaType(annotation.MediaType), cancellationToken);
+    bool adopted = false;
+    try
+    {
+      if (screenshotSessionId != command.SessionId ||
+        screenshotSessionRevision != command.Revision)
+      {
+        throw new ScreenshotSessionStaleException();
+      }
+      // OCR 输入：有遮罩时按归一化框生成白色遮罩副本，无遮罩直接同字节。
+      byte[] ocrBytes = normalBytes;
+      string ocrMediaType = annotation.MediaType;
+      if (command.ExcludeBoxes.Count > 0)
+      {
+        ocrBytes = await PinnedTextMask.CreateMaskedPngBytesAsync(
+          annotation.Path, command.ExcludeBoxes, cancellationToken);
+        ocrMediaType = "image/png";
+      }
+      // 全部 await 完成后、接管权威 input 前复验：遮罩生成期间切图/换会话
+      // 不得把旧 frozen 写回新会话。
+      if (screenshotSessionId != command.SessionId ||
+        screenshotSessionRevision != command.Revision)
+      {
+        throw new ScreenshotSessionStaleException();
+      }
+      var input = new RecognitionInput(
+        ocrBytes,
+        ocrMediaType,
+        "screenshot-session-final" + ExtensionForMediaType(ocrMediaType),
+        "screenshot-session");
+      long generation = Interlocked.Increment(ref recognitionGeneration);
+      Guid sessionId = command.SessionId;
+      long revision = command.Revision;
+      resultActions = null;
+      screenshotSessionResult = null;
+      // 旧 input 仅在 frozen 成功接管后释放。
+      if (screenshotSessionInput is { } previousInput) ReleaseResource(previousInput);
+      screenshotSessionInput = frozen;
+      adopted = true;
+      screenshotSessionExcludeBoxes = command.ExcludeBoxes;
+      if (screenshotSceneEditing)
+      {
+        // 显式识别交接：基准已冻结后再关 scene；会话与已提交任务保留，
+        // 结果由主窗口识别承载面展示；失败/取消时编辑基准仍可用。
+        screenshotSceneEditing = false;
+        ScreenshotSceneRecognitionHandoff?.Invoke(sessionId);
+      }
+      return PublishStartThenTrack(
+        SessionRecognitionState(true, "recognition.running"),
+        () => CompleteScreenshotRecognitionAsync(
+          generation,
+          sessionId,
+          revision,
+          input,
+          cancellationToken));
+    }
+    finally
+    {
+      // 未能接管（陈旧/遮罩失败/取消/发布异常）时释放 frozen，不泄漏资源。
+      if (!adopted) ReleaseResource(frozen);
+    }
   }
 
   private async Task CompleteScreenshotRecognitionAsync(
@@ -1516,6 +1569,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     screenshotSceneEditing = false;
     screenshotSessionInput = null;
     screenshotSessionResult = null;
+    screenshotSessionExcludeBoxes = [];
   }
 
   private RecognitionWorkbenchState? StartRecognition(

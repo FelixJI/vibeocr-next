@@ -219,39 +219,17 @@ test("inpaint preview applies real CPU worker pixels to export and keeps outside
   const undone = await decodeUpload(page, uploads[2]!.body, "image/png");
   expect(undone.pixels).toEqual(baseline.pixels);
 
-  // 修补与屏蔽共存：真实屏蔽预览、文件及识别管线必须使用相同像素。
+  // 修补与屏蔽共存：屏蔽副本文件与识别管线使用同一像素（不再依赖
+  // 已移除的常驻预览图）。
   await page.getByRole("button", { name: "重做", exact: true }).click();
   await page.getByRole("button", { name: "屏蔽", exact: true }).click();
   await dragOnCanvas(page, { x: 10, y: 84 }, { x: 140, y: 160 });
-  const maskedPreview = page.getByAltText("屏蔽导出预览");
-  await expect(maskedPreview).toBeVisible();
-  await expect
-    .poll(() =>
-      maskedPreview.evaluate((node) => (node as HTMLImageElement).naturalWidth),
-    )
-    .toBe(96);
-  const preview = await maskedPreview.evaluate((node) => {
-    const image = node as HTMLImageElement;
-    const canvas = document.createElement("canvas");
-    canvas.width = image.naturalWidth;
-    canvas.height = image.naturalHeight;
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("2d context unavailable");
-    context.drawImage(image, 0, 0);
-    return {
-      width: canvas.width,
-      height: canvas.height,
-      pixels: Array.from(
-        context.getImageData(0, 0, canvas.width, canvas.height).data,
-      ),
-    };
-  });
-  expect(pixelAt(preview, 48, 20)).toEqual(pixelAt(applied, 48, 20));
-  expect(pixelAt(preview, 5, 5)).toEqual([255, 255, 255, 255]);
   await page.getByRole("button", { name: "保存屏蔽副本", exact: true }).click();
   await expect.poll(() => uploads.length).toBe(4);
   const masked = await decodeUpload(page, uploads[3]!.body, "image/png");
-  expect(masked.pixels).toEqual(preview.pixels);
+  expect(masked.width).toBe(96);
+  expect(pixelAt(masked, 48, 20)).toEqual(pixelAt(applied, 48, 20));
+  expect(pixelAt(masked, 5, 5)).toEqual([255, 255, 255, 255]);
 });
 
 test("cancel and re-edit during processing terminate the worker so late results cannot commit", async ({
@@ -429,9 +407,9 @@ test("measures real browser processing wall time and responsiveness on a 4MP ima
   await expect(page.getByRole("button", { name: "撤销" })).toBeDisabled();
 });
 
-/** 修补后像素在 PNG 导出中的预期值：补丁保持原 alpha（半透明 128），
- * 替换式绘制下透出的是导出底色 #161616，而非被修补前的原图。 */
-const TRANSPARENT_PATCHED = [16, 91, 56] as const;
+/** 修补后像素在 PNG 导出中的预期值：PNG 不再烧底色，替换式绘制下
+ * 保留补丁原色与原 alpha（半透明 128），无鬼影、无深底叠加。 */
+const TRANSPARENT_PATCHED = [10, 160, 90] as const;
 
 function expectPixelNear(
   image: DecodedImage,
@@ -468,8 +446,10 @@ test("semi-transparent patches replace pixels (no ghost/alpha stacking) across o
   await page.getByRole("button", { name: "保存标注图" }).click();
   await expect.poll(() => uploads.length).toBe(1);
   const baseline = await decodeUpload(page, uploads[0]!.body, "image/png");
-  // 基线：半透明洋红水印叠在绿背景上的 PNG 深底合成值。
-  expectPixelNear(baseline, 48, 20, [123, 27, 131], 6);
+  // 基线：半透明洋红水印直接保留（alpha 128），不与深底合成。
+  expectPixelNear(baseline, 48, 20, [224, 32, 240], 6);
+  expect(baseline.pixels[(20 * 96 + 48) * 4 + 3]).toBeGreaterThan(0);
+  expect(baseline.pixels[(20 * 96 + 48) * 4 + 3]).toBeLessThan(255);
 
   const applyInpaintOnce = async () => {
     await page.getByRole("button", { name: "去水印" }).click();
@@ -483,8 +463,8 @@ test("semi-transparent patches replace pixels (no ghost/alpha stacking) across o
   };
   await applyInpaintOnce();
 
-  // 第一次应用：导出像素 = 0.5×绿 + 0.5×深底（替换式），旧实现会保留
-  // 原水印鬼影（≈ 0.5×绿 + 0.5×旧水印）而在此失败。
+  // 第一次应用：导出像素 = 补丁绿原色（alpha 128 保留），旧实现会保留
+  // 原水印鬼影（补丁透出旧水印）而在此失败。
   await page.getByRole("button", { name: "保存标注图" }).click();
   await expect.poll(() => uploads.length).toBe(2);
   const firstApplied = await decodeUpload(page, uploads[1]!.body, "image/png");
@@ -622,6 +602,7 @@ test("screenshot session mode exports applied inpaint pixels for explicit recogn
         "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
       sessionId: "inpaint-session-e2e",
       revision: 1,
+      excludeBoxes: [],
     },
   });
   const recognitionInput = await decodeUpload(

@@ -187,6 +187,23 @@ public sealed partial class MainWindow : Window
       else DispatcherQueue.TryEnqueue(MarkPins);
     };
     commandHandler.PinnedTextEnvironmentChanged += InvalidatePinnedTextLayers;
+    commandHandler.ScreenshotSceneRecognitionHandoff += sessionId =>
+    {
+      void Handoff()
+      {
+        // scene 显式识别交接：先解除引用再关窗，避免 Closed 处理器把
+        // 会话关闭而取消刚提交的任务；随后主窗口切到识别承载面。
+        if (imageEditor is { } editor && editor.SessionId == sessionId)
+        {
+          editor.TransferOwnerRestorationTo(commandHandler.PendingScreenshotCaptureScene);
+          imageEditor = null;
+          editor.Close();
+        }
+        ShowAndNavigate("recognition");
+      }
+      if (DispatcherQueue.HasThreadAccess) Handoff();
+      else DispatcherQueue.TryEnqueue(Handoff);
+    };
     application = new WorkbenchApplication(
       DesktopWorkbenchCommandHandler.Capabilities,
       WorkbenchRoute.Recognition,
@@ -677,7 +694,7 @@ public sealed partial class MainWindow : Window
       throw new InvalidOperationException("最多同时打开四张贴图，请先关闭一张。");
     }
     var pinned = new PinnedImageWindow(image, sessionId, revision, layer, excludeBoxes,
-      () => PreparePinTextAsync(sessionId, revision, image.Path),
+      () => PreparePinTextAsync(sessionId, revision, image.Path, excludeBoxes),
       () => supervisorInstanceId?.Invoke());
     pinned.Closed += closed =>
     {
@@ -690,14 +707,14 @@ public sealed partial class MainWindow : Window
   }
 
   private async Task<RecognitionTextLayerState?> PreparePinTextAsync(
-    Guid sessionId, long revision, string imagePath)
+    Guid sessionId, long revision, string imagePath,
+    IReadOnlyList<WorkbenchExclusionBox> excludeBoxes)
   {
     var key = (sessionId, revision);
     if (!pinTextTasks.TryGetValue(key, out var entry))
     {
       var cancellation = new CancellationTokenSource();
-      entry = (commandHandler.PreparePinnedTextLayerAsync(
-        sessionId, revision, imagePath, cancellation.Token), cancellation);
+      entry = (PrepareMaskedPinTextAsync(sessionId, revision, imagePath, excludeBoxes, cancellation.Token), cancellation);
       pinTextTasks.Add(key, entry);
     }
     try
@@ -716,6 +733,36 @@ public sealed partial class MainWindow : Window
       if (pinTextTasks.TryGetValue(key, out var current) &&
           ReferenceEquals(current.Task, entry.Task)) RemovePinTextTask(key);
       throw;
+    }
+  }
+
+  /// <summary>
+  /// 贴图取字输入按需烘焙：临时副本只含白色遮罩像素，识别结束即删除；
+  /// 贴图自身的显示/复制/保存像素不受影响。整图被遮罩时拒绝取字而非拒绝贴图。
+  /// </summary>
+  private async Task<RecognitionTextLayerState?> PrepareMaskedPinTextAsync(
+    Guid sessionId, long revision, string imagePath,
+    IReadOnlyList<WorkbenchExclusionBox> excludeBoxes,
+    CancellationToken cancellationToken)
+  {
+    if (excludeBoxes.Count == 0)
+      return await commandHandler.PreparePinnedTextLayerAsync(
+        sessionId, revision, imagePath, cancellationToken);
+    if (PinnedTextMask.CoversEntireImage(excludeBoxes))
+      throw new PinnedTextPreparationException(
+        "整张图都在屏蔽区内：没有可取文字；贴图本身保持不变。");
+    string masked = await PinnedTextMask.CreateMaskedPngAsync(
+      imagePath, excludeBoxes, cancellationToken);
+    try
+    {
+      return await commandHandler.PreparePinnedTextLayerAsync(
+        sessionId, revision, masked, cancellationToken);
+    }
+    finally
+    {
+      try { File.Delete(masked); }
+      catch (IOException) { }
+      catch (UnauthorizedAccessException) { }
     }
   }
 

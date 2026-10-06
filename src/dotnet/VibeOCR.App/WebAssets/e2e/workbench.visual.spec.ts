@@ -277,8 +277,11 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
   await color.press("ArrowDown");
   await color.press("Tab");
   await expect(color).not.toBeFocused();
-  // 等待当前输出的编码完成和预览布局就绪，再测量缩放、截取稳定画面。
-  await expect(page.getByText(/实际体积 [\d.]+ (B|KB|MB)/)).toBeVisible();
+  // 编码只在显式请求时执行；检查实际大小后再验证键盘与布局。
+  await page.getByRole("button", { name: "检查文件大小" }).click();
+  await expect(
+    page.getByText(/文件大小：image\/png · 实际 [\d.]+ (B|KB|MB)/),
+  ).toBeVisible();
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth,
@@ -307,7 +310,9 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
     )
     .toBeGreaterThan(fitWidth * 1.9);
   await page.getByRole("combobox", { name: "显示缩放" }).selectOption("1");
-  await expect(page.getByText(/实际体积 [\d.]+ (B|KB|MB)/)).toBeVisible();
+  await expect(
+    page.getByText(/文件大小：image\/png · 实际 [\d.]+ (B|KB|MB)/),
+  ).toBeVisible();
   await expect(page).toHaveScreenshot("screenshot-session-light-1024x900.png", {
     fullPage: true,
   });
