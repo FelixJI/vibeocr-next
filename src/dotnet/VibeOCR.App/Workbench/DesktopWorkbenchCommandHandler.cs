@@ -883,9 +883,11 @@ public sealed class DesktopWorkbenchCommandHandler :
   }
 
   /// <summary>
-  /// 普通截图动作栏显式识别：携带唯一 typed 意图，先走既有权威目录校验
-  /// 再按任务模式严格 resolve（无默认回退），只提交一次任务；新输入取代
-  /// 旧截图会话，终态由主窗识别承载面显式展示。
+  /// 普通截图动作栏显式识别：携带唯一 typed 意图，提交前经
+  /// <see cref="EnsureSelectionLoadedForSubmitAsync"/> 取得权威目录（未
+  /// attach 时等待 Supervisor 启动；环境切换窗口取消本次提交，不以空
+  /// 快照提交），再按任务模式严格 resolve（显式 modeId 优先，无默认回退），
+  /// 只提交一次任务；新输入取代旧截图会话，终态由主窗识别承载面显式展示。
   /// </summary>
   private async Task CompleteScreenshotSelectionRecognitionAsync(
     long generation,
@@ -896,7 +898,17 @@ public sealed class DesktopWorkbenchCommandHandler :
     bool terminalVisible = false;
     try
     {
-      bool deferredSelection = !await EnsureSelectionLoadedAsync(cancellationToken);
+      // 提交前权威目录：与单次/批量/PDF 同一契约；切换窗口返回 false 时
+      // 取消本次提交（沿用本方法 cancel 终态/finally 清理），不猜默认。
+      if (!await EnsureSelectionLoadedForSubmitAsync(cancellationToken))
+      {
+        if (generation != Volatile.Read(ref recognitionGeneration)) return;
+        recognition?.InvalidateResult();
+        resultActions = null;
+        StateChanged?.Invoke(new RecognitionWorkbenchState(false, "recognition.cancelled"));
+        terminalVisible = true;
+        return;
+      }
       if (generation != Volatile.Read(ref recognitionGeneration)) return;
       // 动作栏合同：仅 ready 模式可提交；目录在菜单渲染后变化（环境切换）
       // 或需要准备的模式一律拒绝，不自动触发依赖准备/下载。
@@ -907,7 +919,8 @@ public sealed class DesktopWorkbenchCommandHandler :
         throw new RecognitionModeUnavailableException(
           $"截图识别模式 {modeId} 当前不可用（{chosen?.Availability ?? "未在目录中"}），已拒绝执行；请在设置中准备后重试。");
       }
-      // typed 意图冻结为任务模式：模式缺失/不可用直接拒绝，不回退默认。
+      // typed 意图冻结为任务模式：模式缺失/不可用直接拒绝，不回退默认；
+      // 新版 SynchronizeRecognitionMode 中显式 TaskEngine 优先于继承默认。
       ApplyTaskEngine(modeId);
       SynchronizeRecognitionMode(requireUsable: true);
       // 显式识别取代旧截图会话（关闭旧 scene 编辑窗），不新建编辑会话。
@@ -917,22 +930,6 @@ public sealed class DesktopWorkbenchCommandHandler :
       RecognitionWorkbenchState state = await RunRecognitionAsync(
         viewModel => viewModel.RecognizeCapturedInputAsync(input, cancellationToken),
         cancellationToken);
-      if (deferredSelection)
-      {
-        try
-        {
-          await EnsureSelectionLoadedAsync(cancellationToken);
-          state = state with { Engines = RecognitionEngines() };
-        }
-        catch (OperationCanceledException)
-        {
-          throw;
-        }
-        catch (Exception)
-        {
-          // 识别已完成；目录补载失败只影响引擎列表，不推翻结果。
-        }
-      }
       if (generation == Volatile.Read(ref recognitionGeneration))
       {
         StateChanged?.Invoke(state);

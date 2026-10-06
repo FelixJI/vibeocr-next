@@ -3040,6 +3040,68 @@ public sealed class ScreenshotSessionWorkbenchTests
     }
   }
 
+  [Fact]
+  public async Task EnvironmentSwitchWindowCancelsScreenshotSelectionRecognitionWithoutSubmit()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new SelectionSubmitClient();
+      var inputs = new SelectionActionCaptureInput(
+        ScreenshotSelectionAction.Recognize, "windows_text");
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore, settings,
+        inferenceAttached: () => true);
+      // 与 DefaultModeRequestContractTests 同一真实状态位：环境切换窗口
+      // 内提交必须取消，不能继续使用切换前的目录发出请求。
+      System.Reflection.FieldInfo switching = typeof(DesktopWorkbenchCommandHandler)
+        .GetField("environmentSwitching",
+          System.Reflection.BindingFlags.NonPublic |
+          System.Reflection.BindingFlags.Instance)!;
+      int terminalShown = 0;
+      handler.ScreenshotSelectionRecognized += () => terminalShown++;
+
+      switching.SetValue(handler, 1);
+      RecognitionWorkbenchState cancelled;
+      using (var completed = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.StatusCode == "recognition.cancelled" &&
+          state.ScreenshotSession is null))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        cancelled = await completed.Task;
+      }
+      Assert.Equal("recognition.cancelled", cancelled.StatusCode);
+      Assert.Empty(inference.Requests);
+      Assert.Null(handler.CurrentImageSessionId);
+      await UntilAsync(() => terminalShown == 1);
+
+      // 退出切换窗口后同一链路恢复：仅一次显式模式提交，无默认回退。
+      switching.SetValue(handler, 0);
+      RecognitionWorkbenchState done;
+      using (var recovered = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.Result is not null))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        done = await recovered.Task;
+      }
+      SubmitRequest request = Assert.Single(inference.Requests);
+      Assert.Equal("OCR", request.Pipeline.PipelineId);
+      Assert.Equal(OcrEngine.Windows, request.Pipeline.Engine);
+      Assert.Equal("recognition.completed", done.StatusCode);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
   [Theory]
   [InlineData(ScreenshotSelectionAction.Copy)]
   [InlineData(ScreenshotSelectionAction.Save)]
