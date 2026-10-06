@@ -753,6 +753,55 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   [Fact]
+  public async Task TwentyEditorCyclesReleaseInputAndAnnotationLeasesWithoutStartingOcr()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new ThrowingSubmitClient();
+      var recognition = new RecognitionViewModel(inference, new FixedCaptureInput());
+      var platform = new RecordingAnnotatedImagePlatform();
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(recognition, root, broker, annotations,
+        platform: platform, inferenceAttached: () => false);
+      for (int cycle = 0; cycle < 20; cycle++)
+      {
+        RecognitionWorkbenchState opened;
+        using (var ready = new RecognitionStateAwaiter(handler,
+          state => !state.IsBusy && state.ScreenshotSession is not null))
+        {
+          await handler.ExecuteAsync(new SelectImageEditFileCommand(), TestContext.Current.CancellationToken);
+          opened = await ready.Task;
+        }
+        Guid sessionId = Guid.Parse(opened.ScreenshotSession!.SessionId);
+        Uri inputUri = new(opened.Input!.Url);
+        await handler.ExecuteAsync(new NotifyScreenshotSessionRevisionCommand(sessionId, 1),
+          TestContext.Current.CancellationToken);
+        WorkbenchAnnotationLease exported = UploadAnnotation(annotations, AnnotationPng);
+        Assert.Null((await handler.ExecuteAsync(new CopyScreenshotImageCommand(
+          exported.ResourceUri.AbsoluteUri, sessionId, 1), TestContext.Current.CancellationToken)).Error);
+        Assert.Equal(AnnotationPng, platform.CopiedBytes);
+        Assert.Throws<WorkbenchAnnotationAccessException>(() => annotations.Take(exported.ResourceUri));
+        await handler.ExecuteAsync(new CloseScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+        Assert.Null(recognition.CurrentInput);
+        Assert.Null(handler.CurrentImageSessionId);
+        await Assert.ThrowsAsync<WorkbenchResourceAccessException>(async () =>
+          await broker.OpenAsync(inputUri, TestContext.Current.CancellationToken));
+        // 枚举曾返回随即已消失的目录项；物理删除最多等待一秒，永久残留仍失败。
+        long deadline = Environment.TickCount64 + 1000;
+        string[] remaining;
+        while ((remaining = Directory.GetFiles(root, "*", SearchOption.AllDirectories)).Length > 0 &&
+          Environment.TickCount64 < deadline)
+          await Task.Delay(10, TestContext.Current.CancellationToken);
+        Assert.True(remaining.Length == 0, string.Join(Environment.NewLine, remaining));
+      }
+      Assert.Equal(0, inference.SubmitCalls);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
   public async Task FileEditorUsesTheSameRevisionContractWithoutOpeningCaptureScene()
   {
     string root = TemporaryRoot();
