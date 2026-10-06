@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AppActions } from "../app/types";
@@ -156,6 +162,108 @@ function editorProps(overrides?: {
 }
 
 describe("editor export pixels and previews", () => {
+  it("coalesces a pen burst without losing its committed points and cancels stale frames", async () => {
+    stubCanvasStack();
+    vi.stubGlobal("PointerEvent", MouseEvent);
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    });
+    const cancelFrame = vi.fn((id: number) => frames.delete(id));
+    vi.stubGlobal("cancelAnimationFrame", cancelFrame);
+    const flushFrame = () => {
+      act(() => {
+        const pending = [...frames.values()];
+        frames.clear();
+        pending.forEach((callback) => callback(0));
+      });
+    };
+    const actions = createActions();
+    const props = editorProps({ actions });
+    const { rerender, unmount } = render(<ImageCanvasEditor {...props} />);
+    await act(async () => {});
+    flushFrame();
+    const canvas = screen.getByLabelText("图片检查画布");
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      right: 900,
+      bottom: 600,
+      width: 900,
+      height: 600,
+      toJSON: () => ({}),
+    });
+    const calls = state.canvases.find(
+      (entry) => entry.element === canvas,
+    )!.calls;
+    calls.length = 0;
+    fireEvent.click(screen.getByRole("button", { name: "画笔" }));
+    fireEvent.pointerDown(canvas, { clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(canvas, { clientX: 120, clientY: 120 });
+    fireEvent.pointerMove(canvas, { clientX: 160, clientY: 160 });
+    fireEvent.pointerUp(canvas, { clientX: 160, clientY: 160 });
+    expect(calls).toHaveLength(0);
+    expect(frames.size).toBe(1);
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "recognition.notifyScreenshotRevision",
+      sessionId: "session-a",
+      revision: 1,
+    });
+    flushFrame();
+    expect(calls.filter((call) => call.op === "clearRect")).toHaveLength(1);
+    expect(
+      calls.filter((call) => call.op === "lineTo").map((call) => call.args),
+    ).toEqual([
+      [120, 120],
+      [160, 160],
+    ]);
+
+    // 取消只丢弃草稿：之后的 pointerup 不提交内容，也不绘制残留笔迹。
+    fireEvent.pointerDown(canvas, { clientX: 200, clientY: 200 });
+    fireEvent.pointerMove(canvas, { clientX: 250, clientY: 250 });
+    fireEvent.pointerCancel(canvas);
+    fireEvent.pointerUp(canvas, { clientX: 250, clientY: 250 });
+    expect(actions.run).toHaveBeenCalledTimes(1);
+    calls.length = 0;
+    flushFrame();
+    expect(
+      calls.filter((call) => call.op === "lineTo").map((call) => call.args),
+    ).toEqual([
+      [120, 120],
+      [160, 160],
+    ]);
+
+    // 换图发生在待画帧内：旧帧被取消，旧拖拽的松手不能标注新图。
+    fireEvent.pointerDown(canvas, { clientX: 300, clientY: 300 });
+    fireEvent.pointerMove(canvas, { clientX: 350, clientY: 350 });
+    const oldFrame = nextFrame;
+    rerender(
+      <ImageCanvasEditor {...props} source="https://app.vibeocr/new.png" />,
+    );
+    await act(async () => {});
+    expect(cancelFrame).toHaveBeenCalledWith(oldFrame);
+    fireEvent.pointerUp(canvas, { clientX: 350, clientY: 350 });
+    expect(actions.run).toHaveBeenCalledTimes(1);
+    calls.length = 0;
+    flushFrame();
+    expect(calls.some((call) => call.op === "lineTo")).toBe(false);
+    const image = calls.find((call) => call.op === "drawImage")!
+      .args[0] as HTMLImageElement;
+    expect(image.src).toBe("https://app.vibeocr/new.png");
+
+    fireEvent.pointerDown(canvas, { clientX: 400, clientY: 400 });
+    expect(frames.size).toBe(1);
+    const lastFrame = nextFrame;
+    unmount();
+    expect(cancelFrame).toHaveBeenCalledWith(lastFrame);
+    expect(frames.size).toBe(0);
+    expect(state.toBlobCalls).toBe(0);
+  });
+
   it("does not auto-encode a second preview after edits settle", async () => {
     vi.useFakeTimers();
     stubCanvasStack();
