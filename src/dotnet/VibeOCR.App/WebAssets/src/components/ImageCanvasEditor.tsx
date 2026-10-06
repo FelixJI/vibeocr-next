@@ -319,6 +319,9 @@ export function ImageCanvasEditor({
     setHistoryIndex(0);
     setDraftMark(undefined);
     setCropDraft(undefined);
+    dragStart.current = undefined;
+    resizeRef.current = undefined;
+    setResizeDraft(undefined);
     selectedMarkRef.current = undefined;
     setSelectedMark(undefined);
     sessionIdRef.current = session?.sessionId;
@@ -503,28 +506,34 @@ export function ImageCanvasEditor({
   ]);
 
   useEffect(() => {
-    draw(
-      canvasRef.current,
-      imageRef.current,
-      // 裁剪草稿即时生效：拖拽中草稿优先于已提交裁剪，提交后由 state.crop 接管。
-      cropDraft ? { ...state, crop: cropDraft } : state,
-      selectedMark,
-      resizeDraft
-        ? state.marks.map((mark, index) =>
-            index === resizeDraft.index ? resizeDraft.mark : mark,
-          )
-        : draftMark
-          ? [...state.marks, draftMark]
-          : state.marks,
-      true,
-      1,
-      // 预览与导出一致：JPEG 显式白底合成；PNG 不填底色，透明由
-      // 工作区 CSS 背景衬托，不把深色烧进图像内容。
-      outputFormat === "image/jpeg" ? "#ffffff" : undefined,
-      false,
-      inpaintLayer,
-    );
+    // 同帧只绘制最新草稿；提交/导出仍直接读取已提交文档。
+    const frame = requestAnimationFrame(() => {
+      draw(
+        canvasRef.current,
+        imageRef.current,
+        // 裁剪草稿即时生效：拖拽中草稿优先于已提交裁剪，提交后由 state.crop 接管。
+        cropDraft ? { ...state, crop: cropDraft } : state,
+        selectedMark,
+        resizeDraft
+          ? state.marks.map((mark, index) =>
+              index === resizeDraft.index ? resizeDraft.mark : mark,
+            )
+          : draftMark
+            ? [...state.marks, draftMark]
+            : state.marks,
+        true,
+        1,
+        // 预览与导出一致：JPEG 显式白底合成；PNG 不填底色，透明由
+        // 工作区 CSS 背景衬托，不把深色烧进图像内容。
+        outputFormat === "image/jpeg" ? "#ffffff" : undefined,
+        false,
+        inpaintLayer,
+      );
+    });
+    // 换图/会话、下一次更新或卸载都取消旧帧，避免旧文档覆盖新画面。
+    return () => cancelAnimationFrame(frame);
   }, [
+    resetKey,
     imageRevision,
     selectedMark,
     state,
@@ -2246,6 +2255,8 @@ export function ImageCanvasEditor({
             resizeRef.current = undefined;
             setResizeDraft(undefined);
             setCropDraft(undefined);
+            setDraftMark(undefined);
+            setInpaintDraft(undefined);
           }}
           onPointerDown={pointerDown}
           onPointerMove={pointerMove}
