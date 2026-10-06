@@ -27,7 +27,9 @@ public sealed class WindowsPlatformTests
             TestContext.Current.CancellationToken);
 
         IReadOnlyList<string> received = await forwarded.Task.WaitAsync(
-            TimeSpan.FromSeconds(5),
+            // CI runner 只有 4 核，兄弟测试并行阻塞线程池时，已完成的回执也可能
+            // 延迟数秒才恢复 await 续体；30 秒仍足以捕获监听器真正的死锁回归。
+            TimeSpan.FromSeconds(30),
             TestContext.Current.CancellationToken);
         Assert.Equal(["--open", @"C:\input files\scan.png"], received);
     }
