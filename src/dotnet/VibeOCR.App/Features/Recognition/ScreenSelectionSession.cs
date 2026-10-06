@@ -209,6 +209,20 @@ internal sealed class ScreenSelectionSession(int width, int height)
     ClearPreview();
   }
 
+  /// <summary>
+  /// 普通入口：把当前智能候选固化为选区（进入动作阶段）。此后悬停不再
+  /// 更换候选，句柄/键盘微调与重选沿用既有手动选区语义；指针活动或已
+  /// 有手动选区时不做任何事。
+  /// </summary>
+  public void ConfirmPreview()
+  {
+    if (IsPointerActive || Selection is not null) return;
+    if (ActiveSelection is not { } bounds) return;
+    Remember(null);
+    Selection = bounds;
+    ClearPreview();
+  }
+
   private void Remember(PhysicalRectangle? previous)
   {
     if (_undo.Count == 64) _undo.RemoveAt(0);

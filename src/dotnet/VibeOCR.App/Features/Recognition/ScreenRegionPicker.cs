@@ -22,7 +22,55 @@ public sealed record ScreenRegionSelection(
     int? PixelHeight = null)
 {
     internal ScreenshotCaptureScene? CaptureScene { get; init; }
+
+    /// <summary>
+    /// 普通截图入口动作栏选择的显式动作；null 或 <see cref="ScreenshotSelectionAction.Edit"/>
+    /// 表示沿用既有确认语义（现场编辑宿主）。专用直接入口不设置该值。
+    /// </summary>
+    internal ScreenshotSelectionAction? SelectionAction { get; init; }
+
+    /// <summary>动作栏识别菜单显式选择的 typed 模式/引擎 id；仅 Recognize 动作携带。</summary>
+    internal string? RecognitionModeId { get; init; }
 }
+
+/// <summary>普通截图选区动作阶段可选动作；沿 selection/input 一路承载到宿主，不新增服务抽象。</summary>
+public enum ScreenshotSelectionAction
+{
+    /// <summary>进入既有现场编辑宿主（普通入口的可见主动作）。</summary>
+    Edit,
+
+    /// <summary>按动作栏菜单显式选择的 typed 识别模式提交一次识别。</summary>
+    Recognize,
+
+    /// <summary>复制选区像素（复用既有会话本地输出）。</summary>
+    Copy,
+
+    /// <summary>保存选区像素（复用既有会话本地输出）。</summary>
+    Save,
+
+    /// <summary>把选区像素钉到桌面贴图（复用既有会话本地输出）。</summary>
+    Pin,
+
+    /// <summary>放弃本次截图并显式进入现有设置页。</summary>
+    OpenSettings,
+}
+
+/// <summary>
+/// 动作栏识别菜单的一条宿主动态 typed 目录投影：只携带既有 choice 的
+/// id/显示名/availability，picker 不复制引擎支持表或高级配方。
+/// </summary>
+public sealed record ScreenshotRecognitionModeEntry(
+    string ModeId,
+    string DisplayName,
+    string Availability,
+    string? ReasonCode = null);
+
+/// <summary>
+/// 普通截图入口的选区动作请求（宿主当前目录投影）。null 表示专用直接
+/// 入口：保留既有立即确认语义，不显示动作栏。
+/// </summary>
+public sealed record ScreenshotSelectionActions(
+    IReadOnlyList<ScreenshotRecognitionModeEntry> Modes);
 
 /// <summary>冻结桌面仅属于本次截图；确认后移交给同一窗口的编辑器。</summary>
 internal sealed class ScreenshotCaptureScene : IDisposable
@@ -93,6 +141,14 @@ internal sealed class ScreenshotOwnerRestoration
 public interface IScreenRegionPicker
 {
     Task<ScreenRegionSelection?> PickAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// 普通入口：携带动作栏目录投影调用。默认回落到直接入口行为，
+    /// 供专用识别/选字与自检 picker 保持既有立即确认语义。
+    /// </summary>
+    Task<ScreenRegionSelection?> PickAsync(
+        ScreenshotSelectionActions actions,
+        CancellationToken cancellationToken) => PickAsync(cancellationToken);
 }
 
 /// <summary>
@@ -118,7 +174,17 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     private const int VirtualScreenHeight = 79;
     private readonly Func<nint> _ownerWindow = ownerWindow ?? throw new ArgumentNullException(nameof(ownerWindow));
 
-    public async Task<ScreenRegionSelection?> PickAsync(CancellationToken cancellationToken)
+    public Task<ScreenRegionSelection?> PickAsync(CancellationToken cancellationToken) =>
+        PickAsyncCore(null, cancellationToken);
+
+    public Task<ScreenRegionSelection?> PickAsync(
+        ScreenshotSelectionActions actions,
+        CancellationToken cancellationToken) =>
+        PickAsyncCore(actions ?? throw new ArgumentNullException(nameof(actions)), cancellationToken);
+
+    private async Task<ScreenRegionSelection?> PickAsyncCore(
+        ScreenshotSelectionActions? selectionActions,
+        CancellationToken cancellationToken)
     {
         nint owner = _ownerWindow();
         bool visible = IsWindowVisible(owner);
@@ -149,7 +215,8 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
                 desktopBgra,
                 candidates,
                 keepForEditing: !scrolling,
-                cancellationToken);
+                cancellationToken,
+                selectionActions: selectionActions);
             if (selection is null)
             {
                 return null;
@@ -175,7 +242,12 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
             return new ScreenRegionSelection(
                 selected,
                 cropped,
-                selected.Width * 4) { CaptureScene = scene };
+                selected.Width * 4)
+            {
+                CaptureScene = scene,
+                SelectionAction = selection.SelectionAction,
+                RecognitionModeId = selection.RecognitionModeId,
+            };
         }
         catch
         {
@@ -196,7 +268,11 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
         }
     }
 
-  private sealed record OverlaySelection(PhysicalRectangle Bounds, ScreenshotCaptureScene? Scene);
+  private sealed record OverlaySelection(
+    PhysicalRectangle Bounds,
+    ScreenshotCaptureScene? Scene,
+    ScreenshotSelectionAction? SelectionAction = null,
+    string? RecognitionModeId = null);
 
   // 自检仅复用已经捕获的 synthetic 子窗口像素，不采样其他桌面区域。
   internal static async Task<ScreenshotCaptureScene> CreateSyntheticSceneAsync(
@@ -220,8 +296,13 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     SmartScreenCandidates candidates,
     bool keepForEditing,
     CancellationToken cancellationToken,
-    bool automaticSelection = false)
+    bool automaticSelection = false,
+    ScreenshotSelectionActions? selectionActions = null)
   {
+    // 普通入口：稳定选区后显示动作栏；专用直接入口保持既有立即确认。
+    bool ordinary = selectionActions is not null;
+    IReadOnlyList<ScreenshotRecognitionModeEntry> modeEntries =
+      selectionActions?.Modes ?? [];
     var completion = new TaskCompletionSource<OverlaySelection?>(TaskCreationOptions.RunContinuationsAsynchronously);
     Windows.Foundation.TypedEventHandler<object, WindowEventArgs> closeHandler =
       (_, _) => completion.TrySetResult(null);
@@ -258,7 +339,9 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     var sizeLabel = new TextBlock();
     var help = new TextBlock
     {
-      Text = "悬停智能取框，Tab 切换窗口/控件/父级；拖动手动框选\n单击选区 / Enter 确认 · 右键 / Esc 返回或退出 · 方向键微调 · Shift ×10 · Ctrl+方向键缩放\nCtrl+Z 撤销 · Ctrl+Y / Ctrl+Shift+Z 重做 · M 放大镜 · Ctrl+C 复制色号",
+      Text = ordinary
+        ? "悬停智能取框，Tab 切换窗口/控件/父级；拖动手动框选\n松开后在动作栏选择 编辑/识别/复制/保存/钉图 · Enter 编辑 · Esc 退出 · 右键返回上一步\n方向键微调 · Shift ×10 · Ctrl+方向键缩放 · Ctrl+Z 撤销 · Ctrl+Y / Ctrl+Shift+Z 重做 · M 放大镜 · Ctrl+C 复制色号"
+        : "悬停智能取框，Tab 切换窗口/控件/父级；拖动手动框选\n单击选区 / Enter 确认 · 右键 / Esc 返回或退出 · 方向键微调 · Shift ×10 · Ctrl+方向键缩放\nCtrl+Z 撤销 · Ctrl+Y / Ctrl+Shift+Z 重做 · M 放大镜 · Ctrl+C 复制色号",
       IsHitTestVisible = false,
     };
     var toolbar = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
@@ -399,12 +482,20 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
         QueueControlQuery();
       }
     }
-    void Finish(bool accept) => _ = FinishAsync(accept);
-    void CompleteSelection(bool accept)
+    void Finish(
+        bool accept,
+        ScreenshotSelectionAction action = ScreenshotSelectionAction.Edit,
+        string? recognitionModeId = null) =>
+      _ = FinishAsync(accept, action, recognitionModeId);
+    void CompleteSelection(
+        bool accept,
+        ScreenshotSelectionAction action = ScreenshotSelectionAction.Edit,
+        string? recognitionModeId = null)
     {
+      if (completion.Task.IsCompleted) return;
       PhysicalRectangle? result = accept && session.ActiveSelection is { } rect
           ? rect with { X = rect.X + desktop.X, Y = rect.Y + desktop.Y } : null;
-      if (result is { } bounds && keepForEditing)
+      if (result is { } bounds && action is ScreenshotSelectionAction.Edit && keepForEditing)
       {
         overlay.Closed -= closeHandler;
         canvas.ReleasePointerCaptures();
@@ -424,15 +515,39 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
         completion.TrySetResult(new OverlaySelection(bounds,
           new ScreenshotCaptureScene(overlay, sceneRoot, desktop, bounds)));
       }
+      else if (result is { } accepted)
+      {
+        // 非编辑动作不需要冻结现场：直接关闭选区窗口，交回截图前的桌面。
+        completion.TrySetResult(new OverlaySelection(accepted, null,
+          action is ScreenshotSelectionAction.Edit ? null : action, recognitionModeId));
+        overlay.Close();
+      }
       else
       {
-        completion.TrySetResult(result is { } accepted ? new OverlaySelection(accepted, null) : null);
+        completion.TrySetResult(null);
         overlay.Close();
       }
     }
-    async Task FinishAsync(bool accept)
+    async Task FinishAsync(
+      bool accept,
+      ScreenshotSelectionAction action = ScreenshotSelectionAction.Edit,
+      string? recognitionModeId = null,
+      bool fixSelectionOnly = false)
     {
       if (completion.Task.IsCompleted || (accept && (confirming || !session.CanConfirm))) return;
+      // 普通入口的单击确认只固化候选进入动作阶段；直接入口完成选区。
+      void Confirmed()
+      {
+        if (fixSelectionOnly)
+        {
+          session.ConfirmPreview();
+          Render();
+        }
+        else
+        {
+          CompleteSelection(true, action, recognitionModeId);
+        }
+      }
       if (accept && SmartScreenCandidates.CurrentDesktop() != desktop)
       {
         Finish(false);
@@ -486,11 +601,16 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
             Render();
             return;
           }
-          CompleteSelection(true);
+          Confirmed();
         });
         return;
       }
-      CompleteSelection(accept);
+      if (fixSelectionOnly)
+      {
+        Confirmed();
+        return;
+      }
+      CompleteSelection(accept, action, recognitionModeId);
     }
     void Back()
     {
@@ -536,9 +656,61 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     bool showMagnifier = true;
     string? colorHex = null;
     Windows.Foundation.Point? lastPoint = null;
-    confirm = AddButton("确认 (Enter)", () => Finish(true));
-    undo = AddButton("撤销", session.Undo);
-    redo = AddButton("重做", session.Redo);
+    // 普通入口动作栏：编辑是可见主动作（Enter），识别菜单只消费宿主目录
+    // 投影；复制/保存/钉图复用既有本地输出。直接入口保持旧工具条。
+    List<Button> selectionActionButtons = [];
+    MenuFlyout? recognizeMenu = null;
+    bool menuOpen = false;
+    if (ordinary)
+    {
+      Button edit = AddButton("编辑 (Enter)", () => Finish(true));
+      confirm = edit;
+      selectionActionButtons.Add(edit);
+      recognizeMenu = new MenuFlyout();
+      recognizeMenu.Opened += (_, _) => menuOpen = true;
+      recognizeMenu.Closed += (_, _) => menuOpen = false;
+      if (modeEntries.Count == 0)
+      {
+        recognizeMenu.Items.Add(new MenuFlyoutItem
+        {
+          Text = "识别目录尚未加载，请先打开设置检查运行环境",
+          IsEnabled = false,
+        });
+      }
+      else
+      {
+        foreach (ScreenshotRecognitionModeEntry entry in modeEntries)
+        {
+          bool ready = string.Equals(entry.Availability, "ready", StringComparison.Ordinal);
+          var item = new MenuFlyoutItem
+          {
+            Text = ready
+              ? entry.DisplayName
+              : $"{entry.DisplayName} — {UnavailableReason(entry.Availability)}",
+            IsEnabled = ready,
+          };
+          string modeId = entry.ModeId;
+          item.Click += (_, _) => Finish(true, ScreenshotSelectionAction.Recognize, modeId);
+          recognizeMenu.Items.Add(item);
+        }
+      }
+      recognizeMenu.Items.Add(new MenuFlyoutSeparator());
+      var openSettings = new MenuFlyoutItem { Text = "准备识别模式…（打开设置）" };
+      openSettings.Click += (_, _) => Finish(true, ScreenshotSelectionAction.OpenSettings);
+      recognizeMenu.Items.Add(openSettings);
+      var recognize = new Button { Content = "识别", Flyout = recognizeMenu };
+      toolbar.Children.Add(recognize);
+      selectionActionButtons.Add(recognize);
+      selectionActionButtons.Add(AddButton("复制", () => Finish(true, ScreenshotSelectionAction.Copy)));
+      selectionActionButtons.Add(AddButton("保存", () => Finish(true, ScreenshotSelectionAction.Save)));
+      selectionActionButtons.Add(AddButton("钉图", () => Finish(true, ScreenshotSelectionAction.Pin)));
+    }
+    else
+    {
+      confirm = AddButton("确认 (Enter)", () => Finish(true));
+      undo = AddButton("撤销", session.Undo);
+      redo = AddButton("重做", session.Redo);
+    }
     AddButton("重选", () => { if (session.ActiveSelection is not null || session.IsPointerActive) Back(); });
     AddButton("退出 (Esc)", () => Finish(false));
     foreach (Button button in toolbar.Children.OfType<Button>()) button.Click += (_, _) => Render();
@@ -608,10 +780,22 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
         session.ActiveSelection is null ? "" :
         session.PreviewIndex == 0 ? "窗口候选" : $"控件候选 · 层级 {session.PreviewIndex}";
       sizeLabel.Text = rect is { } r
-        ? $"{source} · {r.Width} × {r.Height} px · Enter 确认 / 单击" : "请选择区域";
-      confirm.IsEnabled = session.CanConfirm && !confirming;
-      undo.IsEnabled = session.CanUndo;
-      redo.IsEnabled = session.CanRedo;
+        ? $"{source} · {r.Width} × {r.Height} px · " +
+          (ordinary ? "Enter 编辑 / 动作栏选择动作" : "Enter 确认 / 单击")
+        : "请选择区域";
+      if (ordinary)
+      {
+        // 动作栏仅在选区已固化（拖拽松开或单击确认智能候选）后可操作；
+        // 悬停候选不触发动作，避免鼠标移动换图导致选错。
+        bool actionable = session.Selection is not null && !confirming;
+        foreach (Button button in selectionActionButtons) button.IsEnabled = actionable;
+      }
+      else
+      {
+        confirm.IsEnabled = session.CanConfirm && !confirming;
+        undo.IsEnabled = session.CanUndo;
+        redo.IsEnabled = session.CanRedo;
+      }
       panelBorder.Measure(new Windows.Foundation.Size(w, h));
       double pw = panelBorder.DesiredSize.Width, ph = panelBorder.DesiredSize.Height;
       Canvas.SetLeft(panelBorder, Math.Clamp(left, 0, Math.Max(0, w - pw)));
@@ -696,7 +880,10 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       canvas.ReleasePointerCapture(args.Pointer);
       Render();
       args.Handled = true;
-      if (confirmClick) Finish(true);
+      // 普通入口：单击确认智能候选只固化选区/进入动作阶段（不完成、不
+      // OCR）；手动选区内单击维持动作阶段。直接入口保留单击完成。
+      if (confirmClick && ordinary) _ = FinishAsync(true, fixSelectionOnly: true);
+      else if (confirmClick) Finish(true);
     };
     canvas.PointerCaptureLost += (_, args) => CancelPointer(args);
     canvas.PointerCanceled += (_, args) => CancelPointer(args);
@@ -718,7 +905,13 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
           int step = shift ? 10 : 1;
           switch (args.Key)
           {
-            case VirtualKey.Escape: Back(); break;
+            case VirtualKey.Escape:
+              // 普通动作阶段：菜单打开时先关菜单；再次 Esc 取消截图并恢复
+              // 原窗口状态。右键保留逐级返回；直接入口 Esc 仍逐级返回。
+              if (menuOpen) recognizeMenu?.Hide();
+              else if (ordinary) Finish(false);
+              else Back();
+              break;
             case VirtualKey.Enter: Finish(true); break;
             case VirtualKey.Tab: session.CyclePreview(); break;
             case VirtualKey.Z when control && shift: session.Redo(); break;
@@ -818,6 +1011,15 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       root.Children.Clear();
     }
   }
+    // 只映射目录 availability 的稳定词汇，不复制引擎/配方表；准备类条目
+    // 禁用并解释，不自动下载。
+    private static string UnavailableReason(string availability) => availability switch
+    {
+        "preparation_required" => "需要先准备依赖（可在设置中准备）",
+        "unavailable" => "当前运行环境不可用",
+        _ => "暂不可用",
+    };
+
     public static PhysicalRectangle ScaleSelection(
         PhysicalRectangle desktop,
         double left,

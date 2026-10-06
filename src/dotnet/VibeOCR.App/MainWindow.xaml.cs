@@ -204,6 +204,27 @@ public sealed partial class MainWindow : Window
       if (DispatcherQueue.HasThreadAccess) Handoff();
       else DispatcherQueue.TryEnqueue(Handoff);
     };
+    commandHandler.ScreenshotSelectionRecognized += () =>
+    {
+      // 普通截图动作栏显式识别终态：显示主窗并切到识别承载面（明确分支，
+      // 不贯穿所有动作无条件激活）。
+      void Show()
+      {
+        ShowAndNavigate("recognition");
+      }
+      if (DispatcherQueue.HasThreadAccess) Show();
+      else DispatcherQueue.TryEnqueue(Show);
+    };
+    commandHandler.ScreenshotSelectionSettingsRequested += () =>
+    {
+      // 动作栏“打开设置”：放弃本次截图并显式进入现有设置页，不自动安装。
+      void OpenSettings()
+      {
+        ShowAndNavigate("settings");
+      }
+      if (DispatcherQueue.HasThreadAccess) OpenSettings();
+      else DispatcherQueue.TryEnqueue(OpenSettings);
+    };
     application = new WorkbenchApplication(
       DesktopWorkbenchCommandHandler.Capabilities,
       WorkbenchRoute.Recognition,

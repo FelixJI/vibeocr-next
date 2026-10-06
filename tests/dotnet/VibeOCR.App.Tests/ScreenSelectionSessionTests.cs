@@ -333,4 +333,83 @@ public sealed class ScreenSelectionSessionTests
     Assert.Null(session.ActiveSelection);
     Assert.False(session.CanUndo);
   }
+
+  // #187 普通入口动作阶段：单击确认智能候选只固化选区，不进入旧立即
+  // 完成分支；固化后悬停不换候选、键盘微调/重选/撤销可用。
+
+  [Fact]
+  public void ConfirmPreviewFreezesCurrentCandidateIntoActionPhase()
+  {
+    var session = new ScreenSelectionSession(300, 200);
+    var window = new PhysicalRectangle(10, 10, 200, 100);
+    var control = new PhysicalRectangle(20, 20, 60, 40);
+    session.SetPreview([window, control]);
+    session.CyclePreview();
+    Assert.Equal(control, session.ActiveSelection);
+
+    session.ConfirmPreview();
+    Assert.Equal(control, session.Selection);
+    Assert.Equal(control, session.ActiveSelection);
+    Assert.True(session.CanConfirm);
+    Assert.True(session.CanUndo);
+
+    // 固化后悬停/新候选不再改变动作阶段基准。
+    session.SetPreview([new(50, 50, 100, 80)]);
+    Assert.Equal(control, session.ActiveSelection);
+    Assert.Equal(control, session.Selection);
+
+    // 键盘微调现在作用于固化选区（旧实现 preview 未固化时不可用）。
+    session.Adjust(5, 5, false);
+    Assert.Equal(new PhysicalRectangle(25, 25, 60, 40), session.Selection);
+
+    // 重选：清除固化选区回到空状态，可再次框选/退出。
+    Assert.False(session.Back());
+    Assert.Null(session.Selection);
+    Assert.False(session.CanConfirm);
+    Assert.True(session.Back());
+  }
+
+  [Fact]
+  public void ConfirmPreviewUndoRestoresEmptySelection()
+  {
+    var session = new ScreenSelectionSession(200, 100);
+    session.SetPreview([new(10, 10, 80, 60)]);
+    session.ConfirmPreview();
+    Assert.True(session.CanUndo);
+    session.Undo();
+    Assert.Null(session.Selection);
+    Assert.Null(session.ActiveSelection);
+    // 撤销后可重新悬停候选并再次固化。
+    session.SetPreview([new(0, 0, 50, 40)]);
+    Assert.Equal(new PhysicalRectangle(0, 0, 50, 40), session.ActiveSelection);
+    session.ConfirmPreview();
+    Assert.Equal(new PhysicalRectangle(0, 0, 50, 40), session.Selection);
+  }
+
+  [Fact]
+  public void ConfirmPreviewRequiresStablePointerAndNoManualSelection()
+  {
+    var session = new ScreenSelectionSession(200, 100);
+    // 无候选：固化不做事。
+    session.ConfirmPreview();
+    Assert.Null(session.Selection);
+    Assert.False(session.CanUndo);
+    // 指针活动（拖拽中）：不固化。
+    session.SetPreview([new(10, 10, 80, 60)]);
+    session.Begin(new(40, 40));
+    Assert.True(session.IsPointerActive);
+    session.ConfirmPreview();
+    Assert.Null(session.Selection);
+    session.End(new(40, 40));
+    // 单击确认（End 返回 true）本身不固化：由宿主普通入口调用
+    // ConfirmPreview 把当前候选固化为选区。
+    session.ConfirmPreview();
+    var fixedRect = new PhysicalRectangle(10, 10, 80, 60);
+    Assert.Equal(fixedRect, session.Selection);
+    bool undoBefore = session.CanUndo;
+    // 已有固化选区：再次固化不改变选区、不叠加历史。
+    session.ConfirmPreview();
+    Assert.Equal(fixedRect, session.Selection);
+    Assert.Equal(undoBefore, session.CanUndo);
+  }
 }
