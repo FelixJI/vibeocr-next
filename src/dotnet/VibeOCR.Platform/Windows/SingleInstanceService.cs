@@ -10,7 +10,7 @@ public sealed class SingleInstanceService : IAsyncDisposable
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Mutex _marker;
     private readonly string _pipeName;
-    private readonly Task? _listener;
+    private readonly Thread? _listener;
 
     public SingleInstanceService(
         string instanceName,
@@ -31,16 +31,24 @@ public sealed class SingleInstanceService : IAsyncDisposable
         NamedPipeServerStream? pendingServer = null;
         if (createdNew)
         {
-            // Create the listening pipe before the mutex ownership becomes
-            // observable, so a secondary launch can always connect without
-            // depending on thread-pool scheduling of the listener task.
+            // Create the listening pipe before mutex ownership becomes
+            // observable so a secondary launch can always connect without
+            // waiting for listener startup.
             pendingServer = CreateServer(_pipeName);
         }
 
         IsPrimary = createdNew;
         if (pendingServer is not null)
         {
-            _listener = Task.Run(() => ListenAsync(pendingServer));
+            // A dedicated thread keeps activation delivery independent of
+            // thread-pool scheduling; pool starvation must not delay or
+            // silently drop forwarded arguments.
+            _listener = new Thread(() => Listen(pendingServer))
+            {
+                IsBackground = true,
+                Name = $"{normalized}-activation-listener",
+            };
+            _listener.Start();
         }
     }
 
@@ -92,56 +100,77 @@ public sealed class SingleInstanceService : IAsyncDisposable
         PipeDirection.In,
         1,
         PipeTransmissionMode.Byte,
-        PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly,
+        PipeOptions.CurrentUserOnly,
         64 * 1024,
         64 * 1024);
 
-    private async Task ListenAsync(NamedPipeServerStream firstServer)
+    private void Listen(NamedPipeServerStream firstServer)
     {
         NamedPipeServerStream? prepared = firstServer;
         while (!_shutdown.IsCancellationRequested)
         {
+            NamedPipeServerStream? server = null;
             try
             {
-                await using var server = prepared ?? CreateServer(_pipeName);
+                server = prepared ?? CreateServer(_pipeName);
                 prepared = null;
-                await server.WaitForConnectionAsync(_shutdown.Token).ConfigureAwait(false);
+                server.WaitForConnection();
                 using var buffer = new MemoryStream();
-                await server.CopyToAsync(buffer, _shutdown.Token).ConfigureAwait(false);
-                if (buffer.Length > 64 * 1024)
+                server.CopyTo(buffer);
+                if (buffer.Length <= 64 * 1024)
                 {
-                    continue;
+                    string[] arguments = JsonSerializer.Deserialize<string[]>(buffer.ToArray()) ?? [];
+                    _argumentHandler(arguments).GetAwaiter().GetResult();
                 }
-
-                string[] arguments = JsonSerializer.Deserialize<string[]>(buffer.ToArray()) ?? [];
-                await _argumentHandler(arguments).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
+            catch (Exception)
             {
-                break;
+                // A malformed or aborted activation must not disable future
+                // forwarding; cancellation exits via the loop condition.
             }
-            catch (Exception) when (!_shutdown.IsCancellationRequested)
+            finally
             {
-                // A malformed activation must not disable future forwarding.
+                server?.Dispose();
             }
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
         _shutdown.Cancel();
         if (_listener is not null)
         {
-            try
+            Knock();
+            if (_listener.Join(TimeSpan.FromSeconds(5)))
             {
-                await _listener.ConfigureAwait(false);
+                _shutdown.Dispose();
             }
-            catch (OperationCanceledException)
-            {
-            }
+        }
+        else
+        {
+            _shutdown.Dispose();
         }
 
         _marker.Dispose();
-        _shutdown.Dispose();
+        return ValueTask.CompletedTask;
+    }
+
+    private void Knock()
+    {
+        // Wake a listener blocked in WaitForConnection so it can observe the
+        // shutdown flag; the empty connection is discarded by Listen.
+        try
+        {
+            using var knock = new NamedPipeClientStream(
+                ".",
+                _pipeName,
+                PipeDirection.Out,
+                PipeOptions.CurrentUserOnly);
+            knock.Connect(500);
+        }
+        catch (Exception)
+        {
+            // The listener was not waiting; the shutdown flag ends the loop.
+        }
     }
 }
