@@ -28,10 +28,19 @@ public sealed class SingleInstanceService : IAsyncDisposable
 
         _pipeName = $"{normalized}-activation";
         _marker = new Mutex(false, $@"Local\{normalized}", out bool createdNew);
-        IsPrimary = createdNew;
-        if (IsPrimary)
+        NamedPipeServerStream? pendingServer = null;
+        if (createdNew)
         {
-            _listener = Task.Run(ListenAsync);
+            // Create the listening pipe before the mutex ownership becomes
+            // observable, so a secondary launch can always connect without
+            // depending on thread-pool scheduling of the listener task.
+            pendingServer = CreateServer(_pipeName);
+        }
+
+        IsPrimary = createdNew;
+        if (pendingServer is not null)
+        {
+            _listener = Task.Run(() => ListenAsync(pendingServer));
         }
     }
 
@@ -78,20 +87,24 @@ public sealed class SingleInstanceService : IAsyncDisposable
         throw new IOException("Primary instance did not accept forwarded arguments.", lastError);
     }
 
-    private async Task ListenAsync()
+    private static NamedPipeServerStream CreateServer(string pipeName) => new(
+        pipeName,
+        PipeDirection.In,
+        1,
+        PipeTransmissionMode.Byte,
+        PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly,
+        64 * 1024,
+        64 * 1024);
+
+    private async Task ListenAsync(NamedPipeServerStream firstServer)
     {
+        NamedPipeServerStream? prepared = firstServer;
         while (!_shutdown.IsCancellationRequested)
         {
             try
             {
-                await using var server = new NamedPipeServerStream(
-                    _pipeName,
-                    PipeDirection.In,
-                    1,
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly,
-                    64 * 1024,
-                    64 * 1024);
+                await using var server = prepared ?? CreateServer(_pipeName);
+                prepared = null;
                 await server.WaitForConnectionAsync(_shutdown.Token).ConfigureAwait(false);
                 using var buffer = new MemoryStream();
                 await server.CopyToAsync(buffer, _shutdown.Token).ConfigureAwait(false);
