@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "VibeOCR Local Runtime API",
-    "version": "2.9.0",
+    "version": "2.10.0",
     "description": "Authoritative Runtime API v2. The historical openapi.snapshot.json is non-authoritative."
   },
   "servers": [
@@ -5435,7 +5435,7 @@
           },
           "extra": {
             "type": "object",
-            "description": "When ocr.mineru-remote-api.v1 is advertised, mineru_connection selects the instance-wide MinerU connection: an object with mode local or remote, api_url (HTTP(S) service root, optional reverse-proxy path; no userinfo, query or fragment), and optional api_key (Bearer credential without CR/LF). Omission selects local mode. Remote mode requires a nonempty api_url and uses the complete MinerU 4 V1 parsing API without local MinerU dependencies or models. Clients MUST NOT send mineru_connection to runtimes lacking this capability. Invalid settings MUST be rejected without replacing the prior configuration. Active jobs MUST retain their original connection; servers may reject connection changes while jobs are active. Remote failures MUST NOT fall back to local execution. Credentials MUST NOT appear in logs or diagnostics or be forwarded to another origin. Remote service processes and model residency are owned by the remote deployment, not by local preload/release or TTL settings. Other extra keys retain their existing semantics.",
+            "description": "When ocr.mineru-remote-api.v1 is advertised, mineru_connection selects the instance-wide MinerU connection: an object with mode local or remote, api_url (HTTP(S) service root, optional reverse-proxy path; no userinfo, query or fragment), and optional api_key (Bearer credential without CR/LF). Omission selects local mode. Remote mode requires a nonempty api_url and uses the complete MinerU 4 V1 parsing API without local MinerU dependencies or models. Clients MUST NOT send mineru_connection to runtimes lacking this capability. Invalid settings MUST be rejected without replacing the prior configuration. Active jobs MUST retain their original connection; servers may reject connection changes while jobs are active. Remote failures MUST NOT fall back to local execution. Credentials MUST NOT appear in logs or diagnostics or be forwarded to another origin. Remote service processes and model residency are owned by the remote deployment, not by local preload/release or TTL settings. When ocr.default-recognition-mode.v1 is advertised, default_recognition_mode persists the instance-wide default recognition mode id (ocr.recognition-modes.v1 catalog id). A missing key keeps the legacy default rapid_text; GET /v2/settings echoes the resolved committed default so clients never copy the fallback rule. Every write validates the value type and catalog id, and availability only when the default changes; a stored value that can no longer be parsed or resolved is echoed verbatim so clients can surface and repair it. Invalid snapshots are rejected without replacing prior settings. Clients MUST NOT send default_recognition_mode to runtimes lacking this capability. Explicit per-job mode overrides keep precedence, submitted jobs keep their submit-time parameters, and saving the default never installs components or changes any environment. Other extra keys retain their existing semantics.",
             "additionalProperties": true
           },
           "download_source_ids": {

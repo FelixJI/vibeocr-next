@@ -71,6 +71,8 @@ public static class WorkbenchBridgeCodec
     ["mode", "apiUrl"];
   private static readonly HashSet<string> MineruConnectionArgumentFields =
     ["mode", "apiUrl", "apiKey"];
+  private static readonly HashSet<string> DefaultModeArgumentFields = ["mode"];
+  private const int MaxRecognitionModeIdLength = 64;
   private static readonly HashSet<string> TaskEngineArgumentFields = ["engine"];
   private static readonly HashSet<string> ResourceUriArgumentFields = ["resourceUri"];
   private static readonly HashSet<string> SessionRevisionArgumentFields =
@@ -720,6 +722,8 @@ public static class WorkbenchBridgeCodec
           arguments.GetProperty("enabled").GetBoolean());
       case ("settings", "setMineruConnection"):
         return ParseMineruConnection(arguments);
+      case ("settings", "setDefaultRecognitionMode"):
+        return ParseDefaultRecognitionMode(arguments);
       case ("settings", "prepareMineruConnection"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new PrepareMineruConnectionCommand();
@@ -962,6 +966,27 @@ public static class WorkbenchBridgeCodec
         "Workbench MinerU api key is invalid.");
     }
     return new SetMineruConnectionCommand(mode, apiUrl, apiKey);
+  }
+
+  private static SetDefaultRecognitionModeCommand ParseDefaultRecognitionMode(
+    JsonElement arguments)
+  {
+    // 仅接受非空字符串模式 id；未知/不可用由宿主目录校验 fail closed。
+    if (arguments.ValueKind != JsonValueKind.Object ||
+      !arguments.TryGetProperty("mode", out JsonElement modeElement) ||
+      modeElement.ValueKind != JsonValueKind.String)
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench default recognition mode is invalid.");
+    }
+    string mode = modeElement.GetString()!;
+    if (string.IsNullOrWhiteSpace(mode) || mode.Length > MaxRecognitionModeIdLength)
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench default recognition mode is invalid.");
+    }
+    EnsureObjectWithFields(arguments, DefaultModeArgumentFields, "command arguments");
+    return new SetDefaultRecognitionModeCommand(mode);
   }
 
   private static string ParseEnvironmentId(JsonElement arguments)
@@ -1210,6 +1235,13 @@ public static class WorkbenchBridgeCodec
         apiUrl = settings.MineruConnection.ApiUrl,
         hasApiKey = settings.MineruConnection.HasApiKey,
       },
+      defaultRecognitionMode = settings.DefaultRecognitionMode is null ? null : new
+      {
+        settings.DefaultRecognitionMode.Supported,
+        settings.DefaultRecognitionMode.ModeId,
+        settings.DefaultRecognitionMode.Stored,
+      },
+      recognitionModes = settings.RecognitionModes ?? [],
       installPlan = settings.InstallPlan is not { } plan ? null : new
       {
         plan.PlanId, plan.ExpiresAt,

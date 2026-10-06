@@ -435,6 +435,9 @@ public sealed class DesktopWorkbenchCommandHandler :
         SetMineruConnectionCommand mineru => await SetMineruConnectionAsync(
           mineru,
           cancellationToken),
+        SetDefaultRecognitionModeCommand defaultMode => await SetDefaultRecognitionModeAsync(
+          defaultMode,
+          cancellationToken),
         PrepareMineruConnectionCommand => await PrepareMineruConnectionAsync(
           cancellationToken),
         SetTaskEngineCommand taskEngine => SetTaskEngine(taskEngine),
@@ -1578,9 +1581,44 @@ public sealed class DesktopWorkbenchCommandHandler :
       StructuredResult: structured);
   }
 
+  /// <summary>Runtime 回显的已提交默认识别模式 id；仅 Bound 状态非空。</summary>
+  private string? RuntimeDefaultModeId =>
+    settings?.RecognitionSelection?.DefaultRecognitionModeId;
+
+  /// <summary>
+  /// 单次/批量/PDF 共用的继承解析：显式本次 override 优先；能力已声明时
+  /// 绑定回显默认，Invalid/Unread 在提交协商时明确拒绝并指向设置修复，
+  /// 不猜 rapid_text；仅能力缺失走旧语义。
+  /// </summary>
+  internal static string? EffectiveModeIdOrDefault(
+    RecognitionSelectionSnapshot? snapshot,
+    string? taskEngine,
+    bool requireUsable)
+  {
+    if (taskEngine is not null || snapshot is null)
+    {
+      return taskEngine;
+    }
+    switch (snapshot.DefaultMode)
+    {
+      case RuntimeDefaultModeBinding.Bound:
+        return snapshot.DefaultRecognitionModeId;
+      case RuntimeDefaultModeBinding.NotApplicable:
+        return null;
+      default:
+        if (requireUsable)
+        {
+          throw new RecognitionModeUnavailableException(
+            "当前默认识别模式无效或尚未读取，已拒绝按通用文字识别执行；请在设置 · 识别默认模式中重新选择并保存。");
+        }
+        return null;
+    }
+  }
+
   /// <summary>
   /// Project catalog modes for the recognition page. Only an explicit task
-  /// override is selected; an empty choice delegates to the Runtime default.
+  /// override is IsTaskOverride; the committed runtime default is Selected
+  /// while no override is present, and an empty choice still delegates to it.
   /// </summary>
   private IReadOnlyList<RecognitionEngineChoice>? RecognitionEngines()
   {
@@ -1593,12 +1631,15 @@ public sealed class DesktopWorkbenchCommandHandler :
     if (selection.SupportsRecognitionModes)
     {
       string? task = recognition.TaskEngine;
+      string? defaultId = RuntimeDefaultModeId;
       return [.. selection.RecognitionModes.Select(mode => new RecognitionEngineChoice(
-        mode.Id, SettingsViewModel.DisplayName(mode.Id), task == mode.Id, task == mode.Id,
+        mode.Id, SettingsViewModel.DisplayName(mode.Id),
+        task == mode.Id || (task is null && mode.Id == defaultId), task == mode.Id,
         TryProjectMineruConfig(selection, mode.Id, out _) ? mode.Availability : "unavailable",
         mode.Availability == "preparation_required" && mode.RequiredComponent is not null,
         mode.LifecycleKind,
-        mode.SupportsPreload, mode.SupportsTtl, mode.SupportsPinning, mode.SupportsRelease, mode.Family, mode.SupportedOptions, GetModeOptions(mode)?.ProjectWire(mode), mode.ReasonCode))];
+        mode.SupportsPreload, mode.SupportsTtl, mode.SupportsPinning, mode.SupportsRelease, mode.Family, mode.SupportedOptions, GetModeOptions(mode)?.ProjectWire(mode), mode.ReasonCode,
+        IsDefault: mode.Id == defaultId))];
     }
     bool isOverride = recognition.TaskEngine is not null;
     return [.. selection.EngineOptions.Select(option => new RecognitionEngineChoice(
@@ -2042,16 +2083,19 @@ public sealed class DesktopWorkbenchCommandHandler :
 
   private void SynchronizeBatchMode(bool requireUsable = false)
   {
-    RuntimeSelectionService? selection = settings?.RecognitionSelection?.Catalog;
-    if (batch is null || selection?.SupportsRecognitionModes is not true)
+    RecognitionSelectionSnapshot? snapshot = settings?.RecognitionSelection;
+    if (batch is null || snapshot?.Catalog.SupportsRecognitionModes is not true)
     {
-      if (requireUsable) EnsureUsableModeOverrideOrThrow(selection, batchTaskEngine);
+      if (requireUsable) EnsureUsableModeOverrideOrThrow(selection: snapshot?.Catalog, taskEngine: batchTaskEngine);
       batch?.SetRecognitionMode(null, taskModeId: batchTaskEngine);
       return;
     }
-    RecognitionModeOption? mode = batchTaskEngine is null ? null : requireUsable
-      ? selection.SelectRecognitionMode(batchTaskEngine)
-      : TryFindRecognitionMode(selection, batchTaskEngine);
+    RuntimeSelectionService selection = snapshot.Catalog;
+    string? effectiveId = EffectiveModeIdOrDefault(
+      snapshot, batchTaskEngine, requireUsable);
+    RecognitionModeOption? mode = string.IsNullOrWhiteSpace(effectiveId) ? null : requireUsable
+      ? selection.SelectRecognitionMode(effectiveId)
+      : TryFindRecognitionMode(selection, effectiveId);
     MineruConfig? config = requireUsable
       ? selection.MineruConfigFor(mode?.Id)
       : TryProjectMineruConfig(selection, mode?.Id, out MineruConfig? projected)
@@ -2066,16 +2110,19 @@ public sealed class DesktopWorkbenchCommandHandler :
   /// </summary>
   private void SynchronizePdfMode(bool requireUsable = false)
   {
-    RuntimeSelectionService? selection = settings?.RecognitionSelection?.Catalog;
-    if (pdf is null || selection?.SupportsRecognitionModes is not true)
+    RecognitionSelectionSnapshot? snapshot = settings?.RecognitionSelection;
+    if (pdf is null || snapshot?.Catalog.SupportsRecognitionModes is not true)
     {
-      if (requireUsable) EnsureUsableModeOverrideOrThrow(selection, pdfTaskEngine);
+      if (requireUsable) EnsureUsableModeOverrideOrThrow(snapshot?.Catalog, pdfTaskEngine);
       pdf?.SetRecognitionMode(null, taskModeId: pdfTaskEngine);
       return;
     }
-    RecognitionModeOption? mode = pdfTaskEngine is null ? null : requireUsable
-      ? selection.SelectRecognitionMode(pdfTaskEngine)
-      : TryFindRecognitionMode(selection, pdfTaskEngine);
+    RuntimeSelectionService selection = snapshot.Catalog;
+    string? effectiveId = EffectiveModeIdOrDefault(
+      snapshot, pdfTaskEngine, requireUsable);
+    RecognitionModeOption? mode = string.IsNullOrWhiteSpace(effectiveId) ? null : requireUsable
+      ? selection.SelectRecognitionMode(effectiveId)
+      : TryFindRecognitionMode(selection, effectiveId);
     MineruConfig? config = requireUsable
       ? selection.MineruConfigFor(mode?.Id)
       : TryProjectMineruConfig(selection, mode?.Id, out MineruConfig? projected)
@@ -2691,6 +2738,23 @@ public sealed class DesktopWorkbenchCommandHandler :
     return SettingsState(settings);
   }
 
+  /// <summary>
+  /// 保存默认识别模式：能力门禁 + 目录 ready 校验在
+  /// SettingsViewModel 内 fail closed；保存成功后重发任务页状态，继承
+  /// 选项立即回显新默认，在跑/排队任务参数不受影响。
+  /// </summary>
+  private async Task<SettingsWorkbenchState> SetDefaultRecognitionModeAsync(
+    SetDefaultRecognitionModeCommand command,
+    CancellationToken cancellationToken)
+  {
+    settings ??= CreateSettings();
+    await settings.SetDefaultRecognitionModeAsync(
+      command.ModeId,
+      cancellationToken);
+    await RefreshRecognitionCatalogStatesAsync(cancellationToken);
+    return SettingsState(settings);
+  }
+
   private async Task<SettingsWorkbenchState> PrepareMineruConnectionAsync(
     CancellationToken cancellationToken)
   {
@@ -2741,12 +2805,17 @@ public sealed class DesktopWorkbenchCommandHandler :
     ? new BatchWorkbenchState(false, 0, 0, 0, Engines: BatchEngines())
     : BatchState(batch);
 
-  private IReadOnlyList<RecognitionEngineChoice>? BatchEngines() =>
-    RecognitionEngines()?.Select(choice => choice with
+  private IReadOnlyList<RecognitionEngineChoice>? BatchEngines()
+  {
+    string? defaultId = RuntimeDefaultModeId;
+    return RecognitionEngines()?.Select(choice => choice with
     {
-      Selected = choice.Engine == batchTaskEngine,
+      // IsDefault 从目录投影继承；Selected 仅显式选择或（未覆盖时）默认。
+      Selected = choice.Engine == batchTaskEngine ||
+        (batchTaskEngine is null && choice.Engine == defaultId),
       IsTaskOverride = choice.Engine == batchTaskEngine,
     }).ToArray();
+  }
 
   private PaddleModeOptions? GetModeOptions(RecognitionModeOption? mode)
   {
@@ -2805,12 +2874,14 @@ public sealed class DesktopWorkbenchCommandHandler :
       return;
     }
     RuntimeSelectionService selection = snapshot.Catalog;
+    string? effectiveId = EffectiveModeIdOrDefault(
+      snapshot, recognition.TaskEngine, requireUsable);
     RecognitionModeOption? Resolve(string? id) => string.IsNullOrWhiteSpace(id)
       ? null
       : requireUsable
         ? selection.SelectRecognitionMode(id)
         : TryFindRecognitionMode(selection, id);
-    RecognitionModeOption? mode = Resolve(recognition.TaskEngine);
+    RecognitionModeOption? mode = Resolve(effectiveId);
     // mineru_document 任务随目录默认 tier 携带类型化 MinerU 4 配置。
     MineruConfig? config = requireUsable
       ? selection.MineruConfigFor(mode?.Id)
@@ -3364,12 +3435,17 @@ public sealed class DesktopWorkbenchCommandHandler :
     };
   }
 
-  private IReadOnlyList<RecognitionEngineChoice>? PdfEngines() =>
-    RecognitionEngines()?.Select(choice => choice with
+  private IReadOnlyList<RecognitionEngineChoice>? PdfEngines()
+  {
+    string? defaultId = RuntimeDefaultModeId;
+    return RecognitionEngines()?.Select(choice => choice with
     {
-      Selected = choice.Engine == pdfTaskEngine,
+      // IsDefault 从目录投影继承；Selected 仅显式选择或（未覆盖时）默认。
+      Selected = choice.Engine == pdfTaskEngine ||
+        (pdfTaskEngine is null && choice.Engine == defaultId),
       IsTaskOverride = choice.Engine == pdfTaskEngine,
     }).ToArray();
+  }
 
   private async Task<PdfWorkbenchState> PdfStateAsync(
     PdfViewModel viewModel,
@@ -3569,6 +3645,19 @@ public sealed class DesktopWorkbenchCommandHandler :
         connection.Mode,
         connection.ApiUrl,
         connection.HasApiKey)
+      : null,
+    DefaultRecognitionMode: viewModel.DefaultRecognitionMode is { } defaultMode
+      ? new SettingsDefaultRecognitionModeState(
+        defaultMode.Supported,
+        defaultMode.ModeId,
+        defaultMode.Stored)
+      : null,
+    RecognitionModes: viewModel.Selection?.SupportsRecognitionModes is true
+      ? [.. viewModel.Selection.RecognitionModes.Select(mode => new SettingsRecognitionModeOptionState(
+          mode.Id,
+          SettingsViewModel.DisplayName(mode.Id),
+          mode.Availability,
+          mode.ReasonCode))]
       : null,
     Environments: viewModel.Environments?.Snapshot?.Environments.Select(item =>
       new SettingsEnvironmentState(

@@ -1,0 +1,595 @@
+using System.Text.Json;
+using VibeOCR.App.Features.Batch;
+using VibeOCR.App.Features.Pdf;
+using VibeOCR.App.Features.Recognition;
+using VibeOCR.App.Features.Settings;
+using VibeOCR.App.Features.Shell;
+using VibeOCR.App.Inference;
+using VibeOCR.App.ViewModels;
+using VibeOCR.App.Web;
+using VibeOCR.App.Workbench;
+using VibeOCR.Contracts.HttpV2;
+using VibeOCR.Platform.Bootstrap;
+using VibeOCR.Platform.Inference;
+using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
+using Xunit;
+
+namespace VibeOCR.App.Tests;
+
+/// <summary>
+/// 默认识别模式的实际请求实参契约：真实 DesktopWorkbenchCommandHandler /
+/// SettingsViewModel / 任务 ViewModel 链路提交，fake 只替换 HTTP 边界并
+/// 记录最终 SubmitRequest。覆盖已提交默认（含非 OCR pipeline 的
+/// mineru_document + typed MinerU 配置）、显式本次覆盖优先且不改持久默认，
+/// 以及在途任务提交点冻结（保存新默认不重写已提交参数）。
+/// </summary>
+public sealed class DefaultModeRequestContractTests
+{
+  [Fact]
+  public async Task InheritedDefaultDrivesSingleRequestEngineWithoutChangingSetting()
+  {
+    var fake = Client("windows_text");
+    await using TestHarness harness = await Harness(fake);
+    await harness.Handler.ExecuteAsync(
+      new SelectRecognitionImageCommand(), TestContext.Current.CancellationToken);
+    await fake.WaitSubmittedAsync();
+
+    PipelineSelection pipeline = Assert.Single(fake.Submissions).Pipeline;
+    Assert.Equal("OCR", pipeline.PipelineId);
+    Assert.Equal(OcrEngine.Windows, pipeline.Engine);
+    Assert.Null(pipeline.Mineru);
+    // 继承默认只影响本次请求，不写设置。
+    Assert.Equal(0, fake.UpdateCalls);
+    Assert.Equal("windows_text", harness.Settings.DefaultRecognitionMode?.ModeId);
+  }
+
+  [Fact]
+  public async Task ExplicitOverrideWinsForThisRequestAndKeepsCommittedDefault()
+  {
+    var fake = Client("windows_text");
+    await using TestHarness harness = await Harness(fake);
+    await harness.Handler.ExecuteAsync(
+      new SetTaskEngineCommand("rapid_text"), TestContext.Current.CancellationToken);
+    await harness.Handler.ExecuteAsync(
+      new SelectRecognitionImageCommand(), TestContext.Current.CancellationToken);
+    await fake.WaitSubmittedAsync();
+
+    PipelineSelection pipeline = Assert.Single(fake.Submissions).Pipeline;
+    Assert.Equal("OCR", pipeline.PipelineId);
+    Assert.Equal(OcrEngine.RapidOcr, pipeline.Engine);
+    Assert.Equal(0, fake.UpdateCalls);
+    Assert.Equal("windows_text", harness.Settings.DefaultRecognitionMode?.ModeId);
+  }
+
+  [Fact]
+  public async Task MineruDefaultSubmitsMineruPipelineWithTypedConfig()
+  {
+    var fake = Client("mineru_document", mineruReady: true);
+    await using TestHarness harness = await Harness(fake);
+    await harness.Handler.ExecuteAsync(
+      new SelectRecognitionImageCommand(), TestContext.Current.CancellationToken);
+    await fake.WaitSubmittedAsync();
+
+    PipelineSelection pipeline = Assert.Single(fake.Submissions).Pipeline;
+    Assert.Equal("MinerU", pipeline.PipelineId);
+    Assert.Null(pipeline.Engine);
+    Assert.NotNull(pipeline.Mineru);
+    Assert.Equal(MineruTier.Basic, pipeline.Mineru!.Tier);
+    Assert.Equal(MineruOcrMode.Auto, pipeline.Mineru.OcrMode);
+    Assert.Equal("all", pipeline.Mineru.PageRange);
+    Assert.Equal("ch", pipeline.Mineru.Language);
+  }
+
+  [Fact]
+  public async Task BatchInheritsCommittedDefaultForItsSingleSubmission()
+  {
+    var fake = Client("windows_text");
+    string root = Path.Combine(
+      Path.GetTempPath(), $"vibeocr-default-batch-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      var batch = new BatchViewModel(fake, new BatchFileSource());
+      batch.AddFiles([TempPng(root, "a"), TempPng(root, "b")]);
+      await using TestHarness harness = await Harness(fake, batch: batch);
+      await harness.Handler.ExecuteAsync(
+        new StartBatchCommand(), TestContext.Current.CancellationToken);
+      await fake.WaitSubmittedAsync();
+      await fake.WaitIdleAsync();
+
+      SubmitRequest request = Assert.Single(fake.Submissions);
+      Assert.Equal(JobKind.Recognition, request.Kind);
+      Assert.Equal("OCR", request.Pipeline.PipelineId);
+      Assert.Equal(OcrEngine.Windows, request.Pipeline.Engine);
+      Assert.Equal(2, request.Items.Count);
+      Assert.Equal(0, fake.UpdateCalls);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task SavingNewDefaultDuringInputLoadKeepsFrozenSubmitParameters()
+  {
+    // 提交冻结点在输入 await 之前：输入阻塞期间保存新默认（真实
+    // handler 命令），放行后的首次提交仍用冻结时绑定的默认参数。
+    RecordingClient fake = Client("windows_text");
+    var inputGate = new TaskCompletionSource(
+      TaskCreationOptions.RunContinuationsAsynchronously);
+    var inputs = new GatedInputService(inputGate.Task);
+    await using TestHarness harness = await Harness(fake, input: inputs);
+    WorkbenchCommandOutcome started = await harness.Handler.ExecuteAsync(
+      new SelectRecognitionImageCommand(), TestContext.Current.CancellationToken);
+    Assert.Null(started.Error);
+    await inputs.WaitEnteredAsync();
+    Assert.Empty(fake.Submissions);
+
+    WorkbenchCommandOutcome saved = await harness.Handler.ExecuteAsync(
+      new SetDefaultRecognitionModeCommand("rapid_text"),
+      TestContext.Current.CancellationToken);
+    Assert.Null(saved.Error);
+    Assert.Equal(
+      "rapid_text", harness.Settings.DefaultRecognitionMode?.ModeId);
+    Assert.Empty(fake.Submissions);
+
+    inputGate.TrySetResult();
+    await fake.WaitSubmittedAsync();
+    PipelineSelection pipeline = Assert.Single(fake.Submissions).Pipeline;
+    Assert.Equal("OCR", pipeline.PipelineId);
+    Assert.Equal(OcrEngine.Windows, pipeline.Engine);
+    Assert.Equal(
+      "rapid_text", harness.Settings.DefaultRecognitionMode?.ModeId);
+  }
+
+  [Fact]
+  public async Task PdfOcrInheritsCommittedDefaultForItsSubmission()
+  {
+    var fake = Client("windows_text");
+    var pdf = new PdfViewModel(fake, new StubPdfSource());
+    await using TestHarness harness = await Harness(fake, pdf: pdf);
+    WorkbenchCommandOutcome opened = await harness.Handler.ExecuteAsync(
+      new OpenDroppedPdfCommand("scan.pdf"), TestContext.Current.CancellationToken);
+    Assert.Null(opened.Error);
+
+    WorkbenchCommandOutcome ocr = await harness.Handler.ExecuteAsync(
+      new OcrPdfPagesCommand(), TestContext.Current.CancellationToken);
+    Assert.Null(ocr.Error);
+    await fake.WaitSubmittedAsync();
+
+    SubmitRequest request = Assert.Single(fake.Submissions);
+    Assert.Equal("OCR", request.Pipeline.PipelineId);
+    Assert.Equal(OcrEngine.Windows, request.Pipeline.Engine);
+    Assert.Equal(0, fake.UpdateCalls);
+  }
+
+  private static string TempPng(string root, string name)
+  {
+    string path = Path.Combine(root, name + ".png");
+    File.WriteAllBytes(path, [1, 2, 3, 4]);
+    return path;
+  }
+
+  private static RecordingClient Client(
+    string defaultMode,
+    bool mineruReady = false) => new()
+  {
+    Health = RequestHealth(mineruReady),
+    Settings = new SettingsSnapshot
+    {
+      Extra = new Dictionary<string, JsonElement>
+      {
+        ["default_recognition_mode"] = JsonSerializer.SerializeToElement(defaultMode),
+      },
+    },
+  };
+
+  /// <summary>
+  /// Build the full handler with real view models; the recording client only
+  /// replaces the HTTP boundary and the selection catalog is loaded through
+  /// the real SettingsViewModel gate.
+  /// </summary>
+  private static async Task<TestHarness> Harness(
+    RecordingClient fake,
+    BatchViewModel? batch = null,
+    PdfViewModel? pdf = null,
+    IInputService? input = null)
+  {
+    var recognition = new RecognitionViewModel(
+      fake, input ?? new FixedInputService());
+    var settings = new SettingsViewModel(fake);
+    await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+    Assert.NotNull(settings.RecognitionSelection?.Catalog);
+    string root = Path.Combine(
+      Path.GetTempPath(), $"vibeocr-default-mode-req-{Guid.NewGuid():N}");
+    string resourceRoot = Path.Combine(root, "resources");
+    Directory.CreateDirectory(resourceRoot);
+    var broker = new WorkbenchResourceBroker(resourceRoot);
+    var annotations = new WorkbenchAnnotationStore(resourceRoot);
+    Func<PdfViewModel> pdfFactory =
+      pdf is null ? static () => throw new InvalidOperationException() : () => pdf;
+    DesktopWorkbenchCommandHandler handler = new(
+      () => recognition,
+      batch is null ? static () => throw new InvalidOperationException() : () => batch,
+      static () => throw new InvalidOperationException(),
+      pdfFactory,
+      () => settings,
+      () => new ShellViewModel(new StubHotkeyRegistrar(), new StubStartupRegistrar()),
+      static () => throw new InvalidOperationException(),
+      new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+      broker, resourceRoot, static () => 0, annotations);
+    return new TestHarness(handler, broker, annotations, root, settings);
+  }
+
+  private static Wire.Health RequestHealth(bool mineruReady) => new()
+  {
+    SchemaVersion = 2,
+    InstanceId = "sup-req",
+    ProtocolVersion = 2,
+    Ready = true,
+    Draining = false,
+    Capabilities =
+    [
+      RuntimeSelectionService.DefaultRecognitionModeCapability,
+      RuntimeSelectionService.RecognitionModesCapability,
+      RuntimeSelectionService.MineruConfigCapability,
+    ],
+    CapabilityDescriptors =
+    [
+      new Wire.CapabilityDescriptor
+      {
+        Name = RuntimeSelectionService.RecognitionModesCapability,
+        Lifecycle = "active",
+        IntroducedIn = "2.8.0",
+        DeprecatedIn = null,
+        SunsetAt = null,
+        Replacement = null,
+        RecognitionModeCatalog = new Wire.RecognitionModeCatalog
+        {
+          Modes =
+          [
+            Mode(Wire.RecognitionModeId.RapidText,
+              Wire.RecognitionModeAvailability.Ready),
+            Mode(Wire.RecognitionModeId.WindowsText,
+              Wire.RecognitionModeAvailability.Ready),
+            Mode(Wire.RecognitionModeId.PaddleText,
+              Wire.RecognitionModeAvailability.PreparationRequired),
+            Mode(Wire.RecognitionModeId.PaddleStructure,
+              Wire.RecognitionModeAvailability.PreparationRequired),
+            Mode(Wire.RecognitionModeId.PaddleDocumentVl,
+              Wire.RecognitionModeAvailability.PreparationRequired),
+            Mode(Wire.RecognitionModeId.MineruDocument,
+              mineruReady ? Wire.RecognitionModeAvailability.Ready
+                : Wire.RecognitionModeAvailability.PreparationRequired),
+            Mode(Wire.RecognitionModeId.PaddleTable,
+              Wire.RecognitionModeAvailability.PreparationRequired),
+            Mode(Wire.RecognitionModeId.PaddleFormula,
+              Wire.RecognitionModeAvailability.PreparationRequired),
+          ],
+        },
+      },
+      new Wire.CapabilityDescriptor
+      {
+        Name = RuntimeSelectionService.MineruConfigCapability,
+        Lifecycle = "active",
+        IntroducedIn = "2.8.1",
+        DeprecatedIn = null,
+        SunsetAt = null,
+        Replacement = null,
+        MineruConfigCatalog = new Wire.MineruConfigCatalog
+        {
+          DefaultTier = Wire.MineruTierId.Basic,
+          Tiers = [new Wire.MineruTierDescriptor
+          {
+            Id = Wire.MineruTierId.Basic,
+            Availability = Wire.MineruTierAvailability.Ready,
+            ReasonCode = null,
+          }],
+          Languages = ["ch"],
+        },
+      },
+    ],
+  };
+
+  private static Wire.RecognitionModeDescriptor Mode(
+    Wire.RecognitionModeId id,
+    Wire.RecognitionModeAvailability availability)
+  {
+    var (family, pipeline, engine, provisioning, lifecycle) = id switch
+    {
+      Wire.RecognitionModeId.RapidText => (Wire.RecognitionModeFamily.Text,
+        Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Rapidocr,
+        Wire.RecognitionModeProvisioning.BaseRuntime,
+        Wire.RecognitionModeLifecycleKind.Unmanaged),
+      Wire.RecognitionModeId.WindowsText => (Wire.RecognitionModeFamily.Text,
+        Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Windows,
+        Wire.RecognitionModeProvisioning.OperatingSystem,
+        Wire.RecognitionModeLifecycleKind.Unmanaged),
+      Wire.RecognitionModeId.PaddleText => (Wire.RecognitionModeFamily.Text,
+        Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Paddleocr,
+        Wire.RecognitionModeProvisioning.AdvancedComponent,
+        Wire.RecognitionModeLifecycleKind.ModelResidency),
+      Wire.RecognitionModeId.PaddleStructure => (Wire.RecognitionModeFamily.Document,
+        Wire.ExecutionPipelineId.PPStructureV3, (Wire.OcrEngineId?)null,
+        Wire.RecognitionModeProvisioning.AdvancedComponent,
+        Wire.RecognitionModeLifecycleKind.ModelResidency),
+      Wire.RecognitionModeId.PaddleDocumentVl => (Wire.RecognitionModeFamily.Document,
+        Wire.ExecutionPipelineId.PaddleOCRVL, (Wire.OcrEngineId?)null,
+        Wire.RecognitionModeProvisioning.AdvancedComponent,
+        Wire.RecognitionModeLifecycleKind.ModelResidency),
+      Wire.RecognitionModeId.MineruDocument => (Wire.RecognitionModeFamily.Document,
+        Wire.ExecutionPipelineId.MinerU, (Wire.OcrEngineId?)null,
+        Wire.RecognitionModeProvisioning.AdvancedComponent,
+        Wire.RecognitionModeLifecycleKind.ProcessKeepAlive),
+      Wire.RecognitionModeId.PaddleTable => (Wire.RecognitionModeFamily.Specialized,
+        Wire.ExecutionPipelineId.TABLERECOGNITION, (Wire.OcrEngineId?)null,
+        Wire.RecognitionModeProvisioning.AdvancedComponent,
+        Wire.RecognitionModeLifecycleKind.ModelResidency),
+      Wire.RecognitionModeId.PaddleFormula => (Wire.RecognitionModeFamily.Specialized,
+        Wire.ExecutionPipelineId.FORMULARECOGNITION, (Wire.OcrEngineId?)null,
+        Wire.RecognitionModeProvisioning.AdvancedComponent,
+        Wire.RecognitionModeLifecycleKind.ModelResidency),
+      _ => throw new ArgumentOutOfRangeException(nameof(id)),
+    };
+    bool notReady = availability != Wire.RecognitionModeAvailability.Ready;
+    bool mineru = id == Wire.RecognitionModeId.MineruDocument;
+    return new Wire.RecognitionModeDescriptor
+    {
+      Id = id,
+      Family = family,
+      PipelineId = pipeline,
+      Engine = engine,
+      Provisioning = provisioning,
+      Availability = availability,
+      ReasonCode = notReady ? "runtime_component_missing" : null,
+      RequiredComponent = notReady ? (mineru ? "mineru-cpu" : "paddleocr-cpu") : null,
+      SupportedOptions = [],
+      Lifecycle = new Wire.RecognitionModeLifecycle
+      {
+        Kind = lifecycle,
+        SupportsPreload = mineru,
+        SupportsTtl = mineru,
+        SupportsPinning = false,
+        SupportsRelease = mineru,
+      },
+    };
+  }
+
+  private sealed class GatedInputService(Task gate) : IInputService
+  {
+    private readonly TaskCompletionSource _entered =
+      new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public async Task<RecognitionInput?> PickFileAsync(
+      CancellationToken cancellationToken)
+    {
+      _entered.TrySetResult();
+      await gate.WaitAsync(cancellationToken);
+      return new RecognitionInput([1, 2, 3, 4], "image/png", "file.png", "file");
+    }
+
+    public Task<RecognitionInput?> ReadClipboardAsync(CancellationToken cancellationToken) =>
+      PickFileAsync(cancellationToken);
+
+    public Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken) =>
+      PickFileAsync(cancellationToken);
+
+    public Task<RecognitionInput?> ReadDroppedFileAsync(
+      string path, CancellationToken cancellationToken) => PickFileAsync(cancellationToken);
+
+    public async Task WaitEnteredAsync() =>
+      await TestContext.Current.CancellationToken.WaitAsync(
+        () => _entered.Task.IsCompleted, 1500);
+  }
+
+  private sealed class FixedInputService : IInputService
+  {
+    public Task<RecognitionInput?> PickFileAsync(CancellationToken cancellationToken) =>
+      Task.FromResult<RecognitionInput?>(
+        new RecognitionInput([1, 2, 3, 4], "image/png", "file.png", "file"));
+
+    public Task<RecognitionInput?> ReadClipboardAsync(CancellationToken cancellationToken) =>
+      PickFileAsync(cancellationToken);
+
+    public Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken) =>
+      PickFileAsync(cancellationToken);
+
+    public Task<RecognitionInput?> ReadDroppedFileAsync(
+      string path, CancellationToken cancellationToken) => PickFileAsync(cancellationToken);
+  }
+
+  private sealed class BatchFileSource : IBatchFileSource
+  {
+    public Task<IReadOnlyList<string>> PickFilesAsync(CancellationToken cancellationToken) =>
+      Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
+
+    public Task<(byte[] Data, string MediaType)> ReadAsync(
+      string path, CancellationToken cancellationToken) =>
+      Task.FromResult((File.ReadAllBytes(path), "image/png"));
+  }
+
+  private sealed class StubPdfSource : IPdfFileSource
+  {
+    public Task<string?> PickFileAsync(CancellationToken ct) =>
+      Task.FromResult<string?>("test.pdf");
+  }
+
+  private sealed class StubHotkeyRegistrar : IHotkeyRegistrar
+  {
+    public bool Register(string hotkey, out string? conflict)
+    {
+      conflict = null;
+      return true;
+    }
+
+    public void Unregister() { }
+  }
+
+  private sealed class StubStartupRegistrar : IStartupRegistrar
+  {
+    public bool SetEnabled(bool enabled) => true;
+  }
+
+  /// <summary>Records every SubmitRequest; optional gates freeze in-flight jobs.</summary>
+  private sealed class RecordingClient : InferenceClientStub
+  {
+    private readonly List<SubmitRequest> _submissions = [];
+    private IReadOnlyList<JobItem> _items = Array.Empty<JobItem>();
+    private readonly TaskCompletionSource _idle =
+      new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public Wire.Health Health { get; init; } = new()
+    {
+      SchemaVersion = 2,
+      InstanceId = "sup-req",
+      ProtocolVersion = 2,
+      Ready = true,
+      Draining = false,
+      Capabilities = [],
+    };
+
+    public SettingsSnapshot Settings { get; set; } = new();
+
+    public IReadOnlyList<SubmitRequest> Submissions => _submissions;
+
+    public TaskCompletionSource? ObserveGate { get; set; }
+
+    public int UpdateCalls { get; private set; }
+
+    public override Task<Wire.Health> GetHealthAsync(
+      CancellationToken cancellationToken) => Task.FromResult(Health);
+
+    public override Task<ResidencyStatus> GetResidencyAsync(
+      CancellationToken cancellationToken) => Task.FromResult(new ResidencyStatus());
+
+    public override Task<SettingsSnapshot> GetSettingsAsync(
+      CancellationToken cancellationToken) => Task.FromResult(Settings);
+
+    public override Task<SettingsSnapshot> UpdateSettingsAsync(
+      SettingsSnapshot settings,
+      CancellationToken cancellationToken)
+    {
+      UpdateCalls++;
+      Settings = settings;
+      return Task.FromResult(settings);
+    }
+
+    public override Task<PdfSessionOpenResult> OpenPdfSessionAsync(
+      string path,
+      string? password,
+      CancellationToken cancellationToken) =>
+      Task.FromResult(new PdfSessionOpenResult("pdf-1", 2, path));
+
+    public override Task<byte[]> RenderPdfPageAsync(
+      string sessionId,
+      int page,
+      int size,
+      CancellationToken cancellationToken) =>
+      Task.FromResult(new byte[] { 1, 2, 3 });
+
+    public override Task<JobRef> SubmitAsync(
+      SubmitRequest request,
+      IReadOnlyDictionary<string, SubmitUpload> uploads,
+      CancellationToken cancellationToken)
+    {
+      _submissions.Add(request);
+      _items = request.Items.Select((item, index) => new JobItem
+      {
+        ItemId = $"it-{index}",
+        ClientItemKey = item.ClientItemKey,
+        Ordinal = item.Ordinal,
+        DisplayName = item.DisplayName,
+        State = ItemState.Queued,
+      }).ToArray();
+      return Task.FromResult(new JobRef { JobId = "job-req-1", Items = _items });
+    }
+
+    public override async Task<JobUpdate> ObserveAsync(
+      string jobId,
+      int afterSequence,
+      CancellationToken cancellationToken)
+    {
+      if (ObserveGate is { } gate)
+      {
+        await gate.Task.WaitAsync(cancellationToken);
+      }
+      _idle.TrySetResult();
+      return new JobUpdate
+      {
+        Snapshot = new JobSnapshot
+        {
+          JobId = jobId,
+          Kind = JobKind.Recognition,
+          Priority = JobPriority.Interactive,
+          State = JobState.Completed,
+          Items = _items,
+        },
+        Events = [],
+        Outcomes = _items.Select(item => new ItemOutcome
+        {
+          ItemId = item.ItemId,
+          Attempt = 1,
+          State = ItemState.Succeeded,
+          PayloadType = "ocr.v1",
+          Payload = new Dictionary<string, JsonElement>
+          {
+            ["raw_text"] = JsonSerializer.SerializeToElement("识别结果"),
+          },
+        }).ToArray(),
+        ThroughSequence = afterSequence + 1,
+      };
+    }
+
+    public async Task WaitSubmittedAsync() =>
+      await TestContext.Current.CancellationToken.WaitAsync(
+          () => _submissions.Count > 0, 1500);
+
+    public async Task WaitIdleAsync() =>
+      await TestContext.Current.CancellationToken.WaitAsync(
+          () => _idle.Task.IsCompleted, 3000);
+  }
+
+  private sealed class TestHarness(
+    DesktopWorkbenchCommandHandler handler,
+    WorkbenchResourceBroker broker,
+    WorkbenchAnnotationStore annotations,
+    string root,
+    SettingsViewModel settings) : IAsyncDisposable
+  {
+    public DesktopWorkbenchCommandHandler Handler => handler;
+    public SettingsViewModel Settings => settings;
+
+    public async ValueTask DisposeAsync()
+    {
+      await handler.DisposeAsync();
+      broker.Dispose();
+      annotations.Dispose();
+      Directory.Delete(root, recursive: true);
+    }
+  }
+}
+
+file static class WaitExtensions
+{
+  public static async Task WaitAsync(
+    this CancellationToken cancellationToken,
+    Func<bool> condition,
+    int timeoutMs)
+  {
+    var deadline = Environment.TickCount64 + timeoutMs;
+    while (!condition())
+    {
+      if (Environment.TickCount64 > deadline)
+      {
+        throw new TimeoutException(
+          $"Condition not reached within {timeoutMs}ms.");
+      }
+      if (cancellationToken.IsCancellationRequested)
+      {
+        cancellationToken.ThrowIfCancellationRequested();
+      }
+      await Task.Delay(10, cancellationToken);
+    }
+  }
+}

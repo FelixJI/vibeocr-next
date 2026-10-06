@@ -83,6 +83,13 @@ public sealed class RuntimeSelectionService
         VibeOCR.Runtime.Contracts.Generated.RuntimeProtocol.OCR_MINERU_REMOTE_API_V1;
     public const string MineruConfigCapability =
         VibeOCR.Runtime.Contracts.Generated.RuntimeProtocol.OCR_MINERU_CONFIG_V1;
+    /// <summary>
+    /// 默认识别模式持久化能力（ocr.default-recognition-mode.v1，Protocol
+    /// 2.10.0 新增）。只有声明该能力的 Backend 才接受
+    /// extra.default_recognition_mode 写入；旧 Backend 不写未知键。
+    /// </summary>
+    public const string DefaultRecognitionModeCapability =
+        VibeOCR.Runtime.Contracts.Generated.RuntimeProtocol.OCR_DEFAULT_RECOGNITION_MODE_V1;
 
     private readonly Wire.OcrEngineCatalog? _engineCatalog;
     private readonly Wire.DownloadSourceCatalog? _sourceCatalog;
@@ -229,6 +236,14 @@ public sealed class RuntimeSelectionService
     /// 该能力的 Backend 才接受 pipeline.mineru 块。
     /// </summary>
     public bool SupportsMineruConfig => _mineruConfigCatalog is not null;
+
+    /// <summary>
+    /// Backend 是否声明默认识别模式持久化（ocr.default-recognition-mode.v1）。
+    /// 未声明时设置页只读展示兼容说明，不向旧 Backend 写入未知键。
+    /// </summary>
+    public bool SupportsDefaultRecognitionMode => Health.Capabilities.Contains(
+        DefaultRecognitionModeCapability,
+        StringComparer.Ordinal);
 
     /// <summary>
     /// mineru_document 任务的类型化配置：tier 和语言必须来自可用目录，

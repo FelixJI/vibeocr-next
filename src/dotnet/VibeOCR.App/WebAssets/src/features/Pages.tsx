@@ -360,6 +360,7 @@ interface RecognitionEngineState {
   readonly isTaskOverride: boolean;
   readonly availability: string;
   readonly requiresDownload: boolean;
+  readonly isDefault?: boolean;
   readonly lifecycleKind?: string;
   readonly supportsPreload?: boolean;
   readonly supportsTtl?: boolean;
@@ -711,6 +712,54 @@ function mineruConnection(value: unknown): MineruConnectionState | undefined {
         hasApiKey: candidate.hasApiKey,
       }
     : undefined;
+}
+
+interface DefaultRecognitionModeState {
+  readonly supported: boolean;
+  readonly modeId: string | null;
+  readonly stored: boolean;
+}
+
+// 默认识别模式投影：modeId=null 表示能力未声明或首读未完成。
+function defaultRecognitionMode(
+  value: unknown,
+): DefaultRecognitionModeState | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return undefined;
+  const candidate = value as Partial<DefaultRecognitionModeState>;
+  return typeof candidate.supported === "boolean" &&
+    typeof candidate.stored === "boolean" &&
+    (candidate.modeId === null || typeof candidate.modeId === "string")
+    ? {
+        supported: candidate.supported,
+        modeId: candidate.modeId ?? null,
+        stored: candidate.stored,
+      }
+    : undefined;
+}
+
+interface RecognitionModeOptionState {
+  readonly id: string;
+  readonly displayName: string;
+  readonly availability: string;
+  readonly reasonCode?: string | null;
+}
+
+// 设置页可选识别模式目录（来自 ocr.recognition-modes.v1 目录投影）。
+function recognitionModeOptions(
+  value: unknown,
+): readonly RecognitionModeOptionState[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is RecognitionModeOptionState => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry))
+      return false;
+    const option = entry as Partial<RecognitionModeOptionState>;
+    return (
+      typeof option.id === "string" &&
+      typeof option.displayName === "string" &&
+      typeof option.availability === "string"
+    );
+  });
 }
 
 function planComponents(value: unknown): readonly InstallPlanComponentState[] {
@@ -2172,11 +2221,12 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
       : "尚未执行维护操作";
   const progressText = stringValue(state.progressText);
   const mineru = mineruConnection(state.mineruConnection);
+  const defaultMode = defaultRecognitionMode(state.defaultRecognitionMode);
   return (
     <Workspace
       eyebrow="PREFERENCES / 05"
       title="设置"
-      description="管理快捷操作、运行环境与下载来源。识别模式在对应任务中选择。"
+      description="管理快捷操作、运行环境与下载来源。默认识别类型在此设置，单次/批量/PDF 中的选择仅覆盖当次任务。"
     >
       <div className="settings-grid">
         <Panel label="APPLICATION" title="应用" className="settings-app-panel">
@@ -2193,6 +2243,20 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
               }
             />
           </div>
+        </Panel>
+        <Panel
+          label="RECOGNITION"
+          title="识别默认模式"
+          className="settings-default-mode-panel"
+        >
+          <DefaultRecognitionModeEditor
+            key={defaultMode?.modeId ?? ""}
+            mode={defaultMode}
+            modes={recognitionModeOptions(state.recognitionModes)}
+            locked={busy}
+            hostBusy={booleanValue(state.isBusy)}
+            actions={actions}
+          />
         </Panel>
         <Panel
           label="SHORTCUTS"
@@ -3717,6 +3781,135 @@ function MineruConnectionEditor({
   );
 }
 
+// 默认识别模式编辑器。能力未声明时只读展示准确兼容说明，绝不向旧
+// Backend 写未知键；未知/不可用持久值明确提示并引导重选，不伪造回退。
+function DefaultRecognitionModeEditor({
+  mode,
+  modes,
+  locked,
+  hostBusy,
+  actions,
+}: {
+  readonly mode: DefaultRecognitionModeState | undefined;
+  readonly modes: readonly RecognitionModeOptionState[];
+  readonly locked: boolean;
+  readonly hostBusy: boolean;
+  readonly actions: AppActions;
+}) {
+  const loaded = mode !== undefined;
+  const supported = mode?.supported === true;
+  const currentId = mode?.modeId ?? null;
+  // 本地选择直接控制显示：旧值合法时初始化为它，否则从空白开始；
+  // 修复期间的新选择立即反映在 selector 上，不被旧值强制回空白。
+  const inCatalog = modes.some((option) => option.id === currentId);
+  const [selected, setSelected] = useState<string>(
+    inCatalog && currentId !== null ? currentId : "",
+  );
+  const current = modes.find((option) => option.id === currentId);
+  const selectedOption = modes.find((option) => option.id === selected);
+  const ready = selectedOption?.availability === "ready";
+  const save = async () => {
+    if (!ready) return;
+    await actions.run({
+      type: "settings.setDefaultRecognitionMode",
+      mode: selected,
+    });
+  };
+  if (!loaded) {
+    return (
+      <p className="form-note">
+        默认识别模式等待运行环境目录同步；可点击“重新检查状态”后配置。
+      </p>
+    );
+  }
+  if (!supported) {
+    return (
+      <>
+        <p className="form-note" role="note">
+          当前识别服务未声明 ocr.default-recognition-mode.v1，暂不支持配置默认
+          识别类型；兼容行为：任务未显式选择时按快速 OCR（RapidOCR）执行。更新
+          识别服务后可在此设置。
+        </p>
+      </>
+    );
+  }
+  if (modes.length === 0) {
+    return (
+      <p className="form-note">
+        当前运行环境未提供识别模式目录，暂无法配置默认识别模式；请重新检查
+        状态或切换运行环境。
+      </p>
+    );
+  }
+  return (
+    <>
+      <div className="setting-row">
+        <label htmlFor="default-recognition-mode">默认识别类型</label>
+        <Select
+          id="default-recognition-mode"
+          value={selected}
+          disabled={locked || hostBusy}
+          onChange={(_, data) => setSelected(String(data.value))}
+        >
+          {!inCatalog ? (
+            <option value="">
+              {currentId !== null
+                ? "请重新选择（当前值不在目录）"
+                : mode.stored
+                  ? "请重新选择（当前值无法解析）"
+                  : "请选择"}
+            </option>
+          ) : null}
+          {modes.map((option) => (
+            <option
+              key={option.id}
+              value={option.id}
+              disabled={option.availability !== "ready"}
+            >
+              {`${option.displayName}（${availabilityLabel(option.availability)}）`}
+            </option>
+          ))}
+        </Select>
+      </div>
+      {currentId !== null && !inCatalog ? (
+        <p className="form-note" role="alert">
+          已回显的默认 “{currentId}” 不在当前运行环境目录中（环境可能已切换或
+          组件被移除），保存新默认前未显式选择的任务会拒绝提交；请重新选择
+          并保存。
+        </p>
+      ) : null}
+      {currentId === null && mode.stored ? (
+        <p className="form-note" role="alert">
+          当前运行环境保存的默认值无法解析，未显式选择的任务会拒绝提交；
+          请重新选择并保存以修复。
+        </p>
+      ) : null}
+      {current?.reasonCode && current.availability !== "ready" ? (
+        <p className="form-note" role="alert">
+          当前默认 {current.displayName}（
+          {availabilityLabel(current.availability)}：{current.reasonCode}
+          ）：未显式选择模式的任务提交会被拒绝，不会静默
+          回退其他识别；请先准备组件或改选其他默认。
+        </p>
+      ) : null}
+      <div className="setting-row">
+        <Button
+          disabled={locked || hostBusy || !ready || selected === currentId}
+          onClick={() => void save()}
+          icon={<Save aria-hidden="true" size={16} />}
+        >
+          保存默认识别模式
+        </Button>
+      </div>
+      <p className="form-note">
+        保存的是 Runtime 持久默认：单次、批量、PDF 与截图任务未显式选择时继承
+        它；已在运行/排队的任务参数不受影响，任务中的显式选择始终优先。
+        仅“就绪”模式可设为默认，需要下载/准备的请先在运行环境页准备。
+      </p>
+    </>
+  );
+}
+
 function MaintenanceActions({
   maintenance,
   plan,
@@ -3971,6 +4164,18 @@ function TaskEngineSelector({
   const active =
     engines.find((engine) => engine.isTaskOverride) ??
     engines.find((engine) => engine.selected);
+  // 默认标识独立于本次选择：override 时继承选项仍展示已提交默认及其
+  // 可用性；旧宿主无 isDefault 时回退“选中且非覆盖”推断，未读取不伪造。
+  const defaultMode =
+    engines.find((engine) => engine.isDefault === true) ??
+    engines.find((engine) => engine.selected && !engine.isTaskOverride);
+  const inheritLabel = defaultMode
+    ? `跟随默认（${defaultMode.displayName}${
+        defaultMode.availability === "ready"
+          ? ""
+          : `，${availabilityLabel(defaultMode.availability)}`
+      }）`
+    : "跟随默认（未读取）";
   return (
     <div className="setting-row recognition-mode-settings">
       <label htmlFor={`${scope}-task-engine`}>本次识别模式</label>
@@ -3987,7 +4192,7 @@ function TaskEngineSelector({
               })
         }
       >
-        <option value="">使用 Runtime 默认模式</option>
+        <option value="">{inheritLabel}</option>
         {(
           [
             ["文字", ["paddle_text"]],
@@ -4022,6 +4227,18 @@ function TaskEngineSelector({
       {active?.reasonCode && (
         <p className="form-note">当前环境：{active.reasonCode}</p>
       )}
+      {!active?.isTaskOverride ? (
+        <p className="form-note">本次选择仅覆盖当前任务，不会改写默认。</p>
+      ) : null}
+      <div className="setting-row">
+        <Button
+          appearance="secondary"
+          disabled={!enabled}
+          onClick={() => actions.navigate("settings")}
+        >
+          修改默认识别类型
+        </Button>
+      </div>
       {active?.engine.startsWith("paddle_") &&
         Array.isArray(active.supportedOptions) && (
           // key 只绑定模式：保存成功后宿主会回显新的 active.options，若把它混入

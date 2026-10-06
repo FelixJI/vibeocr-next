@@ -19,7 +19,8 @@
     "ocr.recognition-modes.v1",
     "ocr.mineru-config.v1",
     "runtime.install-plan.v1",
-    "ocr.mineru-remote-api.v1"
+    "ocr.mineru-remote-api.v1",
+    "ocr.default-recognition-mode.v1"
   ],
   "definitions": {
     "ocr.recognition.v2": {
@@ -170,6 +171,14 @@
       "description": "Preview a read-only Runtime install plan for ensure over runtime.maintenance.v2, runtime.component-selection.v1 and runtime.download-sources.v1: requested and effective component/source closures, retain/install/replace/remove actions with machine reason codes, honest blockers with next actions, deduplicated cost totals and expiry, confirmed later via plan_id on maintenance start or retry without installing, downloading, or changing any active environment.",
       "lifecycle": "active",
       "introduced_in": "2.9.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "ocr.default-recognition-mode.v1": {
+      "description": "Persist the instance-wide default recognition mode id through SettingsSnapshot.extra.default_recognition_mode and read the resolved committed default back from GET /v2/settings. A missing key keeps the legacy default rapid_text. Exchanges validate the value type and catalog id on every write, and availability only when the default changes, so a stale stored default never blocks unrelated settings updates. Invalid snapshots are rejected without replacing prior settings. Clients MUST NOT send the key to runtimes lacking this capability. Explicit per-job mode overrides keep precedence, submitted jobs keep their submit-time parameters, and saving the default never installs components or changes any environment.",
+      "lifecycle": "active",
+      "introduced_in": "2.10.0",
       "deprecated_in": null,
       "sunset_at": null,
       "replacement": null

@@ -77,7 +77,11 @@ from vibeocr.runtime.recognition.ocr_engines import (
     ensure_engine_valid_for_pipeline,
     parse_wire_engine,
 )
-from vibeocr.runtime.recognition.recognition_modes import RecognitionModeError
+from vibeocr.runtime.recognition.recognition_modes import (
+    DEFAULT_RECOGNITION_MODE_EXTRA_KEY,
+    RecognitionModeError,
+    resolve_default_recognition_mode,
+)
 from vibeocr.runtime_contracts import (
     SCHEMA_VERSION,
     ErrorCode,
@@ -930,7 +934,22 @@ def create_app(
 
     @app.get("/v2/settings", response_model=wire.SettingsSnapshot)
     async def get_settings() -> dict[str, Any]:
-        return module.settings().to_payload()
+        payload = module.settings().to_payload()
+        # 回显解析后的已提交默认（缺键注入兼容 rapid_text）；无法解析的
+        # 持久值原样回显，由客户端按目录标记并修复。校验只在保存 seam。
+        extra = payload.get("extra")
+        if isinstance(extra, dict):
+            try:
+                resolved = resolve_default_recognition_mode(
+                    extra, module.recognition_mode_registry, require_available=False
+                )
+                payload["extra"] = {
+                    **extra,
+                    DEFAULT_RECOGNITION_MODE_EXTRA_KEY: resolved.value,
+                }
+            except RecognitionModeError:
+                pass
+        return payload
 
     @app.put("/v2/settings", response_model=wire.SettingsSnapshot)
     async def put_settings(request: Request) -> JsonResult:
@@ -955,6 +974,8 @@ def create_app(
             extra = body.get("extra", {})
             if not isinstance(extra, dict):
                 raise ValueError("extra must be an object")
+            # default_recognition_mode 的严格校验统一在 module.update_settings
+            # （单一权威 seam），RecognitionModeError 在下方统一映射。
             # download_source_ids 持久化用户默认偏好：只存显式选择，
             # 未知 id/同 kind 多选 fail closed（RuntimeSelectionError 映射
             # 到 DOWNLOAD_SOURCE_UNKNOWN / VALIDATION_ERROR）。
