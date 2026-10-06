@@ -7,6 +7,17 @@ using VibeOCR.Platform.Inference;
 
 namespace VibeOCR.App.Features.Recognition;
 
+/// <summary>
+/// 冷启动延迟冻结的提交参数：由宿主在输入采集后按权威目录与已提交
+/// 默认解析（忽略运行期间的新 UI 选择）；null 表示环境切换等应取消
+/// 本次提交的窗口状态。
+/// </summary>
+public sealed record RecognitionSubmitSelection(
+    string PipelineId,
+    OcrEngine? Engine,
+    MineruConfig? Mineru,
+    IReadOnlyDictionary<string, System.Text.Json.JsonElement>? Options);
+
 public sealed class RecognitionViewModel : INotifyPropertyChanged
 {
     private readonly IInferenceClient _inference;
@@ -106,17 +117,32 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         return actions;
     }
 
-    public Task RecognizeFileAsync(CancellationToken cancellationToken) =>
-        RecognizeViaSupervisorAsync(_inputs.PickFileAsync, cancellationToken);
+    public Task RecognizeFileAsync(
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task<RecognitionSubmitSelection?>>? awaitSelectionBeforeFreeze = null) =>
+        RecognizeViaSupervisorAsync(
+            _inputs.PickFileAsync, cancellationToken, awaitSelectionBeforeFreeze);
 
-    public Task RecognizeClipboardAsync(CancellationToken cancellationToken) =>
-        RecognizeViaSupervisorAsync(_inputs.ReadClipboardAsync, cancellationToken);
+    public Task RecognizeClipboardAsync(
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task<RecognitionSubmitSelection?>>? awaitSelectionBeforeFreeze = null) =>
+        RecognizeViaSupervisorAsync(
+            _inputs.ReadClipboardAsync, cancellationToken, awaitSelectionBeforeFreeze);
 
-    public Task RecognizeScreenshotAsync(CancellationToken cancellationToken) =>
-        RecognizeViaSupervisorAsync(_inputs.CaptureScreenAsync, cancellationToken);
+    public Task RecognizeScreenshotAsync(
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task<RecognitionSubmitSelection?>>? awaitSelectionBeforeFreeze = null) =>
+        RecognizeViaSupervisorAsync(
+            _inputs.CaptureScreenAsync, cancellationToken, awaitSelectionBeforeFreeze);
 
-    public Task RecognizeDroppedFileAsync(string path, CancellationToken cancellationToken) =>
-        RecognizeViaSupervisorAsync(ct => _inputs.ReadDroppedFileAsync(path, ct), cancellationToken);
+    public Task RecognizeDroppedFileAsync(
+        string path,
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task<RecognitionSubmitSelection?>>? awaitSelectionBeforeFreeze = null) =>
+        RecognizeViaSupervisorAsync(
+            ct => _inputs.ReadDroppedFileAsync(path, ct),
+            cancellationToken,
+            awaitSelectionBeforeFreeze);
 
     /// <summary>
     /// 纯截图会话：只采集输入并建立本地编辑基准，不提交任何 OCR 任务。
@@ -181,24 +207,38 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
 
     public Task RecognizeViaSupervisorAsync(
         Func<CancellationToken, Task<RecognitionInput?>> loadInput,
-        CancellationToken cancellationToken) =>
-        RunInputAsync(loadInput, cancellationToken, recognize: true, persistCurrentInput: true);
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task<RecognitionSubmitSelection?>>? awaitSelectionBeforeFreeze = null) =>
+        RunInputAsync(
+            loadInput,
+            cancellationToken,
+            recognize: true,
+            persistCurrentInput: true,
+            awaitSelectionBeforeFreeze);
 
     private async Task RunInputAsync(
         Func<CancellationToken, Task<RecognitionInput?>> loadInput,
         CancellationToken cancellationToken,
         bool recognize,
-        bool persistCurrentInput)
+        bool persistCurrentInput,
+        Func<CancellationToken, Task<RecognitionSubmitSelection?>>? awaitSelectionBeforeFreeze = null)
     {
         ArgumentNullException.ThrowIfNull(loadInput);
-        string pipeline = recognize ? EffectivePipeline : Pipeline;
-        OcrEngine? engine = recognize ? EffectiveEngine : null;
-        MineruConfig? mineru = _taskMineruConfig;
+        // 冷启动尚未绑定模式（目录未加载且无显式选择）时延迟冻结：输入先
+        // 采集，提交参数在权威目录/已提交默认加载后才冻结；已有绑定则保持
+        // 输入 await 前冻结契约，后续设置变更不影响本次提交。
+        bool deferFreeze = recognize &&
+            awaitSelectionBeforeFreeze is not null &&
+            _taskRecognitionMode is null &&
+            TaskEngine is null;
+        string pipeline = !deferFreeze && recognize ? EffectivePipeline : Pipeline;
+        OcrEngine? engine = !deferFreeze && recognize ? EffectiveEngine : null;
+        MineruConfig? mineru = deferFreeze ? null : _taskMineruConfig;
         // 提交冻结点（输入 await 前）：按冻结的模式对原始 typed 选项严格
         // ToWire；不支持或越界字段在这里明确拒绝整个提交，不静默丢弃后
         // 仍提交（#110 AC2）。状态展示过滤走 ProjectWire，与此分开。
         IReadOnlyDictionary<string, System.Text.Json.JsonElement>? options = null;
-        if (recognize && _taskOptions is not null)
+        if (recognize && !deferFreeze && _taskOptions is not null)
         {
             try
             {
@@ -267,6 +307,40 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
                     TerminalState = null;
                 }
                 return;
+            }
+
+            if (deferFreeze)
+            {
+                // 冷启动：输入已采集，提交参数按启动时意图（跟随默认）×权威
+                // 目录解析；等待期间的新 UI 选择不注入，环境切换窗口取消。
+                RecognitionSubmitSelection? selection;
+                try
+                {
+                    selection = await awaitSelectionBeforeFreeze!(run.Token);
+                }
+                catch (ArgumentException error)
+                {
+                    TerminalState = JobState.Failed;
+                    Status = $"识别选项无效，已拒绝提交：{error.Message}";
+                    return;
+                }
+                if (selection is null)
+                {
+                    if (generation == Volatile.Read(ref _generation))
+                    {
+                        TerminalState = JobState.Cancelled;
+                        Status = "运行环境正在切换，已取消本次识别";
+                    }
+                    return;
+                }
+                if (generation != Volatile.Read(ref _generation))
+                {
+                    return;
+                }
+                pipeline = selection.PipelineId;
+                engine = selection.Engine;
+                mineru = selection.Mineru;
+                options = selection.Options;
             }
 
             const string clientItemKey = "recognition-input";

@@ -164,6 +164,254 @@ public sealed class DefaultModeRequestContractTests
     Assert.Equal(0, fake.UpdateCalls);
   }
 
+  [Fact]
+  public async Task ColdStartRecognitionWaitsForCatalogAndSubmitsCommittedDefault()
+  {
+    // 冷启动竞态回归：未 attach 时不得以空快照冻结提交参数；输入先采集，
+    // 权威目录与已提交默认加载后首个请求必须携带默认模式（旧实现提交
+    // engine=null，Runtime 落回 RapidOCR）。
+    var deferred = new DeferredInferenceClient();
+    deferred.MarkStartupPending();
+    RecordingClient fake = Client("windows_text");
+    var recognition = new RecognitionViewModel(deferred, new FixedInputService());
+    var settings = new SettingsViewModel(deferred);
+    string root = Path.Combine(
+      Path.GetTempPath(), $"vibeocr-default-cold-{Guid.NewGuid():N}");
+    string resourceRoot = Path.Combine(root, "resources");
+    Directory.CreateDirectory(resourceRoot);
+    var broker = new WorkbenchResourceBroker(resourceRoot);
+    var annotations = new WorkbenchAnnotationStore(resourceRoot);
+    try
+    {
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        () => recognition,
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => settings,
+        () => new ShellViewModel(new StubHotkeyRegistrar(), new StubStartupRegistrar()),
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker, resourceRoot, static () => 0, annotations,
+        inferenceAttached: () => deferred.IsAttached);
+
+      WorkbenchCommandOutcome started = await handler.ExecuteAsync(
+        new SelectRecognitionImageCommand(),
+        TestContext.Current.CancellationToken);
+      Assert.Null(started.Error);
+      // 输入采集不等 Runtime；随后 attach 携带目录与已提交默认。
+      deferred.Attach(fake);
+
+      await fake.WaitSubmittedAsync(TimeSpan.FromSeconds(10));
+      PipelineSelection pipeline = Assert.Single(fake.Submissions).Pipeline;
+      Assert.Equal("OCR", pipeline.PipelineId);
+      Assert.Equal(OcrEngine.Windows, pipeline.Engine);
+      Assert.Equal(0, fake.UpdateCalls);
+    }
+    finally
+    {
+      broker.Dispose();
+      annotations.Dispose();
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task ColdStartBatchWaitsForCatalogAndSubmitsCommittedDefault()
+  {
+    var deferred = new DeferredInferenceClient();
+    deferred.MarkStartupPending();
+    RecordingClient fake = Client("windows_text");
+    string root = Path.Combine(
+      Path.GetTempPath(), $"vibeocr-default-cold-batch-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    var broker = default(WorkbenchResourceBroker);
+    try
+    {
+      var batch = new BatchViewModel(deferred, new BatchFileSource());
+      batch.AddFiles([TempPng(root, "a")]);
+      var settings = new SettingsViewModel(deferred);
+      string resourceRoot = Path.Combine(root, "resources");
+      Directory.CreateDirectory(resourceRoot);
+      broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotations = new WorkbenchAnnotationStore(resourceRoot);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        static () => throw new InvalidOperationException(),
+        () => batch,
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => settings,
+        () => new ShellViewModel(new StubHotkeyRegistrar(), new StubStartupRegistrar()),
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker, resourceRoot, static () => 0, annotations,
+        inferenceAttached: () => deferred.IsAttached);
+
+      // StartBatchCommand 在未 attach 时会同步等待权威目录（提交前取得
+      // 默认），须以后台任务启动再 Attach，避免与主线程互等。
+      Task<WorkbenchCommandOutcome> started = handler.ExecuteAsync(
+        new StartBatchCommand(), TestContext.Current.CancellationToken).AsTask();
+      deferred.Attach(fake);
+      WorkbenchCommandOutcome outcome = await started;
+      Assert.Null(outcome.Error);
+
+      await fake.WaitSubmittedAsync(TimeSpan.FromSeconds(10));
+      SubmitRequest request = Assert.Single(fake.Submissions);
+      Assert.Equal("OCR", request.Pipeline.PipelineId);
+      Assert.Equal(OcrEngine.Windows, request.Pipeline.Engine);
+      Assert.Equal(0, fake.UpdateCalls);
+    }
+    finally
+    {
+      broker?.Dispose();
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task ColdStartFreezeIgnoresOverrideChosenWhileAwaitingInput()
+  {
+    // 冷启动延迟冻结：输入等待期间的新 UI 选择不注入已启动的本次任务，
+    // 提交仍按启动时意图（跟随已提交默认）解析；新选择保留给下一次。
+    var deferred = new DeferredInferenceClient();
+    deferred.MarkStartupPending();
+    RecordingClient fake = Client("windows_text");
+    var inputGate = new TaskCompletionSource(
+      TaskCreationOptions.RunContinuationsAsynchronously);
+    var inputs = new GatedInputService(inputGate.Task);
+    var recognition = new RecognitionViewModel(deferred, inputs);
+    var settings = new SettingsViewModel(deferred);
+    string root = Path.Combine(
+      Path.GetTempPath(), $"vibeocr-default-override-{Guid.NewGuid():N}");
+    string resourceRoot = Path.Combine(root, "resources");
+    Directory.CreateDirectory(resourceRoot);
+    var broker = new WorkbenchResourceBroker(resourceRoot);
+    var annotations = new WorkbenchAnnotationStore(resourceRoot);
+    try
+    {
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        () => recognition,
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => settings,
+        () => new ShellViewModel(new StubHotkeyRegistrar(), new StubStartupRegistrar()),
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker, resourceRoot, static () => 0, annotations,
+        inferenceAttached: () => deferred.IsAttached);
+
+      WorkbenchCommandOutcome started = await handler.ExecuteAsync(
+        new SelectRecognitionImageCommand(),
+        TestContext.Current.CancellationToken);
+      Assert.Null(started.Error);
+      await inputs.WaitEnteredAsync();
+      deferred.Attach(fake);
+      // 目录可加载后，用户在输入等待期间另选本次 override。
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      WorkbenchCommandOutcome overridden = await handler.ExecuteAsync(
+        new SetTaskEngineCommand("rapid_text"),
+        TestContext.Current.CancellationToken);
+      Assert.Null(overridden.Error);
+
+      inputGate.TrySetResult();
+      await fake.WaitSubmittedAsync(TimeSpan.FromSeconds(10));
+      PipelineSelection pipeline = Assert.Single(fake.Submissions).Pipeline;
+      // 已启动任务按已提交默认提交；新选择只影响下一次。
+      Assert.Equal(OcrEngine.Windows, pipeline.Engine);
+      Assert.Equal("rapid_text", recognition.TaskEngine);
+    }
+    finally
+    {
+      broker.Dispose();
+      annotations.Dispose();
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task ColdStartSelectionCallbackCancellationCancelsSubmit()
+  {
+    // 环境切换窗口：延迟回调返回 null 时本次提交取消，不以空快照提交。
+    var fake = Client("windows_text");
+    var recognition = new RecognitionViewModel(fake, new FixedInputService());
+    static Task<RecognitionSubmitSelection?> Cancelled(CancellationToken _) =>
+      Task.FromResult<RecognitionSubmitSelection?>(null);
+    await recognition.RecognizeFileAsync(
+      TestContext.Current.CancellationToken, Cancelled);
+    Assert.Equal(JobState.Cancelled, recognition.TerminalState);
+    Assert.Equal("运行环境正在切换，已取消本次识别", recognition.Status);
+    Assert.Empty(fake.Submissions);
+  }
+
+  [Fact]
+  public async Task EnvironmentSwitchingCancelsBatchAndPdfSubmitWithoutRapidFallback()
+  {
+    // 真实 handler 提交路径回归：环境切换窗口（StartEnvironmentOperation
+    // 置位的同一状态）内启动批量/PDF，提交必须取消而非以空快照提交
+    // （旧实现 engine=null 落回 RapidOCR）。
+    var fake = Client("windows_text");
+    string root = Path.Combine(
+      Path.GetTempPath(), $"vibeocr-default-switch-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    var broker = default(WorkbenchResourceBroker);
+    try
+    {
+      var batch = new BatchViewModel(fake, new BatchFileSource());
+      batch.AddFiles([TempPng(root, "a")]);
+      var pdf = new PdfViewModel(fake, new StubPdfSource());
+      var settings = new SettingsViewModel(fake);
+      string resourceRoot = Path.Combine(root, "resources");
+      Directory.CreateDirectory(resourceRoot);
+      broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotations = new WorkbenchAnnotationStore(resourceRoot);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        static () => throw new InvalidOperationException(),
+        () => batch,
+        static () => throw new InvalidOperationException(),
+        () => pdf,
+        () => settings,
+        () => new ShellViewModel(new StubHotkeyRegistrar(), new StubStartupRegistrar()),
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker, resourceRoot, static () => 0, annotations);
+      System.Reflection.FieldInfo switching = typeof(DesktopWorkbenchCommandHandler)
+        .GetField("environmentSwitching",
+          System.Reflection.BindingFlags.NonPublic |
+          System.Reflection.BindingFlags.Instance)!;
+
+      switching.SetValue(handler, 1);
+      WorkbenchCommandOutcome batchOutcome = await handler.ExecuteAsync(
+        new StartBatchCommand(), TestContext.Current.CancellationToken);
+      var batchState = Assert.IsType<BatchWorkbenchState>(
+        Assert.Single(batchOutcome.States));
+      Assert.False(batchState.IsRunning);
+      Assert.Null(batchOutcome.Error);
+
+      WorkbenchCommandOutcome pdfOutcome = await handler.ExecuteAsync(
+        new OcrPdfPagesCommand(), TestContext.Current.CancellationToken);
+      var pdfState = Assert.IsType<PdfWorkbenchState>(
+        Assert.Single(pdfOutcome.States));
+      Assert.False(pdfState.IsBusy);
+      Assert.Null(pdfOutcome.Error);
+
+      // 未提交任何请求；退出切换窗口后同一链路恢复提交。
+      Assert.Empty(fake.Submissions);
+      switching.SetValue(handler, 0);
+      WorkbenchCommandOutcome resumed = await handler.ExecuteAsync(
+        new StartBatchCommand(), TestContext.Current.CancellationToken);
+      Assert.Null(resumed.Error);
+      await fake.WaitSubmittedAsync(TimeSpan.FromSeconds(10));
+      SubmitRequest request = Assert.Single(fake.Submissions);
+      Assert.Equal(OcrEngine.Windows, request.Pipeline.Engine);
+    }
+    finally
+    {
+      broker?.Dispose();
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
   private static string TempPng(string root, string name)
   {
     string path = Path.Combine(root, name + ".png");
@@ -541,9 +789,9 @@ public sealed class DefaultModeRequestContractTests
       };
     }
 
-    public async Task WaitSubmittedAsync() =>
+    public async Task WaitSubmittedAsync(TimeSpan? timeout = null) =>
       await TestContext.Current.CancellationToken.WaitAsync(
-          () => _submissions.Count > 0, 1500);
+          () => _submissions.Count > 0, (int)(timeout ?? TimeSpan.FromMilliseconds(1500)).TotalMilliseconds);
 
     public async Task WaitIdleAsync() =>
       await TestContext.Current.CancellationToken.WaitAsync(
