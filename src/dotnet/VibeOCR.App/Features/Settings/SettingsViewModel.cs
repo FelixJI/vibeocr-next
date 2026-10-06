@@ -790,7 +790,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         DefaultRecognitionModeState? defaultMode) => defaultMode switch
     {
         null or { Supported: false } => RuntimeDefaultModeBinding.NotApplicable,
-        { ModeId: not null } => RuntimeDefaultModeBinding.Bound,
+        { ModeId: { } id } when !string.IsNullOrWhiteSpace(id) => RuntimeDefaultModeBinding.Bound,
         { Stored: true } => RuntimeDefaultModeBinding.Invalid,
         _ => RuntimeDefaultModeBinding.Unread,
     };

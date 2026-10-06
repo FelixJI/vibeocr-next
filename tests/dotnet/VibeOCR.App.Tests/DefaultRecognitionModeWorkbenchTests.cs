@@ -68,17 +68,20 @@ public sealed class DefaultRecognitionModeWorkbenchTests
     Assert.Null(viewModel.RecognitionSelection?.DefaultRecognitionModeId);
   }
 
-  [Fact]
-  public async Task UnparsableEchoedValueMarksSnapshotInvalidAndRefusesSubmit()
+  [Theory]
+  [InlineData(null)]
+  [InlineData("")]
+  [InlineData("   ")]
+  public async Task UnparsableEchoedValueMarksSnapshotInvalidAndRefusesSubmit(string? storedValue)
   {
-    // Runtime 对显式 null/非字符串持久值原样回显：ModeId=null 且已回显，
+    // Runtime 原样回显损坏的持久值，null、空字符串与空白都必须拒绝，
     // 不得当作“无默认”静默回退 RapidOCR，提交协商必须拒绝并指向修复。
     var fake = new DefaultModeInferenceClient { Health = DefaultModeHealth() };
     fake.Settings = new SettingsSnapshot
     {
       Extra = new Dictionary<string, JsonElement>
       {
-        ["default_recognition_mode"] = JsonSerializer.SerializeToElement((string?)null),
+        ["default_recognition_mode"] = JsonSerializer.SerializeToElement(storedValue),
       },
     };
     var viewModel = new SettingsViewModel(fake);
@@ -87,7 +90,7 @@ public sealed class DefaultRecognitionModeWorkbenchTests
     Assert.Equal(
       RuntimeDefaultModeBinding.Invalid,
       viewModel.RecognitionSelection?.DefaultMode);
-    Assert.Null(viewModel.RecognitionSelection?.DefaultRecognitionModeId);
+    Assert.Equal(storedValue, viewModel.RecognitionSelection?.DefaultRecognitionModeId);
 
     RecognitionSelectionSnapshot snapshot = viewModel.RecognitionSelection!;
     RecognitionModeUnavailableException refused = Assert.Throws<
