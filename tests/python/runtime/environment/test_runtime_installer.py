@@ -817,6 +817,7 @@ def test_inactive_install_commit_rejects_active_pointer_drift(
     replacement = manager.create("replacement")
     manager.commit_switch(manager.prepare_switch(active["id"]))
     plan = manager.preview_install(target["id"], "rapidocr-cpu", ("tuna-pypi",))
+    # The deadline measures lock contention, not interpreter startup for replacement.
     original_probe = manager._probe
     monkeypatch.setattr(
         manager,
@@ -827,7 +828,7 @@ def test_inactive_install_commit_rejects_active_pointer_drift(
                 "reason": None,
                 "python": str(manager._venv_python(manager._safe_path(record))),
             }
-            if record["status"] == "installed"
+            if record["status"] == "installed" or record["id"] == replacement["id"]
             else original_probe(record)
         ),
     )
