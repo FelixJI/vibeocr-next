@@ -2143,7 +2143,8 @@ public sealed class ScreenshotSessionWorkbenchTests
       TestContext.Current.CancellationToken);
   }
 
-  private class TextModeHealthClient(bool rapidReady = true, bool windowsReady = true)
+  private class TextModeHealthClient(
+      bool rapidReady = true, bool windowsReady = true, bool mineruConfig = false)
     : InferenceClientStub
   {
     public override Task<JobRef> SubmitAsync(
@@ -2152,8 +2153,9 @@ public sealed class ScreenshotSessionWorkbenchTests
       CancellationToken cancellationToken) =>
       throw new InvalidOperationException("health-only client must not submit");
 
-    public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken) =>
-      Task.FromResult(new Wire.Health
+    public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
+    {
+      Wire.Health health = new()
       {
         SchemaVersion = 2,
         InstanceId = "sup-text",
@@ -2207,7 +2209,46 @@ public sealed class ScreenshotSessionWorkbenchTests
             },
           },
         ],
-      });
+      };
+      if (mineruConfig)
+      {
+        // 可选声明类型化 MinerU 4 配置目录：默认 tier Basic/ch，供
+        // mineru_document 提交断言目录派生配置，其余模式不受影响。
+        health = health with
+        {
+          Capabilities = [.. health.Capabilities,
+            RuntimeSelectionService.MineruConfigCapability],
+          CapabilityDescriptors =
+          [
+            .. health.CapabilityDescriptors!,
+            new Wire.CapabilityDescriptor
+            {
+              Name = RuntimeSelectionService.MineruConfigCapability,
+              Lifecycle = "active",
+              IntroducedIn = "2.9.0",
+              DeprecatedIn = null,
+              SunsetAt = null,
+              Replacement = null,
+              MineruConfigCatalog = new Wire.MineruConfigCatalog
+              {
+                DefaultTier = Wire.MineruTierId.Basic,
+                Tiers =
+                [
+                  new Wire.MineruTierDescriptor
+                  {
+                    Id = Wire.MineruTierId.Basic,
+                    Availability = Wire.MineruTierAvailability.Ready,
+                    ReasonCode = null,
+                  },
+                ],
+                Languages = ["ch"],
+              },
+            },
+          ],
+        };
+      }
+      return Task.FromResult(health);
+    }
 
     public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>
       Task.FromResult(new SettingsSnapshot());
@@ -2642,9 +2683,9 @@ public sealed class ScreenshotSessionWorkbenchTests
       Task.FromResult<RecognitionInput?>(null);
   }
 
-  /// <summary>真实 typed 目录 + 记录识别提交请求/上传。</summary>
-  private sealed class SelectionSubmitClient(bool rapidReady = true)
-    : TextModeHealthClient(rapidReady)
+  /// <summary>真实 typed 目录 + 记录识别提交请求/上传；可派生改写终态。</summary>
+  private class SelectionSubmitClient(bool rapidReady = true, bool mineruConfig = false)
+    : TextModeHealthClient(rapidReady, mineruConfig: mineruConfig)
   {
     public List<SubmitRequest> Requests { get; } = [];
     public List<IReadOnlyList<byte>> UploadedContent { get; } = [];
@@ -2790,15 +2831,26 @@ public sealed class ScreenshotSessionWorkbenchTests
     }
   }
 
-  [Fact]
-  public async Task OrdinaryRecognizeIntentSubmitsOnceWithTypedModeWithoutEditorSession()
+  [Theory]
+  [InlineData("rapid_text", "OCR", "rapidocr")]
+  [InlineData("windows_text", "OCR", "windows")]
+  [InlineData("paddle_text", "OCR", "paddleocr")]
+  [InlineData("paddle_structure", "PP-StructureV3", null)]
+  [InlineData("paddle_document_vl", "PaddleOCR-VL", null)]
+  [InlineData("mineru_document", "MinerU", null)]
+  [InlineData("paddle_table", "TABLE_RECOGNITION", null)]
+  [InlineData("paddle_formula", "FORMULA_RECOGNITION", null)]
+  public async Task OrdinaryRecognizeIntentSubmitsOnceWithTypedModeWithoutEditorSession(
+    string modeId,
+    string pipelineId,
+    string? engineId)
   {
     string root = TemporaryRoot();
     try
     {
-      var inference = new SelectionSubmitClient();
+      var inference = new SelectionSubmitClient(mineruConfig: true);
       var inputs = new SelectionActionCaptureInput(
-        ScreenshotSelectionAction.Recognize, "paddle_table");
+        ScreenshotSelectionAction.Recognize, modeId);
       var recognition = new RecognitionViewModel(inference, inputs);
       var settings = new SettingsViewModel(inference);
       await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
@@ -2823,14 +2875,38 @@ public sealed class ScreenshotSessionWorkbenchTests
         done = await completed.Task;
       }
 
-      // 携带唯一 typed 意图只提交一次：表格管线、无会话/编辑器、终态呈现。
+      // 携带唯一 typed 意图只提交一次：真实 SubmitRequest 实参按目录
+      // 契约逐模式断言（pipeline/engine/MinerU 配置），零会话/编辑器。
       SubmitRequest request = Assert.Single(inference.Requests);
-      Assert.Equal(JobKind.Recognition, request.Kind);
+      Assert.Equal(
+        modeId == "mineru_document" ? JobKind.MineruParse : JobKind.Recognition,
+        request.Kind);
       Assert.Equal(JobPriority.Interactive, request.Priority);
-      Assert.Equal("TABLE_RECOGNITION", request.Pipeline.PipelineId);
-      Assert.Null(request.Pipeline.Engine);
+      Assert.Equal(pipelineId, request.Pipeline.PipelineId);
+      if (engineId is null)
+      {
+        Assert.Null(request.Pipeline.Engine);
+      }
+      else
+      {
+        Assert.Equal(OcrEngineWire.Parse(engineId), request.Pipeline.Engine);
+      }
+      if (modeId == "mineru_document")
+      {
+        // 类型化 MinerU 4 配置来自目录默认 tier：Basic/ch + 生效值，
+        // 不携带任何遗留 engine 选项。
+        Assert.Equal(MineruTier.Basic, request.Pipeline.Mineru!.Tier);
+        Assert.Equal(MineruOcrMode.Auto, request.Pipeline.Mineru.OcrMode);
+        Assert.Equal(MineruConfig.AllPages, request.Pipeline.Mineru.PageRange);
+        Assert.Equal(MineruConfig.DefaultLanguage, request.Pipeline.Mineru.Language);
+      }
+      else
+      {
+        Assert.Null(request.Pipeline.Mineru);
+      }
+      Assert.Empty(request.Pipeline.Options);
       Assert.Equal(CaptureBytes, Assert.Single(inference.UploadedContent));
-      Assert.Equal("paddle_table", recognition.TaskEngine);
+      Assert.Equal(modeId, recognition.TaskEngine);
       Assert.Null(handler.CurrentImageSessionId);
       Assert.Equal(0, sessionReady);
       await UntilAsync(() => terminalShown == 1);
@@ -2883,6 +2959,79 @@ public sealed class ScreenshotSessionWorkbenchTests
       Assert.Null(recognition.TaskEngine);
       Assert.Null(handler.CurrentImageSessionId);
       Assert.Equal(0, sessionReady);
+      await UntilAsync(() => terminalShown == 1);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  /// <summary>提交后以失败 outcome 终态（动作栏显式识别失败分支）。</summary>
+  private sealed class FailingOutcomeSelectionClient : SelectionSubmitClient
+  {
+    public override Task<JobUpdate> ObserveAsync(
+      string jobId,
+      int afterSequence,
+      CancellationToken cancellationToken) => Task.FromResult(new JobUpdate
+    {
+      Snapshot = new JobSnapshot
+      {
+        JobId = jobId,
+        Kind = JobKind.Recognition,
+        Priority = JobPriority.Interactive,
+        State = JobState.Failed,
+      },
+      Events = Array.Empty<StageEvent>(),
+      Outcomes =
+      [
+        new ItemOutcome
+        {
+          ItemId = "it-0",
+          State = ItemState.Failed,
+          Attempt = 1,
+        },
+      ],
+      ThroughSequence = afterSequence,
+    });
+  }
+
+  [Fact]
+  public async Task OrdinaryRecognizeFailureReachesVisibleTerminalWithoutRetrySubmit()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new FailingOutcomeSelectionClient();
+      var inputs = new SelectionActionCaptureInput(
+        ScreenshotSelectionAction.Recognize, "windows_text");
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore, settings,
+        inferenceAttached: () => true);
+      int terminalShown = 0;
+      handler.ScreenshotSelectionRecognized += () => terminalShown++;
+
+      RecognitionWorkbenchState failed;
+      using (var completed = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.StatusCode == "recognition.failed" &&
+          state.ScreenshotSession is null))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        failed = await completed.Task;
+      }
+
+      // 失败终态：可见、无会话残留、不自动重试（仅一次提交）。
+      Assert.Equal("recognition.failed", failed.StatusCode);
+      Assert.Null(failed.Result);
+      Assert.Null(handler.CurrentImageSessionId);
+      Assert.Single(inference.Requests);
+      Assert.Equal("windows_text", recognition.TaskEngine);
       await UntilAsync(() => terminalShown == 1);
     }
     finally

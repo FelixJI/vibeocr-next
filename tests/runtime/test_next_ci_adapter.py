@@ -579,7 +579,7 @@ function Start-Process {
     } | ConvertTo-Json | Set-Content -LiteralPath $Launch
     New-Item -ItemType Directory -Path $env:WEBVIEW2_USER_DATA_FOLDER |
         Out-Null
-    '{"schema_version":1,"state":"bridge-ready","resources":"verified","layout_sizes_verified":2}' |
+    '{"schema_version":1,"state":"bridge-ready","resources":"verified","layout_sizes_verified":2,"owner_restore":"verified"}' |
         Set-Content -LiteralPath $env:VIBEOCR_WEB_READY_FILE
     $process = [pscustomobject]@{ ExitCode = 0 }
     $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {

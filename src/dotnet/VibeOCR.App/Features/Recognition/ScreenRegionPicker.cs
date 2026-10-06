@@ -257,15 +257,86 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
         }
         finally
         {
-            void RestoreOwner()
-            {
-                if (visible) ShowWindow(owner, minimized ? 7 : 8);
-                if (foreground != 0) SetForegroundWindow(foreground);
-            }
+            void RestoreOwner() => RestoreOwnerState(owner, visible, minimized, foreground);
             // 确认选区与加载编辑器之间不闪回主窗口。
             if (scene is null) RestoreOwner();
             else scene.RestoreOwnerOnClose(RestoreOwner);
         }
+    }
+
+    /// <summary>
+    /// 截图后恢复宿主窗口原状态的实际执行路径：可见→按原形态显示（最小化
+    /// SW_SHOWMINNOACTIVE=7，普通 SW_SHOWNA=8，均不夺取激活）；原本隐藏
+    /// （托盘）→保持隐藏；截图前前台非空句柄时恢复其前台。production
+    /// finally 与无 Runtime 的窗口恢复自检共用同一方法。
+    /// </summary>
+    internal static void RestoreOwnerState(nint owner, bool visible, bool minimized, nint foreground)
+    {
+        if (visible) ShowWindow(owner, minimized ? 7 : 8);
+        if (foreground != 0) SetForegroundWindow(foreground);
+    }
+
+    /// <summary>
+    /// 无 Runtime 的窗口恢复自检（web-ready 隔离 smoke 调用）：只创建并操作
+    /// 自检自身的 WinUI 窗口（初次显示会激活该自建窗口），依次验证普通
+    /// 可见、最小化、原本隐藏三态经 <see cref="RestoreOwnerState"/> 的真实
+    /// IsWindowVisible/IsIconic 恢复。不采样用户桌面；恢复方法前台传 0，
+    /// 不恢复/检查任何外部窗口前台（前台物理一致性 UNVERIFIED）。
+    /// </summary>
+    internal static async Task VerifyOwnerRestoreSelfCheckAsync(CancellationToken cancellationToken)
+    {
+        var window = new Window { Content = new Grid() };
+        try
+        {
+            window.AppWindow.Resize(new SizeInt32(240, 160));
+            window.Activate();
+            nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
+            await WaitForSelfCheckStateAsync(
+                () => IsWindowVisible(handle) && !IsIconic(handle), "自检窗口初始可见", cancellationToken);
+
+            // 原本可见+普通：隐藏后按 SW_SHOWNA 恢复为可见非最小化。
+            ShowWindow(handle, 0);
+            await WaitForSelfCheckStateAsync(() => !IsWindowVisible(handle), "自检窗口隐藏", cancellationToken);
+            RestoreOwnerState(handle, visible: true, minimized: false, foreground: 0);
+            await WaitForSelfCheckStateAsync(
+                () => IsWindowVisible(handle) && !IsIconic(handle), "普通可见状态恢复", cancellationToken);
+
+            // 原本可见+最小化：隐藏后按 SW_SHOWMINNOACTIVE 恢复为可见且最小化。
+            ShowWindow(handle, 6);
+            await WaitForSelfCheckStateAsync(() => IsIconic(handle), "自检窗口最小化", cancellationToken);
+            ShowWindow(handle, 0);
+            await WaitForSelfCheckStateAsync(() => !IsWindowVisible(handle), "自检窗口再次隐藏", cancellationToken);
+            RestoreOwnerState(handle, visible: true, minimized: true, foreground: 0);
+            await WaitForSelfCheckStateAsync(
+                () => IsWindowVisible(handle) && IsIconic(handle), "最小化状态恢复", cancellationToken);
+
+            // 原本隐藏（托盘）：恢复调用后保持隐藏。准备阶段用 SW_RESTORE
+            // 明确解除最小化回到普通可见（SW_SHOWNA 不保证解除最小化），
+            // 以便“保持隐藏”结果可区分于未变化；仅自检准备，生产恢复语义
+            // 仍是最小化 SW_SHOWMINNOACTIVE / 普通 SW_SHOWNA。
+            ShowWindow(handle, 9);
+            await WaitForSelfCheckStateAsync(
+                () => IsWindowVisible(handle) && !IsIconic(handle), "自检窗口回到普通可见", cancellationToken);
+            ShowWindow(handle, 0);
+            await WaitForSelfCheckStateAsync(() => !IsWindowVisible(handle), "自检窗口第三次隐藏", cancellationToken);
+            RestoreOwnerState(handle, visible: false, minimized: false, foreground: 0);
+            await WaitForSelfCheckStateAsync(() => !IsWindowVisible(handle), "托盘隐藏保持隐藏", cancellationToken);
+        }
+        finally
+        {
+            window.Close();
+        }
+    }
+
+    private static async Task WaitForSelfCheckStateAsync(
+        Func<bool> state, string description, CancellationToken cancellationToken)
+    {
+        for (int attempt = 0; attempt < 50; attempt++)
+        {
+            if (state()) return;
+            await Task.Delay(100, cancellationToken);
+        }
+        throw new InvalidOperationException($"窗口恢复自检未达到预期状态：{description}。");
     }
 
   private sealed record OverlaySelection(
