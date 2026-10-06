@@ -712,6 +712,20 @@ class SupervisorModule:
                     pipeline_id=pipeline.name,
                     pinned=pipeline.pinned,
                 )
+        # default_recognition_mode 的唯一权威校验 seam：恒验类型/known id；
+        # 仅当值变更时验可用性，让已失效的旧默认不阻断其他设置的读改写。
+        from vibeocr.runtime.recognition.recognition_modes import (
+            DEFAULT_RECOGNITION_MODE_EXTRA_KEY,
+            resolve_default_recognition_mode,
+        )
+
+        old_raw = self._settings.extra.get(DEFAULT_RECOGNITION_MODE_EXTRA_KEY)
+        new_raw = snapshot.extra.get(DEFAULT_RECOGNITION_MODE_EXTRA_KEY)
+        resolve_default_recognition_mode(
+            snapshot.extra,
+            self.recognition_mode_registry,
+            require_available=new_raw != old_raw,
+        )
         with self._lock:
             previous = self._settings
             configure = getattr(self._executor, "configure_settings", None)

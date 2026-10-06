@@ -1021,7 +1021,7 @@ describe("AppShell", () => {
     // 随包基础能力展示已移除（纯视觉）：二维码能力不受设置页影响。
     expect(screen.queryByText("二维码与条形码")).not.toBeInTheDocument();
     expect(screen.queryByText("随包可用")).not.toBeInTheDocument();
-    expect(screen.getByText(/识别模式在对应任务中选择/)).toBeVisible();
+    expect(screen.getByText(/默认识别类型在此设置/)).toBeVisible();
 
     const packageSource = screen.getByLabelText("Python 包下载源");
     expect(packageSource).toHaveValue("tuna-pypi");
@@ -2080,7 +2080,7 @@ describe("AppShell", () => {
 
     const taskEngine = screen.getByLabelText("本次识别模式");
     expect(taskEngine).toHaveValue("");
-    expect(screen.getByText("使用 Runtime 默认模式")).toBeVisible();
+    expect(screen.getByText("跟随默认（未读取）")).toBeVisible();
     await user.selectOptions(taskEngine, "windows");
     expect(actions.run).toHaveBeenCalledWith({
       type: "recognition.setTaskEngine",
@@ -3467,6 +3467,340 @@ describe("AppShell", () => {
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.confirmEnvironmentInstall",
       planId: "plan-follow",
+    });
+    unmount();
+  });
+  it("shows the resolved runtime default and routes to settings from the inherit option", async () => {
+    window.location.hash = "#/recognition";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 61,
+      route: "recognition",
+      theme: "light",
+      capabilities: ["recognition.engine"],
+      features: {
+        recognition: {
+          isBusy: false,
+          statusCode: "recognition.ready",
+          taskEngine: null,
+          engines: [
+            {
+              engine: "windows_text",
+              displayName: "Windows OCR（系统内置）",
+              selected: true,
+              isTaskOverride: false,
+              isDefault: true,
+              availability: "ready",
+              requiresDownload: false,
+            },
+            {
+              engine: "paddle_text",
+              displayName: "通用 OCR（PaddleOCR）",
+              selected: false,
+              isTaskOverride: false,
+              availability: "preparation_required",
+              requiresDownload: true,
+            },
+          ],
+        },
+      },
+      runtimeLabel: "原生宿主已连接",
+    };
+
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+
+    // 继承选项同时展示来源与实际有效模式。
+    expect(
+      screen.getByRole("option", {
+        name: "跟随默认（Windows OCR（系统内置））",
+      }),
+    ).toBeInTheDocument();
+    // 可点击入口直达设置页的默认识别模式区。
+    await user.click(screen.getByRole("button", { name: "修改默认识别类型" }));
+    expect(actions.navigate).toHaveBeenCalledWith("settings");
+    unmount();
+  });
+
+  it("keeps showing the committed default on the inherit option while overridden", () => {
+    window.location.hash = "#/recognition";
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 66,
+      route: "recognition",
+      theme: "light",
+      capabilities: ["recognition.engine"],
+      features: {
+        recognition: {
+          isBusy: false,
+          statusCode: "recognition.ready",
+          taskEngine: "paddle_text",
+          engines: [
+            {
+              engine: "paddle_text",
+              displayName: "通用 OCR（PaddleOCR）",
+              selected: true,
+              isTaskOverride: true,
+              isDefault: false,
+              availability: "ready",
+              requiresDownload: false,
+            },
+            {
+              engine: "windows_text",
+              displayName: "Windows OCR（系统内置）",
+              selected: false,
+              isTaskOverride: false,
+              isDefault: true,
+              availability: "ready",
+              requiresDownload: false,
+            },
+          ],
+        },
+      },
+      runtimeLabel: "原生宿主已连接",
+    };
+
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+
+    // 本次覆盖后默认仍已知：继承项继续展示已提交默认，不退回“未读取”。
+    expect(
+      screen.getByRole("option", {
+        name: "跟随默认（Windows OCR（系统内置））",
+      }),
+    ).toBeInTheDocument();
+    unmount();
+  });
+
+  it("labels a non-ready runtime default with its availability on the inherit option", () => {
+    window.location.hash = "#/batch";
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 62,
+      route: "batch",
+      theme: "light",
+      capabilities: ["recognition.engine"],
+      features: {
+        batch: {
+          isRunning: false,
+          itemCount: 0,
+          completedCount: 0,
+          failedCount: 0,
+          taskEngine: null,
+          engines: [
+            {
+              engine: "mineru_document",
+              displayName: "深度文档解析（MinerU）",
+              selected: true,
+              isTaskOverride: false,
+              availability: "preparation_required",
+              requiresDownload: true,
+            },
+          ],
+        },
+      },
+      runtimeLabel: "原生宿主已连接",
+    };
+
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+
+    expect(
+      screen.getByRole("option", {
+        name: "跟随默认（深度文档解析（MinerU），需准备依赖）",
+      }),
+    ).toBeInTheDocument();
+    unmount();
+  });
+
+  it("saves the default recognition mode from the settings panel", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn().mockResolvedValue(true),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 63,
+      route: "settings",
+      theme: "light",
+      capabilities: ["settings.selection"],
+      features: {
+        settings: {
+          theme: "light",
+          isBusy: false,
+          statusCode: "settings.ready",
+          backend: "cpu",
+          startupEnabled: false,
+          pendingBackend: "cpu",
+          sources: [],
+          features: [],
+          defaultRecognitionMode: {
+            supported: true,
+            modeId: "rapid_text",
+            stored: true,
+          },
+          recognitionModes: [
+            {
+              id: "rapid_text",
+              displayName: "快速 OCR（RapidOCR）",
+              availability: "ready",
+            },
+            {
+              id: "windows_text",
+              displayName: "Windows OCR（系统内置）",
+              availability: "ready",
+            },
+            {
+              id: "paddle_text",
+              displayName: "通用 OCR（PaddleOCR）",
+              availability: "preparation_required",
+            },
+          ],
+        },
+      },
+      runtimeLabel: "原生宿主已连接",
+    };
+
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+
+    const selector = screen.getByLabelText("默认识别类型");
+    expect(selector).toHaveValue("rapid_text");
+    // 未就绪模式不可选为默认，且可用性如实标注。
+    expect(
+      screen.getByRole("option", {
+        name: /通用 OCR（PaddleOCR）（需准备依赖）/,
+      }),
+    ).toBeDisabled();
+    await user.selectOptions(selector, "windows_text");
+    await user.click(screen.getByRole("button", { name: "保存默认识别模式" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setDefaultRecognitionMode",
+      mode: "windows_text",
+    });
+    expect(screen.getByText(/已在运行\/排队的任务参数不受影响/)).toBeVisible();
+    unmount();
+  });
+
+  it("keeps the default recognition mode read-only on backends without the capability", () => {
+    window.location.hash = "#/settings";
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 64,
+      route: "settings",
+      theme: "light",
+      capabilities: ["settings.selection"],
+      features: {
+        settings: {
+          theme: "light",
+          isBusy: false,
+          statusCode: "settings.ready",
+          backend: "cpu",
+          startupEnabled: false,
+          pendingBackend: "cpu",
+          sources: [],
+          features: [],
+          defaultRecognitionMode: {
+            supported: false,
+            modeId: null,
+            stored: false,
+          },
+        },
+      },
+      runtimeLabel: "原生宿主已连接",
+    };
+
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+
+    expect(
+      screen.getByText(/当前识别服务未声明 ocr\.default-recognition-mode\.v1/),
+    ).toBeVisible();
+    expect(screen.getByText(/按快速 OCR（RapidOCR）执行/)).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "保存默认识别模式" }),
+    ).not.toBeInTheDocument();
+    unmount();
+  });
+
+  it("marks an unparsable stored default and routes recovery through saving a valid mode", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn().mockResolvedValue(true),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 65,
+      route: "settings",
+      theme: "light",
+      capabilities: ["settings.selection"],
+      features: {
+        settings: {
+          theme: "light",
+          isBusy: false,
+          statusCode: "settings.ready",
+          backend: "cpu",
+          startupEnabled: false,
+          pendingBackend: "cpu",
+          sources: [],
+          features: [],
+          defaultRecognitionMode: {
+            supported: true,
+            // Runtime 对显式 null/非字符串持久值原样回显。
+            modeId: null,
+            stored: true,
+          },
+          recognitionModes: [
+            {
+              id: "rapid_text",
+              displayName: "快速 OCR（RapidOCR）",
+              availability: "ready",
+            },
+          ],
+        },
+      },
+      runtimeLabel: "原生宿主已连接",
+    };
+
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+
+    expect(
+      screen.getByRole("option", { name: "请重新选择（当前值无法解析）" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/保存的默认值无法解析，未显式选择的任务会拒绝提交/),
+    ).toBeVisible();
+    const selector = screen.getByLabelText("默认识别类型");
+    expect(selector).toHaveValue("");
+    await user.selectOptions(selector, "rapid_text");
+    // 修复项选择后 selector 真实回显新值，不被无效旧值强制回空白。
+    expect(selector).toHaveValue("rapid_text");
+    await user.click(screen.getByRole("button", { name: "保存默认识别模式" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setDefaultRecognitionMode",
+      mode: "rapid_text",
     });
     unmount();
   });

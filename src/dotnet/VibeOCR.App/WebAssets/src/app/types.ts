@@ -89,6 +89,7 @@ export type AppActionType =
   | "settings.setAccelerator"
   | "settings.setFeature"
   | "settings.setMineruConnection"
+  | "settings.setDefaultRecognitionMode"
   | "settings.prepareMineruConnection"
   | "settings.installRuntime"
   | "settings.confirmRuntimeInstall"

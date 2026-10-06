@@ -26,7 +26,23 @@ public sealed record SettingsFeatureOption(
     string Accelerator,
     bool Selected);
 
-internal sealed record RecognitionSelectionSnapshot(RuntimeSelectionService Catalog);
+/// <summary>任务继承绑定时默认识别模式的解析状态。</summary>
+internal enum RuntimeDefaultModeBinding
+{
+    /// <summary>Backend 未声明能力或快照未携带默认信息：按旧语义提交。</summary>
+    NotApplicable,
+    /// <summary>已回显有效模式 id：继承绑定它。</summary>
+    Bound,
+    /// <summary>持久值无法解析（非字符串/显式 null）：提交拒绝并提示修复。</summary>
+    Invalid,
+    /// <summary>能力已声明但快照未回显默认值：提交拒绝，不猜默认。</summary>
+    Unread,
+}
+
+internal sealed record RecognitionSelectionSnapshot(
+    RuntimeSelectionService Catalog,
+    RuntimeDefaultModeBinding DefaultMode = RuntimeDefaultModeBinding.NotApplicable,
+    string? DefaultRecognitionModeId = null);
 
 public sealed class SettingsViewModel : INotifyPropertyChanged
 {
@@ -58,6 +74,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private IReadOnlyList<SettingsFeatureOption> _features = [];
     private IReadOnlyList<string> _selectedSourceIds = [];
     private MineruConnectionState? _mineruConnection;
+    private DefaultRecognitionModeState? _defaultRecognitionMode;
 
     public SettingsViewModel(
         IInferenceClient inference,
@@ -127,6 +144,18 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     {
         get => _mineruConnection;
         private set => SetField(ref _mineruConnection, value);
+    }
+
+    /// <summary>
+    /// 当前默认识别模式投影（extra.default_recognition_mode）；首次
+    /// 读取前为 null，UI 按未加载呈现。Supported=false 时只读兼容说明，
+    /// 不向旧 Backend 写未知键。Stored=true 仅表示 Backend 回显了该键，
+    /// 不代表用户已显式保存。
+    /// </summary>
+    public DefaultRecognitionModeState? DefaultRecognitionMode
+    {
+        get => _defaultRecognitionMode;
+        private set => SetField(ref _defaultRecognitionMode, value);
     }
 
     internal RecognitionSelectionSnapshot? RecognitionSelection =>
@@ -228,10 +257,17 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
     }
 
-    public Task LoadSelectionAsync(CancellationToken cancellationToken) =>
+    /// <summary>
+    /// 读取（或复用已有）Runtime 目录快照。返回 false 仅表示本次读取被
+    /// 代际失效丢弃（环境切换/实例更换的 ClearSelection/Invalidate，
+    /// 未发布快照）；true 表示读取完成（含确认旧 Backend 无目录能力）。
+    /// 既有只 await 的调用者可忽略结果。
+    /// </summary>
+    public Task<bool> LoadSelectionAsync(CancellationToken cancellationToken) =>
         LoadSelectionSerializedAsync(forceReload: false, cancellationToken);
 
-    public Task RefreshSelectionAsync(CancellationToken cancellationToken) =>
+    /// <inheritdoc cref="LoadSelectionAsync"/>
+    public Task<bool> RefreshSelectionAsync(CancellationToken cancellationToken) =>
         LoadSelectionSerializedAsync(forceReload: true, cancellationToken);
 
     public void ClearSelection()
@@ -361,6 +397,84 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             // 保存已生效；目录刷新失败不应把它流报成未保存。
             Status = "MinerU 配置已保存；刷新运行时目录失败，请重新检查状态。";
         }
+    }
+
+    /// <summary>
+    /// 通过 /v2/settings extra.default_recognition_mode 写入默认识别模式。
+    /// 写入需要 Backend 声明 ocr.default-recognition-mode.v1，且目标必须是
+    /// 当前目录内 ready 的模式 id：未知/不可用（含需要准备组件）fail
+    /// closed，不静默降级也不触发安装。保存不改变在跑/已排队任务参数；
+    /// 失败保留原已提交默认。
+    /// </summary>
+    public async Task SetDefaultRecognitionModeAsync(
+        string modeId,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(modeId);
+        if (Maintenance.State.IsRunning) { Status = "运行环境维护尚未结束。"; return; }
+        RuntimeSelectionService? selection = _selection;
+        if (selection is null)
+        {
+            Status = "运行时目录尚未加载，请先刷新运行时";
+            return;
+        }
+        if (!selection.SupportsDefaultRecognitionMode)
+        {
+            Status =
+                $"当前 Backend 未声明 {RuntimeSelectionService.DefaultRecognitionModeCapability}，无法保存默认识别模式";
+            return;
+        }
+        if (!selection.SupportsRecognitionModes)
+        {
+            Status = "当前 Backend 未提供识别模式目录，无法保存默认识别模式";
+            return;
+        }
+        try
+        {
+            // 与 Backend PUT 同一严格度：仅 ready 模式可保存为默认，
+            // preparation_required/unavailable/未知 id 一律拒绝。
+            RecognitionModeOption mode = selection.FindRecognitionMode(modeId);
+            if (!string.Equals(mode.Availability, "ready", StringComparison.Ordinal))
+            {
+                Status = mode.Availability == "preparation_required"
+                    ? $"模式 {SettingsViewModel.DisplayName(modeId)} 需要先准备对应组件，就绪后才能设为默认"
+                    : $"模式 {SettingsViewModel.DisplayName(modeId)} 当前不可用，不能设为默认";
+                return;
+            }
+            selection.MineruConfigFor(mode.Id);
+        }
+        catch (RuntimeSelectionException error)
+        {
+            Status = LocalizeSelection(error);
+            return;
+        }
+        try
+        {
+            await _settingsGate.WaitAsync(cancellationToken);
+            try
+            {
+                SettingsSnapshot updated = await DefaultRecognitionModeSettings.ApplyAsync(
+                    _inference, modeId, cancellationToken);
+                DefaultRecognitionMode = DefaultRecognitionModeSettings.Read(
+                    updated, selection.SupportsDefaultRecognitionMode);
+                Status = $"已保存默认识别模式：{DisplayName(modeId)}";
+            }
+            finally { _settingsGate.Release(); }
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (InferenceClientException error)
+        {
+            // 保存失败：原已提交默认、持久值与投影均不变，仅提示可重试。
+            Status = LocalizeV2(error.Code);
+            return;
+        }
+        catch (RuntimeSelectionException error)
+        {
+            Status = LocalizeSelection(error);
+            return;
+        }
+        // 保存成功后重发布任务目录快照的默认状态，任务页继承选项立即反映。
+        PublishRecognitionSelection(selection, DefaultRecognitionMode);
     }
 
     /// <summary>
@@ -575,7 +689,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     public void Cancel() { }
 
-    private async Task LoadSelectionSerializedAsync(
+    private async Task<bool> LoadSelectionSerializedAsync(
         bool forceReload,
         CancellationToken cancellationToken,
         long? snapshotGeneration = null)
@@ -588,14 +702,14 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             {
                 // 旧快照流程在等门期间被失效（实例更换/新读取）：不得清掉
                 // 新代的 selection 并以新代身份继续读取投影。
-                return;
+                return false;
             }
             if (!forceReload && RecognitionSelection is not null)
             {
-                return;
+                return true;
             }
             if (forceReload) ClearSelection();
-            await LoadSelectionCoreAsync(cancellationToken);
+            return await LoadSelectionCoreAsync(cancellationToken);
         }
         finally
         {
@@ -603,7 +717,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
     }
 
-    private async Task LoadSelectionCoreAsync(CancellationToken cancellationToken)
+    private async Task<bool> LoadSelectionCoreAsync(CancellationToken cancellationToken)
     {
         long selectionGeneration = Volatile.Read(ref _selectionGeneration);
         try
@@ -612,7 +726,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             RuntimeSelectionService selection = new(health);
             SettingsSnapshot settings = await _inference.GetSettingsAsync(cancellationToken);
             IReadOnlyList<string> selectedSourceIds = settings.DownloadSourceIds ?? [];
-            if (selectionGeneration != Volatile.Read(ref _selectionGeneration)) return;
+            if (selectionGeneration != Volatile.Read(ref _selectionGeneration)) return false;
 
             // Commit one complete catalog snapshot only after every remote read
             // succeeds. Concurrent bootstrap/execution callers then observe the
@@ -620,6 +734,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             _selectedSourceIds = selectedSourceIds;
             MineruConnection = MineruConnectionSettings.Read(
                 settings, selection.SupportsMineruRemoteApi);
+            DefaultRecognitionMode = DefaultRecognitionModeSettings.Read(
+                settings, selection.SupportsDefaultRecognitionMode);
             Sources = ProjectSources(selection, selectedSourceIds);
             IReadOnlyList<string> selectedFeatures = _selectionStaged ? PendingFeatureIds :
                 selection.Variants.Where(variant => variant.Accelerator == PendingBackend &&
@@ -628,13 +744,20 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             Features = ProjectFeatures(selection, PendingBackend, selectedFeatures);
             // Publish the catalog marker last. Readers that observe the new
             // selection can therefore also observe its matching projections;
-            // command paths additionally await this same gate.
+            // command paths additionally await this same gate. 投影写入可能
+            // 重入 OnSettingsChanged/InvalidateSnapshot 推进代际：发布前
+            // 复核，失效则不发布旧 snapshot。
+            if (selectionGeneration != Volatile.Read(ref _selectionGeneration))
+                return false;
             _selection = selection;
-            PublishRecognitionSelection(selection);
+            PublishRecognitionSelection(selection, DefaultRecognitionMode);
+            return true;
         }
         catch (NotSupportedException)
         {
             // Pre-2.7 clients do not expose health; selection stays unloaded.
+            // 迟到旧实例的 NotSupported 同样受代际约束，不得绕过失效。
+            return selectionGeneration == Volatile.Read(ref _selectionGeneration);
         }
         catch (RuntimeSelectionException error)
         {
@@ -668,9 +791,23 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             source.Id == sourceId &&
             string.Equals(source.Kind, kind, StringComparison.Ordinal)) == true;
 
-    private void PublishRecognitionSelection(RuntimeSelectionService selection) => Volatile.Write(
+    private void PublishRecognitionSelection(
+        RuntimeSelectionService selection,
+        DefaultRecognitionModeState? defaultMode = null) => Volatile.Write(
             ref _recognitionSelection,
-            new RecognitionSelectionSnapshot(selection));
+            new RecognitionSelectionSnapshot(
+                selection,
+                BindingFor(defaultMode),
+                defaultMode?.ModeId));
+
+    private static RuntimeDefaultModeBinding BindingFor(
+        DefaultRecognitionModeState? defaultMode) => defaultMode switch
+    {
+        null or { Supported: false } => RuntimeDefaultModeBinding.NotApplicable,
+        { ModeId: { } id } when !string.IsNullOrWhiteSpace(id) => RuntimeDefaultModeBinding.Bound,
+        { Stored: true } => RuntimeDefaultModeBinding.Invalid,
+        _ => RuntimeDefaultModeBinding.Unread,
+    };
 
     private static IReadOnlyList<SettingsSourceOption> ProjectSources(
         RuntimeSelectionService selection,
