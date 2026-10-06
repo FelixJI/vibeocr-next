@@ -269,6 +269,14 @@ describe("image editor exclusion regions", () => {
           "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
         sessionId: "session-a",
         revision: 1,
+        excludeBoxes: [
+          {
+            x: expect.any(Number),
+            y: expect.any(Number),
+            width: expect.any(Number),
+            height: expect.any(Number),
+          },
+        ],
       });
       await waitFor(() =>
         expect(

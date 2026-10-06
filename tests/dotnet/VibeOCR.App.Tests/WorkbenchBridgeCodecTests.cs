@@ -474,11 +474,13 @@ public sealed class WorkbenchBridgeCodecTests
           sessionId,
           "recognition",
           "recognizeScreenshotImage",
-          $$"""{"resourceUri":"{{resourceUri}}","sessionId":"{{sessionId}}","revision":3}"""),
+          $$"""{"resourceUri":"{{resourceUri}}","sessionId":"{{sessionId}}","revision":3,"excludeBoxes":[{"x":0,"y":0,"width":500,"height":200}]}"""),
         sessionId).Command);
     Assert.Equal(resourceUri, recognize.ResourceUri);
     Assert.Equal(sessionId, recognize.SessionId);
     Assert.Equal(3, recognize.Revision);
+    Assert.Single(recognize.ExcludeBoxes);
+    Assert.Equal(500, recognize.ExcludeBoxes[0].Width);
 
     CopyScreenshotImageCommand copy = Assert.IsType<CopyScreenshotImageCommand>(
       WorkbenchBridgeCodec.ParseCommand(
@@ -523,7 +525,7 @@ public sealed class WorkbenchBridgeCodecTests
           sessionId,
           "recognition",
           "recognizeScreenshotImage",
-          $$"""{"resourceUri":"file:///tmp/out.png","sessionId":"{{sessionId}}","revision":0}"""),
+          $$"""{"resourceUri":"file:///tmp/out.png","sessionId":"{{sessionId}}","revision":0,"excludeBoxes":[]}"""),
         sessionId));
   }
 

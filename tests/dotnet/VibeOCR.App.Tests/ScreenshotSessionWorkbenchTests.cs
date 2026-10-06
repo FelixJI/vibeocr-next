@@ -744,7 +744,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       using var completed = new RecognitionStateAwaiter(handler,
         state => !state.IsBusy && state.Result is not null);
       Assert.Null((await handler.ExecuteAsync(new RecognizeScreenshotImageCommand(ocr.ResourceUri.AbsoluteUri,
-        sessionId, 0), TestContext.Current.CancellationToken)).Error);
+        sessionId, 0, []), TestContext.Current.CancellationToken)).Error);
       await completed.Task;
       Assert.Equal(jpeg, Assert.Single(inference.UploadedContent));
       Assert.Equal("image/jpeg", Assert.Single(inference.UploadedMediaTypes));
@@ -826,7 +826,7 @@ public sealed class ScreenshotSessionWorkbenchTests
           state => !state.IsBusy && state.Result is not null))
         {
           WorkbenchCommandOutcome recognized = await handler.ExecuteAsync(
-            new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0),
+            new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0, []),
             TestContext.Current.CancellationToken);
           Assert.Null(recognized.Error);
           RecognitionWorkbenchState completed = await completedAwaiter.Task;
@@ -853,11 +853,11 @@ public sealed class ScreenshotSessionWorkbenchTests
       // 旧 revision / 未知会话的识别与复制一律拒绝。
       WorkbenchAnnotationLease staleLease = UploadAnnotation(annotationStore, AnnotationPng);
       Assert.Equal("screenshot_session_stale", (await handler.ExecuteAsync(
-        new RecognizeScreenshotImageCommand(staleLease.ResourceUri.AbsoluteUri, sessionId, 0),
+        new RecognizeScreenshotImageCommand(staleLease.ResourceUri.AbsoluteUri, sessionId, 0, []),
         TestContext.Current.CancellationToken)).Error?.Code);
       Assert.Equal("screenshot_session_stale", (await handler.ExecuteAsync(
         new RecognizeScreenshotImageCommand(
-          staleLease.ResourceUri.AbsoluteUri, Guid.NewGuid(), 1),
+          staleLease.ResourceUri.AbsoluteUri, Guid.NewGuid(), 1, []),
         TestContext.Current.CancellationToken)).Error?.Code);
       WorkbenchAnnotationLease copyLease = UploadAnnotation(annotationStore, AnnotationPng);
       Assert.Equal("screenshot_session_stale", (await handler.ExecuteAsync(
@@ -903,6 +903,216 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   [Fact]
+  public async Task RecognizeFreezesOrdinaryBaselineAndMasksOcrInputWithRealPng()
+  {
+    byte[] png = await EncodeRealPngAsync();
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new RecordingRecognitionClient();
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore,
+        settings: new SettingsViewModel(inference),
+        inferenceAttached: () => false);
+
+      using (var capturedAwaiter = new RecognitionStateAwaiter(
+        handler, state => !state.IsBusy && state.ScreenshotSession is not null))
+      {
+        await handler.ExecuteAsync(
+          new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        RecognitionWorkbenchState captured = await capturedAwaiter.Task;
+        Guid sessionId = Guid.Parse(captured.ScreenshotSession!.SessionId);
+        await handler.ExecuteAsync(
+          new NotifyScreenshotSessionRevisionCommand(sessionId, 1),
+          TestContext.Current.CancellationToken);
+
+        // 左半（0..500‰）为排除框：OCR 输入应烘培不透明白，右半保持绿色。
+        var box = new WorkbenchExclusionBox(0, 0, 500, 1000);
+        WorkbenchAnnotationLease lease = UploadAnnotation(annotationStore, png);
+        using (var completedAwaiter = new RecognitionStateAwaiter(
+          handler, state => !state.IsBusy && state.Result is not null))
+        {
+          await handler.ExecuteAsync(
+            new RecognizeScreenshotImageCommand(
+              lease.ResourceUri.AbsoluteUri, sessionId, 1, [box]),
+            TestContext.Current.CancellationToken);
+          RecognitionWorkbenchState completed = await completedAwaiter.Task;
+
+          // 恰好一次提交；OCR 输入是宿主生成的遮罩副本。
+          IReadOnlyList<byte> ocrBytes = Assert.Single(inference.UploadedContent);
+          (byte[] ocrPixels, uint ocrWidth, uint ocrHeight) =
+            await DecodePngAsync(ocrBytes.ToArray());
+          Assert.Equal(8u, ocrWidth);
+          Assert.Equal(4u, ocrHeight);
+          Assert.Equal([255, 255, 255, 255], Pixel(ocrPixels, ocrWidth, 1, 1));
+          Assert.Equal([255, 255, 255, 255], Pixel(ocrPixels, ocrWidth, 3, 2));
+          Assert.Equal([10, 160, 90, 255], Pixel(ocrPixels, ocrWidth, 6, 2));
+
+          // 会话显示基准是未烘焙普通图：字节与上传完全一致（未重编码）。
+          Assert.Equal(png.LongLength, completed.Input?.ByteLength);
+          Assert.Equal(
+            png,
+            await ReadResourceAsync(broker, completed.Input!.Url));
+          Assert.NotNull(completed.ScreenshotSession);
+          WorkbenchExclusionBox echoed =
+            Assert.Single(completed.ScreenshotSession.ExcludeBoxes ?? []);
+          Assert.Equal(500, echoed.Width);
+        }
+      }
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task FailedRecognitionKeepsFrozenOrdinaryBaselineAndBoxesForRetry()
+  {
+    byte[] png = await EncodeRealPngAsync();
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new FailingSubmitClient();
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore,
+        settings: new SettingsViewModel(inference),
+        inferenceAttached: () => false);
+
+      using (var capturedAwaiter = new RecognitionStateAwaiter(
+        handler, state => !state.IsBusy && state.ScreenshotSession is not null))
+      {
+        await handler.ExecuteAsync(
+          new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        RecognitionWorkbenchState captured = await capturedAwaiter.Task;
+        Guid sessionId = Guid.Parse(captured.ScreenshotSession!.SessionId);
+        await handler.ExecuteAsync(
+          new NotifyScreenshotSessionRevisionCommand(sessionId, 1),
+          TestContext.Current.CancellationToken);
+
+        var box = new WorkbenchExclusionBox(0, 0, 500, 1000);
+        WorkbenchAnnotationLease lease = UploadAnnotation(annotationStore, png);
+        using (var failedAwaiter = new RecognitionStateAwaiter(
+          handler, state => !state.IsBusy &&
+            state.StatusCode == "recognition.failed"))
+        {
+          await handler.ExecuteAsync(
+            new RecognizeScreenshotImageCommand(
+              lease.ResourceUri.AbsoluteUri, sessionId, 1, [box]),
+            TestContext.Current.CancellationToken);
+          RecognitionWorkbenchState failed = await failedAwaiter.Task;
+
+          // 失败后：已编辑普通基准与排除框保留，可重试；仅提交一次。
+          Assert.Equal(1, inference.SubmitCalls);
+          Assert.Equal(png.LongLength, failed.Input?.ByteLength);
+          Assert.Equal(
+            png, await ReadResourceAsync(broker, failed.Input!.Url));
+          WorkbenchExclusionBox retained =
+            Assert.Single(failed.ScreenshotSession?.ExcludeBoxes ?? []);
+          Assert.Equal(500, retained.Width);
+        }
+      }
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  private sealed class FailingSubmitClient : InferenceClientStub
+  {
+    public int SubmitCalls => submitCalls;
+
+    private int submitCalls;
+    public override Task<JobRef> SubmitAsync(
+      SubmitRequest request,
+      IReadOnlyDictionary<string, SubmitUpload> uploads,
+      CancellationToken cancellationToken)
+    {
+      Interlocked.Increment(ref submitCalls);
+      throw new InvalidOperationException("simulated submit failure");
+    }
+  }
+
+  private static byte[] Pixel(byte[] bgra, uint width, int x, int y)
+  {
+    int offset = (int)((y * width + x) * 4);
+    return [bgra[offset], bgra[offset + 1], bgra[offset + 2], bgra[offset + 3]];
+  }
+
+  private static async Task<byte[]> ReadResourceAsync(
+    WorkbenchResourceBroker broker, string url)
+  {
+    await using WorkbenchResourceResponse response =
+      await broker.OpenAsync(new Uri(url));
+    using Stream stream = response.Content;
+    using var memory = new MemoryStream();
+    await stream.CopyToAsync(memory, TestContext.Current.CancellationToken);
+    return memory.ToArray();
+  }
+
+  /// <summary>8×4 真实 PNG：左半红、右半绿（不透明），供 WIC 解码与遮罩断言。</summary>
+  private static async Task<byte[]> EncodeRealPngAsync()
+  {
+    const uint width = 8;
+    const uint height = 4;
+    byte[] pixels = new byte[width * height * 4];
+    for (int y = 0; y < height; y++)
+    {
+      for (int x = 0; x < width; x++)
+      {
+        int offset = (int)((y * width + x) * 4);
+        bool red = x < 4;
+        pixels[offset] = red ? (byte)224 : (byte)10;
+        pixels[offset + 1] = red ? (byte)32 : (byte)160;
+        pixels[offset + 2] = red ? (byte)32 : (byte)90;
+        pixels[offset + 3] = 0xff;
+      }
+    }
+    using var stream = new InMemoryRandomAccessStream();
+    BitmapEncoder encoder = await BitmapEncoder.CreateAsync(
+      BitmapEncoder.PngEncoderId, stream);
+    encoder.SetPixelData(
+      BitmapPixelFormat.Bgra8, BitmapAlphaMode.Straight,
+      width, height, 96, 96, pixels);
+    await encoder.FlushAsync();
+    using IInputStream read = stream.GetInputStreamAt(0);
+    using Stream content = read.AsStreamForRead();
+    using var memory = new MemoryStream();
+    await content.CopyToAsync(memory, 81920, TestContext.Current.CancellationToken);
+    return memory.ToArray();
+  }
+
+  private static async Task<(byte[] Pixels, uint Width, uint Height)> DecodePngAsync(
+    byte[] png)
+  {
+    using var stream = new InMemoryRandomAccessStream();
+    using (var writer = new DataWriter(stream))
+    {
+      writer.WriteBytes(png);
+      await writer.StoreAsync();
+      writer.DetachStream();
+    }
+    stream.Seek(0);
+    BitmapDecoder decoder = await BitmapDecoder.CreateAsync(stream);
+    byte[] pixels = (await decoder.GetPixelDataAsync(BitmapPixelFormat.Bgra8,
+      BitmapAlphaMode.Straight, new BitmapTransform(),
+      ExifOrientationMode.IgnoreExifOrientation,
+      ColorManagementMode.DoNotColorManage)).DetachPixelData();
+    return (pixels, decoder.PixelWidth, decoder.PixelHeight);
+  }
+
+  [Fact]
   public async Task RecognizeSubmitsOnlyTheAnnotatedFinalPng()
   {
     string root = TemporaryRoot();
@@ -930,7 +1140,6 @@ public sealed class ScreenshotSessionWorkbenchTests
           TestContext.Current.CancellationToken);
         RecognitionWorkbenchState captured = await capturedAwaiter.Task;
         Guid sessionId = Guid.Parse(captured.ScreenshotSession!.SessionId);
-        long inputBytes = captured.Input!.ByteLength;
         await handler.ExecuteAsync(
           new NotifyScreenshotSessionRevisionCommand(sessionId, 1),
           TestContext.Current.CancellationToken);
@@ -941,14 +1150,14 @@ public sealed class ScreenshotSessionWorkbenchTests
           state => !state.IsBusy && state.Result is not null))
         {
           await handler.ExecuteAsync(
-            new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, sessionId, 1),
+            new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, sessionId, 1, []),
             TestContext.Current.CancellationToken);
           RecognitionWorkbenchState completed = await completedAwaiter.Task;
 
-          // OCR 输入只能是编辑器导出的最终 PNG，不得回退未编辑基准图。
+          // OCR 输入只能是编辑器导出的最终普通像素，不得回退未编辑基准图。
           Assert.Equal(AnnotationPng, Assert.Single(inference.UploadedContent));
-          // 会话编辑基准（Input）保持稳定，不会被识别输入替换。
-          Assert.Equal(inputBytes, completed.Input?.ByteLength);
+          // 显示基准冻结为同一份已编辑普通像素（无遮罩时同字节，不烧掩膜）。
+          Assert.Equal(AnnotationPng.LongLength, completed.Input?.ByteLength);
           Assert.NotNull(completed.ScreenshotSession);
           Assert.Equal(1, completed.ScreenshotSession.Revision);
         }
@@ -995,7 +1204,7 @@ public sealed class ScreenshotSessionWorkbenchTests
           state => !state.IsBusy && state.Result is not null))
         {
           await handler.ExecuteAsync(
-            new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0),
+            new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0, []),
             TestContext.Current.CancellationToken);
           RecognitionWorkbenchState completed = await completedAwaiter.Task;
           Assert.Equal("recognition.completed", completed.StatusCode);
@@ -1055,7 +1264,7 @@ public sealed class ScreenshotSessionWorkbenchTests
           state => !state.IsBusy && state.Result is not null))
         {
           await handler.ExecuteAsync(
-            new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0),
+            new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0, []),
             TestContext.Current.CancellationToken);
           RecognitionWorkbenchState completed = await completedAwaiter.Task;
           Assert.Equal("recognition.completed", completed.StatusCode);
@@ -1111,7 +1320,7 @@ public sealed class ScreenshotSessionWorkbenchTests
           state => state.IsBusy))
         {
           await handler.ExecuteAsync(
-            new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0),
+            new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0, []),
             TestContext.Current.CancellationToken);
           await busyAwaiter.Task;
         }
@@ -1195,7 +1404,7 @@ public sealed class ScreenshotSessionWorkbenchTests
 
         WorkbenchAnnotationLease lease = UploadAnnotation(annotationStore, AnnotationPng);
         WorkbenchCommandOutcome stale = await handler.ExecuteAsync(
-          new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0),
+          new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0, []),
           TestContext.Current.CancellationToken);
         Assert.Equal("screenshot_session_stale", stale.Error?.Code);
       }
@@ -1245,7 +1454,7 @@ public sealed class ScreenshotSessionWorkbenchTests
           state => state.IsBusy))
         {
           await handler.ExecuteAsync(
-            new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0),
+            new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, sessionId, 0, []),
             TestContext.Current.CancellationToken);
           await busyAwaiter.Task;
         }

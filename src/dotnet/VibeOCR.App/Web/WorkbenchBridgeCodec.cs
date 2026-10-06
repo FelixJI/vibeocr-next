@@ -79,6 +79,8 @@ public static class WorkbenchBridgeCodec
     ["sessionId", "revision"];
   private static readonly HashSet<string> SessionResourceArgumentFields =
     ["resourceUri", "sessionId", "revision"];
+  private static readonly HashSet<string> SessionResourceWithExclusionArgumentFields =
+    ["resourceUri", "sessionId", "revision", "excludeBoxes"];
   private static readonly HashSet<string> PinResourceArgumentFields =
     ["resourceUri", "sessionId", "revision", "excludeBoxes"];
   private static readonly HashSet<string> StructuredCopyArgumentFields =
@@ -353,11 +355,12 @@ public static class WorkbenchBridgeCodec
       }
       case ("recognition", "recognizeScreenshotImage"):
         EnsureObjectWithFields(
-          arguments, SessionResourceArgumentFields, "command arguments");
+          arguments, SessionResourceWithExclusionArgumentFields, "command arguments");
         return new RecognizeScreenshotImageCommand(
           ReadAnnotationResourceUri(arguments),
           ParseGuidArgument(arguments, "sessionId"),
-          ParseContentRevision(arguments));
+          ParseContentRevision(arguments),
+          ParseExclusionBoxes(arguments));
       case ("recognition", "prepareScreenshotTextLayer"):
         EnsureObjectWithFields(
           arguments, SessionResourceArgumentFields, "command arguments");
@@ -1110,6 +1113,7 @@ public static class WorkbenchBridgeCodec
         revision = recognition.ScreenshotSession.Revision,
         textSelectionRequested = recognition.ScreenshotSession.TextSelectionRequested,
         sceneEditing = recognition.ScreenshotSession.SceneEditing,
+        excludeBoxes = recognition.ScreenshotSession.ExcludeBoxes ?? [],
       },
       textLayer = recognition.TextLayer is null ? null : new
       {

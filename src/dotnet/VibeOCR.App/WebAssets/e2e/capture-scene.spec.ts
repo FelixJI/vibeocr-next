@@ -105,6 +105,7 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
         "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
       sessionId: "capture-scene",
       revision: 1,
+      excludeBoxes: [],
     },
   });
   await canvas.press("Escape");

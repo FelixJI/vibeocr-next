@@ -376,6 +376,13 @@ interface ScreenshotSessionState {
   readonly revision: number;
   readonly textSelectionRequested: boolean;
   readonly sceneEditing: boolean;
+  /** 冻结显示基准附带的 [0,1000] 归一化排除框：仅初始化屏蔽标记。 */
+  readonly excludeBoxes?: readonly {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+  }[];
 }
 
 // 宿主回显的活动纯截图会话：会话 id + 当前内容修订。
@@ -393,6 +400,25 @@ function screenshotSession(value: unknown): ScreenshotSessionState | undefined {
         revision: candidate.revision,
         textSelectionRequested: candidate.textSelectionRequested === true,
         sceneEditing: candidate.sceneEditing === true,
+        excludeBoxes: Array.isArray(candidate.excludeBoxes)
+          ? candidate.excludeBoxes.filter(
+              (
+                box,
+              ): box is {
+                x: number;
+                y: number;
+                width: number;
+                height: number;
+              } =>
+                typeof box === "object" &&
+                box !== null &&
+                ["x", "y", "width", "height"].every(
+                  (key) =>
+                    typeof (box as Record<string, unknown>)[key] === "number" &&
+                    Number.isFinite((box as Record<string, unknown>)[key]),
+                ),
+            )
+          : undefined,
       }
     : undefined;
 }
@@ -1050,8 +1076,6 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
   const session = screenshotSession(state.screenshotSession);
   const scene = window.location.hash.includes("?scene=1");
   const busy = booleanValue(state.isBusy);
-  const result = resource(state.result);
-  const resultText = useResourceText(result);
   return (
     <Workspace
       eyebrow={scene ? "CAPTURE" : "IMAGE"}
@@ -1111,23 +1135,14 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
           }
           showAutoTextPreference={session?.textSelectionRequested === true}
           onAutoTextChange={setAutoTextPreference}
+          // 纯编辑不展示识别结果；显式识别提交成功后导航到识别承载面。
+          // scene 窗口固定路由，由宿主完成会话交接与主窗口导航。
+          onRecognitionSubmitted={
+            scene ? undefined : () => actions.navigate("recognition")
+          }
         />
       ) : (
         <EmptyStage title="等待图片" detail="选择、粘贴或直接拖入图片" />
-      )}
-      {result && (
-        <Panel label="OUTPUT" title="识别结果">
-          <CapabilityGate
-            capability="recognition.results"
-            capabilities={viewState.capabilities}
-            action={{ type: "recognition.copy", format: "plain" }}
-            actions={actions}
-            icon={<Copy aria-hidden="true" size={16} />}
-          >
-            复制文本
-          </CapabilityGate>
-          <pre className="result-document">{resultText || "正在读取结果…"}</pre>
-        </Panel>
       )}
     </Workspace>
   );

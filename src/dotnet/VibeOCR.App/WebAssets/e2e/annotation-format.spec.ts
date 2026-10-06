@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import { expectCommand, mountHost, snapshot } from "./workbench-host";
 
@@ -54,40 +54,12 @@ function pixelAt(
   ];
 }
 
-/** 读取用户可见的最终输出预览：blob URL 图像经浏览器解码后的尺寸与像素。
- *  CSP connect-src 不允许 fetch(blob:)，但 blob: 图像不污染 canvas，可直接取样。 */
-async function readPreview(
-  page: Page,
-): Promise<DecodedImage & { src: string }> {
-  const info = await page.evaluate(() => {
-    const element = document.querySelector('img[alt="最终输出预览"]');
-    if (!(element instanceof HTMLImageElement)) {
-      throw new Error("final output preview is missing");
-    }
-    const canvas = document.createElement("canvas");
-    canvas.width = element.naturalWidth;
-    canvas.height = element.naturalHeight;
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("2d context unavailable");
-    context.drawImage(element, 0, 0);
-    const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
-    return {
-      src: element.src,
-      width: element.naturalWidth,
-      height: element.naturalHeight,
-      pixels: Array.from(data),
-    };
-  });
-  return info;
-}
-
 interface AnnotationFormatHost {
   uploads: { contentType: string; body: Buffer }[];
-  previewImg: Locator;
 }
 
 /** 两个编码测试共享的前置：视口、真实上传收集与 80×40 半透明 SVG 源挂载，
- *  确认画布、原图信息行与初始预览可见。 */
+ *  确认实时画布、原图信息行与按需检查入口可见（无第二幅常驻预览）。 */
 async function setupAnnotationFormatHost(
   page: Page,
 ): Promise<AnnotationFormatHost> {
@@ -134,16 +106,17 @@ async function setupAnnotationFormatHost(
   const canvas = page.locator('canvas[aria-label="图片检查画布"]');
   await expect(canvas).toBeVisible();
   await expect(page.getByText(/原图 80×40/)).toBeVisible();
-  await expect(page.getByText(/实际体积/)).toBeVisible();
-  const previewImg = page.locator('img[alt="最终输出预览"]');
-  await expect(previewImg).toBeVisible();
-  return { uploads, previewImg };
+  await expect(
+    page.getByRole("button", { name: "检查文件大小" }),
+  ).toBeVisible();
+  await expect(page.locator('img[alt="最终输出预览"]')).toHaveCount(0);
+  return { uploads };
 }
 
 test("JPEG and PNG outputs encode real decodable pixels with declared sizes", async ({
   page,
 }) => {
-  const { uploads, previewImg } = await setupAnnotationFormatHost(page);
+  const { uploads } = await setupAnnotationFormatHost(page);
 
   // 指定尺寸 + JPEG：真实编码（类型、签名）、白底透明合成与声明尺寸一致。
   await page.getByLabel("输出格式").selectOption("image/jpeg");
@@ -181,44 +154,25 @@ test("JPEG and PNG outputs encode real decodable pixels with declared sizes", as
     },
   });
 
-  // 用户可见的最终输出预览：必须是实际编码 blob 的再次解码，而非预压缩画布。
+  // 按需文件大小检查：明确点击才真实编码；不自动跟随编辑生成第二预览。
   await expect
-    .poll(() =>
-      previewImg.evaluate((el) => (el as HTMLImageElement).naturalWidth),
-    )
-    .toBe(40);
-  await expect
-    .poll(() =>
-      previewImg.evaluate((el) => (el as HTMLImageElement).naturalHeight),
-    )
-    .toBe(20);
-  const jpegPreview = await readPreview(page);
-  expect(jpegPreview.width).toBe(40);
-  expect(jpegPreview.height).toBe(20);
-  expect(jpegPreview.src.startsWith("blob:")).toBe(true);
-  const previewTransparent = pixelAt(jpegPreview, 8, 10);
-  expect(previewTransparent[0]).toBeGreaterThan(235);
-  expect(previewTransparent[1]).toBeGreaterThan(235);
-  expect(previewTransparent[2]).toBeGreaterThan(235);
-  const previewRed = pixelAt(jpegPreview, 32, 10);
-  expect(Math.abs(previewRed[0] - 224)).toBeLessThanOrEqual(20);
-  expect(Math.abs(previewRed[1] - 32)).toBeLessThanOrEqual(25);
-  expect(Math.abs(previewRed[2] - 32)).toBeLessThanOrEqual(25);
-  await expect(
-    page.getByText(/最终输出预览（image\/jpeg · 40×20 · 实际 [\d.]+ (B|KB|MB)/),
-  ).toBeVisible();
-  await expect(page.getByText(/实际体积 [\d.]+ (B|KB|MB)/)).toBeVisible();
+    .poll(async () => {
+      const button = page.getByRole("button", { name: "检查文件大小" });
+      await button.click();
+      return page.locator(".editor-operation-status").textContent();
+    })
+    .toContain("文件大小：image/jpeg · 实际");
 
-  // 切回 PNG：保留原有深色合成（预览与导出同底），尺寸仍为指定值。
-  const jpegPreviewSrc = jpegPreview.src;
+  // 切回 PNG：保留透明 alpha（不再烧深色底），尺寸仍为指定值。
   await page.getByLabel("输出格式").selectOption("image/png");
+  await expect(page.getByText(/PNG 保留透明度/)).toBeVisible();
   await expect
-    .poll(() => previewImg.evaluate((el) => (el as HTMLImageElement).src))
-    .not.toBe(jpegPreviewSrc);
-  const pngPreview = await readPreview(page);
-  expect(pngPreview.width).toBe(40);
-  expect(pngPreview.height).toBe(20);
-  expect(pixelAt(pngPreview, 8, 10)).toEqual([22, 22, 22]);
+    .poll(async () => {
+      const button = page.getByRole("button", { name: "检查文件大小" });
+      await button.click();
+      return page.locator(".editor-operation-status").textContent();
+    })
+    .toContain("文件大小：image/png · 实际");
   await page.getByRole("button", { name: "保存标注图" }).click();
   await expect.poll(() => uploads.length).toBe(2);
   expect(uploads[1]!.contentType).toBe("image/png");
@@ -226,14 +180,19 @@ test("JPEG and PNG outputs encode real decodable pixels with declared sizes", as
   expect(pngBytes.readUInt32BE(16)).toBe(40);
   expect(pngBytes.readUInt32BE(20)).toBe(20);
   const decodedPng = await decodeUpload(page, pngBytes, "image/png");
-  expect(pixelAt(decodedPng, 8, 10)).toEqual([22, 22, 22]);
+  // 透明区不烧入任何底色：RGB 全 0 且 alpha 为 0。
+  const transparentOffset = (10 * 40 + 8) * 4;
+  expect(decodedPng.pixels[transparentOffset]).toBe(0);
+  expect(decodedPng.pixels[transparentOffset + 1]).toBe(0);
+  expect(decodedPng.pixels[transparentOffset + 2]).toBe(0);
+  expect(decodedPng.pixels[transparentOffset + 3]).toBe(0);
   expect(pixelAt(decodedPng, 32, 10)).toEqual([224, 32, 32]);
 });
 
 test("undo restores original output size with matching PNG headers", async ({
   page,
 }) => {
-  const { uploads, previewImg } = await setupAnnotationFormatHost(page);
+  const { uploads } = await setupAnnotationFormatHost(page);
 
   // 默认 PNG：应用指定尺寸并保存，前态为真实 40×20 PNG。
   await page.getByLabel("输出宽度").fill("40");
@@ -245,26 +204,10 @@ test("undo restores original output size with matching PNG headers", async ({
   expect(uploads[0]!.contentType).toBe("image/png");
   expect(uploads[0]!.body.readUInt32BE(16)).toBe(40);
   expect(uploads[0]!.body.readUInt32BE(20)).toBe(20);
-  // 确认预览已离开初始 80×40，避免撤销断言命中尚未更新的旧预览。
-  await expect
-    .poll(() =>
-      previewImg.evaluate((el) => (el as HTMLImageElement).naturalWidth),
-    )
-    .toBe(40);
-  await expect
-    .poll(() =>
-      previewImg.evaluate((el) => (el as HTMLImageElement).naturalHeight),
-    )
-    .toBe(20);
 
   // 撤销尺寸：回到原始输出尺寸，PNG 头部与声明一致。
   await page.getByRole("button", { name: "撤销" }).click();
   await expect(page.getByText(/输出 80×40/)).toBeVisible();
-  await expect
-    .poll(() =>
-      previewImg.evaluate((el) => (el as HTMLImageElement).naturalWidth),
-    )
-    .toBe(80);
   await page.getByRole("button", { name: "保存标注图" }).click();
   await expect.poll(() => uploads.length).toBe(2);
   expect(uploads[1]!.body.readUInt32BE(16)).toBe(80);
@@ -300,12 +243,14 @@ test("failed output preview preserves editing and reports failure without stayin
     },
   });
   await expect(
-    page.getByText(
-      "最终输出预览暂不可用，编辑内容已保留；调整输出设置后重试。",
-    ),
-  ).toBeVisible();
-  await expect(page.getByText(/实际体积暂不可用/)).toBeVisible();
-  await expect(page.getByText(/实际体积生成中/)).toHaveCount(0);
+    page.getByRole("button", { name: "检查文件大小" }),
+  ).toBeEnabled();
+  await page.getByRole("button", { name: "检查文件大小" }).click();
+  await expect(page.getByText("文件大小检查失败；可稍后重试。")).toBeVisible();
   await expect(page.getByRole("button", { name: "保存标注图" })).toBeEnabled();
   await expect(page.getByLabel("图片检查画布")).toBeVisible();
+  // 失败可恢复：不再点击也保持可编辑，不遗留忙碌状态。
+  await expect(
+    page.getByRole("button", { name: "检查文件大小" }),
+  ).toBeEnabled();
 });

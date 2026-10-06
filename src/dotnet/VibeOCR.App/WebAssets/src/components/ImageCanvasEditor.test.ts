@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   finalOutputSize,
+  imageTransform,
+  outputSize,
+  projectPoint,
   rotateEditorState,
+  rotatedBoundingBox,
   type EditorState,
 } from "./annotationGeometry";
 import { uploadAnnotatedImage } from "./annotationHandoff";
@@ -154,6 +158,53 @@ describe("final output size", () => {
   });
 });
 
+describe("arbitrary rotation bounds", () => {
+  const image = new Image();
+  Object.defineProperties(image, {
+    naturalWidth: { value: 1600 },
+    naturalHeight: { value: 900 },
+  });
+
+  it("keeps exact quarter-turn sizes as width/height swap", () => {
+    expect(rotatedBoundingBox(1600, 900, 0)).toEqual({
+      width: 1600,
+      height: 900,
+    });
+    expect(rotatedBoundingBox(1600, 900, 90)).toEqual({
+      width: 900,
+      height: 1600,
+    });
+    expect(rotatedBoundingBox(1600, 900, 180)).toEqual({
+      width: 1600,
+      height: 900,
+    });
+    expect(outputSize(image, 270)).toEqual({ width: 900, height: 1600 });
+  });
+
+  it("keeps odd-sized quarter turns exact without epsilon drift", () => {
+    // 奇数尺寸四直角：三角函数 epsilon 不得把 81×41 变成 82×42。
+    expect(rotatedBoundingBox(81, 41, 0)).toEqual({ width: 81, height: 41 });
+    expect(rotatedBoundingBox(81, 41, 90)).toEqual({ width: 41, height: 81 });
+    expect(rotatedBoundingBox(81, 41, 180)).toEqual({ width: 81, height: 41 });
+    expect(rotatedBoundingBox(81, 41, 270)).toEqual({ width: 41, height: 81 });
+    expect(rotatedBoundingBox(81, 41, 360)).toEqual({ width: 81, height: 41 });
+  });
+
+  it("uses the axis-aligned bounding box for arbitrary angles", () => {
+    // 旧实现任意角退化为未旋转尺寸；导出/显示必须按旋转包围盒容纳内容。
+    expect(rotatedBoundingBox(1600, 900, 45)).toEqual({
+      width: 1768,
+      height: 1768,
+    });
+    expect(outputSize(image, 30)).toEqual({ width: 1836, height: 1580 });
+  });
+
+  it("fits the display transform to the rotated bounding box", () => {
+    const transform = imageTransform(image, 45, { width: 884, height: 884 });
+    expect(transform.scale).toBeCloseTo(0.5, 5);
+  });
+});
+
 describe("annotation rotation", () => {
   it("keeps existing marks attached after four quarter turns", () => {
     const image = new Image();
@@ -186,5 +237,50 @@ describe("annotation rotation", () => {
     expect(rotated.marks[0]?.end.y).toBeCloseTo(310);
     expect(rotated.crop?.start.x).toBeCloseTo(160);
     expect(rotated.crop?.end.y).toBeCloseTo(480);
+  });
+
+  it("rotates pen and highlighter point trails with the same mapping", () => {
+    const image = new Image();
+    Object.defineProperties(image, {
+      naturalWidth: { value: 1600 },
+      naturalHeight: { value: 900 },
+    });
+    const size = { width: 900, height: 600 };
+    const state: EditorState = {
+      rotation: 0,
+      marks: [
+        {
+          tool: "pen",
+          start: { x: 200, y: 180 },
+          end: { x: 420, y: 310 },
+          points: [
+            { x: 200, y: 180 },
+            { x: 300, y: 240 },
+            { x: 420, y: 310 },
+          ],
+        },
+      ],
+    };
+
+    // 旧实现只旋转 start/end、遗留未旋转 points；轨迹点必须同一映射。
+    const rotated = rotateEditorState(state, image, size, 90);
+    const expected = state.marks[0]!.points!.map((at) =>
+      projectPoint(at, image, 0, size, 90, size),
+    );
+    expect(rotated.marks[0]!.points).toHaveLength(3);
+    rotated.marks[0]!.points!.forEach((at, index) => {
+      expect(at.x).toBeCloseTo(expected[index]!.x);
+      expect(at.y).toBeCloseTo(expected[index]!.y);
+    });
+
+    // 三次直角旋转回到原位（90→180→270→0）。
+    const roundTrip = [180, 270, 0].reduce(
+      (current, rotation) => rotateEditorState(current, image, size, rotation),
+      rotated,
+    );
+    roundTrip.marks[0]!.points!.forEach((at, index) => {
+      expect(at.x).toBeCloseTo(state.marks[0]!.points![index]!.x);
+      expect(at.y).toBeCloseTo(state.marks[0]!.points![index]!.y);
+    });
   });
 });
