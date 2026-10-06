@@ -412,6 +412,123 @@ public sealed class DefaultModeRequestContractTests
     }
   }
 
+  [Fact]
+  public async Task SelectionInvalidatedDuringLoadRecoversNewGenerationDefault()
+  {
+    // F8 回归：提交点目录读取（Deferred 等待 attach 后的 health/settings
+    // 读取）被代际失效（切换路径同款 ClearSelection）丢弃时，旧实现把
+    // null 快照当旧 Backend 兼容提交 engine=null（Runtime 落回 Rapid）；
+    // 修复后直接取消本次提交（零提交、不重试），随后新任务按新代目录
+    // 与已提交默认提交 Windows。
+    var deferred = new DeferredInferenceClient();
+    deferred.MarkStartupPending();
+    RecordingClient fake = Client("windows_text");
+    var healthGate = new TaskCompletionSource(
+      TaskCreationOptions.RunContinuationsAsynchronously);
+    fake.HealthGate = healthGate;
+    var recognition = new RecognitionViewModel(deferred, new FixedInputService());
+    var settings = new SettingsViewModel(deferred);
+    string root = Path.Combine(
+      Path.GetTempPath(), $"vibeocr-default-invalidate-{Guid.NewGuid():N}");
+    string resourceRoot = Path.Combine(root, "resources");
+    Directory.CreateDirectory(resourceRoot);
+    var broker = new WorkbenchResourceBroker(resourceRoot);
+    var annotations = new WorkbenchAnnotationStore(resourceRoot);
+    try
+    {
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        () => recognition,
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => settings,
+        () => new ShellViewModel(new StubHotkeyRegistrar(), new StubStartupRegistrar()),
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker, resourceRoot, static () => 0, annotations,
+        inferenceAttached: () => deferred.IsAttached);
+
+      WorkbenchCommandOutcome started = await handler.ExecuteAsync(
+        new SelectRecognitionImageCommand(),
+        TestContext.Current.CancellationToken);
+      Assert.Null(started.Error);
+      // 输入先采集；提交点目录读取在 Deferred 网关等待 attach。
+      deferred.Attach(fake);
+      // 目录读取到达 inner health（已过 generation 记录点）后再推进代际。
+      await TestContext.Current.CancellationToken.WaitAsync(
+        () => fake.HealthCalls > 0, 5000);
+      // 先注册终态等待，再放行 healthGate，避免终态先发被漏掉。
+      using (var terminal = new RecognitionStateAwaiter(
+        handler, state => !state.IsBusy))
+      {
+        settings.ClearSelection();
+        healthGate.TrySetResult();
+
+        // 失效读取直接取消本次提交（不重试、不猜默认）：零提交。
+        RecognitionWorkbenchState cancelled = await terminal.Task;
+        Assert.False(cancelled.IsBusy);
+        Assert.Empty(fake.Submissions);
+      }
+
+      // 新代正常路径：再次发起即用新代目录与已提交默认提交 Windows。
+      using (var resumedTerminal = new RecognitionStateAwaiter(
+        handler, state => !state.IsBusy))
+      {
+        WorkbenchCommandOutcome resumed = await handler.ExecuteAsync(
+          new SelectRecognitionImageCommand(),
+          TestContext.Current.CancellationToken);
+        Assert.Null(resumed.Error);
+        RecognitionWorkbenchState completed = await resumedTerminal.Task;
+        Assert.False(completed.IsBusy);
+      }
+      await fake.WaitSubmittedAsync(TimeSpan.FromSeconds(10));
+      SubmitRequest request = Assert.Single(fake.Submissions);
+      Assert.Equal("OCR", request.Pipeline.PipelineId);
+      Assert.Equal(OcrEngine.Windows, request.Pipeline.Engine);
+    }
+    finally
+    {
+      broker.Dispose();
+      annotations.Dispose();
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  /// <summary>
+  /// 与 ScreenshotSessionWorkbenchTests 同款终态等待：构造即订阅，
+  /// Dispose 退订；Task 固定 5s 超时，不漏早发终态。
+  /// </summary>
+  private sealed class RecognitionStateAwaiter : IDisposable
+  {
+    private readonly DesktopWorkbenchCommandHandler handler;
+    private readonly Func<RecognitionWorkbenchState, bool> predicate;
+    private readonly TaskCompletionSource<RecognitionWorkbenchState> ready =
+      new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public RecognitionStateAwaiter(
+      DesktopWorkbenchCommandHandler handler,
+      Func<RecognitionWorkbenchState, bool> predicate)
+    {
+      this.handler = handler;
+      this.predicate = predicate;
+      handler.StateChanged += OnStateChanged;
+    }
+
+    public Task<RecognitionWorkbenchState> Task => ready.Task.WaitAsync(
+      TimeSpan.FromSeconds(5),
+      TestContext.Current.CancellationToken);
+
+    private void OnStateChanged(WorkbenchState state)
+    {
+      if (state is RecognitionWorkbenchState recognition && predicate(recognition))
+      {
+        ready.TrySetResult(recognition);
+      }
+    }
+
+    public void Dispose() => handler.StateChanged -= OnStateChanged;
+  }
+
   private static string TempPng(string root, string name)
   {
     string path = Path.Combine(root, name + ".png");
@@ -703,10 +820,23 @@ public sealed class DefaultModeRequestContractTests
 
     public TaskCompletionSource? ObserveGate { get; set; }
 
+    public TaskCompletionSource? HealthGate { get; set; }
+
+    public int HealthCalls { get; private set; }
+
     public int UpdateCalls { get; private set; }
 
-    public override Task<Wire.Health> GetHealthAsync(
-      CancellationToken cancellationToken) => Task.FromResult(Health);
+    public override async Task<Wire.Health> GetHealthAsync(
+      CancellationToken cancellationToken)
+    {
+      HealthCalls++;
+      if (HealthGate is { } gate)
+      {
+        HealthGate = null;
+        await gate.Task.WaitAsync(cancellationToken);
+      }
+      return Health;
+    }
 
     public override Task<ResidencyStatus> GetResidencyAsync(
       CancellationToken cancellationToken) => Task.FromResult(new ResidencyStatus());

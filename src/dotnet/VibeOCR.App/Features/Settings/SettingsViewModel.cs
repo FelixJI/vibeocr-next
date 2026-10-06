@@ -257,10 +257,17 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
     }
 
-    public Task LoadSelectionAsync(CancellationToken cancellationToken) =>
+    /// <summary>
+    /// 读取（或复用已有）Runtime 目录快照。返回 false 仅表示本次读取被
+    /// 代际失效丢弃（环境切换/实例更换的 ClearSelection/Invalidate，
+    /// 未发布快照）；true 表示读取完成（含确认旧 Backend 无目录能力）。
+    /// 既有只 await 的调用者可忽略结果。
+    /// </summary>
+    public Task<bool> LoadSelectionAsync(CancellationToken cancellationToken) =>
         LoadSelectionSerializedAsync(forceReload: false, cancellationToken);
 
-    public Task RefreshSelectionAsync(CancellationToken cancellationToken) =>
+    /// <inheritdoc cref="LoadSelectionAsync"/>
+    public Task<bool> RefreshSelectionAsync(CancellationToken cancellationToken) =>
         LoadSelectionSerializedAsync(forceReload: true, cancellationToken);
 
     public void ClearSelection()
@@ -682,7 +689,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     public void Cancel() { }
 
-    private async Task LoadSelectionSerializedAsync(
+    private async Task<bool> LoadSelectionSerializedAsync(
         bool forceReload,
         CancellationToken cancellationToken,
         long? snapshotGeneration = null)
@@ -695,14 +702,14 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             {
                 // 旧快照流程在等门期间被失效（实例更换/新读取）：不得清掉
                 // 新代的 selection 并以新代身份继续读取投影。
-                return;
+                return false;
             }
             if (!forceReload && RecognitionSelection is not null)
             {
-                return;
+                return true;
             }
             if (forceReload) ClearSelection();
-            await LoadSelectionCoreAsync(cancellationToken);
+            return await LoadSelectionCoreAsync(cancellationToken);
         }
         finally
         {
@@ -710,7 +717,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
     }
 
-    private async Task LoadSelectionCoreAsync(CancellationToken cancellationToken)
+    private async Task<bool> LoadSelectionCoreAsync(CancellationToken cancellationToken)
     {
         long selectionGeneration = Volatile.Read(ref _selectionGeneration);
         try
@@ -719,7 +726,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             RuntimeSelectionService selection = new(health);
             SettingsSnapshot settings = await _inference.GetSettingsAsync(cancellationToken);
             IReadOnlyList<string> selectedSourceIds = settings.DownloadSourceIds ?? [];
-            if (selectionGeneration != Volatile.Read(ref _selectionGeneration)) return;
+            if (selectionGeneration != Volatile.Read(ref _selectionGeneration)) return false;
 
             // Commit one complete catalog snapshot only after every remote read
             // succeeds. Concurrent bootstrap/execution callers then observe the
@@ -737,13 +744,20 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             Features = ProjectFeatures(selection, PendingBackend, selectedFeatures);
             // Publish the catalog marker last. Readers that observe the new
             // selection can therefore also observe its matching projections;
-            // command paths additionally await this same gate.
+            // command paths additionally await this same gate. 投影写入可能
+            // 重入 OnSettingsChanged/InvalidateSnapshot 推进代际：发布前
+            // 复核，失效则不发布旧 snapshot。
+            if (selectionGeneration != Volatile.Read(ref _selectionGeneration))
+                return false;
             _selection = selection;
             PublishRecognitionSelection(selection, DefaultRecognitionMode);
+            return true;
         }
         catch (NotSupportedException)
         {
             // Pre-2.7 clients do not expose health; selection stays unloaded.
+            // 迟到旧实例的 NotSupported 同样受代际约束，不得绕过失效。
+            return selectionGeneration == Volatile.Read(ref _selectionGeneration);
         }
         catch (RuntimeSelectionException error)
         {

@@ -3023,14 +3023,14 @@ public sealed class DesktopWorkbenchCommandHandler :
     }
     // Always cross SettingsViewModel's single-flight gate. A refresh may be
     // replacing an older snapshot even while Selection remains non-null.
-    await settings.LoadSelectionAsync(cancellationToken);
-    return true;
+    return await settings.LoadSelectionAsync(cancellationToken);
   }
 
   /// <summary>
   /// 提交路径的目录加载：Supervisor 未 attach 时等待启动完成（Deferred
-  /// 网关内建等待）取得权威目录与已提交默认后才冻结提交参数；环境切换
-  /// 窗口返回 false，由调用方取消提交而非猜默认。
+  /// 网关内建等待）取得权威目录与已提交默认后才冻结提交参数；读取被
+  /// 代际失效丢弃或仍处切换窗口时返回 false，由调用方取消提交而非
+  /// 猜默认（不重试）。
   /// </summary>
   private async Task<bool> EnsureSelectionLoadedForSubmitAsync(
     CancellationToken cancellationToken)
@@ -3038,8 +3038,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     settings ??= CreateSettings();
     if (Volatile.Read(ref environmentSwitching) != 0)
       return false;
-    await settings.LoadSelectionAsync(cancellationToken);
-    return true;
+    return await settings.LoadSelectionAsync(cancellationToken) &&
+      Volatile.Read(ref environmentSwitching) == 0;
   }
 
   /// <summary>
