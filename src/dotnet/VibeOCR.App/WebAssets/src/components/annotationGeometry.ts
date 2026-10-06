@@ -73,18 +73,46 @@ export function isExclusionMark(mark: Mark): boolean {
   return mark.tool === "exclude";
 }
 
+/** 任意角度旋转后内容的轴对齐包围盒；90° 倍数退化为精确宽高交换。
+ * 向上取整保证旋转后的内容不会被包围盒裁掉；导出/显示同一规则。 */
+export function rotatedBoundingBox(
+  width: number,
+  height: number,
+  rotation: number,
+): CanvasSize {
+  const degrees = ((rotation % 360) + 360) % 360;
+  // 90° 倍数走精确交换，避免三角函数 epsilon 导致尺寸 ±1。
+  if (degrees % 90 === 0) {
+    const quarterTurn = degrees % 180 !== 0;
+    return {
+      width: quarterTurn ? height : width,
+      height: quarterTurn ? width : height,
+    };
+  }
+  const angle = degrees * (Math.PI / 180);
+  const cos = Math.abs(Math.cos(angle));
+  const sin = Math.abs(Math.sin(angle));
+  return {
+    width: Math.ceil(width * cos + height * sin),
+    height: Math.ceil(width * sin + height * cos),
+  };
+}
+
 export function imageTransform(
   image: HTMLImageElement,
   rotation: number,
   size: CanvasSize,
 ) {
-  const quarterTurn = rotation % 180 !== 0;
-  const rotatedWidth = quarterTurn ? image.naturalHeight : image.naturalWidth;
-  const rotatedHeight = quarterTurn ? image.naturalWidth : image.naturalHeight;
+  // 适配任意角度：以旋转后的轴对齐包围盒为准，非 90° 倍数不再退化为未旋转尺寸。
+  const bounds = rotatedBoundingBox(
+    image.naturalWidth,
+    image.naturalHeight,
+    rotation,
+  );
   return {
     centerX: size.width / 2,
     centerY: size.height / 2,
-    scale: Math.min(size.width / rotatedWidth, size.height / rotatedHeight),
+    scale: Math.min(size.width / bounds.width, size.height / bounds.height),
   };
 }
 
@@ -129,6 +157,8 @@ export function rotateEditorState(
       ...mark,
       start: rotatePoint(mark.start),
       end: rotatePoint(mark.end),
+      // 画笔/荧光笔轨迹点同映射，旋转后实际轨迹不错位。
+      ...(mark.points ? { points: mark.points.map(rotatePoint) } : {}),
     })),
     ...(state.crop
       ? {
@@ -149,11 +179,7 @@ export function outputSize(
   image: HTMLImageElement,
   rotation: number,
 ): CanvasSize {
-  const quarterTurn = rotation % 180 !== 0;
-  return {
-    width: quarterTurn ? image.naturalHeight : image.naturalWidth,
-    height: quarterTurn ? image.naturalWidth : image.naturalHeight,
-  };
+  return rotatedBoundingBox(image.naturalWidth, image.naturalHeight, rotation);
 }
 
 /** 导出与尺寸信息共用的最终输出尺寸：旋转 → 裁剪 → 指定尺寸。 */
@@ -207,7 +233,7 @@ export function finalOutputSize(
 }
 
 /** 显示空间裁剪映射到自然输出空间并裁剪到画布内；与 finalOutputSize 同源。 */
-function mappedCropRect(
+export function mappedCropRect(
   image: HTMLImageElement,
   state: EditorState,
   displaySize: CanvasSize,
@@ -339,6 +365,44 @@ export function exclusionNormalizedRects(
     width: (rect.width / output.width) * 1000,
     height: (rect.height / output.height) * 1000,
   }));
+}
+
+/** 归一化 [0,1000] 排除框回投到当前显示空间：exclusionNormalizedRects
+ * 的逆映射，供冻结基准初始屏蔽标记重建（坐标与手柄一致可编辑）。 */
+export function exclusionDisplayPoints(
+  box: { x: number; y: number; width: number; height: number },
+  image: HTMLImageElement,
+  state: EditorState,
+  displaySize: CanvasSize,
+): { start: Point; end: Point } {
+  const output = finalOutputSize(image, state, displaySize);
+  const crop = mappedCropRect(image, state, displaySize);
+  const naturalSize = outputSize(image, state.rotation);
+  const toDisplay = (at: Point) =>
+    projectPoint(
+      at,
+      image,
+      state.rotation,
+      naturalSize,
+      state.rotation,
+      displaySize,
+    );
+  const x0 =
+    crop.x + (box.x / 1000) * output.width * (crop.width / output.width);
+  const x1 =
+    crop.x +
+    ((box.x + box.width) / 1000) * output.width * (crop.width / output.width);
+  const y0 =
+    crop.y + (box.y / 1000) * output.height * (crop.height / output.height);
+  const y1 =
+    crop.y +
+    ((box.y + box.height) / 1000) *
+      output.height *
+      (crop.height / output.height);
+  return {
+    start: toDisplay({ x: x0, y: y0 }),
+    end: toDisplay({ x: x1, y: y1 }),
+  };
 }
 
 /** 坐标压缩判定矩形并集是否完整覆盖目标区域（整数网格，无采样误差）。

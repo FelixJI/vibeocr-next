@@ -109,13 +109,17 @@ public sealed record WorkbenchExclusionBox(
 }
 
 /// <summary>
-/// Explicit recognition of the session's current final PNG (uploaded through
-/// the opaque annotation lease). Never falls back to the unedited capture.
+/// Explicit recognition of the session's current final ordinary pixels
+/// (uploaded through the opaque annotation lease, exclusions NOT baked).
+/// The host freezes them as the session display baseline and derives the
+/// masked OCR input itself from ExcludeBoxes. Never falls back to the
+/// unedited capture, and never uses masked bytes for the display baseline.
 /// </summary>
 public sealed record RecognizeScreenshotImageCommand(
     string ResourceUri,
     Guid SessionId,
-    long Revision) : WorkbenchCommand;
+    long Revision,
+    IReadOnlyList<WorkbenchExclusionBox> ExcludeBoxes) : WorkbenchCommand;
 
 /// <summary>
 /// Prepares the in-place selectable text layer for the session's current
@@ -399,7 +403,8 @@ public sealed record RecognitionScreenshotSessionState(
   string SessionId,
   long Revision,
   bool TextSelectionRequested = false,
-  bool SceneEditing = false);
+  bool SceneEditing = false,
+  IReadOnlyList<WorkbenchExclusionBox>? ExcludeBoxes = null);
 
 /// <summary>
 /// In-place selectable text layer bound to one session revision. The lines

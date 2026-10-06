@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AppActions } from "../app/types";
 import {
   exclusionCoversOutput,
+  exclusionDisplayPoints,
   exclusionNormalizedRects,
   finalOutputSize,
   imageTransform,
@@ -123,10 +124,17 @@ const SCALE_PERCENTS = [25, 50, 75, 100, 150, 200] as const;
 const MAX_OUTPUT_DIMENSION = 16384;
 const MAX_OUTPUT_PIXELS = 64_000_000;
 
-/** 活动纯截图会话句柄；宿主回显当前内容修订。 */
+/** 活动纯截图会话句柄；宿主回显当前内容修订与冻结基准的初始排除框。 */
 export interface ScreenshotSessionHandle {
   readonly sessionId: string;
   readonly revision: number;
+  /** [0,1000] 归一化排除框：仅在基准变化时用于重建初始屏蔽标记。 */
+  readonly excludeBoxes?: readonly {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+  }[];
 }
 
 /** 去水印预览结果：仅存在于组件状态，绝不进入历史；明确应用才 commit。 */
@@ -161,6 +169,8 @@ interface ImageCanvasEditorProps {
   readonly autoText?: boolean;
   readonly showAutoTextPreference?: boolean;
   readonly onAutoTextChange?: (enabled: boolean) => void;
+  /** 显式识别提交成功后的宿主交接（纯编辑页导航到识别承载面）。 */
+  readonly onRecognitionSubmitted?: () => void;
 }
 
 export function ImageCanvasEditor({
@@ -174,6 +184,7 @@ export function ImageCanvasEditor({
   autoText: autoTextProp,
   showAutoTextPreference = true,
   onAutoTextChange,
+  onRecognitionSubmitted,
 }: ImageCanvasEditorProps) {
   const captureGeometry = nativeCaptureScene();
   const [sceneViewport, setSceneViewport] = useState(() => ({
@@ -239,7 +250,14 @@ export function ImageCanvasEditor({
   const sourceSize =
     decodedSourceSize?.source === source ? decodedSourceSize.size : undefined;
   const [isExporting, setIsExporting] = useState(false);
+  // 按需“导出效果”检查：只在用户明确点击时真实编码一次，不自动跟随
+  // 编辑重编码，也不渲染常驻第二幅预览；与复制/保存按钮可用性解耦。
+  const [isCheckingExport, setIsCheckingExport] = useState(false);
   const [draftMark, setDraftMark] = useState<Mark | undefined>();
+  // 裁剪草稿：拖拽期间即以实时裁剪画面 + 虚线框反映输出有效内容。
+  const [cropDraft, setCropDraft] = useState<
+    { start: Point; end: Point } | undefined
+  >();
   // 去水印（Beta）：拖拽草稿/确定选区均为显示空间坐标；预览结果仅在
   // 明确应用时进入历史，取消/迟到结果不触碰当前图片。
   const [inpaintDraft, setInpaintDraft] = useState<
@@ -275,15 +293,6 @@ export function ImageCanvasEditor({
   // 权威最新值：导出 await 归来后的比较读 ref，不依赖旧闭包。
   const outputFormatRef = useRef<OutputImageFormat>(outputFormat);
   const jpegQualityRef = useRef<number>(jpegQuality);
-  // 真实最终输出预览：按当前设置真实编码 blob 后再解码显示，与导出同源。
-  const [finalPreview, setFinalPreview] = useState<{
-    key: string;
-    url: string;
-    mediaType: OutputImageFormat;
-    byteLength: number;
-    width: number;
-    height: number;
-  }>();
   const [sizeDraft, setSizeDraft] = useState<{
     width: string;
     height: string;
@@ -309,9 +318,9 @@ export function ImageCanvasEditor({
     setHistory([EMPTY]);
     setHistoryIndex(0);
     setDraftMark(undefined);
+    setCropDraft(undefined);
     selectedMarkRef.current = undefined;
     setSelectedMark(undefined);
-    setFinalPreview(undefined);
     sessionIdRef.current = session?.sessionId;
     contentRevisionRef.current = session?.revision ?? 0;
     setLocalRevision(session?.revision ?? 0);
@@ -325,6 +334,60 @@ export function ImageCanvasEditor({
     setInpaintPreview(undefined);
     setInpaintBusy(false);
   }
+
+  // 冻结基准初始屏蔽：宿主随新基准回发归一化排除框时，映射回当前
+  // 显示空间重建初始 exclude 标记（可编辑/可清除）；仅在基准变化时执行
+  // 一次，不推进修订、不触发 OCR，后续修改沿用既有 revision 机制。
+  const seededBaselineRef = useRef<string>("");
+  useEffect(() => {
+    const seedKey = session ? `${session.sessionId}:${source}` : "";
+    if (!seedKey || seededBaselineRef.current === seedKey) return;
+    const boxes = session?.excludeBoxes;
+    if (!boxes?.length) {
+      seededBaselineRef.current = seedKey;
+      return;
+    }
+    const image = imageRef.current;
+    const canvas = canvasRef.current;
+    // 图像尚未解码或解码结果不属于当前 source 时不播种也不锁 seedKey：
+    // 换图瞬间 imageRef 可能仍是旧图，必须以 decodedSourceSize 键控为准。
+    if (
+      !image ||
+      !canvas ||
+      !image.naturalWidth ||
+      !image.naturalHeight ||
+      decodedSourceSize?.source !== source
+    ) {
+      return;
+    }
+    if (history.length !== 1 || historyIndex !== 0 || state !== EMPTY) {
+      seededBaselineRef.current = seedKey;
+      return;
+    }
+    const fresh: EditorState = { rotation: 0, marks: [] };
+    const marks = boxes.map((box) => ({
+      tool: "exclude" as const,
+      ...exclusionDisplayPoints(box, image, fresh, {
+        width: canvas.width,
+        height: canvas.height,
+      }),
+    }));
+    setHistory([
+      {
+        rotation: 0,
+        marks,
+      },
+    ]);
+    seededBaselineRef.current = seedKey;
+  }, [
+    session,
+    source,
+    imageRevision,
+    decodedSourceSize,
+    history,
+    historyIndex,
+    state,
+  ]);
 
   // 同会话内宿主回显修订时单调对齐本地计数，避免回退。
   useEffect(() => {
@@ -443,7 +506,8 @@ export function ImageCanvasEditor({
     draw(
       canvasRef.current,
       imageRef.current,
-      state,
+      // 裁剪草稿即时生效：拖拽中草稿优先于已提交裁剪，提交后由 state.crop 接管。
+      cropDraft ? { ...state, crop: cropDraft } : state,
       selectedMark,
       resizeDraft
         ? state.marks.map((mark, index) =>
@@ -454,8 +518,9 @@ export function ImageCanvasEditor({
           : state.marks,
       true,
       1,
-      // 预览背底与导出一致：JPEG 白底合成透明，PNG 沿用原有深色合成。
-      outputFormat === "image/jpeg" ? "#ffffff" : "#161616",
+      // 预览与导出一致：JPEG 显式白底合成；PNG 不填底色，透明由
+      // 工作区 CSS 背景衬托，不把深色烧进图像内容。
+      outputFormat === "image/jpeg" ? "#ffffff" : undefined,
       false,
       inpaintLayer,
     );
@@ -464,6 +529,7 @@ export function ImageCanvasEditor({
     selectedMark,
     state,
     draftMark,
+    cropDraft,
     resizeDraft,
     outputFormat,
     inpaintLayer,
@@ -541,144 +607,32 @@ export function ImageCanvasEditor({
     });
   }
 
-  // 真实最终输出预览：编辑稳定后用导出同源的真实编码器产出 blob，
-  // 再交回浏览器原生解码显示；不把预压缩画布伪装成最终像素。
-  const [failedPreviewKey, setFailedPreviewKey] = useState<string>();
-  const finalPreviewKey = `${resetKey}|${imageRevision}|${outputFormat}|${jpegQuality}|${contentRevisionRef.current}`;
-  useEffect(() => {
-    const image = imageRef.current;
-    if (!image) return;
-    let cancelled = false;
-    const failPreview = () => {
-      if (cancelled) return;
-      setFailedPreviewKey(finalPreviewKey);
+  // 按需文件大小检查：用户明确点击才真实编码一次；编码结束逐项校验
+  // 冻结上下文，旧版本结果不得覆盖新内容后的提示。
+  async function checkFileSize() {
+    if (isCheckingExport) return;
+    setIsCheckingExport(true);
+    const frozen = freezeExportContext();
+    setOperationMessage("正在按当前输出设置检查文件大小……");
+    try {
+      const blob = await exportCanvas(frozen.image, canvasRef.current, state, {
+        format: outputFormat,
+        quality: jpegQuality,
+        inpaint: { patches: appliedInpaintPatches },
+      });
+      if (!exportContextUnchanged(frozen)) {
+        setOperationMessage("检查期间内容或设置已变化，请重新检查。");
+        return;
+      }
       setOperationMessage(
-        "最终输出预览暂不可用，编辑内容已保留；调整输出设置后重试。",
+        `文件大小：${blob.type} · 实际 ${formatBytes(blob.size)}。`,
       );
-    };
-    const timer = setTimeout(() => {
-      void (async () => {
-        try {
-          const blob = await exportCanvas(image, canvasRef.current, state, {
-            format: outputFormat,
-            quality: jpegQuality,
-            inpaint: { patches: appliedInpaintPatches },
-          });
-          const url = URL.createObjectURL(blob);
-          const decoded = new Image();
-          decoded.decoding = "async";
-          decoded.onload = () => {
-            if (cancelled) {
-              URL.revokeObjectURL(url);
-              return;
-            }
-            setFinalPreview({
-              key: finalPreviewKey,
-              url,
-              mediaType:
-                blob.type === "image/jpeg" ? "image/jpeg" : "image/png",
-              byteLength: blob.size,
-              width: decoded.naturalWidth,
-              height: decoded.naturalHeight,
-            });
-          };
-          decoded.onerror = () => {
-            URL.revokeObjectURL(url);
-            failPreview();
-          };
-          decoded.src = url;
-        } catch {
-          failPreview();
-        }
-      })();
-    }, 500);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [
-    state,
-    outputFormat,
-    jpegQuality,
-    finalPreviewKey,
-    appliedInpaintPatches,
-  ]);
-
-  // 换新预览或卸载时释放旧 blob URL，避免像素与临时资源泄漏。
-  const finalPreviewUrl = finalPreview?.url;
-  useEffect(() => {
-    if (!finalPreviewUrl) return;
-    return () => URL.revokeObjectURL(finalPreviewUrl);
-  }, [finalPreviewUrl]);
-
-  // 屏蔽导出预览：与识别输入/显式屏蔽副本同一导出管线（烘焙白色像素），
-  // 只在存在排除区时生成；证明预览、文件与再次识别输入一致。
-  const [maskedPreview, setMaskedPreview] = useState<{
-    key: string;
-    url: string;
-    byteLength: number;
-    width: number;
-    height: number;
-  }>();
-  const maskedPreviewKey = hasExclusions ? `${finalPreviewKey}|masked` : "";
-  useEffect(() => {
-    if (!maskedPreviewKey) return;
-    const image = imageRef.current;
-    if (!image) return;
-    let cancelled = false;
-    const timer = setTimeout(() => {
-      void (async () => {
-        try {
-          const blob = await exportCanvas(image, canvasRef.current, state, {
-            format: outputFormat,
-            quality: jpegQuality,
-            bakeExclusions: true,
-            inpaint: { patches: appliedInpaintPatches },
-          });
-          const url = URL.createObjectURL(blob);
-          const decoded = new Image();
-          decoded.decoding = "async";
-          decoded.onload = () => {
-            if (cancelled) {
-              URL.revokeObjectURL(url);
-              return;
-            }
-            setMaskedPreview({
-              key: maskedPreviewKey,
-              url,
-              byteLength: blob.size,
-              width: decoded.naturalWidth,
-              height: decoded.naturalHeight,
-            });
-          };
-          decoded.onerror = () => URL.revokeObjectURL(url);
-          decoded.src = url;
-        } catch {
-          if (!cancelled) {
-            setMaskedPreview((current) =>
-              current?.key === maskedPreviewKey ? current : undefined,
-            );
-          }
-        }
-      })();
-    }, 500);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [
-    state,
-    outputFormat,
-    jpegQuality,
-    maskedPreviewKey,
-    appliedInpaintPatches,
-  ]);
-
-  const maskedPreviewUrl = maskedPreview?.url;
-  useEffect(() => {
-    if (!maskedPreviewUrl) return;
-    return () => URL.revokeObjectURL(maskedPreviewUrl);
-  }, [maskedPreviewUrl]);
+    } catch {
+      setOperationMessage("文件大小检查失败；可稍后重试。");
+    } finally {
+      setIsCheckingExport(false);
+    }
+  }
 
   // 原位取字：会话/修订/工具变化时导出当前最终 PNG 并请求宿主准备文字层。
   const sessionKeyForLayer = session?.sessionId ?? "";
@@ -1123,6 +1077,11 @@ export function ImageCanvasEditor({
       });
       return;
     }
+    if (tool === "crop") {
+      const at = point(event);
+      setCropDraft((current) => (current ? { ...current, end: at } : current));
+      return;
+    }
     if (tool !== "pen" && tool !== "highlighter") return;
     const at = point(event);
     setDraftMark((current) => {
@@ -1162,6 +1121,8 @@ export function ImageCanvasEditor({
         setInpaintSelection(undefined);
       }
       setInpaintDraft({ start, end: start });
+    } else if (tool === "crop") {
+      setCropDraft({ start, end: start });
     } else if (tool === "pen" || tool === "highlighter") {
       setDraftMark({
         tool,
@@ -1182,6 +1143,8 @@ export function ImageCanvasEditor({
     const end = point(event);
     const start = dragStart.current;
     dragStart.current = undefined;
+    // 裁剪草稿无论是否提交都结束：短拖/单击不留 0 尺寸草稿裁空画布。
+    if (tool === "crop") setCropDraft(undefined);
     if (resizeRef.current) {
       const { index, handle, origin } = resizeRef.current;
       resizeRef.current = undefined;
@@ -1279,8 +1242,9 @@ export function ImageCanvasEditor({
       return;
     }
     if (Math.hypot(end.x - start.x, end.y - start.y) >= 8) {
-      if (tool === "crop") commit({ ...state, crop: { start, end } });
-      else if (
+      if (tool === "crop") {
+        commit({ ...state, crop: { start, end } });
+      } else if (
         tool === "exclude" &&
         state.marks.filter(isExclusionMark).length >= MAX_EXCLUSION_MARKS
       ) {
@@ -1464,13 +1428,12 @@ export function ImageCanvasEditor({
 
   async function pinCurrentImage() {
     if (!session || !canExport || exportInProgressRef.current) return;
-    if (refuseIfFullyMasked("textLayer")) return;
     exportInProgressRef.current = true;
     setIsExporting(true);
     try {
-      // 贴图是可取字的识别面：其冻结像素必须与掩膜识别输入一致，
-      // 否则贴图重取字会从原像素找回被屏蔽文字（AC4）。
-      const exported = await exportFinalImageIfUnchanged(true);
+      // 贴图显示/复制/保存使用未烘焙遮罩的原图像素（AC5）；宿主在取字时
+      // 按冻结的 excludeBoxes 生成临时遮罩输入，并沿用行过滤拒绝被屏文字。
+      const exported = await exportFinalImageIfUnchanged(false);
       if (!exported?.sessionId) return;
       const pinned = await actions.run({
         type: "recognition.pinScreenshotImage",
@@ -1535,18 +1498,26 @@ export function ImageCanvasEditor({
     exportInProgressRef.current = true;
     setIsExporting(true);
     try {
-      setOperationMessage("正在导出含屏蔽的识别输入并提交显式识别……");
-      const exported = await exportFinalImageIfUnchanged(true);
+      setOperationMessage("正在提交显式识别……");
+      // 上传未烘焙遮罩的普通最终像素 + 归一化排除框：宿主冻结普通显示
+      // 基准并自行生成白色遮罩 OCR 输入；普通基准绝不采用遮罩像素。
+      const exported = await exportFinalImageIfUnchanged(false);
       if (!exported) return;
       const started = await actions.run({
         type: "recognition.recognizeScreenshotImage",
         resourceUri: exported.resourceUri,
         sessionId: exported.sessionId,
         revision: exported.revision,
+        excludeBoxes: currentExclusionBoxes(),
       });
+      if (started) {
+        // 宿主完成显式识别交接（scene 会话转移/主窗口导航）；结果由
+        // 识别承载面展示，本编辑器不再常驻第二幅结果画面。
+        onRecognitionSubmitted?.();
+      }
       setOperationMessage(
         started
-          ? `已提交识别当前图（${formatLabel(exported)}）；屏蔽区已写入白色像素，完成后结果显示在右侧。`
+          ? `已提交识别当前图（${formatLabel(exported)}）；结果将在识别页面显示。`
           : "识别未开始：内容已更新或会话已失效，请重试。",
       );
     } catch {
@@ -2082,6 +2053,13 @@ export function ImageCanvasEditor({
             应用
           </ToolbarButton>
         </label>
+        <ToolbarButton
+          aria-label="检查文件大小"
+          disabled={isCheckingExport}
+          onClick={() => void checkFileSize()}
+        >
+          检查文件大小
+        </ToolbarButton>
       </Toolbar>
       <p className="editor-guidance">
         拖拽绘制或裁剪；选择标注后可拖动。手形或按住 Space
@@ -2094,7 +2072,7 @@ export function ImageCanvasEditor({
         </p>
       )}
       <p className="editor-guidance">
-        屏蔽区只用于识别及屏蔽副本；普通复制/保存保留原图内容，贴图使用屏蔽副本。整图被屏蔽时无法识别。
+        屏蔽区只用于识别输入及显式屏蔽副本；普通复制/保存与贴图画面保留原图内容，贴图取字仍会忽略被屏蔽文字。整图被屏蔽时无法识别。
       </p>
       <p className="editor-guidance">
         {sourceSize && currentOutputSize
@@ -2106,18 +2084,12 @@ export function ImageCanvasEditor({
               outputFormat === "image/jpeg"
                 ? `JPEG 质量 ${Math.round(jpegQuality * 100)}%`
                 : "PNG 无损"
-            } · ${
-              finalPreview && finalPreview.key === finalPreviewKey
-                ? `实际体积 ${formatBytes(finalPreview.byteLength)}`
-                : failedPreviewKey === finalPreviewKey
-                  ? "实际体积暂不可用"
-                  : "实际体积生成中（按当前设置真实编码）"
             }。${
               outputFormat === "image/jpeg"
                 ? "JPEG 不保留透明：透明区域将合成白色背景。"
-                : ""
+                : "PNG 保留透明度；文件大小可用“检查文件大小”按需查看。"
             }`
-          : "图片解码完成后显示原图与输出尺寸及实际体积。"}
+          : "图片解码完成后显示原图与输出尺寸。"}
       </p>
       {tool === "textSelect" && textLayerHint && (
         <p className="editor-guidance">{textLayerHint}</p>
@@ -2273,6 +2245,7 @@ export function ImageCanvasEditor({
             dragStart.current = undefined;
             resizeRef.current = undefined;
             setResizeDraft(undefined);
+            setCropDraft(undefined);
           }}
           onPointerDown={pointerDown}
           onPointerMove={pointerMove}
@@ -2298,36 +2271,6 @@ export function ImageCanvasEditor({
           </Button>
         )}
       </div>
-      {finalPreview && (
-        <div>
-          <p className="editor-guidance">
-            最终输出预览（{finalPreview.mediaType} · {finalPreview.width}×
-            {finalPreview.height} · 实际 {formatBytes(finalPreview.byteLength)}
-            ）：由最近一次设置真实编码后再解码显示，不是预压缩画布；复制、保存与显式识别走同一导出管线。
-          </p>
-          <img
-            alt="最终输出预览"
-            className="inspection-canvas"
-            src={finalPreview.url}
-            style={{ maxWidth: "100%" }}
-          />
-        </div>
-      )}
-      {maskedPreview && maskedPreview.key === maskedPreviewKey && (
-        <div>
-          <p className="editor-guidance">
-            屏蔽导出预览（{maskedPreview.width}×{maskedPreview.height} · 实际
-            {formatBytes(maskedPreview.byteLength)}
-            ）：与“识别当前图”提交的输入及屏蔽副本导出同一管线，屏蔽区为真实白色像素；未屏蔽区域与上方预览一致，贴图取字同样使用该屏蔽像素。
-          </p>
-          <img
-            alt="屏蔽导出预览"
-            className="inspection-canvas"
-            src={maskedPreview.url}
-            style={{ maxWidth: "100%" }}
-          />
-        </div>
-      )}
       <div className="editor-footer">
         <Button
           size="small"
@@ -2495,7 +2438,8 @@ function draw(
   marksOverride?: readonly Mark[],
   showEditorChrome = true,
   markScale = 1,
-  background = "#161616",
+  /** 仅 JPEG 显式白底时传色；缺省完全不填底色，PNG 透明 alpha 原样保留。 */
+  background?: string,
   bakeExclusions = false,
   inpaintLayer?: InpaintDrawLayer,
 ) {
@@ -2503,8 +2447,11 @@ function draw(
   if (!canvas || !context) return;
   const marks = marksOverride ?? state.marks;
   context.clearRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = background;
-  context.fillRect(0, 0, canvas.width, canvas.height);
+  // 底色只用于显式合成（JPEG 白底）；无底色时保持透明，不烧任何深色。
+  if (background) {
+    context.fillStyle = background;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+  }
   context.save();
   if (state.crop) {
     context.beginPath();
@@ -2541,14 +2488,18 @@ function draw(
       const dy = (-image.naturalHeight * scale) / 2 + rect.y * scale;
       const dw = rect.width * scale;
       const dh = rect.height * scale;
-      // 替换式绘制：先在补丁矩形内回填导出底色，再叠加补丁像素；
-      // 半透明补丁透出的是底色而非被修补前的原图（无鬼影、无 alpha 叠加）。
+      // 替换式绘制：先在补丁矩形内回填底色（PNG 为清除，保持透明），
+      // 再叠加补丁像素；半透明补丁透出底色/透明而非被修补前的原图。
       context.save();
       context.beginPath();
       context.rect(dx, dy, dw, dh);
       context.clip();
-      context.fillStyle = background;
-      context.fillRect(dx, dy, dw, dh);
+      if (background) {
+        context.fillStyle = background;
+        context.fillRect(dx, dy, dw, dh);
+      } else {
+        context.clearRect(dx, dy, dw, dh);
+      }
       context.drawImage(source, dx, dy, dw, dh);
       context.restore();
     };
@@ -2991,8 +2942,8 @@ async function exportCanvas(
     undefined,
     false,
     1 / displayScale,
-    // JPEG 无透明：透明区域在导出时合成白色背景，与预览一致。
-    options.format === "image/jpeg" ? "#ffffff" : "#161616",
+    // JPEG 无透明：导出时显式合成白色背景；PNG 不烧底色，保留 alpha。
+    options.format === "image/jpeg" ? "#ffffff" : undefined,
     options.bakeExclusions === true,
     { patches: options.inpaint?.patches },
   );
