@@ -16,6 +16,13 @@ public sealed record RecognitionInput(
     string Origin, PhysicalRectangle? CaptureBounds = null)
 {
     internal ScreenshotCaptureScene? CaptureScene { get; set; }
+
+    /// <summary>普通截图动作栏的显式动作；null/编辑沿用既有会话语义。</summary>
+    internal ScreenshotSelectionAction? SelectionAction { get; init; }
+
+    /// <summary>动作栏显式选择的 typed 模式/引擎 id；仅 Recognize 动作携带。</summary>
+    internal string? SelectionRecognitionMode { get; init; }
+
     internal ScreenshotCaptureScene? TakeCaptureScene()
     {
         ScreenshotCaptureScene? scene = CaptureScene;
@@ -30,6 +37,15 @@ public interface IInputService
     Task<RecognitionInput?> PickFileAsync(CancellationToken cancellationToken);
     Task<RecognitionInput?> ReadClipboardAsync(CancellationToken cancellationToken);
     Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// 普通截图入口：把宿主动作栏目录投影交给选区 picker。默认实现回落
+    /// 到直接入口行为，供专用识别/选字入口与测试桩保持既有确认语义。
+    /// </summary>
+    Task<RecognitionInput?> CaptureScreenWithActionsAsync(
+        ScreenshotSelectionActions? actions,
+        CancellationToken cancellationToken) => CaptureScreenAsync(cancellationToken);
+
     Task<RecognitionInput?> CaptureScrollingScreenAsync(CancellationToken cancellationToken) =>
         Task.FromException<RecognitionInput?>(new NotSupportedException("Scrolling capture is unavailable."));
     Task<RecognitionInput?> ReadDroppedFileAsync(string path, CancellationToken cancellationToken);
@@ -100,13 +116,21 @@ public sealed class InputService : IInputService
     public Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken) =>
         CaptureAsync(_screenRegionPicker, "screenshot", cancellationToken);
 
+    public Task<RecognitionInput?> CaptureScreenWithActionsAsync(
+        ScreenshotSelectionActions? actions,
+        CancellationToken cancellationToken) =>
+        CaptureAsync(_screenRegionPicker, "screenshot", cancellationToken, actions);
+
     public Task<RecognitionInput?> CaptureScrollingScreenAsync(CancellationToken cancellationToken) =>
         CaptureAsync(_scrollingRegionPicker, "scrolling-screenshot", cancellationToken);
 
     private static async Task<RecognitionInput?> CaptureAsync(
-        IScreenRegionPicker picker, string origin, CancellationToken cancellationToken)
+        IScreenRegionPicker picker, string origin, CancellationToken cancellationToken,
+        ScreenshotSelectionActions? actions = null)
     {
-        ScreenRegionSelection? selection = await picker.PickAsync(cancellationToken);
+        ScreenRegionSelection? selection = actions is null
+            ? await picker.PickAsync(cancellationToken)
+            : await picker.PickAsync(actions, cancellationToken);
         if (selection is null)
         {
             return null;
@@ -122,7 +146,12 @@ public sealed class InputService : IInputService
                     selection.Stride),
                 "image/bmp",
                 origin + ".bmp",
-                origin, selection.Bounds) { CaptureScene = selection.CaptureScene };
+                origin, selection.Bounds)
+            {
+                CaptureScene = selection.CaptureScene,
+                SelectionAction = selection.SelectionAction,
+                SelectionRecognitionMode = selection.RecognitionModeId,
+            };
         }
         catch
         {

@@ -134,10 +134,11 @@ try {
     }
     $health = Get-Content -LiteralPath $healthFile -Raw | ConvertFrom-Json
     if ($health.schema_version -ne 1 -or $health.state -ne 'bridge-ready' -or
-        $health.resources -ne 'verified' -or $health.layout_sizes_verified -ne 2) {
+        $health.resources -ne 'verified' -or $health.layout_sizes_verified -ne 2 -or
+        $health.owner_restore -ne 'verified') {
         throw 'Web workbench health signal is invalid'
     }
-    Write-Host 'Web workbench smoke verified: bridge-ready, resource GET and annotation POST.'
+    Write-Host 'Web workbench smoke verified: bridge-ready, resource GET and annotation POST, visible/minimized/hidden owner-window restoration.'
 } catch {
     # Capture before cleanup removes the health file and portable state/logs.
     $originalFailure = $_

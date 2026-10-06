@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Windows.Graphics.Imaging;
 using Windows.Storage.Streams;
+using VibeOCR.App.Features.QrCode;
 using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Features.Settings;
 using VibeOCR.App.Features.Shell;
@@ -517,6 +518,16 @@ public sealed class ScreenshotSessionWorkbenchTests
     return root;
   }
 
+  /// <summary>状态广播与宿主事件之间只保证最终一致：短暂轮询等待。</summary>
+  private static async Task UntilAsync(Func<bool> condition)
+  {
+    for (int attempt = 0; !condition(); attempt++)
+    {
+      if (attempt >= 150) throw new TimeoutException("Expected host event did not arrive.");
+      await Task.Delay(20, TestContext.Current.CancellationToken);
+    }
+  }
+
   private sealed class RecognitionStateAwaiter : IDisposable
   {
     private readonly DesktopWorkbenchCommandHandler handler;
@@ -931,14 +942,18 @@ public sealed class ScreenshotSessionWorkbenchTests
   private sealed class RecordingAnnotatedImagePlatform : IAnnotatedImagePlatform
   {
     public byte[]? CopiedBytes { get; private set; }
+    public byte[]? SavedBytes { get; private set; }
 
     public async Task CopyImageAsync(string sourcePath, CancellationToken cancellationToken)
     {
       CopiedBytes = await File.ReadAllBytesAsync(sourcePath, cancellationToken);
     }
 
-    public Task<bool> SaveImageAsync(string sourcePath, CancellationToken cancellationToken) =>
-      Task.FromResult(true);
+    public async Task<bool> SaveImageAsync(string sourcePath, CancellationToken cancellationToken)
+    {
+      SavedBytes = await File.ReadAllBytesAsync(sourcePath, cancellationToken);
+      return true;
+    }
 
     public string? CopiedText { get; private set; }
     public bool TextClipboardBusy { get; set; }
@@ -2128,7 +2143,8 @@ public sealed class ScreenshotSessionWorkbenchTests
       TestContext.Current.CancellationToken);
   }
 
-  private class TextModeHealthClient(bool rapidReady = true, bool windowsReady = true)
+  private class TextModeHealthClient(
+      bool rapidReady = true, bool windowsReady = true, bool mineruConfig = false)
     : InferenceClientStub
   {
     public override Task<JobRef> SubmitAsync(
@@ -2137,8 +2153,9 @@ public sealed class ScreenshotSessionWorkbenchTests
       CancellationToken cancellationToken) =>
       throw new InvalidOperationException("health-only client must not submit");
 
-    public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken) =>
-      Task.FromResult(new Wire.Health
+    public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
+    {
+      Wire.Health health = new()
       {
         SchemaVersion = 2,
         InstanceId = "sup-text",
@@ -2192,7 +2209,46 @@ public sealed class ScreenshotSessionWorkbenchTests
             },
           },
         ],
-      });
+      };
+      if (mineruConfig)
+      {
+        // 可选声明类型化 MinerU 4 配置目录：默认 tier Basic/ch，供
+        // mineru_document 提交断言目录派生配置，其余模式不受影响。
+        health = health with
+        {
+          Capabilities = [.. health.Capabilities,
+            RuntimeSelectionService.MineruConfigCapability],
+          CapabilityDescriptors =
+          [
+            .. health.CapabilityDescriptors!,
+            new Wire.CapabilityDescriptor
+            {
+              Name = RuntimeSelectionService.MineruConfigCapability,
+              Lifecycle = "active",
+              IntroducedIn = "2.9.0",
+              DeprecatedIn = null,
+              SunsetAt = null,
+              Replacement = null,
+              MineruConfigCatalog = new Wire.MineruConfigCatalog
+              {
+                DefaultTier = Wire.MineruTierId.Basic,
+                Tiers =
+                [
+                  new Wire.MineruTierDescriptor
+                  {
+                    Id = Wire.MineruTierId.Basic,
+                    Availability = Wire.MineruTierAvailability.Ready,
+                    ReasonCode = null,
+                  },
+                ],
+                Languages = ["ch"],
+              },
+            },
+          ],
+        };
+      }
+      return Task.FromResult(health);
+    }
 
     public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>
       Task.FromResult(new SettingsSnapshot());
@@ -2580,5 +2636,739 @@ public sealed class ScreenshotSessionWorkbenchTests
 
     public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>
       Task.FromResult(new SettingsSnapshot());
+  }
+
+  // #187 普通截图选区动作：动作栏意图沿 selection/input 承载到宿主；编辑/
+  // 识别/复制/保存/钉图/打开设置各自的单次提交、会话/编辑器与恢复契约。
+
+  /// <summary>普通入口桩：记录动作栏目录投影并返回显式意图捕获。</summary>
+  private sealed class SelectionActionCaptureInput(
+      ScreenshotSelectionAction? action,
+      string? modeId = null,
+      byte[]? data = null) : IInputService
+  {
+    private readonly byte[] captureData = data ?? CaptureBytes;
+    public ScreenshotSelectionActions? ReceivedActions { get; private set; }
+    public int CaptureCalls;
+
+    public Task<RecognitionInput?> PickFileAsync(CancellationToken cancellationToken) =>
+      Task.FromResult<RecognitionInput?>(null);
+
+    public Task<RecognitionInput?> ReadClipboardAsync(CancellationToken cancellationToken) =>
+      Task.FromResult<RecognitionInput?>(null);
+
+    public Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken) =>
+      Task.FromResult<RecognitionInput?>(
+        new RecognitionInput(captureData, "image/bmp", "screenshot.bmp", "screenshot"));
+
+    public Task<RecognitionInput?> CaptureScreenWithActionsAsync(
+      ScreenshotSelectionActions? actions,
+      CancellationToken cancellationToken)
+    {
+      ReceivedActions = actions;
+      Interlocked.Increment(ref CaptureCalls);
+      return Task.FromResult<RecognitionInput?>(
+        new RecognitionInput(captureData, "image/bmp", "screenshot.bmp", "screenshot")
+        {
+          SelectionAction = action,
+          SelectionRecognitionMode = modeId,
+        });
+    }
+
+    public Task<RecognitionInput?> CaptureScrollingScreenAsync(CancellationToken cancellationToken) =>
+      CaptureScreenAsync(cancellationToken);
+
+    public Task<RecognitionInput?> ReadDroppedFileAsync(
+      string path, CancellationToken cancellationToken) =>
+      Task.FromResult<RecognitionInput?>(null);
+  }
+
+  /// <summary>真实 typed 目录 + 记录识别提交请求/上传；可派生改写终态。</summary>
+  private class SelectionSubmitClient(bool rapidReady = true, bool mineruConfig = false)
+    : TextModeHealthClient(rapidReady, mineruConfig: mineruConfig)
+  {
+    public List<SubmitRequest> Requests { get; } = [];
+    public List<IReadOnlyList<byte>> UploadedContent { get; } = [];
+    public TaskCompletionSource? SubmitGate { get; set; }
+
+    public override async Task<JobRef> SubmitAsync(
+      SubmitRequest request,
+      IReadOnlyDictionary<string, SubmitUpload> uploads,
+      CancellationToken cancellationToken)
+    {
+      Requests.Add(request);
+      UploadedContent.AddRange(uploads.Values.Select(upload => upload.Content));
+      if (SubmitGate is { } gate) await gate.Task.WaitAsync(cancellationToken);
+      return new JobRef
+      {
+        JobId = "job-selection",
+        Items =
+        [
+          new JobItem
+          {
+            ItemId = "it-0",
+            ClientItemKey = request.Items[0].ClientItemKey,
+            Ordinal = 0,
+            DisplayName = request.Items[0].DisplayName,
+            State = ItemState.Queued,
+          },
+        ],
+      };
+    }
+
+    public override Task<JobUpdate> ObserveAsync(
+      string jobId,
+      int afterSequence,
+      CancellationToken cancellationToken) => Task.FromResult(new JobUpdate
+      {
+        Snapshot = new JobSnapshot
+        {
+          JobId = jobId,
+          Kind = JobKind.Recognition,
+          Priority = JobPriority.Interactive,
+          State = JobState.Completed,
+        },
+        Events = Array.Empty<StageEvent>(),
+        Outcomes =
+        [
+          new ItemOutcome
+          {
+            ItemId = "it-0",
+            State = ItemState.Succeeded,
+            Attempt = 1,
+            PayloadType = "ocr.v1",
+            Payload = new Dictionary<string, JsonElement>
+            {
+              ["raw_text"] = JsonSerializer.SerializeToElement("selection text"),
+            },
+          },
+        ],
+        ThroughSequence = afterSequence,
+      });
+  }
+
+  [Fact]
+  public async Task OrdinaryCaptureSendsLoadedHostCatalogProjectionToSelectionActions()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new TextModeHealthClient(rapidReady: false);
+      var inputs = new SelectionActionCaptureInput(ScreenshotSelectionAction.Edit);
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore, settings,
+        inferenceAttached: () => true);
+
+      using (var captured = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.ScreenshotSession is not null))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        await captured.Task;
+      }
+
+      // 菜单只消费宿主已加载的真实 typed 目录投影：同一 choice 的 id/
+      // 显示名/availability，未额外复制引擎表。
+      Assert.NotNull(inputs.ReceivedActions);
+      ScreenshotRecognitionModeEntry[] entries = [.. inputs.ReceivedActions!.Modes];
+      Assert.Equal(8, entries.Length);
+      Assert.All(entries, entry => Assert.False(string.IsNullOrWhiteSpace(entry.DisplayName)));
+      Assert.Contains(entries, entry =>
+        entry.ModeId == "rapid_text" && entry.Availability == "preparation_required" &&
+        entry.ReasonCode == "runtime_component_missing");
+      Assert.Contains(entries, entry =>
+        entry.ModeId == "windows_text" && entry.Availability == "ready");
+      Assert.Contains(entries, entry =>
+        entry.ModeId == "paddle_table" && entry.DisplayName == "表格结构识别（PaddleOCR）");
+      Assert.Contains(entries, entry =>
+        entry.ModeId == "paddle_formula" && entry.DisplayName == "数学公式识别（PaddleOCR）");
+      // 纯截图零目录加载/零推理提交（submit 会直接抛错）。
+      Assert.Equal(1, inputs.CaptureCalls);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task OrdinaryCaptureWithoutLoadedCatalogSendsEmptyProjection()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new ThrowingSubmitClient();
+      var inputs = new SelectionActionCaptureInput(ScreenshotSelectionAction.Edit);
+      var recognition = new RecognitionViewModel(inference, inputs);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore,
+        settings: new SettingsViewModel(inference),
+        inferenceAttached: () => false);
+
+      using (var captured = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.ScreenshotSession is not null))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        await captured.Task;
+      }
+      // 无 Runtime 时本地截图仍可用；目录投影为空（动作栏解释并可进设置），
+      // 不破块、不臆造引擎表。
+      Assert.NotNull(inputs.ReceivedActions);
+      Assert.Empty(inputs.ReceivedActions!.Modes);
+      Assert.Equal(0, inference.SubmitCalls);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Theory]
+  [InlineData("rapid_text", "OCR", "rapidocr")]
+  [InlineData("windows_text", "OCR", "windows")]
+  [InlineData("paddle_text", "OCR", "paddleocr")]
+  [InlineData("paddle_structure", "PP-StructureV3", null)]
+  [InlineData("paddle_document_vl", "PaddleOCR-VL", null)]
+  [InlineData("mineru_document", "MinerU", null)]
+  [InlineData("paddle_table", "TABLE_RECOGNITION", null)]
+  [InlineData("paddle_formula", "FORMULA_RECOGNITION", null)]
+  public async Task OrdinaryRecognizeIntentSubmitsOnceWithTypedModeWithoutEditorSession(
+    string modeId,
+    string pipelineId,
+    string? engineId)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new SelectionSubmitClient(mineruConfig: true);
+      var inputs = new SelectionActionCaptureInput(
+        ScreenshotSelectionAction.Recognize, modeId);
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore, settings,
+        inferenceAttached: () => true);
+      int sessionReady = 0;
+      handler.ScreenshotSessionReady += (_, _) => sessionReady++;
+      int terminalShown = 0;
+      handler.ScreenshotSelectionRecognized += () => terminalShown++;
+      int settingsRequested = 0;
+      handler.ScreenshotSelectionSettingsRequested += () => settingsRequested++;
+
+      RecognitionWorkbenchState done;
+      using (var completed = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.Result is not null && state.ScreenshotSession is null))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        done = await completed.Task;
+      }
+
+      // 携带唯一 typed 意图只提交一次：真实 SubmitRequest 实参按目录
+      // 契约逐模式断言（pipeline/engine/MinerU 配置），零会话/编辑器。
+      SubmitRequest request = Assert.Single(inference.Requests);
+      Assert.Equal(
+        modeId == "mineru_document" ? JobKind.MineruParse : JobKind.Recognition,
+        request.Kind);
+      Assert.Equal(JobPriority.Interactive, request.Priority);
+      Assert.Equal(pipelineId, request.Pipeline.PipelineId);
+      if (engineId is null)
+      {
+        Assert.Null(request.Pipeline.Engine);
+      }
+      else
+      {
+        Assert.Equal(OcrEngineWire.Parse(engineId), request.Pipeline.Engine);
+      }
+      if (modeId == "mineru_document")
+      {
+        // 类型化 MinerU 4 配置来自目录默认 tier：Basic/ch + 生效值，
+        // 不携带任何遗留 engine 选项。
+        Assert.Equal(MineruTier.Basic, request.Pipeline.Mineru!.Tier);
+        Assert.Equal(MineruOcrMode.Auto, request.Pipeline.Mineru.OcrMode);
+        Assert.Equal(MineruConfig.AllPages, request.Pipeline.Mineru.PageRange);
+        Assert.Equal(MineruConfig.DefaultLanguage, request.Pipeline.Mineru.Language);
+      }
+      else
+      {
+        Assert.Null(request.Pipeline.Mineru);
+      }
+      Assert.Empty(request.Pipeline.Options);
+      Assert.Equal(CaptureBytes, Assert.Single(inference.UploadedContent));
+      Assert.Equal(modeId, recognition.TaskEngine);
+      Assert.Null(handler.CurrentImageSessionId);
+      Assert.Equal(0, sessionReady);
+      await UntilAsync(() => terminalShown == 1);
+      Assert.Equal(0, settingsRequested);
+      Assert.Equal("recognition.completed", done.StatusCode);
+      Assert.NotNull(done.Result);
+      Assert.NotNull(done.Input);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task OrdinaryRecognizeIntentRefusesUnreadyModeWithoutSubmitOrFallback()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      // 模拟菜单渲染后环境变化：rapid_text 变为 preparation_required。
+      var inference = new SelectionSubmitClient(rapidReady: false);
+      var inputs = new SelectionActionCaptureInput(
+        ScreenshotSelectionAction.Recognize, "rapid_text");
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore, settings,
+        inferenceAttached: () => true);
+      int sessionReady = 0;
+      handler.ScreenshotSessionReady += (_, _) => sessionReady++;
+      int terminalShown = 0;
+      handler.ScreenshotSelectionRecognized += () => terminalShown++;
+
+      RecognitionWorkbenchState refused;
+      using (var completed = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.StatusCode == "recognition.modeUnavailable"))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        refused = await completed.Task;
+      }
+
+      // 未准备的模式拒绝提交且不回退通用文字识别；反馈可见指向环境。
+      Assert.Equal("recognition.modeUnavailable", refused.StatusCode);
+      Assert.Empty(inference.Requests);
+      Assert.Null(recognition.TaskEngine);
+      Assert.Null(handler.CurrentImageSessionId);
+      Assert.Equal(0, sessionReady);
+      await UntilAsync(() => terminalShown == 1);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  /// <summary>提交后以失败 outcome 终态（动作栏显式识别失败分支）。</summary>
+  private sealed class FailingOutcomeSelectionClient : SelectionSubmitClient
+  {
+    public override Task<JobUpdate> ObserveAsync(
+      string jobId,
+      int afterSequence,
+      CancellationToken cancellationToken) => Task.FromResult(new JobUpdate
+    {
+      Snapshot = new JobSnapshot
+      {
+        JobId = jobId,
+        Kind = JobKind.Recognition,
+        Priority = JobPriority.Interactive,
+        State = JobState.Failed,
+      },
+      Events = Array.Empty<StageEvent>(),
+      Outcomes =
+      [
+        new ItemOutcome
+        {
+          ItemId = "it-0",
+          State = ItemState.Failed,
+          Attempt = 1,
+        },
+      ],
+      ThroughSequence = afterSequence,
+    });
+  }
+
+  [Fact]
+  public async Task OrdinaryRecognizeFailureReachesVisibleTerminalWithoutRetrySubmit()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new FailingOutcomeSelectionClient();
+      var inputs = new SelectionActionCaptureInput(
+        ScreenshotSelectionAction.Recognize, "windows_text");
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore, settings,
+        inferenceAttached: () => true);
+      int terminalShown = 0;
+      handler.ScreenshotSelectionRecognized += () => terminalShown++;
+
+      RecognitionWorkbenchState failed;
+      using (var completed = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.StatusCode == "recognition.failed" &&
+          state.ScreenshotSession is null))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        failed = await completed.Task;
+      }
+
+      // 失败终态：可见、无会话残留、不自动重试（仅一次提交）。
+      Assert.Equal("recognition.failed", failed.StatusCode);
+      Assert.Null(failed.Result);
+      Assert.Null(handler.CurrentImageSessionId);
+      Assert.Single(inference.Requests);
+      Assert.Equal("windows_text", recognition.TaskEngine);
+      await UntilAsync(() => terminalShown == 1);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task EnvironmentSwitchWindowCancelsScreenshotSelectionRecognitionWithoutSubmit()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new SelectionSubmitClient();
+      var inputs = new SelectionActionCaptureInput(
+        ScreenshotSelectionAction.Recognize, "windows_text");
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore, settings,
+        inferenceAttached: () => true);
+      // 与 DefaultModeRequestContractTests 同一真实状态位：环境切换窗口
+      // 内提交必须取消，不能继续使用切换前的目录发出请求。
+      System.Reflection.FieldInfo switching = typeof(DesktopWorkbenchCommandHandler)
+        .GetField("environmentSwitching",
+          System.Reflection.BindingFlags.NonPublic |
+          System.Reflection.BindingFlags.Instance)!;
+      int terminalShown = 0;
+      handler.ScreenshotSelectionRecognized += () => terminalShown++;
+
+      switching.SetValue(handler, 1);
+      RecognitionWorkbenchState cancelled;
+      using (var completed = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.StatusCode == "recognition.cancelled" &&
+          state.ScreenshotSession is null))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        cancelled = await completed.Task;
+      }
+      Assert.Equal("recognition.cancelled", cancelled.StatusCode);
+      Assert.Empty(inference.Requests);
+      Assert.Null(handler.CurrentImageSessionId);
+      await UntilAsync(() => terminalShown == 1);
+
+      // 退出切换窗口后同一链路恢复：仅一次显式模式提交，无默认回退。
+      switching.SetValue(handler, 0);
+      RecognitionWorkbenchState done;
+      using (var recovered = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.Result is not null))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        done = await recovered.Task;
+      }
+      SubmitRequest request = Assert.Single(inference.Requests);
+      Assert.Equal("OCR", request.Pipeline.PipelineId);
+      Assert.Equal(OcrEngine.Windows, request.Pipeline.Engine);
+      Assert.Equal("recognition.completed", done.StatusCode);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Theory]
+  [InlineData(ScreenshotSelectionAction.Copy)]
+  [InlineData(ScreenshotSelectionAction.Save)]
+  [InlineData(ScreenshotSelectionAction.Pin)]
+  public async Task OrdinaryLocalOutputIntentsReuseExistingSessionCommands(
+    ScreenshotSelectionAction action)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      // 真实 1×1 BMP：本地输出路径要解码选区像素后重编码为 PNG。
+      byte[] captureData = InputService.EncodeTopDownBmp([0, 0, 255, 255], 1, 1, 4);
+      byte[] expectedPng = await QrCodeSavePlatform.EncodeImageAsync(
+        captureData, BitmapEncoder.PngEncoderId, TestContext.Current.CancellationToken);
+      var inference = new ThrowingSubmitClient();
+      var inputs = new SelectionActionCaptureInput(action, data: captureData);
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var platform = new RecordingAnnotatedImagePlatform();
+      var pins = new List<(Guid SessionId, long Revision, RecognitionTextLayerState? Layer,
+        IReadOnlyList<WorkbenchExclusionBox> Boxes)>();
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore,
+        settings: new SettingsViewModel(inference), platform,
+        pinScreenshot: (image, sessionId, revision, layer, boxes) =>
+        {
+          pins.Add((sessionId, revision, layer, boxes));
+          image.Dispose();
+        });
+      int sessionReady = 0;
+      handler.ScreenshotSessionReady += (_, _) => sessionReady++;
+      int terminalShown = 0;
+      handler.ScreenshotSelectionRecognized += () => terminalShown++;
+
+      using (var closed = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.ScreenshotSession is null &&
+          state.StatusCode == "recognition.ready"))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        await closed.Task;
+      }
+
+      // 本地输出复用既有会话命令（快照/剪贴板重试/保存取消/贴图上限），
+      // 不新建并行管线、不提交识别、不打开现场编辑宿主；结束后关闭会话。
+      Assert.Equal(0, inference.SubmitCalls);
+      Assert.Equal(0, sessionReady);
+      Assert.Equal(0, terminalShown);
+      Assert.Null(handler.CurrentImageSessionId);
+      switch (action)
+      {
+        case ScreenshotSelectionAction.Copy:
+          Assert.Equal(expectedPng, platform.CopiedBytes);
+          Assert.Null(platform.SavedBytes);
+          Assert.Empty(pins);
+          break;
+        case ScreenshotSelectionAction.Save:
+          Assert.Equal(expectedPng, platform.SavedBytes);
+          Assert.Null(platform.CopiedBytes);
+          Assert.Empty(pins);
+          break;
+        case ScreenshotSelectionAction.Pin:
+          Assert.Null(platform.CopiedBytes);
+          Assert.Null(platform.SavedBytes);
+          (Guid pinnedSession, long pinnedRevision, RecognitionTextLayerState? layer,
+            IReadOnlyList<WorkbenchExclusionBox> boxes) = Assert.Single(pins);
+          Assert.Equal(0, pinnedRevision);
+          Assert.Null(layer);
+          Assert.Empty(boxes);
+          Assert.NotEqual(Guid.Empty, pinnedSession);
+          break;
+      }
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task OrdinaryOpenSettingsIntentDropsCaptureAndRequestsSettings()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new ThrowingSubmitClient();
+      var inputs = new SelectionActionCaptureInput(ScreenshotSelectionAction.OpenSettings);
+      var recognition = new RecognitionViewModel(inference, inputs);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore,
+        settings: new SettingsViewModel(inference));
+      int settingsRequested = 0;
+      handler.ScreenshotSelectionSettingsRequested += () => settingsRequested++;
+      int terminalShown = 0;
+      handler.ScreenshotSelectionRecognized += () => terminalShown++;
+
+      RecognitionWorkbenchState cancelled;
+      using (var completed = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.StatusCode == "recognition.cancelled"))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        cancelled = await completed.Task;
+      }
+
+      // 放弃捕获并显式进入设置；不残留会话/基准输入，不触发识别。
+      await UntilAsync(() => settingsRequested == 1);
+      Assert.Equal(0, terminalShown);
+      Assert.Equal(0, inference.SubmitCalls);
+      Assert.Null(handler.CurrentImageSessionId);
+      Assert.Null(recognition.CurrentInput);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task OrdinaryRecognizeHoldsCaptureGuardUntilTerminalThenRecovers()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new SelectionSubmitClient();
+      var inputs = new SelectionActionCaptureInput(
+        ScreenshotSelectionAction.Recognize, "paddle_table");
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore, settings,
+        inferenceAttached: () => true);
+      var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      inference.SubmitGate = gate;
+
+      using (var first = new RecognitionStateAwaiter(handler,
+        state => state.IsBusy && state.StatusCode == "recognition.running"))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        await first.Task;
+      }
+      while (inference.Requests.Count == 0)
+        await Task.Delay(20, TestContext.Current.CancellationToken);
+
+      // 识别在途：快速二次唤起被单飞 guard 拒绝，不重入选区。
+      WorkbenchCommandOutcome rejected = await handler.ExecuteAsync(
+        new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+      Assert.NotNull(rejected.Error);
+      Assert.Equal("capture_in_progress", rejected.Error.Code);
+
+      using (var completed = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.Result is not null))
+      {
+        gate.TrySetResult();
+        await completed.Task;
+      }
+
+      // 终态释放 guard：下一次普通截图可重新进入。
+      inference.SubmitGate = null;
+      using (var second = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.Result is not null))
+      {
+        WorkbenchCommandOutcome restarted = await handler.ExecuteAsync(
+          new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+        Assert.Null(restarted.Error);
+        await second.Task;
+      }
+      Assert.Equal(2, inference.Requests.Count);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task LocalOutputFailureClosesSessionReportsAndKeepsRecoverable()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new ThrowingSubmitClient();
+      var inputs = new SelectionActionCaptureInput(ScreenshotSelectionAction.Pin);
+      var recognition = new RecognitionViewModel(inference, inputs);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore,
+        settings: new SettingsViewModel(inference),
+        pinScreenshot: (image, _, _, _, _) =>
+        {
+          image.Dispose();
+          throw new InvalidOperationException("最多同时打开四张贴图。");
+        });
+      int terminalShown = 0;
+      handler.ScreenshotSelectionRecognized += () => terminalShown++;
+
+      RecognitionWorkbenchState failed;
+      using (var completed = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.StatusCode == "recognition.failed"))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        failed = await completed.Task;
+      }
+
+      // 交接失败：状态可见（页面投影）、会话关闭、guard 释放（可立即
+      // 重试）；纯本地动作失败不借识别终态事件激活主窗。
+      Assert.Equal("recognition.failed", failed.StatusCode);
+      Assert.Null(failed.ScreenshotSession);
+      Assert.Equal(0, terminalShown);
+      Assert.Equal(0, inference.SubmitCalls);
+      WorkbenchCommandOutcome retried = await handler.ExecuteAsync(
+        new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+      Assert.Null(retried.Error);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task LocalOutputFailureBeforeTakeRevokesAnnotationLeaseDeterministically()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      byte[] captureData = InputService.EncodeTopDownBmp([0, 0, 255, 255], 1, 1, 4);
+      var inference = new ThrowingSubmitClient();
+      var inputs = new SelectionActionCaptureInput(
+        ScreenshotSelectionAction.Pin, data: captureData);
+      var recognition = new RecognitionViewModel(inference, inputs);
+      using var broker = new WorkbenchResourceBroker(root);
+      // 配额 1：若失败路径残留未消费条目，探测上传会直接被拒绝。
+      using var annotationStore = new WorkbenchAnnotationStore(
+        root, maximumUnconsumedEntries: 1);
+      // 不注入 pin 委托：PinScreenshotImage 在 Take 之前抛错。
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore,
+        settings: new SettingsViewModel(inference));
+
+      using (var failed = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.StatusCode == "recognition.failed"))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        await failed.Task;
+      }
+
+      // 确定性回收契约：取消/失败不留下未消费 annotation，不以 TTL 掩盖。
+      byte[] probe = await QrCodeSavePlatform.EncodeImageAsync(
+        captureData, BitmapEncoder.PngEncoderId, TestContext.Current.CancellationToken);
+      WorkbenchAnnotationLease probeLease = await annotationStore.UploadPngAsync(
+        new MemoryStream(probe), TestContext.Current.CancellationToken);
+      annotationStore.Revoke(probeLease.ResourceUri);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
   }
 }

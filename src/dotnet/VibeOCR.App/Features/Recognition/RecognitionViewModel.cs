@@ -166,9 +166,18 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         CurrentInput = null;
     }
 
-    public Task CaptureScreenshotSessionAsync(CancellationToken cancellationToken) =>
-        RunInputAsync(_inputs.CaptureScreenAsync, cancellationToken,
-            recognize: false, persistCurrentInput: true);
+    /// <summary>
+    /// 普通截图会话：动作栏目录投影随选区链路下传；专用直接入口（显式
+    /// 选字）传 null 保持立即确认。仍不提交任何 OCR 任务。
+    /// </summary>
+    public Task CaptureScreenshotSessionAsync(
+        ScreenshotSelectionActions? selectionActions,
+        CancellationToken cancellationToken) =>
+        RunInputAsync(
+            ct => _inputs.CaptureScreenWithActionsAsync(selectionActions, ct),
+            cancellationToken,
+            recognize: false,
+            persistCurrentInput: true);
 
     public Task CaptureScrollingScreenshotSessionAsync(CancellationToken cancellationToken) =>
         RunInputAsync(_inputs.CaptureScrollingScreenAsync, cancellationToken,

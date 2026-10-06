@@ -16,6 +16,7 @@ using VibeOCR.App.Web;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
+using Windows.Graphics.Imaging;
 using Windows.Storage;
 using Windows.Storage.Pickers;
 using Windows.System;
@@ -221,6 +222,13 @@ public sealed class DesktopWorkbenchCommandHandler :
   internal event Action? ScreenshotCaptureFinished;
   /// <summary>scene 会话显式提交识别后的内部交接：宿主关闭 scene 编辑窗并导航主窗口；会话与任务保留。</summary>
   internal event Action<Guid>? ScreenshotSceneRecognitionHandoff;
+  /// <summary>
+  /// 普通截图动作栏显式识别终态：宿主显示主窗并导航识别承载面（明确
+  /// 分支）。仅识别任务终态允许触发；本地输出失败/取消不借用。
+  /// </summary>
+  internal event Action? ScreenshotSelectionRecognized;
+  /// <summary>普通截图动作栏“打开设置”意图：放弃本次截图并显式进入现有设置页。</summary>
+  internal event Action? ScreenshotSelectionSettingsRequested;
   internal Guid? CurrentImageSessionId => screenshotSessionId;
   internal ScreenshotCaptureScene? PendingScreenshotCaptureScene => recognition?.CurrentInput?.CaptureScene;
   internal ScreenshotCaptureScene? TakeScreenshotCaptureScene(Guid sessionId) =>
@@ -735,10 +743,13 @@ public sealed class DesktopWorkbenchCommandHandler :
       {
         // 纯截图路径：不加载 Runtime 目录（EnsureSelectionLoadedAsync）、
         // 不做 requireUsable 模式协商；Supervisor 未连接/维护中同样可完成。
+        // 普通入口把宿主当前目录投影交给动作栏；专用入口保持直接确认。
         if (scrolling)
           await recognition!.CaptureScrollingScreenshotSessionAsync(cancellationToken);
         else
-          await recognition!.CaptureScreenshotSessionAsync(cancellationToken);
+          await recognition!.CaptureScreenshotSessionAsync(
+            textSelectionRequested ? null : BuildSelectionActions(),
+            cancellationToken);
         if (generation != Volatile.Read(ref recognitionGeneration))
         {
           return;
@@ -752,6 +763,36 @@ public sealed class DesktopWorkbenchCommandHandler :
         if (recognition.CurrentInput is { } captured)
         {
           capturedInput = captured;
+          // 普通入口动作栏意图：识别/本地输出/打开设置按显式意图完成本次
+          // 截图，不创建编辑会话；编辑或无意图沿用既有会话+现场编辑宿主。
+          switch (captured.SelectionAction)
+          {
+            case ScreenshotSelectionAction.Recognize
+              when captured.SelectionRecognitionMode is { } modeId:
+              await CompleteScreenshotSelectionRecognitionAsync(
+                generation, captured, modeId, cancellationToken);
+              return;
+            case ScreenshotSelectionAction.Recognize:
+              AppLog.Warn(
+                $"Screenshot selection recognition arrived without a typed mode id: {captured.SelectionRecognitionMode}");
+              recognition.ReleaseInput();
+              capturedInput = null;
+              StateChanged?.Invoke(new RecognitionWorkbenchState(false, "recognition.failed"));
+              return;
+            case ScreenshotSelectionAction.Copy or ScreenshotSelectionAction.Save
+              or ScreenshotSelectionAction.Pin:
+              await CompleteScreenshotLocalOutputAsync(
+                generation, captured, captured.SelectionAction.Value, cancellationToken);
+              return;
+            case ScreenshotSelectionAction.OpenSettings:
+              // 放弃本次捕获并显式进入现有设置页；不残留会话或隐式 OCR。
+              recognition.ReleaseInput();
+              capturedInput = null;
+              StateChanged?.Invoke(new RecognitionWorkbenchState(false, "recognition.cancelled"));
+              ScreenshotSelectionSettingsRequested?.Invoke();
+              return;
+          }
+
           WorkbenchResourceReference input = await PublishBytesAsync(
             captured.Data,
             captured.MediaType,
@@ -807,7 +848,8 @@ public sealed class DesktopWorkbenchCommandHandler :
       Interlocked.Exchange(ref captureInFlight, 0);
       try
       {
-        if (publishedSession && generation == Volatile.Read(ref recognitionGeneration) &&
+        if (publishedSession &&
+            generation == Volatile.Read(ref recognitionGeneration) &&
             screenshotSessionId is { } id)
           ScreenshotSessionReady?.Invoke(id, recognition?.CurrentInput?.CaptureBounds);
       }
@@ -815,6 +857,197 @@ public sealed class DesktopWorkbenchCommandHandler :
       {
         capturedInput?.DisposeCaptureScene();
         ScreenshotCaptureFinished?.Invoke();
+      }
+    }
+  }
+
+  /// <summary>
+  /// 普通截图动作栏的识别菜单投影：只消费宿主当前已加载的真实 typed
+  /// 目录（既有 choice/availability/显示名），纯截图不触发目录加载或安装；
+  /// 目录未加载时投影为空，由动作栏解释并可显式进入设置。
+  /// </summary>
+  private ScreenshotSelectionActions BuildSelectionActions()
+  {
+    recognition ??= recognitionFactory();
+    // 纯截图不触发目录加载；这里只确保 settings 实例存在并复用它当前
+    // 已加载的真实目录（启动 bootstrap 已加载；冷启动/维护中投影为空）。
+    settings ??= CreateSettings();
+    return new ScreenshotSelectionActions(
+      RecognitionEngines()?
+        .Select(choice => new ScreenshotRecognitionModeEntry(
+          choice.Engine,
+          choice.DisplayName,
+          choice.Availability,
+          choice.ReasonCode))
+        .ToArray() ?? []);
+  }
+
+  /// <summary>
+  /// 普通截图动作栏显式识别：携带唯一 typed 意图，提交前经
+  /// <see cref="EnsureSelectionLoadedForSubmitAsync"/> 取得权威目录（未
+  /// attach 时等待 Supervisor 启动；环境切换窗口取消本次提交，不以空
+  /// 快照提交），再按任务模式严格 resolve（显式 modeId 优先，无默认回退），
+  /// 只提交一次任务；新输入取代旧截图会话，终态由主窗识别承载面显式展示。
+  /// </summary>
+  private async Task CompleteScreenshotSelectionRecognitionAsync(
+    long generation,
+    RecognitionInput input,
+    string modeId,
+    CancellationToken cancellationToken)
+  {
+    bool terminalVisible = false;
+    try
+    {
+      // 提交前权威目录：与单次/批量/PDF 同一契约；切换窗口返回 false 时
+      // 取消本次提交（沿用本方法 cancel 终态/finally 清理），不猜默认。
+      if (!await EnsureSelectionLoadedForSubmitAsync(cancellationToken))
+      {
+        if (generation != Volatile.Read(ref recognitionGeneration)) return;
+        recognition?.InvalidateResult();
+        resultActions = null;
+        StateChanged?.Invoke(new RecognitionWorkbenchState(false, "recognition.cancelled"));
+        terminalVisible = true;
+        return;
+      }
+      if (generation != Volatile.Read(ref recognitionGeneration)) return;
+      // 动作栏合同：仅 ready 模式可提交；目录在菜单渲染后变化（环境切换）
+      // 或需要准备的模式一律拒绝，不自动触发依赖准备/下载。
+      RecognitionEngineChoice? chosen = RecognitionEngines()?
+        .FirstOrDefault(entry => entry.Engine == modeId);
+      if (chosen is not { Availability: "ready" })
+      {
+        throw new RecognitionModeUnavailableException(
+          $"截图识别模式 {modeId} 当前不可用（{chosen?.Availability ?? "未在目录中"}），已拒绝执行；请在设置中准备后重试。");
+      }
+      // typed 意图冻结为任务模式：模式缺失/不可用直接拒绝，不回退默认；
+      // 新版 SynchronizeRecognitionMode 中显式 TaskEngine 优先于继承默认。
+      ApplyTaskEngine(modeId);
+      SynchronizeRecognitionMode(requireUsable: true);
+      // 显式识别取代旧截图会话（关闭旧 scene 编辑窗），不新建编辑会话。
+      ClearScreenshotSession();
+      InvalidateScreenshotTextLayer();
+      resultActions = null;
+      RecognitionWorkbenchState state = await RunRecognitionAsync(
+        viewModel => viewModel.RecognizeCapturedInputAsync(input, cancellationToken),
+        cancellationToken);
+      if (generation == Volatile.Read(ref recognitionGeneration))
+      {
+        StateChanged?.Invoke(state);
+        terminalVisible = true;
+      }
+    }
+    catch (OperationCanceledException)
+    {
+      if (generation == Volatile.Read(ref recognitionGeneration))
+      {
+        StateChanged?.Invoke(new RecognitionWorkbenchState(false, "recognition.cancelled"));
+        terminalVisible = true;
+      }
+    }
+    catch (RecognitionModeUnavailableException error)
+    {
+      // 严格模式合同：菜单选项与目录在提交瞬间不一致（环境切换等）时
+      // 可恢复地失败并指向环境，不静默回退通用文字识别。
+      AppLog.Warn($"Screenshot selection mode refused: {error.Message}");
+      if (generation == Volatile.Read(ref recognitionGeneration))
+      {
+        StateChanged?.Invoke(ModeUnavailableRecognitionState());
+        terminalVisible = true;
+      }
+    }
+    catch (RuntimeSelectionException error)
+    {
+      AppLog.Warn($"Screenshot selection mode refused: {error.Message}");
+      if (generation == Volatile.Read(ref recognitionGeneration))
+      {
+        StateChanged?.Invoke(ModeUnavailableRecognitionState());
+        terminalVisible = true;
+      }
+    }
+    catch (Exception error)
+    {
+      AppLog.Error("Screenshot selection recognition failed", error);
+      if (generation == Volatile.Read(ref recognitionGeneration))
+      {
+        StateChanged?.Invoke(new RecognitionWorkbenchState(false, "recognition.failed"));
+        terminalVisible = true;
+      }
+    }
+    finally
+    {
+      if (terminalVisible) ScreenshotSelectionRecognized?.Invoke();
+    }
+  }
+
+  /// <summary>
+  /// 普通截图动作栏本地输出（复制/保存/钉图）：选区像素编码为 PNG 走既有
+  /// annotation 快照与会话命令（快照/剪贴板重试/保存取消/贴图上限语义复用），
+  /// 执行后关闭会话；全程不提交识别、不打开现场编辑宿主。
+  /// </summary>
+  private async Task CompleteScreenshotLocalOutputAsync(
+    long generation,
+    RecognitionInput input,
+    ScreenshotSelectionAction action,
+    CancellationToken cancellationToken)
+  {
+    bool failed = false;
+    WorkbenchAnnotationLease? lease = null;
+    try
+    {
+      byte[] png = await QrCodeSavePlatform.EncodeImageAsync(
+        input.Data, BitmapEncoder.PngEncoderId, cancellationToken);
+      lease = await annotationStore.UploadPngAsync(
+        new MemoryStream(png), cancellationToken);
+      if (generation != Volatile.Read(ref recognitionGeneration)) return;
+      ClearScreenshotSession();
+      InvalidateScreenshotTextLayer();
+      resultActions = null;
+      screenshotSessionId = Guid.NewGuid();
+      screenshotSessionRevision = 0;
+      screenshotTextSelectionRequested = false;
+      screenshotSceneEditing = false;
+      screenshotSessionInput = null;
+      screenshotSessionResult = null;
+      screenshotSessionExcludeBoxes = [];
+      Guid sessionId = screenshotSessionId.Value;
+      string resourceUri = lease.ResourceUri.AbsoluteUri;
+      switch (action)
+      {
+        case ScreenshotSelectionAction.Copy:
+          await CopyScreenshotImageAsync(
+            new CopyScreenshotImageCommand(resourceUri, sessionId, 0), cancellationToken);
+          break;
+        case ScreenshotSelectionAction.Save:
+          await SaveScreenshotImageAsync(
+            new SaveScreenshotImageCommand(resourceUri, sessionId, 0), cancellationToken);
+          break;
+        case ScreenshotSelectionAction.Pin:
+          PinScreenshotImage(new PinScreenshotImageCommand(resourceUri, sessionId, 0, []));
+          break;
+      }
+    }
+    catch (AnnotatedImageOperationCancelledException)
+    {
+      // 用户在保存对话框取消：静默结束本次截图，不算失败。
+    }
+    catch (Exception error)
+    {
+      AppLog.Error($"Screenshot selection local output failed ({action})", error);
+      failed = true;
+    }
+    finally
+    {
+      // 快照租约确定性回收：命令已 Take 时 Revoke 对已移除条目为无害
+      // no-op；换图/取消/失败（含 Take 之前抛错）不留下未消费 annotation，
+      // 不依赖 TTL 清扫。
+      if (lease is not null) annotationStore.Revoke(lease.ResourceUri);
+      if (generation == Volatile.Read(ref recognitionGeneration))
+      {
+        RecognitionWorkbenchState closed = CloseScreenshotSession();
+        StateChanged?.Invoke(
+          failed ? closed with { StatusCode = "recognition.failed" } : closed);
+        // 纯本地动作失败沿用捕获失败语义：AppLog + 状态投影，不借识别
+        // 终态事件激活主窗（显式主窗交接仅限识别终态与设置入口）。
       }
     }
   }
@@ -2904,25 +3137,34 @@ public sealed class DesktopWorkbenchCommandHandler :
     SynchronizeBatchMode();
     return CurrentRecognitionState();
   }
-  private RecognitionWorkbenchState SetTaskEngine(SetTaskEngineCommand command)
+  /// <summary>
+  /// 任务级模式/引擎严格 resolve：不可用即抛出，不回退默认；普通截图
+  /// 动作栏的显式 typed 意图与设置页任务模式选择共用同一语义。
+  /// </summary>
+  private void ApplyTaskEngine(string? engine)
   {
-    recognition ??= recognitionFactory();
     settings ??= CreateSettings();
     RuntimeSelectionService? selection = settings.RecognitionSelection?.Catalog;
-    if (string.IsNullOrWhiteSpace(command.Engine)) recognition.TaskEngine = null;
+    if (string.IsNullOrWhiteSpace(engine)) recognition!.TaskEngine = null;
     else if (selection?.SupportsRecognitionModes is true)
     {
-      RecognitionModeOption mode = selection.SelectRecognitionMode(command.Engine);
+      RecognitionModeOption mode = selection.SelectRecognitionMode(engine);
       selection.MineruConfigFor(mode.Id);
-      recognition.TaskEngine = mode.Id;
+      recognition!.TaskEngine = mode.Id;
     }
-    else if (selection?.SupportsEngineSelection is true && OcrEngineWire.Parse(command.Engine) is OcrEngine engine)
+    else if (selection?.SupportsEngineSelection is true && OcrEngineWire.Parse(engine) is OcrEngine engineValue)
     {
-      selection.SelectEngine(engine);
-      recognition.TaskEngine = OcrEngineWire.Format(engine);
+      selection.SelectEngine(engineValue);
+      recognition!.TaskEngine = OcrEngineWire.Format(engineValue);
     }
     else throw new RuntimeSelectionException(RuntimeSelectionErrorKind.CapabilityMissing,
       "The runtime does not provide a recognition selection catalog.");
+  }
+
+  private RecognitionWorkbenchState SetTaskEngine(SetTaskEngineCommand command)
+  {
+    recognition ??= recognitionFactory();
+    ApplyTaskEngine(command.Engine);
     return screenshotSessionId is not null
       ? SessionRecognitionState(recognition.IsBusy, SessionStatusCode())
       : RecognitionState(false, RecognitionStatusCode(recognition));

@@ -204,6 +204,27 @@ public sealed partial class MainWindow : Window
       if (DispatcherQueue.HasThreadAccess) Handoff();
       else DispatcherQueue.TryEnqueue(Handoff);
     };
+    commandHandler.ScreenshotSelectionRecognized += () =>
+    {
+      // 普通截图动作栏显式识别终态：显示主窗并切到识别承载面（明确分支，
+      // 不贯穿所有动作无条件激活）。
+      void Show()
+      {
+        ShowAndNavigate("recognition");
+      }
+      if (DispatcherQueue.HasThreadAccess) Show();
+      else DispatcherQueue.TryEnqueue(Show);
+    };
+    commandHandler.ScreenshotSelectionSettingsRequested += () =>
+    {
+      // 动作栏“打开设置”：放弃本次截图并显式进入现有设置页，不自动安装。
+      void OpenSettings()
+      {
+        ShowAndNavigate("settings");
+      }
+      if (DispatcherQueue.HasThreadAccess) OpenSettings();
+      else DispatcherQueue.TryEnqueue(OpenSettings);
+    };
     application = new WorkbenchApplication(
       DesktopWorkbenchCommandHandler.Capabilities,
       WorkbenchRoute.Recognition,
@@ -599,11 +620,19 @@ public sealed partial class MainWindow : Window
         }
         if (!ready) throw new InvalidOperationException("Packaged workbench layout did not fit its client area.");
       }
+      // #187 AC5：窗口原状态恢复自检——真实 WinUI 窗口（自检自建）的可见/
+      // 最小化/隐藏三态经生产 RestoreOwnerState 实际恢复；不采样用户桌面，
+      // 恢复方法前台传 0 不恢复/检查外部窗口前台（自检初次显示会激活其
+      // 自建窗口；前台物理一致性 UNVERIFIED）。无需 Runtime/Supervisor。
+      smokeStage = "owner-restore-verification";
+      WebReadySmokeStatus.Stage(smokeStage);
+      await ScreenRegionPicker.VerifyOwnerRestoreSelfCheckAsync(CancellationToken.None);
       resourceBroker.Revoke(lease);
       if (!string.IsNullOrWhiteSpace(healthFile))
       {
         File.WriteAllText(healthFile,
-          "{\"schema_version\":1,\"state\":\"bridge-ready\",\"resources\":\"verified\",\"layout_sizes_verified\":2}");
+          "{\"schema_version\":1,\"state\":\"bridge-ready\",\"resources\":\"verified\"," +
+          "\"layout_sizes_verified\":2,\"owner_restore\":\"verified\"}");
       }
       Environment.Exit(0);
     }
