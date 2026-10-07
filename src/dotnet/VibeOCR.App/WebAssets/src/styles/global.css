@@ -769,7 +769,9 @@ input {
   min-height: 300px;
   overflow: hidden;
   border-radius: 8px;
-  background: #161616;
+  /* 预览背景跟随界面主题：图片按原始比例完整显示（不裁剪、不烧底色），
+     透明像素由主题背景衬托，不再使用固定深色黑边。 */
+  background: var(--colorNeutralBackground3);
 }
 .canvas-stage.is-panning .image-text-line {
   pointer-events: none;

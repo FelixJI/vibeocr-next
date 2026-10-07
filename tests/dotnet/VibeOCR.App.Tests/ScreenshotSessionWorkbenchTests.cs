@@ -742,7 +742,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       using (var ready = new RecognitionStateAwaiter(handler,
         state => !state.IsBusy && state.ScreenshotSession is not null))
       {
-        await handler.ExecuteAsync(new SelectImageEditFileCommand(), TestContext.Current.CancellationToken);
+        await handler.ExecuteAsync(new OpenRecognitionImageForEditCommand(), TestContext.Current.CancellationToken);
         sessionId = Guid.Parse((await ready.Task).ScreenshotSession!.SessionId);
       }
       WorkbenchAnnotationLease copy = await annotations.UploadImageAsync(new MemoryStream(jpeg),
@@ -782,7 +782,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         using (var ready = new RecognitionStateAwaiter(handler,
           state => !state.IsBusy && state.ScreenshotSession is not null))
         {
-          await handler.ExecuteAsync(new SelectImageEditFileCommand(), TestContext.Current.CancellationToken);
+          await handler.ExecuteAsync(new OpenRecognitionImageForEditCommand(), TestContext.Current.CancellationToken);
           opened = await ready.Task;
         }
         Guid sessionId = Guid.Parse(opened.ScreenshotSession!.SessionId);
@@ -827,7 +827,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       handler.ScreenshotSessionReady += (_, _) => scenes++;
       using var ready = new RecognitionStateAwaiter(handler,
         state => !state.IsBusy && state.ScreenshotSession is not null);
-      await handler.ExecuteAsync(new SelectImageEditFileCommand(),
+      await handler.ExecuteAsync(new OpenRecognitionImageForEditCommand(),
         TestContext.Current.CancellationToken);
       RecognitionWorkbenchState state = await ready.Task;
       Assert.False(state.ScreenshotSession!.SceneEditing);
@@ -1454,16 +1454,19 @@ public sealed class ScreenshotSessionWorkbenchTests
         RecognitionWorkbenchState captured = await capturedAwaiter.Task;
         Guid sessionId = Guid.Parse(captured.ScreenshotSession!.SessionId);
 
-        // 新输入（文件识别）取代会话：旧会话命令立即失效。
+        // 新输入（文件识别）取代旧会话：旧会话命令立即失效，并为新输入
+        // 建立新的 recognition 自身编辑会话（后处理可显式识别）。
         using (var fileAwaiter = new RecognitionStateAwaiter(
           handler,
-          state => !state.IsBusy && state.Result is not null && state.ScreenshotSession is null))
+          state => !state.IsBusy && state.Result is not null &&
+            state.ScreenshotSession is { } session &&
+            session.SessionId != captured.ScreenshotSession!.SessionId))
         {
           await handler.ExecuteAsync(
             new SelectRecognitionImageCommand(),
             TestContext.Current.CancellationToken);
           RecognitionWorkbenchState fileCompleted = await fileAwaiter.Task;
-          Assert.Null(fileCompleted.ScreenshotSession);
+          Assert.False(fileCompleted.ScreenshotSession!.SceneEditing);
         }
 
         WorkbenchAnnotationLease lease = UploadAnnotation(annotationStore, AnnotationPng);
@@ -1832,7 +1835,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         using var replacement = new RecognitionStateAwaiter(handler,
           state => !state.IsBusy && state.ScreenshotSession is { } session &&
             session.SessionId != captured.ScreenshotSession.SessionId);
-        await handler.ExecuteAsync(new SelectImageEditFileCommand(), TestContext.Current.CancellationToken);
+        await handler.ExecuteAsync(new OpenRecognitionImageForEditCommand(), TestContext.Current.CancellationToken);
         current = await replacement.Task;
       }
       else

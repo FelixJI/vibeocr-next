@@ -108,7 +108,12 @@ export function AppShell({
       </aside>
       <div className="shell-content">
         <Toolbar aria-label="应用命令" className="app-toolbar">
-          <Badge appearance="tint" color="informative" shape="rounded">
+          <Badge
+            appearance="tint"
+            color="informative"
+            shape="rounded"
+            role="status"
+          >
             {viewState.runtimeLabel}
           </Badge>
           <ToolbarDivider />

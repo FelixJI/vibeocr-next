@@ -4,7 +4,8 @@ import type { AppSnapshot } from "../src/bridge/client";
 import { mountHost } from "./workbench-host";
 
 /** 经真实 bridge 通道装载视图状态（生产构建同样可用）；
- *  runtimeLabel 在 bridge 投影中恒为“原生宿主已连接”，快照锁定真实传输行为。 */
+ *  runtimeLabel 随 diagnostics 投影（无诊断 → “应用启动中…”），
+ *  快照锁定真实传输行为。 */
 async function mount(
   page: Page,
   state: Omit<AppSnapshot, "sessionId">,
@@ -61,7 +62,7 @@ test("1280x800 light annotation workspace with guidance", async ({ page }) => {
     page.getByRole("toolbar", { name: "图片编辑工具" }),
   ).toBeVisible();
   await expect(
-    page.getByText(/马赛克、模糊与打码会写入复制、保存副本及显式识别输入/),
+    page.getByText(/拖拽框选“屏蔽”区，识别时忽略其中内容/),
   ).toBeVisible();
   await expect(page).toHaveScreenshot("annotation-light-1280x800.png", {
     fullPage: true,
@@ -99,11 +100,11 @@ test("annotation export keeps source pixels and excludes editor chrome", async (
   );
   await mount(page, {
     revision: 3,
-    route: "recognition",
+    route: "imageEdit",
     theme: "light",
     capabilities: ["recognition.results", "recognition.annotation"],
     features: {
-      recognition: {
+      imageEdit: {
         isBusy: false,
         statusCode: "recognition.completed",
         input: {
@@ -271,17 +272,15 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
   await expect(
     page.getByRole("button", { name: "纯截图", exact: true }),
   ).toBeEnabled();
-  const color = page.getByRole("combobox", { name: "标注颜色" });
-  await color.focus();
-  await expect(color).toBeFocused();
-  await color.press("ArrowDown");
-  await color.press("Tab");
-  await expect(color).not.toBeFocused();
-  // 编码只在显式请求时执行；检查实际大小后再验证键盘与布局。
-  await page.getByRole("button", { name: "检查文件大小" }).click();
-  await expect(
-    page.getByText(/文件大小：image\/png · 实际 [\d.]+ (B|KB|MB)/),
-  ).toBeVisible();
+  // 识别面精简后无输出变换控件；键盘验证改用保留的显示缩放下拉。
+  const zoom = page.getByRole("combobox", { name: "显示缩放" });
+  await zoom.focus();
+  await expect(zoom).toBeFocused();
+  await zoom.press("ArrowDown");
+  await zoom.press("Tab");
+  await expect(zoom).not.toBeFocused();
+  // ArrowDown 可能改动选中值：复原后再测量基准布局。
+  await zoom.selectOption("1");
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth,
@@ -310,12 +309,62 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
     )
     .toBeGreaterThan(fitWidth * 1.9);
   await page.getByRole("combobox", { name: "显示缩放" }).selectOption("1");
-  await expect(
-    page.getByText(/文件大小：image\/png · 实际 [\d.]+ (B|KB|MB)/),
-  ).toBeVisible();
+  // 复原缩放同样存在异步提交窗口：慢速 runner 上必须等布局回到 fit 基准再截图。
+  await expect
+    .poll(async () => {
+      const width = await canvas.evaluate(
+        (element) => element.getBoundingClientRect().width,
+      );
+      return Math.abs(width - fitWidth);
+    })
+    .toBeLessThanOrEqual(1);
   await expect(page).toHaveScreenshot("screenshot-session-light-1024x900.png", {
     fullPage: true,
   });
+});
+
+test("recognition preview stage background follows the interface theme", async ({
+  page,
+}) => {
+  // 用户项3：图片预览不需要黑边。透明 PNG 在主题背景上完整显示
+  // （等比、不裁剪），画布视口背景不得是固定深色 #161616。
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.route("/transparent-source.svg", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "image/svg+xml",
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect x="20" y="10" width="40" height="20" fill="#2f6fed"/></svg>',
+    }),
+  );
+  await mount(page, {
+    revision: 9,
+    route: "recognition",
+    theme: "light",
+    capabilities: ["recognition.results", "recognition.annotation"],
+    features: {
+      recognition: {
+        isBusy: false,
+        statusCode: "recognition.completed",
+        input: {
+          url: "/transparent-source.svg",
+          mediaType: "image/png",
+          byteLength: 2048,
+        },
+      },
+    },
+  });
+  const stage = page.getByLabel("图片视口");
+  await expect(stage).toBeVisible();
+  const backgroundColor = await stage.evaluate(
+    (element) => getComputedStyle(element).backgroundColor,
+  );
+  expect(backgroundColor).not.toBe("rgb(22, 22, 22)");
+  // 浅色主题下背景应是浅色（跟随 Fluent colorNeutralBackground3）。
+  const channel = backgroundColor.match(/\d+/g)?.map(Number) ?? [];
+  expect(channel.length).toBe(3);
+  expect(channel[0]!).toBeGreaterThan(200);
+  expect(channel[1]!).toBeGreaterThan(200);
+  expect(channel[2]!).toBeGreaterThan(200);
 });
 
 test("mode selector stays above batch and PDF panel grids", async ({

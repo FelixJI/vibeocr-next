@@ -554,6 +554,40 @@ public sealed class WorkbenchBridgeCodecTests
   }
 
   [Fact]
+  public void SerializeImageEditStateUsesIsolatedScope()
+  {
+    var state = new ImageEditWorkbenchState(
+      false,
+      "recognition.session",
+      Input: new WorkbenchResourceReference(
+        "https://app.vibeocr/__resource/image-edit-input",
+        "image/png",
+        4),
+      ScreenshotSession: new RecognitionScreenshotSessionState(
+        "0123456789abcdef0123456789abcdef",
+        3));
+    string json = WorkbenchBridgeCodec.SerializeState(
+      Guid.NewGuid(),
+      new WorkbenchStateEnvelope(1, "imageEdit", WorkbenchStateChange.Replace, state));
+    using JsonDocument document = JsonDocument.Parse(json);
+    JsonElement payload = document.RootElement.GetProperty("payload");
+    Assert.Equal("imageEdit", payload.GetProperty("scope").GetString());
+    JsonElement stateElement = payload.GetProperty("state");
+    Assert.False(stateElement.GetProperty("isBusy").GetBoolean());
+    Assert.Equal("recognition.session", stateElement.GetProperty("statusCode").GetString());
+    Assert.Equal(
+      "https://app.vibeocr/__resource/image-edit-input",
+      stateElement.GetProperty("input").GetProperty("url").GetString());
+    JsonElement session = stateElement.GetProperty("screenshotSession");
+    Assert.Equal("0123456789abcdef0123456789abcdef", session.GetProperty("sessionId").GetString());
+    Assert.Equal(3, session.GetProperty("revision").GetInt64());
+    // imageEdit scope 不携带引擎目录/任务模式：字段不存在而非空壳。
+    Assert.False(stateElement.TryGetProperty("engines", out _));
+    Assert.False(stateElement.TryGetProperty("taskEngine", out _));
+    Assert.False(stateElement.TryGetProperty("result", out _));
+  }
+
+  [Fact]
   public void ParseCommandSupportsTheClosedWebActionSet()
   {
     Guid sessionId = Guid.NewGuid();
@@ -561,6 +595,8 @@ public sealed class WorkbenchBridgeCodecTests
     [
       ("recognition", "selectImage", "{}", typeof(SelectRecognitionImageCommand)),
       ("recognition", "readClipboard", "{}", typeof(ReadRecognitionClipboardCommand)),
+      ("recognition", "openImageForEdit", "{}", typeof(OpenRecognitionImageForEditCommand)),
+      ("recognition", "pasteImageForEdit", "{}", typeof(PasteRecognitionImageForEditCommand)),
       ("recognition", "captureScreen", "{}", typeof(CaptureRecognitionScreenCommand)),
       ("recognition", "captureScreenshotSession", "{}", typeof(CaptureScreenshotSessionCommand)),
       ("recognition", "captureScrollingScreenshot", "{}", typeof(CaptureScrollingScreenshotCommand)),
@@ -568,6 +604,19 @@ public sealed class WorkbenchBridgeCodecTests
       ("recognition", "closeScreenshotSession", "{}", typeof(CloseScreenshotSessionCommand)),
       ("recognition", "copyAnnotatedImage", "{\"resourceUri\":\"https://app.vibeocr/__annotation/00000000000000000000000000000000\"}", typeof(CopyAnnotatedImageCommand)),
       ("recognition", "saveAnnotatedImage", "{\"resourceUri\":\"https://app.vibeocr/__annotation/11111111111111111111111111111111\"}", typeof(SaveAnnotatedImageCommand)),
+      ("imageEdit", "selectImage", "{}", typeof(SelectImageEditFileCommand)),
+      ("imageEdit", "readClipboard", "{}", typeof(ReadImageEditClipboardCommand)),
+      ("imageEdit", "notifyScreenshotRevision", "{\"sessionId\":\"12345678-1234-1234-1234-123456789abc\",\"revision\":2}", typeof(NotifyImageEditRevisionCommand)),
+      ("imageEdit", "closeScreenshotSession", "{}", typeof(CloseImageEditSessionCommand)),
+      ("imageEdit", "copyScreenshotImage", "{\"resourceUri\":\"https://app.vibeocr/__annotation/00000000000000000000000000000000\",\"sessionId\":\"12345678-1234-1234-1234-123456789abc\",\"revision\":0}", typeof(CopyImageEditImageCommand)),
+      ("imageEdit", "saveScreenshotImage", "{\"resourceUri\":\"https://app.vibeocr/__annotation/11111111111111111111111111111111\",\"sessionId\":\"12345678-1234-1234-1234-123456789abc\",\"revision\":0}", typeof(SaveImageEditImageCommand)),
+      ("imageEdit", "pinScreenshotImage", "{\"resourceUri\":\"https://app.vibeocr/__annotation/22222222222222222222222222222222\",\"sessionId\":\"12345678-1234-1234-1234-123456789abc\",\"revision\":0,\"excludeBoxes\":[{\"x\":1,\"y\":1,\"width\":2,\"height\":2}]}", typeof(PinImageEditImageCommand)),
+      ("imageEdit", "recognizeScreenshotImage", "{\"resourceUri\":\"https://app.vibeocr/__annotation/33333333333333333333333333333333\",\"sessionId\":\"12345678-1234-1234-1234-123456789abc\",\"revision\":0,\"excludeBoxes\":[]}", typeof(RecognizeImageEditImageCommand)),
+      ("imageEdit", "prepareScreenshotTextLayer", "{\"resourceUri\":\"https://app.vibeocr/__annotation/44444444444444444444444444444444\",\"sessionId\":\"12345678-1234-1234-1234-123456789abc\",\"revision\":0}", typeof(PrepareImageEditTextLayerCommand)),
+      ("imageEdit", "cancelScreenshotTextLayer", "{\"sessionId\":\"12345678-1234-1234-1234-123456789abc\",\"revision\":0}", typeof(CancelImageEditTextLayerCommand)),
+      ("imageEdit", "copyScreenshotSelection", "{\"sessionId\":\"12345678-1234-1234-1234-123456789abc\",\"revision\":0,\"text\":\"选中文字\"}", typeof(CopyImageEditSelectionCommand)),
+      ("imageEdit", "copyAnnotatedImage", "{\"resourceUri\":\"https://app.vibeocr/__annotation/55555555555555555555555555555555\"}", typeof(CopyImageEditAnnotatedImageCommand)),
+      ("imageEdit", "saveAnnotatedImage", "{\"resourceUri\":\"https://app.vibeocr/__annotation/66666666666666666666666666666666\"}", typeof(SaveImageEditAnnotatedImageCommand)),
       ("recognition", "copyStructured", "{\"resourceUri\":\"https://app.vibeocr/__resource/22222222222222222222222222222222\",\"blockIndex\":1,\"format\":\"latex\"}", typeof(CopyStructuredResultCommand)),
       ("batch", "addFiles", "{}", typeof(AddBatchFilesCommand)),
       ("batch", "exportAll", "{\"format\":\"markdown\"}", typeof(ExportBatchCommand)),

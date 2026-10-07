@@ -105,6 +105,16 @@ const TOOL_ORDER: readonly Tool[] = [
   "inpaint",
 ];
 
+/** 编辑器用途：full=完整图片编辑（原工具集全量保留）；recognition=单次
+ * 识别精简，只保留去水印、旋转、屏蔽三类图片处理工具及必要交互入口
+ * （选择用于调整屏蔽区，取字用于会话文字选择，均不产生图像处理）。 */
+export type EditorToolset = "full" | "recognition";
+
+const TOOLSETS: Readonly<Record<EditorToolset, readonly Tool[]>> = {
+  full: TOOL_ORDER,
+  recognition: ["select", "textSelect", "exclude", "inpaint"],
+};
+
 const STROKE_COLORS = [
   DEFAULT_COLOR,
   "#e02020",
@@ -157,6 +167,61 @@ export interface InpaintDrawLayer {
   readonly selection?: { readonly start: Point; readonly end: Point };
 }
 
+/** 编辑器发出的会话/导出命令 scope：同一命令形状在两个宿主 feature 上
+ * 等价实现（非 scene 图片编辑页发 imageEdit.*，识别面与 scene 发
+ * recognition.*，宿主命令约定同步演进）。 */
+export type EditorCommandScope = "recognition" | "imageEdit";
+
+/** 编辑器命令后缀：与 AppActionType 中两个 scope 的同名后缀一致。 */
+type EditorCommandSuffix =
+  | "notifyScreenshotRevision"
+  | "closeScreenshotSession"
+  | "copyScreenshotImage"
+  | "saveScreenshotImage"
+  | "pinScreenshotImage"
+  | "recognizeScreenshotImage"
+  | "prepareScreenshotTextLayer"
+  | "cancelScreenshotTextLayer"
+  | "copyScreenshotSelection"
+  | "copyAnnotatedImage"
+  | "saveAnnotatedImage";
+
+type EditorCommandMap = Readonly<
+  Record<EditorCommandSuffix, `${EditorCommandScope}.${EditorCommandSuffix}`>
+>;
+
+/** 静态全量映射：模板字面量类型保证每个命令名都是 AppActionType 的
+ * 合法成员，不需要宽泛断言。 */
+const EDITOR_COMMANDS: Readonly<Record<EditorCommandScope, EditorCommandMap>> =
+  {
+    recognition: {
+      notifyScreenshotRevision: "recognition.notifyScreenshotRevision",
+      closeScreenshotSession: "recognition.closeScreenshotSession",
+      copyScreenshotImage: "recognition.copyScreenshotImage",
+      saveScreenshotImage: "recognition.saveScreenshotImage",
+      pinScreenshotImage: "recognition.pinScreenshotImage",
+      recognizeScreenshotImage: "recognition.recognizeScreenshotImage",
+      prepareScreenshotTextLayer: "recognition.prepareScreenshotTextLayer",
+      cancelScreenshotTextLayer: "recognition.cancelScreenshotTextLayer",
+      copyScreenshotSelection: "recognition.copyScreenshotSelection",
+      copyAnnotatedImage: "recognition.copyAnnotatedImage",
+      saveAnnotatedImage: "recognition.saveAnnotatedImage",
+    },
+    imageEdit: {
+      notifyScreenshotRevision: "imageEdit.notifyScreenshotRevision",
+      closeScreenshotSession: "imageEdit.closeScreenshotSession",
+      copyScreenshotImage: "imageEdit.copyScreenshotImage",
+      saveScreenshotImage: "imageEdit.saveScreenshotImage",
+      pinScreenshotImage: "imageEdit.pinScreenshotImage",
+      recognizeScreenshotImage: "imageEdit.recognizeScreenshotImage",
+      prepareScreenshotTextLayer: "imageEdit.prepareScreenshotTextLayer",
+      cancelScreenshotTextLayer: "imageEdit.cancelScreenshotTextLayer",
+      copyScreenshotSelection: "imageEdit.copyScreenshotSelection",
+      copyAnnotatedImage: "imageEdit.copyAnnotatedImage",
+      saveAnnotatedImage: "imageEdit.saveAnnotatedImage",
+    },
+  };
+
 interface ImageCanvasEditorProps {
   readonly actions: AppActions;
   readonly canExport: boolean;
@@ -171,6 +236,11 @@ interface ImageCanvasEditorProps {
   readonly onAutoTextChange?: (enabled: boolean) => void;
   /** 显式识别提交成功后的宿主交接（纯编辑页导航到识别承载面）。 */
   readonly onRecognitionSubmitted?: () => void;
+  /** 工具集用途：默认 full；单次识别面传 recognition 精简为
+   * 去水印/旋转/屏蔽三类处理工具。 */
+  readonly toolset?: EditorToolset;
+  /** 会话命令 scope：默认 recognition；非 scene 图片编辑页传 imageEdit。 */
+  readonly commandScope?: EditorCommandScope;
 }
 
 export function ImageCanvasEditor({
@@ -185,7 +255,10 @@ export function ImageCanvasEditor({
   showAutoTextPreference = true,
   onAutoTextChange,
   onRecognitionSubmitted,
+  toolset = "full",
+  commandScope = "recognition",
 }: ImageCanvasEditorProps) {
+  const commands = EDITOR_COMMANDS[commandScope];
   const captureGeometry = nativeCaptureScene();
   const [sceneViewport, setSceneViewport] = useState(() => ({
     width: window.innerWidth,
@@ -708,7 +781,7 @@ export function ImageCanvasEditor({
       const exported = await exportFinalImageIfUnchanged(true);
       if (!exported) return;
       await actions.run({
-        type: "recognition.prepareScreenshotTextLayer",
+        type: commands.prepareScreenshotTextLayer,
         sessionId: exported.sessionId,
         revision: exported.revision,
         resourceUri: exported.resourceUri,
@@ -737,7 +810,7 @@ export function ImageCanvasEditor({
     const currentSession = sessionIdRef.current;
     if (!currentSession) return;
     void actions.run({
-      type: "recognition.notifyScreenshotRevision",
+      type: commands.notifyScreenshotRevision,
       sessionId: currentSession,
       revision,
     });
@@ -1365,13 +1438,13 @@ export function ImageCanvasEditor({
       if (!exported) return;
       const copied = exported.sessionId
         ? await actions.run({
-            type: "recognition.copyScreenshotImage",
+            type: commands.copyScreenshotImage,
             resourceUri: exported.resourceUri,
             sessionId: exported.sessionId,
             revision: exported.revision,
           })
         : await actions.run({
-            type: "recognition.copyAnnotatedImage",
+            type: commands.copyAnnotatedImage,
             resourceUri: exported.resourceUri,
           });
       setOperationMessage(
@@ -1407,13 +1480,13 @@ export function ImageCanvasEditor({
       if (!exported) return;
       const saved = exported.sessionId
         ? await actions.run({
-            type: "recognition.saveScreenshotImage",
+            type: commands.saveScreenshotImage,
             resourceUri: exported.resourceUri,
             sessionId: exported.sessionId,
             revision: exported.revision,
           })
         : await actions.run({
-            type: "recognition.saveAnnotatedImage",
+            type: commands.saveAnnotatedImage,
             resourceUri: exported.resourceUri,
           });
       setOperationMessage(
@@ -1445,7 +1518,7 @@ export function ImageCanvasEditor({
       const exported = await exportFinalImageIfUnchanged(false);
       if (!exported?.sessionId) return;
       const pinned = await actions.run({
-        type: "recognition.pinScreenshotImage",
+        type: commands.pinScreenshotImage,
         resourceUri: exported.resourceUri,
         sessionId: exported.sessionId,
         revision: exported.revision,
@@ -1513,7 +1586,7 @@ export function ImageCanvasEditor({
       const exported = await exportFinalImageIfUnchanged(false);
       if (!exported) return;
       const started = await actions.run({
-        type: "recognition.recognizeScreenshotImage",
+        type: commands.recognizeScreenshotImage,
         resourceUri: exported.resourceUri,
         sessionId: exported.sessionId,
         revision: exported.revision,
@@ -1668,7 +1741,7 @@ export function ImageCanvasEditor({
     setCopyMenu(undefined);
     try {
       const copied = await actions.run({
-        type: "recognition.copyScreenshotSelection",
+        type: commands.copyScreenshotSelection,
         sessionId: session.sessionId,
         revision: localRevision,
         text,
@@ -1715,7 +1788,7 @@ export function ImageCanvasEditor({
           !["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)
         ) {
           event.preventDefault();
-          void actions.run({ type: "recognition.closeScreenshotSession" });
+          void actions.run({ type: commands.closeScreenshotSession });
           return;
         }
         if (
@@ -1735,7 +1808,7 @@ export function ImageCanvasEditor({
         size="small"
         className="editor-toolbar"
       >
-        {TOOL_ORDER.map((value) => (
+        {TOOLSETS[toolset].map((value) => (
           <ToolbarButton
             appearance={tool === value ? "primary" : "subtle"}
             aria-pressed={tool === value}
@@ -1753,22 +1826,24 @@ export function ImageCanvasEditor({
             onChange={(_, data) => setAnnotationText(data.value)}
           />
         )}
-        <label className="editor-style-control">
-          <span aria-hidden="true">颜色</span>
-          <Select
-            aria-label="标注颜色"
-            size="small"
-            value={strokeColor}
-            onChange={(_, data) => setStrokeColor(data.value)}
-          >
-            {STROKE_COLORS.map((color) => (
-              <option key={color} value={color}>
-                {color}
-              </option>
-            ))}
-          </Select>
-        </label>
-        {shapeTool && (
+        {toolset === "full" && (
+          <label className="editor-style-control">
+            <span aria-hidden="true">颜色</span>
+            <Select
+              aria-label="标注颜色"
+              size="small"
+              value={strokeColor}
+              onChange={(_, data) => setStrokeColor(data.value)}
+            >
+              {STROKE_COLORS.map((color) => (
+                <option key={color} value={color}>
+                  {color}
+                </option>
+              ))}
+            </Select>
+          </label>
+        )}
+        {toolset === "full" && shapeTool && (
           <label className="editor-style-control">
             <span aria-hidden="true">线宽</span>
             <Select
@@ -1824,7 +1899,7 @@ export function ImageCanvasEditor({
               aria-label="取消准备文字层"
               onClick={() =>
                 void actions.run({
-                  type: "recognition.cancelScreenshotTextLayer",
+                  type: commands.cancelScreenshotTextLayer,
                   sessionId: session.sessionId,
                   revision: localRevision,
                 })
@@ -1981,98 +2056,101 @@ export function ImageCanvasEditor({
           重做
         </ToolbarButton>
       </Toolbar>
-      <Toolbar aria-label="输出设置" size="small" className="editor-toolbar">
-        <label className="editor-style-control">
-          <span aria-hidden="true">输出格式</span>
-          <Select
-            aria-label="输出格式"
-            size="small"
-            value={outputFormat}
-            onChange={(_, data) =>
-              changeOutputFormat(
-                data.value === "image/jpeg" ? "image/jpeg" : "image/png",
-              )
-            }
-          >
-            <option value="image/png">PNG（无损）</option>
-            <option value="image/jpeg">JPEG（白底）</option>
-          </Select>
-        </label>
-        {outputFormat === "image/jpeg" && (
+      {toolset === "full" && (
+        <Toolbar aria-label="输出设置" size="small" className="editor-toolbar">
           <label className="editor-style-control">
-            <span aria-hidden="true">JPEG 质量</span>
+            <span aria-hidden="true">输出格式</span>
             <Select
-              aria-label="JPEG 质量"
+              aria-label="输出格式"
               size="small"
-              value={String(jpegQuality)}
-              onChange={(_, data) => changeJpegQuality(Number(data.value))}
+              value={outputFormat}
+              onChange={(_, data) =>
+                changeOutputFormat(
+                  data.value === "image/jpeg" ? "image/jpeg" : "image/png",
+                )
+              }
             >
-              {JPEG_QUALITIES.map((quality) => (
-                <option key={quality} value={String(quality)}>
-                  {Math.round(quality * 100)}%
+              <option value="image/png">PNG（无损）</option>
+              <option value="image/jpeg">JPEG（白底）</option>
+            </Select>
+          </label>
+          {outputFormat === "image/jpeg" && (
+            <label className="editor-style-control">
+              <span aria-hidden="true">JPEG 质量</span>
+              <Select
+                aria-label="JPEG 质量"
+                size="small"
+                value={String(jpegQuality)}
+                onChange={(_, data) => changeJpegQuality(Number(data.value))}
+              >
+                {JPEG_QUALITIES.map((quality) => (
+                  <option key={quality} value={String(quality)}>
+                    {Math.round(quality * 100)}%
+                  </option>
+                ))}
+              </Select>
+            </label>
+          )}
+          <label className="editor-style-control">
+            <span aria-hidden="true">等比缩放</span>
+            <Select
+              aria-label="等比缩放"
+              size="small"
+              value=""
+              onChange={(_, data) => {
+                if (data.value) applyScalePercent(Number(data.value));
+              }}
+            >
+              <option value="">选择比例</option>
+              {SCALE_PERCENTS.map((percent) => (
+                <option key={percent} value={String(percent)}>
+                  {percent === 100 ? "100%（原始）" : `${percent}%`}
                 </option>
               ))}
             </Select>
           </label>
-        )}
-        <label className="editor-style-control">
-          <span aria-hidden="true">等比缩放</span>
-          <Select
-            aria-label="等比缩放"
-            size="small"
-            value=""
-            onChange={(_, data) => {
-              if (data.value) applyScalePercent(Number(data.value));
-            }}
+          <label className="editor-style-control">
+            <span aria-hidden="true">输出尺寸</span>
+            <Input
+              aria-label="输出宽度"
+              min={1}
+              size="small"
+              style={{ width: 76 }}
+              type="number"
+              value={sizeDraft.width}
+              onChange={(_, data) =>
+                setSizeDraft((current) => ({ ...current, width: data.value }))
+              }
+            />
+            <span aria-hidden="true">×</span>
+            <Input
+              aria-label="输出高度"
+              min={1}
+              size="small"
+              style={{ width: 76 }}
+              type="number"
+              value={sizeDraft.height}
+              onChange={(_, data) =>
+                setSizeDraft((current) => ({ ...current, height: data.value }))
+              }
+            />
+            <ToolbarButton aria-label="应用尺寸" onClick={applySpecifiedSize}>
+              应用
+            </ToolbarButton>
+          </label>
+          <ToolbarButton
+            aria-label="检查文件大小"
+            disabled={isCheckingExport}
+            onClick={() => void checkFileSize()}
           >
-            <option value="">选择比例</option>
-            {SCALE_PERCENTS.map((percent) => (
-              <option key={percent} value={String(percent)}>
-                {percent === 100 ? "100%（原始）" : `${percent}%`}
-              </option>
-            ))}
-          </Select>
-        </label>
-        <label className="editor-style-control">
-          <span aria-hidden="true">输出尺寸</span>
-          <Input
-            aria-label="输出宽度"
-            min={1}
-            size="small"
-            style={{ width: 76 }}
-            type="number"
-            value={sizeDraft.width}
-            onChange={(_, data) =>
-              setSizeDraft((current) => ({ ...current, width: data.value }))
-            }
-          />
-          <span aria-hidden="true">×</span>
-          <Input
-            aria-label="输出高度"
-            min={1}
-            size="small"
-            style={{ width: 76 }}
-            type="number"
-            value={sizeDraft.height}
-            onChange={(_, data) =>
-              setSizeDraft((current) => ({ ...current, height: data.value }))
-            }
-          />
-          <ToolbarButton aria-label="应用尺寸" onClick={applySpecifiedSize}>
-            应用
+            检查文件大小
           </ToolbarButton>
-        </label>
-        <ToolbarButton
-          aria-label="检查文件大小"
-          disabled={isCheckingExport}
-          onClick={() => void checkFileSize()}
-        >
-          检查文件大小
-        </ToolbarButton>
-      </Toolbar>
+        </Toolbar>
+      )}
       <p className="editor-guidance">
-        拖拽绘制或裁剪；选择标注后可拖动。手形或按住 Space
-        可平移。画笔与荧光笔沿拖拽轨迹绘制，序号单击放置。马赛克、模糊与打码会写入复制、保存副本及显式识别输入；画面缩放不改变内容。
+        {toolset === "full"
+          ? "拖拽绘制或裁剪；选择标注后可拖动。手形或按住 Space 可平移。画笔与荧光笔沿拖拽轨迹绘制，序号单击放置。马赛克、模糊与打码会写入复制、保存副本及显式识别输入；画面缩放不改变内容。"
+          : "拖拽框选“屏蔽”区，识别时忽略其中内容；“去水印”先框选、预览修补再应用；旋转调整整图方向。按住 Space 可平移，画面缩放不改变内容。"}
       </p>
       {tool === "inpaint" && (
         <p className="editor-guidance">
@@ -2084,21 +2162,31 @@ export function ImageCanvasEditor({
         屏蔽区只用于识别输入及显式屏蔽副本；普通复制/保存与贴图画面保留原图内容，贴图取字仍会忽略被屏蔽文字。整图被屏蔽时无法识别。
       </p>
       <p className="editor-guidance">
-        {sourceSize && currentOutputSize
-          ? `原图 ${sourceSize.width}×${sourceSize.height}${
-              typeof sourceByteLength === "number"
-                ? ` · ${formatBytes(sourceByteLength)}`
-                : ""
-            } → 输出 ${currentOutputSize.width}×${currentOutputSize.height} · ${
-              outputFormat === "image/jpeg"
-                ? `JPEG 质量 ${Math.round(jpegQuality * 100)}%`
-                : "PNG 无损"
-            }。${
-              outputFormat === "image/jpeg"
-                ? "JPEG 不保留透明：透明区域将合成白色背景。"
-                : "PNG 保留透明度；文件大小可用“检查文件大小”按需查看。"
-            }`
-          : "图片解码完成后显示原图与输出尺寸。"}
+        {toolset === "full"
+          ? sourceSize && currentOutputSize
+            ? `原图 ${sourceSize.width}×${sourceSize.height}${
+                typeof sourceByteLength === "number"
+                  ? ` · ${formatBytes(sourceByteLength)}`
+                  : ""
+              } → 输出 ${currentOutputSize.width}×${
+                currentOutputSize.height
+              } · ${
+                outputFormat === "image/jpeg"
+                  ? `JPEG 质量 ${Math.round(jpegQuality * 100)}%`
+                  : "PNG 无损"
+              }。${
+                outputFormat === "image/jpeg"
+                  ? "JPEG 不保留透明：透明区域将合成白色背景。"
+                  : "PNG 保留透明度；文件大小可用“检查文件大小”按需查看。"
+              }`
+            : "图片解码完成后显示原图与输出尺寸。"
+          : sourceSize
+            ? `原图 ${sourceSize.width}×${sourceSize.height}${
+                typeof sourceByteLength === "number"
+                  ? ` · ${formatBytes(sourceByteLength)}`
+                  : ""
+              } · 识别、复制与保存使用原始像素的 PNG。`
+            : "图片解码完成后显示原图尺寸。"}
       </p>
       {tool === "textSelect" && textLayerHint && (
         <p className="editor-guidance">{textLayerHint}</p>
@@ -2337,9 +2425,7 @@ export function ImageCanvasEditor({
               size="small"
               disabled={isExporting}
               onClick={() =>
-                void actions.run({
-                  type: "recognition.closeScreenshotSession",
-                })
+                void actions.run({ type: commands.closeScreenshotSession })
               }
             >
               结束会话

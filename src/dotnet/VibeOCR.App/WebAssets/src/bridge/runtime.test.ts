@@ -8,7 +8,7 @@ import type {
   HostStateEvent,
 } from "./client";
 import type { AppViewState } from "../app/types";
-import { WorkbenchWebRuntime } from "./runtime";
+import { projectSnapshot, WorkbenchWebRuntime } from "./runtime";
 
 class FakeHostBridge implements HostBridge {
   readonly commands: HostCommand[] = [];
@@ -44,6 +44,60 @@ class FakeHostBridge implements HostBridge {
 }
 
 describe("WorkbenchWebRuntime", () => {
+  it.each([
+    [{ supervisorStatus: "未就绪", isReady: false }, "识别服务未就绪"],
+    [{ supervisorStatus: "正在连接", isReady: false }, "应用启动中…"],
+    [{ supervisorStatus: "已就绪", isReady: true }, "应用已就绪"],
+    [{ supervisorStatus: "已就绪", isReady: false }, "识别服务未就绪"],
+    [{ supervisorStatus: "连接失败", isReady: false }, "识别服务连接失败"],
+    [{ supervisorStatus: "协议不兼容", isReady: false }, "识别服务版本不兼容"],
+  ])(
+    "projects application readiness from diagnostics %j",
+    async (diagnostics, label) => {
+      const snapshot = await new FakeHostBridge().bootstrap();
+      const state = projectSnapshot({ ...snapshot, features: { diagnostics } });
+      expect(state.runtimeLabel).toBe(label);
+      // The bridge remains available for local editing and recovery settings.
+      expect(state.connected).toBe(true);
+    },
+  );
+
+  it("updates readiness on startup, failure and recovery without navigation", async () => {
+    const bridge = new FakeHostBridge();
+    const runtime = new WorkbenchWebRuntime(bridge);
+    const states: AppViewState[] = [];
+    await runtime.start((state) => states.push(state));
+    for (const [index, state] of [
+      { supervisorStatus: "正在连接", isReady: false },
+      { supervisorStatus: "已就绪", isReady: true },
+      { supervisorStatus: "连接失败", isReady: false },
+      { supervisorStatus: "已就绪", isReady: true },
+    ].entries()) {
+      bridge.emit({
+        sessionId: "session-1",
+        revision: 8 + index,
+        scope: "diagnostics",
+        change: "replace",
+        state,
+      });
+    }
+    expect(states.map((state) => state.runtimeLabel)).toEqual([
+      "应用启动中…",
+      "应用启动中…",
+      "应用已就绪",
+      "识别服务连接失败",
+      "应用已就绪",
+    ]);
+    bridge.emit({
+      sessionId: "session-1",
+      revision: 12,
+      scope: "diagnostics",
+      change: "remove",
+      state: null,
+    });
+    expect(states.at(-1)?.runtimeLabel).toBe("应用启动中…");
+  });
+
   it("projects bootstrap and newer host state into a connected AppViewState", async () => {
     const bridge = new FakeHostBridge();
     const runtime = new WorkbenchWebRuntime(bridge);
@@ -73,7 +127,7 @@ describe("WorkbenchWebRuntime", () => {
         theme: "dark",
         capabilities: ["recognition.capture"],
         features: { recognition: { status: "ready" } },
-        runtimeLabel: "原生宿主已连接",
+        runtimeLabel: "应用启动中…",
       },
       {
         connected: true,
@@ -85,7 +139,7 @@ describe("WorkbenchWebRuntime", () => {
           recognition: { status: "ready" },
           shell: { route: "batch" },
         },
-        runtimeLabel: "原生宿主已连接",
+        runtimeLabel: "应用启动中…",
       },
     ]);
   });
