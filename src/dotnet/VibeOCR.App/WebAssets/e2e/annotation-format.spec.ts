@@ -158,23 +158,19 @@ test("JPEG and PNG outputs encode real decodable pixels with declared sizes", as
   });
 
   // 按需文件大小检查：明确点击才真实编码；不自动跟随编辑生成第二预览。
+  // 只点击一次后轮询状态：循环内重复点击会不断重置编码，慢引擎下永远
+  // 停在“正在检查”。
+  await page.getByRole("button", { name: "检查文件大小" }).click();
   await expect
-    .poll(async () => {
-      const button = page.getByRole("button", { name: "检查文件大小" });
-      await button.click();
-      return page.locator(".editor-operation-status").textContent();
-    })
+    .poll(() => page.locator(".editor-operation-status").textContent())
     .toContain("文件大小：image/jpeg · 实际");
 
   // 切回 PNG：保留透明 alpha（不再烧深色底），尺寸仍为指定值。
   await page.getByLabel("输出格式").selectOption("image/png");
   await expect(page.getByText(/PNG 保留透明度/)).toBeVisible();
+  await page.getByRole("button", { name: "检查文件大小" }).click();
   await expect
-    .poll(async () => {
-      const button = page.getByRole("button", { name: "检查文件大小" });
-      await button.click();
-      return page.locator(".editor-operation-status").textContent();
-    })
+    .poll(() => page.locator(".editor-operation-status").textContent())
     .toContain("文件大小：image/png · 实际");
   await page.getByRole("button", { name: "保存标注图" }).click();
   await expect.poll(() => uploads.length).toBe(2);

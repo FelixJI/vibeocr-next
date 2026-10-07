@@ -309,6 +309,15 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
     )
     .toBeGreaterThan(fitWidth * 1.9);
   await page.getByRole("combobox", { name: "显示缩放" }).selectOption("1");
+  // 复原缩放同样存在异步提交窗口：慢速 runner 上必须等布局回到 fit 基准再截图。
+  await expect
+    .poll(async () => {
+      const width = await canvas.evaluate(
+        (element) => element.getBoundingClientRect().width,
+      );
+      return Math.abs(width - fitWidth);
+    })
+    .toBeLessThanOrEqual(1);
   await expect(page).toHaveScreenshot("screenshot-session-light-1024x900.png", {
     fullPage: true,
   });
