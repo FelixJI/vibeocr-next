@@ -333,6 +333,15 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
       return Math.abs(width - fitWidth);
     })
     .toBeLessThanOrEqual(1);
+  // Tab/原生 select 的焦点滚动会移动嵌套 main；fullPage 只处理页面，
+  // 不会复原该容器。键盘行为已验证，视觉基准统一回到内容顶部。
+  const content = page.getByRole("main");
+  await content.evaluate((element) =>
+    element.scrollTo({ top: 0, left: 0, behavior: "instant" }),
+  );
+  await expect
+    .poll(() => content.evaluate((element) => element.scrollTop))
+    .toBe(0);
   await expect(page).toHaveScreenshot("screenshot-session-light-1024x900.png", {
     fullPage: true,
   });
