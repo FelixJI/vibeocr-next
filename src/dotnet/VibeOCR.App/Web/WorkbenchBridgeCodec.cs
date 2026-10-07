@@ -298,12 +298,85 @@ public static class WorkbenchBridgeCodec
       case ("imageEdit", "readClipboard"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new ReadImageEditClipboardCommand();
+      case ("imageEdit", "notifyScreenshotRevision"):
+        EnsureObjectWithFields(
+          arguments, SessionRevisionArgumentFields, "command arguments");
+        return new NotifyImageEditRevisionCommand(
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments));
+      case ("imageEdit", "closeScreenshotSession"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new CloseImageEditSessionCommand();
+      case ("imageEdit", "copyScreenshotImage"):
+        EnsureObjectWithFields(
+          arguments, SessionResourceArgumentFields, "command arguments");
+        return new CopyImageEditImageCommand(
+          ReadAnnotationResourceUri(arguments),
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments));
+      case ("imageEdit", "saveScreenshotImage"):
+        EnsureObjectWithFields(
+          arguments, SessionResourceArgumentFields, "command arguments");
+        return new SaveImageEditImageCommand(
+          ReadAnnotationResourceUri(arguments),
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments));
+      case ("imageEdit", "pinScreenshotImage"):
+      {
+        // excludeBoxes 可选：无该字段保持旧命令形状（空排除区）。
+        bool withExclusions = !HasExactFields(arguments, SessionResourceArgumentFields);
+        EnsureObjectWithFields(
+          arguments,
+          withExclusions ? PinResourceArgumentFields : SessionResourceArgumentFields,
+          "command arguments");
+        return new PinImageEditImageCommand(
+          ReadAnnotationResourceUri(arguments),
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments),
+          withExclusions ? ParseExclusionBoxes(arguments) : []);
+      }
+      case ("imageEdit", "recognizeScreenshotImage"):
+        EnsureObjectWithFields(
+          arguments, SessionResourceWithExclusionArgumentFields, "command arguments");
+        return new RecognizeImageEditImageCommand(
+          ReadAnnotationResourceUri(arguments),
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments),
+          ParseExclusionBoxes(arguments));
+      case ("imageEdit", "prepareScreenshotTextLayer"):
+        EnsureObjectWithFields(
+          arguments, SessionResourceArgumentFields, "command arguments");
+        return new PrepareImageEditTextLayerCommand(
+          ReadAnnotationResourceUri(arguments),
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments));
+      case ("imageEdit", "cancelScreenshotTextLayer"):
+        EnsureObjectWithFields(
+          arguments, SessionRevisionArgumentFields, "command arguments");
+        return new CancelImageEditTextLayerCommand(
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments));
+      case ("imageEdit", "copyScreenshotSelection"):
+        return new CopyImageEditSelectionCommand(
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments),
+          ParseSelectionText(arguments));
+      case ("imageEdit", "copyAnnotatedImage"):
+        return new CopyImageEditAnnotatedImageCommand(ParseAnnotationResourceUri(arguments));
+      case ("imageEdit", "saveAnnotatedImage"):
+        return new SaveImageEditAnnotatedImageCommand(ParseAnnotationResourceUri(arguments));
       case ("recognition", "selectImage"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new SelectRecognitionImageCommand();
       case ("recognition", "readClipboard"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new ReadRecognitionClipboardCommand();
+      case ("recognition", "openImageForEdit"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new OpenRecognitionImageForEditCommand();
+      case ("recognition", "pasteImageForEdit"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new PasteRecognitionImageForEditCommand();
       case ("recognition", "captureScreen"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new CaptureRecognitionScreenCommand();
@@ -1099,6 +1172,34 @@ public static class WorkbenchBridgeCodec
   private static object? SerializeWorkbenchState(WorkbenchState? state) => state switch
   {
     ShellWorkbenchState shell => new { route = FormatRoute(shell.Route) },
+    ImageEditWorkbenchState imageEdit => new
+    {
+      imageEdit.IsBusy,
+      imageEdit.StatusCode,
+      imageEdit.Input,
+      screenshotSession = imageEdit.ScreenshotSession is null ? null : new
+      {
+        sessionId = imageEdit.ScreenshotSession.SessionId,
+        revision = imageEdit.ScreenshotSession.Revision,
+        textSelectionRequested = imageEdit.ScreenshotSession.TextSelectionRequested,
+        sceneEditing = imageEdit.ScreenshotSession.SceneEditing,
+        excludeBoxes = imageEdit.ScreenshotSession.ExcludeBoxes ?? [],
+      },
+      textLayer = imageEdit.TextLayer is null ? null : new
+      {
+        status = imageEdit.TextLayer.Status,
+        reason = imageEdit.TextLayer.Reason,
+        binding = imageEdit.TextLayer.Binding is null ? null : new
+        {
+          sessionId = imageEdit.TextLayer.Binding.SessionId,
+          revision = imageEdit.TextLayer.Binding.Revision,
+        },
+        modeId = imageEdit.TextLayer.ModeId,
+        serviceInstance = imageEdit.TextLayer.ServiceInstance,
+        image = imageEdit.TextLayer.Image,
+        lines = imageEdit.TextLayer.Lines ?? [],
+      },
+    },
     RecognitionWorkbenchState recognition => new
     {
       recognition.IsBusy,

@@ -44,6 +44,43 @@ public sealed record SelectImageEditFileCommand : WorkbenchCommand;
 public sealed record ReadImageEditClipboardCommand : WorkbenchCommand;
 public sealed record OpenDroppedImageEditFileCommand(string Path) : WorkbenchCommand;
 
+/// <summary>
+/// recognition/imageEdit 会话命令共享的数据合同：同一套宿主共享实现按
+/// 通道容器路由，不复制两套截图方法，也不动态交换共享字段。
+/// </summary>
+public interface IScreenshotSessionTarget
+{
+  Guid SessionId { get; }
+  long Revision { get; }
+}
+
+/// <summary>携带 annotation 租约 URI 的会话命令（复制/保存/钉图/识别/文字层）。</summary>
+public interface IScreenshotSessionResource : IScreenshotSessionTarget
+{
+  string ResourceUri { get; }
+}
+
+/// <summary>携带归一化排除框的会话命令（钉图/显式识别）。</summary>
+public interface IScreenshotSessionExclusions : IScreenshotSessionResource
+{
+  IReadOnlyList<WorkbenchExclusionBox> ExcludeBoxes { get; }
+}
+
+/// <summary>携带文字层选中文本的会话命令（选区复制）。</summary>
+public interface IScreenshotSessionSelectionText : IScreenshotSessionTarget
+{
+  string Text { get; }
+}
+
+/// <summary>
+/// 单次识别页的"选图编辑"：在 recognition scope 建立编辑会话（同一
+/// 截图会话/修订合同），不占用 imageEdit 页的独立会话状态。
+/// </summary>
+public sealed record OpenRecognitionImageForEditCommand : WorkbenchCommand;
+
+/// <summary>单次识别页的"粘贴编辑"：recognition scope 编辑会话输入。</summary>
+public sealed record PasteRecognitionImageForEditCommand : WorkbenchCommand;
+
 public sealed record CaptureRecognitionScreenCommand : WorkbenchCommand;
 
 /// <summary>
@@ -66,23 +103,24 @@ public sealed record CloseScreenshotSessionCommand : WorkbenchCommand;
 /// </summary>
 public sealed record NotifyScreenshotSessionRevisionCommand(
     Guid SessionId,
-    long Revision) : WorkbenchCommand;
+    long Revision) : WorkbenchCommand, IScreenshotSessionTarget;
 
 public sealed record CopyScreenshotImageCommand(
     string ResourceUri,
     Guid SessionId,
-    long Revision) : WorkbenchCommand;
+    long Revision) : WorkbenchCommand, IScreenshotSessionResource;
 
 public sealed record SaveScreenshotImageCommand(
     string ResourceUri,
     Guid SessionId,
-    long Revision) : WorkbenchCommand;
+    long Revision) : WorkbenchCommand, IScreenshotSessionResource;
 
 public sealed record PinScreenshotImageCommand(
     string ResourceUri,
     Guid SessionId,
     long Revision,
-    IReadOnlyList<WorkbenchExclusionBox> ExcludeBoxes) : WorkbenchCommand;
+    IReadOnlyList<WorkbenchExclusionBox> ExcludeBoxes) : WorkbenchCommand,
+    IScreenshotSessionExclusions;
 
 /// <summary>
 /// [0,1000] normalized recognition-exclusion rectangle supplied with a pin
@@ -119,7 +157,8 @@ public sealed record RecognizeScreenshotImageCommand(
     string ResourceUri,
     Guid SessionId,
     long Revision,
-    IReadOnlyList<WorkbenchExclusionBox> ExcludeBoxes) : WorkbenchCommand;
+    IReadOnlyList<WorkbenchExclusionBox> ExcludeBoxes) : WorkbenchCommand,
+    IScreenshotSessionExclusions;
 
 /// <summary>
 /// Prepares the in-place selectable text layer for the session's current
@@ -130,17 +169,73 @@ public sealed record RecognizeScreenshotImageCommand(
 public sealed record PrepareScreenshotTextLayerCommand(
     string ResourceUri,
     Guid SessionId,
-    long Revision) : WorkbenchCommand;
+    long Revision) : WorkbenchCommand, IScreenshotSessionResource;
 
 public sealed record CancelScreenshotTextLayerCommand(
     Guid SessionId,
-    long Revision) : WorkbenchCommand;
+    long Revision) : WorkbenchCommand, IScreenshotSessionTarget;
 
 /// <summary>Copies a DOM selection made on the text layer (only the selected text).</summary>
 public sealed record CopyScreenshotSelectionCommand(
     Guid SessionId,
     long Revision,
-    string Text) : WorkbenchCommand;
+    string Text) : WorkbenchCommand, IScreenshotSessionSelectionText;
+
+// ---- imageEdit scope：独立图片编辑会话命令（与 recognition 会话同一数据
+// 约定，但只作用于 imageEdit 通道的会话/修订）。 ----
+
+public sealed record NotifyImageEditRevisionCommand(
+    Guid SessionId,
+    long Revision) : WorkbenchCommand, IScreenshotSessionTarget;
+
+public sealed record CloseImageEditSessionCommand : WorkbenchCommand;
+
+public sealed record CopyImageEditImageCommand(
+    string ResourceUri,
+    Guid SessionId,
+    long Revision) : WorkbenchCommand, IScreenshotSessionResource;
+
+public sealed record SaveImageEditImageCommand(
+    string ResourceUri,
+    Guid SessionId,
+    long Revision) : WorkbenchCommand, IScreenshotSessionResource;
+
+public sealed record PinImageEditImageCommand(
+    string ResourceUri,
+    Guid SessionId,
+    long Revision,
+    IReadOnlyList<WorkbenchExclusionBox> ExcludeBoxes) : WorkbenchCommand,
+    IScreenshotSessionExclusions;
+
+/// <summary>
+/// imageEdit 会话的显式识别交接：验证/冻结 imageEdit 会话基准并按排除框
+/// 生成 OCR 输入，但识别任务与结果发布到 recognition scope（识别承载面）；
+/// imageEdit 会话保留冻结基准供继续编辑/重试。
+/// </summary>
+public sealed record RecognizeImageEditImageCommand(
+    string ResourceUri,
+    Guid SessionId,
+    long Revision,
+    IReadOnlyList<WorkbenchExclusionBox> ExcludeBoxes) : WorkbenchCommand,
+    IScreenshotSessionExclusions;
+
+public sealed record PrepareImageEditTextLayerCommand(
+    string ResourceUri,
+    Guid SessionId,
+    long Revision) : WorkbenchCommand, IScreenshotSessionResource;
+
+public sealed record CancelImageEditTextLayerCommand(
+    Guid SessionId,
+    long Revision) : WorkbenchCommand, IScreenshotSessionTarget;
+
+public sealed record CopyImageEditSelectionCommand(
+    Guid SessionId,
+    long Revision,
+    string Text) : WorkbenchCommand, IScreenshotSessionSelectionText;
+
+public sealed record CopyImageEditAnnotatedImageCommand(string ResourceUri) : WorkbenchCommand;
+
+public sealed record SaveImageEditAnnotatedImageCommand(string ResourceUri) : WorkbenchCommand;
 
 public sealed record SelectRecognitionImageCommand : WorkbenchCommand;
 
@@ -414,6 +509,22 @@ public sealed record RecognitionScreenshotSessionState(
   bool TextSelectionRequested = false,
   bool SceneEditing = false,
   IReadOnlyList<WorkbenchExclusionBox>? ExcludeBoxes = null);
+
+/// <summary>
+/// 图片编辑页的独立宿主状态（scope "imageEdit"）：会话/修订/文字层与
+/// recognition scope 完全隔离；两个页面的上传图片互不影响。字段命名与
+/// recognition 会话投影保持一致，供同一套前端解析器消费；无引擎目录
+/// （imageEdit 页不提供任务级识别模式选择）。
+/// </summary>
+public sealed record ImageEditWorkbenchState(
+  bool IsBusy,
+  string StatusCode,
+  WorkbenchResourceReference? Input = null,
+  RecognitionScreenshotSessionState? ScreenshotSession = null,
+  RecognitionTextLayerState? TextLayer = null) : WorkbenchState
+{
+  public override string Scope => "imageEdit";
+}
 
 /// <summary>
 /// In-place selectable text layer bound to one session revision. The lines

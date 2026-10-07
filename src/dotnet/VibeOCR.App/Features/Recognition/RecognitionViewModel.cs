@@ -199,6 +199,17 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
             persistCurrentInput: false);
     }
 
+    /// <summary>
+    /// 显式交接：宿主把外部已冻结的普通像素收编为当前输入（不提交任务），
+    /// 供识别承载面展示与后续回显；不触碰编辑会话通道的输入。
+    /// </summary>
+    public void AdoptInput(RecognitionInput input)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        if (!ReferenceEquals(CurrentInput, input)) CurrentInput?.DisposeCaptureScene();
+        CurrentInput = input;
+    }
+
     /// <summary>清除旧识别结果及其关联（编辑修订/新会话/维护事件后调用）。</summary>
     public void InvalidateResult()
     {

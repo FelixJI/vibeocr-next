@@ -20,9 +20,22 @@ const APP_ROUTES = new Set<AppRoute>([
 
 const THEMES = new Set<ThemePreference>(["system", "light", "dark"]);
 
-// revision 只用于丢弃过期事件，不属于用户可见状态；徽章文案保持稳定，
-// 避免每次状态推送都变化。
-const CONNECTED_LABEL = "原生宿主已连接";
+// 桥接可用不代表识别服务就绪；启动与恢复状态复用宿主的权威诊断快照。
+function runtimeLabel(features: Readonly<Record<string, unknown>>): string {
+  const diagnostics = features.diagnostics;
+  if (!isRecord(diagnostics)) return "应用启动中…";
+  if (diagnostics.isReady === true) return "应用已就绪";
+  switch (diagnostics.supervisorStatus) {
+    case "正在连接":
+      return "应用启动中…";
+    case "连接失败":
+      return "识别服务连接失败";
+    case "协议不兼容":
+      return "识别服务版本不兼容";
+    default:
+      return "识别服务未就绪";
+  }
+}
 
 export class WorkbenchWebRuntime {
   private current?: AppViewState;
@@ -123,7 +136,7 @@ export function projectSnapshot(snapshot: AppSnapshot): AppViewState {
     theme: snapshot.theme,
     capabilities: snapshot.capabilities,
     features: snapshot.features,
-    runtimeLabel: CONNECTED_LABEL,
+    runtimeLabel: runtimeLabel(snapshot.features),
   };
 }
 
@@ -158,7 +171,7 @@ function projectEvent(
     route,
     theme,
     features,
-    runtimeLabel: CONNECTED_LABEL,
+    runtimeLabel: runtimeLabel(features),
   };
 }
 

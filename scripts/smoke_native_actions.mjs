@@ -1029,18 +1029,26 @@ async function verifyRecognitionHotkeyGuard(app, fixture) {
   }
   if (stillOpen)
     await native('escape', { AppPid: appPid });
-  const until = Date.now() + 12000;
-  while (Date.now() < until) {
+  // 工具栏优先后：Esc 取消不再强制显示主工作台（与纯截图取消同一契约）；
+  // 选区窗口关闭且主窗保持隐藏即通过，由冒烟自行恢复主窗可见性。
+  const cancelDeadline = Date.now() + 12000;
+  let overlayClosed = false;
+  while (Date.now() < cancelDeadline) {
     const current = await windows(appPid);
-    if (current.some((item) => item.Handle === mainHandle && item.Visible) &&
-        !current.some((item) => item.Handle === overlay.Handle && item.Visible))
-      return { hotkey: recognizeHotkey, overlayHandle: overlay.Handle,
-        duplicateOverlayCount: afterDuplicate.filter(isOverlay).length,
-        mainStayedHidden: true, foregroundStayedOnOverlay: true,
-        cancelledBeforeSelection: true };
+    overlayClosed = !current.some((item) => item.Handle === overlay.Handle && item.Visible);
+    if (overlayClosed) break;
     await delay(180);
   }
-  throw new Error('Recognition overlay did not close and restore the main window after Esc.');
+  if (!overlayClosed)
+    throw new Error('Recognition overlay did not close after Esc.');
+  assert(!(await windows(appPid)).some((item) => item.Handle === mainHandle && item.Visible),
+    'Cancelled recognition hotkey force-showed the hidden workbench.');
+  await native('restore', { AppPid: appPid, Handle: mainHandle });
+  await waitForWindows(appPid, (item) => item.Handle === mainHandle && item.Visible, 12000);
+  return { hotkey: recognizeHotkey, overlayHandle: overlay.Handle,
+    duplicateOverlayCount: afterDuplicate.filter(isOverlay).length,
+    mainStayedHidden: true, foregroundStayedOnOverlay: true,
+    cancelledBeforeSelection: true, mainRestoredBySmoke: true };
 }
 
 async function main() {

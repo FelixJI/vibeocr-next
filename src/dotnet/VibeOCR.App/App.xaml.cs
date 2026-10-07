@@ -222,6 +222,27 @@ public sealed partial class App : Application
         RecordMilestone(diagnostics, "T0", TimeSpan.Zero);
         RecordMilestone(diagnostics, "T1", _startup.Elapsed);
 
+        // 非 shell-only：默认环境初始化与主窗构造重叠，失败仍由连接链
+        // 按原路径投影为启动失败终态。
+        Task? defaultEnvironmentPreparation = null;
+        if (!options.ShellOnly)
+        {
+            // 初始化期间即显示“正在连接”；错误终态由连接链原处理发布。
+            diagnostics.UpdateSupervisor(new SupervisorHealth(
+                SupervisorHealthState.Connecting, null, null, null));
+            _inferenceGateway.MarkStartupPending();
+            _qrCodeGateway.MarkStartupPending();
+            if (Volatile.Read(ref _runtimeMaintenanceActive) == 0 &&
+                !MaintenanceMutexEarlyExitSelfTestRequested(isRecovery: false))
+            {
+                defaultEnvironmentPreparation = PrepareDefaultEnvironmentAsync(
+                    _managedEnvironments ?? throw new InvalidOperationException(
+                        "Runtime manager is unavailable."),
+                    _productMaintenance,
+                    _applicationShutdown.Token);
+            }
+        }
+
         _windowLayoutStore = new WindowLayoutStore(
             Path.Combine(layout.DataRoot, "winui-layout.json"));
         if (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") is
@@ -342,9 +363,8 @@ public sealed partial class App : Application
             // interactive; the diagnostics panel reflects Connecting → Ready.
             // 启动尝试期间网关调用等待 Attach 而不是立即失败，窗口早于后端
             // 就绪期间触发的命令得以完成。
-            _inferenceGateway.MarkStartupPending();
-            _qrCodeGateway.MarkStartupPending();
-            _ = ConnectSupervisorAfterFirstWindowAsync(layout, diagnostics);
+            _ = ConnectSupervisorAfterFirstWindowAsync(
+                layout, diagnostics, preloadedDefaultEnvironment: defaultEnvironmentPreparation);
         }
 
         // Perf-gate smoke mode: exit shortly after first window so cold-start
@@ -804,9 +824,11 @@ public sealed partial class App : Application
     private async Task<bool> ConnectSupervisorAfterFirstWindowAsync(
         PortableLayout layout,
         DiagnosticsViewModel diagnostics,
-        bool isRecovery = false)
+        bool isRecovery = false,
+        Task? preloadedDefaultEnvironment = null)
     {
-        bool connected = await ConnectSupervisorCoreAsync(layout, diagnostics, isRecovery);
+        bool connected = await ConnectSupervisorCoreAsync(
+            layout, diagnostics, isRecovery, preloadedDefaultEnvironment);
         if (connected && _managedSession is not null)
         {
             await RefreshEnvironmentSettingsAfterActivationAsync();
@@ -850,7 +872,8 @@ public sealed partial class App : Application
     private async Task<bool> ConnectSupervisorCoreAsync(
         PortableLayout layout,
         DiagnosticsViewModel diagnostics,
-        bool isRecovery)
+        bool isRecovery,
+        Task? preloadedDefaultEnvironment)
     {
         // 门等待可取消且有界：占用方（另一次启动/切换/维护拆线）异常滞留
         // 时，等待方以准确终态退出，不得无限悬挂。等待期间不发布
@@ -859,11 +882,18 @@ public sealed partial class App : Application
         {
             // 默认环境安装可能耗时较长，不占用 Supervisor 生命周期门；
             // 产品维护 lease 让更新/其他安装快速得到互斥状态并支持取消。
-            if (Volatile.Read(ref _runtimeMaintenanceActive) == 0 &&
+            // OnLaunched 预启动的任务在此消费，避免重复初始化。
+            if (preloadedDefaultEnvironment is { } preparation)
+            {
+                await preparation;
+            }
+            else if (Volatile.Read(ref _runtimeMaintenanceActive) == 0 &&
                 !MaintenanceMutexEarlyExitSelfTestRequested(isRecovery))
+            {
                 await PrepareDefaultEnvironmentAsync(
                     _managedEnvironments ?? throw new InvalidOperationException("Runtime manager is unavailable."),
                     _productMaintenance, _applicationShutdown.Token);
+            }
             await WaitSupervisorLifecycleGateAsync(_applicationShutdown.Token);
         }
         catch (OperationCanceledException) when (_applicationShutdown.IsCancellationRequested)

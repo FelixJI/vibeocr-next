@@ -1669,7 +1669,8 @@ public sealed class DesktopWorkbenchCommandHandlerTests
           TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
       Assert.Equal(0, shows.ShowWorkbench);
 
-      // 截图识别入口仍在真实终态后显示结果。
+      // 截图识别入口取消后同样不显示主窗：框选后复用动作栏，显示主窗只
+      // 由动作栏显式识别终态触发（#187 用例覆盖），取消/无动作不借用。
       waiter = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
       WorkbenchCommandOutcome retry = await handler.ExecuteAsync(
         new CaptureRecognitionScreenCommand(),
@@ -1681,8 +1682,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
         await waiter.Task.WaitAsync(
           TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
       Assert.Equal(2, inputs.CaptureCalls);
-      Assert.Equal(1, await WaitForCountAsync(
-        () => shows.ShowWorkbench, 1, TimeSpan.FromSeconds(5)));
+      Assert.Equal(0, shows.ShowWorkbench);
     }
     finally
     {
@@ -1756,7 +1756,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
   }
 
   [Fact]
-  public async Task ScreenRecognitionShowsWorkbenchOnlyAfterTerminalCompletion()
+  public async Task ScreenRecognitionEntryOpensSceneInsteadOfDirectSubmit()
   {
     string root = Path.Combine(Path.GetTempPath(), $"vibeocr-shell-actions-{Guid.NewGuid():N}");
     string resourceRoot = Path.Combine(root, "resources");
@@ -1802,15 +1802,19 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       // 选区进行中：不显示工作台，不抢遮罩焦点。
       Assert.Equal(0, shows.ShowWorkbench);
 
-      // 真正完成（确认选区并识别成功）后才显示；终态发布与 finally 内的
-      // 显示分派存在微小先后，等待其到达。
+      // 截图识别入口与纯截图同一链路：框选后复用选区动作栏，直接确认
+      // （无显式动作）打开现场编辑会话而非直接提交识别；主窗保持隐藏，
+      // 显示主窗只发生在动作栏显式识别的真正终态（#187 用例覆盖）。
+      var sceneReady = new TaskCompletionSource<Guid>(TaskCreationOptions.RunContinuationsAsynchronously);
+      handler.ScreenshotSessionReady += (id, _) => sceneReady.TrySetResult(id);
       inputs.CompleteByUser();
       Assert.Equal(
-        "recognition.completed",
+        "recognition.session",
         await terminal.Task.WaitAsync(
           TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
-      Assert.Equal(1, await WaitForCountAsync(
-        () => shows.ShowWorkbench, 1, TimeSpan.FromSeconds(5)));
+      Assert.Equal(handler.CurrentImageSessionId, await sceneReady.Task.WaitAsync(
+        TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+      Assert.Equal(0, shows.ShowWorkbench);
     }
     finally
     {

@@ -1071,10 +1071,13 @@ function StatusLine({ children }: { readonly children: React.ReactNode }) {
 
 export function ImageEditPage({ viewState, actions }: FeatureProps) {
   const [autoTextPreference, setAutoTextPreference] = useState(true);
-  const state = feature(viewState, "recognition");
+  const scene = window.location.hash.includes("?scene=1");
+  // 宿主命令约定：scene（#/imageEdit?scene=1）仍由 recognition feature 承载
+  // 并发 recognition.*；非 scene 独立编辑页读 imageEdit feature，编辑器
+  // 会话命令全部改发 imageEdit.*（与 recognition 同形命令）。
+  const state = feature(viewState, scene ? "recognition" : "imageEdit");
   const input = resource(state.input);
   const session = screenshotSession(state.screenshotSession);
-  const scene = window.location.hash.includes("?scene=1");
   const busy = booleanValue(state.isBusy);
   return (
     <Workspace
@@ -1135,6 +1138,7 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
           }
           showAutoTextPreference={session?.textSelectionRequested === true}
           onAutoTextChange={setAutoTextPreference}
+          commandScope={scene ? "recognition" : "imageEdit"}
           // 纯编辑不展示识别结果；显式识别提交成功后导航到识别承载面。
           // scene 窗口固定路由，由宿主完成会话交接与主窗口导航。
           onRecognitionSubmitted={
@@ -1236,14 +1240,14 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
               截图取字
             </CapabilityGate>
           )}
-          {/* 先编辑后识别：复用 imageEdit 输入链（宿主创建同一截图会话与修订），
+          {/* 先编辑后识别：宿主在 recognition scope 创建同一截图会话与修订，
            * 载入后在共享画布中标注/屏蔽，再用“识别当前图”显式提交掩膜输入。
-           * 保留上方直接识别入口；不新增协议，仅既有命令。 */}
+           * 编辑入口不再借用 imageEdit scope 命令（命令约定已分离）。 */}
           <CapabilityGate
             appearance="secondary"
             capability="recognition.file"
             capabilities={viewState.capabilities}
-            action={{ type: "imageEdit.selectImage" }}
+            action={{ type: "recognition.openImageForEdit" }}
             actions={actions}
             icon={<ImagePlus aria-hidden="true" size={16} />}
           >
@@ -1253,7 +1257,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
             appearance="secondary"
             capability="recognition.clipboard"
             capabilities={viewState.capabilities}
-            action={{ type: "imageEdit.readClipboard" }}
+            action={{ type: "recognition.pasteImageForEdit" }}
             actions={actions}
             icon={<ClipboardPaste aria-hidden="true" size={16} />}
           >
@@ -1310,6 +1314,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
               }
               showAutoTextPreference={session?.textSelectionRequested === true}
               onAutoTextChange={setAutoTextPreference}
+              toolset="recognition"
             />
           ) : (
             <EmptyStage

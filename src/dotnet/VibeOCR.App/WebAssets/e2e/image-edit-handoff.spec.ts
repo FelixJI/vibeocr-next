@@ -95,7 +95,7 @@ test("explicit recognition handoff keeps edited ordinary pixels, mask and route"
         "recognition.results",
       ],
       features: {
-        recognition: {
+        imageEdit: {
           isBusy: false,
           statusCode: "recognition.session",
           input: {

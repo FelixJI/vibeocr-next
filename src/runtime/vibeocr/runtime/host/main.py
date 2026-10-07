@@ -1,7 +1,10 @@
 """``vibeocr-supervisor`` entry point.
 
-Binds a pre-created ``127.0.0.1:0`` socket, emits the ready envelope on
-stdout, then serves the FastAPI app via uvicorn. The session token is
+Binds a pre-created ``127.0.0.1:0`` socket, serves the FastAPI app via
+uvicorn, and emits the ready envelope on stdout only from inside uvicorn's
+startup hook — after the socket is listening and the app lifespan has
+completed. A parent can therefore treat the envelope as "serving": the first
+authorized ``GET /v2/health`` succeeds immediately. The session token is
 delivered out of band via the ``VIBEOCR_SUP_TOKEN`` env var (inherited from
 the parent process) so it never appears on stdout/argv/logs.
 
@@ -20,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -124,9 +128,6 @@ def run_supervisor(
         schema_version=SCHEMA_VERSION,
         capabilities=list(ALL_CAPABILITIES),
     )
-    _write_self_test_result()
-    emit_ready(envelope)
-    _schedule_soak_crash_after_ready()
 
     # Import lazily so the module can be imported in environments without
     # uvicorn (e.g. pure contract tests).
@@ -138,8 +139,24 @@ def run_supervisor(
         return 3
 
     app = create_app(module, handle.token)
+
+    # Ready 语义：仅在 uvicorn 完成应用 lifespan 并开始在继承 socket 上
+    # 监听之后发布（uvicorn.Server.startup 末尾）；lifespan 或监听失败会先
+    # 经 STARTUP_FAILURE 退出，死服务永远不会发出 ready。自检证据写入与
+    # soak 崩溃调度保持原有的紧随 ready 顺序。
+    class _ReadyAfterStartupServer(uvicorn.Server):
+        def __init__(self, config: uvicorn.Config, envelope: ReadyEnvelope) -> None:
+            super().__init__(config)
+            self._ready_envelope = envelope
+
+        async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+            await super().startup(sockets=sockets)
+            _write_self_test_result()
+            emit_ready(self._ready_envelope)
+            _schedule_soak_crash_after_ready()
+
     config = _build_uvicorn_config(uvicorn, app, port)
-    server = uvicorn.Server(config)
+    server = _ReadyAfterStartupServer(config, envelope)
     config.load()
     # Hand the bound socket to the server.
     server.servers = []  # type: ignore[attr-defined]

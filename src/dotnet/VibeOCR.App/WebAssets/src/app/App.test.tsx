@@ -702,20 +702,22 @@ describe("AppShell", () => {
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
     const undo = screen.getByRole("button", { name: "撤销" });
     expect(undo).toBeDisabled();
-    expect(screen.getByRole("button", { name: "椭圆" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "马赛克" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "模糊" })).toBeVisible();
+    // 单次识别面只保留去水印、旋转、屏蔽三类图片处理工具（用户项2）；
+    // 绘制/遮盖/标注类工具不再进入识别面。
+    expect(screen.getByRole("button", { name: "去水印" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "屏蔽" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "椭圆" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "马赛克" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "文字" })).toBeNull();
     expect(screen.getByRole("button", { name: "复制标注图" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "保存标注图" })).toBeEnabled();
     expect(
-      screen.getByText(/马赛克.*会写入复制、保存副本及显式识别输入/),
+      screen.getByText(/拖拽框选“屏蔽”区，识别时忽略其中内容/),
     ).toBeVisible();
     expect(screen.getByLabelText("图片检查画布")).toHaveAttribute(
       "tabindex",
       "0",
     );
-    await user.click(screen.getByRole("button", { name: "文字" }));
-    expect(screen.getByRole("textbox", { name: "标注文字" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "旋转 90°" }));
     expect(undo).toBeEnabled();
     await user.click(undo);

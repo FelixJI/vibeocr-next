@@ -83,6 +83,7 @@ async function mountWithUploadCapture(
   page: Page,
   uploads: { contentType: string; body: Buffer }[],
   sourcePath: string,
+  route: "recognition" | "imageEdit" = "recognition",
 ) {
   await page.route("**/__annotation", async (route) => {
     uploads.push({
@@ -100,9 +101,10 @@ async function mountWithUploadCapture(
   });
   await mountHost(page, {
     ...snapshot,
+    route,
     capabilities: ["recognition.results", "recognition.annotation"],
     features: {
-      recognition: {
+      [route]: {
         isBusy: false,
         statusCode: "recognition.completed",
         input: {
@@ -441,7 +443,8 @@ test("semi-transparent patches replace pixels (no ghost/alpha stacking) across o
     '<svg xmlns="http://www.w3.org/2000/svg" width="96" height="48"><rect x="24" y="4" width="48" height="8" fill="#0aa05a"/><rect x="24" y="28" width="48" height="16" fill="#0aa05a"/><rect x="24" y="12" width="8" height="16" fill="#0aa05a"/><rect x="64" y="12" width="8" height="16" fill="#0aa05a"/><rect x="32" y="12" width="32" height="16" fill="#e020f0" fill-opacity="0.5"/></svg>',
     "inpaint-alpha.svg",
   );
-  await mountWithUploadCapture(page, uploads, "inpaint-alpha.svg");
+  // 覆盖裁剪与指定尺寸的组合需要裁剪工具：挂在保留完整工具集的图片编辑页。
+  await mountWithUploadCapture(page, uploads, "inpaint-alpha.svg", "imageEdit");
   await expect(page.locator('canvas[aria-label="图片检查画布"]')).toBeVisible();
   await page.getByRole("button", { name: "保存标注图" }).click();
   await expect.poll(() => uploads.length).toBe(1);

@@ -138,18 +138,18 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
   await expect(canvas).toBeVisible();
   await expect(page.getByText(/原图 160×80/)).toBeVisible();
 
-  // 先编辑后识别入口：复用既有 imageEdit 命令（宿主创建同一会话/修订），
-  // 不新增协议；直接识别入口保持不变。
+  // 先编辑后识别入口：识别面专用 recognition 命令（宿主在 recognition
+  // scope 创建同一会话/修订），不再借用 imageEdit scope；直接识别入口不变。
   await page.getByRole("button", { name: "选图编辑" }).click();
   await expectCommand(page, {
-    scope: "imageEdit",
-    action: "selectImage",
+    scope: "recognition",
+    action: "openImageForEdit",
     arguments: {},
   });
   await page.getByRole("button", { name: "粘贴编辑" }).click();
   await expectCommand(page, {
-    scope: "imageEdit",
-    action: "readClipboard",
+    scope: "recognition",
+    action: "pasteImageForEdit",
     arguments: {},
   });
 

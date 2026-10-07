@@ -89,9 +89,12 @@ async function setupAnnotationFormatHost(
   );
   await mountHost(page, {
     ...snapshot,
+    // 输出变换（格式/质量/尺寸/大小检查）属于完整编辑能力：挂在保留
+    // 全量工具的图片编辑页验证。
+    route: "imageEdit",
     capabilities: ["recognition.results", "recognition.annotation"],
     features: {
-      recognition: {
+      imageEdit: {
         isBusy: false,
         statusCode: "recognition.completed",
         input: {
@@ -146,7 +149,7 @@ test("JPEG and PNG outputs encode real decodable pixels with declared sizes", as
   expect(Math.abs(red[1] - 32)).toBeLessThanOrEqual(25);
   expect(Math.abs(red[2] - 32)).toBeLessThanOrEqual(25);
   await expectCommand(page, {
-    scope: "recognition",
+    scope: "imageEdit",
     action: "saveAnnotatedImage",
     arguments: {
       resourceUri:
@@ -229,9 +232,10 @@ test("failed output preview preserves editing and reports failure without stayin
   );
   await mountHost(page, {
     ...snapshot,
+    route: "imageEdit",
     capabilities: ["recognition.results", "recognition.annotation"],
     features: {
-      recognition: {
+      imageEdit: {
         isBusy: false,
         statusCode: "recognition.completed",
         input: {
