@@ -776,7 +776,27 @@ input {
 .canvas-stage.is-panning .image-text-line {
   pointer-events: none;
 }
-/* 原生冻结桌面继续作为背景，WebView 仅在原选区绘图并提供浮动工具。 */
+/* WinUI WebView2 不支持透出 XAML，冻结桌面在网页内显示，永不参与导出。 */
+.capture-scene-backdrop {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+.capture-scene-backdrop > img {
+  image-rendering: pixelated;
+  width: 100%;
+  height: 100%;
+}
+.capture-scene-mask {
+  position: absolute;
+  left: var(--capture-x);
+  top: var(--capture-y);
+  width: var(--capture-width);
+  height: var(--capture-height);
+  box-shadow: 0 0 0 100vmax rgb(0 0 0 / 35%);
+}
 html[data-capture-scene="true"],
 html[data-capture-scene="true"] body,
 html[data-capture-scene="true"] #root > .fluent-root {
@@ -804,6 +824,7 @@ html[data-capture-scene="true"] .workspace > .work-panel {
   box-shadow: 0 6px 24px #0004;
 }
 .capture-scene-editor {
+  z-index: 1;
   position: fixed;
   left: var(--capture-tools-left);
   top: var(--capture-tools-top);
@@ -834,6 +855,9 @@ html[data-capture-scene="true"] .workspace > .work-panel {
   border-radius: 0;
   background: transparent;
   z-index: 0;
+}
+.capture-scene-editor .canvas-stage > .inspection-canvas {
+  image-rendering: pixelated;
 }
 .capture-scene-editor .canvas-stage > .inspection-canvas,
 .capture-scene-editor .canvas-stage > .image-text-frame {
@@ -1071,4 +1095,121 @@ select {
   display: block;
   max-width: 100%;
   max-height: 24rem;
+}
+
+.editor-output-settings > summary {
+  display: none;
+}
+.capture-scene-editor {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: max-content;
+  max-width: calc(100vw - var(--capture-tools-left));
+}
+.capture-scene-editor .editor-toolbar {
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+}
+.capture-scene-editor .editor-toolbar-break {
+  display: none;
+}
+.capture-scene-editor .editor-style-control > span[aria-hidden="true"] {
+  display: none;
+}
+.capture-scene-editor > .editor-footer {
+  display: contents;
+}
+.capture-scene-editor > .editor-footer > button {
+  flex-shrink: 0;
+}
+.capture-scene-editor .editor-operation-status:empty {
+  display: none;
+}
+.capture-scene-editor .editor-operation-status {
+  position: fixed;
+  bottom: 12px;
+  left: 12px;
+  background: var(--colorNeutralBackground1);
+}
+.capture-scene-editor .editor-output-settings > summary {
+  display: flex;
+  padding: 6px;
+  cursor: pointer;
+}
+.capture-scene-editor .editor-output-settings > .editor-toolbar {
+  position: fixed;
+  right: 8px;
+  top: calc(var(--capture-tools-top) + 52px);
+  max-width: calc(100vw - 16px);
+  flex-wrap: wrap;
+  padding: 8px;
+  background: var(--colorNeutralBackground1);
+  border: 1px solid var(--colorNeutralStroke1);
+  border-radius: 8px;
+}
+
+.capture-scene-editor .editor-toolbar button {
+  padding-inline: 6px;
+}
+.capture-scene-editor > .editor-toolbar {
+  padding: 0;
+  border: 0;
+}
+
+/* 工具栏按钮：框选后的浮动工具需要明确的可点击与状态色，
+   不依赖 Fluent 默认主题在冻结桌面背景上的对比度。 */
+.editor-toolbar button,
+.editor-footer button {
+  cursor: pointer;
+}
+.editor-toolbar button:disabled,
+.editor-footer button:disabled {
+  cursor: default;
+}
+.capture-scene-editor .editor-toolbar button[aria-pressed="true"] {
+  background: var(--colorBrandBackground);
+  border-color: var(--colorBrandBackground);
+  color: var(--colorNeutralForegroundOnBrand);
+}
+.capture-scene-editor .editor-toolbar button[aria-pressed="true"]:hover {
+  background: var(--colorBrandBackgroundHover);
+}
+.capture-scene-editor
+  .editor-toolbar
+  button:not([aria-pressed="true"]):not(:disabled):hover {
+  background: var(--colorNeutralBackground1Hover);
+}
+.capture-scene-editor .editor-toolbar button:focus-visible {
+  outline: 2px solid var(--colorStrokeFocus2);
+  outline-offset: 1px;
+}
+
+/* 颜色工具：常用色色板 + 自定义颜色输入 + 屏幕取色入口。 */
+.editor-color-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.editor-color-swatch {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--colorNeutralStroke1);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.editor-color-swatch[aria-pressed="true"] {
+  outline: 2px solid var(--colorBrandBackground);
+  outline-offset: 1px;
+}
+.editor-color-control input[type="color"] {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--colorNeutralStroke1);
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
 }

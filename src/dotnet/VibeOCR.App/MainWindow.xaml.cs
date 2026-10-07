@@ -627,6 +627,15 @@ public sealed partial class MainWindow : Window
       smokeStage = "owner-restore-verification";
       WebReadySmokeStatus.Stage(smokeStage);
       await ScreenRegionPicker.VerifyOwnerRestoreSelfCheckAsync(CancellationToken.None);
+      // 只用合成像素验证覆盖层首帧等待与冻结背景交接，不采样用户桌面。
+      smokeStage = "capture-scene-verification";
+      WebReadySmokeStatus.Stage(smokeStage);
+      using (ScreenshotCaptureScene scene = await ScreenRegionPicker.CreateSyntheticSceneAsync(
+        new VibeOCR.Platform.Windows.PhysicalRectangle(0, 0, 240, 160), new byte[240 * 160 * 4], 240 * 4, CancellationToken.None))
+      {
+        if (scene.TakeBackground() is not { Length: 153654 })
+          throw new InvalidOperationException("Capture scene lost its frozen background.");
+      }
       resourceBroker.Revoke(lease);
       if (!string.IsNullOrWhiteSpace(healthFile))
       {

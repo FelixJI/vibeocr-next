@@ -414,6 +414,7 @@ public sealed class DesktopWorkbenchCommandHandler :
         ClearBatchCommand => ClearBatch(),
         MoveBatchItemCommand move => await MoveBatchItemAsync(move, cancellationToken),
         RemoveBatchItemCommand remove => await RemoveBatchItemAsync(remove, cancellationToken),
+        SetBatchItemPageRangeCommand range => SetBatchItemPageRange(range),
         SetBatchWindowCommand window => await SetBatchWindowAsync(window, cancellationToken),
         SetBatchTaskEngineCommand taskEngine => SetBatchTaskEngine(taskEngine),
         SetPdfTaskEngineCommand pdfTaskEngine => SetPdfTaskEngine(pdfTaskEngine),
@@ -495,6 +496,7 @@ public sealed class DesktopWorkbenchCommandHandler :
           environment => environment.RepairEmptyAsync(repair.EnvironmentId, cancellationToken), cancellationToken),
         FindCompatibleEnvironmentCommand findCompatible => await RunEnvironmentAsync(
           environment => environment.FindCompatibleAsync(findCompatible.Recipe, cancellationToken), cancellationToken),
+        PrepareRemoteHostCommand => PrepareRemoteHost(cancellationToken),
         SetThemeCommand setTheme => SetTheme(setTheme),
         SetStartupCommand startup => SetStartup(startup),
         BeginHotkeyRecordingCommand recording => BeginHotkeyRecording(recording),
@@ -516,6 +518,9 @@ public sealed class DesktopWorkbenchCommandHandler :
         SetRuntimeFeatureCommand feature => SetFeature(feature),
         SetMineruConnectionCommand mineru => await SetMineruConnectionAsync(
           mineru,
+          cancellationToken),
+        SetMineruRecognitionCommand mineruRecognition => await SetMineruRecognitionAsync(
+          mineruRecognition,
           cancellationToken),
         SetDefaultRecognitionModeCommand defaultMode => await SetDefaultRecognitionModeAsync(
           defaultMode,
@@ -1001,24 +1006,92 @@ public sealed class DesktopWorkbenchCommandHandler :
   }
 
   /// <summary>
-  /// 普通截图动作栏的识别菜单投影：只消费宿主当前已加载的真实 typed
-  /// 目录（既有 choice/availability/显示名），纯截图不触发目录加载或安装；
-  /// 目录未加载时投影为空，由动作栏解释并可显式进入设置。
+  /// 普通截图动作栏的识别图标投影：固定三类语义——文字识别（设置已提交
+  /// 的默认引擎）、表格识别、公式识别；任意目录状态下都恰好返回三个条目
+  /// （不可用则禁用并指向设置），不会有时一整列、有时单个泛“未就绪”。
+  /// 纯截图不触发目录加载或安装。
   /// </summary>
   private ScreenshotSelectionActions BuildSelectionActions()
   {
     _ = RecognitionVm;
     // 纯截图不触发目录加载；这里只确保 settings 实例存在并复用它当前
-    // 已加载的真实目录（启动 bootstrap 已加载；冷启动/维护中投影为空）。
+    // 已加载的真实目录（启动 bootstrap 已加载；冷启动/维护中禁用指引）。
     settings ??= CreateSettings();
     return new ScreenshotSelectionActions(
-      RecognitionEngines()?
-        .Select(choice => new ScreenshotRecognitionModeEntry(
-          choice.Engine,
-          choice.DisplayName,
-          choice.Availability,
-          choice.ReasonCode))
-        .ToArray() ?? []);
+      BuildSelectionModeEntries(settings?.RecognitionSelection), theme);
+  }
+
+  /// <summary>
+  /// 三类图标只消费 Runtime typed 目录自身的分类字段（family/pipeline），
+  /// 不在桌面侧复制引擎支持表：表格/公式取 specialized 族中
+  /// TABLE_RECOGNITION/FORMULA_RECOGNITION 管线（Protocol v2 稳定投影值）
+  /// 声明的模式。文字图标复用 <see cref="EffectiveModeIdOrDefault"/> 的
+  /// 既有持久默认解析（Bound→回显 id，其余不猜默认）；解析出的默认属于
+  /// 文字语义（text/document 族）才携带其 id 与目录 availability，默认
+  /// 缺失/无效/不在当前目录或属于表格/公式语义时显式禁用（空 ModeId +
+  /// default_missing/default_invalid 稳定词汇）并指向设置，绝不静默改选
+  /// 其他文字引擎，也不把表格引擎冒充文字。控件名称固定为三分类（稳定
+  /// 可访问名称），引擎名等细节仅进 Hint（Tooltip）。目录未加载时三类
+  /// 统一 catalog_unavailable 禁用。
+  /// </summary>
+  internal static IReadOnlyList<ScreenshotRecognitionModeEntry> BuildSelectionModeEntries(
+    RecognitionSelectionSnapshot? selection)
+  {
+    RuntimeSelectionService? catalog = selection?.Catalog;
+    if (catalog?.SupportsRecognitionModes is not true || catalog.RecognitionModes.Count == 0)
+    {
+      return
+      [
+        new ScreenshotRecognitionModeEntry("", "文字识别", "catalog_unavailable", null, "textRecognition"),
+        new ScreenshotRecognitionModeEntry("", "表格识别", "catalog_unavailable", null, "tableRecognition"),
+        new ScreenshotRecognitionModeEntry("", "公式识别", "catalog_unavailable", null, "formulaRecognition"),
+      ];
+    }
+    IReadOnlyList<RecognitionModeOption> modes = catalog.RecognitionModes;
+
+    RecognitionModeOption? FindMode(string? id) => id is null ? null :
+      modes.FirstOrDefault(mode => string.Equals(mode.Id, id, StringComparison.Ordinal));
+
+    List<ScreenshotRecognitionModeEntry> entries = [];
+    string? defaultModeId = EffectiveModeIdOrDefault(
+      selection, taskEngine: null, requireUsable: false);
+    if (FindMode(defaultModeId) is { } textMode && textMode.Family is "text" or "document")
+    {
+      entries.Add(new ScreenshotRecognitionModeEntry(
+        textMode.Id,
+        "文字识别",
+        textMode.Availability,
+        textMode.ReasonCode,
+        "textRecognition",
+        $"文字识别（当前引擎：{SettingsViewModel.DisplayName(textMode.Id)}；可在设置 · 默认识别类型中更改）"));
+    }
+    else
+    {
+      // 三类语义显式区分：NotApplicable 且无解析默认=尚未配置；其余
+      // （Invalid/Unread/不在目录/specialized 族默认）=当前默认不能用作
+      // 文字识别。禁用条目不携带可提交的 modeId，提交路径 fail closed。
+      string availability = selection!.DefaultMode is RuntimeDefaultModeBinding.NotApplicable &&
+        defaultModeId is null
+          ? "default_missing"
+          : "default_invalid";
+      entries.Add(new ScreenshotRecognitionModeEntry(
+        "", "文字识别", availability, null, "textRecognition"));
+    }
+
+    static ScreenshotRecognitionModeEntry SpecializedEntry(
+      IReadOnlyList<RecognitionModeOption> modes,
+      string pipelineId,
+      string label,
+      string iconKey) =>
+      modes.FirstOrDefault(mode => mode.Family == "specialized" &&
+        mode.PipelineId == pipelineId) is { } mode
+        ? new ScreenshotRecognitionModeEntry(
+          mode.Id, label, mode.Availability, mode.ReasonCode, iconKey)
+        // 验证后的目录必然声明全部稳定模式；缺失时按目录不可用禁用。
+        : new ScreenshotRecognitionModeEntry("", label, "unavailable", null, iconKey);
+    entries.Add(SpecializedEntry(modes, "TABLE_RECOGNITION", "表格识别", "tableRecognition"));
+    entries.Add(SpecializedEntry(modes, "FORMULA_RECOGNITION", "公式识别", "formulaRecognition"));
+    return entries;
   }
 
   /// <summary>
@@ -2244,7 +2317,8 @@ public sealed class DesktopWorkbenchCommandHandler :
   /// </summary>
   private IReadOnlyList<RecognitionEngineChoice>? RecognitionEngines()
   {
-    RuntimeSelectionService? selection = settings?.RecognitionSelection?.Catalog;
+    RecognitionSelectionSnapshot? engineSnapshot = settings?.RecognitionSelection;
+    RuntimeSelectionService? selection = engineSnapshot?.Catalog;
     if (selection is null || (!selection.SupportsEngineSelection && !selection.SupportsRecognitionModes))
     {
       return null;
@@ -2257,7 +2331,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       return [.. selection.RecognitionModes.Select(mode => new RecognitionEngineChoice(
         mode.Id, SettingsViewModel.DisplayName(mode.Id),
         task == mode.Id || (task is null && mode.Id == defaultId), task == mode.Id,
-        TryProjectMineruConfig(selection, mode.Id, out _) ? mode.Availability : "unavailable",
+        TryProjectMineruConfig(engineSnapshot, mode.Id, out _) ? mode.Availability : "unavailable",
         mode.Availability == "preparation_required" && mode.RequiredComponent is not null,
         mode.LifecycleKind,
         mode.SupportsPreload, mode.SupportsTtl, mode.SupportsPinning, mode.SupportsRelease, mode.Family, mode.SupportedOptions, GetModeOptions(mode)?.ProjectWire(mode), mode.ReasonCode,
@@ -2726,6 +2800,14 @@ public sealed class DesktopWorkbenchCommandHandler :
     return await BatchStateAsync(batch, cancellationToken);
   }
 
+  private BatchWorkbenchState SetBatchItemPageRange(SetBatchItemPageRangeCommand command)
+  {
+    batch ??= batchFactory();
+    batch.SetPageRange(command.ItemId, command.PageRange);
+    batchStructured.Remove(command.ItemId);
+    return BatchState(batch);
+  }
+
   private async Task<BatchWorkbenchState> RemoveBatchItemAsync(
     RemoveBatchItemCommand command,
     CancellationToken cancellationToken)
@@ -2749,14 +2831,15 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     batch ??= batchFactory();
     if (batch.IsRunning) throw new InvalidOperationException("A running batch cannot change recognition mode.");
-    RuntimeSelectionService? selection = settings?.RecognitionSelection?.Catalog;
+    RecognitionSelectionSnapshot? snapshot = settings?.RecognitionSelection;
+    RuntimeSelectionService? selection = snapshot?.Catalog;
     if (command.Engine is not null)
     {
-      if (selection?.SupportsRecognitionModes is not true)
+      if (snapshot is null || selection?.SupportsRecognitionModes is not true)
         throw new RuntimeSelectionException(RuntimeSelectionErrorKind.CapabilityMissing,
           "The runtime does not provide recognition modes.");
       RecognitionModeOption mode = selection.SelectRecognitionMode(command.Engine);
-      selection.MineruConfigFor(mode.Id);
+      snapshot.MineruConfigFor(mode.Id);
     }
     batchTaskEngine = command.Engine;
     SynchronizeBatchMode();
@@ -2779,10 +2862,13 @@ public sealed class DesktopWorkbenchCommandHandler :
       ? selection.SelectRecognitionMode(effectiveId)
       : TryFindRecognitionMode(selection, effectiveId);
     MineruConfig? config = requireUsable
-      ? selection.MineruConfigFor(mode?.Id)
-      : TryProjectMineruConfig(selection, mode?.Id, out MineruConfig? projected)
+      ? snapshot.MineruConfigFor(mode?.Id)
+      : TryProjectMineruConfig(snapshot, mode?.Id, out MineruConfig? projected)
         ? projected : null;
-    batch.SetRecognitionMode(mode, config, GetModeOptions(mode), batchTaskEngine);
+    // 原生 Office 仅 flash 档可整篇解析：flash 可用性随配置一起冻结给
+    // 批量任务，提交时按原生格式分组，不改 PDF/图片默认档。
+    bool mineruFlashUsable = mode is not null && selection.IsMineruTierUsable(MineruTier.Flash);
+    batch.SetRecognitionMode(mode, config, GetModeOptions(mode), batchTaskEngine, mineruFlashUsable);
   }
 
   /// <summary>
@@ -2806,8 +2892,8 @@ public sealed class DesktopWorkbenchCommandHandler :
       ? selection.SelectRecognitionMode(effectiveId)
       : TryFindRecognitionMode(selection, effectiveId);
     MineruConfig? config = requireUsable
-      ? selection.MineruConfigFor(mode?.Id)
-      : TryProjectMineruConfig(selection, mode?.Id, out MineruConfig? projected)
+      ? snapshot.MineruConfigFor(mode?.Id)
+      : TryProjectMineruConfig(snapshot, mode?.Id, out MineruConfig? projected)
         ? projected : null;
     pdf.SetRecognitionMode(mode, GetModeOptions(mode), pdfTaskEngine);
   }
@@ -2816,14 +2902,15 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     pdf ??= pdfFactory();
     if (pdf.IsBusy) throw new InvalidOperationException("A running PDF OCR cannot change recognition mode.");
-    RuntimeSelectionService? selection = settings?.RecognitionSelection?.Catalog;
+    RecognitionSelectionSnapshot? snapshot = settings?.RecognitionSelection;
+    RuntimeSelectionService? selection = snapshot?.Catalog;
     if (command.Engine is not null)
     {
-      if (selection?.SupportsRecognitionModes is not true)
+      if (snapshot is null || selection?.SupportsRecognitionModes is not true)
         throw new RuntimeSelectionException(RuntimeSelectionErrorKind.CapabilityMissing,
           "The runtime does not provide recognition modes.");
       RecognitionModeOption mode = selection.SelectRecognitionMode(command.Engine);
-      selection.MineruConfigFor(mode.Id);
+      snapshot.MineruConfigFor(mode.Id);
     }
     pdfTaskEngine = command.Engine;
     SynchronizePdfMode();
@@ -3250,6 +3337,124 @@ public sealed class DesktopWorkbenchCommandHandler :
     return SettingsState(settings);
   }
 
+  /// <summary>远程模式专用环境的基础名；重复创建时追加序号，绝不复用
+  /// 同名用户环境。</summary>
+  private const string RemoteHostEnvironmentName = "远程基础服务";
+
+  /// <summary>本次应用会话内远程模式专用环境 id：重试时验证仍存在且为空
+  /// 才复用（改名不影响同 id 复用）；不跨会话持久化。</summary>
+  private string? remoteHostEnvironmentId;
+
+  /// <summary>远程模式入口跨步骤禁重入：各步之间 RunAsync 会释放
+  /// IsBusy，此标志覆盖整段链路，SettingsState 的环境忙碌投影含它，
+  /// finally 里滑零；重复点击直接拒绝，不进入第二套编排。</summary>
+  private int remoteHostPreparing;
+
+  private static string NextRemoteHostEnvironmentName(ManagedEnvironmentList? snapshot)
+  {
+    var taken = new HashSet<string>(
+      (snapshot?.Environments ?? []).Select(item => item.Name),
+      StringComparer.OrdinalIgnoreCase);
+    string candidate = RemoteHostEnvironmentName;
+    int suffix = 2;
+    while (!taken.Add(candidate))
+    {
+      candidate = $"{RemoteHostEnvironmentName} {suffix++}";
+    }
+    return candidate;
+  }
+
+  /// <summary>
+  /// 远程模式宿主入口编排：随包离线基础配方一键就绪并启动承载识别
+  /// 服务。基础配方只取 Runtime 目录内 dependency_origin=bundled_pack
+  /// 的目录项，宿主不自行推导依赖。已安装可复用环境只切换启动；无可
+  /// 复用环境时仅复用本次会话创建的专用环境 id（仍为空时重试续装），
+  /// 全链路走 Runtime 权威离线安装事务（取消/CAS/回滚保留），安装
+  /// 取消或失败不切换，不触碰用户既有环境。整段链路在后台追踪闭包内
+  /// 执行，IsBusy 立即覆盖长操作，入口回执不等待安装完成。
+  /// </summary>
+  private SettingsWorkbenchState? PrepareRemoteHost(
+    CancellationToken cancellationToken)
+  {
+    settings ??= CreateSettings();
+    _ = settings.Environments
+      ?? throw new InvalidOperationException("运行环境管理器不可用。");
+    if (Interlocked.CompareExchange(ref remoteHostPreparing, 1, 0) != 0)
+      throw new InvalidOperationException("远程模式基础服务正在准备中，请稍候。");
+    try
+    {
+      return StartEnvironmentOperation(async environment =>
+      {
+        try
+        {
+          await environment.RefreshAsync(cancellationToken);
+          // 目录缺失/安装未完成等失败经 ReportFailure 状态 seam 用户可见，
+          // 不被后台追踪仅记录日志。
+          string? baseRecipe = environment.Snapshot?.Recipes?.FirstOrDefault(recipe =>
+              string.Equals(recipe.DependencyOrigin, "bundled_pack", StringComparison.Ordinal))?.Id;
+          if (baseRecipe is null)
+          {
+            environment.ReportFailure("Runtime 目录未提供随包离线基础配方，请更新产品。");
+            throw new InvalidOperationException(
+              "Runtime 目录未提供随包离线基础配方，请更新产品。");
+          }
+          await environment.FindCompatibleAsync(baseRecipe, cancellationToken);
+          if (environment.Compatibility?.Selected is { } reusable)
+          {
+            // 已有可复用环境：只切换启动，不新建、不重装。
+            await environment.SwitchAsync(reusable.EnvironmentId, cancellationToken);
+            return;
+          }
+          // 本次会话专用环境：仍存在且为空则同 id 续装，否则新建；
+          // 绝不按名称复用用户环境。
+          ManagedEnvironmentList snapshot = environment.Snapshot
+            ?? throw new InvalidOperationException("运行环境状态不可用，请重试。");
+          ManagedEnvironment? session = remoteHostEnvironmentId is { } id
+            ? snapshot.Environments.FirstOrDefault(item => item.Id == id)
+            : null;
+          string targetId;
+          if (session is { Status: "empty" })
+          {
+            targetId = session.Id;
+          }
+          else
+          {
+            ManagedEnvironment created = await environment.CreateAsync(
+              NextRemoteHostEnvironmentName(snapshot), cancellationToken);
+            targetId = created.Id;
+            remoteHostEnvironmentId = targetId;
+          }
+          await environment.PreviewAsync(targetId, baseRecipe, null, cancellationToken);
+          string planId = environment.Plan?.PlanId
+            ?? throw new InvalidOperationException("基础服务安装预览失败，请重试。");
+          await environment.InstallAsync(planId, null, cancellationToken);
+          // 取消/失败不得切换：以 Runtime 权威快照确认 installed 后才启动。
+          await environment.RefreshAsync(CancellationToken.None);
+          ManagedEnvironment? installed = environment.Snapshot?.Environments
+            .FirstOrDefault(item => item.Id == targetId);
+          if (installed is null ||
+              !string.Equals(installed.Status, "installed", StringComparison.Ordinal))
+          {
+            environment.ReportFailure("基础服务安装未完成，未切换运行环境；可再次启用重试。");
+            throw new InvalidOperationException(
+              "基础服务安装未完成，未切换运行环境；可再次启用重试。");
+          }
+          await environment.SwitchAsync(targetId, cancellationToken);
+        }
+        finally
+        {
+          Interlocked.Exchange(ref remoteHostPreparing, 0);
+        }
+      }, refreshCatalog: true);
+    }
+    catch
+    {
+      // 闭包未被追踪发布（同步段失败）：同样滑零，避免永久占用入口。
+      Interlocked.Exchange(ref remoteHostPreparing, 0);
+      throw;
+    }
+  }
+
   private SettingsWorkbenchState InvalidateEnvironmentPlan()
   {
     settings ??= CreateSettings();
@@ -3426,6 +3631,25 @@ public sealed class DesktopWorkbenchCommandHandler :
   }
 
   /// <summary>
+  /// 保存全局 MinerU 识别偏好：能力/目录校验在 SettingsViewModel 内
+  /// fail closed；偏好不改变目录可用性，无需刷新 health，任务页状态
+  /// 经 RecognitionSelection 快照即时携带新偏好。
+  /// </summary>
+  private async Task<SettingsWorkbenchState> SetMineruRecognitionAsync(
+    SetMineruRecognitionCommand command,
+    CancellationToken cancellationToken)
+  {
+    settings ??= CreateSettings();
+    await settings.SetMineruRecognitionAsync(
+      command.Tier,
+      command.OcrMode,
+      command.PageRange,
+      command.Language,
+      cancellationToken);
+    return SettingsState(settings);
+  }
+
+  /// <summary>
   /// 保存默认识别模式：能力门禁 + 目录 ready 校验在
   /// SettingsViewModel 内 fail closed；保存成功后重发任务页状态，继承
   /// 选项立即回显新默认，在跑/排队任务参数不受影响。
@@ -3534,12 +3758,13 @@ public sealed class DesktopWorkbenchCommandHandler :
   private void ApplyTaskEngine(string? engine)
   {
     settings ??= CreateSettings();
-    RuntimeSelectionService? selection = settings.RecognitionSelection?.Catalog;
+    RecognitionSelectionSnapshot? snapshot = settings.RecognitionSelection;
+    RuntimeSelectionService? selection = snapshot?.Catalog;
     if (string.IsNullOrWhiteSpace(engine)) RecognitionVm.TaskEngine = null;
-    else if (selection?.SupportsRecognitionModes is true)
+    else if (snapshot is not null && selection?.SupportsRecognitionModes is true)
     {
       RecognitionModeOption mode = selection.SelectRecognitionMode(engine);
-      selection.MineruConfigFor(mode.Id);
+      snapshot.MineruConfigFor(mode.Id);
       RecognitionVm.TaskEngine = mode.Id;
     }
     else if (selection?.SupportsEngineSelection is true && OcrEngineWire.Parse(engine) is OcrEngine engineValue)
@@ -3579,22 +3804,23 @@ public sealed class DesktopWorkbenchCommandHandler :
         ? selection.SelectRecognitionMode(id)
         : TryFindRecognitionMode(selection, id);
     RecognitionModeOption? mode = Resolve(effectiveId);
-    // mineru_document 任务随目录默认 tier 携带类型化 MinerU 4 配置。
+    // mineru_document 任务携带类型化 MinerU 4 配置：全局偏好经快照入口
+    // 解析（无偏好/无效偏好按快照语义 fail closed 或回退目录默认）。
     MineruConfig? config = requireUsable
-      ? selection.MineruConfigFor(mode?.Id)
-      : TryProjectMineruConfig(selection, mode?.Id, out MineruConfig? projected)
+      ? snapshot.MineruConfigFor(mode?.Id)
+      : TryProjectMineruConfig(snapshot, mode?.Id, out MineruConfig? projected)
         ? projected : null;
     viewModel.SetRecognitionMode(mode, config, GetModeOptions(mode));
   }
 
   private static bool TryProjectMineruConfig(
-    RuntimeSelectionService selection,
+    RecognitionSelectionSnapshot? snapshot,
     string? modeId,
     out MineruConfig? config)
   {
     try
     {
-      config = selection.MineruConfigFor(modeId);
+      config = snapshot?.MineruConfigFor(modeId);
       return true;
     }
     catch (RuntimeSelectionException)
@@ -3694,7 +3920,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     RecognitionModeOption? mode = string.IsNullOrWhiteSpace(defaultId)
       ? null
       : selection.SelectRecognitionMode(defaultId);
-    MineruConfig? config = mode is null ? null : selection.MineruConfigFor(mode.Id);
+    MineruConfig? config = mode is null ? null : snapshot.MineruConfigFor(mode.Id);
     IReadOnlyDictionary<string, System.Text.Json.JsonElement>? options =
       mode is null ? null : GetModeOptions(mode)?.ToWire(mode);
     return new RecognitionSubmitSelection(
@@ -4081,16 +4307,31 @@ public sealed class DesktopWorkbenchCommandHandler :
         item.Id,
         Truncate(item.Name, 80),
         $"batch.item.{item.State.ToString().ToLowerInvariant()}",
-        item.Result is null ? null : Truncate(item.Result.Text, 120),
+        item.Result is not null
+          ? Truncate(item.Result.Text, 120)
+          : item.State == BatchItemState.Failed && item.Error is not null
+            ? Truncate(item.Error, 120)
+            : null,
         item.State == BatchItemState.Completed && item.Result is not null
           ? batchStructured.GetValueOrDefault(item.Id).Reference
-          : null))
+          : null,
+        item.PageRange,
+        !BatchCommands.IsNativeOfficeDocument(item.Path)))
       .ToArray(),
     batchWindowStart,
     BatchEngines(),
     batchTaskEngine,
-    batchExportIncomplete);
+    batchExportIncomplete,
+    BatchInputKindNotice(viewModel));
   }
+
+  /// <summary>含 Word/Excel/PowerPoint 文档且为 MinerU 模式时的档位说明。</summary>
+  private static string? BatchInputKindNotice(BatchViewModel viewModel) =>
+    viewModel is { HasNativeOfficeInputs: true, IsMineruDocumentMode: true }
+      ? viewModel.MineruFlashTierAvailable
+        ? "Word、Excel、PowerPoint 文档使用 Flash 档整篇解析；PDF 和图片沿用当前档位。"
+        : "包含 Word、Excel 或 PowerPoint 文档：这些文档需要在 Flash 档解析，当前环境暂不可用；请在设置中检查 MinerU 连接后重试。"
+      : null;
 
   /// <summary>
   /// 可视窗口内已完成项的结构化结果发布：以 Result 对象身份为键缓存，
@@ -4340,6 +4581,51 @@ public sealed class DesktopWorkbenchCommandHandler :
       _ => "disabled",
     };
 
+  /// <summary>
+  /// 全局 MinerU 识别偏好投影：值来自 extra.mineru_recognition，
+  /// tier/language 可用性来自当前目录（设置页下拉动态数据源）；
+  /// 未保存时 Tier/OcrMode/PageRange/Language 为 null，UI 按目录默认展示。
+  /// </summary>
+  private static SettingsMineruRecognitionState? ProjectMineruRecognition(
+    SettingsViewModel viewModel)
+  {
+    MineruRecognitionState? state = viewModel.MineruRecognition;
+    if (state is null) return null;
+    RuntimeSelectionService? selection = viewModel.Selection;
+    return new SettingsMineruRecognitionState(
+      state.Supported,
+      state.Stored,
+      state.Tier is { } tier ? WireTierName(tier) : null,
+      state.OcrMode is { } ocrMode ? WireOcrModeName(ocrMode) : null,
+      state.PageRange,
+      state.Language,
+      state.Invalid,
+      state.InvalidReason,
+      selection?.SupportsMineruConfig is true
+        ? [.. selection.MineruTiers.Select(tier => new SettingsMineruTierOptionState(
+            tier.Id, tier.Availability, tier.ReasonCode))]
+        : null,
+      selection?.SupportsMineruConfig is true ? selection.MineruLanguages : null,
+      selection?.MineruDefaultTier);
+  }
+
+  private static string WireTierName(MineruTier tier) => tier switch
+  {
+    MineruTier.Flash => "flash",
+    MineruTier.Basic => "basic",
+    MineruTier.Standard => "standard",
+    MineruTier.Advanced => "advanced",
+    _ => tier.ToString(),
+  };
+
+  private static string WireOcrModeName(MineruOcrMode mode) => mode switch
+  {
+    MineruOcrMode.Auto => "auto",
+    MineruOcrMode.Txt => "txt",
+    MineruOcrMode.Ocr => "ocr",
+    _ => mode.ToString(),
+  };
+
   private SettingsWorkbenchState SettingsState(
     SettingsViewModel viewModel,
     string? toolbarError = null) => new(
@@ -4397,6 +4683,7 @@ public sealed class DesktopWorkbenchCommandHandler :
         defaultMode.ModeId,
         defaultMode.Stored)
       : null,
+    MineruRecognition: ProjectMineruRecognition(viewModel),
     RecognitionModes: viewModel.Selection?.SupportsRecognitionModes is true
       ? [.. viewModel.Selection.RecognitionModes.Select(mode => new SettingsRecognitionModeOptionState(
           mode.Id,
@@ -4439,7 +4726,10 @@ public sealed class DesktopWorkbenchCommandHandler :
         environmentPlan.RuntimeWheelOrigin)
       : null,
     EnvironmentStatus: viewModel.Environments?.Status ?? "",
-    EnvironmentBusy: viewModel.Environments?.IsBusy ?? false,
+    // 远程模式入口准备期（含各步之间的空窗）同样锁定环境区与 MinerU
+    // 编辑器：不能只依赖各步 RunAsync 的瞬时 IsBusy。
+    EnvironmentBusy: (viewModel.Environments?.IsBusy ?? false) ||
+      Volatile.Read(ref remoteHostPreparing) != 0,
     EnvironmentSources: viewModel.Environments?.Snapshot?.Sources?.Select(source =>
       new SettingsEnvironmentSourceState(
         source.Id, source.Kind, source.DisplayName, source.Endpoint, source.IsDefault)).ToArray(),

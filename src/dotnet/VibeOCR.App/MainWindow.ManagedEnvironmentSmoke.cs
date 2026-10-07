@@ -107,7 +107,7 @@ public sealed partial class MainWindow
     if (smokeInferenceAttached!() || smokeInstallAttempts!() != 0)
       throw new InvalidOperationException("Restarting empty environments installed or started a service.");
     await NavigateSmokeAsync("单次识别", "button");
-    await ClickManagedSmokeButtonAsync("纯截图");
+    await ClickManagedSmokeButtonAsync("截图");
     RecognitionWorkbenchState captured = await WaitForScreenshotStateAsync(
       state => !state.IsBusy && state.ScreenshotSession is not null, TimeSpan.FromSeconds(30));
     SyntheticScreenRegionPicker.CaptureEvidence capture = screenshotSmokePicker!.Evidence ??
@@ -241,7 +241,7 @@ public sealed partial class MainWindow
     string? previousSessionId = (await application.BootstrapAsync(CancellationToken.None))
       .States.Select(item => item.State).OfType<RecognitionWorkbenchState>()
       .Single().ScreenshotSession?.SessionId;
-    await ClickManagedSmokeButtonAsync("纯截图");
+    await ClickManagedSmokeButtonAsync("截图");
     RecognitionWorkbenchState capturedState = await WaitForScreenshotStateAsync(state => !state.IsBusy &&
       state.ScreenshotSession is { } captured &&
       captured.SessionId != previousSessionId && state.Result is null,

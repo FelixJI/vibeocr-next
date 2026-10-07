@@ -1,5 +1,7 @@
+import { Profiler } from "react";
 import {
   act,
+  cleanup,
   fireEvent,
   render,
   screen,
@@ -11,6 +13,7 @@ import type { AppActions } from "../app/types";
 import { ImageCanvasEditor } from "./ImageCanvasEditor";
 
 afterEach(() => {
+  cleanup();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -182,7 +185,12 @@ describe("editor export pixels and previews", () => {
     };
     const actions = createActions();
     const props = editorProps({ actions });
-    const { rerender, unmount } = render(<ImageCanvasEditor {...props} />);
+    const commits = vi.fn();
+    const { rerender, unmount } = render(
+      <Profiler id="editor" onRender={commits}>
+        <ImageCanvasEditor {...props} />
+      </Profiler>,
+    );
     await act(async () => {});
     flushFrame();
     const canvas = screen.getByLabelText("图片检查画布");
@@ -200,11 +208,22 @@ describe("editor export pixels and previews", () => {
     const calls = state.canvases.find(
       (entry) => entry.element === canvas,
     )!.calls;
+    const renderedCalls = (): RecordedCall[] =>
+      calls.flatMap((call) =>
+        call.op === "drawImage" && call.args[0] instanceof HTMLCanvasElement
+          ? (state.canvases.find((entry) => entry.element === call.args[0])
+              ?.calls ?? [])
+          : [call],
+      );
     calls.length = 0;
     fireEvent.click(screen.getByRole("button", { name: "画笔" }));
     fireEvent.pointerDown(canvas, { clientX: 100, clientY: 100 });
+    commits.mockClear();
     fireEvent.pointerMove(canvas, { clientX: 120, clientY: 120 });
+    const pendingDraftFrame = nextFrame;
     fireEvent.pointerMove(canvas, { clientX: 160, clientY: 160 });
+    expect(nextFrame).toBe(pendingDraftFrame);
+    expect(commits).not.toHaveBeenCalled();
     fireEvent.pointerUp(canvas, { clientX: 160, clientY: 160 });
     expect(calls).toHaveLength(0);
     expect(frames.size).toBe(1);
@@ -216,7 +235,9 @@ describe("editor export pixels and previews", () => {
     flushFrame();
     expect(calls.filter((call) => call.op === "clearRect")).toHaveLength(1);
     expect(
-      calls.filter((call) => call.op === "lineTo").map((call) => call.args),
+      renderedCalls()
+        .filter((call) => call.op === "lineTo")
+        .map((call) => call.args),
     ).toEqual([
       [120, 120],
       [160, 160],
@@ -231,7 +252,9 @@ describe("editor export pixels and previews", () => {
     calls.length = 0;
     flushFrame();
     expect(
-      calls.filter((call) => call.op === "lineTo").map((call) => call.args),
+      renderedCalls()
+        .filter((call) => call.op === "lineTo")
+        .map((call) => call.args),
     ).toEqual([
       [120, 120],
       [160, 160],
@@ -242,7 +265,9 @@ describe("editor export pixels and previews", () => {
     fireEvent.pointerMove(canvas, { clientX: 350, clientY: 350 });
     const oldFrame = nextFrame;
     rerender(
-      <ImageCanvasEditor {...props} source="https://app.vibeocr/new.png" />,
+      <Profiler id="editor" onRender={commits}>
+        <ImageCanvasEditor {...props} source="https://app.vibeocr/new.png" />
+      </Profiler>,
     );
     await act(async () => {});
     expect(cancelFrame).toHaveBeenCalledWith(oldFrame);
@@ -250,8 +275,8 @@ describe("editor export pixels and previews", () => {
     expect(actions.run).toHaveBeenCalledTimes(1);
     calls.length = 0;
     flushFrame();
-    expect(calls.some((call) => call.op === "lineTo")).toBe(false);
-    const image = calls.find((call) => call.op === "drawImage")!
+    expect(renderedCalls().some((call) => call.op === "lineTo")).toBe(false);
+    const image = renderedCalls().find((call) => call.op === "drawImage")!
       .args[0] as HTMLImageElement;
     expect(image.src).toBe("https://app.vibeocr/new.png");
 
@@ -262,6 +287,87 @@ describe("editor export pixels and previews", () => {
     expect(cancelFrame).toHaveBeenCalledWith(lastFrame);
     expect(frames.size).toBe(0);
     expect(state.toBlobCalls).toBe(0);
+  });
+
+  it("reuses committed pixel effects across drawing frames", async () => {
+    stubCanvasStack();
+    vi.stubGlobal("PointerEvent", MouseEvent);
+    let pending: FrameRequestCallback | undefined;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      pending = callback;
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => {
+      pending = undefined;
+    });
+    const flush = () =>
+      act(() => {
+        const callback = pending;
+        pending = undefined;
+        callback?.(0);
+      });
+    const { unmount } = render(<ImageCanvasEditor {...editorProps()} />);
+    await act(async () => {});
+    flush();
+    const canvas = screen.getByLabelText("图片检查画布");
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 900,
+      height: 600,
+    } as DOMRect);
+    fireEvent.click(screen.getByRole("button", { name: "模糊" }));
+    fireEvent.pointerDown(canvas, { clientX: 100, clientY: 100 });
+    fireEvent.pointerUp(canvas, { clientX: 300, clientY: 300 });
+    flush();
+    expect(
+      state.canvases
+        .flatMap((c) => c.calls)
+        .some((call) => call.op === "filter"),
+    ).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    fireEvent.pointerDown(canvas, { clientX: 400, clientY: 100 });
+    flush();
+    state.canvases.forEach((c) => {
+      c.calls.length = 0;
+    });
+    for (let i = 0; i < 5; i++) {
+      fireEvent.pointerMove(canvas, {
+        clientX: 450 + i * 10,
+        clientY: 200 + i * 10,
+      });
+      flush();
+    }
+    fireEvent.pointerCancel(canvas);
+    fireEvent.click(screen.getByRole("button", { name: "裁剪" }));
+    fireEvent.pointerDown(canvas, { clientX: 50, clientY: 50 });
+    for (let i = 0; i < 5; i++) {
+      fireEvent.pointerMove(canvas, { clientX: 500 + i * 10, clientY: 400 });
+      flush();
+    }
+    const effectPasses = state.canvases
+      .flatMap((c) => c.calls)
+      .filter((call) => call.op === "filter").length;
+    fireEvent.pointerCancel(canvas);
+    state.canvases.forEach((c) => {
+      c.calls.length = 0;
+    });
+    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+    flush();
+    expect(
+      state.canvases
+        .flatMap((c) => c.calls)
+        .filter((call) => call.op === "filter"),
+    ).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "重做" }));
+    flush();
+    expect(
+      state.canvases
+        .flatMap((c) => c.calls)
+        .filter((call) => call.op === "filter"),
+    ).toHaveLength(1);
+    unmount();
+    expect(effectPasses).toBe(0);
   });
 
   it("does not auto-encode a second preview after edits settle", async () => {

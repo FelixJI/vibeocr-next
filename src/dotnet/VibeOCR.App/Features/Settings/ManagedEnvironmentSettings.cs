@@ -47,13 +47,14 @@ public sealed class ManagedEnvironmentSettings(
             : "运行环境状态已更新。";
     }, cancellationToken);
 
-    public Task CreateAsync(string name, CancellationToken cancellationToken) => RunAsync(async () =>
+    public Task<ManagedEnvironment> CreateAsync(string name, CancellationToken cancellationToken) => RunAsync(async () =>
     {
-        await manager.CreateEnvironmentAsync(name, cancellationToken);
+        ManagedEnvironment created = await manager.CreateEnvironmentAsync(name, cancellationToken);
         Plan = null;
         Compatibility = null;
         await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: false);
         Status = "空环境已创建；未安装识别依赖。";
+        return created;
     }, cancellationToken);
 
     public Task PreviewAsync(string environmentId, string recipe, string? sourceId, CancellationToken cancellationToken) => RunAsync(async () =>
@@ -296,6 +297,17 @@ public sealed class ManagedEnvironmentSettings(
         StateChanged?.Invoke();
     }
 
+    /// <summary>
+    /// 后台编排步骤失败时写入用户可见状态并触发投影：供不在 RunAsync
+    /// 状态机内的编排步骤（远程模式宿主入口）报告根因，避免被后台
+    /// 追踪仅记录日志而呈现中性成功。
+    /// </summary>
+    public void ReportFailure(string status)
+    {
+        Status = status;
+        StateChanged?.Invoke();
+    }
+
     public Task SwitchAsync(string environmentId, CancellationToken cancellationToken) => RunAsync(async () =>
     {
         await activate(environmentId, cancellationToken);
@@ -450,15 +462,19 @@ public sealed class ManagedEnvironmentSettings(
         Status = "空环境解释器已修复；仍未安装识别依赖。";
     }, cancellationToken);
 
-    private async Task RunAsync(Func<Task> action, CancellationToken cancellationToken,
-        string? failureStatus = null)
+    private Task RunAsync(Func<Task> action, CancellationToken cancellationToken,
+        string? failureStatus = null) =>
+        RunAsync<object?>(async () => { await action(); return null; }, cancellationToken, failureStatus);
+
+    private async Task<TResult> RunAsync<TResult>(Func<Task<TResult>> action,
+        CancellationToken cancellationToken, string? failureStatus = null)
     {
         await gate.WaitAsync(cancellationToken);
         IsBusy = true;
         try
         {
             StateChanged?.Invoke();
-            await action();
+            return await action();
         }
         catch (Exception error) when (error is not OperationCanceledException)
         {

@@ -21,6 +21,8 @@ export interface AnnotationStyle {
   readonly color?: string;
   readonly strokeWidth?: number;
   readonly fontSize?: number;
+  /** 马赛克/模糊强度档位：1=弱、2=中（缺省）、3=强；决定块尺寸/滤波半径。 */
+  readonly intensity?: number;
 }
 
 export interface Mark {

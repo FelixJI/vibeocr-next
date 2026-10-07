@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from urllib.parse import quote
 
 import httpx
-from vibeocr.runtime_contracts import MineruConfig
+from vibeocr.runtime.recognition.mineru_config import MineruConfigError
+from vibeocr.runtime_contracts import ErrorCode, MineruConfig
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,15 @@ class MineruApiClient:
                         f"MinerU {method} {path}: HTTP {response.status_code} "
                         "redirect rejected"
                     )
+                if method == "POST" and path == "/v1/uploads":
+                    reason = {
+                        404: "mineru_api_endpoint_incompatible",
+                        405: "mineru_api_endpoint_incompatible",
+                        401: "mineru_api_authentication_failed",
+                        403: "mineru_api_authentication_failed",
+                    }.get(response.status_code)
+                    if reason is not None:
+                        raise MineruConfigError(ErrorCode.VALIDATION_ERROR, reason)
                 if response.is_error:
                     # 只回显方法/相对路径/状态码：服务器正文可能回显配置
                     # URL 或凭据，绝不进入错误消息与日志。

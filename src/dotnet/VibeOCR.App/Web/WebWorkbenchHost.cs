@@ -49,6 +49,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   private bool disposed;
   private readonly bool applicationOwner;
   private readonly WorkbenchRoute? fixedRoute;
+  internal byte[]? CaptureBackground { get; set; }
   private readonly CancellationTokenSource lifetime = new();
   private readonly List<Uri> uploadedAnnotations = [];
 
@@ -386,7 +387,10 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
         args.Response = Forbidden(sender);
         return;
       }
-      WorkbenchResourceResponse response = uri.AbsolutePath.StartsWith(
+      WorkbenchResourceResponse response = CaptureBackground is { } background &&
+        uri.AbsoluteUri == $"https://{VirtualHost}/__capture_background"
+        ? new WorkbenchResourceResponse("image/bmp", background.Length, new MemoryStream(background, writable: false))
+        : uri.AbsolutePath.StartsWith(
         "/__resource/", StringComparison.Ordinal)
         ? await resourceBroker.OpenAsync(uri)
         : packagedAssets?.Open(uri) ??
@@ -474,6 +478,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       return;
     }
     disposed = true;
+    CaptureBackground = null;
     lifetime.Cancel();
     subscriptionCancellation?.Cancel();
     if (subscription is not null)

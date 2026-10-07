@@ -12,7 +12,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { App, type AppActions, type AppViewState } from "./App";
 
-Object.assign(globalThis, { NodeFilter: { FILTER_SKIP: 3 } });
+Object.assign(globalThis, { NodeFilter: window.NodeFilter });
 
 describe("AppShell", () => {
   it("keeps the capture editor isolated from main navigation", async () => {
@@ -81,7 +81,7 @@ describe("AppShell", () => {
     });
     unmount();
   });
-  it("starts scrolling capture without an OCR connection", async () => {
+  it("offers one screenshot action without an OCR connection", async () => {
     window.location.hash = "#/recognition";
     const actions: AppActions = {
       run: vi.fn(),
@@ -93,17 +93,45 @@ describe("AppShell", () => {
       revision: 0,
       route: "recognition",
       theme: "light",
-      capabilities: ["recognition.scrollCapture"],
+      capabilities: [
+        "recognition.capture",
+        "recognition.screenshotSession",
+        "recognition.scrollCapture",
+      ],
       features: {},
       runtimeLabel: "未连接",
     };
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
-    await userEvent
-      .setup()
-      .click(screen.getByRole("button", { name: "长截图" }));
+    // 单击直接开始普通截图：不再弹出菜单，长截图等动作在框选后的动作栏里。
+    expect(screen.getAllByRole("button", { name: /^截图$/ })).toHaveLength(1);
+    expect(
+      screen.queryByRole("menu", { name: /截图/ }),
+    ).not.toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole("button", { name: "截图" }));
     expect(actions.run).toHaveBeenCalledExactlyOnceWith({
-      type: "recognition.captureScrollingScreenshot",
+      type: "recognition.captureScreen",
     });
+    unmount();
+  });
+  it("disables the unified screenshot button without the capture capability", () => {
+    window.location.hash = "#/recognition";
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 1,
+      route: "recognition",
+      theme: "light",
+      capabilities: ["recognition.screenshotSession"],
+      features: {},
+      runtimeLabel: "原生宿主已连接",
+    };
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const button = screen.getAllByRole("button", { name: /^截图$/ })[0]!;
+    expect(button).toBeDisabled();
     unmount();
   });
   it("shows per-action hotkey state and drives apply, disable and reset", async () => {
@@ -561,7 +589,8 @@ describe("AppShell", () => {
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
     expect(screen.getByText("发票一.png")).toBeVisible();
     expect(screen.getByText("合计 42 元")).toBeVisible();
-    expect(screen.getByText("批次由识别服务自动调度")).toBeVisible();
+    // 页码范围说明取代了旧的“批次由识别服务自动调度”调度说明。
+    expect(screen.getByText(/页码从 1 开始；留空沿用 MinerU/)).toBeVisible();
     expect(
       screen.queryByRole("combobox", { name: "批量并发数" }),
     ).not.toBeInTheDocument();

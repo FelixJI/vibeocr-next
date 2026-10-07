@@ -807,6 +807,10 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
     gesture.events.push({ event: 'click-pressed', observedAt: new Date().toISOString() });
   } finally { await native('mouse-up', click); }
   gesture.events.push({ event: 'click-released', observedAt: new Date().toISOString() });
+  // 普通截图先固化选区，Enter 才进入编辑；单击不得再自动跳过动作工具栏。
+  assert((await windows(app.child.pid)).some((item) => item.Handle === overlay.Handle && item.Visible),
+    'Selection click skipped the action toolbar.');
+  await native('enter', { AppPid: app.child.pid });
 
   // The screenshot editor has its own WebView; the workbench stays hidden.
   const sceneDeadline = Date.now() + 12000;

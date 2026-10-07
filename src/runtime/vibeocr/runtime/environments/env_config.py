@@ -180,8 +180,8 @@ OCR_CHECK_MODULES: dict[str, str] = {
     # 故纳入便携环境就绪检测，避免装漏导致 worker 子进程崩溃。
     "markdown": "markdown",
     # PDF 后端子进程依赖（pdf_backend_process.py 顶层 import）。
-    # 注意 fitz 的 import 名与发行版名不一致：PyMuPDF wheel 提供 fitz 模块。
-    "fitz": "pymupdf",
+    # 使用 PyMuPDF 正式模块名，避免旧 fitz 入口的弃用警告。
+    "pymupdf": "pymupdf",
     "fastapi": "fastapi",
     "uvicorn": "uvicorn",
     "pydantic": "pydantic",
@@ -225,7 +225,7 @@ OCR_CHECK_TIMEOUTS: dict[str, int] = {
     "torch": 15,
     "markdown": 10,
     # PDF 后端依赖：纯 Python 或轻量扩展，10s 足够。
-    "fitz": 10,
+    "pymupdf": 10,
     "fastapi": 10,
     "uvicorn": 10,
     "pydantic": 10,

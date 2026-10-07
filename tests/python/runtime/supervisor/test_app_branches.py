@@ -1457,3 +1457,56 @@ async def test_command_retry_returns_new_job_ref(
     out = resp.json()
     assert out["kind"] == "retry"
     assert out["job_ref"]["job_id"] != ref.job_id
+
+
+@pytest.mark.parametrize(
+    ("upstream_status", "reason"),
+    [
+        (404, "mineru_api_endpoint_incompatible"),
+        (405, "mineru_api_endpoint_incompatible"),
+        (401, "mineru_api_authentication_failed"),
+        (403, "mineru_api_authentication_failed"),
+    ],
+)
+async def test_remote_mineru_preload_reports_actionable_configuration_error(
+    pdf_app,
+    supervisor_token: str,
+    pdf_module: SupervisorModule,
+    monkeypatch: pytest.MonkeyPatch,
+    upstream_status: int,
+    reason: str,
+) -> None:
+    from vibeocr.runtime.recognition.mineru_api import MineruApiClient
+    from vibeocr.runtime_contracts import MineruConfig, MineruTier
+
+    requests: list[httpx.Request] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(upstream_status, text="private-token secret endpoint")
+
+    client = MineruApiClient(
+        "https://remote.example/proxy",
+        api_key="private-token",
+        transport=httpx.MockTransport(upstream),
+    )
+
+    def preload(pipelines: tuple[str, ...], *, recognition_modes=None) -> None:
+        client.parse(
+            [("readiness.pdf", b"synthetic readiness PDF")],
+            MineruConfig(tier=MineruTier.FLASH),
+        )
+
+    monkeypatch.setattr(pdf_module, "preload", preload)
+    async with _http(supervisor_token, pdf_app) as http:
+        response = await http.post(
+            "/v2/runtime/preload", json={"pipelines": ["MinerU"]}
+        )
+    assert response.status_code == 400, response.text
+    assert response.json()["code"] == "VALIDATION_ERROR"
+    assert response.json()["detail"]["reason"] == reason
+    assert "private-token" not in response.text
+    assert "remote.example" not in response.text
+    assert [(item.method, item.url.path) for item in requests] == [
+        ("POST", "/proxy/v1/uploads")
+    ]

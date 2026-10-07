@@ -60,6 +60,16 @@ public sealed record RuntimeEngineOption(
         or Wire.OcrEngineAvailability.PreparationRequired;
 }
 
+/// <summary>MinerU tier 目录投影：稳定 wire id + 可用性，供设置页动态渲染。</summary>
+public sealed record MineruTierOption(
+    string Id,
+    string Availability,
+    string? ReasonCode)
+{
+    public bool IsUsable =>
+        Availability is "ready" or "preparation_required";
+}
+
 /// <summary>
 /// UI-neutral selection module over a runtime health snapshot. It owns catalog
 /// structural validation (unique engine ids, globally unique source ids,
@@ -251,16 +261,34 @@ public sealed class RuntimeSelectionService
     /// mineru_document 或未声明 ocr.mineru-config.v1 时返回 null（完全省略
     /// mineru 块，保持遗留 payload 形态）。
     /// </summary>
-    public MineruConfig? MineruConfigFor(string? modeId)
+    public MineruConfig? MineruConfigFor(string? modeId) =>
+        MineruConfigFor(modeId, preference: null);
+
+    /// <summary>
+    /// 带 persisted 偏好的解析：偏好内的 tier/language 仍须在当前目录内
+    /// 可用（未知或不可用 fail closed，不静默降级目录默认）；偏好为 null
+    /// 时保持目录默认行为。extra.mineru_recognition 的语法校验由
+    /// MineruRecognitionSettings 负责，本方法只做目录层校验。
+    /// </summary>
+    public MineruConfig? MineruConfigFor(
+        string? modeId,
+        MineruRecognitionPreference? preference)
     {
         if (_mineruConfigCatalog is null ||
             !string.Equals(modeId, "mineru_document", StringComparison.Ordinal))
         {
             return null;
         }
-        MineruTier tier = ToRequestTier(_mineruConfigCatalog.DefaultTier);
-        Wire.MineruTierDescriptor[] defaults = [.. _mineruConfigCatalog.Tiers.Where(
-            item => item.Id == _mineruConfigCatalog.DefaultTier)];
+        return preference is null
+            ? MineruConfigForDefaults(_mineruConfigCatalog)
+            : MineruConfigForPreference(_mineruConfigCatalog, preference);
+    }
+
+    private static MineruConfig MineruConfigForDefaults(Wire.MineruConfigCatalog catalog)
+    {
+        MineruTier tier = ToRequestTier(catalog.DefaultTier);
+        Wire.MineruTierDescriptor[] defaults = [.. catalog.Tiers.Where(
+            item => item.Id == catalog.DefaultTier)];
         if (defaults.Length != 1)
         {
             throw Error(RuntimeSelectionErrorKind.InvalidCatalogEntry,
@@ -273,9 +301,9 @@ public sealed class RuntimeSelectionService
             throw Error(RuntimeSelectionErrorKind.EngineUnavailable,
                 "MinerU default tier is unavailable.");
         }
-        string? language = _mineruConfigCatalog.Languages.Contains("ch", StringComparer.Ordinal)
+        string? language = catalog.Languages.Contains("ch", StringComparer.Ordinal)
             ? "ch"
-            : _mineruConfigCatalog.Languages.FirstOrDefault(item => !string.IsNullOrWhiteSpace(item));
+            : catalog.Languages.FirstOrDefault(item => !string.IsNullOrWhiteSpace(item));
         if (language is null)
         {
             throw Error(RuntimeSelectionErrorKind.InvalidCatalogEntry,
@@ -283,6 +311,51 @@ public sealed class RuntimeSelectionService
         }
         return new MineruConfig(tier, MineruOcrMode.Auto, "all", language);
     }
+
+    private static MineruConfig MineruConfigForPreference(
+        Wire.MineruConfigCatalog catalog,
+        MineruRecognitionPreference preference)
+    {
+        Wire.MineruTierId tierId = ToWireTierId(preference.Tier);
+        Wire.MineruTierDescriptor[] matches = [.. catalog.Tiers.Where(
+            item => item.Id == tierId)];
+        if (matches.Length == 0)
+        {
+            throw Error(RuntimeSelectionErrorKind.UnknownEngine,
+                $"MinerU tier '{tierId}' is not in the runtime catalog.");
+        }
+        if (matches.Length > 1)
+        {
+            throw Error(RuntimeSelectionErrorKind.InvalidCatalogEntry,
+                $"MinerU catalog declares tier '{tierId}' more than once.");
+        }
+        if (matches[0].Availability is not (
+            Wire.MineruTierAvailability.Ready or
+            Wire.MineruTierAvailability.PreparationRequired))
+        {
+            throw Error(RuntimeSelectionErrorKind.EngineUnavailable,
+                $"MinerU tier '{tierId}' is unavailable"
+                + (string.IsNullOrWhiteSpace(matches[0].ReasonCode)
+                    ? "."
+                    : $" ({matches[0].ReasonCode})."));
+        }
+        if (!catalog.Languages.Contains(preference.Language, StringComparer.Ordinal))
+        {
+            throw Error(RuntimeSelectionErrorKind.UnknownEngine,
+                $"MinerU language '{preference.Language}' is not offered by the runtime catalog.");
+        }
+        return new MineruConfig(
+            preference.Tier, preference.OcrMode, preference.PageRange, preference.Language);
+    }
+
+    private static Wire.MineruTierId ToWireTierId(MineruTier tier) => tier switch
+    {
+        MineruTier.Flash => Wire.MineruTierId.Flash,
+        MineruTier.Basic => Wire.MineruTierId.Basic,
+        MineruTier.Standard => Wire.MineruTierId.Standard,
+        MineruTier.Advanced => Wire.MineruTierId.Advanced,
+        _ => throw new ArgumentOutOfRangeException(nameof(tier), tier, "Unknown MinerU tier."),
+    };
 
     private static MineruTier ToRequestTier(Wire.MineruTierId tier) => tier switch
     {
@@ -292,6 +365,57 @@ public sealed class RuntimeSelectionService
         Wire.MineruTierId.Advanced => MineruTier.Advanced,
         _ => throw Error(RuntimeSelectionErrorKind.InvalidCatalogEntry,
             "MinerU catalog declares an unknown default tier."),
+    };
+
+    /// <summary>指定 MinerU tier 是否在目录中可用；未声明目录时 false。</summary>
+    public bool IsMineruTierUsable(MineruTier tier)
+    {
+        if (_mineruConfigCatalog is null) return false;
+        Wire.MineruTierId id = tier switch
+        {
+            MineruTier.Basic => Wire.MineruTierId.Basic,
+            MineruTier.Flash => Wire.MineruTierId.Flash,
+            MineruTier.Standard => Wire.MineruTierId.Standard,
+            MineruTier.Advanced => Wire.MineruTierId.Advanced,
+            _ => throw new ArgumentOutOfRangeException(nameof(tier), tier, "Unknown MinerU tier."),
+        };
+        return _mineruConfigCatalog.Tiers.Any(item =>
+            item.Id == id &&
+            item.Availability is Wire.MineruTierAvailability.Ready
+                or Wire.MineruTierAvailability.PreparationRequired);
+    }
+
+    /// <summary>目录内 MinerU tier 投影（设置页动态可用性数据源）；无目录时为空。</summary>
+    public IReadOnlyList<MineruTierOption> MineruTiers =>
+        _mineruConfigCatalog is { } catalog
+            ? [.. catalog.Tiers.Select(ToTierOption)]
+            : Array.Empty<MineruTierOption>();
+
+    /// <summary>目录声明的 MinerU 语言（上游 OCR hint 值原样）；无目录时为空。</summary>
+    public IReadOnlyList<string> MineruLanguages =>
+        _mineruConfigCatalog?.Languages ?? Array.Empty<string>();
+
+    /// <summary>目录默认 tier 的稳定 wire id；未声明目录时为 null。</summary>
+    public string? MineruDefaultTier =>
+        _mineruConfigCatalog is null ? null : TierIdName(_mineruConfigCatalog.DefaultTier);
+
+    private static MineruTierOption ToTierOption(Wire.MineruTierDescriptor tier) => new(
+        TierIdName(tier.Id),
+        tier.Availability switch
+        {
+            Wire.MineruTierAvailability.Ready => "ready",
+            Wire.MineruTierAvailability.PreparationRequired => "preparation_required",
+            _ => "unavailable",
+        },
+        tier.ReasonCode);
+
+    private static string TierIdName(Wire.MineruTierId tier) => tier switch
+    {
+        Wire.MineruTierId.Flash => "flash",
+        Wire.MineruTierId.Basic => "basic",
+        Wire.MineruTierId.Standard => "standard",
+        Wire.MineruTierId.Advanced => "advanced",
+        _ => tier.ToString(),
     };
 
     /// <summary>Catalog engines in wire order; empty when the capability is absent.</summary>

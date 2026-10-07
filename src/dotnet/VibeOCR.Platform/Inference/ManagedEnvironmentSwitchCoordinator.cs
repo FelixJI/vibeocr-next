@@ -34,10 +34,14 @@ public sealed class ManagedEnvironmentSession(
 /// </summary>
 public sealed class ManagedEnvironmentSwitchCoordinator(IManagedEnvironmentClient manager)
 {
-    internal static IReadOnlyList<string> RuntimeArguments(RuntimeLaunch launch) =>
-        launch.Environment.ContainsKey("VIBEOCR_PRODUCT_CODE_ROOT")
-            ? ["-I", "-B", "-c", "import os,runpy,sys;sys.path.insert(0,os.environ['VIBEOCR_PRODUCT_CODE_ROOT']);runpy.run_module('vibeocr.runtime.host.main',run_name='__main__')"]
-            : ["-m", launch.SupervisorModule];
+    internal static IReadOnlyList<string> RuntimeArguments(RuntimeLaunch launch)
+    {
+        // -I 会忽略 PYTHONUTF8/PYTHONIOENCODING；argv 级 -X utf8 才能在隔离
+        // 模式下钉死 supervisor 的 UTF-8 输出契约。
+        return launch.Environment.ContainsKey("VIBEOCR_PRODUCT_CODE_ROOT")
+            ? ["-I", "-B", "-X", "utf8", "-c", "import os,runpy,sys;sys.path.insert(0,os.environ['VIBEOCR_PRODUCT_CODE_ROOT']);runpy.run_module('vibeocr.runtime.host.main',run_name='__main__')"]
+            : ["-X", "utf8", "-m", launch.SupervisorModule];
+    }
 
     internal static InferenceSupervisorOptions BuildSupervisorOptions(
         RuntimeLaunch launch, string logPath, TimeSpan startupTimeout,

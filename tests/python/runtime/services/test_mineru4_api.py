@@ -41,6 +41,93 @@ def test_real_basic_three_page_projection():
     assert result.raw_text == ""
 
 
+def test_real_407_empty_page_without_blocks_key_projects():
+    # mineru-api 4.0.7（docvortex>=0.4.24）用 ParseResult.to_dict(skip_defaults=
+    # True) 序列化 middle_json 输出：PageInfo.blocks 是 default_factory=list，
+    # 零 block 页面省略 "blocks" 键；structured_content 渲染器对每页无条件
+    # 输出 "blocks": []。缺键必须等价空列表，否则空白页文档必然抛
+    # "MinerU block identity mismatch"（用户真实日志 mineru_result.py:144）。
+    middle = {
+        "schema": "docvortex.middle",
+        "schema_version": "2.0",
+        "metadata": {
+            "file_suffix": "pdf",
+            "producer": {"name": "mineru", "version": "4.0.7"},
+        },
+        "is_full_document": True,
+        "pages": [
+            {
+                "page_idx": 0,
+                "blocks": [
+                    {
+                        "type": "text",
+                        "index": 0,
+                        "bbox": [0.1, 0.1, 0.9, 0.2],
+                        "content": [{"type": "text", "content": "content page"}],
+                    }
+                ],
+            },
+            {"page_idx": 1},  # 空白页：上游 skip_defaults 省略 blocks 键
+        ],
+    }
+    structured = {
+        "pages": [
+            {
+                "page_idx": 0,
+                "blocks": [
+                    {
+                        "type": "text",
+                        "bbox": [0.1, 0.1, 0.9, 0.2],
+                        "content": "content page",
+                    }
+                ],
+            },
+            {"page_idx": 1, "blocks": []},
+        ]
+    }
+    result = project_document(MineruDocument("", structured, middle, b""))
+    assert result.raw_text == "content page"
+    assert [block["page_idx"] for block in result.content_list] == [0]
+
+
+def test_genuine_block_count_mismatch_is_still_rejected():
+    # 缺键=空列表是上游序列化契约；真正的块数量不一致仍必须 fail closed，
+    # 校验本身不因兼容而删除。
+    middle = {
+        "schema": "docvortex.middle",
+        "schema_version": "2.0",
+        "pages": [
+            {
+                "page_idx": 0,
+                "blocks": [
+                    {
+                        "type": "text",
+                        "index": 0,
+                        "content": [{"type": "text", "content": "a"}],
+                    },
+                    {
+                        "type": "text",
+                        "index": 1,
+                        "content": [{"type": "text", "content": "b"}],
+                    },
+                ],
+            }
+        ],
+    }
+    structured = {
+        "pages": [
+            {
+                "page_idx": 0,
+                "blocks": [
+                    {"type": "text", "bbox": [0.1, 0.1, 0.9, 0.2], "content": "a"}
+                ],
+            }
+        ]
+    }
+    with pytest.raises(MineruApiError, match="block identity mismatch"):
+        project_document(MineruDocument("", structured, middle, b""))
+
+
 @pytest.mark.parametrize(
     "options",
     [

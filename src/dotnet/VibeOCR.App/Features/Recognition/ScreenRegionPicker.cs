@@ -4,6 +4,8 @@ using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Automation;
+using VibeOCR.App.Workbench;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI.Xaml.Shapes;
@@ -42,6 +44,13 @@ public enum ScreenshotSelectionAction
     /// <summary>按动作栏菜单显式选择的 typed 识别模式提交一次识别。</summary>
     Recognize,
 
+    /// <summary>
+    /// 长截图：复用当前已固化的选区直接开始滚动采集，不再让用户二次框选；
+    /// 由 picker 内部完成拼接，返回结果不再携带显式动作（与专用长截图
+    /// 入口同一后续语义）。
+    /// </summary>
+    ScrollCapture,
+
     /// <summary>复制选区像素（复用既有会话本地输出）。</summary>
     Copy,
 
@@ -56,25 +65,35 @@ public enum ScreenshotSelectionAction
 }
 
 /// <summary>
-/// 动作栏识别菜单的一条宿主动态 typed 目录投影：只携带既有 choice 的
-/// id/显示名/availability，picker 不复制引擎支持表或高级配方。
+/// 动作栏识别图标的一条宿主动态 typed 目录投影：识别区固定三类语义
+/// （文字/表格/公式），任意目录状态下都恰好呈现三个条目；picker 不复制
+/// 引擎支持表或高级配方。DisplayName 是稳定的可访问名称（三分类），
+/// 引擎名等细节放 Hint（仅 Tooltip）；文字条目的 ModeId 为设置已提交的
+/// 持久默认模式 id，禁用时不携带可提交的 id（空串）且 availability 使用
+/// default_missing/default_invalid/catalog_unavailable 稳定词汇；IconKey
+/// 指向 <see cref="ScreenshotToolbarIcons"/> 的稳定矢量图标键，由宿主随
+/// 语义提供，不依赖系统字体字形。
 /// </summary>
 public sealed record ScreenshotRecognitionModeEntry(
     string ModeId,
     string DisplayName,
     string Availability,
-    string? ReasonCode = null);
+    string? ReasonCode = null,
+    string IconKey = ScreenshotToolbarIcons.DefaultKey,
+    string? Hint = null);
 
 /// <summary>
 /// 普通截图入口的选区动作请求（宿主当前目录投影）。null 表示专用直接
 /// 入口：保留既有立即确认语义，不显示动作栏。
 /// </summary>
 public sealed record ScreenshotSelectionActions(
-    IReadOnlyList<ScreenshotRecognitionModeEntry> Modes);
+    IReadOnlyList<ScreenshotRecognitionModeEntry> Modes,
+    WorkbenchTheme Theme = WorkbenchTheme.System);
 
 /// <summary>冻结桌面仅属于本次截图；确认后移交给同一窗口的编辑器。</summary>
 internal sealed class ScreenshotCaptureScene : IDisposable
 {
+    private byte[]? background;
     private readonly ScreenshotOwnerRestoration ownerRestoration = new();
     private bool closed;
     internal ScreenshotCaptureScene(Window window, Grid root,
@@ -90,6 +109,9 @@ internal sealed class ScreenshotCaptureScene : IDisposable
     internal Grid Root { get; }
     internal PhysicalRectangle Desktop { get; }
     internal PhysicalRectangle Bounds { get; }
+    internal string? InitialTool { get; init; }
+    internal void SetBackground(byte[] value) => background = value;
+    internal byte[]? TakeBackground() => Interlocked.Exchange(ref background, null);
 
     internal void RestoreOwnerOnClose(Action restore)
     {
@@ -103,6 +125,7 @@ internal sealed class ScreenshotCaptureScene : IDisposable
     {
         Window.Closed -= OnClosed;
         closed = true;
+        background = null;
         Root.Children.Clear();
         ownerRestoration.Restore();
     }
@@ -167,6 +190,19 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       }
     }
 
+    internal static InputSystemCursorShape PointerCursor(int handle, bool overToolbar, bool insideSelection) =>
+      // 用户要求：悬停工具栏（含识别/工具按钮）显示手型光标；选区/手柄
+      // 保持尺寸/十字/移动光标。ProtectedCursor 在 WinUI 3 是 protected，
+      // 不能从外部按按钮设置，统一由 canvas 级游标在工具栏区域呈现 Hand。
+      overToolbar ? InputSystemCursorShape.Hand : handle switch
+      {
+        0 or 7 => InputSystemCursorShape.SizeNorthwestSoutheast,
+        2 or 5 => InputSystemCursorShape.SizeNortheastSouthwest,
+        1 or 6 => InputSystemCursorShape.SizeNorthSouth,
+        3 or 4 => InputSystemCursorShape.SizeWestEast,
+        _ => insideSelection ? InputSystemCursorShape.SizeAll : InputSystemCursorShape.Cross,
+      };
+
     private const long MaximumCaptureBytes = 256L << 20;
     private const int VirtualScreenX = 76;
     private const int VirtualScreenY = 77;
@@ -224,7 +260,9 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
 
             PhysicalRectangle selected = selection.Bounds;
             scene = selection.Scene;
-            if (scrolling)
+            // 长截图（专用入口或动作栏 ScrollCapture）都复用当前已固化的选区
+            // 直接滚动采集，不再弹二次框选；冻结桌面只用于选区，拼接前释放。
+            if (scrolling || selection.SelectionAction is ScreenshotSelectionAction.ScrollCapture)
             {
                 // The frozen desktop is only for selection, not a scrolling history.
                 frame = null;
@@ -378,8 +416,14 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     Windows.Foundation.TypedEventHandler<object, WindowEventArgs> closeHandler =
       (_, _) => completion.TrySetResult(null);
     var session = new ScreenSelectionSession(desktop.Width, desktop.Height);
+    string? initialTool = null;
     var overlay = new Window();
-    var root = new Grid { RequestedTheme = ElementTheme.Dark };
+    var root = new Grid { RequestedTheme = selectionActions?.Theme switch
+    {
+      WorkbenchTheme.Light => ElementTheme.Light,
+      WorkbenchTheme.Dark => ElementTheme.Dark,
+      _ => ElementTheme.Default,
+    } };
     root.Children.Add(new Image { Source = background, Stretch = Stretch.Fill });
     var canvas = new SelectionCanvas { Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };
     root.Children.Add(canvas);
@@ -408,32 +452,48 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     }).ToArray();
     foreach (Rectangle handle in handles) canvas.Children.Add(handle);
     var sizeLabel = new TextBlock();
-    var help = new TextBlock
+    var toolbar = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+    var toolbarScroll = new ScrollViewer
     {
-      Text = ordinary
-        ? "悬停智能取框，Tab 切换窗口/控件/父级；拖动手动框选\n松开后在动作栏选择 编辑/识别/复制/保存/钉图 · Enter 编辑 · Esc 退出 · 右键返回上一步\n方向键微调 · Shift ×10 · Ctrl+方向键缩放 · Ctrl+Z 撤销 · Ctrl+Y / Ctrl+Shift+Z 重做 · M 放大镜 · Ctrl+C 复制色号"
-        : "悬停智能取框，Tab 切换窗口/控件/父级；拖动手动框选\n单击选区 / Enter 确认 · 右键 / Esc 返回或退出 · 方向键微调 · Shift ×10 · Ctrl+方向键缩放\nCtrl+Z 撤销 · Ctrl+Y / Ctrl+Shift+Z 重做 · M 放大镜 · Ctrl+C 复制色号",
-      IsHitTestVisible = false,
+      Content = toolbar,
+      HorizontalScrollMode = ScrollMode.Enabled,
+      HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden,
+      VerticalScrollMode = ScrollMode.Disabled,
+      VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
     };
-    var toolbar = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-    var panel = new StackPanel { Spacing = 8 };
-    panel.Children.Add(help);
-    panel.Children.Add(sizeLabel);
-    panel.Children.Add(toolbar);
     var panelBorder = new Border
     {
-      Background = new SolidColorBrush(Windows.UI.Color.FromArgb(240, 24, 24, 24)),
-      Padding = new Thickness(12),
+      Padding = new Thickness(6),
       CornerRadius = new CornerRadius(8),
-      Child = panel,
+      Child = toolbarScroll,
     };
+    canvas.Children.Add(sizeLabel);
+    sizeLabel.IsHitTestVisible = false;
     canvas.Children.Add(panelBorder);
-    Button AddButton(string text, Action action)
+    Button AddButton(string name, Action action, string iconKey, string? tooltip = null)
     {
-      var button = new Button { Content = text };
+      var button = new Button
+      {
+        // 矢量图标不依赖 Segoe 字形：旧字形在系统字体缺失时渲染为空白。
+        Content = ScreenshotToolbarIcons.CreateIcon(iconKey),
+        Width = 32, Height = 32, Padding = new Thickness(0),
+      };
+      AutomationProperties.SetName(button, name);
+      ToolTipService.SetToolTip(button, tooltip ?? name);
       button.Click += (_, _) => action();
       toolbar.Children.Add(button);
       return button;
+    }
+    void AddSeparator()
+    {
+      toolbar.Children.Add(new Rectangle
+      {
+        Width = 1,
+        Height = 18,
+        Margin = new Thickness(5, 0, 5, 0),
+        Fill = new SolidColorBrush(Windows.UI.Color.FromArgb(110, 128, 128, 128)),
+        IsHitTestVisible = false,
+      });
     }
     uint? activePointerId = null;
     Button confirm = null!;
@@ -570,21 +630,23 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       {
         overlay.Closed -= closeHandler;
         canvas.ReleasePointerCaptures();
-        // 将纯背景移交给新 root，丢弃选区事件闭包及完整 BGRA 缓冲。
-        var sceneRoot = new Grid { RequestedTheme = ElementTheme.Dark };
-        UIElement frozenImage = root.Children[0];
-        root.Children.Remove(frozenImage);
-        sceneRoot.Children.Add(frozenImage);
+        // 保留已呈现的冻结背景及其父级，避免编辑交接时重新挂载整屏纹理。
+        Grid sceneRoot = root;
+
         var sceneShade = new Canvas { IsHitTestVisible = false };
         foreach (Rectangle shade in shades.Append(selection))
         {
           canvas.Children.Remove(shade);
           sceneShade.Children.Add(shade);
         }
+        sceneRoot.Children.Remove(canvas);
         sceneRoot.Children.Add(sceneShade);
-        overlay.Content = sceneRoot;
-        completion.TrySetResult(new OverlaySelection(bounds,
-          new ScreenshotCaptureScene(overlay, sceneRoot, desktop, bounds)));
+        var scene = new ScreenshotCaptureScene(overlay, sceneRoot, desktop, bounds)
+        {
+          InitialTool = initialTool,
+        };
+        scene.SetBackground(EncodeTopDownBmp(pixels, desktop.Width, desktop.Height, desktop.Width * 4));
+        completion.TrySetResult(new OverlaySelection(bounds, scene));
       }
       else if (result is { } accepted)
       {
@@ -724,71 +786,118 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       Visibility = Visibility.Collapsed,
     };
     canvas.Children.Add(magnifier);
+    void ApplyTheme()
+    {
+      var colors = VibeOCR.App.Features.FloatingToolbar.FloatingToolbarWindow.ResolveChromeColors(
+        root.ActualTheme == ElementTheme.Dark);
+      bool dark = root.ActualTheme == ElementTheme.Dark;
+      toolbar.Resources["ButtonBackgroundPointerOver"] = new SolidColorBrush(
+        dark ? Windows.UI.Color.FromArgb(255, 30, 64, 175) : Windows.UI.Color.FromArgb(255, 219, 234, 254));
+      toolbar.Resources["ButtonForegroundPointerOver"] = new SolidColorBrush(
+        dark ? Microsoft.UI.Colors.White : Windows.UI.Color.FromArgb(255, 30, 64, 175));
+      toolbar.Resources["ButtonBackgroundPressed"] = new SolidColorBrush(
+        dark ? Windows.UI.Color.FromArgb(255, 29, 78, 216) : Windows.UI.Color.FromArgb(255, 191, 219, 254));
+      toolbar.Resources["ButtonForegroundPressed"] = toolbar.Resources["ButtonForegroundPointerOver"];
+      panelBorder.Background = new SolidColorBrush(colors.Background);
+      magnifier.Background = new SolidColorBrush(colors.Background);
+      sizeLabel.Foreground = new SolidColorBrush(Microsoft.UI.Colors.White);
+    }
+    root.ActualThemeChanged += (_, _) => ApplyTheme();
+    ApplyTheme();
     bool showMagnifier = true;
     string? colorHex = null;
     Windows.Foundation.Point? lastPoint = null;
-    // 普通入口动作栏：编辑是可见主动作（Enter），识别菜单只消费宿主目录
-    // 投影；复制/保存/钉图复用既有本地输出。直接入口保持旧工具条。
+    // 编辑工具和宿主提供的识别模式直接展示，选择工具后原位进入对应编辑状态。
+    // 图标为 Fluent 矢量 path（见 ScreenshotToolbarIcons），按形状区分语义
+    // 并携带 tooltip；复制/保存/钉图复用既有本地输出。直接入口保持旧工具条。
     List<Button> selectionActionButtons = [];
-    MenuFlyout? recognizeMenu = null;
-    bool menuOpen = false;
     if (ordinary)
     {
-      Button edit = AddButton("编辑 (Enter)", () => Finish(true));
-      confirm = edit;
-      selectionActionButtons.Add(edit);
-      recognizeMenu = new MenuFlyout();
-      recognizeMenu.Opened += (_, _) => menuOpen = true;
-      recognizeMenu.Closed += (_, _) => menuOpen = false;
+      foreach ((string label, string tool, string iconKey, string tip) in new[] {
+        ("矩形", "rectangle", "rectangle", "矩形：拖拽绘制矩形框"),
+        ("椭圆", "ellipse", "ellipse", "椭圆：拖拽绘制椭圆"),
+        ("箭头", "arrow", "arrow", "箭头：拖拽绘制箭头"),
+        ("画笔", "pen", "pen", "画笔：自由手绘线条"),
+        ("荧光笔", "highlighter", "highlighter", "荧光笔：半透明涂抹高亮"),
+        ("文字", "text", "text", "文字：点击后输入文字标注"),
+        ("序号", "numbering", "numbering", "序号：依次点击标注编号"),
+        ("马赛克", "mosaic", "mosaic", "马赛克：像素块遮挡"),
+        ("模糊", "blur", "blur", "模糊：高斯模糊遮挡"),
+        ("屏蔽", "exclude", "exclude", "屏蔽：白块遮挡敏感区域（不进识别）"),
+        ("去水印", "inpaint", "inpaint", "去水印：框选后智能修补"),
+        ("取字", "textSelect", "textSelect", "取字：选择截图中的文字") })
+      {
+        selectionActionButtons.Add(
+          AddButton(label, () => { initialTool = tool; Finish(true); }, iconKey, tip));
+      }
+      AddSeparator();
       if (modeEntries.Count == 0)
       {
-        recognizeMenu.Items.Add(new MenuFlyoutItem
-        {
-          Text = "识别目录尚未加载，请先打开设置检查运行环境",
-          IsEnabled = false,
-        });
+        // 防御性兜底：宿主始终下发三个分类条目，此分支不应被走到。
+        var unavailable = AddButton("识别模式未就绪", () => { },
+          ScreenshotToolbarIcons.DefaultKey);
+        unavailable.IsEnabled = false;
       }
       else
       {
         foreach (ScreenshotRecognitionModeEntry entry in modeEntries)
         {
           bool ready = string.Equals(entry.Availability, "ready", StringComparison.Ordinal);
-          var item = new MenuFlyoutItem
-          {
-            Text = ready
-              ? entry.DisplayName
-              : $"{entry.DisplayName} — {UnavailableReason(entry.Availability)}",
-            IsEnabled = ready,
-          };
           string modeId = entry.ModeId;
-          item.Click += (_, _) => Finish(true, ScreenshotSelectionAction.Recognize, modeId);
-          recognizeMenu.Items.Add(item);
+          Button item = AddButton(
+            entry.DisplayName, () => Finish(true, ScreenshotSelectionAction.Recognize, modeId),
+            entry.IconKey);
+          item.IsEnabled = ready;
+          if (ready) selectionActionButtons.Add(item);
+          // 提示/高亮清晰：可点击时用宿主 Hint（文字图标携带引擎名），
+          // 禁用时同时携带图标名称与原因，指明在设置中修复。
+          if (entry.Hint is { } hint && ready) ToolTipService.SetToolTip(item, hint);
+          else if (!ready) ToolTipService.SetToolTip(item,
+            $"{entry.DisplayName}：{UnavailableReason(entry.Availability)}");
         }
       }
-      recognizeMenu.Items.Add(new MenuFlyoutSeparator());
-      var openSettings = new MenuFlyoutItem { Text = "准备识别模式…（打开设置）" };
-      openSettings.Click += (_, _) => Finish(true, ScreenshotSelectionAction.OpenSettings);
-      recognizeMenu.Items.Add(openSettings);
-      var recognize = new Button { Content = "识别", Flyout = recognizeMenu };
-      toolbar.Children.Add(recognize);
-      selectionActionButtons.Add(recognize);
-      selectionActionButtons.Add(AddButton("复制", () => Finish(true, ScreenshotSelectionAction.Copy)));
-      selectionActionButtons.Add(AddButton("保存", () => Finish(true, ScreenshotSelectionAction.Save)));
-      selectionActionButtons.Add(AddButton("钉图", () => Finish(true, ScreenshotSelectionAction.Pin)));
+      // 长截图复用当前选区，不再二次框选。
+      selectionActionButtons.Add(AddButton("长截图",
+        () => Finish(true, ScreenshotSelectionAction.ScrollCapture), "scrollCapture",
+        "长截图：滚动截取当前所选区域"));
+      AddSeparator();
+      selectionActionButtons.Add(AddButton("设置", () => Finish(true, ScreenshotSelectionAction.OpenSettings),
+        "settings", "设置：打开设置页"));
+      selectionActionButtons.Add(AddButton("复制", () => Finish(true, ScreenshotSelectionAction.Copy),
+        "copy", "复制：复制所选区域图像"));
+      selectionActionButtons.Add(AddButton("保存", () => Finish(true, ScreenshotSelectionAction.Save),
+        "save", "保存：保存所选区域图像"));
+      selectionActionButtons.Add(AddButton("钉图", () => Finish(true, ScreenshotSelectionAction.Pin),
+        "pin", "钉图：将所选区域钉在桌面"));
     }
     else
     {
-      confirm = AddButton("确认 (Enter)", () => Finish(true));
-      undo = AddButton("撤销", session.Undo);
-      redo = AddButton("重做", session.Redo);
+      confirm = AddButton("确认", () => Finish(true), "confirm");
+      undo = AddButton("撤销", session.Undo, "undo");
+      redo = AddButton("重做", session.Redo, "redo");
     }
-    AddButton("重选", () => { if (session.ActiveSelection is not null || session.IsPointerActive) Back(); });
-    AddButton("退出 (Esc)", () => Finish(false));
+    AddSeparator();
+    AddButton("重选", () => { if (session.ActiveSelection is not null || session.IsPointerActive) Back(); },
+      "reselect", "重选：重新框选区域");
+    AddButton("退出", () => Finish(false), "exit", "退出：取消本次截图（Esc）");
+    var magnifierToggle = new Microsoft.UI.Xaml.Controls.Primitives.ToggleButton
+    {
+      Content = ScreenshotToolbarIcons.CreateIcon("magnifier"),
+      Width = 32, Height = 32, Padding = new Thickness(0), IsChecked = true,
+    };
+    AutomationProperties.SetName(magnifierToggle, "放大镜");
+    ToolTipService.SetToolTip(magnifierToggle, "放大镜（M）");
+    magnifierToggle.Click += (_, _) => { showMagnifier = magnifierToggle.IsChecked == true; Render(); };
+    toolbar.Children.Add(magnifierToggle);
     foreach (Button button in toolbar.Children.OfType<Button>()) button.Click += (_, _) => Render();
 
     PhysicalPoint ToPhysical(Windows.Foundation.Point point) => new(
         (int)Math.Round(point.X * desktop.Width / Math.Max(1, canvas.ActualWidth)),
         (int)Math.Round(point.Y * desktop.Height / Math.Max(1, canvas.ActualHeight)));
+    bool IsOverToolbar(Windows.Foundation.Point point) =>
+      !session.IsPointerActive && panelBorder.Visibility == Visibility.Visible &&
+      point.X >= Canvas.GetLeft(panelBorder) && point.X < Canvas.GetLeft(panelBorder) + panelBorder.ActualWidth &&
+      point.Y >= Canvas.GetTop(panelBorder) && point.Y < Canvas.GetTop(panelBorder) + panelBorder.ActualHeight;
     void UpdateMagnifier(Windows.Foundation.Point point)
     {
       lastPoint = point;
@@ -796,14 +905,14 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       double pixelsPerDipY = desktop.Height / Math.Max(1, canvas.ActualHeight);
       int handle = session.IsPointerActive ? session.ActiveHandle :
         session.HitHandle(new(point.X, point.Y), pixelsPerDipX, pixelsPerDipY);
-      canvas.SetCursor(handle switch
-      {
-        0 or 7 => InputSystemCursorShape.SizeNorthwestSoutheast,
-        2 or 5 => InputSystemCursorShape.SizeNortheastSouthwest,
-        1 or 6 => InputSystemCursorShape.SizeNorthSouth,
-        3 or 4 => InputSystemCursorShape.SizeWestEast,
-        _ => InputSystemCursorShape.Cross,
-      });
+      bool overToolbar = IsOverToolbar(point);
+      PhysicalPoint local = ToPhysical(point);
+      bool inside = session.Selection is { } selected && local.X >= selected.X && local.X < selected.Right &&
+        local.Y >= selected.Y && local.Y < selected.Bottom;
+      canvas.SetCursor(PointerCursor(handle, overToolbar, inside));
+      magnifier.Visibility = showMagnifier && !overToolbar && (!inside || handle >= 0)
+        ? Visibility.Visible : Visibility.Collapsed;
+      if (magnifier.Visibility != Visibility.Visible) return;
       PhysicalPoint location = session.SamplePoint(ToPhysical(point), handle);
       int x = Math.Clamp(location.X, 0, desktop.Width - 1);
       int y = Math.Clamp(location.Y, 0, desktop.Height - 1);
@@ -817,7 +926,6 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       Windows.UI.Color color = pixelBrushes[60].Color;
       colorHex = $"#{color.R:X2}{color.G:X2}{color.B:X2}";
       colorLabel.Text = $"{desktop.X + x}, {desktop.Y + y}\n{colorHex}\nRGB {color.R}, {color.G}, {color.B}";
-      magnifier.Visibility = showMagnifier ? Visibility.Visible : Visibility.Collapsed;
       Canvas.SetLeft(magnifier, Math.Max(0, point.X + 24 + 180 > canvas.ActualWidth ? point.X - 180 : point.X + 24));
       Canvas.SetTop(magnifier, Math.Max(0, point.Y + 24 + 190 > canvas.ActualHeight ? point.Y - 190 : point.Y + 24));
     }
@@ -828,6 +936,8 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     }
     void Render()
     {
+      // 交接后的按钮/SizeChanged 回调不得重绘已移交的遮罩。
+      if (completion.Task.IsCompleted) return;
       double w = canvas.ActualWidth, h = canvas.ActualHeight;
       double sx = w / desktop.Width, sy = h / desktop.Height;
       PhysicalRectangle? rect = session.ActiveSelection;
@@ -850,10 +960,12 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       string source = session.Selection is not null ? "手动" :
         session.ActiveSelection is null ? "" :
         session.PreviewIndex == 0 ? "窗口候选" : $"控件候选 · 层级 {session.PreviewIndex}";
+      // 尺寸标签末尾的 Enter 提示是原生 e2e 的 UIA 探针契约
+      // （' · W × H px · Enter'），也向用户说明确认方式。
       sizeLabel.Text = rect is { } r
         ? $"{source} · {r.Width} × {r.Height} px · " +
           (ordinary ? "Enter 编辑 / 动作栏选择动作" : "Enter 确认 / 单击")
-        : "请选择区域";
+        : "拖动框选 · 悬停智能取框 · Tab 切换候选";
       if (ordinary)
       {
         // 动作栏仅在选区已固化（拖拽松开或单击确认智能候选）后可操作；
@@ -867,11 +979,14 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
         undo.IsEnabled = session.CanUndo;
         redo.IsEnabled = session.CanRedo;
       }
+      panelBorder.MaxWidth = Math.Max(1, w - 16);
       panelBorder.Measure(new Windows.Foundation.Size(w, h));
       double pw = panelBorder.DesiredSize.Width, ph = panelBorder.DesiredSize.Height;
       Canvas.SetLeft(panelBorder, Math.Clamp(left, 0, Math.Max(0, w - pw)));
       Canvas.SetTop(panelBorder, rect is null ? Math.Max(0, h - ph - 20) :
           bottom + ph + 12 <= h ? bottom + 12 : Math.Max(0, top - ph - 12));
+      Canvas.SetLeft(sizeLabel, Math.Max(0, left));
+      Canvas.SetTop(sizeLabel, Math.Max(0, top - 24));
       panelBorder.Visibility = session.IsDragging ? Visibility.Collapsed : Visibility.Visible;
       if (lastPoint is { } point) UpdateMagnifier(point);
     }
@@ -928,16 +1043,17 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       if (!args.GetCurrentPoint(canvas).Properties.IsRightButtonPressed) return;
       Back(); Render(); args.Handled = true;
     }), true);
-    canvas.PointerMoved += (_, args) =>
+    canvas.AddHandler(UIElement.PointerMovedEvent, new PointerEventHandler((_, args) =>
     {
       if (!IsPickerPointer(args)) return;
       if (activePointerId is { } id && id != args.Pointer.PointerId) return;
       Windows.Foundation.Point point = args.GetCurrentPoint(canvas).Position;
       lastPoint = point;
+      if (IsOverToolbar(point)) { UpdateMagnifier(point); return; }
       UpdateGesture(point);
       if (!confirming) UpdateSmartPreview(ToPhysical(point));
       Render();
-    };
+    }), true);
     canvas.PointerReleased += (_, args) =>
     {
       if (!IsPickerPointer(args)) return;
@@ -977,10 +1093,8 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
           switch (args.Key)
           {
             case VirtualKey.Escape:
-              // 普通动作阶段：菜单打开时先关菜单；再次 Esc 取消截图并恢复
-              // 原窗口状态。右键保留逐级返回；直接入口 Esc 仍逐级返回。
-              if (menuOpen) recognizeMenu?.Hide();
-              else if (ordinary) Finish(false);
+              // 普通动作阶段 Esc 取消截图；右键与直接入口保留逐级返回。
+              if (ordinary) Finish(false);
               else Back();
               break;
             case VirtualKey.Enter: Finish(true); break;
@@ -993,7 +1107,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
             case VirtualKey.Up: session.Adjust(0, -step, control); break;
             case VirtualKey.Down: session.Adjust(0, step, control); break;
             case VirtualKey.M when !control:
-              showMagnifier = !showMagnifier;
+              showMagnifier = !showMagnifier; magnifierToggle.IsChecked = showMagnifier;
               if (lastPoint is { } point) UpdateMagnifier(point);
               break;
             case VirtualKey.C when control && colorHex is not null:
@@ -1020,12 +1134,24 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     overlay.AppWindow.SetPresenter(presenter);
     overlay.AppWindow.IsShownInSwitchers = false;
     overlay.AppWindow.MoveAndResize(new RectInt32(desktop.X, desktop.Y, desktop.Width, desktop.Height));
-    overlay.Activate();
     nint overlayHandle = WinRT.Interop.WindowNative.GetWindowHandle(overlay);
+    var firstFrame = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    int renderedFrames = 0;
+    void OnRendering(object? sender, object args)
+    {
+      // 第二次 Rendering 时上一帧已提交；窗口仍透明，避免露出未绘制的黑色表面。
+      if (root.IsLoaded && ++renderedFrames >= 2) firstFrame.TrySetResult();
+    }
     try
     {
       if (overlayHandle == nint.Zero)
         throw new InvalidOperationException("无法获取截图选区窗口。");
+      nint style = GetWindowLongPtrW(overlayHandle, -20);
+      SetWindowLongPtrW(overlayHandle, -20, (nint)((long)style | 0x80000));
+      if (!SetLayeredWindowAttributes(overlayHandle, 0, 0, 2))
+        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+      CompositionTarget.Rendering += OnRendering;
+      overlay.Activate();
       // A borderless overlapped window can still have non-client insets. Match
       // the frozen desktop to the client area, where XAML pointer positions live.
       overlay.AppWindow.ResizeClient(new SizeInt32(desktop.Width, desktop.Height));
@@ -1044,11 +1170,18 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
           client.Right - client.Left != desktop.Width ||
           client.Bottom - client.Top != desktop.Height)
         throw new InvalidOperationException("截图选区客户区与虚拟桌面不一致。");
+      await firstFrame.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
+      if (!SetLayeredWindowAttributes(overlayHandle, 0, 255, 2))
+        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
     }
     catch
     {
       overlay.Close();
       throw;
+    }
+    finally
+    {
+      CompositionTarget.Rendering -= OnRendering;
     }
     // A hotkey can open this window while another application remains foreground.
     // WinUI activation alone does not transfer keyboard focus across processes.
@@ -1078,16 +1211,22 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     }
     finally
     {
-      // Release the frozen desktop before a possible long scrolling session.
-      root.Children.Clear();
+      // 编辑窗口接管原冻结画面；其余路径立即释放。
+      if (!completion.Task.IsCompletedSuccessfully || completion.Task.Result?.Scene is null)
+        root.Children.Clear();
     }
   }
-    // 只映射目录 availability 的稳定词汇，不复制引擎/配方表；准备类条目
-    // 禁用并解释，不自动下载。
+    // 只映射目录/投影 availability 的稳定词汇，不复制引擎/配方表；准备类
+    // 条目禁用并解释，不自动下载。default_missing/default_invalid 为文字
+    // 图标专用：指向设置 · 默认识别类型，不静默改选其他文字引擎；
+    // catalog_unavailable 为目录未加载时三类图标的统一指引。
     private static string UnavailableReason(string availability) => availability switch
     {
         "preparation_required" => "需要先准备依赖（可在设置中准备）",
         "unavailable" => "当前运行环境不可用",
+        "default_missing" => "尚未配置默认识别类型；请在设置 · 默认识别类型中选择文字引擎",
+        "default_invalid" => "当前默认识别类型不能用作文字识别（无效或属于表格/公式）；请在设置 · 默认识别类型中重新选择",
+        "catalog_unavailable" => "识别模式目录尚未加载；请先在设置中检查运行环境后重试",
         _ => "暂不可用",
     };
 
@@ -1205,6 +1344,16 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
 
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int index);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern nint GetWindowLongPtrW(nint window, int index);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern nint SetWindowLongPtrW(nint window, int index, nint value);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetLayeredWindowAttributes(nint window, uint colorKey, byte alpha, uint flags);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

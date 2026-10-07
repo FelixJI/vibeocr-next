@@ -187,6 +187,9 @@ test("1024x720 dark batch running workspace", async ({ page }) => {
     features: {
       batch: {
         isBusy: true,
+        isRunning: true,
+        inputKindNotice:
+          "Word、Excel、PowerPoint 文档使用 Flash 档整篇解析；PDF 和图片沿用当前档位。",
         itemCount: 3,
         completedCount: 1,
         failedCount: 0,
@@ -199,11 +202,21 @@ test("1024x720 dark batch running workspace", async ({ page }) => {
             resultSummary: "含税合计 128.00",
           },
           { id: "b", name: "合同扫描件.pdf", statusCode: "batch.item.running" },
-          { id: "c", name: "表格照片.jpg", statusCode: "batch.item.pending" },
+          {
+            id: "c",
+            name: "销售报表.xlsx",
+            statusCode: "batch.item.pending",
+            supportsPageRange: false,
+          },
         ],
       },
     },
   });
+  await expect(page.getByRole("button", { name: "添加文件" })).toBeVisible();
+  await expect(page.getByText("销售报表.xlsx")).toBeVisible();
+  await expect(
+    page.getByRole("status").filter({ hasText: "Flash 档整篇解析" }),
+  ).toBeVisible();
   await expect(page).toHaveScreenshot("batch-dark-1024x720.png", {
     fullPage: true,
   });
@@ -270,7 +283,7 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
     },
   });
   await expect(
-    page.getByRole("button", { name: "纯截图", exact: true }),
+    page.getByRole("button", { name: "截图", exact: true }),
   ).toBeEnabled();
   // 识别面精简后无输出变换控件；键盘验证改用保留的显示缩放下拉。
   const zoom = page.getByRole("combobox", { name: "显示缩放" });
@@ -288,6 +301,8 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
   ).toBe(true);
   const viewport = page.getByLabel("图片视口");
   const canvas = page.getByLabel("图片检查画布");
+  // selectOption 返回时 React 可能仍显示 ArrowDown 留下的 125% 布局。
+  await expect(viewport).toHaveCSS("--editor-zoom", "1");
   // fit 布局就绪信号：画布宽度非零且不超过视口，避免读到 React 提交前的旧布局。
   let fitWidth = 0;
   await expect

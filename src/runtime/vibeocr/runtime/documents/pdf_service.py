@@ -12,8 +12,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-import fitz
 import numpy as np
+import pymupdf as fitz
 
 if TYPE_CHECKING:
     from collections.abc import Callable

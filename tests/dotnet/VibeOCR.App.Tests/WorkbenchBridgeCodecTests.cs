@@ -893,7 +893,8 @@ public sealed class WorkbenchBridgeCodecTests
               "https://app.vibeocr/__resource/44444444444444444444444444444444",
               "application/json; charset=utf-8",
               128))],
-          ExportIncomplete: true)));
+          ExportIncomplete: true,
+          InputKindNotice: "mixed-input scheduling note")));
     using JsonDocument structuredBatch = JsonDocument.Parse(structuredBatchJson);
     JsonElement batchState = structuredBatch.RootElement
       .GetProperty("payload").GetProperty("state");
@@ -902,6 +903,10 @@ public sealed class WorkbenchBridgeCodecTests
       batchState.GetProperty("items")[0].GetProperty("structuredResult")
         .GetProperty("url").GetString());
     Assert.True(batchState.GetProperty("exportIncomplete").GetBoolean());
+    // 调度提示（如 Office 走 flash 档）必须进入 wire，否则 Web 端无法呈现。
+    Assert.Equal(
+      "mixed-input scheduling note",
+      batchState.GetProperty("inputKindNotice").GetString());
 
     string pdfJson = WorkbenchBridgeCodec.SerializeState(
       sessionId,
