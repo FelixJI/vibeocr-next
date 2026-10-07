@@ -55,6 +55,7 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     window = captureScene?.Window ?? new Window();
     host = new WebWorkbenchHost(application, broker, annotations,
       applicationOwner: false, fixedRoute: WorkbenchRoute.ImageEdit);
+    host.CaptureBackground = captureScene?.TakeBackground();
     host.RecoveryRequired += ShowRecovery;
     host.StateChanged += OnHostStateChanged;
     host.ProtocolViolation += error => AppLog.Error("Image editor bridge rejected a message", error);
@@ -76,7 +77,7 @@ internal sealed class ImageEditWindow : IAsyncDisposable
         Close();
       }), true);
     webView.Loaded += OnLoaded;
-    window.Content = content;
+    if (captureScene is null) window.Content = content;
     window.Closed += OnClosed;
     if (captureScene is not null) return;
     window.AppWindow.SetPresenter(AppWindowPresenterKind.Overlapped);
@@ -142,6 +143,7 @@ internal sealed class ImageEditWindow : IAsyncDisposable
           height = scene.Bounds.Height,
           desktopWidth = scene.Desktop.Width,
           desktopHeight = scene.Desktop.Height,
+          initialTool = scene.InitialTool,
         });
         await webView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
           "window.vibeocrCaptureScene=" + geometry + ";" +
@@ -164,10 +166,35 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     recovery.Visibility = Visibility.Visible;
   }
 
-  private void OnHostStateChanged(string state)
+  private async void OnHostStateChanged(string state)
   {
-    // 冻结选区承接 WebView 启动；生产 CSS/bridge 就绪前不露白底或普通页面。
-    if (!closed && state == "bridge-ready") webView.Opacity = 1;
+    if (closed || state != "bridge-ready") return;
+    try
+    {
+      // 等待冻结桌面和选区都解码，避免 bridge-ready 早于 React 首帧时露出黑底。
+      if (captureScene is not null)
+      {
+        var timeout = System.Diagnostics.Stopwatch.StartNew();
+        while (!closed)
+        {
+          string ready = await webView.CoreWebView2.ExecuteScriptAsync(
+            "(()=>{const b=document.querySelector('.capture-scene-backdrop img');" +
+            "const c=document.querySelector('canvas[aria-label=\"图片检查画布\"]');" +
+            "return !!(b?.complete&&b.naturalWidth&&c?.dataset.frameReady==='true'&&getComputedStyle(c).opacity!=='0');})()");
+          if (closed) return;
+          if (ready == "true") break;
+          if (timeout.Elapsed > TimeSpan.FromSeconds(10))
+            throw new TimeoutException("截图现场背景未就绪。");
+          await Task.Delay(16);
+        }
+      }
+      if (!closed) webView.Opacity = 1;
+    }
+    catch (Exception error)
+    {
+      AppLog.Error("Capture scene presentation failed", error);
+      ShowRecovery();
+    }
   }
 
   private async void OnClosed(object sender, WindowEventArgs args)

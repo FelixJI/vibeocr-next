@@ -1,6 +1,5 @@
 import {
   Badge,
-  Button,
   Menu,
   MenuItemRadio,
   MenuList,
@@ -12,17 +11,18 @@ import {
   Tooltip,
 } from "@fluentui/react-components";
 import {
-  Camera,
   FileText,
-  ListChecks,
+  Files,
+  Image as ImageIcon,
+  QrCode,
+  Activity,
   MoonStar,
-  ScanLine,
+  ScanText,
   Settings,
-  ShieldCheck,
-  Sparkles,
 } from "lucide-react";
 import { NavLink, Outlet } from "react-router";
 
+import { CaptureButton } from "../components/CaptureButton";
 import type { AppActions, AppViewState, ThemePreference } from "../app/types";
 
 interface AppShellProps {
@@ -33,17 +33,17 @@ interface AppShellProps {
 }
 
 const primaryNavigation = [
-  ["recognition", "单次识别", ScanLine],
-  ["imageEdit", "图片编辑", Camera],
-  ["batch", "批量识别", ListChecks],
-  ["qrcode", "二维码与条码", Sparkles],
+  ["recognition", "单次识别", ScanText],
+  ["imageEdit", "图片编辑", ImageIcon],
+  ["batch", "批量识别", Files],
+  ["qrcode", "二维码与条码", QrCode],
   ["pdf", "PDF", FileText],
 ] as const;
 
 const utilityNavigation = [
   ["settings", "设置", Settings],
   // 关于与诊断合并后的唯一常规入口；旧 #/about 路由在 App 路由层重定向到这里。
-  ["diagnostics", "关于与诊断", ShieldCheck],
+  ["diagnostics", "关于与诊断", Activity],
 ] as const;
 
 function NavigationItems({
@@ -148,14 +148,10 @@ export function AppShell({
             </MenuPopover>
           </Menu>
           {viewState.route !== "recognition" && (
-            <Button
-              appearance="primary"
-              disabled={!viewState.capabilities.includes("recognition.capture")}
-              icon={<Camera aria-hidden="true" size={16} />}
-              onClick={() => actions.run({ type: "recognition.captureScreen" })}
-            >
-              截图识别
-            </Button>
+            <CaptureButton
+              capabilities={viewState.capabilities}
+              actions={actions}
+            />
           )}
         </Toolbar>
         <main className="page-region">

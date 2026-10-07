@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useMemo } from "react";
 
 import type { CanvasSize } from "./annotationGeometry";
 import "./ImageTextLayer.css";
@@ -72,8 +72,20 @@ export function ImageTextLayer({
     }
   }, [active]);
 
-  if (!active) return null;
   const { image, size } = viewport;
+  const renderedLines = useMemo(
+    () =>
+      active
+        ? lines.map((line, index) => {
+            const box = layoutTextBox(line.bbox, image, size);
+            return box ? (
+              <FittedLine key={index} text={line.text} box={box} />
+            ) : null;
+          })
+        : null,
+    [active, lines, image, size],
+  );
+  if (!active) return null;
   return (
     <div
       className="image-text-layer"
@@ -81,12 +93,7 @@ export function ImageTextLayer({
         if (node) lastLinesRoot.current = node;
       }}
     >
-      {lines.map((line, index) => {
-        const box = layoutTextBox(line.bbox, image, size);
-        return box ? (
-          <FittedLine key={index} text={line.text} box={box} />
-        ) : null;
-      })}
+      {renderedLines}
     </div>
   );
 }
@@ -99,10 +106,10 @@ function FittedLine({
   readonly box: { left: number; top: number; width: number; height: number };
 }) {
   const glyphs = useRef<HTMLSpanElement>(null);
-  const [scale, setScale] = useState(1);
   useLayoutEffect(() => {
     const measured = glyphs.current?.scrollWidth ?? 0;
-    setScale(measured > box.width ? box.width / measured : 1);
+    if (glyphs.current)
+      glyphs.current.style.transform = `scaleX(${measured > box.width ? box.width / measured : 1})`;
   }, [text, box.width, box.height]);
   return (
     <div
@@ -115,11 +122,7 @@ function FittedLine({
         fontSize: `${box.height}px`,
       }}
     >
-      <span
-        className="image-text-glyphs"
-        ref={glyphs}
-        style={{ transform: `scaleX(${scale})` }}
-      >
+      <span className="image-text-glyphs" ref={glyphs}>
         {text}
       </span>
       {"\n"}

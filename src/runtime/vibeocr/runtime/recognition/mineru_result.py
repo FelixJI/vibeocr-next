@@ -137,7 +137,10 @@ def project_document(document: MineruDocument) -> OCRResult:
         page_blocks = native_page.get("blocks")
         if not isinstance(page_blocks, list):
             raise MineruApiError("Invalid MinerU page blocks")
-        source_blocks = object_value(source_page, "source page").get("blocks")
+        # mineru-api 4.0.7（docvortex）用 to_dict(skip_defaults=True) 序列化
+        # middle_json：零 block 页面省略 blocks 键，等价空列表；
+        # 真正的数量不一致仍由下方校验拒绝。
+        source_blocks = object_value(source_page, "source page").get("blocks", [])
         if not isinstance(source_blocks, list) or len(source_blocks) != len(
             page_blocks
         ):

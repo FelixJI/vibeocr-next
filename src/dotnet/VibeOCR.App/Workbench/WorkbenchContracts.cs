@@ -282,6 +282,8 @@ public sealed record MoveBatchItemCommand(Guid ItemId, int Delta) : WorkbenchCom
 
 public sealed record RemoveBatchItemCommand(Guid ItemId) : WorkbenchCommand;
 
+public sealed record SetBatchItemPageRangeCommand(Guid ItemId, string? PageRange) : WorkbenchCommand;
+
 public sealed record SetBatchWindowCommand(int Start) : WorkbenchCommand;
 
 public sealed record SetBatchTaskEngineCommand(string? Engine) : WorkbenchCommand;
@@ -349,6 +351,14 @@ public sealed record DeleteEnvironmentCommand(string EnvironmentId) : WorkbenchC
 public sealed record RepairEmptyEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
 /// <summary>推荐配置选择：只读查询配方兼容环境，不创建/不安装/不切换。</summary>
 public sealed record FindCompatibleEnvironmentCommand(string Recipe) : WorkbenchCommand;
+
+/// <summary>
+/// 远程模式宿主入口：随包离线基础配方一键就绪。已安装可复用环境直接
+/// 切换启动；无可复用环境时新建/复用专用环境并走 Runtime 权威离线
+/// 安装事务（取消/CAS/回滚保留），安装完成后切换启动承载识别服务。
+/// 不触碰用户已有空环境，不下载识别模型。
+/// </summary>
+public sealed record PrepareRemoteHostCommand : WorkbenchCommand;
 
 public sealed record SetThemeCommand(WorkbenchTheme Theme) : WorkbenchCommand;
 
@@ -422,6 +432,20 @@ public sealed record SetMineruConnectionCommand(
 /// catalog. The frontend never connects to the remote service directly.
 /// </summary>
 public sealed record PrepareMineruConnectionCommand : WorkbenchCommand;
+
+/// <summary>
+/// Persist the global MinerU recognition preference in Backend settings
+/// extra.mineru_recognition（ocr.mineru-config.v1）。All four wire fields
+/// are replaced atomically; tier/language availability is enforced against
+/// the runtime catalog host-side before any write. Formula/table parsing is
+/// always-on in MinerU 4 (no upstream switch) and is therefore not part of
+/// this command.
+/// </summary>
+public sealed record SetMineruRecognitionCommand(
+    string Tier,
+    string OcrMode,
+    string PageRange,
+    string Language) : WorkbenchCommand;
 
 /// <summary>
 /// Set the task-level recognition mode for the recognition page; null clears
@@ -586,7 +610,8 @@ public sealed record BatchWorkbenchState(
   int WindowStart = 0,
   IReadOnlyList<RecognitionEngineChoice>? Engines = null,
   string? TaskEngine = null,
-  bool ExportIncomplete = false) : WorkbenchState
+  bool ExportIncomplete = false,
+  string? InputKindNotice = null) : WorkbenchState
 {
   public override string Scope => "batch";
 }
@@ -596,7 +621,9 @@ public sealed record BatchWorkbenchItem(
   string Name,
   string StatusCode,
   string? ResultSummary,
-  WorkbenchResourceReference? StructuredResult = null);
+  WorkbenchResourceReference? StructuredResult = null,
+  string? PageRange = null,
+  bool SupportsPageRange = true);
 
 public sealed record PdfWorkbenchState(
   bool IsBusy,
@@ -659,6 +686,7 @@ public sealed record SettingsWorkbenchState(
   VibeOCR.Runtime.Contracts.Generated.Host.RuntimeInstallPlan? InstallPlan = null,
   SettingsMineruConnectionState? MineruConnection = null,
   SettingsDefaultRecognitionModeState? DefaultRecognitionMode = null,
+  SettingsMineruRecognitionState? MineruRecognition = null,
   IReadOnlyList<SettingsRecognitionModeOptionState>? RecognitionModes = null,
   IReadOnlyList<SettingsEnvironmentState>? Environments = null,
   string? ActiveEnvironmentId = null,
@@ -854,6 +882,31 @@ public sealed record SettingsDefaultRecognitionModeState(
     bool Supported,
     string? ModeId,
     bool Stored);
+
+/// <summary>
+/// 全局 MinerU 识别偏好投影（extra.mineru_recognition）：Tiers/Languages
+/// 为当前目录动态可用性（设置页下拉数据源，DefaultTier 为未保存时的展示
+/// 默认）。Invalid=true 表示持久值语法无法解析，需重新保存修复；公式/
+/// 表格在 MinerU 4 恒开启，无开关字段。
+/// </summary>
+public sealed record SettingsMineruRecognitionState(
+    bool Supported,
+    bool Stored,
+    string? Tier,
+    string? OcrMode,
+    string? PageRange,
+    string? Language,
+    bool Invalid = false,
+    string? InvalidReason = null,
+    IReadOnlyList<SettingsMineruTierOptionState>? Tiers = null,
+    IReadOnlyList<string>? Languages = null,
+    string? DefaultTier = null);
+
+/// <summary>设置页 MinerU 档位目录项（来自 ocr.mineru-config.v1 目录）。</summary>
+public sealed record SettingsMineruTierOptionState(
+    string Id,
+    string Availability,
+    string? ReasonCode);
 
 /// <summary>设置页可选的识别模式目录项（来自 ocr.recognition-modes.v1）。</summary>
 public sealed record SettingsRecognitionModeOptionState(

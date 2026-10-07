@@ -62,6 +62,7 @@ interface AnnotationFormatHost {
  *  确认实时画布、原图信息行与按需检查入口可见（无第二幅常驻预览）。 */
 async function setupAnnotationFormatHost(
   page: Page,
+  sourceSvg?: string,
 ): Promise<AnnotationFormatHost> {
   await page.setViewportSize({ width: 1280, height: 800 });
   const uploads: { contentType: string; body: Buffer }[] = [];
@@ -84,7 +85,9 @@ async function setupAnnotationFormatHost(
     route.fulfill({
       status: 200,
       contentType: "image/svg+xml",
-      body: '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect x="40" width="40" height="40" fill="#e02020"/></svg>',
+      body:
+        sourceSvg ??
+        '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect x="40" width="40" height="40" fill="#e02020"/></svg>',
     }),
   );
   await mountHost(page, {
@@ -254,3 +257,75 @@ test("failed output preview preserves editing and reports failure without stayin
     page.getByRole("button", { name: "检查文件大小" }),
   ).toBeEnabled();
 });
+
+test.describe("高 DPI 编辑画布", () => {
+  test.use({ deviceScaleFactor: 2 });
+  test("显示缩放增加绘制分辨率但不改变输出像素和标注位置", async ({ page }) => {
+    const { uploads } = await setupAnnotationFormatHost(page);
+    const canvas = page.getByLabel("图片检查画布");
+    await page.getByLabel("显示缩放", { exact: true }).selectOption("2");
+    await expect
+      .poll(() =>
+        canvas.evaluate((c: HTMLCanvasElement) =>
+          Math.abs(
+            c.width - c.getBoundingClientRect().width * devicePixelRatio,
+          ),
+        ),
+      )
+      .toBeLessThanOrEqual(1);
+    await page.getByRole("button", { name: "矩形", exact: true }).click();
+    await canvas.scrollIntoViewIfNeeded();
+    const box = (await canvas.boundingBox())!;
+    await page.mouse.move(box.x + box.width * 0.1, box.y + box.height * 0.3);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width * 0.3, box.y + box.height * 0.45);
+    await page.mouse.up();
+    await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+    await expect.poll(() => uploads.length).toBe(1);
+    const before = await decodeUpload(page, uploads[0]!.body, "image/png");
+    await page.getByLabel("显示缩放", { exact: true }).selectOption("0.5");
+    await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+    await expect.poll(() => uploads.length).toBe(2);
+    const after = await decodeUpload(page, uploads[1]!.body, "image/png");
+    expect(before.width).toBe(80);
+    expect(before.height).toBe(40);
+    expect(after).toEqual(before);
+  });
+});
+
+for (const tool of ["模糊", "马赛克"]) {
+  test(`${tool} 的半透明预览和导出不叠加原图透明度`, async ({ page }) => {
+    const { uploads } = await setupAnnotationFormatHost(
+      page,
+      '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect width="80" height="40" fill="#e02020" fill-opacity="0.5"/></svg>',
+    );
+    const canvas = page.getByLabel("图片检查画布");
+    await page.getByRole("button", { name: tool, exact: true }).click();
+    await canvas.scrollIntoViewIfNeeded();
+    const box = (await canvas.boundingBox())!;
+    await page.mouse.move(box.x + box.width * 0.3, box.y + box.height * 0.3);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width * 0.7, box.y + box.height * 0.7);
+    await page.mouse.up();
+    await expect
+      .poll(() =>
+        canvas.evaluate(
+          (c: HTMLCanvasElement) =>
+            c
+              .getContext("2d")!
+              .getImageData(
+                Math.floor(c.width / 2),
+                Math.floor(c.height / 2),
+                1,
+                1,
+              ).data[3],
+        ),
+      )
+      .toBe(128);
+    await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+    await expect.poll(() => uploads.length).toBe(1);
+    const output = await decodeUpload(page, uploads[0]!.body, "image/png");
+    expect(output.pixels[(20 * 80 + 40) * 4 + 3]).toBe(128);
+    expect(output.pixels[(10 * 80 + 10) * 4 + 3]).toBe(128);
+  });
+}

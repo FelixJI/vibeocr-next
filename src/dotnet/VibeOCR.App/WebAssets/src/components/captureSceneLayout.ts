@@ -6,6 +6,7 @@ export interface CaptureSceneGeometry {
   readonly height: number;
   readonly desktopWidth: number;
   readonly desktopHeight: number;
+  readonly initialTool?: string;
 }
 
 export function captureSceneStyle(
@@ -14,7 +15,14 @@ export function captureSceneStyle(
   viewportHeight: number,
 ): Record<string, string> | undefined {
   if (!geometry) return undefined;
-  const values = Object.values(geometry);
+  const values = [
+    geometry.x,
+    geometry.y,
+    geometry.width,
+    geometry.height,
+    geometry.desktopWidth,
+    geometry.desktopHeight,
+  ];
   if (
     values.length !== 6 ||
     !values.every(Number.isFinite) ||
@@ -36,7 +44,7 @@ export function captureSceneStyle(
     y = geometry.y * sy;
   const width = geometry.width * sx,
     height = geometry.height * sy;
-  const toolHeight = Math.min(240, viewportHeight);
+  const toolHeight = Math.min(64, viewportHeight);
   const below = y + height + 8;
   const toolTop =
     below + toolHeight <= viewportHeight

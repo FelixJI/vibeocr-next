@@ -11,7 +11,9 @@
 // Production wiring spawns `python -m vibeocr.runtime.host.main`. Tests inject
 // an alternate FileName (e.g. a fake script) and read the ready line back.
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using VibeOCR.Runtime.Contracts.Generated;
 
 namespace VibeOCR.Platform.Inference;
@@ -176,6 +178,10 @@ public sealed class InferenceSupervisorProcess : IDisposable
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
+                // 消费侧钉死 UTF-8：不钉时会回落到本机控制台代码页，中文路径在
+                // 管道解码处即乱码；生产侧由 -X utf8 / PYTHONUTF8 保证字节流。
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
             };
             foreach (string argument in _options.Arguments)
             {
@@ -183,6 +189,10 @@ public sealed class InferenceSupervisorProcess : IDisposable
             }
             // Token via env — never on argv or in the ready envelope.
             startInfo.Environment["VIBEOCR_SUP_TOKEN"] = _sessionToken;
+            // UTF-8 输出与禁色默认值；EnvironmentOverrides 仍可按 launch 契约覆盖。
+            startInfo.Environment["PYTHONIOENCODING"] = "utf-8";
+            startInfo.Environment["PYTHONUTF8"] = "1";
+            startInfo.Environment["NO_COLOR"] = "1";
             if (_options.EnvironmentOverrides is not null)
             {
                 foreach ((string name, string value) in _options.EnvironmentOverrides)
@@ -385,6 +395,11 @@ public sealed class InferenceSupervisorProcess : IDisposable
         UnexpectedExit?.Invoke(this, new SupervisorUnexpectedExitEventArgs(exitCode));
     }
 
+    // 第三方库在管道下仍可能输出彩色控制码；日志入库/落盘前统一清洗。
+    private static readonly Regex AnsiEscapePattern = new(
+        @"\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\)|[@-Z\\-_])",
+        RegexOptions.Compiled);
+
     private void AppendLog(string channel, string? line)
     {
         if (string.IsNullOrEmpty(line))
@@ -392,20 +407,29 @@ public sealed class InferenceSupervisorProcess : IDisposable
             return;
         }
 
+        line = AnsiEscapePattern.Replace(line, string.Empty);
+        if (line.Length == 0)
+        {
+            return;
+        }
+
+        // 内存入库与落盘必须在同一锁内：stdout drain 线程与 stderr 事件
+        // 并发 AppendAllText 同一文件会 sharing violation，行永久丢失。
         lock (_logLock)
         {
             _logLines.Add($"[{channel}] {line}");
+            try
+            {
+                File.AppendAllText(
+                    _options.LogPath,
+                    $"[{DateTimeOffset.Now:O}] [{channel}] {line}{Environment.NewLine}");
+            }
+            catch
+            {
+                // Diagnostics must not destabilize the process owner.
+            }
         }
+        // Subscriber 在锁外触发，避免用户回调持锁。
         LogReceived?.Invoke(this, line);
-        try
-        {
-            File.AppendAllText(
-                _options.LogPath,
-                $"[{DateTimeOffset.Now:O}] [{channel}] {line}{Environment.NewLine}");
-        }
-        catch
-        {
-            // Diagnostics must not destabilize the process owner.
-        }
     }
 }

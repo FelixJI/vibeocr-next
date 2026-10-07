@@ -33,6 +33,7 @@ from vibeocr.runtime.documents.utils.mime_types import (
     mime_to_extension,
 )
 from vibeocr.runtime.jobs.budgets import AdapterCapability, InputItem
+from vibeocr.runtime.recognition.mineru_api import MineruCancelled
 from vibeocr.runtime_contracts import ErrorCode, EvictionReason, PipelineSelection
 
 if TYPE_CHECKING:
@@ -274,6 +275,15 @@ class MinerUProcessAdapter:
                 cancelled=cancelled,
             )
             payloads = self._map_results_back(raw_results, stem_to_index, len(items))
+        except MineruCancelled:
+            # 取消不是故障：只记一行 info，不用 logger.exception 打错误栈。
+            logger.info(
+                "[Supervisor][Recognize] action=recognize pipeline=MinerU "
+                "items=%d result=cancelled elapsed_ms=%.1f",
+                len(items),
+                (time.perf_counter() - started) * 1000,
+            )
+            raise
         except Exception:
             logger.exception(
                 "[Supervisor][Recognize] action=recognize pipeline=MinerU "

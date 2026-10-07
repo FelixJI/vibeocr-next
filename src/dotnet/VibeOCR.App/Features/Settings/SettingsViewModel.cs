@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using VibeOCR.App.ViewModels;
 using VibeOCR.App.Services;
 using VibeOCR.Contracts.HttpV2;
@@ -42,7 +43,27 @@ internal enum RuntimeDefaultModeBinding
 internal sealed record RecognitionSelectionSnapshot(
     RuntimeSelectionService Catalog,
     RuntimeDefaultModeBinding DefaultMode = RuntimeDefaultModeBinding.NotApplicable,
-    string? DefaultRecognitionModeId = null);
+    string? DefaultRecognitionModeId = null,
+    MineruRecognitionPreference? MineruPreference = null,
+    string? MineruPreferenceError = null)
+{
+    /// <summary>
+    /// 消费方统一入口：把持久化的全局 MinerU 偏好解析为提交配置。偏好
+    /// 语法无法解析时对 mineru_document fail closed（不静默回退目录默认），
+    /// 错误消息可直接展示。
+    /// </summary>
+    public MineruConfig? MineruConfigFor(string? modeId)
+    {
+        if (MineruPreferenceError is not null &&
+            string.Equals(modeId, "mineru_document", StringComparison.Ordinal))
+        {
+            throw new RuntimeSelectionException(
+                RuntimeSelectionErrorKind.InvalidCatalogEntry,
+                $"已保存的 MinerU 识别参数无法解析（{MineruPreferenceError}），请在本页重新保存修复。");
+        }
+        return Catalog.MineruConfigFor(modeId, MineruPreference);
+    }
+}
 
 public sealed class SettingsViewModel : INotifyPropertyChanged
 {
@@ -75,6 +96,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private IReadOnlyList<string> _selectedSourceIds = [];
     private MineruConnectionState? _mineruConnection;
     private DefaultRecognitionModeState? _defaultRecognitionMode;
+    private MineruRecognitionState? _mineruRecognition;
 
     public SettingsViewModel(
         IInferenceClient inference,
@@ -156,6 +178,17 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     {
         get => _defaultRecognitionMode;
         private set => SetField(ref _defaultRecognitionMode, value);
+    }
+
+    /// <summary>
+    /// 全局 MinerU 识别偏好投影（extra.mineru_recognition）；首次读取前
+    /// 为 null。Invalid=true 表示持久值语法无法解析：提交路径 fail closed，
+    /// 不静默降级目录默认。
+    /// </summary>
+    public MineruRecognitionState? MineruRecognition
+    {
+        get => _mineruRecognition;
+        private set => SetField(ref _mineruRecognition, value);
     }
 
     internal RecognitionSelectionSnapshot? RecognitionSelection =>
@@ -359,7 +392,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         RuntimeSelectionService? selection = _selection;
         if (selection is null)
         {
-            Status = "运行时目录尚未加载，请先刷新运行时";
+            Status = MineruCatalogUnavailableStatus();
             return;
         }
         if (mode == "remote" && !selection.SupportsMineruRemoteApi)
@@ -441,7 +474,10 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                     : $"模式 {SettingsViewModel.DisplayName(modeId)} 当前不可用，不能设为默认";
                 return;
             }
-            selection.MineruConfigFor(mode.Id);
+            // 与提交同一入口：校验默认模式切换为 mineru_document 时当前
+            // 全局偏好可解析（无效持久值 fail closed，提示先修复）。
+            (RecognitionSelection ?? new RecognitionSelectionSnapshot(selection))
+                .MineruConfigFor(mode.Id);
         }
         catch (RuntimeSelectionException error)
         {
@@ -478,6 +514,92 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
+    /// 通过 /v2/settings extra.mineru_recognition 写入全局 MinerU 识别
+    /// 偏好（tier/ocr_mode/page_range/language）。写入需要 Backend 声明
+    /// ocr.mineru-config.v1；tier/language 必须在当前目录内可用（未知或
+    /// 不可用 fail closed，不静默降级）。保存成功后重发布任务目录快照，
+    /// 在跑/已排队任务参数不变。
+    /// </summary>
+    public async Task SetMineruRecognitionAsync(
+        string? tier,
+        string? ocrMode,
+        string? pageRange,
+        string? language,
+        CancellationToken cancellationToken)
+    {
+        if (Maintenance.State.IsRunning) { Status = "运行环境维护尚未结束。"; return; }
+        RuntimeSelectionService? selection = _selection;
+        if (selection is null)
+        {
+            Status = MineruCatalogUnavailableStatus();
+            return;
+        }
+        if (!selection.SupportsMineruConfig)
+        {
+            Status = $"当前 Backend 未声明 {RuntimeSelectionService.MineruConfigCapability}，无法保存 MinerU 识别参数";
+            return;
+        }
+        if (!MineruRecognitionSettings.TryParseTier(tier, out MineruTier tierValue))
+        {
+            Status = "未知 MinerU 识别档位，请重新选择";
+            return;
+        }
+        if (!MineruRecognitionSettings.TryParseOcrMode(ocrMode, out MineruOcrMode ocrModeValue))
+        {
+            Status = "未知 MinerU OCR 模式，请重新选择";
+            return;
+        }
+        string normalizedPageRange = pageRange?.Trim().ToLowerInvariant() ?? "";
+        if (!MineruRecognitionSettings.IsValidPageRange(normalizedPageRange))
+        {
+            Status = "页码范围请填写 all 或 1,3-5；r1 表示最后一页";
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(language))
+        {
+            Status = "MinerU 语言不能为空";
+            return;
+        }
+        // 语言只能来自目录声明值（ch/korean/...），不造不存在的 wire 值；
+        // 仅本地模式生效，远程由服务端启动参数决定（UI 侧禁用编辑）。
+        if (!selection.MineruLanguages.Contains(language, StringComparer.Ordinal))
+        {
+            Status = "当前运行时目录不提供该 MinerU 语言，请重新选择";
+            return;
+        }
+        var preference = new MineruRecognitionPreference(
+            tierValue, ocrModeValue, normalizedPageRange, language);
+        try
+        {
+            // 与提交路径同一严格度：目录层校验（tier 可用性/语言在目录内）。
+            selection.MineruConfigFor("mineru_document", preference);
+        }
+        catch (RuntimeSelectionException error)
+        {
+            Status = LocalizeSelection(error);
+            return;
+        }
+        try
+        {
+            await _settingsGate.WaitAsync(cancellationToken);
+            try
+            {
+                SettingsSnapshot updated = await MineruRecognitionSettings.ApplyAsync(
+                    _inference, preference, cancellationToken);
+                MineruRecognition = MineruRecognitionSettings.Read(
+                    updated, selection.SupportsMineruConfig);
+                Status = "已保存 MinerU 识别参数";
+            }
+            finally { _settingsGate.Release(); }
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (ArgumentException error) { Status = error.Message; return; }
+        catch (InferenceClientException error) { Status = LocalizeV2(error.Code); return; }
+        // 保存成功：立即重发布偏好，消费方无需等待目录刷新。
+        PublishRecognitionSelection(selection, DefaultRecognitionMode);
+    }
+
+    /// <summary>
     /// 对已保存的远程 MinerU 配置执行真实准备：/v2/runtime/preload
     /// （pipelines=['MinerU']、recognition_modes=['mineru_document']），
     /// 请求由 Backend 转发到远程 MinerU 4 服务（前端不直连），完成后回读
@@ -490,7 +612,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         RuntimeSelectionService? selection = _selection;
         if (selection is null)
         {
-            Status = "运行时目录尚未加载，请先刷新运行时";
+            Status = MineruCatalogUnavailableStatus();
             return;
         }
         if (MineruConnection?.IsRemote != true)
@@ -536,9 +658,51 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             if (generation == Volatile.Read(ref _generation))
                 Status = "当前 Supervisor 不支持运行时预加载，请更新运行环境。";
         }
-        catch (InferenceClientException error) { if (generation == Volatile.Read(ref _generation)) Status = LocalizeV2(error.Code); }
+        catch (InferenceClientException error) { if (generation == Volatile.Read(ref _generation)) Status = LocalizeMineruPreparationFailure(error); }
         catch (RuntimeSelectionException error) { if (generation == Volatile.Read(ref _generation)) Status = LocalizeSelection(error); }
         finally { EndBusy(generation); }
+    }
+
+    /// <summary>
+    /// 目录未加载时的 MinerU 配置指引。无已启动运行环境承载识别服务时刷新
+    /// 永远无效，必须如实说明：远程 MinerU 不需要本地 MinerU/PaddleOCR 依赖，
+    /// 但设置与目录服务运行在已安装的运行环境里。环境证据来自 Runtime
+    /// 权威快照，宿主不自行推断依赖图，也不默认安装任何引擎。
+    /// </summary>
+    internal string MineruCatalogUnavailableStatus()
+    {
+        ManagedEnvironmentList? snapshot = Environments?.Snapshot;
+        if (snapshot is null)
+            return "运行时目录尚未加载，请先刷新运行时";
+        bool hasInstalledActive = snapshot.ActiveId is { } activeId &&
+            snapshot.Environments.Any(item => item.Id == activeId &&
+                string.Equals(item.Status, "installed", StringComparison.Ordinal));
+        return hasInstalledActive
+            ? "运行时目录尚未加载，识别服务可能正在启动，请稍后重新检查状态。"
+            : "当前没有已启动的运行环境承载识别服务。远程 MinerU 不需要本地 MinerU/PaddleOCR 依赖，但连接配置由识别服务保存：可在 MinerU 连接区启用远程模式，自动从安装包准备基础服务。";
+    }
+
+    /// <summary>
+    /// 远程准备失败的本地化：仅对 Runtime 白名单化的 ValidationError
+    /// reason（mineru_api_endpoint_incompatible /
+    /// mineru_api_authentication_failed）给出可操作建议；其余按既有
+    /// v2 错误码本地化，不回显远程服务正文、URL 或 API Key。
+    /// </summary>
+    internal static string LocalizeMineruPreparationFailure(InferenceClientException error)
+    {
+        if (error.Code == HttpV2ErrorCode.ValidationError &&
+            error.Detail.TryGetValue("reason", out JsonElement reason) &&
+            reason.ValueKind == JsonValueKind.String)
+        {
+            switch (reason.GetString())
+            {
+                case "mineru_api_endpoint_incompatible":
+                    return "远程 MinerU 服务接口不匹配：请填自部署 MinerU 4 解析服务的根地址（如 https://mineru4.example.com），不要带 /file_parse 等具体路径，也不要填 OpenAI/VLM 兼容地址；修正后保存再重试。";
+                case "mineru_api_authentication_failed":
+                    return "远程 MinerU 服务拒绝了认证：请检查已保存的 API Key 是否正确且对该服务有效；修正后保存再重试。";
+            }
+        }
+        return LocalizeV2(error.Code);
     }
 
     /// <summary>Stage the accelerator for the pending feature selection.</summary>
@@ -736,6 +900,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                 settings, selection.SupportsMineruRemoteApi);
             DefaultRecognitionMode = DefaultRecognitionModeSettings.Read(
                 settings, selection.SupportsDefaultRecognitionMode);
+            MineruRecognition = MineruRecognitionSettings.Read(
+                settings, selection.SupportsMineruConfig);
             Sources = ProjectSources(selection, selectedSourceIds);
             IReadOnlyList<string> selectedFeatures = _selectionStaged ? PendingFeatureIds :
                 selection.Variants.Where(variant => variant.Accelerator == PendingBackend &&
@@ -793,12 +959,37 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     private void PublishRecognitionSelection(
         RuntimeSelectionService selection,
-        DefaultRecognitionModeState? defaultMode = null) => Volatile.Write(
+        DefaultRecognitionModeState? defaultMode = null)
+    {
+        // 统一从当前 MineruRecognition 投影解析：任何重发布路径（目录
+        // 加载/保存默认模式/保存识别参数）都携带已存偏好或 Invalid
+        // fail-closed 标记，不会把已保存配置清掉。
+        (MineruRecognitionPreference? preference, string? error) =
+            MineruRecognitionPreferenceFrom(MineruRecognition);
+        Volatile.Write(
             ref _recognitionSelection,
             new RecognitionSelectionSnapshot(
                 selection,
                 BindingFor(defaultMode),
-                defaultMode?.ModeId));
+                defaultMode?.ModeId,
+                preference,
+                error));
+    }
+
+    private static (MineruRecognitionPreference? Preference, string? Error)
+        MineruRecognitionPreferenceFrom(MineruRecognitionState? state)
+    {
+        if (state is not { Supported: true, Stored: true })
+        {
+            return (null, null);
+        }
+        if (state.Invalid || state.Tier is not { } tier || state.OcrMode is not { } ocrMode ||
+            state.PageRange is not { } pageRange || state.Language is not { } language)
+        {
+            return (null, state.InvalidReason ?? "mineru_recognition_shape");
+        }
+        return (new MineruRecognitionPreference(tier, ocrMode, pageRange, language), null);
+    }
 
     private static RuntimeDefaultModeBinding BindingFor(
         DefaultRecognitionModeState? defaultMode) => defaultMode switch

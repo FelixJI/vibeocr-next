@@ -364,6 +364,9 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
             }
 
             const string clientItemKey = "recognition-input";
+            // 单输入提交前归一化：仅 PDF 输入保留非 all 页码范围；图片/
+            // 截图等图像输入固定 all（上游对非 PDF 输入拒绝页码范围）。
+            // 批量/逐文件范围由批量链路自行处理，不经此路径。
             InferenceJobRun job = await _jobs.RunRecognitionAsync(
                 pipeline,
                 JobPriority.Interactive,
@@ -377,7 +380,10 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
                 options: options,
                 cancellationToken: run.Token,
                 engine: engine,
-                mineru: pipeline == "MinerU" ? mineru : null);
+                mineru: NormalizeMineruPageRange(
+                    pipeline == "MinerU" ? mineru : null,
+                    input.MediaType,
+                    input.DisplayName));
             JobSnapshot snapshot = job.Snapshot;
 
             if (generation != Volatile.Read(ref _generation)) return;
@@ -444,6 +450,26 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
                     run.Dispose();
             }
         }
+    }
+
+    /// <summary>
+    /// 单输入提交前的 MinerU 页码范围归一化：仅明确 PDF 输入保留非 all
+    /// 范围；图片/截图等图像输入固定 all（上游对非 PDF 输入会拒绝页码
+    /// 范围）。tier/ocr_mode/language 原样保留，全局偏好不被丢弃。
+    /// </summary>
+    internal static MineruConfig? NormalizeMineruPageRange(
+        MineruConfig? config,
+        string? mediaType,
+        string? displayName)
+    {
+        if (config is null || config.PageRange == MineruConfig.AllPages)
+        {
+            return config;
+        }
+        bool isPdf =
+            string.Equals(mediaType, "application/pdf", StringComparison.OrdinalIgnoreCase) ||
+            (displayName?.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) ?? false);
+        return isPdf ? config : config with { PageRange = MineruConfig.AllPages };
     }
 
     private static string LocalizeV2(HttpV2ErrorCode code) => code switch

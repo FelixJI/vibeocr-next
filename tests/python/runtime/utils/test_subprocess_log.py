@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import logging
 
-from vibeocr.runtime.processes.utils.subprocess_log import SubprocessLogForwarder
+from vibeocr.runtime.processes.utils.subprocess_log import (
+    SubprocessLogForwarder,
+    strip_ansi,
+)
 
 
 def _make_forwarder(threshold: int = 50) -> SubprocessLogForwarder:
@@ -136,6 +139,37 @@ class TestTracebackForwarding:
         with caplog.at_level(logging.DEBUG, logger="test.subprocess"):
             forwarder.forward("ValueError: bad value here")
         assert caplog.records[0].levelno == logging.ERROR
+
+
+class TestAnsiBoundary:
+    """第三方彩色日志在转发边界被清洗，不携带控制码且不丢级别。"""
+
+    def test_strip_ansi_removes_csi_sgr_and_osc(self):
+        assert strip_ansi("\x1b[32mINFO\x1b[0m ok") == "INFO ok"
+        assert strip_ansi("\x1b]0;title\x07text") == "text"
+        assert strip_ansi("\x1b[1m粗体\x1b[m") == "粗体"
+        assert strip_ansi("plain 中文 Downloads\\下载") == "plain 中文 Downloads\\下载"
+
+    def test_colored_structured_line_keeps_level_and_text(self, caplog):
+        """彩色包裹的结构化行不应因 ANSI 前缀被当成裸 print 折叠丢失。"""
+        forwarder = _make_forwarder()
+        with caplog.at_level(logging.DEBUG, logger="test.subprocess"):
+            forwarder.forward(
+                "\x1b[32m2026-08-11 10:00:00,123 [INFO] worker: "
+                "打开 Downloads\\下载\\截图 01.png\x1b[0m"
+            )
+        assert len(caplog.records) == 1
+        assert caplog.records[0].levelno == logging.INFO
+        assert "\x1b" not in caplog.records[0].message
+        assert "Downloads\\下载\\截图 01.png" in caplog.records[0].message
+
+    def test_colored_traceback_line_still_error(self, caplog):
+        forwarder = _make_forwarder()
+        with caplog.at_level(logging.DEBUG, logger="test.subprocess"):
+            forwarder.forward("\x1b[31mTraceback (most recent call last):\x1b[0m")
+        assert len(caplog.records) == 1
+        assert caplog.records[0].levelno == logging.ERROR
+        assert "\x1b" not in caplog.records[0].message
 
 
 class TestSplitMixedLines:

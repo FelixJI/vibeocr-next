@@ -161,15 +161,22 @@ public sealed partial class MainWindow
 
   private async Task ClickSmokeButtonAsync(string label)
   {
-    string script = "(() => { const b=Array.from(document.querySelectorAll('button'))" +
-      ".find(b => b.textContent?.trim() === " + JsonSerializer.Serialize(label) +
-      "); if (!b || b.disabled) return false; b.click(); return true; })()";
-    var surface = label is "纯截图" or "截图取字" or "长截图" or "截图识别"
-      ? WorkbenchWebView : SmokeEditorWebView;
-    if (await surface.CoreWebView2.ExecuteScriptAsync(script) != "true")
+    bool capture = label is "纯截图";
+    var surface = capture ? WorkbenchWebView : SmokeEditorWebView;
+    static string ClickScript(string name) =>
+      "(() => { const b=Array.from(document.querySelectorAll('button'))" +
+      ".find(b => b.textContent?.trim() === " + JsonSerializer.Serialize(name) +
+      "); if (!b || b.disabled || b.getAttribute('aria-disabled')==='true') return false; b.click(); return true; })()";
+    if (capture)
+    {
+      // 右上角统一截图按钮单击直接开始普通截图，不再经过菜单。
+      if (await surface.CoreWebView2.ExecuteScriptAsync(ClickScript("截图")) != "true")
+        throw new InvalidOperationException("Screenshot button unavailable.");
+      return;
+    }
+    if (await surface.CoreWebView2.ExecuteScriptAsync(ClickScript(label)) != "true")
       throw new InvalidOperationException($"Screenshot smoke button unavailable: {label}");
   }
-
   private async Task<RecognitionWorkbenchState> WaitForScreenshotStateAsync(
     Func<RecognitionWorkbenchState, bool> matches, TimeSpan timeout)
   {

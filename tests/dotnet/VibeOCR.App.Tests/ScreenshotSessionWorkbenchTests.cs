@@ -2322,6 +2322,42 @@ public sealed class ScreenshotSessionWorkbenchTests
     }
   }
 
+  /// <summary>
+  /// 目录 + 默认识别类型能力的可配置客户端：defaultMode 非空时回显
+  /// extra.default_recognition_mode；defaultCapability=false 模拟旧
+  /// Backend 未声明能力（NotApplicable）。
+  /// </summary>
+  private sealed class SelectionCatalogClient(
+      bool rapidReady = true, string? defaultMode = null, bool defaultCapability = true)
+    : TextModeHealthClient(rapidReady)
+  {
+    public override async Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
+    {
+      Wire.Health health = await base.GetHealthAsync(cancellationToken);
+      return defaultCapability
+        ? health with
+        {
+          Capabilities =
+          [
+            .. health.Capabilities!,
+            RuntimeSelectionService.DefaultRecognitionModeCapability,
+          ],
+        }
+        : health;
+    }
+
+    public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>
+      Task.FromResult(new SettingsSnapshot
+      {
+        Extra = defaultMode is null
+          ? new Dictionary<string, JsonElement>()
+          : new Dictionary<string, JsonElement>
+          {
+            ["default_recognition_mode"] = JsonSerializer.SerializeToElement(defaultMode),
+          },
+      });
+  }
+
   /// <summary>Records submissions; outcomes carry real text_blocks geometry.</summary>
   private class TextLayerRecognitionClient(
     bool rapidReady = true, bool windowsReady = true, bool noText = false)
@@ -2756,7 +2792,10 @@ public sealed class ScreenshotSessionWorkbenchTests
     string root = TemporaryRoot();
     try
     {
-      var inference = new TextModeHealthClient(rapidReady: false);
+      // 目录真实加载且默认能力已声明、已提交 windows_text：文字图标绑定
+      // 设置选择的持久默认引擎，表格/公式按 typed 目录分类投影。
+      var inference = new SelectionCatalogClient(
+        rapidReady: false, defaultMode: "windows_text");
       var inputs = new SelectionActionCaptureInput(ScreenshotSelectionAction.Edit);
       var recognition = new RecognitionViewModel(inference, inputs);
       var settings = new SettingsViewModel(inference);
@@ -2767,6 +2806,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         recognition, root, broker, annotationStore, settings,
         inferenceAttached: () => true);
 
+      await handler.ExecuteAsync(new SetThemeCommand(WorkbenchTheme.Light), TestContext.Current.CancellationToken);
       using (var captured = new RecognitionStateAwaiter(handler,
         state => !state.IsBusy && state.ScreenshotSession is not null))
       {
@@ -2775,21 +2815,24 @@ public sealed class ScreenshotSessionWorkbenchTests
         await captured.Task;
       }
 
-      // 菜单只消费宿主已加载的真实 typed 目录投影：同一 choice 的 id/
-      // 显示名/availability，未额外复制引擎表。
+      // 识别区固定三类语义图标：文字（设置默认引擎，名称固定“文字识别”、
+      // 引擎名仅进 Hint/Tooltip）、表格、公式；只消费宿主已加载的真实
+      // typed 目录投影（availability/reason 原样透传），不额外复制引擎表。
       Assert.NotNull(inputs.ReceivedActions);
+      Assert.Equal(WorkbenchTheme.Light, inputs.ReceivedActions.Theme);
       ScreenshotRecognitionModeEntry[] entries = [.. inputs.ReceivedActions!.Modes];
-      Assert.Equal(8, entries.Length);
+      Assert.Equal(3, entries.Length);
       Assert.All(entries, entry => Assert.False(string.IsNullOrWhiteSpace(entry.DisplayName)));
       Assert.Contains(entries, entry =>
-        entry.ModeId == "rapid_text" && entry.Availability == "preparation_required" &&
-        entry.ReasonCode == "runtime_component_missing");
+        entry.ModeId == "windows_text" && entry.Availability == "ready" &&
+        entry.DisplayName == "文字识别" && entry.IconKey == "textRecognition" &&
+        entry.Hint!.Contains("Windows OCR（系统内置）", StringComparison.Ordinal));
       Assert.Contains(entries, entry =>
-        entry.ModeId == "windows_text" && entry.Availability == "ready");
+        entry.ModeId == "paddle_table" && entry.DisplayName == "表格识别" &&
+        entry.Availability == "ready" && entry.IconKey == "tableRecognition" && entry.Hint is null);
       Assert.Contains(entries, entry =>
-        entry.ModeId == "paddle_table" && entry.DisplayName == "表格结构识别（PaddleOCR）");
-      Assert.Contains(entries, entry =>
-        entry.ModeId == "paddle_formula" && entry.DisplayName == "数学公式识别（PaddleOCR）");
+        entry.ModeId == "paddle_formula" && entry.DisplayName == "公式识别" &&
+        entry.Availability == "ready" && entry.IconKey == "formulaRecognition" && entry.Hint is null);
       // 纯截图零目录加载/零推理提交（submit 会直接抛错）。
       Assert.Equal(1, inputs.CaptureCalls);
     }
@@ -2800,7 +2843,7 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   [Fact]
-  public async Task OrdinaryCaptureWithoutLoadedCatalogSendsEmptyProjection()
+  public async Task OrdinaryCaptureWithoutLoadedCatalogSendsDisabledThreeCategoryProjection()
   {
     string root = TemporaryRoot();
     try
@@ -2822,15 +2865,176 @@ public sealed class ScreenshotSessionWorkbenchTests
           TestContext.Current.CancellationToken);
         await captured.Task;
       }
-      // 无 Runtime 时本地截图仍可用；目录投影为空（动作栏解释并可进设置），
-      // 不破块、不臆造引擎表。
+      // 无 Runtime 时本地截图仍可用；三类图标固定呈现并统一禁用指引
+      // （catalog_unavailable→设置），不破块、不臆造引擎表。
       Assert.NotNull(inputs.ReceivedActions);
-      Assert.Empty(inputs.ReceivedActions!.Modes);
+      ScreenshotRecognitionModeEntry[] entries = [.. inputs.ReceivedActions!.Modes];
+      Assert.Equal(3, entries.Length);
+      Assert.Equal("文字识别", entries[0].DisplayName);
+      Assert.Equal("表格识别", entries[1].DisplayName);
+      Assert.Equal("公式识别", entries[2].DisplayName);
+      Assert.All(entries, entry =>
+      {
+        Assert.Equal("", entry.ModeId);
+        Assert.Equal("catalog_unavailable", entry.Availability);
+      });
       Assert.Equal(0, inference.SubmitCalls);
     }
     finally
     {
       Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task SelectionMenuProjectionBindsCommittedDefaultOnlyForTextSemantics()
+  {
+    // 已提交默认属于文字/文档语义：文字图标携带该 id（复用既有持久默认
+    // 解析），控件名称固定“文字识别”、引擎名仅进 Hint；表格/公式按
+    // specialized 族 pipeline 分类；availability 原样透传。
+    foreach (string defaultId in new[] { "rapid_text", "mineru_document" })
+    {
+      var settings = new SettingsViewModel(new SelectionCatalogClient(defaultMode: defaultId));
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      ScreenshotRecognitionModeEntry[] entries =
+        [.. DesktopWorkbenchCommandHandler.BuildSelectionModeEntries(settings.RecognitionSelection)];
+      Assert.Equal(3, entries.Length);
+      ScreenshotRecognitionModeEntry text = entries[0];
+      Assert.Equal(defaultId, text.ModeId);
+      Assert.Equal("ready", text.Availability);
+      Assert.Equal("文字识别", text.DisplayName);
+      Assert.Contains(SettingsViewModel.DisplayName(defaultId), text.Hint!, StringComparison.Ordinal);
+      Assert.Equal(("paddle_table", "表格识别", "tableRecognition"),
+        (entries[1].ModeId, entries[1].DisplayName, entries[1].IconKey));
+      Assert.Equal(("paddle_formula", "公式识别", "formulaRecognition"),
+        (entries[2].ModeId, entries[2].DisplayName, entries[2].IconKey));
+    }
+  }
+
+  [Fact]
+  public async Task SelectionMenuProjectionKeepsUnavailableDefaultExplicitlyDisabled()
+  {
+    // 默认引擎需要准备：文字图标透传 preparation_required（禁用+原因），
+    // 不静默改选其他就绪文字引擎；表格/公式不受影响。
+    var settings = new SettingsViewModel(
+      new SelectionCatalogClient(rapidReady: false, defaultMode: "rapid_text"));
+    await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+    ScreenshotRecognitionModeEntry[] entries =
+      [.. DesktopWorkbenchCommandHandler.BuildSelectionModeEntries(settings.RecognitionSelection)];
+    Assert.Equal(3, entries.Length);
+    ScreenshotRecognitionModeEntry text = entries[0];
+    Assert.Equal("rapid_text", text.ModeId);
+    Assert.Equal("preparation_required", text.Availability);
+    Assert.Equal("runtime_component_missing", text.ReasonCode);
+    Assert.All(entries[1..], entry => Assert.Equal("ready", entry.Availability));
+  }
+
+  [Fact]
+  public async Task SelectionMenuProjectionNeverSubstitutesTableEngineForText()
+  {
+    // 已提交默认是表格引擎：文字图标显式禁用（空 modeId + default_invalid
+    // 稳定词汇），绝不把表格引擎冒充文字，也不静默改选其他文字引擎。
+    var settings = new SettingsViewModel(new SelectionCatalogClient(defaultMode: "paddle_table"));
+    await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+    ScreenshotRecognitionModeEntry[] entries =
+      [.. DesktopWorkbenchCommandHandler.BuildSelectionModeEntries(settings.RecognitionSelection)];
+    Assert.Equal(3, entries.Length);
+    ScreenshotRecognitionModeEntry text = entries[0];
+    Assert.Equal("", text.ModeId);
+    Assert.Equal("default_invalid", text.Availability);
+    Assert.Equal("文字识别", text.DisplayName);
+    // 表格/公式图标照常按目录分类可用。
+    Assert.Equal("paddle_table", entries[1].ModeId);
+    Assert.Equal("ready", entries[1].Availability);
+    Assert.Equal("paddle_formula", entries[2].ModeId);
+    Assert.Equal("ready", entries[2].Availability);
+  }
+
+  [Fact]
+  public async Task SelectionMenuProjectionDistinguishesMissingBrokenAndUnknownDefaults()
+  {
+    // 能力未声明（旧 Backend）=尚未配置；能力已声明但未回显/持久值无效/
+    // 不在当前目录=不能用作文字识别；一律禁用且不携带可提交 id。
+    var unsupported = new SettingsViewModel(new SelectionCatalogClient(defaultCapability: false));
+    await unsupported.LoadSelectionAsync(TestContext.Current.CancellationToken);
+    ScreenshotRecognitionModeEntry unsupportedText =
+      DesktopWorkbenchCommandHandler.BuildSelectionModeEntries(unsupported.RecognitionSelection)[0];
+    Assert.Equal(("", "default_missing"), (unsupportedText.ModeId, unsupportedText.Availability));
+
+    var unread = new SettingsViewModel(new SelectionCatalogClient(defaultMode: null));
+    await unread.LoadSelectionAsync(TestContext.Current.CancellationToken);
+    ScreenshotRecognitionModeEntry unreadText =
+      DesktopWorkbenchCommandHandler.BuildSelectionModeEntries(unread.RecognitionSelection)[0];
+    Assert.Equal(("", "default_invalid"), (unreadText.ModeId, unreadText.Availability));
+
+    RuntimeSelectionService catalog = new(await new SelectionCatalogClient().GetHealthAsync(
+      TestContext.Current.CancellationToken));
+    foreach (RecognitionSelectionSnapshot broken in new[]
+             {
+               new RecognitionSelectionSnapshot(catalog, RuntimeDefaultModeBinding.Invalid),
+               new RecognitionSelectionSnapshot(catalog, RuntimeDefaultModeBinding.Bound, "not_a_mode"),
+             })
+    {
+      ScreenshotRecognitionModeEntry text =
+        DesktopWorkbenchCommandHandler.BuildSelectionModeEntries(broken)[0];
+      Assert.Equal("", text.ModeId);
+      Assert.Equal("default_invalid", text.Availability);
+    }
+  }
+
+  [Fact]
+  public void SelectionMenuProjectionWithoutTypedModeCatalogKeepsThreeDisabledIcons()
+  {
+    // 无 Runtime/目录未加载：三类图标固定呈现并统一禁用指引，
+    // 不臆造可用引擎、也不退回单个泛“未就绪”条目。
+    ScreenshotRecognitionModeEntry[] unloaded =
+      [.. DesktopWorkbenchCommandHandler.BuildSelectionModeEntries(null)];
+    Assert.Equal(3, unloaded.Length);
+    Assert.Equal("文字识别", unloaded[0].DisplayName);
+    Assert.Equal("表格识别", unloaded[1].DisplayName);
+    Assert.Equal("公式识别", unloaded[2].DisplayName);
+    Assert.All(unloaded, entry =>
+    {
+      Assert.Equal("", entry.ModeId);
+      Assert.Equal("catalog_unavailable", entry.Availability);
+    });
+
+    var settings = new SettingsViewModel(new SelectionCatalogClient(defaultCapability: false));
+    Assert.Null(settings.RecognitionSelection);
+    ScreenshotRecognitionModeEntry[] noCatalog =
+      [.. DesktopWorkbenchCommandHandler.BuildSelectionModeEntries(
+        settings.RecognitionSelection)];
+    Assert.Equal(3, noCatalog.Length);
+    Assert.All(noCatalog, entry => Assert.Equal("catalog_unavailable", entry.Availability));
+  }
+
+  /// <summary>
+  /// 选区动作栏图标契约：目录键全部可解析为非空矢量 path（旧 FontIcon
+  /// 字形在系统字体缺失时会渲染为空白）；易混淆组（文字/表格/公式、
+  /// 马赛克/模糊、画笔/荧光笔）必须使用互不相同的形状，不靠颜色区分。
+  /// </summary>
+  [Fact]
+  public void SelectionToolbarIconCatalogResolvesDistinctVectorPaths()
+  {
+    string[] toolbarKeys =
+    [
+      "rectangle", "ellipse", "arrow", "pen", "highlighter", "text",
+      "numbering", "mosaic", "blur", "exclude", "inpaint", "textSelect",
+      "textRecognition", "tableRecognition", "formulaRecognition",
+      "scrollCapture", "settings", "copy", "save", "pin",
+      "reselect", "exit", "magnifier", "confirm", "undo", "redo",
+    ];
+    Assert.All(toolbarKeys, key =>
+      Assert.True(ScreenshotToolbarIcons.TryGetPath(key) is not null, $"缺失图标：{key}"));
+    foreach (string[] group in new string[][]
+             {
+               ["textRecognition", "tableRecognition", "formulaRecognition"],
+               ["mosaic", "blur"],
+               ["pen", "highlighter"],
+             })
+    {
+      // 同组内形状必须可区分：不同键不得解析到同一条 path 数据。
+      Assert.Equal(group.Length, group.Select(ScreenshotToolbarIcons.TryGetPath).ToHashSet().Count);
     }
   }
 

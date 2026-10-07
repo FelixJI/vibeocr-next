@@ -32,6 +32,7 @@ from vibeocr.runtime.documents.tables.reducer import rebuild_result_projections
 from vibeocr.runtime.documents.utils.mime_types import mime_to_extension
 from vibeocr.runtime.environments.runtime_maintenance import safe_runtime_detail
 from vibeocr.runtime.processes.utils.job_object import JobObjectGuard
+from vibeocr.runtime.processes.utils.subprocess_log import strip_ansi
 from vibeocr.runtime.recognition.core.constants import Constants
 from vibeocr.runtime.recognition.core.singleton_meta import SingletonMeta
 from vibeocr.runtime.recognition.mineru_api import (
@@ -137,11 +138,9 @@ class MinerUService(metaclass=SingletonMeta):
 
         def _read():
             try:
-                while process.poll() is None:
-                    line = stderr.readline()
-                    if not line:
-                        continue
-                    text = line.decode("utf-8", errors="replace").strip()
+                # 退出后仍排空管道，保留崩溃日志的最后几行。
+                while line := stderr.readline():
+                    text = strip_ansi(line.decode("utf-8", errors="replace")).strip()
                     if not text:
                         continue
                     level = self._parse_api_log_level(text)
@@ -478,7 +477,7 @@ class MinerUService(metaclass=SingletonMeta):
 
     def prepare(self) -> None:
         """Explicit preload verifies actual parsing instead of claiming health is ready."""
-        import fitz
+        import pymupdf as fitz
         from vibeocr.runtime.recognition.mineru_readiness import (
             mark_executed,
             mark_failed,
@@ -556,9 +555,18 @@ class MinerUService(metaclass=SingletonMeta):
             if isinstance(document, MineruApiError):
                 result[Path(filename).stem] = {"mineru_error": str(document)}
                 continue
-            result[Path(filename).stem] = ocr_result_to_payload(
-                project_document(document)
-            )
+            try:
+                projected = project_document(document)
+            except MineruCancelled:
+                # 取消必须无条件上抛，绝不允许波及为文件错误。
+                raise
+            except MineruApiError as exc:
+                # 投影契约失败对同一结果是确定性的：按文件隔离为
+                # mineru_error（与上游 per-file 失败同语义），不进入
+                # supervisor 通用恢复路径重发整批解析，同批其他文件继续成功。
+                result[Path(filename).stem] = {"mineru_error": str(exc)}
+                continue
+            result[Path(filename).stem] = ocr_result_to_payload(projected)
         return result
 
     def _get_extension(self, mime_type: str) -> str:

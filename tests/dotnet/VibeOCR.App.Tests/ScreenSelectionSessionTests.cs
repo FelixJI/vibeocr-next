@@ -6,6 +6,19 @@ namespace VibeOCR.App.Tests;
 
 public sealed class ScreenSelectionSessionTests
 {
+  [Theory]
+  [InlineData(-1, true, true, Microsoft.UI.Input.InputSystemCursorShape.Hand)]
+  [InlineData(0, true, false, Microsoft.UI.Input.InputSystemCursorShape.Hand)]
+  [InlineData(-1, false, true, Microsoft.UI.Input.InputSystemCursorShape.SizeAll)]
+  [InlineData(-1, false, false, Microsoft.UI.Input.InputSystemCursorShape.Cross)]
+  [InlineData(0, false, true, Microsoft.UI.Input.InputSystemCursorShape.SizeNorthwestSoutheast)]
+  [InlineData(2, false, true, Microsoft.UI.Input.InputSystemCursorShape.SizeNortheastSouthwest)]
+  [InlineData(1, false, true, Microsoft.UI.Input.InputSystemCursorShape.SizeNorthSouth)]
+  [InlineData(3, false, true, Microsoft.UI.Input.InputSystemCursorShape.SizeWestEast)]
+  public void PointerFeedbackMatchesRegion(int handle, bool toolbar, bool inside,
+    Microsoft.UI.Input.InputSystemCursorShape expected) =>
+    Assert.Equal(expected, ScreenRegionPicker.PointerCursor(handle, toolbar, inside));
+
   [Fact]
   public void ReplacementSceneRestoresOriginalOwnerOnlyWhenFinalSceneCloses()
   {

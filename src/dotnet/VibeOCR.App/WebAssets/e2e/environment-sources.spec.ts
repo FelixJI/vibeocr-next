@@ -1,5 +1,10 @@
 import { expect, test } from "@playwright/test";
-import { expectCommand, mountHost, snapshot } from "./workbench-host";
+import {
+  expectCommand,
+  mountHost,
+  sendState,
+  snapshot,
+} from "./workbench-host";
 
 const sources = [
   {
@@ -210,4 +215,30 @@ test("recipe choice is unified into purpose and device selects", async ({
       recipe: "rapidocr+mineru-cpu",
     },
   });
+});
+
+test("remote MinerU can be enabled without an installed environment", async ({
+  page,
+}) => {
+  const settings = {
+    environments: [],
+    activeEnvironmentId: null,
+    environmentBusy: false,
+  };
+  await mountHost(page, {
+    ...snapshot,
+    route: "settings",
+    capabilities: ["runtime.environments"],
+    features: { settings },
+  });
+  const enable = page.getByRole("button", { name: "启用 MinerU 远程模式" });
+  await expect(enable).toBeEnabled();
+  await enable.click();
+  await expectCommand(page, {
+    scope: "settings",
+    action: "prepareRemoteHost",
+    arguments: {},
+  });
+  await sendState(page, "settings", { ...settings, environmentBusy: true });
+  await expect(enable).toBeDisabled();
 });

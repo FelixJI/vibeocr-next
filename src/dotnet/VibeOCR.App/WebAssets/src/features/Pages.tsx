@@ -13,8 +13,6 @@ import {
 import {
   ArrowDown,
   ArrowUp,
-  Aperture,
-  Camera,
   ClipboardPaste,
   Copy,
   Download,
@@ -41,6 +39,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 
 import type { AppActions, AppViewState } from "../app/types";
+import { CaptureButton } from "../components/CaptureButton";
 import { CapabilityGate } from "../components/CapabilityGate";
 import { HotkeyRecorder } from "../components/HotkeyRecorder";
 import { ImageCanvasEditor } from "../components/ImageCanvasEditor";
@@ -61,6 +60,8 @@ interface ResourceReference {
 }
 
 interface BatchItemState {
+  readonly pageRange?: string | null;
+  readonly supportsPageRange?: boolean;
   readonly id: string;
   readonly name: string;
   readonly statusCode: string;
@@ -740,6 +741,69 @@ function mineruConnection(value: unknown): MineruConnectionState | undefined {
     : undefined;
 }
 
+interface MineruTierOptionState {
+  readonly id: string;
+  readonly availability: string;
+  readonly reasonCode: string | null;
+}
+
+function mineruTierOptions(value: unknown): readonly MineruTierOptionState[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (item): item is MineruTierOptionState =>
+      item !== null &&
+      typeof item === "object" &&
+      !Array.isArray(item) &&
+      typeof (item as Partial<MineruTierOptionState>).id === "string" &&
+      typeof (item as Partial<MineruTierOptionState>).availability === "string",
+  );
+}
+
+interface MineruRecognitionState {
+  readonly supported: boolean;
+  readonly stored: boolean;
+  readonly tier: string | null;
+  readonly ocrMode: string | null;
+  readonly pageRange: string | null;
+  readonly language: string | null;
+  readonly invalid: boolean;
+  readonly invalidReason: string | null;
+  readonly tiers: readonly MineruTierOptionState[];
+  readonly languages: readonly string[];
+  readonly defaultTier: string | null;
+}
+
+// 全局 MinerU 识别偏好投影：tier/language 可用性来自目录；远程模式下
+// language 仅是本地偏好，不代表服务端当前值。
+function mineruRecognition(value: unknown): MineruRecognitionState | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return undefined;
+  const candidate = value as Partial<MineruRecognitionState>;
+  if (
+    typeof candidate.supported !== "boolean" ||
+    typeof candidate.stored !== "boolean" ||
+    typeof candidate.invalid !== "boolean"
+  )
+    return undefined;
+  return {
+    supported: candidate.supported,
+    stored: candidate.stored,
+    tier: candidate.tier ?? null,
+    ocrMode: candidate.ocrMode ?? null,
+    pageRange: candidate.pageRange ?? null,
+    language: candidate.language ?? null,
+    invalid: candidate.invalid === true,
+    invalidReason: candidate.invalidReason ?? null,
+    tiers: mineruTierOptions(candidate.tiers),
+    languages: Array.isArray(candidate.languages)
+      ? candidate.languages.filter(
+          (item): item is string => typeof item === "string",
+        )
+      : [],
+    defaultTier: candidate.defaultTier ?? null,
+  };
+}
+
 interface DefaultRecognitionModeState {
   readonly supported: boolean;
   readonly modeId: string | null;
@@ -1194,52 +1258,10 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
           >
             从剪贴板
           </CapabilityGate>
-          <CapabilityGate
-            appearance="primary"
-            capability="recognition.capture"
+          <CaptureButton
             capabilities={viewState.capabilities}
-            action={{ type: "recognition.captureScreen" }}
             actions={actions}
-            icon={<Camera aria-hidden="true" size={16} />}
-          >
-            截图识别
-          </CapabilityGate>
-          {sessionCapable && (
-            <CapabilityGate
-              appearance="secondary"
-              capability="recognition.screenshotSession"
-              capabilities={viewState.capabilities}
-              action={{ type: "recognition.captureScreenshotSession" }}
-              actions={actions}
-              icon={<Aperture aria-hidden="true" size={16} />}
-            >
-              纯截图
-            </CapabilityGate>
-          )}
-          {viewState.capabilities.includes("recognition.scrollCapture") && (
-            <CapabilityGate
-              appearance="secondary"
-              capability="recognition.scrollCapture"
-              capabilities={viewState.capabilities}
-              action={{ type: "recognition.captureScrollingScreenshot" }}
-              actions={actions}
-              icon={<ArrowDown aria-hidden="true" size={16} />}
-            >
-              长截图
-            </CapabilityGate>
-          )}
-          {sessionCapable && (
-            <CapabilityGate
-              appearance="secondary"
-              capability="recognition.screenshotSession"
-              capabilities={viewState.capabilities}
-              action={{ type: "recognition.captureScreenshotTextSession" }}
-              actions={actions}
-              icon={<ScanText aria-hidden="true" size={16} />}
-            >
-              截图取字
-            </CapabilityGate>
-          )}
+          />
           {/* 先编辑后识别：宿主在 recognition scope 创建同一截图会话与修订，
            * 载入后在共享画布中标注/屏蔽，再用“识别当前图”显式提交掩膜输入。
            * 编辑入口不再借用 imageEdit scope 命令（命令约定已分离）。 */}
@@ -1409,6 +1431,10 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
   const windowStart = Math.max(0, numberValue(state.windowStart));
   const engines = recognitionEngines(state.engines);
   const exportIncomplete = booleanValue(state.exportIncomplete);
+  const inputKindNotice =
+    typeof state.inputKindNotice === "string" && state.inputKindNotice
+      ? state.inputKindNotice
+      : null;
   // 单选待检查项：仅挂载所选结构化结果，避免窗口内几十项同时拉取。
   const [inspectId, setInspectId] = useState<string | null>(null);
   const inspected = items.find((item) => item.id === inspectId);
@@ -1418,7 +1444,7 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
     <Workspace
       eyebrow="QUEUE / 02"
       title="批量识别"
-      description="按队列处理图像，并集中检查单项结果。"
+      description="按队列处理图片与文档，并集中检查单项结果。"
       actions={
         <>
           <CapabilityGate
@@ -1429,7 +1455,7 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
             actions={actions}
             icon={<FilePlus2 aria-hidden="true" size={16} />}
           >
-            添加图片
+            添加文件
           </CapabilityGate>
           <CapabilityGate
             appearance="primary"
@@ -1484,11 +1510,19 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
                     : "等待输入"}
             </Badge>
           </div>
-          <p className="batch-scheduling-note">批次由识别服务自动调度</p>
+          <p className="batch-scheduling-note">
+            页码从 1 开始；留空沿用 MinerU
+            默认范围，其他管道默认全部。图片按单页处理。
+          </p>
+          {inputKindNotice && (
+            <p role="status" className="batch-scheduling-note">
+              {inputKindNotice}
+            </p>
+          )}
           {itemCount === 0 ? (
             <EmptyStage
               title="队列为空"
-              detail="添加图片后可调整顺序并开始识别。"
+              detail="添加图片或文档后可调整顺序并开始识别。"
             />
           ) : (
             <>
@@ -1506,6 +1540,28 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
                       <strong>{item.name}</strong>
                       <small>{batchItemLabel(item.statusCode)}</small>
                       {item.resultSummary && <em>{item.resultSummary}</em>}
+                      {item.supportsPageRange === false ? (
+                        <small>整篇解析；按页识别请先转换为 PDF</small>
+                      ) : (
+                        <Input
+                          key={`${item.id}-${item.pageRange ?? ""}`}
+                          size="small"
+                          aria-label={`${item.name} 的页码范围`}
+                          placeholder="默认页码（all 或 1,3-5）"
+                          defaultValue={item.pageRange ?? ""}
+                          disabled={running}
+                          onBlur={(event) => {
+                            const pageRange = event.currentTarget.value.trim();
+                            if (pageRange !== (item.pageRange ?? "")) {
+                              void actions.run({
+                                type: "batch.setItemPageRange",
+                                itemId: item.id,
+                                pageRange,
+                              });
+                            }
+                          }}
+                        />
+                      )}
                     </span>
                     <span className="batch-item-actions">
                       {resource(item.structuredResult) && (
@@ -2194,6 +2250,11 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
         recipePurposeKey(recipe) === "text" &&
         recipeDeviceGroup(recipe) === "cpu",
     )?.displayName ?? "RapidOCR · CPU";
+  // 远程 MinerU 面板门禁：目录未加载时区分“正在启动”与“无已安装环境
+  // 承载识别服务”。后者刷新永远无效，如实指路（随包离线基础配置即可），
+  // 不暗示需要本地 MinerU 组件；旧宿主（无运行环境 capability）保留等待语义。
+  const mineruServiceHostReady =
+    !managedEnvironmentsAvailable || activeEnvironment?.status === "installed";
   const onCatalogChoiceChange = (purposeKey: string, device: string) => {
     void actions.run({ type: "settings.invalidateEnvironmentPlan" });
     setPendingPrepare(null);
@@ -2241,6 +2302,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
       : "尚未执行维护操作";
   const progressText = stringValue(state.progressText);
   const mineru = mineruConnection(state.mineruConnection);
+  const recognition = mineruRecognition(state.mineruRecognition);
   const defaultMode = defaultRecognitionMode(state.defaultRecognitionMode);
   return (
     <Workspace
@@ -2432,8 +2494,38 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
           <MineruConnectionEditor
             key={`${mineru?.mode ?? ""}|${mineru?.apiUrl ?? ""}`}
             connection={mineru}
-            locked={busy}
+            locked={
+              busy ||
+              state.environmentBusy === true ||
+              booleanValue(state.isBusy)
+            }
             hostBusy={booleanValue(state.isBusy)}
+            serviceHostReady={mineruServiceHostReady}
+            actions={actions}
+          />
+        </Panel>
+        <Panel
+          label="MINERU"
+          title="MinerU 识别参数"
+          className="settings-mineru-recognition-panel"
+        >
+          <MineruRecognitionEditor
+            key={[
+              recognition?.stored ? 1 : 0,
+              recognition?.tier ?? "",
+              recognition?.ocrMode ?? "",
+              recognition?.pageRange ?? "",
+              recognition?.language ?? "",
+              recognition?.tiers.map((tier) => tier.id).join(","),
+              recognition?.languages.join(","),
+            ].join("|")}
+            recognition={recognition}
+            connection={mineru}
+            locked={
+              busy ||
+              state.environmentBusy === true ||
+              booleanValue(state.isBusy)
+            }
             actions={actions}
           />
         </Panel>
@@ -3637,15 +3729,231 @@ function AcceleratorFeatures({
   );
 }
 
+function MineruRecognitionEditor({
+  recognition,
+  connection,
+  locked,
+  actions,
+}: {
+  readonly recognition: MineruRecognitionState | undefined;
+  readonly connection: MineruConnectionState | undefined;
+  readonly locked: boolean;
+  readonly actions: AppActions;
+}) {
+  const loaded = recognition !== undefined;
+  const supported = recognition?.supported === true;
+  const tiers = recognition?.tiers ?? [];
+  const languages = recognition?.languages ?? [];
+  const remote = connection?.mode === "remote";
+  const [tier, setTier] = useState(
+    recognition?.tier ?? recognition?.defaultTier ?? "",
+  );
+  const [ocrMode, setOcrMode] = useState(recognition?.ocrMode ?? "auto");
+  const [pageRange, setPageRange] = useState(recognition?.pageRange ?? "all");
+  const [language, setLanguage] = useState(
+    recognition?.language ??
+      (languages.includes("ch") ? "ch" : (languages[0] ?? "")),
+  );
+  const tierUsable = (id: string) =>
+    tiers.some(
+      (option) =>
+        option.id === id &&
+        (option.availability === "ready" ||
+          option.availability === "preparation_required"),
+    );
+  const save = async () => {
+    await actions.run({
+      type: "settings.setMineruRecognition",
+      tier,
+      ocrMode,
+      pageRange,
+      language,
+    });
+  };
+  if (!loaded) {
+    return (
+      <p className="form-note">
+        MinerU 识别参数等待运行时目录同步；可点击“重新检查状态”后配置。
+      </p>
+    );
+  }
+  if (!supported) {
+    return (
+      <p className="form-note" role="note">
+        当前识别服务未声明 ocr.mineru-config.v1，无法配置识别参数；请更新
+        识别服务。
+      </p>
+    );
+  }
+  return (
+    <>
+      {recognition?.invalid === true ? (
+        <p className="form-note" role="alert">
+          已保存的 MinerU 识别参数无法解析（{recognition.invalidReason}），
+          深度文档解析提交会被拒绝；请重新选择并保存以修复。
+        </p>
+      ) : null}
+      <div className="setting-row">
+        <label htmlFor="mineru-tier">识别档位</label>
+        <Select
+          id="mineru-tier"
+          value={tier}
+          disabled={locked || tiers.length === 0}
+          onChange={(_, data) => setTier(data.value)}
+        >
+          {tiers.map((option) => (
+            <option
+              key={option.id}
+              value={option.id}
+              disabled={
+                option.availability !== "ready" &&
+                option.availability !== "preparation_required"
+              }
+            >
+              {mineruTierLabel(option.id)}
+              {option.availability === "preparation_required"
+                ? "（需准备）"
+                : option.availability !== "ready"
+                  ? "（不可用）"
+                  : ""}
+            </option>
+          ))}
+        </Select>
+      </div>
+      <div className="setting-row">
+        <label htmlFor="mineru-ocr-mode">OCR 模式</label>
+        <Select
+          id="mineru-ocr-mode"
+          value={ocrMode}
+          disabled={locked}
+          onChange={(_, data) => setOcrMode(data.value)}
+        >
+          <option value="auto">自动（推荐）</option>
+          <option value="txt">优先文本层</option>
+          <option value="ocr">强制 OCR</option>
+        </Select>
+      </div>
+      <div className="setting-row">
+        <label htmlFor="mineru-page-range">默认页码范围</label>
+        <Input
+          id="mineru-page-range"
+          placeholder="all"
+          value={pageRange}
+          disabled={locked}
+          onChange={(_, data) => setPageRange(data.value)}
+        />
+      </div>
+      <p className="form-note">
+        页码范围仅对 PDF 输入生效（all 或 1,3-5；r1
+        表示最后一页）；单张图片/截图始终解析全部内容。
+      </p>
+      <div className="setting-row">
+        <label htmlFor={remote ? undefined : "mineru-language"}>识别语言</label>
+        {remote ? (
+          <p className="form-note" role="note">
+            由服务端配置（客户端无法读取/覆盖）
+          </p>
+        ) : (
+          <Select
+            id="mineru-language"
+            value={language}
+            disabled={locked || languages.length === 0}
+            onChange={(_, data) => setLanguage(data.value)}
+          >
+            {languages.map((item) => (
+              <option key={item} value={item}>
+                {mineruLanguageLabel(item)}
+              </option>
+            ))}
+          </Select>
+        )}
+      </div>
+      {remote ? (
+        <p className="form-note">
+          远程模式语言由自部署服务启动参数决定；本地偏好仅在本机模式生效。
+        </p>
+      ) : (
+        <p className="form-note">
+          语言作为本地解析服务的启动参数；变更会在下次解析时重启服务生效。
+        </p>
+      )}
+      <p className="form-note">
+        公式/表格识别：由档位与服务端决定；当前 MinerU 4 接口无独立开关。
+      </p>
+      <div className="setting-row">
+        <Button
+          disabled={
+            locked ||
+            tier === "" ||
+            (!remote && language === "") ||
+            !tierUsable(tier)
+          }
+          onClick={() => void save()}
+        >
+          保存识别参数
+        </Button>
+      </div>
+    </>
+  );
+}
+
+function mineruTierLabel(id: string): string {
+  switch (id) {
+    case "flash":
+      return "闪电（flash）";
+    case "basic":
+      return "基础（basic）";
+    case "standard":
+      return "标准（standard）";
+    case "advanced":
+      return "进阶（advanced）";
+    default:
+      return id;
+  }
+}
+
+function mineruLanguageLabel(id: string): string {
+  switch (id) {
+    case "ch":
+      return "中文+英文";
+    case "ch_server":
+      return "中文+英文（服务版模型）";
+    case "korean":
+      return "韩文";
+    case "ta":
+      return "泰米尔文";
+    case "te":
+      return "泰卢固文";
+    case "ka":
+      return "格鲁吉亚文";
+    case "th":
+      return "泰文";
+    case "el":
+      return "希腊文";
+    case "arabic":
+      return "阿拉伯文";
+    case "east_slavic":
+      return "东斯拉夫文";
+    case "cyrillic":
+      return "西里尔文";
+    case "devanagari":
+      return "天城文";
+    default:
+      return id;
+  }
+}
+
 function MineruConnectionEditor({
   connection,
   locked,
   hostBusy,
+  serviceHostReady,
   actions,
 }: {
   readonly connection: MineruConnectionState | undefined;
   readonly locked: boolean;
   readonly hostBusy: boolean;
+  readonly serviceHostReady?: boolean;
   readonly actions: AppActions;
 }) {
   const remoteSupported = connection?.supported === true;
@@ -3682,7 +3990,29 @@ function MineruConnectionEditor({
   };
   return (
     <>
-      {loaded ? null : (
+      {loaded ? null : serviceHostReady === false ? (
+        <>
+          <p className="form-note" role="note">
+            当前没有已启动的运行环境承载识别服务。远程 MinerU 不需要本地
+            MinerU/PaddleOCR 依赖，但连接配置由识别服务保存。
+          </p>
+          <div className="setting-row">
+            <Button
+              disabled={locked}
+              onClick={() =>
+                void actions.run({ type: "settings.prepareRemoteHost" })
+              }
+              icon={<RefreshCw aria-hidden="true" size={16} />}
+            >
+              启用 MinerU 远程模式
+            </Button>
+          </div>
+          <p className="form-note">
+            首次使用会从安装包准备基础服务，无需下载本地 MinerU/PaddleOCR
+            引擎或模型。
+          </p>
+        </>
+      ) : (
         <p className="form-note">
           MinerU 连接设置等待运行环境目录同步；可点击“重新检查状态”后配置。
         </p>
@@ -3720,6 +4050,11 @@ function MineruConnectionEditor({
               onChange={(_, data) => setApiUrl(data.value)}
             />
           </div>
+          <p className="form-note">
+            填自部署 MinerU 4 解析服务的根地址（如
+            https://mineru4.example.com）： 不要带 /file_parse
+            等具体路径，也不要填 OpenAI/VLM 兼容地址。
+          </p>
           <div className="setting-row">
             <label htmlFor="mineru-api-key">API Key（可选）</label>
             <Input
@@ -3925,6 +4260,7 @@ function DefaultRecognitionModeEditor({
         保存的是 Runtime 持久默认：单次、批量、PDF 与截图任务未显式选择时继承
         它；已在运行/排队的任务参数不受影响，任务中的显式选择始终优先。
         仅“就绪”模式可设为默认，需要下载/准备的请先在运行环境页准备。
+        截图工具栏的“文字识别”使用此处保存的文字或文档模式；若选择表格、公式模式，文字识别按钮会提示重新设置文字引擎。
       </p>
     </>
   );

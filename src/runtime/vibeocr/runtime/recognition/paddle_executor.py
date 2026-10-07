@@ -31,6 +31,8 @@ if TYPE_CHECKING:
 from vibeocr.runtime.jobs.budgets import AdapterCapability, BudgetPlanner, InputItem
 from vibeocr.runtime.jobs.recovery import FailureClass, RecoveryAction, RecoveryPolicy
 from vibeocr.runtime.jobs.scheduler import DeviceScheduler
+from vibeocr.runtime.recognition.mineru_api import MineruCancelled
+from vibeocr.runtime.recognition.mineru_config import MineruConfigError
 from vibeocr.runtime.recognition.ocr_engines import OcrEngineError
 from vibeocr.runtime_contracts import (
     TERMINAL_JOB_STATES,
@@ -145,6 +147,32 @@ class AdapterExecutor:
         for compute in compute_batches:
             if record.cancel_requested_at is not None:
                 break
+            # 输入种类门禁：不能接受的 item 在进入设备租约与恢复路径前
+            # 按文件类型化失败，剩余合法 item 继续执行。
+            rejected: list[tuple[InputItem, str]] = []
+            valid: list[InputItem] = []
+            for entry in compute.items:
+                reason = self._reject_item(entry)
+                if reason is None:
+                    valid.append(entry)
+                else:
+                    rejected.append((entry, reason))
+            if rejected:
+                record.append_event(
+                    "input_kind_rejected",
+                    detail={
+                        "items": [item.item_id for item, _ in rejected],
+                    },
+                )
+                for item, reason in rejected:
+                    self._fail_items(
+                        record,
+                        [item],
+                        error_code=ErrorCode.VALIDATION_ERROR.value,
+                        error=reason,
+                    )
+            if not valid:
+                continue
             lease = self._scheduler.acquire(
                 job_id=record.job_id,
                 device=self._device,
@@ -156,7 +184,7 @@ class AdapterExecutor:
             try:
                 self._execute_with_recovery(
                     record,
-                    list(compute.items),
+                    valid,
                     options=options,
                     policy=self._recovery_policy_factory(),
                 )
@@ -230,71 +258,38 @@ class AdapterExecutor:
                 error=str(exc),
             )
             return
-        except Exception as exc:
-            failure = policy.classify(
-                str(exc), cancelled=record.cancel_requested_at is not None
-            )
-            decision = policy.next_action(
-                failure=failure,
-                current_batch_size=len(items),
-                attempt=attempt,
-            )
-            if decision.degraded:
-                record.mark_degraded()
+        except MineruConfigError as exc:
+            # 配置类失败是确定性的（远程端点 404/401 等）：按 code/reason
+            # 让本批 item 直接失败，不进入重试/二分恢复路径。
             record.append_event(
-                "recovery_decision",
-                detail={
-                    "failure": failure.value,
-                    "action": decision.action.value,
-                    "attempt": decision.attempt,
-                    "batch_size": len(items),
-                },
+                "mineru_config_rejected",
+                detail={"code": exc.code.value, "reason_code": exc.reason},
             )
-            if decision.action is RecoveryAction.BISECT_ISOLATE and len(items) > 1:
-                midpoint = max(1, len(items) // 2)
-                self._execute_with_recovery(
-                    record,
-                    items[:midpoint],
-                    options=options,
-                    policy=policy,
-                    attempt=decision.attempt,
-                )
-                self._execute_with_recovery(
-                    record,
-                    items[midpoint:],
-                    options=options,
-                    policy=policy,
-                    attempt=decision.attempt,
-                )
-                return
-            if decision.action is RecoveryAction.SHRINK_AND_RETRY:
-                self._clear_cache()
-                next_size = decision.next_batch_size or 1
-                for index in range(0, len(items), next_size):
-                    self._execute_with_recovery(
-                        record,
-                        items[index : index + next_size],
-                        options=options,
-                        policy=policy,
-                        attempt=decision.attempt,
-                    )
-                return
-            if decision.action is RecoveryAction.BACKOFF_RETRY:
-                self._sleeper(decision.delay_seconds)
-                policy.elapsed_seconds += decision.delay_seconds
-                self._execute_with_recovery(
-                    record,
-                    items,
-                    options=options,
-                    policy=policy,
-                    attempt=decision.attempt,
-                )
-                return
             self._fail_items(
                 record,
                 items,
-                error_code=self._error_code_for(failure),
-                error=str(exc),
+                error_code=exc.code.value,
+                error=exc.reason,
+            )
+            return
+        except MineruCancelled as exc:
+            # 用户协作取消：本批 item 直接收敛为 cancelled，不重试、
+            # 不按错误失败；execute() 后续按诚实取消状态机收尾。
+            if record.cancel_requested_at is not None:
+                record.append_event(
+                    "mineru_cancelled",
+                    detail={"error": str(exc)},
+                )
+                self._cancel_non_terminal_items(record)
+                return
+            # 上游单方面取消（调用方未请求）：保持既有通用恢复语义。
+            self._recover_from_exception(
+                record, items, options=options, policy=policy, attempt=attempt, exc=exc
+            )
+            return
+        except Exception as exc:
+            self._recover_from_exception(
+                record, items, options=options, policy=policy, attempt=attempt, exc=exc
             )
             return
 
@@ -333,6 +328,83 @@ class AdapterExecutor:
                 continue
             self._bind_asset_refs(payload, record.job_id, input_item.item_id)
             self._commit_payload(record, input_item, payload_type, payload)
+
+    def _recover_from_exception(
+        self,
+        record: Any,
+        items: list[InputItem],
+        *,
+        options: Any,
+        policy: RecoveryPolicy,
+        attempt: int,
+        exc: Exception,
+    ) -> None:
+        """通用恢复路径：分类 → bisect/shrink/backoff/fail（原 except Exception 体）。"""
+        failure = policy.classify(
+            str(exc), cancelled=record.cancel_requested_at is not None
+        )
+        decision = policy.next_action(
+            failure=failure,
+            current_batch_size=len(items),
+            attempt=attempt,
+        )
+        if decision.degraded:
+            record.mark_degraded()
+        record.append_event(
+            "recovery_decision",
+            detail={
+                "failure": failure.value,
+                "action": decision.action.value,
+                "attempt": decision.attempt,
+                "batch_size": len(items),
+            },
+        )
+        if decision.action is RecoveryAction.BISECT_ISOLATE and len(items) > 1:
+            midpoint = max(1, len(items) // 2)
+            self._execute_with_recovery(
+                record,
+                items[:midpoint],
+                options=options,
+                policy=policy,
+                attempt=decision.attempt,
+            )
+            self._execute_with_recovery(
+                record,
+                items[midpoint:],
+                options=options,
+                policy=policy,
+                attempt=decision.attempt,
+            )
+            return
+        if decision.action is RecoveryAction.SHRINK_AND_RETRY:
+            self._clear_cache()
+            next_size = decision.next_batch_size or 1
+            for index in range(0, len(items), next_size):
+                self._execute_with_recovery(
+                    record,
+                    items[index : index + next_size],
+                    options=options,
+                    policy=policy,
+                    attempt=decision.attempt,
+                )
+            return
+        if decision.action is RecoveryAction.BACKOFF_RETRY:
+            self._sleeper(decision.delay_seconds)
+            policy.elapsed_seconds += decision.delay_seconds
+            self._execute_with_recovery(
+                record,
+                items,
+                options=options,
+                policy=policy,
+                attempt=decision.attempt,
+            )
+            return
+        self._fail_items(
+            record,
+            items,
+            error_code=self._error_code_for(failure),
+            error=str(exc),
+        )
 
     @staticmethod
     def _bind_asset_refs(payload: dict, job_id: str, item_id: str) -> None:
@@ -448,6 +520,20 @@ class AdapterExecutor:
             close()
 
     # ------------------------------------------------------------------
+    # Input-kind gate
+    # ------------------------------------------------------------------
+
+    def _reject_item(self, item: InputItem) -> str | None:
+        """Return a typed rejection reason when this backend cannot run ``item``.
+
+        Default accepts every staged input; image-decoding backends override
+        this so document inputs fail with an actionable error at the job
+        boundary instead of deep inside image decoding.
+        """
+        del item
+        return None
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -509,6 +595,31 @@ class PaddleExecutor(AdapterExecutor):
     @property
     def adapter(self) -> PaddlePipelineAdapter:  # type: ignore[override]
         return super().adapter  # type: ignore[return-value]
+
+    def _reject_item(self, item: InputItem) -> str | None:
+        """图片解码管线只接受图片：PDF/Office 按文件拒绝并指向 MinerU。
+
+        判定用 display_name 扩展名或 wire content_type（共享 MIME 映射），
+        不让文档进入 PIL 解码/恢复路径。
+        """
+        from pathlib import Path
+
+        from vibeocr.runtime.documents.utils.mime_types import (
+            DOCUMENT_EXTENSIONS,
+            mime_to_extension,
+        )
+
+        suffix = Path(item.display_name or "").suffix.lower()
+        if suffix not in DOCUMENT_EXTENSIONS:
+            content_type = (item.content_type or "").split(";", 1)[0].strip().lower()
+            suffix = mime_to_extension(content_type) if content_type else ""
+        if suffix in DOCUMENT_EXTENSIONS:
+            return (
+                f"document input '{item.display_name}' is not supported by "
+                "image pipelines; use the MinerU document recognition mode "
+                "instead"
+            )
+        return None
 
 
 __all__ = ["AdapterExecutor", "PaddleExecutor"]

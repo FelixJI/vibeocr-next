@@ -142,3 +142,110 @@ def test_execute_empty_items_completes() -> None:
     executor = PaddleExecutor(adapter_factory=lambda: _make_adapter(_FakeService([])))
     executor.execute(record, [])
     assert record.snapshot().state is JobState.COMPLETED
+
+
+def test_execute_rejects_document_input_kinds_with_typed_error(
+    tmp_path: Path,
+) -> None:
+    """Batch documents must be rejected clearly, never decoded as images.
+
+    回归契约：图片解码管线（OCR/PP-StructureV3 等全部 RECOGNITION 路径）
+    收到 PDF/Office 输入时按文件给出类型化 VALIDATION_ERROR 失败并指向
+    MinerU 文档解析，不进入 PIL 解码/恢复路径；同批图片项继续完成。
+    """
+    png = _valid_png_bytes()
+    (tmp_path / "page.png").write_bytes(png)
+    (tmp_path / "doc.pdf").write_bytes(b"%PDF-1.4 not an image")
+    reg = JobRegistry(instance_id="t")
+    from vibeocr.runtime_contracts import JobItem
+
+    record = reg.create(
+        kind=JobKind.RECOGNITION,
+        priority=JobPriority.INTERACTIVE,
+        items=[
+            JobItem(
+                item_id="it-img",
+                display_name="page.png",
+                state=ItemState.QUEUED,
+            ),
+            JobItem(
+                item_id="it-pdf",
+                display_name="doc.pdf",
+                state=ItemState.QUEUED,
+            ),
+        ],
+        progress_total=2,
+    )
+    record.transition(JobState.QUEUED)
+    staged = [
+        StagedInput(
+            item_id="it-img",
+            display_name="page.png",
+            path=tmp_path / "page.png",
+            size_bytes=len(png),
+            content_type="image/png",
+        ),
+        StagedInput(
+            item_id="it-pdf",
+            display_name="doc.pdf",
+            path=tmp_path / "doc.pdf",
+            size_bytes=20,
+            content_type="application/pdf",
+        ),
+    ]
+    executor = PaddleExecutor(
+        adapter_factory=lambda: _make_adapter(_FakeService(["alpha"]))
+    )
+    executor.execute(record, staged)
+    snap = record.snapshot()
+    assert snap.state is JobState.COMPLETED_WITH_ERRORS
+    states = {it.item_id: it.state for it in snap.items}
+    assert states["it-img"] is ItemState.SUCCEEDED
+    assert states["it-pdf"] is ItemState.FAILED
+    assert record.item_errors["it-pdf"] == "VALIDATION_ERROR"
+    failed = next(it for it in snap.items if it.item_id == "it-pdf")
+    assert failed.error is not None
+    assert "MinerU" in failed.error
+    assert record.results["it-img"]["text"] == "alpha"
+
+
+def test_execute_rejects_office_content_type_without_extension(
+    tmp_path: Path,
+) -> None:
+    """Wire content_type alone must route the document gate (drop-friendly)."""
+    (tmp_path / "upload.bin").write_bytes(b"PK\x03\x04 zip container")
+    reg = JobRegistry(instance_id="t")
+    from vibeocr.runtime_contracts import JobItem
+
+    record = reg.create(
+        kind=JobKind.RECOGNITION,
+        priority=JobPriority.INTERACTIVE,
+        items=[
+            JobItem(
+                item_id="it-xlsx",
+                display_name="upload.bin",
+                state=ItemState.QUEUED,
+            ),
+        ],
+        progress_total=1,
+    )
+    record.transition(JobState.QUEUED)
+    staged = [
+        StagedInput(
+            item_id="it-xlsx",
+            display_name="upload.bin",
+            path=tmp_path / "upload.bin",
+            size_bytes=18,
+            content_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+        ),
+    ]
+    executor = PaddleExecutor(
+        adapter_factory=lambda: _make_adapter(_FakeService(["unused"]))
+    )
+    executor.execute(record, staged)
+    snap = record.snapshot()
+    assert snap.state is JobState.FAILED
+    assert snap.items[0].state is ItemState.FAILED
+    assert record.item_errors["it-xlsx"] == "VALIDATION_ERROR"

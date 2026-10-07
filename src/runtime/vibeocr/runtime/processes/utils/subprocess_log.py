@@ -22,7 +22,18 @@ import logging
 import re
 import threading
 
-__all__ = ["SubprocessLogForwarder"]
+__all__ = ["SubprocessLogForwarder", "strip_ansi"]
+
+
+# 第三方库在管道下仍可能输出 ANSI 彩色控制码；转发边界统一清洗。
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\)|[@-Z\\-_])"
+)
+
+
+def strip_ansi(text: str) -> str:
+    """去除子进程输出中的 ANSI 转义序列（CSI/OSC/单字符）。"""
+    return _ANSI_ESCAPE_RE.sub("", text)
 
 
 # 子进程标准日志格式：2024-01-15 10:30:45 [INFO] module: message
@@ -82,7 +93,8 @@ class SubprocessLogForwarder:
         的 ``Traceback (most recent call last): ...`` 及末行异常名必须以 ERROR
         级别原样转发,否则真实错误被折叠掉,只剩"退出码 1"无法定位。
         """
-        # 结构化行到来前，先把累积的裸 print 概括输出
+        # 入口先清洗 ANSI 控制码：彩色结构化行仍能被级别正则匹配，且控制码不入库。
+        text = strip_ansi(text)
         match = _STRUCTURED_LINE_RE.match(text)
         if match:
             self.flush()

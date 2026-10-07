@@ -10,6 +10,7 @@ public sealed class BatchItemViewModel(string path) : INotifyPropertyChanged
     private BatchItemState _state = BatchItemState.Pending;
     private RecognizeResponse? _result;
     private string? _error;
+    private string? _pageRange;
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public Guid Id { get; } = Guid.NewGuid();
@@ -18,6 +19,8 @@ public sealed class BatchItemViewModel(string path) : INotifyPropertyChanged
     public BatchItemState State { get => _state; internal set => Set(ref _state, value); }
     public RecognizeResponse? Result { get => _result; internal set => Set(ref _result, value); }
     public string? Error { get => _error; internal set => Set(ref _error, value); }
+
+    public string? PageRange { get => _pageRange; internal set => Set(ref _pageRange, value); }
 
     internal void Reset()
     {

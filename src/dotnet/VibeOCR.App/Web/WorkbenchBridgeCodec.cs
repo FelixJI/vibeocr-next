@@ -71,6 +71,8 @@ public static class WorkbenchBridgeCodec
     ["mode", "apiUrl"];
   private static readonly HashSet<string> MineruConnectionArgumentFields =
     ["mode", "apiUrl", "apiKey"];
+  private static readonly HashSet<string> MineruRecognitionArgumentFields =
+    ["tier", "ocrMode", "pageRange", "language"];
   private static readonly HashSet<string> DefaultModeArgumentFields = ["mode"];
   private const int MaxRecognitionModeIdLength = 64;
   private static readonly HashSet<string> TaskEngineArgumentFields = ["engine"];
@@ -496,6 +498,10 @@ public static class WorkbenchBridgeCodec
         return new MoveBatchItemCommand(
           ParseGuidArgument(arguments, "itemId"),
           delta);
+      case ("batch", "setItemPageRange"):
+        EnsureObjectWithFields(arguments, new HashSet<string> { "itemId", "pageRange" }, "command arguments");
+        return new SetBatchItemPageRangeCommand(ParseGuidArgument(arguments, "itemId"),
+          arguments.GetProperty("pageRange").GetString());
       case ("batch", "removeItem"):
         EnsureObjectWithFields(arguments, BatchItemArgumentFields, "command arguments");
         return new RemoveBatchItemCommand(ParseGuidArgument(arguments, "itemId"));
@@ -798,11 +804,16 @@ public static class WorkbenchBridgeCodec
           arguments.GetProperty("enabled").GetBoolean());
       case ("settings", "setMineruConnection"):
         return ParseMineruConnection(arguments);
+      case ("settings", "setMineruRecognition"):
+        return ParseMineruRecognition(arguments);
       case ("settings", "setDefaultRecognitionMode"):
         return ParseDefaultRecognitionMode(arguments);
       case ("settings", "prepareMineruConnection"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new PrepareMineruConnectionCommand();
+      case ("settings", "prepareRemoteHost"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new PrepareRemoteHostCommand();
       case ("settings", "installRuntime"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new InstallRuntimeCommand();
@@ -1044,6 +1055,38 @@ public static class WorkbenchBridgeCodec
     return new SetMineruConnectionCommand(mode, apiUrl, apiKey);
   }
 
+  private static SetMineruRecognitionCommand ParseMineruRecognition(
+    JsonElement arguments)
+  {
+    EnsureObjectWithFields(arguments, MineruRecognitionArgumentFields, "command arguments");
+    string? tier = arguments.GetProperty("tier").GetString();
+    string? ocrMode = arguments.GetProperty("ocrMode").GetString();
+    string? pageRange = arguments.GetProperty("pageRange").GetString();
+    string? language = arguments.GetProperty("language").GetString();
+    if (!MineruRecognitionSettings.TryParseTier(tier, out _))
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench MinerU tier is invalid.");
+    }
+    if (!MineruRecognitionSettings.TryParseOcrMode(ocrMode, out _))
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench MinerU ocr mode is invalid.");
+    }
+    // 与 Platform 契约同一语法/限额；语义（页数、文件类型）由 Backend 负责。
+    if (!MineruRecognitionSettings.IsValidPageRange(pageRange))
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench MinerU page range is invalid.");
+    }
+    if (string.IsNullOrEmpty(language) || language.Length > 32)
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench MinerU language is invalid.");
+    }
+    return new SetMineruRecognitionCommand(tier!, ocrMode!, pageRange!, language);
+  }
+
   private static SetDefaultRecognitionModeCommand ParseDefaultRecognitionMode(
     JsonElement arguments)
   {
@@ -1243,6 +1286,7 @@ public static class WorkbenchBridgeCodec
       engines = batch.Engines ?? [],
       batch.TaskEngine,
       exportIncomplete = batch.ExportIncomplete,
+      inputKindNotice = batch.InputKindNotice,
     },
     PdfWorkbenchState pdf => new
     {
@@ -1345,6 +1389,20 @@ public static class WorkbenchBridgeCodec
         settings.DefaultRecognitionMode.Supported,
         settings.DefaultRecognitionMode.ModeId,
         settings.DefaultRecognitionMode.Stored,
+      },
+      mineruRecognition = settings.MineruRecognition is null ? null : new
+      {
+        settings.MineruRecognition.Supported,
+        settings.MineruRecognition.Stored,
+        settings.MineruRecognition.Tier,
+        settings.MineruRecognition.OcrMode,
+        settings.MineruRecognition.PageRange,
+        settings.MineruRecognition.Language,
+        settings.MineruRecognition.Invalid,
+        settings.MineruRecognition.InvalidReason,
+        tiers = settings.MineruRecognition.Tiers ?? [],
+        languages = settings.MineruRecognition.Languages ?? [],
+        settings.MineruRecognition.DefaultTier,
       },
       recognitionModes = settings.RecognitionModes ?? [],
       installPlan = settings.InstallPlan is not { } plan ? null : new

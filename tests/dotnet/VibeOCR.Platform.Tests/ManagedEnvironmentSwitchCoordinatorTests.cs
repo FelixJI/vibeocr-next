@@ -28,7 +28,9 @@ public sealed class ManagedEnvironmentSwitchCoordinatorTests
             injectSoakCrash: true);
 
         Assert.Equal(launch.PythonExecutable, options.FileName);
-        Assert.Equal(["-m", launch.SupervisorModule], options.Arguments);
+        // -X utf8 是 argv 级钉子：无论 launch 环境是否携带 PYTHONUTF8，
+        // supervisor 的 stdout/stderr 编码契约都不依赖本机 locale。
+        Assert.Equal(["-X", "utf8", "-m", launch.SupervisorModule], options.Arguments);
         Assert.Equal(launch.WorkingDirectory, options.WorkingDirectory);
         Assert.Equal(
             launch.Environment["VIBEOCR_RUNTIME_ROOT"],
@@ -56,9 +58,11 @@ public sealed class ManagedEnvironmentSwitchCoordinatorTests
 
         IReadOnlyList<string> arguments = ManagedEnvironmentSwitchCoordinator.RuntimeArguments(launch);
 
-        Assert.Equal(["-I", "-B", "-c"], arguments.Take(3));
-        Assert.Contains("VIBEOCR_PRODUCT_CODE_ROOT", arguments[3]);
-        Assert.Contains("vibeocr.runtime.host.main", arguments[3]);
+        // -I 忽略 PYTHONUTF8/PYTHONIOENCODING 环境变量，唯一有效的
+        // argv 钉子是 -X utf8（中文路径日志乱码回归）。
+        Assert.Equal(["-I", "-B", "-X", "utf8", "-c"], arguments.Take(5));
+        Assert.Contains("VIBEOCR_PRODUCT_CODE_ROOT", arguments[5]);
+        Assert.Contains("vibeocr.runtime.host.main", arguments[5]);
     }
 
     [Fact]

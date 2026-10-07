@@ -3,6 +3,7 @@ using Microsoft.Web.WebView2.Core;
 using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Workbench;
 using Windows.ApplicationModel.DataTransfer;
+using Windows.Graphics;
 using Windows.Storage;
 using Windows.Storage.Streams;
 
@@ -61,7 +62,13 @@ public sealed partial class MainWindow
       if (!purePin.SmokeDisposed || File.Exists(purePath))
         throw new InvalidOperationException("Pure pin did not release its PNG lease.");
 
-      await ClickSmokeButtonAsync("截图取字");
+      // 菜单已移除：统一截图按钮单击只做普通截图；专用取字会话经同一宿主
+      // 命令入口（与原菜单命令一致）触发。
+      await application.ExecuteAsync(
+        new WorkbenchCommandEnvelope(
+          Guid.NewGuid(),
+          new CaptureScreenshotTextSessionCommand()),
+        CancellationToken.None);
       captured = await WaitForScreenshotStateAsync(
         state => !state.IsBusy && state.ScreenshotSession?.TextSelectionRequested == true,
         TimeSpan.FromSeconds(30));
@@ -120,16 +127,63 @@ public sealed partial class MainWindow
       }
       if (oldPins.Any(pin => !pin.SmokeAlwaysOnTop))
         throw new InvalidOperationException("A pin is not a native topmost window.");
+      // 钓图默认原大小：客户区物理尺寸与图片像素一致（超出工作区才钳制）。
+      if (oldPins[0].SmokeZoom != 1)
+        throw new InvalidOperationException("Pin did not open at 100% zoom.");
+      SizeInt32 expectedClient = oldPins[0].SmokeExpectedOriginalClientSize;
+      SizeInt32 actualClient = oldPins[0].SmokeClientSize;
+      if (actualClient.Width != expectedClient.Width ||
+          actualClient.Height != expectedClient.Height)
+        throw new InvalidOperationException(
+          $"Pin did not open at original size: client={actualClient.Width}x{actualClient.Height}, " +
+          $"expected={expectedClient.Width}x{expectedClient.Height}.");
+      // 真实像素比断言：stage 渲染宽 × devicePixelRatio ≈ 图片像素，验证
+      // 1:1 不被百分比宽度抵消（仅靠客户区尺寸断言发现不了），任意 DPI 均成立。
+      (int pinImageWidth, _) = oldPins[0].SmokeImageSize;
+      double stagePhysical = await PinStagePhysicalWidthAsync(oldPins[0]);
+      if (Math.Abs(stagePhysical - pinImageWidth) > 1.5)
+        throw new InvalidOperationException(
+          $"Pin stage is not 1:1: stage*dpr={stagePhysical:F2}, image={pinImageWidth}.");
       var pinPosition = oldPins[0].SmokePosition;
       await oldPins[0].SmokeDragTitleBarAsync(40, 30);
       if (oldPins[0].SmokePosition == pinPosition)
-        throw new InvalidOperationException("Native pin did not move by titlebar drag.");
+        throw new InvalidOperationException("Pin did not move by its drag band.");
+      oldPins[0].SmokeRevealActions();
       oldPins[0].SmokeInvokeZoomIn();
       if (oldPins[0].SmokeZoom <= 1)
         throw new InvalidOperationException("Pin zoom control did not change content scale.");
+      stagePhysical = await PinStagePhysicalWidthAsync(oldPins[0]);
+      if (stagePhysical <= pinImageWidth + 1.5)
+        throw new InvalidOperationException(
+          $"Pin zoom did not enlarge the image: stage*dpr={stagePhysical:F2}, image={pinImageWidth}.");
       oldPins[0].SmokeSetOpacity(0.65);
       if (oldPins[0].SmokeNativeAlpha >= 255)
         throw new InvalidOperationException("Pin opacity did not change native window alpha.");
+      oldPins[0].SmokeDismissActions();
+      // 右上角窗口控制：置顶双向切换、最大化后原大小恢复 1:1 与客户区。
+      oldPins[0].SmokeInvokeToggleTopmost();
+      if (oldPins[0].SmokeAlwaysOnTop)
+        throw new InvalidOperationException("Pin topmost toggle did not clear always-on-top.");
+      oldPins[0].SmokeInvokeToggleTopmost();
+      if (!oldPins[0].SmokeAlwaysOnTop)
+        throw new InvalidOperationException("Pin topmost toggle did not restore always-on-top.");
+      oldPins[0].SmokeInvokeMaximize();
+      await UntilPinStateAsync(
+        () => oldPins[0].SmokeIsMaximized ? null : "not maximized",
+        "Pin maximize button did not maximize.");
+      oldPins[0].SmokeInvokeOriginalSize();
+      await UntilPinStateAsync(() =>
+      {
+        SizeInt32 expected = oldPins[0].SmokeExpectedOriginalClientSize;
+        SizeInt32 actual = oldPins[0].SmokeClientSize;
+        return !oldPins[0].SmokeIsMaximized && oldPins[0].SmokeZoom == 1 &&
+          actual.Width == expected.Width && actual.Height == expected.Height
+          ? null
+          : $"maximized={oldPins[0].SmokeIsMaximized}, zoom={oldPins[0].SmokeZoom}, " +
+            $"client={actual.Width}x{actual.Height}, expected={expected.Width}x{expected.Height}";
+      }, "Pin original-size button did not restore zoom and client size.");
+      await UntilPinStageWidthAsync(oldPins[0], pinImageWidth,
+        "Pin original-size button did not restore the 1:1 stage scale");
       string pinnedSelection = await CopyPinSubstringAsync(oldPins[0]);
       await oldPins[0].SmokeCapturePreviewAsync(firstPinPreview);
       await oldPins[1].SmokeCapturePreviewAsync(secondPinPreview);
@@ -184,7 +238,28 @@ public sealed partial class MainWindow
       if (smokeSubmitAttempts() != 3)
         throw new InvalidOperationException("New pure screenshot re-submitted old pin OCR.");
 
-      foreach (PinnedImageWindow pin in oldPins) pin.Close();
+      // 最小化/还原与右上角关闭按钮的真实鼠标路径。
+      oldPins[0].SmokeInvokeMinimize();
+      await UntilPinStateAsync(
+        () => oldPins[0].SmokeIsMinimized ? null : "not minimized",
+        "Pin minimize button did not minimize.");
+      oldPins[0].SmokeRestoreFromMinimized();
+      expectedClient = oldPins[0].SmokeExpectedOriginalClientSize;
+      await UntilPinStateAsync(() =>
+      {
+        SizeInt32 actual = oldPins[0].SmokeClientSize;
+        return !oldPins[0].SmokeIsMinimized &&
+          actual.Width == expectedClient.Width && actual.Height == expectedClient.Height
+          ? null
+          : $"minimized={oldPins[0].SmokeIsMinimized}, " +
+            $"client={actual.Width}x{actual.Height}, " +
+            $"expected={expectedClient.Width}x{expectedClient.Height}";
+      }, "Pin did not restore its original client size after minimize.");
+      oldPins[1].SmokeMouseClickCloseButton();
+      await WaitForPinCountAsync(1);
+      if (!oldPins[1].SmokeDisposed)
+        throw new InvalidOperationException("Real-mouse close click did not close the pin.");
+      oldPins[0].Close();
       await WaitForPinCountAsync(0);
       if (oldPins.Any(pin => !pin.SmokeDisposed) ||
           pinnedPaths.Any(File.Exists))
@@ -207,6 +282,11 @@ public sealed partial class MainWindow
         chinese_selection = chinese,
         pinned_selection = pinnedSelection,
         closed_leases = 2,
+        pin_original_size = true,
+        pin_topmost_toggled = true,
+        pin_maximize_original_size_restored = true,
+        pin_minimize_restored = true,
+        pin_close_by_mouse = true,
         ui_previews = new[] {
           Path.GetFileName(editorPreview),
           Path.GetFileName(firstPinPreview),
@@ -271,6 +351,45 @@ public sealed partial class MainWindow
       await Task.Delay(100);
     }
     throw new TimeoutException($"Expected {count} native pin windows, got {pinnedImages.Count}.");
+  }
+
+  /// <summary>轮询钉图窗口状态直到满足条件；条件返回 null 表示满足，否则返回失败描述。</summary>
+  private static async Task UntilPinStateAsync(Func<string?> condition, string error)
+  {
+    for (int attempt = 0; attempt < 80; attempt++)
+    {
+      string? failure = condition();
+      if (failure is null) return;
+      if (attempt == 79)
+        throw new TimeoutException($"{error}: {failure}.");
+      await Task.Delay(25);
+    }
+  }
+
+  /// <summary>stage 渲染宽 × devicePixelRatio，即图片的实际物理显示宽。</summary>
+  private static async Task<double> PinStagePhysicalWidthAsync(PinnedImageWindow pin)
+  {
+    string json = await pin.SmokeEvaluateAsync(
+      "(()=>{const r=document.querySelector('#stage')?.getBoundingClientRect();" +
+      "return r?{w:r.width,d:window.devicePixelRatio}:null;})()");
+    using JsonDocument document = JsonDocument.Parse(json);
+    JsonElement root = document.RootElement;
+    return root.ValueKind == JsonValueKind.Object
+      ? root.GetProperty("w").GetDouble() * root.GetProperty("d").GetDouble()
+      : -1;
+  }
+
+  private static async Task UntilPinStageWidthAsync(
+    PinnedImageWindow pin, double expected, string error)
+  {
+    for (int attempt = 0; attempt < 80; attempt++)
+    {
+      double width = await PinStagePhysicalWidthAsync(pin);
+      if (Math.Abs(width - expected) <= 1.5) return;
+      if (attempt == 79)
+        throw new InvalidOperationException($"{error}: stage*dpr={width:F2}, expected={expected:F2}.");
+      await Task.Delay(25);
+    }
   }
 
   private static async Task WaitForPinTextAsync(PinnedImageWindow pin, bool present)
@@ -485,6 +604,7 @@ public sealed partial class MainWindow
 
   private static async Task<string> CopyPinSubstringAsync(PinnedImageWindow pin)
   {
+    pin.SmokeRevealActions();
     string geometryJson = await pin.SmokeEvaluateAsync("""
       (() => {
         const span = [...document.querySelectorAll('.line span')]

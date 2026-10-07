@@ -385,6 +385,92 @@ public sealed class RuntimeSelectionServiceTests
             }).MineruConfigFor("mineru_document")).Kind);
     }
 
+    [Fact]
+    public void MineruConfigAppliesStoredPreferenceAndProjectsTierCatalog()
+    {
+        Wire.MineruConfigCatalog catalog = MineruCatalog() with
+        {
+            Tiers =
+            [
+                new Wire.MineruTierDescriptor
+                {
+                    Id = Wire.MineruTierId.Basic,
+                    Availability = Wire.MineruTierAvailability.PreparationRequired,
+                    ReasonCode = null,
+                },
+                new Wire.MineruTierDescriptor
+                {
+                    Id = Wire.MineruTierId.Flash,
+                    Availability = Wire.MineruTierAvailability.Ready,
+                    ReasonCode = null,
+                },
+            ],
+            Languages = ["ch", "korean"],
+        };
+        RuntimeSelectionService service = MineruService(catalog);
+
+        // 目录投影：设置页动态 tier/language 可用性来源于此。
+        Assert.Equal([("basic", "preparation_required"), ("flash", "ready")],
+            service.MineruTiers.Select(tier => (tier.Id, tier.Availability)));
+        Assert.Equal(["ch", "korean"], service.MineruLanguages);
+        Assert.Equal("basic", service.MineruDefaultTier);
+
+        MineruConfig? config = service.MineruConfigFor("mineru_document",
+            new MineruRecognitionPreference(
+                MineruTier.Flash, MineruOcrMode.Txt, "2-4,r1", "korean"));
+        Assert.NotNull(config);
+        Assert.Equal(MineruTier.Flash, config.Tier);
+        Assert.Equal(MineruOcrMode.Txt, config.OcrMode);
+        Assert.Equal("2-4,r1", config.PageRange);
+        Assert.Equal("korean", config.Language);
+        // 非 mineru 模式仍返回 null；未携带偏好时保持目录默认行为。
+        Assert.Null(service.MineruConfigFor("paddle_text",
+            new MineruRecognitionPreference(
+                MineruTier.Flash, MineruOcrMode.Txt, "all", "ch")));
+        MineruConfig? defaulted = service.MineruConfigFor("mineru_document");
+        Assert.Equal(MineruTier.Basic, defaulted?.Tier);
+    }
+
+    [Fact]
+    public void MineruConfigRejectsPreferenceOutsideTheCatalogFailClosed()
+    {
+        Wire.MineruConfigCatalog catalog = MineruCatalog() with
+        {
+            Tiers =
+            [
+                new Wire.MineruTierDescriptor
+                {
+                    Id = Wire.MineruTierId.Basic,
+                    Availability = Wire.MineruTierAvailability.Ready,
+                    ReasonCode = null,
+                },
+                new Wire.MineruTierDescriptor
+                {
+                    Id = Wire.MineruTierId.Flash,
+                    Availability = Wire.MineruTierAvailability.Unavailable,
+                    ReasonCode = "tier_unavailable",
+                },
+            ],
+        };
+        RuntimeSelectionService service = MineruService(catalog);
+
+        Assert.Equal(RuntimeSelectionErrorKind.UnknownEngine,
+            Assert.Throws<RuntimeSelectionException>(() => service.MineruConfigFor(
+                "mineru_document",
+                new MineruRecognitionPreference(
+                    MineruTier.Advanced, MineruOcrMode.Auto, "all", "ch"))).Kind);
+        Assert.Equal(RuntimeSelectionErrorKind.EngineUnavailable,
+            Assert.Throws<RuntimeSelectionException>(() => service.MineruConfigFor(
+                "mineru_document",
+                new MineruRecognitionPreference(
+                    MineruTier.Flash, MineruOcrMode.Auto, "all", "ch"))).Kind);
+        Assert.Equal(RuntimeSelectionErrorKind.UnknownEngine,
+            Assert.Throws<RuntimeSelectionException>(() => service.MineruConfigFor(
+                "mineru_document",
+                new MineruRecognitionPreference(
+                    MineruTier.Basic, MineruOcrMode.Auto, "all", "korean"))).Kind);
+    }
+
     private static Wire.MineruConfigCatalog MineruCatalog() => new()
     {
         DefaultTier = Wire.MineruTierId.Basic,

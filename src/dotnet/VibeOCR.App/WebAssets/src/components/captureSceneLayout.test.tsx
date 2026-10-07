@@ -98,7 +98,7 @@ describe("截图原位编辑", () => {
     expect(style["--capture-x"]).toBe("1000px");
     expect(style["--capture-y"]).toBe("500px");
     expect(style["--capture-tools-left"]).toBe("400px");
-    expect(style["--capture-tools-top"]).toBe("252px");
+    expect(style["--capture-tools-top"]).toBe("428px");
   });
   it("普通图片编辑不使用截图屏幕几何，拒绝超出冻结桌面的选区", () => {
     expect(captureSceneStyle(undefined, 1280, 720)).toBeUndefined();

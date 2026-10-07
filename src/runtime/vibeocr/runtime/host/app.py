@@ -916,6 +916,8 @@ def create_app(
                 pipelines,
                 recognition_modes=recognition_modes,
             )
+        except MineruConfigError as exc:
+            return _error_response(exc.code, instance_id, detail={"reason": exc.reason})
         except RuntimeLockTimeout as exc:
             return _runtime_exception_response(exc, instance_id)
         except RecognitionModeError as exc:

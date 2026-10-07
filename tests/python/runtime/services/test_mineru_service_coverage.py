@@ -113,6 +113,35 @@ class TestParseApiLogLevel:
 
 
 class TestStartLogReader:
+    def test_exited_process_drains_colored_stderr_to_eof(self, caplog):
+        import io
+
+        proc = MagicMock()
+        proc.poll.return_value = 1
+        proc.stderr = io.BytesIO(
+            "\x1b[32mINFO 打开 下载/文档.pdf\x1b[0m\n"
+            "\x1b[31mERROR 最后一行\x1b[0m\n".encode()
+        )
+        threads = []
+        thread_type = threading.Thread
+
+        def make_thread(**kwargs):
+            thread = thread_type(**kwargs)
+            threads.append(thread)
+            return thread
+
+        with (
+            caplog.at_level(logging.DEBUG, logger="vibeocr.subprocess.mineru_api"),
+            patch("threading.Thread", side_effect=make_thread),
+        ):
+            _make_service()._start_log_reader(proc)
+            threads[0].join(timeout=2)
+        assert not threads[0].is_alive()
+        assert [(r.levelno, r.message) for r in caplog.records] == [
+            (logging.INFO, "INFO 打开 下载/文档.pdf"),
+            (logging.ERROR, "ERROR 最后一行"),
+        ]
+
     def test_stderr_none_returns_early(self):
         """process.stderr 为 None → 直接返回（line 112）。"""
         s = _make_service()
@@ -443,6 +472,104 @@ class TestFileParse:
         s = _make_service()
         assert s.file_parse([]) == {}
 
+    def test_projection_contract_failure_is_isolated_per_file(self, monkeypatch):
+        """投影契约失败按文件隔离，不上抛触发整批恢复重试。
+
+        回归（用户真实日志）：自部署 mineru-api 4.0.7 结果投影抛
+        MineruApiError 后从 file_parse 一路上抛，落入通用恢复路径把
+        同一批次完整重试一遍（75 秒）后再次失败。确定性投影失败必须
+        转成与上游 per-file 失败一致的 {"mineru_error": ...}，让同批其他
+        文件继续成功，且不进入重试。
+        """
+        from vibeocr.runtime.recognition.mineru_api import MineruDocument
+
+        good = MineruDocument(
+            markdown="",
+            structured_content={
+                "pages": [
+                    {
+                        "page_idx": 0,
+                        "blocks": [
+                            {
+                                "type": "text",
+                                "bbox": [0.1, 0.1, 0.9, 0.2],
+                                "content": "good text",
+                            }
+                        ],
+                    }
+                ]
+            },
+            middle_json={
+                "schema": "docvortex.middle",
+                "schema_version": "2.0",
+                "pages": [
+                    {
+                        "page_idx": 0,
+                        "blocks": [
+                            {
+                                "type": "text",
+                                "index": 0,
+                                "content": [{"type": "text", "content": "good text"}],
+                            }
+                        ],
+                    }
+                ],
+            },
+            archive=b"",
+        )
+        # 真实契约违规（块数量不一致）：修复前后都必须确定性失败。
+        bad = MineruDocument(
+            markdown="",
+            structured_content={
+                "pages": [
+                    {
+                        "page_idx": 0,
+                        "blocks": [
+                            {
+                                "type": "text",
+                                "bbox": [0.1, 0.1, 0.9, 0.2],
+                                "content": "only one",
+                            }
+                        ],
+                    }
+                ]
+            },
+            middle_json={
+                "schema": "docvortex.middle",
+                "schema_version": "2.0",
+                "pages": [
+                    {
+                        "page_idx": 0,
+                        "blocks": [
+                            {
+                                "type": "text",
+                                "index": 0,
+                                "content": [{"type": "text", "content": "first"}],
+                            },
+                            {
+                                "type": "text",
+                                "index": 1,
+                                "content": [{"type": "text", "content": "second"}],
+                            },
+                        ],
+                    }
+                ],
+            },
+            archive=b"",
+        )
+        s = _make_service()
+        monkeypatch.setattr(
+            s,
+            "_call_api",
+            lambda data, filename, options=None, **kwargs: {
+                "good.pdf": good,
+                "bad.pdf": bad,
+            },
+        )
+        result = s.file_parse([("good.pdf", b"g"), ("bad.pdf", b"b")])
+        assert result["good"]["raw_text"] == "good text"
+        assert result["bad"] == {"mineru_error": "MinerU block identity mismatch"}
+
 
 class TestBuildOcrResultEdges:
     def test_content_list_invalid_json_fallback(self):
@@ -566,9 +693,9 @@ class TestRemainingBranches:
         s = _make_service()
         proc = MagicMock()
         proc.stderr = MagicMock()
-        # b"" → line 119 continue；b"   \n" → strip 后空 → line 122 continue；
+        # 换行/空白行忽略，b"" 表示管道 EOF。
         # b"INFO hello\n" → 正常处理；然后进程退出
-        proc.stderr.readline.side_effect = [b"", b"   \n", b"INFO hello\n", b""]
+        proc.stderr.readline.side_effect = [b"\n", b"   \n", b"INFO hello\n", b""]
         proc.poll.side_effect = [None, None, None, 0]
 
         s._start_log_reader(proc)
