@@ -297,6 +297,7 @@ public sealed class InferenceSupervisorProcessTests
                 text => text.Contains("stdout.encoding=utf-8", StringComparison.Ordinal)
                     && text.Contains("识别完成", StringComparison.Ordinal),
                 TimeSpan.FromSeconds(20));
+            Assert.Equal("sup-utf8", proc.Ready.InstanceId);
             IReadOnlyList<string> lines = proc.LogLines;
 
             Assert.Contains("stdout.encoding=utf-8", fileText);
@@ -374,6 +375,7 @@ public sealed class InferenceSupervisorProcessTests
     private const string FakeSupervisorSource = """
         import json
         import sys
+        import time
 
         capabilities = [
             "ocr.recognition.v2",
@@ -398,6 +400,8 @@ public sealed class InferenceSupervisorProcessTests
         print("处理 Downloads\\下载\\截图 01.png", flush=True)
         sys.stderr.write("\x1b[32mINFO\x1b[0m 识别完成 Downloads\\下载\\截图 01.png\n")
         sys.stderr.flush()
+        # 模拟常驻服务，由测试的 proc.Dispose() 结束；避免登记 Job Object 时已退出。
+        time.sleep(60)
         """;
 
     private static InferenceSupervisorProcess CreateReadyProcess(
