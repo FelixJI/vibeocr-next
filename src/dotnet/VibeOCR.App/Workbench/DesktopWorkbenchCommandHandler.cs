@@ -3330,7 +3330,11 @@ public sealed class DesktopWorkbenchCommandHandler :
           {
             AppLog.Warn($"Recognition catalog refresh failed: {error.GetType().Name}: {error.Message}");
           }
-          finally { Interlocked.Exchange(ref environmentSwitching, 0); }
+          finally
+          {
+            Interlocked.Exchange(ref environmentSwitching, 0);
+            if (Volatile.Read(ref disposed) == 0) StateChanged?.Invoke(SettingsState(settings));
+          }
         }
       }
     });
@@ -3902,9 +3906,17 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     settings ??= CreateSettings();
     if (Volatile.Read(ref environmentSwitching) != 0)
+    {
+      AppLog.Warn("Recognition submit cancelled: environment switch refresh is still running.");
       return false;
-    return await settings.LoadSelectionAsync(cancellationToken) &&
-      Volatile.Read(ref environmentSwitching) == 0;
+    }
+    bool loaded = await settings.LoadSelectionAsync(cancellationToken);
+    bool switching = Volatile.Read(ref environmentSwitching) != 0;
+    if (!loaded || switching)
+      AppLog.Warn(switching
+        ? "Recognition submit cancelled: environment switch began during catalog loading."
+        : "Recognition submit cancelled: catalog was invalidated during loading.");
+    return loaded && !switching;
   }
 
   /// <summary>
@@ -4735,7 +4747,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     // 远程模式入口准备期（含各步之间的空窗）同样锁定环境区与 MinerU
     // 编辑器：不能只依赖各步 RunAsync 的瞬时 IsBusy。
     EnvironmentBusy: (viewModel.Environments?.IsBusy ?? false) ||
-      Volatile.Read(ref remoteHostPreparing) != 0,
+      Volatile.Read(ref environmentSwitching) != 0 || Volatile.Read(ref remoteHostPreparing) != 0,
     EnvironmentSources: viewModel.Environments?.Snapshot?.Sources?.Select(source =>
       new SettingsEnvironmentSourceState(
         source.Id, source.Kind, source.DisplayName, source.Endpoint, source.IsDefault)).ToArray(),

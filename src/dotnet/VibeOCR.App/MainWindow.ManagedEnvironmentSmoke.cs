@@ -341,7 +341,14 @@ public sealed partial class MainWindow
       while (true)
       {
         ManagedEnvironmentSession? session = smokeManagedSession!();
-        if (session?.EnvironmentId == id && smokeInferenceAttached!()) return session;
+        if (session?.EnvironmentId == id && smokeInferenceAttached!())
+        {
+          // 服务 attach 早于目录/设置回读完成；等待生产忙碌投影释放后再提交 OCR。
+          WorkbenchBootstrap bootstrap = await application.BootstrapAsync(cancellation.Token);
+          if (!bootstrap.States.Select(item => item.State).OfType<SettingsWorkbenchState>()
+              .Single().EnvironmentBusy)
+            return session;
+        }
         await Task.Delay(100, cancellation.Token);
       }
     }
