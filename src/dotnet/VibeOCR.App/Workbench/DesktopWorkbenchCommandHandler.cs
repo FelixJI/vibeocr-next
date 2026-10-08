@@ -90,6 +90,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private readonly List<string> generatedFiles = [];
   private readonly Dictionary<string, string> resourceFiles = new(StringComparer.Ordinal);
   private readonly HashSet<Task> backgroundOperations = [];
+  private readonly CancellationTokenSource sceneRecognitionLifetime = new();
   private readonly HashSet<int> selectedPdfPages = [];
   private readonly Dictionary<int, WorkbenchResourceReference> pdfThumbnails = [];
   private readonly Dictionary<string, string> structuredResourceFiles = new(StringComparer.Ordinal);
@@ -496,6 +497,8 @@ public sealed class DesktopWorkbenchCommandHandler :
           environment => environment.RepairEmptyAsync(repair.EnvironmentId, cancellationToken), cancellationToken),
         FindCompatibleEnvironmentCommand findCompatible => await RunEnvironmentAsync(
           environment => environment.FindCompatibleAsync(findCompatible.Recipe, cancellationToken), cancellationToken),
+        PrepareEnvironmentCommand prepareEnvironment => await RunEnvironmentAsync(
+          environment => environment.PrepareAsync(prepareEnvironment.Recipe, cancellationToken), cancellationToken),
         PrepareRemoteHostCommand => PrepareRemoteHost(cancellationToken),
         SetThemeCommand setTheme => SetTheme(setTheme),
         SetStartupCommand startup => SetStartup(startup),
@@ -1446,6 +1449,9 @@ public sealed class DesktopWorkbenchCommandHandler :
       channel.SessionInput = frozen;
       adopted = true;
       channel.ExcludeBoxes = command.ExcludeBoxes;
+      // 现场窗口关闭会取消其 bridge token；冻结后任务归主应用拥有。
+      CancellationToken recognitionToken = channel.SceneEditing
+        ? sceneRecognitionLifetime.Token : cancellationToken;
       if (channel.SceneEditing)
       {
         // 显式识别交接：基准已冻结后再关 scene；会话与已提交任务保留，
@@ -1460,7 +1466,7 @@ public sealed class DesktopWorkbenchCommandHandler :
           sessionId,
           revision,
           input,
-          cancellationToken));
+          recognitionToken));
     }
     finally
     {
@@ -3324,7 +3330,11 @@ public sealed class DesktopWorkbenchCommandHandler :
           {
             AppLog.Warn($"Recognition catalog refresh failed: {error.GetType().Name}: {error.Message}");
           }
-          finally { Interlocked.Exchange(ref environmentSwitching, 0); }
+          finally
+          {
+            Interlocked.Exchange(ref environmentSwitching, 0);
+            if (Volatile.Read(ref disposed) == 0) StateChanged?.Invoke(SettingsState(settings));
+          }
         }
       }
     });
@@ -3896,9 +3906,17 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     settings ??= CreateSettings();
     if (Volatile.Read(ref environmentSwitching) != 0)
+    {
+      AppLog.Warn("Recognition submit cancelled: environment switch refresh is still running.");
       return false;
-    return await settings.LoadSelectionAsync(cancellationToken) &&
-      Volatile.Read(ref environmentSwitching) == 0;
+    }
+    bool loaded = await settings.LoadSelectionAsync(cancellationToken);
+    bool switching = Volatile.Read(ref environmentSwitching) != 0;
+    if (!loaded || switching)
+      AppLog.Warn(switching
+        ? "Recognition submit cancelled: environment switch began during catalog loading."
+        : "Recognition submit cancelled: catalog was invalidated during loading.");
+    return loaded && !switching;
   }
 
   /// <summary>
@@ -4729,7 +4747,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     // 远程模式入口准备期（含各步之间的空窗）同样锁定环境区与 MinerU
     // 编辑器：不能只依赖各步 RunAsync 的瞬时 IsBusy。
     EnvironmentBusy: (viewModel.Environments?.IsBusy ?? false) ||
-      Volatile.Read(ref remoteHostPreparing) != 0,
+      Volatile.Read(ref environmentSwitching) != 0 || Volatile.Read(ref remoteHostPreparing) != 0,
     EnvironmentSources: viewModel.Environments?.Snapshot?.Sources?.Select(source =>
       new SettingsEnvironmentSourceState(
         source.Id, source.Kind, source.DisplayName, source.Endpoint, source.IsDefault)).ToArray(),
@@ -4842,6 +4860,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     {
       return;
     }
+    sceneRecognitionLifetime.Cancel();
     Interlocked.Increment(ref recognitionChannel.Generation);
     Interlocked.Increment(ref imageEditChannel.Generation);
     Interlocked.Increment(ref batchGeneration);
@@ -4879,6 +4898,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       operations = backgroundOperations.ToArray();
     }
     await Task.WhenAll(operations).ConfigureAwait(false);
+    sceneRecognitionLifetime.Dispose();
     foreach (string file in generatedFiles)
     {
       try

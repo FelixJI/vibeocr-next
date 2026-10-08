@@ -49,7 +49,7 @@ function Invoke-ManagedPhase([string]$phase) {
     $env:VIBEOCR_MANAGED_ENVIRONMENT_E2E_PHASE = $phase
     $env:WEBVIEW2_USER_DATA_FOLDER = $webViewData
     $executable = Join-Path $candidate 'app\VibeOCR.WinUI.exe'
-    # create/install 阶段测试手动空环境流程；restart 阶段验证生产启动。
+    # create/install 阶段测试常规准备/确认与旧空环境恢复；restart 验证生产启动。
     $shellOnly = if ($phase -eq 'restart') { '' } else { ' --shell-only' }
     $process = Start-Process -FilePath $executable `
         -ArgumentList "--profile production --install-root `"$candidate`"$shellOnly" `

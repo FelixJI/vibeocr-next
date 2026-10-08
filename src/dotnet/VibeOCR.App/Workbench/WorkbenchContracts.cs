@@ -352,6 +352,9 @@ public sealed record RepairEmptyEnvironmentCommand(string EnvironmentId) : Workb
 /// <summary>推荐配置选择：只读查询配方兼容环境，不创建/不安装/不切换。</summary>
 public sealed record FindCompatibleEnvironmentCommand(string Recipe) : WorkbenchCommand;
 
+/// <summary>优先复用兼容环境，否则按精确 ID 准备并预览；明确确认后才安装。</summary>
+public sealed record PrepareEnvironmentCommand(string Recipe) : WorkbenchCommand;
+
 /// <summary>
 /// 远程模式宿主入口：随包离线基础配方一键就绪。已安装可复用环境直接
 /// 切换启动；无可复用环境时新建/复用专用环境并走 Runtime 权威离线

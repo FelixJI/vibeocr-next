@@ -81,6 +81,76 @@ public sealed class DesktopWorkbenchCommandHandlerTests
   }
 
   [Fact]
+  public async Task SwitchRemainsBusyUntilAttachedServiceSnapshotFinishes()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-switch-ready-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      var inference = new SwitchSnapshotBlockingClient();
+      var manager = new SwitchCatalogManager();
+      bool attached = false;
+      var environments = new ManagedEnvironmentSettings(manager, (id, _) =>
+      {
+        manager.ActiveId = id;
+        attached = true;
+        return Task.CompletedTask;
+      }, () => null, new ProductMaintenanceCoordinator());
+      var settings = new SettingsViewModel(inference, environments: environments);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        () => new RecognitionViewModel(inference, new SignallingInputService()),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => settings, CreateShellViewModel,
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker, root, static () => 0, annotations, inferenceAttached: () => attached);
+      var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      handler.StateChanged += state =>
+      {
+        if (attached && state is SettingsWorkbenchState { EnvironmentBusy: false } &&
+            inference.Released.Task.IsCompleted)
+          finished.TrySetResult();
+      };
+      try
+      {
+        await handler.ExecuteAsync(new SwitchEnvironmentCommand("paddle"),
+          TestContext.Current.CancellationToken);
+        await inference.Started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.True(attached);
+        Assert.False(environments.IsBusy);
+        var captured = new TaskCompletionSource<RecognitionWorkbenchState>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        handler.StateChanged += state =>
+        {
+          if (state is RecognitionWorkbenchState { IsBusy: false, ScreenshotSession: not null } scene)
+            captured.TrySetResult(scene);
+          if (state is RecognitionWorkbenchState { StatusCode: "recognition.cancelled" })
+            cancelled.TrySetResult();
+        };
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+        Guid sessionId = Guid.Parse((await captured.Task.WaitAsync(TimeSpan.FromSeconds(5),
+          TestContext.Current.CancellationToken)).ScreenshotSession!.SessionId);
+        WorkbenchAnnotationLease exported = await annotations.UploadPngAsync(new MemoryStream(AnnotationPng),
+          TestContext.Current.CancellationToken);
+        await handler.ExecuteAsync(new RecognizeScreenshotImageCommand(exported.ResourceUri.AbsoluteUri,
+          sessionId, 0, []), TestContext.Current.CancellationToken);
+        await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.Equal(0, inference.SubmitCalls);
+        Assert.True(handler.InitialStates.OfType<SettingsWorkbenchState>().Single().EnvironmentBusy);
+        inference.Released.TrySetResult();
+        await finished.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.False(handler.InitialStates.OfType<SettingsWorkbenchState>().Single().EnvironmentBusy);
+      }
+      finally { inference.Released.TrySetResult(); }
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
   public async Task SwitchEnvironmentFailureReReadsSnapshotFromCurrentService()
   {
     string root = Path.Combine(Path.GetTempPath(), $"vibeocr-switch-failure-{Guid.NewGuid():N}");
@@ -2127,6 +2197,29 @@ public sealed class DesktopWorkbenchCommandHandlerTests
           Components = [],
         },
       });
+  }
+
+  private sealed class SwitchSnapshotBlockingClient : InferenceClientStub
+  {
+    public int SubmitCalls;
+    public override Task<JobRef> SubmitAsync(SubmitRequest request,
+      IReadOnlyDictionary<string, SubmitUpload> uploads, CancellationToken cancellationToken)
+    {
+      SubmitCalls++;
+      throw new InvalidOperationException("Switching service must not receive recognition.");
+    }
+    public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource Released { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken) =>
+      Task.FromResult(SwitchHealth(Wire.OcrEngineId.Rapidocr));
+    public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>
+      Task.FromResult(new SettingsSnapshot());
+    public override async Task<ResidencyStatus> GetResidencyAsync(CancellationToken cancellationToken)
+    {
+      Started.TrySetResult();
+      await Released.Task.WaitAsync(cancellationToken);
+      return new ResidencyStatus();
+    }
   }
 
   private sealed class SwitchCatalogManager : IManagedEnvironmentClient

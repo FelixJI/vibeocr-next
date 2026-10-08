@@ -1,4 +1,7 @@
 using System.Text.Json;
+using Microsoft.Web.WebView2.Core;
+using Windows.Storage;
+using Windows.Storage.Streams;
 using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Workbench;
 using VibeOCR.App.Services;
@@ -9,7 +12,7 @@ namespace VibeOCR.App;
 
 public sealed partial class MainWindow
 {
-  private const string SmokeEnvironmentA = "Smoke A";
+  private const string SmokeEnvironmentA = "RapidOCR · CPU";
   private const string SmokeEnvironmentB = "Smoke B";
   private string managedSmokeStage = "starting";
 
@@ -74,17 +77,26 @@ public sealed partial class MainWindow
 
   private async Task<object> CreateSmokeEnvironmentsAsync()
   {
-    await NavigateSmokeAsync("设置", "input[aria-label='新环境名称（留空自动命名）']");
-    // F4: 冷启动 managed-environment 清单投影未到时 environmentBusy 会禁用创建控件，
-    // 可能超过下方 30s 按钮就绪等待。复用 Paddle smoke 的首快照就绪等待：首个权威
-    // 清单投影到达即冷清单往返完成。这不是 environmentBusy=false 的严格证明；
-    // 按钮自身的 enabled 守卫仍保持权威。
+    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
-    await EnterSmokeTextAsync("input[aria-label='新环境名称（留空自动命名）']", SmokeEnvironmentA);
-    await ClickManagedSmokeButtonAsync("创建空环境");
+    await SelectSmokeValueAsync("#environment-component-select", "rapidocr");
+    await SelectSmokeValueAsync("#environment-device-select", "cpu");
+    await ClickManagedSmokeButtonAsync("准备此配置");
     await WaitForSmokeEnvironmentsAsync([SmokeEnvironmentA], TimeSpan.FromMinutes(5));
-    await EnterSmokeTextAsync("input[aria-label='新环境名称（留空自动命名）']", SmokeEnvironmentB);
-    await ClickManagedSmokeButtonAsync("创建空环境");
+    await WaitForSmokeDomAsync(
+      "!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
+      "document.querySelector('.runtime-install-plan')?.textContent.includes('rapidocr-cpu') && " +
+      "!document.querySelector('.managed-environment-advanced') && " +
+      "!document.querySelector(\"input[aria-label='新环境名称（留空自动命名）']\")",
+      TimeSpan.FromMinutes(2));
+    await SaveManagedSmokePreviewAsync("confirmation");
+    await ClickManagedSmokeButtonAsync("取消");
+    // 第二个空环境只用于验证隔离和旧记录兼容；用户不再需要手工创建。
+    WorkbenchCommandReceipt created = await application.ExecuteAsync(
+      new WorkbenchCommandEnvelope(Guid.NewGuid(), new CreateEnvironmentCommand(SmokeEnvironmentB)),
+      CancellationToken.None);
+    if (!created.Ok)
+      throw new InvalidOperationException($"Smoke fixture creation failed: {created.Error?.Code}");
     ManagedEnvironmentList list = await WaitForSmokeEnvironmentsAsync(
       [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(5));
     if (list.ActiveId is not null || smokeInferenceAttached!() || smokeInstallAttempts!() != 0)
@@ -99,6 +111,7 @@ public sealed partial class MainWindow
       "panel.textContent.includes('默认运行环境：RapidOCR · CPU（尚未启动）') && " +
       "!panel.querySelector('[role=progressbar]'); })()",
       TimeSpan.FromSeconds(30));
+    await SaveManagedSmokePreviewAsync("environment-list");
     return new { active_id = list.ActiveId, environments = environments.Select(SmokeEnvironmentEvidence) };
   }
 
@@ -124,7 +137,7 @@ public sealed partial class MainWindow
       throw new InvalidOperationException("Local QR generation installed or started a service.");
 
     // 导航证明用稳定 runtime 面板：冷启动权威清单未到时 React 不渲染
-    // #managed-environment-select（environments.length===0），名单由随后等待覆盖。
+    // 环境列表（environments.length===0），名单由随后等待覆盖。
     await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     ManagedEnvironmentList empty = await WaitForSmokeEnvironmentsAsync(
       [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(2));
@@ -162,7 +175,7 @@ public sealed partial class MainWindow
   private async Task<object> VerifyRestartedSmokeEnvironmentAsync()
   {
     // 同上：稳定面板作导航证明，冷启动清单由随后的权威名单等待吸收（F7：
-    // restart 冷入口 30s 内 managedSelect 仍为 null 而面板已渲染）。
+    // restart 冷入口列表尚未到达而面板已渲染）。
     await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     ManagedEnvironmentList list = await WaitForSmokeEnvironmentsAsync(
       [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(2));
@@ -178,6 +191,7 @@ public sealed partial class MainWindow
     if (list.ActiveId != a.Id || a.Revision != session.Revision ||
         smokeInstallAttempts!() != 0 || !smokeInferenceAttached!())
       throw new InvalidOperationException("Restart did not reuse active A without installation.");
+    await SaveManagedSmokePreviewAsync("environment-list");
     return new
     {
       active_id = list.ActiveId,
@@ -192,8 +206,8 @@ public sealed partial class MainWindow
   {
     RecordManagedSmokeStage($"select {environment.Name}");
     await SelectSmokeEnvironmentAsync(environment.Id);
-    await SelectSmokeValueAsync("#environment-purpose-select", "text");
-    await ClickManagedSmokeButtonAsync("预览依赖");
+    await SelectSmokeValueAsync("#environment-component-select", "rapidocr");
+    await ClickManagedSmokeButtonAsync("继续准备依赖");
     await WaitForSmokeDomAsync("!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
       "document.querySelector('.runtime-install-plan')?.textContent.includes('rapidocr-cpu') && " +
       "document.querySelector('.runtime-install-plan')?.textContent.includes('TUNA PyPI 镜像')",
@@ -258,8 +272,13 @@ public sealed partial class MainWindow
     await WaitForCanvasAsync();
     RecordManagedSmokeStage($"recognize {environment.Name}");
     await ClickSmokeButtonAsync("识别当前图");
-    await WaitForScreenshotStateAsync(state => !state.IsBusy && state.Result is not null,
-      TimeSpan.FromMinutes(35));
+    await WaitForScreenshotStateAsync(state =>
+    {
+      if (!state.IsBusy && state.StatusCode is "recognition.cancelled" or
+          "recognition.modeUnavailable" or "recognition.expired")
+        throw new InvalidOperationException($"Managed smoke OCR stopped: {state.StatusCode}");
+      return !state.IsBusy && state.Result is not null;
+    }, TimeSpan.FromMinutes(35));
     await WaitForSmokeDomAsync("(document.querySelector('.result-document')?.textContent ?? '').includes('VibeOCR') && (document.querySelector('.result-document')?.textContent ?? '').includes('123')",
       TimeSpan.FromSeconds(15));
     if (smokeSubmitAttempts() != before + 1 || string.IsNullOrWhiteSpace(smokeLastJobId!()))
@@ -322,7 +341,14 @@ public sealed partial class MainWindow
       while (true)
       {
         ManagedEnvironmentSession? session = smokeManagedSession!();
-        if (session?.EnvironmentId == id && smokeInferenceAttached!()) return session;
+        if (session?.EnvironmentId == id && smokeInferenceAttached!())
+        {
+          // 服务 attach 早于目录/设置回读完成；等待生产忙碌投影释放后再提交 OCR。
+          WorkbenchBootstrap bootstrap = await application.BootstrapAsync(cancellation.Token);
+          if (!bootstrap.States.Select(item => item.State).OfType<SettingsWorkbenchState>()
+              .Single().EnvironmentBusy)
+            return session;
+        }
         await Task.Delay(100, cancellation.Token);
       }
     }
@@ -354,18 +380,53 @@ public sealed partial class MainWindow
     await Task.Delay(100);
   }
 
-  private Task SelectSmokeEnvironmentAsync(string id) =>
-    SelectSmokeValueAsync("#managed-environment-select", id);
+  private string? selectedSmokeEnvironmentId;
+
+  private async Task SelectSmokeEnvironmentAsync(string id)
+  {
+    await WaitForSmokeDomAsync(
+      "(() => { const row=Array.from(document.querySelectorAll('.managed-environment-item'))" +
+      ".find(e => e.dataset.environmentId === " + JsonSerializer.Serialize(id) +
+      "); if (!row) return false; row.scrollIntoView({block:'nearest'}); return true; })()",
+      TimeSpan.FromMinutes(2));
+    selectedSmokeEnvironmentId = id;
+  }
 
   private async Task ClickManagedSmokeButtonAsync(string label)
   {
-    // Readiness and click share one DOM turn: React may replace/disable the
-    // button between two ExecuteScriptAsync calls during a state projection.
+    bool rowAction = label is "切换到此环境" or "启动并验证当前环境" or
+      "继续准备依赖" or "重新准备依赖";
+    string scope = rowAction
+      ? "Array.from(document.querySelectorAll('.managed-environment-item')).find(e => " +
+        "e.dataset.environmentId === " + JsonSerializer.Serialize(selectedSmokeEnvironmentId) + ")"
+      : "document";
+    // 就绪与点击在同一 DOM turn 完成；行操作绑定精确环境 id，不点第一个同名按钮。
     await WaitForSmokeDomAsync(
-      "(() => { const b=Array.from(document.querySelectorAll('button')).find(b => " +
+      "(() => { const root=" + scope + "; if (!root) return false; " +
+      "const b=Array.from(root.querySelectorAll('button')).find(b => " +
       "b.textContent?.trim() === " + JsonSerializer.Serialize(label) +
       " && !b.disabled); if (!b) return false; b.click(); return true; })()",
       TimeSpan.FromSeconds(30));
+  }
+
+  private async Task SaveManagedSmokePreviewAsync(string stage)
+  {
+    string selector = stage == "confirmation" ? ".runtime-install-plan" : ".managed-environment-list";
+    await WaitForSmokeDomAsync(
+      "(() => { const e = document.querySelector(" + JsonSerializer.Serialize(selector) +
+      "); if (!e || !e.querySelector('button:not(:disabled)')) return false; " +
+      "e.scrollIntoView({block:'center'}); return true; })()",
+      TimeSpan.FromSeconds(30));
+    await Task.Delay(100);
+    string health = Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_ENVIRONMENT_E2E_HEALTH")
+      ?? throw new InvalidOperationException("Managed smoke output is missing.");
+    string path = Path.ChangeExtension(health, $".{stage}.png");
+    using (new FileStream(path, FileMode.CreateNew)) { }
+    StorageFile file = await StorageFile.GetFileFromPathAsync(path);
+    using IRandomAccessStream stream = await file.OpenAsync(FileAccessMode.ReadWrite);
+    await WorkbenchWebView.CoreWebView2.CapturePreviewAsync(
+      CoreWebView2CapturePreviewImageFormat.Png, stream);
+    await stream.FlushAsync();
   }
 
   private async Task SelectSmokeValueAsync(string selector, string value)

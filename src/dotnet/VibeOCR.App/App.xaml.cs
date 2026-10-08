@@ -950,7 +950,7 @@ public sealed partial class App : Application
             if (environments.ActiveId is null)
             {
                 var unavailable = new InvalidOperationException(
-                    "尚未选择运行环境。可以在设置中创建空环境或安装依赖。");
+                    "尚未选择运行环境。可以在设置中选择识别组件并准备依赖。");
                 _inferenceGateway.MarkStartupFailed(unavailable);
                 _qrCodeGateway.MarkStartupFailed(unavailable);
                 _runtimeStatus.ReportServiceUnavailable();

@@ -2282,7 +2282,7 @@ describe("AppShell", () => {
     };
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
     // 高级区默认折叠：先展开再操作原编辑器全部路径。
-    await user.click(screen.getByText("高级：环境与依赖管理"));
+    expect(screen.queryByText("高级：环境与依赖管理")).not.toBeInTheDocument();
     // 快照已同步但无活动环境：展示默认配置“尚未启动”，不误写“尚未读取”，
     // 也不伪造就绪。
     expect(
@@ -2299,21 +2299,31 @@ describe("AppShell", () => {
     expect(screen.getByText(/上次依赖安装未完成/)).toHaveTextContent(
       "请求源：跟随配置；生效源：TUNA PyPI 镜像",
     );
+    await user.click(screen.getByText("完整依赖与来源明细（只读）"));
     expect(screen.getByText(/锁定依赖（1 项）/)).toBeVisible();
     expect(
       screen.getByText(
-        /计划：rapidocr-cpu · 目标文档（环境修订 1）· 下载来源：TUNA PyPI 镜像/,
+        /计划：rapidocr-cpu · 目标文档（失败后重新准备）· 下载来源：TUNA PyPI 镜像/,
       ),
     ).toBeVisible();
-    await user.type(
-      screen.getByLabelText("新环境名称（留空自动命名）"),
-      "资料",
-    );
-    await user.click(screen.getByRole("button", { name: "创建空环境" }));
+    expect(
+      screen.queryByLabelText("新环境名称（留空自动命名）"),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "继续准备依赖" }));
     expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.createEnvironment",
-      name: "资料",
+      type: "settings.previewEnvironmentInstall",
+      environmentId: "env-1",
+      recipe: "rapidocr-cpu",
     });
+    await user.click(screen.getByRole("button", { name: "移除环境" }));
+    expect(actions.run).not.toHaveBeenCalledWith({
+      type: "settings.deleteEnvironment",
+      environmentId: "env-1",
+    });
+    await user.click(screen.getByRole("button", { name: "取消移除" }));
+    // 重新预览隐藏旧计划，收到新计划后才允许确认。
+    unmount();
+    const restored = render(<App actions={actions} viewState={viewState} />);
     await user.click(screen.getByRole("button", { name: "确认安装依赖" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.confirmEnvironmentInstall",
@@ -2328,7 +2338,7 @@ describe("AppShell", () => {
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.cancelEnvironmentInstall",
     });
-    unmount();
+    restored.unmount();
   });
   it("recommends catalog recipes with honest hardware gating and read-only reuse lookup", async () => {
     window.location.hash = "#/settings";
@@ -2483,8 +2493,8 @@ describe("AppShell", () => {
     ).not.toBeInTheDocument();
     // 切换用途：旧选择失效 + 新配方的只读查询。
     await user.selectOptions(
-      screen.getByLabelText("识别用途"),
-      "document|text",
+      screen.getByLabelText("识别组件"),
+      "rapidocr+mineru",
     );
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.invalidateEnvironmentPlan",
@@ -2496,7 +2506,7 @@ describe("AppShell", () => {
       }),
     );
     // 真正不支持的 GPU 配方明确禁用并给出原因，不发起查询。
-    await user.selectOptions(screen.getByLabelText("目标设备"), "nvidia_cuda");
+    await user.selectOptions(screen.getByLabelText("加速方式"), "nvidia_cuda");
     expect(
       screen.getByText(
         /不支持：NVIDIA 驱动 527\.00 低于 CUDA 12\.x 下限（需 ≥ 528\.33）；该配置当前不可选。/,
@@ -2585,14 +2595,12 @@ describe("AppShell", () => {
       />,
     );
     expect(screen.getByText(/没有可直接复用的已安装环境/)).toBeVisible();
-    expect(
-      screen.getByText(/将自动创建空环境「RapidOCR · CPU」并预览依赖/),
-    ).toBeVisible();
+    expect(screen.getByText(/自动准备目标环境并预览依赖/)).toBeVisible();
     await user.click(screen.getByRole("button", { name: "准备此配置" }));
     // 自动命名沿目录展示名；创建成功后对同一环境真实预览（跟随配置）。
     expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.createEnvironment",
-      name: "RapidOCR · CPU",
+      type: "settings.prepareEnvironment",
+      recipe: "rapidocr-cpu",
     });
     rerender(
       <App
@@ -2629,13 +2637,10 @@ describe("AppShell", () => {
         }}
       />,
     );
-    await waitFor(() =>
-      expect(actions.run).toHaveBeenCalledWith({
-        type: "settings.previewEnvironmentInstall",
-        environmentId: "env-new",
-        recipe: "rapidocr-cpu",
-      }),
-    );
+    expect(actions.run).not.toHaveBeenCalledWith({
+      type: "settings.createEnvironment",
+      name: "RapidOCR · CPU",
+    });
     // 计划回显在推荐区：新增依赖如实列出，由用户确认安装。
     rerender(
       <App
@@ -2684,7 +2689,7 @@ describe("AppShell", () => {
     );
     expect(
       screen.getByText(
-        /计划：rapidocr-cpu · 目标RapidOCR · CPU（环境修订 1）· 下载来源：TUNA PyPI 镜像/,
+        /计划：rapidocr-cpu · 目标RapidOCR · CPU（空环境准备）· 下载来源：TUNA PyPI 镜像/,
       ),
     ).toBeVisible();
     // AC8：安装只写入目标环境、不停止当前识别服务（活动保护以 Runtime 为准）。
@@ -2695,16 +2700,14 @@ describe("AppShell", () => {
     expect(
       screen.queryByRole("button", { name: "准备此配置" }),
     ).not.toBeInTheDocument();
-    expect(
-      screen.getByText(/请在下方“高级：环境与依赖”核对锁定依赖并确认安装/),
-    ).toBeVisible();
+    expect(screen.queryByText(/高级：环境与依赖/)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "确认安装依赖" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.confirmEnvironmentInstall",
       planId: "p-9",
     });
     // 选择失效后仍可新建：切到另一用途后重新可以准备（不重复旧待准备）。
-    await user.selectOptions(screen.getByLabelText("识别用途"), "document");
+    await user.selectOptions(screen.getByLabelText("识别组件"), "mineru");
     rerender(
       <App
         actions={actions}
@@ -2818,6 +2821,35 @@ describe("AppShell", () => {
     await waitFor(() =>
       expect(countQueries("rapidocr-cpu")).toBeGreaterThanOrEqual(1),
     );
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          features: {
+            settings: {
+              ...settingsBase,
+              environmentCompatibility: {
+                recipe: "rapidocr-cpu",
+                selectedEnvironmentId: null,
+              },
+            },
+          },
+        }}
+      />,
+    );
+    // 原生 Select 会派发同值 change；不应废弃已查询的默认配置。
+    fireEvent.change(screen.getByLabelText("识别组件"), {
+      target: { value: "rapidocr" },
+    });
+    fireEvent.change(screen.getByLabelText("加速方式"), {
+      target: { value: "cpu" },
+    });
+    expect(actions.run).not.toHaveBeenCalledWith({
+      type: "settings.invalidateEnvironmentPlan",
+    });
+    expect(countQueries("rapidocr-cpu")).toBe(1);
+    expect(screen.getByRole("button", { name: "准备此配置" })).toBeVisible();
     // 查询失败（宿主未回传结果）+ busy/状态推送多次重渲染：同一配方不得
     // 自动重发（每次查询都会冻结一个 Installer 子进程）。
     rerender(
@@ -2857,7 +2889,7 @@ describe("AppShell", () => {
     expect(countQueries("rapidocr-cpu")).toBe(2);
     // 迟到的旧选择结果不覆盖新选择：切到文档解析后，旧 rapidocr-cpu 结果
     // 只按配方 id 绑定，不冒充当前选择的查询结果。
-    await user.selectOptions(screen.getByLabelText("识别用途"), "document");
+    await user.selectOptions(screen.getByLabelText("识别组件"), "mineru");
     rerender(
       <App
         actions={actions}
@@ -2888,7 +2920,7 @@ describe("AppShell", () => {
       expect(countQueries("mineru-cpu")).toBeGreaterThanOrEqual(1),
     );
     // 切回文字识别：旧结果（未选中任何环境）如实呈现“没有可直接复用”。
-    await user.selectOptions(screen.getByLabelText("识别用途"), "text");
+    await user.selectOptions(screen.getByLabelText("识别组件"), "rapidocr");
     rerender(
       <App
         actions={actions}
@@ -3010,6 +3042,313 @@ describe("AppShell", () => {
     expect(screen.queryByText(/兼容性查询未完成/)).not.toBeInTheDocument();
     unmount();
   });
+  describe("environment preparation invalidation", () => {
+    const base: AppViewState = {
+      connected: true,
+      revision: 1,
+      route: "settings",
+      theme: "light",
+      runtimeLabel: "运行环境",
+      capabilities: ["runtime.environments"],
+      features: {
+        settings: {
+          environments: [],
+          environmentRecipes: [
+            {
+              id: "rapidocr-cpu",
+              displayName: "RapidOCR · CPU",
+              configuredRecognitionTypes: ["text"],
+              accelerator: "cpu",
+              targetDevice: "cpu",
+            },
+          ],
+          environmentPackageSourceIds: ["tuna-pypi"],
+        },
+      },
+    };
+    const settings = base.features.settings as Record<string, unknown>;
+    const plan = {
+      planId: "plan-Y",
+      environmentId: "Y",
+      environmentRevision: 1,
+      recipe: "rapidocr-cpu",
+      requestedRecipe: "rapidocr-cpu",
+      sourceIds: ["tuna-pypi"],
+      dependencies: ["rapidocr==3.9.2"],
+    };
+    const environment = {
+      id: "X",
+      name: "旧目标",
+      revision: 1,
+      kind: "venv",
+      status: "empty",
+      pythonState: "ready",
+      dependencyState: "empty",
+    };
+
+    it("queries once after source save or plan cancel without environment changes", async () => {
+      window.location.hash = "#/settings";
+      const user = userEvent.setup();
+      const actions: AppActions = {
+        run: vi.fn().mockResolvedValue(true),
+        navigate: vi.fn(),
+        setTheme: vi.fn(),
+      };
+      const { rerender, unmount } = render(
+        <App actions={actions} viewState={base} />,
+      );
+      const queries = () =>
+        vi
+          .mocked(actions.run)
+          .mock.calls.filter(
+            ([action]) => action.type === "settings.findCompatibleEnvironment",
+          ).length;
+      await waitFor(() => expect(queries()).toBe(1));
+      const withResult = {
+        ...settings,
+        environmentCompatibility: {
+          recipe: "rapidocr-cpu",
+          selectedEnvironmentId: null,
+        },
+      };
+      rerender(
+        <App
+          actions={actions}
+          viewState={{ ...base, features: { settings: withResult } }}
+        />,
+      );
+      await user.click(screen.getByRole("button", { name: "保存下载来源" }));
+      rerender(
+        <App
+          actions={actions}
+          viewState={{
+            ...base,
+            features: { settings: { ...settings, environmentBusy: true } },
+          }}
+        />,
+      );
+      rerender(<App actions={actions} viewState={base} />);
+      await waitFor(() => expect(queries()).toBe(2));
+      rerender(<App actions={actions} viewState={{ ...base, revision: 2 }} />);
+      expect(queries()).toBe(2);
+      // 普通失败不循环重查；只有另一个明确失效动作允许新的一次查询。
+      rerender(
+        <App
+          actions={actions}
+          viewState={{
+            ...base,
+            features: {
+              settings: {
+                ...withResult,
+                environments: [{ ...environment, id: "Y" }],
+                environmentPlan: plan,
+              },
+            },
+          }}
+        />,
+      );
+      const beforeCancel = queries();
+      await user.click(screen.getByRole("button", { name: /^取消$/ }));
+      expect(
+        screen.queryByRole("button", { name: "确认安装依赖" }),
+      ).not.toBeInTheDocument();
+      const afterCancel = {
+        ...settings,
+        environments: [{ ...environment, id: "Y" }],
+      };
+      rerender(
+        <App
+          actions={actions}
+          viewState={{ ...base, features: { settings: afterCancel } }}
+        />,
+      );
+      await waitFor(() => expect(queries()).toBe(beforeCancel + 1));
+      rerender(
+        <App
+          actions={actions}
+          viewState={{
+            ...base,
+            revision: 3,
+            features: { settings: afterCancel },
+          }}
+        />,
+      );
+      expect(queries()).toBe(beforeCancel + 1);
+      unmount();
+    });
+
+    it("keeps the current query single-flight when an older generation settles", async () => {
+      window.location.hash = "#/settings";
+      const user = userEvent.setup();
+      let finishOld = () => {};
+      let finishCurrent = () => {};
+      const old = new Promise<boolean>((resolve) => {
+        finishOld = () => resolve(true);
+      });
+      const current = new Promise<boolean>((resolve) => {
+        finishCurrent = () => resolve(true);
+      });
+      let queries = 0;
+      const actions: AppActions = {
+        run: vi.fn((action) =>
+          action.type === "settings.findCompatibleEnvironment"
+            ? ++queries === 1
+              ? old
+              : queries === 2
+                ? current
+                : Promise.resolve(false)
+            : Promise.resolve(true),
+        ),
+        navigate: vi.fn(),
+        setTheme: vi.fn(),
+      };
+      const { rerender, unmount } = render(
+        <App actions={actions} viewState={base} />,
+      );
+      await waitFor(() => expect(queries).toBe(1));
+      await user.click(screen.getByRole("button", { name: "保存下载来源" }));
+      await waitFor(() => expect(queries).toBe(2));
+      await act(async () => {
+        finishOld();
+        await old;
+      });
+      await user.click(
+        screen.getByRole("button", { name: "重新查询兼容环境" }),
+      );
+      expect(queries).toBe(2);
+      await act(async () => {
+        finishCurrent();
+        await current;
+      });
+      await user.click(
+        screen.getByRole("button", { name: "重新查询兼容环境" }),
+      );
+      expect(queries).toBe(3);
+      rerender(<App actions={actions} viewState={{ ...base, revision: 2 }} />);
+      expect(queries).toBe(3);
+      unmount();
+    });
+
+    it("clears failed list target before preparing the recommended environment", async () => {
+      window.location.hash = "#/settings";
+      const user = userEvent.setup();
+      const actions: AppActions = {
+        run: vi.fn(
+          async (action) =>
+            action.type !== "settings.previewEnvironmentInstall",
+        ),
+        navigate: vi.fn(),
+        setTheme: vi.fn(),
+      };
+      const initial = {
+        ...settings,
+        environments: [environment],
+        environmentCompatibility: {
+          recipe: "rapidocr-cpu",
+          selectedEnvironmentId: null,
+        },
+      };
+      const { rerender, unmount } = render(
+        <App
+          actions={actions}
+          viewState={{ ...base, features: { settings: initial } }}
+        />,
+      );
+      await user.click(screen.getByRole("button", { name: "继续准备依赖" }));
+      expect(actions.run).toHaveBeenCalledWith({
+        type: "settings.previewEnvironmentInstall",
+        environmentId: "X",
+        recipe: "rapidocr-cpu",
+      });
+      rerender(
+        <App
+          actions={actions}
+          viewState={{
+            ...base,
+            features: {
+              settings: { ...initial, environmentStatus: "预览失败" },
+            },
+          }}
+        />,
+      );
+      await user.click(screen.getByRole("button", { name: "准备此配置" }));
+      expect(actions.run).toHaveBeenCalledWith({
+        type: "settings.prepareEnvironment",
+        recipe: "rapidocr-cpu",
+      });
+      rerender(
+        <App
+          actions={actions}
+          viewState={{
+            ...base,
+            features: {
+              settings: {
+                ...initial,
+                environments: [
+                  environment,
+                  { ...environment, id: "Y", name: "自动目标" },
+                ],
+                environmentPlan: plan,
+              },
+            },
+          }}
+        />,
+      );
+      expect(
+        screen.getByRole("button", { name: "确认安装依赖" }),
+      ).toBeVisible();
+      await user.click(screen.getByRole("button", { name: "确认安装依赖" }));
+      expect(actions.run).toHaveBeenCalledWith({
+        type: "settings.confirmEnvironmentInstall",
+        planId: "plan-Y",
+      });
+      unmount();
+    });
+
+    it("shows wheel dependency names in summary and preserves exact URLs only in details", async () => {
+      window.location.hash = "#/settings";
+      const user = userEvent.setup();
+      const actions: AppActions = {
+        run: vi.fn().mockResolvedValue(true),
+        navigate: vi.fn(),
+        setTheme: vi.fn(),
+      };
+      const torch =
+        "torch @ https://download.pytorch.org/whl/cu126/torch-2.8.0%2Bcu126-cp312-cp312-win_amd64.whl";
+      const torchvision =
+        "torchvision @ https://download.pytorch.org/whl/cu126/torchvision-0.23.0%2Bcu126-cp312-cp312-win_amd64.whl";
+      const { unmount } = render(
+        <App
+          actions={actions}
+          viewState={{
+            ...base,
+            features: {
+              settings: {
+                ...settings,
+                environments: [{ ...environment, id: "Y" }],
+                environmentPlan: {
+                  ...plan,
+                  dependencies: ["rapidocr==3.9.2", torch, torchvision],
+                },
+              },
+            },
+          }}
+        />,
+      );
+      expect(
+        screen.getByText(/主要组件：rapidocr==3.9.2、torch、torchvision；/),
+      ).toBeVisible();
+      expect(
+        screen.getByText(`${"rapidocr==3.9.2"}、${torch}、${torchvision}`),
+      ).not.toBeVisible();
+      await user.click(screen.getByText("完整依赖与来源明细（只读）"));
+      expect(
+        screen.getByText(`${"rapidocr==3.9.2"}、${torch}、${torchvision}`),
+      ).toBeVisible();
+      unmount();
+    });
+  });
+
   it("keeps a compatible MinerU request confirmable when Runtime resolves a combined recipe", async () => {
     window.location.hash = "#/settings";
     const user = userEvent.setup();
@@ -3076,24 +3415,17 @@ describe("AppShell", () => {
     const { unmount, rerender } = render(
       <App actions={actions} viewState={viewState} />,
     );
-    await user.click(screen.getByText("高级：环境与依赖管理"));
+    expect(screen.queryByText("高级：环境与依赖管理")).not.toBeInTheDocument();
+    // 重进页面从宿主 requestedRecipe 恢复选择，Runtime 实际合并配方仍可确认。
+    expect(screen.getByLabelText("识别组件")).toHaveValue("mineru");
+    expect(screen.getByRole("button", { name: "确认安装依赖" })).toBeVisible();
+    await user.selectOptions(screen.getByLabelText("识别组件"), "rapidocr");
     expect(
       screen.queryByRole("button", { name: "确认安装依赖" }),
     ).not.toBeInTheDocument();
-    // 配方选择统一为用途+设备：切到文档解析后，同一选择指向 mineru-cpu，
-    // 旧计划随之失效（requestedRecipe 不再匹配当前目标）。
-    await user.selectOptions(screen.getByLabelText("识别用途"), "document");
-    expect(
-      screen.queryByRole("button", { name: "确认安装依赖" }),
-    ).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("识别组件"), "mineru");
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.invalidateEnvironmentPlan",
-    });
-    await user.click(screen.getByRole("button", { name: "预览依赖" }));
-    expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.previewEnvironmentInstall",
-      environmentId: "env-1",
-      recipe: "mineru-cpu",
     });
     const settingsState = viewState.features.settings as Record<
       string,
@@ -3359,7 +3691,14 @@ describe("AppShell", () => {
     ).toBeVisible();
     await user.selectOptions(model, "huggingface");
     await user.click(screen.getByRole("button", { name: "保存下载来源" }));
-    expect(actions.run).toHaveBeenLastCalledWith({
+    expect(
+      vi
+        .mocked(actions.run)
+        .mock.calls.filter(
+          ([action]) => action.type === "settings.setEnvironmentSources",
+        )
+        .at(-1)?.[0],
+    ).toEqual({
       type: "settings.setEnvironmentSources",
       packageSourceId: "tuna-pypi",
       paddleocrModelSourceId: "paddleocr-huggingface",
@@ -3432,12 +3771,12 @@ describe("AppShell", () => {
     const { rerender, unmount } = render(
       <App actions={actions} viewState={viewState} />,
     );
-    await user.click(screen.getByText("高级：环境与依赖管理"));
+    expect(screen.queryByText("高级：环境与依赖管理")).not.toBeInTheDocument();
     // 统一选择后预览不再有“本次依赖下载源”按次覆盖入口。
     expect(screen.queryByLabelText("本次依赖下载源")).not.toBeInTheDocument();
 
     // 预览跟随已保存的下载来源：不携带 sourceId。
-    await user.click(screen.getByRole("button", { name: "预览依赖" }));
+    await user.click(screen.getByRole("button", { name: "继续准备依赖" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.previewEnvironmentInstall",
       environmentId: "env-1",
@@ -3488,10 +3827,10 @@ describe("AppShell", () => {
     );
     expect(
       screen.getByText(
-        /计划：rapidocr-cpu · 目标空白（环境修订 1）· 下载来源：TUNA PyPI 镜像/,
+        /计划：rapidocr-cpu · 目标空白（空环境准备）· 下载来源：TUNA PyPI 镜像/,
       ),
     ).toBeVisible();
-    await user.click(screen.getByText("来源与资产明细"));
+    await user.click(screen.getByText("完整依赖与来源明细（只读）"));
     expect(screen.getByText(/TUNA PyPI 镜像（依赖包来源/)).toBeVisible();
     expect(screen.getByText(/已缓存模型直接复用/)).toBeVisible();
     await user.click(screen.getByRole("button", { name: "确认安装依赖" }));

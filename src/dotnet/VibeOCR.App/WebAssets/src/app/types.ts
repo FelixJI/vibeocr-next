@@ -89,6 +89,7 @@ export type AppActionType =
   | "settings.deleteEnvironment"
   | "settings.repairEmptyEnvironment"
   | "settings.findCompatibleEnvironment"
+  | "settings.prepareEnvironment"
   | "settings.setStartup"
   | "settings.beginHotkeyRecording"
   | "settings.endHotkeyRecording"

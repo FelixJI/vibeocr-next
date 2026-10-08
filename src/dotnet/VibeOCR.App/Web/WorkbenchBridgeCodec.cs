@@ -671,6 +671,17 @@ public static class WorkbenchBridgeCodec
           throw new WorkbenchBridgeProtocolException("运行环境配方无效。");
         return new FindCompatibleEnvironmentCommand(compatibleRecipe);
       }
+      case ("settings", "prepareEnvironment"):
+      {
+        // 与 preview/findCompatible 同一 6-id 协议白名单；目录真值仍由宿主
+        // 按 Runtime 目录核验。
+        EnsureObjectWithFields(arguments, RecipeOnlyArgumentFields, "command arguments");
+        string? prepareRecipe = arguments.GetProperty("recipe").GetString();
+        if (prepareRecipe is not ("rapidocr-cpu" or "paddleocr-cpu" or "paddleocr-cuda" or
+            "mineru-cpu" or "rapidocr+mineru-cpu" or "rapidocr+mineru-cuda"))
+          throw new WorkbenchBridgeProtocolException("运行环境配方无效。");
+        return new PrepareEnvironmentCommand(prepareRecipe);
+      }
       case ("settings", "setTheme"):
         EnsureObjectWithFields(arguments, ThemeArgumentFields, "command arguments");
         return new SetThemeCommand(ParseTheme(

@@ -17,7 +17,7 @@ public sealed partial class MainWindow
       throw new InvalidOperationException("Source settings smoke dependencies are missing.");
 
     await CreateSmokeEnvironmentsAsync();
-    await NavigateSmokeAsync("设置", "#managed-environment-select");
+    await NavigateSmokeAsync("设置", ".managed-environment-list");
     ManagedEnvironmentList created = await WaitForSmokeEnvironmentsAsync(
       [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(5));
     ManagedEnvironment[] pair = SmokePair(created);
@@ -75,7 +75,7 @@ public sealed partial class MainWindow
     RecordManagedSmokeStage("preview follow");
     // 空环境 A、统一选择默认“文字识别 · CPU”：预览跟随已保存的统一来源。
     await SelectSmokeEnvironmentAsync(pair[0].Id);
-    await ClickManagedSmokeButtonAsync("预览依赖");
+    await ClickManagedSmokeButtonAsync("继续准备依赖");
     await WaitForSmokeDomAsync(
       "document.querySelector('.runtime-install-plan')?.textContent.includes('下载来源：PyPI 官方源') === true && " +
       "document.querySelector('.runtime-install-plan')?.textContent.includes('ModelScope') === true",
@@ -128,7 +128,7 @@ public sealed partial class MainWindow
         "Cancelled install lost its frozen requested/effective source evidence.");
 
     RecordManagedSmokeStage("re-preview keeps evidence");
-    await ClickManagedSmokeButtonAsync("预览依赖");
+    await ClickManagedSmokeButtonAsync("继续准备依赖");
     await WaitForSmokeDomAsync(
       "document.querySelector('.runtime-install-plan')?.textContent.includes('下载来源：PyPI 官方源') === true",
       TimeSpan.FromMinutes(2));
