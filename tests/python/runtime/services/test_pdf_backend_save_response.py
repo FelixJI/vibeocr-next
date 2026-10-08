@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import threading
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 
@@ -15,10 +13,11 @@ def test_save_returns_status_only_diff(monkeypatch, tmp_path):
     output = tmp_path / "saved.pdf"
     document = PdfDocument(file_path=str(output))
     document.pages = [PdfPageInfo(page_index=i) for i in range(700)]
-    session = SimpleNamespace(
+    session = backend.BackendSession(
+        session_id="save-status-only",
+        file_path=str(output),
         doc=MagicMock(),
         pdf_document=document,
-        fitz_lock=threading.RLock(),
     )
     registry = MagicMock()
     registry.get.return_value = session

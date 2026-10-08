@@ -1,6 +1,7 @@
 # tests/models/test_pdf_ocr_options.py
 """Tests for PdfGlobalSettings data model."""
 
+import pytest
 from vibeocr.runtime.documents.models.pdf_ocr_options import PdfGlobalSettings
 
 
@@ -71,7 +72,8 @@ class TestPdfGlobalSettingsAdjustDpi:
     def test_adjust_dpi_floors_at_72(self):
         """极端小像素上限时，DPI 不低于 72。"""
         s = PdfGlobalSettings(render_dpi=600, max_pixels=10_000)
-        assert s.adjust_dpi(612, 792) == 72
+        with pytest.raises(ValueError, match="72"):
+            s.adjust_dpi(612, 792)
 
     def test_adjust_dpi_at_limit_boundary(self):
         """像素恰好等于上限时，DPI 保持不变。"""

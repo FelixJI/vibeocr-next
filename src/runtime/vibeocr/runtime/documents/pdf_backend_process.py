@@ -37,7 +37,7 @@ from vibeocr.runtime.documents.models.pdf_document import (
     PdfPageInfo,
     TextLayerInfo,
 )
-from vibeocr.runtime.documents.pdf_service import PdfService
+from vibeocr.runtime.documents.pdf_service import PdfService, TextLayerBatchError
 from vibeocr.runtime.documents.wire_schemas import (
     AddTextLayerRequest,
     BatchAddTextLayerRequest,
@@ -114,24 +114,29 @@ def _text_block_to_mirror(b: TextBlock) -> TextBlockMirror:
     )
 
 
-def _page_to_mirror(info: PdfPageInfo) -> PdfPageInfoMirror:
+def _page_to_mirror(info: PdfPageInfo, *, summary: bool = False) -> PdfPageInfoMirror:
     return PdfPageInfoMirror(
         page_index=info.page_index,
         rotation=info.rotation,
         has_text_layer=info.has_text_layer,
+        has_ocr_text_layer=bool(info.ocr_text_blocks),
         text_layers=[_text_layer_to_mirror(t) for t in info.text_layers],
         is_scanned=info.is_scanned,
         rect=info.rect,
-        ocr_text_blocks=[_text_block_to_mirror(b) for b in info.ocr_text_blocks],
+        ocr_text_blocks=[]
+        if summary
+        else [_text_block_to_mirror(b) for b in info.ocr_text_blocks],
         ocr_preproc_angle=info.ocr_preproc_angle,
         deskewed=info.deskewed,
     )
 
 
-def _doc_to_mirror(doc_model: PdfDocument) -> PdfDocumentMirror:
+def _doc_to_mirror(
+    doc_model: PdfDocument, *, summary: bool = False
+) -> PdfDocumentMirror:
     return PdfDocumentMirror(
         file_path=doc_model.file_path,
-        pages=[_page_to_mirror(p) for p in doc_model.pages],
+        pages=[_page_to_mirror(p, summary=summary) for p in doc_model.pages],
         is_modified=doc_model.is_modified,
         has_structural_change=doc_model.has_structural_change,
         render_dpi=doc_model.render_dpi,
@@ -141,7 +146,9 @@ def _doc_to_mirror(doc_model: PdfDocument) -> PdfDocumentMirror:
 
 def _diff_full(doc_model: PdfDocument) -> ModelDiff:
     """全量 model diff(打开/结构变更)。"""
-    return ModelDiff(full_model=_doc_to_mirror(doc_model), structural_change=True)
+    return ModelDiff(
+        full_model=_doc_to_mirror(doc_model, summary=True), structural_change=True
+    )
 
 
 def _diff_pages(
@@ -165,51 +172,32 @@ def _diff_pages(
 
 # ---- 渲染并发控制 -------------------------------------------------------
 # 渲染（render_preview / render_thumbnail）各自打开一个独立的临时
-# fitz.Document 栅格化，不再共用 session.doc。不同 Document 实例可安全并行
-# （PyMuPDF 的线程不安全仅限同一 Document 实例并发访问）。
-# 信号量限制同时打开的临时 doc 句柄数，避免大文件（数百页）并发渲染时
-# 句柄/内存暴涨。8 路并发足以让 300dpi 栅格化在多核上并行。
-_RENDER_SEMAPHORE = threading.Semaphore(8)
+# PyMuPDF 的当前文档读写按文档锁串行，图像编码在锁外。
 
 
 def _render_page_pixels(
-    file_path: str, page_index: int, dpi: float
+    doc: fitz.Document, page_index: int, dpi: float
 ) -> tuple[bytes, int, int]:
-    """打开独立 fitz.Document 栅格化单页，返回 (samples, width, height)。
+    """在调用方持有的文档锁内渲染当前内存修订，分配前限制像素。"""
+    import math
 
-    PyMuPDF 同一 Document 实例并发访问会段错误；不同 Document 实例（各自
-    fitz.open 同一文件）彼此独立，可安全并行栅格化。fitz.open 是惰性的
-    （只读 xref/trailer，不解析整文件），打开代价与页数无关。
-
-    _RENDER_SEMAPHORE 限制同时打开的临时 doc 句柄数，避免大文件（数百页）
-    并发渲染时句柄/内存暴涨。
-
-    Returns:
-        (samples, width, height)：RGB 像素字节（已拷贝，调用方不再触碰 fitz
-        对象）与尺寸。
-    """
-    with _RENDER_SEMAPHORE:
-        doc = fitz.open(file_path)
-        try:
-            if page_index < 0 or page_index >= doc.page_count:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"页索引越界: {page_index}（共 {doc.page_count} 页）",
-                )
-            page = doc[page_index]
-            zoom = dpi / 72.0
-            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-            width, height = pix.width, pix.height
-            samples = bytes(pix.samples)  # 拷贝，离开本函数后不再触碰 fitz 对象
-            return samples, width, height
-        finally:
-            try:
-                doc.close()
-            except Exception:
-                pass
+    if page_index < 0 or page_index >= doc.page_count:
+        raise HTTPException(status_code=400, detail="页索引越界")
+    if not math.isfinite(dpi) or not 1 <= dpi <= 1200:
+        raise HTTPException(status_code=400, detail="DPI 必须在 1–1200 之间")
+    page = doc[page_index]
+    width = math.ceil(page.rect.width * dpi / 72)
+    height = math.ceil(page.rect.height * dpi / 72)
+    if width * height > 16_000_000:
+        raise HTTPException(status_code=400, detail="页面渲染超过 16,000,000 像素预算")
+    pix = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72), alpha=False)
+    return bytes(pix.samples), pix.width, pix.height
 
 
 # ---- Session 注册表 -----------------------------------------------------
+
+
+_FITZ_LOCK = threading.Lock()
 
 
 @dataclass
@@ -221,7 +209,7 @@ class BackendSession:
     cancel_event: threading.Event = field(default_factory=threading.Event)
     # fitz(Document) 非线程安全:并发渲染缩略图时串行化 get_pixmap 等 fitz 调用。
     # 锁粒度仅覆盖 fitz 栅格化,PIL 缩放/PNG 编码在锁外可并行。
-    fitz_lock: threading.Lock = field(default_factory=threading.Lock)
+    fitz_lock: threading.Lock = field(default_factory=lambda: _FITZ_LOCK)
     # 文字层后台逐页检测线程(打开后异步跑,逐页发 progress)
     _load_thread: threading.Thread | None = None
     # 关闭同步：CLOSING 状态拒绝新操作，active_ops 跟踪进行中的 fitz 操作，
@@ -242,7 +230,8 @@ class SessionRegistry:
     def add(self, file_path: str) -> BackendSession:
         sid = uuid.uuid4().hex[:16]
         # fitz.open + 占位 PdfDocument(轻量,不逐页读)
-        doc, pdf_document = PdfService.open_doc(file_path)
+        with _FITZ_LOCK:
+            doc, pdf_document = PdfService.open_doc(file_path)
         session = BackendSession(
             session_id=sid, file_path=file_path, doc=doc, pdf_document=pdf_document
         )
@@ -360,7 +349,8 @@ def session_close(sid: str) -> EmptyOk:
 def session_model(sid: str) -> PdfDocumentMirror:
     """全量刷新 model(主进程定期校准用)。"""
     s = _get_registry().get(sid)
-    return _doc_to_mirror(s.pdf_document)
+    with _fitz_op(s), s.fitz_lock:
+        return _doc_to_mirror(s.pdf_document, summary=True)
 
 
 # ---- 后台逐页文字层检测(打开后流式)----------------------------------
@@ -373,16 +363,19 @@ def _detect_one_page(session: BackendSession, i: int) -> PdfPageInfo:
         page_rect = PdfService.page_rect(session.doc, i)
         has_text_layer = bool(session.doc[i].get_text("text").strip())
         is_scanned = not has_text_layer and PdfService.is_page_scanned(session.doc, i)
-    info = PdfPageInfo(
-        page_index=i,
-        rotation=rotation,
-        has_text_layer=has_text_layer,
-        text_layers=[],
-        is_scanned=is_scanned,
-        rect=page_rect,
-    )
-    session.pdf_document.pages[i] = info
-    return info
+        info = PdfPageInfo(
+            page_index=i,
+            rotation=rotation,
+            has_text_layer=has_text_layer,
+            text_layers=[],
+            is_scanned=is_scanned,
+            rect=page_rect,
+        )
+        previous = session.pdf_document.pages[i]
+        info.ocr_text_blocks = previous.ocr_text_blocks
+        info.ocr_preproc_angle = previous.ocr_preproc_angle
+        session.pdf_document.pages[i] = info
+        return info
 
 
 @app.post("/session/{sid}/load")
@@ -438,14 +431,13 @@ def render_thumbnail(sid: str, req: RenderThumbnailRequest) -> StreamingResponse
     直接用 fitz Pixmap → PNG,不经过 QPixmap(后端子进程无 QApplication,
     不能用 PdfService.render_page)。先按 thumbnail_dpi 渲染再缩放到目标尺寸。
 
-    并发安全:与 render_preview 同理,每次打开独立临时 fitz.Document 栅格化,
-    不同 Document 实例可安全并行;PIL 缩放/PNG 编码无 fitz 调用,亦并行。
+    当前会话 doc 的读取在文档锁内；PIL 缩放/PNG 编码在锁外。
     """
     s = _get_registry().get(sid)
     try:
-        with _fitz_op(s):
+        with _fitz_op(s), s.fitz_lock:
             samples, width, height = _render_page_pixels(
-                s.file_path, req.page, s.pdf_document.thumbnail_dpi
+                s.doc, req.page, s.pdf_document.thumbnail_dpi
             )
         # 锁外:PIL 缩放 + PNG 编码(CPU 密集,无 fitz 调用,可并行)
         from PIL import Image
@@ -465,17 +457,13 @@ def render_thumbnail(sid: str, req: RenderThumbnailRequest) -> StreamingResponse
 def render_preview(sid: str, req: RenderPreviewRequest) -> StreamingResponse:
     """渲染预览页,返回 PNG 字节流(直接 fitz Pixmap → PNG)。
 
-    并发安全:每次渲染打开独立的临时 fitz.Document（fitz.open 是惰性的,
-    代价与页数无关），不同 Document 实例可安全并行栅格化（PyMuPDF 的线程
-    不安全仅限同一 Document 实例）。OCR 批量渲染的多页并发由此真正并行。
-    PIL/PNG 编码无 fitz 调用，亦并行。
-
-    _fitz_op 维护 active_ops，确保 session.remove() 的 close 等待本渲染完成。
+    渲染当前会话内存 doc，完整 PyMuPDF 调用由文档锁保护。
+    PIL/PNG 编码在锁外。
     """
     s = _get_registry().get(sid)
     try:
-        with _fitz_op(s):
-            samples, width, height = _render_page_pixels(s.file_path, req.page, req.dpi)
+        with _fitz_op(s), s.fitz_lock:
+            samples, width, height = _render_page_pixels(s.doc, req.page, req.dpi)
         # 锁外:PIL 转 PNG(CPU 密集,无 fitz 调用,可并行)
         from PIL import Image
 
@@ -495,7 +483,7 @@ def detect_text_layers(
 ) -> DetectTextLayersResponse:
     s = _get_registry().get(sid)
     try:
-        with s.fitz_lock:
+        with _fitz_op(s), s.fitz_lock:
             layers = PdfService.detect_text_layers(s.doc, req.page)
         # 同步更新 model(主进程下次取 model 时可见)
         if 0 <= req.page < len(s.pdf_document.pages):
@@ -515,7 +503,7 @@ def detect_text_layers(
 def rotate_pages(sid: str, req: RotateRequest) -> MutateResponse:
     s = _get_registry().get(sid)
     try:
-        with s.fitz_lock:
+        with _fitz_op(s), s.fitz_lock:
             PdfService.rotate_pages(s.doc, s.pdf_document, req.pages, req.angle)
         return MutateResponse(
             diff=_diff_pages(
@@ -533,7 +521,7 @@ def rotate_pages(sid: str, req: RotateRequest) -> MutateResponse:
 def delete_pages(sid: str, req: DeletePagesRequest) -> MutateResponse:
     s = _get_registry().get(sid)
     try:
-        with s.fitz_lock:
+        with _fitz_op(s), s.fitz_lock:
             PdfService.delete_pages(s.doc, s.pdf_document, req.pages)
         return MutateResponse(diff=_diff_full(s.pdf_document))
     except Exception as e:
@@ -544,7 +532,7 @@ def delete_pages(sid: str, req: DeletePagesRequest) -> MutateResponse:
 def insert_blank(sid: str, req: InsertBlankRequest) -> MutateResponse:
     s = _get_registry().get(sid)
     try:
-        with s.fitz_lock:
+        with _fitz_op(s), s.fitz_lock:
             PdfService.insert_blank_page(
                 s.doc, s.pdf_document, req.after_index, req.width, req.height
             )
@@ -557,7 +545,7 @@ def insert_blank(sid: str, req: InsertBlankRequest) -> MutateResponse:
 def insert_from(sid: str, req: InsertFromRequest) -> MutateResponse:
     s = _get_registry().get(sid)
     try:
-        with s.fitz_lock:
+        with _fitz_op(s), s.fitz_lock:
             PdfService.insert_pages_from(
                 s.doc, s.pdf_document, req.source_path, req.after_index
             )
@@ -570,7 +558,7 @@ def insert_from(sid: str, req: InsertFromRequest) -> MutateResponse:
 def move_page(sid: str, req: MovePageRequest) -> MutateResponse:
     s = _get_registry().get(sid)
     try:
-        with s.fitz_lock:
+        with _fitz_op(s), s.fitz_lock:
             PdfService.move_page(s.doc, s.pdf_document, req.from_index, req.to_index)
         return MutateResponse(diff=_diff_full(s.pdf_document))
     except Exception as e:
@@ -581,7 +569,7 @@ def move_page(sid: str, req: MovePageRequest) -> MutateResponse:
 def reorder(sid: str, req: ReorderRequest) -> MutateResponse:
     s = _get_registry().get(sid)
     try:
-        with s.fitz_lock:
+        with _fitz_op(s), s.fitz_lock:
             PdfService.reorder_pages(s.doc, s.pdf_document, req.new_order)
         return MutateResponse(diff=_diff_full(s.pdf_document))
     except Exception as e:
@@ -616,7 +604,7 @@ def add_text_layer(sid: str, req: AddTextLayerRequest) -> MutateResponse:
             text_blocks=text_blocks,
             preproc_angle=int(ocr_result_data.get("preproc_angle", 0) or 0),
         )
-        with s.fitz_lock:
+        with _fitz_op(s), s.fitz_lock:
             PdfService.add_text_layer(
                 s.doc,
                 s.pdf_document,
@@ -654,7 +642,7 @@ def add_text_layer_batch(sid: str, req: BatchAddTextLayerRequest) -> MutateRespo
     # 导致整批 500（文字层已在内存 doc 中，用户可手动保存）。落盘失败仅记
     # 日志并返回 extra.saved=False，调用方不写 sidecar。
     try:
-        with s.fitz_lock:
+        with _fitz_op(s), s.fitz_lock:
             results = PdfService.add_text_layer_batch(
                 s.doc,
                 s.pdf_document,
@@ -663,63 +651,69 @@ def add_text_layer_batch(sid: str, req: BatchAddTextLayerRequest) -> MutateRespo
                 overwrite=req.overwrite,
                 cancel_check=s.cancel_event.is_set,
             )
+    except TextLayerBatchError as error:
+        logger.error("[pdf-backend] 文字层批次部分提交失败: %s", error)
+        results = error.results
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"批量加文字层失败: {e}") from e
 
-    written_pages = sorted(results.keys())
-    saved = True
-    if req.save and written_pages:
-        save_path = s.pdf_document.file_path
-        if save_path:
-            # save_incremental 成功失败都不 close doc，无需替换 s.doc
-            try:
-                saved = PdfService.save_incremental(s.doc, save_path)
-            except Exception as e:
-                logger.error(
-                    "[pdf-backend] add_text_layer_batch 增量落盘失败"
-                    "（文字层已在内存，不影响后续保存）: %s",
-                    e,
-                )
-                saved = False
-            if not saved:
-                # 增量保存不可用（can_save_incrementally()=False 等）：文字层与
-                # 子集字体留在内存 doc 跨批累积，末尾 _compress_in_place 对累积
-                # 字体做 garbage=4 全量重写会触发 PyMuPDF 1.28.0 原生内存破坏
-                # （0xC0000409）。这里每批失败就立即全量压缩落盘，把累积字体
-                # 收敛到磁盘，末尾压缩面对的是干净文档。
-                # _compress_in_place 失败会 close 原 doc（无法恢复原对象），
-                # 需从备份回滚后的文件重新打开以保证 s.doc 始终可用。
+    with _fitz_op(s), s.fitz_lock:
+        written_pages = sorted(results.keys())
+        saved = True
+        if req.save and written_pages:
+            save_path = s.pdf_document.file_path
+            if save_path:
+                # save_incremental 成功失败都不 close doc，无需替换 s.doc
                 try:
-                    s.doc = PdfService._compress_in_place(s.doc, save_path, clean=False)
-                    saved = True
-                except Exception as e2:
+                    saved = PdfService.save_incremental(s.doc, save_path)
+                except Exception as e:
                     logger.error(
-                        "[pdf-backend] add_text_layer_batch 全量压缩回退也失败"
-                        "（文字层仍在内存 doc，但本批未落盘）: %s",
-                        e2,
+                        "[pdf-backend] add_text_layer_batch 增量落盘失败"
+                        "（文字层已在内存，不影响后续保存）: %s",
+                        e,
                     )
-                    # _compress_in_place 已 close 原 doc 并回滚文件，需重开
-                    try:
-                        s.doc = fitz.open(save_path)
-                    except Exception:
-                        logger.error(
-                            "[pdf-backend] 全量压缩失败后重开 doc 也失败",
-                            exc_info=True,
-                        )
                     saved = False
-        if saved:
-            # 本批文字层已经持久化；保持后端规范模型与磁盘状态一致。后续 OCR
-            # 收尾可据此跳过没有必要的整文档重写。
-            s.pdf_document.is_modified = False
-    return MutateResponse(
-        diff=_diff_pages(
-            s.pdf_document,
-            written_pages,
-            invalidate_thumbnails=written_pages,
-            modified=not (req.save and saved),
-        ),
-        extra={"saved": saved} if req.save else None,
-    )
+                if not saved:
+                    # 增量保存不可用（can_save_incrementally()=False 等）：文字层与
+                    # 子集字体留在内存 doc 跨批累积，末尾 _compress_in_place 对累积
+                    # 字体做 garbage=4 全量重写会触发 PyMuPDF 1.28.0 原生内存破坏
+                    # （0xC0000409）。这里每批失败就立即全量压缩落盘，把累积字体
+                    # 收敛到磁盘，末尾压缩面对的是干净文档。
+                    # _compress_in_place 失败会 close 原 doc（无法恢复原对象），
+                    # 需从备份回滚后的文件重新打开以保证 s.doc 始终可用。
+                    try:
+                        s.doc = PdfService._compress_in_place(
+                            s.doc, save_path, clean=False
+                        )
+                        saved = True
+                    except Exception as e2:
+                        logger.error(
+                            "[pdf-backend] add_text_layer_batch 全量压缩回退也失败"
+                            "（文字层仍在内存 doc，但本批未落盘）: %s",
+                            e2,
+                        )
+                        # _compress_in_place 已 close 原 doc 并回滚文件，需重开
+                        try:
+                            s.doc = fitz.open(save_path)
+                        except Exception:
+                            logger.error(
+                                "[pdf-backend] 全量压缩失败后重开 doc 也失败",
+                                exc_info=True,
+                            )
+                        saved = False
+            if saved:
+                # 本批文字层已经持久化；保持后端规范模型与磁盘状态一致。后续 OCR
+                # 收尾可据此跳过没有必要的整文档重写。
+                s.pdf_document.is_modified = False
+        return MutateResponse(
+            diff=_diff_pages(
+                s.pdf_document,
+                written_pages,
+                invalidate_thumbnails=written_pages,
+                modified=s.pdf_document.is_modified,
+            ),
+            extra={"results": results, **({"saved": saved} if req.save else {})},
+        )
 
 
 @app.post("/session/{sid}/rewrite_text_layer", response_model=MutateResponse)
@@ -739,7 +733,7 @@ def rewrite_text_layer(sid: str, req: RewriteTextLayerRequest) -> MutateResponse
             )
             for b in req.text_blocks
         ]
-        with s.fitz_lock:
+        with _fitz_op(s), s.fitz_lock:
             PdfService.rewrite_text_layer(
                 s.doc,
                 s.pdf_document,
@@ -814,7 +808,7 @@ def delete_text_layers(sid: str, req: PageListRequest) -> StreamingResponse:
             try:
                 # page_has_text + delete_text_layers 是一次"检测+删除"单元,
                 # 一起进锁避免被并发渲染线程插入(与持 fitz_lock 的 render_* 互斥)。
-                with s.fitz_lock:
+                with _fitz_op(s), s.fitz_lock:
                     has_text = PdfService.page_has_text(s.doc, page)
                     if not has_text:
                         PdfService.delete_text_layers(s.doc, s.pdf_document, page)
@@ -859,7 +853,7 @@ def save(sid: str, req: SaveRequest) -> SaveResponse:
     """保存(rewrite + 落盘)。doc 可能被 close+reopen 替换。"""
     s = _get_registry().get(sid)
     try:
-        with s.fitz_lock:
+        with _fitz_op(s), s.fitz_lock:
             result = PdfService.save_with_rewrite(
                 s.doc,
                 s.pdf_document,

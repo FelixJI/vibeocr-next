@@ -320,6 +320,122 @@ def test_paddle_resolver_is_serialized_and_restored(tmp_path, monkeypatch):
         assert manager._get_model_local_path is unsupported
 
 
+def test_paddle_model_dir_uses_windows_ascii_alias_for_unicode_path(tmp_path):
+    # Real GetShortPathNameW, no mocks: the alias must expose the same files.
+    if sys.platform != "win32":
+        pytest.skip("Windows 8.3 aliases are validated on Windows only")
+    revision = (
+        tmp_path
+        / "PaddleOCR · CPU"
+        / "cache"
+        / "paddlex"
+        / "prepared-models"
+        / "PP-LCNet_x1_0_doc_ori"
+        / "revisions"
+        / "21ab7fdcf2904336b43df13e204c0c64"
+    )
+    revision.mkdir(parents=True)
+    (revision / "inference.json").write_text("{}", encoding="utf-8")
+    (revision / "inference.pdiparams").write_bytes(b"synthetic weights")
+    alias = cache._paddle_native_model_dir(revision)
+    assert str(alias).isascii()
+    assert alias != revision
+    assert alias.samefile(revision)
+    assert (alias / "inference.pdiparams").read_bytes() == b"synthetic weights"
+
+
+def test_paddle_model_dir_keeps_readable_paths_unchanged():
+    # A pure constant: never assume pytest's tmp_path ancestors are ASCII.
+    plain = Path("ascii-root") / "prepared-models" / "model"
+    assert cache._paddle_native_model_dir(plain) == plain
+
+
+def test_paddle_model_dir_fails_closed_without_usable_alias(tmp_path, monkeypatch):
+    monkeypatch.setattr(cache, "_WINDOWS", True)
+    model = tmp_path / "PaddleOCR · CPU" / "cache"
+    model.mkdir(parents=True)
+
+    def eight_dot_three_disabled(path):
+        # GetShortPathNameW returns the input when the volume has no 8.3 names.
+        return path
+
+    monkeypatch.setattr(cache, "_windows_short_path", eight_dot_three_disabled)
+    with pytest.raises(cache.ModelCacheError, match="no ASCII short alias"):
+        cache._paddle_native_model_dir(model)
+
+    def api_failure(_path):
+        raise OSError(3, "synthetic GetShortPathNameW failure")
+
+    monkeypatch.setattr(cache, "_windows_short_path", api_failure)
+    with pytest.raises(cache.ModelCacheError, match="short path unavailable"):
+        cache._paddle_native_model_dir(model)
+
+
+def test_paddle_resolver_returns_native_readable_model_dir(tmp_path, monkeypatch):
+    payloads, _calls = _synthetic_provider(monkeypatch)
+    home = tmp_path / "PaddleOCR · CPU" / "cache" / "paddlex"
+    monkeypatch.setenv("VIBEOCR_SHARED_MODEL_CACHE", str(tmp_path / "shared"))
+    monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(home))
+    monkeypatch.setenv("PADDLE_PDX_MODEL_SOURCE", "huggingface")
+    monkeypatch.setattr(cache, "version", lambda _name: "3.7.2")
+
+    def original(names):
+        return Path("legacy")
+
+    manager = types.SimpleNamespace(_get_model_local_path=original)
+    monkeypatch.setitem(
+        sys.modules,
+        "paddlex.inference.utils.official_models",
+        types.SimpleNamespace(official_models=manager),
+    )
+    with cache.paddle_model_cache():
+        resolved = manager._get_model_local_path("PP-LCNet_x1_0_doc_ori")
+    revision = next(
+        (home / "prepared-models" / "PP-LCNet_x1_0_doc_ori" / "revisions").iterdir()
+    )
+    assert revision.is_dir()
+    assert resolved.samefile(revision)
+    assert (resolved / "a.bin").read_bytes() == payloads["a.bin"]
+    assert (resolved / "b.bin").read_bytes() == payloads["b.bin"]
+    if sys.platform == "win32":
+        assert str(resolved).isascii()  # the alias, not the Unicode original
+    binding = home / "prepared-models" / "PP-LCNet_x1_0_doc_ori" / "current.json"
+    assert "~" not in binding.read_text(encoding="utf-8")  # alias never persisted
+
+
+def test_paddle_resolver_normalizes_legacy_and_vl_roots(tmp_path, monkeypatch):
+    home = tmp_path / "PaddleOCR · CPU" / "cache" / "paddlex"
+    vl = home / "official_models" / "PaddleOCR-VL" / "PaddleOCR-VL-0.9B"
+    vl.mkdir(parents=True)
+    (vl / "weights.bin").write_bytes(b"legacy vl weights")
+    monkeypatch.setenv("VIBEOCR_SHARED_MODEL_CACHE", str(tmp_path / "shared"))
+    monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(home))
+    monkeypatch.setenv("PADDLE_PDX_MODEL_SOURCE", "huggingface")
+    monkeypatch.setattr(cache, "version", lambda _name: "3.7.2")
+
+    def unreachable(*_args, **_kwargs):
+        raise AssertionError("legacy private models must not touch the network")
+
+    monkeypatch.setattr(cache, "_remote_manifest", unreachable)
+    monkeypatch.setattr(cache, "_download", unreachable)
+
+    def original(names):
+        return Path("legacy")
+
+    manager = types.SimpleNamespace(_get_model_local_path=original)
+    monkeypatch.setitem(
+        sys.modules,
+        "paddlex.inference.utils.official_models",
+        types.SimpleNamespace(official_models=manager),
+    )
+    with cache.paddle_model_cache():
+        resolved = manager._get_model_local_path("PaddleOCR-VL-0.9B")
+    assert resolved.samefile(vl)
+    assert (resolved / "weights.bin").read_bytes() == b"legacy vl weights"
+    if sys.platform == "win32":
+        assert str(resolved).isascii()
+
+
 @pytest.mark.parametrize(
     "path", ["../outside", "/root", "a\\b", "NUL.bin", "a:b", "a//b"]
 )

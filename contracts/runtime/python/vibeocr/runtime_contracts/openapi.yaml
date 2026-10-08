@@ -163,16 +163,42 @@
       "get": {
         "operationId": "getJobItemAsset",
         "parameters": [
-          { "$ref": "#/components/parameters/JobId" },
-          { "name": "item_id", "in": "path", "required": true, "schema": { "type": "string" } },
-          { "name": "asset_id", "in": "path", "required": true, "schema": { "type": "string" } }
+          {
+            "$ref": "#/components/parameters/JobId"
+          },
+          {
+            "name": "item_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "asset_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
         ],
         "responses": {
-          "200": { "$ref": "#/components/responses/Png" },
-          "400": { "$ref": "#/components/responses/Error" },
-          "401": { "$ref": "#/components/responses/Error" },
-          "403": { "$ref": "#/components/responses/Error" },
-          "404": { "$ref": "#/components/responses/Error" }
+          "200": {
+            "$ref": "#/components/responses/Png"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
@@ -3639,6 +3665,11 @@
             "default": false,
             "title": "Deskewed",
             "type": "boolean"
+          },
+          "has_ocr_text_layer": {
+            "type": "boolean",
+            "default": false,
+            "description": "Whether the current session owns OCR source blocks for this page; model summaries omit the blocks."
           }
         },
         "required": [

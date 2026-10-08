@@ -29,6 +29,8 @@ public sealed partial class MainWindow
 {
   private const string PaddleSmokeEnvironmentName = "PaddleOCR · CPU";
   private const string PaddleSmokeRecipe = "paddleocr-cpu";
+  // 安装预检失败可能只出现在公开状态中，不生成持久失败记录。
+  private const string PaddleSmokeInstallRejectedStatus = "安装未完成；失败原因请查看该环境记录。";
   // paddleModesSmokeStarted 字段随 MainWindow.xaml.cs 的 OnHostStateChanged
   // 钩子一并声明（见交付说明），本文件只引用不声明，避免未读告警。
   private string paddleSmokeStage = "starting";
@@ -169,6 +171,12 @@ public sealed partial class MainWindow
   {
     RecordPaddleSmokeStage("wait environments");
     await NavigateSmokeAsync("设置", ".settings-runtime-panel");
+    int timeoutMinutes = ParsePaddleSmokeMinutes(
+      "VIBEOCR_PADDLE_SMOKE_INSTALL_TIMEOUT_MINUTES", 60);
+    // 等待启动与安装共享同一超时预算。
+    using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMinutes));
+    RecordPaddleSmokeStage("wait install executable");
+    await WaitForPaddleSmokeInstallExecutableAsync(timeout.Token);
     ManagedEnvironmentList list = await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
     if (!list.Environments.Any(item => item.Name == PaddleSmokeEnvironmentName))
     {
@@ -200,13 +208,12 @@ public sealed partial class MainWindow
       "document.querySelector('.runtime-install-plan')?.textContent.includes('TUNA PyPI 镜像')",
       TimeSpan.FromMinutes(2));
     string planText = await PaddleSmokeDomTextAsync(".runtime-install-plan") ?? "";
+
     RecordPaddleSmokeStage("confirm install");
     await ClickManagedSmokeButtonAsync("确认安装依赖");
-    int timeoutMinutes = ParsePaddleSmokeMinutes(
-      "VIBEOCR_PADDLE_SMOKE_INSTALL_TIMEOUT_MINUTES", 60);
-    using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMinutes));
     while (true)
     {
+      SettingsWorkbenchState settingsState = await PaddleSmokeSettingsStateAsync(timeout.Token);
       ManagedEnvironment? current = smokeEnvironmentSnapshot!()?.Environments
         .SingleOrDefault(item => item.Id == environment.Id);
       if (current?.LastInstallFailure is { Phase: "failed" } failure)
@@ -226,7 +233,40 @@ public sealed partial class MainWindow
       if (current?.Status is "failed" or "unavailable")
         throw new InvalidOperationException(
           $"{PaddleSmokeRecipe} install failed: {current.Reason}");
+      // 预检或安装失败可能没有持久记录，公开失败状态仍须及时结束冒烟。
+      if (!settingsState.EnvironmentBusy && !settingsState.EnvironmentCanCancelInstall &&
+          settingsState.EnvironmentStatus.StartsWith(
+            PaddleSmokeInstallRejectedStatus, StringComparison.Ordinal))
+      {
+        throw new InvalidOperationException(
+          "Install did not complete: " +
+          $"{settingsState.EnvironmentStatus}; maintenance=" +
+          $"{JsonSerializer.Serialize(settingsState.Maintenance)}; progress=" +
+          $"{JsonSerializer.Serialize(settingsState.EnvironmentInstallProgress)}");
+      }
       await Task.Delay(500, timeout.Token);
+    }
+  }
+
+  private async Task<SettingsWorkbenchState> PaddleSmokeSettingsStateAsync(
+    CancellationToken cancellation) =>
+    (await application.BootstrapAsync(cancellation))
+      .States.Select(item => item.State).OfType<SettingsWorkbenchState>().Single();
+
+  // 默认初始化释放维护锁后才连接推理；单看设置维护状态不足以判断就绪。
+  private async Task WaitForPaddleSmokeInstallExecutableAsync(
+    CancellationToken cancellation)
+  {
+    while (true)
+    {
+      if (smokeInferenceAttached!())
+      {
+        SettingsWorkbenchState settings = await PaddleSmokeSettingsStateAsync(cancellation);
+        if (settings.Maintenance is not { IsRunning: true } &&
+            !settings.EnvironmentBusy && !settings.EnvironmentCanCancelInstall)
+          return;
+      }
+      await Task.Delay(500, cancellation);
     }
   }
 
@@ -531,8 +571,10 @@ public sealed partial class MainWindow
         TimeSpan.FromSeconds(30));
     }
     int before = smokeSubmitAttempts!();
+    bool textLayer = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_PDF_TEXT_LAYER") == "1";
+    if (textLayer && pipeline != "OCR") throw new InvalidOperationException("PDF text layer smoke requires the coordinate-preserving OCR pipeline.");
     RecordPaddleSmokeStage($"pdf recognize first page {mode}");
-    await ClickManagedSmokeButtonAsync("OCR 选中页");
+    await ClickManagedSmokeButtonAsync(textLayer ? "添加选中页文字层" : "提取/解析选中页");
     PdfWorkbenchState terminal = await WaitForPaddlePdfAsync(
       state => !state.IsBusy &&
         state.Pages?.FirstOrDefault(page => page.Index == 0)?.StatusCode
@@ -543,7 +585,9 @@ public sealed partial class MainWindow
       throw new InvalidOperationException($"PDF page OCR failed: {JsonSerializer.Serialize(terminal)}");
     object job = await ObservePaddleInputJobAsync(session, pipeline,
       optionName, optionValue, before, 1);
-    bool inspected = await InspectPaddlePdfStructureAsync(mode);
+    if (textLayer && (!terminal.IsModified || terminal.Pages?.FirstOrDefault(page => page.Index == 0)?.AddedThisSession != true))
+      throw new InvalidOperationException("PDF text layer was not committed as an unsaved current-session layer.");
+    bool inspected = !textLayer && await InspectPaddlePdfStructureAsync(mode);
     var copies = await ClickPaddleCopyButtonsAsync([]);
     paddleSmokePartialEvidence = new
     {
@@ -559,7 +603,7 @@ public sealed partial class MainWindow
       option = new { name = optionName, value = optionValue },
       submit_attempts = smokeSubmitAttempts!(), job,
       pdf = new { opened.PageCount, terminal.SelectedPages, terminal.Pages },
-      structured_inspected = inspected, copies, saved,
+      structured_inspected = inspected, text_layer = textLayer, copies, saved,
     };
   }
 
@@ -1188,6 +1232,7 @@ public sealed partial class MainWindow
     await WaitForPaddleConditionAsync(() =>
       File.Exists(target) && new FileInfo(target).Length > 0,
       TimeSpan.FromMinutes(2));
+    await WaitForPaddlePdfAsync(state => !state.IsBusy && !state.IsModified, TimeSpan.FromMinutes(2));
     return new { button_label = "保存", file = target,
       bytes = new FileInfo(target).Length, saved_via = "ui-file-save-picker" };
   }

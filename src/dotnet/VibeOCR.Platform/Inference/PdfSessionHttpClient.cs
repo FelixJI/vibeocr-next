@@ -6,6 +6,7 @@
 // page_count), authoritative page counts come from full_model or the existing
 // /model endpoint, and the save request/response field is `path`.
 using System.Text.Json;
+using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Runtime.Client;
 using VibeOCR.Runtime.Contracts.Generated;
@@ -52,7 +53,8 @@ public sealed class PdfSessionHttpClient : IPdfSessionClient
         return new PdfSessionOpenResult(
             RequiredString(root, "session_id", "open"),
             ReadModelPageCount(model, "open"),
-            RequiredString(model, "file_path", "open"));
+            RequiredString(model, "file_path", "open"),
+            model.Deserialize<Wire.PdfDocumentMirror>());
     }
 
     public async Task<byte[]> RenderAsync(string sessionId, int page, int size, CancellationToken ct)
@@ -88,6 +90,84 @@ public sealed class PdfSessionHttpClient : IPdfSessionClient
         await EnsureSuccessAsync(resp, ct);
         using JsonDocument doc = await _runtime.ReadJsonDocumentAsync(resp, ct);
         return RequiredString(doc.RootElement, "path", "save");
+    }
+
+    public async Task<Wire.PdfDocumentMirror> GetModelAsync(string sessionId, CancellationToken ct)
+    {
+        using HttpResponseMessage response = await _runtime.PostAsync(
+            BindSessionPath(RuntimeOperationPaths.GetPdfSessionModel, sessionId), null, ct);
+        await EnsureSuccessAsync(response, ct);
+        using JsonDocument document = await _runtime.ReadJsonDocumentAsync(response, ct);
+        return document.RootElement.Deserialize<Wire.PdfDocumentMirror>()
+            ?? throw new InvalidOperationException("PDF model is missing.");
+    }
+
+    public Task LoadAsync(string sessionId, Action<JsonElement> progress, CancellationToken ct) =>
+        StreamAsync(sessionId, "load", null, progress, ct);
+
+    public Task DeleteTextLayersAsync(string sessionId, int[] pages, Action<JsonElement> progress, CancellationToken ct) =>
+        StreamAsync(sessionId, "delete_text_layers", new { pages }, progress, ct);
+
+    private async Task StreamAsync(string sessionId, string operation, object? body,
+        Action<JsonElement> progress, CancellationToken ct)
+    {
+        using StringContent? content = body is null ? null : _runtime.CreateJsonContent(body);
+        using HttpResponseMessage response = await _runtime.PostStreamAsync(
+            $"/v2/pdf/sessions/{Uri.EscapeDataString(sessionId)}/{operation}", content, ct);
+        await EnsureSuccessAsync(response, ct);
+        using var reader = new StreamReader(await response.Content.ReadAsStreamAsync(ct));
+        while (await reader.ReadLineAsync(ct) is { } line)
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            using JsonDocument document = JsonDocument.Parse(line);
+            JsonElement value = document.RootElement;
+            if (value.TryGetProperty("message", out JsonElement message) &&
+                message.ValueKind == JsonValueKind.String && message.GetString()!.StartsWith("error:", StringComparison.Ordinal))
+                throw new InvalidOperationException("PDF stream failed.");
+            progress(value.Clone());
+        }
+    }
+
+    public async Task<byte[]> RenderPreviewAsync(string sessionId, int page, int dpi, CancellationToken ct)
+    {
+        using StringContent content = _runtime.CreateJsonContent(new { page, dpi });
+        using HttpResponseMessage response = await _runtime.PostAsync(
+            BindSessionPath(RuntimeOperationPaths.RenderPdfPreview, sessionId), content, ct);
+        await EnsureSuccessAsync(response, ct);
+        return await _runtime.ReadBinaryAsync(response, "image/png", ct);
+    }
+
+    public async Task<Wire.PdfMutationResponse> AddTextLayersAsync(string sessionId,
+        Wire.BatchAddTextLayerRequest request, CancellationToken ct)
+    {
+        using StringContent content = _runtime.CreateJsonContent(request);
+        using HttpResponseMessage response = await _runtime.PostAsync(
+            BindSessionPath(RuntimeOperationPaths.AddPdfTextLayerBatch, sessionId), content, ct);
+        await EnsureSuccessAsync(response, ct);
+        using JsonDocument document = await _runtime.ReadJsonDocumentAsync(response, ct);
+        return document.RootElement.Deserialize<Wire.PdfMutationResponse>()
+            ?? throw new InvalidOperationException("PDF write result is missing.");
+    }
+
+    public Task CancelAsync(string sessionId, CancellationToken ct) => SignalAsync(sessionId, "cancel", ct);
+    public Task ResetCancelAsync(string sessionId, CancellationToken ct) => SignalAsync(sessionId, "reset_cancel", ct);
+    private async Task SignalAsync(string sessionId, string operation, CancellationToken ct)
+    {
+        using HttpResponseMessage response = await _runtime.PostAsync(
+            $"/v2/pdf/sessions/{Uri.EscapeDataString(sessionId)}/{operation}", null, ct);
+        await EnsureSuccessAsync(response, ct);
+    }
+
+    public async Task<string> SaveWithSettingsAsync(string sessionId, string outputPath,
+        IReadOnlyDictionary<string, JsonElement> settings, CancellationToken ct)
+    {
+        using StringContent content = _runtime.CreateJsonContent(new {
+            path = outputPath, pdf_settings = settings, rewrite_text_layers = false });
+        using HttpResponseMessage response = await _runtime.PostAsync(
+            BindSessionPath(RuntimeOperationPaths.SavePdfSession, sessionId), content, ct);
+        await EnsureSuccessAsync(response, ct);
+        using JsonDocument document = await _runtime.ReadJsonDocumentAsync(response, ct);
+        return RequiredString(document.RootElement, "path", "save");
     }
 
     public async Task CloseAsync(string sessionId, CancellationToken ct)

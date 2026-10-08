@@ -96,6 +96,19 @@ public interface IInferenceClient : IAsyncDisposable
     Task<PdfMutateResult> RotatePdfPagesAsync(string sessionId, int[] pages, int angle, CancellationToken ct);
     Task<PdfMutateResult> DeletePdfPagesAsync(string sessionId, int[] pages, CancellationToken ct);
     Task<string> SavePdfAsync(string sessionId, string outputPath, CancellationToken ct);
+    Task<Wire.PdfDocumentMirror> GetPdfModelAsync(string sessionId, CancellationToken ct) =>
+        Task.FromException<Wire.PdfDocumentMirror>(new NotSupportedException("PDF model unavailable."));
+    Task LoadPdfAsync(string sessionId, Action<System.Text.Json.JsonElement> progress, CancellationToken ct) => Task.FromException(new NotSupportedException("PDF operation unavailable."));
+    Task<byte[]> RenderPdfPreviewAsync(string sessionId, int page, int dpi, CancellationToken ct) =>
+        Task.FromException<byte[]>(new NotSupportedException("PDF preview unavailable."));
+    Task<Wire.PdfMutationResponse> AddPdfTextLayersAsync(string sessionId, Wire.BatchAddTextLayerRequest request, CancellationToken ct) =>
+        Task.FromException<Wire.PdfMutationResponse>(new NotSupportedException("PDF text layers unavailable."));
+    Task DeletePdfTextLayersAsync(string sessionId, int[] pages, Action<System.Text.Json.JsonElement> progress, CancellationToken ct) =>
+        Task.FromException(new NotSupportedException("PDF text layers unavailable."));
+    Task CancelPdfAsync(string sessionId, CancellationToken ct) => Task.FromException(new NotSupportedException("PDF operation unavailable."));
+    Task ResetPdfCancelAsync(string sessionId, CancellationToken ct) => Task.FromException(new NotSupportedException("PDF operation unavailable."));
+    Task<string> SavePdfWithSettingsAsync(string sessionId, string outputPath,
+        IReadOnlyDictionary<string, System.Text.Json.JsonElement> settings, CancellationToken ct) => SavePdfAsync(sessionId, outputPath, ct);
     Task ClosePdfSessionAsync(string sessionId, CancellationToken ct);
 }
 

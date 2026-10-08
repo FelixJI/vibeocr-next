@@ -103,4 +103,17 @@ class PdfGlobalSettings:
         scale = math.sqrt(self.max_pixels / total_pixels)
         adjusted = int(target_dpi * scale)
         # 确保至少 72 DPI
-        return max(72, adjusted)
+        adjusted = max(72, adjusted)
+        while adjusted > 72 and (
+            math.ceil(page_width * adjusted / 72)
+            * math.ceil(page_height * adjusted / 72)
+            > self.max_pixels
+        ):
+            adjusted -= 1
+        if (
+            math.ceil(page_width * adjusted / 72)
+            * math.ceil(page_height * adjusted / 72)
+            > self.max_pixels
+        ):
+            raise ValueError("页面在最低 72 DPI 仍超过像素预算")
+        return adjusted

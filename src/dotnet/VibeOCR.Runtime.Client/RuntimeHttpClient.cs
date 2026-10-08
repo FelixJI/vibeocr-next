@@ -53,6 +53,13 @@ public sealed class RuntimeHttpClient : IAsyncDisposable
         CancellationToken cancellationToken) =>
         _http.PostAsync(RequireRelativePath(path), content, cancellationToken);
 
+    public async Task<HttpResponseMessage> PostStreamAsync(
+        string path, HttpContent? content, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, RequireRelativePath(path)) { Content = content };
+        return await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+    }
+
     public Task<HttpResponseMessage> PutAsync(
         string path,
         HttpContent? content,

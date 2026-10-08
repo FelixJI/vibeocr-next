@@ -36,7 +36,9 @@ internal sealed class InferenceJobRunner(IInferenceClient inference)
         IReadOnlyDictionary<string, JsonElement>? options,
         CancellationToken cancellationToken = default,
         OcrEngine? engine = null,
-        MineruConfig? mineru = null)
+        MineruConfig? mineru = null,
+        bool waitForCancellation = false,
+        Action<JobSnapshot>? progress = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(pipelineId);
         ArgumentNullException.ThrowIfNull(inputs);
@@ -104,6 +106,7 @@ internal sealed class InferenceJobRunner(IInferenceClient inference)
                     afterSequence,
                     cancellationToken);
                 ValidateUpdate(job.JobId, afterSequence, update);
+                progress?.Invoke(update.Snapshot);
                 AccumulateOutcomes(clientKeyByItemId, outcomes, update.Outcomes);
 
                 bool terminal = IsTerminal(update.Snapshot.State);
@@ -133,6 +136,16 @@ internal sealed class InferenceJobRunner(IInferenceClient inference)
             if (job is not null)
             {
                 await TryCancelAsync(job.JobId);
+                if (waitForCancellation)
+                {
+                    // PDF 写门只在 supervisor 确认终态后释放。
+                    while (true)
+                    {
+                        JobUpdate terminal = await inference.ObserveAsync(job.JobId, 0, CancellationToken.None);
+                        if (IsTerminal(terminal.Snapshot.State)) break;
+                        await Task.Delay(250);
+                    }
+                }
             }
 
             throw;
@@ -270,6 +283,7 @@ internal static class RecognitionOutcomeMapper
             MarkdownText = StringValue(payload, "markdown_text"),
             HtmlText = StringValue(payload, "html_text"),
             RawBlocks = ArrayValue(payload, "text_blocks"),
+            PreprocAngle = payload.TryGetValue("preproc_angle", out JsonElement angle) && angle.ValueKind == JsonValueKind.Number && angle.TryGetInt32(out int degrees) ? degrees : null,
             ContentBlocks = ArrayValue(payload, "content_list"),
             Pipeline = pipeline,
         };

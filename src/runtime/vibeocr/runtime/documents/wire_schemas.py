@@ -63,6 +63,7 @@ class PdfPageInfoMirror(BaseModel):
     page_index: int
     rotation: int = 0
     has_text_layer: bool = False
+    has_ocr_text_layer: bool = False
     text_layers: list[TextLayerInfoMirror] = Field(default_factory=list)
     is_scanned: bool = False
     rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)

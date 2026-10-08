@@ -449,6 +449,13 @@ def draw_document_pdf(out: Path) -> dict[str, object] | None:
     page.insert_text((60, 380), "MIXED PDF END 2244", fontsize=12, fontname="china-s")
     path = out / "document_mixed.pdf"
     doc.save(str(path))
+    with pymupdf.open() as scanned:
+        raster_page = scanned.new_page(width=page.rect.width, height=page.rect.height)
+        raster_page.insert_image(
+            raster_page.rect,
+            stream=page.get_pixmap(matrix=pymupdf.Matrix(3, 3)).tobytes("png"),
+        )
+        scanned.save(str(out / "document_scan.pdf"), deflate=True)
     doc.close()
     return {
         "purpose": "可选 PDF 输入（Goal 组合验证用；本冒烟不自动消费）",
@@ -483,6 +490,11 @@ def main() -> int:
             }
         else:
             entries["document_mixed.pdf"] = pdf
+            entries["document_scan.pdf"] = {
+                **pdf,
+                "purpose": "纯扫描 PDF 文字层添加/保存验证",
+                "font": "raster-image",
+            }
     write_manifest(args.out, entries)
     print(json.dumps(entries, ensure_ascii=False, indent=2))
     return 0

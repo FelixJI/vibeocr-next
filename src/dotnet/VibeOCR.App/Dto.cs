@@ -6,6 +6,7 @@ namespace VibeOCR.App;
 public sealed record RecognizeResponse
 {
     public required string Text { get; init; }
+    public int? PreprocAngle { get; init; }
     public string Pipeline { get; init; } = "OCR";
     public string? RawText { get; init; }
     public string? MarkdownText { get; init; }

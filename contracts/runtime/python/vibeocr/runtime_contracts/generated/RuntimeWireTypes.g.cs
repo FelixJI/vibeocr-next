@@ -1106,6 +1106,9 @@ public sealed record PdfPageInfoMirror
 
     [JsonPropertyName("deskewed")]
     public bool? Deskewed { get; init; }
+
+    [JsonPropertyName("has_ocr_text_layer")]
+    public bool? HasOcrTextLayer { get; init; }
 }
 
 public sealed record PdfPathRequest

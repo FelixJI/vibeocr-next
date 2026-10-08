@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -29,6 +30,7 @@ from vibeocr.runtime.environments.runtime_maintenance import _atomic_json
 _logger = logging.getLogger(__name__)
 _PADDLE_CONSTRUCTION_LOCK = threading.RLock()
 _SHARED_ENV = "VIBEOCR_SHARED_MODEL_CACHE"
+_WINDOWS = sys.platform == "win32"
 
 
 class ModelCacheError(RuntimeError):
@@ -424,6 +426,50 @@ def prepare_models(
         return PreparedModels(candidate, reused, None if downloaded else 0)
 
 
+def _windows_short_path(path: str) -> str:
+    """Return the 8.3 alias Windows already keeps for one existing path."""
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_short_path_name = kernel32.GetShortPathNameW
+    get_short_path_name.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32)
+    get_short_path_name.restype = ctypes.c_uint32
+    needed = get_short_path_name(path, None, 0)
+    if needed == 0:
+        raise OSError(ctypes.get_last_error(), "GetShortPathNameW failed", path)
+    buffer = ctypes.create_unicode_buffer(needed)
+    written = get_short_path_name(path, buffer, needed)
+    if written == 0 or written >= needed:
+        raise OSError(ctypes.get_last_error(), "GetShortPathNameW failed", path)
+    return buffer.value
+
+
+def _paddle_native_model_dir(root: Path) -> Path:
+    """Alias one non-ASCII Windows model dir to its existing 8.3 ASCII name.
+
+    Paddle 3.3.1's native layer cannot read non-ASCII model paths. The alias
+    names the same already-prepared directory (nothing is copied, moved or
+    re-downloaded) and is never persisted; ASCII paths and other platforms
+    keep existing behavior, and a missing alias fails closed.
+    """
+    text = str(root)
+    if not _WINDOWS or text.isascii():
+        return root
+    try:
+        alias = _windows_short_path(text)
+    except OSError as exc:
+        raise ModelCacheError(
+            f"Windows short path unavailable for Paddle model directory: {text}"
+        ) from exc
+    if not alias.isascii():
+        raise ModelCacheError(
+            "Paddle cannot read the model directory and Windows provided no "
+            "ASCII short alias for it; use a local volume with 8.3 short names "
+            f"enabled or an ASCII cache path instead: {text}"
+        )
+    return Path(alias)
+
+
 @contextmanager
 def paddle_model_cache() -> Iterator[None]:
     """Use PaddleX's actual submodel selection during one serialized construction."""
@@ -484,7 +530,8 @@ def paddle_model_cache() -> Iterator[None]:
                             continue
                         raise
                 vl = root / "PaddleOCR-VL-0.9B"
-                return vl if name == "PaddleOCR-VL" and vl.is_dir() else root
+                target = vl if name == "PaddleOCR-VL" and vl.is_dir() else root
+                return _paddle_native_model_dir(target)
             raise ModelCacheError("Paddle did not select an available model")
 
         official_models._get_model_local_path = resolve

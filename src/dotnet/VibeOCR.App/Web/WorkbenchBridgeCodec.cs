@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using VibeOCR.App.Workbench;
 using VibeOCR.App.Features.Recognition;
+using VibeOCR.App.Features.Pdf;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Windows;
 
@@ -528,6 +529,28 @@ public static class WorkbenchBridgeCodec
       case ("pdf", "ocrPages"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new OcrPdfPagesCommand();
+      case ("pdf", "addTextLayers"):
+        EnsureObjectWithFields(arguments, new HashSet<string> { "range", "overwrite" }, "command arguments");
+        string? range = arguments.GetProperty("range").GetString();
+        if (range is not ("selected" or "all" or "unlayered"))
+          throw new WorkbenchBridgeProtocolException("PDF range is invalid.");
+        return new AddPdfTextLayersCommand(range, arguments.GetProperty("overwrite").GetBoolean());
+      case ("pdf", "deleteTextLayers"):
+        EnsureObjectWithFields(arguments, new HashSet<string> { "pages", "revision", "confirmed" }, "command arguments");
+        if (!arguments.GetProperty("confirmed").GetBoolean())
+          throw new WorkbenchBridgeProtocolException("PDF deletion requires confirmation.");
+        return new DeletePdfTextLayersCommand(ParsePageIndexes(arguments.GetProperty("pages")), arguments.GetProperty("revision").GetInt64());
+      case ("pdf", "cancel"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new CancelPdfCommand();
+      case ("pdf", "setProcessingSettings"):
+        EnsureObjectWithFields(arguments, new HashSet<string> { "settings" }, "command arguments");
+        JsonElement pdfSettings = arguments.GetProperty("settings");
+        EnsureObjectWithFields(pdfSettings, new HashSet<string> { "renderDpi", "maxPixels", "fontSizeRatio", "fontSizeRetryCount", "fontSizeShrinkFactor", "minFontSize", "compressOnSave", "cleanOnSave" }, "PDF settings");
+        PdfProcessingSettings processingSettings = pdfSettings.Deserialize<PdfProcessingSettings>(SerializerOptions)
+          ?? throw new WorkbenchBridgeProtocolException("PDF settings missing.");
+        processingSettings.Validate();
+        return new SetPdfProcessingSettingsCommand(processingSettings);
       case ("pdf", "save"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new SavePdfCommand();
@@ -1337,6 +1360,8 @@ public static class WorkbenchBridgeCodec
       pdf.WindowStart,
       engines = pdf.Engines ?? [],
       taskEngine = pdf.TaskEngine,
+      pdf.Revision, pdf.IsModified, pdf.DetectedCount, pdf.TextLayerCount, pdf.AddedCount,
+      pdf.Phase, pdf.ProgressCurrent, pdf.ProgressTotal, pdf.Summary, pdf.CanAddTextLayer, pdf.ProcessingSettings,
     },
     QrCodeWorkbenchState qrCode => new
     {

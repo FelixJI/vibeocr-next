@@ -209,12 +209,14 @@ class TestRenderRoutes:
         )
         assert resp.status_code == 500
 
-    def test_render_page_pixels_close_exception_swallowed(self, tmp_path, monkeypatch):
-        """_render_page_pixels: doc.close 抛异常应被吞（lines 195-198）。"""
+    def test_render_page_pixels_keeps_current_document_open(
+        self, tmp_path, monkeypatch
+    ):
+        """渲染读取当前 doc，不能关闭会话持有的文档。"""
         from vibeocr.runtime.documents import pdf_backend_process as backend
 
         path = _create_test_pdf(tmp_path / "rp.pdf", num_pages=1)
-        # 让 fitz.Document.close 抛异常
+        doc = fitz.open(path)
         original_close = fitz.Document.close
 
         def _fail_close(self):
@@ -222,11 +224,13 @@ class TestRenderRoutes:
 
         monkeypatch.setattr(fitz.Document, "close", _fail_close)
         try:
-            samples, w, h = backend._render_page_pixels(str(path), 0, 72.0)
+            samples, w, h = backend._render_page_pixels(doc, 0, 72.0)
             assert isinstance(samples, bytes)
             assert w > 0 and h > 0
         finally:
             monkeypatch.setattr(fitz.Document, "close", original_close)
+            assert not doc.is_closed
+            doc.close()
 
 
 # ---- detect_text_layers ------------------------------------------------
@@ -426,7 +430,8 @@ class TestTextLayerRoutes:
         assert resp.status_code == 200
         body = resp.json()
         assert "diff" in body
-        assert body.get("extra") is None
+        assert body["extra"]["results"] == {"0": [0, 1]}
+        assert "saved" not in body["extra"]
 
     def test_add_text_layer_batch_with_save(self, opened_session):
         client, _, sid, _path = opened_session
