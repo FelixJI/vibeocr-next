@@ -56,12 +56,12 @@ public sealed class PdfInspectionWorkbenchTests
       Assert.Equal("doc-1", first.SessionId);
       Assert.Equal(300, client.LastDpi);
       Assert.NotNull(first.PagePreview); Assert.NotNull(first.PageInspect);
-      int files = Directory.GetFiles(root).Length;
+      int files = Directory.GetFiles(root, "*", SearchOption.AllDirectories).Length;
       PdfWorkbenchState next = State(await handler.ExecuteAsync(new SelectPdfPageCommand(1, true), CancellationToken.None));
       Assert.NotEqual(first.PagePreview.Url, next.PagePreview!.Url);
       await Assert.ThrowsAsync<WorkbenchResourceAccessException>(async () => await broker.OpenAsync(new Uri(first.PagePreview.Url), TestContext.Current.CancellationToken));
       await Assert.ThrowsAsync<WorkbenchResourceAccessException>(async () => await broker.OpenAsync(new Uri(first.PageInspect.Url), TestContext.Current.CancellationToken));
-      Assert.Equal(files, Directory.GetFiles(root).Length);
+      Assert.Equal(files, Directory.GetFiles(root, "*", SearchOption.AllDirectories).Length);
       client.FailPreview = true;
       PdfWorkbenchState failed = State(await handler.ExecuteAsync(new RetryPdfPageInspectCommand(), CancellationToken.None));
       Assert.Equal("pdf.inspect.failed", failed.PageInspectStatusCode); Assert.Null(failed.PagePreview); Assert.Null(failed.PageInspect);
@@ -101,6 +101,89 @@ public sealed class PdfInspectionWorkbenchTests
     finally { Directory.Delete(root, recursive: true); }
   }
 
+  [Theory]
+  [InlineData(150, 16_000_000, 150)]
+  [InlineData(300, 1_000_000, 103)]
+  public async Task RenderSettingsReloadCurrentPageWithoutChangingRevision(int dpi, int pixels, int expectedDpi)
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-pdf-settings-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      var client = new Client();
+      var model = new PdfViewModel(client, new Source());
+      model.SetInspectionCapabilities(["pdf.page-inspect.v1", "pdf.block-edit.v1"]);
+      await model.OpenPathAsync("synthetic.pdf", CancellationToken.None);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = Handler(model, root, broker, annotations);
+      PdfWorkbenchState original = await SelectAsync(handler, 0);
+      int fileCount = Directory.GetFiles(root, "*", SearchOption.AllDirectories).Length;
+      long revision = model.Revision;
+      var settings = model.ProcessingSettings with { RenderDpi = dpi, MaxPixels = pixels };
+      var refreshed = new TaskCompletionSource<PdfWorkbenchState>(TaskCreationOptions.RunContinuationsAsynchronously);
+      PdfWorkbenchState? loading = null;
+      handler.StateChanged += state =>
+      {
+        if (state is not PdfWorkbenchState current || current.ProcessingSettings != settings) return;
+        if (current.PageInspectStatusCode == "pdf.inspect.loading") loading = current;
+        if (current.PageInspectStatusCode == "pdf.inspect.ready") refreshed.TrySetResult(current);
+      };
+      WorkbenchCommandOutcome change = await handler.ExecuteAsync(new SetPdfProcessingSettingsCommand(settings), CancellationToken.None);
+      Assert.Null(change.Error);
+      PdfWorkbenchState updated = await refreshed.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      Assert.NotNull(loading); Assert.Null(loading.PagePreview); Assert.Null(loading.PageInspect);
+      Assert.Equal(revision, model.Revision); Assert.Equal(expectedDpi, client.LastDpi); Assert.Equal(2, client.PreviewCalls);
+      Assert.NotEqual(original.PagePreview!.Url, updated.PagePreview!.Url);
+      await Assert.ThrowsAsync<WorkbenchResourceAccessException>(async () => await broker.OpenAsync(new Uri(original.PagePreview.Url), TestContext.Current.CancellationToken));
+      await Assert.ThrowsAsync<WorkbenchResourceAccessException>(async () => await broker.OpenAsync(new Uri(original.PageInspect!.Url), TestContext.Current.CancellationToken));
+      Assert.Equal(fileCount, Directory.GetFiles(root, "*", SearchOption.AllDirectories).Length);
+      PdfWorkbenchState otherSettings = State(await handler.ExecuteAsync(new SetPdfProcessingSettingsCommand(settings with { CleanOnSave = true }), CancellationToken.None));
+      Assert.Equal(updated.PagePreview.Url, otherSettings.PagePreview!.Url); Assert.Equal(2, client.PreviewCalls);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
+  public async Task LateRenderCannotPublishAfterSettingsChange()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-pdf-settings-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      var oldPreview = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+      var client = new Client { PendingPreview = oldPreview };
+      var model = new PdfViewModel(client, new Source());
+      model.SetInspectionCapabilities(["pdf.page-inspect.v1", "pdf.block-edit.v1"]);
+      await model.OpenPathAsync("synthetic.pdf", CancellationToken.None);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = Handler(model, root, broker, annotations);
+      Task<PdfWorkbenchState> previous = SelectAsync(handler, 0);
+      await client.PreviewEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      var settings = model.ProcessingSettings with { RenderDpi = 150 };
+      var refreshed = new TaskCompletionSource<PdfWorkbenchState>(TaskCreationOptions.RunContinuationsAsynchronously);
+      handler.StateChanged += state =>
+      {
+        if (state is PdfWorkbenchState { PageInspectStatusCode: "pdf.inspect.ready" } current && current.ProcessingSettings == settings)
+          refreshed.TrySetResult(current);
+      };
+      WorkbenchCommandOutcome change = await handler.ExecuteAsync(new SetPdfProcessingSettingsCommand(settings), CancellationToken.None);
+      Assert.Null(change.Error); Assert.False(oldPreview.Task.IsCompleted);
+      client.PendingPreview = null;
+      oldPreview.SetResult([9, 8, 7]);
+      await previous;
+      PdfWorkbenchState current = await refreshed.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      Assert.Equal(2, client.PreviewCalls); Assert.Equal(150, client.LastDpi);
+      await using WorkbenchResourceResponse content = await broker.OpenAsync(new Uri(current.PagePreview!.Url), TestContext.Current.CancellationToken);
+      using var bytes = new MemoryStream();
+      await content.Content.CopyToAsync(bytes, TestContext.Current.CancellationToken);
+      Assert.Equal(new byte[] { 3, 2, 1 }, bytes.ToArray());
+      Assert.Equal(4, Directory.GetFiles(root, "*", SearchOption.AllDirectories).Length); // two thumbnails + current inspect / preview
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
   private static async Task<PdfWorkbenchState> SelectAsync(DesktopWorkbenchCommandHandler handler, int page) =>
     State(await handler.ExecuteAsync(new SetCurrentPdfPageCommand(page), CancellationToken.None));
   private static PdfWorkbenchState State(WorkbenchCommandOutcome outcome) => Assert.IsType<PdfWorkbenchState>(Assert.Single(outcome.States));
@@ -122,11 +205,13 @@ public sealed class PdfInspectionWorkbenchTests
     public int EditCalls { get; private set; }
     public TaskCompletionSource<Wire.PageInspectResponse>? PendingInspect { get; init; }
     public TaskCompletionSource InspectEntered { get; } = new();
+    public TaskCompletionSource<byte[]>? PendingPreview { get; set; }
+    public TaskCompletionSource PreviewEntered { get; } = new();
     public override Task<PdfSessionOpenResult> OpenPdfSessionAsync(string path, string? password, CancellationToken ct) => Task.FromResult(new PdfSessionOpenResult("doc-1", 2, path,
       new Wire.PdfDocumentMirror { Pages = [new() { PageIndex = 0, Rect = Inspect(0).Rect }, new() { PageIndex = 1, Rect = Inspect(0).Rect }] }));
     public override Task<byte[]> RenderPdfPageAsync(string sessionId, int page, int size, CancellationToken ct) => Task.FromResult(new byte[] { 1, 2, 3 });
     public override Task<Wire.PageInspectResponse> InspectPdfPageAsync(string sessionId, int page, CancellationToken ct) { InspectEntered.TrySetResult(); return page == 0 && PendingInspect is not null ? PendingInspect.Task : Task.FromResult(Inspect(page)); }
-    public override Task<byte[]> RenderPdfPreviewAsync(string sessionId, int page, int dpi, CancellationToken ct) { PreviewCalls++; LastDpi = dpi; return FailPreview ? Task.FromException<byte[]>(new IOException("synthetic rendering failure")) : Task.FromResult(new byte[] { 3, 2, 1 }); }
+    public override Task<byte[]> RenderPdfPreviewAsync(string sessionId, int page, int dpi, CancellationToken ct) { PreviewCalls++; LastDpi = dpi; PreviewEntered.TrySetResult(); if (PendingPreview is not null) return PendingPreview.Task; return FailPreview ? Task.FromException<byte[]>(new IOException("synthetic rendering failure")) : Task.FromResult(new byte[] { 3, 2, 1 }); }
     public override Task<Wire.PdfMutationResponse> UpdatePdfBlockTextAsync(string sessionId, Wire.UpdateBlockTextRequest request, CancellationToken ct) { EditCalls++; throw new InvalidOperationException("Stale editing must not reach runtime."); }
   }
 }

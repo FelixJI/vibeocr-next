@@ -93,12 +93,13 @@ public sealed class DesktopWorkbenchCommandHandler :
   private readonly CancellationTokenSource sceneRecognitionLifetime = new();
   private readonly HashSet<int> selectedPdfPages = [];
   private readonly Dictionary<int, WorkbenchResourceReference> pdfThumbnails = [];
-  // 当前页检查/高清预览资源：单页缓存，键为 session:revision:page；换页/关
+  // 当前页检查/高清预览资源：单页缓存，键含 session/revision/page 与渲染设置；换页/关
   // 闭/修订变更时显式 revoke（ReleaseResource = broker.Revoke + 删除发布文件）。
   private readonly SemaphoreSlim pdfPageResourceGate = new(1, 1);
   private WorkbenchResourceReference? pdfPagePreview;
   private WorkbenchResourceReference? pdfPageInspect;
   private string? pdfPageResourceKey;
+  private long pdfPageResourceGeneration;
   private string pdfPageInspectStatus = "pdf.inspect.none";
   private readonly Dictionary<string, string> structuredResourceFiles = new(StringComparer.Ordinal);
   private readonly Dictionary<Guid, (RecognizeResponse Result, WorkbenchResourceReference Reference)> batchStructured = [];
@@ -2963,14 +2964,32 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     if (args.PropertyName is null && pdf is not null) StateChanged?.Invoke(PdfState(pdf));
   }
-  private PdfWorkbenchState SetPdfProcessingSettings(SetPdfProcessingSettingsCommand command)
+  private PdfWorkbenchState? SetPdfProcessingSettings(SetPdfProcessingSettingsCommand command)
   {
     pdf ??= CreatePdfViewModel();
     if (pdf.IsSettling) return PdfState(pdf);
     command.Settings.Validate();
     if (optionsLayout is not null) command.Settings.Save(optionsLayout);
-    pdf.SetProcessingSettings(command.Settings);
-    return PdfState(pdf);
+    PdfViewModel viewModel = pdf;
+    bool renderChanged = viewModel.ProcessingSettings.RenderDpi != command.Settings.RenderDpi
+      || viewModel.ProcessingSettings.MaxPixels != command.Settings.MaxPixels;
+    // 先废弃旧资源，让设置变更引发的同步状态通知也不能携带旧分辨率图。
+    if (renderChanged) ReleasePdfPageResources();
+    viewModel.SetProcessingSettings(command.Settings);
+    if (!renderChanged || !viewModel.CanInspectPage || viewModel.SessionId is null
+      || viewModel.SelectedPage < 0 || viewModel.SelectedPage >= viewModel.PageCount)
+      return PdfState(viewModel);
+    string key = PdfPageResourceKey(viewModel);
+    pdfPageResourceKey = key;
+    pdfPageInspectStatus = "pdf.inspect.loading";
+    long generation = Volatile.Read(ref pdfPageResourceGeneration);
+    return PublishStartThenTrack(PdfState(viewModel), async () =>
+    {
+      await EnsurePdfPageResourcesAsync(viewModel, CancellationToken.None);
+      if (ReferenceEquals(pdf, viewModel) && PdfPageResourceKey(viewModel) == key
+        && generation == Volatile.Read(ref pdfPageResourceGeneration))
+        StateChanged?.Invoke(PdfState(viewModel));
+    });
   }
   private PdfWorkbenchState CancelPdf()
   {
@@ -4550,7 +4569,7 @@ public sealed class DesktopWorkbenchCommandHandler :
 
   private PdfWorkbenchState PdfState(PdfViewModel viewModel)
   {
-    if (pdfPageResourceKey != $"{viewModel.SessionId}:{viewModel.Revision}:{viewModel.SelectedPage}")
+    if (pdfPageResourceKey != PdfPageResourceKey(viewModel))
       ReleasePdfPageResources();
     SynchronizePdfMode();
     pdfWindowStart = ClampWindowStart(pdfWindowStart, viewModel.PageCount, 64);
@@ -4620,9 +4639,13 @@ public sealed class DesktopWorkbenchCommandHandler :
     }).ToArray();
   }
 
+  private static string PdfPageResourceKey(PdfViewModel viewModel) =>
+    $"{viewModel.SessionId}:{viewModel.Revision}:{viewModel.SelectedPage}:{viewModel.ProcessingSettings.RenderDpi}:{viewModel.ProcessingSettings.MaxPixels}";
+
   /// <summary>释放当前页检查/高清预览资源（revoke + 删除发布文件），不触碰 160px 缩略图缓存。</summary>
   private void ReleasePdfPageResources()
   {
+    Interlocked.Increment(ref pdfPageResourceGeneration);
     if (pdfPagePreview is { } preview) ReleaseResource(preview);
     if (pdfPageInspect is { } inspect) ReleaseResource(inspect);
     pdfPagePreview = null;
@@ -4656,7 +4679,8 @@ public sealed class DesktopWorkbenchCommandHandler :
       return;
     }
     long revision = viewModel.Revision;
-    string key = $"{session}:{revision}:{page}";
+    PdfProcessingSettings renderSettings = viewModel.ProcessingSettings;
+    string key = PdfPageResourceKey(viewModel);
     if (pdfPageResourceKey != key)
     {
       ReleasePdfPageResources();
@@ -4665,10 +4689,12 @@ public sealed class DesktopWorkbenchCommandHandler :
     }
     if (pdfPagePreview is not null && pdfPageInspect is not null) return;
     long generation = Volatile.Read(ref pdfGeneration);
+    long resourceGeneration = Volatile.Read(ref pdfPageResourceGeneration);
     bool CurrentResources() => ReferenceEquals(pdf, viewModel)
       && viewModel.SessionId == session
       && viewModel.Revision == revision && viewModel.SelectedPage == page
-      && pdfPageResourceKey == key
+      && pdfPageResourceKey == key && PdfPageResourceKey(viewModel) == key
+      && resourceGeneration == Volatile.Read(ref pdfPageResourceGeneration)
       && generation == Volatile.Read(ref pdfGeneration);
 
     WorkbenchResourceReference? inspectReference = null;
@@ -4682,8 +4708,8 @@ public sealed class DesktopWorkbenchCommandHandler :
       double width = page < viewModel.Pages.Count ? viewModel.Pages[page].Width : 0;
       double height = page < viewModel.Pages.Count ? viewModel.Pages[page].Height : 0;
       int dpi = width > 0 && height > 0
-        ? viewModel.ProcessingSettings.DpiFor(width, height)
-        : viewModel.ProcessingSettings.RenderDpi;
+        ? renderSettings.DpiFor(width, height)
+        : renderSettings.RenderDpi;
       byte[]? preview = await viewModel.RenderPreviewImageAsync(page, dpi, cancellationToken);
       if (!CurrentResources()) return;
       if (preview is not { Length: > 0 }) { pdfPageInspectStatus = "pdf.inspect.failed"; return; }

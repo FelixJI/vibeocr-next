@@ -1955,6 +1955,10 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
   const engines = recognitionEngines(state.engines);
   const pageCount = numberValue(state.pageCount);
   const selectedPage = numberValue(state.selectedPage);
+  const hasCurrentPage =
+    stringValue(state.sessionId) !== undefined &&
+    selectedPage >= 0 &&
+    selectedPage < pageCount;
   const pages = pdfPages(state.pages);
   const windowStart = Math.max(0, numberValue(state.windowStart));
   const selectedPages = Array.isArray(state.selectedPages)
@@ -2502,7 +2506,7 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
             </div>
           )}
           <Panel label="REVIEW" title="页面检查">
-            {state.canInspectPage === true ? (
+            {hasCurrentPage && state.canInspectPage === true ? (
               <PdfInspection
                 key={`${stringValue(state.sessionId)}:${numberValue(state.revision)}:${selectedPage}:${resource(state.pagePreview)?.url ?? ""}:${resource(state.pageInspect)?.url ?? ""}`}
                 page={selectedPage}
@@ -2516,7 +2520,7 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
                 canEdit={state.canCorrectText === true}
                 actions={actions}
               />
-            ) : activePage?.thumbnail ? (
+            ) : hasCurrentPage && activePage?.thumbnail ? (
               <img
                 className="pdf-resource-preview"
                 src={activePage.thumbnail.url}
