@@ -505,10 +505,12 @@ public sealed partial class MainWindow
         ManagedEnvironmentSession? session = smokeManagedSession!();
         if (session?.EnvironmentId == id && smokeInferenceAttached!())
         {
-          // 服务 attach 早于目录/设置回读完成；等待生产忙碌投影释放后再提交 OCR。
+          // attach 到设置回读开始前也可能不 busy；必须等同一修订的生产投影就绪。
           WorkbenchBootstrap bootstrap = await application.BootstrapAsync(cancellation.Token);
+          ManagedEnvironmentList? projected = smokeEnvironmentSnapshot!();
           if (!bootstrap.States.Select(item => item.State).OfType<SettingsWorkbenchState>()
-              .Single().EnvironmentBusy)
+              .Single().EnvironmentBusy && projected?.ActiveId == id &&
+              projected.Environments.Any(item => item.Id == id && item.Revision == session.Revision && item.ServiceState == "ready"))
             return session;
         }
         await Task.Delay(100, cancellation.Token);
