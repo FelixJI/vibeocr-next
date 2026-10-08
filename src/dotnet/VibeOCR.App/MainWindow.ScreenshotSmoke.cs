@@ -165,7 +165,7 @@ public sealed partial class MainWindow
     var surface = capture ? WorkbenchWebView : SmokeEditorWebView;
     static string ClickScript(string name) =>
       "(() => { const b=Array.from(document.querySelectorAll('button'))" +
-      ".find(b => b.textContent?.trim() === " + JsonSerializer.Serialize(name) +
+      ".find(b => (b.getAttribute('aria-label') || b.textContent)?.trim() === " + JsonSerializer.Serialize(name) +
       "); if (!b || b.disabled || b.getAttribute('aria-disabled')==='true') return false; b.click(); return true; })()";
     if (capture)
     {

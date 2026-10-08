@@ -191,6 +191,7 @@ public sealed partial class MainWindow
     if (list.ActiveId != a.Id || a.Revision != session.Revision ||
         smokeInstallAttempts!() != 0 || !smokeInferenceAttached!())
       throw new InvalidOperationException("Restart did not reuse active A without installation.");
+    await SaveManagedSmokePreviewAsync("environment-list");
     return new
     {
       active_id = list.ActiveId,
@@ -401,7 +402,8 @@ public sealed partial class MainWindow
     string selector = stage == "confirmation" ? ".runtime-install-plan" : ".managed-environment-list";
     await WaitForSmokeDomAsync(
       "(() => { const e = document.querySelector(" + JsonSerializer.Serialize(selector) +
-      "); if (!e) return false; e.scrollIntoView({block:'center'}); return true; })()",
+      "); if (!e || !e.querySelector('button:not(:disabled)')) return false; " +
+      "e.scrollIntoView({block:'center'}); return true; })()",
       TimeSpan.FromSeconds(30));
     await Task.Delay(100);
     string health = Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_ENVIRONMENT_E2E_HEALTH")
