@@ -2916,8 +2916,7 @@ function InstalledEnvironmentList({
                 ? failure.recipe
                 : "";
           const removeAllowed =
-            environment.kind !== "legacy" &&
-            (environment.id !== activeId || environment.status === "empty");
+            environment.kind !== "legacy" && environment.id !== activeId;
           return (
             <div
               key={environment.id}
@@ -3074,9 +3073,242 @@ function InstalledEnvironmentList({
           取消安装
         </Button>
       ) : null}
+      <EnvironmentCleanup state={state} busy={busy} actions={actions} />
       <EnvironmentInstallDetails state={state} />
       <p role="status">{stringValue(state.environmentStatus) ?? ""}</p>
     </section>
+  );
+}
+
+interface CleanupItem {
+  readonly id: string;
+  readonly category: string;
+  readonly label: string;
+  readonly environment_id: string | null;
+  readonly logical_bytes: number | null;
+  readonly can_clean: boolean;
+  readonly reason: string;
+  readonly paths: readonly string[];
+  readonly last_error?: string;
+  readonly path_count?: number;
+}
+interface CleanupPlan {
+  readonly plan_id: string;
+  readonly items: readonly CleanupItem[];
+  readonly warning: string;
+}
+interface CleanupResult {
+  readonly items: readonly {
+    readonly id: string;
+    readonly state: string;
+    readonly detail: string;
+    readonly removed_logical_bytes: number;
+  }[];
+}
+
+function EnvironmentCleanup({
+  state,
+  busy,
+  actions,
+}: {
+  readonly state: Readonly<Record<string, unknown>>;
+  readonly busy: boolean;
+  readonly actions: AppActions;
+}) {
+  if (state.environmentSupportsCleanup !== true) return null;
+  const plan = state.environmentCleanupPlan as CleanupPlan | null | undefined;
+  const result = state.environmentCleanupResult as
+    CleanupResult | null | undefined;
+  const page =
+    typeof state.environmentCleanupPage === "number"
+      ? state.environmentCleanupPage
+      : 0;
+  const pageCount =
+    typeof state.environmentCleanupPageCount === "number"
+      ? state.environmentCleanupPageCount
+      : 1;
+  const outcomes: Readonly<Record<string, string>> = {
+    deleted: "已移除",
+    failed: "失败，可重查续清",
+    cancelled: "已取消，可重查续清",
+  };
+  return (
+    <section aria-label="空间清理">
+      <h4>空间清理</h4>
+      <p className="form-note">
+        非当前环境可能仍有用途，请自行选择需要保留的配置。仅处理有明确归属的环境、准备残留和无保留引用的依赖下载工件；模型、基础
+        Python 和未知目录受保护。
+      </p>
+      <Button
+        disabled={busy}
+        onClick={() =>
+          void actions.run({ type: "settings.previewEnvironmentCleanup" })
+        }
+      >
+        检查可清理项
+      </Button>
+      {pageCount > 1 ? (
+        <div aria-label="清理分页">
+          <Button
+            disabled={busy || page === 0}
+            onClick={() =>
+              void actions.run({
+                type: "settings.setEnvironmentCleanupPage",
+                page: page - 1,
+              })
+            }
+          >
+            上一页清理项目
+          </Button>
+          <span>
+            第 {page + 1} / {pageCount} 页；仅清理本页明确选择的项目
+          </span>
+          <Button
+            disabled={busy || page + 1 >= pageCount}
+            onClick={() =>
+              void actions.run({
+                type: "settings.setEnvironmentCleanupPage",
+                page: page + 1,
+              })
+            }
+          >
+            下一页清理项目
+          </Button>
+        </div>
+      ) : null}
+      {plan && Array.isArray(plan.items) ? (
+        <CleanupSelection
+          key={`${plan.plan_id}:${page}`}
+          plan={plan}
+          busy={busy}
+          actions={actions}
+        />
+      ) : null}
+      {state.environmentCanCancelCleanup === true ? (
+        <Button
+          onClick={() =>
+            void actions.run({ type: "settings.cancelEnvironmentCleanup" })
+          }
+        >
+          取消清理
+        </Button>
+      ) : null}
+      {result && Array.isArray(result.items) ? (
+        <ul aria-label="清理结果">
+          {result.items.map((item) => (
+            <li
+              key={item.id}
+              role={item.state === "failed" ? "alert" : "status"}
+            >
+              {outcomes[item.state] ?? item.state}：{item.detail}
+              ；已移除逻辑字节{" "}
+              {(item.removed_logical_bytes / 1024 / 1024).toFixed(1)} MiB
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </section>
+  );
+}
+
+function CleanupSelection({
+  plan,
+  busy,
+  actions,
+}: {
+  readonly plan: CleanupPlan;
+  readonly busy: boolean;
+  readonly actions: AppActions;
+}) {
+  const [selected, setSelected] = useState<readonly string[]>([]);
+  const [confirming, setConfirming] = useState(false);
+  const chosen = plan.items.filter(
+    (item) => selected.includes(item.id) && item.can_clean,
+  );
+  const categories: Readonly<Record<string, string>> = {
+    environment: "环境及专属依赖",
+    residual: "已记录残留",
+    dependency_cache: "共享依赖下载缓存",
+    models: "模型",
+    python_base: "基础 Python",
+    unknown: "未知目录",
+    cache: "其他缓存",
+    legacy: "原有环境",
+  };
+  return (
+    <div>
+      <ul aria-label="可清理项">
+        {plan.items.map((item) => (
+          <li key={item.id}>
+            <Checkbox
+              disabled={busy || !item.can_clean}
+              checked={selected.includes(item.id)}
+              label={`${item.label} · ${categories[item.category] ?? item.category}`}
+              onChange={(_, data) => {
+                setConfirming(false);
+                setSelected(
+                  data.checked === true
+                    ? [...selected, item.id]
+                    : selected.filter((id) => id !== item.id),
+                );
+              }}
+            />
+            <p>
+              {item.can_clean ? "可选择" : "受保护"}：{item.reason}
+              ；占用（逻辑字节）
+              {typeof item.logical_bytes === "number"
+                ? `${(item.logical_bytes / 1024 / 1024).toFixed(1)} MiB`
+                : "未知"}
+            </p>
+            {item.last_error ? (
+              <p role="alert">上次未完成：{item.last_error}</p>
+            ) : null}
+            <details>
+              <summary>
+                路径摘要（只读，显示首项，长文本省略，共{" "}
+                {item.path_count ?? item.paths.length} 项）
+              </summary>
+              {item.paths.map((path) => (
+                <p key={path}>{path}</p>
+              ))}
+            </details>
+          </li>
+        ))}
+      </ul>
+      <p>{plan.warning}</p>
+      {confirming ? (
+        <div role="alert">
+          <p>
+            确认移除所选 {chosen.length} 项：
+            {chosen.map((item) => item.label).join("、")}
+            。环境及专属依赖删除后不可撤销，缓存以后可能需要重新下载；统计为逻辑字节，不保证物理磁盘释放。
+          </p>
+          <Button
+            disabled={busy || chosen.length === 0}
+            onClick={() => {
+              setConfirming(false);
+              void actions.run({
+                type: "settings.runEnvironmentCleanup",
+                planId: plan.plan_id,
+                itemIds: chosen.map((item) => item.id),
+              });
+            }}
+          >
+            确认清理所选项目
+          </Button>
+          <Button disabled={busy} onClick={() => setConfirming(false)}>
+            返回选择
+          </Button>
+        </div>
+      ) : (
+        <Button
+          disabled={busy || chosen.length === 0}
+          onClick={() => setConfirming(true)}
+        >
+          预览所选清理影响
+        </Button>
+      )}
+    </div>
   );
 }
 

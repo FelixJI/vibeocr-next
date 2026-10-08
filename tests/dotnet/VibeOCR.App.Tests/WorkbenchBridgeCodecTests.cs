@@ -9,6 +9,32 @@ namespace VibeOCR.App.Tests;
 public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
 {
   [Theory]
+  [InlineData("{\"page\":0}", true)]
+  [InlineData("{\"page\":2}", true)]
+  [InlineData("{\"page\":-1}", false)]
+  [InlineData("{\"page\":1.5}", false)]
+  [InlineData("{\"page\":\"2\"}", false)]
+  public void CleanupPageCommandRequiresNonNegativeInteger(string arguments, bool valid)
+  {
+    Guid session = Guid.NewGuid();
+    string command = CommandJson(session, "settings", "setEnvironmentCleanupPage", arguments);
+    if (valid) Assert.IsType<SetEnvironmentCleanupPageCommand>(WorkbenchBridgeCodec.ParseCommand(command, session).Command);
+    else Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(command, session));
+  }
+  [Theory]
+  [InlineData("[\"residual:a\"]", true)]
+  [InlineData("[]", false)]
+  [InlineData("[\"a\",\"a\"]", false)]
+  [InlineData("[3]", false)]
+  public void CleanupBridgeAcceptsOnlyExplicitUniqueSelection(string ids, bool valid)
+  {
+    Guid session = Guid.NewGuid();
+    string command = CommandJson(session, "settings", "runEnvironmentCleanup", "{\"planId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"itemIds\":" + ids + "}");
+    if (valid) Assert.IsType<RunEnvironmentCleanupCommand>(WorkbenchBridgeCodec.ParseCommand(command, session).Command);
+    else Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(command, session));
+  }
+
+  [Theory]
   [InlineData("rapidocr-cpu")]
   [InlineData("文字识别 CPU-2")]
   [InlineData("0123456789abcdef0123456789abcdef")]
@@ -1078,6 +1104,51 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     }
     // The next exact terminal is independently serializable after a large log event.
     WorkbenchBridgeCodec.SerializeState(session, envelope with { Revision = 100, State = settings with { EnvironmentInstallProgress = progress with { State = "succeeded", Phase = "complete", Seq = 853 } } });
+  }
+
+  [Fact]
+  public void SixRecipeCleanupFlowFitsStateAndBootstrapAfterExplicitLifecycleTransition()
+  {
+    DirectoryInfo? root = new(AppContext.BaseDirectory);
+    while (root is not null && !File.Exists(Path.Combine(root.FullName, "repository.json"))) root = root.Parent;
+    Assert.NotNull(root);
+    var settings = new SettingsWorkbenchState(WorkbenchTheme.Light, false, "settings.ready", "cpu", false,
+      StatusMessage: new string('字', 4000));
+    string[] recipeLocks = ["win-x64-base", "win-x64-paddle-cpu", "win-x64-paddle-cu126", "win-x64-mineru-cpu", "win-x64-cpu", "win-x64-cu126"];
+    var recipes = recipeLocks.Select(id => new SettingsEnvironmentRecipeState(id, id,
+      Dependencies: File.ReadAllLines(Path.Combine(root.FullName, "config", "runtime", id, $"requirements-{id}.lock"))
+        .Where(line => System.Text.RegularExpressions.Regex.IsMatch(line, "^[A-Za-z0-9_.-]+(?:==| @ )"))
+        .Select(line => line.Split(" --hash=", StringSplitOptions.None)[0].Trim().TrimEnd('\\').Trim()).ToArray())).ToArray();
+    var cleanupItems = Enumerable.Range(0, 3).Select(index => new VibeOCR.Platform.Bootstrap.ManagedCleanupItem(
+      $"item:{index}", index == 0 ? "dependency_cache" : "models", $"清理与保留资源 {index}", null,
+      index == 0 ? 1024 : null, index == 0, new string('原', 200),
+      [new string('路', 200)], LastError: new string('错', 200), PathCount: 128)).ToArray();
+    settings = settings with
+    {
+      EnvironmentRecipes = recipes,
+      EnvironmentSupportsCleanup = true,
+      EnvironmentCleanupPlan = new VibeOCR.Platform.Bootstrap.ManagedCleanupPlan(new string('c', 32), cleanupItems, "logical_bytes", "不保证物理释放，缓存可能需要重新下载"),
+      EnvironmentCleanupResult = new VibeOCR.Platform.Bootstrap.ManagedCleanupResult(new string('d', 32), Enumerable.Range(0, 3).Select(index => new VibeOCR.Platform.Bootstrap.ManagedCleanupResultItem($"previous:{index}", "failed", new string('错', 200), 1024)).ToArray(), "logical_bytes"),
+    };
+    // PreviewCleanupAsync clears the previous terminal display and install plan;
+    // the persistent installed/failure records remain available separately.
+    Assert.Null(settings.EnvironmentInstallProgress);
+    Assert.Null(settings.EnvironmentPlan);
+    var envelope = new WorkbenchStateEnvelope(1, "settings", WorkbenchStateChange.Replace, settings);
+    Guid session = Guid.NewGuid();
+    string state = WorkbenchBridgeCodec.SerializeState(session, envelope);
+    string bootstrap = WorkbenchBridgeCodec.SerializeBootstrap(Guid.NewGuid(), new WorkbenchBootstrap(
+      2, session, 1, WorkbenchRoute.Settings, [envelope], new HashSet<string> { "runtime.environments" }));
+    foreach (string json in new[] { state, bootstrap })
+    {
+      Assert.True(Encoding.UTF8.GetByteCount(json) <= WorkbenchBridgeCodec.MaxMessageBytes);
+      using JsonDocument document = JsonDocument.Parse(json);
+      JsonElement payload = document.RootElement.GetProperty("payload");
+      JsonElement projected = payload.TryGetProperty("state", out JsonElement value) ? value : payload.GetProperty("features").GetProperty("settings");
+      Assert.Equal(6, projected.GetProperty("environmentRecipes").GetArrayLength());
+      Assert.Equal(3, projected.GetProperty("environmentCleanupPlan").GetProperty("items").GetArrayLength());
+      Assert.Equal("failed", projected.GetProperty("environmentCleanupResult").GetProperty("items")[0].GetProperty("state").GetString());
+    }
   }
 
   [Fact]

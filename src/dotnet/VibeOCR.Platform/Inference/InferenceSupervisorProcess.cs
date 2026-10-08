@@ -152,6 +152,48 @@ public sealed class InferenceSupervisorProcess : IDisposable
         }
     }
 
+  internal static void ConfigurePythonVenvLaunch(ProcessStartInfo startInfo)
+  {
+    if (!string.Equals(Path.GetFileName(startInfo.FileName), "python.exe", StringComparison.OrdinalIgnoreCase))
+    {
+      return;
+    }
+    string launcher = Path.GetFullPath(startInfo.FileName);
+    DirectoryInfo? scripts = Directory.GetParent(launcher);
+    if (scripts is null
+      || !string.Equals(scripts.Name, "Scripts", StringComparison.OrdinalIgnoreCase)
+      || scripts.Parent is null)
+    {
+      return;
+    }
+    string configuration = Path.Combine(scripts.Parent.FullName, "pyvenv.cfg");
+    if (!File.Exists(configuration))
+    {
+      return;
+    }
+    string[] homes = File.ReadAllLines(configuration)
+      .Select(line => line.Split('=', 2))
+      .Where(parts => parts.Length == 2 && string.Equals(parts[0].Trim(), "home", StringComparison.OrdinalIgnoreCase))
+      .Select(parts => parts[1].Trim())
+      .ToArray();
+    if (homes.Length != 1 || !Path.IsPathFullyQualified(homes[0]))
+    {
+      throw new InvalidDataException("Python venv configuration must declare one absolute home path.");
+    }
+    string executable = Path.GetFullPath(Path.Combine(homes[0], "python.exe"));
+    if (string.Equals(executable, launcher, StringComparison.OrdinalIgnoreCase))
+    {
+      throw new InvalidDataException("Python venv home points back to its redirector.");
+    }
+    if (!File.Exists(executable))
+    {
+      throw new FileNotFoundException("Python venv base interpreter is unavailable.", executable);
+    }
+    // Bypass the redirector's private Job while preserving CPython's venv marker.
+    startInfo.FileName = executable;
+    startInfo.Environment["__PYVENV_LAUNCHER__"] = launcher;
+  }
+
     /// <summary>
     /// Launch the child and await its ready envelope. Each owner permits exactly
     /// one launch attempt, including attempts that fail or are cancelled.
@@ -207,6 +249,7 @@ public sealed class InferenceSupervisorProcess : IDisposable
                 }
             }
 
+            ConfigurePythonVenvLaunch(startInfo);
             process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
             process.ErrorDataReceived += (_, e) => AppendLog("stderr", e.Data);
             process.Exited += OnProcessExited;

@@ -1,4 +1,12 @@
-"""Real CPU/CUDA environment reuse smoke; creates only a fresh TEMP product."""
+"""Real CPU/CUDA environment reuse smoke; creates only a fresh TEMP product.
+
+Optionally seeds the fresh product's installer cache from an explicit
+read-only synthetic ``InstallerCacheRoot``; only the new copy receives the
+#196 ``ignore_installed`` resolve-input field. After the reuse and
+failed-switch checks the larger CUDA configuration is really removed via
+the production cleanup plan/run path while the CPU environment stays
+active, healthy and guarded.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +22,7 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
+from smoke_environment_cleanup import seed_installer_cache
 from vibeocr.runtime.environments import managed_environments, runtime_installer
 from vibeocr.runtime.environments.managed_environments import (
     ManagedEnvironmentError,
@@ -25,8 +34,30 @@ from vibeocr.runtime.environments.managed_references import ManagedEnvironmentRe
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime-dir", type=Path, required=True)
-    parser.add_argument("--component-lock", type=Path, required=True)
+    parser.add_argument(
+        "--component-lock",
+        type=Path,
+        required=True,
+        help="component lock bound to this candidate runtime manifest, not the cache seed",
+    )
+    parser.add_argument(
+        "--installer-cache-seed",
+        type=Path,
+        default=None,
+        help=(
+            "explicit synthetic installer-cache root; copied read-only into "
+            "the fresh TEMP product, only the copy gains the #196 "
+            "ignore_installed resolve-input field"
+        ),
+    )
     args = parser.parse_args()
+    if (
+        args.installer_cache_seed is not None
+        and not (args.installer_cache_seed / "resolve").is_dir()
+    ):
+        raise SystemExit(
+            "--installer-cache-seed must be an installer-cache root with resolve/"
+        )
     root = Path(tempfile.mkdtemp(prefix="af135-ac2-"))
     evidence = {"state": "running", "root": str(root), "installed": [], "switches": []}
     output = root / "evidence.json"
@@ -37,6 +68,11 @@ def main() -> int:
 
     save()
     try:
+        if args.installer_cache_seed is not None:
+            evidence["installer_cache_seed"] = seed_installer_cache(
+                root / "product", args.installer_cache_seed.resolve()
+            )
+            save()
         manager = ManagedEnvironmentStore(
             product_root=root / "product",
             component_lock=args.component_lock,
@@ -97,6 +133,59 @@ def main() -> int:
                 }
             )
             save()
+
+        # Delete one empty environment while both real engine configurations remain.
+        disposable = manager.create("共享资源验收")
+        model_markers = [
+            manager.paths.state_root / "model-cache" / "shared-smoke.txt",
+            *[
+                manager.paths.state_root
+                / "environments"
+                / record["id"]
+                / "private-smoke.txt"
+                for record in records
+            ],
+        ]
+        for marker in model_markers:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("retained-model", encoding="utf-8")
+        artifacts = (
+            manager.paths.state_root / "installer-cache" / "downloads" / "artifacts"
+        )
+        artifact_files = sorted(path.name for path in artifacts.iterdir())
+        assert artifact_files, (
+            "real CPU/CUDA installs left no shared download artifacts"
+        )
+        preview = manager.preview_cleanup()
+        retained_groups = [
+            item
+            for item in preview["items"]
+            if item["category"] == "dependency_cache"
+            and not item["can_clean"]
+            and "仍引用此下载工件" in item["reason"]
+        ]
+        assert retained_groups, preview["items"]
+        item_id = f"environment:{disposable['id']}"
+        removed = manager.run_cleanup(preview["plan_id"], [item_id])
+        assert removed["items"][0]["state"] == "deleted", removed
+        assert not Path(disposable["path"]).exists()
+        assert set(manager._read()["environments"]) == {
+            record["id"] for record in records
+        }
+        assert all((manager.root / record["path"]).is_dir() for record in records)
+        assert sorted(path.name for path in artifacts.iterdir()) == artifact_files
+        assert all(
+            marker.read_text(encoding="utf-8") == "retained-model"
+            for marker in model_markers
+        )
+        evidence["two_retained_environments_cleanup"] = {
+            "removed_environment": disposable["id"],
+            "retained_environments": [record["id"] for record in records],
+            "retained_artifact_count": len(artifact_files),
+            "retained_download_groups": retained_groups,
+            "retained_model_markers": [str(marker) for marker in model_markers],
+        }
+        save()
 
         evidence["initial_install_calls"] = initial_calls
         blocked = {
@@ -178,23 +267,24 @@ def main() -> int:
 
         try:
             for record in (records[0], records[1], records[0], records[1], records[0]):
-                prepared = manager.prepare_switch(record["id"])
-                proc, health = started(prepared)
-                try:
-                    committed = manager.commit_switch(prepared, started_health=health)
-                    assert committed["active_id"] == record["id"]
-                    evidence["switches"].append(
-                        {
-                            "recipe": record["recipe"],
-                            "active_id": committed["active_id"],
-                            "active_revision": committed["active_revision"],
-                            "health": health,
-                        }
-                    )
-                    save()
-                finally:
-                    stop(proc)
-
+                with manager.switch_reservation(record["id"]) as prepared:
+                    proc, health = started(prepared)
+                    try:
+                        committed = manager.commit_switch(
+                            prepared, started_health=health
+                        )
+                        assert committed["active_id"] == record["id"]
+                        evidence["switches"].append(
+                            {
+                                "recipe": record["recipe"],
+                                "active_id": committed["active_id"],
+                                "active_revision": committed["active_revision"],
+                                "health": health,
+                            }
+                        )
+                        save()
+                    finally:
+                        stop(proc)
             active = manager._read()["active_id"]
             references = ManagedEnvironmentReferences(
                 manager._registry,
@@ -207,7 +297,8 @@ def main() -> int:
             references.admit(job)
             try:
                 try:
-                    manager.prepare_switch(records[1]["id"])
+                    with manager.switch_reservation(records[1]["id"]):
+                        pass
                 except ManagedEnvironmentError:
                     pass
                 else:
@@ -217,15 +308,15 @@ def main() -> int:
             finally:
                 references.release(job)
 
-            prepared = manager.prepare_switch(records[1]["id"])
-            proc, health = started(prepared)
-            stop(proc)
-            try:
-                manager.commit_switch(prepared, started_health=health)
-            except ManagedEnvironmentError:
-                pass
-            else:
-                raise AssertionError("dead target Supervisor was committed")
+            with manager.switch_reservation(records[1]["id"]) as prepared:
+                proc, health = started(prepared)
+                stop(proc)
+                try:
+                    manager.commit_switch(prepared, started_health=health)
+                except ManagedEnvironmentError:
+                    pass
+                else:
+                    raise AssertionError("dead target Supervisor was committed")
             assert manager._read()["active_id"] == active
             evidence["failed_switch_preserves_active"] = True
             assert blocked == dict.fromkeys(blocked, 0), blocked
@@ -233,6 +324,66 @@ def main() -> int:
             evidence["byte_evidence"] = (
                 "All dependency preparation/download paths closed; no path invoked."
             )
+
+            # Real cleanup: remove the larger CUDA configuration while the
+            # CPU environment stays active; shared caches/models stay guarded.
+            preview = manager.preview_cleanup()
+            items = {item["id"]: item for item in preview["items"]}
+            cuda_item = items[f"environment:{records[1]['id']}"]
+            assert cuda_item["can_clean"] is True, cuda_item
+            retained_groups = [
+                item
+                for item in preview["items"]
+                if item["category"] == "dependency_cache" and not item["can_clean"]
+            ]
+            assert retained_groups, preview["items"]
+            assert all("仍引用此下载工件" in item["reason"] for item in retained_groups)
+            removed = manager.run_cleanup(preview["plan_id"], [cuda_item["id"]])
+            assert removed["items"][0]["state"] == "deleted", removed
+            data = manager._read()
+            assert records[1]["id"] not in data["environments"]
+            assert data["active_id"] == records[0]["id"]
+            assert not (manager.root / records[1]["path"]).exists()
+            after = manager.preview_cleanup()
+            assert after["last_result"]["items"][0]["state"] == "deleted"
+            still_retained = [
+                item
+                for item in after["items"]
+                if item["category"] == "dependency_cache" and not item["can_clean"]
+            ]
+            assert still_retained, after["items"]
+            assert all("仍引用此下载工件" in item["reason"] for item in still_retained)
+            protected = {
+                item["category"] for item in after["items"] if not item["can_clean"]
+            }
+            assert {"models", "python_base", "cache", "legacy"} <= protected
+            assert all(
+                marker.read_text(encoding="utf-8") == "retained-model"
+                for marker in model_markers
+            )
+            evidence["cleanup"] = {
+                "removed_environment": records[1]["id"],
+                "removed_logical_bytes": removed["items"][0]["removed_logical_bytes"],
+                "retained_download_groups": [
+                    {
+                        "id": item["id"],
+                        "path_count": item["path_count"],
+                        "reason": item["reason"],
+                    }
+                    for item in still_retained
+                ],
+                "active_after": data["active_id"],
+            }
+            save()
+            with manager.switch_reservation(records[0]["id"]) as prepared:
+                proc, health = started(prepared)
+                try:
+                    committed = manager.commit_switch(prepared, started_health=health)
+                    assert committed["active_id"] == records[0]["id"]
+                finally:
+                    stop(proc)
+            assert blocked == dict.fromkeys(blocked, 0), blocked
+            evidence["retained_cpu_healthy_after_cleanup"] = True
             evidence["state"] = "passed"
         finally:
             for proc in processes:

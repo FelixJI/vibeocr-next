@@ -87,29 +87,78 @@ public sealed class RuntimeInstallerClientTests
     }
 
     [Fact]
-    public async Task NamedEnvironmentSwitchUsesFrozenManagerBindingAndCasToken()
+    public void UnguardedEnvironmentSwitchClientFailsClosed()
     {
-        const string prepared = """{"environment_id":"abc","environment_revision":2,"active_id":"old","active_revision":4,"python":"C:\\venv\\python.exe","requires_supervisor":true,"launch":null}""";
+        var client = new RuntimeInstallerClient(Configuration(), new StubRunner(new RuntimeInstallerProcessResult(0, "", "")));
+        Assert.Throws<NotSupportedException>(() => { _ = client.PrepareEnvironmentSwitchAsync("abc", TestContext.Current.CancellationToken); });
+        Assert.Throws<NotSupportedException>(() => { _ = client.CommitEnvironmentSwitchAsync(new PreparedEnvironmentSwitch("abc", 1, null, 0, "python", false, null), cancellationToken: TestContext.Current.CancellationToken); });
+    }
+
+    [Theory]
+    [InlineData("{\"plan_id\":null,\"items\":[],\"size_kind\":\"logical_bytes\",\"warning\":\"fixture\"}")]
+    [InlineData("{\"plan_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"items\":[null],\"size_kind\":\"logical_bytes\",\"warning\":\"fixture\"}")]
+    public async Task CleanupClientRejectsMalformedPlan(string payload)
+    {
+        string response = "{\"protocol_version\":2,\"response_kind\":\"environment\",\"action\":\"preview_cleanup\",\"result\":" + payload + "}";
+        var client = new RuntimeInstallerClient(Configuration(), new StubRunner(new RuntimeInstallerProcessResult(0, response, "")));
+        await Assert.ThrowsAsync<RuntimeInstallerException>(() => client.PreviewEnvironmentCleanupAsync(TestContext.Current.CancellationToken));
+    }
+    [Fact]
+    public async Task CleanupClientAcceptsLargePreviewThroughRealOutputTransport()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-cleanup-output-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string envelope = JsonSerializer.Serialize(new
+            {
+                protocol_version = 2, response_kind = "environment", action = "preview_cleanup",
+                result = new
+                {
+                    plan_id = new string('a', 32), size_kind = "logical_bytes", warning = "fixture",
+                    items = Enumerable.Range(0, 2050).Select(index => new
+                    {
+                        id = $"unknown:{index}", category = "unknown", label = $"revision-{index}",
+                        logical_bytes = (long?)null, can_clean = false, reason = "unowned",
+                        paths = new[] { $"environments/kept/revisions/{index}" }, path_count = 1,
+                    }).ToArray(),
+                },
+            });
+            string payload = Path.Combine(root, "payload.json");
+            await File.WriteAllTextAsync(payload, envelope, TestContext.Current.CancellationToken);
+            var start = new ProcessStartInfo
+            {
+                FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
+                    "WindowsPowerShell", "v1.0", "powershell.exe"),
+                UseShellExecute = false, CreateNoWindow = true,
+                RedirectStandardOutput = true, RedirectStandardError = true,
+            };
+            string command = "[Console]::WriteLine([IO.File]::ReadAllText('" + payload.Replace("'", "''") + "'))";
+            foreach (string argument in new[] { "-NoProfile", "-NonInteractive", "-Command", command }) start.ArgumentList.Add(argument);
+            RuntimeInstallerProcessResult output = await RuntimeInstallerCommandRunner.RunProcessAsync(start, null,
+                TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+            Assert.Equal(0, output.ExitCode);
+            var client = new RuntimeInstallerClient(Configuration(), new StubRunner(output));
+            ManagedCleanupPlan plan = await client.PreviewEnvironmentCleanupAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(2050, plan.Items.Count);
+            Assert.Equal("unknown:2049", plan.Items[^1].Id);
+        }
+        finally { TestDirectory.Delete(root, recursive: true); }
+    }
+    [Fact]
+    public async Task CleanupClientBindsExplicitSelectionAndUsesCancelControl()
+    {
         var runner = new QueueRunner(
-            new RuntimeInstallerProcessResult(0,
-                """{"protocol_version":2,"response_kind":"environment","action":"prepare_switch","result":""" + prepared + "}", ""),
-            new RuntimeInstallerProcessResult(0,
-                """{"protocol_version":2,"response_kind":"environment","action":"commit_switch","result":{"active_id":"abc","active_revision":5}}""", ""));
+            new RuntimeInstallerProcessResult(0, """{"protocol_version":2,"response_kind":"environment","action":"preview_cleanup","result":{"plan_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","items":[],"size_kind":"logical_bytes","warning":"fixture"}}""", ""),
+            new RuntimeInstallerProcessResult(0, """{"protocol_version":2,"response_kind":"environment","action":"run_cleanup","result":{"plan_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","items":[{"id":"residual:abc","state":"failed","detail":"file in use","removed_logical_bytes":12}],"size_kind":"logical_bytes"}}""", ""));
         var client = new RuntimeInstallerClient(Configuration(), runner);
-
-        PreparedEnvironmentSwitch token = await client.PrepareEnvironmentSwitchAsync("abc", TestContext.Current.CancellationToken);
-        CommittedEnvironmentSwitch committed = await client.CommitEnvironmentSwitchAsync(
-            token, new StartedEnvironmentHealth(5432, "sup-test"), TestContext.Current.CancellationToken);
-
-        Assert.Equal("abc", committed.ActiveId);
-        JsonElement request = Request(runner.StartInfos[1]);
-        Assert.Equal("environment", request.GetProperty("request_kind").GetString());
-        Assert.Equal("commit_switch", request.GetProperty("action").GetString());
-        Assert.Equal(4, request.GetProperty("prepared").GetProperty("active_revision").GetInt32());
-        Assert.Equal(2, request.GetProperty("prepared").GetProperty("environment_revision").GetInt32());
-        Assert.Equal(5432, request.GetProperty("started_health").GetProperty("port").GetInt32());
-        Assert.False(request.TryGetProperty("started_python", out _));
-        Assert.False(request.TryGetProperty("accelerator", out _));
+        ManagedCleanupPlan plan = await client.PreviewEnvironmentCleanupAsync(TestContext.Current.CancellationToken);
+        ManagedCleanupResult result = await client.RunEnvironmentCleanupAsync(plan.PlanId, ["residual:abc"], TestContext.Current.CancellationToken);
+        Assert.Equal("failed", Assert.Single(result.Items).State);
+        Assert.Equal(plan.PlanId, Request(runner.StartInfos[1]).GetProperty("plan_id").GetString());
+        Assert.Equal("residual:abc", Request(runner.StartInfos[1]).GetProperty("item_ids")[0].GetString());
+        Assert.True(runner.StartInfos[1].RedirectStandardInput);
+        Assert.Contains("--environment-cancel-control", runner.StartInfos[1].ArgumentList);
     }
 
     [Fact]
@@ -1715,6 +1764,10 @@ public sealed class RuntimeInstallerClientTests
                         TestContext.Current.CancellationToken));
 
             Assert.Contains("Runtime manifest SHA-256 mismatch", error.Message);
+            var client = new RuntimeInstallerClient(new RuntimeInstallerConfiguration(executable, root, componentLock, manifest, null));
+            RuntimeInstallerException switchError = await Assert.ThrowsAsync<RuntimeInstallerException>(() =>
+                client.BeginEnvironmentSwitchAsync("abc", TestContext.Current.CancellationToken));
+            Assert.Contains("Runtime manifest SHA-256 mismatch", switchError.Message);
         }
         finally
         {
@@ -1762,6 +1815,10 @@ public sealed class RuntimeInstallerClientTests
             Assert.Contains(
                 "Runtime Installer executable SHA-256 mismatch",
                 error.Message);
+            var client = new RuntimeInstallerClient(new RuntimeInstallerConfiguration(executable, root, componentLock, manifest, null));
+            RuntimeInstallerException switchError = await Assert.ThrowsAsync<RuntimeInstallerException>(() =>
+                client.BeginEnvironmentSwitchAsync("abc", TestContext.Current.CancellationToken));
+            Assert.Contains("Runtime Installer executable SHA-256 mismatch", switchError.Message);
         }
         finally
         {

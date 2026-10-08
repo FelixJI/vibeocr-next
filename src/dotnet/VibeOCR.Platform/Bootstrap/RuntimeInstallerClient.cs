@@ -1836,7 +1836,7 @@ public sealed class RuntimeInstallerCommandRunner : IRuntimeInstallerCommandRunn
         return tail.ToString();
     }
 
-    private static void VerifyBoundExecutable(ProcessStartInfo startInfo)
+    internal static void VerifyBoundExecutable(ProcessStartInfo startInfo)
     {
         try
         {

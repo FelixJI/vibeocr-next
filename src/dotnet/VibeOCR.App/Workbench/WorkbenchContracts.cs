@@ -348,6 +348,10 @@ public sealed record CancelEnvironmentInstallCommand : WorkbenchCommand;
 public sealed record InvalidateEnvironmentPlanCommand : WorkbenchCommand;
 public sealed record SwitchEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
 public sealed record DeleteEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
+public sealed record SetEnvironmentCleanupPageCommand(int Page) : WorkbenchCommand;
+public sealed record PreviewEnvironmentCleanupCommand : WorkbenchCommand;
+public sealed record RunEnvironmentCleanupCommand(string PlanId, IReadOnlyList<string> ItemIds) : WorkbenchCommand;
+public sealed record CancelEnvironmentCleanupCommand : WorkbenchCommand;
 public sealed record RepairEmptyEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
 /// <summary>推荐配置选择：只读查询配方兼容环境，不创建/不安装/不切换。</summary>
 public sealed record FindCompatibleEnvironmentCommand(string Recipe) : WorkbenchCommand;
@@ -709,7 +713,13 @@ public sealed record SettingsWorkbenchState(
   SettingsEnvironmentHardwareState? EnvironmentHardware = null,
   SettingsEnvironmentCompatibilityState? EnvironmentCompatibility = null,
   IReadOnlyList<SettingsHotkeyActionState>? HotkeyActions = null,
-  SettingsFloatingToolbarState? FloatingToolbar = null) : WorkbenchState
+  SettingsFloatingToolbarState? FloatingToolbar = null,
+  bool EnvironmentSupportsCleanup = false,
+  VibeOCR.Platform.Bootstrap.ManagedCleanupPlan? EnvironmentCleanupPlan = null,
+  VibeOCR.Platform.Bootstrap.ManagedCleanupResult? EnvironmentCleanupResult = null,
+  bool EnvironmentCanCancelCleanup = false,
+  int EnvironmentCleanupPage = 0,
+  int EnvironmentCleanupPageCount = 1) : WorkbenchState
 {
   public override string Scope => "settings";
 }

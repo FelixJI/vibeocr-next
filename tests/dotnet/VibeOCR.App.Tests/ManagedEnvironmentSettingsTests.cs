@@ -5,6 +5,8 @@ using System.Text;
 using System.Text.Json;
 using VibeOCR.App.Features.Maintenance;
 using VibeOCR.App.Features.Settings;
+using VibeOCR.App.Web;
+using VibeOCR.App.Workbench;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 using VibeOCR.Contracts.HttpV2;
@@ -317,6 +319,91 @@ public sealed class ManagedEnvironmentSettingsTests
     await settings.RefreshAsync(TestContext.Current.CancellationToken);
     Assert.Equal("succeeded", settings.InstallProgress?.State);
     Assert.Equal(1, manager.InstallCalls);
+    await settings.PreviewCleanupAsync(TestContext.Current.CancellationToken);
+    Assert.Null(settings.InstallProgress);
+    Assert.Empty(settings.InstallLog);
+    Assert.NotNull(settings.CleanupPlan);
+    Assert.Equal("installed", settings.Snapshot!.Environments[0].Status);
+  }
+
+  [Fact]
+  public async Task CleanupRequiresExplicitCurrentSelectionAndKeepsPartialResult()
+  {
+    var manager = new MutableManager();
+    var settings = NewSettings(manager);
+    await settings.RefreshAsync(TestContext.Current.CancellationToken);
+    await settings.PreviewCleanupAsync(TestContext.Current.CancellationToken);
+    await Assert.ThrowsAsync<InvalidOperationException>(() => settings.CleanupAsync(new string('b', 32), ["residual:fixture"], TestContext.Current.CancellationToken));
+    await Assert.ThrowsAsync<InvalidOperationException>(() => settings.CleanupAsync(new string('a', 32), ["environment:protected"], TestContext.Current.CancellationToken));
+    Assert.Equal(0, manager.CleanupCalls);
+    await settings.CleanupAsync(new string('a', 32), ["residual:fixture"], TestContext.Current.CancellationToken);
+    Assert.Equal("failed", Assert.Single(settings.CleanupResult!.Items).State);
+    Assert.Equal(12, Assert.Single(settings.CleanupResult.Items).RemovedLogicalBytes);
+    Assert.Contains("部分完成", settings.Status);
+    Assert.Null(settings.CleanupPlan);
+    Assert.False(settings.CanCancelCleanup);
+    Assert.NotNull(settings.Snapshot);
+  }
+
+  [Fact]
+  public async Task CleanupPagesReachEveryCandidateAndRejectHiddenSelection()
+  {
+    ManagedCleanupItem[] items = Enumerable.Range(0, 2050).Select(index => new ManagedCleanupItem(
+      $"item:{index}", index < 200 ? "unknown" : "residual", $"候选 {index}", null, 12, index >= 200,
+      new string('原', 500), [new string('路', 500)], PathCount: 1)).ToArray();
+    var previous = new ManagedCleanupResult(new string('b', 32), Enumerable.Range(0, 200).Select(index =>
+      new ManagedCleanupResultItem($"previous:{index}", "failed", new string('错', 4000), 0)).ToArray(), "logical_bytes");
+    var manager = new MutableManager { CleanupPreview = new ManagedCleanupPlan(new string('a', 32), items,
+      "logical_bytes", "逻辑字节", previous) };
+    var settings = NewSettings(manager);
+    await settings.PreviewCleanupAsync(TestContext.Current.CancellationToken);
+    await Assert.ThrowsAsync<InvalidOperationException>(() => settings.CleanupAsync(new string('a', 32), ["item:2049"], TestContext.Current.CancellationToken));
+    Assert.Equal(0, manager.CleanupCalls);
+    var seen = new HashSet<string>();
+    var resultIds = new HashSet<string>();
+    Guid session = Guid.NewGuid();
+    for (int page = 0; page < settings.CleanupPageCount; page++)
+    {
+      await settings.SetCleanupPageAsync(page, TestContext.Current.CancellationToken);
+      ManagedCleanupPlan visible = settings.CleanupPlanPage!;
+      Assert.Null(visible.LastResult);
+      Assert.InRange(visible.Items.Count, 1, ManagedEnvironmentSettings.CleanupPageSize);
+      foreach (ManagedCleanupItem item in visible.Items) Assert.True(seen.Add(item.Id));
+      foreach (ManagedCleanupResultItem item in settings.CleanupResultPage!.Items) Assert.True(resultIds.Add(item.Id));
+      var state = new SettingsWorkbenchState(WorkbenchTheme.Light, false, "settings.ready", "cpu", false,
+        EnvironmentCleanupPlan: visible, EnvironmentCleanupResult: settings.CleanupResultPage,
+        EnvironmentCleanupPage: page, EnvironmentCleanupPageCount: settings.CleanupPageCount);
+      var envelope = new WorkbenchStateEnvelope(page, "settings", WorkbenchStateChange.Replace, state);
+      WorkbenchBridgeCodec.SerializeState(session, envelope);
+      WorkbenchBridgeCodec.SerializeBootstrap(Guid.NewGuid(), new WorkbenchBootstrap(2, session, page,
+        WorkbenchRoute.Settings, [envelope], new HashSet<string> { "runtime.environments" }));
+    }
+    Assert.Equal(2050, seen.Count);
+    Assert.Equal(200, resultIds.Count);
+    Assert.Equal(500, manager.CleanupPreview.Items[0].Paths[0].Length);
+    await settings.CleanupAsync(new string('a', 32), ["item:2049"], TestContext.Current.CancellationToken);
+    Assert.Equal(1, manager.CleanupCalls);
+  }
+
+  [Fact]
+  public async Task CleanupCancellationReleasesLeaseAndKeepsRecoveryEntry()
+  {
+    var manager = new MutableManager();
+    var maintenance = new ProductMaintenanceCoordinator();
+    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask, () => null, maintenance);
+    await settings.RefreshAsync(TestContext.Current.CancellationToken);
+    await settings.PreviewCleanupAsync(TestContext.Current.CancellationToken);
+    var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    manager.BeforeCleanup = async token => { started.SetResult(); await Task.Delay(Timeout.InfiniteTimeSpan, token); };
+    Task cleanup = settings.CleanupAsync(new string('a', 32), ["residual:fixture"], TestContext.Current.CancellationToken);
+    await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    Assert.True(settings.CanCancelCleanup);
+    settings.CancelCleanup();
+    await cleanup.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    Assert.False(settings.CanCancelCleanup);
+    Assert.True(maintenance.State.IsIdle);
+    Assert.Contains("重新检查", settings.Status);
+    Assert.Null(settings.CleanupPlan);
   }
 
   private static ManagedEnvironmentSettings NewSettings(IManagedEnvironmentClient manager) =>
@@ -857,6 +944,21 @@ public sealed class ManagedEnvironmentSettingsTests
     public int PreviewCalls { get; private set; }
     public int InstallCalls { get; private set; }
     public bool SupportsEnvironmentInstallProgress => true;
+    public bool SupportsEnvironmentCleanup => true;
+    public int CleanupCalls { get; private set; }
+    public Func<CancellationToken, Task>? BeforeCleanup { get; set; }
+    public ManagedCleanupPlan? CleanupPreview { get; set; }
+    public Task<ManagedCleanupPlan> PreviewEnvironmentCleanupAsync(CancellationToken cancellationToken = default) =>
+      Task.FromResult(CleanupPreview ?? new ManagedCleanupPlan(new string('a', 32),
+      [new ManagedCleanupItem("residual:fixture", "residual", "fixture", null, 12, true, "owned", ["fixture"], PathCount: 1),
+       new ManagedCleanupItem("environment:protected", "environment", "protected", "environment", null, false, "active", [])],
+      "logical_bytes", "不保证物理释放"));
+    public async Task<ManagedCleanupResult> RunEnvironmentCleanupAsync(string planId, IReadOnlyList<string> itemIds, CancellationToken cancellationToken = default)
+    {
+      CleanupCalls++;
+      if (BeforeCleanup is not null) await BeforeCleanup(cancellationToken);
+      return new ManagedCleanupResult(planId, [new ManagedCleanupResultItem(itemIds[0], "failed", "file in use", 12)], "logical_bytes");
+    }
     public Action<ManagedEnvironmentInstallProgress>? Observer { get; private set; }
     public Func<Task>? BeforeList { get; set; }
     public Func<Task>? BeforeFind { get; set; }

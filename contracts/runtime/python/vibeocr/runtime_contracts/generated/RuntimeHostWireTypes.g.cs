@@ -616,6 +616,9 @@ public sealed record ManagedEnvironmentRequest
     [JsonPropertyName("plan_id")]
     public string? PlanId { get; init; }
 
+    [JsonPropertyName("item_ids")]
+    public IReadOnlyList<string>? ItemIds { get; init; }
+
     [JsonPropertyName("prepared")]
     public IReadOnlyDictionary<string, JsonElement>? Prepared { get; init; }
 

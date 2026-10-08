@@ -2,6 +2,8 @@
 //
 // Parser tests are complemented by a lightweight command child that exercises
 // the owner lifecycle without requiring the Python backend.
+using System.Diagnostics;
+using System.Text.Json;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 using Xunit;
@@ -235,6 +237,197 @@ public sealed class InferenceSupervisorProcessTests
         }
     }
 
+  [Fact]
+  public async Task PythonVenvLaunchPreservesIsolatedEnvironmentAndOwnsDescendants()
+  {
+    string python = ResolveRepositoryVenvPython();
+    var start = new ProcessStartInfo(python)
+    {
+      UseShellExecute = false,
+      CreateNoWindow = true,
+      RedirectStandardInput = true,
+      RedirectStandardOutput = true,
+      RedirectStandardError = true,
+    };
+    const string source = """
+      import os,sys,json,site,httpx,subprocess,time
+      print(json.dumps({'pid':os.getpid(),'executable':sys.executable,'prefix':sys.prefix,'base_prefix':sys.base_prefix,'sitepackages':site.getsitepackages(),'httpx':httpx.__file__,'launcher_env':os.environ.get('__PYVENV_LAUNCHER__')}),flush=True)
+      input()
+      child = subprocess.Popen([sys.executable,'-I','-B','-X','utf8','-c',"import os,time;print(os.getpid(),flush=True);time.sleep(60)"],stdout=subprocess.PIPE,text=True)
+      print(json.dumps({'launcher':child.pid,'actual':int(child.stdout.readline())}),flush=True)
+      time.sleep(60)
+      """;
+    foreach (string argument in new[] { "-I", "-B", "-X", "utf8", "-c", source })
+    {
+      start.ArgumentList.Add(argument);
+    }
+    InferenceSupervisorProcess.ConfigurePythonVenvLaunch(start);
+    using var process = new Process { StartInfo = start };
+    using var job = new WindowsJobObject();
+    var descendants = new List<Process>();
+    try
+    {
+      Assert.True(process.Start());
+      JsonElement ready = await ReadPythonProbeAsync(process);
+      var interpreter = Process.GetProcessById(ready.GetProperty("pid").GetInt32());
+      _ = interpreter.SafeHandle;
+      descendants.Add(interpreter);
+      // The venv redirector assigns its private Job after CreateProcess;
+      // hold enrollment until that startup window has passed.
+      await Task.Delay(100, TestContext.Current.CancellationToken);
+      job.AssignProcessTree(process);
+
+      string venv = Path.GetDirectoryName(Path.GetDirectoryName(python))!;
+      Assert.Equal(python, ready.GetProperty("executable").GetString());
+      Assert.Equal(venv, ready.GetProperty("prefix").GetString());
+      Assert.NotEqual(venv, ready.GetProperty("base_prefix").GetString());
+      Assert.Contains(ready.GetProperty("sitepackages").EnumerateArray(),
+        path => path.GetString() == Path.Combine(venv, "Lib", "site-packages"));
+      Assert.StartsWith(Path.Combine(venv, "Lib", "site-packages"),
+        ready.GetProperty("httpx").GetString());
+      Assert.Equal(JsonValueKind.Null, ready.GetProperty("launcher_env").ValueKind);
+      Assert.Equal(process.Id, interpreter.Id);
+
+      await process.StandardInput.WriteLineAsync("spawn".AsMemory(), TestContext.Current.CancellationToken);
+      await process.StandardInput.FlushAsync(TestContext.Current.CancellationToken);
+      JsonElement children = await ReadPythonProbeAsync(process);
+      foreach (string key in new[] { "launcher", "actual" })
+      {
+        var child = Process.GetProcessById(children.GetProperty(key).GetInt32());
+        _ = child.SafeHandle;
+        descendants.Add(child);
+      }
+      Assert.True(job.TerminateAndWait(TimeSpan.FromSeconds(5)));
+      Assert.True(process.WaitForExit(5_000));
+      foreach (Process descendant in descendants)
+      {
+        Assert.True(descendant.WaitForExit(5_000));
+      }
+    }
+    finally
+    {
+      job.Dispose();
+      if (!process.HasExited)
+      {
+        process.Kill(entireProcessTree: true);
+        process.WaitForExit(5_000);
+      }
+      foreach (Process descendant in descendants)
+      {
+        if (!descendant.HasExited)
+        {
+          descendant.Kill();
+          descendant.WaitForExit(5_000);
+        }
+        descendant.Dispose();
+      }
+    }
+  }
+
+  [Theory]
+  [InlineData("cmd.exe")]
+  [InlineData("python.exe")]
+  [InlineData("Scripts/python.exe")]
+  public void PythonVenvLaunchKeepsNonVenvExecutable(string relativeExecutable)
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-python-launch-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      string executable = Path.Combine(root, relativeExecutable);
+      var start = new ProcessStartInfo(executable);
+      InferenceSupervisorProcess.ConfigurePythonVenvLaunch(start);
+      Assert.Equal(executable, start.FileName);
+      Assert.False(start.Environment.ContainsKey("__PYVENV_LAUNCHER__"));
+    }
+    finally
+    {
+      TestDirectory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public void PythonVenvLaunchReadsBomAndWhitespaceWithoutChangingArguments()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-python-launch-{Guid.NewGuid():N}");
+    string scripts = Path.Combine(root, "Scripts");
+    string baseRoot = Path.Combine(root, "base");
+    Directory.CreateDirectory(scripts);
+    Directory.CreateDirectory(baseRoot);
+    string launcher = Path.Combine(scripts, "python.exe");
+    string executable = Path.Combine(baseRoot, "python.exe");
+    File.WriteAllText(executable, string.Empty);
+    File.WriteAllText(Path.Combine(root, "pyvenv.cfg"), $"\uFEFF  home = {baseRoot}  {Environment.NewLine}");
+    try
+    {
+      var start = new ProcessStartInfo(launcher);
+      start.ArgumentList.Add("-I");
+      start.Environment["OTHER"] = "preserved";
+      InferenceSupervisorProcess.ConfigurePythonVenvLaunch(start);
+      Assert.Equal(executable, start.FileName);
+      Assert.Equal(launcher, start.Environment["__PYVENV_LAUNCHER__"]);
+      Assert.Equal("-I", Assert.Single(start.ArgumentList));
+      Assert.Equal("preserved", start.Environment["OTHER"]);
+    }
+    finally
+    {
+      TestDirectory.Delete(root, recursive: true);
+    }
+  }
+
+  [Theory]
+  [InlineData("missing-home")]
+  [InlineData("empty-home")]
+  [InlineData("relative-home")]
+  [InlineData("duplicate-home")]
+  [InlineData("missing-base")]
+  [InlineData("self-reference")]
+  public void PythonVenvLaunchRejectsInvalidDeclaredEnvironment(string failure)
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-python-launch-{Guid.NewGuid():N}");
+    string scripts = Path.Combine(root, "Scripts");
+    Directory.CreateDirectory(scripts);
+    string executable = Path.Combine(scripts, "python.exe");
+    File.WriteAllText(executable, string.Empty);
+    string configuration = failure switch
+    {
+      "missing-home" => "include-system-site-packages = false",
+      "empty-home" => "home = ",
+      "relative-home" => "home = ../base",
+      "duplicate-home" => $"home = {root}{Environment.NewLine}home = {root}",
+      "missing-base" => $"home = {root}",
+      "self-reference" => $"home = {scripts}",
+      _ => throw new ArgumentException("Unknown test case", nameof(failure)),
+    };
+    File.WriteAllText(Path.Combine(root, "pyvenv.cfg"), configuration);
+    try
+    {
+      var start = new ProcessStartInfo(executable);
+      if (failure == "missing-base")
+      {
+        Assert.Throws<FileNotFoundException>(() => InferenceSupervisorProcess.ConfigurePythonVenvLaunch(start));
+      }
+      else
+      {
+        Assert.Throws<InvalidDataException>(() => InferenceSupervisorProcess.ConfigurePythonVenvLaunch(start));
+      }
+      Assert.Equal(executable, start.FileName);
+    }
+    finally
+    {
+      TestDirectory.Delete(root, recursive: true);
+    }
+  }
+
+  private static async Task<JsonElement> ReadPythonProbeAsync(Process process)
+  {
+    string? line = await process.StandardOutput.ReadLineAsync(
+      TestContext.Current.CancellationToken).AsTask().WaitAsync(
+        TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken);
+    Assert.NotNull(line);
+    return JsonSerializer.Deserialize<JsonElement>(line);
+  }
+
     [Fact]
     public async Task ProductCodeSupervisorLogsRoundTripUtf8AndStripAnsi()
     {
@@ -332,7 +525,11 @@ public sealed class InferenceSupervisorProcessTests
             {
                 try
                 {
-                    text = File.ReadAllText(logPath);
+                    // Keep the polling reader from denying the production logger's writes.
+                    using var stream = new FileStream(logPath, FileMode.Open, FileAccess.Read,
+                        FileShare.ReadWrite | FileShare.Delete);
+                    using var reader = new StreamReader(stream);
+                    text = reader.ReadToEnd();
                 }
                 catch (IOException)
                 {
@@ -348,27 +545,27 @@ public sealed class InferenceSupervisorProcessTests
         return text;
     }
 
-    private static string ResolveTestPython()
+  private static string ResolveTestPython()
+  {
+    string? configured = Environment.GetEnvironmentVariable("VIBEOCR_TEST_PYTHON");
+    return !string.IsNullOrWhiteSpace(configured) ? configured : ResolveRepositoryVenvPython();
+  }
+
+  private static string ResolveRepositoryVenvPython()
+  {
+    string? directory = AppContext.BaseDirectory;
+    while (!string.IsNullOrEmpty(directory))
     {
-        string? configured = Environment.GetEnvironmentVariable("VIBEOCR_TEST_PYTHON");
-        if (!string.IsNullOrWhiteSpace(configured))
-        {
-            return configured;
-        }
-        string? directory = AppContext.BaseDirectory;
-        while (!string.IsNullOrEmpty(directory))
-        {
-            string candidate = Path.Combine(directory, ".venv", "Scripts", "python.exe");
-            if (File.Exists(candidate))
-            {
-                return candidate;
-            }
-            directory = Directory.GetParent(directory)?.FullName;
-        }
-        throw new FileNotFoundException(
-            "找不到仓库 .venv 中的 Python 解释器；请先运行 uv sync --frozen，"
-            + "或用 VIBEOCR_TEST_PYTHON 指定解释器。");
+      string candidate = Path.Combine(directory, ".venv", "Scripts", "python.exe");
+      if (File.Exists(candidate))
+      {
+        return candidate;
+      }
+      directory = Directory.GetParent(directory)?.FullName;
     }
+    throw new FileNotFoundException(
+      "找不到仓库 .venv 中的 Python 解释器；请先运行 uv sync --frozen。");
+  }
 
     // 模拟 supervisor：ready envelope 后输出中文路径日志（stdout/stderr）
     // 与 ANSI 色码行，模拟第三方彩色日志。

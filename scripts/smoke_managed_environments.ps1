@@ -177,7 +177,15 @@ try {
         $restarted.evidence.projected_service_state -ne 'ready') {
         throw 'Active environment A was not ready after restart without installation'
     }
-    Write-Host "Managed environment E2E passed: A/B empty, two RapidOCR installs, two OCR tasks, switch-back and restart without installation."
+    $cleanup = Invoke-ManagedPhase 'cleanup'
+    if ($cleanup.install_attempts -ne 0 -or
+        $cleanup.evidence.removed_environment_id -ne $created.evidence.environments[1].id -or
+        -not $cleanup.evidence.recognition.ocr_visible -or
+        (Test-Path -LiteralPath $cleanup.evidence.removed_path) -or
+        -not (Test-Path -LiteralPath $cleanup.evidence.retained_path)) {
+        throw 'Public cleanup did not remove only B and preserve A recognition without installation'
+    }
+    Write-Host "Managed environment E2E passed: A/B installs, OCR, switch-back, restart, public cleanup and retained OCR."
     Write-Host "Isolated evidence retained at: $smokeRoot"
 } finally {
     $env:VIBEOCR_SELF_TEST_SMOKE = $previousSmoke

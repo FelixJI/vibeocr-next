@@ -19,6 +19,7 @@ public sealed class ManagedEnvironmentSettings(
 {
     private readonly SemaphoreSlim gate = new(1, 1);
     private CancellationTokenSource? activeInstall;
+    private CancellationTokenSource? activeCleanup;
     private readonly object progressLock = new();
     private ManagedEnvironmentInstallProgress? installProgress;
     private string[] installLog = [];
@@ -26,6 +27,94 @@ public sealed class ManagedEnvironmentSettings(
     public ManagedEnvironmentInstallProgress? InstallProgress { get { lock (progressLock) return installProgress; } }
     public IReadOnlyList<string> InstallLog { get { lock (progressLock) return installLog; } }
     public bool SupportsInstallProgress => manager.SupportsEnvironmentInstallProgress;
+    public bool SupportsCleanup => manager.SupportsEnvironmentCleanup;
+    public ManagedCleanupPlan? CleanupPlan { get; private set; }
+    public ManagedCleanupResult? CleanupResult { get; private set; }
+    public const int CleanupPageSize = 3;
+    public int CleanupPage { get; private set; }
+    public int CleanupPageCount => Math.Max(1, (Math.Max(CleanupPlan?.Items.Count ?? 0, CleanupResult?.Items.Count ?? 0) + CleanupPageSize - 1) / CleanupPageSize);
+    public ManagedCleanupPlan? CleanupPlanPage => CleanupPlan is { } plan ? plan with
+    {
+        Items = plan.Items.Skip(CleanupPage * CleanupPageSize).Take(CleanupPageSize).Select(item => item with
+        {
+            Reason = CleanupSummary(item.Reason), LastError = item.LastError is null ? null : CleanupSummary(item.LastError),
+            Paths = item.Paths.Take(1).Select(CleanupSummary).ToArray(),
+        }).ToArray(),
+        LastResult = null,
+    } : null;
+    public ManagedCleanupResult? CleanupResultPage => CleanupResult is { } result ? result with
+    {
+        Items = result.Items.Skip(CleanupPage * CleanupPageSize).Take(CleanupPageSize)
+            .Select(item => item with { Detail = CleanupSummary(item.Detail) }).ToArray(),
+    } : null;
+    // Only optional display text is shortened; Runtime retains exact paths and the full plan.
+    private static string CleanupSummary(string value) => value.Length <= 200 ? value :
+        value[..(char.IsHighSurrogate(value[199]) ? 199 : 200)] + "…";
+    public Task SetCleanupPageAsync(int page, CancellationToken cancellationToken) => RunAsync(() =>
+    {
+        if (page < 0 || page >= CleanupPageCount) throw new InvalidOperationException("清理页码已失效，请重新检查。");
+        CleanupPage = page;
+        return Task.CompletedTask;
+    }, cancellationToken);
+    public bool CanCancelCleanup => Volatile.Read(ref activeCleanup) is not null;
+
+    public Task PreviewCleanupAsync(CancellationToken cancellationToken) => RunAsync(async () =>
+    {
+        if (!SupportsCleanup) throw new NotSupportedException("当前 Runtime 不支持空间清理。");
+        if (CanCancelInstall || CanCancelCleanup) throw new InvalidOperationException("请等待当前操作结束后再检查清理项。");
+        ManagedCleanupPlan preview = await manager.PreviewEnvironmentCleanupAsync(cancellationToken);
+        // Explicitly entering cleanup ends the previous installation display flow.
+        // Durable environment/failure records remain in Snapshot; a live attempt is never discarded.
+        InvalidateSelectionPlans();
+        lock (progressLock)
+        {
+            if (installProgress?.State != "running") { installProgress = null; installLog = []; }
+        }
+        CleanupPage = 0;
+        CleanupPlan = preview;
+        CleanupResult = preview.LastResult;
+        Status = "已检查清理影响，请选择需要移除的项目并确认。";
+    }, cancellationToken);
+
+    public Task CleanupAsync(string planId, IReadOnlyList<string> itemIds, CancellationToken cancellationToken) => RunAsync(async () =>
+    {
+        ManagedCleanupPlan plan = CleanupPlanPage ?? throw new InvalidOperationException("请先检查可清理项。");
+        if (!SupportsCleanup || plan.PlanId != planId || itemIds.Count == 0 || itemIds.Distinct(StringComparer.Ordinal).Count() != itemIds.Count ||
+            itemIds.Any(id => !plan.Items.Any(item => item.Id == id && item.CanClean)))
+            throw new InvalidOperationException("清理计划已变化或包含受保护项目，请重新检查。");
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        using IDisposable lease = productMaintenance.Acquire(ProductMaintenanceOwner.RuntimeMaintenance, linked.Cancel);
+        Volatile.Write(ref activeCleanup, linked);
+        CleanupResult = null;
+        StateChanged?.Invoke();
+        try
+        {
+            CleanupResult = await manager.RunEnvironmentCleanupAsync(planId, itemIds, linked.Token);
+            Status = CleanupResult.Items.All(item => item.State == "deleted")
+                ? "所选路径已移除；模型和受保护资源保留。"
+                : "清理部分完成；失败或取消项目可重新检查并继续。";
+        }
+        catch (OperationCanceledException)
+        {
+            Status = "清理已中止；请重新检查待清理记录，已删除文件不会恢复。";
+        }
+        finally
+        {
+            Volatile.Write(ref activeCleanup, null);
+            CleanupPlan = null;
+            CleanupPage = 0;
+            InvalidateSelectionPlans();
+            await ReloadEnvironmentsAsync(CancellationToken.None, strictEvidence: false);
+        }
+    }, cancellationToken);
+
+    public void CancelCleanup()
+    {
+        try { Volatile.Read(ref activeCleanup)?.Cancel(); }
+        catch (ObjectDisposedException) { return; }
+        Status = "正在取消清理；待清理记录会保留。";
+        StateChanged?.Invoke();
+    }
 
     // 精确 ID 归属留在宿主会话中；选择代阻止排队/迟到结果覆盖当前计划。
     private readonly Dictionary<string, string> prepareEnvironmentIds = new(StringComparer.Ordinal);
@@ -238,6 +327,7 @@ public sealed class ManagedEnvironmentSettings(
             // 保留冻结计划供导航/取消展示，同时使先前排队请求过期。
             Interlocked.Increment(ref selectionGeneration);
             Compatibility = null;
+            CleanupResult = null;
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             using IDisposable lease = productMaintenance.Acquire(
                 ProductMaintenanceOwner.RuntimeMaintenance, linked.Cancel);
@@ -474,7 +564,7 @@ public sealed class ManagedEnvironmentSettings(
     public async Task CancelAndWaitForInstallAsync()
     {
         CancellationTokenSource? install = Volatile.Read(ref activeInstall);
-        try { install?.Cancel(); }
+        try { Volatile.Read(ref activeCleanup)?.Cancel(); install?.Cancel(); }
         catch (ObjectDisposedException) { }
         await gate.WaitAsync();
         gate.Release();
@@ -490,6 +580,7 @@ public sealed class ManagedEnvironmentSettings(
     {
         Interlocked.Increment(ref selectionGeneration);
         Plan = null;
+        CleanupPlan = null;
         Compatibility = null;
     }
 

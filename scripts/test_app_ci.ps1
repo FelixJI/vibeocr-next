@@ -32,6 +32,15 @@ if (-not [string]::IsNullOrWhiteSpace($Filter)) {
 
 dotnet @arguments
 $testExitCode = $LASTEXITCODE
+if ($testExitCode -ne 0) {
+    # CI runners discard these local diagnostics when the testhost is stopped.
+    Get-ChildItem -LiteralPath $results -Filter '*_hang.log' -File | ForEach-Object {
+        Write-Host "App test hang diagnostics: $($_.Name)"
+        Get-Content -LiteralPath $_.FullName -TotalCount 60
+        Write-Host 'App test hang diagnostics (last 200 lines):'
+        Get-Content -LiteralPath $_.FullName -Tail 200
+    }
+}
 
 $trxPath = Join-Path $results 'app-tests.trx'
 if (-not (Test-Path -LiteralPath $trxPath -PathType Leaf)) {
@@ -42,6 +51,7 @@ if (-not (Test-Path -LiteralPath $trxPath -PathType Leaf)) {
 $summary = $trx.TestRun.ResultSummary
 $counters = $summary.Counters
 if ($testExitCode -ne 0) {
+    Write-Host "App test outcome=$($summary.outcome), total=$($counters.total), passed=$($counters.passed), failed=$($counters.failed), notExecuted=$($counters.notExecuted)"
     throw "App test command failed with exit code $testExitCode"
 }
 if ($summary.outcome -ne 'Completed') {

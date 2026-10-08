@@ -112,8 +112,9 @@ public sealed class RuntimeCandidateSmokeTests
         ManagedEnvironmentList repeated = await client.InitializeDefaultEnvironmentAsync(ensureToken);
         Assert.Equal(defaultEnvironment.Id, Assert.Single(repeated.Environments).Id);
         Assert.Equal(defaultEnvironment.Revision, Assert.Single(repeated.Environments).Revision);
-        PreparedEnvironmentSwitch prepared = await client.PrepareEnvironmentSwitchAsync(
+        await using IManagedEnvironmentSwitchReservation reservation = await client.BeginEnvironmentSwitchAsync(
             defaultEnvironment.Id, ensureToken);
+        PreparedEnvironmentSwitch prepared = reservation.Prepared;
         Assert.NotNull(prepared.Launch);
         RuntimeLaunch launch = prepared.Launch;
         Assert.True(File.Exists(launch.PythonExecutable), $"缺少 Python: {launch.PythonExecutable}");
@@ -177,8 +178,8 @@ public sealed class RuntimeCandidateSmokeTests
             Assert.Equal(RuntimeProtocol.ProtocolVersion, health.ProtocolVersion);
             Assert.True(health.Ready, "Supervisor health 未就绪。");
             Assert.False(health.Draining, "Supervisor health 处于 draining。");
-            CommittedEnvironmentSwitch committed = await client.CommitEnvironmentSwitchAsync(
-                prepared, new StartedEnvironmentHealth(ready.Port, ready.InstanceId), ensureToken);
+            CommittedEnvironmentSwitch committed = await reservation.CommitAsync(
+                new StartedEnvironmentHealth(ready.Port, ready.InstanceId), ensureToken);
             Assert.Equal(defaultEnvironment.Id, committed.ActiveId);
             Assert.Subset(
                 health.Capabilities.ToHashSet(StringComparer.Ordinal),

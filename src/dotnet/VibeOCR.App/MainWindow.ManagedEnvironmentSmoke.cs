@@ -30,7 +30,7 @@ public sealed partial class MainWindow
     string? phase = Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_ENVIRONMENT_E2E_PHASE");
     string expected = Path.Combine(Directory.GetParent(layout.InstallRoot)!.FullName,
       $"managed-environment-{phase}.json");
-    if (phase is not ("create" or "install" or "restart" or "sources" or "progress") || path is null ||
+    if (phase is not ("create" or "install" or "restart" or "sources" or "progress" or "cleanup") || path is null ||
         !string.Equals(Path.GetFullPath(path), expected, StringComparison.OrdinalIgnoreCase))
     {
       Close();
@@ -52,6 +52,7 @@ public sealed partial class MainWindow
         "install" => await InstallAndSwitchSmokeEnvironmentsAsync(),
         "sources" => await CompleteSourceSettingsSmokeAsync(),
         "progress" => await CompleteInstallProgressSmokeAsync(),
+        "cleanup" => await CompleteCleanupSmokeAsync(),
         _ => await VerifyRestartedSmokeEnvironmentAsync(),
       };
       File.WriteAllText(path, JsonSerializer.Serialize(new
@@ -181,6 +182,45 @@ public sealed partial class MainWindow
     };
   }
 
+  private async Task<object> CompleteCleanupSmokeAsync()
+  {
+    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
+    ManagedEnvironmentList list = await WaitForSmokeEnvironmentsAsync(
+      [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(2));
+    ManagedEnvironment[] pair = SmokePair(list);
+    if (list.ActiveId != pair[0].Id || pair.Any(item => item.Status != "installed"))
+      throw new InvalidOperationException("Cleanup requires the isolated installed A/B fixture.");
+    await ClickManagedSmokeButtonAsync("检查可清理项");
+    await WaitForSmokeDomAsync("document.querySelector('[aria-label=可清理项]')?.textContent.includes('Smoke B') === true",
+      TimeSpan.FromMinutes(2));
+    SettingsWorkbenchState preview = (await application.BootstrapAsync(CancellationToken.None))
+      .States.Select(item => item.State).OfType<SettingsWorkbenchState>().Single();
+    ManagedCleanupPlan plan = preview.EnvironmentCleanupPlan ?? throw new InvalidOperationException("Cleanup plan missing.");
+    if (plan.Items.Single(item => item.Id == $"environment:{pair[0].Id}").CanClean ||
+        !plan.Items.Single(item => item.Id == $"environment:{pair[1].Id}").CanClean)
+      throw new InvalidOperationException("Cleanup protection does not match active/idle environments.");
+    string selected = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+      "(() => { const row = [...document.querySelectorAll('[aria-label=可清理项] > li')].find(x => x.textContent.includes('Smoke B')); " +
+      "const box = row?.querySelector('input[type=checkbox]'); if (!box || box.disabled) return false; box.click(); return true; })()");
+    if (selected != "true") throw new InvalidOperationException("Idle environment cleanup checkbox is unavailable.");
+    await ClickManagedSmokeButtonAsync("预览所选清理影响");
+    await SaveManagedSmokePreviewAsync("cleanup-confirmation");
+    await ClickManagedSmokeButtonAsync("确认清理所选项目");
+    await WaitForSmokeDomAsync("document.querySelector('[aria-label=清理结果]')?.textContent.includes('已移除') === true",
+      TimeSpan.FromMinutes(5));
+    SettingsWorkbenchState completed = (await application.BootstrapAsync(CancellationToken.None))
+      .States.Select(item => item.State).OfType<SettingsWorkbenchState>().Single();
+    ManagedCleanupResult result = completed.EnvironmentCleanupResult ?? throw new InvalidOperationException("Cleanup result missing.");
+    if (result.Items.Count != 1 || result.Items[0].Id != $"environment:{pair[1].Id}" || result.Items[0].State != "deleted" ||
+        Directory.Exists(pair[1].Path) || !Directory.Exists(pair[0].Path) ||
+        smokeEnvironmentSnapshot!()!.Environments.Any(item => item.Id == pair[1].Id))
+      throw new InvalidOperationException("Cleanup result disagrees with registry or actual directories.");
+    await SaveManagedSmokePreviewAsync("cleanup-result");
+    object recognition = await SwitchAndRecognizeSmokeAsync(pair[0]);
+    if (smokeInstallAttempts!() != 0) throw new InvalidOperationException("Retained OCR environment was reinstalled.");
+    return new { removed_environment_id = pair[1].Id, retained_environment_id = pair[0].Id,
+      removed_path = pair[1].Path, retained_path = pair[0].Path, result, recognition };
+  }
   private async Task<object> VerifyRestartedSmokeEnvironmentAsync()
   {
     // 同上：稳定面板作导航证明，冷启动清单由随后的权威名单等待吸收（F7：
@@ -359,7 +399,8 @@ public sealed partial class MainWindow
     await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     RecordManagedSmokeStage($"select {environment.Name}");
     await SelectSmokeEnvironmentAsync(environment.Id);
-    await ClickManagedSmokeButtonAsync("切换到此环境");
+    await ClickManagedSmokeButtonAsync(smokeEnvironmentSnapshot!()?.ActiveId == environment.Id
+      ? "启动并验证当前环境" : "切换到此环境");
     RecordManagedSmokeStage($"wait for service {environment.Name}");
     ManagedEnvironmentSession session = await WaitForSmokeSessionAsync(environment.Id);
     RecordManagedSmokeStage($"service ready {environment.Name}");
@@ -465,10 +506,12 @@ public sealed partial class MainWindow
         ManagedEnvironmentSession? session = smokeManagedSession!();
         if (session?.EnvironmentId == id && smokeInferenceAttached!())
         {
-          // 服务 attach 早于目录/设置回读完成；等待生产忙碌投影释放后再提交 OCR。
+          // attach 到设置回读开始前也可能不 busy；必须等同一修订的生产投影就绪。
           WorkbenchBootstrap bootstrap = await application.BootstrapAsync(cancellation.Token);
+          ManagedEnvironmentList? projected = smokeEnvironmentSnapshot!();
           if (!bootstrap.States.Select(item => item.State).OfType<SettingsWorkbenchState>()
-              .Single().EnvironmentBusy)
+              .Single().EnvironmentBusy && projected?.ActiveId == id &&
+              projected.Environments.Any(item => item.Id == id && item.Revision == session.Revision && item.ServiceState == "ready"))
             return session;
         }
         await Task.Delay(100, cancellation.Token);
@@ -484,12 +527,18 @@ public sealed partial class MainWindow
 
   private async Task NavigateSmokeAsync(string label, string selector)
   {
-    string script = "(() => { const a=document.querySelector('a[aria-label=" +
-      JsonSerializer.Serialize(label) + "]'); if(!a) return false; a.click(); return true; })()";
+    var elapsed = System.Diagnostics.Stopwatch.StartNew();
+    TimeSpan budget = TimeSpan.FromSeconds(30);
+    string query = "document.querySelector('a[aria-label=" + JsonSerializer.Serialize(label) + "]')";
+    // bridge-ready acknowledges bootstrap delivery, before React commits navigation.
+    await WaitForSmokeDomAsync($"!!{query}", budget);
+    string script = "(() => { const a=" + query +
+      "; if(!a) return false; a.click(); return true; })()";
     if (await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(script) != "true")
       throw new InvalidOperationException($"Smoke navigation unavailable: {label}");
+    TimeSpan remaining = budget - elapsed.Elapsed;
     await WaitForSmokeDomAsync($"!!document.querySelector({JsonSerializer.Serialize(selector)})",
-      TimeSpan.FromSeconds(30));
+      remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero);
   }
 
   private async Task EnterSmokeTextAsync(string selector, string value)
