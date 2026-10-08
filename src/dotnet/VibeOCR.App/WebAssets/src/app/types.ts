@@ -87,6 +87,7 @@ export type AppActionType =
   | "settings.invalidateEnvironmentPlan"
   | "settings.switchEnvironment"
   | "settings.deleteEnvironment"
+  | "settings.setEnvironmentCleanupPage"
   | "settings.previewEnvironmentCleanup"
   | "settings.runEnvironmentCleanup"
   | "settings.cancelEnvironmentCleanup"

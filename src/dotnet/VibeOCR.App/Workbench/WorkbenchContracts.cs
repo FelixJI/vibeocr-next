@@ -348,6 +348,7 @@ public sealed record CancelEnvironmentInstallCommand : WorkbenchCommand;
 public sealed record InvalidateEnvironmentPlanCommand : WorkbenchCommand;
 public sealed record SwitchEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
 public sealed record DeleteEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
+public sealed record SetEnvironmentCleanupPageCommand(int Page) : WorkbenchCommand;
 public sealed record PreviewEnvironmentCleanupCommand : WorkbenchCommand;
 public sealed record RunEnvironmentCleanupCommand(string PlanId, IReadOnlyList<string> ItemIds) : WorkbenchCommand;
 public sealed record CancelEnvironmentCleanupCommand : WorkbenchCommand;
@@ -716,7 +717,9 @@ public sealed record SettingsWorkbenchState(
   bool EnvironmentSupportsCleanup = false,
   VibeOCR.Platform.Bootstrap.ManagedCleanupPlan? EnvironmentCleanupPlan = null,
   VibeOCR.Platform.Bootstrap.ManagedCleanupResult? EnvironmentCleanupResult = null,
-  bool EnvironmentCanCancelCleanup = false) : WorkbenchState
+  bool EnvironmentCanCancelCleanup = false,
+  int EnvironmentCleanupPage = 0,
+  int EnvironmentCleanupPageCount = 1) : WorkbenchState
 {
   public override string Scope => "settings";
 }

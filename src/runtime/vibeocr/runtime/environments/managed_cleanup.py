@@ -415,7 +415,9 @@ def _scan(store: ManagedEnvironmentStore, *, held: bool = False) -> dict:
             name = path.name.removesuffix(".part")
             digests = proven.get(name)
             reason = (
-                "安装、切换或模型准备进行中"
+                "同名目录或特殊文件没有下载工件归属证明，保留"
+                if not path.is_file()
+                else "安装、切换或模型准备进行中"
                 if shared_busy
                 else "保留环境的旧配方引用无法完整证明，保留共享工件"
                 if unknown_reference
@@ -544,7 +546,7 @@ def preview_cleanup(store: ManagedEnvironmentStore) -> dict:
         scan = _scan(store)
         plan_id = uuid4().hex
         _atomic_json(
-            store.paths.state_root / "cleanup-plans" / f"{plan_id}.json",
+            store.paths.state_root / "cleanup-plan.json",
             {"plan_id": plan_id, "scan": scan},
         )
         return {
@@ -611,9 +613,9 @@ def run_cleanup(
         locks.enter_context(RuntimeStoreLock(store._lock, timeout=0))
         try:
             frozen = json.loads(
-                (
-                    store.paths.state_root / "cleanup-plans" / f"{plan_id}.json"
-                ).read_text(encoding="utf-8")
+                (store.paths.state_root / "cleanup-plan.json").read_text(
+                    encoding="utf-8"
+                )
             )
         except (OSError, ValueError) as exc:
             raise RuntimeInstallPlanStale(
@@ -744,6 +746,10 @@ def run_cleanup(
                 covered[item["environment_id"]] = results[-1]
         by_id = {item["id"]: item for item in results}
         results = [by_id[item_id] for item_id in item_ids]
+        for result in results:
+            result["detail"] = safe_runtime_detail(
+                f"{chosen[result['id']]['label']}：{result['detail']}"
+            )
         with store._cleanup_cancel_gate:
             store._cleanup_terminal = True
         _atomic_json(

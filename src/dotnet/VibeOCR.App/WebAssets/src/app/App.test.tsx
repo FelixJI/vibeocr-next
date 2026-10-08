@@ -2269,7 +2269,7 @@ describe("AppShell", () => {
       revision: 3,
       features: {
         settings: {
-          ...viewState.features.settings,
+          ...(viewState.features.settings as Readonly<Record<string, unknown>>),
           environmentInstallProgress: {
             ...viewState.features.settings.environmentInstallProgress,
             phase: "complete",
@@ -2324,6 +2324,8 @@ describe("AppShell", () => {
       features: {
         settings: {
           environmentSupportsCleanup: true,
+          environmentCleanupPage: 0,
+          environmentCleanupPageCount: 2,
           environmentCanCancelCleanup: true,
           environments: [],
           environmentCleanupPlan: {
@@ -2367,7 +2369,9 @@ describe("AppShell", () => {
         },
       },
     };
-    const { unmount } = render(<App viewState={viewState} actions={actions} />);
+    const { unmount, rerender } = render(
+      <App viewState={viewState} actions={actions} />,
+    );
     expect(screen.getByRole("checkbox", { name: /共享模型/ })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "检查可清理项" }));
     expect(actions.run).toHaveBeenCalledWith({
@@ -2390,6 +2394,33 @@ describe("AppShell", () => {
       type: "settings.cancelEnvironmentCleanup",
     });
     expect(screen.getByText(/文件占用，重新检查继续/)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "下一页清理项目" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setEnvironmentCleanupPage",
+      page: 1,
+    });
+    rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          features: {
+            settings: {
+              ...(viewState.features.settings as Readonly<
+                Record<string, unknown>
+              >),
+              environmentCleanupPage: 1,
+            },
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.getByRole("checkbox", { name: /已知安装残留/ }),
+    ).not.toBeChecked();
+    expect(
+      screen.getByRole("button", { name: "下一页清理项目" }),
+    ).toBeDisabled();
     unmount();
   });
 

@@ -19,7 +19,7 @@ public sealed class ManagedEnvironmentSwitchCoordinatorTests
         try
         {
             await File.WriteAllTextAsync(script, """
-                param([string]$Marker)
+                $Marker = $args[0]
                 [Console]::WriteLine('{"protocol_version":2,"response_kind":"environment","action":"prepare_switch","result":{"environment_id":"fixture","environment_revision":1,"active_id":null,"active_revision":0,"python":"python","requires_supervisor":false,"launch":null}}')
                 $command = [Console]::In.ReadLine() | ConvertFrom-Json
                 Set-Content -LiteralPath $Marker -Value $command.action
@@ -33,7 +33,21 @@ public sealed class ManagedEnvironmentSwitchCoordinatorTests
                 UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true,
                 RedirectStandardOutput = true, RedirectStandardError = true,
             };
-            foreach (string arg in new[] { "-NoProfile", "-NonInteractive", "-File", script, "-Marker", marker }) start.ArgumentList.Add(arg);
+            foreach (string arg in new[] { "-NoProfile", "-NonInteractive", "-File", script, marker }) start.ArgumentList.Add(arg);
+            // The synthetic child follows the same executable/manifest binding as production.
+            string manifest = Path.Combine(root, "runtime-manifest.json");
+            string componentLock = Path.Combine(root, "component-lock.json");
+            byte[] manifestBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                installer = new { executable_sha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(start.FileName, TestContext.Current.CancellationToken))) },
+            });
+            await File.WriteAllBytesAsync(manifest, manifestBytes, TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(componentLock, System.Text.Json.JsonSerializer.Serialize(new
+            {
+                product = new { runtime_manifest_sha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(manifestBytes)) },
+            }), TestContext.Current.CancellationToken);
+            start.ArgumentList.Add("--request-json");
+            start.ArgumentList.Add(System.Text.Json.JsonSerializer.Serialize(new { component_lock = componentLock, runtime_manifest = manifest }));
             IManagedEnvironmentSwitchReservation reservation = await EnvironmentSwitchReservation.StartAsync(start, "fixture", TestContext.Current.CancellationToken);
             Assert.False(File.Exists(marker));
             Assert.Equal("fixture", reservation.Prepared.EnvironmentId);

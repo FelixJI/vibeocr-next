@@ -1722,6 +1722,10 @@ public sealed class RuntimeInstallerClientTests
                         TestContext.Current.CancellationToken));
 
             Assert.Contains("Runtime manifest SHA-256 mismatch", error.Message);
+            var client = new RuntimeInstallerClient(new RuntimeInstallerConfiguration(executable, root, componentLock, manifest, null));
+            RuntimeInstallerException switchError = await Assert.ThrowsAsync<RuntimeInstallerException>(() =>
+                client.BeginEnvironmentSwitchAsync("abc", TestContext.Current.CancellationToken));
+            Assert.Contains("Runtime manifest SHA-256 mismatch", switchError.Message);
         }
         finally
         {
@@ -1769,6 +1773,10 @@ public sealed class RuntimeInstallerClientTests
             Assert.Contains(
                 "Runtime Installer executable SHA-256 mismatch",
                 error.Message);
+            var client = new RuntimeInstallerClient(new RuntimeInstallerConfiguration(executable, root, componentLock, manifest, null));
+            RuntimeInstallerException switchError = await Assert.ThrowsAsync<RuntimeInstallerException>(() =>
+                client.BeginEnvironmentSwitchAsync("abc", TestContext.Current.CancellationToken));
+            Assert.Contains("Runtime Installer executable SHA-256 mismatch", switchError.Message);
         }
         finally
         {

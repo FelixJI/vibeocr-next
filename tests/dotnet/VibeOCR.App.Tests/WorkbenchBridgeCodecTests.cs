@@ -9,6 +9,19 @@ namespace VibeOCR.App.Tests;
 public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
 {
   [Theory]
+  [InlineData("{\"page\":0}", true)]
+  [InlineData("{\"page\":2}", true)]
+  [InlineData("{\"page\":-1}", false)]
+  [InlineData("{\"page\":1.5}", false)]
+  [InlineData("{\"page\":\"2\"}", false)]
+  public void CleanupPageCommandRequiresNonNegativeInteger(string arguments, bool valid)
+  {
+    Guid session = Guid.NewGuid();
+    string command = CommandJson(session, "settings", "setEnvironmentCleanupPage", arguments);
+    if (valid) Assert.IsType<SetEnvironmentCleanupPageCommand>(WorkbenchBridgeCodec.ParseCommand(command, session).Command);
+    else Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(command, session));
+  }
+  [Theory]
   [InlineData("[\"residual:a\"]", true)]
   [InlineData("[]", false)]
   [InlineData("[\"a\",\"a\"]", false)]
@@ -1106,16 +1119,16 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       Dependencies: File.ReadAllLines(Path.Combine(root.FullName, "config", "runtime", id, $"requirements-{id}.lock"))
         .Where(line => System.Text.RegularExpressions.Regex.IsMatch(line, "^[A-Za-z0-9_.-]+(?:==| @ )"))
         .Select(line => line.Split(" --hash=", StringSplitOptions.None)[0].Trim().TrimEnd('\\').Trim()).ToArray())).ToArray();
-    var cleanupItems = Enumerable.Range(0, 8).Select(index => new VibeOCR.Platform.Bootstrap.ManagedCleanupItem(
+    var cleanupItems = Enumerable.Range(0, 3).Select(index => new VibeOCR.Platform.Bootstrap.ManagedCleanupItem(
       $"item:{index}", index == 0 ? "dependency_cache" : "models", $"清理与保留资源 {index}", null,
-      index == 0 ? 1024 : null, index == 0, "根据当前配方与明确生产记录判断；模型受保护",
-      Enumerable.Range(0, 8).Select(path => $"state/installer-cache/downloads/artifacts/{path}-fixture.whl").ToArray(), PathCount: 128)).ToArray();
+      index == 0 ? 1024 : null, index == 0, new string('原', 200),
+      [new string('路', 200)], LastError: new string('错', 200), PathCount: 128)).ToArray();
     settings = settings with
     {
       EnvironmentRecipes = recipes,
       EnvironmentSupportsCleanup = true,
       EnvironmentCleanupPlan = new VibeOCR.Platform.Bootstrap.ManagedCleanupPlan(new string('c', 32), cleanupItems, "logical_bytes", "不保证物理释放，缓存可能需要重新下载"),
-      EnvironmentCleanupResult = new VibeOCR.Platform.Bootstrap.ManagedCleanupResult(new string('d', 32), [new VibeOCR.Platform.Bootstrap.ManagedCleanupResultItem("previous", "failed", "已记录残留可重查续清", 1024)], "logical_bytes"),
+      EnvironmentCleanupResult = new VibeOCR.Platform.Bootstrap.ManagedCleanupResult(new string('d', 32), Enumerable.Range(0, 3).Select(index => new VibeOCR.Platform.Bootstrap.ManagedCleanupResultItem($"previous:{index}", "failed", new string('错', 200), 1024)).ToArray(), "logical_bytes"),
     };
     // PreviewCleanupAsync clears the previous terminal display and install plan;
     // the persistent installed/failure records remain available separately.
@@ -1133,7 +1146,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       JsonElement payload = document.RootElement.GetProperty("payload");
       JsonElement projected = payload.TryGetProperty("state", out JsonElement value) ? value : payload.GetProperty("features").GetProperty("settings");
       Assert.Equal(6, projected.GetProperty("environmentRecipes").GetArrayLength());
-      Assert.Equal(8, projected.GetProperty("environmentCleanupPlan").GetProperty("items").GetArrayLength());
+      Assert.Equal(3, projected.GetProperty("environmentCleanupPlan").GetProperty("items").GetArrayLength());
       Assert.Equal("failed", projected.GetProperty("environmentCleanupResult").GetProperty("items")[0].GetProperty("state").GetString());
     }
   }

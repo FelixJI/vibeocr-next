@@ -3119,6 +3119,14 @@ function EnvironmentCleanup({
   const plan = state.environmentCleanupPlan as CleanupPlan | null | undefined;
   const result = state.environmentCleanupResult as
     CleanupResult | null | undefined;
+  const page =
+    typeof state.environmentCleanupPage === "number"
+      ? state.environmentCleanupPage
+      : 0;
+  const pageCount =
+    typeof state.environmentCleanupPageCount === "number"
+      ? state.environmentCleanupPageCount
+      : 1;
   const outcomes: Readonly<Record<string, string>> = {
     deleted: "已移除",
     failed: "失败，可重查续清",
@@ -3139,9 +3147,38 @@ function EnvironmentCleanup({
       >
         检查可清理项
       </Button>
+      {pageCount > 1 ? (
+        <div aria-label="清理分页">
+          <Button
+            disabled={busy || page === 0}
+            onClick={() =>
+              void actions.run({
+                type: "settings.setEnvironmentCleanupPage",
+                page: page - 1,
+              })
+            }
+          >
+            上一页清理项目
+          </Button>
+          <span>
+            第 {page + 1} / {pageCount} 页；仅清理本页明确选择的项目
+          </span>
+          <Button
+            disabled={busy || page + 1 >= pageCount}
+            onClick={() =>
+              void actions.run({
+                type: "settings.setEnvironmentCleanupPage",
+                page: page + 1,
+              })
+            }
+          >
+            下一页清理项目
+          </Button>
+        </div>
+      ) : null}
       {plan && Array.isArray(plan.items) ? (
         <CleanupSelection
-          key={plan.plan_id}
+          key={`${plan.plan_id}:${page}`}
           plan={plan}
           busy={busy}
           actions={actions}
@@ -3228,7 +3265,7 @@ function CleanupSelection({
             ) : null}
             <details>
               <summary>
-                路径明细（只读，最多显示 8 项，共{" "}
+                路径摘要（只读，显示首项，长文本省略，共{" "}
                 {item.path_count ?? item.paths.length} 项）
               </summary>
               {item.paths.map((path) => (

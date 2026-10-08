@@ -657,6 +657,12 @@ public static class WorkbenchBridgeCodec
       case ("settings", "switchEnvironment"):
         EnsureObjectWithFields(arguments, EnvironmentIdArgumentFields, "command arguments");
         return new SwitchEnvironmentCommand(ParseEnvironmentId(arguments));
+      case ("settings", "setEnvironmentCleanupPage"):
+        EnsureObjectWithFields(arguments, new HashSet<string>(StringComparer.Ordinal) { "page" }, "command arguments");
+        JsonElement cleanupPage = arguments.GetProperty("page");
+        if (cleanupPage.ValueKind != JsonValueKind.Number || !cleanupPage.TryGetInt32(out int page) || page < 0)
+          throw new WorkbenchBridgeProtocolException("清理页码无效。");
+        return new SetEnvironmentCleanupPageCommand(page);
       case ("settings", "previewEnvironmentCleanup"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new PreviewEnvironmentCleanupCommand();
@@ -1401,6 +1407,8 @@ public static class WorkbenchBridgeCodec
       settings.EnvironmentCleanupPlan,
       settings.EnvironmentCleanupResult,
       settings.EnvironmentCanCancelCleanup,
+      settings.EnvironmentCleanupPage,
+      settings.EnvironmentCleanupPageCount,
       environmentRecipes = settings.EnvironmentRecipes ?? [],
       environmentHardware = settings.EnvironmentHardware is null ? null : new
       {

@@ -30,6 +30,32 @@ public sealed class ManagedEnvironmentSettings(
     public bool SupportsCleanup => manager.SupportsEnvironmentCleanup;
     public ManagedCleanupPlan? CleanupPlan { get; private set; }
     public ManagedCleanupResult? CleanupResult { get; private set; }
+    public const int CleanupPageSize = 3;
+    public int CleanupPage { get; private set; }
+    public int CleanupPageCount => Math.Max(1, (Math.Max(CleanupPlan?.Items.Count ?? 0, CleanupResult?.Items.Count ?? 0) + CleanupPageSize - 1) / CleanupPageSize);
+    public ManagedCleanupPlan? CleanupPlanPage => CleanupPlan is { } plan ? plan with
+    {
+        Items = plan.Items.Skip(CleanupPage * CleanupPageSize).Take(CleanupPageSize).Select(item => item with
+        {
+            Reason = CleanupSummary(item.Reason), LastError = item.LastError is null ? null : CleanupSummary(item.LastError),
+            Paths = item.Paths.Take(1).Select(CleanupSummary).ToArray(),
+        }).ToArray(),
+        LastResult = null,
+    } : null;
+    public ManagedCleanupResult? CleanupResultPage => CleanupResult is { } result ? result with
+    {
+        Items = result.Items.Skip(CleanupPage * CleanupPageSize).Take(CleanupPageSize)
+            .Select(item => item with { Detail = CleanupSummary(item.Detail) }).ToArray(),
+    } : null;
+    // Only optional display text is shortened; Runtime retains exact paths and the full plan.
+    private static string CleanupSummary(string value) => value.Length <= 200 ? value :
+        value[..(char.IsHighSurrogate(value[199]) ? 199 : 200)] + "…";
+    public Task SetCleanupPageAsync(int page, CancellationToken cancellationToken) => RunAsync(() =>
+    {
+        if (page < 0 || page >= CleanupPageCount) throw new InvalidOperationException("清理页码已失效，请重新检查。");
+        CleanupPage = page;
+        return Task.CompletedTask;
+    }, cancellationToken);
     public bool CanCancelCleanup => Volatile.Read(ref activeCleanup) is not null;
 
     public Task PreviewCleanupAsync(CancellationToken cancellationToken) => RunAsync(async () =>
@@ -44,6 +70,7 @@ public sealed class ManagedEnvironmentSettings(
         {
             if (installProgress?.State != "running") { installProgress = null; installLog = []; }
         }
+        CleanupPage = 0;
         CleanupPlan = preview;
         CleanupResult = preview.LastResult;
         Status = "已检查清理影响，请选择需要移除的项目并确认。";
@@ -51,7 +78,7 @@ public sealed class ManagedEnvironmentSettings(
 
     public Task CleanupAsync(string planId, IReadOnlyList<string> itemIds, CancellationToken cancellationToken) => RunAsync(async () =>
     {
-        ManagedCleanupPlan plan = CleanupPlan ?? throw new InvalidOperationException("请先检查可清理项。");
+        ManagedCleanupPlan plan = CleanupPlanPage ?? throw new InvalidOperationException("请先检查可清理项。");
         if (!SupportsCleanup || plan.PlanId != planId || itemIds.Count == 0 || itemIds.Distinct(StringComparer.Ordinal).Count() != itemIds.Count ||
             itemIds.Any(id => !plan.Items.Any(item => item.Id == id && item.CanClean)))
             throw new InvalidOperationException("清理计划已变化或包含受保护项目，请重新检查。");
@@ -75,6 +102,7 @@ public sealed class ManagedEnvironmentSettings(
         {
             Volatile.Write(ref activeCleanup, null);
             CleanupPlan = null;
+            CleanupPage = 0;
             InvalidateSelectionPlans();
             await ReloadEnvironmentsAsync(CancellationToken.None, strictEvidence: false);
         }

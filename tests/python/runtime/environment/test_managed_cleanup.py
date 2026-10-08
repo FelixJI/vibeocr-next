@@ -366,3 +366,39 @@ def test_environment_and_residual_selection_does_not_double_count(
         == env["logical_bytes"]
     )
     assert store.preview_cleanup()["last_result"] == result
+
+
+def test_artifact_filename_does_not_claim_directory_contents(tmp_path, monkeypatch):
+    store, _ = _manager(tmp_path, monkeypatch)
+    scope, _ = store._recipe("rapidocr-cpu")
+    name, hashes = next(iter(_lock_allowed_hashes(scope.lock_path).items()))
+    path = _report(store, "rapidocr-cpu", "known.whl", name, next(iter(hashes)))
+    path.unlink()
+    path.mkdir()
+    private = path / "unknown.txt"
+    private.write_text("not a downloaded artifact")
+    plan = store.preview_cleanup()
+    item = next(
+        item
+        for item in plan["items"]
+        if any("known.whl" in relative for relative in item["paths"])
+    )
+    assert not item["can_clean"]
+    with pytest.raises(RuntimeInstallError):
+        store.run_cleanup(plan["plan_id"], [item["id"]])
+    assert private.read_text() == "not a downloaded artifact"
+
+
+def test_new_preview_invalidates_previous_confirmation(tmp_path, monkeypatch):
+    store, _ = _manager(tmp_path, monkeypatch)
+    target = store.create("重新检查")
+    old = store.preview_cleanup()
+    current = store.preview_cleanup()
+    selection = [f"environment:{target['id']}"]
+    with pytest.raises(RuntimeInstallPlanStale):
+        store.run_cleanup(old["plan_id"], selection)
+    assert Path(target["path"]).exists()
+    assert (
+        store.run_cleanup(current["plan_id"], selection)["items"][0]["state"]
+        == "deleted"
+    )
