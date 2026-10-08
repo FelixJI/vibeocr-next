@@ -181,10 +181,13 @@ public sealed partial class MainWindow
     ManagedEnvironmentList list = await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
     if (!list.Environments.Any(item => item.Name == PaddleSmokeEnvironmentName))
     {
-      RecordPaddleSmokeStage("prepare configuration");
-      await SelectSmokeValueAsync("#environment-component-select", "paddleocr");
-      await SelectSmokeValueAsync("#environment-device-select", "cpu");
-      await ClickManagedSmokeButtonAsync("准备此配置");
+      RecordPaddleSmokeStage("create isolated environment");
+      // 公共一键准备按配方展示名自动命名；先用既有宿主命令创建 ASCII 测试容器。
+      WorkbenchCommandReceipt created = await application.ExecuteAsync(
+        new WorkbenchCommandEnvelope(Guid.NewGuid(), new CreateEnvironmentCommand(PaddleSmokeEnvironmentName)),
+        timeout.Token);
+      if (!created.Ok)
+        throw new InvalidOperationException($"Smoke fixture creation failed: {created.Error?.Code}");
       list = await WaitForSmokeEnvironmentsAsync(
         [PaddleSmokeEnvironmentName], TimeSpan.FromMinutes(5));
     }
@@ -202,6 +205,7 @@ public sealed partial class MainWindow
     RecordPaddleSmokeStage("preview install plan");
     await SelectSmokeEnvironmentAsync(environment.Id);
     await SelectSmokeValueAsync("#environment-component-select", "paddleocr");
+    await SelectSmokeValueAsync("#environment-device-select", "cpu");
     await ClickManagedSmokeButtonAsync("继续准备依赖");
     await WaitForSmokeDomAsync(
       "!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
