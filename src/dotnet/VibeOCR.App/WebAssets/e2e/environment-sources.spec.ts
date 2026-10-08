@@ -262,6 +262,25 @@ test("normal preparation keeps confirmation brief and rejects late plans after a
     capabilities: ["runtime.environments"],
     features: { settings },
   });
+  // 与原生 smoke 一样，向两个默认 Select 派发同值 change。
+  await page.getByLabel("识别组件", { exact: true }).selectOption("rapidocr");
+  await page.getByLabel("加速方式", { exact: true }).selectOption("cpu");
+  const invalidations = await page.evaluate(() => {
+    const host = (
+      window as Window & {
+        __testHost: { commands: readonly { scope: string; action: string }[] };
+      }
+    ).__testHost;
+    return host.commands.filter(
+      (command) =>
+        command.scope === "settings" &&
+        command.action === "invalidateEnvironmentPlan",
+    ).length;
+  });
+  expect(invalidations).toBe(0);
+  await expect(
+    page.getByRole("button", { name: "准备此配置", exact: true }),
+  ).toBeVisible();
   await page.getByRole("button", { name: "准备此配置", exact: true }).click();
   await expectCommand(page, {
     scope: "settings",

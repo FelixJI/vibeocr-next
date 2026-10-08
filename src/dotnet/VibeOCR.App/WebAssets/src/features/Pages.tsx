@@ -391,7 +391,11 @@ function mainDependencies(
   const byName = new Map(
     (dependencies ?? [])
       .map(
-        (pin) => [normalizeDependencyName(dependencyName(pin)), pin] as const,
+        (pin) =>
+          [
+            normalizeDependencyName(dependencyName(pin)),
+            pin.includes("@") ? dependencyName(pin) : pin,
+          ] as const,
       )
       .filter(([name]) => whitelist.has(name)),
   );
@@ -2325,6 +2329,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
   );
   const recipes = managedEnvironmentRecipes(state.environmentRecipes);
   const [hasExplicitChoice, setHasExplicitChoice] = useState(false);
+  const [queryGeneration, setQueryGeneration] = useState(0);
   const [requestedEnvironmentId, setRequestedEnvironmentId] = useState<
     string | null
   >(null);
@@ -2375,17 +2380,18 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
   // 不暗示需要本地 MinerU 组件；旧宿主（无运行环境 capability）保留等待语义。
   const mineruServiceHostReady =
     !managedEnvironmentsAvailable || activeEnvironment?.status === "installed";
+  const invalidateSelectionPlan = () => {
+    setInvalidatedPlanId(rawPlan?.planId ?? null);
+    setQueryGeneration((current) => current + 1);
+    void actions.run({ type: "settings.invalidateEnvironmentPlan" });
+  };
   const onCatalogChoiceChange = (component: string, device: string) => {
     setHasExplicitChoice(true);
-    // 本地失效抑制：选择变化→宿主 invalidate 真值回传之间，旧计划不得
-    // 从识别组件区移到环境行继续确认；宿主清除后自然解除。
-    setInvalidatedPlanId((current) => pendingPlan?.planId ?? current);
-    void actions.run({ type: "settings.invalidateEnvironmentPlan" });
+    invalidateSelectionPlan();
     setRequestedEnvironmentId(null);
     setCatalogChoice({ component, device });
   };
-  // 待确认计划与归属：确认卡只渲染一处——选择匹配时随识别组件区展示，
-  // 否则挂在“已安装环境”里该计划的目标环境行，确认绑定 planId/环境/修订。
+  // 确认卡只属于当前选择，晚到的旧目标不能进入环境行继续确认。
   const pendingPlan =
     rawPlan &&
     rawPlan.planId !== invalidatedPlanId &&
@@ -2394,8 +2400,6 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
       rawPlan.environmentId === requestedEnvironmentId)
       ? rawPlan
       : undefined;
-  const recommendationOwnsPlan =
-    !!pendingPlan && pendingPlan.requestedRecipe === (targetRecipe?.id ?? "");
   // backend 是运行时 profile 声明的目标加速器，不是实测执行设备；
   // 未读取真实快照前不冒充任何设备。
   const backend = typeof state.backend === "string" ? state.backend : "";
@@ -2574,7 +2578,19 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
                 actions={actions}
                 component={effectiveComponent}
                 device={effectiveDevice}
-                onChoiceChange={onCatalogChoiceChange}
+                onChoiceChange={(component, device) => {
+                  if (
+                    component === effectiveComponent &&
+                    device === effectiveDevice
+                  )
+                    return;
+                  onCatalogChoiceChange(component, device);
+                }}
+                queryGeneration={queryGeneration}
+                onCancelPlan={invalidateSelectionPlan}
+                onPrepare={() =>
+                  onCatalogChoiceChange(effectiveComponent, effectiveDevice)
+                }
                 plan={pendingPlan}
               />
               <InstalledEnvironmentList
@@ -2582,7 +2598,6 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
                 actions={actions}
                 selectedRecipeId={targetRecipe?.id ?? ""}
                 plan={pendingPlan}
-                planConsumedByRecommendation={recommendationOwnsPlan}
                 onPreview={(environmentId, recipe) => {
                   const selected = recipeDeviceFromId(recipe);
                   if (!selected) return;
@@ -2599,12 +2614,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
                 state={state}
                 busy={state.environmentBusy === true}
                 actions={actions}
-                onInvalidate={() => {
-                  setInvalidatedPlanId(pendingPlan?.planId ?? null);
-                  void actions.run({
-                    type: "settings.invalidateEnvironmentPlan",
-                  });
-                }}
+                onInvalidate={invalidateSelectionPlan}
               />
             </>
           ) : (
@@ -2773,6 +2783,7 @@ function EnvironmentPlanPanel({
   sourceName,
   busy,
   canCancelInstall,
+  onCancel,
   actions,
 }: {
   readonly plan: ManagedEnvironmentPlanState;
@@ -2780,6 +2791,7 @@ function EnvironmentPlanPanel({
   readonly sourceName: (id: string | null | undefined) => string;
   readonly busy: boolean;
   readonly canCancelInstall: boolean;
+  readonly onCancel: () => void;
   readonly actions: AppActions;
 }) {
   const target = environments.find(
@@ -2824,12 +2836,7 @@ function EnvironmentPlanPanel({
         >
           确认安装依赖
         </Button>
-        <Button
-          disabled={busy}
-          onClick={() =>
-            void actions.run({ type: "settings.invalidateEnvironmentPlan" })
-          }
-        >
+        <Button disabled={busy} onClick={onCancel}>
           取消
         </Button>
         {canCancelInstall ? (
@@ -2872,14 +2879,12 @@ function InstalledEnvironmentList({
   actions,
   selectedRecipeId,
   plan,
-  planConsumedByRecommendation,
   onPreview,
 }: {
   readonly state: Readonly<Record<string, unknown>>;
   readonly actions: AppActions;
   readonly selectedRecipeId: string;
   readonly plan: ManagedEnvironmentPlanState | undefined;
-  readonly planConsumedByRecommendation: boolean;
   readonly onPreview: (environmentId: string, recipe: string) => void;
 }) {
   const environments = managedEnvironments(state.environments);
@@ -2894,8 +2899,6 @@ function InstalledEnvironmentList({
   const [confirmingRemoveId, setConfirmingRemoveId] = useState<string | null>(
     null,
   );
-  // 确认卡只渲染一处：选择匹配时随识别组件区展示，否则挂在目标环境行。
-  const listPlan = planConsumedByRecommendation ? undefined : plan;
   return (
     <section className="managed-environment-list" aria-label="已安装环境">
       <h3>已安装环境</h3>
@@ -2912,10 +2915,6 @@ function InstalledEnvironmentList({
               : failure?.phase === "failed"
                 ? failure.recipe
                 : "";
-          const rowPlan =
-            listPlan && listPlan.environmentId === environment.id
-              ? listPlan
-              : undefined;
           const removeAllowed =
             environment.kind !== "legacy" &&
             (environment.id !== activeId || environment.status === "empty");
@@ -3062,16 +3061,6 @@ function InstalledEnvironmentList({
                   )
                 ) : null}
               </div>
-              {rowPlan ? (
-                <EnvironmentPlanPanel
-                  plan={rowPlan}
-                  environments={environments}
-                  sourceName={sourceName}
-                  busy={busy}
-                  canCancelInstall={canCancelInstall}
-                  actions={actions}
-                />
-              ) : null}
             </div>
           );
         })
@@ -3315,6 +3304,9 @@ function EnvironmentRecommendation({
   component,
   device,
   onChoiceChange,
+  queryGeneration,
+  onCancelPlan,
+  onPrepare,
   plan,
 }: {
   readonly state: Readonly<Record<string, unknown>>;
@@ -3322,6 +3314,9 @@ function EnvironmentRecommendation({
   readonly component: string;
   readonly device: string;
   readonly onChoiceChange: (component: string, device: string) => void;
+  readonly queryGeneration: number;
+  readonly onCancelPlan: () => void;
+  readonly onPrepare: () => void;
   readonly plan: ManagedEnvironmentPlanState | undefined;
 }) {
   const recipes = managedEnvironmentRecipes(state.environmentRecipes);
@@ -3362,6 +3357,7 @@ function EnvironmentRecommendation({
   const prepare = async () => {
     if (!targetId || preparing.current) return;
     preparing.current = true;
+    onPrepare();
     try {
       await actions.run({
         type: "settings.prepareEnvironment",
@@ -3380,25 +3376,29 @@ function EnvironmentRecommendation({
   const [dispatchedQuery, setDispatchedQuery] = useState<{
     recipe: string;
     fingerprint: string;
+    generation: number;
   } | null>(null);
   // 在途闸门只供 effect/事件处理器读写，不在渲染中读取（react-hooks/refs）。
   const inFlightQuery = useRef<string | null>(null);
+  const queryKey = `${targetId}|${environmentsFingerprint}|${queryGeneration}`;
   useEffect(() => {
     if (!targetId || busy || blockedReason) return;
     if (compatibilityRecipe === targetId) return;
     if (
       dispatchedQuery?.recipe === targetId &&
-      dispatchedQuery.fingerprint === environmentsFingerprint
+      dispatchedQuery.fingerprint === environmentsFingerprint &&
+      dispatchedQuery.generation === queryGeneration
     )
       return;
-    if (inFlightQuery.current === targetId) return;
+    if (inFlightQuery.current === queryKey) return;
     setDispatchedQuery({
       recipe: targetId,
       fingerprint: environmentsFingerprint,
+      generation: queryGeneration,
     });
-    inFlightQuery.current = targetId;
+    inFlightQuery.current = queryKey;
     const settle = () => {
-      if (inFlightQuery.current === targetId) inFlightQuery.current = null;
+      if (inFlightQuery.current === queryKey) inFlightQuery.current = null;
     };
     void Promise.resolve(
       actions.run({
@@ -3412,18 +3412,21 @@ function EnvironmentRecommendation({
     blockedReason,
     compatibilityRecipe,
     environmentsFingerprint,
+    queryGeneration,
+    queryKey,
     dispatchedQuery,
     actions,
   ]);
   const retryQuery = () => {
-    if (!targetId || inFlightQuery.current === targetId) return;
+    if (!targetId || inFlightQuery.current === queryKey) return;
     setDispatchedQuery({
       recipe: targetId,
       fingerprint: environmentsFingerprint,
+      generation: queryGeneration,
     });
-    inFlightQuery.current = targetId;
+    inFlightQuery.current = queryKey;
     const settle = () => {
-      if (inFlightQuery.current === targetId) inFlightQuery.current = null;
+      if (inFlightQuery.current === queryKey) inFlightQuery.current = null;
     };
     void Promise.resolve(
       actions.run({
@@ -3444,7 +3447,8 @@ function EnvironmentRecommendation({
     !blockedReason &&
     compatibilityRecipe !== targetId &&
     (dispatchedQuery?.recipe !== targetId ||
-      dispatchedQuery.fingerprint !== environmentsFingerprint);
+      dispatchedQuery.fingerprint !== environmentsFingerprint ||
+      dispatchedQuery.generation !== queryGeneration);
   return (
     <section className="environment-recommendation" aria-label="环境配置">
       <h3>识别组件</h3>
@@ -3606,6 +3610,7 @@ function EnvironmentRecommendation({
               }
               busy={busy}
               canCancelInstall={state.environmentCanCancelInstall === true}
+              onCancel={onCancelPlan}
               actions={actions}
             />
           ) : null}
