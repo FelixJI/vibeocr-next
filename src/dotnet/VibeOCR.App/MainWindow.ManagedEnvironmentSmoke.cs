@@ -399,7 +399,8 @@ public sealed partial class MainWindow
     await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     RecordManagedSmokeStage($"select {environment.Name}");
     await SelectSmokeEnvironmentAsync(environment.Id);
-    await ClickManagedSmokeButtonAsync("切换到此环境");
+    await ClickManagedSmokeButtonAsync(smokeEnvironmentSnapshot!()?.ActiveId == environment.Id
+      ? "启动并验证当前环境" : "切换到此环境");
     RecordManagedSmokeStage($"wait for service {environment.Name}");
     ManagedEnvironmentSession session = await WaitForSmokeSessionAsync(environment.Id);
     RecordManagedSmokeStage($"service ready {environment.Name}");
