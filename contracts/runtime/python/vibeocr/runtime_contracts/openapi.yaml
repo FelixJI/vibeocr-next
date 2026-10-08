@@ -1444,6 +1444,47 @@
         }
       }
     },
+    "/v2/pdf/sessions/{session_id}/page_inspect": {
+      "post": {
+        "operationId": "inspectPdfPage",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PageInspectRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current page inspect payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageInspectResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/v2/pdf/sessions/{session_id}/delete_text_layers": {
       "post": {
         "operationId": "deletePdfTextLayers",
@@ -2303,7 +2344,11 @@
                 "runtime.component-selection.v1",
                 "ocr.recognition-modes.v1",
                 "ocr.mineru-config.v1",
-                "ocr.mineru-remote-api.v1"
+                "runtime.install-plan.v1",
+                "ocr.mineru-remote-api.v1",
+                "ocr.default-recognition-mode.v1",
+                "pdf.page-inspect.v1",
+                "pdf.block-edit.v1"
               ]
             }
           },
@@ -3340,6 +3385,225 @@
         "required": [
           "session_id",
           "model"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "PageInspectNativeLine": {
+        "description": "普通 PDF 文字层的只读检查投影（get_text 行框，显示空间归一化 [0,1000]）。",
+        "properties": {
+          "bbox": {
+            "maxItems": 4,
+            "minItems": 4,
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Bbox",
+            "type": "array"
+          },
+          "text_preview": {
+            "title": "Text Preview",
+            "type": "string"
+          },
+          "char_count": {
+            "title": "Char Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "bbox",
+          "text_preview",
+          "char_count"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "PageInspectOcrBlock": {
+        "description": "可信 OCR 块的检查投影：bbox/polygon 是显示空间（page.rect，含 /Rotate 与 CropBox 归零）按显示宽高归一到 [0,1000] 的坐标，raw OCR bbox 已按 ocr_preproc_angle 逆旋转到当前显示空间。",
+        "properties": {
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string",
+            "maxLength": 2000
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          },
+          "score_unknown": {
+            "title": "Score Unknown",
+            "type": "boolean"
+          },
+          "is_manually_edited": {
+            "title": "Is Manually Edited",
+            "type": "boolean"
+          },
+          "label": {
+            "default": "text",
+            "title": "Label",
+            "type": "string",
+            "maxLength": 128
+          },
+          "bbox": {
+            "anyOf": [
+              {
+                "maxItems": 4,
+                "minItems": 4,
+                "prefixItems": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ],
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Bbox"
+          },
+          "polygon": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array",
+                "maxItems": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Polygon"
+          },
+          "text_truncated": {
+            "type": "boolean",
+            "default": false,
+            "description": "Text is only a preview; this block must not be edited using this response."
+          }
+        },
+        "required": [
+          "index",
+          "text",
+          "score",
+          "score_unknown",
+          "is_manually_edited"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "PageInspectRequest": {
+        "description": "当前页检查 payload 请求（仅单页，不整本拉取）。",
+        "properties": {
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "page"
+        ],
+        "type": "object",
+        "additionalProperties": false
+      },
+      "PageInspectResponse": {
+        "description": "当前页检查 payload：OCR 块与原生文字层的来源区分投影。页面存在可信 OCR 块（本会话经无层添加或显式整页覆盖写入）时，该页可编辑文字即该 OCR 层全部块，native_lines 为空。",
+        "properties": {
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          },
+          "rotation": {
+            "title": "Rotation",
+            "type": "integer"
+          },
+          "rect": {
+            "maxItems": 4,
+            "minItems": 4,
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Rect",
+            "type": "array"
+          },
+          "preproc_angle": {
+            "default": 0,
+            "title": "Preproc Angle",
+            "type": "integer"
+          },
+          "ocr_blocks": {
+            "items": {
+              "$ref": "#/components/schemas/PageInspectOcrBlock"
+            },
+            "title": "Ocr Blocks",
+            "type": "array",
+            "maxItems": 1000
+          },
+          "native_lines": {
+            "items": {
+              "$ref": "#/components/schemas/PageInspectNativeLine"
+            },
+            "title": "Native Lines",
+            "type": "array",
+            "maxItems": 1000
+          },
+          "schema_version": {
+            "const": 2
+          },
+          "instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "truncated": {
+            "type": "boolean",
+            "default": false,
+            "description": "Inspection omits boxes beyond 1000 or clips text beyond 2000 characters per box / 128000 characters per page. The PDF is unchanged."
+          }
+        },
+        "required": [
+          "page",
+          "rotation",
+          "rect",
+          "schema_version",
+          "instance_id"
         ],
         "type": "object",
         "additionalProperties": false
@@ -5794,7 +6058,7 @@
         "additionalProperties": false
       },
       "UpdateBlockTextRequest": {
-        "description": "双击编辑文字块(仅更新内存模型,不落盘)。",
+        "description": "双击编辑文字块：原子写入当前内存 doc 后才更新模型。\n\nexpected_old_text 非空时与目标块当前文本严格比对，不一致按 409 拒绝，防止乱序提交覆盖后续编辑。pdf_settings 携带调用方当前写层策略（visible/字号等），避免编辑重写静默恢复默认。",
         "properties": {
           "page": {
             "title": "Page",
@@ -5807,6 +6071,31 @@
           "new_text": {
             "title": "New Text",
             "type": "string"
+          },
+          "expected_old_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Expected Old Text"
+          },
+          "pdf_settings": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Pdf Settings"
           }
         },
         "required": [

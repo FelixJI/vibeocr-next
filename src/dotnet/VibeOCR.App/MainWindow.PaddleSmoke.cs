@@ -27,7 +27,8 @@ namespace VibeOCR.App;
 /// </summary>
 public sealed partial class MainWindow
 {
-  private const string PaddleSmokeEnvironmentName = "PaddleOCR · CPU";
+  // 隔离验收环境使用 ASCII 名，避免依赖所在卷是否启用 8.3 短名称。
+  private const string PaddleSmokeEnvironmentName = "paddle-smoke-cpu";
   private const string PaddleSmokeRecipe = "paddleocr-cpu";
   // 安装预检失败可能只出现在公开状态中，不生成持久失败记录。
   private const string PaddleSmokeInstallRejectedStatus = "安装未完成；失败原因请查看该环境记录。";
@@ -180,10 +181,13 @@ public sealed partial class MainWindow
     ManagedEnvironmentList list = await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
     if (!list.Environments.Any(item => item.Name == PaddleSmokeEnvironmentName))
     {
-      RecordPaddleSmokeStage("prepare configuration");
-      await SelectSmokeValueAsync("#environment-component-select", "paddleocr");
-      await SelectSmokeValueAsync("#environment-device-select", "cpu");
-      await ClickManagedSmokeButtonAsync("准备此配置");
+      RecordPaddleSmokeStage("create isolated environment");
+      // 公共一键准备按配方展示名自动命名；先用既有宿主命令创建 ASCII 测试容器。
+      WorkbenchCommandReceipt created = await application.ExecuteAsync(
+        new WorkbenchCommandEnvelope(Guid.NewGuid(), new CreateEnvironmentCommand(PaddleSmokeEnvironmentName)),
+        timeout.Token);
+      if (!created.Ok)
+        throw new InvalidOperationException($"Smoke fixture creation failed: {created.Error?.Code}");
       list = await WaitForSmokeEnvironmentsAsync(
         [PaddleSmokeEnvironmentName], TimeSpan.FromMinutes(5));
     }
@@ -201,6 +205,7 @@ public sealed partial class MainWindow
     RecordPaddleSmokeStage("preview install plan");
     await SelectSmokeEnvironmentAsync(environment.Id);
     await SelectSmokeValueAsync("#environment-component-select", "paddleocr");
+    await SelectSmokeValueAsync("#environment-device-select", "cpu");
     await ClickManagedSmokeButtonAsync("继续准备依赖");
     await WaitForSmokeDomAsync(
       "!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
@@ -596,6 +601,13 @@ public sealed partial class MainWindow
       pdf = new { opened.PageCount, terminal.SelectedPages, terminal.Pages },
       structured_inspected = inspected, copies,
     };
+    if (PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_PDF_EDITING") == "1")
+    {
+      if (!textLayer) throw new InvalidOperationException("PDF editing smoke requires a committed OCR layer.");
+      object editing = await RunPaddlePdfEditingAsync(terminal);
+      paddleSmokeOutcome = "passed";
+      return new { input_kind = "pdf_editing", mode, fixture_path = fixture, job, editing };
+    }
     object saved = await RunPaddlePdfSaveAsync();
     paddleSmokeOutcome = "passed";
     return new
@@ -608,6 +620,114 @@ public sealed partial class MainWindow
     };
   }
 
+  private async Task<object> RunPaddlePdfEditingAsync(PdfWorkbenchState layered)
+  {
+    RecordPaddleSmokeStage("PDF HD editing: cancel and page switch");
+    double scale = WindowGeometryPolicy.GetWindowScale(WinRT.Interop.WindowNative.GetWindowHandle(this));
+    AppWindow.Resize(new SizeInt32(WindowGeometryPolicy.ScaleToPhysical(640, scale), WindowGeometryPolicy.ScaleToPhysical(768, scale)));
+    await WaitForSmokeDomAsync("document.querySelectorAll('.pdf-text-box.ocr').length >= 2 && !!document.querySelector('.pdf-inspection-sheet img')?.naturalWidth", TimeSpan.FromSeconds(30));
+    await ClickManagedSmokeButtonAsync("适应页面");
+    string indicesJson = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("""
+      (() => [...document.querySelectorAll('.pdf-text-box.ocr')]
+        .sort((a,b) => b.getBoundingClientRect().width*b.getBoundingClientRect().height-a.getBoundingClientRect().width*a.getBoundingClientRect().height)
+        .slice(0,2).map(e => Number(e.dataset.blockIndex)))()
+      """);
+    int[] indices = JsonSerializer.Deserialize<int[]>(indicesJson) ?? throw new InvalidOperationException("Missing editable OCR blocks.");
+    if (indices.Length != 2) throw new InvalidOperationException("Two trusted OCR blocks are required.");
+    async Task SelectBlockAsync(int index)
+    {
+      string selector = $".pdf-text-box.ocr[data-block-index='{index}']";
+      await WaitForSmokeDomAsync($"!!document.querySelector({JsonSerializer.Serialize(selector)})", TimeSpan.FromSeconds(30));
+      string result = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync($"(() => {{ const e=document.querySelector({JsonSerializer.Serialize(selector)}); e.scrollIntoView({{block:'center'}}); e.click(); return true; }})()");
+      if (result != "true") throw new InvalidOperationException("OCR block selection failed.");
+      await WaitForSmokeDomAsync("!!document.querySelector('textarea[aria-label=\"校正文字\"]')", TimeSpan.FromSeconds(30));
+    }
+    async Task SetDraftAsync(string text)
+    {
+      string result = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync($$"""
+        (() => { const e=document.querySelector('textarea[aria-label="校正文字"]');
+          if(!e) return false;
+          Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(e,{{JsonSerializer.Serialize(text)}});
+          e.dispatchEvent(new Event('input',{bubbles:true})); return true; })()
+        """);
+      if (result != "true") throw new InvalidOperationException("OCR draft input is missing.");
+      await WaitForSmokeDomAsync($"document.querySelector('textarea[aria-label=\"校正文字\"]')?.value === {JsonSerializer.Serialize(text)}", TimeSpan.FromSeconds(30));
+    }
+    await SelectBlockAsync(indices[0]);
+    await SetDraftAsync("CANCELLED_DRAFT201");
+    await ClickManagedSmokeButtonAsync("取消校正");
+    PdfWorkbenchState cancelled = await WaitForPaddlePdfAsync(state => !state.IsBusy, TimeSpan.FromSeconds(30));
+    if (cancelled.Revision != layered.Revision) throw new InvalidOperationException("Cancelling a draft changed PDF revision.");
+    await ClickManagedSmokeButtonAsync("插入空白页");
+    PdfWorkbenchState inserted = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.PageCount == 2, TimeSpan.FromSeconds(30));
+    await SelectBlockAsync(indices[0]); await SetDraftAsync("PAGE_SWITCH_DRAFT201");
+    await ClickManagedSmokeButtonAsync("下一页");
+    await WaitForSmokeDomAsync("!document.querySelector('textarea[aria-label=\"校正文字\"]') && document.querySelector('.pdf-inspection-sheet img')?.alt.includes('第 2 页')", TimeSpan.FromSeconds(30));
+    await ClickManagedSmokeButtonAsync("上一页");
+    await WaitForPaddlePdfAsync(state => state.SelectedPage == 0 && state.PageInspectStatusCode == "pdf.inspect.ready", TimeSpan.FromSeconds(30));
+    string[] replacements = [
+      "中文校正长句：高清检查中的可搜索文字应完整保存，保留扫描图形与其他文字块，并在重新打开后找到末尾标记CNTAIL201。",
+      "English correction keeps the entire searchable sentence after saving and reopening, including this final marker ENTAIL201."
+    ];
+    var edits = new List<object>();
+    PdfWorkbenchState edited = inserted;
+    for (int position = 0; position < indices.Length; position++)
+    {
+      await SelectBlockAsync(indices[position]);
+      string oldTextJson = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("document.querySelector('textarea[aria-label=\"校正文字\"]').value");
+      string oldText = JsonSerializer.Deserialize<string>(oldTextJson)!;
+      await SetDraftAsync(replacements[position]);
+      string reachable = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("""
+        (() => { const b=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='提交校正');
+          if(!b||b.disabled) return false; b.scrollIntoView({block:'center'}); b.focus(); const r=b.getBoundingClientRect();
+          return r.width>0&&r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight; })()
+        """);
+      if (reachable != "true") throw new InvalidOperationException("Correction button is unreachable in the narrow viewport.");
+      long before = edited.Revision;
+      await ClickManagedSmokeButtonAsync("提交校正");
+      edited = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.SessionId == inserted.SessionId && state.SelectedPage == 0 && state.Revision > before && state.PageInspectStatusCode == "pdf.inspect.ready" && state.PagePreview is not null && state.PageInspect is not null, TimeSpan.FromSeconds(30));
+      string expectedPreview = JsonSerializer.Serialize(edited.PagePreview!.Url);
+      await WaitForSmokeDomAsync($"(() => {{ const image=document.querySelector('.pdf-inspection-sheet img'); return image?.src === {expectedPreview} && image.complete && image.naturalWidth > 160 && image.naturalHeight > 0 && document.querySelectorAll('.pdf-text-box.ocr').length >= 2; }})()", TimeSpan.FromSeconds(30));
+      if (!edited.IsModified) throw new InvalidOperationException("Correction was not marked unsaved.");
+      edits.Add(new { block_index = indices[position], old_text = oldText, new_text = replacements[position], edited.Revision, edited.IsModified, edit_button_reachable = true });
+      paddleSmokePartialEvidence = new { input_kind = "pdf_editing", edits, edited.Revision, edited.IsModified };
+    }
+    string viewportJson = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("""
+      (() => { const b=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='保存');
+        if(!b||b.disabled) throw new Error('Save unavailable'); b.scrollIntoView({block:'center'}); b.focus(); const r=b.getBoundingClientRect();
+        const image=document.querySelector('.pdf-inspection-sheet img');
+        return {width:innerWidth,height:innerHeight,devicePixelRatio,save_reachable:r.width>0&&r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight,
+          hd_width:image?.naturalWidth,hd_height:image?.naturalHeight,hd_url:image?.src,boxes:document.querySelectorAll('.pdf-text-box').length}; })()
+      """);
+    JsonElement viewportEvidence = JsonSerializer.Deserialize<JsonElement>(viewportJson);
+    if (!viewportEvidence.TryGetProperty("save_reachable", out JsonElement saveReachable) || saveReachable.ValueKind != JsonValueKind.True ||
+        !viewportEvidence.TryGetProperty("hd_width", out JsonElement hdWidth) || !hdWidth.TryGetInt32(out int width) || width <= 160 ||
+        !viewportEvidence.TryGetProperty("hd_height", out JsonElement hdHeight) || !hdHeight.TryGetInt32(out int height) || height <= 0)
+      throw new InvalidOperationException($"Save button or current revision HD preview evidence is unavailable: {viewportJson}");
+    string editingScreenshot = Path.Combine(ValidatePaddleSmokeOwnedPath(RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_EXPORT_DIR"), "pdf editing evidence"), "pdf-editing-narrow.png");
+    using (new FileStream(editingScreenshot, FileMode.CreateNew)) { }
+    StorageFile editingPreview = await StorageFile.GetFileFromPathAsync(editingScreenshot);
+    using (IRandomAccessStream previewStream = await editingPreview.OpenAsync(FileAccessMode.ReadWrite))
+    {
+      await WorkbenchWebView.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, previewStream);
+      await previewStream.FlushAsync();
+    }
+    object saved = await RunPaddlePdfSaveAsync("editing");
+    string outputPath = JsonSerializer.SerializeToElement(saved).GetProperty("file").GetString()!;
+    await ClickManagedSmokeButtonAsync("关闭文档");
+    await WaitForPaddlePdfAsync(state => state.PageCount == 0, TimeSpan.FromSeconds(30));
+    await ClickManagedSmokeButtonAsync("打开 PDF"); await CompletePaddleOpenPickerAsync(outputPath);
+    PdfWorkbenchState reopened = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.PageCount == 2 && state.DetectedCount == 2 && state.PageInspectStatusCode == "pdf.inspect.ready", TimeSpan.FromSeconds(30));
+    await WaitForSmokeDomAsync("document.querySelectorAll('.pdf-text-box.native').length > 0", TimeSpan.FromSeconds(30));
+    string reopenedJson = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("[...document.querySelectorAll('.pdf-text-box')].map(e=>e.getAttribute('aria-label'))");
+    string[] reopenedLabels = JsonSerializer.Deserialize<string[]>(reopenedJson) ?? [];
+    if (!reopenedLabels.Any(label => label.Contains(replacements[0][..16], StringComparison.Ordinal)) || !reopenedLabels.Any(label => label.Contains(replacements[1][..26], StringComparison.Ordinal)) || reopenedLabels.Any(label => label.Contains("CANCELLED_DRAFT201", StringComparison.Ordinal) || label.Contains("PAGE_SWITCH_DRAFT201", StringComparison.Ordinal)))
+      throw new InvalidOperationException("Reopened PDF does not expose corrected text previews or contains cancelled drafts.");
+    return new { edits, cancelled_revision = cancelled.Revision, inserted_revision = inserted.Revision,
+      edited.Revision, edited.IsModified, saved, reopened_revision = reopened.Revision, reopened.IsBusy,
+      reopened.PageCount, reopened_resources = new { reopened.PagePreview, reopened.PageInspect }, reopened_labels = reopenedLabels, editing_screenshot = editingScreenshot, full_text_verification = "external-extraction-required",
+      window_scale = scale, window_dpi = PaddleSmokeNative.GetDpiForWindow(WinRT.Interop.WindowNative.GetWindowHandle(this)), viewport = viewportEvidence };
+  }
   private async Task<BatchWorkbenchState> WaitForPaddleBatchAsync(
     Func<BatchWorkbenchState, bool> done, TimeSpan timeout)
   {

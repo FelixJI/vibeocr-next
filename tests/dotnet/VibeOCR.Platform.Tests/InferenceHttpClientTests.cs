@@ -13,6 +13,31 @@ public sealed class InferenceHttpClientTests
     private static readonly Uri Base = new("http://127.0.0.1:1");
 
     [Fact]
+    public async Task PdfInspectionAndBlockEditUseSinglePageTypedWire()
+    {
+        var handler = new FakeHandler([
+            """{"schema_version":2,"instance_id":"test","page":2,"rotation":90,"rect":[0,0,792,612],"ocr_blocks":[{"index":4,"text":"原文","score":0,"score_unknown":true,"is_manually_edited":false,"bbox":[100,200,400,300]}],"native_lines":[]}""",
+            """{"schema_version":2,"instance_id":"test","diff":{"replaced_pages":[{"page_index":2}]},"extra":{"changed":true}}"""
+        ]);
+        await using var client = new InferenceHttpClient(Base, "tok", handler);
+        Wire.PageInspectResponse inspect = await client.InspectPdfPageAsync("pdf-7", 2, CancellationToken.None);
+        Assert.Equal("/v2/pdf/sessions/pdf-7/page_inspect", handler.LastPath);
+        Assert.Equal(2, inspect.Page);
+        Assert.True(inspect.OcrBlocks![0].ScoreUnknown);
+        using (var body = JsonDocument.Parse(handler.LastBody!)) Assert.Equal(2, body.RootElement.GetProperty("page").GetInt32());
+        Wire.PdfMutationResponse edit = await client.UpdatePdfBlockTextAsync("pdf-7", new Wire.UpdateBlockTextRequest {
+            Page = 2, BlockIndex = 4, NewText = "校正 English", ExpectedOldText = "原文", PdfSettings = new Dictionary<string, JsonElement> { ["render_dpi"] = JsonSerializer.SerializeToElement(240) }
+        }, CancellationToken.None);
+        Assert.Equal("/v2/pdf/sessions/pdf-7/update_block_text", handler.LastPath);
+        Assert.True(edit.Extra!["changed"].GetBoolean());
+        Assert.Equal(2, edit.Diff!.ReplacedPages![0].PageIndex);
+        using (var body = JsonDocument.Parse(handler.LastBody!)) {
+            Assert.Equal(4, body.RootElement.GetProperty("block_index").GetInt32());
+            Assert.Equal("原文", body.RootElement.GetProperty("expected_old_text").GetString());
+            Assert.Equal(240, body.RootElement.GetProperty("pdf_settings").GetProperty("render_dpi").GetInt32());
+        }
+    }
+    [Fact]
     public async Task SubmitPostsManifestAndAttachmentsToGenericJobsRouteAsync()
     {
         var handler = new FakeHandler("""

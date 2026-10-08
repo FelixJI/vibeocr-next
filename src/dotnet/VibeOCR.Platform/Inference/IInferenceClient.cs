@@ -107,6 +107,10 @@ public interface IInferenceClient : IAsyncDisposable
     Task LoadPdfAsync(string sessionId, Action<System.Text.Json.JsonElement> progress, CancellationToken ct) => Task.FromException(new NotSupportedException("PDF operation unavailable."));
     Task<byte[]> RenderPdfPreviewAsync(string sessionId, int page, int dpi, CancellationToken ct) =>
         Task.FromException<byte[]>(new NotSupportedException("PDF preview unavailable."));
+    Task<Wire.PdfMutationResponse> UpdatePdfBlockTextAsync(string sessionId, Wire.UpdateBlockTextRequest request, CancellationToken ct) =>
+        Task.FromException<Wire.PdfMutationResponse>(new NotSupportedException("PDF block update unavailable."));
+    Task<Wire.PageInspectResponse> InspectPdfPageAsync(string sessionId, int page, CancellationToken ct) =>
+        Task.FromException<Wire.PageInspectResponse>(new NotSupportedException("PDF page inspect unavailable."));
     Task<Wire.PdfMutationResponse> AddPdfTextLayersAsync(string sessionId, Wire.BatchAddTextLayerRequest request, CancellationToken ct) =>
         Task.FromException<Wire.PdfMutationResponse>(new NotSupportedException("PDF text layers unavailable."));
     Task DeletePdfTextLayersAsync(string sessionId, int[] pages, Action<System.Text.Json.JsonElement> progress, CancellationToken ct) =>

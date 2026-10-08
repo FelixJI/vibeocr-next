@@ -582,6 +582,25 @@ public static class WorkbenchBridgeCodec
       case ("pdf", "selectPage"):
         EnsureObjectWithFields(arguments, new HashSet<string> { "page", "selected" }, "command arguments");
         return new SelectPdfPageCommand(arguments.GetProperty("page").GetInt32(), arguments.GetProperty("selected").GetBoolean());
+      case ("pdf", "setCurrentPage"):
+        EnsureObjectWithFields(arguments, new HashSet<string> { "page" }, "command arguments");
+        return new SetCurrentPdfPageCommand(arguments.GetProperty("page").GetInt32());
+      case ("pdf", "updateBlockText"):
+        EnsureObjectWithFields(arguments, new HashSet<string> { "page", "blockIndex", "newText", "expectedOldText", "revision", "sessionId" }, "command arguments");
+        string? expectedOld = arguments.GetProperty("expectedOldText").GetString();
+        string? pdfSession = arguments.GetProperty("sessionId").GetString();
+        string newText = arguments.GetProperty("newText").GetString()!;
+        if (string.IsNullOrWhiteSpace(newText) || expectedOld is null || string.IsNullOrWhiteSpace(pdfSession))
+          throw new WorkbenchBridgeProtocolException("PDF block text is invalid.");
+        return new UpdatePdfBlockTextCommand(
+          arguments.GetProperty("page").GetInt32(),
+          arguments.GetProperty("blockIndex").GetInt32(),
+          newText,
+          expectedOld,
+          arguments.GetProperty("revision").GetInt64(), pdfSession);
+      case ("pdf", "retryPageInspect"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new RetryPdfPageInspectCommand();
       case ("pdf", "setWindow"):
         return new SetPdfWindowCommand(ParseWindowStart(arguments));
       case ("qrcode", "generate"):
@@ -1392,6 +1411,12 @@ public static class WorkbenchBridgeCodec
       taskEngine = pdf.TaskEngine,
       pdf.Revision, pdf.IsModified, pdf.DetectedCount, pdf.TextLayerCount, pdf.AddedCount,
       pdf.Phase, pdf.ProgressCurrent, pdf.ProgressTotal, pdf.Summary, pdf.CanAddTextLayer, pdf.ProcessingSettings,
+      pagePreview = pdf.PagePreview,
+      pageInspect = pdf.PageInspect,
+      pageInspectStatusCode = pdf.PageInspectStatusCode,
+      sessionId = pdf.SessionId,
+      canInspectPage = pdf.CanInspectPage,
+      canCorrectText = pdf.CanCorrectText,
     },
     QrCodeWorkbenchState qrCode => new
     {

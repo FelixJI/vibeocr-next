@@ -272,11 +272,53 @@ class TestTextLayerOperations:
 
     def test_update_block_text(self) -> None:
         client, post = self._client()
-        client.update_block_text("s1", 0, 2, "new")
+        client.update_block_text(
+            "s1", 0, 2, "new", expected_old_text="old", pdf_settings={"a": 1}
+        )
         assert post.call_args.args == (
             "/session/s1/update_block_text",
-            {"page": 0, "block_index": 2, "new_text": "new"},
+            {
+                "page": 0,
+                "block_index": 2,
+                "new_text": "new",
+                "expected_old_text": "old",
+                "pdf_settings": {"a": 1},
+            },
         )
+
+    def test_page_inspect(self) -> None:
+        from vibeocr.runtime.documents.wire_schemas import (
+            PageInspectOcrBlock,
+            PageInspectResponse,
+        )
+
+        client, post = self._client()
+        payload = PageInspectResponse(
+            page=0,
+            rotation=90,
+            rect=(0.0, 0.0, 792.0, 612.0),
+            preproc_angle=90,
+            ocr_blocks=[
+                PageInspectOcrBlock(
+                    index=0,
+                    text="hi",
+                    score=0.9,
+                    score_unknown=False,
+                    is_manually_edited=True,
+                    bbox=(100.0, 100.0, 300.0, 200.0),
+                )
+            ],
+        )
+        post.return_value = MagicMock(
+            status_code=200, content=payload.model_dump_json().encode()
+        )
+        result = client.page_inspect("s1", 0)
+        assert post.call_args.args == (
+            "/session/s1/page_inspect",
+            {"page": 0},
+        )
+        assert result.ocr_blocks[0].is_manually_edited is True
+        assert result.rotation == 90
 
 
 # ---------------------------------------------------------------------------

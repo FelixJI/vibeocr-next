@@ -40,6 +40,8 @@ public sealed class DeferredPdfSessionClient : IPdfSessionClient
     public Task<Wire.PdfDocumentMirror> GetModelAsync(string sessionId, CancellationToken ct) => Current.GetModelAsync(sessionId, ct);
     public Task LoadAsync(string sessionId, Action<JsonElement> progress, CancellationToken ct) => Current.LoadAsync(sessionId, progress, ct);
     public Task<byte[]> RenderPreviewAsync(string sessionId, int page, int dpi, CancellationToken ct) => Current.RenderPreviewAsync(sessionId, page, dpi, ct);
+    public Task<Wire.PdfMutationResponse> UpdateBlockTextAsync(string sessionId, Wire.UpdateBlockTextRequest request, CancellationToken ct) => Current.UpdateBlockTextAsync(sessionId, request, ct);
+    public Task<Wire.PageInspectResponse> InspectPageAsync(string sessionId, int page, CancellationToken ct) => Current.InspectPageAsync(sessionId, page, ct);
     public Task<Wire.PdfMutationResponse> AddTextLayersAsync(string sessionId, Wire.BatchAddTextLayerRequest request, CancellationToken ct) => Current.AddTextLayersAsync(sessionId, request, ct);
     public Task DeleteTextLayersAsync(string sessionId, int[] pages, Action<JsonElement> progress, CancellationToken ct) => Current.DeleteTextLayersAsync(sessionId, pages, progress, ct);
     public Task CancelAsync(string sessionId, CancellationToken ct) => Current.CancelAsync(sessionId, ct);

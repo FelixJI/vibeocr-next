@@ -958,6 +958,84 @@ public sealed record OpenResponse
     public required PdfDocumentMirror Model { get; init; }
 }
 
+public sealed record PageInspectNativeLine
+{
+    [JsonPropertyName("bbox")]
+    public required IReadOnlyList<JsonElement> Bbox { get; init; }
+
+    [JsonPropertyName("text_preview")]
+    public required string TextPreview { get; init; }
+
+    [JsonPropertyName("char_count")]
+    public required int CharCount { get; init; }
+}
+
+public sealed record PageInspectOcrBlock
+{
+    [JsonPropertyName("index")]
+    public required int Index { get; init; }
+
+    [JsonPropertyName("text")]
+    public required string Text { get; init; }
+
+    [JsonPropertyName("score")]
+    public required double Score { get; init; }
+
+    [JsonPropertyName("score_unknown")]
+    public required bool ScoreUnknown { get; init; }
+
+    [JsonPropertyName("is_manually_edited")]
+    public required bool IsManuallyEdited { get; init; }
+
+    [JsonPropertyName("label")]
+    public string? Label { get; init; }
+
+    [JsonPropertyName("bbox")]
+    public IReadOnlyList<JsonElement>? Bbox { get; init; }
+
+    [JsonPropertyName("polygon")]
+    public IReadOnlyList<double>? Polygon { get; init; }
+
+    [JsonPropertyName("text_truncated")]
+    public bool? TextTruncated { get; init; }
+}
+
+public sealed record PageInspectRequest
+{
+    [JsonPropertyName("page")]
+    public required int Page { get; init; }
+}
+
+public sealed record PageInspectResponse
+{
+    [JsonPropertyName("page")]
+    public required int Page { get; init; }
+
+    [JsonPropertyName("rotation")]
+    public required int Rotation { get; init; }
+
+    [JsonPropertyName("rect")]
+    public required IReadOnlyList<JsonElement> Rect { get; init; }
+
+    [JsonPropertyName("preproc_angle")]
+    public int? PreprocAngle { get; init; }
+
+    [JsonPropertyName("ocr_blocks")]
+    public IReadOnlyList<PageInspectOcrBlock>? OcrBlocks { get; init; }
+
+    [JsonPropertyName("native_lines")]
+    public IReadOnlyList<PageInspectNativeLine>? NativeLines { get; init; }
+
+    [JsonPropertyName("schema_version")]
+    public required int SchemaVersion { get; init; }
+
+    [JsonPropertyName("instance_id")]
+    public required string InstanceId { get; init; }
+
+    [JsonPropertyName("truncated")]
+    public bool? Truncated { get; init; }
+}
+
 public sealed record PageListRequest
 {
     [JsonPropertyName("pages")]
@@ -1994,4 +2072,10 @@ public sealed record UpdateBlockTextRequest
 
     [JsonPropertyName("new_text")]
     public required string NewText { get; init; }
+
+    [JsonPropertyName("expected_old_text")]
+    public string? ExpectedOldText { get; init; }
+
+    [JsonPropertyName("pdf_settings")]
+    public IReadOnlyDictionary<string, JsonElement>? PdfSettings { get; init; }
 }

@@ -26,6 +26,8 @@ public interface IPdfSessionClient : IAsyncDisposable
     Task<Wire.PdfDocumentMirror> GetModelAsync(string sessionId, CancellationToken ct);
     Task LoadAsync(string sessionId, Action<JsonElement> progress, CancellationToken ct);
     Task<byte[]> RenderPreviewAsync(string sessionId, int page, int dpi, CancellationToken ct);
+    Task<Wire.PdfMutationResponse> UpdateBlockTextAsync(string sessionId, Wire.UpdateBlockTextRequest request, CancellationToken ct);
+    Task<Wire.PageInspectResponse> InspectPageAsync(string sessionId, int page, CancellationToken ct);
     Task<Wire.PdfMutationResponse> AddTextLayersAsync(string sessionId, Wire.BatchAddTextLayerRequest request, CancellationToken ct);
     Task DeleteTextLayersAsync(string sessionId, int[] pages, Action<JsonElement> progress, CancellationToken ct);
     Task CancelAsync(string sessionId, CancellationToken ct);

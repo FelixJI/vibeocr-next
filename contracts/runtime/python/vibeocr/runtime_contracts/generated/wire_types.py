@@ -291,6 +291,40 @@ class OpenResponse(TypedDict, total=False):
     model: Required[PdfDocumentMirror]
 
 
+class PageInspectNativeLine(TypedDict, total=False):
+    bbox: Required[list[Any]]
+    text_preview: Required[str]
+    char_count: Required[int]
+
+
+class PageInspectOcrBlock(TypedDict, total=False):
+    index: Required[int]
+    text: Required[str]
+    score: Required[float]
+    score_unknown: Required[bool]
+    is_manually_edited: Required[bool]
+    label: NotRequired[str]
+    bbox: NotRequired[list[Any] | None]
+    polygon: NotRequired[list[float] | None]
+    text_truncated: NotRequired[bool]
+
+
+class PageInspectRequest(TypedDict, total=False):
+    page: Required[int]
+
+
+class PageInspectResponse(TypedDict, total=False):
+    page: Required[int]
+    rotation: Required[int]
+    rect: Required[list[Any]]
+    preproc_angle: NotRequired[int]
+    ocr_blocks: NotRequired[list[PageInspectOcrBlock]]
+    native_lines: NotRequired[list[PageInspectNativeLine]]
+    schema_version: Required[Literal[2]]
+    instance_id: Required[str]
+    truncated: NotRequired[bool]
+
+
 class PageListRequest(TypedDict, total=False):
     pages: Required[list[int]]
 
@@ -755,3 +789,5 @@ class UpdateBlockTextRequest(TypedDict, total=False):
     page: Required[int]
     block_index: Required[int]
     new_text: Required[str]
+    expected_old_text: NotRequired[str | None]
+    pdf_settings: NotRequired[dict[str, Any] | None]

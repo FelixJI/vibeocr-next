@@ -37,6 +37,7 @@ from vibeocr.runtime.documents.models.pdf_document import (
     PdfPageInfo,
     TextLayerInfo,
 )
+from vibeocr.runtime.documents.pdf_block_editor import PdfBlockEditor
 from vibeocr.runtime.documents.pdf_service import PdfService, TextLayerBatchError
 from vibeocr.runtime.documents.wire_schemas import (
     AddTextLayerRequest,
@@ -53,6 +54,8 @@ from vibeocr.runtime.documents.wire_schemas import (
     MutateResponse,
     OpenRequest,
     OpenResponse,
+    PageInspectRequest,
+    PageInspectResponse,
     PageListRequest,
     PdfDocumentMirror,
     PdfPageInfoMirror,
@@ -206,6 +209,7 @@ class BackendSession:
     file_path: str
     doc: fitz.Document
     pdf_document: PdfDocument
+    block_editor: PdfBlockEditor | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
     # fitz(Document) 非线程安全:并发渲染缩略图时串行化 get_pixmap 等 fitz 调用。
     # 锁粒度仅覆盖 fitz 栅格化,PIL 缩放/PNG 编码在锁外可并行。
@@ -217,6 +221,21 @@ class BackendSession:
     state: str = "OPEN"  # OPEN / CLOSING / CLOSED
     active_ops: int = 0
     _ops_cond: threading.Condition = field(default_factory=threading.Condition)
+
+
+@contextmanager
+def _invalidate_block_edits(s: BackendSession, pages: list[int]) -> Iterator[None]:
+    if s.block_editor is not None:
+        s.block_editor.invalidate(pages)
+    try:
+        yield
+    finally:
+        if (
+            s.block_editor is not None
+            and s.block_editor.doc is s.doc
+            and not s.doc.is_closed
+        ):
+            s.block_editor.prune()
 
 
 class SessionRegistry:
@@ -268,6 +287,7 @@ class SessionRegistry:
             # 在 fitz_lock 内 close，避免与持锁的 render/load/mutate 并发
             with s.fitz_lock:
                 try:
+                    s.block_editor = None
                     s.doc.close()
                 except Exception:
                     pass
@@ -525,6 +545,8 @@ def delete_pages(sid: str, req: DeletePagesRequest) -> MutateResponse:
     try:
         with _fitz_op(s), s.fitz_lock:
             PdfService.delete_pages(s.doc, s.pdf_document, req.pages)
+            if s.block_editor is not None:
+                s.block_editor.prune()
         return MutateResponse(diff=_diff_full(s.pdf_document))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -616,7 +638,7 @@ def add_text_layer(sid: str, req: AddTextLayerRequest) -> MutateResponse:
             text_blocks=text_blocks,
             preproc_angle=int(ocr_result_data.get("preproc_angle", 0) or 0),
         )
-        with _fitz_op(s), s.fitz_lock:
+        with _fitz_op(s), s.fitz_lock, _invalidate_block_edits(s, [req.page]):
             PdfService.add_text_layer(
                 s.doc,
                 s.pdf_document,
@@ -654,7 +676,11 @@ def add_text_layer_batch(sid: str, req: BatchAddTextLayerRequest) -> MutateRespo
     # 导致整批 500（文字层已在内存 doc 中，用户可手动保存）。落盘失败仅记
     # 日志并返回 extra.saved=False，调用方不写 sidecar。
     try:
-        with _fitz_op(s), s.fitz_lock:
+        with (
+            _fitz_op(s),
+            s.fitz_lock,
+            _invalidate_block_edits(s, [page.page for page in req.pages]),
+        ):
             results = PdfService.add_text_layer_batch(
                 s.doc,
                 s.pdf_document,
@@ -694,6 +720,7 @@ def add_text_layer_batch(sid: str, req: BatchAddTextLayerRequest) -> MutateRespo
                     # _compress_in_place 失败会 close 原 doc（无法恢复原对象），
                     # 需从备份回滚后的文件重新打开以保证 s.doc 始终可用。
                     try:
+                        s.block_editor = None
                         s.doc = PdfService._compress_in_place(
                             s.doc, save_path, clean=False
                         )
@@ -706,6 +733,7 @@ def add_text_layer_batch(sid: str, req: BatchAddTextLayerRequest) -> MutateRespo
                         )
                         # _compress_in_place 已 close 原 doc 并回滚文件，需重开
                         try:
+                            s.block_editor = None
                             s.doc = fitz.open(save_path)
                         except Exception:
                             logger.error(
@@ -745,8 +773,8 @@ def rewrite_text_layer(sid: str, req: RewriteTextLayerRequest) -> MutateResponse
             )
             for b in req.text_blocks
         ]
-        with _fitz_op(s), s.fitz_lock:
-            PdfService.rewrite_text_layer(
+        with _fitz_op(s), s.fitz_lock, _invalidate_block_edits(s, [req.page]):
+            written, skipped = PdfService.rewrite_text_layer(
                 s.doc,
                 s.pdf_document,
                 req.page,
@@ -754,30 +782,144 @@ def rewrite_text_layer(sid: str, req: RewriteTextLayerRequest) -> MutateResponse
                 req.preproc_angle,
                 pdf_settings=_settings_from_dict(req.pdf_settings),
             )
+        if written == 0:
+            # 零写入＝整页未提交，明确 422 而非假成功；纯 OCR 部分写入仍沿既有语义成功。
+            raise HTTPException(
+                status_code=422,
+                detail=f"块写入未全部成功，已保留原内容（written=0, skipped={skipped}）",
+            )
         return MutateResponse(
-            diff=_diff_pages(s.pdf_document, [req.page], modified=True)
+            diff=_diff_pages(
+                s.pdf_document, [req.page], modified=s.pdf_document.is_modified
+            )
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"重写文字层失败: {e}") from e
 
 
 @app.post("/session/{sid}/update_block_text", response_model=MutateResponse)
 def update_block_text(sid: str, req: UpdateBlockTextRequest) -> MutateResponse:
-    """双击编辑文字块(仅内存模型)。"""
+    """双击编辑文字块：原子写入当前内存 doc 后才更新权威模型。
+
+    事务语义（与 add_text_layer_batch 的 candidate 单页事务一致）：锁内在
+    本页块克隆上仅改目标块，经 rewrite_text_layer(require_all=True) 整页
+    重写；全部块写入成功才提交 doc 并更新模型/dirty。任一块被跳过、写入
+    失败 → 原内容与模型不变（fail-closed）。新旧文本相同 → changed=False
+    返回，不推进 dirty。
+    """
+    import math
+    from dataclasses import replace
+
     s = _get_registry().get(sid)
     try:
-        info = s.pdf_document.pages[req.page]
-        if 0 <= req.block_index < len(info.ocr_text_blocks):
-            b = info.ocr_text_blocks[req.block_index]
-            if b.text != req.new_text:
-                b.text = req.new_text
-                b.is_manually_edited = True
-                s.pdf_document.is_modified = True
+        if not req.new_text or not req.new_text.strip():
+            raise HTTPException(status_code=400, detail="新文本不能为空")
+        if len(req.new_text) > 2000:
+            raise HTTPException(status_code=400, detail="新文本超出单块长度限制")
+        with _fitz_op(s), s.fitz_lock:
+            # 页索引在锁内校验，避免检查后结构变化
+            if req.page < 0 or req.page >= len(s.pdf_document.pages):
+                raise HTTPException(status_code=400, detail="页索引越界")
+            info = s.pdf_document.pages[req.page]
+            blocks = list(info.ocr_text_blocks)
+            if not (0 <= req.block_index < len(blocks)):
+                raise HTTPException(status_code=400, detail="块索引越界")
+            target = blocks[req.block_index]
+            if (
+                req.expected_old_text is not None
+                and target.text != req.expected_old_text
+            ):
+                raise HTTPException(
+                    status_code=409, detail="块内容已被其他修改更新，请刷新后重试"
+                )
+            if target.text == req.new_text:
+                return MutateResponse(
+                    diff=_diff_pages(
+                        s.pdf_document,
+                        [req.page],
+                        modified=s.pdf_document.is_modified,
+                    ),
+                    extra={"changed": False},
+                )
+            # 与 batch 反序列化同规则预验证全部块：任一块缺文本/几何 → 拒绝，
+            # 不允许静默丢弃非目标块。
+            for position, block in enumerate(blocks):
+                if not (block.text and block.text.strip()):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"第 {position} 块文本为空，页面不可整页重写提交",
+                    )
+                bbox = block.bbox
+                if (
+                    bbox is None
+                    or len(bbox) != 4
+                    or not all(
+                        isinstance(v, (int, float))
+                        and math.isfinite(v)
+                        and 0 <= v <= 1000
+                        for v in bbox
+                    )
+                    or bbox[2] <= bbox[0]
+                    or bbox[3] <= bbox[1]
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"第 {position} 块缺少可写几何，页面不可整页重写提交",
+                    )
+            cloned = [
+                replace(
+                    block,
+                    text=req.new_text,
+                    is_manually_edited=True,
+                )
+                if position == req.block_index
+                else replace(block)
+                for position, block in enumerate(blocks)
+            ]
+            if s.block_editor is None or s.block_editor.doc is not s.doc:
+                s.block_editor = PdfBlockEditor(s.doc)
+            written, skipped = s.block_editor.rewrite(
+                s.pdf_document,
+                req.page,
+                cloned,
+                info.ocr_preproc_angle,
+                _settings_from_dict(req.pdf_settings),
+            )
+            if written != len(cloned) or skipped:
+                # require_all 下 batch 已不提交，这里是防御性二次校验。
+                raise HTTPException(
+                    status_code=422,
+                    detail="块写入未全部成功，已保留原内容",
+                )
         return MutateResponse(
-            diff=_diff_pages(s.pdf_document, [req.page], modified=True)
+            diff=_diff_pages(
+                s.pdf_document, [req.page], modified=s.pdf_document.is_modified
+            ),
+            extra={"changed": True},
         )
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"更新块文字失败: {e}") from e
+
+
+@app.post("/session/{sid}/page_inspect", response_model=PageInspectResponse)
+def page_inspect(sid: str, req: PageInspectRequest) -> PageInspectResponse:
+    """当前页检查 payload：OCR 块与原生文字层的显示空间归一化投影。"""
+    s = _get_registry().get(sid)
+    try:
+        with _fitz_op(s), s.fitz_lock:
+            return PdfService.page_inspect(s.doc, s.pdf_document, req.page)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"页检查失败: {e}") from e
 
 
 # ---- 流式进度操作 -------------------------------------------------------
@@ -820,7 +962,7 @@ def delete_text_layers(sid: str, req: PageListRequest) -> StreamingResponse:
             try:
                 # page_has_text + delete_text_layers 是一次"检测+删除"单元,
                 # 一起进锁避免被并发渲染线程插入(与持 fitz_lock 的 render_* 互斥)。
-                with _fitz_op(s), s.fitz_lock:
+                with _fitz_op(s), s.fitz_lock, _invalidate_block_edits(s, [page]):
                     has_text = PdfService.page_has_text(s.doc, page)
                     if not has_text:
                         PdfService.delete_text_layers(s.doc, s.pdf_document, page)
@@ -865,7 +1007,17 @@ def save(sid: str, req: SaveRequest) -> SaveResponse:
     """保存(rewrite + 落盘)。doc 可能被 close+reopen 替换。"""
     s = _get_registry().get(sid)
     try:
-        with _fitz_op(s), s.fitz_lock:
+        with (
+            _fitz_op(s),
+            s.fitz_lock,
+            _invalidate_block_edits(
+                s,
+                list(range(s.doc.page_count))
+                if req.rewrite_text_layers
+                or (req.pdf_settings or {}).get("clean_on_save")
+                else [],
+            ),
+        ):
             result = PdfService.save_with_rewrite(
                 s.doc,
                 s.pdf_document,
@@ -879,6 +1031,7 @@ def save(sid: str, req: SaveRequest) -> SaveResponse:
             # 的 fitz doc 调 close 会触发原生 use-after-free（0xC0000409）。
             new_doc = getattr(result, "new_doc", None)
             if new_doc is not None:
+                s.block_editor = None
                 s.doc = new_doc
         saved_path = result.path or s.pdf_document.file_path or ""
         # 保存只改变持久化状态，不改变页内容/结构。返回完整文档会把数百页 OCR

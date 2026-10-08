@@ -1105,6 +1105,17 @@ def create_app(
             return _error_response(
                 ErrorCode.VALIDATION_ERROR, instance_id, detail={"reason": str(exc)}
             )
+        backend_status = getattr(exc, "status", None)
+        if isinstance(backend_status, int) and 400 <= backend_status < 500:
+            # 后端 4xx 逐状态归类；未覆盖状态（如 409 session closing）无通用
+            # registry 码，保守 INTERNAL_ERROR，不得误报为可修正的参数错误。
+            if backend_status == 404:
+                code = ErrorCode.RESOURCE_NOT_FOUND
+            elif backend_status in (400, 422):
+                code = ErrorCode.VALIDATION_ERROR
+            else:
+                code = ErrorCode.INTERNAL_ERROR
+            return _error_response(code, instance_id, detail={"reason": str(exc)})
         return _error_response(
             ErrorCode.INTERNAL_ERROR, instance_id, detail={"error": str(exc)}
         )
@@ -1366,11 +1377,30 @@ def create_app(
             page = int(body.get("page", 0))
             block_index = int(body.get("block_index", 0))
             new_text = body.get("new_text", "")
+            expected_old_text = body.get("expected_old_text")
+            pdf_settings = body.get("pdf_settings")
             return _pdf_response(
                 _pdf_adapter().update_block_text(
-                    session_id, page, block_index, new_text
+                    session_id,
+                    page,
+                    block_index,
+                    new_text,
+                    expected_old_text=expected_old_text,
+                    pdf_settings=pdf_settings,
                 )
             )
+        except Exception as exc:
+            return _pdf_error(exc)
+
+    @app.post(
+        "/v2/pdf/sessions/{session_id}/page_inspect",
+        response_model=wire.PageInspectResponse,
+    )
+    async def pdf_page_inspect(session_id: str, request: Request) -> JsonResult:
+        try:
+            body = await _pdf_body(request, wire.PageInspectRequest)
+            page = int(body.get("page", 0))
+            return _pdf_response(_pdf_adapter().page_inspect(session_id, page))
         except Exception as exc:
             return _pdf_error(exc)
 

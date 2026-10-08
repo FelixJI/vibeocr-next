@@ -5,13 +5,14 @@ Goal #110 隔离候选专用 Paddle 五模式实机冒烟。
 .DESCRIPTION
 只复制全新候选到新的隔离根（不删除/复用任何已有 state，不读取真实
 桌面内容），用仓库 Python 生成合成 fixture，然后按阶段启动候选应用：
-  install   —— 从常规组件入口准备 PaddleOCR · CPU，公开来源预览 paddleocr-cpu
+  install   —— 通过既有宿主命令创建 ASCII 空环境 paddle-smoke-cpu，再从常规组件入口预览 paddleocr-cpu
                配方并确认安装（与 managed-environment 冒烟同一公共 UI）。
   recognize —— 每模式一次独立进程：切换环境、公共 UI 选模式、设置真实
                非默认选项并保存、纯截图（合成 fixture 选区器）+显式
                "识别当前图"、校验 job/环境/管线/选项归属、结构化预览、
                复制与 UI 保存导出。提交被拒 = blocked，真实 job 失败 =
                failed；两者都不是 passed，不盲重试。
+隔离环境固定使用 ASCII 名，避免验收依赖卷的 8.3 短名称设置；生产非 ASCII 路径策略不变。
 证据保留在隔离根；GPU 保持 UNVERIFIED。
 
 .PARAMETER ProductRoot
@@ -27,6 +28,8 @@ Goal #110 隔离候选专用 Paddle 五模式实机冒烟。
 额外真实输入入口：file/batch 使用表格模式，pdf 使用文档结构模式。
 pdf_text_layer 使用文字 OCR，点击添加文字层并验证 dirty/保存状态；
 默认不运行；可与 Modes 空数组组合单独执行。
+pdf_editing 使用一次普通文字 OCR，验证高清检查、取消/切页、中英文长句校正、保存重开和按钮可达。
+UI phase 通过后由 scripts/verify_pdf_editing_export.py 对导出 PDF 做最终 export verification（完整长句/尾标记/旧文/未改块/取消草稿/扫描像素/空白页），失败计入总退出码。
 pdf_operations 验证自动文字朝向与插页/重排组合，仅使用已准备的本地模型。
 新隔离环境应指定 Modes paddle_text，先通过普通 OCR 公共 UI 显式准备模型，
 再执行 pdf_operations；自动方向不会自行下载缺失模型。
@@ -54,7 +57,7 @@ param(
         'paddle_text', 'paddle_table', 'paddle_formula',
         'paddle_structure', 'paddle_document_vl'
     ),
-    [ValidateSet("file", "batch", "pdf", "pdf_text_layer", "pdf_operations")]
+    [ValidateSet("file", "batch", "pdf", "pdf_text_layer", "pdf_operations", "pdf_editing")]
     [string[]]$InputKinds = @(),
     [int]$ModeTimeoutMinutes = 40,
     [int]$InstallTimeoutMinutes = 60,
@@ -203,7 +206,7 @@ foreach ($name in @(
     'VIBEOCR_PADDLE_SMOKE_HEALTH', 'VIBEOCR_PADDLE_SMOKE_PHASE',
     'VIBEOCR_PADDLE_SMOKE_MODE', 'VIBEOCR_PADDLE_SMOKE_PIPELINE',
     'VIBEOCR_PADDLE_SMOKE_INPUT_KIND', 'VIBEOCR_PADDLE_SMOKE_SECOND_FIXTURE',
-    'VIBEOCR_PADDLE_SMOKE_PDF_TEXT_LAYER',
+    'VIBEOCR_PADDLE_SMOKE_PDF_TEXT_LAYER', 'VIBEOCR_PADDLE_SMOKE_PDF_EDITING',
     'VIBEOCR_PADDLE_SMOKE_FIXTURE', 'VIBEOCR_PADDLE_SMOKE_OPTION_NAME',
     'VIBEOCR_PADDLE_SMOKE_OPTION_VALUE', 'VIBEOCR_PADDLE_SMOKE_OPTION_KIND',
     'VIBEOCR_PADDLE_SMOKE_TOKENS', 'VIBEOCR_PADDLE_SMOKE_EXPORT_BUTTONS',
@@ -324,9 +327,9 @@ try {
         }
     }
     foreach ($inputKind in $InputKinds) {
-        $inputMode = if ($inputKind -in @('pdf_text_layer', 'pdf_operations')) { 'paddle_text' } elseif ($inputKind -eq 'pdf') { 'paddle_structure' } else { 'paddle_table' }
+        $inputMode = if ($inputKind -in @('pdf_text_layer', 'pdf_operations', 'pdf_editing')) { 'paddle_text' } elseif ($inputKind -eq 'pdf') { 'paddle_structure' } else { 'paddle_table' }
         $spec = $modeSpec[$inputMode]
-        $fixtureName = if ($inputKind -eq 'pdf_operations') { 'document_orientation.pdf' } elseif ($inputKind -eq 'pdf_text_layer') { 'document_scan.pdf' } elseif ($inputKind -eq 'pdf') { 'document_mixed.pdf' } else { $spec.Fixture }
+        $fixtureName = if ($inputKind -eq 'pdf_operations') { 'document_orientation.pdf' } elseif ($inputKind -in @('pdf_text_layer', 'pdf_editing')) { 'document_scan.pdf' } elseif ($inputKind -eq 'pdf') { 'document_mixed.pdf' } else { $spec.Fixture }
         $phaseName = "paddle-input-$inputKind"
         $healthPath = Join-Path $smokeRoot "$phaseName.json"
         if (Test-Path -LiteralPath $healthPath -PathType Leaf) {
@@ -342,8 +345,9 @@ try {
             New-Item -ItemType Directory -Path $inputExports -Force | Out-Null
             $health = Invoke-PaddlePhase @{
                 'VIBEOCR_PADDLE_SMOKE_PHASE' = 'inputs'
-                'VIBEOCR_PADDLE_SMOKE_INPUT_KIND' = $(if ($inputKind -eq 'pdf_text_layer') { 'pdf' } else { $inputKind })
-                'VIBEOCR_PADDLE_SMOKE_PDF_TEXT_LAYER' = $(if ($inputKind -eq 'pdf_text_layer') { '1' } else { '0' })
+                'VIBEOCR_PADDLE_SMOKE_INPUT_KIND' = $(if ($inputKind -in @('pdf_text_layer', 'pdf_editing')) { 'pdf' } else { $inputKind })
+                'VIBEOCR_PADDLE_SMOKE_PDF_EDITING' = $(if ($inputKind -eq 'pdf_editing') { '1' } else { '0' })
+                'VIBEOCR_PADDLE_SMOKE_PDF_TEXT_LAYER' = $(if ($inputKind -in @('pdf_text_layer', 'pdf_editing')) { '1' } else { '0' })
                 'VIBEOCR_PADDLE_SMOKE_MODE' = $inputMode
                 'VIBEOCR_PADDLE_SMOKE_PIPELINE' = $spec.Pipeline
                 'VIBEOCR_PADDLE_SMOKE_FIXTURE' = (Join-Path $fixtures $fixtureName)
@@ -360,6 +364,18 @@ try {
         $results += [pscustomobject]@{
             phase = $phaseName; mode = $inputMode; fixture = $fixtureName
             state = $health.state; stage = $health.stage; error = $health.error
+        }
+        # UI phase（health JSON）只证明应用内流程；导出 PDF 的最终校验
+        # （完整长句/尾标记/旧文不重复/未改块/取消草稿/扫描像素/空白页）
+        # 由仓库 helper 用锁定 pymupdf 执行，失败置总退出码非 0；报告写入
+        # 隔离根新文件，不覆盖任何原始 health 证据（Resume 已 passed 同样校验）。
+        if ($inputKind -eq 'pdf_editing' -and $health.state -eq 'passed') {
+            Push-Location $repoRoot
+            try {
+                uv run --frozen python (Join-Path $repoRoot 'scripts\verify_pdf_editing_export.py') --root $smokeRoot
+                if ($LASTEXITCODE -ne 0) { throw "pdf_editing export verification failed (exit $LASTEXITCODE)" }
+            } finally { Pop-Location }
+            Write-Host "VERIFIED paddle-input-pdf_editing export (pymupdf final verification)"
         }
         Write-Host "$($health.state) $phaseName stage=$($health.stage) $($health.error)"
         Set-PaddleOutcome $health.state

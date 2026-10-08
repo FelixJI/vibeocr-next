@@ -20,7 +20,9 @@
     "ocr.mineru-config.v1",
     "runtime.install-plan.v1",
     "ocr.mineru-remote-api.v1",
-    "ocr.default-recognition-mode.v1"
+    "ocr.default-recognition-mode.v1",
+    "pdf.page-inspect.v1",
+    "pdf.block-edit.v1"
   ],
   "definitions": {
     "ocr.recognition.v2": {
@@ -177,6 +179,22 @@
     },
     "ocr.default-recognition-mode.v1": {
       "description": "Persist the instance-wide default recognition mode id through SettingsSnapshot.extra.default_recognition_mode and read the resolved committed default back from GET /v2/settings. A missing key keeps the legacy default rapid_text. Exchanges validate the value type and catalog id on every write, and availability only when the default changes, so a stale stored default never blocks unrelated settings updates. Invalid snapshots are rejected without replacing prior settings. Clients MUST NOT send the key to runtimes lacking this capability. Explicit per-job mode overrides keep precedence, submitted jobs keep their submit-time parameters, and saving the default never installs components or changes any environment.",
+      "lifecycle": "active",
+      "introduced_in": "2.10.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "pdf.page-inspect.v1": {
+      "description": "Inspect bounded single-page OCR and native text projections in display coordinates.",
+      "lifecycle": "active",
+      "introduced_in": "2.10.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "pdf.block-edit.v1": {
+      "description": "Atomically rewrite a trusted OCR block and retain all other blocks, rejecting incomplete writes.",
       "lifecycle": "active",
       "introduced_in": "2.10.0",
       "deprecated_in": null,

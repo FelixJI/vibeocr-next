@@ -107,6 +107,11 @@ REQUEST_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'AddTextLayerRequest': {'addi
                  'properties': {'path': {'title': 'Path', 'type': 'string'}},
                  'required': ['path'],
                  'type': 'object'},
+ 'PageInspectRequest': {'additionalProperties': False,
+                        'description': '当前页检查 payload 请求（仅单页，不整本拉取）。',
+                        'properties': {'page': {'title': 'Page', 'type': 'integer'}},
+                        'required': ['page'],
+                        'type': 'object'},
  'PageListRequest': {'additionalProperties': False,
                      'description': '通用页列表请求(摆正/删除文字层/渲染缩略图/预览/检测文字层)。',
                      'properties': {'pages': {'items': {'type': 'integer'},
@@ -639,11 +644,24 @@ REQUEST_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'AddTextLayerRequest': {'addi
                       'required': ['schema_version', 'residency', 'extra'],
                       'type': 'object'},
  'UpdateBlockTextRequest': {'additionalProperties': False,
-                            'description': '双击编辑文字块(仅更新内存模型,不落盘)。',
+                            'description': '双击编辑文字块：原子写入当前内存 doc 后才更新模型。\n'
+                                           '\n'
+                                           'expected_old_text 非空时与目标块当前文本严格比对，不一致按 409 '
+                                           '拒绝，防止乱序提交覆盖后续编辑。pdf_settings '
+                                           '携带调用方当前写层策略（visible/字号等），避免编辑重写静默恢复默认。',
                             'properties': {'block_index': {'title': 'Block Index',
                                                            'type': 'integer'},
+                                           'expected_old_text': {'anyOf': [{'type': 'string'},
+                                                                           {'type': 'null'}],
+                                                                 'default': None,
+                                                                 'title': 'Expected Old Text'},
                                            'new_text': {'title': 'New Text', 'type': 'string'},
-                                           'page': {'title': 'Page', 'type': 'integer'}},
+                                           'page': {'title': 'Page', 'type': 'integer'},
+                                           'pdf_settings': {'anyOf': [{'additionalProperties': True,
+                                                                       'type': 'object'},
+                                                                      {'type': 'null'}],
+                                                            'default': None,
+                                                            'title': 'Pdf Settings'}},
                             'required': ['page', 'block_index', 'new_text'],
                             'type': 'object'}}
 
@@ -2396,7 +2414,11 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                            'runtime.component-selection.v1',
                                                                                            'ocr.recognition-modes.v1',
                                                                                            'ocr.mineru-config.v1',
-                                                                                           'ocr.mineru-remote-api.v1']},
+                                                                                           'runtime.install-plan.v1',
+                                                                                           'ocr.mineru-remote-api.v1',
+                                                                                           'ocr.default-recognition-mode.v1',
+                                                                                           'pdf.page-inspect.v1',
+                                                                                           'pdf.block-edit.v1']},
                                                       'type': 'array',
                                                       'uniqueItems': True},
                                      'capability_descriptors': {'items': {'additionalProperties': False,
@@ -4987,6 +5009,127 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                            'schema_version': {'const': 2}},
                             'required': ['schema_version', 'instance_id', 'diff'],
                             'type': 'object'},
+ 'inspectPdfPage': {'additionalProperties': False,
+                    'description': '当前页检查 payload：OCR 块与原生文字层的来源区分投影。页面存在可信 OCR '
+                                   '块（本会话经无层添加或显式整页覆盖写入）时，该页可编辑文字即该 OCR 层全部块，native_lines 为空。',
+                    'properties': {'instance_id': {'minLength': 1, 'type': 'string'},
+                                   'native_lines': {'items': {'additionalProperties': False,
+                                                              'description': '普通 PDF '
+                                                                             '文字层的只读检查投影（get_text '
+                                                                             '行框，显示空间归一化 '
+                                                                             '[0,1000]）。',
+                                                              'properties': {'bbox': {'maxItems': 4,
+                                                                                      'minItems': 4,
+                                                                                      'prefixItems': [{'type': 'number'},
+                                                                                                      {'type': 'number'},
+                                                                                                      {'type': 'number'},
+                                                                                                      {'type': 'number'}],
+                                                                                      'title': 'Bbox',
+                                                                                      'type': 'array'},
+                                                                             'char_count': {'title': 'Char '
+                                                                                                     'Count',
+                                                                                            'type': 'integer'},
+                                                                             'text_preview': {'title': 'Text '
+                                                                                                       'Preview',
+                                                                                              'type': 'string'}},
+                                                              'required': ['bbox',
+                                                                           'text_preview',
+                                                                           'char_count'],
+                                                              'type': 'object'},
+                                                    'maxItems': 1000,
+                                                    'title': 'Native Lines',
+                                                    'type': 'array'},
+                                   'ocr_blocks': {'items': {'additionalProperties': False,
+                                                            'description': '可信 OCR '
+                                                                           '块的检查投影：bbox/polygon '
+                                                                           '是显示空间（page.rect，含 '
+                                                                           '/Rotate 与 CropBox '
+                                                                           '归零）按显示宽高归一到 [0,1000] '
+                                                                           '的坐标，raw OCR bbox 已按 '
+                                                                           'ocr_preproc_angle '
+                                                                           '逆旋转到当前显示空间。',
+                                                            'properties': {'bbox': {'anyOf': [{'maxItems': 4,
+                                                                                               'minItems': 4,
+                                                                                               'prefixItems': [{'type': 'number'},
+                                                                                                               {'type': 'number'},
+                                                                                                               {'type': 'number'},
+                                                                                                               {'type': 'number'}],
+                                                                                               'type': 'array'},
+                                                                                              {'type': 'null'}],
+                                                                                    'default': None,
+                                                                                    'title': 'Bbox'},
+                                                                           'index': {'title': 'Index',
+                                                                                     'type': 'integer'},
+                                                                           'is_manually_edited': {'title': 'Is '
+                                                                                                           'Manually '
+                                                                                                           'Edited',
+                                                                                                  'type': 'boolean'},
+                                                                           'label': {'default': 'text',
+                                                                                     'maxLength': 128,
+                                                                                     'title': 'Label',
+                                                                                     'type': 'string'},
+                                                                           'polygon': {'anyOf': [{'items': {'type': 'number'},
+                                                                                                  'maxItems': 64,
+                                                                                                  'type': 'array'},
+                                                                                                 {'type': 'null'}],
+                                                                                       'default': None,
+                                                                                       'title': 'Polygon'},
+                                                                           'score': {'title': 'Score',
+                                                                                     'type': 'number'},
+                                                                           'score_unknown': {'title': 'Score '
+                                                                                                      'Unknown',
+                                                                                             'type': 'boolean'},
+                                                                           'text': {'maxLength': 2000,
+                                                                                    'title': 'Text',
+                                                                                    'type': 'string'},
+                                                                           'text_truncated': {'default': False,
+                                                                                              'description': 'Text '
+                                                                                                             'is '
+                                                                                                             'only '
+                                                                                                             'a '
+                                                                                                             'preview; '
+                                                                                                             'this '
+                                                                                                             'block '
+                                                                                                             'must '
+                                                                                                             'not '
+                                                                                                             'be '
+                                                                                                             'edited '
+                                                                                                             'using '
+                                                                                                             'this '
+                                                                                                             'response.',
+                                                                                              'type': 'boolean'}},
+                                                            'required': ['index',
+                                                                         'text',
+                                                                         'score',
+                                                                         'score_unknown',
+                                                                         'is_manually_edited'],
+                                                            'type': 'object'},
+                                                  'maxItems': 1000,
+                                                  'title': 'Ocr Blocks',
+                                                  'type': 'array'},
+                                   'page': {'title': 'Page', 'type': 'integer'},
+                                   'preproc_angle': {'default': 0,
+                                                     'title': 'Preproc Angle',
+                                                     'type': 'integer'},
+                                   'rect': {'maxItems': 4,
+                                            'minItems': 4,
+                                            'prefixItems': [{'type': 'number'},
+                                                            {'type': 'number'},
+                                                            {'type': 'number'},
+                                                            {'type': 'number'}],
+                                            'title': 'Rect',
+                                            'type': 'array'},
+                                   'rotation': {'title': 'Rotation', 'type': 'integer'},
+                                   'schema_version': {'const': 2},
+                                   'truncated': {'default': False,
+                                                 'description': 'Inspection omits boxes beyond '
+                                                                '1000 or clips text beyond 2000 '
+                                                                'characters per box / 128000 '
+                                                                'characters per page. The PDF is '
+                                                                'unchanged.',
+                                                 'type': 'boolean'}},
+                    'required': ['page', 'rotation', 'rect', 'schema_version', 'instance_id'],
+                    'type': 'object'},
  'movePdfPage': {'additionalProperties': False,
                  'description': '通用变更操作响应(旋转/删除/插入/重排/加文字层/重写/摆正)。',
                  'properties': {'diff': {'additionalProperties': False,
@@ -9804,6 +9947,11 @@ ROUTE_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {('GET', '/v2/health'):
                                                        'responses': {'400': {'$ref': '#/components/responses/Error'},
                                                                      '401': {'$ref': '#/components/responses/Error'},
                                                                      '403': {'$ref': '#/components/responses/Error'}}},
+ ('POST', '/v2/pdf/sessions/{session_id}/page_inspect'): {'requestBody': {'content': {'application/json': {'schema': {'$ref': '#/components/schemas/PageInspectRequest'}}},
+                                                                          'required': True},
+                                                          'responses': {'400': {'$ref': '#/components/responses/Error'},
+                                                                        '401': {'$ref': '#/components/responses/Error'},
+                                                                        '403': {'$ref': '#/components/responses/Error'}}},
  ('POST', '/v2/pdf/sessions/{session_id}/render_preview'): {'requestBody': {'content': {'application/json': {'schema': {'$ref': '#/components/schemas/RenderPreviewRequest'}}},
                                                                             'required': True},
                                                             'responses': {'200': {'$ref': '#/components/responses/Png'},

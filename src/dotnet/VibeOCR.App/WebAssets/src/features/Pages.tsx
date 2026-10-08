@@ -43,6 +43,7 @@ import { CaptureButton } from "../components/CaptureButton";
 import { CapabilityGate } from "../components/CapabilityGate";
 import { HotkeyRecorder } from "../components/HotkeyRecorder";
 import { ImageCanvasEditor } from "../components/ImageCanvasEditor";
+import { PdfInspection } from "../components/PdfInspection";
 import { PaddleOptionsEditor } from "../components/PaddleOptionsEditor";
 import { StructuredResult } from "../components/StructuredResult";
 import type { ScreenshotTextLayerState } from "../components/ImageCanvasEditor";
@@ -70,6 +71,8 @@ interface BatchItemState {
 }
 
 interface PdfPageState {
+  readonly recognitionRevision?: number;
+  readonly correctedAfterRecognition?: boolean;
   readonly detected?: boolean;
   readonly hasTextLayer?: boolean;
   readonly addedThisSession?: boolean;
@@ -1952,6 +1955,10 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
   const engines = recognitionEngines(state.engines);
   const pageCount = numberValue(state.pageCount);
   const selectedPage = numberValue(state.selectedPage);
+  const hasCurrentPage =
+    stringValue(state.sessionId) !== undefined &&
+    selectedPage >= 0 &&
+    selectedPage < pageCount;
   const pages = pdfPages(state.pages);
   const windowStart = Math.max(0, numberValue(state.windowStart));
   const selectedPages = Array.isArray(state.selectedPages)
@@ -2098,10 +2105,22 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
                         }}
                       />
                       {thumbnail ? (
-                        <img
-                          alt={`第 ${page.index + 1} 页缩略图`}
-                          src={thumbnail.url}
-                        />
+                        <button
+                          type="button"
+                          className="pdf-thumbnail-button"
+                          aria-label={`检查第 ${page.index + 1} 页`}
+                          onClick={() =>
+                            actions.run({
+                              type: "pdf.setCurrentPage",
+                              page: page.index,
+                            })
+                          }
+                        >
+                          <img
+                            alt={`第 ${page.index + 1} 页缩略图`}
+                            src={thumbnail.url}
+                          />
+                        </button>
                       ) : (
                         <span className="pdf-thumbnail-placeholder">PDF</span>
                       )}
@@ -2487,35 +2506,53 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
             </div>
           )}
           <Panel label="REVIEW" title="页面检查">
-            {resource(activePage?.thumbnail) ? (
+            {hasCurrentPage && state.canInspectPage === true ? (
+              <PdfInspection
+                key={`${stringValue(state.sessionId)}:${numberValue(state.revision)}:${selectedPage}:${resource(state.pagePreview)?.url ?? ""}:${resource(state.pageInspect)?.url ?? ""}`}
+                page={selectedPage}
+                count={pageCount}
+                revision={numberValue(state.revision)}
+                sessionId={stringValue(state.sessionId) ?? ""}
+                preview={resource(state.pagePreview)}
+                inspect={resource(state.pageInspect)}
+                status={stringValue(state.pageInspectStatusCode) ?? ""}
+                busy={busy}
+                canEdit={state.canCorrectText === true}
+                actions={actions}
+              />
+            ) : hasCurrentPage && activePage?.thumbnail ? (
               <img
-                className="pdf-review-image"
-                src={resource(activePage?.thumbnail)?.url}
-                alt={`当前第 ${selectedPage + 1} 页`}
+                className="pdf-resource-preview"
+                src={activePage.thumbnail.url}
+                alt={`第 ${selectedPage + 1} 页预览`}
               />
             ) : (
-              <EmptyStage
-                title={pageCount > 0 ? `${pageCount} 页文档` : "文档检查区"}
-                detail={
-                  pageCount > 0
-                    ? `已选 ${selectedPages.length} 页`
-                    : "选择页面后显示渲染预览与 OCR 状态。"
-                }
-              />
+              <p>选择页面后查看预览。</p>
             )}
             {activeStructured && (
-              <StructuredResult
-                key={activeStructured.url}
-                source={activeStructuredText}
-                onCopy={(blockIndex, format) =>
-                  actions.run({
-                    type: "recognition.copyStructured",
-                    resourceUri: activeStructured.url,
-                    blockIndex,
-                    format,
-                  })
-                }
-              />
+              <>
+                <p>
+                  原始识别结果
+                  {typeof activePage?.recognitionRevision === "number"
+                    ? `（修订 ${activePage.recognitionRevision}）`
+                    : ""}
+                  {activePage?.correctedAfterRecognition === true
+                    ? " · 校正前，复制内容保留原始识别文本"
+                    : " · 复制内容保留原始识别文本"}
+                </p>
+                <StructuredResult
+                  key={activeStructured.url}
+                  source={activeStructuredText}
+                  onCopy={(blockIndex, format) =>
+                    actions.run({
+                      type: "recognition.copyStructured",
+                      resourceUri: activeStructured.url,
+                      blockIndex,
+                      format,
+                    })
+                  }
+                />
+              </>
             )}
           </Panel>
           <StatusLine>

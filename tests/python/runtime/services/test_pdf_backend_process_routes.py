@@ -70,6 +70,35 @@ def opened_session(app_client, tmp_path):
     return client, backend, sid, str(path)
 
 
+@pytest.fixture
+def opened_scanned_session(app_client, tmp_path):
+    """打开无原生文字的扫描页 session（可信 OCR 层的标准 provenance）。"""
+    client, backend = app_client
+    path = _create_scanned_pdf(tmp_path / "scanned.pdf")
+    resp = client.post("/session/open", json={"path": str(path)})
+    assert resp.status_code == 200, resp.text
+    sid = resp.json()["session_id"]
+    return client, backend, sid, str(path)
+
+
+def _add_layer(client, sid, blocks=None, preproc_angle=0, page=0):
+    """经 add_text_layer 写入可信 OCR 块并返回响应。"""
+    payload = {
+        "preproc_angle": preproc_angle,
+        "text_blocks": blocks
+        or [
+            {"text": "hello", "score": 0.9, "bbox": [50, 50, 200, 100]},
+            {"text": "world", "score": None, "bbox": [50, 150, 200, 200]},
+        ],
+    }
+    resp = client.post(
+        f"/session/{sid}/add_text_layer",
+        json={"page": page, "ocr_result": payload},
+    )
+    assert resp.status_code == 200, resp.text
+    return resp
+
+
 # ---- 基础路由 ----------------------------------------------------------
 
 
@@ -567,26 +596,290 @@ class TestTextLayerRoutes:
         )
         assert resp.status_code == 500
 
-    def test_update_block_text(self, opened_session):
-        client, _, sid, _ = opened_session
-        # 先加层
-        client.post(
-            f"/session/{sid}/add_text_layer",
-            json={"page": 0, "ocr_result": self._ocr_result_dict()},
+    def test_rewrite_text_layer_strict_reject_returns_422_preserves_original(
+        self, opened_scanned_session
+    ):
+        """含人工编辑块且无法容纳 → 服务层整页不提交（(0, n)）；路由必须
+        明确 422（沿 update_block_text 模式），doc 内容/模型块/dirty 全部
+        原状，不得返回无条件 modified=True 的假成功。"""
+        client, backend, sid, _ = opened_scanned_session
+        _add_layer(client, sid)
+        session = backend._get_registry().get(sid)
+        text_before = session.doc[0].get_text()
+        blocks_before = [b.text for b in session.pdf_document.pages[0].ocr_text_blocks]
+        modified_before = session.pdf_document.is_modified
+        huge = "放不下的超长编辑" * 200
+        resp = client.post(
+            f"/session/{sid}/rewrite_text_layer",
+            json={
+                "page": 0,
+                "preproc_angle": 0,
+                "text_blocks": [
+                    {
+                        "text": huge,
+                        "score": 0.9,
+                        "bbox": [60, 60, 160, 130],
+                        "page_idx": 0,
+                        "is_manually_edited": True,
+                    },
+                    {
+                        "text": "world",
+                        "score": 0.0,
+                        "score_unknown": True,
+                        "bbox": [50, 150, 300, 220],
+                        "page_idx": 0,
+                    },
+                ],
+            },
         )
+        assert resp.status_code == 422, resp.text
+        assert session.doc[0].get_text() == text_before
+        assert [
+            b.text for b in session.pdf_document.pages[0].ocr_text_blocks
+        ] == blocks_before
+        assert session.pdf_document.is_modified == modified_before
+
+    def test_rewrite_text_layer_no_writable_block_returns_422_not_fake_success(
+        self, opened_scanned_session
+    ):
+        """空文本块被服务层反序列化过滤后 written=0 → 整页未提交：明确 422，
+        不改变空块被静默过滤的既有语义，也不得返回 modified=True 假成功。"""
+        client, backend, sid, _ = opened_scanned_session
+        _add_layer(client, sid)
+        session = backend._get_registry().get(sid)
+        text_before = session.doc[0].get_text()
+        blocks_before = [b.text for b in session.pdf_document.pages[0].ocr_text_blocks]
+        modified_before = session.pdf_document.is_modified
+        resp = client.post(
+            f"/session/{sid}/rewrite_text_layer",
+            json={
+                "page": 0,
+                "preproc_angle": 0,
+                "text_blocks": [
+                    {
+                        "text": "   ",
+                        "score": 0.9,
+                        "bbox": [50, 50, 200, 100],
+                        "page_idx": 0,
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 422, resp.text
+        assert session.doc[0].get_text() == text_before
+        assert [
+            b.text for b in session.pdf_document.pages[0].ocr_text_blocks
+        ] == blocks_before
+        assert session.pdf_document.is_modified == modified_before
+
+    def test_rewrite_text_layer_partial_non_manual_write_stays_success(
+        self, opened_scanned_session, monkeypatch
+    ):
+        """纯 OCR 块（无人工编辑）部分写入仍允许部分提交：written>0 即成功，
+        不因 skipped>0 被升级为全拒绝；实际 PDF 保留已写块、被跳块未写入。"""
+        client, backend, sid, _ = opened_scanned_session
+        _add_layer(client, sid)
+        real_write = backend.PdfService._write_blocks_to_page
+
+        def _drop_one(doc, page_index, text_blocks, preproc_angle, settings, **kw):
+            kept = text_blocks[:1]
+            written, skipped = real_write(
+                doc, page_index, kept, preproc_angle, settings, **kw
+            )
+            return written, skipped + len(text_blocks) - len(kept)
+
+        monkeypatch.setattr(backend.PdfService, "_write_blocks_to_page", _drop_one)
+        resp = client.post(
+            f"/session/{sid}/rewrite_text_layer",
+            json={
+                "page": 0,
+                "preproc_angle": 0,
+                "text_blocks": [
+                    {
+                        "text": "hello",
+                        "score": 0.9,
+                        "bbox": [50, 50, 700, 120],
+                        "page_idx": 0,
+                    },
+                    {
+                        "text": "world",
+                        "score": 0.0,
+                        "score_unknown": True,
+                        "bbox": [50, 150, 300, 220],
+                        "page_idx": 0,
+                    },
+                ],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["diff"]["modified_flag"] is True
+        session = backend._get_registry().get(sid)
+        assert session.pdf_document.is_modified is True
+        page_text = session.doc[0].get_text()
+        assert "hello" in page_text
+        assert "world" not in page_text
+
+    def test_rewrite_text_layer_success_reports_is_modified_truth_and_model(
+        self, opened_scanned_session
+    ):
+        """成功重写：diff.modified 取 pdf_document.is_modified 真值，模型块被
+        整页替换（含人工编辑标记），doc 内可提取新文本。"""
+        client, backend, sid, _ = opened_scanned_session
+        _add_layer(client, sid)
+        resp = client.post(
+            f"/session/{sid}/rewrite_text_layer",
+            json={
+                "page": 0,
+                "preproc_angle": 0,
+                "text_blocks": [
+                    {
+                        "text": "改后的完整长句文本TAIL77",
+                        "score": 0.9,
+                        "bbox": [50, 50, 700, 120],
+                        "page_idx": 0,
+                        "is_manually_edited": True,
+                    },
+                    {
+                        "text": "world",
+                        "score": 0.0,
+                        "score_unknown": True,
+                        "bbox": [50, 150, 300, 220],
+                        "page_idx": 0,
+                    },
+                ],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["diff"]["modified_flag"] is True
+        session = backend._get_registry().get(sid)
+        assert session.pdf_document.is_modified is True
+        texts = [b.text for b in session.pdf_document.pages[0].ocr_text_blocks]
+        assert texts == ["改后的完整长句文本TAIL77", "world"]
+        assert "改后的完整长句文本TAIL77" in session.doc[0].get_text()
+        assert "hello" not in session.doc[0].get_text()
+
+    def test_update_block_text(self, opened_scanned_session):
+        """成功编辑：doc 内文字真实替换，模型/dirty 同步，未改块保留。"""
+        client, backend, sid, _ = opened_scanned_session
+        _add_layer(
+            client,
+            sid,
+            blocks=[
+                {"text": "hello", "score": 0.9, "bbox": [50, 50, 700, 120]},
+                {"text": "world", "score": None, "bbox": [50, 150, 300, 220]},
+            ],
+        )
+        new_text = "改后的中文长句 mixed with English words 123"
         resp = client.post(
             f"/session/{sid}/update_block_text",
-            json={"page": 0, "block_index": 0, "new_text": "edited"},
+            json={
+                "page": 0,
+                "block_index": 0,
+                "new_text": new_text,
+                "expected_old_text": "hello",
+            },
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["extra"]["changed"] is True
+        assert body["diff"]["modified_flag"] is True
+        page_mirror = body["diff"]["replaced_pages"][0]
+        assert page_mirror["ocr_text_blocks"][0]["text"] == new_text
+        assert page_mirror["ocr_text_blocks"][0]["is_manually_edited"] is True
+        assert page_mirror["ocr_text_blocks"][1]["text"] == "world"
+        session = backend._get_registry().get(sid)
+        assert session.pdf_document.is_modified is True
+        page_text = session.doc[0].get_text()
+        assert new_text in page_text
+        assert "hello" not in page_text
+        assert "world" in page_text
 
-    def test_update_block_text_out_of_range_noop(self, opened_session):
-        client, _, sid, _ = opened_session
+    def test_update_block_text_out_of_range_rejected(self, opened_scanned_session):
+        client, _, sid, _ = opened_scanned_session
         resp = client.post(
             f"/session/{sid}/update_block_text",
             json={"page": 0, "block_index": 999, "new_text": "x"},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 400
+
+    def test_update_block_text_page_index_fail_closed(self, opened_scanned_session):
+        """负索引不得回绕改错页；越界页 400。"""
+        client, _, sid, _ = opened_scanned_session
+        _add_layer(client, sid)
+        for page in (-1, 999):
+            resp = client.post(
+                f"/session/{sid}/update_block_text",
+                json={"page": page, "block_index": 0, "new_text": "x"},
+            )
+            assert resp.status_code == 400
+
+    def test_update_block_text_blank_text_rejected(self, opened_scanned_session):
+        client, _, sid, _ = opened_scanned_session
+        _add_layer(client, sid)
+        for new_text in ("", "   "):
+            resp = client.post(
+                f"/session/{sid}/update_block_text",
+                json={"page": 0, "block_index": 0, "new_text": new_text},
+            )
+            assert resp.status_code == 400
+
+    def test_update_block_text_expected_old_text_mismatch(self, opened_scanned_session):
+        client, _, sid, _ = opened_scanned_session
+        _add_layer(client, sid)
+        resp = client.post(
+            f"/session/{sid}/update_block_text",
+            json={
+                "page": 0,
+                "block_index": 0,
+                "new_text": "x",
+                "expected_old_text": "stale",
+            },
+        )
+        assert resp.status_code == 409
+
+    def test_update_block_text_missing_geometry_rejected(self, opened_scanned_session):
+        """目标页存在缺 bbox 的块 → 422，doc/模型保持原状。"""
+        client, backend, sid, _ = opened_scanned_session
+        _add_layer(client, sid)
+        session = backend._get_registry().get(sid)
+        session.pdf_document.pages[0].ocr_text_blocks[1].bbox = None
+        text_before = session.doc[0].get_text()
+        resp = client.post(
+            f"/session/{sid}/update_block_text",
+            json={"page": 0, "block_index": 0, "new_text": "x"},
+        )
+        assert resp.status_code == 422
+        assert session.doc[0].get_text() == text_before
+        assert session.pdf_document.pages[0].ocr_text_blocks[0].text == "hello"
+
+    def test_update_block_text_partial_skip_preserves_original(
+        self, opened_scanned_session, monkeypatch
+    ):
+        """require_all：目标块被跳过 → 提交前拒绝，原内容/模型不变。"""
+        client, backend, sid, _ = opened_scanned_session
+        _add_layer(client, sid)
+        session = backend._get_registry().get(sid)
+        text_before = session.doc[0].get_text()
+        modified_before = session.pdf_document.is_modified
+
+        real_write = backend.PdfService._write_blocks_to_page
+
+        def _skip_one(doc, page_index, text_blocks, preproc_angle, settings, **kw):
+            written, skipped = real_write(
+                doc, page_index, text_blocks, preproc_angle, settings, **kw
+            )
+            return written - 1, skipped + 1
+
+        monkeypatch.setattr(backend.PdfService, "_write_blocks_to_page", _skip_one)
+        resp = client.post(
+            f"/session/{sid}/update_block_text",
+            json={"page": 0, "block_index": 0, "new_text": "x"},
+        )
+        assert resp.status_code == 422
+        assert session.doc[0].get_text() == text_before
+        assert session.pdf_document.is_modified == modified_before
+        assert session.pdf_document.pages[0].ocr_text_blocks[0].text == "hello"
 
     def test_update_block_text_internal_error_500(self, opened_session, monkeypatch):
         client, backend, sid, _ = opened_session
@@ -1197,25 +1490,188 @@ class TestRemainingBranches:
         # 仍返回空 layers
         assert resp.json()["text_layers"] == []
 
-    def test_update_block_text_same_text_noop(self, opened_session):
-        """update_block_text 新旧 text 相同 → 不改（branch 718->722）。"""
-        client, _, sid, _ = opened_session
-        # 先加层
-        client.post(
-            f"/session/{sid}/add_text_layer",
-            json={
-                "page": 0,
-                "ocr_result": {
-                    "preproc_angle": 0,
-                    "text_blocks": [
-                        {"text": "same", "score": 0.9, "bbox": [50, 50, 200, 100]}
-                    ],
-                },
-            },
-        )
-        # 用相同 text 更新
+    def test_update_block_text_same_text_noop(self, opened_scanned_session):
+        """新旧 text 相同 → changed=False，不推进 dirty，模型不变。"""
+        client, backend, sid, _ = opened_scanned_session
+        _add_layer(client, sid)
+        session = backend._get_registry().get(sid)
+        modified_before = session.pdf_document.is_modified
         resp = client.post(
             f"/session/{sid}/update_block_text",
-            json={"page": 0, "block_index": 0, "new_text": "same"},
+            json={"page": 0, "block_index": 0, "new_text": "hello"},
         )
         assert resp.status_code == 200
+        body = resp.json()
+        assert body["extra"]["changed"] is False
+        assert body["diff"]["modified_flag"] == modified_before
+        assert session.pdf_document.is_modified == modified_before
+        block = session.pdf_document.pages[0].ocr_text_blocks[0]
+        assert block.text == "hello"
+        assert block.is_manually_edited is False
+
+    def test_page_inspect_sources_and_geometry(self, opened_scanned_session):
+        """有 OCR 层页：OCR 块投影可用且 native_lines 为空（来源区分）。"""
+        client, _, sid, _ = opened_scanned_session
+        _add_layer(client, sid)
+        resp = client.post(f"/session/{sid}/page_inspect", json={"page": 0})
+        assert resp.status_code == 200, resp.text
+        payload = resp.json()
+        assert payload["page"] == 0
+        assert payload["rotation"] == 0
+        assert len(payload["rect"]) == 4
+        assert len(payload["ocr_blocks"]) == 2
+        first = payload["ocr_blocks"][0]
+        assert first["index"] == 0
+        assert first["text"] == "hello"
+        assert first["score_unknown"] is False
+        assert payload["ocr_blocks"][1]["score_unknown"] is True
+        assert payload["native_lines"] == []
+        bbox = first["bbox"]
+        assert all(0 <= v <= 1000 for v in bbox)
+        assert bbox[2] > bbox[0] and bbox[3] > bbox[1]
+
+    def test_page_inspect_native_lines(self, opened_session):
+        """无 OCR 层页：原生文字层只读投影可用。"""
+        client, _, sid, _ = opened_session
+        resp = client.post(f"/session/{sid}/page_inspect", json={"page": 0})
+        assert resp.status_code == 200, resp.text
+        payload = resp.json()
+        assert payload["ocr_blocks"] == []
+        assert payload["native_lines"]
+        line = payload["native_lines"][0]
+        assert "Page 1" in line["text_preview"]
+        assert all(0 <= v <= 1000 for v in line["bbox"])
+
+    def test_page_inspect_invalid_page_rejected(self, opened_scanned_session):
+        client, _, sid, _ = opened_scanned_session
+        for page in (-1, 999):
+            resp = client.post(f"/session/{sid}/page_inspect", json={"page": page})
+            assert resp.status_code == 400
+
+    def test_update_block_text_long_text_saved_and_reopened(
+        self, opened_scanned_session, tmp_path
+    ):
+        """长中英编辑：收缩写入成功，保存重开后末尾 token 完整、旧文字不重复。"""
+        import fitz as _fitz
+
+        client, backend, sid, _ = opened_scanned_session
+        _add_layer(
+            client,
+            sid,
+            blocks=[
+                {"text": "hello", "score": 0.9, "bbox": [50, 50, 700, 120]},
+                {"text": "world", "score": None, "bbox": [50, 150, 300, 220]},
+            ],
+        )
+        end_token = "ENDTOKEN8877"
+        long_text = (
+            "长文本编辑路由校验，中English混排456，"
+            + "句子semantic padding sentence. " * 2
+            + end_token
+        )
+        resp = client.post(
+            f"/session/{sid}/update_block_text",
+            json={"page": 0, "block_index": 0, "new_text": long_text},
+        )
+        assert resp.status_code == 200, resp.text
+        memory_text = backend._get_registry().get(sid).doc[0].get_text()
+        assert "".join(long_text.split()) in "".join(memory_text.split())
+        saved = tmp_path / "edited.pdf"
+        resp = client.post(f"/session/{sid}/save", json={"path": str(saved)})
+        assert resp.status_code == 200, resp.text
+        with _fitz.open(str(saved)) as reopened:
+            text = reopened[0].get_text()
+        assert end_token in text
+        assert "".join(long_text.split()) in "".join(text.split())
+        assert "hello" not in text
+        assert "world" in text
+
+    def test_update_block_text_over_limit_rejected(self, opened_scanned_session):
+        """超限文本：收缩策略也无法容纳 → 422，doc/模型保持原内容。"""
+        client, backend, sid, _ = opened_scanned_session
+        _add_layer(client, sid)
+        session = backend._get_registry().get(sid)
+        text_before = session.doc[0].get_text()
+        resp = client.post(
+            f"/session/{sid}/update_block_text",
+            json={"page": 0, "block_index": 0, "new_text": "超" * 1200},
+        )
+        assert resp.status_code == 422
+        assert session.doc[0].get_text() == text_before
+        assert session.pdf_document.pages[0].ocr_text_blocks[0].text == "hello"
+
+
+class TestEditedBlockRectangle:
+    @pytest.mark.parametrize(
+        ("bbox", "new_text", "accepted"),
+        [
+            (
+                [100, 700, 900, 950],
+                "第一行中文\nLINE2 English\nLINE3\nLINE4\nTAIL201",
+                True,
+            ),
+            ([100, 950, 900, 980], "LINE1\nLINE2\nLINE3\nLINE4\nTAIL201", False),
+            ([100, 990, 900, 993], "TAIL201", False),
+        ],
+        ids=["multiline-fits", "bottom-multiline-rejected", "minimum-font-too-thick"],
+    )
+    def test_edit_rectangle_saved_and_reopened(
+        self, opened_scanned_session, tmp_path, bbox, new_text, accepted
+    ):
+        client, backend, sid, _ = opened_scanned_session
+        _add_layer(
+            client,
+            sid,
+            blocks=[
+                {"text": "ORIGINAL201", "score": 0.9, "bbox": bbox},
+                {"text": "KEEP201", "score": 0.9, "bbox": [100, 100, 700, 200]},
+            ],
+        )
+        session = backend._get_registry().get(sid)
+        model = session.pdf_document
+        model.is_modified = False
+        blocks_before = model.pages[0].ocr_text_blocks
+        text_before = session.doc[0].get_text()
+        response = client.post(
+            f"/session/{sid}/update_block_text",
+            json={"page": 0, "block_index": 0, "new_text": new_text},
+        )
+        assert response.status_code == (200 if accepted else 422), response.text
+        if accepted:
+            assert response.json()["extra"]["changed"] is True
+            assert model.is_modified is True
+            assert model.pages[0].ocr_text_blocks[0].text == new_text
+            memory_text = session.doc[0].get_text()
+            for line in new_text.splitlines():
+                assert line in memory_text
+            assert "ORIGINAL201" not in memory_text
+            bounds = fitz.Rect(
+                bbox[0] * 612 / 1000,
+                bbox[1] * 792 / 1000,
+                bbox[2] * 612 / 1000,
+                bbox[3] * 792 / 1000,
+            )
+            for word in session.doc[0].get_text("words"):
+                if word[4] != "KEEP201":
+                    assert bounds.contains(fitz.Rect(word[:4]))
+        else:
+            assert model.is_modified is False
+            assert model.pages[0].ocr_text_blocks is blocks_before
+            assert model.pages[0].ocr_text_blocks[0].text == "ORIGINAL201"
+            assert session.doc[0].get_text() == text_before
+        saved = tmp_path / "rectangle.pdf"
+        response = client.post(
+            f"/session/{sid}/save",
+            json={"path": str(saved), "rewrite_text_layers": False},
+        )
+        assert response.status_code == 200, response.text
+        with fitz.open(saved) as reopened:
+            saved_text = reopened[0].get_text()
+        assert "KEEP201" in saved_text
+        if accepted:
+            for line in new_text.splitlines():
+                assert line in saved_text
+            assert "ORIGINAL201" not in saved_text
+        else:
+            assert saved_text == text_before
+            assert "TAIL201" not in saved_text

@@ -25,6 +25,8 @@ public static class RuntimeProtocol
     public const string RUNTIME_INSTALL_PLAN_V1 = "runtime.install-plan.v1";
     public const string OCR_MINERU_REMOTE_API_V1 = "ocr.mineru-remote-api.v1";
     public const string OCR_DEFAULT_RECOGNITION_MODE_V1 = "ocr.default-recognition-mode.v1";
+    public const string PDF_PAGE_INSPECT_V1 = "pdf.page-inspect.v1";
+    public const string PDF_BLOCK_EDIT_V1 = "pdf.block-edit.v1";
     public const int ReadyEnvelopeVersion = 1;
     public const int ProtocolVersion = 2;
     public const int SchemaVersion = 2;
@@ -50,7 +52,9 @@ public static class RuntimeProtocol
         "ocr.mineru-config.v1",
         "runtime.install-plan.v1",
         "ocr.mineru-remote-api.v1",
-        "ocr.default-recognition-mode.v1"
+        "ocr.default-recognition-mode.v1",
+        "pdf.page-inspect.v1",
+        "pdf.block-edit.v1"
         };
     public static IReadOnlyList<RuntimeOperation> Operations { get; } =
         new RuntimeOperation[]
@@ -80,6 +84,7 @@ public static class RuntimeProtocol
         new("POST", "/v2/pdf/sessions/{session_id}/load", "loadPdfSession"),
         new("POST", "/v2/pdf/sessions/{session_id}/model", "getPdfSessionModel"),
         new("POST", "/v2/pdf/sessions/{session_id}/move_page", "movePdfPage"),
+        new("POST", "/v2/pdf/sessions/{session_id}/page_inspect", "inspectPdfPage"),
         new("POST", "/v2/pdf/sessions/{session_id}/render_preview", "renderPdfPreview"),
         new("POST", "/v2/pdf/sessions/{session_id}/render_thumbnail", "renderPdfThumbnail"),
         new("POST", "/v2/pdf/sessions/{session_id}/reorder", "reorderPdfPages"),
@@ -129,6 +134,7 @@ public static class RuntimeOperationPaths
     public const string LoadPdfSession = "/v2/pdf/sessions/{session_id}/load";
     public const string GetPdfSessionModel = "/v2/pdf/sessions/{session_id}/model";
     public const string MovePdfPage = "/v2/pdf/sessions/{session_id}/move_page";
+    public const string InspectPdfPage = "/v2/pdf/sessions/{session_id}/page_inspect";
     public const string RenderPdfPreview = "/v2/pdf/sessions/{session_id}/render_preview";
     public const string RenderPdfThumbnail = "/v2/pdf/sessions/{session_id}/render_thumbnail";
     public const string ReorderPdfPages = "/v2/pdf/sessions/{session_id}/reorder";

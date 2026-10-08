@@ -162,10 +162,34 @@ class FakePdfAdapter:
         return MutateResponse(diff=ModelDiff())
 
     def update_block_text(
-        self, session_id: str, page: int, block_index: int, new_text: str
+        self,
+        session_id: str,
+        page: int,
+        block_index: int,
+        new_text: str,
+        expected_old_text: str | None = None,
+        pdf_settings: dict | None = None,
     ) -> MutateResponse:
-        self._record("update_block_text", (session_id, page, block_index, new_text), {})
+        self._record(
+            "update_block_text",
+            (session_id, page, block_index, new_text),
+            {
+                "expected_old_text": expected_old_text,
+                "pdf_settings": pdf_settings,
+            },
+        )
         return MutateResponse(diff=ModelDiff())
+
+    def page_inspect(self, session_id: str, page: int) -> Any:
+        self._record("page_inspect", (session_id, page), {})
+        return {
+            "page": page,
+            "rotation": 0,
+            "rect": (0.0, 0.0, 612.0, 792.0),
+            "preproc_angle": 0,
+            "ocr_blocks": [],
+            "native_lines": [],
+        }
 
     def delete_text_layers_stream(
         self, session_id: str, pages: list[int]

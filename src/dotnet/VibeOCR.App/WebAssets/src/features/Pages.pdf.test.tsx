@@ -19,6 +19,7 @@ function setup(patch: Record<string, unknown> = {}) {
     runtimeLabel: "host",
     features: {
       pdf: {
+        sessionId: "doc-1",
         pageCount: 70,
         windowStart: 64,
         selectedPage: 69,
@@ -28,6 +29,8 @@ function setup(patch: Record<string, unknown> = {}) {
         detectedCount: 70,
         textLayerCount: 3,
         canAddTextLayer: true,
+        canInspectPage: true,
+        canCorrectText: true,
         pages: [
           {
             index: 69,
@@ -41,8 +44,25 @@ function setup(patch: Record<string, unknown> = {}) {
       },
     },
   };
-  render(<PdfPage viewState={state} actions={actions} />);
-  return actions;
+  const view = render(<PdfPage viewState={state} actions={actions} />);
+  return Object.assign(actions, {
+    updatePdf: (patch: Record<string, unknown>) =>
+      view.rerender(
+        <PdfPage
+          viewState={{
+            ...state,
+            features: {
+              ...state.features,
+              pdf: {
+                ...(state.features.pdf as Record<string, unknown>),
+                ...patch,
+              },
+            },
+          }}
+          actions={actions}
+        />,
+      ),
+  });
 }
 describe("PDF text layer actions", () => {
   it("selects all 129 pages beyond the visible window and clears without mutation", () => {
@@ -175,3 +195,97 @@ describe("PDF text layer actions", () => {
     expect(screen.getByText(/后台实际收尾后才可继续操作/)).toBeInTheDocument();
   });
 });
+
+it("falls back to the old thumbnail without the page inspection capability", () => {
+  setup({
+    canInspectPage: false,
+    canCorrectText: false,
+    pages: [
+      {
+        index: 69,
+        statusCode: "pdf.page.done",
+        thumbnail: { url: "/old-thumbnail.png", contentType: "image/png" },
+      },
+    ],
+  });
+  expect(screen.getByAltText("第 70 页预览")).toHaveAttribute(
+    "src",
+    "/old-thumbnail.png",
+  );
+  expect(
+    screen.queryByRole("button", { name: "适应页面" }),
+  ).not.toBeInTheDocument();
+});
+
+it("labels retained structured results and copy as the original recognition revision", () => {
+  setup({
+    pages: [
+      {
+        index: 69,
+        statusCode: "pdf.page.done",
+        recognitionRevision: 7,
+        correctedAfterRecognition: true,
+        structuredResult: {
+          url: "/original-ocr.json",
+          mediaType: "application/json",
+          byteLength: 128,
+        },
+      },
+    ],
+  });
+  expect(
+    screen.getByText(
+      /原始识别结果（修订 7） · 校正前，复制内容保留原始识别文本/,
+    ),
+  ).toBeInTheDocument();
+});
+
+it.each([
+  {
+    label: "取消选择",
+    command: { type: "pdf.selectAll", selected: false },
+    patch: { selectedPage: -1, selectedPages: [] },
+  },
+  {
+    label: "关闭文档",
+    command: { type: "pdf.close" },
+    patch: {
+      sessionId: undefined,
+      pageCount: 0,
+      selectedPage: -1,
+      selectedPages: [],
+      pages: [],
+    },
+  },
+])(
+  "shows the page-selection placeholder after $label",
+  ({ label, command, patch }) => {
+    const actions = setup();
+    expect(
+      screen.getByRole("button", { name: "适应页面" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("正在读取当前页高清预览…")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: label }));
+    expect(actions.run).toHaveBeenLastCalledWith(command);
+    actions.updatePdf(patch);
+    expect(screen.getByText("选择页面后查看预览。")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "适应页面" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("正在读取当前页高清预览…"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/第 0 \/ /)).not.toBeInTheDocument();
+  },
+);
+
+it.each([{ sessionId: undefined }, { selectedPage: 70 }])(
+  "does not mount inspection without a valid session and current page: %j",
+  (patch) => {
+    setup(patch);
+    expect(screen.getByText("选择页面后查看预览。")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "适应页面" }),
+    ).not.toBeInTheDocument();
+  },
+);

@@ -27,6 +27,9 @@ from vibeocr.runtime.documents.models.pdf_document import (
 from vibeocr.runtime.documents.utils.cjk_font_resolver import _CJK_RESOLVER
 from vibeocr.runtime.recognition.models.ocr_result import TextBlock
 
+if TYPE_CHECKING:
+    from vibeocr.runtime.documents.wire_schemas import PageInspectResponse
+
 logger = logging.getLogger(__name__)
 
 
@@ -463,7 +466,9 @@ class PdfService:
     # ---- text layer detection ---------------------------------------
 
     @staticmethod
-    def detect_text_layers(doc: fitz.Document, page_index: int) -> list[TextLayerInfo]:
+    def detect_text_layers(
+        doc: fitz.Document, page_index: int, *, limit: int | None = None
+    ) -> list[TextLayerInfo]:
         page = doc[page_index]
         # 快速预检：get_text("text") ~4ms vs get_text("dict") ~173ms（扫描件）。
         # 扫描件绝大多数页无文字层，先 4ms 判空，无文字直接返回避免 173ms dict。
@@ -505,6 +510,8 @@ class PdfService:
                     )
                 )
                 layer_index += 1
+                if limit is not None and len(layers) >= limit:
+                    return layers
         return layers
 
     @staticmethod
@@ -815,6 +822,7 @@ class PdfService:
         overwrite: bool = False,
         cancel_check: Callable[[], bool] | None = None,
         font_path: str | None = None,
+        require_all: bool = False,
     ) -> dict[int, tuple[int, int]]:
         """批量写 OCR 文字层，一批页共享单一聚合子集字体。
 
@@ -831,6 +839,11 @@ class PdfService:
             overwrite: 同 add_text_layer，控制已有文字层页的跳过/重写。
             cancel_check: 可选取消回调；在逐页写层循环每页开头调用，返回 True 时
                 立即停止写后续页（已写页保留）。供后端协作式取消使用。
+            font_path: 调用方预先解析的共享子集字体路径。
+            require_all: True 时以每页原始 ocr_result.text_blocks 数量为契约：
+                任一块被反序列化过滤丢弃或写入跳过，即把该页标记为未写入
+                (0, n)——页不进入 candidate 提交，原内容与模型保持不变。供块
+                编辑原子提交使用：不能在提交后才发现目标块被跳过。
 
         Returns:
             {page_index: (written, skipped)} 每页写入/跳过块数。
@@ -887,6 +900,16 @@ class PdfService:
             ]
             preproc_angle = angle
 
+            if require_all and len(text_blocks) != len(
+                ocr_result_data.get("text_blocks", [])
+            ):
+                # strict：反序列化过滤丢弃了原始待保留块 → 提交前整页拒绝。
+                invalid_pages[page_index] = (
+                    0,
+                    len(ocr_result_data.get("text_blocks", [])),
+                )
+                continue
+
             page_info = pdf_document.pages[page_index]
             page_info.has_text_layer = PdfService.page_has_text(doc, page_index)
             if page_info.has_text_layer and not overwrite:
@@ -941,6 +964,16 @@ class PdfService:
                 )
                 if not written:
                     results[page_index] = (0, skipped)
+                    continue
+                has_edited = any(
+                    getattr(block, "is_manually_edited", False) for block in text_blocks
+                )
+                if (require_all or has_edited) and (
+                    skipped > 0 or written != len(text_blocks)
+                ):
+                    # strict：存在被跳过的块 → 整页不进入提交，原内容/模型不变。
+                    # 含人工编辑块的页在任何调用方都保持整页严格（含保存重写）。
+                    results[page_index] = (0, skipped + len(text_blocks) - written)
                     continue
                 prepared.append(
                     (
@@ -1211,6 +1244,77 @@ class PdfService:
             # 窄/高块（width < height，竖排文字误检）：同样走 insert_textbox 自动换行。
             text = block.text
             render_mode = 0 if settings.text_layer_visible else 3
+            if getattr(block, "is_manually_edited", False):
+                # 人工编辑必须整段装入原框与可见页面的交集。单点写入只约束
+                # 首行基线，不能保证换行或最小字号的字形厚度仍在框内。
+                rect = rect & _to_page_space(page_rect)
+                length, thickness = (
+                    (rect.height, rect.width)
+                    if text_rotate in (90, 270)
+                    else (rect.width, rect.height)
+                )
+                lines = text.splitlines() or [text]
+                unit_width = max(
+                    _natural_width(line.expandtabs(), 1.0) for line in lines
+                )
+                fontsize = max(
+                    min(
+                        thickness / (len(lines) * _LINE_LEADING),
+                        # 留出浮点边界余量，避免恰好等宽的末词被另起一行。
+                        max(length - 0.01, 0.0) / max(unit_width, 0.5),
+                    )
+                    * settings.font_size_ratio
+                    / 0.8,
+                    settings.min_font_size,
+                )
+                inserted = False
+                if not rect.is_empty:
+                    for retry in range(max(1, settings.font_size_retry_count) + 1):
+                        try:
+                            rc = page.insert_textbox(
+                                rect,
+                                text,
+                                fontsize=fontsize,
+                                fontname=fontname,
+                                fontfile=font_path,
+                                color=(0, 0, 0),
+                                render_mode=render_mode,
+                                rotate=text_rotate,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "page %d edited block insert_textbox failed: %s",
+                                page_index,
+                                exc,
+                            )
+                            break
+                        if rc >= 0:
+                            inserted = True
+                            break
+                        if fontsize <= settings.min_font_size:
+                            break
+                        # 重试预算耗尽前仍试一次最小字号，但绝不低于它。
+                        fontsize = (
+                            settings.min_font_size
+                            if retry >= settings.font_size_retry_count - 1
+                            else max(
+                                settings.min_font_size,
+                                fontsize * settings.font_size_shrink_factor,
+                            )
+                        )
+                if inserted:
+                    written += 1
+                else:
+                    skipped += 1
+                    logger.warning(
+                        "page %d edited block skipped (text does not fit rect): "
+                        "rect=%s text_len=%d",
+                        page_index,
+                        rect,
+                        len(text),
+                    )
+                continue
+
             # insert_text 主路径覆盖 page_rotation ∈ {0, 90}（扫描件最常见的两种：
             # 竖向页与横向页）。180/270 几何（上下/左右翻转）基线放置复杂，仍用
             # insert_textbox 矩形约束排版。竖排文本行（多字符）走 insert_textbox
@@ -1410,6 +1514,7 @@ class PdfService:
         preproc_angle: int,
         pdf_settings: object | None = None,
         font_path: str | None = None,
+        require_all: bool = False,
     ) -> tuple[int, int]:
         """删除整页文字层后，按 text_blocks 全量重写。
 
@@ -1425,6 +1530,8 @@ class PdfService:
             pdf_settings: PdfGlobalSettings 实例（None 则使用默认值）。
             font_path: 调用方预先解析的共享子集字体路径（保存时整文档共享单一
                 子集）。None 时按本页字符内部解析子集。
+            require_all: 透传 add_text_layer_batch；True 时任一块被跳过即整页
+                不提交（返回 (0, n)），原内容/模型保持不变。
 
         Returns:
             (written, skipped) 成功写入与被跳过的文本块数量。
@@ -1454,6 +1561,7 @@ class PdfService:
             pdf_settings=settings,
             overwrite=True,
             font_path=font_path,
+            require_all=require_all,
         )
         return results.get(page_index, (0, len(text_blocks)))
 
@@ -1517,6 +1625,136 @@ class PdfService:
         info.is_scanned = False
         info.ocr_text_blocks = []
         info.ocr_preproc_angle = 0
+
+    # ---- 当前页检查投影 -------------------------------------------------
+
+    @staticmethod
+    def _normalize_display_rect(
+        rect: fitz.Rect, page_rect: fitz.Rect
+    ) -> tuple[float, float, float, float]:
+        """显示空间矩形 → [0,1000] 归一化（除以显示宽高）。"""
+        return (
+            rect.x0 / page_rect.width * 1000,
+            rect.y0 / page_rect.height * 1000,
+            rect.x1 / page_rect.width * 1000,
+            rect.y1 / page_rect.height * 1000,
+        )
+
+    @staticmethod
+    def page_inspect(
+        doc: fitz.Document, pdf_document: PdfDocument, page_index: int
+    ) -> "PageInspectResponse":
+        """构造单页检查 payload：OCR 块与原生文字层的显示空间归一化投影。
+
+        坐标合同（与预览渲染同一参考系）：
+        - 预览 PNG 是 get_pixmap 显示空间（自动应用 /Rotate，CropBox 归零）。
+        - raw OCR bbox/polygon 在预处理后的归一化空间，先经
+          _denormalize_and_unrotate_bbox/polygon(raw, ocr_preproc_angle, page.rect)
+          逆旋转到当前显示空间，再按显示宽高归一到 [0,1000]。
+        - 普通原生文字层 get_text 行框在未旋转 CropBox 原点空间，经
+          page.rotation_matrix 转到显示空间后同口径归一化。
+        - 页面存在可信 OCR 块时 native_lines 为空（该页可编辑文字即该层）。
+
+        Args:
+            doc: fitz.Document 实例（调用方持有锁）。
+            pdf_document: PdfDocument 状态对象（权威模型）。
+            page_index: 页码索引；越界拋 ValueError。
+        """
+        from vibeocr.runtime.documents.wire_schemas import (
+            PageInspectNativeLine,
+            PageInspectOcrBlock,
+            PageInspectResponse,
+        )
+
+        if not isinstance(page_index, int) or not 0 <= page_index < doc.page_count:
+            raise ValueError("页索引越界")
+        info = pdf_document.pages[page_index]
+        page = doc[page_index]
+        rect = page.rect
+        if rect.width <= 0 or rect.height <= 0:
+            raise ValueError("页面几何退化，无法投影检查框")
+
+        # Bound serialized text, geometry and the resulting WebView DOM per page.
+        max_boxes, remaining_text = 1000, 128000
+        truncated = len(info.ocr_text_blocks) > max_boxes
+        ocr_blocks: list[PageInspectOcrBlock] = []
+        for index, block in enumerate(info.ocr_text_blocks[:max_boxes]):
+            text = block.text[: min(2000, remaining_text)]
+            text_truncated = len(text) != len(block.text)
+            truncated |= (
+                text_truncated
+                or len(block.label) > 128
+                or bool(block.polygon and len(block.polygon) > 64)
+            )
+            remaining_text -= len(text)
+            bbox = None
+            if block.bbox is not None:
+                display = PdfService._denormalize_and_unrotate_bbox(
+                    block.bbox, info.ocr_preproc_angle, rect
+                )
+                bbox = PdfService._normalize_display_rect(display, rect)
+            polygon: tuple[float, ...] | None = None
+            if block.polygon and len(block.polygon) <= 64:
+                points = PdfService._denormalize_and_unrotate_polygon(
+                    block.polygon, info.ocr_preproc_angle, rect
+                )
+                polygon = tuple(
+                    value
+                    for point in points
+                    for value in (
+                        point.x / rect.width * 1000,
+                        point.y / rect.height * 1000,
+                    )
+                )
+            ocr_blocks.append(
+                PageInspectOcrBlock(
+                    index=index,
+                    text=text,
+                    text_truncated=text_truncated,
+                    score=0.0 if block.score is None else block.score,
+                    score_unknown=block.score is None,
+                    is_manually_edited=block.is_manually_edited,
+                    label=block.label[:128],
+                    bbox=bbox,
+                    polygon=polygon,
+                )
+            )
+
+        native_lines: list[PageInspectNativeLine] = []
+        if not info.ocr_text_blocks:
+            layers = PdfService.detect_text_layers(doc, page_index, limit=max_boxes + 1)
+            truncated = len(layers) > max_boxes
+            rotation_matrix = page.rotation_matrix
+            for layer in layers[:max_boxes]:
+                corners = [
+                    fitz.Point(layer.bbox[0], layer.bbox[1]) * rotation_matrix,
+                    fitz.Point(layer.bbox[2], layer.bbox[1]) * rotation_matrix,
+                    fitz.Point(layer.bbox[2], layer.bbox[3]) * rotation_matrix,
+                    fitz.Point(layer.bbox[0], layer.bbox[3]) * rotation_matrix,
+                ]
+                xs = [point.x for point in corners]
+                ys = [point.y for point in corners]
+                bbox = PdfService._normalize_display_rect(
+                    fitz.Rect(min(xs), min(ys), max(xs), max(ys)), rect
+                )
+                native_lines.append(
+                    PageInspectNativeLine(
+                        bbox=bbox,
+                        text_preview=layer.text_preview,
+                        char_count=layer.char_count,
+                    )
+                )
+            # Inspection is a bounded projection; never replace the full model cache.
+
+        return PageInspectResponse(
+            page=page_index,
+            rotation=int(page.rotation or 0) % 360,
+            rect=(rect.x0, rect.y0, rect.x1, rect.y1),
+            preproc_angle=info.ocr_preproc_angle,
+            truncated=truncated,
+            ocr_blocks=ocr_blocks,
+            native_lines=native_lines,
+        )
 
     # ---- bbox coordinate transforms --------------------------------
 
