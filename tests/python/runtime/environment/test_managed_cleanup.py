@@ -402,3 +402,36 @@ def test_new_preview_invalidates_previous_confirmation(tmp_path, monkeypatch):
         store.run_cleanup(current["plan_id"], selection)["items"][0]["state"]
         == "deleted"
     )
+
+
+def test_cleanup_request_crosses_real_host_process(tmp_path, monkeypatch):
+    store, _ = _manager(tmp_path, monkeypatch)
+    target = store.create("真实 Host 清理")
+    plan = store.preview_cleanup()
+    request = {
+        "protocol_version": 2,
+        "request_kind": "environment",
+        "product_root": str(store.product_root),
+        "component_lock": str(store.component_lock_path),
+        "runtime_manifest": str(store.manifest.path),
+        "action": "run_cleanup",
+        "plan_id": plan["plan_id"],
+        "item_ids": [f"environment:{target['id']}"],
+    }
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from vibeocr.runtime.environments.runtime_installer import main; raise SystemExit(main())",
+            "--request-json",
+            json.dumps(request),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+    )
+    assert child.returncode == 0, child.stdout + child.stderr
+    response = json.loads(child.stdout)
+    assert response["result"]["items"][0]["state"] == "deleted"
+    assert not Path(target["path"]).exists()

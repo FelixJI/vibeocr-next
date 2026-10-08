@@ -2592,6 +2592,7 @@ def _request(value: object) -> dict[str, Any]:
             "recipe",
             "source_ids",
             "plan_id",
+            "item_ids",
             "package_source_id",
             "model_source_id",
             "paddleocr_model_source_id",
