@@ -313,13 +313,7 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
   ).toBeEnabled();
   // 识别面精简后无输出变换控件；键盘验证改用保留的显示缩放下拉。
   const zoom = page.getByRole("combobox", { name: "显示缩放" });
-  await zoom.focus();
-  await expect(zoom).toBeFocused();
-  await zoom.press("ArrowDown");
-  await zoom.press("Tab");
-  await expect(zoom).not.toBeFocused();
-  // ArrowDown 可能改动选中值：复原后再测量基准布局。
-  await zoom.selectOption("1");
+
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth,
@@ -327,7 +321,7 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
   ).toBe(true);
   const viewport = page.getByLabel("图片视口");
   const canvas = page.getByLabel("图片检查画布");
-  // selectOption 返回时 React 可能仍显示 ArrowDown 留下的 125% 布局。
+  // 在键盘改变缩放前记录初始 100% 布局，避免把旧 125% 布局当作基准。
   await expect(viewport).toHaveCSS("--editor-zoom", "1");
   // fit 布局就绪信号：画布宽度非零且不超过视口，避免读到 React 提交前的旧布局。
   let fitWidth = 0;
@@ -342,6 +336,11 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
   expect(fitWidth).toBeLessThanOrEqual(
     await viewport.evaluate((element) => element.clientWidth),
   );
+  await zoom.focus();
+  await expect(zoom).toBeFocused();
+  await zoom.press("ArrowDown");
+  await zoom.press("Tab");
+  await expect(zoom).not.toBeFocused();
   await page.getByRole("combobox", { name: "显示缩放" }).selectOption("2");
   // 缩放应用与 React 提交存在异步窗口，轮询布局而非一次性读取。
   await expect
