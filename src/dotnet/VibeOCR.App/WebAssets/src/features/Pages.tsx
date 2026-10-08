@@ -3084,6 +3084,8 @@ function InstalledEnvironmentList({
 // 与“下载模型”；不暴露产品默认/全局默认/环境覆盖三层，也不提供按次
 // 或按环境的来源覆盖。默认值跟随 Runtime 目录与全局默认解析结果。
 interface EnvironmentInstallProgress {
+  readonly attempt_id: string;
+  readonly seq: number;
   readonly environment_id: string;
   readonly timestamp: string;
   readonly phase: string;
@@ -3156,6 +3158,15 @@ function EnvironmentInstallDetails({
       aria-label="依赖安装进度"
       data-install-state={progress.state}
       data-install-phase={progress.phase}
+      data-install-attempt={progress.attempt_id}
+      data-install-seq={progress.seq}
+      data-install-environment={progress.environment_id}
+      data-install-installed={installed}
+      data-install-total={
+        progress.dependency_total_known
+          ? progress.dependencies.length
+          : "unknown"
+      }
     >
       <h4>
         {phases[progress.phase] ?? progress.phase} ·{" "}
@@ -3181,6 +3192,7 @@ function EnvironmentInstallDetails({
       <p className="form-note">
         包数与下载文件数分别统计；Python 和内部 Runtime wheel
         随产品提供，模型尚未下载。安装批次成功后才确认依赖，整体完成须通过验证与提交。
+        源分发包的隔离构建临时依赖按所选来源获取，单独于目标包与目标工件下载数量。
       </p>
       <details>
         <summary>依赖状态（只读）</summary>
@@ -3195,7 +3207,7 @@ function EnvironmentInstallDetails({
         </ul>
       </details>
       <details>
-        <summary>实时命令输出（只读，最多保留 200 行 / 64 KiB）</summary>
+        <summary>实时命令输出（只读，最多保留 200 行，超限截断）</summary>
         <pre
           tabIndex={0}
           style={{

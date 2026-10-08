@@ -295,6 +295,9 @@ public sealed partial class MainWindow
       {
         managedInstallProgressEvidence.Add(new { environment_id = environment.Id, recipe,
           observed = observations, failure, terminal = progress, logs = settingsState.EnvironmentInstallLog });
+        if (progress is null || progress.EnvironmentId != environment.Id || progress.State is not ("failed" or "cancelled"))
+          throw new InvalidOperationException("Installation failure did not expose a bound terminal progress state.");
+        await WaitForInstallProgressDomAsync(progress);
         await SaveManagedSmokePreviewAsync($"failed-progress-{environment.Id}");
         throw new InvalidOperationException(
           $"Environment install failed: {failure.ReasonCode}: {failure.Detail}");
@@ -304,6 +307,9 @@ public sealed partial class MainWindow
         if (phases.Count < 2 || !liveLog || progress?.State != "succeeded" ||
             progress.Dependencies.Any(item => item.InstallState != "installed"))
           throw new InvalidOperationException("Installation did not expose continuous live phases/logs and committed package state.");
+        await WaitForInstallProgressDomAsync(progress);
+        string terminalDom = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+          "JSON.stringify(document.querySelector('.environment-install-progress')?.dataset)");
         managedInstallProgressEvidence.Add(new
         {
           environment_id = environment.Id,
@@ -311,7 +317,8 @@ public sealed partial class MainWindow
           observed = observations,
           finished_event_time = progress.Timestamp,
           finished_observed_at = DateTimeOffset.UtcNow,
-          terminal = progress
+          terminal = progress,
+          terminal_dom = terminalDom
         });
         await SaveManagedSmokePreviewAsync($"progress-{environment.Id}");
         // 安装终态后维护进度动画必须退出，不得残留空闲滚动（AC2）。
@@ -325,6 +332,26 @@ public sealed partial class MainWindow
         throw new InvalidOperationException($"Environment install failed: {current.Reason}");
       await Task.Delay(250, timeout.Token);
     }
+  }
+
+  private Task WaitForInstallProgressDomAsync(ManagedEnvironmentInstallProgress progress)
+  {
+    string expected = JsonSerializer.Serialize(new
+    {
+      attempt = progress.AttemptId,
+      seq = progress.Seq.ToString(System.Globalization.CultureInfo.InvariantCulture),
+      environment = progress.EnvironmentId,
+      state = progress.State,
+      phase = progress.Phase,
+      installed = progress.Dependencies.Count(item => item.InstallState == "installed").ToString(System.Globalization.CultureInfo.InvariantCulture),
+      total = progress.DependencyTotalKnown ? progress.Dependencies.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) : "unknown"
+    });
+    return WaitForSmokeDomAsync("(() => { const expected = " + expected +
+      "; const actual = document.querySelector('.environment-install-progress')?.dataset; return !!actual && " +
+      "actual.installAttempt === expected.attempt && actual.installSeq === expected.seq && " +
+      "actual.installEnvironment === expected.environment && actual.installState === expected.state && " +
+      "actual.installPhase === expected.phase && actual.installInstalled === expected.installed && " +
+      "actual.installTotal === expected.total; })()", TimeSpan.FromSeconds(30));
   }
 
   private async Task<object> SwitchAndRecognizeSmokeAsync(ManagedEnvironment environment)

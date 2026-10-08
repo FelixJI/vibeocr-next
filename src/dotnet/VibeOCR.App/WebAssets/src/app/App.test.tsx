@@ -2202,7 +2202,7 @@ describe("AppShell", () => {
       navigate: vi.fn(),
       setTheme: vi.fn(),
     };
-    const viewState: AppViewState = {
+    const viewState = {
       connected: true,
       revision: 1,
       route: "settings",
@@ -2214,6 +2214,8 @@ describe("AppShell", () => {
           environments: [],
           environmentSupportsInstallProgress: true,
           environmentInstallProgress: {
+            attempt_id: "attempt",
+            seq: 11,
             environment_id: "env",
             timestamp: "2026-10-08T00:00:00Z",
             phase: "install",
@@ -2243,7 +2245,7 @@ describe("AppShell", () => {
           ],
         },
       },
-    };
+    } satisfies AppViewState;
     const first = render(<App actions={actions} viewState={viewState} />);
     expect(
       screen.getByRole("region", { name: "依赖安装进度" }),
@@ -2251,7 +2253,7 @@ describe("AppShell", () => {
       "共 2 项依赖｜已复用 1 项｜新增下载文件 1/1 个｜批次已安装 1/2 项",
     );
     await userEvent.click(
-      screen.getByText("实时命令输出（只读，最多保留 200 行 / 64 KiB）"),
+      screen.getByText("实时命令输出（只读，最多保留 200 行，超限截断）"),
     );
     expect(screen.getByText(/never execute/)).toHaveTextContent(
       "<script>never execute</script>",
@@ -2261,6 +2263,45 @@ describe("AppShell", () => {
       <App actions={actions} viewState={{ ...viewState, revision: 2 }} />,
     );
     expect(screen.getByText(/当前：真实安装批次/)).toBeVisible();
+    expect(actions.run).not.toHaveBeenCalled();
+    const terminal = {
+      ...viewState,
+      revision: 3,
+      features: {
+        settings: {
+          ...viewState.features.settings,
+          environmentInstallProgress: {
+            ...viewState.features.settings.environmentInstallProgress,
+            phase: "complete",
+            state: "succeeded",
+            seq: 12,
+            dependencies: [
+              {
+                name: "a",
+                version: "1",
+                download_state: "cached",
+                install_state: "installed",
+              },
+              {
+                name: "b",
+                version: "2",
+                download_state: "downloaded",
+                install_state: "installed",
+              },
+            ],
+          },
+        },
+      },
+    };
+    second.rerender(<App actions={actions} viewState={terminal} />);
+    const panel = screen.getByRole("region", { name: "依赖安装进度" });
+    expect(panel).toHaveAttribute("data-install-attempt", "attempt");
+    expect(panel).toHaveAttribute("data-install-seq", "12");
+    expect(panel).toHaveAttribute("data-install-state", "succeeded");
+    expect(panel).toHaveAttribute("data-install-phase", "complete");
+    expect(panel).toHaveAttribute("data-install-installed", "2");
+    expect(panel).toHaveAttribute("data-install-total", "2");
+    expect(panel).toHaveTextContent("批次已安装 2/2 项");
     expect(actions.run).not.toHaveBeenCalled();
     second.unmount();
   });
