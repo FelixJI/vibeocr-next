@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
@@ -17,6 +18,7 @@ from urllib.request import ProxyHandler, build_opener
 from uuid import uuid4
 
 from packaging.utils import InvalidWheelFilename, parse_wheel_filename
+from vibeocr.runtime.environments import managed_cleanup
 from vibeocr.runtime.environments.managed_install_progress import (
     CAPABILITY as INSTALL_PROGRESS_CAPABILITY,
 )
@@ -226,6 +228,10 @@ class ManagedEnvironmentStore:
         # the manifest-bound archive into a reusable, read-only base location.
         self._base_override = Path(base_python).resolve() if base_python else None
         self._install_runner = install_runner or self._install_scope
+        self._cleanup_cancelled = threading.Event()
+        self._cleanup_terminal = False
+        self._cleanup_cancel_gate = threading.Lock()
+        self._switch_guarded: str | None = None
         self._install_cancelled = False
         self._install_terminal = False
         self._event_sink = event_sink
@@ -958,6 +964,12 @@ class ManagedEnvironmentStore:
         )
 
     def _probe(self, record: dict) -> dict:
+        if record["id"] in managed_cleanup.read_ledger(self)["pending"]:
+            return {
+                "healthy": False,
+                "reason": "cleanup_pending",
+                "python": str(self._venv_python(self._safe_path(record))),
+            }
         root = self._safe_path(record)
         python = (
             _python_in(root) if record["kind"] == "legacy" else self._venv_python(root)
@@ -1279,7 +1291,11 @@ class ManagedEnvironmentStore:
             return {
                 "active_id": data["active_id"],
                 "active_revision": data["active_revision"],
-                "capabilities": [INSTALL_PROGRESS_CAPABILITY],
+                "capabilities": [
+                    INSTALL_PROGRESS_CAPABILITY,
+                    managed_cleanup.CAPABILITY,
+                    managed_cleanup.SWITCH_CAPABILITY,
+                ],
                 "recipes": self.recipe_catalog(),
                 "hardware": hardware,
                 "sources": [
@@ -1433,6 +1449,7 @@ class ManagedEnvironmentStore:
                     "revision": 1,
                 }
             )
+            managed_cleanup.remember_path(self, env_id, 1, root)
             base = self._base_python()
             result = subprocess.run(
                 [str(base), "-I", "-m", "venv", "--copies", "--without-pip", str(root)],
@@ -1484,6 +1501,7 @@ class ManagedEnvironmentStore:
             revision = record["revision"] + 1
             directory = f"{revision}-{uuid4().hex[:16]}"
             root = self.root / env_id / "revisions" / directory
+            managed_cleanup.remember_path(self, env_id, revision, root)
             result = subprocess.run(
                 [
                     str(self._base_python()),
@@ -1899,6 +1917,7 @@ class ManagedEnvironmentStore:
                 root = self.root / env_id / "revisions" / directory
                 if root.exists():
                     raise ManagedEnvironmentError("candidate revision already exists")
+                managed_cleanup.remember_path(self, env_id, revision, root)
                 operation = {
                     "environment_revision": record["revision"],
                     "plan_id": plan_id,
@@ -2166,8 +2185,22 @@ class ManagedEnvironmentStore:
             heartbeat_code="runtime.verify_runtime",
         )
 
+    @contextmanager
+    def switch_reservation(self, env_id: str) -> Iterator[dict]:
+        with self._target_operation(env_id):
+            self._switch_guarded = env_id
+            try:
+                yield self.prepare_switch(env_id)
+            finally:
+                self._switch_guarded = None
+
     def prepare_switch(self, env_id: str) -> dict:
-        with self._target_operation(env_id), RuntimeStoreLock(self._lock):
+        target = (
+            nullcontext()
+            if self._switch_guarded == env_id
+            else self._target_operation(env_id)
+        )
+        with target, RuntimeStoreLock(self._lock):
             data = self._read()
             self._reject_referenced(data)
             try:
@@ -2220,7 +2253,9 @@ class ManagedEnvironmentStore:
         ):
             raise ManagedEnvironmentError("prepared environment switch is invalid")
         with (
-            self._target_operation(prepared["environment_id"]),
+            nullcontext()
+            if self._switch_guarded == prepared["environment_id"]
+            else self._target_operation(prepared["environment_id"]),
             RuntimeStoreLock(self._lock),
         ):
             data = self._read()
@@ -2289,25 +2324,24 @@ class ManagedEnvironmentStore:
             and health.get("schema_version") == 2
         )
 
-    def delete(self, env_id: str, *, referenced: bool = False) -> None:
-        with self._target_operation(env_id), RuntimeStoreLock(self._lock):
-            data = self._read()
-            if environment_has_references(self._references, env_id):
-                raise ManagedEnvironmentError("environment has active jobs")
-            record = data["environments"].get(env_id)
-            if record is None:
-                raise ManagedEnvironmentError("unknown environment")
-            if env_id == data["active_id"] or referenced or record["kind"] == "legacy":
-                raise ManagedEnvironmentError(
-                    "active, referenced or legacy environment cannot be deleted"
-                )
-            # Remove the registry entry first. An interrupted removal may leave
-            # an orphaned directory, but cannot resurrect a deleted environment.
-            del data["environments"][env_id]
-            _atomic_json(self._registry, data)
-            import shutil
+    def preview_cleanup(self) -> dict:
+        return managed_cleanup.preview_cleanup(self)
 
-            root = (self.root / env_id).resolve()
-            if root.parent != self.root.resolve():
-                raise ManagedEnvironmentError("environment path escapes store")
-            shutil.rmtree(root)
+    def run_cleanup(self, plan_id: str, item_ids: list[str]) -> dict:
+        return managed_cleanup.run_cleanup(self, plan_id, item_ids)
+
+    def cancel_cleanup(self, acknowledge: Callable[[bool], None]) -> None:
+        # Cancellation never waits for the store lock held by filesystem deletion.
+        with self._cleanup_cancel_gate:
+            accepted = not self._cleanup_terminal
+            if accepted:
+                self._cleanup_cancelled.set()
+            acknowledge(accepted)
+
+    def delete(self, env_id: str, *, referenced: bool = False) -> None:
+        if referenced:
+            raise ManagedEnvironmentError("environment has active jobs")
+        try:
+            managed_cleanup.delete_environment(self, env_id)
+        except RuntimeInstallError as exc:
+            raise ManagedEnvironmentError(str(exc)) from exc

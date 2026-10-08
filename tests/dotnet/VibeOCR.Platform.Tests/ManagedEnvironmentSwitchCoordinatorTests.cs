@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 using Xunit;
@@ -6,6 +7,43 @@ namespace VibeOCR.Platform.Tests;
 
 public sealed class ManagedEnvironmentSwitchCoordinatorTests
 {
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SwitchControlSessionStaysAliveUntilCommitOrAbort(bool commit)
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-switch-reservation-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        string script = Path.Combine(root, "switch.ps1");
+        string marker = Path.Combine(root, "command.txt");
+        try
+        {
+            await File.WriteAllTextAsync(script, """
+                param([string]$Marker)
+                [Console]::WriteLine('{"protocol_version":2,"response_kind":"environment","action":"prepare_switch","result":{"environment_id":"fixture","environment_revision":1,"active_id":null,"active_revision":0,"python":"python","requires_supervisor":false,"launch":null}}')
+                $command = [Console]::In.ReadLine() | ConvertFrom-Json
+                Set-Content -LiteralPath $Marker -Value $command.action
+                if ($command.action -eq 'commit_switch') {
+                    [Console]::WriteLine('{"protocol_version":2,"response_kind":"environment","action":"commit_switch","result":{"active_id":"fixture","active_revision":1}}')
+                }
+                """, TestContext.Current.CancellationToken);
+            var start = new ProcessStartInfo
+            {
+                FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe"),
+                UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true,
+                RedirectStandardOutput = true, RedirectStandardError = true,
+            };
+            foreach (string arg in new[] { "-NoProfile", "-NonInteractive", "-File", script, "-Marker", marker }) start.ArgumentList.Add(arg);
+            IManagedEnvironmentSwitchReservation reservation = await EnvironmentSwitchReservation.StartAsync(start, "fixture", TestContext.Current.CancellationToken);
+            Assert.False(File.Exists(marker));
+            Assert.Equal("fixture", reservation.Prepared.EnvironmentId);
+            if (commit) Assert.Equal("fixture", (await reservation.CommitAsync(null, TestContext.Current.CancellationToken)).ActiveId);
+            await reservation.DisposeAsync();
+            Assert.Equal(commit ? "commit_switch" : "abort_switch", (await File.ReadAllTextAsync(marker, TestContext.Current.CancellationToken)).Trim());
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
     [Fact]
     public void SupervisorOptionsUseInstallerLaunchContractVerbatim()
     {
@@ -81,6 +119,7 @@ public sealed class ManagedEnvironmentSwitchCoordinatorTests
         Assert.Null(session);
         Assert.True(published);
         Assert.Equal(1, manager.CommitCount);
+        Assert.Equal(1, manager.DisposeCount);
         Assert.Null(manager.LastHealth);
     }
 
@@ -98,12 +137,24 @@ public sealed class ManagedEnvironmentSwitchCoordinatorTests
             TestContext.Current.CancellationToken));
 
         Assert.Equal(0, manager.CommitCount);
+        Assert.Equal(1, manager.DisposeCount);
         Assert.False(published);
     }
 
     private sealed class FakeManager(PreparedEnvironmentSwitch prepared) : IManagedEnvironmentClient
     {
         public int CommitCount { get; private set; }
+        public int DisposeCount { get; private set; }
+        public Task<IManagedEnvironmentSwitchReservation> BeginEnvironmentSwitchAsync(string environmentId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IManagedEnvironmentSwitchReservation>(new Reservation(this, prepared));
+
+        private sealed class Reservation(FakeManager owner, PreparedEnvironmentSwitch prepared) : IManagedEnvironmentSwitchReservation
+        {
+            public PreparedEnvironmentSwitch Prepared => prepared;
+            public Task<CommittedEnvironmentSwitch> CommitAsync(StartedEnvironmentHealth? health, CancellationToken cancellationToken = default) =>
+                owner.CommitEnvironmentSwitchAsync(prepared, health, cancellationToken);
+            public ValueTask DisposeAsync() { owner.DisposeCount++; return ValueTask.CompletedTask; }
+        }
         public StartedEnvironmentHealth? LastHealth { get; private set; }
 
         public Task<PreparedEnvironmentSwitch> PrepareEnvironmentSwitchAsync(

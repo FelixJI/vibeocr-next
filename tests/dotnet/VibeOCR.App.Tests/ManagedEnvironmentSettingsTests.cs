@@ -317,6 +317,51 @@ public sealed class ManagedEnvironmentSettingsTests
     await settings.RefreshAsync(TestContext.Current.CancellationToken);
     Assert.Equal("succeeded", settings.InstallProgress?.State);
     Assert.Equal(1, manager.InstallCalls);
+    await settings.PreviewCleanupAsync(TestContext.Current.CancellationToken);
+    Assert.Null(settings.InstallProgress);
+    Assert.Empty(settings.InstallLog);
+    Assert.NotNull(settings.CleanupPlan);
+    Assert.Equal("installed", settings.Snapshot!.Environments[0].Status);
+  }
+
+  [Fact]
+  public async Task CleanupRequiresExplicitCurrentSelectionAndKeepsPartialResult()
+  {
+    var manager = new MutableManager();
+    var settings = NewSettings(manager);
+    await settings.RefreshAsync(TestContext.Current.CancellationToken);
+    await settings.PreviewCleanupAsync(TestContext.Current.CancellationToken);
+    await Assert.ThrowsAsync<InvalidOperationException>(() => settings.CleanupAsync(new string('b', 32), ["residual:fixture"], TestContext.Current.CancellationToken));
+    await Assert.ThrowsAsync<InvalidOperationException>(() => settings.CleanupAsync(new string('a', 32), ["environment:protected"], TestContext.Current.CancellationToken));
+    Assert.Equal(0, manager.CleanupCalls);
+    await settings.CleanupAsync(new string('a', 32), ["residual:fixture"], TestContext.Current.CancellationToken);
+    Assert.Equal("failed", Assert.Single(settings.CleanupResult!.Items).State);
+    Assert.Equal(12, Assert.Single(settings.CleanupResult.Items).RemovedLogicalBytes);
+    Assert.Contains("部分完成", settings.Status);
+    Assert.Null(settings.CleanupPlan);
+    Assert.False(settings.CanCancelCleanup);
+    Assert.NotNull(settings.Snapshot);
+  }
+
+  [Fact]
+  public async Task CleanupCancellationReleasesLeaseAndKeepsRecoveryEntry()
+  {
+    var manager = new MutableManager();
+    var maintenance = new ProductMaintenanceCoordinator();
+    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask, () => null, maintenance);
+    await settings.RefreshAsync(TestContext.Current.CancellationToken);
+    await settings.PreviewCleanupAsync(TestContext.Current.CancellationToken);
+    var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    manager.BeforeCleanup = async token => { started.SetResult(); await Task.Delay(Timeout.InfiniteTimeSpan, token); };
+    Task cleanup = settings.CleanupAsync(new string('a', 32), ["residual:fixture"], TestContext.Current.CancellationToken);
+    await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    Assert.True(settings.CanCancelCleanup);
+    settings.CancelCleanup();
+    await cleanup.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    Assert.False(settings.CanCancelCleanup);
+    Assert.True(maintenance.State.IsIdle);
+    Assert.Contains("重新检查", settings.Status);
+    Assert.Null(settings.CleanupPlan);
   }
 
   private static ManagedEnvironmentSettings NewSettings(IManagedEnvironmentClient manager) =>
@@ -857,6 +902,20 @@ public sealed class ManagedEnvironmentSettingsTests
     public int PreviewCalls { get; private set; }
     public int InstallCalls { get; private set; }
     public bool SupportsEnvironmentInstallProgress => true;
+    public bool SupportsEnvironmentCleanup => true;
+    public int CleanupCalls { get; private set; }
+    public Func<CancellationToken, Task>? BeforeCleanup { get; set; }
+    public Task<ManagedCleanupPlan> PreviewEnvironmentCleanupAsync(CancellationToken cancellationToken = default) =>
+      Task.FromResult(new ManagedCleanupPlan(new string('a', 32),
+      [new ManagedCleanupItem("residual:fixture", "residual", "fixture", null, 12, true, "owned", ["fixture"], PathCount: 1),
+       new ManagedCleanupItem("environment:protected", "environment", "protected", "environment", null, false, "active", [])],
+      "logical_bytes", "不保证物理释放"));
+    public async Task<ManagedCleanupResult> RunEnvironmentCleanupAsync(string planId, IReadOnlyList<string> itemIds, CancellationToken cancellationToken = default)
+    {
+      CleanupCalls++;
+      if (BeforeCleanup is not null) await BeforeCleanup(cancellationToken);
+      return new ManagedCleanupResult(planId, [new ManagedCleanupResultItem(itemIds[0], "failed", "file in use", 12)], "logical_bytes");
+    }
     public Action<ManagedEnvironmentInstallProgress>? Observer { get; private set; }
     public Func<Task>? BeforeList { get; set; }
     public Func<Task>? BeforeFind { get; set; }

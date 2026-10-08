@@ -491,6 +491,11 @@ public sealed class DesktopWorkbenchCommandHandler :
         SwitchEnvironmentCommand switchEnvironment => StartEnvironmentOperation(
           environment => environment.SwitchAsync(switchEnvironment.EnvironmentId, cancellationToken),
           refreshCatalog: true),
+        PreviewEnvironmentCleanupCommand => await RunEnvironmentAsync(
+          environment => environment.PreviewCleanupAsync(cancellationToken), cancellationToken),
+        RunEnvironmentCleanupCommand cleanup => StartEnvironmentOperation(
+          environment => environment.CleanupAsync(cleanup.PlanId, cleanup.ItemIds, cancellationToken)),
+        CancelEnvironmentCleanupCommand => CancelEnvironmentCleanup(),
         DeleteEnvironmentCommand deleteEnvironment => await RunEnvironmentAsync(
           environment => environment.DeleteAsync(deleteEnvironment.EnvironmentId, cancellationToken), cancellationToken),
         RepairEmptyEnvironmentCommand repair => await RunEnvironmentAsync(
@@ -3340,6 +3345,13 @@ public sealed class DesktopWorkbenchCommandHandler :
     });
   }
 
+  private SettingsWorkbenchState CancelEnvironmentCleanup()
+  {
+    settings ??= CreateSettings();
+    settings.Environments?.CancelCleanup();
+    return SettingsState(settings);
+  }
+
   private SettingsWorkbenchState CancelEnvironmentInstall()
   {
     settings ??= CreateSettings();
@@ -4774,6 +4786,10 @@ public sealed class DesktopWorkbenchCommandHandler :
         hardware.NvidiaDriver?.DriverVersion)
       // 旧 Runtime payload 无 hardware：诚实按未探测呈现，不臆造可用性。
       : new SettingsEnvironmentHardwareState("unknown"),
+    EnvironmentSupportsCleanup: viewModel.Environments?.SupportsCleanup ?? false,
+    EnvironmentCleanupPlan: viewModel.Environments?.CleanupPlan,
+    EnvironmentCleanupResult: viewModel.Environments?.CleanupResult,
+    EnvironmentCanCancelCleanup: viewModel.Environments?.CanCancelCleanup ?? false,
     EnvironmentCompatibility: viewModel.Environments?.Compatibility is { } compatibility
       ? new SettingsEnvironmentCompatibilityState(
         compatibility.Recipe,

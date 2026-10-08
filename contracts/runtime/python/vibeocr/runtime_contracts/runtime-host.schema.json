@@ -20,7 +20,7 @@
   "$defs": {
     "ManagedEnvironmentRequest": {
       "type": "object",
-      "description": "Frozen manager operations for named, isolated Python environments. A prepared switch is committed only after the host starts and verifies the target Supervisor; empty environments require no Supervisor.",
+      "description": "Frozen manager operations for named, isolated Python environments. Production prepare/commit requires --environment-switch-control to hold the target operation lock across Supervisor startup and stdin commit/abort. Unguarded switching fails closed. Cleanup confirms explicit selected items against fresh ownership and references.",
       "additionalProperties": false,
       "required": ["protocol_version", "request_kind", "product_root", "component_lock", "runtime_manifest", "action"],
       "properties": {
@@ -31,7 +31,7 @@
         "runtime_manifest": { "type": "string", "minLength": 1 },
         "layout_manifest": { "type": "string", "minLength": 1 },
         "product_id": { "type": "string", "minLength": 1 },
-        "action": { "type": "string", "enum": ["list", "initialize_default", "create", "set_sources", "preview_install", "install", "prepare_switch", "commit_switch", "repair_empty", "delete", "find_compatible"] },
+        "action": { "type": "string", "enum": ["list", "initialize_default", "create", "set_sources", "preview_install", "install", "prepare_switch", "commit_switch", "repair_empty", "delete", "find_compatible", "preview_cleanup", "run_cleanup"] },
         "name": { "type": "string", "minLength": 1 },
         "environment_id": {
           "anyOf": [
@@ -81,6 +81,11 @@
           "description": "Only install/initialize_default, after list advertises environment.install_progress.v1."
         },
         "plan_id": { "type": "string", "minLength": 1 },
+        "item_ids": {
+          "type": "array", "minItems": 1, "maxItems": 2048, "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "description": "run_cleanup only: explicit selectable item ids from the frozen preview."
+        },
         "prepared": { "type": "object" },
         "started_health": {
           "type": "object",

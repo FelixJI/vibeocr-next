@@ -67,8 +67,9 @@ public sealed class ManagedEnvironmentSwitchCoordinator(IManagedEnvironmentClien
         bool injectSoakCrash = false)
     {
         ArgumentNullException.ThrowIfNull(publish);
-        PreparedEnvironmentSwitch prepared = await manager.PrepareEnvironmentSwitchAsync(
+        await using IManagedEnvironmentSwitchReservation reservation = await manager.BeginEnvironmentSwitchAsync(
             environmentId, cancellationToken).ConfigureAwait(false);
+        PreparedEnvironmentSwitch prepared = reservation.Prepared;
         ManagedEnvironmentSession? candidate = null;
         StartedEnvironmentHealth? evidence = null;
         bool committed = false;
@@ -117,8 +118,8 @@ public sealed class ManagedEnvironmentSwitchCoordinator(IManagedEnvironmentClien
                 throw new InvalidDataException("Empty environment must not launch a Supervisor.");
             }
 
-            await manager.CommitEnvironmentSwitchAsync(
-                prepared, evidence, cancellationToken)
+            await reservation.CommitAsync(
+                evidence, cancellationToken)
                 .ConfigureAwait(false);
             committed = true;
             publish(candidate);

@@ -176,9 +176,52 @@ public sealed record ManagedEnvironmentQueryResult(
     [property: JsonPropertyName("selected")] ManagedEnvironmentSelection? Selected = null,
     [property: JsonPropertyName("environments")] IReadOnlyList<ManagedEnvironmentQueryMatch>? Environments = null);
 
+public sealed record ManagedCleanupItem(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("category")] string Category,
+    [property: JsonPropertyName("label")] string Label,
+    [property: JsonPropertyName("environment_id")] string? EnvironmentId,
+    [property: JsonPropertyName("logical_bytes")] long? LogicalBytes,
+    [property: JsonPropertyName("can_clean")] bool CanClean,
+    [property: JsonPropertyName("reason")] string Reason,
+    [property: JsonPropertyName("paths")] IReadOnlyList<string> Paths,
+    [property: JsonPropertyName("last_error")] string? LastError = null,
+    [property: JsonPropertyName("path_count")] int PathCount = 0);
+
+public sealed record ManagedCleanupPlan(
+    [property: JsonPropertyName("plan_id")] string PlanId,
+    [property: JsonPropertyName("items")] IReadOnlyList<ManagedCleanupItem> Items,
+    [property: JsonPropertyName("size_kind")] string SizeKind,
+    [property: JsonPropertyName("warning")] string Warning,
+    [property: JsonPropertyName("last_result")] ManagedCleanupResult? LastResult = null);
+
+public sealed record ManagedCleanupResultItem(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("detail")] string Detail,
+    [property: JsonPropertyName("removed_logical_bytes")] long RemovedLogicalBytes);
+
+public sealed record ManagedCleanupResult(
+    [property: JsonPropertyName("plan_id")] string PlanId,
+    [property: JsonPropertyName("items")] IReadOnlyList<ManagedCleanupResultItem> Items,
+    [property: JsonPropertyName("size_kind")] string SizeKind);
+
+public interface IManagedEnvironmentSwitchReservation : IAsyncDisposable
+{
+    PreparedEnvironmentSwitch Prepared { get; }
+    Task<CommittedEnvironmentSwitch> CommitAsync(StartedEnvironmentHealth? health, CancellationToken cancellationToken = default);
+}
+
 public interface IManagedEnvironmentClient
 {
     bool SupportsEnvironmentInstallProgress => false;
+    bool SupportsEnvironmentCleanup => false;
+    Task<ManagedCleanupPlan> PreviewEnvironmentCleanupAsync(CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("当前 Runtime 不支持空间清理，请更新运行组件。");
+    Task<ManagedCleanupResult> RunEnvironmentCleanupAsync(string planId, IReadOnlyList<string> itemIds, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("当前 Runtime 不支持空间清理，请更新运行组件。");
+    Task<IManagedEnvironmentSwitchReservation> BeginEnvironmentSwitchAsync(string environmentId, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("当前 Runtime 不支持受保护的环境切换，请更新运行组件。");
     Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default);
     Task<ManagedEnvironmentList> InitializeDefaultEnvironmentAsync(CancellationToken cancellationToken = default) =>
         ListEnvironmentsAsync(cancellationToken);
@@ -216,6 +259,26 @@ public interface IManagedEnvironmentClient
 public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
 {
     public bool SupportsEnvironmentInstallProgress { get; private set; }
+    public bool SupportsEnvironmentCleanup { get; private set; }
+
+    public Task<ManagedCleanupPlan> PreviewEnvironmentCleanupAsync(CancellationToken cancellationToken = default) =>
+        InvokeEnvironmentAsync<ManagedCleanupPlan>("preview_cleanup", [], cancellationToken);
+
+    public Task<ManagedCleanupResult> RunEnvironmentCleanupAsync(string planId, IReadOnlyList<string> itemIds, CancellationToken cancellationToken = default) =>
+        InvokeEnvironmentAsync<ManagedCleanupResult>("run_cleanup", new() { ["plan_id"] = planId, ["item_ids"] = itemIds }, cancellationToken);
+
+    public async Task<IManagedEnvironmentSwitchReservation> BeginEnvironmentSwitchAsync(string environmentId, CancellationToken cancellationToken = default)
+    {
+        var request = BindingRequest();
+        request.Remove("accelerator");
+        request["request_kind"] = "environment";
+        request["action"] = "prepare_switch";
+        request["environment_id"] = environmentId;
+        ProcessStartInfo startInfo = StartInfo(request);
+        startInfo.RedirectStandardInput = true;
+        startInfo.ArgumentList.Add("--environment-switch-control");
+        return await EnvironmentSwitchReservation.StartAsync(startInfo, environmentId, cancellationToken).ConfigureAwait(false);
+    }
 
     public Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default) =>
         InvokeEnvironmentAsync<ManagedEnvironmentList>("list", [], cancellationToken);
@@ -292,18 +355,12 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
 
     public Task<PreparedEnvironmentSwitch> PrepareEnvironmentSwitchAsync(
         string environmentId, CancellationToken cancellationToken = default) =>
-        InvokeEnvironmentAsync<PreparedEnvironmentSwitch>("prepare_switch",
-            new() { ["environment_id"] = environmentId }, cancellationToken);
+        throw new NotSupportedException("环境切换必须使用持有目标锁的 reservation 会话。");
 
     public Task<CommittedEnvironmentSwitch> CommitEnvironmentSwitchAsync(
         PreparedEnvironmentSwitch prepared, StartedEnvironmentHealth? startedHealth = null,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(prepared);
-        var fields = new Dictionary<string, object?> { ["prepared"] = prepared };
-        if (startedHealth is not null) fields["started_health"] = startedHealth;
-        return InvokeEnvironmentAsync<CommittedEnvironmentSwitch>("commit_switch", fields, cancellationToken);
-    }
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("环境切换必须由 reservation 会话提交。");
 
     public Task<ManagedEnvironment> RepairEmptyEnvironmentAsync(
         string environmentId, CancellationToken cancellationToken = default) =>
@@ -326,7 +383,7 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
         bool observe = progress is not null && SupportsEnvironmentInstallProgress;
         if (observe) request["accepted_event_streams"] = new[] { "environment.install_progress.v1" };
         ProcessStartInfo startInfo = StartInfo(request);
-        if (action is "install" or "initialize_default")
+        if (action is "install" or "initialize_default" or "run_cleanup")
         {
             startInfo.RedirectStandardInput = true;
             startInfo.ArgumentList.Add("--environment-cancel-control");
@@ -398,8 +455,26 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
                 throw new RuntimeInstallerException("运行环境响应协议无效。");
             T value = payload.Deserialize<T>(JsonOptions)
                 ?? throw new RuntimeInstallerException("运行环境响应为空。");
+            if (value is ManagedCleanupPlan cleanupPlan && (string.IsNullOrEmpty(cleanupPlan.PlanId) || cleanupPlan.PlanId.Length != 32 || !cleanupPlan.PlanId.All(Uri.IsHexDigit) ||
+                cleanupPlan.SizeKind != "logical_bytes" || cleanupPlan.Items is null || cleanupPlan.Items.Count > 2048 ||
+                cleanupPlan.Items.Any(item => item is null) ||
+                cleanupPlan.Items.Select(item => item.Id).Distinct(StringComparer.Ordinal).Count() != cleanupPlan.Items.Count ||
+                cleanupPlan.Items.Any(item => string.IsNullOrWhiteSpace(item.Id) || item.Id.Length > 1024 || item.LogicalBytes < 0 ||
+                    item.Label is null || item.Reason is null || item.Paths is null || item.Paths.Count > 8 || item.PathCount < item.Paths.Count)))
+                throw new RuntimeInstallerException("空间清理预览响应无效。");
+            if (value is ManagedCleanupResult cleanupResult && (cleanupResult.PlanId != fields["plan_id"] as string ||
+                cleanupResult.SizeKind != "logical_bytes" || cleanupResult.Items is null || cleanupResult.Items.Count > 2048 ||
+                cleanupResult.Items.Any(item => item is null || string.IsNullOrWhiteSpace(item.Id) || item.State is not ("deleted" or "failed" or "cancelled") ||
+                    item.RemovedLogicalBytes < 0 || item.Detail is null) ||
+                cleanupResult.Items.Select(item => item.Id).Distinct(StringComparer.Ordinal).Count() != cleanupResult.Items.Count ||
+                !cleanupResult.Items.Select(item => item.Id).ToHashSet(StringComparer.Ordinal).SetEquals((IReadOnlyList<string>)fields["item_ids"]!)))
+                throw new RuntimeInstallerException("空间清理结果响应无效。");
             if (value is ManagedEnvironmentList list)
+            {
                 SupportsEnvironmentInstallProgress = list.Capabilities?.Contains("environment.install_progress.v1", StringComparer.Ordinal) == true;
+                SupportsEnvironmentCleanup = list.Capabilities?.Contains("environment.cleanup.v1", StringComparer.Ordinal) == true &&
+                    list.Capabilities.Contains("environment.switch-reservation.v1", StringComparer.Ordinal);
+            }
             return value;
         }
         catch (JsonException exception)

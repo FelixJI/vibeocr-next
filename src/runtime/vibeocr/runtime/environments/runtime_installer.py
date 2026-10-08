@@ -2694,6 +2694,8 @@ def _request(value: object) -> dict[str, Any]:
             "commit_switch": {"prepared"},
             "repair_empty": {"environment_id"},
             "delete": {"environment_id"},
+            "preview_cleanup": set(),
+            "run_cleanup": {"plan_id", "item_ids"},
         }
         if (
             not isinstance(action, str)
@@ -2730,6 +2732,17 @@ def _request(value: object) -> dict[str, Any]:
             raise RuntimeInstallError(
                 "Runtime environment action contains unrelated fields"
             )
+        if "item_ids" in value and (
+            not isinstance(value["item_ids"], list)
+            or not value["item_ids"]
+            or len(value["item_ids"]) > 2048
+            or any(
+                not isinstance(item, str) or not item or len(item) > 1024
+                for item in value["item_ids"]
+            )
+            or len(set(value["item_ids"])) != len(value["item_ids"])
+        ):
+            raise RuntimeInstallError("Runtime cleanup selection is invalid")
         for field in ("name", "environment_id", "recipe", "plan_id"):
             if field not in value:
                 continue
@@ -3121,6 +3134,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="vibeocr-runtime-installer")
     parser.add_argument("--request-json")
     parser.add_argument("--environment-cancel-control", action="store_true")
+    parser.add_argument("--environment-switch-control", action="store_true")
     parser.add_argument("--maintenance-cancel-control", action="store_true")
     args = parser.parse_args(argv)
     operation: str | None = None
@@ -3160,12 +3174,59 @@ def main(argv: list[str] | None = None) -> int:
             if args.environment_cancel_control and action in {
                 "install",
                 "initialize_default",
+                "run_cleanup",
             }:
                 threading.Thread(
                     target=_listen_environment_cancel,
-                    args=(lambda: manager.cancel_install(_environment_cancel_receipt),),
+                    args=(
+                        lambda: (
+                            manager.cancel_cleanup
+                            if action == "run_cleanup"
+                            else manager.cancel_install
+                        )(_environment_cancel_receipt),
+                    ),
                     daemon=True,
                 ).start()
+            if action in {"prepare_switch", "commit_switch"}:
+                if action != "prepare_switch" or not args.environment_switch_control:
+                    raise RuntimeInstallError(
+                        "environment switch requires a held reservation"
+                    )
+                with manager.switch_reservation(request["environment_id"]) as prepared:
+                    _emit(
+                        {
+                            "protocol_version": PROTOCOL_VERSION,
+                            "response_kind": "environment",
+                            "action": "prepare_switch",
+                            "result": prepared,
+                        }
+                    )
+                    line = sys.stdin.readline(65537)
+                    if not line:
+                        return (
+                            0  # Host exited: OS target lock is released by the context.
+                        )
+                    command = json.loads(line)
+                    if command == {"action": "abort_switch"}:
+                        return 0
+                    if (
+                        not isinstance(command, dict)
+                        or set(command) != {"action", "started_health"}
+                        or command["action"] != "commit_switch"
+                    ):
+                        raise RuntimeInstallError("switch control command is invalid")
+                    payload = manager.commit_switch(
+                        prepared, started_health=command["started_health"]
+                    )
+                    _emit(
+                        {
+                            "protocol_version": PROTOCOL_VERSION,
+                            "response_kind": "environment",
+                            "action": "commit_switch",
+                            "result": payload,
+                        }
+                    )
+                    return 0
             if action == "list":
                 payload = manager.list()
             elif action == "initialize_default":
@@ -3205,13 +3266,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
             elif action == "find_compatible":
                 payload = manager.find_compatible(request["recipe"])
-            elif action == "prepare_switch":
-                payload = manager.prepare_switch(request["environment_id"])
-            elif action == "commit_switch":
-                payload = manager.commit_switch(
-                    request["prepared"],
-                    started_health=request.get("started_health"),
-                )
+            elif action == "preview_cleanup":
+                payload = manager.preview_cleanup()
+            elif action == "run_cleanup":
+                payload = manager.run_cleanup(request["plan_id"], request["item_ids"])
             elif action == "repair_empty":
                 payload = manager.repair_empty(request["environment_id"])
             else:

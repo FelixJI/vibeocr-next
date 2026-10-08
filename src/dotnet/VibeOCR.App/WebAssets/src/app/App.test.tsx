@@ -2306,6 +2306,93 @@ describe("AppShell", () => {
     second.unmount();
   });
 
+  it("requires explicit cleanup selection and confirmation while protecting shared resources", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 1,
+      route: "settings",
+      theme: "light",
+      runtimeLabel: "connected",
+      capabilities: ["runtime.environments"],
+      features: {
+        settings: {
+          environmentSupportsCleanup: true,
+          environmentCanCancelCleanup: true,
+          environments: [],
+          environmentCleanupPlan: {
+            plan_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            warning: "仅逻辑字节，不保证物理释放",
+            items: [
+              {
+                id: "residual:known",
+                category: "residual",
+                label: "已知安装残留",
+                environment_id: null,
+                logical_bytes: 1024,
+                can_clean: true,
+                reason: "明确生产记录且无引用",
+                paths: ["environments/known/revisions/2"],
+                path_count: 1,
+              },
+              {
+                id: "protected:model",
+                category: "models",
+                label: "共享模型",
+                environment_id: null,
+                logical_bytes: null,
+                can_clean: false,
+                reason: "两个保留环境仍需使用",
+                paths: ["state/model-cache"],
+                path_count: 1,
+              },
+            ],
+          },
+          environmentCleanupResult: {
+            items: [
+              {
+                id: "previous",
+                state: "failed",
+                detail: "文件占用，重新检查继续",
+                removed_logical_bytes: 10,
+              },
+            ],
+          },
+        },
+      },
+    };
+    const { unmount } = render(<App viewState={viewState} actions={actions} />);
+    expect(screen.getByRole("checkbox", { name: /共享模型/ })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "检查可清理项" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.previewEnvironmentCleanup",
+    });
+    await user.click(screen.getByRole("checkbox", { name: /已知安装残留/ }));
+    await user.click(screen.getByRole("button", { name: "预览所选清理影响" }));
+    expect(actions.run).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "settings.runEnvironmentCleanup" }),
+    );
+    expect(screen.getByText(/缓存以后可能需要重新下载/)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "确认清理所选项目" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.runEnvironmentCleanup",
+      planId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      itemIds: ["residual:known"],
+    });
+    await user.click(screen.getByRole("button", { name: "取消清理" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.cancelEnvironmentCleanup",
+    });
+    expect(screen.getByText(/文件占用，重新检查继续/)).toBeVisible();
+    unmount();
+  });
+
   it("shows a fresh empty environment without starting OCR and routes explicit installation", async () => {
     window.location.hash = "#/settings";
     const user = userEvent.setup();

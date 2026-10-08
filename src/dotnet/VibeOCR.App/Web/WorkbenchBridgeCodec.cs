@@ -657,6 +657,24 @@ public static class WorkbenchBridgeCodec
       case ("settings", "switchEnvironment"):
         EnsureObjectWithFields(arguments, EnvironmentIdArgumentFields, "command arguments");
         return new SwitchEnvironmentCommand(ParseEnvironmentId(arguments));
+      case ("settings", "previewEnvironmentCleanup"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new PreviewEnvironmentCleanupCommand();
+      case ("settings", "cancelEnvironmentCleanup"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new CancelEnvironmentCleanupCommand();
+      case ("settings", "runEnvironmentCleanup"):
+        EnsureObjectWithFields(arguments, new HashSet<string>(StringComparer.Ordinal) { "planId", "itemIds" }, "command arguments");
+        string? cleanupPlanId = arguments.GetProperty("planId").GetString();
+        JsonElement cleanupIds = arguments.GetProperty("itemIds");
+        if (cleanupPlanId is null || cleanupPlanId.Length != 32 || !cleanupPlanId.All(Uri.IsHexDigit) ||
+            cleanupIds.ValueKind != JsonValueKind.Array || cleanupIds.GetArrayLength() is < 1 or > 2048 ||
+            cleanupIds.EnumerateArray().Any(item => item.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(item.GetString()) || item.GetString()!.Length > 1024))
+          throw new WorkbenchBridgeProtocolException("空间清理选择无效。");
+        string[] selectedCleanupIds = cleanupIds.EnumerateArray().Select(item => item.GetString()!).ToArray();
+        if (selectedCleanupIds.Distinct(StringComparer.Ordinal).Count() != selectedCleanupIds.Length)
+          throw new WorkbenchBridgeProtocolException("空间清理选择包含重复项目。");
+        return new RunEnvironmentCleanupCommand(cleanupPlanId, selectedCleanupIds);
       case ("settings", "deleteEnvironment"):
         EnsureObjectWithFields(arguments, EnvironmentIdArgumentFields, "command arguments");
         return new DeleteEnvironmentCommand(ParseEnvironmentId(arguments));
@@ -1379,6 +1397,10 @@ public static class WorkbenchBridgeCodec
       settings.EnvironmentInstallProgress,
       settings.EnvironmentInstallLog,
       settings.EnvironmentSupportsInstallProgress,
+      settings.EnvironmentSupportsCleanup,
+      settings.EnvironmentCleanupPlan,
+      settings.EnvironmentCleanupResult,
+      settings.EnvironmentCanCancelCleanup,
       environmentRecipes = settings.EnvironmentRecipes ?? [],
       environmentHardware = settings.EnvironmentHardware is null ? null : new
       {

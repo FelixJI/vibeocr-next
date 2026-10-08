@@ -91,7 +91,7 @@ class ManagedEnvironmentRequest(TypedDict, total=False):
     runtime_manifest: Required[str]
     layout_manifest: NotRequired[str]
     product_id: NotRequired[str]
-    action: Required[Literal['list', 'initialize_default', 'create', 'set_sources', 'preview_install', 'install', 'prepare_switch', 'commit_switch', 'repair_empty', 'delete', 'find_compatible']]
+    action: Required[Literal['list', 'initialize_default', 'create', 'set_sources', 'preview_install', 'install', 'prepare_switch', 'commit_switch', 'repair_empty', 'delete', 'find_compatible', 'preview_cleanup', 'run_cleanup']]
     name: NotRequired[str]
     environment_id: NotRequired[str | None]
     recipe: NotRequired[str]
@@ -102,6 +102,7 @@ class ManagedEnvironmentRequest(TypedDict, total=False):
     mineru_model_source_id: NotRequired[str | None]
     accepted_event_streams: NotRequired[list[Literal['environment.install_progress.v1']]]
     plan_id: NotRequired[str]
+    item_ids: NotRequired[list[str]]
     prepared: NotRequired[dict[str, Any]]
     started_health: NotRequired[dict[str, Any]]
 

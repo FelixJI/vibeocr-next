@@ -2104,7 +2104,11 @@ def test_frozen_manager_exposes_named_environment_list(
         }
     }
     assert response["result"] == {
-        "capabilities": ["environment.install_progress.v1"],
+        "capabilities": [
+            "environment.install_progress.v1",
+            "environment.cleanup.v1",
+            "environment.switch-reservation.v1",
+        ],
         "active_id": None,
         "active_revision": 0,
         "sources": [
