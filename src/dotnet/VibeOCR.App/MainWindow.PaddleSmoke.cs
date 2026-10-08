@@ -448,6 +448,7 @@ public sealed partial class MainWindow
         optionName, optionValue, session, timeoutMinutes),
       "pdf" => await RunPaddlePdfInputAsync(mode, pipeline, fixture,
         optionName, optionValue, session, timeoutMinutes),
+      "pdf_operations" => await RunPaddlePdfOperationsAsync(mode, fixture, session, timeoutMinutes),
       _ => throw new InvalidOperationException($"Unknown Paddle input kind: {kind}"),
     };
   }
@@ -618,6 +619,73 @@ public sealed partial class MainWindow
       if (done(state)) return state;
       await Task.Delay(250, cancellation.Token);
     }
+  }
+
+  private async Task<object> RunPaddlePdfOperationsAsync(string mode, string fixture, ManagedEnvironmentSession session, int timeoutMinutes)
+  {
+    if (mode != "paddle_text") throw new InvalidOperationException("PDF operations smoke requires Paddle text OCR.");
+    await NavigateSmokeAsync("PDF", "button");
+    await WaitForPaddleModeAsync("#pdf-task-engine", mode);
+    await SelectSmokeValueAsync("#pdf-task-engine", mode);
+    RecordPaddleSmokeStage("open eight orientation pages via public picker");
+    await ClickManagedSmokeButtonAsync("打开 PDF");
+    await CompletePaddleOpenPickerAsync(fixture);
+    PdfWorkbenchState opened = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.DetectedCount == 8, TimeSpan.FromMinutes(2));
+    await ClickManagedSmokeButtonAsync("全选页面");
+    await SelectSmokeValueAsync("#pdf-operation-range", "all");
+    int before = smokeSubmitAttempts!();
+    RecordPaddleSmokeStage("correct all eight orientation pages through public UI");
+    await ClickManagedSmokeButtonAsync("自动文字朝向");
+    PdfWorkbenchState corrected = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Summary.Contains("已纠正 6 页、无需处理 2 页、失败 0 页、未处理 0 页", StringComparison.Ordinal), TimeSpan.FromMinutes(timeoutMinutes));
+    int[] expectedRotations = [0, 0, 270, 270, 180, 180, 90, 90];
+    if (corrected.Pages is null || !corrected.Pages.Select(page => page.Rotation).SequenceEqual(expectedRotations) || smokeSubmitAttempts!() - before != 8)
+      throw new InvalidOperationException($"Orientation page/job mapping failed: {JsonSerializer.Serialize(corrected)}");
+    object correctedJob = await ObservePaddleInputJobAsync(session, "OCR", "local_models_only", "true", smokeSubmitAttempts!() - 1, 1);
+    RecordPaddleSmokeStage("repeat orientation and verify all eight pages are skipped");
+    await ClickManagedSmokeButtonAsync("自动文字朝向");
+    PdfWorkbenchState repeated = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Summary.Contains("已纠正 0 页、无需处理 8 页、失败 0 页、未处理 0 页", StringComparison.Ordinal), TimeSpan.FromMinutes(timeoutMinutes));
+    object repeatedJob = await ObservePaddleInputJobAsync(session, "OCR", "local_models_only", "true", smokeSubmitAttempts!() - 1, 1);
+    object orientationSaved = await RunPaddlePdfSaveAsync("orientation");
+    paddleSmokePartialEvidence = new { opened, corrected, repeated, corrected_job = correctedJob, repeated_job = repeatedJob, orientation_saved = orientationSaved };
+
+    await ClickManagedSmokeButtonAsync("关闭文档");
+    await WaitForPaddlePdfAsync(state => !state.IsBusy && state.PageCount == 0, TimeSpan.FromMinutes(2));
+    string fixtures = Path.GetDirectoryName(fixture)!;
+    string scanned = ValidatePaddleSmokeOwnedPath(Path.Combine(fixtures, "document_scan.pdf"), "PDF operations scan fixture");
+    string external = ValidatePaddleSmokeOwnedPath(Path.Combine(fixtures, "document_mixed.pdf"), "PDF operations insertion fixture");
+    RecordPaddleSmokeStage("add T1 text layer before structure operations");
+    await ClickManagedSmokeButtonAsync("打开 PDF"); await CompletePaddleOpenPickerAsync(scanned);
+    await WaitForPaddlePdfAsync(state => !state.IsBusy && state.DetectedCount == 1 && state.CanAddTextLayer, TimeSpan.FromMinutes(2));
+    await ClickManagedSmokeButtonAsync("添加选中页文字层");
+    PdfWorkbenchState layered = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.AddedCount == 1 && state.IsModified, TimeSpan.FromMinutes(timeoutMinutes));
+    long revision = layered.Revision;
+    await ClickManagedSmokeButtonAsync("顺时针 90°");
+    await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Revision > revision, TimeSpan.FromMinutes(2));
+    await EnterSmokeTextAsync("#pdf-insert-after", "1");
+    await EnterSmokeTextAsync("#pdf-blank-width", "640");
+    await EnterSmokeTextAsync("#pdf-blank-height", "480");
+    await ClickManagedSmokeButtonAsync("插入空白页");
+    await WaitForPaddlePdfAsync(state => !state.IsBusy && state.PageCount == 2, TimeSpan.FromMinutes(2));
+    await ClickManagedSmokeButtonAsync("插入其他 PDF"); await CompletePaddleOpenPickerAsync(external);
+    PdfWorkbenchState inserted = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.PageCount == 3, TimeSpan.FromMinutes(2));
+    if (inserted.Pages is not { Count: 3 } insertedPages || insertedPages[0].AddedThisSession != true || insertedPages[1].HasTextLayer != true || insertedPages[2].Width != 640 || insertedPages[2].Height != 480)
+      throw new InvalidOperationException("Inserted PDF/page metadata did not preserve the original OCR page.");
+    RecordPaddleSmokeStage("keyboard-accessible move followed by drag reorder");
+    revision = inserted.Revision;
+    await WaitForSmokeDomAsync("(() => {const button=document.querySelector('button[aria-label=\"第 1 页向后移动\"]');if(!button||button.disabled)return false;button.focus();button.click();return true;})()", TimeSpan.FromSeconds(30));
+    await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Revision > revision, TimeSpan.FromMinutes(2));
+    string dragged = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+      "(() => {const from=document.querySelector('[data-page-index=\"1\"]'),to=document.querySelector('[data-page-index=\"2\"]');if(!from||!to)return false;from.dispatchEvent(new DragEvent('dragstart',{bubbles:true}));to.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true}));from.dispatchEvent(new DragEvent('dragend',{bubbles:true}));return true;})()");
+    if (dragged != "true") throw new InvalidOperationException("Public PDF drag controls are unavailable.");
+    PdfWorkbenchState reordered = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Pages?[2].AddedThisSession == true, TimeSpan.FromMinutes(2));
+    if (reordered.SelectedPages is null || !reordered.SelectedPages.SequenceEqual([2])) throw new InvalidOperationException("Page selection did not follow OCR page identity.");
+    RecordPaddleSmokeStage("continue OCR on current rotated revision");
+    await ClickManagedSmokeButtonAsync("提取/解析选中页");
+    PdfWorkbenchState continued = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Pages?[2].StatusCode == "pdf.page.done" && state.Summary.StartsWith("已提取/解析", StringComparison.Ordinal), TimeSpan.FromMinutes(timeoutMinutes));
+    object combinedSaved = await RunPaddlePdfSaveAsync("operations");
+    paddleSmokeOutcome = "passed";
+    return new { input_kind = "pdf_operations", fixture_path = fixture, submit_attempts = smokeSubmitAttempts!(), opened, corrected, repeated, corrected_job = correctedJob, repeated_job = repeatedJob, orientation_saved = orientationSaved, layered, inserted, reordered, continued, combined_saved = combinedSaved,
+      drag_input = "public DOM DragEvent", move_input = "public accessible button", expected_combined_order = new[] { "external text PDF", "640x480 blank page", "original OCR scan with Rotate=90" } };
   }
 
   private async Task<PdfWorkbenchState> WaitForPaddlePdfAsync(
@@ -1206,7 +1274,7 @@ public sealed partial class MainWindow
       incomplete };
   }
 
-  private async Task<object> RunPaddlePdfSaveAsync()
+  private async Task<object> RunPaddlePdfSaveAsync(string? suffix = null)
   {
     string? exportDir = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_EXPORT_DIR");
     if (string.IsNullOrWhiteSpace(exportDir))
@@ -1214,7 +1282,7 @@ public sealed partial class MainWindow
     exportDir = ValidatePaddleSmokeOwnedPath(exportDir, "pdf save dir");
     Directory.CreateDirectory(exportDir);
     string target = Path.Combine(exportDir,
-      $"paddle-{RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_MODE")}-ui-save.pdf");
+      $"paddle-{RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_MODE")}-ui-save{(suffix is null ? "" : "-" + suffix)}.pdf");
     if (File.Exists(target))
       throw new InvalidOperationException($"PDF save target already exists: {target}");
     RecordPaddleSmokeStage("save PDF via public picker");

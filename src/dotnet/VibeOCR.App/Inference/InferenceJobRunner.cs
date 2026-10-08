@@ -284,6 +284,7 @@ internal static class RecognitionOutcomeMapper
             HtmlText = StringValue(payload, "html_text"),
             RawBlocks = ArrayValue(payload, "text_blocks"),
             PreprocAngle = payload.TryGetValue("preproc_angle", out JsonElement angle) && angle.ValueKind == JsonValueKind.Number && angle.TryGetInt32(out int degrees) ? degrees : null,
+            DocOrientationAngle = payload.TryGetValue("doc_orientation_angle", out JsonElement orientation) && orientation.ValueKind == JsonValueKind.Number && orientation.TryGetInt32(out int actualAngle) ? actualAngle : null,
             ContentBlocks = ArrayValue(payload, "content_list"),
             Pipeline = pipeline,
         };

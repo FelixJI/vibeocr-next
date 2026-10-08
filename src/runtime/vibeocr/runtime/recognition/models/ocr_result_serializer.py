@@ -126,6 +126,7 @@ def ocr_result_to_payload(result: Any) -> dict[str, Any]:
         "avg_score": float(getattr(result, "avg_score", 0.0) or 0.0),
         "pipeline_type": getattr(result, "pipeline_type", "OCR") or "OCR",
         "preproc_angle": int(getattr(result, "preproc_angle", 0) or 0),
+        "doc_orientation_angle": getattr(result, "doc_orientation_angle", None),
         "content_list": content_list,
         "text_with_scores": text_with_scores,
         "low_confidence_items": low_confidence_items,
@@ -188,6 +189,7 @@ def ocr_result_from_payload(payload: dict[str, Any]) -> Any:
         image_width=int(payload.get("image_width", 0)),
         image_height=int(payload.get("image_height", 0)),
         preproc_angle=int(payload.get("preproc_angle", 0)),
+        doc_orientation_angle=payload.get("doc_orientation_angle"),
     )
 
 

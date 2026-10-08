@@ -31,6 +31,10 @@ public sealed class DeferredPdfSessionClient : IPdfSessionClient
         => Current.RotateAsync(sessionId, pages, angle, ct);
     public Task<PdfMutateResult> DeletePagesAsync(string sessionId, int[] pages, CancellationToken ct)
         => Current.DeletePagesAsync(sessionId, pages, ct);
+    public Task<PdfMutateResult> InsertBlankAsync(string sessionId, int afterIndex, double width, double height, CancellationToken ct) => Current.InsertBlankAsync(sessionId, afterIndex, width, height, ct);
+    public Task<PdfMutateResult> InsertFromAsync(string sessionId, string sourcePath, int afterIndex, CancellationToken ct) => Current.InsertFromAsync(sessionId, sourcePath, afterIndex, ct);
+    public Task<PdfMutateResult> ReorderAsync(string sessionId, int[] newOrder, CancellationToken ct) => Current.ReorderAsync(sessionId, newOrder, ct);
+
     public Task<string> SaveAsync(string sessionId, string outputPath, CancellationToken ct)
         => Current.SaveAsync(sessionId, outputPath, ct);
     public Task<Wire.PdfDocumentMirror> GetModelAsync(string sessionId, CancellationToken ct) => Current.GetModelAsync(sessionId, ct);

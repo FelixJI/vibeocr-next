@@ -17,6 +17,7 @@ from vibeocr.runtime.recognition.core.pipelines.pipeline_ocr import (
     _build_ocr_result,
     _consume_generator_safely,
     _extract_bbox,
+    _extract_orientation_angle,
     _extract_polygon,
     _extract_preproc_info,
     _parse_single_result,
@@ -24,6 +25,28 @@ from vibeocr.runtime.recognition.core.pipelines.pipeline_ocr import (
     _recognize_ocr_batch,
 )
 from vibeocr.runtime.recognition.models.ocr_options import OCROptions
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (None, None),
+        (-1, None),
+        (0, 0),
+        (90, 90),
+        (180, 180),
+        (270, 270),
+        (90.5, None),
+        (True, None),
+        (360, None),
+    ],
+)
+def test_orientation_requires_actual_classifier_quadrant(raw, expected):
+    assert (
+        _extract_orientation_angle({"doc_preprocessor_res": {"angle": raw}}) == expected
+    )
+    assert _extract_orientation_angle({}) is None
+    assert _extract_preproc_info({})[0] == 0
 
 
 class TestExtractBbox:

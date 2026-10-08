@@ -26,6 +26,7 @@ public sealed class PdfViewModel(
   private string? _unclosedSession;
   public bool IsSettling => _inflight > 0 || _requiresReopen;
   public long Revision { get; private set; }
+  public IReadOnlyList<int?>? LastPageMapping { get; private set; }
   public bool IsModified { get; private set; }
   public string Phase { get; private set; } = "idle";
   public int ProgressCurrent { get; private set; }
@@ -119,6 +120,7 @@ public sealed class PdfViewModel(
         return;
       }
       SessionId = result.SessionId; FilePath = result.FilePath; PageCount = result.PageCount;
+      LastPageMapping = null;
       Pages.Clear(); for (int i = 0; i < PageCount; i++) Pages.Add(new PdfPageViewModel { Index = i });
       SelectedPage = -1;
       Revision++; IsModified = false; Summary = ""; _requiresReopen = false; _modelAvailable = result.Model is not null;
@@ -147,7 +149,8 @@ public sealed class PdfViewModel(
   public async Task<byte[]?> RenderThumbnailAsync(int pageIndex, CancellationToken ct)
   {
     if (SessionId is null) return null;
-    try { return await inference.RenderPdfPageAsync(SessionId, pageIndex, 160, ct); }
+    string session = SessionId; long revision = Revision; long generation = Volatile.Read(ref _generation);
+    try { byte[] image = await inference.RenderPdfPageAsync(session, pageIndex, 160, ct); return SessionId == session && Revision == revision && generation == Volatile.Read(ref _generation) ? image : null; }
     catch { return null; }
   }
 
@@ -161,7 +164,10 @@ public sealed class PdfViewModel(
     if (IsSettling) { Status = "后台操作尚未收尾"; return; }
     if (SessionId is null || pages.Length == 0) { Status = "请先选中要旋转的页面"; return; }
     if (!ValidatePages(pages)) return;
-    await MutateAsync(async token => (await inference.RotatePdfPagesAsync(SessionId!, pages, angle, token)).PageCount, "正在旋转", ct);
+    if (angle is not (90 or -90 or 180 or 270)) { Summary = "无效的旋转角度"; Changed(); return; }
+    pages = pages.Distinct().ToArray();
+    await MutateAsync(token => inference.RotatePdfPagesAsync(SessionId!, pages, angle, token), "正在旋转", ct,
+      onSuccess: () => RotateResults(pages, angle));
   }
 
   public async Task DeletePagesAsync(int[] pages, CancellationToken ct)
@@ -170,9 +176,173 @@ public sealed class PdfViewModel(
     if (SessionId is null || pages.Length == 0) return;
     if (!ValidatePages(pages)) return;
     int[] deleted = pages.Distinct().Order().ToArray();
+    if (deleted.Length == PageCount) { Summary = "PDF 必须保留至少一页，不能删除最后一页"; Changed(); return; }
     await MutateAsync(
-        async token => (await inference.DeletePdfPagesAsync(SessionId!, deleted, token)).PageCount,
-        "正在删除页面", ct, () => RemovePages(deleted));
+        token => inference.DeletePdfPagesAsync(SessionId!, deleted, token),
+        "正在删除页面", ct, _ => Enumerable.Range(0, Pages.Count).Where(index => !deleted.Contains(index)).Select(index => (int?)index).ToArray());
+  }
+
+  public Task OrientPagesAsync(int[] pages, bool landscape, CancellationToken ct)
+  {
+    if (!ValidatePages(pages)) return Task.CompletedTask;
+    int[] targets = pages.Distinct().Where(index => landscape ? Pages[index].Width < Pages[index].Height : Pages[index].Width > Pages[index].Height).ToArray();
+    if (targets.Length == 0) { Summary = "页面已满足方向，无需旋转"; Changed(); return Task.CompletedTask; }
+    return RotateAsync(targets, 90, ct);
+  }
+
+  public Task InsertBlankAsync(int afterIndex, double width, double height, CancellationToken ct)
+  {
+    if (!ValidInsertion(afterIndex) || !double.IsFinite(width) || !double.IsFinite(height) || width <= 0 || height <= 0)
+      throw new ArgumentException("Invalid PDF insertion position or size.");
+    return MutateAsync(token => inference.InsertPdfBlankAsync(SessionId!, afterIndex, width, height, token),
+      "正在插入空白页", ct, _ => InsertionMapping(afterIndex, 1));
+  }
+
+  public async Task InsertFromAsync(int afterIndex, CancellationToken ct)
+  {
+    if (IsSettling || !ValidInsertion(afterIndex)) return;
+    string? session = SessionId; long revision = Revision;
+    string? source = await files.PickFileAsync(ct);
+    if (source is null || SessionId != session || Revision != revision || IsSettling) return;
+    int oldCount = PageCount;
+    await MutateAsync(token => inference.InsertPdfFromAsync(session!, source, afterIndex, token),
+      "正在插入 PDF", ct, result => InsertionMapping(afterIndex, result.PageCount - oldCount));
+  }
+
+  public Task ReorderAsync(int[] order, CancellationToken ct)
+  {
+    if (order.Length != PageCount || !order.Order().SequenceEqual(Enumerable.Range(0, PageCount)))
+      throw new ArgumentException("PDF page order must be a permutation.");
+    if (order.SequenceEqual(Enumerable.Range(0, PageCount))) return Task.CompletedTask;
+    return MutateAsync(token => inference.ReorderPdfAsync(SessionId!, order, token),
+      "正在重排页面", ct, _ => order.Select(index => (int?)index).ToArray());
+  }
+
+  private bool ValidInsertion(int afterIndex) => SessionId is not null && afterIndex >= -1 && afterIndex < PageCount;
+  private int?[] InsertionMapping(int afterIndex, int inserted)
+  {
+    if (inserted < 1) throw new InvalidOperationException("Inserted PDF page count is invalid.");
+    var mapping = Enumerable.Range(0, Pages.Count).Select(index => (int?)index).ToList();
+    mapping.InsertRange(afterIndex + 1, Enumerable.Repeat<int?>(null, inserted)); return mapping.ToArray();
+  }
+
+  private void RotateResults(int[] pages, int angle)
+  {
+    foreach (int index in pages)
+    {
+      PdfPageViewModel page = Pages[index];
+      if (page.Result?.PreprocAngle is { } old) page.Result = page.Result with { PreprocAngle = (old + angle + 360) % 360 };
+      if (page.ResultReference is { } reference) page.ResultReference = reference with { RotationOffset = (reference.RotationOffset + angle + 360) % 360 };
+    }
+  }
+
+  public async Task CorrectOrientationAsync(int[] pages, CancellationToken ct)
+  {
+    if (SessionId is null || IsSettling || !ValidatePages(pages)) return;
+    pages = pages.Distinct().Order().ToArray();
+    if (pages.Length == 0) { Summary = "未选择处理页面"; Changed(); return; }
+    RecognitionModeOption? mode = _recognitionMode;
+    if (mode is null || mode.Availability != "ready")
+    {
+      Summary = "自动文字朝向需要已配置且就绪的 Paddle 通用文字 OCR 环境，请在组件设置中检查"; Changed(); return;
+    }
+    if (mode.Engine != OcrEngine.PaddleOcr || mode.PipelineId != "OCR" || !mode.SupportedOptions.Contains("use_doc_orientation_classify", StringComparer.Ordinal))
+    {
+      Summary = "当前引擎/模式不支持文字朝向，请在组件设置中选择 Paddle 通用文字 OCR"; Changed(); return;
+    }
+    if (!mode.SupportedOptions.Contains("local_models_only", StringComparer.Ordinal))
+    {
+      Summary = "当前运行环境不支持仅使用本地模型的文字朝向，请在组件设置中更新运行环境"; Changed(); return;
+    }
+    var options = new Dictionary<string, JsonElement>(((_options ?? new PaddleModeOptions()) with
+      { UseDocOrientationClassify = true, UseDocUnwarping = false }).ToWire(mode), StringComparer.Ordinal)
+      { ["local_models_only"] = JsonSerializer.SerializeToElement(true) };
+    string session = SessionId; long revision = Revision;
+    CancelActiveRun(); long generation = Volatile.Read(ref _generation);
+    var run = CancellationTokenSource.CreateLinkedTokenSource(ct); _activeRun = run; _inflight++;
+    IsBusy = true; TerminalIssue = null;
+    int corrected = 0, unchanged = 0, failed = 0, completed = 0;
+    string detail = "";
+    void Progress() { ProgressCurrent = completed; ProgressTotal = pages.Length; Summary = $"已纠正 {corrected} 页、无需处理 {unchanged} 页、失败 {failed} 页、未处理 {pages.Length - completed} 页{detail}"; Changed(); }
+    try
+    {
+      await inference.ResetPdfCancelAsync(session, CancellationToken.None);
+      Progress();
+      foreach (int index in pages)
+      {
+        run.Token.ThrowIfCancellationRequested();
+        if (SessionId != session || Revision != revision) return;
+        Pages[index].State = PdfPageState.Processing;
+        try
+        {
+          Phase = "render"; Progress();
+          byte[] image = await inference.RenderPdfPreviewAsync(session, index,
+            ProcessingSettings.DpiFor(Pages[index].Width, Pages[index].Height), CancellationToken.None);
+          run.Token.ThrowIfCancellationRequested();
+          Phase = "ocr"; Progress();
+          InferenceJobRun job = await _jobs.RunRecognitionAsync("OCR", JobPriority.Background,
+            [new InferenceUploadInput($"page-{index}", $"page-{index + 1}.png", "image/png", image)],
+            options, run.Token, OcrEngine.PaddleOcr, waitForCancellation: true);
+          run.Token.ThrowIfCancellationRequested();
+          if (SessionId != session || Revision != revision || generation != Volatile.Read(ref _generation)) return;
+          ItemOutcome outcome = job.OutcomesByClientItemKey[$"page-{index}"];
+          if (outcome.State != ItemState.Succeeded)
+          {
+            failed++;
+            detail = outcome.ErrorDetail.TryGetValue("reason", out JsonElement reason) && reason.ValueKind == JsonValueKind.String && reason.GetString() == "local_models_not_prepared"
+              ? "；本地模型未准备，请先在识别页面显式运行 Paddle OCR 准备模型，或打开组件设置检查"
+              : $"；第 {index + 1} 页方向检测失败";
+            Pages[index].State = PdfPageState.Failed;
+          }
+          else
+          {
+            RecognizeResponse result = RecognitionOutcomeMapper.ToResponse(outcome, "OCR");
+            if (result.DocOrientationAngle is not (0 or 90 or 180 or 270))
+            { failed++; detail = $"；第 {index + 1} 页未返回可判定的方向角度"; Pages[index].State = PdfPageState.Failed; }
+            else if (string.IsNullOrWhiteSpace(result.Text) || !HasValidBlocks(result.RawBlocks))
+            { failed++; detail = $"；第 {index + 1} 页无可判定文字"; Pages[index].State = PdfPageState.Failed; }
+            else if (result.DocOrientationAngle == 0)
+            { unchanged++; Pages[index].State = PdfPageState.Done; }
+            else
+            {
+              Phase = "rotate"; Progress();
+              int angle = -result.DocOrientationAngle.Value;
+              PdfMutateResult mutation = await inference.RotatePdfPagesAsync(session, [index], angle, CancellationToken.None);
+              if (SessionId != session || Revision != revision) return;
+              RotateResults([index], angle); Revision++; revision = Revision; IsModified = true; LastPageMapping = null;
+              if (mutation.Diff is not null) ApplyDiff(mutation.Diff);
+              else await RefreshModelAsync(CancellationToken.None);
+              corrected++; Pages[index].State = PdfPageState.Done;
+            }
+          }
+          completed++; Progress();
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception)
+        {
+          failed++; completed++; Pages[index].State = PdfPageState.Failed;
+          detail = $"；第 {index + 1} 页{(Phase == "render" ? "渲染" : Phase == "rotate" ? "旋转" : "方向检测")}失败";
+          if (Phase == "rotate") { _requiresReopen = true; detail += "，写入结果未确认，请重开文档复检"; }
+          else { MarkUnconfirmedOcr(session, revision); if (_requiresReopen) detail += "，后台终态未确认，请重开文档复检"; }
+          Progress(); if (_requiresReopen) break;
+        }
+      }
+      if (generation == Volatile.Read(ref _generation)) { TerminalIssue = failed > 0 ? PdfIssueKind.Failed : null; Status = "文字朝向处理完成"; }
+    }
+    catch (OperationCanceledException) { TerminalIssue = PdfIssueKind.Cancelled; detail = "；已取消，已完成页保留"; Progress(); }
+    catch (Exception) { MarkUnconfirmedOcr(session, revision); TerminalIssue = PdfIssueKind.Failed; detail = "；方向操作失败"; Progress(); }
+    finally
+    {
+      if (SessionId == session)
+      {
+        foreach (int index in pages) if (Pages[index].State == PdfPageState.Processing) Pages[index].State = PdfPageState.None;
+        if (_modelAvailable)
+          try { await RefreshModelAsync(CancellationToken.None); }
+          catch (Exception) { _requiresReopen = true; detail = "；后台结果回读失败，请重开文档复检"; }
+        Progress();
+      }
+      await FinishRunAsync(generation, run);
+    }
   }
 
   public async Task StartOcrAsync(int[] pages, bool overwrite, CancellationToken ct, bool addTextLayer = false)
@@ -383,7 +553,8 @@ public sealed class PdfViewModel(
     Summary = "识别后台终态未确认，请关闭并重新打开文档";
   }
 
-  private async Task MutateAsync(Func<CancellationToken, Task<int>> action, string runningStatus, CancellationToken ct, Action? onSuccess = null)
+  private async Task MutateAsync(Func<CancellationToken, Task<PdfMutateResult>> action, string runningStatus, CancellationToken ct,
+    Func<PdfMutateResult, int?[]>? mapping = null, Action? onSuccess = null)
   {
     if (SessionId is null) return;
     if (IsSettling) { Summary = "后台操作尚未收尾，请等待完成"; Changed(); return; }
@@ -395,10 +566,30 @@ public sealed class PdfViewModel(
     _activeRun = run;
     _inflight++; Changed();
     TerminalIssue = null; IsBusy = true; Status = runningStatus;
-    try { run.Token.ThrowIfCancellationRequested(); int count = await action(CancellationToken.None); if (SessionId == session && Revision == revision) { onSuccess?.Invoke(); PageCount = count; Revision++; IsModified = true; await RefreshModelAsync(CancellationToken.None); if (generation == Volatile.Read(ref _generation)) Status = "完成"; Changed(); } }
-    catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) { TerminalIssue = PdfIssueKind.Cancelled; Status = "已取消"; } }
-    catch (InferenceClientException e) { if (generation == Volatile.Read(ref _generation)) { TerminalIssue = IssueFromV2(e.Code); Status = LocalizeV2(e.Code); } }
-    catch (Exception) when (generation == Volatile.Read(ref _generation)) { TerminalIssue = PdfIssueKind.Failed; Status = "操作失败"; }
+    bool submitted = false;
+    void Unconfirmed() { if (SessionId == session && submitted) { _requiresReopen = true; Summary = "页面写入结果未确认，请关闭并重新打开文档复检"; Changed(); } }
+    try
+    {
+      run.Token.ThrowIfCancellationRequested(); Phase = "write"; Changed();
+      submitted = true;
+      PdfMutateResult result = await action(CancellationToken.None);
+      if (SessionId != session || Revision != revision) return;
+      LastPageMapping = mapping?.Invoke(result);
+      if (LastPageMapping is not null) RemapPages(LastPageMapping);
+      onSuccess?.Invoke(); Revision++; IsModified = true;
+      if (result.Diff is not null) ApplyDiff(result.Diff);
+      else { PageCount = result.PageCount; await RefreshModelAsync(CancellationToken.None); }
+      Summary = "页面操作完成，尚未保存";
+      if (generation == Volatile.Read(ref _generation)) Status = "完成";
+      Changed();
+    }
+    catch (OperationCanceledException) { Unconfirmed(); if (generation == Volatile.Read(ref _generation)) { TerminalIssue = PdfIssueKind.Cancelled; Status = "已取消"; } }
+    catch (InferenceClientException e)
+    {
+      if (e.Code is not (HttpV2ErrorCode.ValidationError or HttpV2ErrorCode.Unauthorized or HttpV2ErrorCode.ForbiddenLoopback or HttpV2ErrorCode.ResourceNotFound or HttpV2ErrorCode.RuntimeCapabilityUnavailable or HttpV2ErrorCode.RuntimeOperationNotFound)) Unconfirmed();
+      if (generation == Volatile.Read(ref _generation)) { TerminalIssue = IssueFromV2(e.Code); Status = LocalizeV2(e.Code); }
+    }
+    catch (Exception) when (SessionId == session) { Unconfirmed(); TerminalIssue = PdfIssueKind.Failed; Status = "操作失败"; }
     finally { await FinishRunAsync(generation, run); }
   }
 
@@ -431,26 +622,25 @@ public sealed class PdfViewModel(
     return false;
   }
 
-  private void RemovePages(int[] deleted)
+  private void RemapPages(IReadOnlyList<int?> mapping)
   {
-    var removed = deleted.ToHashSet();
-    PdfPageViewModel[] remaining = Pages.Where(page => !removed.Contains(page.Index)).ToArray();
+    PdfPageViewModel[] old = Pages.ToArray();
     int selected = SelectedPage;
     Pages.Clear();
-    for (int index = 0; index < remaining.Length; index++)
+    for (int index = 0; index < mapping.Count; index++)
+    {
+      PdfPageViewModel source = mapping[index] is { } original ? old[original] : new PdfPageViewModel { Index = index, Detected = true };
       Pages.Add(new PdfPageViewModel
       {
         Index = index,
-        State = remaining[index].State,
-        OcrText = remaining[index].OcrText,
-        Result = remaining[index].Result,
-        ResultReference = remaining[index].ResultReference,
-        HasTextLayer = remaining[index].HasTextLayer, Detected = remaining[index].Detected,
-        Width = remaining[index].Width, Height = remaining[index].Height, Rotation = remaining[index].Rotation,
-        AddedThisSession = remaining[index].AddedThisSession,
+        State = source.State, OcrText = source.OcrText, Result = source.Result,
+        ResultReference = source.ResultReference, HasTextLayer = source.HasTextLayer, Detected = source.Detected,
+        Width = source.Width, Height = source.Height, Rotation = source.Rotation,
+        AddedThisSession = source.AddedThisSession,
       });
-    SelectedPage = selected < 0 || remaining.Length == 0 ? -1
-        : Math.Min(selected - deleted.Count(index => index < selected), remaining.Length - 1);
+    }
+    SelectedPage = mapping.Select((value, index) => (value, index)).Where(pair => pair.value == selected).Select(pair => pair.index).FirstOrDefault(-1);
+    PageCount = Pages.Count;
   }
 
   public async Task DeleteTextLayersAsync(int[] pages, CancellationToken ct)
@@ -505,6 +695,8 @@ public sealed class PdfViewModel(
           if (outcome?.State == ItemState.Succeeded)
           {
             page.Result = RecognitionOutcomeMapper.ToResponse(outcome, page.ResultReference!.Pipeline);
+            if (page.Result.PreprocAngle is { } angle)
+              page.Result = page.Result with { PreprocAngle = (angle + page.ResultReference.RotationOffset) % 360 };
             page.OcrText = page.Result.Text;
           }
         }
@@ -529,9 +721,9 @@ public sealed class PdfViewModel(
   {
     if (_modelAvailable && SessionId is { } session)
     {
-      long generation = Volatile.Read(ref _generation);
+      long generation = Volatile.Read(ref _generation); long revision = Revision;
       Wire.PdfDocumentMirror model = await inference.GetPdfModelAsync(session, ct);
-      if (SessionId == session && generation == Volatile.Read(ref _generation)) ApplyModel(model);
+      if (SessionId == session && Revision == revision && generation == Volatile.Read(ref _generation)) ApplyModel(model);
     }
   }
   private void ApplyModel(Wire.PdfDocumentMirror model)
@@ -600,4 +792,4 @@ public sealed class PdfPageViewModel : INotifyPropertyChanged
 
 public interface IPdfFileSource { Task<string?> PickFileAsync(CancellationToken cancellationToken); }
 
-internal sealed record PdfResultReference(string JobId, string ItemId, string Pipeline);
+internal sealed record PdfResultReference(string JobId, string ItemId, string Pipeline, int RotationOffset = 0);

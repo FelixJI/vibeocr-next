@@ -123,6 +123,39 @@ def test_execute_isolates_whole_batch_failure(tmp_path: Path) -> None:
     assert snap.state is JobState.FAILED
 
 
+def test_local_models_failure_is_not_retried_and_exposes_explicit_reason(tmp_path):
+    from vibeocr.runtime.environments.model_cache import LocalModelsNotPrepared
+
+    calls = []
+
+    class MissingModels(_FakeService):
+        def recognize_batch(self, images, options=None, *, asset_sinks=None):
+            calls.append(True)
+            raise LocalModelsNotPrepared("private diagnostic path must not reach UI")
+
+    record = _make_job(JobRegistry(instance_id="local-only"), 2)
+    executor = PaddleExecutor(
+        adapter_factory=lambda: _make_adapter(MissingModels([])),
+        sleeper=lambda _delay: (_ for _ in ()).throw(
+            AssertionError("must not back off")
+        ),
+    )
+    executor.execute(record, _staged(2, tmp_path))
+    assert len(calls) == 1
+    assert record.snapshot().state is JobState.FAILED
+    outcomes = record.observe(0).outcomes
+    assert len(outcomes) == 2
+    assert all(
+        outcome.error_code == "BACKEND_UNAVAILABLE"
+        and outcome.error_detail
+        == {
+            "message": "local_models_not_prepared",
+            "reason": "local_models_not_prepared",
+        }
+        for outcome in outcomes
+    )
+
+
 def test_execute_honours_cancel_before_run(tmp_path: Path) -> None:
     reg = JobRegistry(instance_id="t")
     record = _make_job(reg, 1)

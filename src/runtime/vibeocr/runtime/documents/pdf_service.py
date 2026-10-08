@@ -599,12 +599,18 @@ class PdfService:
         page_indices: list[int],
         angle: int,
     ) -> None:
-        for idx in page_indices:
-            if 0 <= idx < doc.page_count:
-                page = doc[idx]
-                page.set_rotation((page.rotation + angle) % 360)
-                pdf_document.pages[idx].rotation = page.rotation
-                pdf_document.pages[idx].rect = tuple(page.rect)
+        if angle % 90 or any(i < 0 or i >= doc.page_count for i in page_indices):
+            raise ValueError("Invalid page rotation")
+        if not page_indices or angle % 360 == 0:
+            return
+        for idx in dict.fromkeys(page_indices):
+            page = doc[idx]
+            page.set_rotation((page.rotation + angle) % 360)
+            info = pdf_document.pages[idx]
+            info.rotation = page.rotation
+            info.rect = tuple(page.rect)
+            if info.ocr_text_blocks:
+                info.ocr_preproc_angle = (info.ocr_preproc_angle + angle) % 360
         pdf_document.is_modified = True
         PdfService.invalidate_thumbnails(pdf_document, page_indices)
 
@@ -614,15 +620,17 @@ class PdfService:
         pdf_document: PdfDocument,
         page_indices: list[int],
     ) -> None:
-        remaining = [
-            p for i, p in enumerate(pdf_document.pages) if i not in page_indices
-        ]
-        for idx in sorted(page_indices, reverse=True):
-            if 0 <= idx < doc.page_count:
-                doc.delete_page(idx)
-        pdf_document.pages = remaining
-        pdf_document.is_modified = True
-        pdf_document.has_structural_change = True
+        removed = set(page_indices)
+        if any(i < 0 or i >= doc.page_count for i in removed):
+            raise ValueError("Invalid page index")
+        if len(removed) == doc.page_count:
+            raise ValueError("A PDF must retain at least one page")
+        if not removed:
+            return
+        mapping = [i for i in range(doc.page_count) if i not in removed]
+        for idx in sorted(removed, reverse=True):
+            doc.delete_page(idx)
+        PdfService._map_page_infos(doc, pdf_document, mapping)
 
     @staticmethod
     def insert_blank_page(
@@ -633,10 +641,24 @@ class PdfService:
         height: float = 792,
     ) -> None:
         insert_at = after_index + 1
-        doc.new_page(pno=insert_at, width=width, height=height)
-        pdf_document.is_modified = True
-        pdf_document.has_structural_change = True
-        PdfService.build_page_infos(doc, pdf_document)
+        if not -1 <= after_index < doc.page_count or not (
+            math.isfinite(width) and math.isfinite(height) and width > 0 and height > 0
+        ):
+            raise ValueError("Invalid insertion position or page size")
+        mapping: list[int | None] = list(range(doc.page_count))
+        mapping.insert(insert_at, None)
+        old_pages = list(pdf_document.pages)
+        old_count = doc.page_count
+        try:
+            doc.new_page(pno=insert_at, width=width, height=height)
+            PdfService._map_page_infos(doc, pdf_document, mapping)
+        except BaseException:
+            if doc.page_count > old_count:
+                doc.delete_page(insert_at)
+            pdf_document.pages = old_pages
+            for index, info in enumerate(old_pages):
+                info.page_index = index
+            raise
 
     @staticmethod
     def insert_pages_from(
@@ -645,13 +667,30 @@ class PdfService:
         source_path: str,
         after_index: int,
     ) -> None:
-        src = fitz.open(source_path)
+        if not -1 <= after_index < doc.page_count:
+            raise ValueError("Invalid insertion position")
         insert_at = after_index + 1
-        doc.insert_pdf(src, start_at=insert_at)
-        src.close()
-        pdf_document.is_modified = True
-        pdf_document.has_structural_change = True
-        PdfService.build_page_infos(doc, pdf_document)
+        old_count = doc.page_count
+        old_pages = list(pdf_document.pages)
+        with fitz.open(source_path) as src:
+            if not src.is_pdf or src.needs_pass or src.page_count == 0:
+                raise ValueError("Source PDF is unavailable")
+            mapping: list[int | None] = list(range(doc.page_count))
+            mapping[insert_at:insert_at] = [None] * src.page_count
+            try:
+                doc.insert_pdf(src, start_at=insert_at)
+                PdfService._map_page_infos(doc, pdf_document, mapping)
+            except BaseException:
+                # insert_pdf 可能已插入部分页；只回退该连续插入区，保留原页对象。
+                inserted = doc.page_count - old_count
+                if inserted > 0:
+                    doc.delete_pages(
+                        from_page=insert_at, to_page=insert_at + inserted - 1
+                    )
+                pdf_document.pages = old_pages
+                for index, info in enumerate(old_pages):
+                    info.page_index = index
+                raise
 
     @staticmethod
     def move_page(
@@ -660,16 +699,11 @@ class PdfService:
         from_index: int,
         to_index: int,
     ) -> None:
-        if from_index == to_index:
-            return
-        page_info = pdf_document.pages[from_index]
-        doc.move_page(from_index, to_index)
-        pages = list(pdf_document.pages)
-        pages.pop(from_index)
-        pages.insert(to_index, page_info)
-        pdf_document.pages = pages
-        pdf_document.is_modified = True
-        pdf_document.has_structural_change = True
+        if not (0 <= from_index < doc.page_count and 0 <= to_index < doc.page_count):
+            raise ValueError("Invalid page index")
+        mapping = list(range(doc.page_count))
+        mapping.insert(to_index, mapping.pop(from_index))
+        PdfService.reorder_pages(doc, pdf_document, mapping)
 
     @staticmethod
     def reorder_pages(
@@ -682,13 +716,34 @@ class PdfService:
         new_order[i] = j 表示新位置 i 应放原索引 j 的页面。
         """
         n = len(new_order)
-        if n != doc.page_count or n != len(pdf_document.pages):
-            return
+        if (
+            n != doc.page_count
+            or n != len(pdf_document.pages)
+            or sorted(new_order) != list(range(n))
+        ):
+            raise ValueError("Page order must be a permutation")
         if new_order == list(range(n)):
             return
 
         doc.select(new_order)
-        pdf_document.pages = [pdf_document.pages[i] for i in new_order]
+        PdfService._map_page_infos(doc, pdf_document, new_order)
+
+    @staticmethod
+    def _map_page_infos(
+        doc: fitz.Document, pdf_document: PdfDocument, mapping: list[int | None]
+    ) -> None:
+        """保留原页 OCR 元数据，仅检测新插入的页面。"""
+        old_pages = pdf_document.pages
+        pdf_document.pages = [
+            old_pages[old] if old is not None else PdfPageInfo(page_index=index)
+            for index, old in enumerate(mapping)
+        ]
+        for index, old in enumerate(mapping):
+            info = pdf_document.pages[index]
+            info.page_index = index
+            info.thumbnail = None
+            if old is None:
+                PdfService.update_page_info(doc, pdf_document, index)
         pdf_document.is_modified = True
         pdf_document.has_structural_change = True
 

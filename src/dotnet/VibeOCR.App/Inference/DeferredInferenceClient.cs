@@ -174,6 +174,10 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     return await Current.DeletePdfPagesAsync(sessionId, pages, ct);
   }
 
+  public async Task<PdfMutateResult> InsertPdfBlankAsync(string sessionId, int afterIndex, double width, double height, CancellationToken ct) { await _gate.WaitAsync(ct); return await Current.InsertPdfBlankAsync(sessionId, afterIndex, width, height, ct); }
+  public async Task<PdfMutateResult> InsertPdfFromAsync(string sessionId, string sourcePath, int afterIndex, CancellationToken ct) { await _gate.WaitAsync(ct); return await Current.InsertPdfFromAsync(sessionId, sourcePath, afterIndex, ct); }
+  public async Task<PdfMutateResult> ReorderPdfAsync(string sessionId, int[] newOrder, CancellationToken ct) { await _gate.WaitAsync(ct); return await Current.ReorderPdfAsync(sessionId, newOrder, ct); }
+
   public async Task<string> SavePdfAsync(
     string sessionId, string outputPath, CancellationToken ct)
   {

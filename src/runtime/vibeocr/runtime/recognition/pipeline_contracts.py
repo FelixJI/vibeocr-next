@@ -149,6 +149,7 @@ _PIPELINE_METADATA: dict[OCRPipeline, dict[str, Any]] = {
         "cache_kind": "routed",
         "description": "文字识别执行管道；具体语义由识别模式和引擎共同确定",
         "supported_options": [
+            "local_models_only",
             "use_doc_orientation_classify",
             "use_doc_unwarping",
             "use_textline_orientation",
@@ -272,6 +273,7 @@ _PIPELINE_OPTION_SPECS: dict[OCRPipeline, dict[str, PipelineOptionSpec]] = {
     OCRPipeline.OCR: {
         name: _bool_spec(name)
         for name in (
+            "local_models_only",
             "use_doc_orientation_classify",
             "use_doc_unwarping",
             "use_textline_orientation",

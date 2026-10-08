@@ -13,6 +13,7 @@ import threading
 from dataclasses import asdict
 from pathlib import Path
 
+from vibeocr.runtime.environments.model_cache import LocalModelsNotPrepared
 from vibeocr.runtime.jobs.budgets import AdapterCapability, InputItem
 from vibeocr.runtime.processes.utils.job_object import JobObjectGuard
 from vibeocr.runtime.processes.utils.subprocess_log import SubprocessLogForwarder
@@ -182,6 +183,8 @@ class PaddleProcessAdapter:
             raise RuntimeError("Paddle worker exited before replying")
         response = json.loads(line)
         if "error" in response:
+            if response.get("error_type") == "LocalModelsNotPrepared":
+                raise LocalModelsNotPrepared(response["error"])
             raise RuntimeError(response["error"])
         return response["result"]
 

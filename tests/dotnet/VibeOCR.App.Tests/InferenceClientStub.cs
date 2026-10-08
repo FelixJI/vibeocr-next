@@ -84,6 +84,10 @@ internal abstract class InferenceClientStub : IInferenceClient
         CancellationToken cancellationToken) =>
         throw new NotImplementedException();
 
+    public virtual Task<PdfMutateResult> InsertPdfBlankAsync(string sessionId, int afterIndex, double width, double height, CancellationToken ct) => throw new NotImplementedException();
+    public virtual Task<PdfMutateResult> InsertPdfFromAsync(string sessionId, string sourcePath, int afterIndex, CancellationToken ct) => throw new NotImplementedException();
+    public virtual Task<PdfMutateResult> ReorderPdfAsync(string sessionId, int[] newOrder, CancellationToken ct) => throw new NotImplementedException();
+
     public virtual Task<VibeOCR.Runtime.Contracts.Generated.Wire.PdfDocumentMirror> GetPdfModelAsync(string sessionId, CancellationToken ct) => throw new NotImplementedException();
     public virtual Task LoadPdfAsync(string sessionId, Action<System.Text.Json.JsonElement> progress, CancellationToken ct) => Task.CompletedTask;
     public virtual Task<byte[]> RenderPdfPreviewAsync(string sessionId, int page, int dpi, CancellationToken ct) => RenderPdfPageAsync(sessionId, page, 1024, ct);

@@ -260,6 +260,245 @@ def test_frozen_provider_listing_rejects_moved_branch(tmp_path, monkeypatch):
     assert not (tmp_path / "two" / "current.json").exists()
 
 
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "empty",
+        "binding",
+        "generation",
+        "asset",
+        "receipt",
+        "empty_receipt",
+        "missing",
+        "corrupt",
+        "version",
+        "source",
+        "resolver",
+        "shared",
+        "private",
+    ],
+)
+def test_local_only_paddle_never_downloads_repairs_or_uses_native_fallback(
+    tmp_path, monkeypatch, fault
+):
+    payloads, _calls = _synthetic_provider(monkeypatch)
+    shared = tmp_path / "shared"
+    private = tmp_path / "private"
+    asset = cache.ModelAsset(
+        "paddlex-3.7.2", "huggingface", "PaddlePaddle/PP-LCNet_x1_0_doc_ori"
+    )
+    view = private / "prepared-models" / "PP-LCNet_x1_0_doc_ori"
+    prepared = cache.prepare_models([asset], view, shared_root=shared)
+    monkeypatch.setenv("VIBEOCR_SHARED_MODEL_CACHE", str(shared))
+    monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(private))
+    monkeypatch.setenv("PADDLE_PDX_MODEL_SOURCE", "huggingface")
+    monkeypatch.setattr(cache, "version", lambda _name: "3.7.2")
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail(
+            "local-only model request reached preparation, network or native fallback"
+        )
+
+    for name in ("prepare_models", "_manifest", "_remote_manifest", "_download"):
+        monkeypatch.setattr(cache, name, forbidden)
+
+    def native_fallback(_model_names):
+        forbidden()
+
+    manager = types.SimpleNamespace(_get_model_local_path=native_fallback)
+    monkeypatch.setitem(
+        sys.modules,
+        "paddlex.inference.utils.official_models",
+        types.SimpleNamespace(official_models=manager),
+    )
+    binding = view / "current.json"
+    current = json.loads(binding.read_text())
+    if fault == "empty":
+        monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(tmp_path / "empty"))
+    elif fault == "binding":
+        binding.write_text("invalid json")
+    elif fault == "generation":
+        current["generation"] = "../outside"
+        binding.write_text(json.dumps(current))
+    elif fault == "asset":
+        current["request"]["assets"][0]["repo_id"] = "PaddlePaddle/other"
+        binding.write_text(json.dumps(current))
+    elif fault == "receipt":
+        (cache._asset_root(shared, asset) / "provider-files.json").unlink()
+    elif fault == "empty_receipt":
+        receipt = cache._asset_root(shared, asset) / "provider-files.json"
+        listing = json.loads(receipt.read_text())
+        listing["files"] = []
+        receipt.write_text(json.dumps(listing))
+    elif fault == "missing":
+        (prepared.root / "a.bin").unlink()
+    elif fault == "corrupt":
+        (prepared.root / "a.bin").write_bytes(b"x" * len(payloads["a.bin"]))
+    elif fault == "version":
+        monkeypatch.setattr(cache, "version", lambda _name: "unsupported")
+    elif fault == "source":
+        monkeypatch.setenv("PADDLE_PDX_MODEL_SOURCE", "unsupported")
+    elif fault == "resolver":
+        manager._get_model_local_path = lambda: forbidden()
+    elif fault == "shared":
+        monkeypatch.delenv("VIBEOCR_SHARED_MODEL_CACHE")
+    elif fault == "private":
+        monkeypatch.delenv("PADDLE_PDX_CACHE_HOME")
+    original = manager._get_model_local_path
+    with pytest.raises(cache.LocalModelsNotPrepared):
+        with cache.paddle_model_cache(local_only=True):
+            with cache.paddle_model_cache():
+                manager._get_model_local_path("PP-LCNet_x1_0_doc_ori")
+    assert manager._get_model_local_path is original
+    assert not cache._PADDLE_LOCAL_ONLY.get()
+
+
+def test_prepared_local_paddle_models_are_used_without_writes_or_network(
+    tmp_path, monkeypatch
+):
+    import contextlib
+    import io
+    from dataclasses import replace
+
+    from vibeocr.runtime.jobs.budgets import InputItem
+    from vibeocr.runtime.recognition import ocr_service, paddle_worker
+    from vibeocr.runtime.recognition.core import pipelines
+    from vibeocr.runtime.recognition.core.pipelines.pipeline_ocr import OCR_SPEC
+    from vibeocr.runtime.recognition.paddle_adapter import PaddlePipelineAdapter
+    from vibeocr.runtime.recognition.paddle_process_adapter import PaddleProcessAdapter
+    from vibeocr.runtime_contracts import PipelineSelection
+
+    _synthetic_provider(monkeypatch)
+    shared = tmp_path / "shared"
+    private = tmp_path / "private"
+    asset = cache.ModelAsset(
+        "paddlex-3.7.2", "huggingface", "PaddlePaddle/PP-LCNet_x1_0_doc_ori"
+    )
+    view = private / "prepared-models" / "PP-LCNet_x1_0_doc_ori"
+    prepared = cache.prepare_models([asset], view, shared_root=shared)
+    monkeypatch.setenv("VIBEOCR_SHARED_MODEL_CACHE", str(shared))
+    monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(private))
+    monkeypatch.setenv("PADDLE_PDX_MODEL_SOURCE", "huggingface")
+    monkeypatch.setattr(cache, "version", lambda _name: "3.7.2")
+    before = (view / "current.json").read_text()
+    paths = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*"))
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("prepared local model unexpectedly reached preparation or network")
+
+    for name in ("prepare_models", "_manifest", "_remote_manifest", "_download"):
+        monkeypatch.setattr(cache, name, forbidden)
+
+    def native_fallback(_model_names):
+        forbidden()
+
+    manager = types.SimpleNamespace(_get_model_local_path=native_fallback)
+    monkeypatch.setitem(
+        sys.modules,
+        "paddlex.inference.utils.official_models",
+        types.SimpleNamespace(official_models=manager),
+    )
+
+    created = []
+
+    def construct(_device, **_kwargs):
+        assert manager._get_model_local_path("PP-LCNet_x1_0_doc_ori") == prepared.root
+        created.append(True)
+        return object()
+
+    spec = replace(OCR_SPEC, create_pipeline=construct)
+    monkeypatch.setattr(
+        pipelines,
+        "get_registry",
+        lambda: types.SimpleNamespace(has=lambda _name: True, get=lambda _name: spec),
+    )
+    real_service = ocr_service.OCRService
+
+    class Service:
+        get_or_create_pipeline = real_service.get_or_create_pipeline
+        _pipeline_constructor_signature = real_service._pipeline_constructor_signature
+
+        def __init__(self):
+            self._pipelines = {}
+            self._pipeline_signatures = {}
+            self._lock = threading.RLock()
+            self.cache_manager = types.SimpleNamespace(
+                prepare_load=lambda _name: None,
+                touch=lambda _name: None,
+                lease=lambda _name: contextlib.nullcontext(),
+                release=lambda **_kwargs: None,
+                shutdown=lambda: None,
+            )
+
+        def _setup_cuda_dll_path(self):
+            pass
+
+        def _get_device(self):
+            return "cpu"
+
+        def _decide_enable_mkldnn(self, _device):
+            return False
+
+        def recognize_batch(self, images, options, *, asset_sinks):
+            assert options.local_models_only
+            self.get_or_create_pipeline("OCR")
+            with cache.paddle_model_cache():
+                actual = manager._get_model_local_path(
+                    ("missing-alternative", "PP-LCNet_x1_0_doc_ori")
+                )
+                assert actual == prepared.root
+            return [{"text": "prepared local model"}]
+
+    proxy = PaddleProcessAdapter(Path(sys.executable))
+    requests = []
+    monkeypatch.setattr(
+        proxy,
+        "_request",
+        lambda operation, **payload: (
+            requests.append({"operation": operation, **payload}) or []
+        ),
+    )
+    for _ in range(2):
+        proxy.recognize_many(
+            [
+                InputItem(
+                    item_id="one", data=b"synthetic", encoded_bytes=9, decoded_pixels=1
+                )
+            ],
+            options=PipelineSelection("OCR", options={"local_models_only": True}),
+        )
+
+    class Replies(io.StringIO):
+        def close(self):
+            pass
+
+    replies = Replies()
+    monkeypatch.setattr(paddle_worker.os, "dup", lambda _fd: 42)
+    monkeypatch.setattr(paddle_worker.os, "dup2", lambda *_args: None)
+    monkeypatch.setattr(paddle_worker.os, "fdopen", lambda *_args, **_kwargs: replies)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO("\n".join(json.dumps(request) for request in requests)),
+    )
+    monkeypatch.setattr(ocr_service, "OCRService", Service)
+    monkeypatch.setattr(
+        PaddlePipelineAdapter, "_to_ndarray", staticmethod(lambda raw: raw)
+    )
+    paddle_worker.main()
+    results = [json.loads(line) for line in replies.getvalue().splitlines()]
+    assert [result["result"][0]["text"] for result in results] == [
+        "prepared local model"
+    ] * 2
+    assert len(created) == 1
+    assert (view / "current.json").read_text() == before
+    assert (
+        sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*")) == paths
+    )
+    assert manager._get_model_local_path is native_fallback
+    assert not cache._PADDLE_LOCAL_ONLY.get()
+
+
 def test_paddle_resolver_is_serialized_and_restored(tmp_path, monkeypatch):
     monkeypatch.setenv("VIBEOCR_SHARED_MODEL_CACHE", str(tmp_path / "shared"))
     monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(tmp_path / "private"))

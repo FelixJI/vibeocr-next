@@ -92,6 +92,20 @@ public sealed class PdfSessionHttpClient : IPdfSessionClient
         return RequiredString(doc.RootElement, "path", "save");
     }
 
+    public Task<PdfMutateResult> InsertBlankAsync(string sessionId, int afterIndex, double width, double height, CancellationToken ct) =>
+        MutateAsync(sessionId, "insert_blank", new { after_index = afterIndex, width, height }, ct);
+    public Task<PdfMutateResult> InsertFromAsync(string sessionId, string sourcePath, int afterIndex, CancellationToken ct) =>
+        MutateAsync(sessionId, "insert_from", new { source_path = sourcePath, after_index = afterIndex }, ct);
+    public Task<PdfMutateResult> ReorderAsync(string sessionId, int[] newOrder, CancellationToken ct) =>
+        MutateAsync(sessionId, "reorder", new { new_order = newOrder }, ct);
+    private async Task<PdfMutateResult> MutateAsync(string sessionId, string operation, object body, CancellationToken ct)
+    {
+        using StringContent content = _runtime.CreateJsonContent(body);
+        using HttpResponseMessage response = await _runtime.PostAsync(
+            $"/v2/pdf/sessions/{Uri.EscapeDataString(sessionId)}/{operation}", content, ct);
+        return await ReadMutationPageCountAsync(sessionId, response, operation, ct);
+    }
+
     public async Task<Wire.PdfDocumentMirror> GetModelAsync(string sessionId, CancellationToken ct)
     {
         using HttpResponseMessage response = await _runtime.PostAsync(
@@ -198,6 +212,8 @@ public sealed class PdfSessionHttpClient : IPdfSessionClient
         await EnsureSuccessAsync(resp, ct);
         using JsonDocument doc = await _runtime.ReadJsonDocumentAsync(resp, ct);
         JsonElement root = doc.RootElement;
+        Wire.PdfMutationResponse mutation = root.Deserialize<Wire.PdfMutationResponse>()
+            ?? throw new InvalidOperationException("PDF mutation result is missing.");
         if (root.ValueKind == JsonValueKind.Object &&
             root.TryGetProperty("diff", out JsonElement diff) &&
             diff.ValueKind == JsonValueKind.Object &&
@@ -206,7 +222,7 @@ public sealed class PdfSessionHttpClient : IPdfSessionClient
             fullModel.TryGetProperty("pages", out JsonElement pages) &&
             pages.ValueKind == JsonValueKind.Array)
         {
-            return new PdfMutateResult(pages.GetArrayLength());
+            return new PdfMutateResult(pages.GetArrayLength(), mutation.Diff);
         }
         using HttpResponseMessage modelResp = await _runtime.PostAsync(
             BindSessionPath(RuntimeOperationPaths.GetPdfSessionModel, sessionId),
@@ -214,7 +230,8 @@ public sealed class PdfSessionHttpClient : IPdfSessionClient
         await EnsureSuccessAsync(modelResp, ct);
         using JsonDocument modelDoc = await _runtime.ReadJsonDocumentAsync(modelResp, ct);
         return new PdfMutateResult(
-            ReadModelPageCount(modelDoc.RootElement, $"{operation} model read-back"));
+            ReadModelPageCount(modelDoc.RootElement, $"{operation} model read-back"),
+            mutation.Diff with { FullModel = modelDoc.RootElement.Deserialize<Wire.PdfDocumentMirror>() });
     }
 
     private static int ReadModelPageCount(JsonElement model, string operation) =>

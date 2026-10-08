@@ -7,11 +7,23 @@ dropped all structure.
 
 from __future__ import annotations
 
+import pytest
 from vibeocr.runtime.recognition.models import (
     ocr_result_from_payload,
     ocr_result_to_payload,
 )
 from vibeocr.runtime.recognition.models.ocr_result import OCRResult, TextBlock
+from vibeocr.runtime_contracts.ocr import OcrResultV1
+
+
+@pytest.mark.parametrize("angle", [None, 0, 90, 180, 270])
+def test_orientation_survives_serializer_and_wire_extra_roundtrip(angle):
+    payload = ocr_result_to_payload(OCRResult(doc_orientation_angle=angle))
+    assert payload["preproc_angle"] == 0
+    wire = OcrResultV1.from_payload(payload)
+    assert wire.extra["doc_orientation_angle"] == angle
+    assert ocr_result_from_payload(wire.to_payload()).doc_orientation_angle == angle
+    assert ocr_result_from_payload({"preproc_angle": 0}).doc_orientation_angle is None
 
 
 def test_dict_input_passes_through_unchanged() -> None:

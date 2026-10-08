@@ -513,6 +513,8 @@ def rotate_pages(sid: str, req: RotateRequest) -> MutateResponse:
                 modified=True,
             )
         )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"旋转失败: {e}") from e
 
@@ -524,6 +526,8 @@ def delete_pages(sid: str, req: DeletePagesRequest) -> MutateResponse:
         with _fitz_op(s), s.fitz_lock:
             PdfService.delete_pages(s.doc, s.pdf_document, req.pages)
         return MutateResponse(diff=_diff_full(s.pdf_document))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"删除页失败: {e}") from e
 
@@ -537,6 +541,8 @@ def insert_blank(sid: str, req: InsertBlankRequest) -> MutateResponse:
                 s.doc, s.pdf_document, req.after_index, req.width, req.height
             )
         return MutateResponse(diff=_diff_full(s.pdf_document))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"插入空白页失败: {e}") from e
 
@@ -550,6 +556,8 @@ def insert_from(sid: str, req: InsertFromRequest) -> MutateResponse:
                 s.doc, s.pdf_document, req.source_path, req.after_index
             )
         return MutateResponse(diff=_diff_full(s.pdf_document))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"插入页失败: {e}") from e
 
@@ -561,6 +569,8 @@ def move_page(sid: str, req: MovePageRequest) -> MutateResponse:
         with _fitz_op(s), s.fitz_lock:
             PdfService.move_page(s.doc, s.pdf_document, req.from_index, req.to_index)
         return MutateResponse(diff=_diff_full(s.pdf_document))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"移动页失败: {e}") from e
 
@@ -572,6 +582,8 @@ def reorder(sid: str, req: ReorderRequest) -> MutateResponse:
         with _fitz_op(s), s.fitz_lock:
             PdfService.reorder_pages(s.doc, s.pdf_document, req.new_order)
         return MutateResponse(diff=_diff_full(s.pdf_document))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"重排失败: {e}") from e
 

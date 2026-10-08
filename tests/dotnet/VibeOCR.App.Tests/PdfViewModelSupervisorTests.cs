@@ -305,7 +305,8 @@ public sealed class PdfViewModelSupervisorTests
 
       PdfWorkbenchState state = Assert.IsType<PdfWorkbenchState>(
           Assert.Single(rotate.States));
-      Assert.False(state.IsBusy);
+      Assert.True(state.IsBusy);
+      Assert.Contains("写入结果未确认", state.Summary);
       Assert.Equal("pdf.outOfMemory", state.StatusCode);
       Assert.Equal(2, state.PageCount);
     }
@@ -356,6 +357,32 @@ public sealed class PdfViewModelSupervisorTests
     Assert.Equal("已打开 2 页", viewModel.Status);
   }
 
+  [Fact]
+  public async Task WorkbenchKeeps129PageSelectionAcrossWindowsAndExplicitWholeBookRange()
+  {
+    string root = Path.Combine(Path.GetTempPath(), "vibeocr-pdf-129-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+      var client = new FailingPdfInference { PageCount = 129 };
+      var model = new PdfViewModel(client, new StubPdfSource());
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = CreatePdfWorkbenchHandler(model, root, broker, annotations);
+      await handler.ExecuteAsync(new OpenDroppedPdfCommand("synthetic.pdf"), CancellationToken.None);
+      await handler.ExecuteAsync(new SelectAllPdfPagesCommand(true), CancellationToken.None);
+      WorkbenchCommandOutcome window = await handler.ExecuteAsync(new SetPdfWindowCommand(64), CancellationToken.None);
+      Assert.Equal(129, Assert.IsType<PdfWorkbenchState>(Assert.Single(window.States)).SelectedPages!.Count);
+      await handler.ExecuteAsync(new SelectPdfPagesCommand([]), CancellationToken.None);
+      await handler.ExecuteAsync(new RotatePdfCommand(-90), CancellationToken.None);
+      Assert.Null(client.RotatedPages);
+      await handler.ExecuteAsync(new RotatePdfCommand(-90, "all"), CancellationToken.None);
+      Assert.Equal(Enumerable.Range(0, 129), client.RotatedPages);
+      Assert.Equal(-90, client.RotatedAngle);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
   private static DesktopWorkbenchCommandHandler CreatePdfWorkbenchHandler(
       PdfViewModel pdf,
       string resourceRoot,
@@ -388,6 +415,9 @@ public sealed class PdfViewModelSupervisorTests
   /// </summary>
   private sealed class FailingPdfInference : InferenceClientStub
   {
+    public int PageCount { get; init; } = 2;
+    public int[]? RotatedPages { get; private set; }
+    public int RotatedAngle { get; private set; }
     public InferenceClientException? OpenError { get; init; }
     public InferenceClientException? RotateError { get; init; }
     public Task? LateOpenGate { get; init; }
@@ -405,7 +435,7 @@ public sealed class PdfViewModelSupervisorTests
         throw new InvalidOperationException("late open failed");
       }
       if (OpenError is { } error) throw error;
-      return new PdfSessionOpenResult("pdf-1", 2, path);
+      return new PdfSessionOpenResult("pdf-1", PageCount, path);
     }
 
     public override Task<byte[]> RenderPdfPageAsync(
@@ -422,6 +452,7 @@ public sealed class PdfViewModelSupervisorTests
     {
       ct.ThrowIfCancellationRequested();
       if (RotateError is { } error) throw error;
+      RotatedPages = pages; RotatedAngle = angle;
       return Task.FromResult(new PdfMutateResult(pages.Length));
     }
 
