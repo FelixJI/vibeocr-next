@@ -272,8 +272,13 @@ public sealed partial class MainWindow
     await WaitForCanvasAsync();
     RecordManagedSmokeStage($"recognize {environment.Name}");
     await ClickSmokeButtonAsync("识别当前图");
-    await WaitForScreenshotStateAsync(state => !state.IsBusy && state.Result is not null,
-      TimeSpan.FromMinutes(35));
+    await WaitForScreenshotStateAsync(state =>
+    {
+      if (!state.IsBusy && state.StatusCode is "recognition.cancelled" or
+          "recognition.modeUnavailable" or "recognition.expired")
+        throw new InvalidOperationException($"Managed smoke OCR stopped: {state.StatusCode}");
+      return !state.IsBusy && state.Result is not null;
+    }, TimeSpan.FromMinutes(35));
     await WaitForSmokeDomAsync("(document.querySelector('.result-document')?.textContent ?? '').includes('VibeOCR') && (document.querySelector('.result-document')?.textContent ?? '').includes('123')",
       TimeSpan.FromSeconds(15));
     if (smokeSubmitAttempts() != before + 1 || string.IsNullOrWhiteSpace(smokeLastJobId!()))

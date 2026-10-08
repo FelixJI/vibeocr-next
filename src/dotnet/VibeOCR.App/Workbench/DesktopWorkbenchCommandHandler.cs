@@ -90,6 +90,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private readonly List<string> generatedFiles = [];
   private readonly Dictionary<string, string> resourceFiles = new(StringComparer.Ordinal);
   private readonly HashSet<Task> backgroundOperations = [];
+  private readonly CancellationTokenSource sceneRecognitionLifetime = new();
   private readonly HashSet<int> selectedPdfPages = [];
   private readonly Dictionary<int, WorkbenchResourceReference> pdfThumbnails = [];
   private readonly Dictionary<string, string> structuredResourceFiles = new(StringComparer.Ordinal);
@@ -1448,6 +1449,9 @@ public sealed class DesktopWorkbenchCommandHandler :
       channel.SessionInput = frozen;
       adopted = true;
       channel.ExcludeBoxes = command.ExcludeBoxes;
+      // 现场窗口关闭会取消其 bridge token；冻结后任务归主应用拥有。
+      CancellationToken recognitionToken = channel.SceneEditing
+        ? sceneRecognitionLifetime.Token : cancellationToken;
       if (channel.SceneEditing)
       {
         // 显式识别交接：基准已冻结后再关 scene；会话与已提交任务保留，
@@ -1462,7 +1466,7 @@ public sealed class DesktopWorkbenchCommandHandler :
           sessionId,
           revision,
           input,
-          cancellationToken));
+          recognitionToken));
     }
     finally
     {
@@ -4844,6 +4848,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     {
       return;
     }
+    sceneRecognitionLifetime.Cancel();
     Interlocked.Increment(ref recognitionChannel.Generation);
     Interlocked.Increment(ref imageEditChannel.Generation);
     Interlocked.Increment(ref batchGeneration);
@@ -4881,6 +4886,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       operations = backgroundOperations.ToArray();
     }
     await Task.WhenAll(operations).ConfigureAwait(false);
+    sceneRecognitionLifetime.Dispose();
     foreach (string file in generatedFiles)
     {
       try
