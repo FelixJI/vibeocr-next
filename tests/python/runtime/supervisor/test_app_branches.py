@@ -117,7 +117,13 @@ class _FailingPdfAdapter:
         raise RuntimeError("rewrite_text_layer failed")
 
     def update_block_text(
-        self, session_id: str, page: int, block_index: int, new_text: str
+        self,
+        session_id: str,
+        page: int,
+        block_index: int,
+        new_text: str,
+        expected_old_text: str | None = None,
+        pdf_settings: dict | None = None,
     ) -> Any:
         raise RuntimeError("update_block_text failed")
 

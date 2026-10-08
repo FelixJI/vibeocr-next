@@ -154,6 +154,137 @@ public sealed class PdfViewModel(
     catch { return null; }
   }
 
+  /// <summary>当前页高清预览（真实 DPI，受后端 16M 像素预算约束）；过期会话/修订返回 null，迟到图不替换新选页。</summary>
+  public async Task<byte[]?> RenderPreviewImageAsync(int pageIndex, int dpi, CancellationToken ct)
+  {
+    if (SessionId is null) return null;
+    string session = SessionId; long revision = Revision; long generation = Volatile.Read(ref _generation);
+    try { byte[] image = await inference.RenderPdfPreviewAsync(session, pageIndex, dpi, ct); return SessionId == session && Revision == revision && generation == Volatile.Read(ref _generation) ? image : null; }
+    catch { return null; }
+  }
+
+  /// <summary>当前页检查 payload（OCR 块/原生文字层显示空间归一化投影）；过期返回 null。</summary>
+  public async Task<Wire.PageInspectResponse?> FetchPageInspectAsync(int pageIndex, CancellationToken ct)
+  {
+    if (SessionId is null) return null;
+    string session = SessionId; long revision = Revision; long generation = Volatile.Read(ref _generation);
+    try { Wire.PageInspectResponse payload = await inference.InspectPdfPageAsync(session, pageIndex, ct); return SessionId == session && Revision == revision && generation == Volatile.Read(ref _generation) ? payload : null; }
+    catch { return null; }
+  }
+
+  /// <summary>
+  /// 提交单块文字编辑：复用全 PDF 写门（与 MutateAsync 同构），送出前在门内
+  /// 核对调用者预期 session/revision；真正写入不可取消，收尾后释放门。
+  /// 无变化明确 noop（不推进修订/dirty）；证据缺失/失联按未确认处理，不假
+  /// 成功也不假称未提交；迟到返回不污染新会话。
+  /// </summary>
+  public async Task<PdfBlockEditResult> UpdateBlockTextAsync(
+    string expectedSession,
+    long expectedRevision,
+    int page,
+    int blockIndex,
+    string newText,
+    string? expectedOldText,
+    CancellationToken ct)
+  {
+    if (SessionId is null) return new(false, false, "请先打开 PDF 文档");
+    if (string.IsNullOrWhiteSpace(newText)) return new(false, false, "新文本不能为空");
+    if (IsSettling) { Summary = "后台操作尚未收尾，请等待完成后再编辑"; Changed(); return new(false, false, Summary); }
+    string session = SessionId;
+    long revision = Revision;
+    CancelActiveRun();
+    long generation = Volatile.Read(ref _generation);
+    var run = CancellationTokenSource.CreateLinkedTokenSource(ct);
+    _activeRun = run;
+    _inflight++; Changed();
+    TerminalIssue = null; IsBusy = true; Status = "正在更新块文字";
+    bool submitted = false;
+    void Unconfirmed()
+    {
+      if (SessionId == session && submitted)
+      {
+        _requiresReopen = true;
+        Summary = "块编辑写入结果未确认，请关闭并重新打开文档复检";
+        Changed();
+      }
+    }
+    try
+    {
+      run.Token.ThrowIfCancellationRequested();
+      // 提交前在写门内核对调用者预期与当前权威状态（handler 早检查不能替代）
+      if (SessionId != expectedSession || Revision != expectedRevision)
+      {
+        Summary = "页面或块状态已变化，请刷新后重试"; Changed();
+        return new(false, false, "编辑目标已过期，请刷新后重试");
+      }
+      if (page < 0 || page >= Pages.Count) return new(false, false, "页面选择已过期，请重新选择");
+      Phase = "write"; Changed();
+      submitted = true;
+      Wire.PdfMutationResponse response = await inference.UpdatePdfBlockTextAsync(session, new Wire.UpdateBlockTextRequest
+      {
+        Page = page,
+        BlockIndex = blockIndex,
+        NewText = newText,
+        ExpectedOldText = expectedOldText,
+        PdfSettings = ProcessingSettings.ToWire(),
+      }, CancellationToken.None);
+      if (SessionId != session || revision != Revision) return new(false, false, "编辑目标已过期，请刷新后重试");
+      if (response.Extra is { } extra &&
+          extra.TryGetValue("changed", out JsonElement changedFlag) &&
+          changedFlag.ValueKind is JsonValueKind.True or JsonValueKind.False)
+      {
+        if (!changedFlag.GetBoolean())
+        {
+          if (response.Diff is not null) ApplyDiff(response.Diff);
+          Status = "块文字未变化";
+          if (generation == Volatile.Read(ref _generation)) Changed();
+          return new(false, true, null);
+        }
+        if (response.Diff?.ReplacedPages?.Any(replaced => replaced.PageIndex == page) != true)
+        {
+          Unconfirmed();
+          return new(false, false, "块更新缺少页结果证据，请重开文档复检");
+        }
+        Revision++;
+        IsModified = true;
+        ApplyDiff(response.Diff!);
+        Status = "块文字已更新，尚未保存";
+        Summary = Status;
+        if (generation == Volatile.Read(ref _generation)) Changed();
+        return new(true, false, null);
+      }
+      // 缺 changed 证据：不假成功，也不推进修订/dirty —— 结果未确认
+      Unconfirmed();
+      return new(false, false, "块更新结果未确认，请重开文档复检");
+    }
+    catch (OperationCanceledException)
+    {
+      Unconfirmed();
+      if (generation == Volatile.Read(ref _generation)) { TerminalIssue = PdfIssueKind.Cancelled; Status = "已取消"; Changed(); }
+      return new(false, false, "编辑已取消，请复检后重试");
+    }
+    catch (InferenceClientException e)
+    {
+      if (e.Code is not (HttpV2ErrorCode.ValidationError or HttpV2ErrorCode.Unauthorized or HttpV2ErrorCode.ForbiddenLoopback or HttpV2ErrorCode.ResourceNotFound or HttpV2ErrorCode.RuntimeCapabilityUnavailable or HttpV2ErrorCode.RuntimeOperationNotFound)) Unconfirmed();
+      if (generation == Volatile.Read(ref _generation)) { TerminalIssue = IssueFromV2(e.Code); Status = LocalizeV2(e.Code); Changed(); }
+      return new(false, false, "块更新未提交或未确认，请复检后重试");
+    }
+    catch (Exception error) when (SessionId == session)
+    {
+      // 传输失败可能已写入：不宣称未提交，按未确认处理（仅原会话）
+      Unconfirmed();
+      TerminalIssue = PdfIssueKind.Failed;
+      Status = "块更新失败，结果未确认，请复检后重试";
+      Changed();
+      return new(false, false, $"{Status}（{error.GetType().Name}: {error.Message}）");
+    }
+    catch (Exception error)
+    {
+      return new(false, false, $"编辑结果未确认，请复检后重试（{error.GetType().Name}）");
+    }
+    finally { await FinishRunAsync(generation, run); }
+  }
+
   /// <summary>授权取回某页识别结果的图片资产（与单次/批量同一接缝）。</summary>
   public Task<byte[]> FetchResultAssetAsync(
       string jobId, string itemId, string assetId, CancellationToken ct) =>
@@ -769,6 +900,9 @@ public sealed class PdfViewModel(
 
 /// <summary>PDF 操作的原生语义终态问题码；v2 错误映射与 <see cref="PdfViewModel"/> 的 LocalizeV2 一致。</summary>
 public enum PdfIssueKind { Cancelled, Failed, BackendUnavailable, OutOfMemory }
+
+/// <summary>单块文字编辑提交结果：applied/noop 二选一，失败携带用户可读原因。</summary>
+public sealed record PdfBlockEditResult(bool Applied, bool Noop, string? Error);
 
 public enum PdfPageState { None, Processing, Done, Failed }
 

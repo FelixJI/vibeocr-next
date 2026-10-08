@@ -160,9 +160,26 @@ class _FullPdfChild:
         return MutateResponse(diff=ModelDiff())
 
     def update_block_text(
-        self, session_id: str, page: int, block_index: int, new_text: str
+        self,
+        session_id: str,
+        page: int,
+        block_index: int,
+        new_text: str,
+        expected_old_text: str | None = None,
+        pdf_settings: dict | None = None,
     ) -> MutateResponse:
-        self._record("update_block_text", (session_id, page, block_index, new_text), {})
+        self._record(
+            "update_block_text",
+            (session_id, page, block_index, new_text),
+            {
+                "expected_old_text": expected_old_text,
+                "pdf_settings": pdf_settings,
+            },
+        )
+        return MutateResponse(diff=ModelDiff())
+
+    def page_inspect(self, session_id: str, page: int) -> MutateResponse:
+        self._record("page_inspect", (session_id, page), {})
         return MutateResponse(diff=ModelDiff())
 
     def delete_text_layers_stream(self, session_id: str, pages: list):  # type: ignore[no-untyped-def]
@@ -374,10 +391,22 @@ def test_rewrite_text_layer_proxies_with_preproc_angle() -> None:
 def test_update_block_text_proxies() -> None:
     fake = _FullPdfChild()
     adapter = _adapter(fake)
-    adapter.update_block_text("sid-1", 0, 1, "edited")
-    name, args, _kwargs = fake.calls[-1]
+    adapter.update_block_text(
+        "sid-1", 0, 1, "edited", expected_old_text="old", pdf_settings={"a": 1}
+    )
+    name, args, kwargs = fake.calls[-1]
     assert name == "update_block_text"
     assert args == ("sid-1", 0, 1, "edited")
+    assert kwargs == {"expected_old_text": "old", "pdf_settings": {"a": 1}}
+
+
+def test_page_inspect_proxies() -> None:
+    fake = _FullPdfChild()
+    adapter = _adapter(fake)
+    adapter.page_inspect("sid-1", 3)
+    name, args, _kwargs = fake.calls[-1]
+    assert name == "page_inspect"
+    assert args == ("sid-1", 3)
 
 
 def test_delete_text_layers_stream_proxies() -> None:

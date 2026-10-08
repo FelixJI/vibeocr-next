@@ -7,6 +7,7 @@ using VibeOCR.App.Workbench;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
+using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 using Xunit;
 
 namespace VibeOCR.App.Tests;
@@ -466,14 +467,216 @@ public sealed class PdfViewModelSupervisorTests
     }
   }
 
+  private static Wire.PdfMutationResponse BlockUpdateResponse(
+    bool changed, int page = 0, bool withChangedFlag = true) => new()
+  {
+    SchemaVersion = 2,
+    InstanceId = "runtime-1",
+    Extra = withChangedFlag
+      ? new Dictionary<string, JsonElement> { ["changed"] = JsonSerializer.SerializeToElement(changed) }
+      : null,
+    Diff = new Wire.ModelDiff
+    {
+      ReplacedPages = [new Wire.PdfPageInfoMirror { PageIndex = page, HasTextLayer = true }],
+      ModifiedFlag = changed,
+    },
+  };
+
+  [Fact]
+  public async Task BlockEditAppliesAtomicallyAndAdvancesRevision()
+  {
+    var fake = new FakePdfInference();
+    var viewModel = new PdfViewModel(fake, new StubPdfSource());
+    await viewModel.OpenPathAsync("test.pdf", CancellationToken.None);
+    long revision = viewModel.Revision;
+
+    PdfBlockEditResult result = await viewModel.UpdateBlockTextAsync(
+      viewModel.SessionId!, revision, 0, 0, "新文本", "旧文本", CancellationToken.None);
+
+    Assert.True(result.Applied, result.Error ?? "no-error");
+    Assert.Equal(revision + 1, viewModel.Revision);
+    Assert.True(viewModel.IsModified);
+    Assert.Equal(1, fake.BlockUpdateCalls);
+    Assert.Equal("旧文本", fake.LastBlockUpdateOldText);
+  }
+
+  [Fact]
+  public async Task BlockEditNoopKeepsRevisionAndDirty()
+  {
+    var fake = new FakePdfInference { PendingBlockUpdate = Task.FromResult(BlockUpdateResponse(changed: false)) };
+    var viewModel = new PdfViewModel(fake, new StubPdfSource());
+    await viewModel.OpenPathAsync("test.pdf", CancellationToken.None);
+    long revision = viewModel.Revision;
+
+    PdfBlockEditResult result = await viewModel.UpdateBlockTextAsync(
+      viewModel.SessionId!, revision, 0, 0, "相同", null, CancellationToken.None);
+
+    Assert.False(result.Applied);
+    Assert.True(result.Noop, result.Error ?? "no-error");
+    Assert.Equal(revision, viewModel.Revision);
+    Assert.False(viewModel.IsModified);
+  }
+
+  [Fact]
+  public async Task BlockEditStaleExpectationIsRejectedInsideGate()
+  {
+    var fake = new FakePdfInference();
+    var viewModel = new PdfViewModel(fake, new StubPdfSource());
+    await viewModel.OpenPathAsync("test.pdf", CancellationToken.None);
+
+    PdfBlockEditResult result = await viewModel.UpdateBlockTextAsync(
+      viewModel.SessionId!, viewModel.Revision + 5, 0, 0, "x", null, CancellationToken.None);
+
+    Assert.False(result.Applied);
+    Assert.False(result.Noop);
+    Assert.Equal(0, fake.BlockUpdateCalls);
+  }
+
+  [Fact]
+  public async Task SlowBlockEditBlocksRotateAndSaveUntilSettled()
+  {
+    var completion = new TaskCompletionSource<Wire.PdfMutationResponse>();
+    var fake = new FakePdfInference { PendingBlockUpdate = completion.Task };
+    var viewModel = new PdfViewModel(fake, new StubPdfSource());
+    await viewModel.OpenPathAsync("test.pdf", CancellationToken.None);
+    Task<PdfBlockEditResult> editing = viewModel.UpdateBlockTextAsync(
+      viewModel.SessionId!, viewModel.Revision, 0, 0, "x", null, CancellationToken.None);
+    await fake.BlockUpdateEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+    await viewModel.RotateAsync([0], 90, CancellationToken.None);
+    Assert.Equal("后台操作尚未收尾", viewModel.Status);
+    await viewModel.SaveAsync("out.pdf", CancellationToken.None);
+    Assert.StartsWith("后台操作尚未收尾", viewModel.Summary);
+
+    completion.SetResult(BlockUpdateResponse(changed: true));
+    PdfBlockEditResult result = await editing;
+    Assert.True(result.Applied, result.Error ?? "no-error");
+    Assert.False(viewModel.IsSettling);
+  }
+
+  [Fact]
+  public async Task CancelDuringBlockEditReturnsImmediatelyAndSettlesAfterWrite()
+  {
+    var completion = new TaskCompletionSource<Wire.PdfMutationResponse>();
+    var fake = new FakePdfInference { PendingBlockUpdate = completion.Task };
+    var viewModel = new PdfViewModel(fake, new StubPdfSource());
+    await viewModel.OpenPathAsync("test.pdf", CancellationToken.None);
+    long revision = viewModel.Revision;
+    Task<PdfBlockEditResult> editing = viewModel.UpdateBlockTextAsync(
+      viewModel.SessionId!, viewModel.Revision, 0, 0, "x", null, CancellationToken.None);
+    await fake.BlockUpdateEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+    viewModel.Cancel();
+    Assert.False(viewModel.IsBusy);
+    Assert.Equal("已取消", viewModel.Status);
+    Assert.True(viewModel.IsSettling);
+
+    completion.SetResult(BlockUpdateResponse(changed: true));
+    PdfBlockEditResult result = await editing;
+    Assert.True(result.Applied, result.Error);
+    Assert.True(viewModel.IsModified);
+    Assert.Equal(revision + 1, viewModel.Revision);
+    Assert.True(viewModel.Pages[0].HasTextLayer);
+    Assert.False(viewModel.IsSettling);
+  }
+
+  [Fact]
+  public async Task LateBlockEditFailureDoesNotPolluteReplacementSession()
+  {
+    var completion = new TaskCompletionSource<Wire.PdfMutationResponse>();
+    var fake = new FakePdfInference { PendingBlockUpdate = completion.Task };
+    var viewModel = new PdfViewModel(fake, new StubPdfSource());
+    await viewModel.OpenPathAsync("old.pdf", CancellationToken.None);
+    Task<PdfBlockEditResult> editing = viewModel.UpdateBlockTextAsync(
+      viewModel.SessionId!, viewModel.Revision, 0, 0, "x", null, CancellationToken.None);
+    await fake.BlockUpdateEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+    await viewModel.OpenPathAsync("new.pdf", CancellationToken.None);
+    string newSession = viewModel.SessionId!;
+    completion.SetException(new IOException("connection reset"));
+    PdfBlockEditResult result = await editing;
+
+    Assert.False(result.Applied);
+    Assert.Equal(newSession, viewModel.SessionId);
+    Assert.Equal("new.pdf", viewModel.FilePath);
+    // 新会话不得被旧会话的未确认结果污染：编辑收尾后不遗留 requiresReopen。
+    Assert.False(viewModel.IsSettling);
+    Assert.DoesNotContain("未确认", viewModel.Summary);
+  }
+
+  [Fact]
+  public async Task TransportFailureIsUnconfirmedNotClaimedUnsubmitted()
+  {
+    var completion = new TaskCompletionSource<Wire.PdfMutationResponse>();
+    var fake = new FakePdfInference { PendingBlockUpdate = completion.Task };
+    var viewModel = new PdfViewModel(fake, new StubPdfSource());
+    await viewModel.OpenPathAsync("test.pdf", CancellationToken.None);
+    long revision = viewModel.Revision;
+    Task<PdfBlockEditResult> editing = viewModel.UpdateBlockTextAsync(
+      viewModel.SessionId!, revision, 0, 0, "x", null, CancellationToken.None);
+    await fake.BlockUpdateEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+    completion.SetException(new IOException("connection reset"));
+    PdfBlockEditResult result = await editing;
+
+    Assert.False(result.Applied);
+    Assert.Contains("未确认", result.Error);
+    Assert.DoesNotContain("未提交", result.Error);
+    Assert.Equal(revision, viewModel.Revision);
+    Assert.True(viewModel.IsSettling);
+  }
+
+  [Fact]
+  public async Task MissingChangedEvidenceFailsClosedWithoutFakeSuccess()
+  {
+    var fake = new FakePdfInference
+    {
+      PendingBlockUpdate = Task.FromResult(BlockUpdateResponse(changed: true, withChangedFlag: false)),
+    };
+    var viewModel = new PdfViewModel(fake, new StubPdfSource());
+    await viewModel.OpenPathAsync("test.pdf", CancellationToken.None);
+    long revision = viewModel.Revision;
+
+    PdfBlockEditResult result = await viewModel.UpdateBlockTextAsync(
+      viewModel.SessionId!, revision, 0, 0, "x", null, CancellationToken.None);
+
+    Assert.False(result.Applied);
+    Assert.Contains("未确认", result.Error);
+    Assert.Equal(revision, viewModel.Revision);
+    Assert.False(viewModel.IsModified);
+  }
+
+  [Fact]
+  public async Task ValidationRejectionDoesNotRequireReopen()
+  {
+    var fake = new FakePdfInference
+    {
+      PendingBlockUpdate = Task.FromException<Wire.PdfMutationResponse>(
+        new InferenceClientException(HttpV2ErrorCode.ValidationError, "新文本不能为空", false)),
+    };
+    var viewModel = new PdfViewModel(fake, new StubPdfSource());
+    await viewModel.OpenPathAsync("test.pdf", CancellationToken.None);
+
+    PdfBlockEditResult result = await viewModel.UpdateBlockTextAsync(
+      viewModel.SessionId!, viewModel.Revision, 0, 0, "x", null, CancellationToken.None);
+
+    Assert.False(result.Applied);
+    Assert.False(viewModel.IsSettling);
+  }
+
   private sealed class FakePdfInference : InferenceClientStub
   {
     private IReadOnlyList<JobItem> _items = Array.Empty<JobItem>();
+    private int _openSessions;
 
     public int RenderCalls { get; private set; }
     public Task<PdfSessionOpenResult>? PendingOpen { get; init; }
     public Task<PdfMutateResult>? PendingDelete { get; init; }
     public Task<byte[]>? PendingRender { get; init; }
+    public Task<Wire.PdfMutationResponse>? PendingBlockUpdate { get; init; }
+    public int BlockUpdateCalls { get; private set; }
+    public string? LastBlockUpdateOldText { get; private set; }
+    public TaskCompletionSource BlockUpdateEntered { get; } = new();
     public int SubmitCalls { get; private set; }
     public SubmitRequest? LastRequest { get; private set; }
     public IReadOnlyDictionary<string, SubmitUpload>? LastUploads { get; private set; }
@@ -482,7 +685,7 @@ public sealed class PdfViewModelSupervisorTests
         string path,
         string? password,
         CancellationToken ct) =>
-    PendingOpen ?? Task.FromResult(new PdfSessionOpenResult("pdf-1", 2, path));
+    PendingOpen ?? Task.FromResult(new PdfSessionOpenResult($"pdf-{++_openSessions}", 2, path));
 
     public override Task<PdfMutateResult> DeletePdfPagesAsync(
         string sessionId, int[] pages, CancellationToken ct) =>
@@ -496,6 +699,17 @@ public sealed class PdfViewModelSupervisorTests
     {
       RenderCalls++;
       return PendingRender ?? Task.FromResult(new byte[] { (byte)page, 1, 2 });
+    }
+
+    public override Task<Wire.PdfMutationResponse> UpdatePdfBlockTextAsync(
+        string sessionId,
+        Wire.UpdateBlockTextRequest request,
+        CancellationToken ct)
+    {
+      BlockUpdateCalls++;
+      LastBlockUpdateOldText = request.ExpectedOldText;
+      BlockUpdateEntered.TrySetResult();
+      return PendingBlockUpdate ?? Task.FromResult(BlockUpdateResponse(changed: true, request.Page));
     }
 
     public override Task<JobRef> SubmitAsync(

@@ -151,6 +151,29 @@ public sealed class PdfSessionHttpClient : IPdfSessionClient
         return await _runtime.ReadBinaryAsync(response, "image/png", ct);
     }
 
+    public async Task<Wire.PdfMutationResponse> UpdateBlockTextAsync(string sessionId,
+        Wire.UpdateBlockTextRequest request, CancellationToken ct)
+    {
+        using StringContent content = _runtime.CreateJsonContent(request);
+        using HttpResponseMessage response = await _runtime.PostAsync(
+            BindSessionPath(RuntimeOperationPaths.UpdatePdfBlockText, sessionId), content, ct);
+        await EnsureSuccessAsync(response, ct);
+        using JsonDocument document = await _runtime.ReadJsonDocumentAsync(response, ct);
+        return document.RootElement.Deserialize<Wire.PdfMutationResponse>()
+            ?? throw new InvalidOperationException("PDF block update result is missing.");
+    }
+
+    public async Task<Wire.PageInspectResponse> InspectPageAsync(string sessionId, int page, CancellationToken ct)
+    {
+        using StringContent content = _runtime.CreateJsonContent(new { page });
+        using HttpResponseMessage response = await _runtime.PostAsync(
+            BindSessionPath(RuntimeOperationPaths.InspectPdfPage, sessionId), content, ct);
+        await EnsureSuccessAsync(response, ct);
+        using JsonDocument document = await _runtime.ReadJsonDocumentAsync(response, ct);
+        return document.RootElement.Deserialize<Wire.PageInspectResponse>()
+            ?? throw new InvalidOperationException("PDF page inspect payload is missing.");
+    }
+
     public async Task<Wire.PdfMutationResponse> AddTextLayersAsync(string sessionId,
         Wire.BatchAddTextLayerRequest request, CancellationToken ct)
     {

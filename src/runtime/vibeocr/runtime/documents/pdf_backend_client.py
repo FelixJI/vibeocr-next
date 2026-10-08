@@ -40,6 +40,8 @@ from vibeocr.runtime.documents.wire_schemas import (
     MutateResponse,
     OpenRequest,
     OpenResponse,
+    PageInspectRequest,
+    PageInspectResponse,
     PageListRequest,
     PdfDocumentMirror,
     ProgressEvent,
@@ -69,7 +71,15 @@ _HTTP_LONG_TIMEOUT = httpx.Timeout(600.0, connect=5.0)
 
 
 class PdfBackendError(RuntimeError):
-    """PDF 后端调用失败。"""
+    """PDF 后端调用失败。
+
+    status 携带后端 HTTP 状态码（4xx 表示请求被后端明确拒绝、未应用），
+    供宿主映射为 ValidationError 等可判定未提交的错误码。
+    """
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class PdfBackendClient:
@@ -409,7 +419,10 @@ class PdfBackendClient:
                 detail = resp.json().get("detail", detail)
             except Exception:
                 pass
-            raise PdfBackendError(f"后端错误 {path} ({resp.status_code}): {detail}")
+            raise PdfBackendError(
+                f"后端错误 {path} ({resp.status_code}): {detail}",
+                status=resp.status_code,
+            )
         return resp
 
     def _get(self, path: str, *, timeout=None) -> httpx.Response:
@@ -426,7 +439,10 @@ class PdfBackendClient:
             elapsed_ms=(time.perf_counter() - started) * 1000.0,
         )
         if resp.status_code >= 400:
-            raise PdfBackendError(f"后端错误 {path} ({resp.status_code}): {resp.text}")
+            raise PdfBackendError(
+                f"后端错误 {path} ({resp.status_code}): {resp.text}",
+                status=resp.status_code,
+            )
         return resp
 
     @staticmethod
@@ -686,16 +702,36 @@ class PdfBackendClient:
         )
 
     def update_block_text(
-        self, sid: str, page: int, block_index: int, new_text: str
+        self,
+        sid: str,
+        page: int,
+        block_index: int,
+        new_text: str,
+        expected_old_text: str | None = None,
+        pdf_settings: dict | None = None,
     ) -> MutateResponse:
         return self._parse(
             self._post(
                 f"/session/{sid}/update_block_text",
                 UpdateBlockTextRequest(
-                    page=page, block_index=block_index, new_text=new_text
+                    page=page,
+                    block_index=block_index,
+                    new_text=new_text,
+                    expected_old_text=expected_old_text,
+                    pdf_settings=pdf_settings,
                 ).model_dump(),
             ),
             MutateResponse,
+        )
+
+    def page_inspect(self, sid: str, page: int) -> PageInspectResponse:
+        """拉取单页检查 payload（OCR 块/原生文字层显示空间归一化投影）。"""
+        return self._parse(
+            self._post(
+                f"/session/{sid}/page_inspect",
+                PageInspectRequest(page=page).model_dump(),
+            ),
+            PageInspectResponse,
         )
 
     def delete_text_layers_stream(

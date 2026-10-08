@@ -321,6 +321,9 @@ public sealed record SavePdfCommand : WorkbenchCommand;
 public sealed record SelectPdfPagesCommand(IReadOnlyList<int> Pages) : WorkbenchCommand;
 public sealed record SelectAllPdfPagesCommand(bool Selected) : WorkbenchCommand;
 public sealed record SelectPdfPageCommand(int Page, bool Selected) : WorkbenchCommand;
+public sealed record SetCurrentPdfPageCommand(int Page) : WorkbenchCommand;
+public sealed record UpdatePdfBlockTextCommand(int Page, int BlockIndex, string NewText, string ExpectedOldText, long Revision, string SessionId) : WorkbenchCommand;
+public sealed record RetryPdfPageInspectCommand : WorkbenchCommand;
 
 public sealed record SetPdfWindowCommand(int Start) : WorkbenchCommand;
 
@@ -656,7 +659,9 @@ public sealed record PdfWorkbenchState(
   long Revision = 0, bool IsModified = false, int DetectedCount = 0, int TextLayerCount = 0,
   int AddedCount = 0, string Phase = "idle", int ProgressCurrent = 0, int ProgressTotal = 0,
   string Summary = "", bool CanAddTextLayer = false,
-  VibeOCR.App.Features.Pdf.PdfProcessingSettings? ProcessingSettings = null) : WorkbenchState
+  VibeOCR.App.Features.Pdf.PdfProcessingSettings? ProcessingSettings = null,
+  WorkbenchResourceReference? PagePreview = null, WorkbenchResourceReference? PageInspect = null,
+  string PageInspectStatusCode = "pdf.inspect.none", string? SessionId = null) : WorkbenchState
 {
   public override string Scope => "pdf";
 }

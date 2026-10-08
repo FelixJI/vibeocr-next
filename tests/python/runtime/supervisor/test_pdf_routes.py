@@ -285,12 +285,34 @@ async def test_update_block_text_proxies_text(
     async with _http(supervisor_token, pdf_app) as http:
         resp = await http.post(
             "/v2/pdf/sessions/sid-1/update_block_text",
-            json={"page": 0, "block_index": 1, "new_text": "edited"},
+            json={
+                "page": 0,
+                "block_index": 1,
+                "new_text": "edited",
+                "expected_old_text": "old",
+            },
         )
     assert resp.status_code == 200
-    name, args, _kwargs = fake_pdf_adapter.calls[-1]
+    name, args, kwargs = fake_pdf_adapter.calls[-1]
     assert name == "update_block_text"
     assert args == ("sid-1", 0, 1, "edited")
+    assert kwargs["expected_old_text"] == "old"
+
+
+async def test_page_inspect_proxies_page(
+    pdf_app: FastAPI, supervisor_token: str, fake_pdf_adapter: FakePdfAdapter
+) -> None:
+    async with _http(supervisor_token, pdf_app) as http:
+        resp = await http.post(
+            "/v2/pdf/sessions/sid-1/page_inspect",
+            json={"page": 2},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["page"] == 2
+    name, args, _kwargs = fake_pdf_adapter.calls[-1]
+    assert name == "page_inspect"
+    assert args == ("sid-1", 2)
 
 
 # ---------------------------------------------------------------------------
@@ -348,3 +370,27 @@ async def test_open_with_invalid_json_returns_validation_error(
             headers={"Authorization": f"Bearer {supervisor_token}"},
         )
     assert resp.status_code == 400
+
+
+async def test_update_block_text_backend_rejection_maps_validation_error(
+    pdf_app: FastAPI, supervisor_token: str, fake_pdf_adapter: FakePdfAdapter
+) -> None:
+    """后端 4xx（如编辑空文本/越界）映射为 ValidationError：可判定未提交。"""
+    from vibeocr.runtime.documents.pdf_backend_client import PdfBackendError
+
+    original = fake_pdf_adapter.update_block_text
+
+    def _reject(*args: object, **kwargs: object) -> object:
+        raise PdfBackendError("后端错误 x (422): 新文本不能为空", status=422)
+
+    fake_pdf_adapter.update_block_text = _reject  # type: ignore[method-assign]
+    try:
+        async with _http(supervisor_token, pdf_app) as http:
+            resp = await http.post(
+                "/v2/pdf/sessions/sid-1/update_block_text",
+                json={"page": 0, "block_index": 0, "new_text": "  "},
+            )
+    finally:
+        fake_pdf_adapter.update_block_text = original  # type: ignore[method-assign]
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "VALIDATION_ERROR"

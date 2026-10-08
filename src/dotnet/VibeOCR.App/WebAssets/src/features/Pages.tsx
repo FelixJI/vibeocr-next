@@ -43,6 +43,7 @@ import { CaptureButton } from "../components/CaptureButton";
 import { CapabilityGate } from "../components/CapabilityGate";
 import { HotkeyRecorder } from "../components/HotkeyRecorder";
 import { ImageCanvasEditor } from "../components/ImageCanvasEditor";
+import { PdfInspection } from "../components/PdfInspection";
 import { PaddleOptionsEditor } from "../components/PaddleOptionsEditor";
 import { StructuredResult } from "../components/StructuredResult";
 import type { ScreenshotTextLayerState } from "../components/ImageCanvasEditor";
@@ -2098,10 +2099,22 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
                         }}
                       />
                       {thumbnail ? (
-                        <img
-                          alt={`第 ${page.index + 1} 页缩略图`}
-                          src={thumbnail.url}
-                        />
+                        <button
+                          type="button"
+                          className="pdf-thumbnail-button"
+                          aria-label={`检查第 ${page.index + 1} 页`}
+                          onClick={() =>
+                            actions.run({
+                              type: "pdf.setCurrentPage",
+                              page: page.index,
+                            })
+                          }
+                        >
+                          <img
+                            alt={`第 ${page.index + 1} 页缩略图`}
+                            src={thumbnail.url}
+                          />
+                        </button>
                       ) : (
                         <span className="pdf-thumbnail-placeholder">PDF</span>
                       )}
@@ -2487,22 +2500,19 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
             </div>
           )}
           <Panel label="REVIEW" title="页面检查">
-            {resource(activePage?.thumbnail) ? (
-              <img
-                className="pdf-review-image"
-                src={resource(activePage?.thumbnail)?.url}
-                alt={`当前第 ${selectedPage + 1} 页`}
-              />
-            ) : (
-              <EmptyStage
-                title={pageCount > 0 ? `${pageCount} 页文档` : "文档检查区"}
-                detail={
-                  pageCount > 0
-                    ? `已选 ${selectedPages.length} 页`
-                    : "选择页面后显示渲染预览与 OCR 状态。"
-                }
-              />
-            )}
+            <PdfInspection
+              key={`${stringValue(state.sessionId)}:${numberValue(state.revision)}:${selectedPage}:${resource(state.pagePreview)?.url ?? ""}:${resource(state.pageInspect)?.url ?? ""}`}
+              page={selectedPage}
+              count={pageCount}
+              revision={numberValue(state.revision)}
+              sessionId={stringValue(state.sessionId) ?? ""}
+              preview={resource(state.pagePreview)}
+              inspect={resource(state.pageInspect)}
+              status={stringValue(state.pageInspectStatusCode) ?? ""}
+              busy={busy}
+              canEdit={viewState.capabilities.includes("pdf.edit")}
+              actions={actions}
+            />
             {activeStructured && (
               <StructuredResult
                 key={activeStructured.url}

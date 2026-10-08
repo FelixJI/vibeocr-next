@@ -222,11 +222,68 @@ class RewriteTextLayerRequest(BaseModel):
 
 
 class UpdateBlockTextRequest(BaseModel):
-    """双击编辑文字块(仅更新内存模型,不落盘)。"""
+    """双击编辑文字块：原子写入当前内存 doc 后才更新模型。
+
+    expected_old_text 非空时与目标块当前文本严格比对，不一致按 409 拒绝，
+    防止乱序提交覆盖后续编辑；None 表示跳过该校验（调用方已用权威修订串行）。
+    pdf_settings 携带调用方当前写层策略（visible/字号等），避免编辑重写
+    静默恢复默认。
+    """
 
     page: int
     block_index: int
     new_text: str
+    expected_old_text: str | None = None
+    pdf_settings: dict[str, Any] | None = None
+
+
+class PageInspectRequest(BaseModel):
+    """当前页检查 payload 请求（仅单页，不整本拉取）。"""
+
+    page: int
+
+
+class PageInspectOcrBlock(BaseModel):
+    """可信 OCR 块的检查投影。
+
+    bbox/polygon 是「显示空间」(page.rect，含 /Rotate 与 CropBox 归零) 再按
+    显示宽高归一到 [0,1000] 的坐标：raw OCR bbox 在预处理后的归一化空间，
+    已按 ocr_preproc_angle 逆旋转到当前显示空间。前端只按显示尺寸缩放，
+    不持有旋转/CropBox 真值。
+    """
+
+    index: int
+    text: str
+    score: float
+    score_unknown: bool
+    is_manually_edited: bool
+    label: str = "text"
+    bbox: tuple[float, float, float, float] | None = None
+    polygon: tuple[float, ...] | None = None
+
+
+class PageInspectNativeLine(BaseModel):
+    """普通 PDF 文字层的只读检查投影（get_text 行框，同口径归一化）。"""
+
+    bbox: tuple[float, float, float, float]
+    text_preview: str
+    char_count: int
+
+
+class PageInspectResponse(BaseModel):
+    """当前页检查 payload：OCR 块与原生文字层的来源区分投影。
+
+    页面存在可信 OCR 块（本会话经无层添加或显式整页覆盖写入）时，该页可
+    编辑文字即该 OCR 层全部块，native_lines 为空——避免把 OCR 层自身重复
+    显示成第二来源，也符合可编辑来源的 provenance 约束。
+    """
+
+    page: int
+    rotation: int
+    rect: tuple[float, float, float, float]
+    preproc_angle: int = 0
+    ocr_blocks: list[PageInspectOcrBlock] = Field(default_factory=list)
+    native_lines: list[PageInspectNativeLine] = Field(default_factory=list)
 
 
 class RenderThumbnailRequest(BaseModel):

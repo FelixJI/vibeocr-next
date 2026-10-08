@@ -80,6 +80,7 @@ public static class RuntimeProtocol
         new("POST", "/v2/pdf/sessions/{session_id}/load", "loadPdfSession"),
         new("POST", "/v2/pdf/sessions/{session_id}/model", "getPdfSessionModel"),
         new("POST", "/v2/pdf/sessions/{session_id}/move_page", "movePdfPage"),
+        new("POST", "/v2/pdf/sessions/{session_id}/page_inspect", "inspectPdfPage"),
         new("POST", "/v2/pdf/sessions/{session_id}/render_preview", "renderPdfPreview"),
         new("POST", "/v2/pdf/sessions/{session_id}/render_thumbnail", "renderPdfThumbnail"),
         new("POST", "/v2/pdf/sessions/{session_id}/reorder", "reorderPdfPages"),
@@ -129,6 +130,7 @@ public static class RuntimeOperationPaths
     public const string LoadPdfSession = "/v2/pdf/sessions/{session_id}/load";
     public const string GetPdfSessionModel = "/v2/pdf/sessions/{session_id}/model";
     public const string MovePdfPage = "/v2/pdf/sessions/{session_id}/move_page";
+    public const string InspectPdfPage = "/v2/pdf/sessions/{session_id}/page_inspect";
     public const string RenderPdfPreview = "/v2/pdf/sessions/{session_id}/render_preview";
     public const string RenderPdfThumbnail = "/v2/pdf/sessions/{session_id}/render_thumbnail";
     public const string ReorderPdfPages = "/v2/pdf/sessions/{session_id}/reorder";

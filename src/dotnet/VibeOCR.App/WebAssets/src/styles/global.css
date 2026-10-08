@@ -1239,3 +1239,85 @@ select {
   background: transparent;
   cursor: pointer;
 }
+
+.pdf-inspection {
+  min-width: 0;
+}
+.pdf-inspection-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.pdf-inspection-hint {
+  font-size: 12px;
+  color: var(--colorNeutralForeground3);
+}
+.pdf-inspection-viewport {
+  position: relative;
+  height: min(60vh, 560px);
+  min-height: 280px;
+  overflow: auto;
+  padding: 12px;
+  background: var(--colorNeutralBackground3);
+  border: 1px solid var(--colorNeutralStroke2);
+  touch-action: none;
+  cursor: grab;
+}
+.pdf-inspection-viewport:focus-visible {
+  outline: 2px solid var(--colorBrandStroke1);
+}
+.pdf-inspection-sheet {
+  position: relative;
+  flex-shrink: 0;
+  margin: auto;
+  background: white;
+}
+.pdf-inspection-sheet > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  user-select: none;
+}
+.pdf-text-box {
+  position: absolute;
+  display: block;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid #157aca;
+  background: #157aca18;
+  cursor: pointer;
+}
+.pdf-text-box.native {
+  border-color: #986614;
+  background: #98661418;
+}
+.pdf-text-box:hover,
+.pdf-text-box.selected,
+.pdf-text-box:focus-visible {
+  border-width: 2px;
+  outline: 1px solid var(--colorBrandStroke1);
+  background: #157aca35;
+}
+.pdf-block-editor {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  overflow-wrap: anywhere;
+}
+.pdf-block-editor textarea {
+  min-height: 80px;
+  width: 100%;
+}
+.pdf-thumbnail-button {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.pdf-thumbnail-button:focus-visible {
+  outline: 2px solid var(--colorBrandStroke1);
+}

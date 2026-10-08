@@ -9,6 +9,21 @@ namespace VibeOCR.App.Tests;
 public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
 {
   [Fact]
+  public void PdfBlockEditRequiresDocumentSessionAndOldText()
+  {
+    Guid bridgeSession = Guid.NewGuid();
+    string arguments = JsonSerializer.Serialize(new { page = 0, blockIndex = 2, newText = "中 English", expectedOldText = "old", revision = 9, sessionId = "pdf-7" });
+    var parsed = Assert.IsType<UpdatePdfBlockTextCommand>(WorkbenchBridgeCodec.ParseCommand(CommandJson(bridgeSession, "pdf", "updateBlockText", arguments), bridgeSession).Command);
+    Assert.Equal("pdf-7", parsed.SessionId);
+    Assert.Equal("old", parsed.ExpectedOldText);
+    Assert.Equal(9, parsed.Revision);
+    foreach (string invalid in new[] {
+      JsonSerializer.Serialize(new { page = 0, blockIndex = 2, newText = "new", expectedOldText = "old", revision = 9 }),
+      JsonSerializer.Serialize(new { page = 0, blockIndex = 2, newText = "new", expectedOldText = (string?)null, revision = 9, sessionId = "pdf-7" }),
+      JsonSerializer.Serialize(new { page = 0, blockIndex = 2, newText = " ", expectedOldText = "old", revision = 9, sessionId = "pdf-7" }) })
+      Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(CommandJson(bridgeSession, "pdf", "updateBlockText", invalid), bridgeSession));
+  }
+  [Fact]
   public void PdfRangesAndInsertionKeepHostAuthorizationBoundary()
   {
     Guid session = Guid.NewGuid();

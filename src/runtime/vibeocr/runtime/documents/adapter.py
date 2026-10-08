@@ -111,8 +111,16 @@ class _PdfChildLike(Protocol):
     ) -> Any: ...
 
     def update_block_text(
-        self, session_id: str, page: int, block_index: int, new_text: str
+        self,
+        session_id: str,
+        page: int,
+        block_index: int,
+        new_text: str,
+        expected_old_text: str | None = None,
+        pdf_settings: dict[str, Any] | None = None,
     ) -> Any: ...
+
+    def page_inspect(self, session_id: str, page: int) -> Any: ...
 
     def delete_text_layers_stream(self, session_id: str, pages: list[int]) -> Any: ...
 
@@ -302,10 +310,20 @@ class PdfProcessAdapter:
         page: int,
         block_index: int,
         new_text: str,
+        expected_old_text: str | None = None,
+        pdf_settings: dict[str, Any] | None = None,
     ) -> MutateResponse:
         return self.ensure_started().update_block_text(
-            session_id, page, block_index, new_text
+            session_id,
+            page,
+            block_index,
+            new_text,
+            expected_old_text=expected_old_text,
+            pdf_settings=pdf_settings,
         )
+
+    def page_inspect(self, session_id: str, page: int) -> Any:
+        return self.ensure_started().page_inspect(session_id, page)
 
     def delete_text_layers_stream(
         self, session_id: str, pages: list[int]

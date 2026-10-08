@@ -27,6 +27,7 @@ Goal #110 隔离候选专用 Paddle 五模式实机冒烟。
 额外真实输入入口：file/batch 使用表格模式，pdf 使用文档结构模式。
 pdf_text_layer 使用文字 OCR，点击添加文字层并验证 dirty/保存状态；
 默认不运行；可与 Modes 空数组组合单独执行。
+pdf_editing 使用一次普通文字 OCR，验证高清检查、取消/切页、中英文长句校正、保存重开和按钮可达。
 pdf_operations 验证自动文字朝向与插页/重排组合，仅使用已准备的本地模型。
 新隔离环境应指定 Modes paddle_text，先通过普通 OCR 公共 UI 显式准备模型，
 再执行 pdf_operations；自动方向不会自行下载缺失模型。
@@ -54,7 +55,7 @@ param(
         'paddle_text', 'paddle_table', 'paddle_formula',
         'paddle_structure', 'paddle_document_vl'
     ),
-    [ValidateSet("file", "batch", "pdf", "pdf_text_layer", "pdf_operations")]
+    [ValidateSet("file", "batch", "pdf", "pdf_text_layer", "pdf_operations", "pdf_editing")]
     [string[]]$InputKinds = @(),
     [int]$ModeTimeoutMinutes = 40,
     [int]$InstallTimeoutMinutes = 60,
@@ -203,7 +204,7 @@ foreach ($name in @(
     'VIBEOCR_PADDLE_SMOKE_HEALTH', 'VIBEOCR_PADDLE_SMOKE_PHASE',
     'VIBEOCR_PADDLE_SMOKE_MODE', 'VIBEOCR_PADDLE_SMOKE_PIPELINE',
     'VIBEOCR_PADDLE_SMOKE_INPUT_KIND', 'VIBEOCR_PADDLE_SMOKE_SECOND_FIXTURE',
-    'VIBEOCR_PADDLE_SMOKE_PDF_TEXT_LAYER',
+    'VIBEOCR_PADDLE_SMOKE_PDF_TEXT_LAYER', 'VIBEOCR_PADDLE_SMOKE_PDF_EDITING',
     'VIBEOCR_PADDLE_SMOKE_FIXTURE', 'VIBEOCR_PADDLE_SMOKE_OPTION_NAME',
     'VIBEOCR_PADDLE_SMOKE_OPTION_VALUE', 'VIBEOCR_PADDLE_SMOKE_OPTION_KIND',
     'VIBEOCR_PADDLE_SMOKE_TOKENS', 'VIBEOCR_PADDLE_SMOKE_EXPORT_BUTTONS',
@@ -324,9 +325,9 @@ try {
         }
     }
     foreach ($inputKind in $InputKinds) {
-        $inputMode = if ($inputKind -in @('pdf_text_layer', 'pdf_operations')) { 'paddle_text' } elseif ($inputKind -eq 'pdf') { 'paddle_structure' } else { 'paddle_table' }
+        $inputMode = if ($inputKind -in @('pdf_text_layer', 'pdf_operations', 'pdf_editing')) { 'paddle_text' } elseif ($inputKind -eq 'pdf') { 'paddle_structure' } else { 'paddle_table' }
         $spec = $modeSpec[$inputMode]
-        $fixtureName = if ($inputKind -eq 'pdf_operations') { 'document_orientation.pdf' } elseif ($inputKind -eq 'pdf_text_layer') { 'document_scan.pdf' } elseif ($inputKind -eq 'pdf') { 'document_mixed.pdf' } else { $spec.Fixture }
+        $fixtureName = if ($inputKind -eq 'pdf_operations') { 'document_orientation.pdf' } elseif ($inputKind -in @('pdf_text_layer', 'pdf_editing')) { 'document_scan.pdf' } elseif ($inputKind -eq 'pdf') { 'document_mixed.pdf' } else { $spec.Fixture }
         $phaseName = "paddle-input-$inputKind"
         $healthPath = Join-Path $smokeRoot "$phaseName.json"
         if (Test-Path -LiteralPath $healthPath -PathType Leaf) {
@@ -342,8 +343,9 @@ try {
             New-Item -ItemType Directory -Path $inputExports -Force | Out-Null
             $health = Invoke-PaddlePhase @{
                 'VIBEOCR_PADDLE_SMOKE_PHASE' = 'inputs'
-                'VIBEOCR_PADDLE_SMOKE_INPUT_KIND' = $(if ($inputKind -eq 'pdf_text_layer') { 'pdf' } else { $inputKind })
-                'VIBEOCR_PADDLE_SMOKE_PDF_TEXT_LAYER' = $(if ($inputKind -eq 'pdf_text_layer') { '1' } else { '0' })
+                'VIBEOCR_PADDLE_SMOKE_INPUT_KIND' = $(if ($inputKind -in @('pdf_text_layer', 'pdf_editing')) { 'pdf' } else { $inputKind })
+                'VIBEOCR_PADDLE_SMOKE_PDF_EDITING' = $(if ($inputKind -eq 'pdf_editing') { '1' } else { '0' })
+                'VIBEOCR_PADDLE_SMOKE_PDF_TEXT_LAYER' = $(if ($inputKind -in @('pdf_text_layer', 'pdf_editing')) { '1' } else { '0' })
                 'VIBEOCR_PADDLE_SMOKE_MODE' = $inputMode
                 'VIBEOCR_PADDLE_SMOKE_PIPELINE' = $spec.Pipeline
                 'VIBEOCR_PADDLE_SMOKE_FIXTURE' = (Join-Path $fixtures $fixtureName)

@@ -91,6 +91,8 @@ internal abstract class InferenceClientStub : IInferenceClient
     public virtual Task<VibeOCR.Runtime.Contracts.Generated.Wire.PdfDocumentMirror> GetPdfModelAsync(string sessionId, CancellationToken ct) => throw new NotImplementedException();
     public virtual Task LoadPdfAsync(string sessionId, Action<System.Text.Json.JsonElement> progress, CancellationToken ct) => Task.CompletedTask;
     public virtual Task<byte[]> RenderPdfPreviewAsync(string sessionId, int page, int dpi, CancellationToken ct) => RenderPdfPageAsync(sessionId, page, 1024, ct);
+    public virtual Task<VibeOCR.Runtime.Contracts.Generated.Wire.PdfMutationResponse> UpdatePdfBlockTextAsync(string sessionId, VibeOCR.Runtime.Contracts.Generated.Wire.UpdateBlockTextRequest request, CancellationToken ct) => throw new NotSupportedException("PDF block update unavailable.");
+    public virtual Task<VibeOCR.Runtime.Contracts.Generated.Wire.PageInspectResponse> InspectPdfPageAsync(string sessionId, int page, CancellationToken ct) => throw new NotSupportedException("PDF page inspect unavailable.");
     public virtual Task<VibeOCR.Runtime.Contracts.Generated.Wire.PdfMutationResponse> AddPdfTextLayersAsync(string sessionId, VibeOCR.Runtime.Contracts.Generated.Wire.BatchAddTextLayerRequest request, CancellationToken ct) => throw new NotImplementedException();
     public virtual Task DeletePdfTextLayersAsync(string sessionId, int[] pages, Action<System.Text.Json.JsonElement> progress, CancellationToken ct) => throw new NotImplementedException();
     public virtual Task CancelPdfAsync(string sessionId, CancellationToken ct) => Task.CompletedTask;

@@ -53,6 +53,8 @@ from vibeocr.runtime.documents.wire_schemas import (
     MutateResponse,
     OpenRequest,
     OpenResponse,
+    PageInspectRequest,
+    PageInspectResponse,
     PageListRequest,
     PdfDocumentMirror,
     PdfPageInfoMirror,
@@ -763,21 +765,125 @@ def rewrite_text_layer(sid: str, req: RewriteTextLayerRequest) -> MutateResponse
 
 @app.post("/session/{sid}/update_block_text", response_model=MutateResponse)
 def update_block_text(sid: str, req: UpdateBlockTextRequest) -> MutateResponse:
-    """双击编辑文字块(仅内存模型)。"""
+    """双击编辑文字块：原子写入当前内存 doc 后才更新权威模型。
+
+    事务语义（与 add_text_layer_batch 的 candidate 单页事务一致）：锁内在
+    本页块克隆上仅改目标块，经 rewrite_text_layer(require_all=True) 整页
+    重写；全部块写入成功才提交 doc 并更新模型/dirty。任一块被跳过、写入
+    失败 → 原内容与模型不变（fail-closed）。新旧文本相同 → changed=False
+    返回，不推进 dirty。
+    """
+    import math
+    from dataclasses import replace
+
     s = _get_registry().get(sid)
     try:
-        info = s.pdf_document.pages[req.page]
-        if 0 <= req.block_index < len(info.ocr_text_blocks):
-            b = info.ocr_text_blocks[req.block_index]
-            if b.text != req.new_text:
-                b.text = req.new_text
-                b.is_manually_edited = True
-                s.pdf_document.is_modified = True
+        if not req.new_text or not req.new_text.strip():
+            raise HTTPException(status_code=400, detail="新文本不能为空")
+        if len(req.new_text) > 2000:
+            raise HTTPException(status_code=400, detail="新文本超出单块长度限制")
+        with _fitz_op(s), s.fitz_lock:
+            # 页索引在锁内校验，避免检查后结构变化
+            if req.page < 0 or req.page >= len(s.pdf_document.pages):
+                raise HTTPException(status_code=400, detail="页索引越界")
+            info = s.pdf_document.pages[req.page]
+            blocks = list(info.ocr_text_blocks)
+            if not (0 <= req.block_index < len(blocks)):
+                raise HTTPException(status_code=400, detail="块索引越界")
+            target = blocks[req.block_index]
+            if (
+                req.expected_old_text is not None
+                and target.text != req.expected_old_text
+            ):
+                raise HTTPException(
+                    status_code=409, detail="块内容已被其他修改更新，请刷新后重试"
+                )
+            if target.text == req.new_text:
+                return MutateResponse(
+                    diff=_diff_pages(
+                        s.pdf_document,
+                        [req.page],
+                        modified=s.pdf_document.is_modified,
+                    ),
+                    extra={"changed": False},
+                )
+            # 与 batch 反序列化同规则预验证全部块：任一块缺文本/几何 → 拒绝，
+            # 不允许静默丢弃非目标块。
+            for position, block in enumerate(blocks):
+                if not (block.text and block.text.strip()):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"第 {position} 块文本为空，页面不可整页重写提交",
+                    )
+                bbox = block.bbox
+                if (
+                    bbox is None
+                    or len(bbox) != 4
+                    or not all(
+                        isinstance(v, (int, float))
+                        and math.isfinite(v)
+                        and 0 <= v <= 1000
+                        for v in bbox
+                    )
+                    or bbox[2] <= bbox[0]
+                    or bbox[3] <= bbox[1]
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"第 {position} 块缺少可写几何，页面不可整页重写提交",
+                    )
+            cloned = [
+                replace(
+                    block,
+                    text=req.new_text,
+                    is_manually_edited=True,
+                )
+                if position == req.block_index
+                else replace(block)
+                for position, block in enumerate(blocks)
+            ]
+            written, skipped = PdfService.rewrite_text_layer(
+                s.doc,
+                s.pdf_document,
+                req.page,
+                cloned,
+                info.ocr_preproc_angle,
+                pdf_settings=_settings_from_dict(req.pdf_settings),
+                require_all=True,
+            )
+            if written != len(cloned) or skipped:
+                # require_all 下 batch 已不提交，这里是防御性二次校验。
+                raise HTTPException(
+                    status_code=422,
+                    detail="块写入未全部成功，已保留原内容",
+                )
         return MutateResponse(
-            diff=_diff_pages(s.pdf_document, [req.page], modified=True)
+            diff=_diff_pages(
+                s.pdf_document, [req.page], modified=s.pdf_document.is_modified
+            ),
+            extra={"changed": True},
         )
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"更新块文字失败: {e}") from e
+
+
+@app.post("/session/{sid}/page_inspect", response_model=PageInspectResponse)
+def page_inspect(sid: str, req: PageInspectRequest) -> PageInspectResponse:
+    """当前页检查 payload：OCR 块与原生文字层的显示空间归一化投影。"""
+    s = _get_registry().get(sid)
+    try:
+        with _fitz_op(s), s.fitz_lock:
+            return PdfService.page_inspect(s.doc, s.pdf_document, req.page)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"页检查失败: {e}") from e
 
 
 # ---- 流式进度操作 -------------------------------------------------------
