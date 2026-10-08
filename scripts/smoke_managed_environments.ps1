@@ -50,7 +50,8 @@ if ($InstallerCacheRoot) {
     if (-not (Test-Path -LiteralPath (Join-Path $cache 'downloads/artifacts') -PathType Container)) {
         throw 'InstallerCacheRoot must be an explicitly selected synthetic installer cache'
     }
-    $targetCache = Join-Path $candidate 'state/installer-cache'
+    # Runtime store is rooted in the portable mutable state directory.
+    $targetCache = Join-Path $candidate 'state/state/installer-cache'
     New-Item -ItemType Directory -Path $targetCache -Force | Out-Null
     Get-ChildItem -LiteralPath $cache -Force | Copy-Item -Destination $targetCache -Recurse -Force
 }
