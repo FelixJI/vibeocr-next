@@ -104,6 +104,48 @@ public sealed class RuntimeInstallerClientTests
         await Assert.ThrowsAsync<RuntimeInstallerException>(() => client.PreviewEnvironmentCleanupAsync(TestContext.Current.CancellationToken));
     }
     [Fact]
+    public async Task CleanupClientAcceptsLargePreviewThroughRealOutputTransport()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-cleanup-output-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string envelope = JsonSerializer.Serialize(new
+            {
+                protocol_version = 2, response_kind = "environment", action = "preview_cleanup",
+                result = new
+                {
+                    plan_id = new string('a', 32), size_kind = "logical_bytes", warning = "fixture",
+                    items = Enumerable.Range(0, 2050).Select(index => new
+                    {
+                        id = $"unknown:{index}", category = "unknown", label = $"revision-{index}",
+                        logical_bytes = (long?)null, can_clean = false, reason = "unowned",
+                        paths = new[] { $"environments/kept/revisions/{index}" }, path_count = 1,
+                    }).ToArray(),
+                },
+            });
+            string payload = Path.Combine(root, "payload.json");
+            await File.WriteAllTextAsync(payload, envelope, TestContext.Current.CancellationToken);
+            var start = new ProcessStartInfo
+            {
+                FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
+                    "WindowsPowerShell", "v1.0", "powershell.exe"),
+                UseShellExecute = false, CreateNoWindow = true,
+                RedirectStandardOutput = true, RedirectStandardError = true,
+            };
+            string command = "[Console]::WriteLine([IO.File]::ReadAllText('" + payload.Replace("'", "''") + "'))";
+            foreach (string argument in new[] { "-NoProfile", "-NonInteractive", "-Command", command }) start.ArgumentList.Add(argument);
+            RuntimeInstallerProcessResult output = await RuntimeInstallerCommandRunner.RunProcessAsync(start, null,
+                TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+            Assert.Equal(0, output.ExitCode);
+            var client = new RuntimeInstallerClient(Configuration(), new StubRunner(output));
+            ManagedCleanupPlan plan = await client.PreviewEnvironmentCleanupAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(2050, plan.Items.Count);
+            Assert.Equal("unknown:2049", plan.Items[^1].Id);
+        }
+        finally { TestDirectory.Delete(root, recursive: true); }
+    }
+    [Fact]
     public async Task CleanupClientBindsExplicitSelectionAndUsesCancelControl()
     {
         var runner = new QueueRunner(

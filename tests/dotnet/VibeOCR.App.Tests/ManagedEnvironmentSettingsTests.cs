@@ -348,7 +348,7 @@ public sealed class ManagedEnvironmentSettingsTests
   [Fact]
   public async Task CleanupPagesReachEveryCandidateAndRejectHiddenSelection()
   {
-    ManagedCleanupItem[] items = Enumerable.Range(0, 400).Select(index => new ManagedCleanupItem(
+    ManagedCleanupItem[] items = Enumerable.Range(0, 2050).Select(index => new ManagedCleanupItem(
       $"item:{index}", index < 200 ? "unknown" : "residual", $"候选 {index}", null, 12, index >= 200,
       new string('原', 500), [new string('路', 500)], PathCount: 1)).ToArray();
     var previous = new ManagedCleanupResult(new string('b', 32), Enumerable.Range(0, 200).Select(index =>
@@ -357,7 +357,7 @@ public sealed class ManagedEnvironmentSettingsTests
       "logical_bytes", "逻辑字节", previous) };
     var settings = NewSettings(manager);
     await settings.PreviewCleanupAsync(TestContext.Current.CancellationToken);
-    await Assert.ThrowsAsync<InvalidOperationException>(() => settings.CleanupAsync(new string('a', 32), ["item:399"], TestContext.Current.CancellationToken));
+    await Assert.ThrowsAsync<InvalidOperationException>(() => settings.CleanupAsync(new string('a', 32), ["item:2049"], TestContext.Current.CancellationToken));
     Assert.Equal(0, manager.CleanupCalls);
     var seen = new HashSet<string>();
     var resultIds = new HashSet<string>();
@@ -378,10 +378,10 @@ public sealed class ManagedEnvironmentSettingsTests
       WorkbenchBridgeCodec.SerializeBootstrap(Guid.NewGuid(), new WorkbenchBootstrap(2, session, page,
         WorkbenchRoute.Settings, [envelope], new HashSet<string> { "runtime.environments" }));
     }
-    Assert.Equal(400, seen.Count);
+    Assert.Equal(2050, seen.Count);
     Assert.Equal(200, resultIds.Count);
     Assert.Equal(500, manager.CleanupPreview.Items[0].Paths[0].Length);
-    await settings.CleanupAsync(new string('a', 32), ["item:399"], TestContext.Current.CancellationToken);
+    await settings.CleanupAsync(new string('a', 32), ["item:2049"], TestContext.Current.CancellationToken);
     Assert.Equal(1, manager.CleanupCalls);
   }
 

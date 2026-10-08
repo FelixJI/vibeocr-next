@@ -456,7 +456,7 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
             T value = payload.Deserialize<T>(JsonOptions)
                 ?? throw new RuntimeInstallerException("运行环境响应为空。");
             if (value is ManagedCleanupPlan cleanupPlan && (string.IsNullOrEmpty(cleanupPlan.PlanId) || cleanupPlan.PlanId.Length != 32 || !cleanupPlan.PlanId.All(Uri.IsHexDigit) ||
-                cleanupPlan.SizeKind != "logical_bytes" || cleanupPlan.Items is null || cleanupPlan.Items.Count > 2048 ||
+                cleanupPlan.SizeKind != "logical_bytes" || cleanupPlan.Items is null ||
                 cleanupPlan.Items.Any(item => item is null) ||
                 cleanupPlan.Items.Select(item => item.Id).Distinct(StringComparer.Ordinal).Count() != cleanupPlan.Items.Count ||
                 cleanupPlan.Items.Any(item => string.IsNullOrWhiteSpace(item.Id) || item.Id.Length > 1024 || item.LogicalBytes < 0 ||
