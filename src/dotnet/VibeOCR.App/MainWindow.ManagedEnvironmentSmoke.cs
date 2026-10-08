@@ -529,11 +529,11 @@ public sealed partial class MainWindow
   {
     var elapsed = System.Diagnostics.Stopwatch.StartNew();
     TimeSpan budget = TimeSpan.FromSeconds(30);
-    string link = JsonSerializer.Serialize($"a[aria-label={JsonSerializer.Serialize(label)}]");
+    string query = "document.querySelector('a[aria-label=" + JsonSerializer.Serialize(label) + "]')";
     // bridge-ready acknowledges bootstrap delivery, before React commits navigation.
-    await WaitForSmokeDomAsync($"!!document.querySelector({link})", budget);
-    string script = "(() => { const a=document.querySelector(" + link +
-      "); if(!a) return false; a.click(); return true; })()";
+    await WaitForSmokeDomAsync($"!!{query}", budget);
+    string script = "(() => { const a=" + query +
+      "; if(!a) return false; a.click(); return true; })()";
     if (await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(script) != "true")
       throw new InvalidOperationException($"Smoke navigation unavailable: {label}");
     TimeSpan remaining = budget - elapsed.Elapsed;
