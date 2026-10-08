@@ -148,6 +148,10 @@ public sealed partial class MainWindow
     ManagedEnvironment[] initial = SmokePair(empty);
     if (initial.Any(item => item.Status != "empty") || empty.ActiveId is not null)
       throw new InvalidOperationException("Empty environment state changed across restart.");
+    WorkbenchCommandReceipt sources = await application.ExecuteAsync(
+      new WorkbenchCommandEnvelope(Guid.NewGuid(), new SetEnvironmentSourcesCommand(null, "tuna-pypi", null)),
+      CancellationToken.None);
+    if (!sources.Ok) throw new InvalidOperationException("Managed fixture source selection failed.");
     await InstallSmokeRecipeAsync(initial[0]);
     await InstallSmokeRecipeAsync(initial[1]);
     if (smokeInstallAttempts() != 2)
