@@ -924,17 +924,13 @@ def _prepare_online_artifacts(
             and _file_sha256(wheel) in allowed[name]
         ):
             shutil.copyfile(wheel, downloads / wheel.name)
+    artifacts = _parse_resolve_report(
+        _resolve_online_report(python, lock, endpoint, cache, reporter, env),
+        downloads,
+    )
     if isinstance(reporter, ManagedInstallObserver):
         reporter.set_phase("download", "核验缓存并下载缺失依赖")
-    return _download_resolved_artifacts(
-        _parse_resolve_report(
-            _resolve_online_report(python, lock, endpoint, cache, reporter, env),
-            downloads,
-        ),
-        allowed,
-        downloads,
-        reporter,
-    )
+    return _download_resolved_artifacts(artifacts, allowed, downloads, reporter)
 
 
 def _default_install_runner(

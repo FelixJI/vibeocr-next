@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-import time
 from importlib.resources import files
 from pathlib import Path
 
@@ -127,36 +126,48 @@ def test_cached_files_are_not_new_downloads(
     )
 
 
-def test_real_command_output_arrives_before_exit_and_is_redacted() -> None:
-    observed: list[tuple[float, dict]] = []
-    observer = ManagedInstallObserver(
-        lambda event: observed.append((time.monotonic(), event)),
-        lambda: None,
-        "b" * 32,
-        "env",
-        1,
-        [],
-    )
+def test_real_command_output_arrives_before_exit_and_is_redacted(
+    tmp_path: Path,
+) -> None:
+    release = tmp_path / "release"
+    observed: list[dict] = []
+    streams: set[str] = set()
+
+    def receive(event: dict) -> None:
+        observed.append(event)
+        if log := event.get("log"):
+            if log["stream"] == "stderr" or "Collecting sample" in log["text"]:
+                streams.add(log["stream"])
+            if streams == {"stdout", "stderr"}:
+                release.touch()
+
+    observer = ManagedInstallObserver(receive, lambda: None, "b" * 32, "env", 1, [])
     installer._run_install_command(
         [
             sys._base_executable,
             "-u",
             "-c",
-            'import sys,time; print("Collecting sample"); print("https://user:password@example.invalid/a?token=secret", file=sys.stderr); print("x"*5000); time.sleep(0.5); print("Successfully installed sample-1")',
+            "import pathlib,sys,time; "
+            'print("Collecting sample", flush=True); '
+            'print("https://user:password@example.invalid/a?token=secret", file=sys.stderr, flush=True); '
+            'print("x"*5000, flush=True); '
+            "release=pathlib.Path(sys.argv[1]); deadline=time.monotonic()+10; "
+            "exec('while not release.exists():\\n"
+            " if time.monotonic() >= deadline: sys.exit(7)\\n"
+            " time.sleep(0.01)'); "
+            'print("Successfully installed sample-1")',
+            str(release),
         ],
-        timeout=10,
+        timeout=15,
         env=dict(os.environ),
         reporter=observer,
         heartbeat_code="runtime.install_profile",
     )
-    finished = time.monotonic()
-    logs = [(when, event["log"]) for when, event in observed if "log" in event]
-    assert any(
-        finished - when > 0.3 and "Collecting sample" in log["text"]
-        for when, log in logs
-    )
-    assert any(log["stream"] == "stderr" for _, log in logs)
-    assert any(log["truncated"] for _, log in logs)
+    logs = [event["log"] for event in observed if "log" in event]
+    # A buffered-to-exit observer cannot release the waiting child successfully.
+    assert release.is_file() and streams == {"stdout", "stderr"}
+    assert any("Collecting sample" in log["text"] for log in logs)
+    assert any(log["truncated"] for log in logs)
     assert "password" not in json.dumps(observed) and "secret" not in json.dumps(
         observed
     )
@@ -188,3 +199,74 @@ def test_observer_failure_does_not_break_command_or_cancellation() -> None:
             reporter=observer,
             heartbeat_code="runtime.install_profile",
         )
+
+
+@pytest.mark.parametrize("resolver_fails", [False, True])
+def test_online_artifacts_keep_resolve_phase_until_resolution_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resolver_fails: bool
+) -> None:
+    lock = tmp_path / "requirements.txt"
+    lock.write_text("a==1\n", encoding="utf-8")
+    report = tmp_path / "report.json"
+    report.write_text(
+        json.dumps(
+            {
+                "install": [
+                    {
+                        "metadata": {"name": "a", "version": "1"},
+                        "download_info": {"url": "https://example.invalid/a.whl"},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    events: list[dict] = []
+    observer = _observer(events)
+    observer.set_phase("resolve")
+    resolving_phases: list[str] = []
+    downloaded = False
+    original_parse = installer._parse_resolve_report
+
+    def resolve(*args) -> Path:
+        resolving_phases.append(observer.phase)
+        if resolver_fails:
+            raise installer.RuntimeInstallError("resolver failed")
+        return report
+
+    def parse(path: Path, root: Path) -> tuple[installer._ResolvedArtifact, ...]:
+        resolving_phases.append(observer.phase)
+        return original_parse(path, root)
+
+    def download(artifacts, allowed, root: Path, reporter) -> Path:
+        nonlocal downloaded
+        assert reporter is observer and observer.phase == "download"
+        downloaded = True
+        return root
+
+    monkeypatch.setattr(installer, "_resolve_online_report", resolve)
+    monkeypatch.setattr(installer, "_parse_resolve_report", parse)
+    monkeypatch.setattr(installer, "_download_resolved_artifacts", download)
+    if resolver_fails:
+        with pytest.raises(installer.RuntimeInstallError, match="resolver failed"):
+            installer._prepare_online_artifacts(
+                Path(sys._base_executable),
+                lock,
+                "https://example.invalid",
+                tmp_path,
+                observer,
+                {},
+            )
+        assert not downloaded and observer.phase == "resolve"
+        assert resolving_phases == ["resolve"]
+        assert all(event["phase"] != "download" for event in events)
+    else:
+        installer._prepare_online_artifacts(
+            Path(sys._base_executable),
+            lock,
+            "https://example.invalid",
+            tmp_path,
+            observer,
+            {},
+        )
+        assert downloaded and resolving_phases == ["resolve", "resolve"]
