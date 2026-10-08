@@ -5,7 +5,7 @@ Goal #110 隔离候选专用 Paddle 五模式实机冒烟。
 .DESCRIPTION
 只复制全新候选到新的隔离根（不删除/复用任何已有 state，不读取真实
 桌面内容），用仓库 Python 生成合成 fixture，然后按阶段启动候选应用：
-  install   —— 创建具名空环境 "Paddle 冒烟"，公开来源预览 paddleocr-cpu
+  install   —— 从常规组件入口准备 PaddleOCR · CPU，公开来源预览 paddleocr-cpu
                配方并确认安装（与 managed-environment 冒烟同一公共 UI）。
   recognize —— 每模式一次独立进程：切换环境、公共 UI 选模式、设置真实
                非默认选项并保存、纯截图（合成 fixture 选区器）+显式

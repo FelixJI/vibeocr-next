@@ -112,6 +112,9 @@ public sealed class ManagedEnvironmentSettingsTests
     Task install = settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
     await manager.Started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
     Assert.True(settings.CanCancelInstall);
+    Assert.Equal("plan", settings.Plan?.PlanId);
+    await Assert.ThrowsAsync<InvalidOperationException>(() =>
+      settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken));
     Assert.Equal(ProductMaintenanceOwner.RuntimeMaintenance, maintenance.State.ActiveOwner);
     await settings.CancelAndWaitForInstallAsync();
     await install.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
@@ -147,6 +150,140 @@ public sealed class ManagedEnvironmentSettingsTests
     Assert.Null(settings.Compatibility);
     Assert.Null(settings.Plan);
   }
+
+  [Fact]
+  public async Task PrepareUsesCompatibilityWithoutCreatingOrInstalling()
+  {
+    var manager = new MutableManager();
+    var settings = NewSettings(manager);
+    await settings.PrepareAsync("rapidocr-cpu", TestContext.Current.CancellationToken);
+    Assert.Equal("environment", settings.Compatibility?.Selected?.EnvironmentId);
+    Assert.Null(settings.Plan);
+    Assert.Equal(0, manager.CreateCalls);
+    Assert.Equal(0, manager.PreviewCalls);
+    Assert.Equal(0, manager.InstallCalls);
+  }
+
+  [Fact]
+  public async Task PrepareDoubleClickAndPreviewFailureReuseExactEnvironment()
+  {
+    var manager = new MutableManager { HasCompatibleEnvironment = false };
+    var settings = NewSettings(manager);
+    manager.BeforePreview = () => throw new HttpRequestException("preview unavailable");
+    await Assert.ThrowsAsync<HttpRequestException>(() => settings.PrepareAsync(
+      "rapidocr-cpu", TestContext.Current.CancellationToken));
+    Assert.Equal(1, manager.CreateCalls);
+    manager.BeforePreview = null;
+    await Task.WhenAll(settings.PrepareAsync("rapidocr-cpu", TestContext.Current.CancellationToken),
+      settings.PrepareAsync("rapidocr-cpu", TestContext.Current.CancellationToken));
+    Assert.Equal(1, manager.CreateCalls);
+    Assert.Equal("fresh", settings.Plan?.EnvironmentId);
+    Assert.Equal(0, manager.InstallCalls);
+  }
+
+  [Fact]
+  public async Task PrepareRetryRequiresAuthoritativeListAfterCreateRefreshFailure()
+  {
+    var manager = new MutableManager { HasCompatibleEnvironment = false, FailListAfterCreate = true };
+    var settings = NewSettings(manager);
+    await Assert.ThrowsAsync<HttpRequestException>(() => settings.PrepareAsync(
+      "rapidocr-cpu", TestContext.Current.CancellationToken));
+    await Assert.ThrowsAsync<HttpRequestException>(() => settings.PrepareAsync(
+      "rapidocr-cpu", TestContext.Current.CancellationToken));
+    Assert.Equal(1, manager.CreateCalls);
+    Assert.Equal(0, manager.PreviewCalls);
+    manager.FailListAfterCreate = false;
+    await settings.PrepareAsync("rapidocr-cpu", TestContext.Current.CancellationToken);
+    Assert.Equal(1, manager.CreateCalls);
+    Assert.Equal("fresh", settings.Plan?.EnvironmentId);
+  }
+
+  [Fact]
+  public async Task SelectionChangeDuringMappedRefreshCannotRecreateMissingTarget()
+  {
+    var manager = new MutableManager { HasCompatibleEnvironment = false, FailListAfterCreate = true };
+    var settings = NewSettings(manager);
+    await Assert.ThrowsAsync<HttpRequestException>(() => settings.PrepareAsync(
+      "rapidocr-cpu", TestContext.Current.CancellationToken));
+    manager.FailListAfterCreate = false;
+    await manager.DeleteEnvironmentAsync("fresh", TestContext.Current.CancellationToken);
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    manager.BeforeList = () => { entered.TrySetResult(); return release.Task; };
+    Task retry = settings.PrepareAsync("rapidocr-cpu", TestContext.Current.CancellationToken);
+    await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    settings.InvalidatePlan();
+    release.SetResult();
+    await retry;
+    Assert.Equal(1, manager.CreateCalls);
+    Assert.Equal(0, manager.PreviewCalls);
+    Assert.Null(settings.Plan);
+  }
+
+  [Fact]
+  public async Task QueuedAndInFlightPrepareCannotCreateAfterSelectionChanges()
+  {
+    var manager = new MutableManager { HasCompatibleEnvironment = false };
+    var settings = NewSettings(manager);
+    await settings.RefreshAsync(TestContext.Current.CancellationToken);
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    manager.BeforeFind = () => { entered.TrySetResult(); return release.Task; };
+    Task inFlight = settings.PrepareAsync("rapidocr-cpu", TestContext.Current.CancellationToken);
+    await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    Task queued = settings.PrepareAsync("rapidocr-cpu", TestContext.Current.CancellationToken);
+    settings.InvalidatePlan();
+    Task current = settings.PreviewAsync("environment", "rapidocr-cpu", null,
+      TestContext.Current.CancellationToken);
+    release.SetResult();
+    await Task.WhenAll(inFlight, queued, current);
+    Assert.Equal(0, manager.CreateCalls);
+    Assert.Equal(1, manager.PreviewCalls);
+    Assert.Equal("environment", settings.Plan?.EnvironmentId);
+  }
+
+  [Fact]
+  public async Task LatePreviewCannotRestoreInvalidatedPlan()
+  {
+    var manager = new MutableManager();
+    var settings = NewSettings(manager);
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    manager.BeforePreview = () => { entered.TrySetResult(); return release.Task; };
+    Task preview = settings.PreviewAsync("environment", "rapidocr-cpu", null,
+      TestContext.Current.CancellationToken);
+    await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    settings.InvalidatePlan();
+    release.SetResult();
+    await preview;
+    Assert.Null(settings.Plan);
+  }
+
+  [Fact]
+  public async Task InstallPreservesFrozenPlanAndExpiresPreviouslyQueuedPrepare()
+  {
+    var manager = new MutableManager { HasCompatibleEnvironment = false };
+    var settings = NewSettings(manager);
+    await settings.PreviewAsync("environment", "rapidocr-cpu", null,
+      TestContext.Current.CancellationToken);
+    ManagedEnvironmentPlan frozen = settings.Plan!;
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    manager.BeforeList = () => { entered.TrySetResult(); return release.Task; };
+    Task refresh = settings.RefreshAsync(TestContext.Current.CancellationToken);
+    await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    Task install = settings.InstallAsync(frozen.PlanId, null, TestContext.Current.CancellationToken);
+    Task queued = settings.PrepareAsync("rapidocr-cpu", TestContext.Current.CancellationToken);
+    manager.BeforeInstall = () => { Assert.Same(frozen, settings.Plan); return Task.CompletedTask; };
+    release.SetResult();
+    await Task.WhenAll(refresh, install, queued);
+    Assert.Equal(1, manager.InstallCalls);
+    Assert.Equal(0, manager.CreateCalls);
+    Assert.Null(settings.Plan);
+  }
+
+  private static ManagedEnvironmentSettings NewSettings(IManagedEnvironmentClient manager) =>
+    new(manager, (_, _) => Task.CompletedTask, () => null, new ProductMaintenanceCoordinator());
 
   [Fact]
   public async Task CancelClickDuringPostInstallRefreshIsIgnoredAndInstallStaysCommitted()
@@ -677,6 +814,15 @@ public sealed class ManagedEnvironmentSettingsTests
   private sealed class MutableManager : IManagedEnvironmentClient
   {
     public List<string> SourceSaves { get; } = [];
+    public bool HasCompatibleEnvironment { get; set; } = true;
+    public bool FailListAfterCreate { get; set; }
+    public int CreateCalls { get; private set; }
+    public int PreviewCalls { get; private set; }
+    public int InstallCalls { get; private set; }
+    public Func<Task>? BeforeList { get; set; }
+    public Func<Task>? BeforeFind { get; set; }
+    public Func<Task>? BeforePreview { get; set; }
+    public Func<Task>? BeforeInstall { get; set; }
 
     // 与生产 list payload 一致：配方目录随列表同步，宿主据此核验未知配方。
     private static readonly IReadOnlyList<ManagedEnvironmentRecipe> Catalog =
@@ -697,14 +843,18 @@ public sealed class ManagedEnvironmentSettingsTests
         ]),
     ];
 
-    public Task<ManagedEnvironmentList> ListEnvironmentsAsync(
-      CancellationToken cancellationToken = default) =>
-      Task.FromResult(new ManagedEnvironmentList("environment", 1, [.. environments],
-        Recipes: Catalog));
+    public async Task<ManagedEnvironmentList> ListEnvironmentsAsync(
+      CancellationToken cancellationToken = default)
+    {
+      if (BeforeList is not null) await BeforeList();
+      if (FailListAfterCreate && CreateCalls > 0) throw new HttpRequestException("list unavailable");
+      return new ManagedEnvironmentList("environment", 1, [.. environments], Recipes: Catalog);
+    }
 
     public Task<ManagedEnvironment> CreateEnvironmentAsync(
       string name, CancellationToken cancellationToken = default)
     {
+      CreateCalls++;
       var created = new ManagedEnvironment("fresh", name, 1, "venv", "empty", "python",
         "ready", "empty", "unverified", "not_checked", "not_started", null);
       environments.Add(created);
@@ -721,10 +871,13 @@ public sealed class ManagedEnvironmentSettingsTests
         DefaultSourceIds: packageSourceId is null ? [] : [packageSourceId], Recipes: Catalog));
     }
 
-    public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(
+    public async Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(
       string environmentId, string recipe, IReadOnlyList<string>? sourceIds = null,
-      CancellationToken cancellationToken = default) =>
-      Task.FromResult(new ManagedEnvironmentPlan("plan", environmentId, 1, 1, recipe,
+      CancellationToken cancellationToken = default)
+    {
+      PreviewCalls++;
+      if (BeforePreview is not null) await BeforePreview();
+      return new ManagedEnvironmentPlan("plan", environmentId, 1, 1, recipe,
         sourceIds ?? ["tuna-pypi"], RequestedSourceIds: sourceIds,
         Sources:
         [
@@ -736,32 +889,38 @@ public sealed class ManagedEnvironmentSettingsTests
             "online_index"),
         ],
         DependencyOrigin: "online_index", PythonOrigin: "product_bundle",
-        RuntimeWheelOrigin: "product_bundle"));
+        RuntimeWheelOrigin: "product_bundle");
+    }
 
-    public Task<ManagedEnvironmentQueryResult> FindCompatibleEnvironmentAsync(
-      string recipe, CancellationToken cancellationToken = default) =>
-      Task.FromResult(new ManagedEnvironmentQueryResult(
+    public async Task<ManagedEnvironmentQueryResult> FindCompatibleEnvironmentAsync(
+      string recipe, CancellationToken cancellationToken = default)
+    {
+      if (BeforeFind is not null) await BeforeFind();
+      return new ManagedEnvironmentQueryResult(
         recipe,
         Recipes: Catalog,
-        Selected: new ManagedEnvironmentSelection("environment", 1, recipe, "active_environment"),
+        Selected: HasCompatibleEnvironment ? new ManagedEnvironmentSelection("environment", 1, recipe, "active_environment") : null,
         Environments:
         [
           new ManagedEnvironmentQueryMatch("environment", "活动环境", 1, "installed",
             Recipe: recipe, Active: true, Selected: true,
             ReasonCode: "selected_active_environment"),
-        ]));
+        ]);
+    }
 
-    public Task<ManagedEnvironment> InstallEnvironmentAsync(
+    public async Task<ManagedEnvironment> InstallEnvironmentAsync(
       ManagedEnvironmentPlan plan, IReadOnlyList<string>? sourceIds = null,
       CancellationToken cancellationToken = default)
     {
+      InstallCalls++;
+      if (BeforeInstall is not null) await BeforeInstall();
       int index = environments.FindIndex(item => item.Id == plan.EnvironmentId);
       environments[index] = environments[index] with
       {
         Status = "installed",
         DependencyState = "installed",
       };
-      return Task.FromResult(environments[index]);
+      return environments[index];
     }
 
     public Task<PreparedEnvironmentSwitch> PrepareEnvironmentSwitchAsync(

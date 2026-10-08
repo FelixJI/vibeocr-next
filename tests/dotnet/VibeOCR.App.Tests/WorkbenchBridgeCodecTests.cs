@@ -324,6 +324,19 @@ public sealed class WorkbenchBridgeCodecTests
   }
 
   [Fact]
+  public void PrepareEnvironmentDecodesOnlySupportedRecipe()
+  {
+    Guid session = Guid.NewGuid();
+    string json = CommandJson(session, "settings", "prepareEnvironment", "{\"recipe\":\"paddleocr-cuda\"}");
+    var command = Assert.IsType<PrepareEnvironmentCommand>(WorkbenchBridgeCodec.ParseCommand(json, session).Command);
+    Assert.Equal("paddleocr-cuda", command.Recipe);
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(
+      json.Replace("paddleocr-cuda", "made-up-recipe"), session));
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(
+      CommandJson(session, "settings", "prepareEnvironment", "{}"), session));
+  }
+
+  [Fact]
   public void SettingsStateProjectsProgressActivityAndNullableBackend()
   {
     var state = new SettingsWorkbenchState(

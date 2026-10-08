@@ -27,7 +27,7 @@ namespace VibeOCR.App;
 /// </summary>
 public sealed partial class MainWindow
 {
-  private const string PaddleSmokeEnvironmentName = "Paddle 冒烟";
+  private const string PaddleSmokeEnvironmentName = "PaddleOCR · CPU";
   private const string PaddleSmokeRecipe = "paddleocr-cpu";
   // paddleModesSmokeStarted 字段随 MainWindow.xaml.cs 的 OnHostStateChanged
   // 钩子一并声明（见交付说明），本文件只引用不声明，避免未读告警。
@@ -168,13 +168,14 @@ public sealed partial class MainWindow
   private async Task<object> RunPaddleSmokeInstallAsync()
   {
     RecordPaddleSmokeStage("wait environments");
-    await NavigateSmokeAsync("设置", "input[aria-label='新环境名称（留空自动命名）']");
+    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     ManagedEnvironmentList list = await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
     if (!list.Environments.Any(item => item.Name == PaddleSmokeEnvironmentName))
     {
-      RecordPaddleSmokeStage("create empty environment");
-      await EnterSmokeTextAsync("input[aria-label='新环境名称（留空自动命名）']", PaddleSmokeEnvironmentName);
-      await ClickManagedSmokeButtonAsync("创建空环境");
+      RecordPaddleSmokeStage("prepare configuration");
+      await SelectSmokeValueAsync("#environment-component-select", "paddleocr");
+      await SelectSmokeValueAsync("#environment-device-select", "cpu");
+      await ClickManagedSmokeButtonAsync("准备此配置");
       list = await WaitForSmokeEnvironmentsAsync(
         [PaddleSmokeEnvironmentName], TimeSpan.FromMinutes(5));
     }
@@ -191,8 +192,8 @@ public sealed partial class MainWindow
 
     RecordPaddleSmokeStage("preview install plan");
     await SelectSmokeEnvironmentAsync(environment.Id);
-    await SelectSmokeValueAsync("#environment-purpose-select", "document|document_vl|formula|structure|table|text");
-    await ClickManagedSmokeButtonAsync("预览依赖");
+    await SelectSmokeValueAsync("#environment-component-select", "paddleocr");
+    await ClickManagedSmokeButtonAsync("继续准备依赖");
     await WaitForSmokeDomAsync(
       "!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
       "document.querySelector('.runtime-install-plan')?.textContent.includes('paddleocr-cpu') && " +

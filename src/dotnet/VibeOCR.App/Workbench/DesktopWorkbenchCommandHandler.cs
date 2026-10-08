@@ -496,6 +496,8 @@ public sealed class DesktopWorkbenchCommandHandler :
           environment => environment.RepairEmptyAsync(repair.EnvironmentId, cancellationToken), cancellationToken),
         FindCompatibleEnvironmentCommand findCompatible => await RunEnvironmentAsync(
           environment => environment.FindCompatibleAsync(findCompatible.Recipe, cancellationToken), cancellationToken),
+        PrepareEnvironmentCommand prepareEnvironment => await RunEnvironmentAsync(
+          environment => environment.PrepareAsync(prepareEnvironment.Recipe, cancellationToken), cancellationToken),
         PrepareRemoteHostCommand => PrepareRemoteHost(cancellationToken),
         SetThemeCommand setTheme => SetTheme(setTheme),
         SetStartupCommand startup => SetStartup(startup),
