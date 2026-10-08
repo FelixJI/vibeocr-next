@@ -34,6 +34,8 @@ from typing import TYPE_CHECKING, Any, TextIO
 from uuid import uuid4
 
 import httpx
+from packaging.markers import default_environment
+from packaging.requirements import InvalidRequirement, Requirement
 from vibeocr.runtime.environments.managed_install_progress import ManagedInstallObserver
 from vibeocr.runtime.environments.runtime_install_plan import (
     CAPABILITY,
@@ -65,6 +67,7 @@ from vibeocr.runtime.environments.runtime_maintenance import (
     RuntimeOperationStore,
     RuntimeSourceIdentityMismatch,
     StartupCancellation,
+    _replace_transient_windows_lock,
     declared_installed_closure,
     probe_runtime_components,
     profile_descriptor,
@@ -842,7 +845,11 @@ def _resolve_online_report(
     report_path = cache / "resolve" / f"{lock.stem}-report.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     inputs_path = report_path.with_suffix(".inputs.json")
-    inputs = {"lock": lock.read_text(encoding="utf-8"), "endpoint": endpoint}
+    inputs = {
+        "lock": lock.read_text(encoding="utf-8"),
+        "endpoint": endpoint,
+        "ignore_installed": True,
+    }
     try:
         if json.loads(inputs_path.read_text(encoding="utf-8")) == inputs:
             artifacts = _parse_resolve_report(
@@ -868,6 +875,7 @@ def _resolve_online_report(
             "pip",
             "install",
             "--dry-run",
+            "--ignore-installed",
             "--no-input",
             "--disable-pip-version-check",
             "--progress-bar",
@@ -931,6 +939,92 @@ def _prepare_online_artifacts(
     if isinstance(reporter, ManagedInstallObserver):
         reporter.set_phase("download", "核验缓存并下载缺失依赖")
     return _download_resolved_artifacts(artifacts, allowed, downloads, reporter)
+
+
+def _local_install_requirements(
+    lock: Path, downloads: Path, report: Path, python_version: str
+) -> Path:
+    """Bind the resolved target closure to the verified local artifacts.
+
+    The original lock remains authoritative: pip rechecks its allowed hashes.
+    Explicit local targets plus --no-deps prevent an index or @HTTPS pin from
+    downloading targets again. The selected index remains available only to
+    pip's isolated sdist build requirements, outside the target package counts.
+    """
+    target = default_environment()
+    target.update(
+        python_version=".".join(python_version.split(".")[:2]),
+        python_full_version=python_version,
+        os_name="nt",
+        sys_platform="win32",
+        platform_system="Windows",
+        platform_machine="AMD64",
+    )
+    requirements: dict[str, Requirement] = {}
+    for raw in lock.read_text(encoding="utf-8").splitlines():
+        declaration = raw.split(" --hash=", 1)[0].strip().removesuffix(chr(92)).rstrip()
+        if not declaration or declaration.startswith(("#", "--hash=")):
+            continue
+        try:
+            requirement = Requirement(declaration)
+        except InvalidRequirement:
+            raise RuntimeInstallError(
+                "local target closure has an invalid lock requirement"
+            ) from None
+        if requirement.marker and not requirement.marker.evaluate(target):
+            continue
+        name = _normalize_dist_name(requirement.name)
+        previous = requirements.get(name)
+        if previous is not None and (
+            previous.specifier != requirement.specifier
+            or previous.url != requirement.url
+        ):
+            raise RuntimeInstallError(
+                "local target closure has conflicting lock requirements"
+            )
+        requirements[name] = requirement
+    artifacts: dict[str, _ResolvedArtifact] = {}
+    for artifact in _parse_resolve_report(report, downloads):
+        name = _normalize_dist_name(artifact.name)
+        if name in artifacts and artifacts[name] != artifact:
+            raise RuntimeInstallError(
+                "local target closure has conflicting resolved artifacts"
+            )
+        artifacts[name] = artifact
+    if artifacts.keys() != requirements.keys():
+        raise RuntimeInstallError(
+            "resolved local target closure does not match the applicable lock"
+        )
+    allowed = _lock_allowed_hashes(lock)
+    lines = []
+    for name, artifact in artifacts.items():
+        hashes = allowed.get(name, set())
+        if artifact.sha256 is not None:
+            hashes = hashes & {artifact.sha256}
+        if not hashes:
+            raise RuntimeInstallError(
+                "local target artifact hash is not accepted by the lock"
+            )
+        local = downloads / artifact.filename
+        if not local.is_file():
+            raise RuntimeInstallError("verified local target artifact is missing")
+        extras = requirements[name].extras
+        project = name + ("[" + ",".join(sorted(extras)) + "]" if extras else "")
+        lines.append(
+            f"{project} @ {local.resolve().as_uri()} "
+            + " ".join(f"--hash=sha256:{digest}" for digest in sorted(hashes))
+        )
+    local_lock = report.with_name(f"{lock.stem}-local.txt")
+    temporary = local_lock.with_name(f".{local_lock.name}.{uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as stream:
+            stream.write("\n".join(lines) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        _replace_transient_windows_lock(temporary, local_lock)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return local_lock
 
 
 def _default_install_runner(
@@ -1050,13 +1144,8 @@ def _default_install_runner(
             raise RuntimeInstallError(
                 "online Runtime install requires one package_index source"
             )
-        # 在线路径两步走：pip dry-run 解析出 lock 的精确工件清单，自管下载
-        # 逐件校验哈希并推送字节级下载进度；最终安装把已验证工件作为
-        # --find-links 输入，pip 直接复用本地文件不重复下载。不加
-        # --only-binary：lock 的哈希行覆盖 index 上无 wheel 的 sdist 工件
-        # （如经 omegaconf 传递的 antlr4-python3-runtime==4.9.3 只发
-        # sdist），禁止 sdist 会直接解析失败。工件字节仍由 --require-hashes
-        # 锁定，与 build_runtime_pack 阶段 1 的下载语义一致。
+        # 目标闭包只消费自管下载的本地工件（包括直链 wheel 与 sdist）。
+        # 索引只供 sdist 的隔离构建临时依赖使用，不参与目标包重新选取。
         endpoint = package_indexes[0].endpoint
         download_root = _prepare_online_artifacts(
             python, lock, endpoint, cache, reporter, portable_env
@@ -1066,9 +1155,17 @@ def _default_install_runner(
             endpoint,
             "--find-links",
             str(download_root),
+            "--no-deps",
             "--require-hashes",
             "-r",
-            str(lock),
+            str(
+                _local_install_requirements(
+                    lock,
+                    download_root,
+                    cache / "resolve" / f"{lock.stem}-report.json",
+                    manifest.python.version,
+                )
+            ),
         ]
     _run_install_command(
         install_command,

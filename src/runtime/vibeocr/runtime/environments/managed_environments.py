@@ -32,6 +32,7 @@ from vibeocr.runtime.environments.runtime_installer import (
     _extract_python_archive,
     _extract_runtime_pack,
     _load_component_lock,
+    _local_install_requirements,
     _normalize_dist_name,
     _prepare_online_artifacts,
     _python_in,
@@ -2106,9 +2107,17 @@ class ManagedEnvironmentStore:
                 endpoint,
                 "--find-links",
                 str(downloaded),
+                "--no-deps",
                 "--require-hashes",
                 "-r",
-                str(scope.lock_path),
+                str(
+                    _local_install_requirements(
+                        scope.lock_path,
+                        downloaded,
+                        cache / "resolve" / f"{scope.lock_path.stem}-report.json",
+                        self.manifest.python.version,
+                    )
+                ),
             ]
         if observer is not None:
             observer.set_phase("install", "安装锁定依赖批次")

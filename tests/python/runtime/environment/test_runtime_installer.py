@@ -3571,6 +3571,11 @@ def _run_default_installer(
 
     monkeypatch.setattr(installer, "_run_install_command", fake_run)
     monkeypatch.setattr(installer, "_prepare_online_artifacts", fake_prepare)
+    monkeypatch.setattr(
+        installer,
+        "_local_install_requirements",
+        lambda lock, *args: lock.with_suffix(".local.txt"),
+    )
     monkeypatch.setattr(installer, "_extract_python_archive", fake_extract_python)
     installer._default_install_runner(
         partial_root,
@@ -3658,7 +3663,8 @@ class TestOfflineRuntimePack:
             tmp_path, monkeypatch, with_base_pack=False
         )
         assert "--no-index" not in commands[0]
-        # 在线路径的 find-links 指向自管下载的已验证工件目录。
+        # 所选索引只供隔离构建；目标闭包绑定为本地输入，禁止重选远端。
+        assert "--no-deps" in commands[0]
         assert commands[0][commands[0].index("--find-links") + 1] == str(
             tmp_path / "downloads"
         )
@@ -3668,7 +3674,7 @@ class TestOfflineRuntimePack:
         assert "--only-binary=:all:" not in commands[0]
         assert commands[0][-2:] == [
             "-r",
-            str(tmp_path / "release" / "requirements-win-x64-base.lock"),
+            str(tmp_path / "release" / "requirements-win-x64-base.local.txt"),
         ]
 
     def test_missing_bound_pack_fails_closed(
@@ -3736,6 +3742,11 @@ def test_online_install_uses_selected_source_and_isolates_parent_config(
     monkeypatch.setattr(installer_module, "_prepare_online_artifacts", fake_prepare)
     monkeypatch.setattr(
         installer_module,
+        "_local_install_requirements",
+        lambda lock, *args: lock.with_suffix(".local.txt"),
+    )
+    monkeypatch.setattr(
+        installer_module,
         "_extract_python_archive",
         fake_extract_python,
     )
@@ -3761,6 +3772,8 @@ def test_online_install_uses_selected_source_and_isolates_parent_config(
         expected_endpoint
     )
     assert "--require-hashes" in profile_command
+    assert "--no-deps" in profile_command
+    assert profile_command[-1].endswith(".local.txt")
     assert "PIP_EXTRA_INDEX_URL" not in child_env
     assert "PIP_FIND_LINKS" not in child_env
     assert "PIP_NO_INDEX" not in child_env
@@ -3792,6 +3805,11 @@ def test_cuda_gpu_only_selection_uses_exact_install_scope(
     monkeypatch.setattr(installer_module, "_prepare_online_artifacts", fake_prepare)
     monkeypatch.setattr(
         installer_module,
+        "_local_install_requirements",
+        lambda lock, *args: lock.with_suffix(".local.txt"),
+    )
+    monkeypatch.setattr(
+        installer_module,
         "_extract_python_archive",
         fake_extract_python,
     )
@@ -3807,7 +3825,7 @@ def test_cuda_gpu_only_selection_uses_exact_install_scope(
     runtime.ensure()
 
     assert captured[0][-1] == str(
-        tmp_path / "release" / "requirements-win-x64-cu126-gpu.lock"
+        tmp_path / "release" / "requirements-win-x64-cu126-gpu.local.txt"
     )
     marker = json.loads(
         (runtime.paths.runtime_root / ".installed.json").read_text(encoding="utf-8")
@@ -3943,7 +3961,9 @@ def test_extract_runtime_pack_requires_pack_requirements(tmp_path: Path) -> None
         )
 
 
-def test_full_profile_without_pack_falls_back_online(tmp_path: Path) -> None:
+def test_full_profile_without_pack_falls_back_online(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """full 闭包绑定的 pack 未下载到位时回退在线安装,不 fail closed。"""
     from vibeocr.runtime.environments import runtime_installer as installer
 
@@ -3976,6 +3996,11 @@ def test_full_profile_without_pack_falls_back_online(tmp_path: Path) -> None:
     installer._run_install_command = fake_run  # type: ignore[assignment]
     installer._extract_python_archive = fake_extract_python  # type: ignore[assignment]
     installer._prepare_online_artifacts = fake_prepare  # type: ignore[assignment]
+    monkeypatch.setattr(
+        installer,
+        "_local_install_requirements",
+        lambda lock, *args: lock.with_suffix(".local.txt"),
+    )
     try:
         installer._default_install_runner(
             partial_root,
@@ -3991,7 +4016,8 @@ def test_full_profile_without_pack_falls_back_online(tmp_path: Path) -> None:
     assert "--require-hashes" in commands[0]
     assert "--no-index" not in commands[0]
     assert "--find-links" in commands[0]
-    assert commands[0][-1].endswith("requirements-win-x64-cpu.lock")
+    assert commands[0][-1].endswith("requirements-win-x64-cpu.local.txt")
+    assert "--no-deps" in commands[0]
 
 
 def test_multi_part_pack_extracts_into_one_directory(tmp_path: Path) -> None:
@@ -4957,6 +4983,11 @@ def test_paddle_environment_installs_in_separate_interpreter_and_shared_cache(
     monkeypatch.setattr(installer, "_extract_python_archive", extract)
     monkeypatch.setattr(installer, "_run_install_command", run)
     monkeypatch.setattr(installer, "_prepare_online_artifacts", prepare)
+    monkeypatch.setattr(
+        installer,
+        "_local_install_requirements",
+        lambda lock, *args: lock.with_suffix(".local.txt"),
+    )
     installer._default_install_runner(root, manifest, scope, _pypi_source())
     checks = [c for c in calls if c[1:] == ["-m", "pip", "check"]]
     assert [c[0] for c in checks] == [
@@ -4964,7 +4995,9 @@ def test_paddle_environment_installs_in_separate_interpreter_and_shared_cache(
         str(root / "engines/paddle/python.exe"),
     ]
     assert caches[0] == caches[1]
-    paddle_install = next(c for c in calls if str(paddle_lock) in c)
+    paddle_install = next(
+        c for c in calls if str(paddle_lock.with_suffix(".local.txt")) in c
+    )
     assert paddle_install[0] == str(root / "engines/paddle/python.exe")
     assert str(scope.lock_path) not in paddle_install
 
