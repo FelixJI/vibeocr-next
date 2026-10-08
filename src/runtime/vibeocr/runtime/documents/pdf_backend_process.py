@@ -774,7 +774,7 @@ def rewrite_text_layer(sid: str, req: RewriteTextLayerRequest) -> MutateResponse
             for b in req.text_blocks
         ]
         with _fitz_op(s), s.fitz_lock, _invalidate_block_edits(s, [req.page]):
-            PdfService.rewrite_text_layer(
+            written, skipped = PdfService.rewrite_text_layer(
                 s.doc,
                 s.pdf_document,
                 req.page,
@@ -782,9 +782,19 @@ def rewrite_text_layer(sid: str, req: RewriteTextLayerRequest) -> MutateResponse
                 req.preproc_angle,
                 pdf_settings=_settings_from_dict(req.pdf_settings),
             )
+        if written == 0:
+            # 零写入＝整页未提交，明确 422 而非假成功；纯 OCR 部分写入仍沿既有语义成功。
+            raise HTTPException(
+                status_code=422,
+                detail=f"块写入未全部成功，已保留原内容（written=0, skipped={skipped}）",
+            )
         return MutateResponse(
-            diff=_diff_pages(s.pdf_document, [req.page], modified=True)
+            diff=_diff_pages(
+                s.pdf_document, [req.page], modified=s.pdf_document.is_modified
+            )
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"重写文字层失败: {e}") from e
 

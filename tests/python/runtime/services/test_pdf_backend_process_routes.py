@@ -596,6 +596,169 @@ class TestTextLayerRoutes:
         )
         assert resp.status_code == 500
 
+    def test_rewrite_text_layer_strict_reject_returns_422_preserves_original(
+        self, opened_scanned_session
+    ):
+        """含人工编辑块且无法容纳 → 服务层整页不提交（(0, n)）；路由必须
+        明确 422（沿 update_block_text 模式），doc 内容/模型块/dirty 全部
+        原状，不得返回无条件 modified=True 的假成功。"""
+        client, backend, sid, _ = opened_scanned_session
+        _add_layer(client, sid)
+        session = backend._get_registry().get(sid)
+        text_before = session.doc[0].get_text()
+        blocks_before = [b.text for b in session.pdf_document.pages[0].ocr_text_blocks]
+        modified_before = session.pdf_document.is_modified
+        huge = "放不下的超长编辑" * 200
+        resp = client.post(
+            f"/session/{sid}/rewrite_text_layer",
+            json={
+                "page": 0,
+                "preproc_angle": 0,
+                "text_blocks": [
+                    {
+                        "text": huge,
+                        "score": 0.9,
+                        "bbox": [60, 60, 160, 130],
+                        "page_idx": 0,
+                        "is_manually_edited": True,
+                    },
+                    {
+                        "text": "world",
+                        "score": 0.0,
+                        "score_unknown": True,
+                        "bbox": [50, 150, 300, 220],
+                        "page_idx": 0,
+                    },
+                ],
+            },
+        )
+        assert resp.status_code == 422, resp.text
+        assert session.doc[0].get_text() == text_before
+        assert [
+            b.text for b in session.pdf_document.pages[0].ocr_text_blocks
+        ] == blocks_before
+        assert session.pdf_document.is_modified == modified_before
+
+    def test_rewrite_text_layer_no_writable_block_returns_422_not_fake_success(
+        self, opened_scanned_session
+    ):
+        """空文本块被服务层反序列化过滤后 written=0 → 整页未提交：明确 422，
+        不改变空块被静默过滤的既有语义，也不得返回 modified=True 假成功。"""
+        client, backend, sid, _ = opened_scanned_session
+        _add_layer(client, sid)
+        session = backend._get_registry().get(sid)
+        text_before = session.doc[0].get_text()
+        blocks_before = [b.text for b in session.pdf_document.pages[0].ocr_text_blocks]
+        modified_before = session.pdf_document.is_modified
+        resp = client.post(
+            f"/session/{sid}/rewrite_text_layer",
+            json={
+                "page": 0,
+                "preproc_angle": 0,
+                "text_blocks": [
+                    {
+                        "text": "   ",
+                        "score": 0.9,
+                        "bbox": [50, 50, 200, 100],
+                        "page_idx": 0,
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 422, resp.text
+        assert session.doc[0].get_text() == text_before
+        assert [
+            b.text for b in session.pdf_document.pages[0].ocr_text_blocks
+        ] == blocks_before
+        assert session.pdf_document.is_modified == modified_before
+
+    def test_rewrite_text_layer_partial_non_manual_write_stays_success(
+        self, opened_scanned_session, monkeypatch
+    ):
+        """纯 OCR 块（无人工编辑）部分写入仍允许部分提交：written>0 即成功，
+        不因 skipped>0 被升级为全拒绝；实际 PDF 保留已写块、被跳块未写入。"""
+        client, backend, sid, _ = opened_scanned_session
+        _add_layer(client, sid)
+        real_write = backend.PdfService._write_blocks_to_page
+
+        def _drop_one(doc, page_index, text_blocks, preproc_angle, settings, **kw):
+            kept = text_blocks[:1]
+            written, skipped = real_write(
+                doc, page_index, kept, preproc_angle, settings, **kw
+            )
+            return written, skipped + len(text_blocks) - len(kept)
+
+        monkeypatch.setattr(backend.PdfService, "_write_blocks_to_page", _drop_one)
+        resp = client.post(
+            f"/session/{sid}/rewrite_text_layer",
+            json={
+                "page": 0,
+                "preproc_angle": 0,
+                "text_blocks": [
+                    {
+                        "text": "hello",
+                        "score": 0.9,
+                        "bbox": [50, 50, 700, 120],
+                        "page_idx": 0,
+                    },
+                    {
+                        "text": "world",
+                        "score": 0.0,
+                        "score_unknown": True,
+                        "bbox": [50, 150, 300, 220],
+                        "page_idx": 0,
+                    },
+                ],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["diff"]["modified_flag"] is True
+        session = backend._get_registry().get(sid)
+        assert session.pdf_document.is_modified is True
+        page_text = session.doc[0].get_text()
+        assert "hello" in page_text
+        assert "world" not in page_text
+
+    def test_rewrite_text_layer_success_reports_is_modified_truth_and_model(
+        self, opened_scanned_session
+    ):
+        """成功重写：diff.modified 取 pdf_document.is_modified 真值，模型块被
+        整页替换（含人工编辑标记），doc 内可提取新文本。"""
+        client, backend, sid, _ = opened_scanned_session
+        _add_layer(client, sid)
+        resp = client.post(
+            f"/session/{sid}/rewrite_text_layer",
+            json={
+                "page": 0,
+                "preproc_angle": 0,
+                "text_blocks": [
+                    {
+                        "text": "改后的完整长句文本TAIL77",
+                        "score": 0.9,
+                        "bbox": [50, 50, 700, 120],
+                        "page_idx": 0,
+                        "is_manually_edited": True,
+                    },
+                    {
+                        "text": "world",
+                        "score": 0.0,
+                        "score_unknown": True,
+                        "bbox": [50, 150, 300, 220],
+                        "page_idx": 0,
+                    },
+                ],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["diff"]["modified_flag"] is True
+        session = backend._get_registry().get(sid)
+        assert session.pdf_document.is_modified is True
+        texts = [b.text for b in session.pdf_document.pages[0].ocr_text_blocks]
+        assert texts == ["改后的完整长句文本TAIL77", "world"]
+        assert "改后的完整长句文本TAIL77" in session.doc[0].get_text()
+        assert "hello" not in session.doc[0].get_text()
+
     def test_update_block_text(self, opened_scanned_session):
         """成功编辑：doc 内文字真实替换，模型/dirty 同步，未改块保留。"""
         client, backend, sid, _ = opened_scanned_session

@@ -29,6 +29,7 @@ Goal #110 隔离候选专用 Paddle 五模式实机冒烟。
 pdf_text_layer 使用文字 OCR，点击添加文字层并验证 dirty/保存状态；
 默认不运行；可与 Modes 空数组组合单独执行。
 pdf_editing 使用一次普通文字 OCR，验证高清检查、取消/切页、中英文长句校正、保存重开和按钮可达。
+UI phase 通过后由 scripts/verify_pdf_editing_export.py 对导出 PDF 做最终 export verification（完整长句/尾标记/旧文/未改块/取消草稿/扫描像素/空白页），失败计入总退出码。
 pdf_operations 验证自动文字朝向与插页/重排组合，仅使用已准备的本地模型。
 新隔离环境应指定 Modes paddle_text，先通过普通 OCR 公共 UI 显式准备模型，
 再执行 pdf_operations；自动方向不会自行下载缺失模型。
@@ -363,6 +364,18 @@ try {
         $results += [pscustomobject]@{
             phase = $phaseName; mode = $inputMode; fixture = $fixtureName
             state = $health.state; stage = $health.stage; error = $health.error
+        }
+        # UI phase（health JSON）只证明应用内流程；导出 PDF 的最终校验
+        # （完整长句/尾标记/旧文不重复/未改块/取消草稿/扫描像素/空白页）
+        # 由仓库 helper 用锁定 pymupdf 执行，失败置总退出码非 0；报告写入
+        # 隔离根新文件，不覆盖任何原始 health 证据（Resume 已 passed 同样校验）。
+        if ($inputKind -eq 'pdf_editing' -and $health.state -eq 'passed') {
+            Push-Location $repoRoot
+            try {
+                uv run --frozen python (Join-Path $repoRoot 'scripts\verify_pdf_editing_export.py') --root $smokeRoot
+                if ($LASTEXITCODE -ne 0) { throw "pdf_editing export verification failed (exit $LASTEXITCODE)" }
+            } finally { Pop-Location }
+            Write-Host "VERIFIED paddle-input-pdf_editing export (pymupdf final verification)"
         }
         Write-Host "$($health.state) $phaseName stage=$($health.stage) $($health.error)"
         Set-PaddleOutcome $health.state

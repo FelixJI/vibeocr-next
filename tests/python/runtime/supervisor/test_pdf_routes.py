@@ -396,3 +396,77 @@ async def test_update_block_text_backend_rejection_maps_validation_error(
         fake_pdf_adapter.update_block_text = original  # type: ignore[method-assign]
     assert resp.status_code == 400
     assert resp.json()["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize(
+    "backend_status,expected_http,expected_code,expected_category,detail_key",
+    [
+        (400, 400, "VALIDATION_ERROR", "validation", "reason"),
+        (422, 400, "VALIDATION_ERROR", "validation", "reason"),
+        (404, 404, "RESOURCE_NOT_FOUND", "not_found", "reason"),
+        # 409 只有 session closing / stale expected text 内部来源，无通用 409
+        # registry 码：不伪造 RUNTIME_BUSY/JOB 码，保守 INTERNAL_ERROR。
+        (409, 500, "INTERNAL_ERROR", "internal", "reason"),
+        (423, 500, "INTERNAL_ERROR", "internal", "reason"),
+        (500, 500, "INTERNAL_ERROR", "internal", "error"),
+    ],
+)
+async def test_pdf_error_maps_backend_status_distinctly(
+    pdf_app: FastAPI,
+    supervisor_token: str,
+    fake_pdf_adapter: FakePdfAdapter,
+    backend_status: int,
+    expected_http: int,
+    expected_code: str,
+    expected_category: str,
+    detail_key: str,
+) -> None:
+    """后端 4xx/5xx 逐状态映射 v2 错误码：只有真 400/422 才是
+    VALIDATION_ERROR；404 会话/资源丢失必须 RESOURCE_NOT_FOUND（后端崩溃
+    重启后旧 session 不得被误报为可修正参数错误）；其余保守 INTERNAL_ERROR。
+    全部响应携带 v2 错误信封（schema_version/instance_id/code/message/Category）。"""
+    from vibeocr.runtime.documents.pdf_backend_client import PdfBackendError
+
+    message = f"后端错误 x ({backend_status})"
+    original = fake_pdf_adapter.get_model
+
+    def _reject(*args: object, **kwargs: object) -> object:
+        raise PdfBackendError(message, status=backend_status)
+
+    fake_pdf_adapter.get_model = _reject  # type: ignore[method-assign]
+    try:
+        async with _http(supervisor_token, pdf_app) as http:
+            resp = await http.post("/v2/pdf/sessions/sid-1/model")
+    finally:
+        fake_pdf_adapter.get_model = original  # type: ignore[method-assign]
+    assert resp.status_code == expected_http
+    body = resp.json()
+    assert body["schema_version"] == 2
+    assert isinstance(body["instance_id"], str) and body["instance_id"]
+    assert body["code"] == expected_code
+    assert body["category"] == expected_category
+    assert isinstance(body["message"], str) and body["message"]
+    assert body["detail"][detail_key] == message
+
+
+async def test_pdf_error_backend_error_without_status_keeps_internal_error(
+    pdf_app: FastAPI,
+    supervisor_token: str,
+    fake_pdf_adapter: FakePdfAdapter,
+) -> None:
+    """无 status 的 PdfBackendError（子进程启动/传输失败）保持 INTERNAL_ERROR 兜底。"""
+    from vibeocr.runtime.documents.pdf_backend_client import PdfBackendError
+
+    original = fake_pdf_adapter.close_session
+
+    def _reject(*args: object, **kwargs: object) -> object:
+        raise PdfBackendError("transport failed")
+
+    fake_pdf_adapter.close_session = _reject  # type: ignore[method-assign]
+    try:
+        async with _http(supervisor_token, pdf_app) as http:
+            resp = await http.post("/v2/pdf/sessions/sid-1/close")
+    finally:
+        fake_pdf_adapter.close_session = original  # type: ignore[method-assign]
+    assert resp.status_code == 500
+    assert resp.json()["code"] == "INTERNAL_ERROR"

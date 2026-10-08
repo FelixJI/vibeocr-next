@@ -1107,10 +1107,15 @@ def create_app(
             )
         backend_status = getattr(exc, "status", None)
         if isinstance(backend_status, int) and 400 <= backend_status < 500:
-            # 后端 4xx：请求被明确拒绝、未应用 → 可判定的 ValidationError。
-            return _error_response(
-                ErrorCode.VALIDATION_ERROR, instance_id, detail={"reason": str(exc)}
-            )
+            # 后端 4xx 逐状态归类；未覆盖状态（如 409 session closing）无通用
+            # registry 码，保守 INTERNAL_ERROR，不得误报为可修正的参数错误。
+            if backend_status == 404:
+                code = ErrorCode.RESOURCE_NOT_FOUND
+            elif backend_status in (400, 422):
+                code = ErrorCode.VALIDATION_ERROR
+            else:
+                code = ErrorCode.INTERNAL_ERROR
+            return _error_response(code, instance_id, detail={"reason": str(exc)})
         return _error_response(
             ErrorCode.INTERNAL_ERROR, instance_id, detail={"error": str(exc)}
         )
