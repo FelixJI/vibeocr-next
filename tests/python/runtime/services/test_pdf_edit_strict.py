@@ -76,6 +76,7 @@ class TestEditedBlockFit:
         assert written == 2 and skipped == 0
         page_text = doc[0].get_text()
         assert end_token in page_text
+        assert "".join(long_text.split()) in "".join(page_text.split())
         assert "keep" in page_text
 
         model.file_path = str(path)
@@ -83,6 +84,7 @@ class TestEditedBlockFit:
         with fitz.open(str(tmp_path / "saved.pdf")) as reopened:
             saved_text = reopened[0].get_text()
         assert end_token in saved_text
+        assert "".join(long_text.split()) in "".join(saved_text.split())
         assert "原始块零" not in saved_text
         assert "keep" in saved_text
 
@@ -130,3 +132,41 @@ class TestEditedBlockFit:
         assert model.is_modified is True
         # doc 中仍是编辑提交前的内容（保存重写在 candidate 阶段被拒绝）
         assert "原始块零" in doc[0].get_text()
+
+
+@pytest.mark.parametrize(
+    "bbox",
+    [(100, 950, 900, 980), (100, 950, 110, 980)],
+    ids=["horizontal-primary", "narrow-textbox-fallback"],
+)
+def test_multiline_strict_rewrite_rejects_without_changing_page(tmp_path, bbox):
+    doc = _scanned_doc(tmp_path / "multiline.pdf")
+    try:
+        model = _layered_model(doc)
+        model.is_modified = False
+        blocks_before = model.pages[0].ocr_text_blocks
+        text_before = doc[0].get_text()
+        edited = TextBlock(
+            text="LINE1\nLINE2\nLINE3\nLINE4\nTAIL201",
+            score=0.9,
+            bbox=bbox,
+            is_manually_edited=True,
+        )
+        written, skipped = PdfService.rewrite_text_layer(
+            doc,
+            model,
+            0,
+            [edited, blocks_before[1]],
+            0,
+            require_all=True,
+        )
+        assert written == 0 and skipped > 0
+        assert model.is_modified is False
+        assert model.pages[0].ocr_text_blocks is blocks_before
+        assert doc[0].get_text() == text_before
+        saved = tmp_path / "unchanged.pdf"
+        doc.save(saved, garbage=3)
+        with fitz.open(saved) as reopened:
+            assert reopened[0].get_text() == text_before
+    finally:
+        doc.close()

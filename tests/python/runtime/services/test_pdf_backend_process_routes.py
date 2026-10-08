@@ -1391,7 +1391,7 @@ class TestRemainingBranches:
         """长中英编辑：收缩写入成功，保存重开后末尾 token 完整、旧文字不重复。"""
         import fitz as _fitz
 
-        client, _, sid, _ = opened_scanned_session
+        client, backend, sid, _ = opened_scanned_session
         _add_layer(
             client,
             sid,
@@ -1411,12 +1411,15 @@ class TestRemainingBranches:
             json={"page": 0, "block_index": 0, "new_text": long_text},
         )
         assert resp.status_code == 200, resp.text
+        memory_text = backend._get_registry().get(sid).doc[0].get_text()
+        assert "".join(long_text.split()) in "".join(memory_text.split())
         saved = tmp_path / "edited.pdf"
         resp = client.post(f"/session/{sid}/save", json={"path": str(saved)})
         assert resp.status_code == 200, resp.text
         with _fitz.open(str(saved)) as reopened:
             text = reopened[0].get_text()
         assert end_token in text
+        assert "".join(long_text.split()) in "".join(text.split())
         assert "hello" not in text
         assert "world" in text
 
@@ -1433,3 +1436,79 @@ class TestRemainingBranches:
         assert resp.status_code == 422
         assert session.doc[0].get_text() == text_before
         assert session.pdf_document.pages[0].ocr_text_blocks[0].text == "hello"
+
+
+class TestEditedBlockRectangle:
+    @pytest.mark.parametrize(
+        ("bbox", "new_text", "accepted"),
+        [
+            (
+                [100, 700, 900, 950],
+                "第一行中文\nLINE2 English\nLINE3\nLINE4\nTAIL201",
+                True,
+            ),
+            ([100, 950, 900, 980], "LINE1\nLINE2\nLINE3\nLINE4\nTAIL201", False),
+            ([100, 990, 900, 993], "TAIL201", False),
+        ],
+        ids=["multiline-fits", "bottom-multiline-rejected", "minimum-font-too-thick"],
+    )
+    def test_edit_rectangle_saved_and_reopened(
+        self, opened_scanned_session, tmp_path, bbox, new_text, accepted
+    ):
+        client, backend, sid, _ = opened_scanned_session
+        _add_layer(
+            client,
+            sid,
+            blocks=[
+                {"text": "ORIGINAL201", "score": 0.9, "bbox": bbox},
+                {"text": "KEEP201", "score": 0.9, "bbox": [100, 100, 700, 200]},
+            ],
+        )
+        session = backend._get_registry().get(sid)
+        model = session.pdf_document
+        model.is_modified = False
+        blocks_before = model.pages[0].ocr_text_blocks
+        text_before = session.doc[0].get_text()
+        response = client.post(
+            f"/session/{sid}/update_block_text",
+            json={"page": 0, "block_index": 0, "new_text": new_text},
+        )
+        assert response.status_code == (200 if accepted else 422), response.text
+        if accepted:
+            assert response.json()["extra"]["changed"] is True
+            assert model.is_modified is True
+            assert model.pages[0].ocr_text_blocks[0].text == new_text
+            memory_text = session.doc[0].get_text()
+            for line in new_text.splitlines():
+                assert line in memory_text
+            assert "ORIGINAL201" not in memory_text
+            bounds = fitz.Rect(
+                bbox[0] * 612 / 1000,
+                bbox[1] * 792 / 1000,
+                bbox[2] * 612 / 1000,
+                bbox[3] * 792 / 1000,
+            )
+            for word in session.doc[0].get_text("words"):
+                if word[4] != "KEEP201":
+                    assert bounds.contains(fitz.Rect(word[:4]))
+        else:
+            assert model.is_modified is False
+            assert model.pages[0].ocr_text_blocks is blocks_before
+            assert model.pages[0].ocr_text_blocks[0].text == "ORIGINAL201"
+            assert session.doc[0].get_text() == text_before
+        saved = tmp_path / "rectangle.pdf"
+        response = client.post(
+            f"/session/{sid}/save",
+            json={"path": str(saved), "rewrite_text_layers": False},
+        )
+        assert response.status_code == 200, response.text
+        with fitz.open(saved) as reopened:
+            saved_text = reopened[0].get_text()
+        assert "KEEP201" in saved_text
+        if accepted:
+            for line in new_text.splitlines():
+                assert line in saved_text
+            assert "ORIGINAL201" not in saved_text
+        else:
+            assert saved_text == text_before
+            assert "TAIL201" not in saved_text

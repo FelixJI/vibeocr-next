@@ -1244,6 +1244,77 @@ class PdfService:
             # 窄/高块（width < height，竖排文字误检）：同样走 insert_textbox 自动换行。
             text = block.text
             render_mode = 0 if settings.text_layer_visible else 3
+            if getattr(block, "is_manually_edited", False):
+                # 人工编辑必须整段装入原框与可见页面的交集。单点写入只约束
+                # 首行基线，不能保证换行或最小字号的字形厚度仍在框内。
+                rect = rect & _to_page_space(page_rect)
+                length, thickness = (
+                    (rect.height, rect.width)
+                    if text_rotate in (90, 270)
+                    else (rect.width, rect.height)
+                )
+                lines = text.splitlines() or [text]
+                unit_width = max(
+                    _natural_width(line.expandtabs(), 1.0) for line in lines
+                )
+                fontsize = max(
+                    min(
+                        thickness / (len(lines) * _LINE_LEADING),
+                        # 留出浮点边界余量，避免恰好等宽的末词被另起一行。
+                        max(length - 0.01, 0.0) / max(unit_width, 0.5),
+                    )
+                    * settings.font_size_ratio
+                    / 0.8,
+                    settings.min_font_size,
+                )
+                inserted = False
+                if not rect.is_empty:
+                    for retry in range(max(1, settings.font_size_retry_count) + 1):
+                        try:
+                            rc = page.insert_textbox(
+                                rect,
+                                text,
+                                fontsize=fontsize,
+                                fontname=fontname,
+                                fontfile=font_path,
+                                color=(0, 0, 0),
+                                render_mode=render_mode,
+                                rotate=text_rotate,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "page %d edited block insert_textbox failed: %s",
+                                page_index,
+                                exc,
+                            )
+                            break
+                        if rc >= 0:
+                            inserted = True
+                            break
+                        if fontsize <= settings.min_font_size:
+                            break
+                        # 重试预算耗尽前仍试一次最小字号，但绝不低于它。
+                        fontsize = (
+                            settings.min_font_size
+                            if retry >= settings.font_size_retry_count - 1
+                            else max(
+                                settings.min_font_size,
+                                fontsize * settings.font_size_shrink_factor,
+                            )
+                        )
+                if inserted:
+                    written += 1
+                else:
+                    skipped += 1
+                    logger.warning(
+                        "page %d edited block skipped (text does not fit rect): "
+                        "rect=%s text_len=%d",
+                        page_index,
+                        rect,
+                        len(text),
+                    )
+                continue
+
             # insert_text 主路径覆盖 page_rotation ∈ {0, 90}（扫描件最常见的两种：
             # 竖向页与横向页）。180/270 几何（上下/左右翻转）基线放置复杂，仍用
             # insert_textbox 矩形约束排版。竖排文本行（多字符）走 insert_textbox
@@ -1324,45 +1395,6 @@ class PdfService:
                 scale_x = length / natural_w
                 scale_x = max(0.5, min(3.0, scale_x))
 
-                # 人工编辑块：阅读方向墨迹不得超出原 bbox（bbox 归一化在页内，
-                # 从而不越过页面）。先按既有宽度策略收缩字号（下限
-                # min_font_size），仍放不下则跳过，不用 morph 下限硬塞。
-                if getattr(block, "is_manually_edited", False):
-                    max_length = length * 1.02 + 2.0
-                    if natural_w > max_length:
-                        unit_w = max(_natural_width(text, 1.0), 0.5)
-                        fontsize = max(
-                            min(length / unit_w, fontsize),
-                            settings.min_font_size,
-                        )
-                        ascent = ascent_ratio * fontsize
-                        baseline_disp_x, baseline_disp_y = {
-                            0: (disp_rect.x0, disp_rect.y0 + ascent),
-                            90: (disp_rect.x1 - ascent, disp_rect.y0),
-                            180: (disp_rect.x1, disp_rect.y1 - ascent),
-                            270: (disp_rect.x0 + ascent, disp_rect.y1),
-                        }[preproc_angle]
-                        dpt = _to_page_space(
-                            fitz.Rect(
-                                baseline_disp_x,
-                                baseline_disp_y,
-                                baseline_disp_x,
-                                baseline_disp_y,
-                            )
-                        )
-                        baseline = fitz.Point(dpt.x0, dpt.y0)
-                        natural_w = max(_natural_width(text, fontsize), fontsize * 0.5)
-                        scale_x = max(0.5, min(3.0, length / natural_w))
-                    if natural_w > max_length:
-                        skipped += 1
-                        logger.warning(
-                            "page %d edited block skipped (text too long for "
-                            "bbox): text_len=%d",
-                            page_index,
-                            len(text),
-                        )
-                        continue
-
                 try:
                     morph = None
                     if abs(scale_x - 1.0) > 0.05:
@@ -1439,20 +1471,6 @@ class PdfService:
                     min(last_fontsize, settings.min_font_size * 1.5),
                     settings.min_font_size,
                 )
-                # 人工编辑块：兜底单点写入同样不得溢出矩形阅读方向。
-                if getattr(block, "is_manually_edited", False):
-                    avail = (
-                        rect.height if text_rotate in (90, 270) else rect.width
-                    ) * 1.02 + 2.0
-                    if _natural_width(text, fallback_fs) > avail:
-                        skipped += 1
-                        logger.warning(
-                            "page %d edited block skipped (fallback overflow): "
-                            "text_len=%d",
-                            page_index,
-                            len(text),
-                        )
-                        continue
                 try:
                     baseline = fitz.Point(rect.x0, rect.y1 - fallback_fs * 0.2)
                     page.insert_text(
