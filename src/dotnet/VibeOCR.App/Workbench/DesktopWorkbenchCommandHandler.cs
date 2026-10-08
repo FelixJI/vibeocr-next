@@ -4757,6 +4757,9 @@ public sealed class DesktopWorkbenchCommandHandler :
     EnvironmentUnknownDefaultSourceIds: viewModel.Environments?.Snapshot?.UnknownDefaultSourceIds,
     EnvironmentPackageSourceIds: viewModel.Environments?.Snapshot?.PackageSourceIds,
     EnvironmentCanCancelInstall: viewModel.Environments?.CanCancelInstall ?? false,
+    EnvironmentInstallProgress: viewModel.Environments?.InstallProgress,
+    EnvironmentInstallLog: viewModel.Environments?.InstallLog,
+    EnvironmentSupportsInstallProgress: viewModel.Environments?.SupportsInstallProgress ?? false,
     EnvironmentRecipes: viewModel.Environments?.Snapshot?.Recipes?.Select(recipe =>
       new SettingsEnvironmentRecipeState(
         recipe.Id, recipe.DisplayName, recipe.ConfiguredRecognitionTypes,

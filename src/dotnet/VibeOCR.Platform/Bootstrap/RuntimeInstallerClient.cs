@@ -1572,7 +1572,7 @@ public sealed class RuntimeInstallerCommandRunner : IRuntimeInstallerCommandRunn
             standardOutputLine,
             streamsLifetime.Token,
             environmentCancellation || maintenanceCancellation ? receipt : null);
-        Task<string> stderr = process.StandardError.ReadToEndAsync(streamsLifetime.Token);
+        Task<string> stderr = ReadBoundedErrorAsync(process.StandardError, streamsLifetime.Token);
         Task exited = process.WaitForExitAsync();
         try
         {
@@ -1722,7 +1722,9 @@ public sealed class RuntimeInstallerCommandRunner : IRuntimeInstallerCommandRunn
         CancellationToken cancellationToken,
         TaskCompletionSource<bool>? cancellationReceipt = null)
     {
-        while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+        bool hasFinal = false;
+        bool incompleteEnvelope = false;
+        await foreach (string line in ReadBoundedLinesAsync(reader, cancellationToken).ConfigureAwait(false))
         {
             if (cancellationReceipt is not null)
             {
@@ -1753,9 +1755,85 @@ public sealed class RuntimeInstallerCommandRunner : IRuntimeInstallerCommandRunn
                 {
                 }
             }
-            buffer.AppendLine(line);
-            standardOutputLine?.Invoke(line);
+            if (line == "[output truncated: long line]")
+            {
+                buffer.Clear();
+                hasFinal = false;
+                incompleteEnvelope = true;
+            }
+            // Events are consumed live; only final envelopes belong in the result.
+            bool isEvent = false;
+            bool isFinal = false;
+            try
+            {
+                using JsonDocument document = JsonDocument.Parse(line);
+                isEvent = document.RootElement.ValueKind == JsonValueKind.Object &&
+                                document.RootElement.TryGetProperty("event_version", out _);
+                isFinal = document.RootElement.ValueKind == JsonValueKind.Object &&
+                                document.RootElement.TryGetProperty("protocol_version", out _);
+            }
+            catch (JsonException) { }
+            if (!isEvent)
+            {
+                if (isFinal)
+                {
+                    buffer.Clear();
+                    buffer.AppendLine(line);
+                    hasFinal = true;
+                    incompleteEnvelope = false;
+                }
+                else if (!hasFinal)
+                {
+                    if (buffer.Length > 16000) buffer.Clear();
+                    buffer.AppendLine(line.Length > 4000 ? "[output truncated: long line]" : line);
+                }
+            }
+            try { standardOutputLine?.Invoke(line); }
+            catch (Exception) { /* Observers cannot prevent pipe draining or cancellation. */ }
         }
+        if (incompleteEnvelope)
+            throw new RuntimeInstallerException("Runtime Host 输出超出单行上限，最终响应未获完整确认。");
+    }
+
+    private static async IAsyncEnumerable<string> ReadBoundedLinesAsync(
+                    StreamReader reader, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken token)
+    {
+        const int maxLine = 1_048_576;
+        char[] chunk = new char[4096];
+        var line = new StringBuilder();
+        bool dropping = false;
+        int count;
+        while ((count = await reader.ReadAsync(chunk.AsMemory(), token).ConfigureAwait(false)) != 0)
+        {
+            for (int index = 0; index < count; index++)
+            {
+                char value = chunk[index];
+                if (value == '\n')
+                {
+                    yield return dropping ? "[output truncated: long line]" : line.ToString().TrimEnd('\r');
+                    line.Clear();
+                    dropping = false;
+                }
+                else if (!dropping)
+                {
+                    if (line.Length == maxLine) { dropping = true; line.Clear(); }
+                    else line.Append(value);
+                }
+            }
+        }
+        if (dropping) yield return "[output truncated: long line]";
+        else if (line.Length > 0) yield return line.ToString();
+    }
+
+    private static async Task<string> ReadBoundedErrorAsync(StreamReader reader, CancellationToken token)
+    {
+        var tail = new StringBuilder();
+        await foreach (string line in ReadBoundedLinesAsync(reader, token).ConfigureAwait(false))
+        {
+            tail.AppendLine(line.Length > 4000 ? "[stderr truncated: long line]" : line);
+            if (tail.Length > 16000) tail.Remove(0, tail.Length - 16000);
+        }
+        return tail.ToString();
     }
 
     private static void VerifyBoundExecutable(ProcessStartInfo startInfo)

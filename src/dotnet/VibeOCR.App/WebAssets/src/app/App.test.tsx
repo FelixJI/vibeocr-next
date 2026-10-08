@@ -2195,6 +2195,117 @@ describe("AppShell", () => {
     ).toBeVisible();
     unmount();
   });
+  it("shows runtime package counts and bounded text logs across remount without installing", async () => {
+    window.location.hash = "#/settings";
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState = {
+      connected: true,
+      revision: 1,
+      route: "settings",
+      theme: "light",
+      runtimeLabel: "已连接",
+      capabilities: ["runtime.environments"],
+      features: {
+        settings: {
+          environments: [],
+          environmentSupportsInstallProgress: true,
+          environmentInstallProgress: {
+            attempt_id: "attempt",
+            seq: 11,
+            environment_id: "env",
+            timestamp: "2026-10-08T00:00:00Z",
+            phase: "install",
+            state: "running",
+            current: "真实安装批次",
+            dependency_total_known: true,
+            download_files_total: 1,
+            download_files_completed: 1,
+            dependencies: [
+              {
+                name: "a",
+                version: "1",
+                download_state: "cached",
+                install_state: "installed",
+              },
+              {
+                name: "b",
+                version: "2",
+                download_state: "downloaded",
+                install_state: "pending",
+              },
+            ],
+          },
+          environmentInstallLog: [
+            "[较早输出已截断]",
+            "<script>never execute</script>",
+          ],
+        },
+      },
+    } satisfies AppViewState;
+    const first = render(<App actions={actions} viewState={viewState} />);
+    expect(
+      screen.getByRole("region", { name: "依赖安装进度" }),
+    ).toHaveTextContent(
+      "共 2 项依赖｜已复用 1 项｜新增下载文件 1/1 个｜批次已安装 1/2 项",
+    );
+    await userEvent.click(
+      screen.getByText("实时命令输出（只读，最多保留 200 行，超限截断）"),
+    );
+    expect(screen.getByText(/never execute/)).toHaveTextContent(
+      "<script>never execute</script>",
+    );
+    first.unmount();
+    const second = render(
+      <App actions={actions} viewState={{ ...viewState, revision: 2 }} />,
+    );
+    expect(screen.getByText(/当前：真实安装批次/)).toBeVisible();
+    expect(actions.run).not.toHaveBeenCalled();
+    const terminal = {
+      ...viewState,
+      revision: 3,
+      features: {
+        settings: {
+          ...viewState.features.settings,
+          environmentInstallProgress: {
+            ...viewState.features.settings.environmentInstallProgress,
+            phase: "complete",
+            state: "succeeded",
+            seq: 12,
+            dependencies: [
+              {
+                name: "a",
+                version: "1",
+                download_state: "cached",
+                install_state: "installed",
+              },
+              {
+                name: "b",
+                version: "2",
+                download_state: "downloaded",
+                install_state: "installed",
+              },
+            ],
+          },
+        },
+      },
+    };
+    second.rerender(<App actions={actions} viewState={terminal} />);
+    const panel = screen.getByRole("region", { name: "依赖安装进度" });
+    expect(panel).toHaveAttribute("data-install-attempt", "attempt");
+    expect(panel).toHaveAttribute("data-install-seq", "12");
+    expect(panel).toHaveAttribute("data-install-state", "succeeded");
+    expect(panel).toHaveAttribute("data-install-phase", "complete");
+    expect(panel).toHaveAttribute("data-install-installed", "2");
+    expect(panel).toHaveAttribute("data-install-total", "2");
+    expect(panel).toHaveTextContent("批次已安装 2/2 项");
+    expect(actions.run).not.toHaveBeenCalled();
+    second.unmount();
+  });
+
   it("shows a fresh empty environment without starting OCR and routes explicit installation", async () => {
     window.location.hash = "#/settings";
     const user = userEvent.setup();

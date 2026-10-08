@@ -2,7 +2,10 @@
 param(
     [Parameter(Mandatory = $true)][string]$ProductRoot,
     [Parameter(Mandatory = $true)][string]$WorkRoot,
-    [int]$TimeoutMinutes = 120
+    [int]$TimeoutMinutes = 120,
+    [switch]$ProgressOnly,
+    [ValidateSet('rapidocr-cpu', 'paddleocr-cpu')][string]$ProgressRecipe = 'rapidocr-cpu',
+    [string]$InstallerCacheRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -40,6 +43,18 @@ $previousInstance = $env:VIBEOCR_SELF_TEST_INSTANCE
 $previousHealth = $env:VIBEOCR_MANAGED_ENVIRONMENT_E2E_HEALTH
 $previousPhase = $env:VIBEOCR_MANAGED_ENVIRONMENT_E2E_PHASE
 $previousWebViewData = $env:WEBVIEW2_USER_DATA_FOLDER
+$previousProgressRecipe = $env:VIBEOCR_MANAGED_PROGRESS_RECIPE
+$env:VIBEOCR_MANAGED_PROGRESS_RECIPE = $ProgressRecipe
+if ($InstallerCacheRoot) {
+    $cache = (Resolve-Path -LiteralPath $InstallerCacheRoot).Path
+    if (-not (Test-Path -LiteralPath (Join-Path $cache 'downloads/artifacts') -PathType Container)) {
+        throw 'InstallerCacheRoot must be an explicitly selected synthetic installer cache'
+    }
+    # Runtime store is rooted in the portable mutable state directory.
+    $targetCache = Join-Path $candidate 'state/state/installer-cache'
+    New-Item -ItemType Directory -Path $targetCache -Force | Out-Null
+    Get-ChildItem -LiteralPath $cache -Force | Copy-Item -Destination $targetCache -Recurse -Force
+}
 
 function Invoke-ManagedPhase([string]$phase) {
     $healthPath = Join-Path $smokeRoot "managed-environment-$phase.json"
@@ -93,6 +108,15 @@ function Test-ManagedPython([string]$python, [bool]$expectEmpty) {
 }
 
 try {
+    if ($ProgressOnly) {
+        $progress = Invoke-ManagedPhase 'progress'
+        if ($progress.install_attempts -ne 1 -or $progress.evidence.installed.status -ne 'installed') {
+            throw 'Progress smoke did not complete exactly one real install'
+        }
+        Test-ManagedPython $progress.evidence.installed.python $false | Out-Null
+        Write-Host "Managed install progress passed. Isolated evidence retained at: $smokeRoot"
+        return
+    }
     $created = Invoke-ManagedPhase 'create'
     if ($created.install_attempts -ne 0 -or $created.evidence.active_id -or
         $created.evidence.environments.Count -ne 2) {
@@ -161,4 +185,5 @@ try {
     $env:VIBEOCR_MANAGED_ENVIRONMENT_E2E_HEALTH = $previousHealth
     $env:VIBEOCR_MANAGED_ENVIRONMENT_E2E_PHASE = $previousPhase
     $env:WEBVIEW2_USER_DATA_FOLDER = $previousWebViewData
+    $env:VIBEOCR_MANAGED_PROGRESS_RECIPE = $previousProgressRecipe
 }

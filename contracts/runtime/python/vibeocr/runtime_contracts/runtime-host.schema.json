@@ -14,7 +14,8 @@
     { "$ref": "#/$defs/RuntimeHostSuccess" },
     { "$ref": "#/$defs/RuntimeHostFailure" },
     { "$ref": "#/$defs/RuntimeInstallPlanResponse" },
-    { "$ref": "#/$defs/ManagedEnvironmentResponse" }
+    { "$ref": "#/$defs/ManagedEnvironmentResponse" },
+    { "$ref": "#/$defs/ManagedEnvironmentInstallEvent" }
   ],
   "$defs": {
     "ManagedEnvironmentRequest": {
@@ -74,6 +75,11 @@
           "type": ["string", "null"], "minLength": 1,
           "description": "set_sources only: independent MinerU preference; null clears this engine override, absent preserves it."
         },
+        "accepted_event_streams": {
+          "type": "array", "uniqueItems": true,
+          "items": { "const": "environment.install_progress.v1" },
+          "description": "Only install/initialize_default, after list advertises environment.install_progress.v1."
+        },
         "plan_id": { "type": "string", "minLength": 1 },
         "prepared": { "type": "object" },
         "started_health": {
@@ -96,6 +102,188 @@
         "response_kind": { "const": "environment" },
         "action": { "type": "string" },
         "result": { "type": "object" }
+      }
+    },
+    "ManagedEnvironmentInstallEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_version",
+        "event_kind",
+        "attempt_id",
+        "plan_id",
+        "environment_id",
+        "environment_revision",
+        "seq",
+        "timestamp",
+        "phase",
+        "state",
+        "current",
+        "dependencies",
+        "dependency_total_known",
+        "download_files_total",
+        "download_files_completed",
+        "bytes_current",
+        "bytes_total",
+        "heartbeat"
+      ],
+      "properties": {
+        "event_version": {
+          "const": 1
+        },
+        "event_kind": {
+          "const": "environment_install"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "plan_id": {
+          "type": "string"
+        },
+        "environment_id": {
+          "type": "string"
+        },
+        "environment_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "seq": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "prepare",
+            "resolve",
+            "unpack",
+            "download",
+            "install",
+            "runtime_wheel",
+            "verify",
+            "complete"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "running",
+            "succeeded",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "current": {
+          "type": "string"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ManagedInstallDependency"
+          }
+        },
+        "dependency_total_known": {
+          "type": "boolean"
+        },
+        "download_files_total": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "download_files_completed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytes_current": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "bytes_total": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "minimum": 0
+        },
+        "heartbeat": {
+          "type": "boolean"
+        },
+        "log": {
+          "$ref": "#/$defs/ManagedInstallLog"
+        }
+      }
+    },
+    "ManagedInstallDependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "download_state",
+        "install_state"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "download_state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "bundled",
+            "cached",
+            "downloading",
+            "downloaded"
+          ]
+        },
+        "install_state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "installed"
+          ]
+        }
+      }
+    },
+    "ManagedInstallLog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stream",
+        "text",
+        "truncated"
+      ],
+      "properties": {
+        "stream": {
+          "type": "string",
+          "enum": [
+            "stdout",
+            "stderr"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "truncated": {
+          "type": "boolean"
+        }
       }
     },
     "Accelerator": {

@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using VibeOCR.App.Workbench;
 using VibeOCR.App.Features.Recognition;
 using VibeOCR.Platform.Bootstrap;
@@ -152,6 +153,7 @@ public static class WorkbenchBridgeCodec
         features,
       },
     }, SerializerOptions);
+    json = BoundInstallLogToMessage(json);
     EnsureMessageSize(json);
     return json;
   }
@@ -206,6 +208,7 @@ public static class WorkbenchBridgeCodec
         state = statePayload,
       },
     }, SerializerOptions);
+    json = BoundInstallLogToMessage(json);
     EnsureMessageSize(json);
     return json;
   }
@@ -1373,6 +1376,9 @@ public static class WorkbenchBridgeCodec
       environmentUnknownDefaultSourceIds = settings.EnvironmentUnknownDefaultSourceIds ?? [],
       environmentPackageSourceIds = settings.EnvironmentPackageSourceIds ?? [],
       settings.EnvironmentCanCancelInstall,
+      settings.EnvironmentInstallProgress,
+      settings.EnvironmentInstallLog,
+      settings.EnvironmentSupportsInstallProgress,
       environmentRecipes = settings.EnvironmentRecipes ?? [],
       environmentHardware = settings.EnvironmentHardware is null ? null : new
       {
@@ -1467,6 +1473,53 @@ public static class WorkbenchBridgeCodec
     _ => throw new WorkbenchBridgeProtocolException(
       "Workbench state type is not supported."),
   };
+
+  private static string BoundInstallLogToMessage(string json)
+  {
+    if (Encoding.UTF8.GetByteCount(json) <= MaxMessageBytes) return json;
+    JsonNode root = JsonNode.Parse(json)!;
+    JsonNode? payload = root["payload"];
+    JsonNode? settings = payload?["state"] ?? payload?["features"]?["settings"];
+    if (settings?["environmentInstallLog"] is not JsonArray logs || logs.Count == 0) return json;
+    string[] entries = logs.Select(item => item!.GetValue<string>()).ToArray();
+    // The event's log is already in the host log list; preserve all authority
+    // fields and trim only this optional, newly added display material.
+    if (settings["environmentInstallProgress"] is { } progress) progress["log"] = null;
+    logs.Clear();
+    logs.Add("[较早输出已截断；显示内容受桥接容量限制]");
+    int available = MaxMessageBytes - Encoding.UTF8.GetByteCount(root.ToJsonString(SerializerOptions));
+    if (available < 0) return root.ToJsonString(SerializerOptions); // Authority alone still fails closed.
+    var tail = new List<string>();
+    for (int index = entries.Length - 1; index >= 0; index--)
+    {
+      int bytes = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(entries[index], SerializerOptions)) + 1;
+      if (bytes <= available)
+      {
+        tail.Add(entries[index]);
+        available -= bytes;
+        continue;
+      }
+      if (tail.Count == 0 && available > 3)
+      {
+        // Keep a useful suffix even when one Unicode line uses the entire budget.
+        string last = entries[index];
+        int low = 0, high = last.Length;
+        while (low < high)
+        {
+          int middle = (low + high) / 2;
+          int start = middle < last.Length && char.IsLowSurrogate(last[middle]) ? middle + 1 : middle;
+          int size = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(last[start..], SerializerOptions)) + 1;
+          if (size <= available) high = middle;
+          else low = middle + 1;
+        }
+        if (low < last.Length && char.IsLowSurrogate(last[low])) low++;
+        if (low < last.Length) tail.Add(last[low..]);
+      }
+      break;
+    }
+    for (int index = tail.Count - 1; index >= 0; index--) logs.Add(tail[index]);
+    return root.ToJsonString(SerializerOptions);
+  }
 
   private static void EnsureMessageSize(string json)
   {

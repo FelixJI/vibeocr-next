@@ -6,7 +6,7 @@ using System.Text;
 
 namespace VibeOCR.App.Tests;
 
-public sealed class WorkbenchBridgeCodecTests
+public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
 {
   [Theory]
   [InlineData("rapidocr-cpu")]
@@ -995,6 +995,89 @@ public sealed class WorkbenchBridgeCodecTests
     JsonElement state = about.RootElement.GetProperty("payload").GetProperty("state");
     Assert.Equal("0.2.0", state.GetProperty("version").GetString());
     Assert.Equal("Proprietary", state.GetProperty("license").GetString());
+  }
+
+  [Theory]
+  [InlineData("running")]
+  [InlineData("succeeded")]
+  [InlineData("failed")]
+  public void MaximumProfileProgressAndUnicodeLogsFitCompleteStateAndBootstrap(string terminal)
+  {
+    DirectoryInfo? root = new(AppContext.BaseDirectory);
+    while (root is not null && !File.Exists(Path.Combine(root.FullName, "repository.json"))) root = root.Parent;
+    Assert.NotNull(root);
+    string[] pins = File.ReadAllLines(Path.Combine(root.FullName, "config", "runtime", "win-x64-cu126",
+        "requirements-win-x64-cu126.lock"))
+      .Where(line => System.Text.RegularExpressions.Regex.IsMatch(line, "^[A-Za-z0-9_.-]+(?:==| @ )"))
+      .Select(line => line.Trim().TrimEnd('\\').Trim()).ToArray();
+    Assert.Equal(146, pins.Length);
+    var dependencies = pins.Select(pin => new VibeOCR.Runtime.Contracts.Generated.Host.ManagedInstallDependency
+    {
+      Name = System.Text.RegularExpressions.Regex.Match(pin, "^[A-Za-z0-9_.-]+").Value,
+      Version = "1.0.0",
+      DownloadState = "cached", InstallState = terminal == "running" ? "pending" : "installed",
+    }).ToArray();
+    var progress = new VibeOCR.Runtime.Contracts.Generated.Host.ManagedEnvironmentInstallEvent
+    {
+      EventVersion = 1, EventKind = "environment_install", AttemptId = new string('a', 32),
+      PlanId = new string('b', 32), EnvironmentId = "容量验收", EnvironmentRevision = 1,
+      Seq = 852, Timestamp = "2026-10-08T03:47:40Z", Phase = terminal == "running" ? "install" : "complete",
+      State = terminal, Current = "依赖已验证并提交", Dependencies = dependencies, DependencyTotalKnown = true,
+      DownloadFilesTotal = 0, DownloadFilesCompleted = 0, BytesCurrent = 0, BytesTotal = null, Heartbeat = false,
+      Log = new VibeOCR.Runtime.Contracts.Generated.Host.ManagedInstallLog { Stream = "stdout", Text = "最后一条有用输出", Truncated = false },
+    };
+    string[] logs = Enumerable.Range(0, 180).Select(index => $"{index}: " + new string('文', 300) + "😀\"<>&").Append("最后一条有用输出").ToArray();
+    var settings = new SettingsWorkbenchState(WorkbenchTheme.Light, terminal == "running", "settings.ready", "cpu", false,
+      StatusMessage: new string('字', 1000), EnvironmentInstallProgress: progress,
+      EnvironmentInstallLog: logs, EnvironmentSupportsInstallProgress: true,
+      EnvironmentPlan: new SettingsEnvironmentPlanState(new string('b', 32), "容量验收", "cu126", ["tuna-pypi"], pins, "cu126"),
+      EnvironmentRecipes: [new SettingsEnvironmentRecipeState("cu126", "完整 CUDA 配方", Dependencies: pins)],
+      HotkeyActions: [new SettingsHotkeyActionState("screenshot_recognize", "快捷截图识别", "Ctrl+Alt+Q", "Ctrl+Alt+Q", null, "Ctrl+Alt+Q")]);
+    var envelope = new WorkbenchStateEnvelope(99, "settings", WorkbenchStateChange.Replace, settings);
+    Guid session = Guid.NewGuid();
+    string stateJson = WorkbenchBridgeCodec.SerializeState(session, envelope);
+    var bootstrap = new WorkbenchBootstrap(2, session, 99, WorkbenchRoute.Settings,
+      [envelope, new WorkbenchStateEnvelope(98, "about", WorkbenchStateChange.Replace, new AboutWorkbenchState("0.3.0", new string('许', 200), "https://example.invalid"))],
+      new HashSet<string> { "runtime.environments" });
+    string bootstrapJson = WorkbenchBridgeCodec.SerializeBootstrap(Guid.NewGuid(), bootstrap);
+    foreach (string json in new[] { stateJson, bootstrapJson })
+    {
+      int bytes = Encoding.UTF8.GetByteCount(json);
+      output.WriteLine($"install-budget state={terminal} envelope={(json == stateJson ? "state" : "bootstrap")} bytes={bytes} limit={WorkbenchBridgeCodec.MaxMessageBytes}");
+      Assert.True(bytes <= WorkbenchBridgeCodec.MaxMessageBytes);
+      using JsonDocument document = JsonDocument.Parse(json);
+      JsonElement payload = document.RootElement.GetProperty("payload");
+      JsonElement projected = payload.TryGetProperty("state", out JsonElement value) ? value : payload.GetProperty("features").GetProperty("settings");
+      JsonElement observed = projected.GetProperty("environmentInstallProgress");
+      Assert.Equal(terminal, observed.GetProperty("state").GetString());
+      Assert.Equal(progress.AttemptId, observed.GetProperty("attempt_id").GetString());
+      Assert.Equal(852, observed.GetProperty("seq").GetInt64());
+      Assert.Equal(146, observed.GetProperty("dependencies").GetArrayLength());
+      Assert.Equal(JsonValueKind.Null, observed.GetProperty("log").ValueKind);
+      Assert.Equal(JsonSerializer.Serialize(progress with { Log = null }), observed.GetRawText());
+      string[] visible = projected.GetProperty("environmentInstallLog").EnumerateArray().Select(item => item.GetString()!).ToArray();
+      Assert.Contains("截断", visible[0]);
+      Assert.Equal("最后一条有用输出", visible[^1]);
+      Assert.True(visible.Length < logs.Length);
+    }
+    Assert.Equal(logs, settings.EnvironmentInstallLog);
+    Assert.NotNull(settings.EnvironmentInstallProgress!.Log);
+    // A single escaped Unicode entry can itself exceed the remaining envelope
+    // budget; preserve its useful suffix without splitting a surrogate pair.
+    string oneLineJson = WorkbenchBridgeCodec.SerializeState(session, envelope with { State = settings with
+    {
+      StatusMessage = new string('字', 4000),
+      EnvironmentInstallLog = [string.Concat(Enumerable.Repeat("文😀", 1300)) + "最后一条有用输出"],
+    } });
+    Assert.True(Encoding.UTF8.GetByteCount(oneLineJson) <= WorkbenchBridgeCodec.MaxMessageBytes);
+    using (JsonDocument oneLine = JsonDocument.Parse(oneLineJson))
+    {
+      string suffix = oneLine.RootElement.GetProperty("payload").GetProperty("state").GetProperty("environmentInstallLog")[1].GetString()!;
+      Assert.EndsWith("最后一条有用输出", suffix);
+      Assert.DoesNotContain("\ufffd", suffix);
+    }
+    // The next exact terminal is independently serializable after a large log event.
+    WorkbenchBridgeCodec.SerializeState(session, envelope with { Revision = 100, State = settings with { EnvironmentInstallProgress = progress with { State = "succeeded", Phase = "complete", Seq = 853 } } });
   }
 
   [Fact]

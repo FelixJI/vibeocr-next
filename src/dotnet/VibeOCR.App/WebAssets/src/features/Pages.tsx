@@ -3074,6 +3074,7 @@ function InstalledEnvironmentList({
           取消安装
         </Button>
       ) : null}
+      <EnvironmentInstallDetails state={state} />
       <p role="status">{stringValue(state.environmentStatus) ?? ""}</p>
     </section>
   );
@@ -3082,6 +3083,147 @@ function InstalledEnvironmentList({
 // 来源收敛为单一简单设置：依赖包与模型各选一个来源，语义仅“安装依赖”
 // 与“下载模型”；不暴露产品默认/全局默认/环境覆盖三层，也不提供按次
 // 或按环境的来源覆盖。默认值跟随 Runtime 目录与全局默认解析结果。
+interface EnvironmentInstallProgress {
+  readonly attempt_id: string;
+  readonly seq: number;
+  readonly environment_id: string;
+  readonly timestamp: string;
+  readonly phase: string;
+  readonly state: string;
+  readonly current: string;
+  readonly dependency_total_known: boolean;
+  readonly dependencies: readonly {
+    name: string;
+    version: string | null;
+    download_state: string;
+    install_state: string;
+  }[];
+  readonly download_files_total: number | null;
+  readonly download_files_completed: number;
+}
+
+function EnvironmentInstallDetails({
+  state,
+}: {
+  readonly state: Readonly<Record<string, unknown>>;
+}) {
+  const value = state.environmentInstallProgress;
+  if (!value || typeof value !== "object") {
+    return state.environmentCanCancelInstall === true &&
+      state.environmentSupportsInstallProgress !== true ? (
+      <p role="status">
+        当前运行组件不支持实时明细；安装结果仍以环境记录为准。
+      </p>
+    ) : null;
+  }
+  const progress = value as EnvironmentInstallProgress;
+  if (!Array.isArray(progress.dependencies)) return null;
+  const phases: Readonly<Record<string, string>> = {
+    prepare: "准备",
+    resolve: "解析依赖",
+    unpack: "解包",
+    download: "下载",
+    install: "安装依赖批次",
+    runtime_wheel: "安装内部 Runtime wheel",
+    verify: "验证",
+    complete: "完成",
+  };
+  const states: Readonly<Record<string, string>> = {
+    running: "进行中",
+    succeeded: "已完成",
+    failed: "失败",
+    cancelled: "取消",
+  };
+  const origins: Readonly<Record<string, string>> = {
+    pending: "待处理",
+    bundled: "随包可用",
+    cached: "缓存复用",
+    downloading: "正在下载",
+    downloaded: "已新增下载",
+  };
+  const reused = progress.dependencies.filter((item) =>
+    ["bundled", "cached"].includes(item.download_state),
+  ).length;
+  const installed = progress.dependencies.filter(
+    (item) => item.install_state === "installed",
+  ).length;
+  const logs = Array.isArray(state.environmentInstallLog)
+    ? state.environmentInstallLog.filter(
+        (line): line is string => typeof line === "string",
+      )
+    : [];
+  return (
+    <section
+      className="environment-install-progress"
+      aria-label="依赖安装进度"
+      data-install-state={progress.state}
+      data-install-phase={progress.phase}
+      data-install-attempt={progress.attempt_id}
+      data-install-seq={progress.seq}
+      data-install-environment={progress.environment_id}
+      data-install-installed={installed}
+      data-install-total={
+        progress.dependency_total_known
+          ? progress.dependencies.length
+          : "unknown"
+      }
+    >
+      <h4>
+        {phases[progress.phase] ?? progress.phase} ·{" "}
+        {states[progress.state] ?? progress.state}
+      </h4>
+      <p role="status">
+        共{" "}
+        {progress.dependency_total_known
+          ? progress.dependencies.length
+          : "正在解析 / 未知"}{" "}
+        项依赖｜已复用 {reused} 项｜新增下载文件{" "}
+        {progress.download_files_completed}/
+        {progress.download_files_total ?? "未知"} 个｜批次已安装 {installed}/
+        {progress.dependency_total_known
+          ? progress.dependencies.length
+          : "未知"}{" "}
+        项
+      </p>
+      <p>
+        当前：{progress.current || "等待安装事件"}；最后事件：
+        {progress.timestamp}
+      </p>
+      <p className="form-note">
+        包数与下载文件数分别统计；Python 和内部 Runtime wheel
+        随产品提供，模型尚未下载。安装批次成功后才确认依赖，整体完成须通过验证与提交。
+        源分发包的隔离构建临时依赖按所选来源获取，单独于目标包与目标工件下载数量。
+      </p>
+      <details>
+        <summary>依赖状态（只读）</summary>
+        <ul>
+          {progress.dependencies.map((item) => (
+            <li key={`${item.name}==${item.version ?? "unknown"}`}>
+              {item.name} {item.version ?? "版本未知"}：
+              {origins[item.download_state] ?? item.download_state}；
+              {item.install_state === "installed" ? "已安装" : "等待批次成功"}
+            </li>
+          ))}
+        </ul>
+      </details>
+      <details>
+        <summary>实时命令输出（只读，最多保留 200 行，超限截断）</summary>
+        <pre
+          tabIndex={0}
+          style={{
+            maxHeight: "20rem",
+            overflow: "auto",
+            whiteSpace: "pre-wrap",
+            overflowWrap: "anywhere",
+          }}
+        >
+          {logs.join("\n") || "等待命令输出…"}
+        </pre>
+      </details>
+    </section>
+  );
+}
+
 function EnvironmentSourceSettings({
   state,
   busy,

@@ -1,3 +1,4 @@
+using ManagedEnvironmentInstallProgress = VibeOCR.Runtime.Contracts.Generated.Host.ManagedEnvironmentInstallEvent;
 using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
 using Windows.Storage;
@@ -15,6 +16,7 @@ public sealed partial class MainWindow
   private const string SmokeEnvironmentA = "RapidOCR · CPU";
   private const string SmokeEnvironmentB = "Smoke B";
   private string managedSmokeStage = "starting";
+  private readonly List<object> managedInstallProgressEvidence = [];
 
   private void RecordManagedSmokeStage(string stage)
   {
@@ -28,7 +30,7 @@ public sealed partial class MainWindow
     string? phase = Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_ENVIRONMENT_E2E_PHASE");
     string expected = Path.Combine(Directory.GetParent(layout.InstallRoot)!.FullName,
       $"managed-environment-{phase}.json");
-    if (phase is not ("create" or "install" or "restart" or "sources") || path is null ||
+    if (phase is not ("create" or "install" or "restart" or "sources" or "progress") || path is null ||
         !string.Equals(Path.GetFullPath(path), expected, StringComparison.OrdinalIgnoreCase))
     {
       Close();
@@ -49,6 +51,7 @@ public sealed partial class MainWindow
         "create" => await CreateSmokeEnvironmentsAsync(),
         "install" => await InstallAndSwitchSmokeEnvironmentsAsync(),
         "sources" => await CompleteSourceSettingsSmokeAsync(),
+        "progress" => await CompleteInstallProgressSmokeAsync(),
         _ => await VerifyRestartedSmokeEnvironmentAsync(),
       };
       File.WriteAllText(path, JsonSerializer.Serialize(new
@@ -70,6 +73,7 @@ public sealed partial class MainWindow
         stage = managedSmokeStage,
         error = error.ToString(),
         install_attempts = smokeInstallAttempts?.Invoke(),
+        install_progress = managedInstallProgressEvidence,
       }));
     }
     Close();
@@ -144,6 +148,10 @@ public sealed partial class MainWindow
     ManagedEnvironment[] initial = SmokePair(empty);
     if (initial.Any(item => item.Status != "empty") || empty.ActiveId is not null)
       throw new InvalidOperationException("Empty environment state changed across restart.");
+    WorkbenchCommandReceipt sources = await application.ExecuteAsync(
+      new WorkbenchCommandEnvelope(Guid.NewGuid(), new SetEnvironmentSourcesCommand(null, "tuna-pypi", null)),
+      CancellationToken.None);
+    if (!sources.Ok) throw new InvalidOperationException("Managed fixture source selection failed.");
     await InstallSmokeRecipeAsync(initial[0]);
     await InstallSmokeRecipeAsync(initial[1]);
     if (smokeInstallAttempts() != 2)
@@ -169,6 +177,7 @@ public sealed partial class MainWindow
       recognition = new[] { first, second },
       switch_back = new { environment_id = returned.EnvironmentId, revision = returned.Revision },
       install_attempts_after_switch_back = smokeInstallAttempts(),
+      install_progress = managedInstallProgressEvidence,
     };
   }
 
@@ -202,28 +211,116 @@ public sealed partial class MainWindow
     };
   }
 
-  private async Task InstallSmokeRecipeAsync(ManagedEnvironment environment)
+  private async Task<object> CompleteInstallProgressSmokeAsync()
+  {
+    string recipe = Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_PROGRESS_RECIPE") ?? "rapidocr-cpu";
+    if (recipe is not ("rapidocr-cpu" or "paddleocr-cpu"))
+      throw new InvalidOperationException("Progress smoke supports isolated CPU recipes only.");
+    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
+    await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
+    WorkbenchCommandReceipt created = await application.ExecuteAsync(
+      new WorkbenchCommandEnvelope(Guid.NewGuid(), new CreateEnvironmentCommand("安装进度验收")),
+      CancellationToken.None);
+    if (!created.Ok) throw new InvalidOperationException("Progress fixture creation failed.");
+    ManagedEnvironmentList list = await WaitForSmokeEnvironmentsAsync(["安装进度验收"], TimeSpan.FromMinutes(2));
+    ManagedEnvironment target = list.Environments.Single(item => item.Name == "安装进度验收");
+    WorkbenchCommandReceipt sources = await application.ExecuteAsync(
+      new WorkbenchCommandEnvelope(Guid.NewGuid(), new SetEnvironmentSourcesCommand(null, "tuna-pypi", null)),
+      CancellationToken.None);
+    if (!sources.Ok) throw new InvalidOperationException("Progress fixture source selection failed.");
+    await InstallSmokeRecipeAsync(target, recipe);
+    ManagedEnvironment installed = smokeEnvironmentSnapshot!()!.Environments.Single(item => item.Id == target.Id);
+    return new { installed = SmokeEnvironmentEvidence(installed), install_progress = managedInstallProgressEvidence };
+  }
+
+  private async Task InstallSmokeRecipeAsync(ManagedEnvironment environment, string recipe = "rapidocr-cpu")
   {
     RecordManagedSmokeStage($"select {environment.Name}");
     await SelectSmokeEnvironmentAsync(environment.Id);
-    await SelectSmokeValueAsync("#environment-component-select", "rapidocr");
+    await SelectSmokeValueAsync("#environment-component-select", recipe.StartsWith("paddleocr", StringComparison.Ordinal) ? "paddleocr" : "rapidocr");
     await ClickManagedSmokeButtonAsync("继续准备依赖");
     await WaitForSmokeDomAsync("!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
-      "document.querySelector('.runtime-install-plan')?.textContent.includes('rapidocr-cpu') && " +
+      $"document.querySelector('.runtime-install-plan')?.textContent.includes('{recipe}') && " +
       "document.querySelector('.runtime-install-plan')?.textContent.includes('TUNA PyPI 镜像')",
       TimeSpan.FromMinutes(2));
     RecordManagedSmokeStage($"install {environment.Name}");
     await ClickManagedSmokeButtonAsync("确认安装依赖");
     using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(45));
+    var phases = new HashSet<string>(StringComparer.Ordinal);
+    var observations = new List<object>();
+    bool liveLog = false;
+    bool capturedLiveLog = false;
     while (true)
     {
+      SettingsWorkbenchState settingsState = (await application.BootstrapAsync(timeout.Token))
+        .States.Select(item => item.State).OfType<SettingsWorkbenchState>().Single();
+      ManagedEnvironmentInstallProgress? progress = settingsState.EnvironmentInstallProgress;
+      if (progress?.EnvironmentId == environment.Id && progress.State == "running" &&
+          settingsState.EnvironmentCanCancelInstall)
+      {
+        string visible = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+          "JSON.stringify({phase:document.querySelector('.environment-install-progress')?.dataset.installPhase," +
+          "log:document.querySelector('.environment-install-progress pre')?.textContent ?? ''})");
+        using JsonDocument dom = JsonDocument.Parse(JsonSerializer.Deserialize<string>(visible) ?? "{}");
+        bool phaseVisible = dom.RootElement.TryGetProperty("phase", out JsonElement domPhase) &&
+          domPhase.GetString() == progress.Phase;
+        string logText = dom.RootElement.GetProperty("log").GetString() ?? "";
+        bool hasLog = phaseVisible && settingsState.EnvironmentInstallLog?.Count > 0 &&
+          !string.IsNullOrWhiteSpace(logText) && !logText.Contains("等待命令输出", StringComparison.Ordinal);
+        liveLog |= hasLog;
+        if (hasLog && !capturedLiveLog)
+        {
+          await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+            "(() => { const log = document.querySelector('.environment-install-progress details:last-child'); if(log && !log.open) log.querySelector('summary').click(); })()");
+          await SaveManagedSmokePreviewAsync($"live-progress-{environment.Id}");
+          capturedLiveLog = true;
+        }
+        if (phaseVisible && phases.Add(progress.Phase) || hasLog && observations.Count < 10)
+          observations.Add(new
+          {
+            observed_at = DateTimeOffset.UtcNow,
+            event_time = progress.Timestamp,
+            progress.Phase,
+            progress.Seq,
+            dependencies = progress.Dependencies.Count,
+            progress.DownloadFilesCompleted,
+            progress.DownloadFilesTotal,
+            live_log = hasLog,
+            dom = visible
+          });
+      }
       ManagedEnvironment? current = smokeEnvironmentSnapshot!()?.Environments
         .SingleOrDefault(item => item.Id == environment.Id);
       if (current?.LastInstallFailure is { Phase: "failed" } failure)
+      {
+        managedInstallProgressEvidence.Add(new { environment_id = environment.Id, recipe,
+          observed = observations, failure, terminal = progress, logs = settingsState.EnvironmentInstallLog });
+        if (progress is null || progress.EnvironmentId != environment.Id || progress.State is not ("failed" or "cancelled"))
+          throw new InvalidOperationException("Installation failure did not expose a bound terminal progress state.");
+        await WaitForInstallProgressDomAsync(progress);
+        await SaveManagedSmokePreviewAsync($"failed-progress-{environment.Id}");
         throw new InvalidOperationException(
           $"Environment install failed: {failure.ReasonCode}: {failure.Detail}");
+      }
       if (current?.Status == "installed" && current.Revision > environment.Revision)
       {
+        if (phases.Count < 2 || !liveLog || progress?.State != "succeeded" ||
+            progress.Dependencies.Any(item => item.InstallState != "installed"))
+          throw new InvalidOperationException("Installation did not expose continuous live phases/logs and committed package state.");
+        await WaitForInstallProgressDomAsync(progress);
+        string terminalDom = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+          "JSON.stringify(document.querySelector('.environment-install-progress')?.dataset)");
+        managedInstallProgressEvidence.Add(new
+        {
+          environment_id = environment.Id,
+          recipe,
+          observed = observations,
+          finished_event_time = progress.Timestamp,
+          finished_observed_at = DateTimeOffset.UtcNow,
+          terminal = progress,
+          terminal_dom = terminalDom
+        });
+        await SaveManagedSmokePreviewAsync($"progress-{environment.Id}");
         // 安装终态后维护进度动画必须退出，不得残留空闲滚动（AC2）。
         await WaitForSmokeDomAsync(
           "(() => { const panel = document.querySelector('.settings-runtime-panel'); return !!panel && " +
@@ -235,6 +332,26 @@ public sealed partial class MainWindow
         throw new InvalidOperationException($"Environment install failed: {current.Reason}");
       await Task.Delay(250, timeout.Token);
     }
+  }
+
+  private Task WaitForInstallProgressDomAsync(ManagedEnvironmentInstallProgress progress)
+  {
+    string expected = JsonSerializer.Serialize(new
+    {
+      attempt = progress.AttemptId,
+      seq = progress.Seq.ToString(System.Globalization.CultureInfo.InvariantCulture),
+      environment = progress.EnvironmentId,
+      state = progress.State,
+      phase = progress.Phase,
+      installed = progress.Dependencies.Count(item => item.InstallState == "installed").ToString(System.Globalization.CultureInfo.InvariantCulture),
+      total = progress.DependencyTotalKnown ? progress.Dependencies.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) : "unknown"
+    });
+    return WaitForSmokeDomAsync("(() => { const expected = " + expected +
+      "; const actual = document.querySelector('.environment-install-progress')?.dataset; return !!actual && " +
+      "actual.installAttempt === expected.attempt && actual.installSeq === expected.seq && " +
+      "actual.installEnvironment === expected.environment && actual.installState === expected.state && " +
+      "actual.installPhase === expected.phase && actual.installInstalled === expected.installed && " +
+      "actual.installTotal === expected.total; })()", TimeSpan.FromSeconds(30));
   }
 
   private async Task<object> SwitchAndRecognizeSmokeAsync(ManagedEnvironment environment)
@@ -315,9 +432,14 @@ public sealed partial class MainWindow
 
   private static object SmokeEnvironmentEvidence(ManagedEnvironment environment) => new
   {
-    id = environment.Id, name = environment.Name, revision = environment.Revision,
-    status = environment.Status, python_state = environment.PythonState,
-    python = environment.Python, path = environment.Path, recipe = environment.Recipe,
+    id = environment.Id,
+    name = environment.Name,
+    revision = environment.Revision,
+    status = environment.Status,
+    python_state = environment.PythonState,
+    python = environment.Python,
+    path = environment.Path,
+    recipe = environment.Recipe,
   };
 
   private async Task<ManagedEnvironmentList> WaitForSmokeEnvironmentsAsync(
@@ -411,10 +533,11 @@ public sealed partial class MainWindow
 
   private async Task SaveManagedSmokePreviewAsync(string stage)
   {
-    string selector = stage == "confirmation" ? ".runtime-install-plan" : ".managed-environment-list";
+    bool progress = stage.Contains("progress", StringComparison.Ordinal);
+    string selector = progress ? ".environment-install-progress" : stage == "confirmation" ? ".runtime-install-plan" : ".managed-environment-list";
     await WaitForSmokeDomAsync(
       "(() => { const e = document.querySelector(" + JsonSerializer.Serialize(selector) +
-      "); if (!e || !e.querySelector('button:not(:disabled)')) return false; " +
+      "); if (!e" + (progress ? "" : " || !e.querySelector('button:not(:disabled)')") + ") return false; " +
       "e.scrollIntoView({block:'center'}); return true; })()",
       TimeSpan.FromSeconds(30));
     await Task.Delay(100);
