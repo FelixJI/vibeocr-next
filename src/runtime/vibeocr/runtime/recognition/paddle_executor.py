@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
     from vibeocr.runtime.recognition.paddle_adapter import PaddlePipelineAdapter
 
+from vibeocr.runtime.environments.model_cache import LocalModelsNotPrepared
 from vibeocr.runtime.jobs.budgets import AdapterCapability, BudgetPlanner, InputItem
 from vibeocr.runtime.jobs.recovery import FailureClass, RecoveryAction, RecoveryPolicy
 from vibeocr.runtime.jobs.scheduler import DeviceScheduler
@@ -240,6 +241,15 @@ class AdapterExecutor:
             return
         try:
             payloads = self._recognize_many(record, items, options)
+        except LocalModelsNotPrepared:
+            self._fail_items(
+                record,
+                items,
+                error_code=ErrorCode.BACKEND_UNAVAILABLE.value,
+                error="local_models_not_prepared",
+                detail={"reason": "local_models_not_prepared"},
+            )
+            return
         except OcrEngineError as exc:
             # 引擎选择失败是确定性错误：直接按协议错误码标记本批 item，
             # 不进入 bisect/backoff 恢复路径，也不切换引擎。
@@ -442,6 +452,7 @@ class AdapterExecutor:
         *,
         error_code: str,
         error: str,
+        detail: dict | None = None,
     ) -> None:
         for item in items:
             current = next(
@@ -459,6 +470,7 @@ class AdapterExecutor:
                 item.item_id,
                 error_code=error_code,
                 error=error,
+                detail=detail,
             )
 
     @staticmethod

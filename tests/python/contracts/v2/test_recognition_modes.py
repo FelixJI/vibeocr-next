@@ -155,6 +155,36 @@ def test_recognition_mode_catalog_is_the_semantic_source_of_truth() -> None:
     assert hasattr(wire_types, "RecognitionModeCatalog")
 
 
+def test_paddle_local_models_policy_is_strict_and_request_only():
+    import pytest
+    from vibeocr.runtime.recognition.models.ocr_options import OCROptions
+    from vibeocr.runtime_contracts.parser import ContractError, parse_pipeline_selection
+
+    definition = get_recognition_mode_definition(RecognitionMode.PADDLE_TEXT)
+    assert "local_models_only" in definition.supported_options
+    selected = parse_pipeline_selection(
+        {
+            "pipeline_id": "OCR",
+            "engine": "paddleocr",
+            "options_version": 1,
+            "options": {"local_models_only": True},
+        }
+    )
+    assert selected.options["local_models_only"] is True
+    assert OCROptions.from_dict(selected.options).local_models_only
+    assert not OCROptions().local_models_only
+    for invalid in (1, "true", None):
+        with pytest.raises(ContractError):
+            parse_pipeline_selection(
+                {
+                    "pipeline_id": "OCR",
+                    "engine": "paddleocr",
+                    "options_version": 1,
+                    "options": {"local_models_only": invalid},
+                }
+            )
+
+
 def test_recognition_modes_project_to_legacy_execution_without_lifecycle_ambiguity() -> (
     None
 ):

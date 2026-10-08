@@ -258,6 +258,10 @@ public sealed class InferenceHttpClient : IInferenceClient
     public Task<PdfMutateResult> DeletePdfPagesAsync(string sessionId, int[] pages, CancellationToken ct)
         => _pdf.DeletePagesAsync(sessionId, pages, ct);
 
+    public Task<PdfMutateResult> InsertPdfBlankAsync(string sessionId, int afterIndex, double width, double height, CancellationToken ct) => _pdf.InsertBlankAsync(sessionId, afterIndex, width, height, ct);
+    public Task<PdfMutateResult> InsertPdfFromAsync(string sessionId, string sourcePath, int afterIndex, CancellationToken ct) => _pdf.InsertFromAsync(sessionId, sourcePath, afterIndex, ct);
+    public Task<PdfMutateResult> ReorderPdfAsync(string sessionId, int[] newOrder, CancellationToken ct) => _pdf.ReorderAsync(sessionId, newOrder, ct);
+
     public Task<string> SavePdfAsync(string sessionId, string outputPath, CancellationToken ct)
         => _pdf.SaveAsync(sessionId, outputPath, ct);
 

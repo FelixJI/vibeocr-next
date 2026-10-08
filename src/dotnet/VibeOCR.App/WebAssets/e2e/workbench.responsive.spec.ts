@@ -252,8 +252,8 @@ test("PDF selection, delete and save remain clickable in a compact workspace", a
   await page.getByRole("checkbox", { name: "选择第 2 页" }).click();
   await expectCommand(page, {
     scope: "pdf",
-    action: "selectPages",
-    arguments: { pages: [0, 1] },
+    action: "selectPage",
+    arguments: { page: 1, selected: true },
   });
   await sendState(page, "pdf", { ...pdf, selectedPages: [0, 1] });
   await expect(
@@ -262,8 +262,8 @@ test("PDF selection, delete and save remain clickable in a compact workspace", a
   await page.getByRole("checkbox", { name: "选择第 1 页" }).click();
   await expectCommand(page, {
     scope: "pdf",
-    action: "selectPages",
-    arguments: { pages: [1] },
+    action: "selectPage",
+    arguments: { page: 0, selected: false },
   });
   await sendState(page, "pdf", { ...pdf, selectedPage: 1, selectedPages: [1] });
   await page.getByRole("button", { name: "删除选中页" }).click();

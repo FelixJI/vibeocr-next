@@ -8,6 +8,17 @@ namespace VibeOCR.App.Tests;
 
 public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
 {
+  [Fact]
+  public void PdfRangesAndInsertionKeepHostAuthorizationBoundary()
+  {
+    Guid session = Guid.NewGuid();
+    var rotate = Assert.IsType<RotatePdfCommand>(WorkbenchBridgeCodec.ParseCommand(CommandJson(session, "pdf", "rotate", "{\"degrees\":-90,\"range\":\"all\"}"), session).Command);
+    Assert.Equal("all", rotate.Range); Assert.Equal(-90, rotate.Degrees);
+    Assert.IsType<CorrectPdfOrientationCommand>(WorkbenchBridgeCodec.ParseCommand(CommandJson(session, "pdf", "correctOrientation", "{\"range\":\"selected\"}"), session).Command);
+    Assert.IsType<InsertPdfFromCommand>(WorkbenchBridgeCodec.ParseCommand(CommandJson(session, "pdf", "insertFrom", "{\"afterIndex\":0,\"revision\":2}"), session).Command);
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(CommandJson(session, "pdf", "insertFrom", "{\"afterIndex\":0,\"revision\":2,\"sourcePath\":\"C:/private.pdf\"}"), session));
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(CommandJson(session, "pdf", "rotate", "{\"degrees\":90,\"range\":\"implicit\"}"), session));
+  }
   [Theory]
   [InlineData("{\"page\":0}", true)]
   [InlineData("{\"page\":2}", true)]

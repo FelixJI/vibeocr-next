@@ -95,6 +95,12 @@ public interface IInferenceClient : IAsyncDisposable
     Task<byte[]> RenderPdfPageAsync(string sessionId, int page, int size, CancellationToken ct);
     Task<PdfMutateResult> RotatePdfPagesAsync(string sessionId, int[] pages, int angle, CancellationToken ct);
     Task<PdfMutateResult> DeletePdfPagesAsync(string sessionId, int[] pages, CancellationToken ct);
+    Task<PdfMutateResult> InsertPdfBlankAsync(string sessionId, int afterIndex, double width, double height, CancellationToken ct) =>
+        Task.FromException<PdfMutateResult>(new NotSupportedException("PDF operation unavailable."));
+    Task<PdfMutateResult> InsertPdfFromAsync(string sessionId, string sourcePath, int afterIndex, CancellationToken ct) =>
+        Task.FromException<PdfMutateResult>(new NotSupportedException("PDF operation unavailable."));
+    Task<PdfMutateResult> ReorderPdfAsync(string sessionId, int[] newOrder, CancellationToken ct) =>
+        Task.FromException<PdfMutateResult>(new NotSupportedException("PDF operation unavailable."));
     Task<string> SavePdfAsync(string sessionId, string outputPath, CancellationToken ct);
     Task<Wire.PdfDocumentMirror> GetPdfModelAsync(string sessionId, CancellationToken ct) =>
         Task.FromException<Wire.PdfDocumentMirror>(new NotSupportedException("PDF model unavailable."));

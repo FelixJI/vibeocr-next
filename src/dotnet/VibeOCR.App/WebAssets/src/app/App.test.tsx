@@ -658,8 +658,9 @@ describe("AppShell", () => {
     const { unmount } = render(<App actions={actions} viewState={viewState} />);
     await user.click(screen.getByRole("checkbox", { name: "选择第 2 页" }));
     expect(actions.run).toHaveBeenCalledWith({
-      type: "pdf.selectPages",
-      pages: [0, 1],
+      type: "pdf.selectPage",
+      page: 1,
+      selected: true,
     });
     expect(screen.getByRole("img", { name: "第 2 页缩略图" })).toHaveAttribute(
       "src",

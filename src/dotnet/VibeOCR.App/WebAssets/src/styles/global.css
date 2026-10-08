@@ -468,6 +468,24 @@ input {
   object-fit: contain;
   background: var(--colorNeutralBackground2);
 }
+
+.pdf-selection-actions,
+.pdf-page-move,
+.pdf-insertion,
+.pdf-main > [role="toolbar"] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.pdf-insertion {
+  margin-block: 12px;
+}
+
+.pdf-insertion input {
+  width: 88px;
+}
 .qr-workspace {
   display: grid;
   min-height: 430px;

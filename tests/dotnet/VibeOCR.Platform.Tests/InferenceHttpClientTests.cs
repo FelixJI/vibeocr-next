@@ -625,6 +625,26 @@ public sealed class InferenceHttpClientTests
         Assert.Null(handler.LastPath);
     }
 
+    [Fact]
+    public async Task PdfInsertionAndReorderCarryAuthoritativeModelDiff()
+    {
+        const string response = """{"schema_version":2,"instance_id":"test","diff":{"full_model":{"pages":[{"page_index":0,"rotation":90,"rect":[0,0,500,300]},{"page_index":1,"rotation":0,"rect":[0,0,640,480]}],"is_modified":true},"structural_change":true}}""";
+        var handler = new FakeHandler([response, response, response]);
+        await using var client = new InferenceHttpClient(Base, "tok", handler);
+        PdfMutateResult blank = await client.InsertPdfBlankAsync("pdf-1", 0, 640, 480, CancellationToken.None);
+        Assert.Equal("/v2/pdf/sessions/pdf-1/insert_blank", handler.LastPath);
+        Assert.Equal(2, blank.Diff!.FullModel!.Pages!.Count);
+        using (var body = JsonDocument.Parse(handler.LastBody!))
+        { Assert.Equal(0, body.RootElement.GetProperty("after_index").GetInt32()); Assert.Equal(640, body.RootElement.GetProperty("width").GetDouble()); }
+        await client.InsertPdfFromAsync("pdf-1", "authorized.pdf", -1, CancellationToken.None);
+        Assert.Equal("/v2/pdf/sessions/pdf-1/insert_from", handler.LastPath);
+        using (var body = JsonDocument.Parse(handler.LastBody!)) Assert.Equal("authorized.pdf", body.RootElement.GetProperty("source_path").GetString());
+        PdfMutateResult reordered = await client.ReorderPdfAsync("pdf-1", [1, 0], CancellationToken.None);
+        Assert.Equal("/v2/pdf/sessions/pdf-1/reorder", handler.LastPath);
+        Assert.True(reordered.Diff!.StructuralChange);
+        using (var body = JsonDocument.Parse(handler.LastBody!)) Assert.Equal(new[] { 1, 0 }, body.RootElement.GetProperty("new_order").EnumerateArray().Select(value => value.GetInt32()));
+    }
+
     [Theory]
     [InlineData("[]")]
     [InlineData("{\"session_id\":5,\"model\":{\"pages\":[],\"file_path\":\"a.pdf\"}}")]

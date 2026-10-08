@@ -45,6 +45,73 @@ function setup(patch: Record<string, unknown> = {}) {
   return actions;
 }
 describe("PDF text layer actions", () => {
+  it("selects all 129 pages beyond the visible window and clears without mutation", () => {
+    const actions = setup({ pageCount: 129 });
+    fireEvent.click(screen.getByRole("button", { name: "全选页面" }));
+    expect(actions.run).toHaveBeenLastCalledWith({
+      type: "pdf.selectAll",
+      selected: true,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "取消选择" }));
+    expect(actions.run).toHaveBeenLastCalledWith({
+      type: "pdf.selectAll",
+      selected: false,
+    });
+  });
+  it("uses explicit ranges for both directions and prevents empty-selection book rotation", () => {
+    const actions = setup({ selectedPages: [] });
+    expect(screen.getByRole("button", { name: "逆时针 90°" })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("页面处理范围"), {
+      target: { value: "all" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "逆时针 90°" }));
+    expect(actions.run).toHaveBeenLastCalledWith({
+      type: "pdf.rotate",
+      degrees: -90,
+      range: "all",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "横放" }));
+    expect(actions.run).toHaveBeenLastCalledWith({
+      type: "pdf.orient",
+      landscape: true,
+      range: "all",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "自动文字朝向" }));
+    expect(actions.run).toHaveBeenLastCalledWith({
+      type: "pdf.correctOrientation",
+      range: "all",
+    });
+  });
+  it("sends an authorized picker command and explicit blank size and revision", () => {
+    const actions = setup();
+    fireEvent.change(screen.getByLabelText("插入到第几页后（0 为开头）"), {
+      target: { value: "70" },
+    });
+    fireEvent.change(screen.getByLabelText("空白页宽度 pt"), {
+      target: { value: "640" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "插入空白页" }));
+    expect(actions.run).toHaveBeenLastCalledWith({
+      type: "pdf.insertBlank",
+      afterIndex: 69,
+      width: 640,
+      height: 792,
+      revision: 8,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "插入其他 PDF" }));
+    expect(actions.run).toHaveBeenLastCalledWith({
+      type: "pdf.insertFrom",
+      afterIndex: 69,
+      revision: 8,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "第 70 页向前移动" }));
+    expect(actions.run).toHaveBeenLastCalledWith({
+      type: "pdf.movePage",
+      fromIndex: 69,
+      toIndex: 68,
+      revision: 8,
+    });
+  });
   it("separates extraction from whole-book add and defaults to skip", () => {
     const actions = setup();
     fireEvent.click(screen.getByRole("button", { name: "提取/解析选中页" }));

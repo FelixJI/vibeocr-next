@@ -520,6 +520,24 @@ public static class WorkbenchBridgeCodec
         return new OpenPdfCommand();
       case ("pdf", "rotate"):
         return ParseRotate(arguments);
+      case ("pdf", "orient"):
+        EnsureObjectWithFields(arguments, new HashSet<string> { "range", "landscape" }, "command arguments");
+        return new OrientPdfCommand(ParsePdfRange(arguments), arguments.GetProperty("landscape").GetBoolean());
+      case ("pdf", "correctOrientation"):
+        EnsureObjectWithFields(arguments, new HashSet<string> { "range" }, "command arguments");
+        return new CorrectPdfOrientationCommand(ParsePdfRange(arguments));
+      case ("pdf", "insertBlank"):
+        EnsureObjectWithFields(arguments, new HashSet<string> { "afterIndex", "width", "height", "revision" }, "command arguments");
+        double width = arguments.GetProperty("width").GetDouble(), height = arguments.GetProperty("height").GetDouble();
+        if (!double.IsFinite(width) || !double.IsFinite(height) || width <= 0 || height <= 0)
+          throw new WorkbenchBridgeProtocolException("PDF page size is invalid.");
+        return new InsertPdfBlankCommand(arguments.GetProperty("afterIndex").GetInt32(), width, height, arguments.GetProperty("revision").GetInt64());
+      case ("pdf", "insertFrom"):
+        EnsureObjectWithFields(arguments, new HashSet<string> { "afterIndex", "revision" }, "command arguments");
+        return new InsertPdfFromCommand(arguments.GetProperty("afterIndex").GetInt32(), arguments.GetProperty("revision").GetInt64());
+      case ("pdf", "movePage"):
+        EnsureObjectWithFields(arguments, new HashSet<string> { "fromIndex", "toIndex", "revision" }, "command arguments");
+        return new MovePdfPageCommand(arguments.GetProperty("fromIndex").GetInt32(), arguments.GetProperty("toIndex").GetInt32(), arguments.GetProperty("revision").GetInt64());
       case ("pdf", "close"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new ClosePdfCommand();
@@ -558,6 +576,12 @@ public static class WorkbenchBridgeCodec
         EnsureObjectWithFields(arguments, PagesArgumentFields, "command arguments");
         return new SelectPdfPagesCommand(ParsePageIndexes(
           arguments.GetProperty("pages")));
+      case ("pdf", "selectAll"):
+        EnsureObjectWithFields(arguments, new HashSet<string> { "selected" }, "command arguments");
+        return new SelectAllPdfPagesCommand(arguments.GetProperty("selected").GetBoolean());
+      case ("pdf", "selectPage"):
+        EnsureObjectWithFields(arguments, new HashSet<string> { "page", "selected" }, "command arguments");
+        return new SelectPdfPageCommand(arguments.GetProperty("page").GetInt32(), arguments.GetProperty("selected").GetBoolean());
       case ("pdf", "setWindow"):
         return new SetPdfWindowCommand(ParseWindowStart(arguments));
       case ("qrcode", "generate"):
@@ -1046,14 +1070,20 @@ public static class WorkbenchBridgeCodec
       EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
       return new RotatePdfCommand();
     }
-    EnsureObjectWithFields(arguments, DegreesArgumentFields, "command arguments");
+    EnsureObjectWithFields(arguments, arguments.TryGetProperty("range", out _) ? new HashSet<string> { "degrees", "range" } : DegreesArgumentFields, "command arguments");
     int degrees = arguments.GetProperty("degrees").GetInt32();
     if (degrees is not (90 or -90))
     {
       throw new WorkbenchBridgeProtocolException(
         "Workbench PDF rotation is invalid.");
     }
-    return new RotatePdfCommand(degrees);
+    return new RotatePdfCommand(degrees, arguments.TryGetProperty("range", out _) ? ParsePdfRange(arguments) : "selected");
+  }
+
+  private static string ParsePdfRange(JsonElement arguments)
+  {
+    string? range = arguments.GetProperty("range").GetString();
+    return range is "selected" or "all" ? range : throw new WorkbenchBridgeProtocolException("PDF range is invalid.");
   }
 
   private static SetMineruConnectionCommand ParseMineruConnection(

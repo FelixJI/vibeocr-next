@@ -19,6 +19,7 @@ import sys
 import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from importlib.metadata import version
 from pathlib import Path, PurePosixPath
@@ -31,6 +32,7 @@ _logger = logging.getLogger(__name__)
 _PADDLE_CONSTRUCTION_LOCK = threading.RLock()
 _SHARED_ENV = "VIBEOCR_SHARED_MODEL_CACHE"
 _WINDOWS = sys.platform == "win32"
+_PADDLE_LOCAL_ONLY: ContextVar[bool] = ContextVar("paddle_local_only", default=False)
 
 
 class ModelCacheError(RuntimeError):
@@ -39,6 +41,10 @@ class ModelCacheError(RuntimeError):
 
 class ModelMetadataUnavailable(ModelCacheError):
     """No authority listing was obtained; legacy private reads remain possible."""
+
+
+class LocalModelsNotPrepared(ModelCacheError):
+    """Explicit local-only requests cannot prepare, repair or download models."""
 
 
 @dataclass(frozen=True)
@@ -470,15 +476,80 @@ def _paddle_native_model_dir(root: Path) -> Path:
     return Path(alias)
 
 
+def _local_paddle_model(asset: ModelAsset, private: Path) -> Path:
+    try:
+        shared = Path(os.environ[_SHARED_ENV])
+        manifest = _validate_manifest(
+            json.loads(
+                (_asset_root(shared, asset) / "provider-files.json").read_text(
+                    encoding="utf-8"
+                )
+            ),
+            asset,
+        )
+        current = json.loads((private / "current.json").read_text(encoding="utf-8"))
+        expected = {
+            "assets": [{**asdict(asset), "required_paths": list(asset.required_paths)}],
+            "completion_marker": None,
+        }
+        if not isinstance(current, dict) or current.get("request") != expected:
+            raise ModelCacheError("Private model binding does not match request")
+        generation = current.get("generation")
+        if not isinstance(generation, str) or not re.fullmatch(
+            r"[0-9a-f]{32}", generation
+        ):
+            raise ModelCacheError("Invalid private model generation")
+        candidate = private / "revisions" / generation
+        if not all(
+            _valid_file(candidate / entry["path"], entry)
+            for entry in _selected_files(manifest, asset)
+        ):
+            raise ModelCacheError("Prepared model is missing or damaged")
+        return candidate
+    except (OSError, ValueError, KeyError, TypeError, ModelCacheError) as exc:
+        raise LocalModelsNotPrepared(
+            "Local Paddle models are not prepared; explicitly prepare them with ordinary Paddle OCR"
+        ) from exc
+
+
 @contextmanager
-def paddle_model_cache() -> Iterator[None]:
+def paddle_model_cache(*, local_only: bool = False) -> Iterator[None]:
+    # A nested construction must not weaken the calling recognition request.
+    token = _PADDLE_LOCAL_ONLY.set(local_only or _PADDLE_LOCAL_ONLY.get())
+    try:
+        with _paddle_model_cache():
+            yield
+    finally:
+        _PADDLE_LOCAL_ONLY.reset(token)
+
+
+@contextmanager
+def _paddle_model_cache() -> Iterator[None]:
     """Use PaddleX's actual submodel selection during one serialized construction."""
     with _PADDLE_CONSTRUCTION_LOCK:
+        local_only = _PADDLE_LOCAL_ONLY.get()
         source = os.environ.get("PADDLE_PDX_MODEL_SOURCE", "huggingface")
         if not os.environ.get(_SHARED_ENV):
+            if local_only:
+                raise LocalModelsNotPrepared("Shared model cache is unavailable")
             yield
             return
-        if source not in {"huggingface", "modelscope"} or version("paddlex") != "3.7.2":
+        try:
+            supported = (
+                source in {"huggingface", "modelscope"}
+                and version("paddlex") == "3.7.2"
+            )
+        except Exception as exc:
+            if local_only:
+                raise LocalModelsNotPrepared(
+                    "Local-only Paddle resolver version is unavailable"
+                ) from exc
+            raise
+        if not supported:
+            if local_only:
+                raise LocalModelsNotPrepared(
+                    "Local-only Paddle resolver version or source is unsupported"
+                )
             _logger.info(
                 "Paddle shared model cache unsupported; using private native cache"
             )
@@ -488,11 +559,17 @@ def paddle_model_cache() -> Iterator[None]:
 
         original = getattr(official_models, "_get_model_local_path", None)
         if not callable(original) or len(inspect.signature(original).parameters) != 1:
+            if local_only:
+                raise LocalModelsNotPrepared(
+                    "Local-only Paddle resolver shape is unsupported"
+                )
             _logger.warning(
                 "Unsupported PaddleX resolver shape; using private native cache"
             )
             yield
             return
+        if local_only and not os.environ.get("PADDLE_PDX_CACHE_HOME"):
+            raise LocalModelsNotPrepared("Private model cache is unavailable")
         private = Path(os.environ["PADDLE_PDX_CACHE_HOME"])
 
         def resolve(model_names: str | tuple[str, ...]) -> Path:
@@ -507,6 +584,18 @@ def paddle_model_cache() -> Iterator[None]:
                 )
                 old = private / "official_models" / name
                 asset = ModelAsset("paddlex-3.7.2", source, f"PaddlePaddle/{name}")
+                if local_only:
+                    try:
+                        root = _local_paddle_model(
+                            asset, private / "prepared-models" / name
+                        )
+                    except LocalModelsNotPrepared:
+                        if index + 1 < len(names):
+                            continue
+                        raise
+                    vl = root / "PaddleOCR-VL-0.9B"
+                    target = vl if name == "PaddleOCR-VL" and vl.is_dir() else root
+                    return _paddle_native_model_dir(target)
                 try:
                     prepared = prepare_models(
                         [asset], private / "prepared-models" / name, legacy_roots=(old,)

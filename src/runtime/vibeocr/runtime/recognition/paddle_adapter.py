@@ -196,7 +196,14 @@ class PaddlePipelineAdapter:
                 if manager is not None and hasattr(manager, "lease")
                 else contextlib.nullcontext()
             )
-            with lease:
+            from vibeocr.runtime.environments.model_cache import paddle_model_cache
+
+            model_policy = (
+                paddle_model_cache(local_only=True)
+                if getattr(service_options, "local_models_only", False)
+                else contextlib.nullcontext()
+            )
+            with lease, model_policy:
                 results = self.service.recognize_batch(
                     images, service_options, asset_sinks=asset_sinks
                 )

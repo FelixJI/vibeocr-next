@@ -465,6 +465,38 @@ def draw_document_pdf(out: Path) -> dict[str, object] | None:
     }
 
 
+def draw_orientation_pdf(out: Path) -> dict[str, object]:
+    """八个扫描页：四个内容朝向分别叠加现有 /Rotate=0/90。"""
+    import io
+
+    import pymupdf
+
+    rotations: list[dict[str, int]] = []
+    with Image.open(out / "text_zh_en.png") as upright, pymupdf.open() as doc:
+        for angle in (0, 90, 180, 270):
+            for existing in (0, 90):
+                image = upright.rotate(-angle, expand=True)
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG")
+                page = doc.new_page(width=image.width / 3, height=image.height / 3)
+                page.insert_image(page.rect, stream=buffer.getvalue())
+                page.set_rotation(existing)
+                rotations.append(
+                    {
+                        "content_clockwise": angle,
+                        "existing_rotate": existing,
+                        "expected_rotate": (-angle) % 360,
+                    }
+                )
+        doc.save(out / "document_orientation.pdf", deflate=True)
+    return {
+        "purpose": "T2 四方向及既有 Rotate 的真实文字朝向 UI 纠正",
+        "pages": 8,
+        "rotations": rotations,
+        "upright_image": "text_zh_en.png",
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True, type=Path, help="隔离输出目录")
@@ -495,6 +527,7 @@ def main() -> int:
                 "purpose": "纯扫描 PDF 文字层添加/保存验证",
                 "font": "raster-image",
             }
+            entries["document_orientation.pdf"] = draw_orientation_pdf(args.out)
     write_manifest(args.out, entries)
     print(json.dumps(entries, ensure_ascii=False, indent=2))
     return 0

@@ -1933,6 +1933,11 @@ function PdfParameters({
 }
 
 export function PdfPage({ viewState, actions }: FeatureProps) {
+  const [operationRange, setOperationRange] = useState("selected");
+  const [insertAfter, setInsertAfter] = useState(1);
+  const [pageWidth, setPageWidth] = useState(612);
+  const [pageHeight, setPageHeight] = useState(792);
+  const draggingPage = useRef<number | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<readonly number[] | null>(
     null,
   );
@@ -1955,6 +1960,27 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
       )
     : [];
   const selected = new Set(selectedPages);
+  const operationDisabled =
+    busy ||
+    pageCount === 0 ||
+    (operationRange === "selected" && selectedPages.length === 0);
+  const insertionDisabled =
+    busy ||
+    pageCount === 0 ||
+    !Number.isInteger(insertAfter) ||
+    insertAfter < 0 ||
+    insertAfter > pageCount ||
+    !Number.isFinite(pageWidth) ||
+    !Number.isFinite(pageHeight) ||
+    pageWidth <= 0 ||
+    pageHeight <= 0;
+  const movePage = (fromIndex: number, toIndex: number) =>
+    actions.run({
+      type: "pdf.movePage",
+      fromIndex,
+      toIndex,
+      revision: numberValue(state.revision),
+    });
   const activePage = pages.find((page) => page.index === selectedPage);
   const activeStructured = resource(activePage?.structuredResult);
   const activeStructuredText = useResourceText(activeStructured);
@@ -2007,6 +2033,30 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
             />
           ) : (
             <>
+              <div className="pdf-selection-actions">
+                <Button
+                  disabled={busy}
+                  onClick={() =>
+                    actions.run({
+                      type: "pdf.selectAll",
+                      selected: true,
+                    })
+                  }
+                >
+                  全选页面
+                </Button>
+                <Button
+                  disabled={busy || selectedPages.length === 0}
+                  onClick={() =>
+                    actions.run({ type: "pdf.selectAll", selected: false })
+                  }
+                >
+                  取消选择
+                </Button>
+                <span>
+                  已选 {selectedPages.length} / {pageCount} 页
+                </span>
+              </div>
               <ol className="pdf-page-list" aria-label="PDF 页面缩略图">
                 {pages.map((page) => {
                   const thumbnail = resource(page.thumbnail);
@@ -2014,19 +2064,36 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
                     <li
                       className={selected.has(page.index) ? "is-selected" : ""}
                       key={page.index}
+                      data-page-index={page.index}
+                      draggable={!busy}
+                      onDragStart={() => {
+                        draggingPage.current = page.index;
+                      }}
+                      onDragEnd={() => {
+                        draggingPage.current = null;
+                      }}
+                      onDragOver={(event) => {
+                        if (!busy) event.preventDefault();
+                      }}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        if (
+                          !busy &&
+                          draggingPage.current !== null &&
+                          draggingPage.current !== page.index
+                        )
+                          void movePage(draggingPage.current, page.index);
+                        draggingPage.current = null;
+                      }}
                     >
                       <Checkbox
                         aria-label={`选择第 ${page.index + 1} 页`}
                         checked={selected.has(page.index)}
                         onChange={(_, data) => {
-                          const next = new Set(selected);
-                          if (data.checked === true) next.add(page.index);
-                          else next.delete(page.index);
                           actions.run({
-                            type: "pdf.selectPages",
-                            pages: [...next].sort(
-                              (left, right) => left - right,
-                            ),
+                            type: "pdf.selectPage",
+                            page: page.index,
+                            selected: data.checked === true,
                           });
                         }}
                       />
@@ -2039,6 +2106,22 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
                         <span className="pdf-thumbnail-placeholder">PDF</span>
                       )}
                       <span>第 {page.index + 1} 页</span>
+                      <div className="pdf-page-move">
+                        <Button
+                          size="small"
+                          aria-label={`第 ${page.index + 1} 页向前移动`}
+                          disabled={busy || page.index === 0}
+                          onClick={() => movePage(page.index, page.index - 1)}
+                          icon={<ArrowUp size={14} />}
+                        />
+                        <Button
+                          size="small"
+                          aria-label={`第 ${page.index + 1} 页向后移动`}
+                          disabled={busy || page.index === pageCount - 1}
+                          onClick={() => movePage(page.index, page.index + 1)}
+                          icon={<ArrowDown size={14} />}
+                        />
+                      </div>
                       <span>
                         {page.detected
                           ? page.hasTextLayer
@@ -2097,16 +2180,82 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
           )}
         </Panel>
         <div className="pdf-main">
+          <div className="pdf-selection-actions">
+            <label htmlFor="pdf-operation-range">页面处理范围</label>
+            <Select
+              id="pdf-operation-range"
+              value={operationRange}
+              disabled={busy}
+              onChange={(_, data) => setOperationRange(data.value)}
+            >
+              <option value="selected">选中页</option>
+              <option value="all">全文件</option>
+            </Select>
+            <span>旋转、横纵放置和文字朝向仅处理此范围</span>
+          </div>
           <Toolbar aria-label="PDF 页面命令">
             <CapabilityGate
               capability="pdf.rotate"
               capabilities={viewState.capabilities}
-              action={{ type: "pdf.rotate", degrees: 90 }}
+              action={{
+                type: "pdf.rotate",
+                degrees: 90,
+                range: operationRange,
+              }}
               actions={actions}
               icon={<RotateCw aria-hidden="true" size={16} />}
-              disabled={selectedPages.length === 0 || busy}
+              disabled={operationDisabled}
             >
               顺时针 90°
+            </CapabilityGate>
+            <CapabilityGate
+              capability="pdf.rotate"
+              capabilities={viewState.capabilities}
+              action={{
+                type: "pdf.rotate",
+                degrees: -90,
+                range: operationRange,
+              }}
+              actions={actions}
+              disabled={operationDisabled}
+              icon={<RotateCcw size={16} aria-hidden="true" />}
+            >
+              逆时针 90°
+            </CapabilityGate>
+            <CapabilityGate
+              capability="pdf.rotate"
+              capabilities={viewState.capabilities}
+              action={{
+                type: "pdf.orient",
+                landscape: true,
+                range: operationRange,
+              }}
+              actions={actions}
+              disabled={operationDisabled}
+            >
+              横放
+            </CapabilityGate>
+            <CapabilityGate
+              capability="pdf.rotate"
+              capabilities={viewState.capabilities}
+              action={{
+                type: "pdf.orient",
+                landscape: false,
+                range: operationRange,
+              }}
+              actions={actions}
+              disabled={operationDisabled}
+            >
+              纵放
+            </CapabilityGate>
+            <CapabilityGate
+              capability="pdf.rotate"
+              capabilities={viewState.capabilities}
+              action={{ type: "pdf.correctOrientation", range: operationRange }}
+              actions={actions}
+              disabled={operationDisabled}
+            >
+              自动文字朝向
             </CapabilityGate>
             <CapabilityGate
               capability="pdf.edit"
@@ -2193,6 +2342,77 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
               保存
             </CapabilityGate>
           </Toolbar>
+          <div className="pdf-insertion" aria-label="插入页面">
+            <label htmlFor="pdf-insert-after">插入到第几页后（0 为开头）</label>
+            <Input
+              id="pdf-insert-after"
+              type="number"
+              min={0}
+              max={pageCount}
+              value={String(insertAfter)}
+              disabled={busy}
+              onChange={(_, data) => setInsertAfter(Number(data.value))}
+            />
+            <label htmlFor="pdf-blank-width">空白页宽度 pt</label>
+            <Input
+              id="pdf-blank-width"
+              type="number"
+              min={1}
+              value={String(pageWidth)}
+              disabled={busy}
+              onChange={(_, data) => setPageWidth(Number(data.value))}
+            />
+            <label htmlFor="pdf-blank-height">空白页高度 pt</label>
+            <Input
+              id="pdf-blank-height"
+              type="number"
+              min={1}
+              value={String(pageHeight)}
+              disabled={busy}
+              onChange={(_, data) => setPageHeight(Number(data.value))}
+            />
+            <CapabilityGate
+              capability="pdf.edit"
+              capabilities={viewState.capabilities}
+              actions={actions}
+              action={{
+                type: "pdf.insertBlank",
+                afterIndex: insertAfter - 1,
+                width: pageWidth,
+                height: pageHeight,
+                revision: numberValue(state.revision),
+              }}
+              disabled={insertionDisabled}
+            >
+              插入空白页
+            </CapabilityGate>
+            <CapabilityGate
+              capability="pdf.edit"
+              capabilities={viewState.capabilities}
+              actions={actions}
+              action={{
+                type: "pdf.insertFrom",
+                afterIndex: insertAfter - 1,
+                revision: numberValue(state.revision),
+              }}
+              disabled={
+                busy ||
+                pageCount === 0 ||
+                !Number.isInteger(insertAfter) ||
+                insertAfter < 0 ||
+                insertAfter > pageCount
+              }
+            >
+              插入其他 PDF
+            </CapabilityGate>
+          </div>
+          <p>
+            自动文字朝向需要已就绪的 Paddle 通用文字
+            OCR；缺少能力或模型时请在组件设置中检查。
+          </p>
+          <Button onClick={() => actions.navigate("settings")}>
+            打开组件设置
+          </Button>
           <p aria-live="polite">
             已检测 {detected}/{pageCount} 页 · 有文字层 {layers} 页 · 无文字层{" "}
             {Math.max(0, detected - layers)} 页 ·{" "}
@@ -2242,6 +2462,7 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
                     load: "检测文字层",
                     render: "渲染",
                     ocr: "识别",
+                    rotate: "旋转",
                     write: "写入文字层",
                     delete: "删除文字层",
                     save: "保存",

@@ -452,12 +452,13 @@ class TestMoveReorderEdges:
         finally:
             doc.close()
 
-    def test_reorder_pages_invalid_count_noop(self, tmp_path):
-        """reorder_pages new_order 长度不符 → 返回（line 642-643）。"""
+    def test_reorder_pages_invalid_count_rejected(self, tmp_path):
+        """非法重排必须在修改文档前失败。"""
         doc, pdf_doc = PdfService.open_doc(str(_create_test_pdf(tmp_path / "t.pdf")))
         try:
-            PdfService.reorder_pages(doc, pdf_doc, [0])  # 长度 1 != 2 页
-            # 不抛即覆盖
+            with pytest.raises(ValueError, match="permutation"):
+                PdfService.reorder_pages(doc, pdf_doc, [0])
+            assert doc.page_count == 2
         finally:
             doc.close()
 
@@ -474,8 +475,9 @@ class TestMoveReorderEdges:
         doc, pdf_doc = PdfService.open_doc(str(_create_test_pdf(tmp_path / "t.pdf")))
         try:
             PdfService.reorder_pages(doc, pdf_doc, [1, 0])
-            assert pdf_doc.pages[0].page_index == 1
-            assert pdf_doc.pages[1].page_index == 0
+            assert pdf_doc.pages[0].page_index == 0
+            assert pdf_doc.pages[1].page_index == 1
+            assert "Page 2" in doc[0].get_text()
             assert pdf_doc.has_structural_change is True
         finally:
             doc.close()
@@ -1079,22 +1081,23 @@ class TestRemainingBranches:
         finally:
             doc.close()
 
-    def test_rotate_pages_out_of_range_index_skipped(self, tmp_path):
-        """rotate_pages 含越界索引应跳过该页（branch 561->560）。"""
+    def test_rotate_pages_out_of_range_index_rejected(self, tmp_path):
+        """非法旋转拒绝整个操作，不部分修改。"""
         doc, pdf_doc = PdfService.open_doc(str(_create_test_pdf(tmp_path / "t.pdf")))
         try:
-            PdfService.rotate_pages(doc, pdf_doc, [0, 999], 90)
-            # page 0 仍被旋转
-            assert pdf_doc.pages[0].rotation == 90
+            with pytest.raises(ValueError, match="rotation"):
+                PdfService.rotate_pages(doc, pdf_doc, [0, 999], 90)
+            assert pdf_doc.pages[0].rotation == 0
         finally:
             doc.close()
 
-    def test_delete_pages_out_of_range_index_skipped(self, tmp_path):
-        """delete_pages 含越界索引应跳过该页（branch 578->577）。"""
+    def test_delete_pages_out_of_range_index_rejected(self, tmp_path):
+        """非法删页拒绝整个操作，不能部分删除。"""
         doc, pdf_doc = PdfService.open_doc(str(_create_test_pdf(tmp_path / "t.pdf")))
         try:
-            PdfService.delete_pages(doc, pdf_doc, [0, 999])
-            assert pdf_doc.page_count == 1
+            with pytest.raises(ValueError, match="index"):
+                PdfService.delete_pages(doc, pdf_doc, [0, 999])
+            assert pdf_doc.page_count == 2
         finally:
             doc.close()
 

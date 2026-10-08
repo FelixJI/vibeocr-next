@@ -27,6 +27,9 @@ Goal #110 隔离候选专用 Paddle 五模式实机冒烟。
 额外真实输入入口：file/batch 使用表格模式，pdf 使用文档结构模式。
 pdf_text_layer 使用文字 OCR，点击添加文字层并验证 dirty/保存状态；
 默认不运行；可与 Modes 空数组组合单独执行。
+pdf_operations 验证自动文字朝向与插页/重排组合，仅使用已准备的本地模型。
+新隔离环境应指定 Modes paddle_text，先通过普通 OCR 公共 UI 显式准备模型，
+再执行 pdf_operations；自动方向不会自行下载缺失模型。
 
 .PARAMETER ResumeRoot
 恢复模式：复用本脚本已创建的隔离根继续未完成的模式；与 ProductRoot/
@@ -51,7 +54,7 @@ param(
         'paddle_text', 'paddle_table', 'paddle_formula',
         'paddle_structure', 'paddle_document_vl'
     ),
-    [ValidateSet("file", "batch", "pdf", "pdf_text_layer")]
+    [ValidateSet("file", "batch", "pdf", "pdf_text_layer", "pdf_operations")]
     [string[]]$InputKinds = @(),
     [int]$ModeTimeoutMinutes = 40,
     [int]$InstallTimeoutMinutes = 60,
@@ -321,9 +324,9 @@ try {
         }
     }
     foreach ($inputKind in $InputKinds) {
-        $inputMode = if ($inputKind -eq 'pdf_text_layer') { 'paddle_text' } elseif ($inputKind -eq 'pdf') { 'paddle_structure' } else { 'paddle_table' }
+        $inputMode = if ($inputKind -in @('pdf_text_layer', 'pdf_operations')) { 'paddle_text' } elseif ($inputKind -eq 'pdf') { 'paddle_structure' } else { 'paddle_table' }
         $spec = $modeSpec[$inputMode]
-        $fixtureName = if ($inputKind -eq 'pdf_text_layer') { 'document_scan.pdf' } elseif ($inputKind -eq 'pdf') { 'document_mixed.pdf' } else { $spec.Fixture }
+        $fixtureName = if ($inputKind -eq 'pdf_operations') { 'document_orientation.pdf' } elseif ($inputKind -eq 'pdf_text_layer') { 'document_scan.pdf' } elseif ($inputKind -eq 'pdf') { 'document_mixed.pdf' } else { $spec.Fixture }
         $phaseName = "paddle-input-$inputKind"
         $healthPath = Join-Path $smokeRoot "$phaseName.json"
         if (Test-Path -LiteralPath $healthPath -PathType Leaf) {

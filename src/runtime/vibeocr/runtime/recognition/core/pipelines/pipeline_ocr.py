@@ -284,7 +284,7 @@ def _extract_preproc_info(
     preproc_w = preproc_h = 0
     dp_res = res.get("doc_preprocessor_res") if hasattr(res, "get") else None
     if dp_res is not None:
-        preproc_angle = dp_res.get("angle", 0)
+        preproc_angle = _extract_orientation_angle(res) or 0
         out_arr = dp_res.get("output_img")
         if out_arr is not None:
             preproc_h, preproc_w = out_arr.shape[:2]
@@ -298,6 +298,19 @@ def _extract_preproc_info(
                 pil_img.save(buf, format="PNG")
                 preprocessed_png = buf.getvalue()
     return preproc_angle, preprocessed_png, preproc_w, preproc_h
+
+
+def _extract_orientation_angle(res: Any) -> int | None:
+    """只投影分类器实际返回的象限；缺值和关闭分类的 -1 不代表正向。"""
+    dp_res = res.get("doc_preprocessor_res") if hasattr(res, "get") else None
+    angle = dp_res.get("angle") if dp_res is not None else None
+    if angle is None or isinstance(angle, bool):
+        return None
+    try:
+        value = int(angle)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if value in (0, 90, 180, 270) and value == angle else None
 
 
 def _recognize_ocr(
@@ -370,6 +383,11 @@ def _recognize_ocr(
         text_blocks=text_blocks,
     )
     result.preproc_angle = preproc_angle
+    result.doc_orientation_angle = (
+        _extract_orientation_angle(output_list[0])
+        if output_list and options.use_doc_orientation_classify
+        else None
+    )
     result.preprocessed_image = preprocessed_png
     result.preproc_img_w = preproc_w
     result.preproc_img_h = preproc_h
@@ -455,6 +473,11 @@ def _recognize_ocr_batch(
             text_blocks=blocks,
         )
         result.preproc_angle = preproc_angle
+        result.doc_orientation_angle = (
+            _extract_orientation_angle(res)
+            if options.use_doc_orientation_classify
+            else None
+        )
         result.preprocessed_image = preprocessed_png
         result.preproc_img_w = preproc_w
         result.preproc_img_h = preproc_h

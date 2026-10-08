@@ -299,7 +299,12 @@ public sealed record OpenPdfCommand : WorkbenchCommand;
 
 public sealed record OpenDroppedPdfCommand(string Path) : WorkbenchCommand;
 
-public sealed record RotatePdfCommand(int Degrees = 90) : WorkbenchCommand;
+public sealed record RotatePdfCommand(int Degrees = 90, string Range = "selected") : WorkbenchCommand;
+public sealed record OrientPdfCommand(string Range, bool Landscape) : WorkbenchCommand;
+public sealed record CorrectPdfOrientationCommand(string Range) : WorkbenchCommand;
+public sealed record InsertPdfBlankCommand(int AfterIndex, double Width, double Height, long Revision) : WorkbenchCommand;
+public sealed record InsertPdfFromCommand(int AfterIndex, long Revision) : WorkbenchCommand;
+public sealed record MovePdfPageCommand(int FromIndex, int ToIndex, long Revision) : WorkbenchCommand;
 
 public sealed record ClosePdfCommand : WorkbenchCommand;
 
@@ -314,6 +319,8 @@ public sealed record SetPdfProcessingSettingsCommand(VibeOCR.App.Features.Pdf.Pd
 public sealed record SavePdfCommand : WorkbenchCommand;
 
 public sealed record SelectPdfPagesCommand(IReadOnlyList<int> Pages) : WorkbenchCommand;
+public sealed record SelectAllPdfPagesCommand(bool Selected) : WorkbenchCommand;
+public sealed record SelectPdfPageCommand(int Page, bool Selected) : WorkbenchCommand;
 
 public sealed record SetPdfWindowCommand(int Start) : WorkbenchCommand;
 

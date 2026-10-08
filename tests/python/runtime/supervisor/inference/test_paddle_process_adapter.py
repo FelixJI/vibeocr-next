@@ -45,6 +45,20 @@ def test_worker_model_error_is_not_reported_as_payload():
     process.stdin.write.assert_called_once()
 
 
+def test_worker_preserves_local_model_failure_for_deterministic_job_feedback():
+    from vibeocr.runtime.environments.model_cache import LocalModelsNotPrepared
+
+    adapter = PaddleProcessAdapter(Path(sys.executable))
+    process = MagicMock()
+    adapter._process = process
+    adapter._responses.put(
+        '{"error":"not locally prepared","error_type":"LocalModelsNotPrepared"}'
+    )
+    with pytest.raises(LocalModelsNotPrepared):
+        adapter._exchange({"operation": "recognize"})
+    process.stdin.write.assert_called_once()
+
+
 def test_shutdown_escalates_only_when_worker_does_not_exit():
     adapter = PaddleProcessAdapter(Path(sys.executable))
     process = MagicMock()
