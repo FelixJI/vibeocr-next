@@ -264,6 +264,7 @@ it.each([
     expect(
       screen.getByRole("button", { name: "适应页面" }),
     ).toBeInTheDocument();
+    expect(screen.getByText("正在读取当前页高清预览…")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: label }));
     expect(actions.run).toHaveBeenLastCalledWith(command);
     actions.updatePdf(patch);
@@ -272,7 +273,7 @@ it.each([
       screen.queryByRole("button", { name: "适应页面" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByText("正在读取当前页高清预览。"),
+      screen.queryByText("正在读取当前页高清预览…"),
     ).not.toBeInTheDocument();
     expect(screen.queryByText(/第 0 \/ /)).not.toBeInTheDocument();
   },

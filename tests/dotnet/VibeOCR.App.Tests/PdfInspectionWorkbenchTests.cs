@@ -1,8 +1,12 @@
 using System.Text.Json;
 using VibeOCR.App.Features.Pdf;
+using VibeOCR.App.Features.Recognition;
+using VibeOCR.App.Features.Settings;
+using VibeOCR.App.Features.Shell;
 using VibeOCR.App.ViewModels;
 using VibeOCR.App.Web;
 using VibeOCR.App.Workbench;
+using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
@@ -184,6 +188,81 @@ public sealed class PdfInspectionWorkbenchTests
     finally { Directory.Delete(root, recursive: true); }
   }
 
+  [Theory]
+  [InlineData(true, true)]
+  [InlineData(true, false)]
+  [InlineData(false, true)]
+  public async Task CatalogRefreshLoadsOpenedPageOnlyWhenInspectionBecomesAvailable(bool opened, bool available)
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-pdf-catalog-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      var client = new Client();
+      var settings = new SettingsViewModel(client);
+      PdfViewModel? model = opened ? new PdfViewModel(client, new Source()) : null;
+      if (model is not null) await model.OpenPathAsync("synthetic.pdf", CancellationToken.None);
+      int factoryCalls = 0;
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        () => new RecognitionViewModel(client, new NoInput()),
+        static () => throw new InvalidOperationException(), static () => throw new InvalidOperationException(),
+        () => { factoryCalls++; return model ?? throw new InvalidOperationException("Catalog refresh must not create a PDF view model."); },
+        () => settings, static () => new ShellViewModel(new NoShellActions(), new NoShellActions()), static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])), broker, root, static () => 0, annotations);
+      await handler.RefreshRecognitionCatalogAsync(TestContext.Current.CancellationToken);
+      if (opened)
+      {
+        PdfWorkbenchState legacy = await SelectAsync(handler, 0);
+        Assert.False(legacy.CanInspectPage); Assert.Null(legacy.PagePreview); Assert.Null(legacy.PageInspect);
+        Assert.NotNull(legacy.Pages![0].Thumbnail);
+      }
+      Assert.False(client.InspectEntered.Task.IsCompleted); Assert.Equal(0, client.PreviewCalls);
+      long revision = model?.Revision ?? 0;
+      client.Capabilities = available ? ["pdf.edit.v2", "pdf.page-inspect.v1", "pdf.block-edit.v1"] : ["pdf.edit.v2"];
+      var published = new List<PdfWorkbenchState>();
+      handler.StateChanged += state => { if (state is PdfWorkbenchState current) published.Add(current); };
+      await handler.RefreshRecognitionCatalogAsync(TestContext.Current.CancellationToken);
+      PdfWorkbenchState refreshed = Assert.Single(published);
+      Assert.Equal(opened ? 1 : 0, factoryCalls);
+      Assert.Equal(revision, model?.Revision ?? 0);
+      if (opened && available)
+      {
+        Assert.True(refreshed.CanInspectPage); Assert.True(refreshed.CanCorrectText);
+        Assert.Equal("pdf.inspect.ready", refreshed.PageInspectStatusCode);
+        Assert.NotNull(refreshed.PagePreview); Assert.NotNull(refreshed.PageInspect);
+        Assert.Equal(1, client.PreviewCalls); Assert.Equal(300, client.LastDpi);
+        await using WorkbenchResourceResponse content = await broker.OpenAsync(new Uri(refreshed.PageInspect.Url), TestContext.Current.CancellationToken);
+        using JsonDocument payload = await JsonDocument.ParseAsync(content.Content, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(0, payload.RootElement.GetProperty("page").GetInt32());
+      }
+      else
+      {
+        Assert.False(refreshed.CanInspectPage); Assert.Null(refreshed.PagePreview); Assert.Null(refreshed.PageInspect);
+        Assert.False(client.InspectEntered.Task.IsCompleted); Assert.Equal(0, client.PreviewCalls);
+        if (opened) Assert.NotNull(refreshed.Pages![0].Thumbnail);
+        else { Assert.Equal(0, refreshed.PageCount); Assert.Equal(-1, refreshed.SelectedPage); }
+      }
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  private sealed class NoShellActions : IHotkeyRegistrar, IStartupRegistrar
+  {
+    public bool Register(string hotkey, out string? conflict) => throw new NotSupportedException();
+    public void Unregister() => throw new NotSupportedException();
+    public bool SetEnabled(bool enabled) => throw new NotSupportedException();
+  }
+
+  private sealed class NoInput : IInputService
+  {
+    public Task<RecognitionInput?> PickFileAsync(CancellationToken ct) => throw new NotSupportedException();
+    public Task<RecognitionInput?> ReadClipboardAsync(CancellationToken ct) => throw new NotSupportedException();
+    public Task<RecognitionInput?> CaptureScreenAsync(CancellationToken ct) => throw new NotSupportedException();
+    public Task<RecognitionInput?> ReadDroppedFileAsync(string path, CancellationToken ct) => throw new NotSupportedException();
+  }
+
   private static async Task<PdfWorkbenchState> SelectAsync(DesktopWorkbenchCommandHandler handler, int page) =>
     State(await handler.ExecuteAsync(new SetCurrentPdfPageCommand(page), CancellationToken.None));
   private static PdfWorkbenchState State(WorkbenchCommandOutcome outcome) => Assert.IsType<PdfWorkbenchState>(Assert.Single(outcome.States));
@@ -199,6 +278,13 @@ public sealed class PdfInspectionWorkbenchTests
   }
   private sealed class Client : InferenceClientStub
   {
+    public IReadOnlyList<string> Capabilities { get; set; } = ["pdf.edit.v2"];
+    public override Task<Wire.Health> GetHealthAsync(CancellationToken ct) => Task.FromResult(new Wire.Health
+    {
+      SchemaVersion = 2, InstanceId = "test", ProtocolVersion = 2, Ready = true, Draining = false,
+      Capabilities = Capabilities, CapabilityDescriptors = [],
+    });
+    public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken ct) => Task.FromResult(new SettingsSnapshot());
     public bool FailPreview { get; set; }
     public int PreviewCalls { get; private set; }
     public int LastDpi { get; private set; }

@@ -27,7 +27,8 @@ namespace VibeOCR.App;
 /// </summary>
 public sealed partial class MainWindow
 {
-  private const string PaddleSmokeEnvironmentName = "PaddleOCR · CPU";
+  // 隔离验收环境使用 ASCII 名，避免依赖所在卷是否启用 8.3 短名称。
+  private const string PaddleSmokeEnvironmentName = "paddle-smoke-cpu";
   private const string PaddleSmokeRecipe = "paddleocr-cpu";
   // 安装预检失败可能只出现在公开状态中，不生成持久失败记录。
   private const string PaddleSmokeInstallRejectedStatus = "安装未完成；失败原因请查看该环境记录。";

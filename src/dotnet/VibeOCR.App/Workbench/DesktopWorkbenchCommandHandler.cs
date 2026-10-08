@@ -3881,7 +3881,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     StateChanged?.Invoke(pdf is null
       ? new PdfWorkbenchState(false, "pdf.empty", 0, -1,
           Engines: PdfEngines(), TaskEngine: pdfTaskEngine)
-      : PdfState(pdf));
+      : await PdfStateAsync(pdf, cancellationToken));
   }
 
   internal async Task RefreshRecognitionCatalogAsync(CancellationToken cancellationToken)
