@@ -29,6 +29,8 @@ public sealed partial class MainWindow
 {
   private const string PaddleSmokeEnvironmentName = "PaddleOCR · CPU";
   private const string PaddleSmokeRecipe = "paddleocr-cpu";
+  // 安装事务启动前的拒绝只出现在公开状态中，不会生成持久失败记录。
+  private const string PaddleSmokeInstallRejectedStatus = "安装未完成；失败原因请查看该环境记录。";
   // paddleModesSmokeStarted 字段随 MainWindow.xaml.cs 的 OnHostStateChanged
   // 钩子一并声明（见交付说明），本文件只引用不声明，避免未读告警。
   private string paddleSmokeStage = "starting";
@@ -200,13 +202,19 @@ public sealed partial class MainWindow
       "document.querySelector('.runtime-install-plan')?.textContent.includes('TUNA PyPI 镜像')",
       TimeSpan.FromMinutes(2));
     string planText = await PaddleSmokeDomTextAsync(".runtime-install-plan") ?? "";
-    RecordPaddleSmokeStage("confirm install");
-    await ClickManagedSmokeButtonAsync("确认安装依赖");
     int timeoutMinutes = ParsePaddleSmokeMinutes(
       "VIBEOCR_PADDLE_SMOKE_INSTALL_TIMEOUT_MINUTES", 60);
+    // 等待启动与安装共享同一超时预算。
     using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMinutes));
+    RecordPaddleSmokeStage("wait install executable");
+    await WaitForPaddleSmokeInstallExecutableAsync(timeout.Token);
+    RecordPaddleSmokeStage("confirm install");
+    SettingsWorkbenchState beforeConfirm = await PaddleSmokeSettingsStateAsync(timeout.Token);
+    int attemptsBeforeConfirm = smokeInstallAttempts!();
+    await ClickManagedSmokeButtonAsync("确认安装依赖");
     while (true)
     {
+      SettingsWorkbenchState settingsState = await PaddleSmokeSettingsStateAsync(timeout.Token);
       ManagedEnvironment? current = smokeEnvironmentSnapshot!()?.Environments
         .SingleOrDefault(item => item.Id == environment.Id);
       if (current?.LastInstallFailure is { Phase: "failed" } failure)
@@ -226,7 +234,44 @@ public sealed partial class MainWindow
       if (current?.Status is "failed" or "unavailable")
         throw new InvalidOperationException(
           $"{PaddleSmokeRecipe} install failed: {current.Reason}");
+      // 请求在事务启动前被拒时及时退出，不等待不存在的安装终态。
+      if (smokeInstallAttempts!() == attemptsBeforeConfirm &&
+          current?.Status == "empty" &&
+          !settingsState.EnvironmentBusy && !settingsState.EnvironmentCanCancelInstall &&
+          settingsState.EnvironmentStatus != beforeConfirm.EnvironmentStatus &&
+          settingsState.EnvironmentStatus.StartsWith(
+            PaddleSmokeInstallRejectedStatus, StringComparison.Ordinal))
+      {
+        paddleSmokeOutcome = "blocked";
+        throw new InvalidOperationException(
+          "Confirm install was rejected before any attempt: " +
+          $"{settingsState.EnvironmentStatus}; maintenance=" +
+          $"{JsonSerializer.Serialize(settingsState.Maintenance)}; progress=" +
+          $"{JsonSerializer.Serialize(settingsState.EnvironmentInstallProgress)}");
+      }
       await Task.Delay(500, timeout.Token);
+    }
+  }
+
+  private async Task<SettingsWorkbenchState> PaddleSmokeSettingsStateAsync(
+    CancellationToken cancellation) =>
+    (await application.BootstrapAsync(cancellation))
+      .States.Select(item => item.State).OfType<SettingsWorkbenchState>().Single();
+
+  // 默认初始化释放维护锁后才连接推理；单看设置维护状态不足以判断就绪。
+  private async Task WaitForPaddleSmokeInstallExecutableAsync(
+    CancellationToken cancellation)
+  {
+    while (true)
+    {
+      if (smokeInferenceAttached!())
+      {
+        SettingsWorkbenchState settings = await PaddleSmokeSettingsStateAsync(cancellation);
+        if (settings.Maintenance is not { IsRunning: true } &&
+            !settings.EnvironmentBusy && !settings.EnvironmentCanCancelInstall)
+          return;
+      }
+      await Task.Delay(500, cancellation);
     }
   }
 
