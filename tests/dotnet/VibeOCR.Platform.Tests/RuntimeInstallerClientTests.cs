@@ -1,3 +1,4 @@
+using ManagedEnvironmentInstallProgress = VibeOCR.Runtime.Contracts.Generated.Host.ManagedEnvironmentInstallEvent;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
@@ -1824,6 +1825,108 @@ public sealed class RuntimeInstallerClientTests
         Assert.Equal("mineru-modelscope", request.GetProperty("mineru_model_source_id").GetString());
         Assert.False(request.TryGetProperty("model_source_id", out _));
         Assert.Equal("paddleocr-bos", Assert.Single(result.ResolvedDefaultSources!).Id);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ManagedProgressNegotiatesCapabilityAndRejectsDuplicateForeignAndLateEvents(bool supported)
+    {
+        var value = new ManagedEnvironmentInstallProgress
+        {
+            EventVersion = 1, EventKind = "environment_install", AttemptId = new string('a', 32), PlanId = "plan",
+            EnvironmentId = "env", EnvironmentRevision = 1, Seq = 1, Timestamp = "2026-10-08T00:00:00Z",
+            Phase = "install", State = "running", Current = "batch", Dependencies = [], DependencyTotalKnown = true,
+            DownloadFilesTotal = 0, DownloadFilesCompleted = 0, BytesCurrent = 3000000000, BytesTotal = null, Heartbeat = false,
+        };
+        string Event(ManagedEnvironmentInstallProgress update)
+        {
+            JsonObject result = JsonSerializer.SerializeToNode(update)!.AsObject();
+            result["event_version"] = 1;
+            result["event_kind"] = "environment_install";
+            return result.ToJsonString();
+        }
+        var runner = new ManagedProgressRunner(supported,
+        [Event(value), Event(value), Event(value with { EnvironmentId = "foreign", Seq = 10 }),
+            Event(value with { AttemptId = new string('b', 32), Seq = 11 }),
+            Event(value with { Seq = 20, Phase = "invented" }),
+            Event(value with { Seq = 21, DownloadFilesCompleted = -1 }),
+            Event(value with { Seq = 22, Log = new Host.ManagedInstallLog { Stream = "other", Text = "invalid", Truncated = false } }),
+            Event(value with { Seq = 23, Log = new Host.ManagedInstallLog { Stream = "stdout", Text = new string('x', 4001), Truncated = false } }),
+            Event(value with { Seq = 2, State = "succeeded", Phase = "complete" }),
+            Event(value with { Seq = 12 })]);
+        var client = new RuntimeInstallerClient(Configuration(), runner);
+        await client.ListEnvironmentsAsync(TestContext.Current.CancellationToken);
+        var observed = new List<ManagedEnvironmentInstallProgress>();
+        await client.InstallEnvironmentAsync(new ManagedEnvironmentPlan("plan", "env", 1, 0,
+            "rapidocr-cpu", ["tuna-pypi"]), null, update =>
+            {
+                observed.Add(update);
+                throw new InvalidOperationException("observer failure");
+            }, TestContext.Current.CancellationToken);
+        Assert.Equal(supported ? 2 : 0, observed.Count);
+        Assert.Equal(supported, Request(runner.LastStartInfo!).TryGetProperty("accepted_event_streams", out _));
+        if (supported) Assert.Equal("succeeded", observed[^1].State);
+    }
+
+    [Fact]
+    public async Task RealRunnerDrainsLargeOutputDespiteObserverFailureAndKeepsFinalEnvelope()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-output-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string script = Path.Combine(root, "output.ps1");
+            await File.WriteAllTextAsync(script, """
+                [Console]::WriteLine('{"event_version":1,"event_kind":"environment_install"}')
+                Start-Sleep -Milliseconds 500
+                for ($i=0; $i -lt 1000; $i++) {
+                  [Console]::WriteLine('{"event_version":1}')
+                  [Console]::Error.WriteLine(('x' * 100))
+                }
+                [Console]::WriteLine(('x' * 1100000))
+                [Console]::WriteLine('{"protocol_version":2,"ok":true}')
+                """, TestContext.Current.CancellationToken);
+            var start = new ProcessStartInfo
+            {
+                FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
+                    "WindowsPowerShell", "v1.0", "powershell.exe"),
+                UseShellExecute = false, CreateNoWindow = true,
+                RedirectStandardOutput = true, RedirectStandardError = true,
+            };
+            foreach (string arg in new[] { "-NoProfile", "-NonInteractive", "-File", script }) start.ArgumentList.Add(arg);
+            var seen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Task<RuntimeInstallerProcessResult> running = RuntimeInstallerCommandRunner.RunProcessAsync(start,
+                _ => { seen.TrySetResult(); throw new InvalidOperationException("observer broke"); },
+                TestContext.Current.CancellationToken);
+            await seen.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Assert.False(running.IsCompleted);
+            RuntimeInstallerProcessResult result = await running.WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+            Assert.Equal(0, result.ExitCode);
+            Assert.DoesNotContain("event_version", result.StandardOutput);
+            using JsonDocument final = JsonDocument.Parse(result.StandardOutput);
+            Assert.True(final.RootElement.GetProperty("ok").GetBoolean());
+            Assert.True(result.StandardError.Length <= 16000);
+        }
+        finally { TestDirectory.Delete(root, recursive: true); }
+    }
+
+    private sealed class ManagedProgressRunner(bool supported, string[] events) : IRuntimeInstallerCommandRunner
+    {
+        public ProcessStartInfo? LastStartInfo { get; private set; }
+        public Task<RuntimeInstallerProcessResult> RunAsync(ProcessStartInfo start, CancellationToken token) =>
+            RunAsync(start, null, token);
+        public Task<RuntimeInstallerProcessResult> RunAsync(ProcessStartInfo start, Action<string>? output, CancellationToken token)
+        {
+            LastStartInfo = start;
+            if (Request(start).GetProperty("action").GetString() == "list")
+                return Task.FromResult(new RuntimeInstallerProcessResult(0,
+                    "{\"protocol_version\":2,\"response_kind\":\"environment\",\"action\":\"list\",\"result\":{\"active_id\":null,\"active_revision\":0,\"environments\":[],\"capabilities\":" +
+                        (supported ? "[\"environment.install_progress.v1\"]" : "[]") + "}}", ""));
+            foreach (string line in events) output?.Invoke(line);
+            return Task.FromResult(new RuntimeInstallerProcessResult(0,
+                """{"protocol_version":2,"response_kind":"environment","action":"install","result":{"id":"env","name":"env","revision":2,"kind":"venv","status":"installed"}}""", ""));
+        }
     }
 
     private static RuntimeInstallerConfiguration Configuration() =>

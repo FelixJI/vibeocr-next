@@ -17,6 +17,12 @@ from urllib.request import ProxyHandler, build_opener
 from uuid import uuid4
 
 from packaging.utils import InvalidWheelFilename, parse_wheel_filename
+from vibeocr.runtime.environments.managed_install_progress import (
+    CAPABILITY as INSTALL_PROGRESS_CAPABILITY,
+)
+from vibeocr.runtime.environments.managed_install_progress import (
+    ManagedInstallObserver,
+)
 from vibeocr.runtime.environments.managed_references import environment_has_references
 from vibeocr.runtime.environments.runtime_install_plan import (
     RuntimeInstallPlanStale,
@@ -185,6 +191,7 @@ class ManagedEnvironmentStore:
         product_id: str | None = None,
         base_python: str | Path | None = None,
         install_runner: Callable[[Path, RuntimeInstallScope, str], None] | None = None,
+        event_sink: Callable[[dict], None] | None = None,
     ) -> None:
         self.product_root = Path(product_root).resolve()
         self.component_lock_path = Path(component_lock).resolve()
@@ -220,6 +227,8 @@ class ManagedEnvironmentStore:
         self._install_runner = install_runner or self._install_scope
         self._install_cancelled = False
         self._install_terminal = False
+        self._event_sink = event_sink
+        self._install_observer: ManagedInstallObserver | None = None
 
     def cancel_install(self, acknowledge: Callable[[bool], None]) -> None:
         """Acknowledge before kill, serialized with both terminal registry writes.
@@ -1269,6 +1278,7 @@ class ManagedEnvironmentStore:
             return {
                 "active_id": data["active_id"],
                 "active_revision": data["active_revision"],
+                "capabilities": [INSTALL_PROGRESS_CAPABILITY],
                 "recipes": self.recipe_catalog(),
                 "hardware": hardware,
                 "sources": [
@@ -1903,7 +1913,18 @@ class ManagedEnvironmentStore:
                 record = {**record, "last_install_operation": operation}
                 data["environments"][env_id] = record
                 _atomic_json(self._registry, data)
+            observer = ManagedInstallObserver(
+                self._event_sink,
+                self._check_install_cancelled,
+                plan_id,
+                env_id,
+                record["revision"],
+                list(plan["source_ids"]),
+            )
+            self._install_observer = observer
             try:
+                observer.requirements(scope.lock_path, self.manifest.python.version)
+                observer.set_phase("prepare", "初始化 Python 解释器（随产品提供）")
                 base = self._base_python()
                 result = subprocess.run(
                     [str(base), "-I", "-m", "venv", "--copies", str(root)],
@@ -1940,6 +1961,7 @@ class ManagedEnvironmentStore:
                         "abi": self.manifest.python.abi,
                     }
                 )
+                observer.set_phase("verify", "检查环境解释器与识别依赖；模型尚未下载")
                 probe = self._probe(candidate)
                 if not probe["healthy"]:
                     raise ManagedEnvironmentError(
@@ -1973,6 +1995,12 @@ class ManagedEnvironmentStore:
                     _atomic_json(self._registry, latest)
                     self._install_terminal = True
             except Exception as error:
+                observer.finish(
+                    "cancelled"
+                    if isinstance(error, ManagedEnvironmentInstallCancelled)
+                    else "failed",
+                    str(error),
+                )
                 guidance = failure_guidance(error)
                 if isinstance(error, RuntimeInstallPlanStale):
                     guidance = {
@@ -2008,6 +2036,7 @@ class ManagedEnvironmentStore:
                     # recording the more specific failure detail.
                     pass
                 raise
+            observer.finish("succeeded", "依赖已验证并提交；模型与服务尚未启动")
             return self._public_record(candidate, probe, latest)
 
     def _install_scope(
@@ -2035,6 +2064,7 @@ class ManagedEnvironmentStore:
                 "PIP_NO_INPUT": "1",
                 "PYTHONNOUSERSITE": "1",
                 "PYTHONUTF8": "1",
+                "PYTHONUNBUFFERED": "1",
             }
         )
         (cache / "pip").mkdir(parents=True, exist_ok=True)
@@ -2042,13 +2072,21 @@ class ManagedEnvironmentStore:
         pack_files = [self.manifest.path.parent / name for name in scope.runtime_pack]
         if pack_files and not all(path.is_file() for path in pack_files):
             raise ManagedEnvironmentError("bound offline engine pack is missing")
-        command = [str(python), "-m", "pip", "install"]
+        observer = self._install_observer
+        command = [str(python), "-m", "pip", "install", "--progress-bar", "off"]
         if pack_files and all(path.is_file() for path in pack_files):
+            if observer is not None:
+                observer.set_phase("unpack", "解包随产品提供的离线依赖")
             pack_dir = _extract_runtime_pack(
                 pack_files,
                 cache / "runtime-packs",
                 expected_sha256=scope.runtime_pack_sha256,
             )
+            if observer is not None:
+                observer.requirements(
+                    pack_dir / "pack-requirements.txt", self.manifest.python.version
+                )
+                observer.bundled()
             command += [
                 "--no-index",
                 "--find-links",
@@ -2058,8 +2096,10 @@ class ManagedEnvironmentStore:
                 str(pack_dir / "pack-requirements.txt"),
             ]
         else:
+            if observer is not None:
+                observer.set_phase("resolve", "解析锁定依赖及可复用缓存")
             downloaded = _prepare_online_artifacts(
-                python, scope.lock_path, endpoint, cache, None, env
+                python, scope.lock_path, endpoint, cache, observer, env
             )
             command += [
                 "--index-url",
@@ -2070,13 +2110,21 @@ class ManagedEnvironmentStore:
                 "-r",
                 str(scope.lock_path),
             ]
+        if observer is not None:
+            observer.set_phase("install", "安装锁定依赖批次")
         _run_install_command(
             command,
             timeout=3600,
             env=env,
-            reporter=None,
+            reporter=observer,
             heartbeat_code="runtime.install_profile",
         )
+        if observer is not None:
+            observer.installed_batch()
+            observer.set_phase(
+                "runtime_wheel",
+                "安装内部 Runtime wheel（随产品提供，独立于目标依赖计数）",
+            )
         _run_install_command(
             [
                 str(python),
@@ -2089,21 +2137,23 @@ class ManagedEnvironmentStore:
             ],
             timeout=600,
             env=env,
-            reporter=None,
+            reporter=observer,
             heartbeat_code="runtime.install_backend",
         )
+        if observer is not None:
+            observer.set_phase("verify", "验证 Runtime 导入与依赖一致性")
         _run_install_command(
             [str(python), "-c", "import vibeocr.runtime.host.main"],
             timeout=60,
             env=env,
-            reporter=None,
+            reporter=observer,
             heartbeat_code="runtime.verify_runtime",
         )
         _run_install_command(
             [str(python), "-m", "pip", "check"],
             timeout=60,
             env=env,
-            reporter=None,
+            reporter=observer,
             heartbeat_code="runtime.verify_runtime",
         )
 

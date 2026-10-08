@@ -2104,6 +2104,7 @@ def test_frozen_manager_exposes_named_environment_list(
         }
     }
     assert response["result"] == {
+        "capabilities": ["environment.install_progress.v1"],
         "active_id": None,
         "active_revision": 0,
         "sources": [

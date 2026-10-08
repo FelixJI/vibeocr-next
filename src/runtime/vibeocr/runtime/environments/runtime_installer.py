@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any, TextIO
 from uuid import uuid4
 
 import httpx
+from vibeocr.runtime.environments.managed_install_progress import ManagedInstallObserver
 from vibeocr.runtime.environments.runtime_install_plan import (
     CAPABILITY,
     bind_plan,
@@ -210,8 +211,9 @@ def _safe_child_text(text: str) -> str:
 def _drain_child_lines(
     stream: TextIO,
     lines: deque[str],
-    line_queue: queue.Queue[str],
+    line_queue: queue.Queue[tuple[str, str, bool]],
     done: threading.Event,
+    stream_name: str,
 ) -> None:
     # Bound both memory and individual lines. Never publish fragments of a long
     # line: a credential could straddle the read boundary.
@@ -220,12 +222,19 @@ def _drain_child_lines(
         while line := stream.readline(_OUTPUT_TAIL_MAX_CHARS + 1):
             too_long = len(line) > _OUTPUT_TAIL_MAX_CHARS
             if dropping or too_long:
+                if not dropping:
+                    try:
+                        line_queue.put_nowait(
+                            (stream_name, "[output truncated: long line]", True)
+                        )
+                    except queue.Full:
+                        pass
                 dropping = not line.endswith("\n")
                 continue
             safe = _safe_child_text(line)
             lines.append(safe)
             try:
-                line_queue.put_nowait(safe)
+                line_queue.put_nowait((stream_name, safe, False))
             except queue.Full:
                 # Stale display output may be discarded, but draining must never
                 # block cancellation. The independent stderr/stdout tails remain.
@@ -234,7 +243,7 @@ def _drain_child_lines(
                 except queue.Empty:
                     pass
                 try:
-                    line_queue.put_nowait(safe)
+                    line_queue.put_nowait((stream_name, safe, True))
                 except queue.Full:
                     pass
     finally:
@@ -267,7 +276,7 @@ def _run_install_command(
     *,
     timeout: float,
     env: dict[str, str],
-    reporter: RuntimeMaintenanceReporter | None,
+    reporter: RuntimeMaintenanceReporter | ManagedInstallObserver | None,
     heartbeat_code: str,
     idle_timeout: float | None = None,
 ) -> None:
@@ -339,7 +348,7 @@ def _run_install_command(
         ) from None
     readers: list[threading.Thread] = []
     done = [threading.Event(), threading.Event()]
-    line_queue: queue.Queue[str] = queue.Queue(maxsize=64)
+    line_queue: queue.Queue[tuple[str, str, bool]] = queue.Queue(maxsize=64)
     try:
         if os.name == "nt":
             if not guard.assign_from_popen(process):
@@ -354,7 +363,13 @@ def _run_install_command(
         for index, stream in enumerate((process.stdout, process.stderr)):
             reader = threading.Thread(
                 target=_drain_child_lines,
-                args=(stream, tails[index], line_queue, done[index]),
+                args=(
+                    stream,
+                    tails[index],
+                    line_queue,
+                    done[index],
+                    "stdout" if index == 0 else "stderr",
+                ),
                 daemon=True,
             )
             readers.append(reader)
@@ -385,11 +400,13 @@ def _run_install_command(
                     next_action="check_source_and_retry",
                 )
             try:
-                line = line_queue.get(
+                stream_name, line, truncated = line_queue.get(
                     timeout=min(0.1, max(0.001, timeout - (now - started)))
                 )
             except queue.Empty:
                 line = ""
+            if line and isinstance(reporter, ManagedInstallObserver):
+                reporter.output(stream_name, line, truncated)
             detail = _child_status_detail(line)
             if detail is not None and detail != last_detail:
                 last_detail = detail
@@ -439,6 +456,8 @@ def _run_install_command(
         process.wait(timeout=5)
         for reader in readers:
             reader.join(timeout=5)
+        if isinstance(reporter, ManagedInstallObserver):
+            reporter.flush_output()
         if not readers:
             if process.stdout is not None:
                 process.stdout.close()
@@ -617,7 +636,7 @@ def _download_resolved_artifacts(
     artifacts: tuple[_ResolvedArtifact, ...],
     allowed_hashes: dict[str, set[str]],
     download_root: Path,
-    reporter: RuntimeMaintenanceReporter | None,
+    reporter: RuntimeMaintenanceReporter | ManagedInstallObserver | None,
 ) -> Path:
     """Fetch each verified artifact once; progress counts this batch's network bytes."""
     download_root.mkdir(parents=True, exist_ok=True)
@@ -687,6 +706,9 @@ def _download_resolved_artifacts(
                 if cached_digest is not None:
                     report("runtime.download_cache_invalid", package=artifact.name)
                 pending.append((artifact, expected))
+        if isinstance(reporter, ManagedInstallObserver):
+            reporter.download_total = len(pending)
+            reporter.emit()
         if not pending:
             return
         async with _download_client() as client:
@@ -808,7 +830,7 @@ def _resolve_online_report(
     lock: Path,
     endpoint: str,
     cache: Path,
-    reporter: RuntimeMaintenanceReporter | None,
+    reporter: RuntimeMaintenanceReporter | ManagedInstallObserver | None,
     env: dict[str, str],
 ) -> Path:
     """Resolve the lock closure with ``pip --dry-run --report``.
@@ -885,7 +907,7 @@ def _prepare_online_artifacts(
     lock: Path,
     endpoint: str,
     cache: Path,
-    reporter: RuntimeMaintenanceReporter | None,
+    reporter: RuntimeMaintenanceReporter | ManagedInstallObserver | None,
     env: dict[str, str],
 ) -> Path:
     """Resolve and download the online lock closure; return the artifact dir."""
@@ -902,6 +924,8 @@ def _prepare_online_artifacts(
             and _file_sha256(wheel) in allowed[name]
         ):
             shutil.copyfile(wheel, downloads / wheel.name)
+    if isinstance(reporter, ManagedInstallObserver):
+        reporter.set_phase("download", "核验缓存并下载缺失依赖")
     return _download_resolved_artifacts(
         _parse_resolve_report(
             _resolve_online_report(python, lock, endpoint, cache, reporter, env),
@@ -918,7 +942,7 @@ def _default_install_runner(
     manifest: RuntimeManifest,
     install_scope: RuntimeInstallScope,
     download_sources: tuple[BoundDownloadSource, ...],
-    reporter: RuntimeMaintenanceReporter | None = None,
+    reporter: RuntimeMaintenanceReporter | ManagedInstallObserver | None = None,
     *,
     cache_root: Path | None = None,
 ) -> Path:
@@ -1207,7 +1231,7 @@ def _extract_runtime_pack(
     cache_root: Path,
     *,
     expected_sha256: tuple[str, ...],
-    reporter: RuntimeMaintenanceReporter | None = None,
+    reporter: RuntimeMaintenanceReporter | ManagedInstallObserver | None = None,
 ) -> Path:
     """Idempotently extract manifest-bound runtime pack parts into the cache.
 
@@ -2467,6 +2491,7 @@ def _request(value: object) -> dict[str, Any]:
     elif request_kind == "environment":
         required = binding_fields | {"request_kind", "action"}
         allowed = required | {
+            "accepted_event_streams",
             "layout_manifest",
             "product_id",
             "name",
@@ -2587,6 +2612,11 @@ def _request(value: object) -> dict[str, Any]:
             set(value)
             - binding_fields
             - {"request_kind", "action", "layout_manifest", "product_id"}
+            - (
+                {"accepted_event_streams"}
+                if action in {"install", "initialize_default"}
+                else set()
+            )
         )
         if (
             extras
@@ -2661,7 +2691,15 @@ def _request(value: object) -> dict[str, Any]:
         not isinstance(accepted_streams, list)
         or any(not isinstance(stream, str) for stream in accepted_streams)
         or len(set(accepted_streams)) != len(accepted_streams)
-        or any(stream not in {"ndjson.v1", "ndjson.v2"} for stream in accepted_streams)
+        or any(
+            stream
+            not in (
+                {"environment.install_progress.v1"}
+                if request_kind == "environment"
+                else {"ndjson.v1", "ndjson.v2"}
+            )
+            for stream in accepted_streams
+        )
     ):
         raise RuntimeInstallError("Runtime Host accepted_event_streams is invalid")
     for field in ("component_ids", "required_capabilities"):
@@ -3020,6 +3058,10 @@ def main(argv: list[str] | None = None) -> int:
                 runtime_manifest=request["runtime_manifest"],
                 layout_manifest=request.get("layout_manifest"),
                 product_id=request.get("product_id"),
+                event_sink=_emit
+                if "environment.install_progress.v1"
+                in request.get("accepted_event_streams", [])
+                else None,
             )
             action = request["action"]
             if args.environment_cancel_control and action in {

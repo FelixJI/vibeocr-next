@@ -1,3 +1,5 @@
+using ManagedInstallLog = VibeOCR.Runtime.Contracts.Generated.Host.ManagedInstallLog;
+using ManagedEnvironmentInstallProgress = VibeOCR.Runtime.Contracts.Generated.Host.ManagedEnvironmentInstallEvent;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -280,6 +282,41 @@ public sealed class ManagedEnvironmentSettingsTests
     Assert.Equal(1, manager.InstallCalls);
     Assert.Equal(0, manager.CreateCalls);
     Assert.Null(settings.Plan);
+  }
+
+  [Fact]
+  public async Task InstallObserverKeepsBoundedLogAndCommittedSnapshotAcrossRefresh()
+  {
+    var manager = new MutableManager();
+    var settings = NewSettings(manager);
+    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi", TestContext.Current.CancellationToken);
+    var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    manager.BeforeInstall = async () => { started.SetResult(); await release.Task; };
+    Task install = settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
+    await started.Task;
+    var update = new ManagedEnvironmentInstallProgress
+    {
+      EventVersion = 1, EventKind = "environment_install", AttemptId = new string('a', 32), PlanId = "plan",
+      EnvironmentId = "environment", EnvironmentRevision = 1, Seq = 1, Timestamp = "2026-10-08T00:00:00Z",
+      Phase = "install", State = "running", Current = "batch", Dependencies = [], DependencyTotalKnown = true,
+      DownloadFilesTotal = 0, DownloadFilesCompleted = 0, BytesCurrent = 0, BytesTotal = null, Heartbeat = false,
+      Log = new ManagedInstallLog { Stream = "stdout", Text = "Installing collected packages", Truncated = false },
+    };
+    for (int index = 1; index <= 220; index++) manager.Observer!(update with { Seq = index });
+    manager.Observer!(update with { Seq = 500, EnvironmentId = "other", State = "failed" });
+    manager.Observer!(update with { Seq = 221, State = "succeeded", Phase = "complete", Log = null });
+    manager.Observer!(update with { Seq = 999, State = "running" });
+    release.SetResult();
+    await install;
+    for (int count = 0; settings.InstallProgress?.State != "succeeded" && count < 100; count++)
+      await Task.Delay(10, TestContext.Current.CancellationToken);
+    Assert.Equal("succeeded", settings.InstallProgress?.State);
+    Assert.InRange(settings.InstallLog.Count, 1, 201);
+    Assert.Contains("[较早输出已截断]", settings.InstallLog);
+    await settings.RefreshAsync(TestContext.Current.CancellationToken);
+    Assert.Equal("succeeded", settings.InstallProgress?.State);
+    Assert.Equal(1, manager.InstallCalls);
   }
 
   private static ManagedEnvironmentSettings NewSettings(IManagedEnvironmentClient manager) =>
@@ -819,6 +856,8 @@ public sealed class ManagedEnvironmentSettingsTests
     public int CreateCalls { get; private set; }
     public int PreviewCalls { get; private set; }
     public int InstallCalls { get; private set; }
+    public bool SupportsEnvironmentInstallProgress => true;
+    public Action<ManagedEnvironmentInstallProgress>? Observer { get; private set; }
     public Func<Task>? BeforeList { get; set; }
     public Func<Task>? BeforeFind { get; set; }
     public Func<Task>? BeforePreview { get; set; }
@@ -921,6 +960,14 @@ public sealed class ManagedEnvironmentSettingsTests
         DependencyState = "installed",
       };
       return environments[index];
+    }
+
+    public Task<ManagedEnvironment> InstallEnvironmentAsync(
+      ManagedEnvironmentPlan plan, IReadOnlyList<string>? sourceIds,
+      Action<ManagedEnvironmentInstallProgress> progress, CancellationToken cancellationToken = default)
+    {
+      Observer = progress;
+      return InstallEnvironmentAsync(plan, sourceIds, cancellationToken);
     }
 
     public Task<PreparedEnvironmentSwitch> PrepareEnvironmentSwitchAsync(

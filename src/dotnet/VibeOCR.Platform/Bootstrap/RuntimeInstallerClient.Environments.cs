@@ -1,3 +1,4 @@
+using ManagedEnvironmentInstallProgress = VibeOCR.Runtime.Contracts.Generated.Host.ManagedEnvironmentInstallEvent;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -71,7 +72,8 @@ public sealed record ManagedEnvironmentList(
     [property: JsonPropertyName("package_source_ids")] IReadOnlyList<string>? PackageSourceIds = null,
     [property: JsonPropertyName("recipes")] IReadOnlyList<ManagedEnvironmentRecipe>? Recipes = null,
     [property: JsonPropertyName("hardware")] ManagedEnvironmentHardware? Hardware = null,
-    [property: JsonPropertyName("resolved_default_sources")] IReadOnlyList<ManagedEnvironmentResolvedSource>? ResolvedDefaultSources = null);
+    [property: JsonPropertyName("resolved_default_sources")] IReadOnlyList<ManagedEnvironmentResolvedSource>? ResolvedDefaultSources = null,
+    [property: JsonPropertyName("capabilities")] IReadOnlyList<string>? Capabilities = null);
 
 public sealed record ManagedEnvironmentPlan(
     [property: JsonPropertyName("plan_id")] string PlanId,
@@ -176,6 +178,7 @@ public sealed record ManagedEnvironmentQueryResult(
 
 public interface IManagedEnvironmentClient
 {
+    bool SupportsEnvironmentInstallProgress => false;
     Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default);
     Task<ManagedEnvironmentList> InitializeDefaultEnvironmentAsync(CancellationToken cancellationToken = default) =>
         ListEnvironmentsAsync(cancellationToken);
@@ -196,6 +199,10 @@ public interface IManagedEnvironmentClient
     Task<ManagedEnvironment> InstallEnvironmentAsync(
         ManagedEnvironmentPlan plan, IReadOnlyList<string>? sourceIds = null,
         CancellationToken cancellationToken = default);
+    Task<ManagedEnvironment> InstallEnvironmentAsync(
+        ManagedEnvironmentPlan plan, IReadOnlyList<string>? sourceIds,
+        Action<ManagedEnvironmentInstallProgress> progress, CancellationToken cancellationToken = default) =>
+        InstallEnvironmentAsync(plan, sourceIds, cancellationToken);
     Task<PreparedEnvironmentSwitch> PrepareEnvironmentSwitchAsync(
         string environmentId, CancellationToken cancellationToken = default);
     Task<CommittedEnvironmentSwitch> CommitEnvironmentSwitchAsync(
@@ -208,6 +215,8 @@ public interface IManagedEnvironmentClient
 
 public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
 {
+    public bool SupportsEnvironmentInstallProgress { get; private set; }
+
     public Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default) =>
         InvokeEnvironmentAsync<ManagedEnvironmentList>("list", [], cancellationToken);
 
@@ -267,6 +276,20 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
         }, cancellationToken);
     }
 
+    public Task<ManagedEnvironment> InstallEnvironmentAsync(
+        ManagedEnvironmentPlan plan, IReadOnlyList<string>? sourceIds,
+        Action<ManagedEnvironmentInstallProgress> progress, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        return InvokeEnvironmentAsync<ManagedEnvironment>("install", new()
+        {
+            ["plan_id"] = plan.PlanId,
+            ["environment_id"] = plan.EnvironmentId,
+            ["recipe"] = plan.Recipe,
+            ["source_ids"] = sourceIds,
+        }, cancellationToken, progress, plan);
+    }
+
     public Task<PreparedEnvironmentSwitch> PrepareEnvironmentSwitchAsync(
         string environmentId, CancellationToken cancellationToken = default) =>
         InvokeEnvironmentAsync<PreparedEnvironmentSwitch>("prepare_switch",
@@ -292,21 +315,71 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
             new() { ["environment_id"] = environmentId }, cancellationToken).ConfigureAwait(false);
 
     private async Task<T> InvokeEnvironmentAsync<T>(
-        string action, Dictionary<string, object?> fields, CancellationToken cancellationToken)
+        string action, Dictionary<string, object?> fields, CancellationToken cancellationToken,
+        Action<ManagedEnvironmentInstallProgress>? progress = null, ManagedEnvironmentPlan? plan = null)
     {
         var request = BindingRequest();
         request.Remove("accelerator");
         request["request_kind"] = "environment";
         request["action"] = action;
         foreach ((string key, object? value) in fields) request[key] = value;
+        bool observe = progress is not null && SupportsEnvironmentInstallProgress;
+        if (observe) request["accepted_event_streams"] = new[] { "environment.install_progress.v1" };
         ProcessStartInfo startInfo = StartInfo(request);
         if (action is "install" or "initialize_default")
         {
             startInfo.RedirectStandardInput = true;
             startInfo.ArgumentList.Add("--environment-cancel-control");
         }
-        RuntimeInstallerProcessResult result = await _runner.RunAsync(startInfo, cancellationToken)
-            .ConfigureAwait(false);
+        var progressOptions = new JsonSerializerOptions(JsonOptions)
+        { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow };
+        string? attempt = null;
+        long sequence = 0;
+        bool terminal = false;
+        void Observe(string line)
+        {
+            if (!observe) return;
+            try
+            {
+                using JsonDocument eventDocument = JsonDocument.Parse(line);
+                JsonElement envelope = eventDocument.RootElement;
+                if (!envelope.TryGetProperty("event_kind", out JsonElement kind) ||
+                                kind.GetString() != "environment_install" ||
+                                !envelope.TryGetProperty("event_version", out JsonElement version) || version.GetInt32() != 1)
+                    return;
+                ManagedEnvironmentInstallProgress? update = envelope.Deserialize<ManagedEnvironmentInstallProgress>(progressOptions);
+                if (update is null || update.Dependencies is null || update.Seq <= sequence || terminal ||
+                                update.AttemptId.Length != 32 || !update.AttemptId.All(Uri.IsHexDigit) ||
+                                update.State is not ("running" or "succeeded" or "failed" or "cancelled") ||
+                                update.Phase is not ("prepare" or "resolve" or "unpack" or "download" or "install" or "runtime_wheel" or "verify" or "complete") ||
+                                update.Current is null || update.Current.Length > 4000 ||
+                                !DateTimeOffset.TryParse(update.Timestamp, System.Globalization.CultureInfo.InvariantCulture,
+                                                System.Globalization.DateTimeStyles.None, out _) ||
+                                update.EnvironmentRevision < 0 || update.DownloadFilesCompleted < 0 ||
+                                update.DownloadFilesTotal < 0 || update.DownloadFilesCompleted > update.DownloadFilesTotal ||
+                                update.BytesCurrent < 0 || update.BytesTotal < 0 || update.BytesCurrent > update.BytesTotal ||
+                                update.Dependencies.Count > 2048 || update.Dependencies.Any(item =>
+                                                item.Name is null || item.Name.Length is < 1 or > 128 ||
+                                                !item.Name.All(c => char.IsAsciiLetterOrDigit(c) || c == '-') ||
+                                                item.Version?.Length > 100 ||
+                                                item.DownloadState is not ("pending" or "bundled" or "cached" or "downloading" or "downloaded") ||
+                                                item.InstallState is not ("pending" or "installed")) ||
+                                update.Dependencies.DistinctBy(item => (item.Name, item.Version)).Count() != update.Dependencies.Count ||
+                                update.Log is { } log && (log.Stream is not ("stdout" or "stderr") || log.Text is null || log.Text.Length > 4000) ||
+                                plan is not null && (update.PlanId != plan.PlanId || update.EnvironmentId != plan.EnvironmentId ||
+                                                update.EnvironmentRevision != plan.EnvironmentRevision) ||
+                                attempt is not null && attempt != update.AttemptId)
+                    return;
+                attempt ??= update.AttemptId;
+                sequence = update.Seq;
+                terminal = update.State != "running";
+                progress?.Invoke(update);
+            }
+            catch (Exception) { /* The observer cannot break installation or pipe draining. */ }
+        }
+        RuntimeInstallerProcessResult result = observe
+                        ? await _runner.RunAsync(startInfo, Observe, cancellationToken).ConfigureAwait(false)
+                        : await _runner.RunAsync(startInfo, cancellationToken).ConfigureAwait(false);
         string? json = FinalEnvelopeJson(result.StandardOutput);
         RuntimeHostError? error = ParseHostError(json);
         if (result.ExitCode != 0 || error is not null)
@@ -323,8 +396,11 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
                 returnedAction.ValueKind != JsonValueKind.String || returnedAction.GetString() != action ||
                 !root.TryGetProperty("result", out JsonElement payload) || payload.ValueKind != JsonValueKind.Object)
                 throw new RuntimeInstallerException("运行环境响应协议无效。");
-            return payload.Deserialize<T>(JsonOptions)
+            T value = payload.Deserialize<T>(JsonOptions)
                 ?? throw new RuntimeInstallerException("运行环境响应为空。");
+            if (value is ManagedEnvironmentList list)
+                SupportsEnvironmentInstallProgress = list.Capabilities?.Contains("environment.install_progress.v1", StringComparer.Ordinal) == true;
+            return value;
         }
         catch (JsonException exception)
         {

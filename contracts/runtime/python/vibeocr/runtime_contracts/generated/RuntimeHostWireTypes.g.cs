@@ -500,6 +500,66 @@ public sealed record DownloadSourceDescriptor
     public required string Endpoint { get; init; }
 }
 
+public sealed record ManagedEnvironmentInstallEvent
+{
+    [JsonPropertyName("event_version")]
+    public required int EventVersion { get; init; }
+
+    [JsonPropertyName("event_kind")]
+    public required string EventKind { get; init; }
+
+    [JsonPropertyName("attempt_id")]
+    public required string AttemptId { get; init; }
+
+    [JsonPropertyName("plan_id")]
+    public required string PlanId { get; init; }
+
+    [JsonPropertyName("environment_id")]
+    public required string EnvironmentId { get; init; }
+
+    [JsonPropertyName("environment_revision")]
+    public required int EnvironmentRevision { get; init; }
+
+    [JsonPropertyName("seq")]
+    public required long Seq { get; init; }
+
+    [JsonPropertyName("timestamp")]
+    public required string Timestamp { get; init; }
+
+    [JsonPropertyName("phase")]
+    public required string Phase { get; init; }
+
+    [JsonPropertyName("state")]
+    public required string State { get; init; }
+
+    [JsonPropertyName("current")]
+    public required string Current { get; init; }
+
+    [JsonPropertyName("dependencies")]
+    public required IReadOnlyList<ManagedInstallDependency> Dependencies { get; init; }
+
+    [JsonPropertyName("dependency_total_known")]
+    public required bool DependencyTotalKnown { get; init; }
+
+    [JsonPropertyName("download_files_total")]
+    public required int? DownloadFilesTotal { get; init; }
+
+    [JsonPropertyName("download_files_completed")]
+    public required int DownloadFilesCompleted { get; init; }
+
+    [JsonPropertyName("bytes_current")]
+    public required long BytesCurrent { get; init; }
+
+    [JsonPropertyName("bytes_total")]
+    public required long? BytesTotal { get; init; }
+
+    [JsonPropertyName("heartbeat")]
+    public required bool Heartbeat { get; init; }
+
+    [JsonPropertyName("log")]
+    public ManagedInstallLog? Log { get; init; }
+}
+
 public sealed record ManagedEnvironmentRequest
 {
     [JsonPropertyName("protocol_version")]
@@ -550,6 +610,9 @@ public sealed record ManagedEnvironmentRequest
     [JsonPropertyName("mineru_model_source_id")]
     public string? MineruModelSourceId { get; init; }
 
+    [JsonPropertyName("accepted_event_streams")]
+    public IReadOnlyList<string>? AcceptedEventStreams { get; init; }
+
     [JsonPropertyName("plan_id")]
     public string? PlanId { get; init; }
 
@@ -573,6 +636,33 @@ public sealed record ManagedEnvironmentResponse
 
     [JsonPropertyName("result")]
     public required IReadOnlyDictionary<string, JsonElement> Result { get; init; }
+}
+
+public sealed record ManagedInstallDependency
+{
+    [JsonPropertyName("name")]
+    public required string Name { get; init; }
+
+    [JsonPropertyName("version")]
+    public required string? Version { get; init; }
+
+    [JsonPropertyName("download_state")]
+    public required string DownloadState { get; init; }
+
+    [JsonPropertyName("install_state")]
+    public required string InstallState { get; init; }
+}
+
+public sealed record ManagedInstallLog
+{
+    [JsonPropertyName("stream")]
+    public required string Stream { get; init; }
+
+    [JsonPropertyName("text")]
+    public required string Text { get; init; }
+
+    [JsonPropertyName("truncated")]
+    public required bool Truncated { get; init; }
 }
 
 public sealed record MineruConfigCatalog

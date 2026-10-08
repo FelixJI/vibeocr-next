@@ -1,3 +1,4 @@
+using ManagedEnvironmentInstallProgress = VibeOCR.Runtime.Contracts.Generated.Host.ManagedEnvironmentInstallEvent;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.App.Features.Maintenance;
 using VibeOCR.App.Services;
@@ -18,6 +19,13 @@ public sealed class ManagedEnvironmentSettings(
 {
     private readonly SemaphoreSlim gate = new(1, 1);
     private CancellationTokenSource? activeInstall;
+    private readonly object progressLock = new();
+    private ManagedEnvironmentInstallProgress? installProgress;
+    private string[] installLog = [];
+    private int installGeneration;
+    public ManagedEnvironmentInstallProgress? InstallProgress { get { lock (progressLock) return installProgress; } }
+    public IReadOnlyList<string> InstallLog { get { lock (progressLock) return installLog; } }
+    public bool SupportsInstallProgress => manager.SupportsEnvironmentInstallProgress;
 
     // 精确 ID 归属留在宿主会话中；选择代阻止排队/迟到结果覆盖当前计划。
     private readonly Dictionary<string, string> prepareEnvironmentIds = new(StringComparer.Ordinal);
@@ -234,20 +242,74 @@ public sealed class ManagedEnvironmentSettings(
             using IDisposable lease = productMaintenance.Acquire(
                 ProductMaintenanceOwner.RuntimeMaintenance, linked.Cancel);
             Volatile.Write(ref activeInstall, linked);
+            int attemptGeneration = Interlocked.Increment(ref installGeneration);
+            SynchronizationContext? context = SynchronizationContext.Current;
+            lock (progressLock) { installProgress = null; installLog = []; }
+            void Progress(ManagedEnvironmentInstallProgress update)
+            {
+                void Apply()
+                {
+                    if (attemptGeneration != Volatile.Read(ref installGeneration) ||
+                        update.PlanId != plan.PlanId || update.EnvironmentId != plan.EnvironmentId ||
+                        update.EnvironmentRevision != plan.EnvironmentRevision) return;
+                    lock (progressLock)
+                    {
+                        if (installProgress is { } previous &&
+                            (previous.AttemptId != update.AttemptId || update.Seq <= previous.Seq || previous.State != "running")) return;
+                        installProgress = update;
+                        if (update.Log is { } log)
+                        {
+                            string entry = $"{update.Timestamp} [{update.Phase}/{log.Stream}] {log.Text}" +
+                                (log.Truncated ? " [输出已截断]" : "");
+                            string[] next = [.. installLog, entry];
+                            int start = Math.Max(0, next.Length - 200);
+                            int chars = 0;
+                            for (int index = next.Length - 1; index >= start; index--)
+                            {
+                                chars += next[index].Length;
+                                if (chars > 64000) { start = index + 1; break; }
+                            }
+                            installLog = start == 0 ? next : ["[较早输出已截断]", .. next[start..]];
+                        }
+                    }
+                    StateChanged?.Invoke();
+                }
+                if (context is null) Apply();
+                else context.Post(_ =>
+                                        {
+                                            try { Apply(); }
+                                            catch (Exception) { /* UI observers cannot change the install result. */ }
+                                        }, null);
+            }
             bool cancelled = false;
             try
             {
                 StateChanged?.Invoke();
                 installAttempted?.Invoke();
                 await manager.InstallEnvironmentAsync(
-                    plan, sourceId is null ? null : [sourceId], linked.Token);
+                    plan, sourceId is null ? null : [sourceId], Progress, linked.Token);
+                // The final managed response proves commit, even if observation failed.
+                Interlocked.Increment(ref installGeneration);
+                lock (progressLock)
+                    if (installProgress is { } observed)
+                        installProgress = observed with
+                        {
+                            State = "succeeded",
+                            Phase = "complete",
+                            Current = "依赖已验证并提交；模型与服务尚未启动",
+                            Log = null
+                        };
             }
             catch (OperationCanceledException) when (linked.IsCancellationRequested)
             {
                 cancelled = true;
             }
-            catch (Exception)
+            catch (Exception error)
             {
+                Interlocked.Increment(ref installGeneration);
+                lock (progressLock)
+                    if (installProgress is { State: "running" } observed)
+                        installProgress = observed with { State = "failed", Current = error.Message, Log = null };
                 try { await ReloadEnvironmentsAsync(CancellationToken.None, strictEvidence: false); }
                 catch (Exception) { /* Preserve the original installation error. */ }
                 throw;
@@ -261,6 +323,17 @@ public sealed class ManagedEnvironmentSettings(
             if (cancelled)
             {
                 await ConfirmCancelledInstallAsync(plan);
+                Interlocked.Increment(ref installGeneration);
+                ManagedEnvironmentInstallFailure? evidence = Snapshot?.Environments
+                    .FirstOrDefault(item => item.Id == plan.EnvironmentId)?.LastInstallFailure;
+                lock (progressLock)
+                    if (installProgress is { State: "running" } observed)
+                        installProgress = observed with
+                        {
+                            State = evidence is { Phase: "failed" } && evidence.PlanId == plan.PlanId
+                                ? evidence.ReasonCode == "install_interrupted" ? "cancelled" : "failed" : "running",
+                            Current = Status, Log = null,
+                        };
                 return;
             }
             Plan = null;

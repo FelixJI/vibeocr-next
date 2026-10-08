@@ -1373,6 +1373,9 @@ public static class WorkbenchBridgeCodec
       environmentUnknownDefaultSourceIds = settings.EnvironmentUnknownDefaultSourceIds ?? [],
       environmentPackageSourceIds = settings.EnvironmentPackageSourceIds ?? [],
       settings.EnvironmentCanCancelInstall,
+      settings.EnvironmentInstallProgress,
+      settings.EnvironmentInstallLog,
+      settings.EnvironmentSupportsInstallProgress,
       environmentRecipes = settings.EnvironmentRecipes ?? [],
       environmentHardware = settings.EnvironmentHardware is null ? null : new
       {

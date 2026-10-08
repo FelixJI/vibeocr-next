@@ -61,6 +61,28 @@ class DownloadSourceDescriptor(TypedDict, total=False):
     endpoint: Required[str]
 
 
+class ManagedEnvironmentInstallEvent(TypedDict, total=False):
+    event_version: Required[Literal[1]]
+    event_kind: Required[Literal['environment_install']]
+    attempt_id: Required[str]
+    plan_id: Required[str]
+    environment_id: Required[str]
+    environment_revision: Required[int]
+    seq: Required[int]
+    timestamp: Required[str]
+    phase: Required[Literal['prepare', 'resolve', 'unpack', 'download', 'install', 'runtime_wheel', 'verify', 'complete']]
+    state: Required[Literal['running', 'succeeded', 'failed', 'cancelled']]
+    current: Required[str]
+    dependencies: Required[list[ManagedInstallDependency]]
+    dependency_total_known: Required[bool]
+    download_files_total: Required[int | None]
+    download_files_completed: Required[int]
+    bytes_current: Required[int]
+    bytes_total: Required[int | None]
+    heartbeat: Required[bool]
+    log: NotRequired[ManagedInstallLog]
+
+
 class ManagedEnvironmentRequest(TypedDict, total=False):
     protocol_version: Required[Literal[2]]
     request_kind: Required[Literal['environment']]
@@ -78,6 +100,7 @@ class ManagedEnvironmentRequest(TypedDict, total=False):
     model_source_id: NotRequired[str | None]
     paddleocr_model_source_id: NotRequired[str | None]
     mineru_model_source_id: NotRequired[str | None]
+    accepted_event_streams: NotRequired[list[Literal['environment.install_progress.v1']]]
     plan_id: NotRequired[str]
     prepared: NotRequired[dict[str, Any]]
     started_health: NotRequired[dict[str, Any]]
@@ -88,6 +111,19 @@ class ManagedEnvironmentResponse(TypedDict, total=False):
     response_kind: Required[Literal['environment']]
     action: Required[str]
     result: Required[dict[str, Any]]
+
+
+class ManagedInstallDependency(TypedDict, total=False):
+    name: Required[str]
+    version: Required[str | None]
+    download_state: Required[Literal['pending', 'bundled', 'cached', 'downloading', 'downloaded']]
+    install_state: Required[Literal['pending', 'installed']]
+
+
+class ManagedInstallLog(TypedDict, total=False):
+    stream: Required[Literal['stdout', 'stderr']]
+    text: Required[str]
+    truncated: Required[bool]
 
 
 class MineruConfigCatalog(TypedDict, total=False):
