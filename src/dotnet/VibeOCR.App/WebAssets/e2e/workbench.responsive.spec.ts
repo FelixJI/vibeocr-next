@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import type { HostCommand } from "../src/bridge/client";
 import {
   expectCommand,
   rejectNextCommand,
@@ -19,6 +20,24 @@ for (const size of [
     await page.setViewportSize(size);
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
+    await page.addInitScript(() => {
+      const events: { type: string; label: string | null }[] = [];
+      Object.assign(window, { __navigationEvents: events });
+      for (const type of ["pointerdown", "pointerup", "click"]) {
+        document.addEventListener(
+          type,
+          (event) => {
+            const link = (event.target as Element | null)?.closest(
+              ".navigation-rail a",
+            );
+            if (!link) return;
+            events.push({ type, label: link.getAttribute("aria-label") });
+            if (events.length > 8) events.shift();
+          },
+          true,
+        );
+      }
+    });
     await mountHost(page, {
       ...snapshot,
       capabilities: [...snapshot.capabilities, "settings.floatingToolbar"],
@@ -36,18 +55,61 @@ for (const size of [
         },
       },
     });
-    for (const name of [
-      "单次识别",
-      "批量识别",
-      "二维码与条码",
-      "PDF",
-      "设置",
-      "关于与诊断",
-    ]) {
-      await page.getByRole("link", { name, exact: true }).click();
-      await expect(
-        page.getByRole("heading", { level: 1, name, exact: false }),
-      ).toBeVisible();
+    for (const [route, name] of [
+      ["recognition", "单次识别"],
+      ["batch", "批量识别"],
+      ["qrcode", "二维码与条码"],
+      ["pdf", "PDF"],
+      ["settings", "设置"],
+      ["diagnostics", "关于与诊断"],
+    ] as const) {
+      try {
+        await page.getByRole("link", { name, exact: true }).click();
+        await expect(
+          page.getByRole("heading", { level: 1, name, exact: false }),
+        ).toBeVisible();
+      } catch (error) {
+        try {
+          const evidence = await page.evaluate((expectedRoute) => {
+            const host = window as Window & {
+              __testHost: { commands: readonly HostCommand[] };
+              __navigationEvents: readonly {
+                type: string;
+                label: string | null;
+              }[];
+            };
+            return {
+              hash: location.hash,
+              expectedRoute,
+              headings: Array.from(document.querySelectorAll("h1"))
+                .slice(0, 8)
+                .map((heading) => heading.textContent?.trim()),
+              currentLinks: Array.from(
+                document.querySelectorAll(".navigation-rail a[aria-current]"),
+              )
+                .slice(0, 8)
+                .map((link) => ({
+                  label: link.getAttribute("aria-label"),
+                  current: link.getAttribute("aria-current"),
+                })),
+              commands: host.__testHost.commands
+                .filter(
+                  (command) =>
+                    command.scope === "shell" && command.action === "navigate",
+                )
+                .slice(-8),
+              pointerEvents: host.__navigationEvents.slice(-8),
+            };
+          }, route);
+          console.error("[navigation-failure]", JSON.stringify(evidence));
+        } catch (diagnosticError) {
+          console.error(
+            "[navigation-failure] evidence unavailable:",
+            String(diagnosticError),
+          );
+        }
+        throw error;
+      }
       expect(
         await page.evaluate(() => document.documentElement.scrollWidth),
       ).toBeLessThanOrEqual(size.width);
