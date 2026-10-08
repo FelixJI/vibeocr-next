@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import shutil
 import time
@@ -27,6 +28,15 @@ from vibeocr.runtime.documents.utils.cjk_font_resolver import _CJK_RESOLVER
 from vibeocr.runtime.recognition.models.ocr_result import TextBlock
 
 logger = logging.getLogger(__name__)
+
+
+class TextLayerBatchError(RuntimeError):
+    """A page commit failed after earlier pages may have committed."""
+
+    def __init__(self, message: str, results: dict[int, tuple[int, int]]) -> None:
+        super().__init__(message)
+        self.results = dict(results)
+
 
 # insert_textbox 单行所需的最小矩形高度系数（实测：CJK≈1.58，Helvetica≈1.67，
 # 含行距/上下内边距）。fontsize × LINE_LEADING ≤ rect.height 才能在首次
@@ -280,18 +290,35 @@ class PdfService:
             )
             shared_font_path = _CJK_RESOLVER.resolve(all_chars)
 
+        from vibeocr.runtime.recognition.models.ocr_result_serializer import (
+            text_block_to_dict,
+        )
+
         rewritten: list[int] = []
-        for info in target_pages:
-            PdfService.rewrite_text_layer(
+        for offset in range(0, len(target_pages), 16):
+            data = [
+                {
+                    "page": info.page_index,
+                    "ocr_result": {
+                        "preproc_angle": info.ocr_preproc_angle,
+                        "text_blocks": [
+                            text_block_to_dict(block) for block in info.ocr_text_blocks
+                        ],
+                    },
+                }
+                for info in target_pages[offset : offset + 16]
+            ]
+            results = PdfService.add_text_layer_batch(
                 doc,
                 pdf_document,
-                info.page_index,
-                info.ocr_text_blocks,
-                info.ocr_preproc_angle,
+                data,
                 pdf_settings=settings,
+                overwrite=True,
                 font_path=shared_font_path,
             )
-            rewritten.append(info.page_index)
+            if any(not count[0] for count in results.values()):
+                raise RuntimeError("文字层重写未成功，保留未提交页原层")
+            rewritten.extend(page for page, count in results.items() if count[0])
 
         new_doc: fitz.Document | None = None
         if path is None:
@@ -309,7 +336,21 @@ class PdfService:
                 if not PdfService.save_incremental(doc, save_path):
                     raise RuntimeError("incremental save failed and was rolled back")
         else:
-            doc.save(path, deflate=True, clean=clean)
+            # 另存也先写相邻临时文件，再提交；失败时编辑模型仍 dirty。
+            import tempfile
+
+            target = Path(path)
+            fd, temporary = tempfile.mkstemp(
+                prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+            )
+            os.close(fd)
+            try:
+                doc.save(temporary, deflate=compress, clean=clean)
+                with open(temporary, "r+b") as stream:
+                    os.fsync(stream.fileno())
+                Path(temporary).replace(target)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
 
         pdf_document.is_modified = False
         pdf_document.has_structural_change = False
@@ -563,6 +604,7 @@ class PdfService:
                 page = doc[idx]
                 page.set_rotation((page.rotation + angle) % 360)
                 pdf_document.pages[idx].rotation = page.rotation
+                pdf_document.pages[idx].rect = tuple(page.rect)
         pdf_document.is_modified = True
         PdfService.invalidate_thumbnails(pdf_document, page_indices)
 
@@ -717,6 +759,7 @@ class PdfService:
         pdf_settings: object | None = None,
         overwrite: bool = False,
         cancel_check: Callable[[], bool] | None = None,
+        font_path: str | None = None,
     ) -> dict[int, tuple[int, int]]:
         """批量写 OCR 文字层，一批页共享单一聚合子集字体。
 
@@ -742,6 +785,11 @@ class PdfService:
 
         settings = pdf_settings if pdf_settings is not None else PdfGlobalSettings()
 
+        if len(pages_data) > 16:
+            raise ValueError("文字层写入批次最多 16 页")
+        if len({item["page"] for item in pages_data}) != len(pages_data):
+            raise ValueError("文字层批次页码重复")
+        invalid_pages: dict[int, tuple[int, int]] = {}
         # 预处理：反序列化、应用防重复守卫，收集实际要写的页
         to_write: list[
             tuple[int, list, int]
@@ -749,7 +797,16 @@ class PdfService:
         skipped_pages: list[int] = []  # 因已有文字层而跳过的页
         for item in pages_data:
             page_index = item["page"]
+            if not isinstance(page_index, int) or not 0 <= page_index < doc.page_count:
+                raise ValueError("文字层页码越界")
             ocr_result_data = item["ocr_result"]
+            angle = ocr_result_data.get("preproc_angle")
+            if type(angle) is not int or angle not in (0, 90, 180, 270):
+                invalid_pages[page_index] = (
+                    0,
+                    len(ocr_result_data.get("text_blocks", [])),
+                )
+                continue
             text_blocks = [
                 TextBlock(
                     text=b["text"],
@@ -762,26 +819,30 @@ class PdfService:
                     order=b.get("order", -1),
                 )
                 for b in ocr_result_data.get("text_blocks", [])
+                if isinstance(b.get("text"), str)
+                and b["text"].strip()
+                and isinstance(b.get("bbox"), (list, tuple))
+                and len(b["bbox"]) == 4
+                and all(
+                    isinstance(v, (int, float)) and math.isfinite(v) and 0 <= v <= 1000
+                    for v in b["bbox"]
+                )
+                and b["bbox"][2] > b["bbox"][0]
+                and b["bbox"][3] > b["bbox"][1]
             ]
-            preproc_angle = int(ocr_result_data.get("preproc_angle", 0) or 0)
+            preproc_angle = angle
 
             page_info = pdf_document.pages[page_index]
-            if page_info.has_text_layer:
-                if not overwrite:
-                    logger.info(
-                        "batch: page %d 已有文字层，跳过（overwrite=False）",
-                        page_index,
-                    )
-                    skipped_pages.append(page_index)
-                    continue
-                logger.info(
-                    "batch: page %d 已有文字层，overwrite=True，先删除再写入",
-                    page_index,
-                )
-                PdfService.delete_text_layers(doc, pdf_document, page_index)
+            page_info.has_text_layer = PdfService.page_has_text(doc, page_index)
+            if page_info.has_text_layer and not overwrite:
+                skipped_pages.append(page_index)
+                continue
             to_write.append((page_index, text_blocks, preproc_angle))
 
-        results: dict[int, tuple[int, int]] = dict.fromkeys(skipped_pages, (0, 1))
+        results: dict[int, tuple[int, int]] = {
+            **invalid_pages,
+            **dict.fromkeys(skipped_pages, (0, 1)),
+        }
 
         if not to_write:
             return results
@@ -790,30 +851,99 @@ class PdfService:
         all_chars = "".join(
             b.text for _, blocks, _ in to_write for b in blocks if b.text
         )
-        shared_font_path = _CJK_RESOLVER.resolve(all_chars) if all_chars else None
+        shared_font_path = font_path or (
+            _CJK_RESOLVER.resolve(all_chars) if all_chars else None
+        )
 
-        for page_index, text_blocks, preproc_angle in to_write:
-            # 协作式取消：每页开头检查，已写页保留、停止写后续页
-            # （对齐 delete_text_layers 路由的 cancel_event 逐页检查语义）。
-            if cancel_check is not None and cancel_check():
-                logger.info("batch: 取消已请求，停止写后续页（已写页保留）")
-                break
-            written, skipped = PdfService._write_blocks_to_page(
-                doc,
+        if len(to_write) > 16:
+            raise ValueError("文字层写入批次最多 16 页")
+        # 有界候选文档共享字体/CID 映射。原页内容直到提交成功前均未改变。
+        with fitz.open() as candidate:
+            prepared: list[tuple[int, int, list, int, int, int]] = []
+            for page_index, text_blocks, preproc_angle in to_write:
+                local_index = candidate.page_count
+                candidate.insert_pdf(doc, from_page=page_index, to_page=page_index)
+                local_model = PdfDocument(
+                    pages=[
+                        PdfPageInfo(page_index=i) for i in range(candidate.page_count)
+                    ]
+                )
+                if pdf_document.pages[page_index].has_text_layer:
+                    PdfService.delete_text_layers(candidate, local_model, local_index)
+                    if candidate[local_index].get_text().strip():
+                        results[page_index] = (0, len(text_blocks))
+                        continue
+                if preproc_angle not in (0, 90, 180, 270):
+                    results[page_index] = (0, len(text_blocks))
+                    continue
+                written, skipped = PdfService._write_blocks_to_page(
+                    candidate,
+                    local_index,
+                    text_blocks,
+                    preproc_angle,
+                    settings,
+                    font_path=shared_font_path,
+                )
+                if not written:
+                    results[page_index] = (0, skipped)
+                    continue
+                prepared.append(
+                    (
+                        page_index,
+                        local_index,
+                        text_blocks,
+                        preproc_angle,
+                        written,
+                        skipped,
+                    )
+                )
+
+            for (
                 page_index,
+                local_index,
                 text_blocks,
                 preproc_angle,
-                settings,
-                font_path=shared_font_path,
-            )
-            # 缓存 OCR 原始块（与单页 add_text_layer 一致）
-            pdf_document.is_modified = True
-            info = pdf_document.pages[page_index]
-            info.ocr_text_blocks = text_blocks
-            info.ocr_preproc_angle = preproc_angle
-            info.has_text_layer = written > 0
-            info.thumbnail = None
-            results[page_index] = (written, skipped)
+                written,
+                skipped,
+            ) in prepared:
+                if cancel_check is not None and cancel_check():
+                    break
+                target = doc.page_xref(page_index)
+                old_contents = doc.xref_get_key(target, "Contents")[1]
+                old_resources = doc.xref_get_key(target, "Resources")[1]
+                original_count = doc.page_count
+                try:
+                    doc.insert_pdf(
+                        candidate,
+                        from_page=local_index,
+                        to_page=local_index,
+                        links=False,
+                        annots=False,
+                        widgets=False,
+                        final=local_index == prepared[-1][1],
+                    )
+                    source = doc.page_xref(original_count)
+                    # 保留原页身份、CropBox、Rotate、注解、入链与文档元数据。
+                    doc.xref_set_key(
+                        target, "Contents", doc.xref_get_key(source, "Contents")[1]
+                    )
+                    doc.xref_set_key(
+                        target, "Resources", doc.xref_get_key(source, "Resources")[1]
+                    )
+                    doc.delete_page(original_count)
+                except Exception as error:
+                    doc.xref_set_key(target, "Contents", old_contents)
+                    doc.xref_set_key(target, "Resources", old_resources)
+                    if doc.page_count > original_count:
+                        doc.delete_page(original_count)
+                    raise TextLayerBatchError(str(error), results) from error
+                pdf_document.is_modified = True
+                info = pdf_document.pages[page_index]
+                info.ocr_text_blocks = text_blocks
+                info.ocr_preproc_angle = preproc_angle
+                info.has_text_layer = True
+                info.thumbnail = None
+                results[page_index] = (written, skipped)
 
         return results
 
@@ -901,7 +1031,7 @@ class PdfService:
         # page.rotation ∈ {90,270} 时给 insert_textbox/insert_text 传 rotate=90，
         # 字形即按显示方向正确排布（渲染后长宽比与 rotation=0 基准一致）。
         # 180° 字形仍正向（宽高不互换），rotate=0 即可。
-        text_rotate = 90 if page_rotation in (90, 270) else 0
+        text_rotate = (page_rotation - preproc_angle) % 360
 
         # 收集本页所有字符，解析子集字体（探测失败则 None，回退 china-s）。
         # 子集字体嵌入后 PyMuPDF 自动生成 ToUnicode CMap，使文字层在所有
@@ -1039,7 +1169,11 @@ class PdfService:
             polygon = getattr(block, "polygon", None)
             poly_pts = (
                 PdfService._denormalize_and_unrotate_polygon(
-                    polygon, preproc_angle, page_rect
+                    polygon,
+                    0,
+                    fitz.Rect(0, 0, page_rect.height, page_rect.width)
+                    if preproc_angle in (90, 270)
+                    else page_rect,
                 )
                 if polygon
                 else None
@@ -1047,21 +1181,38 @@ class PdfService:
             orient = PdfService._poly_orientation(poly_pts, text)
             if orient == "unknown":
                 # 无多边形兜底：保留长宽比启发式（多字符竖排误检检测）。
-                is_horizontal = (
-                    len(text.strip()) <= 1 or disp_rect.width >= disp_rect.height
+                is_horizontal = len(text.strip()) <= 1 or (
+                    disp_rect.height >= disp_rect.width
+                    if preproc_angle in (90, 270)
+                    else disp_rect.width >= disp_rect.height
                 )
             else:
                 is_horizontal = orient == "horizontal"
-            use_insert_text = page_rotation in (0, 90) and is_horizontal
+            use_insert_text = is_horizontal
 
             if use_insert_text:
                 # 在『显示空间』按真实 glyph bbox 算字号和基线，使 ink 顶部 =
                 # disp_rect.y0、ink 底部 = disp_rect.y1，再经 derotation_matrix
                 # 转到 PyMuPDF 未旋转页面空间。
                 ink_ratio, ascent_ratio = _vertical_ink_metrics(text)
-                fontsize = max(disp_rect.height / ink_ratio, settings.min_font_size)
-                baseline_disp_x = disp_rect.x0
-                baseline_disp_y = disp_rect.y0 + ascent_ratio * fontsize
+                thickness = (
+                    disp_rect.width if preproc_angle in (90, 270) else disp_rect.height
+                )
+                length = (
+                    disp_rect.height if preproc_angle in (90, 270) else disp_rect.width
+                )
+                fontsize = max(
+                    thickness / ink_ratio * settings.font_size_ratio / 0.8,
+                    settings.min_font_size,
+                )
+                ascent = ascent_ratio * fontsize
+                # 预处理反变换同时改变字形方向和基线，不把横排文字塞进竖框。
+                baseline_disp_x, baseline_disp_y = {
+                    0: (disp_rect.x0, disp_rect.y0 + ascent),
+                    90: (disp_rect.x1 - ascent, disp_rect.y0),
+                    180: (disp_rect.x1, disp_rect.y1 - ascent),
+                    270: (disp_rect.x0 + ascent, disp_rect.y1),
+                }[preproc_angle]
                 # 经 _to_page_space 同款变换（derotate）到未旋转页面空间。
                 dpt = _to_page_space(
                     fitz.Rect(
@@ -1072,7 +1223,7 @@ class PdfService:
                     )
                 )
                 baseline = fitz.Point(dpt.x0, dpt.y0)
-                text_rotate = 90 if page_rotation in (90, 270) else 0
+                text_rotate = (page_rotation - preproc_angle) % 360
 
                 # 宽度匹配：用子集字体真实 advance width 计算自然宽度，再算 morph
                 # 水平缩放把 ink 拉伸到 bbox 宽度（隐形层 render_mode=3 下字形拉伸
@@ -1082,7 +1233,7 @@ class PdfService:
                 # 缩放系数夹在 [0.5, 3.0]：避免过度拉伸（稀疏 OCR 框）或过度压缩
                 # （文本溢出 bbox）。scale_x=1.0 时不传 morph（与原行为一致）。
                 natural_w = max(_natural_width(text, fontsize), fontsize * 0.5)
-                scale_x = disp_rect.width / natural_w
+                scale_x = length / natural_w
                 scale_x = max(0.5, min(3.0, scale_x))
 
                 try:
@@ -1090,7 +1241,7 @@ class PdfService:
                     if abs(scale_x - 1.0) > 0.05:
                         # rot=0: mediabox x 缩放；rot=90: mediabox y 缩放
                         # （显示水平方向 = mediabox 竖直方向，因 derotation 旋 90°）
-                        if page_rotation == 90:
+                        if text_rotate in (90, 270):
                             morph = (baseline, fitz.Matrix(1.0, scale_x))
                         else:
                             morph = (baseline, fitz.Matrix(scale_x, 1.0))
@@ -1126,7 +1277,10 @@ class PdfService:
             # 估算导致的字号偏大/文字溢出 bbox。
             natural_w = _natural_width(text, 1.0)  # 单位 fontsize 宽度
             width_based = rect.width / max(natural_w, 0.5)
-            fontsize = max(min(height_based, width_based), settings.min_font_size)
+            fontsize = max(
+                min(height_based, width_based) * settings.font_size_ratio / 0.8,
+                settings.min_font_size,
+            )
 
             inserted = False
             last_fontsize = fontsize
@@ -1224,23 +1378,29 @@ class PdfService:
 
         settings = pdf_settings if pdf_settings is not None else PdfGlobalSettings()
 
-        # 先删除旧文字层（redact 全页文字，保留图片）
-        # 注意：delete_text_layers 会 _clear_page_layer_info 并清空 ocr_text_blocks，
-        # 所以必须在删除后重新设置 ocr_text_blocks。
-        PdfService.delete_text_layers(doc, pdf_document, page_index)
-
-        written, skipped = PdfService._write_blocks_to_page(
-            doc, page_index, text_blocks, preproc_angle, settings, font_path=font_path
+        from vibeocr.runtime.recognition.models.ocr_result_serializer import (
+            text_block_to_dict,
         )
 
-        # 重设缓存（delete 清空了）
-        pdf_document.is_modified = True
-        info = pdf_document.pages[page_index]
-        info.ocr_text_blocks = list(text_blocks)
-        info.ocr_preproc_angle = preproc_angle
-        info.has_text_layer = written > 0
-        info.thumbnail = None
-        return written, skipped
+        results = PdfService.add_text_layer_batch(
+            doc,
+            pdf_document,
+            [
+                {
+                    "page": page_index,
+                    "ocr_result": {
+                        "preproc_angle": preproc_angle,
+                        "text_blocks": [
+                            text_block_to_dict(block) for block in text_blocks
+                        ],
+                    },
+                }
+            ],
+            pdf_settings=settings,
+            overwrite=True,
+            font_path=font_path,
+        )
+        return results.get(page_index, (0, len(text_blocks)))
 
     @staticmethod
     def delete_text_layers(
@@ -1274,7 +1434,7 @@ class PdfService:
                 break
             for w in current_words:
                 page.add_redact_annot(fitz.Rect(w[:4]), fill=None)
-            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)  # type: ignore[attr-defined]
+            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=0)  # type: ignore[attr-defined]
             rounds_used = round_idx + 1
 
         has_residual = bool(page.get_text().strip())
@@ -1288,6 +1448,7 @@ class PdfService:
 
         pdf_document.is_modified = True
         PdfService._clear_page_layer_info(pdf_document, page_index)
+        pdf_document.pages[page_index].has_text_layer = has_residual
         return initial_word_count, rounds_used, has_residual
 
     @staticmethod

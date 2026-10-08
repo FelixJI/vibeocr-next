@@ -306,6 +306,10 @@ public sealed record ClosePdfCommand : WorkbenchCommand;
 public sealed record DeletePdfPagesCommand : WorkbenchCommand;
 
 public sealed record OcrPdfPagesCommand : WorkbenchCommand;
+public sealed record AddPdfTextLayersCommand(string Range, bool Overwrite) : WorkbenchCommand;
+public sealed record DeletePdfTextLayersCommand(IReadOnlyList<int> Pages, long Revision) : WorkbenchCommand;
+public sealed record CancelPdfCommand : WorkbenchCommand;
+public sealed record SetPdfProcessingSettingsCommand(VibeOCR.App.Features.Pdf.PdfProcessingSettings Settings) : WorkbenchCommand;
 
 public sealed record SavePdfCommand : WorkbenchCommand;
 
@@ -641,7 +645,11 @@ public sealed record PdfWorkbenchState(
   IReadOnlyList<PdfWorkbenchPage>? Pages = null,
   int WindowStart = 0,
   IReadOnlyList<RecognitionEngineChoice>? Engines = null,
-  string? TaskEngine = null) : WorkbenchState
+  string? TaskEngine = null,
+  long Revision = 0, bool IsModified = false, int DetectedCount = 0, int TextLayerCount = 0,
+  int AddedCount = 0, string Phase = "idle", int ProgressCurrent = 0, int ProgressTotal = 0,
+  string Summary = "", bool CanAddTextLayer = false,
+  VibeOCR.App.Features.Pdf.PdfProcessingSettings? ProcessingSettings = null) : WorkbenchState
 {
   public override string Scope => "pdf";
 }
@@ -650,7 +658,9 @@ public sealed record PdfWorkbenchPage(
   int Index,
   string StatusCode,
   WorkbenchResourceReference? Thumbnail,
-  WorkbenchResourceReference? StructuredResult = null);
+  WorkbenchResourceReference? StructuredResult = null,
+  bool Detected = false, bool HasTextLayer = false, bool AddedThisSession = false,
+  int Rotation = 0, double Width = 0, double Height = 0);
 
 public sealed record QrCodeWorkbenchState(
   bool IsBusy,

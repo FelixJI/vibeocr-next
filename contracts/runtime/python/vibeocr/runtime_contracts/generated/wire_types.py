@@ -357,6 +357,7 @@ class PdfPageInfoMirror(TypedDict, total=False):
     ocr_text_blocks: NotRequired[list[TextBlockMirror]]
     ocr_preproc_angle: NotRequired[int]
     deskewed: NotRequired[bool]
+    has_ocr_text_layer: NotRequired[bool]
 
 
 class PdfPathRequest(TypedDict, total=False):

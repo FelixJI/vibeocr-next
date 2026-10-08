@@ -1,15 +1,4 @@
-"""测试 PDF 后端渲染并行化（独立 fitz.Document 并发栅格化）。
-
-回归任务1的改造：render_preview/render_thumbnail 不再用 session.doc +
-per-session fitz_lock 串行化，而是每次打开独立临时 fitz.Document 栅格化。
-不同 Document 实例可安全并行（PyMuPDF 线程不安全仅限同一 Document 实例）。
-
-验证点：
-1. 多页并发渲染全部成功、后端不崩溃（无 native 段错误）。
-2. 并发渲染显著快于串行（证明栅格化真正并行，而非仍被锁串行化）。
-3. 页索引越界返回 400 而非 500。
-4. 渲染期间 session.remove() 仍能正确等待（active_ops 同步）。
-"""
+"""当前内存 PDF 的并发请求按文档锁串行栅格化，图像编码在锁外。"""
 
 from __future__ import annotations
 
@@ -63,8 +52,8 @@ def heavy_pdf(tmp_path):
     return path
 
 
-class TestRenderParallelization:
-    """验证渲染并行化：独立 Document 实例并发栅格化。"""
+class TestCurrentDocumentRendering:
+    """并发请求不允许同时进入同一个 PyMuPDF 文档。"""
 
     def test_concurrent_render_preview_all_succeed(self, backend_client, heavy_pdf):
         """8 页并发 render_preview 应全部成功返回有效 PNG。"""
@@ -86,18 +75,12 @@ class TestRenderParallelization:
             # 验证是有效 PNG
             assert png[:8] == b"\x89PNG\r\n\x1a\n", "应返回 PNG 字节流"
 
-    def test_concurrent_render_enters_rasterizer_in_parallel(self, monkeypatch):
-        """两个预览请求必须同时进入独立 Document 栅格化路径。
-
-        这里用栅栏直接验证并发重叠，不再用共享 CI runner 上接近 1.0x 的
-        耗时比推断并发。若 render_preview 重新获取 session.fitz_lock，首个
-        请求会在栅栏超时，测试将确定性失败。
-        """
+    def test_current_document_rasterization_holds_session_lock(self, monkeypatch):
         from vibeocr.runtime.documents import pdf_backend_process as backend
         from vibeocr.runtime.documents.wire_schemas import RenderPreviewRequest
 
         session = backend.BackendSession(
-            session_id="parallel-render",
+            session_id="current-render",
             file_path="unused.pdf",
             doc=MagicMock(),
             pdf_document=MagicMock(),
@@ -105,25 +88,38 @@ class TestRenderParallelization:
         registry = MagicMock()
         registry.get.return_value = session
         monkeypatch.setattr(backend, "_get_registry", lambda: registry)
+        entered = threading.Event()
+        release = threading.Event()
+        calls = []
 
-        entered = threading.Barrier(2, timeout=5.0)
-
-        def rasterize(_file_path: str, _page_index: int, _dpi: float):
-            entered.wait()
+        def rasterize(doc, page, dpi):
+            assert doc is session.doc
+            calls.append(page)
+            if page == 0:
+                entered.set()
+                assert release.wait(5)
             return b"\x00\x00\x00", 1, 1
 
         monkeypatch.setattr(backend, "_render_page_pixels", rasterize)
-        request = RenderPreviewRequest(page=0, dpi=150)
-
         with ThreadPoolExecutor(max_workers=2) as pool:
-            responses = list(
-                pool.map(
-                    lambda _: backend.render_preview(session.session_id, request),
-                    range(2),
-                )
+            first = pool.submit(
+                backend.render_preview,
+                session.session_id,
+                RenderPreviewRequest(page=0, dpi=150),
             )
-
-        assert all(response.media_type == "image/png" for response in responses)
+            assert entered.wait(5)
+            # 首个真实文档读尚未结束；另一线程不能取得该文档锁。
+            assert not session.fitz_lock.acquire(blocking=False)
+            second = pool.submit(
+                backend.render_preview,
+                session.session_id,
+                RenderPreviewRequest(page=1, dpi=150),
+            )
+            release.set()
+            assert (
+                first.result().media_type == second.result().media_type == "image/png"
+            )
+        assert calls == [0, 1]
 
     def test_render_preview_invalid_page_returns_400(self, backend_client, heavy_pdf):
         """页索引越界应返回 400（而非 500）。"""

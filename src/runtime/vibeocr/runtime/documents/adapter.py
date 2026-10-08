@@ -23,7 +23,6 @@ swap (in :mod:`vibeocr.classic.pdf_client`) needs no translation.
 from __future__ import annotations
 
 import os
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -333,30 +332,17 @@ class PdfProcessAdapter:
         )
 
     def save_transactional(self, session_id: str, target_path: str) -> str:
-        """Save the session to ``target_path`` atomically.
+        """Commit through the worker's adjacent-temp/fsync/replace transaction.
 
-        Writes to a temp file in the same directory, fsyncs, then renames over
-        the target. On any error the original file is left untouched and the
-        temp file is removed. This guarantees no half-finished file is ever
-        published as a successful save.
+        The worker owns both the file commit and dirty-state transition. An
+        outer second rename would clear dirty before the actual target commit.
+        PdfBackendClient.save always calls the worker /session/{sid}/save route;
+        PdfService.save_with_rewrite publishes the target atomically before it
+        clears is_modified and leaves the current in-memory document usable.
         """
-        child = self.ensure_started()
         target = Path(target_path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent)
-        )
-        os.close(fd)
-        try:
-            child.save(session_id, tmp_name)
-            self._fsync_path(tmp_name)
-            Path(tmp_name).replace(target)
-        except Exception:
-            try:
-                Path(tmp_name).unlink()
-            except OSError:
-                pass
-            raise
+        self.ensure_started().save(session_id, str(target))
         return str(target)
 
     # ------------------------------------------------------------------

@@ -70,6 +70,12 @@ interface BatchItemState {
 }
 
 interface PdfPageState {
+  readonly detected?: boolean;
+  readonly hasTextLayer?: boolean;
+  readonly addedThisSession?: boolean;
+  readonly rotation?: number;
+  readonly width?: number;
+  readonly height?: number;
   readonly index: number;
   readonly statusCode: string;
   readonly thumbnail?: ResourceReference | null;
@@ -1169,11 +1175,15 @@ function statusLabel(value: unknown, fallback: string): string {
     "recognition.exportedIncomplete":
       "文件已保存，但部分图片缺失或该格式无法容纳图片；请检查原始结果",
     "pdf.open": "PDF 会话已建立",
+    "pdf.page.none": "未处理",
+    "pdf.page.processing": "处理中",
+    "pdf.page.done": "已完成",
+    "pdf.page.failed": "失败",
     "pdf.empty": "尚未建立 PDF 会话",
     "pdf.failed": "PDF 操作失败，请检查文件或重试",
     "pdf.backendUnavailable": "识别服务暂不可用，请检查运行时状态后重试",
     "pdf.outOfMemory": "内存或显存不足，请减少页数或关闭其他任务后重试",
-    "pdf.cancelled": "PDF 操作已取消，可重新操作",
+    "pdf.cancelled": "PDF 操作已取消",
     "qrcode.decoded": "识别完成",
     "qrcode.ready": "等待输入",
     "qrcode.running": "正在处理二维码…",
@@ -1837,8 +1847,103 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
   );
 }
 
+function PdfParameters({
+  state,
+  actions,
+  busy,
+}: {
+  readonly state: Readonly<Record<string, unknown>>;
+  readonly actions: AppActions;
+  readonly busy: boolean;
+}) {
+  const settings =
+    state.processingSettings !== null &&
+    typeof state.processingSettings === "object"
+      ? (state.processingSettings as Record<string, unknown>)
+      : {};
+  const parameters = [
+    ["renderDpi", "渲染 DPI", 300, 72, 600, 1],
+    ["maxPixels", "单页像素预算", 16000000, 100000, 16000000, 1],
+    ["fontSizeRatio", "字号比例", 0.8, 0.1, 2, 0.1],
+    ["fontSizeRetryCount", "溢出重试次数", 5, 0, 10, 1],
+    ["fontSizeShrinkFactor", "字号缩小比例", 0.75, 0.01, 0.99, 0.01],
+    ["minFontSize", "最小字号（pt）", 4, 1, 72, 0.5],
+  ] as const;
+  return (
+    <details>
+      <summary>PDF 参数</summary>
+      <form
+        key={JSON.stringify(settings)}
+        onSubmit={(event) => {
+          event.preventDefault();
+          const values = new FormData(event.currentTarget);
+          const next = Object.fromEntries(
+            parameters.map(([name]) => [name, Number(values.get(name))]),
+          );
+          actions.run({
+            type: "pdf.setProcessingSettings",
+            settings: {
+              ...next,
+              compressOnSave: values.has("compressOnSave"),
+              cleanOnSave: values.has("cleanOnSave"),
+            },
+          });
+        }}
+      >
+        <fieldset disabled={busy}>
+          {parameters.map(([name, label, value, min, max, step]) => (
+            <label key={name}>
+              {label}
+              <input
+                name={name}
+                type="number"
+                min={min}
+                max={max}
+                step={step}
+                required
+                defaultValue={
+                  typeof settings[name] === "number"
+                    ? (settings[name] as number)
+                    : value
+                }
+              />
+            </label>
+          ))}
+          <label>
+            <input
+              name="compressOnSave"
+              type="checkbox"
+              defaultChecked={settings.compressOnSave !== false}
+            />
+            保存时压缩
+          </label>
+          <label>
+            <input
+              name="cleanOnSave"
+              type="checkbox"
+              defaultChecked={settings.cleanOnSave === true}
+            />
+            保存时深度清理内容流
+          </label>
+          <Button type="submit">保存 PDF 参数</Button>
+        </fieldset>
+      </form>
+    </details>
+  );
+}
+
 export function PdfPage({ viewState, actions }: FeatureProps) {
+  const [confirmDelete, setConfirmDelete] = useState<readonly number[] | null>(
+    null,
+  );
+  const [confirmRevision, setConfirmRevision] = useState(0);
+  const [replaceLayers, setReplaceLayers] = useState(false);
   const state = feature(viewState, "pdf");
+  const busy = booleanValue(state.isBusy);
+  const detected = numberValue(state.detectedCount);
+  const layers = numberValue(state.textLayerCount);
+  const canAdd =
+    state.canAddTextLayer === true && detected === numberValue(state.pageCount);
   const engines = recognitionEngines(state.engines);
   const pageCount = numberValue(state.pageCount);
   const selectedPage = numberValue(state.selectedPage);
@@ -1857,7 +1962,7 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
     <Workspace
       eyebrow="DOCUMENT / 03"
       title="PDF 工作台"
-      description="选择页面后完成旋转、页面 OCR 与保存操作。"
+      description="提取/解析结果，或为扫描页添加可搜索文字层后保存。"
       actions={
         <>
           <CapabilityGate
@@ -1875,7 +1980,7 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
             capabilities={viewState.capabilities}
             action={{ type: "pdf.close" }}
             actions={actions}
-            disabled={pageCount === 0}
+            disabled={pageCount === 0 && !busy}
             icon={<X aria-hidden="true" size={16} />}
           >
             关闭文档
@@ -1934,6 +2039,22 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
                         <span className="pdf-thumbnail-placeholder">PDF</span>
                       )}
                       <span>第 {page.index + 1} 页</span>
+                      <span>
+                        {page.detected
+                          ? page.hasTextLayer
+                            ? page.addedThisSession
+                              ? "本次 OCR 文字层"
+                              : "已有文字层 / 来源未知"
+                            : "无文字层"
+                          : "检测中"}
+                      </span>
+                      <span>{statusLabel(page.statusCode, "待处理")}</span>
+                      {(page.width ?? 0) > 0 && (
+                        <span>
+                          {Math.round(page.width ?? 0)} ×{" "}
+                          {Math.round(page.height ?? 0)} pt · {page.rotation}°
+                        </span>
+                      )}
                     </li>
                   );
                 })}
@@ -1983,7 +2104,7 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
               action={{ type: "pdf.rotate", degrees: 90 }}
               actions={actions}
               icon={<RotateCw aria-hidden="true" size={16} />}
-              disabled={selectedPages.length === 0}
+              disabled={selectedPages.length === 0 || busy}
             >
               顺时针 90°
             </CapabilityGate>
@@ -1992,7 +2113,7 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
               capabilities={viewState.capabilities}
               action={{ type: "pdf.deletePages" }}
               actions={actions}
-              disabled={selectedPages.length === 0}
+              disabled={selectedPages.length === 0 || busy}
               icon={<Trash2 aria-hidden="true" size={16} />}
             >
               删除选中页
@@ -2002,23 +2123,148 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
               capabilities={viewState.capabilities}
               action={{ type: "pdf.ocrPages" }}
               actions={actions}
-              disabled={selectedPages.length === 0}
+              disabled={selectedPages.length === 0 || busy}
               icon={<ScanText aria-hidden="true" size={16} />}
             >
-              OCR 选中页
+              提取/解析选中页
             </CapabilityGate>
+            <ToolbarDivider />
+            <CapabilityGate
+              capability="pdf.edit"
+              capabilities={viewState.capabilities}
+              action={{
+                type: "pdf.addTextLayers",
+                range: "selected",
+                overwrite: replaceLayers,
+              }}
+              actions={actions}
+              disabled={busy || !canAdd || selectedPages.length === 0}
+            >
+              添加选中页文字层
+            </CapabilityGate>
+            <CapabilityGate
+              capability="pdf.edit"
+              capabilities={viewState.capabilities}
+              action={{
+                type: "pdf.addTextLayers",
+                range: "unlayered",
+                overwrite: false,
+              }}
+              actions={actions}
+              disabled={
+                busy || !canAdd || layers === pageCount || pageCount === 0
+              }
+            >
+              为全部无层页添加
+            </CapabilityGate>
+            <CapabilityGate
+              capability="pdf.edit"
+              capabilities={viewState.capabilities}
+              action={{
+                type: "pdf.addTextLayers",
+                range: "all",
+                overwrite: replaceLayers,
+              }}
+              actions={actions}
+              disabled={busy || !canAdd || pageCount === 0}
+            >
+              添加整本文字层
+            </CapabilityGate>
+            <Button
+              disabled={
+                busy || selectedPages.length === 0 || detected !== pageCount
+              }
+              onClick={() => {
+                setConfirmDelete([...selectedPages]);
+                setConfirmRevision(numberValue(state.revision));
+              }}
+            >
+              删除选中文字层
+            </Button>
             <ToolbarDivider />
             <CapabilityGate
               capability="pdf.save"
               capabilities={viewState.capabilities}
               action={{ type: "pdf.save" }}
               actions={actions}
-              disabled={pageCount === 0}
+              disabled={pageCount === 0 || busy}
               icon={<Save aria-hidden="true" size={16} />}
             >
               保存
             </CapabilityGate>
           </Toolbar>
+          <p aria-live="polite">
+            已检测 {detected}/{pageCount} 页 · 有文字层 {layers} 页 · 无文字层{" "}
+            {Math.max(0, detected - layers)} 页 ·{" "}
+            {state.isModified === true ? "当前修订尚未保存" : "当前修订已保存"}
+          </p>
+          <Checkbox
+            checked={replaceLayers}
+            disabled={busy}
+            label="显式覆盖已有文字层（默认跳过）"
+            onChange={(_, data) => setReplaceLayers(data.checked === true)}
+          />
+          {!canAdd && pageCount > 0 && (
+            <p>
+              添加文字层需要全部页检测完成，并使用具有可逆页坐标的文字 OCR
+              模式，关闭文档去扭曲。提取/解析仍可使用。
+            </p>
+          )}
+          <PdfParameters state={state} actions={actions} busy={busy} />
+          {confirmDelete && (
+            <div role="alertdialog" aria-label="确认删除文字层">
+              <p>
+                将删除第 {confirmDelete.map((index) => index + 1).join("、")}{" "}
+                页的全部文字，包括原有可见文字，页面外观可能变化；扫描图像和其它图元保留。这不是安全脱敏工具。
+              </p>
+              <Button
+                disabled={busy}
+                onClick={() => {
+                  actions.run({
+                    type: "pdf.deleteTextLayers",
+                    pages: confirmDelete,
+                    revision: confirmRevision,
+                    confirmed: true,
+                  });
+                  setConfirmDelete(null);
+                }}
+              >
+                确认删除文字层
+              </Button>
+              <Button onClick={() => setConfirmDelete(null)}>返回</Button>
+            </div>
+          )}
+          {busy && (
+            <div aria-live="polite">
+              <p>
+                {(
+                  {
+                    load: "检测文字层",
+                    render: "渲染",
+                    ocr: "识别",
+                    write: "写入文字层",
+                    delete: "删除文字层",
+                    save: "保存",
+                    idle: "等待后台收尾",
+                  } as Record<string, string>
+                )[stringValue(state.phase) ?? "idle"] ?? "处理中"}{" "}
+                · {numberValue(state.progressCurrent)}/
+                {numberValue(state.progressTotal)}
+              </p>
+              <ProgressBar
+                value={
+                  numberValue(state.progressTotal) > 0 && state.phase !== "save"
+                    ? numberValue(state.progressCurrent) /
+                      numberValue(state.progressTotal)
+                    : undefined
+                }
+              />
+              <Button onClick={() => actions.run({ type: "pdf.cancel" })}>
+                取消 PDF 操作
+              </Button>
+              <p>取消不会撤销已完成写入；后台实际收尾后才可继续操作。</p>
+            </div>
+          )}
           <Panel label="REVIEW" title="页面检查">
             {resource(activePage?.thumbnail) ? (
               <img
@@ -2052,7 +2298,8 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
             )}
           </Panel>
           <StatusLine>
-            {statusLabel(state.statusCode, "尚未建立 PDF 会话。")}
+            {statusLabel(state.statusCode, "尚未建立 PDF 会话。")}{" "}
+            {stringValue(state.summary)}
           </StatusLine>
         </div>
       </div>

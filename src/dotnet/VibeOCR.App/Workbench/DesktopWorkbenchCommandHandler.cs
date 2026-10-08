@@ -424,9 +424,13 @@ public sealed class DesktopWorkbenchCommandHandler :
           dropped,
           cancellationToken),
         RotatePdfCommand rotate => await RotatePdfAsync(rotate, cancellationToken),
-        ClosePdfCommand => ClosePdf(),
+        ClosePdfCommand => await ClosePdfAsync(cancellationToken),
         DeletePdfPagesCommand => await DeletePdfPagesAsync(cancellationToken),
         OcrPdfPagesCommand => await StartPdfOcr(cancellationToken),
+        AddPdfTextLayersCommand add => await StartPdfOcr(cancellationToken, add),
+        DeletePdfTextLayersCommand delete => StartPdfDeleteLayers(delete, cancellationToken),
+        CancelPdfCommand => CancelPdf(),
+        SetPdfProcessingSettingsCommand change => SetPdfProcessingSettings(change),
         SavePdfCommand => await SavePdfAsync(cancellationToken),
         SelectPdfPagesCommand select => SelectPdfPages(select),
         SetPdfWindowCommand window => await SetPdfWindowAsync(
@@ -2913,7 +2917,7 @@ public sealed class DesktopWorkbenchCommandHandler :
 
   private PdfWorkbenchState SetPdfTaskEngine(SetPdfTaskEngineCommand command)
   {
-    pdf ??= pdfFactory();
+    pdf ??= CreatePdfViewModel();
     if (pdf.IsBusy) throw new InvalidOperationException("A running PDF OCR cannot change recognition mode.");
     RecognitionSelectionSnapshot? snapshot = settings?.RecognitionSelection;
     RuntimeSelectionService? selection = snapshot?.Catalog;
@@ -2930,9 +2934,50 @@ public sealed class DesktopWorkbenchCommandHandler :
     return PdfState(pdf);
   }
 
+  private PdfViewModel CreatePdfViewModel()
+  {
+    PdfViewModel model = pdfFactory();
+    if (optionsLayout is not null) model.SetProcessingSettings(PdfProcessingSettings.Load(optionsLayout));
+    model.PropertyChanged += OnPdfPropertyChanged;
+    return model;
+  }
+  private void OnPdfPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
+  {
+    if (args.PropertyName is null && pdf is not null) StateChanged?.Invoke(PdfState(pdf));
+  }
+  private PdfWorkbenchState SetPdfProcessingSettings(SetPdfProcessingSettingsCommand command)
+  {
+    pdf ??= CreatePdfViewModel();
+    if (pdf.IsSettling) return PdfState(pdf);
+    command.Settings.Validate();
+    if (optionsLayout is not null) command.Settings.Save(optionsLayout);
+    pdf.SetProcessingSettings(command.Settings);
+    return PdfState(pdf);
+  }
+  private PdfWorkbenchState CancelPdf()
+  {
+    pdf ??= CreatePdfViewModel(); pdf.Cancel(); return PdfState(pdf);
+  }
+  private PdfWorkbenchState? StartPdfDeleteLayers(DeletePdfTextLayersCommand command, CancellationToken ct)
+  {
+    pdf ??= CreatePdfViewModel();
+    if (pdf.IsSettling || command.Revision != pdf.Revision)
+      throw new InvalidOperationException("文档修订已变化，请重新确认删除范围。");
+    int[] pages = command.Pages.ToArray();
+    long generation = Interlocked.Increment(ref pdfGeneration);
+    return PublishStartThenTrack(PdfState(pdf) with { IsBusy = true }, async () => {
+      await pdf.DeleteTextLayersAsync(pages, ct);
+      if (generation == Volatile.Read(ref pdfGeneration))
+      {
+        pdfThumbnails.Clear(); pdfStructured.Clear();
+        StateChanged?.Invoke(await PdfStateAsync(pdf, CancellationToken.None));
+      }
+    });
+  }
+
   private async Task<PdfWorkbenchState> OpenPdfAsync(CancellationToken cancellationToken)
   {
-    pdf ??= pdfFactory();
+    pdf ??= CreatePdfViewModel();
     Interlocked.Increment(ref pdfGeneration);
     await pdf.OpenAsync(cancellationToken);
     ResetPdfSelection(selectFirstPage: true);
@@ -2943,7 +2988,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     OpenDroppedPdfCommand command,
     CancellationToken cancellationToken)
   {
-    pdf ??= pdfFactory();
+    pdf ??= CreatePdfViewModel();
     Interlocked.Increment(ref pdfGeneration);
     await pdf.OpenPathAsync(command.Path, cancellationToken);
     ResetPdfSelection(selectFirstPage: true);
@@ -2954,7 +2999,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     RotatePdfCommand command,
     CancellationToken cancellationToken)
   {
-    pdf ??= pdfFactory();
+    pdf ??= CreatePdfViewModel();
     Interlocked.Increment(ref pdfGeneration);
     PdfViewModel viewModel = pdf;
     int[] pages = SelectedPdfPages(viewModel);
@@ -2967,11 +3012,11 @@ public sealed class DesktopWorkbenchCommandHandler :
     return await PdfStateAsync(viewModel, cancellationToken);
   }
 
-  private PdfWorkbenchState ClosePdf()
+  private async Task<PdfWorkbenchState> ClosePdfAsync(CancellationToken ct)
   {
-    pdf ??= pdfFactory();
+    pdf ??= CreatePdfViewModel();
     Interlocked.Increment(ref pdfGeneration);
-    pdf.CloseSession();
+    await pdf.CloseSessionAsync(ct);
     ResetPdfSelection(selectFirstPage: false);
     return PdfState(pdf);
   }
@@ -2979,7 +3024,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private async Task<PdfWorkbenchState> DeletePdfPagesAsync(
     CancellationToken cancellationToken)
   {
-    pdf ??= pdfFactory();
+    pdf ??= CreatePdfViewModel();
     Interlocked.Increment(ref pdfGeneration);
     PdfViewModel viewModel = pdf;
     int[] pages = SelectedPdfPages(viewModel);
@@ -2992,21 +3037,23 @@ public sealed class DesktopWorkbenchCommandHandler :
   }
 
   private async Task<PdfWorkbenchState> OcrPdfPagesAsync(
-    CancellationToken cancellationToken)
+    CancellationToken cancellationToken, AddPdfTextLayersCommand? add = null)
   {
-    pdf ??= pdfFactory();
+    pdf ??= CreatePdfViewModel();
     PdfViewModel viewModel = pdf;
-    int[] pages = SelectedPdfPages(viewModel);
-    if (pages.Length > 0)
+    int[] pages = add?.Range is "all" or "unlayered"
+      ? viewModel.Pages.Where(page => add.Range == "all" || !page.HasTextLayer).Select(page => page.Index).ToArray()
+      : SelectedPdfPages(viewModel);
     {
-      await viewModel.StartOcrAsync(pages, overwrite: false, cancellationToken);
+      await viewModel.StartOcrAsync(pages, overwrite: add?.Overwrite == true, cancellationToken, addTextLayer: add is not null);
     }
     return PdfState(viewModel);
   }
 
-  private async Task<PdfWorkbenchState?> StartPdfOcr(CancellationToken cancellationToken)
+  private async Task<PdfWorkbenchState?> StartPdfOcr(CancellationToken cancellationToken, AddPdfTextLayersCommand? add = null)
   {
-    pdf ??= pdfFactory();
+    pdf ??= CreatePdfViewModel();
+    if (pdf.IsSettling) return PdfState(pdf);
     // 与单次/批量相同：提交前加载权威目录并严格协商可用模式；用户已显式
     // 选择 Paddle 模式而目录/环境不可用时，这里会抛出可恢复的
     // RecognitionModeUnavailableException，拒绝按默认 OCR 静默提交。
@@ -3020,18 +3067,19 @@ public sealed class DesktopWorkbenchCommandHandler :
     long generation = Interlocked.Increment(ref pdfGeneration);
     return PublishStartThenTrack(
       PdfState(pdf) with { IsBusy = true, StatusCode = PdfStatusCode(pdf, isBusy: true) },
-      () => CompletePdfOcrAsync(generation, cancellationToken));
+      () => CompletePdfOcrAsync(generation, cancellationToken, add));
   }
 
   private async Task CompletePdfOcrAsync(
     long generation,
-    CancellationToken cancellationToken)
+    CancellationToken cancellationToken, AddPdfTextLayersCommand? add = null)
   {
     try
     {
-      PdfWorkbenchState state = await OcrPdfPagesAsync(cancellationToken);
+      PdfWorkbenchState state = await OcrPdfPagesAsync(cancellationToken, add);
       if (generation == Volatile.Read(ref pdfGeneration))
       {
+        pdfThumbnails.Clear(); pdfStructured.Clear();
         StateChanged?.Invoke((await PdfStateAsync(pdf!, cancellationToken)) with
         {
           StatusCode = state.StatusCode,
@@ -3058,7 +3106,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private async Task<PdfWorkbenchState> SavePdfAsync(
     CancellationToken cancellationToken)
   {
-    pdf ??= pdfFactory();
+    pdf ??= CreatePdfViewModel();
     var picker = new FileSavePicker
     {
       SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
@@ -3076,7 +3124,7 @@ public sealed class DesktopWorkbenchCommandHandler :
 
   private PdfWorkbenchState SelectPdfPages(SelectPdfPagesCommand command)
   {
-    pdf ??= pdfFactory();
+    pdf ??= CreatePdfViewModel();
     if (command.Pages.Any(page => page < 0 || page >= pdf.PageCount))
     {
       throw new InvalidOperationException("The PDF page selection is stale.");
@@ -3094,7 +3142,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     SetPdfWindowCommand command,
     CancellationToken cancellationToken)
   {
-    pdf ??= pdfFactory();
+    pdf ??= CreatePdfViewModel();
     pdfWindowStart = ClampWindowStart(command.Start, pdf.PageCount, 64);
     return await PdfStateAsync(pdf, cancellationToken);
   }
@@ -4408,7 +4456,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     SynchronizePdfMode();
     pdfWindowStart = ClampWindowStart(pdfWindowStart, viewModel.PageCount, 64);
     return new PdfWorkbenchState(
-      viewModel.IsBusy,
+      viewModel.IsBusy || viewModel.IsSettling,
       PdfStatusCode(viewModel),
       viewModel.PageCount,
       viewModel.SelectedPage,
@@ -4424,11 +4472,15 @@ public sealed class DesktopWorkbenchCommandHandler :
           viewModel.Pages[index].State == PdfPageState.Done &&
           viewModel.Pages[index].Result is not null
           ? pdfStructured.GetValueOrDefault(index).Reference
-          : null))
+          : null,
+        viewModel.Pages[index].Detected, viewModel.Pages[index].HasTextLayer, viewModel.Pages[index].AddedThisSession,
+        viewModel.Pages[index].Rotation, viewModel.Pages[index].Width, viewModel.Pages[index].Height))
       .ToArray(),
       pdfWindowStart,
       PdfEngines(),
-      pdfTaskEngine);
+      pdfTaskEngine, viewModel.Revision, viewModel.IsModified, viewModel.DetectedCount, viewModel.TextLayerCount,
+      viewModel.AddedCount, viewModel.Phase, viewModel.ProgressCurrent, viewModel.ProgressTotal, viewModel.Summary,
+      viewModel.CanAddTextLayer, viewModel.ProcessingSettings);
   }
 
   /// <summary>
@@ -4484,6 +4536,9 @@ public sealed class DesktopWorkbenchCommandHandler :
           cancellationToken);
       }
     }
+    foreach (int cachedIndex in pdfThumbnails.Keys.Where(index => index < pdfWindowStart || index >= visiblePageEnd).ToArray()) pdfThumbnails.Remove(cachedIndex);
+    foreach (int cachedIndex in pdfStructured.Keys.Where(index => index < pdfWindowStart || index >= visiblePageEnd).ToArray()) pdfStructured.Remove(cachedIndex);
+    await viewModel.PrepareResultsAsync(pdfWindowStart, 64, cancellationToken);
     // 已完成页的结构化结果与缩略图同窗口发布：以 Result 对象身份缓存，
     // 旋转/删除/重开文档时整体失效，与单次/批量共用同一发布路径。
     for (int index = pdfWindowStart; index < visiblePageEnd; index++)

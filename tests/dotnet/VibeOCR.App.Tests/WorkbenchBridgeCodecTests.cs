@@ -1252,6 +1252,35 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     Assert.Null(command.Theme);
   }
 
+  [Theory]
+  [InlineData("selected", true)]
+  [InlineData("all", true)]
+  [InlineData("unlayered", true)]
+  [InlineData("window", false)]
+  public void PdfTextLayerRangeIsExplicit(string range, bool valid)
+  {
+    Guid session = Guid.NewGuid();
+    string json = CommandJson(session, "pdf", "addTextLayers", JsonSerializer.Serialize(new { range, overwrite = false }));
+    if (valid) Assert.IsType<AddPdfTextLayersCommand>(WorkbenchBridgeCodec.ParseCommand(json, session).Command);
+    else Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(json, session));
+  }
+
+  [Theory]
+  [InlineData(false, false)]
+  [InlineData(true, true)]
+  public void PdfLayerDeletionRequiresConfirmationAndRevision(bool confirmed, bool valid)
+  {
+    Guid session = Guid.NewGuid();
+    string json = CommandJson(session, "pdf", "deleteTextLayers", JsonSerializer.Serialize(new { pages = new[] { 3, 70 }, revision = 12, confirmed }));
+    if (valid)
+    {
+      var command = Assert.IsType<DeletePdfTextLayersCommand>(WorkbenchBridgeCodec.ParseCommand(json, session).Command);
+      Assert.Equal([3, 70], command.Pages);
+      Assert.Equal(12, command.Revision);
+    }
+    else Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(json, session));
+  }
+
   private static string CommandJson(
     Guid sessionId,
     string scope,

@@ -288,6 +288,26 @@ test("PDF selection, delete and save remain clickable in a compact workspace", a
       .getByRole("main")
       .evaluate((element) => element.scrollWidth - element.clientWidth),
   ).toBeLessThanOrEqual(1);
+  await sendState(page, "pdf", {
+    ...pdf,
+    pageCount: 1,
+    selectedPage: 0,
+    selectedPages: [0],
+    pages: [pdf.pages[0]],
+    isBusy: true,
+    phase: "write",
+    progressCurrent: 1,
+    progressTotal: 4,
+  });
+  await page
+    .getByRole("button", { name: "取消 PDF 操作", exact: true })
+    .click();
+  await expectCommand(page, { scope: "pdf", action: "cancel", arguments: {} });
+  expect(
+    await page
+      .getByRole("main")
+      .evaluate((element) => element.scrollWidth - element.clientWidth),
+  ).toBeLessThanOrEqual(1);
   await page.screenshot({
     path: "test-results/pdf-compact.png",
     fullPage: true,

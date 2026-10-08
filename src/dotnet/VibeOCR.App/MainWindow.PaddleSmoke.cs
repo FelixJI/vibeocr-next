@@ -531,8 +531,10 @@ public sealed partial class MainWindow
         TimeSpan.FromSeconds(30));
     }
     int before = smokeSubmitAttempts!();
+    bool textLayer = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_PDF_TEXT_LAYER") == "1";
+    if (textLayer && pipeline != "OCR") throw new InvalidOperationException("PDF text layer smoke requires the coordinate-preserving OCR pipeline.");
     RecordPaddleSmokeStage($"pdf recognize first page {mode}");
-    await ClickManagedSmokeButtonAsync("OCR 选中页");
+    await ClickManagedSmokeButtonAsync(textLayer ? "添加选中页文字层" : "提取/解析选中页");
     PdfWorkbenchState terminal = await WaitForPaddlePdfAsync(
       state => !state.IsBusy &&
         state.Pages?.FirstOrDefault(page => page.Index == 0)?.StatusCode
@@ -543,7 +545,9 @@ public sealed partial class MainWindow
       throw new InvalidOperationException($"PDF page OCR failed: {JsonSerializer.Serialize(terminal)}");
     object job = await ObservePaddleInputJobAsync(session, pipeline,
       optionName, optionValue, before, 1);
-    bool inspected = await InspectPaddlePdfStructureAsync(mode);
+    if (textLayer && (!terminal.IsModified || terminal.Pages?.FirstOrDefault(page => page.Index == 0)?.AddedThisSession != true))
+      throw new InvalidOperationException("PDF text layer was not committed as an unsaved current-session layer.");
+    bool inspected = !textLayer && await InspectPaddlePdfStructureAsync(mode);
     var copies = await ClickPaddleCopyButtonsAsync([]);
     paddleSmokePartialEvidence = new
     {
@@ -559,7 +563,7 @@ public sealed partial class MainWindow
       option = new { name = optionName, value = optionValue },
       submit_attempts = smokeSubmitAttempts!(), job,
       pdf = new { opened.PageCount, terminal.SelectedPages, terminal.Pages },
-      structured_inspected = inspected, copies, saved,
+      structured_inspected = inspected, text_layer = textLayer, copies, saved,
     };
   }
 
@@ -1188,6 +1192,7 @@ public sealed partial class MainWindow
     await WaitForPaddleConditionAsync(() =>
       File.Exists(target) && new FileInfo(target).Length > 0,
       TimeSpan.FromMinutes(2));
+    await WaitForPaddlePdfAsync(state => !state.IsBusy && !state.IsModified, TimeSpan.FromMinutes(2));
     return new { button_label = "保存", file = target,
       bytes = new FileInfo(target).Length, saved_via = "ui-file-save-picker" };
   }

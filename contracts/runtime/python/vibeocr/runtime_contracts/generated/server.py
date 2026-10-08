@@ -690,6 +690,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                          'properties': {'deskewed': {'default': False,
                                                                                                                                                      'title': 'Deskewed',
                                                                                                                                                      'type': 'boolean'},
+                                                                                                                                        'has_ocr_text_layer': {'default': False,
+                                                                                                                                                               'description': 'Whether '
+                                                                                                                                                                              'the '
+                                                                                                                                                                              'current '
+                                                                                                                                                                              'session '
+                                                                                                                                                                              'owns '
+                                                                                                                                                                              'OCR '
+                                                                                                                                                                              'source '
+                                                                                                                                                                              'blocks '
+                                                                                                                                                                              'for '
+                                                                                                                                                                              'this '
+                                                                                                                                                                              'page; '
+                                                                                                                                                                              'model '
+                                                                                                                                                                              'summaries '
+                                                                                                                                                                              'omit '
+                                                                                                                                                                              'the '
+                                                                                                                                                                              'blocks.',
+                                                                                                                                                               'type': 'boolean'},
                                                                                                                                         'has_text_layer': {'default': False,
                                                                                                                                                            'title': 'Has '
                                                                                                                                                                     'Text '
@@ -869,6 +887,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                          'properties': {'deskewed': {'default': False,
                                                                                                                      'title': 'Deskewed',
                                                                                                                      'type': 'boolean'},
+                                                                                                        'has_ocr_text_layer': {'default': False,
+                                                                                                                               'description': 'Whether '
+                                                                                                                                              'the '
+                                                                                                                                              'current '
+                                                                                                                                              'session '
+                                                                                                                                              'owns '
+                                                                                                                                              'OCR '
+                                                                                                                                              'source '
+                                                                                                                                              'blocks '
+                                                                                                                                              'for '
+                                                                                                                                              'this '
+                                                                                                                                              'page; '
+                                                                                                                                              'model '
+                                                                                                                                              'summaries '
+                                                                                                                                              'omit '
+                                                                                                                                              'the '
+                                                                                                                                              'blocks.',
+                                                                                                                               'type': 'boolean'},
                                                                                                         'has_text_layer': {'default': False,
                                                                                                                            'title': 'Has '
                                                                                                                                     'Text '
@@ -1083,6 +1119,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                               'properties': {'deskewed': {'default': False,
                                                                                                                                                           'title': 'Deskewed',
                                                                                                                                                           'type': 'boolean'},
+                                                                                                                                             'has_ocr_text_layer': {'default': False,
+                                                                                                                                                                    'description': 'Whether '
+                                                                                                                                                                                   'the '
+                                                                                                                                                                                   'current '
+                                                                                                                                                                                   'session '
+                                                                                                                                                                                   'owns '
+                                                                                                                                                                                   'OCR '
+                                                                                                                                                                                   'source '
+                                                                                                                                                                                   'blocks '
+                                                                                                                                                                                   'for '
+                                                                                                                                                                                   'this '
+                                                                                                                                                                                   'page; '
+                                                                                                                                                                                   'model '
+                                                                                                                                                                                   'summaries '
+                                                                                                                                                                                   'omit '
+                                                                                                                                                                                   'the '
+                                                                                                                                                                                   'blocks.',
+                                                                                                                                                                    'type': 'boolean'},
                                                                                                                                              'has_text_layer': {'default': False,
                                                                                                                                                                 'title': 'Has '
                                                                                                                                                                          'Text '
@@ -1262,6 +1316,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                               'properties': {'deskewed': {'default': False,
                                                                                                                           'title': 'Deskewed',
                                                                                                                           'type': 'boolean'},
+                                                                                                             'has_ocr_text_layer': {'default': False,
+                                                                                                                                    'description': 'Whether '
+                                                                                                                                                   'the '
+                                                                                                                                                   'current '
+                                                                                                                                                   'session '
+                                                                                                                                                   'owns '
+                                                                                                                                                   'OCR '
+                                                                                                                                                   'source '
+                                                                                                                                                   'blocks '
+                                                                                                                                                   'for '
+                                                                                                                                                   'this '
+                                                                                                                                                   'page; '
+                                                                                                                                                   'model '
+                                                                                                                                                   'summaries '
+                                                                                                                                                   'omit '
+                                                                                                                                                   'the '
+                                                                                                                                                   'blocks.',
+                                                                                                                                    'type': 'boolean'},
                                                                                                              'has_text_layer': {'default': False,
                                                                                                                                 'title': 'Has '
                                                                                                                                          'Text '
@@ -1671,6 +1743,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                         'properties': {'deskewed': {'default': False,
                                                                                                                                                     'title': 'Deskewed',
                                                                                                                                                     'type': 'boolean'},
+                                                                                                                                       'has_ocr_text_layer': {'default': False,
+                                                                                                                                                              'description': 'Whether '
+                                                                                                                                                                             'the '
+                                                                                                                                                                             'current '
+                                                                                                                                                                             'session '
+                                                                                                                                                                             'owns '
+                                                                                                                                                                             'OCR '
+                                                                                                                                                                             'source '
+                                                                                                                                                                             'blocks '
+                                                                                                                                                                             'for '
+                                                                                                                                                                             'this '
+                                                                                                                                                                             'page; '
+                                                                                                                                                                             'model '
+                                                                                                                                                                             'summaries '
+                                                                                                                                                                             'omit '
+                                                                                                                                                                             'the '
+                                                                                                                                                                             'blocks.',
+                                                                                                                                                              'type': 'boolean'},
                                                                                                                                        'has_text_layer': {'default': False,
                                                                                                                                                           'title': 'Has '
                                                                                                                                                                    'Text '
@@ -1850,6 +1940,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                         'properties': {'deskewed': {'default': False,
                                                                                                                     'title': 'Deskewed',
                                                                                                                     'type': 'boolean'},
+                                                                                                       'has_ocr_text_layer': {'default': False,
+                                                                                                                              'description': 'Whether '
+                                                                                                                                             'the '
+                                                                                                                                             'current '
+                                                                                                                                             'session '
+                                                                                                                                             'owns '
+                                                                                                                                             'OCR '
+                                                                                                                                             'source '
+                                                                                                                                             'blocks '
+                                                                                                                                             'for '
+                                                                                                                                             'this '
+                                                                                                                                             'page; '
+                                                                                                                                             'model '
+                                                                                                                                             'summaries '
+                                                                                                                                             'omit '
+                                                                                                                                             'the '
+                                                                                                                                             'blocks.',
+                                                                                                                              'type': 'boolean'},
                                                                                                        'has_text_layer': {'default': False,
                                                                                                                           'title': 'Has '
                                                                                                                                    'Text '
@@ -2094,6 +2202,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                            'properties': {'deskewed': {'default': False,
                                                                                        'title': 'Deskewed',
                                                                                        'type': 'boolean'},
+                                                                          'has_ocr_text_layer': {'default': False,
+                                                                                                 'description': 'Whether '
+                                                                                                                'the '
+                                                                                                                'current '
+                                                                                                                'session '
+                                                                                                                'owns '
+                                                                                                                'OCR '
+                                                                                                                'source '
+                                                                                                                'blocks '
+                                                                                                                'for '
+                                                                                                                'this '
+                                                                                                                'page; '
+                                                                                                                'model '
+                                                                                                                'summaries '
+                                                                                                                'omit '
+                                                                                                                'the '
+                                                                                                                'blocks.',
+                                                                                                 'type': 'boolean'},
                                                                           'has_text_layer': {'default': False,
                                                                                              'title': 'Has '
                                                                                                       'Text '
@@ -4048,6 +4174,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                             'properties': {'deskewed': {'default': False,
                                                                                                                                                         'title': 'Deskewed',
                                                                                                                                                         'type': 'boolean'},
+                                                                                                                                           'has_ocr_text_layer': {'default': False,
+                                                                                                                                                                  'description': 'Whether '
+                                                                                                                                                                                 'the '
+                                                                                                                                                                                 'current '
+                                                                                                                                                                                 'session '
+                                                                                                                                                                                 'owns '
+                                                                                                                                                                                 'OCR '
+                                                                                                                                                                                 'source '
+                                                                                                                                                                                 'blocks '
+                                                                                                                                                                                 'for '
+                                                                                                                                                                                 'this '
+                                                                                                                                                                                 'page; '
+                                                                                                                                                                                 'model '
+                                                                                                                                                                                 'summaries '
+                                                                                                                                                                                 'omit '
+                                                                                                                                                                                 'the '
+                                                                                                                                                                                 'blocks.',
+                                                                                                                                                                  'type': 'boolean'},
                                                                                                                                            'has_text_layer': {'default': False,
                                                                                                                                                               'title': 'Has '
                                                                                                                                                                        'Text '
@@ -4227,6 +4371,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                             'properties': {'deskewed': {'default': False,
                                                                                                                         'title': 'Deskewed',
                                                                                                                         'type': 'boolean'},
+                                                                                                           'has_ocr_text_layer': {'default': False,
+                                                                                                                                  'description': 'Whether '
+                                                                                                                                                 'the '
+                                                                                                                                                 'current '
+                                                                                                                                                 'session '
+                                                                                                                                                 'owns '
+                                                                                                                                                 'OCR '
+                                                                                                                                                 'source '
+                                                                                                                                                 'blocks '
+                                                                                                                                                 'for '
+                                                                                                                                                 'this '
+                                                                                                                                                 'page; '
+                                                                                                                                                 'model '
+                                                                                                                                                 'summaries '
+                                                                                                                                                 'omit '
+                                                                                                                                                 'the '
+                                                                                                                                                 'blocks.',
+                                                                                                                                  'type': 'boolean'},
                                                                                                            'has_text_layer': {'default': False,
                                                                                                                               'title': 'Has '
                                                                                                                                        'Text '
@@ -4442,6 +4604,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                 'properties': {'deskewed': {'default': False,
                                                                                                                                                             'title': 'Deskewed',
                                                                                                                                                             'type': 'boolean'},
+                                                                                                                                               'has_ocr_text_layer': {'default': False,
+                                                                                                                                                                      'description': 'Whether '
+                                                                                                                                                                                     'the '
+                                                                                                                                                                                     'current '
+                                                                                                                                                                                     'session '
+                                                                                                                                                                                     'owns '
+                                                                                                                                                                                     'OCR '
+                                                                                                                                                                                     'source '
+                                                                                                                                                                                     'blocks '
+                                                                                                                                                                                     'for '
+                                                                                                                                                                                     'this '
+                                                                                                                                                                                     'page; '
+                                                                                                                                                                                     'model '
+                                                                                                                                                                                     'summaries '
+                                                                                                                                                                                     'omit '
+                                                                                                                                                                                     'the '
+                                                                                                                                                                                     'blocks.',
+                                                                                                                                                                      'type': 'boolean'},
                                                                                                                                                'has_text_layer': {'default': False,
                                                                                                                                                                   'title': 'Has '
                                                                                                                                                                            'Text '
@@ -4621,6 +4801,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                 'properties': {'deskewed': {'default': False,
                                                                                                                             'title': 'Deskewed',
                                                                                                                             'type': 'boolean'},
+                                                                                                               'has_ocr_text_layer': {'default': False,
+                                                                                                                                      'description': 'Whether '
+                                                                                                                                                     'the '
+                                                                                                                                                     'current '
+                                                                                                                                                     'session '
+                                                                                                                                                     'owns '
+                                                                                                                                                     'OCR '
+                                                                                                                                                     'source '
+                                                                                                                                                     'blocks '
+                                                                                                                                                     'for '
+                                                                                                                                                     'this '
+                                                                                                                                                     'page; '
+                                                                                                                                                     'model '
+                                                                                                                                                     'summaries '
+                                                                                                                                                     'omit '
+                                                                                                                                                     'the '
+                                                                                                                                                     'blocks.',
+                                                                                                                                      'type': 'boolean'},
                                                                                                                'has_text_layer': {'default': False,
                                                                                                                                   'title': 'Has '
                                                                                                                                            'Text '
@@ -4832,6 +5030,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                      'properties': {'deskewed': {'default': False,
                                                                                                                                                  'title': 'Deskewed',
                                                                                                                                                  'type': 'boolean'},
+                                                                                                                                    'has_ocr_text_layer': {'default': False,
+                                                                                                                                                           'description': 'Whether '
+                                                                                                                                                                          'the '
+                                                                                                                                                                          'current '
+                                                                                                                                                                          'session '
+                                                                                                                                                                          'owns '
+                                                                                                                                                                          'OCR '
+                                                                                                                                                                          'source '
+                                                                                                                                                                          'blocks '
+                                                                                                                                                                          'for '
+                                                                                                                                                                          'this '
+                                                                                                                                                                          'page; '
+                                                                                                                                                                          'model '
+                                                                                                                                                                          'summaries '
+                                                                                                                                                                          'omit '
+                                                                                                                                                                          'the '
+                                                                                                                                                                          'blocks.',
+                                                                                                                                                           'type': 'boolean'},
                                                                                                                                     'has_text_layer': {'default': False,
                                                                                                                                                        'title': 'Has '
                                                                                                                                                                 'Text '
@@ -5010,6 +5226,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                      'properties': {'deskewed': {'default': False,
                                                                                                                  'title': 'Deskewed',
                                                                                                                  'type': 'boolean'},
+                                                                                                    'has_ocr_text_layer': {'default': False,
+                                                                                                                           'description': 'Whether '
+                                                                                                                                          'the '
+                                                                                                                                          'current '
+                                                                                                                                          'session '
+                                                                                                                                          'owns '
+                                                                                                                                          'OCR '
+                                                                                                                                          'source '
+                                                                                                                                          'blocks '
+                                                                                                                                          'for '
+                                                                                                                                          'this '
+                                                                                                                                          'page; '
+                                                                                                                                          'model '
+                                                                                                                                          'summaries '
+                                                                                                                                          'omit '
+                                                                                                                                          'the '
+                                                                                                                                          'blocks.',
+                                                                                                                           'type': 'boolean'},
                                                                                                     'has_text_layer': {'default': False,
                                                                                                                        'title': 'Has '
                                                                                                                                 'Text '
@@ -6201,6 +6435,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                 'properties': {'deskewed': {'default': False,
                                                                                                             'title': 'Deskewed',
                                                                                                             'type': 'boolean'},
+                                                                                               'has_ocr_text_layer': {'default': False,
+                                                                                                                      'description': 'Whether '
+                                                                                                                                     'the '
+                                                                                                                                     'current '
+                                                                                                                                     'session '
+                                                                                                                                     'owns '
+                                                                                                                                     'OCR '
+                                                                                                                                     'source '
+                                                                                                                                     'blocks '
+                                                                                                                                     'for '
+                                                                                                                                     'this '
+                                                                                                                                     'page; '
+                                                                                                                                     'model '
+                                                                                                                                     'summaries '
+                                                                                                                                     'omit '
+                                                                                                                                     'the '
+                                                                                                                                     'blocks.',
+                                                                                                                      'type': 'boolean'},
                                                                                                'has_text_layer': {'default': False,
                                                                                                                   'title': 'Has '
                                                                                                                            'Text '
@@ -7165,6 +7417,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                          'properties': {'deskewed': {'default': False,
                                                                                                                                                      'title': 'Deskewed',
                                                                                                                                                      'type': 'boolean'},
+                                                                                                                                        'has_ocr_text_layer': {'default': False,
+                                                                                                                                                               'description': 'Whether '
+                                                                                                                                                                              'the '
+                                                                                                                                                                              'current '
+                                                                                                                                                                              'session '
+                                                                                                                                                                              'owns '
+                                                                                                                                                                              'OCR '
+                                                                                                                                                                              'source '
+                                                                                                                                                                              'blocks '
+                                                                                                                                                                              'for '
+                                                                                                                                                                              'this '
+                                                                                                                                                                              'page; '
+                                                                                                                                                                              'model '
+                                                                                                                                                                              'summaries '
+                                                                                                                                                                              'omit '
+                                                                                                                                                                              'the '
+                                                                                                                                                                              'blocks.',
+                                                                                                                                                               'type': 'boolean'},
                                                                                                                                         'has_text_layer': {'default': False,
                                                                                                                                                            'title': 'Has '
                                                                                                                                                                     'Text '
@@ -7344,6 +7614,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                          'properties': {'deskewed': {'default': False,
                                                                                                                      'title': 'Deskewed',
                                                                                                                      'type': 'boolean'},
+                                                                                                        'has_ocr_text_layer': {'default': False,
+                                                                                                                               'description': 'Whether '
+                                                                                                                                              'the '
+                                                                                                                                              'current '
+                                                                                                                                              'session '
+                                                                                                                                              'owns '
+                                                                                                                                              'OCR '
+                                                                                                                                              'source '
+                                                                                                                                              'blocks '
+                                                                                                                                              'for '
+                                                                                                                                              'this '
+                                                                                                                                              'page; '
+                                                                                                                                              'model '
+                                                                                                                                              'summaries '
+                                                                                                                                              'omit '
+                                                                                                                                              'the '
+                                                                                                                                              'blocks.',
+                                                                                                                               'type': 'boolean'},
                                                                                                         'has_text_layer': {'default': False,
                                                                                                                            'title': 'Has '
                                                                                                                                     'Text '
@@ -7564,6 +7852,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                              'properties': {'deskewed': {'default': False,
                                                                                                                                                          'title': 'Deskewed',
                                                                                                                                                          'type': 'boolean'},
+                                                                                                                                            'has_ocr_text_layer': {'default': False,
+                                                                                                                                                                   'description': 'Whether '
+                                                                                                                                                                                  'the '
+                                                                                                                                                                                  'current '
+                                                                                                                                                                                  'session '
+                                                                                                                                                                                  'owns '
+                                                                                                                                                                                  'OCR '
+                                                                                                                                                                                  'source '
+                                                                                                                                                                                  'blocks '
+                                                                                                                                                                                  'for '
+                                                                                                                                                                                  'this '
+                                                                                                                                                                                  'page; '
+                                                                                                                                                                                  'model '
+                                                                                                                                                                                  'summaries '
+                                                                                                                                                                                  'omit '
+                                                                                                                                                                                  'the '
+                                                                                                                                                                                  'blocks.',
+                                                                                                                                                                   'type': 'boolean'},
                                                                                                                                             'has_text_layer': {'default': False,
                                                                                                                                                                'title': 'Has '
                                                                                                                                                                         'Text '
@@ -7743,6 +8049,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                              'properties': {'deskewed': {'default': False,
                                                                                                                          'title': 'Deskewed',
                                                                                                                          'type': 'boolean'},
+                                                                                                            'has_ocr_text_layer': {'default': False,
+                                                                                                                                   'description': 'Whether '
+                                                                                                                                                  'the '
+                                                                                                                                                  'current '
+                                                                                                                                                  'session '
+                                                                                                                                                  'owns '
+                                                                                                                                                  'OCR '
+                                                                                                                                                  'source '
+                                                                                                                                                  'blocks '
+                                                                                                                                                  'for '
+                                                                                                                                                  'this '
+                                                                                                                                                  'page; '
+                                                                                                                                                  'model '
+                                                                                                                                                  'summaries '
+                                                                                                                                                  'omit '
+                                                                                                                                                  'the '
+                                                                                                                                                  'blocks.',
+                                                                                                                                   'type': 'boolean'},
                                                                                                             'has_text_layer': {'default': False,
                                                                                                                                'title': 'Has '
                                                                                                                                         'Text '
@@ -7954,6 +8278,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                         'properties': {'deskewed': {'default': False,
                                                                                                                                                     'title': 'Deskewed',
                                                                                                                                                     'type': 'boolean'},
+                                                                                                                                       'has_ocr_text_layer': {'default': False,
+                                                                                                                                                              'description': 'Whether '
+                                                                                                                                                                             'the '
+                                                                                                                                                                             'current '
+                                                                                                                                                                             'session '
+                                                                                                                                                                             'owns '
+                                                                                                                                                                             'OCR '
+                                                                                                                                                                             'source '
+                                                                                                                                                                             'blocks '
+                                                                                                                                                                             'for '
+                                                                                                                                                                             'this '
+                                                                                                                                                                             'page; '
+                                                                                                                                                                             'model '
+                                                                                                                                                                             'summaries '
+                                                                                                                                                                             'omit '
+                                                                                                                                                                             'the '
+                                                                                                                                                                             'blocks.',
+                                                                                                                                                              'type': 'boolean'},
                                                                                                                                        'has_text_layer': {'default': False,
                                                                                                                                                           'title': 'Has '
                                                                                                                                                                    'Text '
@@ -8133,6 +8475,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                         'properties': {'deskewed': {'default': False,
                                                                                                                     'title': 'Deskewed',
                                                                                                                     'type': 'boolean'},
+                                                                                                       'has_ocr_text_layer': {'default': False,
+                                                                                                                              'description': 'Whether '
+                                                                                                                                             'the '
+                                                                                                                                             'current '
+                                                                                                                                             'session '
+                                                                                                                                             'owns '
+                                                                                                                                             'OCR '
+                                                                                                                                             'source '
+                                                                                                                                             'blocks '
+                                                                                                                                             'for '
+                                                                                                                                             'this '
+                                                                                                                                             'page; '
+                                                                                                                                             'model '
+                                                                                                                                             'summaries '
+                                                                                                                                             'omit '
+                                                                                                                                             'the '
+                                                                                                                                             'blocks.',
+                                                                                                                              'type': 'boolean'},
                                                                                                        'has_text_layer': {'default': False,
                                                                                                                           'title': 'Has '
                                                                                                                                    'Text '
@@ -8343,6 +8703,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                         'properties': {'deskewed': {'default': False,
                                                                                                                                                     'title': 'Deskewed',
                                                                                                                                                     'type': 'boolean'},
+                                                                                                                                       'has_ocr_text_layer': {'default': False,
+                                                                                                                                                              'description': 'Whether '
+                                                                                                                                                                             'the '
+                                                                                                                                                                             'current '
+                                                                                                                                                                             'session '
+                                                                                                                                                                             'owns '
+                                                                                                                                                                             'OCR '
+                                                                                                                                                                             'source '
+                                                                                                                                                                             'blocks '
+                                                                                                                                                                             'for '
+                                                                                                                                                                             'this '
+                                                                                                                                                                             'page; '
+                                                                                                                                                                             'model '
+                                                                                                                                                                             'summaries '
+                                                                                                                                                                             'omit '
+                                                                                                                                                                             'the '
+                                                                                                                                                                             'blocks.',
+                                                                                                                                                              'type': 'boolean'},
                                                                                                                                        'has_text_layer': {'default': False,
                                                                                                                                                           'title': 'Has '
                                                                                                                                                                    'Text '
@@ -8522,6 +8900,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                         'properties': {'deskewed': {'default': False,
                                                                                                                     'title': 'Deskewed',
                                                                                                                     'type': 'boolean'},
+                                                                                                       'has_ocr_text_layer': {'default': False,
+                                                                                                                              'description': 'Whether '
+                                                                                                                                             'the '
+                                                                                                                                             'current '
+                                                                                                                                             'session '
+                                                                                                                                             'owns '
+                                                                                                                                             'OCR '
+                                                                                                                                             'source '
+                                                                                                                                             'blocks '
+                                                                                                                                             'for '
+                                                                                                                                             'this '
+                                                                                                                                             'page; '
+                                                                                                                                             'model '
+                                                                                                                                             'summaries '
+                                                                                                                                             'omit '
+                                                                                                                                             'the '
+                                                                                                                                             'blocks.',
+                                                                                                                              'type': 'boolean'},
                                                                                                        'has_text_layer': {'default': False,
                                                                                                                           'title': 'Has '
                                                                                                                                    'Text '
@@ -8882,6 +9278,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                             'properties': {'deskewed': {'default': False,
                                                                                                                                                         'title': 'Deskewed',
                                                                                                                                                         'type': 'boolean'},
+                                                                                                                                           'has_ocr_text_layer': {'default': False,
+                                                                                                                                                                  'description': 'Whether '
+                                                                                                                                                                                 'the '
+                                                                                                                                                                                 'current '
+                                                                                                                                                                                 'session '
+                                                                                                                                                                                 'owns '
+                                                                                                                                                                                 'OCR '
+                                                                                                                                                                                 'source '
+                                                                                                                                                                                 'blocks '
+                                                                                                                                                                                 'for '
+                                                                                                                                                                                 'this '
+                                                                                                                                                                                 'page; '
+                                                                                                                                                                                 'model '
+                                                                                                                                                                                 'summaries '
+                                                                                                                                                                                 'omit '
+                                                                                                                                                                                 'the '
+                                                                                                                                                                                 'blocks.',
+                                                                                                                                                                  'type': 'boolean'},
                                                                                                                                            'has_text_layer': {'default': False,
                                                                                                                                                               'title': 'Has '
                                                                                                                                                                        'Text '
@@ -9061,6 +9475,24 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                             'properties': {'deskewed': {'default': False,
                                                                                                                         'title': 'Deskewed',
                                                                                                                         'type': 'boolean'},
+                                                                                                           'has_ocr_text_layer': {'default': False,
+                                                                                                                                  'description': 'Whether '
+                                                                                                                                                 'the '
+                                                                                                                                                 'current '
+                                                                                                                                                 'session '
+                                                                                                                                                 'owns '
+                                                                                                                                                 'OCR '
+                                                                                                                                                 'source '
+                                                                                                                                                 'blocks '
+                                                                                                                                                 'for '
+                                                                                                                                                 'this '
+                                                                                                                                                 'page; '
+                                                                                                                                                 'model '
+                                                                                                                                                 'summaries '
+                                                                                                                                                 'omit '
+                                                                                                                                                 'the '
+                                                                                                                                                 'blocks.',
+                                                                                                                                  'type': 'boolean'},
                                                                                                            'has_text_layer': {'default': False,
                                                                                                                               'title': 'Has '
                                                                                                                                        'Text '

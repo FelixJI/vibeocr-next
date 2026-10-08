@@ -1,5 +1,7 @@
 // Deferred PDF session client mirroring DeferredInferenceClient.
 using VibeOCR.Platform.Inference;
+using System.Text.Json;
+using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 
 namespace VibeOCR.App.Inference;
 
@@ -31,6 +33,14 @@ public sealed class DeferredPdfSessionClient : IPdfSessionClient
         => Current.DeletePagesAsync(sessionId, pages, ct);
     public Task<string> SaveAsync(string sessionId, string outputPath, CancellationToken ct)
         => Current.SaveAsync(sessionId, outputPath, ct);
+    public Task<Wire.PdfDocumentMirror> GetModelAsync(string sessionId, CancellationToken ct) => Current.GetModelAsync(sessionId, ct);
+    public Task LoadAsync(string sessionId, Action<JsonElement> progress, CancellationToken ct) => Current.LoadAsync(sessionId, progress, ct);
+    public Task<byte[]> RenderPreviewAsync(string sessionId, int page, int dpi, CancellationToken ct) => Current.RenderPreviewAsync(sessionId, page, dpi, ct);
+    public Task<Wire.PdfMutationResponse> AddTextLayersAsync(string sessionId, Wire.BatchAddTextLayerRequest request, CancellationToken ct) => Current.AddTextLayersAsync(sessionId, request, ct);
+    public Task DeleteTextLayersAsync(string sessionId, int[] pages, Action<JsonElement> progress, CancellationToken ct) => Current.DeleteTextLayersAsync(sessionId, pages, progress, ct);
+    public Task CancelAsync(string sessionId, CancellationToken ct) => Current.CancelAsync(sessionId, ct);
+    public Task ResetCancelAsync(string sessionId, CancellationToken ct) => Current.ResetCancelAsync(sessionId, ct);
+    public Task<string> SaveWithSettingsAsync(string sessionId, string outputPath, IReadOnlyDictionary<string, JsonElement> settings, CancellationToken ct) => Current.SaveWithSettingsAsync(sessionId, outputPath, settings, ct);
     public Task CloseAsync(string sessionId, CancellationToken ct)
         => Current.CloseAsync(sessionId, ct);
     public ValueTask DisposeAsync()

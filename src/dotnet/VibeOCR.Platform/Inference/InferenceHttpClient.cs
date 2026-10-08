@@ -261,6 +261,15 @@ public sealed class InferenceHttpClient : IInferenceClient
     public Task<string> SavePdfAsync(string sessionId, string outputPath, CancellationToken ct)
         => _pdf.SaveAsync(sessionId, outputPath, ct);
 
+    public Task<VibeOCR.Runtime.Contracts.Generated.Wire.PdfDocumentMirror> GetPdfModelAsync(string sessionId, CancellationToken ct) => _pdf.GetModelAsync(sessionId, ct);
+    public Task LoadPdfAsync(string sessionId, Action<JsonElement> progress, CancellationToken ct) => _pdf.LoadAsync(sessionId, progress, ct);
+    public Task<byte[]> RenderPdfPreviewAsync(string sessionId, int page, int dpi, CancellationToken ct) => _pdf.RenderPreviewAsync(sessionId, page, dpi, ct);
+    public Task<VibeOCR.Runtime.Contracts.Generated.Wire.PdfMutationResponse> AddPdfTextLayersAsync(string sessionId, VibeOCR.Runtime.Contracts.Generated.Wire.BatchAddTextLayerRequest request, CancellationToken ct) => _pdf.AddTextLayersAsync(sessionId, request, ct);
+    public Task DeletePdfTextLayersAsync(string sessionId, int[] pages, Action<JsonElement> progress, CancellationToken ct) => _pdf.DeleteTextLayersAsync(sessionId, pages, progress, ct);
+    public Task CancelPdfAsync(string sessionId, CancellationToken ct) => _pdf.CancelAsync(sessionId, ct);
+    public Task ResetPdfCancelAsync(string sessionId, CancellationToken ct) => _pdf.ResetCancelAsync(sessionId, ct);
+    public Task<string> SavePdfWithSettingsAsync(string sessionId, string outputPath, IReadOnlyDictionary<string, JsonElement> settings, CancellationToken ct) => _pdf.SaveWithSettingsAsync(sessionId, outputPath, settings, ct);
+
     public Task ClosePdfSessionAsync(string sessionId, CancellationToken ct)
         => _pdf.CloseAsync(sessionId, ct);
 
