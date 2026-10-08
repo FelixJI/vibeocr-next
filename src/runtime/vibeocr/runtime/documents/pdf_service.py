@@ -466,7 +466,9 @@ class PdfService:
     # ---- text layer detection ---------------------------------------
 
     @staticmethod
-    def detect_text_layers(doc: fitz.Document, page_index: int) -> list[TextLayerInfo]:
+    def detect_text_layers(
+        doc: fitz.Document, page_index: int, *, limit: int | None = None
+    ) -> list[TextLayerInfo]:
         page = doc[page_index]
         # 快速预检：get_text("text") ~4ms vs get_text("dict") ~173ms（扫描件）。
         # 扫描件绝大多数页无文字层，先 4ms 判空，无文字直接返回避免 173ms dict。
@@ -508,6 +510,8 @@ class PdfService:
                     )
                 )
                 layer_index += 1
+                if limit is not None and len(layers) >= limit:
+                    return layers
         return layers
 
     @staticmethod
@@ -1652,8 +1656,19 @@ class PdfService:
         if rect.width <= 0 or rect.height <= 0:
             raise ValueError("页面几何退化，无法投影检查框")
 
+        # Bound serialized text, geometry and the resulting WebView DOM per page.
+        max_boxes, remaining_text = 1000, 128000
+        truncated = len(info.ocr_text_blocks) > max_boxes
         ocr_blocks: list[PageInspectOcrBlock] = []
-        for index, block in enumerate(info.ocr_text_blocks):
+        for index, block in enumerate(info.ocr_text_blocks[:max_boxes]):
+            text = block.text[: min(2000, remaining_text)]
+            text_truncated = len(text) != len(block.text)
+            truncated |= (
+                text_truncated
+                or len(block.label) > 128
+                or bool(block.polygon and len(block.polygon) > 64)
+            )
+            remaining_text -= len(text)
             bbox = None
             if block.bbox is not None:
                 display = PdfService._denormalize_and_unrotate_bbox(
@@ -1661,7 +1676,7 @@ class PdfService:
                 )
                 bbox = PdfService._normalize_display_rect(display, rect)
             polygon: tuple[float, ...] | None = None
-            if block.polygon:
+            if block.polygon and len(block.polygon) <= 64:
                 points = PdfService._denormalize_and_unrotate_polygon(
                     block.polygon, info.ocr_preproc_angle, rect
                 )
@@ -1676,21 +1691,23 @@ class PdfService:
             ocr_blocks.append(
                 PageInspectOcrBlock(
                     index=index,
-                    text=block.text,
+                    text=text,
+                    text_truncated=text_truncated,
                     score=0.0 if block.score is None else block.score,
                     score_unknown=block.score is None,
                     is_manually_edited=block.is_manually_edited,
-                    label=block.label,
+                    label=block.label[:128],
                     bbox=bbox,
                     polygon=polygon,
                 )
             )
 
         native_lines: list[PageInspectNativeLine] = []
-        if not ocr_blocks:
-            layers = PdfService.detect_text_layers(doc, page_index)
+        if not info.ocr_text_blocks:
+            layers = PdfService.detect_text_layers(doc, page_index, limit=max_boxes + 1)
+            truncated = len(layers) > max_boxes
             rotation_matrix = page.rotation_matrix
-            for layer in layers:
+            for layer in layers[:max_boxes]:
                 corners = [
                     fitz.Point(layer.bbox[0], layer.bbox[1]) * rotation_matrix,
                     fitz.Point(layer.bbox[2], layer.bbox[1]) * rotation_matrix,
@@ -1709,15 +1726,14 @@ class PdfService:
                         char_count=layer.char_count,
                     )
                 )
-            # 同步模型缓存（与 detect_text_layers 路由同一语义）
-            info.text_layers = layers
-            info.has_text_layer = len(layers) > 0
+            # Inspection is a bounded projection; never replace the full model cache.
 
         return PageInspectResponse(
             page=page_index,
             rotation=int(page.rotation or 0) % 360,
             rect=(rect.x0, rect.y0, rect.x1, rect.y1),
             preproc_angle=info.ocr_preproc_angle,
+            truncated=truncated,
             ocr_blocks=ocr_blocks,
             native_lines=native_lines,
         )

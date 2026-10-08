@@ -36,6 +36,13 @@ public sealed class PdfViewModel(
   public int AddedCount => Pages.Count(page => page.AddedThisSession);
   public string Summary { get; private set; } = "";
   public PdfProcessingSettings ProcessingSettings { get; private set; } = new();
+  public bool CanInspectPage { get; private set; }
+  public bool CanCorrectText { get; private set; }
+  public void SetInspectionCapabilities(IReadOnlyCollection<string> capabilities)
+  {
+    CanInspectPage = capabilities.Contains(VibeOCR.Runtime.Contracts.Generated.RuntimeProtocol.PDF_PAGE_INSPECT_V1);
+    CanCorrectText = CanInspectPage && capabilities.Contains(VibeOCR.Runtime.Contracts.Generated.RuntimeProtocol.PDF_BLOCK_EDIT_V1);
+  }
   public bool CanAddTextLayer => (_recognitionMode?.PipelineId ?? "OCR") == "OCR" && _options?.UseDocUnwarping != true;
   public void SetProcessingSettings(PdfProcessingSettings settings) { settings.Validate(); ProcessingSettings = settings; Changed(); }
 
@@ -168,6 +175,7 @@ public sealed class PdfViewModel(
   {
     if (SessionId is null) return null;
     string session = SessionId; long revision = Revision; long generation = Volatile.Read(ref _generation);
+    if (!CanInspectPage) return null;
     try { Wire.PageInspectResponse payload = await inference.InspectPdfPageAsync(session, pageIndex, ct); return SessionId == session && Revision == revision && generation == Volatile.Read(ref _generation) ? payload : null; }
     catch { return null; }
   }
@@ -187,6 +195,7 @@ public sealed class PdfViewModel(
     string? expectedOldText,
     CancellationToken ct)
   {
+    if (!CanCorrectText) return new(false, false, "当前 Runtime 不支持原子文字校正");
     if (SessionId is null) return new(false, false, "请先打开 PDF 文档");
     if (string.IsNullOrWhiteSpace(newText)) return new(false, false, "新文本不能为空");
     if (IsSettling) { Summary = "后台操作尚未收尾，请等待完成后再编辑"; Changed(); return new(false, false, Summary); }
@@ -248,6 +257,7 @@ public sealed class PdfViewModel(
         Revision++;
         IsModified = true;
         ApplyDiff(response.Diff!);
+        Pages[page].CorrectedAfterRecognition = Pages[page].Result is not null || Pages[page].ResultReference is not null;
         Status = "块文字已更新，尚未保存";
         Summary = Status;
         if (generation == Volatile.Read(ref _generation)) Changed();
@@ -551,6 +561,8 @@ public sealed class PdfViewModel(
           {
             RecognizeResponse result = RecognitionOutcomeMapper.ToResponse(outcome, pipeline);
             Pages[idx].Result = result; Pages[idx].OcrText = result.Text;
+            Pages[idx].RecognitionRevision = Revision;
+            Pages[idx].CorrectedAfterRecognition = false;
             Pages[idx].ResultReference = new PdfResultReference(job.Snapshot.JobId, outcome.ItemId, pipeline);
             if (!addTextLayer) { Pages[idx].State = PdfPageState.Done; s++; }
             else if (result.PreprocAngle is 0 or 90 or 180 or 270 && HasValidBlocks(result.RawBlocks))
@@ -765,6 +777,7 @@ public sealed class PdfViewModel(
       {
         Index = index,
         State = source.State, OcrText = source.OcrText, Result = source.Result,
+        RecognitionRevision = source.RecognitionRevision, CorrectedAfterRecognition = source.CorrectedAfterRecognition,
         ResultReference = source.ResultReference, HasTextLayer = source.HasTextLayer, Detected = source.Detected,
         Width = source.Width, Height = source.Height, Rotation = source.Rotation,
         AddedThisSession = source.AddedThisSession,
@@ -919,6 +932,8 @@ public sealed class PdfPageViewModel : INotifyPropertyChanged
   public double Width { get; internal set; }
   public double Height { get; internal set; }
   public RecognizeResponse? Result { get; internal set; }
+  public long? RecognitionRevision { get; set; }
+  public bool CorrectedAfterRecognition { get; set; }
   internal PdfResultReference? ResultReference { get; set; }
   public PdfPageState State { get => _state; set { if (_state != value) { _state = value; PropertyChanged?.Invoke(this, new(nameof(State))); } } }
   public string OcrText { get => _ocrText; set { if (_ocrText != value) { _ocrText = value; PropertyChanged?.Invoke(this, new(nameof(OcrText))); } } }

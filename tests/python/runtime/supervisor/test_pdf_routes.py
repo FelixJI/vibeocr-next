@@ -310,6 +310,8 @@ async def test_page_inspect_proxies_page(
     assert resp.status_code == 200
     body = resp.json()
     assert body["page"] == 2
+    assert body["schema_version"] == 2
+    assert isinstance(body["instance_id"], str) and body["instance_id"]
     name, args, _kwargs = fake_pdf_adapter.calls[-1]
     assert name == "page_inspect"
     assert args == ("sid-1", 2)

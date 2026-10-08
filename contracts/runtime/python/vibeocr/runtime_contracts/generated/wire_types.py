@@ -306,6 +306,7 @@ class PageInspectOcrBlock(TypedDict, total=False):
     label: NotRequired[str]
     bbox: NotRequired[list[Any] | None]
     polygon: NotRequired[list[float] | None]
+    text_truncated: NotRequired[bool]
 
 
 class PageInspectRequest(TypedDict, total=False):
@@ -319,6 +320,9 @@ class PageInspectResponse(TypedDict, total=False):
     preproc_angle: NotRequired[int]
     ocr_blocks: NotRequired[list[PageInspectOcrBlock]]
     native_lines: NotRequired[list[PageInspectNativeLine]]
+    schema_version: Required[Literal[2]]
+    instance_id: Required[str]
+    truncated: NotRequired[bool]
 
 
 class PageListRequest(TypedDict, total=False):

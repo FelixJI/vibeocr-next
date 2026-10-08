@@ -13,6 +13,31 @@ namespace VibeOCR.App.Tests;
 public sealed class PdfInspectionWorkbenchTests
 {
   [Fact]
+  public async Task LegacyPdfCapabilityDoesNotRequestInspectionOrAtomicEditing()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-pdf-legacy-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      var client = new Client();
+      var model = new PdfViewModel(client, new Source());
+      model.SetInspectionCapabilities(["pdf.edit.v2"]);
+      await model.OpenPathAsync("synthetic.pdf", CancellationToken.None);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = Handler(model, root, broker, annotations);
+      PdfWorkbenchState state = await SelectAsync(handler, 0);
+      Assert.False(state.CanInspectPage); Assert.False(state.CanCorrectText);
+      Assert.Null(state.PageInspect); Assert.Null(state.PagePreview);
+      Assert.False(client.InspectEntered.Task.IsCompleted); Assert.Equal(0, client.PreviewCalls);
+      Assert.NotNull(state.Pages![0].Thumbnail);
+      PdfBlockEditResult edit = await model.UpdateBlockTextAsync(model.SessionId!, model.Revision, 0, 0, "new", "old", CancellationToken.None);
+      Assert.False(edit.Applied); Assert.Equal(0, client.EditCalls);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
   public async Task CurrentPageResourcesAreBoundedRevokedAndRetryable()
   {
     string root = Path.Combine(Path.GetTempPath(), $"vibeocr-pdf-inspect-{Guid.NewGuid():N}");
@@ -21,6 +46,7 @@ public sealed class PdfInspectionWorkbenchTests
     {
       var client = new Client();
       var model = new PdfViewModel(client, new Source());
+      model.SetInspectionCapabilities(["pdf.page-inspect.v1", "pdf.block-edit.v1"]);
       await model.OpenPathAsync("synthetic.pdf", CancellationToken.None);
       using var broker = new WorkbenchResourceBroker(root);
       using var annotations = new WorkbenchAnnotationStore(root);
@@ -56,7 +82,8 @@ public sealed class PdfInspectionWorkbenchTests
     try
     {
       var client = new Client { PendingInspect = new TaskCompletionSource<Wire.PageInspectResponse>() };
-      var model = new PdfViewModel(client, new Source()); await model.OpenPathAsync("synthetic.pdf", CancellationToken.None);
+      var model = new PdfViewModel(client, new Source());
+      model.SetInspectionCapabilities(["pdf.page-inspect.v1", "pdf.block-edit.v1"]); await model.OpenPathAsync("synthetic.pdf", CancellationToken.None);
       using var broker = new WorkbenchResourceBroker(root); using var annotations = new WorkbenchAnnotationStore(root);
       await using var handler = Handler(model, root, broker, annotations);
       Task<PdfWorkbenchState> old = SelectAsync(handler, 0);
@@ -81,7 +108,7 @@ public sealed class PdfInspectionWorkbenchTests
     static () => throw new InvalidOperationException(), static () => throw new InvalidOperationException(), static () => throw new InvalidOperationException(),
     () => model, static () => throw new InvalidOperationException(), static () => throw new InvalidOperationException(), static () => throw new InvalidOperationException(),
     new DiagnosticsViewModel("test", new PrerequisiteReport([])), broker, root, static () => 0, annotations);
-  private static Wire.PageInspectResponse Inspect(int page) => new() { Page = page, Rotation = 0, Rect = [JsonSerializer.SerializeToElement(0), JsonSerializer.SerializeToElement(0), JsonSerializer.SerializeToElement(612), JsonSerializer.SerializeToElement(792)], OcrBlocks = [], NativeLines = [] };
+  private static Wire.PageInspectResponse Inspect(int page) => new() { SchemaVersion = 2, InstanceId = "test", Page = page, Rotation = 0, Rect = [JsonSerializer.SerializeToElement(0), JsonSerializer.SerializeToElement(0), JsonSerializer.SerializeToElement(612), JsonSerializer.SerializeToElement(792)], OcrBlocks = [], NativeLines = [] };
   private sealed class Source : IPdfFileSource
   {
     public Task<string?> PickFileAsync(CancellationToken ct) => Task.FromResult<string?>(null);

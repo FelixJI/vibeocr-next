@@ -16,7 +16,7 @@ public sealed class InferenceHttpClientTests
     public async Task PdfInspectionAndBlockEditUseSinglePageTypedWire()
     {
         var handler = new FakeHandler([
-            """{"page":2,"rotation":90,"rect":[0,0,792,612],"ocr_blocks":[{"index":4,"text":"原文","score":0,"score_unknown":true,"is_manually_edited":false,"bbox":[100,200,400,300]}],"native_lines":[]}""",
+            """{"schema_version":2,"instance_id":"test","page":2,"rotation":90,"rect":[0,0,792,612],"ocr_blocks":[{"index":4,"text":"原文","score":0,"score_unknown":true,"is_manually_edited":false,"bbox":[100,200,400,300]}],"native_lines":[]}""",
             """{"schema_version":2,"instance_id":"test","diff":{"replaced_pages":[{"page_index":2}]},"extra":{"changed":true}}"""
         ]);
         await using var client = new InferenceHttpClient(Base, "tok", handler);

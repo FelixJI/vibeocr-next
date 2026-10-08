@@ -28,6 +28,8 @@ function setup(patch: Record<string, unknown> = {}) {
         detectedCount: 70,
         textLayerCount: 3,
         canAddTextLayer: true,
+        canInspectPage: true,
+        canCorrectText: true,
         pages: [
           {
             index: 69,
@@ -174,4 +176,48 @@ describe("PDF text layer actions", () => {
     expect(actions.run).toHaveBeenLastCalledWith({ type: "pdf.cancel" });
     expect(screen.getByText(/后台实际收尾后才可继续操作/)).toBeInTheDocument();
   });
+});
+
+it("falls back to the old thumbnail without the page inspection capability", () => {
+  setup({
+    canInspectPage: false,
+    canCorrectText: false,
+    pages: [
+      {
+        index: 69,
+        statusCode: "pdf.page.done",
+        thumbnail: { url: "/old-thumbnail.png", contentType: "image/png" },
+      },
+    ],
+  });
+  expect(screen.getByAltText("第 70 页预览")).toHaveAttribute(
+    "src",
+    "/old-thumbnail.png",
+  );
+  expect(
+    screen.queryByRole("button", { name: "适应页面" }),
+  ).not.toBeInTheDocument();
+});
+
+it("labels retained structured results and copy as the original recognition revision", () => {
+  setup({
+    pages: [
+      {
+        index: 69,
+        statusCode: "pdf.page.done",
+        recognitionRevision: 7,
+        correctedAfterRecognition: true,
+        structuredResult: {
+          url: "/original-ocr.json",
+          mediaType: "application/json",
+          byteLength: 128,
+        },
+      },
+    ],
+  });
+  expect(
+    screen.getByText(
+      /原始识别结果（修订 7） · 校正前，复制内容保留原始识别文本/,
+    ),
+  ).toBeInTheDocument();
 });

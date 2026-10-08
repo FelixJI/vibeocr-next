@@ -71,6 +71,8 @@ interface BatchItemState {
 }
 
 interface PdfPageState {
+  readonly recognitionRevision?: number;
+  readonly correctedAfterRecognition?: boolean;
   readonly detected?: boolean;
   readonly hasTextLayer?: boolean;
   readonly addedThisSession?: boolean;
@@ -2500,32 +2502,53 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
             </div>
           )}
           <Panel label="REVIEW" title="页面检查">
-            <PdfInspection
-              key={`${stringValue(state.sessionId)}:${numberValue(state.revision)}:${selectedPage}:${resource(state.pagePreview)?.url ?? ""}:${resource(state.pageInspect)?.url ?? ""}`}
-              page={selectedPage}
-              count={pageCount}
-              revision={numberValue(state.revision)}
-              sessionId={stringValue(state.sessionId) ?? ""}
-              preview={resource(state.pagePreview)}
-              inspect={resource(state.pageInspect)}
-              status={stringValue(state.pageInspectStatusCode) ?? ""}
-              busy={busy}
-              canEdit={viewState.capabilities.includes("pdf.edit")}
-              actions={actions}
-            />
-            {activeStructured && (
-              <StructuredResult
-                key={activeStructured.url}
-                source={activeStructuredText}
-                onCopy={(blockIndex, format) =>
-                  actions.run({
-                    type: "recognition.copyStructured",
-                    resourceUri: activeStructured.url,
-                    blockIndex,
-                    format,
-                  })
-                }
+            {state.canInspectPage === true ? (
+              <PdfInspection
+                key={`${stringValue(state.sessionId)}:${numberValue(state.revision)}:${selectedPage}:${resource(state.pagePreview)?.url ?? ""}:${resource(state.pageInspect)?.url ?? ""}`}
+                page={selectedPage}
+                count={pageCount}
+                revision={numberValue(state.revision)}
+                sessionId={stringValue(state.sessionId) ?? ""}
+                preview={resource(state.pagePreview)}
+                inspect={resource(state.pageInspect)}
+                status={stringValue(state.pageInspectStatusCode) ?? ""}
+                busy={busy}
+                canEdit={state.canCorrectText === true}
+                actions={actions}
               />
+            ) : activePage?.thumbnail ? (
+              <img
+                className="pdf-resource-preview"
+                src={activePage.thumbnail.url}
+                alt={`第 ${selectedPage + 1} 页预览`}
+              />
+            ) : (
+              <p>选择页面后查看预览。</p>
+            )}
+            {activeStructured && (
+              <>
+                <p>
+                  原始识别结果
+                  {typeof activePage?.recognitionRevision === "number"
+                    ? `（修订 ${activePage.recognitionRevision}）`
+                    : ""}
+                  {activePage?.correctedAfterRecognition === true
+                    ? " · 校正前，复制内容保留原始识别文本"
+                    : " · 复制内容保留原始识别文本"}
+                </p>
+                <StructuredResult
+                  key={activeStructured.url}
+                  source={activeStructuredText}
+                  onCopy={(blockIndex, format) =>
+                    actions.run({
+                      type: "recognition.copyStructured",
+                      resourceUri: activeStructured.url,
+                      blockIndex,
+                      format,
+                    })
+                  }
+                />
+              </>
             )}
           </Panel>
           <StatusLine>

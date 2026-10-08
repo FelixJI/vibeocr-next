@@ -661,7 +661,8 @@ public sealed record PdfWorkbenchState(
   string Summary = "", bool CanAddTextLayer = false,
   VibeOCR.App.Features.Pdf.PdfProcessingSettings? ProcessingSettings = null,
   WorkbenchResourceReference? PagePreview = null, WorkbenchResourceReference? PageInspect = null,
-  string PageInspectStatusCode = "pdf.inspect.none", string? SessionId = null) : WorkbenchState
+  string PageInspectStatusCode = "pdf.inspect.none", string? SessionId = null,
+  bool CanInspectPage = false, bool CanCorrectText = false) : WorkbenchState
 {
   public override string Scope => "pdf";
 }
@@ -672,7 +673,8 @@ public sealed record PdfWorkbenchPage(
   WorkbenchResourceReference? Thumbnail,
   WorkbenchResourceReference? StructuredResult = null,
   bool Detected = false, bool HasTextLayer = false, bool AddedThisSession = false,
-  int Rotation = 0, double Width = 0, double Height = 0);
+  int Rotation = 0, double Width = 0, double Height = 0,
+  long? RecognitionRevision = null, bool CorrectedAfterRecognition = false);
 
 public sealed record QrCodeWorkbenchState(
   bool IsBusy,

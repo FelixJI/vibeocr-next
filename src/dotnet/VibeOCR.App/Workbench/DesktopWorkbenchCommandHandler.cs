@@ -2913,6 +2913,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private void SynchronizePdfMode(bool requireUsable = false)
   {
     RecognitionSelectionSnapshot? snapshot = settings?.RecognitionSelection;
+    if (settings is not null) pdf?.SetInspectionCapabilities(snapshot?.Catalog.Health.Capabilities ?? []);
     if (pdf is null || snapshot?.Catalog.SupportsRecognitionModes is not true)
     {
       if (requireUsable) EnsureUsableModeOverrideOrThrow(snapshot?.Catalog, pdfTaskEngine);
@@ -4572,7 +4573,8 @@ public sealed class DesktopWorkbenchCommandHandler :
           ? pdfStructured.GetValueOrDefault(index).Reference
           : null,
         viewModel.Pages[index].Detected, viewModel.Pages[index].HasTextLayer, viewModel.Pages[index].AddedThisSession,
-        viewModel.Pages[index].Rotation, viewModel.Pages[index].Width, viewModel.Pages[index].Height))
+        viewModel.Pages[index].Rotation, viewModel.Pages[index].Width, viewModel.Pages[index].Height,
+        viewModel.Pages[index].RecognitionRevision, viewModel.Pages[index].CorrectedAfterRecognition))
       .ToArray(),
       pdfWindowStart,
       PdfEngines(),
@@ -4581,7 +4583,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       viewModel.CanAddTextLayer, viewModel.ProcessingSettings,
       pdfPagePreview,
       pdfPageInspect,
-      pdfPageInspectStatus, viewModel.SessionId);
+      pdfPageInspectStatus, viewModel.SessionId, viewModel.CanInspectPage, viewModel.CanCorrectText);
   }
 
   /// <summary>
@@ -4644,6 +4646,8 @@ public sealed class DesktopWorkbenchCommandHandler :
   private async Task LoadPdfPageResourcesAsync(
     PdfViewModel viewModel, CancellationToken cancellationToken)
   {
+    SynchronizePdfMode();
+    if (!viewModel.CanInspectPage) { ReleasePdfPageResources(); return; }
     int page = viewModel.SelectedPage;
     string? session = viewModel.SessionId;
     if (session is null || page < 0 || page >= viewModel.PageCount)

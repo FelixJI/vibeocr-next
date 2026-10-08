@@ -199,3 +199,55 @@ class TestOcrBlockProjection:
         assert payload.ocr_blocks[0].bbox is None
         # 存在可信 OCR 块（含缺几何块）的页不再投影原生行（来源区分）
         assert payload.native_lines == []
+
+
+def test_inspection_bounds_boxes_text_and_preserves_ocr_indices():
+    with fitz.open() as doc:
+        doc.new_page()
+        model = _model(doc)
+        blocks = [
+            TextBlock(text="X" * 2500, score=None, bbox=(10, 10, 900, 50))
+            for _ in range(20000)
+        ]
+        model.pages[0].ocr_text_blocks = blocks
+        payload = PdfService.page_inspect(doc, model, 0)
+        assert payload.truncated
+        assert len(payload.ocr_blocks) == 1000
+        assert [block.index for block in payload.ocr_blocks] == list(range(1000))
+        assert sum(len(block.text) for block in payload.ocr_blocks) == 128000
+        assert all(
+            len(block.text) <= 2000 and block.text_truncated
+            for block in payload.ocr_blocks
+        )
+        assert model.pages[0].ocr_text_blocks is blocks
+        assert model.pages[0].ocr_text_blocks[-1].text == "X" * 2500
+
+
+def test_native_inspection_is_bounded_without_replacing_complete_model_cache(
+    monkeypatch,
+):
+    from vibeocr.runtime.documents.models.pdf_document import TextLayerInfo
+
+    with fitz.open() as doc:
+        doc.new_page()
+        model = _model(doc)
+        layers = [
+            TextLayerInfo(
+                index=i,
+                text_preview="native",
+                char_count=6,
+                bbox=(1, 1, 50, 20),
+                color_id=0,
+            )
+            for i in range(12000)
+        ]
+        model.pages[0].text_layers = layers
+
+        def detect(_doc, _page, *, limit=None):
+            assert limit == 1001
+            return layers[:limit]
+
+        monkeypatch.setattr(PdfService, "detect_text_layers", detect)
+        payload = PdfService.page_inspect(doc, model, 0)
+        assert payload.truncated and len(payload.native_lines) == 1000
+        assert model.pages[0].text_layers is layers

@@ -487,8 +487,12 @@ public sealed class PdfViewModelSupervisorTests
   {
     var fake = new FakePdfInference();
     var viewModel = new PdfViewModel(fake, new StubPdfSource());
+    viewModel.SetInspectionCapabilities(["pdf.page-inspect.v1", "pdf.block-edit.v1"]);
     await viewModel.OpenPathAsync("test.pdf", CancellationToken.None);
     long revision = viewModel.Revision;
+    var original = new VibeOCR.App.RecognizeResponse { Text = "原始识别" };
+    viewModel.Pages[0].Result = original;
+    viewModel.Pages[0].RecognitionRevision = revision;
 
     PdfBlockEditResult result = await viewModel.UpdateBlockTextAsync(
       viewModel.SessionId!, revision, 0, 0, "新文本", "旧文本", CancellationToken.None);
@@ -498,6 +502,9 @@ public sealed class PdfViewModelSupervisorTests
     Assert.True(viewModel.IsModified);
     Assert.Equal(1, fake.BlockUpdateCalls);
     Assert.Equal("旧文本", fake.LastBlockUpdateOldText);
+    Assert.Same(original, viewModel.Pages[0].Result);
+    Assert.Equal(revision, viewModel.Pages[0].RecognitionRevision);
+    Assert.True(viewModel.Pages[0].CorrectedAfterRecognition);
   }
 
   [Fact]
@@ -505,6 +512,7 @@ public sealed class PdfViewModelSupervisorTests
   {
     var fake = new FakePdfInference { PendingBlockUpdate = Task.FromResult(BlockUpdateResponse(changed: false)) };
     var viewModel = new PdfViewModel(fake, new StubPdfSource());
+    viewModel.SetInspectionCapabilities(["pdf.page-inspect.v1", "pdf.block-edit.v1"]);
     await viewModel.OpenPathAsync("test.pdf", CancellationToken.None);
     long revision = viewModel.Revision;
 
@@ -522,6 +530,7 @@ public sealed class PdfViewModelSupervisorTests
   {
     var fake = new FakePdfInference();
     var viewModel = new PdfViewModel(fake, new StubPdfSource());
+    viewModel.SetInspectionCapabilities(["pdf.page-inspect.v1", "pdf.block-edit.v1"]);
     await viewModel.OpenPathAsync("test.pdf", CancellationToken.None);
 
     PdfBlockEditResult result = await viewModel.UpdateBlockTextAsync(
@@ -538,6 +547,7 @@ public sealed class PdfViewModelSupervisorTests
     var completion = new TaskCompletionSource<Wire.PdfMutationResponse>();
     var fake = new FakePdfInference { PendingBlockUpdate = completion.Task };
     var viewModel = new PdfViewModel(fake, new StubPdfSource());
+    viewModel.SetInspectionCapabilities(["pdf.page-inspect.v1", "pdf.block-edit.v1"]);
     await viewModel.OpenPathAsync("test.pdf", CancellationToken.None);
     Task<PdfBlockEditResult> editing = viewModel.UpdateBlockTextAsync(
       viewModel.SessionId!, viewModel.Revision, 0, 0, "x", null, CancellationToken.None);
@@ -560,6 +570,7 @@ public sealed class PdfViewModelSupervisorTests
     var completion = new TaskCompletionSource<Wire.PdfMutationResponse>();
     var fake = new FakePdfInference { PendingBlockUpdate = completion.Task };
     var viewModel = new PdfViewModel(fake, new StubPdfSource());
+    viewModel.SetInspectionCapabilities(["pdf.page-inspect.v1", "pdf.block-edit.v1"]);
     await viewModel.OpenPathAsync("test.pdf", CancellationToken.None);
     long revision = viewModel.Revision;
     Task<PdfBlockEditResult> editing = viewModel.UpdateBlockTextAsync(
@@ -586,6 +597,7 @@ public sealed class PdfViewModelSupervisorTests
     var completion = new TaskCompletionSource<Wire.PdfMutationResponse>();
     var fake = new FakePdfInference { PendingBlockUpdate = completion.Task };
     var viewModel = new PdfViewModel(fake, new StubPdfSource());
+    viewModel.SetInspectionCapabilities(["pdf.page-inspect.v1", "pdf.block-edit.v1"]);
     await viewModel.OpenPathAsync("old.pdf", CancellationToken.None);
     Task<PdfBlockEditResult> editing = viewModel.UpdateBlockTextAsync(
       viewModel.SessionId!, viewModel.Revision, 0, 0, "x", null, CancellationToken.None);
@@ -610,6 +622,7 @@ public sealed class PdfViewModelSupervisorTests
     var completion = new TaskCompletionSource<Wire.PdfMutationResponse>();
     var fake = new FakePdfInference { PendingBlockUpdate = completion.Task };
     var viewModel = new PdfViewModel(fake, new StubPdfSource());
+    viewModel.SetInspectionCapabilities(["pdf.page-inspect.v1", "pdf.block-edit.v1"]);
     await viewModel.OpenPathAsync("test.pdf", CancellationToken.None);
     long revision = viewModel.Revision;
     Task<PdfBlockEditResult> editing = viewModel.UpdateBlockTextAsync(
@@ -634,6 +647,7 @@ public sealed class PdfViewModelSupervisorTests
       PendingBlockUpdate = Task.FromResult(BlockUpdateResponse(changed: true, withChangedFlag: false)),
     };
     var viewModel = new PdfViewModel(fake, new StubPdfSource());
+    viewModel.SetInspectionCapabilities(["pdf.page-inspect.v1", "pdf.block-edit.v1"]);
     await viewModel.OpenPathAsync("test.pdf", CancellationToken.None);
     long revision = viewModel.Revision;
 
@@ -655,6 +669,7 @@ public sealed class PdfViewModelSupervisorTests
         new InferenceClientException(HttpV2ErrorCode.ValidationError, "新文本不能为空", false)),
     };
     var viewModel = new PdfViewModel(fake, new StubPdfSource());
+    viewModel.SetInspectionCapabilities(["pdf.page-inspect.v1", "pdf.block-edit.v1"]);
     await viewModel.OpenPathAsync("test.pdf", CancellationToken.None);
 
     PdfBlockEditResult result = await viewModel.UpdateBlockTextAsync(

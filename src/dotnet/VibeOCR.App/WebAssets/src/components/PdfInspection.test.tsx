@@ -176,3 +176,23 @@ describe("PDF HD inspection", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+it("bounds overlay DOM and refuses truncated OCR preview editing", async () => {
+  resource({
+    page: 0,
+    truncated: true,
+    ocr_blocks: Array.from({ length: 12000 }, (_, index) => ({
+      ...ocr,
+      index,
+      text_truncated: true,
+    })),
+  });
+  render(<PdfInspection {...props()} />);
+  await waitFor(() =>
+    expect(document.querySelectorAll(".pdf-text-box")).toHaveLength(1000),
+  );
+  expect(screen.getByRole("status")).toHaveTextContent("检查已截断");
+  fireEvent.click(document.querySelector(".pdf-text-box")!);
+  expect(screen.queryByLabelText("校正文字")).not.toBeInTheDocument();
+  expect(screen.getByText(/不能用预览提交校正/)).toBeInTheDocument();
+});

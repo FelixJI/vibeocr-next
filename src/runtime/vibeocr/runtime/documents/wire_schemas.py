@@ -258,6 +258,7 @@ class PageInspectOcrBlock(BaseModel):
     score_unknown: bool
     is_manually_edited: bool
     label: str = "text"
+    text_truncated: bool = False
     bbox: tuple[float, float, float, float] | None = None
     polygon: tuple[float, ...] | None = None
 
@@ -284,6 +285,7 @@ class PageInspectResponse(BaseModel):
     preproc_angle: int = 0
     ocr_blocks: list[PageInspectOcrBlock] = Field(default_factory=list)
     native_lines: list[PageInspectNativeLine] = Field(default_factory=list)
+    truncated: bool = False
 
 
 class RenderThumbnailRequest(BaseModel):

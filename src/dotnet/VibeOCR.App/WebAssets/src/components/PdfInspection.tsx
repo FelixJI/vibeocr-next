@@ -12,6 +12,7 @@ interface Block {
   readonly source: "ocr" | "native";
   readonly confidence?: number;
   readonly edited: boolean;
+  readonly textTruncated: boolean;
 }
 
 function blocksFrom(value: unknown, page: number): readonly Block[] {
@@ -27,44 +28,47 @@ function blocksFrom(value: unknown, page: number): readonly Block[] {
   for (const source of ["ocr", "native"] as const) {
     const entries = payload[source === "ocr" ? "ocr_blocks" : "native_lines"];
     if (!Array.isArray(entries)) continue;
-    entries.forEach((entry: unknown, index: number) => {
-      if (!entry || typeof entry !== "object") return;
-      const item = entry as Record<string, unknown>;
-      const bbox: unknown = item.bbox;
-      const text = source === "ocr" ? item.text : item.text_preview;
-      if (
-        typeof text !== "string" ||
-        !Array.isArray(bbox) ||
-        bbox.length !== 4 ||
-        !bbox.every(
-          (n: unknown) => typeof n === "number" && Number.isFinite(n),
-        ) ||
-        bbox[2] <= bbox[0] ||
-        bbox[3] <= bbox[1]
-      )
-        return;
-      if (
-        source === "ocr" &&
-        (!Number.isInteger(item.index) || Number(item.index) < 0)
-      )
-        return;
-      result.push({
-        index: source === "ocr" ? Number(item.index) : index,
-        text,
-        bbox: bbox as [number, number, number, number],
-        source,
-        edited: item.is_manually_edited === true,
-        confidence:
+    entries
+      .slice(0, 1000 - result.length)
+      .forEach((entry: unknown, index: number) => {
+        if (!entry || typeof entry !== "object") return;
+        const item = entry as Record<string, unknown>;
+        const bbox: unknown = item.bbox;
+        const text = source === "ocr" ? item.text : item.text_preview;
+        if (
+          typeof text !== "string" ||
+          !Array.isArray(bbox) ||
+          bbox.length !== 4 ||
+          !bbox.every(
+            (n: unknown) => typeof n === "number" && Number.isFinite(n),
+          ) ||
+          bbox[2] <= bbox[0] ||
+          bbox[3] <= bbox[1]
+        )
+          return;
+        if (
           source === "ocr" &&
-          item.score_unknown === false &&
-          typeof item.score === "number" &&
-          Number.isFinite(item.score) &&
-          item.score >= 0 &&
-          item.score <= 1
-            ? item.score
-            : undefined,
+          (!Number.isInteger(item.index) || Number(item.index) < 0)
+        )
+          return;
+        result.push({
+          index: source === "ocr" ? Number(item.index) : index,
+          text: text.slice(0, 2000),
+          textTruncated: item.text_truncated === true || text.length > 2000,
+          bbox: bbox as [number, number, number, number],
+          source,
+          edited: item.is_manually_edited === true,
+          confidence:
+            source === "ocr" &&
+            item.score_unknown === false &&
+            typeof item.score === "number" &&
+            Number.isFinite(item.score) &&
+            item.score >= 0 &&
+            item.score <= 1
+              ? item.score
+              : undefined,
+        });
       });
-    });
   }
   return result;
 }
@@ -109,6 +113,7 @@ export function PdfInspection({
   } | null>(null);
   const [blocks, setBlocks] = useState<readonly Block[]>([]);
   const [error, setError] = useState("");
+  const [truncated, setTruncated] = useState(false);
   const [imageFailed, setImageFailed] = useState(false);
   const [dimensions, setDimensions] = useState({ width: 612, height: 792 });
   const [space, setSpace] = useState({ width: 600, height: 480 });
@@ -143,7 +148,15 @@ export function PdfInspection({
     })
       .then(async (response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return blocksFrom(await response.json(), page);
+        const value: unknown = await response.json();
+        if (!cancellation.signal.aborted)
+          setTruncated(
+            !!value &&
+              typeof value === "object" &&
+              "truncated" in value &&
+              value.truncated === true,
+          );
+        return blocksFrom(value, page);
       })
       .then((value) => {
         if (!cancellation.signal.aborted) setBlocks(value);
@@ -367,10 +380,16 @@ export function PdfInspection({
           </p>
         )}
       </div>
+      {truncated && (
+        <p role="status">
+          当前页检查已截断（最多 1000 个框、每框 2000 字、全页 128000 字）。PDF
+          内容完整保留；截断的文字块仅供检查。
+        </p>
+      )}
       {selected && (
         <div className="pdf-block-editor" aria-label="文字块检查">
           <p>{blockLabel(selected)}</p>
-          {selected.source === "ocr" && canEdit ? (
+          {selected.source === "ocr" && canEdit && !selected.textTruncated ? (
             <>
               <Textarea
                 aria-label="校正文字"
@@ -403,7 +422,13 @@ export function PdfInspection({
               </p>
             </>
           ) : (
-            <p>仅检查：已有 PDF 文字层没有可信 OCR 块身份。</p>
+            <p>
+              {selected.textTruncated
+                ? "仅检查：文字预览已截断，不能用预览提交校正。"
+                : selected.source === "ocr"
+                  ? "仅检查：当前 Runtime 不支持原子文字校正。"
+                  : "仅检查：已有 PDF 文字层没有可信 OCR 块身份。"}
+            </p>
           )}
         </div>
       )}

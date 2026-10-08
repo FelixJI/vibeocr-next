@@ -43,6 +43,8 @@ test("PDF HD inspection and correction remain reachable at 640px", async ({
     revision: 9,
     isModified: true,
     pageInspectStatusCode: "pdf.inspect.ready",
+    canInspectPage: true,
+    canCorrectText: true,
     pagePreview: {
       url: "/pdf-test-hd.svg",
       mediaType: "image/png",

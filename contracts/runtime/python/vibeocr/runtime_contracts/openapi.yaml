@@ -2344,7 +2344,11 @@
                 "runtime.component-selection.v1",
                 "ocr.recognition-modes.v1",
                 "ocr.mineru-config.v1",
-                "ocr.mineru-remote-api.v1"
+                "runtime.install-plan.v1",
+                "ocr.mineru-remote-api.v1",
+                "ocr.default-recognition-mode.v1",
+                "pdf.page-inspect.v1",
+                "pdf.block-edit.v1"
               ]
             }
           },
@@ -3434,7 +3438,8 @@
           },
           "text": {
             "title": "Text",
-            "type": "string"
+            "type": "string",
+            "maxLength": 2000
           },
           "score": {
             "title": "Score",
@@ -3451,7 +3456,8 @@
           "label": {
             "default": "text",
             "title": "Label",
-            "type": "string"
+            "type": "string",
+            "maxLength": 128
           },
           "bbox": {
             "anyOf": [
@@ -3487,7 +3493,8 @@
                 "items": {
                   "type": "number"
                 },
-                "type": "array"
+                "type": "array",
+                "maxItems": 64
               },
               {
                 "type": "null"
@@ -3495,6 +3502,11 @@
             ],
             "default": null,
             "title": "Polygon"
+          },
+          "text_truncated": {
+            "type": "boolean",
+            "default": false,
+            "description": "Text is only a preview; this block must not be edited using this response."
           }
         },
         "required": [
@@ -3562,20 +3574,36 @@
               "$ref": "#/components/schemas/PageInspectOcrBlock"
             },
             "title": "Ocr Blocks",
-            "type": "array"
+            "type": "array",
+            "maxItems": 1000
           },
           "native_lines": {
             "items": {
               "$ref": "#/components/schemas/PageInspectNativeLine"
             },
             "title": "Native Lines",
-            "type": "array"
+            "type": "array",
+            "maxItems": 1000
+          },
+          "schema_version": {
+            "const": 2
+          },
+          "instance_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "truncated": {
+            "type": "boolean",
+            "default": false,
+            "description": "Inspection omits boxes beyond 1000 or clips text beyond 2000 characters per box / 128000 characters per page. The PDF is unchanged."
           }
         },
         "required": [
           "page",
           "rotation",
-          "rect"
+          "rect",
+          "schema_version",
+          "instance_id"
         ],
         "type": "object",
         "additionalProperties": false

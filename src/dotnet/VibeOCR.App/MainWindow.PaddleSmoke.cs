@@ -680,7 +680,9 @@ public sealed partial class MainWindow
       if (reachable != "true") throw new InvalidOperationException("Correction button is unreachable in the narrow viewport.");
       long before = edited.Revision;
       await ClickManagedSmokeButtonAsync("提交校正");
-      edited = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Revision > before, TimeSpan.FromSeconds(30));
+      edited = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.SessionId == inserted.SessionId && state.SelectedPage == 0 && state.Revision > before && state.PageInspectStatusCode == "pdf.inspect.ready" && state.PagePreview is not null && state.PageInspect is not null, TimeSpan.FromSeconds(30));
+      string expectedPreview = JsonSerializer.Serialize(edited.PagePreview!.Url);
+      await WaitForSmokeDomAsync($"(() => {{ const image=document.querySelector('.pdf-inspection-sheet img'); return image?.src === {expectedPreview} && image.complete && image.naturalWidth > 160 && image.naturalHeight > 0 && document.querySelectorAll('.pdf-text-box.ocr').length >= 2; }})()", TimeSpan.FromSeconds(30));
       if (!edited.IsModified) throw new InvalidOperationException("Correction was not marked unsaved.");
       edits.Add(new { block_index = indices[position], old_text = oldText, new_text = replacements[position], edited.Revision, edited.IsModified, edit_button_reachable = true });
       paddleSmokePartialEvidence = new { input_kind = "pdf_editing", edits, edited.Revision, edited.IsModified };
@@ -693,8 +695,10 @@ public sealed partial class MainWindow
           hd_width:image?.naturalWidth,hd_height:image?.naturalHeight,hd_url:image?.src,boxes:document.querySelectorAll('.pdf-text-box').length}; })()
       """);
     JsonElement viewportEvidence = JsonSerializer.Deserialize<JsonElement>(viewportJson);
-    if (!viewportEvidence.GetProperty("save_reachable").GetBoolean() || viewportEvidence.GetProperty("hd_width").GetInt32() <= 160)
-      throw new InvalidOperationException("Save button or true HD preview is unavailable.");
+    if (!viewportEvidence.TryGetProperty("save_reachable", out JsonElement saveReachable) || saveReachable.ValueKind != JsonValueKind.True ||
+        !viewportEvidence.TryGetProperty("hd_width", out JsonElement hdWidth) || !hdWidth.TryGetInt32(out int width) || width <= 160 ||
+        !viewportEvidence.TryGetProperty("hd_height", out JsonElement hdHeight) || !hdHeight.TryGetInt32(out int height) || height <= 0)
+      throw new InvalidOperationException($"Save button or current revision HD preview evidence is unavailable: {viewportJson}");
     string editingScreenshot = Path.Combine(ValidatePaddleSmokeOwnedPath(RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_EXPORT_DIR"), "pdf editing evidence"), "pdf-editing-narrow.png");
     using (new FileStream(editingScreenshot, FileMode.CreateNew)) { }
     StorageFile editingPreview = await StorageFile.GetFileFromPathAsync(editingScreenshot);

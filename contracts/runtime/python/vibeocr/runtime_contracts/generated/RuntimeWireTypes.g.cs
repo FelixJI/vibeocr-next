@@ -995,6 +995,9 @@ public sealed record PageInspectOcrBlock
 
     [JsonPropertyName("polygon")]
     public IReadOnlyList<double>? Polygon { get; init; }
+
+    [JsonPropertyName("text_truncated")]
+    public bool? TextTruncated { get; init; }
 }
 
 public sealed record PageInspectRequest
@@ -1022,6 +1025,15 @@ public sealed record PageInspectResponse
 
     [JsonPropertyName("native_lines")]
     public IReadOnlyList<PageInspectNativeLine>? NativeLines { get; init; }
+
+    [JsonPropertyName("schema_version")]
+    public required int SchemaVersion { get; init; }
+
+    [JsonPropertyName("instance_id")]
+    public required string InstanceId { get; init; }
+
+    [JsonPropertyName("truncated")]
+    public bool? Truncated { get; init; }
 }
 
 public sealed record PageListRequest

@@ -2414,7 +2414,11 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                            'runtime.component-selection.v1',
                                                                                            'ocr.recognition-modes.v1',
                                                                                            'ocr.mineru-config.v1',
-                                                                                           'ocr.mineru-remote-api.v1']},
+                                                                                           'runtime.install-plan.v1',
+                                                                                           'ocr.mineru-remote-api.v1',
+                                                                                           'ocr.default-recognition-mode.v1',
+                                                                                           'pdf.page-inspect.v1',
+                                                                                           'pdf.block-edit.v1']},
                                                       'type': 'array',
                                                       'uniqueItems': True},
                                      'capability_descriptors': {'items': {'additionalProperties': False,
@@ -5008,7 +5012,8 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
  'inspectPdfPage': {'additionalProperties': False,
                     'description': '当前页检查 payload：OCR 块与原生文字层的来源区分投影。页面存在可信 OCR '
                                    '块（本会话经无层添加或显式整页覆盖写入）时，该页可编辑文字即该 OCR 层全部块，native_lines 为空。',
-                    'properties': {'native_lines': {'items': {'additionalProperties': False,
+                    'properties': {'instance_id': {'minLength': 1, 'type': 'string'},
+                                   'native_lines': {'items': {'additionalProperties': False,
                                                               'description': '普通 PDF '
                                                                              '文字层的只读检查投影（get_text '
                                                                              '行框，显示空间归一化 '
@@ -5031,6 +5036,7 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                            'text_preview',
                                                                            'char_count'],
                                                               'type': 'object'},
+                                                    'maxItems': 1000,
                                                     'title': 'Native Lines',
                                                     'type': 'array'},
                                    'ocr_blocks': {'items': {'additionalProperties': False,
@@ -5059,9 +5065,11 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                            'Edited',
                                                                                                   'type': 'boolean'},
                                                                            'label': {'default': 'text',
+                                                                                     'maxLength': 128,
                                                                                      'title': 'Label',
                                                                                      'type': 'string'},
                                                                            'polygon': {'anyOf': [{'items': {'type': 'number'},
+                                                                                                  'maxItems': 64,
                                                                                                   'type': 'array'},
                                                                                                  {'type': 'null'}],
                                                                                        'default': None,
@@ -5071,14 +5079,32 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                            'score_unknown': {'title': 'Score '
                                                                                                       'Unknown',
                                                                                              'type': 'boolean'},
-                                                                           'text': {'title': 'Text',
-                                                                                    'type': 'string'}},
+                                                                           'text': {'maxLength': 2000,
+                                                                                    'title': 'Text',
+                                                                                    'type': 'string'},
+                                                                           'text_truncated': {'default': False,
+                                                                                              'description': 'Text '
+                                                                                                             'is '
+                                                                                                             'only '
+                                                                                                             'a '
+                                                                                                             'preview; '
+                                                                                                             'this '
+                                                                                                             'block '
+                                                                                                             'must '
+                                                                                                             'not '
+                                                                                                             'be '
+                                                                                                             'edited '
+                                                                                                             'using '
+                                                                                                             'this '
+                                                                                                             'response.',
+                                                                                              'type': 'boolean'}},
                                                             'required': ['index',
                                                                          'text',
                                                                          'score',
                                                                          'score_unknown',
                                                                          'is_manually_edited'],
                                                             'type': 'object'},
+                                                  'maxItems': 1000,
                                                   'title': 'Ocr Blocks',
                                                   'type': 'array'},
                                    'page': {'title': 'Page', 'type': 'integer'},
@@ -5093,8 +5119,16 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                             {'type': 'number'}],
                                             'title': 'Rect',
                                             'type': 'array'},
-                                   'rotation': {'title': 'Rotation', 'type': 'integer'}},
-                    'required': ['page', 'rotation', 'rect'],
+                                   'rotation': {'title': 'Rotation', 'type': 'integer'},
+                                   'schema_version': {'const': 2},
+                                   'truncated': {'default': False,
+                                                 'description': 'Inspection omits boxes beyond '
+                                                                '1000 or clips text beyond 2000 '
+                                                                'characters per box / 128000 '
+                                                                'characters per page. The PDF is '
+                                                                'unchanged.',
+                                                 'type': 'boolean'}},
+                    'required': ['page', 'rotation', 'rect', 'schema_version', 'instance_id'],
                     'type': 'object'},
  'movePdfPage': {'additionalProperties': False,
                  'description': '通用变更操作响应(旋转/删除/插入/重排/加文字层/重写/摆正)。',

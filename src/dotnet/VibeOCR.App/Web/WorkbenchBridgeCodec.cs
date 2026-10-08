@@ -1415,6 +1415,8 @@ public static class WorkbenchBridgeCodec
       pageInspect = pdf.PageInspect,
       pageInspectStatusCode = pdf.PageInspectStatusCode,
       sessionId = pdf.SessionId,
+      canInspectPage = pdf.CanInspectPage,
+      canCorrectText = pdf.CanCorrectText,
     },
     QrCodeWorkbenchState qrCode => new
     {
