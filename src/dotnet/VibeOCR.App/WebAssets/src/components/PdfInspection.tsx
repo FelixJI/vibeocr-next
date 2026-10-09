@@ -82,6 +82,7 @@ function blockLabel(block: Block): string {
 }
 
 export function PdfInspection({
+  position,
   page,
   count,
   revision,
@@ -93,6 +94,7 @@ export function PdfInspection({
   canEdit,
   actions,
 }: {
+  readonly position?: Readonly<Record<string, unknown>>;
   readonly page: number;
   readonly count: number;
   readonly revision: number;
@@ -117,12 +119,57 @@ export function PdfInspection({
   const [imageFailed, setImageFailed] = useState(false);
   const [dimensions, setDimensions] = useState({ width: 612, height: 792 });
   const [space, setSpace] = useState({ width: 600, height: 480 });
-  const [zoom, setZoom] = useState<number | null>(null);
-  const [showBoxes, setShowBoxes] = useState(true);
+  const [zoom, setZoom] = useState<number | null>(
+    typeof position?.zoom === "number" ? position.zoom : null,
+  );
+  const [showBoxes, setShowBoxes] = useState(position?.showBoxes !== false);
   const [selected, setSelected] = useState<Block | null>(null);
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(
+    position?.revision === revision &&
+      position?.page === page &&
+      typeof position.draft === "string"
+      ? position.draft
+      : "",
+  );
   const [submitting, setSubmitting] = useState(false);
   const alive = useRef(true);
+  const actionsRef = useRef(actions);
+  useEffect(() => {
+    actionsRef.current = actions;
+  }, [actions]);
+  const initialPosition = useRef(position);
+  const restoredPosition = useRef(false);
+  const rememberPosition = () => {
+    const node = viewport.current;
+    void actionsRef.current.run({
+      type: "pdf.setPreviewPosition",
+      position: {
+        zoom,
+        left: node?.scrollLeft ?? 0,
+        top: node?.scrollTop ?? 0,
+        showBoxes,
+        block: selected?.index ?? null,
+        draft,
+        revision,
+        page,
+      },
+    });
+  };
+  useEffect(() => {
+    void actionsRef.current.run({
+      type: "pdf.setPreviewPosition",
+      position: {
+        zoom,
+        left: viewport.current?.scrollLeft ?? 0,
+        top: viewport.current?.scrollTop ?? 0,
+        showBoxes,
+        block: selected?.index ?? null,
+        draft,
+        revision,
+        page,
+      },
+    });
+  }, [zoom, showBoxes, selected?.index, draft, revision, page]);
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -159,14 +206,28 @@ export function PdfInspection({
         return blocksFrom(value, page);
       })
       .then((value) => {
-        if (!cancellation.signal.aborted) setBlocks(value);
+        if (!cancellation.signal.aborted) {
+          setBlocks(value);
+          const saved = initialPosition.current;
+          if (
+            saved?.revision === revision &&
+            saved.page === page &&
+            typeof saved.block === "number"
+          )
+            setSelected(
+              value.find(
+                (block) =>
+                  block.source === "ocr" && block.index === saved.block,
+              ) ?? null,
+            );
+        }
       })
       .catch(() => {
         if (!cancellation.signal.aborted)
           setError("文字框读取失败，请重试当前页。");
       });
     return () => cancellation.abort();
-  }, [inspect, page]);
+  }, [inspect, page, revision]);
   const fit = Math.min(
     (space.width - 24) / dimensions.width,
     (space.height - 24) / dimensions.height,
@@ -300,6 +361,7 @@ export function PdfInspection({
           } else return;
           event.preventDefault();
         }}
+        onScroll={() => rememberPosition()}
         onPointerDown={(event) => {
           if (
             event.button !== 0 ||
@@ -342,12 +404,25 @@ export function PdfInspection({
               alt={`当前第 ${page + 1} 页高清预览`}
               draggable={false}
               onError={() => setImageFailed(true)}
-              onLoad={(event) =>
+              onLoad={(event) => {
                 setDimensions({
                   width: event.currentTarget.naturalWidth || 612,
                   height: event.currentTarget.naturalHeight || 792,
-                })
-              }
+                });
+                if (!restoredPosition.current) {
+                  restoredPosition.current = true;
+                  requestAnimationFrame(() => {
+                    const node = viewport.current,
+                      saved = initialPosition.current;
+                    if (node && saved) {
+                      node.scrollLeft =
+                        typeof saved.left === "number" ? saved.left : 0;
+                      node.scrollTop =
+                        typeof saved.top === "number" ? saved.top : 0;
+                    }
+                  });
+                }
+              }}
             />
             {showBoxes &&
               blocks.map((block) => (

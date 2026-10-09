@@ -1935,7 +1935,15 @@ function PdfParameters({
   );
 }
 
-export function PdfPage({ viewState, actions }: FeatureProps) {
+export function PdfPage(props: FeatureProps) {
+  return (
+    <PdfDocumentPage
+      key={stringValue(feature(props.viewState, "pdf").documentId)}
+      {...props}
+    />
+  );
+}
+function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
   const [operationRange, setOperationRange] = useState("selected");
   const [insertAfter, setInsertAfter] = useState(1);
   const [pageWidth, setPageWidth] = useState(612);
@@ -1947,6 +1955,35 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
   const [confirmRevision, setConfirmRevision] = useState(0);
   const [replaceLayers, setReplaceLayers] = useState(false);
   const state = feature(viewState, "pdf");
+  const documentId = stringValue(state.documentId);
+  const actions: AppActions = {
+    ...parentActions,
+    run: (action) =>
+      parentActions.run(
+        documentId !== undefined &&
+          action.type.startsWith("pdf.") &&
+          action.type !== "pdf.open"
+          ? {
+              documentId,
+              documentRevision: numberValue(state.revision),
+              ...action,
+            }
+          : action,
+      ),
+  };
+  const documents = Array.isArray(state.documents)
+    ? state.documents.filter(
+        (value): value is Record<string, unknown> =>
+          !!value && typeof value === "object",
+      )
+    : [];
+  const exports = Array.isArray(state.exportItems)
+    ? state.exportItems.filter(
+        (value): value is Record<string, unknown> =>
+          !!value && typeof value === "object",
+      )
+    : [];
+  const [modifiedOnly, setModifiedOnly] = useState(true);
   const busy = booleanValue(state.isBusy);
   const detected = numberValue(state.detectedCount);
   const layers = numberValue(state.textLayerCount);
@@ -2006,7 +2043,7 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
             actions={actions}
             icon={<FolderOpen aria-hidden="true" size={16} />}
           >
-            打开 PDF
+            {documents.length > 0 ? "添加 PDF" : "打开 PDF"}
           </CapabilityGate>
           <CapabilityGate
             capability="pdf.open"
@@ -2021,6 +2058,97 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
         </>
       }
     >
+      <div className="pdf-documents" aria-label="PDF 文档列表">
+        {documents.map((document) => (
+          <Button
+            key={stringValue(document.documentId)}
+            appearance={
+              document.documentId === documentId ? "primary" : "secondary"
+            }
+            aria-pressed={document.documentId === documentId}
+            onClick={() =>
+              void actions.run({
+                type: "pdf.activateDocument",
+                documentId: document.documentId,
+              })
+            }
+          >
+            {stringValue(document.name) ?? "PDF"}
+            {document.isModified === true ? " · 未保存" : ""}
+            {document.isBusy === true ? " · 处理中" : ""}
+            {document.closeFailed === true ? " · 关闭失败，可重试" : ""}
+          </Button>
+        ))}
+      </div>
+      {documents.length > 0 && (
+        <details className="pdf-export">
+          <summary>批量导出副本</summary>
+          <p>
+            导出副本保留原文档修改状态和保存目标。默认避让同名文件；目标竞争导致的失败可重试。
+          </p>
+          <label>
+            <input
+              type="checkbox"
+              checked={modifiedOnly}
+              onChange={(event) => setModifiedOnly(event.target.checked)}
+            />
+            仅已修改文档
+          </label>
+          <Button
+            disabled={state.canCopyExport !== true || state.exporting === true}
+            onClick={() =>
+              void actions.run({
+                type: "pdf.exportDocuments",
+                modifiedOnly,
+                retry: false,
+              })
+            }
+          >
+            选择目录并导出
+          </Button>
+          <Button
+            disabled={state.exporting !== true}
+            onClick={() => void actions.run({ type: "pdf.cancelExport" })}
+          >
+            停止后续导出
+          </Button>
+          <Button
+            disabled={
+              state.exporting === true ||
+              !exports.some((item) => item.status !== "saved")
+            }
+            onClick={() =>
+              void actions.run({
+                type: "pdf.exportDocuments",
+                modifiedOnly,
+                retry: true,
+              })
+            }
+          >
+            重试未完成项
+          </Button>
+          <ul>
+            {exports.map((item) => (
+              <li key={stringValue(item.documentId)}>
+                {stringValue(item.name)} ·{" "}
+                {item.status === "saved"
+                  ? "成功"
+                  : item.status === "saving"
+                    ? "提交中"
+                    : item.status === "failed"
+                      ? "失败"
+                      : item.status === "cancelled"
+                        ? "取消"
+                        : "未开始"}
+                {stringValue(item.output)
+                  ? ` · ${stringValue(item.output)}`
+                  : ""}
+                {stringValue(item.error) ? ` · ${stringValue(item.error)}` : ""}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
       <TaskEngineSelector
         engines={engines}
         taskEngine={stringValue(state.taskEngine)}
@@ -2360,6 +2488,14 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
             >
               保存
             </CapabilityGate>
+            {state.canCopyExport === true && (
+              <Button
+                disabled={busy || pageCount === 0}
+                onClick={() => void actions.run({ type: "pdf.saveAs" })}
+              >
+                另存为并切换保存目标
+              </Button>
+            )}
           </Toolbar>
           <div className="pdf-insertion" aria-label="插入页面">
             <label htmlFor="pdf-insert-after">插入到第几页后（0 为开头）</label>
@@ -2508,7 +2644,13 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
           <Panel label="REVIEW" title="页面检查">
             {hasCurrentPage && state.canInspectPage === true ? (
               <PdfInspection
-                key={`${stringValue(state.sessionId)}:${numberValue(state.revision)}:${selectedPage}:${resource(state.pagePreview)?.url ?? ""}:${resource(state.pageInspect)?.url ?? ""}`}
+                key={`${documentId}:${stringValue(state.sessionId)}:${numberValue(state.revision)}:${selectedPage}:${resource(state.pagePreview)?.url ?? ""}:${resource(state.pageInspect)?.url ?? ""}`}
+                position={
+                  state.previewPosition &&
+                  typeof state.previewPosition === "object"
+                    ? (state.previewPosition as Record<string, unknown>)
+                    : undefined
+                }
                 page={selectedPage}
                 count={pageCount}
                 revision={numberValue(state.revision)}

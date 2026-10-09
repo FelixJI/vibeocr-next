@@ -98,7 +98,11 @@ describe("PDF HD inspection", () => {
     expect(screen.getByLabelText("校正文字")).toHaveValue("新稿");
     value.actions.run.mockClear();
     fireEvent.click(screen.getByRole("button", { name: "取消校正" }));
-    expect(value.actions.run).not.toHaveBeenCalled();
+    expect(
+      value.actions.run.mock.calls.every(
+        ([command]) => command.type === "pdf.setPreviewPosition",
+      ),
+    ).toBe(true);
     fireEvent.click(screen.getByRole("checkbox", { name: "显示文字框" }));
     expect(
       screen.queryByRole("button", { name: /人工修改 · 原文/ }),
@@ -195,4 +199,42 @@ it("bounds overlay DOM and refuses truncated OCR preview editing", async () => {
   fireEvent.click(document.querySelector(".pdf-text-box")!);
   expect(screen.queryByLabelText("校正文字")).not.toBeInTheDocument();
   expect(screen.getByText(/不能用预览提交校正/)).toBeInTheDocument();
+});
+
+it("restores the owning document draft and preview settings without submitting it", async () => {
+  resource({ page: 0, ocr_blocks: [ocr] });
+  const value = props();
+  render(
+    <PdfInspection
+      {...value}
+      position={{
+        zoom: 1.5,
+        left: 20,
+        top: 40,
+        showBoxes: true,
+        block: 2,
+        draft: "恢复草稿202",
+        revision: 7,
+        page: 0,
+      }}
+    />,
+  );
+  await waitFor(() =>
+    expect(screen.getByLabelText("校正文字")).toHaveValue("恢复草稿202"),
+  );
+  expect(
+    value.actions.run.mock.calls.every(
+      ([command]) => command.type === "pdf.setPreviewPosition",
+    ),
+  ).toBe(true);
+  expect(value.actions.run).toHaveBeenCalledWith(
+    expect.objectContaining({
+      type: "pdf.setPreviewPosition",
+      position: expect.objectContaining({
+        zoom: 1.5,
+        draft: "恢复草稿202",
+        block: 2,
+      }),
+    }),
+  );
 });

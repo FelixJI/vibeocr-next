@@ -143,7 +143,7 @@ public sealed partial class MainWindow : Window
       supervisorInstanceId: supervisorInstanceId,
       pinScreenshot: PinScreenshot,
       shellActions: shellActions,
-      optionsLayout: layout);
+      optionsLayout: layout, confirmPdfClose: ConfirmPdfCloseAsync);
     commandHandler.ScreenshotSessionReady += ShowImageEditor;
     commandHandler.ScreenshotCaptureStarting += () => imageEditor?.HideForCapture();
     commandHandler.ScreenshotCaptureFinished += () => imageEditor?.RestoreAfterCapture();
@@ -696,8 +696,32 @@ public sealed partial class MainWindow : Window
     }
   }
 
+  public Task<bool> PreparePdfExitAsync() => commandHandler.RequestCloseAllPdfAsync();
+  private Microsoft.UI.Xaml.Controls.ContentDialog? activePdfCloseDialog;
+  private async Task<PdfCloseDecision> ConfirmPdfCloseAsync(PdfDocumentEntry entry)
+  {
+    var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
+    {
+      XamlRoot = (Content as FrameworkElement)?.XamlRoot,
+      Title = $"保存 {Path.GetFileName(entry.Model.FilePath)} 的修改？",
+      Content = "保存提交当前文档；放弃会丢弃未保存修改；取消保留文档。",
+      PrimaryButtonText = "保存", SecondaryButtonText = "放弃修改", CloseButtonText = "取消",
+      DefaultButton = Microsoft.UI.Xaml.Controls.ContentDialogButton.Close,
+    };
+    activePdfCloseDialog = dialog;
+    try
+    {
+      return await dialog.ShowAsync() switch
+      {
+        Microsoft.UI.Xaml.Controls.ContentDialogResult.Primary => PdfCloseDecision.Save,
+        Microsoft.UI.Xaml.Controls.ContentDialogResult.Secondary => PdfCloseDecision.Discard,
+        _ => PdfCloseDecision.Cancel,
+      };
+    }
+    finally { if (ReferenceEquals(activePdfCloseDialog, dialog)) activePdfCloseDialog = null; }
+  }
   private void OnExitClicked(object sender, RoutedEventArgs args) =>
-    Application.Current.Exit();
+    Close();
 
   private async void OnWindowClosed(object sender, WindowEventArgs args)
   {

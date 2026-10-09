@@ -1443,6 +1443,18 @@ def create_app(
                     path,
                     pdf_settings,
                     rewrite_text_layers=rewrite_text_layers,
+                    **(
+                        {
+                            "copy_export": body.get("copy_export", False),
+                            "overwrite": body.get("overwrite", True),
+                            "rebind_target": body.get("rebind_target", False),
+                        }
+                        if any(
+                            key in body
+                            for key in ("copy_export", "overwrite", "rebind_target")
+                        )
+                        else {}
+                    ),
                 )
             )
         except Exception as exc:

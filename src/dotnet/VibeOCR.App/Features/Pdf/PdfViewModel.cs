@@ -21,6 +21,11 @@ public sealed class PdfViewModel(
   private long _generation;
   private bool _isBusy;
   private int _inflight;
+  private TaskCompletionSource? _settlement;
+  public Task WaitForSettlementAsync() => _settlement?.Task ?? Task.CompletedTask;
+  public async Task CancelAndSettleAsync() { Cancel(); await WaitForSettlementAsync(); await _cancelSignal; }
+  private void BeginRun() { if (_inflight++ == 0) _settlement = new(TaskCreationOptions.RunContinuationsAsynchronously); }
+  private void EndRun() { if (--_inflight == 0) { Phase = "idle"; _settlement?.TrySetResult(); } }
   private bool _modelAvailable;
   private bool _requiresReopen;
   private string? _unclosedSession;
@@ -38,8 +43,10 @@ public sealed class PdfViewModel(
   public PdfProcessingSettings ProcessingSettings { get; private set; } = new();
   public bool CanInspectPage { get; private set; }
   public bool CanCorrectText { get; private set; }
+  public bool CanCopyExport { get; private set; }
   public void SetInspectionCapabilities(IReadOnlyCollection<string> capabilities)
   {
+    CanCopyExport = capabilities.Contains(VibeOCR.Runtime.Contracts.Generated.RuntimeProtocol.PDF_COPY_EXPORT_V1);
     CanInspectPage = capabilities.Contains(VibeOCR.Runtime.Contracts.Generated.RuntimeProtocol.PDF_PAGE_INSPECT_V1);
     CanCorrectText = CanInspectPage && capabilities.Contains(VibeOCR.Runtime.Contracts.Generated.RuntimeProtocol.PDF_BLOCK_EDIT_V1);
   }
@@ -71,6 +78,7 @@ public sealed class PdfViewModel(
   public int PageCount { get => _pageCount; private set => SetField(ref _pageCount, value); }
   public int SelectedPage { get => _selectedPage; set => SetField(ref _selectedPage, value); }
   public bool HasSession => _sessionId is not null;
+  public bool HasRemoteSession => HasSession || _unclosedSession is not null;
 
   /// <summary>
   /// 绑定 PDF OCR 的任务级识别模式；taskModeId 是用户显式选择的模式 id。
@@ -89,6 +97,8 @@ public sealed class PdfViewModel(
     _taskModeId = taskModeId;
   }
 
+  public Task<string?> PickFileAsync(CancellationToken ct) => files.PickFileAsync(ct);
+
   public async Task OpenAsync(CancellationToken ct) { string? path = await files.PickFileAsync(ct); if (path is null) { Status = "已取消选择"; return; } await OpenPathAsync(path, ct); }
 
   public async Task OpenPathAsync(string path, CancellationToken ct)
@@ -98,7 +108,7 @@ public sealed class PdfViewModel(
     long generation = Volatile.Read(ref _generation);
     var run = CancellationTokenSource.CreateLinkedTokenSource(ct);
     _activeRun = run;
-    _inflight++; Changed();
+    BeginRun(); Changed();
     TerminalIssue = null; IsBusy = true; Status = "正在打开";
     try
     {
@@ -205,7 +215,7 @@ public sealed class PdfViewModel(
     long generation = Volatile.Read(ref _generation);
     var run = CancellationTokenSource.CreateLinkedTokenSource(ct);
     _activeRun = run;
-    _inflight++; Changed();
+    BeginRun(); Changed();
     TerminalIssue = null; IsBusy = true; Status = "正在更新块文字";
     bool submitted = false;
     void Unconfirmed()
@@ -400,7 +410,7 @@ public sealed class PdfViewModel(
       { ["local_models_only"] = JsonSerializer.SerializeToElement(true) };
     string session = SessionId; long revision = Revision;
     CancelActiveRun(); long generation = Volatile.Read(ref _generation);
-    var run = CancellationTokenSource.CreateLinkedTokenSource(ct); _activeRun = run; _inflight++;
+    var run = CancellationTokenSource.CreateLinkedTokenSource(ct); _activeRun = run; BeginRun();
     IsBusy = true; TerminalIssue = null;
     int corrected = 0, unchanged = 0, failed = 0, completed = 0;
     string detail = "";
@@ -527,7 +537,7 @@ public sealed class PdfViewModel(
     long generation = Volatile.Read(ref _generation);
     var run = CancellationTokenSource.CreateLinkedTokenSource(ct);
     _activeRun = run;
-    _inflight++; Changed();
+    BeginRun(); Changed();
     TerminalIssue = null; IsBusy = true; Status = "正在识别";
     foreach (int idx in pages) if (idx < Pages.Count) Pages[idx].State = PdfPageState.Processing;
     try
@@ -631,24 +641,49 @@ public sealed class PdfViewModel(
     }
   }
 
-  public async Task SaveAsync(string path, CancellationToken ct)
+  public Task<PdfSaveResult> SaveAsync(string path, CancellationToken ct) => SaveCoreAsync(path, false, false, ct);
+  public Task<PdfSaveResult> SaveAsAsync(string path, CancellationToken ct) => SaveCoreAsync(path, false, true, ct);
+  public Task<PdfSaveResult> ExportCopyAsync(string path, long revision, PdfProcessingSettings settings, CancellationToken ct)
   {
-    if (SessionId is null) return;
-    if (IsSettling) { Summary = "后台操作尚未收尾，请等待完成"; Changed(); return; }
+    if (Revision != revision) return Task.FromResult(new PdfSaveResult(PdfSaveDisposition.Rejected, path, "文档修订已变化"));
+    return SaveCoreAsync(path, true, false, ct, settings);
+  }
+  private async Task<PdfSaveResult> SaveCoreAsync(string path, bool copy, bool rebind, CancellationToken ct, PdfProcessingSettings? settings = null)
+  {
+    if (SessionId is null || IsSettling) { Summary = "后台操作尚未收尾，请等待完成"; Changed(); return new(PdfSaveDisposition.Rejected, path, Summary); }
+    if ((copy || rebind) && !CanCopyExport) return new(PdfSaveDisposition.Rejected, path, "当前 Runtime 不支持副本导出和目标切换");
+    string session = SessionId;
+    long revision = Revision;
+    path = Path.GetFullPath(path);
     CancelActiveRun();
     long generation = Volatile.Read(ref _generation);
     var run = CancellationTokenSource.CreateLinkedTokenSource(ct);
     _activeRun = run;
-    _inflight++; Changed();
-    TerminalIssue = null; IsBusy = true; Status = "正在保存";
-    try {
-      run.Token.ThrowIfCancellationRequested(); Phase = "save"; Changed();
-      string saved = await inference.SavePdfWithSettingsAsync(SessionId, path, ProcessingSettings.ToWire(), CancellationToken.None);
-      if (generation == Volatile.Read(ref _generation)) { IsModified = false; Summary = "当前修订已保存"; Status = $"已保存到 {saved}"; Changed(); }
+    BeginRun(); Changed();
+    TerminalIssue = null; IsBusy = true; Status = copy ? "正在导出副本" : "正在保存";
+    bool submitted = false;
+    try
+    {
+      run.Token.ThrowIfCancellationRequested(); Phase = "save"; Changed(); submitted = true;
+      string saved = await inference.SavePdfOperationAsync(session, path, (settings ?? ProcessingSettings).ToWire(), copy, rebind, !copy, CancellationToken.None);
+      if (string.IsNullOrWhiteSpace(saved) || !string.Equals(Path.GetFullPath(saved), path, StringComparison.OrdinalIgnoreCase)
+        || SessionId != session || Revision != revision)
+        throw new InvalidOperationException("保存结果未确认");
+      if (!copy) { IsModified = false; if (rebind) FilePath = path; }
+      Summary = copy ? "副本已导出，当前文档修改状态保留" : "当前修订已保存";
+      Status = $"已保存到 {saved}"; Changed();
+      return new(PdfSaveDisposition.Saved, saved);
     }
-    catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) { TerminalIssue = PdfIssueKind.Cancelled; Status = "已取消"; } }
-    catch (InferenceClientException e) { if (generation == Volatile.Read(ref _generation)) { TerminalIssue = IssueFromV2(e.Code); Status = LocalizeV2(e.Code); } }
-    catch (Exception) when (generation == Volatile.Read(ref _generation)) { TerminalIssue = PdfIssueKind.Failed; Status = "保存失败"; }
+    catch (OperationCanceledException) when (!submitted)
+    { TerminalIssue = PdfIssueKind.Cancelled; Status = "已取消"; return new(PdfSaveDisposition.Cancelled, path); }
+    catch (InferenceClientException e) when (e.Code is HttpV2ErrorCode.ValidationError or HttpV2ErrorCode.Unauthorized or HttpV2ErrorCode.ForbiddenLoopback or HttpV2ErrorCode.ResourceNotFound or HttpV2ErrorCode.RuntimeCapabilityUnavailable or HttpV2ErrorCode.RuntimeOperationNotFound)
+    { TerminalIssue = IssueFromV2(e.Code); Status = LocalizeV2(e.Code); return new(PdfSaveDisposition.Failed, path, Status); }
+    catch (Exception)
+    {
+      _requiresReopen = submitted && !copy;
+      TerminalIssue = PdfIssueKind.Failed; Status = submitted ? "保存结果未确认，保留修改与目标" : "保存失败";
+      return new(submitted ? PdfSaveDisposition.Unconfirmed : PdfSaveDisposition.Failed, path, Status);
+    }
     finally { await FinishRunAsync(generation, run); }
   }
 
@@ -666,7 +701,7 @@ public sealed class PdfViewModel(
     string? session = _modelAvailable ? SessionId : null;
     CancelActiveRun();
     long generation = Volatile.Read(ref _generation);
-    _inflight++; Changed();
+    BeginRun(); Changed();
     try
     {
       if (_unclosedSession is not null)
@@ -686,7 +721,7 @@ public sealed class PdfViewModel(
       }
       throw;
     }
-    finally { _inflight--; Changed(); }
+    finally { EndRun(); Changed(); }
   }
 
   private void MarkUnconfirmedOcr(string session, long revision)
@@ -707,7 +742,7 @@ public sealed class PdfViewModel(
     long generation = Volatile.Read(ref _generation);
     var run = CancellationTokenSource.CreateLinkedTokenSource(ct);
     _activeRun = run;
-    _inflight++; Changed();
+    BeginRun(); Changed();
     TerminalIssue = null; IsBusy = true; Status = runningStatus;
     bool submitted = false;
     void Unconfirmed() { if (SessionId == session && submitted) { _requiresReopen = true; Summary = "页面写入结果未确认，请关闭并重新打开文档复检"; Changed(); } }
@@ -754,7 +789,7 @@ public sealed class PdfViewModel(
     if (generation == Volatile.Read(ref _generation)) IsBusy = false;
     Interlocked.CompareExchange(ref _activeRun, null, run);
     run.Dispose();
-    _inflight--; if (_inflight == 0) Phase = "idle"; Changed();
+    EndRun(); Changed();
   }
 
   private bool ValidatePages(int[] pages)
@@ -794,7 +829,7 @@ public sealed class PdfViewModel(
     pages = pages.Distinct().Where(index => Pages[index].Detected && Pages[index].HasTextLayer).ToArray();
     if (pages.Length == 0) { Summary = "所选页面无文字层，已跳过"; Changed(); return; }
     CancelActiveRun(); long generation = Volatile.Read(ref _generation);
-    var run = CancellationTokenSource.CreateLinkedTokenSource(ct); _activeRun = run; _inflight++;
+    var run = CancellationTokenSource.CreateLinkedTokenSource(ct); _activeRun = run; BeginRun();
     IsBusy = true; TerminalIssue = null;
     try
     {
@@ -850,7 +885,7 @@ public sealed class PdfViewModel(
       }
     }
   }
-  private void TrimResultCache(int start, int count)
+  public void TrimResultCache(int start, int count)
   {
     foreach (PdfPageViewModel page in Pages)
       if (page.Index < start || page.Index >= start + count) { page.Result = null; page.OcrText = ""; }
@@ -942,3 +977,7 @@ public sealed class PdfPageViewModel : INotifyPropertyChanged
 public interface IPdfFileSource { Task<string?> PickFileAsync(CancellationToken cancellationToken); }
 
 internal sealed record PdfResultReference(string JobId, string ItemId, string Pipeline, int RotationOffset = 0);
+
+public enum PdfSaveDisposition { Saved, Cancelled, Rejected, Failed, Unconfirmed }
+public sealed record PdfSaveResult(PdfSaveDisposition Disposition, string Target, string? Error = null)
+{ public bool Saved => Disposition == PdfSaveDisposition.Saved; }

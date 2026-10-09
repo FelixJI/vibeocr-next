@@ -791,6 +791,9 @@ class PdfBackendClient:
         pdf_settings: dict | None = None,
         *,
         rewrite_text_layers: bool = True,
+        copy_export: bool = False,
+        overwrite: bool = True,
+        rebind_target: bool = False,
     ) -> SaveResponse:
         return self._parse(
             self._post(
@@ -799,6 +802,9 @@ class PdfBackendClient:
                     path=path,
                     pdf_settings=pdf_settings,
                     rewrite_text_layers=rewrite_text_layers,
+                    copy_export=copy_export,
+                    overwrite=overwrite,
+                    rebind_target=rebind_target,
                 ).model_dump(),
                 timeout=_HTTP_LONG_TIMEOUT,
             ),

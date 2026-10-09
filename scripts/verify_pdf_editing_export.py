@@ -114,6 +114,152 @@ def verify_export(root: Path) -> dict:
     }
 
 
+def verify_workspace_export(root: Path) -> dict:
+    """同一真实候选的工作区流程：检查全部成功副本及当前保存目标。"""
+    root = root.resolve()
+    health = json.loads(
+        (root / "paddle-input-pdf_workspace.json").read_text(encoding="utf-8-sig")
+    )
+    assert health["state"] == "passed", health.get("state")
+    evidence = health["evidence"]
+    assert evidence["input_kind"] == "pdf_workspace"
+    workspace = evidence["workspace"]
+    editing = workspace["editing"]
+    edits = editing["edits"]
+    final_edits = {int(edit["block_index"]): edit for edit in edits}
+    assert len(edits) == 3 and len(final_edits) == 2
+    assert "AFTER_SAVE_AS202" in edits[-1]["new_text"]
+    blocks = evidence["job"]["outcomes"][0]["Payload"]["text_blocks"]
+    original = [Path(path).resolve() for path in workspace["original_paths"]]
+    assert len(original) == 2 and original[0].name == original[1].name
+    assert original[0].parent != original[1].parent
+    a_id = editing["DocumentId"]
+    outputs = [
+        (Path(workspace["a_saved"]["file"]), True),
+        (Path(workspace["b_saved"]["file"]), False),
+    ]
+    for directory, key in (
+        ("partial_directory", "retry_items"),
+        ("cancelled_directory", "completed_items"),
+    ):
+        for item in workspace[key]:
+            assert item["Status"] == "saved", item
+            outputs.append(
+                (
+                    Path(workspace[directory]) / item["Output"],
+                    item["DocumentId"] == a_id,
+                )
+            )
+    assert any(item["Status"] == "saved" for item in workspace["cancelled_items"])
+    assert any(
+        item["Status"] in ("cancelled", "not_started")
+        for item in workspace["cancelled_items"]
+    )
+    assert all(item["IsModified"] for item in workspace["before_copy_documents"])
+    assert all(item["IsModified"] for item in workspace["after_copy_documents"])
+    competitor = Path(workspace["competitor"]).resolve()
+    assert (
+        competitor.is_relative_to(root)
+        and competitor.read_text() == "T4_SYNTHETIC_COMPETITOR"
+    )
+    checked = []
+    for path, is_a in outputs:
+        path = path.resolve()
+        assert path.is_relative_to(root) and path.is_file(), path
+        with fitz.open(path) as saved, fitz.open(original[0 if is_a else 1]) as source:
+            assert len(saved) == (77 if is_a else 3), (path, len(saved))
+            assert len(source) == (75 if is_a else 3)
+            assert not source[0].get_text().strip(), "源扫描页被写入"
+            assert "WORKSPACE NATIVE TAIL202" in source[1].get_text(), "源原生页被覆盖"
+            before = source[0].get_pixmap(dpi=SCAN_COMPARE_DPI, alpha=False)
+            after = saved[0].get_pixmap(dpi=SCAN_COMPARE_DPI, alpha=False)
+            assert (before.width, before.height, before.samples) == (
+                after.width,
+                after.height,
+                after.samples,
+            ), "扫描像素改变"
+            actual = _norm(saved[0].get_text())
+            if is_a:
+                for edit in final_edits.values():
+                    assert actual.count(_norm(edit["new_text"])) == 1, (
+                        "完整校正文本丢失或重复"
+                    )
+                for token in ("CNTAIL201", "ENTAIL201", "AFTER_SAVE_AS202"):
+                    assert actual.count(token) == 1, token
+                for index, block in enumerate(blocks):
+                    expected = _norm(
+                        final_edits[index]["new_text"]
+                        if index in final_edits
+                        else block["text"]
+                    )
+                    assert expected in actual, f"未改块/完整新文本丢失 {index}"
+                    if index in final_edits:
+                        old = _norm(block["text"])
+                        expected_count = sum(
+                            _norm(
+                                final_edits[i]["new_text"]
+                                if i in final_edits
+                                else value["text"]
+                            ).count(old)
+                            for i, value in enumerate(blocks)
+                        )
+                        assert actual.count(old) == expected_count, "旧文字层残留或重复"
+                assert not saved[1].get_text().strip(), "明确删除的原生文字仍在"
+                clip = fitz.Rect(40, 120, 220, 200)
+                assert (
+                    source[1].get_pixmap(clip=clip).samples
+                    == saved[1].get_pixmap(clip=clip).samples
+                ), "删除文字破坏非文字图形"
+                with fitz.open(root / "fixtures" / "document_mixed.pdf") as inserted:
+                    assert _norm(inserted[0].get_text()) == _norm(
+                        saved[75].get_text()
+                    ), "插入页顺序/全文不正确"
+                    assert (
+                        inserted[0].get_pixmap().samples
+                        == saved[75].get_pixmap().samples
+                    ), "插入页像素改变"
+                blank_indices = [*range(2, 75), 76]
+            else:
+                assert not actual, "副本导出给未识别扫描页伪造文字"
+                assert source[1].get_text() == saved[1].get_text()
+                assert (
+                    source[1].get_pixmap().samples == saved[1].get_pixmap().samples
+                ), "非目标原生页像素改变"
+                blank_indices = [2]
+            for index in blank_indices:
+                assert not saved[index].get_text().strip() and set(
+                    saved[index].get_pixmap().samples
+                ) == {255}, f"空白页 {index} 改变"
+            assert all(
+                draft not in actual
+                for draft in ("CANCELLED_DRAFT201", "PAGE_SWITCH_DRAFT201")
+            )
+            checked.append(
+                {
+                    "file": str(path),
+                    "page_count": len(saved),
+                    "document": "A" if is_a else "B",
+                }
+            )
+    assert all(
+        sample["thumbnails"] <= 64 and sample["published_files"] <= 72
+        for sample in workspace["resources"]
+    )
+    return {
+        "candidate_root": str(root),
+        "outputs": checked,
+        "edits": edits,
+        "resources": workspace["resources"],
+        "full_text_exact": True,
+        "save_as_continuation": True,
+        "original_sources_preserved": True,
+        "scan_pixels_exact_at_dpi": SCAN_COMPARE_DPI,
+        "copy_dirty_preserved": True,
+        "commit_collision_preserved": True,
+        "verifier": "scripts/verify_pdf_editing_export.py (pymupdf)",
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True, help="冒烟隔离根")
@@ -123,9 +269,17 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="报告输出路径（默认隔离根内；旧证据只读验收时指定仓库内路径）",
     )
+    parser.add_argument(
+        "--workspace", action="store_true", help="校验 pdf_workspace 组合输出"
+    )
     args = parser.parse_args(argv)
-    report = verify_export(args.root)
-    report_path = (args.output or args.root / REPORT_NAME).resolve()
+    report = (
+        verify_workspace_export(args.root)
+        if args.workspace
+        else verify_export(args.root)
+    )
+    name = "pdf-workspace-export-verification.json" if args.workspace else REPORT_NAME
+    report_path = (args.output or args.root / name).resolve()
     report_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )

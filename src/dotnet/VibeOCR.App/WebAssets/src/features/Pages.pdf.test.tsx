@@ -155,7 +155,11 @@ describe("PDF text layer actions", () => {
   it("freezes confirmed deletion pages and revision and explains visible text", () => {
     const actions = setup();
     fireEvent.click(screen.getByRole("button", { name: "删除选中文字层" }));
-    expect(actions.run).not.toHaveBeenCalled();
+    expect(
+      actions.run.mock.calls.every(
+        ([command]) => command.type === "pdf.setPreviewPosition",
+      ),
+    ).toBe(true);
     expect(screen.getByRole("alertdialog")).toHaveTextContent("原有可见文字");
     expect(screen.getByRole("alertdialog")).toHaveTextContent(
       "不是安全脱敏工具",
@@ -289,3 +293,39 @@ it.each([{ sessionId: undefined }, { selectedPage: 70 }])(
     ).not.toBeInTheDocument();
   },
 );
+
+describe("PDF workspace identity", () => {
+  it("binds editing, save and switching to the opaque document identity", () => {
+    const actions = setup({
+      documentId: "first",
+      canCopyExport: true,
+      documents: [
+        { documentId: "first", name: "same.pdf", isModified: true },
+        { documentId: "second", name: "same.pdf", isModified: false },
+      ],
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(actions.run).toHaveBeenLastCalledWith({
+      type: "pdf.save",
+      documentId: "first",
+      documentRevision: 8,
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "另存为并切换保存目标" }),
+    );
+    expect(actions.run).toHaveBeenLastCalledWith({
+      type: "pdf.saveAs",
+      documentId: "first",
+      documentRevision: 8,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "same.pdf" }));
+    expect(actions.run).toHaveBeenLastCalledWith({
+      type: "pdf.activateDocument",
+      documentId: "second",
+      documentRevision: 8,
+    });
+    expect(
+      screen.getByText(/导出副本保留原文档修改状态和保存目标/),
+    ).toBeInTheDocument();
+  });
+});
