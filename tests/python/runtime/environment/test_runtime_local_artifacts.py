@@ -16,19 +16,19 @@ import pytest
 from vibeocr.runtime.environments import runtime_installer as installer
 
 
-def _wheel(name: str, module: str) -> bytes:
+def _wheel(name: str, module: str, version: str = "1") -> bytes:
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, "w") as archive:
         archive.writestr(f"{module}.py", "VALUE = 'local'\n")
         archive.writestr(
-            f"{module}-1.dist-info/METADATA",
-            f"Metadata-Version: 2.1\nName: {name}\nVersion: 1\n",
+            f"{module}-{version}.dist-info/METADATA",
+            f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n",
         )
         archive.writestr(
-            f"{module}-1.dist-info/WHEEL",
+            f"{module}-{version}.dist-info/WHEEL",
             "Wheel-Version: 1.0\nGenerator: fixture\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
         )
-        archive.writestr(f"{module}-1.dist-info/RECORD", "")
+        archive.writestr(f"{module}-{version}.dist-info/RECORD", "")
     return stream.getvalue()
 
 

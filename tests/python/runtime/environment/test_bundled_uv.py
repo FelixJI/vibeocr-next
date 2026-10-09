@@ -59,6 +59,90 @@ def test_real_pylock_adapts_direct_wheel_with_markers_and_extras(tmp_path: Path)
     assert "target[feature] @ file:///" in local.read_text()
 
 
+def test_real_pylock_keeps_percent_encoded_local_version_direct_url(tmp_path: Path):
+    # A torch-style local version (`2.x+cu126`) reaches uv through a direct URL
+    # whose `+` stays percent-encoded; real uv compile must preserve that exact
+    # authoritative URL and hash in pylock and the local install input.
+    import hashlib
+    import threading
+    import urllib.parse
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    version = "2.0.1+cu126"
+    filename = f"cu_target-{version}-py3-none-any.whl"
+    encoded = filename.replace("+", "%2B")
+    payload = _wheel("cu-target", "cu_target", version)
+    digest = hashlib.sha256(payload).hexdigest()
+    requests: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            requests.append(self.path)
+            body = (
+                payload
+                if urllib.parse.unquote(self.path.rsplit("/", 1)[-1]) == filename
+                else b""
+            )
+            self.send_response(200 if body else 404)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/wheels/{encoded}"
+    lock = tmp_path / "requirements.lock"
+    lock.write_text(f"cu-target @ {url} --hash=sha256:{digest}\n", encoding="utf-8")
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    pylock = tmp_path / "pylock.toml"
+    command = installer._uv_command(Path(sys.executable), "compile") + [
+        "--no-index",
+        "--format",
+        "pylock.toml",
+        "--generate-hashes",
+        "--python-platform",
+        "x86_64-pc-windows-msvc",
+        "-o",
+        str(pylock),
+        str(lock),
+    ]
+    try:
+        installer._run_install_command(
+            command,
+            timeout=45,
+            env=installer._uv_install_environment(dict(os.environ), tmp_path),
+            reporter=None,
+            heartbeat_code="runtime.resolve_packages",
+            gate_python=Path(sys.executable),
+        )
+        assert requests, "real uv did not fetch the localhost wheel"
+        assert any(encoded in path for path in requests)
+        (downloads / filename).write_bytes(payload)
+        report = installer._pylock_report(pylock, lock, "3.13.16", downloads)
+        entry = report["install"][0]
+        assert entry["metadata"] == {"name": "cu-target", "version": version}
+        assert entry["download_info"]["url"] == url
+        assert entry["download_info"]["archive_info"]["hashes"]["sha256"] == digest
+        report_path = tmp_path / "report.json"
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        local = installer._local_install_requirements(
+            lock, downloads, report_path, "3.13.16"
+        )
+        text = local.read_text(encoding="utf-8")
+        assert "cu-target @ file:///" in text
+        assert encoded in text
+        assert f"--hash=sha256:{digest}" in text
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 @pytest.mark.parametrize(
     "fault", ["version", "hash", "missing", "extra", "incompatible", "direct_url"]
 )
