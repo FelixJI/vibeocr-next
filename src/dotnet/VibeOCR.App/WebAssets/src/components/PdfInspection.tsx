@@ -106,6 +106,8 @@ export function PdfInspection({
   canEdit,
   actions,
   registerPositionFlush,
+  registerNativePositionFlush,
+  documentId,
 }: {
   readonly position?: Readonly<Record<string, unknown>>;
   readonly page: number;
@@ -118,6 +120,8 @@ export function PdfInspection({
   readonly busy: boolean;
   readonly canEdit: boolean;
   readonly actions: AppActions;
+  readonly documentId?: string;
+  readonly registerNativePositionFlush?: AppActions["registerPdfPreviewFlush"];
   readonly registerPositionFlush?: (
     flush: (() => Promise<void>) | null,
   ) => void;
@@ -205,13 +209,22 @@ export function PdfInspection({
   const flushPosition = drainPosition;
   useEffect(() => {
     registerPositionFlush?.(flushPosition);
+    const unregisterNative = documentId
+      ? registerNativePositionFlush?.(documentId, flushPosition)
+      : undefined;
     return () => {
+      unregisterNative?.();
       registerPositionFlush?.(null);
       // 非切换路径的卸载（翻页/修订/路由变化）也排空最后状态；后续任何
       // 激活/关闭命令都会先 await 同一排空任务。
       void flushPosition().catch(() => undefined);
     };
-  }, [registerPositionFlush, flushPosition]);
+  }, [
+    registerPositionFlush,
+    registerNativePositionFlush,
+    documentId,
+    flushPosition,
+  ]);
   const rememberPosition = () => {
     const node = viewport.current;
     schedulePosition({

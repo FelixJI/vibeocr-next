@@ -23,6 +23,7 @@ public sealed class PdfWorkspace
 {
   public const int MaxDocuments = 16;
   private readonly List<PdfDocumentEntry> documents = [];
+  private readonly Dictionary<PdfDocumentEntry, string> saveAsTargets = [];
   public IReadOnlyList<PdfDocumentEntry> Documents => documents;
   public PdfDocumentEntry? Active { get; private set; }
   public string EmptyDocumentId { get; private set; } = Guid.NewGuid().ToString("N");
@@ -46,13 +47,24 @@ public sealed class PdfWorkspace
   public PdfDocumentEntry? FindTarget(string path)
   {
     string target = Path.GetFullPath(path);
-    return documents.FirstOrDefault(entry => entry.Model.FilePath is { } current
+    return documents.FirstOrDefault(entry => saveAsTargets.TryGetValue(entry, out string? reserved) &&
+      string.Equals(reserved, target, StringComparison.OrdinalIgnoreCase))
+      ?? documents.FirstOrDefault(entry => entry.Model.FilePath is { } current
       ? string.Equals(Path.GetFullPath(current), target, StringComparison.OrdinalIgnoreCase)
       : entry.RequestedPath is { } requested &&
         string.Equals(Path.GetFullPath(requested), target, StringComparison.OrdinalIgnoreCase));
   }
+  public void ReserveSaveAsTarget(PdfDocumentEntry entry, string path)
+  {
+    if (!documents.Contains(entry) || saveAsTargets.ContainsKey(entry))
+      throw new InvalidOperationException("文档已有未收尾或未确认的保存目标。");
+    if (FindTarget(path) is { } owner && owner != entry)
+      throw new InvalidOperationException("目标属于另一打开文档，请选择其他路径。");
+    saveAsTargets.Add(entry, Path.GetFullPath(path));
+  }
+  public void ReleaseSaveAsTarget(PdfDocumentEntry entry) => saveAsTargets.Remove(entry);
   public void Activate(PdfDocumentEntry entry) { if (!documents.Contains(entry)) throw new InvalidOperationException("文档已关闭"); Active = entry; }
-  public void Remove(PdfDocumentEntry entry) { documents.Remove(entry); if (Active == entry) Active = documents.LastOrDefault(); if (documents.Count == 0) EmptyDocumentId = Guid.NewGuid().ToString("N"); }
+  public void Remove(PdfDocumentEntry entry) { saveAsTargets.Remove(entry); documents.Remove(entry); if (Active == entry) Active = documents.LastOrDefault(); if (documents.Count == 0) EmptyDocumentId = Guid.NewGuid().ToString("N"); }
   public void CancelExport() => cancelExport = true;
   /// <summary>仅真正失败/取消/未开始的项可重试；saved 与 unconfirmed（服务端可能已
   /// 提交副本但响应丢失）不重发，避免盲目重试生成重复副本。</summary>

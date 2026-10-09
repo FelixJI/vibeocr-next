@@ -143,7 +143,8 @@ public sealed partial class MainWindow : Window
       supervisorInstanceId: supervisorInstanceId,
       pinScreenshot: PinScreenshot,
       shellActions: shellActions,
-      optionsLayout: layout, confirmPdfClose: ConfirmPdfCloseAsync);
+      optionsLayout: layout, confirmPdfClose: ConfirmPdfCloseAsync,
+      flushPdfPreview: FlushPdfPreviewAsync);
     commandHandler.ScreenshotSessionReady += ShowImageEditor;
     commandHandler.ScreenshotCaptureStarting += () => imageEditor?.HideForCapture();
     commandHandler.ScreenshotCaptureFinished += () => imageEditor?.RestoreAfterCapture();
@@ -695,6 +696,8 @@ public sealed partial class MainWindow : Window
       RecoveryStatus.Text = "诊断导出失败，请检查数据目录权限。";
     }
   }
+
+  private Task<bool> FlushPdfPreviewAsync(string documentId) => webHost.FlushPdfPreviewAsync(documentId);
 
   public Task<bool> PreparePdfExitAsync() => commandHandler.RequestCloseAllPdfAsync();
   private Microsoft.UI.Xaml.Controls.ContentDialog? activePdfCloseDialog;

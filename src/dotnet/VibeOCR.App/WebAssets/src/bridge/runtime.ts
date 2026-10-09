@@ -42,10 +42,38 @@ export class WorkbenchWebRuntime {
   private listener?: (state: AppViewState) => void;
   private sessionId?: string;
   private unsubscribe?: () => void;
+  private unsubscribePdfPreviewFlush?: () => void;
+  private pdfPreviewFlush?: { documentId: string; flush: () => Promise<void> };
+
+  // 卸载期间每文档仅保留首个在途和最新 drain；成功/真实关闭即释放，不缓存预览内容。
+  private readonly retiringPdfPreviewFlush = new Map<
+    string,
+    {
+      first: () => Promise<void>;
+      latest: () => Promise<void>;
+      draining?: Promise<void>;
+    }
+  >();
 
   readonly actions: AppActions = {
+    registerPdfPreviewFlush: (documentId, flush) => {
+      const registered = { documentId, flush };
+      this.pdfPreviewFlush = registered;
+      return () => {
+        if (this.pdfPreviewFlush !== registered) return;
+        this.pdfPreviewFlush = undefined;
+        const retiring = this.retiringPdfPreviewFlush.get(documentId);
+        if (retiring) retiring.latest = flush;
+        else
+          this.retiringPdfPreviewFlush.set(documentId, {
+            first: flush,
+            latest: flush,
+          });
+        void this.drainRetiringPdfPreview(documentId).catch(() => undefined);
+      };
+    },
     run: ({ type, ...payload }) => this.runCommand(type, payload),
-    navigate: (route) => void this.runCommand("shell.navigate", { route }),
+    navigate: (route) => void this.navigateAfterPdfPreview(route),
     setTheme: (theme) => void this.runCommand("settings.setTheme", { theme }),
   };
 
@@ -56,11 +84,15 @@ export class WorkbenchWebRuntime {
 
   async start(listener: (state: AppViewState) => void): Promise<void> {
     this.unsubscribe?.();
+    this.unsubscribePdfPreviewFlush?.();
     const snapshot = await this.bridge.bootstrap();
     this.sessionId = snapshot.sessionId;
     this.current = projectSnapshot(snapshot);
     this.listener = listener;
     listener(this.current);
+    this.unsubscribePdfPreviewFlush = this.bridge.subscribePdfPreviewFlush?.(
+      (documentId) => this.flushPdfPreview(documentId),
+    );
     this.unsubscribe = this.bridge.subscribe((event) => {
       if (
         event.sessionId !== this.sessionId ||
@@ -70,6 +102,18 @@ export class WorkbenchWebRuntime {
         return;
       }
       this.current = projectEvent(this.current, event);
+      const pdf = this.current.features.pdf;
+      if (
+        event.scope === "pdf" &&
+        isRecord(pdf) &&
+        Array.isArray(pdf.documents)
+      ) {
+        const known = new Set(
+          pdf.documents.filter(isRecord).map((doc) => doc.documentId),
+        );
+        for (const id of this.retiringPdfPreviewFlush.keys())
+          if (!known.has(id)) this.retiringPdfPreviewFlush.delete(id);
+      }
       listener(this.current);
     });
   }
@@ -77,7 +121,65 @@ export class WorkbenchWebRuntime {
   stop(): void {
     this.unsubscribe?.();
     this.unsubscribe = undefined;
+    this.unsubscribePdfPreviewFlush?.();
+    this.unsubscribePdfPreviewFlush = undefined;
+    this.pdfPreviewFlush = undefined;
+    this.retiringPdfPreviewFlush.clear();
     this.listener = undefined;
+  }
+
+  private drainRetiringPdfPreview(documentId: string): Promise<void> {
+    const retiring = this.retiringPdfPreviewFlush.get(documentId);
+    if (!retiring) return Promise.resolve();
+    if (retiring.draining) return retiring.draining;
+    const task = (async () => {
+      await Promise.resolve();
+      try {
+        let flushed = retiring.first;
+        await flushed();
+        while (retiring.latest !== flushed) {
+          flushed = retiring.latest;
+          await flushed();
+        }
+        if (this.retiringPdfPreviewFlush.get(documentId) === retiring)
+          this.retiringPdfPreviewFlush.delete(documentId);
+      } finally {
+        retiring.draining = undefined;
+      }
+    })();
+    retiring.draining = task;
+    return task;
+  }
+
+  private async flushPdfPreview(documentId: string): Promise<boolean> {
+    const pdf = this.current?.features.pdf;
+    if (
+      isRecord(pdf) &&
+      typeof pdf.documentId === "string" &&
+      pdf.documentId !== documentId
+    )
+      return false;
+    await this.drainRetiringPdfPreview(documentId);
+    if (this.current?.route !== "pdf") return true;
+    if (this.pdfPreviewFlush?.documentId !== documentId) return false;
+    await this.pdfPreviewFlush.flush();
+    return true;
+  }
+
+  private async navigateAfterPdfPreview(route: AppRoute): Promise<void> {
+    const pdf = this.current?.features.pdf;
+    try {
+      if (
+        isRecord(pdf) &&
+        typeof pdf.documentId === "string" &&
+        (this.current?.route === "pdf" || route === "pdf")
+      ) {
+        if (!(await this.flushPdfPreview(pdf.documentId))) return;
+      }
+      await this.runCommand("shell.navigate", { route });
+    } catch {
+      this.reportCommandProblem("workbench.error.commandFailed");
+    }
   }
 
   private async runCommand(
@@ -92,6 +194,11 @@ export class WorkbenchWebRuntime {
       arguments: args,
     };
     try {
+      if (
+        type === "pdf.activateDocument" &&
+        typeof args.documentId === "string"
+      )
+        await this.drainRetiringPdfPreview(args.documentId);
       const receipt = await this.bridge.execute(command);
       if (!receipt.ok) {
         const messageKey = receipt.problem?.messageKey;

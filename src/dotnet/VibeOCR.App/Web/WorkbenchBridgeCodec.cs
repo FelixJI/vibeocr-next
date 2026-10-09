@@ -214,6 +214,32 @@ public static class WorkbenchBridgeCodec
     return json;
   }
 
+  internal static string SerializePdfPreviewFlush(Guid id, Guid session, string documentId) =>
+    JsonSerializer.Serialize(new { version = WorkbenchProtocol.Version, kind = "request", id,
+      type = "pdf.flushPreview", payload = new { sessionId = session, documentId } }, SerializerOptions);
+
+  internal static (Guid Id, Guid Session, string DocumentId, bool Ok) ParsePdfPreviewFlushResponse(string json)
+  {
+    EnsureMessageSize(json);
+    try
+    {
+      using JsonDocument document = JsonDocument.Parse(json);
+      JsonElement root = document.RootElement;
+      EnsureObjectWithFields(root, EnvelopeFields, "preview flush envelope");
+      JsonElement payload = root.GetProperty("payload");
+      EnsureObjectWithFields(payload, new HashSet<string>(StringComparer.Ordinal) { "sessionId", "documentId", "ok" }, "preview flush payload");
+      if (root.GetProperty("version").GetInt32() != WorkbenchProtocol.Version ||
+        root.GetProperty("kind").GetString() != "response" || root.GetProperty("type").GetString() != "pdf.flushPreview" ||
+        !Guid.TryParse(root.GetProperty("id").GetString(), out Guid id) ||
+        !Guid.TryParse(payload.GetProperty("sessionId").GetString(), out Guid session) ||
+        !Guid.TryParseExact(payload.GetProperty("documentId").GetString(), "N", out _))
+        throw new WorkbenchBridgeProtocolException("Preview flush response identity is invalid.");
+      return (id, session, payload.GetProperty("documentId").GetString()!, payload.GetProperty("ok").GetBoolean());
+    }
+    catch (Exception error) when (error is JsonException or InvalidOperationException or KeyNotFoundException)
+    { throw new WorkbenchBridgeProtocolException("Preview flush response is invalid.", error); }
+  }
+
   public static WorkbenchCommandEnvelope ParseCommand(
     string json,
     Guid expectedSessionId)

@@ -151,6 +151,10 @@ export interface AppAction {
 }
 
 export interface AppActions {
+  readonly registerPdfPreviewFlush?: (
+    documentId: string,
+    flush: () => Promise<void>,
+  ) => () => void;
   readonly run: (action: AppAction) => Promise<boolean>;
   readonly navigate: (route: AppRoute) => void;
   readonly setTheme: (theme: ThemePreference) => void;

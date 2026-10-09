@@ -1955,7 +1955,8 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
   const [confirmRevision, setConfirmRevision] = useState(0);
   const [replaceLayers, setReplaceLayers] = useState(false);
   const state = feature(viewState, "pdf");
-  const documentId = stringValue(state.documentId);
+  const documentId =
+    typeof state.documentId === "string" ? state.documentId : undefined;
   // 当前检查组件的预览状态排空接缝：切换/关闭前 await 最后位置/草稿在宿主
   // 完成提交，再发送后续命令（关闭可能取消/失败，文档保留时草稿不丢）。
   const positionFlush = useRef<(() => Promise<void>) | null>(null);
@@ -1965,6 +1966,7 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
     },
     [],
   );
+  const registerNativePreviewFlush = parentActions.registerPdfPreviewFlush;
   const actions: AppActions = {
     ...parentActions,
     run: (action) => {
@@ -1978,7 +1980,11 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
               ...action,
             }
           : action;
-      if (action.type !== "pdf.activateDocument" && action.type !== "pdf.close")
+      if (
+        action.type !== "pdf.activateDocument" &&
+        action.type !== "pdf.close" &&
+        action.type !== "pdf.open"
+      )
         return parentActions.run(bound);
       // 切换/关闭前等待最后位置/草稿在宿主确认提交；未确认时不发出该命令，
       // 待发送值保留在检查组件中供重试。
@@ -2020,6 +2026,16 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
     stringValue(state.sessionId) !== undefined &&
     selectedPage >= 0 &&
     selectedPage < pageCount;
+  useEffect(() => {
+    if (!documentId || (hasCurrentPage && state.canInspectPage === true))
+      return;
+    return registerNativePreviewFlush?.(documentId, () => Promise.resolve());
+  }, [
+    documentId,
+    hasCurrentPage,
+    state.canInspectPage,
+    registerNativePreviewFlush,
+  ]);
   const pages = pdfPages(state.pages);
   const windowStart = Math.max(0, numberValue(state.windowStart));
   const selectedPages = Array.isArray(state.selectedPages)
@@ -2697,6 +2713,8 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
                 canEdit={state.canCorrectText === true}
                 actions={actions}
                 registerPositionFlush={registerPositionFlush}
+                documentId={documentId}
+                registerNativePositionFlush={registerNativePreviewFlush}
               />
             ) : hasCurrentPage && activePage?.thumbnail ? (
               <img

@@ -190,7 +190,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     PortableLayout? optionsLayout = null,
     IStructuredClipboardPlatform? structuredClipboard = null,
     Func<PdfDocumentEntry, Task<PdfCloseDecision>>? confirmPdfClose = null,
-    Func<Task<string?>>? pickPdfSavePath = null, Func<Task<string?>>? pickPdfFolder = null)
+    Func<Task<string?>>? pickPdfSavePath = null, Func<Task<string?>>? pickPdfFolder = null,
+    Func<string, Task<bool>>? flushPdfPreview = null)
   {
     this.recognitionFactory = recognitionFactory ??
       throw new ArgumentNullException(nameof(recognitionFactory));
@@ -232,8 +233,10 @@ public sealed class DesktopWorkbenchCommandHandler :
     this.optionsLayout = optionsLayout;
     this.confirmPdfClose = confirmPdfClose ?? (_ => Task.FromResult(PdfCloseDecision.Cancel));
     this.pickPdfSavePath = pickPdfSavePath; this.pickPdfFolder = pickPdfFolder;
+    this.flushPdfPreview = flushPdfPreview;
   }
 
+  private readonly Func<string, Task<bool>>? flushPdfPreview;
   private readonly Func<string?> supervisorInstanceId;
   private readonly Func<RecognitionViewModel> textLayerRecognitionFactory;
   private string pinnedServiceInstance = string.Empty;
@@ -3076,6 +3079,13 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     // 实际加入入口重查：退出审阅开始前已打开的 picker 迟到返回同样拒绝。
     if (pdfExitReview) throw new InvalidOperationException("正在退出应用，不能打开新 PDF。");
+    // 在实际切换点排空：picker 等待期间继续输入、原生拖入和重复打开均走这里。
+    PdfDocumentEntry? leaving = pdfWorkspace.Active;
+    if (leaving is { Model.HasRemoteSession: true } && flushPdfPreview is not null)
+    {
+      if (!await flushPdfPreview(leaving.Id) || pdfWorkspace.Active != leaving || pdfExitReview)
+        throw new InvalidOperationException("最后的预览草稿未确认，保留当前文档，请重试。");
+    }
     path = Path.GetFullPath(path);
     if (pdfWorkspace.FindTarget(path) is { } duplicate) return await ActivatePdfAsync(duplicate, ct);
     if (pdfWorkspace.Documents.Count >= PdfWorkspace.MaxDocuments && pdf is not { HasRemoteSession: false, IsSettling: false }) throw new InvalidOperationException("最多同时打开 16 份 PDF，请先关闭文档。");
@@ -3353,9 +3363,20 @@ public sealed class DesktopWorkbenchCommandHandler :
     }
     if (path is null) return PdfState(entry.Model);
     if (entry.Model.SessionId != session || entry.Model.Revision != revision || entry.Closing) throw new InvalidOperationException("保存选择期间文档已变化，请重新保存。");
-    PdfSaveResult result = saveAs ? await entry.Model.SaveAsAsync(path, ct) : await entry.Model.SaveAsync(path, ct);
-    if (!result.Saved) throw new InvalidOperationException(result.Error ?? "保存未完成");
-    return PdfState(entry.Model);
+    if (saveAs) pdfWorkspace.ReserveSaveAsTarget(entry, path);
+    PdfSaveResult? result = null;
+    try
+    {
+      result = saveAs ? await entry.Model.SaveAsAsync(path, ct) : await entry.Model.SaveAsync(path, ct);
+      if (!result.Saved) throw new InvalidOperationException(result.Error ?? "保存未完成");
+      return PdfState(entry.Model);
+    }
+    finally
+    {
+      // 未确认可能已提交到新目标：在真正关闭该条目前继续占用目标。
+      // 预约成功后才进入此 finally，同条目的第二次调用不能释放第一份预约。
+      if (saveAs && result?.Disposition != PdfSaveDisposition.Unconfirmed) pdfWorkspace.ReleaseSaveAsTarget(entry);
+    }
   }
   private async Task<PdfWorkbenchState?> ExportPdfDocumentsAsync(ExportPdfDocumentsCommand command, CancellationToken ct)
   {

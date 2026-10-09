@@ -40,6 +40,77 @@ public sealed class PdfWorkspaceTests
   }
 
   [Fact]
+  public async Task PendingSaveAsReservesTargetAgainstOpenAndAnotherSaveAs()
+  {
+    using var fixture = new Fixture(); await using var handler = fixture.Handler();
+    await handler.ExecuteAsync(new OpenDroppedPdfCommand(Path.Combine(fixture.Root, "a.pdf")), CancellationToken.None);
+    PdfDocumentEntry a = Assert.Single(handler.PdfDocuments);
+    fixture.Client.PendingSave = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    Task<WorkbenchCommandOutcome> save = handler.ExecuteAsync(new PdfBoundCommand(a.Id, new SavePdfAsCommand()), CancellationToken.None).AsTask();
+    await fixture.Client.SaveEntered.Task;
+    try
+    {
+      await handler.ExecuteAsync(new OpenDroppedPdfCommand(fixture.SaveTarget), CancellationToken.None);
+      Assert.Single(handler.PdfDocuments); Assert.Equal(1, fixture.Client.Opens);
+      await handler.ExecuteAsync(new OpenDroppedPdfCommand(Path.Combine(fixture.Root, "b.pdf")), CancellationToken.None);
+      PdfDocumentEntry b = handler.PdfDocuments.Last();
+      WorkbenchCommandOutcome conflict = await handler.ExecuteAsync(new PdfBoundCommand(b.Id, new SavePdfAsCommand()), CancellationToken.None);
+      Assert.NotNull(conflict.Error); Assert.Single(fixture.Client.Saves);
+      WorkbenchCommandOutcome sameEntry = await handler.ExecuteAsync(new PdfBoundCommand(a.Id, new ActivatePdfDocumentCommand()), CancellationToken.None);
+      Assert.Null(sameEntry.Error);
+      Assert.NotNull((await handler.ExecuteAsync(new PdfBoundCommand(a.Id, new SavePdfAsCommand()), CancellationToken.None)).Error);
+      await handler.ExecuteAsync(new OpenDroppedPdfCommand(fixture.SaveTarget), CancellationToken.None);
+      Assert.Equal(2, handler.PdfDocuments.Count); Assert.Equal(2, fixture.Client.Opens);
+    }
+    finally { fixture.Client.PendingSave.TrySetResult(fixture.SaveTarget); await save; }
+    Assert.Equal(fixture.SaveTarget, a.Model.FilePath);
+    await handler.ExecuteAsync(new OpenDroppedPdfCommand(fixture.SaveTarget), CancellationToken.None);
+    Assert.Equal(2, handler.PdfDocuments.Count); Assert.Equal(2, fixture.Client.Opens);
+  }
+
+  [Theory]
+  [InlineData("failed")]
+  [InlineData("cancelled")]
+  [InlineData("unknown")]
+  public async Task SaveAsTargetReleasesOnDefiniteFailureButUnconfirmedWaitsForClose(string disposition)
+  {
+    using var fixture = new Fixture(); await using var handler = fixture.Handler();
+    await handler.ExecuteAsync(new OpenDroppedPdfCommand(Path.Combine(fixture.Root, "a.pdf")), CancellationToken.None);
+    PdfDocumentEntry a = Assert.Single(handler.PdfDocuments);
+    bool unknown = disposition == "unknown";
+    using var cancel = new CancellationTokenSource();
+    if (disposition == "cancelled") fixture.SavePicker = () => { cancel.Cancel(); return Task.FromResult<string?>(fixture.SaveTarget); };
+    if (disposition != "cancelled") fixture.Client.SaveError = unknown ? new IOException("synthetic lost receipt")
+      : new InferenceClientException(HttpV2ErrorCode.ValidationError, "synthetic rejected save", false);
+    Assert.NotNull((await handler.ExecuteAsync(new PdfBoundCommand(a.Id, new SavePdfAsCommand()), cancel.Token)).Error);
+    await handler.ExecuteAsync(new OpenDroppedPdfCommand(fixture.SaveTarget), CancellationToken.None);
+    Assert.Equal(unknown ? 1 : 2, handler.PdfDocuments.Count);
+    Assert.True(a.Model.IsModified);
+    if (unknown)
+    {
+      fixture.Decision = PdfCloseDecision.Discard;
+      await handler.ExecuteAsync(new PdfBoundCommand(a.Id, new ClosePdfCommand()), CancellationToken.None);
+      await handler.ExecuteAsync(new OpenDroppedPdfCommand(fixture.SaveTarget), CancellationToken.None);
+      Assert.Single(handler.PdfDocuments); Assert.Equal(2, fixture.Client.Opens);
+    }
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task CloseSaveOnlyClosesAfterConfirmedSave(bool fail)
+  {
+    using var fixture = new Fixture(); await using var handler = fixture.Handler();
+    await handler.ExecuteAsync(new OpenDroppedPdfCommand(Path.Combine(fixture.Root, "a.pdf")), CancellationToken.None);
+    PdfDocumentEntry a = Assert.Single(handler.PdfDocuments); fixture.Decision = PdfCloseDecision.Save;
+    if (fail) fixture.Client.SaveError = new InferenceClientException(HttpV2ErrorCode.ValidationError, "synthetic save rejection", false);
+    bool closed = await handler.RequestCloseAllPdfAsync();
+    Assert.Equal(!fail, closed); Assert.Single(fixture.Client.Saves);
+    if (fail) { Assert.Single(handler.PdfDocuments); Assert.True(a.Model.IsModified); Assert.True(a.Model.HasSession); Assert.Empty(fixture.Client.Closed); }
+    else { Assert.Empty(handler.PdfDocuments); Assert.False(a.Model.IsModified); Assert.Single(fixture.Client.Closed); }
+  }
+
+  [Fact]
   public async Task WindowAndSwitchRevokePublishedResourcesAndDuplicateTargetActivates()
   {
     using var fixture = new Fixture(70);
@@ -367,6 +438,73 @@ public sealed class PdfWorkspaceTests
     }
   }
 
+  [Theory]
+  [InlineData("drop", true)]
+  [InlineData("picker", true)]
+  [InlineData("duplicate", true)]
+  [InlineData("drop", false)]
+  public async Task ActualAddBoundaryWaitsForLatestPreviewAndFailureKeepsDocument(string route, bool confirmed)
+  {
+    using var fixture = new Fixture(); await using var handler = fixture.Handler();
+    await using var application = new WorkbenchApplication(["pdf.open"], WorkbenchRoute.Pdf, handler);
+    string original = Path.Combine(fixture.Root, "a.pdf");
+    await handler.ExecuteAsync(new OpenDroppedPdfCommand(original), CancellationToken.None);
+    PdfDocumentEntry a = Assert.Single(handler.PdfDocuments);
+    var pending = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var entered = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+    fixture.PreviewFlush = id => { entered.TrySetResult(id); return pending.Task; };
+    string target = route == "duplicate" ? original : Path.Combine(fixture.Root, "b.pdf");
+    Task<WorkbenchCommandReceipt> adding;
+    if (route == "picker")
+    {
+      fixture.Source.PendingPick = new(TaskCreationOptions.RunContinuationsAsynchronously);
+      adding = application.ExecuteAsync(new WorkbenchCommandEnvelope(Guid.NewGuid(), new OpenPdfCommand()), CancellationToken.None).AsTask();
+      Assert.False(entered.Task.IsCompleted);
+      // 文件选择器等待期间仍编辑：必须在 picker 返回后的实际切换点再排空。
+      fixture.Source.PendingPick.SetResult(target);
+    }
+    else adding = application.ExecuteAsync(new WorkbenchCommandEnvelope(Guid.NewGuid(), new OpenDroppedPdfCommand(target)), CancellationToken.None).AsTask();
+    Assert.Equal(a.Id, await entered.Task); Assert.False(adding.IsCompleted); Assert.Equal(1, fixture.Client.Opens);
+    await handler.ExecuteAsync(new PdfBoundCommand(a.Id, new SetPdfPreviewPositionCommand(
+      new PdfPreviewPosition(Draft: "LATEST AFTER PICKER211", Revision: a.Model.Revision, Page: 0))), CancellationToken.None);
+    pending.SetResult(confirmed); WorkbenchCommandReceipt receipt = await adding;
+    Assert.Equal(confirmed, receipt.Ok);
+    Assert.Equal(confirmed && route != "duplicate" ? 2 : 1, fixture.Client.Opens);
+    fixture.PreviewFlush = null;
+    WorkbenchCommandOutcome back = await handler.ExecuteAsync(new PdfBoundCommand(a.Id, new ActivatePdfDocumentCommand()), CancellationToken.None);
+    Assert.Equal("LATEST AFTER PICKER211", Assert.IsType<PdfWorkbenchState>(Assert.Single(back.States)).PreviewPosition!.Draft);
+  }
+
+  [Fact]
+  public async Task FirstPickerOpenHasNoPreviewToFlushOrStaleEmptyIdentityToMatch()
+  {
+    using var fixture = new Fixture(); await using var handler = fixture.Handler();
+    fixture.PreviewFlush = _ => throw new InvalidOperationException("No remote PDF means no pending editor");
+    fixture.Source.PendingPick = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    fixture.Source.PendingPick.SetResult(Path.Combine(fixture.Root, "first.pdf"));
+    Assert.Null((await handler.ExecuteAsync(new OpenPdfCommand(), CancellationToken.None)).Error);
+    Assert.True(Assert.Single(handler.PdfDocuments).Model.HasSession);
+  }
+
+  [Fact]
+  public async Task ActiveDocumentDriftDuringNativeFlushRejectsAddWithoutOpeningOrSwitching()
+  {
+    using var fixture = new Fixture(); await using var handler = fixture.Handler();
+    await handler.ExecuteAsync(new OpenDroppedPdfCommand(Path.Combine(fixture.Root, "a.pdf")), CancellationToken.None);
+    PdfDocumentEntry a = handler.PdfDocuments[0];
+    await handler.ExecuteAsync(new OpenDroppedPdfCommand(Path.Combine(fixture.Root, "b.pdf")), CancellationToken.None);
+    PdfDocumentEntry b = handler.PdfDocuments[1];
+    await handler.ExecuteAsync(new PdfBoundCommand(a.Id, new ActivatePdfDocumentCommand()), CancellationToken.None);
+    var pending = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    fixture.PreviewFlush = id => { Assert.Equal(a.Id, id); return pending.Task; };
+    Task<WorkbenchCommandOutcome> adding = handler.ExecuteAsync(new OpenDroppedPdfCommand(Path.Combine(fixture.Root, "c.pdf")), CancellationToken.None).AsTask();
+    Assert.False(adding.IsCompleted);
+    await handler.ExecuteAsync(new PdfBoundCommand(b.Id, new ActivatePdfDocumentCommand()), CancellationToken.None);
+    pending.SetResult(true); Assert.NotNull((await adding).Error); Assert.Equal(2, fixture.Client.Opens);
+    WorkbenchCommandOutcome state = await handler.ExecuteAsync(new PdfBoundCommand(b.Id, new ActivatePdfDocumentCommand()), CancellationToken.None);
+    Assert.Equal(b.Id, Assert.IsType<PdfWorkbenchState>(Assert.Single(state.States)).DocumentId);
+  }
+
   [Fact]
   public async Task PreviewPositionStoresPerDocumentSilentlyAndValidatesLateWrites()
   {
@@ -436,6 +574,7 @@ public sealed class PdfWorkspaceTests
     public TaskCompletionSource SaveEntered { get; set; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public string? FailCopy { get; set; }
     public string? ThrowCopyAfterSubmit { get; set; }
+    public Exception? SaveError { get; set; }
     public bool FailClose { get; set; }
     public bool FailOpen { get; set; }
     public int Opens { get; private set; }
@@ -454,6 +593,7 @@ public sealed class PdfWorkspaceTests
     public override Task<string> SavePdfOperationAsync(string sessionId, string path, IReadOnlyDictionary<string, JsonElement> settings, bool copyExport, bool rebindTarget, bool overwrite, CancellationToken ct)
     {
       Saves.Add((sessionId, path)); SaveEntered.TrySetResult();
+      if (SaveError is { } error) throw error;
       if (copyExport && ThrowCopyAfterSubmit == sessionId)
       { File.WriteAllBytes(path, [1, 2, 3, 4]); throw new IOException("synthetic response lost after commit"); }
       if (copyExport && FailCopy == sessionId) throw new InferenceClientException(HttpV2ErrorCode.ValidationError, "synthetic target collision", false);
@@ -472,13 +612,16 @@ public sealed class PdfWorkspaceTests
     public PdfCloseDecision Decision { get; set; } = PdfCloseDecision.Cancel;
     public TaskCompletionSource<PdfCloseDecision>? DecisionPending { get; set; }
     public Source Source { get; } = new();
+    public Func<string, Task<bool>>? PreviewFlush { get; set; }
+    public Func<Task<string?>>? SavePicker { get; set; }
     public Fixture(int pages = 2)
     { Directory.CreateDirectory(Root); Client = new(pages); Broker = new(Root); Annotations = new(Root); }
     public DesktopWorkbenchCommandHandler Handler() => new(
       () => throw new NotSupportedException(), () => throw new NotSupportedException(), () => throw new NotSupportedException(),
       () => Model(Client, Source), () => throw new NotSupportedException(), () => throw new NotSupportedException(), () => throw new NotSupportedException(),
       new DiagnosticsViewModel("test", new PrerequisiteReport([])), Broker, Root, static () => 0, Annotations,
-      confirmPdfClose: _ => DecisionPending?.Task ?? Task.FromResult(Decision), pickPdfSavePath: () => Task.FromResult<string?>(SaveTarget));
+      confirmPdfClose: _ => DecisionPending?.Task ?? Task.FromResult(Decision), pickPdfSavePath: () => SavePicker?.Invoke() ?? Task.FromResult<string?>(SaveTarget),
+      flushPdfPreview: id => PreviewFlush?.Invoke(id) ?? Task.FromResult(true));
     public void Dispose() { Annotations.Dispose(); Broker.Dispose(); }
   }
 }
