@@ -384,7 +384,11 @@ def _scan(store: ManagedEnvironmentStore, *, held: bool = False) -> dict:
             raw_inputs = json.loads(inputs.read_text(encoding="utf-8"))
             if (
                 not isinstance(raw_inputs, dict)
-                or set(raw_inputs) != {"lock", "endpoint", "ignore_installed"}
+                or set(raw_inputs)
+                not in (
+                    {"lock", "endpoint", "ignore_installed"},
+                    {"lock", "endpoint", "ignore_installed", "executor", "target"},
+                )
                 or raw_inputs["lock"] != scope.lock_path.read_text(encoding="utf-8")
                 or not isinstance(raw_inputs["endpoint"], str)
                 or raw_inputs["ignore_installed"] is not True
