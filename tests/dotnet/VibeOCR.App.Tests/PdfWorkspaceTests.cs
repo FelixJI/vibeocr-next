@@ -289,6 +289,34 @@ public sealed class PdfWorkspaceTests
   }
 
   [Fact]
+  public async Task IdleOrdinaryCloseNeverPublishesCancelled()
+  {
+    using var fixture = new Fixture(); await using var handler = fixture.Handler();
+    await handler.ExecuteAsync(new OpenDroppedPdfCommand(Path.Combine(fixture.Root, "a.pdf")), CancellationToken.None);
+    PdfDocumentEntry entry = Assert.Single(handler.PdfDocuments);
+    var issues = new List<PdfIssueKind?>();
+    entry.Model.PropertyChanged += (_, _) => issues.Add(entry.Model.TerminalIssue);
+    fixture.Decision = PdfCloseDecision.Discard;
+    WorkbenchCommandOutcome result = await handler.ExecuteAsync(new PdfBoundCommand(entry.Id, new ClosePdfCommand()), CancellationToken.None);
+    Assert.Null(result.Error); Assert.Empty(handler.PdfDocuments); Assert.Single(fixture.Client.Closed);
+    Assert.DoesNotContain(PdfIssueKind.Cancelled, issues); Assert.Empty(fixture.Client.Cancelled);
+  }
+
+  [Fact]
+  public async Task IdleCancelPreservesUnconfirmedSaveRecoveryBoundary()
+  {
+    var client = new Client { SaveError = new IOException("synthetic lost save response") };
+    PdfViewModel model = Model(client); await model.OpenPathAsync("source.pdf", CancellationToken.None);
+    Assert.Equal(PdfSaveDisposition.Unconfirmed, (await model.SaveAsync("target.pdf", CancellationToken.None)).Disposition);
+    var before = (model.SessionId, model.FilePath, model.Revision, model.IsModified, model.Status, model.Summary, model.TerminalIssue);
+    await model.CancelAndSettleAsync();
+    Assert.True(model.IsSettling);
+    Assert.Equal(before, (model.SessionId, model.FilePath, model.Revision, model.IsModified, model.Status, model.Summary, model.TerminalIssue));
+    Assert.Equal(PdfSaveDisposition.Rejected, (await model.SaveAsync("target.pdf", CancellationToken.None)).Disposition);
+    Assert.Single(client.Saves); Assert.Empty(client.Cancelled);
+  }
+
+  [Fact]
   public async Task ExitCancelKeepsSessionsAndCloseFailureCanRetry()
   {
     using var fixture = new Fixture();

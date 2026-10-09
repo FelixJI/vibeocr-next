@@ -690,6 +690,8 @@ public sealed class PdfViewModel(
 
   public void Cancel()
   {
+    // 空闲读取不属于可取消任务；保留预览代次及已收尾的未确认写入状态。
+    if (_inflight == 0 && _activeRun is null) return;
     if (Phase == "save") { Summary = "保存已进入不可取消的提交阶段，等待实际结果"; Changed(); return; }
     CancelActiveRun(); TerminalIssue = PdfIssueKind.Cancelled;
     Summary = IsSettling ? "已请求取消，等待后台实际收尾；已完成写入保留" : "已取消";
