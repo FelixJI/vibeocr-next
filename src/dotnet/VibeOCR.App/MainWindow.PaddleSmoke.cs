@@ -783,7 +783,8 @@ public sealed partial class MainWindow
     async Task<PdfWorkbenchState> ExportCopiesAsync(string directory, bool retry = false, bool cancel = false)
     {
       Directory.CreateDirectory(directory);
-      long previousGeneration = (await WaitForPaddlePdfAsync(_ => true, TimeSpan.FromSeconds(30))).ExportGeneration;
+      // 重试轮次会保留上一批的逐文件失败残留为 pdf.failed；快照不触终态守卫。
+      long previousGeneration = (await WaitForPaddlePdfAsync(_ => true, TimeSpan.FromSeconds(30), tolerateDocumentTerminalIssue: true)).ExportGeneration;
       await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("(() => { const e=document.querySelector('details.pdf-export'); if(!e.open)e.querySelector('summary').click(); })()");
       if (cancel)
       {
@@ -801,7 +802,7 @@ public sealed partial class MainWindow
       nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
       try { await CompletePaddlePickerAsync(dialog, directory, isFolder: true); }
       catch { CancelPaddleDialog(dialog); throw; }
-      PdfWorkbenchState result = await WaitForPaddlePdfAsync(state => state.ExportGeneration > previousGeneration && !state.Exporting && state.ExportItems?.Count == 2 && state.ExportItems.All(item => item.Status != "saving"), TimeSpan.FromMinutes(2));
+      PdfWorkbenchState result = await WaitForPaddlePdfAsync(state => state.ExportGeneration > previousGeneration && !state.Exporting && state.ExportItems?.Count == 2 && state.ExportItems.All(item => item.Status != "saving"), TimeSpan.FromMinutes(2), tolerateDocumentTerminalIssue: true);
       if (cancel)
       {
         string cancelled = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("(() => {window.__pdfSmokeCancelObserver?.disconnect();return window.__pdfSmokeCancelled===true;})()");
@@ -1018,7 +1019,7 @@ public sealed partial class MainWindow
   }
 
   private async Task<PdfWorkbenchState> WaitForPaddlePdfAsync(
-    Func<PdfWorkbenchState, bool> done, TimeSpan timeout)
+    Func<PdfWorkbenchState, bool> done, TimeSpan timeout, bool tolerateDocumentTerminalIssue = false)
   {
     using var cancellation = new CancellationTokenSource(timeout);
     PdfWorkbenchState? last = null;
@@ -1029,7 +1030,9 @@ public sealed partial class MainWindow
         PdfWorkbenchState state = (await application.BootstrapAsync(cancellation.Token))
           .States.Select(item => item.State).OfType<PdfWorkbenchState>().Single();
         last = state;
-        if (!state.IsBusy && state.StatusCode is
+        // 批量导出按逐项结果验收：单个文件失败会投影为文档级终态码且批量继续，
+        // 仅 ExportCopiesAsync 允许等待越过；其余等待保持快速失败。
+        if (!tolerateDocumentTerminalIssue && !state.IsBusy && state.StatusCode is
             "pdf.failed" or "pdf.backendUnavailable" or "pdf.outOfMemory" or "pdf.cancelled")
           throw new InvalidOperationException($"PDF operation stopped: {state.StatusCode}");
         if (done(state)) return state;

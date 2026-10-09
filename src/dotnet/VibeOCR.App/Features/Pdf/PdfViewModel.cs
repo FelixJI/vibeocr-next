@@ -33,6 +33,8 @@ public sealed class PdfViewModel(
   public bool IsSettling => _inflight > 0 || _requiresReopen;
   public long Revision { get; private set; }
   public IReadOnlyList<int?>? LastPageMapping { get; private set; }
+  /// <summary>页结构重建后、任何携带新结构的发布前同步触发；宿主选择集须在此完成重映射。</summary>
+  public event Action<PdfViewModel, IReadOnlyList<int?>>? PagesRemapped;
   public bool IsModified { get; private set; }
   public string Phase { get; private set; } = "idle";
   public int ProgressCurrent { get; private set; }
@@ -756,7 +758,7 @@ public sealed class PdfViewModel(
       PdfMutateResult result = await action(CancellationToken.None);
       if (SessionId != session || Revision != revision) return;
       LastPageMapping = mapping?.Invoke(result);
-      if (LastPageMapping is not null) RemapPages(LastPageMapping);
+      if (LastPageMapping is not null) { RemapPages(LastPageMapping); PagesRemapped?.Invoke(this, LastPageMapping); }
       onSuccess?.Invoke(); Revision++; IsModified = true;
       if (result.Diff is not null) ApplyDiff(result.Diff);
       else { PageCount = result.PageCount; await RefreshModelAsync(CancellationToken.None); }

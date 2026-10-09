@@ -3015,6 +3015,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     PdfViewModel model = pdfFactory();
     if (optionsLayout is not null) model.SetProcessingSettings(PdfProcessingSettings.Load(optionsLayout));
     model.PropertyChanged += OnPdfPropertyChanged;
+    model.PagesRemapped += OnPdfPagesRemapped;
     pdfWorkspace.Add(model);
     return model;
   }
@@ -3106,6 +3107,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     {
       bool wasActive = pdfWorkspace.Active == entry;
       model.PropertyChanged -= OnPdfPropertyChanged;
+      model.PagesRemapped -= OnPdfPagesRemapped;
       pdfWorkspace.Remove(entry); pdfContext.Value = pdfWorkspace.Active;
       PdfWorkbenchState retained = ActivePdf is { } previous ? await PdfStateAsync(previous, ct) : EmptyPdfState();
       string issue = PdfStatusCode(model);
@@ -3184,6 +3186,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       }
       await entry.Model.CloseSessionAsync(CancellationToken.None);
       entry.Model.PropertyChanged -= OnPdfPropertyChanged;
+      entry.Model.PagesRemapped -= OnPdfPagesRemapped;
       if (pdfWorkspace.Active == entry) ReleasePdfWindowResources();
       pdfWorkspace.Remove(entry); entry.CloseError = null; closed = true;
       pdfContext.Value = pdfWorkspace.Active;
@@ -3256,7 +3259,6 @@ public sealed class DesktopWorkbenchCommandHandler :
     if (pdf.IsSettling) return PdfState(pdf);
     long expected = command switch { InsertPdfBlankCommand value => value.Revision, InsertPdfFromCommand value => value.Revision, MovePdfPageCommand value => value.Revision, _ => -1 };
     if (expected != pdf.Revision) throw new InvalidOperationException("PDF structure command is stale.");
-    long revision = pdf.Revision;
     Interlocked.Increment(ref pdfGeneration);
     switch (command)
     {
@@ -3269,18 +3271,19 @@ public sealed class DesktopWorkbenchCommandHandler :
         int moving = order[move.FromIndex]; order.RemoveAt(move.FromIndex); order.Insert(move.ToIndex, moving);
         await pdf.ReorderAsync(order.ToArray(), ct); break;
     }
-    if (revision != pdf.Revision) MapPdfSelection(pdf.LastPageMapping);
     return await PdfStateAsync(pdf, ct);
   }
 
-  private void MapPdfSelection(IReadOnlyList<int?>? mapping)
+  private void OnPdfPagesRemapped(PdfViewModel model, IReadOnlyList<int?> mapping)
   {
-    if (mapping is not null)
-    {
-      int[] selected = mapping.Select((old, index) => (old, index)).Where(pair => pair.old.HasValue && selectedPdfPages.Contains(pair.old.Value)).Select(pair => pair.index).ToArray();
-      selectedPdfPages.Clear(); foreach (int index in selected) selectedPdfPages.Add(index);
-    }
-    ReleasePdfWindowResources();
+    // 重映射按 For(model) 归属：已移除 sender 完全 no-op；仅活跃文档的结构变更
+    // 回收其窗口资源（不依赖 AsyncLocal 环境），不触碰其他文档。mapping 非幂等，
+    // 仅此一处生效。
+    if (pdfWorkspace.For(model) is not { } entry) return;
+    HashSet<int> selection = entry.SelectedPages;
+    int[] selected = mapping.Select((old, index) => (old, index)).Where(pair => pair.old.HasValue && selection.Contains(pair.old.Value)).Select(pair => pair.index).ToArray();
+    selection.Clear(); foreach (int index in selected) selection.Add(index);
+    if (ReferenceEquals(pdfWorkspace.Active, entry)) ReleasePdfWindowResources(force: true);
   }
 
   private async Task<PdfWorkbenchState> DeletePdfPagesAsync(
@@ -3291,12 +3294,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     Interlocked.Increment(ref pdfGeneration);
     PdfViewModel viewModel = pdf;
     int[] pages = SelectedPdfPages(viewModel);
-    if (pages.Length > 0)
-    {
-      long revision = viewModel.Revision;
-      await viewModel.DeletePagesAsync(pages, cancellationToken);
-      if (revision != viewModel.Revision) MapPdfSelection(viewModel.LastPageMapping);
-    }
+    if (pages.Length > 0) await viewModel.DeletePagesAsync(pages, cancellationToken);
     return await PdfStateAsync(viewModel, cancellationToken);
   }
 
