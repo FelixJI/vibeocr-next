@@ -54,6 +54,9 @@ param(
     # 恢复模式：复用本脚本已创建的隔离根（与 ProductRoot/WorkRoot 互斥）。
     # 已有 health 证据不覆盖：passed 保留跳过，failed/blocked 保留并计入退出码。
     [string]$ResumeRoot,
+    # 显式新尝试保留旧 health/导出；仅复用已安装成功的合成环境。
+    [ValidatePattern("^[a-zA-Z0-9][a-zA-Z0-9-]{0,31}$")]
+    [string]$Attempt,
     [string[]]$Modes = @(
         'paddle_text', 'paddle_table', 'paddle_formula',
         'paddle_structure', 'paddle_document_vl'
@@ -66,6 +69,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Attempt -and -not $ResumeRoot) { throw 'Attempt 只能与 ResumeRoot 一起使用' }
+$attemptSuffix = if ($Attempt) { "-$Attempt" } else { '' }
 if ($ModeTimeoutMinutes -le 0 -or $InstallTimeoutMinutes -le 0) {
     throw 'All timeout parameters must be positive'
 }
@@ -284,7 +289,7 @@ try {
             $runs += @{ Fixture = 'table_wireless.png'; Suffix = '-wireless' }
         }
         foreach ($run in $runs) {
-            $phaseName = "paddle-$mode$($run.Suffix)"
+            $phaseName = "paddle-$mode$($run.Suffix)$attemptSuffix"
             $healthPath = Join-Path $smokeRoot "$phaseName.json"
             if (Test-Path -LiteralPath $healthPath -PathType Leaf) {
                 # 已有证据不覆盖：passed 保留跳过；failed/blocked 保留并计入退出码。
@@ -331,7 +336,7 @@ try {
         $inputMode = if ($inputKind -in @('pdf_text_layer', 'pdf_operations', 'pdf_editing', 'pdf_workspace')) { 'paddle_text' } elseif ($inputKind -eq 'pdf') { 'paddle_structure' } else { 'paddle_table' }
         $spec = $modeSpec[$inputMode]
         $fixtureName = if ($inputKind -eq 'pdf_workspace') { 'workspace-a/same.pdf' } elseif ($inputKind -eq 'pdf_operations') { 'document_orientation.pdf' } elseif ($inputKind -in @('pdf_text_layer', 'pdf_editing', 'pdf_workspace')) { 'document_scan.pdf' } elseif ($inputKind -eq 'pdf') { 'document_mixed.pdf' } else { $spec.Fixture }
-        $phaseName = "paddle-input-$inputKind"
+        $phaseName = "paddle-input-$inputKind$attemptSuffix"
         $healthPath = Join-Path $smokeRoot "$phaseName.json"
         if (Test-Path -LiteralPath $healthPath -PathType Leaf) {
             $health = Get-Content -LiteralPath $healthPath -Raw | ConvertFrom-Json
@@ -342,7 +347,7 @@ try {
                     throw "Input fixture missing: $needed"
                 }
             }
-            $inputExports = Join-Path $exports "input-$inputKind"
+            $inputExports = Join-Path $exports "input-$inputKind$attemptSuffix"
             New-Item -ItemType Directory -Path $inputExports -Force | Out-Null
             $health = Invoke-PaddlePhase @{
                 'VIBEOCR_PADDLE_SMOKE_PHASE' = 'inputs'
@@ -374,7 +379,10 @@ try {
         if ($inputKind -in @('pdf_editing', 'pdf_workspace') -and $health.state -eq 'passed') {
             Push-Location $repoRoot
             try {
-                $verificationArgs = @('--root', $smokeRoot)
+                $verificationArgs = @('--root', $smokeRoot, '--health', $healthPath)
+                if ($Attempt) {
+                    $verificationArgs += @('--output', (Join-Path $smokeRoot "$phaseName-export-verification.json"))
+                }
                 if ($inputKind -eq 'pdf_workspace') { $verificationArgs += '--workspace' }
                 uv run --frozen python (Join-Path $repoRoot 'scripts\verify_pdf_editing_export.py') @verificationArgs
                 if ($LASTEXITCODE -ne 0) { throw "pdf_editing export verification failed (exit $LASTEXITCODE)" }

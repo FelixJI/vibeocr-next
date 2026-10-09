@@ -26,11 +26,13 @@ def _norm(value: str) -> str:
     return "".join(value.split())
 
 
-def verify_export(root: Path) -> dict:
+def verify_export(root: Path, health_path: Path | None = None) -> dict:
     """读取隔离根内固定 health 证据并校验导出 PDF；通过返回报告 dict，
     任一校验失败抛 AssertionError/异常（调用方以非 0 退出）。"""
     root = root.resolve()
-    health = json.loads((root / HEALTH_NAME).read_text(encoding="utf-8-sig"))
+    health_path = (health_path or root / HEALTH_NAME).resolve()
+    assert health_path.parent == root, "health 必须在合成隔离根内"
+    health = json.loads(health_path.read_text(encoding="utf-8-sig"))
     assert health["state"] == "passed", f"health state={health.get('state')}"
     proof = health["evidence"]
     assert proof["input_kind"] == "pdf_editing", proof.get("input_kind")
@@ -114,12 +116,12 @@ def verify_export(root: Path) -> dict:
     }
 
 
-def verify_workspace_export(root: Path) -> dict:
+def verify_workspace_export(root: Path, health_path: Path | None = None) -> dict:
     """同一真实候选的工作区流程：检查全部成功副本及当前保存目标。"""
     root = root.resolve()
-    health = json.loads(
-        (root / "paddle-input-pdf_workspace.json").read_text(encoding="utf-8-sig")
-    )
+    health_path = (health_path or root / "paddle-input-pdf_workspace.json").resolve()
+    assert health_path.parent == root, "health 必须在合成隔离根内"
+    health = json.loads(health_path.read_text(encoding="utf-8-sig"))
     assert health["state"] == "passed", health.get("state")
     evidence = health["evidence"]
     assert evidence["input_kind"] == "pdf_workspace"
@@ -272,11 +274,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--workspace", action="store_true", help="校验 pdf_workspace 组合输出"
     )
+    parser.add_argument("--health", type=Path, help="隔离根内本次尝试的原始 health")
     args = parser.parse_args(argv)
     report = (
-        verify_workspace_export(args.root)
+        verify_workspace_export(args.root, args.health)
         if args.workspace
-        else verify_export(args.root)
+        else verify_export(args.root, args.health)
     )
     name = "pdf-workspace-export-verification.json" if args.workspace else REPORT_NAME
     report_path = (args.output or args.root / name).resolve()

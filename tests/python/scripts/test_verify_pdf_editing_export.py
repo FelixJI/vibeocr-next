@@ -235,3 +235,30 @@ def test_workspace_truncated_successful_copy_is_rejected(tmp_path: Path) -> None
     health_path.write_text(json.dumps(health, ensure_ascii=False), encoding="utf-8")
     with pytest.raises(AssertionError, match="完整校正"):
         verify_workspace_export(root)
+
+
+@pytest.mark.parametrize("workspace", [False, True])
+def test_attempt_health_keeps_prior_failure(tmp_path: Path, workspace: bool) -> None:
+    from scripts.verify_pdf_editing_export import verify_workspace_export
+
+    root = (
+        _workspace_root(tmp_path)
+        if workspace
+        else _make_root(tmp_path, "attempt", GOOD_LINES)
+    )
+    verify = verify_workspace_export if workspace else verify_export
+    name = (
+        "paddle-input-pdf_workspace.json"
+        if workspace
+        else "paddle-input-pdf_editing.json"
+    )
+    original = root / name
+    attempt = root / "attempt-new.json"
+    attempt.write_bytes(original.read_bytes())
+    original.write_text('{"state": "failed"}', encoding="utf-8")
+    with pytest.raises(AssertionError):
+        verify(root)
+    verify(root, attempt)
+    assert json.loads(original.read_text(encoding="utf-8"))["state"] == "failed"
+    with pytest.raises(AssertionError, match="合成隔离根"):
+        verify(root, tmp_path / "outside.json")
