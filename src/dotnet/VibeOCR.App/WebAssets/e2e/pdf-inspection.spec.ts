@@ -146,3 +146,128 @@ test("PDF HD inspection and correction remain reachable at 640px", async ({
     fullPage: true,
   });
 });
+
+test("same named PDF documents bind commands and restore only their own draft at 640px", async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 640, height: 768 });
+  const a = "11111111111111111111111111111111";
+  const b = "22222222222222222222222222222222";
+  await page.route("**/workspace-inspect.json", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        page: 0,
+        ocr_blocks: [
+          { index: 2, text: "OWNED TEXT202", bbox: [100, 200, 900, 300] },
+        ],
+      }),
+    }),
+  );
+  await page.route("**/workspace-hd.svg", (route) =>
+    route.fulfill({
+      contentType: "image/svg+xml",
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="2400"><rect width="1800" height="2400" fill="white"/></svg>',
+    }),
+  );
+  const state = {
+    documentId: a,
+    sessionId: "worker-a",
+    revision: 8,
+    pageCount: 75,
+    selectedPage: 0,
+    selectedPages: [0],
+    windowStart: 0,
+    isModified: true,
+    canCopyExport: true,
+    canInspectPage: true,
+    canCorrectText: true,
+    pageInspectStatusCode: "pdf.inspect.ready",
+    documents: [
+      { documentId: a, name: "same.pdf", isModified: true },
+      { documentId: b, name: "same.pdf", isModified: false },
+    ],
+    pagePreview: {
+      url: "/workspace-hd.svg",
+      mediaType: "image/svg+xml",
+      byteLength: 130,
+    },
+    pageInspect: {
+      url: "/workspace-inspect.json",
+      mediaType: "application/json",
+      byteLength: 120,
+    },
+    pages: Array.from({ length: 64 }, (_, index) => ({
+      index,
+      statusCode: "pdf.page.done",
+      detected: true,
+      hasTextLayer: index === 0,
+      addedThisSession: index === 0,
+    })),
+  };
+  await mountHost(page, {
+    ...snapshot,
+    route: "pdf",
+    features: { ...snapshot.features, pdf: state },
+  });
+  await page.getByRole("button", { name: /OCR.*OWNED TEXT202/ }).click();
+  await page.getByLabel("校正文字").fill("ONLY A DRAFT202");
+  await page.locator(".pdf-documents button").nth(1).click();
+  await expectCommand(page, {
+    scope: "pdf",
+    action: "activateDocument",
+    arguments: { documentId: b, documentRevision: 8 },
+  });
+  await sendState(page, "pdf", {
+    ...state,
+    documentId: b,
+    sessionId: "worker-b",
+    revision: 3,
+    pageCount: 2,
+    pages: state.pages.slice(0, 2),
+    isModified: false,
+  });
+  await expect(page.getByLabel("校正文字")).toHaveCount(0);
+  await page.getByRole("button", { name: "保存", exact: true }).click();
+  await expectCommand(page, {
+    scope: "pdf",
+    action: "save",
+    arguments: { documentId: b, documentRevision: 3 },
+  });
+  await sendState(page, "pdf", {
+    ...state,
+    previewPosition: {
+      revision: 8,
+      page: 0,
+      block: 2,
+      draft: "ONLY A DRAFT202",
+      zoom: 1.5,
+    },
+  });
+  await expect(page.getByLabel("校正文字")).toHaveValue("ONLY A DRAFT202");
+  await page.locator("details.pdf-export summary").click();
+  await expect(
+    page.getByText(/导出副本保留原文档修改状态和保存目标/),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "选择目录并导出" }).click();
+  await expectCommand(page, {
+    scope: "pdf",
+    action: "exportDocuments",
+    arguments: {
+      documentId: a,
+      documentRevision: 8,
+      modifiedOnly: true,
+      retry: false,
+    },
+  });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth > innerWidth,
+    ),
+  ).toBe(false);
+  await page.locator(".pdf-documents").scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: testInfo.outputPath("pdf-workspace-640.png"),
+    fullPage: true,
+  });
+});

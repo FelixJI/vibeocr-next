@@ -90,8 +90,21 @@ public sealed class DesktopWorkbenchCommandHandler :
   private readonly List<string> generatedFiles = [];
   private readonly Dictionary<string, string> resourceFiles = new(StringComparer.Ordinal);
   private readonly HashSet<Task> backgroundOperations = [];
+  private readonly HashSet<Task> pdfBackgroundOperations = [];
+  private bool pdfExitReview;
+  private PdfDocumentEntry? pdfClosingPreviewDrain;
   private readonly CancellationTokenSource sceneRecognitionLifetime = new();
-  private readonly HashSet<int> selectedPdfPages = [];
+  private readonly PdfWorkspace pdfWorkspace = new();
+  // Capture document ownership at command entry; the async flow retains it across pickers/awaits.
+  private readonly AsyncLocal<PdfDocumentEntry?> pdfContext = new();
+  private PdfDocumentEntry? PdfEntry => pdfContext.Value ?? pdfWorkspace.Active;
+  private PdfViewModel? ActivePdf => pdfWorkspace.Active?.Model;
+  private readonly HashSet<int> emptyPdfSelection = [];
+  private HashSet<int> selectedPdfPages => PdfEntry?.SelectedPages ?? emptyPdfSelection;
+  private readonly Func<PdfDocumentEntry, Task<PdfCloseDecision>> confirmPdfClose;
+  private readonly Func<Task<string?>>? pickPdfSavePath;
+  private readonly Func<Task<string?>>? pickPdfFolder;
+  public IReadOnlyList<PdfDocumentEntry> PdfDocuments => pdfWorkspace.Documents;
   private readonly Dictionary<int, WorkbenchResourceReference> pdfThumbnails = [];
   // 当前页检查/高清预览资源：单页缓存，键含 session/revision/page 与渲染设置；换页/关
   // 闭/修订变更时显式 revoke（ReleaseResource = broker.Revoke + 删除发布文件）。
@@ -101,6 +114,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private string? pdfPageResourceKey;
   private long pdfPageResourceGeneration;
   private string pdfPageInspectStatus = "pdf.inspect.none";
+  private readonly Dictionary<string, IReadOnlyList<WorkbenchResourceReference>> structuredResourceChildren = new(StringComparer.Ordinal);
   private readonly Dictionary<string, string> structuredResourceFiles = new(StringComparer.Ordinal);
   private readonly Dictionary<Guid, (RecognizeResponse Result, WorkbenchResourceReference Reference)> batchStructured = [];
   private readonly Dictionary<int, (RecognizeResponse Result, WorkbenchResourceReference Reference)> pdfStructured = [];
@@ -138,20 +152,21 @@ public sealed class DesktopWorkbenchCommandHandler :
   private BatchViewModel? batch;
   private string? batchTaskEngine;
   private bool batchExportIncomplete;
-  private string? pdfTaskEngine;
+  private string? pdfTaskEngine { get => PdfEntry?.TaskEngine; set { if (PdfEntry is { } entry) entry.TaskEngine = value; } }
   private QrCodeViewModel? qrCode;
-  private PdfViewModel? pdf;
+  private PdfViewModel? pdf { get => PdfEntry?.Model; set { if (value is not null) { var entry = pdfWorkspace.For(value) ?? pdfWorkspace.Add(value); pdfContext.Value = entry; } } }
   private SettingsViewModel? settings;
   private WorkbenchTheme theme = WorkbenchTheme.System;
   private WorkbenchResourceReference? generatedQrResource;
   private long batchGeneration;
   private long pdfGeneration;
+  private long pdfWindowGeneration;
   private long qrCodeGeneration;
   private long publishedQrRevision;
   private string? qrPreviewPath;
   private long updateGeneration;
   private int batchWindowStart;
-  private int pdfWindowStart;
+  private int pdfWindowStart { get => PdfEntry?.WindowStart ?? 0; set { if (PdfEntry is { } entry) entry.WindowStart = value; } }
   private int disposed;
 
   internal DesktopWorkbenchCommandHandler(
@@ -175,7 +190,10 @@ public sealed class DesktopWorkbenchCommandHandler :
       IReadOnlyList<WorkbenchExclusionBox>>? pinScreenshot = null,
     ShellActionDispatcher? shellActions = null,
     PortableLayout? optionsLayout = null,
-    IStructuredClipboardPlatform? structuredClipboard = null)
+    IStructuredClipboardPlatform? structuredClipboard = null,
+    Func<PdfDocumentEntry, Task<PdfCloseDecision>>? confirmPdfClose = null,
+    Func<Task<string?>>? pickPdfSavePath = null, Func<Task<string?>>? pickPdfFolder = null,
+    Func<string, Task<bool>>? flushPdfPreview = null)
   {
     this.recognitionFactory = recognitionFactory ??
       throw new ArgumentNullException(nameof(recognitionFactory));
@@ -215,8 +233,12 @@ public sealed class DesktopWorkbenchCommandHandler :
     if (shellActions is not null)
       shellActions.ToolbarStateChanged += OnToolbarStateChanged;
     this.optionsLayout = optionsLayout;
+    this.confirmPdfClose = confirmPdfClose ?? (_ => Task.FromResult(PdfCloseDecision.Cancel));
+    this.pickPdfSavePath = pickPdfSavePath; this.pickPdfFolder = pickPdfFolder;
+    this.flushPdfPreview = flushPdfPreview;
   }
 
+  private readonly Func<string, Task<bool>>? flushPdfPreview;
   private readonly Func<string?> supervisorInstanceId;
   private readonly Func<RecognitionViewModel> textLayerRecognitionFactory;
   private string pinnedServiceInstance = string.Empty;
@@ -227,7 +249,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     RecognitionState(false, "recognition.ready"),
     ImageEditState(false, "recognition.ready"),
     CurrentBatchState(),
-    new PdfWorkbenchState(false, "pdf.empty", 0, -1),
+    EmptyPdfState(),
     new QrCodeWorkbenchState(false, "qrcode.ready", [], null),
     settings is null ? SettingsShellState() : SettingsState(settings),
     new UpdateWorkbenchState(false, "update.current", null, false),
@@ -300,9 +322,37 @@ public sealed class DesktopWorkbenchCommandHandler :
     CancellationToken cancellationToken)
   {
     ArgumentNullException.ThrowIfNull(command);
-    cancellationToken.ThrowIfCancellationRequested();
+    PdfDocumentEntry? previousContext = pdfContext.Value;
+    // 入口门在既有 try/catch 错误边界内执行：预期操作冲突（关闭/切换/修订/
+    // 退出确认）按既有 WorkbenchCommandOutcome 回执拒绝，不再穿透桥接层
+    // 触发全局 WebView 恢复；finally 同步恢复 pdfContext。
     try
     {
+      if (command is PdfBoundCommand bound)
+      {
+        PdfDocumentEntry? entry = pdfWorkspace.Find(bound.DocumentId);
+        if (entry is null)
+        {
+          if (bound.DocumentId != pdfWorkspace.EmptyDocumentId || pdfWorkspace.Active is not null ||
+            bound.Command is not (SetPdfTaskEngineCommand or SetPdfProcessingSettingsCommand) || pdfExitReview)
+            throw new InvalidOperationException("文档已关闭");
+        }
+        else
+        {
+          // 纯预览状态（缩放/滚动/草稿）允许写入已知的非活动条目：交互中的
+          // 最后位置/草稿不因切换文档丢失；未知/关闭中的文档仍在上面拒绝。
+          if (bound.Command is not (ActivatePdfDocumentCommand or SetPdfPreviewPositionCommand) && entry != pdfWorkspace.Active)
+            throw new InvalidOperationException("活动文档已变化，请重新操作");
+          if ((pdfExitReview || pdfWorkspace.Documents.Any(item => item.Closing)) &&
+            !(bound.Command is SetPdfPreviewPositionCommand && ReferenceEquals(pdfClosingPreviewDrain, entry)))
+            throw new InvalidOperationException("文档正在关闭确认中");
+          if (bound.Revision is { } expected && expected != entry.Model.Revision && bound.Command is not (ActivatePdfDocumentCommand or CancelPdfCommand or CancelPdfExportCommand or SetPdfPreviewPositionCommand))
+            throw new InvalidOperationException("文档修订已变化，请重新操作");
+        }
+        pdfContext.Value = entry; command = bound.Command;
+      }
+      else pdfContext.Value = pdfWorkspace.Active;
+      cancellationToken.ThrowIfCancellationRequested();
       WorkbenchState? state = command switch
       {
         SelectRecognitionImageCommand => StartRecognition(
@@ -427,6 +477,11 @@ public sealed class DesktopWorkbenchCommandHandler :
         SetBatchWindowCommand window => await SetBatchWindowAsync(window, cancellationToken),
         SetBatchTaskEngineCommand taskEngine => SetBatchTaskEngine(taskEngine),
         SetPdfTaskEngineCommand pdfTaskEngine => SetPdfTaskEngine(pdfTaskEngine),
+        ActivatePdfDocumentCommand => await ActivatePdfAsync(PdfEntry!, cancellationToken),
+        SavePdfAsCommand => await SavePdfAsync(cancellationToken, true),
+        ExportPdfDocumentsCommand export => await ExportPdfDocumentsAsync(export, cancellationToken),
+        CancelPdfExportCommand => CancelPdfExport(),
+        SetPdfPreviewPositionCommand position => SetPdfPreviewPosition(position),
         OpenPdfCommand => await OpenPdfAsync(cancellationToken),
         OpenDroppedPdfCommand dropped => await OpenDroppedPdfAsync(
           dropped,
@@ -574,6 +629,7 @@ public sealed class DesktopWorkbenchCommandHandler :
         CopyDiagnosticsCommand => await CopyDiagnosticsAsync(cancellationToken),
         _ => throw new InvalidOperationException("Unsupported desktop workbench command."),
       };
+      if (state is PdfWorkbenchState && ActivePdf is { } active && !ReferenceEquals(pdf, active)) state = PdfState(active);
       // A null state was already published before its background operation started.
       return new WorkbenchCommandOutcome(state is null ? [] : [state], null);
     }
@@ -656,6 +712,7 @@ public sealed class DesktopWorkbenchCommandHandler :
           true,
           "workbench.error.desktopCommandFailed"));
     }
+    finally { pdfContext.Value = previousContext; }
   }
 
   private async Task<RecognitionWorkbenchState> CopyAnnotatedImageAsync(
@@ -2914,7 +2971,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private void SynchronizePdfMode(bool requireUsable = false)
   {
     RecognitionSelectionSnapshot? snapshot = settings?.RecognitionSelection;
-    if (settings is not null) pdf?.SetInspectionCapabilities(snapshot?.Catalog.Health.Capabilities ?? []);
+    if (settings is not null) foreach (PdfDocumentEntry entry in pdfWorkspace.Documents) entry.Model.SetInspectionCapabilities(snapshot?.Catalog.Health.Capabilities ?? []);
     if (pdf is null || snapshot?.Catalog.SupportsRecognitionModes is not true)
     {
       if (requireUsable) EnsureUsableModeOverrideOrThrow(snapshot?.Catalog, pdfTaskEngine);
@@ -2958,11 +3015,13 @@ public sealed class DesktopWorkbenchCommandHandler :
     PdfViewModel model = pdfFactory();
     if (optionsLayout is not null) model.SetProcessingSettings(PdfProcessingSettings.Load(optionsLayout));
     model.PropertyChanged += OnPdfPropertyChanged;
+    model.PagesRemapped += OnPdfPagesRemapped;
+    pdfWorkspace.Add(model);
     return model;
   }
   private void OnPdfPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
   {
-    if (args.PropertyName is null && pdf is not null) StateChanged?.Invoke(PdfState(pdf));
+    if (args.PropertyName is null && sender is PdfViewModel && ActivePdf is { } active) StateChanged?.Invoke(PdfState(active));
   }
   private PdfWorkbenchState? SetPdfProcessingSettings(SetPdfProcessingSettingsCommand command)
   {
@@ -2983,10 +3042,10 @@ public sealed class DesktopWorkbenchCommandHandler :
     pdfPageResourceKey = key;
     pdfPageInspectStatus = "pdf.inspect.loading";
     long generation = Volatile.Read(ref pdfPageResourceGeneration);
-    return PublishStartThenTrack(PdfState(viewModel), async () =>
+    return PublishPdfStartThenTrack(PdfState(viewModel), async () =>
     {
       await EnsurePdfPageResourcesAsync(viewModel, CancellationToken.None);
-      if (ReferenceEquals(pdf, viewModel) && PdfPageResourceKey(viewModel) == key
+      if (ReferenceEquals(ActivePdf, viewModel) && PdfPageResourceKey(viewModel) == key
         && generation == Volatile.Read(ref pdfPageResourceGeneration))
         StateChanged?.Invoke(PdfState(viewModel));
     });
@@ -3002,36 +3061,74 @@ public sealed class DesktopWorkbenchCommandHandler :
       throw new InvalidOperationException("文档修订已变化，请重新确认删除范围。");
     int[] pages = command.Pages.ToArray();
     long generation = Interlocked.Increment(ref pdfGeneration);
-    return PublishStartThenTrack(PdfState(pdf) with { IsBusy = true }, async () => {
+    return PublishPdfStartThenTrack(PdfState(pdf) with { IsBusy = true }, async () => {
       await pdf.DeleteTextLayersAsync(pages, ct);
       if (generation == Volatile.Read(ref pdfGeneration))
       {
-        pdfThumbnails.Clear(); pdfStructured.Clear();
+        ReleasePdfWindowResources();
         StateChanged?.Invoke(await PdfStateAsync(pdf, CancellationToken.None));
       }
     });
   }
 
-  private async Task<PdfWorkbenchState> OpenPdfAsync(CancellationToken cancellationToken)
+  private async Task<PdfWorkbenchState> OpenPdfAsync(CancellationToken ct)
   {
+    // 退出审阅中拒绝新的打开入口：新会话不会进入退出快照，未经确认即被留下。
+    if (pdfExitReview || pdfWorkspace.Documents.Any(entry => entry.Closing)) throw new InvalidOperationException("正在关闭确认中，不能打开新 PDF。");
     pdf ??= CreatePdfViewModel();
-    Interlocked.Increment(ref pdfGeneration);
-    await pdf.OpenAsync(cancellationToken);
-    ResetPdfSelection(selectFirstPage: true);
-    return await PdfStateAsync(pdf, cancellationToken);
+    string? path = await pdf.PickFileAsync(ct);
+    return path is null ? PdfState(ActivePdf ?? pdf) : await AddPdfPathAsync(path, ct);
   }
-
-  private async Task<PdfWorkbenchState> OpenDroppedPdfAsync(
-    OpenDroppedPdfCommand command,
-    CancellationToken cancellationToken)
+  private Task<PdfWorkbenchState> OpenDroppedPdfAsync(OpenDroppedPdfCommand command, CancellationToken ct) => AddPdfPathAsync(command.Path, ct);
+  private async Task<PdfWorkbenchState> AddPdfPathAsync(string path, CancellationToken ct)
   {
-    pdf ??= CreatePdfViewModel();
+    // 实际加入入口重查：退出审阅开始前已打开的 picker 迟到返回同样拒绝。
+    if (pdfExitReview || pdfWorkspace.Documents.Any(entry => entry.Closing)) throw new InvalidOperationException("正在关闭确认中，不能打开新 PDF。");
+    // 在实际切换点排空：picker 等待期间继续输入、原生拖入和重复打开均走这里。
+    PdfDocumentEntry? leaving = pdfWorkspace.Active;
+    if (leaving is { Model.HasRemoteSession: true } && flushPdfPreview is not null)
+    {
+      if (!await flushPdfPreview(leaving.Id) || pdfWorkspace.Active != leaving || pdfExitReview || pdfWorkspace.Documents.Any(entry => entry.Closing))
+        throw new InvalidOperationException("最后的预览草稿未确认，保留当前文档，请重试。");
+    }
+    path = Path.GetFullPath(path);
+    if (pdfWorkspace.FindTarget(path) is { } duplicate) return await ActivatePdfAsync(duplicate, ct);
+    if (pdfWorkspace.Documents.Count >= PdfWorkspace.MaxDocuments && pdf is not { HasRemoteSession: false, IsSettling: false }) throw new InvalidOperationException("最多同时打开 16 份 PDF，请先关闭文档。");
+    ActivePdf?.TrimResultCache(0, 0);
+    ReleasePdfWindowResources(force: true);
+    PdfViewModel model = pdf is { HasRemoteSession: false, IsSettling: false } empty ? empty : CreatePdfViewModel();
+    PdfDocumentEntry entry = pdfWorkspace.For(model)!;
+    entry.RequestedPath = path;
+    pdfWorkspace.Activate(entry); pdfContext.Value = entry;
     Interlocked.Increment(ref pdfGeneration);
-    await pdf.OpenPathAsync(command.Path, cancellationToken);
+    try { await model.OpenPathAsync(path, ct); }
+    catch (Exception error) { entry.CloseError = error.Message; AppLog.Error("PDF open failed", error); }
+    if (!model.HasRemoteSession)
+    {
+      bool wasActive = pdfWorkspace.Active == entry;
+      model.PropertyChanged -= OnPdfPropertyChanged;
+      model.PagesRemapped -= OnPdfPagesRemapped;
+      pdfWorkspace.Remove(entry); pdfContext.Value = pdfWorkspace.Active;
+      PdfWorkbenchState retained = ActivePdf is { } previous ? await PdfStateAsync(previous, ct) : EmptyPdfState();
+      string issue = PdfStatusCode(model);
+      return wasActive ? retained with { StatusCode = issue == "pdf.empty" ? "pdf.failed" : issue, Summary = "打开未完成，其他文档保持原状态。" } : retained;
+    }
+    if (!model.HasSession) entry.CloseError = model.Summary;
     ResetPdfSelection(selectFirstPage: true);
-    return await PdfStateAsync(pdf, cancellationToken);
+    return await PdfStateAsync(model, ct);
   }
-
+  private async Task<PdfWorkbenchState> ActivatePdfAsync(PdfDocumentEntry entry, CancellationToken ct)
+  {
+    if (pdfWorkspace.Active != entry)
+    {
+      ActivePdf?.TrimResultCache(0, 0);
+      ReleasePdfWindowResources(force: true);
+      Interlocked.Increment(ref pdfGeneration);
+      pdfWorkspace.Activate(entry);
+    }
+    pdfContext.Value = entry;
+    return await PdfStateAsync(entry.Model, ct);
+  }
   private async Task<PdfWorkbenchState> RotatePdfAsync(
     RotatePdfCommand command,
     CancellationToken cancellationToken)
@@ -3044,20 +3141,83 @@ public sealed class DesktopWorkbenchCommandHandler :
     if (pages.Length > 0)
     {
       await viewModel.RotateAsync(pages, command.Degrees, cancellationToken);
-      pdfThumbnails.Clear();
-      pdfStructured.Clear();
+      ReleasePdfWindowResources();
     }
     return await PdfStateAsync(viewModel, cancellationToken);
   }
 
   private async Task<PdfWorkbenchState> ClosePdfAsync(CancellationToken ct)
   {
-    pdf ??= CreatePdfViewModel();
-    Interlocked.Increment(ref pdfGeneration);
-    await pdf.CloseSessionAsync(ct);
-    ResetPdfSelection(selectFirstPage: false);
-    ReleasePdfPageResources();
-    return PdfState(pdf);
+    PdfDocumentEntry? entry = PdfEntry;
+    if (entry is null) return EmptyPdfState();
+    if (await ClosePdfEntryAsync(entry, ct) && ActivePdf is { } active) return await PdfStateAsync(active, ct);
+    return ActivePdf is { } remaining ? PdfState(remaining) : EmptyPdfState();
+  }
+  private async Task<bool> ClosePdfEntryAsync(PdfDocumentEntry entry, CancellationToken ct)
+  {
+    if (pdfWorkspace.Documents.Any(item => item.Closing) || pdfWorkspace.Exporting) return false;
+    entry.Closing = true;
+    PdfPreviewPosition? discardedDraft = null;
+    bool closed = false;
+    try
+    {
+      await entry.Model.CancelAndSettleAsync();
+      if (entry == pdfWorkspace.Active && entry.Model.HasRemoteSession && flushPdfPreview is not null)
+      {
+        pdfClosingPreviewDrain = entry;
+        try { if (!await flushPdfPreview(entry.Id)) return false; }
+        finally { pdfClosingPreviewDrain = null; }
+      }
+      if (entry.HasUnsubmittedDraft)
+      {
+        // 保存只包含已提交 PDF；必须先明确放弃局部草稿，不能伪称保存了草稿。
+        if (await confirmPdfClose(entry) != PdfCloseDecision.Discard) return false;
+        discardedDraft = entry.Preview;
+        entry.Preview = entry.Preview with { Block = null, Draft = "", OriginalText = null };
+      }
+      if (entry.Model.IsModified)
+      {
+        PdfCloseDecision decision = await confirmPdfClose(entry);
+        if (decision == PdfCloseDecision.Cancel) return false;
+        if (decision == PdfCloseDecision.Save)
+        {
+          if (entry.Model.FilePath is not { } target || !(await entry.Model.SaveAsync(target, ct)).Saved) return false;
+        }
+      }
+      await entry.Model.CloseSessionAsync(CancellationToken.None);
+      entry.Model.PropertyChanged -= OnPdfPropertyChanged;
+      entry.Model.PagesRemapped -= OnPdfPagesRemapped;
+      if (pdfWorkspace.Active == entry) ReleasePdfWindowResources();
+      pdfWorkspace.Remove(entry); entry.CloseError = null; closed = true;
+      pdfContext.Value = pdfWorkspace.Active;
+      Interlocked.Increment(ref pdfGeneration);
+      return true;
+    }
+    catch (Exception error) { entry.CloseError = error.Message; return false; }
+    finally
+    {
+      // 取消后续模型确认或远端关闭失败时保留草稿；仅关闭成功才真正丢弃。
+      if (!closed && discardedDraft is not null) entry.Preview = discardedDraft;
+      entry.Closing = false;
+      if (ActivePdf is { } active) StateChanged?.Invoke(PdfState(active));
+    }
+  }
+  public async Task<bool> RequestCloseAllPdfAsync()
+  {
+    if (pdfExitReview) return false;
+    pdfExitReview = true;
+    try
+    {
+      pdfWorkspace.CancelExport();
+      foreach (PdfDocumentEntry entry in pdfWorkspace.Documents) entry.Model.Cancel();
+      Task[] operations; lock (pdfBackgroundOperations) operations = pdfBackgroundOperations.ToArray();
+      await Task.WhenAll(operations);
+      await Task.WhenAll(pdfWorkspace.Documents.Select(entry => entry.Model.WaitForSettlementAsync()));
+      foreach (PdfDocumentEntry entry in pdfWorkspace.Documents.ToArray())
+        if (!await ClosePdfEntryAsync(entry, CancellationToken.None)) return false;
+      return true;
+    }
+    finally { pdfExitReview = false; }
   }
 
   private int[] PdfRange(PdfViewModel model, string range) => range == "all"
@@ -3069,7 +3229,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     if (pdf.IsSettling) return PdfState(pdf);
     Interlocked.Increment(ref pdfGeneration);
     await pdf.OrientPagesAsync(PdfRange(pdf, command.Range), command.Landscape, ct);
-    pdfThumbnails.Clear(); pdfStructured.Clear();
+    ReleasePdfWindowResources();
     return await PdfStateAsync(pdf, ct);
   }
 
@@ -3078,16 +3238,16 @@ public sealed class DesktopWorkbenchCommandHandler :
     pdf ??= CreatePdfViewModel();
     if (pdf.IsSettling) return PdfState(pdf);
     PdfViewModel model = pdf; string? session = model.SessionId; long revision = model.Revision;
-    if (!await EnsureSelectionLoadedForSubmitAsync(ct) || !ReferenceEquals(pdf, model) || model.SessionId != session || model.Revision != revision || model.IsSettling)
+    if (!await EnsureSelectionLoadedForSubmitAsync(ct) || !ReferenceEquals(ActivePdf, model) || model.SessionId != session || model.Revision != revision || model.IsSettling)
       return PdfState(model);
     SynchronizePdfMode();
     int[] pages = PdfRange(model, command.Range);
     long generation = Interlocked.Increment(ref pdfGeneration);
-    return PublishStartThenTrack(PdfState(model) with { IsBusy = true }, async () => {
+    return PublishPdfStartThenTrack(PdfState(model) with { IsBusy = true }, async () => {
       await model.CorrectOrientationAsync(pages, ct);
       if (generation == Volatile.Read(ref pdfGeneration))
       {
-        pdfThumbnails.Clear(); pdfStructured.Clear();
+        ReleasePdfWindowResources();
         StateChanged?.Invoke(await PdfStateAsync(model, CancellationToken.None));
       }
     });
@@ -3099,7 +3259,6 @@ public sealed class DesktopWorkbenchCommandHandler :
     if (pdf.IsSettling) return PdfState(pdf);
     long expected = command switch { InsertPdfBlankCommand value => value.Revision, InsertPdfFromCommand value => value.Revision, MovePdfPageCommand value => value.Revision, _ => -1 };
     if (expected != pdf.Revision) throw new InvalidOperationException("PDF structure command is stale.");
-    long revision = pdf.Revision;
     Interlocked.Increment(ref pdfGeneration);
     switch (command)
     {
@@ -3112,18 +3271,19 @@ public sealed class DesktopWorkbenchCommandHandler :
         int moving = order[move.FromIndex]; order.RemoveAt(move.FromIndex); order.Insert(move.ToIndex, moving);
         await pdf.ReorderAsync(order.ToArray(), ct); break;
     }
-    if (revision != pdf.Revision) MapPdfSelection(pdf.LastPageMapping);
     return await PdfStateAsync(pdf, ct);
   }
 
-  private void MapPdfSelection(IReadOnlyList<int?>? mapping)
+  private void OnPdfPagesRemapped(PdfViewModel model, IReadOnlyList<int?> mapping)
   {
-    if (mapping is not null)
-    {
-      int[] selected = mapping.Select((old, index) => (old, index)).Where(pair => pair.old.HasValue && selectedPdfPages.Contains(pair.old.Value)).Select(pair => pair.index).ToArray();
-      selectedPdfPages.Clear(); foreach (int index in selected) selectedPdfPages.Add(index);
-    }
-    pdfThumbnails.Clear(); pdfStructured.Clear();
+    // 重映射按 For(model) 归属：已移除 sender 完全 no-op；仅活跃文档的结构变更
+    // 回收其窗口资源（不依赖 AsyncLocal 环境），不触碰其他文档。mapping 非幂等，
+    // 仅此一处生效。
+    if (pdfWorkspace.For(model) is not { } entry) return;
+    HashSet<int> selection = entry.SelectedPages;
+    int[] selected = mapping.Select((old, index) => (old, index)).Where(pair => pair.old.HasValue && selection.Contains(pair.old.Value)).Select(pair => pair.index).ToArray();
+    selection.Clear(); foreach (int index in selected) selection.Add(index);
+    if (ReferenceEquals(pdfWorkspace.Active, entry)) ReleasePdfWindowResources(force: true);
   }
 
   private async Task<PdfWorkbenchState> DeletePdfPagesAsync(
@@ -3134,12 +3294,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     Interlocked.Increment(ref pdfGeneration);
     PdfViewModel viewModel = pdf;
     int[] pages = SelectedPdfPages(viewModel);
-    if (pages.Length > 0)
-    {
-      long revision = viewModel.Revision;
-      await viewModel.DeletePagesAsync(pages, cancellationToken);
-      if (revision != viewModel.Revision) MapPdfSelection(viewModel.LastPageMapping);
-    }
+    if (pages.Length > 0) await viewModel.DeletePagesAsync(pages, cancellationToken);
     return await PdfStateAsync(viewModel, cancellationToken);
   }
 
@@ -3172,7 +3327,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     }
     SynchronizePdfMode(requireUsable: true);
     long generation = Interlocked.Increment(ref pdfGeneration);
-    return PublishStartThenTrack(
+    return PublishPdfStartThenTrack(
       PdfState(pdf) with { IsBusy = true, StatusCode = PdfStatusCode(pdf, isBusy: true) },
       () => CompletePdfOcrAsync(generation, cancellationToken, add));
   }
@@ -3186,7 +3341,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       PdfWorkbenchState state = await OcrPdfPagesAsync(cancellationToken, add);
       if (generation == Volatile.Read(ref pdfGeneration))
       {
-        pdfThumbnails.Clear(); pdfStructured.Clear();
+        ReleasePdfWindowResources();
         StateChanged?.Invoke((await PdfStateAsync(pdf!, cancellationToken)) with
         {
           StatusCode = state.StatusCode,
@@ -3210,25 +3365,69 @@ public sealed class DesktopWorkbenchCommandHandler :
     }
   }
 
-  private async Task<PdfWorkbenchState> SavePdfAsync(
-    CancellationToken cancellationToken)
+  private async Task<PdfWorkbenchState> SavePdfAsync(CancellationToken ct, bool saveAs = false)
   {
-    pdf ??= CreatePdfViewModel();
-    var picker = new FileSavePicker
+    PdfDocumentEntry entry = PdfEntry ?? throw new InvalidOperationException("请先打开 PDF");
+    string? session = entry.Model.SessionId; long revision = entry.Model.Revision;
+    string? path = entry.Model.FilePath;
+    if (saveAs)
     {
-      SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
-      SuggestedFileName = "vibeocr-output",
-    };
-    picker.FileTypeChoices.Add("PDF", [".pdf"]);
-    WinRT.Interop.InitializeWithWindow.Initialize(picker, windowHandle());
-    StorageFile? file = await picker.PickSaveFileAsync();
-    if (file is not null)
-    {
-      await pdf.SaveAsync(file.Path, cancellationToken);
+      if (pickPdfSavePath is not null) path = await pickPdfSavePath();
+      else
+      {
+        var picker = new FileSavePicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
+          SuggestedFileName = Path.GetFileNameWithoutExtension(path ?? "document") };
+        picker.FileTypeChoices.Add("PDF", [".pdf"]);
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, windowHandle());
+        path = (await picker.PickSaveFileAsync())?.Path;
+      }
+      if (path is null) return PdfState(entry.Model);
+      if (pdfWorkspace.FindTarget(path) is { } owner && owner != entry) throw new InvalidOperationException("目标属于另一打开文档，请选择其他路径。");
     }
-    return PdfState(pdf);
+    if (path is null) return PdfState(entry.Model);
+    if (entry.Model.SessionId != session || entry.Model.Revision != revision || entry.Closing) throw new InvalidOperationException("保存选择期间文档已变化，请重新保存。");
+    if (saveAs) pdfWorkspace.ReserveSaveAsTarget(entry, path);
+    PdfSaveResult? result = null;
+    try
+    {
+      result = saveAs ? await entry.Model.SaveAsAsync(path, ct) : await entry.Model.SaveAsync(path, ct);
+      if (!result.Saved) throw new InvalidOperationException(result.Error ?? "保存未完成");
+      return PdfState(entry.Model);
+    }
+    finally
+    {
+      // 未确认可能已提交到新目标：在真正关闭该条目前继续占用目标。
+      // 预约成功后才进入此 finally，同条目的第二次调用不能释放第一份预约。
+      if (saveAs && result?.Disposition != PdfSaveDisposition.Unconfirmed) pdfWorkspace.ReleaseSaveAsTarget(entry);
+    }
   }
-
+  private async Task<PdfWorkbenchState?> ExportPdfDocumentsAsync(ExportPdfDocumentsCommand command, CancellationToken ct)
+  {
+    if (pdfWorkspace.Documents.Any(entry => entry.Model.HasSession && !entry.Model.CanCopyExport)) throw new InvalidOperationException("当前 Runtime 不支持副本导出");
+    PdfExportItem[] plan = pdfWorkspace.CreateExportPlan(command.ModifiedOnly, command.Retry);
+    string? directory;
+    if (pickPdfFolder is not null) directory = await pickPdfFolder();
+    else
+    {
+      var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
+      picker.FileTypeFilter.Add("*"); WinRT.Interop.InitializeWithWindow.Initialize(picker, windowHandle());
+      directory = (await picker.PickSingleFolderAsync())?.Path;
+    }
+    if (directory is null || ActivePdf is null) return ActivePdf is { } model ? PdfState(model) : EmptyPdfState();
+    return PublishPdfStartThenTrack(PdfState(ActivePdf), () => pdfWorkspace.ExportAsync(directory, command.ModifiedOnly, command.Retry,
+      () => { if (ActivePdf is { } active) StateChanged?.Invoke(PdfState(active)); }, ct, plan));
+  }
+  private PdfWorkbenchState CancelPdfExport() { pdfWorkspace.CancelExport(); return ActivePdf is { } active ? PdfState(active) : EmptyPdfState(); }
+  private PdfWorkbenchState? SetPdfPreviewPosition(SetPdfPreviewPositionCommand command)
+  {
+    // 纯预览状态命令：按修订/页码校验后写入所属条目，过期迟到值直接忽略；
+    // 不回发状态，避免高频位置更新每条都回声完整 PDF 状态。
+    if (PdfEntry is not { } entry) return null;
+    if (command.Position.Revision != entry.Model.Revision ||
+      command.Position.Page < 0 || command.Position.Page >= entry.Model.PageCount) return null;
+    entry.Preview = command.Position;
+    return null;
+  }
   private async Task<PdfWorkbenchState> SelectPdfPagesAsync(SelectPdfPagesCommand command, CancellationToken cancellationToken)
   {
     pdf ??= CreatePdfViewModel();
@@ -3260,6 +3459,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     pdf ??= CreatePdfViewModel();
     pdfWindowStart = ClampWindowStart(command.Start, pdf.PageCount, 64);
+    Interlocked.Increment(ref pdfWindowGeneration);
     return await PdfStateAsync(pdf, cancellationToken);
   }
 
@@ -3878,10 +4078,9 @@ public sealed class DesktopWorkbenchCommandHandler :
       TaskEngine = viewModel.TaskEngine,
     });
     StateChanged?.Invoke(CurrentBatchState());
-    StateChanged?.Invoke(pdf is null
-      ? new PdfWorkbenchState(false, "pdf.empty", 0, -1,
-          Engines: PdfEngines(), TaskEngine: pdfTaskEngine)
-      : await PdfStateAsync(pdf, cancellationToken));
+    PdfViewModel? activeModel = ActivePdf;
+    PdfWorkbenchState pdfProjection = activeModel is null ? EmptyPdfState() : await PdfStateAsync(activeModel, cancellationToken);
+    StateChanged?.Invoke(ReferenceEquals(ActivePdf, activeModel) ? pdfProjection : ActivePdf is { } replacement ? PdfState(replacement) : EmptyPdfState());
   }
 
   internal async Task RefreshRecognitionCatalogAsync(CancellationToken cancellationToken)
@@ -4298,6 +4497,16 @@ public sealed class DesktopWorkbenchCommandHandler :
     }
   }
 
+  private PdfWorkbenchState? PublishPdfStartThenTrack(PdfWorkbenchState start, Func<Task> operation)
+  {
+    StateChanged?.Invoke(start);
+    Task task = operation(); lock (pdfBackgroundOperations) pdfBackgroundOperations.Add(task);
+    Track(task);
+    _ = task.ContinueWith(done => { lock (pdfBackgroundOperations) pdfBackgroundOperations.Remove(done); },
+      CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    return null;
+  }
+
   private TState? PublishStartThenTrack<TState>(TState start, Func<Task> operation)
     where TState : WorkbenchState
   {
@@ -4382,66 +4591,77 @@ public sealed class DesktopWorkbenchCommandHandler :
     CancellationToken cancellationToken)
   {
     if (blocks is not { Length: > 0 } content) return null;
-    JsonArray json = [];
-    int imageCount = 0;
-    foreach (JsonElement block in content)
+    List<WorkbenchResourceReference> children = [];
+    bool adopted = false;
+    try
     {
-      JsonNode? node = JsonNode.Parse(block.GetRawText());
-      if (node is not JsonObject item) continue;
-      if (item["image"] is JsonObject asset)
+      JsonArray json = [];
+      int imageCount = 0;
+      foreach (JsonElement block in content)
       {
-        // resource 只承载宿主发布的 opaque 资源引用：wire 原样携带的
-        // 不可信副本先清除，成功取回后再写回权威引用。
-        asset.Remove("resource");
-        if (++imageCount > 32)
+        JsonNode? node = JsonNode.Parse(block.GetRawText());
+        if (node is not JsonObject item) continue;
+        if (item["image"] is JsonObject asset)
         {
-          asset["available"] = false;
-          asset["reason"] = "本项图片数量超过 32 张预览上限";
-        }
-        else if (asset["available"]?.GetValue<bool>() is not false &&
-          fetchAsset is not null &&
-          asset["job_id"] is JsonValue job && job.TryGetValue<string>(out string? jobId) &&
-          asset["item_id"] is JsonValue sourceItem && sourceItem.TryGetValue<string>(out string? itemId) &&
-          asset["asset_id"] is JsonValue identity && identity.TryGetValue<string>(out string? assetId))
-        {
-          try
-          {
-            byte[] bytes = await fetchAsset(
-              jobId!, itemId!, assetId!, cancellationToken);
-            WorkbenchResourceReference reference = await PublishBytesAsync(
-              bytes, "image/png", ".png", cancellationToken);
-            asset["resource"] = JsonSerializer.SerializeToNode(new
-            {
-              url = reference.Url,
-              mediaType = reference.MediaType,
-              byteLength = reference.ByteLength,
-            });
-          }
-          // HttpClient 超时按图片降级；调用者取消仍向上传播。
-          catch (Exception error) when (error is IOException or
-            ArgumentException or NotSupportedException or InferenceClientException or
-            HttpRequestException or VibeOCR.Runtime.Client.RuntimeClientException or
-            InvalidDataException or InferenceClientNotAttachedException ||
-            error is OperationCanceledException { InnerException: TimeoutException } &&
-            !cancellationToken.IsCancellationRequested)
+          // resource 只承载宿主发布的 opaque 资源引用：wire 原样携带的
+          // 不可信副本先清除，成功取回后再写回权威引用。
+          asset.Remove("resource");
+          if (++imageCount > 32)
           {
             asset["available"] = false;
-            asset["reason"] = "结果图片已失效或无法读取";
+            asset["reason"] = "本项图片数量超过 32 张预览上限";
+          }
+          else if (asset["available"]?.GetValue<bool>() is not false &&
+            fetchAsset is not null &&
+            asset["job_id"] is JsonValue job && job.TryGetValue<string>(out string? jobId) &&
+            asset["item_id"] is JsonValue sourceItem && sourceItem.TryGetValue<string>(out string? itemId) &&
+            asset["asset_id"] is JsonValue identity && identity.TryGetValue<string>(out string? assetId))
+          {
+            try
+            {
+              byte[] bytes = await fetchAsset(
+                jobId!, itemId!, assetId!, cancellationToken);
+              WorkbenchResourceReference reference = await PublishBytesAsync(
+                bytes, "image/png", ".png", cancellationToken);
+              children.Add(reference);
+              asset["resource"] = JsonSerializer.SerializeToNode(new
+              {
+                url = reference.Url,
+                mediaType = reference.MediaType,
+                byteLength = reference.ByteLength,
+              });
+            }
+            // HttpClient 超时按图片降级；调用者取消仍向上传播。
+            catch (Exception error) when (error is IOException or
+              ArgumentException or NotSupportedException or InferenceClientException or
+              HttpRequestException or VibeOCR.Runtime.Client.RuntimeClientException or
+              InvalidDataException or InferenceClientNotAttachedException ||
+              error is OperationCanceledException { InnerException: TimeoutException } &&
+              !cancellationToken.IsCancellationRequested)
+            {
+              asset["available"] = false;
+              asset["reason"] = "结果图片已失效或无法读取";
+            }
           }
         }
+        json.Add(item);
       }
-      json.Add(item);
+      (WorkbenchResourceReference structured, string structuredPath) =
+        await PublishFileAsync(
+          Encoding.UTF8.GetBytes(json.ToJsonString()),
+          "application/json; charset=utf-8", ".json", cancellationToken);
+      structuredResourceFiles[structured.Url] = structuredPath;
+      structuredResourceChildren[structured.Url] = children; adopted = true;
+      return structured;
     }
-    (WorkbenchResourceReference structured, string structuredPath) =
-      await PublishFileAsync(
-        Encoding.UTF8.GetBytes(json.ToJsonString()),
-        "application/json; charset=utf-8", ".json", cancellationToken);
-    structuredResourceFiles[structured.Url] = structuredPath;
-    return structured;
+    finally { if (!adopted) foreach (WorkbenchResourceReference child in children) ReleaseResource(child); }
   }
 
   private void ReleaseResource(WorkbenchResourceReference resource)
   {
+    structuredResourceFiles.Remove(resource.Url);
+    if (structuredResourceChildren.Remove(resource.Url, out var children))
+      foreach (WorkbenchResourceReference child in children) ReleaseResource(child);
     if (!Uri.TryCreate(resource.Url, UriKind.Absolute, out Uri? uri)) return;
     resourceBroker.Revoke(new WorkbenchResourceLease(uri, DateTimeOffset.MaxValue));
     // Published input files belong to the app and are retained only while leased.
@@ -4567,9 +4787,18 @@ public sealed class DesktopWorkbenchCommandHandler :
     return BatchState(viewModel);
   }
 
+  private PdfWorkbenchState EmptyPdfState() => new(false, "pdf.empty", 0, -1,
+    Engines: PdfEngines(), TaskEngine: pdfTaskEngine, DocumentId: pdfWorkspace.EmptyDocumentId, Documents: []);
   private PdfWorkbenchState PdfState(PdfViewModel viewModel)
   {
-    if (pdfPageResourceKey != PdfPageResourceKey(viewModel))
+    PdfDocumentEntry? previous = pdfContext.Value;
+    pdfContext.Value = pdfWorkspace.For(viewModel);
+    try { return PdfStateCore(viewModel); }
+    finally { pdfContext.Value = previous; }
+  }
+  private PdfWorkbenchState PdfStateCore(PdfViewModel viewModel)
+  {
+    if (ReferenceEquals(ActivePdf, viewModel) && pdfPageResourceKey != PdfPageResourceKey(viewModel))
       ReleasePdfPageResources();
     SynchronizePdfMode();
     pdfWindowStart = ClampWindowStart(pdfWindowStart, viewModel.PageCount, 64);
@@ -4602,7 +4831,13 @@ public sealed class DesktopWorkbenchCommandHandler :
       viewModel.CanAddTextLayer, viewModel.ProcessingSettings,
       pdfPagePreview,
       pdfPageInspect,
-      pdfPageInspectStatus, viewModel.SessionId, viewModel.CanInspectPage, viewModel.CanCorrectText);
+      pdfPageInspectStatus, viewModel.SessionId, viewModel.CanInspectPage, viewModel.CanCorrectText,
+      PdfEntry?.Id, pdfWorkspace.Documents.Where(entry => entry.Model.HasRemoteSession || entry.Model.IsBusy).Select(entry => new PdfDocumentSummary(entry.Id,
+        entry.DisplayName, entry.Model.PageCount, entry.Model.IsModified,
+        entry.Model.IsBusy || entry.Model.IsSettling, entry.Model.Phase, entry.CloseError is not null)).ToArray(),
+      PdfEntry?.Preview, viewModel.CanCopyExport, pdfWorkspace.Exporting,
+      pdfWorkspace.ExportItems.Select(item => new PdfExportSummary(item.DocumentId, item.Name, item.Revision,
+        item.Status, item.Output is null ? null : Path.GetFileName(item.Output), item.Error)).ToArray(), pdfWorkspace.ExportGeneration);
   }
 
   /// <summary>
@@ -4643,8 +4878,19 @@ public sealed class DesktopWorkbenchCommandHandler :
     $"{viewModel.SessionId}:{viewModel.Revision}:{viewModel.SelectedPage}:{viewModel.ProcessingSettings.RenderDpi}:{viewModel.ProcessingSettings.MaxPixels}";
 
   /// <summary>释放当前页检查/高清预览资源（revoke + 删除发布文件），不触碰 160px 缩略图缓存。</summary>
-  private void ReleasePdfPageResources()
+  private void RemovePdfStructured(int index)
+  { if (pdfStructured.Remove(index, out var cached)) ReleaseResource(cached.Reference); }
+  private void ReleasePdfWindowResources(bool force = false)
   {
+    if (!force && pdfContext.Value is { } owner && owner != pdfWorkspace.Active) return;
+    Interlocked.Increment(ref pdfWindowGeneration);
+    foreach (WorkbenchResourceReference reference in pdfThumbnails.Values) ReleaseResource(reference);
+    foreach (var value in pdfStructured.Values) ReleaseResource(value.Reference);
+    pdfThumbnails.Clear(); pdfStructured.Clear(); ReleasePdfPageResources(force);
+  }
+  private void ReleasePdfPageResources(bool force = false)
+  {
+    if (!force && pdfContext.Value is { } owner && owner != pdfWorkspace.Active) return;
     Interlocked.Increment(ref pdfPageResourceGeneration);
     if (pdfPagePreview is { } preview) ReleaseResource(preview);
     if (pdfPageInspect is { } inspect) ReleaseResource(inspect);
@@ -4661,6 +4907,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private async Task EnsurePdfPageResourcesAsync(
     PdfViewModel viewModel, CancellationToken cancellationToken)
   {
+    if (!ReferenceEquals(ActivePdf, viewModel) || pdfWorkspace.For(viewModel)?.Closing == true) return;
     await pdfPageResourceGate.WaitAsync(cancellationToken);
     try { await LoadPdfPageResourcesAsync(viewModel, cancellationToken); }
     finally { pdfPageResourceGate.Release(); }
@@ -4669,6 +4916,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private async Task LoadPdfPageResourcesAsync(
     PdfViewModel viewModel, CancellationToken cancellationToken)
   {
+    if (!ReferenceEquals(ActivePdf, viewModel)) return;
     SynchronizePdfMode();
     if (!viewModel.CanInspectPage) { ReleasePdfPageResources(); return; }
     int page = viewModel.SelectedPage;
@@ -4690,7 +4938,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     if (pdfPagePreview is not null && pdfPageInspect is not null) return;
     long generation = Volatile.Read(ref pdfGeneration);
     long resourceGeneration = Volatile.Read(ref pdfPageResourceGeneration);
-    bool CurrentResources() => ReferenceEquals(pdf, viewModel)
+    bool CurrentResources() => ReferenceEquals(ActivePdf, viewModel)
       && viewModel.SessionId == session
       && viewModel.Revision == revision && viewModel.SelectedPage == page
       && pdfPageResourceKey == key && PdfPageResourceKey(viewModel) == key
@@ -4769,15 +5017,28 @@ public sealed class DesktopWorkbenchCommandHandler :
     return await PdfStateAsync(pdf, cancellationToken);
   }
 
-  private async Task<PdfWorkbenchState> PdfStateAsync(
+  private async Task<PdfWorkbenchState> PdfStateAsync(PdfViewModel viewModel, CancellationToken cancellationToken)
+  {
+    PdfDocumentEntry? previous = pdfContext.Value;
+    pdfContext.Value = pdfWorkspace.For(viewModel);
+    try { return await PdfResourcesStateAsync(viewModel, cancellationToken); }
+    finally { pdfContext.Value = previous; }
+  }
+  private async Task<PdfWorkbenchState> PdfResourcesStateAsync(
     PdfViewModel viewModel,
     CancellationToken cancellationToken)
   {
     string? session = viewModel.SessionId; long revision = viewModel.Revision; long generation = Volatile.Read(ref pdfGeneration);
-    bool Current() => ReferenceEquals(pdf, viewModel) && viewModel.SessionId == session && viewModel.Revision == revision && generation == Volatile.Read(ref pdfGeneration);
-    pdfWindowStart = ClampWindowStart(pdfWindowStart, viewModel.PageCount, 64);
-    int visiblePageEnd = Math.Min(viewModel.PageCount, pdfWindowStart + 64);
-    for (int index = pdfWindowStart; index < visiblePageEnd; index++)
+    long windowGeneration = Volatile.Read(ref pdfWindowGeneration);
+    int windowStart = ClampWindowStart(pdfWindowStart, viewModel.PageCount, 64);
+    bool Current() => ReferenceEquals(ActivePdf, viewModel) && viewModel.SessionId == session && viewModel.Revision == revision && generation == Volatile.Read(ref pdfGeneration) && windowGeneration == Volatile.Read(ref pdfWindowGeneration);
+    if (!Current()) return PdfState(viewModel);
+    pdfWindowStart = windowStart;
+    int visiblePageEnd = Math.Min(viewModel.PageCount, windowStart + 64);
+    // 冻结窗口在 await 前回收旧范围；翻窗只使资源请求过期，不影响 OCR 任务。
+    foreach (int cachedIndex in pdfThumbnails.Keys.Where(index => index < windowStart || index >= visiblePageEnd).ToArray()) { ReleaseResource(pdfThumbnails[cachedIndex]); pdfThumbnails.Remove(cachedIndex); }
+    foreach (int cachedIndex in pdfStructured.Keys.Where(index => index < windowStart || index >= visiblePageEnd).ToArray()) RemovePdfStructured(cachedIndex);
+    for (int index = windowStart; index < visiblePageEnd; index++)
     {
       if (pdfThumbnails.ContainsKey(index)) continue;
       byte[]? thumbnail = await viewModel.RenderThumbnailAsync(index, cancellationToken);
@@ -4789,23 +5050,21 @@ public sealed class DesktopWorkbenchCommandHandler :
           "image/png",
           ".png",
           cancellationToken);
-        if (!Current()) return PdfState(viewModel);
-        pdfThumbnails[index] = reference;
+        if (!Current()) { ReleaseResource(reference); return PdfState(viewModel); }
+        if (!pdfThumbnails.TryAdd(index, reference)) ReleaseResource(reference);
       }
     }
-    foreach (int cachedIndex in pdfThumbnails.Keys.Where(index => index < pdfWindowStart || index >= visiblePageEnd).ToArray()) pdfThumbnails.Remove(cachedIndex);
-    foreach (int cachedIndex in pdfStructured.Keys.Where(index => index < pdfWindowStart || index >= visiblePageEnd).ToArray()) pdfStructured.Remove(cachedIndex);
-    await viewModel.PrepareResultsAsync(pdfWindowStart, 64, cancellationToken);
+    await viewModel.PrepareResultsAsync(windowStart, 64, cancellationToken);
     if (!Current()) return PdfState(viewModel);
     // 已完成页的结构化结果与缩略图同窗口发布：以 Result 对象身份缓存，
     // 旋转/删除/重开文档时整体失效，与单次/批量共用同一发布路径。
-    for (int index = pdfWindowStart; index < visiblePageEnd; index++)
+    for (int index = windowStart; index < visiblePageEnd; index++)
     {
       if (index >= viewModel.Pages.Count) break;
       RecognizeResponse? result = viewModel.Pages[index].Result;
       if (result?.ContentBlocks is not { Length: > 0 })
       {
-        pdfStructured.Remove(index);
+        RemovePdfStructured(index);
         continue;
       }
       if (pdfStructured.TryGetValue(index, out var cached) &&
@@ -4817,13 +5076,14 @@ public sealed class DesktopWorkbenchCommandHandler :
         result.ContentBlocks,
         viewModel.FetchResultAssetAsync,
         cancellationToken);
-      if (!Current()) return PdfState(viewModel);
+      if (!Current()) { if (reference is not null) ReleaseResource(reference); return PdfState(viewModel); }
       if (reference is null)
       {
-        pdfStructured.Remove(index);
+        RemovePdfStructured(index);
       }
       else
       {
+        RemovePdfStructured(index);
         pdfStructured[index] = (result, reference);
       }
     }
@@ -4840,8 +5100,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private void ResetPdfSelection(bool selectFirstPage)
   {
     selectedPdfPages.Clear();
-    pdfThumbnails.Clear();
-    pdfStructured.Clear();
+    ReleasePdfWindowResources();
     pdfWindowStart = 0;
     if (selectFirstPage && pdf is { PageCount: > 0 })
     {
@@ -5212,7 +5471,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     imageEditChannel.TextLayerViewModel?.Cancel();
     batch?.CancelAll();
     qrCode?.Cancel();
-    pdf?.Cancel();
+    foreach (PdfDocumentEntry entry in pdfWorkspace.Documents) entry.Model.Cancel();
     if (update.IsValueCreated)
     {
       update.Value.PropertyChanged -= OnUpdatePropertyChanged;
@@ -5252,7 +5511,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       }
     }
     generatedFiles.Clear();
-    structuredResourceFiles.Clear();
+    structuredResourceFiles.Clear(); structuredResourceChildren.Clear();
     batchStructured.Clear();
     pdfStructured.Clear();
   }

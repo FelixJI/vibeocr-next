@@ -295,6 +295,13 @@ public sealed record SetBatchTaskEngineCommand(string? Engine) : WorkbenchComman
 /// </summary>
 public sealed record SetPdfTaskEngineCommand(string? Engine) : WorkbenchCommand;
 
+public sealed record PdfBoundCommand(string DocumentId, WorkbenchCommand Command, long? Revision = null) : WorkbenchCommand;
+public sealed record ActivatePdfDocumentCommand : WorkbenchCommand;
+public sealed record SavePdfAsCommand : WorkbenchCommand;
+public sealed record ExportPdfDocumentsCommand(bool ModifiedOnly, bool Retry) : WorkbenchCommand;
+public sealed record CancelPdfExportCommand : WorkbenchCommand;
+public sealed record SetPdfPreviewPositionCommand(VibeOCR.App.Features.Pdf.PdfPreviewPosition Position) : WorkbenchCommand;
+
 public sealed record OpenPdfCommand : WorkbenchCommand;
 
 public sealed record OpenDroppedPdfCommand(string Path) : WorkbenchCommand;
@@ -662,7 +669,10 @@ public sealed record PdfWorkbenchState(
   VibeOCR.App.Features.Pdf.PdfProcessingSettings? ProcessingSettings = null,
   WorkbenchResourceReference? PagePreview = null, WorkbenchResourceReference? PageInspect = null,
   string PageInspectStatusCode = "pdf.inspect.none", string? SessionId = null,
-  bool CanInspectPage = false, bool CanCorrectText = false) : WorkbenchState
+  bool CanInspectPage = false, bool CanCorrectText = false,
+  string? DocumentId = null, IReadOnlyList<PdfDocumentSummary>? Documents = null,
+  VibeOCR.App.Features.Pdf.PdfPreviewPosition? PreviewPosition = null,
+  bool CanCopyExport = false, bool Exporting = false, IReadOnlyList<PdfExportSummary>? ExportItems = null, long ExportGeneration = 0) : WorkbenchState
 {
   public override string Scope => "pdf";
 }
@@ -1085,3 +1095,6 @@ public interface IWorkbenchBootstrapSource
 {
   ValueTask PrepareBootstrapAsync(CancellationToken cancellationToken);
 }
+
+public sealed record PdfDocumentSummary(string DocumentId, string Name, int PageCount, bool IsModified, bool IsBusy, string Phase, bool CloseFailed);
+public sealed record PdfExportSummary(string DocumentId, string Name, long Revision, string Status, string? Output, string? Error);

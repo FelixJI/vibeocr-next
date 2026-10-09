@@ -1392,7 +1392,8 @@ public sealed partial class App : Application
         }
     }
 
-    private void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
+    private bool _pdfCloseReview;
+    private async void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
     {
         if (_shutdownStarted)
         {
@@ -1400,10 +1401,18 @@ public sealed partial class App : Application
         }
 
         args.Cancel = true;
-        _actionDispatcher?.EndHotkeyRecording();
-        _shutdownStarted = true;
-        _applicationShutdown.Cancel();
-        _ = ShutdownAndExitAsync(sender);
+        if (_pdfCloseReview) return;
+        _pdfCloseReview = true;
+        try
+        {
+            if (_window is not null && !await _window.PreparePdfExitAsync()) return;
+            _actionDispatcher?.EndHotkeyRecording();
+            _shutdownStarted = true;
+            _applicationShutdown.Cancel();
+            await ShutdownAndExitAsync(sender);
+        }
+        catch (Exception error) { AppLog.Error("PDF exit coordination failed", error); }
+        finally { _pdfCloseReview = false; }
     }
 
     private async Task ShutdownAndExitAsync(AppWindow appWindow)

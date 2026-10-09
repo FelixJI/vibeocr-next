@@ -23,6 +23,7 @@ OCR_MINERU_REMOTE_API_V1 = "ocr.mineru-remote-api.v1"
 OCR_DEFAULT_RECOGNITION_MODE_V1 = "ocr.default-recognition-mode.v1"
 PDF_PAGE_INSPECT_V1 = "pdf.page-inspect.v1"
 PDF_BLOCK_EDIT_V1 = "pdf.block-edit.v1"
+PDF_COPY_EXPORT_V1 = "pdf.copy-export.v1"
 
 ALL_CAPABILITIES: tuple[str, ...] = (
     'ocr.recognition.v2',
@@ -47,6 +48,7 @@ ALL_CAPABILITIES: tuple[str, ...] = (
     'ocr.default-recognition-mode.v1',
     'pdf.page-inspect.v1',
     'pdf.block-edit.v1',
+    'pdf.copy-export.v1',
 )
 READY_ENVELOPE_VERSION = 1
 PROTOCOL_VERSION = 2

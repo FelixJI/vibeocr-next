@@ -101,6 +101,9 @@ export interface HostBridge {
   bootstrap(): Promise<AppSnapshot>;
   execute(command: HostCommand): Promise<CommandResult>;
   subscribe(listener: (event: HostStateEvent) => void): () => void;
+  subscribePdfPreviewFlush?(
+    listener: (documentId: string) => Promise<boolean>,
+  ): () => void;
 }
 
 export class BridgeProtocolError extends Error {}
@@ -124,6 +127,9 @@ export class BridgeClient implements HostBridge {
   private readonly unsubscribe: () => void;
   private sessionId?: string;
   private revision = -1;
+  private pdfPreviewFlush?: (documentId: string) => Promise<boolean>;
+  private flushingPdfPreview = false;
+  private disposed = false;
 
   constructor(
     private readonly transport: WebViewTransport,
@@ -162,7 +168,18 @@ export class BridgeClient implements HostBridge {
     return () => this.listeners.delete(listener);
   }
 
+  subscribePdfPreviewFlush(
+    listener: (documentId: string) => Promise<boolean>,
+  ): () => void {
+    this.pdfPreviewFlush = listener;
+    return () => {
+      if (this.pdfPreviewFlush === listener) this.pdfPreviewFlush = undefined;
+    };
+  }
+
   dispose(): void {
+    this.disposed = true;
+    this.pdfPreviewFlush = undefined;
     this.unsubscribe();
     const error = new BridgeProtocolError("Bridge client was disposed.");
     for (const pending of this.pending.values()) pending.reject(error);
@@ -223,6 +240,10 @@ export class BridgeClient implements HostBridge {
       return;
     }
 
+    if (value.kind === "request" && value.type === "pdf.flushPreview") {
+      void this.receivePdfPreviewFlush(value);
+      return;
+    }
     if (value.kind === "event") {
       this.receiveEvent(value);
       return;
@@ -241,6 +262,38 @@ export class BridgeClient implements HostBridge {
       return;
     }
     pending.resolve(value.payload);
+  }
+
+  private async receivePdfPreviewFlush(
+    envelope: BridgeEnvelope,
+  ): Promise<void> {
+    const { sessionId, documentId } = envelope.payload;
+    if (
+      !hasExactFields(envelope.payload, ["sessionId", "documentId"]) ||
+      sessionId !== this.sessionId ||
+      typeof documentId !== "string" ||
+      !/^[0-9a-f]{32}$/i.test(documentId)
+    )
+      return;
+    let ok = false;
+    if (!this.flushingPdfPreview && this.pdfPreviewFlush) {
+      this.flushingPdfPreview = true;
+      try {
+        ok = await this.pdfPreviewFlush(documentId);
+      } catch {
+        ok = false;
+      } finally {
+        this.flushingPdfPreview = false;
+      }
+    }
+    if (!this.disposed)
+      this.transport.postMessage({
+        version: BRIDGE_VERSION,
+        kind: "response",
+        id: envelope.id,
+        type: envelope.type,
+        payload: { sessionId, documentId, ok },
+      });
   }
 
   private rejectCorrelated(value: unknown, message: string): void {

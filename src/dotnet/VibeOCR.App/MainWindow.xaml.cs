@@ -124,6 +124,8 @@ public sealed partial class MainWindow : Window
 
     resourceRoot = Path.Combine(layout.DataRoot, "web-resources");
     Directory.CreateDirectory(resourceRoot);
+    if (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "paddle-modes-e2e")
+      paddleSmokePriorResourceFiles.UnionWith(Directory.GetFiles(resourceRoot, "*", SearchOption.AllDirectories));
     resourceBroker = new WorkbenchResourceBroker(resourceRoot);
     annotationStore = new WorkbenchAnnotationStore(resourceRoot);
     commandHandler = new DesktopWorkbenchCommandHandler(
@@ -143,7 +145,8 @@ public sealed partial class MainWindow : Window
       supervisorInstanceId: supervisorInstanceId,
       pinScreenshot: PinScreenshot,
       shellActions: shellActions,
-      optionsLayout: layout);
+      optionsLayout: layout, confirmPdfClose: ConfirmPdfCloseAsync,
+      flushPdfPreview: FlushPdfPreviewAsync);
     commandHandler.ScreenshotSessionReady += ShowImageEditor;
     commandHandler.ScreenshotCaptureStarting += () => imageEditor?.HideForCapture();
     commandHandler.ScreenshotCaptureFinished += () => imageEditor?.RestoreAfterCapture();
@@ -696,8 +699,36 @@ public sealed partial class MainWindow : Window
     }
   }
 
+  private Task<bool> FlushPdfPreviewAsync(string documentId) => webHost.FlushPdfPreviewAsync(documentId);
+
+  public Task<bool> PreparePdfExitAsync() => commandHandler.RequestCloseAllPdfAsync();
+  private Microsoft.UI.Xaml.Controls.ContentDialog? activePdfCloseDialog;
+  private async Task<PdfCloseDecision> ConfirmPdfCloseAsync(PdfDocumentEntry entry)
+  {
+    bool draft = entry.HasUnsubmittedDraft;
+    var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
+    {
+      XamlRoot = (Content as FrameworkElement)?.XamlRoot,
+      Title = draft ? $"{entry.DisplayName} 有未提交草稿" : $"保存 {entry.DisplayName} 的修改？",
+      Content = draft ? "草稿尚未写入 PDF。返回继续编辑，或明确放弃草稿后继续关闭；随后仍会确认已提交文档的未保存修改。"
+        : "保存提交当前文档；放弃会丢弃未保存修改；取消保留文档。",
+      PrimaryButtonText = draft ? "返回继续编辑" : "保存", SecondaryButtonText = draft ? "放弃草稿并继续" : "放弃修改", CloseButtonText = "取消",
+      DefaultButton = Microsoft.UI.Xaml.Controls.ContentDialogButton.Close,
+    };
+    activePdfCloseDialog = dialog;
+    try
+    {
+      return await dialog.ShowAsync() switch
+      {
+        Microsoft.UI.Xaml.Controls.ContentDialogResult.Primary => draft ? PdfCloseDecision.Cancel : PdfCloseDecision.Save,
+        Microsoft.UI.Xaml.Controls.ContentDialogResult.Secondary => PdfCloseDecision.Discard,
+        _ => PdfCloseDecision.Cancel,
+      };
+    }
+    finally { if (ReferenceEquals(activePdfCloseDialog, dialog)) activePdfCloseDialog = null; }
+  }
   private void OnExitClicked(object sender, RoutedEventArgs args) =>
-    Application.Current.Exit();
+    Close();
 
   private async void OnWindowClosed(object sender, WindowEventArgs args)
   {

@@ -719,6 +719,9 @@ class SaveRequest(TypedDict, total=False):
     path: NotRequired[str | None]
     pdf_settings: NotRequired[dict[str, Any] | None]
     rewrite_text_layers: NotRequired[bool]
+    copy_export: NotRequired[bool]
+    overwrite: NotRequired[bool]
+    rebind_target: NotRequired[bool]
 
 
 class SaveResponse(TypedDict, total=False):

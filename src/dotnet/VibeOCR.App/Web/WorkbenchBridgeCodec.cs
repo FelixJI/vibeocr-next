@@ -214,6 +214,32 @@ public static class WorkbenchBridgeCodec
     return json;
   }
 
+  internal static string SerializePdfPreviewFlush(Guid id, Guid session, string documentId) =>
+    JsonSerializer.Serialize(new { version = WorkbenchProtocol.Version, kind = "request", id,
+      type = "pdf.flushPreview", payload = new { sessionId = session, documentId } }, SerializerOptions);
+
+  internal static (Guid Id, Guid Session, string DocumentId, bool Ok) ParsePdfPreviewFlushResponse(string json)
+  {
+    EnsureMessageSize(json);
+    try
+    {
+      using JsonDocument document = JsonDocument.Parse(json);
+      JsonElement root = document.RootElement;
+      EnsureObjectWithFields(root, EnvelopeFields, "preview flush envelope");
+      JsonElement payload = root.GetProperty("payload");
+      EnsureObjectWithFields(payload, new HashSet<string>(StringComparer.Ordinal) { "sessionId", "documentId", "ok" }, "preview flush payload");
+      if (root.GetProperty("version").GetInt32() != WorkbenchProtocol.Version ||
+        root.GetProperty("kind").GetString() != "response" || root.GetProperty("type").GetString() != "pdf.flushPreview" ||
+        !Guid.TryParse(root.GetProperty("id").GetString(), out Guid id) ||
+        !Guid.TryParse(payload.GetProperty("sessionId").GetString(), out Guid session) ||
+        !Guid.TryParseExact(payload.GetProperty("documentId").GetString(), "N", out _))
+        throw new WorkbenchBridgeProtocolException("Preview flush response identity is invalid.");
+      return (id, session, payload.GetProperty("documentId").GetString()!, payload.GetProperty("ok").GetBoolean());
+    }
+    catch (Exception error) when (error is JsonException or InvalidOperationException or KeyNotFoundException)
+    { throw new WorkbenchBridgeProtocolException("Preview flush response is invalid.", error); }
+  }
+
   public static WorkbenchCommandEnvelope ParseCommand(
     string json,
     Guid expectedSessionId)
@@ -257,7 +283,18 @@ public static class WorkbenchBridgeCodec
       string? scope = command.GetProperty("scope").GetString();
       string? action = command.GetProperty("action").GetString();
       JsonElement arguments = command.GetProperty("arguments");
+      string? documentId = null; long? documentRevision = null;
+      if (scope == "pdf" && action != "open")
+      {
+        documentId = arguments.GetProperty("documentId").GetString();
+        if (!Guid.TryParseExact(documentId, "N", out _)) throw new WorkbenchBridgeProtocolException("PDF document identity is missing or invalid.");
+        documentRevision = arguments.GetProperty("documentRevision").GetInt64();
+        if (documentRevision < 0) throw new WorkbenchBridgeProtocolException("Invalid PDF revision");
+        JsonObject fields = JsonNode.Parse(arguments.GetRawText())!.AsObject(); fields.Remove("documentId"); fields.Remove("documentRevision");
+        arguments = JsonSerializer.SerializeToElement(fields);
+      }
       WorkbenchCommand typedCommand = ParseTypedCommand(scope, action, arguments);
+      if (documentId is not null) typedCommand = new PdfBoundCommand(documentId, typedCommand, documentRevision);
       return new WorkbenchCommandEnvelope(id, typedCommand);
     }
     catch (WorkbenchBridgeProtocolException)
@@ -515,6 +552,26 @@ public static class WorkbenchBridgeCodec
         return new SetBatchTaskEngineCommand(ParseTaskEngine(arguments));
       case ("pdf", "setTaskEngine"):
         return new SetPdfTaskEngineCommand(ParseTaskEngine(arguments));
+      case ("pdf", "activateDocument"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments"); return new ActivatePdfDocumentCommand();
+      case ("pdf", "saveAs"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments"); return new SavePdfAsCommand();
+      case ("pdf", "exportDocuments"):
+        EnsureObjectWithFields(arguments, new HashSet<string> { "modifiedOnly", "retry" }, "command arguments");
+        return new ExportPdfDocumentsCommand(arguments.GetProperty("modifiedOnly").GetBoolean(), arguments.GetProperty("retry").GetBoolean());
+      case ("pdf", "cancelExport"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments"); return new CancelPdfExportCommand();
+      case ("pdf", "setPreviewPosition"):
+        EnsureObjectWithFields(arguments, new HashSet<string> { "position" }, "command arguments");
+        JsonElement position = arguments.GetProperty("position");
+        var positionFields = new HashSet<string> { "zoom", "left", "top", "showBoxes", "block", "draft", "revision", "page" };
+        if (position.ValueKind == JsonValueKind.Object && position.TryGetProperty("originalText", out _)) positionFields.Add("originalText");
+        EnsureObjectWithFields(position, positionFields, "PDF preview position");
+        PdfPreviewPosition view = position.Deserialize<PdfPreviewPosition>(SerializerOptions) ?? throw new WorkbenchBridgeProtocolException("Missing PDF position");
+        if (!double.IsFinite(view.Left) || !double.IsFinite(view.Top) || view.Left < 0 || view.Top < 0 || view.Zoom is { } zoom && (!double.IsFinite(zoom) || zoom < .01 || zoom > 8) || view.Draft is null || view.Draft.Length > 65536 || view.Block is < 0 ||
+          view.OriginalText is { } original && (original.Length > 2000 || view.Block is null))
+          throw new WorkbenchBridgeProtocolException("Invalid PDF position");
+        return new SetPdfPreviewPositionCommand(view);
       case ("pdf", "open"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new OpenPdfCommand();
@@ -1417,6 +1474,8 @@ public static class WorkbenchBridgeCodec
       sessionId = pdf.SessionId,
       canInspectPage = pdf.CanInspectPage,
       canCorrectText = pdf.CanCorrectText,
+      documentId = pdf.DocumentId, documents = pdf.Documents ?? [], previewPosition = pdf.PreviewPosition,
+      canCopyExport = pdf.CanCopyExport, exporting = pdf.Exporting, exportItems = pdf.ExportItems ?? [], exportGeneration = pdf.ExportGeneration,
     },
     QrCodeWorkbenchState qrCode => new
     {

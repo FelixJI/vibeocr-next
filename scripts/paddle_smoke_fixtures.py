@@ -497,6 +497,39 @@ def draw_orientation_pdf(out: Path) -> dict[str, object]:
     }
 
 
+def draw_workspace_pdfs(out: Path) -> dict[str, object]:
+    """同名不同目录；A 超过 64 页，B 三页，均含扫描、原生文字和空白页。"""
+    import pymupdf
+
+    entries = {}
+    for folder, count in (("workspace-a", 75), ("workspace-b", 3)):
+        destination = out / folder / "same.pdf"
+        destination.parent.mkdir(exist_ok=True)
+        with (
+            pymupdf.open(out / "document_scan.pdf") as scan,
+            pymupdf.open() as document,
+        ):
+            document.insert_pdf(scan)
+            native = document.new_page(width=595, height=842)
+            native.insert_text((60, 80), "WORKSPACE NATIVE TAIL202", fontsize=18)
+            native.draw_rect(
+                pymupdf.Rect(40, 120, 220, 200),
+                color=(0, 0.4, 0.8),
+                fill=(0.2, 0.7, 0.3),
+            )
+            for _ in range(count - 2):
+                document.new_page(width=595, height=842)
+            document.save(destination, deflate=True)
+        entries[f"{folder}/same.pdf"] = {
+            "pages": count,
+            "scan_page": 0,
+            "native_page": 1,
+            "blank_pages_from": 2,
+            "synthetic_only": True,
+        }
+    return entries
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True, type=Path, help="隔离输出目录")
@@ -528,6 +561,7 @@ def main() -> int:
                 "font": "raster-image",
             }
             entries["document_orientation.pdf"] = draw_orientation_pdf(args.out)
+            entries.update(draw_workspace_pdfs(args.out))
     write_manifest(args.out, entries)
     print(json.dumps(entries, ensure_ascii=False, indent=2))
     return 0

@@ -194,6 +194,7 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
   public async Task DeletePdfTextLayersAsync(string sessionId, int[] pages, Action<System.Text.Json.JsonElement> progress, CancellationToken ct) { await _gate.WaitAsync(ct); await Current.DeletePdfTextLayersAsync(sessionId, pages, progress, ct); }
   public async Task CancelPdfAsync(string sessionId, CancellationToken ct) { await _gate.WaitAsync(ct); await Current.CancelPdfAsync(sessionId, ct); }
   public async Task ResetPdfCancelAsync(string sessionId, CancellationToken ct) { await _gate.WaitAsync(ct); await Current.ResetPdfCancelAsync(sessionId, ct); }
+  public async Task<string> SavePdfOperationAsync(string sessionId, string outputPath, IReadOnlyDictionary<string, System.Text.Json.JsonElement> settings, bool copyExport, bool rebindTarget, bool overwrite, CancellationToken ct) { await _gate.WaitAsync(ct); return await Current.SavePdfOperationAsync(sessionId, outputPath, settings, copyExport, rebindTarget, overwrite, ct); }
   public async Task<string> SavePdfWithSettingsAsync(string sessionId, string outputPath, IReadOnlyDictionary<string, System.Text.Json.JsonElement> settings, CancellationToken ct) { await _gate.WaitAsync(ct); return await Current.SavePdfWithSettingsAsync(sessionId, outputPath, settings, ct); }
 
   public async Task ClosePdfSessionAsync(string sessionId, CancellationToken ct)

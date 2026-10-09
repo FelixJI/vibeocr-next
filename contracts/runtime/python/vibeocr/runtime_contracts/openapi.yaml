@@ -2348,7 +2348,8 @@
                 "ocr.mineru-remote-api.v1",
                 "ocr.default-recognition-mode.v1",
                 "pdf.page-inspect.v1",
-                "pdf.block-edit.v1"
+                "pdf.block-edit.v1",
+                "pdf.copy-export.v1"
               ]
             }
           },
@@ -5671,6 +5672,21 @@
             "default": true,
             "title": "Rewrite Text Layers",
             "type": "boolean"
+          },
+          "copy_export": {
+            "type": "boolean",
+            "default": false,
+            "description": "pdf.copy-export.v1: publish a copy without clearing dirty or changing the target."
+          },
+          "overwrite": {
+            "type": "boolean",
+            "default": true,
+            "description": "pdf.copy-export.v1: false commits atomically only when the target does not exist."
+          },
+          "rebind_target": {
+            "type": "boolean",
+            "default": false,
+            "description": "pdf.copy-export.v1: after confirmed SaveAs replace the live document source handle and target."
           }
         },
         "type": "object",
