@@ -337,10 +337,42 @@ class TestSaveCancel:
         args, kwargs = post.call_args
         assert args[0] == "/session/s1/save"
         assert kwargs["timeout"] == _HTTP_LONG_TIMEOUT
+        # 同源 worker 权威 schema：save 恒经 SaveRequest 序列化，新字段以默认值携带。
         assert args[1] == {
             "path": "out.pdf",
             "pdf_settings": {"c": True},
             "rewrite_text_layers": False,
+            "copy_export": False,
+            "overwrite": True,
+            "rebind_target": False,
+        }
+
+    def test_save_forwards_explicit_copy_and_rebind_options(self) -> None:
+        client, post = _client_with_post()
+        post.return_value = _mock_response(
+            SaveResponse(path="copy.pdf", diff=ModelDiff()).model_dump_json().encode()
+        )
+        resp = client.save(
+            "s1",
+            "copy.pdf",
+            None,
+            rewrite_text_layers=False,
+            copy_export=True,
+            overwrite=False,
+            rebind_target=True,
+        )
+        assert resp.path == "copy.pdf"
+        args, kwargs = post.call_args
+        assert args[0] == "/session/s1/save"
+        assert kwargs["timeout"] == _HTTP_LONG_TIMEOUT
+        # 非默认副本/另存选项不得在序列化中丢失。
+        assert args[1] == {
+            "path": "copy.pdf",
+            "pdf_settings": None,
+            "rewrite_text_layers": False,
+            "copy_export": True,
+            "overwrite": False,
+            "rebind_target": True,
         }
 
     def test_save_defaults(self) -> None:

@@ -13,6 +13,31 @@ public sealed class InferenceHttpClientTests
     private static readonly Uri Base = new("http://127.0.0.1:1");
 
     [Fact]
+    public async Task PdfLegacySaveOmitsNewFieldsAndWorkspaceSaveStatesItsSemantics()
+    {
+        var handler = new FakeHandler("""{"schema_version":2,"instance_id":"test","path":"copy.pdf","diff":{}}""");
+        await using var client = new InferenceHttpClient(Base, "tok", handler);
+        await client.SavePdfWithSettingsAsync("pdf-1", "copy.pdf", new Dictionary<string, JsonElement>(), TestContext.Current.CancellationToken);
+        using (var legacy = JsonDocument.Parse(handler.LastBody!))
+        {
+            Assert.False(legacy.RootElement.TryGetProperty("copy_export", out _));
+            Assert.False(legacy.RootElement.TryGetProperty("rebind_target", out _));
+            Assert.False(legacy.RootElement.TryGetProperty("overwrite", out _));
+        }
+        await client.SavePdfOperationAsync("pdf-1", "copy.pdf", new Dictionary<string, JsonElement>(), true, false, false, TestContext.Current.CancellationToken);
+        using (var copy = JsonDocument.Parse(handler.LastBody!))
+        {
+            Assert.True(copy.RootElement.GetProperty("copy_export").GetBoolean());
+            Assert.False(copy.RootElement.GetProperty("overwrite").GetBoolean());
+            Assert.False(copy.RootElement.GetProperty("rebind_target").GetBoolean());
+            Assert.False(copy.RootElement.GetProperty("rewrite_text_layers").GetBoolean());
+        }
+        await client.SavePdfOperationAsync("pdf-1", "copy.pdf", new Dictionary<string, JsonElement>(), false, true, true, TestContext.Current.CancellationToken);
+        using var rebound = JsonDocument.Parse(handler.LastBody!);
+        Assert.True(rebound.RootElement.GetProperty("rebind_target").GetBoolean());
+    }
+
+    [Fact]
     public async Task PdfInspectionAndBlockEditUseSinglePageTypedWire()
     {
         var handler = new FakeHandler([

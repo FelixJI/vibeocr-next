@@ -99,6 +99,10 @@ internal abstract class InferenceClientStub : IInferenceClient
     public virtual Task ResetPdfCancelAsync(string sessionId, CancellationToken ct) => Task.CompletedTask;
     public virtual Task<string> SavePdfWithSettingsAsync(string sessionId, string outputPath, IReadOnlyDictionary<string, System.Text.Json.JsonElement> settings, CancellationToken ct) => SavePdfAsync(sessionId, outputPath, ct);
 
+    public virtual Task<string> SavePdfOperationAsync(string sessionId, string outputPath,
+        IReadOnlyDictionary<string, System.Text.Json.JsonElement> settings, bool copyExport, bool rebindTarget, bool overwrite, CancellationToken ct)
+        => copyExport || rebindTarget || !overwrite ? Task.FromException<string>(new NotSupportedException()) : SavePdfWithSettingsAsync(sessionId, outputPath, settings, ct);
+
     public virtual Task ClosePdfSessionAsync(
         string sessionId,
         CancellationToken cancellationToken) =>

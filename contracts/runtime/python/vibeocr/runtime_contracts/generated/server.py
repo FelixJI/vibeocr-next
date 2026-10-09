@@ -501,7 +501,17 @@ REQUEST_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'AddTextLayerRequest': {'addi
                            'required': [],
                            'type': 'object'},
  'SaveRequest': {'additionalProperties': False,
-                 'properties': {'path': {'anyOf': [{'type': 'string'}, {'type': 'null'}],
+                 'properties': {'copy_export': {'default': False,
+                                                'description': 'pdf.copy-export.v1: publish a copy '
+                                                               'without clearing dirty or changing '
+                                                               'the target.',
+                                                'type': 'boolean'},
+                                'overwrite': {'default': True,
+                                              'description': 'pdf.copy-export.v1: false commits '
+                                                             'atomically only when the target does '
+                                                             'not exist.',
+                                              'type': 'boolean'},
+                                'path': {'anyOf': [{'type': 'string'}, {'type': 'null'}],
                                          'default': None,
                                          'title': 'Path'},
                                 'pdf_settings': {'anyOf': [{'additionalProperties': True,
@@ -509,6 +519,12 @@ REQUEST_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'AddTextLayerRequest': {'addi
                                                            {'type': 'null'}],
                                                  'default': None,
                                                  'title': 'Pdf Settings'},
+                                'rebind_target': {'default': False,
+                                                  'description': 'pdf.copy-export.v1: after '
+                                                                 'confirmed SaveAs replace the '
+                                                                 'live document source handle and '
+                                                                 'target.',
+                                                  'type': 'boolean'},
                                 'rewrite_text_layers': {'default': True,
                                                         'title': 'Rewrite Text Layers',
                                                         'type': 'boolean'}},
@@ -2418,7 +2434,8 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                            'ocr.mineru-remote-api.v1',
                                                                                            'ocr.default-recognition-mode.v1',
                                                                                            'pdf.page-inspect.v1',
-                                                                                           'pdf.block-edit.v1']},
+                                                                                           'pdf.block-edit.v1',
+                                                                                           'pdf.copy-export.v1']},
                                                       'type': 'array',
                                                       'uniqueItems': True},
                                      'capability_descriptors': {'items': {'additionalProperties': False,

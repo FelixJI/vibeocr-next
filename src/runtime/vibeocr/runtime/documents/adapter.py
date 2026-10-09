@@ -131,6 +131,9 @@ class _PdfChildLike(Protocol):
         pdf_settings: dict[str, Any] | None = None,
         *,
         rewrite_text_layers: bool = True,
+        copy_export: bool = False,
+        overwrite: bool = True,
+        rebind_target: bool = False,
     ) -> Any: ...
 
     def cancel(self, session_id: str) -> None: ...
@@ -341,12 +344,25 @@ class PdfProcessAdapter:
         pdf_settings: dict[str, Any] | None = None,
         *,
         rewrite_text_layers: bool = True,
+        copy_export: bool = False,
+        overwrite: bool = True,
+        rebind_target: bool = False,
     ) -> SaveResponse:
+        extra = (
+            {
+                "copy_export": copy_export,
+                "overwrite": overwrite,
+                "rebind_target": rebind_target,
+            }
+            if copy_export or rebind_target or not overwrite
+            else {}
+        )
         return self.ensure_started().save(
             session_id,
             path,
             pdf_settings,
             rewrite_text_layers=rewrite_text_layers,
+            **extra,
         )
 
     def save_transactional(self, session_id: str, target_path: str) -> str:

@@ -147,6 +147,9 @@ class SaveRequest(BaseModel):
     pdf_settings: dict[str, Any] | None = None
     # OCR 分批写层已完成时无需删除并重写全部文字层；普通保存保持 True。
     rewrite_text_layers: bool = True
+    copy_export: bool = False
+    overwrite: bool = True
+    rebind_target: bool = False
 
 
 class RotateRequest(BaseModel):

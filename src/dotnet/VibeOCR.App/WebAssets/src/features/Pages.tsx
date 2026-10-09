@@ -36,7 +36,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { AppActions, AppViewState } from "../app/types";
 import { CaptureButton } from "../components/CaptureButton";
@@ -1935,7 +1935,15 @@ function PdfParameters({
   );
 }
 
-export function PdfPage({ viewState, actions }: FeatureProps) {
+export function PdfPage(props: FeatureProps) {
+  return (
+    <PdfDocumentPage
+      key={stringValue(feature(props.viewState, "pdf").documentId)}
+      {...props}
+    />
+  );
+}
+function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
   const [operationRange, setOperationRange] = useState("selected");
   const [insertAfter, setInsertAfter] = useState(1);
   const [pageWidth, setPageWidth] = useState(612);
@@ -1947,6 +1955,65 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
   const [confirmRevision, setConfirmRevision] = useState(0);
   const [replaceLayers, setReplaceLayers] = useState(false);
   const state = feature(viewState, "pdf");
+  const documentId =
+    typeof state.documentId === "string" ? state.documentId : undefined;
+  // 当前检查组件的预览状态排空接缝：切换/关闭前 await 最后位置/草稿在宿主
+  // 完成提交，再发送后续命令（关闭可能取消/失败，文档保留时草稿不丢）。
+  const positionFlush = useRef<(() => Promise<void>) | null>(null);
+  const registerPositionFlush = useCallback(
+    (flush: (() => Promise<void>) | null) => {
+      positionFlush.current = flush;
+    },
+    [],
+  );
+  const registerNativePreviewFlush = parentActions.registerPdfPreviewFlush;
+  const actions: AppActions = {
+    ...parentActions,
+    run: (action) => {
+      const bound =
+        documentId !== undefined &&
+        action.type.startsWith("pdf.") &&
+        action.type !== "pdf.open"
+          ? {
+              documentId,
+              documentRevision: numberValue(state.revision),
+              ...action,
+            }
+          : action;
+      if (
+        action.type !== "pdf.activateDocument" &&
+        action.type !== "pdf.close" &&
+        action.type !== "pdf.open"
+      )
+        return parentActions.run(bound);
+      // 切换/关闭前等待最后位置/草稿在宿主确认提交；未确认时不发出该命令，
+      // 待发送值保留在检查组件中供重试。
+      const flush = positionFlush.current;
+      if (!flush) return parentActions.run(bound);
+      return flush().then(
+        () => parentActions.run(bound),
+        () => false,
+      );
+    },
+  };
+  const documents = Array.isArray(state.documents)
+    ? state.documents.filter(
+        (value): value is Record<string, unknown> =>
+          !!value && typeof value === "object",
+      )
+    : [];
+  const exports = Array.isArray(state.exportItems)
+    ? state.exportItems.filter(
+        (value): value is Record<string, unknown> =>
+          !!value && typeof value === "object",
+      )
+    : [];
+  // 关闭入口对准当前活动文档：远端会话未释放（关闭失败可重试）的条目即使
+  // 页数为 0 也保持可用，避免只能退出应用才能释放会话。
+  const activeDocument = documents.find(
+    (document) => stringValue(document.documentId) === documentId,
+  );
+  const [modifiedOnly, setModifiedOnly] = useState(true);
   const busy = booleanValue(state.isBusy);
   const detected = numberValue(state.detectedCount);
   const layers = numberValue(state.textLayerCount);
@@ -1959,6 +2026,16 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
     stringValue(state.sessionId) !== undefined &&
     selectedPage >= 0 &&
     selectedPage < pageCount;
+  useEffect(() => {
+    if (!documentId || (hasCurrentPage && state.canInspectPage === true))
+      return;
+    return registerNativePreviewFlush?.(documentId, () => Promise.resolve());
+  }, [
+    documentId,
+    hasCurrentPage,
+    state.canInspectPage,
+    registerNativePreviewFlush,
+  ]);
   const pages = pdfPages(state.pages);
   const windowStart = Math.max(0, numberValue(state.windowStart));
   const selectedPages = Array.isArray(state.selectedPages)
@@ -2006,14 +2083,16 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
             actions={actions}
             icon={<FolderOpen aria-hidden="true" size={16} />}
           >
-            打开 PDF
+            {documents.length > 0 ? "添加 PDF" : "打开 PDF"}
           </CapabilityGate>
           <CapabilityGate
             capability="pdf.open"
             capabilities={viewState.capabilities}
             action={{ type: "pdf.close" }}
             actions={actions}
-            disabled={pageCount === 0 && !busy}
+            disabled={
+              pageCount === 0 && !busy && activeDocument?.closeFailed !== true
+            }
             icon={<X aria-hidden="true" size={16} />}
           >
             关闭文档
@@ -2021,6 +2100,106 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
         </>
       }
     >
+      <div className="pdf-documents" aria-label="PDF 文档列表">
+        {documents.map((document) => (
+          <Button
+            key={stringValue(document.documentId)}
+            appearance={
+              document.documentId === documentId ? "primary" : "secondary"
+            }
+            aria-pressed={document.documentId === documentId}
+            onClick={() =>
+              void actions.run({
+                type: "pdf.activateDocument",
+                documentId: document.documentId,
+              })
+            }
+          >
+            {stringValue(document.name) ?? "PDF"}
+            {document.isModified === true ? " · 未保存" : ""}
+            {document.isBusy === true ? " · 处理中" : ""}
+            {document.closeFailed === true ? " · 关闭失败，可重试" : ""}
+          </Button>
+        ))}
+      </div>
+      {documents.length > 0 && (
+        <details className="pdf-export">
+          <summary>批量导出副本</summary>
+          <p>
+            导出副本保留原文档修改状态和保存目标。默认避让同名文件；目标竞争导致的失败可重试。
+          </p>
+          <label>
+            <input
+              type="checkbox"
+              checked={modifiedOnly}
+              onChange={(event) => setModifiedOnly(event.target.checked)}
+            />
+            仅已修改文档
+          </label>
+          <Button
+            disabled={state.canCopyExport !== true || state.exporting === true}
+            onClick={() =>
+              void actions.run({
+                type: "pdf.exportDocuments",
+                modifiedOnly,
+                retry: false,
+              })
+            }
+          >
+            选择目录并导出
+          </Button>
+          <Button
+            disabled={state.exporting !== true}
+            onClick={() => void actions.run({ type: "pdf.cancelExport" })}
+          >
+            停止后续导出
+          </Button>
+          <Button
+            disabled={
+              state.exporting === true ||
+              // 与宿主 CreateExportPlan(retry) 一致：仅真正失败/取消/未开始项
+              // 可重试；saved 与 unconfirmed（结果未确认，不自动重试）不重发。
+              !exports.some(
+                (item) =>
+                  item.status === "failed" ||
+                  item.status === "cancelled" ||
+                  item.status === "not_started",
+              )
+            }
+            onClick={() =>
+              void actions.run({
+                type: "pdf.exportDocuments",
+                modifiedOnly,
+                retry: true,
+              })
+            }
+          >
+            重试未完成项
+          </Button>
+          <ul>
+            {exports.map((item) => (
+              <li key={stringValue(item.documentId)}>
+                {stringValue(item.name)} ·{" "}
+                {item.status === "saved"
+                  ? "成功"
+                  : item.status === "saving"
+                    ? "提交中"
+                    : item.status === "unconfirmed"
+                      ? "结果未确认"
+                      : item.status === "failed"
+                        ? "失败"
+                        : item.status === "cancelled"
+                          ? "取消"
+                          : "未开始"}
+                {stringValue(item.output)
+                  ? ` · ${stringValue(item.output)}`
+                  : ""}
+                {stringValue(item.error) ? ` · ${stringValue(item.error)}` : ""}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
       <TaskEngineSelector
         engines={engines}
         taskEngine={stringValue(state.taskEngine)}
@@ -2360,6 +2539,14 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
             >
               保存
             </CapabilityGate>
+            {state.canCopyExport === true && (
+              <Button
+                disabled={busy || pageCount === 0}
+                onClick={() => void actions.run({ type: "pdf.saveAs" })}
+              >
+                另存为并切换保存目标
+              </Button>
+            )}
           </Toolbar>
           <div className="pdf-insertion" aria-label="插入页面">
             <label htmlFor="pdf-insert-after">插入到第几页后（0 为开头）</label>
@@ -2508,7 +2695,13 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
           <Panel label="REVIEW" title="页面检查">
             {hasCurrentPage && state.canInspectPage === true ? (
               <PdfInspection
-                key={`${stringValue(state.sessionId)}:${numberValue(state.revision)}:${selectedPage}:${resource(state.pagePreview)?.url ?? ""}:${resource(state.pageInspect)?.url ?? ""}`}
+                key={`${documentId}:${stringValue(state.sessionId)}:${numberValue(state.revision)}:${selectedPage}:${resource(state.pagePreview)?.url ?? ""}:${resource(state.pageInspect)?.url ?? ""}`}
+                position={
+                  state.previewPosition &&
+                  typeof state.previewPosition === "object"
+                    ? (state.previewPosition as Record<string, unknown>)
+                    : undefined
+                }
                 page={selectedPage}
                 count={pageCount}
                 revision={numberValue(state.revision)}
@@ -2519,6 +2712,9 @@ export function PdfPage({ viewState, actions }: FeatureProps) {
                 busy={busy}
                 canEdit={state.canCorrectText === true}
                 actions={actions}
+                registerPositionFlush={registerPositionFlush}
+                documentId={documentId}
+                registerNativePositionFlush={registerNativePreviewFlush}
               />
             ) : hasCurrentPage && activePage?.thumbnail ? (
               <img

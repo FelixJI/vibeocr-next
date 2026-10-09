@@ -85,6 +85,77 @@ describe("HostBridge", () => {
     expect(ChromeWebViewTransport.fromWindow({})).toBeUndefined();
   });
 
+  it("confirms native PDF flush only after its correlated pending draft settles", async () => {
+    const transport = new FakeTransport();
+    const bridge = new BridgeClient(transport, { idFactory: () => "boot" });
+    const boot = bridge.bootstrap();
+    transport.receive({
+      version: 2,
+      kind: "response",
+      id: "boot",
+      type: "app.bootstrap",
+      payload: {
+        sessionId: "s1",
+        revision: 0,
+        route: "pdf",
+        theme: "light",
+        capabilities: [],
+        features: {},
+      },
+    });
+    await boot;
+    const doc = "11111111111111111111111111111111";
+    let resolve!: (confirmed: boolean) => void;
+    let calls = 0;
+    bridge.subscribePdfPreviewFlush(async (id) => {
+      expect(id).toBe(doc);
+      calls++;
+      return new Promise<boolean>((done) => {
+        resolve = done;
+      });
+    });
+    const flush: BridgeEnvelope = {
+      version: 2,
+      kind: "request",
+      id: "native-flush",
+      type: "pdf.flushPreview",
+      payload: { sessionId: "s1", documentId: doc },
+    };
+    transport.receive({
+      ...flush,
+      payload: { ...flush.payload, sessionId: "old-session" },
+    });
+    expect(calls).toBe(0);
+    transport.receive(flush);
+    expect(transport.posted).toHaveLength(1);
+    transport.receive({ ...flush, id: "parallel" });
+    await Promise.resolve();
+    expect(transport.posted.at(-1)).toMatchObject({
+      kind: "response",
+      id: "parallel",
+      payload: { ok: false },
+    });
+    resolve(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(transport.posted.at(-1)).toEqual({
+      ...flush,
+      kind: "response",
+      payload: { ...flush.payload, ok: true },
+    });
+    bridge.subscribePdfPreviewFlush(async () => {
+      throw new Error("unconfirmed");
+    });
+    transport.receive({ ...flush, id: "failed" });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(transport.posted.at(-1)).toMatchObject({
+      id: "failed",
+      payload: { ok: false },
+    });
+    bridge.dispose();
+  });
+
   it("bootstraps through one versioned correlated request", async () => {
     const transport = new FakeTransport();
     const bridge = new BridgeClient(transport, {

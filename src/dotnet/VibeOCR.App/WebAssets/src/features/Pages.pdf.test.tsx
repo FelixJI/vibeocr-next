@@ -1,11 +1,30 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppActions, AppViewState } from "../app/types";
 import { PdfPage } from "./Pages";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 function setup(patch: Record<string, unknown> = {}) {
+  let nativeFlush: (() => Promise<void>) | undefined;
+  let retiredNativeFlush: (() => Promise<void>) | undefined;
   const actions: AppActions & { run: ReturnType<typeof vi.fn> } = {
+    registerPdfPreviewFlush: (_id, flush) => {
+      nativeFlush = flush;
+      return () => {
+        retiredNativeFlush = flush;
+        if (nativeFlush === flush) nativeFlush = undefined;
+      };
+    },
     run: vi.fn().mockResolvedValue(true),
     navigate: vi.fn(),
     setTheme: vi.fn(),
@@ -46,6 +65,12 @@ function setup(patch: Record<string, unknown> = {}) {
   };
   const view = render(<PdfPage viewState={state} actions={actions} />);
   return Object.assign(actions, {
+    unmount: () => view.unmount(),
+    openFromNative: () =>
+      ((nativeFlush ?? retiredNativeFlush)?.() ?? Promise.resolve()).then(
+        () => actions.run({ type: "pdf.open" }),
+        () => false,
+      ),
     updatePdf: (patch: Record<string, unknown>) =>
       view.rerender(
         <PdfPage
@@ -155,7 +180,11 @@ describe("PDF text layer actions", () => {
   it("freezes confirmed deletion pages and revision and explains visible text", () => {
     const actions = setup();
     fireEvent.click(screen.getByRole("button", { name: "删除选中文字层" }));
-    expect(actions.run).not.toHaveBeenCalled();
+    expect(
+      actions.run.mock.calls.every(
+        ([command]) => command.type === "pdf.setPreviewPosition",
+      ),
+    ).toBe(true);
     expect(screen.getByRole("alertdialog")).toHaveTextContent("原有可见文字");
     expect(screen.getByRole("alertdialog")).toHaveTextContent(
       "不是安全脱敏工具",
@@ -259,14 +288,15 @@ it.each([
   },
 ])(
   "shows the page-selection placeholder after $label",
-  ({ label, command, patch }) => {
+  async ({ label, command, patch }) => {
     const actions = setup();
     expect(
       screen.getByRole("button", { name: "适应页面" }),
     ).toBeInTheDocument();
     expect(screen.getByText("正在读取当前页高清预览…")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: label }));
-    expect(actions.run).toHaveBeenLastCalledWith(command);
+    // 关闭前先等待预览状态排空完成，命令异步发出。
+    await waitFor(() => expect(actions.run).toHaveBeenLastCalledWith(command));
     actions.updatePdf(patch);
     expect(screen.getByText("选择页面后查看预览。")).toBeInTheDocument();
     expect(
@@ -289,3 +319,468 @@ it.each([{ sessionId: undefined }, { selectedPage: 70 }])(
     ).not.toBeInTheDocument();
   },
 );
+
+describe("PDF close retry entry", () => {
+  it("keeps close available for a retained close-failed document and binds its identity", () => {
+    const actions = setup({
+      sessionId: undefined,
+      pageCount: 0,
+      selectedPage: -1,
+      selectedPages: [],
+      pages: [],
+      documentId: "33333333333333333333333333333333",
+      documents: [
+        {
+          documentId: "33333333333333333333333333333333",
+          name: "late.pdf",
+          pageCount: 0,
+          isModified: false,
+          isBusy: false,
+          closeFailed: true,
+        },
+      ],
+    });
+    const close = screen.getByRole("button", { name: "关闭文档" });
+    expect(close).toBeEnabled();
+    expect(screen.getByRole("button", { name: /late\.pdf/ })).toHaveTextContent(
+      "关闭失败，可重试",
+    );
+    fireEvent.click(close);
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "pdf.close",
+      documentId: "33333333333333333333333333333333",
+      documentRevision: 8,
+    });
+  });
+
+  it("keeps close disabled for an actually empty workspace without failed documents", () => {
+    setup({
+      sessionId: undefined,
+      pageCount: 0,
+      selectedPage: -1,
+      selectedPages: [],
+      pages: [],
+      documents: [],
+    });
+    expect(screen.getByRole("button", { name: "关闭文档" })).toBeDisabled();
+  });
+});
+
+describe("PDF document switching", () => {
+  it.each(["switch", "open", "native", "unmounted"] as const)(
+    "does not send %s while the last position commit is unconfirmed",
+    async (operation) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({
+            page: 69,
+            ocr_blocks: [
+              {
+                index: 2,
+                text: "原文 211",
+                score: 0,
+                score_unknown: true,
+                bbox: [100, 200, 900, 300],
+              },
+            ],
+          }),
+        }),
+      );
+      const a = "11111111111111111111111111111111";
+      const b = "22222222222222222222222222222222";
+      const actions = setup({
+        documentId: a,
+        pagePreview: {
+          url: "/hd-a.svg",
+          mediaType: "image/png",
+          byteLength: 100,
+        },
+        pageInspect: {
+          url: "/inspect-a.json",
+          mediaType: "application/json",
+          byteLength: 200,
+        },
+        documents: [
+          { documentId: a, name: "a.pdf", isModified: true },
+          { documentId: b, name: "b.pdf", isModified: false },
+        ],
+      });
+      // 宿主未确认任何位置提交：切换命令不得发出。
+      actions.run.mockResolvedValue(false);
+      fireEvent.click(await screen.findByRole("button", { name: /原文 211/ }));
+      await waitFor(() => expect(actions.run).toHaveBeenCalled());
+      fireEvent.change(screen.getByLabelText("校正文字"), {
+        target: { value: "未确认草稿" },
+      });
+      if (operation === "unmounted") {
+        actions.unmount();
+        void actions.openFromNative();
+      } else if (operation === "native") void actions.openFromNative();
+      else
+        fireEvent.click(
+          screen.getByRole("button", {
+            name: operation === "switch" ? "b.pdf" : "添加 PDF",
+          }),
+        );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(
+        actions.run.mock.calls.some(
+          ([command]) =>
+            (command as Record<string, unknown>).type ===
+            (operation === "switch" ? "pdf.activateDocument" : "pdf.open"),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it.each(["switch", "open", "native", "unmounted"] as const)(
+    "commits the last draft before %s and immediate return to A",
+    async (operation) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({
+            page: 69,
+            ocr_blocks: [
+              {
+                index: 2,
+                text: "原文 211",
+                score: 0,
+                score_unknown: true,
+                bbox: [100, 200, 900, 300],
+              },
+            ],
+          }),
+        }),
+      );
+      const a = "11111111111111111111111111111111";
+      const b = "22222222222222222222222222222222";
+      const actions = setup({
+        documentId: a,
+        pagePreview: {
+          url: "/hd-a.svg",
+          mediaType: "image/png",
+          byteLength: 100,
+        },
+        pageInspect: {
+          url: "/inspect-a.json",
+          mediaType: "application/json",
+          byteLength: 200,
+        },
+        documents: [
+          { documentId: a, name: "a.pdf", isModified: true },
+          { documentId: b, name: "b.pdf", isModified: false },
+        ],
+      });
+      // 首条草稿相关位置更新在途中：切换命令必须等待排空完成才发出。
+      let resolveSlow!: (ok: boolean) => void;
+      actions.run.mockImplementationOnce(
+        () =>
+          new Promise<boolean>((resolve) => {
+            resolveSlow = resolve;
+          }),
+      );
+      fireEvent.click(await screen.findByRole("button", { name: /原文 211/ }));
+      fireEvent.change(screen.getByLabelText("校正文字"), {
+        target: { value: "最终草稿211" },
+      });
+      if (operation === "unmounted") {
+        actions.unmount();
+        void actions.openFromNative();
+      } else if (operation === "native") void actions.openFromNative();
+      else
+        fireEvent.click(
+          screen.getByRole("button", {
+            name: operation === "switch" ? "b.pdf" : "添加 PDF",
+          }),
+        );
+      // 在途命令未完成：激活命令尚未发出。
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(
+        actions.run.mock.calls.some(
+          ([command]) =>
+            (command as Record<string, unknown>).type ===
+            (operation === "switch" ? "pdf.activateDocument" : "pdf.open"),
+        ),
+      ).toBe(false);
+      resolveSlow(true);
+      await waitFor(() =>
+        expect(
+          actions.run.mock.calls.some(
+            ([command]) =>
+              (command as Record<string, unknown>).type ===
+              (operation === "switch" ? "pdf.activateDocument" : "pdf.open"),
+          ),
+        ).toBe(true),
+      );
+      const calls = actions.run.mock.calls.map(
+        ([command]) => command as Record<string, unknown>,
+      );
+      const activateIndex = calls.findIndex(
+        (command) =>
+          command.type ===
+          (operation === "switch" ? "pdf.activateDocument" : "pdf.open"),
+      );
+      const flushedIndex = calls.findIndex(
+        (command, index) =>
+          index < activateIndex &&
+          command.type === "pdf.setPreviewPosition" &&
+          (command.position as { draft?: string }).draft === "最终草稿211",
+      );
+      // 激活命令发出前，最新草稿已在排空链中完成提交，且是激活前最后一条命令。
+      expect(flushedIndex).toBeGreaterThan(-1);
+      expect(
+        calls.findIndex(
+          (command, index) => index > flushedIndex && index < activateIndex,
+        ),
+      ).toBe(-1);
+      if (operation === "unmounted") return;
+      // 宿主按提交顺序回读：立即切回 A 时返回已提交的最新草稿。
+      actions.updatePdf({
+        documentId: b,
+        sessionId: "worker-b",
+        revision: 3,
+        pageCount: 2,
+        selectedPage: -1,
+        selectedPages: [],
+        pages: [],
+        canInspectPage: false,
+        pagePreview: undefined,
+        pageInspect: undefined,
+      });
+      expect(screen.queryByLabelText("校正文字")).not.toBeInTheDocument();
+      actions.updatePdf({
+        documentId: a,
+        previewPosition: {
+          revision: 8,
+          page: 69,
+          block: 2,
+          draft: "最终草稿211",
+          zoom: 1.5,
+        },
+      });
+      expect(await screen.findByLabelText("校正文字")).toHaveValue(
+        "最终草稿211",
+      );
+    },
+  );
+});
+
+describe("PDF copy export status", () => {
+  const exportDocuments = [
+    {
+      documentId: "11111111111111111111111111111111",
+      name: "a.pdf",
+      revision: 8,
+      status: "saved",
+      output: "a.pdf",
+    },
+    {
+      documentId: "22222222222222222222222222222222",
+      name: "b.pdf",
+      revision: 3,
+      status: "unconfirmed",
+      output: "b.pdf",
+      error: "结果未确认，请检查输出 b.pdf；未自动重试。",
+    },
+  ];
+
+  it("shows unconfirmed as its own status with the retained output and explicit guidance", () => {
+    setup({
+      canCopyExport: true,
+      documents: [
+        {
+          documentId: "11111111111111111111111111111111",
+          name: "a.pdf",
+          isModified: true,
+        },
+        {
+          documentId: "22222222222222222222222222222222",
+          name: "b.pdf",
+          isModified: true,
+        },
+      ],
+      exportItems: exportDocuments,
+    });
+    fireEvent.click(screen.getByText("批量导出副本"));
+    const item = screen
+      .getAllByText(/b\.pdf/)
+      .find((element) => element.tagName === "LI");
+    expect(item).toBeDefined();
+    expect(item).toHaveTextContent("结果未确认");
+    expect(item).toHaveTextContent("未自动重试");
+  });
+
+  it("keeps retry aligned with the host plan: saved and unconfirmed are not retryable", () => {
+    const actions = setup({
+      canCopyExport: true,
+      documents: [
+        {
+          documentId: "11111111111111111111111111111111",
+          name: "a.pdf",
+          isModified: true,
+        },
+      ],
+      exportItems: exportDocuments,
+    });
+    fireEvent.click(screen.getByText("批量导出副本"));
+    expect(screen.getByRole("button", { name: "重试未完成项" })).toBeDisabled();
+    actions.updatePdf({
+      exportItems: [
+        ...exportDocuments,
+        {
+          documentId: "33333333333333333333333333333333",
+          name: "c.pdf",
+          revision: 1,
+          status: "failed",
+          error: "目标冲突",
+        },
+      ],
+    });
+    expect(screen.getByRole("button", { name: "重试未完成项" })).toBeEnabled();
+  });
+});
+
+describe("PDF workspace identity", () => {
+  it("binds editing, save and switching to the opaque document identity", async () => {
+    const actions = setup({
+      documentId: "first",
+      canCopyExport: true,
+      documents: [
+        { documentId: "first", name: "same.pdf", isModified: true },
+        { documentId: "second", name: "same.pdf", isModified: false },
+      ],
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(actions.run).toHaveBeenLastCalledWith({
+      type: "pdf.save",
+      documentId: "first",
+      documentRevision: 8,
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "另存为并切换保存目标" }),
+    );
+    expect(actions.run).toHaveBeenLastCalledWith({
+      type: "pdf.saveAs",
+      documentId: "first",
+      documentRevision: 8,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "same.pdf" }));
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenLastCalledWith({
+        type: "pdf.activateDocument",
+        documentId: "second",
+        documentRevision: 8,
+      }),
+    );
+    expect(
+      screen.getByText(/导出副本保留原文档修改状态和保存目标/),
+    ).toBeInTheDocument();
+  });
+});
+
+it("preserves A confirmed draft through a second switch before restored resources load", async () => {
+  const a = "11111111111111111111111111111111",
+    b = "22222222222222222222222222222222";
+  let finish!: (response: unknown) => void;
+  vi.stubGlobal(
+    "fetch",
+    vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      )
+      .mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          page: 69,
+          ocr_blocks: [
+            { index: 2, text: "原文 R4", bbox: [100, 200, 900, 300] },
+          ],
+        }),
+      }),
+  );
+  const confirmed = {
+    block: 2,
+    draft: "A确认草稿 R4TAIL",
+    originalText: "原文 R4",
+    left: 140,
+    top: 80,
+    zoom: 1.5,
+    revision: 8,
+    page: 69,
+  };
+  const documents = [
+    { documentId: a, name: "a.pdf" },
+    { documentId: b, name: "b.pdf" },
+  ];
+  const actions = setup({
+    documentId: a,
+    documents,
+    previewPosition: confirmed,
+    pagePreview: { url: "/a.png", mediaType: "image/png", byteLength: 100 },
+    pageInspect: {
+      url: "/a.json",
+      mediaType: "application/json",
+      byteLength: 100,
+    },
+  });
+  let stored: unknown = confirmed;
+  actions.run.mockImplementation(async (action) => {
+    if (action.type === "pdf.setPreviewPosition" && action.documentId === a)
+      stored = action.position;
+    return true;
+  });
+  for (const [action] of actions.run.mock.calls)
+    if (action.type === "pdf.setPreviewPosition" && action.documentId === a)
+      stored = action.position;
+  // A 恢复还未结束，用户再次切 B；真实 Pages 接缝会先排空编辑器。
+  fireEvent.click(screen.getByRole("button", { name: "b.pdf" }));
+  await waitFor(() =>
+    expect(actions.run).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "pdf.activateDocument", documentId: b }),
+    ),
+  );
+  expect(stored).toMatchObject(confirmed);
+  actions.updatePdf({
+    documentId: b,
+    sessionId: "b-worker",
+    selectedPage: -1,
+    pages: [],
+    canInspectPage: false,
+    pageInspect: undefined,
+    pagePreview: undefined,
+  });
+  fireEvent.click(screen.getByRole("button", { name: "a.pdf" }));
+  await waitFor(() =>
+    expect(actions.run).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "pdf.activateDocument", documentId: a }),
+    ),
+  );
+  actions.updatePdf({
+    documentId: a,
+    documents,
+    previewPosition: stored,
+    pagePreview: { url: "/a.png", mediaType: "image/png", byteLength: 100 },
+    pageInspect: {
+      url: "/a.json",
+      mediaType: "application/json",
+      byteLength: 100,
+    },
+  });
+  expect(await screen.findByLabelText("校正文字")).toHaveValue(confirmed.draft);
+  await act(async () => {
+    finish({ ok: true, json: async () => ({ page: 69, ocr_blocks: [] }) });
+  });
+  expect(screen.getByLabelText("校正文字")).toHaveValue(confirmed.draft);
+});

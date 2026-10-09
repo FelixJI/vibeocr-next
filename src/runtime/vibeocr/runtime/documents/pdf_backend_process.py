@@ -274,24 +274,29 @@ class SessionRegistry:
 
     def remove(self, session_id: str) -> None:
         with self._lock:
-            s = self._sessions.pop(session_id, None)
-        if s is not None:
-            # 标记 CLOSING，拒绝新操作
-            with s._ops_cond:
-                s.state = "CLOSING"
-                s.cancel_event.set()
-                # 等待活跃操作完成（有界等待，避免永久阻塞）
-                deadline = time.monotonic() + 10.0
-                while s.active_ops > 0 and time.monotonic() < deadline:
-                    s._ops_cond.wait(timeout=1.0)
-            # 在 fitz_lock 内 close，避免与持锁的 render/load/mutate 并发
-            with s.fitz_lock:
-                try:
-                    s.block_editor = None
-                    s.doc.close()
-                except Exception:
-                    pass
+            s = self._sessions.get(session_id)
+        if s is None:
+            return
+        # Keep the entry until close is confirmed; a timeout/exception is retryable.
+        with s._ops_cond:
+            s.state = "CLOSING"
+            s.cancel_event.set()
+            deadline = time.monotonic() + 10.0
+            while s.active_ops > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise HTTPException(
+                        status_code=409, detail="PDF operations have not settled"
+                    )
+                s._ops_cond.wait(timeout=min(1.0, remaining))
+        with s.fitz_lock:
+            if s.doc.is_closed is not True:
+                s.doc.close()
+            s.block_editor = None
             s.state = "CLOSED"
+        with self._lock:
+            if self._sessions.get(session_id) is s:
+                del self._sessions[session_id]
 
     def count(self) -> int:
         with self._lock:
@@ -1024,7 +1029,12 @@ def save(sid: str, req: SaveRequest) -> SaveResponse:
                 path=req.path,
                 pdf_settings=_settings_from_dict(req.pdf_settings),
                 rewrite_text_layers=req.rewrite_text_layers,
+                copy_export=req.copy_export,
+                overwrite=req.overwrite,
+                rebind_target=req.rebind_target,
             )
+            if req.rebind_target and not req.copy_export:
+                s.file_path = s.pdf_document.file_path or s.file_path
             # 全量压缩时 doc 被替换。
             # 注意：_compress_in_place 内部已经 close 了传入的 s.doc（释放
             # Windows 文件锁的必要步骤）。这里不能再 close 一次——对已关闭
@@ -1039,8 +1049,15 @@ def save(sid: str, req: SaveRequest) -> SaveResponse:
         # 8 MiB 帧上限并在保存已经成功后误报连接失败。
         return SaveResponse(
             path=saved_path,
-            diff=ModelDiff(modified_flag=False, structural_flag=False),
+            diff=ModelDiff(
+                modified_flag=s.pdf_document.is_modified if req.copy_export else False,
+                structural_flag=s.pdf_document.has_structural_change
+                if req.copy_export
+                else False,
+            ),
         )
+    except (FileExistsError, ValueError) as e:
+        raise HTTPException(status_code=422, detail=f"保存拒绝: {e}") from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"保存失败: {e}") from e
 

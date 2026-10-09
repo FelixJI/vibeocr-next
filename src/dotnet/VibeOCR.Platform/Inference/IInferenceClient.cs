@@ -119,6 +119,9 @@ public interface IInferenceClient : IAsyncDisposable
     Task ResetPdfCancelAsync(string sessionId, CancellationToken ct) => Task.FromException(new NotSupportedException("PDF operation unavailable."));
     Task<string> SavePdfWithSettingsAsync(string sessionId, string outputPath,
         IReadOnlyDictionary<string, System.Text.Json.JsonElement> settings, CancellationToken ct) => SavePdfAsync(sessionId, outputPath, ct);
+    Task<string> SavePdfOperationAsync(string sessionId, string outputPath,
+        IReadOnlyDictionary<string, System.Text.Json.JsonElement> settings, bool copyExport, bool rebindTarget, bool overwrite, CancellationToken ct)
+        => copyExport || rebindTarget || !overwrite ? Task.FromException<string>(new NotSupportedException("PDF copy export unavailable")) : SavePdfWithSettingsAsync(sessionId, outputPath, settings, ct);
     Task ClosePdfSessionAsync(string sessionId, CancellationToken ct);
 }
 

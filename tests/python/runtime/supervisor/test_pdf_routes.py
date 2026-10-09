@@ -470,3 +470,25 @@ async def test_pdf_error_backend_error_without_status_keeps_internal_error(
         fake_pdf_adapter.close_session = original  # type: ignore[method-assign]
     assert resp.status_code == 500
     assert resp.json()["code"] == "INTERNAL_ERROR"
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"copy_export": True, "overwrite": False, "rebind_target": False},
+        {"copy_export": False, "overwrite": True, "rebind_target": True},
+    ],
+)
+async def test_save_forwards_negotiated_workspace_semantics(
+    pdf_app, supervisor_token, fake_pdf_adapter, fields
+):
+    async with _http(supervisor_token, pdf_app) as http:
+        response = await http.post(
+            "/v2/pdf/sessions/sid-1/save",
+            json={"path": "copy.pdf", "rewrite_text_layers": False, **fields},
+        )
+    assert response.status_code == 200
+    assert response.json()["schema_version"] == 2
+    assert response.json()["path"] == "copy.pdf"
+    _, _, kwargs = fake_pdf_adapter.calls[-1]
+    assert kwargs == {"rewrite_text_layers": False, **fields}

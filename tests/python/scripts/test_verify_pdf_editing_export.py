@@ -117,3 +117,148 @@ def test_old_text_residue_fails(tmp_path: Path) -> None:
     root = _make_root(tmp_path, "pm-residue", [*GOOD_LINES, (220, OLD_ZH)])
     with pytest.raises(AssertionError, match="旧文字层残留或重复"):
         verify_export(root)
+
+
+def _workspace_root(tmp_path: Path) -> Path:
+    from scripts.verify_pdf_editing_export import verify_workspace_export
+
+    root = _make_root(tmp_path, "workspace", GOOD_LINES)
+    original_health = json.loads(
+        (root / "paddle-input-pdf_editing.json").read_text(encoding="utf-8")
+    )
+    fixtures = root / "fixtures"
+    sources = []
+    for folder, count in (("workspace-a", 75), ("workspace-b", 3)):
+        path = fixtures / folder / "same.pdf"
+        path.parent.mkdir()
+        with fitz.open(fixtures / "document_scan.pdf") as scan, fitz.open() as source:
+            source.insert_pdf(scan)
+            page = source.new_page(width=595, height=842)
+            page.insert_text((60, 80), "WORKSPACE NATIVE TAIL202", fontsize=18)
+            page.draw_rect(fitz.Rect(40, 120, 220, 200), fill=(0.2, 0.7, 0.3))
+            for _ in range(count - 2):
+                source.new_page(width=595, height=842)
+            source.save(path)
+        sources.append(path)
+    with fitz.open() as inserted:
+        inserted.new_page().insert_text((60, 80), "INSERTED FULL TAIL202")
+        inserted.save(fixtures / "document_mixed.pdf")
+    a_target, b_target = root / "a-target.pdf", root / "b-target.pdf"
+    with (
+        fitz.open(sources[0]) as a,
+        fitz.open(fixtures / "document_mixed.pdf") as inserted,
+    ):
+        for y, text in [
+            (100, NEW_ZH + " AFTER_SAVE_AS202"),
+            (140, NEW_EN),
+            (180, KEEP),
+        ]:
+            a[0].insert_text(
+                (48, y),
+                text,
+                fontname="helv" if text.isascii() else "china-s",
+                fontsize=6,
+                render_mode=3,
+            )
+        a[1].add_redact_annot(fitz.Rect(50, 50, 550, 100), fill=False)
+        a[1].apply_redactions(images=0, graphics=0)
+        a.insert_pdf(inserted)
+        a.new_page(width=612, height=792)
+        a.save(a_target)
+    with fitz.open(sources[1]) as b:
+        b.save(b_target)
+    retry_items, completed_items = [], []
+    for directory, items in (("partial", retry_items), ("cancelled", completed_items)):
+        parent = root / directory
+        parent.mkdir()
+        for identifier, target in (("A", a_target), ("B", b_target)):
+            output = parent / target.name
+            output.write_bytes(target.read_bytes())
+            items.append(
+                {"DocumentId": identifier, "Output": output.name, "Status": "saved"}
+            )
+    competitor = root / "partial" / "competitor.pdf"
+    competitor.write_text("T4_SYNTHETIC_COMPETITOR")
+    editing = original_health["evidence"]["editing"]
+    editing["DocumentId"] = "A"
+    editing["edits"].append(
+        {"block_index": 0, "old_text": NEW_ZH, "new_text": NEW_ZH + " AFTER_SAVE_AS202"}
+    )
+    health = {
+        "state": "passed",
+        "evidence": {
+            "input_kind": "pdf_workspace",
+            "job": original_health["evidence"]["job"],
+            "workspace": {
+                "editing": editing,
+                "original_paths": list(map(str, sources)),
+                "a_saved": {"file": str(a_target)},
+                "b_saved": {"file": str(b_target)},
+                "partial_directory": str(root / "partial"),
+                "retry_items": retry_items,
+                "cancelled_directory": str(root / "cancelled"),
+                "completed_items": completed_items,
+                "cancelled_items": [{"Status": "saved"}, {"Status": "cancelled"}],
+                "competitor": str(competitor),
+                "before_copy_documents": [{"IsModified": True}, {"IsModified": True}],
+                "after_copy_documents": [{"IsModified": True}, {"IsModified": True}],
+                "resources": [{"thumbnails": 64, "published_files": 66}],
+            },
+        },
+    }
+    (root / "paddle-input-pdf_workspace.json").write_text(
+        json.dumps(health, ensure_ascii=False), encoding="utf-8"
+    )
+    assert verify_workspace_export(root)["copy_dirty_preserved"]
+    return root
+
+
+def test_workspace_complete_outputs_and_save_as_continuation_pass(
+    tmp_path: Path,
+) -> None:
+    from scripts.verify_pdf_editing_export import verify_workspace_export
+
+    report = verify_workspace_export(_workspace_root(tmp_path))
+    assert len(report["outputs"]) == 6
+    assert report["original_sources_preserved"] and report["save_as_continuation"]
+
+
+def test_workspace_truncated_successful_copy_is_rejected(tmp_path: Path) -> None:
+    from scripts.verify_pdf_editing_export import verify_workspace_export
+
+    root = _workspace_root(tmp_path)
+    health_path = root / "paddle-input-pdf_workspace.json"
+    health = json.loads(health_path.read_text(encoding="utf-8"))
+    health["evidence"]["workspace"]["editing"]["edits"][-1]["new_text"] += (
+        " MUST_NOT_BE_MISSING"
+    )
+    health_path.write_text(json.dumps(health, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(AssertionError, match="完整校正"):
+        verify_workspace_export(root)
+
+
+@pytest.mark.parametrize("workspace", [False, True])
+def test_attempt_health_keeps_prior_failure(tmp_path: Path, workspace: bool) -> None:
+    from scripts.verify_pdf_editing_export import verify_workspace_export
+
+    root = (
+        _workspace_root(tmp_path)
+        if workspace
+        else _make_root(tmp_path, "attempt", GOOD_LINES)
+    )
+    verify = verify_workspace_export if workspace else verify_export
+    name = (
+        "paddle-input-pdf_workspace.json"
+        if workspace
+        else "paddle-input-pdf_editing.json"
+    )
+    original = root / name
+    attempt = root / "attempt-new.json"
+    attempt.write_bytes(original.read_bytes())
+    original.write_text('{"state": "failed"}', encoding="utf-8")
+    with pytest.raises(AssertionError):
+        verify(root)
+    verify(root, attempt)
+    assert json.loads(original.read_text(encoding="utf-8"))["state"] == "failed"
+    with pytest.raises(AssertionError, match="合成隔离根"):
+        verify(root, tmp_path / "outside.json")
