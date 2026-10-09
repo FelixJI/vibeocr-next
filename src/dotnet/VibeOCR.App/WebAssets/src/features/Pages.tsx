@@ -2141,7 +2141,14 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
           <Button
             disabled={
               state.exporting === true ||
-              !exports.some((item) => item.status !== "saved")
+              // 与宿主 CreateExportPlan(retry) 一致：仅真正失败/取消/未开始项
+              // 可重试；saved 与 unconfirmed（结果未确认，不自动重试）不重发。
+              !exports.some(
+                (item) =>
+                  item.status === "failed" ||
+                  item.status === "cancelled" ||
+                  item.status === "not_started",
+              )
             }
             onClick={() =>
               void actions.run({
@@ -2161,11 +2168,13 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
                   ? "成功"
                   : item.status === "saving"
                     ? "提交中"
-                    : item.status === "failed"
-                      ? "失败"
-                      : item.status === "cancelled"
-                        ? "取消"
-                        : "未开始"}
+                    : item.status === "unconfirmed"
+                      ? "结果未确认"
+                      : item.status === "failed"
+                        ? "失败"
+                        : item.status === "cancelled"
+                          ? "取消"
+                          : "未开始"}
                 {stringValue(item.output)
                   ? ` · ${stringValue(item.output)}`
                   : ""}

@@ -527,6 +527,81 @@ describe("PDF document switching", () => {
   });
 });
 
+describe("PDF copy export status", () => {
+  const exportDocuments = [
+    {
+      documentId: "11111111111111111111111111111111",
+      name: "a.pdf",
+      revision: 8,
+      status: "saved",
+      output: "a.pdf",
+    },
+    {
+      documentId: "22222222222222222222222222222222",
+      name: "b.pdf",
+      revision: 3,
+      status: "unconfirmed",
+      output: "b.pdf",
+      error: "结果未确认，请检查输出 b.pdf；未自动重试。",
+    },
+  ];
+
+  it("shows unconfirmed as its own status with the retained output and explicit guidance", () => {
+    setup({
+      canCopyExport: true,
+      documents: [
+        {
+          documentId: "11111111111111111111111111111111",
+          name: "a.pdf",
+          isModified: true,
+        },
+        {
+          documentId: "22222222222222222222222222222222",
+          name: "b.pdf",
+          isModified: true,
+        },
+      ],
+      exportItems: exportDocuments,
+    });
+    fireEvent.click(screen.getByText("批量导出副本"));
+    const item = screen
+      .getAllByText(/b\.pdf/)
+      .find((element) => element.tagName === "LI");
+    expect(item).toBeDefined();
+    expect(item).toHaveTextContent("结果未确认");
+    expect(item).toHaveTextContent("未自动重试");
+  });
+
+  it("keeps retry aligned with the host plan: saved and unconfirmed are not retryable", () => {
+    const actions = setup({
+      canCopyExport: true,
+      documents: [
+        {
+          documentId: "11111111111111111111111111111111",
+          name: "a.pdf",
+          isModified: true,
+        },
+      ],
+      exportItems: exportDocuments,
+    });
+    fireEvent.click(screen.getByText("批量导出副本"));
+    expect(screen.getByRole("button", { name: "重试未完成项" })).toBeDisabled();
+    actions.updatePdf({
+      exportItems: [
+        ...exportDocuments,
+        {
+          documentId: "33333333333333333333333333333333",
+          name: "c.pdf",
+          revision: 1,
+          status: "failed",
+          error: "目标冲突",
+        },
+      ],
+    });
+    expect(screen.getByRole("button", { name: "重试未完成项" })).toBeEnabled();
+  });
+});
+
 describe("PDF workspace identity", () => {
   it("binds editing, save and switching to the opaque document identity", async () => {
     const actions = setup({

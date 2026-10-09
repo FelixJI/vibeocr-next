@@ -116,6 +116,89 @@ public sealed class PdfWorkspaceTests
   }
 
   [Fact]
+  public async Task ExitReviewLateBoundCommandsFailAsReceiptsWithoutThrowing()
+  {
+    using var fixture = new Fixture();
+    await using var handler = fixture.Handler();
+    // 经实际 application 边界（桥接层下一跳）验证：失败回执而非异常，
+    // 宿主只把异常升级为全局恢复面板，回执不会隐藏工作台。
+    await using var application = new WorkbenchApplication(
+      ["pdf.open", "pdf.rotate", "pdf.save"], WorkbenchRoute.Pdf, handler);
+    await handler.ExecuteAsync(new OpenDroppedPdfCommand(Path.Combine(fixture.Root, "a.pdf")), CancellationToken.None);
+    PdfDocumentEntry entry = Assert.Single(handler.PdfDocuments);
+    // 退出审阅真实挂起在关闭确认上。
+    fixture.DecisionPending = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    Task<bool> exiting = handler.RequestCloseAllPdfAsync();
+    try
+    {
+      Assert.False(exiting.IsCompleted);
+      // 退出确认挂起时迟到的位置更新：失败回执，不写入条目预览。
+      WorkbenchCommandReceipt latePosition = await application.ExecuteAsync(
+        new WorkbenchCommandEnvelope(Guid.NewGuid(), new PdfBoundCommand(entry.Id,
+          new SetPdfPreviewPositionCommand(new PdfPreviewPosition(Draft: "exit-draft", Revision: entry.Model.Revision, Page: 0)))),
+        CancellationToken.None);
+      Assert.False(latePosition.Ok);
+      Assert.NotEqual("exit-draft", entry.Preview.Draft);
+      // 已关闭/未知文档 ID：失败回执，不抛。
+      WorkbenchCommandReceipt closedId = await application.ExecuteAsync(
+        new WorkbenchCommandEnvelope(Guid.NewGuid(), new PdfBoundCommand("00000000000000000000000000000000", new SavePdfCommand())),
+        CancellationToken.None);
+      Assert.False(closedId.Ok);
+      // 被拒命令没有产生远端副作用。
+      Assert.Empty(fixture.Client.Saves);
+    }
+    finally
+    {
+      // 红断言提前抛出时也放行挂起的关闭确认，避免退出流程悬挂。
+      fixture.DecisionPending.TrySetResult(PdfCloseDecision.Cancel);
+      await exiting;
+    }
+    // 用户取消退出后原会话仍可用；旧 revision 的迟到写命令在退出窗口外
+    // 命中修订门：失败回执，不产生远端副作用。
+    Assert.Same(entry, Assert.Single(handler.PdfDocuments));
+    Assert.True(entry.Model.HasSession);
+    WorkbenchCommandReceipt staleRevision = await application.ExecuteAsync(
+      new WorkbenchCommandEnvelope(Guid.NewGuid(), new PdfBoundCommand(entry.Id,
+        new RotatePdfCommand(90), entry.Model.Revision - 1)),
+      CancellationToken.None);
+    Assert.False(staleRevision.Ok);
+    Assert.Empty(fixture.Client.Saves);
+    WorkbenchCommandOutcome reactivated = await handler.ExecuteAsync(
+      new PdfBoundCommand(entry.Id, new ActivatePdfDocumentCommand()), CancellationToken.None);
+    Assert.Null(reactivated.Error);
+    Assert.Equal(entry.Id, Assert.IsType<PdfWorkbenchState>(Assert.Single(reactivated.States)).DocumentId);
+  }
+
+  [Fact]
+  public async Task UnconfirmedExportKeepsTargetAndRetryDoesNotDuplicate()
+  {
+    var client = new Client(); var workspace = new PdfWorkspace();
+    for (int i = 0; i < 3; i++)
+    { var model = Model(client); await model.OpenPathAsync(Path.Combine(Path.GetTempPath(), $"unconfirmed-{i}.pdf"), CancellationToken.None); workspace.Add(model); }
+    string directory = Path.Combine(Path.GetTempPath(), $"t4-unconfirmed-{Guid.NewGuid():N}"); Directory.CreateDirectory(directory);
+    // 中间文档在服务端提交副本后丢失响应（本地合成 target 已存在）；
+    // 末尾文档是真正的失败项。
+    PdfDocumentEntry unconfirmed = workspace.Documents[1];
+    client.ThrowCopyAfterSubmit = unconfirmed.Model.SessionId;
+    client.FailCopy = workspace.Documents[2].Model.SessionId;
+    await workspace.ExportAsync(directory, false, false, () => { }, CancellationToken.None);
+    Assert.Equal(["saved", "unconfirmed", "failed"], workspace.ExportItems.Select(item => item.Status));
+    // 未确认项保留真实目标与明确反馈，dirty 不因未确认被清除。
+    string target = workspace.ExportItems[1].Output!;
+    Assert.Equal(Path.Combine(directory, "unconfirmed-1.pdf"), target);
+    Assert.Contains("未确认", workspace.ExportItems[1].Error);
+    Assert.True(File.Exists(target));
+    Assert.All(workspace.Documents, entry => Assert.True(entry.Model.IsModified));
+    // 重试只重发真正失败项：未确认项不第二次提交，也不换目标生成副本。
+    client.ThrowCopyAfterSubmit = null; client.FailCopy = null;
+    await workspace.ExportAsync(directory, false, true, () => { }, CancellationToken.None);
+    Assert.Equal(["saved", "unconfirmed", "saved"], workspace.ExportItems.Select(item => item.Status));
+    Assert.Equal(target, workspace.ExportItems[1].Output);
+    Assert.Equal(1, client.Saves.Count(save => string.Equals(save.Path, target, StringComparison.OrdinalIgnoreCase)));
+    Assert.True(unconfirmed.Model.IsModified);
+  }
+
+  [Fact]
   public async Task LateRotationDoesNotRevokeAnotherDocumentsWindowAndExitCancelsBeforeSettlement()
   {
     using var fixture = new Fixture(70);
@@ -307,9 +390,13 @@ public sealed class PdfWorkspaceTests
       new SetPdfPreviewPositionCommand(new PdfPreviewPosition(Draft: "stale", Revision: first.Model.Revision + 5, Page: 0))), CancellationToken.None);
     await handler.ExecuteAsync(new PdfBoundCommand(first.Id,
       new SetPdfPreviewPositionCommand(new PdfPreviewPosition(Draft: "stale-page", Revision: first.Model.Revision, Page: first.Model.PageCount + 1))), CancellationToken.None);
-    // 未知文档 ID 仍按入口门拒绝（硬错误，与其他绑定命令一致）。
-    await Assert.ThrowsAsync<InvalidOperationException>(() => handler.ExecuteAsync(new PdfBoundCommand("00000000000000000000000000000000",
-      new SetPdfPreviewPositionCommand(new PdfPreviewPosition(Draft: "x", Revision: 0, Page: 0))), CancellationToken.None).AsTask());
+    // 未知文档 ID 仍按入口门拒绝：预期冲突以失败回执返回（经既有错误边界），
+    // 不再以异常穿透桥接层触发全局 WebView 恢复面板。
+    WorkbenchCommandOutcome unknown = await handler.ExecuteAsync(new PdfBoundCommand("00000000000000000000000000000000",
+      new SetPdfPreviewPositionCommand(new PdfPreviewPosition(Draft: "x", Revision: 0, Page: 0))), CancellationToken.None);
+    Assert.NotNull(unknown.Error);
+    Assert.Equal("desktop_command_failed", unknown.Error.Code);
+    Assert.Equal(WorkbenchProblemCategory.Unavailable, unknown.Error.Category);
     // 切回后恢复的是最后被接受的位置/草稿。
     WorkbenchCommandOutcome back = await handler.ExecuteAsync(new PdfBoundCommand(first.Id, new ActivatePdfDocumentCommand()), CancellationToken.None);
     PdfWorkbenchState state = Assert.IsType<PdfWorkbenchState>(Assert.Single(back.States));
@@ -348,6 +435,7 @@ public sealed class PdfWorkspaceTests
     public TaskCompletionSource<string>? PendingSave { get; set; }
     public TaskCompletionSource SaveEntered { get; set; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public string? FailCopy { get; set; }
+    public string? ThrowCopyAfterSubmit { get; set; }
     public bool FailClose { get; set; }
     public bool FailOpen { get; set; }
     public int Opens { get; private set; }
@@ -366,6 +454,8 @@ public sealed class PdfWorkspaceTests
     public override Task<string> SavePdfOperationAsync(string sessionId, string path, IReadOnlyDictionary<string, JsonElement> settings, bool copyExport, bool rebindTarget, bool overwrite, CancellationToken ct)
     {
       Saves.Add((sessionId, path)); SaveEntered.TrySetResult();
+      if (copyExport && ThrowCopyAfterSubmit == sessionId)
+      { File.WriteAllBytes(path, [1, 2, 3, 4]); throw new IOException("synthetic response lost after commit"); }
       if (copyExport && FailCopy == sessionId) throw new InferenceClientException(HttpV2ErrorCode.ValidationError, "synthetic target collision", false);
       return PendingSave?.Task ?? Task.FromResult(path);
     }

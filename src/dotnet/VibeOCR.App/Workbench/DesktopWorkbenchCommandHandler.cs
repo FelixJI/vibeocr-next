@@ -318,31 +318,34 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     ArgumentNullException.ThrowIfNull(command);
     PdfDocumentEntry? previousContext = pdfContext.Value;
-    if (command is PdfBoundCommand bound)
-    {
-      PdfDocumentEntry? entry = pdfWorkspace.Find(bound.DocumentId);
-      if (entry is null)
-      {
-        if (bound.DocumentId != pdfWorkspace.EmptyDocumentId || pdfWorkspace.Active is not null ||
-          bound.Command is not (SetPdfTaskEngineCommand or SetPdfProcessingSettingsCommand) || pdfExitReview)
-          throw new InvalidOperationException("文档已关闭");
-      }
-      else
-      {
-        // 纯预览状态（缩放/滚动/草稿）允许写入已知的非活动条目：交互中的
-        // 最后位置/草稿不因切换文档丢失；未知/关闭中的文档仍在上面拒绝。
-        if (bound.Command is not (ActivatePdfDocumentCommand or SetPdfPreviewPositionCommand) && entry != pdfWorkspace.Active)
-          throw new InvalidOperationException("活动文档已变化，请重新操作");
-        if (pdfExitReview || entry.Closing) throw new InvalidOperationException("文档正在关闭确认中");
-        if (bound.Revision is { } expected && expected != entry.Model.Revision && bound.Command is not (ActivatePdfDocumentCommand or CancelPdfCommand or CancelPdfExportCommand or SetPdfPreviewPositionCommand))
-          throw new InvalidOperationException("文档修订已变化，请重新操作");
-      }
-      pdfContext.Value = entry; command = bound.Command;
-    }
-    else pdfContext.Value = pdfWorkspace.Active;
-    cancellationToken.ThrowIfCancellationRequested();
+    // 入口门在既有 try/catch 错误边界内执行：预期操作冲突（关闭/切换/修订/
+    // 退出确认）按既有 WorkbenchCommandOutcome 回执拒绝，不再穿透桥接层
+    // 触发全局 WebView 恢复；finally 同步恢复 pdfContext。
     try
     {
+      if (command is PdfBoundCommand bound)
+      {
+        PdfDocumentEntry? entry = pdfWorkspace.Find(bound.DocumentId);
+        if (entry is null)
+        {
+          if (bound.DocumentId != pdfWorkspace.EmptyDocumentId || pdfWorkspace.Active is not null ||
+            bound.Command is not (SetPdfTaskEngineCommand or SetPdfProcessingSettingsCommand) || pdfExitReview)
+            throw new InvalidOperationException("文档已关闭");
+        }
+        else
+        {
+          // 纯预览状态（缩放/滚动/草稿）允许写入已知的非活动条目：交互中的
+          // 最后位置/草稿不因切换文档丢失；未知/关闭中的文档仍在上面拒绝。
+          if (bound.Command is not (ActivatePdfDocumentCommand or SetPdfPreviewPositionCommand) && entry != pdfWorkspace.Active)
+            throw new InvalidOperationException("活动文档已变化，请重新操作");
+          if (pdfExitReview || entry.Closing) throw new InvalidOperationException("文档正在关闭确认中");
+          if (bound.Revision is { } expected && expected != entry.Model.Revision && bound.Command is not (ActivatePdfDocumentCommand or CancelPdfCommand or CancelPdfExportCommand or SetPdfPreviewPositionCommand))
+            throw new InvalidOperationException("文档修订已变化，请重新操作");
+        }
+        pdfContext.Value = entry; command = bound.Command;
+      }
+      else pdfContext.Value = pdfWorkspace.Active;
+      cancellationToken.ThrowIfCancellationRequested();
       WorkbenchState? state = command switch
       {
         SelectRecognitionImageCommand => StartRecognition(

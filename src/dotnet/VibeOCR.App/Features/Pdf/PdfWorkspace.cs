@@ -54,8 +54,10 @@ public sealed class PdfWorkspace
   public void Activate(PdfDocumentEntry entry) { if (!documents.Contains(entry)) throw new InvalidOperationException("文档已关闭"); Active = entry; }
   public void Remove(PdfDocumentEntry entry) { documents.Remove(entry); if (Active == entry) Active = documents.LastOrDefault(); if (documents.Count == 0) EmptyDocumentId = Guid.NewGuid().ToString("N"); }
   public void CancelExport() => cancelExport = true;
+  /// <summary>仅真正失败/取消/未开始的项可重试；saved 与 unconfirmed（服务端可能已
+  /// 提交副本但响应丢失）不重发，避免盲目重试生成重复副本。</summary>
   public PdfExportItem[] CreateExportPlan(bool modifiedOnly, bool retry) => retry
-    ? ExportItems.Where(item => item.Status != "saved").ToArray()
+    ? ExportItems.Where(item => item.Status is "failed" or "cancelled" or "not_started").ToArray()
     : documents.Where(entry => entry.Model.HasSession && (!modifiedOnly || entry.Model.IsModified))
       .Select(entry => new PdfExportItem(entry.Id, Path.GetFileName(entry.Model.FilePath ?? "document.pdf"), entry.Model.Revision, entry.Model.ProcessingSettings)).ToArray();
   public async Task ExportAsync(string directory, bool modifiedOnly, bool retry, Action changed, CancellationToken ct, PdfExportItem[]? snapshot = null)
@@ -65,7 +67,7 @@ public sealed class PdfWorkspace
     var plan = snapshot ?? CreateExportPlan(modifiedOnly, retry);
     var items = retry ? previous.ToList() : plan.ToList();
     ExportGeneration++; ExportItems = items; Exporting = true; cancelExport = false; changed();
-    var targets = new HashSet<string>(retry ? previous.Where(item => item.Status == "saved" && item.Output is not null).Select(item => item.Output!) : [], StringComparer.OrdinalIgnoreCase);
+    var targets = new HashSet<string>(retry ? previous.Where(item => (item.Status == "saved" || item.Status == "unconfirmed") && item.Output is not null).Select(item => item.Output!) : [], StringComparer.OrdinalIgnoreCase);
     try
     {
       foreach (PdfExportItem item in plan)
@@ -81,7 +83,24 @@ public sealed class PdfWorkspace
           target = Path.Combine(directory, $"{Path.GetFileNameWithoutExtension(item.Name)}_{suffix}.pdf");
         targets.Add(target); items[index] = item with { Status = "saving", Output = target }; changed();
         PdfSaveResult result = await entry.Model.ExportCopyAsync(target, item.Revision, item.Settings, CancellationToken.None);
-        items[index] = item with { Status = result.Saved ? "saved" : result.Disposition == PdfSaveDisposition.Cancelled ? "cancelled" : "failed", Output = result.Saved ? result.Target : null, Error = result.Error };
+        // Unconfirmed：副本提交后响应丢失，服务端可能已写入真实目标。保留
+        // result.Target 与独立状态，明确告知用户检查该输出且不自动重试。
+        items[index] = item with
+        {
+          Status = result.Disposition switch
+          {
+            PdfSaveDisposition.Saved => "saved",
+            PdfSaveDisposition.Unconfirmed => "unconfirmed",
+            PdfSaveDisposition.Cancelled => "cancelled",
+            _ => "failed",
+          },
+          Output = result.Disposition is PdfSaveDisposition.Saved or PdfSaveDisposition.Unconfirmed
+            ? result.Target
+            : null,
+          Error = result.Disposition == PdfSaveDisposition.Unconfirmed
+            ? $"结果未确认，请检查输出 {Path.GetFileName(result.Target)}；未自动重试。"
+            : result.Error,
+        };
         changed();
       }
     }

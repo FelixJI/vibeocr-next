@@ -224,6 +224,11 @@ test("1024x720 dark batch running workspace", async ({ page }) => {
 
 test("1280x800 light PDF review workspace", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
+  // 宿主真实契约：打开的文档必有 sessionId/documentId 与 documents 摘要
+  // （含 dirty 状态）；canCopyExport 为 Runtime 协商真值（展示另存为与批量
+  // 导出）。不伪造 HD 页检查或缩略图资源：canInspectPage=false 且无缩略图
+  // 时回退到占位分支；截图前展开批量导出，呈现未确认导出状态。
+  const documentId = "33333333333333333333333333333333";
   await mount(page, {
     revision: 7,
     route: "pdf",
@@ -233,6 +238,19 @@ test("1280x800 light PDF review workspace", async ({ page }) => {
       pdf: {
         isBusy: false,
         statusCode: "pdf.open",
+        sessionId: "0123456789abcdef0123456789abcdef",
+        documentId,
+        documents: [
+          {
+            documentId,
+            name: "扫描合同-审阅.pdf",
+            pageCount: 4,
+            isModified: true,
+            isBusy: false,
+            phase: "idle",
+            closeFailed: false,
+          },
+        ],
         pageCount: 4,
         selectedPage: 1,
         selectedPages: [1],
@@ -242,6 +260,21 @@ test("1280x800 light PDF review workspace", async ({ page }) => {
         textLayerCount: 2,
         canAddTextLayer: true,
         isModified: true,
+        canCopyExport: true,
+        canInspectPage: false,
+        canCorrectText: false,
+        exporting: false,
+        exportGeneration: 1,
+        exportItems: [
+          {
+            documentId,
+            name: "扫描合同-审阅.pdf",
+            revision: 2,
+            status: "unconfirmed",
+            output: "扫描合同-审阅_1.pdf",
+            error: "结果未确认，请检查输出 扫描合同-审阅_1.pdf；未自动重试。",
+          },
+        ],
         pages: [
           {
             index: 0,
@@ -272,6 +305,9 @@ test("1280x800 light PDF review workspace", async ({ page }) => {
       },
     },
   });
+  // 展开批量导出区后截图：未确认导出状态与重试入口对用户可见。
+  await page.getByText("批量导出副本").click();
+  await expect(page.getByText(/扫描合同-审阅\.pdf · 结果未确认/)).toBeVisible();
   await expect(page).toHaveScreenshot("pdf-light-1280x800.png", {
     fullPage: true,
   });
