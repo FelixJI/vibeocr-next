@@ -19,6 +19,7 @@ public sealed class PdfViewModel(
   private CancellationTokenSource? _activeRun;
   private Task _cancelSignal = Task.CompletedTask;
   private long _generation;
+  private long _resultCacheGeneration;
   private bool _isBusy;
   private int _inflight;
   private TaskCompletionSource? _settlement;
@@ -859,23 +860,27 @@ public sealed class PdfViewModel(
     string? session = SessionId;
     long revision = Revision;
     TrimResultCache(start, count);
+    long cacheGeneration = Volatile.Read(ref _resultCacheGeneration);
     var needed = Pages.Skip(start).Take(count).Where(page => page.Result is null && page.ResultReference is not null)
-        .GroupBy(page => page.ResultReference!.JobId).ToArray();
+        .Select(page => (Page: page, Reference: page.ResultReference!))
+        .GroupBy(item => item.Reference.JobId).ToArray();
     foreach (var group in needed)
     {
       int sequence = 0;
       while (true)
       {
         JobUpdate update = await inference.ObserveAsync(group.Key, sequence, ct);
-        if (SessionId != session || Revision != revision) return;
-        foreach (PdfPageViewModel page in group)
+        if (SessionId != session || Revision != revision || cacheGeneration != Volatile.Read(ref _resultCacheGeneration)) return;
+        foreach (var (page, reference) in group)
         {
-          ItemOutcome? outcome = update.Outcomes.FirstOrDefault(item => item.ItemId == page.ResultReference!.ItemId);
+          // 同修订下的新 OCR job/清层也可能更换引用；旧回读不能借新归属回填。
+          if (page.ResultReference != reference) continue;
+          ItemOutcome? outcome = update.Outcomes.FirstOrDefault(item => item.ItemId == reference.ItemId);
           if (outcome?.State == ItemState.Succeeded)
           {
-            page.Result = RecognitionOutcomeMapper.ToResponse(outcome, page.ResultReference!.Pipeline);
+            page.Result = RecognitionOutcomeMapper.ToResponse(outcome, reference.Pipeline);
             if (page.Result.PreprocAngle is { } angle)
-              page.Result = page.Result with { PreprocAngle = (angle + page.ResultReference.RotationOffset) % 360 };
+              page.Result = page.Result with { PreprocAngle = (angle + reference.RotationOffset) % 360 };
             page.OcrText = page.Result.Text;
           }
         }
@@ -887,6 +892,8 @@ public sealed class PdfViewModel(
   }
   public void TrimResultCache(int start, int count)
   {
+    // 淘汰窗口或切走文档时，使等待 supervisor 回读的旧窗口先于回填失效。
+    Interlocked.Increment(ref _resultCacheGeneration);
     foreach (PdfPageViewModel page in Pages)
       if (page.Index < start || page.Index >= start + count) { page.Result = null; page.OcrText = ""; }
   }

@@ -38,6 +38,56 @@ public sealed class PdfTextLayerTests
     Assert.Equal(before + 1, client.Written.Count);
   }
 
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task ResultReadbackCannotReviveRetiredWindowsAndCanReloadOnReturn(bool switchedAway)
+  {
+    var client = new PdfClient(192);
+    var model = new PdfViewModel(client, new Source());
+    await model.OpenPathAsync("synthetic-192.pdf", CancellationToken.None);
+    await model.StartOcrAsync(Enumerable.Range(0, 192).ToArray(), false, CancellationToken.None);
+    Assert.Equal(192, model.Pages.Count(page => page.ResultReference is not null));
+    Assert.Equal(64, model.Pages.Count(page => page.Result is not null));
+    string job0 = model.Pages[0].ResultReference!.JobId, job64 = model.Pages[64].ResultReference!.JobId;
+    var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var second = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    client.BeforeObserve = id => id == job0 ? first.Task : id == job64 ? second.Task : Task.CompletedTask;
+    Task old0 = model.PrepareResultsAsync(0, 64, CancellationToken.None);
+    Task old64 = model.PrepareResultsAsync(64, 64, CancellationToken.None);
+    try
+    {
+      await model.PrepareResultsAsync(128, 64, CancellationToken.None);
+      Assert.Equal(64, model.Pages.Count(page => page.Result is not null));
+      // AddPdfPath/Activate 切走实际调用同一 Trim(0,0) seam。
+      if (switchedAway) model.TrimResultCache(0, 0);
+    }
+    finally { first.TrySetResult(); second.TrySetResult(); await Task.WhenAll(old0, old64); }
+    Assert.All(model.Pages.Where(page => switchedAway || page.Index < 128), page => { Assert.Null(page.Result); Assert.Equal("", page.OcrText); });
+    Assert.Equal(switchedAway ? 0 : 64, model.Pages.Count(page => page.Result is not null));
+    Assert.Equal(192, model.Pages.Count(page => page.ResultReference is not null));
+    client.BeforeObserve = null;
+    await model.PrepareResultsAsync(0, 64, CancellationToken.None);
+    Assert.All(model.Pages.Take(64), page => { Assert.NotNull(page.Result); Assert.Equal($"中文 page-{page.Index}", page.OcrText); });
+    Assert.All(model.Pages.Skip(64), page => Assert.Null(page.Result));
+  }
+
+  [Fact]
+  public async Task ResultReadbackDoesNotUseAReplacedReferenceAfterObserve()
+  {
+    var client = new PdfClient(1); var model = new PdfViewModel(client, new Source());
+    await model.OpenPathAsync("synthetic.pdf", CancellationToken.None);
+    await model.StartOcrAsync([0], false, CancellationToken.None);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    client.BeforeObserve = _ => release.Task;
+    Task pending = model.PrepareResultsAsync(0, 0, CancellationToken.None);
+    await pending;
+    pending = model.PrepareResultsAsync(0, 1, CancellationToken.None);
+    model.Pages[0].ResultReference = null; // 清引用入口的最小边界：不能把旧 job 回填到新归属。
+    release.TrySetResult(); await pending;
+    Assert.Null(model.Pages[0].Result); Assert.Equal("", model.Pages[0].OcrText);
+  }
+
   [Fact]
   public async Task ClosingAndReplacingDocumentReleaseWorkerSession()
   {
@@ -265,8 +315,10 @@ public sealed class PdfTextLayerTests
       _jobs[id] = items;
       return Task.FromResult(new JobRef { JobId = id, Items = items });
     }
+    public Func<string, Task>? BeforeObserve { get; set; }
     public override async Task<JobUpdate> ObserveAsync(string id, int sequence, CancellationToken ct)
     {
+      if (BeforeObserve is { } before) await before(id);
       if (TerminalGate is not null)
       {
         if (ct.CanBeCanceled) await Task.Delay(Timeout.Infinite, ct);
