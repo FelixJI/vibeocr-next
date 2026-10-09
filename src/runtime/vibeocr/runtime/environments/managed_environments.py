@@ -39,6 +39,8 @@ from vibeocr.runtime.environments.runtime_installer import (
     _prepare_online_artifacts,
     _python_in,
     _run_install_command,
+    _uv_command,
+    _uv_install_environment,
     probe_nvidia_driver,
 )
 from vibeocr.runtime.environments.runtime_layout import resolve_runtime_store
@@ -1947,7 +1949,15 @@ class ManagedEnvironmentStore:
                 observer.set_phase("prepare", "初始化 Python 解释器（随产品提供）")
                 base = self._base_python()
                 result = subprocess.run(
-                    [str(base), "-I", "-m", "venv", "--copies", str(root)],
+                    [
+                        str(base),
+                        "-I",
+                        "-m",
+                        "venv",
+                        "--copies",
+                        "--without-pip",
+                        str(root),
+                    ],
                     stdin=subprocess.DEVNULL,
                     capture_output=True,
                     text=True,
@@ -2075,25 +2085,22 @@ class ManagedEnvironmentStore:
         }
         env.update(
             {
-                "PIP_CACHE_DIR": str(cache / "pip"),
                 "UV_CACHE_DIR": str(cache / "uv"),
                 "HF_HOME": str(cache / "huggingface"),
                 "TEMP": str(cache / "temp"),
                 "TMP": str(cache / "temp"),
-                "PIP_CONFIG_FILE": os.devnull,
-                "PIP_NO_INPUT": "1",
                 "PYTHONNOUSERSITE": "1",
                 "PYTHONUTF8": "1",
                 "PYTHONUNBUFFERED": "1",
             }
         )
-        (cache / "pip").mkdir(parents=True, exist_ok=True)
         (cache / "temp").mkdir(parents=True, exist_ok=True)
         pack_files = [self.manifest.path.parent / name for name in scope.runtime_pack]
         if pack_files and not all(path.is_file() for path in pack_files):
             raise ManagedEnvironmentError("bound offline engine pack is missing")
         observer = self._install_observer
-        command = [str(python), "-m", "pip", "install", "--progress-bar", "off"]
+        env = _uv_install_environment(env, cache)
+        command = _uv_command(python, "install")
         if pack_files and all(path.is_file() for path in pack_files):
             if observer is not None:
                 observer.set_phase("unpack", "解包随产品提供的离线依赖")
@@ -2108,6 +2115,7 @@ class ManagedEnvironmentStore:
                 )
                 observer.bundled()
             command += [
+                "--offline",
                 "--no-index",
                 "--find-links",
                 str(pack_dir),
@@ -2122,8 +2130,10 @@ class ManagedEnvironmentStore:
                 python, scope.lock_path, endpoint, cache, observer, env
             )
             command += [
-                "--index-url",
+                "--default-index",
                 endpoint,
+                "--index-strategy",
+                "first-index",
                 "--find-links",
                 str(downloaded),
                 "--no-deps",
@@ -2146,6 +2156,7 @@ class ManagedEnvironmentStore:
             env=env,
             reporter=observer,
             heartbeat_code="runtime.install_profile",
+            gate_python=python,
         )
         if observer is not None:
             observer.installed_batch()
@@ -2154,19 +2165,13 @@ class ManagedEnvironmentStore:
                 "安装内部 Runtime wheel（随产品提供，独立于目标依赖计数）",
             )
         _run_install_command(
-            [
-                str(python),
-                "-m",
-                "pip",
-                "install",
-                "--no-deps",
-                "--force-reinstall",
-                str(wheel),
-            ],
+            _uv_command(python, "install")
+            + ["--offline", "--no-deps", "--reinstall", str(wheel)],
             timeout=600,
             env=env,
             reporter=observer,
             heartbeat_code="runtime.install_backend",
+            gate_python=python,
         )
         if observer is not None:
             observer.set_phase("verify", "验证 Runtime 导入与依赖一致性")
@@ -2176,13 +2181,15 @@ class ManagedEnvironmentStore:
             env=env,
             reporter=observer,
             heartbeat_code="runtime.verify_runtime",
+            gate_python=python,
         )
         _run_install_command(
-            [str(python), "-m", "pip", "check"],
+            _uv_command(python, "check") + ["--offline"],
             timeout=60,
             env=env,
             reporter=observer,
             heartbeat_code="runtime.verify_runtime",
+            gate_python=python,
         )
 
     @contextmanager

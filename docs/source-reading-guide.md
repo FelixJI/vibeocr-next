@@ -43,6 +43,34 @@ Python 旧生成路由与选项仍有内部契约消费者，本次保留，不�
 二者均不引入 Python.NET/IronPython、第二套 IPC 或全量原生 UI 重写，不移除 Python OCR/PDF 能力、
 已证明的 worker 隔离、Runtime 安装事务与内部 wire。
 
+## 用户环境安装执行器
+
+首启与受管理环境安装统一调用固定 **uv 0.12.22** 的 `uv pip` 接口，目标为 manifest 绑定的
+Windows x64 CPython 3.13；具名候选由标准 `venv --without-pip` 创建。用户无需 PATH 中的 uv、pip 或系统 Python。
+`bundled_uv.py` 在冻结 Installer 中仅定位 `_MEIPASS/uv/uv.exe` 并核实版本；源码开发入口仅使用根
+`pyproject.toml` / `uv.lock` 安装的 uv distribution，缺失或版本不符明确失败。运行时不下载/bootstrap 工具。
+
+工具来自 [Astral 官方 PyPI uv 0.12.22](https://pypi.org/project/uv/0.12.22/)，Windows wheel 来源与既有摘要
+由 `uv.lock` 记录。`build_runtime_installer.py` 将其 uv.exe 和 wheel 中的 `LICENSE-MIT` / `LICENSE-APACHE`
+一起嵌入现有 onefile EXE；许可证为 [MIT 或 Apache-2.0](https://github.com/astral-sh/uv/tree/0.12.22)。
+Installer ZIP 仍只有绑定的一个 EXE，沿用产品现有 installer / manifest 完整性链。
+
+各 profile/recipe requirements lock 仍是唯一用户依赖权威，用户环境不消费根开发 `uv.lock`。
+在线解析的 pylock 只是临时派生结果：按真实目标解释器的版本/平台/ABI筛选，再核对原锁适用包集合、版本、
+marker、direct URL 与工件摘要，输出现有下载/清理模型可读的统一报告。原锁 extras保留在本地安装输入中。
+自管下载器继续统计目标闭包下载字节、缓存命中及安装批次；uv 为元数据解析或 sdist 隔离构建读取的网络数据和
+临时构建依赖不计为目标包已下载/已安装。已核验目标使用本地显式工件并禁止重解析依赖，sdist 构建临时依赖仅用
+计划确认的单一索引。完整随包闭包、Runtime wheel 与最终一致性检查使用 `--offline`。
+
+安装命令屏蔽继承的 `UV_` / `PIP_`、VIRTUAL_ENV / CONDA 与 Python路径覆盖，禁用 uv 用户/父目录配置和
+Python自动下载；产品设置及冻结计划是唯一目标/来源输入。Windows 门控仍先归属 Job 再启动 uv 与构建后代。
+新报告缓存按执行器、目标、原锁及来源失效；旧 pip 报告保留可读的清理归属证据，自管工件只按已有锁验证复用。
+uv 内部缓存由 uv 管理，清理器不遍历删除其内部结构；已健康环境不会只因更换执行器重建。
+
+`env_manager.py` 的历史安装/重装/卸载函数没有当前产品调用方（仓内其他命中仅是历史注释），本次保留历史代码；
+当前产品安装入口在 `runtime_installer.py` 与 `ManagedEnvironmentStore._install_scope`。
+`scripts/build_runtime_pack.py` 的固定 pip download/wheel 是开发构建工具，继续由仓库 build group 管理。
+
 ## 20 分钟启动链
 
 1. 读 `global.json`，确认 SDK 锁定策略。

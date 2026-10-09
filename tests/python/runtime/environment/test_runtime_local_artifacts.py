@@ -60,30 +60,20 @@ def _report(
     return downloads, report
 
 
-def _pip(
+def _uv(
     python: Path, requirements: Path, endpoint: str, target: Path
 ) -> subprocess.CompletedProcess[str]:
     # Target packages are explicit verified local files; only isolated build
     # requirements may use the selected endpoint.
-    env = {
-        k: v for k, v in os.environ.items() if not k.upper().startswith(("PIP_", "UV_"))
-    }
-    env.update(
-        PIP_CONFIG_FILE=os.devnull,
-        PIP_DISABLE_PIP_VERSION_CHECK="1",
-        PIP_NO_INPUT="1",
-        PYTHONNOUSERSITE="1",
+    env = installer._uv_install_environment(
+        dict(os.environ), target.parent / "uv-cache"
     )
     return subprocess.run(
-        [
-            str(python),
-            "-m",
-            "pip",
-            "install",
-            "--disable-pip-version-check",
+        installer._uv_command(python, "install")
+        + [
             "--no-deps",
             "--require-hashes",
-            "--index-url",
+            "--default-index",
             endpoint,
             "--find-links",
             str(target.parent / "downloads" / "artifacts"),
@@ -142,7 +132,7 @@ def test_verified_local_wheel_never_fetches_same_version_or_original_direct_url(
         local = installer._local_install_requirements(
             lock, downloads, report, "3.13.16"
         )
-        result = _pip(
+        result = _uv(
             Path(sys._base_executable), local, endpoint, tmp_path / "installed"
         )
         assert result.returncode == 0, result.stdout + result.stderr
@@ -221,6 +211,12 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
     requests: list[str] = []
 
     class Handler(BaseHTTPRequestHandler):
+        def do_HEAD(self):
+            requests.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(build_wheel)))
+            self.end_headers()
+
         def do_GET(self):
             requests.append(self.path)
             self.send_response(200)
@@ -256,7 +252,7 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
         local = installer._local_install_requirements(
             lock, downloads, report, "3.13.16"
         )
-        result = _pip(
+        result = _uv(
             Path(sys._base_executable),
             local,
             f"http://127.0.0.1:{server.server_port}/simple/",
@@ -328,7 +324,9 @@ def test_both_product_install_entries_bind_verified_local_targets(
             runtime_manifest=manifest_path,
             base_python=sys._base_executable,
         )
-        store._install_scope(Path("python"), scope, "https://example.invalid/simple/")
+        store._install_scope(
+            Path(sys._base_executable), scope, "https://example.invalid/simple/"
+        )
     else:
         root = tmp_path / "candidate"
         root.mkdir()
@@ -371,26 +369,34 @@ def test_resolve_cache_evolution_refreshes_report_but_keeps_verified_artifacts(
         encoding="utf-8",
     )
     report = report.rename(report.with_name(f"{lock.stem}-report.json"))
-    endpoint = "https://example.invalid/simple/"
+    index = tmp_path / "index" / "local-target"
+    index.mkdir(parents=True)
+    (index / "index.html").write_text("", encoding="utf-8")
+    endpoint = index.parent.as_uri() + "/"
     inputs: dict[str, str | bool] = {"lock": lock.read_text(), "endpoint": endpoint}
     if complete_inputs:
         inputs["ignore_installed"] = True
     report.with_suffix(".inputs.json").write_text(json.dumps(inputs), encoding="utf-8")
     commands: list[list[str]] = []
-    monkeypatch.setattr(
-        installer,
-        "_run_install_command",
-        lambda command, **kwargs: commands.append(command),
-    )
+    real_run = installer._run_install_command
+
+    def observe(command, **kwargs):
+        commands.append(command)
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(installer, "_run_install_command", observe)
     assert (
         installer._resolve_online_report(
-            Path("python"), lock, endpoint, tmp_path, None, {}
+            Path(sys._base_executable), lock, endpoint, tmp_path, None, dict(os.environ)
         )
         == report
     )
-    assert len(commands) == (0 if complete_inputs else 1)
-    if commands:
-        assert "--ignore-installed" in commands[0]
+    assert sum("compile" in command for command in commands) == 1
+    assert json.loads(report.read_text())["executor"] == "uv-0.12.22"
+    installer._resolve_online_report(
+        Path(sys._base_executable), lock, endpoint, tmp_path, None, dict(os.environ)
+    )
+    assert sum("compile" in command for command in commands) == 1
     assert (
         json.loads(report.with_suffix(".inputs.json").read_text())["ignore_installed"]
         is True

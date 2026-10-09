@@ -35,19 +35,40 @@ from vibeocr.runtime.environments import managed_cleanup
 from vibeocr.runtime.environments.managed_environments import (
     ManagedEnvironmentStore,
 )
+from vibeocr.runtime.environments.runtime_installer import _parse_resolve_report
 from vibeocr.runtime.environments.runtime_lock import RuntimeStoreLock
 
 
 def seed_installer_cache(product_root: Path, source: Path) -> dict:
     """Copy an existing installer cache; patch only the new copy.
 
-    The seed predates #196, so its resolve inputs lack ``ignore_installed``.
-    Production compares full input dictionaries, so the copy — and only the
-    copy — gets the field added; the seed itself is never written and no
-    consumption check is relaxed.
+    Legacy inputs gain ``ignore_installed`` only in the copy. Report file URIs
+    belonging to the explicit source artifact directory move to the copied
+    directory; network sources and digests stay unchanged. The source is read-only.
     """
     cache = product_root / "state" / "installer-cache"
     shutil.copytree(source, cache)
+    relocated = 0
+    for report_path in sorted((cache / "resolve").glob("*-report.json")):
+        artifacts = _parse_resolve_report(
+            report_path, source / "downloads" / "artifacts"
+        )
+        document = json.loads(report_path.read_text(encoding="utf-8"))
+        changed = False
+        for item, artifact in zip(document["install"], artifacts, strict=True):
+            if artifact.url.startswith("file://"):
+                copied = cache / "downloads" / "artifacts" / artifact.filename
+                if not copied.is_file():
+                    raise ValueError(
+                        "synthetic cache report references a missing copied artifact"
+                    )
+                item["download_info"]["url"] = copied.resolve().as_uri()
+                relocated += 1
+                changed = True
+        if changed:
+            report_path.write_text(
+                json.dumps(document, sort_keys=True), encoding="utf-8"
+            )
     patched = 0
     for inputs_path in sorted((cache / "resolve").glob("*.inputs.json")):
         document = json.loads(inputs_path.read_text(encoding="utf-8"))
@@ -57,7 +78,11 @@ def seed_installer_cache(product_root: Path, source: Path) -> dict:
                 json.dumps(document, sort_keys=True), encoding="utf-8"
             )
             patched += 1
-    return {"source": str(source), "patched_ignore_installed": patched}
+    return {
+        "source": str(source),
+        "patched_ignore_installed": patched,
+        "relocated_file_artifacts": relocated,
+    }
 
 
 def _create_candidate_venv(manager: ManagedEnvironmentStore, destination: Path) -> None:
@@ -69,6 +94,7 @@ def _create_candidate_venv(manager: ManagedEnvironmentStore, destination: Path) 
             "-m",
             "venv",
             "--copies",
+            "--without-pip",
             str(destination),
         ],
         stdin=subprocess.DEVNULL,
