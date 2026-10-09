@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using VibeOCR.App.Web;
 using VibeOCR.App.Workbench;
 using Windows.Storage.Streams;
@@ -41,6 +42,47 @@ public sealed class WebWorkbenchHostPolicyTests
       Assert.Equal("text/plain", response.ContentType);
     }
     finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
+  public async Task PdfPreviewFlushCorrelatesOneRequestAndAbandonsOnCancellationOrDispose()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"pdf-flush-{Guid.NewGuid():N}"); Directory.CreateDirectory(root);
+    using var broker = new WorkbenchResourceBroker(root); using var annotations = new WorkbenchAnnotationStore(root);
+    await using var app = new WorkbenchApplication([], WorkbenchRoute.Pdf);
+    var host = new WebWorkbenchHost(app, broker, annotations, applicationOwner: false);
+    Guid session = Guid.NewGuid(); string doc = Guid.NewGuid().ToString("N"); string request = "";
+    using var cancel = new CancellationTokenSource();
+    Task<bool> first = host.RequestPdfPreviewFlushAsync(session, doc, json => request = json, cancel.Token);
+    Assert.False(await host.RequestPdfPreviewFlushAsync(session, doc, _ => throw new InvalidOperationException(), CancellationToken.None));
+    using JsonDocument sent = JsonDocument.Parse(request); string id = sent.RootElement.GetProperty("id").GetString()!;
+    string Reply(string responseId, Guid responseSession, string responseDoc, bool ok) => JsonSerializer.Serialize(new {
+      version = 2, kind = "response", id = responseId, type = "pdf.flushPreview", payload = new { sessionId = responseSession, documentId = responseDoc, ok } });
+    host.AcceptPdfPreviewFlushResponse("{}"); // 没有匹配 correlation 的未知消息无副作用。
+    host.AcceptPdfPreviewFlushResponse(Reply(Guid.NewGuid().ToString(), session, doc, true));
+    host.AcceptPdfPreviewFlushResponse(Reply(id, Guid.NewGuid(), doc, true));
+    host.AcceptPdfPreviewFlushResponse(Reply(id, session, Guid.NewGuid().ToString("N"), true));
+    Assert.False(first.IsCompleted);
+    host.AcceptPdfPreviewFlushResponse(Reply(id, session, doc, true)); Assert.True(await first);
+    Task<bool> cancelled = host.RequestPdfPreviewFlushAsync(session, doc, _ => { }, cancel.Token);
+    cancel.Cancel(); Assert.False(await cancelled);
+    host.AcceptPdfPreviewFlushResponse(Reply(id, session, doc, true));
+    Task<bool> disposed = host.RequestPdfPreviewFlushAsync(session, doc, _ => { }, CancellationToken.None);
+    Assert.False(disposed.IsCompleted); await host.DisposeAsync(); Assert.False(await disposed);
+  }
+
+  [Theory]
+  [InlineData("[]")]
+  [InlineData("null")]
+  [InlineData("{\"type\":5}")]
+  [InlineData("{\"type\":null}")]
+  public void InvalidEnvelopeDoesNotEnterPreviewOrBootstrapDispatch(string json)
+  {
+    using JsonDocument document = JsonDocument.Parse(json);
+    Assert.False(WebWorkbenchHost.IsPdfPreviewFlushResponse(document.RootElement));
+    Assert.False(WebWorkbenchHost.IsBootstrap(json));
+    Assert.Throws<WorkbenchBridgeProtocolException>(() =>
+      WorkbenchBridgeCodec.ParseCommand(json, Guid.NewGuid()));
   }
 
   [Fact]

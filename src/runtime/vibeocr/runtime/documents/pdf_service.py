@@ -248,6 +248,9 @@ class PdfService:
         pdf_settings: object | None = None,
         *,
         rewrite_text_layers: bool = True,
+        copy_export: bool = False,
+        overwrite: bool = True,
+        rebind_target: bool = False,
     ) -> SaveResult:
         """对所有有 OCR 块的页重写文字层后落盘（保存/另存为共用）。
 
@@ -272,6 +275,30 @@ class PdfService:
 
         settings = pdf_settings if pdf_settings is not None else PdfGlobalSettings()
         compress = getattr(settings, "compress_on_save", True)
+        if copy_export and rebind_target:
+            raise ValueError("copy export cannot rebind the target")
+        if not overwrite and path is None:
+            raise ValueError("no-clobber requires an explicit new target")
+        if copy_export and (path is None or rewrite_text_layers):
+            raise ValueError("copy export requires a target and the current text layer")
+        if (
+            copy_export
+            and pdf_document.file_path
+            and os.path.normcase(os.path.abspath(path))
+            == os.path.normcase(os.path.abspath(pdf_document.file_path))
+        ):
+            raise ValueError("copy export cannot replace the document target")
+        # An explicit source target still needs Windows close/replace/reopen.
+        if (
+            path is not None
+            and not copy_export
+            and doc.name
+            and os.path.normcase(os.path.abspath(path))
+            == os.path.normcase(os.path.abspath(doc.name))
+        ):
+            if not overwrite:
+                raise FileExistsError(path)
+            path = None
 
         # clean_on_save 决定全量压缩时是否深度清理内容流。默认 False：加文字层
         # 是纯增量场景，clean=True 会解压并重写扫描件内容流，叠加 MuPDF 无法保留
@@ -351,12 +378,31 @@ class PdfService:
                 doc.save(temporary, deflate=compress, clean=clean)
                 with open(temporary, "r+b") as stream:
                     os.fsync(stream.fileno())
-                Path(temporary).replace(target)
+                if overwrite:
+                    Path(temporary).replace(target)
+                elif os.name == "nt":
+                    # Windows rename is atomic and refuses an existing destination.
+                    os.rename(temporary, target)
+                else:
+                    # Both names are on the same filesystem; link is a no-clobber commit.
+                    os.link(temporary, target)
+                if rebind_target and not copy_export:
+                    # Open the committed PDF before releasing the old source handle.
+                    # Subsequent saves/another entry opening the old source remain safe.
+                    new_doc = fitz.open(target)
+                    try:
+                        doc.close()
+                    except Exception:
+                        new_doc.close()
+                        raise
             finally:
                 Path(temporary).unlink(missing_ok=True)
 
-        pdf_document.is_modified = False
-        pdf_document.has_structural_change = False
+        if not copy_export:
+            if rebind_target and path is not None:
+                pdf_document.file_path = str(Path(path).absolute())
+            pdf_document.is_modified = False
+            pdf_document.has_structural_change = False
         return SaveResult(rewritten, path, new_doc)
 
     @staticmethod

@@ -12,6 +12,15 @@ import { projectSnapshot, WorkbenchWebRuntime } from "./runtime";
 
 class FakeHostBridge implements HostBridge {
   readonly commands: HostCommand[] = [];
+  previewFlush?: (documentId: string) => Promise<boolean>;
+  subscribePdfPreviewFlush(
+    listener: (documentId: string) => Promise<boolean>,
+  ): () => void {
+    this.previewFlush = listener;
+    return () => {
+      this.previewFlush = undefined;
+    };
+  }
   nextResult: CommandResult = { revision: 8, ok: true, problem: null };
   private listener?: (event: HostStateEvent) => void;
 
@@ -44,6 +53,147 @@ class FakeHostBridge implements HostBridge {
 }
 
 describe("WorkbenchWebRuntime", () => {
+  it("native preview flush matches the mounted PDF and succeeds with no PDF work outside that route", async () => {
+    const bridge = new FakeHostBridge();
+    const runtime = new WorkbenchWebRuntime(bridge);
+    await runtime.start(() => undefined);
+    const a = "11111111111111111111111111111111",
+      b = "22222222222222222222222222222222";
+    expect(await bridge.previewFlush!(a)).toBe(true);
+    bridge.emit({
+      sessionId: "session-1",
+      revision: 8,
+      scope: "shell",
+      change: "replace",
+      state: { route: "pdf" },
+    });
+    bridge.emit({
+      sessionId: "session-1",
+      revision: 9,
+      scope: "pdf",
+      change: "replace",
+      state: { documentId: a },
+    });
+    expect(await bridge.previewFlush!(a)).toBe(false);
+    let done!: () => void;
+    const deferred = new Promise<void>((resolve) => {
+      done = resolve;
+    });
+    const unregister = runtime.actions.registerPdfPreviewFlush!(
+      a,
+      () => deferred,
+    );
+    expect(await bridge.previewFlush!(b)).toBe(false);
+    let completed = false;
+    const pending = bridge.previewFlush!(a).then((ok) => {
+      completed = ok;
+    });
+    await Promise.resolve();
+    expect(completed).toBe(false);
+    done();
+    await pending;
+    expect(completed).toBe(true);
+    unregister();
+    runtime.actions.registerPdfPreviewFlush!(a, async () => undefined);
+    expect(await bridge.previewFlush!(a)).toBe(true); // 空文档/无待提交的预览也明确完成。
+    runtime.stop();
+    expect(bridge.previewFlush).toBeUndefined();
+  });
+
+  it("waits for the exact retiring drain outside PDF and before returning to that document", async () => {
+    const bridge = new FakeHostBridge();
+    const runtime = new WorkbenchWebRuntime(bridge);
+    await runtime.start(() => undefined);
+    const a = "11111111111111111111111111111111";
+    bridge.emit({
+      sessionId: "session-1",
+      revision: 8,
+      scope: "pdf",
+      change: "replace",
+      state: { documentId: a, documents: [{ documentId: a }] },
+    });
+    let done!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      done = resolve;
+    });
+    const unregister = runtime.actions.registerPdfPreviewFlush!(
+      a,
+      () => pending,
+    );
+    unregister(); // 实际组件已卸载，当前注册为空；保留其确切 drain。
+    let complete = false;
+    const native = bridge.previewFlush!(a).then((ok) => {
+      complete = ok;
+    });
+    const returning = runtime.actions.run({
+      type: "pdf.activateDocument",
+      documentId: a,
+    });
+    await Promise.resolve();
+    expect(complete).toBe(false);
+    expect(bridge.commands).toHaveLength(0);
+    expect(await bridge.previewFlush!("22222222222222222222222222222222")).toBe(
+      false,
+    );
+    done();
+    await native;
+    expect(complete).toBe(true);
+    expect(await returning).toBe(true);
+    expect(bridge.commands[0]?.action).toBe("activateDocument");
+    runtime.stop();
+  });
+
+  it("failed retiring drain blocks navigation and can retry until authoritative close releases it", async () => {
+    const bridge = new FakeHostBridge();
+    const runtime = new WorkbenchWebRuntime(bridge);
+    await runtime.start(() => undefined);
+    const a = "11111111111111111111111111111111";
+    bridge.emit({
+      sessionId: "session-1",
+      revision: 8,
+      scope: "pdf",
+      change: "replace",
+      state: { documentId: a, documents: [{ documentId: a }] },
+    });
+    let reject = true;
+    let calls = 0;
+    const unregister = runtime.actions.registerPdfPreviewFlush!(a, async () => {
+      calls++;
+      if (reject) throw new Error("unconfirmed");
+    });
+    unregister();
+    await expect(bridge.previewFlush!(a)).rejects.toThrow("unconfirmed");
+    runtime.actions.navigate("pdf");
+    expect(
+      await runtime.actions.run({
+        type: "pdf.activateDocument",
+        documentId: a,
+      }),
+    ).toBe(false);
+    expect(bridge.commands).toHaveLength(0);
+    reject = false;
+    expect(await bridge.previewFlush!(a)).toBe(true);
+    expect(calls).toBeGreaterThan(1);
+    reject = true;
+    const again = runtime.actions.registerPdfPreviewFlush!(a, async () => {
+      calls++;
+      throw new Error("unconfirmed");
+    });
+    again();
+    await expect(bridge.previewFlush!(a)).rejects.toThrow("unconfirmed");
+    bridge.emit({
+      sessionId: "session-1",
+      revision: 9,
+      scope: "pdf",
+      change: "replace",
+      state: { documents: [] },
+    });
+    const before = calls;
+    expect(await bridge.previewFlush!(a)).toBe(true);
+    expect(calls).toBe(before);
+    runtime.stop();
+  });
+
   it.each([
     [{ supervisorStatus: "未就绪", isReady: false }, "识别服务未就绪"],
     [{ supervisorStatus: "正在连接", isReady: false }, "应用启动中…"],

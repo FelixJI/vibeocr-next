@@ -22,7 +22,8 @@
     "ocr.mineru-remote-api.v1",
     "ocr.default-recognition-mode.v1",
     "pdf.page-inspect.v1",
-    "pdf.block-edit.v1"
+    "pdf.block-edit.v1",
+    "pdf.copy-export.v1"
   ],
   "definitions": {
     "ocr.recognition.v2": {
@@ -195,6 +196,14 @@
     },
     "pdf.block-edit.v1": {
       "description": "Atomically rewrite a trusted OCR block and retain all other blocks, rejecting incomplete writes.",
+      "lifecycle": "active",
+      "introduced_in": "2.10.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "pdf.copy-export.v1": {
+      "description": "SaveAs rebinds the current document after commit; copy export preserves dirty/structural flags and target with atomic no-clobber publication.",
       "lifecycle": "active",
       "introduced_in": "2.10.0",
       "deprecated_in": null,

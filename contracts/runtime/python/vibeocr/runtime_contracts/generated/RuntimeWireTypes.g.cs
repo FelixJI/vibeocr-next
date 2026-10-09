@@ -1916,6 +1916,15 @@ public sealed record SaveRequest
 
     [JsonPropertyName("rewrite_text_layers")]
     public bool? RewriteTextLayers { get; init; }
+
+    [JsonPropertyName("copy_export")]
+    public bool? CopyExport { get; init; }
+
+    [JsonPropertyName("overwrite")]
+    public bool? Overwrite { get; init; }
+
+    [JsonPropertyName("rebind_target")]
+    public bool? RebindTarget { get; init; }
 }
 
 public sealed record SaveResponse

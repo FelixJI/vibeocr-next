@@ -274,6 +274,7 @@ public sealed class InferenceHttpClient : IInferenceClient
     public Task DeletePdfTextLayersAsync(string sessionId, int[] pages, Action<JsonElement> progress, CancellationToken ct) => _pdf.DeleteTextLayersAsync(sessionId, pages, progress, ct);
     public Task CancelPdfAsync(string sessionId, CancellationToken ct) => _pdf.CancelAsync(sessionId, ct);
     public Task ResetPdfCancelAsync(string sessionId, CancellationToken ct) => _pdf.ResetCancelAsync(sessionId, ct);
+    public Task<string> SavePdfOperationAsync(string sessionId, string outputPath, IReadOnlyDictionary<string, JsonElement> settings, bool copyExport, bool rebindTarget, bool overwrite, CancellationToken ct) => _pdf.SaveOperationAsync(sessionId, outputPath, settings, copyExport, rebindTarget, overwrite, ct);
     public Task<string> SavePdfWithSettingsAsync(string sessionId, string outputPath, IReadOnlyDictionary<string, JsonElement> settings, CancellationToken ct) => _pdf.SaveWithSettingsAsync(sessionId, outputPath, settings, ct);
 
     public Task ClosePdfSessionAsync(string sessionId, CancellationToken ct)

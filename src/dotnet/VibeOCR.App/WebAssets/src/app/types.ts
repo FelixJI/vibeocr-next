@@ -60,6 +60,11 @@ export type AppActionType =
   | "batch.setItemPageRange"
   | "batch.setWindow"
   | "batch.setTaskEngine"
+  | "pdf.activateDocument"
+  | "pdf.saveAs"
+  | "pdf.exportDocuments"
+  | "pdf.cancelExport"
+  | "pdf.setPreviewPosition"
   | "pdf.open"
   | "pdf.rotate"
   | "pdf.orient"
@@ -146,6 +151,10 @@ export interface AppAction {
 }
 
 export interface AppActions {
+  readonly registerPdfPreviewFlush?: (
+    documentId: string,
+    flush: () => Promise<void>,
+  ) => () => void;
   readonly run: (action: AppAction) => Promise<boolean>;
   readonly navigate: (route: AppRoute) => void;
   readonly setTheme: (theme: ThemePreference) => void;

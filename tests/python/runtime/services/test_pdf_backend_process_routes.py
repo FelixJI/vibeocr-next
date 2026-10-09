@@ -1214,8 +1214,8 @@ class TestRenderPreviewError:
 
 
 class TestRegistryRemoveCloseException:
-    def test_remove_swallows_doc_close_exception(self):
-        """remove() 中 doc.close 抛异常应被吞（lines 267-268）。"""
+    def test_remove_propagates_close_failure_and_keeps_retryable_entry(self):
+        """remove() 中 doc.close 抛异常必须传播；条目保留 CLOSING 供重试。"""
         from vibeocr.runtime.documents.pdf_backend_process import (
             BackendSession,
             SessionRegistry,
@@ -1231,9 +1231,18 @@ class TestRegistryRemoveCloseException:
             pdf_document=MagicMock(),
         )
         reg._sessions["x"] = session
-        # 不应抛异常
+        # 不吞异常：关闭失败必须传播，且登记保留（不能假 CLOSED 移除）。
+        with pytest.raises(RuntimeError, match="close boom"):
+            reg.remove("x")
+        assert session.state == "CLOSING"
+        assert reg.count() == 1
+        assert reg._sessions["x"] is session
+        # 只有真实关闭成功后才移除登记；重试会再次进入 doc.close。
+        mock_doc.close.side_effect = None
         reg.remove("x")
         assert session.state == "CLOSED"
+        assert reg.count() == 0
+        assert mock_doc.close.call_count == 2
 
 
 class TestBatchSaveEdgeCases:

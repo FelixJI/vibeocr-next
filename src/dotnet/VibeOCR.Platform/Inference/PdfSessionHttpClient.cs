@@ -195,11 +195,16 @@ public sealed class PdfSessionHttpClient : IPdfSessionClient
         await EnsureSuccessAsync(response, ct);
     }
 
-    public async Task<string> SaveWithSettingsAsync(string sessionId, string outputPath,
+    public Task<string> SaveWithSettingsAsync(string sessionId, string outputPath,
         IReadOnlyDictionary<string, JsonElement> settings, CancellationToken ct)
+        => SaveOperationAsync(sessionId, outputPath, settings, false, false, true, ct);
+
+    public async Task<string> SaveOperationAsync(string sessionId, string outputPath,
+        IReadOnlyDictionary<string, JsonElement> settings, bool copyExport, bool rebindTarget, bool overwrite, CancellationToken ct)
     {
-        using StringContent content = _runtime.CreateJsonContent(new {
-            path = outputPath, pdf_settings = settings, rewrite_text_layers = false });
+        using StringContent content = _runtime.CreateJsonContent(copyExport || rebindTarget || !overwrite
+            ? (object)new { path = outputPath, pdf_settings = settings, rewrite_text_layers = false, copy_export = copyExport, rebind_target = rebindTarget, overwrite }
+            : new { path = outputPath, pdf_settings = settings, rewrite_text_layers = false });
         using HttpResponseMessage response = await _runtime.PostAsync(
             BindSessionPath(RuntimeOperationPaths.SavePdfSession, sessionId), content, ct);
         await EnsureSuccessAsync(response, ct);

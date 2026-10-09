@@ -1,5 +1,5 @@
 import { Button, Checkbox, Textarea } from "@fluentui/react-components";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppActions } from "../app/types";
 
 interface Resource {
@@ -81,7 +81,21 @@ function blockLabel(block: Block): string {
   }${block.edited ? " · 人工修改" : ""} · ${block.text}`;
 }
 
+// 预览位置（纯预览状态）：高频滚动/击键只保留单个在途命令与最新待发送值。
+interface PreviewPositionUpdate {
+  readonly zoom: number | null;
+  readonly left: number;
+  readonly top: number;
+  readonly showBoxes: boolean;
+  readonly block: number | null;
+  readonly draft: string;
+  readonly originalText: string | null;
+  readonly revision: number;
+  readonly page: number;
+}
+
 export function PdfInspection({
+  position,
   page,
   count,
   revision,
@@ -92,7 +106,11 @@ export function PdfInspection({
   busy,
   canEdit,
   actions,
+  registerPositionFlush,
+  registerNativePositionFlush,
+  documentId,
 }: {
+  readonly position?: Readonly<Record<string, unknown>>;
   readonly page: number;
   readonly count: number;
   readonly revision: number;
@@ -103,6 +121,11 @@ export function PdfInspection({
   readonly busy: boolean;
   readonly canEdit: boolean;
   readonly actions: AppActions;
+  readonly documentId?: string;
+  readonly registerNativePositionFlush?: AppActions["registerPdfPreviewFlush"];
+  readonly registerPositionFlush?: (
+    flush: (() => Promise<void>) | null,
+  ) => void;
 }) {
   const viewport = useRef<HTMLDivElement>(null);
   const drag = useRef<{
@@ -117,12 +140,168 @@ export function PdfInspection({
   const [imageFailed, setImageFailed] = useState(false);
   const [dimensions, setDimensions] = useState({ width: 612, height: 792 });
   const [space, setSpace] = useState({ width: 600, height: 480 });
-  const [zoom, setZoom] = useState<number | null>(null);
-  const [showBoxes, setShowBoxes] = useState(true);
-  const [selected, setSelected] = useState<Block | null>(null);
-  const [draft, setDraft] = useState("");
+  const [zoom, setZoom] = useState<number | null>(
+    typeof position?.zoom === "number" ? position.zoom : null,
+  );
+  const [showBoxes, setShowBoxes] = useState(position?.showBoxes !== false);
+  const [selection, setSelection] = useState<{
+    source: Block["source"];
+    index: number;
+  } | null>(
+    position?.revision === revision &&
+      position?.page === page &&
+      typeof position.block === "number"
+      ? { source: "ocr", index: position.block }
+      : null,
+  );
+  const selected =
+    blocks.find(
+      (block) =>
+        block.source === selection?.source && block.index === selection.index,
+    ) ?? null;
+  const [draft, setDraft] = useState(
+    position?.revision === revision &&
+      position?.page === page &&
+      typeof position.draft === "string"
+      ? position.draft
+      : "",
+  );
   const [submitting, setSubmitting] = useState(false);
   const alive = useRef(true);
+  const actionsRef = useRef(actions);
+  useEffect(() => {
+    actionsRef.current = actions;
+  }, [actions]);
+  const initialPosition = useRef(position);
+  const [savedOriginalText] = useState(
+    position?.revision === revision &&
+      position?.page === page &&
+      typeof position.originalText === "string"
+      ? position.originalText
+      : null,
+  );
+  const restoredPosition = useRef(
+    !position || !(Number(position.left) || Number(position.top)),
+  );
+  const restoredImage = useRef(false);
+  const originalText =
+    selection?.source === "ocr"
+      ? selected
+        ? selected.textTruncated
+          ? null
+          : selected.text
+        : savedOriginalText
+      : null;
+  const pendingPosition = useRef<PreviewPositionUpdate | null>(null);
+  const drainingPosition = useRef<Promise<void> | null>(null);
+  // 单个在途 + 最新 pending：同一时刻至多一个排空任务，重复调度直接复用同一
+  // promise，不追加链；只有 run 确认成功才视为提交完成，未确认时保留待发送
+  // 值并使排空失败，切换/关闭命令因此不发出。
+  const drainPosition = useCallback((): Promise<void> => {
+    const existing = drainingPosition.current;
+    if (existing) return existing;
+    // 无待发送值时直接完成：不能登记空任务，否则其同步结束时序会把已完
+    // 成的 promise 留在唯一任务槽里，后续最新值永远不会被发送。
+    if (!pendingPosition.current) return Promise.resolve();
+    const task = (async () => {
+      try {
+        while (pendingPosition.current) {
+          const current = pendingPosition.current;
+          pendingPosition.current = null;
+          let confirmed = false;
+          try {
+            confirmed = await actionsRef.current.run({
+              type: "pdf.setPreviewPosition",
+              position: current,
+            });
+          } catch {
+            confirmed = false;
+          }
+          if (!confirmed) {
+            // 未确认提交：保留待发送值（较新的值优先）供重试，排空以失败结束。
+            pendingPosition.current ??= current;
+            throw new Error("preview position update was not confirmed");
+          }
+        }
+      } finally {
+        drainingPosition.current = null;
+      }
+    })();
+    drainingPosition.current = task;
+    return task;
+  }, []);
+  const schedulePosition = useCallback(
+    (update: PreviewPositionUpdate) => {
+      pendingPosition.current = update;
+      void drainPosition().catch(() => undefined);
+    },
+    [drainPosition],
+  );
+  // 切换/卸载前的排空：可等待，返回即表示最后位置/草稿已被宿主确认提交；
+  // 关闭可能被用户取消或远端失败，同样只补发不丢弃。
+  const flushPosition = drainPosition;
+  useEffect(() => {
+    registerPositionFlush?.(flushPosition);
+    const unregisterNative = documentId
+      ? registerNativePositionFlush?.(documentId, flushPosition)
+      : undefined;
+    return () => {
+      unregisterNative?.();
+      registerPositionFlush?.(null);
+      // 非切换路径的卸载（翻页/修订/路由变化）也排空最后状态；后续任何
+      // 激活/关闭命令都会先 await 同一排空任务。
+      void flushPosition().catch(() => undefined);
+    };
+  }, [
+    registerPositionFlush,
+    registerNativePositionFlush,
+    documentId,
+    flushPosition,
+  ]);
+  const rememberPosition = () => {
+    const node = viewport.current;
+    schedulePosition({
+      zoom,
+      left: restoredPosition.current
+        ? (node?.scrollLeft ?? 0)
+        : Number(initialPosition.current?.left) || 0,
+      top: restoredPosition.current
+        ? (node?.scrollTop ?? 0)
+        : Number(initialPosition.current?.top) || 0,
+      showBoxes,
+      block: selection?.index ?? null,
+      draft,
+      originalText,
+      revision,
+      page,
+    });
+  };
+  useEffect(() => {
+    schedulePosition({
+      zoom,
+      left: restoredPosition.current
+        ? (viewport.current?.scrollLeft ?? 0)
+        : Number(initialPosition.current?.left) || 0,
+      top: restoredPosition.current
+        ? (viewport.current?.scrollTop ?? 0)
+        : Number(initialPosition.current?.top) || 0,
+      showBoxes,
+      block: selection?.index ?? null,
+      draft,
+      originalText,
+      revision,
+      page,
+    });
+  }, [
+    schedulePosition,
+    zoom,
+    showBoxes,
+    selection?.index,
+    draft,
+    originalText,
+    revision,
+    page,
+  ]);
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -159,14 +338,16 @@ export function PdfInspection({
         return blocksFrom(value, page);
       })
       .then((value) => {
-        if (!cancellation.signal.aborted) setBlocks(value);
+        if (!cancellation.signal.aborted) {
+          setBlocks(value);
+        }
       })
       .catch(() => {
         if (!cancellation.signal.aborted)
           setError("文字框读取失败，请重试当前页。");
       });
     return () => cancellation.abort();
-  }, [inspect, page]);
+  }, [inspect, page, revision]);
   const fit = Math.min(
     (space.width - 24) / dimensions.width,
     (space.height - 24) / dimensions.height,
@@ -179,7 +360,7 @@ export function PdfInspection({
       void actions.run({ type: "pdf.setCurrentPage", page: target });
   };
   const cancel = () => {
-    setSelected(null);
+    setSelection(null);
     setDraft("");
     setError("");
     if (submitting) void actions.run({ type: "pdf.cancel" });
@@ -208,7 +389,7 @@ export function PdfInspection({
       });
       if (alive.current) {
         if (ok) {
-          setSelected(null);
+          setSelection(null);
           setDraft("");
         } else
           setError("校正未确认，请查看操作反馈；原稿保留。失联时请重开复检。");
@@ -285,6 +466,7 @@ export function PdfInspection({
               event.key,
             )
           ) {
+            restoredPosition.current = true;
             node.scrollLeft +=
               event.key === "ArrowRight"
                 ? 60
@@ -300,12 +482,19 @@ export function PdfInspection({
           } else return;
           event.preventDefault();
         }}
+        onScroll={() => {
+          if (restoredPosition.current) rememberPosition();
+        }}
+        onWheel={() => {
+          restoredPosition.current = true;
+        }}
         onPointerDown={(event) => {
           if (
             event.button !== 0 ||
             (event.target instanceof Element && event.target.closest("button"))
           )
             return;
+          restoredPosition.current = true;
           const node = event.currentTarget;
           drag.current = {
             x: event.clientX,
@@ -342,12 +531,31 @@ export function PdfInspection({
               alt={`当前第 ${page + 1} 页高清预览`}
               draggable={false}
               onError={() => setImageFailed(true)}
-              onLoad={(event) =>
+              onLoad={(event) => {
                 setDimensions({
                   width: event.currentTarget.naturalWidth || 612,
                   height: event.currentTarget.naturalHeight || 792,
-                })
-              }
+                });
+                if (!restoredImage.current) {
+                  restoredImage.current = true;
+                  requestAnimationFrame(() => {
+                    const node = viewport.current,
+                      saved = initialPosition.current;
+                    if (
+                      alive.current &&
+                      node &&
+                      saved &&
+                      !restoredPosition.current
+                    ) {
+                      node.scrollLeft =
+                        typeof saved.left === "number" ? saved.left : 0;
+                      node.scrollTop =
+                        typeof saved.top === "number" ? saved.top : 0;
+                      restoredPosition.current = true;
+                    }
+                  });
+                }
+              }}
             />
             {showBoxes &&
               blocks.map((block) => (
@@ -366,8 +574,15 @@ export function PdfInspection({
                   aria-label={blockLabel(block)}
                   onClick={() => {
                     if (!submitting) {
-                      setSelected(block);
-                      setDraft(block.text);
+                      setSelection({
+                        source: block.source,
+                        index: block.index,
+                      });
+                      if (
+                        selection?.source !== block.source ||
+                        selection.index !== block.index
+                      )
+                        setDraft(block.text);
                       setError("");
                     }
                   }}

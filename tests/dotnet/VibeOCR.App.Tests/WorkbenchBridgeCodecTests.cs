@@ -13,7 +13,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   {
     Guid bridgeSession = Guid.NewGuid();
     string arguments = JsonSerializer.Serialize(new { page = 0, blockIndex = 2, newText = "中 English", expectedOldText = "old", revision = 9, sessionId = "pdf-7" });
-    var parsed = Assert.IsType<UpdatePdfBlockTextCommand>(WorkbenchBridgeCodec.ParseCommand(CommandJson(bridgeSession, "pdf", "updateBlockText", arguments), bridgeSession).Command);
+    var parsed = Assert.IsType<UpdatePdfBlockTextCommand>(ParseForTest(CommandJson(bridgeSession, "pdf", "updateBlockText", arguments), bridgeSession).Command);
     Assert.Equal("pdf-7", parsed.SessionId);
     Assert.Equal("old", parsed.ExpectedOldText);
     Assert.Equal(9, parsed.Revision);
@@ -21,18 +21,18 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       JsonSerializer.Serialize(new { page = 0, blockIndex = 2, newText = "new", expectedOldText = "old", revision = 9 }),
       JsonSerializer.Serialize(new { page = 0, blockIndex = 2, newText = "new", expectedOldText = (string?)null, revision = 9, sessionId = "pdf-7" }),
       JsonSerializer.Serialize(new { page = 0, blockIndex = 2, newText = " ", expectedOldText = "old", revision = 9, sessionId = "pdf-7" }) })
-      Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(CommandJson(bridgeSession, "pdf", "updateBlockText", invalid), bridgeSession));
+      Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(CommandJson(bridgeSession, "pdf", "updateBlockText", invalid), bridgeSession));
   }
   [Fact]
   public void PdfRangesAndInsertionKeepHostAuthorizationBoundary()
   {
     Guid session = Guid.NewGuid();
-    var rotate = Assert.IsType<RotatePdfCommand>(WorkbenchBridgeCodec.ParseCommand(CommandJson(session, "pdf", "rotate", "{\"degrees\":-90,\"range\":\"all\"}"), session).Command);
+    var rotate = Assert.IsType<RotatePdfCommand>(ParseForTest(CommandJson(session, "pdf", "rotate", "{\"degrees\":-90,\"range\":\"all\"}"), session).Command);
     Assert.Equal("all", rotate.Range); Assert.Equal(-90, rotate.Degrees);
-    Assert.IsType<CorrectPdfOrientationCommand>(WorkbenchBridgeCodec.ParseCommand(CommandJson(session, "pdf", "correctOrientation", "{\"range\":\"selected\"}"), session).Command);
-    Assert.IsType<InsertPdfFromCommand>(WorkbenchBridgeCodec.ParseCommand(CommandJson(session, "pdf", "insertFrom", "{\"afterIndex\":0,\"revision\":2}"), session).Command);
-    Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(CommandJson(session, "pdf", "insertFrom", "{\"afterIndex\":0,\"revision\":2,\"sourcePath\":\"C:/private.pdf\"}"), session));
-    Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(CommandJson(session, "pdf", "rotate", "{\"degrees\":90,\"range\":\"implicit\"}"), session));
+    Assert.IsType<CorrectPdfOrientationCommand>(ParseForTest(CommandJson(session, "pdf", "correctOrientation", "{\"range\":\"selected\"}"), session).Command);
+    Assert.IsType<InsertPdfFromCommand>(ParseForTest(CommandJson(session, "pdf", "insertFrom", "{\"afterIndex\":0,\"revision\":2}"), session).Command);
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(CommandJson(session, "pdf", "insertFrom", "{\"afterIndex\":0,\"revision\":2,\"sourcePath\":\"C:/private.pdf\"}"), session));
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(CommandJson(session, "pdf", "rotate", "{\"degrees\":90,\"range\":\"implicit\"}"), session));
   }
   [Theory]
   [InlineData("{\"page\":0}", true)]
@@ -44,8 +44,8 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   {
     Guid session = Guid.NewGuid();
     string command = CommandJson(session, "settings", "setEnvironmentCleanupPage", arguments);
-    if (valid) Assert.IsType<SetEnvironmentCleanupPageCommand>(WorkbenchBridgeCodec.ParseCommand(command, session).Command);
-    else Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(command, session));
+    if (valid) Assert.IsType<SetEnvironmentCleanupPageCommand>(ParseForTest(command, session).Command);
+    else Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(command, session));
   }
   [Theory]
   [InlineData("[\"residual:a\"]", true)]
@@ -56,8 +56,8 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   {
     Guid session = Guid.NewGuid();
     string command = CommandJson(session, "settings", "runEnvironmentCleanup", "{\"planId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"itemIds\":" + ids + "}");
-    if (valid) Assert.IsType<RunEnvironmentCleanupCommand>(WorkbenchBridgeCodec.ParseCommand(command, session).Command);
-    else Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(command, session));
+    if (valid) Assert.IsType<RunEnvironmentCleanupCommand>(ParseForTest(command, session).Command);
+    else Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(command, session));
   }
 
   [Theory]
@@ -69,7 +69,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     Guid sessionId = Guid.NewGuid();
     string arguments = JsonSerializer.Serialize(new { environmentId, recipe = "rapidocr-cpu" });
     var command = Assert.IsType<PreviewEnvironmentInstallCommand>(
-      WorkbenchBridgeCodec.ParseCommand(CommandJson(sessionId, "settings", "previewEnvironmentInstall", arguments), sessionId).Command);
+      ParseForTest(CommandJson(sessionId, "settings", "previewEnvironmentInstall", arguments), sessionId).Command);
     Assert.Equal(environmentId, command.EnvironmentId);
   }
 
@@ -84,7 +84,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     Guid sessionId = Guid.NewGuid();
     string arguments = JsonSerializer.Serialize(new { environmentId, recipe = "rapidocr-cpu" });
     Assert.Throws<WorkbenchBridgeProtocolException>(() =>
-      WorkbenchBridgeCodec.ParseCommand(CommandJson(sessionId, "settings", "previewEnvironmentInstall", arguments), sessionId));
+      ParseForTest(CommandJson(sessionId, "settings", "previewEnvironmentInstall", arguments), sessionId));
   }
 
   [Fact]
@@ -113,11 +113,11 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       }
       """;
     var preview = Assert.IsType<PreviewEnvironmentInstallCommand>(
-      WorkbenchBridgeCodec.ParseCommand(json, sessionId).Command);
+      ParseForTest(json, sessionId).Command);
     Assert.Equal("pypi", preview.SourceId);
     // 桥只校验 id 形状，不硬编码目录成员；目录成员由管理器 fail closed。
     Assert.Throws<WorkbenchBridgeProtocolException>(() =>
-      WorkbenchBridgeCodec.ParseCommand(json.Replace("\"pypi\"", "\"un trusted!\""), sessionId));
+      ParseForTest(json.Replace("\"pypi\"", "\"un trusted!\""), sessionId));
   }
 
   [Fact]
@@ -145,7 +145,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       }
       """;
     var preview = Assert.IsType<PreviewEnvironmentInstallCommand>(
-      WorkbenchBridgeCodec.ParseCommand(previewJson, sessionId).Command);
+      ParseForTest(previewJson, sessionId).Command);
     Assert.Null(preview.SourceId);
 
     string confirmJson = $$"""
@@ -167,7 +167,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       }
       """;
     var confirm = Assert.IsType<ConfirmEnvironmentInstallCommand>(
-      WorkbenchBridgeCodec.ParseCommand(confirmJson, sessionId).Command);
+      ParseForTest(confirmJson, sessionId).Command);
     Assert.Null(confirm.SourceId);
   }
 
@@ -196,14 +196,14 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       }
       """;
     var global = Assert.IsType<SetEnvironmentSourcesCommand>(
-      WorkbenchBridgeCodec.ParseCommand(globalJson, sessionId).Command);
+      ParseForTest(globalJson, sessionId).Command);
     Assert.Null(global.EnvironmentId);
     Assert.Equal("pypi", global.PackageSourceId);
     Assert.Null(global.ModelSourceId);
     string independentJson = globalJson.Replace("\"modelSourceId\": null",
       "\"paddleocrModelSourceId\": \"paddleocr-bos\", \"mineruModelSourceId\": \"mineru-modelscope\"");
     var independent = Assert.IsType<SetEnvironmentSourcesCommand>(
-      WorkbenchBridgeCodec.ParseCommand(independentJson, sessionId).Command);
+      ParseForTest(independentJson, sessionId).Command);
     Assert.True(independent.IndependentModelSources);
     Assert.Equal("paddleocr-bos", independent.PaddleocrModelSourceId);
     Assert.Equal("mineru-modelscope", independent.MineruModelSourceId);
@@ -231,13 +231,13 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       }
       """;
     var scoped = Assert.IsType<SetEnvironmentSourcesCommand>(
-      WorkbenchBridgeCodec.ParseCommand(scopedJson, sessionId).Command);
+      ParseForTest(scopedJson, sessionId).Command);
     Assert.Equal(environmentId, scoped.EnvironmentId);
     Assert.Null(scoped.PackageSourceId);
     Assert.Equal("modelscope", scoped.ModelSourceId);
 
     Assert.Throws<WorkbenchBridgeProtocolException>(() =>
-      WorkbenchBridgeCodec.ParseCommand(
+      ParseForTest(
         globalJson.Replace("\"modelscope\"", "\"bad id\"").Replace("\"pypi\"", "\"bad id\""),
         sessionId));
   }
@@ -363,14 +363,14 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       }
       """;
     var find = Assert.IsType<FindCompatibleEnvironmentCommand>(
-      WorkbenchBridgeCodec.ParseCommand(json, sessionId).Command);
+      ParseForTest(json, sessionId).Command);
     Assert.Equal("rapidocr+mineru-cuda", find.Recipe);
     // 桥只做协议 id 类型守卫；未知输入拒绝，不降 input validation。
     Assert.Throws<WorkbenchBridgeProtocolException>(() =>
-      WorkbenchBridgeCodec.ParseCommand(
+      ParseForTest(
         json.Replace("rapidocr+mineru-cuda", "made-up-recipe"), sessionId));
     Assert.Throws<WorkbenchBridgeProtocolException>(() =>
-      WorkbenchBridgeCodec.ParseCommand(
+      ParseForTest(
         json.Replace("\"recipe\": \"rapidocr+mineru-cuda\"", "\"environmentId\": \"abc\""),
         sessionId));
   }
@@ -380,11 +380,11 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   {
     Guid session = Guid.NewGuid();
     string json = CommandJson(session, "settings", "prepareEnvironment", "{\"recipe\":\"paddleocr-cuda\"}");
-    var command = Assert.IsType<PrepareEnvironmentCommand>(WorkbenchBridgeCodec.ParseCommand(json, session).Command);
+    var command = Assert.IsType<PrepareEnvironmentCommand>(ParseForTest(json, session).Command);
     Assert.Equal("paddleocr-cuda", command.Recipe);
-    Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
       json.Replace("paddleocr-cuda", "made-up-recipe"), session));
-    Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
       CommandJson(session, "settings", "prepareEnvironment", "{}"), session));
   }
 
@@ -436,7 +436,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       }
       """;
 
-    WorkbenchCommandEnvelope envelope = WorkbenchBridgeCodec.ParseCommand(
+    WorkbenchCommandEnvelope envelope = ParseForTest(
       json,
       sessionId);
 
@@ -523,7 +523,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef";
 
     NotifyScreenshotSessionRevisionCommand notify = Assert.IsType<NotifyScreenshotSessionRevisionCommand>(
-      WorkbenchBridgeCodec.ParseCommand(
+      ParseForTest(
         CommandJson(
           sessionId,
           "recognition",
@@ -534,7 +534,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     Assert.Equal(3, notify.Revision);
 
     RecognizeScreenshotImageCommand recognize = Assert.IsType<RecognizeScreenshotImageCommand>(
-      WorkbenchBridgeCodec.ParseCommand(
+      ParseForTest(
         CommandJson(
           sessionId,
           "recognition",
@@ -548,7 +548,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     Assert.Equal(500, recognize.ExcludeBoxes[0].Width);
 
     CopyScreenshotImageCommand copy = Assert.IsType<CopyScreenshotImageCommand>(
-      WorkbenchBridgeCodec.ParseCommand(
+      ParseForTest(
         CommandJson(
           sessionId,
           "recognition",
@@ -558,7 +558,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     Assert.Equal(0, copy.Revision);
 
     SaveScreenshotImageCommand save = Assert.IsType<SaveScreenshotImageCommand>(
-      WorkbenchBridgeCodec.ParseCommand(
+      ParseForTest(
         CommandJson(
           sessionId,
           "recognition",
@@ -569,7 +569,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
 
     // 负数/越界 revision、缺失字段与越权 URI 一律 fail closed。
     Assert.Throws<WorkbenchBridgeProtocolException>(() =>
-      WorkbenchBridgeCodec.ParseCommand(
+      ParseForTest(
         CommandJson(
           sessionId,
           "recognition",
@@ -577,7 +577,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
           $$"""{"sessionId":"{{sessionId}}","revision":-1}"""),
         sessionId));
     Assert.Throws<WorkbenchBridgeProtocolException>(() =>
-      WorkbenchBridgeCodec.ParseCommand(
+      ParseForTest(
         CommandJson(
           sessionId,
           "recognition",
@@ -585,7 +585,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
           $$"""{"sessionId":"{{sessionId}}","revision":0}"""),
         sessionId));
     Assert.Throws<WorkbenchBridgeProtocolException>(() =>
-      WorkbenchBridgeCodec.ParseCommand(
+      ParseForTest(
         CommandJson(
           sessionId,
           "recognition",
@@ -711,7 +711,8 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
 
     foreach ((string scope, string action, string arguments, Type type) in cases)
     {
-      using JsonDocument argumentDocument = JsonDocument.Parse(arguments);
+      var argumentNode = System.Text.Json.Nodes.JsonNode.Parse(arguments)!.AsObject();
+    if (scope == "pdf" && action != "open") { argumentNode["documentId"] = "77777777777777777777777777777777"; argumentNode["documentRevision"] = 0; }
       string json = JsonSerializer.Serialize(new
       {
         version = 2,
@@ -725,11 +726,11 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
           {
             scope,
             action,
-            arguments = argumentDocument.RootElement,
+            arguments = argumentNode,
           },
         },
       });
-      Assert.IsType(type, WorkbenchBridgeCodec.ParseCommand(json, sessionId).Command);
+      Assert.IsType(type, ParseForTest(json, sessionId).Command);
     }
   }
 
@@ -740,7 +741,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     const string resourceUri =
       "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef";
     CopyAnnotatedImageCommand copy = Assert.IsType<CopyAnnotatedImageCommand>(
-      WorkbenchBridgeCodec.ParseCommand(
+      ParseForTest(
         CommandJson(
           sessionId,
           "recognition",
@@ -759,7 +760,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     foreach (string value in invalid)
     {
       Assert.Throws<WorkbenchBridgeProtocolException>(() =>
-        WorkbenchBridgeCodec.ParseCommand(
+        ParseForTest(
           CommandJson(
             sessionId,
             "recognition",
@@ -781,7 +782,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       $$"""{"itemId":"{{itemId}}","delta":-1}""");
 
     MoveBatchItemCommand command = Assert.IsType<MoveBatchItemCommand>(
-      WorkbenchBridgeCodec.ParseCommand(json, sessionId).Command);
+      ParseForTest(json, sessionId).Command);
 
     Assert.Equal(itemId, command.ItemId);
     Assert.Equal(-1, command.Delta);
@@ -793,7 +794,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   {
     Guid sessionId = Guid.NewGuid();
     Assert.Throws<WorkbenchBridgeProtocolException>(() =>
-      WorkbenchBridgeCodec.ParseCommand(
+      ParseForTest(
         CommandJson(sessionId, "batch", "setConcurrency", "{\"concurrency\":2}"),
         sessionId));
   }
@@ -805,7 +806,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   {
     Guid sessionId = Guid.NewGuid();
     ExportRecognitionResultCommand command = Assert.IsType<ExportRecognitionResultCommand>(
-      WorkbenchBridgeCodec.ParseCommand(
+      ParseForTest(
         CommandJson(
           sessionId,
           "recognition",
@@ -820,18 +821,18 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   public void ParseCodeOptionsAndRejectInvalidOrExtraFields()
   {
     Guid session = Guid.NewGuid();
-    GenerateQrCodeCommand generate = Assert.IsType<GenerateQrCodeCommand>(WorkbenchBridgeCodec.ParseCommand(
+    GenerateQrCodeCommand generate = Assert.IsType<GenerateQrCodeCommand>(ParseForTest(
       CommandJson(session, "qrcode", "generate", "{\"text\":\"590123412345\",\"format\":\"ean13\",\"captionMode\":\"custom\",\"captionText\":\"说明\"}"), session).Command);
     Assert.Equal(new GenerateQrCodeCommand("590123412345", "ean13", "custom", "说明"), generate);
-    Assert.True(Assert.IsType<DecodeCurrentQrCodeCommand>(WorkbenchBridgeCodec.ParseCommand(
+    Assert.True(Assert.IsType<DecodeCurrentQrCodeCommand>(ParseForTest(
       CommandJson(session, "qrcode", "decodeCurrent", "{\"force\":true}"), session).Command).Force);
-    Assert.IsType<CopyQrCodeImageCommand>(WorkbenchBridgeCodec.ParseCommand(
+    Assert.IsType<CopyQrCodeImageCommand>(ParseForTest(
       CommandJson(session, "qrcode", "copyImage", "{}"), session).Command);
     foreach (string arguments in new[] {
       "{\"text\":\"x\",\"format\":\"unknown\",\"captionMode\":\"off\",\"captionText\":\"\"}",
       "{\"text\":\"x\",\"format\":\"qrcode\",\"captionMode\":\"unknown\",\"captionText\":\"\"}",
       "{\"text\":\"x\",\"format\":\"qrcode\",\"captionMode\":\"off\",\"captionText\":\"\",\"path\":\"x\"}" })
-      Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(
+      Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
         CommandJson(session, "qrcode", "generate", arguments), session));
   }
 
@@ -840,13 +841,13 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   {
     Guid sessionId = Guid.NewGuid();
     SelectPdfPagesCommand selection = Assert.IsType<SelectPdfPagesCommand>(
-      WorkbenchBridgeCodec.ParseCommand(
+      ParseForTest(
         CommandJson(sessionId, "pdf", "selectPages", "{\"pages\":[0,2,7]}"),
         sessionId).Command);
     Assert.Equal([0, 2, 7], selection.Pages);
 
     OpenQrCodeUrlCommand open = Assert.IsType<OpenQrCodeUrlCommand>(
-      WorkbenchBridgeCodec.ParseCommand(
+      ParseForTest(
         CommandJson(
           sessionId,
           "qrcode",
@@ -855,7 +856,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
         sessionId).Command);
     Assert.Equal("https://example.test/result", open.Url);
     Assert.Throws<WorkbenchBridgeProtocolException>(() =>
-      WorkbenchBridgeCodec.ParseCommand(
+      ParseForTest(
         CommandJson(
           sessionId,
           "qrcode",
@@ -891,7 +892,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   {
     Guid sessionId = Guid.NewGuid();
     CopyStructuredResultCommand command = Assert.IsType<CopyStructuredResultCommand>(
-      WorkbenchBridgeCodec.ParseCommand(
+      ParseForTest(
         CommandJson(
           sessionId,
           "recognition",
@@ -915,7 +916,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     foreach (string arguments in invalid)
     {
       Assert.Throws<WorkbenchBridgeProtocolException>(() =>
-        WorkbenchBridgeCodec.ParseCommand(
+        ParseForTest(
           CommandJson(sessionId, "recognition", "copyStructured", arguments),
           sessionId));
     }
@@ -1232,13 +1233,13 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     foreach ((string action, string arguments) in invalid)
     {
       Assert.Throws<WorkbenchBridgeProtocolException>(() =>
-        WorkbenchBridgeCodec.ParseCommand(
+        ParseForTest(
           CommandJson(sessionId, "settings", action, arguments),
           sessionId));
     }
 
     // 禁用快捷键不带 hotkey 字段是合法形状。
-    WorkbenchCommandEnvelope disable = WorkbenchBridgeCodec.ParseCommand(
+    WorkbenchCommandEnvelope disable = ParseForTest(
       CommandJson(
         sessionId,
         "settings",
@@ -1259,7 +1260,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   public void ToolbarPreferencesAcceptSingleFieldPatches(string arguments, int? lingerMs, string? theme)
   {
     Guid sessionId = Guid.NewGuid();
-    WorkbenchCommandEnvelope envelope = WorkbenchBridgeCodec.ParseCommand(
+    WorkbenchCommandEnvelope envelope = ParseForTest(
       CommandJson(sessionId, "settings", "setFloatingToolbarPreferences", arguments), sessionId);
     SetFloatingToolbarPreferencesCommand command = Assert.IsType<SetFloatingToolbarPreferencesCommand>(envelope.Command);
     Assert.Equal(lingerMs, command.LingerMs);
@@ -1270,7 +1271,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   public void ToolbarPreferencesAcceptPeekPixelsPatch()
   {
     Guid sessionId = Guid.NewGuid();
-    WorkbenchCommandEnvelope envelope = WorkbenchBridgeCodec.ParseCommand(
+    WorkbenchCommandEnvelope envelope = ParseForTest(
       CommandJson(sessionId, "settings", "setFloatingToolbarPreferences", "{\"peekPixels\":8}"), sessionId);
     var command = Assert.IsType<SetFloatingToolbarPreferencesCommand>(envelope.Command);
     Assert.Equal(8, command.PeekPixels);
@@ -1287,8 +1288,8 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   {
     Guid session = Guid.NewGuid();
     string json = CommandJson(session, "pdf", "addTextLayers", JsonSerializer.Serialize(new { range, overwrite = false }));
-    if (valid) Assert.IsType<AddPdfTextLayersCommand>(WorkbenchBridgeCodec.ParseCommand(json, session).Command);
-    else Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(json, session));
+    if (valid) Assert.IsType<AddPdfTextLayersCommand>(ParseForTest(json, session).Command);
+    else Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(json, session));
   }
 
   [Theory]
@@ -1300,11 +1301,49 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     string json = CommandJson(session, "pdf", "deleteTextLayers", JsonSerializer.Serialize(new { pages = new[] { 3, 70 }, revision = 12, confirmed }));
     if (valid)
     {
-      var command = Assert.IsType<DeletePdfTextLayersCommand>(WorkbenchBridgeCodec.ParseCommand(json, session).Command);
+      var command = Assert.IsType<DeletePdfTextLayersCommand>(ParseForTest(json, session).Command);
       Assert.Equal([3, 70], command.Pages);
       Assert.Equal(12, command.Revision);
     }
-    else Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(json, session));
+    else Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(json, session));
+  }
+
+  [Theory]
+  [InlineData(2000, 2, true)]
+  [InlineData(2001, 2, false)]
+  [InlineData(10, null, false)]
+  public void PdfDraftOriginalTextIsBoundToAnEditableBlockAndBounded(int length, int? block, bool valid)
+  {
+    Guid session = Guid.NewGuid();
+    string json = CommandJson(session, "pdf", "setPreviewPosition", JsonSerializer.Serialize(new {position = new {zoom = (double?)null, left = 0, top = 0, showBoxes = true, block, originalText = new string('x', length), draft = "改变", page = 0, revision = 7}}));
+    if (valid) Assert.Equal(length, Assert.IsType<SetPdfPreviewPositionCommand>(ParseForTest(json, session).Command).Position.OriginalText!.Length);
+    else Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(json, session));
+  }
+
+  [Fact]
+  public void PdfPositionWithoutDraftRelationshipRemainsCompatibleWithExistingProducers()
+  {
+    Guid session = Guid.NewGuid();
+    string json = CommandJson(session, "pdf", "setPreviewPosition", JsonSerializer.Serialize(new {position = new {zoom = (double?)null, left = 0, top = 0, showBoxes = true, block = (int?)null, draft = "", page = 0, revision = 7}}));
+    Assert.Null(Assert.IsType<SetPdfPreviewPositionCommand>(ParseForTest(json, session).Command).Position.OriginalText);
+  }
+
+  [Fact]
+  public void PdfCommandsRequireAndRetainOpaqueDocumentIdentity()
+  {
+    Guid session = Guid.NewGuid();
+    string json = CommandJson(session, "pdf", "save", "{}");
+    PdfBoundCommand bound = Assert.IsType<PdfBoundCommand>(WorkbenchBridgeCodec.ParseCommand(json, session).Command);
+    Assert.Equal("77777777777777777777777777777777", bound.DocumentId);
+    Assert.IsType<SavePdfCommand>(bound.Command);
+    var root = System.Text.Json.Nodes.JsonNode.Parse(json)!;
+    root["payload"]!["command"]!["arguments"]!.AsObject().Remove("documentId");
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(root.ToJsonString(), session));
+  }
+  private static WorkbenchCommandEnvelope ParseForTest(string json, Guid session)
+  {
+    WorkbenchCommandEnvelope envelope = WorkbenchBridgeCodec.ParseCommand(json, session);
+    return envelope.Command is PdfBoundCommand bound ? envelope with { Command = bound.Command } : envelope;
   }
 
   private static string CommandJson(
@@ -1313,7 +1352,12 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     string action,
     string arguments)
   {
-    using JsonDocument argumentDocument = JsonDocument.Parse(arguments);
+    var argumentNode = System.Text.Json.Nodes.JsonNode.Parse(arguments)!.AsObject();
+    if (scope == "pdf" && action != "open")
+    {
+      argumentNode["documentId"] = "77777777777777777777777777777777";
+      argumentNode["documentRevision"] = 0;
+    }
     return JsonSerializer.Serialize(new
     {
       version = 2,
@@ -1327,7 +1371,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
         {
           scope,
           action,
-          arguments = argumentDocument.RootElement,
+          arguments = argumentNode,
         },
       },
     });

@@ -52,6 +52,45 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   internal byte[]? CaptureBackground { get; set; }
   private readonly CancellationTokenSource lifetime = new();
   private readonly List<Uri> uploadedAnnotations = [];
+  private PendingPdfPreviewFlush? pendingPdfPreviewFlush;
+  private sealed record PendingPdfPreviewFlush(Guid Id, Guid Session, string DocumentId, TaskCompletionSource<bool> Completion);
+
+  public Task<bool> FlushPdfPreviewAsync(string documentId) => core is { } current && sessionId is { } session && !disposed
+    ? RequestPdfPreviewFlushAsync(session, documentId, current.PostWebMessageAsJson, lifetime.Token)
+    : Task.FromResult(false);
+
+  // 此接缝只排空已有 PDF 局部编辑状态，不传文件路径、不执行第二套 PDF 命令。
+  internal async Task<bool> RequestPdfPreviewFlushAsync(Guid session, string documentId, Action<string> publish, CancellationToken ct)
+  {
+    if (pendingPdfPreviewFlush is not null) return false;
+    var pending = new PendingPdfPreviewFlush(Guid.NewGuid(), session, documentId,
+      new(TaskCreationOptions.RunContinuationsAsynchronously));
+    pendingPdfPreviewFlush = pending;
+    try
+    {
+      publish(WorkbenchBridgeCodec.SerializePdfPreviewFlush(pending.Id, session, documentId));
+      return await pending.Completion.Task.WaitAsync(TimeSpan.FromSeconds(10), ct);
+    }
+    catch (Exception error) when (error is TimeoutException or OperationCanceledException) { return false; }
+    finally { if (ReferenceEquals(pendingPdfPreviewFlush, pending)) pendingPdfPreviewFlush = null; }
+  }
+
+  internal static bool IsPdfPreviewFlushResponse(JsonElement root) => root.ValueKind == JsonValueKind.Object &&
+    root.TryGetProperty("type", out JsonElement type) && type.ValueKind == JsonValueKind.String &&
+    type.GetString() == "pdf.flushPreview";
+
+  internal void AcceptPdfPreviewFlushResponse(string json)
+  {
+    if (pendingPdfPreviewFlush is not { } pending) return;
+    using JsonDocument message = JsonDocument.Parse(json);
+    if (message.RootElement.ValueKind != JsonValueKind.Object ||
+      !message.RootElement.TryGetProperty("id", out JsonElement identity) || identity.ValueKind != JsonValueKind.String ||
+      !Guid.TryParse(identity.GetString(), out Guid id) || id != pending.Id) return;
+    var response = WorkbenchBridgeCodec.ParsePdfPreviewFlushResponse(json);
+    if (response.Session == pending.Session && response.DocumentId == pending.DocumentId)
+      pending.Completion.TrySetResult(response.Ok);
+  }
+  private void AbandonPdfPreviewFlush() => pendingPdfPreviewFlush?.Completion.TrySetResult(false);
 
   public WebWorkbenchHost(
     IWorkbenchApplication application,
@@ -176,6 +215,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       return;
     }
     sessionId = null;
+    AbandonPdfPreviewFlush();
     StateChanged?.Invoke("navigation-starting");
   }
 
@@ -216,6 +256,12 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     try
     {
       string message = args.WebMessageAsJson;
+      if (message.Length > WorkbenchBridgeCodec.MaxMessageBytes) throw new WorkbenchBridgeProtocolException("Bridge message exceeds the size limit.");
+      using (JsonDocument incoming = JsonDocument.Parse(message))
+      {
+        if (IsPdfPreviewFlushResponse(incoming.RootElement))
+        { AcceptPdfPreviewFlushResponse(message); return; }
+      }
       if (IsBootstrap(message))
       {
         Guid requestId = WorkbenchBridgeCodec.ParseBootstrapRequest(message);
@@ -246,7 +292,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       if (!disposed) sender.PostWebMessageAsJson(WorkbenchBridgeCodec.SerializeReceipt(receipt));
     }
     catch (Exception error) when (
-      error is WorkbenchBridgeProtocolException or OperationCanceledException)
+      error is WorkbenchBridgeProtocolException or OperationCanceledException or JsonException)
     {
       ProtocolViolation?.Invoke(error);
     }
@@ -267,7 +313,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       ? state with { State = new ShellWorkbenchState(route) }
       : state;
 
-  private static bool IsBootstrap(string json)
+  internal static bool IsBootstrap(string json)
   {
     if (json.Length > WorkbenchBridgeCodec.MaxMessageBytes)
     {
@@ -277,8 +323,9 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     {
       using System.Text.Json.JsonDocument document =
         System.Text.Json.JsonDocument.Parse(json);
-      return document.RootElement.TryGetProperty("type", out var type) &&
-        type.GetString() == "app.bootstrap";
+      return document.RootElement.ValueKind == JsonValueKind.Object &&
+        document.RootElement.TryGetProperty("type", out var type) &&
+        type.ValueKind == JsonValueKind.String && type.GetString() == "app.bootstrap";
     }
     catch (System.Text.Json.JsonException)
     {
@@ -320,6 +367,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     CoreWebView2ProcessFailedEventArgs args)
   {
     StateChanged?.Invoke($"process-failed:{args.ProcessFailedKind}");
+    AbandonPdfPreviewFlush();
     sessionId = null;
     Recover(sender);
   }
@@ -478,6 +526,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       return;
     }
     disposed = true;
+    AbandonPdfPreviewFlush();
     CaptureBackground = null;
     lifetime.Cancel();
     subscriptionCancellation?.Cancel();
