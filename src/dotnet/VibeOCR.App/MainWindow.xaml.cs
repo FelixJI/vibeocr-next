@@ -703,12 +703,14 @@ public sealed partial class MainWindow : Window
   private Microsoft.UI.Xaml.Controls.ContentDialog? activePdfCloseDialog;
   private async Task<PdfCloseDecision> ConfirmPdfCloseAsync(PdfDocumentEntry entry)
   {
+    bool draft = entry.HasUnsubmittedDraft;
     var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
     {
       XamlRoot = (Content as FrameworkElement)?.XamlRoot,
-      Title = $"保存 {Path.GetFileName(entry.Model.FilePath)} 的修改？",
-      Content = "保存提交当前文档；放弃会丢弃未保存修改；取消保留文档。",
-      PrimaryButtonText = "保存", SecondaryButtonText = "放弃修改", CloseButtonText = "取消",
+      Title = draft ? $"{entry.DisplayName} 有未提交草稿" : $"保存 {entry.DisplayName} 的修改？",
+      Content = draft ? "草稿尚未写入 PDF。返回继续编辑，或明确放弃草稿后继续关闭；随后仍会确认已提交文档的未保存修改。"
+        : "保存提交当前文档；放弃会丢弃未保存修改；取消保留文档。",
+      PrimaryButtonText = draft ? "返回继续编辑" : "保存", SecondaryButtonText = draft ? "放弃草稿并继续" : "放弃修改", CloseButtonText = "取消",
       DefaultButton = Microsoft.UI.Xaml.Controls.ContentDialogButton.Close,
     };
     activePdfCloseDialog = dialog;
@@ -716,7 +718,7 @@ public sealed partial class MainWindow : Window
     {
       return await dialog.ShowAsync() switch
       {
-        Microsoft.UI.Xaml.Controls.ContentDialogResult.Primary => PdfCloseDecision.Save,
+        Microsoft.UI.Xaml.Controls.ContentDialogResult.Primary => draft ? PdfCloseDecision.Cancel : PdfCloseDecision.Save,
         Microsoft.UI.Xaml.Controls.ContentDialogResult.Secondary => PdfCloseDecision.Discard,
         _ => PdfCloseDecision.Cancel,
       };

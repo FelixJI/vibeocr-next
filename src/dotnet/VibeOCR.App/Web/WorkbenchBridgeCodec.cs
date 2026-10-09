@@ -564,9 +564,12 @@ public static class WorkbenchBridgeCodec
       case ("pdf", "setPreviewPosition"):
         EnsureObjectWithFields(arguments, new HashSet<string> { "position" }, "command arguments");
         JsonElement position = arguments.GetProperty("position");
-        EnsureObjectWithFields(position, new HashSet<string> { "zoom", "left", "top", "showBoxes", "block", "draft", "revision", "page" }, "PDF preview position");
+        var positionFields = new HashSet<string> { "zoom", "left", "top", "showBoxes", "block", "draft", "revision", "page" };
+        if (position.ValueKind == JsonValueKind.Object && position.TryGetProperty("originalText", out _)) positionFields.Add("originalText");
+        EnsureObjectWithFields(position, positionFields, "PDF preview position");
         PdfPreviewPosition view = position.Deserialize<PdfPreviewPosition>(SerializerOptions) ?? throw new WorkbenchBridgeProtocolException("Missing PDF position");
-        if (!double.IsFinite(view.Left) || !double.IsFinite(view.Top) || view.Left < 0 || view.Top < 0 || view.Zoom is { } zoom && (!double.IsFinite(zoom) || zoom < .01 || zoom > 8) || view.Draft.Length > 65536)
+        if (!double.IsFinite(view.Left) || !double.IsFinite(view.Top) || view.Left < 0 || view.Top < 0 || view.Zoom is { } zoom && (!double.IsFinite(zoom) || zoom < .01 || zoom > 8) || view.Draft is null || view.Draft.Length > 65536 || view.Block is < 0 ||
+          view.OriginalText is { } original && (original.Length > 2000 || view.Block is null))
           throw new WorkbenchBridgeProtocolException("Invalid PDF position");
         return new SetPdfPreviewPositionCommand(view);
       case ("pdf", "open"):

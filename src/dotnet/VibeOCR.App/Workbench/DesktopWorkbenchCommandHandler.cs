@@ -92,6 +92,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private readonly HashSet<Task> backgroundOperations = [];
   private readonly HashSet<Task> pdfBackgroundOperations = [];
   private bool pdfExitReview;
+  private PdfDocumentEntry? pdfClosingPreviewDrain;
   private readonly CancellationTokenSource sceneRecognitionLifetime = new();
   private readonly PdfWorkspace pdfWorkspace = new();
   // Capture document ownership at command entry; the async flow retains it across pickers/awaits.
@@ -159,6 +160,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private WorkbenchResourceReference? generatedQrResource;
   private long batchGeneration;
   private long pdfGeneration;
+  private long pdfWindowGeneration;
   private long qrCodeGeneration;
   private long publishedQrRevision;
   private string? qrPreviewPath;
@@ -341,7 +343,9 @@ public sealed class DesktopWorkbenchCommandHandler :
           // 最后位置/草稿不因切换文档丢失；未知/关闭中的文档仍在上面拒绝。
           if (bound.Command is not (ActivatePdfDocumentCommand or SetPdfPreviewPositionCommand) && entry != pdfWorkspace.Active)
             throw new InvalidOperationException("活动文档已变化，请重新操作");
-          if (pdfExitReview || entry.Closing) throw new InvalidOperationException("文档正在关闭确认中");
+          if ((pdfExitReview || pdfWorkspace.Documents.Any(item => item.Closing)) &&
+            !(bound.Command is SetPdfPreviewPositionCommand && ReferenceEquals(pdfClosingPreviewDrain, entry)))
+            throw new InvalidOperationException("文档正在关闭确认中");
           if (bound.Revision is { } expected && expected != entry.Model.Revision && bound.Command is not (ActivatePdfDocumentCommand or CancelPdfCommand or CancelPdfExportCommand or SetPdfPreviewPositionCommand))
             throw new InvalidOperationException("文档修订已变化，请重新操作");
         }
@@ -3069,7 +3073,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private async Task<PdfWorkbenchState> OpenPdfAsync(CancellationToken ct)
   {
     // 退出审阅中拒绝新的打开入口：新会话不会进入退出快照，未经确认即被留下。
-    if (pdfExitReview) throw new InvalidOperationException("正在退出应用，不能打开新 PDF。");
+    if (pdfExitReview || pdfWorkspace.Documents.Any(entry => entry.Closing)) throw new InvalidOperationException("正在关闭确认中，不能打开新 PDF。");
     pdf ??= CreatePdfViewModel();
     string? path = await pdf.PickFileAsync(ct);
     return path is null ? PdfState(ActivePdf ?? pdf) : await AddPdfPathAsync(path, ct);
@@ -3078,12 +3082,12 @@ public sealed class DesktopWorkbenchCommandHandler :
   private async Task<PdfWorkbenchState> AddPdfPathAsync(string path, CancellationToken ct)
   {
     // 实际加入入口重查：退出审阅开始前已打开的 picker 迟到返回同样拒绝。
-    if (pdfExitReview) throw new InvalidOperationException("正在退出应用，不能打开新 PDF。");
+    if (pdfExitReview || pdfWorkspace.Documents.Any(entry => entry.Closing)) throw new InvalidOperationException("正在关闭确认中，不能打开新 PDF。");
     // 在实际切换点排空：picker 等待期间继续输入、原生拖入和重复打开均走这里。
     PdfDocumentEntry? leaving = pdfWorkspace.Active;
     if (leaving is { Model.HasRemoteSession: true } && flushPdfPreview is not null)
     {
-      if (!await flushPdfPreview(leaving.Id) || pdfWorkspace.Active != leaving || pdfExitReview)
+      if (!await flushPdfPreview(leaving.Id) || pdfWorkspace.Active != leaving || pdfExitReview || pdfWorkspace.Documents.Any(entry => entry.Closing))
         throw new InvalidOperationException("最后的预览草稿未确认，保留当前文档，请重试。");
     }
     path = Path.GetFullPath(path);
@@ -3149,11 +3153,26 @@ public sealed class DesktopWorkbenchCommandHandler :
   }
   private async Task<bool> ClosePdfEntryAsync(PdfDocumentEntry entry, CancellationToken ct)
   {
-    if (entry.Closing || pdfWorkspace.Exporting) return false;
+    if (pdfWorkspace.Documents.Any(item => item.Closing) || pdfWorkspace.Exporting) return false;
     entry.Closing = true;
+    PdfPreviewPosition? discardedDraft = null;
+    bool closed = false;
     try
     {
       await entry.Model.CancelAndSettleAsync();
+      if (entry == pdfWorkspace.Active && entry.Model.HasRemoteSession && flushPdfPreview is not null)
+      {
+        pdfClosingPreviewDrain = entry;
+        try { if (!await flushPdfPreview(entry.Id)) return false; }
+        finally { pdfClosingPreviewDrain = null; }
+      }
+      if (entry.HasUnsubmittedDraft)
+      {
+        // 保存只包含已提交 PDF；必须先明确放弃局部草稿，不能伪称保存了草稿。
+        if (await confirmPdfClose(entry) != PdfCloseDecision.Discard) return false;
+        discardedDraft = entry.Preview;
+        entry.Preview = entry.Preview with { Block = null, Draft = "", OriginalText = null };
+      }
       if (entry.Model.IsModified)
       {
         PdfCloseDecision decision = await confirmPdfClose(entry);
@@ -3166,13 +3185,19 @@ public sealed class DesktopWorkbenchCommandHandler :
       await entry.Model.CloseSessionAsync(CancellationToken.None);
       entry.Model.PropertyChanged -= OnPdfPropertyChanged;
       if (pdfWorkspace.Active == entry) ReleasePdfWindowResources();
-      pdfWorkspace.Remove(entry); entry.CloseError = null;
+      pdfWorkspace.Remove(entry); entry.CloseError = null; closed = true;
       pdfContext.Value = pdfWorkspace.Active;
       Interlocked.Increment(ref pdfGeneration);
       return true;
     }
     catch (Exception error) { entry.CloseError = error.Message; return false; }
-    finally { entry.Closing = false; if (ActivePdf is { } active) StateChanged?.Invoke(PdfState(active)); }
+    finally
+    {
+      // 取消后续模型确认或远端关闭失败时保留草稿；仅关闭成功才真正丢弃。
+      if (!closed && discardedDraft is not null) entry.Preview = discardedDraft;
+      entry.Closing = false;
+      if (ActivePdf is { } active) StateChanged?.Invoke(PdfState(active));
+    }
   }
   public async Task<bool> RequestCloseAllPdfAsync()
   {
@@ -3436,6 +3461,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     pdf ??= CreatePdfViewModel();
     pdfWindowStart = ClampWindowStart(command.Start, pdf.PageCount, 64);
+    Interlocked.Increment(ref pdfWindowGeneration);
     return await PdfStateAsync(pdf, cancellationToken);
   }
 
@@ -4809,7 +4835,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       pdfPageInspect,
       pdfPageInspectStatus, viewModel.SessionId, viewModel.CanInspectPage, viewModel.CanCorrectText,
       PdfEntry?.Id, pdfWorkspace.Documents.Where(entry => entry.Model.HasRemoteSession || entry.Model.IsBusy).Select(entry => new PdfDocumentSummary(entry.Id,
-        Path.GetFileName(entry.Model.FilePath ?? entry.RequestedPath ?? "打开中"), entry.Model.PageCount, entry.Model.IsModified,
+        entry.DisplayName, entry.Model.PageCount, entry.Model.IsModified,
         entry.Model.IsBusy || entry.Model.IsSettling, entry.Model.Phase, entry.CloseError is not null)).ToArray(),
       PdfEntry?.Preview, viewModel.CanCopyExport, pdfWorkspace.Exporting,
       pdfWorkspace.ExportItems.Select(item => new PdfExportSummary(item.DocumentId, item.Name, item.Revision,
@@ -4859,6 +4885,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private void ReleasePdfWindowResources(bool force = false)
   {
     if (!force && pdfContext.Value is { } owner && owner != pdfWorkspace.Active) return;
+    Interlocked.Increment(ref pdfWindowGeneration);
     foreach (WorkbenchResourceReference reference in pdfThumbnails.Values) ReleaseResource(reference);
     foreach (var value in pdfStructured.Values) ReleaseResource(value.Reference);
     pdfThumbnails.Clear(); pdfStructured.Clear(); ReleasePdfPageResources(force);
@@ -5004,11 +5031,16 @@ public sealed class DesktopWorkbenchCommandHandler :
     CancellationToken cancellationToken)
   {
     string? session = viewModel.SessionId; long revision = viewModel.Revision; long generation = Volatile.Read(ref pdfGeneration);
-    bool Current() => ReferenceEquals(ActivePdf, viewModel) && viewModel.SessionId == session && viewModel.Revision == revision && generation == Volatile.Read(ref pdfGeneration);
+    long windowGeneration = Volatile.Read(ref pdfWindowGeneration);
+    int windowStart = ClampWindowStart(pdfWindowStart, viewModel.PageCount, 64);
+    bool Current() => ReferenceEquals(ActivePdf, viewModel) && viewModel.SessionId == session && viewModel.Revision == revision && generation == Volatile.Read(ref pdfGeneration) && windowGeneration == Volatile.Read(ref pdfWindowGeneration);
     if (!Current()) return PdfState(viewModel);
-    pdfWindowStart = ClampWindowStart(pdfWindowStart, viewModel.PageCount, 64);
-    int visiblePageEnd = Math.Min(viewModel.PageCount, pdfWindowStart + 64);
-    for (int index = pdfWindowStart; index < visiblePageEnd; index++)
+    pdfWindowStart = windowStart;
+    int visiblePageEnd = Math.Min(viewModel.PageCount, windowStart + 64);
+    // 冻结窗口在 await 前回收旧范围；翻窗只使资源请求过期，不影响 OCR 任务。
+    foreach (int cachedIndex in pdfThumbnails.Keys.Where(index => index < windowStart || index >= visiblePageEnd).ToArray()) { ReleaseResource(pdfThumbnails[cachedIndex]); pdfThumbnails.Remove(cachedIndex); }
+    foreach (int cachedIndex in pdfStructured.Keys.Where(index => index < windowStart || index >= visiblePageEnd).ToArray()) RemovePdfStructured(cachedIndex);
+    for (int index = windowStart; index < visiblePageEnd; index++)
     {
       if (pdfThumbnails.ContainsKey(index)) continue;
       byte[]? thumbnail = await viewModel.RenderThumbnailAsync(index, cancellationToken);
@@ -5021,16 +5053,14 @@ public sealed class DesktopWorkbenchCommandHandler :
           ".png",
           cancellationToken);
         if (!Current()) { ReleaseResource(reference); return PdfState(viewModel); }
-        pdfThumbnails[index] = reference;
+        if (!pdfThumbnails.TryAdd(index, reference)) ReleaseResource(reference);
       }
     }
-    foreach (int cachedIndex in pdfThumbnails.Keys.Where(index => index < pdfWindowStart || index >= visiblePageEnd).ToArray()) { ReleaseResource(pdfThumbnails[cachedIndex]); pdfThumbnails.Remove(cachedIndex); }
-    foreach (int cachedIndex in pdfStructured.Keys.Where(index => index < pdfWindowStart || index >= visiblePageEnd).ToArray()) RemovePdfStructured(cachedIndex);
-    await viewModel.PrepareResultsAsync(pdfWindowStart, 64, cancellationToken);
+    await viewModel.PrepareResultsAsync(windowStart, 64, cancellationToken);
     if (!Current()) return PdfState(viewModel);
     // 已完成页的结构化结果与缩略图同窗口发布：以 Result 对象身份缓存，
     // 旋转/删除/重开文档时整体失效，与单次/批量共用同一发布路径。
-    for (int index = pdfWindowStart; index < visiblePageEnd; index++)
+    for (int index = windowStart; index < visiblePageEnd; index++)
     {
       if (index >= viewModel.Pages.Count) break;
       RecognizeResponse? result = viewModel.Pages[index].Result;

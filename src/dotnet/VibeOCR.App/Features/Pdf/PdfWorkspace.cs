@@ -2,11 +2,25 @@ namespace VibeOCR.App.Features.Pdf;
 
 public enum PdfCloseDecision { Save, Discard, Cancel }
 public sealed record PdfPreviewPosition(double? Zoom = null, double Left = 0, double Top = 0, bool ShowBoxes = true,
-  int? Block = null, string Draft = "", long Revision = -1, int Page = -1);
+  int? Block = null, string Draft = "", long Revision = -1, int Page = -1, string? OriginalText = null);
 public sealed class PdfDocumentEntry(PdfViewModel model)
 {
   public string Id { get; } = Guid.NewGuid().ToString("N");
   public PdfViewModel Model { get; } = model;
+  public int DisplayOrdinal { get; internal init; }
+  public string DisplayName
+  {
+    get
+    {
+      string path = Model.FilePath ?? RequestedPath ?? "打开中";
+      string parent = Path.GetFileName(Path.GetDirectoryName(path)) ?? "";
+      if (parent.Length > 32) parent = parent[..32] + "…";
+      return $"{Path.GetFileName(path)} · {parent} · #{DisplayOrdinal}";
+    }
+  }
+  public bool HasUnsubmittedDraft => Preview.Block is >= 0 && Preview.Revision == Model.Revision &&
+    Preview.Page >= 0 && Preview.Page < Model.PageCount && Preview.OriginalText is { } original && Preview.Draft != original;
+
   public HashSet<int> SelectedPages { get; } = [];
   public int WindowStart { get; set; }
   public string? TaskEngine { get; set; }
@@ -31,10 +45,11 @@ public sealed class PdfWorkspace
   public bool Exporting { get; private set; }
   public long ExportGeneration { get; private set; }
   private bool cancelExport;
+  private int nextDisplayOrdinal;
   public PdfDocumentEntry Add(PdfViewModel model)
   {
     if (documents.Count >= MaxDocuments) throw new InvalidOperationException("最多同时打开 16 份 PDF，请先关闭文档。");
-    var entry = new PdfDocumentEntry(model); documents.Add(entry); Active = entry; return entry;
+    var entry = new PdfDocumentEntry(model) { DisplayOrdinal = ++nextDisplayOrdinal }; documents.Add(entry); Active = entry; return entry;
   }
   public PdfDocumentEntry? Find(string id) => documents.FirstOrDefault(entry => entry.Id == id);
   public PdfDocumentEntry? For(PdfViewModel model) => documents.FirstOrDefault(entry => ReferenceEquals(entry.Model, model));

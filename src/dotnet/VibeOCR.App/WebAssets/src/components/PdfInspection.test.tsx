@@ -399,3 +399,195 @@ it("restores the owning document draft and preview settings without submitting i
     ),
   );
 });
+
+it("keeps confirmed block and scroll while inspection and image restoration are deferred", async () => {
+  let finish!: (response: unknown) => void;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    ),
+  );
+  const value = props();
+  const position = {
+    block: 2,
+    draft: "确认草稿 R4TAIL",
+    originalText: "原文",
+    left: 120,
+    top: 70,
+    zoom: 1.5,
+    revision: 7,
+    page: 0,
+  };
+  let flush: (() => Promise<void>) | null = null;
+  const view = render(
+    <PdfInspection
+      {...value}
+      position={position}
+      registerPositionFlush={(fn) => {
+        flush = fn;
+      }}
+    />,
+  );
+  await act(async () => {
+    await flush?.();
+  });
+  const updates = value.actions.run.mock.calls
+    .map(([action]) => action)
+    .filter((action) => action.type === "pdf.setPreviewPosition");
+  expect(updates.length).toBeGreaterThan(0);
+  expect(
+    updates.every(
+      (action) =>
+        action.position.block === 2 &&
+        action.position.draft === position.draft &&
+        action.position.left === 120 &&
+        action.position.top === 70 &&
+        action.position.originalText === "原文",
+    ),
+  ).toBe(true);
+  // inspect 成功但图片失败时仍允许真实编辑，并保留已确认草稿。
+  await act(async () => {
+    finish({ ok: true, json: async () => ({ page: 0, ocr_blocks: [ocr] }) });
+  });
+  fireEvent.error(screen.getByAltText("当前第 1 页高清预览"));
+  expect(await screen.findByLabelText("校正文字")).toHaveValue(position.draft);
+  fireEvent.change(screen.getByLabelText("校正文字"), {
+    target: { value: "真实新稿 R4TAIL" },
+  });
+  await act(async () => {
+    await flush?.();
+  });
+  expect(value.actions.run).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      position: expect.objectContaining({
+        block: 2,
+        draft: "真实新稿 R4TAIL",
+        originalText: "原文",
+        left: 120,
+        top: 70,
+      }),
+    }),
+  );
+  view.unmount();
+});
+
+it("does not reuse a saved draft or block across revision changes", async () => {
+  resource({ page: 0, ocr_blocks: [ocr] });
+  const value = props();
+  render(
+    <PdfInspection
+      {...value}
+      position={{ block: 2, draft: "旧修订草稿", revision: 6, page: 0 }}
+    />,
+  );
+  await screen.findByRole("button", { name: /人工修改 · 原文/ });
+  expect(screen.queryByLabelText("校正文字")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /人工修改 · 原文/ }));
+  expect(screen.getByLabelText("校正文字")).toHaveValue("原文");
+});
+
+it("reports the original text relationship and clears it on explicit cancel", async () => {
+  resource({ page: 0, ocr_blocks: [ocr] });
+  const value = props();
+  render(<PdfInspection {...value} />);
+  fireEvent.click(
+    await screen.findByRole("button", { name: /人工修改 · 原文/ }),
+  );
+  await waitFor(() =>
+    expect(value.actions.run).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        position: expect.objectContaining({
+          block: 2,
+          draft: "原文",
+          originalText: "原文",
+        }),
+      }),
+    ),
+  );
+  fireEvent.change(screen.getByLabelText("校正文字"), {
+    target: { value: "真的修改" },
+  });
+  await waitFor(() =>
+    expect(value.actions.run).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        position: expect.objectContaining({
+          block: 2,
+          draft: "真的修改",
+          originalText: "原文",
+        }),
+      }),
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "取消校正" }));
+  await waitFor(() =>
+    expect(value.actions.run).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        position: expect.objectContaining({
+          block: null,
+          draft: "",
+          originalText: null,
+        }),
+      }),
+    ),
+  );
+});
+
+it("does not publish zero scroll between image load and its restoration frame", async () => {
+  resource({ page: 0, ocr_blocks: [ocr] });
+  let frame!: FrameRequestCallback;
+  vi.stubGlobal(
+    "requestAnimationFrame",
+    vi.fn((callback) => {
+      frame = callback;
+      return 1;
+    }),
+  );
+  const value = props();
+  render(
+    <PdfInspection
+      {...value}
+      position={{
+        block: 2,
+        originalText: "原文",
+        draft: "保留坐标",
+        left: 110,
+        top: 45,
+        revision: 7,
+        page: 0,
+      }}
+    />,
+  );
+  await screen.findByLabelText("校正文字");
+  fireEvent.load(screen.getByAltText("当前第 1 页高清预览"));
+  fireEvent.change(screen.getByLabelText("校正文字"), {
+    target: { value: "图像恢复期间继续编辑" },
+  });
+  await waitFor(() =>
+    expect(value.actions.run).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        position: expect.objectContaining({
+          left: 110,
+          top: 45,
+          draft: "图像恢复期间继续编辑",
+        }),
+      }),
+    ),
+  );
+  act(() => frame(0));
+  const region = screen.getByRole("region", { name: "高清 PDF 页面" });
+  expect(region.scrollLeft).toBe(110);
+  expect(region.scrollTop).toBe(45);
+  region.scrollLeft = 140;
+  fireEvent.scroll(region);
+  await waitFor(() =>
+    expect(value.actions.run).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        position: expect.objectContaining({ left: 140, top: 45 }),
+      }),
+    ),
+  );
+});

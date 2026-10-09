@@ -685,3 +685,102 @@ describe("PDF workspace identity", () => {
     ).toBeInTheDocument();
   });
 });
+
+it("preserves A confirmed draft through a second switch before restored resources load", async () => {
+  const a = "11111111111111111111111111111111",
+    b = "22222222222222222222222222222222";
+  let finish!: (response: unknown) => void;
+  vi.stubGlobal(
+    "fetch",
+    vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      )
+      .mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          page: 69,
+          ocr_blocks: [
+            { index: 2, text: "原文 R4", bbox: [100, 200, 900, 300] },
+          ],
+        }),
+      }),
+  );
+  const confirmed = {
+    block: 2,
+    draft: "A确认草稿 R4TAIL",
+    originalText: "原文 R4",
+    left: 140,
+    top: 80,
+    zoom: 1.5,
+    revision: 8,
+    page: 69,
+  };
+  const documents = [
+    { documentId: a, name: "a.pdf" },
+    { documentId: b, name: "b.pdf" },
+  ];
+  const actions = setup({
+    documentId: a,
+    documents,
+    previewPosition: confirmed,
+    pagePreview: { url: "/a.png", mediaType: "image/png", byteLength: 100 },
+    pageInspect: {
+      url: "/a.json",
+      mediaType: "application/json",
+      byteLength: 100,
+    },
+  });
+  let stored: unknown = confirmed;
+  actions.run.mockImplementation(async (action) => {
+    if (action.type === "pdf.setPreviewPosition" && action.documentId === a)
+      stored = action.position;
+    return true;
+  });
+  for (const [action] of actions.run.mock.calls)
+    if (action.type === "pdf.setPreviewPosition" && action.documentId === a)
+      stored = action.position;
+  // A 恢复还未结束，用户再次切 B；真实 Pages 接缝会先排空编辑器。
+  fireEvent.click(screen.getByRole("button", { name: "b.pdf" }));
+  await waitFor(() =>
+    expect(actions.run).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "pdf.activateDocument", documentId: b }),
+    ),
+  );
+  expect(stored).toMatchObject(confirmed);
+  actions.updatePdf({
+    documentId: b,
+    sessionId: "b-worker",
+    selectedPage: -1,
+    pages: [],
+    canInspectPage: false,
+    pageInspect: undefined,
+    pagePreview: undefined,
+  });
+  fireEvent.click(screen.getByRole("button", { name: "a.pdf" }));
+  await waitFor(() =>
+    expect(actions.run).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "pdf.activateDocument", documentId: a }),
+    ),
+  );
+  actions.updatePdf({
+    documentId: a,
+    documents,
+    previewPosition: stored,
+    pagePreview: { url: "/a.png", mediaType: "image/png", byteLength: 100 },
+    pageInspect: {
+      url: "/a.json",
+      mediaType: "application/json",
+      byteLength: 100,
+    },
+  });
+  expect(await screen.findByLabelText("校正文字")).toHaveValue(confirmed.draft);
+  await act(async () => {
+    finish({ ok: true, json: async () => ({ page: 69, ocr_blocks: [] }) });
+  });
+  expect(screen.getByLabelText("校正文字")).toHaveValue(confirmed.draft);
+});

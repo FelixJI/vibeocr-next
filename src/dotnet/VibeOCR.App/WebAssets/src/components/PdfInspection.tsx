@@ -89,6 +89,7 @@ interface PreviewPositionUpdate {
   readonly showBoxes: boolean;
   readonly block: number | null;
   readonly draft: string;
+  readonly originalText: string | null;
   readonly revision: number;
   readonly page: number;
 }
@@ -143,7 +144,21 @@ export function PdfInspection({
     typeof position?.zoom === "number" ? position.zoom : null,
   );
   const [showBoxes, setShowBoxes] = useState(position?.showBoxes !== false);
-  const [selected, setSelected] = useState<Block | null>(null);
+  const [selection, setSelection] = useState<{
+    source: Block["source"];
+    index: number;
+  } | null>(
+    position?.revision === revision &&
+      position?.page === page &&
+      typeof position.block === "number"
+      ? { source: "ocr", index: position.block }
+      : null,
+  );
+  const selected =
+    blocks.find(
+      (block) =>
+        block.source === selection?.source && block.index === selection.index,
+    ) ?? null;
   const [draft, setDraft] = useState(
     position?.revision === revision &&
       position?.page === page &&
@@ -158,7 +173,25 @@ export function PdfInspection({
     actionsRef.current = actions;
   }, [actions]);
   const initialPosition = useRef(position);
-  const restoredPosition = useRef(false);
+  const [savedOriginalText] = useState(
+    position?.revision === revision &&
+      position?.page === page &&
+      typeof position.originalText === "string"
+      ? position.originalText
+      : null,
+  );
+  const restoredPosition = useRef(
+    !position || !(Number(position.left) || Number(position.top)),
+  );
+  const restoredImage = useRef(false);
+  const originalText =
+    selection?.source === "ocr"
+      ? selected
+        ? selected.textTruncated
+          ? null
+          : selected.text
+        : savedOriginalText
+      : null;
   const pendingPosition = useRef<PreviewPositionUpdate | null>(null);
   const drainingPosition = useRef<Promise<void> | null>(null);
   // 单个在途 + 最新 pending：同一时刻至多一个排空任务，重复调度直接复用同一
@@ -229,11 +262,16 @@ export function PdfInspection({
     const node = viewport.current;
     schedulePosition({
       zoom,
-      left: node?.scrollLeft ?? 0,
-      top: node?.scrollTop ?? 0,
+      left: restoredPosition.current
+        ? (node?.scrollLeft ?? 0)
+        : Number(initialPosition.current?.left) || 0,
+      top: restoredPosition.current
+        ? (node?.scrollTop ?? 0)
+        : Number(initialPosition.current?.top) || 0,
       showBoxes,
-      block: selected?.index ?? null,
+      block: selection?.index ?? null,
       draft,
+      originalText,
       revision,
       page,
     });
@@ -241,11 +279,16 @@ export function PdfInspection({
   useEffect(() => {
     schedulePosition({
       zoom,
-      left: viewport.current?.scrollLeft ?? 0,
-      top: viewport.current?.scrollTop ?? 0,
+      left: restoredPosition.current
+        ? (viewport.current?.scrollLeft ?? 0)
+        : Number(initialPosition.current?.left) || 0,
+      top: restoredPosition.current
+        ? (viewport.current?.scrollTop ?? 0)
+        : Number(initialPosition.current?.top) || 0,
       showBoxes,
-      block: selected?.index ?? null,
+      block: selection?.index ?? null,
       draft,
+      originalText,
       revision,
       page,
     });
@@ -253,8 +296,9 @@ export function PdfInspection({
     schedulePosition,
     zoom,
     showBoxes,
-    selected?.index,
+    selection?.index,
     draft,
+    originalText,
     revision,
     page,
   ]);
@@ -296,18 +340,6 @@ export function PdfInspection({
       .then((value) => {
         if (!cancellation.signal.aborted) {
           setBlocks(value);
-          const saved = initialPosition.current;
-          if (
-            saved?.revision === revision &&
-            saved.page === page &&
-            typeof saved.block === "number"
-          )
-            setSelected(
-              value.find(
-                (block) =>
-                  block.source === "ocr" && block.index === saved.block,
-              ) ?? null,
-            );
         }
       })
       .catch(() => {
@@ -328,7 +360,7 @@ export function PdfInspection({
       void actions.run({ type: "pdf.setCurrentPage", page: target });
   };
   const cancel = () => {
-    setSelected(null);
+    setSelection(null);
     setDraft("");
     setError("");
     if (submitting) void actions.run({ type: "pdf.cancel" });
@@ -357,7 +389,7 @@ export function PdfInspection({
       });
       if (alive.current) {
         if (ok) {
-          setSelected(null);
+          setSelection(null);
           setDraft("");
         } else
           setError("校正未确认，请查看操作反馈；原稿保留。失联时请重开复检。");
@@ -434,6 +466,7 @@ export function PdfInspection({
               event.key,
             )
           ) {
+            restoredPosition.current = true;
             node.scrollLeft +=
               event.key === "ArrowRight"
                 ? 60
@@ -449,13 +482,19 @@ export function PdfInspection({
           } else return;
           event.preventDefault();
         }}
-        onScroll={() => rememberPosition()}
+        onScroll={() => {
+          if (restoredPosition.current) rememberPosition();
+        }}
+        onWheel={() => {
+          restoredPosition.current = true;
+        }}
         onPointerDown={(event) => {
           if (
             event.button !== 0 ||
             (event.target instanceof Element && event.target.closest("button"))
           )
             return;
+          restoredPosition.current = true;
           const node = event.currentTarget;
           drag.current = {
             x: event.clientX,
@@ -497,16 +536,22 @@ export function PdfInspection({
                   width: event.currentTarget.naturalWidth || 612,
                   height: event.currentTarget.naturalHeight || 792,
                 });
-                if (!restoredPosition.current) {
-                  restoredPosition.current = true;
+                if (!restoredImage.current) {
+                  restoredImage.current = true;
                   requestAnimationFrame(() => {
                     const node = viewport.current,
                       saved = initialPosition.current;
-                    if (node && saved) {
+                    if (
+                      alive.current &&
+                      node &&
+                      saved &&
+                      !restoredPosition.current
+                    ) {
                       node.scrollLeft =
                         typeof saved.left === "number" ? saved.left : 0;
                       node.scrollTop =
                         typeof saved.top === "number" ? saved.top : 0;
+                      restoredPosition.current = true;
                     }
                   });
                 }
@@ -529,8 +574,15 @@ export function PdfInspection({
                   aria-label={blockLabel(block)}
                   onClick={() => {
                     if (!submitting) {
-                      setSelected(block);
-                      setDraft(block.text);
+                      setSelection({
+                        source: block.source,
+                        index: block.index,
+                      });
+                      if (
+                        selection?.source !== block.source ||
+                        selection.index !== block.index
+                      )
+                        setDraft(block.text);
                       setError("");
                     }
                   }}

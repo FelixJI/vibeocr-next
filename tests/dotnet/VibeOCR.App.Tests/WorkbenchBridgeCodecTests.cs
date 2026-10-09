@@ -1308,6 +1308,26 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     else Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(json, session));
   }
 
+  [Theory]
+  [InlineData(2000, 2, true)]
+  [InlineData(2001, 2, false)]
+  [InlineData(10, null, false)]
+  public void PdfDraftOriginalTextIsBoundToAnEditableBlockAndBounded(int length, int? block, bool valid)
+  {
+    Guid session = Guid.NewGuid();
+    string json = CommandJson(session, "pdf", "setPreviewPosition", JsonSerializer.Serialize(new {position = new {zoom = (double?)null, left = 0, top = 0, showBoxes = true, block, originalText = new string('x', length), draft = "改变", page = 0, revision = 7}}));
+    if (valid) Assert.Equal(length, Assert.IsType<SetPdfPreviewPositionCommand>(ParseForTest(json, session).Command).Position.OriginalText!.Length);
+    else Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(json, session));
+  }
+
+  [Fact]
+  public void PdfPositionWithoutDraftRelationshipRemainsCompatibleWithExistingProducers()
+  {
+    Guid session = Guid.NewGuid();
+    string json = CommandJson(session, "pdf", "setPreviewPosition", JsonSerializer.Serialize(new {position = new {zoom = (double?)null, left = 0, top = 0, showBoxes = true, block = (int?)null, draft = "", page = 0, revision = 7}}));
+    Assert.Null(Assert.IsType<SetPdfPreviewPositionCommand>(ParseForTest(json, session).Command).Position.OriginalText);
+  }
+
   [Fact]
   public void PdfCommandsRequireAndRetainOpaqueDocumentIdentity()
   {
