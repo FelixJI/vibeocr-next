@@ -32,7 +32,11 @@ public sealed partial class App : Application
     /// Attached after the Supervisor process reports a v2 ready envelope.
     /// </summary>
     private readonly DeferredInferenceClient _inferenceGateway;
-    private readonly DeferredQrCodeClient _qrCodeGateway;
+    /// <summary>
+    /// #213: QR/barcode decode+generate run locally and never wait for the
+    /// Supervisor; this client is the single desktop assembly seam.
+    /// </summary>
+    private readonly LocalQrCodeClient _qrCodeClient;
     private readonly SemaphoreSlim _supervisorLifecycle = new(1, 1);
     private readonly CancellationTokenSource _applicationShutdown = new();
     private readonly Dictionary<string, double> _startupMilestones = [];
@@ -44,7 +48,6 @@ public sealed partial class App : Application
     private InferenceSupervisorProcess? _supervisorProcess;
     private string? _supervisorInstanceId;
     private IInferenceClient? _activeInferenceClient;
-    private IQrCodeClient? _activeQrCodeClient;
     private PortableLayout? _supervisorLayout;
     private DiagnosticsViewModel? _supervisorDiagnostics;
     private IRuntimeInstallerClient? _runtimeInstaller;
@@ -97,7 +100,8 @@ public sealed partial class App : Application
         InitializeComponent();
         // 网关等待 Supervisor 启动时以应用关停令牌兜底，避免退出时挂起。
         _inferenceGateway = new DeferredInferenceClient(_applicationShutdown.Token);
-        _qrCodeGateway = new DeferredQrCodeClient(_applicationShutdown.Token);
+        // 本地二维码/条码解码与生成不依赖 Supervisor 生命周期。
+        _qrCodeClient = new LocalQrCodeClient(_applicationShutdown.Token);
     }
 
     private void OnUnhandledException(
@@ -231,7 +235,6 @@ public sealed partial class App : Application
             diagnostics.UpdateSupervisor(new SupervisorHealth(
                 SupervisorHealthState.Connecting, null, null, null));
             _inferenceGateway.MarkStartupPending();
-            _qrCodeGateway.MarkStartupPending();
             if (Volatile.Read(ref _runtimeMaintenanceActive) == 0 &&
                 !MaintenanceMutexEarlyExitSelfTestRequested(isRecovery: false))
             {
@@ -295,7 +298,7 @@ public sealed partial class App : Application
           {
             nint handle = WinRT.Interop.WindowNative.GetWindowHandle(_window!);
             return new QrCodeViewModel(
-              _qrCodeGateway,
+              _qrCodeClient,
               new QrCodeInputService(() => handle));
           },
           () =>
@@ -903,7 +906,6 @@ public sealed partial class App : Application
         catch (Exception error)
         {
             _inferenceGateway.MarkStartupFailed(error);
-            _qrCodeGateway.MarkStartupFailed(error);
             _runtimeStatus.ReportServiceUnavailable();
             diagnostics.UpdateSupervisor(new SupervisorHealth(
                 SupervisorHealthState.Faulted, null, null, error.Message));
@@ -920,7 +922,6 @@ public sealed partial class App : Application
                 // 完成。
                 var maintenance = new InvalidOperationException("运行环境维护尚未结束，识别服务保持暂停。");
                 _inferenceGateway.MarkStartupFailed(maintenance);
-                _qrCodeGateway.MarkStartupFailed(maintenance);
                 _runtimeStatus.ReportServicePausedForMaintenance();
                 diagnostics.UpdateSupervisor(new SupervisorHealth(
                     SupervisorHealthState.NotReady, null, null, "运行环境维护尚未结束。"));
@@ -940,7 +941,6 @@ public sealed partial class App : Application
             // Recovery reuses this entry point; re-announce the attempt so
             // calls crossing the detach gap wait for this reconnect.
             _inferenceGateway.MarkStartupPending();
-            _qrCodeGateway.MarkStartupPending();
             IManagedEnvironmentClient manager = _managedEnvironments
                 ?? throw new InvalidOperationException("Runtime manager is unavailable.");
             // 安装期间用户可能已切换环境；取门后重新读取权威活动选择。
@@ -952,7 +952,6 @@ public sealed partial class App : Application
                 var unavailable = new InvalidOperationException(
                     "尚未选择运行环境。可以在设置中选择识别组件并准备依赖。");
                 _inferenceGateway.MarkStartupFailed(unavailable);
-                _qrCodeGateway.MarkStartupFailed(unavailable);
                 _runtimeStatus.ReportServiceUnavailable();
                 diagnostics.UpdateSupervisor(new SupervisorHealth(
                     SupervisorHealthState.NotReady, null, null, unavailable.Message));
@@ -999,7 +998,6 @@ public sealed partial class App : Application
         {
             // 释放等待本次启动尝试的网关调用，使其携带启动失败原因返回。
             _inferenceGateway.MarkStartupFailed(error);
-            _qrCodeGateway.MarkStartupFailed(error);
             AppLog.Error("Supervisor connection failed", error);
             _runtimeStatus.ReportServiceUnavailable();
             await DisconnectSupervisorResourcesAsync();
@@ -1100,24 +1098,20 @@ public sealed partial class App : Application
             previous.Process.UnexpectedExit -= OnSupervisorUnexpectedExit;
             previous.Process.LogReceived -= OnSupervisorLogReceived;
             _inferenceGateway.Detach(previous.Client);
-            _qrCodeGateway.Detach(previous.QrClient);
         }
         _managedSession = next;
         _supervisorProcess = next?.Process;
         _activeInferenceClient = next?.Client;
-        _activeQrCodeClient = next?.QrClient;
         if (next is null)
         {
             var unavailable = new InvalidOperationException(
                 "当前为空环境，未安装识别服务依赖。");
             _inferenceGateway.MarkStartupFailed(unavailable);
-            _qrCodeGateway.MarkStartupFailed(unavailable);
             return;
         }
         next.Process.UnexpectedExit += OnSupervisorUnexpectedExit;
         next.Process.LogReceived += OnSupervisorLogReceived;
         _inferenceGateway.Attach(next.Client);
-        _qrCodeGateway.Attach(next.QrClient);
     }
 
     private void WriteSoakResult(bool requested, bool recovered, string? error = null)
@@ -1350,11 +1344,9 @@ public sealed partial class App : Application
             _managedSession = null;
             _supervisorProcess = null;
             _activeInferenceClient = null;
-            _activeQrCodeClient = null;
             managed.Process.UnexpectedExit -= OnSupervisorUnexpectedExit;
             managed.Process.LogReceived -= OnSupervisorLogReceived;
             _inferenceGateway.Detach(managed.Client);
-            _qrCodeGateway.Detach(managed.QrClient);
             await managed.DisposeAsync();
             return;
         }
@@ -1364,14 +1356,6 @@ public sealed partial class App : Application
         {
             _inferenceGateway.Detach(inferenceClient);
             await inferenceClient.DisposeAsync();
-        }
-
-        IQrCodeClient? qrCodeClient = _activeQrCodeClient;
-        _activeQrCodeClient = null;
-        if (qrCodeClient is not null)
-        {
-            _qrCodeGateway.Detach(qrCodeClient);
-            await qrCodeClient.DisposeAsync();
         }
 
         InferenceSupervisorProcess? process = _supervisorProcess;
@@ -1419,7 +1403,7 @@ public sealed partial class App : Application
             }
             await StopSupervisorAsync();
             await _inferenceGateway.DisposeAsync();
-            await _qrCodeGateway.DisposeAsync();
+            await _qrCodeClient.DisposeAsync();
             await DisposeDesktopShellAsync();
         }
         finally

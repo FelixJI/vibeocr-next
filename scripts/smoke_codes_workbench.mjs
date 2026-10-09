@@ -2,7 +2,7 @@
 //
 // Stage 1 (candidate 1, --shell-only): local QR/Code128/EAN-13 generation,
 // native clipboard copy/paste pixel roundtrip, source-Runtime pyzbar
-// cross-check and the decode-unavailable path without a Supervisor.
+// cross-check and local decode of the current preview without a Supervisor.
 //
 // Stage 2 (fresh candidate 2, no state): the real product first materializes
 // its own portable-layout state during a shell-only boot (no manager list),
@@ -11,7 +11,9 @@
 // Ensure into the fresh candidate state. Only then the full App starts; the
 // first manager list discovers the ensured base as the active legacy
 // environment and launches a real Supervisor. Every recognition result below
-// comes from the actual UI backed by QrCodeHttpClient /v2/qrcode/decode.
+// comes from the actual UI backed by the local C# decoder (Windows
+// BitmapDecoder + ZXing.Net); the Supervisor lifecycle itself is still
+// exercised end to end.
 import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
 import { once } from 'node:events';
@@ -43,7 +45,6 @@ const qrTests = [
 const statusCopied = '已复制当前预览图片';
 const statusDecoded = '识别完成';
 const statusNoCodes = '当前预览中未识别到支持的二维码或条码';
-const statusUnavailable = '图片识别需要识别运行环境，请启动或恢复后重试';
 
 function option(name) {
   const index = process.argv.indexOf(name);
@@ -299,7 +300,8 @@ async function stage1(source, smokeRoot, evidence) {
       await page.getByText(statusCopied, { exact: true }).waitFor();
       // Never inspect an existing user clipboard: this paste occurs only after our own successful copy.
       await page.getByRole('tab', { name: '识别', exact: true }).click();
-      await page.getByText(statusUnavailable, { exact: true }).waitFor();
+      // #213: decode is local, so the generated preview decodes even without
+      // a Supervisor; the pasted image then replaces it and decodes again.
       await page.getByRole('button', { name: '粘贴图片', exact: true }).click();
       await page.waitForFunction((old) => {
         const img = document.querySelector('img[alt="当前二维码与条码预览"]');
@@ -616,8 +618,8 @@ async function main() {
   const stage2Root = path.join(smokeRoot, 'stage2');
   const evidence = { schema_version: 2, state: 'failed', smokeRoot, cases: [],
     stage1: { state: 'failed' }, stage2: { state: 'not-run' },
-    desktopRuntime: 'stage1 shell-only unavailable path; stage2 real Supervisor from offline base Ensure via frozen installer',
-    decoder: 'stage1 source Runtime pyzbar cross-check; stage2 real product HTTP /v2/qrcode/decode via Supervisor',
+    desktopRuntime: 'stage1 shell-only local decode; stage2 real Supervisor from offline base Ensure via frozen installer (decode stays local)',
+    decoder: 'stage1+stage2 local C# decoder (BitmapDecoder+ZXing.Net); source Runtime pyzbar used as independent cross-check',
     commonWindowsAppPaste: 'not covered by this script' };
   try {
     await stage1(source, smokeRoot, evidence);
@@ -691,7 +693,7 @@ async function main() {
         }, oldUrl, { timeout: 15000 });
         const generated = await preview(page);
         fs.writeFileSync(path.join(stage2Root, `${test.format}-generated.png`), Buffer.from(generated.bytes));
-        // Switching to the decode tab auto-decodes once through the real HTTP route.
+        // Switching to the decode tab auto-decodes once through the local decoder.
         await page.getByRole('tab', { name: '识别', exact: true }).click();
         await waitDecodedItem(page, test.expected, decodeTimeoutMs);
         const autoResults = await qrResults(page);
@@ -716,8 +718,8 @@ async function main() {
         const pastedResults = await qrResults(page);
         assert(pastedResults.some((item) => item.data === test.expected),
           `Paste decode missed ${test.format} payload: ${JSON.stringify(pastedResults)}`);
-        // Manual re-recognition visibly re-runs the real HTTP decode on the
-        // same preview revision.
+        // Manual re-recognition visibly re-runs the local decode on the same
+        // preview revision.
         await native('foreground', { AppPid: app.child.pid });
         await watchStatus(page);
         await page.getByRole('button', { name: '识别当前预览 / 重新识别', exact: true }).click();
@@ -804,8 +806,9 @@ async function main() {
         evidence.stage2.recovery = { killedSupervisorPid: supervisorPid,
           beforeInstanceId: owned.instance_id, afterInstanceId: recoveredReady.instance_id,
           afterProcessId: Number(recoveredReady.process_id) };
-        // The same current preview survives; manual re-recognition still
-        // visibly re-runs the decode through the recovered Supervisor.
+        // The same current preview survives; decode is local and unaffected by
+        // the Supervisor kill, while manual re-recognition still re-runs and
+        // the recovered Supervisor evidence stays valid for the lifecycle.
         await native('foreground', { AppPid: app.child.pid });
         await watchStatus(page);
         await page.getByRole('button', { name: '识别当前预览 / 重新识别', exact: true }).click();
