@@ -829,12 +829,14 @@ public sealed partial class MainWindow
     PdfWorkbenchState oriented = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Summary.Contains("失败 0 页", StringComparison.Ordinal) && state.Summary.Contains("未处理 0 页", StringComparison.Ordinal), TimeSpan.FromMinutes(timeoutMinutes));
     await EnterSmokeTextAsync("#pdf-insert-after", "75");
     await ClickManagedSmokeButtonAsync("插入其他 PDF"); await CompletePaddleOpenPickerAsync(external);
-    await WaitForPaddlePdfAsync(state => !state.IsBusy && state.PageCount == 76, TimeSpan.FromSeconds(30));
+    PdfWorkbenchState inserted = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.PageCount == 76, TimeSpan.FromSeconds(30));
     // Reorder within the active window, then restore the first OCR page for HD editing.
-    await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("document.querySelector('button[aria-label=\"第 1 页向后移动\"]').click()");
-    await WaitForPaddlePdfAsync(state => !state.IsBusy && state.SelectedPage == 1, TimeSpan.FromSeconds(30));
-    await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("document.querySelector('button[aria-label=\"第 2 页向前移动\"]').click()");
-    PdfWorkbenchState ready = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.SelectedPage == 0 && state.PageInspectStatusCode == "pdf.inspect.ready", TimeSpan.FromSeconds(30));
+    RecordPaddleSmokeStage("workspace move first page backward");
+    await WaitForSmokeDomAsync("(() => {const button=document.querySelector('button[aria-label=\"第 1 页向后移动\"]');if(!button||button.disabled)return false;button.focus();button.click();return true;})()", TimeSpan.FromSeconds(30));
+    PdfWorkbenchState moved = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Revision > inserted.Revision && state.SelectedPage == 1, TimeSpan.FromSeconds(30));
+    RecordPaddleSmokeStage("workspace restore OCR page to first position");
+    await WaitForSmokeDomAsync("(() => {const button=document.querySelector('button[aria-label=\"第 2 页向前移动\"]');if(!button||button.disabled)return false;button.focus();button.click();return true;})()", TimeSpan.FromSeconds(30));
+    PdfWorkbenchState ready = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Revision > moved.Revision && state.SelectedPage == 0 && state.PageInspectStatusCode == "pdf.inspect.ready", TimeSpan.FromSeconds(30));
     await EnterSmokeTextAsync("#pdf-insert-after", "76");
     object editing = await RunPaddlePdfEditingAsync(ready, workspace: true);
     JsonElement editEvidence = JsonSerializer.SerializeToElement(editing);
