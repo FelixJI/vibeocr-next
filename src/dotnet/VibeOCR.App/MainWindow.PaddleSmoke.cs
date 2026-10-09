@@ -39,6 +39,8 @@ public sealed partial class MainWindow
   // 本次合成输入已获取证据的兑底快照（job/outcomes/copies/exports 引用），
   // 仅供失败 health 保留取证；成功路径不写入最终 JSON，合同不变。
   private object? paddleSmokePartialEvidence;
+  // 恢复验收保留旧进程现场；资源预算只计本进程新增文件。
+  private readonly HashSet<string> paddleSmokePriorResourceFiles = new(StringComparer.OrdinalIgnoreCase);
 
   private static string? PaddleSmokeEnv(string name) =>
     Environment.GetEnvironmentVariable(name);
@@ -758,11 +760,12 @@ public sealed partial class MainWindow
     async Task SampleResourcesAsync(string stage)
     {
       int thumbnails = int.Parse(await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("document.querySelectorAll('.pdf-page-list img').length"));
-      string[] files = Directory.GetFiles(resourceRoot, "*", SearchOption.AllDirectories);
+      string[] files = Directory.GetFiles(resourceRoot, "*", SearchOption.AllDirectories)
+        .Except(paddleSmokePriorResourceFiles, StringComparer.OrdinalIgnoreCase).ToArray();
       if (thumbnails > 64 || files.Length > 72) throw new InvalidOperationException($"Workspace resource budget exceeded at {stage}: {thumbnails}/{files.Length}");
       using var process = System.Diagnostics.Process.GetCurrentProcess();
       PdfWorkbenchState state = await WaitForPaddlePdfAsync(_ => true, TimeSpan.FromSeconds(30));
-      resources.Add(new { stage, thumbnails, published_files = files.Length, published_bytes = files.Sum(path => new FileInfo(path).Length),
+      resources.Add(new { stage, thumbnails, prior_process_files = paddleSmokePriorResourceFiles.Count, resource_scope = "files created by current App process", published_files = files.Length, published_bytes = files.Sum(path => new FileInfo(path).Length),
         app_peak_working_set_bytes = process.PeakWorkingSet64, peak_scope = "current App process only; excludes Runtime/OCR children",
         pdf_control_state_json_bytes = JsonSerializer.SerializeToUtf8Bytes(state).Length });
     }
