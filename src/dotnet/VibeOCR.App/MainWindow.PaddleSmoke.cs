@@ -981,6 +981,10 @@ public sealed partial class MainWindow
     RecordPaddleSmokeStage("add T1 text layer before structure operations");
     await ClickManagedSmokeButtonAsync("打开 PDF"); await CompletePaddleOpenPickerAsync(scanned);
     await WaitForPaddlePdfAsync(state => !state.IsBusy && state.DetectedCount == 1 && state.CanAddTextLayer, TimeSpan.FromMinutes(2));
+    // Recognition mode belongs to each document; the newly opened scan has no task override.
+    await WaitForPaddleModeAsync("#pdf-task-engine", mode);
+    await SelectSmokeValueAsync("#pdf-task-engine", mode);
+    await WaitForPaddlePdfAsync(state => !state.IsBusy && state.TaskEngine == mode, TimeSpan.FromMinutes(2));
     await ClickManagedSmokeButtonAsync("添加选中页文字层");
     PdfWorkbenchState layered = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.AddedCount == 1 && state.IsModified, TimeSpan.FromMinutes(timeoutMinutes));
     long revision = layered.Revision;
@@ -1017,15 +1021,27 @@ public sealed partial class MainWindow
     Func<PdfWorkbenchState, bool> done, TimeSpan timeout)
   {
     using var cancellation = new CancellationTokenSource(timeout);
-    while (true)
+    PdfWorkbenchState? last = null;
+    try
     {
-      PdfWorkbenchState state = (await application.BootstrapAsync(cancellation.Token))
-        .States.Select(item => item.State).OfType<PdfWorkbenchState>().Single();
-      if (!state.IsBusy && state.StatusCode is
-          "pdf.failed" or "pdf.backendUnavailable" or "pdf.outOfMemory" or "pdf.cancelled")
-        throw new InvalidOperationException($"PDF operation stopped: {state.StatusCode}");
-      if (done(state)) return state;
-      await Task.Delay(250, cancellation.Token);
+      while (true)
+      {
+        PdfWorkbenchState state = (await application.BootstrapAsync(cancellation.Token))
+          .States.Select(item => item.State).OfType<PdfWorkbenchState>().Single();
+        last = state;
+        if (!state.IsBusy && state.StatusCode is
+            "pdf.failed" or "pdf.backendUnavailable" or "pdf.outOfMemory" or "pdf.cancelled")
+          throw new InvalidOperationException($"PDF operation stopped: {state.StatusCode}");
+        if (done(state)) return state;
+        await Task.Delay(250, cancellation.Token);
+      }
+    }
+    catch (OperationCanceledException error) when (cancellation.IsCancellationRequested)
+    {
+      string diagnostic = JsonSerializer.Serialize(last is null ? null : new {
+        last.Phase, last.IsBusy, last.StatusCode, last.Revision, last.AddedCount, last.SelectedPage, last.TaskEngine,
+      });
+      throw new TimeoutException($"PDF state wait timed out after {timeout}. Last state: {diagnostic}", error);
     }
   }
 
