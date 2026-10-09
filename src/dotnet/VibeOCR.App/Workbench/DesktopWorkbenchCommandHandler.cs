@@ -329,7 +329,9 @@ public sealed class DesktopWorkbenchCommandHandler :
       }
       else
       {
-        if (bound.Command is not ActivatePdfDocumentCommand && entry != pdfWorkspace.Active)
+        // 纯预览状态（缩放/滚动/草稿）允许写入已知的非活动条目：交互中的
+        // 最后位置/草稿不因切换文档丢失；未知/关闭中的文档仍在上面拒绝。
+        if (bound.Command is not (ActivatePdfDocumentCommand or SetPdfPreviewPositionCommand) && entry != pdfWorkspace.Active)
           throw new InvalidOperationException("活动文档已变化，请重新操作");
         if (pdfExitReview || entry.Closing) throw new InvalidOperationException("文档正在关闭确认中");
         if (bound.Revision is { } expected && expected != entry.Model.Revision && bound.Command is not (ActivatePdfDocumentCommand or CancelPdfCommand or CancelPdfExportCommand or SetPdfPreviewPositionCommand))
@@ -3060,6 +3062,8 @@ public sealed class DesktopWorkbenchCommandHandler :
 
   private async Task<PdfWorkbenchState> OpenPdfAsync(CancellationToken ct)
   {
+    // 退出审阅中拒绝新的打开入口：新会话不会进入退出快照，未经确认即被留下。
+    if (pdfExitReview) throw new InvalidOperationException("正在退出应用，不能打开新 PDF。");
     pdf ??= CreatePdfViewModel();
     string? path = await pdf.PickFileAsync(ct);
     return path is null ? PdfState(ActivePdf ?? pdf) : await AddPdfPathAsync(path, ct);
@@ -3067,6 +3071,8 @@ public sealed class DesktopWorkbenchCommandHandler :
   private Task<PdfWorkbenchState> OpenDroppedPdfAsync(OpenDroppedPdfCommand command, CancellationToken ct) => AddPdfPathAsync(command.Path, ct);
   private async Task<PdfWorkbenchState> AddPdfPathAsync(string path, CancellationToken ct)
   {
+    // 实际加入入口重查：退出审阅开始前已打开的 picker 迟到返回同样拒绝。
+    if (pdfExitReview) throw new InvalidOperationException("正在退出应用，不能打开新 PDF。");
     path = Path.GetFullPath(path);
     if (pdfWorkspace.FindTarget(path) is { } duplicate) return await ActivatePdfAsync(duplicate, ct);
     if (pdfWorkspace.Documents.Count >= PdfWorkspace.MaxDocuments && pdf is not { HasRemoteSession: false, IsSettling: false }) throw new InvalidOperationException("最多同时打开 16 份 PDF，请先关闭文档。");
@@ -3365,8 +3371,16 @@ public sealed class DesktopWorkbenchCommandHandler :
       () => { if (ActivePdf is { } active) StateChanged?.Invoke(PdfState(active)); }, ct, plan));
   }
   private PdfWorkbenchState CancelPdfExport() { pdfWorkspace.CancelExport(); return ActivePdf is { } active ? PdfState(active) : EmptyPdfState(); }
-  private PdfWorkbenchState SetPdfPreviewPosition(SetPdfPreviewPositionCommand command)
-  { if (PdfEntry is { } entry) entry.Preview = command.Position; return PdfState(pdf!); }
+  private PdfWorkbenchState? SetPdfPreviewPosition(SetPdfPreviewPositionCommand command)
+  {
+    // 纯预览状态命令：按修订/页码校验后写入所属条目，过期迟到值直接忽略；
+    // 不回发状态，避免高频位置更新每条都回声完整 PDF 状态。
+    if (PdfEntry is not { } entry) return null;
+    if (command.Position.Revision != entry.Model.Revision ||
+      command.Position.Page < 0 || command.Position.Page >= entry.Model.PageCount) return null;
+    entry.Preview = command.Position;
+    return null;
+  }
   private async Task<PdfWorkbenchState> SelectPdfPagesAsync(SelectPdfPagesCommand command, CancellationToken cancellationToken)
   {
     pdf ??= CreatePdfViewModel();

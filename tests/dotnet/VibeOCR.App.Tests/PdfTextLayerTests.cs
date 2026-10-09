@@ -148,21 +148,50 @@ public sealed class PdfTextLayerTests
   }
 
   [Fact]
-  public async Task SaveFailureKeepsDirtyAndSettingsSaveClearsIt()
+  public async Task ConfirmedSaveFailureCanBeRetriedAndSettingsSaveClearsDirty()
   {
     var client = new PdfClient(1);
     var model = new PdfViewModel(client, new Source());
     await model.OpenPathAsync("synthetic.pdf", CancellationToken.None);
     await model.StartOcrAsync([0], false, CancellationToken.None, true);
-    client.FailSave = true;
-    await model.SaveAsync("copy.pdf", CancellationToken.None);
+    // 明确确认的失败（4xx 校验拒绝）：结果确定未写入，不进入未确认/待重开
+    // 状态，可以安全重试同一路径。
+    client.FailSave = new InferenceClientException(HttpV2ErrorCode.ValidationError, "synthetic settings rejected", false);
+    PdfSaveResult failed = await model.SaveAsync("copy.pdf", CancellationToken.None);
+    Assert.Equal(PdfSaveDisposition.Failed, failed.Disposition);
     Assert.True(model.IsModified);
-    client.FailSave = false;
+    Assert.False(model.IsSettling);
+    client.FailSave = null;
     model.SetProcessingSettings(new(FontSizeRatio: .6, CompressOnSave: false));
-    await model.SaveAsync("copy.pdf", CancellationToken.None);
+    PdfSaveResult saved = await model.SaveAsync("copy.pdf", CancellationToken.None);
+    Assert.Equal(PdfSaveDisposition.Saved, saved.Disposition);
     Assert.False(model.IsModified);
     Assert.Equal(.6, client.SaveSettings!["font_size_ratio"].GetDouble());
     Assert.False(client.SaveSettings["compress_on_save"].GetBoolean());
+  }
+
+  [Fact]
+  public async Task UnconfirmedSaveKeepsDirtyAndTargetAndBlocksBlindRetry()
+  {
+    var client = new PdfClient(1);
+    var model = new PdfViewModel(client, new Source());
+    await model.OpenPathAsync("synthetic.pdf", CancellationToken.None);
+    await model.StartOcrAsync([0], false, CancellationToken.None, true);
+    Assert.True(model.IsModified);
+    // 提交后传输失败：结果未知，按未确认处理，不盲目重试同一路径。
+    client.FailSave = new IOException("injected transport failure");
+    PdfSaveResult unconfirmed = await model.SaveAsync("copy.pdf", CancellationToken.None);
+    Assert.Equal(PdfSaveDisposition.Unconfirmed, unconfirmed.Disposition);
+    Assert.True(model.IsModified);
+    Assert.Equal("synthetic.pdf", model.FilePath);
+    Assert.True(model.IsSettling);
+    // 收尾确认前再次保存被拒绝，且不再发送第二次保存请求。
+    int wireCalls = client.SaveCalls;
+    PdfSaveResult rejected = await model.SaveAsync("copy.pdf", CancellationToken.None);
+    Assert.Equal(PdfSaveDisposition.Rejected, rejected.Disposition);
+    Assert.Equal(wireCalls, client.SaveCalls);
+    Assert.True(model.IsModified);
+    Assert.Equal("synthetic.pdf", model.FilePath);
   }
 
   [Fact]
@@ -210,7 +239,8 @@ public sealed class PdfTextLayerTests
     public int RotateCalls { get; private set; }
     public int CloseCalls { get; private set; }
     public override Task ClosePdfSessionAsync(string session, CancellationToken ct) { CloseCalls++; if (FailClose) throw new IOException("injected close failure"); return Task.CompletedTask; }
-    public bool FailSave { get; set; }
+    public Exception? FailSave { get; set; }
+    public int SaveCalls { get; private set; }
     public IReadOnlyDictionary<string, JsonElement>? SaveSettings { get; private set; }
     private Wire.PdfPageInfoMirror Page(int index) => new() { PageIndex = index, HasTextLayer = Layered.Contains(index), HasOcrTextLayer = Added.Contains(index), Rect = new double[] { 0, 0, 612, 792 }.Select(value => JsonSerializer.SerializeToElement(value)).ToArray() };
     private Wire.PdfDocumentMirror Model() => new() { Pages = Enumerable.Range(0, count).Select(Page).ToArray(), IsModified = _dirty };
@@ -269,8 +299,8 @@ public sealed class PdfTextLayerTests
     public override Task<PdfMutateResult> RotatePdfPagesAsync(string session, int[] pages, int angle, CancellationToken ct) { RotateCalls++; return Task.FromResult(new PdfMutateResult(count)); }
     public override Task<string> SavePdfWithSettingsAsync(string session, string path, IReadOnlyDictionary<string, JsonElement> settings, CancellationToken ct)
     {
-      SaveSettings = settings;
-      if (FailSave) throw new IOException("injected save failure");
+      SaveCalls++; SaveSettings = settings;
+      if (FailSave is { } failure) throw failure;
       _dirty = false; return Task.FromResult(path);
     }
   }

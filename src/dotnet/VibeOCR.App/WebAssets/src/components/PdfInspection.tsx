@@ -1,5 +1,5 @@
 import { Button, Checkbox, Textarea } from "@fluentui/react-components";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppActions } from "../app/types";
 
 interface Resource {
@@ -81,6 +81,18 @@ function blockLabel(block: Block): string {
   }${block.edited ? " · 人工修改" : ""} · ${block.text}`;
 }
 
+// 预览位置（纯预览状态）：高频滚动/击键只保留单个在途命令与最新待发送值。
+interface PreviewPositionUpdate {
+  readonly zoom: number | null;
+  readonly left: number;
+  readonly top: number;
+  readonly showBoxes: boolean;
+  readonly block: number | null;
+  readonly draft: string;
+  readonly revision: number;
+  readonly page: number;
+}
+
 export function PdfInspection({
   position,
   page,
@@ -93,6 +105,7 @@ export function PdfInspection({
   busy,
   canEdit,
   actions,
+  registerPositionFlush,
 }: {
   readonly position?: Readonly<Record<string, unknown>>;
   readonly page: number;
@@ -105,6 +118,9 @@ export function PdfInspection({
   readonly busy: boolean;
   readonly canEdit: boolean;
   readonly actions: AppActions;
+  readonly registerPositionFlush?: (
+    flush: (() => Promise<void>) | null,
+  ) => void;
 }) {
   const viewport = useRef<HTMLDivElement>(null);
   const drag = useRef<{
@@ -139,37 +155,96 @@ export function PdfInspection({
   }, [actions]);
   const initialPosition = useRef(position);
   const restoredPosition = useRef(false);
+  const pendingPosition = useRef<PreviewPositionUpdate | null>(null);
+  const drainingPosition = useRef<Promise<void> | null>(null);
+  // 单个在途 + 最新 pending：同一时刻至多一个排空任务，重复调度直接复用同一
+  // promise，不追加链；只有 run 确认成功才视为提交完成，未确认时保留待发送
+  // 值并使排空失败，切换/关闭命令因此不发出。
+  const drainPosition = useCallback((): Promise<void> => {
+    const existing = drainingPosition.current;
+    if (existing) return existing;
+    // 无待发送值时直接完成：不能登记空任务，否则其同步结束时序会把已完
+    // 成的 promise 留在唯一任务槽里，后续最新值永远不会被发送。
+    if (!pendingPosition.current) return Promise.resolve();
+    const task = (async () => {
+      try {
+        while (pendingPosition.current) {
+          const current = pendingPosition.current;
+          pendingPosition.current = null;
+          let confirmed = false;
+          try {
+            confirmed = await actionsRef.current.run({
+              type: "pdf.setPreviewPosition",
+              position: current,
+            });
+          } catch {
+            confirmed = false;
+          }
+          if (!confirmed) {
+            // 未确认提交：保留待发送值（较新的值优先）供重试，排空以失败结束。
+            pendingPosition.current ??= current;
+            throw new Error("preview position update was not confirmed");
+          }
+        }
+      } finally {
+        drainingPosition.current = null;
+      }
+    })();
+    drainingPosition.current = task;
+    return task;
+  }, []);
+  const schedulePosition = useCallback(
+    (update: PreviewPositionUpdate) => {
+      pendingPosition.current = update;
+      void drainPosition().catch(() => undefined);
+    },
+    [drainPosition],
+  );
+  // 切换/卸载前的排空：可等待，返回即表示最后位置/草稿已被宿主确认提交；
+  // 关闭可能被用户取消或远端失败，同样只补发不丢弃。
+  const flushPosition = drainPosition;
+  useEffect(() => {
+    registerPositionFlush?.(flushPosition);
+    return () => {
+      registerPositionFlush?.(null);
+      // 非切换路径的卸载（翻页/修订/路由变化）也排空最后状态；后续任何
+      // 激活/关闭命令都会先 await 同一排空任务。
+      void flushPosition().catch(() => undefined);
+    };
+  }, [registerPositionFlush, flushPosition]);
   const rememberPosition = () => {
     const node = viewport.current;
-    void actionsRef.current.run({
-      type: "pdf.setPreviewPosition",
-      position: {
-        zoom,
-        left: node?.scrollLeft ?? 0,
-        top: node?.scrollTop ?? 0,
-        showBoxes,
-        block: selected?.index ?? null,
-        draft,
-        revision,
-        page,
-      },
+    schedulePosition({
+      zoom,
+      left: node?.scrollLeft ?? 0,
+      top: node?.scrollTop ?? 0,
+      showBoxes,
+      block: selected?.index ?? null,
+      draft,
+      revision,
+      page,
     });
   };
   useEffect(() => {
-    void actionsRef.current.run({
-      type: "pdf.setPreviewPosition",
-      position: {
-        zoom,
-        left: viewport.current?.scrollLeft ?? 0,
-        top: viewport.current?.scrollTop ?? 0,
-        showBoxes,
-        block: selected?.index ?? null,
-        draft,
-        revision,
-        page,
-      },
+    schedulePosition({
+      zoom,
+      left: viewport.current?.scrollLeft ?? 0,
+      top: viewport.current?.scrollTop ?? 0,
+      showBoxes,
+      block: selected?.index ?? null,
+      draft,
+      revision,
+      page,
     });
-  }, [zoom, showBoxes, selected?.index, draft, revision, page]);
+  }, [
+    schedulePosition,
+    zoom,
+    showBoxes,
+    selected?.index,
+    draft,
+    revision,
+    page,
+  ]);
   useEffect(() => {
     alive.current = true;
     return () => {

@@ -36,7 +36,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { AppActions, AppViewState } from "../app/types";
 import { CaptureButton } from "../components/CaptureButton";
@@ -1956,20 +1956,39 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
   const [replaceLayers, setReplaceLayers] = useState(false);
   const state = feature(viewState, "pdf");
   const documentId = stringValue(state.documentId);
+  // 当前检查组件的预览状态排空接缝：切换/关闭前 await 最后位置/草稿在宿主
+  // 完成提交，再发送后续命令（关闭可能取消/失败，文档保留时草稿不丢）。
+  const positionFlush = useRef<(() => Promise<void>) | null>(null);
+  const registerPositionFlush = useCallback(
+    (flush: (() => Promise<void>) | null) => {
+      positionFlush.current = flush;
+    },
+    [],
+  );
   const actions: AppActions = {
     ...parentActions,
-    run: (action) =>
-      parentActions.run(
+    run: (action) => {
+      const bound =
         documentId !== undefined &&
-          action.type.startsWith("pdf.") &&
-          action.type !== "pdf.open"
+        action.type.startsWith("pdf.") &&
+        action.type !== "pdf.open"
           ? {
               documentId,
               documentRevision: numberValue(state.revision),
               ...action,
             }
-          : action,
-      ),
+          : action;
+      if (action.type !== "pdf.activateDocument" && action.type !== "pdf.close")
+        return parentActions.run(bound);
+      // 切换/关闭前等待最后位置/草稿在宿主确认提交；未确认时不发出该命令，
+      // 待发送值保留在检查组件中供重试。
+      const flush = positionFlush.current;
+      if (!flush) return parentActions.run(bound);
+      return flush().then(
+        () => parentActions.run(bound),
+        () => false,
+      );
+    },
   };
   const documents = Array.isArray(state.documents)
     ? state.documents.filter(
@@ -1983,6 +2002,11 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
           !!value && typeof value === "object",
       )
     : [];
+  // 关闭入口对准当前活动文档：远端会话未释放（关闭失败可重试）的条目即使
+  // 页数为 0 也保持可用，避免只能退出应用才能释放会话。
+  const activeDocument = documents.find(
+    (document) => stringValue(document.documentId) === documentId,
+  );
   const [modifiedOnly, setModifiedOnly] = useState(true);
   const busy = booleanValue(state.isBusy);
   const detected = numberValue(state.detectedCount);
@@ -2050,7 +2074,9 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
             capabilities={viewState.capabilities}
             action={{ type: "pdf.close" }}
             actions={actions}
-            disabled={pageCount === 0 && !busy}
+            disabled={
+              pageCount === 0 && !busy && activeDocument?.closeFailed !== true
+            }
             icon={<X aria-hidden="true" size={16} />}
           >
             关闭文档
@@ -2661,6 +2687,7 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
                 busy={busy}
                 canEdit={state.canCorrectText === true}
                 actions={actions}
+                registerPositionFlush={registerPositionFlush}
               />
             ) : hasCurrentPage && activePage?.thumbnail ? (
               <img

@@ -37,8 +37,20 @@ public sealed class PdfWorkspace
   }
   public PdfDocumentEntry? Find(string id) => documents.FirstOrDefault(entry => entry.Id == id);
   public PdfDocumentEntry? For(PdfViewModel model) => documents.FirstOrDefault(entry => ReferenceEquals(entry.Model, model));
-  public PdfDocumentEntry? FindTarget(string path) => documents.FirstOrDefault(entry => entry.Model.FilePath is { } target
-    && string.Equals(Path.GetFullPath(target), Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase));
+  /// <summary>
+  /// 按规范路径（OrdinalIgnoreCase）判定目标归属：优先当前保存目标
+  /// Model.FilePath；尚无当前目标（正在打开或仅剩可重试的未关闭会话）时
+  /// 退回 RequestedPath，避免同一文档重复打开/重复占用槽位。SaveAs 成功
+  /// 后 FilePath 已指向新目标，旧源 RequestedPath 不再抢占，可独立重开。
+  /// </summary>
+  public PdfDocumentEntry? FindTarget(string path)
+  {
+    string target = Path.GetFullPath(path);
+    return documents.FirstOrDefault(entry => entry.Model.FilePath is { } current
+      ? string.Equals(Path.GetFullPath(current), target, StringComparison.OrdinalIgnoreCase)
+      : entry.RequestedPath is { } requested &&
+        string.Equals(Path.GetFullPath(requested), target, StringComparison.OrdinalIgnoreCase));
+  }
   public void Activate(PdfDocumentEntry entry) { if (!documents.Contains(entry)) throw new InvalidOperationException("文档已关闭"); Active = entry; }
   public void Remove(PdfDocumentEntry entry) { documents.Remove(entry); if (Active == entry) Active = documents.LastOrDefault(); if (documents.Count == 0) EmptyDocumentId = Guid.NewGuid().ToString("N"); }
   public void CancelExport() => cancelExport = true;

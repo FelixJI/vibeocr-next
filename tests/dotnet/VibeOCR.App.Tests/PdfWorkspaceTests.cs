@@ -190,9 +190,132 @@ public sealed class PdfWorkspaceTests
     Assert.False(entry.Model.HasSession); Assert.True(entry.Model.HasRemoteSession);
     Assert.Equal(entry.Id, Assert.Single(failed.Documents!).DocumentId);
     Assert.True(Assert.Single(failed.Documents!).CloseFailed);
+    // 只剩 _unclosedSession/RequestedPath 的条目：同一路径再次打开激活既有条目，
+    // 不创建第二份文档/远端会话，保留可重试关闭入口。
+    WorkbenchCommandOutcome reopen = await handler.ExecuteAsync(new OpenDroppedPdfCommand(path), CancellationToken.None);
+    Assert.Null(reopen.Error);
+    Assert.Same(entry, Assert.Single(handler.PdfDocuments));
+    Assert.Equal(1, fixture.Client.Opens);
     fixture.Client.FailClose = false;
     await handler.ExecuteAsync(new PdfBoundCommand(entry.Id, new ClosePdfCommand()), CancellationToken.None);
     Assert.Empty(handler.PdfDocuments); Assert.Single(fixture.Client.Closed);
+  }
+
+  [Fact]
+  public async Task ExitReviewRejectsOpenEntriesAndLatePickerReturn()
+  {
+    using var fixture = new Fixture();
+    await using var handler = fixture.Handler();
+    await handler.ExecuteAsync(new OpenDroppedPdfCommand(Path.Combine(fixture.Root, "a.pdf")), CancellationToken.None);
+    PdfDocumentEntry entry = Assert.Single(handler.PdfDocuments);
+    // 退出审阅开始前，普通打开入口已经进入 picker 等待。
+    var pick = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+    fixture.Source.PendingPick = pick;
+    Task<WorkbenchCommandOutcome> picking = handler.ExecuteAsync(new OpenPdfCommand(), CancellationToken.None).AsTask();
+    // 退出审阅真实挂起在关闭确认上。
+    var decision = new TaskCompletionSource<PdfCloseDecision>(TaskCreationOptions.RunContinuationsAsynchronously);
+    fixture.DecisionPending = decision;
+    Task<bool> exiting = handler.RequestCloseAllPdfAsync();
+    try
+    {
+      Assert.False(exiting.IsCompleted);
+      // 审阅中：拖入打开被拒绝，不新增条目也不发远端 open。
+      WorkbenchCommandOutcome dropped = await handler.ExecuteAsync(new OpenDroppedPdfCommand(Path.Combine(fixture.Root, "late.pdf")), CancellationToken.None);
+      Assert.NotNull(dropped.Error);
+      Assert.Single(handler.PdfDocuments); Assert.Equal(1, fixture.Client.Opens);
+      // 审阅前已打开的 picker 迟到返回：在实际加入入口重查并拒绝。
+      pick.SetResult(Path.Combine(fixture.Root, "late.pdf"));
+      WorkbenchCommandOutcome late = await picking;
+      Assert.NotNull(late.Error);
+      Assert.Single(handler.PdfDocuments); Assert.Equal(1, fixture.Client.Opens);
+      // 用户取消退出：原会话保持，等待用户决定。
+      decision.SetResult(PdfCloseDecision.Cancel);
+      Assert.False(await exiting);
+      Assert.Same(entry, Assert.Single(handler.PdfDocuments));
+      Assert.True(entry.Model.HasSession);
+    }
+    finally
+    {
+      // 红断言提前抛出时也排空挂起的 picker/退出流程，避免悬挂。
+      pick.TrySetResult(null);
+      decision.TrySetResult(PdfCloseDecision.Cancel);
+      await picking;
+      await exiting;
+    }
+  }
+
+  [Fact]
+  public async Task RequestedPathClaimsOpeningEntryAndSaveAsOldSourceReopensIndependently()
+  {
+    using var fixture = new Fixture();
+    await using var handler = fixture.Handler();
+    string path = Path.Combine(fixture.Root, "source.pdf");
+    fixture.Client.PendingOpen = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    Task<WorkbenchCommandOutcome> opening = handler.ExecuteAsync(new OpenDroppedPdfCommand(path), CancellationToken.None).AsTask();
+    await fixture.Client.OpenEntered.Task;
+    PdfDocumentEntry openingEntry = Assert.Single(handler.PdfDocuments);
+    try
+    {
+      // 正在打开中的条目按 RequestedPath 判重：激活既有条目，不二次远端打开、
+      // 不占用第二个文档槽位。先派发重复打开再放行远端结果，两条实现路径都有界。
+      Task<WorkbenchCommandOutcome> duplicate = handler.ExecuteAsync(new OpenDroppedPdfCommand(path), CancellationToken.None).AsTask();
+      Assert.False(opening.IsCompleted);
+      fixture.Client.PendingOpen.SetResult(fixture.Client.OpenResult(path));
+      await opening;
+      WorkbenchCommandOutcome repeated = await duplicate;
+      Assert.Null(repeated.Error);
+      Assert.Same(openingEntry, Assert.Single(handler.PdfDocuments));
+      Assert.Equal(1, fixture.Client.Opens);
+      Assert.True(openingEntry.Model.HasSession);
+      // SaveAs 成功后以 Model.FilePath 为当前目标；旧源 RequestedPath 不再抢占，
+      // 可以作为独立文档重新打开。
+      await handler.ExecuteAsync(new PdfBoundCommand(openingEntry.Id, new SavePdfAsCommand()), CancellationToken.None);
+      Assert.Equal(fixture.SaveTarget, openingEntry.Model.FilePath);
+      await handler.ExecuteAsync(new OpenDroppedPdfCommand(path), CancellationToken.None);
+      Assert.Equal(2, handler.PdfDocuments.Count);
+      PdfDocumentEntry reopened = handler.PdfDocuments.Last();
+      Assert.NotSame(openingEntry, reopened);
+      Assert.Equal(path, reopened.Model.FilePath);
+    }
+    finally
+    {
+      // 红断言提前抛出时也放行仍在等待的远端 open，避免悬挂。
+      fixture.Client.PendingOpen.TrySetResult(fixture.Client.OpenResult(path));
+    }
+  }
+
+  [Fact]
+  public async Task PreviewPositionStoresPerDocumentSilentlyAndValidatesLateWrites()
+  {
+    using var fixture = new Fixture();
+    await using var handler = fixture.Handler();
+    await handler.ExecuteAsync(new OpenDroppedPdfCommand(Path.Combine(fixture.Root, "a.pdf")), CancellationToken.None);
+    PdfDocumentEntry first = handler.PdfDocuments[0];
+    // 活动文档：保存位置但不回发完整 PDF 状态（避免高频位置更新回声）。
+    WorkbenchCommandOutcome active = await handler.ExecuteAsync(new PdfBoundCommand(first.Id,
+      new SetPdfPreviewPositionCommand(new PdfPreviewPosition(Left: 5, Top: 6, Draft: "d1", Revision: first.Model.Revision, Page: 0))), CancellationToken.None);
+    Assert.Null(active.Error); Assert.Empty(active.States);
+    await handler.ExecuteAsync(new OpenDroppedPdfCommand(Path.Combine(fixture.Root, "b.pdf")), CancellationToken.None);
+    PdfDocumentEntry second = handler.PdfDocuments[1];
+    Assert.Same(second, handler.PdfDocuments.Last());
+    // 已切走后迟到的最后位置：允许写入已知非活动条目，仍不发布状态。
+    WorkbenchCommandOutcome late = await handler.ExecuteAsync(new PdfBoundCommand(first.Id,
+      new SetPdfPreviewPositionCommand(new PdfPreviewPosition(Left: 7, Top: 8, Draft: "d2", Revision: first.Model.Revision, Page: 0))), CancellationToken.None);
+    Assert.Null(late.Error); Assert.Empty(late.States);
+    // 过期修订/越界页码的迟到值被忽略，不覆盖已知位置。
+    await handler.ExecuteAsync(new PdfBoundCommand(first.Id,
+      new SetPdfPreviewPositionCommand(new PdfPreviewPosition(Draft: "stale", Revision: first.Model.Revision + 5, Page: 0))), CancellationToken.None);
+    await handler.ExecuteAsync(new PdfBoundCommand(first.Id,
+      new SetPdfPreviewPositionCommand(new PdfPreviewPosition(Draft: "stale-page", Revision: first.Model.Revision, Page: first.Model.PageCount + 1))), CancellationToken.None);
+    // 未知文档 ID 仍按入口门拒绝（硬错误，与其他绑定命令一致）。
+    await Assert.ThrowsAsync<InvalidOperationException>(() => handler.ExecuteAsync(new PdfBoundCommand("00000000000000000000000000000000",
+      new SetPdfPreviewPositionCommand(new PdfPreviewPosition(Draft: "x", Revision: 0, Page: 0))), CancellationToken.None).AsTask());
+    // 切回后恢复的是最后被接受的位置/草稿。
+    WorkbenchCommandOutcome back = await handler.ExecuteAsync(new PdfBoundCommand(first.Id, new ActivatePdfDocumentCommand()), CancellationToken.None);
+    PdfWorkbenchState state = Assert.IsType<PdfWorkbenchState>(Assert.Single(back.States));
+    Assert.Equal(first.Id, state.DocumentId);
+    Assert.Equal("d2", state.PreviewPosition!.Draft);
+    Assert.Equal(7, state.PreviewPosition.Left); Assert.Equal(8, state.PreviewPosition.Top);
   }
 
   [Fact]
@@ -205,10 +328,13 @@ public sealed class PdfWorkspaceTests
     Assert.Empty(client.Saves); Assert.True(model.IsModified); Assert.Equal("source.pdf", model.FilePath);
   }
 
-  private static PdfViewModel Model(Client client)
-  { var model = new PdfViewModel(client, new Source()); model.SetInspectionCapabilities(["pdf.copy-export.v1"]); return model; }
+  private static PdfViewModel Model(Client client, Source? source = null)
+  { var model = new PdfViewModel(client, source ?? new Source()); model.SetInspectionCapabilities(["pdf.copy-export.v1"]); return model; }
   private sealed class Source : IPdfFileSource
-  { public Task<string?> PickFileAsync(CancellationToken ct) => Task.FromResult<string?>(null); }
+  {
+    public TaskCompletionSource<string?>? PendingPick { get; set; }
+    public Task<string?> PickFileAsync(CancellationToken ct) => PendingPick?.Task ?? Task.FromResult<string?>(null);
+  }
   private sealed class Client(int pageCount = 2) : InferenceClientStub
   {
     public List<(string Session, string Path)> Saves { get; } = [];
@@ -224,13 +350,14 @@ public sealed class PdfWorkspaceTests
     public string? FailCopy { get; set; }
     public bool FailClose { get; set; }
     public bool FailOpen { get; set; }
+    public int Opens { get; private set; }
     public TaskCompletionSource<PdfSessionOpenResult>? PendingOpen { get; set; }
     public TaskCompletionSource OpenEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public PdfSessionOpenResult OpenResult(string path) => new(Guid.NewGuid().ToString("N"), pageCount, path,
       new Wire.PdfDocumentMirror { IsModified = true, Pages = Enumerable.Range(0, pageCount).Select(index => new Wire.PdfPageInfoMirror { PageIndex = index, Rect = [JsonSerializer.SerializeToElement(0), JsonSerializer.SerializeToElement(0), JsonSerializer.SerializeToElement(612), JsonSerializer.SerializeToElement(792)] }).ToArray() });
     public override Task<PdfSessionOpenResult> OpenPdfSessionAsync(string path, string? password, CancellationToken ct)
     {
-      OpenEntered.TrySetResult();
+      Opens++; OpenEntered.TrySetResult();
       if (FailOpen && Path.GetFileName(path) == "bad.pdf") throw new InferenceClientException(HttpV2ErrorCode.ValidationError, "synthetic bad PDF", false);
       return PendingOpen?.Task ?? Task.FromResult(OpenResult(path));
     }
@@ -253,13 +380,15 @@ public sealed class PdfWorkspaceTests
     public WorkbenchResourceBroker Broker { get; }
     private WorkbenchAnnotationStore Annotations { get; }
     public PdfCloseDecision Decision { get; set; } = PdfCloseDecision.Cancel;
+    public TaskCompletionSource<PdfCloseDecision>? DecisionPending { get; set; }
+    public Source Source { get; } = new();
     public Fixture(int pages = 2)
     { Directory.CreateDirectory(Root); Client = new(pages); Broker = new(Root); Annotations = new(Root); }
     public DesktopWorkbenchCommandHandler Handler() => new(
       () => throw new NotSupportedException(), () => throw new NotSupportedException(), () => throw new NotSupportedException(),
-      () => Model(Client), () => throw new NotSupportedException(), () => throw new NotSupportedException(), () => throw new NotSupportedException(),
+      () => Model(Client, Source), () => throw new NotSupportedException(), () => throw new NotSupportedException(), () => throw new NotSupportedException(),
       new DiagnosticsViewModel("test", new PrerequisiteReport([])), Broker, Root, static () => 0, Annotations,
-      confirmPdfClose: _ => Task.FromResult(Decision), pickPdfSavePath: () => Task.FromResult<string?>(SaveTarget));
+      confirmPdfClose: _ => DecisionPending?.Task ?? Task.FromResult(Decision), pickPdfSavePath: () => Task.FromResult<string?>(SaveTarget));
     public void Dispose() { Annotations.Dispose(); Broker.Dispose(); }
   }
 }
