@@ -1190,12 +1190,12 @@ function statusLabel(value: unknown, fallback: string): string {
     "qrcode.decoded": "识别完成",
     "qrcode.ready": "等待输入",
     "qrcode.running": "正在处理二维码…",
-    "qrcode.failed": "图片识别失败，请检查输入图片和识别运行环境后重试",
+    "qrcode.failed": "图片识别失败，请检查输入图片后重试",
     "qrcode.generateFailed": "二维码生成失败，请重试",
     "qrcode.invalidInput": "内容不符合所选编码格式，请检查下方提示。",
     "qrcode.copied": "已复制当前预览图片",
     "qrcode.noCodes": "当前预览中未识别到支持的二维码或条码",
-    "qrcode.decodeUnavailable": "图片识别需要识别运行环境，请启动或恢复后重试",
+    "qrcode.decodeUnavailable": "图片识别暂不可用，请稍后重试",
     "qrcode.cancelled": "二维码处理已取消",
     "settings.ready": "运行环境设置已同步",
     "settings.restartRequired": "更改将在重启后生效",
@@ -2899,10 +2899,10 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
           ) : (
             <div className="form-stack">
               <p className="form-note">
-                识别由识别运行环境的 zbar 解码器完成，解码能力已随产品预装：支持
-                QR Code、Code 128、Code 39、Code 93、EAN-13/8、UPC-A/E、
-                Codabar、交插 2/5、DataBar 等常见格式；识别效果取决于图片
-                清晰度与对比度。
+                识别在本机直接完成，无需启动识别运行环境；
+                解码能力已随产品预装：支持 QR Code、Code 128、Code 39、Code
+                93、EAN-13/8、UPC-A/E、Codabar、交插 2/5、DataBar
+                等常见格式；识别效果取决于图片清晰度与对比度。
               </p>
               <CapabilityGate
                 capability="qrcode.decode"

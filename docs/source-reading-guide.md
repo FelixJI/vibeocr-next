@@ -21,8 +21,8 @@
 | 宿主：窗口、单实例与跨产品互斥、热键、剪贴板/文件授权 | C#/WinUI（`VibeOCR.App`、`VibeOCR.Platform`） | WinUI/Win32 原生；剪贴板/文件命令经 `App/Workbench` 暴露给 Web | 系统级集成与权限仲裁只能在原生层 |
 | 桌面工作流、应用权威状态与更新 | C#（`src/dotnet/VibeOCR.App/Features`、ViewModels） | ViewModel → Platform typed client；更新走 Velopack feed | 权威状态单点，UI 不复制协议/进程细节 |
 | Workbench 展示与局部编辑 | React/TypeScript（`WebAssets/src` 的 `features`/`components`） | WebView2 消息桥：`WebAssets/src/bridge` ↔ `App/Web` codec ↔ `App/Workbench` handler | 富交互迭代快；浏览器内容无直接系统/Runtime 权限 |
-| 二维码生成与 PNG/JPEG 保存 | C#（`VibeOCR.App/Features/QrCode`） | WebView 命令 → 本地 ZXing.Net 与 Windows 图片编码；不等待 Supervisor | 无需识别运行环境即可生成，文件授权留在宿主 |
-| OCR/MinerU 推理、PDF/表格/导出、二维码解码 | Python/CPython（`runtime/recognition`、`documents`、`codes`） | Desktop↔Runtime 唯一 v2 内部 HTTP wire（`contracts/runtime` + `VibeOCR.Runtime.Client`） | 直接消费 OCR/PDF 生态；worker 隔离与引擎生命周期同源 |
+| 二维码/条码生成、本地解码与 PNG/JPEG 保存 | C#（`VibeOCR.App/Features/QrCode`、`VibeOCR.App/Inference/LocalQrCodeClient`） | WebView 命令 → 本地 ZXing.Net 与 Windows 图片编码/BitmapDecoder（≤4096 有界缩放，有界趟次）；不等待 Supervisor | 无需识别运行环境即可生成与解码，文件授权留在宿主 |
+| OCR/MinerU 推理、PDF/表格/导出、二维码兼容生成/解码 route | Python/CPython（`runtime/recognition`、`documents`、`codes`） | Desktop↔Runtime 唯一 v2 内部 HTTP wire（`contracts/runtime` + `VibeOCR.Runtime.Client`）；桌面已不消费解码 route | 直接消费 OCR/PDF 生态；worker 隔离与引擎生命周期同源；保留的兼容 wire 面不构成桌面依赖 |
 | 任务调度与共享子进程 | Python（`runtime/jobs`、`processes`） | 入口是 host 暴露的 v2 内部 HTTP 路由；Paddle/MinerU/PDF worker 是 Runtime 内部管理的子进程，不经桌面直接调用 | 跨 job 状态与进程复用集中在 Runtime |
 | 运行环境安装事务（组件选择、安装计划、设备就绪、回滚） | Python/CPython（`runtime/environments`，经产品内冻结 Installer 可执行文件交付） | C# 侧由 `Platform/Bootstrap/RuntimeInstallerClient` 以子进程调用冻结 Installer：inspect/ensure/repair/install_plan 与 cancel/retry/observe 都是独立子进程命令（`--request-json` 参数），进度走 stdout NDJSON 事件流（`ndjson.v1/v2`），结果为单个 JSON envelope；安装计划/设备就绪真值只在 Runtime，C#/TS 不复制包依赖推导 | 依赖解析与 manifest 绑定在事务内保持一致 |
 | Windows 构建/打包/安装前置 | PowerShell（`scripts/build-release.ps1`、`build_internal_runtime.ps1`、`install_windows_app_runtime.ps1`） | 本地/CI 命令行 | Windows SDK、Velopack 与 App Runtime 适配 |
@@ -35,8 +35,12 @@ wire 都有 v2 命名，但编号相同不代表同一协议；前者是浏览�
 必须同步对应两侧类型与测试。
 
 二维码公开入口只暴露文本 QR：300×300、UTF-8、纠错 M、四模块静区和 PNG 预览，保存支持真实 PNG/JPEG。
-#97 的 C# 本地生成在 Runtime 未启动、启动失败、断开或维护时仍可使用；图片解码继续通过 Runtime。
-Python 旧生成路由与选项仍有内部契约消费者，本次保留，不据此宣称移除了 Pillow 等依赖。
+#97 的 C# 本地生成在 Runtime 未启动、启动失败、断开或维护时仍可使用；#213 起图片解码同样在本地完成
+（Windows BitmapDecoder ≤4096 缩放 + 固定 ZXing.Net 有界趟次），桌面不再发起 /v2/qrcode/decode 请求。
+公开解码结果保持原 Runtime pyzbar 基线（Codabar 起止符、DataBar 01 前缀、UPC-A/E 以 EAN-13 形式、
+add-on 不单独上报）；RSS Expanded 例外：保持 ZXing 的 (AI)value 可读文本，不承诺保留原始 GS1 分隔符，
+不适合依赖原始元素串的处理（后续如需 raw 兼容应换可保留原始数据的解码边界）。
+Python 旧生成/解码路由仍有内部契约消费者，本次保留为兼容 wire 面，不据此宣称移除了 Pillow 等依赖。
 #98 已移除无生产消费者的旧 JS 核心、薄 TS 包装及专属遗留测试；生产编辑器使用
 `components/ImageCanvasEditor.tsx`、`annotationGeometry.ts` 与 `annotationHandoff.ts`，bridge 使用
 `bridge/client.ts` 和 `bridge/runtime.ts`，并由编译期类型契约与运行时消息测试共同校验。
