@@ -71,13 +71,13 @@ async function freeLocalPort() {
   return port;
 }
 
-async function native(action, options = {}) {
+async function native(action, options = {}, timeoutMs = 15000) {
   const args = ['-NoProfile', '-NonInteractive', '-File', nativeScript,
     '-Action', action];
   for (const [key, value] of Object.entries(options))
     args.push(`-${key}`, String(value));
   const { stdout } = await execFileAsync('pwsh', args, {
-    timeout: 15000, windowsHide: true, maxBuffer: 1024 * 1024,
+    timeout: timeoutMs, windowsHide: true, maxBuffer: 1024 * 1024,
   });
   return stdout.trim();
 }
@@ -276,6 +276,18 @@ async function stage1(source, smokeRoot, evidence) {
     const page = app.page;
     await page.getByRole('link', { name: '二维码与条码', exact: true }).click();
     await page.getByRole('heading', { name: '二维码与条码', exact: true }).waitFor();
+    // Unique-payload inputs for the picker/drop rounds: the current preview
+    // cannot satisfy their assertions, so only the real input path can.
+    const pickerPayload = `PICKER-${crypto.randomUUID().slice(0, 8)}`;
+    const dropPayload = `DROP-${crypto.randomUUID().slice(0, 8)}`;
+    const pickerFile = path.join(smokeRoot, 'qr-input-picker.png');
+    const dropFile = path.join(smokeRoot, 'qr-input-drop.png');
+    await makeIndependentQr(pickerFile, pickerPayload);
+    await makeIndependentQr(dropFile, dropPayload);
+    assert((await runtimeDecode(pickerFile)).some((item) => item.data === pickerPayload),
+      'Independent picker QR does not decode via the runtime cross-check.');
+    assert((await runtimeDecode(dropFile)).some((item) => item.data === dropPayload),
+      'Independent drop QR does not decode via the runtime cross-check.');
     for (const test of qrTests) {
       await native('foreground', { AppPid: app.child.pid });
       await page.getByRole('tab', { name: '生成', exact: true }).click();
@@ -300,6 +312,14 @@ async function stage1(source, smokeRoot, evidence) {
       await page.getByText(statusCopied, { exact: true }).waitFor();
       // Never inspect an existing user clipboard: this paste occurs only after our own successful copy.
       await page.getByRole('tab', { name: '识别', exact: true }).click();
+      // #213 AC1: the generated preview itself decodes in-app without any
+      // Supervisor — assert the app's own decoded results, not just the
+      // external pyzbar cross-check below.
+      await waitDecodedItem(page, test.expected, decodeTimeoutMs);
+      assert.equal(await qrStatus(page), statusDecoded);
+      const generatedResults = await qrResults(page);
+      assert(generatedResults.some((item) => item.data === test.expected),
+        `In-app decode of the generated preview missed ${test.format}: ${JSON.stringify(generatedResults)}`);
       // #213: decode is local, so the generated preview decodes even without
       // a Supervisor; the pasted image then replaces it and decodes again.
       await page.getByRole('button', { name: '粘贴图片', exact: true }).click();
@@ -314,9 +334,45 @@ async function stage1(source, smokeRoot, evidence) {
       fs.writeFileSync(pastedFile, Buffer.from(pasted.bytes));
       const pastedDecoded = await runtimeDecode(pastedFile);
       assert(pastedDecoded.some((item) => item.data === test.expected), 'Clipboard image no longer decodes to actual payload.');
-      await page.screenshot({ path: path.join(smokeRoot, `${test.format}-workbench.png`) });
+      // File-picker input: the real FileOpenPicker is driven through its
+      // owned Win32 dialog (codes-open-file), opening a fresh unique-payload
+      // QR; the preview change wait plus unique payload rules out stale
+      // results satisfying the assertion.
+      const beforePicker = await page.getByAltText('当前二维码与条码预览').getAttribute('src');
+      await native('foreground', { AppPid: app.child.pid });
+      await page.getByRole('button', { name: '选择图片识别', exact: true }).click();
+      await native('codes-open-file',
+        { AppPid: app.child.pid, Handle: app.main.Handle, FilePath: pickerFile }, 45000);
+      await page.waitForFunction((old) => {
+        const img = document.querySelector('img[alt="当前二维码与条码预览"]');
+        return img && img.src !== old && img.complete && img.naturalWidth > 0;
+      }, beforePicker, { timeout: 20000 });
+      await waitDecodedItem(page, pickerPayload, decodeTimeoutMs);
+      assert.equal(await qrStatus(page), statusDecoded);
+      const pickedResults = await qrResults(page);
+      assert(pickedResults.some((item) => item.data === pickerPayload),
+        `Picker decode missed fresh payload: ${JSON.stringify(pickedResults)}`);
+      // Host drop input: a real OLE FileDrop onto the app window routes
+      // through MainWindow OnDrop → DecodeDroppedQrCodeCommand (StorageItems).
+      const beforeDrop = await page.getByAltText('当前二维码与条码预览').getAttribute('src');
+      const dropEffect = JSON.parse(await native('codes-drop-file',
+        { AppPid: app.child.pid, Handle: app.main.Handle, FilePath: dropFile, EvidenceRoot: smokeRoot }, 60000));
+      assert.equal(dropEffect.effect, 'Copy', `OLE drop was not accepted: ${JSON.stringify(dropEffect)}`);
+      await page.waitForFunction((old) => {
+        const img = document.querySelector('img[alt="当前二维码与条码预览"]');
+        return img && img.src !== old && img.complete && img.naturalWidth > 0;
+      }, beforeDrop, { timeout: 20000 });
+      await waitDecodedItem(page, dropPayload, decodeTimeoutMs);
+      assert.equal(await qrStatus(page), statusDecoded);
+      const droppedResults = await qrResults(page);
+      assert(droppedResults.some((item) => item.data === dropPayload),
+        `Dropped decode missed fresh payload: ${JSON.stringify(droppedResults)}`);
+      await page.screenshot({ path: path.join(smokeRoot, `${test.format}-picker.png`) });
       evidence.cases.push({ ...test, width: generated.width, height: generated.height,
-        nativeClipboardPixelsEqual: true, decoded, pastedDecoded });
+        nativeClipboardPixelsEqual: true, decoded, pastedDecoded,
+        inAppResults: generatedResults,
+        picker: { payload: pickerPayload, results: pickedResults },
+        hostDrop: { payload: dropPayload, effect: dropEffect.effect, results: droppedResults } });
     }
     // Invalid generation must show a local message and keep the same preview.
     await page.getByRole('tab', { name: '生成', exact: true }).click();
@@ -445,6 +501,21 @@ async function ensureBaseOffline(candidate, layout, smokeRoot) {
   return { productId, request: { ...request }, launch, state: envelope.state };
 }
 
+// Independent QR with a per-run unique payload for picker/drop inputs: a
+// fresh payload cannot be satisfied by any stale preview result, so those
+// assertions can only pass through the real new input path.
+async function makeIndependentQr(out, payload) {
+  const code = [
+    'import sys, qrcode',
+    'qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=10, border=4)',
+    'qr.add_data(sys.argv[2]); qr.make(fit=True)',
+    'qr.make_image(fill_color="black", back_color="white").save(sys.argv[1])',
+  ].join('\n');
+  await execFileAsync('uv', ['run', '--frozen', '--no-sync', 'python', '-c', code, out, payload],
+    { cwd: repoRoot, windowsHide: true, timeout: 60000, encoding: 'utf8' });
+  assert(fs.statSync(out).isFile(), `Independent QR was not produced: ${out}`);
+}
+
 // Synthetic composites use the repository's locked Pillow; output stays in
 // the smoke root.
 async function composePillow(out, sources) {
@@ -497,6 +568,23 @@ async function waitForTrace(file, predicate, timeoutMs, label) {
   }
   throw new Error(`Timed out waiting for supervisor health ${label}; last record: ${JSON.stringify(last)}`);
 }
+
+// Owned child-process census for zero-new-work evidence: a health trace
+// without Ready records does not by itself prove process counts, so we also
+// enumerate the app's own direct children (read-only Win32_Process query) and
+// snapshot installer evidence files. Only used for pids this smoke owns.
+async function ownedChildren(pid) {
+  const script = `$ErrorActionPreference='Stop'; Get-CimInstance Win32_Process -Filter ('ParentProcessId = ' + ${pid}) | Select-Object ProcessId,Name | ConvertTo-Json -Compress`;
+  const { stdout } = await execFileAsync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', script],
+    { timeout: 15000, windowsHide: true, maxBuffer: 1024 * 1024 });
+  const trimmed = stdout.trim();
+  if (!trimmed) return [];
+  const parsed = JSON.parse(trimmed);
+  return Array.isArray(parsed) ? parsed : [parsed];
+}
+
+const hasPythonChild = (children) =>
+  children.some((child) => /python/i.test(String(child.Name ?? '')));
 
 async function assertDescendant(pid, rootPid) {
   assert(Number.isInteger(pid) && pid > 0 && Number.isInteger(rootPid) && rootPid > 0,
@@ -602,6 +690,72 @@ function resultTexts(results) {
 async function waitDecodedItem(page, expected, timeoutMs) {
   await expect(page.getByRole('listitem').filter({ hasText: expected }))
     .toBeVisible({ timeout: timeoutMs });
+}
+
+// #213 AC1 isolated states on the already-ensured candidate: maintenance-
+// paused and injected startup-failure windows. Each relaunch is a full real
+// App boot with strict selftest double-guarded flags (see App.xaml.cs); the
+// paste image is the real QR generated by stage 2. Zero-request evidence:
+// the health trace must never contain a Ready record in these cases.
+async function relaunchIsolatedStateCase({ candidate, webview2, smokeRoot, evidence, label, env, settleState, image, expected }) {
+  assert(fs.existsSync(image), `Isolated-state paste image is missing: ${image}`);
+  const trace = path.join(smokeRoot, `state-${label}-health.jsonl`);
+  let app;
+  try {
+    app = await launchApp(candidate, webview2, crypto.randomUUID().replaceAll('-', ''), {
+      shellOnly: false,
+      env: { VIBEOCR_SUPERVISOR_HEALTH_TRACE: trace, ...env },
+    });
+    evidence[label] = { state: 'failed', appPid: app.child.pid };
+    await foreground(app);
+    const page = app.page;
+    await page.getByRole('link', { name: '二维码与条码', exact: true }).click();
+    await page.getByRole('heading', { name: '二维码与条码', exact: true }).waitFor();
+    // Settle into the injected state before decoding; fail-closed if the
+    // strict double-guarded selftest flags are missing from this build.
+    await waitForTrace(trace, (record) => record.state === settleState, 90000, `${label} ${settleState}`);
+    const childrenAtState = await ownedChildren(app.child.pid);
+    assert(!hasPythonChild(childrenAtState),
+      `${label} window unexpectedly has a Supervisor child: ${JSON.stringify(childrenAtState)}`);
+    const installerEvidenceBefore = fs.readdirSync(smokeRoot)
+      .filter((name) => name.startsWith('installer-')).sort();
+    await page.getByRole('tab', { name: '识别', exact: true }).click();
+    await setClipboardImage(smokeRoot, image);
+    await native('foreground', { AppPid: app.child.pid });
+    await page.getByRole('button', { name: '粘贴图片', exact: true }).click();
+    await waitDecodedItem(page, expected, decodeTimeoutMs);
+    assert.equal(await qrStatus(page), statusDecoded);
+    const results = await qrResults(page);
+    assert(results.some((item) => item.data === expected),
+      `${label} decode missed payload: ${JSON.stringify(results)}`);
+    const records = readTrace(trace);
+    assert(!records.some((record) => record.state === 'Ready'),
+      `${label} unexpectedly reached a Ready Supervisor`);
+    const childrenAfterDecode = await ownedChildren(app.child.pid);
+    assert(!hasPythonChild(childrenAfterDecode),
+      `${label} decode ran with a Supervisor child present: ${JSON.stringify(childrenAfterDecode)}`);
+    const installerEvidenceAfter = fs.readdirSync(smokeRoot)
+      .filter((name) => name.startsWith('installer-')).sort();
+    assert.deepEqual(installerEvidenceAfter, installerEvidenceBefore,
+      `${label} decode created new installer evidence`);
+    await page.screenshot({ path: path.join(smokeRoot, `${label}-decoded.png`) });
+    evidence[label].results = results;
+    evidence[label].childCensus = { atState: childrenAtState, afterDecode: childrenAfterDecode };
+    evidence[label].zeroNewWorkEvidence =
+      'owned child-process census (no python child) + no Ready health record + installer evidence set unchanged; loopback HTTP traffic not directly observed';
+    evidence[label].state = 'passed';
+    console.log(`Codes isolated state ${label} passed.`);
+  } finally {
+    if (app) {
+      let cleanupError = null;
+      try {
+        await stopOwned(app.child, 'close', { AppPid: app.child.pid, Handle: app.main.Handle });
+      } catch (error) { cleanupError = error; }
+      await app.browser.close().catch(() => {});
+      if (cleanupError) throw cleanupError;
+      assert(app.child.exitCode !== null, `${label} owned app PID did not exit.`);
+    }
+  }
 }
 
 async function main() {
@@ -798,6 +952,34 @@ async function main() {
         await execFileAsync('taskkill', ['/PID', String(supervisorPid), '/F'],
           { timeout: 10000, windowsHide: true });
         await waitForTrace(trace, (record) => record.state === 'Faulted', 30000, 'Faulted after owned supervisor exit');
+        // #213 AC1: decode during the disconnected window — between Faulted
+        // and recovery Ready — must succeed locally and must not be replaced
+        // by the post-recovery regression below. Snapshot the trace and the
+        // owned child census first so a racing recovery fails closed instead
+        // of masquerading as a disconnected-window success.
+        const traceAtFaulted = readTrace(trace).length;
+        const childrenAtFaulted = await ownedChildren(app.child.pid);
+        assert(!hasPythonChild(childrenAtFaulted),
+          `Supervisor child survived into the disconnected window: ${JSON.stringify(childrenAtFaulted)}`);
+        await native('foreground', { AppPid: app.child.pid });
+        await watchStatus(app.page);
+        await app.page.getByRole('button', { name: '识别当前预览 / 重新识别', exact: true }).click();
+        const disconnectedLog = await waitManualDecode(app.page);
+        const disconnectedResults = await qrResults(app.page);
+        assert(disconnectedResults.some((item) => item.data === '中文🙂 hello QR') &&
+          disconnectedResults.some((item) => item.data === 'VIBE-128'),
+        `Decode during disconnected window missed payloads: ${JSON.stringify(disconnectedResults)}`);
+        const disconnectedRecords = readTrace(trace).slice(traceAtFaulted);
+        assert(!disconnectedRecords.some((record) => record.state === 'Ready'),
+          'Recovery reached Ready during the disconnected decode; the result can no longer be attributed to the disconnected window.');
+        const childrenAfterDisconnectedDecode = await ownedChildren(app.child.pid);
+        assert(!hasPythonChild(childrenAfterDisconnectedDecode),
+          'Decode during the disconnected window spawned a Supervisor.');
+        evidence.stage2.decodeDuringDisconnected = {
+          bridge: disconnectedLog, results: disconnectedResults,
+          childCensus: { atFaulted: childrenAtFaulted, afterDecode: childrenAfterDisconnectedDecode },
+          traceRecordsAfterDecode: readTrace(trace).length - traceAtFaulted,
+        };
         const recovered = await waitForTrace(trace, (record) =>
           record.state === 'Ready' && Number(record.process_id) > 0 &&
           !!record.instance_id && record.instance_id !== owned.instance_id,
@@ -855,8 +1037,30 @@ async function main() {
         }
       }
     }
+
+    // Stage 3 (#213 AC1): isolated representative states on the same ensured
+    // candidate — maintenance-paused, then injected startup failure. Both
+    // relaunches keep decode fully local: the health trace must never reach
+    // a Ready Supervisor in either case.
+    const stageImage = path.join(stage2Root, 'qrcode-generated.png');
+    await relaunchIsolatedStateCase({
+      candidate: candidate2, webview2, smokeRoot: stage2Root, evidence,
+      label: 'maintenancePaused',
+      env: { VIBEOCR_SELF_TEST_CODES_MAINTENANCE: '1' },
+      settleState: 'NotReady',
+      image: stageImage,
+      expected: '中文🙂 hello QR',
+    });
+    await relaunchIsolatedStateCase({
+      candidate: candidate2, webview2, smokeRoot: stage2Root, evidence,
+      label: 'startupFailed',
+      env: { VIBEOCR_SELF_TEST_CODES_FAIL_STARTUP: '1' },
+      settleState: 'Faulted',
+      image: stageImage,
+      expected: '中文🙂 hello QR',
+    });
     evidence.state = 'passed';
-    console.log(`Codes workbench product HTTP smoke passed: ${smokeRoot}`);
+    console.log(`Codes workbench product smoke passed: ${smokeRoot}`);
   } catch (error) {
     evidence.error = `${error.name}: ${error.message}`;
     throw error;

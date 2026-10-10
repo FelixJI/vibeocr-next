@@ -122,6 +122,19 @@ def compose_multi(sources: list[Image.Image]) -> Image.Image:
     return canvas
 
 
+def compose_orientation_mixed(
+    upright: Image.Image, rotated: Image.Image
+) -> Image.Image:
+    """Same-image mixed-orientation composite: one upright 1D code and one
+    1D code rotated 90° CCW. zbar scans both orientations in a single decode
+    (measured with pyzbar on these pixels), so this is the #213 multi-code
+    orientation contract the bounded pass sequence must accumulate across."""
+    canvas = Image.new("RGB", (1400, 700), "white")
+    canvas.paste(upright, (100, 140))
+    canvas.paste(rotated.rotate(90, expand=True, fillcolor="white"), (900, 60))
+    return canvas
+
+
 def main() -> int:
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     manifest: dict[str, object] = {
@@ -190,6 +203,28 @@ def main() -> int:
             "generator": "qrcode[pil] + python-barcode, Pillow canvas",
             "variant": "two codes side by side",
             "note": "DecodeMultiple coverage",
+        }
+    )
+
+    orientation = compose_orientation_mixed(
+        make_one_d("code128", "MIX-ORIENT-128"),
+        make_one_d("code39", "MIX-ORIENT-39"),
+    )
+    orientation.save(OUTPUT_ROOT / "multi_orientation_composite.png", format="PNG")
+    samples.append(
+        {
+            "file": "multi_orientation_composite.png",
+            "payload": "MIX-ORIENT-128|MIX-ORIENT-39",
+            "generator": "python-barcode ImageWriter, Pillow canvas + rotate(90)",
+            "variant": (
+                "upright Code 128 (left) + 90-degree CCW Code 39 (right); the "
+                "physical Code 39 payload gains the writer checksum character"
+            ),
+            "note": (
+                "mixed-orientation same-image contract: pyzbar (zbar) scans both "
+                "orientations and returns both codes, so the bounded pass "
+                "sequence must keep accumulating after the first hit"
+            ),
         }
     )
 

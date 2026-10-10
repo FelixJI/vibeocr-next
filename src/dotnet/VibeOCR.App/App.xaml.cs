@@ -236,7 +236,8 @@ public sealed partial class App : Application
                 SupervisorHealthState.Connecting, null, null, null));
             _inferenceGateway.MarkStartupPending();
             if (Volatile.Read(ref _runtimeMaintenanceActive) == 0 &&
-                !MaintenanceMutexEarlyExitSelfTestRequested(isRecovery: false))
+                !MaintenanceMutexEarlyExitSelfTestRequested(isRecovery: false) &&
+                !CodesIsolatedStateSelfTestRequested())
             {
                 defaultEnvironmentPreparation = PrepareDefaultEnvironmentAsync(
                     _managedEnvironments ?? throw new InvalidOperationException(
@@ -883,6 +884,27 @@ public sealed partial class App : Application
         // Connecting，避免占用方把“正在连接”滞留成永久状态。
         try
         {
+            // #213 codes 冒烟的隔离终态注入：必须先于任何默认环境准备早退，
+            // 才能成立“零 Runtime 安装 / 零 Supervisor”证据；应用保持运行，
+            // 本地解码不依赖 Supervisor 生命周期，冒烟在窗口内继续断言解码。
+            if (CodesIsolatedStateSelfTestRequested())
+            {
+                bool maintenancePause =
+                    Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_CODES_MAINTENANCE") == "1";
+                var injected = new InvalidOperationException(
+                    maintenancePause
+                        ? "selftest 注入：运行环境维护尚未结束，识别服务保持暂停。"
+                        : "selftest 注入：Supervisor 启动失败（codes 冒烟）。");
+                _inferenceGateway.MarkStartupFailed(injected);
+                if (maintenancePause)
+                    _runtimeStatus.ReportServicePausedForMaintenance();
+                else
+                    _runtimeStatus.ReportServiceUnavailable();
+                diagnostics.UpdateSupervisor(new SupervisorHealth(
+                    maintenancePause ? SupervisorHealthState.NotReady : SupervisorHealthState.Faulted,
+                    null, null, injected.Message));
+                return false;
+            }
             // 默认环境安装可能耗时较长，不占用 Supervisor 生命周期门；
             // 产品维护 lease 让更新/其他安装快速得到互斥状态并支持取消。
             // OnLaunched 预启动的任务在此消费，避免重复初始化。
@@ -1168,6 +1190,14 @@ public sealed partial class App : Application
         !isRecovery &&
         Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "t6" &&
         Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_MAINTENANCE_EARLY_EXIT") == "1";
+
+    /// <summary>selftest-only：仅在 native-actions-e2e 冒烟且显式设置环境变量时，
+    /// 为 codes 冒烟注入隔离的维护暂停 / 启动失败终态；应用不自退，供窗口内
+    /// 解码断言使用。见 ConnectSupervisorCoreAsync 的注入早退。</summary>
+    private static bool CodesIsolatedStateSelfTestRequested() =>
+        Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "native-actions-e2e" &&
+        (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_CODES_MAINTENANCE") == "1" ||
+         Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_CODES_FAIL_STARTUP") == "1");
 
     /// <summary>稳定终态（无环境/注入的维护互斥）下 t6 冒烟自退并落盘轨迹。</summary>
     private void ExitStartupSmokeT6()

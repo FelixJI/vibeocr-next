@@ -108,6 +108,22 @@ public sealed class LocalQrCodeClientTests
   }
 
   [Fact]
+  public async Task DecodesIndependentUprightAndRotatedOneDimensionalCompositeAsync()
+  {
+    // Same-image mixed-orientation composite: one upright Code 128 and one
+    // 90-degree-rotated Code 39 with distinct payloads. The Runtime pyzbar
+    // baseline returns both codes in a single call (measured on these exact
+    // pixels: CODE128 MIX-ORIENT-128 + CODE39 MIX-ORIENT-39Y — the writer
+    // checksum character included), so the local decode must surface both.
+    await using var client = new LocalQrCodeClient();
+    IReadOnlyList<QrCodeDecodedItem> decoded = await client.DecodeAsync(
+      await FixtureBytesAsync("multi_orientation_composite.png"), TestContext.Current.CancellationToken);
+    Assert.Equal(2, decoded.Count);
+    Assert.Contains(decoded, item => item is { Data: "MIX-ORIENT-128", Format: "CODE128" });
+    Assert.Contains(decoded, item => item is { Data: "MIX-ORIENT-39Y", Format: "CODE39" });
+  }
+
+  [Fact]
   public async Task ClassifiesStrictHttpUrlsFromIndependentFixturesAsync()
   {
     await using var client = new LocalQrCodeClient();

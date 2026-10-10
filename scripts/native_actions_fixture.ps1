@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'webview-bounds', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection', 'cursor', 'magnifier', 'toolbar-sequence', 'toolbar-drag', 'toolbar-hotkey', 'pump', 'minimize', 'restore', 'tray-state', 'tray-click', 'taskbar-created', 'down', 'tray-fixture', 'tray-keyboard', 'tray-keyboard-resume', 'tray-expose', 'tray-left-click', 'tray-double-click', 'tray-gone', 'tray-menu-quit', 'tray-menu-open', 'tray-menu-toggle')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'webview-bounds', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection', 'cursor', 'magnifier', 'toolbar-sequence', 'toolbar-drag', 'toolbar-hotkey', 'pump', 'minimize', 'restore', 'tray-state', 'tray-click', 'taskbar-created', 'down', 'tray-fixture', 'tray-keyboard', 'tray-keyboard-resume', 'tray-expose', 'tray-left-click', 'tray-double-click', 'tray-gone', 'tray-menu-quit', 'tray-menu-open', 'tray-menu-toggle', 'codes-open-file')][string]$Action,
     [int]$AppPid = 0,
     [int]$FixturePid = 0,
     [int]$ForegroundPid = 0,
@@ -10,7 +10,9 @@ param(
     [int]$OutsideX = 0,
     [int]$OutsideY = 0,
     [ValidateRange(100, 5000)][int]$LingerMs = 300,
-    [Guid]$IconGuid = [Guid]::Empty
+    [Guid]$IconGuid = [Guid]::Empty,
+    [string]$FilePath = '',
+    [string]$EvidenceRoot = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -116,6 +118,17 @@ public static class NativeActionsFixture
         var text = new System.Text.StringBuilder(256);
         GetClassName(window, text, text.Capacity);
         return text.ToString();
+    }
+
+    // Owned-chain rule: a dialog qualifies when its owner is the main window
+    // itself or any window belonging to the same app pid (FileOpenPicker may
+    // be brokered with an indirect owner chain).
+    private static bool OwnedByApp(IntPtr dialog, IntPtr main, int appPid)
+    {
+        IntPtr owner = GetWindowLongPtrW(dialog, -8);
+        if (owner == main) return true;
+        GetWindowThreadProcessId(owner, out uint ownerPid);
+        return ownerPid == (uint)appPid;
     }
 
     public static void Show(long handle, int pid, int command)
@@ -597,8 +610,264 @@ public static class NativeActionsFixture
         RequireForeground(appPid);
         Tap(key);
     }
+
+    [DllImport("user32.dll")] private static extern int GetDlgCtrlID(IntPtr window);
+    [DllImport("user32.dll")] private static extern bool IsWindowEnabled(IntPtr window);
+    [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", CharSet = CharSet.Unicode)]
+    private static extern IntPtr SetText(IntPtr window, uint message, IntPtr wp, string text, uint flags, uint timeout, out IntPtr result);
+    [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", CharSet = CharSet.Unicode)]
+    private static extern IntPtr ReadText(IntPtr window, uint message, int count, System.Text.StringBuilder text, uint flags, uint timeout, out IntPtr result);
+
+    // Drives the app's own FileOpenPicker (Win32 dialog owned by the main
+    // window): fills the filename field with an absolute synthetic path and
+    // confirms. Mirrors the owned save-picker contract of scroll_capture.
+    public static void CodesOpenFilePicker(long mainHandle, int appPid, string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath) || !System.IO.Path.IsPathRooted(filePath) ||
+            !System.IO.File.Exists(filePath))
+            throw new InvalidOperationException("Picker input must be an existing absolute synthetic file.");
+        RequireOwner(mainHandle, appPid);
+        var main = new IntPtr(mainHandle);
+        IntPtr dialog = IntPtr.Zero, edit = IntPtr.Zero, confirm = IntPtr.Zero;
+        var until = DateTime.UtcNow.AddSeconds(12);
+        while (DateTime.UtcNow < until)
+        {
+            EnumWindows((window, _) =>
+            {
+                if (IsWindowVisible(window) && ClassName(window) == "#32770" &&
+                    GetWindowLongPtrW(window, -8) == main)
+                {
+                    dialog = window; return false;
+                }
+                return true;
+            }, IntPtr.Zero);
+            if (dialog != IntPtr.Zero) break;
+            System.Threading.Thread.Sleep(100);
+        }
+        if (dialog == IntPtr.Zero)
+        {
+            // FileOpenPicker may be brokered with an owner chain instead of a
+            // direct owner; accept exactly one dialog fully owned by this app's
+            // own window tree, otherwise fail with the observed evidence.
+            var candidates = new List<IntPtr>();
+            EnumWindows((window, _) =>
+            {
+                if (IsWindowVisible(window) && ClassName(window) == "#32770")
+                {
+                    IntPtr owner = GetWindowLongPtrW(window, -8);
+                    GetWindowThreadProcessId(owner, out uint ownerPid);
+                    if (ownerPid == (uint)appPid) candidates.Add(window);
+                }
+                return true;
+            }, IntPtr.Zero);
+            if (candidates.Count != 1)
+                throw new InvalidOperationException(
+                    $"Owned open picker not found; owned-dialog candidates: {candidates.Count}.");
+            dialog = candidates[0];
+        }
+        EnumChildWindows(dialog, (child, _) =>
+        {
+            if (!IsWindowVisible(child)) return true;
+            int id = GetDlgCtrlID(child);
+            if (ClassName(child) == "Edit" && (id == 1001 || id == 1148))
+            {
+                if (edit != IntPtr.Zero) throw new InvalidOperationException("Ambiguous picker filename field.");
+                edit = child;
+            }
+            if (ClassName(child) == "Button" && id == 1) confirm = child;
+            return true;
+        }, IntPtr.Zero);
+        if (edit == IntPtr.Zero || confirm == IntPtr.Zero || !OwnedByApp(dialog, main, appPid))
+            throw new InvalidOperationException("Owned open picker controls unavailable.");
+        if (SetText(edit, 0x000C, IntPtr.Zero, filePath, 2, 1000, out IntPtr setResult) == IntPtr.Zero || setResult == IntPtr.Zero)
+            throw new InvalidOperationException("Picker filename rejected.");
+        var readBack = new System.Text.StringBuilder(filePath.Length + 2);
+        if (ReadText(edit, 0x000D, readBack.Capacity, readBack, 2, 1000, out _) == IntPtr.Zero ||
+            readBack.ToString() != filePath)
+            throw new InvalidOperationException("Picker filename mismatch.");
+        until = DateTime.UtcNow.AddSeconds(5);
+        while (!IsWindowEnabled(confirm) && DateTime.UtcNow < until) System.Threading.Thread.Sleep(100);
+        if (!IsWindowEnabled(confirm) || !OwnedByApp(dialog, main, appPid) ||
+            !PostMessage(dialog, 0x0111, new IntPtr(1), confirm))
+            throw new InvalidOperationException("Picker open confirmation failed.");
+    }
 }
 '@
+
+Add-Type -AssemblyName System.Windows.Forms
+$formsAsm = [System.Windows.Forms.Form].Assembly.Location
+$formsDir = Split-Path $formsAsm -Parent
+$dropRefs = @(
+  $formsAsm,
+  (Join-Path $formsDir 'System.Private.Windows.Core.dll'),
+  (Join-Path $formsDir 'System.Windows.Forms.Primitives.dll'),
+  (Join-Path $formsDir 'System.ComponentModel.Primitives.dll'),
+  'netstandard', 'System.Runtime', 'System.Console', 'System.Collections', 'System.Linq',
+  'System.Threading', 'System.Threading.Thread', 'Microsoft.Win32.Primitives')
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+// #213 codes smoke: real OLE file drop helper. A small owned synthetic
+// WinForms source window runs Control.DoDragDrop with a FileDrop DataObject
+// (CF_HDROP → StorageItems) while real SendInput mouse input presses on the
+// source, drags to the owned target window and releases. Only this fixture's
+// own source window is created/closed; every step is timeout-bounded.
+public static class CodesDropFixture
+{
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Rect { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Point { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Input { public uint Type; public InputUnion Data; }
+    [StructLayout(LayoutKind.Explicit)]
+    private struct InputUnion { [FieldOffset(0)] public MouseInput Mouse; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MouseInput
+    {
+        public int X, Y;
+        public uint Data, Flags, Time;
+        public UIntPtr Extra;
+    }
+
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr window, out Rect bounds);
+    [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(Point point);
+    [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr window, uint flags);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr window);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint SendInput(uint count, Input[] inputs, int size);
+
+    private static void Send(uint flag)
+    {
+        var input = new Input { Type = 0, Data = new InputUnion { Mouse = new MouseInput { Flags = flag } } };
+        if (SendInput(1, new[] { input }, Marshal.SizeOf<Input>()) != 1)
+            throw new InvalidOperationException("Synthetic drop input was not delivered.");
+    }
+
+    private static void RequireOwner(long handle, int appPid)
+    {
+        IntPtr window = new IntPtr(handle);
+        if (appPid <= 0 || !IsWindow(window))
+            throw new InvalidOperationException("Owned target window is gone.");
+        GetWindowThreadProcessId(window, out uint owner);
+        if (owner != (uint)appPid)
+            throw new InvalidOperationException("Drop target is outside this smoke run.");
+    }
+
+    public static object DropFile(long targetHandle, int appPid, string filePath, string evidenceRoot)
+    {
+        if (string.IsNullOrWhiteSpace(filePath) || !System.IO.Path.IsPathRooted(filePath))
+            throw new InvalidOperationException("Drop source must be an absolute file path.");
+        string fullRoot = System.IO.Path.GetFullPath(evidenceRoot).TrimEnd('\\') + System.IO.Path.DirectorySeparatorChar;
+        string fullFile = System.IO.Path.GetFullPath(filePath);
+        if (!fullFile.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Drop source must live inside this smoke run's evidence root.");
+        if (!System.IO.File.Exists(fullFile))
+            throw new InvalidOperationException("Drop source file does not exist.");
+        RequireOwner(targetHandle, appPid);
+        IntPtr target = new IntPtr(targetHandle);
+        if (!GetWindowRect(target, out Rect targetRect))
+            throw new InvalidOperationException("Owned target geometry unavailable.");
+        int tx = (targetRect.Left + targetRect.Right) / 2;
+        int ty = (targetRect.Top + targetRect.Bottom) / 2;
+
+        var uiReady = new ManualResetEvent(false);
+        var buttonDown = new ManualResetEvent(false);
+        var dragStarted = new ManualResetEvent(false);
+        object result = null;
+        Exception uiError = null;
+        long sourceHandle = 0;
+
+        var ui = new Thread(() =>
+        {
+            try
+            {
+                using var form = new System.Windows.Forms.Form
+                {
+                    Text = "VibeOCR synthetic drop source",
+                    StartPosition = System.Windows.Forms.FormStartPosition.Manual,
+                    Left = 40, Top = 40, Width = 220, Height = 90,
+                    TopMost = true, ShowInTaskbar = false,
+                    FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedToolWindow,
+                };
+                sourceHandle = form.Handle.ToInt64();
+                form.Shown += (s, e) =>
+                {
+                    uiReady.Set();
+                    var pump = new Thread(() =>
+                    {
+                        if (!buttonDown.WaitOne(5000))
+                        {
+                            form.BeginInvoke((Action)(() => form.Close()));
+                            return;
+                        }
+                        dragStarted.Set();
+                        var effect = (System.Windows.Forms.DragDropEffects)form.Invoke(
+                            new Func<System.Windows.Forms.DragDropEffects>(() =>
+                                form.DoDragDrop(
+                                    new System.Windows.Forms.DataObject(
+                                        System.Windows.Forms.DataFormats.FileDrop, new[] { fullFile }),
+                                    System.Windows.Forms.DragDropEffects.Copy)));
+                        result = new { effect = effect.ToString(), file = fullFile };
+                        form.BeginInvoke((Action)(() => form.Close()));
+                    });
+                    pump.IsBackground = true;
+                    pump.Start();
+                };
+                System.Windows.Forms.Application.Run(form);
+            }
+            catch (Exception error)
+            {
+                uiError = error;
+                uiReady.Set(); buttonDown.Set(); dragStarted.Set();
+            }
+        });
+        ui.SetApartmentState(ApartmentState.STA);
+        ui.IsBackground = true;
+        ui.Start();
+        if (!uiReady.WaitOne(8000) || uiError != null)
+            throw new InvalidOperationException(
+                "Synthetic drop source failed to start: " + (uiError?.Message ?? "timeout"));
+
+        int scx = 40 + 110, scy = 40 + 45;
+        if (!SetCursorPos(scx, scy))
+            throw new InvalidOperationException("Synthetic drag start cursor move failed.");
+        Thread.Sleep(150);
+        IntPtr over = WindowFromPoint(new Point { X = scx, Y = scy });
+        if (over == IntPtr.Zero || GetAncestor(over, 2) != new IntPtr(sourceHandle))
+            throw new InvalidOperationException("Drag start point is not on the synthetic owned source window.");
+        Send(0x0002);
+        try
+        {
+            buttonDown.Set();
+            if (!dragStarted.WaitOne(5000))
+                throw new InvalidOperationException("OLE drag did not start while the button was held.");
+            const int steps = 12;
+            for (int i = 1; i <= steps; i++)
+            {
+                SetCursorPos(scx + (tx - scx) * i / steps, scy + (ty - scy) * i / steps);
+                Thread.Sleep(40);
+            }
+            Thread.Sleep(120);
+        }
+        finally
+        {
+            // Never leave the injected button pressed, even on failure paths.
+            Send(0x0004);
+        }
+        if (!ui.Join(15000) || uiError != null)
+            throw new InvalidOperationException(
+                "Drop did not complete within the bounded window: " + (uiError?.Message ?? "timeout"));
+        if (result is null)
+            throw new InvalidOperationException("DoDragDrop did not produce a result.");
+        return result;
+    }
+}
+'@ -ReferencedAssemblies $dropRefs
 
 function Get-OwnedTrayTarget {
     $rect = [NativeActionsFixture]::TrayRect($Handle, $AppPid, $IconGuid)
@@ -736,6 +1005,8 @@ try {
         'tab' { [NativeActionsFixture]::OverlayKey($AppPid, 0x09) }
         'enter' { [NativeActionsFixture]::OverlayKey($AppPid, 0x0D) }
         'escape' { [NativeActionsFixture]::OverlayKey($AppPid, 0x1B) }
+        'codes-open-file' { [NativeActionsFixture]::CodesOpenFilePicker($Handle, $AppPid, $FilePath) }
+        'codes-drop-file' { [CodesDropFixture]::DropFile($Handle, $AppPid, $FilePath, $EvidenceRoot) | ConvertTo-Json -Compress }
     }
 } finally {
     [void][NativeActionsFixture]::SetThreadDpiAwarenessContext($oldDpi)

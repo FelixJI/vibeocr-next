@@ -2900,9 +2900,9 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
             <div className="form-stack">
               <p className="form-note">
                 识别在本机直接完成，无需启动识别运行环境；
-                解码能力已随产品预装：支持 QR Code、Code 128、Code 39、Code
-                93、EAN-13/8、UPC-A/E、 Codabar、交插 2/5、DataBar
-                等常见格式；识别效果取决于图片 清晰度与对比度。
+                解码能力已随产品预装：支持 QR Code、Code 128、Code 39、
+                Code 93、EAN-13/8、UPC-A/E、Codabar、交插 2/5、DataBar
+                等常见格式；识别效果取决于图片清晰度与对比度。
               </p>
               <CapabilityGate
                 capability="qrcode.decode"

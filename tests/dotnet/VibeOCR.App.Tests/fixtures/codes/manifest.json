@@ -90,6 +90,13 @@
       "note": "DecodeMultiple coverage"
     },
     {
+      "file": "multi_orientation_composite.png",
+      "payload": "MIX-ORIENT-128|MIX-ORIENT-39",
+      "generator": "python-barcode ImageWriter, Pillow canvas + rotate(90)",
+      "variant": "upright Code 128 (left) + 90-degree CCW Code 39 (right); the physical Code 39 payload gains the writer checksum character",
+      "note": "mixed-orientation same-image contract: pyzbar (zbar) scans both orientations and returns both codes, so the bounded pass sequence must keep accumulating after the first hit"
+    },
+    {
       "file": "blank.png",
       "payload": "",
       "generator": "Pillow",

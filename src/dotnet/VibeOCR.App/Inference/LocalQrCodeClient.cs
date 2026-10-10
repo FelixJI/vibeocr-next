@@ -164,38 +164,44 @@ public sealed class LocalQrCodeClient(CancellationToken shutdownToken = default)
       // Cancelled means cancelled: a found (or final-pass) result must not be
       // reported as success once the caller's token has fired.
       cancellationToken.ThrowIfCancellationRequested();
-      // Escalate only while nothing was found; the first pass mirrors the
-      // Runtime's single-pass capability.
-      if (collected.Count > 0) break;
+      // The four base orientation passes mirror the Runtime's single zbar
+      // scan over both axes, so they always run and accumulate: a same-image
+      // mixed-orientation multi-code must not lose its rotated halves to the
+      // first hit. The remaining passes are single-code escalation and stay
+      // gated on nothing found yet.
+      if (pass.Escalation && collected.Count > 0) break;
     }
     return collected;
   }
 
-  private readonly record struct Pass(LuminanceSource Source, bool PureBarcode, bool GlobalHistogram);
+  private readonly record struct Pass(
+    LuminanceSource Source, bool PureBarcode, bool GlobalHistogram, bool Escalation);
 
   /// <summary>Bounded pass order: hybrid binarizer at 0/90/180/270°, pure
   /// barcode (the documented 0.16.11 V1 detector workaround for single-code
   /// images), global histogram binarizer at the same rotations, then the four
-  /// inverted orientations. Rotated/inverted sources are derived lazily, only
-  /// when their pass is actually reached.</summary>
+  /// inverted orientations. The first four orientation passes are the base
+  /// ladder that always accumulates; everything after them is escalation that
+  /// only runs while nothing was found. Rotated/inverted sources are derived
+  /// lazily, only when their pass is actually reached.</summary>
   private static IEnumerable<Pass> EnumeratePasses(LuminanceSource source)
   {
-    yield return new Pass(source, PureBarcode: false, GlobalHistogram: false);
+    yield return new Pass(source, PureBarcode: false, GlobalHistogram: false, Escalation: false);
     LuminanceSource rotated90 = source.rotateCounterClockwise();
-    yield return new Pass(rotated90, PureBarcode: false, GlobalHistogram: false);
+    yield return new Pass(rotated90, PureBarcode: false, GlobalHistogram: false, Escalation: false);
     LuminanceSource rotated180 = rotated90.rotateCounterClockwise();
-    yield return new Pass(rotated180, PureBarcode: false, GlobalHistogram: false);
+    yield return new Pass(rotated180, PureBarcode: false, GlobalHistogram: false, Escalation: false);
     LuminanceSource rotated270 = rotated180.rotateCounterClockwise();
-    yield return new Pass(rotated270, PureBarcode: false, GlobalHistogram: false);
-    yield return new Pass(source, PureBarcode: true, GlobalHistogram: false);
-    yield return new Pass(source, PureBarcode: false, GlobalHistogram: true);
-    yield return new Pass(rotated90, PureBarcode: false, GlobalHistogram: true);
-    yield return new Pass(rotated180, PureBarcode: false, GlobalHistogram: true);
-    yield return new Pass(rotated270, PureBarcode: false, GlobalHistogram: true);
-    yield return new Pass(source.invert(), PureBarcode: false, GlobalHistogram: false);
-    yield return new Pass(rotated90.invert(), PureBarcode: false, GlobalHistogram: false);
-    yield return new Pass(rotated180.invert(), PureBarcode: false, GlobalHistogram: false);
-    yield return new Pass(rotated270.invert(), PureBarcode: false, GlobalHistogram: false);
+    yield return new Pass(rotated270, PureBarcode: false, GlobalHistogram: false, Escalation: false);
+    yield return new Pass(source, PureBarcode: true, GlobalHistogram: false, Escalation: true);
+    yield return new Pass(source, PureBarcode: false, GlobalHistogram: true, Escalation: true);
+    yield return new Pass(rotated90, PureBarcode: false, GlobalHistogram: true, Escalation: true);
+    yield return new Pass(rotated180, PureBarcode: false, GlobalHistogram: true, Escalation: true);
+    yield return new Pass(rotated270, PureBarcode: false, GlobalHistogram: true, Escalation: true);
+    yield return new Pass(source.invert(), PureBarcode: false, GlobalHistogram: false, Escalation: true);
+    yield return new Pass(rotated90.invert(), PureBarcode: false, GlobalHistogram: false, Escalation: true);
+    yield return new Pass(rotated180.invert(), PureBarcode: false, GlobalHistogram: false, Escalation: true);
+    yield return new Pass(rotated270.invert(), PureBarcode: false, GlobalHistogram: false, Escalation: true);
   }
 
   private static void RunDecodePass(Pass pass, List<QrCodeDecodedItem> collected)
