@@ -180,6 +180,7 @@ public sealed partial class MainWindow
     using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMinutes));
     RecordPaddleSmokeStage("wait install executable");
     await WaitForPaddleSmokeInstallExecutableAsync(timeout.Token);
+    await ClickManagedSmokeButtonAsync("查看环境清单");
     ManagedEnvironmentList list = await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
     if (!list.Environments.Any(item => item.Name == PaddleSmokeEnvironmentName))
     {
@@ -304,6 +305,7 @@ public sealed partial class MainWindow
     RecordPaddleSmokeStage("switch environment");
     // 稳定 runtime 面板作导航证明：冷启动清单未到时不渲染环境 Select。
     await NavigateSmokeAsync("设置", ".settings-runtime-panel");
+    await ClickManagedSmokeButtonAsync("查看环境清单");
     ManagedEnvironmentList list = await WaitForSmokeEnvironmentsAsync(
       [PaddleSmokeEnvironmentName], TimeSpan.FromMinutes(2));
     ManagedEnvironment environment = list.Environments
@@ -314,6 +316,11 @@ public sealed partial class MainWindow
     await SelectSmokeEnvironmentAsync(environment.Id);
     if (list.ActiveId != environment.Id)
       await ClickManagedSmokeButtonAsync("切换到此环境");
+    else
+    {
+      await WaitForSmokeSessionAsync(environment.Id, requireProjection: false);
+      await ClickManagedSmokeButtonAsync("查看环境清单");
+    }
     ManagedEnvironmentSession session = await WaitForSmokeSessionAsync(environment.Id);
     await WaitForSmokeDomAsync(
       "document.querySelector('.settings-runtime-panel')?.textContent.includes('运行时已就绪') === true",

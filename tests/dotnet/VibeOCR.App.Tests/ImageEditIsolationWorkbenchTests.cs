@@ -140,7 +140,8 @@ public sealed class ImageEditIsolationWorkbenchTests
     SettingsViewModel? settings = null,
     IAnnotatedImagePlatform? platform = null,
     Action<WorkbenchAnnotationFile, Guid, long, RecognitionTextLayerState?,
-      IReadOnlyList<WorkbenchExclusionBox>>? pinScreenshot = null) => new(
+      IReadOnlyList<WorkbenchExclusionBox>>? pinScreenshot = null,
+    Func<CancellationToken, Task>? ensureRuntimeReady = null) => new(
     recognitionFactory,
     static () => throw new InvalidOperationException(),
     static () => throw new InvalidOperationException(),
@@ -155,7 +156,7 @@ public sealed class ImageEditIsolationWorkbenchTests
     annotationStore,
     platform,
     inferenceAttached: () => false,
-    pinScreenshot: pinScreenshot);
+    pinScreenshot: pinScreenshot, ensureRuntimeReady: ensureRuntimeReady);
 
   private static string TemporaryRoot()
   {
@@ -459,6 +460,75 @@ public sealed class ImageEditIsolationWorkbenchTests
     {
       Directory.Delete(root, recursive: true);
     }
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task ColdImageEditHandoffOwnsReadinessCancellation(bool cancelRecognition)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new CompletingInferenceClient();
+      var inputs = new TaggedInputService();
+      var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      using var readinessCleanup = new CancellationTokenSource();
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(() => new RecognitionViewModel(inference, inputs),
+        root, broker, annotations, inference, inputs, ensureRuntimeReady: async ct =>
+        {
+          using var wait = CancellationTokenSource.CreateLinkedTokenSource(ct, readinessCleanup.Token);
+          using var registration = ct.Register(() => cancelled.TrySetResult());
+          entered.TrySetResult();
+          await Task.Delay(Timeout.Infinite, wait.Token);
+        });
+      Task? disposal = null;
+      try
+      {
+        using var ready = new StateAwaiter<ImageEditWorkbenchState>(handler,
+          state => !state.IsBusy && state.ScreenshotSession is not null);
+        await handler.ExecuteAsync(new SelectImageEditFileCommand(), TestContext.Current.CancellationToken);
+        ImageEditWorkbenchState original = await ready.Task;
+        Guid id = Guid.Parse(original.ScreenshotSession!.SessionId);
+        WorkbenchAnnotationLease image = UploadAnnotation(annotations, AnnotationPng);
+        Assert.Null((await handler.ExecuteAsync(new RecognizeImageEditImageCommand(
+          image.ResourceUri.AbsoluteUri, id, 0, []), TestContext.Current.CancellationToken)).Error);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        // 编辑页后续修订/关闭只修改原图；识别承载面的交接快照仍独立等待。
+        await handler.ExecuteAsync(new NotifyImageEditRevisionCommand(id, 1),
+          TestContext.Current.CancellationToken);
+        Assert.False(cancelled.Task.IsCompleted);
+        ImageEditWorkbenchState edited = await LatestImageEditStateAsync(handler);
+        Assert.Equal(original.ScreenshotSession.SessionId, edited.ScreenshotSession!.SessionId);
+        Assert.NotNull(edited.Input);
+        if (cancelRecognition)
+        {
+          await handler.ExecuteAsync(new CancelRecognitionCommand(), TestContext.Current.CancellationToken);
+        }
+        else
+        {
+          await handler.ExecuteAsync(new CloseImageEditSessionCommand(), TestContext.Current.CancellationToken);
+          Assert.False(cancelled.Task.IsCompleted);
+          disposal = handler.DisposeAsync().AsTask();
+        }
+        await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.Empty(inference.UploadedContent);
+        if (cancelRecognition)
+        {
+          Assert.Equal(1, (await LatestImageEditStateAsync(handler)).ScreenshotSession!.Revision);
+        }
+      }
+      finally
+      {
+        readinessCleanup.Cancel();
+        if (disposal is not null)
+          await disposal.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      }
+    }
+    finally { Directory.Delete(root, recursive: true); }
   }
 
   [Fact]

@@ -650,6 +650,7 @@ public sealed class ScreenshotSessionWorkbenchTests
           TestContext.Current.CancellationToken);
         Assert.Equal("recognition.cancelled",
           Assert.IsType<RecognitionWorkbenchState>(Assert.Single(cancelled.States)).StatusCode);
+        await UntilAsync(() => inference.SelectionCancelled);
         inference.BlockSelection = false;
         inference.Released.TrySetResult();
         WorkbenchAnnotationLease retry = UploadAnnotation(annotations, AnnotationPng);
@@ -669,6 +670,87 @@ public sealed class ScreenshotSessionWorkbenchTests
         Assert.Empty(inference.UploadedContent);
         Assert.Null(recognition.Result);
       }
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Theory]
+  [InlineData("cancel")]
+  [InlineData("revision")]
+  [InlineData("close")]
+  [InlineData("replace")]
+  [InlineData("dispose")]
+  public async Task ColdSceneHandoffCancelsOwnedReadinessWait(string action)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new RecordingRecognitionClient();
+      var recognition = new RecognitionViewModel(inference, new FixedCaptureInput());
+      var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      using var readinessCleanup = new CancellationTokenSource();
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(recognition, root, broker, annotations,
+        new SettingsViewModel(inference), inferenceAttached: () => false,
+        ensureRuntimeReady: async ct =>
+        {
+          using var wait = CancellationTokenSource.CreateLinkedTokenSource(ct, readinessCleanup.Token);
+          using var registration = ct.Register(() => cancelled.TrySetResult());
+          entered.TrySetResult();
+          await Task.Delay(Timeout.Infinite, wait.Token);
+        });
+      try
+      {
+        using var captured = new RecognitionStateAwaiter(handler,
+          state => !state.IsBusy && state.ScreenshotSession is not null);
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        RecognitionWorkbenchState original = await captured.Task;
+        Guid id = Guid.Parse(original.ScreenshotSession!.SessionId);
+        WorkbenchAnnotationLease image = UploadAnnotation(annotations, AnnotationPng);
+        using var sceneBridge = new CancellationTokenSource();
+        handler.ScreenshotSceneRecognitionHandoff += _ => sceneBridge.Cancel();
+        Assert.Null((await handler.ExecuteAsync(new RecognizeScreenshotImageCommand(
+          image.ResourceUri.AbsoluteUri, id, 0, []), sceneBridge.Token)).Error);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.True(sceneBridge.IsCancellationRequested);
+        Assert.False(cancelled.Task.IsCompleted);
+        WorkbenchCommandOutcome? outcome = null;
+        switch (action)
+        {
+          case "cancel":
+            outcome = await handler.ExecuteAsync(new CancelRecognitionCommand(),
+              TestContext.Current.CancellationToken);
+            break;
+          case "revision":
+            outcome = await handler.ExecuteAsync(new NotifyScreenshotSessionRevisionCommand(id, 1),
+              TestContext.Current.CancellationToken);
+            break;
+          case "close":
+            await handler.ExecuteAsync(new CloseScreenshotSessionCommand(),
+              TestContext.Current.CancellationToken);
+            break;
+          case "replace":
+            await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+              TestContext.Current.CancellationToken);
+            break;
+          case "dispose":
+            await handler.DisposeAsync();
+            break;
+        }
+        await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.Empty(inference.UploadedContent);
+        if (outcome is not null)
+        {
+          RecognitionWorkbenchState state = Assert.IsType<RecognitionWorkbenchState>(Assert.Single(outcome.States));
+          Assert.Equal(original.ScreenshotSession.SessionId, state.ScreenshotSession!.SessionId);
+          Assert.NotNull(state.Input);
+          Assert.False(state.IsBusy);
+        }
+      }
+      finally { readinessCleanup.Cancel(); }
     }
     finally { Directory.Delete(root, recursive: true); }
   }

@@ -83,6 +83,7 @@ public sealed partial class MainWindow
   private async Task<object> CreateSmokeEnvironmentsAsync()
   {
     await NavigateSmokeAsync("设置", ".settings-runtime-panel");
+    await ClickManagedSmokeButtonAsync("查看环境清单");
     await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
     await SelectSmokeValueAsync("#environment-component-select", "rapidocr");
     await SelectSmokeValueAsync("#environment-device-select", "cpu");
@@ -144,6 +145,7 @@ public sealed partial class MainWindow
     // 导航证明用稳定 runtime 面板：冷启动权威清单未到时 React 不渲染
     // 环境列表（environments.length===0），名单由随后等待覆盖。
     await NavigateSmokeAsync("设置", ".settings-runtime-panel");
+    await ClickManagedSmokeButtonAsync("查看环境清单");
     ManagedEnvironmentList empty = await WaitForSmokeEnvironmentsAsync(
       [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(2));
     ManagedEnvironment[] initial = SmokePair(empty);
@@ -185,6 +187,7 @@ public sealed partial class MainWindow
   private async Task<object> CompleteCleanupSmokeAsync()
   {
     await NavigateSmokeAsync("设置", ".settings-runtime-panel");
+    await ClickManagedSmokeButtonAsync("查看环境清单");
     ManagedEnvironmentList list = await WaitForSmokeEnvironmentsAsync(
       [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(2));
     ManagedEnvironment[] pair = SmokePair(list);
@@ -223,9 +226,10 @@ public sealed partial class MainWindow
   }
   private async Task<object> VerifyRestartedSmokeEnvironmentAsync()
   {
-    // 同上：稳定面板作导航证明，冷启动清单由随后的权威名单等待吸收（F7：
-    // restart 冷入口列表尚未到达而面板已渲染）。
     await NavigateSmokeAsync("设置", ".settings-runtime-panel");
+    // 先等真实会话，再走公开只读清单动作，避免冻结 attach 前的陈旧投影。
+    await WaitForSmokeSessionAsync(null, requireProjection: false);
+    await ClickManagedSmokeButtonAsync("查看环境清单");
     ManagedEnvironmentList list = await WaitForSmokeEnvironmentsAsync(
       [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(2));
     ManagedEnvironment a = SmokePair(list)[0];
@@ -257,6 +261,7 @@ public sealed partial class MainWindow
     if (recipe is not ("rapidocr-cpu" or "paddleocr-cpu"))
       throw new InvalidOperationException("Progress smoke supports isolated CPU recipes only.");
     await NavigateSmokeAsync("设置", ".settings-runtime-panel");
+    await ClickManagedSmokeButtonAsync("查看环境清单");
     await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
     WorkbenchCommandReceipt created = await application.ExecuteAsync(
       new WorkbenchCommandEnvelope(Guid.NewGuid(), new CreateEnvironmentCommand("安装进度验收")),
@@ -496,7 +501,8 @@ public sealed partial class MainWindow
     }
   }
 
-  private async Task<ManagedEnvironmentSession> WaitForSmokeSessionAsync(string id)
+  private async Task<ManagedEnvironmentSession> WaitForSmokeSessionAsync(
+    string? id, bool requireProjection = true)
   {
     using var cancellation = new CancellationTokenSource(TimeSpan.FromMinutes(2));
     try
@@ -504,14 +510,15 @@ public sealed partial class MainWindow
       while (true)
       {
         ManagedEnvironmentSession? session = smokeManagedSession!();
-        if (session?.EnvironmentId == id && smokeInferenceAttached!())
+        if (session is not null && (id is null || session.EnvironmentId == id) && smokeInferenceAttached!())
         {
+          if (!requireProjection) return session;
           // attach 到设置回读开始前也可能不 busy；必须等同一修订的生产投影就绪。
           WorkbenchBootstrap bootstrap = await application.BootstrapAsync(cancellation.Token);
           ManagedEnvironmentList? projected = smokeEnvironmentSnapshot!();
           if (!bootstrap.States.Select(item => item.State).OfType<SettingsWorkbenchState>()
-              .Single().EnvironmentBusy && projected?.ActiveId == id &&
-              projected.Environments.Any(item => item.Id == id && item.Revision == session.Revision && item.ServiceState == "ready"))
+              .Single().EnvironmentBusy && projected is not null && projected.ActiveId == session.EnvironmentId &&
+              projected.Environments.Any(item => item.Id == session.EnvironmentId && item.Revision == session.Revision && item.ServiceState == "ready"))
             return session;
         }
         await Task.Delay(100, cancellation.Token);

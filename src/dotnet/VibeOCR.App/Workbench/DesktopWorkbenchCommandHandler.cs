@@ -144,6 +144,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     public RecognitionViewModel? TextLayerViewModel;
     public CancellationTokenSource? TextPreparation;
     public CancellationTokenSource? CaptureDemand;
+    public CancellationTokenSource? RecognitionDemand;
   }
 
   private readonly ImageSessionChannel recognitionChannel = new();
@@ -869,6 +870,14 @@ public sealed class DesktopWorkbenchCommandHandler :
       ScreenshotTextLayerInvalidated?.Invoke(id, revision);
   }
 
+  private static long AdvanceImageGeneration(ImageSessionChannel channel)
+  {
+    long generation = Interlocked.Increment(ref channel.Generation);
+    // 交接准备先于 VM activeRun；换图/修订/关闭也须撤销这段独立等待。
+    channel.RecognitionDemand?.Cancel();
+    return generation;
+  }
+
   private WorkbenchAnnotationFile TakeScreenshotAnnotation(string resourceUri) =>
     annotationStore.Take(new Uri(resourceUri));
 
@@ -878,7 +887,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     CancellationToken cancellationToken)
   {
     _ = channel.ViewModel ??= recognitionFactory();
-    long generation = Interlocked.Increment(ref channel.Generation);
+    long generation = AdvanceImageGeneration(channel);
     return PublishStartThenTrack(
       SessionState(channel, true, "recognition.running"),
       () => CompleteImageEditAsync(channel, loadImage, generation, cancellationToken));
@@ -943,7 +952,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     {
       var demand = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, sceneRecognitionLifetime.Token);
       recognitionChannel.CaptureDemand = demand;
-      long generation = Interlocked.Increment(ref recognitionChannel.Generation);
+      long generation = AdvanceImageGeneration(recognitionChannel);
       // 框选取消或失败时保留旧图、标注、结果与修订；成功捕获才替换。
       ScreenshotCaptureStarting?.Invoke();
       return PublishStartThenTrack(
@@ -1408,7 +1417,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     channel.Revision = command.Revision;
     // 任何内容修订都使本通道旧识别结果与文字层失效：迟到响应不得覆盖
     // 当前内容。修订只作用于所属通道：另一页的独立输入/结果不受影响。
-    Interlocked.Increment(ref channel.Generation);
+    AdvanceImageGeneration(channel);
     viewModel.Cancel();
     viewModel.InvalidateResult();
     InvalidateScreenshotTextLayer(channel, previousRevision);
@@ -1547,7 +1556,7 @@ public sealed class DesktopWorkbenchCommandHandler :
         ocrMediaType,
         "screenshot-session-final" + ExtensionForMediaType(ocrMediaType),
         "screenshot-session");
-      long generation = Interlocked.Increment(ref channel.Generation);
+      long generation = AdvanceImageGeneration(channel);
       Guid sessionId = command.SessionId;
       long revision = command.Revision;
       resultActions = null;
@@ -1560,6 +1569,9 @@ public sealed class DesktopWorkbenchCommandHandler :
       // 现场窗口关闭会取消其 bridge token；冻结后任务归主应用拥有。
       CancellationToken recognitionToken = channel.SceneEditing
         ? sceneRecognitionLifetime.Token : cancellationToken;
+      var demand = CancellationTokenSource.CreateLinkedTokenSource(
+        recognitionToken, sceneRecognitionLifetime.Token);
+      channel.RecognitionDemand = demand;
       if (channel.SceneEditing)
       {
         // 显式识别交接：基准已冻结后再关 scene；会话与已提交任务保留，
@@ -1574,7 +1586,7 @@ public sealed class DesktopWorkbenchCommandHandler :
           sessionId,
           revision,
           input,
-          recognitionToken));
+          demand));
     }
     finally
     {
@@ -1647,11 +1659,14 @@ public sealed class DesktopWorkbenchCommandHandler :
       ClearScreenshotSession(recognitionChannel);
       InvalidateScreenshotTextLayer(recognitionChannel);
       resultActions = null;
-      long generation = Interlocked.Increment(ref recognitionChannel.Generation);
+      long generation = AdvanceImageGeneration(recognitionChannel);
       if (channel.SessionInput is { } previousInput) ReleaseResource(previousInput);
       channel.SessionInput = frozen;
       adopted = true;
       channel.ExcludeBoxes = command.ExcludeBoxes;
+      var demand = CancellationTokenSource.CreateLinkedTokenSource(
+        cancellationToken, sceneRecognitionLifetime.Token);
+      recognitionChannel.RecognitionDemand = demand;
       StateChanged?.Invoke(RecognitionState(true, "recognition.running"));
       return PublishStartThenTrack(
         ImageEditState(false, "recognition.session"),
@@ -1660,7 +1675,7 @@ public sealed class DesktopWorkbenchCommandHandler :
           input,
           displayInput,
           exclusions,
-          cancellationToken));
+          demand));
     }
     finally
     {
@@ -1673,8 +1688,9 @@ public sealed class DesktopWorkbenchCommandHandler :
     RecognitionInput input,
     RecognitionInput displayInput,
     IReadOnlyList<WorkbenchExclusionBox> exclusions,
-    CancellationToken cancellationToken)
+    CancellationTokenSource demand)
   {
+    CancellationToken cancellationToken = demand.Token;
     try
     {
       // 提交前取得权威目录并严格协商可用模式（与单次/批量/PDF 同一契约）；
@@ -1735,6 +1751,12 @@ public sealed class DesktopWorkbenchCommandHandler :
         StateChanged?.Invoke(new RecognitionWorkbenchState(false, "recognition.failed"));
       }
     }
+    finally
+    {
+      if (ReferenceEquals(recognitionChannel.RecognitionDemand, demand))
+        recognitionChannel.RecognitionDemand = null;
+      demand.Dispose();
+    }
   }
 
   private async Task CompleteScreenshotRecognitionAsync(
@@ -1742,8 +1764,9 @@ public sealed class DesktopWorkbenchCommandHandler :
     Guid sessionId,
     long revision,
     RecognitionInput input,
-    CancellationToken cancellationToken)
+    CancellationTokenSource demand)
   {
+    CancellationToken cancellationToken = demand.Token;
     try
     {
       // 只有显式识别才同步 Runtime 目录并做 requireUsable 模式协商。
@@ -1844,12 +1867,18 @@ public sealed class DesktopWorkbenchCommandHandler :
         StateChanged?.Invoke(SessionRecognitionState(false, "recognition.failed"));
       }
     }
+    finally
+    {
+      if (ReferenceEquals(recognitionChannel.RecognitionDemand, demand))
+        recognitionChannel.RecognitionDemand = null;
+      demand.Dispose();
+    }
   }
 
   private WorkbenchState CloseScreenshotSession(ImageSessionChannel channel)
   {
     RecognitionViewModel viewModel = channel.ViewModel ??= recognitionFactory();
-    Interlocked.Increment(ref channel.Generation);
+    AdvanceImageGeneration(channel);
     viewModel.Cancel();
     viewModel.InvalidateResult();
     viewModel.ReleaseInput();
@@ -2346,7 +2375,7 @@ public sealed class DesktopWorkbenchCommandHandler :
 
     try
     {
-      long generation = Interlocked.Increment(ref recognitionChannel.Generation);
+      long generation = AdvanceImageGeneration(recognitionChannel);
       // 新输入（文件/剪贴板/拖入/即时截图识别）取代 recognition 通道的
       // 截图会话：旧会话命令立即失效，避免旧图混入新输入。imageEdit
       // 通道的会话与输入不受影响（两页独立）。
@@ -2648,7 +2677,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private RecognitionWorkbenchState CancelRecognition()
   {
     RecognitionViewModel viewModel = RecognitionVm;
-    Interlocked.Increment(ref recognitionChannel.Generation);
+    AdvanceImageGeneration(recognitionChannel);
     recognitionChannel.CaptureDemand?.Cancel();
     viewModel.Cancel();
     if (recognitionChannel.SessionId is not null)
@@ -4427,13 +4456,14 @@ public sealed class DesktopWorkbenchCommandHandler :
     foreach (ImageSessionChannel channel in (ImageSessionChannel[])
       [recognitionChannel, imageEditChannel])
     {
-      if (channel.SessionId is null ||
-        (channel.ViewModel is not { IsBusy: true } &&
-          channel.TextLayer is null && channel.SessionResult is null))
+      if (channel.RecognitionDemand is null &&
+        (channel.SessionId is null ||
+          (channel.ViewModel is not { IsBusy: true } &&
+            channel.TextLayer is null && channel.SessionResult is null)))
       {
         continue;
       }
-      Interlocked.Increment(ref channel.Generation);
+      AdvanceImageGeneration(channel);
       channel.ViewModel?.Cancel();
       channel.ViewModel?.InvalidateResult();
       if (channel == recognitionChannel) resultActions = null;
@@ -5511,8 +5541,8 @@ public sealed class DesktopWorkbenchCommandHandler :
       return;
     }
     sceneRecognitionLifetime.Cancel();
-    Interlocked.Increment(ref recognitionChannel.Generation);
-    Interlocked.Increment(ref imageEditChannel.Generation);
+    AdvanceImageGeneration(recognitionChannel);
+    AdvanceImageGeneration(imageEditChannel);
     Interlocked.Increment(ref batchGeneration);
     Interlocked.Increment(ref pdfGeneration);
     Interlocked.Increment(ref qrCodeGeneration);
