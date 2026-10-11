@@ -528,7 +528,7 @@ public sealed class InferenceHttpClientTests
         await using var client = new QrCodeHttpClient(Base, "tok", handler);
 
         IReadOnlyList<QrCodeDecodedItem> codes = await client.DecodeAsync(
-            "AQID", TestContext.Current.CancellationToken);
+            Convert.FromBase64String("AQID"), TestContext.Current.CancellationToken);
 
         QrCodeDecodedItem code = Assert.Single(codes);
         Assert.Equal("hello", code.Data);

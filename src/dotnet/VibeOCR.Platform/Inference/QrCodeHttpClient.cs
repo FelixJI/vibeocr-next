@@ -15,9 +15,12 @@ public sealed class QrCodeHttpClient : IQrCodeClient
     }
 
     public async Task<IReadOnlyList<QrCodeDecodedItem>> DecodeAsync(
-        string base64Image, CancellationToken cancellationToken)
+        ReadOnlyMemory<byte> image, CancellationToken cancellationToken)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(base64Image);
+        if (image.IsEmpty) throw new ArgumentException("Image must not be empty.", nameof(image));
+        // #213: the base64 round-trip exists only for this Python wire boundary;
+        // local desktop decoding consumes the raw bytes directly.
+        string base64Image = Convert.ToBase64String(image.Span);
         using StringContent content = _runtime.CreateJsonContent(
             new { image = base64Image });
         using HttpResponseMessage response = await _runtime.PostAsync(
