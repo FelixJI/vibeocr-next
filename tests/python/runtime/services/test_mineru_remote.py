@@ -20,7 +20,12 @@ from vibeocr.runtime.recognition.mineru_api import (
 )
 from vibeocr.runtime.recognition.mineru_config import MineruConfigError
 from vibeocr.runtime.recognition.mineru_service import MinerUService
-from vibeocr.runtime_contracts import ErrorCode, MineruConfig, MineruTier
+from vibeocr.runtime_contracts import (
+    ErrorCode,
+    MineruConfig,
+    MineruOcrMode,
+    MineruTier,
+)
 
 
 @pytest.fixture()
@@ -50,6 +55,14 @@ def _remote_connection(url: str = REMOTE_URL, key: str = REMOTE_KEY):
     return readiness.connection_from_extra(
         {"mineru_connection": {"mode": "remote", "api_url": url, "api_key": key}}
     )
+
+
+_LOCAL = readiness.MineruConnection()
+_REMOTE = _remote_connection()
+
+
+def _non_ch(tier: MineruTier, mode: MineruOcrMode) -> MineruConfig:
+    return MineruConfig(tier=tier, ocr_mode=mode, language="korean")
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +250,14 @@ class TestTierCatalogGating:
             readiness.require_ready(MineruTier.BASIC)
         assert caught.value.code == ErrorCode.MINERU_TIER_PREPARATION_REQUIRED
 
+    def test_local_catalog_advertises_only_honorable_ch(self, isolated_connection):
+        readiness.configure_connection(readiness.MineruConnection())
+        assert readiness.catalog_payload()["languages"] == ["ch"]
+
+    def test_remote_catalog_keeps_full_language_list(self, isolated_connection):
+        readiness.configure_connection(_remote_connection())
+        assert readiness.catalog_payload()["languages"] == list(readiness.LANGUAGES)
+
 
 # ---------------------------------------------------------------------------
 # MinerUService：remote 不启动本地、失败不回退
@@ -268,12 +289,16 @@ class TestMinerUServiceRemote:
         MinerUService._api_process = None
         MinerUService._api_url = ""
         MinerUService._job_guard = None
+        MinerUService._server_tier = "basic"
+        MinerUService._model_root = None
         yield
         SingletonMeta._instances.pop(MinerUService, None)
         MinerUService._initialized = False
         MinerUService._api_process = None
         MinerUService._api_url = ""
         MinerUService._job_guard = None
+        MinerUService._server_tier = "basic"
+        MinerUService._model_root = None
 
     def test_remote_init_does_not_start_local_api(self, isolated_connection):
         readiness.configure_connection(_remote_connection())
@@ -336,6 +361,44 @@ class TestMinerUServiceRemote:
         ensure.assert_not_called()
         shutdown.assert_not_called()
         assert recording.calls  # 远程端点确实被调用过一次后失败
+
+    @pytest.mark.parametrize(
+        ("connection", "config", "reaches_client"),
+        [
+            (_LOCAL, _non_ch(MineruTier.BASIC, MineruOcrMode.AUTO), False),
+            (_LOCAL, _non_ch(MineruTier.FLASH, MineruOcrMode.OCR), True),
+            (_LOCAL, _non_ch(MineruTier.BASIC, MineruOcrMode.TXT), True),
+            (_REMOTE, _non_ch(MineruTier.BASIC, MineruOcrMode.AUTO), True),
+        ],
+        ids=[
+            "local-ocr-rejected",
+            "local-flash-passes",
+            "local-txt-passes",
+            "remote-unchanged",
+        ],
+    )
+    def test_non_ch_language_gate_scopes_to_local_ocr_combos(
+        self, isolated_connection, monkeypatch, connection, config, reaches_client
+    ):
+        """本地 MinerU 4 无 language 通道：仅可能 OCR 的本地组合拒绝非 ch。"""
+        readiness.configure_connection(connection)
+        recording = _RecordingClient(result=self._readiness_document())
+        monkeypatch.setattr(
+            "vibeocr.runtime.recognition.mineru_service.MineruApiClient",
+            lambda url, **kwargs: recording,
+        )
+        service = MinerUService.__new__(MinerUService)
+        if connection.mode == readiness.CONNECTION_LOCAL:
+            MinerUService._api_url = "http://127.0.0.1:9999"
+        with patch.object(MinerUService, "_check_api_running", return_value=True):
+            if reaches_client:
+                service._call_api(b"pdf", "input.pdf", config)
+            else:
+                with pytest.raises(MineruConfigError) as caught:
+                    service._call_api(b"pdf", "input.pdf", config)
+                assert caught.value.code == ErrorCode.MINERU_CONFIG_UNAVAILABLE
+                assert caught.value.reason == "unsupported_language"
+        assert bool(recording.calls) == reaches_client
 
     def test_local_mode_still_ensures_local_api(self, isolated_connection):
         with patch.object(MinerUService, "_ensure_api_running") as ensure:

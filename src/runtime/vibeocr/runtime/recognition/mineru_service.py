@@ -41,7 +41,10 @@ from vibeocr.runtime.recognition.mineru_api import (
     MineruCancelled,
     MineruDocument,
 )
-from vibeocr.runtime.recognition.mineru_config import migrate_legacy_options
+from vibeocr.runtime.recognition.mineru_config import (
+    MineruConfigError,
+    migrate_legacy_options,
+)
 from vibeocr.runtime.recognition.mineru_readiness import (
     CONNECTION_REMOTE,
     current_connection,
@@ -54,7 +57,12 @@ from vibeocr.runtime.recognition.models.ocr_result import (
     normalize_bbox,
     normalize_content_list,
 )
-from vibeocr.runtime_contracts import MineruConfig, MineruOcrMode, MineruTier
+from vibeocr.runtime_contracts import (
+    ErrorCode,
+    MineruConfig,
+    MineruOcrMode,
+    MineruTier,
+)
 from vibeocr.runtime_contracts.utils.http_log import (
     guess_response_size,
     log_http_response,
@@ -77,7 +85,6 @@ class MinerUService(metaclass=SingletonMeta):
     _api_url: str = ""
     _lock = threading.RLock()
     _initialized = False
-    _language = "ch"
     _server_tier = "basic"
     _job_guard: JobObjectGuard | None = None
     _model_root: str | None = None
@@ -253,6 +260,7 @@ class MinerUService(metaclass=SingletonMeta):
 
         _logger.info(f"[MinerU] 启动 mineru-api 服务 @ {url}...")
 
+        # MinerU 4 api_server CLI 无 --language（传入即退出码 2），语言不经 CLI 传递。
         cmd = [
             str(python_exe),
             "-m",
@@ -263,8 +271,6 @@ class MinerUService(metaclass=SingletonMeta):
             str(port),
             "--tier",
             self.__class__._server_tier,
-            "--language",
-            self.__class__._language,
         ]
 
         env = self._local_environment()
@@ -438,8 +444,19 @@ class MinerUService(metaclass=SingletonMeta):
         config = self._config(options)
         # 在途解析固定原端点：入口快照连接，配置中途变更不串用。
         connection = current_connection()
-        # Language is service-wide. Serialize jobs through shutdown/start and
-        # result download; never mutate a live service used by another job.
+        # 本地能力真值闭环：锁定 MinerU 4 无 language 上行通道，本地可能 OCR
+        # 的组合对旧配置非 ch fail-closed，不静默改意图；纯抽取与远端不受限。
+        if (
+            connection.mode != CONNECTION_REMOTE
+            and config.tier != MineruTier.FLASH
+            and config.ocr_mode != MineruOcrMode.TXT
+            and config.language != "ch"
+        ):
+            raise MineruConfigError(
+                ErrorCode.MINERU_CONFIG_UNAVAILABLE, "unsupported_language"
+            )
+        # Serialize jobs through shutdown/start and result download; never
+        # mutate a live service used by another job.
         with self._lock:
             if connection.mode == CONNECTION_REMOTE:
                 # 远程自部署服务器：绝不回退本地，失败原样上抛。
@@ -459,12 +476,8 @@ class MinerUService(metaclass=SingletonMeta):
             )
             if config.tier != MineruTier.FLASH:
                 self._prepare_cached_models(tier, cancelled)
-            if (
-                self.__class__._language != config.language
-                or self.__class__._server_tier != tier
-            ):
+            if self.__class__._server_tier != tier:
                 self.shutdown()
-                self.__class__._language = config.language
                 self.__class__._server_tier = tier
             self._ensure_api_running()
             return MineruApiClient(

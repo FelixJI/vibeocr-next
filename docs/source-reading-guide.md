@@ -22,7 +22,7 @@
 | 桌面工作流、应用权威状态与更新 | C#（`src/dotnet/VibeOCR.App/Features`、ViewModels） | ViewModel → Platform typed client；更新走 Velopack feed | 权威状态单点，UI 不复制协议/进程细节 |
 | Workbench 展示与局部编辑 | React/TypeScript（`WebAssets/src` 的 `features`/`components`） | WebView2 消息桥：`WebAssets/src/bridge` ↔ `App/Web` codec ↔ `App/Workbench` handler | 富交互迭代快；浏览器内容无直接系统/Runtime 权限 |
 | 二维码生成与 PNG/JPEG 保存 | C#（`VibeOCR.App/Features/QrCode`） | WebView 命令 → 本地 ZXing.Net 与 Windows 图片编码；不等待 Supervisor | 无需识别运行环境即可生成，文件授权留在宿主 |
-| OCR/MinerU 推理、PDF/表格/导出、二维码解码 | Python/CPython（`runtime/recognition`、`documents`、`codes`） | Desktop↔Runtime 唯一 v2 内部 HTTP wire（`contracts/runtime` + `VibeOCR.Runtime.Client`） | 直接消费 OCR/PDF 生态；worker 隔离与引擎生命周期同源 |
+| OCR/MinerU 推理、PDF/表格/导出、二维码解码 | Python/CPython（`runtime/recognition`、`documents`、`codes`） | Desktop↔Runtime 唯一 v2 内部 HTTP wire（`contracts/runtime` + `VibeOCR.Runtime.Client`） | 直接消费 OCR/PDF 生态；worker 隔离与引擎生命周期同源；本地 MinerU 4 无 language 上行通道，OCR 恒用内置 ch 模型（覆盖中英） |
 | 任务调度与共享子进程 | Python（`runtime/jobs`、`processes`） | 入口是 host 暴露的 v2 内部 HTTP 路由；Paddle/MinerU/PDF worker 是 Runtime 内部管理的子进程，不经桌面直接调用 | 跨 job 状态与进程复用集中在 Runtime |
 | 运行环境安装事务（组件选择、安装计划、设备就绪、回滚） | Python/CPython（`runtime/environments`，经产品内冻结 Installer 可执行文件交付） | C# 侧由 `Platform/Bootstrap/RuntimeInstallerClient` 以子进程调用冻结 Installer：inspect/ensure/repair/install_plan 与 cancel/retry/observe 都是独立子进程命令（`--request-json` 参数），进度走 stdout NDJSON 事件流（`ndjson.v1/v2`），结果为单个 JSON envelope；安装计划/设备就绪真值只在 Runtime，C#/TS 不复制包依赖推导 | 依赖解析与 manifest 绑定在事务内保持一致 |
 | Windows 构建/打包/安装前置 | PowerShell（`scripts/build-release.ps1`、`build_internal_runtime.ps1`、`install_windows_app_runtime.ps1`） | 本地/CI 命令行 | Windows SDK、Velopack 与 App Runtime 适配 |
