@@ -88,6 +88,42 @@ public sealed class WebWorkbenchCommandDeliveryTests
     Assert.Single(fixture.Application.Executions);
   }
 
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task BootstrapFailureReportsOnlyWhileItsRequestOwnsTheSession(bool superseded)
+  {
+    await using HostFixture fixture = new(Guid.NewGuid(), Guid.NewGuid());
+    var firstGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    fixture.Application.BootstrapGate = firstGate;
+    Task first = fixture.Host.ReceiveWebMessageAsync(Bootstrap(Guid.NewGuid()), fixture.Document);
+    var secondGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    Guid secondId = Guid.NewGuid();
+    Task? second = null;
+    if (superseded)
+    {
+      fixture.Application.BootstrapGate = secondGate;
+      second = fixture.Host.ReceiveWebMessageAsync(Bootstrap(secondId), fixture.Document);
+      Assert.False(second.IsCompleted);
+    }
+
+    firstGate.SetException(new InvalidOperationException("Runtime catalog unavailable"));
+    await first;
+    Assert.Equal(superseded ? 0 : 1, fixture.Recoveries);
+    Assert.Empty(fixture.Violations);
+    Assert.Equal(superseded ? 0 : 1,
+      fixture.States.Count(state => state.StartsWith("bridge-command-failed:", StringComparison.Ordinal)));
+    Assert.Empty(BootstrapResponses(fixture.Posted));
+
+    if (second is not null)
+    {
+      secondGate.SetResult();
+      await second;
+      Assert.Equal([secondId], BootstrapResponses(fixture.Posted));
+      Assert.Equal(0, fixture.Recoveries);
+    }
+  }
+
   [Fact]
   public async Task DocumentResetSuppressesOldReceiptFlushAndStaleSessionInput()
   {
@@ -274,21 +310,23 @@ public sealed class WebWorkbenchCommandDeliveryTests
     public readonly List<WorkbenchCommandEnvelope> Executions = [];
     public readonly List<Guid> ReturnedSessions = [];
     public TaskCompletionSource<WorkbenchCommandReceipt>? ExecuteGate;
+    public TaskCompletionSource? BootstrapGate;
 
     public DeliveryApplication(params Guid[] sessions) => this.sessions = new(sessions);
 
-    public ValueTask<WorkbenchBootstrap> BootstrapAsync(CancellationToken cancellationToken)
+    public async ValueTask<WorkbenchBootstrap> BootstrapAsync(CancellationToken cancellationToken)
     {
       Bootstraps++;
       Guid session = sessions.Count > 0 ? sessions.Dequeue() : Guid.NewGuid();
+      if (BootstrapGate is { } gate) await gate.Task;
       ReturnedSessions.Add(session);
-      return ValueTask.FromResult(new WorkbenchBootstrap(
+      return new WorkbenchBootstrap(
         WorkbenchProtocol.Version,
         session,
         0,
         WorkbenchRoute.Recognition,
         [],
-        new HashSet<string>()));
+        new HashSet<string>());
     }
 
     public ValueTask<WorkbenchCommandReceipt> ExecuteAsync(

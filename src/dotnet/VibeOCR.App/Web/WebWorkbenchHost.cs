@@ -282,6 +282,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   {
     if (disposed || bridge is not { } attached || !ReferenceEquals(attached.Sender, sender)) return;
     long document = Volatile.Read(ref documentGeneration);
+    long? requestBootstrapGeneration = null;
     try
     {
       if (message.Length > WorkbenchBridgeCodec.MaxMessageBytes) throw new WorkbenchBridgeProtocolException("Bridge message exceeds the size limit.");
@@ -294,6 +295,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       {
         Guid requestId = WorkbenchBridgeCodec.ParseBootstrapRequest(message);
         long generation = Interlocked.Increment(ref bootstrapGeneration);
+        requestBootstrapGeneration = generation;
         subscriptionCancellation?.Cancel();
         sessionId = null;
         StateChanged?.Invoke("bootstrap-received");
@@ -325,6 +327,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     }
     catch (Exception error)
     {
+      if (requestBootstrapGeneration is { } generation &&
+        generation != Volatile.Read(ref bootstrapGeneration)) return;
       ReportBridgeFailure(sender, document, error);
     }
   }
