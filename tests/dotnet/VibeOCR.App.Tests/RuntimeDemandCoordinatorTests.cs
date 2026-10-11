@@ -189,6 +189,54 @@ public sealed class RuntimeDemandCoordinatorTests
     Assert.Equal(1, disconnects);
   }
 
+  [Theory]
+  [InlineData(false, false)]
+  [InlineData(true, false)]
+  [InlineData(false, true)]
+  [InlineData(true, true)]
+  public async Task PauseAndStopPreserveAttemptCleanupFailureAfterSessionIsCleared(bool stop, bool failSecondDisconnect)
+  {
+    var entered = Signal();
+    var release = Signal();
+    var firstFailure = new IOException("attempt cleanup failed after clearing session");
+    var secondFailure = new IOException("pause disconnect failed");
+    var maintenance = new ProductMaintenanceCoordinator();
+    bool attached = false;
+    int disconnects = 0;
+    var coordinator = new RuntimeDemandCoordinator(async (_, _) =>
+    {
+      attached = true;
+      entered.TrySetResult();
+      await release.Task; // Attach has finished; Pause cancels before coordinator commit.
+    }, () =>
+    {
+      if (++disconnects == 1)
+      {
+        attached = false; // ManagedRuntimeConnection publishes null before disposal.
+        return Task.FromException(firstFailure);
+      }
+      Assert.False(attached);
+      return failSecondDisconnect ? Task.FromException(secondFailure) : Task.CompletedTask;
+    }, maintenance, TestContext.Current.CancellationToken);
+    Task demand = coordinator.EnsureReadyAsync(TestContext.Current.CancellationToken);
+    await entered.Task;
+    Task pausing = stop ? coordinator.StopAsync() : coordinator.PauseAsync(TestContext.Current.CancellationToken);
+    release.TrySetResult();
+    AggregateException demandFailure = await Assert.ThrowsAsync<AggregateException>(() => demand);
+    Assert.Contains(firstFailure, demandFailure.InnerExceptions);
+    if (failSecondDisconnect)
+    {
+      AggregateException pauseFailure = await Assert.ThrowsAsync<AggregateException>(() => pausing);
+      Assert.Collection(pauseFailure.InnerExceptions,
+        error => Assert.Same(firstFailure, error), error => Assert.Same(secondFailure, error));
+    }
+    else
+      Assert.Same(firstFailure, await Assert.ThrowsAsync<IOException>(() => pausing));
+    Assert.Equal(2, disconnects);
+    Assert.False(attached);
+    Assert.True(maintenance.State.IsIdle);
+  }
+
   [Fact]
   public async Task DemandSharingEmptyEnvironmentSwitchReportsNotReadyWithoutRetry()
   {

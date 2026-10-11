@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using VibeOCR.App.Features.Maintenance;
 
 namespace VibeOCR.App.Inference;
@@ -33,6 +34,7 @@ internal sealed class RuntimeDemandCoordinator(
     public readonly Func<CancellationToken, Task>? Activate = activate;
     public int Waiters;
     public bool Committed;
+    public Exception? CleanupFailure;
     public readonly List<CancellationToken> WaiterTokens = [];
   }
 
@@ -162,7 +164,11 @@ internal sealed class RuntimeDemandCoordinator(
         if ((lease is not null || attempt.BorrowLease) && (attempt.Activate is null || activated))
           await disconnect();
       }
-      catch (Exception cleanup) { error = new AggregateException(error, cleanup); }
+      catch (Exception cleanup)
+      {
+        attempt.CleanupFailure = cleanup;
+        error = new AggregateException(error, cleanup);
+      }
       failure = error;
     }
     finally
@@ -188,25 +194,33 @@ internal sealed class RuntimeDemandCoordinator(
 
   public async Task PauseAsync(CancellationToken cancellationToken)
   {
-    Task? pending;
+    Attempt? pending;
+    Exception? cleanupFailure = null;
     lock (gate)
     {
       paused = true;
       transition++;
       ready = false;
-      current?.Cancellation.Cancel();
-      pending = current?.Completion.Task;
+      pending = current;
+      pending?.Cancellation.Cancel();
     }
     if (pending is not null)
     {
-      try { await pending.WaitAsync(cancellationToken); }
-      catch (Exception) when (pending.IsCompleted && !cancellationToken.IsCancellationRequested)
+      try { await pending.Completion.Task.WaitAsync(cancellationToken); }
+      catch (Exception) when (pending.Completion.Task.IsCompleted && !cancellationToken.IsCancellationRequested)
       {
-        // The old attempt reports its failure to its own callers. Pausing still
-        // owns disconnecting any preserved session; its cleanup failure propagates.
+        // The old attempt reports business failure to its own callers. Its
+        // resource cleanup failure also belongs to this pause and must survive
+        // a second disconnect after the connection already published null.
+        cleanupFailure = pending.CleanupFailure;
       }
     }
-    await disconnect();
+    try { await disconnect(); }
+    catch (Exception error) when (cleanupFailure is not null)
+    {
+      throw new AggregateException(cleanupFailure, error);
+    }
+    if (cleanupFailure is not null) ExceptionDispatchInfo.Capture(cleanupFailure).Throw();
   }
 
   public Task RestoreAsync(bool maintenanceLeaseHeld = false)
