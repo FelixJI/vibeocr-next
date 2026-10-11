@@ -352,7 +352,9 @@ public sealed partial class App : Application
                 "外壳模式：未拉起后端（--shell-only）。"));
             RecordMilestone(diagnostics, "T6", _startup.Elapsed);
         }
-        else if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE")))
+        else if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE")) &&
+                 (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") != "managed-environment-e2e" ||
+                  Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_ENVIRONMENT_E2E_PHASE") == "restart"))
         {
             // Existing startup/failure/maintenance smoke contracts explicitly
             // request startup. Ordinary Portable launch never creates demand.
