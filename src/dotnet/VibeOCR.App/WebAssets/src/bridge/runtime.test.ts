@@ -517,3 +517,36 @@ describe("WorkbenchWebRuntime", () => {
     expect(states.at(-1)?.commandProblem).toBeUndefined();
   });
 });
+
+it("runtime forwards only its committed capture bootstrap and stops on unmount", async () => {
+  const bridge = new FakeHostBridge();
+  const reportCapturePixels = vi.fn();
+  const capturedBridge = Object.assign(bridge, { reportCapturePixels });
+  capturedBridge.deferBootstrap = true;
+  const scene = {
+    surfaceId: "surface",
+    captureSessionId: "capture",
+    inputUrl: "/image.png",
+    inputRevision: 0,
+    documentGeneration: 2,
+    bootstrapGeneration: 3,
+    x: 10,
+    y: 20,
+    width: 100,
+    height: 50,
+    desktopWidth: 3840,
+    desktopHeight: 2160,
+    initialTool: "select",
+  };
+  const runtime = new WorkbenchWebRuntime(capturedBridge);
+  const start = runtime.start(() => undefined);
+  capturedBridge.settleBootstrap({ captureScene: scene });
+  await start;
+  runtime.actions.reportCapturePixels?.({ ...scene });
+  expect(reportCapturePixels).not.toHaveBeenCalled();
+  runtime.actions.reportCapturePixels?.(scene);
+  expect(reportCapturePixels).toHaveBeenCalledWith(scene, undefined);
+  runtime.stop();
+  runtime.actions.reportCapturePixels?.(scene);
+  expect(reportCapturePixels).toHaveBeenCalledTimes(1);
+});

@@ -61,6 +61,9 @@ public sealed partial class MainWindow
         await CaptureScreenshotForEditAsync();
         RecognitionWorkbenchState state = await WaitForScreenshotStateAsync(
           item => !item.IsBusy && item.ScreenshotSession is not null, TimeSpan.FromSeconds(30));
+        Guid sessionId = Guid.ParseExact(state.ScreenshotSession!.SessionId, "N");
+        await WaitForImageEditorRequestAsync(sessionId).WaitAsync(TimeSpan.FromSeconds(10));
+        await imageEditorCreation.WaitAsync(TimeSpan.FromSeconds(10));
         ImageEditWindow editor = imageEditor ?? throw new InvalidOperationException("Real capture editor missing.");
         long presented = await editor.Presented.WaitAsync(TimeSpan.FromSeconds(10));
         if (editor.SessionId.ToString("N") != state.ScreenshotSession?.SessionId || !editor.ReusesCaptureOverlay)

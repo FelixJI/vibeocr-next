@@ -59,6 +59,81 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   { "shell", "recognition", "settings" };
   private readonly WorkbenchDispatcherDelivery stateDelivery = new();
   internal byte[]? CaptureBackground { get; set; }
+  internal CaptureSceneConfiguration? CaptureScene { get; set; }
+  private PendingCapturePixels? pendingCapturePixels;
+  private sealed record PendingCapturePixels(Guid Session, CaptureSceneDescriptor Scene, CancellationTokenSource Cancellation);
+
+  private CaptureSceneDescriptor? BeginCapturePixels(WorkbenchBootstrap bootstrap, long generation, long document)
+  {
+    CancelCapturePixels();
+    if (CaptureScene is not { } geometry) return null;
+    RecognitionWorkbenchState? recognition = bootstrap.States.Select(state => state.State).OfType<RecognitionWorkbenchState>().SingleOrDefault();
+    if (recognition is null || recognition.ScreenshotSession is not { SceneEditing: true } capture ||
+      recognition.Input is not { } input ||
+      !Guid.TryParse(capture.SessionId, out Guid captureSession) || captureSession != geometry.CaptureSessionId)
+      throw new WorkbenchBridgeProtocolException("Capture scene does not own the bootstrap input.");
+    var scene = new CaptureSceneDescriptor(geometry.SurfaceId, capture.SessionId, input.Url, capture.Revision,
+      document, generation, geometry.X, geometry.Y, geometry.Width, geometry.Height,
+      geometry.DesktopWidth, geometry.DesktopHeight, geometry.InitialTool);
+    var pending = new PendingCapturePixels(bootstrap.SessionId, scene, new CancellationTokenSource());
+    pendingCapturePixels = pending;
+    _ = AwaitCapturePixelsAsync(pending);
+    return scene;
+  }
+
+  private async Task AwaitCapturePixelsAsync(PendingCapturePixels pending)
+  {
+    try
+    {
+      await Task.Delay(TimeSpan.FromSeconds(10), pending.Cancellation.Token);
+      if (dispatcher is { } queue) queue.TryEnqueue(() => ExpireCapturePixels(pending.Scene));
+      else ExpireCapturePixels(pending.Scene);
+    }
+    catch (OperationCanceledException) { }
+  }
+
+  private void CancelCapturePixels()
+  {
+    PendingCapturePixels? pending = pendingCapturePixels;
+    pendingCapturePixels = null;
+    pending?.Cancellation.Cancel();
+    pending?.Cancellation.Dispose();
+  }
+
+  // The same identity guard is used by the deadline and the renderer report.
+  internal void ExpireCapturePixels(CaptureSceneDescriptor scene)
+  {
+    if (disposed || pendingCapturePixels?.Scene != scene) return;
+    FailCapturePixels("timeout");
+  }
+
+  internal void ObserveCaptureState(WorkbenchStateEnvelope state)
+  {
+    if (pendingCapturePixels is not { } pending || state.Scope != "recognition" ||
+      state.Change is WorkbenchStateChange.Reset or WorkbenchStateChange.Ready) return;
+    if (state.State is not RecognitionWorkbenchState recognition || recognition.Input?.Url != pending.Scene.InputUrl ||
+      recognition.ScreenshotSession is not { } capture || capture.SessionId != pending.Scene.CaptureSessionId ||
+      capture.Revision != pending.Scene.InputRevision) FailCapturePixels("input");
+  }
+
+  private void AcceptCapturePixels(CapturePixelReport report)
+  {
+    if (disposed || pendingCapturePixels is not { } pending || pending.Session != report.SessionId ||
+      sessionId != report.SessionId || pending.Scene != report.CaptureScene ||
+      pending.Scene.DocumentGeneration != Volatile.Read(ref documentGeneration) ||
+      pending.Scene.BootstrapGeneration != Volatile.Read(ref bootstrapGeneration)) return;
+    if (!report.Ready) { FailCapturePixels("renderer"); return; }
+    CancelCapturePixels();
+    recoveryPolicy.MarkReady();
+    StateChanged?.Invoke("capture-pixel-ready");
+  }
+
+  private void FailCapturePixels(string reason)
+  {
+    ResetWebDocument();
+    StateChanged?.Invoke($"capture-pixel-failed:{reason}");
+    Recover(core);
+  }
   internal bool HasBridgeBinding => bridge is not null;
   internal bool HasWebViewBindings => core is not null;
   internal bool HasSubscription => subscription is { IsCompleted: false };
@@ -242,6 +317,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       StateChanged?.Invoke("navigation-complete");
       return;
     }
+    ResetWebDocument();
     StateChanged?.Invoke($"navigation-failed:{args.WebErrorStatus}");
     Recover(sender);
   }
@@ -293,6 +369,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       {
         if (IsPdfPreviewFlushResponse(incoming.RootElement))
         { AcceptPdfPreviewFlushResponse(message); return; }
+        if (CaptureSceneMessages.IsReport(incoming.RootElement))
+        { AcceptCapturePixels(CaptureSceneMessages.Parse(message)); return; }
       }
       if (IsBootstrap(message))
       {
@@ -300,6 +378,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
         long generation = Interlocked.Increment(ref bootstrapGeneration);
         requestBootstrapGeneration = generation;
         subscriptionCancellation?.Cancel();
+        CancelCapturePixels();
         sessionId = null;
         StateChanged?.Invoke("bootstrap-received");
         WorkbenchBootstrap bootstrap = await application.BootstrapAsync(
@@ -307,7 +386,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
         bootstrap = ProjectBootstrap(bootstrap);
         if (disposed || bridge is not { } registered || !ReferenceEquals(registered.Sender, sender) ||
           generation != Volatile.Read(ref bootstrapGeneration)) return;
-        var response = WorkbenchBridgeCodec.SerializeBootstrapResponse(requestId, bootstrap);
+        CaptureSceneDescriptor? capture = BeginCapturePixels(bootstrap, generation, document);
+        var response = WorkbenchBridgeCodec.SerializeBootstrapResponse(requestId, bootstrap, capture);
         sessionId = bootstrap.SessionId;
         registered.Post(response.Json);
         StartSubscription(bootstrap, response.RequiresSnapshot);
@@ -415,7 +495,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
           if (!await PublishStateFrameAsync(activeSession, frame, target, cancellationToken)) return;
       }
       if (disposed || sessionId != activeSession || !ReferenceEquals(core, target)) return;
-      recoveryPolicy.MarkReady();
+      if (CaptureScene is null) recoveryPolicy.MarkReady();
       StateChanged?.Invoke("bridge-ready");
       WorkbenchTheme? lastTheme = null;
       bool resync = false;
@@ -424,6 +504,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
         cancellationToken,
         fixedRoute is null ? null : SceneScopes))
       {
+        ObserveCaptureState(state);
+        if (cancellationToken.IsCancellationRequested) return;
         if (state.Change == WorkbenchStateChange.Reset) resync = true;
         if (fixedRoute is not null && state.State is SettingsWorkbenchState settings)
         {
@@ -463,9 +545,15 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     CoreWebView2 sender,
     CoreWebView2ProcessFailedEventArgs args)
   {
+    HandleRendererFailure(args.ProcessFailedKind.ToString());
+  }
+
+  internal void HandleRendererFailure(string kind)
+  {
+    if (disposed) return;
     ResetWebDocument();
-    StateChanged?.Invoke($"process-failed:{args.ProcessFailedKind}");
-    Recover(sender);
+    StateChanged?.Invoke($"process-failed:{kind}");
+    Recover(core);
   }
 
   // 导航与渲染进程失败共用：换文档即作废 session/bootstrap 代际与在途 flush。
@@ -475,14 +563,16 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     Interlocked.Increment(ref documentGeneration);
     sessionId = null;
     subscriptionCancellation?.Cancel();
+    CancelCapturePixels();
     AbandonPdfPreviewFlush();
   }
 
-  private void Recover(CoreWebView2 sender)
+  private void Recover(CoreWebView2? sender)
   {
     if (recoveryPolicy.RegisterFailure() == WorkbenchRecoveryAction.Reload)
     {
-      sender.Reload();
+      StateChanged?.Invoke("recovery-reload");
+      sender?.Reload();
       return;
     }
     RecoveryRequired?.Invoke();
@@ -632,6 +722,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       return;
     }
     disposed = true;
+    CancelCapturePixels();
     AbandonPdfPreviewFlush();
     CaptureBackground = null;
     lifetime.Cancel();

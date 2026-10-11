@@ -97,6 +97,44 @@ function parseRect(value) {
   return { left, top, right, bottom, width: right - left, height: bottom - top };
 }
 
+// Capture-scene canvas geometry: the physical selection must map exactly
+// through the measured editor WebView viewport (no window.vibeocrCaptureScene).
+function assertCaptureCanvasLayout({ box, selection, desktopClient, viewport }) {
+  const tolerance = 2;
+  const finite = Number.isFinite;
+  assert(finite(desktopClient?.X) && finite(desktopClient?.Y) &&
+    finite(desktopClient?.Width) && desktopClient.Width > 0 &&
+    finite(desktopClient?.Height) && desktopClient.Height > 0,
+    `Frozen desktop client geometry is invalid: ${JSON.stringify(desktopClient)}.`);
+  assert(finite(selection?.left) && finite(selection?.top) &&
+    finite(selection?.width) && selection.width > 0 &&
+    finite(selection?.height) && selection.height > 0,
+    `Physical selection geometry is invalid: ${JSON.stringify(selection)}.`);
+  const left = selection.left - desktopClient.X;
+  const top = selection.top - desktopClient.Y;
+  assert(left >= 0 && top >= 0 &&
+    left + selection.width <= desktopClient.Width &&
+    top + selection.height <= desktopClient.Height,
+    'Physical selection escaped the frozen desktop client.');
+  assert(finite(viewport?.width) && viewport.width > 0 &&
+    finite(viewport?.height) && viewport.height > 0,
+    `Editor WebView viewport is invalid: ${JSON.stringify(viewport)}.`);
+  assert(box && finite(box.x) && finite(box.y) &&
+    finite(box.width) && box.width > 0 && finite(box.height) && box.height > 0,
+    `Editor canvas has no positive finite visual bounds: ${JSON.stringify(box)}.`);
+  const scale = { x: viewport.width / desktopClient.Width,
+    y: viewport.height / desktopClient.Height };
+  const expected = { x: left * scale.x, y: top * scale.y,
+    width: selection.width * scale.x, height: selection.height * scale.y };
+  for (const field of ['x', 'y', 'width', 'height'])
+    assert(Math.abs(box[field] - expected[field]) <= tolerance,
+      `Editor canvas ${field} is ${box[field]} instead of the physical→CSS ` +
+      `mapping ${expected[field]} (±${tolerance} CSS px).`);
+  return { measured: { ...box }, expected, scale, tolerance,
+    selection: { ...selection }, desktopClient: { ...desktopClient },
+    viewport: { ...viewport } };
+}
+
 async function firstLine(child, timeoutMs) {
   const lines = readline.createInterface({ input: child.stdout });
   let stderr = '';
@@ -902,7 +940,14 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
   await page.getByRole('button', { name: '矩形', exact: true }).click();
   await page.getByRole('combobox', { name: '线条宽度' }).selectOption('8');
   const box = await editor.boundingBox();
-  assert(box && box.width > 100 && box.height > 100, 'Editor canvas has no usable visual bounds.');
+  // A CSS size floor would reject the legitimate 140x42 crop at 175% DPI;
+  // verify the exact physical→CSS mapping of the first frame instead.
+  pixelEvidence.canvasLayout = assertCaptureCanvasLayout({
+    box,
+    selection: selectedRegion,
+    desktopClient: client,
+    viewport: await page.evaluate(() => ({ width: innerWidth, height: innerHeight })),
+  });
   await page.mouse.move(box.x + box.width * 0.35, box.y + box.height * 0.45);
   await page.mouse.down();
   await page.mouse.move(box.x + box.width * 0.65, box.y + box.height * 0.55);
@@ -1143,7 +1188,8 @@ async function main() {
 
 export { native, windows, waitForWindows, area, inside, delay, startFixture,
   launchApp, openSettings, toolbarStatus, setCheckbox, stopOwned, configure,
-  captureThroughHotkey, taskbarState, pngPixels, focusRecorder };
+  captureThroughHotkey, taskbarState, pngPixels, focusRecorder,
+  assertCaptureCanvasLayout };
 
 if (path.resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
   main().catch((error) => {

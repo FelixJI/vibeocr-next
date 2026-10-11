@@ -45,11 +45,15 @@ receipt/error response 与 PDF preview flush 走独立关联通道；reset 完�
 小 bootstrap 保留完整响应。聚合快照超过 64 KiB 时，先逐 scope 验证帧上限，再发送带唯一合法 `stateScopes` 的
 `stateTransfer: "snapshot"` 启动控制响应，随后复用 reset/replace/ready；bootstrap Promise 在完整事务 ready 后才 resolve。
 仅该启动事务允许与控制帧相同的真实 checkpoint。缺 ready 的十秒期限、未知/重复 scope、单帧超限和旧 session 均不提交部分状态。
-这里的 ready 是状态快照提交，首帧像素确认仍属于后续 #216。
+这里的 ready 是状态快照提交。截图覆盖层另有 `captureScene`：C# 提供冻结桌面的物理几何、surface、截图会话、输入资源/内容 revision，以及 document/bootstrap generation；小响应与 snapshot 控制都携带同一 typed 元数据，TS 在完整快照提交后才经 runtime/viewState/props 使用。
+
+截图编辑器不再注入 `window` 几何或由宿主轮询 DOM。前端确认对应输入的实际解码尺寸，完成源图画布绘制与冻结背景解码，再在后续 rAF 通过既有 bridge 发送一次 `capture.pixelReady`；解码/绘制失败只发送有界 `capture.pixelFailed` reason。宿主必须匹配当前 bridge session、document/bootstrap generation、surface、截图会话、输入资源和内容 revision，才原生设置 Opacity 揭示。旧、重复、导航后和关闭后的回报不生效。普通主窗 bootstrap-ready 保持原语义；截图只在匹配像素 ready 后重置一次自动恢复预算，十秒首帧期限和 renderer 失败最多自动 reload 一次，再显示可退出的原生恢复入口。导航、替换 bootstrap 和 dispose 撤销旧期限；command receipt 与 PDF preview flush 仍是独立契约。
+
+纯工具首帧测量使用打包应用的 `capture-first-frame-e2e`，三个隔离 App/UDF 冷批次分别 20/1/1 轮，保留 22 行真实原生 editor 的时间、dispatch lag、资源/订阅计数、工作集采样与进程角色。计时终点固定为原生 Opacity 揭示之后；输入开始点是 synthetic GDI capture，不包含人类热键或框选时间。普通启动不创建采样定时器。after 使用保存的 before 冻结预算；完整失败 before 可作为性能基线，但 cleanup、资源及 zero-Runtime 证据失败不能接受。每轮 closed 的 CIM 采样只有一秒窗口，常见仅一个样本；工作集增长是门禁证据，不能据此单独归因为浏览器缓存或资源泄漏。混合 DPI/负坐标副屏需要真实硬件证据，浏览器 DPR 测试不替代该验收。
 
 ## WebView2 与恢复
 
-主窗口和独立 scene 各持有自己的 WebView2 host。静态资产映射到 `https://app.vibeocr/`，顶层导航限制在产品入口与 hash route；外部导航被拒绝。renderer/browser 故障每个 episode 最多自动恢复一次，连续失败显示原生恢复页，提供重载、导出脱敏诊断和退出。
+主窗口持有一个 WebView2，截图编辑器按需创建且最多一个；共享应用、资源 broker 与 WebView2 UDF，不池化或预热。替换、会话 detach、识别交接、用户 Closed 和 shutdown 都进入同一个退休屏障：旧 host 订阅与事件 drain、WebView Close 完成后才创建下一窗口。等待后再次验证截图会话与请求 generation，过期/取消的待用 scene 转移或执行一次 owner 恢复并关闭；旧 Closed 不关闭新会话。主窗关闭共享 ShutdownCompletion，App 退出须等待它，失败保留日志并非零退出。独立 `capture-replacement-e2e` 使用真实 WebView disposal gate 验证连续替换、待建取消和 shutdown，并实际 Reload 主窗/editor；该入口不诱发 ProcessFailed，不能替代 renderer crash 实测。主窗口和独立 scene 各持有自己的 WebView2 host。静态资产映射到 `https://app.vibeocr/`，顶层导航限制在产品入口与 hash route；外部导航被拒绝。renderer/browser 故障每个 episode 最多自动恢复一次，连续失败显示原生恢复页，提供重载、导出脱敏诊断和退出。
 
 模块加载失败与已加载组件的 render 异常分别显示。浏览器会缓存失败的动态 import；模块失败提供用户显式“保留草稿并重新加载页面”，
 先等待当前及 retiring PDF 首/末草稿得到宿主确认，失败或十秒超时保留草稿且不重载，成功才重载故障文档和完整依赖图。

@@ -6,7 +6,7 @@ import { statistics, attachWorkingSets, summarize, validateBaseline, checkAfter 
 const baselineCounts = { Subscriptions: 1, Resources: 0, AnnotationEntries: 0,
   AnnotationReservations: 0, AnnotationOwnedFiles: 0, ResourceFiles: 0, EditorWebViews: 0, TotalWebViews: 1 };
 function batch(cycles) {
-  return { health: { schema_version: 1, state: 'passed', callbacks_after_stop: 0,
+  return { state: 'passed', health: { schema_version: 1, state: 'passed', callbacks_after_stop: 0,
     submit_attempts: 0, startup_ensure_attempts: 0, installer_attempts: 0, inference_attached: false,
     baseline: baselineCounts, rows: Array.from({ length: cycles }, (_, index) => ({
       cycle: index + 1, temperature: index === 0 ? 'cold' : 'warm',
@@ -56,6 +56,9 @@ export function runSelfCheck() {
     measurement_complete: true, batches: growth, summary: summarize(growth) };
   assert.equal(validateBaseline(failedBefore), failedBefore.summary);
   assert.doesNotThrow(() => checkAfter(summarize(batches), validateBaseline(failedBefore)));
+  const invalidBatch = structuredClone(failedBefore);
+  invalidBatch.batches[0].state = 'failed';
+  assert.throws(() => validateBaseline(invalidBatch), /Invalid batch evidence/);
   assert.throws(() => validateBaseline({ ...failedBefore, measurement_complete: false }), /incomplete/);
   const invalidBefore = structuredClone(failedBefore);
   invalidBefore.batches[0].health.rows[0].dispatch_lag_ms = [];

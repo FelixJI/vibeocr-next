@@ -59,6 +59,10 @@ export class WorkbenchWebRuntime {
   >();
 
   readonly actions: AppActions = {
+    reportCapturePixels: (scene, failure) => {
+      if (this.current?.captureScene === scene && this.listener)
+        this.bridge.reportCapturePixels?.(scene, failure);
+    },
     recoverFeatureAssets: () => {
       if (this.featureRecovery) return this.featureRecovery;
       const recovery = this.recoverFeatureAssets();
@@ -321,6 +325,7 @@ export function projectSnapshot(snapshot: AppSnapshot): AppViewState {
     theme: snapshot.theme,
     capabilities: snapshot.capabilities,
     features: snapshot.features,
+    captureScene: snapshot.captureScene,
     runtimeLabel: runtimeLabel(snapshot.features),
   };
 }

@@ -2,7 +2,6 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using System.Text.Json;
 using System.Runtime.InteropServices;
 using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Services;
@@ -32,6 +31,15 @@ internal sealed class ImageEditWindow : IAsyncDisposable
   private bool initialized;
   private bool restoreCaptureFocus;
   private Task? disposal;
+  private Task? controlledDisposalGate;
+  private TaskCompletionSource? controlledDisposalReached;
+  internal Task HoldDisposalForSmoke(Task release)
+  {
+    if (disposal is not null) throw new InvalidOperationException("Editor disposal already started.");
+    controlledDisposalGate = release;
+    controlledDisposalReached = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    return controlledDisposalReached.Task;
+  }
   private readonly TextBlock recoveryMessage = new()
   {
     Foreground = new SolidColorBrush(Microsoft.UI.Colors.White),
@@ -63,6 +71,10 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     host = new WebWorkbenchHost(application, broker, annotations,
       applicationOwner: false, fixedRoute: WorkbenchRoute.ImageEdit);
     host.CaptureBackground = captureScene?.TakeBackground();
+    if (captureScene is { } geometry)
+      host.CaptureScene = new(Guid.NewGuid(), sessionId, geometry.Bounds.X - geometry.Desktop.X,
+        geometry.Bounds.Y - geometry.Desktop.Y, geometry.Bounds.Width, geometry.Bounds.Height,
+        geometry.Desktop.Width, geometry.Desktop.Height, geometry.InitialTool ?? "select");
     host.RecoveryRequired += ShowRecovery;
     host.StateChanged += OnHostStateChanged;
     host.ProtocolViolation += error => AppLog.Error("Image editor bridge rejected a message", error);
@@ -139,24 +151,11 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     initialized = true;
     try
     {
-      if (captureScene is { } scene)
+      if (captureScene is not null)
       {
         await webView.EnsureCoreWebView2Async();
+        if (closed) return;
         webView.DefaultBackgroundColor = Microsoft.UI.Colors.Transparent;
-        string geometry = JsonSerializer.Serialize(new
-        {
-          x = scene.Bounds.X - scene.Desktop.X,
-          y = scene.Bounds.Y - scene.Desktop.Y,
-          width = scene.Bounds.Width,
-          height = scene.Bounds.Height,
-          desktopWidth = scene.Desktop.Width,
-          desktopHeight = scene.Desktop.Height,
-          initialTool = scene.InitialTool,
-        });
-        await webView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
-          "window.vibeocrCaptureScene=" + geometry + ";" +
-          "document.addEventListener('DOMContentLoaded',()=>{" +
-          "document.documentElement.dataset.captureScene='true';});");
       }
       await host.InitializeAsync(webView, assetFolder);
     }
@@ -175,39 +174,17 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     recovery.Visibility = Visibility.Visible;
   }
 
-  private async void OnHostStateChanged(string state)
+  private void OnHostStateChanged(string state)
   {
-    if (closed || state != "bridge-ready") return;
-    try
+    if (closed) return;
+    if (captureScene is not null && state == "navigation-starting")
     {
-      // 等待冻结桌面和选区都解码，避免 bridge-ready 早于 React 首帧时露出黑底。
-      if (captureScene is not null)
-      {
-        var timeout = System.Diagnostics.Stopwatch.StartNew();
-        while (!closed)
-        {
-          string ready = await webView.CoreWebView2.ExecuteScriptAsync(
-            "(()=>{const b=document.querySelector('.capture-scene-backdrop img');" +
-            "const c=document.querySelector('canvas[aria-label=\"图片检查画布\"]');" +
-            "return !!(b?.complete&&b.naturalWidth&&c?.dataset.frameReady==='true'&&getComputedStyle(c).opacity!=='0');})()");
-          if (closed) return;
-          if (ready == "true") break;
-          if (timeout.Elapsed > TimeSpan.FromSeconds(10))
-            throw new TimeoutException("截图现场背景未就绪。");
-          await Task.Delay(16);
-        }
-      }
-      if (!closed)
-      {
-        webView.Opacity = 1;
-        presented.TrySetResult(System.Diagnostics.Stopwatch.GetTimestamp());
-      }
+      webView.Opacity = 0;
+      return;
     }
-    catch (Exception error)
-    {
-      AppLog.Error("Capture scene presentation failed", error);
-      ShowRecovery();
-    }
+    if (state != (captureScene is null ? "bridge-ready" : "capture-pixel-ready")) return;
+    webView.Opacity = 1;
+    presented.TrySetResult(System.Diagnostics.Stopwatch.GetTimestamp());
   }
 
   private async void OnClosed(object sender, WindowEventArgs args)
@@ -216,10 +193,24 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     webView.Loaded -= OnLoaded;
     window.Closed -= OnClosed;
     Closed?.Invoke(this, args);
-    await DisposeAsync();
+    try { await DisposeAsync(); }
+    catch (Exception error) { AppLog.Error("Image editor disposal failed", error); }
   }
 
-  public ValueTask DisposeAsync() => new(disposal ??= DisposeCoreAsync());
+  public ValueTask DisposeAsync()
+  {
+    if (disposal is not null) return new(disposal);
+    var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    disposal = completion.Task;
+    _ = CompleteDisposalAsync(completion);
+    return new(disposal);
+  }
+
+  private async Task CompleteDisposalAsync(TaskCompletionSource completion)
+  {
+    try { await DisposeCoreAsync(); completion.TrySetResult(); }
+    catch (Exception error) { completion.TrySetException(error); }
+  }
 
   private async Task DisposeCoreAsync()
   {
@@ -228,6 +219,13 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     host.StateChanged -= OnHostStateChanged;
     presented.TrySetCanceled();
     await host.DisposeAsync();
+    if (controlledDisposalGate is { } gate)
+    {
+      controlledDisposalReached?.TrySetResult();
+      await gate;
+      controlledDisposalGate = null;
+      controlledDisposalReached = null;
+    }
     webView.Close();
     Interlocked.Decrement(ref activeWebViewCount);
     captureScene?.Dispose();

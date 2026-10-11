@@ -2,7 +2,7 @@ import { Button } from "@fluentui/react-components";
 
 import { ClipboardPaste, ImagePlus } from "lucide-react";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { ImageCanvasEditor } from "../components/ImageCanvasEditor";
 
@@ -20,7 +20,16 @@ import { StatusLine } from "./FeaturePanels";
 
 export function ImageEditPage({ viewState, actions }: FeatureProps) {
   const [autoTextPreference, setAutoTextPreference] = useState(true);
-  const scene = window.location.hash.includes("?scene=1");
+  const captureScene = viewState.captureScene ?? undefined;
+  const scene =
+    captureScene !== undefined || window.location.hash.includes("?scene=1");
+  useEffect(() => {
+    if (!captureScene) return;
+    document.documentElement.dataset.captureScene = "true";
+    return () => {
+      delete document.documentElement.dataset.captureScene;
+    };
+  }, [captureScene]);
   // 宿主命令约定：scene（#/imageEdit?scene=1）仍由 recognition feature 承载
   // 并发 recognition.*；非 scene 独立编辑页读 imageEdit feature，编辑器
   // 会话命令全部改发 imageEdit.*（与 recognition 同形命令）。
@@ -79,6 +88,7 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
             "recognition.screenshotSession",
           )}
           source={input.url}
+          captureScene={captureScene}
           sourceByteLength={input.byteLength}
           session={session}
           textLayer={screenshotTextLayer(state.textLayer)}

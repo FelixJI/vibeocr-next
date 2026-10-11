@@ -62,7 +62,9 @@ import {
   type Point,
 } from "./annotationGeometry";
 import { uploadAnnotatedImage } from "./annotationHandoff";
-import { captureSceneStyle, nativeCaptureScene } from "./captureSceneLayout";
+import { captureSceneStyle } from "./captureSceneLayout";
+import type { CaptureScene } from "../bridge/captureScene";
+import { CapturePixelPresentation } from "./capturePixelPresentation";
 import { ImageTextLayer } from "./ImageTextLayer";
 import { toImageTextLines } from "./imageTextLayerGeometry";
 import type { InpaintRect, InpaintResponse } from "./inpaint/inpaint";
@@ -318,6 +320,7 @@ interface ImageCanvasEditorProps {
   readonly canExport: boolean;
   readonly canRecognize: boolean;
   readonly source: string;
+  readonly captureScene?: CaptureScene;
   /** 原图体积（字节）；宿主可选提供，缺省时只显示尺寸不显示原图体积。 */
   readonly sourceByteLength?: number;
   readonly session?: ScreenshotSessionHandle;
@@ -340,6 +343,7 @@ export function ImageCanvasEditor({
   canRecognize,
   source,
   sourceByteLength,
+  captureScene,
   session,
   textLayer,
   autoText: autoTextProp,
@@ -350,7 +354,30 @@ export function ImageCanvasEditor({
   commandScope = "recognition",
 }: ImageCanvasEditorProps) {
   const commands = EDITOR_COMMANDS[commandScope];
-  const captureGeometry = nativeCaptureScene();
+  const captureGeometry = captureScene;
+  const contentRevisionRef = useRef(session?.revision ?? 0);
+  const presentation = useRef<CapturePixelPresentation | undefined>(undefined);
+  const backdropRef = useRef<HTMLImageElement>(null);
+  useEffect(() => {
+    if (!captureScene) return;
+    const attempt = new CapturePixelPresentation((failure) =>
+      actions.reportCapturePixels?.(captureScene, failure),
+    );
+    presentation.current = attempt;
+    if (
+      source !== captureScene.inputUrl ||
+      session?.sessionId !== captureScene.captureSessionId ||
+      contentRevisionRef.current !== captureScene.inputRevision
+    )
+      attempt.fail("identity");
+    else if (backdropRef.current?.complete)
+      void attempt.backgroundLoaded(backdropRef.current);
+    return () => {
+      attempt.dispose();
+      if (presentation.current === attempt) presentation.current = undefined;
+    };
+    // The attempt belongs to this bootstrap/input, not later annotation revisions.
+  }, [captureScene, source, session?.sessionId, actions]);
   const [sceneViewport, setSceneViewport] = useState(() => ({
     width: window.innerWidth,
     height: window.innerHeight,
@@ -392,10 +419,9 @@ export function ImageCanvasEditor({
       }
     | undefined
   >(undefined);
-  const contentRevisionRef = useRef(session?.revision ?? 0);
   const sessionIdRef = useRef(session?.sessionId);
   const [tool, setTool] = useState<Tool>(() => {
-    const scene = nativeCaptureScene();
+    const scene = captureScene;
     const initial = scene?.initialTool;
     // 截图现场没有裁剪工具按钮：初始工具不得落在 crop 上。
     if (scene && initial === "crop") return "select";
@@ -658,7 +684,24 @@ export function ImageCanvasEditor({
     imageRef.current = undefined;
     const image = new Image();
     image.decoding = "async";
-    image.onload = () => {
+    let active = true;
+    image.onload = async () => {
+      try {
+        if (captureScene && typeof image.decode === "function")
+          await image.decode();
+      } catch {
+        if (active) presentation.current?.fail("sourceDecode");
+        return;
+      }
+      if (!active) return;
+      if (
+        captureScene &&
+        (image.naturalWidth !== captureScene.width ||
+          image.naturalHeight !== captureScene.height)
+      ) {
+        presentation.current?.fail("identity");
+        return;
+      }
       imageRef.current = image;
       setDecodedSourceSize({
         source,
@@ -666,12 +709,17 @@ export function ImageCanvasEditor({
       });
       setImageRevision((current) => current + 1);
     };
+    image.onerror = () => {
+      if (active) presentation.current?.fail("sourceDecode");
+    };
     image.src = source;
     return () => {
+      active = false;
       image.onload = null;
+      image.onerror = null;
       if (imageRef.current === image) imageRef.current = undefined;
     };
-  }, [source]);
+  }, [source, captureScene]);
 
   // 去水印绘制层：应用补丁从存储解析；预览仅在对比为“修补后”时叠加；
   // 选区高亮按映射后的有效范围回投显示，用户看到的就是实际修改范围。
@@ -751,6 +799,10 @@ export function ImageCanvasEditor({
     latestDraw.current = () => {
       const canvas = canvasRef.current;
       if (!canvas || layerReady) return;
+      if (captureScene && !canvas.getContext("2d")) {
+        presentation.current?.fail("draw");
+        return;
+      }
       const image = imageRef.current;
       const layer = currentInpaintLayer();
       const crop = cropDraft.current ? undefined : state.crop;
@@ -831,15 +883,20 @@ export function ImageCanvasEditor({
         layer,
         cached,
       );
-      // 宿主揭示门控：首个真实图像帧上屏后才标记；换图/会话由 resetKey 清理。
-      if (image && image.naturalWidth > 0 && image.naturalHeight > 0) {
-        canvas.dataset.frameReady = "true";
-      }
       if (cropDraft.current) {
         drawCropPreview(canvas, cropDraft.current);
       } else if (captureGeometry && !layerReady) {
         // 截图现场：选区即当前裁剪范围；无已提交裁剪时在四边/四角绘制闲置手柄。
         drawSceneCropHandles(canvas, state.crop);
+      }
+      if (
+        image &&
+        image.naturalWidth > 0 &&
+        image.naturalHeight > 0 &&
+        canvas.getContext("2d")
+      ) {
+        canvas.dataset.frameReady = "true";
+        presentation.current?.sourceDrawn();
       }
     };
     if (!layerReady) scheduleDraw();
@@ -848,7 +905,12 @@ export function ImageCanvasEditor({
     if (pendingDraw.current !== undefined) return;
     pendingDraw.current = requestAnimationFrame(() => {
       pendingDraw.current = undefined;
-      latestDraw.current();
+      try {
+        latestDraw.current();
+      } catch (error) {
+        if (presentation.current) presentation.current.fail("draw");
+        else throw error;
+      }
     });
   }
 
@@ -2315,7 +2377,18 @@ export function ImageCanvasEditor({
             style={captureStyle}
             aria-hidden="true"
           >
-            <img src="/__capture_background" alt="" draggable={false} />
+            <img
+              ref={backdropRef}
+              src="/__capture_background"
+              alt=""
+              draggable={false}
+              onLoad={(event) => {
+                void presentation.current?.backgroundLoaded(
+                  event.currentTarget,
+                );
+              }}
+              onError={() => presentation.current?.fail("backgroundDecode")}
+            />
             <div className="capture-scene-mask" />
           </div>,
           document.body,

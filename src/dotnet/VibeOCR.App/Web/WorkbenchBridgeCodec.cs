@@ -17,9 +17,9 @@ public static class WorkbenchBridgeCodec
 {
   internal sealed record BootstrapResponse(string Json, bool RequiresSnapshot);
 
-  internal static BootstrapResponse SerializeBootstrapResponse(Guid requestId, WorkbenchBootstrap bootstrap)
+  internal static BootstrapResponse SerializeBootstrapResponse(Guid requestId, WorkbenchBootstrap bootstrap, CaptureSceneDescriptor? captureScene = null)
   {
-    try { return new(SerializeBootstrap(requestId, bootstrap), false); }
+    try { return new(SerializeBootstrap(requestId, bootstrap, captureScene), false); }
     catch (WorkbenchBridgeProtocolException)
     {
       string[] scopes = bootstrap.States.Select(state => state.Scope).ToArray();
@@ -32,7 +32,7 @@ public static class WorkbenchBridgeCodec
       {
         version = WorkbenchProtocol.Version, kind = "response", id = requestId, type = "app.bootstrap",
         payload = new { sessionId = bootstrap.SessionId, revision = bootstrap.Revision, route = FormatRoute(bootstrap.Route),
-          theme = BootstrapTheme(bootstrap), capabilities = bootstrap.Capabilities.Order(StringComparer.Ordinal), stateTransfer = "snapshot", stateScopes = scopes },
+          theme = BootstrapTheme(bootstrap), capabilities = bootstrap.Capabilities.Order(StringComparer.Ordinal), stateTransfer = "snapshot", stateScopes = scopes, captureScene },
       }, SerializerOptions);
       EnsureMessageSize(json);
       return new(json, true);
@@ -157,7 +157,9 @@ public static class WorkbenchBridgeCodec
     }
   }
 
-  public static string SerializeBootstrap(Guid requestId, WorkbenchBootstrap bootstrap)
+  public static string SerializeBootstrap(Guid requestId, WorkbenchBootstrap bootstrap) => SerializeBootstrap(requestId, bootstrap, null);
+
+  internal static string SerializeBootstrap(Guid requestId, WorkbenchBootstrap bootstrap, CaptureSceneDescriptor? captureScene)
   {
     ArgumentNullException.ThrowIfNull(bootstrap);
     Dictionary<string, object?> features = bootstrap.States
@@ -180,6 +182,7 @@ public static class WorkbenchBridgeCodec
         theme = BootstrapTheme(bootstrap),
         capabilities = bootstrap.Capabilities.Order(StringComparer.Ordinal),
         features,
+        captureScene,
       },
     }, SerializerOptions);
     json = BoundInstallLogToMessage(json);

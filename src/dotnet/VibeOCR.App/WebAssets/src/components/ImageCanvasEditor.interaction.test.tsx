@@ -143,16 +143,21 @@ function stubAnimationFrames(): FrameHarness {
   };
 }
 
-function stubCaptureScene() {
-  vi.stubGlobal("vibeocrCaptureScene", {
-    x: 100,
-    y: 100,
-    width: 800,
-    height: 400,
-    desktopWidth: 2560,
-    desktopHeight: 1440,
-  });
-}
+const captureScene = {
+  surfaceId: "surface",
+  captureSessionId: "session-a",
+  inputUrl: "https://app.vibeocr/__resource/capture.png",
+  inputRevision: 0,
+  documentGeneration: 1,
+  bootstrapGeneration: 1,
+  initialTool: "select",
+  x: 100,
+  y: 100,
+  width: 800,
+  height: 400,
+  desktopWidth: 2560,
+  desktopHeight: 1440,
+};
 
 function mockCanvasBox(
   canvas: HTMLCanvasElement,
@@ -199,10 +204,9 @@ function allCalls(): RecordedCall[] {
 
 describe("截图现场工具栏与裁剪交互", () => {
   it("截图现场不出现裁剪按钮，普通编辑仍保留", async () => {
-    stubCanvasStack();
+    stubCanvasStack({ width: 800, height: 400 });
     stubAnimationFrames();
-    stubCaptureScene();
-    await renderEditor();
+    await renderEditor({ captureScene });
     expect(screen.queryByRole("button", { name: "裁剪" })).toBeNull();
     cleanup();
 
@@ -214,10 +218,9 @@ describe("截图现场工具栏与裁剪交互", () => {
   });
 
   it("拖动选区边/角把裁剪提交进历史并影响修订", async () => {
-    stubCanvasStack();
+    stubCanvasStack({ width: 800, height: 400 });
     const harness = stubAnimationFrames();
-    stubCaptureScene();
-    const { actions, unmount } = await renderEditor();
+    const { actions, unmount } = await renderEditor({ captureScene });
     const canvas = getEditorCanvas();
     mockCanvasBox(canvas, 800, 400);
     harness.flush();
@@ -261,10 +264,9 @@ describe("截图现场工具栏与裁剪交互", () => {
   });
 
   it("拖动选区四角调整裁剪（se 角）", async () => {
-    stubCanvasStack();
+    stubCanvasStack({ width: 800, height: 400 });
     const harness = stubAnimationFrames();
-    stubCaptureScene();
-    const { unmount } = await renderEditor();
+    const { unmount } = await renderEditor({ captureScene });
     const canvas = getEditorCanvas();
     mockCanvasBox(canvas, 800, 400);
     harness.flush();
@@ -611,5 +613,27 @@ describe("切换编辑按钮的绘制合并回归", () => {
     );
     expect(restored).toBeGreaterThan(cleared);
     unmount();
+  });
+});
+
+describe("首帧输入身份", () => {
+  it("拒绝与 bootstrap 资源不相同的源图，保持有界失败", async () => {
+    stubCanvasStack({ width: 800, height: 400 });
+    const harness = stubAnimationFrames();
+    const reportCapturePixels = vi.fn();
+    const actions = { ...createActions(), reportCapturePixels };
+    const wrong = {
+      ...captureScene,
+      inputUrl: "https://app.vibeocr/__resource/another",
+    };
+    const { unmount } = await renderEditor({ actions, captureScene: wrong });
+    harness.flush();
+    expect(reportCapturePixels).toHaveBeenCalledExactlyOnceWith(
+      wrong,
+      "identity",
+    );
+    unmount();
+    harness.flush();
+    expect(reportCapturePixels).toHaveBeenCalledTimes(1);
   });
 });

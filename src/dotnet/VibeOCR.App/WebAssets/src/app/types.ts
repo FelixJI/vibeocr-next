@@ -1,9 +1,11 @@
+import type { CaptureScene, CapturePixelFailure } from "../bridge/captureScene";
 import type { AppRoute } from "../bridge/client";
 
 export type ThemePreference = "system" | "light" | "dark";
 
 export interface AppViewState {
   readonly connected: boolean;
+  readonly captureScene?: CaptureScene | null;
   readonly revision: number;
   readonly route: AppRoute;
   readonly theme: ThemePreference;
@@ -152,6 +154,10 @@ export interface AppAction {
 }
 
 export interface AppActions {
+  readonly reportCapturePixels?: (
+    scene: CaptureScene,
+    failure?: CapturePixelFailure,
+  ) => void;
   readonly recoverFeatureAssets?: () => Promise<boolean>;
   readonly recover?: () => void;
   readonly registerPdfPreviewFlush?: (

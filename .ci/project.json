@@ -217,7 +217,9 @@
         "--",
         "node",
         "--test",
-        "tests/node/smoke_native_actions.test.mjs"
+        "tests/node/smoke_native_actions.test.mjs",
+        "tests/node/smoke_capture_first_frame.test.mjs",
+        "tests/node/smoke_capture_replacement.test.mjs"
       ]
     ],
     "release_build": [

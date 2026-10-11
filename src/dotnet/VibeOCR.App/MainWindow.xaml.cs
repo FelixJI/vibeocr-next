@@ -59,7 +59,22 @@ public sealed partial class MainWindow : Window
   private readonly string resourceRoot;
   private readonly WorkbenchAnnotationStore annotationStore;
   private ImageEditWindow? imageEditor;
+  private readonly ImageEditorRetirement editorRetirement = new();
+  private sealed record PendingImageEditor(long Generation, Guid SessionId,
+    VibeOCR.Platform.Windows.PhysicalRectangle? Bounds, ScreenshotCaptureScene? Scene)
+  {
+    internal Action? DetachClosed { get; set; }
+  }
+  private PendingImageEditor? pendingImageEditor;
+  private Task imageEditorCreation = Task.CompletedTask;
+  private TaskCompletionSource imageEditorRequestChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
+  private TaskCompletionSource? captureFinished;
+  private bool pendingCaptureFocus;
   private bool shuttingDown;
+  private TaskCompletionSource? shutdownCompletion;
+  private readonly TaskCompletionSource shutdownStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+  internal Task ShutdownCompletion => shutdownCompletion?.Task ?? Task.CompletedTask;
+  private Action? captureReplacementShutdownVerification;
   internal Microsoft.UI.Xaml.Controls.WebView2? SceneWebView => imageEditor?.WebView;
   internal Guid? SceneSessionId => imageEditor?.SessionId;
   private Microsoft.UI.Xaml.Controls.WebView2 SmokeEditorWebView => SceneWebView ?? WorkbenchWebView;
@@ -140,7 +155,8 @@ public sealed partial class MainWindow : Window
       diagnostics,
       resourceBroker,
       resourceRoot,
-      () => imageEditor is { } editor ? editor.Handle : WindowNative.GetWindowHandle(this),
+      () => imageEditor is { } editor ? editor.Handle : pendingImageEditor?.Scene is { } scene ?
+        WindowNative.GetWindowHandle(scene.Window) : WindowNative.GetWindowHandle(this),
       annotationStore,
       inferenceAttached: inferenceAttached,
       supervisorInstanceId: supervisorInstanceId,
@@ -150,8 +166,8 @@ public sealed partial class MainWindow : Window
       flushPdfPreview: FlushPdfPreviewAsync,
       ensureRuntimeReady: ensureRuntimeReady);
     commandHandler.ScreenshotSessionReady += ShowImageEditor;
-    commandHandler.ScreenshotCaptureStarting += () => imageEditor?.HideForCapture();
-    commandHandler.ScreenshotCaptureFinished += () => imageEditor?.RestoreAfterCapture();
+    commandHandler.ScreenshotCaptureStarting += OnScreenshotCaptureStarting;
+    commandHandler.ScreenshotCaptureFinished += OnScreenshotCaptureFinished;
     commandHandler.ScreenshotTextLayerChanged += layer =>
     {
       void UpdatePins()
@@ -180,10 +196,10 @@ public sealed partial class MainWindow : Window
       {
         if (imageEditor is { } editor && editor.SessionId == sessionId)
         {
-          editor.TransferOwnerRestorationTo(commandHandler.PendingScreenshotCaptureScene);
-          imageEditor = null;
-          editor.Close();
+          RetireImageEditor(editor, commandHandler.PendingScreenshotCaptureScene);
         }
+        if (pendingImageEditor?.SessionId == sessionId)
+          CancelPendingImageEditor(commandHandler.PendingScreenshotCaptureScene);
         foreach (PinnedImageWindow pinned in pinnedImages.ToArray())
           if (pinned.SessionId == sessionId && pinned.Revision == revision)
             pinned.MarkOldSnapshot();
@@ -200,10 +216,9 @@ public sealed partial class MainWindow : Window
         // 会话关闭而取消刚提交的任务；随后主窗口切到识别承载面。
         if (imageEditor is { } editor && editor.SessionId == sessionId)
         {
-          editor.TransferOwnerRestorationTo(commandHandler.PendingScreenshotCaptureScene);
-          imageEditor = null;
-          editor.Close();
+          RetireImageEditor(editor, commandHandler.PendingScreenshotCaptureScene);
         }
+        if (pendingImageEditor?.SessionId == sessionId) CancelPendingImageEditor(null);
         ShowAndNavigate("recognition");
       }
       if (DispatcherQueue.HasThreadAccess) Handoff();
@@ -332,36 +347,155 @@ public sealed partial class MainWindow : Window
   private void ShowImageEditor(Guid sessionId, VibeOCR.Platform.Windows.PhysicalRectangle? bounds)
   {
     if (shuttingDown || commandHandler.CurrentImageSessionId != sessionId) return;
-    ScreenshotCaptureScene? captureScene = commandHandler.TakeScreenshotCaptureScene(sessionId);
-    if (imageEditor is { } previous)
+    // Take ownership synchronously: the capture producer disposes any unclaimed scene
+    // as soon as ScreenshotSessionReady returns.
+    ScreenshotCaptureScene? scene = commandHandler.TakeScreenshotCaptureScene(sessionId);
+    CancelPendingImageEditor(scene);
+    if (imageEditor is { } previous) RetireImageEditor(previous, scene);
+    var pending = new PendingImageEditor(editorRetirement.BeginReplacement(), sessionId, bounds, scene);
+    pendingImageEditor = pending;
+    if (scene is not null)
     {
-      previous.TransferOwnerRestorationTo(captureScene);
-      imageEditor = null;
-      previous.Close();
+      void OnPendingClosed(object sender, WindowEventArgs args) => OnPendingImageEditorClosed(pending);
+      scene.Window.Closed += OnPendingClosed;
+      pending.DetachClosed = () => scene.Window.Closed -= OnPendingClosed;
     }
-    ImageEditWindow editor;
-    try
-    {
-      editor = new ImageEditWindow(sessionId, application, resourceBroker, annotationStore,
-        layout.WebAssetsRoot, bounds, captureScene);
-    }
-    catch
-    {
-      captureScene?.Dispose();
-      throw;
-    }
-    imageEditor = editor;
-    editor.Closed += async (_, _) =>
-    {
-      if (!ReferenceEquals(imageEditor, editor)) return;
-      imageEditor = null;
-      if (!shuttingDown && commandHandler.CurrentImageSessionId == sessionId)
-        await application.ExecuteAsync(new WorkbenchCommandEnvelope(Guid.NewGuid(),
-          new CloseScreenshotSessionCommand()), CancellationToken.None);
-    };
-    editor.Activate();
+    imageEditorCreation = CreateImageEditorAsync(pending);
+    TaskCompletionSource changed = imageEditorRequestChanged;
+    imageEditorRequestChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    changed.TrySetResult();
+    ObserveImageEditorCreation(imageEditorCreation);
   }
 
+  private static async void ObserveImageEditorCreation(Task creation)
+  {
+    // Keep the original task faulted for smoke/shutdown callers, while observing
+    // failures when the production event caller does not await creation.
+    try { await creation; }
+    catch (Exception error) { AppLog.Error("Image editor creation did not complete", error); }
+  }
+
+  private async Task WaitForImageEditorRequestAsync(Guid session)
+  {
+    while (imageEditor?.SessionId != session && pendingImageEditor?.SessionId != session)
+    {
+      if (shuttingDown || commandHandler.CurrentImageSessionId != session)
+        throw new InvalidOperationException("Capture editor request was superseded.");
+      await imageEditorRequestChanged.Task;
+    }
+  }
+
+  private void CancelPendingImageEditor(ScreenshotCaptureScene? successor)
+  {
+    editorRetirement.CancelReplacement();
+    PendingImageEditor? previous = pendingImageEditor;
+    pendingImageEditor = null;
+    previous?.DetachClosed?.Invoke();
+    if (previous is not null) previous.DetachClosed = null;
+    if (previous?.Scene is not { } scene) return;
+    if (successor is not null) scene.TransferOwnerRestorationTo(successor);
+    scene.Dispose();
+  }
+
+  private async void OnPendingImageEditorClosed(PendingImageEditor pending)
+  {
+    if (!ReferenceEquals(pendingImageEditor, pending)) return;
+    CancelPendingImageEditor(null);
+    if (!shuttingDown && commandHandler.CurrentImageSessionId == pending.SessionId)
+      await application.ExecuteAsync(new WorkbenchCommandEnvelope(Guid.NewGuid(),
+        new CloseScreenshotSessionCommand()), CancellationToken.None);
+  }
+
+  private void RetireImageEditor(ImageEditWindow editor, ScreenshotCaptureScene? successor)
+  {
+    editor.TransferOwnerRestorationTo(successor);
+    if (ReferenceEquals(imageEditor, editor)) imageEditor = null;
+    // Closed also registers user-driven closure in the same drain. Close is first
+    // so no asynchronous Dispose can recursively close an unregistered window.
+    editor.Close();
+    editorRetirement.Track(editor.DisposeAsync().AsTask());
+  }
+
+  private async Task CreateImageEditorAsync(PendingImageEditor pending)
+  {
+    bool claimed = false;
+    try
+    {
+      await editorRetirement.Drain;
+      while (captureFinished is { } capture) await capture.Task;
+      if (!editorRetirement.IsCurrent(pending.Generation, pending.SessionId,
+          commandHandler.CurrentImageSessionId, shuttingDown) ||
+          !ReferenceEquals(pendingImageEditor, pending)) return;
+      pending.DetachClosed?.Invoke();
+      pending.DetachClosed = null;
+      var editor = new ImageEditWindow(pending.SessionId, application, resourceBroker, annotationStore,
+        layout.WebAssetsRoot, pending.Bounds, pending.Scene);
+      claimed = true;
+      pendingImageEditor = null;
+      imageEditor = editor;
+      editor.Closed += OnImageEditorClosed;
+      editor.Activate();
+    }
+    catch (Exception error)
+    {
+      AppLog.Error("Image editor replacement failed", error);
+      if (editorRetirement.IsCurrent(pending.Generation, pending.SessionId,
+          commandHandler.CurrentImageSessionId, shuttingDown))
+        await application.ExecuteAsync(new WorkbenchCommandEnvelope(Guid.NewGuid(),
+          new CloseScreenshotSessionCommand()), CancellationToken.None);
+      throw;
+    }
+    finally
+    {
+      if (ReferenceEquals(pendingImageEditor, pending)) pendingImageEditor = null;
+      if (!claimed)
+      {
+        pending.DetachClosed?.Invoke();
+        pending.DetachClosed = null;
+        pending.Scene?.Dispose();
+      }
+    }
+  }
+
+  private async void OnImageEditorClosed(object? sender, WindowEventArgs args)
+  {
+    if (sender is not ImageEditWindow editor) return;
+    editorRetirement.Track(editor.DisposeAsync().AsTask());
+    if (!ReferenceEquals(imageEditor, editor)) return;
+    imageEditor = null;
+    if (!shuttingDown && commandHandler.CurrentImageSessionId == editor.SessionId)
+      await application.ExecuteAsync(new WorkbenchCommandEnvelope(Guid.NewGuid(),
+        new CloseScreenshotSessionCommand()), CancellationToken.None);
+  }
+
+  private void OnScreenshotCaptureStarting()
+  {
+    captureFinished = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    imageEditor?.HideForCapture();
+    if (pendingImageEditor?.Scene is not { } scene) return;
+    pendingCaptureFocus = GetForegroundWindow() == WindowNative.GetWindowHandle(scene.Window);
+    scene.Window.AppWindow.Hide();
+  }
+
+  private void OnScreenshotCaptureFinished()
+  {
+    imageEditor?.RestoreAfterCapture();
+    if (pendingImageEditor?.Scene is { } scene)
+    {
+      scene.Window.AppWindow.Show(false);
+      if (pendingCaptureFocus) SetForegroundWindow(WindowNative.GetWindowHandle(scene.Window));
+    }
+    pendingCaptureFocus = false;
+    TaskCompletionSource? finished = captureFinished;
+    captureFinished = null;
+    finished?.TrySetResult();
+  }
+
+  [DllImport("user32.dll")]
+  private static extern nint GetForegroundWindow();
+  [DllImport("user32.dll")]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool SetForegroundWindow(nint window);
   internal void NavigateTo(string? destination)
   {
     WorkbenchRoute route = destination switch
@@ -519,6 +653,12 @@ public sealed partial class MainWindow : Window
       {
         screenshotSmokeStarted = true;
         _ = CompleteCaptureFirstFrameSmokeAsync();
+      }
+      if (!screenshotSmokeStarted &&
+          Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "capture-replacement-e2e")
+      {
+        screenshotSmokeStarted = true;
+        _ = CompleteCaptureReplacementSmokeAsync();
       }
       if (!screenshotSmokeStarted &&
           Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "screenshot-e2e")
@@ -738,25 +878,53 @@ public sealed partial class MainWindow : Window
   private void OnExitClicked(object sender, RoutedEventArgs args) =>
     Close();
 
-  private async void OnWindowClosed(object sender, WindowEventArgs args)
+  private void OnWindowClosed(object sender, WindowEventArgs args)
   {
     Closed -= OnWindowClosed;
     Activated -= OnWindowActivated;
+    // Assign the shared completion before invoking any async cleanup; App's
+    // later Closed subscriber can always await this exact task.
+    var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    shutdownCompletion = completion;
+    _ = CompleteWindowShutdownAsync(completion);
+  }
+
+  private async Task CompleteWindowShutdownAsync(TaskCompletionSource completion)
+  {
+    try { await ShutdownWindowAsync(); completion.TrySetResult(); }
+    catch (Exception error) { completion.TrySetException(error); }
+  }
+
+  private async Task ShutdownWindowAsync()
+  {
     commandHandler.EndHotkeyRecording();
     shuttingDown = true;
     commandHandler.ScreenshotSessionReady -= ShowImageEditor;
-    if (imageEditor is { } editor)
+    commandHandler.ScreenshotCaptureStarting -= OnScreenshotCaptureStarting;
+    commandHandler.ScreenshotCaptureFinished -= OnScreenshotCaptureFinished;
+    CancelPendingImageEditor(null);
+    TaskCompletionSource? finished = captureFinished;
+    captureFinished = null;
+    finished?.TrySetResult();
+    imageEditorRequestChanged.TrySetResult();
+    if (imageEditor is { } editor) RetireImageEditor(editor, null);
+    shutdownStarted.TrySetResult();
+    try
     {
-      imageEditor = null;
-      await editor.DisposeAsync();
-      editor.Close();
+      await editorRetirement.Drain;
+      await imageEditorCreation;
     }
-    ClearPinTextTasks();
-    foreach (PinnedImageWindow pinned in pinnedImages.ToArray()) pinned.Close();
-    webHost.ProtocolViolation -= OnProtocolViolation;
-    webHost.RecoveryRequired -= OnRecoveryRequired;
-    webHost.StateChanged -= OnHostStateChanged;
-    await webHost.DisposeAsync();
+    finally
+    {
+      ClearPinTextTasks();
+      foreach (PinnedImageWindow pinned in pinnedImages.ToArray()) pinned.Close();
+      webHost.ProtocolViolation -= OnProtocolViolation;
+      webHost.RecoveryRequired -= OnRecoveryRequired;
+      webHost.StateChanged -= OnHostStateChanged;
+      await webHost.DisposeAsync();
+    }
+    captureReplacementShutdownVerification?.Invoke();
+    captureReplacementShutdownVerification = null;
   }
 
   private void PinScreenshot(

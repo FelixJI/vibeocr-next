@@ -51,12 +51,23 @@ public sealed partial class MainWindow
         throw new InvalidOperationException("Pure screenshot started OCR or lacks an input.");
       }
       int ensureAfterCapture = smokeStartupEnsureAttempts();
+      await WaitForImageEditorRequestAsync(Guid.ParseExact(captured.ScreenshotSession!.SessionId, "N"))
+        .WaitAsync(TimeSpan.FromSeconds(10));
+      await imageEditorCreation.WaitAsync(TimeSpan.FromSeconds(10));
       int orangeBefore = await WaitForCanvasAsync();
-      if (imageEditor?.ReusesCaptureOverlay != true)
+      ImageEditWindow editor = imageEditor ?? throw new InvalidOperationException("Screenshot editor is absent.");
+      if (!editor.ReusesCaptureOverlay)
         throw new InvalidOperationException("Screenshot editor did not reuse the selection overlay.");
+      ScreenshotCaptureScene nativeScene = editor.CaptureScene ??
+        throw new InvalidOperationException("Screenshot editor has no native geometry.");
+      string nativeGeometry = JsonSerializer.Serialize(new {
+        x = nativeScene.Bounds.X - nativeScene.Desktop.X, y = nativeScene.Bounds.Y - nativeScene.Desktop.Y,
+        width = nativeScene.Bounds.Width, height = nativeScene.Bounds.Height,
+        desktopWidth = nativeScene.Desktop.Width, desktopHeight = nativeScene.Desktop.Height,
+      });
       string geometryJson = await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync(
         "(() => { const c=document.querySelector('canvas[aria-label=\"图片检查画布\"]');" +
-        "const r=c.getBoundingClientRect(); const s=window.vibeocrCaptureScene;" +
+        "const r=c.getBoundingClientRect(); const s=" + nativeGeometry + ";" +
         "return {x:r.x,y:r.y,width:r.width,height:r.height," +
         "expectedX:s.x*innerWidth/s.desktopWidth,expectedY:s.y*innerHeight/s.desktopHeight," +
         "expectedWidth:s.width*innerWidth/s.desktopWidth,expectedHeight:s.height*innerHeight/s.desktopHeight};})()");

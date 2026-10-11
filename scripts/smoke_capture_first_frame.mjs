@@ -68,6 +68,7 @@ export function summarize(batches) {
   const expectedCycles = [20, 1, 1];
   for (const [index, batch] of batches.entries()) {
     assert.equal(batch.health.schema_version, 1);
+    assert.equal(batch.state, 'passed', batch.error ?? batch.cleanup_error ?? batch.evidence_error ?? 'Invalid batch evidence.');
     assert.equal(batch.health.state, 'passed', batch.health.error ?? 'Native measurement failed.');
     assert.equal(batch.health.rows.length, expectedCycles[index]);
     assert.equal(batch.health.callbacks_after_stop, 0);
@@ -174,7 +175,7 @@ function option(name, required = true) {
   return fs.realpathSync(process.argv[index + 1]);
 }
 
-async function batchRun(candidate, root, cycleCount, helpers) {
+async function batchRun(candidate, root, cycleCount, helpers, replacement = false) {
   fs.mkdirSync(root);
   const copy = path.join(root, 'candidate');
   const record = { root, app_pid: null, health: null, state: 'failed' };
@@ -189,12 +190,17 @@ async function batchRun(candidate, root, cycleCount, helpers) {
     const env = { ...process.env };
     for (const key of Object.keys(env))
       if (key.startsWith('VIBEOCR_SELF_TEST') || key.startsWith('VIBEOCR_SOAK') ||
-          key.startsWith('VIBEOCR_CAPTURE_FIRST_FRAME') || key === 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS') delete env[key];
-    Object.assign(env, { VIBEOCR_SELF_TEST_SMOKE: 'capture-first-frame-e2e',
+          key.startsWith('VIBEOCR_CAPTURE_FIRST_FRAME') || key.startsWith('VIBEOCR_CAPTURE_REPLACEMENT') || key === 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS') delete env[key];
+    Object.assign(env, { VIBEOCR_SELF_TEST_SMOKE: replacement ? 'capture-replacement-e2e' : 'capture-first-frame-e2e',
       VIBEOCR_SELF_TEST_INSTANCE: randomUUID().replaceAll('-', ''),
       VIBEOCR_CAPTURE_FIRST_FRAME_CYCLES: String(cycleCount),
       VIBEOCR_CAPTURE_FIRST_FRAME_HEALTH: path.join(root, 'capture-first-frame-health.json'),
       WEBVIEW2_USER_DATA_FOLDER: path.join(root, 'webview') });
+    if (replacement) {
+      delete env.VIBEOCR_CAPTURE_FIRST_FRAME_CYCLES;
+      delete env.VIBEOCR_CAPTURE_FIRST_FRAME_HEALTH;
+      env.VIBEOCR_CAPTURE_REPLACEMENT_HEALTH = path.join(root, 'capture-replacement-health.json');
+    }
     const executable = path.join(copy, 'app', 'VibeOCR.WinUI.exe');
     child = spawn(executable, ['--profile', 'production', '--install-root', copy],
       { cwd: path.dirname(executable), env, windowsHide: true, stdio: 'ignore' });
@@ -209,9 +215,9 @@ async function batchRun(candidate, root, cycleCount, helpers) {
     });
     await Promise.race([exit, timeout]);
     assert.equal(child.exitCode, 0, 'App exit failed.');
-    record.health = read(path.join(root, 'capture-first-frame-health.json'));
+    record.health = read(path.join(root, replacement ? 'capture-replacement-health.json' : 'capture-first-frame-health.json'));
     assert.equal(record.health.state, 'passed', record.health.error ?? 'Native capture failed.');
-    assert(fs.statSync(path.join(root, 'capture-first-frame-preview.png')).size > 100, 'Real WebView preview missing.');
+    if (!replacement) assert(fs.statSync(path.join(root, 'capture-first-frame-preview.png')).size > 100, 'Real WebView preview missing.');
   } catch (error) { record.error = error.stack ?? String(error); }
   finally {
     clearTimeout(deadline);
@@ -238,13 +244,19 @@ async function batchRun(candidate, root, cycleCount, helpers) {
       record.zero_evidence = helpers.zeroEvidence(copy, root, record.app_pid);
       assert.equal(record.zero_evidence.violations.length, 0, JSON.stringify(record.zero_evidence.violations));
       record.monitor = read(path.join(root, 'monitor-info.json'));
-      if (record.health) record.health.rows = attachWorkingSets(record.health,
+      if (record.health && !replacement) record.health.rows = attachWorkingSets(record.health,
         lines(path.join(root, 'process-samples.jsonl')), record.app_pid);
       if (!record.error && !record.cleanup_error && record.health?.state === 'passed') record.state = 'passed';
     } catch (error) { record.evidence_error = error.stack ?? String(error); }
     fs.writeFileSync(path.join(root, 'result.json'), JSON.stringify(record, null, 2));
   }
   return record;
+}
+
+// The independent lifecycle entry reuses owned launch/monitor/cleanup, without
+// joining the frozen 22-row timing or working-set performance comparison.
+export async function runCaptureReplacementBatch(candidate, root, helpers) {
+  return batchRun(candidate, root, 1, helpers, true);
 }
 
 async function main() {

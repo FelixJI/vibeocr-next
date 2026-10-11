@@ -1,12 +1,17 @@
+import type { CaptureScene } from "../bridge/captureScene";
 import { fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ImageCanvasEditor } from "./ImageCanvasEditor";
-import {
-  captureSceneStyle,
-  type CaptureSceneGeometry,
-} from "./captureSceneLayout";
+import { captureSceneStyle } from "./captureSceneLayout";
 
-const scene: CaptureSceneGeometry = {
+const scene: CaptureScene = {
+  surfaceId: "surface",
+  captureSessionId: "capture",
+  inputUrl: "https://app.vibeocr/__resource/screenshot.bmp",
+  inputRevision: 0,
+  documentGeneration: 1,
+  bootstrapGeneration: 1,
+  initialTool: "select",
   x: 400,
   y: 200,
   width: 900,
@@ -14,16 +19,9 @@ const scene: CaptureSceneGeometry = {
   desktopWidth: 2560,
   desktopHeight: 1440,
 };
-afterEach(() => {
-  delete (window as Window & { vibeocrCaptureScene?: CaptureSceneGeometry })
-    .vibeocrCaptureScene;
-});
 
 describe("截图原位编辑", () => {
   it("Esc 先退出当前工具、再次退出现场，输入框的 Esc 不丢失截图", () => {
-    (
-      window as Window & { vibeocrCaptureScene?: CaptureSceneGeometry }
-    ).vibeocrCaptureScene = scene;
     const run = vi.fn().mockResolvedValue(true);
     const { unmount } = render(
       <ImageCanvasEditor
@@ -31,6 +29,7 @@ describe("截图原位编辑", () => {
         canExport
         canRecognize
         source="https://app.vibeocr/__resource/screenshot.bmp"
+        captureScene={scene}
         session={{ sessionId: "capture", revision: 0 }}
       />,
     );
@@ -49,9 +48,6 @@ describe("截图原位编辑", () => {
     unmount();
   });
   it("把画布放回框选屏幕位置且保持 DPI 后的选区尺寸", () => {
-    (
-      window as Window & { vibeocrCaptureScene?: CaptureSceneGeometry }
-    ).vibeocrCaptureScene = scene;
     const { unmount } = render(
       <ImageCanvasEditor
         actions={{
@@ -62,6 +58,7 @@ describe("截图原位编辑", () => {
         canExport
         canRecognize
         source="https://app.vibeocr/__resource/screenshot.bmp"
+        captureScene={scene}
         session={{ sessionId: "capture", revision: 0 }}
       />,
     );
