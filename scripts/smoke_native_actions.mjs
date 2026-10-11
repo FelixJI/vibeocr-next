@@ -51,7 +51,7 @@ async function freeLocalPort() {
 }
 
 async function native(action, options = {}) {
-  const pointerAction = ['mouse-move', 'mouse-down', 'mouse-up', 'frame', 'geometry'].includes(action);
+  const pointerAction = ['mouse-move', 'mouse-down', 'mouse-up', 'mouse-right', 'frame', 'geometry'].includes(action);
   const script = pointerAction ? path.join(scriptDir, 'scroll_capture_fixture.ps1') : nativeScript;
   const args = ['-NoProfile', '-NonInteractive', '-File', script,
     '-Action', action];
@@ -635,10 +635,11 @@ async function verifyManualHandleEvidence(app, overlay, desktop, button, gesture
   assert(afterHover.includes(manualLabel(rect.width, rect.height)),
     `Hovering the eight handles changed the selection: ${afterHover}`);
 
-  // Leaving every hit range restores raw-pointer sampling and the cross cursor.
-  await observe({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
-    'cross', { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
-    'off-handle-center', 1);
+  // Outside both the handles and selection, the magnifier samples the pointer.
+  const offHandle = { x: rect.left + rect.width / 2, y: rect.top - 20 };
+  assert(offHandle.y > desktopY, 'Manual selection touches the desktop top edge.');
+  const outsideObservation = await observe(offHandle, 'cross', offHandle, 'off-selection', 1);
+  outsideObservation.crossCheck = false; // This frozen pixel is outside the final crop.
 
   // Pressing and releasing on a handle must never confirm the selection.
   await native('mouse-move', point(anchors[0].x + 2, anchors[0].y + 2));
@@ -673,7 +674,8 @@ async function verifyManualHandleEvidence(app, overlay, desktop, button, gesture
   }
 
   // Back to the exact manual selection for the remaining edge and tiny checks.
-  await native('escape', { AppPid: appPid });
+  await native('mouse-move', point(rect.left + 20, rect.top + 10));
+  await native('mouse-right', point(rect.left + 20, rect.top + 10));
   await delay(150);
   const redrawn = await dragHandle({ x: rect.left, y: rect.top },
     { x: rect.left + rect.width, y: rect.top + rect.height });
@@ -700,7 +702,8 @@ async function verifyManualHandleEvidence(app, overlay, desktop, button, gesture
 
   // Tiny 4x4 selection: all eight handles overlap; the nearest-anchor rule
   // still switches between the two inclusive corner pixels deterministically.
-  await native('escape', { AppPid: appPid });
+  await native('mouse-move', point(rect.left + 20, rect.top + 10));
+  await native('mouse-right', point(rect.left + 20, rect.top + 10));
   await delay(150);
   const tx = rect.left + 20, ty = rect.top + 10;
   const tinySeed = await dragHandle({ x: tx, y: ty }, { x: tx + 20, y: ty + 20 });
@@ -714,7 +717,8 @@ async function verifyManualHandleEvidence(app, overlay, desktop, button, gesture
   await observe({ x: tx + 4, y: ty + 4 }, 'sizeNWSE', { x: tx + 3, y: ty + 3 }, 'tiny-bottom-right');
 
   // Restore the exact manual selection so the shipped pixel assertions hold.
-  await native('escape', { AppPid: appPid });
+  await native('mouse-move', point(rect.left + 20, rect.top + 10));
+  await native('mouse-right', point(rect.left + 20, rect.top + 10));
   await delay(150);
   const restored = await dragHandle({ x: rect.left, y: rect.top },
     { x: rect.left + rect.width, y: rect.top + rect.height });
@@ -920,8 +924,9 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
     const cropLeft = selectedRegion.left, cropTop = selectedRegion.top;
     const checkable = gesture.manualHandleEvidence
       .filter((item) => item.crossCheck !== false);
-    assert.equal(gesture.manualHandleEvidence.length - checkable.length, 1,
-      'Exactly the screen-edge magnifier observation may fall outside the crop.');
+    assert.deepEqual(gesture.manualHandleEvidence.filter((item) => item.crossCheck === false)
+      .map((item) => item.context), ['off-selection', 'screen-edge-corner'],
+    'Only the off-selection and screen-edge observations may be outside the crop.');
     for (const observed of checkable) {
       const px = observed.sample.x - cropLeft, py = observed.sample.y - cropTop;
       assert(px >= 0 && py >= 0 && px < width && py < height,

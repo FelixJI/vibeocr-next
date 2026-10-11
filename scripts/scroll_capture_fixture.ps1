@@ -4,7 +4,7 @@
 param(
     [Parameter(Mandatory = $true)][ValidateSet(
         'fixture', 'windows', 'taskbar-state', 'probe', 'foreground', 'focus', 'raise', 'wheel', 'scenario',
-        'mouse-move', 'mouse-down', 'mouse-up', 'key', 'hide', 'lower', 'close', 'quit',
+        'mouse-move', 'mouse-down', 'mouse-up', 'mouse-right', 'key', 'hide', 'lower', 'close', 'quit',
         'uia-find', 'uia-invoke', 'uia-bar-text', 'metrics', 'save-file', 'frame', 'geometry', 'window-text')][string]$Action,
     [int]$AppPid = 0,
     [int]$FixturePid = 0,
@@ -394,6 +394,14 @@ public static class ScrollCaptureNative
         Send(new[] { Move(x, y) });
     }
 
+    public static void MouseRightClick(int appPid, int x, int y)
+    {
+        RequireForeground(appPid);
+        RequirePointOwner(x, y, appPid);
+        try { Send(new[] { Mouse(0x0008u) }); }
+        finally { Send(new[] { Mouse(0x0010u) }); }
+    }
+
     public static void MouseButton(int appPid, int x, int y, bool down)
     {
         RequireForeground(appPid);
@@ -601,6 +609,7 @@ try {
         'mouse-move' { [ScrollCaptureNative]::MouseMove($AppPid, $X, $Y) }
         'mouse-down' { [ScrollCaptureNative]::MouseButton($AppPid, $X, $Y, $true) }
         'mouse-up' { [ScrollCaptureNative]::MouseButton($AppPid, $X, $Y, $false) }
+        'mouse-right' { [ScrollCaptureNative]::MouseRightClick($AppPid, $X, $Y) }
         'key' {
             $virtualKey = switch ($Key) {
                 'tab' { 0x09 }
