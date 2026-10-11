@@ -237,6 +237,99 @@ public sealed class RuntimeDemandCoordinatorTests
     Assert.True(maintenance.State.IsIdle);
   }
 
+  [Theory]
+  [InlineData(false, false)]
+  [InlineData(true, false)]
+  [InlineData(false, true)]
+  public async Task SwitchDrainsFailedPreparationAndKeepsCleanupFailure(bool installerFailure, bool failCleanup)
+  {
+    var entered = Signal();
+    var release = Signal();
+    Exception businessFailure = installerFailure ? new RuntimeInstallerException("old installer failed")
+      : new InvalidOperationException("old preparation failed");
+    var cleanupFailure = new IOException("old attempt cleanup failed");
+    var maintenance = new ProductMaintenanceCoordinator();
+    int connects = 0;
+    int activations = 0;
+    int disconnects = 0;
+    var coordinator = new RuntimeDemandCoordinator(async (_, _) =>
+    {
+      connects++;
+      entered.TrySetResult();
+      await release.Task;
+      throw businessFailure;
+    }, () =>
+    {
+      disconnects++;
+      return failCleanup ? Task.FromException(cleanupFailure) : Task.CompletedTask;
+    }, maintenance, TestContext.Current.CancellationToken);
+    Task demand = coordinator.EnsureReadyAsync(TestContext.Current.CancellationToken);
+    await entered.Task;
+    Task switching = coordinator.SwitchAsync(_ =>
+    {
+      activations++;
+      Assert.Equal(1, disconnects);
+      return Task.CompletedTask;
+    }, TestContext.Current.CancellationToken);
+    release.TrySetResult();
+    Exception requestFailure = await Assert.ThrowsAnyAsync<Exception>(() => demand);
+    if (failCleanup)
+    {
+      Assert.Collection(Assert.IsType<AggregateException>(requestFailure).InnerExceptions,
+        error => Assert.Same(businessFailure, error), error => Assert.Same(cleanupFailure, error));
+      Assert.Same(cleanupFailure, await Assert.ThrowsAsync<IOException>(() => switching));
+      Assert.Equal(0, activations);
+    }
+    else
+    {
+      Assert.Same(businessFailure, requestFailure);
+      await switching;
+      Assert.Equal(1, activations);
+    }
+    Assert.Equal(1, connects);
+    Assert.Equal(1, disconnects);
+    Assert.True(maintenance.State.IsIdle);
+  }
+
+  [Theory]
+  [InlineData("caller")]
+  [InlineData("shutdown")]
+  [InlineData("pause")]
+  public async Task SwitchDuringFailedPreparationDrainHonorsNewLifecycleOwner(string boundary)
+  {
+    var entered = Signal();
+    var release = Signal();
+    using var shutdown = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+    using var caller = new CancellationTokenSource();
+    var businessFailure = new InvalidOperationException("old preparation failed");
+    int activations = 0;
+    var coordinator = new RuntimeDemandCoordinator(async (_, _) =>
+    {
+      entered.TrySetResult();
+      await release.Task;
+      throw businessFailure;
+    }, () => Task.CompletedTask, new ProductMaintenanceCoordinator(), shutdown.Token);
+    Task demand = coordinator.EnsureReadyAsync(TestContext.Current.CancellationToken);
+    await entered.Task;
+    Task switching = coordinator.SwitchAsync(_ => { activations++; return Task.CompletedTask; }, caller.Token);
+    Task? pausing = null;
+    if (boundary == "caller") caller.Cancel();
+    else if (boundary == "shutdown") shutdown.Cancel();
+    else pausing = coordinator.PauseAsync(TestContext.Current.CancellationToken);
+    release.TrySetResult();
+    if (boundary == "shutdown")
+      await Assert.ThrowsAnyAsync<OperationCanceledException>(() => demand);
+    else
+      Assert.Same(businessFailure, await Assert.ThrowsAsync<InvalidOperationException>(() => demand));
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => switching);
+    Assert.Equal(0, activations);
+    if (pausing is not null)
+    {
+      await pausing;
+      await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.EnsureReadyAsync(TestContext.Current.CancellationToken));
+    }
+  }
+
   [Fact]
   public async Task DemandSharingEmptyEnvironmentSwitchReportsNotReadyWithoutRetry()
   {

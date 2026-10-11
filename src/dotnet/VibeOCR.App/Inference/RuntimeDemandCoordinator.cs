@@ -239,26 +239,35 @@ internal sealed class RuntimeDemandCoordinator(
 
   public async Task SwitchAsync(Func<CancellationToken, Task> activate, CancellationToken cancellationToken)
   {
-    Task? pending;
+    Attempt? pending;
     long owner;
     lock (gate)
     {
       paused = true;
       owner = ++transition;
       ready = false;
-      current?.Cancellation.Cancel();
-      pending = current?.Completion.Task;
+      pending = current;
+      pending?.Cancellation.Cancel();
     }
     try
     {
       if (pending is not null)
       {
-        try { await pending.WaitAsync(cancellationToken); }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
+        try { await pending.Completion.Task.WaitAsync(cancellationToken); }
+        catch (Exception) when (pending.Completion.Task.IsCompleted)
+        {
+          cancellationToken.ThrowIfCancellationRequested();
+          shutdown.ThrowIfCancellationRequested();
+          // The prior request owns its preparation error. A failed resource
+          // cleanup cannot be bypassed by activating another environment.
+          if (pending.CleanupFailure is { } cleanup) ExceptionDispatchInfo.Capture(cleanup).Throw();
+        }
       }
       Task switching;
       lock (gate)
       {
+        cancellationToken.ThrowIfCancellationRequested();
+        shutdown.ThrowIfCancellationRequested();
         if (owner != transition) throw new OperationCanceledException(cancellationToken);
         paused = false;
         switching = WaitAsync(false, cancellationToken, activate: activate);
