@@ -3121,17 +3121,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
       statusMessage !== "" &&
       statusMessage !== "正在读取设置" &&
       statusMessage !== "正在读取模型驻留状态");
-  // 挂载后自动加载一次运行时快照：冷启动 bootstrap 只尽力加载目录，
-  // 状态/来源以一次显式刷新为准（与手动“重新检查状态”同一命令）。
-  // StrictMode 双挂载与宿主广播重放都不得重复派发。
-  const autoRefreshed = useRef(false);
-  useEffect(() => {
-    if (autoRefreshed.current) return;
-    if (!viewState.connected || busy) return;
-    if (!viewState.capabilities.includes("runtime.refresh")) return;
-    autoRefreshed.current = true;
-    void actions.run({ type: "settings.refreshRuntime" });
-  }, [actions, busy, viewState.capabilities, viewState.connected]);
+  // 通用设置只显示本地状态；“重新检查状态”是显式计算准备入口。
   const serviceText = stringValue(state.serviceStatus) ?? "等待宿主同步";
   const maintenanceParts = [
     stringValue(state.maintenanceStatus),
@@ -3274,6 +3264,18 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
           </CapabilityGate>
           {managedEnvironmentsAvailable ? (
             <>
+              <CapabilityGate
+                capability="runtime.environments"
+                capabilities={viewState.capabilities}
+                action={{ type: "settings.refreshEnvironmentList" }}
+                actions={actions}
+                icon={<RefreshCw aria-hidden="true" size={16} />}
+              >
+                查看环境清单
+              </CapabilityGate>
+              <p className="form-note">
+                只读取已有环境，不启动或初始化计算服务。
+              </p>
               <EnvironmentRecommendation
                 state={state}
                 actions={actions}

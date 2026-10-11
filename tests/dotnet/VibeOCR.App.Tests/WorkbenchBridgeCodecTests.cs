@@ -694,6 +694,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       ("qrcode", "cancel", "{}", typeof(CancelQrCodeCommand)),
       ("about", "openProject", "{}", typeof(OpenProjectPageCommand)),
       ("settings", "refreshRuntime", "{}", typeof(RefreshRuntimeCommand)),
+      ("settings", "refreshEnvironmentList", "{}", typeof(RefreshEnvironmentListCommand)),
       ("settings", "beginHotkeyRecording", "{\"recordingId\":\"12345678-1234-1234-1234-123456789abc\"}", typeof(BeginHotkeyRecordingCommand)),
       ("settings", "endHotkeyRecording", "{\"recordingId\":\"12345678-1234-1234-1234-123456789abc\"}", typeof(EndHotkeyRecordingCommand)),
       ("settings", "setTheme", "{\"theme\":\"dark\"}", typeof(SetThemeCommand)),

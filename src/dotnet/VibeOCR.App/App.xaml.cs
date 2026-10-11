@@ -37,7 +37,6 @@ public sealed partial class App : Application
     /// Supervisor; this client is the single desktop assembly seam.
     /// </summary>
     private readonly LocalQrCodeClient _qrCodeClient;
-    private readonly SemaphoreSlim _supervisorLifecycle = new(1, 1);
     private readonly CancellationTokenSource _applicationShutdown = new();
     private readonly Dictionary<string, double> _startupMilestones = [];
     private readonly RuntimeStatusViewModel _runtimeStatus = new();
@@ -45,15 +44,14 @@ public sealed partial class App : Application
     private MainWindow? _window;
     private WindowLayoutStore? _windowLayoutStore;
     private SingleInstanceService? _singleInstance;
-    private InferenceSupervisorProcess? _supervisorProcess;
-    private string? _supervisorInstanceId;
-    private IInferenceClient? _activeInferenceClient;
-    private PortableLayout? _supervisorLayout;
+    private InferenceSupervisorProcess? _supervisorProcess => _managedSession?.Process;
+    private string? _supervisorInstanceId => _managedSession?.InstanceId;
     private DiagnosticsViewModel? _supervisorDiagnostics;
     private IRuntimeInstallerClient? _runtimeInstaller;
     private IManagedEnvironmentClient? _managedEnvironments;
     private ManagedEnvironmentSettings? _environmentSettings;
-    private ManagedEnvironmentSession? _managedSession;
+    private ManagedEnvironmentSession? _managedSession => _runtimeDemand?.Connection?.Session;
+    private RuntimeDemandCoordinator? _runtimeDemand;
     private SyntheticScreenRegionPicker? _screenshotSmokePicker;
     private int _startupRuntimeEnsureAttempts = 0;
     private int _managedEnvironmentInstallAttempts;
@@ -70,14 +68,14 @@ public sealed partial class App : Application
     private bool _shutdownStarted;
     private bool _soakCrashRequested;
     private bool _soakCrashInjected;
-    private int _supervisorRecoveryScheduled;
+    private ManagedEnvironmentSession? _supervisorRecoveryScheduledSession;
     private int _runtimeMaintenanceActive;
+    // The maintenance lease serializes this stop/restore callback pair.
+    private long? _runtimeMaintenancePauseOwner;
 
     private const uint HotkeyMessage = 0x0312;
     private const uint TrayMessage = 0x8001;
 
-    /// <summary>连接/恢复等待生命周期门的有界预算（覆盖一次 90 秒激活）。</summary>
-    private static readonly TimeSpan SupervisorGateWaitTimeout = TimeSpan.FromSeconds(120);
 
     /// <summary>supervisor 健康轨迹写锁；仅显式设置 VIBEOCR_SUPERVISOR_HEALTH_TRACE 时启用。</summary>
     private readonly object _supervisorHealthTraceLock = new();
@@ -183,7 +181,8 @@ public sealed partial class App : Application
                 layout.WebView2Root);
         }
         _runtimeInstaller = new RuntimeInstallerClient(
-            RuntimeInstallerConfiguration.ForNext(layout));
+            RuntimeInstallerConfiguration.ForNext(layout),
+            new RuntimeInstallerCommandRunner(action => AppLog.Info($"Runtime Installer command starting action={action}")));
         _managedEnvironments = (IManagedEnvironmentClient)_runtimeInstaller;
         _runtimeStatus.ApplyProfile(_runtimeInstaller.ReadProfileDescriptor());
         AppLog.Initialize(Path.Combine(layout.DataRoot, "logs"));
@@ -210,8 +209,8 @@ public sealed partial class App : Application
                 }
             },
             _runtimeStatus,
-            () => _supervisorProcess is { } process
-                ? (process.Ready.InstanceId, process.LogLines)
+            () => _managedSession is { } session
+                ? (session.InstanceId, session.Process.LogLines)
                 : (null, Array.Empty<string>()));
         // 可选取证轨迹（默认关闭）：仅显式设置环境变量时才订阅，不引入新配置系统。
         if (!string.IsNullOrWhiteSpace(
@@ -219,33 +218,30 @@ public sealed partial class App : Application
         {
             diagnostics.PropertyChanged += OnSupervisorHealthTraceChanged;
         }
-        _supervisorLayout = layout;
         _supervisorDiagnostics = diagnostics;
         _soakCrashRequested =
             Environment.GetEnvironmentVariable("VIBEOCR_SOAK_INJECT_CRASH") == "1";
         RecordMilestone(diagnostics, "T0", TimeSpan.Zero);
         RecordMilestone(diagnostics, "T1", _startup.Elapsed);
 
-        // 非 shell-only：默认环境初始化与主窗构造重叠，失败仍由连接链
-        // 按原路径投影为启动失败终态。
-        Task? defaultEnvironmentPreparation = null;
-        if (!options.ShellOnly)
-        {
-            // 初始化期间即显示“正在连接”；错误终态由连接链原处理发布。
-            diagnostics.UpdateSupervisor(new SupervisorHealth(
-                SupervisorHealthState.Connecting, null, null, null));
-            _inferenceGateway.MarkStartupPending();
-            if (Volatile.Read(ref _runtimeMaintenanceActive) == 0 &&
-                !MaintenanceMutexEarlyExitSelfTestRequested(isRecovery: false) &&
-                !CodesIsolatedStateSelfTestRequested())
+        var runtimeConnection = new ManagedRuntimeConnection(
+            _managedEnvironments, layout, _runtimeStatus, PublishManagedEnvironmentSession);
+        runtimeConnection.Milestone += name => RecordMilestone(diagnostics, name, _startup.Elapsed);
+        _runtimeDemand = new RuntimeDemandCoordinator(
+            async (initialize, token) =>
             {
-                defaultEnvironmentPreparation = PrepareDefaultEnvironmentAsync(
-                    _managedEnvironments ?? throw new InvalidOperationException(
-                        "Runtime manager is unavailable."),
-                    _productMaintenance,
-                    _applicationShutdown.Token);
-            }
-        }
+                AppLog.Info($"Runtime demand: connect begin initialize={initialize}");
+                _inferenceGateway.MarkStartupPending();
+                bool connected = await ConnectSupervisorAfterFirstWindowAsync(
+                    layout, diagnostics, isRecovery: !initialize, cancellationToken: token);
+                token.ThrowIfCancellationRequested();
+                if (!connected) throw new InvalidOperationException("运行环境准备未完成，请检查诊断后重试。");
+                AppLog.Info("Runtime demand: ready");
+            },
+            runtimeConnection.DisconnectAsync, _productMaintenance, _applicationShutdown.Token, runtimeConnection,
+            shellOnly: options.ShellOnly);
+        diagnostics.UpdateSupervisor(new SupervisorHealth(
+            SupervisorHealthState.NotReady, null, null, "识别服务尚未启用；首次计算时准备运行环境。"));
 
         _windowLayoutStore = new WindowLayoutStore(
             Path.Combine(layout.DataRoot, "winui-layout.json"));
@@ -307,7 +303,7 @@ public sealed partial class App : Application
             nint handle = WinRT.Interop.WindowNative.GetWindowHandle(_window!);
             return new PdfViewModel(
               _inferenceGateway,
-              new PdfFileSource(() => handle));
+              new PdfFileSource(() => handle), EnsureRuntimeReadyAsync);
           },
           () => new SettingsViewModel(
             _inferenceGateway,
@@ -338,7 +334,8 @@ public sealed partial class App : Application
           () => _environmentSettings?.Snapshot,
           () => _managedSession,
           () => Volatile.Read(ref _managedEnvironmentInstallAttempts),
-          shellActions: _actionDispatcher);
+          shellActions: _actionDispatcher,
+          ensureRuntimeReady: EnsureRuntimeReadyAsync);
         _window.AppWindow.Closing += OnAppWindowClosing;
         _window.Closed += OnWindowClosedFallback;
         _window.Activate();
@@ -347,7 +344,7 @@ public sealed partial class App : Application
 
         // --shell-only: run the UI shell without launching the Supervisor. Useful
         // for inspecting layout / XAML without paying the dev cold-import cost.
-        // Without args the default is to bring the backend up automatically.
+        // Ordinary launches prepare only after an explicit computing demand.
         if (options.ShellOnly)
         {
             diagnostics.UpdateSupervisor(new SupervisorHealth(
@@ -357,18 +354,13 @@ public sealed partial class App : Application
                 "外壳模式：未拉起后端（--shell-only）。"));
             RecordMilestone(diagnostics, "T6", _startup.Elapsed);
         }
-        else
+        else if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE")) &&
+                 (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") != "managed-environment-e2e" ||
+                  Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_ENVIRONMENT_E2E_PHASE") == "restart"))
         {
-            // Phase 8 atomic switch: start the v2 inference supervisor after the
-            // first window is up. This spawns the supervisor subprocess, reads
-            // the ready envelope, and Attach()es the real InferenceHttpClient /
-            // QrCodeHttpClient into the deferred gateways so every ViewModel's
-            // v2 calls stop throwing. Fire-and-forget: the window is already
-            // interactive; the diagnostics panel reflects Connecting → Ready.
-            // 启动尝试期间网关调用等待 Attach 而不是立即失败，窗口早于后端
-            // 就绪期间触发的命令得以完成。
-            _ = ConnectSupervisorAfterFirstWindowAsync(
-                layout, diagnostics, preloadedDefaultEnvironment: defaultEnvironmentPreparation);
+            // Existing startup/failure/maintenance smoke contracts explicitly
+            // request startup. Ordinary Portable launch never creates demand.
+            _ = StartSelfTestRuntimeAsync();
         }
 
         // Perf-gate smoke mode: exit shortly after first window so cold-start
@@ -803,44 +795,35 @@ public sealed partial class App : Application
         Environment.Exit(0);
     }
 
-    /// <summary>
-    /// 等待 Supervisor 生命周期门：可被调用方令牌取消且有界超时。界取
-    /// 一次激活的 90 秒引擎启动预算加余量；运行环境安装不持门，只在拆
-    /// 线/提交时短暂占用。关停路径保持无令牌等待：所有持门方均已
-    /// 有界/可被关停令牌取消，销毁共享资源前不与在途写入者并发。
-    /// </summary>
-    private async Task WaitSupervisorLifecycleGateAsync(CancellationToken cancellationToken)
+
+
+    private Task EnsureRuntimeReadyAsync(CancellationToken cancellationToken) =>
+        (_runtimeDemand ?? throw new InvalidOperationException("Runtime demand coordinator is unavailable."))
+            .EnsureReadyAsync(cancellationToken);
+
+    private async Task StartSelfTestRuntimeAsync()
     {
-        using var bound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        bound.CancelAfter(SupervisorGateWaitTimeout);
-        try
-        {
-            await _supervisorLifecycle.WaitAsync(bound.Token);
-        }
-        catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested)
-        {
-            throw new InvalidOperationException(
-                $"等待运行环境生命周期门超时（{(int)SupervisorGateWaitTimeout.TotalSeconds} 秒），连接尝试未能开始。",
-                error);
-        }
+        try { await EnsureRuntimeReadyAsync(_applicationShutdown.Token); }
+        catch (Exception error) { AppLog.Warn($"Selftest runtime startup ended: {error.GetType().Name}"); }
     }
+
+
 
     private async Task<bool> ConnectSupervisorAfterFirstWindowAsync(
         PortableLayout layout,
         DiagnosticsViewModel diagnostics,
         bool isRecovery = false,
-        Task? preloadedDefaultEnvironment = null)
+        CancellationToken cancellationToken = default)
     {
         bool connected = await ConnectSupervisorCoreAsync(
-            layout, diagnostics, isRecovery, preloadedDefaultEnvironment);
+            layout, diagnostics, isRecovery, cancellationToken);
         if (connected && _managedSession is not null)
         {
-            await RefreshEnvironmentSettingsAfterActivationAsync();
             if (_window is not null)
             {
                 try
                 {
-                    await _window.RefreshRecognitionCatalogAsync(_applicationShutdown.Token);
+                    await _window.RefreshRecognitionCatalogAsync(cancellationToken);
                 }
                 catch (OperationCanceledException) when (_applicationShutdown.IsCancellationRequested) { }
                 catch (Exception error)
@@ -848,45 +831,19 @@ public sealed partial class App : Application
                     AppLog.Warn($"Recognition catalog refresh after attach failed: {error.Message}");
                 }
             }
+            // The attempt token breaks a settings-switch gate dependency: a
+            // new switch cancels this attempt before draining its connection.
+            await RefreshEnvironmentSettingsAfterActivationAsync(_environmentSettings, cancellationToken);
         }
         return connected;
     }
 
-    internal static async Task PrepareDefaultEnvironmentAsync(
-        IManagedEnvironmentClient manager, ProductMaintenanceCoordinator productMaintenance,
-        CancellationToken shutdown)
-    {
-        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdown);
-        IDisposable lease;
-        try
-        {
-            lease = productMaintenance.Acquire(
-                ProductMaintenanceOwner.RuntimeMaintenance, cancellation.Cancel);
-        }
-        catch (ProductMaintenanceConflictException)
-        {
-            // 用户安装或更新正在进行时，跳过幂等初始化，保留服务恢复路径。
-            AppLog.Warn("Default environment initialization deferred during product maintenance.");
-            return;
-        }
-        using (lease)
-            await manager.InitializeDefaultEnvironmentAsync(cancellation.Token);
-    }
-
     private async Task<bool> ConnectSupervisorCoreAsync(
-        PortableLayout layout,
-        DiagnosticsViewModel diagnostics,
-        bool isRecovery,
-        Task? preloadedDefaultEnvironment)
+        PortableLayout layout, DiagnosticsViewModel diagnostics, bool isRecovery,
+        CancellationToken cancellationToken)
     {
-        // 门等待可取消且有界：占用方（另一次启动/切换/维护拆线）异常滞留
-        // 时，等待方以准确终态退出，不得无限悬挂。等待期间不发布
-        // Connecting，避免占用方把“正在连接”滞留成永久状态。
         try
         {
-            // #213 codes 冒烟的隔离终态注入：必须先于任何默认环境准备早退，
-            // 才能成立“零 Runtime 安装 / 零 Supervisor”证据；应用保持运行，
-            // 本地解码不依赖 Supervisor 生命周期，冒烟在窗口内继续断言解码。
             if (CodesIsolatedStateSelfTestRequested())
             {
                 bool maintenancePause =
@@ -905,180 +862,102 @@ public sealed partial class App : Application
                     null, null, injected.Message));
                 return false;
             }
-            // 默认环境安装可能耗时较长，不占用 Supervisor 生命周期门；
-            // 产品维护 lease 让更新/其他安装快速得到互斥状态并支持取消。
-            // OnLaunched 预启动的任务在此消费，避免重复初始化。
-            if (preloadedDefaultEnvironment is { } preparation)
+            if (Volatile.Read(ref _runtimeMaintenanceActive) != 0 || MaintenanceMutexEarlyExitSelfTestRequested(isRecovery))
             {
-                await preparation;
-            }
-            else if (Volatile.Read(ref _runtimeMaintenanceActive) == 0 &&
-                !MaintenanceMutexEarlyExitSelfTestRequested(isRecovery))
-            {
-                await PrepareDefaultEnvironmentAsync(
-                    _managedEnvironments ?? throw new InvalidOperationException("Runtime manager is unavailable."),
-                    _productMaintenance, _applicationShutdown.Token);
-            }
-            await WaitSupervisorLifecycleGateAsync(_applicationShutdown.Token);
-        }
-        catch (OperationCanceledException) when (_applicationShutdown.IsCancellationRequested)
-        {
-            return false;
-        }
-        catch (Exception error)
-        {
-            _inferenceGateway.MarkStartupFailed(error);
-            _runtimeStatus.ReportServiceUnavailable();
-            diagnostics.UpdateSupervisor(new SupervisorHealth(
-                SupervisorHealthState.Faulted, null, null, error.Message));
-            return false;
-        }
-        try
-        {
-            bool injectedMaintenanceMutex = MaintenanceMutexEarlyExitSelfTestRequested(isRecovery) &&
-                Volatile.Read(ref _runtimeMaintenanceActive) == 0;
-            if (Volatile.Read(ref _runtimeMaintenanceActive) != 0 || injectedMaintenanceMutex)
-            {
-                // 维护互斥早退必须发布终态：识别服务因维护暂停，等待中的
-                // 网关调用携带原因退出；恢复仍由维护结束后的 Restore 路径
-                // 完成。
                 var maintenance = new InvalidOperationException("运行环境维护尚未结束，识别服务保持暂停。");
                 _inferenceGateway.MarkStartupFailed(maintenance);
                 _runtimeStatus.ReportServicePausedForMaintenance();
-                diagnostics.UpdateSupervisor(new SupervisorHealth(
-                    SupervisorHealthState.NotReady, null, null, "运行环境维护尚未结束。"));
-                if (injectedMaintenanceMutex)
-                {
-                    // selftest-only 注入路径同样以 t6 终态自退，产出可验证的
-                    // NotReady+维护原因证据；真实维护早退不得中断在途安装。
-                    RecordMilestone(diagnostics, "T6", _startup.Elapsed);
-                    ExitStartupSmokeT6();
-                }
-                return false;
-            }
-            // 拿到门且确认开始后才发布 Connecting。
-            diagnostics.UpdateSupervisor(new SupervisorHealth(
-                SupervisorHealthState.Connecting, null, null, null));
-            RecordMilestone(diagnostics, "T3", _startup.Elapsed);
-            // Recovery reuses this entry point; re-announce the attempt so
-            // calls crossing the detach gap wait for this reconnect.
-            _inferenceGateway.MarkStartupPending();
-            IManagedEnvironmentClient manager = _managedEnvironments
-                ?? throw new InvalidOperationException("Runtime manager is unavailable.");
-            // 安装期间用户可能已切换环境；取门后重新读取权威活动选择。
-            ManagedEnvironmentList environments = await manager.ListEnvironmentsAsync(
-                _applicationShutdown.Token);
-            RecordMilestone(diagnostics, "T4", _startup.Elapsed);
-            if (environments.ActiveId is null)
-            {
-                var unavailable = new InvalidOperationException(
-                    "尚未选择运行环境。可以在设置中选择识别组件并准备依赖。");
-                _inferenceGateway.MarkStartupFailed(unavailable);
-                _runtimeStatus.ReportServiceUnavailable();
-                diagnostics.UpdateSupervisor(new SupervisorHealth(
-                    SupervisorHealthState.NotReady, null, null, unavailable.Message));
+                diagnostics.UpdateSupervisor(new SupervisorHealth(SupervisorHealthState.NotReady, null, null, maintenance.Message));
                 RecordMilestone(diagnostics, "T6", _startup.Elapsed);
-                // 未建/无活动环境是稳定终态：t6 冒烟同样自退并产出完整
-                // T0–T6 轨迹，而不是悬挂到外部超时。
                 ExitStartupSmokeT6();
                 return false;
             }
-            bool injectSoakCrash = _soakCrashRequested && !_soakCrashInjected && !isRecovery &&
+            diagnostics.UpdateSupervisor(new SupervisorHealth(SupervisorHealthState.Connecting, null, null, "正在准备运行环境。"));
+            _inferenceGateway.MarkStartupPending();
+            bool injectCrash = _soakCrashRequested && !_soakCrashInjected && !isRecovery &&
                 Environment.GetEnvironmentVariable("VIBEOCR_SOAK_EXTERNAL_CRASH") != "1";
-            if (injectSoakCrash) _soakCrashInjected = true;
-            await ActivateManagedEnvironmentCoreAsync(
-                environments.ActiveId, layout, _applicationShutdown.Token, injectSoakCrash);
-            RecordMilestone(diagnostics, "T5", _startup.Elapsed);
-            if (_managedSession is { } session)
+            if (injectCrash) _soakCrashInjected = true;
+            bool connected = await (_runtimeDemand?.Connection ?? throw new InvalidOperationException("Runtime connection is unavailable."))
+                .ConnectAsync(!isRecovery, cancellationToken, injectCrash);
+            if (!connected)
             {
-                SupervisorReadyEnvelope ready = session.Process.Ready;
-                diagnostics.UpdateSupervisor(new SupervisorHealth(
-                    SupervisorHealthState.Ready, ready.InstanceId, ready.ProtocolVersion, null));
-                AppLog.Info($"Supervisor ready: instance={ready.InstanceId} port={ready.Port}");
+                var unavailable = new InvalidOperationException("当前为空环境，未启动识别服务。");
+                _inferenceGateway.MarkStartupFailed(unavailable);
+                _runtimeStatus.ReportServiceUnavailable();
+                diagnostics.UpdateSupervisor(new SupervisorHealth(SupervisorHealthState.NotReady, null, null, unavailable.Message));
+                RecordMilestone(diagnostics, "T6", _startup.Elapsed);
+                ExitStartupSmokeT6();
+                return false;
             }
-            else
-            {
-                diagnostics.UpdateSupervisor(new SupervisorHealth(
-                    SupervisorHealthState.NotReady, null, null,
-                    "当前为空环境，未安装服务依赖。"));
-            }
+            SupervisorReadyEnvelope ready = _managedSession!.Process.Ready;
+            diagnostics.UpdateSupervisor(new SupervisorHealth(SupervisorHealthState.Ready, ready.InstanceId, ready.ProtocolVersion, null));
+            AppLog.Info($"Supervisor ready: instance={ready.InstanceId} port={ready.Port}");
             RecordMilestone(diagnostics, "T6", _startup.Elapsed);
             bool soakCycleComplete = !_soakCrashRequested || isRecovery;
-            if (soakCycleComplete)
-            {
-                WriteSoakResult(_soakCrashRequested, recovered: true);
-            }
-            if (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "t6"
-                && soakCycleComplete)
+            if (soakCycleComplete) WriteSoakResult(_soakCrashRequested, recovered: true);
+            if (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "t6" && soakCycleComplete)
             {
                 FlushStartupTrace();
                 Environment.Exit(0);
             }
             return true;
         }
+        catch (OperationCanceledException error) when (cancellationToken.IsCancellationRequested)
+        {
+            _inferenceGateway.MarkStartupFailed(error);
+            _runtimeStatus.ReportServiceUnavailable();
+            diagnostics.UpdateSupervisor(new SupervisorHealth(SupervisorHealthState.NotReady, null, null, "运行环境准备已取消。"));
+            throw;
+        }
         catch (Exception error)
         {
-            // 释放等待本次启动尝试的网关调用，使其携带启动失败原因返回。
             _inferenceGateway.MarkStartupFailed(error);
-            AppLog.Error("Supervisor connection failed", error);
             _runtimeStatus.ReportServiceUnavailable();
-            await DisconnectSupervisorResourcesAsync();
-            diagnostics.UpdateSupervisor(new SupervisorHealth(
-                SupervisorHealthState.Faulted, null, null, error.Message));
+            diagnostics.UpdateSupervisor(new SupervisorHealth(SupervisorHealthState.Faulted, null, null, error.Message));
             FailSoakRun(error.Message);
-            return false;
-        }
-        finally
-        {
-            _supervisorLifecycle.Release();
+            throw;
         }
     }
 
-    private async Task SwitchManagedEnvironmentAsync(
-        string environmentId, CancellationToken cancellationToken)
+    private Task SwitchManagedEnvironmentAsync(string environmentId, CancellationToken cancellationToken) =>
+        SwitchManagedEnvironmentAndRefreshAsync(
+            _runtimeDemand ?? throw new InvalidOperationException("Runtime demand coordinator is unavailable."),
+            (token, committed) => _runtimeDemand.Connection!.SwitchAsync(environmentId, token, committed),
+            async token =>
+            {
+                if (_managedSession is { } session)
+                {
+                    SupervisorReadyEnvelope ready = session.Process.Ready;
+                    _supervisorDiagnostics?.UpdateSupervisor(new SupervisorHealth(SupervisorHealthState.Ready, ready.InstanceId, ready.ProtocolVersion, null));
+                    if (_window is not null) await _window.RefreshRecognitionCatalogAsync(token);
+                }
+                else
+                    _supervisorDiagnostics?.UpdateSupervisor(new SupervisorHealth(SupervisorHealthState.NotReady, null, null, "当前为空环境，未启动识别服务。"));
+            }, error => AppLog.Warn($"Recognition catalog refresh after environment switch failed: {error.Message}"), cancellationToken);
+
+    internal static async Task SwitchManagedEnvironmentAndRefreshAsync(
+        RuntimeDemandCoordinator coordinator, Func<CancellationToken, Action, Task> activate,
+        Func<CancellationToken, Task> refresh, Action<Exception> refreshFailed, CancellationToken cancellationToken)
     {
-        // 同一有界门等待：排队在异常滞留的启动/拆线之后时以准确失败
-        // 终态退出，而不是无限悬挂。
-        await WaitSupervisorLifecycleGateAsync(cancellationToken);
-        try
-        {
-            if (Volatile.Read(ref _runtimeMaintenanceActive) != 0)
-                throw new InvalidOperationException("运行环境维护尚未结束。");
-            PortableLayout layout = _supervisorLayout
-                ?? throw new InvalidOperationException("Runtime layout is unavailable.");
-            await ActivateManagedEnvironmentCoreAsync(environmentId, layout, cancellationToken);
-            if (_managedSession is { } session)
-            {
-                SupervisorReadyEnvelope ready = session.Process.Ready;
-                _supervisorDiagnostics?.UpdateSupervisor(new SupervisorHealth(
-                    SupervisorHealthState.Ready, ready.InstanceId, ready.ProtocolVersion, null));
-            }
-            else
-            {
-                _supervisorDiagnostics?.UpdateSupervisor(new SupervisorHealth(
-                    SupervisorHealthState.NotReady, null, null,
-                    "当前为空环境，未启动识别服务。"));
-            }
-        }
-        finally { _supervisorLifecycle.Release(); }
+        await coordinator.SwitchAsync(activate, cancellationToken);
+        // Activation has committed. Refresh has its own outcome and cannot
+        // turn the committed environment into an activation failure.
+        try { await refresh(cancellationToken); }
+        catch (Exception error) { refreshFailed(error); }
     }
 
     // 在 supervisor 门释放后刷新；环境切换持环境门等待 supervisor 门。
-    private Task RefreshEnvironmentSettingsAfterActivationAsync() =>
-        RefreshEnvironmentSettingsAfterActivationAsync(
-            _environmentSettings, _applicationShutdown.Token);
-
     internal static async Task RefreshEnvironmentSettingsAfterActivationAsync(
-        ManagedEnvironmentSettings? settings, CancellationToken shutdown)
+        ManagedEnvironmentSettings? settings, CancellationToken cancellationToken)
     {
-        if (settings is null) return;
+        if (settings?.Snapshot is null) return;
         try
         {
-            await settings.RefreshAsync(shutdown);
+            await settings.RefreshAsync(cancellationToken);
         }
-        catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            // 应用关停取消了刷新；无需任何处理。
+            // 刷新取消不改变已经提交的环境；切换或关停可排空旧 attempt。
         }
         catch (Exception error)
         {
@@ -1086,44 +965,17 @@ public sealed partial class App : Application
         }
     }
 
-    private async Task ActivateManagedEnvironmentCoreAsync(
-        string environmentId, PortableLayout layout, CancellationToken cancellationToken,
-        bool injectSoakCrash = false)
-    {
-        IManagedEnvironmentClient manager = _managedEnvironments
-            ?? throw new InvalidOperationException("Runtime manager is unavailable.");
-        var coordinator = new ManagedEnvironmentSwitchCoordinator(manager);
-        // 真实 Paddle 导入探针允许 60 秒；启动预算还需覆盖解释器和装配开销。
-        ManagedEnvironmentSession? session = await coordinator.SwitchAsync(
-            environmentId,
-            _managedSession,
-            PublishManagedEnvironmentSession,
-            Path.Combine(layout.DataRoot, "supervisor.log"),
-            TimeSpan.FromSeconds(90),
-            RuntimeCapabilityRequirements.Read(layout.ComponentLock),
-            cancellationToken,
-            injectSoakCrash);
-        if (session is null)
-        {
-            _runtimeStatus.ReportServiceUnavailable();
-            return;
-        }
-        _runtimeStatus.ApplySnapshot(session.Status);
-    }
 
-    private void PublishManagedEnvironmentSession(ManagedEnvironmentSession? next)
+
+    private void PublishManagedEnvironmentSession(ManagedEnvironmentSession? previous, ManagedEnvironmentSession? next)
     {
-        _supervisorInstanceId = next?.Process.Ready.InstanceId;
         _window?.InvalidatePinnedTextLayers();
-        if (_managedSession is { } previous)
+        if (previous is not null)
         {
             previous.Process.UnexpectedExit -= OnSupervisorUnexpectedExit;
             previous.Process.LogReceived -= OnSupervisorLogReceived;
             _inferenceGateway.Detach(previous.Client);
         }
-        _managedSession = next;
-        _supervisorProcess = next?.Process;
-        _activeInferenceClient = next?.Client;
         if (next is null)
         {
             var unavailable = new InvalidOperationException(
@@ -1259,60 +1111,64 @@ public sealed partial class App : Application
         object? sender,
         SupervisorUnexpectedExitEventArgs eventArgs)
     {
+        ManagedEnvironmentSession? trigger = _managedSession;
         if (_applicationShutdown.IsCancellationRequested
             || Volatile.Read(ref _runtimeMaintenanceActive) != 0
-            || !ReferenceEquals(sender, _supervisorProcess)
-            || Interlocked.Exchange(ref _supervisorRecoveryScheduled, 1) != 0)
-        {
-            return;
-        }
+            || trigger is null || !ReferenceEquals(sender, trigger.Process)
+            || !TryScheduleSupervisorRecovery(ref _supervisorRecoveryScheduledSession, trigger, () => _managedSession)) return;
 
         AppLog.Warn(
             $"Supervisor exited unexpectedly (code={eventArgs.ExitCode?.ToString() ?? "unknown"}); "
             + "scheduling one reconnect attempt.");
-        _soakCrashedInstanceId = _supervisorInstanceId;
-        void ScheduleRecovery()
-        {
-            // 服务已消失：恢复期间不得残留“运行时已就绪”投影。
-            _runtimeStatus.ReportServiceUnavailable();
-            _supervisorDiagnostics?.UpdateSupervisor(new SupervisorHealth(
-                SupervisorHealthState.Faulted,
-                null,
-                null,
-                "Supervisor 异常退出，正在自动恢复。"));
-            _ = RecoverSupervisorAfterExitAsync();
-        }
-
+        void ScheduleRecovery() => _ = RecoverSupervisorAfterExitAsync(trigger);
         if (_window?.DispatcherQueue.TryEnqueue(ScheduleRecovery) != true)
-        {
             _ = Task.Run(ScheduleRecovery);
+    }
+
+    internal static bool TryScheduleSupervisorRecovery(ref ManagedEnvironmentSession? scheduled,
+        ManagedEnvironmentSession trigger, Func<ManagedEnvironmentSession?> currentSession)
+    {
+        while (true)
+        {
+            ManagedEnvironmentSession? previous = Volatile.Read(ref scheduled);
+            if (!ReferenceEquals(currentSession(), trigger) || ReferenceEquals(previous, trigger)) return false;
+            if (ReferenceEquals(Interlocked.CompareExchange(ref scheduled, trigger, previous), previous)) return true;
         }
     }
 
-    private async Task RecoverSupervisorAfterExitAsync()
+    internal static void CompleteSupervisorRecovery(ref ManagedEnvironmentSession? scheduled, ManagedEnvironmentSession trigger) =>
+        Interlocked.CompareExchange(ref scheduled, null, trigger);
+
+    internal static async Task RunCurrentSupervisorRecoveryAsync(
+        Func<bool> isCurrentSession, Func<Task> recover, Action complete)
     {
+        try { if (isCurrentSession()) await recover(); }
+        finally { complete(); }
+    }
+
+    private async Task RecoverSupervisorAfterExitAsync(ManagedEnvironmentSession trigger)
+    {
+        bool IsCurrentSession() => !_applicationShutdown.IsCancellationRequested
+            && Volatile.Read(ref _runtimeMaintenanceActive) == 0 && ReferenceEquals(trigger, _managedSession);
         try
         {
-            await WaitSupervisorLifecycleGateAsync(_applicationShutdown.Token);
-            try
+            await RunCurrentSupervisorRecoveryAsync(IsCurrentSession, async () =>
             {
-                await DisconnectSupervisorResourcesAsync();
-            }
-            finally
-            {
-                _supervisorLifecycle.Release();
-            }
-
-            await Task.Delay(TimeSpan.FromMilliseconds(250), _applicationShutdown.Token);
-            if (_supervisorLayout is null || _supervisorDiagnostics is null)
-            {
-                throw new InvalidOperationException("Supervisor recovery context is unavailable.");
-            }
-
-            await ConnectSupervisorAfterFirstWindowAsync(
-                _supervisorLayout,
-                _supervisorDiagnostics,
-                isRecovery: true);
+                await (_runtimeDemand ?? throw new InvalidOperationException("Runtime recovery context is unavailable."))
+                    .RecoverAsync(IsCurrentSession, () =>
+                    {
+                        _soakCrashedInstanceId = trigger.InstanceId;
+                        _runtimeStatus.ReportServiceUnavailable();
+                        _supervisorDiagnostics?.UpdateSupervisor(new SupervisorHealth(
+                            SupervisorHealthState.Faulted, null, null, "Supervisor 异常退出，正在自动恢复。"));
+                    }, error =>
+                    {
+                        _runtimeStatus.ReportServiceUnavailable();
+                        _supervisorDiagnostics?.UpdateSupervisor(new SupervisorHealth(
+                            SupervisorHealthState.Faulted, null, null, error.Message));
+                        FailSoakRun(error.Message);
+                    });
+            }, () => CompleteSupervisorRecovery(ref _supervisorRecoveryScheduledSession, trigger));
         }
         catch (OperationCanceledException) when (_applicationShutdown.IsCancellationRequested)
         {
@@ -1321,16 +1177,6 @@ public sealed partial class App : Application
         catch (Exception error)
         {
             AppLog.Error("Supervisor recovery failed", error);
-            // 恢复失败（含门等待超时）必须同步退出“运行时已就绪”残留，
-            // 与连接路径的故障终态保持一致。
-            _runtimeStatus.ReportServiceUnavailable();
-            _supervisorDiagnostics?.UpdateSupervisor(new SupervisorHealth(
-                SupervisorHealthState.Faulted, null, null, error.Message));
-            FailSoakRun(error.Message);
-        }
-        finally
-        {
-            Interlocked.Exchange(ref _supervisorRecoveryScheduled, 0);
         }
     }
 
@@ -1339,72 +1185,23 @@ public sealed partial class App : Application
         Interlocked.Exchange(ref _runtimeMaintenanceActive, 1);
         // 与连接/恢复/切换同一有界门等待：占用方异常滞留时以失败终态
         // 退出（ConfirmAsync 会把安装置为 failed 并经 Restore 重连）。
-        await WaitSupervisorLifecycleGateAsync(cancellationToken);
-        try
-        {
-            await DisconnectSupervisorResourcesAsync();
-            _runtimeStatus.ReportServicePausedForMaintenance();
-        }
-        finally { _supervisorLifecycle.Release(); }
+        RuntimeDemandCoordinator.PauseOperation pause = (_runtimeDemand
+            ?? throw new InvalidOperationException("Runtime maintenance context is unavailable.")).BeginPause(cancellationToken);
+        _runtimeMaintenancePauseOwner = pause.Owner;
+        await pause.Completion;
+        _runtimeStatus.ReportServicePausedForMaintenance();
     }
 
     private async Task RestoreAfterMaintenanceAsync()
     {
         Interlocked.Exchange(ref _runtimeMaintenanceActive, 0);
-        if (_applicationShutdown.IsCancellationRequested || _supervisorProcess is not null) return;
-        if (_supervisorLayout is not null && _supervisorDiagnostics is not null)
-            await ConnectSupervisorAfterFirstWindowAsync(_supervisorLayout, _supervisorDiagnostics, isRecovery: true);
+        long? owner = _runtimeMaintenancePauseOwner;
+        _runtimeMaintenancePauseOwner = null;
+        if (_runtimeDemand is not null && owner is { } pauseOwner)
+            await _runtimeDemand.RestoreAsync(pauseOwner, maintenanceLeaseHeld: true);
     }
 
-    private async Task StopSupervisorAsync()
-    {
-        // Phase 8: stop the v2 inference supervisor subprocess. The supervisor
-        // owns MinerU/PDF children via a Job Object, so disposing the process
-        // handle tears the whole tree down. Best-effort: shutdown must not hang
-        // the UI even if the child is unresponsive.
-        await DisconnectSupervisorResourcesAsync();
-    }
 
-    private async Task DisconnectSupervisorResourcesAsync()
-    {
-        _supervisorInstanceId = null;
-        _window?.InvalidatePinnedTextLayers();
-        if (_managedSession is { } managed)
-        {
-            _managedSession = null;
-            _supervisorProcess = null;
-            _activeInferenceClient = null;
-            managed.Process.UnexpectedExit -= OnSupervisorUnexpectedExit;
-            managed.Process.LogReceived -= OnSupervisorLogReceived;
-            _inferenceGateway.Detach(managed.Client);
-            await managed.DisposeAsync();
-            return;
-        }
-        IInferenceClient? inferenceClient = _activeInferenceClient;
-        _activeInferenceClient = null;
-        if (inferenceClient is not null)
-        {
-            _inferenceGateway.Detach(inferenceClient);
-            await inferenceClient.DisposeAsync();
-        }
-
-        InferenceSupervisorProcess? process = _supervisorProcess;
-        _supervisorProcess = null;
-        if (process is null)
-        {
-            return;
-        }
-        process.UnexpectedExit -= OnSupervisorUnexpectedExit;
-        process.LogReceived -= OnSupervisorLogReceived;
-        try
-        {
-            process.Dispose();
-        }
-        catch (Exception error)
-        {
-            AppLog.Warn($"Supervisor shutdown error: {error.Message}");
-        }
-    }
 
     private bool _pdfCloseReview;
     private async void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
@@ -1433,21 +1230,25 @@ public sealed partial class App : Application
     {
         if (_environmentSettings is not null)
             await _environmentSettings.CancelAndWaitForInstallAsync();
-        await _supervisorLifecycle.WaitAsync();
         try
         {
-            if (_window is not null && _windowLayoutStore is not null && _window.CaptureGeometry() is { } geometry)
+            try
             {
-                _windowLayoutStore.Save(geometry);
+                if (_runtimeDemand is not null) await _runtimeDemand.StopAsync();
             }
-            await StopSupervisorAsync();
-            await _inferenceGateway.DisposeAsync();
-            await _qrCodeClient.DisposeAsync();
-            await DisposeDesktopShellAsync();
+            finally
+            {
+                if (_window is not null && _windowLayoutStore is not null && _window.CaptureGeometry() is { } geometry)
+                {
+                    _windowLayoutStore.Save(geometry);
+                }
+                await _inferenceGateway.DisposeAsync();
+                await _qrCodeClient.DisposeAsync();
+                await DisposeDesktopShellAsync();
+            }
         }
         finally
         {
-            _supervisorLifecycle.Release();
             _applicationShutdown.Dispose();
             appWindow.Closing -= OnAppWindowClosing;
             _window?.Close();

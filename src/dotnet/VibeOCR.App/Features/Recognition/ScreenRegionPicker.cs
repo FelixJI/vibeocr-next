@@ -33,7 +33,11 @@ public sealed record ScreenRegionSelection(
 
     /// <summary>动作栏识别菜单显式选择的 typed 模式/引擎 id；仅 Recognize 动作携带。</summary>
     internal string? RecognitionModeId { get; init; }
+    internal ScreenshotRecognitionIntent? RecognitionIntent { get; init; }
 }
+
+/// <summary>A cold screenshot retains category intent until the Runtime catalog is ready.</summary>
+public enum ScreenshotRecognitionIntent { Text, Table, Formula }
 
 /// <summary>普通截图选区动作阶段可选动作；沿 selection/input 一路承载到宿主，不新增服务抽象。</summary>
 public enum ScreenshotSelectionAction
@@ -80,7 +84,8 @@ public sealed record ScreenshotRecognitionModeEntry(
     string Availability,
     string? ReasonCode = null,
     string IconKey = ScreenshotToolbarIcons.DefaultKey,
-    string? Hint = null);
+    string? Hint = null,
+    ScreenshotRecognitionIntent? Intent = null);
 
 /// <summary>
 /// 普通截图入口的选区动作请求（宿主当前目录投影）。null 表示专用直接
@@ -285,6 +290,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
                 CaptureScene = scene,
                 SelectionAction = selection.SelectionAction,
                 RecognitionModeId = selection.RecognitionModeId,
+                RecognitionIntent = selection.RecognitionIntent,
             };
         }
         catch
@@ -381,7 +387,8 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     PhysicalRectangle Bounds,
     ScreenshotCaptureScene? Scene,
     ScreenshotSelectionAction? SelectionAction = null,
-    string? RecognitionModeId = null);
+    string? RecognitionModeId = null,
+    ScreenshotRecognitionIntent? RecognitionIntent = null);
 
   // 自检仅复用已经捕获的 synthetic 子窗口像素，不采样其他桌面区域。
   internal static async Task<ScreenshotCaptureScene> CreateSyntheticSceneAsync(
@@ -616,12 +623,14 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     void Finish(
         bool accept,
         ScreenshotSelectionAction action = ScreenshotSelectionAction.Edit,
-        string? recognitionModeId = null) =>
-      _ = FinishAsync(accept, action, recognitionModeId);
+        string? recognitionModeId = null,
+        ScreenshotRecognitionIntent? recognitionIntent = null) =>
+      _ = FinishAsync(accept, action, recognitionModeId, recognitionIntent: recognitionIntent);
     void CompleteSelection(
         bool accept,
         ScreenshotSelectionAction action = ScreenshotSelectionAction.Edit,
-        string? recognitionModeId = null)
+        string? recognitionModeId = null,
+        ScreenshotRecognitionIntent? recognitionIntent = null)
     {
       if (completion.Task.IsCompleted) return;
       PhysicalRectangle? result = accept && session.ActiveSelection is { } rect
@@ -652,7 +661,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       {
         // 非编辑动作不需要冻结现场：直接关闭选区窗口，交回截图前的桌面。
         completion.TrySetResult(new OverlaySelection(accepted, null,
-          action is ScreenshotSelectionAction.Edit ? null : action, recognitionModeId));
+          action is ScreenshotSelectionAction.Edit ? null : action, recognitionModeId, recognitionIntent));
         overlay.Close();
       }
       else
@@ -665,7 +674,8 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       bool accept,
       ScreenshotSelectionAction action = ScreenshotSelectionAction.Edit,
       string? recognitionModeId = null,
-      bool fixSelectionOnly = false)
+      bool fixSelectionOnly = false,
+      ScreenshotRecognitionIntent? recognitionIntent = null)
     {
       if (completion.Task.IsCompleted || (accept && (confirming || !session.CanConfirm))) return;
       // 普通入口的单击确认只固化候选进入动作阶段；直接入口完成选区。
@@ -678,7 +688,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
         }
         else
         {
-          CompleteSelection(true, action, recognitionModeId);
+          CompleteSelection(true, action, recognitionModeId, recognitionIntent);
         }
       }
       if (accept && SmartScreenCandidates.CurrentDesktop() != desktop)
@@ -743,7 +753,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
         Confirmed();
         return;
       }
-      CompleteSelection(accept, action, recognitionModeId);
+      CompleteSelection(accept, action, recognitionModeId, recognitionIntent);
     }
     void Back()
     {
@@ -842,10 +852,10 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       {
         foreach (ScreenshotRecognitionModeEntry entry in modeEntries)
         {
-          bool ready = string.Equals(entry.Availability, "ready", StringComparison.Ordinal);
+          bool ready = string.Equals(entry.Availability, "ready", StringComparison.Ordinal) || entry.Intent is not null;
           string modeId = entry.ModeId;
           Button item = AddButton(
-            entry.DisplayName, () => Finish(true, ScreenshotSelectionAction.Recognize, modeId),
+            entry.DisplayName, () => Finish(true, ScreenshotSelectionAction.Recognize, modeId, entry.Intent),
             entry.IconKey);
           item.IsEnabled = ready;
           if (ready) selectionActionButtons.Add(item);

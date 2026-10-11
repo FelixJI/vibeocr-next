@@ -327,8 +327,10 @@ public static class ScrollCaptureNative
         {
             SetForegroundWindow(new IntPtr(handle));
             System.Threading.Thread.Sleep(200);
-            if (GetAncestor(WindowFromPoint(new NativePoint { X = x, Y = y }), 2) != new IntPtr(handle))
-                throw new InvalidOperationException("Focus point is outside the owned window root.");
+            var focusHit = WindowFromPoint(new NativePoint { X = x, Y = y });
+            var focusRoot = GetAncestor(focusHit, 2);
+            if (focusRoot != new IntPtr(handle))
+                throw new InvalidOperationException($"Focus point is outside the owned window root: point={x},{y}; hit={focusHit}; root={focusRoot}; expected={handle}.");
             if (!SetCursorPos(x, y)) throw new InvalidOperationException("Cursor move failed.");
             SetForegroundWindow(new IntPtr(handle));
             try { Send(new[] { Mouse(0x0002) }); }

@@ -494,6 +494,118 @@ public sealed class DefaultModeRequestContractTests
     }
   }
 
+  [Fact]
+  public async Task FirstColdSubmitWaitsForInstancePublicationAndCatalogRefresh()
+  {
+    var fake = Client("windows_text");
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    string? instance = null;
+    TestHarness? current = null;
+    await using TestHarness harness = await Harness(fake, loadSelection: false,
+      instance: () => instance, attached: () => instance is not null, ensureReady: async ct =>
+      {
+        entered.TrySetResult();
+        await release.Task.WaitAsync(ct);
+        instance = "sup-first";
+        // Actual attach publication and the subsequent catalog generation change
+        // must both precede the first submit's selection snapshot capture.
+        current!.Settings.RuntimeStatus.ReportServiceUnavailable();
+        await current.Handler.RefreshRecognitionCatalogAsync(ct);
+      });
+    current = harness;
+    using var terminal = new RecognitionStateAwaiter(harness.Handler, state => !state.IsBusy);
+    await harness.Handler.ExecuteAsync(new SelectRecognitionImageCommand(), TestContext.Current.CancellationToken);
+    await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+    Assert.Equal(0, fake.HealthCalls);
+    Assert.Empty(fake.Submissions);
+    release.TrySetResult();
+    await terminal.Task;
+    await fake.WaitSubmittedAsync();
+    Assert.Equal(OcrEngine.Windows, Assert.Single(fake.Submissions).Pipeline.Engine);
+  }
+
+  [Fact]
+  public async Task CancellingColdBatchCancelsOnlyItsPreparationAndRetainsQueue()
+  {
+    var fake = Client("windows_text");
+    var batch = new BatchViewModel(fake, new BatchFileSource());
+    batch.AddFiles(["queued.png"]);
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    await using TestHarness harness = await Harness(fake, batch: batch, loadSelection: false,
+      ensureReady: async ct =>
+      {
+        entered.TrySetResult();
+        try { await Task.Delay(Timeout.Infinite, ct); }
+        finally { cancelled.TrySetResult(); }
+      });
+    var settled = new TaskCompletionSource<BatchWorkbenchState>(TaskCreationOptions.RunContinuationsAsynchronously);
+    harness.Handler.StateChanged += state =>
+    {
+      if (state is BatchWorkbenchState { IsRunning: false } idle) settled.TrySetResult(idle);
+    };
+    await harness.Handler.ExecuteAsync(new StartBatchCommand(), TestContext.Current.CancellationToken);
+    await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+    await harness.Handler.ExecuteAsync(new CancelBatchCommand(), TestContext.Current.CancellationToken);
+    await cancelled.Task.WaitAsync(TestContext.Current.CancellationToken);
+    Assert.False((await settled.Task.WaitAsync(TestContext.Current.CancellationToken)).IsRunning);
+    Assert.Single(batch.Items);
+    Assert.Empty(fake.Submissions);
+    Assert.Equal(0, fake.HealthCalls);
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task CancelledBatchRemainsBusyUntilItsPreparationCleanupFinishes(bool clear)
+  {
+    var fake = Client("windows_text");
+    var batch = new BatchViewModel(fake, new BatchFileSource());
+    batch.AddFiles(["queued.png"]);
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var cleaning = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    int preparations = 0;
+    await using TestHarness harness = await Harness(fake, batch: batch, loadSelection: false,
+      ensureReady: async ct =>
+      {
+        preparations++;
+        entered.TrySetResult();
+        try { await Task.Delay(Timeout.Infinite, ct); }
+        finally
+        {
+          cleaning.TrySetResult();
+          await release.Task;
+        }
+      });
+    var settled = new TaskCompletionSource<BatchWorkbenchState>(TaskCreationOptions.RunContinuationsAsynchronously);
+    bool started = false;
+    harness.Handler.StateChanged += state =>
+    {
+      if (started && state is BatchWorkbenchState { IsRunning: false } idle) settled.TrySetResult(idle);
+    };
+    try
+    {
+      await harness.Handler.ExecuteAsync(new StartBatchCommand(), TestContext.Current.CancellationToken);
+      started = true;
+      await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+      WorkbenchCommandOutcome cancelled = await harness.Handler.ExecuteAsync(
+        clear ? new ClearBatchCommand() : new CancelBatchCommand(), TestContext.Current.CancellationToken);
+      await cleaning.Task.WaitAsync(TestContext.Current.CancellationToken);
+      Assert.True(Assert.Single(cancelled.States.OfType<BatchWorkbenchState>()).IsRunning);
+      WorkbenchCommandOutcome restarted = await harness.Handler.ExecuteAsync(new StartBatchCommand(), TestContext.Current.CancellationToken);
+      Assert.True(Assert.Single(restarted.States.OfType<BatchWorkbenchState>()).IsRunning);
+      Assert.Equal(1, preparations);
+      Assert.False(settled.Task.IsCompleted);
+      release.TrySetResult();
+      Assert.False((await settled.Task.WaitAsync(TestContext.Current.CancellationToken)).IsRunning);
+      Assert.Equal(clear ? 0 : 1, batch.Items.Count);
+      Assert.Empty(fake.Submissions);
+    }
+    finally { release.TrySetResult(); }
+  }
+
   /// <summary>
   /// 与 ScreenshotSessionWorkbenchTests 同款终态等待：构造即订阅，
   /// Dispose 退订；Task 固定 5s 超时，不漏早发终态。
@@ -559,13 +671,18 @@ public sealed class DefaultModeRequestContractTests
     RecordingClient fake,
     BatchViewModel? batch = null,
     PdfViewModel? pdf = null,
-    IInputService? input = null)
+    IInputService? input = null, bool loadSelection = true,
+    Func<CancellationToken, Task>? ensureReady = null, Func<string?>? instance = null,
+    Func<bool>? attached = null)
   {
     var recognition = new RecognitionViewModel(
       fake, input ?? new FixedInputService());
     var settings = new SettingsViewModel(fake);
-    await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
-    Assert.NotNull(settings.RecognitionSelection?.Catalog);
+    if (loadSelection)
+    {
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      Assert.NotNull(settings.RecognitionSelection?.Catalog);
+    }
     string root = Path.Combine(
       Path.GetTempPath(), $"vibeocr-default-mode-req-{Guid.NewGuid():N}");
     string resourceRoot = Path.Combine(root, "resources");
@@ -583,7 +700,8 @@ public sealed class DefaultModeRequestContractTests
       () => new ShellViewModel(new StubHotkeyRegistrar(), new StubStartupRegistrar()),
       static () => throw new InvalidOperationException(),
       new DiagnosticsViewModel("test", new PrerequisiteReport([])),
-      broker, resourceRoot, static () => 0, annotations);
+      broker, resourceRoot, static () => 0, annotations,
+      inferenceAttached: attached, supervisorInstanceId: instance, ensureRuntimeReady: ensureReady);
     return new TestHarness(handler, broker, annotations, root, settings);
   }
 

@@ -80,7 +80,7 @@ uv 内部缓存由 uv 管理，清理器不遍历删除其内部结构；已健�
 1. 读 `global.json`，确认 SDK 锁定策略。
 2. 找到 Bootstrapper 的 `.csproj` 与入口，理解它与 WinUI App 的职责分界。
 3. 读 `src/dotnet/VibeOCR.App/App.xaml.cs` 的 `OnLaunched`。
-4. 搜索 `InferenceSupervisorProcess`，查看进程启动、ready envelope 与 shutdown。
+4. 读 `Inference/RuntimeDemandCoordinator` 与 `ManagedRuntimeConnection`，查看按需准备、共享等待、维护归属与唯一活动连接；再搜索 `InferenceSupervisorProcess` 的 ready envelope 与 shutdown。
 5. 搜索 capability 的消费位置，确认功能如何协商。
 6. 对照 `VibeOCR.Platform.Tests` 与 `VibeOCR.App.Tests` 的启动/失败测试。
 
@@ -89,13 +89,16 @@ flowchart TD
     A["Bootstrapper"] --> B["App.OnLaunched"]
     B --> C["单实例 / 前置检查"]
     C --> D["创建主窗口"]
-    D --> E["InferenceSupervisorProcess"]
+    D --> P["本地工具 / 通用设置：无需计算进程"]
+    D --> Q["显式 OCR / batch / PDF / Runtime 配置需求"]
+    Q --> R["RuntimeDemandCoordinator：prepare + attach + catalog"]
+    R --> E["ManagedRuntimeConnection / InferenceSupervisorProcess"]
     E --> F["Backend ready envelope"]
     F --> G["Capabilities + typed client"]
     G --> H["ViewModels 可提交任务"]
 ```
 
-启动成功不等于模型已经加载；ready 只表示 Supervisor 协议边界可用。
+主窗口可交互不依赖计算服务。首次计算先取得就绪实例的权威目录和默认模式，随后构造任务；ready 仍不表示模型已经加载。恢复跳过默认环境初始化，维护结束只恢复先前启用的连接。
 
 ## 第一条纵向链：提交识别
 

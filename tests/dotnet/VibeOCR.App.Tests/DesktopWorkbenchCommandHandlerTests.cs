@@ -820,7 +820,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
         static () => throw new InvalidOperationException(),
         static () => throw new InvalidOperationException(),
         () => settings,
-        static () => throw new InvalidOperationException(),
+        CreateShellViewModel,
         static () => throw new InvalidOperationException(),
         new DiagnosticsViewModel("test", new PrerequisiteReport([])),
         broker,
@@ -883,7 +883,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
         static () => throw new InvalidOperationException(),
         static () => throw new InvalidOperationException(),
         () => new SettingsViewModel(client),
-        static () => throw new InvalidOperationException(),
+        CreateShellViewModel,
         static () => throw new InvalidOperationException(),
         new DiagnosticsViewModel("test", new PrerequisiteReport([])),
         broker, resourceRoot, static () => 0, annotationStore);

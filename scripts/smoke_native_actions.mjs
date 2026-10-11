@@ -821,7 +821,8 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
     await delay(100);
   }
   assert(page !== app.page, 'Screenshot scene WebView did not appear.');
-  await page.getByRole('heading', { name: '截图现场编辑' }).waitFor({ timeout: 12000 });
+  await page.locator('html[data-capture-scene="true"]')
+    .waitFor({ state: 'attached', timeout: 12000 });
   await watchScreenshotRevision(page);
   // Bootstrap may have completed before CDP attached to the scene. Carry only
   // the actual native state already observed by the shared workbench host.

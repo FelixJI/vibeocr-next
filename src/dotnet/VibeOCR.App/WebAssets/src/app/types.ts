@@ -98,6 +98,7 @@ export type AppActionType =
   | "qrcode.openUrl"
   | "about.openProject"
   | "settings.refreshRuntime"
+  | "settings.refreshEnvironmentList"
   | "settings.createEnvironment"
   | "settings.previewEnvironmentInstall"
   | "settings.confirmEnvironmentInstall"

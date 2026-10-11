@@ -13,7 +13,8 @@ namespace VibeOCR.App.Features.Pdf;
 
 public sealed class PdfViewModel(
     IInferenceClient inference,
-    IPdfFileSource files) : INotifyPropertyChanged
+    IPdfFileSource files,
+    Func<CancellationToken, Task>? ensureRuntimeReady = null) : INotifyPropertyChanged
 {
   private readonly InferenceJobRunner _jobs = new(inference);
   private CancellationTokenSource? _activeRun;
@@ -82,6 +83,7 @@ public sealed class PdfViewModel(
   public int SelectedPage { get => _selectedPage; set => SetField(ref _selectedPage, value); }
   public bool HasSession => _sessionId is not null;
   public bool HasRemoteSession => HasSession || _unclosedSession is not null;
+  internal bool RuntimePreparationIncomplete { get; private set; }
 
   /// <summary>
   /// 绑定 PDF OCR 的任务级识别模式；taskModeId 是用户显式选择的模式 id。
@@ -112,9 +114,19 @@ public sealed class PdfViewModel(
     var run = CancellationTokenSource.CreateLinkedTokenSource(ct);
     _activeRun = run;
     BeginRun(); Changed();
+    RuntimePreparationIncomplete = false;
     TerminalIssue = null; IsBusy = true; Status = "正在打开";
+    if (!HasSession) FilePath = path;
     try
     {
+      if (ensureRuntimeReady is not null)
+      {
+        Status = "正在准备运行环境";
+        RuntimePreparationIncomplete = true;
+        await ensureRuntimeReady(run.Token);
+        run.Token.ThrowIfCancellationRequested();
+        if (generation == Volatile.Read(ref _generation)) RuntimePreparationIncomplete = false;
+      }
       if (_unclosedSession is not null)
       {
         await inference.ClosePdfSessionAsync(_unclosedSession, CancellationToken.None);
@@ -699,7 +711,7 @@ public sealed class PdfViewModel(
     Summary = IsSettling ? "已请求取消，等待后台实际收尾；已完成写入保留" : "已取消";
     Status = "已取消"; Changed();
   }
-  public void CloseSession() { CancelActiveRun(); SessionId = null; FilePath = null; PageCount = 0; Pages.Clear(); _requiresReopen = false; _modelAvailable = false; IsModified = false; Summary = ""; SelectedPage = -1; TerminalIssue = null; Status = "请选择 PDF"; }
+  public void CloseSession() { RuntimePreparationIncomplete = false; CancelActiveRun(); SessionId = null; FilePath = null; PageCount = 0; Pages.Clear(); _requiresReopen = false; _modelAvailable = false; IsModified = false; Summary = ""; SelectedPage = -1; TerminalIssue = null; Status = "请选择 PDF"; }
 
   public async Task CloseSessionAsync(CancellationToken ct)
   {
