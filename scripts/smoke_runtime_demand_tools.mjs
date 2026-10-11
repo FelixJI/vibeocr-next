@@ -349,6 +349,24 @@ async function watchImageEditInput(page) {
   });
 }
 
+async function focusMain(ctx) {
+  await ctx.page.bringToFront();
+  const main = (await windows(ctx.child.pid)).find((item) => item.Handle === ctx.main.Handle);
+  assert(main?.Visible && !main.Iconic, 'Owned main window is not available for input.');
+  const scale = main.Dpi / 96;
+  const x = Math.round((main.Bounds.Left + main.Bounds.Right) / 2);
+  const y = main.Bounds.Top + Math.round(14 * scale);
+  try {
+    await exec('pwsh', ['-NoProfile', '-NonInteractive', '-File', scrollCaptureScript,
+      '-Action', 'focus', '-Handle', String(main.Handle), '-FixturePid', String(ctx.child.pid),
+      '-X', String(x), '-Y', String(y)], { windowsHide: true, timeout: 15000 });
+  } catch (error) {
+    const observed = await native('probe', { AppPid: ctx.child.pid, X: x, Y: y });
+    throw new Error(`Owned focus failed: ${error.stderr || error.message}; geometry=${JSON.stringify(main)}; probe=${observed}`);
+  }
+  await native('foreground', { AppPid: ctx.child.pid });
+}
+
 async function qrToolStep(ctx) {
   const { page, root, child } = ctx;
   const step = { state: 'failed' };
@@ -373,14 +391,14 @@ async function qrToolStep(ctx) {
   fs.writeFileSync(png, Buffer.from(generated.bytes));
   step.generated = { payload, width: generated.width, height: generated.height, file: png };
   ctx.qrDims = { width: generated.width, height: generated.height };
-  await native('foreground', { AppPid: child.pid });
+  await focusMain(ctx);
   await page.getByRole('button', { name: '复制图片', exact: true }).click();
   await page.getByText('已复制当前预览图片', { exact: true }).waitFor();
   // Switching to the decode tab auto-decodes the current preview locally.
   await page.getByRole('tab', { name: '识别', exact: true }).click();
   step.generatedResults = await waitDecoded(page, payload);
   // Paste only ever reads back the image this smoke just copied itself.
-  await native('foreground', { AppPid: child.pid });
+  await focusMain(ctx);
   await page.getByRole('button', { name: '粘贴图片', exact: true }).click();
   await page.waitForFunction((old) => {
     const img = document.querySelector('img[alt="当前二维码与条码预览"]');
@@ -429,7 +447,7 @@ async function imageEditStep(ctx) {
   await watchImageEditInput(page);
   // Write-only synthetic clipboard: our own generated QR PNG from the smoke root.
   await setClipboardImage(root, path.join(root, 'qr-generated.png'));
-  await native('foreground', { AppPid: child.pid });
+  await focusMain(ctx);
   await page.getByRole('button', { name: '粘贴图片', exact: true }).click();
   await page.getByLabel('图片检查画布').waitFor({ timeout: 15000 });
   await page.waitForFunction(() => {
@@ -492,7 +510,7 @@ async function imageEditStep(ctx) {
   // Repaste proves the copied clipboard image really carries the annotation;
   // wait for the NEW public input resource first so pixel reads can never
   // pass on the stale pre-paste canvas.
-  await native('foreground', { AppPid: child.pid });
+  await focusMain(ctx);
   await page.getByRole('button', { name: '粘贴图片', exact: true }).click();
   await page.waitForFunction((previous) =>
     typeof window.__rt214ImageEditInput === 'string' &&
@@ -799,7 +817,7 @@ async function run(candidate, work) {
       .filter((item) => item.Visible && area(item) > 20000)
       .sort((a, b) => area(b) - area(a))[0];
     assert(ctx.main, 'Owned main window missing');
-    await native('foreground', { AppPid: ctx.child.pid });
+    await focusMain(ctx);
     record.steps.qrcode = await qrToolStep(ctx);
     record.steps.settings = await settingsStep(ctx);
     record.steps.image_edit = await imageEditStep(ctx);
