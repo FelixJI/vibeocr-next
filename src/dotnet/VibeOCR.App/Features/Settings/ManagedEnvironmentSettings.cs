@@ -599,10 +599,21 @@ public sealed class ManagedEnvironmentSettings(
     {
         await activate(environmentId, cancellationToken);
         InvalidateSelectionPlans();
-        await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: true);
-        Status = Snapshot?.ActiveId == environmentId
-            ? "环境已切换。模型与引擎状态以目标服务检查结果为准。"
-            : "环境切换未提交。";
+        try
+        {
+            await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: true);
+            Status = Snapshot?.ActiveId == environmentId
+                ? "环境已切换。模型与引擎状态以目标服务检查结果为准。"
+                : "环境已切换；清单尚未反映目标环境，请刷新核实。";
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            Status = "环境已切换；后续清单刷新已取消，请稍后刷新。";
+        }
+        catch (Exception error)
+        {
+            Status = $"环境已切换；后续清单刷新失败：{error.Message}";
+        }
     }, cancellationToken);
 
     private async Task ApplyRunningEvidenceAsync(CancellationToken cancellationToken)

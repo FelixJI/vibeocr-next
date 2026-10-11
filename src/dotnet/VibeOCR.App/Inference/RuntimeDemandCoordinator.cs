@@ -192,18 +192,33 @@ internal sealed class RuntimeDemandCoordinator(
     }
   }
 
-  public async Task PauseAsync(CancellationToken cancellationToken)
+  internal sealed record PauseOperation(long Owner, Task Completion);
+
+  public PauseOperation BeginPause(CancellationToken cancellationToken)
   {
     Attempt? pending;
-    Exception? cleanupFailure = null;
+    long owner;
     lock (gate)
     {
       paused = true;
-      transition++;
+      owner = ++transition;
       ready = false;
       pending = current;
       pending?.Cancellation.Cancel();
     }
+    return new PauseOperation(owner, DrainPauseAsync(owner, pending, cancellationToken));
+  }
+
+  public async Task<long> PauseAsync(CancellationToken cancellationToken)
+  {
+    PauseOperation pause = BeginPause(cancellationToken);
+    await pause.Completion;
+    return pause.Owner;
+  }
+
+  private async Task DrainPauseAsync(long owner, Attempt? pending, CancellationToken cancellationToken)
+  {
+    Exception? cleanupFailure = null;
     if (pending is not null)
     {
       try { await pending.Completion.Task.WaitAsync(cancellationToken); }
@@ -215,7 +230,17 @@ internal sealed class RuntimeDemandCoordinator(
         cleanupFailure = pending.CleanupFailure;
       }
     }
-    try { await disconnect(); }
+    try
+    {
+      Task disconnecting;
+      lock (gate)
+      {
+        // A superseding transition owns its own connection. Start disposal
+        // under the same gate as this ownership check, before it can activate.
+        disconnecting = owner == transition ? disconnect() : Task.CompletedTask;
+      }
+      await disconnecting;
+    }
     catch (Exception error) when (cleanupFailure is not null)
     {
       throw new AggregateException(cleanupFailure, error);
@@ -223,18 +248,31 @@ internal sealed class RuntimeDemandCoordinator(
     if (cleanupFailure is not null) ExceptionDispatchInfo.Capture(cleanupFailure).Throw();
   }
 
-  public Task RestoreAsync(bool maintenanceLeaseHeld = false)
+  public Task RestoreAsync(long owner, bool maintenanceLeaseHeld = false)
   {
-    bool resume;
-    lock (gate) { paused = false; resume = enabled; }
-    return resume && !shutdown.IsCancellationRequested ? WaitAsync(false, shutdown, maintenanceLeaseHeld) : Task.CompletedTask;
+    lock (gate)
+    {
+      // The caller carries its own pause ticket; a delayed restore cannot
+      // unpause a newer switch, maintenance operation or application stop.
+      if (owner != transition || !paused || shutdown.IsCancellationRequested) return Task.CompletedTask;
+      paused = false;
+      return enabled ? WaitAsync(false, shutdown, maintenanceLeaseHeld) : Task.CompletedTask;
+    }
   }
 
   public async Task RecoverAsync()
   {
-    await PauseAsync(shutdown);
-    lock (gate) { paused = false; }
-    await WaitAsync(false, shutdown);
+    PauseOperation pause = BeginPause(shutdown);
+    await pause.Completion;
+    Task recovery;
+    lock (gate)
+    {
+      shutdown.ThrowIfCancellationRequested();
+      if (pause.Owner != transition) return;
+      paused = false;
+      recovery = WaitAsync(false, shutdown);
+    }
+    await recovery;
   }
 
   public async Task SwitchAsync(Func<CancellationToken, Task> activate, CancellationToken cancellationToken)

@@ -34,13 +34,15 @@ internal sealed class ManagedRuntimeConnection(
     try
     {
       if (Session is not null) return true;
+      ManagedEnvironmentList environments;
       if (initialize)
       {
         AppLog.Info("Runtime demand: initialize_default begin");
-        await manager.InitializeDefaultEnvironmentAsync(cancellationToken);
+        environments = await manager.InitializeDefaultEnvironmentAsync(cancellationToken);
       }
+      else
+        environments = await manager.ListEnvironmentsAsync(cancellationToken);
       Milestone?.Invoke("T3");
-      ManagedEnvironmentList environments = await manager.ListEnvironmentsAsync(cancellationToken);
       Milestone?.Invoke("T4");
       if (environments.ActiveId is null) return false;
       await ActivateCoreAsync(environments.ActiveId, cancellationToken, injectSoakCrash);

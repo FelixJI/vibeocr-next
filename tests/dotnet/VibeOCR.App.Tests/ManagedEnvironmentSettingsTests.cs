@@ -20,6 +20,40 @@ namespace VibeOCR.App.Tests;
 
 public sealed class ManagedEnvironmentSettingsTests
 {
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task CommittedSwitchSurvivesPostCommitListRefreshFailure(bool cancelRefresh)
+  {
+    using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+    var manager = new MutableManager();
+    int activations = 0;
+    var settings = new ManagedEnvironmentSettings(manager, (_, _) =>
+    {
+      activations++;
+      manager.BeforeList = () =>
+      {
+        if (cancelRefresh)
+        {
+          cancellation.Cancel();
+          return Task.FromCanceled(cancellation.Token);
+        }
+        return Task.FromException(new HttpRequestException("post-commit list unavailable"));
+      };
+      return Task.CompletedTask;
+    }, () => null, new ProductMaintenanceCoordinator());
+    await settings.RefreshAsync(cancellation.Token);
+    ManagedEnvironmentList original = Assert.IsType<ManagedEnvironmentList>(settings.Snapshot);
+
+    await settings.SwitchAsync("environment", cancellation.Token);
+
+    Assert.Equal(1, activations);
+    Assert.False(settings.IsBusy);
+    Assert.Same(original, settings.Snapshot);
+    Assert.Contains("已切换", settings.Status, StringComparison.Ordinal);
+    Assert.Contains("刷新", settings.Status, StringComparison.Ordinal);
+    Assert.Contains(cancelRefresh ? "取消" : "post-commit list unavailable", settings.Status, StringComparison.Ordinal);
+  }
   [Fact]
   public async Task ReadOnlyEnvironmentListUsesExistingRefreshWithoutPreparingRuntime()
   {

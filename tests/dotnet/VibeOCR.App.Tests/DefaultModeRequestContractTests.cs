@@ -555,6 +555,57 @@ public sealed class DefaultModeRequestContractTests
     Assert.Equal(0, fake.HealthCalls);
   }
 
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task CancelledBatchRemainsBusyUntilItsPreparationCleanupFinishes(bool clear)
+  {
+    var fake = Client("windows_text");
+    var batch = new BatchViewModel(fake, new BatchFileSource());
+    batch.AddFiles(["queued.png"]);
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var cleaning = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    int preparations = 0;
+    await using TestHarness harness = await Harness(fake, batch: batch, loadSelection: false,
+      ensureReady: async ct =>
+      {
+        preparations++;
+        entered.TrySetResult();
+        try { await Task.Delay(Timeout.Infinite, ct); }
+        finally
+        {
+          cleaning.TrySetResult();
+          await release.Task;
+        }
+      });
+    var settled = new TaskCompletionSource<BatchWorkbenchState>(TaskCreationOptions.RunContinuationsAsynchronously);
+    bool started = false;
+    harness.Handler.StateChanged += state =>
+    {
+      if (started && state is BatchWorkbenchState { IsRunning: false } idle) settled.TrySetResult(idle);
+    };
+    try
+    {
+      await harness.Handler.ExecuteAsync(new StartBatchCommand(), TestContext.Current.CancellationToken);
+      started = true;
+      await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+      WorkbenchCommandOutcome cancelled = await harness.Handler.ExecuteAsync(
+        clear ? new ClearBatchCommand() : new CancelBatchCommand(), TestContext.Current.CancellationToken);
+      await cleaning.Task.WaitAsync(TestContext.Current.CancellationToken);
+      Assert.True(Assert.Single(cancelled.States.OfType<BatchWorkbenchState>()).IsRunning);
+      WorkbenchCommandOutcome restarted = await harness.Handler.ExecuteAsync(new StartBatchCommand(), TestContext.Current.CancellationToken);
+      Assert.True(Assert.Single(restarted.States.OfType<BatchWorkbenchState>()).IsRunning);
+      Assert.Equal(1, preparations);
+      Assert.False(settled.Task.IsCompleted);
+      release.TrySetResult();
+      Assert.False((await settled.Task.WaitAsync(TestContext.Current.CancellationToken)).IsRunning);
+      Assert.Equal(clear ? 0 : 1, batch.Items.Count);
+      Assert.Empty(fake.Submissions);
+    }
+    finally { release.TrySetResult(); }
+  }
+
   /// <summary>
   /// 与 ScreenshotSessionWorkbenchTests 同款终态等待：构造即订阅，
   /// Dispose 退订；Task 固定 5s 超时，不漏早发终态。

@@ -4794,7 +4794,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     SynchronizeBatchMode();
     batchWindowStart = ClampWindowStart(batchWindowStart, viewModel.Items.Count, 40);
     return new BatchWorkbenchState(
-    viewModel.IsRunning || batchPreparation is { IsCancellationRequested: false },
+    viewModel.IsRunning || batchPreparation is not null,
     viewModel.Items.Count,
     viewModel.CompletedCount,
     viewModel.FailedCount,

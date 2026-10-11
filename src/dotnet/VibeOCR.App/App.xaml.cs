@@ -70,6 +70,8 @@ public sealed partial class App : Application
     private bool _soakCrashInjected;
     private int _supervisorRecoveryScheduled;
     private int _runtimeMaintenanceActive;
+    // The maintenance lease serializes this stop/restore callback pair.
+    private long? _runtimeMaintenancePauseOwner;
 
     private const uint HotkeyMessage = 0x0312;
     private const uint TrayMessage = 0x8001;
@@ -915,10 +917,11 @@ public sealed partial class App : Application
     }
 
     private Task SwitchManagedEnvironmentAsync(string environmentId, CancellationToken cancellationToken) =>
-        (_runtimeDemand ?? throw new InvalidOperationException("Runtime demand coordinator is unavailable."))
-            .SwitchAsync(async token =>
+        SwitchManagedEnvironmentAndRefreshAsync(
+            _runtimeDemand ?? throw new InvalidOperationException("Runtime demand coordinator is unavailable."),
+            token => _runtimeDemand.Connection!.SwitchAsync(environmentId, token),
+            async token =>
             {
-                await _runtimeDemand.Connection!.SwitchAsync(environmentId, token);
                 if (_managedSession is { } session)
                 {
                     SupervisorReadyEnvelope ready = session.Process.Ready;
@@ -927,7 +930,18 @@ public sealed partial class App : Application
                 }
                 else
                     _supervisorDiagnostics?.UpdateSupervisor(new SupervisorHealth(SupervisorHealthState.NotReady, null, null, "当前为空环境，未启动识别服务。"));
-            }, cancellationToken);
+            }, error => AppLog.Warn($"Recognition catalog refresh after environment switch failed: {error.Message}"), cancellationToken);
+
+    internal static async Task SwitchManagedEnvironmentAndRefreshAsync(
+        RuntimeDemandCoordinator coordinator, Func<CancellationToken, Task> activate,
+        Func<CancellationToken, Task> refresh, Action<Exception> refreshFailed, CancellationToken cancellationToken)
+    {
+        await coordinator.SwitchAsync(activate, cancellationToken);
+        // Activation has committed. Refresh has its own outcome and cannot
+        // turn the committed environment into an activation failure.
+        try { await refresh(cancellationToken); }
+        catch (Exception error) { refreshFailed(error); }
+    }
 
     // 在 supervisor 门释放后刷新；环境切换持环境门等待 supervisor 门。
     internal static async Task RefreshEnvironmentSettingsAfterActivationAsync(
@@ -1156,16 +1170,20 @@ public sealed partial class App : Application
         Interlocked.Exchange(ref _runtimeMaintenanceActive, 1);
         // 与连接/恢复/切换同一有界门等待：占用方异常滞留时以失败终态
         // 退出（ConfirmAsync 会把安装置为 failed 并经 Restore 重连）。
-        await (_runtimeDemand ?? throw new InvalidOperationException("Runtime maintenance context is unavailable."))
-            .PauseAsync(cancellationToken);
+        RuntimeDemandCoordinator.PauseOperation pause = (_runtimeDemand
+            ?? throw new InvalidOperationException("Runtime maintenance context is unavailable.")).BeginPause(cancellationToken);
+        _runtimeMaintenancePauseOwner = pause.Owner;
+        await pause.Completion;
         _runtimeStatus.ReportServicePausedForMaintenance();
     }
 
     private async Task RestoreAfterMaintenanceAsync()
     {
         Interlocked.Exchange(ref _runtimeMaintenanceActive, 0);
-        if (_runtimeDemand is not null)
-            await _runtimeDemand.RestoreAsync(maintenanceLeaseHeld: true);
+        long? owner = _runtimeMaintenancePauseOwner;
+        _runtimeMaintenancePauseOwner = null;
+        if (_runtimeDemand is not null && owner is { } pauseOwner)
+            await _runtimeDemand.RestoreAsync(pauseOwner, maintenanceLeaseHeld: true);
     }
 
 

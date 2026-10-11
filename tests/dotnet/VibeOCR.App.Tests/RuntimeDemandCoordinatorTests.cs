@@ -93,15 +93,15 @@ public sealed class RuntimeDemandCoordinatorTests
       initializes.Add(initialize);
       return Task.CompletedTask;
     }, () => Task.CompletedTask, maintenance, TestContext.Current.CancellationToken);
-    await coordinator.PauseAsync(TestContext.Current.CancellationToken);
-    await coordinator.RestoreAsync();
+    long firstOwner = await coordinator.PauseAsync(TestContext.Current.CancellationToken);
+    await coordinator.RestoreAsync(firstOwner);
     Assert.Empty(initializes);
     await coordinator.EnsureReadyAsync(TestContext.Current.CancellationToken);
     using (maintenance.Acquire(ProductMaintenanceOwner.RuntimeMaintenance))
     {
-      await coordinator.PauseAsync(TestContext.Current.CancellationToken);
+      long owner = await coordinator.PauseAsync(TestContext.Current.CancellationToken);
       await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.EnsureReadyAsync(TestContext.Current.CancellationToken));
-      await coordinator.RestoreAsync(maintenanceLeaseHeld: true);
+      await coordinator.RestoreAsync(owner, maintenanceLeaseHeld: true);
     }
     await coordinator.RecoverAsync();
     Assert.Equal([true, false, false], initializes);
@@ -378,6 +378,200 @@ public sealed class RuntimeDemandCoordinatorTests
     Assert.Equal(0, switches);
   }
 
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task StaleMaintenanceRestoreCannotResumeNewPauseOrStop(bool stop)
+  {
+    int connects = 0;
+    var coordinator = new RuntimeDemandCoordinator((_, _) => { connects++; return Task.CompletedTask; },
+      () => Task.CompletedTask, new ProductMaintenanceCoordinator(), TestContext.Current.CancellationToken);
+    await coordinator.EnsureReadyAsync(TestContext.Current.CancellationToken);
+    long maintenanceOwner = await coordinator.PauseAsync(TestContext.Current.CancellationToken);
+    if (stop) await coordinator.StopAsync();
+    else await coordinator.PauseAsync(TestContext.Current.CancellationToken);
+
+    await coordinator.RestoreAsync(maintenanceOwner);
+
+    Assert.Equal(1, connects);
+    await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.EnsureReadyAsync(TestContext.Current.CancellationToken));
+  }
+
+  [Fact]
+  public async Task StaleMaintenanceRestoreDoesNotJoinExplicitSwitchAttempt()
+  {
+    var entered = Signal();
+    var release = Signal();
+    int connects = 0;
+    int activations = 0;
+    var coordinator = new RuntimeDemandCoordinator((_, _) => { connects++; return Task.CompletedTask; },
+      () => Task.CompletedTask, new ProductMaintenanceCoordinator(), TestContext.Current.CancellationToken);
+    await coordinator.EnsureReadyAsync(TestContext.Current.CancellationToken);
+    long maintenanceOwner = await coordinator.PauseAsync(TestContext.Current.CancellationToken);
+    Task switching = coordinator.SwitchAsync(async _ =>
+    {
+      activations++;
+      entered.TrySetResult();
+      await release.Task;
+    }, TestContext.Current.CancellationToken);
+    try
+    {
+      await entered.Task;
+      Task restoring = coordinator.RestoreAsync(maintenanceOwner);
+      Assert.True(restoring.IsCompletedSuccessfully);
+      await restoring;
+      Assert.False(switching.IsCompleted);
+    }
+    finally { release.TrySetResult(); await switching; }
+    Assert.Equal(1, connects);
+    Assert.Equal(1, activations);
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task RecoverySupersededByNewTransitionCannotChangeItsState(bool switchEnvironment)
+  {
+    var disconnectEntered = Signal();
+    var disconnectRelease = Signal();
+    int disconnects = 0;
+    int connects = 0;
+    int activations = 0;
+    var coordinator = new RuntimeDemandCoordinator((_, _) => { connects++; return Task.CompletedTask; }, async () =>
+    {
+      if (++disconnects == 1)
+      {
+        disconnectEntered.TrySetResult();
+        await disconnectRelease.Task;
+      }
+    }, new ProductMaintenanceCoordinator(), TestContext.Current.CancellationToken);
+    await coordinator.EnsureReadyAsync(TestContext.Current.CancellationToken);
+    Task recovery = coordinator.RecoverAsync();
+    try
+    {
+      await disconnectEntered.Task;
+      if (switchEnvironment)
+        await coordinator.SwitchAsync(_ => { activations++; return Task.CompletedTask; }, TestContext.Current.CancellationToken);
+      else
+        await coordinator.PauseAsync(TestContext.Current.CancellationToken);
+      disconnectRelease.TrySetResult();
+      await recovery;
+      if (switchEnvironment)
+        await coordinator.EnsureReadyAsync(TestContext.Current.CancellationToken);
+      else
+        await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.EnsureReadyAsync(TestContext.Current.CancellationToken));
+      Assert.Equal(1, connects);
+      Assert.Equal(switchEnvironment ? 1 : 0, activations);
+    }
+    finally { disconnectRelease.TrySetResult(); await recovery; }
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task CommittedAppSwitchReportsCatalogRefreshFailureSeparately(bool cancelRefresh)
+  {
+    using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+    int activations = 0;
+    int connects = 0;
+    int disconnects = 0;
+    Exception? refreshFailure = null;
+    var coordinator = new RuntimeDemandCoordinator((_, _) => { connects++; return Task.CompletedTask; },
+      () => { disconnects++; return Task.CompletedTask; }, new ProductMaintenanceCoordinator(), TestContext.Current.CancellationToken);
+
+    await App.SwitchManagedEnvironmentAndRefreshAsync(coordinator,
+      _ => { activations++; return Task.CompletedTask; },
+      _ =>
+      {
+        if (cancelRefresh)
+        {
+          cancellation.Cancel();
+          return Task.FromCanceled(cancellation.Token);
+        }
+        return Task.FromException(new HttpRequestException("catalog unavailable after commit"));
+      }, error => refreshFailure = error, cancellation.Token);
+
+    Assert.Equal(1, activations);
+    Assert.NotNull(refreshFailure);
+    if (cancelRefresh) Assert.IsAssignableFrom<OperationCanceledException>(refreshFailure);
+    else Assert.IsType<HttpRequestException>(refreshFailure);
+    await coordinator.EnsureReadyAsync(TestContext.Current.CancellationToken);
+    Assert.Equal(0, connects);
+    Assert.Equal(0, disconnects);
+  }
+  [Theory]
+  [InlineData(true)]
+  [InlineData(false)]
+  public async Task ConnectionUsesInitializeResultAndReadsListOnlyForRecovery(bool initialize)
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-connect-list-{Guid.NewGuid():N}");
+    PortableLayout layout = PortableLayout.Resolve(Path.Combine(root, "VibeOCR.exe"), "winui-dev");
+    Directory.CreateDirectory(Path.GetDirectoryName(layout.ComponentLock)!);
+    File.WriteAllText(layout.ComponentLock, "{\"required_capabilities\":[\"test.capability\"]}");
+    var manager = new ConnectionListManager();
+    int publications = 0;
+    var connection = new ManagedRuntimeConnection(manager, layout, new RuntimeStatusViewModel(), (_, _) => publications++);
+    try
+    {
+      Assert.False(await connection.ConnectAsync(initialize, TestContext.Current.CancellationToken));
+      Assert.Equal(initialize ? 1 : 0, manager.Initializes);
+      Assert.Equal(initialize ? 0 : 1, manager.Lists);
+      Assert.Equal(initialize ? "initialized" : "listed", Assert.Single(manager.PreparedIds));
+      Assert.Equal(1, manager.Commits);
+      Assert.Equal(1, manager.ReservationDisposals);
+      Assert.Equal(1, publications);
+      Assert.Null(connection.Session);
+    }
+    finally { await connection.DisconnectAsync(); Directory.Delete(root, recursive: true); }
+  }
+
+  private sealed class ConnectionListManager : IManagedEnvironmentClient
+  {
+    public int Initializes { get; private set; }
+    public int Lists { get; private set; }
+    public int Commits { get; private set; }
+    public int ReservationDisposals { get; private set; }
+    public List<string> PreparedIds { get; } = [];
+    public Task<ManagedEnvironmentList> InitializeDefaultEnvironmentAsync(CancellationToken cancellationToken = default)
+    {
+      Initializes++;
+      return Task.FromResult(new ManagedEnvironmentList("initialized", 1, []));
+    }
+    public Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default)
+    {
+      Lists++;
+      return Task.FromResult(new ManagedEnvironmentList("listed", 2, []));
+    }
+    public Task<IManagedEnvironmentSwitchReservation> BeginEnvironmentSwitchAsync(string environmentId, CancellationToken cancellationToken = default)
+    {
+      PreparedIds.Add(environmentId);
+      return Task.FromResult<IManagedEnvironmentSwitchReservation>(new Reservation(this,
+        new PreparedEnvironmentSwitch(environmentId, 1, null, 0, "unused", false, null)));
+    }
+    private sealed class Reservation(ConnectionListManager owner, PreparedEnvironmentSwitch prepared) : IManagedEnvironmentSwitchReservation
+    {
+      public PreparedEnvironmentSwitch Prepared => prepared;
+      public Task<CommittedEnvironmentSwitch> CommitAsync(StartedEnvironmentHealth? health, CancellationToken cancellationToken = default)
+      {
+        Assert.Null(health);
+        owner.Commits++;
+        return Task.FromResult(new CommittedEnvironmentSwitch(prepared.EnvironmentId, 1));
+      }
+      public ValueTask DisposeAsync() { owner.ReservationDisposals++; return ValueTask.CompletedTask; }
+    }
+    public Task<PreparedEnvironmentSwitch> PrepareEnvironmentSwitchAsync(string environmentId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<CommittedEnvironmentSwitch> CommitEnvironmentSwitchAsync(PreparedEnvironmentSwitch prepared,
+      StartedEnvironmentHealth? startedHealth = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<ManagedEnvironment> CreateEnvironmentAsync(string name, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(string? environmentId, string? packageSourceId,
+      string? modelSourceId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(string environmentId, string recipe,
+      IReadOnlyList<string>? sourceIds = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<ManagedEnvironment> InstallEnvironmentAsync(ManagedEnvironmentPlan plan,
+      IReadOnlyList<string>? sourceIds = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<ManagedEnvironment> RepairEmptyEnvironmentAsync(string environmentId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task DeleteEnvironmentAsync(string environmentId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+  }
   private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
   [Fact]
