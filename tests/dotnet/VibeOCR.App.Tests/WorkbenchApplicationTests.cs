@@ -259,7 +259,7 @@ public sealed class WorkbenchApplicationTests
     public ValueTask<WorkbenchCommandOutcome> ExecuteAsync(
       WorkbenchCommand command, CancellationToken cancellationToken)
     {
-      StateChanged?.Invoke(new QrCodeWorkbenchState(false, "qrcode.failed", [], null));
+      StateChanged?.Invoke(new QrCodeWorkbenchState(false, "qrcode.failed", [], null) { IsTerminal = true });
       if (throwAfterPublish) throw new InvalidOperationException("command failed");
       return ValueTask.FromResult(new WorkbenchCommandOutcome(
         [new QrCodeWorkbenchState(true, "qrcode.running", [], null)], null));

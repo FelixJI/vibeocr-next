@@ -530,11 +530,17 @@ public enum WorkbenchTheme
 public abstract record WorkbenchState
 {
   public abstract string Scope { get; }
+  internal bool IsTerminal { get; init; }
 }
 
 public sealed record ShellWorkbenchState(WorkbenchRoute Route) : WorkbenchState
 {
   public override string Scope => "shell";
+}
+
+internal sealed record ThemeWorkbenchState(WorkbenchTheme Theme) : WorkbenchState
+{
+  public override string Scope => "settings";
 }
 
 public sealed record RecognitionWorkbenchState(
@@ -1071,7 +1077,8 @@ public interface IWorkbenchApplication : IAsyncDisposable
 
   IAsyncEnumerable<WorkbenchStateEnvelope> SubscribeAsync(
     long afterRevision,
-    CancellationToken cancellationToken);
+    CancellationToken cancellationToken,
+    IReadOnlySet<string>? scopes = null);
 }
 
 public sealed record WorkbenchCommandOutcome(

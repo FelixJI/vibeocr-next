@@ -15,6 +15,34 @@ public sealed class WorkbenchBridgeProtocolException(
 
 public static class WorkbenchBridgeCodec
 {
+  internal sealed record BootstrapResponse(string Json, bool RequiresSnapshot);
+
+  internal static BootstrapResponse SerializeBootstrapResponse(Guid requestId, WorkbenchBootstrap bootstrap)
+  {
+    try { return new(SerializeBootstrap(requestId, bootstrap), false); }
+    catch (WorkbenchBridgeProtocolException)
+    {
+      string[] scopes = bootstrap.States.Select(state => state.Scope).ToArray();
+      if (scopes.Length != scopes.Distinct(StringComparer.Ordinal).Count() || !scopes.Contains("shell") ||
+        scopes.Any(scope => !WorkbenchStateMailbox.AllScopes.Contains(scope)))
+        throw new WorkbenchBridgeProtocolException("Invalid bootstrap snapshot scopes.");
+      // Validate the entire fixed snapshot before sending any startup control.
+      foreach (WorkbenchStateEnvelope state in bootstrap.States) SerializeState(bootstrap.SessionId, state);
+      string json = JsonSerializer.Serialize(new
+      {
+        version = WorkbenchProtocol.Version, kind = "response", id = requestId, type = "app.bootstrap",
+        payload = new { sessionId = bootstrap.SessionId, revision = bootstrap.Revision, route = FormatRoute(bootstrap.Route),
+          theme = BootstrapTheme(bootstrap), capabilities = bootstrap.Capabilities.Order(StringComparer.Ordinal), stateTransfer = "snapshot", stateScopes = scopes },
+      }, SerializerOptions);
+      EnsureMessageSize(json);
+      return new(json, true);
+    }
+  }
+
+  private static string BootstrapTheme(WorkbenchBootstrap bootstrap) => (bootstrap.States.Select(state => state.State)
+    .Select(state => state switch { SettingsWorkbenchState settings => (WorkbenchTheme?)settings.Theme, ThemeWorkbenchState theme => theme.Theme, _ => null })
+    .FirstOrDefault(theme => theme is not null) ?? WorkbenchTheme.System).ToString().ToLowerInvariant();
+
   public const int MaxMessageBytes = 64 * 1024;
   private static readonly JsonSerializerOptions SerializerOptions = new()
   {
@@ -136,7 +164,7 @@ public static class WorkbenchBridgeCodec
       .Where(state => state.Scope != "shell")
       .ToDictionary(
         state => state.Scope,
-        state => (object?)state.State,
+        state => state.State is ThemeWorkbenchState theme ? SerializeWorkbenchState(theme) : (object?)state.State,
         StringComparer.Ordinal);
     string json = JsonSerializer.Serialize(new
     {
@@ -149,7 +177,7 @@ public static class WorkbenchBridgeCodec
         sessionId = bootstrap.SessionId,
         revision = bootstrap.Revision,
         route = FormatRoute(bootstrap.Route),
-        theme = "system",
+        theme = BootstrapTheme(bootstrap),
         capabilities = bootstrap.Capabilities.Order(StringComparer.Ordinal),
         features,
       },
@@ -1641,6 +1669,7 @@ public static class WorkbenchBridgeCodec
       diagnostics.Milestones,
       diagnostics.DeviceEvidence,
     },
+    ThemeWorkbenchState theme => new { theme = theme.Theme.ToString().ToLowerInvariant() },
     null => null,
     _ => throw new WorkbenchBridgeProtocolException(
       "Workbench state type is not supported."),
@@ -1695,10 +1724,11 @@ public static class WorkbenchBridgeCodec
 
   private static void EnsureMessageSize(string json)
   {
-    if (Encoding.UTF8.GetByteCount(json) > MaxMessageBytes)
+    int bytes = Encoding.UTF8.GetByteCount(json);
+    if (bytes > MaxMessageBytes)
     {
       throw new WorkbenchBridgeProtocolException(
-        "Workbench bridge message exceeds the size limit.");
+        $"Workbench bridge message exceeds the size limit ({bytes} > {MaxMessageBytes} UTF-8 bytes).");
     }
   }
 

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type {
   AppSnapshot,
@@ -11,6 +11,13 @@ import type { AppViewState } from "../app/types";
 import { projectSnapshot, WorkbenchWebRuntime } from "./runtime";
 
 class FakeHostBridge implements HostBridge {
+  failure?: (error: Error) => void;
+  subscribeStateFailure(listener: (error: Error) => void): () => void {
+    this.failure = listener;
+    return () => {
+      if (this.failure === listener) this.failure = undefined;
+    };
+  }
   readonly commands: HostCommand[] = [];
   previewFlush?: (documentId: string) => Promise<boolean>;
   subscribePdfPreviewFlush(
@@ -22,17 +29,42 @@ class FakeHostBridge implements HostBridge {
     };
   }
   nextResult: CommandResult = { revision: 8, ok: true, problem: null };
+  // 模拟已修复的 BridgeClient 契约：新 bootstrap 按类型撤销并 reject 旧在途请求。
+  deferBootstrap = false;
+  private boot?: {
+    resolve: (snapshot: AppSnapshot) => void;
+    reject: (error: Error) => void;
+  };
   private listener?: (event: HostStateEvent) => void;
 
   async bootstrap(): Promise<AppSnapshot> {
-    return {
+    if (!this.deferBootstrap)
+      return {
+        sessionId: "session-1",
+        revision: 7,
+        route: "recognition",
+        theme: "dark",
+        capabilities: ["recognition.capture"],
+        features: { recognition: { status: "ready" } },
+      };
+    this.boot?.reject(new Error("Bootstrap was superseded."));
+    return new Promise<AppSnapshot>((resolve, reject) => {
+      this.boot = { resolve, reject };
+    });
+  }
+
+  settleBootstrap(override: Partial<AppSnapshot> = {}): void {
+    const boot = this.boot;
+    this.boot = undefined;
+    boot?.resolve({
       sessionId: "session-1",
       revision: 7,
       route: "recognition",
       theme: "dark",
       capabilities: ["recognition.capture"],
       features: { recognition: { status: "ready" } },
-    };
+      ...override,
+    });
   }
 
   async execute(command: HostCommand): Promise<CommandResult> {
@@ -53,6 +85,147 @@ class FakeHostBridge implements HostBridge {
 }
 
 describe("WorkbenchWebRuntime", () => {
+  it("explicit feature recovery waits for active and retiring PDF drafts before reloading only its surface", async () => {
+    const bridge = new FakeHostBridge();
+    const order: string[] = [];
+    const runtime = new WorkbenchWebRuntime(
+      bridge,
+      () => undefined,
+      () => {
+        order.push("reload");
+      },
+    );
+    await runtime.start(() => undefined);
+    let acknowledge!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      acknowledge = resolve;
+    });
+    const unregister = runtime.actions.registerPdfPreviewFlush!(
+      "first",
+      async () => {
+        order.push("first");
+        await pending;
+      },
+    );
+    unregister();
+    runtime.actions.registerPdfPreviewFlush!("active", async () => {
+      order.push("active");
+    });
+    const recovery = runtime.actions.recoverFeatureAssets!();
+    expect(runtime.actions.recoverFeatureAssets!()).toBe(recovery);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(order).toContain("active");
+    expect(order).not.toContain("reload");
+    const latest = runtime.actions.registerPdfPreviewFlush!(
+      "first",
+      async () => {
+        order.push("latest");
+      },
+    );
+    latest();
+    acknowledge();
+    expect(await recovery).toBe(true);
+    expect(order.indexOf("latest")).toBeLessThan(order.indexOf("reload"));
+    expect(order.at(-1)).toBe("reload");
+    expect(bridge.commands).toEqual([]);
+    runtime.stop();
+  });
+
+  it("failed or timed out draft confirmation keeps recovery available and never reloads", async () => {
+    vi.useFakeTimers();
+    try {
+      const bridge = new FakeHostBridge();
+      const errors: Error[] = [];
+      const reload = vi.fn();
+      const runtime = new WorkbenchWebRuntime(
+        bridge,
+        (error) => {
+          errors.push(error);
+        },
+        reload,
+      );
+      await runtime.start(() => undefined);
+      let fail = true;
+      const unregister = runtime.actions.registerPdfPreviewFlush!(
+        "draft",
+        async () => {
+          if (fail) throw new Error("not acknowledged");
+        },
+      );
+      unregister();
+      await Promise.resolve();
+      expect(await runtime.actions.recoverFeatureAssets!()).toBe(false);
+      expect(reload).not.toHaveBeenCalled();
+      fail = false;
+      expect(await runtime.actions.recoverFeatureAssets!()).toBe(true);
+      expect(reload).toHaveBeenCalledOnce();
+      reload.mockClear();
+      runtime.actions.registerPdfPreviewFlush!(
+        "active",
+        () => new Promise<void>(() => undefined),
+      );
+      const pending = runtime.actions.recoverFeatureAssets!();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(await pending).toBe(false);
+      expect(reload).not.toHaveBeenCalled();
+      expect(errors.map((error) => error.message)).toEqual([
+        "not acknowledged",
+        "Draft confirmation timed out",
+      ]);
+      runtime.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows state failure and lets the user resynchronize without replaying commands", async () => {
+    const bridge = new FakeHostBridge();
+    const errors: Error[] = [];
+    const runtime = new WorkbenchWebRuntime(bridge, (error) =>
+      errors.push(error),
+    );
+    let latest: AppViewState | undefined;
+    await runtime.start((state) => {
+      latest = state;
+    });
+    bridge.failure?.(new Error("incomplete"));
+    expect(latest?.commandProblem).toBe("workbench.error.stateSyncFailed");
+    expect(errors).toHaveLength(1);
+    runtime.actions.recover?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(latest?.commandProblem).toBeUndefined();
+    expect(bridge.commands).toHaveLength(0);
+    runtime.stop();
+  });
+  it("keeps a superseded recovery bootstrap from polluting the newer session", async () => {
+    const bridge = new FakeHostBridge();
+    bridge.deferBootstrap = true;
+    const errors: Error[] = [];
+    const runtime = new WorkbenchWebRuntime(bridge, (error) =>
+      errors.push(error),
+    );
+    const states: AppViewState[] = [];
+    const starting = runtime.start((state) => states.push(state));
+    bridge.settleBootstrap();
+    await starting;
+    runtime.actions.recover?.(); // 第一次恢复：bootstrap 在途。
+    runtime.actions.recover?.(); // 第二次恢复 supersede 第一次。
+    bridge.settleBootstrap({
+      sessionId: "session-2",
+      revision: 9,
+      features: { recognition: { status: "ready" }, pdf: { fresh: true } },
+    });
+    await new Promise((flush) => setTimeout(flush, 0));
+    expect(errors).toEqual([]);
+    expect(states.filter((state) => state.commandProblem)).toHaveLength(0);
+    expect(states.at(-1)?.features).toEqual({
+      recognition: { status: "ready" },
+      pdf: { fresh: true },
+    });
+    runtime.stop();
+  });
   it("native preview flush matches the mounted PDF and succeeds with no PDF work outside that route", async () => {
     const bridge = new FakeHostBridge();
     const runtime = new WorkbenchWebRuntime(bridge);
@@ -184,9 +357,9 @@ describe("WorkbenchWebRuntime", () => {
     bridge.emit({
       sessionId: "session-1",
       revision: 9,
-      scope: "pdf",
-      change: "replace",
-      state: { documents: [] },
+      scope: "shell",
+      change: "ready",
+      snapshot: { pdf: { documents: [] }, shell: { route: "recognition" } },
     });
     const before = calls;
     expect(await bridge.previewFlush!(a)).toBe(true);

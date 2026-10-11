@@ -1747,6 +1747,78 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   [Fact]
+  public async Task InitialReadySupervisorInstanceDoesNotInvalidatePinnedText()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new MaintenanceHealthClient();
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      // Supervisor 在 handler 创建前已 ready：拆分前构造函数即捕获基线，
+      // 首次 Settings 通知不得把同一实例误判为更换而清空贴图取字。
+      string serviceInstance = "sup-initial";
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore, settings,
+        inferenceAttached: () => true,
+        supervisorInstanceId: () => serviceInstance);
+      int invalidated = 0;
+      handler.PinnedTextEnvironmentChanged += () => invalidated++;
+
+      // 首次 Settings 通知：设置页真实加载路径 + 显式状态通知。
+      Assert.Null((await handler.ExecuteAsync(
+        new RefreshRuntimeCommand(),
+        TestContext.Current.CancellationToken)).Error);
+      handler.Settings.OnSettingsChanged();
+
+      Assert.Equal(0, invalidated);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task RealSupervisorInstanceChangeStillInvalidatesPinnedText()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new MaintenanceHealthClient();
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      string serviceInstance = "sup-initial";
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore, settings,
+        inferenceAttached: () => true,
+        supervisorInstanceId: () => serviceInstance);
+      Assert.Null((await handler.ExecuteAsync(
+        new RefreshRuntimeCommand(),
+        TestContext.Current.CancellationToken)).Error);
+      int invalidated = 0;
+      handler.PinnedTextEnvironmentChanged += () => invalidated++;
+
+      // 真实后续实例更换（切换/维护停止/崩溃恢复）仍须失效贴图取字。
+      serviceInstance = "sup-next";
+      handler.Settings.OnSettingsChanged();
+
+      Assert.Equal(1, invalidated);
+      Assert.Contains("服务实例已更换", settings.Status);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
   public async Task PrepareScreenshotTextLayerRunsFixedLightweightLocalMode()
   {
     string root = TemporaryRoot();
@@ -3524,14 +3596,14 @@ public sealed class ScreenshotSessionWorkbenchTests
         inferenceAttached: () => true);
       // 与 DefaultModeRequestContractTests 同一真实状态位：环境切换窗口
       // 内提交必须取消，不能继续使用切换前的目录发出请求。
-      System.Reflection.FieldInfo switching = typeof(DesktopWorkbenchCommandHandler)
+      System.Reflection.FieldInfo switching = typeof(WorkbenchSettingsOwner)
         .GetField("environmentSwitching",
           System.Reflection.BindingFlags.NonPublic |
           System.Reflection.BindingFlags.Instance)!;
       int terminalShown = 0;
       handler.ScreenshotSelectionRecognized += () => terminalShown++;
 
-      switching.SetValue(handler, 1);
+      switching.SetValue(handler.Settings, 1);
       RecognitionWorkbenchState cancelled;
       using (var completed = new RecognitionStateAwaiter(handler,
         state => !state.IsBusy && state.StatusCode == "recognition.cancelled" &&
@@ -3547,7 +3619,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       await UntilAsync(() => terminalShown == 1);
 
       // 退出切换窗口后同一链路恢复：仅一次显式模式提交，无默认回退。
-      switching.SetValue(handler, 0);
+      switching.SetValue(handler.Settings, 0);
       RecognitionWorkbenchState done;
       using (var recovered = new RecognitionStateAwaiter(handler,
         state => !state.IsBusy && state.Result is not null))

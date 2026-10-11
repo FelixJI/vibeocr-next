@@ -27,6 +27,19 @@
 // Not covered (left for the main agent): settings hotkey re-recording. The
 // evidence root is never deleted; owned cleanup
 // follows recorded PID + creation_filetime lineage only.
+// Task #215 (additive, listener-only, same Issue214 baseline above): passive
+// per-scope/scene WebView message counting with UTF-8 serialized-payload
+// bytes plus the actual JS resource request graph (buffered in-page resource
+// timing + passive CDP request events) via scripts/workbench_delivery_probe.mjs
+// into record.measurement_215 / root file workbench-delivery-215.json. Contexts
+// existing at attach are instrumented; when the script holds the scene page its
+// context is confirmed explicitly (scene.context()) and the scene is harvested
+// before its window closes. The late-connected main page and any scene whose
+// document start cannot be confirmed are marked partial (first_screen_missed);
+// first-screen resources are corroborated by buffered resource timing only,
+// with explicit gaps - never fabricated into a pass.
+// No private bridge commands, no public input step changes, no new validity
+// rule: existing failures are never swallowed by missing new measurement.
 import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
 import { once } from 'node:events';
@@ -40,6 +53,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { native, windows, waitForWindows, area, inside, delay,
   startFixture, openSettings, setCheckbox, toolbarStatus, stopOwned } from './smoke_native_actions.mjs';
+import { createWorkbenchCollector, runMeasurementSelfCheck } from './workbench_delivery_probe.mjs';
 
 const exec = promisify(execFile);
 const scripts = path.dirname(fileURLToPath(import.meta.url));
@@ -94,7 +108,9 @@ function contained(parent, child) {
 const jsonLines = (file) => fs.existsSync(file)
   ? fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).map(JSON.parse) : [];
 
-async function freePort() {
+// Minimal named exports for scripts/smoke_workbench_delivery.mjs reuse only;
+// the CLI behavior, zero-runtime rules and steps of this smoke are unchanged.
+export async function freePort() {
   const server = net.createServer();
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -113,7 +129,7 @@ async function waitFile(file, child, milliseconds = 20000) {
   }
 }
 
-async function connect(child, debugPort) {
+export async function connect(child, debugPort) {
   const until = Date.now() + 30000;
   let error;
   while (Date.now() < until) {
@@ -140,7 +156,7 @@ async function connect(child, debugPort) {
 // Owner-written read-only monitor contract: wait for monitor-ready, the
 // spawned App PID goes to root-pid.txt, stop-monitor ends it. CIM snapshots
 // are a lower bound (complete_start_trace=false), never a complete trace.
-async function monitor(root) {
+export async function monitor(root) {
   const child = spawn('pwsh', ['-NoProfile', '-NonInteractive', '-File', probeScript,
     '-OutputRoot', root], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
   let stderr = '';
@@ -158,7 +174,7 @@ async function monitor(root) {
 // double ownership (same batch CIM approach as scripts/probe_runtime_demand.mjs
 // cleanupLineage); one command, no per-PID spawns, no name-based kill, no
 // external process trees (PickerHost untouched), no evidence deletion.
-async function cleanupLineage(root) {
+export async function cleanupLineage(root) {
   const records = jsonLines(path.join(root, 'process-starts.jsonl'))
     .filter((row) => row.creation_filetime !== null && row.creation_filetime !== undefined);
   for (const row of records)
@@ -349,7 +365,7 @@ async function watchImageEditInput(page) {
   });
 }
 
-async function focusMain(ctx) {
+export async function focusMain(ctx) {
   await ctx.page.bringToFront();
   const main = (await windows(ctx.child.pid)).find((item) => item.Handle === ctx.main.Handle);
   assert(main?.Visible && !main.Iconic, 'Owned main window is not available for input.');
@@ -598,6 +614,11 @@ async function captureStep(ctx) {
       if (!scene) await delay(100);
     }
     assert(scene, 'Screenshot scene WebView did not appear.');
+    // Task #215: install the probe on the scene as soon as it is located,
+    // BEFORE any public operation, and await it (its context is attached
+    // inside; an init-script probe, if any, stays untouched/idempotent).
+    if (ctx.collector) await ctx.collector.installOnPage(scene)
+      .catch((error) => ctx.collector.noteError(`scene install: ${error.message}`));
     await scene.locator('html[data-capture-scene="true"]')
       .waitFor({ state: 'attached', timeout: 12000 });
     await scene.getByLabel('图片检查画布').waitFor({ timeout: 12000 });
@@ -672,6 +693,9 @@ async function captureStep(ctx) {
       await delay(200);
     }
     step.pinClosed = true;
+    // Task #215: recover the scene page's bounded measurement while the
+    // window is still open (listener-only data; no bridge commands).
+    if (ctx.collector) await ctx.collector.harvest('scene-capture', scene);
     await scene.screenshot({ path: path.join(root, 'capture-scene.png') });
     const closed = scene.waitForEvent('close', { timeout: 10000 });
     await scene.getByRole('button', { name: '结束会话', exact: true }).click();
@@ -742,6 +766,9 @@ function zeroEvidence(copy, root, appPid) {
 // without non-empty content is rejected. The temp directory is kept as
 // evidence; nothing is deleted.
 async function selfCheck() {
+  // Task #215 (no GUI): real in-page probe source on a fake DOM - UTF-8
+  // Chinese payload bytes, scope aggregation, bounded maps/lists.
+  const measurement = await runMeasurementSelfCheck();
   const root = path.join(fs.realpathSync(os.tmpdir()),
     `rt214-zero-selfcheck-${randomUUID().slice(0, 8)}`);
   const benign = path.join(root, 'benign');
@@ -774,7 +801,7 @@ async function selfCheck() {
     benign_allowed: allowed.hits.length === 0,
     installer_list_and_switch_reservation_rejected: installerScan.hits.length > 0,
     empty_rejected: !emptyScan.nonEmpty && !noFiles.nonEmpty,
-  } }));
+  }, measurement_215: measurement }));
 }
 
 async function run(candidate, work) {
@@ -796,7 +823,7 @@ async function run(candidate, work) {
       'zero AppLog evidence requires a non-empty log plus no Installer command start (any action) and no runtime demand connect/initialize_default',
     ] };
   const ctx = { child: null, browser: null, page: null, main: null,
-    root, copy, fixture: null, fixtureCleanupErrors: [] };
+    root, copy, fixture: null, fixtureCleanupErrors: [], collector: null };
   let watch;
   try {
     for (const marker of ['app/VibeOCR.WinUI.exe', 'app/metadata/product-layout.json',
@@ -827,6 +854,16 @@ async function run(candidate, work) {
     const connected = await connect(ctx.child, debugPort);
     ctx.browser = connected.browser;
     ctx.page = connected.page;
+    // Task #215: passive measurement (listener-only, additive). Contexts
+    // existing at attach are instrumented; the scene page's context is
+    // confirmed explicitly via page.context() at harvest time. The already-
+    // loaded main page gets the probe directly (late install recorded as
+    // such, first_screen_missed=true in measurement_215).
+    ctx.collector = createWorkbenchCollector();
+    await ctx.collector.attachBrowser(ctx.browser)
+      .catch((error) => ctx.collector.noteError(`browser attach: ${error.message}`));
+    await ctx.collector.installOnPage(ctx.page)
+      .catch((error) => ctx.collector.noteError(`main page install: ${error.message}`));
     ctx.main = (await windows(ctx.child.pid))
       .filter((item) => item.Visible && area(item) > 20000)
       .sort((a, b) => area(b) - area(a))[0];
@@ -853,6 +890,10 @@ async function run(candidate, work) {
       } catch (error) { cleanupErrors.push(`fixture ${ctx.fixture.pid}: ${error.message}`); }
       ctx.fixture = null;
     }
+    // Task #215: bounded measurement recovery before the pages go away;
+    // gaps land in measurement_215.errors/limitations and never mask the
+    // functional/zero-evidence outcome below.
+    if (ctx.collector && ctx.page) await ctx.collector.harvest('main', ctx.page);
     if (ctx.browser) await ctx.browser.close().catch(() => {});
     if (ctx.child) {
       try {
@@ -873,6 +914,15 @@ async function run(candidate, work) {
       catch (error) { cleanupErrors.push(`lineage: ${error.message}`); }
     }
     if (cleanupErrors.length) record.cleanup_error = cleanupErrors.join('; ');
+    if (ctx.collector) {
+      record.measurement_215 = ctx.collector.finalise();
+      try {
+        fs.writeFileSync(path.join(root, 'workbench-delivery-215.json'),
+          JSON.stringify(record.measurement_215, null, 2));
+      } catch (error) {
+        record.measurement_215.write_error = error.message;
+      }
+    }
     try {
       record.zero_evidence = zeroEvidence(copy, root, record.app_pid);
       if (fs.existsSync(path.join(root, 'monitor-info.json')))

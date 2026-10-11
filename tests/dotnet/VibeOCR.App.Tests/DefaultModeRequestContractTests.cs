@@ -375,12 +375,12 @@ public sealed class DefaultModeRequestContractTests
         static () => throw new InvalidOperationException(),
         new DiagnosticsViewModel("test", new PrerequisiteReport([])),
         broker, resourceRoot, static () => 0, annotations);
-      System.Reflection.FieldInfo switching = typeof(DesktopWorkbenchCommandHandler)
+      System.Reflection.FieldInfo switching = typeof(WorkbenchSettingsOwner)
         .GetField("environmentSwitching",
           System.Reflection.BindingFlags.NonPublic |
           System.Reflection.BindingFlags.Instance)!;
 
-      switching.SetValue(handler, 1);
+      switching.SetValue(handler.Settings, 1);
       WorkbenchCommandOutcome batchOutcome = await handler.ExecuteAsync(
         new StartBatchCommand(), TestContext.Current.CancellationToken);
       var batchState = Assert.IsType<BatchWorkbenchState>(
@@ -397,7 +397,7 @@ public sealed class DefaultModeRequestContractTests
 
       // 未提交任何请求；退出切换窗口后同一链路恢复提交。
       Assert.Empty(fake.Submissions);
-      switching.SetValue(handler, 0);
+      switching.SetValue(handler.Settings, 0);
       WorkbenchCommandOutcome resumed = await handler.ExecuteAsync(
         new StartBatchCommand(), TestContext.Current.CancellationToken);
       Assert.Null(resumed.Error);

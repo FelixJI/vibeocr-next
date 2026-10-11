@@ -14,6 +14,11 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              name: "result-math",
+              test: /node_modules[\\/]katex/,
+              priority: 25,
+            },
+            {
               name: "react-vendor",
               test: /node_modules[\\/](react|react-dom|react-router)/,
               priority: 20,

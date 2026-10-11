@@ -24,9 +24,43 @@ public sealed class ManagedEnvironmentSettings(
     private ManagedEnvironmentInstallProgress? installProgress;
     private string[] installLog = [];
     private int installGeneration;
+  private int progressNotificationQueued;
+  private long progressNotificationVersion;
     public ManagedEnvironmentInstallProgress? InstallProgress { get { lock (progressLock) return installProgress; } }
     public IReadOnlyList<string> InstallLog { get { lock (progressLock) return installLog; } }
     public bool SupportsInstallProgress => manager.SupportsEnvironmentInstallProgress;
+
+  private void NotifyInstallProgress(SynchronizationContext? context)
+  {
+    Interlocked.Increment(ref progressNotificationVersion);
+    if (context is null) { StateChanged?.Invoke(); return; }
+    QueueInstallProgressNotification(context);
+  }
+
+  private void QueueInstallProgressNotification(SynchronizationContext context)
+  {
+    if (Interlocked.CompareExchange(ref progressNotificationQueued, 1, 0) != 0) return;
+    try
+    {
+      context.Post(_ =>
+      {
+        long version = Volatile.Read(ref progressNotificationVersion);
+        try { StateChanged?.Invoke(); }
+        catch (Exception) { /* UI observers cannot change the install result. */ }
+        finally
+        {
+          Volatile.Write(ref progressNotificationQueued, 0);
+          if (Volatile.Read(ref progressNotificationVersion) != version)
+            QueueInstallProgressNotification(context);
+        }
+      }, null);
+    }
+    catch (Exception)
+    {
+      Volatile.Write(ref progressNotificationQueued, 0);
+      // A closing UI context cannot affect the installation transaction.
+    }
+  }
     public bool SupportsCleanup => manager.SupportsEnvironmentCleanup;
     public ManagedCleanupPlan? CleanupPlan { get; private set; }
     public ManagedCleanupResult? CleanupResult { get; private set; }
@@ -37,7 +71,8 @@ public sealed class ManagedEnvironmentSettings(
     {
         Items = plan.Items.Skip(CleanupPage * CleanupPageSize).Take(CleanupPageSize).Select(item => item with
         {
-            Reason = CleanupSummary(item.Reason), LastError = item.LastError is null ? null : CleanupSummary(item.LastError),
+      Reason = CleanupSummary(item.Reason),
+      LastError = item.LastError is null ? null : CleanupSummary(item.LastError),
             Paths = item.Paths.Take(1).Select(CleanupSummary).ToArray(),
         }).ToArray(),
         LastResult = null,
@@ -339,11 +374,11 @@ public sealed class ManagedEnvironmentSettings(
             {
                 void Apply()
                 {
+          lock (progressLock)
+          {
                     if (attemptGeneration != Volatile.Read(ref installGeneration) ||
                         update.PlanId != plan.PlanId || update.EnvironmentId != plan.EnvironmentId ||
                         update.EnvironmentRevision != plan.EnvironmentRevision) return;
-                    lock (progressLock)
-                    {
                         if (installProgress is { } previous &&
                             (previous.AttemptId != update.AttemptId || update.Seq <= previous.Seq || previous.State != "running")) return;
                         installProgress = update;
@@ -362,14 +397,9 @@ public sealed class ManagedEnvironmentSettings(
                             installLog = start == 0 ? next : ["[较早输出已截断]", .. next[start..]];
                         }
                     }
-                    StateChanged?.Invoke();
+          NotifyInstallProgress(context);
                 }
-                if (context is null) Apply();
-                else context.Post(_ =>
-                                        {
-                                            try { Apply(); }
-                                            catch (Exception) { /* UI observers cannot change the install result. */ }
-                                        }, null);
+        Apply();
             }
             bool cancelled = false;
             try
@@ -422,7 +452,8 @@ public sealed class ManagedEnvironmentSettings(
                         {
                             State = evidence is { Phase: "failed" } && evidence.PlanId == plan.PlanId
                                 ? evidence.ReasonCode == "install_interrupted" ? "cancelled" : "failed" : "running",
-                            Current = Status, Log = null,
+              Current = Status,
+              Log = null,
                         };
                 return;
             }
@@ -635,8 +666,11 @@ public sealed class ManagedEnvironmentSettings(
                 health.InstanceId != session.Process.Ready.InstanceId ||
                 status.InstanceId != session.Process.Ready.InstanceId) return;
             ManagedEnvironment observed = ProjectRunning(current, health, residency, status);
-            Snapshot = snapshot with { Environments = [.. snapshot.Environments.Select(item =>
-                item.Id == current.Id ? observed : item)] };
+      Snapshot = snapshot with
+      {
+        Environments = [.. snapshot.Environments.Select(item =>
+                item.Id == current.Id ? observed : item)]
+      };
         }
         catch (Exception error) when (error is HttpRequestException or InferenceClientException or VibeOCR.Runtime.Client.RuntimeClientException)
         {
@@ -671,7 +705,9 @@ public sealed class ManagedEnvironmentSettings(
         ManagedEnvironment? current = snapshot.Environments.SingleOrDefault(item =>
             item.Id == session.EnvironmentId && item.Revision == session.Revision);
         if (current is null) return;
-        Snapshot = snapshot with { Environments = [.. snapshot.Environments.Select(item =>
+    Snapshot = snapshot with
+    {
+      Environments = [.. snapshot.Environments.Select(item =>
             item.Id == current.Id
                 ? item with
                 {
@@ -680,7 +716,8 @@ public sealed class ManagedEnvironmentSettings(
                     ServiceState = "unverified",
                     Reason = RunningEvidenceUnavailableMessage,
                 }
-                : item)] };
+                : item)]
+    };
     }
 
     internal static ManagedEnvironment ProjectRunning(

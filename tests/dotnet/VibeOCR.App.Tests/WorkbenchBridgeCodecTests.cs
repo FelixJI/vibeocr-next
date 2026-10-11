@@ -1091,10 +1091,36 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     Guid session = Guid.NewGuid();
     string stateJson = WorkbenchBridgeCodec.SerializeState(session, envelope);
     var bootstrap = new WorkbenchBootstrap(2, session, 99, WorkbenchRoute.Settings,
-      [envelope, new WorkbenchStateEnvelope(98, "about", WorkbenchStateChange.Replace, new AboutWorkbenchState("0.3.0", new string('许', 200), "https://example.invalid"))],
+      [envelope,
+        new(98, "shell", WorkbenchStateChange.Replace, new ShellWorkbenchState(WorkbenchRoute.Settings)),
+        new(98, "recognition", WorkbenchStateChange.Replace, new RecognitionWorkbenchState(false, "recognition.failed")),
+        new(98, "imageEdit", WorkbenchStateChange.Replace, new ImageEditWorkbenchState(false, "recognition.session")),
+        new(98, "batch", WorkbenchStateChange.Replace, new BatchWorkbenchState(false, 40, 20, 20,
+          Enumerable.Range(0, 40).Select(index => new BatchWorkbenchItem(Guid.Empty, new string('名', 80), "batch.item.failed", new string('错', 120))).ToArray())),
+        new(98, "pdf", WorkbenchStateChange.Replace, new PdfWorkbenchState(false, "pdf.failed", 64, 0,
+          Pages: Enumerable.Range(0, 64).Select(index => new PdfWorkbenchPage(index, "pdf.page.done", new WorkbenchResourceReference("https://app.vibeocr/__resource/" + new string('a', 32), "image/png", 1024))).ToArray(),
+          Documents: Enumerable.Range(0, 16).Select(index => new PdfDocumentSummary(new string('b', 32), "文档", 64, true, false, "idle", false)).ToArray())),
+        new(98, "qrcode", WorkbenchStateChange.Replace, new QrCodeWorkbenchState(false, "qrcode.ready", [], null)),
+        new(98, "update", WorkbenchStateChange.Replace, new UpdateWorkbenchState(false, "update.current", null, false)),
+        new(98, "diagnostics", WorkbenchStateChange.Replace, new DiagnosticsWorkbenchState("ready", "v2", true, [])),
+        new(98, "about", WorkbenchStateChange.Replace, new AboutWorkbenchState("0.3.0", "MIT", "https://example.invalid"))],
       new HashSet<string> { "runtime.environments" });
-    string bootstrapJson = WorkbenchBridgeCodec.SerializeBootstrap(Guid.NewGuid(), bootstrap);
-    foreach (string json in new[] { stateJson, bootstrapJson })
+    foreach (var scope in bootstrap.States)
+      output.WriteLine($"complete-snapshot scope={scope.Scope} utf8Bytes={Encoding.UTF8.GetByteCount(WorkbenchBridgeCodec.SerializeState(session, scope))}");
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.SerializeBootstrap(Guid.NewGuid(), bootstrap));
+    var startup = WorkbenchBridgeCodec.SerializeBootstrapResponse(Guid.NewGuid(), bootstrap);
+    Assert.True(startup.RequiresSnapshot);
+    using (JsonDocument control = JsonDocument.Parse(startup.Json))
+    {
+      var payload = control.RootElement.GetProperty("payload");
+      Assert.Equal("snapshot", payload.GetProperty("stateTransfer").GetString());
+      Assert.Equal(10, payload.GetProperty("stateScopes").GetArrayLength());
+      Assert.False(payload.TryGetProperty("features", out _));
+    }
+    Assert.True(Encoding.UTF8.GetByteCount(startup.Json) <= WorkbenchBridgeCodec.MaxMessageBytes);
+    var small = WorkbenchBridgeCodec.SerializeBootstrapResponse(Guid.NewGuid(), bootstrap with { States = [envelope] });
+    Assert.False(small.RequiresSnapshot);
+    foreach (string json in new[] { stateJson, small.Json })
     {
       int bytes = Encoding.UTF8.GetByteCount(json);
       output.WriteLine($"install-budget state={terminal} envelope={(json == stateJson ? "state" : "bootstrap")} bytes={bytes} limit={WorkbenchBridgeCodec.MaxMessageBytes}");
@@ -1132,6 +1158,15 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     }
     // The next exact terminal is independently serializable after a large log event.
     WorkbenchBridgeCodec.SerializeState(session, envelope with { Revision = 100, State = settings with { EnvironmentInstallProgress = progress with { State = "succeeded", Phase = "complete", Seq = 853 } } });
+  }
+
+  [Fact]
+  public void BootstrapTransferNeverBypassesAnOversizedSingleScope()
+  {
+    var bootstrap = new WorkbenchBootstrap(2, Guid.NewGuid(), 7, WorkbenchRoute.Recognition,
+      [new(7, "shell", WorkbenchStateChange.Replace, new ShellWorkbenchState(WorkbenchRoute.Recognition)),
+        new(7, "recognition", WorkbenchStateChange.Replace, new RecognitionWorkbenchState(false, new string('x', WorkbenchBridgeCodec.MaxMessageBytes)))], new HashSet<string>());
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.SerializeBootstrapResponse(Guid.NewGuid(), bootstrap));
   }
 
   [Fact]
