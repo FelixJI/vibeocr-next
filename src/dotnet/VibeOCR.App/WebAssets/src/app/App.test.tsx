@@ -1,7 +1,7 @@
 import {
   act,
   fireEvent,
-  render,
+  render as renderImmediate,
   screen,
   waitFor,
   within,
@@ -13,6 +13,31 @@ import { describe, expect, it, vi } from "vitest";
 import { App, type AppActions, type AppViewState } from "./App";
 
 Object.assign(globalThis, { NodeFilter: window.NodeFilter });
+
+async function renderLoaded(element: React.ReactNode) {
+  const result = renderImmediate(element);
+  await waitFor(() =>
+    expect(screen.queryByText("正在加载页面…")).not.toBeInTheDocument(),
+  );
+  return {
+    ...result,
+    rerender: async (next: React.ReactNode) => {
+      if (vi.isFakeTimers()) {
+        act(() => {
+          result.rerender(next);
+        });
+        expect(screen.queryByText("正在加载页面…")).not.toBeInTheDocument();
+        return;
+      }
+      await act(async () => {
+        result.rerender(next);
+      });
+      await waitFor(() =>
+        expect(screen.queryByText("正在加载页面…")).not.toBeInTheDocument(),
+      );
+    },
+  };
+}
 
 describe("AppShell", () => {
   it("keeps the capture editor isolated from main navigation", async () => {
@@ -31,7 +56,7 @@ describe("AppShell", () => {
       features: {},
       runtimeLabel: "原生宿主已连接",
     };
-    const { rerender, unmount } = render(
+    const { rerender, unmount } = await renderLoaded(
       <App actions={actions} viewState={viewState} />,
     );
     expect(
@@ -40,7 +65,7 @@ describe("AppShell", () => {
     expect(
       screen.queryByRole("complementary", { name: "主导航" }),
     ).not.toBeInTheDocument();
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{ ...viewState, revision: 2, route: "pdf" }}
@@ -69,7 +94,9 @@ describe("AppShell", () => {
       features: {},
       runtimeLabel: "原生宿主已连接",
     };
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "选择图片" }));
     await user.click(screen.getByRole("button", { name: "粘贴图片" }));
@@ -101,7 +128,9 @@ describe("AppShell", () => {
       features: {},
       runtimeLabel: "未连接",
     };
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
     // 单击直接开始普通截图：不再弹出菜单，长截图等动作在框选后的动作栏里。
     expect(screen.getAllByRole("button", { name: /^截图$/ })).toHaveLength(1);
     expect(
@@ -113,7 +142,7 @@ describe("AppShell", () => {
     });
     unmount();
   });
-  it("disables the unified screenshot button without the capture capability", () => {
+  it("disables the unified screenshot button without the capture capability", async () => {
     window.location.hash = "#/recognition";
     const actions: AppActions = {
       run: vi.fn(),
@@ -129,7 +158,9 @@ describe("AppShell", () => {
       features: {},
       runtimeLabel: "原生宿主已连接",
     };
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
     const button = screen.getAllByRole("button", { name: /^截图$/ })[0]!;
     expect(button).toBeDisabled();
     unmount();
@@ -172,7 +203,9 @@ describe("AppShell", () => {
         },
       },
     };
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
     // 配置已保存但未注册生效必须如实区分，不得冒称当前生效。
     expect(
       screen.getByText("已保存 Ctrl+Alt+Q，但当前未注册生效"),
@@ -249,7 +282,9 @@ describe("AppShell", () => {
         },
       },
     };
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
     expect(
       screen.getByText(/当前状态：已主动隐藏（鼠标路过不恢复）/),
     ).toBeVisible();
@@ -327,7 +362,9 @@ describe("AppShell", () => {
       runtimeLabel: "运行时已就绪",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
 
     await user.click(screen.getByRole("link", { name: "二维码与条码" }));
     expect(actions.navigate).toHaveBeenCalledWith("qrcode");
@@ -367,7 +404,7 @@ describe("AppShell", () => {
       features: {},
       runtimeLabel: "原生宿主已连接",
     };
-    const { rerender, unmount } = render(
+    const { rerender, unmount } = await renderLoaded(
       <App actions={actions} viewState={initial} />,
     );
     const push = vi.spyOn(window.history, "pushState");
@@ -376,7 +413,7 @@ describe("AppShell", () => {
       expect(actions.navigate).toHaveBeenCalledWith("qrcode");
       expect(push).not.toHaveBeenCalled();
       expect(window.location.hash).toBe("#/recognition");
-      rerender(
+      await rerender(
         <App
           actions={actions}
           viewState={{ ...initial, revision: 2, route: "qrcode" }}
@@ -406,11 +443,11 @@ describe("AppShell", () => {
       features: {},
       runtimeLabel: "原生宿主已连接",
     };
-    const { rerender, unmount } = render(
+    const { rerender, unmount } = await renderLoaded(
       <App actions={actions} viewState={initial} />,
     );
 
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{ ...initial, revision: 2, route: "pdf" }}
@@ -441,7 +478,9 @@ describe("AppShell", () => {
       features: {},
       runtimeLabel: "演示模式",
     };
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
 
     await user.type(screen.getByLabelText("输入内容"), "中文识别结果");
     await user.click(screen.getByRole("button", { name: "生成图片" }));
@@ -489,7 +528,9 @@ describe("AppShell", () => {
       },
       runtimeLabel: "就绪",
     };
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
     await user.selectOptions(screen.getByLabelText("生成格式"), "ean13");
     await user.selectOptions(screen.getByLabelText("底部文字"), "custom");
     await user.type(screen.getByLabelText("独立说明"), "标签");
@@ -586,7 +627,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
     expect(screen.getByText("发票一.png")).toBeVisible();
     expect(screen.getByText("合计 42 元")).toBeVisible();
     // 页码范围说明取代了旧的“批次由识别服务自动调度”调度说明。
@@ -655,7 +698,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
     await user.click(screen.getByRole("checkbox", { name: "选择第 2 页" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "pdf.selectPage",
@@ -693,7 +738,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
     await user.click(screen.getByRole("tab", { name: "识别" }));
     await user.click(screen.getByRole("button", { name: "打开链接" }));
     expect(actions.run).toHaveBeenCalledWith({
@@ -729,7 +776,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
     const undo = screen.getByRole("button", { name: "撤销" });
     expect(undo).toBeDisabled();
     // 单次识别面只保留去水印、旋转、屏蔽三类图片处理工具（用户项2）；
@@ -755,7 +804,7 @@ describe("AppShell", () => {
     unmount();
   });
 
-  it("shows failed recognition and rejected host commands without hiding them as idle", () => {
+  it("shows failed recognition and rejected host commands without hiding them as idle", async () => {
     window.location.hash = "#/recognition";
     const actions: AppActions = {
       run: vi.fn(),
@@ -773,7 +822,9 @@ describe("AppShell", () => {
       commandProblem: "workbench.error.desktopCommandFailed",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
 
     expect(screen.getByText("识别失败，请检查运行时状态后重试")).toBeVisible();
     expect(screen.getByRole("alert")).toHaveTextContent(
@@ -781,7 +832,7 @@ describe("AppShell", () => {
     );
     unmount();
 
-    const cancelled = render(
+    const cancelled = await renderLoaded(
       <App
         actions={actions}
         viewState={{
@@ -816,7 +867,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
     const cancel = screen.getByRole("button", { name: "取消任务" });
     expect(cancel).toBeEnabled();
     await user.click(cancel);
@@ -853,7 +906,7 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { rerender, unmount } = render(
+    const { rerender, unmount } = await renderLoaded(
       <App actions={actions} viewState={base} />,
     );
     await user.click(screen.getByRole("button", { name: "下一组" }));
@@ -863,7 +916,7 @@ describe("AppShell", () => {
     });
 
     window.location.hash = "#/pdf";
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -919,7 +972,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
     expect(screen.getByText("0.2.0")).toBeVisible();
     expect(screen.getByText("Proprietary")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "打开项目主页" }));
@@ -958,7 +1013,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
 
     // 旧入口落到合并后的唯一页面，不再出现第二个内容重复页面。
     expect(
@@ -1047,7 +1104,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
 
     expect(screen.queryByLabelText("默认模式")).not.toBeInTheDocument();
     // 随包基础能力展示已移除（纯视觉）：二维码能力不受设置页影响。
@@ -1101,7 +1160,7 @@ describe("AppShell", () => {
     unmount();
   });
 
-  it("prepares runtime only after the explicit settings action", () => {
+  it("prepares runtime only after the explicit settings action", async () => {
     window.location.hash = "#/settings";
     const run = vi.fn();
     const actions: AppActions = {
@@ -1129,7 +1188,7 @@ describe("AppShell", () => {
     };
 
     // 宿主未声明 runtime.refresh 能力时不派发；StrictMode 双挂载也不得提前触发。
-    const { rerender, unmount } = render(
+    const { rerender, unmount } = await renderLoaded(
       <StrictMode>
         <App actions={actions} viewState={base} />
       </StrictMode>,
@@ -1137,7 +1196,7 @@ describe("AppShell", () => {
     expect(run).not.toHaveBeenCalled();
 
     // 能力广播和通用设置挂载均保持纯本地；只有显式点击才准备。
-    rerender(
+    await rerender(
       <StrictMode>
         <App
           actions={actions}
@@ -1154,7 +1213,7 @@ describe("AppShell", () => {
     expect(run).toHaveBeenCalledWith({ type: "settings.refreshRuntime" });
 
     // 后续宿主状态广播（刷新结果、能力数组重建）不得再次触发挂载刷新。
-    rerender(
+    await rerender(
       <StrictMode>
         <App
           actions={actions}
@@ -1188,7 +1247,7 @@ describe("AppShell", () => {
     unmount();
   });
 
-  it("reads the environment list without requesting runtime preparation", () => {
+  it("reads the environment list without requesting runtime preparation", async () => {
     window.location.hash = "#/settings";
     const run = vi.fn();
     const actions: AppActions = { run, navigate: vi.fn(), setTheme: vi.fn() };
@@ -1201,7 +1260,9 @@ describe("AppShell", () => {
       features: { settings: { isBusy: false, environments: [] } },
       runtimeLabel: "原生宿主已连接",
     };
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
     expect(run).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "查看环境清单" }));
     expect(run).toHaveBeenCalledTimes(1);
@@ -1247,7 +1308,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
 
     const mode = screen.getByLabelText("MinerU 运行模式");
     expect(mode).toHaveValue("local");
@@ -1309,7 +1372,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
 
     expect(
       screen.getByRole("option", { name: "远程（自部署服务）" }),
@@ -1326,7 +1391,7 @@ describe("AppShell", () => {
     unmount();
   });
 
-  it("waits for the runtime catalog before offering MinerU connection editing", () => {
+  it("waits for the runtime catalog before offering MinerU connection editing", async () => {
     window.location.hash = "#/settings";
     const actions: AppActions = {
       run: vi.fn(),
@@ -1355,7 +1420,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
 
     expect(
       screen.getByText(/MinerU 连接设置等待运行环境目录同步/),
@@ -1367,7 +1434,7 @@ describe("AppShell", () => {
     unmount();
   });
 
-  it("does not describe unloaded download sources as a backend decision", () => {
+  it("does not describe unloaded download sources as a backend decision", async () => {
     window.location.hash = "#/settings";
     const actions: AppActions = {
       run: vi.fn(),
@@ -1394,7 +1461,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
 
     expect(screen.getByText(/尚未加载/)).toBeVisible();
     expect(
@@ -1458,7 +1527,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
 
     // 随包能力展示已移除（纯视觉）：二维码能力不受设置页影响。
     expect(screen.queryByText("当前运行环境不可用")).not.toBeInTheDocument();
@@ -1576,7 +1647,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
 
     expect(
       screen.getByText(
@@ -1693,7 +1766,7 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { rerender, unmount } = render(
+    const { rerender, unmount } = await renderLoaded(
       <App actions={actions} viewState={base} />,
     );
     const confirm = screen.getByRole("button", { name: "确认此计划并安装" });
@@ -1722,7 +1795,7 @@ describe("AppShell", () => {
       },
     });
 
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={settings({
@@ -1749,7 +1822,7 @@ describe("AppShell", () => {
 
     vi.useFakeTimers();
     try {
-      rerender(
+      await rerender(
         <App
           actions={actions}
           viewState={settings({
@@ -1767,7 +1840,7 @@ describe("AppShell", () => {
     } finally {
       vi.useRealTimers();
     }
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={settings({
@@ -1780,7 +1853,7 @@ describe("AppShell", () => {
       screen.getByText("安装计划已过期，请重新预览后确认。"),
     ).toBeVisible();
 
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={settings({
@@ -1814,7 +1887,7 @@ describe("AppShell", () => {
     ).toBeVisible();
     expect(screen.getByRole("button", { name: "取消安装" })).toBeEnabled();
 
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={settings({ canPreviewInstall: false })}
@@ -1873,7 +1946,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
 
     expect(screen.getByText("当前服务：识别服务已就绪。")).toBeVisible();
     expect(
@@ -1895,7 +1970,7 @@ describe("AppShell", () => {
     unmount();
   });
 
-  it("renders idle settings without a maintenance progress bar and an unread target accelerator", () => {
+  it("renders idle settings without a maintenance progress bar and an unread target accelerator", async () => {
     window.location.hash = "#/settings";
     const actions: AppActions = {
       run: vi.fn(),
@@ -1931,7 +2006,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
 
     expect(screen.getByText("目标推理设备：尚未读取")).toBeVisible();
     expect(screen.getByText("当前服务：等待运行时检查")).toBeVisible();
@@ -1940,7 +2017,7 @@ describe("AppShell", () => {
     unmount();
   });
 
-  it("shows current instance device evidence without claiming a completed execution", () => {
+  it("shows current instance device evidence without claiming a completed execution", async () => {
     window.location.hash = "#/diagnostics";
     const actions: AppActions = {
       run: vi.fn(),
@@ -1961,7 +2038,9 @@ describe("AppShell", () => {
       },
       runtimeLabel: "原生宿主已连接",
     };
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
     // 设备证据属于排错信息：默认折叠在技术详情里，内容仍在文档中可展开。
     expect(
       screen.getByText("[Paddle worker] [GPU] 验证失败，回退到 CPU"),
@@ -1975,7 +2054,7 @@ describe("AppShell", () => {
     unmount();
   });
 
-  it("gates the maintenance progress bar on the active operation with a real total", () => {
+  it("gates the maintenance progress bar on the active operation with a real total", async () => {
     window.location.hash = "#/settings";
     const actions: AppActions = {
       run: vi.fn(),
@@ -2020,7 +2099,7 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { rerender, unmount } = render(
+    const { rerender, unmount } = await renderLoaded(
       <App actions={actions} viewState={viewState} />,
     );
 
@@ -2030,7 +2109,7 @@ describe("AppShell", () => {
     });
     expect(indeterminate).not.toHaveAttribute("aria-valuenow");
 
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -2051,7 +2130,7 @@ describe("AppShell", () => {
       screen.getByRole("progressbar", { name: "运行环境维护进度" }),
     ).toHaveAttribute("aria-valuenow", "0.5");
 
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -2131,7 +2210,7 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount, rerender } = render(
+    const { unmount, rerender } = await renderLoaded(
       <App actions={actions} viewState={viewState} />,
     );
 
@@ -2147,7 +2226,7 @@ describe("AppShell", () => {
     expect(actions.run).toHaveBeenCalledWith({
       type: "recognition.setTaskEngine",
     });
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -2183,7 +2262,7 @@ describe("AppShell", () => {
         "该 Paddle 模式使用模型驻留；支持：预热、TTL、固定驻留、释放。",
       ),
     ).toBeVisible();
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -2272,7 +2351,9 @@ describe("AppShell", () => {
         },
       },
     } satisfies AppViewState;
-    const first = render(<App actions={actions} viewState={viewState} />);
+    const first = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
     expect(
       screen.getByRole("region", { name: "依赖安装进度" }),
     ).toHaveTextContent(
@@ -2285,7 +2366,7 @@ describe("AppShell", () => {
       "<script>never execute</script>",
     );
     first.unmount();
-    const second = render(
+    const second = await renderLoaded(
       <App actions={actions} viewState={{ ...viewState, revision: 2 }} />,
     );
     expect(screen.getByText(/当前：真实安装批次/)).toBeVisible();
@@ -2319,7 +2400,7 @@ describe("AppShell", () => {
         },
       },
     };
-    second.rerender(<App actions={actions} viewState={terminal} />);
+    await second.rerender(<App actions={actions} viewState={terminal} />);
     const panel = screen.getByRole("region", { name: "依赖安装进度" });
     expect(panel).toHaveAttribute("data-install-attempt", "attempt");
     expect(panel).toHaveAttribute("data-install-seq", "12");
@@ -2395,7 +2476,7 @@ describe("AppShell", () => {
         },
       },
     };
-    const { unmount, rerender } = render(
+    const { unmount, rerender } = await renderLoaded(
       <App viewState={viewState} actions={actions} />,
     );
     expect(screen.getByRole("checkbox", { name: /共享模型/ })).toBeDisabled();
@@ -2425,7 +2506,7 @@ describe("AppShell", () => {
       type: "settings.setEnvironmentCleanupPage",
       page: 1,
     });
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -2535,7 +2616,9 @@ describe("AppShell", () => {
         },
       },
     };
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
     // 高级区默认折叠：先展开再操作原编辑器全部路径。
     expect(screen.queryByText("高级：环境与依赖管理")).not.toBeInTheDocument();
     // 快照已同步但无活动环境：展示默认配置“尚未启动”，不误写“尚未读取”，
@@ -2578,7 +2661,9 @@ describe("AppShell", () => {
     await user.click(screen.getByRole("button", { name: "取消移除" }));
     // 重新预览隐藏旧计划，收到新计划后才允许确认。
     unmount();
-    const restored = render(<App actions={actions} viewState={viewState} />);
+    const restored = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
     await user.click(screen.getByRole("button", { name: "确认安装依赖" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.confirmEnvironmentInstall",
@@ -2661,7 +2746,7 @@ describe("AppShell", () => {
       runtimeLabel: "运行环境",
       features: { settings: settingsBase },
     };
-    const { unmount, rerender } = render(
+    const { unmount, rerender } = await renderLoaded(
       <App actions={actions} viewState={viewState} />,
     );
     // 选择即查询：默认用途/设备只读触发一次兼容查询，不创建不安装。
@@ -2676,7 +2761,7 @@ describe("AppShell", () => {
     expect(
       screen.getByText(/目标配置：RapidOCR · CPU（文字识别，设备 cpu/),
     ).toBeVisible();
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -2713,7 +2798,7 @@ describe("AppShell", () => {
       environmentId: "env-1",
     });
     // active 且已验证时不伪重装：只说明现状，不再提供切换/准备按钮。
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -2819,7 +2904,7 @@ describe("AppShell", () => {
       runtimeLabel: "运行环境",
       features: { settings: settingsBase },
     };
-    const { unmount, rerender } = render(
+    const { unmount, rerender } = await renderLoaded(
       <App actions={actions} viewState={viewState} />,
     );
     await waitFor(() =>
@@ -2829,7 +2914,7 @@ describe("AppShell", () => {
       }),
     );
     // 查询无命中：只读结果如实呈现“没有可直接复用”，准备按钮可用。
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -2857,7 +2942,7 @@ describe("AppShell", () => {
       type: "settings.prepareEnvironment",
       recipe: "rapidocr-cpu",
     });
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -2897,7 +2982,7 @@ describe("AppShell", () => {
       name: "RapidOCR · CPU",
     });
     // 计划回显在推荐区：新增依赖如实列出，由用户确认安装。
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -2963,7 +3048,7 @@ describe("AppShell", () => {
     });
     // 选择失效后仍可新建：切到另一用途后重新可以准备（不重复旧待准备）。
     await user.selectOptions(screen.getByLabelText("识别组件"), "mineru");
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -3070,13 +3155,13 @@ describe("AppShell", () => {
             action?.type === "settings.findCompatibleEnvironment" &&
             action?.recipe === recipe,
         ).length;
-    const { unmount, rerender } = render(
+    const { unmount, rerender } = await renderLoaded(
       <App actions={actions} viewState={viewState} />,
     );
     await waitFor(() =>
       expect(countQueries("rapidocr-cpu")).toBeGreaterThanOrEqual(1),
     );
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -3107,7 +3192,7 @@ describe("AppShell", () => {
     expect(screen.getByRole("button", { name: "准备此配置" })).toBeVisible();
     // 查询失败（宿主未回传结果）+ busy/状态推送多次重渲染：同一配方不得
     // 自动重发（每次查询都会冻结一个 Installer 子进程）。
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -3119,7 +3204,7 @@ describe("AppShell", () => {
         }}
       />,
     );
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -3134,7 +3219,7 @@ describe("AppShell", () => {
         }}
       />,
     );
-    rerender(
+    await rerender(
       <App actions={actions} viewState={{ ...viewState, revision: 33 }} />,
     );
     expect(countQueries("rapidocr-cpu")).toBe(1);
@@ -3145,7 +3230,7 @@ describe("AppShell", () => {
     // 迟到的旧选择结果不覆盖新选择：切到文档解析后，旧 rapidocr-cpu 结果
     // 只按配方 id 绑定，不冒充当前选择的查询结果。
     await user.selectOptions(screen.getByLabelText("识别组件"), "mineru");
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -3176,7 +3261,7 @@ describe("AppShell", () => {
     );
     // 切回文字识别：旧结果（未选中任何环境）如实呈现“没有可直接复用”。
     await user.selectOptions(screen.getByLabelText("识别组件"), "rapidocr");
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -3199,7 +3284,7 @@ describe("AppShell", () => {
     expect(screen.getByText(/没有可直接复用的已安装环境/)).toBeVisible();
     const installedBase = countQueries("rapidocr-cpu");
     // 安装进行中：宿主已清空兼容结果且环境修订推进，但 busy 时不补发。
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -3220,7 +3305,7 @@ describe("AppShell", () => {
     // 安装成功结束：兼容结果仍被宿主清空且环境状态已变——自动补发一次新
     // 查询（成功安装后需要新的兼容查询），不永久卡在“查询未完成”；
     // 重复状态推送也不再多发。
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -3238,7 +3323,7 @@ describe("AppShell", () => {
     await waitFor(() =>
       expect(countQueries("rapidocr-cpu")).toBe(installedBase + 1),
     );
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -3253,7 +3338,7 @@ describe("AppShell", () => {
         }}
       />,
     );
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -3270,7 +3355,7 @@ describe("AppShell", () => {
     );
     expect(countQueries("rapidocr-cpu")).toBe(installedBase + 1);
     // 新结果绑定后如实指向修订 4 的可复用环境，不再卡在“查询未完成”。
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -3349,7 +3434,7 @@ describe("AppShell", () => {
         navigate: vi.fn(),
         setTheme: vi.fn(),
       };
-      const { rerender, unmount } = render(
+      const { rerender, unmount } = await renderLoaded(
         <App actions={actions} viewState={base} />,
       );
       const queries = () =>
@@ -3366,14 +3451,14 @@ describe("AppShell", () => {
           selectedEnvironmentId: null,
         },
       };
-      rerender(
+      await rerender(
         <App
           actions={actions}
           viewState={{ ...base, features: { settings: withResult } }}
         />,
       );
       await user.click(screen.getByRole("button", { name: "保存下载来源" }));
-      rerender(
+      await rerender(
         <App
           actions={actions}
           viewState={{
@@ -3382,12 +3467,14 @@ describe("AppShell", () => {
           }}
         />,
       );
-      rerender(<App actions={actions} viewState={base} />);
+      await rerender(<App actions={actions} viewState={base} />);
       await waitFor(() => expect(queries()).toBe(2));
-      rerender(<App actions={actions} viewState={{ ...base, revision: 2 }} />);
+      await rerender(
+        <App actions={actions} viewState={{ ...base, revision: 2 }} />,
+      );
       expect(queries()).toBe(2);
       // 普通失败不循环重查；只有另一个明确失效动作允许新的一次查询。
-      rerender(
+      await rerender(
         <App
           actions={actions}
           viewState={{
@@ -3411,14 +3498,14 @@ describe("AppShell", () => {
         ...settings,
         environments: [{ ...environment, id: "Y" }],
       };
-      rerender(
+      await rerender(
         <App
           actions={actions}
           viewState={{ ...base, features: { settings: afterCancel } }}
         />,
       );
       await waitFor(() => expect(queries()).toBe(beforeCancel + 1));
-      rerender(
+      await rerender(
         <App
           actions={actions}
           viewState={{
@@ -3457,7 +3544,7 @@ describe("AppShell", () => {
         navigate: vi.fn(),
         setTheme: vi.fn(),
       };
-      const { rerender, unmount } = render(
+      const { rerender, unmount } = await renderLoaded(
         <App actions={actions} viewState={base} />,
       );
       await waitFor(() => expect(queries).toBe(1));
@@ -3479,7 +3566,9 @@ describe("AppShell", () => {
         screen.getByRole("button", { name: "重新查询兼容环境" }),
       );
       expect(queries).toBe(3);
-      rerender(<App actions={actions} viewState={{ ...base, revision: 2 }} />);
+      await rerender(
+        <App actions={actions} viewState={{ ...base, revision: 2 }} />,
+      );
       expect(queries).toBe(3);
       unmount();
     });
@@ -3503,7 +3592,7 @@ describe("AppShell", () => {
           selectedEnvironmentId: null,
         },
       };
-      const { rerender, unmount } = render(
+      const { rerender, unmount } = await renderLoaded(
         <App
           actions={actions}
           viewState={{ ...base, features: { settings: initial } }}
@@ -3515,7 +3604,7 @@ describe("AppShell", () => {
         environmentId: "X",
         recipe: "rapidocr-cpu",
       });
-      rerender(
+      await rerender(
         <App
           actions={actions}
           viewState={{
@@ -3531,7 +3620,7 @@ describe("AppShell", () => {
         type: "settings.prepareEnvironment",
         recipe: "rapidocr-cpu",
       });
-      rerender(
+      await rerender(
         <App
           actions={actions}
           viewState={{
@@ -3572,7 +3661,7 @@ describe("AppShell", () => {
         "torch @ https://download.pytorch.org/whl/cu126/torch-2.8.0%2Bcu126-cp312-cp312-win_amd64.whl";
       const torchvision =
         "torchvision @ https://download.pytorch.org/whl/cu126/torchvision-0.23.0%2Bcu126-cp312-cp312-win_amd64.whl";
-      const { unmount } = render(
+      const { unmount } = await renderLoaded(
         <App
           actions={actions}
           viewState={{
@@ -3667,7 +3756,7 @@ describe("AppShell", () => {
         },
       },
     };
-    const { unmount, rerender } = render(
+    const { unmount, rerender } = await renderLoaded(
       <App actions={actions} viewState={viewState} />,
     );
     expect(screen.queryByText("高级：环境与依赖管理")).not.toBeInTheDocument();
@@ -3690,7 +3779,7 @@ describe("AppShell", () => {
       string,
       unknown
     >;
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -3878,7 +3967,7 @@ describe("AppShell", () => {
         },
       },
     };
-    const { unmount, rerender } = render(
+    const { unmount, rerender } = await renderLoaded(
       <App actions={actions} viewState={viewState} />,
     );
     // 来源收敛为一个简单设置：目录展示名直出，默认值跟随 Runtime 解析；
@@ -3921,7 +4010,7 @@ describe("AppShell", () => {
     });
 
     // 引擎间不一致的存量配置如实标注，选择后保存统一为同一提供方。
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -4023,7 +4112,7 @@ describe("AppShell", () => {
         },
       },
     };
-    const { rerender, unmount } = render(
+    const { rerender, unmount } = await renderLoaded(
       <App actions={actions} viewState={viewState} />,
     );
     expect(screen.queryByText("高级：环境与依赖管理")).not.toBeInTheDocument();
@@ -4040,7 +4129,7 @@ describe("AppShell", () => {
 
     // 计划只展示实际使用的下载来源与资产分类。
     const settings = viewState.features.settings as Record<string, unknown>;
-    rerender(
+    await rerender(
       <App
         actions={actions}
         viewState={{
@@ -4138,7 +4227,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
 
     // 继承选项同时展示来源与实际有效模式。
     expect(
@@ -4152,7 +4243,7 @@ describe("AppShell", () => {
     unmount();
   });
 
-  it("keeps showing the committed default on the inherit option while overridden", () => {
+  it("keeps showing the committed default on the inherit option while overridden", async () => {
     window.location.hash = "#/recognition";
     const actions: AppActions = {
       run: vi.fn(),
@@ -4195,7 +4286,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
 
     // 本次覆盖后默认仍已知：继承项继续展示已提交默认，不退回“未读取”。
     expect(
@@ -4206,7 +4299,7 @@ describe("AppShell", () => {
     unmount();
   });
 
-  it("labels a non-ready runtime default with its availability on the inherit option", () => {
+  it("labels a non-ready runtime default with its availability on the inherit option", async () => {
     window.location.hash = "#/batch";
     const actions: AppActions = {
       run: vi.fn(),
@@ -4241,7 +4334,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
 
     expect(
       screen.getByRole("option", {
@@ -4302,7 +4397,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
 
     const selector = screen.getByLabelText("默认识别类型");
     expect(selector).toHaveValue("rapid_text");
@@ -4322,7 +4419,7 @@ describe("AppShell", () => {
     unmount();
   });
 
-  it("keeps the default recognition mode read-only on backends without the capability", () => {
+  it("keeps the default recognition mode read-only on backends without the capability", async () => {
     window.location.hash = "#/settings";
     const actions: AppActions = {
       run: vi.fn(),
@@ -4355,7 +4452,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
 
     expect(
       screen.getByText(/当前识别服务未声明 ocr\.default-recognition-mode\.v1/),
@@ -4409,7 +4508,9 @@ describe("AppShell", () => {
       runtimeLabel: "原生宿主已连接",
     };
 
-    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
 
     expect(
       screen.getByRole("option", { name: "请重新选择（当前值无法解析）" }),

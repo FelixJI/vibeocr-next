@@ -11,6 +11,7 @@ export async function mountHost(
   page: Page,
   snapshot: AppSnapshot,
   entryPath = "/",
+  waitForFeature = true,
 ): Promise<void> {
   await page.addInitScript((initial) => {
     let revision = initial.revision;
@@ -88,6 +89,7 @@ export async function mountHost(
     });
   }, snapshot);
   await page.goto(entryPath);
+  if (!waitForFeature) return;
   if (entryPath.includes("?scene=1"))
     await expect(
       page.getByRole("toolbar", { name: "图片编辑工具" }),

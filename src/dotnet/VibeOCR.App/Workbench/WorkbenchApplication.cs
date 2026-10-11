@@ -1,5 +1,4 @@
 using System.Runtime.CompilerServices;
-using System.Threading.Channels;
 
 namespace VibeOCR.App.Workbench;
 
@@ -11,7 +10,7 @@ public sealed class WorkbenchApplication : IWorkbenchApplication
   private readonly List<WorkbenchStateEnvelope> _history = [];
   private readonly Dictionary<string, WorkbenchStateEnvelope> _snapshots =
     new(StringComparer.Ordinal);
-  private readonly HashSet<Channel<WorkbenchStateEnvelope>> _subscriptions = [];
+  private readonly HashSet<WorkbenchStateMailbox> _subscriptions = [];
   private readonly IWorkbenchCommandHandler? _commandHandler;
   private WorkbenchRoute _route;
   private long _revision;
@@ -37,6 +36,16 @@ public sealed class WorkbenchApplication : IWorkbenchApplication
   internal WorkbenchRoute CurrentRoute
   {
     get { lock (_gate) return _route; }
+  }
+
+  internal int PendingStateCount
+  {
+    get { lock (_gate) return _subscriptions.Sum(mailbox => mailbox.PendingCount); }
+  }
+
+  internal int MaximumPendingSubscriptionStates
+  {
+    get { lock (_gate) return _subscriptions.Count == 0 ? 0 : _subscriptions.Max(mailbox => mailbox.PendingCount); }
   }
 
   public async ValueTask<WorkbenchBootstrap> BootstrapAsync(
@@ -113,38 +122,38 @@ public sealed class WorkbenchApplication : IWorkbenchApplication
 
   public async IAsyncEnumerable<WorkbenchStateEnvelope> SubscribeAsync(
     long afterRevision,
-    [EnumeratorCancellation] CancellationToken cancellationToken)
+    [EnumeratorCancellation] CancellationToken cancellationToken,
+    IReadOnlySet<string>? scopes = null)
   {
-    Channel<WorkbenchStateEnvelope> channel = Channel.CreateUnbounded<WorkbenchStateEnvelope>(
-      new UnboundedChannelOptions
-      {
-        SingleReader = true,
-        SingleWriter = false,
-      });
-    WorkbenchStateEnvelope[] replay;
+    scopes ??= WorkbenchStateMailbox.AllScopes;
+    if (!scopes.IsSubsetOf(WorkbenchStateMailbox.AllScopes))
+      throw new ArgumentException("Unknown workbench scope.", nameof(scopes));
+    var mailbox = new WorkbenchStateMailbox(scopes);
     lock (_gate)
     {
       ObjectDisposedException.ThrowIf(_disposed, this);
-      replay = _history.Where(state => state.Revision > afterRevision).ToArray();
-      _subscriptions.Add(channel);
+      EnsureInitialStates();
+      mailbox.Resync = _history.Count > 0 && afterRevision < _history[0].Revision - 1;
+      foreach (WorkbenchStateEnvelope state in _history.Where(state => state.Revision > afterRevision))
+        mailbox.Publish(state);
+      if (mailbox.Resync) mailbox.Signal.Writer.TryWrite(true);
+      _subscriptions.Add(mailbox);
     }
 
     try
     {
-      foreach (WorkbenchStateEnvelope state in replay)
+      await foreach (bool signal in mailbox.Signal.Reader.ReadAllAsync(cancellationToken))
       {
-        yield return state;
-      }
-      await foreach (WorkbenchStateEnvelope state in channel.Reader.ReadAllAsync(cancellationToken))
-      {
-        yield return state;
+        WorkbenchStateEnvelope[] batch;
+        lock (_gate) batch = mailbox.Drain(_snapshots.Values, _revision);
+        foreach (WorkbenchStateEnvelope state in batch) yield return state;
       }
     }
     finally
     {
       lock (_gate)
       {
-        _subscriptions.Remove(channel);
+        _subscriptions.Remove(mailbox);
       }
     }
   }
@@ -159,9 +168,9 @@ public sealed class WorkbenchApplication : IWorkbenchApplication
       {
         stateSource.StateChanged -= OnHandlerStateChanged;
       }
-      foreach (Channel<WorkbenchStateEnvelope> channel in _subscriptions)
+      foreach (WorkbenchStateMailbox mailbox in _subscriptions)
       {
-        channel.Writer.TryComplete();
+        mailbox.Signal.Writer.TryComplete();
       }
       _subscriptions.Clear();
     }
@@ -188,12 +197,14 @@ public sealed class WorkbenchApplication : IWorkbenchApplication
 
   private void RecordAndPublish(WorkbenchStateEnvelope state)
   {
+    if (!WorkbenchStateMailbox.AllScopes.Contains(state.Scope))
+      throw new ArgumentException("Unknown workbench state scope.");
     _snapshots[state.Scope] = state;
     _history.Add(state);
     if (_history.Count > HistoryLimit) _history.RemoveAt(0);
-    foreach (Channel<WorkbenchStateEnvelope> channel in _subscriptions)
+    foreach (WorkbenchStateMailbox mailbox in _subscriptions)
     {
-      channel.Writer.TryWrite(state);
+      mailbox.Publish(state);
     }
   }
 

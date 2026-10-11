@@ -135,6 +135,23 @@ flowchart LR
 
 WebAssets 不直接连接 Backend；bridge 是浏览器内容与桌面权限之间的边界。
 
+`DesktopWorkbenchCommandHandler` 负责组合、统一错误映射和生命周期；功能状态、operation generation、取消源和回调由
+`WorkbenchImageOwner`（两个独立图片通道）、`WorkbenchBatchOwner`、`WorkbenchPdfOwner`、`WorkbenchQrCodeOwner`、
+`WorkbenchSettingsOwner`、`WorkbenchSystemOwner` 持有。PDF owner 同时持有文档绑定门和保存/恢复上下文；共享文件授权与
+资源 lease 进入 `WorkbenchResourcesOwner`，模式选择进入 `WorkbenchSelectionOwner`。`WorkbenchOperations` 只共享
+应用生命周期、状态发布和既有后台操作追踪。阅读某功能时沿它的 owner 进入 ViewModel，不经整个 facade 读取其他功能字段。
+
+状态订阅使用 `WorkbenchStateMailbox` 的每 scope 最新槽和受保护完成槽，每槽最多一项，信号 channel 容量为一。
+`WorkbenchDispatcherDelivery` 在宿主层保持最多一个实际 dispatcher callback；取消旧 session 会等待其旧 callback
+释放占位但不发布旧状态。main 订阅十个 scope，现场编辑窗口只接收 shell、recognition 和仅有 theme 的 settings 投影。
+历史缺口以同 checkpoint 的 reset/replace/ready 恢复事务提交当前权威快照，客户端最多缓冲订阅 scope 数量的状态；
+普通事件仍严格递增 revision，缺 ready 或非法恢复会显示错误并提供重新同步。这里的 ready 仅表示快照提交，不表示首帧像素或模型就绪。
+
+完成/错误的长期真值仍由各 owner 的 typed ViewModel/Workspace 保存，普通进度不得替代它们；只有对应的新操作或关闭才替代。
+订阅不承诺无限历史。命令 receipt/error response 与 PDF preview flush 不进入可合并状态邮箱，PDF flush 仍通过独立
+会话/文档关联及十秒期限确认；reset 提交后按最终 PDF documents 清理 retiring drain。
+React `App` 按需加载各 feature 页面，`Pages.tsx` 仅保留兼容导出；纯编辑入口不静态加载 PDF、环境设置、批处理或公式渲染。
+
 ## 各方向阅读入口
 
 ### WinUI 与 ViewModel

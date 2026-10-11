@@ -43,6 +43,9 @@ export class WorkbenchWebRuntime {
   private sessionId?: string;
   private unsubscribe?: () => void;
   private unsubscribePdfPreviewFlush?: () => void;
+  private unsubscribeStateFailure?: () => void;
+  private startGeneration = 0;
+  private featureRecovery?: Promise<boolean>;
   private pdfPreviewFlush?: { documentId: string; flush: () => Promise<void> };
 
   // 卸载期间每文档仅保留首个在途和最新 drain；成功/真实关闭即释放，不缓存预览内容。
@@ -56,6 +59,24 @@ export class WorkbenchWebRuntime {
   >();
 
   readonly actions: AppActions = {
+    recoverFeatureAssets: () => {
+      if (this.featureRecovery) return this.featureRecovery;
+      const recovery = this.recoverFeatureAssets();
+      this.featureRecovery = recovery;
+      void recovery.finally(() => {
+        if (this.featureRecovery === recovery) this.featureRecovery = undefined;
+      });
+      return recovery;
+    },
+    recover: () => {
+      if (this.listener)
+        void this.start(this.listener).catch((error: unknown) => {
+          this.onError(
+            error instanceof Error ? error : new Error(String(error)),
+          );
+          this.reportCommandProblem("workbench.error.stateSyncFailed");
+        });
+    },
     registerPdfPreviewFlush: (documentId, flush) => {
       const registered = { documentId, flush };
       this.pdfPreviewFlush = registered;
@@ -80,12 +101,55 @@ export class WorkbenchWebRuntime {
   constructor(
     private readonly bridge: HostBridge,
     private readonly onError: (error: Error) => void = () => undefined,
+    private readonly reloadSurface: () => void = () => window.location.reload(),
   ) {}
 
+  private async recoverFeatureAssets(): Promise<boolean> {
+    const generation = this.startGeneration;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // A failed module has never mounted. Preserve any previous PDF component's
+      // retiring draft, and any still registered preview, before replacing only
+      // this browser document and its failed module registry.
+      await Promise.race([
+        (async () => {
+          await this.pdfPreviewFlush?.flush();
+          for (const documentId of this.retiringPdfPreviewFlush.keys())
+            await this.drainRetiringPdfPreview(documentId);
+        })(),
+        new Promise<never>((_, reject) => {
+          deadline = setTimeout(
+            () => reject(new Error("Draft confirmation timed out")),
+            10_000,
+          );
+        }),
+      ]);
+      if (generation !== this.startGeneration) return false;
+      this.reloadSurface();
+      return true;
+    } catch (error: unknown) {
+      this.onError(error instanceof Error ? error : new Error(String(error)));
+      this.reportCommandProblem("workbench.error.commandFailed");
+      return false;
+    } finally {
+      if (deadline !== undefined) clearTimeout(deadline);
+    }
+  }
+
   async start(listener: (state: AppViewState) => void): Promise<void> {
+    const generation = ++this.startGeneration;
     this.unsubscribe?.();
     this.unsubscribePdfPreviewFlush?.();
+    this.unsubscribeStateFailure?.();
+    this.unsubscribeStateFailure = this.bridge.subscribeStateFailure?.(
+      (error) => {
+        if (generation !== this.startGeneration) return;
+        this.onError(error);
+        this.reportCommandProblem("workbench.error.stateSyncFailed");
+      },
+    );
     const snapshot = await this.bridge.bootstrap();
+    if (generation !== this.startGeneration) return;
     this.sessionId = snapshot.sessionId;
     this.current = projectSnapshot(snapshot);
     this.listener = listener;
@@ -95,6 +159,7 @@ export class WorkbenchWebRuntime {
     );
     this.unsubscribe = this.bridge.subscribe((event) => {
       if (
+        generation !== this.startGeneration ||
         event.sessionId !== this.sessionId ||
         !this.current ||
         event.revision <= this.current.revision
@@ -104,7 +169,7 @@ export class WorkbenchWebRuntime {
       this.current = projectEvent(this.current, event);
       const pdf = this.current.features.pdf;
       if (
-        event.scope === "pdf" &&
+        (event.scope === "pdf" || event.snapshot !== undefined) &&
         isRecord(pdf) &&
         Array.isArray(pdf.documents)
       ) {
@@ -119,10 +184,13 @@ export class WorkbenchWebRuntime {
   }
 
   stop(): void {
+    this.startGeneration++;
     this.unsubscribe?.();
     this.unsubscribe = undefined;
     this.unsubscribePdfPreviewFlush?.();
     this.unsubscribePdfPreviewFlush = undefined;
+    this.unsubscribeStateFailure?.();
+    this.unsubscribeStateFailure = undefined;
     this.pdfPreviewFlush = undefined;
     this.retiringPdfPreviewFlush.clear();
     this.listener = undefined;
@@ -193,6 +261,7 @@ export class WorkbenchWebRuntime {
       action: type.slice(separator + 1),
       arguments: args,
     };
+    const generation = this.startGeneration;
     try {
       if (
         type === "pdf.activateDocument" &&
@@ -200,6 +269,7 @@ export class WorkbenchWebRuntime {
       )
         await this.drainRetiringPdfPreview(args.documentId);
       const receipt = await this.bridge.execute(command);
+      if (generation !== this.startGeneration) return false;
       if (!receipt.ok) {
         const messageKey = receipt.problem?.messageKey;
         this.reportCommandProblem(
@@ -212,6 +282,7 @@ export class WorkbenchWebRuntime {
       this.clearCommandProblem();
       return true;
     } catch (error: unknown) {
+      if (generation !== this.startGeneration) return false;
       const normalized =
         error instanceof Error ? error : new Error(String(error));
       this.onError(normalized);
@@ -252,7 +323,9 @@ function projectEvent(
   event: HostStateEvent,
 ): AppViewState {
   let features = current.features;
-  if (event.change === "reset") {
+  if (event.snapshot) {
+    features = event.snapshot;
+  } else if (event.change === "reset") {
     features = {};
   } else if (event.change === "remove") {
     features = Object.fromEntries(
@@ -263,12 +336,22 @@ function projectEvent(
   }
 
   const state = isRecord(event.state) ? event.state : undefined;
-  const route =
-    event.scope === "shell" && isAppRoute(state?.route)
+  const shell =
+    event.snapshot && isRecord(event.snapshot.shell)
+      ? event.snapshot.shell
+      : undefined;
+  const settings =
+    event.snapshot && isRecord(event.snapshot.settings)
+      ? event.snapshot.settings
+      : undefined;
+  const route = isAppRoute(shell?.route)
+    ? shell.route
+    : event.scope === "shell" && isAppRoute(state?.route)
       ? state.route
       : current.route;
-  const theme =
-    event.scope === "settings" && isTheme(state?.theme)
+  const theme = isTheme(settings?.theme)
+    ? settings.theme
+    : event.scope === "settings" && isTheme(state?.theme)
       ? state.theme
       : current.theme;
 

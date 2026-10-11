@@ -152,6 +152,8 @@ export interface AppAction {
 }
 
 export interface AppActions {
+  readonly recoverFeatureAssets?: () => Promise<boolean>;
+  readonly recover?: () => void;
   readonly registerPdfPreviewFlush?: (
     documentId: string,
     flush: () => Promise<void>,

@@ -1,5 +1,12 @@
 // Task #214: normal Portable, public OCR/PDF actions, fresh state per metric.
 // No shell-only/selftest, fabricated bridge state, HTTP bypass or user inputs.
+// Task #215 (additive, listener-only): passive per-scope/scene WebView message
+// counting with UTF-8 serialized-payload bytes plus the actual JS resource
+// request graph (buffered resource timing + CDP request events) collected via
+// scripts/workbench_delivery_probe.mjs into measurement_215 / root file. The
+// pre-attached page misses its first screen (messages before install are not
+// counted; pre-connect CDP requests marked partial); public input steps,
+// safety attribution, failure handling and cleanup are unchanged.
 import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
 import { once } from 'node:events';
@@ -11,6 +18,7 @@ import { promisify } from 'node:util';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { native, windows, area, stopOwned, delay } from './smoke_native_actions.mjs';
+import { createWorkbenchCollector, runMeasurementSelfCheck } from './workbench_delivery_probe.mjs';
 
 const exec = promisify(execFile);
 const scripts = path.dirname(fileURLToPath(import.meta.url));
@@ -156,6 +164,7 @@ async function run(candidate, series, metric, retryBaselineCancellation) {
   let app;
   let browser;
   let page;
+  let meter215;
   try {
     await exec('uv', ['run', '--frozen', 'python', path.join(scripts, 'runtime_demand_fixtures.py'), '--out', path.join(root, 'inputs')], { cwd: repo, timeout: 30000, windowsHide: true });
     const copy = path.join(root, 'candidate');
@@ -181,6 +190,13 @@ async function run(candidate, series, metric, retryBaselineCancellation) {
     const connected = await connect(app, debugPort);
     browser = connected.browser;
     page = connected.page;
+    // Task #215: passive measurement (listener-only, additive; never sends
+    // bridge commands and never alters the public steps below).
+    meter215 = createWorkbenchCollector();
+    await meter215.attachBrowser(browser)
+      .catch((error) => meter215.noteError(`browser attach: ${error.message}`));
+    await meter215.installOnPage(page)
+      .catch((error) => meter215.noteError(`main page install: ${error.message}`));
     await observe(page);
     await page.getByRole('link', { name: metric === 'ocr' ? '单次识别' : 'PDF', exact: true }).click();
     const main = (await windows(app.pid)).filter((item) => item.Visible && area(item) > 20000).sort((a, b) => area(b) - area(a))[0];
@@ -218,6 +234,7 @@ async function run(candidate, series, metric, retryBaselineCancellation) {
       }
       if (metric === 'pdf') assert(!record.observations.some((item) => item.session_id === observation.session_id), 'Warm PDF open reused an old document instead of opening it');
       record.observations.push(observation);
+      if (meter215) await meter215.harvest('main', page);
       fs.writeFileSync(path.join(root, 'result.json'), JSON.stringify(record, null, 2));
     }
     const coldEnd = record.observations[0].t_result_ms;
@@ -236,6 +253,19 @@ async function run(candidate, series, metric, retryBaselineCancellation) {
     record.failure_at_ms = Date.now();
     if (page) record.failed_states = await page.evaluate(() => window.__runtimeDemandEvidence).catch(() => []);
   } finally {
+    // Task #215: recover the bounded measurement before the page goes away;
+    // measurement gaps are recorded, never swallowed into a pass, and never
+    // mask or replace the original error/cleanup fields.
+    if (meter215) {
+      if (page) await meter215.harvest('main', page);
+      record.measurement_215 = meter215.finalise();
+      try {
+        fs.writeFileSync(path.join(root, 'workbench-delivery-215.json'),
+          JSON.stringify(record.measurement_215, null, 2));
+      } catch (error) {
+        record.measurement_215.write_error = error.message;
+      }
+    }
     try {
       if (browser) await browser.close();
       if (app) await stopOwned(app, 'quit', {});
@@ -267,6 +297,9 @@ async function run(candidate, series, metric, retryBaselineCancellation) {
 async function main() {
   assert.equal(process.platform, 'win32', 'Windows desktop required');
   if (process.argv.includes('--self-check')) {
+    // Task #215 (no GUI): UTF-8 Chinese payload bytes + scope aggregation +
+    // bounded storage checks run the real in-page probe source on a fake DOM.
+    console.log(JSON.stringify(await runMeasurementSelfCheck()));
     const root = path.join(repo, '.test-results', `runtime-demand-self-check-${randomUUID()}`);
     fs.mkdirSync(root, { recursive: true });
     await exec('uv', ['run', '--frozen', 'python', path.join(scripts, 'runtime_demand_fixtures.py'), '--out', path.join(root, 'inputs')], { cwd: repo, windowsHide: true });

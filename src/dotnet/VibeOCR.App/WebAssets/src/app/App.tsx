@@ -3,6 +3,7 @@ import {
   MessageBar,
   MessageBarBody,
   MessageBarTitle,
+  Button,
 } from "@fluentui/react-components";
 import {
   HashRouter,
@@ -13,22 +14,146 @@ import {
   useNavigate,
   Outlet,
 } from "react-router";
-import { useEffect, useState } from "react";
-
 import {
-  BatchPage,
-  DiagnosticsPage,
-  PdfPage,
-  QrCodePage,
-  RecognitionPage,
-  ImageEditPage,
-  SettingsPage,
-} from "../features/Pages";
+  Component,
+  lazy,
+  Suspense,
+  useEffect,
+  useState,
+  type ReactNode,
+} from "react";
 import { AppShell } from "../layout/AppShell";
 import { vibeDarkTheme, vibeLightTheme } from "../theme/theme";
 import type { AppActions, AppViewState } from "./types";
 
 export type { AppActions, AppViewState } from "./types";
+
+const featureLoaders = {
+  RecognitionPage: () =>
+    import("../features/RecognitionPage").then((module) => ({
+      default: module.RecognitionPage,
+    })),
+  ImageEditPage: () =>
+    import("../features/ImageEditPage").then((module) => ({
+      default: module.ImageEditPage,
+    })),
+  BatchPage: () =>
+    import("../features/BatchPage").then((module) => ({
+      default: module.BatchPage,
+    })),
+  PdfPage: () =>
+    import("../features/PdfPage").then((module) => ({
+      default: module.PdfPage,
+    })),
+  QrCodePage: () =>
+    import("../features/QrCodePage").then((module) => ({
+      default: module.QrCodePage,
+    })),
+  SettingsPage: () =>
+    import("../features/SettingsPage").then((module) => ({
+      default: module.SettingsPage,
+    })),
+  DiagnosticsPage: () =>
+    import("../features/DiagnosticsPage").then((module) => ({
+      default: module.DiagnosticsPage,
+    })),
+};
+
+class FeatureLoadBoundary extends Component<
+  { children: ReactNode; recover?: () => Promise<boolean> },
+  {
+    failed: boolean;
+    moduleFailed: boolean;
+    recovering: boolean;
+    recoveryFailed: boolean;
+  }
+> {
+  state = {
+    failed: false,
+    moduleFailed: false,
+    recovering: false,
+    recoveryFailed: false,
+  };
+  static getDerivedStateFromError(error: unknown) {
+    return {
+      failed: true,
+      moduleFailed: error instanceof FeatureModuleLoadError,
+    };
+  }
+  private recover = async () => {
+    if (this.state.recovering || !this.props.recover) return;
+    this.setState({ recovering: true, recoveryFailed: false });
+    const recovered = await this.props.recover();
+    this.setState({ recovering: false, recoveryFailed: !recovered });
+  };
+  render() {
+    return this.state.failed ? (
+      <div role="alert">
+        {this.state.moduleFailed
+          ? "页面加载失败。"
+          : "页面显示失败。请返回其他页面。"}
+        {this.state.moduleFailed && this.props.recover && (
+          <Button
+            disabled={this.state.recovering}
+            onClick={() => void this.recover()}
+          >
+            {this.state.recovering ? "正在确认草稿…" : "保留草稿并重新加载页面"}
+          </Button>
+        )}
+        {this.state.recoveryFailed && (
+          <span>草稿尚未确认，页面未重新加载。请检查连接后重试。</span>
+        )}
+      </div>
+    ) : (
+      this.props.children
+    );
+  }
+}
+
+class FeatureModuleLoadError extends Error {
+  constructor(cause: unknown) {
+    super("Feature module failed to load", { cause });
+  }
+}
+
+function createFeaturePage(
+  load: (typeof featureLoaders)[keyof typeof featureLoaders],
+) {
+  return lazy(() =>
+    load().catch((error: unknown) => {
+      throw new FeatureModuleLoadError(error);
+    }),
+  );
+}
+
+const featurePages = {
+  RecognitionPage: createFeaturePage(featureLoaders.RecognitionPage),
+  ImageEditPage: createFeaturePage(featureLoaders.ImageEditPage),
+  BatchPage: createFeaturePage(featureLoaders.BatchPage),
+  PdfPage: createFeaturePage(featureLoaders.PdfPage),
+  QrCodePage: createFeaturePage(featureLoaders.QrCodePage),
+  SettingsPage: createFeaturePage(featureLoaders.SettingsPage),
+  DiagnosticsPage: createFeaturePage(featureLoaders.DiagnosticsPage),
+};
+
+function FeatureRoute({
+  page,
+  actions,
+  viewState,
+}: {
+  page: keyof typeof featureLoaders;
+  actions: AppActions;
+  viewState: AppViewState;
+}) {
+  const Page = featurePages[page];
+  return (
+    <FeatureLoadBoundary key={page} recover={actions.recoverFeatureAssets}>
+      <Suspense fallback={<div role="status">正在加载页面…</div>}>
+        <Page actions={actions} viewState={viewState} />
+      </Suspense>
+    </FeatureLoadBoundary>
+  );
+}
 
 function RouteSync({ viewState }: { readonly viewState: AppViewState }) {
   const location = useLocation();
@@ -106,30 +231,62 @@ export function App({
             <Route
               path="recognition"
               element={
-                <RecognitionPage actions={actions} viewState={viewState} />
+                <FeatureRoute
+                  page="RecognitionPage"
+                  actions={actions}
+                  viewState={viewState}
+                />
               }
             />
             <Route
               path="imageEdit"
               element={
-                <ImageEditPage actions={actions} viewState={viewState} />
+                <FeatureRoute
+                  page="ImageEditPage"
+                  actions={actions}
+                  viewState={viewState}
+                />
               }
             />
             <Route
               path="batch"
-              element={<BatchPage actions={actions} viewState={viewState} />}
+              element={
+                <FeatureRoute
+                  page="BatchPage"
+                  actions={actions}
+                  viewState={viewState}
+                />
+              }
             />
             <Route
               path="qrcode"
-              element={<QrCodePage actions={actions} viewState={viewState} />}
+              element={
+                <FeatureRoute
+                  page="QrCodePage"
+                  actions={actions}
+                  viewState={viewState}
+                />
+              }
             />
             <Route
               path="pdf"
-              element={<PdfPage actions={actions} viewState={viewState} />}
+              element={
+                <FeatureRoute
+                  page="PdfPage"
+                  actions={actions}
+                  viewState={viewState}
+                />
+              }
             />
             <Route
               path="settings"
-              element={<SettingsPage actions={actions} viewState={viewState} />}
+              element={
+                <FeatureRoute
+                  page="SettingsPage"
+                  actions={actions}
+                  viewState={viewState}
+                />
+              }
             />
             {/* 关于与诊断已合并；保留 #/about 兼容重定向，直接跳转/旧收藏不落空页。 */}
             <Route
@@ -139,7 +296,11 @@ export function App({
             <Route
               path="diagnostics"
               element={
-                <DiagnosticsPage actions={actions} viewState={viewState} />
+                <FeatureRoute
+                  page="DiagnosticsPage"
+                  actions={actions}
+                  viewState={viewState}
+                />
               }
             />
             <Route
@@ -186,6 +347,9 @@ export function App({
                     : "操作未完成"}
             </MessageBarTitle>
             {commandProblemLabel(viewState.commandProblem)}
+            {viewState.commandProblem === "workbench.error.stateSyncFailed" && (
+              <Button onClick={actions.recover}>重新同步</Button>
+            )}
           </MessageBarBody>
         </MessageBar>
       )}
@@ -195,6 +359,8 @@ export function App({
 
 function commandProblemLabel(messageKey: string): string {
   const messages: Readonly<Record<string, string>> = {
+    "workbench.error.stateSyncFailed":
+      "界面状态同步中断。重新同步后可继续操作，未保存的本地编辑会保留。",
     "workbench.error.clipboardBusy": "剪贴板被占用，请稍后重试复制。",
     "workbench.error.desktopCommandFailed":
       "原生操作执行失败。请检查当前输入和运行时状态后重试。",

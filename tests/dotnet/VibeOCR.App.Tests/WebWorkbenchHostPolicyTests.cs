@@ -31,6 +31,27 @@ public sealed class WebWorkbenchHostPolicyTests
         new ShellWorkbenchState(WorkbenchRoute.Pdf));
       Assert.Equal(WorkbenchRoute.ImageEdit,
         Assert.IsType<ShellWorkbenchState>(scene.ProjectState(navigation).State).Route);
+      var settings = new WorkbenchStateEnvelope(2, "settings", WorkbenchStateChange.Replace,
+        new SettingsWorkbenchState(WorkbenchTheme.Dark, true, "settings.ready", "cpu", false,
+          EnvironmentInstallLog: [new string('文', 20000)], EnvironmentStatus: "安装环境", EnvironmentBusy: true));
+      string sceneSettings = WorkbenchBridgeCodec.SerializeState(Guid.Empty, scene.ProjectState(settings));
+      using (JsonDocument projectedSettings = JsonDocument.Parse(sceneSettings))
+      {
+        JsonElement state = projectedSettings.RootElement.GetProperty("payload").GetProperty("state");
+        Assert.Equal("dark", state.GetProperty("theme").GetString()); Assert.Single(state.EnumerateObject());
+      }
+      var full = bootstrap with { States = [.. bootstrap.States, settings,
+        new WorkbenchStateEnvelope(3, "pdf", WorkbenchStateChange.Replace, new PdfWorkbenchState(true, "pdf.open", 64, 0)),
+        new WorkbenchStateEnvelope(4, "batch", WorkbenchStateChange.Replace, new BatchWorkbenchState(true, 40, 0, 0))] };
+      Assert.DoesNotContain(scene.ProjectBootstrap(full).States, state => state.Scope is "pdf" or "batch");
+      using (JsonDocument sceneBootstrap = JsonDocument.Parse(WorkbenchBridgeCodec.SerializeBootstrap(Guid.NewGuid(), scene.ProjectBootstrap(full))))
+      {
+        var payload = sceneBootstrap.RootElement.GetProperty("payload");
+        Assert.Equal("dark", payload.GetProperty("theme").GetString());
+        var lightSettings = payload.GetProperty("features").GetProperty("settings");
+        Assert.Equal("dark", lightSettings.GetProperty("theme").GetString());
+        Assert.Single(lightSettings.EnumerateObject());
+      }
 
       await scene.DisposeAsync();
       Assert.Equal(WorkbenchRoute.Recognition,

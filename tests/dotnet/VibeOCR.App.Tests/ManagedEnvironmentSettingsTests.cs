@@ -409,6 +409,68 @@ public sealed class ManagedEnvironmentSettingsTests
   }
 
   [Fact]
+  public async Task PausedInstallDisplayKeepsOneNotificationAcrossAttemptsAndPreservesLatestTerminal()
+  {
+    var manager = new MutableManager(); var settings = NewSettings(manager);
+    var context = new PausedProgressContext();
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    manager.BeforeInstall = () => release.Task;
+    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi", TestContext.Current.CancellationToken);
+    Task Start()
+    {
+      SynchronizationContext? previous = SynchronizationContext.Current;
+      try { SynchronizationContext.SetSynchronizationContext(context); return settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken); }
+      finally { SynchronizationContext.SetSynchronizationContext(previous); }
+    }
+    Task first = Start();
+    Action<ManagedEnvironmentInstallProgress> oldObserver = manager.Observer!;
+    var update = new ManagedEnvironmentInstallProgress
+    {
+      EventVersion = 1, EventKind = "environment_install", AttemptId = new string('a', 32), PlanId = "plan",
+      EnvironmentId = "environment", EnvironmentRevision = 1, Seq = 1, Timestamp = "2026-10-08T00:00:00Z",
+      Phase = "install", State = "running", Current = "batch", Dependencies = [], DependencyTotalKnown = true,
+      DownloadFilesTotal = 0, DownloadFilesCompleted = 0, BytesCurrent = 0, BytesTotal = null, Heartbeat = false,
+      Log = new ManagedInstallLog { Stream = "stdout", Text = new string('文', 400), Truncated = false },
+    };
+    context.ThrowNext = true;
+    oldObserver(update); // Post rejection releases the display slot, without changing installation.
+    for (int index = 2; index <= 10000; index++) oldObserver(update with { Seq = index });
+    Assert.Equal(1, context.Pending); Assert.Equal(10000, settings.InstallProgress?.Seq);
+    Assert.InRange(settings.InstallLog.Count, 1, 201);
+    Assert.InRange(settings.InstallLog.Sum(line => line.Length), 1, 64000 + 20);
+    release.SetResult(); await first.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    Assert.Equal("succeeded", settings.InstallProgress?.State);
+    oldObserver(update with { Seq = 20000 }); Assert.Equal("succeeded", settings.InstallProgress?.State);
+
+    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi", TestContext.Current.CancellationToken);
+    release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    manager.BeforeInstall = () => release.Task;
+    Task second = Start();
+    manager.Observer!(update with { AttemptId = new string('b', 32), Seq = 1, Log = null });
+    oldObserver(update with { Seq = 30000 });
+    Assert.Equal(1, context.Pending); Assert.Equal(new string('b', 32), settings.InstallProgress?.AttemptId);
+    Assert.Empty(settings.InstallLog);
+    release.SetResult(); await second.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    string? displayed = null; settings.StateChanged += () => displayed = settings.InstallProgress?.State;
+    context.Resume(); Assert.Equal("succeeded", displayed); Assert.Equal(0, context.Pending);
+  }
+
+  private sealed class PausedProgressContext : SynchronizationContext
+  {
+    private readonly System.Collections.Concurrent.ConcurrentQueue<SendOrPostCallback> queued = new();
+    internal bool ThrowNext { get; set; }
+    internal int Pending => queued.Count;
+    public override void Post(SendOrPostCallback callback, object? state)
+    {
+      // Await continuations still run; only host display notification delivery is paused.
+      if (state is not null) { base.Post(callback, state); return; }
+      if (ThrowNext) { ThrowNext = false; throw new InvalidOperationException("context closing"); }
+      queued.Enqueue(callback);
+    }
+    internal void Resume() { while (queued.TryDequeue(out var callback)) callback(null); }
+  }
+
+  [Fact]
   public async Task CleanupRequiresExplicitCurrentSelectionAndKeepsPartialResult()
   {
     var manager = new MutableManager();

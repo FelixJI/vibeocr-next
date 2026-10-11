@@ -46,9 +46,13 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   private CancellationTokenSource? subscriptionCancellation;
   private Task? subscription;
   private Guid? sessionId;
+  private long bootstrapGeneration;
   private bool disposed;
   private readonly bool applicationOwner;
   private readonly WorkbenchRoute? fixedRoute;
+  private static readonly IReadOnlySet<string> SceneScopes = new HashSet<string>(StringComparer.Ordinal)
+  { "shell", "recognition", "settings" };
+  private readonly WorkbenchDispatcherDelivery stateDelivery = new();
   internal byte[]? CaptureBackground { get; set; }
   private readonly CancellationTokenSource lifetime = new();
   private readonly List<Uri> uploadedAnnotations = [];
@@ -215,6 +219,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       return;
     }
     sessionId = null;
+    Interlocked.Increment(ref bootstrapGeneration);
+    subscriptionCancellation?.Cancel();
     AbandonPdfPreviewFlush();
     StateChanged?.Invoke("navigation-starting");
   }
@@ -265,17 +271,18 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       if (IsBootstrap(message))
       {
         Guid requestId = WorkbenchBridgeCodec.ParseBootstrapRequest(message);
+        long generation = Interlocked.Increment(ref bootstrapGeneration);
+        subscriptionCancellation?.Cancel();
+        sessionId = null;
         StateChanged?.Invoke("bootstrap-received");
         WorkbenchBootstrap bootstrap = await application.BootstrapAsync(
           lifetime.Token);
         bootstrap = ProjectBootstrap(bootstrap);
-        if (disposed) return;
+        if (disposed || !ReferenceEquals(core, sender) || generation != Volatile.Read(ref bootstrapGeneration)) return;
+        var response = WorkbenchBridgeCodec.SerializeBootstrapResponse(requestId, bootstrap);
         sessionId = bootstrap.SessionId;
-        sender.PostWebMessageAsJson(
-          WorkbenchBridgeCodec.SerializeBootstrap(requestId, bootstrap));
-        StartSubscription(bootstrap);
-        recoveryPolicy.MarkReady();
-        StateChanged?.Invoke("bridge-ready");
+        sender.PostWebMessageAsJson(response.Json);
+        StartSubscription(bootstrap, response.RequiresSnapshot);
         return;
       }
 
@@ -289,7 +296,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       WorkbenchCommandReceipt receipt = await application.ExecuteAsync(
         envelope,
         lifetime.Token);
-      if (!disposed) sender.PostWebMessageAsJson(WorkbenchBridgeCodec.SerializeReceipt(receipt));
+      if (!disposed && sessionId == activeSession && ReferenceEquals(core, sender))
+        sender.PostWebMessageAsJson(WorkbenchBridgeCodec.SerializeReceipt(receipt));
     }
     catch (Exception error) when (
       error is WorkbenchBridgeProtocolException or OperationCanceledException or JsonException)
@@ -305,13 +313,17 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   }
 
   internal WorkbenchBootstrap ProjectBootstrap(WorkbenchBootstrap bootstrap) => fixedRoute is { } route
-    ? bootstrap with { Route = route, States = bootstrap.States.Select(ProjectState).ToArray() }
+    ? bootstrap with { Route = route, States = bootstrap.States.Where(state => SceneScopes.Contains(state.Scope)).Select(ProjectState).ToArray() }
     : bootstrap;
 
   internal WorkbenchStateEnvelope ProjectState(WorkbenchStateEnvelope state) =>
-    fixedRoute is { } route && state.State is ShellWorkbenchState
-      ? state with { State = new ShellWorkbenchState(route) }
-      : state;
+    fixedRoute is { } route ? state.State switch
+    {
+      ShellWorkbenchState => state with { State = new ShellWorkbenchState(route) },
+      SettingsWorkbenchState settings => state with { State = new ThemeWorkbenchState(settings.Theme) },
+      RecognitionWorkbenchState recognition => state with { State = recognition with { Result = null, StructuredResult = null, Engines = null } },
+      _ => state,
+    } : state;
 
   internal static bool IsBootstrap(string json)
   {
@@ -333,42 +345,86 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     }
   }
 
-  private void StartSubscription(WorkbenchBootstrap bootstrap)
+  private void StartSubscription(WorkbenchBootstrap bootstrap, bool requiresSnapshot = false)
   {
     subscriptionCancellation?.Cancel();
     subscriptionCancellation?.Dispose();
     subscriptionCancellation = new CancellationTokenSource();
     CancellationToken token = subscriptionCancellation.Token;
-    subscription = PublishStatesAsync(bootstrap.SessionId, bootstrap.Revision, token);
+    subscription = PublishStatesAsync(bootstrap.SessionId, bootstrap.Revision, token, requiresSnapshot ? bootstrap : null);
   }
 
   private async Task PublishStatesAsync(
     Guid activeSession,
     long afterRevision,
-    CancellationToken cancellationToken)
+    CancellationToken cancellationToken,
+    WorkbenchBootstrap? startup = null)
   {
     try
     {
+      CoreWebView2? target = core;
+      if (startup is not null)
+      {
+        WorkbenchStateEnvelope[] frames = [new(startup.Revision, "shell", WorkbenchStateChange.Reset, null),
+          .. startup.States.Select(state => state with { Revision = startup.Revision, Change = WorkbenchStateChange.Replace }),
+          new(startup.Revision, "shell", WorkbenchStateChange.Ready, null)];
+        foreach (WorkbenchStateEnvelope frame in frames)
+          if (!await PublishStateFrameAsync(activeSession, frame, target, cancellationToken)) return;
+      }
+      if (disposed || sessionId != activeSession || !ReferenceEquals(core, target)) return;
+      recoveryPolicy.MarkReady();
+      StateChanged?.Invoke("bridge-ready");
+      WorkbenchTheme? lastTheme = null;
+      bool resync = false;
       await foreach (WorkbenchStateEnvelope state in application.SubscribeAsync(
         afterRevision,
-        cancellationToken))
+        cancellationToken,
+        fixedRoute is null ? null : SceneScopes))
       {
-        string json = WorkbenchBridgeCodec.SerializeState(activeSession, ProjectState(state));
-        dispatcher?.TryEnqueue(() => core?.PostWebMessageAsJson(json));
+        if (state.Change == WorkbenchStateChange.Reset) resync = true;
+        if (fixedRoute is not null && state.State is SettingsWorkbenchState settings)
+        {
+          if (!resync && lastTheme == settings.Theme) continue;
+          lastTheme = settings.Theme;
+        }
+        if (!await PublishStateFrameAsync(activeSession, ProjectState(state), target, cancellationToken)) return;
+        if (state.Change == WorkbenchStateChange.Ready) resync = false;
       }
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
     }
+    catch (Exception error)
+    {
+      if (!disposed && sessionId == activeSession)
+      {
+        VibeOCR.App.Services.AppLog.Error("Workbench state delivery failed", error);
+        RecoveryRequired?.Invoke();
+      }
+    }
+  }
+
+  private async Task<bool> PublishStateFrameAsync(Guid activeSession, WorkbenchStateEnvelope state, CoreWebView2? target, CancellationToken cancellationToken)
+  {
+    bool Current() => !disposed && sessionId == activeSession && ReferenceEquals(core, target) && !cancellationToken.IsCancellationRequested;
+    if (!Current()) return false;
+    string json = WorkbenchBridgeCodec.SerializeState(activeSession, state);
+    await stateDelivery.PostAsync(action => dispatcher?.TryEnqueue(action.Invoke) == true, () =>
+    {
+      if (Current()) target?.PostWebMessageAsJson(json);
+    }, cancellationToken);
+    return Current();
   }
 
   private void OnProcessFailed(
     CoreWebView2 sender,
     CoreWebView2ProcessFailedEventArgs args)
   {
+    Interlocked.Increment(ref bootstrapGeneration);
     StateChanged?.Invoke($"process-failed:{args.ProcessFailedKind}");
     AbandonPdfPreviewFlush();
     sessionId = null;
+    subscriptionCancellation?.Cancel();
     Recover(sender);
   }
 
