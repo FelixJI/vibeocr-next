@@ -925,6 +925,89 @@ public sealed class RuntimeDemandCoordinatorTests
       await connection.DisconnectAsync();
     }
   }
+  [Theory]
+  [InlineData("failed")]
+  [InlineData("healthy")]
+  [InlineData("cleanup")]
+  public async Task ExitRecoveryWaitsForSharedAttemptAfterSwitchCallerCancels(string outcome)
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-exit-shared-{Guid.NewGuid():N}");
+    PortableLayout layout = PortableLayout.Resolve(Path.Combine(root, "VibeOCR.exe"), "winui-dev");
+    var connection = new ManagedRuntimeConnection(new ConnectionListManager(), layout, new RuntimeStatusViewModel(), (_, _) => { });
+    await using ManagedEnvironmentSession original = StubSession("exited-A");
+    await using ManagedEnvironmentSession target = StubSession("target-B");
+    await using ManagedEnvironmentSession restored = StubSession("restored-A");
+    var entered = Signal();
+    var release = Signal();
+    var businessFailure = new InvalidOperationException("B failed while a shared demand still owns its attempt");
+    var cleanupFailure = new IOException("late shared attempt cleanup failed");
+    using var switchCaller = new CancellationTokenSource();
+    using var demandCaller = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+    CancellationToken activationToken = default;
+    int connects = 0;
+    int projections = 0;
+    Exception? reported = null;
+    var coordinator = new RuntimeDemandCoordinator((_, _) =>
+    {
+      PublishSession(connection, ++connects == 1 ? original : restored);
+      return Task.CompletedTask;
+    }, async () =>
+    {
+      await connection.DisconnectAsync();
+      if (outcome == "cleanup") throw cleanupFailure;
+    }, new ProductMaintenanceCoordinator(), TestContext.Current.CancellationToken, connection);
+    await coordinator.EnsureReadyAsync(TestContext.Current.CancellationToken);
+    Task switching = coordinator.SwitchAsync(async ct =>
+    {
+      activationToken = ct;
+      entered.TrySetResult();
+      await release.Task;
+      if (outcome == "failed") throw businessFailure;
+      PublishSession(connection, target);
+      if (outcome == "cleanup") demandCaller.Cancel();
+    }, switchCaller.Token);
+    await entered.Task;
+    Task demand = coordinator.EnsureReadyAsync(demandCaller.Token);
+    Task recovery = coordinator.RecoverAsync(() => ReferenceEquals(connection.Session, original),
+      () => projections++, error => reported = error);
+    try
+    {
+      Assert.False(demand.IsCompleted);
+      Assert.False(recovery.IsCompleted);
+      switchCaller.Cancel();
+      await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+        switching.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+      Assert.False(activationToken.IsCancellationRequested);
+      // The command caller departed promptly; the legitimate computation still
+      // owns the activation, and its real terminal outcome owns exit recovery.
+      release.TrySetResult();
+      if (outcome == "failed") Assert.Same(businessFailure, await Assert.ThrowsAsync<InvalidOperationException>(() => demand));
+      else if (outcome == "cleanup") await Assert.ThrowsAnyAsync<OperationCanceledException>(() => demand);
+      else await demand;
+      if (outcome == "cleanup")
+      {
+        Assert.Same(cleanupFailure, await Assert.ThrowsAsync<IOException>(() => recovery));
+        Assert.Same(cleanupFailure, reported);
+        Assert.Null(connection.Session);
+      }
+      else
+      {
+        await recovery;
+        Assert.Null(reported);
+        Assert.Same(outcome == "failed" ? restored : target, connection.Session);
+      }
+      Assert.Equal(outcome == "failed" ? 2 : 1, connects);
+      Assert.Equal(outcome == "failed" ? 1 : 0, projections);
+    }
+    finally
+    {
+      release.TrySetResult();
+      try { await switching; } catch (Exception) { }
+      try { await demand; } catch (Exception) { }
+      try { await recovery; } catch (Exception) { }
+      await connection.DisconnectAsync();
+    }
+  }
   private static ManagedEnvironmentSession StubSession(string instance) => new("environment", 1,
     new InferenceSupervisorProcess(new InferenceSupervisorOptions("unused", [], Path.GetTempPath(),
       Path.Combine(Path.GetTempPath(), "unused.log"), TimeSpan.FromSeconds(1), new HashSet<string>()), "test"),

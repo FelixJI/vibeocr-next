@@ -28,6 +28,7 @@ internal sealed class RuntimeDemandCoordinator(
   private sealed class SwitchOperation(long owner)
   {
     public readonly long Owner = owner;
+    public Attempt? ActivationAttempt;
     public readonly TaskCompletionSource Completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public Exception? CleanupFailure;
   }
@@ -67,6 +68,7 @@ internal sealed class RuntimeDemandCoordinator(
         if (current is null)
         {
           current = new Attempt(shutdown, initialize, borrowLease, activate, activate is null ? null : activeSwitch);
+          if (current.Switch is { } switching) switching.ActivationAttempt = current;
           start = true;
         }
         attempt = current;
@@ -305,9 +307,12 @@ internal sealed class RuntimeDemandCoordinator(
         if (observedSwitch is not null)
         {
           await observedSwitch.Completion.Task.WaitAsync(shutdown);
-          if (observedSwitch.CleanupFailure is { } cleanup) ExceptionDispatchInfo.Capture(cleanup).Throw();
+          // Cancelling the command caller does not end an activation still
+          // owned by computation waiters. Wait for that bound attempt's cleanup;
+          // an operation cancelled in its first stage still owns the old drain.
+          lock (gate) observedAttempt = observedSwitch.ActivationAttempt ?? observedAttempt;
         }
-        else if (observedAttempt is not null)
+        if (observedAttempt is not null)
         {
           try { await observedAttempt.Completion.Task.WaitAsync(shutdown); }
           catch (Exception) when (observedAttempt.Completion.Task.IsCompleted)
@@ -316,6 +321,7 @@ internal sealed class RuntimeDemandCoordinator(
             if (observedAttempt.CleanupFailure is { } cleanup) ExceptionDispatchInfo.Capture(cleanup).Throw();
           }
         }
+        if (observedSwitch?.CleanupFailure is { } switchCleanup) ExceptionDispatchInfo.Capture(switchCleanup).Throw();
         lock (gate)
         {
           shutdown.ThrowIfCancellationRequested();
