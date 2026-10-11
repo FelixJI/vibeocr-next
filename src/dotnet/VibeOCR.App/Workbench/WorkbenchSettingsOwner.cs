@@ -94,7 +94,8 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
   };
 
   private int environmentSwitching;
-  private string pinnedServiceInstance = string.Empty;
+  // 保留已就绪实例的基线，避免首次设置通知误清贴图取字。
+  private string pinnedServiceInstance = supervisorInstanceId() ?? string.Empty;
   private bool pinMaintenanceNotified;
   private SettingsViewModel? settings;
   internal SettingsViewModel? CurrentModel => settings;
