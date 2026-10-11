@@ -229,6 +229,11 @@ async function openScene(ctx) {
     X: fixture.rootRect.left, Y: fixture.rootRect.top,
     Width: fixture.rootRect.width, Height: fixture.rootRect.height,
     EvidenceRoot: root, OutputPath: path.join(root, 'capture-fixture.png') });
+  // The synthetic desktop stays visible, but must not cover the app's input point.
+  await exec('pwsh', ['-NoProfile', '-NonInteractive', '-File',
+    path.join(scripts, 'scroll_capture_fixture.ps1'), '-Action', 'lower',
+    '-FixturePid', String(fixture.pid), '-Handle', String(fixture.background)],
+  { windowsHide: true, timeout: 15000 });
   await showMain(ctx);
   await page.getByRole('button', { name: '截图', exact: true }).click();
   const button = fixture.buttonRect;
