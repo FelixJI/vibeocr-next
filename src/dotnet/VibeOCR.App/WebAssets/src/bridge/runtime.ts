@@ -148,7 +148,14 @@ export class WorkbenchWebRuntime {
         this.reportCommandProblem("workbench.error.stateSyncFailed");
       },
     );
-    const snapshot = await this.bridge.bootstrap();
+    let snapshot: AppSnapshot;
+    try {
+      snapshot = await this.bridge.bootstrap();
+    } catch (error) {
+      // 旧恢复的失败不能覆盖新会话状态。
+      if (generation !== this.startGeneration) return;
+      throw error;
+    }
     if (generation !== this.startGeneration) return;
     this.sessionId = snapshot.sessionId;
     this.current = projectSnapshot(snapshot);

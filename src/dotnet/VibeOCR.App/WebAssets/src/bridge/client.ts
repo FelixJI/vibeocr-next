@@ -157,6 +157,7 @@ export class BridgeClient implements HostBridge {
   bootstrap(): Promise<AppSnapshot> {
     const generation = ++this.bootstrapGeneration;
     this.rejectStartup(new BridgeProtocolError("Bootstrap was superseded."));
+    this.rejectSupersededBootstraps();
     this.sessionId = undefined;
     this.clearRecovery();
     this.stateFailed = false;
@@ -236,6 +237,16 @@ export class BridgeClient implements HostBridge {
     const startup = this.startup;
     this.startup = undefined;
     startup?.reject(error);
+  }
+
+  // 宿主换代后不再回复旧 bootstrap，必须终结其 Promise，避免在途请求积累。
+  private rejectSupersededBootstraps(): void {
+    const error = new BridgeProtocolError("Bootstrap was superseded.");
+    for (const [id, pending] of this.pending) {
+      if (pending.type !== "app.bootstrap") continue;
+      this.pending.delete(id);
+      pending.reject(error);
+    }
   }
 
   subscribePdfPreviewFlush(
@@ -331,6 +342,8 @@ export class BridgeClient implements HostBridge {
 
     const pending = this.pending.get(value.id);
     if (!pending) {
+      // 已撤销的 bootstrap 可能迟到；无匹配请求的回复不再拥有状态写入权。
+      if (value.type === "app.bootstrap") return;
       throw new BridgeProtocolError("Received an unsolicited bridge response.");
     }
     this.pending.delete(value.id);

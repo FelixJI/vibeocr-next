@@ -29,17 +29,42 @@ class FakeHostBridge implements HostBridge {
     };
   }
   nextResult: CommandResult = { revision: 8, ok: true, problem: null };
+  // 模拟已修复的 BridgeClient 契约：新 bootstrap 按类型撤销并 reject 旧在途请求。
+  deferBootstrap = false;
+  private boot?: {
+    resolve: (snapshot: AppSnapshot) => void;
+    reject: (error: Error) => void;
+  };
   private listener?: (event: HostStateEvent) => void;
 
   async bootstrap(): Promise<AppSnapshot> {
-    return {
+    if (!this.deferBootstrap)
+      return {
+        sessionId: "session-1",
+        revision: 7,
+        route: "recognition",
+        theme: "dark",
+        capabilities: ["recognition.capture"],
+        features: { recognition: { status: "ready" } },
+      };
+    this.boot?.reject(new Error("Bootstrap was superseded."));
+    return new Promise<AppSnapshot>((resolve, reject) => {
+      this.boot = { resolve, reject };
+    });
+  }
+
+  settleBootstrap(override: Partial<AppSnapshot> = {}): void {
+    const boot = this.boot;
+    this.boot = undefined;
+    boot?.resolve({
       sessionId: "session-1",
       revision: 7,
       route: "recognition",
       theme: "dark",
       capabilities: ["recognition.capture"],
       features: { recognition: { status: "ready" } },
-    };
+      ...override,
+    });
   }
 
   async execute(command: HostCommand): Promise<CommandResult> {
@@ -172,6 +197,33 @@ describe("WorkbenchWebRuntime", () => {
     await Promise.resolve();
     expect(latest?.commandProblem).toBeUndefined();
     expect(bridge.commands).toHaveLength(0);
+    runtime.stop();
+  });
+  it("keeps a superseded recovery bootstrap from polluting the newer session", async () => {
+    const bridge = new FakeHostBridge();
+    bridge.deferBootstrap = true;
+    const errors: Error[] = [];
+    const runtime = new WorkbenchWebRuntime(bridge, (error) =>
+      errors.push(error),
+    );
+    const states: AppViewState[] = [];
+    const starting = runtime.start((state) => states.push(state));
+    bridge.settleBootstrap();
+    await starting;
+    runtime.actions.recover?.(); // 第一次恢复：bootstrap 在途。
+    runtime.actions.recover?.(); // 第二次恢复 supersede 第一次。
+    bridge.settleBootstrap({
+      sessionId: "session-2",
+      revision: 9,
+      features: { recognition: { status: "ready" }, pdf: { fresh: true } },
+    });
+    await new Promise((flush) => setTimeout(flush, 0));
+    expect(errors).toEqual([]);
+    expect(states.filter((state) => state.commandProblem)).toHaveLength(0);
+    expect(states.at(-1)?.features).toEqual({
+      recognition: { status: "ready" },
+      pdf: { fresh: true },
+    });
     runtime.stop();
   });
   it("native preview flush matches the mounted PDF and succeeds with no PDF work outside that route", async () => {

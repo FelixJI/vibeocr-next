@@ -324,6 +324,203 @@ describe("bounded snapshot recovery", () => {
     }
   });
 
+  it("terminates every superseded in-flight bootstrap and ignores their late replies", async () => {
+    const ids = ["boot-1", "boot-2", "boot-3", "cmd-1"];
+    const transport = new Transport();
+    const bridge = new BridgeClient(transport, {
+      idFactory: () => ids.shift()!,
+    });
+    const first = bridge.bootstrap();
+    const second = bridge.bootstrap();
+    const third = bridge.bootstrap();
+    // 宿主换代后不再回复旧请求；被 supersede 的旧 bootstrap 必须就地终结，
+    // 否则重复恢复会无界积累在途请求与未终结 Promise。
+    await expect(first).rejects.toThrow("superseded");
+    await expect(second).rejects.toThrow("superseded");
+    const late = (id: string, sessionId: string) =>
+      transport.receive({
+        version: 2,
+        kind: "response",
+        id,
+        type: "app.bootstrap",
+        payload: {
+          sessionId,
+          revision: 40,
+          route: "pdf",
+          theme: "dark",
+          capabilities: [],
+          features: { pdf: { stale: true } },
+        },
+      });
+    late("boot-1", "stale-1");
+    late("boot-2", "stale-2");
+    transport.receive({
+      version: 2,
+      kind: "response",
+      id: "boot-3",
+      type: "app.bootstrap",
+      payload: {
+        sessionId: "current",
+        revision: 5,
+        route: "pdf",
+        theme: "light",
+        capabilities: [],
+        features: { pdf: { documents: [] } },
+      },
+    });
+    await expect(third).resolves.toMatchObject({
+      sessionId: "current",
+      revision: 5,
+    });
+    // 已撤销请求的迟到响应即使载荷合法也不得改写当前会话或抛出 unsolicited。
+    late("boot-1", "stale-1");
+    const command = bridge.execute({
+      scope: "settings",
+      action: "setTheme",
+      arguments: { theme: "dark" },
+    });
+    expect(transport.posted.at(-1)?.payload).toMatchObject({
+      sessionId: "current",
+      command: { scope: "settings", action: "setTheme" },
+    });
+    transport.receive({
+      version: 2,
+      kind: "response",
+      id: "cmd-1",
+      type: "app.command",
+      payload: { revision: 6, ok: true, problem: null },
+    });
+    await expect(command).resolves.toEqual({
+      revision: 6,
+      ok: true,
+      problem: null,
+    });
+    const received: HostStateEvent[] = [];
+    bridge.subscribe((event) => received.push(event));
+    late("boot-2", "stale-2");
+    transport.receive({
+      version: 2,
+      kind: "event",
+      id: "state",
+      type: "app.state",
+      payload: {
+        sessionId: "stale-1",
+        revision: 40,
+        scope: "pdf",
+        change: "replace",
+        state: { stale: true },
+      },
+    });
+    transport.receive({
+      version: 2,
+      kind: "event",
+      id: "state",
+      type: "app.state",
+      payload: {
+        sessionId: "current",
+        revision: 6,
+        scope: "pdf",
+        change: "replace",
+        state: { fresh: true },
+      },
+    });
+    expect(received).toEqual([
+      {
+        sessionId: "current",
+        revision: 6,
+        scope: "pdf",
+        change: "replace",
+        state: { fresh: true },
+      },
+    ]);
+    bridge.dispose();
+  });
+
+  it("keeps ordinary command receipts across a bootstrap supersede", async () => {
+    const ids = ["boot-1", "cmd-1", "boot-2"];
+    const transport = new Transport();
+    const bridge = new BridgeClient(transport, {
+      idFactory: () => ids.shift()!,
+    });
+    const boot = bridge.bootstrap();
+    transport.receive({
+      version: 2,
+      kind: "response",
+      id: "boot-1",
+      type: "app.bootstrap",
+      payload: {
+        sessionId: "current",
+        revision: 2,
+        route: "pdf",
+        theme: "light",
+        capabilities: [],
+        features: { pdf: {} },
+      },
+    });
+    await boot;
+    const command = bridge.execute({
+      scope: "pdf",
+      action: "cancel",
+      arguments: {},
+    });
+    const reboot = bridge.bootstrap();
+    transport.receive({
+      version: 2,
+      kind: "response",
+      id: "cmd-1",
+      type: "app.command",
+      payload: { revision: 3, ok: true, problem: null },
+    });
+    await expect(command).resolves.toEqual({
+      revision: 3,
+      ok: true,
+      problem: null,
+    });
+    transport.receive({
+      version: 2,
+      kind: "response",
+      id: "boot-2",
+      type: "app.bootstrap",
+      payload: {
+        sessionId: "fresh",
+        revision: 4,
+        route: "pdf",
+        theme: "light",
+        capabilities: [],
+        features: { pdf: { fresh: true } },
+      },
+    });
+    await expect(reboot).resolves.toMatchObject({
+      sessionId: "fresh",
+      revision: 4,
+    });
+    bridge.dispose();
+  });
+
+  it("still rejects type mismatches for recorded ids and unsolicited replies", async () => {
+    const transport = new Transport();
+    const bridge = new BridgeClient(transport, { idFactory: () => "boot-1" });
+    const boot = bridge.bootstrap();
+    transport.receive({
+      version: 2,
+      kind: "response",
+      id: "boot-1",
+      type: "app.command",
+      payload: { revision: 1, ok: true, problem: null },
+    });
+    await expect(boot).rejects.toThrow("type does not match");
+    expect(() =>
+      transport.receive({
+        version: 2,
+        kind: "response",
+        id: "ghost",
+        type: "app.command",
+        payload: { revision: 1, ok: true, problem: null },
+      }),
+    ).toThrow("unsolicited");
+    bridge.dispose();
+  });
+
   it("reports a missing ready and recovers through a fresh bootstrap", async () => {
     vi.useFakeTimers();
     const { send, bridge, transport, received } = await setup();
