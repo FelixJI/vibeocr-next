@@ -14,6 +14,84 @@ namespace VibeOCR.App.Tests;
 
 public sealed class PdfViewModelSupervisorTests
 {
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task WorkbenchKeepsColdPreparationInputWhenAnotherDemandAttaches(bool failPreparation)
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-pdf-demand-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      bool attached = false;
+      int prepares = 0;
+      var inference = new FakePdfInference();
+      async Task Prepare(CancellationToken ct)
+      {
+        if (++prepares != 1) return;
+        entered.TrySetResult();
+        await release.Task.WaitAsync(ct);
+        if (failPreparation) throw new InvalidOperationException("preparation failed");
+      }
+      var model = new PdfViewModel(inference, new StubPdfSource(), Prepare);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = CreatePdfWorkbenchHandler(model, root, broker, annotations,
+        () => attached, Prepare);
+      string path = Path.Combine(root, "authorized.pdf");
+      Task<WorkbenchCommandOutcome> opening = handler.ExecuteAsync(new OpenDroppedPdfCommand(path),
+        TestContext.Current.CancellationToken).AsTask();
+      await entered.Task;
+      attached = true; // Another independent demand has completed its attach.
+      if (!failPreparation) model.Cancel();
+      release.TrySetResult();
+      WorkbenchCommandOutcome result = await opening;
+      Assert.Null(result.Error);
+      PdfDocumentEntry entry = Assert.Single(handler.PdfDocuments);
+      Assert.Equal(path, entry.RequestedPath);
+      Assert.Equal(path, entry.Model.FilePath);
+      Assert.False(entry.Model.HasRemoteSession);
+      Assert.Equal(0, inference.OpenCalls);
+      Assert.False(entry.Model.IsBusy);
+      Assert.Equal(failPreparation ? PdfIssueKind.Failed : PdfIssueKind.Cancelled, entry.Model.TerminalIssue);
+      await handler.ExecuteAsync(new OpenDroppedPdfCommand(path), TestContext.Current.CancellationToken);
+      Assert.Same(entry, Assert.Single(handler.PdfDocuments));
+      Assert.True(entry.Model.HasSession);
+      Assert.False(entry.Model.RuntimePreparationIncomplete);
+      Assert.Equal(2, prepares);
+      Assert.Equal(1, inference.OpenCalls);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
+  public async Task WorkbenchDoesNotRetainRejectedPdfAfterRuntimePreparationCompletes()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-pdf-rejected-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      var inference = new FailingPdfInference
+      {
+        OpenError = new InferenceClientException(HttpV2ErrorCode.ValidationError, "invalid PDF", retryable: false),
+      };
+      var model = new PdfViewModel(inference, new StubPdfSource(), _ => Task.CompletedTask);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = CreatePdfWorkbenchHandler(model, root, broker, annotations,
+        () => true, _ => Task.CompletedTask);
+      WorkbenchCommandOutcome result = await handler.ExecuteAsync(
+        new OpenDroppedPdfCommand(Path.Combine(root, "invalid.pdf")), TestContext.Current.CancellationToken);
+      Assert.Null(result.Error);
+      Assert.Empty(handler.PdfDocuments);
+      Assert.False(model.RuntimePreparationIncomplete);
+      Assert.Equal(PdfIssueKind.Failed, model.TerminalIssue);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
   [Fact]
   public async Task CancelDuringPreparationKeepsInputWithoutCreatingWorkerSession()
   {
@@ -409,7 +487,9 @@ public sealed class PdfViewModelSupervisorTests
       PdfViewModel pdf,
       string resourceRoot,
       WorkbenchResourceBroker broker,
-      WorkbenchAnnotationStore annotationStore) =>
+      WorkbenchAnnotationStore annotationStore,
+      Func<bool>? inferenceAttached = null,
+      Func<CancellationToken, Task>? ensureRuntimeReady = null) =>
       new(
           static () => throw new InvalidOperationException(),
           static () => throw new InvalidOperationException(),
@@ -422,7 +502,7 @@ public sealed class PdfViewModelSupervisorTests
           broker,
           resourceRoot,
           static () => 0,
-          annotationStore);
+          annotationStore, inferenceAttached: inferenceAttached, ensureRuntimeReady: ensureRuntimeReady);
 
   private sealed class StubPdfSource : IPdfFileSource
   {
@@ -705,6 +785,7 @@ public sealed class PdfViewModelSupervisorTests
     private IReadOnlyList<JobItem> _items = Array.Empty<JobItem>();
     private int _openSessions;
 
+    public int OpenCalls => _openSessions;
     public int RenderCalls { get; private set; }
     public Task<PdfSessionOpenResult>? PendingOpen { get; init; }
     public Task<PdfMutateResult>? PendingDelete { get; init; }

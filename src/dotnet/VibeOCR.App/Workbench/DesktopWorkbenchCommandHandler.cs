@@ -3175,7 +3175,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     {
       // Preparation cancellation/failure keeps the authorized input visible for
       // a later explicit retry. No worker session has been created at this point.
-      if (ensureRuntimeReady is not null && inferenceAttached?.Invoke() == false)
+      if (model.RuntimePreparationIncomplete)
       {
         entry.CloseError = model.Summary;
         return await PdfStateAsync(model, CancellationToken.None);

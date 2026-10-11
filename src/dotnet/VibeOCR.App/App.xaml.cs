@@ -236,7 +236,8 @@ public sealed partial class App : Application
                 if (!connected) throw new InvalidOperationException("运行环境准备未完成，请检查诊断后重试。");
                 AppLog.Info("Runtime demand: ready");
             },
-            runtimeConnection.DisconnectAsync, _productMaintenance, _applicationShutdown.Token, runtimeConnection);
+            runtimeConnection.DisconnectAsync, _productMaintenance, _applicationShutdown.Token, runtimeConnection,
+            shellOnly: options.ShellOnly);
         diagnostics.UpdateSupervisor(new SupervisorHealth(
             SupervisorHealthState.NotReady, null, null, "识别服务尚未启用；首次计算时准备运行环境。"));
 
@@ -1194,16 +1195,22 @@ public sealed partial class App : Application
     {
         if (_environmentSettings is not null)
             await _environmentSettings.CancelAndWaitForInstallAsync();
-        if (_runtimeDemand is not null) await _runtimeDemand.StopAsync();
         try
         {
-            if (_window is not null && _windowLayoutStore is not null && _window.CaptureGeometry() is { } geometry)
+            try
             {
-                _windowLayoutStore.Save(geometry);
+                if (_runtimeDemand is not null) await _runtimeDemand.StopAsync();
             }
-            await _inferenceGateway.DisposeAsync();
-            await _qrCodeClient.DisposeAsync();
-            await DisposeDesktopShellAsync();
+            finally
+            {
+                if (_window is not null && _windowLayoutStore is not null && _window.CaptureGeometry() is { } geometry)
+                {
+                    _windowLayoutStore.Save(geometry);
+                }
+                await _inferenceGateway.DisposeAsync();
+                await _qrCodeClient.DisposeAsync();
+                await DisposeDesktopShellAsync();
+            }
         }
         finally
         {

@@ -12,7 +12,8 @@ internal sealed class RuntimeDemandCoordinator(
   Func<Task> disconnect,
   ProductMaintenanceCoordinator maintenance,
   CancellationToken shutdown,
-  ManagedRuntimeConnection? connection = null)
+  ManagedRuntimeConnection? connection = null,
+  bool shellOnly = false)
 {
   public ManagedRuntimeConnection? Connection { get; } = connection;
   private readonly object gate = new();
@@ -40,6 +41,7 @@ internal sealed class RuntimeDemandCoordinator(
   private async Task WaitAsync(bool initialize, CancellationToken cancellationToken, bool borrowLease = false,
     Func<CancellationToken, Task>? activate = null)
   {
+    if (shellOnly) throw new InvalidOperationException("外壳模式不启动识别服务（--shell-only）。");
     while (true)
     {
       cancellationToken.ThrowIfCancellationRequested();
@@ -86,6 +88,13 @@ internal sealed class RuntimeDemandCoordinator(
         cancellationToken.ThrowIfCancellationRequested();
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(shutdown, cancellationToken);
         await attempt.Completion.Task.WaitAsync(linked.Token);
+        if (activate is null)
+        {
+          lock (gate)
+          {
+            if (!ready) throw new InvalidOperationException("当前运行环境未提供识别服务，请选择可用环境后重试。");
+          }
+        }
         return;
       }
       finally
@@ -191,7 +200,11 @@ internal sealed class RuntimeDemandCoordinator(
     if (pending is not null)
     {
       try { await pending.WaitAsync(cancellationToken); }
-      catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
+      catch (Exception) when (pending.IsCompleted && !cancellationToken.IsCancellationRequested)
+      {
+        // The old attempt reports its failure to its own callers. Pausing still
+        // owns disconnecting any preserved session; its cleanup failure propagates.
+      }
     }
     await disconnect();
   }

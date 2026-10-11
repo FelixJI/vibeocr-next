@@ -1,5 +1,7 @@
 using VibeOCR.App.Features.Maintenance;
 using VibeOCR.App.Inference;
+using VibeOCR.App.ViewModels;
+using VibeOCR.Platform.Bootstrap;
 using Xunit;
 
 namespace VibeOCR.App.Tests;
@@ -154,6 +156,85 @@ public sealed class RuntimeDemandCoordinatorTests
     Assert.Equal(2, attempts);
     Assert.Equal(1, cleanups);
     Assert.True(maintenance.State.IsIdle);
+  }
+
+  [Theory]
+  [InlineData(false, false)]
+  [InlineData(true, false)]
+  [InlineData(false, true)]
+  [InlineData(true, true)]
+  public async Task PauseAndStopDrainFailedSwitchAndPreserveDisconnectFailure(bool stop, bool failDisconnect)
+  {
+    var entered = Signal();
+    var release = Signal();
+    int disconnects = 0;
+    var disconnectFailure = new IOException("disconnect failed");
+    var coordinator = new RuntimeDemandCoordinator((_, _) => Task.CompletedTask,
+      () => { disconnects++; return failDisconnect ? Task.FromException(disconnectFailure) : Task.CompletedTask; },
+      new ProductMaintenanceCoordinator(), TestContext.Current.CancellationToken);
+    Task switching = coordinator.SwitchAsync(async _ =>
+    {
+      entered.TrySetResult();
+      await release.Task;
+      throw new InvalidOperationException("switch failed before commit");
+    }, TestContext.Current.CancellationToken);
+    await entered.Task;
+    Task pausing = stop ? coordinator.StopAsync() : coordinator.PauseAsync(TestContext.Current.CancellationToken);
+    release.TrySetResult();
+    await Assert.ThrowsAsync<InvalidOperationException>(() => switching);
+    if (failDisconnect)
+      Assert.Same(disconnectFailure, await Assert.ThrowsAsync<IOException>(() => pausing));
+    else
+      await pausing;
+    Assert.Equal(1, disconnects);
+  }
+
+  [Fact]
+  public async Task DemandSharingEmptyEnvironmentSwitchReportsNotReadyWithoutRetry()
+  {
+    var entered = Signal();
+    var release = Signal();
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-demand-empty-{Guid.NewGuid():N}");
+    PortableLayout layout = PortableLayout.Resolve(Path.Combine(root, "VibeOCR.exe"), "winui-dev");
+    var manager = new RuntimeInstallerClient(RuntimeInstallerConfiguration.ForNext(layout));
+    var connection = new ManagedRuntimeConnection(manager, layout, new RuntimeStatusViewModel(), (_, _) => { });
+    int connects = 0;
+    var coordinator = new RuntimeDemandCoordinator((_, _) => { connects++; return Task.CompletedTask; },
+      connection.DisconnectAsync, new ProductMaintenanceCoordinator(), TestContext.Current.CancellationToken, connection);
+    Task switching = coordinator.SwitchAsync(async _ =>
+    {
+      entered.TrySetResult();
+      await release.Task;
+    }, TestContext.Current.CancellationToken);
+    await entered.Task;
+    Task demand = coordinator.EnsureReadyAsync(TestContext.Current.CancellationToken);
+    release.TrySetResult();
+    await switching;
+    await Assert.ThrowsAsync<InvalidOperationException>(() => demand);
+    Assert.Null(connection.Session);
+    Assert.Equal(0, connects);
+  }
+
+  [Theory]
+  [InlineData("ensure")]
+  [InlineData("switch")]
+  [InlineData("recover")]
+  public async Task ShellOnlyRejectsAllComputingLifecycleEntries(string operation)
+  {
+    int connects = 0;
+    int switches = 0;
+    var coordinator = new RuntimeDemandCoordinator((_, _) => { connects++; return Task.CompletedTask; },
+      () => Task.CompletedTask, new ProductMaintenanceCoordinator(), TestContext.Current.CancellationToken,
+      shellOnly: true);
+    Task action = operation switch
+    {
+      "ensure" => coordinator.EnsureReadyAsync(TestContext.Current.CancellationToken),
+      "switch" => coordinator.SwitchAsync(_ => { switches++; return Task.CompletedTask; }, TestContext.Current.CancellationToken),
+      _ => coordinator.RecoverAsync(),
+    };
+    await Assert.ThrowsAsync<InvalidOperationException>(() => action);
+    Assert.Equal(0, connects);
+    Assert.Equal(0, switches);
   }
 
   private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
