@@ -6,7 +6,6 @@ import io
 import itertools
 import json
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -260,13 +259,13 @@ def test_resolver_output_is_bounded_before_reporting() -> None:
 
 
 @pytest.mark.parametrize("scenario", ["success", "conflict", "network_timeout"])
-def test_real_pip_resolves_hash_locked_wheel_with_observable_activity(
+def test_real_uv_resolves_hash_locked_wheel_with_observable_activity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     scenario: str,
 ) -> None:
-    # This fixture is the producer of the lock digest; real pip is the consumer.
-    # A mismatched transfer must fail --require-hashes, just like a release lock.
+    # This fixture produces the authoritative lock digest; uv-derived artifacts
+    # must pass the same original-lock validation as production downloads.
     wheel_name = "vibeocr_resolver_fixture-1.0-py3-none-any.whl"
     data = io.BytesIO()
     with zipfile.ZipFile(data, "w") as wheel:
@@ -285,6 +284,11 @@ def test_real_pip_resolves_hash_locked_wheel_with_observable_activity(
     finish = threading.Event()
 
     class Handler(BaseHTTPRequestHandler):
+        def do_HEAD(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+
         def do_GET(self) -> None:
             if scenario == "network_timeout":
                 finish.wait(3)
@@ -318,24 +322,15 @@ def test_real_pip_resolves_hash_locked_wheel_with_observable_activity(
     )
     events = []
     reporter = _reporter(tmp_path / "state", events.append)
-    monkeypatch.setattr(installer, "_RESOLVE_NETWORK_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(installer, "_RESOLVE_NETWORK_TIMEOUT_SECONDS", 1)
     monkeypatch.setattr(installer, "_RESOLVE_NETWORK_RETRIES", 1)
-    # The outer guard must sit far above worst-case child startup: gate spawn
-    # plus fresh-venv pip import can exceed 8s on a cold CI runner, and a 10s
-    # guard then fires before pip's own 0.2s network timeout can exit nonzero.
-    # Supervisor deadline semantics stay pinned by this module's dedicated tests.
+    # The outer guard must allow cold Windows process startup; uv's network
+    # timeout remains bounded separately. Dedicated tests pin supervision budgets.
     monkeypatch.setattr(installer, "_RESOLVE_TOTAL_TIMEOUT_SECONDS", 60)
-    # The product runtime has pip; uv's development .venv intentionally does not.
+    # A real candidate without pip proves resolution uses the bound native uv.
     resolver_venv = tmp_path / "resolver-venv"
     subprocess.run(
-        [
-            shutil.which("uv") or "uv",
-            "venv",
-            "--seed",
-            "--python",
-            sys.executable,
-            str(resolver_venv),
-        ],
+        [sys.executable, "-I", "-m", "venv", "--without-pip", str(resolver_venv)],
         check=True,
         capture_output=True,
         text=True,
@@ -365,21 +360,20 @@ def test_real_pip_resolves_hash_locked_wheel_with_observable_activity(
             detail = str(failure.value)
             assert "reason=exit_nonzero" in detail
             assert (
-                "ReadTimeoutError" in detail
+                "timed out" in detail
                 if scenario == "network_timeout"
-                else "No matching distribution" in detail
+                else "No solution found" in detail
             )
             assert not (tmp_path / "cache/resolve/requirements-report.json").exists()
             return
         report = resolve()
         parsed = json.loads(report.read_text())
         assert parsed["install"][0]["metadata"]["name"] == "vibeocr-resolver-fixture"
-        assert transfers == [len(payload)]  # This dry-run actually fetched the wheel.
+        # Metadata reads are resolver traffic, separate from the self-managed target download.
+        assert transfers and all(size == len(payload) for size in transfers)
         details = [event.get("fallback_message", "") for event in events]
         assert any("reason=started" in detail for detail in details)
-        assert any(
-            "Collecting vibeocr-resolver-fixture" in detail for detail in details
-        )
+        assert any("Resolved 1 package" in detail for detail in details)
         assert any("reason=succeeded" in detail for detail in details)
         assert all("http://127.0.0.1" not in detail for detail in details)
     finally:

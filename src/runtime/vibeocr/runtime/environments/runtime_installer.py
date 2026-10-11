@@ -2,7 +2,7 @@
 
 The public surface is intentionally small: ``inspect``, ``ensure`` and ``repair``.
 Frontends receive paths and integrity state,
-never dependency names, index URLs or pip arguments.
+never dependency names, index URLs or package-manager arguments.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import sys
 import tarfile
 import threading
 import time
+import tomllib
 import urllib.parse
 import urllib.request
 import zipfile
@@ -34,8 +35,15 @@ from typing import TYPE_CHECKING, Any, TextIO
 from uuid import uuid4
 
 import httpx
-from packaging.markers import default_environment
+from packaging.markers import InvalidMarker, Marker, default_environment
 from packaging.requirements import InvalidRequirement, Requirement
+from packaging.tags import compatible_tags, cpython_tags
+from packaging.utils import InvalidWheelFilename, parse_wheel_filename
+from vibeocr.runtime.environments.bundled_uv import (
+    UV_VERSION,
+    uv_environment,
+    uv_pip_command,
+)
 from vibeocr.runtime.environments.managed_install_progress import ManagedInstallObserver
 from vibeocr.runtime.environments.runtime_install_plan import (
     CAPABILITY,
@@ -155,7 +163,7 @@ _OUTPUT_TAIL_MAX_CHARS = 4000
 def _child_output_tail(*streams: str) -> str:
     """Return the last non-empty lines of the first informative stream.
 
-    pip 把错误写进 stderr、下载进度写进 stdout，失败排障需要这份输出；
+    包管理器的错误与进度分布于 stderr/stdout，失败排障需要这份输出；
     优先 stderr，全部为空时返回空串。tail 只拼进异常消息（随 journal 与
     错误信封持久化），绝不写入 NDJSON stdout。
     """
@@ -179,7 +187,7 @@ _RESOLVE_NETWORK_RETRIES = 2
 _RESOLVE_IDLE_TIMEOUT_SECONDS = 300
 _RESOLVE_TOTAL_TIMEOUT_SECONDS = 1800
 _CHILD_DETAIL_MAX_CHARS = 160
-# pip 在非交互管道下按行输出解析/下载/安装状态；进度条等噪声行不匹配
+# 包管理器在非交互管道下按行输出解析/下载/安装状态；进度条等噪声行不匹配
 # 前缀，自然被忽略。明细行只经 maintenance 事件的 ``fallback_message``
 # 回报，绝不把包管理器的原始输出 bulk 写进 NDJSON stdout。
 _CHILD_STATUS_PREFIXES = (
@@ -194,6 +202,11 @@ _CHILD_STATUS_PREFIXES = (
     "Building wheel",
     "Would install ",
     "Progress ",
+    "Resolved ",
+    "Prepared ",
+    "Installed ",
+    "Audited ",
+    "Building ",
 )
 
 
@@ -282,13 +295,14 @@ def _run_install_command(
     reporter: RuntimeMaintenanceReporter | ManagedInstallObserver | None,
     heartbeat_code: str,
     idle_timeout: float | None = None,
-) -> None:
-    """Supervise one Python command with bounded diagnostics and owned cleanup.
+    gate_python: Path | None = None,
+) -> str:
+    """Supervise one command with bounded diagnostics and owned cleanup.
 
     On Windows a base Python gate waits on stdin until its anonymous Job is
     assigned. A venv launcher cannot serve as the gate: it can start the real
     interpreter before the launcher itself is assigned.
-    Only then can pip or its build children start. Closing the Job also kills
+    Only then can uv or its build children start. Closing the Job also kills
     descendants whose parent has already exited; unrelated operations are safe.
     """
     started = time.monotonic()
@@ -319,7 +333,9 @@ def _run_install_command(
     launched = command
     if os.name == "nt":
         launched = [
-            _install_gate_python(command[0]),
+            _install_gate_python(
+                str(gate_python) if gate_python is not None else command[0]
+            ),
             "-c",
             (
                 "import subprocess,sys; "
@@ -439,6 +455,7 @@ def _run_install_command(
             reporter.child_status_detail(
                 message_code=heartbeat_code, fallback_message=diagnostic("succeeded")
             )
+        return "".join(tails[0])
     except RuntimeInstallError as exc:
         raise RuntimeInstallError(
             str(exc) + _child_output_tail("".join(tails[1]), "".join(tails[0])),
@@ -520,7 +537,9 @@ def _python_in(runtime_root: Path) -> Path:
     return next((path for path in candidates if path.is_file()), candidates[0])
 
 
-_LOCK_DECLARATION_RE = re.compile(r"(?m)^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:==|@)")
+_LOCK_DECLARATION_RE = re.compile(
+    r"(?m)^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[A-Za-z0-9._, -]+\])?\s*(?:==|@)"
+)
 _LOCK_HASH_RE = re.compile(r"--hash=sha256:([0-9a-f]{64})")
 _DOWNLOAD_EVENT_MIN_BYTES = 4 * 1024 * 1024
 _DOWNLOAD_CHUNK_BYTES = 1024 * 1024
@@ -537,6 +556,7 @@ class _ResolvedArtifact:
     url: str
     sha256: str | None
     filename: str
+    version: str | None = None
 
 
 def _lock_allowed_hashes(lock_path: Path) -> dict[str, set[str]]:
@@ -566,14 +586,20 @@ def _parse_resolve_report(
     try:
         document = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        raise RuntimeInstallError("pip resolve report is unreadable") from exc
+        raise RuntimeInstallError("package resolve report is unreadable") from exc
+    return _parse_resolve_document(document, download_root)
+
+
+def _parse_resolve_document(
+    document: object, download_root: Path | None
+) -> tuple[_ResolvedArtifact, ...]:
     items = document.get("install") if isinstance(document, dict) else None
     if not isinstance(items, list) or not items:
-        raise RuntimeInstallError("pip resolve report has no artifacts")
+        raise RuntimeInstallError("package resolve report has no artifacts")
     artifacts: list[_ResolvedArtifact] = []
     for item in items:
         if not isinstance(item, dict):
-            raise RuntimeInstallError("pip resolve report artifact is invalid")
+            raise RuntimeInstallError("package resolve report artifact is invalid")
         metadata = item.get("metadata")
         download = item.get("download_info")
         archive = download.get("archive_info") if isinstance(download, dict) else None
@@ -588,7 +614,7 @@ def _parse_resolve_report(
             or not url.startswith(("http://", "https://", "file://"))
             or (sha256 is not None and not isinstance(sha256, str))
         ):
-            raise RuntimeInstallError("pip resolve report artifact is invalid")
+            raise RuntimeInstallError("package resolve report artifact is invalid")
         if url.startswith("file://"):
             parsed = urllib.parse.urlsplit(url)
             local = Path(urllib.request.url2pathname(parsed.path)).resolve()
@@ -606,8 +632,10 @@ def _parse_resolve_report(
             or ":" in filename
             or ".." in filename
         ):
-            raise RuntimeInstallError("pip resolve artifact URL is unsafe")
-        artifacts.append(_ResolvedArtifact(name, url, sha256, filename))
+            raise RuntimeInstallError("package resolve artifact URL is unsafe")
+        artifacts.append(
+            _ResolvedArtifact(name, url, sha256, filename, metadata.get("version"))
+        )
     return tuple(artifacts)
 
 
@@ -828,6 +856,204 @@ def _download_resolved_artifacts(
     return download_root
 
 
+def _uv_command(python: Path, action: str) -> list[str]:
+    try:
+        return uv_pip_command(python, action)
+    except ValueError as exc:
+        raise RuntimeInstallError(
+            str(exc),
+            reason_code="installer_tool_unavailable",
+            next_action="restore_product",
+        ) from None
+
+
+def _uv_install_environment(environment: dict[str, str], cache: Path) -> dict[str, str]:
+    controlled = uv_environment(environment)
+    controlled.update(
+        UV_CACHE_DIR=str(cache / "uv"),
+        UV_HTTP_TIMEOUT=str(_RESOLVE_NETWORK_TIMEOUT_SECONDS),
+        UV_HTTP_RETRIES=str(_RESOLVE_NETWORK_RETRIES),
+        PYTHONNOUSERSITE="1",
+        PYTHONUTF8="1",
+        PYTHONUNBUFFERED="1",
+    )
+    return controlled
+
+
+def _target_markers(python_version: str) -> dict[str, str]:
+    target = default_environment()
+    target.update(
+        python_version=".".join(python_version.split(".")[:2]),
+        python_full_version=python_version,
+        implementation_version=python_version,
+        os_name="nt",
+        sys_platform="win32",
+        platform_system="Windows",
+        platform_machine="AMD64",
+    )
+    return target
+
+
+def _applicable_lock(lock: Path, python_version: str) -> dict[str, Requirement]:
+    target = _target_markers(python_version)
+    requirements: dict[str, Requirement] = {}
+    for raw in lock.read_text(encoding="utf-8").splitlines():
+        declaration = raw.split(" --hash=", 1)[0].strip().removesuffix(chr(92)).rstrip()
+        if not declaration or declaration.startswith(("#", "--hash=")):
+            continue
+        try:
+            requirement = Requirement(declaration)
+        except InvalidRequirement:
+            raise RuntimeInstallError(
+                "local target closure has an invalid lock requirement"
+            ) from None
+        if requirement.marker and not requirement.marker.evaluate(target):
+            continue
+        name = _normalize_dist_name(requirement.name)
+        previous = requirements.get(name)
+        if previous is not None and (
+            previous.specifier != requirement.specifier
+            or previous.url != requirement.url
+            or previous.extras != requirement.extras
+        ):
+            raise RuntimeInstallError(
+                "local target closure has conflicting lock requirements"
+            )
+        requirements[name] = requirement
+    return requirements
+
+
+def _validate_resolved_lock(
+    lock: Path, artifacts: tuple[_ResolvedArtifact, ...], python_version: str
+) -> None:
+    requirements = _applicable_lock(lock, python_version)
+    allowed = _lock_allowed_hashes(lock)
+    names = [_normalize_dist_name(artifact.name) for artifact in artifacts]
+    if len(names) != len(set(names)) or set(names) != requirements.keys():
+        raise RuntimeInstallError(
+            "resolved local target closure does not match the applicable lock"
+        )
+    for artifact in artifacts:
+        name = _normalize_dist_name(artifact.name)
+        requirement = requirements[name]
+        if not artifact.sha256 or artifact.sha256 not in allowed.get(name, set()):
+            raise RuntimeInstallError(
+                "local target artifact hash is not accepted by the lock"
+            )
+        if not isinstance(artifact.version, str) or (
+            requirement.specifier
+            and not requirement.specifier.contains(artifact.version, prereleases=True)
+        ):
+            raise RuntimeInstallError(
+                "resolved local target version is not accepted by the lock"
+            )
+        if (
+            requirement.url
+            and not artifact.url.startswith("file://")
+            and artifact.url != requirement.url
+        ):
+            raise RuntimeInstallError(
+                "resolved direct artifact URL differs from the lock"
+            )
+
+
+def _pylock_report(
+    pylock: Path, lock: Path, python_version: str, downloads: Path
+) -> dict[str, object]:
+    try:
+        document = tomllib.loads(pylock.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise RuntimeInstallError("uv pylock report is unreadable") from None
+    packages = document.get("packages")
+    if (
+        document.get("lock-version") != "1.0"
+        or not isinstance(packages, list)
+        or not packages
+    ):
+        raise RuntimeInstallError("uv pylock report has no supported artifacts")
+    tags = list(cpython_tags((3, 13), abis=["cp313"], platforms=["win_amd64"])) + list(
+        compatible_tags((3, 13), interpreter="cp313", platforms=["win_amd64"])
+    )
+    ranks = {tag: rank for rank, tag in enumerate(tags)}
+    allowed = _lock_allowed_hashes(lock)
+    items = []
+    for package in packages:
+        if not isinstance(package, dict):
+            raise RuntimeInstallError("uv pylock target package is invalid")
+        name, version = package.get("name"), package.get("version")
+        if not isinstance(name, str) or not isinstance(version, str):
+            raise RuntimeInstallError("uv pylock target package is invalid")
+        marker = package.get("marker")
+        if marker is not None:
+            try:
+                if not Marker(marker).evaluate(_target_markers(python_version)):
+                    continue
+            except (InvalidMarker, TypeError):
+                raise RuntimeInstallError(
+                    "uv pylock target marker is invalid"
+                ) from None
+        wheels = package.get("wheels", [])
+        if not isinstance(wheels, list):
+            raise RuntimeInstallError("uv pylock wheels are invalid")
+        archive = package.get("archive")
+        if isinstance(archive, dict) and "path" in archive:
+            path = archive["path"]
+            if not isinstance(path, str) or not Path(path).is_absolute():
+                raise RuntimeInstallError("uv pylock archive path is invalid")
+            archive = {**archive, "url": Path(path).resolve().as_uri()}
+        if isinstance(archive, dict) and str(archive.get("url", "")).endswith(".whl"):
+            wheels = [*wheels, archive]
+            archive = None
+        candidates = []
+        for wheel in wheels:
+            if (
+                not isinstance(wheel, dict)
+                or not isinstance(wheel.get("url"), str)
+                or not isinstance(wheel.get("hashes"), dict)
+            ):
+                raise RuntimeInstallError("uv pylock wheel is invalid")
+            url = wheel["url"]
+            try:
+                wheel_name, wheel_version, _, wheel_tags = parse_wheel_filename(
+                    urllib.parse.unquote(
+                        urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1]
+                    )
+                )
+            except (InvalidWheelFilename, ValueError):
+                raise RuntimeInstallError(
+                    "uv pylock wheel filename is invalid"
+                ) from None
+            matching = [ranks[tag] for tag in wheel_tags if tag in ranks]
+            if (
+                matching
+                and _normalize_dist_name(str(wheel_name)) == _normalize_dist_name(name)
+                and str(wheel_version) == version
+                and wheel["hashes"].get("sha256")
+                in allowed.get(_normalize_dist_name(name), set())
+            ):
+                candidates.append((min(matching), url, wheel))
+        if candidates:
+            artifact = min(candidates, key=lambda value: (value[0], value[1]))[2]
+        else:
+            artifact = package.get("sdist", archive)
+        if not isinstance(artifact, dict):
+            raise RuntimeInstallError("uv pylock has no lock-allowed target artifact")
+        items.append(
+            {
+                "metadata": {"name": name, "version": version},
+                "download_info": {
+                    "url": artifact.get("url"),
+                    "archive_info": {"hashes": artifact.get("hashes")},
+                },
+            }
+        )
+    report = {"executor": f"uv-{UV_VERSION}", "install": items}
+    _validate_resolved_lock(
+        lock, _parse_resolve_document(report, downloads), python_version
+    )
+    return report
+
+
 def _resolve_online_report(
     python: Path,
     lock: Path,
@@ -836,12 +1062,33 @@ def _resolve_online_report(
     reporter: RuntimeMaintenanceReporter | ManagedInstallObserver | None,
     env: dict[str, str],
 ) -> Path:
-    """Resolve the lock closure with ``pip --dry-run --report``.
-
-    ``--require-hashes`` keeps pip's resolver pinned to the exact lock
-    artifacts, so the report's URLs are precisely what a direct install
-    would download.
-    """
+    """Derive artifacts with uv; the bound requirements lock stays authoritative."""
+    env = _uv_install_environment(env, cache)
+    target_output = _run_install_command(
+        [
+            str(python),
+            "-I",
+            "-c",
+            "import json,sys,sysconfig; print(json.dumps({'version': '.'.join(map(str,sys.version_info[:3])), 'platform': sysconfig.get_platform(), 'implementation':sys.implementation.name, 'gil_disabled':bool(sysconfig.get_config_var('Py_GIL_DISABLED'))}))",
+        ],
+        timeout=60,
+        env=env,
+        reporter=reporter,
+        heartbeat_code="runtime.resolve_target",
+    )
+    try:
+        target = json.loads(target_output)
+    except ValueError:
+        raise RuntimeInstallError("target Python identity is unreadable") from None
+    if (
+        target.get("implementation") != "cpython"
+        or target.get("platform") != "win-amd64"
+        or not target.get("version", "").startswith("3.13.")
+        or target.get("gil_disabled")
+    ):
+        raise RuntimeInstallError(
+            "installer requires the bound Windows x64 CPython 3.13"
+        )
     report_path = cache / "resolve" / f"{lock.stem}-report.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     inputs_path = report_path.with_suffix(".inputs.json")
@@ -849,64 +1096,58 @@ def _resolve_online_report(
         "lock": lock.read_text(encoding="utf-8"),
         "endpoint": endpoint,
         "ignore_installed": True,
+        "executor": f"uv-{UV_VERSION}",
+        "target": target,
     }
+    downloads = cache / "downloads" / "artifacts"
+    downloads.mkdir(parents=True, exist_ok=True)
     try:
         if json.loads(inputs_path.read_text(encoding="utf-8")) == inputs:
-            artifacts = _parse_resolve_report(
-                report_path, cache / "downloads/artifacts"
-            )
-            allowed = _lock_allowed_hashes(lock)
+            artifacts = _parse_resolve_report(report_path, downloads)
+            _validate_resolved_lock(lock, artifacts, target["version"])
             for artifact in artifacts:
                 if artifact.url.startswith("file://"):
-                    local = cache / "downloads/artifacts" / artifact.filename
-                    if not local.is_file() or _file_sha256(local) not in allowed.get(
-                        _normalize_dist_name(artifact.name), set()
-                    ):
-                        local.unlink(missing_ok=True)
+                    local = downloads / artifact.filename
+                    if not local.is_file() or _file_sha256(local) != artifact.sha256:
                         break
             else:
                 return report_path
     except (OSError, ValueError, RuntimeInstallError):
         pass
-    _run_install_command(
-        [
-            str(python),
-            "-m",
-            "pip",
-            "install",
-            "--dry-run",
-            "--ignore-installed",
-            "--no-input",
-            "--disable-pip-version-check",
-            "--progress-bar",
-            "raw",
-            "--timeout",
-            str(_RESOLVE_NETWORK_TIMEOUT_SECONDS),
-            "--retries",
-            str(_RESOLVE_NETWORK_RETRIES),
-            "--resume-retries",
-            str(_RESOLVE_NETWORK_RETRIES),
-            "--report",
-            str(report_path),
-            "--find-links",
-            str(cache / "downloads" / "artifacts"),
-            "--index-url",
-            endpoint,
-            "--require-hashes",
-            "-r",
-            str(lock),
-        ],
-        # A hard ceiling still bounds repeated resolver/backtracking activity.
-        # Network reads have a shorter pip bound; only effective status changes
-        # reset the idle budget, never our heartbeat or arbitrary stderr noise.
-        timeout=_RESOLVE_TOTAL_TIMEOUT_SECONDS,
-        idle_timeout=_RESOLVE_IDLE_TIMEOUT_SECONDS,
-        env={**env, "PYTHONUNBUFFERED": "1", "PIP_NO_INPUT": "1"},
-        reporter=reporter,
-        heartbeat_code="runtime.resolve_packages",
-    )
-    _parse_resolve_report(report_path, cache / "downloads/artifacts")
-    inputs_path.write_text(json.dumps(inputs, sort_keys=True), encoding="utf-8")
+    # Unique output prevents an obsolete derived lock from becoming a resolver preference.
+    pylock = report_path.with_name(f"pylock.{uuid4().hex}.toml")
+    try:
+        _run_install_command(
+            _uv_command(python, "compile")
+            + [
+                "--no-sources",
+                "--python-platform",
+                "x86_64-pc-windows-msvc",
+                "--generate-hashes",
+                "--format",
+                "pylock.toml",
+                "--output-file",
+                str(pylock),
+                "--find-links",
+                str(downloads),
+                "--default-index",
+                endpoint,
+                "--index-strategy",
+                "first-index",
+                str(lock),
+            ],
+            timeout=_RESOLVE_TOTAL_TIMEOUT_SECONDS,
+            idle_timeout=_RESOLVE_IDLE_TIMEOUT_SECONDS,
+            env=env,
+            reporter=reporter,
+            heartbeat_code="runtime.resolve_packages",
+            gate_python=python,
+        )
+        document = _pylock_report(pylock, lock, target["version"], downloads)
+        report_path.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
+        inputs_path.write_text(json.dumps(inputs, sort_keys=True), encoding="utf-8")
+    finally:
+        pylock.unlink(missing_ok=True)
     return report_path
 
 
@@ -946,43 +1187,12 @@ def _local_install_requirements(
 ) -> Path:
     """Bind the resolved target closure to the verified local artifacts.
 
-    The original lock remains authoritative: pip rechecks its allowed hashes.
+    The original lock remains authoritative: uv rechecks its allowed hashes.
     Explicit local targets plus --no-deps prevent an index or @HTTPS pin from
     downloading targets again. The selected index remains available only to
-    pip's isolated sdist build requirements, outside the target package counts.
+    uv's isolated sdist build requirements, outside the target package counts.
     """
-    target = default_environment()
-    target.update(
-        python_version=".".join(python_version.split(".")[:2]),
-        python_full_version=python_version,
-        os_name="nt",
-        sys_platform="win32",
-        platform_system="Windows",
-        platform_machine="AMD64",
-    )
-    requirements: dict[str, Requirement] = {}
-    for raw in lock.read_text(encoding="utf-8").splitlines():
-        declaration = raw.split(" --hash=", 1)[0].strip().removesuffix(chr(92)).rstrip()
-        if not declaration or declaration.startswith(("#", "--hash=")):
-            continue
-        try:
-            requirement = Requirement(declaration)
-        except InvalidRequirement:
-            raise RuntimeInstallError(
-                "local target closure has an invalid lock requirement"
-            ) from None
-        if requirement.marker and not requirement.marker.evaluate(target):
-            continue
-        name = _normalize_dist_name(requirement.name)
-        previous = requirements.get(name)
-        if previous is not None and (
-            previous.specifier != requirement.specifier
-            or previous.url != requirement.url
-        ):
-            raise RuntimeInstallError(
-                "local target closure has conflicting lock requirements"
-            )
-        requirements[name] = requirement
+    requirements = _applicable_lock(lock, python_version)
     artifacts: dict[str, _ResolvedArtifact] = {}
     for artifact in _parse_resolve_report(report, downloads):
         name = _normalize_dist_name(artifact.name)
@@ -1066,27 +1276,21 @@ def _default_install_runner(
         raise RuntimeInstallError("Python archive has no python.exe")
     lock = install_scope.lock_path
     runtime_pack = install_scope.runtime_pack
-    portable_env = os.environ.copy()
-    for name in tuple(portable_env):
-        if name.upper().startswith(("PIP_", "UV_")):
-            portable_env.pop(name)
+    portable_env = uv_environment(dict(os.environ))
     cache = cache_root or partial_root.parent.parent / "state" / "installer-cache"
     portable_env.update(
         {
-            "PIP_CACHE_DIR": str(cache / "pip"),
             "UV_CACHE_DIR": str(cache / "uv"),
             "HF_HOME": str(cache / "huggingface"),
             "MODELSCOPE_CACHE": str(cache / "modelscope"),
             "TEMP": str(cache / "temp"),
             "TMP": str(cache / "temp"),
-            "PIP_CONFIG_FILE": os.devnull,
-            "PIP_DISABLE_PIP_VERSION_CHECK": "1",
-            "PIP_NO_INPUT": "1",
             "PYTHONNOUSERSITE": "1",
             "PYTHONUTF8": "1",
         }
     )
-    for directory in portable_env["PIP_CACHE_DIR"], portable_env["TEMP"]:
+    portable_env = _uv_install_environment(portable_env, cache)
+    for directory in portable_env["UV_CACHE_DIR"], portable_env["TEMP"]:
         Path(directory).mkdir(parents=True, exist_ok=True)
     if reporter is not None:
         reporter.advance(
@@ -1095,12 +1299,7 @@ def _default_install_runner(
             total=7,
             message_code="runtime.install_profile",
         )
-    install_command = [
-        str(python),
-        "-m",
-        "pip",
-        "install",
-    ]
+    install_command = _uv_command(python, "install")
     pack_files = [manifest.path.parent / name for name in runtime_pack]
     pack_present = bool(pack_files) and all(path.is_file() for path in pack_files)
     base_ids = {
@@ -1128,6 +1327,7 @@ def _default_install_runner(
         )
         requirements_file = pack_dir / "pack-requirements.txt"
         install_command += [
+            "--offline",
             "--no-index",
             "--find-links",
             str(pack_dir),
@@ -1151,8 +1351,10 @@ def _default_install_runner(
             python, lock, endpoint, cache, reporter, portable_env
         )
         install_command += [
-            "--index-url",
+            "--default-index",
             endpoint,
+            "--index-strategy",
+            "first-index",
             "--find-links",
             str(download_root),
             "--no-deps",
@@ -1173,6 +1375,7 @@ def _default_install_runner(
         env=portable_env,
         reporter=reporter,
         heartbeat_code="runtime.install_profile",
+        gate_python=python,
     )
     artifact_root = manifest.path.parent
     runtime_wheel = artifact_root / manifest.runtime_wheel
@@ -1189,19 +1392,13 @@ def _default_install_runner(
             component_id="runtime_host",
         )
     _run_install_command(
-        [
-            str(python),
-            "-m",
-            "pip",
-            "install",
-            "--no-deps",
-            "--force-reinstall",
-            str(runtime_wheel),
-        ],
+        _uv_command(python, "install")
+        + ["--offline", "--no-deps", "--reinstall", str(runtime_wheel)],
         timeout=600,
         env=portable_env,
         reporter=reporter,
         heartbeat_code="runtime.install_backend",
+        gate_python=python,
     )
     if reporter is not None:
         reporter.advance(
@@ -1223,13 +1420,15 @@ def _default_install_runner(
         env=portable_env,
         reporter=reporter,
         heartbeat_code="runtime.verify_runtime",
+        gate_python=python,
     )
     _run_install_command(
-        [str(python), "-m", "pip", "check"],
+        _uv_command(python, "check") + ["--offline"],
         timeout=60,
         env=portable_env,
         reporter=reporter,
         heartbeat_code="runtime.verify_runtime",
+        gate_python=python,
     )
     paddle_environment = install_scope.paddle_environment
     if paddle_environment is not None:

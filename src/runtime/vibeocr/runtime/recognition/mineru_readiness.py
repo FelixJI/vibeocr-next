@@ -168,7 +168,9 @@ def catalog_payload(*, observe_runtime: bool = True) -> dict:
     installed = remote or _mineru4_installed()
     return {
         "default_tier": "basic",
-        "languages": list(LANGUAGES),
+        # 本地 MinerU 4 无 language 通道且 OCR 恒用内置 ch 模型（覆盖中英），
+        # catalog 只广告实际可兑现集合；远端协议不在本地限制内。
+        "languages": list(LANGUAGES) if remote else ["ch"],
         "tiers": [
             {
                 "id": tier.value,

@@ -141,6 +141,10 @@ class TestMinerUService:
         assert "mineru.parser.api_server" in cmd
         assert "--host" in cmd
         assert "--port" in cmd
+        # MinerU 4（含锁定的 4.0.10）api_server CLI 无 --language 选项，传入即
+        # Click 退出码 2 导致服务无法启动（#208 冻结安装真实回归发现）。
+        assert "--language" not in cmd
+        assert "--tier" in cmd
 
     def test_shutdown(self):
         """关闭服务不报错"""

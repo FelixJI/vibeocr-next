@@ -22,7 +22,7 @@
 | 桌面工作流、应用权威状态与更新 | C#（`src/dotnet/VibeOCR.App/Features`、ViewModels） | ViewModel → Platform typed client；更新走 Velopack feed | 权威状态单点，UI 不复制协议/进程细节 |
 | Workbench 展示与局部编辑 | React/TypeScript（`WebAssets/src` 的 `features`/`components`） | WebView2 消息桥：`WebAssets/src/bridge` ↔ `App/Web` codec ↔ `App/Workbench` handler | 富交互迭代快；浏览器内容无直接系统/Runtime 权限 |
 | 二维码/条码生成、本地解码与 PNG/JPEG 保存 | C#（`VibeOCR.App/Features/QrCode`、`VibeOCR.App/Inference/LocalQrCodeClient`） | WebView 命令 → 本地 ZXing.Net 与 Windows 图片编码/BitmapDecoder（≤4096 有界缩放，有界趟次）；不等待 Supervisor | 无需识别运行环境即可生成与解码，文件授权留在宿主 |
-| OCR/MinerU 推理、PDF/表格/导出、二维码兼容生成/解码 route | Python/CPython（`runtime/recognition`、`documents`、`codes`） | Desktop↔Runtime 唯一 v2 内部 HTTP wire（`contracts/runtime` + `VibeOCR.Runtime.Client`）；桌面已不消费解码 route | 直接消费 OCR/PDF 生态；worker 隔离与引擎生命周期同源；保留的兼容 wire 面不构成桌面依赖 |
+| OCR/MinerU 推理、PDF/表格/导出、二维码兼容生成/解码 route | Python/CPython（`runtime/recognition`、`documents`、`codes`） | Desktop↔Runtime 唯一 v2 内部 HTTP wire（`contracts/runtime` + `VibeOCR.Runtime.Client`）；桌面已不消费解码 route | 直接消费 OCR/PDF 生态；worker 隔离与引擎生命周期同源；保留的兼容 wire 面不构成桌面依赖；本地 MinerU 4 无 language 上行通道，OCR 恒用内置 ch 模型（覆盖中英） |
 | 任务调度与共享子进程 | Python（`runtime/jobs`、`processes`） | 入口是 host 暴露的 v2 内部 HTTP 路由；Paddle/MinerU/PDF worker 是 Runtime 内部管理的子进程，不经桌面直接调用 | 跨 job 状态与进程复用集中在 Runtime |
 | 运行环境安装事务（组件选择、安装计划、设备就绪、回滚） | Python/CPython（`runtime/environments`，经产品内冻结 Installer 可执行文件交付） | C# 侧由 `Platform/Bootstrap/RuntimeInstallerClient` 以子进程调用冻结 Installer：inspect/ensure/repair/install_plan 与 cancel/retry/observe 都是独立子进程命令（`--request-json` 参数），进度走 stdout NDJSON 事件流（`ndjson.v1/v2`），结果为单个 JSON envelope；安装计划/设备就绪真值只在 Runtime，C#/TS 不复制包依赖推导 | 依赖解析与 manifest 绑定在事务内保持一致 |
 | Windows 构建/打包/安装前置 | PowerShell（`scripts/build-release.ps1`、`build_internal_runtime.ps1`、`install_windows_app_runtime.ps1`） | 本地/CI 命令行 | Windows SDK、Velopack 与 App Runtime 适配 |
@@ -46,6 +46,34 @@ Python 旧生成/解码路由仍有内部契约消费者，本次保留为兼容
 `bridge/client.ts` 和 `bridge/runtime.ts`，并由编译期类型契约与运行时消息测试共同校验。
 二者均不引入 Python.NET/IronPython、第二套 IPC 或全量原生 UI 重写，不移除 Python OCR/PDF 能力、
 已证明的 worker 隔离、Runtime 安装事务与内部 wire。
+
+## 用户环境安装执行器
+
+首启与受管理环境安装统一调用固定 **uv 0.12.22** 的 `uv pip` 接口，目标为 manifest 绑定的
+Windows x64 CPython 3.13；具名候选由标准 `venv --without-pip` 创建。用户无需 PATH 中的 uv、pip 或系统 Python。
+`bundled_uv.py` 在冻结 Installer 中仅定位 `_MEIPASS/uv/uv.exe` 并核实版本；源码开发入口仅使用根
+`pyproject.toml` / `uv.lock` 安装的 uv distribution，缺失或版本不符明确失败。运行时不下载/bootstrap 工具。
+
+工具来自 [Astral 官方 PyPI uv 0.12.22](https://pypi.org/project/uv/0.12.22/)，Windows wheel 来源与既有摘要
+由 `uv.lock` 记录。`build_runtime_installer.py` 将其 uv.exe 和 wheel 中的 `LICENSE-MIT` / `LICENSE-APACHE`
+一起嵌入现有 onefile EXE；许可证为 [MIT 或 Apache-2.0](https://github.com/astral-sh/uv/tree/0.12.22)。
+Installer ZIP 仍只有绑定的一个 EXE，沿用产品现有 installer / manifest 完整性链。
+
+各 profile/recipe requirements lock 仍是唯一用户依赖权威，用户环境不消费根开发 `uv.lock`。
+在线解析的 pylock 只是临时派生结果：按真实目标解释器的版本/平台/ABI筛选，再核对原锁适用包集合、版本、
+marker、direct URL 与工件摘要，输出现有下载/清理模型可读的统一报告。原锁 extras保留在本地安装输入中。
+自管下载器继续统计目标闭包下载字节、缓存命中及安装批次；uv 为元数据解析或 sdist 隔离构建读取的网络数据和
+临时构建依赖不计为目标包已下载/已安装。已核验目标使用本地显式工件并禁止重解析依赖，sdist 构建临时依赖仅用
+计划确认的单一索引。完整随包闭包、Runtime wheel 与最终一致性检查使用 `--offline`。
+
+安装命令屏蔽继承的 `UV_` / `PIP_`、VIRTUAL_ENV / CONDA 与 Python路径覆盖，禁用 uv 用户/父目录配置和
+Python自动下载；产品设置及冻结计划是唯一目标/来源输入。Windows 门控仍先归属 Job 再启动 uv 与构建后代。
+新报告缓存按执行器、目标、原锁及来源失效；旧 pip 报告保留可读的清理归属证据，自管工件只按已有锁验证复用。
+uv 内部缓存由 uv 管理，清理器不遍历删除其内部结构；已健康环境不会只因更换执行器重建。
+
+`env_manager.py` 的历史安装/重装/卸载函数没有当前产品调用方（仓内其他命中仅是历史注释），本次保留历史代码；
+当前产品安装入口在 `runtime_installer.py` 与 `ManagedEnvironmentStore._install_scope`。
+`scripts/build_runtime_pack.py` 的固定 pip download/wheel 是开发构建工具，继续由仓库 build group 管理。
 
 ## 20 分钟启动链
 

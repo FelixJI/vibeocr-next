@@ -189,7 +189,8 @@ def _report(store, recipe, filename, name, digest):
     return artifact
 
 
-def test_shared_downloads_survive_unreferenced_cleanup(tmp_path, monkeypatch):
+@pytest.mark.parametrize("executor", ["pip", "uv"])
+def test_shared_downloads_survive_unreferenced_cleanup(tmp_path, monkeypatch, executor):
     store, _ = _manager(tmp_path, monkeypatch)
     first, second, third = [
         store.create(name) for name in ("保留一", "保留二", "删除三")
@@ -208,6 +209,27 @@ def test_shared_downloads_survive_unreferenced_cleanup(tmp_path, monkeypatch):
         gpu_name,
         next(iter(gpu_allowed[gpu_name])),
     )
+    if executor == "uv":
+        for recipe in ("rapidocr-cpu", "rapidocr+mineru-cuda"):
+            recipe_scope, _ = store._recipe(recipe)
+            report = (
+                store.paths.state_root
+                / "installer-cache"
+                / "resolve"
+                / f"{recipe_scope.lock_path.stem}-report.json"
+            )
+            inputs_path = report.with_suffix(".inputs.json")
+            inputs = json.loads(inputs_path.read_text())
+            inputs.update(
+                executor="uv-0.12.22",
+                target={
+                    "version": "3.13.16",
+                    "platform": "win-amd64",
+                    "implementation": "cpython",
+                    "gil_disabled": False,
+                },
+            )
+            _atomic_json(inputs_path, inputs)
     data = store._read()
     for item in (first, second):
         data["environments"][item["id"]].update(

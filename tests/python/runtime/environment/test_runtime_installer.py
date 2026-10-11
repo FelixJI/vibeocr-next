@@ -3548,7 +3548,7 @@ def _run_default_installer(
     with_base_pack: bool,
     profile: str = "win-x64-base",
 ) -> tuple[list[list[str]], Path, Path]:
-    """Run ``_default_install_runner`` with captured pip commands.
+    """Run ``_default_install_runner`` with captured uv commands.
 
     Returns (captured_commands, partial_root, manifest_path). The Python
     archive extraction and every child process are faked so the test only
@@ -3562,7 +3562,7 @@ def _run_default_installer(
     partial_root.mkdir(parents=True)
     commands: list[list[str]] = []
 
-    def fake_run(command, *, timeout, env, reporter, heartbeat_code):  # type: ignore[no-untyped-def]
+    def fake_run(command, *, timeout, env, reporter, heartbeat_code, gate_python=None):  # type: ignore[no-untyped-def]
         commands.append(list(command))
 
     def fake_extract_python(archive_path, destination, *, progress=None):  # type: ignore[no-untyped-def]
@@ -3692,7 +3692,9 @@ class TestOfflineRuntimePack:
         partial_root.mkdir(parents=True)
         manifest = load_runtime_manifest(manifest_path, verify_artifacts=False)
 
-        def fake_run(command, *, timeout, env, reporter, heartbeat_code):  # type: ignore[no-untyped-def]
+        def fake_run(
+            command, *, timeout, env, reporter, heartbeat_code, gate_python=None
+        ):  # type: ignore[no-untyped-def]
             raise AssertionError("install must not run when the pack is missing")
 
         monkeypatch.setattr(installer, "_run_install_command", fake_run)
@@ -3728,7 +3730,7 @@ def test_online_install_uses_selected_source_and_isolates_parent_config(
     manifest, component = _release(tmp_path / "release")
     captured: list[tuple[list[str], dict[str, str]]] = []
 
-    def fake_run(command, *, timeout, env, reporter, heartbeat_code):  # type: ignore[no-untyped-def]
+    def fake_run(command, *, timeout, env, reporter, heartbeat_code, gate_python=None):  # type: ignore[no-untyped-def]
         captured.append((list(command), dict(env)))
 
     def fake_extract_python(archive_path, destination, *, progress=None):  # type: ignore[no-untyped-def]
@@ -3772,7 +3774,7 @@ def test_online_install_uses_selected_source_and_isolates_parent_config(
 
     profile_command, child_env = captured[0]
     assert resolved_endpoints == [expected_endpoint]
-    assert profile_command[profile_command.index("--index-url") + 1] == (
+    assert profile_command[profile_command.index("--default-index") + 1] == (
         expected_endpoint
     )
     assert "--require-hashes" in profile_command
@@ -3794,7 +3796,7 @@ def test_cuda_gpu_only_selection_uses_exact_install_scope(
     manifest, component = _release(tmp_path / "release")
     captured: list[list[str]] = []
 
-    def fake_run(command, *, timeout, env, reporter, heartbeat_code):  # type: ignore[no-untyped-def]
+    def fake_run(command, *, timeout, env, reporter, heartbeat_code, gate_python=None):  # type: ignore[no-untyped-def]
         captured.append(list(command))
 
     def fake_extract_python(archive_path, destination, *, progress=None):  # type: ignore[no-untyped-def]
@@ -3983,7 +3985,7 @@ def test_full_profile_without_pack_falls_back_online(
     partial_root.mkdir(parents=True)
     commands: list[list[str]] = []
 
-    def fake_run(command, *, timeout, env, reporter, heartbeat_code):  # type: ignore[no-untyped-def]
+    def fake_run(command, *, timeout, env, reporter, heartbeat_code, gate_python=None):  # type: ignore[no-untyped-def]
         commands.append(list(command))
 
     def fake_extract_python(archive_path, destination, *, progress=None):  # type: ignore[no-untyped-def]
@@ -4993,8 +4995,8 @@ def test_paddle_environment_installs_in_separate_interpreter_and_shared_cache(
         lambda lock, *args: lock.with_suffix(".local.txt"),
     )
     installer._default_install_runner(root, manifest, scope, _pypi_source())
-    checks = [c for c in calls if c[1:] == ["-m", "pip", "check"]]
-    assert [c[0] for c in checks] == [
+    checks = [c for c in calls if "check" in c and "pip" in c]
+    assert [c[c.index("--python") + 1] for c in checks] == [
         str(root / "python.exe"),
         str(root / "engines/paddle/python.exe"),
     ]
@@ -5002,7 +5004,9 @@ def test_paddle_environment_installs_in_separate_interpreter_and_shared_cache(
     paddle_install = next(
         c for c in calls if str(paddle_lock.with_suffix(".local.txt")) in c
     )
-    assert paddle_install[0] == str(root / "engines/paddle/python.exe")
+    assert paddle_install[paddle_install.index("--python") + 1] == str(
+        root / "engines/paddle/python.exe"
+    )
     assert str(scope.lock_path) not in paddle_install
 
 

@@ -6,7 +6,10 @@ import argparse
 import subprocess
 import sys
 import zipfile
+from importlib.metadata import distribution
 from pathlib import Path
+
+from vibeocr.runtime.environments.bundled_uv import UV_VERSION, uv_executable
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
@@ -38,6 +41,10 @@ def build_runtime_installer(
     work_dir: Path,
     version: str,
 ) -> tuple[Path, Path]:
+    uv_binary = uv_executable()
+    uv_licenses = distribution("uv").locate_file(f"uv-{UV_VERSION}.dist-info/licenses")
+    if not uv_licenses.is_dir():
+        raise ValueError("locked uv license files are missing")
     dist = work_dir / "dist"
     build = work_dir / "build"
     spec = work_dir / "spec"
@@ -51,6 +58,10 @@ def build_runtime_installer(
             "--noconfirm",
             "--clean",
             "--onefile",
+            "--add-binary",
+            f"{uv_binary};uv",
+            "--add-data",
+            f"{uv_licenses};uv/licenses",
             "--name",
             "vibeocr-runtime-installer",
             "--paths",
