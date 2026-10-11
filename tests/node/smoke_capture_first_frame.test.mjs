@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { statistics, attachWorkingSets, summarize, checkAfter } from '../../scripts/smoke_capture_first_frame.mjs';
+import { statistics, attachWorkingSets, summarize, validateBaseline, checkAfter } from '../../scripts/smoke_capture_first_frame.mjs';
 
 const baselineCounts = { Subscriptions: 1, Resources: 0, AnnotationEntries: 0,
   AnnotationReservations: 0, AnnotationOwnedFiles: 0, ResourceFiles: 0, EditorWebViews: 0, TotalWebViews: 1 };
@@ -47,7 +47,29 @@ export function runSelfCheck() {
   assert.throws(() => summarize(forbidden));
   const growth = structuredClone(batches);
   for (const row of growth[0].health.rows.slice(-5)) row.working_set.app_closed_median_bytes += 33 * 1024 * 1024;
-  assert.throws(() => summarize(growth), /closed working set/);
+  const growthSummary = summarize(growth);
+  assert.equal(growthSummary.row_count, 22);
+  assert.equal(growthSummary.closed_working_set_growth.app.passed, false);
+  assert.match(growthSummary.gate_violations[0], /closed working set growth 34603008 bytes exceeds 33554432 bytes/);
+  assert.throws(() => checkAfter(growthSummary, summary), /closed working set growth/);
+  const failedBefore = { schema_version: 1, state: 'failed', original_state: 'failed',
+    measurement_complete: true, batches: growth, summary: summarize(growth) };
+  assert.equal(validateBaseline(failedBefore), failedBefore.summary);
+  assert.doesNotThrow(() => checkAfter(summarize(batches), validateBaseline(failedBefore)));
+  assert.throws(() => validateBaseline({ ...failedBefore, measurement_complete: false }), /incomplete/);
+  const invalidBefore = structuredClone(failedBefore);
+  invalidBefore.batches[0].health.rows[0].dispatch_lag_ms = [];
+  assert.throws(() => validateBaseline(invalidBefore), /dispatch samples/);
+  const frozen = { ...summary, frozen_after_budgets: {
+    cold_median_ms: 825.55237, warm_p95_ms: 722.57103, ui_dispatch_p95_ms: 32 } };
+  const budgetFailure = summarize(batches);
+  budgetFailure.warm.p95_ms = 723;
+  assert.throws(() => checkAfter(budgetFailure, frozen), /Warm p95 723ms exceeds frozen before budget 722.57103ms/);
+  assert.equal(budgetFailure.frozen_after_budgets, frozen.frozen_after_budgets);
+  assert.equal(budgetFailure.performance_comparison.warm_p95_ms.observed_ms, 723);
+  assert.equal(budgetFailure.performance_comparison.warm_p95_ms.passed, false);
+  assert.equal(budgetFailure.row_count, 22);
+  assert.equal(budgetFailure.gate_violations.length, 1);
   const samples = [{ at_ms: 2300, procs: [{ pid: 99, name: 'VibeOCR.WinUI.exe', ws_bytes: 10 },
     { pid: 101, name: 'msedgewebview2.exe', ws_bytes: 20, webview_role: 'browser' },
     { pid: 102, name: 'msedgewebview2.exe', ws_bytes: 30, webview_role: 'renderer' }] }];

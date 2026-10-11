@@ -105,18 +105,21 @@ export function summarize(batches) {
     ...batches.flatMap((batch) => batch.health.dispatch_tail_ms ?? [])]);
   const twenty = batches[0].health.rows;
   const closedGrowth = {};
+  const gateViolations = [];
   for (const [name, field] of Object.entries({ app: 'app_closed_median_bytes', webview: 'webview_closed_median_bytes' })) {
     const early = statistics(twenty.slice(1, 5).map((row) => row.working_set[field])).median;
     const late = statistics(twenty.slice(-5).map((row) => row.working_set[field])).median;
+    const allowance = Math.max(32 * mib, early * 0.1);
+    const passed = late - early <= allowance;
     closedGrowth[name] = { early_median_bytes: early, late_median_bytes: late,
-      growth_bytes: late - early, allowance_bytes: Math.max(32 * mib, early * 0.1) };
-    assert(late - early <= closedGrowth[name].allowance_bytes, `${name} closed working set exceeds frozen growth rule.`);
+      growth_bytes: late - early, allowance_bytes: allowance, passed };
+    if (!passed) gateViolations.push(`${name} closed working set growth ${late - early} bytes exceeds ${allowance} bytes.`);
   }
   return { row_count: rows.length,
     cold: { count: cold.count, median_ms: cold.median, max_ms: cold.max },
     warm: { count: warm.count, median_ms: warm.median, p95_ms: warm.p95, max_ms: warm.max },
     ui_dispatch_lag: { count: dispatch.count, median_ms: dispatch.median, p95_ms: dispatch.p95, max_ms: dispatch.max },
-    closed_working_set_growth: closedGrowth,
+    closed_working_set_growth: closedGrowth, gate_violations: gateViolations,
     working_set_observed_peaks: { app_bytes: Math.max(...rows.map((row) => row.working_set.app_observed_peak_bytes)),
       webview_bytes: Math.max(...rows.map((row) => row.working_set.webview_observed_peak_bytes)) },
     frozen_after_budgets: { cold_median_ms: cold.median * 1.1 + 16,
@@ -124,12 +127,39 @@ export function summarize(batches) {
   };
 }
 
+function frozenBudgets(summary) {
+  const budgets = summary?.frozen_after_budgets;
+  assert(budgets && Object.values(budgets).every((value) => Number.isFinite(value) && value >= 0),
+    'Frozen before budgets missing.');
+  assert.deepEqual(Object.keys(budgets).sort(), ['cold_median_ms', 'ui_dispatch_p95_ms', 'warm_p95_ms']);
+  return budgets;
+}
+
+export function validateBaseline(before) {
+  assert.equal(before.schema_version, 1, 'Invalid before schema.');
+  assert.equal(before.measurement_complete, true, 'Before observations are incomplete.');
+  const observed = summarize(before.batches);
+  for (const field of ['row_count', 'cold', 'warm', 'ui_dispatch_lag', 'closed_working_set_growth',
+    'working_set_observed_peaks', 'gate_violations'])
+    assert.deepEqual(before.summary?.[field], observed[field], `Before ${field} differs from raw observations.`);
+  frozenBudgets(before.summary);
+  return before.summary;
+}
+
 export function checkAfter(summary, baseline) {
-  const budgets = baseline.frozen_after_budgets;
-  assert(budgets && Object.values(budgets).every(Number.isFinite), 'Frozen before budgets missing.');
-  assert(summary.cold.median_ms <= budgets.cold_median_ms, 'Cold median exceeds frozen before budget.');
-  assert(summary.warm.p95_ms <= budgets.warm_p95_ms, 'Warm p95 exceeds frozen before budget.');
-  assert(summary.ui_dispatch_lag.p95_ms <= budgets.ui_dispatch_p95_ms, 'UI dispatch p95 exceeds frozen before budget.');
+  const budgets = frozenBudgets(baseline);
+  summary.frozen_after_budgets = budgets;
+  summary.performance_comparison = {};
+  for (const [label, metric, observed] of [
+    ['Cold median', 'cold_median_ms', summary.cold.median_ms],
+    ['Warm p95', 'warm_p95_ms', summary.warm.p95_ms],
+    ['UI dispatch p95', 'ui_dispatch_p95_ms', summary.ui_dispatch_lag.p95_ms],
+  ]) {
+    const passed = observed <= budgets[metric];
+    summary.performance_comparison[metric] = { observed_ms: observed, budget_ms: budgets[metric], passed };
+    if (!passed) summary.gate_violations.push(`${label} ${observed}ms exceeds frozen before budget ${budgets[metric]}ms.`);
+  }
+  assert.equal(summary.gate_violations.length, 0, summary.gate_violations.join('; '));
   return budgets;
 }
 
@@ -235,7 +265,7 @@ async function main() {
   const helpers = await import('./smoke_runtime_demand_tools.mjs');
   const root = path.join(work, `capture216-${randomUUID().replaceAll('-', '')}`);
   fs.mkdirSync(root);
-  const record = { schema_version: 1, issue: 216, state: 'failed', root,
+  const record = { schema_version: 1, issue: 216, state: 'failed', measurement_complete: false, root,
     source_identity: read(path.join(candidate, 'app/metadata/component-identities.json')).project,
     batches: [], coverage_gaps: ['Only this physical monitor/DPI; mixed DPI and negative-coordinate secondary displays UNVERIFIED.'],
     limitations: ['CIM intervals are nominal 250ms plus query time; short-lived processes can be missed.',
@@ -249,12 +279,13 @@ async function main() {
       assert.equal(batch.state, 'passed', batch.error ?? batch.cleanup_error ?? batch.evidence_error);
     }
     record.summary = summarize(record.batches);
+    record.measurement_complete = true;
     if (baselinePath) {
-      const before = read(baselinePath);
-      assert.equal(before.state, 'passed', 'Before evidence did not pass.');
-      record.summary.frozen_after_budgets = checkAfter(record.summary, before.summary);
+      const before = validateBaseline(read(baselinePath));
       record.baseline = baselinePath;
+      checkAfter(record.summary, before);
     }
+    assert.equal(record.summary.gate_violations.length, 0, record.summary.gate_violations.join('; '));
     record.state = 'passed';
   } catch (error) { record.error = error.stack ?? String(error); }
   fs.writeFileSync(path.join(root, 'result.json'), JSON.stringify(record, null, 2));
