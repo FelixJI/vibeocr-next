@@ -100,6 +100,7 @@ internal sealed class WorkbenchBatchOwner(Func<BatchViewModel> batchFactory, Fun
     CancellationTokenSource preparation)
   {
     CancellationToken cancellationToken = preparation.Token;
+    // 终态在 finally 清理 preparation 后重算并只发布一次，避免清理前的伪运行终态与重复 terminal 触发 mailbox resync。
     try
     {
       if (!await selectionPolicy.EnsureSelectionLoadedForSubmitAsync(cancellationToken)) return;
@@ -107,26 +108,13 @@ internal sealed class WorkbenchBatchOwner(Func<BatchViewModel> batchFactory, Fun
       if (generation != Volatile.Read(ref batchGeneration)) return;
       SynchronizeBatchMode(requireUsable: true);
       await batch!.StartAsync(cancellationToken);
-      BatchWorkbenchState state = await BatchStateAsync(batch, cancellationToken);
-      if (generation == Volatile.Read(ref batchGeneration))
-      {
-        operations.PublishTerminal(state);
-      }
+      // BatchStateAsync 只为发布/缓存结构化结果资源，终态由 finally 重算。
+      await BatchStateAsync(batch, cancellationToken);
     }
-    catch (OperationCanceledException)
-    {
-      if (generation == Volatile.Read(ref batchGeneration))
-      {
-        operations.PublishTerminal(BatchState(batch!));
-      }
-    }
+    catch (OperationCanceledException) { }
     catch (Exception error)
     {
       AppLog.Error("Batch workbench operation failed", error);
-      if (generation == Volatile.Read(ref batchGeneration))
-      {
-        operations.PublishTerminal(BatchState(batch!));
-      }
     }
     finally
     {
