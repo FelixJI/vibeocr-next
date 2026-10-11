@@ -464,7 +464,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
   }
 
   [Fact]
-  public async Task QrCodeGenerateWithoutAttachedSupervisorPublishesImage()
+  public async Task QrCodeGenerateAndDecodeLocallyWithoutSupervisor()
   {
     string resourceRoot = Path.Combine(
       Path.GetTempPath(), $"vibeocr-handler-{Guid.NewGuid():N}");
@@ -473,7 +473,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     {
       var imported = await LocalQrCodeGenerator.GenerateAsync("IMPORT-128", "code128", TestContext.Current.CancellationToken);
       byte[] importedBytes = Convert.FromBase64String(imported.Base64Png);
-      var client = new DeferredQrCodeClient();
+      var client = new LocalQrCodeClient();
       var maintenance = new ProductMaintenanceCoordinator();
       using var broker = new WorkbenchResourceBroker(resourceRoot);
       using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
@@ -526,18 +526,21 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       (byte[] generatedPixels, uint generatedWidth, uint generatedHeight) = await DecodePreviewPixelsAsync(Convert.ToBase64String(generatedBytes));
       Assert.Equal("hello", DecodePreviewBarcode(generatedPixels, generatedWidth, generatedHeight));
 
+      // #213: decode runs locally — pasting the imported Code 128 publishes
+      // real decoded results without any Supervisor.
       WorkbenchCommandReceipt decodeReceipt = await application.ExecuteAsync(
         new WorkbenchCommandEnvelope(Guid.NewGuid(), new DecodeQrCodeClipboardCommand()),
         timeout.Token);
       Assert.True(decodeReceipt.Ok);
       Assert.True(await updates.MoveNextAsync());
       Assert.True(await updates.MoveNextAsync());
-      QrCodeWorkbenchState unavailable = Assert.IsType<QrCodeWorkbenchState>(updates.Current.State);
-      Assert.False(unavailable.IsBusy);
-      Assert.Equal("qrcode.decodeUnavailable", unavailable.StatusCode);
-      Assert.NotNull(unavailable.GeneratedResource);
-      Assert.NotEqual(generated.GeneratedResource, unavailable.GeneratedResource);
-      Assert.Equal(importedBytes, await ReadPreviewBytesAsync(unavailable.GeneratedResource!));
+      QrCodeWorkbenchState decoded = Assert.IsType<QrCodeWorkbenchState>(updates.Current.State);
+      Assert.False(decoded.IsBusy);
+      Assert.Equal("qrcode.decoded", decoded.StatusCode);
+      QrCodeWorkbenchResult decodedItem = Assert.Single(decoded.Items!);
+      Assert.Equal("IMPORT-128", decodedItem.Data);
+      Assert.Equal("CODE128", decodedItem.Format);
+      Assert.Equal(importedBytes, await ReadPreviewBytesAsync(decoded.GeneratedResource!));
       (byte[] importedPixels, uint importedWidth, uint importedHeight) = await DecodePreviewPixelsAsync(imported.Base64Png);
       Assert.Equal("IMPORT-128", DecodePreviewBarcode(importedPixels, importedWidth, importedHeight));
 
@@ -549,34 +552,14 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       Assert.True(await updates.MoveNextAsync());
       QrCodeWorkbenchState invalid = Assert.IsType<QrCodeWorkbenchState>(updates.Current.State);
       Assert.Equal("qrcode.invalidInput", invalid.StatusCode);
-      Assert.Equal(unavailable.GeneratedResource, invalid.GeneratedResource);
+      Assert.Equal(decoded.GeneratedResource, invalid.GeneratedResource);
       Assert.Equal(importedBytes, await ReadPreviewBytesAsync(invalid.GeneratedResource!));
 
-      client.MarkStartupPending();
-      client.MarkStartupFailed(new InvalidOperationException("startup failed"));
-      WorkbenchCommandReceipt afterFailure = await application.ExecuteAsync(
-        new WorkbenchCommandEnvelope(Guid.NewGuid(), new GenerateQrCodeCommand("after failure")),
+      // Generation stays local regardless of any Supervisor state.
+      WorkbenchCommandReceipt afterInvalid = await application.ExecuteAsync(
+        new WorkbenchCommandEnvelope(Guid.NewGuid(), new GenerateQrCodeCommand("after invalid")),
         timeout.Token);
-      Assert.True(afterFailure.Ok);
-      Assert.True(await updates.MoveNextAsync());
-      Assert.True(await updates.MoveNextAsync());
-      Assert.NotNull(Assert.IsType<QrCodeWorkbenchState>(updates.Current.State).GeneratedResource);
-
-      var failingDecode = new FailingDecodeQrCodeClient();
-      client.Attach(failingDecode);
-      WorkbenchCommandReceipt decodeFailure = await application.ExecuteAsync(
-        new WorkbenchCommandEnvelope(Guid.NewGuid(), new DecodeQrCodeClipboardCommand()),
-        timeout.Token);
-      Assert.True(decodeFailure.Ok);
-      Assert.True(await updates.MoveNextAsync());
-      Assert.True(await updates.MoveNextAsync());
-      Assert.Equal("qrcode.failed", Assert.IsType<QrCodeWorkbenchState>(updates.Current.State).StatusCode);
-
-      client.Detach(failingDecode);
-      WorkbenchCommandReceipt afterDetach = await application.ExecuteAsync(
-        new WorkbenchCommandEnvelope(Guid.NewGuid(), new GenerateQrCodeCommand("after detach")),
-        timeout.Token);
-      Assert.True(afterDetach.Ok);
+      Assert.True(afterInvalid.Ok);
       Assert.True(await updates.MoveNextAsync());
       Assert.True(await updates.MoveNextAsync());
       Assert.NotNull(Assert.IsType<QrCodeWorkbenchState>(updates.Current.State).GeneratedResource);
@@ -675,7 +658,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
   [Fact]
   public async Task EanPayloadCaptionShowsTheFinalThirteenDigits()
   {
-    var viewModel = new QrCodeViewModel(new DeferredQrCodeClient(), new EmptyQrCodeInput())
+    var viewModel = new QrCodeViewModel(new LocalQrCodeClient(), new EmptyQrCodeInput())
     {
       GenerateText = "590123412345",
       GenerateFormat = "ean13",
@@ -771,6 +754,46 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       Assert.True(viewModel.GenerateFailed);
       Assert.False(viewModel.GenerateInvalidInput);
       Assert.Equal("二维码生成失败，请重试", viewModel.GenerateStatus);
+    }
+    finally { Directory.Delete(resourceRoot, recursive: true); }
+  }
+
+  [Fact]
+  public async Task QrCodeDecodeFailurePublishesGenericFailure()
+  {
+    string resourceRoot = Path.Combine(Path.GetTempPath(), $"vibeocr-handler-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      var viewModel = new QrCodeViewModel(new FailingDecodeQrCodeClient(), new FixedQrCodeInput());
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => viewModel,
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker,
+        resourceRoot,
+        static () => 0,
+        annotationStore);
+      var published = new List<WorkbenchState>();
+      handler.StateChanged += published.Add;
+
+      await handler.ExecuteAsync(new DecodeQrCodeClipboardCommand(), TestContext.Current.CancellationToken);
+      // The terminal state is published from the decode continuation; wait
+      // for it to land before asserting.
+      using var settled = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+      while (published.Count < 2 && !settled.IsCancellationRequested)
+        await Task.Delay(20, TestContext.Current.CancellationToken);
+      await handler.DisposeAsync();
+      Assert.Contains(published, state => state is QrCodeWorkbenchState qr && qr.StatusCode == "qrcode.failed");
+      Assert.True(viewModel.DecodeFailed);
+      Assert.Equal("识别失败，请重试", viewModel.DecodeStatus);
     }
     finally { Directory.Delete(resourceRoot, recursive: true); }
   }
@@ -1064,7 +1087,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
   {
     private readonly Queue<Func<CancellationToken, Task<IReadOnlyList<QrCodeDecodedItem>>>> responses = [];
 
-    public List<string> DecodedImages { get; } = [];
+    public List<byte[]> DecodedImages { get; } = [];
 
     public int DecodeCalls => DecodedImages.Count;
 
@@ -1076,9 +1099,9 @@ public sealed class DesktopWorkbenchCommandHandlerTests
         new InferenceClientNotAttachedException("not attached")));
 
     public Task<IReadOnlyList<QrCodeDecodedItem>> DecodeAsync(
-      string base64Image, CancellationToken cancellationToken)
+      ReadOnlyMemory<byte> image, CancellationToken cancellationToken)
     {
-      DecodedImages.Add(base64Image);
+      DecodedImages.Add(image.ToArray());
       return responses.Dequeue()(cancellationToken);
     }
 
@@ -1112,7 +1135,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     }
 
     public Task<IReadOnlyList<QrCodeDecodedItem>> DecodeAsync(
-      string base64Image, CancellationToken cancellationToken) =>
+      ReadOnlyMemory<byte> image, CancellationToken cancellationToken) =>
       Task.FromResult<IReadOnlyList<QrCodeDecodedItem>>([]);
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
@@ -1130,7 +1153,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       "image/png"));
 
     public Task<IReadOnlyList<QrCodeDecodedItem>> DecodeAsync(
-      string base64Image,
+      ReadOnlyMemory<byte> image,
       CancellationToken cancellationToken) =>
       Task.FromResult<IReadOnlyList<QrCodeDecodedItem>>([]);
 
@@ -1152,7 +1175,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       Convert.ToBase64String([4, 5, 6]), "image/png"));
 
     public Task<IReadOnlyList<QrCodeDecodedItem>> DecodeAsync(
-      string base64Image, CancellationToken cancellationToken) =>
+      ReadOnlyMemory<byte> image, CancellationToken cancellationToken) =>
       Task.FromResult<IReadOnlyList<QrCodeDecodedItem>>([]);
 
     public Task<QrCodeGeneratedImage> GenerateAsync(
@@ -1173,7 +1196,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       [new QrCodeDecodedItem("stale", "QR_CODE", false)]);
 
     public Task<IReadOnlyList<QrCodeDecodedItem>> DecodeAsync(
-      string base64Image, CancellationToken cancellationToken) => completion.Task;
+      ReadOnlyMemory<byte> image, CancellationToken cancellationToken) => completion.Task;
 
     public Task<QrCodeGeneratedImage> GenerateAsync(
       string data, string format, CancellationToken cancellationToken) =>
@@ -1185,7 +1208,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
   private sealed class FailingDecodeQrCodeClient : IQrCodeClient
   {
     public Task<IReadOnlyList<QrCodeDecodedItem>> DecodeAsync(
-      string base64Image, CancellationToken cancellationToken) =>
+      ReadOnlyMemory<byte> image, CancellationToken cancellationToken) =>
       Task.FromException<IReadOnlyList<QrCodeDecodedItem>>(new HttpRequestException("disconnected"));
 
     public Task<QrCodeGeneratedImage> GenerateAsync(
@@ -1198,7 +1221,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
   private sealed class FailingQrCodeClient : IQrCodeClient
   {
     public Task<IReadOnlyList<QrCodeDecodedItem>> DecodeAsync(
-      string base64Image, CancellationToken cancellationToken) =>
+      ReadOnlyMemory<byte> image, CancellationToken cancellationToken) =>
       Task.FromResult<IReadOnlyList<QrCodeDecodedItem>>([]);
 
     public Task<QrCodeGeneratedImage> GenerateAsync(

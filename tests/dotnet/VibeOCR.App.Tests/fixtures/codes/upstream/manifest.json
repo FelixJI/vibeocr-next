@@ -1,0 +1,71 @@
+{
+  "purpose": "Upstream ZXing blackbox samples fetched for #213 independent decode verification (pyzbar cross-check recorded).",
+  "source": {
+    "repository": "zxing/zxing",
+    "commit": "33dfdefcb35576612841e614d44ba9edc9aee2b5",
+    "license": "Apache-2.0 (upstream repo root LICENSE, copied here)",
+    "fetched_via": "raw.githubusercontent.com (pinned commit URLs)"
+  },
+  "samples": [
+    {
+      "file": "rss14-1_1.png",
+      "upstream_path": "core/src/test/resources/blackbox/rss14-1/1.png",
+      "upstream_expected": "04412345678909",
+      "pyzbar_reference": {
+        "data": "0104412345678909",
+        "type": "DATABAR",
+        "note": "zbar emits the GS1 AI 01 element string; the local boundary prefixes 01 to the bare 14-digit GTIN so public results keep this baseline"
+      }
+    },
+    {
+      "file": "upce-1_1.png",
+      "upstream_path": "core/src/test/resources/blackbox/upce-1/1.png",
+      "upstream_expected": "01234565",
+      "pyzbar_reference": {
+        "data": "0012345000065",
+        "type": "EAN13",
+        "note": "zbar expands UPC-E to its EAN-13 equivalent; the local boundary applies UPCEReader.convertUPCEtoUPCA plus the leading zero to keep this baseline"
+      }
+    },
+    {
+      "file": "code93-1_1.png",
+      "upstream_path": "core/src/test/resources/blackbox/code93-1/1.png",
+      "upstream_expected": "1234567890",
+      "pyzbar_reference": {
+        "data": "1234567890",
+        "type": "CODE93",
+        "note": "identical readings"
+      }
+    },
+    {
+      "file": "upcean-extension-1_1.png",
+      "upstream_path": "core/src/test/resources/blackbox/upcean-extension-1/1.png",
+      "upstream_expected": "9780735200449",
+      "pyzbar_reference": {
+        "data": "9780735200449",
+        "type": "EAN13",
+        "note": "zbar's default decode never surfaces the EAN2/EAN5 add-on as a separate result; the local boundary drops UPC_EAN_EXTENSION to keep this baseline"
+      }
+    },
+    {
+      "file": "upcean-extension-1_2.png",
+      "upstream_path": "core/src/test/resources/blackbox/upcean-extension-1/2.png",
+      "upstream_expected": "9780884271789",
+      "pyzbar_reference": {
+        "data": "9780884271789",
+        "type": "EAN13",
+        "note": "same add-on handling as 1.png"
+      }
+    },
+    {
+      "file": "rssexpanded-1_1.png",
+      "upstream_path": "core/src/test/resources/blackbox/rssexpanded-1/1.png",
+      "upstream_expected": "(11)100224(17)110224(3102)000100",
+      "pyzbar_reference": {
+        "data": "11100224171102243102000100",
+        "type": "DATABAR_EXP",
+        "note": "user-accepted readable-text difference: zbar strips the AI parentheses, but the pinned ZXing 0.16.11 Result.RawBytes is null, so original GS/FNC1 separators cannot be recovered losslessly (not merely a missing AI table — e.g. batch numbers containing parentheses are ambiguous). Kept as (AI)value; raw-element-string consumers need a decoder boundary that preserves raw data"
+      }
+    }
+  ]
+}

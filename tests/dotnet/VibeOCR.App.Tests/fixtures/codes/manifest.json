@@ -1,0 +1,107 @@
+{
+  "purpose": "Independent #213 decode fixtures: qrcode[pil] + python-barcode, composed with Pillow",
+  "generators": {
+    "qrcode": "8.2",
+    "python-barcode": "0.16.1"
+  },
+  "samples": [
+    {
+      "file": "qr_v1_unicode.png",
+      "payload": "中文🙂",
+      "generator": "qrcode[pil]",
+      "variant": "V1 ECC M box=10 border=4",
+      "note": "V1 QR (10 UTF-8 bytes, ECC M) — the pinned ZXing.Net 0.16.11 detector gap payload"
+    },
+    {
+      "file": "qr_url_https.png",
+      "payload": "https://example.com/independent",
+      "generator": "qrcode[pil]",
+      "variant": "auto-fit ECC M box=10 border=4",
+      "note": "strict http(s) URL classification"
+    },
+    {
+      "file": "qr_not_url.png",
+      "payload": "javascript:alert(1)",
+      "generator": "qrcode[pil]",
+      "variant": "auto-fit ECC M box=10 border=4",
+      "note": "non-http scheme must stay non-openable"
+    },
+    {
+      "file": "code128_independent.png",
+      "payload": "INDEP-128",
+      "generator": "python-barcode ImageWriter",
+      "variant": "code128",
+      "note": "independent Code 128"
+    },
+    {
+      "file": "ean13_independent.png",
+      "payload": "5901234123457",
+      "generator": "python-barcode ImageWriter",
+      "variant": "ean13",
+      "note": "independent EAN-13 (checksum digit included)"
+    },
+    {
+      "file": "code39_independent.png",
+      "payload": "INDEP-39",
+      "generator": "python-barcode ImageWriter",
+      "variant": "code39",
+      "note": "independent Code 39; the writer appends its checksum char C, so the physical payload is INDEP-39C (confirmed identically by pyzbar)"
+    },
+    {
+      "file": "ean8_independent.png",
+      "payload": "96385074",
+      "generator": "python-barcode ImageWriter",
+      "variant": "ean8",
+      "note": "independent EAN-8 (checksum digit included)"
+    },
+    {
+      "file": "upca_independent.png",
+      "payload": "036000291452",
+      "generator": "python-barcode ImageWriter",
+      "variant": "upca",
+      "note": "independent UPC-A; the pyzbar baseline surfaces it as EAN-13 0036000291452 (leading zero)"
+    },
+    {
+      "file": "itf_independent.png",
+      "payload": "1234567890",
+      "generator": "python-barcode ImageWriter",
+      "variant": "itf",
+      "note": "independent Interleaved 2 of 5"
+    },
+    {
+      "file": "codabar_independent.png",
+      "payload": "A1234567B",
+      "generator": "python-barcode ImageWriter",
+      "variant": "codabar",
+      "note": "independent Codabar (NW-7); the pinned ZXing reader strips the A/B start/stop glyphs and returns 1234567 (pyzbar keeps A1234567B)"
+    },
+    {
+      "file": "qr_rotated_90.png",
+      "payload": "rotated-independent-42",
+      "generator": "qrcode[pil] + Pillow rotate(90)",
+      "variant": "CCW 90 degrees",
+      "note": "bounded rotation pass coverage"
+    },
+    {
+      "file": "multi_composite.png",
+      "payload": "multi-qrcode-independent|INDEP-128",
+      "generator": "qrcode[pil] + python-barcode, Pillow canvas",
+      "variant": "two codes side by side",
+      "note": "DecodeMultiple coverage"
+    },
+    {
+      "file": "multi_orientation_composite.png",
+      "payload": "MIX-ORIENT-128|MIX-ORIENT-39",
+      "generator": "python-barcode ImageWriter, Pillow canvas + rotate(90)",
+      "variant": "upright Code 128 (left) + 90-degree CCW Code 39 (right); the physical Code 39 payload gains the writer checksum character",
+      "note": "mixed-orientation same-image contract: pyzbar (zbar) scans both orientations and returns both codes, so the bounded pass sequence must keep accumulating after the first hit"
+    },
+    {
+      "file": "blank.png",
+      "payload": "",
+      "generator": "Pillow",
+      "variant": "plain white",
+      "note": "no-code image yields zero results"
+    }
+  ]
+}

@@ -107,7 +107,7 @@ public sealed class QrCodeViewModel(IQrCodeClient qrClient, IQrCodeInput input) 
         catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) DecodeStatus = "已取消"; }
         catch (InferenceClientNotAttachedException error) { if (generation == Volatile.Read(ref _generation)) { DecodeFailed = true; DecodeUnavailable = true; DecodeStatus = "识别运行环境未就绪"; AppLog.Error("QR preview decode unavailable", error); } }
         catch (InferenceClientException error) { if (generation == Volatile.Read(ref _generation)) { DecodeFailed = true; DecodeUnavailable = error.Code is HttpV2ErrorCode.BackendUnavailable or HttpV2ErrorCode.TransientBackend; DecodeStatus = DecodeUnavailable ? "识别运行环境暂不可用" : "识别失败"; } }
-        catch (Exception) when (generation == Volatile.Read(ref _generation)) { DecodeFailed = true; DecodeStatus = "Supervisor 已断开，请重试"; }
+        catch (Exception) when (generation == Volatile.Read(ref _generation)) { DecodeFailed = true; DecodeStatus = "识别失败，请重试"; }
         finally { if (generation == Volatile.Read(ref _generation)) IsBusy = false; EndRun(run); }
     }
 
@@ -214,7 +214,7 @@ public sealed class QrCodeViewModel(IQrCodeClient qrClient, IQrCodeInput input) 
         catch (InferenceClientNotAttachedException) { if (generation == Volatile.Read(ref _generation)) { DecodeFailed = true; DecodeUnavailable = true; DecodeStatus = "识别运行环境未就绪"; } }
         catch (InferenceClientException error) { if (generation == Volatile.Read(ref _generation)) { DecodeFailed = true; DecodeUnavailable = error.Code is HttpV2ErrorCode.BackendUnavailable or HttpV2ErrorCode.TransientBackend; DecodeStatus = DecodeUnavailable ? "识别运行环境暂不可用" : "识别失败"; } }
         catch (Exception error) when (error is InvalidDataException or UnauthorizedAccessException or FileNotFoundException) { if (generation == Volatile.Read(ref _generation)) { DecodeFailed = true; DecodeStatus = "无法读取输入图片"; } }
-        catch (Exception) when (generation == Volatile.Read(ref _generation)) { DecodeFailed = true; DecodeStatus = "Supervisor 已断开，请重试"; }
+        catch (Exception) when (generation == Volatile.Read(ref _generation)) { DecodeFailed = true; DecodeStatus = "识别失败，请重试"; }
         finally { if (generation == Volatile.Read(ref _generation)) IsBusy = false; EndRun(run); }
     }
 
@@ -222,8 +222,9 @@ public sealed class QrCodeViewModel(IQrCodeClient qrClient, IQrCodeInput input) 
     private async Task DecodePreviewCoreAsync(
         byte[] preview, long previewRevision, CancellationTokenSource run, long generation)
     {
-        string base64Image = Convert.ToBase64String(preview);
-        IReadOnlyList<QrCodeDecodedItem> decoded = await qrClient.DecodeAsync(base64Image, run.Token);
+        // Raw preview bytes cross the seam; the only remaining base64 use is
+        // the wire-compatible HTTP client boundary (#213).
+        IReadOnlyList<QrCodeDecodedItem> decoded = await qrClient.DecodeAsync(preview, run.Token);
         run.Token.ThrowIfCancellationRequested();
         // Gate generation AND preview revision together before writing any result:
         // a newer preview (or a cancelled/cleared run) must never be overwritten by
