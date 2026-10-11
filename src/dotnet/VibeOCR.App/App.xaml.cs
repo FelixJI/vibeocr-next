@@ -45,7 +45,7 @@ public sealed partial class App : Application
     private WindowLayoutStore? _windowLayoutStore;
     private SingleInstanceService? _singleInstance;
     private InferenceSupervisorProcess? _supervisorProcess => _managedSession?.Process;
-    private string? _supervisorInstanceId => _managedSession?.Process.Ready.InstanceId;
+    private string? _supervisorInstanceId => _managedSession?.InstanceId;
     private DiagnosticsViewModel? _supervisorDiagnostics;
     private IRuntimeInstallerClient? _runtimeInstaller;
     private IManagedEnvironmentClient? _managedEnvironments;

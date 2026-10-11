@@ -18,6 +18,8 @@ public sealed class ManagedEnvironmentSession(
     public InferenceHttpClient Client { get; } = client;
     public QrCodeHttpClient QrClient { get; } = qrClient;
     public RuntimeStatusSnapshot Status { get; } = status;
+    /// <summary>The validated handshake identity, retained after the process exits.</summary>
+    public string InstanceId => Status.InstanceId;
 
     public async ValueTask DisposeAsync()
     {

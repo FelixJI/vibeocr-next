@@ -4,6 +4,7 @@
 // the owner lifecycle without requiring the Python backend.
 using System.Diagnostics;
 using System.Text.Json;
+using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 using Xunit;
@@ -205,6 +206,51 @@ public sealed class InferenceSupervisorProcessTests
 
             Assert.Equal(0, result.ExitCode);
             Assert.Throws<InvalidOperationException>(() => proc.Ready);
+        }
+        finally
+        {
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ManagedSessionIdentityRemainsReadableInsideUnexpectedExitCallback()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), $"vibeocr-session-exit-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        using var process = CreateReadyProcess(root, lifetimeMilliseconds: 250);
+        try
+        {
+            SupervisorReadyEnvelope ready = await process.StartAsync(TestContext.Current.CancellationToken);
+            var client = new InferenceHttpClient(ready.BaseUrl, "test");
+            var qrClient = new QrCodeHttpClient(ready.BaseUrl, "test");
+            // SwitchCoordinator validates this snapshot against the ready handshake
+            // before publishing a session. Its identity outlives the child process.
+            await using var session = new ManagedEnvironmentSession(
+                "environment", 1, process, client, qrClient, new RuntimeStatusSnapshot
+                {
+                    InstanceId = ready.InstanceId,
+                    BackendVersion = "test",
+                    ServiceState = RuntimeServiceState.Ready,
+                    Profile = new RuntimeProfileStatus
+                    {
+                        ProfileId = "test",
+                        Accelerator = RuntimeAccelerator.Cpu,
+                    },
+                });
+            var exited = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            process.UnexpectedExit += (_, _) =>
+            {
+                try { exited.TrySetResult(session.InstanceId); }
+                catch (Exception error) { exited.TrySetException(error); }
+            };
+
+            string instance = await exited.Task.WaitAsync(
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            Assert.Equal(ready.InstanceId, instance);
+            Assert.Equal(ready.InstanceId, session.InstanceId);
+            Assert.Throws<InvalidOperationException>(() => process.Ready);
         }
         finally
         {
