@@ -821,8 +821,12 @@ def _download_resolved_artifacts(
                 await asyncio.wait({task}, timeout=0.1)
                 if reporter is not None:
                     reporter.check_cancelled()
+                    # The wait above can return with the task just completed;
+                    # a trailing heartbeat would overwrite the terminal
+                    # runtime.download_verified progress event.
                     if (
-                        time.monotonic() - last_heartbeat
+                        not task.done()
+                        and time.monotonic() - last_heartbeat
                         >= _CHILD_HEARTBEAT_INTERVAL_SECONDS
                     ):
                         reporter.heartbeat(message_code="runtime.download_wait")

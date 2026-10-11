@@ -180,6 +180,36 @@ def test_interrupted_body_closes_stream_and_removes_only_own_partial(
     assert "secret" not in json.dumps(terminal)
 
 
+def test_wait_heartbeat_never_overwrites_verified_terminal_event(tmp_path, monkeypatch):
+    # Regression (CI 38114918365): a zero heartbeat interval makes every
+    # post-wait supervisor poll heartbeat-eligible, so a poll returning after
+    # the download task completed used to append runtime.download_wait on top
+    # of the terminal runtime.download_verified progress event.
+    payload = b"wheel"
+    artifact, allowed = _artifact(payload)
+    events = []
+    reporter = _reporter(tmp_path / "state", events.append)
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield payload
+
+    def respond(request):
+        return (
+            httpx.Response(200, stream=Body())
+            if request.method == "GET"
+            else httpx.Response(200)
+        )
+
+    _transport(monkeypatch, respond)
+    monkeypatch.setattr(installer, "_CHILD_HEARTBEAT_INTERVAL_SECONDS", 0)
+    installer._download_resolved_artifacts(
+        (artifact,), allowed, tmp_path / "cache", reporter
+    )
+    assert events[-1]["message_code"] == "runtime.download_verified"
+    assert reporter.snapshot["operation_state"] == "running"
+
+
 @pytest.mark.parametrize("head_length", [None, "1", "-2", "broken"])
 def test_unreliable_total_never_becomes_invented_percentage(
     tmp_path, monkeypatch, head_length
