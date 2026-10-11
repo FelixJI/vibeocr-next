@@ -42,6 +42,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   private readonly WorkbenchRecoveryPolicy recoveryPolicy = new();
   private PackagedWebAssets? packagedAssets;
   private CoreWebView2? core;
+  private Windows.Foundation.TypedEventHandler<CoreWebView2, CoreWebView2WebMessageReceivedEventArgs>? webMessageReceived;
   private DispatcherQueue? dispatcher;
   private CancellationTokenSource? subscriptionCancellation;
   private Task? subscription;
@@ -179,7 +180,9 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     next.NewWindowRequested += OnNewWindowRequested;
     next.PermissionRequested += OnPermissionRequested;
     next.DownloadStarting += OnDownloadStarting;
-    next.WebMessageReceived += OnWebMessageReceived;
+    // WinRT event senders can use a different managed wrapper; bind the registered core.
+    webMessageReceived = (_, args) => OnWebMessageReceived(next, args);
+    next.WebMessageReceived += webMessageReceived;
     next.ProcessFailed += OnProcessFailed;
     next.AddWebResourceRequestedFilter(
       $"https://{VirtualHost}/*",
@@ -258,7 +261,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     CoreWebView2 sender,
     CoreWebView2WebMessageReceivedEventArgs args)
   {
-    if (disposed) return;
+    if (disposed || !ReferenceEquals(core, sender)) return;
     try
     {
       string message = args.WebMessageAsJson;
@@ -606,7 +609,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       current.NewWindowRequested -= OnNewWindowRequested;
       current.PermissionRequested -= OnPermissionRequested;
       current.DownloadStarting -= OnDownloadStarting;
-      current.WebMessageReceived -= OnWebMessageReceived;
+      current.WebMessageReceived -= webMessageReceived;
+      webMessageReceived = null;
       current.ProcessFailed -= OnProcessFailed;
       current.WebResourceRequested -= OnWebResourceRequested;
     }
