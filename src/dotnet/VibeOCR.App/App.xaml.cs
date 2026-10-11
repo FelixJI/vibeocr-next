@@ -207,8 +207,8 @@ public sealed partial class App : Application
                 }
             },
             _runtimeStatus,
-            () => _supervisorProcess is { } process
-                ? (process.Ready.InstanceId, process.LogLines)
+            () => _managedSession is { } session
+                ? (session.InstanceId, session.Process.LogLines)
                 : (null, Array.Empty<string>()));
         // 可选取证轨迹（默认关闭）：仅显式设置环境变量时才订阅，不引入新配置系统。
         if (!string.IsNullOrWhiteSpace(
