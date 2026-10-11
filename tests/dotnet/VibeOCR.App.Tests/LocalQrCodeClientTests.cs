@@ -377,6 +377,26 @@ public sealed class LocalQrCodeClientTests
     Assert.Equal(LocalQrCodeClient.MaximumResults, capped.Count);
   }
 
+  [Fact]
+  public void CollectResultsCapHoldsAcrossRepeatedPassCalls()
+  {
+    Result A(string data, BarcodeFormat format) => new(
+      data, Array.Empty<byte>(), Array.Empty<ResultPoint>(), format);
+
+    var collected = new List<QrCodeDecodedItem>();
+    LocalQrCodeClient.CollectResults(
+      Enumerable.Range(0, LocalQrCodeClient.MaximumResults)
+        .Select(i => A($"code-{i}", BarcodeFormat.CODE_128)), collected);
+    Assert.Equal(LocalQrCodeClient.MaximumResults, collected.Count);
+
+    LocalQrCodeClient.CollectResults(
+      Enumerable.Range(LocalQrCodeClient.MaximumResults, LocalQrCodeClient.MaximumResults)
+        .Select(i => A($"code-{i}", BarcodeFormat.CODE_128)), collected);
+    Assert.Equal(LocalQrCodeClient.MaximumResults, collected.Count);
+    Assert.Equal("code-0", collected[0].Data);
+    Assert.Equal($"code-{LocalQrCodeClient.MaximumResults - 1}", collected[^1].Data);
+  }
+
   private static async Task<byte[]> EncodeNoisePngAsync(int width, int height)
   {
     // Deterministic LCG noise: no finder patterns, so every bounded pass

@@ -160,16 +160,16 @@ public sealed class LocalQrCodeClient(CancellationToken shutdownToken = default)
     foreach (Pass pass in EnumeratePasses(source))
     {
       cancellationToken.ThrowIfCancellationRequested();
-      RunDecodePass(pass, collected);
-      // Cancelled means cancelled: a found (or final-pass) result must not be
-      // reported as success once the caller's token has fired.
-      cancellationToken.ThrowIfCancellationRequested();
       // The four base orientation passes mirror the Runtime's single zbar
       // scan over both axes, so they always run and accumulate: a same-image
       // mixed-orientation multi-code must not lose its rotated halves to the
       // first hit. The remaining passes are single-code escalation and stay
       // gated on nothing found yet.
       if (pass.Escalation && collected.Count > 0) break;
+      RunDecodePass(pass, collected);
+      // Cancelled means cancelled: a found (or final-pass) result must not be
+      // reported as success once the caller's token has fired.
+      cancellationToken.ThrowIfCancellationRequested();
     }
     return collected;
   }
@@ -276,8 +276,9 @@ public sealed class LocalQrCodeClient(CancellationToken shutdownToken = default)
         if (item.Format == displayName && item.Data == data) { duplicate = true; break; }
       }
       if (duplicate) continue;
-      collected.Add(new QrCodeDecodedItem(data, displayName, IsHttpUrl(data)));
+      // Passes share this list, so check the cumulative bound before adding.
       if (collected.Count >= MaximumResults) return;
+      collected.Add(new QrCodeDecodedItem(data, displayName, IsHttpUrl(data)));
     }
   }
 
