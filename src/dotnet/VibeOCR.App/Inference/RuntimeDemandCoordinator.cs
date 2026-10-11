@@ -23,15 +23,24 @@ internal sealed class RuntimeDemandCoordinator(
   private bool enabled;
   private bool paused;
   private long transition;
+  private SwitchOperation? activeSwitch;
+
+  private sealed class SwitchOperation(long owner)
+  {
+    public readonly long Owner = owner;
+    public readonly TaskCompletionSource Completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public Exception? CleanupFailure;
+  }
 
   private sealed class Attempt(CancellationToken shutdown, bool initialize, bool borrowLease,
-    Func<CancellationToken, Task>? activate)
+    Func<CancellationToken, Task>? activate, SwitchOperation? switchOperation)
   {
     public readonly CancellationTokenSource Cancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdown);
     public readonly TaskCompletionSource Completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public readonly bool Initialize = initialize;
     public readonly bool BorrowLease = borrowLease;
     public readonly Func<CancellationToken, Task>? Activate = activate;
+    public readonly SwitchOperation? Switch = switchOperation;
     public int Waiters;
     public bool Committed;
     public Exception? CleanupFailure;
@@ -57,7 +66,7 @@ internal sealed class RuntimeDemandCoordinator(
         if (ready && current is null && activate is null) return;
         if (current is null)
         {
-          current = new Attempt(shutdown, initialize, borrowLease, activate);
+          current = new Attempt(shutdown, initialize, borrowLease, activate, activate is null ? null : activeSwitch);
           start = true;
         }
         attempt = current;
@@ -72,8 +81,15 @@ internal sealed class RuntimeDemandCoordinator(
       {
         // A new demand waits for the previous owner's rollback/disposal before
         // starting its own attempt. Cancellation of that old owner is expected.
-        try { await attempt.Completion.Task.WaitAsync(cancellationToken); }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && !shutdown.IsCancellationRequested) { }
+        using var drainingCancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdown, cancellationToken);
+        try { await attempt.Completion.Task.WaitAsync(drainingCancellation.Token); }
+        catch (Exception) when (attempt.Completion.Task.IsCompleted)
+        {
+          cancellationToken.ThrowIfCancellationRequested();
+          shutdown.ThrowIfCancellationRequested();
+          if (attempt.CleanupFailure is { } cleanup) ExceptionDispatchInfo.Capture(cleanup).Throw();
+          // Preparation failure belongs to the departing demand, not this one.
+        }
         continue;
       }
       using CancellationTokenRegistration registration = cancellationToken.Register(() =>
@@ -151,7 +167,8 @@ internal sealed class RuntimeDemandCoordinator(
         // released; even reentrant demand must await the complete transition.
         attempt.Committed = true;
         ready = Connection is null || Connection.Session is not null;
-        enabled |= ready;
+        if (attempt.Activate is not null) enabled = ready;
+        else enabled |= ready;
       }
     }
     catch (Exception error)
@@ -167,6 +184,7 @@ internal sealed class RuntimeDemandCoordinator(
       catch (Exception cleanup)
       {
         attempt.CleanupFailure = cleanup;
+        if (attempt.Switch is { } switching) switching.CleanupFailure = cleanup;
         error = new AggregateException(error, cleanup);
       }
       failure = error;
@@ -260,35 +278,99 @@ internal sealed class RuntimeDemandCoordinator(
     }
   }
 
-  public async Task RecoverAsync()
+  public async Task RecoverAsync(Func<bool>? isCurrentSession = null, Action? recovering = null,
+    Action<Exception>? recoveryFailed = null)
   {
-    PauseOperation pause = BeginPause(shutdown);
-    await pause.Completion;
-    Task recovery;
-    lock (gate)
+    long? reportingOwner = null;
+    try
     {
-      shutdown.ThrowIfCancellationRequested();
-      if (pause.Owner != transition) return;
-      paused = false;
-      recovery = WaitAsync(false, shutdown);
+      PauseOperation pause;
+      if (isCurrentSession is not null)
+      {
+        long observedOwner;
+        SwitchOperation? observedSwitch;
+        Attempt? observedAttempt;
+        lock (gate)
+        {
+          shutdown.ThrowIfCancellationRequested();
+          if (!isCurrentSession()) return;
+          reportingOwner = observedOwner = transition;
+          observedSwitch = activeSwitch;
+          observedAttempt = current;
+          if (paused && (observedSwitch is null || observedSwitch.Owner != observedOwner)) return;
+        }
+        // Wait only for the operation this exit observed. Do not cancel a newer
+        // activation or retry a switch. A failed candidate may preserve the dead
+        // trigger session; a successful one replaces it and makes this event stale.
+        if (observedSwitch is not null)
+        {
+          await observedSwitch.Completion.Task.WaitAsync(shutdown);
+          if (observedSwitch.CleanupFailure is { } cleanup) ExceptionDispatchInfo.Capture(cleanup).Throw();
+        }
+        else if (observedAttempt is not null)
+        {
+          try { await observedAttempt.Completion.Task.WaitAsync(shutdown); }
+          catch (Exception) when (observedAttempt.Completion.Task.IsCompleted)
+          {
+            shutdown.ThrowIfCancellationRequested();
+            if (observedAttempt.CleanupFailure is { } cleanup) ExceptionDispatchInfo.Capture(cleanup).Throw();
+          }
+        }
+        lock (gate)
+        {
+          shutdown.ThrowIfCancellationRequested();
+          if (observedOwner != transition || paused || current is not null || !isCurrentSession()) return;
+          recovering?.Invoke();
+          pause = BeginPause(shutdown);
+        }
+      }
+      else
+        pause = BeginPause(shutdown);
+      reportingOwner = pause.Owner;
+      await pause.Completion;
+      Task recovery;
+      lock (gate)
+      {
+        shutdown.ThrowIfCancellationRequested();
+        if (pause.Owner != transition) return;
+        paused = false;
+        recovery = WaitAsync(false, shutdown);
+      }
+      await recovery;
     }
-    await recovery;
+    catch (Exception error)
+    {
+      if (!(error is OperationCanceledException && shutdown.IsCancellationRequested))
+      {
+        lock (gate)
+        {
+          // Our disconnect may already have published null. Report by the
+          // accepted transition, not the departed session's continued presence.
+          if (reportingOwner == transition && current is null &&
+              (isCurrentSession is null || isCurrentSession() || Connection?.Session is null))
+            recoveryFailed?.Invoke(error);
+        }
+      }
+      throw;
+    }
   }
 
   public async Task SwitchAsync(Func<CancellationToken, Task> activate, CancellationToken cancellationToken)
   {
     Attempt? pending;
-    long owner;
-    lock (gate)
-    {
-      paused = true;
-      owner = ++transition;
-      ready = false;
-      pending = current;
-      pending?.Cancellation.Cancel();
-    }
+    long owner = 0;
+    SwitchOperation? operation = null;
     try
     {
+      lock (gate)
+      {
+        paused = true;
+        owner = ++transition;
+        activeSwitch = operation = new SwitchOperation(owner);
+        ready = false;
+        pending = current;
+        pending?.Cancellation.Cancel();
+      }
       if (pending is not null)
       {
         try { await pending.Completion.Task.WaitAsync(cancellationToken); }
@@ -298,7 +380,11 @@ internal sealed class RuntimeDemandCoordinator(
           shutdown.ThrowIfCancellationRequested();
           // The prior request owns its preparation error. A failed resource
           // cleanup cannot be bypassed by activating another environment.
-          if (pending.CleanupFailure is { } cleanup) ExceptionDispatchInfo.Capture(cleanup).Throw();
+          if (pending.CleanupFailure is { } cleanup)
+          {
+            operation.CleanupFailure = cleanup;
+            ExceptionDispatchInfo.Capture(cleanup).Throw();
+          }
         }
       }
       Task switching;
@@ -318,13 +404,21 @@ internal sealed class RuntimeDemandCoordinator(
       {
         // A cancelled switch must not leave the preserved old session paused,
         // or undo a newer maintenance/shutdown owner's pause.
-        if (owner == transition)
+        if (operation is not null && owner == transition)
         {
           paused = false;
           ready = Connection?.Session is not null;
         }
       }
       throw;
+    }
+    finally
+    {
+      lock (gate)
+      {
+        if (ReferenceEquals(activeSwitch, operation)) activeSwitch = null;
+        operation?.Completion.TrySetResult();
+      }
     }
   }
 

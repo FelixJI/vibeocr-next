@@ -68,7 +68,7 @@ public sealed partial class App : Application
     private bool _shutdownStarted;
     private bool _soakCrashRequested;
     private bool _soakCrashInjected;
-    private int _supervisorRecoveryScheduled;
+    private ManagedEnvironmentSession? _supervisorRecoveryScheduledSession;
     private int _runtimeMaintenanceActive;
     // The maintenance lease serializes this stop/restore callback pair.
     private long? _runtimeMaintenancePauseOwner;
@@ -1108,42 +1108,64 @@ public sealed partial class App : Application
         object? sender,
         SupervisorUnexpectedExitEventArgs eventArgs)
     {
+        ManagedEnvironmentSession? trigger = _managedSession;
         if (_applicationShutdown.IsCancellationRequested
             || Volatile.Read(ref _runtimeMaintenanceActive) != 0
-            || !ReferenceEquals(sender, _supervisorProcess)
-            || Interlocked.Exchange(ref _supervisorRecoveryScheduled, 1) != 0)
-        {
-            return;
-        }
+            || trigger is null || !ReferenceEquals(sender, trigger.Process)
+            || !TryScheduleSupervisorRecovery(ref _supervisorRecoveryScheduledSession, trigger, () => _managedSession)) return;
 
         AppLog.Warn(
             $"Supervisor exited unexpectedly (code={eventArgs.ExitCode?.ToString() ?? "unknown"}); "
             + "scheduling one reconnect attempt.");
-        _soakCrashedInstanceId = _supervisorInstanceId;
-        void ScheduleRecovery()
-        {
-            // 服务已消失：恢复期间不得残留“运行时已就绪”投影。
-            _runtimeStatus.ReportServiceUnavailable();
-            _supervisorDiagnostics?.UpdateSupervisor(new SupervisorHealth(
-                SupervisorHealthState.Faulted,
-                null,
-                null,
-                "Supervisor 异常退出，正在自动恢复。"));
-            _ = RecoverSupervisorAfterExitAsync();
-        }
-
+        void ScheduleRecovery() => _ = RecoverSupervisorAfterExitAsync(trigger);
         if (_window?.DispatcherQueue.TryEnqueue(ScheduleRecovery) != true)
-        {
             _ = Task.Run(ScheduleRecovery);
+    }
+
+    internal static bool TryScheduleSupervisorRecovery(ref ManagedEnvironmentSession? scheduled,
+        ManagedEnvironmentSession trigger, Func<ManagedEnvironmentSession?> currentSession)
+    {
+        while (true)
+        {
+            ManagedEnvironmentSession? previous = Volatile.Read(ref scheduled);
+            if (!ReferenceEquals(currentSession(), trigger) || ReferenceEquals(previous, trigger)) return false;
+            if (ReferenceEquals(Interlocked.CompareExchange(ref scheduled, trigger, previous), previous)) return true;
         }
     }
 
-    private async Task RecoverSupervisorAfterExitAsync()
+    internal static void CompleteSupervisorRecovery(ref ManagedEnvironmentSession? scheduled, ManagedEnvironmentSession trigger) =>
+        Interlocked.CompareExchange(ref scheduled, null, trigger);
+
+    internal static async Task RunCurrentSupervisorRecoveryAsync(
+        Func<bool> isCurrentSession, Func<Task> recover, Action complete)
     {
+        try { if (isCurrentSession()) await recover(); }
+        finally { complete(); }
+    }
+
+    private async Task RecoverSupervisorAfterExitAsync(ManagedEnvironmentSession trigger)
+    {
+        bool IsCurrentSession() => !_applicationShutdown.IsCancellationRequested
+            && Volatile.Read(ref _runtimeMaintenanceActive) == 0 && ReferenceEquals(trigger, _managedSession);
         try
         {
-            await (_runtimeDemand ?? throw new InvalidOperationException("Runtime recovery context is unavailable."))
-                .RecoverAsync();
+            await RunCurrentSupervisorRecoveryAsync(IsCurrentSession, async () =>
+            {
+                await (_runtimeDemand ?? throw new InvalidOperationException("Runtime recovery context is unavailable."))
+                    .RecoverAsync(IsCurrentSession, () =>
+                    {
+                        _soakCrashedInstanceId = trigger.InstanceId;
+                        _runtimeStatus.ReportServiceUnavailable();
+                        _supervisorDiagnostics?.UpdateSupervisor(new SupervisorHealth(
+                            SupervisorHealthState.Faulted, null, null, "Supervisor 异常退出，正在自动恢复。"));
+                    }, error =>
+                    {
+                        _runtimeStatus.ReportServiceUnavailable();
+                        _supervisorDiagnostics?.UpdateSupervisor(new SupervisorHealth(
+                            SupervisorHealthState.Faulted, null, null, error.Message));
+                        FailSoakRun(error.Message);
+                    });
+            }, () => CompleteSupervisorRecovery(ref _supervisorRecoveryScheduledSession, trigger));
         }
         catch (OperationCanceledException) when (_applicationShutdown.IsCancellationRequested)
         {
@@ -1152,16 +1174,6 @@ public sealed partial class App : Application
         catch (Exception error)
         {
             AppLog.Error("Supervisor recovery failed", error);
-            // 恢复失败（含门等待超时）必须同步退出“运行时已就绪”残留，
-            // 与连接路径的故障终态保持一致。
-            _runtimeStatus.ReportServiceUnavailable();
-            _supervisorDiagnostics?.UpdateSupervisor(new SupervisorHealth(
-                SupervisorHealthState.Faulted, null, null, error.Message));
-            FailSoakRun(error.Message);
-        }
-        finally
-        {
-            Interlocked.Exchange(ref _supervisorRecoveryScheduled, 0);
         }
     }
 
