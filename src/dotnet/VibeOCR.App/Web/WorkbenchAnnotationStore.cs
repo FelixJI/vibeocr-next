@@ -82,6 +82,11 @@ public sealed class WorkbenchAnnotationStore : IDisposable
   private long pendingBytes;
   private bool disposed;
 
+  internal (int Entries, int Reservations, int OwnedFiles) ActiveCounts
+  {
+    get { lock (gate) return (entries.Count, pendingReservations.Count, ownedFiles.Count); }
+  }
+
   public WorkbenchAnnotationStore(
     string resourceRoot,
     TimeProvider? timeProvider = null,

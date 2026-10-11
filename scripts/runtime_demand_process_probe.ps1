@@ -85,17 +85,27 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
                     $class = if ($process.CommandLine -match 'vibeocr.runtime.host.main') { 'supervisor' } else { 'python-child' }
                     if (-not $process.CommandLine) { $gap = 'python_role_not_observed' }
                 }
+                $webViewRole = $null
+                if ([string]$process.Name -ieq 'msedgewebview2.exe') {
+                    $webViewRole = 'unknown'
+                    if ($process.CommandLine) {
+                        $webViewRole = 'browser'
+                        if ($process.CommandLine -match '--type=([^\s"]+)') {
+                            $webViewRole = if ($Matches[1] -in @('renderer', 'utility', 'gpu-process')) { $Matches[1] } else { 'other' }
+                        }
+                    }
+                }
                 $record = [ordered]@{
                     pid = $processId; ppid = [int]$process.ParentProcessID; name = [string]$process.Name
                     started_ms = [DateTimeOffset]::new($process.CreationDate.ToUniversalTime()).ToUnixTimeMilliseconds()
                     observed_ms = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
                     creation_filetime = $created
-                    class = $class; action = $action; evidence_gap = $gap
+                    class = $class; action = $action; evidence_gap = $gap; webview_role = $webViewRole
                 }
                 $owned[$processId] = $record
                 $record | ConvertTo-Json -Compress | Add-Content -LiteralPath $startsFile
             }
-            $live.Add(@{ pid = $processId; name = $process.Name; ws_bytes = [long]$process.WorkingSetSize })
+            $live.Add(@{ pid = $processId; name = $process.Name; ws_bytes = [long]$process.WorkingSetSize; webview_role = $owned[$processId].webview_role })
         }
         @{ at_ms = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); procs = @($live.ToArray()) } |
             ConvertTo-Json -Depth 4 -Compress | Add-Content -LiteralPath $samplesFile

@@ -246,7 +246,7 @@ public sealed partial class App : Application
         _windowLayoutStore = new WindowLayoutStore(
             Path.Combine(layout.DataRoot, "winui-layout.json"));
         if (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") is
-            "screenshot-e2e" or "text-selection-e2e" or "managed-environment-e2e")
+            "screenshot-e2e" or "text-selection-e2e" or "managed-environment-e2e" or "capture-first-frame-e2e")
         {
             _screenshotSmokePicker = new SyntheticScreenRegionPicker(
                 Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") ==
@@ -355,6 +355,7 @@ public sealed partial class App : Application
             RecordMilestone(diagnostics, "T6", _startup.Elapsed);
         }
         else if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE")) &&
+                 Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") != "capture-first-frame-e2e" &&
                  (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") != "managed-environment-e2e" ||
                   Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_ENVIRONMENT_E2E_PHASE") == "restart"))
         {

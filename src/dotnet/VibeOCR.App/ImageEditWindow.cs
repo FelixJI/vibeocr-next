@@ -17,6 +17,13 @@ namespace VibeOCR.App;
 internal sealed class ImageEditWindow : IAsyncDisposable
 {
   private readonly WebView2 webView = new();
+  private static int activeWebViewCount;
+  private readonly TaskCompletionSource<long> presented = new(TaskCreationOptions.RunContinuationsAsynchronously);
+  internal long CreatedTimestamp { get; } = System.Diagnostics.Stopwatch.GetTimestamp();
+  internal Task<long> Presented => presented.Task;
+  internal static int ActiveWebViewCount => Volatile.Read(ref activeWebViewCount);
+  internal WebWorkbenchHost Host => host;
+  internal ScreenshotCaptureScene? CaptureScene => captureScene;
   private readonly WebWorkbenchHost host;
   private readonly string assetFolder;
   private readonly Window window;
@@ -79,6 +86,7 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     webView.Loaded += OnLoaded;
     if (captureScene is null) window.Content = content;
     window.Closed += OnClosed;
+    Interlocked.Increment(ref activeWebViewCount);
     if (captureScene is not null) return;
     window.AppWindow.SetPresenter(AppWindowPresenterKind.Overlapped);
     var area = captureBounds is { } bounds
@@ -162,6 +170,7 @@ internal sealed class ImageEditWindow : IAsyncDisposable
   private void ShowRecovery()
   {
     if (closed) return;
+    presented.TrySetCanceled();
     recoveryMessage.Text = "图片编辑器暂不可用；退出后可重新截图。";
     recovery.Visibility = Visibility.Visible;
   }
@@ -188,7 +197,11 @@ internal sealed class ImageEditWindow : IAsyncDisposable
           await Task.Delay(16);
         }
       }
-      if (!closed) webView.Opacity = 1;
+      if (!closed)
+      {
+        webView.Opacity = 1;
+        presented.TrySetResult(System.Diagnostics.Stopwatch.GetTimestamp());
+      }
     }
     catch (Exception error)
     {
@@ -213,8 +226,10 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     closed = true;
     host.RecoveryRequired -= ShowRecovery;
     host.StateChanged -= OnHostStateChanged;
+    presented.TrySetCanceled();
     await host.DisposeAsync();
     webView.Close();
+    Interlocked.Decrement(ref activeWebViewCount);
     captureScene?.Dispose();
   }
 }

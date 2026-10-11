@@ -515,6 +515,12 @@ public sealed partial class MainWindow : Window
         await CompleteWebReadySmokeAsync();
       });
       if (!screenshotSmokeStarted &&
+          Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "capture-first-frame-e2e")
+      {
+        screenshotSmokeStarted = true;
+        _ = CompleteCaptureFirstFrameSmokeAsync();
+      }
+      if (!screenshotSmokeStarted &&
           Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "screenshot-e2e")
       {
         screenshotSmokeStarted = true;

@@ -38,6 +38,11 @@ public sealed class WorkbenchApplication : IWorkbenchApplication
     get { lock (_gate) return _route; }
   }
 
+  internal int ActiveSubscriptionCount
+  {
+    get { lock (_gate) return _subscriptions.Count; }
+  }
+
   internal int PendingStateCount
   {
     get { lock (_gate) return _subscriptions.Sum(mailbox => mailbox.PendingCount); }

@@ -12,7 +12,7 @@ internal sealed record SelfTestInstanceScope(
     string? instanceId)
   {
     bool isUiSmoke = smokeMode is "web-ready" or "screenshot-e2e" or
-      "text-selection-e2e" or "managed-environment-e2e" or "native-actions-e2e" or "paddle-modes-e2e";
+      "text-selection-e2e" or "managed-environment-e2e" or "native-actions-e2e" or "paddle-modes-e2e" or "capture-first-frame-e2e";
     // t6 兼容两种形态：无 instance id 保持既有生产名单例行为
     // （collect_startup_metrics 入口不变）；显式 GUID 时切换到隔离名单。
     bool optionalInstanceId = smokeMode == "t6";

@@ -59,6 +59,9 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   { "shell", "recognition", "settings" };
   private readonly WorkbenchDispatcherDelivery stateDelivery = new();
   internal byte[]? CaptureBackground { get; set; }
+  internal bool HasBridgeBinding => bridge is not null;
+  internal bool HasWebViewBindings => core is not null;
+  internal bool HasSubscription => subscription is { IsCompleted: false };
   private readonly CancellationTokenSource lifetime = new();
   private readonly List<Uri> uploadedAnnotations = [];
   private PendingPdfPreviewFlush? pendingPdfPreviewFlush;
