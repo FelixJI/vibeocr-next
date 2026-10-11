@@ -423,7 +423,9 @@ async function settingsStep(ctx) {
   const rows = await page.locator('.hotkey-action-row').count();
   assert(rows > 0, 'Settings page exposes no hotkey action rows.');
   await page.locator('.hotkey-action-row').filter({ hasText: '截图编辑' })
-    .getByText(/当前生效：/).first().waitFor();
+    .getByText('未绑定', { exact: true }).waitFor();
+  await page.locator('.hotkey-action-row').filter({ hasText: '快捷截图识别' })
+    .getByText('当前生效：Ctrl+Alt+Q', { exact: true }).waitFor();
   step.hotkeyRows = rows;
   // Generic local settings toggle: floating toolbar show/hide with status.
   await setCheckbox(page, '启用悬浮工具栏', true);
@@ -479,7 +481,7 @@ async function imageEditStep(ctx) {
   const after = await canvasOrange(page);
   assert(after.orange > before.orange + 50, 'Rectangle edit changed too few canvas pixels.');
   step.annotationPixels = { before: before.orange, after: after.orange };
-  step.annotationUpload = await copyAnnotated(page, '已复制标注图片副本');
+  step.annotationUpload = await copyAnnotated(page, '已复制截图副本');
   // Real FileSavePicker through the owned save-file seam: the export upload
   // is observed first, then the picker dialog (owned by our main window)
   // receives the target path and its confirmation is driven through the
@@ -497,7 +499,7 @@ async function imageEditStep(ctx) {
     '-Action', 'save-file', '-Handle', String(main.Handle), '-AppPid', String(child.pid),
     '-OutputPath', savedFile, '-EvidenceRoot', root],
   { timeout: 45000, windowsHide: true });
-  await page.getByText('已保存标注图片副本', { exact: false }).waitFor({ timeout: 15000 });
+  await page.getByText('已保存截图副本', { exact: false }).waitFor({ timeout: 15000 });
   const savedStat = fs.statSync(savedFile);
   assert(savedStat.isFile() && savedStat.size > 8, 'Saved annotation PNG is missing or empty.');
   const savedPixels = await decodePng(page, fs.readFileSync(savedFile));
@@ -545,6 +547,17 @@ async function captureStep(ctx) {
   try {
     await watchSessionInput(page);
     await page.getByRole('link', { name: '单次识别', exact: true }).click();
+
+    await native('focus-fixture', {
+      FixturePid: fixture.pid, Handle: fixture.root,
+      X: fixture.editRect.left + Math.floor(fixture.editRect.width / 2),
+      Y: fixture.editRect.top + Math.floor(fixture.editRect.height / 2),
+    });
+    await native('frame', { FixturePid: fixture.pid, Handle: fixture.root,
+      X: fixture.rootRect.left, Y: fixture.rootRect.top,
+      Width: fixture.rootRect.width, Height: fixture.rootRect.height,
+      EvidenceRoot: root, OutputPath: path.join(root, 'capture-fixture.png') });
+    await focusMain(ctx);
     await page.getByRole('button', { name: '截图', exact: true }).click();
     const button = fixture.buttonRect;
     const x = button.left + Math.floor(button.width / 2);
@@ -555,14 +568,14 @@ async function captureStep(ctx) {
       inside(item, x, y), 12000);
     const overlay = overlays.sort((a, b) => area(b) - area(a))[0];
     step.overlayHandle = overlay.Handle;
-    const start = { AppPid: child.pid, X: button.left + 4, Y: button.top + 4 };
-    const end = { AppPid: child.pid, X: button.right - 4, Y: button.bottom - 4 };
+    const start = { AppPid: child.pid, X: fixture.rootRect.left + 20, Y: fixture.rootRect.top + 40 };
+    const end = { AppPid: child.pid, X: fixture.rootRect.right - 20, Y: fixture.rootRect.bottom - 20 };
     await native('mouse-move', start);
     await native('mouse-down', start);
     try { await native('mouse-move', end); }
     finally { await native('mouse-up', end); }
     const region = { left: start.X, top: start.Y,
-      width: button.width - 8, height: button.height - 8 };
+      width: end.X - start.X, height: end.Y - start.Y };
     const label = await native('selection', { AppPid: child.pid, Handle: overlay.Handle });
     assert(label.includes(`手动 · ${region.width} × ${region.height} px`),
       `Manual selection label mismatch: ${label}`);
@@ -585,7 +598,8 @@ async function captureStep(ctx) {
       if (!scene) await delay(100);
     }
     assert(scene, 'Screenshot scene WebView did not appear.');
-    await scene.getByRole('heading', { name: '截图现场编辑' }).waitFor({ timeout: 12000 });
+    await scene.locator('html[data-capture-scene="true"]')
+      .waitFor({ state: 'attached', timeout: 12000 });
     await scene.getByLabel('图片检查画布').waitFor({ timeout: 12000 });
     await scene.waitForFunction(() => {
       const canvas = document.querySelector('canvas[aria-label="图片检查画布"]');
