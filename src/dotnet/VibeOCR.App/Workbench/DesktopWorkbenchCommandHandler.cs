@@ -142,6 +142,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     public RecognitionTextLayerState? TextLayer;
     public long TextGeneration;
     public RecognitionViewModel? TextLayerViewModel;
+    public CancellationTokenSource? TextPreparation;
+    public CancellationTokenSource? CaptureDemand;
   }
 
   private readonly ImageSessionChannel recognitionChannel = new();
@@ -159,6 +161,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private WorkbenchTheme theme = WorkbenchTheme.System;
   private WorkbenchResourceReference? generatedQrResource;
   private long batchGeneration;
+  private CancellationTokenSource? batchPreparation;
   private long pdfGeneration;
   private long pdfWindowGeneration;
   private long qrCodeGeneration;
@@ -193,7 +196,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     IStructuredClipboardPlatform? structuredClipboard = null,
     Func<PdfDocumentEntry, Task<PdfCloseDecision>>? confirmPdfClose = null,
     Func<Task<string?>>? pickPdfSavePath = null, Func<Task<string?>>? pickPdfFolder = null,
-    Func<string, Task<bool>>? flushPdfPreview = null)
+    Func<string, Task<bool>>? flushPdfPreview = null,
+    Func<CancellationToken, Task>? ensureRuntimeReady = null)
   {
     this.recognitionFactory = recognitionFactory ??
       throw new ArgumentNullException(nameof(recognitionFactory));
@@ -236,9 +240,11 @@ public sealed class DesktopWorkbenchCommandHandler :
     this.confirmPdfClose = confirmPdfClose ?? (_ => Task.FromResult(PdfCloseDecision.Cancel));
     this.pickPdfSavePath = pickPdfSavePath; this.pickPdfFolder = pickPdfFolder;
     this.flushPdfPreview = flushPdfPreview;
+    this.ensureRuntimeReady = ensureRuntimeReady;
   }
 
   private readonly Func<string, Task<bool>>? flushPdfPreview;
+  private readonly Func<CancellationToken, Task>? ensureRuntimeReady;
   private readonly Func<string?> supervisorInstanceId;
   private readonly Func<RecognitionViewModel> textLayerRecognitionFactory;
   private string pinnedServiceInstance = string.Empty;
@@ -547,6 +553,8 @@ public sealed class DesktopWorkbenchCommandHandler :
           cancellationToken),
         OpenProjectPageCommand => await OpenProjectPageAsync(cancellationToken),
         RefreshRuntimeCommand => await RefreshRuntimeAsync(cancellationToken),
+        RefreshEnvironmentListCommand => await RunEnvironmentAsync(
+          environment => environment.RefreshAsync(cancellationToken), cancellationToken),
         CreateEnvironmentCommand create => await RunEnvironmentAsync(
           environment => environment.CreateAsync(create.Name, cancellationToken), cancellationToken),
         SetEnvironmentSourcesCommand setEnvironmentSources => await RunEnvironmentAsync(
@@ -853,6 +861,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     ImageSessionChannel channel, long? editedRevision = null)
   {
     Interlocked.Increment(ref channel.TextGeneration);
+    channel.TextPreparation?.Cancel();
     channel.TextLayerViewModel?.Cancel();
     if (channel.TextLayer?.Image is { } image) ReleaseResource(image);
     channel.TextLayer = null;
@@ -932,13 +941,15 @@ public sealed class DesktopWorkbenchCommandHandler :
 
     try
     {
+      var demand = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, sceneRecognitionLifetime.Token);
+      recognitionChannel.CaptureDemand = demand;
       long generation = Interlocked.Increment(ref recognitionChannel.Generation);
       // 框选取消或失败时保留旧图、标注、结果与修订；成功捕获才替换。
       ScreenshotCaptureStarting?.Invoke();
       return PublishStartThenTrack(
         SessionState(recognitionChannel, true, "recognition.running"),
         () => CompleteScreenshotSessionAsync(generation, textSelectionRequested, scrolling,
-          cancellationToken));
+          demand));
     }
     catch
     {
@@ -958,8 +969,9 @@ public sealed class DesktopWorkbenchCommandHandler :
     long generation,
     bool textSelectionRequested,
     bool scrolling,
-    CancellationToken cancellationToken)
+    CancellationTokenSource demand)
   {
+    CancellationToken cancellationToken = demand.Token;
     // 所有截图入口（主窗/热键/悬浮栏）统一让位：截图期间工具栏与感应条
     // 均不入画面；结束后恢复原态。无论成功、取消或失败都释放单飞 guard。
     bool publishedSession = false;
@@ -997,9 +1009,9 @@ public sealed class DesktopWorkbenchCommandHandler :
           switch (captured.SelectionAction)
           {
             case ScreenshotSelectionAction.Recognize
-              when captured.SelectionRecognitionMode is { } modeId:
+              when captured.SelectionRecognitionMode is { Length: > 0 } || captured.SelectionRecognitionIntent is not null:
               await CompleteScreenshotSelectionRecognitionAsync(
-                generation, captured, modeId, cancellationToken);
+                generation, captured, captured.SelectionRecognitionMode, cancellationToken);
               return;
             case ScreenshotSelectionAction.Recognize:
               AppLog.Warn(
@@ -1089,6 +1101,8 @@ public sealed class DesktopWorkbenchCommandHandler :
       finally
       {
         capturedInput?.DisposeCaptureScene();
+        if (ReferenceEquals(recognitionChannel.CaptureDemand, demand)) recognitionChannel.CaptureDemand = null;
+        demand.Dispose();
         ScreenshotCaptureFinished?.Invoke();
       }
     }
@@ -1104,10 +1118,13 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     _ = RecognitionVm;
     // 纯截图不触发目录加载；这里只确保 settings 实例存在并复用它当前
-    // 已加载的真实目录（启动 bootstrap 已加载；冷启动/维护中禁用指引）。
+    // 已加载的真实目录；冷启动只保存分类意图，点击后才准备。
     settings ??= CreateSettings();
     return new ScreenshotSelectionActions(
-      BuildSelectionModeEntries(settings?.RecognitionSelection), theme);
+      settings.RecognitionSelection is null && ensureRuntimeReady is not null
+        ? BuildSelectionModeEntries(null).Select((entry, index) => entry with
+          { Intent = (ScreenshotRecognitionIntent)index, Hint = "点击后准备运行环境并识别" }).ToArray()
+        : BuildSelectionModeEntries(settings.RecognitionSelection), theme);
   }
 
   /// <summary>
@@ -1193,7 +1210,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   private async Task CompleteScreenshotSelectionRecognitionAsync(
     long generation,
     RecognitionInput input,
-    string modeId,
+    string? modeId,
     CancellationToken cancellationToken)
   {
     bool terminalVisible = false;
@@ -1212,6 +1229,11 @@ public sealed class DesktopWorkbenchCommandHandler :
         return;
       }
       if (generation != Volatile.Read(ref recognitionChannel.Generation)) return;
+      if (input.SelectionRecognitionIntent is { } intent)
+      {
+        ScreenshotRecognitionModeEntry resolved = BuildSelectionModeEntries(settings?.RecognitionSelection)[(int)intent];
+        modeId = resolved.ModeId;
+      }
       // 动作栏合同：仅 ready 模式可提交；目录在菜单渲染后变化（环境切换）
       // 或需要准备的模式一律拒绝，不自动触发依赖准备/下载。
       RecognitionEngineChoice? chosen = RecognitionEngines()?
@@ -1223,7 +1245,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       }
       // typed 意图冻结为任务模式：模式缺失/不可用直接拒绝，不回退默认；
       // 新版 SynchronizeRecognitionMode 中显式 TaskEngine 优先于继承默认。
-      ApplyTaskEngine(modeId);
+      ApplyTaskEngine(modeId!);
       SynchronizeRecognitionMode(requireUsable: true);
       // 显式识别取代旧截图会话（关闭旧 scene 编辑窗），不新建编辑会话。
       ClearScreenshotSession(recognitionChannel);
@@ -1845,85 +1867,85 @@ public sealed class DesktopWorkbenchCommandHandler :
   /// 远端或重型文档管线。
   /// </summary>
   private async Task<WorkbenchState?> PrepareScreenshotTextLayerAsync(
-    ImageSessionChannel channel,
-    IScreenshotSessionResource command,
-    CancellationToken cancellationToken,
-    byte[]? pinnedPng = null, string pinnedMediaType = "image/png")
+    ImageSessionChannel channel, IScreenshotSessionResource command,
+    CancellationToken cancellationToken, byte[]? pinnedPng = null,
+    string pinnedMediaType = "image/png")
   {
     _ = channel.ViewModel ??= recognitionFactory();
     ValidateScreenshotSession(channel, command.SessionId, command.Revision);
-    string sessionId = command.SessionId.ToString("N");
     if (channel.TextLayer?.Binding is { } existing &&
-      existing.SessionId == sessionId &&
-      existing.Revision == command.Revision &&
-      channel.TextLayer.Status is "textlayer.preparing" or "textlayer.ready")
-    {
+        existing.SessionId == command.SessionId.ToString("N") && existing.Revision == command.Revision &&
+        channel.TextLayer.Status is "textlayer.preparing" or "textlayer.ready")
       return SessionState(channel, false, SessionStatusCode(channel));
-    }
-
-    if (inferenceAttached?.Invoke() == false)
+    if (ensureRuntimeReady is null || inferenceAttached?.Invoke() != false)
+      await EnsureSelectionLoadedAsync(cancellationToken);
+    if ((ensureRuntimeReady is null && inferenceAttached?.Invoke() == false) ||
+        (settings?.RecognitionSelection is not null && FindReadyLocalTextMode(out _) is null))
     {
-      channel.TextLayer = new RecognitionTextLayerState(
-        "textlayer.unavailable", "textlayer.serviceUnavailable",
-        new RecognitionScreenshotSessionState(sessionId, command.Revision),
+      _ = FindReadyLocalTextMode(out string? reason);
+      channel.TextLayer = new RecognitionTextLayerState("textlayer.unavailable",
+        inferenceAttached?.Invoke() == false ? "textlayer.serviceUnavailable" : reason,
+        new RecognitionScreenshotSessionState(command.SessionId.ToString("N"), command.Revision),
         null, supervisorInstanceId(), null);
       return SessionState(channel, false, SessionStatusCode(channel));
     }
-    await EnsureSelectionLoadedAsync(cancellationToken);
-    RecognitionModeOption? mode = FindReadyLocalTextMode(out string? reason);
-    if (mode is null)
-    {
-      channel.TextLayer = new RecognitionTextLayerState(
-        "textlayer.unavailable",
-        reason,
-        new RecognitionScreenshotSessionState(sessionId, command.Revision),
-        null,
-        supervisorInstanceId(),
-        null);
-      return SessionState(channel, false, SessionStatusCode(channel));
-    }
-
-    byte[] png;
-    string mediaType = pinnedMediaType;
-    if (pinnedPng is null)
-    {
-      using WorkbenchAnnotationFile annotation = TakeScreenshotAnnotation(command.ResourceUri);
-      png = await File.ReadAllBytesAsync(annotation.Path, cancellationToken);
-      mediaType = annotation.MediaType;
-    }
-    else
-    {
-      png = pinnedPng;
-    }
-    // 读取租约期间会话/修订变更则拒绝启动，不消费推理配额。
-    ValidateScreenshotSession(channel, command.SessionId, command.Revision);
-    var input = new RecognitionInput(
-      png,
-      mediaType,
-      "screenshot-text-layer" + ExtensionForMediaType(mediaType),
-      "screenshot-text");
-    string serviceInstance = supervisorInstanceId() ?? string.Empty;
+    var preparation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, sceneRecognitionLifetime.Token);
+    channel.TextPreparation = preparation;
     long generation = Interlocked.Increment(ref channel.TextGeneration);
-    Guid sessionGuid = command.SessionId;
-    long revision = command.Revision;
-    channel.TextLayer = new RecognitionTextLayerState(
-      "textlayer.preparing",
-      null,
-      new RecognitionScreenshotSessionState(sessionId, revision),
-      mode.Id,
-      serviceInstance,
-      null);
+    channel.TextLayer = new RecognitionTextLayerState("textlayer.preparing", null,
+      new RecognitionScreenshotSessionState(command.SessionId.ToString("N"), command.Revision),
+      null, null, null);
     return PublishStartThenTrack(
       SessionState(channel, false, SessionStatusCode(channel)),
-      () => CompleteScreenshotTextLayerAsync(
-        channel,
-        generation,
-        sessionGuid,
-        revision,
-        mode.Id,
-        serviceInstance,
-        input,
-        cancellationToken));
+      () => PrepareScreenshotTextLayerCoreAsync(channel, command, generation, preparation, pinnedPng, pinnedMediaType));
+  }
+
+  private async Task PrepareScreenshotTextLayerCoreAsync(
+    ImageSessionChannel channel, IScreenshotSessionResource command, long generation,
+    CancellationTokenSource preparation, byte[]? pinnedPng, string mediaType)
+  {
+    CancellationToken ct = preparation.Token;
+    try
+    {
+      byte[] png;
+      if (pinnedPng is null)
+      {
+        using WorkbenchAnnotationFile annotation = TakeScreenshotAnnotation(command.ResourceUri);
+        png = await File.ReadAllBytesAsync(annotation.Path, ct);
+        mediaType = annotation.MediaType;
+      }
+      else png = pinnedPng;
+      if (!await EnsureSelectionLoadedForSubmitAsync(ct))
+        throw new OperationCanceledException(ct);
+      ct.ThrowIfCancellationRequested();
+      if (generation != Volatile.Read(ref channel.TextGeneration)) return;
+      ValidateScreenshotSession(channel, command.SessionId, command.Revision);
+      RecognitionModeOption? mode = FindReadyLocalTextMode(out string? reason);
+      if (mode is null)
+      {
+        PublishTextLayerState(channel, "textlayer.unavailable", reason);
+        return;
+      }
+      string instance = supervisorInstanceId() ?? string.Empty;
+      channel.TextLayer = channel.TextLayer! with { ModeId = mode.Id, ServiceInstance = instance };
+      await CompleteScreenshotTextLayerAsync(channel, generation, command.SessionId, command.Revision,
+        mode.Id, instance, new RecognitionInput(png, mediaType,
+          "screenshot-text-layer" + ExtensionForMediaType(mediaType), "screenshot-text"), ct);
+    }
+    catch (OperationCanceledException)
+    {
+      if (generation == Volatile.Read(ref channel.TextGeneration)) PublishTextLayerState(channel, "textlayer.cancelled", null);
+    }
+    catch (Exception error)
+    {
+      AppLog.Error("Screenshot text layer preparation failed", error);
+      if (generation == Volatile.Read(ref channel.TextGeneration)) PublishTextLayerState(channel, "textlayer.failed", null);
+    }
+    finally
+    {
+      if (ReferenceEquals(channel.TextPreparation, preparation)) channel.TextPreparation = null;
+      preparation.Dispose();
+    }
   }
 
   /// <summary>
@@ -1958,9 +1980,8 @@ public sealed class DesktopWorkbenchCommandHandler :
 
     // No session-dependent generation or result cache is read below. The pin
     // retains its own final PNG lease even after close/new capture/redaction.
-    if (inferenceAttached?.Invoke() == false)
+    if (!await EnsureSelectionLoadedForSubmitAsync(cancellationToken))
       throw new PinnedTextPreparationException("本地识别服务尚未就绪。");
-    await EnsureSelectionLoadedAsync(cancellationToken);
     RecognitionModeOption mode = FindReadyLocalTextMode(out _) ??
       throw new PinnedTextPreparationException("没有已就绪的本地轻量文字引擎，请先在设置中准备。");
     byte[] png = await File.ReadAllBytesAsync(imagePath, cancellationToken);
@@ -2135,6 +2156,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     if (channel.TextLayer is { Status: "textlayer.preparing" })
     {
       Interlocked.Increment(ref channel.TextGeneration);
+      channel.TextPreparation?.Cancel();
       channel.TextLayerViewModel?.Cancel();
       PublishTextLayerState(channel, "textlayer.cancelled", null);
     }
@@ -2627,6 +2649,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     RecognitionViewModel viewModel = RecognitionVm;
     Interlocked.Increment(ref recognitionChannel.Generation);
+    recognitionChannel.CaptureDemand?.Cancel();
     viewModel.Cancel();
     if (recognitionChannel.SessionId is not null)
     {
@@ -2808,34 +2831,36 @@ public sealed class DesktopWorkbenchCommandHandler :
     return await BatchStateAsync(batch, cancellationToken);
   }
 
-  private async Task<BatchWorkbenchState?> StartBatchAsync(
+  private Task<BatchWorkbenchState?> StartBatchAsync(
     CancellationToken cancellationToken)
   {
     batch ??= batchFactory();
-    // 提交前取得权威目录与已提交默认：未 attach 时等待 Supervisor 启动；
-    // 环境切换窗口取消本次提交，不以空快照冻结批量提交参数。
-    if (!await EnsureSelectionLoadedForSubmitAsync(cancellationToken))
-    {
-      Interlocked.Increment(ref batchGeneration);
-      return BatchState(batch);
-    }
-    SynchronizeBatchMode(requireUsable: true);
+    if (batchPreparation is not null || batch.IsRunning) return Task.FromResult<BatchWorkbenchState?>(BatchState(batch));
+    if (Volatile.Read(ref environmentSwitching) != 0) return Task.FromResult<BatchWorkbenchState?>(BatchState(batch));
+    if (settings?.RecognitionSelection is not null) SynchronizeBatchMode(requireUsable: true);
+    var preparation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, sceneRecognitionLifetime.Token);
+    batchPreparation = preparation;
     long generation = Interlocked.Increment(ref batchGeneration);
     BatchWorkbenchState start = new(
       true,
       batch.Items.Count,
       batch.CompletedCount,
       batch.FailedCount);
-    return PublishStartThenTrack(start,
-      () => CompleteBatchAsync(generation, cancellationToken));
+    return Task.FromResult(PublishStartThenTrack(start,
+      () => CompleteBatchAsync(generation, preparation)));
   }
 
   private async Task CompleteBatchAsync(
     long generation,
-    CancellationToken cancellationToken)
+    CancellationTokenSource preparation)
   {
+    CancellationToken cancellationToken = preparation.Token;
     try
     {
+      if (!await EnsureSelectionLoadedForSubmitAsync(cancellationToken)) return;
+      cancellationToken.ThrowIfCancellationRequested();
+      if (generation != Volatile.Read(ref batchGeneration)) return;
+      SynchronizeBatchMode(requireUsable: true);
       await batch!.StartAsync(cancellationToken);
       BatchWorkbenchState state = await BatchStateAsync(batch, cancellationToken);
       if (generation == Volatile.Read(ref batchGeneration))
@@ -2858,12 +2883,20 @@ public sealed class DesktopWorkbenchCommandHandler :
         StateChanged?.Invoke(BatchState(batch!));
       }
     }
+    finally
+    {
+      bool ownsPreparation = ReferenceEquals(batchPreparation, preparation);
+      if (ownsPreparation) batchPreparation = null;
+      preparation.Dispose();
+      if (ownsPreparation) StateChanged?.Invoke(BatchState(batch!));
+    }
   }
 
   private BatchWorkbenchState CancelBatch()
   {
     batch ??= batchFactory();
     Interlocked.Increment(ref batchGeneration);
+    batchPreparation?.Cancel();
     batch.CancelAll();
     return BatchState(batch);
   }
@@ -2872,6 +2905,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   {
     batch ??= batchFactory();
     Interlocked.Increment(ref batchGeneration);
+    batchPreparation?.Cancel();
     batch.ResetTemporaryQueue();
     batchExportIncomplete = false;
     batchWindowStart = 0;
@@ -3092,7 +3126,12 @@ public sealed class DesktopWorkbenchCommandHandler :
         throw new InvalidOperationException("最后的预览草稿未确认，保留当前文档，请重试。");
     }
     path = Path.GetFullPath(path);
-    if (pdfWorkspace.FindTarget(path) is { } duplicate) return await ActivatePdfAsync(duplicate, ct);
+    if (pdfWorkspace.FindTarget(path) is { } duplicate)
+    {
+      if (!duplicate.Model.HasRemoteSession && !duplicate.Model.IsSettling)
+        await duplicate.Model.OpenPathAsync(path, ct);
+      return await ActivatePdfAsync(duplicate, ct);
+    }
     if (pdfWorkspace.Documents.Count >= PdfWorkspace.MaxDocuments && pdf is not { HasRemoteSession: false, IsSettling: false }) throw new InvalidOperationException("最多同时打开 16 份 PDF，请先关闭文档。");
     ActivePdf?.TrimResultCache(0, 0);
     ReleasePdfWindowResources(force: true);
@@ -3105,6 +3144,13 @@ public sealed class DesktopWorkbenchCommandHandler :
     catch (Exception error) { entry.CloseError = error.Message; AppLog.Error("PDF open failed", error); }
     if (!model.HasRemoteSession)
     {
+      // Preparation cancellation/failure keeps the authorized input visible for
+      // a later explicit retry. No worker session has been created at this point.
+      if (ensureRuntimeReady is not null && inferenceAttached?.Invoke() == false)
+      {
+        entry.CloseError = model.Summary;
+        return await PdfStateAsync(model, CancellationToken.None);
+      }
       bool wasActive = pdfWorkspace.Active == entry;
       model.PropertyChanged -= OnPdfPropertyChanged;
       model.PagesRemapped -= OnPdfPagesRemapped;
@@ -3628,6 +3674,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     CancellationToken cancellationToken)
   {
     settings ??= CreateSettings();
+    if (ensureRuntimeReady is not null) await ensureRuntimeReady(cancellationToken);
     await settings.LoadSnapshotAsync(cancellationToken);
     await RefreshRecognitionCatalogStatesAsync(cancellationToken);
     return SettingsState(settings);
@@ -4086,6 +4133,9 @@ public sealed class DesktopWorkbenchCommandHandler :
   internal async Task RefreshRecognitionCatalogAsync(CancellationToken cancellationToken)
   {
     settings ??= CreateSettings();
+    // Announce the session before capturing its catalog generation. Initial
+    // status/property projection must not invalidate that session's first load.
+    OnSettingsChanged();
     settings.ClearSelection();
     try
     {
@@ -4282,6 +4332,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     CancellationToken cancellationToken)
   {
     settings ??= CreateSettings();
+    if (ensureRuntimeReady is not null) await ensureRuntimeReady(cancellationToken);
+    OnSettingsChanged();
     if (Volatile.Read(ref environmentSwitching) != 0)
     {
       AppLog.Warn("Recognition submit cancelled: environment switch refresh is still running.");
@@ -4712,7 +4764,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     SynchronizeBatchMode();
     batchWindowStart = ClampWindowStart(batchWindowStart, viewModel.Items.Count, 40);
     return new BatchWorkbenchState(
-    viewModel.IsRunning,
+    viewModel.IsRunning || batchPreparation is { IsCancellationRequested: false },
     viewModel.Items.Count,
     viewModel.CompletedCount,
     viewModel.FailedCount,
@@ -5467,6 +5519,10 @@ public sealed class DesktopWorkbenchCommandHandler :
     Interlocked.Increment(ref updateGeneration);
     recognitionChannel.ViewModel?.Cancel();
     imageEditChannel.ViewModel?.Cancel();
+    recognitionChannel.TextPreparation?.Cancel();
+    imageEditChannel.TextPreparation?.Cancel();
+    recognitionChannel.CaptureDemand?.Cancel();
+    batchPreparation?.Cancel();
     recognitionChannel.TextLayerViewModel?.Cancel();
     imageEditChannel.TextLayerViewModel?.Cancel();
     batch?.CancelAll();

@@ -15,6 +15,27 @@ namespace VibeOCR.App.Tests;
 public sealed class PdfViewModelSupervisorTests
 {
   [Fact]
+  public async Task CancelDuringPreparationKeepsInputWithoutCreatingWorkerSession()
+  {
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var viewModel = new PdfViewModel(new FakePdfInference(), new StubPdfSource(), async ct =>
+    {
+      entered.TrySetResult();
+      await Task.Delay(Timeout.Infinite, ct);
+    });
+    Task opening = viewModel.OpenPathAsync("retained.pdf", TestContext.Current.CancellationToken);
+    await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+    Assert.True(viewModel.IsBusy);
+    Assert.Equal("retained.pdf", viewModel.FilePath);
+    viewModel.Cancel();
+    await opening;
+    Assert.False(viewModel.HasRemoteSession);
+    Assert.False(viewModel.IsBusy);
+    Assert.Equal("retained.pdf", viewModel.FilePath);
+    Assert.Equal("已取消", viewModel.Status);
+  }
+
+  [Fact]
   public async Task CancelImmediatelyClearsBusyAndIgnoresLateOpen()
   {
     var completion = new TaskCompletionSource<PdfSessionOpenResult>();

@@ -13,7 +13,8 @@ namespace VibeOCR.App.Features.Pdf;
 
 public sealed class PdfViewModel(
     IInferenceClient inference,
-    IPdfFileSource files) : INotifyPropertyChanged
+    IPdfFileSource files,
+    Func<CancellationToken, Task>? ensureRuntimeReady = null) : INotifyPropertyChanged
 {
   private readonly InferenceJobRunner _jobs = new(inference);
   private CancellationTokenSource? _activeRun;
@@ -113,8 +114,14 @@ public sealed class PdfViewModel(
     _activeRun = run;
     BeginRun(); Changed();
     TerminalIssue = null; IsBusy = true; Status = "正在打开";
+    if (!HasSession) FilePath = path;
     try
     {
+      if (ensureRuntimeReady is not null)
+      {
+        Status = "正在准备运行环境";
+        await ensureRuntimeReady(run.Token);
+      }
       if (_unclosedSession is not null)
       {
         await inference.ClosePdfSessionAsync(_unclosedSession, CancellationToken.None);

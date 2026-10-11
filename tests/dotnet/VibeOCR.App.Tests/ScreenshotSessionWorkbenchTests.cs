@@ -225,7 +225,8 @@ public sealed class ScreenshotSessionWorkbenchTests
     Func<string?>? supervisorInstanceId = null,
     Func<RecognitionViewModel>? textLayerRecognitionFactory = null,
     Action<WorkbenchAnnotationFile, Guid, long, RecognitionTextLayerState?,
-      IReadOnlyList<WorkbenchExclusionBox>>? pinScreenshot = null) => new(
+      IReadOnlyList<WorkbenchExclusionBox>>? pinScreenshot = null,
+    Func<CancellationToken, Task>? ensureRuntimeReady = null) => new(
       () => recognition,
       static () => throw new InvalidOperationException(),
       static () => throw new InvalidOperationException(),
@@ -244,7 +245,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       inferenceAttached,
       supervisorInstanceId,
       textLayerRecognitionFactory,
-      pinScreenshot);
+      pinScreenshot, ensureRuntimeReady: ensureRuntimeReady);
 
   [Fact]
   public void BridgeParsesPinExclusionBoxesWithLegacyShapeAndStrictValidation()
@@ -2797,7 +2798,7 @@ public sealed class ScreenshotSessionWorkbenchTests
   private sealed class SelectionActionCaptureInput(
       ScreenshotSelectionAction? action,
       string? modeId = null,
-      byte[]? data = null) : IInputService
+      byte[]? data = null, ScreenshotRecognitionIntent? intent = null) : IInputService
   {
     private readonly byte[] captureData = data ?? CaptureBytes;
     public ScreenshotSelectionActions? ReceivedActions { get; private set; }
@@ -2824,6 +2825,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         {
           SelectionAction = action,
           SelectionRecognitionMode = modeId,
+          SelectionRecognitionIntent = intent,
         });
     }
 
@@ -3149,6 +3151,67 @@ public sealed class ScreenshotSessionWorkbenchTests
       // 同组内形状必须可区分：不同键不得解析到同一条 path 数据。
       Assert.Equal(group.Length, group.Select(ScreenshotToolbarIcons.TryGetPath).ToHashSet().Count);
     }
+  }
+
+  [Theory]
+  [InlineData(ScreenshotRecognitionIntent.Table, "TABLE_RECOGNITION")]
+  [InlineData(ScreenshotRecognitionIntent.Formula, "FORMULA_RECOGNITION")]
+  public async Task ColdScreenshotCategoryResolvesOnlyAfterExplicitPreparation(
+    ScreenshotRecognitionIntent intent, string pipeline)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new SelectionSubmitClient();
+      var inputs = new SelectionActionCaptureInput(ScreenshotSelectionAction.Recognize, intent: intent);
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      bool attached = false;
+      int preparations = 0;
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(recognition, root, broker, annotations, settings,
+        inferenceAttached: () => attached, ensureRuntimeReady: _ =>
+        {
+          preparations++;
+          attached = true;
+          return Task.CompletedTask;
+        });
+      using var completed = new RecognitionStateAwaiter(handler, state => !state.IsBusy && state.Result is not null);
+      await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+      await completed.Task;
+      Assert.Equal(1, preparations);
+      Assert.All(inputs.ReceivedActions!.Modes, entry => Assert.NotNull(entry.Intent));
+      Assert.Equal(pipeline, Assert.Single(inference.Requests).Pipeline.PipelineId);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task FailedOrCancelledColdScreenshotKeepsCapturedInput(bool cancel)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new SelectionSubmitClient();
+      var recognition = new RecognitionViewModel(inference,
+        new SelectionActionCaptureInput(ScreenshotSelectionAction.Recognize, intent: ScreenshotRecognitionIntent.Text));
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(recognition, root, broker, annotations,
+        new SettingsViewModel(inference), inferenceAttached: () => false,
+        ensureRuntimeReady: ct => Task.FromException(cancel
+          ? new OperationCanceledException(ct) : new InvalidOperationException("preparation failed")));
+      using var completed = new RecognitionStateAwaiter(handler, state => !state.IsBusy);
+      await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+      RecognitionWorkbenchState terminal = await completed.Task;
+      Assert.Equal(cancel ? "recognition.cancelled" : "recognition.failed", terminal.StatusCode);
+      Assert.Equal(CaptureBytes, recognition.CurrentInput!.Data);
+      Assert.Empty(inference.Requests);
+    }
+    finally { Directory.Delete(root, recursive: true); }
   }
 
   [Theory]

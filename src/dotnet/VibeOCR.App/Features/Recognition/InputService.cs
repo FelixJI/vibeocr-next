@@ -22,6 +22,7 @@ public sealed record RecognitionInput(
 
     /// <summary>动作栏显式选择的 typed 模式/引擎 id；仅 Recognize 动作携带。</summary>
     internal string? SelectionRecognitionMode { get; init; }
+    internal ScreenshotRecognitionIntent? SelectionRecognitionIntent { get; init; }
 
     internal ScreenshotCaptureScene? TakeCaptureScene()
     {
@@ -151,6 +152,7 @@ public sealed class InputService : IInputService
                 CaptureScene = selection.CaptureScene,
                 SelectionAction = selection.SelectionAction,
                 SelectionRecognitionMode = selection.RecognitionModeId,
+                SelectionRecognitionIntent = selection.RecognitionIntent,
             };
         }
         catch

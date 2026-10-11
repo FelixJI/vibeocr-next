@@ -1532,7 +1532,7 @@ public sealed partial class RuntimeInstallerClient : IRuntimeInstallerClient
     }
 }
 
-public sealed class RuntimeInstallerCommandRunner : IRuntimeInstallerCommandRunner
+public sealed class RuntimeInstallerCommandRunner(Action<string>? commandStarting = null) : IRuntimeInstallerCommandRunner
 {
     public async Task<RuntimeInstallerProcessResult> RunAsync(
         ProcessStartInfo startInfo,
@@ -1550,8 +1550,23 @@ public sealed class RuntimeInstallerCommandRunner : IRuntimeInstallerCommandRunn
         cancellationToken.ThrowIfCancellationRequested();
         VerifyBoundExecutable(startInfo);
         cancellationToken.ThrowIfCancellationRequested();
+        // Observe every real invocation, including short-lived read-only commands.
+        // Only the validated action is exposed; request contents remain private.
+        ObserveCommand(startInfo);
         return await RunProcessAsync(startInfo, standardOutputLine, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    internal void ObserveCommand(ProcessStartInfo startInfo)
+    {
+        if (commandStarting is null) return;
+        using JsonDocument request = JsonDocument.Parse(RequireOption(startInfo, "--request-json"));
+        JsonElement root = request.RootElement;
+        string action = root.TryGetProperty("action", out JsonElement value) ? value.GetString() ?? "unknown"
+            : root.TryGetProperty("command", out value) ? value.GetString() ?? "unknown"
+            : root.TryGetProperty("request_kind", out value) ? value.GetString() ?? "unknown" : "unknown";
+        commandStarting(action.Length <= 64 && action.All(character => character is >= 'a' and <= 'z' or '_')
+            ? action : "unknown");
     }
 
     internal static async Task<RuntimeInstallerProcessResult> RunProcessAsync(

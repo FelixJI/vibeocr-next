@@ -18,12 +18,14 @@ internal sealed class EnvironmentSwitchReservation : IManagedEnvironmentSwitchRe
     }
 
     public static async Task<IManagedEnvironmentSwitchReservation> StartAsync(
-        ProcessStartInfo startInfo, string environmentId, CancellationToken cancellationToken)
+        ProcessStartInfo startInfo, string environmentId, CancellationToken cancellationToken,
+        Action<ProcessStartInfo>? commandStarting = null)
     {
         await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         cancellationToken.ThrowIfCancellationRequested();
         RuntimeInstallerCommandRunner.VerifyBoundExecutable(startInfo);
         cancellationToken.ThrowIfCancellationRequested();
+        commandStarting?.Invoke(startInfo);
         var process = new Process { StartInfo = startInfo };
         if (!process.Start()) throw new RuntimeInstallerException("无法启动环境切换 reservation。");
         var session = new EnvironmentSwitchReservation(process);

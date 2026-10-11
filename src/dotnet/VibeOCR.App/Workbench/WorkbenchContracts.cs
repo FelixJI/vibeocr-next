@@ -357,6 +357,7 @@ public sealed record OpenQrCodeUrlCommand(string Url) : WorkbenchCommand;
 public sealed record OpenProjectPageCommand : WorkbenchCommand;
 
 public sealed record RefreshRuntimeCommand : WorkbenchCommand;
+public sealed record RefreshEnvironmentListCommand : WorkbenchCommand;
 
 public sealed record CreateEnvironmentCommand(string Name) : WorkbenchCommand;
 public sealed record PreviewEnvironmentInstallCommand(string EnvironmentId, string Recipe, string? SourceId) : WorkbenchCommand;

@@ -1101,7 +1101,7 @@ describe("AppShell", () => {
     unmount();
   });
 
-  it("auto-loads runtime settings once per settings page visit", () => {
+  it("prepares runtime only after the explicit settings action", () => {
     window.location.hash = "#/settings";
     const run = vi.fn();
     const actions: AppActions = {
@@ -1136,7 +1136,7 @@ describe("AppShell", () => {
     );
     expect(run).not.toHaveBeenCalled();
 
-    // 能力随宿主广播到达后自动加载一次，与手动“重新检查状态”同一命令。
+    // 能力广播和通用设置挂载均保持纯本地；只有显式点击才准备。
     rerender(
       <StrictMode>
         <App
@@ -1149,6 +1149,8 @@ describe("AppShell", () => {
         />
       </StrictMode>,
     );
+    expect(run).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "重新检查状态" }));
     expect(run).toHaveBeenCalledWith({ type: "settings.refreshRuntime" });
 
     // 后续宿主状态广播（刷新结果、能力数组重建）不得再次触发挂载刷新。
@@ -1183,6 +1185,29 @@ describe("AppShell", () => {
         ([action]) => action?.type === "settings.refreshRuntime",
       ),
     ).toHaveLength(1);
+    unmount();
+  });
+
+  it("reads the environment list without requesting runtime preparation", () => {
+    window.location.hash = "#/settings";
+    const run = vi.fn();
+    const actions: AppActions = { run, navigate: vi.fn(), setTheme: vi.fn() };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 43,
+      route: "settings",
+      theme: "light",
+      capabilities: ["runtime.environments", "runtime.refresh"],
+      features: { settings: { isBusy: false, environments: [] } },
+      runtimeLabel: "原生宿主已连接",
+    };
+    const { unmount } = render(<App actions={actions} viewState={viewState} />);
+    expect(run).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "查看环境清单" }));
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledWith({
+      type: "settings.refreshEnvironmentList",
+    });
     unmount();
   });
 

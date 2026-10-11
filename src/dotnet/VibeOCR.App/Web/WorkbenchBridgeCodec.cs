@@ -712,6 +712,9 @@ public static class WorkbenchBridgeCodec
       case ("settings", "refreshRuntime"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new RefreshRuntimeCommand();
+      case ("settings", "refreshEnvironmentList"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new RefreshEnvironmentListCommand();
       case ("settings", "createEnvironment"):
         EnsureObjectWithFields(arguments, EnvironmentNameArgumentFields, "command arguments");
         string? environmentName = arguments.GetProperty("name").GetString();

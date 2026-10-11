@@ -100,7 +100,8 @@ public sealed partial class MainWindow : Window
     Func<ManagedEnvironmentList?>? smokeEnvironmentSnapshot = null,
     Func<ManagedEnvironmentSession?>? smokeManagedSession = null,
     Func<int>? smokeInstallAttempts = null,
-    ShellActionDispatcher? shellActions = null)
+    ShellActionDispatcher? shellActions = null,
+    Func<CancellationToken, Task>? ensureRuntimeReady = null)
   {
     this.diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
     this.layout = layout ?? throw new ArgumentNullException(nameof(layout));
@@ -146,7 +147,8 @@ public sealed partial class MainWindow : Window
       pinScreenshot: PinScreenshot,
       shellActions: shellActions,
       optionsLayout: layout, confirmPdfClose: ConfirmPdfCloseAsync,
-      flushPdfPreview: FlushPdfPreviewAsync);
+      flushPdfPreview: FlushPdfPreviewAsync,
+      ensureRuntimeReady: ensureRuntimeReady);
     commandHandler.ScreenshotSessionReady += ShowImageEditor;
     commandHandler.ScreenshotCaptureStarting += () => imageEditor?.HideForCapture();
     commandHandler.ScreenshotCaptureFinished += () => imageEditor?.RestoreAfterCapture();

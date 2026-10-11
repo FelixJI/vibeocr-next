@@ -5,6 +5,9 @@ using System.Text;
 using System.Text.Json;
 using VibeOCR.App.Features.Maintenance;
 using VibeOCR.App.Features.Settings;
+using VibeOCR.App.Features.Shell;
+using VibeOCR.App.Inference;
+using VibeOCR.App.ViewModels;
 using VibeOCR.App.Web;
 using VibeOCR.App.Workbench;
 using VibeOCR.Platform.Bootstrap;
@@ -17,6 +20,51 @@ namespace VibeOCR.App.Tests;
 
 public sealed class ManagedEnvironmentSettingsTests
 {
+  [Fact]
+  public async Task ReadOnlyEnvironmentListUsesExistingRefreshWithoutPreparingRuntime()
+  {
+    int lists = 0;
+    var manager = new MutableManager { BeforeList = () => { lists++; return Task.CompletedTask; } };
+    var environments = new ManagedEnvironmentSettings(manager,
+      (_, _) => throw new Xunit.Sdk.XunitException("list must not switch"), () => null,
+      new ProductMaintenanceCoordinator());
+    var inference = new DeferredInferenceClient();
+    var settings = new SettingsViewModel(inference, environments: environments);
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-readonly-list-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        static () => throw new InvalidOperationException(), static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(), static () => throw new InvalidOperationException(),
+        () => settings, () => new ShellViewModel(new ListHotkeys(), new ListStartup()),
+        static () => throw new InvalidOperationException(), new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker, root, static () => 0, annotations, inferenceAttached: () => false,
+        ensureRuntimeReady: _ => throw new Xunit.Sdk.XunitException("list must not prepare"));
+      WorkbenchCommandOutcome result = await handler.ExecuteAsync(new RefreshEnvironmentListCommand(),
+        TestContext.Current.CancellationToken);
+      Assert.Null(result.Error);
+      Assert.Equal(1, lists);
+      Assert.NotEmpty(environments.Snapshot!.Environments);
+      Assert.False(inference.IsAttached);
+      Assert.Equal(0, manager.CreateCalls);
+      Assert.Equal(0, manager.InstallCalls);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  private sealed class ListHotkeys : IHotkeyRegistrar
+  {
+    public bool Register(string hotkey, out string? conflict) { conflict = null; return true; }
+    public void Unregister() { }
+  }
+  private sealed class ListStartup : IStartupRegistrar
+  {
+    public bool SetEnabled(bool enabled) => true;
+  }
+
   [Fact]
   public void RunningCatalogAndResidencyDistinguishPendingFromReadyModel()
   {

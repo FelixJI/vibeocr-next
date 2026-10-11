@@ -277,7 +277,8 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
         ProcessStartInfo startInfo = StartInfo(request);
         startInfo.RedirectStandardInput = true;
         startInfo.ArgumentList.Add("--environment-switch-control");
-        return await EnvironmentSwitchReservation.StartAsync(startInfo, environmentId, cancellationToken).ConfigureAwait(false);
+        return await EnvironmentSwitchReservation.StartAsync(startInfo, environmentId, cancellationToken,
+            _runner is RuntimeInstallerCommandRunner runner ? runner.ObserveCommand : null).ConfigureAwait(false);
     }
 
     public Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default) =>
