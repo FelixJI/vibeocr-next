@@ -831,6 +831,9 @@ public sealed partial class App : Application
                     AppLog.Warn($"Recognition catalog refresh after attach failed: {error.Message}");
                 }
             }
+            // The attempt token breaks a settings-switch gate dependency: a
+            // new switch cancels this attempt before draining its connection.
+            await RefreshEnvironmentSettingsAfterActivationAsync(_environmentSettings, cancellationToken);
         }
         return connected;
     }
@@ -919,7 +922,7 @@ public sealed partial class App : Application
     private Task SwitchManagedEnvironmentAsync(string environmentId, CancellationToken cancellationToken) =>
         SwitchManagedEnvironmentAndRefreshAsync(
             _runtimeDemand ?? throw new InvalidOperationException("Runtime demand coordinator is unavailable."),
-            token => _runtimeDemand.Connection!.SwitchAsync(environmentId, token),
+            (token, committed) => _runtimeDemand.Connection!.SwitchAsync(environmentId, token, committed),
             async token =>
             {
                 if (_managedSession is { } session)
@@ -933,7 +936,7 @@ public sealed partial class App : Application
             }, error => AppLog.Warn($"Recognition catalog refresh after environment switch failed: {error.Message}"), cancellationToken);
 
     internal static async Task SwitchManagedEnvironmentAndRefreshAsync(
-        RuntimeDemandCoordinator coordinator, Func<CancellationToken, Task> activate,
+        RuntimeDemandCoordinator coordinator, Func<CancellationToken, Action, Task> activate,
         Func<CancellationToken, Task> refresh, Action<Exception> refreshFailed, CancellationToken cancellationToken)
     {
         await coordinator.SwitchAsync(activate, cancellationToken);
@@ -945,16 +948,16 @@ public sealed partial class App : Application
 
     // 在 supervisor 门释放后刷新；环境切换持环境门等待 supervisor 门。
     internal static async Task RefreshEnvironmentSettingsAfterActivationAsync(
-        ManagedEnvironmentSettings? settings, CancellationToken shutdown)
+        ManagedEnvironmentSettings? settings, CancellationToken cancellationToken)
     {
-        if (settings is null) return;
+        if (settings?.Snapshot is null) return;
         try
         {
-            await settings.RefreshAsync(shutdown);
+            await settings.RefreshAsync(cancellationToken);
         }
-        catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            // 应用关停取消了刷新；无需任何处理。
+            // 刷新取消不改变已经提交的环境；切换或关停可排空旧 attempt。
         }
         catch (Exception error)
         {

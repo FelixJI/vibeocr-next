@@ -52,19 +52,25 @@ internal sealed class ManagedRuntimeConnection(
     finally { gate.Release(); }
   }
 
-  public async Task SwitchAsync(string environmentId, CancellationToken cancellationToken)
+  public async Task SwitchAsync(string environmentId, CancellationToken cancellationToken, Action? committed = null)
   {
     await EnterAsync(cancellationToken);
-    try { await ActivateCoreAsync(environmentId, cancellationToken); }
+    try { await ActivateCoreAsync(environmentId, cancellationToken, committed: committed); }
     finally { gate.Release(); }
   }
 
-  private async Task ActivateCoreAsync(string environmentId, CancellationToken cancellationToken, bool injectSoakCrash = false)
+  private async Task ActivateCoreAsync(string environmentId, CancellationToken cancellationToken, bool injectSoakCrash = false, Action? committed = null)
   {
     AppLog.Info("Runtime demand: activate begin");
     var coordinator = new ManagedEnvironmentSwitchCoordinator(manager);
     ManagedEnvironmentSession? session = await coordinator.SwitchAsync(
-      environmentId, Session, Publish,
+      environmentId, Session, next =>
+      {
+        // Platform invokes this only after Runtime reservation commit succeeds.
+        // Notify before App publication callbacks can cancel the command.
+        committed?.Invoke();
+        Publish(next);
+      },
       Path.Combine(layout.DataRoot, "supervisor.log"), TimeSpan.FromSeconds(90),
       RuntimeCapabilityRequirements.Read(layout.ComponentLock), cancellationToken, injectSoakCrash);
     if (session is null) status.ReportServiceUnavailable();

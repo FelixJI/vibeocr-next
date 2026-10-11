@@ -483,7 +483,7 @@ public sealed class RuntimeDemandCoordinatorTests
       () => { disconnects++; return Task.CompletedTask; }, new ProductMaintenanceCoordinator(), TestContext.Current.CancellationToken);
 
     await App.SwitchManagedEnvironmentAndRefreshAsync(coordinator,
-      _ => { activations++; return Task.CompletedTask; },
+      (_, committed) => { activations++; committed(); return Task.CompletedTask; },
       _ =>
       {
         if (cancelRefresh)
@@ -714,6 +714,7 @@ public sealed class RuntimeDemandCoordinatorTests
       if (outcome == "cleanup" && ++disconnects == 1) throw cleanupFailure;
     }, new ProductMaintenanceCoordinator(), TestContext.Current.CancellationToken, connection);
     await coordinator.EnsureReadyAsync(TestContext.Current.CancellationToken);
+    Task? superseding = null;
     Task switching = coordinator.SwitchAsync(async ct =>
     {
       activationToken = ct;
@@ -722,11 +723,10 @@ public sealed class RuntimeDemandCoordinatorTests
       ct.ThrowIfCancellationRequested();
       if (outcome == "failed") throw new InvalidOperationException("B failed; A remains published");
       PublishSession(connection, target);
-      if (outcome == "cleanup") switchCaller.Cancel();
+      if (outcome == "cleanup") superseding = coordinator.PauseAsync(TestContext.Current.CancellationToken);
     }, switchCaller.Token);
     await entered.Task;
     Task recovery = coordinator.RecoverAsync(() => ReferenceEquals(connection.Session, original), () => recovering++);
-    Task? superseding = null;
     try
     {
       Assert.False(activationToken.IsCancellationRequested);
@@ -740,10 +740,16 @@ public sealed class RuntimeDemandCoordinatorTests
       }, TestContext.Current.CancellationToken);
       release.TrySetResult();
       if (outcome == "failed") await Assert.ThrowsAsync<InvalidOperationException>(() => switching);
-      else if (outcome is "stop" or "maintenance" or "new-switch" or "cleanup")
+      else if (outcome == "cleanup")
+        Assert.Contains(cleanupFailure, (await Assert.ThrowsAsync<AggregateException>(() => switching)).InnerExceptions);
+      else if (outcome is "stop" or "maintenance" or "new-switch")
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => switching);
       else await switching;
-      if (superseding is not null) await superseding;
+      if (superseding is not null)
+      {
+        if (outcome == "cleanup") Assert.Same(cleanupFailure, await Assert.ThrowsAsync<IOException>(() => superseding));
+        else await superseding;
+      }
       if (outcome == "cleanup")
         Assert.Same(cleanupFailure, await Assert.ThrowsAsync<IOException>(() => recovery));
       else await recovery;
@@ -947,6 +953,7 @@ public sealed class RuntimeDemandCoordinatorTests
     int connects = 0;
     int projections = 0;
     Exception? reported = null;
+    Task? takeover = null;
     var coordinator = new RuntimeDemandCoordinator((_, _) =>
     {
       PublishSession(connection, ++connects == 1 ? original : restored);
@@ -964,7 +971,7 @@ public sealed class RuntimeDemandCoordinatorTests
       await release.Task;
       if (outcome == "failed") throw businessFailure;
       PublishSession(connection, target);
-      if (outcome == "cleanup") demandCaller.Cancel();
+      if (outcome == "cleanup") takeover = coordinator.PauseAsync(TestContext.Current.CancellationToken);
     }, switchCaller.Token);
     await entered.Task;
     Task demand = coordinator.EnsureReadyAsync(demandCaller.Token);
@@ -982,12 +989,17 @@ public sealed class RuntimeDemandCoordinatorTests
       // owns the activation, and its real terminal outcome owns exit recovery.
       release.TrySetResult();
       if (outcome == "failed") Assert.Same(businessFailure, await Assert.ThrowsAsync<InvalidOperationException>(() => demand));
-      else if (outcome == "cleanup") await Assert.ThrowsAnyAsync<OperationCanceledException>(() => demand);
+      else if (outcome == "cleanup")
+        Assert.Contains(cleanupFailure, (await Assert.ThrowsAsync<AggregateException>(() => demand)).InnerExceptions);
       else await demand;
       if (outcome == "cleanup")
       {
         Assert.Same(cleanupFailure, await Assert.ThrowsAsync<IOException>(() => recovery));
-        Assert.Same(cleanupFailure, reported);
+        // Pause owns the newer transition; the old exit must not overwrite its fault projection.
+        Assert.Null(reported);
+        var takeoverFailure = await Assert.ThrowsAsync<AggregateException>(() => takeover!);
+        Assert.Collection(takeoverFailure.InnerExceptions,
+          error => Assert.Same(cleanupFailure, error), error => Assert.Same(cleanupFailure, error));
         Assert.Null(connection.Session);
       }
       else
@@ -1005,8 +1017,134 @@ public sealed class RuntimeDemandCoordinatorTests
       try { await switching; } catch (Exception) { }
       try { await demand; } catch (Exception) { }
       try { await recovery; } catch (Exception) { }
+      if (takeover is not null) { try { await takeover; } catch (Exception) { } }
       await connection.DisconnectAsync();
     }
+  }
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task CommittedActivationSurvivesCallerCancellationBeforeReturn(bool empty)
+  {
+    PortableLayout layout = PortableLayout.Resolve(Path.Combine(Path.GetTempPath(), "VibeOCR.exe"), "winui-dev");
+    var connection = new ManagedRuntimeConnection(new ConnectionListManager(), layout, new RuntimeStatusViewModel(), (_, _) => { });
+    await using ManagedEnvironmentSession original = StubSession("A");
+    await using ManagedEnvironmentSession target = StubSession("B");
+    PublishSession(connection, original);
+    var committed = Signal();
+    var release = Signal();
+    int disconnects = 0;
+    using var caller = new CancellationTokenSource();
+    var coordinator = new RuntimeDemandCoordinator((_, _) => Task.CompletedTask,
+      async () => { disconnects++; await connection.DisconnectAsync(); },
+      new ProductMaintenanceCoordinator(), TestContext.Current.CancellationToken, connection);
+    Task switching = coordinator.SwitchAsync(async (_, markCommitted) =>
+    {
+      PublishSession(connection, empty ? null : target);
+      markCommitted();
+      committed.TrySetResult();
+      await release.Task;
+    }, caller.Token);
+    try
+    {
+      await committed.Task;
+      caller.Cancel();
+      release.TrySetResult();
+      await switching;
+      Assert.Equal(0, disconnects);
+      Assert.Same(empty ? null : target, connection.Session);
+    }
+    finally
+    {
+      release.TrySetResult();
+      try { await switching; } catch (Exception) { }
+      await connection.DisconnectAsync();
+    }
+  }
+
+  [Theory]
+  [InlineData("shutdown")]
+  [InlineData("stop")]
+  [InlineData("switch")]
+  [InlineData("maintenance")]
+  public async Task CommittedActivationStillHonorsLifecycleTakeover(string boundary)
+  {
+    PortableLayout layout = PortableLayout.Resolve(Path.Combine(Path.GetTempPath(), "VibeOCR.exe"), "winui-dev");
+    var connection = new ManagedRuntimeConnection(new ConnectionListManager(), layout, new RuntimeStatusViewModel(), (_, _) => { });
+    await using ManagedEnvironmentSession target = StubSession("B");
+    await using ManagedEnvironmentSession newer = StubSession("C");
+    var committed = Signal();
+    var release = Signal();
+    using var shutdown = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+    int disconnects = 0;
+    var maintenance = new ProductMaintenanceCoordinator();
+    Task<bool>? maintenanceCancellation = null;
+    var coordinator = new RuntimeDemandCoordinator((_, _) => Task.CompletedTask,
+      async () => { disconnects++; await connection.DisconnectAsync(); },
+      maintenance, shutdown.Token, connection);
+    Task switching = coordinator.SwitchAsync(async (_, markCommitted) =>
+    {
+      PublishSession(connection, target);
+      markCommitted();
+      committed.TrySetResult();
+      await release.Task;
+    }, TestContext.Current.CancellationToken);
+    Task? takeover = null;
+    try
+    {
+      await committed.Task;
+      if (boundary == "shutdown") shutdown.Cancel();
+      else if (boundary == "stop") takeover = coordinator.StopAsync();
+      else if (boundary == "maintenance") takeover = maintenanceCancellation =
+        maintenance.CancelRuntimeMaintenanceAndWaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      else takeover = coordinator.SwitchAsync(_ => { PublishSession(connection, newer); return Task.CompletedTask; }, TestContext.Current.CancellationToken);
+      release.TrySetResult();
+      await Assert.ThrowsAnyAsync<OperationCanceledException>(() => switching);
+      if (takeover is not null) await takeover;
+      if (maintenanceCancellation is not null) Assert.True(await maintenanceCancellation);
+      Assert.True(disconnects >= 1);
+      Assert.Same(boundary == "switch" ? newer : null, connection.Session);
+    }
+    finally
+    {
+      release.TrySetResult();
+      try { await switching; } catch (Exception) { }
+      if (takeover is not null) { try { await takeover; } catch (Exception) { } }
+      await connection.DisconnectAsync();
+    }
+  }
+  [Fact]
+  public async Task RuntimeCommitNotificationPrecedesAppPublicationCancellation()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-commit-publish-{Guid.NewGuid():N}");
+    PortableLayout layout = PortableLayout.Resolve(Path.Combine(root, "VibeOCR.exe"), "winui-dev");
+    Directory.CreateDirectory(Path.GetDirectoryName(layout.ComponentLock)!);
+    File.WriteAllText(layout.ComponentLock, "{\"required_capabilities\":[\"test.capability\"]}");
+    using var caller = new CancellationTokenSource();
+    bool notified = false;
+    var manager = new ConnectionListManager();
+    var connection = new ManagedRuntimeConnection(manager, layout, new RuntimeStatusViewModel(), (_, _) =>
+    {
+      Assert.True(notified);
+      caller.Cancel();
+    });
+    int disconnects = 0;
+    var coordinator = new RuntimeDemandCoordinator((_, _) => Task.CompletedTask,
+      () => { disconnects++; return connection.DisconnectAsync(); },
+      new ProductMaintenanceCoordinator(), TestContext.Current.CancellationToken, connection);
+    try
+    {
+      await coordinator.SwitchAsync((token, committed) => connection.SwitchAsync("empty", token, () =>
+      {
+        notified = true;
+        committed();
+      }), caller.Token);
+      Assert.True(caller.IsCancellationRequested);
+      Assert.Equal(1, manager.Commits);
+      Assert.Null(connection.Session);
+      Assert.Equal(0, disconnects);
+    }
+    finally { await connection.DisconnectAsync(); Directory.Delete(root, recursive: true); }
   }
   private static ManagedEnvironmentSession StubSession(string instance) => new("environment", 1,
     new InferenceSupervisorProcess(new InferenceSupervisorOptions("unused", [], Path.GetTempPath(),
@@ -1018,7 +1156,7 @@ public sealed class RuntimeDemandCoordinatorTests
       Profile = new RuntimeProfileStatus { ProfileId = "test", Accelerator = RuntimeAccelerator.Cpu },
     });
 
-  private static void PublishSession(ManagedRuntimeConnection connection, ManagedEnvironmentSession session) =>
+  private static void PublishSession(ManagedRuntimeConnection connection, ManagedEnvironmentSession? session) =>
     typeof(ManagedRuntimeConnection).GetMethod("Publish", BindingFlags.Instance | BindingFlags.NonPublic)!
       .Invoke(connection, [session]);
   private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);

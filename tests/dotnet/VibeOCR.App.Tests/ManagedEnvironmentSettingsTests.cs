@@ -791,6 +791,54 @@ public sealed class ManagedEnvironmentSettingsTests
   }
 
   [Fact]
+  public async Task PostActivationRefreshUsesAttemptCancellationToReleaseSettingsSwitchGate()
+  {
+    var connected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var project = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var projectionEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var settingsEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var beginSwitch = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var maintenance = new ProductMaintenanceCoordinator();
+    ManagedEnvironmentSettings settings = null!;
+    var coordinator = new RuntimeDemandCoordinator(async (_, token) =>
+    {
+      connected.TrySetResult();
+      await project.Task;
+      projectionEntered.TrySetResult();
+      await App.RefreshEnvironmentSettingsAfterActivationAsync(settings, token);
+      token.ThrowIfCancellationRequested();
+    }, () => Task.CompletedTask, maintenance, TestContext.Current.CancellationToken);
+    settings = new ManagedEnvironmentSettings(new MutableManager(), async (_, token) =>
+    {
+      settingsEntered.TrySetResult();
+      await beginSwitch.Task;
+      await coordinator.SwitchAsync(_ => Task.CompletedTask, token);
+    }, () => null, maintenance);
+    await settings.RefreshAsync(TestContext.Current.CancellationToken);
+    Task demand = coordinator.EnsureReadyAsync(TestContext.Current.CancellationToken);
+    await connected.Task;
+    Task switching = settings.SwitchAsync("environment", TestContext.Current.CancellationToken);
+    try
+    {
+      await settingsEntered.Task;
+      project.TrySetResult();
+      await projectionEntered.Task;
+      Assert.False(demand.IsCompleted);
+      beginSwitch.TrySetResult();
+      await switching.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      await Assert.ThrowsAnyAsync<OperationCanceledException>(() => demand);
+      Assert.False(settings.IsBusy);
+      Assert.Contains("已切换", settings.Status, StringComparison.Ordinal);
+    }
+    finally
+    {
+      project.TrySetResult();
+      beginSwitch.TrySetResult();
+      try { await demand; } catch (Exception) { }
+      try { await switching; } catch (Exception) { }
+    }
+  }
+  [Fact]
   public async Task PostActivationRefreshProjectsRunningEvidenceAndSurvivesProbeFailure()
   {
     string root = CreateReadyEchoScript();
@@ -813,9 +861,14 @@ public sealed class ManagedEnvironmentSettingsTests
         new QrCodeHttpClient(new Uri("http://127.0.0.1:12345"), "test"),
         ReadyStatus());
       ManagedEnvironmentSession? current = null;
-      var settings = new ManagedEnvironmentSettings(new MutableManager(),
+      int lists = 0;
+      var manager = new MutableManager { BeforeList = () => { lists++; return Task.CompletedTask; } };
+      var settings = new ManagedEnvironmentSettings(manager,
         (_, _) => Task.CompletedTask, () => ("environment", 1),
         new ProductMaintenanceCoordinator(), () => current);
+
+      await App.RefreshEnvironmentSettingsAfterActivationAsync(settings, TestContext.Current.CancellationToken);
+      Assert.Equal(0, lists);
 
       // 启动竞争：设置页在 Supervisor 激活前刷新，只有管理器投影。
       await settings.RefreshAsync(TestContext.Current.CancellationToken);

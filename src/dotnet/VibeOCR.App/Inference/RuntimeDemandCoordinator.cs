@@ -34,16 +34,18 @@ internal sealed class RuntimeDemandCoordinator(
   }
 
   private sealed class Attempt(CancellationToken shutdown, bool initialize, bool borrowLease,
-    Func<CancellationToken, Task>? activate, SwitchOperation? switchOperation)
+    Func<CancellationToken, Action, Task>? activate, SwitchOperation? switchOperation)
   {
     public readonly CancellationTokenSource Cancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdown);
     public readonly TaskCompletionSource Completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public readonly bool Initialize = initialize;
     public readonly bool BorrowLease = borrowLease;
-    public readonly Func<CancellationToken, Task>? Activate = activate;
+    public readonly Func<CancellationToken, Action, Task>? Activate = activate;
     public readonly SwitchOperation? Switch = switchOperation;
     public int Waiters;
     public bool Committed;
+    public volatile bool ActivationCommitted;
+    public volatile bool LifecycleCancellationRequested;
     public Exception? CleanupFailure;
     public readonly List<CancellationToken> WaiterTokens = [];
   }
@@ -51,7 +53,7 @@ internal sealed class RuntimeDemandCoordinator(
   public Task EnsureReadyAsync(CancellationToken cancellationToken) => WaitAsync(true, cancellationToken);
 
   private async Task WaitAsync(bool initialize, CancellationToken cancellationToken, bool borrowLease = false,
-    Func<CancellationToken, Task>? activate = null)
+    Func<CancellationToken, Action, Task>? activate = null)
   {
     if (shellOnly) throw new InvalidOperationException("外壳模式不启动识别服务（--shell-only）。");
     while (true)
@@ -98,16 +100,25 @@ internal sealed class RuntimeDemandCoordinator(
       {
         lock (gate)
         {
-          if (!attempt.Committed && !attempt.Completion.Task.IsCompleted && attempt.WaiterTokens.All(token => token.IsCancellationRequested))
+          if (!attempt.Committed && !attempt.ActivationCommitted && !attempt.Completion.Task.IsCompleted && attempt.WaiterTokens.All(token => token.IsCancellationRequested))
             attempt.Cancellation.Cancel();
         }
       });
       if (start) _ = RunAsync(attempt);
       try
       {
-        cancellationToken.ThrowIfCancellationRequested();
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(shutdown, cancellationToken);
-        await attempt.Completion.Task.WaitAsync(linked.Token);
+        try
+        {
+          cancellationToken.ThrowIfCancellationRequested();
+          using var linked = CancellationTokenSource.CreateLinkedTokenSource(shutdown, cancellationToken);
+          await attempt.Completion.Task.WaitAsync(linked.Token);
+        }
+        catch (OperationCanceledException) when (activate is not null && attempt.ActivationCommitted && !shutdown.IsCancellationRequested)
+        {
+          // Runtime already committed this command. Observe its completion;
+          // caller cancellation cannot turn a published selection into a cancel.
+          await attempt.Completion.Task;
+        }
         if (activate is null)
         {
           lock (gate)
@@ -124,7 +135,10 @@ internal sealed class RuntimeDemandCoordinator(
         {
           attempt.Waiters--;
           attempt.WaiterTokens.Remove(cancellationToken);
-          if (attempt.Waiters == 0 && !attempt.Committed && !attempt.Completion.Task.IsCompleted)
+          bool lifecycleCancellation = shutdown.IsCancellationRequested || attempt.LifecycleCancellationRequested ||
+            paused || !ReferenceEquals(current, attempt);
+          if (attempt.Waiters == 0 && !attempt.Completion.Task.IsCompleted &&
+              (lifecycleCancellation || (!attempt.Committed && !attempt.ActivationCommitted)))
           {
             attempt.Cancellation.Cancel();
             drain = true;
@@ -154,15 +168,24 @@ internal sealed class RuntimeDemandCoordinator(
           throw new InvalidOperationException("恢复连接缺少维护操作归属。");
       }
       else
-        lease = maintenance.Acquire(ProductMaintenanceOwner.RuntimeMaintenance, attempt.Cancellation.Cancel);
-      if (attempt.Activate is not null) await attempt.Activate(attempt.Cancellation.Token);
+        lease = maintenance.Acquire(ProductMaintenanceOwner.RuntimeMaintenance, () =>
+        {
+          attempt.LifecycleCancellationRequested = true;
+          attempt.Cancellation.Cancel();
+        });
+      if (attempt.Activate is not null) await attempt.Activate(attempt.Cancellation.Token, () =>
+      {
+        lock (gate) attempt.ActivationCommitted = true;
+      });
       else await connect(attempt.Initialize, attempt.Cancellation.Token);
       activated = true;
       lock (gate)
       {
-        attempt.Cancellation.Token.ThrowIfCancellationRequested();
+        shutdown.ThrowIfCancellationRequested();
+        if (attempt.LifecycleCancellationRequested) throw new OperationCanceledException(attempt.Cancellation.Token);
+        if (!attempt.ActivationCommitted) attempt.Cancellation.Token.ThrowIfCancellationRequested();
         if (paused || !ReferenceEquals(current, attempt) ||
-            attempt.WaiterTokens.All(token => token.IsCancellationRequested))
+            (!attempt.ActivationCommitted && attempt.WaiterTokens.All(token => token.IsCancellationRequested)))
           throw new OperationCanceledException(attempt.Cancellation.Token);
         // This is the connection commit point. Cancellation after it only ends
         // that caller's wait. Keep the attempt published until its lease is
@@ -361,7 +384,10 @@ internal sealed class RuntimeDemandCoordinator(
     }
   }
 
-  public async Task SwitchAsync(Func<CancellationToken, Task> activate, CancellationToken cancellationToken)
+  public Task SwitchAsync(Func<CancellationToken, Task> activate, CancellationToken cancellationToken) =>
+    SwitchAsync(async (token, committed) => { await activate(token); committed(); }, cancellationToken);
+
+  public async Task SwitchAsync(Func<CancellationToken, Action, Task> activate, CancellationToken cancellationToken)
   {
     Attempt? pending;
     long owner = 0;
