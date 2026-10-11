@@ -1,53 +1,14 @@
 import { Button, Select } from "@fluentui/react-components";
 
-import { useEffect, useState } from "react";
-
 import type { AppActions } from "../app/types";
 
 import { PaddleOptionsEditor } from "../components/PaddleOptionsEditor";
 
-import type { ResourceReference } from "./FeatureValues";
-
 import { availabilityLabel } from "./FeatureValues";
 
-export interface RecognitionEngineState {
-  readonly engine: string;
-  readonly displayName: string;
-  readonly selected: boolean;
-  readonly isTaskOverride: boolean;
-  readonly availability: string;
-  readonly requiresDownload: boolean;
-  readonly isDefault?: boolean;
-  readonly lifecycleKind?: string;
-  readonly supportsPreload?: boolean;
-  readonly supportsTtl?: boolean;
-  readonly supportsPinning?: boolean;
-  readonly supportsRelease?: boolean;
-  readonly supportedOptions?: readonly string[];
-  readonly options?: unknown;
-  readonly reasonCode?: string | null;
-}
+import type { RecognitionEngineState } from "./TaskEngineValues";
 
-export function recognitionEngines(
-  value: unknown,
-): readonly RecognitionEngineState[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((entry): entry is RecognitionEngineState => {
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry))
-      return false;
-    const option = entry as Partial<RecognitionEngineState>;
-    return (
-      typeof option.engine === "string" &&
-      typeof option.displayName === "string" &&
-      typeof option.selected === "boolean" &&
-      typeof option.isTaskOverride === "boolean" &&
-      typeof option.availability === "string" &&
-      typeof option.requiresDownload === "boolean"
-    );
-  });
-}
-
-export function lifecycleHint(
+function lifecycleHint(
   engine: RecognitionEngineState | undefined,
 ): string | null {
   if (!engine) return null;
@@ -71,32 +32,6 @@ export function lifecycleHint(
       : `该 Paddle 模式使用模型驻留；支持：${controls.join("、")}。`;
   }
   return null;
-}
-
-export function useResourceText(
-  reference: ResourceReference | undefined,
-): string {
-  const [text, setText] = useState("");
-  useEffect(() => {
-    if (!reference) return undefined;
-    const cancellation = new AbortController();
-    void fetch(reference.url, {
-      cache: "no-store",
-      credentials: "omit",
-      signal: cancellation.signal,
-    })
-      .then((response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.text();
-      })
-      .then(setText)
-      .catch((error: unknown) => {
-        if (!(error instanceof DOMException && error.name === "AbortError"))
-          setText("结果资源已失效，请重新识别。");
-      });
-    return () => cancellation.abort();
-  }, [reference]);
-  return reference ? text : "";
 }
 
 export function TaskEngineSelector({

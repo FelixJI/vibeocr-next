@@ -500,17 +500,22 @@ public sealed class DesktopWorkbenchCommandHandlerTests
         .SubscribeAsync(0, timeout.Token)
         .GetAsyncEnumerator(timeout.Token);
 
+      var published = new System.Collections.Concurrent.ConcurrentQueue<QrCodeWorkbenchState>();
+      handler.StateChanged += state => { if (state is QrCodeWorkbenchState qr) published.Enqueue(qr); };
+      async Task<QrCodeWorkbenchState> ReadQrStateAsync(string status)
+      {
+        // Replaceable busy frames may coalesce; each authoritative terminal must arrive.
+        while (await updates.MoveNextAsync())
+          if (updates.Current.State is QrCodeWorkbenchState qr && qr.StatusCode == status) return qr;
+        throw new InvalidOperationException($"Missing QR state {status}");
+      }
+
       WorkbenchCommandReceipt receipt = await application.ExecuteAsync(
         new WorkbenchCommandEnvelope(Guid.NewGuid(), new GenerateQrCodeCommand("hello")),
         timeout.Token);
 
       Assert.True(receipt.Ok);
-      Assert.True(await updates.MoveNextAsync());
-      QrCodeWorkbenchState busy = Assert.IsType<QrCodeWorkbenchState>(updates.Current.State);
-      Assert.True(busy.IsBusy);
-      Assert.Equal("qrcode.running", busy.StatusCode);
-      Assert.True(await updates.MoveNextAsync());
-      QrCodeWorkbenchState generated = Assert.IsType<QrCodeWorkbenchState>(updates.Current.State);
+      QrCodeWorkbenchState generated = await ReadQrStateAsync("qrcode.ready");
       Assert.False(generated.IsBusy);
       Assert.Equal("qrcode.ready", generated.StatusCode);
       Assert.NotNull(generated.GeneratedResource);
@@ -532,9 +537,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
         new WorkbenchCommandEnvelope(Guid.NewGuid(), new DecodeQrCodeClipboardCommand()),
         timeout.Token);
       Assert.True(decodeReceipt.Ok);
-      Assert.True(await updates.MoveNextAsync());
-      Assert.True(await updates.MoveNextAsync());
-      QrCodeWorkbenchState decoded = Assert.IsType<QrCodeWorkbenchState>(updates.Current.State);
+      QrCodeWorkbenchState decoded = await ReadQrStateAsync("qrcode.decoded");
       Assert.False(decoded.IsBusy);
       Assert.Equal("qrcode.decoded", decoded.StatusCode);
       QrCodeWorkbenchResult decodedItem = Assert.Single(decoded.Items!);
@@ -548,9 +551,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
         new WorkbenchCommandEnvelope(Guid.NewGuid(), new GenerateQrCodeCommand("")),
         timeout.Token);
       Assert.True(invalidReceipt.Ok);
-      Assert.True(await updates.MoveNextAsync());
-      Assert.True(await updates.MoveNextAsync());
-      QrCodeWorkbenchState invalid = Assert.IsType<QrCodeWorkbenchState>(updates.Current.State);
+      QrCodeWorkbenchState invalid = await ReadQrStateAsync("qrcode.invalidInput");
       Assert.Equal("qrcode.invalidInput", invalid.StatusCode);
       Assert.Equal(decoded.GeneratedResource, invalid.GeneratedResource);
       Assert.Equal(importedBytes, await ReadPreviewBytesAsync(invalid.GeneratedResource!));
@@ -560,9 +561,15 @@ public sealed class DesktopWorkbenchCommandHandlerTests
         new WorkbenchCommandEnvelope(Guid.NewGuid(), new GenerateQrCodeCommand("after invalid")),
         timeout.Token);
       Assert.True(afterInvalid.Ok);
-      Assert.True(await updates.MoveNextAsync());
-      Assert.True(await updates.MoveNextAsync());
-      Assert.NotNull(Assert.IsType<QrCodeWorkbenchState>(updates.Current.State).GeneratedResource);
+      Assert.NotNull((await ReadQrStateAsync("qrcode.ready")).GeneratedResource);
+      QrCodeWorkbenchState[] transitions = published.ToArray();
+      Assert.Equal(8, transitions.Length);
+      for (int index = 0; index < transitions.Length; index += 2)
+      {
+        Assert.True(transitions[index].IsBusy);
+        Assert.Equal("qrcode.running", transitions[index].StatusCode);
+        Assert.False(transitions[index + 1].IsBusy);
+      }
     }
     finally
     {

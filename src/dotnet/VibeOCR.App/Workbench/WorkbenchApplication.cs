@@ -132,7 +132,6 @@ public sealed class WorkbenchApplication : IWorkbenchApplication
     lock (_gate)
     {
       ObjectDisposedException.ThrowIf(_disposed, this);
-      EnsureInitialStates();
       mailbox.Resync = _history.Count > 0 && afterRevision < _history[0].Revision - 1;
       foreach (WorkbenchStateEnvelope state in _history.Where(state => state.Revision > afterRevision))
         mailbox.Publish(state);

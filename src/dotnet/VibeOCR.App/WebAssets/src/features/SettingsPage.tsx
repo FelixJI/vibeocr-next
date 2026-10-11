@@ -37,27 +37,27 @@ import type { FeatureProps } from "./FeatureValues";
 
 import { feature, booleanValue } from "./FeatureValues";
 
-import { Panel } from "./FeatureValues";
+import { Panel } from "./FeaturePanels";
 
 import { statusLabel } from "./FeatureValues";
 
 import { availabilityLabel } from "./FeatureValues";
 
-export interface SourceOptionState {
+interface SourceOptionState {
   readonly kind: string;
   readonly id: string;
   readonly displayName: string;
   readonly selected: boolean;
 }
 
-export interface FeatureOptionState {
+interface FeatureOptionState {
   readonly featureId: string;
   readonly displayName: string;
   readonly accelerator: string;
   readonly selected: boolean;
 }
 
-export interface ManagedEnvironmentState {
+interface ManagedEnvironmentState {
   readonly id: string;
   readonly name: string;
   readonly revision: number;
@@ -93,7 +93,7 @@ export interface ManagedEnvironmentState {
   readonly diskBytes?: number;
 }
 
-export interface ManagedSourceOptionState {
+interface ManagedSourceOptionState {
   readonly isDefault?: boolean;
   readonly id: string;
   readonly kind: string;
@@ -101,14 +101,14 @@ export interface ManagedSourceOptionState {
   readonly endpoint: string;
 }
 
-export interface ManagedResolvedSourceState {
+interface ManagedResolvedSourceState {
   readonly kind: string;
   readonly id: string | null;
   readonly displayName: string | null;
   readonly origin: string;
 }
 
-export interface ManagedPlanSourceState {
+interface ManagedPlanSourceState {
   readonly id: string;
   readonly kind: string;
   readonly displayName: string;
@@ -119,7 +119,7 @@ export interface ManagedPlanSourceState {
   readonly actualEndpoint?: string | null;
 }
 
-export interface ManagedEnvironmentPlanState {
+interface ManagedEnvironmentPlanState {
   readonly planId: string;
   readonly environmentId: string;
   readonly environmentRevision: number;
@@ -134,7 +134,7 @@ export interface ManagedEnvironmentPlanState {
   readonly runtimeWheelOrigin?: string | null;
 }
 
-export function sourceKindLabel(kind: string): string {
+function sourceKindLabel(kind: string): string {
   return (
     (
       {
@@ -146,7 +146,7 @@ export function sourceKindLabel(kind: string): string {
   );
 }
 
-export interface ManagedEnvironmentRecipeState {
+interface ManagedEnvironmentRecipeState {
   readonly id: string;
   readonly displayName: string;
   readonly configuredRecognitionTypes?: readonly string[] | null;
@@ -161,21 +161,21 @@ export interface ManagedEnvironmentRecipeState {
   readonly runtimeWheelOrigin?: string | null;
 }
 
-export interface ManagedEnvironmentHardwareState {
+interface ManagedEnvironmentHardwareState {
   /** ok/unsupported/unknown；缺失按 unknown（未探测）呈现，不臆造可用性。 */
   readonly nvidiaDriverStatus: string;
   readonly nvidiaDriverReason?: string | null;
   readonly nvidiaDriverVersion?: string | null;
 }
 
-export interface ManagedEnvironmentCompatibilityState {
+interface ManagedEnvironmentCompatibilityState {
   readonly recipe: string;
   readonly selectedEnvironmentId?: string | null;
   readonly selectedEnvironmentRevision?: number | null;
   readonly selectionReason?: string | null;
 }
 
-export function managedEnvironmentRecipes(
+function managedEnvironmentRecipes(
   value: unknown,
 ): readonly ManagedEnvironmentRecipeState[] {
   if (!Array.isArray(value)) return [];
@@ -191,7 +191,7 @@ export function managedEnvironmentRecipes(
   );
 }
 
-export function managedEnvironmentHardware(
+function managedEnvironmentHardware(
   value: unknown,
 ): ManagedEnvironmentHardwareState {
   if (value === null || typeof value !== "object" || Array.isArray(value))
@@ -203,7 +203,7 @@ export function managedEnvironmentHardware(
     : { nvidiaDriverStatus: "unknown" };
 }
 
-export function managedEnvironmentCompatibility(
+function managedEnvironmentCompatibility(
   value: unknown,
 ): ManagedEnvironmentCompatibilityState | undefined {
   if (typeof value !== "object" || value === null) return undefined;
@@ -214,7 +214,7 @@ export function managedEnvironmentCompatibility(
 }
 
 // 实际支持选项的展示标签：类型来自 Runtime 目录 configured_recognition_types。
-export const recognitionTypeLabels: Readonly<Record<string, string>> = {
+const recognitionTypeLabels: Readonly<Record<string, string>> = {
   text: "文字识别",
   table: "表格识别",
   formula: "公式识别",
@@ -223,22 +223,20 @@ export const recognitionTypeLabels: Readonly<Record<string, string>> = {
   document_vl: "文档视觉大模型",
 };
 
-export function recognitionPurposeLabel(types: readonly string[]): string {
+function recognitionPurposeLabel(types: readonly string[]): string {
   return types.map((type) => recognitionTypeLabels[type] ?? type).join(" + ");
 }
 
 // 用途/设备分组只消费 Runtime 目录字段（configured_recognition_types 与
 // accelerator），不在前端重算依赖或配方组合。
-export function recipePurposeKey(
-  recipe: ManagedEnvironmentRecipeState,
-): string {
+function recipePurposeKey(recipe: ManagedEnvironmentRecipeState): string {
   return [...(recipe.configuredRecognitionTypes ?? [])].sort().join("|");
 }
 
 // 目录组件分组（#195）：以配方 id 的 -cpu/-cuda 后缀分组，并与 accelerator
 // 字段双向校验；后缀缺失、加速器不一致、同组件同设备重复、成员用途或
 // 展示名不一致都明确拒绝，不用集合首个匹配静默合并不同引擎。
-export interface RecipeComponentGroup {
+interface RecipeComponentGroup {
   readonly key: string;
   readonly title: string;
   readonly purposeLabel: string;
@@ -246,12 +244,12 @@ export interface RecipeComponentGroup {
   readonly byDevice: ReadonlyMap<string, ManagedEnvironmentRecipeState>;
 }
 
-export interface RecipeComponentCatalog {
+interface RecipeComponentCatalog {
   readonly groups: readonly RecipeComponentGroup[];
   readonly problems: readonly string[];
 }
 
-export function recipeDeviceFromId(
+function recipeDeviceFromId(
   id: string,
 ): { base: string; device: string } | null {
   if (id.endsWith("-cpu"))
@@ -262,7 +260,7 @@ export function recipeDeviceFromId(
 }
 
 // 目录展示名以“ · CPU”/“ · NVIDIA CUDA”结尾承载设备；组件标题仅做展示层去尾。
-export function recipeTitleWithoutDevice(displayName: string): string {
+function recipeTitleWithoutDevice(displayName: string): string {
   if (displayName.endsWith(" · NVIDIA CUDA"))
     return displayName.slice(0, -" · NVIDIA CUDA".length);
   if (displayName.endsWith(" · CPU"))
@@ -270,7 +268,7 @@ export function recipeTitleWithoutDevice(displayName: string): string {
   return displayName;
 }
 
-export function recipeComponentGroups(
+function recipeComponentGroups(
   recipes: readonly ManagedEnvironmentRecipeState[],
 ): RecipeComponentCatalog {
   const problems: string[] = [];
@@ -327,7 +325,7 @@ export function recipeComponentGroups(
 
 // 主要依赖摘要（#195）：仅从目录/计划的实际 dependencies 里筛白名单
 // 组件并保留版本 pin，不建前端依赖矩阵；其余包只在只读完整清单里出现。
-export const mainDependencyNames: readonly string[] = [
+const mainDependencyNames: readonly string[] = [
   "rapidocr",
   "onnxruntime",
   "paddleocr",
@@ -338,16 +336,16 @@ export const mainDependencyNames: readonly string[] = [
   "torchvision",
 ];
 
-export function normalizeDependencyName(name: string): string {
+function normalizeDependencyName(name: string): string {
   return name.toLowerCase().replace(/[-_.]+/g, "-");
 }
 
-export function dependencyName(pin: string): string {
+function dependencyName(pin: string): string {
   const match = /^[A-Za-z0-9._-]+/.exec(pin.trim());
   return match ? match[0] : pin.trim();
 }
 
-export function mainDependencies(
+function mainDependencies(
   dependencies: readonly string[] | null | undefined,
 ): readonly string[] {
   const whitelist = new Set(mainDependencyNames.map(normalizeDependencyName));
@@ -368,7 +366,7 @@ export function mainDependencies(
     .filter((pin): pin is string => pin !== undefined);
 }
 
-export function managedEnvironmentSummary(
+function managedEnvironmentSummary(
   environment: ManagedEnvironmentState,
 ): string {
   const parts: string[] = [];
@@ -381,7 +379,7 @@ export function managedEnvironmentSummary(
   return parts.join(" · ");
 }
 
-export const environmentRecoveryActions: Readonly<Record<string, string>> = {
+const environmentRecoveryActions: Readonly<Record<string, string>> = {
   check_source_and_retry: "检查下载源与网络后重新预览安装",
   free_disk_space: "释放磁盘空间后重新预览安装",
   check_directory_permissions: "检查环境目录权限后重试",
@@ -391,20 +389,20 @@ export const environmentRecoveryActions: Readonly<Record<string, string>> = {
   wait: "等待当前安装完成",
 };
 
-export interface InstallPlanComponentState {
+interface InstallPlanComponentState {
   readonly componentId: string;
   readonly action: string;
   readonly dependencyState: string;
   readonly reasonCodes: readonly string[];
 }
 
-export interface InstallPlanBlockerState {
+interface InstallPlanBlockerState {
   readonly code: string;
   readonly componentId?: string;
   readonly nextAction: string;
 }
 
-export interface InstallPlanState {
+interface InstallPlanState {
   readonly planId: string;
   readonly expiresAt: string;
   readonly accelerator: string;
@@ -419,7 +417,7 @@ export interface InstallPlanState {
   };
 }
 
-export interface MaintenanceState {
+interface MaintenanceState {
   readonly failureReason?: string;
   readonly failureCode?: string;
   readonly isRunning: boolean;
@@ -433,7 +431,7 @@ export interface MaintenanceState {
   readonly canRetry: boolean;
 }
 
-export function sourceOptions(value: unknown): readonly SourceOptionState[] {
+function sourceOptions(value: unknown): readonly SourceOptionState[] {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is SourceOptionState => {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry))
@@ -448,7 +446,7 @@ export function sourceOptions(value: unknown): readonly SourceOptionState[] {
   });
 }
 
-export function featureOptions(value: unknown): readonly FeatureOptionState[] {
+function featureOptions(value: unknown): readonly FeatureOptionState[] {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is FeatureOptionState => {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry))
@@ -463,7 +461,7 @@ export function featureOptions(value: unknown): readonly FeatureOptionState[] {
   });
 }
 
-export interface HotkeyActionOptionState {
+interface HotkeyActionOptionState {
   readonly actionId: string;
   readonly displayName: string;
   readonly configuredHotkey: string | null;
@@ -474,9 +472,7 @@ export interface HotkeyActionOptionState {
 
 // 宿主回显的动作键位：configured 是配置值，registered 是实际生效的
 // 系统注册（为空表示被占用/未注册），二者可能不同。
-export function hotkeyActions(
-  value: unknown,
-): readonly HotkeyActionOptionState[] {
+function hotkeyActions(value: unknown): readonly HotkeyActionOptionState[] {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is HotkeyActionOptionState => {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry))
@@ -496,7 +492,7 @@ export function hotkeyActions(
   });
 }
 
-export interface FloatingToolbarOptionState {
+interface FloatingToolbarOptionState {
   readonly lingerMs: number;
   readonly peekPixels?: number;
   readonly theme: "system" | "light" | "dark";
@@ -507,9 +503,7 @@ export interface FloatingToolbarOptionState {
   readonly error?: string | null;
 }
 
-export function toolbarState(
-  value: unknown,
-): FloatingToolbarOptionState | undefined {
+function toolbarState(value: unknown): FloatingToolbarOptionState | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value))
     return undefined;
   const option = value as Partial<FloatingToolbarOptionState>;
@@ -530,16 +524,16 @@ export function toolbarState(
     : undefined;
 }
 
-export const TOOLBAR_EDGES = ["top", "bottom", "left", "right"] as const;
+const TOOLBAR_EDGES = ["top", "bottom", "left", "right"] as const;
 
-export const TOOLBAR_EDGE_LABELS: Readonly<Record<string, string>> = {
+const TOOLBAR_EDGE_LABELS: Readonly<Record<string, string>> = {
   top: "顶部",
   bottom: "底部",
   left: "左侧",
   right: "右侧",
 };
 
-export function toolbarVisibilityLabel(visibility: string): string {
+function toolbarVisibilityLabel(visibility: string): string {
   const labels: Readonly<Record<string, string>> = {
     disabled: "已关闭",
     userHidden: "已主动隐藏（鼠标路过不恢复）",
@@ -550,7 +544,7 @@ export function toolbarVisibilityLabel(visibility: string): string {
   return labels[visibility] ?? "等待宿主同步";
 }
 
-export function maintenanceState(value: unknown): MaintenanceState | undefined {
+function maintenanceState(value: unknown): MaintenanceState | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value))
     return undefined;
   const state = value as Partial<MaintenanceState>;
@@ -568,7 +562,7 @@ export function maintenanceState(value: unknown): MaintenanceState | undefined {
   return state as MaintenanceState;
 }
 
-export interface MineruConnectionState {
+interface MineruConnectionState {
   readonly supported: boolean;
   readonly mode: string;
   readonly apiUrl: string;
@@ -576,9 +570,7 @@ export interface MineruConnectionState {
 }
 
 // MinerU 连接投影：宿主只回传模式/根地址/是否已配置 Key，永远不回传明文。
-export function mineruConnection(
-  value: unknown,
-): MineruConnectionState | undefined {
+function mineruConnection(value: unknown): MineruConnectionState | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value))
     return undefined;
   const candidate = value as Partial<MineruConnectionState>;
@@ -595,15 +587,13 @@ export function mineruConnection(
     : undefined;
 }
 
-export interface MineruTierOptionState {
+interface MineruTierOptionState {
   readonly id: string;
   readonly availability: string;
   readonly reasonCode: string | null;
 }
 
-export function mineruTierOptions(
-  value: unknown,
-): readonly MineruTierOptionState[] {
+function mineruTierOptions(value: unknown): readonly MineruTierOptionState[] {
   if (!Array.isArray(value)) return [];
   return value.filter(
     (item): item is MineruTierOptionState =>
@@ -615,7 +605,7 @@ export function mineruTierOptions(
   );
 }
 
-export interface MineruRecognitionState {
+interface MineruRecognitionState {
   readonly supported: boolean;
   readonly stored: boolean;
   readonly tier: string | null;
@@ -631,9 +621,7 @@ export interface MineruRecognitionState {
 
 // 全局 MinerU 识别偏好投影：tier/language 可用性来自目录；远程模式下
 // language 仅是本地偏好，不代表服务端当前值。
-export function mineruRecognition(
-  value: unknown,
-): MineruRecognitionState | undefined {
+function mineruRecognition(value: unknown): MineruRecognitionState | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value))
     return undefined;
   const candidate = value as Partial<MineruRecognitionState>;
@@ -662,14 +650,14 @@ export function mineruRecognition(
   };
 }
 
-export interface DefaultRecognitionModeState {
+interface DefaultRecognitionModeState {
   readonly supported: boolean;
   readonly modeId: string | null;
   readonly stored: boolean;
 }
 
 // 默认识别模式投影：modeId=null 表示能力未声明或首读未完成。
-export function defaultRecognitionMode(
+function defaultRecognitionMode(
   value: unknown,
 ): DefaultRecognitionModeState | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value))
@@ -686,7 +674,7 @@ export function defaultRecognitionMode(
     : undefined;
 }
 
-export interface RecognitionModeOptionState {
+interface RecognitionModeOptionState {
   readonly id: string;
   readonly displayName: string;
   readonly availability: string;
@@ -694,7 +682,7 @@ export interface RecognitionModeOptionState {
 }
 
 // 设置页可选识别模式目录（来自 ocr.recognition-modes.v1 目录投影）。
-export function recognitionModeOptions(
+function recognitionModeOptions(
   value: unknown,
 ): readonly RecognitionModeOptionState[] {
   if (!Array.isArray(value)) return [];
@@ -710,9 +698,7 @@ export function recognitionModeOptions(
   });
 }
 
-export function planComponents(
-  value: unknown,
-): readonly InstallPlanComponentState[] {
+function planComponents(value: unknown): readonly InstallPlanComponentState[] {
   if (!Array.isArray(value)) return [];
   return value
     .filter(
@@ -728,9 +714,7 @@ export function planComponents(
     .filter((entry) => entry.componentId !== "");
 }
 
-export function planBlockers(
-  value: unknown,
-): readonly InstallPlanBlockerState[] {
+function planBlockers(value: unknown): readonly InstallPlanBlockerState[] {
   if (!Array.isArray(value)) return [];
   return value
     .filter(
@@ -745,7 +729,7 @@ export function planBlockers(
     .filter((entry) => entry.code !== "" && entry.nextAction !== "");
 }
 
-export function planCost(value: unknown): InstallPlanState["cost"] {
+function planCost(value: unknown): InstallPlanState["cost"] {
   if (value === null || typeof value !== "object" || Array.isArray(value))
     return {
       downloadBytes: null,
@@ -768,7 +752,7 @@ export function planCost(value: unknown): InstallPlanState["cost"] {
   };
 }
 
-export function installPlan(value: unknown): InstallPlanState | undefined {
+function installPlan(value: unknown): InstallPlanState | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value))
     return undefined;
   const plan = value as Record<string, unknown>;
@@ -788,36 +772,36 @@ export function installPlan(value: unknown): InstallPlanState | undefined {
   };
 }
 
-export function isPlanFresh(expiresAt: string): boolean {
+function isPlanFresh(expiresAt: string): boolean {
   const expiry = Date.parse(expiresAt);
   return Number.isFinite(expiry) && expiry > Date.now();
 }
 
-export const installActionLabels: Readonly<Record<string, string>> = {
+const installActionLabels: Readonly<Record<string, string>> = {
   retain: "保留",
   install: "安装",
   replace: "替换",
   remove: "移除",
 };
 
-export const dependencyStateLabels: Readonly<Record<string, string>> = {
+const dependencyStateLabels: Readonly<Record<string, string>> = {
   satisfied: "依赖已满足",
   pending: "依赖待安装",
 };
 
-export const installReasonLabels: Readonly<Record<string, string>> = {
+const installReasonLabels: Readonly<Record<string, string>> = {
   requested: "用户选择",
   required_dependency: "必要依赖",
   removed_by_selection: "按选择移除",
 };
 
-export const unknownCostLabels: Readonly<Record<string, string>> = {
+const unknownCostLabels: Readonly<Record<string, string>> = {
   artifact_resolution_required: "下载量待解析",
   candidate_disk_usage_unknown: "磁盘用量未知",
   native_model_preparation_not_estimated: "原生模型首次准备另计",
 };
 
-export function formatBytes(bytes: number): string {
+function formatBytes(bytes: number): string {
   if (bytes <= 0) return "0 B";
   const units = ["B", "KiB", "MiB", "GiB", "TiB"];
   const exponent = Math.min(
@@ -832,7 +816,7 @@ export function formatBytes(bytes: number): string {
   return `${text} ${units[exponent]}`;
 }
 
-export function knownLabels(
+function knownLabels(
   codes: readonly string[],
   labels: Readonly<Record<string, string>>,
   unknownCodes: string[],
@@ -845,7 +829,7 @@ export function knownLabels(
   });
 }
 
-export function maintenanceStatusLabel(statusCode: string): string {
+function maintenanceStatusLabel(statusCode: string): string {
   const labels: Readonly<Record<string, string>> = {
     idle: "尚未执行维护操作",
     running: "正在执行维护操作",
@@ -857,7 +841,7 @@ export function maintenanceStatusLabel(statusCode: string): string {
   return labels[statusCode] ?? statusCode;
 }
 
-export function acceleratorLabel(accelerator: string): string {
+function acceleratorLabel(accelerator: string): string {
   return accelerator === "nvidia_cuda" ? "CUDA GPU" : "CPU";
 }
 
@@ -1259,7 +1243,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
   );
 }
 
-export function managedEnvironments(
+function managedEnvironments(
   value: unknown,
 ): readonly ManagedEnvironmentState[] {
   if (!Array.isArray(value)) return [];
@@ -1274,7 +1258,7 @@ export function managedEnvironments(
   );
 }
 
-export function managedEnvironmentPlan(
+function managedEnvironmentPlan(
   value: unknown,
 ): ManagedEnvironmentPlanState | undefined {
   if (typeof value !== "object" || value === null) return undefined;
@@ -1292,7 +1276,7 @@ export function managedEnvironmentPlan(
   return plan as unknown as ManagedEnvironmentPlanState;
 }
 
-export function managedSourceOptions(
+function managedSourceOptions(
   value: unknown,
 ): readonly ManagedSourceOptionState[] {
   if (!Array.isArray(value)) return [];
@@ -1308,7 +1292,7 @@ export function managedSourceOptions(
   );
 }
 
-export function managedResolvedSources(
+function managedResolvedSources(
   value: unknown,
 ): readonly ManagedResolvedSourceState[] {
   if (!Array.isArray(value)) return [];
@@ -1326,7 +1310,7 @@ export function managedResolvedSources(
 // 主要组件、目标环境/加速、依赖总数、有效下载来源与影响；完整锁清单、
 // 来源端点与目标目录收进只读 details，不成为另一个高级设置区。
 // 确认绑定 planId/目标环境/修订，取消（作废本次计划）与安装中取消均可达。
-export function EnvironmentPlanPanel({
+function EnvironmentPlanPanel({
   plan,
   environments,
   sourceName,
@@ -1423,7 +1407,7 @@ export function EnvironmentPlanPanel({
 // 已安装环境列表（#195）：常规页面承载必要管理——切换/启动验证、失败
 // 修复、旧空环境继续准备与明确确认后的移除；保护沿用 Runtime（活动/被
 // 引用/legacy 拒删），失败保留旧健康环境，不宣称清理未证实资源。
-export function InstalledEnvironmentList({
+function InstalledEnvironmentList({
   state,
   actions,
   selectedRecipeId,
@@ -1629,7 +1613,7 @@ export function InstalledEnvironmentList({
   );
 }
 
-export interface CleanupItem {
+interface CleanupItem {
   readonly id: string;
   readonly category: string;
   readonly label: string;
@@ -1642,13 +1626,13 @@ export interface CleanupItem {
   readonly path_count?: number;
 }
 
-export interface CleanupPlan {
+interface CleanupPlan {
   readonly plan_id: string;
   readonly items: readonly CleanupItem[];
   readonly warning: string;
 }
 
-export interface CleanupResult {
+interface CleanupResult {
   readonly items: readonly {
     readonly id: string;
     readonly state: string;
@@ -1657,7 +1641,7 @@ export interface CleanupResult {
   }[];
 }
 
-export function EnvironmentCleanup({
+function EnvironmentCleanup({
   state,
   busy,
   actions,
@@ -1762,7 +1746,7 @@ export function EnvironmentCleanup({
   );
 }
 
-export function CleanupSelection({
+function CleanupSelection({
   plan,
   busy,
   actions,
@@ -1866,7 +1850,7 @@ export function CleanupSelection({
 // 来源收敛为单一简单设置：依赖包与模型各选一个来源，语义仅“安装依赖”
 // 与“下载模型”；不暴露产品默认/全局默认/环境覆盖三层，也不提供按次
 // 或按环境的来源覆盖。默认值跟随 Runtime 目录与全局默认解析结果。
-export interface EnvironmentInstallProgress {
+interface EnvironmentInstallProgress {
   readonly attempt_id: string;
   readonly seq: number;
   readonly environment_id: string;
@@ -1885,7 +1869,7 @@ export interface EnvironmentInstallProgress {
   readonly download_files_completed: number;
 }
 
-export function EnvironmentInstallDetails({
+function EnvironmentInstallDetails({
   state,
 }: {
   readonly state: Readonly<Record<string, unknown>>;
@@ -2007,7 +1991,7 @@ export function EnvironmentInstallDetails({
   );
 }
 
-export function EnvironmentSourceSettings({
+function EnvironmentSourceSettings({
   state,
   busy,
   actions,
@@ -2223,7 +2207,7 @@ export function EnvironmentSourceSettings({
   );
 }
 
-export function EnvironmentRecommendation({
+function EnvironmentRecommendation({
   state,
   actions,
   component,
@@ -2545,7 +2529,7 @@ export function EnvironmentRecommendation({
   );
 }
 
-export function SourceSelector({
+function SourceSelector({
   sources,
   loaded,
   enabled,
@@ -2609,7 +2593,7 @@ export function SourceSelector({
   );
 }
 
-export function SourceKindSelector({
+function SourceKindSelector({
   kind,
   label,
   sources,
@@ -2654,7 +2638,7 @@ export function SourceKindSelector({
   );
 }
 
-export function AcceleratorFeatures({
+function AcceleratorFeatures({
   pendingBackend,
   features,
   enabled,
@@ -2719,7 +2703,7 @@ export function AcceleratorFeatures({
   );
 }
 
-export function MineruRecognitionEditor({
+function MineruRecognitionEditor({
   recognition,
   connection,
   locked,
@@ -2887,7 +2871,7 @@ export function MineruRecognitionEditor({
   );
 }
 
-export function mineruTierLabel(id: string): string {
+function mineruTierLabel(id: string): string {
   switch (id) {
     case "flash":
       return "闪电（flash）";
@@ -2902,7 +2886,7 @@ export function mineruTierLabel(id: string): string {
   }
 }
 
-export function mineruLanguageLabel(id: string): string {
+function mineruLanguageLabel(id: string): string {
   switch (id) {
     case "ch":
       return "中文+英文";
@@ -2933,7 +2917,7 @@ export function mineruLanguageLabel(id: string): string {
   }
 }
 
-export function MineruConnectionEditor({
+function MineruConnectionEditor({
   connection,
   locked,
   hostBusy,
@@ -3128,7 +3112,7 @@ export function MineruConnectionEditor({
 
 // 默认识别模式编辑器。能力未声明时只读展示准确兼容说明，绝不向旧
 // Backend 写未知键；未知/不可用持久值明确提示并引导重选，不伪造回退。
-export function DefaultRecognitionModeEditor({
+function DefaultRecognitionModeEditor({
   mode,
   modes,
   locked,
@@ -3256,7 +3240,7 @@ export function DefaultRecognitionModeEditor({
   );
 }
 
-export function MaintenanceActions({
+function MaintenanceActions({
   maintenance,
   plan,
   canPreview,
@@ -3350,7 +3334,7 @@ export function MaintenanceActions({
   );
 }
 
-export function displayNameFor(
+function displayNameFor(
   id: string,
   features: readonly FeatureOptionState[],
 ): string {
@@ -3359,14 +3343,14 @@ export function displayNameFor(
   );
 }
 
-export function sourceNameFor(
+function sourceNameFor(
   id: string,
   sources: readonly SourceOptionState[],
 ): string {
   return sources.find((source) => source.id === id)?.displayName ?? id;
 }
 
-export function InstallPlanSection({
+function InstallPlanSection({
   plan,
   sources,
   features,
@@ -3491,7 +3475,7 @@ export function InstallPlanSection({
   );
 }
 
-export function HotkeyActions({
+function HotkeyActions({
   actions: hotkeyOptions,
   enabled,
   dispatch,
@@ -3524,7 +3508,7 @@ export function HotkeyActions({
   );
 }
 
-export function HotkeyActionRow({
+function HotkeyActionRow({
   option,
   enabled,
   dispatch,
@@ -3643,7 +3627,7 @@ export function HotkeyActionRow({
   );
 }
 
-export function FloatingToolbarPanel({
+function FloatingToolbarPanel({
   toolbar,
   enabled,
   dispatch,

@@ -23,21 +23,21 @@ import { feature, booleanValue } from "./FeatureValues";
 
 import { resource } from "./FeatureValues";
 
-import { Panel } from "./FeatureValues";
+import { Panel } from "./FeaturePanels";
+
+import { StatusLine } from "./FeaturePanels";
 
 import { stringValue } from "./FeatureValues";
 
-import { StatusLine } from "./FeatureValues";
-
 import { statusLabel } from "./FeatureValues";
 
-export interface QrResultState {
+interface QrResultState {
   readonly data: string;
   readonly format: string;
   readonly isUrl: boolean;
 }
 
-export function qrResults(value: unknown): readonly QrResultState[] {
+function qrResults(value: unknown): readonly QrResultState[] {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is QrResultState => {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry))

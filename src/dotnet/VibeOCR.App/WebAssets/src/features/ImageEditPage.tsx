@@ -16,7 +16,7 @@ import { resource } from "./FeatureValues";
 
 import { screenshotSession, screenshotTextLayer } from "./ScreenshotSession";
 
-import { StatusLine } from "./FeatureValues";
+import { StatusLine } from "./FeaturePanels";
 
 export function ImageEditPage({ viewState, actions }: FeatureProps) {
   const [autoTextPreference, setAutoTextPreference] = useState(true);

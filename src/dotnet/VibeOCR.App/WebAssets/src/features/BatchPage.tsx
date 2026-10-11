@@ -27,21 +27,19 @@ import { resource } from "./FeatureValues";
 
 import type { FeatureProps } from "./FeatureValues";
 
-import { feature, booleanValue } from "./FeatureValues";
+import { feature, booleanValue, numberValue } from "./FeatureValues";
 
-import { numberValue } from "./FeatureValues";
-
-import {
-  recognitionEngines,
-  useResourceText,
-  TaskEngineSelector,
-} from "./TaskEngineSelection";
+import { useResourceText } from "./FeatureValues";
 
 import { stringValue } from "./FeatureValues";
 
-import { Panel } from "./FeatureValues";
+import { Panel } from "./FeaturePanels";
 
-export interface BatchItemState {
+import { recognitionEngines } from "./TaskEngineValues";
+
+import { TaskEngineSelector } from "./TaskEngineSelection";
+
+interface BatchItemState {
   readonly pageRange?: string | null;
   readonly supportsPageRange?: boolean;
   readonly id: string;
@@ -51,7 +49,7 @@ export interface BatchItemState {
   readonly structuredResult?: ResourceReference | null;
 }
 
-export function batchItems(value: unknown): readonly BatchItemState[] {
+function batchItems(value: unknown): readonly BatchItemState[] {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is BatchItemState => {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry))
@@ -71,7 +69,7 @@ export function batchItems(value: unknown): readonly BatchItemState[] {
   });
 }
 
-export function batchItemLabel(statusCode: string): string {
+function batchItemLabel(statusCode: string): string {
   const labels: Readonly<Record<string, string>> = {
     "batch.item.pending": "等待",
     "batch.item.running": "处理中",

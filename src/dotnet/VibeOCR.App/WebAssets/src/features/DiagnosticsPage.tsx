@@ -19,7 +19,7 @@ import { feature, booleanValue } from "./FeatureValues";
 
 import { stringValues } from "./FeatureValues";
 
-import { Panel } from "./FeatureValues";
+import { Panel } from "./FeaturePanels";
 
 import { statusLabel } from "./FeatureValues";
 

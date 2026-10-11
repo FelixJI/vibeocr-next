@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+
 import type { AppActions, AppViewState } from "../app/types";
 
 export interface FeatureProps {
@@ -17,31 +19,6 @@ export function feature(
 
 export function booleanValue(value: unknown): boolean {
   return value === true;
-}
-
-export function Panel({
-  label,
-  title,
-  className,
-  children,
-}: {
-  readonly label: string;
-  readonly title: string;
-  readonly className?: string;
-  readonly children: React.ReactNode;
-}) {
-  return (
-    <section
-      className={`work-panel${className ? ` ${className}` : ""}`}
-      aria-label={title}
-    >
-      <header className="panel-heading">
-        <span>{label}</span>
-        <h2>{title}</h2>
-      </header>
-      <div className="panel-content">{children}</div>
-    </section>
-  );
 }
 
 export interface ResourceReference {
@@ -127,14 +104,28 @@ export function stringValues(value: unknown): readonly string[] {
     : [];
 }
 
-export function StatusLine({
-  children,
-}: {
-  readonly children: React.ReactNode;
-}) {
-  return (
-    <output className="status-line" aria-live="polite">
-      {children}
-    </output>
-  );
+export function useResourceText(
+  reference: ResourceReference | undefined,
+): string {
+  const [text, setText] = useState("");
+  useEffect(() => {
+    if (!reference) return undefined;
+    const cancellation = new AbortController();
+    void fetch(reference.url, {
+      cache: "no-store",
+      credentials: "omit",
+      signal: cancellation.signal,
+    })
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.text();
+      })
+      .then(setText)
+      .catch((error: unknown) => {
+        if (!(error instanceof DOMException && error.name === "AbortError"))
+          setText("结果资源已失效，请重新识别。");
+      });
+    return () => cancellation.abort();
+  }, [reference]);
+  return reference ? text : "";
 }

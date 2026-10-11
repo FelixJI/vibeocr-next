@@ -44,19 +44,19 @@ import { stringValue } from "./FeatureValues";
 
 import { numberValue } from "./FeatureValues";
 
-import {
-  recognitionEngines,
-  useResourceText,
-  TaskEngineSelector,
-} from "./TaskEngineSelection";
+import { useResourceText } from "./FeatureValues";
 
-import { Panel } from "./FeatureValues";
+import { Panel } from "./FeaturePanels";
+
+import { StatusLine } from "./FeaturePanels";
 
 import { statusLabel } from "./FeatureValues";
 
-import { StatusLine } from "./FeatureValues";
+import { recognitionEngines } from "./TaskEngineValues";
 
-export interface PdfPageState {
+import { TaskEngineSelector } from "./TaskEngineSelection";
+
+interface PdfPageState {
   readonly recognitionRevision?: number;
   readonly correctedAfterRecognition?: boolean;
   readonly detected?: boolean;
@@ -71,7 +71,7 @@ export interface PdfPageState {
   readonly structuredResult?: ResourceReference | null;
 }
 
-export function pdfPages(value: unknown): readonly PdfPageState[] {
+function pdfPages(value: unknown): readonly PdfPageState[] {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is PdfPageState => {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry))
@@ -87,7 +87,7 @@ export function pdfPages(value: unknown): readonly PdfPageState[] {
   });
 }
 
-export function PdfParameters({
+function PdfParameters({
   state,
   actions,
   busy,
@@ -181,10 +181,7 @@ export function PdfPage(props: FeatureProps) {
   );
 }
 
-export function PdfDocumentPage({
-  viewState,
-  actions: parentActions,
-}: FeatureProps) {
+function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
   const [operationRange, setOperationRange] = useState("selected");
   const [insertAfter, setInsertAfter] = useState(1);
   const [pageWidth, setPageWidth] = useState(612);

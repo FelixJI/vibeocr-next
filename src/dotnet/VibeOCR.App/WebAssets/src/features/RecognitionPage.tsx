@@ -28,21 +28,19 @@ import { feature, booleanValue } from "./FeatureValues";
 
 import { resource } from "./FeatureValues";
 
-import {
-  useResourceText,
-  TaskEngineSelector,
-  recognitionEngines,
-} from "./TaskEngineSelection";
+import { useResourceText } from "./FeatureValues";
+
+import { TaskEngineSelector } from "./TaskEngineSelection";
+
+import { recognitionEngines } from "./TaskEngineValues";
 
 import { screenshotSession, screenshotTextLayer } from "./ScreenshotSession";
 
-import { StatusLine } from "./FeatureValues";
+import { Panel, StatusLine } from "./FeaturePanels";
 
 import { statusLabel } from "./FeatureValues";
 
 import { stringValue } from "./FeatureValues";
-
-import { Panel } from "./FeatureValues";
 
 export function RecognitionPage({ viewState, actions }: FeatureProps) {
   // The host owns each capture's intent; this user preference survives keyed
