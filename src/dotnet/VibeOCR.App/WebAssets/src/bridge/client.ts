@@ -378,7 +378,8 @@ export class BridgeClient implements HostBridge {
         this.flushingPdfPreview = false;
       }
     }
-    if (!this.disposed && sessionId === this.sessionId)
+    // 已接受的 flush 按原请求 id/session/doc 回执一次；同文档 bootstrap 换 session 不丢，仅 dispose 抑制。
+    if (!this.disposed)
       this.transport.postMessage({
         version: BRIDGE_VERSION,
         kind: "response",

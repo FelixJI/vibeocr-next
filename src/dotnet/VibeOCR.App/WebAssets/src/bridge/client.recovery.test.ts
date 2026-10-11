@@ -650,4 +650,91 @@ describe("bounded snapshot recovery", () => {
     expect(received).toHaveLength(1);
     expect(received[0]?.state).toEqual({ fresh: true });
   });
+
+  it("replies an accepted PDF flush with its original session after a bootstrap supersede", async () => {
+    const { bridge, transport } = await setup();
+    const doc = "a".repeat(32);
+    let confirm!: (ok: boolean) => void;
+    bridge.subscribePdfPreviewFlush(
+      () =>
+        new Promise<boolean>((done) => {
+          confirm = done;
+        }),
+    );
+    transport.receive({
+      version: 2,
+      kind: "request",
+      id: "flush-1",
+      type: "pdf.flushPreview",
+      payload: { sessionId: "current", documentId: doc },
+    });
+    // flush 已按 "current" 会话接受；同文档内的恢复式 bootstrap 换成新会话。
+    const reboot = bridge.bootstrap();
+    transport.receive({
+      version: 2,
+      kind: "response",
+      id: "2",
+      type: "app.bootstrap",
+      payload: {
+        sessionId: "fresh",
+        revision: 6,
+        route: "pdf",
+        theme: "light",
+        capabilities: [],
+        features: { pdf: {} },
+      },
+    });
+    await reboot;
+    // 入站旧 session 的新 flush 请求仍被拒绝。
+    transport.receive({
+      version: 2,
+      kind: "request",
+      id: "flush-2",
+      type: "pdf.flushPreview",
+      payload: { sessionId: "current", documentId: doc },
+    });
+    const responses = () =>
+      transport.posted.filter((message) => message.kind === "response");
+    expect(responses()).toHaveLength(0);
+    confirm(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    // 同一活着的 client 按原请求 session/doc/id 恰好回执一次。
+    expect(responses()).toEqual([
+      {
+        version: 2,
+        kind: "response",
+        id: "flush-1",
+        type: "pdf.flushPreview",
+        payload: { sessionId: "current", documentId: doc, ok: true },
+      },
+    ]);
+    bridge.dispose();
+  });
+
+  it("suppresses an accepted PDF flush reply after dispose", async () => {
+    const { bridge, transport } = await setup();
+    const doc = "b".repeat(32);
+    let confirm!: (ok: boolean) => void;
+    bridge.subscribePdfPreviewFlush(
+      () =>
+        new Promise<boolean>((done) => {
+          confirm = done;
+        }),
+    );
+    transport.receive({
+      version: 2,
+      kind: "request",
+      id: "flush-1",
+      type: "pdf.flushPreview",
+      payload: { sessionId: "current", documentId: doc },
+    });
+    bridge.dispose();
+    confirm(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(
+      transport.posted.filter((message) => message.kind === "response"),
+    ).toHaveLength(0);
+  });
 });
