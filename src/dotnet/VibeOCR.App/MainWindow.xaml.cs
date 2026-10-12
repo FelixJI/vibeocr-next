@@ -655,6 +655,9 @@ public sealed partial class MainWindow : Window
     if (shuttingDown) return;
     RootLayout.RequestedTheme = WorkbenchThemePresenter.ResolveRequestedTheme(
       workbenchTheme, themeSettings.HighContrast);
+    // RequestedTheme 不包含标准标题栏。
+    AppWindow.TitleBar.PreferredTheme = ImageEditWindow.ResolveTitleBarTheme(
+      workbenchTheme, themeSettings.HighContrast);
     // 恢复面已停止 WebView 订阅，仍由主窗的主题真值驱动。
     imageEditor?.ApplyWorkbenchTheme(workbenchTheme);
   }

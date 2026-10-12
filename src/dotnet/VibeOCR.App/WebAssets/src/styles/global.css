@@ -1051,17 +1051,6 @@ select {
     background: Highlight;
     color: HighlightText;
   }
-  /* 检查文字框是覆盖在 PDF 预览上的 UI 层（不改变内容像素）：forced-colors
-     下用系统色保持边框可见，选中框用 Highlight 与普通框区分。 */
-  .pdf-text-box,
-  .pdf-text-box.native {
-    border-color: CanvasText;
-    background: transparent;
-  }
-  .pdf-text-box.selected {
-    border-color: Highlight;
-    border-width: 2px;
-  }
 }
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -1310,6 +1299,24 @@ select {
   border-width: 2px;
   outline: 1px solid var(--colorBrandStroke1);
   background: #157aca35;
+}
+/* 检查文字框是覆盖在 PDF 预览上的 UI 层（不改变内容像素）：forced-colors
+   下用系统色保持边框可见，选中框用 Highlight 与普通框区分。规则必须
+   位于上面普通/悬停/选中规则之后：同特异性时后写的规则才生效，否则
+   半透明背景会在 forced-colors 下重新覆盖 PDF 预览。 */
+@media (forced-colors: active) {
+  .pdf-text-box,
+  .pdf-text-box.native,
+  .pdf-text-box:hover,
+  .pdf-text-box.selected,
+  .pdf-text-box:focus-visible {
+    border-color: CanvasText;
+    background: transparent;
+  }
+  .pdf-text-box.selected {
+    border-color: Highlight;
+    border-width: 2px;
+  }
 }
 .pdf-block-editor {
   display: grid;

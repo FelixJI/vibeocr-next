@@ -2348,6 +2348,56 @@ export function ImageCanvasEditor({
 
   const textLayerHint = textLayerStatusLabel(textLayer);
 
+  // 容器外的工作台控件也可调用文档命令；ref 保留最新回调。
+  const documentCommandRef = useRef({
+    save: saveAnnotatedImage,
+    close: () => actions.run({ type: commands.closeScreenshotSession }),
+    canExport,
+    isExporting,
+    hasSession: !!session,
+  });
+  useEffect(() => {
+    documentCommandRef.current = {
+      save: saveAnnotatedImage,
+      close: () => actions.run({ type: commands.closeScreenshotSession }),
+      canExport,
+      isExporting,
+      hasSession: !!session,
+    };
+  });
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        !shouldRunDocumentCommand(event) ||
+        event.repeat ||
+        event.altKey ||
+        event.shiftKey ||
+        !(event.ctrlKey || event.metaKey)
+      )
+        return;
+      const key = event.key.toLowerCase();
+      const state = documentCommandRef.current;
+      if (key === "s" && state.canExport && !state.isExporting) {
+        event.preventDefault();
+        void state.save();
+        return;
+      }
+      if (
+        key === "w" &&
+        state.hasSession &&
+        !state.isExporting &&
+        !["INPUT", "TEXTAREA", "SELECT"].includes(
+          (event.target as HTMLElement | null)?.tagName ?? "",
+        )
+      ) {
+        event.preventDefault();
+        void state.close();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   return (
     <div
       className={`canvas-editor${captureStyle ? " capture-scene-editor" : ""}`}
@@ -2356,33 +2406,7 @@ export function ImageCanvasEditor({
       onKeyDown={(event) => {
         if (isImeCompositionEvent(event.nativeEvent)) return;
         const target = event.target as HTMLElement;
-        // 文档命令（Ctrl+S/W）用完整守卫：已被子层消费、隐藏/失焦页面、
-        // IME 组合都不触发，并与工具栏按钮同一入口与启用条件；其余层
-        // （Space/Esc 手势与退出）保持原有局部消费顺序不变。
-        if (
-          (event.ctrlKey || event.metaKey) &&
-          !event.altKey &&
-          !event.shiftKey &&
-          !event.repeat &&
-          shouldRunDocumentCommand(event.nativeEvent)
-        ) {
-          const key = event.key.toLowerCase();
-          if (key === "s" && canExport && !isExporting) {
-            event.preventDefault();
-            void saveAnnotatedImage();
-            return;
-          }
-          if (
-            key === "w" &&
-            session &&
-            !isExporting &&
-            !["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)
-          ) {
-            event.preventDefault();
-            void actions.run({ type: commands.closeScreenshotSession });
-            return;
-          }
-        }
+        // 文档命令由 window 消费，画布手势仍在本地处理。
         if (
           captureStyle &&
           session &&

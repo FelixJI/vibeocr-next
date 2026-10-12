@@ -666,6 +666,40 @@ describe("Windows document commands on the editor surface (Ctrl+S / Ctrl+W)", ()
     );
   });
 
+  it("document commands still run when focus is outside the editor container", async () => {
+    // 回归：Ctrl+S/W 曾只挂在 .canvas-editor 容器 onKeyDown 上，焦点在
+    // 工作台“选择图片”按钮或导航时不触发；现与 PdfPage 一样注册 window。
+    stubCanvasStack({ width: 800, height: 400 });
+    stubAnimationFrames();
+    focusDocument(true);
+    const { actions } = await renderEditor();
+    const outside = document.createElement("button");
+    outside.type = "button";
+    document.body.appendChild(outside);
+    outside.focus();
+    try {
+      fireEvent.keyDown(window, { key: "w", ctrlKey: true });
+      expect(actions.run).toHaveBeenCalledWith({
+        type: "recognition.closeScreenshotSession",
+      });
+      fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+      expect(
+        screen.getByText("正在生成标注图片并打开系统保存窗口……"),
+      ).toBeInTheDocument();
+    } finally {
+      outside.remove();
+    }
+  });
+
+  it("Ctrl+W does not close an image without a screenshot session", async () => {
+    stubCanvasStack({ width: 800, height: 400 });
+    stubAnimationFrames();
+    focusDocument(true);
+    const { actions } = await renderEditor({ session: undefined });
+    fireEvent.keyDown(getEditorCanvas(), { key: "w", ctrlKey: true });
+    fireEvent.keyDown(window, { key: "w", ctrlKey: true });
+    expect(actions.run).not.toHaveBeenCalled();
+  });
   it("Ctrl+W ends the session through the existing close command", async () => {
     stubCanvasStack({ width: 800, height: 400 });
     stubAnimationFrames();

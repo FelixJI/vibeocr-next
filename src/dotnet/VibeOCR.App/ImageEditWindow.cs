@@ -41,6 +41,7 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     return controlledDisposalReached.Task;
   }
   private readonly TextBlock recoveryMessage = new();
+  private readonly Button exitButton = new() { Content = "退出截图" };
   private readonly Border recovery = new()
   {
     Visibility = Visibility.Collapsed,
@@ -83,9 +84,8 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     window.Title = "VibeOCR · 图片编辑";
     var recoveryPanel = new StackPanel { Spacing = 12 };
     recoveryPanel.Children.Add(recoveryMessage);
-    var exit = new Button { Content = "退出截图" };
-    exit.Click += (_, _) => Close();
-    recoveryPanel.Children.Add(exit);
+    exitButton.Click += (_, _) => Close();
+    recoveryPanel.Children.Add(exitButton);
     recovery.Child = recoveryPanel;
     var content = captureScene?.Root ?? new Grid();
     contentRoot = content;
@@ -185,7 +185,11 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     if (closed) return;
     presented.TrySetCanceled();
     recoveryMessage.Text = "图片编辑器暂不可用；退出后可重新截图。";
+    // 失效 WebView 移出 Tab 链，避免焦点停在不可见错误页。
+    webView.Visibility = Visibility.Collapsed;
     recovery.Visibility = Visibility.Visible;
+    // 原生退出按钮获得键盘焦点：恢复面首次 Tab 即可达且可见。
+    exitButton.Focus(FocusState.Keyboard);
   }
 
   /// <summary>既有 settings 真值驱动的根主题；高对比激活时一律 Default，
@@ -202,7 +206,17 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     if (closed) return;
     contentRoot.RequestedTheme = WorkbenchThemePresenter.ResolveRequestedTheme(
       workbenchTheme, themeSettings.HighContrast);
+    // RequestedTheme 不包含标准标题栏；无边框截图 scene 不需要设置。
+    if (captureScene is null)
+      window.AppWindow.TitleBar.PreferredTheme = ResolveTitleBarTheme(
+        workbenchTheme, themeSettings.HighContrast);
   }
+
+  /// <summary>标准标题栏复用单一主题偏好，高对比优先使用 Windows 应用主题。</summary>
+  internal static TitleBarTheme ResolveTitleBarTheme(WorkbenchTheme theme, bool highContrast) =>
+    highContrast || theme == WorkbenchTheme.System
+      ? TitleBarTheme.UseDefaultAppMode
+      : theme == WorkbenchTheme.Light ? TitleBarTheme.Light : TitleBarTheme.Dark;
 
   private void OnSystemHighContrastChanged(ThemeSettings sender, object args) =>
     window.DispatcherQueue.TryEnqueue(ApplyResolvedTheme);
