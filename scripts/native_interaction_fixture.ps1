@@ -99,6 +99,7 @@ public static class InteractionNative
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
     [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr window, uint flags);
+    [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(Point point);
     [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr window);
     [DllImport("user32.dll")] private static extern bool GetGUIThreadInfo(uint thread, ref GuiThreadInfo info);
@@ -235,7 +236,7 @@ public static class InteractionNative
         if (focusRootPid != (uint)appPid)
             throw new InvalidOperationException("Keyboard focus is not on the app or its owned WebView.");
         if (pointRootPid != (uint)appPid)
-            throw new InvalidOperationException("Guard point root is not an app-owned window.");
+            throw new InvalidOperationException($"Guard point ({x},{y}) root={pointRoot.ToInt64()} pid={pointRootPid} is not app={appPid}.");
         return snapshot;
     }
 
@@ -424,6 +425,10 @@ function Assert-UiaElementOwned($element, $appPid) {
     throw "UIA element ownership could not be proven through an app-owned window root (app=$appPid)."
 }
 
+# Coordinates are physical pixels, matching native_actions_fixture.ps1.
+$oldDpi = [InteractionNative]::SetThreadDpiAwarenessContext([IntPtr]::new(-4))
+if ($oldDpi -eq [IntPtr]::Zero) { throw 'Per Monitor V2 native control context unavailable' }
+try {
 switch ($Action) {
     'abi-selfcheck' {
         $result = [InteractionNative]::AbiSelfCheck()
@@ -503,4 +508,8 @@ switch ($Action) {
             isOffscreen = $element.Current.IsOffscreen
         } | ConvertTo-Json -Compress -Depth 3
     }
+}
+
+} finally {
+    [void][InteractionNative]::SetThreadDpiAwarenessContext($oldDpi)
 }

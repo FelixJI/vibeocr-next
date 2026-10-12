@@ -17,7 +17,7 @@ import crypto from 'node:crypto';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { native, windows, waitForWindows, delay, launchApp,
-  focusRecorder, stopOwned } from './smoke_native_actions.mjs';
+  stopOwned } from './smoke_native_actions.mjs';
 
 const exec = promisify(execFile);
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -137,14 +137,34 @@ async function webviewPoint(app, element) {
   const sy = (bounds.Bottom - bounds.Top) / view.height;
   assert(sx > 0 && sy > 0 && Math.abs(sx - sy) < 0.03, 'Owned WebView must have a uniform measured scale.');
   return {
-    X: Math.round(bounds.Left + (box.x + box.width / 2) * sx),
-    Y: Math.round(bounds.Top + (box.y + box.height / 2) * sy),
+    X: Math.round(bounds.Left + (box.x + Math.min(8, box.width / 2)) * sx),
+    Y: Math.round(bounds.Top + (box.y + Math.min(8, box.height / 2)) * sy),
   };
 }
 
 async function focusElement(app, element) {
-  const point = await webviewPoint(app, element);
-  await focusRecorder(app, element); // real native click -> real OS focus
+  await native('restore', { AppPid: app.child.pid, Handle: app.main.Handle });
+  await element.scrollIntoViewIfNeeded();
+  const clickPoint = await webviewPoint(app, element);
+  try {
+    await native('focus-fixture', {
+      FixturePid: app.child.pid, Handle: app.main.Handle, ...clickPoint,
+    });
+  } catch (error) {
+    const probe = await native('probe', {
+      AppPid: app.child.pid, FixturePid: app.child.pid, ...clickPoint,
+    });
+    throw new Error(`${error.message}; post-failure geometry=${probe}`);
+  }
+  assert(await element.evaluate((node) => document.activeElement === node),
+    'Guarded native click did not focus the requested input.');
+  // IME candidate UI may cover the caret. Key input still checks actual focus
+  // ownership; use a separate App-owned header point for the occlusion guard.
+  const bounds = JSON.parse(await native('webview-bounds', {
+    AppPid: app.child.pid, Handle: app.main.Handle,
+  }));
+  const point = { X: bounds.Left + 8, Y: bounds.Top + 8 };
+  await interaction('focus-state', { AppPid: app.child.pid, ...point });
   return point;
 }
 
@@ -231,6 +251,7 @@ async function realImeSequence(app, { element, selector, point, urlGuard = true,
   const mainVisible = async () => (await windows(app.child.pid))
     .some((item) => item.Handle === app.main.Handle && item.Visible);
   try {
+    record.valueBefore = await element.inputValue();
     await installImeObserver(page, selector);
     const activeBefore = await page.evaluate(() => document.activeElement?.matches?.(window.__intTarget));
     assert(activeBefore, 'Real native focus did not land on the IME target input.');
@@ -283,8 +304,9 @@ async function realImeSequence(app, { element, selector, point, urlGuard = true,
     record.phases.escape = await sliceFrom(page, escapeMark);
     record.afterEsc = { value: valueAfterEsc,
       url: page.url(), mainVisible: await mainVisible() };
-    if (cjkPattern.test(valueAfterEsc))
-      return Object.assign(record, { state: FAIL, reason: `Esc committed CJK instead of cancelling: ${valueAfterEsc}.` });
+    if (valueAfterEsc !== record.valueBefore)
+      return Object.assign(record, { state: FAIL,
+        reason: `Esc changed the pre-composition text: ${JSON.stringify(record.valueBefore)} -> ${JSON.stringify(valueAfterEsc)}.` });
     if (urlGuard) {
       assert.equal(record.afterEsc.url, urlBefore, 'Esc navigated away from the surface.');
       assert(record.afterEsc.mainVisible, 'Esc closed or hid the owned main window.');
@@ -411,7 +433,7 @@ async function focusAndNamesStep(app) {
     step.activeAfterTab = await page.evaluate(() => ({
       id: document.activeElement?.id ?? null,
       label: document.activeElement?.getAttribute?.('aria-label') ?? null,
-      same: document.activeElement?.matches?.('[aria-label="输入内容"]') ?? false,
+      same: document.activeElement?.matches?.('#qr-content') ?? false,
     }));
     assert(step.activeAfterTab.same === false, 'Real Tab did not move focus off the input.');
     const focusedAfterTab = await interaction('uia-focused', {
@@ -436,7 +458,7 @@ async function qrImeStep(app) {
     await page.getByRole('tab', { name: '生成', exact: true }).click();
     const input = page.getByLabel('输入内容', { exact: true });
     const point = await focusElement(app, input);
-    return realImeSequence(app, { element: input, selector: '[aria-label="输入内容"]', point });
+    return realImeSequence(app, { element: input, selector: '#qr-content', point });
   })();
   return step.state === FAIL && /outside this smoke run|focus/i.test(step.reason ?? '')
     ? { ...step, reason: `Guard failure on the QR surface: ${step.reason}` }
@@ -500,12 +522,20 @@ async function imageTextStep(app, pngPath) {
     step.escCanvasDiff = await canvasPixelDiff(page, baseSnapshot, escSnapshot);
     assert(step.escCanvasDiff.comparable && step.escCanvasDiff.changedPixels === 0,
       `Esc during text annotation changed ${step.escCanvasDiff.changedPixels} canvas pixels.`);
-    // Place the committed text annotation with the real pointer (CDP mouse,
+    // Drag the committed text annotation with the real pointer (CDP mouse,
     // same precedent as the shipped native smokes) and observe undo/redo via
     // real guarded Ctrl+Z / Ctrl+Y SendInput.
     const box = await page.getByLabel('图片检查画布').boundingBox();
     assert(box, 'Editor canvas has no visual bounds.');
-    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    // Text marks, unlike numbering, require a drag of at least 8 image pixels.
+    await page.mouse.move(box.x + box.width * 0.3, box.y + box.height * 0.4);
+    await page.mouse.down();
+    try { await page.mouse.move(box.x + box.width * 0.7, box.y + box.height * 0.6, { steps: 8 }); }
+    finally { await page.mouse.up(); }
+    await page.waitForFunction(() => {
+      const undo = document.querySelector('button[aria-label="撤销"]');
+      return undo && !undo.disabled;
+    }, null, { timeout: 5000 });
     const placedSnapshot = await canvasSnapshot(page);
     step.placedDiff = await canvasPixelDiff(page, baseSnapshot, placedSnapshot);
     step.annotationPlaced = step.placedDiff.comparable && step.placedDiff.changedPixels > 0;
@@ -674,7 +704,9 @@ async function main() {
     record.steps.preflight = await preflightStep(app);
     record.steps.focusNames = await focusAndNamesStep(app);
     record.steps.qrIme = await qrImeStep(app);
+    await app.page.screenshot({ path: path.join(root, 'qr-ime.png') });
     record.steps.imageText = await imageTextStep(app, pngPath);
+    await app.page.screenshot({ path: path.join(root, 'image-ime.png') });
     record.steps.pdfCorrection = await pdfCorrectionStep(app, root);
     const summary = summarizeSteps(record.steps);
     // Per-step finally blocks already restore the thread-local input locale
@@ -720,7 +752,7 @@ async function main() {
   }
 }
 
-export { interaction, applyImeRestore, classifyImeObservation, classifyImeCommit, summarizeSteps,
+export { interaction, realImeSequence, focusElement, applyImeRestore, classifyImeObservation, classifyImeCommit, summarizeSteps,
   ensureSyntheticFixtures, PASS, FAIL, EVIDENCE_MISSING, main };
 
 if (path.resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
