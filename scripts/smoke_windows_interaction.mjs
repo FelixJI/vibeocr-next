@@ -395,6 +395,8 @@ async function preflightStep(app) {
   const step = { state: FAIL, reason: null };
   try {
     step.system = await interaction('system-state');
+    // Clear Playwright defaults before observing the actual Windows media preferences.
+    await app.page.emulateMedia({ media: null, colorScheme: null, forcedColors: null, contrast: null, reducedMotion: null });
     // Observation only: the page-side media queries are NOT a substitute for
     // real Windows high-contrast dynamic verification (left to the main
     // agent; a global theme/HC switch is out of this smoke's scope).
