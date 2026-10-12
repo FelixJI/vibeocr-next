@@ -18,6 +18,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { native, windows, waitForWindows, delay, launchApp,
   stopOwned } from './smoke_native_actions.mjs';
+import { focusMain } from './smoke_runtime_demand_tools.mjs';
 
 const exec = promisify(execFile);
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -144,6 +145,7 @@ async function webviewPoint(app, element) {
 
 async function focusElement(app, element) {
   await native('restore', { AppPid: app.child.pid, Handle: app.main.Handle });
+  await focusMain(app);
   await element.scrollIntoViewIfNeeded();
   const clickPoint = await webviewPoint(app, element);
   try {
@@ -424,6 +426,9 @@ async function focusAndNamesStep(app) {
       AppPid: app.child.pid, X: point.X, Y: point.Y,
     });
     step.uiaFocusedOnInput = focused;
+    step.uiaInputAtPoint = await interaction('uia-point', {
+      AppPid: app.child.pid, ...await webviewPoint(app, input),
+    });
     assert(focused.name?.includes('输入内容'),
       `UIA name of the focused input was ${JSON.stringify(focused.name)}.`);
     // Real Tab through this round's guarded SendInput (focus-root +
@@ -704,6 +709,7 @@ async function main() {
     record.steps.preflight = await preflightStep(app);
     record.steps.focusNames = await focusAndNamesStep(app);
     record.steps.qrIme = await qrImeStep(app);
+    record.steps.focusNamesAfterIme = await focusAndNamesStep(app);
     await app.page.screenshot({ path: path.join(root, 'qr-ime.png') });
     record.steps.imageText = await imageTextStep(app, pngPath);
     await app.page.screenshot({ path: path.join(root, 'image-ime.png') });
