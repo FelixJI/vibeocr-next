@@ -438,6 +438,7 @@ public sealed partial class MainWindow : Window
       claimed = true;
       pendingImageEditor = null;
       imageEditor = editor;
+      editor.ApplyWorkbenchTheme(workbenchTheme);
       editor.Closed += OnImageEditorClosed;
       editor.Activate();
     }
@@ -654,6 +655,8 @@ public sealed partial class MainWindow : Window
     if (shuttingDown) return;
     RootLayout.RequestedTheme = WorkbenchThemePresenter.ResolveRequestedTheme(
       workbenchTheme, themeSettings.HighContrast);
+    // 恢复面已停止 WebView 订阅，仍由主窗的主题真值驱动。
+    imageEditor?.ApplyWorkbenchTheme(workbenchTheme);
   }
 
   private void OnSystemHighContrastChanged(Microsoft.UI.System.ThemeSettings sender, object args) =>

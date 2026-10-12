@@ -190,7 +190,7 @@ internal sealed class ImageEditWindow : IAsyncDisposable
 
   /// <summary>既有 settings 真值驱动的根主题；高对比激活时一律 Default，
   /// 与浮栏同一优先级（WorkbenchThemePresenter 唯一解析）。</summary>
-  private void ApplyWorkbenchTheme(WorkbenchTheme theme)
+  internal void ApplyWorkbenchTheme(WorkbenchTheme theme)
   {
     workbenchTheme = theme;
     window.DispatcherQueue.TryEnqueue(ApplyResolvedTheme);

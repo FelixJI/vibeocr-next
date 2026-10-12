@@ -75,8 +75,9 @@ public enum ScreenshotSelectionAction
 /// 引擎名等细节放 Hint（仅 Tooltip）；文字条目的 ModeId 为设置已提交的
 /// 持久默认模式 id，禁用时不携带可提交的 id（空串）且 availability 使用
 /// default_missing/default_invalid/catalog_unavailable 稳定词汇；IconKey
-/// 指向 <see cref="ScreenshotToolbarIcons"/> 的稳定矢量图标键，由宿主随
-/// 语义提供，不依赖系统字体字形。
+/// 指向 <see cref="ScreenshotToolbarIcons"/> 的稳定字形图标键，由宿主随
+/// 语义提供；图标走系统图标字体默认族（旧 Windows 回退 Segoe MDL2
+/// Assets）。
 /// </summary>
 public sealed record ScreenshotRecognitionModeEntry(
     string ModeId,
@@ -481,7 +482,8 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     {
       var button = new Button
       {
-        // 矢量图标不依赖 Segoe 字形：旧字形在系统字体缺失时渲染为空白。
+        // 图标用默认图标字体族的官方字形（旧 Windows 自动回退
+        // Segoe MDL2 Assets；不硬编码 FontFamily）。
         Content = ScreenshotToolbarIcons.CreateIcon(iconKey),
         Width = 32, Height = 32, Padding = new Thickness(0),
       };
@@ -818,7 +820,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     string? colorHex = null;
     Windows.Foundation.Point? lastPoint = null;
     // 编辑工具和宿主提供的识别模式直接展示，选择工具后原位进入对应编辑状态。
-    // 图标为 Fluent 矢量 path（见 ScreenshotToolbarIcons），按形状区分语义
+    // 图标为 Segoe 官方稳定字形（见 ScreenshotToolbarIcons），按形状区分语义
     // 并携带 tooltip；复制/保存/钉图复用既有本地输出。直接入口保持旧工具条。
     List<Button> selectionActionButtons = [];
     if (ordinary)
@@ -1093,7 +1095,8 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       HorizontalAlignment = HorizontalAlignment.Left,
       VerticalAlignment = VerticalAlignment.Top
     };
-    root.Children.Add(keyboardSink);
+    // 选区结束时随 canvas 移除，不把不可见 Tab stop 留给编辑器。
+    canvas.Children.Add(keyboardSink);
     root.AddHandler(UIElement.PreviewKeyDownEvent, new KeyEventHandler((_, args) =>
         {
           if (completion.Task.IsCompleted) return;
