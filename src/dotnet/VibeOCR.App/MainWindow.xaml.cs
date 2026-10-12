@@ -59,6 +59,8 @@ public sealed partial class MainWindow : Window
   private readonly string resourceRoot;
   private readonly WorkbenchAnnotationStore annotationStore;
   private ImageEditWindow? imageEditor;
+  private WorkbenchTheme workbenchTheme = WorkbenchTheme.System;
+  private readonly Microsoft.UI.System.ThemeSettings themeSettings;
   private readonly ImageEditorRetirement editorRetirement = new();
   private sealed record PendingImageEditor(long Generation, Guid SessionId,
     VibeOCR.Platform.Windows.PhysicalRectangle? Bounds, ScreenshotCaptureScene? Scene)
@@ -256,6 +258,9 @@ public sealed partial class MainWindow : Window
     webHost.ProtocolViolation += OnProtocolViolation;
     webHost.RecoveryRequired += OnRecoveryRequired;
     webHost.StateChanged += OnHostStateChanged;
+    webHost.ThemeObserved += OnWorkbenchThemeObserved;
+    themeSettings = Microsoft.UI.System.ThemeSettings.CreateForWindowId(AppWindow.Id);
+    themeSettings.Changed += OnSystemHighContrastChanged;
 
     InitializeComponent();
     Title = "VibeOCR";
@@ -633,6 +638,27 @@ public sealed partial class MainWindow : Window
       commandHandler.EndHotkeyRecording();
   }
 
+  /// <summary>既有 settings 主题真值驱动原生根主题：高对比优先回落 Default
+  /// （系统可见资源），System/Light/Dark 由 WorkbenchThemePresenter 唯一解析；
+  /// 系统高对比切换经 ThemeSettings 封送 UI 线程重解析。</summary>
+  private void OnWorkbenchThemeObserved(WorkbenchTheme theme)
+  {
+    workbenchTheme = theme;
+    DispatcherQueue.TryEnqueue(ApplyResolvedTheme);
+  }
+
+  private void ApplyResolvedTheme()
+  {
+    // 入队后窗口可能已进入 shutdown：复用既有 shuttingDown 状态，
+    // 避免与 teardown（#216 生命周期收口）竞争触碰根元素。
+    if (shuttingDown) return;
+    RootLayout.RequestedTheme = WorkbenchThemePresenter.ResolveRequestedTheme(
+      workbenchTheme, themeSettings.HighContrast);
+  }
+
+  private void OnSystemHighContrastChanged(Microsoft.UI.System.ThemeSettings sender, object args) =>
+    DispatcherQueue.TryEnqueue(ApplyResolvedTheme);
+
   private void OnHostStateChanged(string state)
   {
     WebReadySmokeStatus.Stage(state);
@@ -921,6 +947,8 @@ public sealed partial class MainWindow : Window
       webHost.ProtocolViolation -= OnProtocolViolation;
       webHost.RecoveryRequired -= OnRecoveryRequired;
       webHost.StateChanged -= OnHostStateChanged;
+      webHost.ThemeObserved -= OnWorkbenchThemeObserved;
+      themeSettings.Changed -= OnSystemHighContrastChanged;
       await webHost.DisposeAsync();
     }
     captureReplacementShutdownVerification?.Invoke();

@@ -43,7 +43,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   private PackagedWebAssets? packagedAssets;
   private CoreWebView2? core;
   // 生产由 InitializeAsync 与 core 同点绑定、DisposeAsync 同点清空；换绑/清空后旧文档在途消息被抑制。
-  private (object Sender, Action<string> Post)? bridge;
+  private (object Sender, Action<string> Post, Func<Action, bool> Enqueue)? bridge;
   private Windows.Foundation.TypedEventHandler<CoreWebView2, CoreWebView2WebMessageReceivedEventArgs>? webMessageReceived;
   private DispatcherQueue? dispatcher;
   private CancellationTokenSource? subscriptionCancellation;
@@ -198,6 +198,11 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   public event Action<Exception>? ProtocolViolation;
 
   public event Action? RecoveryRequired;
+
+  /// <summary>主题观察通知：既有 settings 真值（含 bootstrap 初始值）的主题
+  /// 变化，供原生窗口 chrome 同步 RequestedTheme；不引入第二主题源。
+  /// 可能从后台订阅线程触发，订阅方自行封送 UI 线程。</summary>
+  internal event Action<WorkbenchTheme>? ThemeObserved;
 
   public static bool IsNavigationAllowed(Uri uri)
   {
@@ -355,7 +360,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   }
 
   // 绑定消息泵文档身份与投递动作；InitializeAsync 注册真实 core，测试注册替身。
-  internal void RegisterBridge(object sender, Action<string> post) => bridge = (sender, post);
+  internal void RegisterBridge(object sender, Action<string> post, Func<Action, bool>? enqueue = null) =>
+    bridge = (sender, post, enqueue ?? (action => dispatcher?.TryEnqueue(action.Invoke) == true));
 
   internal async Task ReceiveWebMessageAsync(string message, object sender)
   {
@@ -389,6 +395,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
         CaptureSceneDescriptor? capture = BeginCapturePixels(bootstrap, generation, document);
         var response = WorkbenchBridgeCodec.SerializeBootstrapResponse(requestId, bootstrap, capture);
         sessionId = bootstrap.SessionId;
+        if (ThemeOf(bootstrap) is { } initialTheme)
+          ThemeObserved?.Invoke(initialTheme);
         registered.Post(response.Json);
         StartSubscription(bootstrap, response.RequiresSnapshot);
         return;
@@ -474,14 +482,21 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     subscriptionCancellation?.Dispose();
     subscriptionCancellation = new CancellationTokenSource();
     CancellationToken token = subscriptionCancellation.Token;
-    subscription = PublishStatesAsync(bootstrap.SessionId, bootstrap.Revision, token, requiresSnapshot ? bootstrap : null);
+    subscription = PublishStatesAsync(bootstrap.SessionId, bootstrap.Revision, token, requiresSnapshot ? bootstrap : null, ThemeOf(bootstrap));
   }
+
+  /// <summary>bootstrap 状态中的主题真值（fixedRoute 投影后为 ThemeWorkbenchState）。</summary>
+  private static WorkbenchTheme? ThemeOf(WorkbenchBootstrap bootstrap) =>
+    bootstrap.States.Select(state => state.State)
+      .Select(state => state switch { SettingsWorkbenchState settings => (WorkbenchTheme?)settings.Theme, ThemeWorkbenchState theme => theme.Theme, _ => null })
+      .FirstOrDefault(theme => theme is not null);
 
   private async Task PublishStatesAsync(
     Guid activeSession,
     long afterRevision,
     CancellationToken cancellationToken,
-    WorkbenchBootstrap? startup = null)
+    WorkbenchBootstrap? startup = null,
+    WorkbenchTheme? initialTheme = null)
   {
     try
     {
@@ -497,7 +512,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       if (disposed || sessionId != activeSession || !ReferenceEquals(core, target)) return;
       if (CaptureScene is null) recoveryPolicy.MarkReady();
       StateChanged?.Invoke("bridge-ready");
-      WorkbenchTheme? lastTheme = null;
+      WorkbenchTheme? lastTheme = initialTheme;
       bool resync = false;
       await foreach (WorkbenchStateEnvelope state in application.SubscribeAsync(
         afterRevision,
@@ -507,10 +522,18 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
         ObserveCaptureState(state);
         if (cancellationToken.IsCancellationRequested) return;
         if (state.Change == WorkbenchStateChange.Reset) resync = true;
-        if (fixedRoute is not null && state.State is SettingsWorkbenchState settings)
+        if (state.State is SettingsWorkbenchState settings)
         {
-          if (!resync && lastTheme == settings.Theme) continue;
-          lastTheme = settings.Theme;
+          // 原生 chrome 主题同步：既有 settings 真值变化时通知订阅窗口；
+          // 去重布尔先判定再更新，保持 fixedRoute 原有“仅主题变化才投递”
+          // 的投影契约（重复同值不重发、不 continue 掉真实变化）。
+          bool themeChanged = lastTheme != settings.Theme;
+          if (themeChanged)
+          {
+            lastTheme = settings.Theme;
+            ThemeObserved?.Invoke(settings.Theme);
+          }
+          if (fixedRoute is not null && !themeChanged && !resync) continue;
         }
         if (!await PublishStateFrameAsync(activeSession, ProjectState(state), target, cancellationToken)) return;
         if (state.Change == WorkbenchStateChange.Ready) resync = false;
@@ -531,12 +554,14 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
 
   private async Task<bool> PublishStateFrameAsync(Guid activeSession, WorkbenchStateEnvelope state, CoreWebView2? target, CancellationToken cancellationToken)
   {
-    bool Current() => !disposed && sessionId == activeSession && ReferenceEquals(core, target) && !cancellationToken.IsCancellationRequested;
+    if (bridge is not { } registered) return false;
+    bool Current() => !disposed && sessionId == activeSession && ReferenceEquals(core, target) &&
+      bridge is { } current && ReferenceEquals(current.Sender, registered.Sender) && !cancellationToken.IsCancellationRequested;
     if (!Current()) return false;
     string json = WorkbenchBridgeCodec.SerializeState(activeSession, state);
-    await stateDelivery.PostAsync(action => dispatcher?.TryEnqueue(action.Invoke) == true, () =>
+    await stateDelivery.PostAsync(registered.Enqueue, () =>
     {
-      if (Current()) target?.PostWebMessageAsJson(json);
+      if (Current()) registered.Post(json);
     }, cancellationToken);
     return Current();
   }

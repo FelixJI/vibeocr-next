@@ -22,7 +22,9 @@ import {
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { AppActions } from "../app/types";
+import type { AppAction, AppActions } from "../app/types";
+
+import { shouldRunDocumentCommand } from "../app/keyboard";
 
 import { CapabilityGate } from "../components/CapabilityGate";
 
@@ -264,6 +266,63 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
     stringValue(state.sessionId) !== undefined &&
     selectedPage >= 0 &&
     selectedPage < pageCount;
+  // 包装 run 每次渲染都新建：用 ref 持有最新包装（自动绑定当前
+  // documentId/revision），监听器不随其重建。
+  const wrappedActionsRef = useRef(actions);
+  useEffect(() => {
+    wrappedActionsRef.current = actions;
+  });
+  // Windows 文档命令快捷键：与工具栏按钮同一包装 run 入口（自动绑定当前
+  // documentId/revision，并在关闭/打开前等待检查草稿排空），可用条件逐条
+  // 镜像对应按钮；IME 组合、隐藏/失焦页面与未支持场景不触发任何命令。
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        !shouldRunDocumentCommand(event) ||
+        event.repeat ||
+        event.altKey ||
+        !(event.ctrlKey || event.metaKey)
+      )
+        return;
+      const key = event.key.toLowerCase();
+      const closeEnabled =
+        pageCount > 0 || busy || activeDocument?.closeFailed === true;
+      const command: AppAction | null =
+        key === "o" &&
+        !event.shiftKey &&
+        viewState.capabilities.includes("pdf.open")
+          ? { type: "pdf.open" }
+          : key === "s" &&
+              !event.shiftKey &&
+              viewState.capabilities.includes("pdf.save") &&
+              pageCount > 0 &&
+              !busy
+            ? { type: "pdf.save" }
+            : key === "s" &&
+                event.shiftKey &&
+                state.canCopyExport === true &&
+                pageCount > 0 &&
+                !busy
+              ? { type: "pdf.saveAs" }
+              : key === "w" &&
+                  !event.shiftKey &&
+                  viewState.capabilities.includes("pdf.open") &&
+                  closeEnabled
+                ? { type: "pdf.close" }
+                : null;
+      if (!command) return;
+      event.preventDefault();
+      void wrappedActionsRef.current.run(command);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    viewState.capabilities,
+    pageCount,
+    busy,
+    state.canCopyExport,
+    activeDocument?.closeFailed,
+  ]);
   useEffect(() => {
     if (!documentId || (hasCurrentPage && state.canInspectPage === true))
       return;

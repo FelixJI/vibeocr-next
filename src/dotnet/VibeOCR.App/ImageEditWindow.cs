@@ -1,7 +1,7 @@
+using Microsoft.UI.System;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media;
 using System.Runtime.InteropServices;
 using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Services;
@@ -40,10 +40,7 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     controlledDisposalReached = new(TaskCreationOptions.RunContinuationsAsynchronously);
     return controlledDisposalReached.Task;
   }
-  private readonly TextBlock recoveryMessage = new()
-  {
-    Foreground = new SolidColorBrush(Microsoft.UI.Colors.White),
-  };
+  private readonly TextBlock recoveryMessage = new();
   private readonly Border recovery = new()
   {
     Visibility = Visibility.Collapsed,
@@ -51,8 +48,12 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     VerticalAlignment = VerticalAlignment.Center,
     Padding = new Thickness(16),
     CornerRadius = new CornerRadius(8),
-    Background = new SolidColorBrush(Microsoft.UI.Colors.Black),
   };
+  // 根容器随工作台主题设置同步 RequestedTheme（高对比优先回落 Default；
+  // scene 复用截图窗 Root 时仅影响主题资源，不碰像素内容与生命周期）。
+  private readonly FrameworkElement contentRoot;
+  private readonly ThemeSettings themeSettings;
+  private WorkbenchTheme workbenchTheme = WorkbenchTheme.System;
 
   public ImageEditWindow(
     Guid sessionId,
@@ -77,6 +78,7 @@ internal sealed class ImageEditWindow : IAsyncDisposable
         geometry.Desktop.Width, geometry.Desktop.Height, geometry.InitialTool ?? "select");
     host.RecoveryRequired += ShowRecovery;
     host.StateChanged += OnHostStateChanged;
+    host.ThemeObserved += ApplyWorkbenchTheme;
     host.ProtocolViolation += error => AppLog.Error("Image editor bridge rejected a message", error);
     window.Title = "VibeOCR · 图片编辑";
     var recoveryPanel = new StackPanel { Spacing = 12 };
@@ -86,6 +88,7 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     recoveryPanel.Children.Add(exit);
     recovery.Child = recoveryPanel;
     var content = captureScene?.Root ?? new Grid();
+    contentRoot = content;
     content.Children.Add(webView);
     content.Children.Add(recovery);
     content.AddHandler(UIElement.PreviewKeyDownEvent,
@@ -98,6 +101,17 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     webView.Loaded += OnLoaded;
     if (captureScene is null) window.Content = content;
     window.Closed += OnClosed;
+    themeSettings = ThemeSettings.CreateForWindowId(window.AppWindow.Id);
+    themeSettings.Changed += OnSystemHighContrastChanged;
+    // 恢复面颜色经 App.xaml 的 ThemeResource style 动态绑定，随根元素
+    // 主题/高对比切换重解析，替代旧固定黑底白字。
+    if (Application.Current?.Resources is { } resources)
+    {
+      if (resources.TryGetValue("RecoveryPanelBorderStyle", out object? borderStyle) && borderStyle is Style border)
+        recovery.Style = border;
+      if (resources.TryGetValue("RecoveryPanelTextStyle", out object? textStyle) && textStyle is Style text)
+        recoveryMessage.Style = text;
+    }
     Interlocked.Increment(ref activeWebViewCount);
     if (captureScene is not null) return;
     window.AppWindow.SetPresenter(AppWindowPresenterKind.Overlapped);
@@ -174,6 +188,25 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     recovery.Visibility = Visibility.Visible;
   }
 
+  /// <summary>既有 settings 真值驱动的根主题；高对比激活时一律 Default，
+  /// 与浮栏同一优先级（WorkbenchThemePresenter 唯一解析）。</summary>
+  private void ApplyWorkbenchTheme(WorkbenchTheme theme)
+  {
+    workbenchTheme = theme;
+    window.DispatcherQueue.TryEnqueue(ApplyResolvedTheme);
+  }
+
+  private void ApplyResolvedTheme()
+  {
+    // 入队后窗口可能已关闭/进入 teardown：不再触碰根元素主题。
+    if (closed) return;
+    contentRoot.RequestedTheme = WorkbenchThemePresenter.ResolveRequestedTheme(
+      workbenchTheme, themeSettings.HighContrast);
+  }
+
+  private void OnSystemHighContrastChanged(ThemeSettings sender, object args) =>
+    window.DispatcherQueue.TryEnqueue(ApplyResolvedTheme);
+
   private void OnHostStateChanged(string state)
   {
     if (closed) return;
@@ -217,6 +250,8 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     closed = true;
     host.RecoveryRequired -= ShowRecovery;
     host.StateChanged -= OnHostStateChanged;
+    host.ThemeObserved -= ApplyWorkbenchTheme;
+    themeSettings.Changed -= OnSystemHighContrastChanged;
     presented.TrySetCanceled();
     await host.DisposeAsync();
     if (controlledDisposalGate is { } gate)

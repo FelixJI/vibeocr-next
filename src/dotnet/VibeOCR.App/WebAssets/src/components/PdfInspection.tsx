@@ -2,6 +2,8 @@ import { Button, Checkbox, Textarea } from "@fluentui/react-components";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppActions } from "../app/types";
 
+import { isImeCompositionEvent } from "../app/keyboard";
+
 interface Resource {
   readonly url: string;
 }
@@ -401,7 +403,7 @@ export function PdfInspection({
     }
   };
   return (
-    <div className="pdf-inspection">
+    <div className="pdf-inspection" aria-busy={busy || submitting}>
       <div className="pdf-inspection-tools" aria-label="高清页面操作">
         <Button disabled={page <= 0} onClick={() => flip(page - 1)}>
           上一页
@@ -453,6 +455,8 @@ export function PdfInspection({
         aria-label="高清 PDF 页面"
         onKeyDown={(event) => {
           if (event.target !== event.currentTarget) return;
+          // IME 组合中的任何键（含 Esc）先交给输入法消费。
+          if (isImeCompositionEvent(event.nativeEvent)) return;
           const node = viewport.current;
           if (event.key === "PageUp") flip(page - 1);
           else if (event.key === "PageDown") flip(page + 1);
@@ -613,7 +617,13 @@ export function PdfInspection({
                 disabled={busy || submitting}
                 onChange={(_, data) => setDraft(data.value)}
                 onKeyDown={(event) => {
-                  if (event.key === "Escape") cancel();
+                  // 组合中的 Esc 只取消输入法候选：校正框与草稿保持，
+                  // 不与输入法一次按键关闭两层。
+                  if (
+                    event.key === "Escape" &&
+                    !isImeCompositionEvent(event.nativeEvent)
+                  )
+                    cancel();
                 }}
               />
               <div className="pdf-inspection-tools">

@@ -1051,6 +1051,17 @@ select {
     background: Highlight;
     color: HighlightText;
   }
+  /* 检查文字框是覆盖在 PDF 预览上的 UI 层（不改变内容像素）：forced-colors
+     下用系统色保持边框可见，选中框用 Highlight 与普通框区分。 */
+  .pdf-text-box,
+  .pdf-text-box.native {
+    border-color: CanvasText;
+    background: transparent;
+  }
+  .pdf-text-box.selected {
+    border-color: Highlight;
+    border-width: 2px;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   *,

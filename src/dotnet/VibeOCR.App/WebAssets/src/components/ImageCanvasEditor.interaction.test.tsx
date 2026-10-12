@@ -637,3 +637,102 @@ describe("首帧输入身份", () => {
     expect(reportCapturePixels).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("Windows document commands on the editor surface (Ctrl+S / Ctrl+W)", () => {
+  function focusDocument(focused: boolean) {
+    Object.defineProperty(document, "hasFocus", {
+      configurable: true,
+      value: () => focused,
+    });
+  }
+
+  afterEach(() => {
+    delete (document as { hasFocus?: () => boolean }).hasFocus;
+  });
+
+  it("Ctrl+S enters the same save entry as the toolbar button", async () => {
+    stubCanvasStack({ width: 800, height: 400 });
+    stubAnimationFrames();
+    focusDocument(true);
+    const { actions } = await renderEditor();
+    const canvas = getEditorCanvas();
+    fireEvent.keyDown(canvas, { key: "s", ctrlKey: true, bubbles: true });
+    // 与“保存标注图”按钮同一回调：导出前同步提示出现（按钮可用条件一致）。
+    expect(
+      screen.getByText("正在生成标注图片并打开系统保存窗口……"),
+    ).toBeInTheDocument();
+    expect(actions.run).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "recognition.closeScreenshotSession" }),
+    );
+  });
+
+  it("Ctrl+W ends the session through the existing close command", async () => {
+    stubCanvasStack({ width: 800, height: 400 });
+    stubAnimationFrames();
+    focusDocument(true);
+    const { actions } = await renderEditor();
+    fireEvent.keyDown(getEditorCanvas(), {
+      key: "w",
+      ctrlKey: true,
+      bubbles: true,
+    });
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "recognition.closeScreenshotSession",
+    });
+  });
+
+  it("IME composition keys do not trigger save/close/undo layers", async () => {
+    stubCanvasStack({ width: 800, height: 400 });
+    stubAnimationFrames();
+    focusDocument(true);
+    const { actions } = await renderEditor();
+    const canvas = getEditorCanvas();
+    const imeCommand = (key: string) => {
+      const event = new KeyboardEvent("keydown", {
+        key,
+        ctrlKey: true,
+        bubbles: true,
+      });
+      Object.defineProperty(event, "keyCode", { value: 229 });
+      fireEvent(canvas, event);
+    };
+    imeCommand("w");
+    imeCommand("s");
+    fireEvent.keyDown(canvas, {
+      key: "w",
+      ctrlKey: true,
+      isComposing: true,
+      bubbles: true,
+    });
+    expect(actions.run).not.toHaveBeenCalled();
+    expect(
+      screen.queryByText("正在生成标注图片并打开系统保存窗口……"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hidden or unfocused pages do not run editor document commands", async () => {
+    stubCanvasStack({ width: 800, height: 400 });
+    stubAnimationFrames();
+    focusDocument(false);
+    const { actions } = await renderEditor();
+    fireEvent.keyDown(getEditorCanvas(), {
+      key: "w",
+      ctrlKey: true,
+      bubbles: true,
+    });
+    expect(actions.run).not.toHaveBeenCalled();
+
+    focusDocument(true);
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      get: () => true,
+    });
+    fireEvent.keyDown(getEditorCanvas(), {
+      key: "w",
+      ctrlKey: true,
+      bubbles: true,
+    });
+    delete (document as { hidden?: boolean }).hidden;
+    expect(actions.run).not.toHaveBeenCalled();
+  });
+});

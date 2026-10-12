@@ -4,6 +4,8 @@ import { ClipboardPaste, ImagePlus } from "lucide-react";
 
 import { useEffect, useState } from "react";
 
+import { shouldRunDocumentCommand } from "../app/keyboard";
+
 import { ImageCanvasEditor } from "../components/ImageCanvasEditor";
 
 import { EmptyStage, Workspace } from "../components/Workspace";
@@ -37,6 +39,28 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
   const input = resource(state.input);
   const session = screenshotSession(state.screenshotSession);
   const busy = booleanValue(state.isBusy);
+  // Windows 打开命令：与“选择图片”按钮同一入口与启用条件；截图现场窗
+  // （scene）由 ImageCanvasEditor 承载会话命令，不接收文档级打开。
+  useEffect(() => {
+    if (scene) return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        !shouldRunDocumentCommand(event) ||
+        event.repeat ||
+        event.altKey ||
+        event.shiftKey ||
+        !(event.ctrlKey || event.metaKey) ||
+        event.key.toLowerCase() !== "o" ||
+        !viewState.connected ||
+        busy
+      )
+        return;
+      event.preventDefault();
+      void actions.run({ type: "imageEdit.selectImage" });
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [actions, viewState.connected, busy, scene]);
   return (
     <Workspace
       eyebrow={scene ? "CAPTURE" : "IMAGE"}

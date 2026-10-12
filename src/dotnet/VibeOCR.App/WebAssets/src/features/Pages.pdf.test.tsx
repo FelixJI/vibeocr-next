@@ -14,7 +14,15 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
-function setup(patch: Record<string, unknown> = {}) {
+function setup(
+  patch: Record<string, unknown> = {},
+  capabilities: readonly string[] = [
+    "pdf.edit",
+    "pdf.save",
+    "pdf.rotate",
+    "pdf.open",
+  ],
+) {
   let nativeFlush: (() => Promise<void>) | undefined;
   let retiredNativeFlush: (() => Promise<void>) | undefined;
   const actions: AppActions & { run: ReturnType<typeof vi.fn> } = {
@@ -34,7 +42,7 @@ function setup(patch: Record<string, unknown> = {}) {
     revision: 1,
     route: "pdf",
     theme: "light",
-    capabilities: ["pdf.edit", "pdf.save", "pdf.rotate", "pdf.open"],
+    capabilities,
     runtimeLabel: "host",
     features: {
       pdf: {
@@ -783,4 +791,145 @@ it("preserves A confirmed draft through a second switch before restored resource
     finish({ ok: true, json: async () => ({ page: 69, ocr_blocks: [] }) });
   });
   expect(screen.getByLabelText("校正文字")).toHaveValue(confirmed.draft);
+});
+
+describe("PDF document command shortcuts (Ctrl+O / Ctrl+S / Ctrl+Shift+S / Ctrl+W)", () => {
+  /** 显式控制 document.hasFocus：守卫要求页面持有焦点，jsdom 默认值不作证据。 */
+  function focusDocument(focused: boolean) {
+    Object.defineProperty(document, "hasFocus", {
+      configurable: true,
+      value: () => focused,
+    });
+  }
+  const shortcut = (key: string, init: Record<string, unknown> = {}) =>
+    fireEvent.keyDown(window, { key, ctrlKey: true, bubbles: true, ...init });
+  /** 只看文档命令本身：挂载的检查组件会在后台发 pdf.setPreviewPosition。 */
+  const documentCommands = (actions: { run: ReturnType<typeof vi.fn> }) =>
+    actions.run.mock.calls
+      .map(([command]) => command as { type: string })
+      .filter((command) =>
+        ["pdf.save", "pdf.saveAs", "pdf.open", "pdf.close"].includes(
+          command.type,
+        ),
+      );
+
+  afterEach(() => {
+    delete (document as { hasFocus?: () => boolean }).hasFocus;
+  });
+
+  it("runs save/saveAs/open/close through the wrapped entry with document binding", async () => {
+    focusDocument(true);
+    const actions = setup({
+      documentId: "doc-1",
+      canCopyExport: true,
+      documents: [{ documentId: "doc-1", name: "a.pdf", isModified: true }],
+    });
+    shortcut("s");
+    shortcut("S", { shiftKey: true });
+    shortcut("o");
+    shortcut("w");
+    // open/close 经包装入口先排空检查草稿再发出，异步确认后到达。
+    await waitFor(() =>
+      expect(documentCommands(actions).map((command) => command.type)).toEqual([
+        "pdf.save",
+        "pdf.saveAs",
+        "pdf.open",
+        "pdf.close",
+      ]),
+    );
+    const commands = documentCommands(actions);
+    expect(commands[0]).toEqual({
+      type: "pdf.save",
+      documentId: "doc-1",
+      documentRevision: 8,
+    });
+    expect(commands[1]).toEqual({
+      type: "pdf.saveAs",
+      documentId: "doc-1",
+      documentRevision: 8,
+    });
+    expect(commands[2]).toEqual({ type: "pdf.open" });
+    expect(commands[3]).toEqual({
+      type: "pdf.close",
+      documentId: "doc-1",
+      documentRevision: 8,
+    });
+    // 同一业务入口：工具栏保存按钮与 Ctrl+S 发出完全相同的命令。
+    actions.run.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "pdf.save",
+      documentId: "doc-1",
+      documentRevision: 8,
+    });
+  });
+
+  it("skips commands while busy or without the matching capability", () => {
+    focusDocument(true);
+    // busy 镜像按钮禁用；capabilities 缺 pdf.save/pdf.open 时打开/保存/关闭都不触发。
+    const actions = setup(
+      {
+        documentId: "doc-1",
+        isBusy: true,
+        canCopyExport: true,
+        documents: [{ documentId: "doc-1", name: "a.pdf" }],
+      },
+      ["pdf.edit"],
+    );
+    shortcut("s");
+    shortcut("S", { shiftKey: true });
+    shortcut("o");
+    shortcut("w");
+    expect(documentCommands(actions)).toEqual([]);
+  });
+
+  it("skips save/saveAs/close for an empty document but keeps open available", () => {
+    focusDocument(true);
+    const actions = setup({
+      documentId: "doc-1",
+      pageCount: 0,
+      selectedPage: -1,
+      pages: [],
+      canCopyExport: true,
+      documents: [{ documentId: "doc-1", name: "a.pdf" }],
+    });
+    shortcut("s");
+    shortcut("S", { shiftKey: true });
+    shortcut("w");
+    expect(documentCommands(actions)).toEqual([]);
+    shortcut("o");
+    expect(documentCommands(actions).map((command) => command.type)).toEqual([
+      "pdf.open",
+    ]);
+  });
+
+  it("does not trigger commands for IME composition, hidden or unfocused pages", () => {
+    focusDocument(true);
+    const actions = setup({ documentId: "doc-1" });
+    // IME 组合中的 Ctrl+S（isComposing 与 keyCode 229 各自成立即让路）。
+    fireEvent.keyDown(window, {
+      key: "s",
+      ctrlKey: true,
+      isComposing: true,
+      bubbles: true,
+    });
+    const imeKeyDown = new KeyboardEvent("keydown", {
+      key: "s",
+      ctrlKey: true,
+      bubbles: true,
+    });
+    Object.defineProperty(imeKeyDown, "keyCode", { value: 229 });
+    fireEvent(window, imeKeyDown);
+    expect(documentCommands(actions)).toEqual([]);
+
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      get: () => true,
+    });
+    shortcut("s");
+    delete (document as { hidden?: boolean }).hidden;
+    focusDocument(false);
+    shortcut("s");
+    expect(documentCommands(actions)).toEqual([]);
+  });
 });

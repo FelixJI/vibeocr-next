@@ -591,3 +591,66 @@ it("does not publish zero scroll between image load and its restoration frame", 
     ),
   );
 });
+
+describe("PDF correction Escape composition boundary", () => {
+  it("keeps the correction draft when Escape arrives during IME composition and only bare Escape cancels", async () => {
+    resource({ page: 0, ocr_blocks: [ocr] });
+    const value = props();
+    render(<PdfInspection {...value} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /人工修改 · 原文/ }),
+    );
+    const textarea = screen.getByLabelText("校正文字");
+    fireEvent.change(textarea, { target: { value: "组合中的中文草稿" } });
+
+    // IME 组合中的 Esc（isComposing 与 keyCode 229 两种形态）只取消输入法
+    // 候选：校正框、草稿与选中块保持，不与输入法一次按键关闭两层。
+    fireEvent.keyDown(textarea, {
+      key: "Escape",
+      isComposing: true,
+      bubbles: true,
+    });
+    const imeEscape = new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+    });
+    Object.defineProperty(imeEscape, "keyCode", { value: 229 });
+    fireEvent(textarea, imeEscape);
+    expect(screen.getByLabelText("校正文字")).toHaveValue("组合中的中文草稿");
+    expect(
+      screen.getByRole("button", { name: "提交校正" }),
+    ).toBeInTheDocument();
+
+    // 组合结束后的裸 Esc 才取消校正草稿（原有行为保留）。
+    value.actions.run.mockClear();
+    fireEvent.keyDown(textarea, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByLabelText("校正文字")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("keeps the viewport keyboard layer untouched during composition", async () => {
+    resource({ page: 0, ocr_blocks: [ocr] });
+    const value = props();
+    render(<PdfInspection {...value} />);
+    const region = await screen.findByRole("region", { name: "高清 PDF 页面" });
+    const imeKey = new KeyboardEvent("keydown", {
+      key: "PageDown",
+      bubbles: true,
+    });
+    Object.defineProperty(imeKey, "keyCode", { value: 229 });
+    Object.defineProperty(imeKey, "isComposing", { value: true });
+    fireEvent(region, imeKey);
+    expect(
+      value.actions.run.mock.calls.filter(
+        ([command]) =>
+          (command as { type?: string }).type === "pdf.setCurrentPage",
+      ),
+    ).toHaveLength(0);
+    fireEvent.keyDown(region, { key: "PageDown" });
+    expect(value.actions.run).toHaveBeenCalledWith({
+      type: "pdf.setCurrentPage",
+      page: 1,
+    });
+  });
+});

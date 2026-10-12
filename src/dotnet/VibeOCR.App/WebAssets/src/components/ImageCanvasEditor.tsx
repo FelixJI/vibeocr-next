@@ -43,6 +43,11 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import type { AppActions } from "../app/types";
+
+import {
+  isImeCompositionEvent,
+  shouldRunDocumentCommand,
+} from "../app/keyboard";
 import {
   exclusionCoversOutput,
   exclusionDisplayPoints,
@@ -2306,6 +2311,8 @@ export function ImageCanvasEditor({
       : readLayerSelection();
     if (!session || !text || !layerSelectionKey) return;
     setCopyMenu(undefined);
+    // 浮层按钮即将卸载：把焦点还给画布，避免落到 body 后 Tab 从头开始。
+    canvasRef.current?.focus();
     try {
       const copied = await actions.run({
         type: commands.copyScreenshotSelection,
@@ -2344,7 +2351,35 @@ export function ImageCanvasEditor({
       style={captureStyle}
       data-screenshot-session={session?.sessionId ?? ""}
       onKeyDown={(event) => {
+        if (isImeCompositionEvent(event.nativeEvent)) return;
         const target = event.target as HTMLElement;
+        // 文档命令（Ctrl+S/W）用完整守卫：已被子层消费、隐藏/失焦页面、
+        // IME 组合都不触发，并与工具栏按钮同一入口与启用条件；其余层
+        // （Space/Esc 手势与退出）保持原有局部消费顺序不变。
+        if (
+          (event.ctrlKey || event.metaKey) &&
+          !event.altKey &&
+          !event.shiftKey &&
+          !event.repeat &&
+          shouldRunDocumentCommand(event.nativeEvent)
+        ) {
+          const key = event.key.toLowerCase();
+          if (key === "s" && canExport && !isExporting) {
+            event.preventDefault();
+            void saveAnnotatedImage();
+            return;
+          }
+          if (
+            key === "w" &&
+            session &&
+            !isExporting &&
+            !["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)
+          ) {
+            event.preventDefault();
+            void actions.run({ type: commands.closeScreenshotSession });
+            return;
+          }
+        }
         if (
           captureStyle &&
           session &&
@@ -2981,6 +3016,9 @@ export function ImageCanvasEditor({
             opacity: captureStyle && !sourceSize ? 0 : undefined,
           }}
           onKeyDown={(event) => {
+            // IME 组合（含标注文字输入结束前迟到的 229 键）不触发撤销/
+            // 删除/手势取消；非组合行为保持不变。
+            if (isImeCompositionEvent(event.nativeEvent)) return;
             const modifier = event.ctrlKey || event.metaKey;
             if (event.key === "Escape" && colorPickPendingRef.current) {
               // 取消画布取色：不触发选区清除/工具切换/会话关闭。
