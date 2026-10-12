@@ -522,6 +522,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
         ObserveCaptureState(state);
         if (cancellationToken.IsCancellationRequested) return;
         if (state.Change == WorkbenchStateChange.Reset) resync = true;
+        WorkbenchTheme? observedTheme = null;
         if (state.State is SettingsWorkbenchState settings)
         {
           // 原生 chrome 主题同步：既有 settings 真值变化时通知订阅窗口；
@@ -531,11 +532,13 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
           if (themeChanged)
           {
             lastTheme = settings.Theme;
-            ThemeObserved?.Invoke(settings.Theme);
+            // 主题通知不直接发出：随状态帧进入已受校验的投递回调，
+            // 旧订阅越过取消检查后无法再覆盖新 bootstrap 的主题。
+            observedTheme = settings.Theme;
           }
           if (fixedRoute is not null && !themeChanged && !resync) continue;
         }
-        if (!await PublishStateFrameAsync(activeSession, ProjectState(state), target, cancellationToken)) return;
+        if (!await PublishStateFrameAsync(activeSession, ProjectState(state), target, cancellationToken, observedTheme)) return;
         if (state.Change == WorkbenchStateChange.Ready) resync = false;
       }
     }
@@ -552,7 +555,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     }
   }
 
-  private async Task<bool> PublishStateFrameAsync(Guid activeSession, WorkbenchStateEnvelope state, CoreWebView2? target, CancellationToken cancellationToken)
+  private async Task<bool> PublishStateFrameAsync(Guid activeSession, WorkbenchStateEnvelope state, CoreWebView2? target, CancellationToken cancellationToken, WorkbenchTheme? observedTheme = null)
   {
     if (bridge is not { } registered) return false;
     bool Current() => !disposed && sessionId == activeSession && ReferenceEquals(core, target) &&
@@ -561,7 +564,13 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     string json = WorkbenchBridgeCodec.SerializeState(activeSession, state);
     await stateDelivery.PostAsync(registered.Enqueue, () =>
     {
-      if (Current()) registered.Post(json);
+      if (Current())
+      {
+        registered.Post(json);
+        // 通知与帧同链：仅当帧在投递期通过身份校验真正送达时才发出，
+        // 校验与 UI 转发之间不留可抢占窗口。
+        if (observedTheme is { } theme) ThemeObserved?.Invoke(theme);
+      }
     }, cancellationToken);
     return Current();
   }

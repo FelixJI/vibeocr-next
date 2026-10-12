@@ -65,7 +65,7 @@ public sealed class WebWorkbenchThemeObservationTests
     await fixture.Host.ReceiveWebMessageAsync(Bootstrap(Guid.NewGuid()), fixture.Document);
     Assert.Equal([WorkbenchTheme.Dark], fixture.ObservedSnapshot);
 
-    // 通知先于投递触发：以实际 Posted 的 settings 帧到达为准再断言。
+    // 主题随帧同链投递：以实际 Posted 的 settings 帧到达为准再断言。
     fixture.ReleaseStream();
     await WaitUntilPostedSettingsThemesAsync(fixture, ["light"]);
     Assert.Equal([WorkbenchTheme.Dark, WorkbenchTheme.Light], fixture.ObservedSnapshot);
@@ -90,6 +90,155 @@ public sealed class WebWorkbenchThemeObservationTests
     fixture.ReleaseStream();
     await recovery.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
     Assert.Empty(PostedSettingsThemes(fixture));
+  }
+
+  [Fact]
+  public async Task StaleSubscriptionThemeLandingAfterRebootstrapIsDroppedAtDelivery()
+  {
+    // 回归：旧订阅越过取消检查进入主题通知后，二次 bootstrap 已发布当前
+    // 主题才落地旧主题。enqueue 只排队、由测试在受控时机执行，模拟真实
+    // dispatcher 的异步出队，构造确定顺序。
+    await using RaceFixture fixture = new();
+    await fixture.Host.ReceiveWebMessageAsync(Bootstrap(Guid.NewGuid()), fixture.Document);
+    fixture.ReleaseFirstStream();
+    // 旧实现在消费点发出 System 通知（StaleThemeEntered）；新实现只把通知
+    // 随帧排队（StreamFrameQueued）。首个信号即区分两条路径。
+    Task firstSignal = await Task.WhenAny(fixture.StaleThemeEntered.Task, fixture.StreamFrameQueued.Task)
+      .WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+    await fixture.Host.ReceiveWebMessageAsync(Bootstrap(Guid.NewGuid()), fixture.Document);
+    fixture.RunQueued();
+    if (ReferenceEquals(firstSignal, fixture.StaleThemeEntered.Task))
+    {
+      // 旧路径：被挂起的 System 通知落地后（Dark 已先记录）再断言失败。
+      await fixture.StaleThemeLanded.Task.WaitAsync(
+        TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+    }
+    // 新路径：旧帧回调已在 RunQueued 内同步执行并被身份校验丢弃。
+    Assert.Equal([WorkbenchTheme.Light, WorkbenchTheme.Dark], fixture.ObservedSnapshot);
+  }
+
+  /// <summary>双 bootstrap 竞态夹具：enqueue 只排队不出队，由测试控制
+  /// 出队时机；System 主题订阅方在 Dark 落地前挂起。</summary>
+  private sealed class RaceFixture : IAsyncDisposable
+  {
+    private readonly TaskCompletionSource firstStreamGate =
+      new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource secondStreamGate =
+      new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int bootstrapCalls;
+    private volatile bool firstStreamReleased;
+
+    public readonly string Root = Path.Combine(Path.GetTempPath(), $"workbench-theme-race-{Guid.NewGuid():N}");
+    public readonly WebWorkbenchHost Host;
+    public readonly WorkbenchResourceBroker Broker;
+    public readonly WorkbenchAnnotationStore Annotations;
+    public readonly ConcurrentQueue<string> Posted = [];
+    public readonly ConcurrentQueue<WorkbenchTheme> Observed = [];
+    public readonly object Document = new();
+    public readonly TaskCompletionSource StaleThemeEntered =
+      new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public readonly TaskCompletionSource StaleThemeLanded =
+      new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public readonly TaskCompletionSource DarkThemeRecorded =
+      new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public readonly TaskCompletionSource StreamFrameQueued =
+      new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly ConcurrentQueue<Action> queued = [];
+    public List<string> PostedSnapshot => Posted.ToList();
+    public List<WorkbenchTheme> ObservedSnapshot => Observed.ToList();
+
+    public RaceFixture()
+    {
+      Directory.CreateDirectory(Root);
+      Broker = new WorkbenchResourceBroker(Root);
+      Annotations = new WorkbenchAnnotationStore(Root);
+      Host = new WebWorkbenchHost(
+        new RaceApplication(this),
+        Broker,
+        Annotations,
+        applicationOwner: false,
+        fixedRoute: null);
+      Host.RegisterBridge(Document, Posted.Enqueue, action =>
+      {
+        queued.Enqueue(action);
+        if (firstStreamReleased && !StreamFrameQueued.Task.IsCompleted)
+          StreamFrameQueued.TrySetResult();
+        return true;
+      });
+      Host.ThemeObserved += theme =>
+      {
+        if (theme == WorkbenchTheme.System)
+        {
+          StaleThemeEntered.TrySetResult();
+          DarkThemeRecorded.Task.WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
+          Observed.Enqueue(theme);
+          StaleThemeLanded.TrySetResult();
+          return;
+        }
+        Observed.Enqueue(theme);
+        if (theme == WorkbenchTheme.Dark) DarkThemeRecorded.TrySetResult();
+      };
+    }
+
+    public void ReleaseFirstStream()
+    {
+      firstStreamReleased = true;
+      firstStreamGate.TrySetResult();
+    }
+
+    public void RunQueued()
+    {
+      while (queued.TryDequeue(out Action? action)) action();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+      firstStreamGate.TrySetResult();
+      secondStreamGate.TrySetResult();
+      DarkThemeRecorded.TrySetResult();
+      await Host.DisposeAsync();
+      Broker.Dispose();
+      Annotations.Dispose();
+      Directory.Delete(Root, recursive: true);
+    }
+
+    private sealed class RaceApplication(RaceFixture owner) : IWorkbenchApplication
+    {
+      public ValueTask<WorkbenchBootstrap> BootstrapAsync(CancellationToken cancellationToken)
+      {
+        WorkbenchTheme theme = Interlocked.Increment(ref owner.bootstrapCalls) == 1
+          ? WorkbenchTheme.Light
+          : WorkbenchTheme.Dark;
+        return ValueTask.FromResult(new WorkbenchBootstrap(
+          WorkbenchProtocol.Version,
+          Guid.NewGuid(),
+          0,
+          WorkbenchRoute.Recognition,
+          [State(0, theme)],
+          new HashSet<string>()));
+      }
+
+      public ValueTask<WorkbenchCommandReceipt> ExecuteAsync(
+        WorkbenchCommandEnvelope envelope,
+        CancellationToken cancellationToken) => throw new InvalidOperationException(
+        "Theme race tests do not execute commands.");
+
+      public async IAsyncEnumerable<WorkbenchStateEnvelope> SubscribeAsync(
+        long afterRevision,
+        [EnumeratorCancellation] CancellationToken cancellationToken,
+        IReadOnlySet<string>? scopes = null)
+      {
+        TaskCompletionSource gate = Volatile.Read(ref owner.bootstrapCalls) == 1
+          ? owner.firstStreamGate
+          : owner.secondStreamGate;
+        try { await gate.Task.WaitAsync(cancellationToken); }
+        catch (OperationCanceledException) { yield break; }
+        if (ReferenceEquals(gate, owner.firstStreamGate))
+          yield return State(++afterRevision, WorkbenchTheme.System);
+      }
+
+      public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
   }
 
   private static async Task WaitUntilObservedAsync(ThemeFixture fixture, int expected)
