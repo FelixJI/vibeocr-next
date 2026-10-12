@@ -3280,12 +3280,12 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   /// <summary>
-  /// 选区动作栏图标契约：目录键全部可解析为非空矢量 path（旧 FontIcon
-  /// 字形在系统字体缺失时会渲染为空白）；易混淆组（文字/表格/公式、
-  /// 马赛克/模糊、画笔/荧光笔）必须使用互不相同的形状，不靠颜色区分。
+  /// 选区动作栏图标契约：目录键全部解析为非空官方字形；易混淆组
+  /// （文字/表格/公式、马赛克/模糊、画笔/荧光笔）必须使用互不相同的
+  /// 字形，不靠颜色区分。
   /// </summary>
   [Fact]
-  public void SelectionToolbarIconCatalogResolvesDistinctVectorPaths()
+  public void SelectionToolbarIconCatalogResolvesDistinctStableGlyphs()
   {
     string[] toolbarKeys =
     [
@@ -3296,7 +3296,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       "reselect", "exit", "magnifier", "confirm", "undo", "redo",
     ];
     Assert.All(toolbarKeys, key =>
-      Assert.True(ScreenshotToolbarIcons.TryGetPath(key) is not null, $"缺失图标：{key}"));
+      Assert.True(ScreenshotToolbarIcons.TryGetGlyph(key) is not null, $"缺失图标：{key}"));
     foreach (string[] group in new string[][]
              {
                ["textRecognition", "tableRecognition", "formulaRecognition"],
@@ -3304,8 +3304,8 @@ public sealed class ScreenshotSessionWorkbenchTests
                ["pen", "highlighter"],
              })
     {
-      // 同组内形状必须可区分：不同键不得解析到同一条 path 数据。
-      Assert.Equal(group.Length, group.Select(ScreenshotToolbarIcons.TryGetPath).ToHashSet().Count);
+      // 同组内形状必须可区分：不同键不得解析到同一字形。
+      Assert.Equal(group.Length, group.Select(ScreenshotToolbarIcons.TryGetGlyph).ToHashSet().Count);
     }
   }
 

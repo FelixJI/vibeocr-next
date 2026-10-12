@@ -43,6 +43,11 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import type { AppActions } from "../app/types";
+
+import {
+  isImeCompositionEvent,
+  shouldRunDocumentCommand,
+} from "../app/keyboard";
 import {
   exclusionCoversOutput,
   exclusionDisplayPoints,
@@ -398,6 +403,7 @@ export function ImageCanvasEditor({
     sceneViewport.height,
   );
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement | undefined>(undefined);
   const dragStart = useRef<Point | undefined>(undefined);
   const selectedMarkRef = useRef<number | undefined>(undefined);
@@ -2306,6 +2312,10 @@ export function ImageCanvasEditor({
       : readLayerSelection();
     if (!session || !text || !layerSelectionKey) return;
     setCopyMenu(undefined);
+    // 浮层按钮即将卸载：把焦点还给始终可见且可聚焦的图片视口容器
+    // （layerReady 时画布 display:none 不可聚焦），避免焦点落到 body 后
+    // Tab 从头开始。
+    viewportRef.current?.focus({ preventScroll: true });
     try {
       const copied = await actions.run({
         type: commands.copyScreenshotSelection,
@@ -2338,13 +2348,65 @@ export function ImageCanvasEditor({
 
   const textLayerHint = textLayerStatusLabel(textLayer);
 
+  // 容器外的工作台控件也可调用文档命令；ref 保留最新回调。
+  const documentCommandRef = useRef({
+    save: saveAnnotatedImage,
+    close: () => actions.run({ type: commands.closeScreenshotSession }),
+    canExport,
+    isExporting,
+    hasSession: !!session,
+  });
+  useEffect(() => {
+    documentCommandRef.current = {
+      save: saveAnnotatedImage,
+      close: () => actions.run({ type: commands.closeScreenshotSession }),
+      canExport,
+      isExporting,
+      hasSession: !!session,
+    };
+  });
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        !shouldRunDocumentCommand(event) ||
+        event.repeat ||
+        event.altKey ||
+        event.shiftKey ||
+        !(event.ctrlKey || event.metaKey)
+      )
+        return;
+      const key = event.key.toLowerCase();
+      const state = documentCommandRef.current;
+      if (key === "s" && state.canExport && !state.isExporting) {
+        event.preventDefault();
+        void state.save();
+        return;
+      }
+      if (
+        key === "w" &&
+        state.hasSession &&
+        !state.isExporting &&
+        !["INPUT", "TEXTAREA", "SELECT"].includes(
+          (event.target as HTMLElement | null)?.tagName ?? "",
+        )
+      ) {
+        event.preventDefault();
+        void state.close();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   return (
     <div
       className={`canvas-editor${captureStyle ? " capture-scene-editor" : ""}`}
       style={captureStyle}
       data-screenshot-session={session?.sessionId ?? ""}
       onKeyDown={(event) => {
+        if (isImeCompositionEvent(event.nativeEvent)) return;
         const target = event.target as HTMLElement;
+        // 文档命令由 window 消费，画布手势仍在本地处理。
         if (
           captureStyle &&
           session &&
@@ -2880,6 +2942,7 @@ export function ImageCanvasEditor({
       <div
         aria-label="图片视口"
         className={`canvas-stage${panning ? " is-panning" : ""}`}
+        ref={viewportRef}
         tabIndex={0}
         style={{
           ["--editor-zoom" as string]: zoom,
@@ -2981,6 +3044,9 @@ export function ImageCanvasEditor({
             opacity: captureStyle && !sourceSize ? 0 : undefined,
           }}
           onKeyDown={(event) => {
+            // IME 组合（含标注文字输入结束前迟到的 229 键）不触发撤销/
+            // 删除/手势取消；非组合行为保持不变。
+            if (isImeCompositionEvent(event.nativeEvent)) return;
             const modifier = event.ctrlKey || event.metaKey;
             if (event.key === "Escape" && colorPickPendingRef.current) {
               // 取消画布取色：不触发选区清除/工具切换/会话关闭。

@@ -316,3 +316,116 @@ describe("RecognitionPage lean editor", () => {
     unmount();
   });
 });
+
+describe("Windows document commands (Ctrl+O / Ctrl+C)", () => {
+  function focusDocument(focused: boolean) {
+    Object.defineProperty(document, "hasFocus", {
+      configurable: true,
+      value: () => focused,
+    });
+  }
+  const shortcut = (key: string, init: Record<string, unknown> = {}) =>
+    fireEvent.keyDown(window, { key, ctrlKey: true, bubbles: true, ...init });
+
+  afterEach(() => {
+    delete (document as { hasFocus?: () => boolean }).hasFocus;
+    document.getSelection()?.removeAllRanges();
+  });
+
+  it("imageEdit opens an image with the same entry and skips the capture scene window", () => {
+    focusDocument(true);
+    const run = vi.fn().mockResolvedValue(true);
+    const actions = { run, navigate: vi.fn(), setTheme: vi.fn() };
+    const { unmount } = render(
+      <ImageEditPage
+        viewState={viewState(
+          { imageEdit: imageEditWithInput },
+          editorCapabilities,
+        )}
+        actions={actions}
+      />,
+    );
+    shortcut("o");
+    expect(run).toHaveBeenLastCalledWith({ type: "imageEdit.selectImage" });
+    unmount();
+
+    // scene=1 截图现场窗由编辑器会话命令承载，不接收文档级打开。
+    window.location.hash = "#/imageEdit?scene=1";
+    const sceneRun = vi.fn().mockResolvedValue(true);
+    const sceneView = render(
+      <ImageEditPage
+        viewState={viewState(
+          { imageEdit: imageEditWithInput },
+          editorCapabilities,
+        )}
+        actions={{ run: sceneRun, navigate: vi.fn(), setTheme: vi.fn() }}
+      />,
+    );
+    shortcut("o");
+    expect(sceneRun).not.toHaveBeenCalled();
+    sceneView.unmount();
+  });
+
+  it("recognition Ctrl+C yields when no result exists (copy toolbar mirror)", () => {
+    // 回归：旧代码只看 capability，无结果时 Ctrl+C 仍发 recognition.copy，
+    // 宿主端无果可复制只能走异常恢复；镜像工具栏渲染条件后不再接管。
+    focusDocument(true);
+    const run = vi.fn().mockResolvedValue(true);
+    const view = render(
+      <RecognitionPage
+        viewState={viewState({ recognition: {} }, [
+          ...editorCapabilities,
+          "recognition.results",
+        ])}
+        actions={{ run, navigate: vi.fn(), setTheme: vi.fn() }}
+      />,
+    );
+    shortcut("c");
+    expect(run).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "recognition.copy" }),
+    );
+    // 无结果不影响打开入口。
+    shortcut("o");
+    expect(run).toHaveBeenLastCalledWith({ type: "recognition.selectImage" });
+    view.unmount();
+  });
+
+  it("recognition copies text without a selection and yields to real text selections or editable targets", () => {
+    focusDocument(true);
+    const run = vi.fn().mockResolvedValue(true);
+    const view = render(
+      <RecognitionPage
+        viewState={viewState({ recognition: recognitionWithResult }, [
+          ...editorCapabilities,
+          "recognition.results",
+        ])}
+        actions={{ run, navigate: vi.fn(), setTheme: vi.fn() }}
+      />,
+    );
+    shortcut("o");
+    expect(run).toHaveBeenLastCalledWith({ type: "recognition.selectImage" });
+    shortcut("c");
+    expect(run).toHaveBeenLastCalledWith({
+      type: "recognition.copy",
+      format: "plain",
+    });
+
+    // 结果文本存在可见选择：Ctrl+C 交回原生复制，不发文档命令。
+    const selection = document.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(screen.getByText("识别结果"));
+    selection?.addRange(range);
+    run.mockClear();
+    shortcut("c");
+    expect(run).not.toHaveBeenCalled();
+
+    // 目标本身是输入控件（显示缩放下拉）：同样交回默认行为。
+    fireEvent.keyDown(screen.getByLabelText("显示缩放"), {
+      key: "c",
+      ctrlKey: true,
+      bubbles: true,
+    });
+    expect(run).not.toHaveBeenCalled();
+    view.unmount();
+  });
+});

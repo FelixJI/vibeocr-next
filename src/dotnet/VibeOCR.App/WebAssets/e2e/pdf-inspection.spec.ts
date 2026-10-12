@@ -271,3 +271,112 @@ test("same named PDF documents bind commands and restore only their own draft at
     fullPage: true,
   });
 });
+
+test("forced-colors keeps PDF text boxes from painting over the preview", async ({
+  page,
+}) => {
+  // 回归（#217 review P2）：forced-colors 下普通/native/悬停/选中文字框的
+  // 最终 computed 背景必须保持透明，边框用系统色（CanvasText/Highlight），
+  // 不再用品牌蓝/棕。旧实现把 forced-colors 规则放在普通规则之前，同特异性
+  // 时被后面的 #157aca18/#157aca35 半透明背景覆盖，此测试失败。
+  await page.emulateMedia({ forcedColors: "active" });
+  await page.route("**/pdf-test-inspect.json", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        page: 0,
+        ocr_blocks: [
+          {
+            index: 2,
+            text: "HC-OCR-BOX",
+            score: 0,
+            score_unknown: true,
+            bbox: [100, 200, 900, 300],
+          },
+        ],
+        native_lines: [
+          { text_preview: "HC-NATIVE-BOX", bbox: [100, 400, 900, 500] },
+        ],
+      }),
+    }),
+  );
+  await page.route("**/pdf-test-hd.svg", (route) =>
+    route.fulfill({
+      contentType: "image/svg+xml",
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="2400"><rect width="1800" height="2400" fill="white"/><text x="180" y="600" font-size="72">HC forced colors preview</text></svg>',
+    }),
+  );
+  const pdfState = {
+    sessionId: "pdf-real-session",
+    pageCount: 1,
+    selectedPage: 0,
+    selectedPages: [0],
+    revision: 3,
+    isModified: true,
+    pageInspectStatusCode: "pdf.inspect.ready",
+    canInspectPage: true,
+    canCorrectText: true,
+    pagePreview: {
+      url: "/pdf-test-hd.svg",
+      mediaType: "image/png",
+      byteLength: 100,
+    },
+    pageInspect: {
+      url: "/pdf-test-inspect.json",
+      mediaType: "application/json",
+      byteLength: 300,
+    },
+    pages: [
+      {
+        index: 0,
+        statusCode: "pdf.page.done",
+        detected: true,
+        hasTextLayer: true,
+        addedThisSession: true,
+      },
+    ],
+  };
+  await mountHost(page, {
+    ...snapshot,
+    route: "pdf",
+    features: { pdf: pdfState },
+  });
+  await expect(page.getByAltText("当前第 1 页高清预览")).toBeVisible();
+  const ocrBox = page.getByRole("button", {
+    name: /OCR · 置信度未知 · HC-OCR-BOX/,
+  });
+  const nativeBox = page.getByRole("button", {
+    name: /已有 PDF 文字层 \/ 来源未知 · 置信度未知 · HC-NATIVE-BOX/,
+  });
+  await expect(ocrBox).toBeVisible();
+  await expect(nativeBox).toBeVisible();
+  const read = (locator: ReturnType<typeof page.locator>) =>
+    locator.evaluate((node) => {
+      const style = getComputedStyle(node);
+      return {
+        background: style.backgroundColor,
+        borderColor: style.borderColor,
+        borderWidth: style.borderTopWidth,
+      };
+    });
+  // 普通与 native：背景 alpha 为 0（forced-colors 下 Chromium 会把
+  // transparent 序列化为画布色+0 透明度；旧实现是半透明品牌色，
+  // alpha 不为 0，此断言失败），边框不再是品牌蓝/棕。
+  const fullyTransparent = (value: string) =>
+    /^rgba\(\d+, \d+, \d+, 0\)$/.test(value);
+  const normal = await read(ocrBox);
+  expect(fullyTransparent(normal.background)).toBe(true);
+  expect(normal.borderColor).not.toBe("rgb(21, 122, 202)");
+  const native = await read(nativeBox);
+  expect(fullyTransparent(native.background)).toBe(true);
+  expect(native.borderColor).not.toBe("rgb(152, 102, 20)");
+  // 悬停：forced 覆盖组包含 :hover，背景保持全透明。
+  await ocrBox.hover();
+  expect(fullyTransparent((await read(ocrBox)).background)).toBe(true);
+  // 选中：背景仍全透明，边框为 Highlight 系统色且 2px，可区分普通框。
+  await ocrBox.click();
+  const selected = await read(ocrBox);
+  expect(fullyTransparent(selected.background)).toBe(true);
+  expect(selected.borderColor).not.toBe("rgb(21, 122, 202)");
+  expect(selected.borderWidth).toBe("2px");
+});
