@@ -1,3 +1,9 @@
+import {
+  isCaptureScene,
+  type CaptureScene,
+  type CapturePixelFailure,
+} from "./captureScene";
+
 export const BRIDGE_VERSION = 2 as const;
 export const MAX_BRIDGE_BYTES = 64 * 1024;
 
@@ -28,6 +34,7 @@ export interface AppSnapshot {
   readonly theme: "system" | "light" | "dark";
   readonly capabilities: readonly string[];
   readonly features: Readonly<Record<string, unknown>>;
+  readonly captureScene?: CaptureScene | null;
 }
 
 export interface HostCommand {
@@ -101,6 +108,10 @@ export class ChromeWebViewTransport implements WebViewTransport {
 
 export interface HostBridge {
   bootstrap(): Promise<AppSnapshot>;
+  reportCapturePixels?(
+    scene: CaptureScene,
+    failure?: CapturePixelFailure,
+  ): void;
   execute(command: HostCommand): Promise<CommandResult>;
   subscribe(listener: (event: HostStateEvent) => void): () => void;
   subscribeStateFailure?(listener: (error: Error) => void): () => void;
@@ -130,6 +141,8 @@ export class BridgeClient implements HostBridge {
   private readonly unsubscribe: () => void;
   private sessionId?: string;
   private revision = -1;
+  private captureScene?: CaptureScene;
+  private captureReported = false;
   private projectedScopes = new Set<string>();
   private recovery?: { revision: number; states: Map<string, unknown> };
   private stateFailed = false;
@@ -159,6 +172,8 @@ export class BridgeClient implements HostBridge {
     this.rejectStartup(new BridgeProtocolError("Bootstrap was superseded."));
     this.rejectSupersededBootstraps();
     this.sessionId = undefined;
+    this.captureScene = undefined;
+    this.captureReported = false;
     this.clearRecovery();
     this.stateFailed = false;
     return this.request("app.bootstrap", {}).then((payload) => {
@@ -175,6 +190,7 @@ export class BridgeClient implements HostBridge {
           route: control.route,
           theme: control.theme,
           capabilities: control.capabilities,
+          captureScene: control.captureScene,
         };
         return new Promise<AppSnapshot>((resolve, reject) => {
           this.startup = { snapshot, resolve, reject };
@@ -184,6 +200,7 @@ export class BridgeClient implements HostBridge {
         });
       }
       const snapshot = parseAppSnapshot(payload);
+      this.captureScene = snapshot.captureScene ?? undefined;
       this.sessionId = snapshot.sessionId;
       this.revision = snapshot.revision;
       this.projectedScopes = new Set([
@@ -192,6 +209,41 @@ export class BridgeClient implements HostBridge {
       ]);
       return snapshot;
     });
+  }
+
+  reportCapturePixels(
+    scene: CaptureScene,
+    failure?: CapturePixelFailure,
+  ): void {
+    if (
+      this.disposed ||
+      this.startup ||
+      this.stateFailed ||
+      !this.sessionId ||
+      this.captureScene !== scene ||
+      this.captureReported
+    )
+      return;
+    const envelope: BridgeEnvelope = {
+      version: BRIDGE_VERSION,
+      kind: "event",
+      id: this.idFactory(),
+      type: failure ? "capture.pixelFailed" : "capture.pixelReady",
+      payload: {
+        sessionId: this.sessionId,
+        captureScene: scene,
+        ...(failure ? { reason: failure } : {}),
+      },
+    };
+    if (
+      new TextEncoder().encode(JSON.stringify(envelope)).byteLength >
+      this.maxBytes
+    )
+      throw new BridgeProtocolError(
+        "Capture pixel report exceeds the size limit.",
+      );
+    this.transport.postMessage(envelope);
+    this.captureReported = true;
   }
 
   execute(command: HostCommand): Promise<CommandResult> {
@@ -477,6 +529,7 @@ export class BridgeClient implements HostBridge {
           throw this.failState("Workbench startup snapshot is invalid.");
         }
         this.startup = undefined;
+        this.captureScene = snapshot.captureScene ?? undefined;
         startup.resolve(snapshot);
         return;
       }
@@ -532,6 +585,7 @@ function parseBootstrapControl(
       "capabilities",
       "stateTransfer",
       "stateScopes",
+      ...("captureScene" in payload ? ["captureScene"] : []),
     ]) ||
     payload.stateTransfer !== "snapshot" ||
     !Array.isArray(payload.stateScopes) ||
@@ -550,6 +604,9 @@ function parseBootstrapControl(
     theme: payload.theme,
     capabilities: payload.capabilities,
     features: {},
+    ...("captureScene" in payload
+      ? { captureScene: payload.captureScene }
+      : {}),
   });
   return payload as unknown as BootstrapControl;
 }
@@ -600,6 +657,7 @@ function parseAppSnapshot(payload: Record<string, unknown>): AppSnapshot {
       "theme",
       "capabilities",
       "features",
+      ...("captureScene" in payload ? ["captureScene"] : []),
     ]) ||
     typeof payload.sessionId !== "string" ||
     payload.sessionId.length === 0 ||
@@ -614,7 +672,8 @@ function parseAppSnapshot(payload: Record<string, unknown>): AppSnapshot {
     !payload.capabilities.every(
       (capability) => typeof capability === "string" && capability.length > 0,
     ) ||
-    !isRecord(payload.features)
+    !isRecord(payload.features) ||
+    (payload.captureScene != null && !isCaptureScene(payload.captureScene))
   ) {
     throw new BridgeProtocolError("Invalid app.bootstrap payload.");
   }

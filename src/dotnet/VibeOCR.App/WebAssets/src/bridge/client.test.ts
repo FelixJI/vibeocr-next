@@ -390,3 +390,125 @@ describe("HostBridge", () => {
     unsubscribe();
   });
 });
+
+describe("capture bootstrap presentation", () => {
+  const scene = {
+    surfaceId: "surface",
+    captureSessionId: "capture",
+    inputUrl: "https://app.vibeocr/__resource/input",
+    inputRevision: 0,
+    documentGeneration: 2,
+    bootstrapGeneration: 3,
+    x: 100,
+    y: 100,
+    width: 800,
+    height: 400,
+    desktopWidth: 3840,
+    desktopHeight: 2160,
+    initialTool: "select",
+  };
+  function response(
+    transport: FakeTransport,
+    payload: Record<string, unknown>,
+  ) {
+    const request = transport.posted.at(-1)!;
+    transport.receive({ ...request, kind: "response", payload });
+  }
+  function state(
+    transport: FakeTransport,
+    change: "reset" | "replace" | "ready",
+    scope: string,
+    value?: unknown,
+  ) {
+    transport.receive({
+      version: 2,
+      kind: "event",
+      id: "state",
+      type: "app.state",
+      payload: {
+        sessionId: "bridge",
+        revision: 1,
+        scope,
+        change,
+        ...(value !== undefined ? { state: value } : {}),
+      },
+    });
+  }
+  const metadata = {
+    sessionId: "bridge",
+    revision: 1,
+    route: "imageEdit",
+    theme: "dark",
+    capabilities: [],
+    captureScene: scene,
+  };
+
+  it("keeps large startup metadata private until the complete snapshot atomically commits", async () => {
+    const transport = new FakeTransport();
+    const bridge = new BridgeClient(transport);
+    const starting = bridge.bootstrap();
+    response(transport, {
+      ...metadata,
+      stateTransfer: "snapshot",
+      stateScopes: ["shell", "recognition"],
+    });
+    await Promise.resolve();
+    bridge.reportCapturePixels(scene);
+    expect(transport.posted).toHaveLength(1);
+    state(transport, "reset", "shell");
+    state(transport, "replace", "shell", { route: "imageEdit" });
+    state(transport, "replace", "recognition", {
+      input: { url: scene.inputUrl },
+      screenshotSession: { sessionId: "capture", revision: 0 },
+    });
+    state(transport, "ready", "shell");
+    const snapshot = await starting;
+    expect(snapshot.captureScene).toBe(scene);
+    bridge.reportCapturePixels(snapshot.captureScene!);
+    bridge.reportCapturePixels(snapshot.captureScene!);
+    expect(transport.posted).toHaveLength(2);
+    expect(transport.posted[1]).toMatchObject({
+      kind: "event",
+      type: "capture.pixelReady",
+      payload: { sessionId: "bridge", captureScene: scene },
+    });
+    bridge.dispose();
+  });
+
+  it("rejects invalid geometry and suppresses reports from superseded or disposed bootstraps", async () => {
+    const transport = new FakeTransport();
+    const bridge = new BridgeClient(transport);
+    const malformed = bridge.bootstrap();
+    response(transport, {
+      ...metadata,
+      captureScene: { ...scene, width: 9999 },
+      features: {},
+    });
+    await expect(malformed).rejects.toThrow("Invalid app.bootstrap");
+    const first = bridge.bootstrap();
+    response(transport, { ...metadata, features: {} });
+    const old = await first;
+    const newerScene = { ...scene, bootstrapGeneration: 4 };
+    const second = bridge.bootstrap();
+    response(transport, {
+      ...metadata,
+      captureScene: newerScene,
+      features: {},
+    });
+    await second;
+    bridge.reportCapturePixels(old.captureScene!);
+    expect(
+      transport.posted.filter((message) => message.type.startsWith("capture.")),
+    ).toHaveLength(0);
+    bridge.reportCapturePixels(newerScene, "sourceDecode");
+    expect(transport.posted.at(-1)).toMatchObject({
+      type: "capture.pixelFailed",
+      payload: { reason: "sourceDecode" },
+    });
+    bridge.dispose();
+    bridge.reportCapturePixels(newerScene);
+    expect(
+      transport.posted.filter((message) => message.type.startsWith("capture.")),
+    ).toHaveLength(1);
+  });
+});

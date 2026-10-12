@@ -1002,6 +1002,8 @@ public sealed class ScreenshotSessionWorkbenchTests
           Environment.TickCount64 < deadline)
           await Task.Delay(10, TestContext.Current.CancellationToken);
         Assert.True(remaining.Length == 0, string.Join(Environment.NewLine, remaining));
+        Assert.Equal(0, broker.ActiveResourceCount);
+        Assert.Equal((0, 0, 0), annotations.ActiveCounts);
       }
       Assert.Equal(0, inference.SubmitCalls);
     }

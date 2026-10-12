@@ -18,6 +18,8 @@ public sealed class SelfTestInstanceScopeTests
   }
 
   [Theory]
+  [InlineData("capture-first-frame-e2e")]
+  [InlineData("capture-replacement-e2e")]
   [InlineData("web-ready")]
   [InlineData("screenshot-e2e")]
   [InlineData("text-selection-e2e")]
@@ -72,6 +74,9 @@ public sealed class SelfTestInstanceScopeTests
   }
 
   [Theory]
+  [InlineData("capture-first-frame-e2e", null)]
+  [InlineData("capture-replacement-e2e", null)]
+  [InlineData("capture-first-frame-e2e", "not-a-guid")]
   [InlineData("web-ready", null)]
   [InlineData("web-ready", "not-a-guid")]
   [InlineData("screenshot-e2e", null)]

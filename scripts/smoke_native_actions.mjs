@@ -51,7 +51,7 @@ async function freeLocalPort() {
 }
 
 async function native(action, options = {}) {
-  const pointerAction = ['mouse-move', 'mouse-down', 'mouse-up', 'frame', 'geometry'].includes(action);
+  const pointerAction = ['mouse-move', 'mouse-down', 'mouse-up', 'mouse-right', 'frame', 'geometry'].includes(action);
   const script = pointerAction ? path.join(scriptDir, 'scroll_capture_fixture.ps1') : nativeScript;
   const args = ['-NoProfile', '-NonInteractive', '-File', script,
     '-Action', action];
@@ -95,6 +95,44 @@ function parseRect(value) {
   assert([left, top, right, bottom].every(Number.isSafeInteger) &&
     right > left && bottom > top, 'Synthetic fixture geometry is invalid.');
   return { left, top, right, bottom, width: right - left, height: bottom - top };
+}
+
+// Capture-scene canvas geometry: the physical selection must map exactly
+// through the measured editor WebView viewport (no window.vibeocrCaptureScene).
+function assertCaptureCanvasLayout({ box, selection, desktopClient, viewport }) {
+  const tolerance = 2;
+  const finite = Number.isFinite;
+  assert(finite(desktopClient?.X) && finite(desktopClient?.Y) &&
+    finite(desktopClient?.Width) && desktopClient.Width > 0 &&
+    finite(desktopClient?.Height) && desktopClient.Height > 0,
+    `Frozen desktop client geometry is invalid: ${JSON.stringify(desktopClient)}.`);
+  assert(finite(selection?.left) && finite(selection?.top) &&
+    finite(selection?.width) && selection.width > 0 &&
+    finite(selection?.height) && selection.height > 0,
+    `Physical selection geometry is invalid: ${JSON.stringify(selection)}.`);
+  const left = selection.left - desktopClient.X;
+  const top = selection.top - desktopClient.Y;
+  assert(left >= 0 && top >= 0 &&
+    left + selection.width <= desktopClient.Width &&
+    top + selection.height <= desktopClient.Height,
+    'Physical selection escaped the frozen desktop client.');
+  assert(finite(viewport?.width) && viewport.width > 0 &&
+    finite(viewport?.height) && viewport.height > 0,
+    `Editor WebView viewport is invalid: ${JSON.stringify(viewport)}.`);
+  assert(box && finite(box.x) && finite(box.y) &&
+    finite(box.width) && box.width > 0 && finite(box.height) && box.height > 0,
+    `Editor canvas has no positive finite visual bounds: ${JSON.stringify(box)}.`);
+  const scale = { x: viewport.width / desktopClient.Width,
+    y: viewport.height / desktopClient.Height };
+  const expected = { x: left * scale.x, y: top * scale.y,
+    width: selection.width * scale.x, height: selection.height * scale.y };
+  for (const field of ['x', 'y', 'width', 'height'])
+    assert(Math.abs(box[field] - expected[field]) <= tolerance,
+      `Editor canvas ${field} is ${box[field]} instead of the physical→CSS ` +
+      `mapping ${expected[field]} (±${tolerance} CSS px).`);
+  return { measured: { ...box }, expected, scale, tolerance,
+    selection: { ...selection }, desktopClient: { ...desktopClient },
+    viewport: { ...viewport } };
 }
 
 async function firstLine(child, timeoutMs) {
@@ -597,10 +635,11 @@ async function verifyManualHandleEvidence(app, overlay, desktop, button, gesture
   assert(afterHover.includes(manualLabel(rect.width, rect.height)),
     `Hovering the eight handles changed the selection: ${afterHover}`);
 
-  // Leaving every hit range restores raw-pointer sampling and the cross cursor.
-  await observe({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
-    'cross', { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
-    'off-handle-center', 1);
+  // Outside both the handles and selection, the magnifier samples the pointer.
+  const offHandle = { x: rect.left + rect.width / 2, y: rect.top - 20 };
+  assert(offHandle.y > desktopY, 'Manual selection touches the desktop top edge.');
+  const outsideObservation = await observe(offHandle, 'cross', offHandle, 'off-selection', 1);
+  outsideObservation.crossCheck = false; // This frozen pixel is outside the final crop.
 
   // Pressing and releasing on a handle must never confirm the selection.
   await native('mouse-move', point(anchors[0].x + 2, anchors[0].y + 2));
@@ -635,7 +674,8 @@ async function verifyManualHandleEvidence(app, overlay, desktop, button, gesture
   }
 
   // Back to the exact manual selection for the remaining edge and tiny checks.
-  await native('escape', { AppPid: appPid });
+  await native('mouse-move', point(rect.left + 20, rect.top + 10));
+  await native('mouse-right', point(rect.left + 20, rect.top + 10));
   await delay(150);
   const redrawn = await dragHandle({ x: rect.left, y: rect.top },
     { x: rect.left + rect.width, y: rect.top + rect.height });
@@ -662,7 +702,8 @@ async function verifyManualHandleEvidence(app, overlay, desktop, button, gesture
 
   // Tiny 4x4 selection: all eight handles overlap; the nearest-anchor rule
   // still switches between the two inclusive corner pixels deterministically.
-  await native('escape', { AppPid: appPid });
+  await native('mouse-move', point(rect.left + 20, rect.top + 10));
+  await native('mouse-right', point(rect.left + 20, rect.top + 10));
   await delay(150);
   const tx = rect.left + 20, ty = rect.top + 10;
   const tinySeed = await dragHandle({ x: tx, y: ty }, { x: tx + 20, y: ty + 20 });
@@ -676,7 +717,8 @@ async function verifyManualHandleEvidence(app, overlay, desktop, button, gesture
   await observe({ x: tx + 4, y: ty + 4 }, 'sizeNWSE', { x: tx + 3, y: ty + 3 }, 'tiny-bottom-right');
 
   // Restore the exact manual selection so the shipped pixel assertions hold.
-  await native('escape', { AppPid: appPid });
+  await native('mouse-move', point(rect.left + 20, rect.top + 10));
+  await native('mouse-right', point(rect.left + 20, rect.top + 10));
   await delay(150);
   const restored = await dragHandle({ x: rect.left, y: rect.top },
     { x: rect.left + rect.width, y: rect.top + rect.height });
@@ -882,8 +924,9 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
     const cropLeft = selectedRegion.left, cropTop = selectedRegion.top;
     const checkable = gesture.manualHandleEvidence
       .filter((item) => item.crossCheck !== false);
-    assert.equal(gesture.manualHandleEvidence.length - checkable.length, 1,
-      'Exactly the screen-edge magnifier observation may fall outside the crop.');
+    assert.deepEqual(gesture.manualHandleEvidence.filter((item) => item.crossCheck === false)
+      .map((item) => item.context), ['off-selection', 'screen-edge-corner'],
+    'Only the off-selection and screen-edge observations may be outside the crop.');
     for (const observed of checkable) {
       const px = observed.sample.x - cropLeft, py = observed.sample.y - cropTop;
       assert(px >= 0 && py >= 0 && px < width && py < height,
@@ -902,7 +945,14 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
   await page.getByRole('button', { name: '矩形', exact: true }).click();
   await page.getByRole('combobox', { name: '线条宽度' }).selectOption('8');
   const box = await editor.boundingBox();
-  assert(box && box.width > 100 && box.height > 100, 'Editor canvas has no usable visual bounds.');
+  // A CSS size floor would reject the legitimate 140x42 crop at 175% DPI;
+  // verify the exact physical→CSS mapping of the first frame instead.
+  pixelEvidence.canvasLayout = assertCaptureCanvasLayout({
+    box,
+    selection: selectedRegion,
+    desktopClient: client,
+    viewport: await page.evaluate(() => ({ width: innerWidth, height: innerHeight })),
+  });
   await page.mouse.move(box.x + box.width * 0.35, box.y + box.height * 0.45);
   await page.mouse.down();
   await page.mouse.move(box.x + box.width * 0.65, box.y + box.height * 0.55);
@@ -1143,7 +1193,8 @@ async function main() {
 
 export { native, windows, waitForWindows, area, inside, delay, startFixture,
   launchApp, openSettings, toolbarStatus, setCheckbox, stopOwned, configure,
-  captureThroughHotkey, taskbarState, pngPixels, focusRecorder };
+  captureThroughHotkey, taskbarState, pngPixels, focusRecorder,
+  assertCaptureCanvasLayout };
 
 if (path.resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
   main().catch((error) => {

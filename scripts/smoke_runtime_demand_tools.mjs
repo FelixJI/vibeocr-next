@@ -721,7 +721,7 @@ async function captureStep(ctx) {
 // Post-exit combined zero evidence: owned CIM lineage classes, candidate
 // AppLog runtime-demand/Installer markers (must exist and be non-empty) and
 // fresh-state environment surfaces (both possible store anchors).
-function zeroEvidence(copy, root, appPid) {
+export function zeroEvidence(copy, root, appPid) {
   const violations = [];
   const starts = jsonLines(path.join(root, 'process-starts.jsonl'));
   const forbidden = starts.filter((entry) => forbiddenClasses.has(entry.class));

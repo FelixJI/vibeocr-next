@@ -16,6 +16,8 @@ internal sealed class SyntheticScreenRegionPicker(string text = "VibeOCR 123") :
 
   internal CaptureEvidence? Evidence { get; private set; }
   internal string? Failure { get; private set; }
+  internal long CaptureStartedTimestamp { get; private set; }
+  internal long CaptureCompletedTimestamp { get; private set; }
 
   public async Task<ScreenRegionSelection?> PickAsync(CancellationToken cancellationToken)
   {
@@ -145,8 +147,10 @@ internal sealed class SyntheticScreenRegionPicker(string text = "VibeOCR 123") :
         }
       }
       await using var capture = new ScreenCaptureService(Guid.NewGuid());
+      CaptureStartedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
       CapturedFrame frame = capture.Capture(bounds, TimeSpan.FromMinutes(1));
       byte[] pixels = capture.Read(frame);
+      CaptureCompletedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
       int white = 0;
       int dark = 0;
       for (int offset = 0; offset < pixels.Length; offset += 4)

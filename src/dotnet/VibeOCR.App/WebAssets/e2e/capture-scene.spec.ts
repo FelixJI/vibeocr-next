@@ -51,22 +51,6 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
   page,
 }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 720 });
-  await page.addInitScript(() => {
-    Object.assign(window, {
-      vibeocrCaptureScene: {
-        x: 300,
-        y: 200,
-        width: 900,
-        height: 400,
-        desktopWidth: 2560,
-        desktopHeight: 1440,
-        initialTool: "rectangle",
-      },
-    });
-    document.addEventListener("DOMContentLoaded", () => {
-      document.documentElement.dataset.captureScene = "true";
-    });
-  });
   const uploads: Buffer[] = [];
   await page.route("**/__capture_background", (route) =>
     route.fulfill({
@@ -96,6 +80,21 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
     page,
     {
       sessionId: "capture-scene-e2e",
+      captureScene: {
+        surfaceId: "surface",
+        captureSessionId: "capture-scene",
+        inputUrl: "/capture-scene.svg",
+        inputRevision: 0,
+        documentGeneration: 1,
+        bootstrapGeneration: 1,
+        x: 300,
+        y: 200,
+        width: 900,
+        height: 400,
+        desktopWidth: 2560,
+        desktopHeight: 1440,
+        initialTool: "rectangle",
+      },
       revision: 1,
       route: "imageEdit",
       theme: "dark",
@@ -119,6 +118,26 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
     },
     "/#/imageEdit?scene=1",
   );
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const host = (
+          window as Window & {
+            __testHost: {
+              captureReports: {
+                type: string;
+                payload: { captureScene: { inputUrl: string } };
+              }[];
+            };
+          }
+        ).__testHost;
+        return host.captureReports.map((report) => ({
+          type: report.type,
+          inputUrl: report.payload.captureScene.inputUrl,
+        }));
+      }),
+    )
+    .toEqual([{ type: "capture.pixelReady", inputUrl: "/capture-scene.svg" }]);
   const canvas = page.getByLabel("图片检查画布");
   await expect(canvas).toBeVisible();
   await expect
@@ -249,21 +268,6 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
 /** 共享的截图现场挂载：细纹理 SVG + 上传采集；返回画布与上传缓冲。 */
 async function mountSceneForExport(page: Page, svg: string) {
   await page.setViewportSize({ width: 1280, height: 720 });
-  await page.addInitScript(() => {
-    Object.assign(window, {
-      vibeocrCaptureScene: {
-        x: 300,
-        y: 200,
-        width: 900,
-        height: 400,
-        desktopWidth: 2560,
-        desktopHeight: 1440,
-      },
-    });
-    document.addEventListener("DOMContentLoaded", () => {
-      document.documentElement.dataset.captureScene = "true";
-    });
-  });
   const uploads: Buffer[] = [];
   await page.route("**/__capture_background", (route) =>
     route.fulfill({
@@ -290,6 +294,21 @@ async function mountSceneForExport(page: Page, svg: string) {
     page,
     {
       sessionId: "capture-scene-e2e",
+      captureScene: {
+        surfaceId: "surface",
+        captureSessionId: "capture-scene",
+        inputUrl: "/capture-scene.svg",
+        inputRevision: 0,
+        documentGeneration: 1,
+        bootstrapGeneration: 1,
+        x: 300,
+        y: 200,
+        width: 900,
+        height: 400,
+        desktopWidth: 2560,
+        desktopHeight: 1440,
+        initialTool: "select",
+      },
       revision: 1,
       route: "imageEdit",
       theme: "dark",
@@ -313,6 +332,26 @@ async function mountSceneForExport(page: Page, svg: string) {
     },
     "/#/imageEdit?scene=1",
   );
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const host = (
+          window as Window & {
+            __testHost: {
+              captureReports: {
+                type: string;
+                payload: { captureScene: { inputUrl: string } };
+              }[];
+            };
+          }
+        ).__testHost;
+        return host.captureReports.map((report) => ({
+          type: report.type,
+          inputUrl: report.payload.captureScene.inputUrl,
+        }));
+      }),
+    )
+    .toEqual([{ type: "capture.pixelReady", inputUrl: "/capture-scene.svg" }]);
   const canvas = page.getByLabel("图片检查画布");
   await expect
     .poll(async () => {
@@ -408,12 +447,6 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
         desktopWidth: 1200 * dpr,
         desktopHeight: 800 * dpr,
       };
-      await page.addInitScript((geometry) => {
-        Object.assign(window, { vibeocrCaptureScene: geometry });
-        document.addEventListener("DOMContentLoaded", () => {
-          document.documentElement.dataset.captureScene = "true";
-        });
-      }, geometry);
       // 黑白单像素棋盘；任何降采样或插值都会产生灰色像素。
       const images = await page.evaluate((geometry) => {
         const c = document.createElement("canvas");
@@ -463,6 +496,16 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
         page,
         {
           sessionId: "dpi",
+          captureScene: {
+            ...geometry,
+            surfaceId: "surface",
+            captureSessionId: "dpi",
+            inputUrl: "/pixel-grid.png",
+            inputRevision: 0,
+            documentGeneration: 1,
+            bootstrapGeneration: 1,
+            initialTool: "select",
+          },
           revision: 1,
           route: "imageEdit",
           theme: "light",
@@ -489,6 +532,26 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
         },
         "/#/imageEdit?scene=1",
       );
+      await expect
+        .poll(() =>
+          page.evaluate(() => {
+            const host = (
+              window as Window & {
+                __testHost: {
+                  captureReports: {
+                    type: string;
+                    payload: { captureScene: { inputUrl: string } };
+                  }[];
+                };
+              }
+            ).__testHost;
+            return host.captureReports.map((report) => ({
+              type: report.type,
+              inputUrl: report.payload.captureScene.inputUrl,
+            }));
+          }),
+        )
+        .toEqual([{ type: "capture.pixelReady", inputUrl: "/pixel-grid.png" }]);
       const canvas = page.getByLabel("图片检查画布");
       await expect
         .poll(() =>

@@ -281,9 +281,11 @@ public sealed class WorkbenchAnnotationStoreTests : IDisposable
       TestContext.Current.CancellationToken);
     await blocked.WaitUntilBlockedAsync();
 
+    Assert.Equal(1, store.ActiveCounts.Reservations);
     store.Dispose();
     blocked.Complete();
     await Assert.ThrowsAsync<ObjectDisposedException>(() => upload);
+    Assert.Equal((0, 0, 0), store.ActiveCounts);
     Assert.Empty(Directory.EnumerateFiles(resourceRoot, "*", SearchOption.AllDirectories));
   }
 

@@ -17,6 +17,7 @@ export async function mountHost(
     let revision = initial.revision;
     const listeners = new Set<(event: { data: unknown }) => void>();
     const commands: HostCommand[] = [];
+    const captureReports: BridgeEnvelope[] = [];
     let rejectNext = false;
     const emit = (data: unknown) =>
       listeners.forEach((listener) => listener({ data }));
@@ -38,6 +39,7 @@ export async function mountHost(
     Object.assign(window, {
       __testHost: {
         commands,
+        captureReports,
         state,
         rejectNext: () => {
           rejectNext = true;
@@ -57,6 +59,13 @@ export async function mountHost(
             queueMicrotask(() => {
               if (request.type === "app.bootstrap") {
                 emit({ ...request, kind: "response", payload: initial });
+                return;
+              }
+              if (
+                request.type === "capture.pixelReady" ||
+                request.type === "capture.pixelFailed"
+              ) {
+                captureReports.push(request);
                 return;
               }
               const command = request.payload.command as unknown as HostCommand;

@@ -1,4 +1,4 @@
-/** 仅截图覆盖层宿主注入，数值均为相对冻结虚拟桌面的物理像素。 */
+/** 仅截图覆盖层的 typed bootstrap 提供，数值均为相对冻结虚拟桌面的物理像素。 */
 export interface CaptureSceneGeometry {
   readonly x: number;
   readonly y: number;
@@ -61,9 +61,4 @@ export function captureSceneStyle(
     "--capture-tools-top": `${toolTop}px`,
     "--capture-tools-height": `${toolHeight}px`,
   };
-}
-
-export function nativeCaptureScene(): CaptureSceneGeometry | undefined {
-  return (window as Window & { vibeocrCaptureScene?: CaptureSceneGeometry })
-    .vibeocrCaptureScene;
 }

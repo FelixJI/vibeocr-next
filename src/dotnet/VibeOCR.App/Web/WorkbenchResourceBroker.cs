@@ -33,6 +33,11 @@ public sealed class WorkbenchResourceBroker : IDisposable
   private readonly TimeProvider timeProvider;
   private bool disposed;
 
+  internal int ActiveResourceCount
+  {
+    get { lock (gate) return entries.Count; }
+  }
+
   public WorkbenchResourceBroker(
     string resourceRoot,
     TimeProvider? timeProvider = null)

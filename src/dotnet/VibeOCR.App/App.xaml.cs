@@ -246,7 +246,7 @@ public sealed partial class App : Application
         _windowLayoutStore = new WindowLayoutStore(
             Path.Combine(layout.DataRoot, "winui-layout.json"));
         if (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") is
-            "screenshot-e2e" or "text-selection-e2e" or "managed-environment-e2e")
+            "screenshot-e2e" or "text-selection-e2e" or "managed-environment-e2e" or "capture-first-frame-e2e" or "capture-replacement-e2e")
         {
             _screenshotSmokePicker = new SyntheticScreenRegionPicker(
                 Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") ==
@@ -355,6 +355,8 @@ public sealed partial class App : Application
             RecordMilestone(diagnostics, "T6", _startup.Elapsed);
         }
         else if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE")) &&
+                 Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") != "capture-first-frame-e2e" &&
+                 Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") != "capture-replacement-e2e" &&
                  (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") != "managed-environment-e2e" ||
                   Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_ENVIRONMENT_E2E_PHASE") == "restart"))
         {
@@ -1252,6 +1254,7 @@ public sealed partial class App : Application
             _applicationShutdown.Dispose();
             appWindow.Closing -= OnAppWindowClosing;
             _window?.Close();
+            if (_window is not null) await _window.ShutdownCompletion;
             Exit();
         }
     }
@@ -1287,7 +1290,7 @@ public sealed partial class App : Application
         _exclusiveLock = null;
     }
 
-    private void OnWindowClosedFallback(object sender, WindowEventArgs args)
+    private async void OnWindowClosedFallback(object sender, WindowEventArgs args)
     {
         if (!_shutdownStarted)
         {
@@ -1295,7 +1298,16 @@ public sealed partial class App : Application
             _applicationShutdown.Cancel();
         }
 
-        Environment.Exit(0);
+        try
+        {
+            if (sender is MainWindow window) await window.ShutdownCompletion;
+            Environment.Exit(0);
+        }
+        catch (Exception error)
+        {
+            AppLog.Error("Window shutdown failed", error);
+            Environment.Exit(1);
+        }
     }
 }
 
