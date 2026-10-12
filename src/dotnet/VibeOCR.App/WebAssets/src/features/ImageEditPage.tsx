@@ -2,7 +2,7 @@ import { Button } from "@fluentui/react-components";
 
 import { ClipboardPaste, ImagePlus } from "lucide-react";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { shouldRunDocumentCommand } from "../app/keyboard";
 
@@ -39,6 +39,30 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
   const input = resource(state.input);
   const session = screenshotSession(state.screenshotSession);
   const busy = booleanValue(state.isBusy);
+  // 打开入口共享同一业务命令；busy=true 会禁用按钮并失焦，busy 周期
+  // 回落时恢复到可见的“选择图片”按钮（scene 无此按钮不参与）。
+  const chooseButtonRef = useRef<HTMLButtonElement>(null);
+  const openFocusRestore = useRef({ armed: false, sawBusy: false });
+  const openImage = useCallback(() => {
+    openFocusRestore.current = { armed: true, sawBusy: false };
+    void actions.run({ type: "imageEdit.selectImage" });
+  }, [actions]);
+  useEffect(() => {
+    if (scene) return;
+    const restore = openFocusRestore.current;
+    if (!restore.armed) return;
+    if (busy) {
+      restore.sawBusy = true;
+      return;
+    }
+    if (!restore.sawBusy) return;
+    // busy 周期才是完成依据：run 回执可能先于系统选择器关闭到达；
+    // armed 立即清除，仅页面可见且实际持有焦点时恢复，不重试。
+    restore.armed = false;
+    const choose = chooseButtonRef.current;
+    if (!document.hidden && document.hasFocus() && choose && !choose.disabled)
+      choose.focus();
+  }, [busy, scene]);
   // Windows 打开命令：与“选择图片”按钮同一入口与启用条件；截图现场窗
   // （scene）由 ImageCanvasEditor 承载会话命令，不接收文档级打开。
   useEffect(() => {
@@ -56,11 +80,11 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
       )
         return;
       event.preventDefault();
-      void actions.run({ type: "imageEdit.selectImage" });
+      openImage();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [actions, viewState.connected, busy, scene]);
+  }, [openImage, viewState.connected, busy, scene]);
   return (
     <Workspace
       eyebrow={scene ? "CAPTURE" : "IMAGE"}
@@ -71,8 +95,9 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
           {!scene && (
             <>
               <Button
+                ref={chooseButtonRef}
                 disabled={!viewState.connected || busy}
-                onClick={() => actions.run({ type: "imageEdit.selectImage" })}
+                onClick={openImage}
                 icon={<ImagePlus aria-hidden="true" size={16} />}
               >
                 选择图片

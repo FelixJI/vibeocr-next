@@ -108,6 +108,153 @@ describe("AppShell", () => {
     });
     unmount();
   });
+
+  it("restores choose-button focus after the open image operation finishes", async () => {
+    window.location.hash = "#/imageEdit";
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 1,
+      route: "imageEdit",
+      theme: "light",
+      capabilities: [],
+      features: {},
+      runtimeLabel: "原生宿主已连接",
+    };
+    const { rerender, unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
+    // 受控 hasFocus：代表真实宿主在系统选择器取消后的窗口焦点状态
+    // （titlebar 取证已证实 focused=true），不依赖 JSDOM 默认值。
+    const hasFocus = vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    try {
+      const user = userEvent.setup();
+      const choose = await screen.findByRole("button", { name: "选择图片" });
+      await user.click(choose);
+      expect(actions.run).toHaveBeenCalledWith({
+        type: "imageEdit.selectImage",
+      });
+      // 系统选择器打开会夺走文档焦点：在按钮仍启用时显式 blur 模拟（JSDOM
+      // 对 disabled 元素的 blur 无效，且不因 disabled 真实失焦）。
+      act(() => choose.blur());
+      expect(document.activeElement).toBe(document.body);
+      await rerender(
+        <App
+          actions={actions}
+          viewState={{
+            ...viewState,
+            revision: 2,
+            features: { imageEdit: { isBusy: true } },
+          }}
+        />,
+      );
+      expect(choose).toBeDisabled();
+      expect(document.activeElement).toBe(document.body);
+      // busy=false（成功或取消）：恢复到可见的“选择图片”按钮；旧实现停在
+      // body，本断言失败。
+      await rerender(<App actions={actions} viewState={viewState} />);
+      await waitFor(() => expect(document.activeElement).toBe(choose));
+      expect(actions.run).toHaveBeenCalledTimes(1);
+    } finally {
+      hasFocus.mockRestore();
+      unmount();
+    }
+  });
+
+  it("does not restore focus while the page is not focused", async () => {
+    window.location.hash = "#/imageEdit";
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 1,
+      route: "imageEdit",
+      theme: "light",
+      capabilities: [],
+      features: {},
+      runtimeLabel: "原生宿主已连接",
+    };
+    const { rerender, unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
+    // 负例：后台/失焦窗口（hasFocus=false）不恢复焦点，验证不会在后台
+    // 抢控件。
+    const hasFocus = vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    try {
+      const user = userEvent.setup();
+      const choose = await screen.findByRole("button", { name: "选择图片" });
+      await user.click(choose);
+      act(() => choose.blur());
+      await rerender(
+        <App
+          actions={actions}
+          viewState={{
+            ...viewState,
+            revision: 2,
+            features: { imageEdit: { isBusy: true } },
+          }}
+        />,
+      );
+      await rerender(<App actions={actions} viewState={viewState} />);
+      await waitFor(() => expect(choose).toBeEnabled());
+      expect(document.activeElement).toBe(document.body);
+      expect(actions.run).toHaveBeenCalledTimes(1);
+    } finally {
+      hasFocus.mockRestore();
+      unmount();
+    }
+  });
+
+  it("leaves focus untouched for the clipboard entry across a busy cycle", async () => {
+    window.location.hash = "#/imageEdit";
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 1,
+      route: "imageEdit",
+      theme: "light",
+      capabilities: [],
+      features: {},
+      runtimeLabel: "原生宿主已连接",
+    };
+    const { rerender, unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
+    const user = userEvent.setup();
+    const choose = await screen.findByRole("button", { name: "选择图片" });
+    const paste = screen.getByRole("button", { name: "粘贴图片" });
+    await user.click(paste);
+    act(() => paste.blur());
+    await rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 2,
+          features: { imageEdit: { isBusy: true } },
+        }}
+      />,
+    );
+    await rerender(<App actions={actions} viewState={viewState} />);
+    await waitFor(() => expect(choose).toBeEnabled());
+    // 粘贴入口无系统选择器：不抢焦点，保持 body（约束不过度恢复）。
+    expect(document.activeElement).toBe(document.body);
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "imageEdit.readClipboard",
+    });
+    unmount();
+  });
   it("offers one screenshot action without an OCR connection", async () => {
     window.location.hash = "#/recognition";
     const actions: AppActions = {
