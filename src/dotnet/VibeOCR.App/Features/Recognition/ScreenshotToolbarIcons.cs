@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 
 namespace VibeOCR.App.Features.Recognition;
 
@@ -52,9 +53,15 @@ internal static class ScreenshotToolbarIcons
   internal static bool HasIcon(string key) => TryGetGlyph(key) is not null;
 
   /// <summary>按稳定键创建 20px 字形图标；未知键回落默认图标，不抛错。</summary>
-  internal static FontIcon CreateIcon(string key) => new()
+  internal static FontIcon CreateIcon(string key)
   {
-    Glyph = TryGetGlyph(key) ?? Glyphs[DefaultKey],
-    FontSize = 20,
-  };
+    var icon = new FontIcon
+    {
+      Glyph = TryGetGlyph(key) ?? Glyphs[DefaultKey],
+      FontSize = 20,
+    };
+    // 编号是普通 Unicode 字符，需文本字体而非系统图标字体。
+    if (key == "numbering") icon.FontFamily = new FontFamily("Segoe UI");
+    return icon;
+  }
 }

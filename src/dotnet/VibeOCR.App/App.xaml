@@ -11,7 +11,7 @@
                  ThemeResource，元素主题/高对比切换由 ThemeResource 动态重解析，
                  不从 Application.Resources 手读主题字典色。 -->
             <Style x:Key="RecoveryPanelBorderStyle" TargetType="Border">
-                <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+                <Setter Property="Background" Value="{ThemeResource SolidBackgroundFillColorBaseBrush}" />
                 <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
                 <Setter Property="BorderThickness" Value="1" />
             </Style>
