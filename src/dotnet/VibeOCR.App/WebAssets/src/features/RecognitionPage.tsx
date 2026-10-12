@@ -63,8 +63,9 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
   const sessionCapable = viewState.capabilities.includes(
     "recognition.screenshotSession",
   );
-  // Windows 常用命令：打开与工具栏按钮同一入口；Ctrl+C 仅在无文本选择
-  // 且目标非输入控件时降级为复制识别结果，选择优先交回原生复制。
+  // Windows 常用命令：打开与工具栏按钮同一入口；Ctrl+C 仅在无文本选择、
+  // 目标非输入控件且存在可复制结果（镜像“复制文本”工具栏渲染条件）时
+  // 降级为复制识别结果，避免无果可复制时命令走宿主异常恢复路径。
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (
@@ -87,6 +88,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
         !event.shiftKey &&
         !isEditableTarget(event.target) &&
         !hasTextSelection() &&
+        (result !== undefined || structured !== undefined) &&
         viewState.capabilities.includes("recognition.results")
       ) {
         event.preventDefault();
@@ -95,7 +97,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [actions, viewState.capabilities]);
+  }, [actions, viewState.capabilities, result, structured]);
   return (
     <Workspace
       eyebrow="WORKBENCH / 01"

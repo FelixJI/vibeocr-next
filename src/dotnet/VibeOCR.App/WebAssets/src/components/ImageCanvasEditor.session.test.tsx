@@ -364,6 +364,9 @@ describe("screenshot session editor wiring", () => {
         revision: 0,
         text: "好世",
       });
+      // 复制浮层卸载后焦点回到可见可聚焦的图片视口容器（layerReady 时画布
+      // display:none 不可聚焦；回归：不得落到 body 或隐藏画布）。
+      expect(screen.getByLabelText("图片视口")).toHaveFocus();
       // Native selection has advanced, but React has not processed selectionchange yet.
       // The context menu must freeze the new DOM substring, not the previous state.
       range.setStart(firstText, 0);

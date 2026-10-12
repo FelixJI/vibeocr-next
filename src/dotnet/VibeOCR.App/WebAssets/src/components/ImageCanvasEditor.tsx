@@ -403,6 +403,7 @@ export function ImageCanvasEditor({
     sceneViewport.height,
   );
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement | undefined>(undefined);
   const dragStart = useRef<Point | undefined>(undefined);
   const selectedMarkRef = useRef<number | undefined>(undefined);
@@ -2311,8 +2312,10 @@ export function ImageCanvasEditor({
       : readLayerSelection();
     if (!session || !text || !layerSelectionKey) return;
     setCopyMenu(undefined);
-    // 浮层按钮即将卸载：把焦点还给画布，避免落到 body 后 Tab 从头开始。
-    canvasRef.current?.focus();
+    // 浮层按钮即将卸载：把焦点还给始终可见且可聚焦的图片视口容器
+    // （layerReady 时画布 display:none 不可聚焦），避免焦点落到 body 后
+    // Tab 从头开始。
+    viewportRef.current?.focus({ preventScroll: true });
     try {
       const copied = await actions.run({
         type: commands.copyScreenshotSelection,
@@ -2915,6 +2918,7 @@ export function ImageCanvasEditor({
       <div
         aria-label="图片视口"
         className={`canvas-stage${panning ? " is-panning" : ""}`}
+        ref={viewportRef}
         tabIndex={0}
         style={{
           ["--editor-zoom" as string]: zoom,

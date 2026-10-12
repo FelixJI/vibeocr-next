@@ -366,6 +366,30 @@ describe("Windows document commands (Ctrl+O / Ctrl+C)", () => {
     sceneView.unmount();
   });
 
+  it("recognition Ctrl+C yields when no result exists (copy toolbar mirror)", () => {
+    // 回归：旧代码只看 capability，无结果时 Ctrl+C 仍发 recognition.copy，
+    // 宿主端无果可复制只能走异常恢复；镜像工具栏渲染条件后不再接管。
+    focusDocument(true);
+    const run = vi.fn().mockResolvedValue(true);
+    const view = render(
+      <RecognitionPage
+        viewState={viewState({ recognition: {} }, [
+          ...editorCapabilities,
+          "recognition.results",
+        ])}
+        actions={{ run, navigate: vi.fn(), setTheme: vi.fn() }}
+      />,
+    );
+    shortcut("c");
+    expect(run).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "recognition.copy" }),
+    );
+    // 无结果不影响打开入口。
+    shortcut("o");
+    expect(run).toHaveBeenLastCalledWith({ type: "recognition.selectImage" });
+    view.unmount();
+  });
+
   it("recognition copies text without a selection and yields to real text selections or editable targets", () => {
     focusDocument(true);
     const run = vi.fn().mockResolvedValue(true);
