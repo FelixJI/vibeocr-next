@@ -128,6 +128,47 @@ it("remounts per result so a stale cell selection cannot leak across results", a
   );
 });
 
+it("keeps recognized text beside image/chart/seal previews including failed assets", () => {
+  // 生产管线对 image/chart/seal 同时产出 text 与 image（图表内容、图片
+  // 说明、印章文字）：预览资产失效时识别文本也不得丢失。
+  render(
+    <StructuredResult
+      source={JSON.stringify([
+        {
+          type: "image",
+          text: "图片说明文字",
+          image: {
+            resource: {
+              url: "https://resource.vibeocr/image",
+              mediaType: "image/png",
+            },
+          },
+        },
+        {
+          type: "chart",
+          text: "图表内容摘要",
+          image: {
+            resource: {
+              url: "https://resource.vibeocr/chart",
+              mediaType: "image/png",
+            },
+          },
+        },
+        {
+          type: "seal",
+          text: "印章文字",
+          image: { available: false, reason: "资产已过期" },
+        },
+      ])}
+      onCopy={vi.fn(async () => true)}
+    />,
+  );
+  expect(screen.getByText("图片说明文字")).toBeInTheDocument();
+  expect(screen.getByText("图表内容摘要")).toBeInTheDocument();
+  expect(screen.getByText("印章文字")).toBeInTheDocument();
+  expect(screen.getByText("图片不可用：资产已过期")).toBeInTheDocument();
+});
+
 it("previews image assets on chart and seal blocks", () => {
   render(
     <StructuredResult
@@ -151,6 +192,150 @@ it("previews image assets on chart and seal blocks", () => {
     "https://resource.vibeocr/chart",
   );
   expect(screen.getByText("图片不可用：资产已过期")).toBeInTheDocument();
+});
+
+it("bounds sparse oversized tables to a note while keeping full-table copy", async () => {
+  // 101×101=10201 格仅 1 个单元格：刚超过 10000 格展示上限的合法稀疏
+  // 输入，验证降级路径（明确提示 + 不物化网格 + 整表复制仍可用）。
+  const onCopy = vi.fn(async () => true);
+  render(
+    <StructuredResult
+      source={JSON.stringify([
+        { type: "text", text: "前置文本块" },
+        {
+          type: "table",
+          table: {
+            schema_version: 1,
+            row_count: 101,
+            column_count: 101,
+            cells: [
+              {
+                row: 0,
+                column: 0,
+                rowspan: 1,
+                colspan: 1,
+                text: "唯一值",
+                is_header: true,
+              },
+            ],
+          },
+        },
+      ])}
+      onCopy={onCopy}
+      onCopyCells={vi.fn(async () => true)}
+    />,
+  );
+  expect(screen.getByRole("region", { name: "表格 1" })).toBeInTheDocument();
+  expect(document.querySelector(".structured-table-scroll table")).toBeNull();
+  expect(
+    screen.getByText("表格较大，暂不支持预览和区域选择，请复制整表或导出。"),
+  ).toBeInTheDocument();
+  // 降级态不展示范围选择提示与不可用交互。
+  expect(screen.queryByText(/拖选或方向键/)).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "复制所选单元格" }),
+  ).not.toBeInTheDocument();
+  await fireEvent.click(
+    screen.getByRole("button", { name: "复制表格 HTML / TSV" }),
+  );
+  expect(onCopy).toHaveBeenCalledWith(1, "table");
+});
+
+it("renders tables within the grid area limit", () => {
+  // 边界内（100×100=10000 格）仍完整物化网格，不提前降级。
+  const cells = Array.from({ length: 100 }, (_, row) =>
+    Array.from({ length: 100 }, (_, column) => ({
+      row,
+      column,
+      rowspan: 1,
+      colspan: 1,
+      text: `${row}-${column}`,
+    })),
+  ).flat();
+  render(
+    <StructuredResult
+      source={JSON.stringify([
+        {
+          type: "table",
+          table: {
+            schema_version: 1,
+            row_count: 100,
+            column_count: 100,
+            cells,
+          },
+        },
+      ])}
+      onCopy={vi.fn(async () => true)}
+    />,
+  );
+  expect(document.querySelectorAll(".structured-table-scroll td").length).toBe(
+    10000,
+  );
+  expect(screen.queryByText(/表格较大/)).not.toBeInTheDocument();
+});
+
+it("skips million-cell grids for 1000×1000 sparse tables", () => {
+  // 1000×1000 少 cells：协议允许的极端稀疏表也不得物化百万格 DOM。
+  render(
+    <StructuredResult
+      source={JSON.stringify([
+        {
+          type: "table",
+          table: {
+            schema_version: 1,
+            row_count: 1000,
+            column_count: 1000,
+            cells: [
+              { row: 0, column: 0, rowspan: 1, colspan: 1, text: "唯一值" },
+            ],
+          },
+        },
+      ])}
+      onCopy={vi.fn(async () => true)}
+    />,
+  );
+  expect(document.querySelector(".structured-table-scroll table")).toBeNull();
+  expect(document.querySelectorAll("tr").length).toBe(0);
+  expect(screen.getByText(/表格较大/)).toBeInTheDocument();
+});
+
+it("keeps native Enter newline and double-click selection inside the line editor", async () => {
+  // 每行模式下 LineEditor 嵌套在带触发器的 <li> 内：编辑框内的默认
+  // 行为（Enter 换行、双击选词）不得被父级行触发器 preventDefault 取消。
+  const onUpdateLine = vi.fn(async () => true);
+  render(
+    <StructuredResult
+      source={JSON.stringify([
+        linesBlock([{ text: "普通行文本", score: 0.9, bbox: null }]),
+      ])}
+      mode="line"
+      onCopy={vi.fn(async () => true)}
+      onUpdateLine={onUpdateLine}
+    />,
+  );
+  const line = document.querySelector(".result-lines-list .result-line");
+  if (!line) throw new Error("result line is missing");
+  await fireEvent.dblClick(line);
+  const editor = screen.getByRole("textbox", { name: "编辑第 1 行" });
+  const defaults: Array<[string, boolean]> = [];
+  const record = (event: Event) =>
+    defaults.push([event.type, event.defaultPrevented]);
+  document.addEventListener("keydown", record);
+  document.addEventListener("dblclick", record);
+  editor.focus();
+  await fireEvent.keyDown(editor, { key: "Enter" });
+  await fireEvent.dblClick(editor);
+  document.removeEventListener("keydown", record);
+  document.removeEventListener("dblclick", record);
+  expect(defaults).toEqual([
+    ["keydown", false],
+    ["dblclick", false],
+  ]);
+  // Enter 只进入草稿：编辑器保持打开且未触发行激活或提交。
+  expect(
+    screen.getByRole("textbox", { name: "编辑第 1 行" }),
+  ).toBeInTheDocument();
+  expect(onUpdateLine).not.toHaveBeenCalled();
 });
 
 it("orders table cells by column and ignores malformed cell entries", () => {

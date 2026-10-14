@@ -2,7 +2,7 @@ using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Windows.ApplicationModel.DataTransfer;
-using Windows.Storage.Pickers;
+using Microsoft.Windows.Storage.Pickers;
 using VibeOCR.Platform.Inference;
 
 namespace VibeOCR.App.Features.Recognition;
@@ -109,9 +109,9 @@ public sealed class WindowsResultActionPlatform(Func<nint> windowHandle) : IResu
             ResultExportFormat.Xlsx => ".xlsx",
             _ => ".txt",
         };
-        FileSavePicker picker = new() { SuggestedStartLocation = PickerLocationId.DocumentsLibrary, SuggestedFileName = "ocr-result" };
+        FileSavePicker picker = new(Microsoft.UI.Win32Interop.GetWindowIdFromWindow(windowHandle())) { SuggestedStartLocation = PickerLocationId.DocumentsLibrary, SuggestedFileName = "ocr-result" };
         picker.FileTypeChoices.Add("Export", [ext]);
-        WinRT.Interop.InitializeWithWindow.Initialize(picker, windowHandle());
+        // App SDK 选择器只返回路径，结果过期或取消时不会留下空占位文件。
         return await picker.PickSaveFileAsync() is { } file ? file.Path : null;
     }
 

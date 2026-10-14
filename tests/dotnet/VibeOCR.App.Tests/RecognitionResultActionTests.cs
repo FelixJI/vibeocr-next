@@ -31,6 +31,37 @@ public sealed class RecognitionResultActionTests
   }
 
   [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task RejectedExportToNewPathDoesNotCreateFile(bool cancelDuringPicker)
+  {
+    string path = Path.Combine(Path.GetTempPath(), $"vibeocr-export-{Guid.NewGuid():N}.txt");
+    using var cancellation = new CancellationTokenSource();
+    bool current = true;
+    var client = new ExportClient();
+    var platform = new ExportPlatform(path, () =>
+    {
+      if (cancelDuringPicker) cancellation.Cancel();
+      else current = false;
+    }, () => throw new InvalidOperationException("A new path must not need overwrite confirmation."));
+    var actions = new ResultActions(client, platform);
+    actions.SetResult(new RecognizeResponse { Text = "old" });
+    try
+    {
+      if (cancelDuringPicker)
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => actions.ExportAsync(
+          ResultExportFormat.Text, cancellation.Token, stillCurrent: () => current));
+      else
+        await Assert.ThrowsAsync<InvalidOperationException>(() => actions.ExportAsync(
+          ResultExportFormat.Text, cancellation.Token, stillCurrent: () => current));
+      Assert.Null(client.Request);
+      Assert.False(File.Exists(path));
+      Assert.True(actions.HasResult);
+    }
+    finally { File.Delete(path); }
+  }
+
+  [Theory]
   [InlineData(ResultExportFormat.Text)]
   [InlineData(ResultExportFormat.Html)]
   [InlineData(ResultExportFormat.Docx)]

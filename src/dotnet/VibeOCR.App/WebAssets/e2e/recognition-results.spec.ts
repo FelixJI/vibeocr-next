@@ -10,6 +10,12 @@ const STRUCTURED_URL = "/structured.json";
 const RESULT_URL = "/result.txt";
 const INPUT_URL = "/input.png";
 const RESULT_IMAGE_URL = "/result-image.png";
+const DOC_IMAGE_URL = "/doc-image.png";
+
+/** 记录默认行为是否被取消的页面内探针（见行编辑测试）。 */
+type Pr225EventsWindow = Window & {
+  __pr225Events?: Array<[string, boolean]>;
+};
 
 const structuredPayload = [
   { type: "text", text: "前置文本块" },
@@ -70,6 +76,14 @@ const structuredPayload = [
       ],
     },
   },
+  {
+    // 携带识别文本的图片区块（MinerU 风格）：预览与文字并列呈现。
+    type: "image",
+    text: "插图说明文字",
+    image: {
+      resource: { url: DOC_IMAGE_URL, mediaType: "image/png" },
+    },
+  },
 ];
 
 // 真实 1000×500 PNG（浏览器可解码）：校对视图行框可实际操作。
@@ -92,6 +106,9 @@ async function mountRecognitionResults(page: Page): Promise<void> {
     route.fulfill({ contentType: "image/png", body: PROOF_PNG }),
   );
   await page.route(RESULT_IMAGE_URL, (route) =>
+    route.fulfill({ contentType: "image/png", body: PROOF_PNG }),
+  );
+  await page.route(DOC_IMAGE_URL, (route) =>
     route.fulfill({ contentType: "image/png", body: PROOF_PNG }),
   );
   await mountHost(page, {
@@ -290,6 +307,61 @@ test("table cell selection via drag, shift-click and keyboard", async ({
   await page.screenshot({
     path: testInfo.outputPath("cell-selection.png"),
   });
+});
+
+test("image block keeps text within panel bounds; line editor keeps native Enter", async ({
+  page,
+}, testInfo) => {
+  await mountRecognitionResults(page);
+
+  // 高分辨率图片区块（1000×500）：预览不得按固有尺寸撞破结果面板。
+  const image = page.getByRole("img", { name: "文档图像区块" });
+  await expect(image).toBeVisible();
+  await expect(page.getByText("插图说明文字")).toBeVisible();
+  const resultPanel = page.getByRole("region", {
+    name: "识别结果",
+    exact: true,
+  });
+  const panelBox = await resultPanel.boundingBox();
+  const imageBox = await image.boundingBox();
+  expect(panelBox).not.toBeNull();
+  expect(imageBox).not.toBeNull();
+  expect(imageBox!.width).toBeLessThanOrEqual(panelBox!.width);
+  expect(imageBox!.x).toBeGreaterThanOrEqual(panelBox!.x);
+  expect(imageBox!.x + imageBox!.width).toBeLessThanOrEqual(
+    panelBox!.x + panelBox!.width,
+  );
+  expect(imageBox!.height).toBeLessThanOrEqual(384); // max-height: 24rem。
+  await page.screenshot({ path: testInfo.outputPath("image-bounds.png") });
+
+  // 每行模式：真实键盘下编辑框内 Enter 换行、双击默认行为不被行
+  // 触发器取消（修复前 Enter 被 li 冒泡层 preventDefault 吞掉）。
+  await page.getByRole("combobox", { name: "排版模式" }).selectOption("line");
+  const line = page
+    .locator(".result-lines-list .result-line")
+    .filter({ hasText: "第一段行一" });
+  await line.dblclick();
+  const editor = page.getByRole("textbox", { name: "编辑第 1 行" });
+  await expect(editor).toBeFocused();
+  await page.evaluate(() => {
+    const scope = window as Pr225EventsWindow;
+    scope.__pr225Events = [];
+    for (const type of ["keydown", "dblclick"] as const)
+      window.addEventListener(type, (event) =>
+        scope.__pr225Events!.push([type, event.defaultPrevented]),
+      );
+  });
+  await page.keyboard.press("Enter");
+  await editor.dblclick();
+  const events = await page.evaluate(
+    () => (window as Pr225EventsWindow).__pr225Events,
+  );
+  expect(events).toEqual([
+    ["keydown", false],
+    ["dblclick", false],
+  ]);
+  // 编辑框初始全选：Enter 默认行为把选区替换为换行符。
+  await expect(editor).toHaveValue("\n");
 });
 
 test("bbox proofreading edits through the frozen result image", async ({

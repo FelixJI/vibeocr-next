@@ -213,6 +213,9 @@ function cellIntersectsSelection(
   );
 }
 
+// shortcut: 大表仅保留整表复制/导出；支持虚拟滚动后再开放其预览和区域选择。
+const MAX_TABLE_GRID_AREA = 10_000;
+
 /** 表格网格放置：锚点单元格 + span 覆盖位 + 稀疏空位，保持列对齐。 */
 function buildTableGrid(
   cells: readonly Cell[],
@@ -258,6 +261,9 @@ function TableBlock({
   const [cellsError, setCellsError] = useState(false);
   const tableRef = useRef<HTMLTableElement>(null);
   const cells = tableCells(block);
+  const table = block.table!;
+  const gridTooLarge =
+    table.row_count * table.column_count > MAX_TABLE_GRID_AREA;
   const selection = anchor && focus ? selectionRect(anchor, focus) : undefined;
   const selectCell = (cell: Cell, shiftKey: boolean) => {
     if (shiftKey && anchor) setFocus({ row: cell.row, column: cell.column });
@@ -332,86 +338,92 @@ function TableBlock({
         <Button size="small" onClick={() => void onCopy(blockIndex, "table")}>
           复制表格 HTML / TSV
         </Button>
-        {onCopyCells && selection && (
+        {onCopyCells && !gridTooLarge && selection && (
           <Button size="small" onClick={() => void copyCells()}>
             复制所选单元格
           </Button>
         )}
       </header>
-      <div className="structured-table-scroll">
-        <table ref={tableRef}>
-          <tbody>
-            {buildTableGrid(
-              cells,
-              block.table!.row_count,
-              block.table!.column_count,
-            ).map((row, rowNumber) => (
-              <tr key={rowNumber}>
-                {row.map((placed, columnNumber) => {
-                  if (placed === "covered") return null; // 由锚点 span 覆盖。
-                  if (placed === null)
-                    // 稀疏空位：非交互占位保持列对齐。
-                    return (
-                      <td
-                        key={columnNumber}
-                        className="cell-empty"
-                        data-row={rowNumber}
-                        data-column={columnNumber}
-                      />
-                    );
-                  const cell = placed;
-                  const selected =
-                    selection && cellIntersectsSelection(cell, selection);
-                  const props = {
-                    key: columnNumber,
-                    rowSpan: cell.rowspan,
-                    colSpan: cell.colspan,
-                    className: selected ? "cell-selected" : undefined,
-                    "data-row": cell.row,
-                    "data-column": cell.column,
-                    tabIndex: 0,
-                    onClick: (event: MouseEvent) =>
-                      selectCell(cell, event.shiftKey),
-                    onMouseDown: (event: MouseEvent<HTMLTableCellElement>) => {
-                      // 阻止拖选时的原生文本选中，保持矩形选择语义。
-                      if (event.button !== 0) return;
-                      event.preventDefault();
-                      event.currentTarget.focus();
-                      selectCell(cell, event.shiftKey);
-                    },
-                    onMouseEnter: (event: MouseEvent) =>
-                      dragOver(cell, event.buttons),
-                    onKeyDown: (event: React.KeyboardEvent) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        selectCell(cell, event.shiftKey);
-                        return;
-                      }
-                      const deltas: Record<string, [number, number]> = {
-                        ArrowUp: [-1, 0],
-                        ArrowDown: [1, 0],
-                        ArrowLeft: [0, -1],
-                        ArrowRight: [0, 1],
+      {gridTooLarge ? (
+        <p className="form-note" role="note">
+          表格较大，暂不支持预览和区域选择，请复制整表或导出。
+        </p>
+      ) : (
+        <div className="structured-table-scroll">
+          <table ref={tableRef}>
+            <tbody>
+              {buildTableGrid(cells, table.row_count, table.column_count).map(
+                (row, rowNumber) => (
+                  <tr key={rowNumber}>
+                    {row.map((placed, columnNumber) => {
+                      if (placed === "covered") return null; // 由锚点 span 覆盖。
+                      if (placed === null)
+                        // 稀疏空位：非交互占位保持列对齐。
+                        return (
+                          <td
+                            key={columnNumber}
+                            className="cell-empty"
+                            data-row={rowNumber}
+                            data-column={columnNumber}
+                          />
+                        );
+                      const cell = placed;
+                      const selected =
+                        selection && cellIntersectsSelection(cell, selection);
+                      const props = {
+                        key: columnNumber,
+                        rowSpan: cell.rowspan,
+                        colSpan: cell.colspan,
+                        className: selected ? "cell-selected" : undefined,
+                        "data-row": cell.row,
+                        "data-column": cell.column,
+                        tabIndex: 0,
+                        onClick: (event: MouseEvent) =>
+                          selectCell(cell, event.shiftKey),
+                        onMouseDown: (
+                          event: MouseEvent<HTMLTableCellElement>,
+                        ) => {
+                          // 阻止拖选时的原生文本选中，保持矩形选择语义。
+                          if (event.button !== 0) return;
+                          event.preventDefault();
+                          event.currentTarget.focus();
+                          selectCell(cell, event.shiftKey);
+                        },
+                        onMouseEnter: (event: MouseEvent) =>
+                          dragOver(cell, event.buttons),
+                        onKeyDown: (event: React.KeyboardEvent) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            selectCell(cell, event.shiftKey);
+                            return;
+                          }
+                          const deltas: Record<string, [number, number]> = {
+                            ArrowUp: [-1, 0],
+                            ArrowDown: [1, 0],
+                            ArrowLeft: [0, -1],
+                            ArrowRight: [0, 1],
+                          };
+                          const delta = deltas[event.key];
+                          if (delta && onCopyCells) {
+                            event.preventDefault();
+                            moveFocus(cell, delta[0], delta[1], event.shiftKey);
+                          }
+                        },
                       };
-                      const delta = deltas[event.key];
-                      if (delta && onCopyCells) {
-                        event.preventDefault();
-                        moveFocus(cell, delta[0], delta[1], event.shiftKey);
-                      }
-                    },
-                  };
-                  return cell.is_header ? (
-                    <th {...props}>{cell.text}</th>
-                  ) : (
-                    <td {...props}>{cell.text}</td>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {onCopyCells && (
+                      return cell.is_header ? (
+                        <th {...props}>{cell.text}</th>
+                      ) : (
+                        <td {...props}>{cell.text}</td>
+                      );
+                    })}
+                  </tr>
+                ),
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {onCopyCells && !gridTooLarge && (
         <p className="form-note">
           单击、拖选或方向键选择范围；Shift 扩展选择。
         </p>
@@ -454,11 +466,13 @@ function LinesBlock({
         <ol className="result-lines-list">
           {lines.map((line, index) => {
             const editable = onUpdateLine !== undefined;
-            const trigger = editable
-              ? startEditOnEnterOrDoubleActivate(() => {
-                  if (editing === undefined) setEditing(index);
-                })
-              : undefined;
+            // 正在编辑的行不装触发器：编辑框事件不经父级 li。
+            const trigger =
+              editable && editing !== index
+                ? startEditOnEnterOrDoubleActivate(() => {
+                    if (editing === undefined) setEditing(index);
+                  })
+                : undefined;
             return (
               <li
                 key={index}
@@ -590,14 +604,26 @@ export function StructuredResult({
           );
         }
         if (block.type === "image" || block.image) {
+          // 图片预览旁保留非空识别文本（图表内容/图片说明/印章文字），资产失效也不丢。
+          const imageText =
+            typeof block.text === "string" && block.text.length > 0
+              ? block.text
+              : undefined;
           return (
             <section key={index} className="structured-block">
               {block.image?.resource ? (
-                <img src={block.image.resource.url} alt="文档图像区块" />
+                <img
+                  className="structured-image"
+                  src={block.image.resource.url}
+                  alt="文档图像区块"
+                />
               ) : (
                 <p className="form-note">
                   图片不可用：{block.image?.reason ?? "资源缺失"}
                 </p>
+              )}
+              {imageText !== undefined && (
+                <p className="structured-text">{imageText}</p>
               )}
             </section>
           );

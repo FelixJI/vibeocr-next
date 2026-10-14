@@ -1117,12 +1117,6 @@ select {
   padding: 0.75rem 0;
 }
 
-.structured-blocks img {
-  display: block;
-  max-width: 100%;
-  max-height: 24rem;
-}
-
 .editor-output-settings > summary {
   display: none;
 }

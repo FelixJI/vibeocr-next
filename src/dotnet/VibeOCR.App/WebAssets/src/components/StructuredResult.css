@@ -56,6 +56,13 @@
   gap: 6px;
 }
 
+/* 图片区块预览：约束固有尺寸，防止高分辨率图片撑破结果面板。 */
+.structured-block .structured-image {
+  display: block;
+  max-width: 100%;
+  max-height: 24rem;
+}
+
 /* 表格单元格范围选择：锚点矩形内的单元格高亮。 */
 .structured-table-scroll .cell-selected {
   outline: 2px solid #0078d4;
