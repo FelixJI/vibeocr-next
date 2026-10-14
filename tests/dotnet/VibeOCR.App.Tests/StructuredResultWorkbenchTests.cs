@@ -27,6 +27,15 @@ public sealed class StructuredResultWorkbenchTests
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
 
   [Fact]
+  public async Task NativeClipboardAcceptsEmptyTextBeforeHonoringCancellation()
+  {
+    using var cancelled = new CancellationTokenSource();
+    await cancelled.CancelAsync();
+    // 真实 DataPackage 接受空文本；取消阻止系统剪贴板写入。
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+      new WindowsStructuredClipboardPlatform().WriteTextAsync(string.Empty, cancelled.Token));
+  }
+  [Fact]
   public void TableClipboardPayloadPreservesMergesAndGuardsFormulaText()
   {
     using JsonDocument document = JsonDocument.Parse("""

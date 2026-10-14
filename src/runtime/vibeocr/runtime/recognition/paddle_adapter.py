@@ -23,7 +23,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
 from vibeocr.runtime.jobs.budgets import AdapterCapability, ComputeBatch, InputItem
@@ -43,6 +43,9 @@ from vibeocr.runtime_contracts import (
 from vibeocr.runtime_contracts.dtos import OcrEngine
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from vibeocr.runtime.recognition.result_assets import ResultAssetSink
 
 # PaddleOCR 属于用户显式准备的重型闭包；variant id 按 accelerator 一义。
 PADDLE_REQUIRED_COMPONENT = (
@@ -207,7 +210,11 @@ class PaddlePipelineAdapter:
                 results = self.service.recognize_batch(
                     images, service_options, asset_sinks=asset_sinks
                 )
-            payloads = [self._result_to_payload(r) for r in results]
+            payloads = self._payloads_with_reference_images(
+                results,
+                asset_sinks,
+                unwarping=bool(getattr(service_options, "use_doc_unwarping", False)),
+            )
         except Exception:
             logger.exception(
                 "[Supervisor][Recognize] action=recognize pipeline=%s "
@@ -404,6 +411,111 @@ class PaddlePipelineAdapter:
         if img.mode != "RGB":
             img = img.convert("RGB")
         return np.array(img)
+
+    @classmethod
+    def _payloads_with_reference_images(
+        cls,
+        results: list[Any],
+        asset_sinks: list[ResultAssetSink | None] | None,
+        *,
+        unwarping: bool,
+    ) -> list[dict[str, Any]]:
+        """序列化结果并按需发布顶层 ``reference_image``（见发布函数）。"""
+        payloads: list[dict[str, Any]] = []
+        for index, result in enumerate(results):
+            payload = cls._result_to_payload(result)
+            sink = (
+                asset_sinks[index]
+                if asset_sinks is not None and index < len(asset_sinks)
+                else None
+            )
+            cls._publish_reference_image(payload, result, sink, unwarping=unwarping)
+            payloads.append(payload)
+        return payloads
+
+    @staticmethod
+    def _has_overlay_bbox(blocks: object) -> bool:
+        """桌面 overlay 消费的最小校验：非空文本 + 4 个有限数 + 正面积。"""
+        import math
+
+        if not isinstance(blocks, list):
+            return False
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            text = block.get("text")
+            bbox = block.get("bbox")
+            if not (isinstance(text, str) and text.strip()):
+                continue
+            if not isinstance(bbox, list) or len(bbox) != 4:
+                continue
+            if not all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                for value in bbox
+            ):
+                continue
+            x0, y0, x1, y1 = bbox
+            if x1 > x0 and y1 > y0:
+                return True
+        return False
+
+    @staticmethod
+    def _publish_reference_image(
+        payload: dict[str, Any],
+        result: Any,
+        sink: ResultAssetSink | None,
+        *,
+        unwarping: bool,
+    ) -> None:
+        """发布纯文本 OCR 的预处理参考图为 payload 顶层 ``reference_image``。
+
+        bbox 在预处理图（旋转/去畸变后）坐标空间归一化，桌面按原图展示
+        会错位；这里把 Paddle 真实预处理 PNG 经既有 ``ResultAssetSink``
+        发布为 opaque 资产引用（形状与 ``content_list[].image`` 相同），
+        不在消费侧猜变换。仅对无 ``content_list`` 且存在可 overlay 行
+        bbox 的纯文本结果发布；预处理确实需要（角度非 0、预处理图尺寸
+        已知，或本次开启 use_doc_unwarping——去畸变在角度 0 时也改变
+        几何，该推导只在此处做）而图缺失/超预算/保存失败时写
+        ``{available: false, reason}``，禁止原图 fallback；普通无预处理
+        结果省略该字段。
+        """
+        if payload.get("content_list"):
+            return
+        if not PaddlePipelineAdapter._has_overlay_bbox(payload.get("text_blocks")):
+            return
+        from vibeocr.runtime.recognition.result_assets import (
+            REASON_ENCODE_FAILED,
+            REASON_SOURCE_UNAVAILABLE,
+            REASON_STORE_UNAVAILABLE,
+            unavailable_asset,
+        )
+
+        preprocessed = getattr(result, "preprocessed_image", None)
+        if not isinstance(preprocessed, (bytes, bytearray)) or not preprocessed:
+            angle = int(getattr(result, "preproc_angle", 0) or 0)
+            width = int(getattr(result, "preproc_img_w", 0) or 0)
+            height = int(getattr(result, "preproc_img_h", 0) or 0)
+            if unwarping or angle != 0 or (width > 0 and height > 0):
+                payload["reference_image"] = unavailable_asset(
+                    REASON_SOURCE_UNAVAILABLE
+                )
+            return
+        if sink is None:
+            payload["reference_image"] = unavailable_asset(REASON_STORE_UNAVAILABLE)
+            return
+        from PIL import Image as PILImage
+
+        # preprocessed_image 已是 PNG bytes；_encode_png 只接 PIL/ndarray，
+        # 解码后复用 sink.save（预算/上限/落盘失败语义一致）。
+        try:
+            with PILImage.open(io.BytesIO(bytes(preprocessed))) as image:
+                reference = image.copy()
+        except Exception:
+            payload["reference_image"] = unavailable_asset(REASON_ENCODE_FAILED)
+            return
+        payload["reference_image"] = sink.save(reference)
 
     @staticmethod
     def _result_to_payload(result: Any) -> dict[str, Any]:

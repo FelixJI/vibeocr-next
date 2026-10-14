@@ -35,7 +35,9 @@ public sealed class WindowsStructuredClipboardPlatform : IStructuredClipboardPla
 
   public Task WriteTextAsync(string text, CancellationToken cancellationToken)
   {
-    ArgumentException.ThrowIfNullOrWhiteSpace(text);
+    // 空文本是合法复制结果（如空 raw 模式）：写入空字符串即清空剪贴板
+    // 文本；仅 null 拒绝。复用同一 busy 重试/取消边界。
+    ArgumentNullException.ThrowIfNull(text);
     var package = new DataPackage { RequestedOperation = DataPackageOperation.Copy };
     package.SetText(text);
     return SetContentWithRetryAsync(package, cancellationToken);

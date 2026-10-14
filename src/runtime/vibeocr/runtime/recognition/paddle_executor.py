@@ -418,25 +418,31 @@ class AdapterExecutor:
 
     @staticmethod
     def _bind_asset_refs(payload: dict, job_id: str, item_id: str) -> None:
-        """把 job/item 权威绑定补进 content_list 的结果资产引用。
+        """把 job/item 权威绑定补进结果资产引用。
 
         worker 侧 sink 只产生随机 asset_id；job/item 绑定由 supervisor 侧
         （知晓 job_id 与 payload↔item 顺序对齐）在提交成功结果前补齐，
-        供资产 GET 路由校验“属于已完成结果的当前 item”。
+        供资产 GET 路由校验“属于已完成结果的当前 item”。覆盖两类引用：
+        ``content_list[].image`` 块级图与顶层 ``reference_image``（纯文本
+        OCR 的预处理参考图，形状相同）。
         """
 
+        def _bind(ref: object) -> None:
+            if (
+                isinstance(ref, dict)
+                and ref.get("available") is not False
+                and "asset_id" in ref
+            ):
+                ref["item_id"] = item_id
+                ref["job_id"] = job_id
+
         content_list = payload.get("content_list")
-        if not isinstance(content_list, list):
-            return
-        for block in content_list:
-            if not isinstance(block, dict):
-                continue
-            image = block.get("image")
-            if not isinstance(image, dict) or image.get("available") is False:
-                continue
-            if "asset_id" in image:
-                image["item_id"] = item_id
-                image["job_id"] = job_id
+        if isinstance(content_list, list):
+            for block in content_list:
+                if not isinstance(block, dict):
+                    continue
+                _bind(block.get("image"))
+        _bind(payload.get("reference_image"))
 
     def _commit_payload(
         self, record: Any, item: InputItem, payload_type: str, payload: dict

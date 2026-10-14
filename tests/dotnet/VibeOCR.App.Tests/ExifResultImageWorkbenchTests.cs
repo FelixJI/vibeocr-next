@@ -97,6 +97,10 @@ public sealed class ExifResultImageWorkbenchTests
             Payload = new Dictionary<string, JsonElement>
             {
               ["raw_text"] = JsonSerializer.SerializeToElement("exif text"),
+              ["text_blocks"] = JsonSerializer.SerializeToElement(new object[]
+              {
+                new { text = "exif text", bbox = new[] { 10, 10, 100, 30 } },
+              }),
             },
           },
         ],
