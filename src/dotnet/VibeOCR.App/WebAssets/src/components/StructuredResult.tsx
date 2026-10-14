@@ -605,7 +605,12 @@ export function StructuredResult({
             </section>
           );
         }
-        if (block.type === "image" || block.image) {
+        if (
+          block.type === "image" ||
+          block.type === "chart" ||
+          block.type === "seal" ||
+          block.image
+        ) {
           // 图片预览旁保留非空识别文本（图表内容/图片说明/印章文字），资产失效也不丢。
           const imageText =
             typeof block.text === "string" && block.text.length > 0

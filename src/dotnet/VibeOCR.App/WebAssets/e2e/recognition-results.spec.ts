@@ -95,6 +95,8 @@ const structuredPayload = [
       cells: [{ row: 0, column: 0, rowspan: 1, colspan: 1, text: "唯一值" }],
     },
   },
+  { type: "chart", text: "无预览的图表内容", img_path: "chart.png" },
+  { type: "seal", text: "无预览的印章文字" },
 ];
 
 // 真实 1000×500 PNG（浏览器可解码）：校对视图行框可实际操作。
@@ -351,6 +353,8 @@ test("image block keeps text within panel bounds; line editor keeps native Enter
   const image = page.getByRole("img", { name: "文档图像区块" });
   await expect(image).toBeVisible();
   await expect(page.getByText("插图说明文字")).toBeVisible();
+  await expect(page.getByText("无预览的图表内容")).toBeVisible();
+  await expect(page.getByText("无预览的印章文字")).toBeVisible();
   const resultPanel = page.getByRole("region", {
     name: "识别结果",
     exact: true,

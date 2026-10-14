@@ -169,6 +169,22 @@ it("keeps recognized text beside image/chart/seal previews including failed asse
   expect(screen.getByText("图片不可用：资产已过期")).toBeInTheDocument();
 });
 
+it.each(["image", "chart", "seal"])(
+  "keeps %s text when no image descriptor is provided",
+  (type) => {
+    render(
+      <StructuredResult
+        source={JSON.stringify([
+          { type, text: "无预览的识别文字", img_path: "figure.png" },
+        ])}
+        onCopy={vi.fn(async () => true)}
+      />,
+    );
+    expect(screen.getByText("无预览的识别文字")).toBeInTheDocument();
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+  },
+);
+
 it("previews image assets on chart and seal blocks", () => {
   render(
     <StructuredResult

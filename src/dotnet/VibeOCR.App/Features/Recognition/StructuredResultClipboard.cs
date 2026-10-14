@@ -25,7 +25,7 @@ public sealed class WindowsStructuredClipboardPlatform : IStructuredClipboardPla
     string html,
     CancellationToken cancellationToken)
   {
-    ArgumentException.ThrowIfNullOrWhiteSpace(tsv);
+    ArgumentNullException.ThrowIfNull(tsv);
     ArgumentException.ThrowIfNullOrWhiteSpace(html);
     var package = new DataPackage { RequestedOperation = DataPackageOperation.Copy };
     package.SetText(tsv);

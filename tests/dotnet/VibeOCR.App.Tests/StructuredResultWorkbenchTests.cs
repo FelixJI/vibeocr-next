@@ -35,6 +35,32 @@ public sealed class StructuredResultWorkbenchTests
     await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
       new WindowsStructuredClipboardPlatform().WriteTextAsync(string.Empty, cancelled.Token));
   }
+  [Theory]
+  [InlineData("", 1)]
+  [InlineData("   ", 1)]
+  [InlineData("", 2)]
+  public async Task NativeClipboardAcceptsBlankTableRanges(string cellText, int columns)
+  {
+    using JsonDocument document = JsonDocument.Parse(JsonSerializer.Serialize(new
+    {
+      type = "table",
+      table = new
+      {
+        schema_version = 1, row_count = 1, column_count = columns,
+        cells = new[] { new { row = 0, column = 0, rowspan = 1, colspan = 1, text = cellText } },
+      },
+    }));
+    Assert.True(StructuredResultClipboard.TryBuildTableRange(
+      document.RootElement, 0, 0, 0, columns - 1, out string? tsv, out string? html));
+    Assert.Equal(cellText + (columns == 2 ? "\t" : "") + "\n", tsv);
+    Assert.Contains("<td", html);
+    using var cancelled = new CancellationTokenSource();
+    await cancelled.CancelAsync();
+    // 经过真实 DataPackage 构建，取消只阻止系统剪贴板写入。
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+      new WindowsStructuredClipboardPlatform().WriteTableAsync(tsv!, html!, cancelled.Token));
+  }
+
   [Fact]
   public void TableClipboardPayloadPreservesMergesAndGuardsFormulaText()
   {
