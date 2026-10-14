@@ -76,6 +76,9 @@ public static class StructuredResultClipboard
   public const int MaxRows = 1000;
   public const int MaxColumns = 1000;
 
+  /// <summary>限制物化网格面积，与 Web 预览上限一致；稀疏表同样受限。</summary>
+  public const int MaxGridArea = 10_000;
+
   public sealed record TableCell(
     int Row,
     int Column,
@@ -90,7 +93,8 @@ public static class StructuredResultClipboard
   /// <summary>
   /// 构建表格子范围的 TSV/HTML：cell 矩形与选择矩形取交集，交集左上映射
   /// 为新锚点并裁剪 span（范围外跨入的合并单元格也参与）；未被任何交集
-  /// 覆盖的稀疏位置输出空 td，保持列对齐。整表复制共用本构建器。
+  /// 覆盖的稀疏位置输出空 td，保持列对齐。整表复制共用本构建器；交集
+  /// 面积超过 <see cref="MaxGridArea"/> 时拒绝，不物化无界网格。
   /// </summary>
   public static bool TryBuildTableRange(
     JsonElement block,
@@ -113,6 +117,9 @@ public static class StructuredResultClipboard
       return false;
     int gridRows = lastRow - rowStart + 1;
     int gridColumns = lastColumn - columnStart + 1;
+    // 整表与范围共用此入口，必须在分配网格前拒绝超限面积。
+    if ((long)gridRows * gridColumns > MaxGridArea)
+      return false;
     // 交集锚点（选择网格坐标）；-1 表示被同一次交集覆盖，-2 表示未覆盖。
     int[,] anchorRow = new int[gridRows, gridColumns];
     int[,] anchorColumn = new int[gridRows, gridColumns];

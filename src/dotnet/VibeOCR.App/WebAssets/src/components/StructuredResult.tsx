@@ -213,7 +213,7 @@ function cellIntersectsSelection(
   );
 }
 
-// shortcut: 大表仅保留整表复制/导出；支持虚拟滚动后再开放其预览和区域选择。
+// shortcut: 超过宿主 MaxGridArea 的表格仅导出；有界预览/复制实现后再开放。
 const MAX_TABLE_GRID_AREA = 10_000;
 
 /** 表格网格放置：锚点单元格 + span 覆盖位 + 稀疏空位，保持列对齐。 */
@@ -335,9 +335,11 @@ function TableBlock({
     <section className="structured-block" aria-label={`表格 ${ordinal}`}>
       <header className="structured-block-header">
         <strong>表格 {ordinal}</strong>
-        <Button size="small" onClick={() => void onCopy(blockIndex, "table")}>
-          复制表格 HTML / TSV
-        </Button>
+        {!gridTooLarge && (
+          <Button size="small" onClick={() => void onCopy(blockIndex, "table")}>
+            复制表格 HTML / TSV
+          </Button>
+        )}
         {onCopyCells && !gridTooLarge && selection && (
           <Button size="small" onClick={() => void copyCells()}>
             复制所选单元格
@@ -346,7 +348,7 @@ function TableBlock({
       </header>
       {gridTooLarge ? (
         <p className="form-note" role="note">
-          表格较大，暂不支持预览和区域选择，请复制整表或导出。
+          {`表格较大（超过 ${MAX_TABLE_GRID_AREA} 格），暂不支持预览与剪贴板复制，请使用导出获取完整内容。`}
         </p>
       ) : (
         <div className="structured-table-scroll">

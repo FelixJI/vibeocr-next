@@ -2027,9 +2027,14 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       result = await resources.PublishBytesAsync(Encoding.UTF8.GetBytes(response.Text),
         "text/plain; charset=utf-8", ".txt", cancellationToken);
       structured = await resources.PublishStructuredResultAsync(response, viewModel.FetchResultAssetAsync, cancellationToken);
-      if (source is not null)
-        image = await resources.PublishBytesAsync(source.Data, source.MediaType,
-          WorkbenchResourcesOwner.ExtensionForMediaType(source.MediaType), cancellationToken);
+      // 参考图统一重编码为无方向 PNG，与引擎存储像素坐标系一致；失败不发布。
+      if (source is not null &&
+        await WorkbenchResultReferenceImage.NormalizeAsync(
+          source.Data, cancellationToken) is { } reference)
+      {
+        image = await resources.PublishBytesAsync(reference.Data, reference.MediaType,
+          WorkbenchResourcesOwner.ExtensionForMediaType(reference.MediaType), cancellationToken);
+      }
       return (result, structured, image);
     }
     catch

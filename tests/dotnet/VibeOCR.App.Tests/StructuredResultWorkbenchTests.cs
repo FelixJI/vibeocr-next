@@ -9,6 +9,8 @@ using VibeOCR.App.Workbench;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Inference;
 using VibeOCR.Platform.Bootstrap;
+using Windows.Graphics.Imaging;
+using Windows.Storage.Streams;
 using Xunit;
 
 namespace VibeOCR.App.Tests;
@@ -20,6 +22,9 @@ namespace VibeOCR.App.Tests;
 public sealed class StructuredResultWorkbenchTests
 {
   private static readonly byte[] AssetPng = [1, 2, 3, 4];
+  /// <summary>真实可解码 1×1 PNG：识别输入 fixture（ResultImage 像素契约）。</summary>
+  private static readonly byte[] RecognitionPng = Convert.FromBase64String(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
 
   [Fact]
   public void TableClipboardPayloadPreservesMergesAndGuardsFormulaText()
@@ -139,6 +144,37 @@ public sealed class StructuredResultWorkbenchTests
   }
 
   [Fact]
+  public void TableClipboardBoundsMaterializedGridArea()
+  {
+    // 回归（PR225 review）：合法 1000×1000 稀疏表（仅 1 个单元格）会让
+    // 旧实现分配两个 int[,]、一个 string[,] 并生成百万 td，宿主 UI 冻结；
+    // 超限面积必须 fail fast 拒绝，而不是物化无界网格。
+    using JsonDocument sparse = JsonDocument.Parse(
+      """{"type":"table","table":{"schema_version":1,"row_count":1000,"column_count":1000,"cells":[{"row":0,"column":0,"rowspan":1,"colspan":1,"text":"唯一值"}]}}""");
+
+    Assert.False(StructuredResultClipboard.TryBuildTable(
+      sparse.RootElement, out string? tsv, out string? html));
+    Assert.Null(tsv);
+    Assert.Null(html);
+    // 范围复制不得成为绕过面：覆盖整表的子范围同样拒绝。
+    Assert.False(StructuredResultClipboard.TryBuildTableRange(
+      sparse.RootElement, 0, 999, 0, 999, out _, out _));
+    // 面积上限内的子范围仍可复制，稀疏位置保持空占位列对齐。
+    Assert.True(StructuredResultClipboard.TryBuildTableRange(
+      sparse.RootElement, 0, 0, 0, 9, out string? rangeTsv, out string? rangeHtml));
+    Assert.Equal("唯一值\t\t\t\t\t\t\t\t\t\n", rangeTsv);
+    Assert.Contains("<td rowspan=\"1\" colspan=\"1\">唯一值</td>", rangeHtml);
+
+    // 边界：100×100=10000 格恰在上限内，整表复制保持可用。
+    using JsonDocument bounded = JsonDocument.Parse(
+      """{"type":"table","table":{"schema_version":1,"row_count":100,"column_count":100,"cells":[{"row":0,"column":0,"rowspan":1,"colspan":1,"text":"左上"}]}}""");
+    Assert.True(StructuredResultClipboard.TryBuildTable(
+      bounded.RootElement, out string? wholeTsv, out string? wholeHtml));
+    Assert.Equal(100, wholeTsv!.Split('\n').Length - 1);
+    Assert.Contains("左上", wholeHtml);
+  }
+
+  [Fact]
   public void LinesTextModesMatchClassicJoinSemantics()
   {
     using JsonDocument document = JsonDocument.Parse("""
@@ -221,7 +257,12 @@ public sealed class StructuredResultWorkbenchTests
       {
         using var bytes = new MemoryStream();
         await image.Content.CopyToAsync(bytes, TestContext.Current.CancellationToken);
-        Assert.Equal(new byte[] { 1, 2, 3, 4 }, bytes.ToArray());
+        // ResultImage 统一重编码为无方向 PNG：按解码像素与输入一致断言。
+        (byte[] pixels, uint width, uint height) = await DecodePngPixelsAsync(bytes.ToArray());
+        (byte[] inputPixels, uint inputWidth, uint inputHeight) = await DecodePngPixelsAsync(RecognitionPng);
+        Assert.Equal(inputWidth, width);
+        Assert.Equal(inputHeight, height);
+        Assert.Equal(inputPixels, pixels);
       }
 
       // 模式复制：宿主从权威资源预计算 modes 取文本（merged = 无分隔拼接）。
@@ -620,6 +661,26 @@ public sealed class StructuredResultWorkbenchTests
     }
   }
 
+  /// <summary>解码 PNG 像素（存储网格）：ResultImage 断言用。</summary>
+  private static async Task<(byte[] Pixels, uint Width, uint Height)> DecodePngPixelsAsync(
+    byte[] png)
+  {
+    using var stream = new InMemoryRandomAccessStream();
+    using (var writer = new DataWriter(stream))
+    {
+      writer.WriteBytes(png);
+      await writer.StoreAsync();
+      writer.DetachStream();
+    }
+    stream.Seek(0);
+    BitmapDecoder decoder = await BitmapDecoder.CreateAsync(stream);
+    byte[] pixels = (await decoder.GetPixelDataAsync(
+      BitmapPixelFormat.Bgra8, BitmapAlphaMode.Straight, new BitmapTransform(),
+      ExifOrientationMode.IgnoreExifOrientation,
+      ColorManagementMode.DoNotColorManage)).DetachPixelData();
+    return (pixels, decoder.PixelWidth, decoder.PixelHeight);
+  }
+
   private sealed class FixedRecognitionInputs : IInputService
   {
     public Task<RecognitionInput?> PickFileAsync(CancellationToken cancellationToken) => Acquire();
@@ -632,7 +693,7 @@ public sealed class StructuredResultWorkbenchTests
       string path, CancellationToken cancellationToken) => Acquire();
 
     private static Task<RecognitionInput?> Acquire() => Task.FromResult<RecognitionInput?>(
-      new RecognitionInput([1, 2, 3, 4], "image/png", "file.png", "file"));
+      new RecognitionInput(RecognitionPng, "image/png", "file.png", "file"));
   }
 
   /// <summary>返回带 text_blocks（含 score/bbox）的纯文本结果。</summary>

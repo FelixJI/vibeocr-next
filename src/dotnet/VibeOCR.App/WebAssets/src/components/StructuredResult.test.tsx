@@ -194,9 +194,10 @@ it("previews image assets on chart and seal blocks", () => {
   expect(screen.getByText("图片不可用：资产已过期")).toBeInTheDocument();
 });
 
-it("bounds sparse oversized tables to a note while keeping full-table copy", async () => {
-  // 101×101=10201 格仅 1 个单元格：刚超过 10000 格展示上限的合法稀疏
-  // 输入，验证降级路径（明确提示 + 不物化网格 + 整表复制仍可用）。
+it("bounds sparse oversized tables to a note without clipboard copy", () => {
+  // 101×101=10201 格仅 1 个单元格：刚超过 10000 格上限的合法稀疏输入。
+  // 宿主对超限网格拒绝剪贴板构建（旧实现会物化整表矩阵冻结 UI），前端
+  // 必须同步降级：不物化网格、不提供整表/范围复制，明确引导导出替代。
   const onCopy = vi.fn(async () => true);
   render(
     <StructuredResult
@@ -228,17 +229,19 @@ it("bounds sparse oversized tables to a note while keeping full-table copy", asy
   expect(screen.getByRole("region", { name: "表格 1" })).toBeInTheDocument();
   expect(document.querySelector(".structured-table-scroll table")).toBeNull();
   expect(
-    screen.getByText("表格较大，暂不支持预览和区域选择，请复制整表或导出。"),
+    screen.getByText(
+      "表格较大（超过 10000 格），暂不支持预览与剪贴板复制，请使用导出获取完整内容。",
+    ),
   ).toBeInTheDocument();
-  // 降级态不展示范围选择提示与不可用交互。
+  // 降级态不展示范围选择提示与不可用交互，也不再引导整表复制。
   expect(screen.queryByText(/拖选或方向键/)).not.toBeInTheDocument();
   expect(
     screen.queryByRole("button", { name: "复制所选单元格" }),
   ).not.toBeInTheDocument();
-  await fireEvent.click(
-    screen.getByRole("button", { name: "复制表格 HTML / TSV" }),
-  );
-  expect(onCopy).toHaveBeenCalledWith(1, "table");
+  expect(
+    screen.queryByRole("button", { name: "复制表格 HTML / TSV" }),
+  ).not.toBeInTheDocument();
+  expect(onCopy).not.toHaveBeenCalled();
 });
 
 it("renders tables within the grid area limit", () => {
@@ -272,10 +275,15 @@ it("renders tables within the grid area limit", () => {
     10000,
   );
   expect(screen.queryByText(/表格较大/)).not.toBeInTheDocument();
+  // 恰在上限内的表格仍提供整表剪贴板复制。
+  expect(
+    screen.getByRole("button", { name: "复制表格 HTML / TSV" }),
+  ).toBeInTheDocument();
 });
 
 it("skips million-cell grids for 1000×1000 sparse tables", () => {
-  // 1000×1000 少 cells：协议允许的极端稀疏表也不得物化百万格 DOM。
+  // 1000×1000 少 cells：协议允许的极端稀疏表也不得物化百万格 DOM，
+  // 也不得引导宿主物化超限剪贴板负载。
   render(
     <StructuredResult
       source={JSON.stringify([
@@ -297,6 +305,9 @@ it("skips million-cell grids for 1000×1000 sparse tables", () => {
   expect(document.querySelector(".structured-table-scroll table")).toBeNull();
   expect(document.querySelectorAll("tr").length).toBe(0);
   expect(screen.getByText(/表格较大/)).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "复制表格 HTML / TSV" }),
+  ).not.toBeInTheDocument();
 });
 
 it("keeps native Enter newline and double-click selection inside the line editor", async () => {

@@ -84,6 +84,17 @@ const structuredPayload = [
       resource: { url: DOC_IMAGE_URL, mediaType: "image/png" },
     },
   },
+  {
+    // 超限稀疏大表（101×101=10201 格）：降级为提示 + 导出替代，不提供
+    // 剪贴板复制（宿主同样拒绝超限网格，旧实现会冻结 UI）。
+    type: "table",
+    table: {
+      schema_version: 1,
+      row_count: 101,
+      column_count: 101,
+      cells: [{ row: 0, column: 0, rowspan: 1, colspan: 1, text: "唯一值" }],
+    },
+  },
 ];
 
 // 真实 1000×500 PNG（浏览器可解码）：校对视图行框可实际操作。
@@ -306,6 +317,28 @@ test("table cell selection via drag, shift-click and keyboard", async ({
   await expect(merged).toHaveClass(/cell-selected/);
   await page.screenshot({
     path: testInfo.outputPath("cell-selection.png"),
+  });
+});
+
+test("oversized sparse tables degrade to export guidance without clipboard copy", async ({
+  page,
+}, testInfo) => {
+  await mountRecognitionResults(page);
+
+  // 降级契约与宿主面积上限一致：不物化网格、不提供整表/范围剪贴板
+  // 复制，明确引导导出替代。
+  const region = page.getByRole("region", { name: "表格 3" });
+  await expect(region).toBeVisible();
+  await expect(region.locator(".structured-table-scroll table")).toHaveCount(0);
+  await expect(
+    region.getByRole("button", { name: "复制表格 HTML / TSV" }),
+  ).toHaveCount(0);
+  await expect(
+    region.getByRole("button", { name: "复制所选单元格" }),
+  ).toHaveCount(0);
+  await expect(region.getByText(/表格较大（超过 10000 格）/)).toBeVisible();
+  await region.screenshot({
+    path: testInfo.outputPath("large-table-export.png"),
   });
 });
 

@@ -133,7 +133,13 @@ public sealed class QrCodeSavePlatform(Func<nint> windowHandle) : IQrCodeSavePla
         });
     }
 
-    internal static async Task<byte[]> EncodeImageAsync(byte[] png, Guid encoderId, CancellationToken cancellationToken)
+    /// <param name="bypassPassthrough">
+    /// 跳过 PNG→PNG 直通短路：供必须重编码以剥离方向元数据（eXIf）的
+    /// 生产消费者（结果参考图归一化）使用；默认 false 保持二维码既有语义。
+    /// </param>
+    internal static async Task<byte[]> EncodeImageAsync(
+        byte[] png, Guid encoderId, CancellationToken cancellationToken,
+        bool bypassPassthrough = false)
     {
         cancellationToken.ThrowIfCancellationRequested();
         using var input = new InMemoryRandomAccessStream();
@@ -146,7 +152,7 @@ public sealed class QrCodeSavePlatform(Func<nint> windowHandle) : IQrCodeSavePla
         input.Seek(0);
         BitmapDecoder decoder = await BitmapDecoder.CreateAsync(input);
         cancellationToken.ThrowIfCancellationRequested();
-        if (encoderId == BitmapEncoder.PngEncoderId && decoder.DecoderInformation.CodecId == BitmapDecoder.PngDecoderId) return png;
+        if (!bypassPassthrough && encoderId == BitmapEncoder.PngEncoderId && decoder.DecoderInformation.CodecId == BitmapDecoder.PngDecoderId) return png;
         BitmapAlphaMode alpha = encoderId == BitmapEncoder.PngEncoderId ? BitmapAlphaMode.Straight : BitmapAlphaMode.Ignore;
         PixelDataProvider source = await decoder.GetPixelDataAsync(
             BitmapPixelFormat.Bgra8, alpha,

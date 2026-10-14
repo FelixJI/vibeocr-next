@@ -1,6 +1,6 @@
 # Classic → VibeOCR Next 行为对照
 
-Classic 的对照事实来自 [GitHub 当前源码](https://github.com/FelixJI/vibeocr-classic/tree/b816274809276699aa20b1b79193e0672710198c)，不使用旧迁移文档替代实现。2026-10-14 核对默认分支 `main` 为 `b816274809276699aa20b1b79193e0672710198c`，仓库当前未归档。Next 的 Runtime、内部契约和桌面源码已在本仓；缺少功能应在本仓按 capability 与语言边界实现，不再等待旧 Backend/Protocol 发版。
+Classic 的对照事实来自 [本次核对的 GitHub 源码](https://github.com/FelixJI/vibeocr-classic/tree/b816274809276699aa20b1b79193e0672710198c)，不使用旧迁移文档替代实现。2026-10-14 核对默认分支 `main` 为 `b816274809276699aa20b1b79193e0672710198c`。该提交仅作为冻结的历史源码对照源，不要求 Classic 未来的提交、发版或镜像维护。Next 的 Runtime、内部契约和桌面源码已在本仓；缺少功能应在本仓按 capability 与语言边界实现，不再等待旧 Backend/Protocol 发版。
 
 ## 本次核对范围
 
@@ -32,10 +32,10 @@ Classic 的对照事实来自 [GitHub 当前源码](https://github.com/FelixJI/v
 - Classic 迁入的 Python `TextBlockProcessor` 与 `TextBlockOptions` 没有生产调用方，已随宿主排版接线移除；排版规则仅由 C# 生成，Web 展示，Runtime 导出消费所选文本。
 - 单图/截图使用会话与修订绑定，编辑图像经过导出后进入 OCR；旋转、裁剪或会话替换后旧文字层失效。相关入口为 `WorkbenchImageOwner`，契约见 `ScreenshotSessionWorkbenchTests` 与 `ImageEditIsolationWorkbenchTests`。
 - PDF 已有插页、重排、横纵摆正、文本层读写及保存路径，并非旧矩阵所述的外部接口阻断。对应 `PdfViewModel`、`PdfPageOperationsTests`、`PdfTextLayerTests`。
-- 公开文本二维码已由 C# 本地生成；解码仍由 Runtime 承担。对应 `LocalQrCodeClientTests` 与 `LocalQrCodeGeneratorTests`。
+- 公开文本二维码生成与图片二维码/条码解码均由 C# 桌面进程完成；`App.xaml.cs` 装配 `LocalQrCodeClient`，不依赖 Supervisor。Runtime 仅保留生成/解码的内部 wire 兼容路由，不是桌面的解码调用链。对应 `LocalQrCodeClientTests` 与 `LocalQrCodeGeneratorTests`。
 - 环境安装、切换、清理和修复已有宿主命令与 Runtime 事务边界。`WorkbenchSettingsOwner` 负责装配，不在 React 重复推导依赖或设备就绪状态。
 - 单实例、托盘、跨产品互斥、任务取消、更新及恢复沿用现有实现。保留已有数据迁移与跨产品互斥，仓库状态变化不改变这些兼容契约。
 
 ## 持续保留的边界
 
-低置信度仅在上游提供有效分数时判断，缺失分数不能伪装成 0% 或 100%。编辑、复制和导出必须拒绝已替换的结果；同文本出现多次时不能靠全文首次匹配定位。结构化表格复制保留 HTML 与 TSV 两种表达，公式同时保留可选择的源文本。没有 capability 的操作继续隐藏、禁用或明确回退，不显示假成功。
+低置信度仅在上游提供有效分数时判断，缺失分数不能伪装成 0% 或 100%。编辑、复制和导出必须拒绝已替换的结果；同文本出现多次时不能靠全文首次匹配定位。结构化表格复制保留 HTML 与 TSV 两种表达。为避免超大网格卡住界面，预览与剪贴板复制最多物化 10000 格；更大的表格使用导出，范围复制按实际交集面积检查上限。公式同时保留可选择的源文本。没有 capability 的操作继续隐藏、禁用或明确回退，不显示假成功。
