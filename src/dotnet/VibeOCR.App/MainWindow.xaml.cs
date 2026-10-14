@@ -1,5 +1,6 @@
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using VibeOCR.App.Features.Batch;
@@ -819,6 +820,16 @@ public sealed partial class MainWindow : Window
         if (scene.TakeBackground() is not { Length: 153654 })
           throw new InvalidOperationException("Capture scene lost its frozen background.");
       }
+      // XAML 图标解析需真实 WinUI UI 线程；普通单元测试宿主未初始化 Application。
+      smokeStage = "capture-icons-verification";
+      WebReadySmokeStatus.Stage(smokeStage);
+      foreach (string key in new[] { "rectangle", "ellipse", "arrow", "mosaic", "blur", "tableRecognition", "scrollCapture" })
+      {
+        if (ScreenshotToolbarIcons.CreateIcon(key) is not PathIcon { Data: not null })
+          throw new InvalidOperationException($"Capture icon failed to load: {key}");
+      }
+      if (ScreenshotToolbarIcons.CreateIcon("settings") is not FontIcon)
+        throw new InvalidOperationException("Capture settings icon failed to load.");
       resourceBroker.Revoke(lease);
       if (!string.IsNullOrWhiteSpace(healthFile))
       {

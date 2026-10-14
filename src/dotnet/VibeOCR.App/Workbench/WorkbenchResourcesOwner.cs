@@ -17,11 +17,45 @@ internal sealed class WorkbenchResourcesOwner(WorkbenchResourceBroker resourceBr
   internal readonly Dictionary<string, string> structuredResourceFiles = new(StringComparer.Ordinal);
   internal Task<WorkbenchResourceReference?> PublishStructuredResultAsync(
     RecognitionViewModel viewModel,
-    CancellationToken cancellationToken) =>
-    PublishStructuredResultAsync(
-      viewModel.Result?.ContentBlocks,
-      viewModel.FetchResultAssetAsync,
+    CancellationToken cancellationToken)
+    => PublishStructuredResultAsync(viewModel.Result, viewModel.FetchResultAssetAsync, cancellationToken);
+
+  internal Task<WorkbenchResourceReference?> PublishStructuredResultAsync(
+    RecognizeResponse? result,
+    Func<string, string, string, CancellationToken, Task<byte[]>> fetchAsset,
+    CancellationToken cancellationToken)
+  {
+    // 纯文本 OCR 无 content_list：用权威 text_blocks 合成 lines 区块
+    // （modes 为展示/复制的拼接权威），供结果面板的排版模式、低置信度
+    // 提示与行内联编辑使用；结构化结果仍优先使用 content_list。
+    if (result?.ContentBlocks is not { Length: > 0 } && result?.RawBlocks is { Length: > 0 })
+    {
+      JsonObject? linesBlock = RecognitionLinesBlock.BuildBlock(
+        result.RawBlocks, result.RawText ?? result.Text);
+      if (linesBlock is not null)
+      {
+        return PublishLinesStructuredResultAsync(linesBlock, cancellationToken);
+      }
+    }
+    return PublishStructuredResultAsync(
+      result?.ContentBlocks,
+      fetchAsset,
       cancellationToken);
+  }
+
+  private async Task<WorkbenchResourceReference?> PublishLinesStructuredResultAsync(
+    JsonObject linesBlock,
+    CancellationToken cancellationToken)
+  {
+    JsonArray json = [linesBlock];
+    (WorkbenchResourceReference structured, string structuredPath) =
+      await PublishFileAsync(
+        Encoding.UTF8.GetBytes(json.ToJsonString()),
+        "application/json; charset=utf-8", ".json", cancellationToken);
+    structuredResourceFiles[structured.Url] = structuredPath;
+    structuredResourceChildren[structured.Url] = [];
+    return structured;
+  }
 
   /// <summary>
   /// 结构化结果与授权图片资产的唯一发布路径：单次/批量项/PDF 页共用，
@@ -44,7 +78,11 @@ internal sealed class WorkbenchResourcesOwner(WorkbenchResourceBroker resourceBr
       foreach (JsonElement block in content)
       {
         JsonNode? node = JsonNode.Parse(block.GetRawText());
-        if (node is not JsonObject item) continue;
+        if (node is not JsonObject item)
+        {
+          json.Add(node);
+          continue;
+        }
         if (item["image"] is JsonObject asset)
         {
           // resource 只承载宿主发布的 opaque 资源引用：wire 原样携带的
@@ -55,7 +93,8 @@ internal sealed class WorkbenchResourcesOwner(WorkbenchResourceBroker resourceBr
             asset["available"] = false;
             asset["reason"] = "本项图片数量超过 32 张预览上限";
           }
-          else if (asset["available"]?.GetValue<bool>() is not false &&
+          else if (!(asset["available"] is JsonValue available &&
+            available.TryGetValue<bool>(out bool canRead) && !canRead) &&
             fetchAsset is not null &&
             asset["job_id"] is JsonValue job && job.TryGetValue<string>(out string? jobId) &&
             asset["item_id"] is JsonValue sourceItem && sourceItem.TryGetValue<string>(out string? itemId) &&
@@ -138,17 +177,20 @@ internal sealed class WorkbenchResourcesOwner(WorkbenchResourceBroker resourceBr
     string relative = Path.Combine("session", $"{Guid.NewGuid():N}{extension}");
     string destination = Path.Combine(resourceRoot, relative);
     Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-    await File.WriteAllBytesAsync(destination, data, cancellationToken);
-    generatedFiles.Add(destination);
-    WorkbenchResourceLease lease = resourceBroker.Lease(
-      relative,
-      mediaType,
-      TimeSpan.FromHours(1));
-    resourceFiles[lease.Uri.AbsoluteUri] = destination;
-    return (new WorkbenchResourceReference(
-      lease.Uri.AbsoluteUri,
-      mediaType,
-      data.LongLength), destination);
+    try
+    {
+      await File.WriteAllBytesAsync(destination, data, cancellationToken);
+      cancellationToken.ThrowIfCancellationRequested();
+      WorkbenchResourceLease lease = resourceBroker.Lease(relative, mediaType, TimeSpan.FromHours(1));
+      generatedFiles.Add(destination);
+      resourceFiles[lease.Uri.AbsoluteUri] = destination;
+      return (new WorkbenchResourceReference(lease.Uri.AbsoluteUri, mediaType, data.LongLength), destination);
+    }
+    catch
+    {
+      File.Delete(destination);
+      throw;
+    }
   }
 
   internal static string ExtensionForMediaType(string mediaType) => mediaType switch

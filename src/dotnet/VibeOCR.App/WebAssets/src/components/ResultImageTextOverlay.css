@@ -1,0 +1,64 @@
+/* 结果图像校对视图（组件局部样式）：参考图 + 结果行框投影与行内编辑。 */
+
+.result-image-overlay {
+  margin: 0;
+}
+
+.result-image-stage {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+}
+
+.result-image-stage img {
+  display: block;
+}
+
+.overlay-line {
+  position: absolute;
+  border: 1px solid rgba(0, 120, 212, 0.55);
+  background: rgba(0, 120, 212, 0.08);
+  border-radius: 2px;
+  cursor: text;
+  /* 裁剪行内文字：避免文本溢出遮挡相邻 bbox 的点击；编辑器是兄弟节点。 */
+  overflow: hidden;
+  padding: 0 2px;
+}
+
+.overlay-line.low-confidence {
+  border-color: #d13438;
+  background: rgba(209, 52, 56, 0.12);
+}
+
+.overlay-line-text {
+  font-size: 12px;
+  opacity: 0.9;
+  white-space: pre;
+  display: block;
+}
+
+/* 编辑面板锚定行框并钳位到舞台内，不越过右/下边缘。 */
+.overlay-line-editor {
+  position: absolute;
+  z-index: 2;
+  max-width: 320px;
+  background: var(--colorNeutralBackground1);
+  color: var(--colorNeutralForeground1);
+  border: 1px solid var(--colorNeutralStroke1);
+  border-radius: 4px;
+  padding: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+
+.overlay-line-editor textarea {
+  width: 100%;
+  min-height: 3em;
+  font: inherit;
+  box-sizing: border-box;
+}
+
+.overlay-line:focus-visible,
+.overlay-line:focus-within {
+  outline: 2px solid #0078d4;
+  outline-offset: 1px;
+}

@@ -63,6 +63,7 @@ export interface TextLayerLineState {
   readonly x2: number;
   readonly y2: number;
   readonly order?: number | null;
+  readonly score?: number | null;
 }
 
 export function textLayerLines(value: unknown): readonly TextLayerLineState[] {

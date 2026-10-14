@@ -8,6 +8,7 @@ import {
   type ImageTextLine,
   type ImageTextLineBinding,
 } from "./imageTextLayerGeometry";
+import { confidenceLabel, isLowConfidence } from "./resultTextModes";
 
 export type {
   ImageTextLine,
@@ -79,7 +80,12 @@ export function ImageTextLayer({
         ? lines.map((line, index) => {
             const box = layoutTextBox(line.bbox, image, size);
             return box ? (
-              <FittedLine key={index} text={line.text} box={box} />
+              <FittedLine
+                key={index}
+                text={line.text}
+                box={box}
+                score={line.score}
+              />
             ) : null;
           })
         : null,
@@ -101,9 +107,11 @@ export function ImageTextLayer({
 function FittedLine({
   text,
   box,
+  score,
 }: {
   readonly text: string;
   readonly box: { left: number; top: number; width: number; height: number };
+  readonly score?: number;
 }) {
   const glyphs = useRef<HTMLSpanElement>(null);
   useLayoutEffect(() => {
@@ -111,9 +119,15 @@ function FittedLine({
     if (glyphs.current)
       glyphs.current.style.transform = `scaleX(${measured > box.width ? box.width / measured : 1})`;
   }, [text, box.width, box.height]);
+  // 低置信提示：score 已知且 <80% 时加标记与悬停说明（Classic 阈值）；
+  // unknown（score 缺失）不标记。仅提示，不提供编辑。
+  const lowConfidence = isLowConfidence(score ?? null);
   return (
     <div
-      className="image-text-line"
+      className={
+        lowConfidence ? "image-text-line low-confidence" : "image-text-line"
+      }
+      title={score === undefined ? undefined : confidenceLabel(score)}
       style={{
         left: `${box.left}px`,
         top: `${box.top}px`,

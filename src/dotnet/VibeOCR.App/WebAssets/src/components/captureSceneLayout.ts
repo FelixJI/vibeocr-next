@@ -9,6 +9,11 @@ export interface CaptureSceneGeometry {
   readonly initialTool?: string;
 }
 
+/** 现场浮动工具的宽度预算（DIP）：工具栏左缘钳制的唯一事实源。 */
+const TOOLS_WIDTH_BUDGET = 880;
+/** 输出设置面板的翻转决策预算（换行后约 3 行控件的估算高度）。 */
+const SETTINGS_PANEL_BUDGET = 132;
+
 export function captureSceneStyle(
   geometry: CaptureSceneGeometry | undefined,
   viewportWidth: number,
@@ -44,7 +49,11 @@ export function captureSceneStyle(
     y = geometry.y * sy;
   const width = geometry.width * sx,
     height = geometry.height * sy;
-  const toolHeight = Math.min(64, viewportHeight);
+  // 两排工具栏（主操作一排 + 样式一排）的最大高度预算：两行小尺寸
+  // 控件加内边距约 84px，64px 单排时代的预算会触发内部滚动。窄视口
+  // （<900px）时两排各自换行、行数增多，放宽到 144px 避免主操作排被
+  // 卷进折叠区；仍由宿主滚动容器兑底。
+  const toolHeight = Math.min(viewportWidth < 900 ? 144 : 96, viewportHeight);
   const below = y + height + 8;
   const toolTop =
     below + toolHeight <= viewportHeight
@@ -52,13 +61,29 @@ export function captureSceneStyle(
       : y >= toolHeight + 8
         ? y - toolHeight - 8
         : Math.max(0, viewportHeight - toolHeight);
+  // 输出设置下拉：优先在覆盖层下方；选区几乎全屏、工具栏钉在视口底部时
+  // 下方放不下，翻转到覆盖层上方；实际高度由 CSS max-height+滚动兑底。
+  const settingsBelowTop = toolTop + toolHeight + 4;
+  const settingsBelowFits =
+    settingsBelowTop + SETTINGS_PANEL_BUDGET <= viewportHeight;
+  const settingsTop = settingsBelowFits
+    ? settingsBelowTop
+    : Math.max(4, toolTop - 4 - SETTINGS_PANEL_BUDGET);
+  const settingsMaxHeight = Math.max(
+    48,
+    settingsBelowFits
+      ? viewportHeight - settingsTop - 8
+      : toolTop - 4 - settingsTop,
+  );
   return {
     "--capture-x": `${x}px`,
     "--capture-y": `${y}px`,
     "--capture-width": `${width}px`,
     "--capture-height": `${height}px`,
-    "--capture-tools-left": `${Math.min(x, Math.max(0, viewportWidth - 880))}px`,
+    "--capture-tools-left": `${Math.min(x, Math.max(0, viewportWidth - TOOLS_WIDTH_BUDGET))}px`,
     "--capture-tools-top": `${toolTop}px`,
     "--capture-tools-height": `${toolHeight}px`,
+    "--capture-settings-top": `${settingsTop}px`,
+    "--capture-settings-max-height": `${settingsMaxHeight}px`,
   };
 }

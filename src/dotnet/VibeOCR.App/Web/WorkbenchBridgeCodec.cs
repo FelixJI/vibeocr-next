@@ -63,6 +63,7 @@ public static class WorkbenchBridgeCodec
   private static readonly HashSet<string> ThemeArgumentFields = ["theme"];
   private static readonly HashSet<string> DegreesArgumentFields = ["degrees"];
   private static readonly HashSet<string> FormatArgumentFields = ["format"];
+  private static readonly HashSet<string> ExportArgumentFields = ["format", "textMode"];
   private static readonly HashSet<string> EnabledArgumentFields = ["enabled"];
   private static readonly HashSet<string> ActionIdArgumentFields = ["actionId"];
   private static readonly HashSet<string> RecordingArgumentFields = ["recordingId"];
@@ -117,6 +118,12 @@ public static class WorkbenchBridgeCodec
     ["resourceUri", "sessionId", "revision", "excludeBoxes"];
   private static readonly HashSet<string> StructuredCopyArgumentFields =
     ["resourceUri", "blockIndex", "format"];
+  private static readonly HashSet<string> LinesCopyArgumentFields =
+    ["resourceUri", "mode"];
+  private static readonly HashSet<string> CellsCopyArgumentFields =
+    ["resourceUri", "blockIndex", "rowStart", "rowEnd", "columnStart", "columnEnd"];
+  private static readonly HashSet<string> LineEditArgumentFields =
+    ["resourceUri", "lineIndex", "expectedOldText", "newText"];
   private static readonly HashSet<string> SessionSelectionArgumentFields =
     ["sessionId", "revision", "text"];
 
@@ -149,7 +156,7 @@ public static class WorkbenchBridgeCodec
       throw;
     }
     catch (Exception error) when (
-      error is JsonException or InvalidOperationException or KeyNotFoundException)
+      error is JsonException or InvalidOperationException or KeyNotFoundException or FormatException)
     {
       throw new WorkbenchBridgeProtocolException(
         "Workbench bridge bootstrap JSON is invalid.",
@@ -267,7 +274,7 @@ public static class WorkbenchBridgeCodec
         throw new WorkbenchBridgeProtocolException("Preview flush response identity is invalid.");
       return (id, session, payload.GetProperty("documentId").GetString()!, payload.GetProperty("ok").GetBoolean());
     }
-    catch (Exception error) when (error is JsonException or InvalidOperationException or KeyNotFoundException)
+    catch (Exception error) when (error is JsonException or InvalidOperationException or KeyNotFoundException or FormatException)
     { throw new WorkbenchBridgeProtocolException("Preview flush response is invalid.", error); }
   }
 
@@ -333,7 +340,7 @@ public static class WorkbenchBridgeCodec
       throw;
     }
     catch (Exception error) when (
-      error is JsonException or InvalidOperationException or KeyNotFoundException)
+      error is JsonException or InvalidOperationException or KeyNotFoundException or FormatException)
     {
       throw new WorkbenchBridgeProtocolException(
         "Workbench bridge command JSON is invalid.",
@@ -535,10 +542,77 @@ public static class WorkbenchBridgeCodec
           ["plain", "markdown", "rich"]));
       case ("recognition", "copyStructured"):
         return ParseStructuredCopy(arguments);
+      case ("recognition", "copyLines"):
+      {
+        EnsureObjectWithFields(arguments, LinesCopyArgumentFields, "command arguments");
+        string? linesMode = arguments.GetProperty("mode").GetString();
+        if (linesMode is not ("raw" or "line" or "merged" or "smart"))
+          throw new WorkbenchBridgeProtocolException(
+            "Workbench recognition line copy mode is invalid.");
+        return new CopyRecognitionLinesCommand(
+          ParseStructuredResourceUri(arguments),
+          linesMode);
+      }
+      case ("recognition", "copyStructuredCells"):
+      {
+        EnsureObjectWithFields(arguments, CellsCopyArgumentFields, "command arguments");
+        int cellsBlockIndex = arguments.GetProperty("blockIndex").GetInt32();
+        if (cellsBlockIndex is < 0 or > 4095)
+          throw new WorkbenchBridgeProtocolException(
+            "Workbench structured block index is invalid.");
+        int rowStart = arguments.GetProperty("rowStart").GetInt32();
+        int rowEnd = arguments.GetProperty("rowEnd").GetInt32();
+        int columnStart = arguments.GetProperty("columnStart").GetInt32();
+        int columnEnd = arguments.GetProperty("columnEnd").GetInt32();
+        if (rowStart < 0 || columnStart < 0 || rowEnd < rowStart || columnEnd < columnStart ||
+          rowEnd >= StructuredResultClipboard.MaxRows || columnEnd >= StructuredResultClipboard.MaxColumns)
+          throw new WorkbenchBridgeProtocolException(
+            "Workbench structured cell range is invalid.");
+        return new CopyStructuredCellsCommand(
+          ParseStructuredResourceUri(arguments),
+          cellsBlockIndex,
+          rowStart,
+          rowEnd,
+          columnStart,
+          columnEnd);
+      }
+      case ("recognition", "updateLine"):
+      {
+        EnsureObjectWithFields(arguments, LineEditArgumentFields, "command arguments");
+        int lineIndex = arguments.GetProperty("lineIndex").GetInt32();
+        string? expectedOldText = arguments.GetProperty("expectedOldText").GetString();
+        string? editedText = arguments.GetProperty("newText").GetString();
+        if (lineIndex < 0 || lineIndex > 9999 ||
+          expectedOldText is null || expectedOldText.Length > 10_000 ||
+          string.IsNullOrWhiteSpace(editedText) || editedText.Length > 10_000)
+          throw new WorkbenchBridgeProtocolException(
+            "Workbench recognition line edit is invalid.");
+        return new UpdateRecognitionLineCommand(
+          ParseStructuredResourceUri(arguments),
+          lineIndex,
+          expectedOldText,
+          editedText);
+      }
       case ("recognition", "export"):
-        return new ExportRecognitionResultCommand(ParseFormat(
+      {
+        // textMode 可选：lines 结果按选定排版模式重建导出文本（宿主权威）。
+        bool withTextMode = arguments.TryGetProperty("textMode", out _);
+        EnsureObjectWithFields(
           arguments,
-          ["text", "markdown", "html", "docx", "xlsx"]));
+          withTextMode ? ExportArgumentFields : FormatArgumentFields,
+          "command arguments");
+        string? textMode = null;
+        if (withTextMode)
+        {
+          textMode = arguments.GetProperty("textMode").GetString();
+          if (textMode is not ("raw" or "line" or "merged" or "smart"))
+            throw new WorkbenchBridgeProtocolException(
+              "Workbench recognition export text mode is invalid.");
+        }
+        return new ExportRecognitionResultCommand(
+          ParseFormat(arguments, ["text", "markdown", "html", "docx", "xlsx"]),
+          textMode);
+      }
       case ("recognition", "copyAnnotatedImage"):
         return new CopyAnnotatedImageCommand(ParseAnnotationResourceUri(arguments));
       case ("recognition", "saveAnnotatedImage"):
@@ -1063,13 +1137,6 @@ public static class WorkbenchBridgeCodec
     JsonElement arguments)
   {
     EnsureObjectWithFields(arguments, StructuredCopyArgumentFields, "command arguments");
-    string? value = arguments.GetProperty("resourceUri").GetString();
-    if (value is null || !Uri.TryCreate(value, UriKind.Absolute, out Uri? uri) ||
-      !WorkbenchResourceBroker.IsResourceUri(uri))
-    {
-      throw new WorkbenchBridgeProtocolException(
-        "Workbench structured result URI is invalid.");
-    }
     int blockIndex = arguments.GetProperty("blockIndex").GetInt32();
     if (blockIndex is < 0 or > 4095)
     {
@@ -1082,7 +1149,20 @@ public static class WorkbenchBridgeCodec
       throw new WorkbenchBridgeProtocolException(
         "Workbench structured copy format is invalid.");
     }
-    return new CopyStructuredResultCommand(uri.AbsoluteUri, blockIndex, format);
+    return new CopyStructuredResultCommand(
+      ParseStructuredResourceUri(arguments), blockIndex, format);
+  }
+
+  private static string ParseStructuredResourceUri(JsonElement arguments)
+  {
+    string? value = arguments.GetProperty("resourceUri").GetString();
+    if (value is null || !Uri.TryCreate(value, UriKind.Absolute, out Uri? uri) ||
+      !WorkbenchResourceBroker.IsResourceUri(uri))
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench structured result URI is invalid.");
+    }
+    return uri.AbsoluteUri;
   }
 
   private static string ParseAnnotationResourceUri(JsonElement arguments)
@@ -1475,6 +1555,7 @@ public static class WorkbenchBridgeCodec
         lines = recognition.TextLayer.Lines ?? [],
       },
       structuredResult = recognition.StructuredResult,
+      resultImage = recognition.ResultImage,
     },
     BatchWorkbenchState batch => new
     {

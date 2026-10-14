@@ -32,3 +32,8 @@
 .image-text-line::selection {
   background: rgba(31, 111, 235, 0.35);
 }
+
+/* 低置信行（score 已知且 <80%）：左侧警示条；选中高亮不变。 */
+.image-text-line.low-confidence {
+  box-shadow: inset 3px 0 0 #d13438;
+}

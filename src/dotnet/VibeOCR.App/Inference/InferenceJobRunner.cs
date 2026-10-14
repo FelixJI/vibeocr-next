@@ -286,6 +286,9 @@ internal static class RecognitionOutcomeMapper
             PreprocAngle = payload.TryGetValue("preproc_angle", out JsonElement angle) && angle.ValueKind == JsonValueKind.Number && angle.TryGetInt32(out int degrees) ? degrees : null,
             DocOrientationAngle = payload.TryGetValue("doc_orientation_angle", out JsonElement orientation) && orientation.ValueKind == JsonValueKind.Number && orientation.TryGetInt32(out int actualAngle) ? actualAngle : null,
             ContentBlocks = ArrayValue(payload, "content_list"),
+            // 字段存在性即语义：存在但非 Object（null/畸形）不得降为缺省，
+            // 宿主据此禁止 angle0 原图回退。
+            ReferenceImage = payload.TryGetValue("reference_image", out JsonElement reference) ? reference.Clone() : null,
             Pipeline = pipeline,
         };
     }

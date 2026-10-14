@@ -26,6 +26,44 @@ def test_orientation_survives_serializer_and_wire_extra_roundtrip(angle):
     assert ocr_result_from_payload({"preproc_angle": 0}).doc_orientation_angle is None
 
 
+def test_reference_image_survives_wire_extra_roundtrip():
+    """顶层 reference_image 由 ocr.v1 opaque extra 承载，不需 schema 变更。"""
+    reference = {
+        "item_id": "it-0000",
+        "job_id": "job-a",
+        "asset_id": "a" * 32,
+        "media_type": "image/png",
+        "width": 3,
+        "height": 6,
+        "size_bytes": 96,
+        "name": f"{'a' * 32}.png",
+    }
+    payload = ocr_result_to_payload(
+        OCRResult(
+            raw_text="文本",
+            text_blocks=[TextBlock(text="文本", score=0.9, bbox=(1.0, 2.0, 3.0, 4.0))],
+        )
+    )
+    payload["reference_image"] = reference
+    wire = OcrResultV1.from_payload(payload)
+    assert wire.extra["reference_image"] == reference
+    assert wire.to_payload()["reference_image"] == reference
+    assert ocr_result_from_payload(wire.to_payload()).raw_text == "文本"
+
+
+def test_reference_image_unavailable_marker_survives_wire_extra_roundtrip():
+    payload = {
+        "raw_text": "文本",
+        "reference_image": {"available": False, "reason": "asset_job_budget"},
+    }
+    wire = OcrResultV1.from_payload(payload)
+    assert wire.extra["reference_image"] == {
+        "available": False,
+        "reason": "asset_job_budget",
+    }
+    assert wire.to_payload()["reference_image"]["available"] is False
+
+
 def test_dict_input_passes_through_unchanged() -> None:
     payload = {"raw_text": "hi", "markdown_text": "# hi"}
     assert ocr_result_to_payload(payload) is payload

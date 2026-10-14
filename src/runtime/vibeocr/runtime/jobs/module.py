@@ -484,7 +484,8 @@ class SupervisorModule:
         """读取一条已完成结果的图像资产（受控目录 + 权威引用校验）。
 
         校验链：job 存在 → item 存在且 SUCCEEDED → 资产 id 出现在该 item
-        成功结果 payload 的 content_list 引用中（不可猜测、不跨 job）→
+        成功结果 payload 的授权引用中（``content_list[].image`` 或顶层
+        ``reference_image``，不可猜测、不跨 job）→
         文件位于本 job staging 目录固定 results/ 子目录且真实存在。
         任一环不满足返回 None（调用方映射 RESOURCE_NOT_FOUND）；job 不
         存在抛 JobNotFoundError。
@@ -502,20 +503,25 @@ class SupervisorModule:
         payload = record.results.get(item_id)
         if not isinstance(payload, dict):
             return None
+
+        def _match(ref: object) -> bool:
+            return (
+                isinstance(ref, dict)
+                and ref.get("asset_id") == asset_id
+                and ref.get("job_id") == job_id
+                and ref.get("item_id") == item_id
+                and ref.get("available") is not False
+            )
+
         ref = None
         for block in payload.get("content_list") or []:
             if not isinstance(block, dict):
                 continue
-            image = block.get("image")
-            if (
-                isinstance(image, dict)
-                and image.get("asset_id") == asset_id
-                and image.get("job_id") == job_id
-                and image.get("item_id") == item_id
-                and image.get("available") is not False
-            ):
-                ref = image
+            if _match(block.get("image")):
+                ref = block["image"]
                 break
+        if ref is None and _match(payload.get("reference_image")):
+            ref = payload["reference_image"]
         if ref is None:
             return None
         job_dir = self.stager.job_dir(job_id)

@@ -12,8 +12,9 @@ import {
  */
 export interface ImageTextLine {
   readonly text: string;
-  /** [0,1000] 归一化行框 (x1,y1,x2,y2)，参考系是识别提交的最终 PNG。 */
   readonly bbox: readonly [number, number, number, number];
+  /** 引擎置信度（缺失 = unknown，不伪装 0%/100%）；仅用于低置信提示。 */
+  readonly score?: number;
   /** 引擎给出的阅读顺序（≥0 有效）；仅当全部行都有有效 order 才按 order 排。 */
   readonly order?: number;
 }
@@ -52,6 +53,7 @@ export function toImageTextLines(value: unknown): readonly ImageTextLine[] {
     const candidate = entry as {
       text?: unknown;
       bbox?: unknown;
+      score?: unknown;
       order?: unknown;
     };
     if (typeof candidate.text !== "string" || candidate.text.length === 0) {
@@ -76,10 +78,17 @@ export function toImageTextLines(value: unknown): readonly ImageTextLine[] {
       isFiniteNumber(candidate.order) && candidate.order >= 0
         ? candidate.order
         : undefined;
+    const score =
+      isFiniteNumber(candidate.score) &&
+      candidate.score >= 0 &&
+      candidate.score <= 1
+        ? candidate.score
+        : undefined;
     lines.push({
       text: candidate.text,
       bbox: [x1, y1, x2, y2],
       ...(order !== undefined ? { order } : {}),
+      ...(score !== undefined ? { score } : {}),
     });
   }
   const byEngineOrder = lines.every((line) => line.order !== undefined);

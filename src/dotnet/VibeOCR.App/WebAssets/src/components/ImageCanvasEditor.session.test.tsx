@@ -317,7 +317,15 @@ describe("screenshot session editor wiring", () => {
             byteLength: 100,
           },
           lines: [
-            { text: "你好世界", x1: 0, y1: 0, x2: 500, y2: 100, order: 0 },
+            {
+              text: "你好世界",
+              x1: 0,
+              y1: 0,
+              x2: 500,
+              y2: 100,
+              order: 0,
+              score: 0.65,
+            },
             {
               text: "second line",
               x1: 100,
@@ -345,6 +353,7 @@ describe("screenshot session editor wiring", () => {
         expect(screen.getByText("你好世界")).toBeInTheDocument(),
       );
 
+      expect(screen.getByTitle("置信度: 65.0%")).toHaveClass("low-confidence");
       const firstText = screen.getByText("你好世界").firstChild!;
       const range = document.createRange();
       range.setStart(firstText, 1);
@@ -477,7 +486,15 @@ describe("screenshot session editor wiring", () => {
             byteLength: 100,
           },
           lines: [
-            { text: "你好世界", x1: 0, y1: 0, x2: 500, y2: 100, order: 0 },
+            {
+              text: "你好世界",
+              x1: 0,
+              y1: 0,
+              x2: 500,
+              y2: 100,
+              order: 0,
+              score: 0.65,
+            },
           ],
         }}
       />,

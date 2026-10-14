@@ -25,6 +25,11 @@ import {
   X,
   Trash2,
   Settings2,
+  Check,
+  Eye,
+  ShieldX,
+  ClipboardCopy,
+  RefreshCw,
 } from "lucide-react";
 import {
   Button,
@@ -102,6 +107,7 @@ export interface ScreenshotTextLayerState {
         readonly x2: number;
         readonly y2: number;
         readonly order?: number | null;
+        readonly score?: number | null;
       }[]
     | null;
 }
@@ -2265,6 +2271,7 @@ export function ImageCanvasEditor({
             text: line.text,
             bbox: [line.x1, line.y1, line.x2, line.y2] as const,
             order: line.order ?? undefined,
+            score: line.score ?? undefined,
           })),
       ),
     [layerLines, layerExclusionRects],
@@ -2398,6 +2405,455 @@ export function ImageCanvasEditor({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  // —— 工具栏组合片段 ——
+  // 截图现场（与 Classic 同构）分两排：第一排是主操作（工具、旋转/清空
+  // 屏蔽/撤销/重做、复制/保存/贴图/识别/结束会话/清除编辑），第二排是
+  // 颜色/线宽/字号/强度等标注样式与取字、去水印的上下文操作；两排各自
+  // 可换行，窄选区不横向溢出。普通编辑页仍渲染单条可换行工具栏，片段
+  // 顺序与旧实现一致。两种布局复用同一批片段：按钮的可访问名称、title
+  // 提示与命令不随布局变化。
+  const toolButtons = TOOLSETS[toolset]
+    // 截图现场无裁剪按钮：选区四边/四角拖拽直接调整裁剪。
+    .filter((value) => !(captureStyle && value === "crop"))
+    .map((value) => {
+      const Icon = TOOL_ICONS[value];
+      return (
+        <ToolbarButton
+          appearance={tool === value ? "primary" : "subtle"}
+          aria-label={TOOL_LABELS[value]}
+          title={TOOL_LABELS[value]}
+          icon={captureStyle ? <Icon size={18} /> : undefined}
+          aria-pressed={tool === value}
+          key={value}
+          onClick={() => {
+            cancelDrawing();
+            setTool(value);
+          }}
+        >
+          {captureStyle ? undefined : TOOL_LABELS[value]}
+        </ToolbarButton>
+      );
+    });
+
+  const annotationTextInput = tool === "text" && (
+    <Input
+      aria-label="标注文字"
+      size="small"
+      value={annotationText}
+      onChange={(_, data) => setAnnotationText(data.value)}
+    />
+  );
+
+  const strokeColorControl = toolset === "full" && (
+    <div aria-label="标注颜色" className="editor-color-control" role="group">
+      {STROKE_COLORS.map((color) => (
+        <button
+          aria-label={`常用颜色 ${color}`}
+          aria-pressed={normalizeHexColor(strokeColor).toLowerCase() === color}
+          className="editor-color-swatch"
+          key={color}
+          onClick={() => setStrokeColor(color)}
+          title={color}
+          type="button"
+          style={{ background: color }}
+        />
+      ))}
+      <input
+        aria-label="自定义颜色"
+        onChange={(event) => setStrokeColor(event.target.value)}
+        title="自定义颜色"
+        type="color"
+        value={normalizeHexColor(strokeColor)}
+      />
+      <Button
+        appearance="subtle"
+        aria-label="屏幕取色"
+        disabled={eyedropperBusy}
+        icon={<Pipette size={16} />}
+        onClick={() =>
+          eyedropperAvailable ? void pickScreenColor() : enterCanvasPick()
+        }
+        size="small"
+        title={
+          eyedropperAvailable ? "屏幕取色" : "取色：点击后在画布上取样颜色"
+        }
+      />
+    </div>
+  );
+
+  const effectIntensityControl = toolset === "full" &&
+    (tool === "mosaic" || tool === "blur") && (
+      <label className="editor-style-control">
+        <span aria-hidden="true">强度</span>
+        <Select
+          aria-label="马赛克与模糊强度"
+          size="small"
+          value={String(effectIntensity)}
+          onChange={(_, data) => setEffectIntensity(Number(data.value))}
+        >
+          {EFFECT_INTENSITIES.map((level) => (
+            <option key={level} value={String(level)}>
+              {level === 1 ? "弱" : level === 2 ? "中" : "强"}
+            </option>
+          ))}
+        </Select>
+      </label>
+    );
+
+  const strokeWidthControl = toolset === "full" && shapeTool && (
+    <label className="editor-style-control">
+      <span aria-hidden="true">线宽</span>
+      <Select
+        aria-label="线条宽度"
+        size="small"
+        value={String(strokeWidth)}
+        onChange={(_, data) => setStrokeWidth(Number(data.value))}
+      >
+        {STROKE_WIDTHS.map((width) => (
+          <option key={width} value={String(width)}>
+            {width}px
+          </option>
+        ))}
+      </Select>
+    </label>
+  );
+
+  const fontSizeControl = fontTool && (
+    <label className="editor-style-control">
+      <span aria-hidden="true">字号</span>
+      <Select
+        aria-label="文字字号"
+        size="small"
+        value={String(fontSize)}
+        onChange={(_, data) => setFontSize(Number(data.value))}
+      >
+        {FONT_SIZES.map((size) => (
+          <option key={size} value={String(size)}>
+            {size}px
+          </option>
+        ))}
+      </Select>
+    </label>
+  );
+
+  const autoTextControl = session && showAutoTextPreference && (
+    <label className="editor-style-control">
+      <input
+        aria-label="自动取字"
+        checked={autoText}
+        onChange={(event) => {
+          setLocalAutoText(event.target.checked);
+          onAutoTextChange?.(event.target.checked);
+        }}
+        type="checkbox"
+      />
+      <span aria-hidden="true">自动取字</span>
+    </label>
+  );
+
+  const textLayerControls = (
+    <>
+      {tool === "textSelect" &&
+        textLayer?.status === "textlayer.preparing" &&
+        session && (
+          <ToolbarButton
+            aria-label="取消准备文字层"
+            icon={captureStyle ? <X size={18} /> : undefined}
+            title="取消准备文字层"
+            onClick={() =>
+              void actions.run({
+                type: commands.cancelScreenshotTextLayer,
+                sessionId: session.sessionId,
+                revision: localRevision,
+              })
+            }
+          >
+            {captureStyle ? undefined : "取消准备"}
+          </ToolbarButton>
+        )}
+      {tool === "textSelect" &&
+        (textLayer?.status === "textlayer.unavailable" ||
+          textLayer?.status === "textlayer.failed" ||
+          textLayer?.status === "textlayer.cancelled") && (
+          <ToolbarButton
+            aria-label="重新准备文字层"
+            disabled={!canRecognize}
+            icon={captureStyle ? <RefreshCw size={18} /> : undefined}
+            title="重新准备文字层"
+            onClick={() => setPrepareNonce((nonce) => nonce + 1)}
+          >
+            {captureStyle ? undefined : "重新准备"}
+          </ToolbarButton>
+        )}
+      {tool === "textSelect" && selectionText.length > 0 && session && (
+        <Button
+          appearance="primary"
+          icon={captureStyle ? <Copy size={18} /> : undefined}
+          size="small"
+          onPointerDown={() => {
+            const text = readLayerSelection();
+            copyButtonSelection.current = text
+              ? { text, key: layerSelectionKey }
+              : undefined;
+          }}
+          onClick={() => {
+            const frozen = copyButtonSelection.current;
+            copyButtonSelection.current = undefined;
+            void copySelectedText(frozen);
+          }}
+        >
+          {captureStyle ? undefined : "复制所选"}
+        </Button>
+      )}
+    </>
+  );
+
+  const inpaintControls = tool === "inpaint" && (
+    <>
+      <ToolbarButton
+        appearance="primary"
+        aria-label="预览修补"
+        disabled={!inpaintSelection || inpaintBusy || !!inpaintPreview}
+        icon={captureStyle ? <Eye size={18} /> : undefined}
+        title="预览修补"
+        onClick={startInpaintPreview}
+      >
+        {captureStyle ? undefined : "预览修补"}
+      </ToolbarButton>
+      {inpaintBusy ? (
+        <ToolbarButton
+          aria-label="取消修补"
+          icon={captureStyle ? <X size={18} /> : undefined}
+          title="取消修补"
+          onClick={() => cancelInpaintPending("已取消修补；当前图片未被修改。")}
+        >
+          {captureStyle ? undefined : "取消修补"}
+        </ToolbarButton>
+      ) : inpaintPreview ? (
+        <>
+          <ToolbarButton
+            appearance="primary"
+            aria-label="应用修补"
+            icon={captureStyle ? <Check size={18} /> : undefined}
+            title="应用修补"
+            onClick={applyInpaintPreview}
+          >
+            {captureStyle ? undefined : "应用修补"}
+          </ToolbarButton>
+          <ToolbarButton
+            aria-label="放弃修补预览"
+            icon={captureStyle ? <X size={18} /> : undefined}
+            title="放弃修补预览"
+            onClick={() =>
+              cancelInpaintPending("已放弃修补预览；当前图片未被修改。")
+            }
+          >
+            {captureStyle ? undefined : "放弃预览"}
+          </ToolbarButton>
+          <label className="editor-style-control">
+            <span aria-hidden="true">对比</span>
+            <Select
+              aria-label="修补对比"
+              size="small"
+              value={inpaintCompare}
+              onChange={(_, data) =>
+                setInpaintCompare(data.value === "before" ? "before" : "after")
+              }
+            >
+              <option value="after">修补后</option>
+              <option value="before">本次修补前</option>
+            </Select>
+          </label>
+        </>
+      ) : inpaintSelection ? (
+        <ToolbarButton
+          aria-label="清除修补选区"
+          icon={captureStyle ? <X size={18} /> : undefined}
+          title="清除修补选区"
+          onClick={() =>
+            cancelInpaintPending("已清除修补选区；当前图片未被修改。")
+          }
+        >
+          {captureStyle ? undefined : "清除选区"}
+        </ToolbarButton>
+      ) : null}
+    </>
+  );
+
+  const historyControls = (
+    <>
+      <ToolbarButton
+        title="旋转 90°"
+        icon={captureStyle ? <RotateCw size={18} /> : undefined}
+        aria-label="旋转 90°"
+        onClick={() => {
+          const image = imageRef.current;
+          const canvas = canvasRef.current;
+          const nextRotation = (state.rotation + 90) % 360;
+          commit(
+            image && canvas
+              ? rotateEditorState(
+                  state,
+                  image,
+                  canvasSize(canvas),
+                  nextRotation,
+                )
+              : { ...state, rotation: nextRotation },
+          );
+        }}
+      >
+        {captureStyle ? undefined : "旋转 90°"}
+      </ToolbarButton>
+      <ToolbarButton
+        title="清空屏蔽"
+        icon={captureStyle ? <ShieldX size={18} /> : undefined}
+        aria-label="清空屏蔽"
+        disabled={!hasExclusions}
+        onClick={() => {
+          // 只移除排除区：普通标注保留，几何变更入历史可撤销。
+          select(undefined);
+          setResizeDraft(undefined);
+          resizeRef.current = undefined;
+          commit({
+            ...state,
+            marks: state.marks.filter((mark) => !isExclusionMark(mark)),
+          });
+          setOperationMessage("已清空全部屏蔽区；可用撤销恢复。");
+        }}
+      >
+        {captureStyle ? undefined : "清空屏蔽"}
+      </ToolbarButton>
+      <ToolbarButton
+        title="撤销"
+        icon={captureStyle ? <Undo2 size={18} /> : undefined}
+        aria-label="撤销"
+        disabled={historyIndex === 0}
+        onClick={undo}
+      >
+        {captureStyle ? undefined : "撤销"}
+      </ToolbarButton>
+      <ToolbarButton
+        title="重做"
+        icon={captureStyle ? <Redo2 size={18} /> : undefined}
+        aria-label="重做"
+        disabled={historyIndex >= history.length - 1}
+        onClick={redo}
+      >
+        {captureStyle ? undefined : "重做"}
+      </ToolbarButton>
+    </>
+  );
+
+  // 导出/会话主操作：普通编辑页渲染在底部 editor-footer；截图现场并入
+  // 第一排工具栏（Classic 顶排“保存/复制/取消”同位），状态提示仍由
+  // footer 的 output 承载（现场为固定位置浮层，不影响布局）。
+  const exportActions = (
+    <>
+      <Button
+        title="复制标注图"
+        icon={captureStyle ? <Copy size={18} /> : undefined}
+        aria-label="复制标注图"
+        size="small"
+        disabled={!canExport || isExporting}
+        onClick={() => void copyAnnotatedImage()}
+      >
+        {captureStyle ? undefined : "复制标注图"}
+      </Button>
+      {hasExclusions && (
+        <Button
+          title="复制屏蔽副本"
+          icon={captureStyle ? <ClipboardCopy size={18} /> : undefined}
+          aria-label="复制屏蔽副本"
+          size="small"
+          disabled={!canExport || isExporting}
+          onClick={() => void copyAnnotatedImage(true)}
+        >
+          {captureStyle ? undefined : "复制屏蔽副本"}
+        </Button>
+      )}
+      <Button
+        title="保存标注图"
+        icon={captureStyle ? <Save size={18} /> : undefined}
+        aria-label="保存标注图"
+        size="small"
+        disabled={!canExport || isExporting}
+        onClick={() => void saveAnnotatedImage()}
+      >
+        {captureStyle ? undefined : "保存标注图"}
+      </Button>
+      {hasExclusions && (
+        <Button
+          title="保存屏蔽副本"
+          icon={captureStyle ? <ShieldOff size={18} /> : undefined}
+          aria-label="保存屏蔽副本"
+          size="small"
+          disabled={!canExport || isExporting}
+          onClick={() => void saveAnnotatedImage(true)}
+        >
+          {captureStyle ? undefined : "保存屏蔽副本"}
+        </Button>
+      )}
+      {session && (
+        <>
+          <Button
+            title="贴图"
+            icon={captureStyle ? <Pin size={18} /> : undefined}
+            aria-label="贴图"
+            size="small"
+            disabled={!canExport || isExporting}
+            onClick={() => void pinCurrentImage()}
+          >
+            {captureStyle ? undefined : "贴图"}
+          </Button>
+          <Button
+            title="识别当前图"
+            icon={captureStyle ? <ScanText size={18} /> : undefined}
+            aria-label="识别当前图"
+            appearance="primary"
+            size="small"
+            disabled={!canRecognize || isExporting}
+            onClick={() => void recognizeCurrentImage()}
+          >
+            {captureStyle ? undefined : "识别当前图"}
+          </Button>
+          <Button
+            title="结束会话"
+            icon={captureStyle ? <X size={18} /> : undefined}
+            aria-label="结束会话"
+            appearance="transparent"
+            size="small"
+            disabled={isExporting}
+            onClick={() =>
+              void actions.run({ type: commands.closeScreenshotSession })
+            }
+          >
+            {captureStyle ? undefined : "结束会话"}
+          </Button>
+        </>
+      )}
+      <Button
+        title="清除编辑"
+        icon={captureStyle ? <Trash2 size={18} /> : undefined}
+        aria-label="清除编辑"
+        appearance="transparent"
+        size="small"
+        disabled={
+          state.marks.length === 0 &&
+          state.rotation === 0 &&
+          !state.crop &&
+          !state.resize &&
+          !state.patches?.length
+        }
+        onClick={() => {
+          select(undefined);
+          commit(EMPTY);
+        }}
+      >
+        {captureStyle ? undefined : "清除编辑"}
+      </Button>
+    </>
+  );
+
   return (
     <div
       className={`canvas-editor${captureStyle ? " capture-scene-editor" : ""}`}
@@ -2455,323 +2911,52 @@ export function ImageCanvasEditor({
           </div>,
           document.body,
         )}
-      <Toolbar
-        aria-label="图片编辑工具"
-        size="small"
-        className="editor-toolbar"
-      >
-        {TOOLSETS[toolset]
-          // 截图现场无裁剪按钮：选区四边/四角拖拽直接调整裁剪。
-          .filter((value) => !(captureStyle && value === "crop"))
-          .map((value) => {
-            const Icon = TOOL_ICONS[value];
-            return (
-              <ToolbarButton
-                appearance={tool === value ? "primary" : "subtle"}
-                aria-label={TOOL_LABELS[value]}
-                title={TOOL_LABELS[value]}
-                icon={captureStyle ? <Icon size={18} /> : undefined}
-                aria-pressed={tool === value}
-                key={value}
-                onClick={() => {
-                  cancelDrawing();
-                  setTool(value);
-                }}
-              >
-                {captureStyle ? undefined : TOOL_LABELS[value]}
-              </ToolbarButton>
-            );
-          })}
-        {tool === "text" && (
-          <Input
-            aria-label="标注文字"
+      {captureStyle ? (
+        // 截图现场：主操作一排、样式与上下文操作一排；两排均可换行。
+        <div className="editor-scene-toolstack">
+          <Toolbar
+            aria-label="图片编辑工具"
             size="small"
-            value={annotationText}
-            onChange={(_, data) => setAnnotationText(data.value)}
-          />
-        )}
-        {toolset === "full" && (
-          <div
-            aria-label="标注颜色"
-            className="editor-color-control"
-            role="group"
+            className="editor-toolbar editor-toolbar-scene-primary"
           >
-            {STROKE_COLORS.map((color) => (
-              <button
-                aria-label={`常用颜色 ${color}`}
-                aria-pressed={
-                  normalizeHexColor(strokeColor).toLowerCase() === color
-                }
-                className="editor-color-swatch"
-                key={color}
-                onClick={() => setStrokeColor(color)}
-                title={color}
-                type="button"
-                style={{ background: color }}
-              />
-            ))}
-            <input
-              aria-label="自定义颜色"
-              onChange={(event) => setStrokeColor(event.target.value)}
-              title="自定义颜色"
-              type="color"
-              value={normalizeHexColor(strokeColor)}
-            />
-            <Button
-              appearance="subtle"
-              aria-label="屏幕取色"
-              disabled={eyedropperBusy}
-              icon={<Pipette size={16} />}
-              onClick={() =>
-                eyedropperAvailable ? void pickScreenColor() : enterCanvasPick()
-              }
-              size="small"
-              title={
-                eyedropperAvailable
-                  ? "屏幕取色"
-                  : "取色：点击后在画布上取样颜色"
-              }
-            />
-          </div>
-        )}
-        {toolset === "full" && (tool === "mosaic" || tool === "blur") && (
-          <label className="editor-style-control">
-            <span aria-hidden="true">强度</span>
-            <Select
-              aria-label="马赛克与模糊强度"
-              size="small"
-              value={String(effectIntensity)}
-              onChange={(_, data) => setEffectIntensity(Number(data.value))}
-            >
-              {EFFECT_INTENSITIES.map((level) => (
-                <option key={level} value={String(level)}>
-                  {level === 1 ? "弱" : level === 2 ? "中" : "强"}
-                </option>
-              ))}
-            </Select>
-          </label>
-        )}
-        {toolset === "full" && shapeTool && (
-          <label className="editor-style-control">
-            <span aria-hidden="true">线宽</span>
-            <Select
-              aria-label="线条宽度"
-              size="small"
-              value={String(strokeWidth)}
-              onChange={(_, data) => setStrokeWidth(Number(data.value))}
-            >
-              {STROKE_WIDTHS.map((width) => (
-                <option key={width} value={String(width)}>
-                  {width}px
-                </option>
-              ))}
-            </Select>
-          </label>
-        )}
-        {fontTool && (
-          <label className="editor-style-control">
-            <span aria-hidden="true">字号</span>
-            <Select
-              aria-label="文字字号"
-              size="small"
-              value={String(fontSize)}
-              onChange={(_, data) => setFontSize(Number(data.value))}
-            >
-              {FONT_SIZES.map((size) => (
-                <option key={size} value={String(size)}>
-                  {size}px
-                </option>
-              ))}
-            </Select>
-          </label>
-        )}
-        <span aria-hidden="true" className="editor-toolbar-break" />
-        {session && showAutoTextPreference && (
-          <label className="editor-style-control">
-            <input
-              aria-label="自动取字"
-              checked={autoText}
-              onChange={(event) => {
-                setLocalAutoText(event.target.checked);
-                onAutoTextChange?.(event.target.checked);
-              }}
-              type="checkbox"
-            />
-            <span aria-hidden="true">自动取字</span>
-          </label>
-        )}
-        {tool === "textSelect" &&
-          textLayer?.status === "textlayer.preparing" &&
-          session && (
-            <ToolbarButton
-              aria-label="取消准备文字层"
-              onClick={() =>
-                void actions.run({
-                  type: commands.cancelScreenshotTextLayer,
-                  sessionId: session.sessionId,
-                  revision: localRevision,
-                })
-              }
-            >
-              取消准备
-            </ToolbarButton>
-          )}
-        {tool === "textSelect" &&
-          (textLayer?.status === "textlayer.unavailable" ||
-            textLayer?.status === "textlayer.failed" ||
-            textLayer?.status === "textlayer.cancelled") && (
-            <ToolbarButton
-              aria-label="重新准备文字层"
-              disabled={!canRecognize}
-              onClick={() => setPrepareNonce((nonce) => nonce + 1)}
-            >
-              重新准备
-            </ToolbarButton>
-          )}
-        {tool === "textSelect" && selectionText.length > 0 && session && (
-          <Button
-            appearance="primary"
+            {toolButtons}
+            {historyControls}
+            {exportActions}
+          </Toolbar>
+          <Toolbar
+            aria-label="标注样式与辅助操作"
             size="small"
-            onPointerDown={() => {
-              const text = readLayerSelection();
-              copyButtonSelection.current = text
-                ? { text, key: layerSelectionKey }
-                : undefined;
-            }}
-            onClick={() => {
-              const frozen = copyButtonSelection.current;
-              copyButtonSelection.current = undefined;
-              void copySelectedText(frozen);
-            }}
+            className="editor-toolbar editor-toolbar-scene-secondary"
           >
-            复制所选
-          </Button>
-        )}
-        {tool === "inpaint" && (
-          <>
-            <ToolbarButton
-              appearance="primary"
-              aria-label="预览修补"
-              disabled={!inpaintSelection || inpaintBusy || !!inpaintPreview}
-              onClick={startInpaintPreview}
-            >
-              预览修补
-            </ToolbarButton>
-            {inpaintBusy ? (
-              <ToolbarButton
-                aria-label="取消修补"
-                onClick={() =>
-                  cancelInpaintPending("已取消修补；当前图片未被修改。")
-                }
-              >
-                取消修补
-              </ToolbarButton>
-            ) : inpaintPreview ? (
-              <>
-                <ToolbarButton
-                  appearance="primary"
-                  aria-label="应用修补"
-                  onClick={applyInpaintPreview}
-                >
-                  应用修补
-                </ToolbarButton>
-                <ToolbarButton
-                  aria-label="放弃修补预览"
-                  onClick={() =>
-                    cancelInpaintPending("已放弃修补预览；当前图片未被修改。")
-                  }
-                >
-                  放弃预览
-                </ToolbarButton>
-                <label className="editor-style-control">
-                  <span aria-hidden="true">对比</span>
-                  <Select
-                    aria-label="修补对比"
-                    size="small"
-                    value={inpaintCompare}
-                    onChange={(_, data) =>
-                      setInpaintCompare(
-                        data.value === "before" ? "before" : "after",
-                      )
-                    }
-                  >
-                    <option value="after">修补后</option>
-                    <option value="before">本次修补前</option>
-                  </Select>
-                </label>
-              </>
-            ) : inpaintSelection ? (
-              <ToolbarButton
-                aria-label="清除修补选区"
-                onClick={() =>
-                  cancelInpaintPending("已清除修补选区；当前图片未被修改。")
-                }
-              >
-                清除选区
-              </ToolbarButton>
-            ) : null}
-          </>
-        )}
-        <ToolbarButton
-          title="旋转 90°"
-          icon={captureStyle ? <RotateCw size={18} /> : undefined}
-          aria-label="旋转 90°"
-          onClick={() => {
-            const image = imageRef.current;
-            const canvas = canvasRef.current;
-            const nextRotation = (state.rotation + 90) % 360;
-            commit(
-              image && canvas
-                ? rotateEditorState(
-                    state,
-                    image,
-                    canvasSize(canvas),
-                    nextRotation,
-                  )
-                : { ...state, rotation: nextRotation },
-            );
-          }}
+            {annotationTextInput}
+            {strokeColorControl}
+            {effectIntensityControl}
+            {strokeWidthControl}
+            {fontSizeControl}
+            {autoTextControl}
+            {textLayerControls}
+            {inpaintControls}
+          </Toolbar>
+        </div>
+      ) : (
+        <Toolbar
+          aria-label="图片编辑工具"
+          size="small"
+          className="editor-toolbar"
         >
-          {captureStyle ? undefined : "旋转 90°"}
-        </ToolbarButton>
-        <ToolbarButton
-          title="清空屏蔽"
-          icon={captureStyle ? <ShieldOff size={18} /> : undefined}
-          aria-label="清空屏蔽"
-          disabled={!hasExclusions}
-          onClick={() => {
-            // 只移除排除区：普通标注保留，几何变更入历史可撤销。
-            select(undefined);
-            setResizeDraft(undefined);
-            resizeRef.current = undefined;
-            commit({
-              ...state,
-              marks: state.marks.filter((mark) => !isExclusionMark(mark)),
-            });
-            setOperationMessage("已清空全部屏蔽区；可用撤销恢复。");
-          }}
-        >
-          {captureStyle ? undefined : "清空屏蔽"}
-        </ToolbarButton>
-        <ToolbarButton
-          title="撤销"
-          icon={captureStyle ? <Undo2 size={18} /> : undefined}
-          aria-label="撤销"
-          disabled={historyIndex === 0}
-          onClick={undo}
-        >
-          {captureStyle ? undefined : "撤销"}
-        </ToolbarButton>
-        <ToolbarButton
-          title="重做"
-          icon={captureStyle ? <Redo2 size={18} /> : undefined}
-          aria-label="重做"
-          disabled={historyIndex >= history.length - 1}
-          onClick={redo}
-        >
-          {captureStyle ? undefined : "重做"}
-        </ToolbarButton>
-      </Toolbar>
+          {toolButtons}
+          {annotationTextInput}
+          {strokeColorControl}
+          {effectIntensityControl}
+          {strokeWidthControl}
+          {fontSizeControl}
+          <span aria-hidden="true" className="editor-toolbar-break" />
+          {autoTextControl}
+          {textLayerControls}
+          {inpaintControls}
+          {historyControls}
+        </Toolbar>
+      )}
       {toolset === "full" && (
         <details
           className="editor-output-settings"
@@ -3108,105 +3293,7 @@ export function ImageCanvasEditor({
         )}
       </div>
       <div className="editor-footer">
-        <Button
-          title="复制标注图"
-          icon={captureStyle ? <Copy size={18} /> : undefined}
-          aria-label="复制标注图"
-          size="small"
-          disabled={!canExport || isExporting}
-          onClick={() => void copyAnnotatedImage()}
-        >
-          {captureStyle ? undefined : "复制标注图"}
-        </Button>
-        {hasExclusions && (
-          <Button
-            size="small"
-            disabled={!canExport || isExporting}
-            onClick={() => void copyAnnotatedImage(true)}
-          >
-            复制屏蔽副本
-          </Button>
-        )}
-        <Button
-          title="保存标注图"
-          icon={captureStyle ? <Save size={18} /> : undefined}
-          aria-label="保存标注图"
-          size="small"
-          disabled={!canExport || isExporting}
-          onClick={() => void saveAnnotatedImage()}
-        >
-          {captureStyle ? undefined : "保存标注图"}
-        </Button>
-        {hasExclusions && (
-          <Button
-            title="保存屏蔽副本"
-            icon={captureStyle ? <ShieldOff size={18} /> : undefined}
-            aria-label="保存屏蔽副本"
-            size="small"
-            disabled={!canExport || isExporting}
-            onClick={() => void saveAnnotatedImage(true)}
-          >
-            {captureStyle ? undefined : "保存屏蔽副本"}
-          </Button>
-        )}
-        {session && (
-          <>
-            <Button
-              title="贴图"
-              icon={captureStyle ? <Pin size={18} /> : undefined}
-              aria-label="贴图"
-              size="small"
-              disabled={!canExport || isExporting}
-              onClick={() => void pinCurrentImage()}
-            >
-              {captureStyle ? undefined : "贴图"}
-            </Button>
-            <Button
-              title="识别当前图"
-              icon={captureStyle ? <ScanText size={18} /> : undefined}
-              aria-label="识别当前图"
-              appearance="primary"
-              size="small"
-              disabled={!canRecognize || isExporting}
-              onClick={() => void recognizeCurrentImage()}
-            >
-              {captureStyle ? undefined : "识别当前图"}
-            </Button>
-            <Button
-              title="结束会话"
-              icon={captureStyle ? <X size={18} /> : undefined}
-              aria-label="结束会话"
-              appearance="transparent"
-              size="small"
-              disabled={isExporting}
-              onClick={() =>
-                void actions.run({ type: commands.closeScreenshotSession })
-              }
-            >
-              {captureStyle ? undefined : "结束会话"}
-            </Button>
-          </>
-        )}
-        <Button
-          title="清除编辑"
-          icon={captureStyle ? <Trash2 size={18} /> : undefined}
-          aria-label="清除编辑"
-          appearance="transparent"
-          size="small"
-          disabled={
-            state.marks.length === 0 &&
-            state.rotation === 0 &&
-            !state.crop &&
-            !state.resize &&
-            !state.patches?.length
-          }
-          onClick={() => {
-            select(undefined);
-            commit(EMPTY);
-          }}
-        >
-          {captureStyle ? undefined : "清除编辑"}
-        </Button>
+        {captureStyle ? null : exportActions}
         <output aria-live="polite" className="editor-operation-status">
           {canExport
             ? operationMessage

@@ -1,43 +1,43 @@
-# Classic → VibeOCR 行为对齐矩阵
+# Classic → VibeOCR Next 行为对照
 
-本矩阵把 Classic 当作用户可观察行为参考，而不是 Qt 布局模板。`已对齐` 表示当前
-VibeOCR 仓库内已有可执行实现与自动化契约；`局部对齐` 表示主流程可用，但仍缺少
-Classic 已公开的行为；`上游阻断` 表示当前发布的 Backend/Protocol 没有对应写操作，
-本仓不能用占位按钮或纯前端假状态伪装完成。
+Classic 的对照事实来自 [本次核对的 GitHub 源码](https://github.com/FelixJI/vibeocr-classic/tree/b816274809276699aa20b1b79193e0672710198c)，不使用旧迁移文档替代实现。2026-10-14 核对默认分支 `main` 为 `b816274809276699aa20b1b79193e0672710198c`。该提交仅作为冻结的历史源码对照源，不要求 Classic 未来的提交、发版或镜像维护。Next 的 Runtime、内部契约和桌面源码已在本仓；缺少功能应在本仓按 capability 与语言边界实现，不再等待旧 Backend/Protocol 发版。
 
-## 结论
+## 本次核对范围
 
-| 工作流 | 状态 | 本次落地 | 尚缺行为 / 阻断原因 |
-|---|---|---|---|
-| 单图输入与识别 | 局部对齐 | 文件、拖放、剪贴板、截图、取消、结果展示；任务状态跨路由保留 | 当前输入即启动识别，尚无“先检查/编辑/配置，再开始”提交边界；编辑后的画布未重新送入 OCR；缺复制原图和完整预处理参数 |
-| 截图与编辑 | 局部对齐 | 原生多屏选区、全局快捷键、托盘入口；Canvas 有选择、形状、文字、马赛克、模糊、裁剪、旋转、撤销/重做 | 缺 Classic 的截图后确认/复制/另存完整闭环；当前编辑结果不参与随后的识别输入 |
-| 结果复制与导出 | 已对齐 | 复制纯文本；导出 Markdown、Word (`docx`) 与 Excel (`xlsx`)；宿主文件选择和覆盖确认 | 富文本表格剪贴板仍只保留为结果 HTML/导出路径，没有 Classic 的 HTML Clipboard MIME |
-| 批量识别 | 局部对齐 | 多文件、拖放、去重、运行时自动调度、排序、移除、真实取消、部分失败继续、分页窗口、全部 Markdown/Word/Excel 导出 | 缺选中项预览、完整结果检查和“当前项导出”；页面目前只投影 120 字摘要 |
-| PDF | 上游阻断 | 打开单个 PDF、多选、缩略图分页、旋转、删除、页面 OCR、取消、保存 | OCR 文本仅保存在前端 ViewModel，`SavePdfAsync` 不写文字层；当前接口没有插页、重排、多个 PDF 合并、自动/横放/纵放摆正、文字层读写操作 |
-| 二维码 | 上游阻断 | 生成、文件/剪贴板/拖放识别、取消、清空、保存、严格限定的 URL 打开 | `IQrCodeClient.GenerateAsync` 只接受 `data/format`；没有尺寸、纠错、前景/背景色、反色、Logo、标签位置；缺结果复制命令 |
-| 设置与 Runtime | 上游阻断 | 主题、开机启动、全局快捷键、Runtime/驻留状态刷新、更新检查/下载/取消、诊断导出 | `IInferenceClient` 只有驻留状态读取；没有预热、TTL 写入、驻留释放、缓存清理、Backend 切换、依赖树重装或 Runtime profile 重建接口 |
-| 应用壳与恢复 | 已对齐 | 单实例、托盘、全局截图快捷键、`--goto`、跨路由任务状态、WebView2 单次恢复、原生诊断恢复页 | 按产品决策不增加永久识别历史，也不在重启后恢复未完成任务 |
+| 工作流 | 对照要求 | Next 的实现边界与验证入口 |
+|---|---|---|
+| 布局 | 标题下无随窗口高度扩大的空白 | Web 工作区顶部对齐。`workspace-density.spec.ts` 验证不同高度的标题布局。 |
+| 截图工具栏 | 工具含义清楚；样式设置不把操作条撑出窗口 | 原生选区工具栏与 Web 编辑器分别承担选区动作和局部编辑；编辑工具、颜色/线宽等设置分排。`ScreenshotSessionWorkbenchTests` 与截图场景 Playwright 测试覆盖交接及布局。 |
+| 文字结果 | 低置信度提示、行框编辑、原始/每行/一段/智能分段 | 识别结果由 C# 宿主管理；展示和行编辑共用 Classic 阅读顺序到源块的索引映射，原始格式保留上游原文。Web 通过 bridge 提交编辑，复制和导出消费同一权威文本。`StructuredResultWorkbenchTests` 与 `StructuredResult.test.tsx` 覆盖结果交互。 |
+| 公式与表格 | 公式显示与源文本选择；表格整表/局部选择与复制 | 复用 KaTeX、结构化表格和原生 HTML/TSV 剪贴板路径；Web 不直接访问系统剪贴板或 Runtime。结构化结果测试覆盖展示、范围与 bridge 命令。 |
+| Word / Excel 导出 | 识别内容可导出为真实文档；失败、取消与过期结果有明确行为 | 宿主提供文件选择与授权，Runtime documents 负责格式转换；沿用已有导出能力，避免新增第二套文档生成链路。 |
 
-## 本 PR 的可验证契约
+标题栏快速拖动已由用户从当前目标移除，仍未视为已修复；标题下留白已独立修复。
 
-- `WorkbenchBridgeCodecTests` 覆盖封闭命令、导出格式、状态 envelope 与尺寸边界。
-- `DesktopWorkbenchCommandHandlerTests` 和各 ViewModel 测试覆盖任务取消、陈旧完成抑制、
-  批量部分失败继续、PDF/二维码状态和平台动作。
-- Web 测试覆盖七路由、能力门控、分页窗口、PDF 多选、二维码 URL、安全资源 broker
-  与编辑器撤销/重做。
-- Playwright 固定覆盖 1280×800 浅色单图、1024×720 深色批量运行、1280×800
-  浅色 PDF 检查三张视觉基线。
+表中描述的是本次实现与验收范围，不表示所有 Classic 细节严格等价。自动化结果以本次实际执行记录为准；Office 剪贴板格式契约通过也不能替代真实 Office 应用的粘贴验收。
 
-## 完成严格等价所需的外部 seam
+## 源码对照依据
 
-严格完成上述三个“上游阻断”工作流，必须先发布兼容的 Backend/Protocol capability，
-再由本仓消费；不能在 VibeOCR 的 React 页面中直接访问 Backend 或文件系统，也不能
-扩张现有 bridge JSON 去传输图片/PDF 二进制。最小外部接口至少包括：
+以下链接均固定到本次核对的 Classic GitHub 提交，行为结论来自源码：
 
-1. PDF session 的 insert/reorder/orient/text-layer read/write，并明确保存后的持久化语义。
-2. 二维码生成 options（尺寸、纠错、颜色、反色、Logo、标签）及生成资产的保存契约。
-3. Runtime residency/config mutation（preload、TTL、evict、cache clear、backend/profile、
-   dependency reinstall）及可取消进度事件。
+- [文本排版](https://github.com/FelixJI/vibeocr-classic/blob/b816274809276699aa20b1b79193e0672710198c/apps/vibeocr-pyside/src/vibeocr/classic/text_layout.py)：阅读顺序、合并与智能分段。
+- [结果窗口](https://github.com/FelixJI/vibeocr-classic/blob/b816274809276699aa20b1b79193e0672710198c/apps/vibeocr-pyside/src/vibeocr/classic/widgets/result_view_widget.py)：公式渲染、文字选择、局部表格复制与 HTML 剪贴板。
+- [图片校对](https://github.com/FelixJI/vibeocr-classic/blob/b816274809276699aa20b1b79193e0672710198c/apps/vibeocr-pyside/src/vibeocr/classic/widgets/preview_widget.py)：低置信度框与双击编辑。
+- [编辑工具栏](https://github.com/FelixJI/vibeocr-classic/blob/b816274809276699aa20b1b79193e0672710198c/apps/vibeocr-pyside/src/vibeocr/classic/widgets/editor/edit_toolbar.py)与[图标](https://github.com/FelixJI/vibeocr-classic/blob/b816274809276699aa20b1b79193e0672710198c/apps/vibeocr-pyside/src/vibeocr/classic/ui/toolbar_icons.py)：动作与属性控制。
 
-在这些接口真实存在并进入发布绑定前，相关页面应显示准确的只读能力边界，不得显示
-无实现的操作或用“即将支持”替代验收。
+2026-10-14 使用真实 Word/Excel 补验生产剪贴板：所选 2×2 区域粘贴后保持单元格位置，多行文字留在同一单元格，识别出的公式样文本不执行；真实 Runtime 导出的 DOCX/XLSX 可打开，空行和字面量尖括号保留。HTML 换行使用 `mso-data-placement:same-cell`，防止 Excel 把单元格内换行拆成新表格行。该实测不代表所有 Office 版本和复杂表格组合均已验证。
+
+## 已有能力，避免重复实施
+
+- Classic 迁入的 Python `TextBlockProcessor` 与 `TextBlockOptions` 没有生产调用方，已随宿主排版接线移除；排版规则仅由 C# 生成，Web 展示，Runtime 导出消费所选文本。
+- 单图/截图使用会话与修订绑定，编辑图像经过导出后进入 OCR；旋转、裁剪或会话替换后旧文字层失效。相关入口为 `WorkbenchImageOwner`，契约见 `ScreenshotSessionWorkbenchTests` 与 `ImageEditIsolationWorkbenchTests`。
+- PDF 已有插页、重排、横纵摆正、文本层读写及保存路径，并非旧矩阵所述的外部接口阻断。对应 `PdfViewModel`、`PdfPageOperationsTests`、`PdfTextLayerTests`。
+- 公开文本二维码生成与图片二维码/条码解码均由 C# 桌面进程完成；`App.xaml.cs` 装配 `LocalQrCodeClient`，不依赖 Supervisor。Runtime 仅保留生成/解码的内部 wire 兼容路由，不是桌面的解码调用链。对应 `LocalQrCodeClientTests` 与 `LocalQrCodeGeneratorTests`。
+- 环境安装、切换、清理和修复已有宿主命令与 Runtime 事务边界。`WorkbenchSettingsOwner` 负责装配，不在 React 重复推导依赖或设备就绪状态。
+- 单实例、托盘、跨产品互斥、任务取消、更新及恢复沿用现有实现。保留已有数据迁移与跨产品互斥，仓库状态变化不改变这些兼容契约。
+
+## 持续保留的边界
+
+低置信度仅在上游提供有效分数时判断，缺失分数不能伪装成 0% 或 100%。编辑、复制和导出必须拒绝已替换的结果；同文本出现多次时不能靠全文首次匹配定位。结构化表格复制保留 HTML 与 TSV 两种表达。为避免超大网格卡住界面，预览与剪贴板复制最多物化 10000 格；更大的表格使用导出，范围复制按实际交集面积检查上限。公式同时保留可选择的源文本。没有 capability 的操作继续隐藏、禁用或明确回退，不显示假成功。
+
+图像校对仅为实际包含有效行框的结果生成参考图。Paddle 的旋转或去畸变结果使用 Runtime 发布的实际预处理图，通过 `ocr.v1` 的可选 `reference_image` 引用，经现有 job/item/asset 授权通道读取；所需资产不可用时保留文字结果，不把行框投影到原图。没有几何预处理的输入仅去除 EXIF 方向元数据，保持 OCR 存储像素坐标。普通输入的行编辑和复制/导出状态更新复用当前资源，替换或失败时按所属生命周期回收。已存在但内容为空的排版模式允许复制空文本，缺失模式仍拒绝。

@@ -51,6 +51,7 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     public string Status { get => _status; private set => SetField(ref _status, value); }
     public RecognitionInput? CurrentInput { get => _currentInput; private set => SetField(ref _currentInput, value); }
     public bool HasResult => _result is not null;
+    public RecognitionInput? ResultInput { get; private set; }
     public JobState? TerminalState { get; private set; }
     public string Pipeline { get; set; } = "OCR";
     public string? Language { get; set; }
@@ -214,6 +215,7 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     public void InvalidateResult()
     {
         _result = null;
+        ResultInput = null;
         ResultText = string.Empty;
         if (CurrentInput is not null)
         {
@@ -221,6 +223,55 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         }
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Result)));
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasResult)));
+    }
+
+    /// <summary>构造行编辑候选；发布成功并确认原结果仍有效后才提交。</summary>
+    internal bool TryPrepareLineEdit(
+        int lineIndex, string expectedOldText, string newText,
+        out RecognizeResponse? updated, out string? error)
+    {
+        updated = null;
+        error = "识别行内容已变化，请刷新后重试。";
+        RecognizeResponse? current = _result;
+        if (current?.ContentBlocks is { Length: > 0 } ||
+            current?.RawBlocks is not { Length: > 0 } blocks ||
+            lineIndex < 0 || lineIndex >= 10_000 || string.IsNullOrWhiteSpace(newText) ||
+            newText.Length > 10_000)
+            return false;
+        // 与展示投影共用同一 Classic 行序映射：lineIndex 是排序后行序，
+        // 重复文本也命中正确源块。
+        int[] sourceIndexes = StructuredResultClipboard.OrderLineSourceIndexes(blocks);
+        if (lineIndex >= sourceIndexes.Length) return false;
+        int sourceIndex = sourceIndexes[lineIndex];
+        if (!StructuredResultClipboard.TryReadBlockText(blocks[sourceIndex], out string? sourceText) ||
+            !string.Equals(sourceText, expectedOldText, StringComparison.Ordinal)) return false;
+        var node = System.Text.Json.Nodes.JsonNode.Parse(blocks[sourceIndex].GetRawText())!;
+        node["text"] = newText;
+        node["is_manually_edited"] = true;
+        System.Text.Json.JsonElement[] editedBlocks = [.. blocks];
+        editedBlocks[sourceIndex] = System.Text.Json.JsonSerializer.SerializeToElement(node);
+        string rawText = string.Join("\n", editedBlocks
+            .Select(block => StructuredResultClipboard.TryReadBlockText(block, out string? text) ? text : null)
+            .Where(text => text is not null));
+        updated = current with
+        {
+            Text = rawText, RawText = rawText, MarkdownText = rawText,
+            HtmlText = "<pre>" + System.Net.WebUtility.HtmlEncode(rawText) + "</pre>",
+            RawBlocks = editedBlocks,
+        };
+        error = null;
+        return true;
+    }
+
+    internal bool TryCommitLineEdit(RecognizeResponse expected, RecognizeResponse updated)
+    {
+        if (!ReferenceEquals(_result, expected)) return false;
+        _result = updated;
+        ResultText = updated.Text;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Result)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasResult)));
+        Status = "已更新行文本";
+        return true;
     }
 
     public void Cancel() => _activeRun?.Cancel();
@@ -313,6 +364,7 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
                     CurrentInput = input;
                 }
                 _result = null;
+                ResultInput = null;
                 ResultText = string.Empty;
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Result)));
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasResult)));
@@ -411,6 +463,7 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
             }
 
             _result = RecognitionOutcomeMapper.ToResponse(outcome, pipeline);
+            ResultInput = input;
             ResultText = _result.Text;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Result)));
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasResult)));

@@ -3280,9 +3280,10 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   /// <summary>
-  /// 选区动作栏图标契约：目录键全部解析为非空官方字形；易混淆组
-  /// （文字/表格/公式、马赛克/模糊、画笔/荧光笔）必须使用互不相同的
-  /// 字形，不靠颜色区分。
+  /// 选区动作栏图标契约：目录键全部解析为非空图标（官方字形或 20×20
+  /// 自绘路径）；易混淆组（文字/表格/公式、马赛克/模糊、画笔/荧光笔）
+  /// 必须互不相同，不靠颜色区分。字形/路径来源见
+  /// <see cref="ScreenshotToolbarIcons"/>（误导字形已换成自绘）。
   /// </summary>
   [Fact]
   public void SelectionToolbarIconCatalogResolvesDistinctStableGlyphs()
@@ -3296,7 +3297,15 @@ public sealed class ScreenshotSessionWorkbenchTests
       "reselect", "exit", "magnifier", "confirm", "undo", "redo",
     ];
     Assert.All(toolbarKeys, key =>
-      Assert.True(ScreenshotToolbarIcons.TryGetGlyph(key) is not null, $"缺失图标：{key}"));
+      Assert.True(ScreenshotToolbarIcons.HasIcon(key), $"缺失图标：{key}"));
+    // 自绘键的路径必须是合法的 mini-language 开头（运行时经 XamlReader
+    // 解析；渲染由原生 e2e/真实使用验证）。
+    Assert.All(
+      toolbarKeys.Where(key => ScreenshotToolbarIcons.TryGetPath(key) is not null),
+      key => Assert.True(
+        System.Text.RegularExpressions.Regex.IsMatch(
+          ScreenshotToolbarIcons.TryGetPath(key)!, @"^(F[01] )?M[0-9,\.\-+ a-zA-Z]+$"),
+        $"自绘路径非法：{key}"));
     foreach (string[] group in new string[][]
              {
                ["textRecognition", "tableRecognition", "formulaRecognition"],
@@ -3304,9 +3313,40 @@ public sealed class ScreenshotSessionWorkbenchTests
                ["pen", "highlighter"],
              })
     {
-      // 同组内形状必须可区分：不同键不得解析到同一字形。
-      Assert.Equal(group.Length, group.Select(ScreenshotToolbarIcons.TryGetGlyph).ToHashSet().Count);
+      // 同组内形状必须可区分：不同键不得解析到同一字形/路径。
+      Assert.Equal(
+        group.Length,
+        group.Select(key => ScreenshotToolbarIcons.TryGetGlyph(key)
+          ?? ScreenshotToolbarIcons.TryGetPath(key)).ToHashSet().Count);
     }
+  }
+
+  /// <summary>
+  /// 两排动作栏组合契约：第一排编辑工具的 initialTool 词汇与 Web
+  /// ImageCanvasEditor 工具 id 一致（未知 id 会被 Web 静默回退到选择工具，
+  /// 原生改名必须在同一变更中同步两侧）；第二排固定动作键全部可解析。
+  /// </summary>
+  [Fact]
+  public void SelectionToolbarTwoRowsMatchWebEditorToolVocabulary()
+  {
+    string[] expectedTools =
+    [
+      "rectangle", "ellipse", "arrow", "pen", "highlighter", "text",
+      "numbering", "mosaic", "blur", "exclude", "inpaint", "textSelect",
+    ];
+    Assert.Equal(expectedTools, ScreenRegionPicker.SelectionEditToolRow.Select(entry => entry.Tool));
+    Assert.All(ScreenRegionPicker.SelectionEditToolRow, entry =>
+      Assert.True(ScreenshotToolbarIcons.HasIcon(entry.IconKey), $"第一排缺图标：{entry.IconKey}"));
+    Assert.All(ScreenRegionPicker.SelectionEditToolRow, entry =>
+    {
+      Assert.False(string.IsNullOrWhiteSpace(entry.Label));
+      Assert.False(string.IsNullOrWhiteSpace(entry.Tip));
+    });
+    // 第二排：识别三类（宿主动态下发，键由 IconKey 默认 textRecognition 兜底）
+    // 加长截图/输出/会话控制的固定键全部可解析。
+    Assert.All(
+      new[] { "scrollCapture", "settings", "copy", "save", "pin", "reselect", "exit", "magnifier" },
+      key => Assert.True(ScreenshotToolbarIcons.HasIcon(key), $"第二排缺图标：{key}"));
   }
 
   [Theory]

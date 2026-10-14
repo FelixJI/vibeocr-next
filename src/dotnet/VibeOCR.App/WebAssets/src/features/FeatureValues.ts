@@ -67,6 +67,7 @@ export function statusLabel(value: unknown, fallback: string): string {
     "recognition.modeUnavailable":
       "所选识别模式在当前环境不可用；请检查模型、设备与运行环境",
     "recognition.exported": "结果已导出",
+    "recognition.exportCancelled": "已取消导出，识别结果仍保留",
     "recognition.exportedIncomplete":
       "文件已保存，但部分图片缺失或该格式无法容纳图片；请检查原始结果",
     "pdf.open": "PDF 会话已建立",
@@ -107,7 +108,9 @@ export function stringValues(value: unknown): readonly string[] {
 export function useResourceText(
   reference: ResourceReference | undefined,
 ): string {
-  const [text, setText] = useState("");
+  // 文本与来源 URL 绑定：A→B/undefined 替换后的首帧即返回空串，
+  // 迟到/逆序响应只写入匹配自身 URL 的槽位，不覆写新资源。
+  const [entry, setEntry] = useState<{ url: string; text: string }>();
   useEffect(() => {
     if (!reference) return undefined;
     const cancellation = new AbortController();
@@ -120,12 +123,20 @@ export function useResourceText(
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.text();
       })
-      .then(setText)
+      .then((text) => {
+        if (!cancellation.signal.aborted)
+          setEntry({ url: reference.url, text });
+      })
       .catch((error: unknown) => {
-        if (!(error instanceof DOMException && error.name === "AbortError"))
-          setText("结果资源已失效，请重新识别。");
+        if (error instanceof DOMException && error.name === "AbortError")
+          return;
+        if (!cancellation.signal.aborted)
+          setEntry({
+            url: reference.url,
+            text: "结果资源已失效，请重新识别。",
+          });
       });
     return () => cancellation.abort();
   }, [reference]);
-  return reference ? text : "";
+  return entry && reference && entry.url === reference.url ? entry.text : "";
 }

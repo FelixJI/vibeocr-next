@@ -248,6 +248,33 @@ public sealed record CancelRecognitionCommand : WorkbenchCommand;
 public sealed record CopyRecognitionResultCommand(string Format) : WorkbenchCommand;
 
 /// <summary>
+/// 按模式（raw/line/merged/smart）复制纯文本行结果：宿主重读权威结构化
+/// 资源拼接后写入平台剪贴板，Web 不直接拼接剪贴板文本。
+/// </summary>
+public sealed record CopyRecognitionLinesCommand(
+  string ResourceUri,
+  string Mode) : WorkbenchCommand;
+
+/// <summary>表格子范围（含合并单元格裁剪）的原生复制，粘贴 Word/Excel 语义一致。</summary>
+public sealed record CopyStructuredCellsCommand(
+  string ResourceUri,
+  int BlockIndex,
+  int RowStart,
+  int RowEnd,
+  int ColumnStart,
+  int ColumnEnd) : WorkbenchCommand;
+
+/// <summary>
+/// 行内联编辑提交：宿主校验资源仍为当前结果且旧行文本一致后改写权威
+/// 行数据并重建 raw/markdown，过期或文本漂移时拒绝（fail closed）。
+/// </summary>
+public sealed record UpdateRecognitionLineCommand(
+  string ResourceUri,
+  int LineIndex,
+  string ExpectedOldText,
+  string NewText) : WorkbenchCommand;
+
+/// <summary>
 /// Copy one block of a host-published structured result resource through the
 /// native clipboard. The web side only passes the opaque resource URI it was
 /// given plus the block index and the desired representation ("table" writes
@@ -259,7 +286,7 @@ public sealed record CopyStructuredResultCommand(
   int BlockIndex,
   string Format) : WorkbenchCommand;
 
-public sealed record ExportRecognitionResultCommand(string Format) : WorkbenchCommand;
+public sealed record ExportRecognitionResultCommand(string Format, string? TextMode = null) : WorkbenchCommand;
 
 public sealed record CopyAnnotatedImageCommand(string ResourceUri) : WorkbenchCommand;
 
@@ -552,7 +579,8 @@ public sealed record RecognitionWorkbenchState(
   string? TaskEngine = null,
   RecognitionScreenshotSessionState? ScreenshotSession = null,
   RecognitionTextLayerState? TextLayer = null,
-  WorkbenchResourceReference? StructuredResult = null) : WorkbenchState
+  WorkbenchResourceReference? StructuredResult = null,
+  WorkbenchResourceReference? ResultImage = null) : WorkbenchState
 {
   public override string Scope => "recognition";
 }
@@ -610,7 +638,8 @@ public sealed record RecognitionTextLayerLine(
   double Y1,
   double X2,
   double Y2,
-  int? Order = null);
+  int? Order = null,
+  double? Score = null);
 
 /// <summary>
 /// One selectable recognition mode on the recognition page. <see cref="Selected"/>
