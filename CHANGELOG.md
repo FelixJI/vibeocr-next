@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.4
+
+### Features
+
+- **workbench:** 完善截图校对与识别结果交互 (#225) (2620462)
+
 ## 0.7.3
 
 ### Features
