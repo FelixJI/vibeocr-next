@@ -141,8 +141,9 @@ input {
 .workspace {
   display: grid;
   min-height: 100%;
-  gap: 14px;
-  padding: 16px 18px 20px;
+  align-content: start;
+  gap: 10px;
+  padding: 12px 16px 16px;
   width: 100%;
   max-width: 1920px;
   margin-inline: auto;
@@ -151,7 +152,7 @@ input {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 24px;
+  gap: 16px;
 }
 .workspace-header h1 {
   margin: 0;
@@ -854,7 +855,6 @@ html[data-capture-scene="true"] .workspace > .work-panel {
   position: fixed;
   left: var(--capture-tools-left);
   top: var(--capture-tools-top);
-  width: min(880px, 100vw);
   max-height: var(--capture-tools-height);
   overflow: auto;
   padding: 8px;
@@ -1128,26 +1128,34 @@ select {
 }
 .capture-scene-editor {
   display: flex;
-  align-items: center;
+  /* 顶部对齐：两排内容高于高度窗口时滚动从首排可达（居中会把顶部溢出卷成不可达）。 */
+  align-items: flex-start;
   gap: 4px;
   width: max-content;
   max-width: calc(100vw - var(--capture-tools-left));
 }
-.capture-scene-editor .editor-toolbar {
-  flex-wrap: nowrap;
-  flex-shrink: 0;
+/* 截图现场两排工具栏（Classic 同构）：主操作与样式各自成排，排内换行收纳，窄区域不横向溢出。 */
+.editor-scene-toolstack {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
 }
-.capture-scene-editor .editor-toolbar-break {
-  display: none;
+.capture-scene-editor .editor-scene-toolstack .editor-toolbar {
+  flex-wrap: wrap;
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 100%;
+  row-gap: 4px;
+  padding: 0;
+  border: 0;
 }
 .capture-scene-editor .editor-style-control > span[aria-hidden="true"] {
   display: none;
 }
 .capture-scene-editor > .editor-footer {
   display: contents;
-}
-.capture-scene-editor > .editor-footer > button {
-  flex-shrink: 0;
 }
 .capture-scene-editor .editor-operation-status:empty {
   display: none;
@@ -1166,7 +1174,13 @@ select {
 .capture-scene-editor .editor-output-settings > .editor-toolbar {
   position: fixed;
   right: 8px;
-  top: calc(var(--capture-tools-top) + 52px);
+  /* 位置/高度由 TS 注入：下方放不下时翻到覆盖层上方，max-height+滚动兑底。 */
+  top: var(
+    --capture-settings-top,
+    calc(var(--capture-tools-top) + var(--capture-tools-height) + 4px)
+  );
+  max-height: var(--capture-settings-max-height, 60vh);
+  overflow: auto;
   max-width: calc(100vw - 16px);
   flex-wrap: wrap;
   padding: 8px;
@@ -1177,10 +1191,6 @@ select {
 
 .capture-scene-editor .editor-toolbar button {
   padding-inline: 6px;
-}
-.capture-scene-editor > .editor-toolbar {
-  padding: 0;
-  border: 0;
 }
 
 /* 工具栏按钮：框选后的浮动工具需要明确的可点击与状态色，
@@ -1203,7 +1213,7 @@ select {
 }
 .capture-scene-editor
   .editor-toolbar
-  button:not([aria-pressed="true"]):not(:disabled):hover {
+  button[aria-pressed="false"]:not(:disabled):hover {
   background: var(--colorNeutralBackground1Hover);
 }
 .capture-scene-editor .editor-toolbar button:focus-visible {
@@ -1360,4 +1370,28 @@ select {
 }
 .pdf-export li {
   overflow-wrap: anywhere;
+}
+
+.recognition-result-toolbar.fui-Toolbar {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.result-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.result-action-row > button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.result-mode-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }

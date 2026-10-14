@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using VibeOCR.App.Features.QrCode;
 using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Features.Settings;
@@ -14,7 +15,7 @@ using Windows.Storage.Pickers;
 
 namespace VibeOCR.App.Workbench;
 
-internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImagePlatform, WorkbenchAnnotationStore annotationStore, Func<CancellationToken, Task>? ensureRuntimeReady, Func<bool>? inferenceAttached, PortableLayout? optionsLayout, Action<WorkbenchAnnotationFile, Guid, long, RecognitionTextLayerState?, IReadOnlyList<WorkbenchExclusionBox>>? pinScreenshot, Func<RecognitionViewModel> recognitionFactory, WorkbenchResourceBroker resourceBroker, ShellActionDispatcher? shellActions, IStructuredClipboardPlatform structuredClipboard, Func<string?> supervisorInstanceId, Func<RecognitionViewModel> textLayerRecognitionFactory, Func<nint> windowHandle, WorkbenchSettingsOwner settingsOwner, WorkbenchResourcesOwner resources, WorkbenchSelectionOwner selectionPolicy, WorkbenchOperations operations, Action synchronizeBatchMode)
+internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImagePlatform, WorkbenchAnnotationStore annotationStore, Func<CancellationToken, Task>? ensureRuntimeReady, Func<bool>? inferenceAttached, PortableLayout? optionsLayout, Action<WorkbenchAnnotationFile, Guid, long, RecognitionTextLayerState?, IReadOnlyList<WorkbenchExclusionBox>>? pinScreenshot, Func<RecognitionViewModel> recognitionFactory, WorkbenchResourceBroker resourceBroker, ShellActionDispatcher? shellActions, IStructuredClipboardPlatform structuredClipboard, Func<string?> supervisorInstanceId, Func<RecognitionViewModel> textLayerRecognitionFactory, IResultActionPlatform resultActionPlatform, WorkbenchSettingsOwner settingsOwner, WorkbenchResourcesOwner resources, WorkbenchSelectionOwner selectionPolicy, WorkbenchOperations operations, Action synchronizeBatchMode)
 {
   internal event Action? ScreenshotSelectionSettingsRequested;
   internal event Action? ScreenshotSelectionRecognized;
@@ -25,7 +26,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
   public event Action<Guid, long>? ScreenshotSessionDetached;
   public event Action<Guid, long>? ScreenshotTextLayerInvalidated;
   public event Action<RecognitionTextLayerState?>? ScreenshotTextLayerChanged;
-  internal bool Handles(WorkbenchCommand command) => command is SelectRecognitionImageCommand or RecognizeDroppedFileCommand or ReadRecognitionClipboardCommand or CaptureRecognitionScreenCommand or SelectImageEditFileCommand or ReadImageEditClipboardCommand or OpenDroppedImageEditFileCommand or OpenRecognitionImageForEditCommand or PasteRecognitionImageForEditCommand or CaptureScreenshotSessionCommand or CaptureScreenshotTextSessionCommand or CaptureScrollingScreenshotCommand or CloseScreenshotSessionCommand or CloseImageEditSessionCommand or NotifyScreenshotSessionRevisionCommand or NotifyImageEditRevisionCommand or CopyScreenshotImageCommand or CopyImageEditImageCommand or SaveScreenshotImageCommand or SaveImageEditImageCommand or PinScreenshotImageCommand or PinImageEditImageCommand or RecognizeScreenshotImageCommand or RecognizeImageEditImageCommand or PrepareScreenshotTextLayerCommand or PrepareImageEditTextLayerCommand or CancelScreenshotTextLayerCommand or CancelImageEditTextLayerCommand or CopyScreenshotSelectionCommand or CopyImageEditSelectionCommand or CancelRecognitionCommand or CopyRecognitionResultCommand or CopyStructuredResultCommand or ExportRecognitionResultCommand or CopyAnnotatedImageCommand or CopyImageEditAnnotatedImageCommand or SaveAnnotatedImageCommand or SaveImageEditAnnotatedImageCommand or SetTaskEngineCommand or SetRecognitionOptionsCommand;
+  internal bool Handles(WorkbenchCommand command) => command is SelectRecognitionImageCommand or RecognizeDroppedFileCommand or ReadRecognitionClipboardCommand or CaptureRecognitionScreenCommand or SelectImageEditFileCommand or ReadImageEditClipboardCommand or OpenDroppedImageEditFileCommand or OpenRecognitionImageForEditCommand or PasteRecognitionImageForEditCommand or CaptureScreenshotSessionCommand or CaptureScreenshotTextSessionCommand or CaptureScrollingScreenshotCommand or CloseScreenshotSessionCommand or CloseImageEditSessionCommand or NotifyScreenshotSessionRevisionCommand or NotifyImageEditRevisionCommand or CopyScreenshotImageCommand or CopyImageEditImageCommand or SaveScreenshotImageCommand or SaveImageEditImageCommand or PinScreenshotImageCommand or PinImageEditImageCommand or RecognizeScreenshotImageCommand or RecognizeImageEditImageCommand or PrepareScreenshotTextLayerCommand or PrepareImageEditTextLayerCommand or CancelScreenshotTextLayerCommand or CancelImageEditTextLayerCommand or CopyScreenshotSelectionCommand or CopyImageEditSelectionCommand or CancelRecognitionCommand or CopyRecognitionResultCommand or CopyStructuredResultCommand or CopyRecognitionLinesCommand or CopyStructuredCellsCommand or UpdateRecognitionLineCommand or ExportRecognitionResultCommand or CopyAnnotatedImageCommand or CopyImageEditAnnotatedImageCommand or SaveAnnotatedImageCommand or SaveImageEditAnnotatedImageCommand or SetTaskEngineCommand or SetRecognitionOptionsCommand;
 
   internal async ValueTask<WorkbenchState?> ExecuteAsync(WorkbenchCommand command, CancellationToken cancellationToken) => command switch
   {
@@ -122,6 +123,15 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     CopyStructuredResultCommand copyStructured => await CopyStructuredResultAsync(
       copyStructured,
       cancellationToken),
+    CopyRecognitionLinesCommand copyLines => await CopyRecognitionLinesAsync(
+      copyLines,
+      cancellationToken),
+    CopyStructuredCellsCommand copyCells => await CopyStructuredCellsAsync(
+      copyCells,
+      cancellationToken),
+    UpdateRecognitionLineCommand updateLine => await UpdateRecognitionLineAsync(
+      updateLine,
+      cancellationToken),
     ExportRecognitionResultCommand export => await ExportRecognitionAsync(
       export,
       cancellationToken),
@@ -166,6 +176,29 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
   private readonly ImageSessionChannel recognitionChannel = new();
   private readonly ImageSessionChannel imageEditChannel = new();
   private ResultActions? resultActions;
+  /// <summary>当前结果最近发布的结构化资源 URL；与新发布/失效同步维护。</summary>
+  private WorkbenchResourceReference? latestStructuredResult;
+  private string? latestStructuredUri => latestStructuredResult?.Url;
+
+  private void SetStructuredResult(WorkbenchResourceReference? structured)
+  {
+    if (latestStructuredResult is { } previous && previous.Url != structured?.Url) resources.ReleaseResource(previous);
+    latestStructuredResult = structured;
+  }
+  private WorkbenchResourceReference? resultImage;
+  private void SetResultImage(WorkbenchResourceReference? image)
+  {
+    if (resultImage is { } previous && previous.Url != image?.Url) resources.ReleaseResource(previous);
+    resultImage = image;
+  }
+
+  private void ClearResultActions()
+  {
+    resultActions = null;
+    SetStructuredResult(null);
+    SetResultImage(null);
+  }
+
   private int captureInFlight;
 
   internal Guid? CurrentImageSessionId => recognitionChannel.SessionId;
@@ -303,7 +336,8 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       TextLayer: recognitionChannel.TextLayer,
       StructuredResult: recognitionChannel.SessionResult is null
         ? null
-        : recognitionChannel.SessionStructuredResult);
+        : recognitionChannel.SessionStructuredResult,
+      ResultImage: recognitionChannel.SessionResult is null ? null : resultImage);
 
   /// <summary>通道会话状态：按通道目标 scope 发布（recognition/imageEdit）。</summary>
   private WorkbenchState SessionState(
@@ -385,7 +419,10 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       }
       ClearScreenshotSession(channel);
       InvalidateScreenshotTextLayer(channel);
-      if (channel == recognitionChannel) resultActions = null;
+      if (channel == recognitionChannel)
+      {
+        ClearResultActions();
+      }
       channel.SessionId = Guid.NewGuid();
       channel.Revision = 0;
       channel.SessionInput = input;
@@ -524,7 +561,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
 
           ClearScreenshotSession(recognitionChannel);
           InvalidateScreenshotTextLayer(recognitionChannel);
-          resultActions = null;
+          ClearResultActions();
           recognitionChannel.SessionId = Guid.NewGuid();
           recognitionChannel.Revision = 0;
           recognitionChannel.TextSelectionRequested = textSelectionRequested;
@@ -695,7 +732,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       {
         if (generation != Volatile.Read(ref recognitionChannel.Generation)) return;
         RecognitionVm.InvalidateResult();
-        resultActions = null;
+        ClearResultActions();
         ReleaseCaptureGuard();
         operations.PublishTerminal(new RecognitionWorkbenchState(false, "recognition.cancelled"));
         terminalVisible = true;
@@ -723,7 +760,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       // 显式识别取代旧截图会话（关闭旧 scene 编辑窗），不新建编辑会话。
       ClearScreenshotSession(recognitionChannel);
       InvalidateScreenshotTextLayer(recognitionChannel);
-      resultActions = null;
+      ClearResultActions();
       RecognitionWorkbenchState state = await RunRecognitionAsync(
         viewModel => viewModel.RecognizeCapturedInputAsync(input, cancellationToken),
         generation,
@@ -805,7 +842,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       if (generation != Volatile.Read(ref recognitionChannel.Generation)) return;
       ClearScreenshotSession(recognitionChannel);
       InvalidateScreenshotTextLayer(recognitionChannel);
-      resultActions = null;
+      ClearResultActions();
       recognitionChannel.SessionId = Guid.NewGuid();
       recognitionChannel.Revision = 0;
       recognitionChannel.TextSelectionRequested = false;
@@ -887,7 +924,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     InvalidateScreenshotTextLayer(channel, previousRevision);
     if (channel == recognitionChannel)
     {
-      resultActions = null;
+      ClearResultActions();
       channel.SessionResult = null;
     }
     return SessionState(channel, false, "recognition.session");
@@ -1023,7 +1060,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       long generation = AdvanceImageGeneration(channel);
       Guid sessionId = command.SessionId;
       long revision = command.Revision;
-      resultActions = null;
+      ClearResultActions();
       channel.SessionResult = null;
       // 旧 input 仅在 frozen 成功接管后释放。
       if (channel.SessionInput is { } previousInput) resources.ReleaseResource(previousInput);
@@ -1122,7 +1159,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       // 会话；imageEdit 通道的会话/输入不受影响。
       ClearScreenshotSession(recognitionChannel);
       InvalidateScreenshotTextLayer(recognitionChannel);
-      resultActions = null;
+      ClearResultActions();
       long generation = AdvanceImageGeneration(recognitionChannel);
       if (channel.SessionInput is { } previousInput) resources.ReleaseResource(previousInput);
       channel.SessionInput = frozen;
@@ -1163,7 +1200,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       {
         if (generation != Volatile.Read(ref recognitionChannel.Generation)) return;
         RecognitionVm.InvalidateResult();
-        resultActions = null;
+        ClearResultActions();
         operations.PublishTerminal(new RecognitionWorkbenchState(false, "recognition.cancelled"));
         return;
       }
@@ -1247,7 +1284,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       if (selectionUnavailable)
       {
         RecognitionVm.InvalidateResult();
-        resultActions = null;
+        ClearResultActions();
         operations.PublishTerminal(SessionRecognitionState(false, "recognition.cancelled"));
         return;
       }
@@ -1261,30 +1298,20 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       if (recognitionChannel.SessionId == sessionId &&
         recognitionChannel.Revision == revision)
       {
-        if (viewModel.Result is not null)
-        {
-          resultActions = viewModel.CreateResultActions(
-            new WindowsResultActionPlatform(windowHandle));
-        }
-        // 完成结果即使文本为空也发布真实（可能为空的）文本资源：会话终态
-        // 可见性（SessionStatusCode 与 StructuredResult 门控）绑定
-        // 通道 SessionResult，空文本不得伪装成仍在会话编辑中（#110）。
-        WorkbenchResourceReference? result = viewModel.Result is null
-          ? null
-          : await resources.PublishBytesAsync(
-            Encoding.UTF8.GetBytes(viewModel.ResultText),
-            "text/plain; charset=utf-8",
-            ".txt",
-            cancellationToken);
-        WorkbenchResourceReference? structured = await resources.PublishStructuredResultAsync(
-          viewModel, cancellationToken);
+        RecognizeResponse? response = viewModel.Result;
+        (WorkbenchResourceReference? result, WorkbenchResourceReference? structured, WorkbenchResourceReference? image) =
+          await PublishRecognitionResultAsync(viewModel, response, viewModel.ResultInput, cancellationToken);
         // 结果资源发布期间编辑/换图/维护会推进 generation：丢弃迟到结果。
         if (generation != Volatile.Read(ref recognitionChannel.Generation) ||
           recognitionChannel.SessionId != sessionId ||
-          recognitionChannel.Revision != revision)
+          recognitionChannel.Revision != revision || !ReferenceEquals(response, viewModel.Result))
         {
+          ReleaseResultResources(result, structured, image);
           return;
         }
+        resultActions = response is null ? null : viewModel.CreateResultActions(resultActionPlatform);
+        SetStructuredResult(structured);
+        SetResultImage(image);
         recognitionChannel.SessionResult = result;
         recognitionChannel.SessionStructuredResult = structured;
         operations.PublishTerminal(SessionRecognitionState(
@@ -1295,7 +1322,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       {
         // 会话或内容修订已变更：迟到结果丢弃，不覆盖新会话。
         viewModel.InvalidateResult();
-        resultActions = null;
+        ClearResultActions();
         recognitionChannel.SessionResult = null;
         operations.PublishTerminal(SessionRecognitionState(false, "recognition.expired"));
       }
@@ -1346,7 +1373,10 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     viewModel.Cancel();
     viewModel.InvalidateResult();
     viewModel.ReleaseInput();
-    if (channel == recognitionChannel) resultActions = null;
+    if (channel == recognitionChannel)
+      {
+        ClearResultActions();
+      }
     InvalidateScreenshotTextLayer(channel);
     ClearScreenshotSession(channel);
     return SessionState(channel, false, "recognition.ready");
@@ -1793,8 +1823,11 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       {
         order = orderValue;
       }
+      double? score = block.TryGetProperty("score", out JsonElement confidence) &&
+        confidence.ValueKind == JsonValueKind.Number && confidence.TryGetDouble(out double number) &&
+        double.IsFinite(number) && number is >= 0 and <= 1 ? number : null;
       lines.Add(new RecognitionTextLayerLine(
-        text, bbox[0], bbox[1], bbox[2], bbox[3], order));
+        text, bbox[0], bbox[1], bbox[2], bbox[3], order, score));
       characterCount += text.Length;
     }
     if (lines.Count == 0) return null;
@@ -1806,6 +1839,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
 
   private void ClearScreenshotSession(ImageSessionChannel channel)
   {
+    if (ReferenceEquals(channel, recognitionChannel)) ClearResultActions();
     if (channel.SessionId is { } id)
       ScreenshotSessionDetached?.Invoke(id, channel.Revision);
     if (channel.SessionInput is { } input)
@@ -1880,7 +1914,8 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       selectionPolicy.RecognitionEngines(),
       recognitionChannel.ViewModel?.TaskEngine,
       CurrentScreenshotSession(recognitionChannel),
-      StructuredResult: structured);
+      StructuredResult: structured,
+      ResultImage: result is null ? null : resultImage);
   }
 
   /// <summary>Runtime 回显的已提交默认识别模式 id；仅 Bound 状态非空。</summary>
@@ -1980,6 +2015,38 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     }
   }
 
+  private async Task<(WorkbenchResourceReference? Result, WorkbenchResourceReference? Structured,
+    WorkbenchResourceReference? Image)> PublishRecognitionResultAsync(
+    RecognitionViewModel viewModel, RecognizeResponse? response, RecognitionInput? source,
+    CancellationToken cancellationToken)
+  {
+    WorkbenchResourceReference? result = null, structured = null, image = null;
+    try
+    {
+      if (response is null) return (null, null, null);
+      result = await resources.PublishBytesAsync(Encoding.UTF8.GetBytes(response.Text),
+        "text/plain; charset=utf-8", ".txt", cancellationToken);
+      structured = await resources.PublishStructuredResultAsync(response, viewModel.FetchResultAssetAsync, cancellationToken);
+      if (source is not null)
+        image = await resources.PublishBytesAsync(source.Data, source.MediaType,
+          WorkbenchResourcesOwner.ExtensionForMediaType(source.MediaType), cancellationToken);
+      return (result, structured, image);
+    }
+    catch
+    {
+      ReleaseResultResources(result, structured, image);
+      throw;
+    }
+  }
+
+  private void ReleaseResultResources(WorkbenchResourceReference? result,
+    WorkbenchResourceReference? structured, WorkbenchResourceReference? image)
+  {
+    if (result is not null) resources.ReleaseResource(result);
+    if (structured is not null) resources.ReleaseResource(structured);
+    if (image is not null) resources.ReleaseResource(image);
+  }
+
   /// <summary>
   /// 在 recognition 通道上执行一次识别并发布终态投影。结果资源发布的
   /// await 窗口后先核对调用者代际：过期则释放本次 input/result/structured
@@ -1992,6 +2059,8 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
   {
     RecognitionViewModel viewModel = RecognitionVm;
     await action(viewModel);
+    RecognizeResponse? response = viewModel.Result;
+    RecognitionInput? source = viewModel.ResultInput;
     WorkbenchResourceReference? input = null;
     if (viewModel.CurrentInput is { } currentInput)
     {
@@ -2001,32 +2070,32 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
         WorkbenchResourcesOwner.ExtensionForMediaType(currentInput.MediaType),
         cancellationToken);
     }
-    // 完成结果即使文本为空也保留真实（可能为空的）文本资源：Result 非空
-    // 合同绑定真实识别结果，而不是文本长度（#110）。
-    WorkbenchResourceReference? result = viewModel.Result is null
-      ? null
-      : await resources.PublishBytesAsync(
-        Encoding.UTF8.GetBytes(viewModel.ResultText),
-        "text/plain; charset=utf-8",
-        ".txt",
-        cancellationToken);
-    WorkbenchResourceReference? structured = await resources.PublishStructuredResultAsync(
-      viewModel, cancellationToken);
-    if (generation != Volatile.Read(ref recognitionChannel.Generation))
+    WorkbenchResourceReference? result, structured, image;
+    try
+    {
+      (result, structured, image) = await PublishRecognitionResultAsync(viewModel, response, source, cancellationToken);
+    }
+    catch
+    {
+      if (input is not null) resources.ReleaseResource(input);
+      throw;
+    }
+    if (generation != Volatile.Read(ref recognitionChannel.Generation) || !ReferenceEquals(response, viewModel.Result))
     {
       // 本次运行已被取代（取消/新输入/新交接）：本次发布资源确定性回收，
       // 不改共享 resultActions，也不把旧资源写回新状态。
       if (input is not null) resources.ReleaseResource(input);
-      if (result is not null) resources.ReleaseResource(result);
-      if (structured is not null) resources.ReleaseResource(structured);
+      ReleaseResultResources(result, structured, image);
       return RecognitionState(
         viewModel.IsBusy,
         RecognitionStatusCode(viewModel));
     }
-    if (viewModel.Result is not null)
+    SetResultImage(image);
+    SetStructuredResult(structured);
+    if (response is not null)
     {
       resultActions = viewModel.CreateResultActions(
-        new WindowsResultActionPlatform(windowHandle));
+        resultActionPlatform);
     }
     return RecognitionState(
       viewModel.IsBusy,
@@ -2064,6 +2133,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     recognitionChannel.SessionResult = state.Result;
     recognitionChannel.SessionStructuredResult = state.StructuredResult;
     recognitionChannel.ExcludeBoxes = excludeBoxes ?? [];
+    SetStructuredResult(state.StructuredResult);
     return SessionRecognitionState(state.IsBusy, state.StatusCode);
   }
 
@@ -2073,11 +2143,11 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     AdvanceImageGeneration(recognitionChannel);
     recognitionChannel.CaptureDemand?.Cancel();
     viewModel.Cancel();
+    viewModel.InvalidateResult();
+    ClearResultActions();
     if (recognitionChannel.SessionId is not null)
     {
       // 取消保留会话编辑基准；运行中结果与文字层准备丢弃后可重新触发。
-      viewModel.InvalidateResult();
-      resultActions = null;
       recognitionChannel.SessionResult = null;
       InvalidateScreenshotTextLayer(recognitionChannel);
       return SessionRecognitionState(false, "recognition.cancelled");
@@ -2164,10 +2234,179 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     return null;
   }
 
+  /// <summary>读取宿主发布的结构化资源并解析为 JSON；缺失/不可解析一律拒绝。</summary>
+  private async Task<JsonDocument> OpenStructuredDocumentAsync(
+    string resourceUri,
+    CancellationToken cancellationToken)
+  {
+    if (!resources.structuredResourceFiles.TryGetValue(resourceUri, out string? path) ||
+      !File.Exists(path))
+    {
+      throw new InvalidOperationException(
+        "The structured result resource is no longer available.");
+    }
+    await using WorkbenchResourceResponse resource = await resourceBroker.OpenAsync(
+      new Uri(resourceUri), cancellationToken);
+    try
+    {
+      return await JsonDocument.ParseAsync(resource.Content, cancellationToken: cancellationToken);
+    }
+    catch (Exception error) when (error is JsonException or ArgumentException)
+    {
+      throw new InvalidOperationException(
+        "The structured result resource is no longer readable.",
+        error);
+    }
+  }
+
+  /// <summary>
+  /// 按模式复制纯文本行结果：宿主重读权威结构化资源里的预计算 modes 文本
+  /// 写入平台剪贴板（raw = Runtime raw_text 原样）；资源必须是当前结果
+  /// 发布的结构化资源（新结果/编辑后旧 URI 即过期，fail closed）。
+  /// </summary>
+  private async Task<RecognitionWorkbenchState?> CopyRecognitionLinesAsync(
+    CopyRecognitionLinesCommand command,
+    CancellationToken cancellationToken)
+  {
+    EnsureCurrentStructuredResource(command.ResourceUri);
+    using JsonDocument document = await OpenStructuredDocumentAsync(
+      command.ResourceUri, cancellationToken);
+    EnsureCurrentStructuredResource(command.ResourceUri);
+    JsonElement root = document.RootElement;
+    if (root.ValueKind != JsonValueKind.Array)
+    {
+      throw new InvalidOperationException(
+        "The structured result resource is no longer available.");
+    }
+    foreach (JsonElement block in root.EnumerateArray())
+    {
+      if (block.ValueKind != JsonValueKind.Object ||
+        !block.TryGetProperty("type", out JsonElement type) ||
+        type.ValueKind != JsonValueKind.String ||
+        type.GetString() != "lines" ||
+        !block.TryGetProperty("modes", out JsonElement modes) ||
+        modes.ValueKind != JsonValueKind.Object ||
+        !modes.TryGetProperty(command.Mode, out JsonElement modeText) ||
+        modeText.ValueKind != JsonValueKind.String)
+      {
+        continue;
+      }
+      string text = modeText.GetString()!;
+      if (text.Length > 0)
+      {
+        await structuredClipboard.WriteTextAsync(text, cancellationToken);
+        return null;
+      }
+    }
+    throw new InvalidOperationException(
+      "The structured result does not contain copyable lines.");
+  }
+
+  /// <summary>表格子范围的原生复制：合并单元格裁剪到范围边界，Word/Excel 语义一致。</summary>
+  private async Task<RecognitionWorkbenchState?> CopyStructuredCellsAsync(
+    CopyStructuredCellsCommand command,
+    CancellationToken cancellationToken)
+  {
+    EnsureCurrentStructuredResource(command.ResourceUri);
+    using JsonDocument document = await OpenStructuredDocumentAsync(
+      command.ResourceUri, cancellationToken);
+    EnsureCurrentStructuredResource(command.ResourceUri);
+    JsonElement root = document.RootElement;
+    if (root.ValueKind != JsonValueKind.Array ||
+      command.BlockIndex >= root.GetArrayLength())
+    {
+      throw new InvalidOperationException("The structured block is no longer available.");
+    }
+    JsonElement block = root[command.BlockIndex];
+    if (!StructuredResultClipboard.TryBuildTableRange(
+      block,
+      command.RowStart,
+      command.RowEnd,
+      command.ColumnStart,
+      command.ColumnEnd,
+      out string? tsv,
+      out string? html))
+    {
+      throw new InvalidOperationException("The structured block is not a valid table.");
+    }
+    await structuredClipboard.WriteTableAsync(tsv!, html!, cancellationToken);
+    return null;
+  }
+
+  /// <summary>先发布候选资源，复核当前结果后同步提交；失败或过期时回收候选。</summary>
+  private async Task<RecognitionWorkbenchState> UpdateRecognitionLineAsync(
+    UpdateRecognitionLineCommand command, CancellationToken cancellationToken)
+  {
+    EnsureCurrentStructuredResource(command.ResourceUri);
+    RecognitionViewModel viewModel = RecognitionVm;
+    RecognizeResponse expected = viewModel.Result ?? throw new InvalidOperationException("No result is available.");
+    long generation = Volatile.Read(ref recognitionChannel.Generation);
+    if (!viewModel.TryPrepareLineEdit(command.LineIndex, command.ExpectedOldText, command.NewText,
+      out RecognizeResponse? updated, out string? error))
+      throw new InvalidOperationException(error);
+    ResultActions updatedActions = viewModel.CreateResultActions(resultActionPlatform);
+    updatedActions.SetResult(updated!);
+    WorkbenchResourceReference? input = null, result = null, structured = null;
+    bool committed = false;
+    try
+    {
+      if (recognitionChannel.SessionId is null && viewModel.CurrentInput is { } currentInput)
+        input = await resources.PublishBytesAsync(currentInput.Data, currentInput.MediaType,
+          WorkbenchResourcesOwner.ExtensionForMediaType(currentInput.MediaType), cancellationToken);
+      result = await resources.PublishBytesAsync(Encoding.UTF8.GetBytes(updated!.Text),
+        "text/plain; charset=utf-8", ".txt", cancellationToken);
+      structured = await resources.PublishStructuredResultAsync(updated, viewModel.FetchResultAssetAsync, cancellationToken);
+      cancellationToken.ThrowIfCancellationRequested();
+      EnsureCurrentStructuredResource(command.ResourceUri);
+      if (generation != Volatile.Read(ref recognitionChannel.Generation) ||
+        !viewModel.TryCommitLineEdit(expected, updated))
+        throw new InvalidOperationException("识别结果已更新或失效，请刷新后重试。");
+      WorkbenchResourceReference? previousResult = recognitionChannel.SessionResult;
+      WorkbenchResourceReference? previousStructured = recognitionChannel.SessionStructuredResult;
+      resultActions = updatedActions;
+      SetStructuredResult(structured);
+      if (recognitionChannel.SessionId is not null)
+      {
+        recognitionChannel.SessionResult = result;
+        recognitionChannel.SessionStructuredResult = structured;
+      }
+      committed = true;
+      if (previousResult is not null) resources.ReleaseResource(previousResult);
+      if (previousStructured is not null) resources.ReleaseResource(previousStructured);
+      return recognitionChannel.SessionId is not null
+        ? SessionRecognitionState(false, "recognition.completed")
+        : RecognitionState(false, "recognition.completed", input, result, structured);
+    }
+    finally
+    {
+      if (!committed)
+      {
+        if (input is not null) resources.ReleaseResource(input);
+        if (result is not null) resources.ReleaseResource(result);
+        if (structured is not null) resources.ReleaseResource(structured);
+      }
+    }
+  }
+
+  /// <summary>
+  /// 当前置换守卫：被复制/编辑的资源必须是当前结果发布的结构化资源，
+  /// 且权威剪贴板动作仍在（新结果/取消/会话关闭后旧 URI 过期）。
+  /// </summary>
+  private void EnsureCurrentStructuredResource(string resourceUri)
+  {
+    if (resultActions is null ||
+      !string.Equals(latestStructuredUri, resourceUri, StringComparison.Ordinal))
+    {
+      throw new InvalidOperationException(
+        "识别结果已更新或失效，请刷新后重试。");
+    }
+  }
+
   private async Task<RecognitionWorkbenchState> ExportRecognitionAsync(
     ExportRecognitionResultCommand command,
     CancellationToken cancellationToken)
   {
+    // 权威快照：选择器 await 期间结果被替换/编辑时拒绝导出旧内容。
     ResultActions actions = resultActions ??
       throw new InvalidOperationException("No recognition result is available.");
     ResultExportFormat format = command.Format switch
@@ -2178,9 +2417,35 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       "xlsx" => ResultExportFormat.Xlsx,
       _ => ResultExportFormat.Text,
     };
-    ExportResult? export = await actions.ExportAsync(format, cancellationToken);
+    // 模式化导出：仅对 lines 结果生效（结构化结果保留原 raw_text）。
+    string? rawOverride = null;
+    if (command.TextMode is { } mode && mode != StructuredResultClipboard.LineModeRaw)
+    {
+      RecognizeResponse? response = RecognitionVm.Result;
+      if (response is not null &&
+        response.ContentBlocks is not { Length: > 0 } &&
+        response.RawBlocks is { Length: > 0 } blocks)
+      {
+        JsonObject? linesBlock = RecognitionLinesBlock.BuildBlock(
+          blocks, response.RawText ?? response.Text);
+        if (linesBlock is not null &&
+          linesBlock["modes"]?[mode] is JsonValue text &&
+          text.TryGetValue<string>(out string? modeText) &&
+          modeText is { Length: > 0 })
+        {
+          rawOverride = modeText;
+        }
+      }
+    }
+    ExportResult? export = await actions.ExportAsync(
+      format,
+      cancellationToken,
+      rawOverride,
+      rawOverride,
+      // 选择器 await 期间结果被替换/编辑时，写盘前拒绝导出旧内容。
+      () => ReferenceEquals(resultActions, actions));
     return await CurrentRecognitionStateAsync(
-      export?.Incomplete is true ? "recognition.exportedIncomplete" : "recognition.exported",
+      export is null ? "recognition.exportCancelled" : export.Incomplete ? "recognition.exportedIncomplete" : "recognition.exported",
       cancellationToken);
   }
 
@@ -2195,6 +2460,8 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     }
     RecognitionViewModel viewModel = recognitionChannel.ViewModel ??
       throw new InvalidOperationException("Recognition is unavailable.");
+    RecognizeResponse? response = viewModel.Result;
+    long generation = Volatile.Read(ref recognitionChannel.Generation);
     WorkbenchResourceReference? input = viewModel.CurrentInput is { } currentInput
       ? await resources.PublishBytesAsync(
         currentInput.Data,
@@ -2202,16 +2469,24 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
         WorkbenchResourcesOwner.ExtensionForMediaType(currentInput.MediaType),
         cancellationToken)
       : null;
-    // 同上：真实完成结果即使文本为空也保留结果资源（#110）。
-    WorkbenchResourceReference? result = viewModel.Result is null
-      ? null
-      : await resources.PublishBytesAsync(
-        Encoding.UTF8.GetBytes(viewModel.ResultText),
-        "text/plain; charset=utf-8",
-        ".txt",
-        cancellationToken);
-    WorkbenchResourceReference? structured = await resources.PublishStructuredResultAsync(
-      viewModel, cancellationToken);
+    WorkbenchResourceReference? result, structured, image;
+    try
+    {
+      (result, structured, image) = await PublishRecognitionResultAsync(viewModel, response, viewModel.ResultInput, cancellationToken);
+    }
+    catch
+    {
+      if (input is not null) resources.ReleaseResource(input);
+      throw;
+    }
+    if (generation != Volatile.Read(ref recognitionChannel.Generation) || !ReferenceEquals(response, viewModel.Result))
+    {
+      if (input is not null) resources.ReleaseResource(input);
+      ReleaseResultResources(result, structured, image);
+      return CurrentRecognitionState();
+    }
+    SetStructuredResult(structured);
+    SetResultImage(image);
     return RecognitionState(false, statusCode, input, result, structured);
   }
 
@@ -2327,7 +2602,10 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       WorkbenchImageOwner.AdvanceImageGeneration(channel);
       channel.ViewModel?.Cancel();
       channel.ViewModel?.InvalidateResult();
-      if (channel == recognitionChannel) resultActions = null;
+      if (channel == recognitionChannel)
+      {
+        ClearResultActions();
+      }
       channel.SessionResult = null;
       InvalidateScreenshotTextLayer(channel);
       operations.Publish(SessionState(channel, false, "recognition.expired"));

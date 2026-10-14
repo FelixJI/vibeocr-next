@@ -61,6 +61,30 @@ describe("image text layer selection", () => {
     });
   });
 
+  it("marks known low-confidence lines without touching unknown scores", () => {
+    render(
+      <ImageTextLayer
+        {...layerProps({
+          lines: [
+            { text: "高置信行", bbox: [0, 0, 500, 100], score: 0.93 },
+            { text: "低置信行", bbox: [0, 120, 500, 220], score: 0.61 },
+            { text: "无置信行", bbox: [0, 240, 500, 340] },
+          ],
+        })}
+      />,
+    );
+    const high = screen.getByText("高置信行").parentElement!;
+    const low = screen.getByText("低置信行").parentElement!;
+    const unknown = screen.getByText("无置信行").parentElement!;
+    expect(high).not.toHaveClass("low-confidence");
+    expect(high).toHaveAttribute("title", "置信度: 93.0%");
+    // Classic 阈值：<80% 标记；unknown 不伪装数值。
+    expect(low).toHaveClass("low-confidence");
+    expect(low).toHaveAttribute("title", "置信度: 61.0%");
+    expect(unknown).not.toHaveClass("low-confidence");
+    expect(unknown).not.toHaveAttribute("title");
+  });
+
   it("selects an inline Chinese substring through a native range", () => {
     render(<ImageTextLayer {...layerProps()} />);
 

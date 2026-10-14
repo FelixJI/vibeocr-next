@@ -36,13 +36,33 @@ public sealed class ResultActions(IInferenceClient inference, IResultActionPlatf
         }
     }
 
-    public async Task<ExportResult?> ExportAsync(ResultExportFormat format, CancellationToken cancellationToken)
+    public async Task<ExportResult?> ExportAsync(ResultExportFormat format, CancellationToken cancellationToken,
+      string? rawTextOverride = null, string? markdownTextOverride = null, Func<bool>? stillCurrent = null)
     {
         RecognitionResultContent result = _result ?? throw new InvalidOperationException("No OCR result is available.");
+        if (rawTextOverride is not null)
+        {
+            // 模式化导出：纯文本行结果按选定排版模式重建 raw/markdown；
+            // 其余字段（html/结构块）保持权威结果不变。
+            result = result with
+            {
+                RawText = rawTextOverride, MarkdownText = markdownTextOverride ?? rawTextOverride,
+                HtmlText = "<pre>" + System.Net.WebUtility.HtmlEncode(rawTextOverride) + "</pre>",
+            };
+        }
         string? path = await platform.PickExportPathAsync(format, cancellationToken);
         if (path is null) return null;
         bool existed = File.Exists(path);
+        // 选择器 await 期间权威结果被替换时，写盘前拒绝导出旧内容。
+        if (stillCurrent is not null && !stillCurrent())
+            throw new InvalidOperationException("The recognition result changed while exporting.");
+        // Windows FileSavePicker 在目标已存在时自带“替换/取消”确认对话
+        // 框；用户在此确认后 existed 标志即运行时覆盖意图，宿主不再叠加
+        // 第二层确认（也不会静默跳过确认）。
         if (existed && !await platform.ConfirmOverwriteAsync(path, cancellationToken)) return null;
+        cancellationToken.ThrowIfCancellationRequested();
+        if (stillCurrent is not null && !stillCurrent())
+            throw new InvalidOperationException("The recognition result changed while exporting.");
         string fmt = format switch
         {
             ResultExportFormat.Docx => "docx",
@@ -58,7 +78,6 @@ public sealed class ResultActions(IInferenceClient inference, IResultActionPlatf
 
 public sealed class WindowsResultActionPlatform(Func<nint> windowHandle) : IResultActionPlatform
 {
-    // Unchanged from original — clipboard and file picker platform impls.
     public async Task WriteClipboardAsync(RecognitionResultContent result, ResultCopyFormat format, CancellationToken cancellationToken)
     {
         DataPackage package = new();
@@ -99,6 +118,6 @@ public sealed class WindowsResultActionPlatform(Func<nint> windowHandle) : IResu
     public Task<bool> ConfirmOverwriteAsync(string path, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(true); // Auto-confirm for now; can add dialog later.
+        return Task.FromResult(true);
     }
 }

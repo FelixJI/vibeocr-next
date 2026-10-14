@@ -25,6 +25,13 @@ import { CapabilityGate } from "../components/CapabilityGate";
 import { ImageCanvasEditor } from "../components/ImageCanvasEditor";
 
 import { StructuredResult } from "../components/StructuredResult";
+import { ResultImageTextOverlay } from "../components/ResultImageTextOverlay";
+import type { IndexedResultLine } from "../components/ResultImageTextOverlay";
+import {
+  linesInfoFromSource,
+  RESULT_TEXT_MODES,
+  type ResultTextMode,
+} from "../components/resultTextModes";
 
 import { EmptyStage, Workspace } from "../components/Workspace";
 
@@ -52,20 +59,35 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
   // The host owns each capture's intent; this user preference survives keyed
   // editor remounts and only applies to sessions explicitly captured for text.
   const [autoTextPreference, setAutoTextPreference] = useState(true);
+  // 排版模式为结果单一状态：唯一的一组复制/导出按钮按它提交，避免
+  // 结果区再叠一套全局输出按钮。
+  const [resultTextMode, setResultTextMode] = useState<ResultTextMode>("raw");
   const state = feature(viewState, "recognition");
   const input = resource(state.input);
   const result = resource(state.result);
   const resultText = useResourceText(result);
   const structured = resource(state.structuredResult);
   const structuredText = useResourceText(structured);
+  // 识别时真实冻结的参考图（随结果原子替换/失效）：校对视图唯一图源；
+  // 缺失时不渲染 bbox，不用会话基准图冒充。
+  const resultImage = resource(state.resultImage);
+  const linesInfo = structured
+    ? linesInfoFromSource(structuredText ?? "")
+    : null;
+  // 宿主未发布某模式（undefined；解析已排除空串）时禁用该项。
+  const effectiveMode =
+    linesInfo?.hasLines && linesInfo.modes[resultTextMode] === undefined
+      ? "raw"
+      : resultTextMode;
   const session = screenshotSession(state.screenshotSession);
   const textLayer = screenshotTextLayer(state.textLayer);
   const sessionCapable = viewState.capabilities.includes(
     "recognition.screenshotSession",
   );
   // Windows 常用命令：打开与工具栏按钮同一入口；Ctrl+C 仅在无文本选择、
-  // 目标非输入控件且存在可复制结果（镜像“复制文本”工具栏渲染条件）时
-  // 降级为复制识别结果，避免无果可复制时命令走宿主异常恢复路径。
+  // 目标非输入控件且存在可复制结果时降级为复制识别结果（镜像页级唯一
+  // 复制按钮：lines 结果按当前排版模式，其余 plain），不覆盖用户已有
+  // 文本选区复制。
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (
@@ -92,12 +114,27 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
         viewState.capabilities.includes("recognition.results")
       ) {
         event.preventDefault();
-        void actions.run({ type: "recognition.copy", format: "plain" });
+        void actions.run(
+          linesInfo?.hasLines && structured
+            ? {
+                type: "recognition.copyLines",
+                resourceUri: structured.url,
+                mode: effectiveMode,
+              }
+            : { type: "recognition.copy", format: "plain" },
+        );
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [actions, viewState.capabilities, result, structured]);
+  }, [
+    actions,
+    viewState.capabilities,
+    result,
+    structured,
+    linesInfo,
+    effectiveMode,
+  ]);
   return (
     <Workspace
       eyebrow="WORKBENCH / 01"
@@ -215,54 +252,155 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
         <Panel label="OUTPUT / 02" title="识别结果">
           {result || structured ? (
             <>
-              <Toolbar aria-label="识别结果操作" size="small">
-                <CapabilityGate
-                  capability="recognition.results"
-                  capabilities={viewState.capabilities}
-                  action={{ type: "recognition.copy", format: "plain" }}
-                  actions={actions}
-                  icon={<Copy aria-hidden="true" size={16} />}
-                >
-                  复制文本
-                </CapabilityGate>
-                <CapabilityGate
-                  capability="recognition.results"
-                  capabilities={viewState.capabilities}
-                  action={{ type: "recognition.export", format: "markdown" }}
-                  actions={actions}
-                  icon={<Download aria-hidden="true" size={16} />}
-                >
-                  导出 Markdown
-                </CapabilityGate>
-                <CapabilityGate
-                  capability="recognition.results"
-                  capabilities={viewState.capabilities}
-                  action={{ type: "recognition.export", format: "docx" }}
-                  actions={actions}
-                  icon={<Sheet aria-hidden="true" size={16} />}
-                >
-                  导出 Word
-                </CapabilityGate>
-                <CapabilityGate
-                  capability="recognition.results"
-                  capabilities={viewState.capabilities}
-                  action={{ type: "recognition.export", format: "xlsx" }}
-                  actions={actions}
-                  icon={<FileSpreadsheet aria-hidden="true" size={16} />}
-                >
-                  导出 Excel
-                </CapabilityGate>
+              <Toolbar
+                aria-label="识别结果操作"
+                size="small"
+                className="recognition-result-toolbar"
+              >
+                <div className="result-action-row">
+                  {linesInfo?.hasLines && structured ? (
+                    <label className="result-mode-select">
+                      排版模式{" "}
+                      <select
+                        aria-label="排版模式"
+                        value={effectiveMode}
+                        onChange={(event) =>
+                          setResultTextMode(
+                            event.target.value as ResultTextMode,
+                          )
+                        }
+                      >
+                        {RESULT_TEXT_MODES.map((entry) => (
+                          <option
+                            key={entry.value}
+                            value={entry.value}
+                            disabled={
+                              linesInfo.modes[entry.value] === undefined
+                            }
+                          >
+                            {entry.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+                  <CapabilityGate
+                    capability="recognition.results"
+                    capabilities={viewState.capabilities}
+                    action={
+                      linesInfo?.hasLines && structured
+                        ? {
+                            type: "recognition.copyLines",
+                            resourceUri: structured.url,
+                            mode: effectiveMode,
+                          }
+                        : { type: "recognition.copy", format: "plain" }
+                    }
+                    actions={actions}
+                    icon={<Copy aria-hidden="true" size={16} />}
+                  >
+                    复制文本
+                  </CapabilityGate>
+                </div>
+                <div className="result-action-row">
+                  {(["markdown", "docx", "xlsx"] as const).map((format) => (
+                    <CapabilityGate
+                      key={format}
+                      capability="recognition.results"
+                      capabilities={viewState.capabilities}
+                      action={{
+                        type: "recognition.export",
+                        format,
+                        ...(linesInfo?.hasLines && effectiveMode !== "raw"
+                          ? { textMode: effectiveMode }
+                          : {}),
+                      }}
+                      actions={actions}
+                      icon={
+                        format === "xlsx" ? (
+                          <FileSpreadsheet aria-hidden="true" size={16} />
+                        ) : format === "docx" ? (
+                          <Sheet aria-hidden="true" size={16} />
+                        ) : (
+                          <Download aria-hidden="true" size={16} />
+                        )
+                      }
+                    >
+                      导出{" "}
+                      {format === "markdown"
+                        ? "Markdown"
+                        : format === "docx"
+                          ? "Word"
+                          : "Excel"}
+                    </CapabilityGate>
+                  ))}
+                </div>
               </Toolbar>
+              {resultImage &&
+                linesInfo?.hasLines &&
+                linesInfo.lines.some((line) => line.bbox) && (
+                  <details className="result-image-overlay-details" open>
+                    <summary>图像校对（双击或 Enter 编辑行框）</summary>
+                    {/* 绑定键：识别参考图+结构化资源任一变化即重挂。 */}
+                    <ResultImageTextOverlay
+                      key={`${resultImage.url}:${structured?.url ?? ""}`}
+                      imageUrl={resultImage.url}
+                      lines={linesInfo.lines.flatMap((line, index) =>
+                        line.bbox
+                          ? [{ line, index } satisfies IndexedResultLine]
+                          : [],
+                      )}
+                      onUpdateLine={(lineIndex, expectedOldText, newText) =>
+                        structured
+                          ? actions.run({
+                              type: "recognition.updateLine",
+                              resourceUri: structured.url,
+                              lineIndex,
+                              expectedOldText,
+                              newText,
+                            })
+                          : Promise.resolve(false)
+                      }
+                    />
+                  </details>
+                )}
               {structured && (
                 <StructuredResult
                   key={structured.url}
                   source={structuredText}
+                  mode={effectiveMode}
                   onCopy={(blockIndex, format) =>
                     actions.run({
                       type: "recognition.copyStructured",
                       resourceUri: structured.url,
                       blockIndex,
                       format,
+                    })
+                  }
+                  onCopyCells={(
+                    blockIndex,
+                    rowStart,
+                    rowEnd,
+                    columnStart,
+                    columnEnd,
+                  ) =>
+                    actions.run({
+                      type: "recognition.copyStructuredCells",
+                      resourceUri: structured.url,
+                      blockIndex,
+                      rowStart,
+                      rowEnd,
+                      columnStart,
+                      columnEnd,
+                    })
+                  }
+                  onUpdateLine={(lineIndex, expectedOldText, newText) =>
+                    actions.run({
+                      type: "recognition.updateLine",
+                      resourceUri: structured.url,
+                      lineIndex,
+                      expectedOldText,
+                      newText,
                     })
                   }
                 />

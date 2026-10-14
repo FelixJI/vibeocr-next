@@ -6,7 +6,6 @@
 import base64
 import io
 import logging
-import re
 from pathlib import Path
 
 from vibeocr.runtime.documents.tables.blocks import table_model_from_block
@@ -360,10 +359,8 @@ class ExportService:
                 )
 
         if not content_list and not written_table_htmls:
-            # 既无结构化块也无表格：写纯文本（清洗裸 HTML 标签）。
-            text = ExportService._strip_html_tags(
-                result.raw_text or result.markdown_text
-            )
+            # 无结构化内容时，原始文字与空白必须原样保留。
+            text = result.raw_text or result.markdown_text
             for line in text.split("\n"):
                 doc.add_paragraph(line)
 
@@ -517,12 +514,9 @@ class ExportService:
                 )
 
         if not content_list and table_count == 0:
-            # 既无结构化块也无表格：写纯文本（清洗裸 HTML 标签，避免把
-            # <table><tr> 当文字写进单元格）。
+            # 表格已在上方解析；纯文本中的尖括号不是 HTML 标记。
             ws_text.title = "文本"
-            text = ExportService._strip_html_tags(
-                result.raw_text or result.markdown_text
-            )
+            text = result.raw_text or result.markdown_text
             for line in text.split("\n"):
                 _xlsx_append_row(ws_text, [line])
 
@@ -578,9 +572,3 @@ class ExportService:
             block,
             fallback_table_id=fallback_table_id,
         )
-
-    @staticmethod
-    def _strip_html_tags(text: str) -> str:
-        """剥离 HTML 标签并规整空白（用于纯文本回退，避免裸标签进单元格）。"""
-        stripped = re.sub(r"<[^>]+>", " ", text or "")
-        return re.sub(r"[ \t]+", " ", stripped).strip()

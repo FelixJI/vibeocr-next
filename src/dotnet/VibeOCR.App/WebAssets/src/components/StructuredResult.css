@@ -1,0 +1,64 @@
+/*
+ * StructuredResult 局部样式：结果行列表/低置信标记、行内编辑与
+ * 表格单元格范围选择。
+ */
+
+.result-lines-summary {
+  margin: 4px 0;
+  opacity: 0.85;
+}
+
+.result-lines-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.result-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  position: relative;
+}
+
+.result-line .result-line-hint {
+  visibility: hidden;
+  font-size: 12px;
+  opacity: 0.7;
+  white-space: nowrap;
+}
+
+.result-line:hover .result-line-hint {
+  visibility: visible;
+}
+
+/* 低置信度行：左侧警示条 + 淡红背景；score 缺失（unknown）不标记。 */
+.result-line.line-low-confidence {
+  border-left: 3px solid #d13438;
+  background: rgba(209, 52, 56, 0.12);
+}
+
+/* 手动编辑过的行：左侧橙色条（与 Classic 手动修改标记语义一致）。 */
+.result-line.line-edited {
+  border-left: 3px solid #ff8c00;
+}
+
+.result-line textarea {
+  flex: 1;
+  font: inherit;
+  min-width: 12em;
+}
+
+.result-line-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+/* 表格单元格范围选择：锚点矩形内的单元格高亮。 */
+.structured-table-scroll .cell-selected {
+  outline: 2px solid #0078d4;
+  outline-offset: -2px;
+  background: rgba(0, 120, 212, 0.12);
+}

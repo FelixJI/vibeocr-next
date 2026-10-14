@@ -1106,3 +1106,32 @@ class TestExportCoverageGaps:
             assert "表格 1" in wb.sheetnames
         finally:
             openpyxl.Workbook = monkeypatch_target
+
+
+@pytest.mark.parametrize("fmt", ["docx", "xlsx"])
+@pytest.mark.parametrize("text_field", ["raw_text", "markdown_text"])
+def test_office_plain_text_preserves_markup_literals_and_spacing(
+    tmp_path, fmt, text_field
+):
+    from vibeocr.runtime.documents.export import parse_export_request, write_export
+
+    text = "  甲<丁>  &amp;\t乙\n\n 末行 "
+    path = tmp_path / f"literal.{fmt}"
+    request = parse_export_request(
+        {text_field: text, "raw_blocks": [], "output_path": str(path), "format": fmt}
+    )
+    assert write_export(request) is not None
+    if fmt == "docx":
+        from docx import Document
+
+        assert [
+            paragraph.text for paragraph in Document(path).paragraphs
+        ] == text.split("\n")
+    else:
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(path)
+        try:
+            assert [row[0] or "" for row in workbook.active.values] == text.split("\n")
+        finally:
+            workbook.close()

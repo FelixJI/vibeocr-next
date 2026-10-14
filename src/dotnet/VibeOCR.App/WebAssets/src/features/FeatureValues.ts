@@ -67,6 +67,7 @@ export function statusLabel(value: unknown, fallback: string): string {
     "recognition.modeUnavailable":
       "所选识别模式在当前环境不可用；请检查模型、设备与运行环境",
     "recognition.exported": "结果已导出",
+    "recognition.exportCancelled": "已取消导出，识别结果仍保留",
     "recognition.exportedIncomplete":
       "文件已保存，但部分图片缺失或该格式无法容纳图片；请检查原始结果",
     "pdf.open": "PDF 会话已建立",

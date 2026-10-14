@@ -94,7 +94,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     Func<PdfDocumentEntry, Task<PdfCloseDecision>>? confirmPdfClose = null,
     Func<Task<string?>>? pickPdfSavePath = null, Func<Task<string?>>? pickPdfFolder = null,
     Func<string, Task<bool>>? flushPdfPreview = null,
-    Func<CancellationToken, Task>? ensureRuntimeReady = null)
+    Func<CancellationToken, Task>? ensureRuntimeReady = null,
+    IResultActionPlatform? resultActionPlatform = null)
   {
 
     recognitionFactory = recognitionFactory ??
@@ -119,6 +120,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       new AnnotatedImagePlatform(windowHandle);
     structuredClipboard = structuredClipboard ??
       new WindowsStructuredClipboardPlatform();
+    resultActionPlatform ??= new WindowsResultActionPlatform(windowHandle);
     supervisorInstanceId = supervisorInstanceId ?? (() => null);
     textLayerRecognitionFactory = textLayerRecognitionFactory ?? recognitionFactory;
     confirmPdfClose = confirmPdfClose ?? (_ => Task.FromResult(PdfCloseDecision.Cancel));
@@ -126,7 +128,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     Resources = new WorkbenchResourcesOwner(resourceBroker, resourceRoot);
     Settings = new WorkbenchSettingsOwner(ensureRuntimeReady, inferenceAttached, settingsFactory, shell, shellActions, supervisorInstanceId, operations, RefreshFeatureCatalogStatesAsync, InvalidateImageRecognition);
     Selection = new WorkbenchSelectionOwner(ensureRuntimeReady, inferenceAttached, optionsLayout, Settings, GetRecognitionTaskEngine);
-    Image = new WorkbenchImageOwner(annotatedImagePlatform, annotationStore, ensureRuntimeReady, inferenceAttached, optionsLayout, pinScreenshot, recognitionFactory, resourceBroker, shellActions, structuredClipboard, supervisorInstanceId, textLayerRecognitionFactory, windowHandle, Settings, Resources, Selection, operations, SynchronizeBatchMode);
+    Image = new WorkbenchImageOwner(annotatedImagePlatform, annotationStore, ensureRuntimeReady, inferenceAttached, optionsLayout, pinScreenshot, recognitionFactory, resourceBroker, shellActions, structuredClipboard, supervisorInstanceId, textLayerRecognitionFactory, resultActionPlatform, Settings, Resources, Selection, operations, SynchronizeBatchMode);
     Batch = new WorkbenchBatchOwner(batchFactory, windowHandle, Settings, Resources, Selection, operations);
     Pdf = new WorkbenchPdfOwner(confirmPdfClose, flushPdfPreview, optionsLayout, pdfFactory, pickPdfFolder, pickPdfSavePath, windowHandle, Settings, Resources, Selection, operations);
     QrCode = new WorkbenchQrCodeOwner(annotatedImagePlatform, qrCodeFactory, windowHandle, Resources, operations);
