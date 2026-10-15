@@ -3849,6 +3849,7 @@ export function ImageCanvasEditor({
           {textLayerControls}
           {inpaintOperations}
           {rotateControl}
+          {resetAttributesControl}
           {captureStyle ? null : clearExclusionsButton}
           {undoButton}
           {redoButton}
@@ -3875,7 +3876,6 @@ export function ImageCanvasEditor({
             {effectIntensityControl}
             {autoTextControl}
             {inpaintCompareControl}
-            {resetAttributesControl}
           </Toolbar>
         ) : null}
       </div>
@@ -4546,11 +4546,10 @@ function draw(
       context.lineWidth = lineWidth;
       context.strokeStyle = color;
       const fill = annotationFill(mark);
-      const radius =
-        Math.min(
-          mark.style?.cornerRadius ?? 0,
-          Math.min(Math.abs(width), Math.abs(height)) / 2,
-        ) * markScale;
+      const radius = Math.min(
+        (mark.style?.cornerRadius ?? 0) * markScale,
+        Math.min(Math.abs(width), Math.abs(height)) / 2,
+      );
       if (radius > 0 && typeof context.roundRect === "function") {
         // 圆角路径：填充先铺底、边框后描，两者颜色/不透明度独立。
         const area = normalizedRect(mark);
@@ -4662,8 +4661,11 @@ function draw(
         );
         context.stroke();
       };
-      // 实心/空心三角头：尺寸随线宽缩放，底边垂直于轴线。
-      const headSize = (10 + (mark.style?.strokeWidth ?? 3) * 2) * markScale;
+      // 短箭头的端头共同受总长度约束，防止轴杆反向穿过空心头。
+      const headSize = Math.min(
+        (10 + (mark.style?.strokeWidth ?? 3) * 2) * markScale,
+        Math.hypot(width, height) / (doubleHead ? 2 : 1),
+      );
       const drawTriangleHead = (
         tip: Point,
         dir: number,

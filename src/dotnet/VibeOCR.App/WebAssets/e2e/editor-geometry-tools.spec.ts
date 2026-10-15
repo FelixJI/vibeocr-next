@@ -115,6 +115,7 @@ async function configureTool(
 
 async function setupGeometryHost(
   page: Page,
+  sourceSize = { width: 900, height: 600 },
 ): Promise<{ uploads: { contentType: string; body: Buffer }[] }> {
   await page.setViewportSize({ width: 1280, height: 900 });
   const uploads: { contentType: string; body: Buffer }[] = [];
@@ -136,8 +137,8 @@ async function setupGeometryHost(
     route.fulfill({
       status: 200,
       contentType: "image/svg+xml",
-      // 与 900×600 显示画布同比：displayScale=1，导出自然像素 1:1。
-      body: '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600"><rect width="900" height="600" fill="#12a150"/></svg>',
+      // 源图与逻辑画布同比，尺寸可缩小以覆盖非 1:1 导出。
+      body: `<svg xmlns="http://www.w3.org/2000/svg" width="${sourceSize.width}" height="${sourceSize.height}"><rect width="100%" height="100%" fill="#12a150"/></svg>`,
     }),
   );
   await mountHost(page, {
@@ -158,15 +159,18 @@ async function setupGeometryHost(
   });
   const canvas = page.getByLabel("图片检查画布");
   await expect(canvas).toBeVisible();
-  await expect(page.getByText(/原图 900×600/)).toBeVisible();
+  await expect(
+    page.getByText(new RegExp(`原图 ${sourceSize.width}×${sourceSize.height}`)),
+  ).toBeVisible();
   return { uploads };
 }
 
-/** 解码上传 PNG 并按显示坐标（=自然像素）采样指定点列表。 */
+/** 解码上传 PNG 并按自然像素坐标采样指定点列表。 */
 async function decodeUploadPixels(
   page: Page,
   body: Buffer,
   points: readonly { x: number; y: number }[],
+  expectedSize = { width: 900, height: 600 },
 ): Promise<number[][]> {
   return page
     .evaluate(
@@ -201,8 +205,8 @@ async function decodeUploadPixels(
       { base64: body.toString("base64"), samples: points },
     )
     .then((result) => {
-      expect(result.width).toBe(900);
-      expect(result.height).toBe(600);
+      expect(result.width).toBe(expectedSize.width);
+      expect(result.height).toBe(expectedSize.height);
       return result.pixels;
     });
 }
@@ -464,4 +468,84 @@ test("折线双击提交；0% 不透明对象经对象选择入口恢复，撤�
   for (const pixel of undone) {
     expect(withinTolerance(pixel, GREEN, 12)).toBe(true);
   }
+});
+
+test("非1:1尺寸下圆角先缩放再夹取，预览与小图导出保留相同圆角", async ({
+  page,
+}) => {
+  const { uploads } = await setupGeometryHost(page, {
+    width: 300,
+    height: 200,
+  });
+  const canvas = page.getByLabel("图片检查画布");
+  await page.getByRole("button", { name: "矩形", exact: true }).click();
+  await configureTool(page, { fill: true, fillColor: "#e02020" });
+  await page.getByLabel("填充不透明度").fill("100");
+  await page.getByLabel("填充不透明度").blur();
+  await page.getByLabel("矩形圆角").selectOption("18");
+  await page.getByLabel("边框不透明度").fill("0");
+  await page.getByLabel("边框不透明度").blur();
+  await dragOnCanvas(page, { x: 150, y: 120 }, { x: 210, y: 180 });
+  await expectCanvasPixel(canvas, 153, 123, GREEN, 20);
+  await expectCanvasPixel(canvas, 180, 150, FILL_RED, 20);
+  await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+  await expect.poll(() => uploads.length).toBe(1);
+  // 逻辑 60×60/r18 导出为自然 20×20/r6；左上 6×6 至少三点完全留绿。
+  // 错误的先夹取再缩放会变成 r3.33，只有角点留绿，其余被红色填充。
+  const corner = Array.from({ length: 36 }, (_, index) => ({
+    x: 50 + (index % 6),
+    y: 40 + Math.floor(index / 6),
+  }));
+  const pixels = await decodeUploadPixels(
+    page,
+    uploads[0]!.body,
+    [...corner, { x: 60, y: 50 }],
+    { width: 300, height: 200 },
+  );
+  expect(
+    pixels.slice(0, 36).filter((pixel) => withinTolerance(pixel, GREEN, 20))
+      .length,
+  ).toBeGreaterThanOrEqual(3);
+  expect(withinTolerance(pixels[36]!, FILL_RED, 20)).toBe(true);
+});
+
+test.describe("缩放后的标注控制点", () => {
+  test.use({ deviceScaleFactor: 2 });
+  test("150% 显示缩放后拖动矩形角手柄，预览和导出更新几何且一次撤销恢复", async ({
+    page,
+  }) => {
+    const { uploads } = await setupGeometryHost(page);
+    const canvas = page.getByLabel("图片检查画布");
+    await page.getByRole("button", { name: "矩形", exact: true }).click();
+    await configureTool(page, { color: "#1f6feb", width: "8" });
+    await dragOnCanvas(page, { x: 150, y: 150 }, { x: 450, y: 350 });
+    await page.getByRole("button", { name: "选择", exact: true }).click();
+    await page.getByLabel("选择标注对象").selectOption("0");
+    await page.getByLabel("显示缩放", { exact: true }).selectOption("1.5");
+    await expect
+      .poll(() =>
+        canvas.evaluate((element: HTMLCanvasElement) =>
+          Math.abs(
+            element.width -
+              element.getBoundingClientRect().width * devicePixelRatio,
+          ),
+        ),
+      )
+      .toBeLessThanOrEqual(1);
+    await dragOnCanvas(page, { x: 450, y: 350 }, { x: 550, y: 420 });
+    await page.getByLabel("选择标注对象").selectOption("");
+    await expectCanvasPixel(canvas, 550, 400, STROKE_BLUE, 40);
+    await expectCanvasPixel(canvas, 450, 350, GREEN, 20);
+    await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+    await expect.poll(() => uploads.length).toBe(1);
+    const pixels = await decodeUploadPixels(page, uploads[0]!.body, [
+      { x: 550, y: 400 },
+      { x: 450, y: 350 },
+    ]);
+    expect(withinTolerance(pixels[0]!, STROKE_BLUE, 30)).toBe(true);
+    expect(withinTolerance(pixels[1]!, GREEN, 20)).toBe(true);
+    await page.getByRole("button", { name: "撤销", exact: true }).click();
+    await expectCanvasPixel(canvas, 450, 250, STROKE_BLUE, 40);
+    await expectCanvasPixel(canvas, 550, 400, GREEN, 20);
+  });
 });

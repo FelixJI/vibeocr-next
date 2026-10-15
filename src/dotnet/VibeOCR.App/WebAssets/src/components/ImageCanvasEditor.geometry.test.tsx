@@ -457,6 +457,54 @@ describe("AC2 直线/折线、线型、圆角与箭头端头", () => {
     unmount();
   });
 
+  it.each([
+    { style: "hollow", double: false, length: 12 },
+    { style: "hollow", double: true, length: 30 },
+    { style: "solid", double: false, length: 12 },
+    { style: "solid", double: true, length: 30 },
+  ])(
+    "短箭头 $style / 双头 $double 的轴杆不反向且不越过端点",
+    async ({ style, double, length }) => {
+      stubCanvasStack();
+      const harness = stubAnimationFrames();
+      const { unmount } = await renderEditor();
+      const canvas = getEditorCanvas();
+      mockCanvasBox(canvas, 900, 600);
+      harness.flush();
+      fireEvent.click(screen.getByRole("button", { name: "箭头" }));
+      fireEvent.change(screen.getByLabelText("线条宽度"), {
+        target: { value: "8" },
+      });
+      fireEvent.change(screen.getByLabelText("箭头样式"), {
+        target: { value: style },
+      });
+      if (double) fireEvent.click(screen.getByLabelText("双向箭头"));
+      clearCalls();
+      await dragDraw(
+        canvas,
+        harness,
+        { x: 100, y: 100 },
+        { x: 100 + length, y: 100 },
+      );
+      const calls = allCalls();
+      // 轴杆只有一段 lineTo；三角端头有两段，不混入端头边线。
+      const shafts = calls.flatMap((call, index) =>
+        call.op === "moveTo" &&
+        calls[index + 1]?.op === "lineTo" &&
+        calls[index + 2]?.op !== "lineTo"
+          ? [[call.args[0] as number, calls[index + 1]!.args[0] as number]]
+          : [],
+      );
+      expect(shafts.length).toBeGreaterThan(0);
+      for (const [start, end] of shafts) {
+        expect(start).toBeGreaterThanOrEqual(100);
+        expect(end).toBeLessThanOrEqual(100 + length);
+        expect(end).toBeGreaterThanOrEqual(start!);
+      }
+      unmount();
+    },
+  );
+
   it("箭头可选实心/空心与单向/双向端头", async () => {
     stubCanvasStack();
     const harness = stubAnimationFrames();
@@ -567,7 +615,9 @@ describe("AC3 工具属性记忆、滚轮线宽与快捷键边界", () => {
     fireEvent.click(screen.getByRole("button", { name: "矩形" }));
     expect(screen.getByLabelText("线条宽度")).toHaveValue("8");
     expect(screen.getByLabelText("线型")).toHaveValue("dashed");
-    fireEvent.click(screen.getByRole("button", { name: "重置属性" }));
+    const main = within(screen.getByRole("toolbar", { name: "图片编辑工具" }));
+    expect(settings.queryByRole("button", { name: "重置属性" })).toBeNull();
+    fireEvent.click(main.getByRole("button", { name: "重置属性" }));
     expect(screen.getByLabelText("线条宽度")).toHaveValue("3");
     expect(screen.getByLabelText("线型")).toHaveValue("solid");
     expect(
