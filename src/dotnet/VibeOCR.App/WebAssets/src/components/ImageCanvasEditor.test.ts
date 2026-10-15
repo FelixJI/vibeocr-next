@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   annotationFill,
   annotationStrokeAlpha,
+  constrainBoxDrag,
+  constrainLineDrag,
   finalOutputSize,
   imageTransform,
   outputSize,
@@ -261,6 +263,74 @@ describe("arbitrary rotation bounds", () => {
   it("fits the display transform to the rotated bounding box", () => {
     const transform = imageTransform(image, 45, { width: 884, height: 884 });
     expect(transform.scale).toBeCloseTo(0.5, 5);
+  });
+});
+
+describe("drag constraints (Shift/Alt)", () => {
+  it("keeps anchor-corner semantics without modifiers", () => {
+    expect(
+      constrainBoxDrag(
+        { x: 100, y: 100 },
+        { x: 400, y: 300 },
+        { shift: false, fromCenter: false },
+      ),
+    ).toEqual({ start: { x: 100, y: 100 }, end: { x: 400, y: 300 } });
+  });
+
+  it("shift grows to the larger edge for square/circle", () => {
+    // dx=300、dy=200 → 300×300；负方向保持各自符号。
+    expect(
+      constrainBoxDrag(
+        { x: 100, y: 100 },
+        { x: 400, y: 300 },
+        { shift: true, fromCenter: false },
+      ),
+    ).toEqual({ start: { x: 100, y: 100 }, end: { x: 400, y: 400 } });
+    expect(
+      constrainBoxDrag(
+        { x: 400, y: 300 },
+        { x: 100, y: 100 },
+        { shift: true, fromCenter: false },
+      ),
+    ).toEqual({ start: { x: 400, y: 300 }, end: { x: 100, y: 0 } });
+  });
+
+  it("alt expands symmetrically around the anchor", () => {
+    expect(
+      constrainBoxDrag(
+        { x: 200, y: 200 },
+        { x: 300, y: 260 },
+        { shift: false, fromCenter: true },
+      ),
+    ).toEqual({ start: { x: 100, y: 140 }, end: { x: 300, y: 260 } });
+    // Shift+Alt：正方且中心对称。
+    expect(
+      constrainBoxDrag(
+        { x: 200, y: 200 },
+        { x: 300, y: 260 },
+        { shift: true, fromCenter: true },
+      ),
+    ).toEqual({ start: { x: 100, y: 100 }, end: { x: 300, y: 300 } });
+  });
+
+  it("snaps line endpoints to 45° multiples while keeping length", () => {
+    const snapped = constrainLineDrag(
+      { x: 100, y: 100 },
+      { x: 400, y: 300 },
+      true,
+    );
+    const length = Math.hypot(300, 200);
+    expect(snapped.x).toBeCloseTo(100 + length / Math.SQRT2, 6);
+    expect(snapped.y).toBeCloseTo(100 + length / Math.SQRT2, 6);
+    // 33.69° 吸附到 45°；近乎水平的角吸附到 0°。
+    const flat = constrainLineDrag({ x: 0, y: 0 }, { x: 100, y: 5 }, true);
+    expect(flat.y).toBeCloseTo(0, 9);
+    expect(flat.x).toBeCloseTo(Math.hypot(100, 5), 6);
+    // 不约束时原样返回。
+    expect(constrainLineDrag({ x: 0, y: 0 }, { x: 7, y: 9 }, false)).toEqual({
+      x: 7,
+      y: 9,
+    });
   });
 });
 

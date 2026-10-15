@@ -318,7 +318,7 @@ describe("颜色工具：常用色、自定义与屏幕取色", () => {
     unmount();
   });
 
-  it("自定义颜色输入接受任意 #rrggbb", async () => {
+  it("自定义颜色输入接受任意 #rrggbb；颜色按工具独立记忆", async () => {
     stubCanvasStack();
     const harness = stubAnimationFrames();
     const { unmount } = await renderEditor();
@@ -326,12 +326,12 @@ describe("颜色工具：常用色、自定义与屏幕取色", () => {
     mockCanvasBox(canvas, 900, 600);
     harness.flush();
 
-    // 先切颜色工具，自定义颜色输入才在属性排出现。
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    // 先切颜色工具，自定义颜色输入才在属性排出现；AC3 起各工具记忆
+    // 各自属性：在椭圆工具下设置的颜色供椭圆绘制使用。
+    fireEvent.click(screen.getByRole("button", { name: "椭圆" }));
     fireEvent.change(screen.getByLabelText("自定义颜色"), {
       target: { value: "#00c8ff" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "椭圆" }));
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
     fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 400, clientY: 300 });
     harness.flush();
@@ -342,6 +342,10 @@ describe("颜色工具：常用色、自定义与屏幕取色", () => {
       .filter((call) => call.op === "strokeStyle")
       .map((call) => call.args[0]);
     expect(styles).toContain("#00c8ff");
+    // 切回椭圆工具：颜色记忆保留（输入框仍显示上次取值）。
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    fireEvent.click(screen.getByRole("button", { name: "椭圆" }));
+    expect(screen.getByLabelText("自定义颜色")).toHaveValue("#00c8ff");
     unmount();
   });
 
@@ -1023,8 +1027,9 @@ describe("形状边框/填充不透明度（canvas 调用契约）", () => {
     stepUndo({ color: "#ffffff", alpha: 0.5 });
     stepUndo();
     expect(allCalls().some((call) => call.op === "strokeRect")).toBe(true);
-    // 撤销清除选择：属性排收起（选择工具无其他属性）。
-    expect(screen.queryByRole("toolbar", { name: "当前工具设置" })).toBeNull();
+    // 撤销清除选择：对象入口保留，未选中时不显示样式属性。
+    expect(screen.getByLabelText("选择标注对象")).toHaveValue("");
+    expect(screen.queryByLabelText("边框不透明度")).toBeNull();
     // 再撤销：边框回到完全不透明。
     fireEvent.click(screen.getByRole("button", { name: "撤销" }));
     clearCalls();
