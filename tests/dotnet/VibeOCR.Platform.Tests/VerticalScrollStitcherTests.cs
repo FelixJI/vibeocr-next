@@ -145,6 +145,33 @@ public sealed class VerticalScrollStitcherTests
   }
 
   [Fact]
+  public void NegativeOnlyMultipleMatchesAreReverseWithoutPossiblePositiveCorrection()
+  {
+    CapturedFrame first = PeriodicFrame(Width, FrameHeight, 2, 0);
+    for (int y = 80; y < FrameHeight; y++) first.Pixels[y * first.Stride] ^= 0x80;
+    CapturedFrame next = PeriodicFrame(Width, FrameHeight, 2, 0);
+    var stitcher = new VerticalScrollStitcher(first);
+    for (int offset = 1; offset <= stitcher.MaximumOffset; offset++)
+      Assert.Equal(ScrollAppendStatus.NoOverlap, stitcher.AppendWithOffset(next, offset, TestContext.Current.CancellationToken).Status);
+    Assert.Equal(ScrollAppendStatus.Reverse, stitcher.Append(next, TestContext.Current.CancellationToken).Status);
+    Assert.Equal(1, stitcher.FrameCount);
+    Assert.Equal(first.Pixels, stitcher.BuildFrame(TestContext.Current.CancellationToken).Pixels);
+  }
+
+  [Fact]
+  public void AllPositiveMatchesBeyondRemainingPixelBudgetAreLimitReached()
+  {
+    // Exactly one more row fits; all matching positive offsets are 2 mod 3.
+    CapturedFrame first = PeriodicFrame(32000, 249, 3, 0);
+    CapturedFrame next = PeriodicFrame(32000, 249, 3, 2);
+    var stitcher = new VerticalScrollStitcher(first);
+    Assert.Equal(ScrollAppendStatus.LimitReached, stitcher.AppendWithOffset(next, 2, TestContext.Current.CancellationToken).Status);
+    Assert.Equal(ScrollAppendStatus.LimitReached, stitcher.Append(next, TestContext.Current.CancellationToken).Status);
+    Assert.Equal(1, stitcher.FrameCount);
+    Assert.Equal(first.Pixels, stitcher.BuildFrame(TestContext.Current.CancellationToken).Pixels);
+  }
+
+  [Fact]
   public void ExplicitOffsetResolvesAmbiguityButStillVerifiesWholeOverlapAndBounds()
   {
     CapturedFrame first = PeriodicFrame(Width, FrameHeight, 8, 0);

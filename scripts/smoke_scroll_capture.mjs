@@ -968,6 +968,9 @@ async function waitForControllerError(appPid, scenario, expectedParts, timeoutMs
       const start = await controlBar(appPid, 'scroll-capture-start');
       assert.equal(start.enabled, false,
         `${scenario} failure left 开始 enabled.`);
+      const confirm = await controlBar(appPid, 'scroll-capture-confirm');
+      assert(!confirm.found || !confirm.enabled,
+        `${scenario} terminal failure exposed a confirmation/correction action.`);
       return last;
     }
     await delay(300);
@@ -1040,7 +1043,7 @@ async function verifyControllerFailureModes(app, fixture) {
   // verified at any offset, so the append is rejected.
   await runNegative({
     scenario: 'jump',
-    expectedParts: ['没有足够重叠', '尚未完成'],
+    expectedParts: ['没有足够重叠', '无法用正向纠偏恢复', '尚未完成'],
     trigger: async () => {
       await waitForFirstFrameAccepted(appPid);
       await confirmCapturePreview(appPid);

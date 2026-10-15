@@ -64,6 +64,7 @@ internal static class ScrollCaptureSession
     private readonly TaskCompletionSource<CapturedFrame?> _completion =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Stopwatch _elapsed = new();
+    private readonly object _terminalGate = new();
 
     private Window _window = null!;
     private nint _controlHandle;
@@ -442,28 +443,8 @@ internal static class ScrollCaptureSession
           {
             string? sourceViolation = GuardBeforeCapture(GetForegroundWindow());
             if (sourceViolation is not null) { Fail(new InvalidOperationException(sourceViolation)); return; }
-            if (_confirmedOffset > 0 && _pendingFrame is { } pending && _stitcher is { } current)
-            {
-              int offset = _confirmedOffset;
-              _confirmedOffset = 0;
-              ScrollAppendResult correction = current.AppendWithOffset(pending, offset, _lifecycle.Token);
-              if (correction.Status != ScrollAppendStatus.Added)
-              {
-                RunOnUi(() => _errorText.Text = "纠偏未通过完整重叠校验，请核对位移；未修改已收图像。取消可丢弃本次采集。");
-              }
-              else
-              {
-                _pendingFrame = null;
-                _reviewPending = false;
-                _lastProgress = Environment.TickCount64;
-                DiscardStableWitness();
-                _appendedForCurrentStreak = false;
-                ReportAccepted(current, pending);
-                if (_failure is not null) return;
-                RunOnUi(HideReview);
-                SetForegroundWindow(_source);
-              }
-            }
+            if (_confirmedOffset > 0 && _pendingFrame is not null && _stitcher is not null)
+              ApplyConfirmedOffset();
             await Task.Delay(CaptureIntervalMs, _lifecycle.Token);
             continue;
           }
@@ -754,15 +735,12 @@ internal static class ScrollCaptureSession
           }
           break;
         case ScrollAppendStatus.NoOverlap:
+          Fail(new InvalidDataException("没有足够重叠：已检查全部支持的位移，无法用正向纠偏恢复。本次尚未完成，未生成长图；请取消后减少滚动量重试。"));
+          break;
         case ScrollAppendStatus.Ambiguous:
           _automatic = false;
           _scrollOutstanding = false;
-          string reason = result.Status switch
-          {
-            ScrollAppendStatus.NoOverlap => "没有足够重叠",
-            _ => "重复纹理导致偏移歧义",
-          };
-          PauseForReview($"无法可靠拼接（{reason}），自动滚动已停止，本次尚未完成。上图为已收选段，下图为待拼帧；输入所选方向的真实位移并明确确认。完整重叠必须一致，否则拒绝；不能确认时请取消重选。", frame);
+          PauseForReview("无法可靠拼接（重复纹理导致偏移歧义），自动滚动已停止，本次尚未完成。上图为已收选段，下图为待拼帧；输入所选方向的真实位移并明确确认。完整重叠必须一致，否则拒绝；不能确认时请取消重选。", frame);
           break;
         case ScrollAppendStatus.FixedContentChanged:
           Fail(new InvalidDataException("用户指定的固定边缘发生变化，不能安全移除；本次未完成，请重新框选固定范围。"));
@@ -778,6 +756,33 @@ internal static class ScrollCaptureSession
         default:
           Fail(new InvalidDataException($"拼接器返回未知状态 {result.Status}，已停止采集。"));
           break;
+      }
+    }
+
+    private void ApplyConfirmedOffset()
+    {
+      CapturedFrame pending = _pendingFrame!;
+      VerticalScrollStitcher current = _stitcher!;
+      int offset = _confirmedOffset;
+      _confirmedOffset = 0;
+      ScrollAppendResult correction = current.AppendWithOffset(pending, offset, _lifecycle.Token);
+      if (correction.Status != ScrollAppendStatus.Added)
+      {
+        RunOnUi(() => _errorText.Text = correction.Status == ScrollAppendStatus.LimitReached
+          ? "该位移会超过拼接上限，请选择其他可行位移；未修改已收图像。不能确认时请取消。"
+          : "纠偏未通过完整重叠校验，请核对位移；未修改已收图像。取消可丢弃本次采集。");
+      }
+      else
+      {
+        _pendingFrame = null;
+        _reviewPending = false;
+        _lastProgress = Environment.TickCount64;
+        DiscardStableWitness();
+        _appendedForCurrentStreak = false;
+        ReportAccepted(current, pending);
+        if (_failure is not null) return;
+        RunOnUi(HideReview);
+        SetForegroundWindow(_source);
       }
     }
 
@@ -923,12 +928,13 @@ internal static class ScrollCaptureSession
     /// </summary>
     private void Fail(Exception error)
     {
-      if (_completion.Task.IsCompleted)
+      lock (_terminalGate)
       {
-        return;
+        if (_completion.Task.IsCompleted || _failure is not null || _lifecycle.IsCancellationRequested) return;
+        _failure = error;
       }
-
-      _failure = error;
+      // 立即停止正在匹配/解码的工作；错误窗口仍保留到用户取消或关闭，返回最初原因。
+      _lifecycle.Cancel();
       AppLog.Warn($"scroll-capture 停止：{error.Message}");
       RunOnUi(() =>
       {
@@ -941,7 +947,7 @@ internal static class ScrollCaptureSession
         _finishButton.IsEnabled = false;
         _cancelButton.IsEnabled = true;
         _statusText.Text = "本次未完成，未生成长图：请查看原因后取消或关闭窗口。";
-      });
+      }, allowAfterFailure: true);
     }
 
     private async Task EnforceDeadlineAsync()
@@ -1050,10 +1056,14 @@ internal static class ScrollCaptureSession
 
     private void OnConfirm(object sender, RoutedEventArgs args)
     {
-      if (!_reviewPending || !_confirmButton.IsEnabled || _failure is not null || _completion.Task.IsCompleted) return;
+      if (!_reviewPending || !_confirmButton.IsEnabled || _failure is not null ||
+          _lifecycle.IsCancellationRequested || _completion.Task.IsCompleted) return;
       if (_finalFrame is { } final)
       {
-        _completion.TrySetResult(final);
+        lock (_terminalGate)
+        {
+          if (_failure is null && !_lifecycle.IsCancellationRequested) _completion.TrySetResult(final);
+        }
         return;
       }
       if (_pendingFrame is not null)
@@ -1421,6 +1431,146 @@ internal static class ScrollCaptureSession
       }
     }
 
+    internal static async Task VerifyNoOverlapStopsSelfCheckAsync()
+    {
+      static CapturedFrame Frame(int top)
+      {
+        byte[] pixels = new byte[48 * 96 * 4];
+        for (int y = 0; y < 96; y++) pixels[y * 48 * 4] = (byte)(top + y);
+        return new CapturedFrame(pixels, 48, 96, 48 * 4, "BGRA8");
+      }
+      var session = CreateSelfCheckSession();
+      try
+      {
+        CapturedFrame first = Frame(0);
+        session._stableStreak = StableComparisonsRequired;
+        session.HandleStable(first);
+        await session._previewTask;
+        session.OnConfirm(session, new RoutedEventArgs());
+        session._appendedForCurrentStreak = false;
+        session.HandleStable(Frame(128));
+        await session._previewTask;
+        if (session._failure is null || session._pendingFrame is not null ||
+            session._confirmButton.Visibility != Visibility.Collapsed || session._finishButton.IsEnabled)
+          throw new InvalidOperationException("Exhaustive NoOverlap must terminate without an impossible correction or partial output.");
+        if (session._stitcher?.FrameCount != 1 || !session._stitcher.BuildFrame().Pixels.SequenceEqual(first.Pixels))
+          throw new InvalidOperationException("NoOverlap must preserve accepted pixels until cleanup.");
+        session.OnConfirm(session, new RoutedEventArgs());
+        session.OnFinish(session, new RoutedEventArgs());
+        if (session._completion.Task.IsCompleted || session._finishRequested)
+          throw new InvalidOperationException("A terminal NoOverlap cannot be confirmed or finished.");
+        Exception original = session._failure;
+        session.CancelFromUi();
+        try { await session._completion.Task; throw new InvalidOperationException("NoOverlap returned partial output."); }
+        catch (Exception error) when (ReferenceEquals(error, original)) { }
+      }
+      finally
+      {
+        session._lifecycle.Cancel();
+        await session._previewTask;
+        session._window.Close();
+        session._lifecycle.Dispose();
+      }
+    }
+
+    internal static async Task VerifyFirstFailureSelfCheckAsync()
+    {
+      var session = CreateSelfCheckSession();
+      try
+      {
+        var original = new InvalidOperationException("源窗口已关闭，已停止采集。");
+        session.Fail(original);
+        session.Fail(new InvalidOperationException("已到 3 分钟总时限（包含预览与纠偏等待），本次未完成，未生成长图。"));
+        if (!ReferenceEquals(session._failure, original) || session._errorText.Text != original.Message)
+          throw new InvalidOperationException("A late deadline must not overwrite the first capture failure.");
+        await Task.Run(() => Parallel.For(0, 16, index =>
+            session.Fail(new InvalidOperationException($"concurrent late failure {index}"))));
+        session.RunOnUi(() =>
+        {
+          session._errorText.Text = "late queued correction message";
+          session._finishButton.IsEnabled = true;
+        });
+        if (!ReferenceEquals(session._failure, original) || session._errorText.Text != original.Message)
+          throw new InvalidOperationException("Concurrent later failures must retain the first failure and its visible explanation.");
+        session.OnConfirm(session, new RoutedEventArgs());
+        session.OnFinish(session, new RoutedEventArgs());
+        if (session._completion.Task.IsCompleted || session._finishButton.IsEnabled || session._confirmButton.IsEnabled)
+          throw new InvalidOperationException("Terminal failure must keep output actions closed.");
+        session.CancelFromUi();
+        try { await session._completion.Task; throw new InvalidOperationException("Failure returned output."); }
+        catch (Exception error) when (ReferenceEquals(error, original)) { }
+      }
+      finally
+      {
+        session._lifecycle.Cancel();
+        await session._previewTask;
+        session._window.Close();
+        session._lifecycle.Dispose();
+      }
+    }
+
+    internal static async Task VerifyAmbiguousCorrectionsSelfCheckAsync()
+    {
+      static CapturedFrame Periodic(int width, int height, int offset, bool horizontal)
+      {
+        byte[] pixels = new byte[width * height * 4];
+        for (int y = 0; y < height; y++)
+          for (int x = 0; x < width; x++) pixels[(y * width + x) * 4] = (byte)(((horizontal ? x : y) + offset) % 8);
+        return new CapturedFrame(pixels, width, height, width * 4, "BGRA8");
+      }
+      // 所有测试窗口先创建、统一最后关闭，避免两次 await 之间关闭最后窗口而退出 App。
+      var sessions = new[] { CreateSelfCheckSession(), CreateSelfCheckSession(32764, 32) };
+      try
+      {
+        for (int index = 0; index < sessions.Length; index++)
+        {
+          bool horizontal = index == 1;
+          int width = horizontal ? 32764 : 48, height = horizontal ? 32 : 96;
+          int acceptedOffset = horizontal ? 2 : 10, rejectedOffset = horizontal ? 10 : 11;
+          Session session = sessions[index];
+          CapturedFrame first = Periodic(width, height, 0, horizontal);
+          CapturedFrame pending = Periodic(width, height, 2, horizontal);
+          session._direction = horizontal ? ScrollCaptureDirection.Right : ScrollCaptureDirection.Down;
+          session._stableStreak = StableComparisonsRequired;
+          session.HandleStable(first);
+          await session._previewTask;
+          session.OnConfirm(session, new RoutedEventArgs());
+          session._appendedForCurrentStreak = false;
+          session.HandleStable(pending);
+          await session._previewTask;
+          if (!ReferenceEquals(session._pendingFrame, pending) || !session._reviewPending ||
+              session._offsetBox.Visibility != Visibility.Visible || session._finishButton.IsEnabled)
+            throw new InvalidOperationException("Feasible ambiguous matches must expose only the explicit verified correction path.");
+          session._offsetBox.Value = 0;
+          session.OnConfirm(session, new RoutedEventArgs());
+          if (session._confirmedOffset != 0) throw new InvalidOperationException("Invalid offsets must not reach the matcher.");
+          session._offsetBox.Value = rejectedOffset;
+          session.OnConfirm(session, new RoutedEventArgs());
+          session.ApplyConfirmedOffset();
+          if (session._failure is not null || !session._reviewPending || session._stitcher?.FrameCount != 1 ||
+              !ReferenceEquals(session._pendingFrame, pending) || !session._stitcher.BuildFrame().Pixels.SequenceEqual(first.Pixels))
+            throw new InvalidOperationException("A wrong or oversized choice must preserve ambiguous review and accepted pixels.");
+          session._offsetBox.Value = acceptedOffset;
+          session.OnConfirm(session, new RoutedEventArgs());
+          session.ApplyConfirmedOffset();
+          await session._previewTask;
+          if (session._failure is not null || session._reviewPending || session._pendingFrame is not null ||
+              session._stitcher.FrameCount != 2 || !session._finishButton.IsEnabled || session._completion.Task.IsCompleted)
+            throw new InvalidOperationException("Another feasible correction must resume capture without publishing unconfirmed output.");
+        }
+      }
+      finally
+      {
+        foreach (Session session in sessions)
+        {
+          session._lifecycle.Cancel();
+          await session._previewTask;
+          session._window.Close();
+          session._lifecycle.Dispose();
+        }
+      }
+    }
+
     private void SetReadyUi()
     {
       _statusText.Text = "就绪：选择方向、滚动模式和固定边缘，点击开始采样首帧。";
@@ -1429,7 +1579,7 @@ internal static class ScrollCaptureSession
 
     private void OnStart(object sender, RoutedEventArgs args)
     {
-      if (_loop is not null || _failure is not null || _completion.Task.IsCompleted)
+      if (_loop is not null || _failure is not null || _lifecycle.IsCancellationRequested || _completion.Task.IsCompleted)
       {
         return; // 防止两轮采集同时运行。
       }
@@ -1457,7 +1607,7 @@ internal static class ScrollCaptureSession
 
     private void OnFinish(object sender, RoutedEventArgs args)
     {
-      if (_stitcher is null || _finishRequested || _failure is not null || _completion.Task.IsCompleted)
+      if (_stitcher is null || _finishRequested || _failure is not null || _lifecycle.IsCancellationRequested || _completion.Task.IsCompleted)
       {
         return;
       }
@@ -1482,13 +1632,10 @@ internal static class ScrollCaptureSession
     private void CancelFromUi()
     {
       _lifecycle.Cancel();
-      if (_failure is not null)
+      lock (_terminalGate)
       {
-        _completion.TrySetException(_failure);
-      }
-      else
-      {
-        _completion.TrySetResult(null);
+        if (_failure is not null) _completion.TrySetException(_failure);
+        else _completion.TrySetResult(null);
       }
     }
 
@@ -1528,7 +1675,7 @@ internal static class ScrollCaptureSession
       }
     }
 
-    private void RunOnUi(Action action)
+    private void RunOnUi(Action action, bool allowAfterFailure = false)
     {
       DispatcherQueue? queue = _window?.DispatcherQueue;
       if (queue is null)
@@ -1538,7 +1685,8 @@ internal static class ScrollCaptureSession
 
       void Guarded()
       {
-        if (_completion.Task.IsCompleted) return;
+        if (_completion.Task.IsCompleted || (!allowAfterFailure &&
+            (_failure is not null || _lifecycle.IsCancellationRequested))) return;
         try
         {
           action();

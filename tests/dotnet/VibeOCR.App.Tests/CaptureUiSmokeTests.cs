@@ -32,6 +32,18 @@ public sealed class CaptureUiSmokeTests : IDisposable
       RunUiSmokeAsync(nameof(RegionPickerRejectsChangedMonitorLayoutWithSameDesktopBounds));
 
   [Fact]
+  public Task ScrollCaptureAmbiguousChoicesPreserveStateAndAllowFeasibleCorrection() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureAmbiguousChoicesPreserveStateAndAllowFeasibleCorrection));
+
+  [Fact]
+  public Task ScrollCaptureNoOverlapStopsWithoutImpossibleCorrection() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureNoOverlapStopsWithoutImpossibleCorrection));
+
+  [Fact]
+  public Task ScrollCaptureKeepsFirstFailureAcrossDeadlineAndConcurrentStops() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureKeepsFirstFailureAcrossDeadlineAndConcurrentStops));
+
+  [Fact]
   public Task ScrollCaptureAllowsNarrowHorizontalSelectionAndEnforcesAxisLimits() =>
       RunUiSmokeAsync(nameof(ScrollCaptureAllowsNarrowHorizontalSelectionAndEnforcesAxisLimits));
 

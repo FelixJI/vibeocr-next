@@ -120,15 +120,24 @@ public sealed class VerticalScrollStitcher
         {
           int signed = scroll * sign;
           if (!VerifyAlignment(_previousFrame, packed, signed, cancellationToken)) continue;
-          if (candidate != 0) return new(ScrollAppendStatus.Ambiguous, 0);
-          candidate = signed;
+          // Candidates are visited by increasing magnitude. If no earlier
+          // positive match fits, a matching positive offset already over the
+          // limits rules out every later positive choice too.
+          if (signed > 0 && candidate <= 0 && ExceedsLimits(signed))
+            return new(ScrollAppendStatus.LimitReached, 0);
+          if (candidate != 0)
+          {
+            if (candidate > 0 || signed > 0) return new(ScrollAppendStatus.Ambiguous, 0);
+            // Multiple negative-only matches still require reverse recovery,
+            // never a positive-offset correction that cannot succeed.
+          }
+          else candidate = signed;
         }
       }
     }
     if (candidate == 0) return new(ScrollAppendStatus.NoOverlap, 0);
     if (candidate < 0) return new(ScrollAppendStatus.Reverse, 0);
-    if (FullHeight + candidate > MaximumDimension ||
-        (long)_frameWidth * (FullHeight + candidate) > MaximumPixels)
+    if (ExceedsLimits(candidate))
       return new(ScrollAppendStatus.LimitReached, 0);
     cancellationToken.ThrowIfCancellationRequested();
     byte[] strip = packed.AsSpan((_frameHeight - candidate) * _frameRowBytes).ToArray();
@@ -138,6 +147,9 @@ public sealed class VerticalScrollStitcher
     _height += candidate;
     return new(ScrollAppendStatus.Added, candidate);
   }
+
+  private bool ExceedsLimits(int offset) => FullHeight + offset > MaximumDimension ||
+    (long)_frameWidth * (FullHeight + offset) > MaximumPixels;
 
   public CapturedFrame BuildFrame(CancellationToken cancellationToken = default)
   {

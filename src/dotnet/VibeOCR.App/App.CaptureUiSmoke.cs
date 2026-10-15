@@ -24,6 +24,15 @@ public sealed partial class App
       var store = new CapturePreferencesStore(layout);
       switch (scenario)
       {
+        case "ScrollCaptureAmbiguousChoicesPreserveStateAndAllowFeasibleCorrection":
+          await ScrollCaptureSession.Session.VerifyAmbiguousCorrectionsSelfCheckAsync();
+          break;
+        case "ScrollCaptureNoOverlapStopsWithoutImpossibleCorrection":
+          await ScrollCaptureSession.Session.VerifyNoOverlapStopsSelfCheckAsync();
+          break;
+        case "ScrollCaptureKeepsFirstFailureAcrossDeadlineAndConcurrentStops":
+          await ScrollCaptureSession.Session.VerifyFirstFailureSelfCheckAsync();
+          break;
         case "ScrollCaptureAllowsNarrowHorizontalSelectionAndEnforcesAxisLimits":
           ScrollCaptureSession.Session.VerifySelectionGeometrySelfCheck();
           break;
