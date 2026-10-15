@@ -60,6 +60,10 @@ public sealed class CaptureUiSmokeTests : IDisposable
       RunUiSmokeAsync(nameof(ScrollCapturePendingPreviewBoundsBothDimensionsWithoutUpscaling));
 
   [Fact]
+  public Task ScrollCaptureAcceptedPreviewSkipsBusyRendererAndBoundsAllocation() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureAcceptedPreviewSkipsBusyRendererAndBoundsAllocation));
+
+  [Fact]
   public Task ScrollCapturePreviewResumeGetsFreshDynamicWindowWithoutResettingBudgets() =>
       RunUiSmokeAsync(nameof(ScrollCapturePreviewResumeGetsFreshDynamicWindowWithoutResettingBudgets));
 

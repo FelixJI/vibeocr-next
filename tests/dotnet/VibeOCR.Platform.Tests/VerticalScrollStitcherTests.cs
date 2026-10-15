@@ -652,6 +652,52 @@ public sealed class VerticalScrollStitcherTests
     Assert.Equal(height, stitcher.Height);
   }
 
+  [Theory]
+  [InlineData(ScrollCaptureDirection.Down)]
+  [InlineData(ScrollCaptureDirection.Up)]
+  [InlineData(ScrollCaptureDirection.Right)]
+  [InlineData(ScrollCaptureDirection.Left)]
+  public void PreviewSamplesExactFinalPixelsAcrossStripsAndFixedEdges(ScrollCaptureDirection direction)
+  {
+    byte[] document = RenderDocument(Width, FrameHeight + 60);
+    CapturedFrame Frame(int top) => Orient(WithEdges(FrameFromDocument(document, Width, top, FrameHeight)), direction);
+    bool reversed = direction is ScrollCaptureDirection.Up or ScrollCaptureDirection.Left;
+    var stitcher = new VerticalScrollStitcher(Frame(0), direction, reversed ? 6 : 4, reversed ? 4 : 6);
+    Assert.Equal(ScrollAppendStatus.Added, stitcher.Append(Frame(40), TestContext.Current.CancellationToken).Status);
+    Assert.Equal(ScrollAppendStatus.Added, stitcher.Append(Frame(60), TestContext.Current.CancellationToken).Status);
+    CapturedFrame full = stitcher.BuildFrame(TestContext.Current.CancellationToken);
+    CapturedFrame preview = stitcher.BuildPreview(31, TestContext.Current.CancellationToken);
+    Assert.Equal(31, Math.Max(preview.Width, preview.Height));
+    for (int y = 0; y < preview.Height; y++)
+      for (int x = 0; x < preview.Width; x++)
+      {
+        int sourceX = x * full.Width / preview.Width, sourceY = y * full.Height / preview.Height;
+        Assert.Equal(full.Pixels.AsSpan(sourceY * full.Stride + sourceX * 4, 4).ToArray(),
+          preview.Pixels.AsSpan(y * preview.Stride + x * 4, 4).ToArray());
+      }
+    CapturedFrame small = stitcher.BuildPreview(440, TestContext.Current.CancellationToken);
+    Assert.Equal(full.Width, small.Width);
+    Assert.Equal(full.Height, small.Height);
+    Assert.Equal(full.Pixels, small.Pixels);
+    Assert.Equal(full.Pixels, stitcher.BuildFrame(TestContext.Current.CancellationToken).Pixels);
+  }
+
+  [Fact]
+  public void PreviewAllocationDependsOnThumbnailAndHonorsCancellation()
+  {
+    byte[] document = RenderDocument(2048, 2048);
+    var stitcher = new VerticalScrollStitcher(new CapturedFrame(document, 2048, 2048, 8192, "BGRA8"));
+    long before = GC.GetAllocatedBytesForCurrentThread();
+    CapturedFrame preview = stitcher.BuildPreview(440, TestContext.Current.CancellationToken);
+    long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+    Assert.Equal(440 * 440 * 4, preview.Pixels.Length);
+    Assert.InRange(allocated, preview.Pixels.Length, preview.Pixels.Length + 65536);
+    Assert.Throws<ArgumentOutOfRangeException>(() => stitcher.BuildPreview(0, TestContext.Current.CancellationToken));
+    using var cancelled = new CancellationTokenSource();
+    cancelled.Cancel();
+    Assert.Throws<OperationCanceledException>(() => stitcher.BuildPreview(440, cancelled.Token));
+  }
+
   [Fact]
   public void BuildFrameReturnsIndependentCopy()
   {

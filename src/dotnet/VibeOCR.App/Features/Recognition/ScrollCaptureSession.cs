@@ -120,6 +120,7 @@ internal static class ScrollCaptureSession
     private bool _finishSamplingStarted;
     private bool _closed;
     private Task _previewTask = Task.CompletedTask;
+    private bool _acceptedPreviewQueued; // _terminalGate：生成中或已排入 UI，尚未交给渲染任务。
     private CancellationTokenRegistration _registration;
 
     internal Window ControlWindow => _window;
@@ -192,6 +193,7 @@ internal static class ScrollCaptureSession
         _finalFrame = null;
         _pendingImage.Source = null;
         _stitcher = null;
+        _acceptedPreviewQueued = false;
         CloseControlWindow(); // owner/任务栏恢复由调用方负责，此处只关本模块控制窗。
         _lifecycle.Dispose();
       }
@@ -865,34 +867,68 @@ internal static class ScrollCaptureSession
     private void ReportAccepted(VerticalScrollStitcher stitcher, CapturedFrame frame)
     {
       string status = $"已收 {stitcher.FrameCount} 帧 · {stitcher.Width} × {stitcher.Height} px";
-      CapturedFrame stitched = stitcher.BuildFrame(_lifecycle.Token);
-      CapturedFrame previewFrame = stitcher.FrameCount == 1 ? MarkFixedEdges(frame) : stitched;
-      byte[]? preview = EncodePreviewBmp(previewFrame);
-      if (preview is null)
-      {
-        Fail(new InvalidOperationException("无法生成已收选段预览，本次未完成，请取消后重试。"));
-        return;
-      }
       RunOnUi(() =>
       {
         _statusText.Text = status;
-        _finishButton.IsEnabled = !_reviewPending; // 待拼帧必须先完成自己的预览确认。
-        UpdatePreview(preview, stitched.Width, stitched.Height);
+        _finishButton.IsEnabled = !_reviewPending;
       });
+      lock (_terminalGate)
+      {
+        if (_acceptedPreviewQueued || !_previewTask.IsCompleted || _failure is not null ||
+            _lifecycle.IsCancellationRequested || _completion.Task.IsCompleted) return;
+        _acceptedPreviewQueued = true;
+      }
+      try
+      {
+        if (frame.Stride != checked(frame.Width * 4) || frame.Pixels.LongLength != (long)frame.Stride * frame.Height)
+        {
+          Fail(new InvalidOperationException("无法生成已收选段预览，本次未完成，请取消后重试。"));
+          lock (_terminalGate) _acceptedPreviewQueued = false;
+          return;
+        }
+        CapturedFrame thumbnail = stitcher.BuildPreview(PreviewMaxDecodePx, _lifecycle.Token);
+        if (stitcher.FrameCount == 1) thumbnail = MarkFixedEdges(thumbnail, frame.Width, frame.Height);
+        byte[]? preview = EncodePreviewBmp(thumbnail);
+        if (preview is null)
+        {
+          Fail(new InvalidOperationException("无法生成已收选段预览，本次未完成，请取消后重试。"));
+          lock (_terminalGate) _acceptedPreviewQueued = false;
+          return;
+        }
+        void Present()
+        {
+          lock (_terminalGate)
+          {
+            _acceptedPreviewQueued = false;
+            if (_failure is not null || _lifecycle.IsCancellationRequested || _completion.Task.IsCompleted) return;
+            UpdatePreview(preview, thumbnail.Width, thumbnail.Height);
+          }
+        }
+        DispatcherQueue queue = _window.DispatcherQueue;
+        if (queue.HasThreadAccess) Present();
+        else if (!queue.TryEnqueue(Present))
+          lock (_terminalGate) _acceptedPreviewQueued = false;
+      }
+      catch
+      {
+        lock (_terminalGate) _acceptedPreviewQueued = false;
+        throw;
+      }
     }
 
-    private CapturedFrame MarkFixedEdges(CapturedFrame frame)
+    private CapturedFrame MarkFixedEdges(CapturedFrame frame, int sourceWidth, int sourceHeight)
     {
       if (_fixedLeading == 0 && _fixedTrailing == 0) return frame;
       byte[] pixels = (byte[])frame.Pixels.Clone();
       bool horizontal = _direction is ScrollCaptureDirection.Left or ScrollCaptureDirection.Right;
-      int extent = horizontal ? frame.Width : frame.Height;
+      int extent = horizontal ? sourceWidth : sourceHeight;
+      int previewExtent = horizontal ? frame.Width : frame.Height;
       for (int y = 0; y < frame.Height; y++)
       {
         _lifecycle.Token.ThrowIfCancellationRequested();
         for (int x = 0; x < frame.Width; x++)
         {
-          int axis = horizontal ? x : y;
+          int axis = (int)((long)(horizontal ? x : y) * extent / previewExtent);
           if (axis >= _fixedLeading && axis < extent - _fixedTrailing) continue;
           int offset = y * frame.Stride + x * 4;
           pixels[offset] /= 2;
@@ -1394,6 +1430,71 @@ internal static class ScrollCaptureSession
         }
       }
     }
+    internal static async Task VerifyAcceptedPreviewAllocationSelfCheckAsync()
+    {
+      const int side = 2048;
+      byte[] pixels = new byte[side * side * 4];
+      for (int y = 0; y < side; y++) pixels[y * side * 4] = (byte)y;
+      var frame = new CapturedFrame(pixels, side, side, side * 4, "BGRA8");
+      var stitcher = new VerticalScrollStitcher(frame);
+      var session = CreateSelfCheckSession(side, side);
+      var busy = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      try
+      {
+        session._previewTask = busy.Task;
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        session.ReportAccepted(stitcher, frame);
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        AppLog.Info($"scroll-capture busy preview allocation self-check: {allocated} bytes");
+        if (allocated > 65536 || !ReferenceEquals(session._previewTask, busy.Task))
+          throw new InvalidOperationException($"A busy renderer must skip preview generation before allocation; allocated={allocated} bytes.");
+        busy.SetResult();
+        Task.Run(() => session.ReportAccepted(stitcher, frame)).GetAwaiter().GetResult();
+        if (!session._acceptedPreviewQueued) throw new InvalidOperationException("The worker preview must be queued until the UI can present it.");
+        before = GC.GetAllocatedBytesForCurrentThread();
+        session.ReportAccepted(stitcher, frame);
+        allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        if (allocated > 65536) throw new InvalidOperationException("A queued preview must also block further generation.");
+        var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!session._window.DispatcherQueue.TryEnqueue(() => drained.SetResult()))
+          throw new InvalidOperationException("Could not drain the accepted preview callback.");
+        await drained.Task;
+        await session._previewTask;
+        session._fixedLeading = 256;
+        session._fixedTrailing = 128;
+        CapturedFrame unmarked = stitcher.BuildPreview(PreviewMaxDecodePx);
+        foreach (ScrollCaptureDirection direction in new[] { ScrollCaptureDirection.Down, ScrollCaptureDirection.Right })
+        {
+          session._direction = direction;
+          CapturedFrame marked = session.MarkFixedEdges(unmarked, side, side);
+          int end = direction == ScrollCaptureDirection.Down ? (marked.Height - 1) * marked.Stride : (marked.Width - 1) * 4;
+          int middle = marked.Height / 2 * marked.Stride + marked.Width / 2 * 4;
+          if (marked.Pixels[2] == 0 || marked.Pixels[end + 2] == 0 || unmarked.Pixels[2] != 0 ||
+              !marked.Pixels.AsSpan(middle, 4).SequenceEqual(unmarked.Pixels.AsSpan(middle, 4)))
+            throw new InvalidOperationException("Thumbnail fixed-edge marks must follow physical source coordinates without changing body/source pixels.");
+        }
+        session._direction = ScrollCaptureDirection.Down;
+        before = GC.GetAllocatedBytesForCurrentThread();
+        session.ReportAccepted(stitcher, frame);
+        allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        if (allocated > 3 * PreviewMaxDecodePx * PreviewMaxDecodePx * 4 + 65536)
+          throw new InvalidOperationException($"Accepted preview allocation must depend on the thumbnail bound, not source area; allocated={allocated} bytes.");
+        await session._previewTask;
+        if (session._previewImage.Source is not BitmapImage bitmap ||
+            bitmap.PixelWidth > PreviewMaxDecodePx || bitmap.PixelHeight > PreviewMaxDecodePx)
+          throw new InvalidOperationException("The encoded accepted preview itself must be bounded, not only its decode request.");
+      }
+      finally
+      {
+        busy.TrySetResult();
+        session._lifecycle.Cancel();
+        await session._previewTask;
+        session._previewImage.Source = null;
+        session._window.Close();
+        session._lifecycle.Dispose();
+      }
+    }
+
     internal static async Task VerifyPreviewResumeStableWindowSelfCheckAsync()
     {
       static CapturedFrame Frame(int top)

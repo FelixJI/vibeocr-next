@@ -151,6 +151,47 @@ public sealed class VerticalScrollStitcher
   private bool ExceedsLimits(int offset) => FullHeight + offset > MaximumDimension ||
     (long)_frameWidth * (FullHeight + offset) > MaximumPixels;
 
+  /// <summary>Samples retained strips directly; never materializes the full stitched image for a preview.</summary>
+  public CapturedFrame BuildPreview(int maximumDimension, CancellationToken cancellationToken = default)
+  {
+    ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumDimension);
+    cancellationToken.ThrowIfCancellationRequested();
+    double scale = Math.Min(1.0, (double)maximumDimension / Math.Max(Width, Height));
+    int width = Math.Max(1, (int)Math.Round(Width * scale));
+    int height = Math.Max(1, (int)Math.Round(Height * scale));
+    byte[] pixels = new byte[checked(width * height * 4)];
+    int axisLength = Horizontal ? width : height;
+    int crossLength = Horizontal ? height : width;
+    for (int axis = 0; axis < axisLength; axis++)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      int sourceAxis = (int)((long)axis * FullHeight / axisLength);
+      ReadOnlySpan<byte> row = PreviewRow(Reversed ? FullHeight - 1 - sourceAxis : sourceAxis);
+      for (int cross = 0; cross < crossLength; cross++)
+      {
+        int sourceCross = (int)((long)cross * _frameWidth / crossLength);
+        int target = Horizontal ? cross * width + axis : axis * width + cross;
+        row.Slice(sourceCross * 4, 4).CopyTo(pixels.AsSpan(target * 4, 4));
+      }
+    }
+    return new(pixels, width, height, width * 4, "BGRA8");
+  }
+
+  private ReadOnlySpan<byte> PreviewRow(int row)
+  {
+    int offset = row * _frameRowBytes;
+    if (offset < _leading.Length) return _leading.AsSpan(offset, _frameRowBytes);
+    offset -= _leading.Length;
+    if (offset < _firstFrame.Length) return _firstFrame.AsSpan(offset, _frameRowBytes);
+    offset -= _firstFrame.Length;
+    foreach (byte[] strip in _strips)
+    {
+      if (offset < strip.Length) return strip.AsSpan(offset, _frameRowBytes);
+      offset -= strip.Length;
+    }
+    return _trailing.AsSpan(offset, _frameRowBytes);
+  }
+
   public CapturedFrame BuildFrame(CancellationToken cancellationToken = default)
   {
     byte[] normalized = new byte[checked(_frameRowBytes * FullHeight)];
