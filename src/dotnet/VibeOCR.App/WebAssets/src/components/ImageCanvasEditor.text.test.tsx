@@ -834,3 +834,45 @@ describe("文字、序号和说明对象", () => {
     unmount();
   });
 });
+
+for (const tool of ["文字", "序号", "说明"] as const) {
+  it(`${tool}字体草稿连续输入后直接绘制使用新字体并保持预览导出一致`, async () => {
+    stubCanvasStack({ width: 900, height: 600 });
+    const harness = stubAnimationFrames();
+    const { actions } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+    fireEvent.click(screen.getByRole("button", { name: tool }));
+    const font = screen.getByLabelText("文字字体");
+    font.focus();
+    for (const value of ["", "m", "mono", "mono:", "monospace"]) {
+      fireEvent.change(font, { target: { value } });
+      expect(screen.getByLabelText("文字字体")).toBe(font);
+      expect(font).toHaveValue(value);
+      expect(font).toHaveFocus();
+    }
+    clearCalls();
+    await dragDraw(canvas, harness, { x: 100, y: 220 }, { x: 300, y: 220 });
+    expect(screen.getByLabelText("文字字体")).toHaveValue("monospace");
+    expect(revisions(actions)).toEqual([1]);
+    expect(
+      allCalls().some(
+        (call) =>
+          call.op === "font" && String(call.args[0]).includes("px monospace,"),
+      ),
+    ).toBe(true);
+    clearCalls();
+    fireEvent.click(screen.getByRole("button", { name: "保存标注图" }));
+    await act(async () => {});
+    expect(
+      allCalls().some(
+        (call) =>
+          call.op === "font" && String(call.args[0]).includes("px monospace,"),
+      ),
+    ).toBe(true);
+    expect(actions.run).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "recognition.saveScreenshotImage" }),
+    );
+  });
+}

@@ -3155,9 +3155,11 @@ export function ImageCanvasEditor({
       canvasRef.current?.getContext("2d") ?? null,
       requested || "system-ui",
     );
-    applyTextStyle({ fontFamily: resolved.family });
+    if (resolved.family !== (activeTextStyle.fontFamily ?? "system-ui"))
+      applyTextStyle({ fontFamily: resolved.family });
     if (!resolved.available)
       setOperationMessage("字体“" + requested + "”不可用，已回退到系统字体。");
+    else setOperationMessage("已使用字体“" + resolved.family + "”。");
     return resolved.family;
   }
   function renumber(): void {

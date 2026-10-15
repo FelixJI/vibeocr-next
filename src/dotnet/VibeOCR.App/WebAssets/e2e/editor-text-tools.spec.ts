@@ -1,3 +1,4 @@
+import { writeFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 import { mountHost, snapshot } from "./workbench-host";
 
@@ -557,3 +558,47 @@ test("深色序号底形使用白字，预览和PNG导出均有实际可读字�
   expect(pixels.white).toBeGreaterThan(50);
   expect(pixels.black).toBeGreaterThan(100);
 });
+
+for (const tool of ["文字", "序号", "说明"] as const) {
+  test(`${tool}连续输入真实字体后直接画布绘制，字形写入PNG`, async ({
+    page,
+  }, testInfo) => {
+    const { uploads } = await setupTextHost(page);
+    await page.getByRole("button", { name: tool, exact: true }).click();
+    if (tool !== "序号") await page.getByLabel("标注文字").fill("iiiiiiiiiiii");
+    else await page.getByLabel("序号形状").selectOption("none");
+    await page.getByLabel("文字字号").selectOption("48");
+    await page.getByLabel("自定义颜色").fill("#1f6feb");
+    const font = page.getByLabel("文字字体");
+    await font.fill("");
+    await font.pressSequentially("Courier New");
+    await expect(font).toHaveValue("Courier New");
+    await expect(font).toBeFocused();
+    if (tool === "说明") await drag(page, 100, 400, 200, 220);
+    else if (tool === "序号") await drag(page, 300, 220, 300, 220);
+    else await drag(page, 120, 220, 500, 220);
+    await expect(page.getByLabel("文字字体")).toHaveValue("Courier New");
+    await page.getByRole("button", { name: "选择", exact: true }).click();
+    await deselect(page);
+    const area =
+      tool === "文字"
+        ? { x: 360, y: 180, width: 100, height: 60 }
+        : tool === "说明"
+          ? { x: 440, y: 180, width: 90, height: 60 }
+          : { x: 280, y: 180, width: 40, height: 80 };
+    await expect
+      .poll(async () => (await scan(page, area)).blue)
+      .toBeGreaterThan(20);
+    const png = await save(page, uploads);
+    const exportPath = testInfo.outputPath("font-export.png");
+    await writeFile(exportPath, png);
+    await testInfo.attach("font-export.png", {
+      path: exportPath,
+      contentType: "image/png",
+    });
+    expect((await scan(page, area, png)).blue).toBeGreaterThan(20);
+    await page.screenshot({
+      path: testInfo.outputPath("direct-font-draw.png"),
+    });
+  });
+}

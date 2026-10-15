@@ -28,7 +28,13 @@ export function AnnotationTextPanel({
           aria-label="文字字体"
           size="small"
           value={fontDraft.value}
-          onChange={(_, data) => setFontDraft({ family, value: data.value })}
+          onChange={(_, data) => {
+            // 生效字体与输入草稿分开，名称前缀不可用时也保留连续输入。
+            const resolved = data.value.trim()
+              ? onResolveFont(data.value)
+              : family;
+            setFontDraft({ family: resolved, value: data.value });
+          }}
           onBlur={() => {
             const resolved = onResolveFont(fontDraft.value);
             setFontDraft({ family: resolved, value: resolved });
