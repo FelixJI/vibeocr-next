@@ -1,0 +1,274 @@
+/**
+ * 修补二值掩膜编辑状态（原图整数像素空间）：矩形/笔刷的增减共同维护
+ * ROI + 0/255 位图。纯函数、无 DOM，便于直接单测。
+ *
+ * 契约：
+ * - ROI（掩膜包围盒，含已清除的空穴区域）≤ INPAINT_MAX_ROI_PIXELS；
+ *   有效掩膜像素 ≤ INPAINT_MAX_MASK_PIXELS。任一超限拒绝整个操作并
+ *   保留原状态（显式失败，不静默截断）。
+ * - 笔刷以直径 stamp 光栅化（步长 = 半径/2 保证覆盖），总 stamp 像素
+ *   工作量受预算约束，超限同样拒绝整个操作。
+ * - 图像尺寸外的部分自动裁剪；完全在图像外的操作为无变化成功。
+ */
+
+import {
+  INPAINT_MAX_MASK_PIXELS,
+  INPAINT_MAX_ROI_PIXELS,
+  type InpaintRect,
+} from "./inpaint";
+
+export interface InpaintMaskState {
+  readonly rect: InpaintRect;
+  readonly data: Uint8Array;
+}
+
+export type InpaintMaskOpResult =
+  | {
+      readonly ok: true;
+      /** 无变化时为 undefined（如空掩膜上移除）：调用方保持/清空当前状态。 */
+      readonly state: InpaintMaskState | undefined;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: "roi-budget" | "mask-budget" | "work-budget";
+    };
+
+/** 笔刷 stamp 光栅化工作量预算（stamp 行跨度像素累计 ≤ 64M）。 */
+export const INPAINT_MASK_WORK_BUDGET = 64_000_000;
+
+interface ImageSize {
+  readonly width: number;
+  readonly height: number;
+}
+
+function clampRectToImage(rect: InpaintRect, image: ImageSize): InpaintRect {
+  const x0 = Math.max(0, Math.min(image.width - 1, Math.floor(rect.x)));
+  const y0 = Math.max(0, Math.min(image.height - 1, Math.floor(rect.y)));
+  const x1 = Math.max(
+    x0 + 1,
+    Math.min(image.width, Math.ceil(rect.x + rect.width)),
+  );
+  const y1 = Math.max(
+    y0 + 1,
+    Math.min(image.height, Math.ceil(rect.y + rect.height)),
+  );
+  return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+}
+
+function rectsUnion(a: InpaintRect, b: InpaintRect): InpaintRect {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  return {
+    x,
+    y,
+    width: Math.max(a.x + a.width, b.x + b.width) - x,
+    height: Math.max(a.y + a.height, b.y + b.height) - y,
+  };
+}
+
+/** 以新 ROI 重分配并拷贝旧数据。 */
+function resizeState(
+  state: InpaintMaskState,
+  rect: InpaintRect,
+): InpaintMaskState {
+  const data = new Uint8Array(rect.width * rect.height);
+  for (let y = 0; y < state.rect.height; y += 1) {
+    for (let x = 0; x < state.rect.width; x += 1) {
+      if ((state.data[y * state.rect.width + x] ?? 0) === 0) continue;
+      const nx = state.rect.x + x - rect.x;
+      const ny = state.rect.y + y - rect.y;
+      if (nx < 0 || ny < 0 || nx >= rect.width || ny >= rect.height) continue;
+      data[ny * rect.width + nx] = 1;
+    }
+  }
+  return { rect, data };
+}
+
+function prepare(
+  current: InpaintMaskState | undefined,
+  region: InpaintRect,
+): { ok: true; state: InpaintMaskState } | { ok: false; reason: "roi-budget" } {
+  const base = current ?? {
+    rect: region,
+    data: new Uint8Array(region.width * region.height),
+  };
+  const union = rectsUnion(base.rect, region);
+  if (union.width * union.height > INPAINT_MAX_ROI_PIXELS) {
+    return { ok: false, reason: "roi-budget" };
+  }
+  const state = union === base.rect ? base : resizeState(base, union);
+  return { ok: true, state };
+}
+
+function countMasked(state: InpaintMaskState): number {
+  let count = 0;
+  for (let i = 0; i < state.data.length; i += 1) {
+    if (state.data[i] !== 0) count += 1;
+  }
+  return count;
+}
+
+/** 矩形增/减：add=true 置 1，否则清 0。 */
+export function applyMaskRect(
+  current: InpaintMaskState | undefined,
+  rect: InpaintRect,
+  image: ImageSize,
+  add: boolean,
+): InpaintMaskOpResult {
+  const region = clampRectToImage(rect, image);
+  if (
+    region.x >= image.width ||
+    region.y >= image.height ||
+    region.width <= 0 ||
+    region.height <= 0
+  ) {
+    return {
+      ok: true,
+      state: current ?? {
+        rect: region,
+        data: new Uint8Array(region.width * region.height),
+      },
+    };
+  }
+  if (!add && !current) {
+    return { ok: true, state: current };
+  }
+  const prepared = prepare(current, region);
+  if (!prepared.ok) return prepared;
+  const state = prepared.state;
+  const next = new Uint8Array(state.data);
+  for (let y = region.y; y < region.y + region.height; y += 1) {
+    for (let x = region.x; x < region.x + region.width; x += 1) {
+      const lx = x - state.rect.x;
+      const ly = y - state.rect.y;
+      if (lx < 0 || ly < 0 || lx >= state.rect.width || ly >= state.rect.height)
+        continue;
+      next[ly * state.rect.width + lx] = add ? 1 : 0;
+    }
+  }
+  const result: InpaintMaskState = { rect: state.rect, data: next };
+  if (add && countMasked(result) > INPAINT_MAX_MASK_PIXELS) {
+    return { ok: false, reason: "mask-budget" };
+  }
+  return { ok: true, state: result };
+}
+
+/** 笔刷增/减：点列（原图空间）沿轨迹以半径 stamp 光栅化。 */
+export function applyMaskBrush(
+  current: InpaintMaskState | undefined,
+  points: readonly { x: number; y: number }[],
+  radius: number,
+  image: ImageSize,
+  add: boolean,
+): InpaintMaskOpResult {
+  if (points.length === 0) {
+    return { ok: true, state: current };
+  }
+  if (!add && !current) {
+    return { ok: true, state: current };
+  }
+  const r = Math.max(1, Math.floor(radius));
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const at of points) {
+    minX = Math.min(minX, at.x);
+    minY = Math.min(minY, at.y);
+    maxX = Math.max(maxX, at.x);
+    maxY = Math.max(maxY, at.y);
+  }
+  const region = clampRectToImage(
+    {
+      x: minX - r,
+      y: minY - r,
+      width: maxX - minX + r * 2 + 2,
+      height: maxY - minY + r * 2 + 2,
+    },
+    image,
+  );
+  const prepared = prepare(current, region);
+  if (!prepared.ok) return prepared;
+  const state = prepared.state;
+  const next = new Uint8Array(state.data);
+  const stamp = (cx: number, cy: number): number => {
+    let work = 0;
+    const top = Math.max(0, Math.floor(cy - r));
+    const bottom = Math.min(image.height - 1, Math.ceil(cy + r));
+    for (let y = top; y <= bottom; y += 1) {
+      const span = Math.floor(Math.sqrt(Math.max(0, r * r - (y - cy) ** 2)));
+      work += span * 2 + 1;
+      const left = Math.floor(cx) - span;
+      const right = Math.floor(cx) + span;
+      for (
+        let x = Math.max(0, left);
+        x <= Math.min(image.width - 1, right);
+        x += 1
+      ) {
+        const lx = x - state.rect.x;
+        const ly = y - state.rect.y;
+        if (
+          lx < 0 ||
+          ly < 0 ||
+          lx >= state.rect.width ||
+          ly >= state.rect.height
+        )
+          continue;
+        next[ly * state.rect.width + lx] = add ? 1 : 0;
+      }
+    }
+    return work;
+  };
+  let work = 0;
+  const step = Math.max(1, r / 2);
+  for (let i = 0; i < points.length; i += 1) {
+    const from = points[i]!;
+    const to = points[i + 1] ?? from;
+    const length = Math.hypot(to.x - from.x, to.y - from.y);
+    const steps = Math.max(1, Math.ceil(length / step));
+    for (let s = 0; s <= steps; s += 1) {
+      const t = s / steps;
+      work += stamp(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+      if (work > INPAINT_MASK_WORK_BUDGET) {
+        return { ok: false, reason: "work-budget" };
+      }
+    }
+  }
+  const result: InpaintMaskState = { rect: state.rect, data: next };
+  if (add && countMasked(result) > INPAINT_MAX_MASK_PIXELS) {
+    return { ok: false, reason: "mask-budget" };
+  }
+  return { ok: true, state: result };
+}
+
+/** 掩膜紧致包围盒（无有效像素时 undefined）。 */
+export function maskBounds(
+  state: InpaintMaskState | undefined,
+): InpaintRect | undefined {
+  if (!state) return undefined;
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (let y = 0; y < state.rect.height; y += 1) {
+    for (let x = 0; x < state.rect.width; x += 1) {
+      if ((state.data[y * state.rect.width + x] ?? 0) === 0) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+  if (!Number.isFinite(minX)) return undefined;
+  return {
+    x: state.rect.x + minX,
+    y: state.rect.y + minY,
+    width: maxX - minX + 1,
+    height: maxY - minY + 1,
+  };
+}
+
+/** 有效掩膜像素数。 */
+export function maskCount(state: InpaintMaskState | undefined): number {
+  return state ? countMasked(state) : 0;
+}

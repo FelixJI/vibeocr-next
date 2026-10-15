@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { InpaintError, inpaintRectangle, type InpaintRect } from "./inpaint";
+import {
+  inpaintMask,
+  inpaintRectangle,
+  InpaintError,
+  type InpaintRect,
+} from "./inpaint";
 
 type Pixel = readonly [number, number, number, number];
 
@@ -360,5 +365,131 @@ describe("inpaintRectangle", () => {
     expect(cornerEffects.insideAlphaDiffs).toBe(0);
     expect(cornerEffects.insideRgbChanged).toBeGreaterThan(0);
     expect(cornerInput).toEqual(cornerOriginal);
+  });
+});
+
+describe("inpaintMask", () => {
+  it("fills only masked pixels: holes and outside bytes stay identical", () => {
+    const width = 32;
+    const height = 24;
+    const inMask = (x: number, y: number) =>
+      x >= 8 &&
+      x < 20 &&
+      y >= 6 &&
+      y < 18 &&
+      !(x >= 13 && x < 16 && y >= 10 && y < 13);
+    const rgba = paintImage(width, height, (x, y) =>
+      inMask(x, y) ? [240, 30, 220, 255] : [12, 160, 90, 255],
+    );
+    const original = new Uint8ClampedArray(rgba);
+    const roi: InpaintRect = { x: 8, y: 6, width: 12, height: 12 };
+    const mask = new Uint8Array(12 * 12);
+    for (let y = 0; y < 12; y += 1) {
+      for (let x = 0; x < 12; x += 1) {
+        if (x >= 5 && x < 8 && y >= 4 && y < 7) continue; // 洞：保留原水印像素
+        mask[y * 12 + x] = 1;
+      }
+    }
+
+    const out = inpaintMask(rgba, width, height, roi, mask);
+
+    expect(countByteDiffs(rgba, original)).toBe(0);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        for (let c = 0; c < 4; c += 1) {
+          const before = original[(y * width + x) * 4 + c] ?? 0;
+          const after = out[(y * width + x) * 4 + c] ?? 0;
+          if (inMask(x, y) && !(x >= 13 && x < 16 && y >= 10 && y < 13)) {
+            if (c === 3) expect(after).toBe(before);
+          } else {
+            expect(after, `pixel (${x},${y}) ch${c}`).toBe(before);
+          }
+        }
+      }
+    }
+    // 掩膜区域中心恢复为背景色。
+    expectRgbNear(out, width, 10, 8, [12, 160, 90], 4);
+  });
+
+  it("rejects empty masks and whole-image masks", () => {
+    const width = 20;
+    const height = 16;
+    const rgba = paintImage(width, height, () => [10, 20, 30, 255]);
+    expect(
+      failureCodeOf(() =>
+        inpaintMask(
+          rgba,
+          width,
+          height,
+          { x: 2, y: 2, width: 8, height: 8 },
+          new Uint8Array(64),
+        ),
+      ),
+    ).toBe("empty-mask");
+    expect(
+      failureCodeOf(() =>
+        inpaintMask(
+          rgba,
+          width,
+          height,
+          { x: 0, y: 0, width: width, height: height },
+          new Uint8Array(width * height).fill(1),
+        ),
+      ),
+    ).toBe("mask-covers-image");
+    expect(
+      failureCodeOf(() =>
+        inpaintMask(
+          rgba,
+          width,
+          height,
+          { x: 2, y: 2, width: 8, height: 8 },
+          new Uint8Array(9),
+        ),
+      ),
+    ).toBe("invalid-rect");
+  });
+
+  it("rejects ROI beyond the allocation budget", () => {
+    const width = 1100;
+    const height = 1100;
+    const rgba = paintImage(width, height, () => [1, 2, 3, 255]);
+    const roi: InpaintRect = { x: 0, y: 0, width: 1001, height: 1001 };
+    expect(
+      failureCodeOf(() =>
+        inpaintMask(
+          rgba,
+          width,
+          height,
+          roi,
+          new Uint8Array(1001 * 1001).fill(1),
+        ),
+      ),
+    ).toBe("budget-exceeded");
+  });
+
+  it("rectangle wrapper keeps the legacy rect contract", () => {
+    const width = 32;
+    const height = 24;
+    const rect: InpaintRect = { x: 8, y: 8, width: 12, height: 8 };
+    const inside = (x: number, y: number) =>
+      x >= rect.x &&
+      x < rect.x + rect.width &&
+      y >= rect.y &&
+      y < rect.y + rect.height;
+    const rgba = paintImage(width, height, (x, y) =>
+      inside(x, y) ? [240, 30, 220, 255] : [12, 160, 90, 255],
+    );
+    const out = inpaintRectangle(rgba, width, height, rect);
+    expectRgbNear(out, width, 14, 12, [12, 160, 90], 3);
+    const effects = scanMaskEffects(out, rgba, width, height, {
+      x0: 8,
+      y0: 8,
+      x1: 20,
+      y1: 16,
+    });
+    expect(effects.outsideDiffs).toBe(0);
+    expect(effects.insideAlphaDiffs).toBe(0);
+    expect(effects.insideRgbChanged).toBeGreaterThan(0);
   });
 });

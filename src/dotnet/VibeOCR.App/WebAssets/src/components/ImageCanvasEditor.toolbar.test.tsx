@@ -132,7 +132,9 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
       "箭头",
       "画笔",
       "屏蔽",
+      "遮挡",
       "去水印",
+      "重复匹配",
       "旋转 90°",
       "撤销",
       "重做",
@@ -161,10 +163,17 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     // 手形无属性：下排整体收起。
     fireEvent.click(main.getByRole("button", { name: "手形" }));
     expect(screen.queryByRole("toolbar", { name: "当前工具设置" })).toBeNull();
-    // 去水印：修补操作（预览）在主排且未选区时禁用；无参数则属性排收起。
+    // 去水印：修补操作（预览）在主排且未选区时禁用；掩膜绘制方式属于
+    // 当前工具属性，出现在下排而不是主排。
     fireEvent.click(main.getByRole("button", { name: "去水印" }));
     expect(main.getByRole("button", { name: "预览修补" })).toBeDisabled();
-    expect(screen.queryByRole("toolbar", { name: "当前工具设置" })).toBeNull();
+    const inpaintSettings = within(
+      screen.getByRole("toolbar", { name: "当前工具设置" }),
+    );
+    expect(
+      inpaintSettings.getByLabelText("修补掩膜绘制方式"),
+    ).toBeInTheDocument();
+    expect(main.queryByLabelText("修补掩膜绘制方式")).toBeNull();
   });
 
   it("两排按钮统一 Tabler 描边矢量图标；更多菜单按可用状态收纳低频操作", () => {
