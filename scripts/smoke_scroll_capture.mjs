@@ -528,17 +528,19 @@ async function startScrollSession(app, fixture) {
   return { overlayHandle: overlay.Handle, selection, start };
 }
 
-async function confirmCapturePreview(appPid, expectedText = '确认预览并继续') {
+async function waitForCapturePreview(appPid, expectedText = '确认预览并继续') {
   const until = Date.now() + 15000;
   while (Date.now() < until) {
     const confirm = await controlBar(appPid, 'scroll-capture-confirm');
-    if (confirm.found && confirm.enabled && confirm.name === expectedText) {
-      await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-confirm' });
-      return;
-    }
+    if (confirm.found && confirm.enabled && confirm.name === expectedText) return confirm;
     await delay(200);
   }
   throw new Error(`Capture preview confirmation was not ready: ${expectedText}`);
+}
+
+async function confirmCapturePreview(appPid, expectedText = '确认预览并继续') {
+  await waitForCapturePreview(appPid, expectedText);
+  await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-confirm' });
 }
 
 async function runScrollCapture(app, fixture, { cancel }) {
@@ -639,7 +641,7 @@ async function runScrollCapture(app, fixture, { cancel }) {
   return { cancelled: false, barTexts, steps, ...opened };
 }
 
-async function copySessionPng(app, evidenceRoot) {
+async function copySessionPng(app, evidenceRoot, outputName = 'scroll-capture-stitched.png') {
   await observeNextAnnotationUpload(app.page);
   try {
     const requestPromise = app.page.waitForRequest((request) =>
@@ -661,7 +663,7 @@ async function copySessionPng(app, evidenceRoot) {
     assert(png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])),
       'Product upload Blob is not PNG.');
     await app.page.getByText('已复制截图副本', { exact: false }).waitFor({ timeout: 8000 });
-    fs.writeFileSync(path.join(evidenceRoot, 'scroll-capture-stitched.png'), png);
+    fs.writeFileSync(path.join(evidenceRoot, outputName), png);
     return png;
   } finally {
     await app.page.evaluate(() => window.__scrollCaptureRestoreFetch?.()).catch(() => {});
@@ -671,7 +673,9 @@ async function copySessionPng(app, evidenceRoot) {
 // Decode the stitched PNG inside the real WebView2 context and verify every
 // encoded row: the stripe color at stripeX encodes the document row index, so
 // order, range, gaps and duplicated rows are all detected pixel-exactly.
-async function analyzeStitched(page, png, fixture, selection) {
+async function analyzeStitched(page, png, fixture, selection, startOffsetPixels = 0) {
+  assert(Number.isSafeInteger(startOffsetPixels) && startOffsetPixels >= 0,
+    'Synthetic source offset must be a non-negative integer.');
   return page.evaluate(async ({ encoded, rowHeight, stripeX, textX, startY }) => {
     const bytes = Uint8Array.from(atob(encoded), (letter) => letter.charCodeAt(0));
     const image = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
@@ -695,7 +699,8 @@ async function analyzeStitched(page, png, fixture, selection) {
       else counts.set(decoded, (counts.get(decoded) || 0) + 1);
     }
     const blocks = [];
-    for (let row = 1; (row + 1) * rowHeight - startY <= height; row++) {
+    for (let row = Math.max(1, Math.ceil(startY / rowHeight));
+      (row + 1) * rowHeight - startY <= height; row++) {
       let dark = 0;
       const yEnd = (row + 1) * rowHeight - startY;
       for (let y = row * rowHeight - startY; y < yEnd; y++)
@@ -713,7 +718,7 @@ async function analyzeStitched(page, png, fixture, selection) {
   }, {
     encoded: png.toString('base64'),
     rowHeight: fixture.rowHeight,
-    startY: selection.top - fixture.clientRect.top,
+    startY: selection.top - fixture.clientRect.top + startOffsetPixels,
     stripeX: Math.max(0, Math.floor(fixture.stripeWidth / 2) - selectionInset),
     textX: fixture.textLeft - selectionInset + 2,
   });
@@ -991,7 +996,7 @@ async function waitForFirstFrameAccepted(appPid, timeoutMs = 20000) {
 // cancelling never opens a new screenshot session. low-texture/dynamic are set
 // before start (window geometry unchanged); jump/move fire after the first
 // accepted frame; every round except the final move restores normal.
-async function verifyControllerFailureModes(app, fixture, baselineSessionId) {
+async function verifyControllerFailureModes(app, fixture) {
   const appPid = app.child.pid;
   const setScenario = (scenario) => native('scenario',
     { FixturePid: fixture.pid, Handle: fixture.root, Scenario: scenario });
@@ -1008,10 +1013,8 @@ async function verifyControllerFailureModes(app, fixture, baselineSessionId) {
     await waitForControlBarGone(appPid, 'scroll-capture-start', 10000);
     await app.page.waitForFunction(() => window.__scrollCaptureCurrentSession === null);
     const sessionsAfter = await sessionEvidence(app.page);
-    assert.equal(sessionsAfter.length, sessionsBefore.length,
-      `${scenario} round opened a new screenshot session.`);
-    assert(sessionsAfter.every((item) => item.sessionId === baselineSessionId),
-      `${scenario} round switched the screenshot session.`);
+    assert.deepEqual(sessionsAfter, sessionsBefore,
+      `${scenario} round created or changed a screenshot session.`);
     if (restore) await setScenario('normal');
     results.push({ scenario, barText: bar.text });
   };
@@ -1057,6 +1060,99 @@ async function verifyControllerFailureModes(app, fixture, baselineSessionId) {
     restore: false,
   });
   return results;
+}
+
+// A reverse frame is a recoverable review, not a terminal failure. Exercise
+// the real discard action, return to the accepted boundary, then append one
+// new strip. Export only after explicit final confirmation and verify every
+// encoded pixel row so retaining only the last viewport cannot pass.
+async function verifyReverseRecovery(app, fixture) {
+  const appPid = app.child.pid;
+  const sessionsBefore = await sessionEvidence(app.page);
+  const priorIds = [...new Set(sessionsBefore.map((item) => item.sessionId))];
+  const opened = await startScrollSession(app, fixture);
+  const wheel = (delta) => native('wheel', { FixturePid: fixture.pid, Handle: fixture.root,
+    X: fixture.clientRect.left + 100, Y: fixture.clientRect.top + 100, Delta: delta });
+  await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-start' });
+  await confirmCapturePreview(appPid);
+  await wheel(120);
+  const discard = await waitForCapturePreview(appPid, '丢弃反向帧并继续');
+  const rejected = await barText(appPid, 'scroll-capture-start');
+  assert(rejected.text.includes('反向滚动') && rejected.text.includes('该帧未加入已收选段'),
+    `Reverse review did not identify the rejected frame: ${rejected.text}`);
+  assert((await controlBar(appPid, 'scroll-capture-finish')).enabled,
+    'Reverse review must allow previewing the already accepted segment.');
+  const offset = await controlBar(appPid, 'scroll-capture-offset');
+  assert(!offset.found || offset.right <= offset.left || offset.bottom <= offset.top,
+    'Reverse review exposed an impossible positive-offset correction.');
+  assert.deepEqual(await sessionEvidence(app.page), sessionsBefore,
+    'Reverse review published a screenshot before explicit final confirmation.');
+  await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-confirm' });
+  await wheel(-120); // Back to the first accepted viewport: no new strip.
+  await delay(stableWaitMs);
+  const afterDiscard = await controlBar(appPid, 'scroll-capture-confirm');
+  assert(!afterDiscard.found || !afterDiscard.enabled,
+    'Discarding the reverse frame did not resume capture.');
+  await wheel(-120); // Beyond that viewport: exactly one new strip.
+  await delay(stableWaitMs);
+  const resumed = await barText(appPid, 'scroll-capture-start');
+  const expectedHeight = opened.selection.height + fixture.wheelStepPixels;
+  assert(resumed.text.includes('已收 2 帧') &&
+    resumed.text.includes(`${opened.selection.width} × ${expectedHeight}`),
+    `Forward capture did not resume from the retained first frame: ${resumed.text}`);
+  await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-finish' });
+  await waitForCapturePreview(appPid, '确认选段并送入编辑器');
+  const finalPreview = await barText(appPid, 'scroll-capture-start');
+  assert(finalPreview.text.includes(`${opened.selection.width} × ${expectedHeight}px`),
+    `Final preview did not preserve the confirmed segment bounds: ${finalPreview.text}`);
+  assert.deepEqual(await sessionEvidence(app.page), sessionsBefore,
+    'The final preview published output before explicit user confirmation.');
+  await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-confirm' });
+  await waitForControlBarGone(appPid, 'scroll-capture-start', 15000);
+  await app.page.waitForFunction((ids) => {
+    const session = window.__scrollCaptureCurrentSession;
+    return typeof session?.sessionId === 'string' && !ids.includes(session.sessionId);
+  }, priorIds, { timeout: 15000 });
+  const sessionsAfter = await sessionEvidence(app.page);
+  assert.deepEqual(sessionsAfter.slice(0, sessionsBefore.length), sessionsBefore,
+    'Confirming a recovered capture rewrote the prior session history.');
+  const added = sessionsAfter.slice(sessionsBefore.length);
+  const recoveredId = added[0]?.sessionId;
+  assert(recoveredId && !priorIds.includes(recoveredId) &&
+    added.every((item) => item.sessionId === recoveredId),
+    'Explicit confirmation must create exactly one new screenshot session.');
+  await app.page.getByLabel('图片检查画布').waitFor({ timeout: 15000 });
+  const outputName = 'scroll-capture-reverse-recovered.png';
+  const png = await copySessionPng(app, app.evidence.smokeRoot, outputName);
+  // The earlier full-capture round left the fixture at wheelSteps * step.
+  // The reverse/return pair cancels out; only the final forward step grows it.
+  const startOffsetPixels = wheelSteps * fixture.wheelStepPixels;
+  const analysis = await analyzeStitched(app.page, png, fixture, opened.selection, startOffsetPixels);
+  assert.equal(analysis.width, opened.selection.width, 'Recovered output width changed.');
+  assert.equal(analysis.height, expectedHeight, 'Recovered output lost its first viewport or new strip.');
+  assert.equal(analysis.badCount, 0,
+    `Recovered first-frame/new-strip pixels differ: ${JSON.stringify(analysis.bad)}`);
+  assert(analysis.minDark >= 8, 'Recovered complete rows lost rendered text.');
+
+  // Preserve the original reverse cancellation check as a separate real round.
+  // Its history now includes the explicitly confirmed recovered output above.
+  const beforeCancel = await sessionEvidence(app.page);
+  await startScrollSession(app, fixture);
+  await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-start' });
+  await confirmCapturePreview(appPid);
+  await wheel(120);
+  await waitForCapturePreview(appPid, '丢弃反向帧并继续');
+  await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-cancel' });
+  await waitForControlBarGone(appPid, 'scroll-capture-start', 10000);
+  await app.page.waitForFunction(() => window.__scrollCaptureCurrentSession === null);
+  assert.deepEqual(await sessionEvidence(app.page), beforeCancel,
+    'Cancelling reverse review created or changed a screenshot session.');
+  return {
+    rejected, discardAction: discard.name, resumed: resumed.text, finalPreview: finalPreview.text,
+    sessionId: recoveredId, startOffsetPixels, stitched: analysis,
+    output: path.join(app.evidence.smokeRoot, outputName),
+    noOutputBeforeFinalConfirmation: true, cancelPreservedHistory: true,
+  };
 }
 
 async function main() {
@@ -1227,28 +1323,13 @@ async function main() {
       'Cancelled capture incorrectly published the previous image as a new session.');
     evidence.cancelAfterOutput = { cancelled: true, barTexts: cancelledAgain.barTexts };
 
-    // A real reverse wheel step must fail closed, without publishing a partial image.
-    await startScrollSession(app, fixture);
-    await native('uia-invoke', { AppPid: app.child.pid, AutomationId: 'scroll-capture-start' });
-    await confirmCapturePreview(app.child.pid);
-    await delay(stableWaitMs);
-    await native('wheel', { FixturePid: fixture.pid, Handle: fixture.root,
-      X: fixture.clientRect.left + 100, Y: fixture.clientRect.top + 100, Delta: 120 });
-    await delay(stableWaitMs);
-    const reversed = await barText(app.child.pid, 'scroll-capture-start');
-    assert(reversed.text.includes('反向滚动') && reversed.text.includes('尚未完成'), `Reverse scroll did not report its reason: ${reversed.text}`);
-    assert.equal((await controlBar(app.child.pid, 'scroll-capture-finish')).enabled, false);
-    await native('uia-invoke', { AppPid: app.child.pid, AutomationId: 'scroll-capture-cancel' });
-    await waitForControlBarGone(app.child.pid, 'scroll-capture-start', 10000);
-    await app.page.waitForFunction(() => window.__scrollCaptureCurrentSession === null);
-    assert((await sessionEvidence(app.page)).every((item) => item.sessionId === sessionsBeforeEdit[0].sessionId));
-    evidence.reverseRejected = reversed;
+    evidence.reverseRecovery = await verifyReverseRecovery(app, fixture);
+    evidence.reverseRejected = evidence.reverseRecovery.rejected;
     evidence.memoryAfterCancel = JSON.parse(await native('metrics', { AppPid: app.child.pid }));
 
     // 5) Controller negatives through the owned fixture scenario switch: real
     // error text, disabled 完成, and cancels that open no new session.
-    evidence.controllerFailures = await verifyControllerFailureModes(app, fixture,
-      sessionsBeforeEdit[0].sessionId);
+    evidence.controllerFailures = await verifyControllerFailureModes(app, fixture);
 
     evidence.taskbarStateAfter = Number(await native('taskbar-state'));
     assert.equal(evidence.taskbarStateAfter, evidence.taskbarStateBefore,
