@@ -14,15 +14,23 @@ public sealed class SystemImportReaderTests
 {
   private static CancellationToken Token => TestContext.Current.CancellationToken;
 
-  private static async Task<byte[]> PngAsync(uint width = 2, uint height = 2)
+  private static Task<byte[]> PngAsync(uint width = 2, uint height = 2) =>
+    ImageBytesAsync(BitmapEncoder.PngEncoderId, width, height);
+
+  private static async Task<byte[]> ImageBytesAsync(Guid encoderId, uint width, uint height, bool noise = false)
   {
     using var stream = new InMemoryRandomAccessStream();
-    BitmapEncoder encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, stream);
+    BitmapEncoder encoder = await BitmapEncoder.CreateAsync(encoderId, stream);
     byte[] pixels = new byte[checked((int)(width * height * 4))];
+    uint random = 1;
     for (int i = 0; i < pixels.Length; i += 4)
     {
-      pixels[i] = 255;
-      pixels[i + 3] = 128;
+      for (int channel = 0; channel < 3; channel++)
+      {
+        random = unchecked(random * 1664525 + 1013904223);
+        pixels[i + channel] = noise ? (byte)(random >> 24) : (byte)(channel == 0 ? 255 : 0);
+      }
+      pixels[i + 3] = noise ? (byte)255 : (byte)128;
     }
     encoder.SetPixelData(BitmapPixelFormat.Rgba8, BitmapAlphaMode.Straight,
       width, height, 96, 96, pixels);
@@ -32,6 +40,101 @@ public sealed class SystemImportReaderTests
     byte[] bytes = new byte[checked((int)stream.Size)];
     reader.ReadBytes(bytes);
     return bytes;
+  }
+
+  // Pillow-generated two-frame inputs: first RGBA red/128, then blue/255 (100 ms each).
+  [Theory]
+  [InlineData("png", "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAACGFjVEwAAAACAAAAAPONk3AAAAAaZmNUTAAAAAAAAAACAAAAAQAAAAAAAAAAAAEACgAA+Sm2eQAAABFJREFUeJxj/M/A0MDAwMAAAAqKAYHtVsU+AAAAGmZjVEwAAAABAAAAAgAAAAEAAAAAAAAAAAABAAoAAGJaXK0AAAAVZmRBVAAAAAJ4nGNkYPj/n4GBgQEACwcCAEgTs00AAAAASUVORK5CYII=")]
+  [InlineData("webp", "UklGRoQAAABXRUJQVlA4WAoAAAASAAAAAQAAAAAAQU5JTQYAAAAAAAAAAABBTk1GKAAAAAAAAAAAAAEAAAAAAGQAAAJWUDhMDwAAAC8BAAAQBxD9jwIGIqL/AQBBTk1GKAAAAAAAAAAAAAEAAAAAAGQAAABWUDhMDwAAAC8BAAAABxDR//4HIqL/AQA=")]
+  public async Task AnimatedStorageItemPublishesOnlyStaticFirstFrame(string extension, string encoded)
+  {
+    byte[] source = Convert.FromBase64String(encoded);
+    using var sourceStream = await WebWorkbenchHost.BufferBytesAsync(source, Token);
+    try { _ = await BitmapDecoder.CreateAsync(sourceStream); }
+    catch (System.Runtime.InteropServices.COMException) when (extension == "webp")
+    {
+      TestContext.Current.TestOutputHelper!.WriteLine("Windows WebP decoder unavailable; import must reject this input.");
+      StorageFile unsupported = await StreamedFileAsync("animation.webp", source);
+      var rejected = new DataPackage();
+      rejected.SetStorageItems([unsupported]);
+      SystemImportRejectException error = await Assert.ThrowsAsync<SystemImportRejectException>(() =>
+        InputService.CreateImportReader().ReadPackageForImportAsync(rejected.GetView(), Token));
+      Assert.Equal("invalid", error.Reason);
+      return;
+    }
+    StorageFile file = await StreamedFileAsync($"animation.{extension}", source);
+    var package = new DataPackage();
+    package.SetStorageItems([file]);
+    ImportedSystemContent? content = await InputService.CreateImportReader()
+      .ReadPackageForImportAsync(package.GetView(), Token);
+    SystemImportImageItem image = Assert.Single(content!.Images);
+    Assert.Equal("image/png", image.MediaType);
+    Assert.NotEqual(source, image.Data);
+    Assert.DoesNotContain("acTL", System.Text.Encoding.ASCII.GetString(image.Data));
+    using var output = await WebWorkbenchHost.BufferBytesAsync(image.Data, Token);
+    BitmapDecoder decoder = await BitmapDecoder.CreateAsync(output);
+    Assert.Equal(BitmapDecoder.PngDecoderId, decoder.DecoderInformation.CodecId);
+    Assert.Equal(1u, decoder.FrameCount);
+    PixelDataProvider pixels = await decoder.GetPixelDataAsync(BitmapPixelFormat.Rgba8,
+      BitmapAlphaMode.Straight, new BitmapTransform(), ExifOrientationMode.IgnoreExifOrientation,
+      ColorManagementMode.DoNotColorManage);
+    Assert.Equal(new byte[] { 255, 0, 0, 128 }, pixels.DetachPixelData()[..4]);
+  }
+
+  private static Task<StorageFile> StreamedFileAsync(string name, byte[] bytes) =>
+    StorageFile.CreateStreamedFileAsync(name, async request =>
+    {
+      using Stream output = request.AsStreamForWrite();
+      await output.WriteAsync(bytes, Token);
+    }, null).AsTask(Token);
+
+  [Fact]
+  public async Task JpegExifOrientationIsAppliedOnceToStaticPng()
+  {
+    byte[] jpeg = await ImageBytesAsync(BitmapEncoder.JpegEncoderId, 2, 1);
+    // APP1/Exif: IFD0 Orientation=6 (90 degrees clockwise).
+    byte[] exif = Convert.FromHexString("FFE100224578696600004D4D002A00000008000101120003000000010006000000000000");
+    byte[] oriented = [.. jpeg[..2], .. exif, .. jpeg[2..]];
+    var package = new DataPackage();
+    package.SetStorageItems([await StreamedFileAsync("rotated.jpg", oriented)]);
+    SystemImportImageItem image = Assert.Single((await InputService.CreateImportReader()
+      .ReadPackageForImportAsync(package.GetView(), Token))!.Images);
+    Assert.Equal("image/png", image.MediaType);
+    Assert.Equal(1, image.PixelWidth);
+    Assert.Equal(2, image.PixelHeight);
+    using var output = await WebWorkbenchHost.BufferBytesAsync(image.Data, Token);
+    BitmapDecoder decoder = await BitmapDecoder.CreateAsync(output);
+    Assert.Equal(1u, decoder.PixelWidth);
+    Assert.Equal(2u, decoder.PixelHeight);
+    Assert.Equal(decoder.PixelWidth, decoder.OrientedPixelWidth);
+    Assert.Equal(decoder.PixelHeight, decoder.OrientedPixelHeight);
+  }
+
+  [Fact]
+  public async Task NormalizedEncodingStillEnforcesSingleImageByteLimit()
+  {
+    byte[] jpeg = await ImageBytesAsync(BitmapEncoder.JpegEncoderId, 2400, 2400, noise: true);
+    Assert.True(jpeg.Length < InputService.MaximumImportImageBytes);
+    var package = new DataPackage();
+    package.SetStorageItems([await StreamedFileAsync("noise.jpg", jpeg)]);
+    SystemImportRejectException error = await Assert.ThrowsAsync<SystemImportRejectException>(() =>
+      InputService.CreateImportReader().ReadPackageForImportAsync(package.GetView(), Token));
+    Assert.Equal("oversize", error.Reason);
+  }
+
+  [Fact]
+  public async Task NormalizedEncodingStillEnforcesBatchByteLimit()
+  {
+    byte[] jpeg = await ImageBytesAsync(BitmapEncoder.JpegEncoderId, 1900, 1900, noise: true);
+    Assert.True(jpeg.LongLength * 8 < InputService.MaximumImportBatchBytes);
+    Assert.True(1900L * 1900 * 8 < InputService.MaximumImportBatchPixels);
+    StorageFile file = await StreamedFileAsync("batch-noise.jpg", jpeg);
+    var package = new DataPackage();
+    package.SetStorageItems(Enumerable.Repeat<IStorageItem>(file, 8));
+    SystemImportRejectException error = await Assert.ThrowsAsync<SystemImportRejectException>(() =>
+      InputService.CreateImportReader().ReadPackageForImportAsync(package.GetView(), Token));
+    Assert.Equal("budget", error.Reason);
+    Assert.Contains("资源总体积", error.Message);
   }
 
   [Fact]
@@ -49,7 +152,7 @@ public sealed class SystemImportReaderTests
     ImportedSystemContent? content = await InputService.CreateImportReader().ReadPackageForImportAsync(package.GetView(), Token);
     SystemImportImageItem image = Assert.Single(content!.Images);
     Assert.Equal("image/png", image.MediaType);
-    Assert.Equal(png, image.Data);
+    Assert.Equal(new byte[] { 137, 80, 78, 71 }, image.Data[..4]);
     Assert.Equal(2, image.PixelWidth);
   }
   [Fact]
@@ -88,7 +191,7 @@ public sealed class SystemImportReaderTests
     Assert.Equal("image/png", image.MediaType);
     Assert.Equal(2, image.PixelWidth);
     Assert.Equal(2, image.PixelHeight);
-    Assert.Equal(png, image.Data);
+    Assert.Equal(new byte[] { 137, 80, 78, 71 }, image.Data[..4]);
     using var decodedMemory = new MemoryStream(image.Data);
     using var decodedStream = decodedMemory.AsRandomAccessStream();
     BitmapDecoder decoder = await BitmapDecoder.CreateAsync(decodedStream);

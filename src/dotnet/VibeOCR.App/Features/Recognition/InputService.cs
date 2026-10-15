@@ -520,9 +520,7 @@ public sealed class InputService : IInputService, ISystemImportReader
             using IRandomAccessStreamWithContentType stream = await reference.OpenReadAsync().AsTask(cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             SystemImportImageItem image = await ReadImportImageAsync(
-                stream,
-                string.IsNullOrWhiteSpace(stream.ContentType) ? "image/png" : stream.ContentType,
-                cancellationToken);
+                stream, cancellationToken);
             return new ImportedSystemContent([image], null, ImportedSystemContent.BitmapSource);
         }
         if (view.Contains(StandardDataFormats.StorageItems))
@@ -542,12 +540,16 @@ public sealed class InputService : IInputService, ISystemImportReader
             }
             List<SystemImportImageItem> images = [];
             long remainingPixels = MaximumImportBatchPixels, remainingBytes = MaximumImportBatchBytes;
+            long remainingSourceBytes = MaximumImportBatchBytes;
             foreach (StorageFile file in files)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 using IRandomAccessStreamWithContentType stream = await file.OpenReadAsync().AsTask(cancellationToken);
+                if ((long)stream.Size > remainingSourceBytes)
+                    throw new SystemImportRejectException("budget", "导入源文件总体积超过 64 MiB 上限。");
+                remainingSourceBytes -= (long)stream.Size;
                 SystemImportImageItem image = await ReadImportImageAsync(
-                    stream, MediaType(file.Name), cancellationToken, remainingPixels, remainingBytes);
+                    stream, cancellationToken, remainingPixels, remainingBytes);
                 images.Add(image);
                 remainingPixels -= (long)image.PixelWidth * image.PixelHeight;
                 remainingBytes -= image.Data.LongLength;
@@ -567,7 +569,6 @@ public sealed class InputService : IInputService, ISystemImportReader
     /// 实际读流/解码结果拒绝；解码成功才返回，杜绝伪造扩展名。</summary>
     private static async Task<SystemImportImageItem> ReadImportImageAsync(
         IRandomAccessStreamWithContentType stream,
-        string mediaType,
         CancellationToken cancellationToken,
         long remainingPixels = MaximumImportBatchPixels,
         long remainingBytes = MaximumImportBatchBytes)
@@ -575,8 +576,6 @@ public sealed class InputService : IInputService, ISystemImportReader
         if (stream.Size > MaximumImportImageBytes)
             throw new SystemImportRejectException(
                 "oversize", "导入图片超过 16 MiB 上限。");
-        if ((long)stream.Size > remainingBytes)
-            throw new SystemImportRejectException("budget", "导入资源总体积超过 64 MiB 上限。");
         byte[] data = new byte[(int)stream.Size];
         using (DataReader reader = new(stream.GetInputStreamAt(0)))
         {
@@ -592,7 +591,7 @@ public sealed class InputService : IInputService, ISystemImportReader
         try
         {
             BitmapDecoder decoder = await BitmapDecoder.CreateAsync(random).AsTask(cancellationToken);
-            uint width = decoder.PixelWidth, height = decoder.PixelHeight;
+            uint width = decoder.OrientedPixelWidth, height = decoder.OrientedPixelHeight;
             if (width == 0 || height == 0 ||
                 width > MaximumImportImageSide || height > MaximumImportImageSide ||
                 (long)width * height > MaximumImportImagePixels)
@@ -600,10 +599,26 @@ public sealed class InputService : IInputService, ISystemImportReader
                     "oversize", "导入图片尺寸超出支持范围（单边 ≤8192，总像素 ≤1600 万）。");
             if ((long)width * height > remainingPixels)
                 throw new SystemImportRejectException("budget", "导入图片总像素超过 3200 万上限。");
-            _ = await decoder.GetPixelDataAsync().AsTask(cancellationToken);
-            if (!mediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
-                mediaType = decoder.DecoderInformation.MimeTypes.FirstOrDefault() ?? "image/png";
-            return new SystemImportImageItem(data, mediaType, (int)width, (int)height);
+            // 只解码并发布首帧；不能把动画容器交给 Web 随时间再次解码。
+            byte[] pixels = (await decoder.GetPixelDataAsync(BitmapPixelFormat.Rgba8,
+                BitmapAlphaMode.Straight, new BitmapTransform(), ExifOrientationMode.RespectExifOrientation,
+                ColorManagementMode.DoNotColorManage).AsTask(cancellationToken)).DetachPixelData();
+            using var encoded = new InMemoryRandomAccessStream();
+            BitmapEncoder encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, encoded)
+                .AsTask(cancellationToken);
+            encoder.SetPixelData(BitmapPixelFormat.Rgba8, BitmapAlphaMode.Straight,
+                width, height, 96, 96, pixels);
+            await encoder.FlushAsync().AsTask(cancellationToken);
+            if (encoded.Size > MaximumImportImageBytes)
+                throw new SystemImportRejectException("oversize", "导入图片静态编码超过 16 MiB 上限。");
+            if ((long)encoded.Size > remainingBytes)
+                throw new SystemImportRejectException("budget", "导入资源总体积超过 64 MiB 上限。");
+            using var reader = new DataReader(encoded.GetInputStreamAt(0));
+            await reader.LoadAsync((uint)encoded.Size).AsTask(cancellationToken);
+            byte[] png = new byte[(int)encoded.Size];
+            reader.ReadBytes(png);
+            cancellationToken.ThrowIfCancellationRequested();
+            return new SystemImportImageItem(png, "image/png", (int)width, (int)height);
         }
         catch (Exception error) when (
             error is not (SystemImportRejectException or OperationCanceledException))
