@@ -80,6 +80,9 @@ public sealed partial class App
       VerticalScrollBarVisibility = Microsoft.UI.Xaml.Controls.ScrollBarVisibility.Hidden,
       HorizontalScrollBarVisibility = Microsoft.UI.Xaml.Controls.ScrollBarVisibility.Disabled,
     };
+    int wheelEvents = 0;
+    viewer.AddHandler(UIElement.PointerWheelChangedEvent,
+        new Microsoft.UI.Xaml.Input.PointerEventHandler((_, _) => wheelEvents++), handledEventsToo: true);
     var source = new Window { Title = "Owned synthetic scroll source", Content = viewer };
     var owner = new Window { Content = new Microsoft.UI.Xaml.Controls.Grid() };
     nint sourceHandle = WinRT.Interop.WindowNative.GetWindowHandle(source);
@@ -137,7 +140,13 @@ public sealed partial class App
         else
         {
           Invoke("scroll-capture-confirm");
-          await WaitForScrollUiAsync(() => viewer.VerticalOffset >= 32, cancellation.Token);
+          try { await WaitForScrollUiAsync(() => viewer.VerticalOffset >= 32, cancellation.Token); }
+          catch (InvalidOperationException error)
+          {
+            throw new InvalidOperationException(
+                $"{error.Message} offset={viewer.VerticalOffset}, wheelEvents={wheelEvents}; {session.DiagnosticState}", error);
+          }
+          Check(wheelEvents > 0, "Automatic scrolling must enter the real XAML pointer wheel input pipeline.");
           await Task.Delay(1400, cancellation.Token);
           Invoke("scroll-capture-finish");
           await WaitForScrollUiAsync(() => confirm.Visibility == Visibility.Visible && confirm.IsEnabled &&

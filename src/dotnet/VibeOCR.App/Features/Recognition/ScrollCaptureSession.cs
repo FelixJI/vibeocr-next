@@ -93,6 +93,7 @@ internal static class ScrollCaptureSession
     private long _lastProgress;
     private bool _scrollOutstanding;
     private int _noProgressAttempts;
+    private volatile string _scrollInputDiagnostic = "not attempted";
 
     private nint _source;
     private PhysicalRectangle _sourceRect;
@@ -114,6 +115,9 @@ internal static class ScrollCaptureSession
     private CancellationTokenRegistration _registration;
 
     internal Window ControlWindow => _window;
+    internal string DiagnosticState =>
+        $"automatic={_automatic}, review={_reviewPending}, confirmed={_initialPreviewConfirmed}, " +
+        $"stable={_stableStreak}, appended={_appendedForCurrentStreak}, input={_scrollInputDiagnostic}, failure={_failure?.Message}";
     internal bool HasReleasedCaptureResources => _loop?.IsCompleted != false && _previewTask.IsCompleted &&
         _stitcher is null && _lastCaptured is null && _pendingFrame is null && _finalFrame is null;
 
@@ -266,7 +270,7 @@ internal static class ScrollCaptureSession
       root.Children.Add(new TextBlock
       {
         Text = "仅支持静态、可重叠的普通窗口内容。选择方向与固定边缘范围，首帧预览后确认；"
-            + "自动模式使用选区中心的标准滚轮，不支持游戏、受保护画面、提权窗口或自定义滚动控件。",
+            + "自动模式会短暂定位光标到选区中心发送标准滚轮；请松开鼠键和 Ctrl/Shift/Alt。不支持游戏、受保护画面、提权窗口或自定义滚动控件。",
         TextWrapping = TextWrapping.Wrap,
       });
       _directionBox = new ComboBox { Header = "滚动方向", SelectedIndex = 0, HorizontalAlignment = HorizontalAlignment.Stretch };
@@ -569,7 +573,7 @@ internal static class ScrollCaptureSession
               if (inputViolation is not null) { Fail(new InvalidOperationException(inputViolation)); return; }
               if (!SendScroll())
               {
-                Fail(new InvalidOperationException("标准滚轮输入被系统拒绝，不支持此目标窗口；本次未完成。"));
+                Fail(new InvalidOperationException("标准滚轮输入被拒绝：请松开鼠键及 Ctrl/Shift/Alt，并确认目标支持滚轮且未提权；本次未完成。"));
                 return;
               }
               _scrollOutstanding = true;
@@ -1060,17 +1064,142 @@ internal static class ScrollCaptureSession
     private bool SendScroll()
     {
       var center = new Point { X = _bounds.X + _bounds.Width / 2, Y = _bounds.Y + _bounds.Height / 2 };
-      nint target = WindowFromPoint(center);
-      if (target == 0 || GetAncestor(target, GaRoot) != _source || GetForegroundWindow() != _source) return false;
-      bool horizontal = _direction is ScrollCaptureDirection.Left or ScrollCaptureDirection.Right;
-      int delta = _direction is ScrollCaptureDirection.Down or ScrollCaptureDirection.Left ? -120 : 120;
-      nint coordinates = unchecked((nint)((uint)(ushort)center.X | ((uint)(ushort)center.Y << 16)));
-      return SendMessageTimeoutW(target, horizontal ? 0x020Eu : 0x020Au,
-        unchecked((nint)(delta << 16)), coordinates, 0x0003, 250, out _) != 0;
+      bool sent = TrySendScrollInput(new NativeScrollInput(), center, _source, _direction);
+      _scrollInputDiagnostic = sent ? "system wheel accepted" : "system wheel refused";
+      return sent;
     }
+
+    // XAML 输入管线不保证处理直接 SendMessage 的 WM_MOUSEWHEEL；使用系统鼠标输入。
+    // 只在定位前和定位后均通过归属/按键检查时发送，且不覆盖用户在此期间的光标移动。
+    private static bool TrySendScrollInput(IScrollInput input, Point center, nint source, ScrollCaptureDirection direction)
+    {
+      bool CanSend() => input.IsSourceAt(center, source) &&
+          !new[] { 0x01, 0x02, 0x04, 0x05, 0x06, 0x10, 0x11, 0x12 }.Any(input.IsKeyDown);
+      if (!CanSend() || !input.TryGetCursor(out Point original)) return false;
+      try
+      {
+        if (!input.TrySetCursor(center) || !input.TryGetCursor(out Point positioned) ||
+            positioned.X != center.X || positioned.Y != center.Y || !CanSend()) return false;
+        bool horizontal = direction is ScrollCaptureDirection.Left or ScrollCaptureDirection.Right;
+        int delta = direction is ScrollCaptureDirection.Down or ScrollCaptureDirection.Left ? -120 : 120;
+        return input.SendWheel(horizontal, delta);
+      }
+      finally
+      {
+        if (input.TryGetCursor(out Point current) && current.X == center.X && current.Y == center.Y)
+          input.TrySetCursor(original);
+      }
+    }
+
+    private interface IScrollInput
+    {
+      bool IsSourceAt(Point center, nint source);
+      bool IsKeyDown(int key);
+      bool TryGetCursor(out Point point);
+      bool TrySetCursor(Point point);
+      bool SendWheel(bool horizontal, int delta);
+    }
+
+    private sealed class NativeScrollInput : IScrollInput
+    {
+      public bool IsSourceAt(Point center, nint source)
+      {
+        nint target = WindowFromPoint(center);
+        return target != 0 && GetAncestor(target, GaRoot) == source && GetForegroundWindow() == source;
+      }
+      public bool IsKeyDown(int key) => (GetAsyncKeyState(key) & 0x8000) != 0;
+      public bool TryGetCursor(out Point point) => GetCursorPos(out point);
+      public bool TrySetCursor(Point point) => SetCursorPos(point.X, point.Y);
+      public bool SendWheel(bool horizontal, int delta)
+      {
+        var input = new MouseInput
+        {
+          Data = unchecked((uint)delta),
+          Flags = horizontal ? 0x1000u : 0x0800u, // MOUSEEVENTF_HWHEEL / MOUSEEVENTF_WHEEL
+        };
+        return SendInput(1, [new Input { Mouse = input }], Marshal.SizeOf<Input>()) == 1;
+      }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Input
+    {
+      public uint Type; // INPUT_MOUSE = 0; Mouse 是 INPUT 联合体中最大的成员。
+      public MouseInput Mouse;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MouseInput
+    {
+      public int X, Y;
+      public uint Data, Flags, Time;
+      public nuint ExtraInfo;
+    }
+
+    // 不触碰真实桌面的输入边界自检，与预览门控共用既有子进程 seam。
+    private static void VerifyScrollInputBoundaries()
+    {
+      static void Check(bool condition, string message)
+      {
+        if (!condition) throw new InvalidOperationException(message);
+      }
+      var center = new Point { X = -80, Y = 120 };
+      foreach (ScrollCaptureDirection direction in Enum.GetValues<ScrollCaptureDirection>())
+      {
+        var input = new SyntheticScrollInput();
+        Check(TrySendScrollInput(input, center, 1, direction), "Allowed system wheel must be sent.");
+        Check(input.Horizontal == (direction is ScrollCaptureDirection.Left or ScrollCaptureDirection.Right) &&
+            input.Delta == (direction is ScrollCaptureDirection.Down or ScrollCaptureDirection.Left ? -120 : 120),
+            "Wheel flags and signs must follow the selected direction.");
+        Check(input.Position.X == 12 && input.Position.Y == 34, "Cursor must restore after accepted input.");
+      }
+      foreach (int key in new[] { 0x01, 0x02, 0x04, 0x05, 0x06, 0x10, 0x11, 0x12 })
+      {
+        var input = new SyntheticScrollInput { PressedKey = key };
+        Check(!TrySendScrollInput(input, center, 1, ScrollCaptureDirection.Down) && input.Sends == 0 && input.Moves == 0,
+            "Mouse buttons and wheel modifiers must reject input before moving the cursor.");
+      }
+      var refused = new SyntheticScrollInput { AcceptWheel = false };
+      Check(!TrySendScrollInput(refused, center, 1, ScrollCaptureDirection.Down) && refused.Sends == 1 &&
+          refused.Position.X == 12 && refused.Position.Y == 34, "Rejected injection must restore the cursor.");
+      var switched = new SyntheticScrollInput { RejectAfterMove = true };
+      Check(!TrySendScrollInput(switched, center, 1, ScrollCaptureDirection.Down) && switched.Sends == 0 &&
+          switched.Position.X == 12, "Source change after positioning must prevent input and restore the cursor.");
+      var clipped = new SyntheticScrollInput { ClipCursor = true };
+      Check(!TrySendScrollInput(clipped, center, 1, ScrollCaptureDirection.Down) && clipped.Sends == 0,
+          "Clipped cursor positioning must never send wheel input at the wrong location.");
+      var moved = new SyntheticScrollInput { UserMoves = true };
+      Check(TrySendScrollInput(moved, center, 1, ScrollCaptureDirection.Down) &&
+          moved.Position.X == 56 && moved.Position.Y == 78, "User cursor movement must never be overwritten.");
+    }
+
+    private sealed class SyntheticScrollInput : IScrollInput
+    {
+      public Point Position = new() { X = 12, Y = 34 };
+      public int PressedKey, Moves, Sends, Delta;
+      public bool Horizontal, RejectAfterMove, UserMoves, ClipCursor;
+      public bool AcceptWheel = true;
+      public bool IsSourceAt(Point center, nint source) => !RejectAfterMove || Moves == 0;
+      public bool IsKeyDown(int key) => key == PressedKey;
+      public bool TryGetCursor(out Point point) { point = Position; return true; }
+      public bool TrySetCursor(Point point)
+      {
+        Position = ClipCursor ? new Point { X = point.X + 1, Y = point.Y } : point;
+        Moves++;
+        return true;
+      }
+      public bool SendWheel(bool horizontal, int delta)
+      {
+        Sends++; Horizontal = horizontal; Delta = delta;
+        if (UserMoves) Position = new Point { X = 56, Y = 78 };
+        return AcceptWheel;
+      }
+    }
+
     // 此自检使用真实 WinUI 控件与解码，阻塞上一张预览来验证确认门控，不需要桌面前台权限。
     internal static async Task VerifyPreviewGateSelfCheckAsync()
     {
+      VerifyScrollInputBoundaries();
       static Session Create()
       {
         var session = new Session(1, new PhysicalRectangle(0, 0, 48, 96), CancellationToken.None)
@@ -1340,8 +1469,18 @@ internal static class ScrollCaptureSession
     private static extern bool SetWindowDisplayAffinity(nint window, uint affinity);
 
     [DllImport("user32.dll", SetLastError = true)]
-    private static extern nint SendMessageTimeoutW(nint window, uint message, nint wParam,
-      nint lParam, uint flags, uint timeout, out nuint result);
+    private static extern uint SendInput(uint count, Input[] inputs, int size);
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int key);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetCursorPos(out Point point);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetCursorPos(int x, int y);
 
     [DllImport("user32.dll")]
     private static extern nint GetForegroundWindow();
