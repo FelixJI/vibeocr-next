@@ -142,6 +142,13 @@ export async function expectCommand(
     .toContainEqual(expected);
 }
 
+// 模拟原生边界已加载的权威三分类目录；无目录用例应显式省略。
+export const readyImageRecognitionModes = [
+  { modeId: "rapid_text", displayName: "文字识别", availability: "ready" },
+  { modeId: "paddle_table", displayName: "表格识别", availability: "ready" },
+  { modeId: "paddle_formula", displayName: "公式识别", availability: "ready" },
+];
+
 export const snapshot: AppSnapshot = {
   sessionId: "layout-e2e",
   revision: 1,

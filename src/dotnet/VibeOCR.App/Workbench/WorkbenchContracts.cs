@@ -162,7 +162,8 @@ public sealed record RecognizeScreenshotImageCommand(
     string ResourceUri,
     Guid SessionId,
     long Revision,
-    IReadOnlyList<WorkbenchExclusionBox> ExcludeBoxes) : WorkbenchCommand,
+    IReadOnlyList<WorkbenchExclusionBox> ExcludeBoxes,
+    string? ModeId = null) : WorkbenchCommand,
     IScreenshotSessionExclusions;
 
 /// <summary>
@@ -221,7 +222,8 @@ public sealed record RecognizeImageEditImageCommand(
     string ResourceUri,
     Guid SessionId,
     long Revision,
-    IReadOnlyList<WorkbenchExclusionBox> ExcludeBoxes) : WorkbenchCommand,
+    IReadOnlyList<WorkbenchExclusionBox> ExcludeBoxes,
+    string? ModeId = null) : WorkbenchCommand,
     IScreenshotSessionExclusions;
 
 public sealed record PrepareImageEditTextLayerCommand(
@@ -585,7 +587,8 @@ public sealed record RecognitionWorkbenchState(
   RecognitionScreenshotSessionState? ScreenshotSession = null,
   RecognitionTextLayerState? TextLayer = null,
   WorkbenchResourceReference? StructuredResult = null,
-  WorkbenchResourceReference? ResultImage = null) : WorkbenchState
+  WorkbenchResourceReference? ResultImage = null,
+  IReadOnlyList<ScreenshotRecognitionModeEntry>? RecognitionModes = null) : WorkbenchState
 {
   public override string Scope => "recognition";
 }
@@ -605,15 +608,16 @@ public sealed record RecognitionScreenshotSessionState(
 /// <summary>
 /// 图片编辑页的独立宿主状态（scope "imageEdit"）：会话/修订/文字层与
 /// recognition scope 完全隔离；两个页面的上传图片互不影响。字段命名与
-/// recognition 会话投影保持一致，供同一套前端解析器消费；无引擎目录
-/// （imageEdit 页不提供任务级识别模式选择）。
+/// recognition 会话投影保持一致，供同一套前端解析器消费；三类显式识别
+/// 按钮共用宿主权威模式目录投影。
 /// </summary>
 public sealed record ImageEditWorkbenchState(
   bool IsBusy,
   string StatusCode,
   WorkbenchResourceReference? Input = null,
   RecognitionScreenshotSessionState? ScreenshotSession = null,
-  RecognitionTextLayerState? TextLayer = null) : WorkbenchState
+  RecognitionTextLayerState? TextLayer = null,
+  IReadOnlyList<ScreenshotRecognitionModeEntry>? RecognitionModes = null) : WorkbenchState
 {
   public override string Scope => "imageEdit";
 }

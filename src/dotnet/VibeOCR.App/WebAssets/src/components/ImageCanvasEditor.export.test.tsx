@@ -410,6 +410,125 @@ describe("editor export pixels and previews", () => {
     unmount();
   });
 
+  it.each([
+    ["文字识别", "rapid_text"],
+    ["表格识别", "paddle_table"],
+    ["公式识别", "paddle_formula"],
+  ])(
+    "submits the completed image with the explicit %s mode",
+    async (label, modeId) => {
+      stubCanvasStack();
+      const actions = createActions();
+      const modes = [
+        {
+          modeId: "rapid_text",
+          displayName: "文字识别",
+          availability: "ready",
+        },
+        {
+          modeId: "paddle_table",
+          displayName: "表格识别",
+          availability: "ready",
+        },
+        {
+          modeId: "paddle_formula",
+          displayName: "公式识别",
+          availability: "ready",
+        },
+      ];
+      const { unmount } = render(
+        <ImageCanvasEditor
+          {...editorProps({ actions })}
+          {...{ recognitionModes: modes }}
+        />,
+      );
+      fireEvent.click(await screen.findByRole("button", { name: label }));
+      await waitFor(() =>
+        expect(actions.run).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: "recognition.recognizeScreenshotImage",
+            modeId,
+            sessionId: "session-a",
+            revision: 0,
+            excludeBoxes: [],
+          }),
+        ),
+      );
+      expect(state.toBlobCalls).toBe(1);
+      unmount();
+    },
+  );
+
+  it("freezes the clicked mode while its PNG upload waits for the host", async () => {
+    stubCanvasStack();
+    let finishUpload: (response: Response) => void = () => {};
+    const uploading = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          finishUpload = resolve;
+        }),
+    );
+    vi.stubGlobal("fetch", uploading);
+    const actions = createActions();
+    const modes = [
+      { modeId: "rapid_text", displayName: "文字识别", availability: "ready" },
+      {
+        modeId: "paddle_table",
+        displayName: "表格识别",
+        availability: "ready",
+      },
+      {
+        modeId: "paddle_formula",
+        displayName: "公式识别",
+        availability: "ready",
+      },
+    ];
+    const props = editorProps({ actions });
+    const { rerender, unmount } = render(
+      <ImageCanvasEditor {...props} recognitionModes={modes} />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "表格识别" }));
+    await waitFor(() => expect(uploading).toHaveBeenCalledTimes(1));
+    rerender(<ImageCanvasEditor {...props} recognitionModes={[]} />);
+    finishUpload(
+      new Response(
+        JSON.stringify({
+          resourceUri:
+            "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+        }),
+        { status: 201, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "recognition.recognizeScreenshotImage",
+          modeId: "paddle_table",
+          sessionId: "session-a",
+          revision: 0,
+        }),
+      ),
+    );
+    unmount();
+  });
+
+  it("explains missing capabilities and never falls back to a generic recognition submit", async () => {
+    stubCanvasStack();
+    const actions = createActions();
+    const { unmount } = render(
+      <ImageCanvasEditor
+        {...editorProps({ actions })}
+        {...{ recognitionModes: [] }}
+      />,
+    );
+    for (const label of ["文字识别", "表格识别", "公式识别"])
+      expect(await screen.findByRole("button", { name: label })).toBeDisabled();
+    expect(screen.getByText(/识别目录未就绪/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "识别当前图" })).toBeNull();
+    expect(state.toBlobCalls).toBe(0);
+    unmount();
+  });
+
   it("hands off after an explicit recognition submit succeeds", async () => {
     stubCanvasStack();
     const actions = createActions();
