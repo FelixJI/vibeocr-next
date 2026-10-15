@@ -1,3 +1,4 @@
+import { readyImageRecognitionModes } from "./workbench-host";
 import { expect, test, type Page } from "@playwright/test";
 
 import { expectCommand, mountHost, snapshot } from "./workbench-host";
@@ -562,6 +563,7 @@ test("screenshot session mode exports applied inpaint pixels for explicit recogn
     ],
     features: {
       recognition: {
+        recognitionModes: readyImageRecognitionModes,
         isBusy: false,
         statusCode: "recognition.session",
         input: {
@@ -595,12 +597,13 @@ test("screenshot session mode exports applied inpaint pixels for explicit recogn
   });
 
   // 显式识别走会话导出路径：上传的识别输入包含已应用修补像素。
-  await page.getByRole("button", { name: "识别当前图" }).click();
+  await page.getByRole("button", { name: "文字识别" }).click();
   await expect.poll(() => uploads.length).toBe(1);
   await expectCommand(page, {
     scope: "recognition",
     action: "recognizeScreenshotImage",
     arguments: {
+      modeId: "rapid_text",
       resourceUri:
         "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
       sessionId: "inpaint-session-e2e",

@@ -1,3 +1,4 @@
+import { readyImageRecognitionModes } from "./workbench-host";
 import { expect, test, type Page } from "@playwright/test";
 import { expectCommand, mountHost } from "./workbench-host";
 
@@ -101,6 +102,7 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
       capabilities: ["recognition.annotation", "recognition.screenshotSession"],
       features: {
         recognition: {
+          recognitionModes: readyImageRecognitionModes,
           isBusy: false,
           statusCode: "recognition.session",
           input: {
@@ -245,11 +247,12 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
   await expect.poll(() => uploads.length).toBe(1);
   expect(uploads[0]?.readUInt32BE(16)).toBe(900);
   expect(uploads[0]?.readUInt32BE(20)).toBe(400);
-  await page.getByRole("button", { name: "识别当前图" }).click();
+  await page.getByRole("button", { name: "文字识别" }).click();
   await expectCommand(page, {
     scope: "recognition",
     action: "recognizeScreenshotImage",
     arguments: {
+      modeId: "rapid_text",
       resourceUri:
         "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
       sessionId: "capture-scene",
@@ -316,6 +319,7 @@ async function mountSceneForExport(page: Page, svg: string) {
       capabilities: ["recognition.annotation", "recognition.screenshotSession"],
       features: {
         recognition: {
+          recognitionModes: readyImageRecognitionModes,
           isBusy: false,
           statusCode: "recognition.session",
           input: {
@@ -523,6 +527,7 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
           ],
           features: {
             recognition: {
+              recognitionModes: readyImageRecognitionModes,
               isBusy: false,
               statusCode: "recognition.session",
               input: {

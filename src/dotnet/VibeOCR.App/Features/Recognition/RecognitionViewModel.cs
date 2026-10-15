@@ -210,14 +210,16 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     /// </summary>
     public Task RecognizeCapturedInputAsync(
         RecognitionInput input,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        RecognitionSubmitSelection? selection = null)
     {
         ArgumentNullException.ThrowIfNull(input);
         return RunInputAsync(
             _ => Task.FromResult<RecognitionInput?>(input),
             cancellationToken,
             recognize: true,
-            persistCurrentInput: false);
+            persistCurrentInput: false,
+            frozenSelection: selection);
     }
 
     /// <summary>
@@ -319,24 +321,25 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         CancellationToken cancellationToken,
         bool recognize,
         bool persistCurrentInput,
-        Func<CancellationToken, Task<RecognitionSubmitSelection?>>? awaitSelectionBeforeFreeze = null)
+        Func<CancellationToken, Task<RecognitionSubmitSelection?>>? awaitSelectionBeforeFreeze = null,
+        RecognitionSubmitSelection? frozenSelection = null)
     {
         ArgumentNullException.ThrowIfNull(loadInput);
         // 冷启动尚未绑定模式（目录未加载且无显式选择）时延迟冻结：输入先
         // 采集，提交参数在权威目录/已提交默认加载后才冻结；已有绑定则保持
         // 输入 await 前冻结契约，后续设置变更不影响本次提交。
-        bool deferFreeze = recognize &&
+        bool deferFreeze = frozenSelection is null && recognize &&
             awaitSelectionBeforeFreeze is not null &&
             _taskRecognitionMode is null &&
             TaskEngine is null;
-        string pipeline = !deferFreeze && recognize ? EffectivePipeline : Pipeline;
-        OcrEngine? engine = !deferFreeze && recognize ? EffectiveEngine : null;
-        MineruConfig? mineru = deferFreeze ? null : _taskMineruConfig;
+        string pipeline = frozenSelection?.PipelineId ?? (!deferFreeze && recognize ? EffectivePipeline : Pipeline);
+        OcrEngine? engine = frozenSelection is not null ? frozenSelection.Engine : !deferFreeze && recognize ? EffectiveEngine : null;
+        MineruConfig? mineru = frozenSelection is not null ? frozenSelection.Mineru : deferFreeze ? null : _taskMineruConfig;
         // 提交冻结点（输入 await 前）：按冻结的模式对原始 typed 选项严格
         // ToWire；不支持或越界字段在这里明确拒绝整个提交，不静默丢弃后
         // 仍提交（#110 AC2）。状态展示过滤走 ProjectWire，与此分开。
-        IReadOnlyDictionary<string, System.Text.Json.JsonElement>? options = null;
-        if (recognize && !deferFreeze && _taskOptions is not null)
+        IReadOnlyDictionary<string, System.Text.Json.JsonElement>? options = frozenSelection?.Options;
+        if (frozenSelection is null && recognize && !deferFreeze && _taskOptions is not null)
         {
             try
             {

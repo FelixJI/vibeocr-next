@@ -22,6 +22,8 @@ import {
 } from "react";
 import { createPortal, flushSync } from "react-dom";
 import type { AppActions } from "../app/types";
+import type { ImageRecognitionMode } from "../features/ScreenshotSession";
+import { availabilityLabel } from "../features/FeatureValues";
 
 import {
   isImeCompositionEvent,
@@ -576,6 +578,7 @@ interface ImageCanvasEditorProps {
   readonly actions: AppActions;
   readonly canExport: boolean;
   readonly canRecognize: boolean;
+  readonly recognitionModes?: readonly ImageRecognitionMode[];
   readonly source: string;
   readonly captureScene?: CaptureScene;
   /** 原图体积（字节）；宿主可选提供，缺省时只显示尺寸不显示原图体积。 */
@@ -975,6 +978,7 @@ export function ImageCanvasEditor({
   actions,
   canExport,
   canRecognize,
+  recognitionModes,
   source,
   sourceByteLength,
   captureScene,
@@ -4109,7 +4113,7 @@ export function ImageCanvasEditor({
     return true;
   }
 
-  async function recognizeCurrentImage() {
+  async function recognizeCurrentImage(modeId?: string) {
     if (!session || !canRecognize || exportInProgressRef.current) return;
     if (refuseIfFullyMasked("recognition")) return;
     exportInProgressRef.current = true;
@@ -4122,6 +4126,7 @@ export function ImageCanvasEditor({
       if (!exported) return;
       const started = await actions.run({
         type: commands.recognizeScreenshotImage,
+        ...(modeId === undefined ? {} : { modeId }),
         resourceUri: exported.resourceUri,
         sessionId: exported.sessionId,
         revision: exported.revision,
@@ -5757,19 +5762,64 @@ export function ImageCanvasEditor({
       {captureStyle ? undefined : "贴图"}
     </Button>
   );
-  const recognizeButton = session && (
-    <Button
-      title="识别当前图"
-      icon={<ToolbarIcon name="textRecognition" />}
-      aria-label="识别当前图"
-      appearance="primary"
-      size="small"
-      disabled={!canRecognize || isExporting || !!textEdit}
-      onClick={() => void recognizeCurrentImage()}
-    >
-      {captureStyle ? undefined : "识别当前图"}
-    </Button>
-  );
+  const imageModes: readonly ImageRecognitionMode[] = recognitionModes?.length
+    ? recognitionModes
+    : ["文字识别", "表格识别", "公式识别"].map((displayName) => ({
+        modeId: "",
+        displayName,
+        availability: "catalog_unavailable",
+      }));
+  const unavailableModeHints =
+    recognitionModes === undefined
+      ? []
+      : imageModes
+          .filter((mode) => mode.availability !== "ready" || !mode.modeId)
+          .map(
+            (mode) =>
+              `${mode.displayName}：${
+                mode.availability === "catalog_unavailable"
+                  ? "识别目录未就绪"
+                  : mode.availability === "default_missing" ||
+                      mode.availability === "default_invalid"
+                    ? "默认文字模式未配置或无效"
+                    : availabilityLabel(mode.availability)
+              }${mode.reasonCode ? `（${mode.reasonCode}）` : ""}`,
+          );
+  const recognizeButton =
+    session &&
+    (recognitionModes !== undefined ? (
+      imageModes.map((mode) => (
+        <Button
+          key={mode.displayName}
+          title={mode.hint ?? mode.displayName}
+          aria-label={mode.displayName}
+          appearance="primary"
+          size="small"
+          disabled={
+            !canRecognize ||
+            isExporting ||
+            !!textEdit ||
+            mode.availability !== "ready" ||
+            !mode.modeId
+          }
+          onClick={() => void recognizeCurrentImage(mode.modeId)}
+        >
+          {mode.displayName}
+        </Button>
+      ))
+    ) : (
+      <Button
+        title="识别当前图"
+        icon={<ToolbarIcon name="textRecognition" />}
+        aria-label="识别当前图"
+        appearance="primary"
+        size="small"
+        disabled={!canRecognize || isExporting || !!textEdit}
+        onClick={() => void recognizeCurrentImage()}
+      >
+        {captureStyle ? undefined : "识别当前图"}
+      </Button>
+    ));
   const closeSessionButton = session && (
     <Button
       title="结束会话"
@@ -5994,6 +6044,17 @@ export function ImageCanvasEditor({
           {captureStyle ? null : clearEditsButton}
           {moreActionsMenu}
         </Toolbar>
+        {session && !canRecognize && (
+          <p className="form-note">
+            当前宿主未提供图片识别能力；请检查运行环境。
+          </p>
+        )}
+        {session && unavailableModeHints.length > 0 && (
+          <p className="form-note">
+            {unavailableModeHints.join("；")}
+            。请在设置中检查运行环境与默认识别类型。
+          </p>
+        )}
         {settingsRowActive ? (
           <Toolbar
             aria-label="当前工具设置"

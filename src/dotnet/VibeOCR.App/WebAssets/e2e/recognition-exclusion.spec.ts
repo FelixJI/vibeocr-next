@@ -1,3 +1,4 @@
+import { readyImageRecognitionModes } from "./workbench-host";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { expectCommand, mountHost, snapshot } from "./workbench-host";
@@ -117,6 +118,7 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
     ],
     features: {
       recognition: {
+        recognitionModes: readyImageRecognitionModes,
         isBusy: false,
         statusCode: "recognition.session",
         input: {
@@ -176,7 +178,7 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
 
   // 识别当前图：上传的是未烘焙遮罩的普通最终像素；白色遮罩 OCR 输入
   // 由宿主按 excludeBoxes 生成（C# 单测覆盖），不在上传副本里烧白。
-  await page.getByRole("button", { name: "识别当前图" }).click();
+  await page.getByRole("button", { name: "文字识别" }).click();
   await expect.poll(() => uploads.length).toBe(1);
   expect(uploads[0]!.contentType).toBe("image/png");
   const recognitionInput = await decodeUpload(
@@ -216,6 +218,7 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
         scope: "recognition",
         action: "recognizeScreenshotImage",
         arguments: expect.objectContaining({
+          modeId: "rapid_text",
           resourceUri:
             "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
           sessionId: "exclusion-e2e",
@@ -253,7 +256,7 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
     action: "notifyScreenshotRevision",
     arguments: { sessionId: "exclusion-e2e", revision: 2 },
   });
-  await page.getByRole("button", { name: "识别当前图" }).click();
+  await page.getByRole("button", { name: "文字识别" }).click();
   await expect(
     page.getByText(
       "整张图都在屏蔽区内：没有可识别内容，已取消本次识别；原图与屏蔽区保持不变，可撤销后重试。",
@@ -269,7 +272,7 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
     action: "notifyScreenshotRevision",
     arguments: { sessionId: "exclusion-e2e", revision: 3 },
   });
-  await page.getByRole("button", { name: "识别当前图" }).click();
+  await page.getByRole("button", { name: "文字识别" }).click();
   await expect.poll(() => uploads.length).toBe(4);
   const retryInput = await decodeUpload(page, uploads[3]!.body, "image/png");
   expect(pixelAt(retryInput, 120, 40)).toEqual([224, 32, 32]);

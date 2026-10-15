@@ -114,6 +114,8 @@ public static class WorkbenchBridgeCodec
     ["resourceUri", "sessionId", "revision"];
   private static readonly HashSet<string> SessionResourceWithExclusionArgumentFields =
     ["resourceUri", "sessionId", "revision", "excludeBoxes"];
+  private static readonly HashSet<string> ImageRecognitionArgumentFields =
+    ["resourceUri", "sessionId", "revision", "excludeBoxes", "modeId"];
   private static readonly HashSet<string> PinResourceArgumentFields =
     ["resourceUri", "sessionId", "revision", "excludeBoxes"];
   private static readonly HashSet<string> StructuredCopyArgumentFields =
@@ -418,12 +420,14 @@ public static class WorkbenchBridgeCodec
       }
       case ("imageEdit", "recognizeScreenshotImage"):
         EnsureObjectWithFields(
-          arguments, SessionResourceWithExclusionArgumentFields, "command arguments");
+          arguments, arguments.TryGetProperty("modeId", out _)
+            ? ImageRecognitionArgumentFields : SessionResourceWithExclusionArgumentFields, "command arguments");
         return new RecognizeImageEditImageCommand(
           ReadAnnotationResourceUri(arguments),
           ParseGuidArgument(arguments, "sessionId"),
           ParseContentRevision(arguments),
-          ParseExclusionBoxes(arguments));
+          ParseExclusionBoxes(arguments),
+          ParseOptionalImageRecognitionMode(arguments));
       case ("imageEdit", "prepareScreenshotTextLayer"):
         EnsureObjectWithFields(
           arguments, SessionResourceArgumentFields, "command arguments");
@@ -509,12 +513,14 @@ public static class WorkbenchBridgeCodec
       }
       case ("recognition", "recognizeScreenshotImage"):
         EnsureObjectWithFields(
-          arguments, SessionResourceWithExclusionArgumentFields, "command arguments");
+          arguments, arguments.TryGetProperty("modeId", out _)
+            ? ImageRecognitionArgumentFields : SessionResourceWithExclusionArgumentFields, "command arguments");
         return new RecognizeScreenshotImageCommand(
           ReadAnnotationResourceUri(arguments),
           ParseGuidArgument(arguments, "sessionId"),
           ParseContentRevision(arguments),
-          ParseExclusionBoxes(arguments));
+          ParseExclusionBoxes(arguments),
+          ParseOptionalImageRecognitionMode(arguments));
       case ("recognition", "prepareScreenshotTextLayer"):
         EnsureObjectWithFields(
           arguments, SessionResourceArgumentFields, "command arguments");
@@ -1368,6 +1374,16 @@ public static class WorkbenchBridgeCodec
     return new SetMineruRecognitionCommand(tier!, ocrMode!, pageRange!, language);
   }
 
+  private static string? ParseOptionalImageRecognitionMode(JsonElement arguments)
+  {
+    // 旧命令省略字段；显式提供时不接受 null/空值来悄悄退回全局模式。
+    if (!arguments.TryGetProperty("modeId", out JsonElement element)) return null;
+    if (element.ValueKind == JsonValueKind.String &&
+      element.GetString() is { Length: > 0 and <= MaxRecognitionModeIdLength } mode &&
+      !string.IsNullOrWhiteSpace(mode)) return mode;
+    throw new WorkbenchBridgeProtocolException("Workbench image recognition mode is invalid.");
+  }
+
   private static SetDefaultRecognitionModeCommand ParseDefaultRecognitionMode(
     JsonElement arguments)
   {
@@ -1500,6 +1516,7 @@ public static class WorkbenchBridgeCodec
     {
       imageEdit.IsBusy,
       imageEdit.StatusCode,
+      recognitionModes = imageEdit.RecognitionModes ?? [],
       imageEdit.Input,
       screenshotSession = imageEdit.ScreenshotSession is null ? null : new
       {
@@ -1528,6 +1545,7 @@ public static class WorkbenchBridgeCodec
     {
       recognition.IsBusy,
       recognition.StatusCode,
+      recognitionModes = recognition.RecognitionModes ?? [],
       recognition.Input,
       recognition.Result,
       engines = recognition.Engines ?? [],
