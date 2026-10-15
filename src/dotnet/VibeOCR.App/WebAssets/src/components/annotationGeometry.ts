@@ -2,6 +2,8 @@ export type AnnotationTool =
   | "rectangle"
   | "ellipse"
   | "arrow"
+  | "line"
+  | "polyline"
   | "text"
   | "mosaic"
   | "blur"
@@ -28,13 +30,31 @@ export interface AnnotationStyle {
   readonly strokeOpacity?: number;
   /** 矩形/椭圆填充：缺省（undefined）= 空心，即旧对象默认效果。 */
   readonly fill?: AnnotationFill;
+  /** 线型：缺省 solid（旧对象实线）；虚线/点线按固定节奏绘制。 */
+  readonly lineStyle?: AnnotationLineStyle;
+  /** 矩形圆角半径（px）：缺省/0 = 直角（旧对象效果）。 */
+  readonly cornerRadius?: number;
+  /** 箭头端头样式：缺省 open（旧两线开放头）；hollow/solid 为三角端头。 */
+  readonly arrowStyle?: AnnotationArrowStyle;
+  /** 双向箭头：两端都绘制端头；缺省单向（仅 end 端）。 */
+  readonly arrowDouble?: boolean;
 }
 
-/** 形状填充样式：存在即启用；颜色缺省白、不透明度缺省 100。 */
+/** 描边线型：实线/虚线/点线。 */
+export type AnnotationLineStyle = "solid" | "dashed" | "dotted";
+
+/** 箭头端头样式：开放（旧默认两线头）/实心三角/空心三角。 */
+export type AnnotationArrowStyle = "open" | "hollow" | "solid";
+
+/** 形状填充样式：存在即启用；颜色缺省白、不透明度缺省 100。
+ * enabled=false 表示填充被关闭但保留原值：渲染/导出与空心一致，
+ * 重新开启时从对象自身恢复（随历史撤销/重做，不做索引侧表）。 */
 export interface AnnotationFill {
   readonly color?: string;
   /** 0-100 百分比；0 为有效值（完全透明填充）。 */
   readonly opacity?: number;
+  /** 缺省（undefined/true）= 启用；false = 关闭但保留值。 */
+  readonly enabled?: boolean;
 }
 
 export interface Mark {
@@ -83,6 +103,47 @@ export interface Rect {
   readonly height: number;
 }
 
+/** 拖拽绘制的矩形/椭圆对角约束：Shift 取较大边成正方/正圆，Alt 以
+ * 起点为中心对称展开；返回可能反向（start>end）的对角点，渲染/命中
+ * 一律经 normalizedRect 归一，不产生负尺寸语义。 */
+export function constrainBoxDrag(
+  anchor: Point,
+  current: Point,
+  options: { readonly shift: boolean; readonly fromCenter: boolean },
+): { readonly start: Point; readonly end: Point } {
+  let dx = current.x - anchor.x;
+  let dy = current.y - anchor.y;
+  if (options.shift) {
+    const size = Math.max(Math.abs(dx), Math.abs(dy));
+    dx = (dx < 0 ? -1 : 1) * size;
+    dy = (dy < 0 ? -1 : 1) * size;
+  }
+  return options.fromCenter
+    ? {
+        start: { x: anchor.x - dx, y: anchor.y - dy },
+        end: { x: anchor.x + dx, y: anchor.y + dy },
+      }
+    : { start: anchor, end: { x: anchor.x + dx, y: anchor.y + dy } };
+}
+
+/** 直线/箭头拖拽终点约束：Shift 吸附到 45° 倍数方向，长度保持拖拽值。 */
+export function constrainLineDrag(
+  anchor: Point,
+  current: Point,
+  snap45: boolean,
+): Point {
+  const dx = current.x - anchor.x;
+  const dy = current.y - anchor.y;
+  if (!snap45 || (dx === 0 && dy === 0)) return current;
+  const step = Math.PI / 4;
+  const angle = Math.round(Math.atan2(dy, dx) / step) * step;
+  const length = Math.hypot(dx, dy);
+  return {
+    x: anchor.x + Math.cos(angle) * length,
+    y: anchor.y + Math.sin(angle) * length,
+  };
+}
+
 export function isExclusionMark(mark: Mark): boolean {
   return mark.tool === "exclude";
 }
@@ -98,12 +159,13 @@ export function annotationStrokeAlpha(mark: Mark): number {
   return clampPercent(mark.style?.strokeOpacity, 100) / 100;
 }
 
-/** 标记填充解析：无 fill 为 undefined（空心）；0% 不透明度是有效透明填充。 */
+/** 标记填充解析：无 fill 或 fill.enabled=false 为 undefined（空心，
+ * 旧对象与关闭填充的渲染一致）；0% 不透明度是有效透明填充。 */
 export function annotationFill(
   mark: Mark,
 ): { readonly color: string; readonly alpha: number } | undefined {
   const fill = mark.style?.fill;
-  if (!fill) return undefined;
+  if (!fill || fill.enabled === false) return undefined;
   const color =
     typeof fill.color === "string" && /^#[0-9a-fA-F]{6}$/.test(fill.color)
       ? fill.color.toLowerCase()
