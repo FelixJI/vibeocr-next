@@ -1572,7 +1572,8 @@ public sealed class RuntimeInstallerCommandRunner(Action<string>? commandStartin
     internal static async Task<RuntimeInstallerProcessResult> RunProcessAsync(
         ProcessStartInfo startInfo,
         Action<string>? standardOutputLine,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<Process>? processStarted = null)
     {
         using Process process = Process.Start(startInfo) ??
             throw new RuntimeInstallerException("Could not start Runtime Installer.");
@@ -1591,6 +1592,7 @@ public sealed class RuntimeInstallerCommandRunner(Action<string>? commandStartin
         Task exited = process.WaitForExitAsync();
         try
         {
+            processStarted?.Invoke(process);
             try
             {
                 await exited.WaitAsync(cancellationToken).ConfigureAwait(false);
