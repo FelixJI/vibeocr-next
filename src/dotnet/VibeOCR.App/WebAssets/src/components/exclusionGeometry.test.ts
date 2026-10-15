@@ -23,7 +23,7 @@ function fakeImage(width: number, height: number) {
 }
 
 function exclusionMark(start: Mark["start"], end: Mark["end"]): Mark {
-  return { tool: "exclude", start, end };
+  return { id: "exclude-seed", tool: "exclude", start, end };
 }
 
 const IMAGE = fakeImage(1600, 900);
