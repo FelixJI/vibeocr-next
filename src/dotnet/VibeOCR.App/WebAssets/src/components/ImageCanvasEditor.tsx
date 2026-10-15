@@ -5078,6 +5078,7 @@ function resizeBoxMark(
   delta: Point,
   shift: boolean,
 ): Mark {
+  if (delta.x === 0 && delta.y === 0) return mark;
   const left = Math.min(mark.start.x, mark.end.x);
   const right = Math.max(mark.start.x, mark.end.x);
   const top = Math.min(mark.start.y, mark.end.y);

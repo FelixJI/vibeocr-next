@@ -1632,3 +1632,91 @@ describe("E 轮手势边界回归", () => {
     },
   );
 });
+
+describe("G1 手柄零位移", () => {
+  it.each(
+    ["矩形", "椭圆", "屏蔽"].flatMap((toolName) =>
+      [
+        {
+          name: "正向 Shift",
+          from: { x: 100, y: 100 },
+          to: { x: 300, y: 200 },
+          shift: true,
+        },
+        {
+          name: "反向",
+          from: { x: 200, y: 200 },
+          to: { x: 100, y: 100 },
+          shift: false,
+        },
+        {
+          name: "零宽 Shift",
+          from: { x: 100, y: 100 },
+          to: { x: 100, y: 200 },
+          shift: true,
+        },
+        {
+          name: "零高 Shift",
+          from: { x: 100, y: 100 },
+          to: { x: 200, y: 100 },
+          shift: true,
+        },
+      ].map((scenario) => ({ toolName, ...scenario })),
+    ),
+  )(
+    "$toolName $name：原地点击手柄不改变预览或产生历史",
+    async ({ toolName, from, to, shift }) => {
+      stubCanvasStack();
+      const harness = stubAnimationFrames();
+      const { actions, unmount } = await renderEditor();
+      const canvas = getEditorCanvas();
+      mockCanvasBox(canvas, 900, 600);
+      harness.flush();
+      fireEvent.click(screen.getByRole("button", { name: toolName }));
+      await dragDraw(canvas, harness, from, to);
+      fireEvent.click(screen.getByRole("button", { name: "选择" }));
+      fireEvent.change(screen.getByLabelText("选择标注对象"), {
+        target: { value: "0" },
+      });
+      harness.flush();
+      const left = Math.min(from.x, to.x),
+        top = Math.min(from.y, to.y);
+      const width = Math.abs(from.x - to.x),
+        height = Math.abs(from.y - to.y);
+      clearCalls();
+      fireEvent.pointerDown(canvas, {
+        pointerId: 2,
+        clientX: left,
+        clientY: top,
+        shiftKey: shift,
+      });
+      fireEvent.pointerMove(canvas, {
+        pointerId: 2,
+        clientX: left,
+        clientY: top,
+        shiftKey: shift,
+      });
+      harness.flush();
+      // 悬停在同一手柄：预览仍保留原包围框，退化形状不会因 Shift 自动展开。
+      expect(drawnRects()).toContainEqual([
+        left - 5,
+        top - 5,
+        width + 10,
+        height + 10,
+      ]);
+      fireEvent.pointerUp(canvas, {
+        pointerId: 2,
+        clientX: left,
+        clientY: top,
+        shiftKey: shift,
+      });
+      harness.flush();
+      expect(revisions(actions)).toEqual([1]);
+      // 一次撤销只撤原绘制，不能留下一个规范化字段造成的空历史步骤。
+      fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+      harness.flush();
+      expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
+      unmount();
+    },
+  );
+});
