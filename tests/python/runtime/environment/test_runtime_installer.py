@@ -967,7 +967,11 @@ def test_repair_after_failed_install_clears_stale_revision_failure_only_on_succe
 
     monkeypatch.setattr(manager, "_base_python", original_base_python)
     repaired = manager.repair_empty(item["id"])
-    assert repaired["revision"] == 2
+    # 失败安装残留 2、失败修复在 ledger 保留 3：成功修复取新号码 4。
+    assert repaired["revision"] == 4
+    assert repaired["path"].endswith(str(Path(item["id"]) / "revisions" / "4"))
+    assert (manager.root / item["id"] / "revisions" / "2").is_dir()
+    assert not (manager.root / item["id"] / "revisions" / "3").exists()
     assert repaired["last_install_failure"] is None
     assert (
         ManagedEnvironmentStore(
@@ -1814,8 +1818,8 @@ def test_named_install_rejects_native_import_failure_without_committing(
     assert surviving["status"] == "empty"
     assert surviving["revision"] == 1
     assert surviving["last_install_failure"]["reason_code"] == "engine_import_failed"
-    candidate = next((manager.root / item["id"] / "revisions").glob("2-*"))
-    assert len(candidate.name.split("-", 1)[1]) == 16
+    candidate = manager.root / item["id"] / "revisions" / "2"
+    assert candidate.is_dir()
     registry = json.loads(manager._registry.read_text(encoding="utf-8"))
     registry["environments"][item["id"]].pop("last_install_operation")
     registry["environments"][item["id"]].update(
@@ -1926,7 +1930,7 @@ def test_named_install_rapidocr_probe_imports_real_transitive_closure(
 
     # 若探针未覆盖真实闭包（旧实现），候选修订会被提交为已安装环境；
     # 模拟该状态时，list/prepare_switch 也必须按同一探针 fail closed。
-    candidate = next((manager.root / item["id"] / "revisions").glob("2-*"))
+    candidate = manager.root / item["id"] / "revisions" / "2"
     registry = json.loads(manager._registry.read_text(encoding="utf-8"))
     registry["environments"][item["id"]].pop("last_install_operation")
     registry["environments"][item["id"]].update(

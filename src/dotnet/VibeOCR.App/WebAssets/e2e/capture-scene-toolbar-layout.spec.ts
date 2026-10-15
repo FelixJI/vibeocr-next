@@ -2,10 +2,14 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { mountHost } from "./workbench-host";
 
-/** 截图现场两排工具栏的真实浏览器布局契约：
- *  1) 宽视口：第一排主操作单行且不超过 880px 工具宽度上限，页面无横向溢出；
- *  2) 窄视口：两排各自换行收纳，覆盖层与所有按钮都不横向溢出视口；
- *     第二排可见且可交互（点色板、切工具后线宽出现）。
+/** 截图现场两排工具栏的真实浏览器布局契约（最终方案）：
+ *  1) 主排（图片编辑工具）承载全部绘图工具与操作（含取字/修补上下文
+ *     操作、复制/保存/识别/撤销等），始终单行；过宽时容器内水平滚动
+ *     保持可达，不把工具/操作挪去下排；
+ *  2) 下排（当前工具设置）仅当前工具的颜色/线宽/字号/强度等参数与
+ *     自动取字偏好，无属性时收起，且位于主排下方；
+ *  3) 窄视口（360/640）：页面不横向溢出，主排可滚动到末尾按钮，
+ *     下排可见且可交互（点色板、线宽选择器出现）。
  *  只锁定几何契约，不做视觉基线（基线由主代理维护）。 */
 
 const sceneGeometry = {
@@ -81,13 +85,14 @@ async function mountScene(
     },
     "/#/imageEdit?scene=1",
   );
+  // initialTool=rectangle：主排与属性下排（当前工具设置）同时就绪。
   await expect(
-    page.getByRole("toolbar", { name: "标注样式与辅助操作" }),
+    page.getByRole("toolbar", { name: "当前工具设置" }),
   ).toBeVisible();
 }
 
-/** 主操作排内按钮的视觉行数（按按钮中心 y 去重）。 */
-async function primaryRowCount(page: Page): Promise<number> {
+/** 主排内按钮的视觉行数（按按钮中心 y 去重；滚动不改变单行）。 */
+async function mainRowCount(page: Page): Promise<number> {
   return page
     .getByRole("toolbar", { name: "图片编辑工具" })
     .locator("button")
@@ -102,49 +107,72 @@ async function primaryRowCount(page: Page): Promise<number> {
     );
 }
 
-/** 两排工具栏按钮中横向超出视口的名字（应为空）。 */
-async function horizontallyOffscreenButtons(page: Page): Promise<string[]> {
-  return page.evaluate(() =>
-    Array.from(
-      document.querySelectorAll<HTMLElement>(".editor-scene-toolstack button"),
-    )
-      .filter((button) => {
-        const box = button.getBoundingClientRect();
-        return (
-          box.width > 0 &&
-          (box.right > window.innerWidth + 0.5 || box.left < -0.5)
-        );
-      })
-      .map((button) => button.getAttribute("aria-label") ?? button.textContent),
-  );
+/** 主排滚动到最右后，末尾按钮是否可达（仍在工具栏盒内可见）。 */
+async function mainRowScrollableToEnd(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const toolbar = document.querySelector<HTMLElement>(".editor-toolbar-main");
+    if (!toolbar) return false;
+    toolbar.scrollLeft = toolbar.scrollWidth;
+    const box = toolbar.getBoundingClientRect();
+    const buttons = Array.from(toolbar.querySelectorAll("button"));
+    const last = buttons[buttons.length - 1];
+    if (!last) return false;
+    const button = last.getBoundingClientRect();
+    return button.right <= box.right + 0.5 && button.width > 0;
+  });
 }
 
-test("宽视口：第一排主操作单行、宽度不超过 880px 且页面不横向溢出", async ({
+/** 工具栏盒自身是否越出视口（溢出应被容器滚动承接，不撑破页面）。 */
+async function toolbarWithinViewport(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const toolbars = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        ".editor-toolbar-stack .editor-toolbar",
+      ),
+    );
+    return toolbars.every((toolbar) => {
+      const box = toolbar.getBoundingClientRect();
+      return box.right <= window.innerWidth + 0.5 && box.left >= -0.5;
+    });
+  });
+}
+
+test("宽视口：主排（工具+操作）单行、位于属性下排上方，页面不横向溢出", async ({
   page,
 }) => {
   await mountScene(page, 1280, 720);
-  const primary = page.getByRole("toolbar", { name: "图片编辑工具" });
-  await expect(primary).toBeVisible();
-  expect(await primaryRowCount(page)).toBe(1);
-  const primaryWidth = await primary.evaluate(
+  const main = page.getByRole("toolbar", { name: "图片编辑工具" });
+  const settings = page.getByRole("toolbar", { name: "当前工具设置" });
+  await expect(main).toBeVisible();
+  await expect(settings).toBeVisible();
+  const mainTop = await main.evaluate(
+    (element: HTMLElement) => element.getBoundingClientRect().top,
+  );
+  const settingsTop = await settings.evaluate(
+    (element: HTMLElement) => element.getBoundingClientRect().top,
+  );
+  // 主排在上、属性下排在下。
+  expect(mainTop).toBeLessThan(settingsTop);
+  // 主排全部按钮单行（工具+操作同排，不折行）。
+  const mainWidth = await main.evaluate(
     (element: HTMLElement) => element.getBoundingClientRect().width,
   );
   test.info().annotations.push({
-    type: "primary-row-width",
-    description: `${primaryWidth.toFixed(1)}px`,
+    type: "main-row-width",
+    description: `${mainWidth.toFixed(1)}px`,
   });
-  // 880px 是截图现场工具区的既有宽度上限（--capture-tools-left 公式）。
-  expect(primaryWidth).toBeLessThanOrEqual(880);
+  expect(await mainRowCount(page)).toBe(1);
+  // 页面与工具栏盒均不横向溢出。
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth,
     ),
   ).toBe(true);
-  expect(await horizontallyOffscreenButtons(page)).toEqual([]);
+  expect(await toolbarWithinViewport(page)).toBe(true);
 });
 
 for (const width of [640, 360]) {
-  test(`窄视口 ${width}px：两排换行收纳不横向溢出，第二排可见可达`, async ({
+  test(`窄视口 ${width}px：主排单行可滚动到末尾，下排属性可见可交互`, async ({
     page,
   }) => {
     await mountScene(page, width, 720);
@@ -162,27 +190,36 @@ for (const width of [640, 360]) {
         () => document.documentElement.scrollWidth <= window.innerWidth,
       ),
     ).toBe(true);
-    // 所有按钮不横向出视口（换行收纳而非裁剪）。
-    expect(await horizontallyOffscreenButtons(page)).toEqual([]);
-    // 第二排可见且可交互：点选常用色 + 工具切换后线宽选择器出现在第二排。
-    // 与真实用户一致：覆盖层内部可滚动时先滚动到目标区再点击。
-    const secondary = page.getByRole("toolbar", {
-      name: "标注样式与辅助操作",
-    });
+    expect(await toolbarWithinViewport(page)).toBe(true);
+    // 主排保持单行，且滚动到最右后末尾按钮（更多）可达。
+    expect(await mainRowCount(page)).toBe(1);
+    expect(await mainRowScrollableToEnd(page)).toBe(true);
+    // 下排可见且可交互：点选常用色；线宽选择器在属性排且不出视口。
+    const settings = page.getByRole("toolbar", { name: "当前工具设置" });
     await expect(
-      secondary.getByRole("group", { name: "标注颜色" }),
+      settings.getByRole("group", { name: "标注颜色" }),
     ).toBeVisible();
     await page.getByRole("button", { name: "常用颜色 #1f6feb" }).click();
-    await overlay.evaluate((element) => {
-      element.scrollTop = 0;
-    });
-    await page.getByRole("button", { name: "矩形", exact: true }).click();
-    const widthSelect = secondary.getByLabel("线条宽度");
+    const widthSelect = settings.getByLabel("线条宽度");
     await expect(widthSelect).toBeVisible();
     const selectBox = await widthSelect.boundingBox();
     expect(selectBox!.x + selectBox!.width).toBeLessThanOrEqual(width + 0.5);
   });
 }
+
+test("无属性工具收起下排；切换工具后属性排重新出现", async ({ page }) => {
+  await mountScene(page, 1280, 720);
+  // 选择工具无属性：下排收起，只剩主排。
+  await page.getByRole("button", { name: "选择", exact: true }).click();
+  await expect(
+    page.getByRole("toolbar", { name: "当前工具设置" }),
+  ).toBeHidden();
+  // 切回绘图工具：颜色/线宽属性排重新出现。
+  await page.getByRole("button", { name: "矩形", exact: true }).click();
+  const settings = page.getByRole("toolbar", { name: "当前工具设置" });
+  await expect(settings.getByRole("group", { name: "标注颜色" })).toBeVisible();
+  await expect(settings.getByLabel("线条宽度")).toBeVisible();
+});
 
 test("输出设置可达：正常位置展开、操作格式/尺寸输入与色板、Tab 可达", async ({
   page,

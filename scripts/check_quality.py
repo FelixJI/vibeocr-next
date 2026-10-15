@@ -52,6 +52,10 @@ def main() -> int:
         ),
         ("openapi", [sys.executable, "scripts/check_openapi_quality.py"]),
         (
+            "toolbar-icons",
+            [sys.executable, "scripts/generate_toolbar_icons.py", "--check"],
+        ),
+        (
             "protocol-conformance",
             [sys.executable, "scripts/check_runtime_protocol_conformance.py"],
         ),

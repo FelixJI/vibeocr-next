@@ -823,13 +823,32 @@ public sealed partial class MainWindow : Window
       // XAML 图标解析需真实 WinUI UI 线程；普通单元测试宿主未初始化 Application。
       smokeStage = "capture-icons-verification";
       WebReadySmokeStatus.Stage(smokeStage);
-      foreach (string key in new[] { "rectangle", "ellipse", "arrow", "mosaic", "blur", "tableRecognition", "scrollCapture" })
+      foreach (string key in ScreenshotToolbarIcons.Keys)
       {
-        if (ScreenshotToolbarIcons.CreateIcon(key) is not PathIcon { Data: not null })
-          throw new InvalidOperationException($"Capture icon failed to load: {key}");
+        smokeStage = $"capture-icon-{key}";
+        ContentControl icon = ScreenshotToolbarIcons.CreateIcon(key);
+        ScreenshotToolbarIcons.EffectLayers.TryGetValue(key, out var layers);
+        if (icon.Content is not Canvas iconCanvas ||
+            iconCanvas.Children.Count != (layers?.Length ?? 1))
+          throw new InvalidOperationException($"Toolbar icon failed to load: {key}");
+        var foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.White);
+        smokeStage = $"capture-icon-color-{key}";
+        icon.Foreground = foreground;
+        for (int index = 0; index < iconCanvas.Children.Count; index++)
+        {
+          if (iconCanvas.Children[index] is not Microsoft.UI.Xaml.Shapes.Path iconPath ||
+              iconPath.Data is null ||
+              (iconPath.Data.Bounds.Width <= 0 && iconPath.Data.Bounds.Height <= 0))
+            throw new InvalidOperationException($"Toolbar icon has invalid geometry: {key}");
+          bool stroked = layers is null || layers[index].Stroke;
+          if (stroked &&
+              Math.Abs(iconPath.StrokeThickness - ScreenshotToolbarIcons.StrokeWidth) > 0.001)
+            throw new InvalidOperationException($"Toolbar icon has incorrect stroke width: {key}");
+          if ((stroked ? iconPath.Stroke : iconPath.Fill) is not
+              Microsoft.UI.Xaml.Media.SolidColorBrush brush || brush.Color != Microsoft.UI.Colors.White)
+            throw new InvalidOperationException($"Toolbar icon failed to follow foreground: {key}");
+        }
       }
-      if (ScreenshotToolbarIcons.CreateIcon("settings") is not FontIcon)
-        throw new InvalidOperationException("Capture settings icon failed to load.");
       resourceBroker.Revoke(lease);
       if (!string.IsNullOrWhiteSpace(healthFile))
       {

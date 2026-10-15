@@ -23,6 +23,18 @@ export interface AnnotationStyle {
   readonly fontSize?: number;
   /** 马赛克/模糊强度档位：1=弱、2=中（缺省）、3=强；决定块尺寸/滤波半径。 */
   readonly intensity?: number;
+  /** 边框/线条不透明度百分比 [0,100]；缺省 100（旧标记渲染完全不变）。
+   * 荧光笔复用该值与自身 35% 透明相乘，不覆盖原透明语义。 */
+  readonly strokeOpacity?: number;
+  /** 矩形/椭圆填充：缺省（undefined）= 空心，即旧对象默认效果。 */
+  readonly fill?: AnnotationFill;
+}
+
+/** 形状填充样式：存在即启用；颜色缺省白、不透明度缺省 100。 */
+export interface AnnotationFill {
+  readonly color?: string;
+  /** 0-100 百分比；0 为有效值（完全透明填充）。 */
+  readonly opacity?: number;
 }
 
 export interface Mark {
@@ -73,6 +85,30 @@ export interface Rect {
 
 export function isExclusionMark(mark: Mark): boolean {
   return mark.tool === "exclude";
+}
+
+/** [0,100] 百分比夹取；非法/缺省值回退 fallback。 */
+function clampPercent(value: number | undefined, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(100, Math.max(0, value));
+}
+
+/** 标记边框/线条不透明度 → canvas globalAlpha [0,1]；缺省 1（旧对象不变）。 */
+export function annotationStrokeAlpha(mark: Mark): number {
+  return clampPercent(mark.style?.strokeOpacity, 100) / 100;
+}
+
+/** 标记填充解析：无 fill 为 undefined（空心）；0% 不透明度是有效透明填充。 */
+export function annotationFill(
+  mark: Mark,
+): { readonly color: string; readonly alpha: number } | undefined {
+  const fill = mark.style?.fill;
+  if (!fill) return undefined;
+  const color =
+    typeof fill.color === "string" && /^#[0-9a-fA-F]{6}$/.test(fill.color)
+      ? fill.color.toLowerCase()
+      : "#ffffff";
+  return { color, alpha: clampPercent(fill.opacity, 100) / 100 };
 }
 
 /** 任意角度旋转后内容的轴对齐包围盒；90° 倍数退化为精确宽高交换。

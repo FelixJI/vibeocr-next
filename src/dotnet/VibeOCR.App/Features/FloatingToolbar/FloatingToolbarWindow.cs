@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using VibeOCR.App.Features.Recognition;
 using VibeOCR.Platform.Windows;
 using Windows.Graphics;
 using Windows.UI.ViewManagement;
@@ -48,13 +49,7 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
   private const uint SwpNoActivate = 0x0010;
 
   private readonly Window _window = new();
-  private readonly FontIcon _gripIcon = new()
-  {
-    Glyph = "\uE700",
-    FontSize = 12,
-    Opacity = 0.7,
-    Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 235, 235, 235)),
-  };
+  private readonly ContentControl _gripIcon = ScreenshotToolbarIcons.CreateIcon("grip");
   private readonly Border _grip;
   private readonly Grid _root = new();
   private readonly Popup _popup = new()
@@ -373,6 +368,7 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
 
   private Border BuildGrip()
   {
+    _gripIcon.Opacity = 0.7;
     return new Border
     {
       Width = GripWidthDip,
@@ -398,17 +394,17 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     };
     bar.Children.Add(_grip);
     bar.Children.Add(CreateCommandButton(
-        "\uE722", "截图识别", FloatingToolbarCommand.CaptureScreenshot));
+        "capture", "截图识别", FloatingToolbarCommand.CaptureScreenshot));
     bar.Children.Add(CreateCommandButton(
-        "\uE70F", "截图编辑", FloatingToolbarCommand.ScreenshotEdit));
+        "editImage", "截图编辑", FloatingToolbarCommand.ScreenshotEdit));
     bar.Children.Add(CreateCommandButton(
-        "\uE77F", "剪贴板识别", FloatingToolbarCommand.ClipboardRecognize));
+        "clipboard", "剪贴板识别", FloatingToolbarCommand.ClipboardRecognize));
     bar.Children.Add(CreateCommandButton(
-        "\uE8A7", "显示工作台", FloatingToolbarCommand.ShowMainWindow));
+        "workbench", "显示工作台", FloatingToolbarCommand.ShowMainWindow));
     bar.Children.Add(CreateCommandButton(
-        "\uE713", "设置", FloatingToolbarCommand.OpenSettings));
+        "settings", "设置", FloatingToolbarCommand.OpenSettings));
     bar.Children.Add(CreateCommandButton(
-        "\uE70E", "隐藏悬浮栏", FloatingToolbarCommand.DismissToolbar));
+        "exit", "隐藏悬浮栏", FloatingToolbarCommand.DismissToolbar));
     _root.Children.Add(bar);
 
     _root.PointerEntered += (_, _) => UpdatePointerPresence();
@@ -423,7 +419,7 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     _window.Content = _host;
   }
 
-  private Button CreateCommandButton(string glyph, string tooltip, FloatingToolbarCommand command)
+  private Button CreateCommandButton(string iconName, string tooltip, FloatingToolbarCommand command)
   {
     var button = new Button
     {
@@ -434,11 +430,7 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
       Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0, 0, 0, 0)),
       BorderThickness = new Thickness(0),
       AllowFocusOnInteraction = false,
-      Content = new FontIcon
-      {
-        Glyph = glyph,
-        FontSize = 16,
-      },
+      Content = ScreenshotToolbarIcons.CreateIcon(iconName),
     };
     AutomationProperties.SetName(button, tooltip);
     ToolTipService.SetToolTip(button, tooltip);

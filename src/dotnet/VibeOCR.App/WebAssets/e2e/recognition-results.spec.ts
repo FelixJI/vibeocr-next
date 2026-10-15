@@ -407,8 +407,15 @@ test("bbox proofreading edits through the frozen result image", async ({
   await mountRecognitionResults(page);
 
   // 校对视图使用 resultImage（非会话基准图）。
-  const image = page.getByRole("img", { name: "识别结果参考图" });
+  const image = page
+    .getByRole("region", { name: "输入图像", exact: true })
+    .getByRole("img", { name: "识别结果参考图" });
   await expect(image).toHaveAttribute("src", RESULT_IMAGE_URL);
+  await expect(
+    page
+      .getByRole("region", { name: "识别结果", exact: true })
+      .getByRole("img", { name: "识别结果参考图" }),
+  ).toHaveCount(0);
 
   // 双击行框编辑；宿主拒绝时保留草稿，重试成功后收起。
   const line = page.locator(".overlay-line").filter({ hasText: "第一段行一" });
@@ -445,6 +452,7 @@ test("bbox proofreading edits through the frozen result image", async ({
 
   // 窄屏 resize：行框随舞台缩放，不溢出视口。
   const before = await line.boundingBox();
+  await page.screenshot({ path: testInfo.outputPath("bbox-left-preview.png") });
   await page.setViewportSize({ width: 480, height: 900 });
   await expect
     .poll(async () => (await line.boundingBox())?.width ?? Infinity)

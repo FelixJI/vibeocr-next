@@ -1,4 +1,4 @@
-import { Toolbar } from "@fluentui/react-components";
+import { Button, Toolbar } from "@fluentui/react-components";
 
 import {
   ClipboardPaste,
@@ -25,7 +25,6 @@ import { CapabilityGate } from "../components/CapabilityGate";
 import { ImageCanvasEditor } from "../components/ImageCanvasEditor";
 
 import { StructuredResult } from "../components/StructuredResult";
-import { ResultImageTextOverlay } from "../components/ResultImageTextOverlay";
 import type { IndexedResultLine } from "../components/ResultImageTextOverlay";
 import {
   linesInfoFromSource,
@@ -59,6 +58,13 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
   // The host owns each capture's intent; this user preference survives keyed
   // editor remounts and only applies to sessions explicitly captured for text.
   const [autoTextPreference, setAutoTextPreference] = useState(true);
+  // 左侧单一图片区承载编辑与校对：有带 bbox 的结果时默认展示校对层
+  // （宿主 state.resultImage 冻结参考图，不用会话基准图冒充）；切换到
+  // 编辑仅隐藏画布，编辑器不卸载，未提交编辑状态不丢失。
+  const [leftImageMode, setLeftImageMode] = useState<"proofread" | "edit">(
+    "proofread",
+  );
+  const [proofreadBindingKey, setProofreadBindingKey] = useState<string>();
   // 排版模式为结果单一状态：唯一的一组复制/导出按钮按它提交，避免
   // 结果区再叠一套全局输出按钮。
   const [resultTextMode, setResultTextMode] = useState<ResultTextMode>("raw");
@@ -84,6 +90,43 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
   const sessionCapable = viewState.capabilities.includes(
     "recognition.screenshotSession",
   );
+  // 左侧校对面：行框投影到识别时真实冻结的参考图（state.resultImage，
+  // 随结果原子替换/失效），绝不拿会话输入基准图冒充，避免裁剪/旋转后错位。
+  // 有带 bbox 的行时才提供；右侧不再重复渲染第二张校对图。
+  const proofreadLines =
+    structured && resultImage && linesInfo?.hasLines
+      ? linesInfo.lines.flatMap((line, index) =>
+          line.bbox ? [{ line, index } satisfies IndexedResultLine] : [],
+        )
+      : undefined;
+  const proofread =
+    resultImage && proofreadLines?.length
+      ? {
+          imageUrl: resultImage.url,
+          // 绑定键：识别参考图+结构化资源任一变化即重挂校对层。
+          bindingKey: `${resultImage.url}:${structured?.url ?? ""}`,
+          lines: proofreadLines,
+          onUpdateLine: (
+            lineIndex: number,
+            expectedOldText: string,
+            newText: string,
+          ) =>
+            structured
+              ? actions.run({
+                  type: "recognition.updateLine",
+                  resourceUri: structured.url,
+                  lineIndex,
+                  expectedOldText,
+                  newText,
+                })
+              : Promise.resolve(false),
+        }
+      : undefined;
+  // 仅结果身份变化时恢复默认校对；同一结果的宿主更新不打断编辑。
+  if (proofreadBindingKey !== proofread?.bindingKey) {
+    setProofreadBindingKey(proofread?.bindingKey);
+    setLeftImageMode("proofread");
+  }
   // Windows 常用命令：打开与工具栏按钮同一入口；Ctrl+C 仅在无文本选择、
   // 目标非输入控件且存在可复制结果时降级为复制识别结果（镜像页级唯一
   // 复制按钮：lines 结果按当前排版模式，其余 plain），不覆盖用户已有
@@ -224,24 +267,58 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
               detail="请在截图现场窗口继续编辑当前图片。"
             />
           ) : input ? (
-            <ImageCanvasEditor
-              key={session ? `session-${session.sessionId}` : undefined}
-              actions={actions}
-              canExport={viewState.capabilities.includes(
-                "recognition.annotation",
-              )}
-              canRecognize={sessionCapable}
-              session={session}
-              source={input.url}
-              sourceByteLength={input.byteLength}
-              textLayer={textLayer}
-              autoText={
-                session?.textSelectionRequested === true && autoTextPreference
-              }
-              showAutoTextPreference={session?.textSelectionRequested === true}
-              onAutoTextChange={setAutoTextPreference}
-              toolset="recognition"
-            />
+            <>
+              {/* 单一左侧图片区的编辑/校对模式切换：明确当前视图；编辑器
+               * 始终挂载，切回编辑时未提交标注/历史原样恢复。 */}
+              {proofread ? (
+                <div
+                  aria-label="左侧视图模式"
+                  className="left-view-switch"
+                  role="group"
+                >
+                  <Button
+                    appearance={
+                      leftImageMode === "proofread" ? "primary" : "subtle"
+                    }
+                    aria-pressed={leftImageMode === "proofread"}
+                    onClick={() => setLeftImageMode("proofread")}
+                    size="small"
+                  >
+                    图像校对
+                  </Button>
+                  <Button
+                    appearance={leftImageMode === "edit" ? "primary" : "subtle"}
+                    aria-pressed={leftImageMode === "edit"}
+                    onClick={() => setLeftImageMode("edit")}
+                    size="small"
+                  >
+                    编辑图片
+                  </Button>
+                </div>
+              ) : null}
+              <ImageCanvasEditor
+                key={session ? `session-${session.sessionId}` : undefined}
+                actions={actions}
+                canExport={viewState.capabilities.includes(
+                  "recognition.annotation",
+                )}
+                canRecognize={sessionCapable}
+                session={session}
+                source={input.url}
+                sourceByteLength={input.byteLength}
+                textLayer={textLayer}
+                autoText={
+                  session?.textSelectionRequested === true && autoTextPreference
+                }
+                showAutoTextPreference={
+                  session?.textSelectionRequested === true
+                }
+                onAutoTextChange={setAutoTextPreference}
+                toolset="recognition"
+                proofread={proofread}
+                proofreadActive={leftImageMode === "proofread"}
+              />
+            </>
           ) : (
             <EmptyStage
               title="等待图片"
@@ -336,34 +413,6 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
                   ))}
                 </div>
               </Toolbar>
-              {resultImage &&
-                linesInfo?.hasLines &&
-                linesInfo.lines.some((line) => line.bbox) && (
-                  <details className="result-image-overlay-details" open>
-                    <summary>图像校对（双击或 Enter 编辑行框）</summary>
-                    {/* 绑定键：识别参考图+结构化资源任一变化即重挂。 */}
-                    <ResultImageTextOverlay
-                      key={`${resultImage.url}:${structured?.url ?? ""}`}
-                      imageUrl={resultImage.url}
-                      lines={linesInfo.lines.flatMap((line, index) =>
-                        line.bbox
-                          ? [{ line, index } satisfies IndexedResultLine]
-                          : [],
-                      )}
-                      onUpdateLine={(lineIndex, expectedOldText, newText) =>
-                        structured
-                          ? actions.run({
-                              type: "recognition.updateLine",
-                              resourceUri: structured.url,
-                              lineIndex,
-                              expectedOldText,
-                              newText,
-                            })
-                          : Promise.resolve(false)
-                      }
-                    />
-                  </details>
-                )}
               {structured && (
                 <StructuredResult
                   key={structured.url}

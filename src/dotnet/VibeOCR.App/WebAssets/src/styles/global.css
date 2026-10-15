@@ -775,6 +775,19 @@ input {
   min-height: 0;
   gap: 8px;
 }
+/* 左侧单一图片区的编辑/校对模式切换：常驻小切换条，不抢画布空间。 */
+.left-view-switch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+/* 校对模式：同一图片区显示冻结参考图行框，隐藏其余编辑 chrome
+   （display:none 不入无障碍树，文档级命令已同步挂起）；编辑画布仅
+   隐藏未卸载，切回编辑时未提交状态原样恢复。 */
+.canvas-editor.is-proofreading > *:not(.canvas-stage) {
+  display: none;
+}
 .editor-guidance,
 .editor-operation-status {
   margin: 0;
@@ -1128,16 +1141,37 @@ select {
   width: max-content;
   max-width: calc(100vw - var(--capture-tools-left));
 }
-/* 截图现场两排工具栏（Classic 同构）：主操作与样式各自成排，排内换行收纳，窄区域不横向溢出。 */
-.editor-scene-toolstack {
+/* 编辑器工具栏栈：主排（全部工具+操作）单行、容器内水平滚动保持单行
+   可达；下排仅当前工具属性，可换行收纳。 */
+.editor-toolbar-stack {
   display: flex;
   flex-direction: column;
   gap: 4px;
   min-width: 0;
   max-width: 100%;
 }
-.capture-scene-editor .editor-scene-toolstack .editor-toolbar {
+.editor-toolbar-stack .editor-toolbar-main {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  min-width: 0;
+  max-width: 100%;
+  /* 主排子项不收缩：文本不逐字折行、图标不被压扁，过宽时靠容器滚动。 */
+}
+.editor-toolbar-main > * {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.editor-toolbar-main svg {
+  flex: none;
+  width: 24px;
+  height: 24px;
+}
+.editor-toolbar-stack .editor-toolbar-settings {
   flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+}
+.capture-scene-editor .editor-toolbar-stack .editor-toolbar {
   flex-shrink: 1;
   min-width: 0;
   max-width: 100%;
@@ -1242,6 +1276,17 @@ select {
   border-radius: 4px;
   background: transparent;
   cursor: pointer;
+}
+/* 形状填充颜色：独立于边框色板，与色板输入同尺寸/可点击区域。 */
+.editor-toolbar-settings input[type="color"].editor-fill-color {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--colorNeutralStroke1);
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  flex-shrink: 0;
 }
 
 .pdf-inspection {

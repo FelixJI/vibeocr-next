@@ -210,7 +210,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       };
 
     /// <summary>
-    /// 普通入口动作栏第一排：编辑工具按钮（label、进入现场编辑的 initialTool、
+    /// 普通入口动作栏：编辑工具按钮（label、进入现场编辑的 initialTool、
     /// 图标键、tooltip）。tool 取值与 Web ImageCanvasEditor 的工具 id 跨语言
     /// 契约一致，不得随意改名（未知 id 会被 Web 静默回退到选择工具）。
     /// </summary>
@@ -481,23 +481,13 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     }).ToArray();
     foreach (Rectangle handle in handles) canvas.Children.Add(handle);
     var sizeLabel = new TextBlock();
-    // 与 Web 截图现场工具栏同构的两排动作栏：第一排编辑标注工具（直接
-    // 入口的确认/撤销/重做同排），第二排识别/长截图/输出与会话控制；
-    // 两排宽度都显著小于旧单排（23 按钮 ≈ 860px），不再依赖隐藏横向
-    // 滚动条收纳溢出，窄桌面/窄选区下直接完整可见；放置逻辑按
-    // DesiredSize.Height 自动适配更高的两排面板。
+    // 所有工具与操作同排；选中工具进入 Web 编辑后，才出现对应的下排属性。
     var toolbarRowMain = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
-    var toolbarRowActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
-    var toolbar = new StackPanel { Orientation = Orientation.Vertical, Spacing = 4 };
-    toolbar.Children.Add(toolbarRowMain);
-    if (selectionActions is not null) toolbar.Children.Add(toolbarRowActions);
-    // 兑底：极窄桌面（两排换不了行仍超宽）时保留旧的受限横向滚动；
-    // 正常宽度下两排完整呈现，不出现滚动。
     var toolbarScroll = new ScrollViewer
     {
-      Content = toolbar,
+      Content = toolbarRowMain,
       HorizontalScrollMode = ScrollMode.Enabled,
-      HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden,
+      HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
       VerticalScrollMode = ScrollMode.Disabled,
       VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
     };
@@ -512,12 +502,21 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     canvas.Children.Add(panelBorder);
     Button AddButton(string name, Action action, string iconKey, StackPanel row, string? tooltip = null)
     {
+      bool showLabel = iconKey is "mosaic" or "blur";
+      UIElement content = ScreenshotToolbarIcons.CreateIcon(iconKey);
+      if (showLabel)
+      {
+        var labeledIcon = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+        labeledIcon.Children.Add(content);
+        labeledIcon.Children.Add(new TextBlock { Text = name, VerticalAlignment = VerticalAlignment.Center });
+        content = labeledIcon;
+      }
       var button = new Button
       {
-        // 图标用默认图标字体族的官方字形（旧 Windows 自动回退
-        // Segoe MDL2 Assets；不硬编码 FontFamily）。
-        Content = ScreenshotToolbarIcons.CreateIcon(iconKey),
-        Width = 32, Height = 32, Padding = new Thickness(0),
+        Content = content,
+        Width = showLabel ? double.NaN : 32,
+        Height = 32,
+        Padding = new Thickness(showLabel ? 6 : 0, 0, showLabel ? 6 : 0, 0),
       };
       AutomationProperties.SetName(button, name);
       ToolTipService.SetToolTip(button, tooltip ?? name);
@@ -835,13 +834,13 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       var colors = VibeOCR.App.Features.FloatingToolbar.FloatingToolbarWindow.ResolveChromeColors(
         root.ActualTheme == ElementTheme.Dark);
       bool dark = root.ActualTheme == ElementTheme.Dark;
-      toolbar.Resources["ButtonBackgroundPointerOver"] = new SolidColorBrush(
+      toolbarRowMain.Resources["ButtonBackgroundPointerOver"] = new SolidColorBrush(
         dark ? Windows.UI.Color.FromArgb(255, 30, 64, 175) : Windows.UI.Color.FromArgb(255, 219, 234, 254));
-      toolbar.Resources["ButtonForegroundPointerOver"] = new SolidColorBrush(
+      toolbarRowMain.Resources["ButtonForegroundPointerOver"] = new SolidColorBrush(
         dark ? Microsoft.UI.Colors.White : Windows.UI.Color.FromArgb(255, 30, 64, 175));
-      toolbar.Resources["ButtonBackgroundPressed"] = new SolidColorBrush(
+      toolbarRowMain.Resources["ButtonBackgroundPressed"] = new SolidColorBrush(
         dark ? Windows.UI.Color.FromArgb(255, 29, 78, 216) : Windows.UI.Color.FromArgb(255, 191, 219, 254));
-      toolbar.Resources["ButtonForegroundPressed"] = toolbar.Resources["ButtonForegroundPointerOver"];
+      toolbarRowMain.Resources["ButtonForegroundPressed"] = toolbarRowMain.Resources["ButtonForegroundPointerOver"];
       panelBorder.Background = new SolidColorBrush(colors.Background);
       magnifier.Background = new SolidColorBrush(colors.Background);
       sizeLabel.Foreground = new SolidColorBrush(Microsoft.UI.Colors.White);
@@ -852,7 +851,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     string? colorHex = null;
     Windows.Foundation.Point? lastPoint = null;
     // 编辑工具和宿主提供的识别模式直接展示，选择工具后原位进入对应编辑状态。
-    // 图标为 Segoe 官方稳定字形（见 ScreenshotToolbarIcons），按形状区分语义
+    // 原生与 Web 使用同一套 Tabler 矢量图标，按形状区分语义
     // 并携带 tooltip；复制/保存/钉图复用既有本地输出。直接入口保持旧工具条。
     List<Button> selectionActionButtons = [];
     if (ordinary)
@@ -862,12 +861,12 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
         selectionActionButtons.Add(
           AddButton(label, () => { initialTool = tool; Finish(true); }, iconKey, toolbarRowMain, tip));
       }
-      // 第二排：识别与输出动作（识别三类 + 长截图 + 设置/复制/保存/钉图）。
+      AddSeparator(toolbarRowMain);
       if (modeEntries.Count == 0)
       {
         // 防御性兜底：宿主始终下发三个分类条目，此分支不应被走到。
         var unavailable = AddButton("识别模式未就绪", () => { },
-          ScreenshotToolbarIcons.DefaultKey, toolbarRowActions);
+          ScreenshotToolbarIcons.DefaultKey, toolbarRowMain);
         unavailable.IsEnabled = false;
       }
       else
@@ -878,7 +877,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
           string modeId = entry.ModeId;
           Button item = AddButton(
             entry.DisplayName, () => Finish(true, ScreenshotSelectionAction.Recognize, modeId, entry.Intent),
-            entry.IconKey, toolbarRowActions);
+            entry.IconKey, toolbarRowMain);
           item.IsEnabled = ready;
           if (ready) selectionActionButtons.Add(item);
           // 提示/高亮清晰：可点击时用宿主 Hint（文字图标携带引擎名），
@@ -890,17 +889,18 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       }
       // 长截图复用当前选区，不再二次框选。
       selectionActionButtons.Add(AddButton("长截图",
-        () => Finish(true, ScreenshotSelectionAction.ScrollCapture), "scrollCapture", toolbarRowActions,
+        () => Finish(true, ScreenshotSelectionAction.ScrollCapture), "scrollCapture", toolbarRowMain,
         "长截图：滚动截取当前所选区域"));
-      AddSeparator(toolbarRowActions);
-      selectionActionButtons.Add(AddButton("设置", () => Finish(true, ScreenshotSelectionAction.OpenSettings),
-        "settings", toolbarRowActions, "设置：打开设置页"));
+      AddSeparator(toolbarRowMain);
       selectionActionButtons.Add(AddButton("复制", () => Finish(true, ScreenshotSelectionAction.Copy),
-        "copy", toolbarRowActions, "复制：复制所选区域图像"));
+        "copy", toolbarRowMain, "复制：复制所选区域图像"));
       selectionActionButtons.Add(AddButton("保存", () => Finish(true, ScreenshotSelectionAction.Save),
-        "save", toolbarRowActions, "保存：保存所选区域图像"));
+        "save", toolbarRowMain, "保存：保存所选区域图像"));
       selectionActionButtons.Add(AddButton("钉图", () => Finish(true, ScreenshotSelectionAction.Pin),
-        "pin", toolbarRowActions, "钉图：将所选区域钉在桌面"));
+        "pin", toolbarRowMain, "钉图：将所选区域钉在桌面"));
+      AddSeparator(toolbarRowMain);
+      selectionActionButtons.Add(AddButton("设置", () => Finish(true, ScreenshotSelectionAction.OpenSettings),
+        "settings", toolbarRowMain, "设置：打开设置页"));
     }
     else
     {
@@ -908,8 +908,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
       undo = AddButton("撤销", session.Undo, "undo", toolbarRowMain);
       redo = AddButton("重做", session.Redo, "redo", toolbarRowMain);
     }
-    // 会话控制排：普通入口在第二排尾部，直接入口沿用单排尾部。
-    StackPanel sessionRow = selectionActions is not null ? toolbarRowActions : toolbarRowMain;
+    StackPanel sessionRow = toolbarRowMain;
     AddSeparator(sessionRow);
     AddButton("重选", () => { if (session.ActiveSelection is not null || session.IsPointerActive) Back(); },
       "reselect", sessionRow, "重选：重新框选区域");
@@ -923,7 +922,7 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
     ToolTipService.SetToolTip(magnifierToggle, "放大镜（M）");
     magnifierToggle.Click += (_, _) => { showMagnifier = magnifierToggle.IsChecked == true; Render(); };
     sessionRow.Children.Add(magnifierToggle);
-    foreach (Button button in toolbar.Children.OfType<StackPanel>().SelectMany(row => row.Children.OfType<Button>()))
+    foreach (Button button in toolbarRowMain.Children.OfType<Button>())
       button.Click += (_, _) => Render();
 
     PhysicalPoint ToPhysical(Windows.Foundation.Point point) => new(
