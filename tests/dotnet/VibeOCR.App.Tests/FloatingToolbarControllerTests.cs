@@ -843,6 +843,11 @@ public sealed class FloatingToolbarControllerTests
 
         public event EventHandler? PointerExited;
 
+        public event EventHandler? ModeMenuRequested;
+
+        internal void RaiseModeMenuRequested() =>
+            ModeMenuRequested?.Invoke(this, EventArgs.Empty);
+
         public event EventHandler<PhysicalRectangle>? DragStarted;
 
         public event EventHandler<PhysicalRectangle>? DragCompleted;

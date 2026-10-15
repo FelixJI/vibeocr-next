@@ -185,8 +185,12 @@ public interface IScreenRegionPicker
 /// single frozen snapshot after hiding the main window, then crops from that
 /// snapshot so the application cannot reappear in the final OCR input.
 /// </summary>
-public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = false) : IScreenRegionPicker
+public sealed class ScreenRegionPicker(
+    Func<nint> ownerWindow,
+    bool scrolling = false,
+    ICapturePreferencesStore? preferences = null) : IScreenRegionPicker
 {
+    private readonly ICapturePreferencesStore? _preferences = preferences;
     private sealed class SelectionCanvas : Canvas
     {
       public void SetCursor(InputSystemCursorShape shape)
@@ -260,8 +264,13 @@ public sealed class ScreenRegionPicker(Func<nint> ownerWindow, bool scrolling = 
             await Task.Delay(180, cancellationToken);
             PhysicalRectangle desktop = GetVirtualDesktop();
             SmartScreenCandidates candidates = SmartScreenCandidates.Capture(desktop);
-            await using var capture = new ScreenCaptureService(Guid.NewGuid());
-            CapturedFrame? frame = capture.Capture(desktop, TimeSpan.FromMinutes(1));
+            await using var capture = new ScreenCaptureService(
+                Guid.NewGuid(), cursorOverlay: new GdiScreenCursorOverlay());
+            // #236 光标选项对框选/延时链路同样生效：冻结底图即最终裁剪来源。
+            CapturedFrame? frame = capture.Capture(
+                desktop,
+                TimeSpan.FromMinutes(1),
+                _preferences?.Load().IncludeCursor ?? false);
             byte[] desktopBgra = capture.Read(frame);
             byte[] desktopBmp = EncodeTopDownBmp(
                 desktopBgra,

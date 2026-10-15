@@ -54,6 +54,23 @@ public sealed class ScreenSelectionSessionTests
     Assert.Equal(1, restores);
   }
 
+  [Fact]
+  public async Task SavingLastRegionFailureDoesNotDiscardSuccessfulCapture()
+  {
+    var inputService = new InputService(static () => 0,
+      scrollingRegionPicker: new StitchedRegionPicker(), preferences: new FailingCapturePreferences());
+    RecognitionInput input = Assert.IsType<RecognitionInput>(
+      await inputService.CaptureScrollingScreenAsync(TestContext.Current.CancellationToken));
+    Assert.Equal(94, input.Data.Length);
+    Assert.Equal(new PhysicalRectangle(10, 20, 2, 2), input.CaptureBounds);
+  }
+
+  private sealed class FailingCapturePreferences : ICapturePreferencesStore
+  {
+    public CapturePreferences Load() => new();
+    public void Save(CapturePreferences preferences) => throw new IOException("simulated disk full");
+    public void SaveLastRegion(PhysicalRectangle bounds) => throw new IOException("simulated disk full");
+  }
   private sealed class StitchedRegionPicker : IScreenRegionPicker
   {
     public Task<ScreenRegionSelection?> PickAsync(CancellationToken cancellationToken) =>

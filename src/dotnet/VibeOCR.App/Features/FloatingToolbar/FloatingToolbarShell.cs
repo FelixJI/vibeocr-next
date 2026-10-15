@@ -34,6 +34,8 @@ internal sealed class FloatingToolbarShell : IDisposable
         _dispatchAction = dispatchAction;
         _openSettings = openSettings;
         view.CommandInvoked += OnCommandInvoked;
+        // #236 悬浮栏右键打开统一截图模式菜单（screenshot_menu 动作）。
+        view.ModeMenuRequested += (_, _) => _dispatchAction(HotkeyActionCatalog.ScreenshotMenu);
     }
 
     /// <summary>

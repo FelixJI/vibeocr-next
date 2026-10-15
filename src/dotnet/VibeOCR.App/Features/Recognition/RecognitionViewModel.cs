@@ -174,8 +174,28 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     public Task CaptureScreenshotSessionAsync(
         ScreenshotSelectionActions? selectionActions,
         CancellationToken cancellationToken) =>
+        CaptureScreenshotSessionAsync(selectionActions, null, cancellationToken);
+
+    /// <summary>
+    /// #236 参数化截图会话：request 为 null 保持既有框选入口；直接目标
+    /// （全屏/活动窗口/显示器/上次区域）与延时模式经 InputService 的对应
+    /// 入口进入同一会话状态机，不在 Shell 层绕过。
+    /// </summary>
+    public Task CaptureScreenshotSessionAsync(
+        ScreenshotSelectionActions? selectionActions,
+        ScreenshotCaptureRequest? request,
+        CancellationToken cancellationToken) =>
         RunInputAsync(
-            ct => _inputs.CaptureScreenWithActionsAsync(selectionActions, ct),
+            ct => request switch
+            {
+                { Kind: ScreenshotCaptureKind.Fullscreen or ScreenshotCaptureKind.ActiveWindow
+                    or ScreenshotCaptureKind.Monitor or ScreenshotCaptureKind.FixedRegion
+                    or ScreenshotCaptureKind.LastRegion } =>
+                    _inputs.CaptureAreaAsync(request, ct),
+                { Kind: ScreenshotCaptureKind.DelayedRegion } =>
+                    _inputs.CaptureDelayedRegionAsync(selectionActions, ct),
+                _ => _inputs.CaptureScreenWithActionsAsync(selectionActions, ct),
+            },
             cancellationToken,
             recognize: false,
             persistCurrentInput: true);

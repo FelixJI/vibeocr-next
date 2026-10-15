@@ -42,15 +42,119 @@ public sealed record CapturedFrame(
 public interface IScreenCaptureNativeMethods
 {
     byte[] CaptureBgra(PhysicalRectangle bounds);
+
+    /// <summary>
+    /// 带可选光标叠加的捕获；默认在旧实现上忽略光标，保持既有桩兼容。
+    /// </summary>
+    byte[] CaptureBgra(PhysicalRectangle bounds, bool includeCursor) => CaptureBgra(bounds);
+}
+
+/// <summary>
+/// 把真实系统光标绘制到已冻结的捕获表面（内存 DC）上。GDI BitBlt 不采集
+/// 光标；启用“包含光标”时在读取像素前把 GetCursorInfo 的光标按热点与
+/// 捕获原点偏移绘入。共享光标句柄不销毁；GetIconInfo 返回的临时位图句柄
+/// 由调用方清理。
+/// </summary>
+public interface IScreenCursorOverlay
+{
+    bool TryDraw(nint memoryDc, PhysicalRectangle bounds);
+}
+
+public sealed class GdiScreenCursorOverlay : IScreenCursorOverlay
+{
+    private const int CursorShowing = 0x00000001;
+    private const uint DiNormal = 0x0003;
+
+    public bool TryDraw(nint memoryDc, PhysicalRectangle bounds)
+    {
+        var info = new CursorInfo { CbSize = (uint)Marshal.SizeOf<CursorInfo>() };
+        if (!GetCursorInfo(ref info) || (info.Flags & CursorShowing) == 0 || info.Handle == 0)
+        {
+            return false;
+        }
+
+        // CURSORINFO.pt 是热点在屏幕上的位置；DrawIconEx 以左上角绘制。
+        var icon = new IconInfo();
+        int hotX = 0;
+        int hotY = 0;
+        if (GetIconInfo(info.Handle, ref icon))
+        {
+            hotX = icon.XHotspot;
+            hotY = icon.YHotspot;
+            if (icon.MaskBitmap != 0) DeleteObject(icon.MaskBitmap);
+            if (icon.ColorBitmap != 0) DeleteObject(icon.ColorBitmap);
+        }
+
+        return TryDrawCursor(
+            memoryDc, info.Handle, hotX, hotY, info.Position.X, info.Position.Y, bounds);
+    }
+
+    /// <summary>按热点偏移把指定光标句柄绘制到捕获表面的独立实现，供契约测试。</summary>
+    internal static bool TryDrawCursor(
+        nint memoryDc, nint cursor, int hotspotX, int hotspotY,
+        int screenX, int screenY, PhysicalRectangle bounds)
+    {
+        if (memoryDc == 0 || cursor == 0)
+        {
+            return false;
+        }
+
+        int x = screenX - hotspotX - bounds.X;
+        int y = screenY - hotspotY - bounds.Y;
+        return DrawIconEx(memoryDc, x, y, cursor, 0, 0, 0, 0, DiNormal);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CursorInfo
+    {
+        public uint CbSize;
+        public uint Flags;
+        public nint Handle;
+        public NativePoint Position;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IconInfo
+    {
+        [MarshalAs(UnmanagedType.Bool)] public bool IsIcon;
+        public int XHotspot;
+        public int YHotspot;
+        public nint MaskBitmap;
+        public nint ColorBitmap;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint { public int X; public int Y; }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetCursorInfo(ref CursorInfo info);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetIconInfo(nint cursor, ref IconInfo info);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DrawIconEx(
+        nint deviceContext, int x, int y, nint icon, int width, int height,
+        uint frameStep, nint brush, uint flags);
+
+    [DllImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DeleteObject(nint value);
 }
 
 public sealed class ScreenCaptureService : IAsyncDisposable
 {
     private readonly IScreenCaptureNativeMethods _native;
 
-    public ScreenCaptureService(Guid sessionId, IScreenCaptureNativeMethods? native = null)
+    public ScreenCaptureService(
+        Guid sessionId,
+        IScreenCaptureNativeMethods? native = null,
+        IScreenCursorOverlay? cursorOverlay = null)
     {
-        _native = native ?? new GdiScreenCaptureNativeMethods();
+        _native = native ?? new GdiScreenCaptureNativeMethods(cursorOverlay ?? new GdiScreenCursorOverlay());
     }
 
     public static PhysicalPoint LogicalToPhysical(LogicalPoint point, MonitorGeometry monitor)
@@ -71,11 +175,11 @@ public sealed class ScreenCaptureService : IAsyncDisposable
         return new PhysicalPoint(x, y);
     }
 
-    public CapturedFrame Capture(PhysicalRectangle bounds, TimeSpan ttl)
+    public CapturedFrame Capture(PhysicalRectangle bounds, TimeSpan ttl, bool includeCursor = false)
     {
         bounds.Validate();
         int expected = checked(bounds.Width * bounds.Height * 4);
-        byte[] pixels = _native.CaptureBgra(bounds);
+        byte[] pixels = _native.CaptureBgra(bounds, includeCursor);
         if (pixels.Length != expected)
         {
             throw new InvalidDataException(
@@ -93,12 +197,15 @@ public sealed class ScreenCaptureService : IAsyncDisposable
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
-    private sealed class GdiScreenCaptureNativeMethods : IScreenCaptureNativeMethods
+    private sealed class GdiScreenCaptureNativeMethods(IScreenCursorOverlay? cursor = null)
+        : IScreenCaptureNativeMethods
     {
         private const uint SourceCopy = 0x00CC0020;
         private const uint CaptureLayeredWindows = 0x40000000;
 
-        public byte[] CaptureBgra(PhysicalRectangle bounds)
+        public byte[] CaptureBgra(PhysicalRectangle bounds) => CaptureBgra(bounds, false);
+
+        public byte[] CaptureBgra(PhysicalRectangle bounds, bool includeCursor)
         {
             nint screen = GetDC(0);
             if (screen == 0)
@@ -131,6 +238,12 @@ public sealed class ScreenCaptureService : IAsyncDisposable
                         SourceCopy | CaptureLayeredWindows))
                 {
                     throw new Win32Exception(Marshal.GetLastPInvokeError(), "BitBlt failed.");
+                }
+
+                // 光标叠加必须在 GetDIBits 读取像素前绘入同一 GDI 表面。
+                if (includeCursor && cursor is not null)
+                {
+                    cursor.TryDraw(memory, bounds);
                 }
 
                 if (SelectObject(memory, previous) is 0 or -1)

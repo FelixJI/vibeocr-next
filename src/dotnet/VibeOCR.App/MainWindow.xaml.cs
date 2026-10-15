@@ -570,6 +570,19 @@ public sealed partial class MainWindow : Window
       CancellationToken.None);
   }
 
+  /// <summary>
+  /// #236 直接目标截图入口：与纯截图同一命令、会话状态机与现场编辑宿主，
+  /// 不在 Shell 层绕过；失败经既有 recognition.failed 终态呈现。
+  /// </summary>
+  internal async Task CaptureScreenshotAreaAsync(ScreenshotCaptureRequest request)
+  {
+    await application.ExecuteAsync(
+      new WorkbenchCommandEnvelope(
+        Guid.NewGuid(),
+        new CaptureScreenshotSessionCommand(request)),
+      CancellationToken.None);
+  }
+
   /// <summary>剪贴板识别入口：与页面“读取剪贴板”同一命令。</summary>
   internal async Task RecognizeClipboardAsync()
   {

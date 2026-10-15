@@ -1,5 +1,7 @@
 using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using Windows.Graphics.Imaging;
+using VibeOCR.App.Services;
 using VibeOCR.App.Web;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage;
@@ -49,22 +51,44 @@ public interface IInputService
 
     Task<RecognitionInput?> CaptureScrollingScreenAsync(CancellationToken cancellationToken) =>
         Task.FromException<RecognitionInput?>(new NotSupportedException("Scrolling capture is unavailable."));
+
+    /// <summary>
+    /// #236 直接目标截图（全屏/活动窗口/显示器/上次区域）。默认实现保持
+    /// 既有测试桩语义（不可用），生产 InputService 覆盖。
+    /// </summary>
+    Task<RecognitionInput?> CaptureAreaAsync(
+        ScreenshotCaptureRequest request,
+        CancellationToken cancellationToken) =>
+        Task.FromException<RecognitionInput?>(
+            new NotSupportedException("Direct area capture is unavailable."));
+
+    /// <summary>#236 延时截图：倒计时（可取消）后进入既有框选链路。</summary>
+    Task<RecognitionInput?> CaptureDelayedRegionAsync(
+        ScreenshotSelectionActions? actions,
+        CancellationToken cancellationToken) =>
+        Task.FromException<RecognitionInput?>(
+            new NotSupportedException("Delayed capture is unavailable."));
+
     Task<RecognitionInput?> ReadDroppedFileAsync(string path, CancellationToken cancellationToken);
 }
 
 public sealed class InputService : IInputService
 {
     private const long MaximumInputBytes = 256L << 20;
+    private const long MaximumCaptureBytes = 256L << 20;
     private readonly Func<nint> _windowHandle;
     private readonly IScreenRegionPicker _screenRegionPicker;
     private readonly IScreenRegionPicker _scrollingRegionPicker;
+    private readonly ICapturePreferencesStore? _preferences;
 
     public InputService(Func<nint> windowHandle, IScreenRegionPicker? screenRegionPicker = null,
-        IScreenRegionPicker? scrollingRegionPicker = null)
+        IScreenRegionPicker? scrollingRegionPicker = null,
+        ICapturePreferencesStore? preferences = null)
     {
         _windowHandle = windowHandle ?? throw new ArgumentNullException(nameof(windowHandle));
-        _screenRegionPicker = screenRegionPicker ?? new ScreenRegionPicker(windowHandle);
+        _screenRegionPicker = screenRegionPicker ?? new ScreenRegionPicker(windowHandle, preferences: preferences);
         _scrollingRegionPicker = scrollingRegionPicker ?? new ScreenRegionPicker(windowHandle, scrolling: true);
+        _preferences = preferences;
     }
 
     public async Task<RecognitionInput?> PickFileAsync(CancellationToken cancellationToken)
@@ -125,7 +149,194 @@ public sealed class InputService : IInputService
     public Task<RecognitionInput?> CaptureScrollingScreenAsync(CancellationToken cancellationToken) =>
         CaptureAsync(_scrollingRegionPicker, "scrolling-screenshot", cancellationToken);
 
-    private static async Task<RecognitionInput?> CaptureAsync(
+    /// <summary>
+    /// #236 直接目标截图：隐藏宿主 → 冻结目标矩形（可选光标叠加）→ 恢复
+    /// 宿主；失败/取消经既有异常路径发布 recognition.failed/cancelled。
+    /// </summary>
+    public async Task<RecognitionInput?> CaptureAreaAsync(
+        ScreenshotCaptureRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.Kind is ScreenshotCaptureKind.Region or ScreenshotCaptureKind.DelayedRegion)
+        {
+            throw new ArgumentException(
+                $"区域框选模式应走既有选区链路：{request.Kind}", nameof(request));
+        }
+
+        CapturePreferences preferences = _preferences?.Load() ?? new CapturePreferences();
+        nint owner = _windowHandle();
+        nint foreground = GetForegroundWindow();
+        IReadOnlyList<ScreenMonitorTarget> layoutBefore = ScreenTargetQuery.EnumerateMonitors();
+        PhysicalRectangle desktopBefore = ScreenTargetQuery.VirtualDesktop();
+        bool visible = IsWindowVisible(owner);
+        bool minimized = IsIconic(owner);
+        ShowWindow(owner, 0);
+        try
+        {
+            await Task.Delay(180, cancellationToken);
+            EnsureLayoutUnchanged(layoutBefore, desktopBefore);
+            PhysicalRectangle bounds = ResolveTargetBounds(request, preferences, owner, foreground);
+            await using var capture = new ScreenCaptureService(
+                Guid.NewGuid(), cursorOverlay: new GdiScreenCursorOverlay());
+            CapturedFrame frame = capture.Capture(bounds, TimeSpan.FromMinutes(1), preferences.IncludeCursor);
+            byte[] bgra = capture.Read(frame);
+            EnsureLayoutUnchanged(layoutBefore, desktopBefore);
+            if (bounds != ResolveTargetBounds(request, preferences, owner, foreground))
+                throw new InvalidDataException("截图目标已移动或改变大小，请重新截图。");
+            cancellationToken.ThrowIfCancellationRequested();
+            return new RecognitionInput(
+                EncodeTopDownBmp(bgra, bounds.Width, bounds.Height, frame.Stride),
+                "image/bmp",
+                "screenshot.bmp",
+                "screenshot",
+                bounds);
+        }
+        finally
+        {
+            ScreenRegionPicker.RestoreOwnerState(owner, visible, minimized, foreground);
+        }
+    }
+
+    public async Task<RecognitionInput?> CaptureDelayedRegionAsync(
+        ScreenshotSelectionActions? actions,
+        CancellationToken cancellationToken)
+    {
+        CapturePreferences preferences = _preferences?.Load() ?? new CapturePreferences();
+        if (!await DelayedCaptureOverlay.RunAsync(preferences.EffectiveDelaySeconds, cancellationToken))
+        {
+            return null;
+        }
+
+        return await CaptureScreenWithActionsAsync(actions, cancellationToken);
+    }
+
+    private static void EnsureLayoutUnchanged(
+        IReadOnlyList<ScreenMonitorTarget> previous, PhysicalRectangle desktop)
+    {
+        if (ScreenTargetQuery.VirtualDesktop() != desktop ||
+            !ScreenTargetQuery.LayoutsMatch(previous, ScreenTargetQuery.EnumerateMonitors()))
+            throw new InvalidDataException("截图期间显示器布局已变化，请重新截图。");
+    }
+
+    private static PhysicalRectangle ResolveTargetBounds(
+        ScreenshotCaptureRequest request,
+        CapturePreferences preferences,
+        nint owner,
+        nint foreground)
+    {
+        PhysicalRectangle desktop = ScreenTargetQuery.VirtualDesktop();
+        desktop.Validate();
+        if (checked((long)desktop.Width * desktop.Height * 4) > MaximumCaptureBytes)
+        {
+            throw new InvalidDataException("虚拟桌面截图超过 256 MiB 限制。");
+        }
+
+        PhysicalRectangle bounds = request.Kind switch
+        {
+            ScreenshotCaptureKind.Fullscreen => desktop,
+            ScreenshotCaptureKind.ActiveWindow =>
+                ResolveActiveWindow(preferences, request, owner, foreground),
+            ScreenshotCaptureKind.Monitor => ResolveMonitor(request.MonitorDevice),
+            ScreenshotCaptureKind.FixedRegion => ResolveFixedRegion(preferences, desktop),
+            ScreenshotCaptureKind.LastRegion => ResolveLastRegion(preferences, desktop),
+            _ => throw new ArgumentException($"未知截图目标：{request.Kind}", nameof(request)),
+        };
+        bounds.Validate();
+        PhysicalRectangle? clipped = SmartScreenCandidates.Intersect(bounds, desktop);
+        if (clipped is null)
+        {
+            throw new InvalidDataException("截图目标不在当前桌面范围内，请重试。");
+        }
+
+        return clipped.Value;
+    }
+
+    internal static PhysicalRectangle ResolveActiveWindow(
+        CapturePreferences preferences, ScreenshotCaptureRequest request, nint owner, nint foreground)
+    {
+        // 菜单/悬浮栏入口：捕获时的前台是菜单宿主或本应用窗口；使用打开
+        // 菜单前记录的真实目标窗口（request.TargetWindow）。热键入口无
+        // 记录时沿用进入时前台；宿主自身持前台则隐藏后重查。
+        nint window = request.TargetWindow != 0 && request.TargetWindow != owner
+            ? request.TargetWindow
+            : foreground == owner && owner != 0
+                ? GetForegroundWindow()
+                : foreground;
+        PhysicalRectangle? bounds = window == 0 || window == owner
+            ? null
+            : ScreenTargetQuery.TryGetWindowBounds(window, preferences.EffectiveWindowBoundsMode);
+        return bounds ?? throw new InvalidDataException(
+            "目标活动窗口已不可用（消失/最小化），请在其置顶后重试。");
+    }
+
+    private static PhysicalRectangle ResolveFixedRegion(
+        CapturePreferences preferences, PhysicalRectangle desktop)
+    {
+        PhysicalRectangle fixedRegion = preferences.FixedRegion
+            ?? throw new InvalidDataException("尚未设置固定截图区域，请先在截图选项中设置。");
+        if (!CapturePreferencesStore.IsRegionInsideDesktop(fixedRegion, desktop))
+        {
+            throw new InvalidDataException(
+                "固定截图区域不在当前桌面范围内（显示器布局可能已变化），请在截图选项中重新设置。");
+        }
+
+        return fixedRegion;
+    }
+
+    private static PhysicalRectangle ResolveMonitor(string? deviceName)
+    {
+        IReadOnlyList<ScreenMonitorTarget> monitors = ScreenTargetQuery.EnumerateMonitors();
+        if (monitors.Count == 0)
+        {
+            throw new InvalidDataException("未检测到可用显示器，无法截图。");
+        }
+
+        if (string.IsNullOrEmpty(deviceName))
+        {
+            return monitors.Count == 1
+                ? monitors[0].Bounds
+                : throw new InvalidDataException("存在多台显示器，请从截图模式菜单选择目标显示器。");
+        }
+
+        return monitors.FirstOrDefault(
+            monitor => string.Equals(monitor.DeviceName, deviceName, StringComparison.Ordinal))
+            is { } matched
+            ? matched.Bounds
+            : throw new InvalidDataException("所选显示器当前不可用（可能已断开），请重新选择。");
+    }
+
+    private static PhysicalRectangle ResolveLastRegion(
+        CapturePreferences preferences, PhysicalRectangle desktop)
+    {
+        LastRegionCapture? last = preferences.LastRegion
+            ?? throw new InvalidDataException("尚无上次截图区域，请先完成一次框选截图。");
+        if (!CapturePreferencesStore.IsLastRegionUsable(
+                last, ScreenTargetQuery.EnumerateMonitors(), desktop))
+        {
+            throw new InvalidDataException(
+                "上次截图区域已不可用（显示器布局变化或区域越界），请重新框选。");
+        }
+
+        return last.Bounds;
+    }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShowWindow(nint window, int command);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(nint window);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsIconic(nint window);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetForegroundWindow();
+
+    private async Task<RecognitionInput?> CaptureAsync(
         IScreenRegionPicker picker, string origin, CancellationToken cancellationToken,
         ScreenshotSelectionActions? actions = null)
     {
@@ -139,7 +350,7 @@ public sealed class InputService : IInputService
 
         try
         {
-            return new RecognitionInput(
+            RecognitionInput input = new RecognitionInput(
                 EncodeTopDownBmp(
                     selection.Bgra,
                     selection.Bounds.Width,
@@ -154,6 +365,19 @@ public sealed class InputService : IInputService
                 SelectionRecognitionMode = selection.RecognitionModeId,
                 SelectionRecognitionIntent = selection.RecognitionIntent,
             };
+            // 上次区域只持久化坐标与布局快照，绝不保存像素（#236 AC3）；
+            // 持久化失败只告警，不得让已成功截图失败或泄漏 CaptureScene。
+            try
+            {
+                _preferences?.SaveLastRegion(selection.Bounds);
+            }
+            catch (Exception saveError) when (
+                saveError is IOException or UnauthorizedAccessException or InvalidOperationException)
+            {
+                AppLog.Warn($"保存上次截图区域失败：{saveError.Message}");
+            }
+
+            return input;
         }
         catch
         {

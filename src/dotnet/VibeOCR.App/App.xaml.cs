@@ -91,6 +91,9 @@ public sealed partial class App : Application
     private const int TrayMenuCommandBase = 1000;
     private const int TrayMenuToggleToolbar = 1004;
     private const int TrayMenuQuit = 1005;
+    private const int TrayMenuScreenshotModes = 1006;
+    /// <summary>#236 截图选项与上次区域持久化（DataRoot 原子写入）。</summary>
+    private CapturePreferencesStore? _capturePreferences;
 
     public App()
     {
@@ -117,6 +120,11 @@ public sealed partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
+        if (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "capture-ui")
+        {
+            _ = RunCaptureUiSmokeAsync();
+            return;
+        }
         AppLaunchOptions options = AppLaunchOptions.Parse(Environment.GetCommandLineArgs()[1..]);
         SelfTestInstanceScope instanceScope = SelfTestInstanceScope.Resolve(
             options.Profile,
@@ -270,6 +278,25 @@ public sealed partial class App : Application
                     ShowWorkbenchThenRecognizeClipboardAsync,
                 [HotkeyActionCatalog.ToggleToolbar] = ToggleFloatingToolbarAsync,
                 [HotkeyActionCatalog.ShowWorkbench] = ShowWorkbenchFromShellActionAsync,
+                // #236 直接目标截图：与纯截图同一命令/编辑会话状态机；
+                // 显示器模式经模式菜单选择具体目标，裸热键进入菜单。
+                [HotkeyActionCatalog.ScreenshotFullscreen] =
+                    () => _window!.CaptureScreenshotAreaAsync(
+                        new ScreenshotCaptureRequest(ScreenshotCaptureKind.Fullscreen)),
+                [HotkeyActionCatalog.ScreenshotWindow] =
+                    () => _window!.CaptureScreenshotAreaAsync(
+                        new ScreenshotCaptureRequest(ScreenshotCaptureKind.ActiveWindow)),
+                [HotkeyActionCatalog.ScreenshotFixed] =
+                    () => _window!.CaptureScreenshotAreaAsync(
+                        new ScreenshotCaptureRequest(ScreenshotCaptureKind.FixedRegion)),
+                [HotkeyActionCatalog.ScreenshotRepeat] =
+                    () => _window!.CaptureScreenshotAreaAsync(
+                        new ScreenshotCaptureRequest(ScreenshotCaptureKind.LastRegion)),
+                [HotkeyActionCatalog.ScreenshotDelayed] =
+                    () => _window!.CaptureScreenshotAreaAsync(
+                        new ScreenshotCaptureRequest(ScreenshotCaptureKind.DelayedRegion)),
+                [HotkeyActionCatalog.ScreenshotMonitor] = ShowScreenshotModeMenuAsync,
+                [HotkeyActionCatalog.ScreenshotMenu] = ShowScreenshotModeMenuAsync,
             },
             CurrentFloatingToolbarSettings,
             () => _floatingToolbar?.Visibility ?? FloatingToolbarVisibility.Disabled,
@@ -287,7 +314,7 @@ public sealed partial class App : Application
               () => WinRT.Interop.WindowNative.GetWindowHandle(_window!),
               Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "paddle-modes-e2e"
                 ? new MainWindow.SyntheticFixtureRegionPicker()
-                : _screenshotSmokePicker)),
+                : _screenshotSmokePicker, preferences: new CapturePreferencesStore(layout))),
           () => new BatchViewModel(
             _inferenceGateway,
             new BatchFileSource(() => WinRT.Interop.WindowNative.GetWindowHandle(_window!))),
@@ -403,6 +430,7 @@ public sealed partial class App : Application
         _trayIcon = new TrayIconService(Path.Combine(layout.WebAssetsRoot, "vibeocr.ico"));
         _trayIcon.Show(_trayOwner.Handle, TrayMessage, "VibeOCR");
         _shellLayout = layout;
+        _capturePreferences = new CapturePreferencesStore(layout);
 
         _hotkeyRegistrar = new WindowsHotkeyRegistrar(
             new GlobalHotkeyService(windowHandle: handle),
@@ -545,6 +573,13 @@ public sealed partial class App : Application
                     HotkeyActionCatalog.DisplayName(trayActions[index]));
             }
 
+            // #236 截图模式菜单：托盘固定入口（热键 screenshot_menu 同一菜单）。
+            AppendMenuW(menu, MenuFlagSeparator, 0, null);
+            AppendMenuW(
+                menu,
+                MenuFlagString,
+                (nuint)TrayMenuScreenshotModes,
+                "截图模式…");
             AppendMenuW(menu, MenuFlagSeparator, 0, null);
             AppendMenuW(
                 menu,
@@ -559,6 +594,7 @@ public sealed partial class App : Application
                 return;
             }
 
+            nint captureTarget = GetForegroundWindow();
             // 握手全部落在 owner：前台、模态菜单、结束 WM_NULL。
             int selected = owner.TrackContextMenu(menu, cursor.X, cursor.Y);
             if (selected is 0)
@@ -575,6 +611,12 @@ public sealed partial class App : Application
             if (selected == TrayMenuToggleToolbar)
             {
                 _actionDispatcher?.TryDispatch(HotkeyActionCatalog.ToggleToolbar);
+                return;
+            }
+
+            if (selected == TrayMenuScreenshotModes)
+            {
+                ShowScreenshotModeMenu(captureTarget);
                 return;
             }
 
@@ -600,6 +642,75 @@ public sealed partial class App : Application
                 AppLog.Error("Tray notification focus restore failed", error);
             }
         }
+    }
+
+    /// <summary>
+    /// 统一截图模式菜单：托盘“截图模式…”、悬浮栏右键与 screenshot_menu/
+    /// screenshot_monitor 热键共用；选项入口打开原生选项对话框。
+    /// </summary>
+    private void ShowScreenshotModeMenu(nint targetWindow = 0)
+    {
+        if (_trayOwner is not { } owner || _window is not { } window)
+        {
+            return;
+        }
+
+        try
+        {
+            if (!GetCursorPos(out PointL cursor))
+            {
+                return;
+            }
+
+            // 菜单打开前的真实前台是活动窗口模式的目标：托盘菜单会让 owner
+            // 短暂成为前台，必须在展示菜单前记录。
+            nint menuTarget = targetWindow != 0 ? targetWindow : GetForegroundWindow();
+            ScreenshotModeMenuItem? item = ScreenshotModeMenu.Show(
+                ScreenshotModeMenu.BuildItems(ScreenTargetQuery.EnumerateMonitors()),
+                (menu, x, y) => owner.TrackContextMenu(menu, x, y),
+                cursor.X,
+                cursor.Y);
+            if (menuTarget != 0) SetForegroundWindow(menuTarget);
+            if (item is null)
+            {
+                return;
+            }
+
+            if (item.IsOptions)
+            {
+                _capturePreferences ??= new CapturePreferencesStore(
+                    _shellLayout ?? throw new InvalidOperationException("桌面壳尚未初始化。"));
+                new CaptureOptionsDialog(_capturePreferences).Show(
+                    WinRT.Interop.WindowNative.GetWindowHandle(window));
+                return;
+            }
+
+            if (item.ActionId == HotkeyActionCatalog.ScreenshotMonitor)
+            {
+                _ = window.CaptureScreenshotAreaAsync(new ScreenshotCaptureRequest(
+                    ScreenshotCaptureKind.Monitor, item.MonitorDevice ?? string.Empty, menuTarget));
+            }
+            else if (item.ActionId == HotkeyActionCatalog.ScreenshotWindow)
+            {
+                // 活动窗口经菜单入口必须用记录的目标窗口，不走热键前台语义。
+                _ = window.CaptureScreenshotAreaAsync(new ScreenshotCaptureRequest(
+                    ScreenshotCaptureKind.ActiveWindow, TargetWindow: menuTarget));
+            }
+            else if (item.ActionId is { } action)
+            {
+                _actionDispatcher?.TryDispatch(action);
+            }
+        }
+        catch (Win32Exception error)
+        {
+            AppLog.Error("Screenshot mode menu failed", error);
+        }
+    }
+
+    private Task ShowScreenshotModeMenuAsync()
+    {
+        ShowScreenshotModeMenu();
+        return Task.CompletedTask;
     }
 
     private string ToolbarToggleMenuLabel() =>
@@ -778,6 +889,9 @@ public sealed partial class App : Application
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetForegroundWindow(nint window);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetForegroundWindow();
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
