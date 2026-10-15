@@ -5,6 +5,7 @@ export type AnnotationTool =
   | "line"
   | "polyline"
   | "text"
+  | "callout"
   | "mosaic"
   | "blur"
   | "pen"
@@ -19,7 +20,20 @@ export interface Point {
 }
 
 /** 逐标记样式；缺省回退到编辑器默认，历史条目保留当时样式。 */
-export interface AnnotationStyle {
+export interface AnnotationTextStyle {
+  readonly fontFamily?: string;
+  readonly fontBold?: boolean;
+  readonly fontItalic?: boolean;
+  readonly fontUnderline?: boolean;
+  readonly textAlign?: "left" | "center" | "right";
+  readonly textBackground?: AnnotationFill;
+  readonly textOutline?: { readonly color: string; readonly width: number };
+  readonly numberFormat?: "number" | "upper" | "lower";
+  readonly numberShape?: "circle" | "square" | "diamond" | "none";
+  readonly calloutStyle?: "bubble" | "arrow";
+}
+
+export interface AnnotationStyle extends AnnotationTextStyle {
   readonly color?: string;
   readonly strokeWidth?: number;
   readonly fontSize?: number;

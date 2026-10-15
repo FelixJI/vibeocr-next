@@ -7,6 +7,7 @@ import {
   MenuPopover,
   MenuTrigger,
   Select,
+  Textarea,
   Toolbar,
   ToolbarButton,
 } from "@fluentui/react-components";
@@ -43,6 +44,8 @@ import {
   type AnnotationArrowStyle,
   type AnnotationFill,
   type AnnotationLineStyle,
+  type AnnotationStyle,
+  type AnnotationTextStyle,
   type AnnotationTool,
   type CanvasSize,
   type EditorState,
@@ -50,6 +53,14 @@ import {
   type PixelPatch,
   type Point,
 } from "./annotationGeometry";
+import { AnnotationTextPanel } from "./AnnotationTextPanel";
+import {
+  drawTextAnnotation,
+  textAnnotationBounds,
+  isFontMark,
+  isContentMark,
+  resolveAnnotationFont,
+} from "./annotationText";
 import { uploadAnnotatedImage } from "./annotationHandoff";
 import { captureSceneStyle } from "./captureSceneLayout";
 import type { CaptureScene } from "../bridge/captureScene";
@@ -127,6 +138,7 @@ const TOOL_LABELS: Readonly<Record<Tool, string>> = {
   line: "直线",
   polyline: "折线",
   text: "文字",
+  callout: "说明",
   mosaic: "马赛克",
   blur: "模糊",
   pen: "画笔",
@@ -168,7 +180,12 @@ const STROKE_TOOLS: readonly Tool[] = [
   "pen",
   "highlighter",
 ];
-const COLOR_TOOLS: readonly Tool[] = [...STROKE_TOOLS, "text", "numbering"];
+const COLOR_TOOLS: readonly Tool[] = [
+  ...STROKE_TOOLS,
+  "text",
+  "numbering",
+  "callout",
+];
 /** 线型（实/虚/点）属性适用的描边工具。 */
 const LINE_STYLE_TOOLS: readonly Tool[] = [
   "rectangle",
@@ -191,6 +208,7 @@ const TOOL_ORDER: readonly Tool[] = [
   "line",
   "polyline",
   "text",
+  "callout",
   "mosaic",
   "blur",
   "pen",
@@ -241,6 +259,8 @@ interface ToolAttributes {
   readonly arrowStyle: AnnotationArrowStyle;
   readonly arrowDouble: boolean;
   readonly fontSize: number;
+  readonly textStyle: AnnotationTextStyle;
+  readonly numberStart: number;
   readonly intensity: number;
 }
 
@@ -257,6 +277,8 @@ const DEFAULT_TOOL_ATTRIBUTES: ToolAttributes = {
   arrowStyle: "open",
   arrowDouble: false,
   fontSize: 24,
+  textStyle: { fontBold: false },
+  numberStart: 1,
   intensity: 2,
 };
 
@@ -872,6 +894,15 @@ export function ImageCanvasEditor({
     | undefined
   >(undefined);
   const [annotationText, setAnnotationText] = useState("文本");
+  const [textEdit, setTextEdit] = useState<{ index: number; mark: Mark }>();
+  const textInputRef = useRef<HTMLTextAreaElement>(null);
+  const textComposing = useRef(false);
+  const textEditingRef = useRef(false);
+  textEditingRef.current = !!textEdit;
+  const textEditingIndex = textEdit?.index;
+  useEffect(() => {
+    if (textEditingIndex !== undefined) textInputRef.current?.focus();
+  }, [textEditingIndex]);
   // 各工具属性记忆：每个工具独立记录自己消费的属性，切换工具互不覆盖；
   // 未记录时回退默认值；“重置属性”删除当前工具条目回到默认。
   const [toolAttributes, setToolAttributes] = useState<
@@ -1032,6 +1063,8 @@ export function ImageCanvasEditor({
     setDraftMark(undefined);
     setCropDraft(undefined);
     dragStart.current = undefined;
+    setTextEdit(undefined);
+    textComposing.current = false;
     markDragRef.current = undefined;
     cropResizeRef.current = undefined;
     setResizeDraft(undefined);
@@ -1314,9 +1347,13 @@ export function ImageCanvasEditor({
                 ? resizeDraft.current!.mark
                 : mark,
             )
-          : draftMark.current
-            ? [...state.marks, draftMark.current]
-            : state.marks,
+          : textEdit
+            ? state.marks.map((mark, index) =>
+                index === textEdit.index ? textEdit.mark : mark,
+              )
+            : draftMark.current
+              ? [...state.marks, draftMark.current]
+              : state.marks,
         true,
         1,
         // 预览与导出一致：JPEG 显式白底合成；PNG 不填底色，透明由
@@ -1473,7 +1510,7 @@ export function ImageCanvasEditor({
         quality: jpegQuality,
         inpaint: { patches: appliedInpaintPatches },
       });
-      if (!exportContextUnchanged(frozen)) {
+      if (textEditingRef.current || !exportContextUnchanged(frozen)) {
         setOperationMessage("检查期间内容或设置已变化，请重新检查。");
         return;
       }
@@ -1796,11 +1833,12 @@ export function ImageCanvasEditor({
   // 无填充，渲染与旧版完全一致。
   const editingMarkCandidate =
     tool === "select" && selectedMark !== undefined
-      ? state.marks[selectedMark]
+      ? textEdit?.index === selectedMark
+        ? textEdit.mark
+        : state.marks[selectedMark]
       : undefined;
   const editingMark =
-    editingMarkCandidate &&
-    (STROKE_TOOLS as readonly string[]).includes(editingMarkCandidate.tool)
+    editingMarkCandidate && COLOR_TOOLS.includes(editingMarkCandidate.tool)
       ? editingMarkCandidate
       : undefined;
   const styleEditing = !!editingMark;
@@ -1851,8 +1889,7 @@ export function ImageCanvasEditor({
 
   function applyStyleChange(change: StyleChange): void {
     const index = selectedMark;
-    const mark =
-      editingMark && index !== undefined ? state.marks[index] : undefined;
+    const mark = editingMark && index !== undefined ? editingMark : undefined;
     if (mark && index !== undefined) {
       const style = mark.style ?? {};
       // 选中标记已带填充时，改色保留其原不透明度、改不透明度保留其原色；
@@ -1903,12 +1940,15 @@ export function ImageCanvasEditor({
                                 opacity: change.value,
                               },
                             };
-      commit({
-        ...state,
-        marks: state.marks.map((entry, entryIndex) =>
-          entryIndex === index ? { ...entry, style: next } : entry,
-        ),
-      });
+      if (textEdit?.index === index)
+        setTextEdit({ index, mark: { ...mark, style: next } });
+      else
+        commit({
+          ...state,
+          marks: state.marks.map((entry, entryIndex) =>
+            entryIndex === index ? { ...entry, style: next } : entry,
+          ),
+        });
       return;
     }
     // 未选中标记：更新当前工具的属性记忆（不影响其他工具，可重置）。
@@ -1953,7 +1993,7 @@ export function ImageCanvasEditor({
     setOperationMessage(`已重置“${TOOL_LABELS[tool]}”工具属性为默认值。`);
   }
 
-  function point(event: React.PointerEvent<HTMLCanvasElement>): Point {
+  function point(event: React.MouseEvent<HTMLCanvasElement>): Point {
     // 选中对象会展开属性栏；同一手势沿按下时边界换算，避免布局移动变成对象位移。
     const bounds =
       tool === "select" && dragStart.current && selectionDragBounds.current
@@ -1991,6 +2031,9 @@ export function ImageCanvasEditor({
       color: attributes.color,
       strokeWidth: attributes.strokeWidth,
       fontSize: attributes.fontSize,
+      ...(["text", "numbering", "callout"].includes(tool)
+        ? attributes.textStyle
+        : {}),
       // 马赛克/模糊创建时冻结当前强度档位，撤销/重做回放当时效果。
       ...(tool === "mosaic" || tool === "blur"
         ? { intensity: attributes.intensity }
@@ -2185,6 +2228,8 @@ export function ImageCanvasEditor({
   }
 
   function cancelDrawing() {
+    setTextEdit(undefined);
+    textComposing.current = false;
     dragStart.current = undefined;
     markDragRef.current = undefined;
     cropResizeRef.current = undefined;
@@ -2286,7 +2331,11 @@ export function ImageCanvasEditor({
             ? "move"
             : cropHandle
               ? `${cropHandle}-resize`
-              : findMark(state.marks, at) === undefined
+              : findMark(
+                    state.marks,
+                    at,
+                    canvasRef.current?.getContext("2d") ?? undefined,
+                  ) === undefined
                 ? "default"
                 : "move";
       }
@@ -2386,7 +2435,7 @@ export function ImageCanvasEditor({
   }
 
   function pointerDown(event: React.PointerEvent<HTMLCanvasElement>) {
-    if (event.button !== 0 || dragStart.current) return;
+    if (event.button !== 0 || dragStart.current || textEdit) return;
     // 一次性画布取色：只采样像素，不开始任何绘制/选中/裁剪。
     if (colorPickPendingRef.current) {
       sampleCanvasColor(point(event), event.currentTarget);
@@ -2434,7 +2483,13 @@ export function ImageCanvasEditor({
         if (cropBase && cropHandle) {
           cropResizeRef.current = { handle: cropHandle, origin: cropBase };
         } else {
-          select(findMark(state.marks, start));
+          select(
+            findMark(
+              state.marks,
+              start,
+              canvasRef.current?.getContext("2d") ?? undefined,
+            ),
+          );
         }
       }
     } else if (tool === "inpaint") {
@@ -2477,12 +2532,14 @@ export function ImageCanvasEditor({
           ? { points: draftPoints.current }
           : {}),
         style: currentStyle(),
-        ...(tool === "text" ? { text: annotationText.trim() || "文本" } : {}),
+        ...(["text", "callout"].includes(tool)
+          ? { text: annotationText.trim() || "文本" }
+          : {}),
         ...(tool === "numbering"
           ? {
               ordinal:
-                state.marks.filter((mark) => mark.tool === "numbering").length +
-                1,
+                activeToolAttributes.numberStart +
+                state.marks.filter((mark) => mark.tool === "numbering").length,
             }
           : {}),
       });
@@ -2647,8 +2704,9 @@ export function ImageCanvasEditor({
             start,
             end,
             ordinal:
-              state.marks.filter((mark) => mark.tool === "numbering").length +
-              1,
+              draft?.ordinal ??
+              activeToolAttributes.numberStart +
+                state.marks.filter((mark) => mark.tool === "numbering").length,
             style: draft?.style ?? currentStyle(),
           },
         ],
@@ -2675,7 +2733,7 @@ export function ImageCanvasEditor({
       }
       return;
     }
-    if (Math.hypot(end.x - start.x, end.y - start.y) >= 8) {
+    if (tool === "text" || Math.hypot(end.x - start.x, end.y - start.y) >= 8) {
       if (tool === "crop") {
         commit({ ...state, crop: { start, end } });
       } else if (
@@ -2708,12 +2766,16 @@ export function ImageCanvasEditor({
               start: box ? box.start : start,
               end: box ? box.end : lineEnd,
               style: draft?.style ?? currentStyle(),
-              ...(tool === "text"
-                ? { text: annotationText.trim() || "文本" }
+              ...(["text", "callout"].includes(tool)
+                ? { text: draft?.text ?? (annotationText.trim() || "文本") }
                 : {}),
             },
           ],
         });
+      }
+      if (tool === "text" || tool === "callout") {
+        setTool("select");
+        select(state.marks.length);
       }
     }
   }
@@ -2806,6 +2868,10 @@ export function ImageCanvasEditor({
       }
     | undefined
   > {
+    if (textEdit) {
+      setOperationMessage("请先完成或取消文字编辑。");
+      return undefined;
+    }
     const frozen = freezeExportContext();
     const blob = await exportCanvas(frozen.image, canvasRef.current, state, {
       format: outputFormat,
@@ -2814,7 +2880,7 @@ export function ImageCanvasEditor({
       bakeExclusions,
     });
     const resourceUri = await uploadAnnotatedImage(blob);
-    if (!exportContextUnchanged(frozen)) {
+    if (textEditingRef.current || !exportContextUnchanged(frozen)) {
       setOperationMessage(
         "导出期间内容或会话已变化，本次未发送；请在新画面重试。",
       );
@@ -3007,7 +3073,91 @@ export function ImageCanvasEditor({
     }
   }
 
-  const fontTool = tool === "text" || tool === "numbering";
+  const fontMark =
+    editingMarkCandidate && isFontMark(editingMarkCandidate)
+      ? editingMarkCandidate
+      : undefined;
+  const activeFontTool =
+    fontMark?.tool ??
+    (tool === "text" || tool === "numbering" || tool === "callout"
+      ? tool
+      : undefined);
+  const fontTool = activeFontTool !== undefined;
+  const activeTextStyle: AnnotationStyle = fontMark?.style ?? {
+    ...activeToolAttributes.textStyle,
+    fontSize: activeToolAttributes.fontSize,
+  };
+  const contentMark =
+    fontMark && isContentMark(fontMark) ? fontMark : undefined;
+  function updateFontMark(patch: Partial<Mark>): void {
+    if (!fontMark || selectedMark === undefined) return;
+    const next = { ...fontMark, ...patch };
+    if (textEdit?.index === selectedMark)
+      setTextEdit({ index: selectedMark, mark: next });
+    else
+      commit({
+        ...state,
+        marks: state.marks.map((mark, index) =>
+          index === selectedMark ? next : mark,
+        ),
+      });
+  }
+  function applyTextStyle(patch: Partial<AnnotationTextStyle>): void {
+    if (fontMark) updateFontMark({ style: { ...fontMark.style, ...patch } });
+    else
+      updateToolAttribute({
+        textStyle: { ...activeToolAttributes.textStyle, ...patch },
+      });
+  }
+  function beginTextEdit(index: number): void {
+    const mark = state.marks[index];
+    if (!mark || !isContentMark(mark)) return;
+    cancelDrawing();
+    select(index);
+    setTool("select");
+    setTextEdit({ index, mark });
+    setOperationMessage("正在编辑文字草稿；完成后才能复制或保存，Esc 可取消。");
+  }
+  function finishTextEdit(): void {
+    if (!textEdit || textComposing.current) return;
+    if (textEdit.mark.text?.trim() === "") {
+      setOperationMessage("文字不能为空；可取消以保留原文字。");
+      return;
+    }
+    if (
+      JSON.stringify(textEdit.mark) !==
+      JSON.stringify(state.marks[textEdit.index])
+    )
+      commit({
+        ...state,
+        marks: state.marks.map((mark, index) =>
+          index === textEdit.index ? textEdit.mark : mark,
+        ),
+      });
+    setTextEdit(undefined);
+    setOperationMessage("已完成文字编辑。");
+  }
+  function resolveFont(requested: string): string {
+    const resolved = resolveAnnotationFont(
+      canvasRef.current?.getContext("2d") ?? null,
+      requested || "system-ui",
+    );
+    applyTextStyle({ fontFamily: resolved.family });
+    if (!resolved.available)
+      setOperationMessage("字体“" + requested + "”不可用，已回退到系统字体。");
+    return resolved.family;
+  }
+  function renumber(): void {
+    const start = attributesOfTool("numbering").numberStart;
+    let next = start;
+    commit({
+      ...state,
+      marks: state.marks.map((mark) =>
+        mark.tool === "numbering" ? { ...mark, ordinal: next++ } : mark,
+      ),
+    });
+    setOperationMessage("已从 " + start + " 重新编号；可撤销。");
+  }
   const panning = tool === "hand" || spaceHeld;
 
   // 取字模式：仅当宿主层就绪且绑定与当前本地修订一致时展示；
@@ -3214,7 +3364,7 @@ export function ImageCanvasEditor({
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       // 校对模式挂起文档级命令：隐藏的编辑器不得继续消费 Ctrl+S/Ctrl+W。
-      if (documentCommandRef.current.suspended) return;
+      if (documentCommandRef.current.suspended || textComposing.current) return;
       if (
         !shouldRunDocumentCommand(event) ||
         event.repeat ||
@@ -3305,12 +3455,49 @@ export function ImageCanvasEditor({
       </label>
     );
 
-  const annotationTextInput = tool === "text" && (
-    <Input
+  const annotationTextInput = (tool === "text" ||
+    tool === "callout" ||
+    contentMark) && (
+    <Textarea
       aria-label="标注文字"
+      className="editor-annotation-text"
       size="small"
-      value={annotationText}
-      onChange={(_, data) => setAnnotationText(data.value)}
+      resize="vertical"
+      rows={2}
+      maxLength={4000}
+      ref={textInputRef}
+      value={contentMark ? (contentMark.text ?? "") : annotationText}
+      onChange={(_, data) => {
+        if (contentMark && selectedMark !== undefined)
+          setTextEdit({
+            index: selectedMark,
+            mark: { ...contentMark, text: data.value },
+          });
+        else setAnnotationText(data.value);
+      }}
+      onCompositionStart={() => {
+        textComposing.current = true;
+      }}
+      onCompositionEnd={() => {
+        textComposing.current = false;
+      }}
+      onKeyDown={(event) => {
+        event.stopPropagation();
+        if (textComposing.current || isImeCompositionEvent(event.nativeEvent))
+          return;
+        if (event.key === "Escape" && textEdit) {
+          event.preventDefault();
+          setTextEdit(undefined);
+          setOperationMessage("已取消文字编辑，原文字保留。");
+        } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+          event.preventDefault();
+          finishTextEdit();
+        } else if (
+          event.key.toLowerCase() === "s" &&
+          (event.ctrlKey || event.metaKey)
+        )
+          event.preventDefault();
+      }}
     />
   );
 
@@ -3319,7 +3506,9 @@ export function ImageCanvasEditor({
   const showStrokeColorControl =
     toolset === "full" && (COLOR_TOOLS.includes(tool) || styleEditing);
   const showStrokeWidthControl =
-    toolset === "full" && (STROKE_TOOLS.includes(tool) || styleEditing);
+    toolset === "full" &&
+    (STROKE_TOOLS.includes(tool) ||
+      (!!editingMark && STROKE_TOOLS.includes(editingMark.tool)));
   const showLineStyleControl =
     toolset === "full" &&
     (LINE_STYLE_TOOLS.includes(tool) ||
@@ -3403,9 +3592,13 @@ export function ImageCanvasEditor({
       <Select
         aria-label="文字字号"
         size="small"
-        value={String(activeToolAttributes.fontSize)}
+        value={String(activeTextStyle.fontSize ?? 24)}
         onChange={(_, data) =>
-          updateToolAttribute({ fontSize: Number(data.value) })
+          fontMark
+            ? updateFontMark({
+                style: { ...fontMark.style, fontSize: Number(data.value) },
+              })
+            : updateToolAttribute({ fontSize: Number(data.value) })
         }
       >
         {FONT_SIZES.map((size) => (
@@ -3611,7 +3804,7 @@ export function ImageCanvasEditor({
       title="撤销"
       icon={<ToolbarIcon name="undo" />}
       aria-label="撤销"
-      disabled={historyIndex === 0}
+      disabled={historyIndex === 0 || !!textEdit}
       onClick={undo}
     >
       {captureStyle ? undefined : "撤销"}
@@ -3622,7 +3815,7 @@ export function ImageCanvasEditor({
       title="重做"
       icon={<ToolbarIcon name="redo" />}
       aria-label="重做"
-      disabled={historyIndex >= history.length - 1}
+      disabled={historyIndex >= history.length - 1 || !!textEdit}
       onClick={redo}
     >
       {captureStyle ? undefined : "重做"}
@@ -3663,7 +3856,7 @@ export function ImageCanvasEditor({
       icon={<ToolbarIcon name="copy" />}
       aria-label="复制标注图"
       size="small"
-      disabled={!canExport || isExporting}
+      disabled={!canExport || isExporting || !!textEdit}
       onClick={() => void copyAnnotatedImage()}
     >
       {captureStyle ? undefined : "复制标注图"}
@@ -3675,7 +3868,7 @@ export function ImageCanvasEditor({
       icon={<ToolbarIcon name="copyExcluded" />}
       aria-label="复制屏蔽副本"
       size="small"
-      disabled={!canExport || isExporting}
+      disabled={!canExport || isExporting || !!textEdit}
       onClick={() => void copyAnnotatedImage(true)}
     >
       {captureStyle ? undefined : "复制屏蔽副本"}
@@ -3687,7 +3880,7 @@ export function ImageCanvasEditor({
       icon={<ToolbarIcon name="save" />}
       aria-label="保存标注图"
       size="small"
-      disabled={!canExport || isExporting}
+      disabled={!canExport || isExporting || !!textEdit}
       onClick={() => void saveAnnotatedImage()}
     >
       {captureStyle ? undefined : "保存标注图"}
@@ -3699,7 +3892,7 @@ export function ImageCanvasEditor({
       icon={<ToolbarIcon name="saveExcluded" />}
       aria-label="保存屏蔽副本"
       size="small"
-      disabled={!canExport || isExporting}
+      disabled={!canExport || isExporting || !!textEdit}
       onClick={() => void saveAnnotatedImage(true)}
     >
       {captureStyle ? undefined : "保存屏蔽副本"}
@@ -3711,7 +3904,7 @@ export function ImageCanvasEditor({
       icon={<ToolbarIcon name="pin" />}
       aria-label="贴图"
       size="small"
-      disabled={!canExport || isExporting}
+      disabled={!canExport || isExporting || !!textEdit}
       onClick={() => void pinCurrentImage()}
     >
       {captureStyle ? undefined : "贴图"}
@@ -3724,7 +3917,7 @@ export function ImageCanvasEditor({
       aria-label="识别当前图"
       appearance="primary"
       size="small"
-      disabled={!canRecognize || isExporting}
+      disabled={!canRecognize || isExporting || !!textEdit}
       onClick={() => void recognizeCurrentImage()}
     >
       {captureStyle ? undefined : "识别当前图"}
@@ -3782,14 +3975,14 @@ export function ImageCanvasEditor({
           {hasExclusions && (
             <>
               <MenuItem
-                disabled={!canExport || isExporting}
+                disabled={!canExport || isExporting || !!textEdit}
                 icon={<ToolbarIcon name="copyExcluded" />}
                 onClick={() => void copyAnnotatedImage(true)}
               >
                 复制屏蔽副本
               </MenuItem>
               <MenuItem
-                disabled={!canExport || isExporting}
+                disabled={!canExport || isExporting || !!textEdit}
                 icon={<ToolbarIcon name="saveExcluded" />}
                 onClick={() => void saveAnnotatedImage(true)}
               >
@@ -3815,7 +4008,7 @@ export function ImageCanvasEditor({
   const settingsRowActive =
     !!objectSelectionControl ||
     styleEditing ||
-    tool === "text" ||
+    fontTool ||
     (toolset === "full" &&
       (COLOR_TOOLS.includes(tool) || tool === "mosaic" || tool === "blur")) ||
     !!inpaintCompareControl ||
@@ -3829,7 +4022,9 @@ export function ImageCanvasEditor({
       style={captureStyle}
       data-screenshot-session={session?.sessionId ?? ""}
       onKeyDown={(event) => {
-        if (isImeCompositionEvent(event.nativeEvent)) return;
+        if (textComposing.current || isImeCompositionEvent(event.nativeEvent))
+          return;
+        if (textEdit) return;
         // 校对模式挂起本地编辑手势（Space 平移/Esc 关闭），不抢占校对交互。
         if (proofreading) return;
         const target = event.target as HTMLElement;
@@ -3897,6 +4092,36 @@ export function ImageCanvasEditor({
           {inpaintOperations}
           {rotateControl}
           {resetAttributesControl}
+          {contentMark && !textEdit && (
+            <ToolbarButton
+              aria-label="编辑文字"
+              onClick={() => beginTextEdit(selectedMark!)}
+            >
+              编辑文字
+            </ToolbarButton>
+          )}
+          {textEdit && (
+            <>
+              <ToolbarButton aria-label="完成文字编辑" onClick={finishTextEdit}>
+                完成文字
+              </ToolbarButton>
+              <ToolbarButton
+                aria-label="取消文字编辑"
+                onClick={() => {
+                  setTextEdit(undefined);
+                  setOperationMessage("已取消文字编辑，原文字保留。");
+                }}
+              >
+                取消文字
+              </ToolbarButton>
+            </>
+          )}
+          {activeFontTool === "numbering" &&
+            state.marks.some((mark) => mark.tool === "numbering") && (
+              <ToolbarButton aria-label="重新编号" onClick={renumber}>
+                重新编号
+              </ToolbarButton>
+            )}
           {captureStyle ? null : clearExclusionsButton}
           {undoButton}
           {redoButton}
@@ -3920,6 +4145,47 @@ export function ImageCanvasEditor({
             {annotationTextInput}
             {stylePanel}
             {fontSizeControl}
+            {activeFontTool && (
+              <AnnotationTextPanel
+                style={activeTextStyle}
+                tool={activeFontTool}
+                onChange={applyTextStyle}
+                onResolveFont={resolveFont}
+              />
+            )}
+            {activeFontTool === "numbering" && (
+              <label className="editor-style-control">
+                <span aria-hidden="true">{fontMark ? "序号值" : "起点"}</span>
+                <Input
+                  aria-label={fontMark ? "序号值" : "序号起点"}
+                  type="number"
+                  size="small"
+                  min={1}
+                  max={9999}
+                  key={
+                    fontMark
+                      ? "mark-" + selectedMark + "-" + fontMark.ordinal
+                      : "number-start-" + activeToolAttributes.numberStart
+                  }
+                  defaultValue={String(
+                    fontMark?.ordinal ?? activeToolAttributes.numberStart,
+                  )}
+                  onBlur={(event) => {
+                    const value = Number(event.currentTarget.value);
+                    if (
+                      Number.isInteger(value) &&
+                      value >= 1 &&
+                      value <= 9999
+                    ) {
+                      if (fontMark) {
+                        if (value !== fontMark.ordinal)
+                          updateFontMark({ ordinal: value });
+                      } else updateToolAttribute({ numberStart: value });
+                    }
+                  }}
+                />
+              </label>
+            )}
             {effectIntensityControl}
             {autoTextControl}
             {inpaintCompareControl}
@@ -4024,7 +4290,7 @@ export function ImageCanvasEditor({
             </label>
             <ToolbarButton
               aria-label="检查文件大小"
-              disabled={isCheckingExport}
+              disabled={isCheckingExport || !!textEdit}
               onClick={() => void checkFileSize()}
             >
               检查文件大小
@@ -4035,8 +4301,8 @@ export function ImageCanvasEditor({
       <p className="editor-guidance">
         {toolset === "full"
           ? captureStyle
-            ? "拖拽绘制标注；拖动选区四边与四角可调整裁剪范围。矩形/椭圆选中后可拖八点手柄缩放，直线/箭头可拖端点。按住 Shift 约束正方形/正圆/45°，按住 Alt 以起点为中心绘制；折线单击加点、双击或 Enter 完成，Esc 放弃草稿。手形或按住 Space 可平移；滚轮可调线宽。马赛克/模糊强度可在工具栏选择，写入复制、保存副本及显式识别输入；画面缩放不改变内容。"
-            : "拖拽绘制或裁剪；选择标注后可拖动，矩形/椭圆可拖八点手柄缩放，直线/箭头可拖端点，已提交裁剪框的四边/四角可继续拖拽调整。按住 Shift 约束正方形/正圆/45°，按住 Alt 以起点为中心绘制；折线单击加点、双击或 Enter 完成，Esc 放弃草稿。手形或按住 Space 可平移；滚轮可调线宽。马赛克/模糊强度可在工具栏选择，写入复制、保存副本及显式识别输入；画面缩放不改变内容。"
+            ? "拖拽绘制标注；拖动选区四边与四角可调整裁剪范围。矩形/椭圆选中后可拖八点手柄缩放，直线/箭头/说明可拖端点；文字可双击继续编辑，上排完成或取消。说明从指向位置拖到文字位置。按住 Shift 约束正方形/正圆/45°，按住 Alt 以起点为中心绘制；折线单击加点、双击或 Enter 完成，Esc 放弃草稿。手形或按住 Space 可平移；滚轮可调线宽。马赛克/模糊强度可在工具栏选择，写入复制、保存副本及显式识别输入；画面缩放不改变内容。"
+            : "拖拽绘制或裁剪；选择标注后可拖动，矩形/椭圆可拖八点手柄缩放，直线/箭头/说明可拖端点；文字可双击继续编辑，上排完成或取消。说明从指向位置拖到文字位置；已提交裁剪框的四边/四角可继续拖拽调整。按住 Shift 约束正方形/正圆/45°，按住 Alt 以起点为中心绘制；折线单击加点、双击或 Enter 完成，Esc 放弃草稿。手形或按住 Space 可平移；滚轮可调线宽。马赛克/模糊强度可在工具栏选择，写入复制、保存副本及显式识别输入；画面缩放不改变内容。"
           : "拖拽框选“屏蔽”区，识别时忽略其中内容；“去水印”先框选、预览修补再应用；旋转调整整图方向。按住 Space 可平移，画面缩放不改变内容。"}
       </p>
       {tool === "inpaint" && (
@@ -4213,7 +4479,20 @@ export function ImageCanvasEditor({
           onKeyDown={(event) => {
             // IME 组合（含标注文字输入结束前迟到的 229 键）不触发撤销/
             // 删除/手势取消；非组合行为保持不变。
-            if (isImeCompositionEvent(event.nativeEvent)) return;
+            if (
+              textComposing.current ||
+              isImeCompositionEvent(event.nativeEvent)
+            )
+              return;
+            if (textEdit) {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                cancelDrawing();
+                setOperationMessage("已取消文字编辑，原文字保留。");
+              }
+              return;
+            }
             // Enter 完成折线草稿：监听只挂画布，焦点在输入框时不触发。
             if (
               event.key === "Enter" &&
@@ -4258,10 +4537,17 @@ export function ImageCanvasEditor({
               setTool("select");
             }
           }}
-          onDoubleClick={() => {
+          onDoubleClick={(event) => {
             // 双击完成折线草稿：恰好一条历史；其他工具无草稿时忽略。
             if (draftMark.current?.tool === "polyline") {
               commitPolylineDraft();
+            } else {
+              const index = findMark(
+                state.marks,
+                point(event),
+                canvasRef.current?.getContext("2d") ?? undefined,
+              );
+              if (index !== undefined) beginTextEdit(index);
             }
           }}
           onPointerCancel={cancelDrawing}
@@ -4346,7 +4632,16 @@ function textLayerStatusLabel(
   }
 }
 
-function markBounds(mark: Mark) {
+function markBounds(mark: Mark, context?: CanvasRenderingContext2D) {
+  if (context && isFontMark(mark)) {
+    const box = textAnnotationBounds(context, mark);
+    return {
+      left: Math.min(box.x, mark.start.x),
+      top: Math.min(box.y, mark.start.y),
+      right: Math.max(box.x + box.width, mark.start.x),
+      bottom: Math.max(box.y + box.height, mark.start.y),
+    };
+  }
   let left = mark.start.x,
     right = mark.start.x,
     top = mark.start.y,
@@ -4787,11 +5082,8 @@ function draw(
         }
       }
       context.restore();
-    } else if (mark.tool === "text") {
-      context.setLineDash([]);
-      context.fillStyle = color;
-      context.font = `600 ${(mark.style?.fontSize ?? 24) * markScale}px system-ui, sans-serif`;
-      context.fillText(mark.text || "文本", mark.start.x, mark.end.y);
+    } else if (isContentMark(mark)) {
+      drawTextAnnotation(context, mark, markScale);
     } else if (mark.tool === "mosaic") {
       applyMosaic(context, canvas, mark, markScale);
     } else if (mark.tool === "blur") {
@@ -4845,23 +5137,10 @@ function draw(
       }
       // 普通导出（bake=false）完全跳过：屏蔽不改变复制/保存/贴图像素。
     } else if (mark.tool === "numbering") {
-      const size = (mark.style?.fontSize ?? 24) * markScale;
-      const radius = Math.max(size * 0.68, 8 * markScale);
-      context.setLineDash([]);
-      context.save();
-      context.fillStyle = color;
-      context.beginPath();
-      context.arc(mark.start.x, mark.start.y, radius, 0, Math.PI * 2);
-      context.fill();
-      context.fillStyle = "#161616";
-      context.font = `700 ${size}px system-ui, sans-serif`;
-      context.textAlign = "center";
-      context.textBaseline = "middle";
-      context.fillText(String(mark.ordinal ?? 1), mark.start.x, mark.start.y);
-      context.restore();
+      drawTextAnnotation(context, mark, markScale);
     }
     if (showEditorChrome && selectedMark === index) {
-      const bounds = markBounds(mark);
+      const bounds = markBounds(mark, context);
       context.setLineDash([7, 5]);
       context.lineWidth = 1 * markScale;
       context.strokeStyle = "#f38b35";
@@ -4878,7 +5157,11 @@ function draw(
         !isExclusionMark(mark)
       ) {
         drawHandleSquares(context, normalizedRect(mark), "#f38b35");
-      } else if (mark.tool === "line" || mark.tool === "arrow") {
+      } else if (
+        mark.tool === "line" ||
+        mark.tool === "arrow" ||
+        mark.tool === "callout"
+      ) {
         drawPointHandleSquares(context, [mark.start, mark.end], "#f38b35");
       }
     }
@@ -5057,7 +5340,9 @@ function isBoxResizableMark(mark: Mark): boolean {
 
 /** 直线/箭头支持端点拖拽。 */
 function isEndpointMark(mark: Mark): boolean {
-  return mark.tool === "line" || mark.tool === "arrow";
+  return (
+    mark.tool === "line" || mark.tool === "arrow" || mark.tool === "callout"
+  );
 }
 
 /** 直线/箭头端点命中：两端都在半径内时取距离更近的一端（相等时稳定取
@@ -5392,10 +5677,30 @@ async function exportCanvas(
  * 达到上限时提示并拒绝新增，不丢弃既有标记，也不静默截断 payload。 */
 const MAX_EXCLUSION_MARKS = 64;
 
-function findMark(marks: readonly Mark[], point: Point): number | undefined {
+function findMark(
+  marks: readonly Mark[],
+  point: Point,
+  context?: CanvasRenderingContext2D,
+): number | undefined {
   for (let index = marks.length - 1; index >= 0; index -= 1) {
     const mark = marks[index];
     if (!mark) continue;
+    if (context && isFontMark(mark)) {
+      const box = textAnnotationBounds(context, mark);
+      if (
+        (point.x >= box.x - 6 &&
+          point.x <= box.x + box.width + 6 &&
+          point.y >= box.y - 6 &&
+          point.y <= box.y + box.height + 6) ||
+        (mark.tool === "callout" &&
+          distanceToSegment(point, mark.start, {
+            x: box.x,
+            y: box.y + box.height / 2,
+          }) <= 10)
+      )
+        return index;
+      continue;
+    }
     // 直线/箭头/折线：按到线段的最短距离命中，避免包络盒内误选；
     // 其余工具沿用包络盒（±10px 容差）。
     if (

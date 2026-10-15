@@ -1,0 +1,550 @@
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import type { AppActions } from "../app/types";
+import { ImageCanvasEditor } from "./ImageCanvasEditor";
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+function createActions(): AppActions & { run: ReturnType<typeof vi.fn> } {
+  return {
+    run: vi.fn().mockResolvedValue(true),
+    navigate: vi.fn(),
+    setTheme: vi.fn(),
+  };
+}
+
+/** 记录型 2D 上下文：jsdom 无像素，按调用序列断言绘制语义。 */
+type RecordedCall = { op: string; args: unknown[] };
+
+interface RecordedCanvas {
+  element: HTMLCanvasElement;
+  calls: RecordedCall[];
+}
+
+const state = {
+  canvases: [] as RecordedCanvas[],
+};
+
+function proxyFor(
+  canvas: HTMLCanvasElement,
+  calls: RecordedCall[],
+): CanvasRenderingContext2D {
+  const handler: ProxyHandler<RecordedCall[]> = {
+    get(target, prop) {
+      if (prop === "canvas") return canvas;
+      if (typeof prop !== "string") return undefined;
+      return (...args: unknown[]) => {
+        calls.push({ op: prop, args });
+        if (prop === "measureText")
+          return { width: String(args[0] ?? "").length * 12 };
+        return undefined;
+      };
+    },
+    set(target, prop, value) {
+      calls.push({ op: String(prop), args: [value] });
+      return true;
+    },
+  };
+  return new Proxy(calls, handler) as unknown as CanvasRenderingContext2D;
+}
+
+function stubCanvasStack(natural?: { width: number; height: number }) {
+  state.canvases = [];
+  Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
+    configurable: true,
+    value: function (this: HTMLCanvasElement) {
+      const holder = this as unknown as { __calls?: RecordedCall[] };
+      if (holder.__calls) return proxyFor(this, holder.__calls);
+      const calls: RecordedCall[] = [];
+      holder.__calls = calls;
+      state.canvases.push({ element: this, calls });
+      return proxyFor(this, calls);
+    },
+  });
+  Object.defineProperty(HTMLCanvasElement.prototype, "toBlob", {
+    configurable: true,
+    value: (callback: (blob: Blob) => void) =>
+      queueMicrotask(() =>
+        callback(
+          new Blob([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], {
+            type: "image/png",
+          }),
+        ),
+      ),
+  });
+  class FakeImage {
+    decoding = "async";
+    onload: (() => void) | null = null;
+    naturalWidth = natural?.width ?? 900;
+    naturalHeight = natural?.height ?? 400;
+    private assigned = "";
+    set src(value: string) {
+      this.assigned = value;
+      queueMicrotask(() => this.onload?.());
+    }
+    get src() {
+      return this.assigned;
+    }
+  }
+  vi.stubGlobal("Image", FakeImage);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          resourceUri:
+            "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+        }),
+        { status: 201, headers: { "Content-Type": "application/json" } },
+      ),
+    ),
+  );
+}
+
+interface FrameHarness {
+  readonly frames: Map<number, FrameRequestCallback>;
+  readonly flush: () => void;
+}
+
+function stubAnimationFrames(): FrameHarness {
+  const frames = new Map<number, FrameRequestCallback>();
+  let nextFrame = 0;
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    frames.set(++nextFrame, callback);
+    return nextFrame;
+  });
+  vi.stubGlobal("cancelAnimationFrame", vi.fn());
+  return {
+    frames,
+    flush: () => {
+      act(() => {
+        const pending = [...frames.values()];
+        frames.clear();
+        pending.forEach((callback) => callback(0));
+      });
+    },
+  };
+}
+
+function mockCanvasBox(
+  canvas: HTMLCanvasElement,
+  width: number,
+  height: number,
+) {
+  vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
+    left: 0,
+    top: 0,
+    width,
+    height,
+  } as DOMRect);
+}
+
+function getEditorCanvas(): HTMLCanvasElement {
+  return screen.getByLabelText("图片检查画布") as HTMLCanvasElement;
+}
+
+function editorProps() {
+  return {
+    actions: createActions(),
+    canExport: true,
+    canRecognize: true,
+    source: "https://app.vibeocr/__resource/capture.png",
+    session: { sessionId: "session-geometry", revision: 0 },
+    showAutoTextPreference: false,
+  };
+}
+
+async function renderEditor() {
+  const props = editorProps();
+  const rendered = render(<ImageCanvasEditor {...props} />);
+  await act(async () => {});
+  return { ...rendered, actions: props.actions };
+}
+
+function allCalls(): RecordedCall[] {
+  return state.canvases.flatMap((entry) => entry.calls);
+}
+
+function clearCalls() {
+  state.canvases.forEach((entry) => {
+    entry.calls.length = 0;
+  });
+}
+
+async function dragDraw(
+  canvas: HTMLCanvasElement,
+  harness: FrameHarness,
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  modifiers: { shift?: boolean; alt?: boolean } = {},
+) {
+  fireEvent.pointerDown(canvas, {
+    pointerId: 1,
+    clientX: from.x,
+    clientY: from.y,
+  });
+  fireEvent.pointerMove(canvas, {
+    pointerId: 1,
+    clientX: to.x,
+    clientY: to.y,
+    shiftKey: modifiers.shift,
+    altKey: modifiers.alt,
+  });
+  harness.flush();
+  fireEvent.pointerUp(canvas, {
+    pointerId: 1,
+    clientX: to.x,
+    clientY: to.y,
+    shiftKey: modifiers.shift,
+    altKey: modifiers.alt,
+  });
+  harness.flush();
+}
+
+function revisions(actions: { run: ReturnType<typeof vi.fn> }): number[] {
+  return actions.run.mock.calls
+    .map((call) => (call[0] as { revision?: number }).revision)
+    .filter((value): value is number => typeof value === "number");
+}
+
+describe("文字、序号和说明对象", () => {
+  async function placeText(text = "旧中文\n第二行") {
+    stubCanvasStack({ width: 900, height: 600 });
+    const harness = stubAnimationFrames();
+    const rendered = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+    fireEvent.click(screen.getByRole("button", { name: "文字" }));
+    fireEvent.change(screen.getByLabelText("标注文字"), {
+      target: { value: text },
+    });
+    await dragDraw(canvas, harness, { x: 100, y: 220 }, { x: 300, y: 220 });
+    return { ...rendered, canvas, harness };
+  }
+
+  it("双击继续编辑多行文字及字体属性：草稿不入历史，完成一次提交，取消保留旧文字", async () => {
+    const { actions, canvas, harness, unmount } = await placeText();
+    expect(revisions(actions)).toEqual([1]);
+    fireEvent.doubleClick(canvas, { clientX: 110, clientY: 210 });
+    fireEvent.change(screen.getByLabelText("标注文字"), {
+      target: { value: "更新中文\nNext" },
+    });
+    fireEvent.click(screen.getByLabelText("粗体"));
+    fireEvent.click(screen.getByLabelText("斜体"));
+    fireEvent.click(screen.getByLabelText("下划线"));
+    fireEvent.change(screen.getByLabelText("文字字号"), {
+      target: { value: "32" },
+    });
+    fireEvent.change(screen.getByLabelText("文字对齐"), {
+      target: { value: "right" },
+    });
+    fireEvent.click(screen.getByLabelText("文字背景"));
+    fireEvent.click(screen.getByLabelText("文字描边"));
+    expect(revisions(actions)).toEqual([1]);
+    expect(screen.getByRole("button", { name: "保存标注图" })).toBeDisabled();
+    clearCalls();
+    harness.flush();
+    expect(
+      allCalls()
+        .filter((call) => call.op === "fillText")
+        .map((call) => call.args[0]),
+    ).toContain("Next");
+    expect(allCalls().some((call) => call.op === "strokeText")).toBe(true);
+    const main = within(screen.getByRole("toolbar", { name: "图片编辑工具" }));
+    fireEvent.click(main.getByRole("button", { name: "完成文字编辑" }));
+    harness.flush();
+    expect(revisions(actions)).toEqual([1, 2]);
+    fireEvent.click(main.getByRole("button", { name: "编辑文字" }));
+    fireEvent.change(screen.getByLabelText("标注文字"), {
+      target: { value: "不应留下" },
+    });
+    fireEvent.click(main.getByRole("button", { name: "取消文字编辑" }));
+    harness.flush();
+    expect(screen.getByLabelText("标注文字")).toHaveValue("更新中文\nNext");
+    expect(revisions(actions)).toEqual([1, 2]);
+    fireEvent.click(main.getByRole("button", { name: "撤销" }));
+    harness.flush();
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    expect(screen.getByLabelText("标注文字")).toHaveValue("旧中文\n第二行");
+    unmount();
+  });
+
+  it("无变化完成不产生历史；切工具或旋转取消草稿并保留原文字", async () => {
+    const { actions, canvas, harness, unmount } = await placeText("原文字");
+    fireEvent.doubleClick(canvas, { clientX: 110, clientY: 210 });
+    fireEvent.change(screen.getByLabelText("标注文字"), {
+      target: { value: "临时" },
+    });
+    fireEvent.change(screen.getByLabelText("标注文字"), {
+      target: { value: "原文字" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "完成文字编辑" }));
+    expect(revisions(actions)).toEqual([1]);
+    fireEvent.click(screen.getByRole("button", { name: "编辑文字" }));
+    fireEvent.change(screen.getByLabelText("标注文字"), {
+      target: { value: "草稿" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    expect(
+      screen.queryByRole("button", { name: "完成文字编辑" }),
+    ).not.toBeInTheDocument();
+    expect(revisions(actions)).toEqual([1]);
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    expect(screen.getByLabelText("标注文字")).toHaveValue("原文字");
+    fireEvent.click(screen.getByRole("button", { name: "编辑文字" }));
+    fireEvent.change(screen.getByLabelText("标注文字"), {
+      target: { value: "草稿" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "旋转 90°" }));
+    harness.flush();
+    expect(
+      screen.queryByRole("button", { name: "完成文字编辑" }),
+    ).not.toBeInTheDocument();
+    expect(revisions(actions)).toEqual([1, 2]);
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    expect(screen.getByLabelText("标注文字")).toHaveValue("原文字");
+    unmount();
+  });
+
+  it("文字草稿期间画布删除/撤销不更改原对象，画布Esc可取消", async () => {
+    const { actions, canvas, harness, unmount } = await placeText("原文字");
+    fireEvent.doubleClick(canvas, { clientX: 110, clientY: 210 });
+    fireEvent.change(screen.getByLabelText("标注文字"), {
+      target: { value: "草稿" },
+    });
+    fireEvent.keyDown(canvas, { key: "Delete" });
+    fireEvent.keyDown(canvas, { key: "z", ctrlKey: true });
+    expect(revisions(actions)).toEqual([1]);
+    fireEvent.keyDown(canvas, { key: "Escape" });
+    harness.flush();
+    expect(screen.getByLabelText("标注文字")).toHaveValue("原文字");
+    expect(
+      screen.queryByRole("button", { name: "完成文字编辑" }),
+    ).not.toBeInTheDocument();
+    expect(revisions(actions)).toEqual([1]);
+    unmount();
+  });
+
+  it("导出在途时开始续编不会把旧预览发送为当前画面", async () => {
+    const { actions, canvas, unmount } = await placeText("原文字");
+    let resolveUpload: ((value: Response) => void) | undefined;
+    const upload = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveUpload = resolve;
+        }),
+    );
+    vi.stubGlobal("fetch", upload);
+    fireEvent.click(screen.getByRole("button", { name: "保存标注图" }));
+    await act(async () => {});
+    expect(upload).toHaveBeenCalled();
+    fireEvent.doubleClick(canvas, { clientX: 110, clientY: 210 });
+    fireEvent.change(screen.getByLabelText("标注文字"), {
+      target: { value: "草稿" },
+    });
+    await act(async () => {
+      resolveUpload!(
+        new Response(
+          JSON.stringify({
+            resourceUri:
+              "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    });
+    expect(
+      actions.run.mock.calls.some(
+        (call) => "resourceUri" in (call[0] as object),
+      ),
+    ).toBe(false);
+    expect(screen.getByLabelText("标注文字")).toHaveValue("草稿");
+    unmount();
+  });
+
+  it("IME 组合及229键不完成/取消编辑、不关闭会话或执行文档快捷键", async () => {
+    const { actions, canvas, harness, unmount } = await placeText("旧文字");
+    fireEvent.doubleClick(canvas, { clientX: 110, clientY: 210 });
+    const input = screen.getByLabelText("标注文字");
+    fireEvent.change(input, { target: { value: "中文候选" } });
+    fireEvent.compositionStart(input);
+    for (const key of ["Escape", "Delete", " "])
+      fireEvent.keyDown(input, { key });
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
+    fireEvent.keyDown(input, { key: "s", ctrlKey: true });
+    fireEvent.keyDown(window, { key: "w", ctrlKey: true });
+    expect(
+      screen.getByRole("button", { name: "完成文字编辑" }),
+    ).toBeInTheDocument();
+    expect(revisions(actions)).toEqual([1]);
+    fireEvent.compositionEnd(input);
+    fireEvent.keyDown(input, { key: "Escape", keyCode: 229 });
+    expect(screen.getByLabelText("标注文字")).toHaveValue("中文候选");
+    fireEvent.keyDown(input, { key: "Escape" });
+    harness.flush();
+    expect(screen.getByLabelText("标注文字")).toHaveValue("旧文字");
+    expect(
+      actions.run.mock.calls.some((call) =>
+        String((call[0] as { type: string }).type).includes("close"),
+      ),
+    ).toBe(false);
+    unmount();
+  });
+
+  it("字体不可用时明确回退系统字体，取消仍保留原样式", async () => {
+    const { canvas, harness, unmount } = await placeText();
+    fireEvent.doubleClick(canvas, { clientX: 110, clientY: 210 });
+    const font = screen.getByLabelText("文字字体");
+    fireEvent.change(font, { target: { value: "Unavailable_Font_230" } });
+    fireEvent.blur(font);
+    expect(
+      screen.getByText("字体“Unavailable_Font_230”不可用，已回退到系统字体。"),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("文字字体")).toHaveValue("system-ui");
+    fireEvent.click(screen.getByRole("button", { name: "取消文字编辑" }));
+    harness.flush();
+    expect(screen.getByLabelText("文字字体")).toHaveValue("system-ui");
+    unmount();
+  });
+
+  it("序号起点、字母、形状、单对象序号与批量重新编号均可撤销", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { actions, unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+    fireEvent.click(screen.getByRole("button", { name: "序号" }));
+    fireEvent.change(screen.getByLabelText("序号起点"), {
+      target: { value: "5" },
+    });
+    fireEvent.blur(screen.getByLabelText("序号起点"));
+    fireEvent.change(screen.getByLabelText("序号格式"), {
+      target: { value: "upper" },
+    });
+    fireEvent.change(screen.getByLabelText("序号形状"), {
+      target: { value: "square" },
+    });
+    await dragDraw(canvas, harness, { x: 200, y: 200 }, { x: 200, y: 200 });
+    await dragDraw(canvas, harness, { x: 300, y: 200 }, { x: 300, y: 200 });
+    expect(
+      allCalls()
+        .filter((call) => call.op === "fillText")
+        .map((call) => call.args[0]),
+    ).toEqual(expect.arrayContaining(["E", "F"]));
+    fireEvent.change(screen.getByLabelText("序号起点"), {
+      target: { value: "10" },
+    });
+    fireEvent.blur(screen.getByLabelText("序号起点"));
+    clearCalls();
+    fireEvent.click(screen.getByRole("button", { name: "重新编号" }));
+    harness.flush();
+    expect(revisions(actions)).toEqual([1, 2, 3]);
+    expect(
+      allCalls()
+        .filter((call) => call.op === "fillText")
+        .map((call) => call.args[0]),
+    ).toEqual(expect.arrayContaining(["J", "K"]));
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    fireEvent.change(screen.getByLabelText("序号值"), {
+      target: { value: "27" },
+    });
+    fireEvent.blur(screen.getByLabelText("序号值"));
+    harness.flush();
+    expect(revisions(actions)).toEqual([1, 2, 3, 4]);
+    expect(
+      allCalls()
+        .filter((call) => call.op === "fillText")
+        .map((call) => call.args[0]),
+    ).toContain("AA");
+    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+    harness.flush();
+    unmount();
+  });
+
+  it("气泡/箭头说明可修改内容及指向端点，拖动保留偏心抓取", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { actions, unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+    fireEvent.click(screen.getByRole("button", { name: "说明" }));
+    fireEvent.change(screen.getByLabelText("标注文字"), {
+      target: { value: "说明内容" },
+    });
+    await dragDraw(canvas, harness, { x: 100, y: 100 }, { x: 300, y: 220 });
+    expect(screen.getByLabelText("说明样式")).toHaveValue("bubble");
+    fireEvent.change(screen.getByLabelText("说明样式"), {
+      target: { value: "arrow" },
+    });
+    await dragDraw(canvas, harness, { x: 101, y: 101 }, { x: 151, y: 141 });
+    expect(revisions(actions)).toEqual([1, 2, 3]);
+    fireEvent.click(screen.getByRole("button", { name: "编辑文字" }));
+    fireEvent.change(screen.getByLabelText("标注文字"), {
+      target: { value: "更新说明\n第二行" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "完成文字编辑" }));
+    harness.flush();
+    expect(revisions(actions)).toEqual([1, 2, 3, 4]);
+    expect(
+      allCalls()
+        .filter((call) => call.op === "fillText")
+        .map((call) => call.args[0]),
+    ).toContain("更新说明");
+    expect(
+      allCalls().some(
+        (call) =>
+          call.op === "lineTo" &&
+          Math.abs((call.args[0] as number) - 150) < 0.01 &&
+          Math.abs((call.args[1] as number) - 140) < 0.01,
+      ),
+    ).toBe(true);
+    unmount();
+  });
+
+  it("裁剪和旋转后仍能从实际文字位置双击编辑", async () => {
+    const { canvas, harness, unmount } = await placeText("可定位");
+    fireEvent.click(screen.getByRole("button", { name: "裁剪" }));
+    await dragDraw(canvas, harness, { x: 50, y: 100 }, { x: 700, y: 500 });
+    fireEvent.click(screen.getByRole("button", { name: "旋转 90°" }));
+    clearCalls();
+    harness.flush();
+    const text = allCalls().find(
+      (call) => call.op === "fillText" && call.args[0] === "可定位",
+    )!;
+    fireEvent.doubleClick(canvas, {
+      clientX: (text.args[1] as number) + 5,
+      clientY: (text.args[2] as number) - 5,
+    });
+    expect(
+      screen.getByRole("button", { name: "完成文字编辑" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("标注文字")).toHaveValue("可定位");
+    unmount();
+  });
+});

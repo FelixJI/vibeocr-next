@@ -1434,3 +1434,8 @@ select {
   align-items: center;
   gap: 6px;
 }
+
+.editor-annotation-text {
+  min-width: 220px;
+  max-width: 100%;
+}
