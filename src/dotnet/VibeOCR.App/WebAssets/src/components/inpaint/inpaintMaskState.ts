@@ -42,14 +42,16 @@ interface ImageSize {
 }
 
 function clampRectToImage(rect: InpaintRect, image: ImageSize): InpaintRect {
-  const x0 = Math.max(0, Math.min(image.width - 1, Math.floor(rect.x)));
-  const y0 = Math.max(0, Math.min(image.height - 1, Math.floor(rect.y)));
+  const x0 = Math.max(0, Math.min(image.width, Math.floor(rect.x)));
+  const y0 = Math.max(0, Math.min(image.height, Math.floor(rect.y)));
+  if (rect.width <= 0 || rect.height <= 0)
+    return { x: x0, y: y0, width: 0, height: 0 };
   const x1 = Math.max(
-    x0 + 1,
+    x0,
     Math.min(image.width, Math.ceil(rect.x + rect.width)),
   );
   const y1 = Math.max(
-    y0 + 1,
+    y0,
     Math.min(image.height, Math.ceil(rect.y + rect.height)),
   );
   return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
@@ -88,16 +90,16 @@ function prepare(
   current: InpaintMaskState | undefined,
   region: InpaintRect,
 ): { ok: true; state: InpaintMaskState } | { ok: false; reason: "roi-budget" } {
-  const base = current ?? {
-    rect: region,
-    data: new Uint8Array(region.width * region.height),
-  };
-  const union = rectsUnion(base.rect, region);
+  const union = current ? rectsUnion(current.rect, region) : region;
   if (union.width * union.height > INPAINT_MAX_ROI_PIXELS) {
     return { ok: false, reason: "roi-budget" };
   }
-  const state = union === base.rect ? base : resizeState(base, union);
-  return { ok: true, state };
+  return {
+    ok: true,
+    state: current
+      ? resizeState(current, union)
+      : { rect: region, data: new Uint8Array(region.width * region.height) },
+  };
 }
 
 function countMasked(state: InpaintMaskState): number {
@@ -124,10 +126,7 @@ export function applyMaskRect(
   ) {
     return {
       ok: true,
-      state: current ?? {
-        rect: region,
-        data: new Uint8Array(region.width * region.height),
-      },
+      state: current,
     };
   }
   if (!add && !current) {
@@ -187,6 +186,8 @@ export function applyMaskBrush(
     },
     image,
   );
+  if (region.width <= 0 || region.height <= 0)
+    return { ok: true, state: current };
   const prepared = prepare(current, region);
   if (!prepared.ok) return prepared;
   const state = prepared.state;

@@ -17,7 +17,7 @@
  *
  * 搜索分两阶段，覆盖每一个整数平移偏移（不存在未访问的偏移）：
  * 1. 筛选：对每个偏移只比较固定 4×4 采样点（十六个像素，确定性
- *    位置），平均每通道差 ≤ 筛选阈值才进入精比。筛选总量 = 偏移数 ×
+ *    位置，去重），累计差不超过整块容差才进入精比。筛选总量 ≤ 偏移数 ×
  *    16，超过 DUPLICATE_WORK_BUDGET 时显式 budget-exceeded 拒绝
  *    （图片过大/源块过小），不继续也不遇漏。
  * 2. 精比：逐像素比较（RGB、累计容差早退），总量受
@@ -59,9 +59,6 @@ export const DUPLICATE_LOW_TEXTURE_VARIANCE = 16;
 export const DUPLICATE_WORK_BUDGET = 96_000_000;
 /** 精比阶段逐像素比较总量 ≤ 32M：相似位置过多时显式拒绝。 */
 export const DUPLICATE_PRECISE_BUDGET = 32_000_000;
-/** 筛选阈值：每通道平均差 ≤ 24（4× 容差）才进入精比，宽进严出，
- * 不漏掉真实副本（精比才是最终判定）。 */
-const DUPLICATE_SCREEN_TOLERANCE = 24;
 /** 固定 4×4 采样点：确定性位置（块内等分网格中心），不依赖随机数。 */
 const DUPLICATE_SCREEN_SAMPLES: readonly { x: number; y: number }[] = [
   { x: 1, y: 1 },
@@ -220,8 +217,12 @@ export function findDuplicateRegions(
   const screenSamples = DUPLICATE_SCREEN_SAMPLES.map((sample) => ({
     lx: Math.min(bw - 1, Math.floor((sample.x * bw) / 5)),
     ly: Math.min(bh - 1, Math.floor((sample.y * bh) / 5)),
-  }));
-  const screenTolerance = DUPLICATE_SCREEN_TOLERANCE * screenSamples.length * 3; // 每×3通道累计
+  })).filter(
+    (sample, index, all) =>
+      all.findIndex(
+        (other) => other.lx === sample.lx && other.ly === sample.ly,
+      ) === index,
+  );
   const screenCache: number[] = [];
   for (const sample of screenSamples) {
     const p = ((y0 + sample.ly) * width + (x0 + sample.lx)) * 4;
@@ -251,7 +252,7 @@ export function findDuplicateRegions(
         height: bh,
       };
       if (rectsOverlap(candidate, block)) continue;
-      // 阶段 1：便宜筛选——16 个采样点的平均差，宽阈值宽进严出。
+      // 去重采样点的累计差是整块累计差的下界，只有超过整块容差才拒绝。
       let screenError = 0;
       for (let i = 0; i < screenSamples.length; i += 1) {
         const sample = screenSamples[i]!;
@@ -261,9 +262,9 @@ export function findDuplicateRegions(
           Math.abs((packed & 255) - (other & 255)) +
           Math.abs(((packed >> 8) & 255) - ((other >> 8) & 255)) +
           Math.abs(((packed >> 16) & 255) - ((other >> 16) & 255));
-        if (screenError > screenTolerance) break;
+        if (screenError > tolerance) break;
       }
-      if (screenError > screenTolerance) continue;
+      if (screenError > tolerance) continue;
       // 阶段 2：逐像素精比（RGB），累计容差早退；总量受精比预算约束。
       let error = 0;
       compare: for (let y = 0; y < bh; y += 1) {

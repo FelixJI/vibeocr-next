@@ -369,6 +369,59 @@ describe("inpaintRectangle", () => {
 });
 
 describe("inpaintMask", () => {
+  it("R1 fills disconnected mask islands from known pixels inside the ROI", () => {
+    const roi = { x: 2, y: 2, width: 8, height: 8 };
+    const mask = new Uint8Array(64);
+    for (const index of [0, 27, 63]) mask[index] = 1;
+    const rgba = paintImage(12, 12, (x, y) =>
+      mask[(y - 2) * 8 + x - 2] === 1 && x >= 2 && x < 10 && y >= 2 && y < 10
+        ? [240, 30, 220, 128]
+        : [12, 160, 90, 255],
+    );
+    const out = inpaintMask(rgba, 12, 12, roi, mask);
+    for (let y = 0; y < 12; y++)
+      for (let x = 0; x < 12; x++) {
+        const selected =
+          x >= 2 &&
+          x < 10 &&
+          y >= 2 &&
+          y < 10 &&
+          mask[(y - 2) * 8 + x - 2] === 1;
+        const pixel = (y * 12 + x) * 4;
+        if (selected) {
+          expect(Array.from(out.slice(pixel, pixel + 4))).toEqual([
+            12, 160, 90, 128,
+          ]);
+        } else
+          expect(Array.from(out.slice(pixel, pixel + 4))).toEqual(
+            Array.from(rgba.slice(pixel, pixel + 4)),
+          );
+      }
+  });
+
+  it("R7 fills a full-image ROI using an unmasked known hole", () => {
+    const width = 64,
+      height = 48;
+    const hole = (x: number, y: number) =>
+      x >= 27 && x < 37 && y >= 19 && y < 29;
+    const rgba = paintImage(width, height, (x, y) =>
+      hole(x, y) ? [12, 160, 90, 255] : [240, 30, 220, 255],
+    );
+    const mask = new Uint8Array(width * height).fill(1);
+    for (let y = 19; y < 29; y++)
+      for (let x = 27; x < 37; x++) mask[y * width + x] = 0;
+    const out = inpaintMask(
+      rgba,
+      width,
+      height,
+      { x: 0, y: 0, width, height },
+      mask,
+    );
+    expect(Array.from(out)).toEqual(
+      Array.from(paintImage(width, height, () => [12, 160, 90, 255])),
+    );
+  });
+
   it("fills only masked pixels: holes and outside bytes stay identical", () => {
     const width = 32;
     const height = 24;

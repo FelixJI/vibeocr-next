@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   applyMaskBrush,
@@ -17,6 +17,68 @@ function rectState(): InpaintRect {
 }
 
 describe("inpaint mask state", () => {
+  it.each([
+    { x: 100, y: 10, width: 8, height: 8 },
+    { x: -100, y: 10, width: 8, height: 8 },
+    { x: 10, y: 100, width: 8, height: 8 },
+    { x: 10, y: -100, width: 8, height: 8 },
+    { x: 10.2, y: 10.2, width: 0, height: 8 },
+    { x: 10.2, y: 10.2, width: 8, height: 0 },
+  ])("R5 empty intersections preserve the current mask: %j", (rect) => {
+    const current = { rect: rectState(), data: new Uint8Array(96).fill(1) };
+    for (const add of [true, false]) {
+      expect(applyMaskRect(current, rect, IMAGE, add)).toEqual({
+        ok: true,
+        state: current,
+      });
+      const result = applyMaskRect(undefined, rect, IMAGE, add);
+      expect(result).toEqual({ ok: true, state: undefined });
+    }
+  });
+
+  it("R5 a brush wholly outside the image is a no-op", () => {
+    expect(
+      applyMaskBrush(undefined, [{ x: 100, y: 10 }], 3, IMAGE, true),
+    ).toEqual({ ok: true, state: undefined });
+  });
+
+  it("R6 rejects oversized initial regions before allocating mask storage", () => {
+    const allocations: number[] = [];
+    const Native = Uint8Array;
+    vi.stubGlobal(
+      "Uint8Array",
+      new Proxy(Native, {
+        construct(target, args) {
+          if (typeof args[0] === "number") allocations.push(args[0]);
+          return Reflect.construct(target, args);
+        },
+      }),
+    );
+    try {
+      expect(
+        applyMaskRect(
+          undefined,
+          { x: 0, y: 0, width: 1001, height: 1001 },
+          { width: 1100, height: 1100 },
+          true,
+        ),
+      ).toEqual({ ok: false, reason: "roi-budget" });
+      expect(allocations).toEqual([]);
+      expect(
+        applyMaskBrush(
+          undefined,
+          [{ x: 500, y: 500 }],
+          501,
+          { width: 1100, height: 1100 },
+          true,
+        ),
+      ).toEqual({ ok: false, reason: "roi-budget" });
+      expect(allocations).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("rect add fills exactly the clamped region; remove carves holes", () => {
     const added = applyMaskRect(undefined, rectState(), IMAGE, true);
     expect(added.ok).toBe(true);

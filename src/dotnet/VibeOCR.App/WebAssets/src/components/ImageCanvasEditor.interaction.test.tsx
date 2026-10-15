@@ -487,6 +487,83 @@ async function waitForStroke(
 }
 
 describe("马赛克与模糊强度", () => {
+  it("R2 rectangle mosaic export scales its legacy cell width once", async () => {
+    stubCanvasStack({ width: 1800, height: 1200 });
+    const harness = stubAnimationFrames();
+    const { unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    fireEvent.click(screen.getByRole("button", { name: "马赛克" }));
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 56, clientY: 150 });
+    fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 784, clientY: 202 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 784, clientY: 202 });
+    harness.flush();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "保存标注图" }));
+    });
+    const natural = allCalls().find(
+      (call) =>
+        call.op === "drawImage" &&
+        call.args[0] instanceof HTMLCanvasElement &&
+        call.args[1] === 112 &&
+        call.args[2] === 300 &&
+        call.args[3] === 1456,
+    );
+    expect(natural).toBeDefined();
+    expect((natural!.args[0] as HTMLCanvasElement).width).toBe(52);
+    unmount();
+  });
+
+  it.each([false, true])(
+    "R3 locked effects and locked groups cannot change intensity (group=%s)",
+    async (group) => {
+      stubCanvasStack();
+      const harness = stubAnimationFrames();
+      const { actions, unmount } = await renderEditor();
+      const canvas = getEditorCanvas();
+      mockCanvasBox(canvas, 900, 600);
+      fireEvent.click(screen.getByRole("button", { name: "马赛克" }));
+      const drag = (x: number) => {
+        fireEvent.pointerDown(canvas, {
+          pointerId: 1,
+          clientX: x,
+          clientY: 100,
+        });
+        fireEvent.pointerMove(canvas, {
+          pointerId: 1,
+          clientX: x + 100,
+          clientY: 200,
+        });
+        fireEvent.pointerUp(canvas, {
+          pointerId: 1,
+          clientX: x + 100,
+          clientY: 200,
+        });
+        harness.flush();
+      };
+      drag(100);
+      if (group) drag(350);
+      fireEvent.click(screen.getByRole("button", { name: "选择" }));
+      fireEvent.click(screen.getByRole("button", { name: "全选对象" }));
+      if (group) fireEvent.click(screen.getByRole("button", { name: "组合" }));
+      fireEvent.click(screen.getByRole("button", { name: "锁定" }));
+      fireEvent.change(screen.getByLabelText("选择标注对象"), {
+        target: { value: "0" },
+      });
+      vi.mocked(actions.run).mockClear();
+      const slider = screen.getByLabelText("马赛克与模糊强度");
+      fireEvent.change(slider, { target: { value: "2.4" } });
+      expect(actions.run).not.toHaveBeenCalled();
+      expect(slider).toBeDisabled();
+      fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+      fireEvent.change(screen.getByLabelText("选择标注对象"), {
+        target: { value: "0" },
+      });
+      expect(screen.getByRole("button", { name: "锁定" })).toBeEnabled();
+      unmount();
+    },
+  );
+
   it("马赛克强度改变块尺寸：弱块小、强块大", async () => {
     stubCanvasStack();
     const harness = stubAnimationFrames();

@@ -2199,33 +2199,39 @@ export function ImageCanvasEditor({
       setOperationMessage("图片尚未解码完成，无法修补；请稍后重试。");
       return;
     }
-    // 掩膜为权威：无掩膜时退回选区整矩形（旧矩形流程兼容）。
-    const bounds = maskBounds(inpaintMask);
+    // 先检查尺寸与实际选中像素，再创建矩形兼容掩膜或扫描其边界。
     const selection = inpaintSelection;
-    let maskState = inpaintMask;
-    if (!bounds) {
-      if (!selection) {
-        setOperationMessage("请先拖拽框选或笔刷涂抹要去水印的区域。");
-        return;
-      }
-      const rect = selectionToNaturalRect(
-        selection.start,
-        selection.end,
-        image,
-        state.rotation,
-        canvasSize(canvas),
-      );
-      maskState = {
-        rect,
-        data: new Uint8Array(rect.width * rect.height).fill(1),
-      };
-    }
-    const rect = maskBounds(maskState);
-    if (!maskState || !rect) {
-      setOperationMessage("修补掩膜为空，请先框选或涂抹要修补的区域。");
+    const region =
+      inpaintMask?.rect ??
+      (selection
+        ? selectionToNaturalRect(
+            selection.start,
+            selection.end,
+            image,
+            state.rotation,
+            canvasSize(canvas),
+          )
+        : undefined);
+    if (!region) {
+      setOperationMessage("请先拖拽框选或笔刷涂抹要去水印的区域。");
       return;
     }
-    if (maskCount(maskState) <= 0) {
+    const selectedPixels = inpaintMask
+      ? maskCount(inpaintMask)
+      : region.width * region.height;
+    const preflight = preflightSelection(region, image, selectedPixels);
+    if (!preflight.ok) {
+      setOperationMessage(
+        describeInpaintFailure(preflight.code, preflight.message),
+      );
+      return;
+    }
+    const maskState = inpaintMask ?? {
+      rect: region,
+      data: new Uint8Array(region.width * region.height).fill(1),
+    };
+    const rect = maskBounds(maskState);
+    if (!rect) {
       setOperationMessage("修补掩膜为空，请先框选或涂抹要修补的区域。");
       return;
     }
@@ -2233,12 +2239,9 @@ export function ImageCanvasEditor({
       setOperationMessage("当前环境不支持本地修补，当前图片未被修改。");
       return;
     }
-    const preflight = preflightSelection(rect, image);
-    if (!preflight.ok) {
-      setOperationMessage(
-        describeInpaintFailure(preflight.code, preflight.message),
-      );
-      return;
+    if (!inpaintMask) {
+      inpaintMaskRef.current = maskState;
+      setInpaintMask(maskState);
     }
     // 基线合成到原图尺寸离屏画布：透明/已修补像素一起作为修补输入。
     const composed = composeBaseline(image);
@@ -4986,8 +4989,23 @@ export function ImageCanvasEditor({
           ) * 10,
         ) / 10
       : undefined;
+  const effectIntensityLocked =
+    !!editingEffectMark &&
+    state.marks.some(
+      (mark) =>
+        mark.locked &&
+        expandGroupSelection(state.marks, new Set([editingEffectMark.id])).has(
+          mark.id,
+        ),
+    );
   function commitEffectIntensity(value: number): void {
     if (editingEffectMark && selectedMark !== undefined) {
+      if (
+        !selectionModifiable(
+          expandGroupSelection(state.marks, new Set([editingEffectMark.id])),
+        )
+      )
+        return;
       commit({
         ...state,
         marks: state.marks.map((entry) =>
@@ -5007,6 +5025,7 @@ export function ImageCanvasEditor({
         <span aria-hidden="true">强度</span>
         <input
           aria-label="马赛克与模糊强度"
+          disabled={effectIntensityLocked}
           max={EFFECT_INTENSITY_MAX}
           min={EFFECT_INTENSITY_MIN}
           step={EFFECT_INTENSITY_STEP}
@@ -5342,7 +5361,7 @@ export function ImageCanvasEditor({
             title="确认应用重复遮挡"
             onClick={applyDuplicateCandidates}
           >
-            {captureStyle ? undefined : "确认应用"}
+            确认应用
           </ToolbarButton>
           <ToolbarButton
             aria-label="放弃重复匹配"
@@ -5351,7 +5370,7 @@ export function ImageCanvasEditor({
               cancelDupmatchPending("已放弃重复匹配；当前图片未被修改。")
             }
           >
-            {captureStyle ? undefined : "放弃匹配"}
+            放弃匹配
           </ToolbarButton>
         </>
       ) : (
@@ -5362,7 +5381,7 @@ export function ImageCanvasEditor({
           disabled={!dupmatchSelection || dupmatchBusy}
           onClick={startDuplicateSearch}
         >
-          {captureStyle ? undefined : dupmatchBusy ? "匹配中…" : "查找重复"}
+          {dupmatchBusy ? "匹配中…" : "查找重复"}
         </ToolbarButton>
       )}
       {dupmatchBusy && (
@@ -5373,7 +5392,7 @@ export function ImageCanvasEditor({
             cancelDupmatchPending("已取消重复匹配；当前图片未被修改。")
           }
         >
-          {captureStyle ? undefined : "取消匹配"}
+          取消匹配
         </ToolbarButton>
       )}
     </>
@@ -7463,11 +7482,7 @@ function applyMosaic(
   if (area.width <= 0 || area.height <= 0) return;
   // 强度决定马赛克块尺寸：1→8、2→14、3→26，中间连续插值，预览与导出同源。
   const cell = mosaicCellSize(markEffectIntensity(mark)) * scale;
-  const scratch = effectSurface(
-    canvas,
-    area.width / (cell * scale),
-    area.height / (cell * scale),
-  );
+  const scratch = effectSurface(canvas, area.width / cell, area.height / cell);
   const scratchContext = scratch.getContext("2d");
   if (!scratchContext) return;
   scratchContext.filter = "none";

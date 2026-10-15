@@ -36,8 +36,8 @@ function createActions(): AppActions & { run: ReturnType<typeof vi.fn> } {
 }
 
 class FakeImage {
-  readonly naturalWidth = 160;
-  readonly naturalHeight = 100;
+  readonly naturalWidth: number = 160;
+  readonly naturalHeight: number = 100;
   decoding = "";
   src = "";
   onload: (() => void) | null = null;
@@ -182,6 +182,37 @@ function dragSelection(canvas: HTMLElement): void {
 }
 
 describe("inpaint tool wiring", () => {
+  it("R6 fallback preview rejects oversized images before mask allocation", async () => {
+    const restore = installCanvasStubs();
+    class BigImage extends FakeImage {
+      override readonly naturalWidth = 9000;
+      override readonly naturalHeight = 6000;
+    }
+    vi.stubGlobal("Image", BigImage);
+    vi.stubGlobal("Worker", FakeWorker);
+    try {
+      const { unmount, canvas } = await renderEditor();
+      dragSelection(canvas);
+      const allocations: number[] = [];
+      const Native = Uint8Array;
+      vi.stubGlobal(
+        "Uint8Array",
+        new Proxy(Native, {
+          construct(target, args) {
+            if (typeof args[0] === "number") allocations.push(args[0]);
+            return Reflect.construct(target, args);
+          },
+        }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "预览修补" }));
+      expect(screen.getByText(/超出去水印预算/)).toBeInTheDocument();
+      expect(allocations.filter((size) => size > 1_000_000)).toEqual([]);
+      unmount();
+    } finally {
+      restore();
+    }
+  });
+
   it("requires an explicit selection before previewing and reports Beta limits", async () => {
     const restore = installCanvasStubs();
     vi.stubGlobal("Image", FakeImage);

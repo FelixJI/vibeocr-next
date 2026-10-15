@@ -50,6 +50,27 @@ function failureCodeOf(run: () => void): string {
 }
 
 describe("findDuplicateRegions", () => {
+  it("R8 retains a valid copy whose entire error is concentrated at screening samples", () => {
+    const source = { x: 8, y: 8, width: 32, height: 32 };
+    const coordinates = [6, 12, 19, 25];
+    const isSample = (x: number, y: number) =>
+      coordinates.includes(x) && coordinates.includes(y);
+    const rgba = paint(128, 96, (x, y) => {
+      if (x >= 8 && x < 40 && y >= 8 && y < 40)
+        return isSample(x - 8, y - 8) ? [0, 0, 0, 255] : textureAt(x, y);
+      if (x >= 75 && x < 107 && y >= 53 && y < 85)
+        return isSample(x - 75, y - 53)
+          ? [255, 255, 255, 255]
+          : textureAt(x - 75 + 8, y - 53 + 8);
+      return textureAt(x, y);
+    });
+    const match = findDuplicateRegions(rgba, 128, 96, source).find(
+      (item) => item.x === 75 && item.y === 53,
+    );
+    expect(match).toBeDefined();
+    expect(match!.error).toBeCloseTo((255 * 16) / 1024);
+  });
+
   it("finds an exact translated copy of a textured block", () => {
     const width = 96;
     const height = 64;

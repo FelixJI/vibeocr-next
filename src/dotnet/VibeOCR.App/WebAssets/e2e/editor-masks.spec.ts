@@ -8,6 +8,13 @@ import { mountHost, snapshot } from "./workbench-host";
  * 断言，不依赖 UI 遮罩或 mock 像素。
  */
 
+interface PixelRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 interface DecodedImage {
   width: number;
   height: number;
@@ -18,9 +25,10 @@ async function decodeUpload(
   page: Page,
   body: Buffer,
   mediaType: string,
+  region?: PixelRegion,
 ): Promise<DecodedImage> {
   return page.evaluate(
-    async ({ base64, mediaType }) => {
+    async ({ base64, mediaType, region }) => {
       const binary = atob(base64);
       const bytes = new Uint8Array(binary.length);
       for (let index = 0; index < binary.length; index += 1) {
@@ -30,19 +38,29 @@ async function decodeUpload(
         new Blob([bytes], { type: mediaType }),
       );
       const canvas = document.createElement("canvas");
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
+      canvas.width = region?.width ?? bitmap.width;
+      canvas.height = region?.height ?? bitmap.height;
       const context = canvas.getContext("2d");
       if (!context) throw new Error("2d context unavailable");
-      context.drawImage(bitmap, 0, 0);
+      context.drawImage(
+        bitmap,
+        region?.x ?? 0,
+        region?.y ?? 0,
+        canvas.width,
+        canvas.height,
+        0,
+        0,
+        canvas.width,
+        canvas.height,
+      );
       const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
       return {
-        width: bitmap.width,
-        height: bitmap.height,
+        width: canvas.width,
+        height: canvas.height,
         pixels: Array.from(data),
       };
     },
-    { base64: body.toString("base64"), mediaType },
+    { base64: body.toString("base64"), mediaType, region },
   );
 }
 
@@ -156,6 +174,7 @@ async function clickCanvasAt(
 async function saveAndDecode(
   page: Page,
   uploads: { contentType: string; body: Buffer }[],
+  region?: PixelRegion,
 ): Promise<DecodedImage> {
   const index = uploads.length;
   await page.getByRole("button", { name: "保存标注图", exact: true }).click();
@@ -164,7 +183,7 @@ async function saveAndDecode(
     page.getByRole("button", { name: "保存标注图", exact: true }),
   ).toBeEnabled();
   expect(uploads[index]!.contentType).toBe("image/png");
-  return decodeUpload(page, uploads[index]!.body, "image/png");
+  return decodeUpload(page, uploads[index]!.body, "image/png", region);
 }
 
 async function setRangeValue(
@@ -540,6 +559,126 @@ test("duplicate match previews candidates, applies once, follows rotation, and u
   // 撤销两步（旋转、应用）回到基线。
   await page.getByRole("button", { name: "撤销" }).click();
   await page.getByRole("button", { name: "撤销" }).click();
+  const undone = await saveAndDecode(page, uploads);
+  expect(
+    Buffer.compare(Buffer.from(undone.pixels), Buffer.from(baseline.pixels)),
+  ).toBe(0);
+});
+
+test("R2 non-1:1 rectangle mosaic preserves the legacy 1/2/3 cell anchors in real PNG pixels", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const uploads: { contentType: string; body: Buffer }[] = [];
+  const stripes = Array.from(
+    { length: 129 },
+    (_, index) =>
+      '<rect x="' +
+      index * 14 +
+      '" width="14" height="1200" fill="rgb(' +
+      index +
+      "," +
+      ((index * 13) % 256) +
+      "," +
+      ((index * 29) % 256) +
+      ')"/>',
+  ).join("");
+  await routeSource(
+    page,
+    '<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1200">' +
+      stripes +
+      "</svg>",
+    "masks-scale-anchors.svg",
+  );
+  await mountWithUploadCapture(page, uploads, "masks-scale-anchors.svg");
+  await expect(page.getByText(/原图 1800×1200/)).toBeVisible();
+  const map = makeCanvasMapper(1800, 1200);
+  for (const [intensity, cell] of [
+    [1, 16],
+    [2, 28],
+    [3, 52],
+  ] as const) {
+    await page.getByRole("button", { name: "马赛克", exact: true }).click();
+    await setRangeValue(page, "马赛克与模糊强度", String(intensity));
+    await pointerStroke(page, [
+      map({ x: 0, y: 300 }),
+      map({ x: 1800, y: 404 }),
+    ]);
+    const strip = await saveAndDecode(page, uploads, {
+      x: 0,
+      y: 350,
+      width: 1800,
+      height: 1,
+    });
+    const png = uploads.at(-1)!.body;
+    expect(png.readUInt32BE(16)).toBe(1800);
+    expect(png.readUInt32BE(20)).toBe(1200);
+    const runs: number[] = [];
+    let previous = "";
+    for (let x = 0; x < strip.width; x++) {
+      const color = pixelAt(strip, x, 0).join(",");
+      if (color === previous) runs[runs.length - 1]! += 1;
+      else {
+        runs.push(1);
+        previous = color;
+      }
+    }
+    // 全宽由画布边界夹取，避免鼠标浮点投影在整除处多出一列采样。
+    const samples = Math.ceil(1800 / cell);
+    const expectedRuns: number[] = [];
+    let previousSample = -1;
+    for (let x = 0; x < 1800; x++) {
+      const sample = Math.floor(((x + 0.5) * samples) / 1800);
+      if (sample === previousSample)
+        expectedRuns[expectedRuns.length - 1]! += 1;
+      else {
+        expectedRuns.push(1);
+        previousSample = sample;
+      }
+    }
+    expect(runs).toEqual(expectedRuns);
+    await page.getByRole("button", { name: "清除编辑", exact: true }).click();
+  }
+});
+
+test("R7 a full-image mask with a known hole previews and applies real worker pixels", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const uploads: { contentType: string; body: Buffer }[] = [];
+  await routeSource(
+    page,
+    '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="48"><rect width="64" height="48" fill="#e020f0"/><rect x="27" y="19" width="10" height="10" fill="#0aa05a"/></svg>',
+    "masks-full-roi-hole.svg",
+  );
+  await mountWithUploadCapture(page, uploads, "masks-full-roi-hole.svg");
+  await expect(page.getByText(/原图 64×48/)).toBeVisible();
+  const baseline = await saveAndDecode(page, uploads);
+  const map = makeCanvasMapper(64, 48);
+  await page.getByRole("button", { name: "去水印", exact: true }).click();
+  await pointerStroke(page, [
+    map({ x: 0.01, y: 0.01 }),
+    map({ x: 63.99, y: 47.99 }),
+  ]);
+  await page.getByLabel("修补掩膜绘制方式").selectOption("rect-remove");
+  await pointerStroke(page, [
+    map({ x: 27.5, y: 19.5 }),
+    map({ x: 36.5, y: 28.5 }),
+  ]);
+  await page.getByRole("button", { name: "预览修补", exact: true }).click();
+  await expect(page.getByText(/修补预览完成/)).toBeVisible();
+  await page.getByRole("button", { name: "应用修补", exact: true }).click();
+  const applied = await saveAndDecode(page, uploads);
+  const green = [10, 160, 90, 255];
+  expect(
+    applied.pixels.every((value, index) => value === green[index % 4]),
+  ).toBe(true);
+  expectOutsideRegionIdentical(
+    baseline,
+    applied,
+    (x, y) => !(x >= 27 && x < 37 && y >= 19 && y < 29),
+  );
+  await page.getByRole("button", { name: "撤销", exact: true }).click();
   const undone = await saveAndDecode(page, uploads);
   expect(
     Buffer.compare(Buffer.from(undone.pixels), Buffer.from(baseline.pixels)),

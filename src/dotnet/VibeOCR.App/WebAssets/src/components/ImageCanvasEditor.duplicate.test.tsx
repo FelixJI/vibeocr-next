@@ -9,6 +9,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AppActions } from "../app/types";
+import type { CaptureScene } from "../bridge/captureScene";
 import type { DuplicateResponse } from "./duplicate/duplicateMatch";
 import { ImageCanvasEditor } from "./ImageCanvasEditor";
 
@@ -42,7 +43,7 @@ class FakeImage {
   onload: (() => void) | null = null;
 
   constructor() {
-    setTimeout(() => this.onload?.(), 0);
+    queueMicrotask(() => this.onload?.());
   }
 }
 
@@ -134,7 +135,10 @@ function installCanvasStubs(
   };
 }
 
-async function renderEditor(session?: { sessionId: string; revision: number }) {
+async function renderEditor(
+  session?: { sessionId: string; revision: number },
+  captureScene?: CaptureScene,
+) {
   const actions = createActions();
   const view = render(
     <ImageCanvasEditor
@@ -142,6 +146,7 @@ async function renderEditor(session?: { sessionId: string; revision: number }) {
       canExport
       canRecognize={false}
       session={session}
+      captureScene={captureScene}
       source="https://app.vibeocr/__resource/capture.png"
     />,
   );
@@ -161,6 +166,59 @@ function dragSource(canvas: HTMLElement): void {
 }
 
 describe("duplicate match wiring", () => {
+  it("R4 capture duplicate actions always have visible text", async () => {
+    const restore = installCanvasStubs();
+    vi.stubGlobal("Image", FakeImage);
+    vi.stubGlobal("Worker", FakeWorker);
+    FakeWorker.instances = [];
+    try {
+      const { canvas, unmount } = await renderEditor(
+        { sessionId: "capture", revision: 0 },
+        {
+          surfaceId: "surface",
+          captureSessionId: "capture",
+          inputUrl: "https://app.vibeocr/__resource/capture.png",
+          inputRevision: 0,
+          documentGeneration: 1,
+          bootstrapGeneration: 1,
+          initialTool: "select",
+          x: 0,
+          y: 0,
+          width: 160,
+          height: 100,
+          desktopWidth: 1920,
+          desktopHeight: 1080,
+        },
+      );
+      expect(
+        screen.getByRole("button", { name: "查找重复" }),
+      ).toHaveTextContent("查找重复");
+      dragSource(canvas);
+      fireEvent.click(screen.getByRole("button", { name: "查找重复" }));
+      expect(
+        screen.getByRole("button", { name: "取消重复匹配" }),
+      ).toHaveTextContent("取消匹配");
+      fireEvent.click(screen.getByRole("button", { name: "取消重复匹配" }));
+      dragSource(canvas);
+      fireEvent.click(screen.getByRole("button", { name: "查找重复" }));
+      await act(async () => {
+        FakeWorker.instances.at(-1)!.respond({
+          ok: true,
+          candidates: [{ x: 80, y: 40, width: 10, height: 8, error: 0 }],
+        });
+      });
+      expect(
+        screen.getByRole("button", { name: "确认应用重复遮挡" }),
+      ).toHaveTextContent("确认应用");
+      expect(
+        screen.getByRole("button", { name: "放弃重复匹配" }),
+      ).toHaveTextContent("放弃匹配");
+      unmount();
+    } finally {
+      restore();
+    }
+  });
+
   it("requires a selection before searching", async () => {
     const restore = installCanvasStubs();
     vi.stubGlobal("Image", FakeImage);

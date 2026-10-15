@@ -243,7 +243,7 @@ export function inpaintMask(
   // 的掩膜像素一定已重算，绝不读到原水印颜色。
   const sample = (gx: number, gy: number, maskIdx: number): void => {
     let weight = 1;
-    if (maskIdx >= 0) {
+    if (maskIdx >= 0 && selected[maskIdx] === 1) {
       const d = depth[maskIdx] ?? -1;
       if (d < 0) return;
       weight = 1 / (1 + d);
