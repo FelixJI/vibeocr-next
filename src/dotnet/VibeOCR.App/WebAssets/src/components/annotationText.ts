@@ -120,7 +120,7 @@ export function calloutLeaderPaths(
     mark.start.x - leader.from.x,
   );
   return [
-    { points: [leader.from, mark.start] },
+    { points: [leader.from, mark.start], cap: "butt" },
     ...(mark.style?.calloutStyle === "arrow"
       ? openArrowHeadPaths(mark.start, angle, leader.headSize)
       : []),
@@ -338,6 +338,8 @@ export function drawTextAnnotation(
     mark.tool === "callout" ? calloutLeaderPaths(box, mark, scale) : [];
   if (leaderPaths.length) {
     context.strokeStyle = color;
+    context.lineCap = leaderPaths[0]!.cap;
+    context.lineJoin = leaderPaths[0]!.join ?? "miter";
     context.lineWidth = (mark.style?.strokeWidth ?? 3) * scale;
     context.beginPath();
     for (const path of leaderPaths)

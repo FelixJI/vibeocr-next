@@ -7,6 +7,8 @@ import {
 
 export interface AnnotationPath {
   readonly points: readonly Point[];
+  readonly cap: "butt" | "round";
+  readonly join?: "miter" | "round";
   readonly closed?: boolean;
   readonly filled?: boolean;
 }
@@ -16,8 +18,10 @@ export function openArrowHeadPaths(
   tip: Point,
   angle: number,
   size: number,
+  cap: AnnotationPath["cap"] = "butt",
 ): readonly AnnotationPath[] {
   return [-0.45, 0.45].map((side) => ({
+    cap,
     points: [
       tip,
       {
@@ -36,6 +40,7 @@ export function annotationArrowGeometry(mark: Mark, scale = 1) {
   );
   const double = mark.style?.arrowDouble === true;
   const style = mark.style?.arrowStyle ?? "open";
+  const cap = mark.style?.lineStyle === "dotted" ? "round" : "butt";
   const size = Math.min(
     (10 * (mark.objectScale ?? 1) + (mark.style?.strokeWidth ?? 3) * 2) * scale,
     Math.hypot(mark.end.x - mark.start.x, mark.end.y - mark.start.y) /
@@ -43,7 +48,12 @@ export function annotationArrowGeometry(mark: Mark, scale = 1) {
   );
   const head = (tip: Point, dir: number): readonly AnnotationPath[] => {
     if (style === "open")
-      return openArrowHeadPaths(tip, dir, 16 * scale * (mark.objectScale ?? 1));
+      return openArrowHeadPaths(
+        tip,
+        dir,
+        16 * scale * (mark.objectScale ?? 1),
+        cap,
+      );
     const base = {
         x: tip.x - size * Math.cos(dir),
         y: tip.y - size * Math.sin(dir),
@@ -51,6 +61,7 @@ export function annotationArrowGeometry(mark: Mark, scale = 1) {
       half = size / 2.5;
     return [
       {
+        cap,
         points: [
           tip,
           {
@@ -68,6 +79,7 @@ export function annotationArrowGeometry(mark: Mark, scale = 1) {
     ];
   };
   const shaft: AnnotationPath = {
+    cap,
     points:
       style === "open"
         ? [mark.start, mark.end]
@@ -112,7 +124,18 @@ export function annotationPaths(mark: Mark): readonly AnnotationPath[] {
     const { shaft, heads } = annotationArrowGeometry(mark);
     return [shaft, ...heads.flat()];
   }
-  return [{ points: annotationPathPoints(mark) }];
+  return [
+    {
+      points: annotationPathPoints(mark),
+      join: "round",
+      cap:
+        mark.tool === "pen" ||
+        mark.tool === "highlighter" ||
+        mark.style?.lineStyle !== "dashed"
+          ? "round"
+          : "butt",
+    },
+  ];
 }
 
 function distanceToSegment(at: Point, from: Point, to: Point): number {
@@ -131,15 +154,16 @@ function distanceToSegment(at: Point, from: Point, to: Point): number {
   return Math.hypot(at.x - from.x - t * dx, at.y - from.y - t * dy);
 }
 
-/** 闭合三角描边使用Canvas默认miter连接（limit=10），尖角不能只外扩半线宽。 */
+/** Canvas miter连接（limit=10），尖角不能只外扩半线宽。 */
 function miterJoins(
   path: AnnotationPath,
   radius: number,
 ): readonly (readonly Point[])[] {
-  if (!path.closed) return [];
+  if (path.join === "round") return [];
   const joins: Point[][] = [];
   const points = path.points;
   points.forEach((at, index) => {
+    if (!path.closed && (index === 0 || index === points.length - 1)) return;
     const before = points[(index + points.length - 1) % points.length]!,
       after = points[(index + 1) % points.length]!;
     const a = { x: at.x - before.x, y: at.y - before.y },
@@ -171,13 +195,43 @@ export function strokePathsBounds(
   width: number,
 ): Rect {
   const radius = width / 2;
-  const points = paths.flatMap((path) => [
-    ...path.points.flatMap((at) => [
+  const points: Point[] = [];
+  const round = (at: Point) =>
+    points.push(
       { x: at.x - radius, y: at.y - radius },
       { x: at.x + radius, y: at.y + radius },
-    ]),
-    ...miterJoins(path, radius).flat(),
-  ]);
+    );
+  for (const path of paths) {
+    // 平端帽只沿法线外扩；不得借用端点处完整圆盘的轴向范围。
+    for (let i = path.closed ? 0 : 1; i < path.points.length; i++) {
+      const from =
+          path.points[(i + path.points.length - 1) % path.points.length]!,
+        to = path.points[i]!;
+      const dx = to.x - from.x,
+        dy = to.y - from.y,
+        length = Math.hypot(dx, dy);
+      if (!length) continue;
+      const nx = (-dy / length) * radius,
+        ny = (dx / length) * radius;
+      for (const at of [from, to])
+        for (const side of [-1, 1])
+          points.push({ x: at.x + nx * side, y: at.y + ny * side });
+    }
+    if (!path.closed && path.cap === "round") {
+      round(path.points[0]!);
+      round(path.points.at(-1)!);
+    }
+    if (path.join === "round") {
+      path.points.forEach((at, index) => {
+        if (path.closed || (index > 0 && index < path.points.length - 1))
+          round(at);
+      });
+    } else
+      for (const join of miterJoins(path, radius))
+        for (const at of join) points.push(at);
+    // 退化路径仍保留几何位置，未绘制的butt零长度不产生虚构圆帽。
+    for (const at of path.points) points.push(at);
+  }
   let left = Infinity,
     top = Infinity,
     right = -Infinity,

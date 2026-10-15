@@ -515,8 +515,18 @@ test("说明自身旋转及垂直镜像的字形、背景和引线共同写入�
     context.font = "400 32px system-ui, sans-serif";
     return context.measureText("F→AB").width;
   });
-  // 使自然空间旋转中心落在整数像素网格，独立比较正交几何而不混入参考图插值。
-  await drag(page, 174 - measured, 100, 300, 210);
+  // butt引线端点只沿法线外扩1.5；独立求tip使可见AABB中心仍为(240,162)。
+  let tip = { x: 174 - measured, y: 100 };
+  for (let i = 0; i < 8; i++) {
+    const dx = tip.x - (300 + measured / 2),
+      dy = tip.y - 198;
+    const normalScale = 1.5 / Math.hypot(dx, dy);
+    tip = {
+      x: 172.5 - measured + Math.abs(dy) * normalScale,
+      y: 98.5 + Math.abs(dx) * normalScale,
+    };
+  }
+  await drag(page, tip.x, tip.y, 300, 210);
   await action(page, "选择");
   await list.selectOption("");
   const original = await save(page, uploads);
@@ -538,13 +548,12 @@ test("说明自身旋转及垂直镜像的字形、背景和引线共同写入�
   );
   await writeFile(info.outputPath("callout-original.png"), original);
   await writeFile(info.outputPath("callout-transformed.png"), actual);
-  expect(result.overlap).toBeGreaterThan(0.93);
-  expect(result.union).toBeGreaterThan(100);
-  await writeFile(info.outputPath("callout-transformed.png"), actual);
   await writeFile(
     info.outputPath("callout-transform-pixels.json"),
     JSON.stringify(result, null, 2),
   );
+  expect(result.overlap).toBeGreaterThan(0.93);
+  expect(result.union).toBeGreaterThan(100);
 });
 
 test("锁定文字禁止直接输入与全局清除，解锁后可继续编辑", async ({ page }) => {
@@ -1044,4 +1053,52 @@ test("PR249 第三轮混合多选主对象在画内不显示回中心，离屏�
   ]);
   await action(page, "撤销");
   await expect(list.locator("option").nth(1)).toContainText("画布外");
+});
+
+test("GEO-01 平端帽开放箭头完全不可见后仍可从列表回中心", async ({
+  page,
+}, info) => {
+  const { uploads, list, canvas } = await setup(page);
+  await action(page, "箭头");
+  await page.getByLabel("线条宽度").selectOption("8");
+  await page.getByLabel("自定义颜色").fill("#1f6feb");
+  await drag(page, 400, 300, 440, 300);
+  await action(page, "选择");
+  await list.selectOption("");
+  await writeFile(
+    info.outputPath("butt-arrow-original.png"),
+    await save(page, uploads),
+  );
+  await list.selectOption("0");
+  for (let i = 0; i < 6; i++) await action(page, "放大选区");
+  await canvas.focus();
+  for (let i = 0; i < 51; i++) await canvas.press("Shift+ArrowLeft");
+  await list.selectOption("");
+  const png = await save(page, uploads);
+  await writeFile(info.outputPath("butt-arrow-offscreen.png"), png);
+  const painted = await page.evaluate(async (png) => {
+    const image = await createImageBitmap(
+      new Blob([Uint8Array.from(atob(png), (c) => c.charCodeAt(0))], {
+        type: "image/png",
+      }),
+    );
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const ctx = canvas.getContext("2d")!;
+    ctx.drawImage(image, 0, 0);
+    image.close();
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    let count = 0;
+    for (let i = 0; i < data.length; i += 4)
+      if (data[i] !== 18 || data[i + 1] !== 161 || data[i + 2] !== 80) count++;
+    return count;
+  }, png.toString("base64"));
+  expect(painted).toBe(0);
+  await expect(list.locator("option").last()).toContainText("画布外");
+  await list.selectOption("0");
+  await action(page, "对象回中心");
+  await expect(list.locator("option").last()).not.toContainText("画布外");
+  await action(page, "撤销");
+  await expect(list.locator("option").last()).toContainText("画布外");
 });

@@ -94,7 +94,6 @@ import {
 } from "./annotationText";
 import {
   annotationArrowGeometry,
-  annotationPathPoints,
   annotationPaths,
   hitStrokePaths,
 } from "./annotationStrokeGeometry";
@@ -5866,7 +5865,8 @@ function draw(
       // 草稿的活动 end 追加为最后一个顶点：拖拽/悬停中的新段实时可见；
       // 已提交标记 end == 最后顶点，不追加，渲染与旧像素不变。未提交
       // 草稿只进预览画布，导出/历史仍只包含已提交 points。
-      const points = annotationPathPoints(mark);
+      const path = annotationPaths(mark)[0]!;
+      const points = path.points;
       context.save();
       context.strokeStyle = color;
       context.lineWidth = lineWidth;
@@ -5877,10 +5877,8 @@ function draw(
         markScale * (mark.objectScale ?? 1),
         lineWidth,
       );
-      if (!mark.style?.lineStyle || mark.style.lineStyle === "solid") {
-        context.lineCap = "round";
-      }
-      context.lineJoin = "round";
+      context.lineCap = path.cap;
+      context.lineJoin = path.join ?? "miter";
       context.beginPath();
       points.forEach((at, pointIndex) => {
         if (pointIndex === 0) context.moveTo(at.x, at.y);
@@ -5921,6 +5919,8 @@ function draw(
             markScale * (mark.objectScale ?? 1),
             lineWidth,
           );
+        context.lineCap = paths[0]!.cap;
+        context.lineJoin = paths[0]!.join ?? "miter";
         context.stroke();
       });
       context.restore();
@@ -5931,12 +5931,13 @@ function draw(
     } else if (mark.tool === "blur") {
       applyBlur(context, canvas, mark, markScale);
     } else if (mark.tool === "pen" || mark.tool === "highlighter") {
-      const points = annotationPathPoints(mark);
+      const path = annotationPaths(mark)[0]!;
+      const points = path.points;
       context.setLineDash([]);
       context.save();
       context.strokeStyle = color;
-      context.lineCap = "round";
-      context.lineJoin = "round";
+      context.lineCap = path.cap;
+      context.lineJoin = path.join ?? "miter";
       if (mark.tool === "highlighter") {
         // 边框不透明度与荧光笔自身 35% 透明相乘：旧标记（缺省 100%）
         // 渲染保持不变，不覆盖原有透明语义。
