@@ -32,6 +32,10 @@ public sealed class CaptureUiSmokeTests : IDisposable
       RunUiSmokeAsync(nameof(RegionPickerRejectsChangedMonitorLayoutWithSameDesktopBounds));
 
   [Fact]
+  public Task ScrollCaptureCorrectionAuthorizationStaysWithItsPendingFrame() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureCorrectionAuthorizationStaysWithItsPendingFrame));
+
+  [Fact]
   public Task ScrollCaptureAmbiguousChoicesPreserveStateAndAllowFeasibleCorrection() =>
       RunUiSmokeAsync(nameof(ScrollCaptureAmbiguousChoicesPreserveStateAndAllowFeasibleCorrection));
 

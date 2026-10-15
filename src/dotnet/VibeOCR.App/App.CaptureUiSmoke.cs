@@ -24,6 +24,9 @@ public sealed partial class App
       var store = new CapturePreferencesStore(layout);
       switch (scenario)
       {
+        case "ScrollCaptureCorrectionAuthorizationStaysWithItsPendingFrame":
+          await ScrollCaptureSession.Session.VerifyCorrectionAuthorizationSelfCheckAsync();
+          break;
         case "ScrollCaptureAmbiguousChoicesPreserveStateAndAllowFeasibleCorrection":
           await ScrollCaptureSession.Session.VerifyAmbiguousCorrectionsSelfCheckAsync();
           break;
