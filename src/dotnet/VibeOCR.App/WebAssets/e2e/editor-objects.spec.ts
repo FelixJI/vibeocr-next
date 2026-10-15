@@ -128,6 +128,106 @@ async function pixels(
   );
 }
 
+test("PR249 对称大组两侧主对象分别回中心，保持组间距与一次撤销", async ({
+  page,
+}, info) => {
+  const { uploads, list, canvas } = await setup(page);
+  await rectangle(page, 100, 270);
+  await rectangle(page, 700, 270, "#1f6feb");
+  await action(page, "选择");
+  await canvas.focus();
+  await canvas.press("Control+a");
+  await action(page, "组合");
+  for (let i = 0; i < 3; i++) await action(page, "放大选区");
+  for (const primary of ["0", "1"]) {
+    await list.selectOption(primary);
+    await expect(list.locator("option").nth(Number(primary) + 1)).toContainText(
+      "画布外",
+    );
+    await action(page, "对象回中心");
+    const png = await save(page, uploads);
+    await writeFile(info.outputPath(`primary-${primary}-recovered.png`), png);
+    expect(await pixels(page, png, [{ x: 450, y: 300 }])).toEqual([
+      primary === "0" ? [224, 32, 32] : [31, 111, 235],
+    ]);
+    await expect(
+      list.locator("option").nth(Number(primary) + 1),
+    ).not.toContainText("画布外");
+    await expect(
+      list.locator("option").nth(Number(primary === "0" ? 1 : 0) + 1),
+    ).toContainText("画布外");
+    // 绕联合中心缩小3次还原600px成员间距；主对象的位置也验证整组平移。
+    for (let i = 0; i < 3; i++) await action(page, "缩小选区");
+    const compact = await save(page, uploads);
+    await writeFile(info.outputPath(`primary-${primary}-compact.png`), compact);
+    expect(
+      await pixels(page, compact, [{ x: primary === "0" ? 736 : 164, y: 300 }]),
+    ).toEqual([primary === "0" ? [224, 32, 32] : [31, 111, 235]]);
+    for (let i = 0; i < 3; i++) await action(page, "撤销");
+    await action(page, "撤销");
+    await expect(list.locator("option").nth(1)).toContainText("画布外");
+    await expect(list.locator("option").nth(2)).toContainText("画布外");
+  }
+  await list.selectOption("1");
+  await action(page, "锁定");
+  await expect(
+    page.getByRole("button", { name: "对象回中心", exact: true }),
+  ).toHaveCount(0);
+});
+
+test("PR249 缩放样式显示真实线宽圆角，选择档位只改当前对象且可逐次撤销", async ({
+  page,
+}) => {
+  const { list } = await setup(page);
+  await action(page, "矩形");
+  await page.getByLabel("矩形圆角").selectOption("6");
+  await rectangle(page, 100, 100);
+  await rectangle(page, 500, 100);
+  await action(page, "选择");
+  await list.selectOption("0");
+  await action(page, "放大选区");
+  const width = page.getByLabel("线条宽度");
+  const radius = page.getByLabel("矩形圆角");
+  await expect(width).toHaveValue("3.75");
+  await expect(radius).toHaveValue("7.5");
+  await width.click();
+  await page.keyboard.press("Escape");
+  await radius.click();
+  await page.keyboard.press("Escape");
+  await width.selectOption("5");
+  await radius.selectOption("12");
+  await list.selectOption("1");
+  await expect(width).toHaveValue("3");
+  await expect(radius).toHaveValue("6");
+  await action(page, "撤销");
+  await list.selectOption("0");
+  await expect(width).toHaveValue("5");
+  await expect(radius).toHaveValue("7.5");
+  await action(page, "撤销");
+  await list.selectOption("0");
+  await expect(width).toHaveValue("3.75");
+  await action(page, "撤销");
+  await list.selectOption("0");
+  await expect(width).toHaveValue("3");
+  await expect(radius).toHaveValue("6");
+});
+
+test("PR249 缩放文字显示30px字号，查看不新增历史", async ({ page }) => {
+  const { list } = await setup(page);
+  await action(page, "文字");
+  await page.getByLabel("标注文字").fill("F2Ab");
+  await drag(page, 100, 200, 300, 200);
+  await action(page, "选择");
+  await list.selectOption("0");
+  await action(page, "放大选区");
+  await expect(page.getByLabel("文字字号")).toHaveValue("30");
+  await list.selectOption("");
+  await list.selectOption("0");
+  await action(page, "撤销");
+  await list.selectOption("0");
+  await expect(page.getByLabel("文字字号")).toHaveValue("24");
+});
+
 test("框选、组合、复制与键盘批量编辑一次撤销，副本样式独立", async ({
   page,
 }, info) => {
@@ -1041,11 +1141,11 @@ test("PR249 第三轮混合多选主对象在画内不显示回中心，离屏�
   await action(page, "对象回中心");
   const png = await save(page, uploads);
   await writeFile(info.outputPath("recovered-group.png"), png);
-  // 组原间距100x30，整体中心恢复到450,300；两成员的相对位置不变。
+  // 组原间距100x30，蓝色主对象恢复到450,300；两成员的相对位置不变。
   expect(
     await pixels(page, png, [
-      { x: 400, y: 285 },
-      { x: 500, y: 315 },
+      { x: 350, y: 270 },
+      { x: 450, y: 300 },
     ]),
   ).toEqual([
     [224, 32, 32],

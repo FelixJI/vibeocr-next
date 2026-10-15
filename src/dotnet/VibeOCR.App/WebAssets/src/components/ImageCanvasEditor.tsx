@@ -627,6 +627,13 @@ function AnnotationStylePanel({
                 })
               }
             >
+              {Number.isFinite(activeStrokeWidth) &&
+                activeStrokeWidth > 0 &&
+                !STROKE_WIDTHS.some((width) => width === activeStrokeWidth) && (
+                  <option value={String(activeStrokeWidth)}>
+                    {activeStrokeWidth}px
+                  </option>
+                )}
               {STROKE_WIDTHS.map((width) => (
                 <option key={width} value={String(width)}>
                   {width}px
@@ -715,6 +722,15 @@ function AnnotationStylePanel({
               onStyleChange({ kind: "cornerRadius", value: Number(data.value) })
             }
           >
+            {Number.isFinite(activeCornerRadius) &&
+              activeCornerRadius >= 0 &&
+              !RECT_CORNER_RADII.some(
+                (radius) => radius === activeCornerRadius,
+              ) && (
+                <option value={String(activeCornerRadius)}>
+                  {activeCornerRadius}px
+                </option>
+              )}
             {RECT_CORNER_RADII.map((radius) => (
               <option key={radius} value={String(radius)}>
                 {radius === 0 ? "直角" : `${radius}px`}
@@ -3760,8 +3776,7 @@ export function ImageCanvasEditor({
     const ids = expandGroupSelection(state.marks, new Set([id]));
     if (!markOffscreen(mark, size, objectActionContext())) return;
     if (!selectionModifiable(ids)) return;
-    const bounds = selectionBounds(state.marks, ids, objectActionContext());
-    if (!bounds) return;
+    const bounds = markBoundsOf(mark, objectActionContext());
     cancelDrawing();
     commit({
       ...state,
@@ -4239,13 +4254,14 @@ export function ImageCanvasEditor({
       </label>
     );
 
+  const activeFontSize = activeTextStyle.fontSize ?? 24;
   const fontSizeControl = fontTool && (
     <label className="editor-style-control">
       <span aria-hidden="true">字号</span>
       <Select
         aria-label="文字字号"
         size="small"
-        value={String(activeTextStyle.fontSize ?? 24)}
+        value={String(activeFontSize)}
         onChange={(_, data) =>
           fontMark
             ? updateFontMark({
@@ -4254,6 +4270,11 @@ export function ImageCanvasEditor({
             : updateToolAttribute({ fontSize: Number(data.value) })
         }
       >
+        {Number.isFinite(activeFontSize) &&
+          activeFontSize > 0 &&
+          !FONT_SIZES.some((size) => size === activeFontSize) && (
+            <option value={String(activeFontSize)}>{activeFontSize}px</option>
+          )}
         {FONT_SIZES.map((size) => (
           <option key={size} value={String(size)}>
             {size}px

@@ -49,6 +49,8 @@ function proxyFor(
       if (typeof prop !== "string") return undefined;
       return (...args: unknown[]) => {
         calls.push({ op: prop, args });
+        if (prop === "measureText")
+          return { width: String(args[0]).length * 12 };
         if (prop === "getImageData" && state.sampleResult) {
           return { data: state.sampleResult };
         }
@@ -1348,4 +1350,140 @@ describe("PR249 第二轮对象交互", () => {
       unmount();
     },
   );
+});
+
+describe("PR249 主对象恢复与连续样式", () => {
+  it("缩放字号提供当前30px选项，查看不提交历史", async () => {
+    stubCanvasStack({ width: 900, height: 600 });
+    stubAnimationFrames();
+    const { actions, unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    fireEvent.click(screen.getByRole("button", { name: "文字" }));
+    fireEvent.change(screen.getByLabelText("标注文字"), {
+      target: { value: "F2Ab" },
+    });
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 200 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 300, clientY: 200 });
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "放大选区" }));
+    vi.mocked(actions.run).mockClear();
+    expect(screen.getByLabelText("文字字号")).toHaveValue("30");
+    expect(actions.run).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    expect(screen.getByLabelText("文字字号")).toHaveValue("24");
+    unmount();
+  });
+  async function prepare() {
+    stubCanvasStack({ width: 900, height: 600 });
+    const harness = stubAnimationFrames();
+    const rendered = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    fireEvent.change(screen.getByLabelText("矩形圆角"), {
+      target: { value: "6" },
+    });
+    for (const x of [100, 700]) {
+      fireEvent.pointerDown(canvas, { pointerId: 1, clientX: x, clientY: 270 });
+      fireEvent.pointerUp(canvas, {
+        pointerId: 1,
+        clientX: x + 100,
+        clientY: 330,
+      });
+    }
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    return { ...rendered, canvas, harness };
+  }
+  it.each(["0", "1"])(
+    "对称离屏组以主对象%s恢复，整组间距与一次历史不变",
+    async (primary) => {
+      const { actions, canvas, harness, unmount } = await prepare();
+      fireEvent.keyDown(canvas, { key: "a", ctrlKey: true });
+      fireEvent.click(screen.getByRole("button", { name: "组合" }));
+      for (let i = 0; i < 3; i++)
+        fireEvent.click(screen.getByRole("button", { name: "放大选区" }));
+      harness.flush();
+      fireEvent.change(screen.getByLabelText("选择标注对象"), {
+        target: { value: primary },
+      });
+      expect(
+        screen.getByLabelText("选择标注对象").querySelectorAll("option")[
+          Number(primary) + 1
+        ],
+      ).toHaveTextContent("画布外");
+      vi.mocked(actions.run).mockClear();
+      fireEvent.click(screen.getByRole("button", { name: "对象回中心" }));
+      for (const holder of state.canvases) holder.calls.length = 0;
+      harness.flush();
+      const memberX = [
+        ...new Set(
+          allCalls()
+            .filter(
+              (call) => call.op === "roundRect" && call.args[2] === 195.3125,
+            )
+            .map((call) => Number(call.args[0])),
+        ),
+      ].sort((a, b) => a - b);
+      expect(memberX).toEqual(
+        primary === "0" ? [352.34375, 1524.21875] : [-819.53125, 352.34375],
+      );
+      expect(
+        screen.getByLabelText("选择标注对象").querySelectorAll("option")[
+          Number(primary) + 1
+        ],
+      ).not.toHaveTextContent("画布外");
+      expect(actions.run).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole("button", { name: "解组" })).toBeVisible();
+      fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+      harness.flush();
+      expect(
+        screen.getByLabelText("选择标注对象").querySelectorAll("option")[
+          Number(primary) + 1
+        ],
+      ).toHaveTextContent("画布外");
+      fireEvent.change(screen.getByLabelText("选择标注对象"), {
+        target: { value: primary },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "锁定" }));
+      expect(screen.queryByRole("button", { name: "对象回中心" })).toBeNull();
+      unmount();
+    },
+  );
+  it("缩放后的线宽和圆角显示真实值，查看不提交，改档只更新目标", async () => {
+    const { actions, unmount } = await prepare();
+    fireEvent.click(screen.getByRole("button", { name: "放大选区" }));
+    vi.mocked(actions.run).mockClear();
+    expect(screen.getByLabelText("线条宽度")).toHaveValue("3.75");
+    expect(screen.getByLabelText("矩形圆角")).toHaveValue("7.5");
+    expect(actions.run).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("线条宽度"), {
+      target: { value: "5" },
+    });
+    fireEvent.change(screen.getByLabelText("矩形圆角"), {
+      target: { value: "12" },
+    });
+    expect(actions.run).toHaveBeenCalledTimes(2);
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "1" },
+    });
+    expect(screen.getByLabelText("线条宽度")).toHaveValue("3");
+    expect(screen.getByLabelText("矩形圆角")).toHaveValue("6");
+    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    expect(screen.getByLabelText("线条宽度")).toHaveValue("5");
+    expect(screen.getByLabelText("矩形圆角")).toHaveValue("7.5");
+    unmount();
+  });
 });
