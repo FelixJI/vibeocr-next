@@ -296,3 +296,51 @@ describe("totalDistinctPatchPixels（历史补丁聚合预算口径）", () => {
     );
   });
 });
+
+it("subtract compacts remaining ROI before a valid neighbouring addition", () => {
+  const image = { width: 2000, height: 1000 };
+  const current = {
+    rect: { x: 900, y: 0, width: 1000, height: 1000 },
+    data: new Uint8Array(1_000_000).fill(1),
+  };
+  const removed = applyMaskRect(
+    current,
+    { x: 1000, y: 0, width: 900, height: 1000 },
+    image,
+    false,
+  );
+  expect(removed.ok).toBe(true);
+  if (!removed.ok) return;
+  expect(removed.state?.rect).toEqual({
+    x: 900,
+    y: 0,
+    width: 100,
+    height: 1000,
+  });
+  expect(
+    applyMaskRect(
+      removed.state,
+      { x: 0, y: 0, width: 900, height: 1000 },
+      image,
+      true,
+    ).ok,
+  ).toBe(true);
+});
+it("fractional circular stamps never write outside their radius", () => {
+  const result = applyMaskBrush(
+    undefined,
+    [{ x: 10.2, y: 10.2 }],
+    5,
+    IMAGE,
+    true,
+  );
+  expect(result.ok).toBe(true);
+  if (!result.ok || !result.state) return;
+  const { rect, data } = result.state;
+  for (let y = 0; y < rect.height; y++)
+    for (let x = 0; x < rect.width; x++)
+      if (data[y * rect.width + x])
+        expect(
+          Math.hypot(rect.x + x - 10.2, rect.y + y - 10.2),
+        ).toBeLessThanOrEqual(5);
+});

@@ -379,3 +379,43 @@ describe("findDuplicateRegions", () => {
     }
   });
 });
+
+it("screens a 100x100 source without exhausting precise work before a distant copy", () => {
+  const source = { x: 5, y: 5, width: 100, height: 100 };
+  const rgba = paint(1000, 800, (x, y) => {
+    let xx = x,
+      yy = y;
+    if (x >= 880 && x < 980 && y >= 680 && y < 780) {
+      xx = x - 880 + 5;
+      yy = y - 680 + 5;
+    }
+    if (xx >= 5 && xx < 105 && yy >= 5 && yy < 105) return textureAt(xx, yy);
+    return [230, 230, 230, 255];
+  });
+  expect(findDuplicateRegions(rgba, 1000, 800, source)).toContainEqual({
+    x: 880,
+    y: 680,
+    width: 100,
+    height: 100,
+    error: 0,
+  });
+});
+
+it("rejects the integral table byte budget before allocating it", () => {
+  const width = 2_000_000,
+    height = 4;
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < 4; y++)
+    for (let x = 0; x < 680; x++) {
+      const value = (x % 2) * 255;
+      rgba.set([value, value, value, 255], (y * width + x) * 4);
+    }
+  expect(() =>
+    findDuplicateRegions(rgba, width, height, {
+      x: 0,
+      y: 0,
+      width: 680,
+      height: 4,
+    }),
+  ).toThrow("积分表超过100MB预算");
+});

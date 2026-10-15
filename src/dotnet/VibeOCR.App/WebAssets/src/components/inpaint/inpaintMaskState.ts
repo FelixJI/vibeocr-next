@@ -121,6 +121,17 @@ function countMasked(state: InpaintMaskState): number {
   return count;
 }
 
+function compactMask(state: InpaintMaskState): InpaintMaskState | undefined {
+  const rect = maskBounds(state);
+  if (!rect) return undefined;
+  return rect.x === state.rect.x &&
+    rect.y === state.rect.y &&
+    rect.width === state.rect.width &&
+    rect.height === state.rect.height
+    ? state
+    : resizeState(state, rect);
+}
+
 /** 矩形增/减：add=true 置 1，否则清 0。 */
 export function applyMaskRect(
   current: InpaintMaskState | undefined,
@@ -169,7 +180,7 @@ export function applyMaskRect(
   }
   return {
     ok: true,
-    state: !add && countMasked(result) === 0 ? undefined : result,
+    state: add ? result : compactMask(result),
   };
 }
 
@@ -228,13 +239,16 @@ export function applyMaskBrush(
       Math.ceil(cy + r),
     );
     for (let y = top; y <= bottom; y += 1) {
-      const span = Math.floor(Math.sqrt(Math.max(0, r * r - (y - cy) ** 2)));
-      const left = Math.max(state.rect.x, Math.floor(cx) - span);
+      if (Math.abs(y - cy) > r) continue;
+      const span = Math.sqrt(r * r - (y - cy) ** 2);
+      const left = Math.max(state.rect.x, Math.ceil(cx - span));
       const right = Math.min(
         state.rect.x + state.rect.width - 1,
-        Math.floor(cx) + span,
+        Math.floor(cx + span),
       );
-      work += add ? span * 2 + 1 : Math.max(0, right - left + 1);
+      work += add
+        ? Math.floor(cx + span) - Math.ceil(cx - span) + 1
+        : Math.max(0, right - left + 1);
       for (let x = left; x <= right; x += 1) {
         const lx = x - state.rect.x;
         const ly = y - state.rect.y;
@@ -271,7 +285,7 @@ export function applyMaskBrush(
   }
   return {
     ok: true,
-    state: !add && countMasked(result) === 0 ? undefined : result,
+    state: add ? result : compactMask(result),
   };
 }
 

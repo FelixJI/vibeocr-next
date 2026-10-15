@@ -9,7 +9,7 @@
  *   源块 ≤ DUPLICATE_MAX_SOURCE_PIXELS（512×512=0.26MP）。源块 RGB 通道平均方差
  *   低于 DUPLICATE_LOW_TEXTURE_VARIANCE 时拒绝（纯色/近纯色块在任何
  *   平移处都“匹配”，结果无意义）。
- * - 工作量有界：覆盖全部整数偏移，以十六点筛选和有限精比控制成本，
+ * - 工作量有界：覆盖全部整数偏移，以十六点/分块下界筛选和有限精比控制成本，
  *   超预算明确拒绝，不返回不完整的搜索结果。
  * - 合格窗口最多 DUPLICATE_MAX_MATCH_WINDOWS，超限明确拒绝。完整扫描后
  *   按平均误差、y、x 升序去除重叠，再取 DUPLICATE_MAX_CANDIDATES 个
@@ -17,15 +17,17 @@
  * - 无任何候选时以 "no-duplicates" 显式失败。
  *
  * 搜索分两阶段，覆盖每一个整数平移偏移（不存在未访问的偏移）：
- * 1. 筛选：对每个偏移只比较固定 4×4 采样点（十六个像素，确定性
+ * 1. 筛选：小块对每个偏移比较固定 4×4 采样点（十六个像素，确定性
  *    位置，去重），累计差不超过整块容差才进入精比。筛选总量 ≤ 偏移数 ×
  *    16，超过 DUPLICATE_WORK_BUDGET 时显式 budget-exceeded 拒绝
  *    （图片过大/源块过小），不继续也不遇漏。
+ *    大块改用 4×4 不重叠分块的 RGB 和之差下界，仍为16次筛选；
+ *    按需分配≤100MB的三通道Uint32积分表，累计值≤8MP×255。
  * 2. 精比：逐像素比较（RGB 容差与完全相同的 alpha、累计容差早退），总量受
  *    DUPLICATE_PRECISE_BUDGET 约束；相似位置过多导致超限时同样
  *    budget-exceeded 拒绝，不把截断的扫描当作完整结果。
  *
- * 资源开销：直接读取传入的基线（最多 32MB RGBA），无额外像素副本；
+ * 资源开销：直接读取传入的基线（最多 32MB RGBA），无额外像素副本；大块另有≤100MB积分表；
  * 最多存储 4096 个合格窗口的坐标和误差，排序后最多进行 4096×8 次重叠
  * 检查，响应只携带最多 8 个候选坐标。
  */
@@ -247,6 +249,62 @@ export function findDuplicateRegions(
     );
   };
 
+  // 大块使用互不重叠的分块 RGB 和之差；三角不等式保证它不超过真实 L1 误差。
+  // 三通道 Uint32 积分表最多100MB；8MP×255<2^32，无整数溢出。
+  let integral: Uint32Array | undefined;
+  const stride = (width + 1) * 3;
+  const integralSum = (
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    c: number,
+  ): number => {
+    const table = integral!;
+    return (
+      table[(y + h) * stride + (x + w) * 3 + c]! -
+      table[y * stride + (x + w) * 3 + c]! -
+      table[(y + h) * stride + x * 3 + c]! +
+      table[y * stride + x * 3 + c]!
+    );
+  };
+  const blocks: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    sums: readonly number[];
+  }[] = [];
+  if (count * DUPLICATE_MATCH_TOLERANCE * 3 >= 16 * 765) {
+    const entries = (width + 1) * (height + 1) * 3;
+    if (entries * 4 > 100_000_000 || width * height * 255 >= 2 ** 32)
+      fail("budget-exceeded", "重复匹配积分表超过100MB预算");
+    integral = new Uint32Array(entries);
+    for (let y = 0; y < height; y++) {
+      const row = [0, 0, 0];
+      for (let x = 0; x < width; x++)
+        for (let c = 0; c < 3; c++) {
+          row[c] = row[c]! + rgba[(y * width + x) * 4 + c]!;
+          integral[(y + 1) * stride + (x + 1) * 3 + c] =
+            integral[y * stride + (x + 1) * 3 + c]! + row[c]!;
+        }
+    }
+    for (let gy = 0; gy < 4; gy++)
+      for (let gx = 0; gx < 4; gx++) {
+        const x = Math.floor((gx * bw) / 4),
+          y = Math.floor((gy * bh) / 4);
+        const w = Math.floor(((gx + 1) * bw) / 4) - x,
+          h = Math.floor(((gy + 1) * bh) / 4) - y;
+        blocks.push({
+          x,
+          y,
+          width: w,
+          height: h,
+          sums: [0, 1, 2].map((c) => integralSum(x0 + x, y0 + y, w, h, c)),
+        });
+      }
+  }
+
   const tolerance = DUPLICATE_MATCH_TOLERANCE * count * 3; // 每×3通道累计容差
   const matches: DuplicateCandidate[] = [];
   let preciseWork = 0;
@@ -264,7 +322,23 @@ export function findDuplicateRegions(
       if (rectsOverlap(candidate, block)) continue;
       // 去重采样点的累计差是整块累计差的下界，只有超过整块容差才拒绝。
       let screenError = 0;
-      for (let i = 0; i < screenSamples.length; i += 1) {
+      if (integral) {
+        for (const part of blocks) {
+          for (let c = 0; c < 3; c++)
+            screenError += Math.abs(
+              part.sums[c]! -
+                integralSum(
+                  cx + part.x,
+                  cy + part.y,
+                  part.width,
+                  part.height,
+                  c,
+                ),
+            );
+          if (screenError > tolerance) break;
+        }
+      }
+      for (let i = 0; !integral && i < screenSamples.length; i += 1) {
         const sample = screenSamples[i]!;
         const packed = screenCache[i]!;
         const other = screenAt(sample.lx, sample.ly, cx, cy);

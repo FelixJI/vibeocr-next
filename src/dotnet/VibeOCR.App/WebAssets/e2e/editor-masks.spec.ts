@@ -780,3 +780,106 @@ test("R9 the first remove stroke keeps export bytes and history unchanged", asyn
   ).toBe(0);
   expect(workers).toEqual([]);
 });
+
+test("tiled blur matches a whole-image filter across the 512px seam and click stamps persist", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const uploads: { contentType: string; body: Buffer }[] = [];
+  await routeSource(
+    page,
+    '<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="128"><rect width="512" height="128" fill="black"/><rect x="512" width="512" height="128" fill="white"/></svg>',
+    "tile-seam.svg",
+  );
+  await mountWithUploadCapture(page, uploads, "tile-seam.svg");
+  await expect(page.getByText(/原图 1024×128/)).toBeVisible();
+  const baseline = await saveAndDecode(page, uploads);
+  const map = makeCanvasMapper(1024, 128);
+  await page.getByRole("button", { name: "模糊", exact: true }).click();
+  await page.getByLabel("马赛克与模糊绘制方式").selectOption("brush");
+  await page.getByLabel("马赛克与模糊笔刷大小").selectOption("64");
+  await pointerStroke(page, [map({ x: 50, y: 64 }), map({ x: 970, y: 64 })]);
+  const actual = await saveAndDecode(page, uploads);
+  const expected = await page.evaluate(
+    ({ pixels }) => {
+      const source = document.createElement("canvas");
+      source.width = 1024;
+      source.height = 128;
+      source
+        .getContext("2d")!
+        .putImageData(
+          new ImageData(new Uint8ClampedArray(pixels), 1024, 128),
+          0,
+          0,
+        );
+      const result = document.createElement("canvas");
+      result.width = 1024;
+      result.height = 128;
+      const context = result.getContext("2d")!;
+      context.filter = "blur(" + (10 * 1024) / 900 + "px)";
+      context.drawImage(source, 0, 0);
+      return Array.from(context.getImageData(508, 64, 8, 1).data);
+    },
+    { pixels: baseline.pixels },
+  );
+  for (let x = 508; x < 516; x++)
+    expect(pixelAt(actual, x, 64)).toEqual(
+      expected.slice((x - 508) * 4, (x - 507) * 4),
+    );
+  await page.getByRole("button", { name: "撤销", exact: true }).click();
+  await clickCanvasAt(page, map({ x: 512, y: 64 }));
+  const clicked = await saveAndDecode(page, uploads);
+  expect(pixelAt(clicked, 511, 64)).not.toEqual(pixelAt(baseline, 511, 64));
+  await page.getByRole("button", { name: "撤销", exact: true }).click();
+  const restored = await saveAndDecode(page, uploads);
+  expect(restored.pixels).toEqual(baseline.pixels);
+});
+
+test("sparse diagonal effects bound scratch canvases in natural output", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const uploads: { contentType: string; body: Buffer }[] = [];
+  await routeSource(
+    page,
+    '<svg xmlns="http://www.w3.org/2000/svg" width="4096" height="4096"><rect width="4096" height="4096" fill="white"/><path d="M0 0L4096 4096" stroke="black" stroke-width="20"/></svg>',
+    "tile-large.svg",
+  );
+  await mountWithUploadCapture(page, uploads, "tile-large.svg");
+  await expect(page.getByText(/原图 4096×4096/)).toBeVisible();
+  await page.evaluate(() => {
+    const old = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (
+      ...args: Parameters<typeof old>
+    ) {
+      if (
+        this.width * this.height > 4_000_000 &&
+        !(this.width === 4096 && this.height === 4096)
+      )
+        document.body.dataset.unboundedScratch =
+          String(this.width) + "x" + this.height;
+      return old.apply(this, args);
+    };
+  });
+  await page.getByRole("button", { name: "模糊", exact: true }).click();
+  await page.getByLabel("马赛克与模糊绘制方式").selectOption("brush");
+  const map = makeCanvasMapper(4096, 4096);
+  await pointerStroke(page, [
+    map({ x: 100, y: 100 }),
+    map({ x: 3996, y: 3996 }),
+  ]);
+  const actual = await saveAndDecode(page, uploads, {
+    x: 2046,
+    y: 2046,
+    width: 4,
+    height: 4,
+  });
+  expect(actual.width).toBe(4);
+  expect(pixelAt(actual, 1, 1)[3]).toBe(255);
+  expect(pixelAt(actual, 1, 1)[0]).toBeGreaterThan(0);
+  await expect(page.locator("body")).not.toHaveAttribute(
+    "data-unbounded-scratch",
+    /./,
+  );
+});

@@ -1682,152 +1682,171 @@ export function ImageCanvasEditor({
   useLayoutEffect(() => {
     // 保留已排队的帧，只替换绘制内容，避免连续 pointermove 饿死绘制。
     latestDraw.current = () => {
-      const canvas = canvasRef.current;
-      if (!canvas || layerReady) return;
-      if (captureScene && !canvas.getContext("2d")) {
-        presentation.current?.fail("draw");
-        return;
-      }
-      const image = imageRef.current;
-      const offscreen = new Set(
-        state.marks
-          .filter((mark) =>
-            markOffscreen(
-              mark,
-              canvasSize(canvas),
-              canvas.getContext("2d") ?? undefined,
-            ),
-          )
-          .map((mark) => mark.id),
-      );
-      setOffscreenIds((current) =>
-        current.size === offscreen.size &&
-        [...current].every((id) => offscreen.has(id))
-          ? current
-          : offscreen,
-      );
-      const layer = currentInpaintLayer();
-      const crop = cropDraft.current ? undefined : state.crop;
-      const renderedState = crop === state.crop ? state : { ...state, crop };
-      // Only the unchanged prefix is cached: moving a mark must also recompute
-      // all later mosaic/blur marks that sample its pixels. Never cache exports.
-      const draftIds = objectDraftRef.current?.byId.keys() ?? [];
-      let markCount = state.marks.length;
-      for (const id of [...selectedIds, ...draftIds]) {
-        const index = state.marks.findIndex((mark) => mark.id === id);
-        if (index >= 0 && index < markCount) markCount = index;
-      }
-      let cached = previewCache.current;
-      if (canvas.width * canvas.height <= 16_000_000) {
-        if (
-          !cached ||
-          cached.state !== state ||
-          cached.image !== image ||
-          cached.crop !== crop ||
-          cached.preview?.canvas !== layer.preview?.canvas ||
-          cached.maskOverlay?.canvas !== layer.maskOverlay?.canvas ||
-          cached.duplicateOverlay !== layer.duplicateOverlay ||
-          cached.format !== outputFormat ||
-          cached.markCount !== markCount ||
-          cached.canvas.width !== canvas.width ||
-          cached.canvas.height !== canvas.height
-        ) {
-          const base = cached?.canvas ?? document.createElement("canvas");
-          base.width = canvas.width;
-          base.height = canvas.height;
-          Object.assign(base.dataset, canvas.dataset);
-          draw(
-            base,
-            image,
-            renderedState,
-            undefined,
-            state.marks.slice(0, markCount),
-            true,
-            1,
-            outputFormat === "image/jpeg" ? "#ffffff" : undefined,
-            false,
-            {
-              patches: layer.patches,
+      try {
+        validateBrushBudget(
+          imageRef.current,
+          canvasRef.current,
+          draftMark.current
+            ? { ...state, marks: [...state.marks, draftMark.current] }
+            : state,
+        );
+
+        const canvas = canvasRef.current;
+        if (!canvas || layerReady) return;
+        if (captureScene && !canvas.getContext("2d")) {
+          presentation.current?.fail("draw");
+          return;
+        }
+        const image = imageRef.current;
+        const offscreen = new Set(
+          state.marks
+            .filter((mark) =>
+              markOffscreen(
+                mark,
+                canvasSize(canvas),
+                canvas.getContext("2d") ?? undefined,
+              ),
+            )
+            .map((mark) => mark.id),
+        );
+        setOffscreenIds((current) =>
+          current.size === offscreen.size &&
+          [...current].every((id) => offscreen.has(id))
+            ? current
+            : offscreen,
+        );
+        const layer = currentInpaintLayer();
+        const crop = cropDraft.current ? undefined : state.crop;
+        const renderedState = crop === state.crop ? state : { ...state, crop };
+        // Only the unchanged prefix is cached: moving a mark must also recompute
+        // all later mosaic/blur marks that sample its pixels. Never cache exports.
+        const draftIds = objectDraftRef.current?.byId.keys() ?? [];
+        let markCount = state.marks.length;
+        for (const id of [...selectedIds, ...draftIds]) {
+          const index = state.marks.findIndex((mark) => mark.id === id);
+          if (index >= 0 && index < markCount) markCount = index;
+        }
+        let cached = previewCache.current;
+        if (canvas.width * canvas.height <= 16_000_000) {
+          if (
+            !cached ||
+            cached.state !== state ||
+            cached.image !== image ||
+            cached.crop !== crop ||
+            cached.preview?.canvas !== layer.preview?.canvas ||
+            cached.maskOverlay?.canvas !== layer.maskOverlay?.canvas ||
+            cached.duplicateOverlay !== layer.duplicateOverlay ||
+            cached.format !== outputFormat ||
+            cached.markCount !== markCount ||
+            cached.canvas.width !== canvas.width ||
+            cached.canvas.height !== canvas.height
+          ) {
+            const base = cached?.canvas ?? document.createElement("canvas");
+            base.width = canvas.width;
+            base.height = canvas.height;
+            Object.assign(base.dataset, canvas.dataset);
+            draw(
+              base,
+              image,
+              renderedState,
+              undefined,
+              state.marks.slice(0, markCount),
+              true,
+              1,
+              outputFormat === "image/jpeg" ? "#ffffff" : undefined,
+              false,
+              {
+                patches: layer.patches,
+                preview: layer.preview,
+                maskOverlay: layer.maskOverlay,
+                duplicateOverlay: layer.duplicateOverlay,
+              },
+              undefined,
+              false,
+            );
+            cached = {
+              canvas: base,
+              state,
+              image,
+              crop,
               preview: layer.preview,
               maskOverlay: layer.maskOverlay,
               duplicateOverlay: layer.duplicateOverlay,
-            },
-            undefined,
-            false,
-          );
-          cached = {
-            canvas: base,
-            state,
-            image,
-            crop,
-            preview: layer.preview,
-            maskOverlay: layer.maskOverlay,
-            duplicateOverlay: layer.duplicateOverlay,
-            format: outputFormat,
-            markCount,
-          };
-          previewCache.current = cached;
+              format: outputFormat,
+              markCount,
+            };
+            previewCache.current = cached;
+          }
+        } else {
+          cached = undefined;
+          previewCache.current = undefined;
         }
-      } else {
-        cached = undefined;
-        previewCache.current = undefined;
-      }
-      draw(
-        canvasRef.current,
-        imageRef.current,
-        // 拖动裁剪时保留完整画面，只更新遮罩；松开后提交实际裁剪。
-        renderedState,
-        selectedIds,
-        objectDraftRef.current
-          ? state.marks.map(
-              (mark) => objectDraftRef.current!.byId.get(mark.id) ?? mark,
-            )
-          : textEdit
-            ? state.marks.map((mark) =>
-                mark.id === textEdit.id ? textEdit.mark : mark,
+        draw(
+          canvasRef.current,
+          imageRef.current,
+          // 拖动裁剪时保留完整画面，只更新遮罩；松开后提交实际裁剪。
+          renderedState,
+          selectedIds,
+          objectDraftRef.current
+            ? state.marks.map(
+                (mark) => objectDraftRef.current!.byId.get(mark.id) ?? mark,
               )
-            : draftMark.current
-              ? [...state.marks, draftMark.current]
-              : state.marks,
-        true,
-        1,
-        // 预览与导出一致：JPEG 显式白底合成；PNG 不填底色，透明由
-        // 工作区 CSS 背景衬托，不把深色烧进图像内容。
-        outputFormat === "image/jpeg" ? "#ffffff" : undefined,
-        false,
-        layer,
-        cached,
-      );
-      if (cropDraft.current) {
-        drawCropPreview(canvas, cropDraft.current);
-      } else if (captureGeometry && !layerReady) {
-        // 截图现场：选区即当前裁剪范围；无已提交裁剪时在四边/四角绘制闲置手柄。
-        drawSceneCropHandles(canvas, state.crop);
-      }
-      if (marqueeRef.current) {
-        // 空白框选草稿：蓝色虚线实时反馈包含范围。
-        const marqueeContext = canvas.getContext("2d");
-        const area = clampRect(
-          normalizedRect(marqueeRef.current),
-          canvasSize(canvas),
+            : textEdit
+              ? state.marks.map((mark) =>
+                  mark.id === textEdit.id ? textEdit.mark : mark,
+                )
+              : draftMark.current
+                ? [...state.marks, draftMark.current]
+                : state.marks,
+          true,
+          1,
+          // 预览与导出一致：JPEG 显式白底合成；PNG 不填底色，透明由
+          // 工作区 CSS 背景衬托，不把深色烧进图像内容。
+          outputFormat === "image/jpeg" ? "#ffffff" : undefined,
+          false,
+          layer,
+          cached,
         );
-        if (marqueeContext && (area.width > 0 || area.height > 0)) {
-          marqueeContext.save();
-          marqueeContext.setLineDash([6, 4]);
-          marqueeContext.lineWidth = 1.5;
-          marqueeContext.strokeStyle = "#1f6feb";
-          marqueeContext.strokeRect(area.x, area.y, area.width, area.height);
-          marqueeContext.restore();
+        if (cropDraft.current) {
+          drawCropPreview(canvas, cropDraft.current);
+        } else if (captureGeometry && !layerReady) {
+          // 截图现场：选区即当前裁剪范围；无已提交裁剪时在四边/四角绘制闲置手柄。
+          drawSceneCropHandles(canvas, state.crop);
         }
-      }
-      if (
-        image &&
-        image.naturalWidth > 0 &&
-        image.naturalHeight > 0 &&
-        canvas.getContext("2d")
-      ) {
-        canvas.dataset.frameReady = "true";
-        presentation.current?.sourceDrawn();
+        if (marqueeRef.current) {
+          // 空白框选草稿：蓝色虚线实时反馈包含范围。
+          const marqueeContext = canvas.getContext("2d");
+          const area = clampRect(
+            normalizedRect(marqueeRef.current),
+            canvasSize(canvas),
+          );
+          if (marqueeContext && (area.width > 0 || area.height > 0)) {
+            marqueeContext.save();
+            marqueeContext.setLineDash([6, 4]);
+            marqueeContext.lineWidth = 1.5;
+            marqueeContext.strokeStyle = "#1f6feb";
+            marqueeContext.strokeRect(area.x, area.y, area.width, area.height);
+            marqueeContext.restore();
+          }
+        }
+        if (
+          image &&
+          image.naturalWidth > 0 &&
+          image.naturalHeight > 0 &&
+          canvas.getContext("2d")
+        ) {
+          canvas.dataset.frameReady = "true";
+          presentation.current?.sourceDrawn();
+        }
+      } catch (error) {
+        previewCache.current = undefined;
+        if (presentation.current) presentation.current.fail("draw");
+        else
+          setOperationMessage(
+            error instanceof Error
+              ? error.message
+              : "图片预览失败，请减小笔刷范围后重试。",
+          );
       }
     };
     if (!layerReady) scheduleDraw();
@@ -2033,6 +2052,14 @@ export function ImageCanvasEditor({
   ]);
 
   function commit(next: EditorState) {
+    try {
+      validateBrushBudget(imageRef.current, canvasRef.current, next);
+    } catch (error) {
+      setOperationMessage(
+        error instanceof Error ? error.message : "笔刷效果预算检查失败",
+      );
+      return;
+    }
     setHistory((current) => [...current.slice(0, historyIndex + 1), next]);
     setHistoryIndex((current) => current + 1);
     // 提交后剔除已不存在对象的选择；主选失效时回退到剩余集合的顶层。
@@ -3719,7 +3746,7 @@ export function ImageCanvasEditor({
           ? total + Math.hypot(at.x - previous.x, at.y - previous.y)
           : total;
       }, 0);
-      if (length >= 4) {
+      if (length >= 4 || tool === "mosaic" || tool === "blur") {
         commit({
           ...state,
           marks: [
@@ -7477,7 +7504,7 @@ function strokeMaskSurface(
 ): HTMLCanvasElement | undefined {
   const mask = effectSurface(canvas, area.width, area.height, "brush-mask");
   const context = mask.getContext("2d");
-  if (!context) return undefined;
+  if (!context) throw new Error("笔刷掩膜画布分配失败");
   context.lineWidth = brush;
   context.lineCap = "round";
   context.lineJoin = "round";
@@ -7512,7 +7539,7 @@ function compositeThroughMask(
     "brush-composited",
   );
   const compositor = composited.getContext("2d");
-  if (!compositor) return;
+  if (!compositor) throw new Error("笔刷合成画布分配失败");
   compositor.drawImage(effect, 0, 0);
   compositor.globalCompositeOperation = "destination-in";
   compositor.drawImage(mask, 0, 0);
@@ -7532,7 +7559,7 @@ function applyMosaic(
   scale = 1,
 ) {
   if (mark.points?.length) {
-    applyMosaicBrush(context, canvas, mark, scale);
+    applyBrushTiles(context, canvas, mark, scale);
     return;
   }
   const size = canvasSize(canvas);
@@ -7572,7 +7599,7 @@ function applyBlur(
   scale = 1,
 ) {
   if (mark.points?.length) {
-    applyBlurBrush(context, canvas, mark, scale);
+    applyBrushTiles(context, canvas, mark, scale);
     return;
   }
   const size = canvasSize(canvas);
@@ -7619,39 +7646,227 @@ function applyBlur(
   context.restore();
 }
 
+function validateBrushBudget(
+  image: HTMLImageElement | undefined,
+  canvas: HTMLCanvasElement | null,
+  next: EditorState,
+) {
+  if (!image || !canvas) return;
+  const size = outputSize(image, next.rotation),
+    display = canvasSize(canvas);
+  const scale = 1 / imageTransform(image, next.rotation, display).scale;
+  for (const mark of next.marks) {
+    if (
+      (mark.tool !== "mosaic" && mark.tool !== "blur") ||
+      !mark.points?.length
+    )
+      continue;
+    brushTiles(
+      {
+        ...mark,
+        points: mark.points.map((at) =>
+          projectPoint(at, image, next.rotation, display, next.rotation, size),
+        ),
+      },
+      scale,
+      size,
+    );
+  }
+}
+
+const BRUSH_TILE_PIXELS = 512;
+const BRUSH_STAGED_PIXELS = 8_000_000;
+const BRUSH_SAMPLE_PIXELS = 4_000_000;
+
+function brushTiles(
+  mark: Mark,
+  scale: number,
+  size: CanvasSize,
+  pixelScale = 1,
+) {
+  const points = mark.points ?? [mark.start, mark.end];
+  const radius = Math.max(2, (mark.style?.brushSize ?? 24) * scale) / 2 + 1;
+  const side = BRUSH_TILE_PIXELS / Math.max(1, pixelScale);
+  const area = strokeArea(points, radius, size);
+  const tiles: ReturnType<typeof normalizedRect>[] = [];
+  let pixels = 0;
+  const halo =
+    mark.tool === "blur"
+      ? blurRadius(markEffectIntensity(mark)) * 3 * scale
+      : 0;
+  for (
+    let y = Math.floor(area.y / side) * side;
+    y < area.y + area.height;
+    y += side
+  ) {
+    for (
+      let x = Math.floor(area.x / side) * side;
+      x < area.x + area.width;
+      x += side
+    ) {
+      const outer = clampRect({ x, y, width: side, height: side }, size);
+      const tx = Math.max(outer.x, area.x),
+        ty = Math.max(outer.y, area.y);
+      const tile = {
+        x: tx,
+        y: ty,
+        width: Math.min(outer.x + outer.width, area.x + area.width) - tx,
+        height: Math.min(outer.y + outer.height, area.y + area.height) - ty,
+      };
+      const cx = tile.x + tile.width / 2,
+        cy = tile.y + tile.height / 2;
+      const reach = radius + Math.hypot(tile.width, tile.height) / 2;
+      const touches = points.some((a, i) => {
+        const b = points[i + 1] ?? a,
+          dx = b.x - a.x,
+          dy = b.y - a.y;
+        const t =
+          dx || dy
+            ? Math.max(
+                0,
+                Math.min(
+                  1,
+                  ((cx - a.x) * dx + (cy - a.y) * dy) / (dx * dx + dy * dy),
+                ),
+              )
+            : 0;
+        return Math.hypot(cx - a.x - t * dx, cy - a.y - t * dy) <= reach;
+      });
+      if (!touches) continue;
+      pixels +=
+        Math.ceil(tile.width * pixelScale) *
+        Math.ceil(tile.height * pixelScale);
+      if (
+        pixels > BRUSH_STAGED_PIXELS ||
+        (Math.ceil((tile.width + halo * 2) * pixelScale) + 2) *
+          (Math.ceil((tile.height + halo * 2) * pixelScale) + 2) >
+          BRUSH_SAMPLE_PIXELS
+      )
+        throw new Error(
+          "笔刷效果超出8MP暂存或4MP单块采样预算，请缩短轨迹或减小笔刷/强度。",
+        );
+      tiles.push(tile);
+    }
+  }
+  return tiles;
+}
+
+function applyBrushTiles(
+  context: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  mark: Mark,
+  scale: number,
+) {
+  const size = canvasSize(canvas),
+    sx = canvas.width / size.width,
+    sy = canvas.height / size.height;
+  const tiles = brushTiles(mark, scale, size, Math.max(sx, sy));
+  const staged: {
+    area: ReturnType<typeof normalizedRect>;
+    canvas: HTMLCanvasElement;
+    x: number;
+    y: number;
+  }[] = [];
+  // 全部读取原始画布后才提交，halo 不会读取已模糊的相邻块。
+  try {
+    for (const planned of tiles) {
+      const x = Math.round(planned.x * sx),
+        y = Math.round(planned.y * sy);
+      const right = Math.round((planned.x + planned.width) * sx),
+        bottom = Math.round((planned.y + planned.height) * sy);
+      const area = {
+        x: x / sx,
+        y: y / sy,
+        width: (right - x) / sx,
+        height: (bottom - y) / sy,
+      };
+      const tile = document.createElement("canvas");
+      tile.width = right - x;
+      tile.height = bottom - y;
+      const target = tile.getContext("2d");
+      if (!target) throw new Error("笔刷效果画布分配失败");
+      target.drawImage(
+        canvas,
+        x,
+        y,
+        tile.width,
+        tile.height,
+        0,
+        0,
+        tile.width,
+        tile.height,
+      );
+      target.setTransform(sx, 0, 0, sy, -x, -y);
+      staged.push({ area, canvas: tile, x, y });
+      if (mark.tool === "mosaic")
+        applyMosaicBrush(target, canvas, mark, scale, area);
+      else applyBlurBrush(target, canvas, mark, scale, area);
+    }
+    context.save();
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    for (const tile of staged) {
+      context.clearRect(tile.x, tile.y, tile.canvas.width, tile.canvas.height);
+      context.drawImage(tile.canvas, tile.x, tile.y);
+    }
+    context.restore();
+  } finally {
+    for (const tile of staged) {
+      tile.canvas.width = 1;
+      tile.canvas.height = 1;
+    }
+  }
+}
+
 /** 自由笔刷马赛克：轨迹包围盒内按块尺寸降采样，再经笔刷掩膜裁剪写回。 */
 function applyMosaicBrush(
   context: CanvasRenderingContext2D,
   canvas: HTMLCanvasElement,
   mark: Mark,
   scale = 1,
+  tileArea?: ReturnType<typeof normalizedRect>,
 ) {
   const size = canvasSize(canvas);
   const points = mark.points ?? [mark.start, mark.end];
   const brush = Math.max(2, (mark.style?.brushSize ?? 24) * scale);
-  const area = strokeArea(points, brush / 2 + 1, size);
+  const fullArea = strokeArea(points, brush / 2 + 1, size);
+  const area = tileArea ?? fullArea;
   if (area.width <= 2 || area.height <= 2) return;
   const cell = Math.max(2, mosaicCellSize(markEffectIntensity(mark)) * scale);
   const mask = strokeMaskSurface(canvas, area, points, brush);
   if (!mask) return;
+  const cellWidth = fullArea.width / Math.ceil(fullArea.width / cell),
+    cellHeight = fullArea.height / Math.ceil(fullArea.height / cell);
+  const gx = Math.floor((area.x - fullArea.x) / cellWidth),
+    gy = Math.floor((area.y - fullArea.y) / cellHeight);
+  const right = Math.ceil((area.x + area.width - fullArea.x) / cellWidth),
+    bottom = Math.ceil((area.y + area.height - fullArea.y) / cellHeight);
+  const sample = clampRect(
+    {
+      x: fullArea.x + gx * cellWidth,
+      y: fullArea.y + gy * cellHeight,
+      width: (right - gx) * cellWidth,
+      height: (bottom - gy) * cellHeight,
+    },
+    size,
+  );
   const down = effectSurface(
     canvas,
-    area.width / cell,
-    area.height / cell,
+    right - gx,
+    bottom - gy,
     "brush-mosaic-down",
   );
   const downContext = down.getContext("2d");
-  if (!downContext) return;
+  if (!downContext) throw new Error("笔刷效果画布分配失败");
   downContext.imageSmoothingEnabled = true;
   downContext.imageSmoothingQuality = "high";
   const sx = canvas.width / size.width,
     sy = canvas.height / size.height;
   downContext.drawImage(
     canvas,
-    area.x * sx,
-    area.y * sy,
-    area.width * sx,
-    area.height * sy,
+    sample.x * sx,
+    sample.y * sy,
+    sample.width * sx,
+    sample.height * sy,
     0,
     0,
     down.width,
@@ -7659,9 +7874,19 @@ function applyMosaicBrush(
   );
   const up = effectSurface(canvas, area.width, area.height, "brush-mosaic-up");
   const upContext = up.getContext("2d");
-  if (!upContext) return;
+  if (!upContext) throw new Error("笔刷效果画布分配失败");
   upContext.imageSmoothingEnabled = false;
-  upContext.drawImage(down, 0, 0, up.width, up.height);
+  upContext.drawImage(
+    down,
+    (area.x - sample.x) / cellWidth,
+    (area.y - sample.y) / cellHeight,
+    area.width / cellWidth,
+    area.height / cellHeight,
+    0,
+    0,
+    up.width,
+    up.height,
+  );
   compositeThroughMask(context, up, mask, area);
 }
 
@@ -7671,16 +7896,18 @@ function applyBlurBrush(
   canvas: HTMLCanvasElement,
   mark: Mark,
   scale = 1,
+  tileArea?: ReturnType<typeof normalizedRect>,
 ) {
   const size = canvasSize(canvas);
   const points = mark.points ?? [mark.start, mark.end];
   const brush = Math.max(2, (mark.style?.brushSize ?? 24) * scale);
-  const area = strokeArea(points, brush / 2 + 1, size);
+  const fullArea = strokeArea(points, brush / 2 + 1, size);
+  const area = tileArea ?? fullArea;
   if (area.width <= 0 || area.height <= 0) return;
   const radius = blurRadius(markEffectIntensity(mark));
   const mask = strokeMaskSurface(canvas, area, points, brush);
   if (!mask) return;
-  const sample = clampRect(
+  let sample = clampRect(
     {
       x: area.x - radius * 3 * scale,
       y: area.y - radius * 3 * scale,
@@ -7691,6 +7918,17 @@ function applyBlurBrush(
   );
   const sx = canvas.width / size.width,
     sy = canvas.height / size.height;
+  const px = Math.floor(sample.x * sx),
+    py = Math.floor(sample.y * sy);
+  sample = clampRect(
+    {
+      x: px / sx,
+      y: py / sy,
+      width: (Math.ceil((sample.x + sample.width) * sx) - px) / sx,
+      height: (Math.ceil((sample.y + sample.height) * sy) - py) / sy,
+    },
+    size,
+  );
   const blurred = effectSurface(
     canvas,
     sample.width * sx,
@@ -7698,7 +7936,7 @@ function applyBlurBrush(
     "brush-blur-sample",
   );
   const blurContext = blurred.getContext("2d");
-  if (!blurContext) return;
+  if (!blurContext) throw new Error("笔刷效果画布分配失败");
   blurContext.imageSmoothingEnabled = true;
   blurContext.filter = `blur(${radius * scale * sx}px)`;
   blurContext.drawImage(
@@ -7715,7 +7953,7 @@ function applyBlurBrush(
   // 裁出 area 尺寸的效果层，再经掩膜写回。
   const cut = effectSurface(canvas, area.width, area.height, "brush-blur-cut");
   const cutContext = cut.getContext("2d");
-  if (!cutContext) return;
+  if (!cutContext) throw new Error("笔刷效果画布分配失败");
   cutContext.drawImage(
     blurred,
     (area.x - sample.x) * sx,

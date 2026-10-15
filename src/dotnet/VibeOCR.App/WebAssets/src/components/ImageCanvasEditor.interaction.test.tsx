@@ -1564,3 +1564,55 @@ describe("PR249 主对象恢复与连续样式", () => {
     unmount();
   });
 });
+
+describe("effect brush stamps", () => {
+  it.each(["马赛克", "模糊"])(
+    "%s commits a single click and permits one undo",
+    async (label) => {
+      stubCanvasStack({ width: 900, height: 600 });
+      const harness = stubAnimationFrames();
+      const { unmount } = await renderEditor();
+      const canvas = getEditorCanvas();
+      mockCanvasBox(canvas, 900, 600);
+      harness.flush();
+      fireEvent.click(screen.getByRole("button", { name: label }));
+      fireEvent.change(screen.getByLabelText("马赛克与模糊绘制方式"), {
+        target: { value: "brush" },
+      });
+      fireEvent.pointerDown(canvas, {
+        pointerId: 1,
+        clientX: 300,
+        clientY: 300,
+      });
+      fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 300, clientY: 300 });
+      harness.flush();
+      expect(screen.getByRole("button", { name: "撤销" })).toBeEnabled();
+      fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+      expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
+      unmount();
+    },
+  );
+});
+
+it("rejects a natural-pixel oversized effect before history commit", async () => {
+  stubCanvasStack({ width: 8000, height: 8000 });
+  const harness = stubAnimationFrames();
+  const { unmount } = await renderEditor();
+  const canvas = getEditorCanvas();
+  mockCanvasBox(canvas, 900, 600);
+  harness.flush();
+  fireEvent.click(screen.getByRole("button", { name: "模糊" }));
+  fireEvent.change(screen.getByLabelText("马赛克与模糊绘制方式"), {
+    target: { value: "brush" },
+  });
+  fireEvent.change(screen.getByLabelText("马赛克与模糊笔刷大小"), {
+    target: { value: "64" },
+  });
+  fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 160, clientY: 10 });
+  fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 740, clientY: 590 });
+  fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 740, clientY: 590 });
+  harness.flush();
+  expect(screen.getByText(/笔刷效果超出8MP/)).toBeVisible();
+  expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
+  unmount();
+});
