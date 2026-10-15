@@ -32,6 +32,21 @@ public sealed class CaptureUiSmokeTests : IDisposable
       RunUiSmokeAsync(nameof(RegionPickerRejectsChangedMonitorLayoutWithSameDesktopBounds));
 
   [Fact]
+  public Task ScrollCapturePreviewWaitsForDecodeAndRejectsPendingEncodingFailure() =>
+      RunUiSmokeAsync(nameof(ScrollCapturePreviewWaitsForDecodeAndRejectsPendingEncodingFailure));
+
+  [Fact]
+  public Task ScrollCaptureAutoScrollRequiresPreviewAndReturnsConfirmedSegment() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureAutoScrollRequiresPreviewAndReturnsConfirmedSegment));
+
+  [Fact]
+  public Task ScrollCaptureCancellationDiscardsFramesAndClosesController() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureCancellationDiscardsFramesAndClosesController));
+
+  [Fact]
+  public Task ScrollCaptureVanishedSourceFailsWithoutReturningPartialFrame() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureVanishedSourceFailsWithoutReturningPartialFrame));
+  [Fact]
   public void ActiveWindowResolutionRejectsVanishedTargets()
   {
     var request = new ScreenshotCaptureRequest(ScreenshotCaptureKind.ActiveWindow);

@@ -528,6 +528,19 @@ async function startScrollSession(app, fixture) {
   return { overlayHandle: overlay.Handle, selection, start };
 }
 
+async function confirmCapturePreview(appPid, expectedText = '确认预览并继续') {
+  const until = Date.now() + 15000;
+  while (Date.now() < until) {
+    const confirm = await controlBar(appPid, 'scroll-capture-confirm');
+    if (confirm.found && confirm.enabled && confirm.name === expectedText) {
+      await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-confirm' });
+      return;
+    }
+    await delay(200);
+  }
+  throw new Error(`Capture preview confirmation was not ready: ${expectedText}`);
+}
+
 async function runScrollCapture(app, fixture, { cancel }) {
   const appPid = app.child.pid;
   const opened = await startScrollSession(app, fixture);
@@ -569,6 +582,7 @@ async function runScrollCapture(app, fixture, { cancel }) {
   assert(!during.some((item) => item.Handle === app.main.Handle && item.Visible),
     'Main window stayed visible while the scroll controller owned the screen.');
   await recordBar('started');
+  await confirmCapturePreview(appPid);
   await delay(stableWaitMs);
   await native('frame', { FixturePid: fixture.pid, Handle: fixture.root, X: opened.selection.left, Y: opened.selection.top, Width: opened.selection.width, Height: opened.selection.height, EvidenceRoot: app.evidence.smokeRoot, OutputPath: path.join(app.evidence.smokeRoot, 'source-before.png') });
 
@@ -598,6 +612,7 @@ async function runScrollCapture(app, fixture, { cancel }) {
   await native('focus', { FixturePid: appPid, Handle: finish.windowHandle,
     X: Math.floor((finish.left + finish.right) / 2), Y: Math.floor((finish.top + finish.bottom) / 2) });
   try {
+    await confirmCapturePreview(appPid, '确认选段并送入编辑器');
     await waitForControlBarGone(appPid, 'scroll-capture-start', 15000);
   } catch (error) {
     await recordBar('finish-failed');
@@ -962,7 +977,8 @@ async function waitForControllerError(appPid, scenario, expectedParts, timeoutMs
 async function waitForFirstFrameAccepted(appPid, timeoutMs = 20000) {
   const until = Date.now() + timeoutMs;
   while (Date.now() < until) {
-    if ((await controlBar(appPid, 'scroll-capture-finish')).enabled) return;
+    const preview = await controlBar(appPid, 'scroll-capture-confirm');
+    if (preview.found && preview.enabled && preview.name === '确认预览并继续') return;
     await delay(250);
   }
   throw new Error(`First stable frame was not accepted within ${timeoutMs} ms.`);
@@ -1021,9 +1037,10 @@ async function verifyControllerFailureModes(app, fixture, baselineSessionId) {
   // verified at any offset, so the append is rejected.
   await runNegative({
     scenario: 'jump',
-    expectedParts: ['新内容与已拼接区域无重叠', '已停止采集'],
+    expectedParts: ['没有足够重叠', '尚未完成'],
     trigger: async () => {
       await waitForFirstFrameAccepted(appPid);
+      await confirmCapturePreview(appPid);
       await setScenario('jump');
     },
   });
@@ -1213,12 +1230,13 @@ async function main() {
     // A real reverse wheel step must fail closed, without publishing a partial image.
     await startScrollSession(app, fixture);
     await native('uia-invoke', { AppPid: app.child.pid, AutomationId: 'scroll-capture-start' });
+    await confirmCapturePreview(app.child.pid);
     await delay(stableWaitMs);
     await native('wheel', { FixturePid: fixture.pid, Handle: fixture.root,
       X: fixture.clientRect.left + 100, Y: fixture.clientRect.top + 100, Delta: 120 });
     await delay(stableWaitMs);
     const reversed = await barText(app.child.pid, 'scroll-capture-start');
-    assert(reversed.text.includes('反向'), `Reverse scroll did not report its reason: ${reversed.text}`);
+    assert(reversed.text.includes('反向滚动') && reversed.text.includes('尚未完成'), `Reverse scroll did not report its reason: ${reversed.text}`);
     assert.equal((await controlBar(app.child.pid, 'scroll-capture-finish')).enabled, false);
     await native('uia-invoke', { AppPid: app.child.pid, AutomationId: 'scroll-capture-cancel' });
     await waitForControlBarGone(app.child.pid, 'scroll-capture-start', 10000);

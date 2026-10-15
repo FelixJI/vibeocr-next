@@ -82,6 +82,97 @@ public sealed class VerticalScrollStitcherTests
       Enumerable.Repeat(value, width * height * 4).ToArray(), width, height, width * 4, "BGRA8");
   }
 
+  private static CapturedFrame Orient(CapturedFrame frame, ScrollCaptureDirection direction)
+  {
+    bool horizontal = direction is ScrollCaptureDirection.Left or ScrollCaptureDirection.Right;
+    bool reversed = direction is ScrollCaptureDirection.Left or ScrollCaptureDirection.Up;
+    int width = horizontal ? frame.Height : frame.Width;
+    int height = horizontal ? frame.Width : frame.Height;
+    byte[] pixels = new byte[frame.Pixels.Length];
+    for (int y = 0; y < frame.Height; y++)
+      for (int x = 0; x < frame.Width; x++)
+      {
+        int axis = reversed ? frame.Height - y - 1 : y;
+        int target = horizontal ? x * width + axis : axis * width + x;
+        frame.Pixels.AsSpan(y * frame.Stride + x * 4, 4).CopyTo(pixels.AsSpan(target * 4, 4));
+      }
+    return new(pixels, width, height, width * 4, "BGRA8");
+  }
+
+  private static CapturedFrame WithEdges(CapturedFrame frame)
+  {
+    const int leading = 4, trailing = 6;
+    byte[] pixels = new byte[frame.Pixels.Length + (leading + trailing) * frame.Stride];
+    pixels.AsSpan(0, leading * frame.Stride).Fill(0xA5);
+    frame.Pixels.CopyTo(pixels, leading * frame.Stride);
+    pixels.AsSpan((leading + frame.Height) * frame.Stride).Fill(0xC3);
+    return new(pixels, frame.Width, frame.Height + leading + trailing, frame.Stride, "BGRA8");
+  }
+
+  [Theory]
+  [InlineData(ScrollCaptureDirection.Down)]
+  [InlineData(ScrollCaptureDirection.Up)]
+  [InlineData(ScrollCaptureDirection.Right)]
+  [InlineData(ScrollCaptureDirection.Left)]
+  public void FourDirectionsPreserveExplicitFixedEdgesOnce(ScrollCaptureDirection direction)
+  {
+    byte[] document = RenderDocument(Width, FrameHeight + 60);
+    CapturedFrame First(int top) => Orient(WithEdges(FrameFromDocument(document, Width, top, FrameHeight)), direction);
+    bool reversed = direction is ScrollCaptureDirection.Up or ScrollCaptureDirection.Left;
+    var stitcher = new VerticalScrollStitcher(First(0), direction, reversed ? 6 : 4, reversed ? 4 : 6);
+    Assert.Equal(ScrollAppendStatus.Added, stitcher.Append(First(40), TestContext.Current.CancellationToken).Status);
+    Assert.Equal(20, stitcher.Append(First(60), TestContext.Current.CancellationToken).AddedRows);
+    CapturedFrame expected = Orient(WithEdges(FrameFromDocument(document, Width, 0, FrameHeight + 60)), direction);
+    CapturedFrame actual = stitcher.BuildFrame(TestContext.Current.CancellationToken);
+    Assert.Equal(expected.Width, stitcher.Width);
+    Assert.Equal(expected.Height, stitcher.Height);
+    Assert.Equal(expected.Pixels, actual.Pixels);
+  }
+
+  [Fact]
+  public void ChangedExplicitFixedEdgeRejectsWithoutDiscardingContent()
+  {
+    byte[] document = RenderDocument(Width, FrameHeight + 30);
+    CapturedFrame first = WithEdges(FrameFromDocument(document, Width, 0, FrameHeight));
+    CapturedFrame next = WithEdges(FrameFromDocument(document, Width, 30, FrameHeight));
+    var stitcher = new VerticalScrollStitcher(first, fixedLeadingPixels: 4, fixedTrailingPixels: 6);
+    next.Pixels[0] ^= 1;
+    Assert.Equal(ScrollAppendStatus.FixedContentChanged, stitcher.Append(next, TestContext.Current.CancellationToken).Status);
+    Assert.Equal(1, stitcher.FrameCount);
+    Assert.Equal(first.Pixels, stitcher.BuildFrame(TestContext.Current.CancellationToken).Pixels);
+    next.Pixels[0] ^= 1;
+    Assert.Equal(ScrollAppendStatus.Added, stitcher.Append(next, TestContext.Current.CancellationToken).Status);
+  }
+
+  [Fact]
+  public void ExplicitOffsetResolvesAmbiguityButStillVerifiesWholeOverlapAndBounds()
+  {
+    CapturedFrame first = PeriodicFrame(Width, FrameHeight, 8, 0);
+    CapturedFrame next = PeriodicFrame(Width, FrameHeight, 8, 10);
+    var stitcher = new VerticalScrollStitcher(first);
+    Assert.Equal(ScrollAppendStatus.Ambiguous, stitcher.Append(next, TestContext.Current.CancellationToken).Status);
+    Assert.Throws<ArgumentOutOfRangeException>(() => stitcher.AppendWithOffset(next, 0, TestContext.Current.CancellationToken));
+    Assert.Throws<ArgumentOutOfRangeException>(() => stitcher.AppendWithOffset(next, stitcher.MaximumOffset + 1, TestContext.Current.CancellationToken));
+    Assert.Equal(ScrollAppendStatus.NoOverlap, stitcher.AppendWithOffset(next, 11, TestContext.Current.CancellationToken).Status);
+    next.Pixels[20 * next.Stride + 3] ^= 1;
+    Assert.Equal(ScrollAppendStatus.NoOverlap, stitcher.AppendWithOffset(next, 10, TestContext.Current.CancellationToken).Status);
+    Assert.Equal(1, stitcher.FrameCount);
+    next.Pixels[20 * next.Stride + 3] ^= 1;
+    Assert.Equal(new ScrollAppendResult(ScrollAppendStatus.Added, 10),
+      stitcher.AppendWithOffset(next, 10, TestContext.Current.CancellationToken));
+    Assert.Equal(FrameHeight + 10, stitcher.Height);
+  }
+
+  [Fact]
+  public void InvalidFixedRangesAndCancelledBuildAreRejected()
+  {
+    CapturedFrame first = FrameFromDocument(RenderDocument(Width, FrameHeight), Width, 0, FrameHeight);
+    Assert.Throws<ArgumentOutOfRangeException>(() => new VerticalScrollStitcher(first, fixedLeadingPixels: -1));
+    Assert.Throws<ArgumentOutOfRangeException>(() => new VerticalScrollStitcher(first, fixedTrailingPixels: 33));
+    using var cancel = new CancellationTokenSource();
+    cancel.Cancel();
+    Assert.Throws<OperationCanceledException>(() => new VerticalScrollStitcher(first).BuildFrame(cancel.Token));
+  }
   [Fact]
   public void ConstructorStoresFirstFrameAndBuildsExactCopy()
   {
@@ -92,7 +183,7 @@ public sealed class VerticalScrollStitcherTests
     Assert.Equal(FrameHeight, stitcher.Height);
     Assert.Equal(1, stitcher.FrameCount);
 
-    CapturedFrame built = stitcher.BuildFrame();
+    CapturedFrame built = stitcher.BuildFrame(TestContext.Current.CancellationToken);
     Assert.Equal(Width, built.Width);
     Assert.Equal(FrameHeight, built.Height);
     Assert.Equal(Width * 4, built.Stride);
@@ -120,7 +211,7 @@ public sealed class VerticalScrollStitcherTests
 
     Assert.Equal(3, stitcher.FrameCount);
     Assert.Equal(FrameHeight + firstScroll + secondScroll, stitcher.Height);
-    CapturedFrame built = stitcher.BuildFrame();
+    CapturedFrame built = stitcher.BuildFrame(TestContext.Current.CancellationToken);
     Assert.Equal(FrameHeight + firstScroll + secondScroll, built.Height);
     Assert.Equal(document, built.Pixels);
   }
@@ -206,7 +297,7 @@ public sealed class VerticalScrollStitcherTests
       stitcher.Append(next, TestContext.Current.CancellationToken).Status);
     Assert.Equal(1, stitcher.FrameCount);
     Assert.Equal(height, stitcher.Height);
-    Assert.Equal(first.Pixels, stitcher.BuildFrame().Pixels);
+    Assert.Equal(first.Pixels, stitcher.BuildFrame(TestContext.Current.CancellationToken).Pixels);
   }
 
   [Fact]
@@ -242,7 +333,7 @@ public sealed class VerticalScrollStitcherTests
 
     Assert.Equal(4, stitcher.FrameCount);
     Assert.Equal(FrameHeight + 98, stitcher.Height);
-    Assert.Equal(document, stitcher.BuildFrame().Pixels);
+    Assert.Equal(document, stitcher.BuildFrame(TestContext.Current.CancellationToken).Pixels);
   }
 
   [Fact]
@@ -255,7 +346,7 @@ public sealed class VerticalScrollStitcherTests
     Assert.Equal(
       ScrollAppendStatus.Added,
       stitcher.Append(FrameFromDocument(document, Width, 20, FrameHeight, stride: Width * 4 + 64), TestContext.Current.CancellationToken).Status);
-    Assert.Equal(document, stitcher.BuildFrame().Pixels);
+    Assert.Equal(document, stitcher.BuildFrame(TestContext.Current.CancellationToken).Pixels);
   }
 
   [Fact]
@@ -272,7 +363,7 @@ public sealed class VerticalScrollStitcherTests
     Assert.Equal(ScrollAppendStatus.Added, stitcher.Append(third, TestContext.Current.CancellationToken).Status);
     third.Pixels.AsSpan().Fill(0xCD);
 
-    Assert.Equal(document, stitcher.BuildFrame().Pixels);
+    Assert.Equal(document, stitcher.BuildFrame(TestContext.Current.CancellationToken).Pixels);
   }
 
   [Fact]
@@ -319,7 +410,7 @@ public sealed class VerticalScrollStitcherTests
     Assert.Equal(
       ScrollAppendStatus.Added,
       stitcher.Append(FrameFromDocument(document, Width, 30, FrameHeight), TestContext.Current.CancellationToken).Status);
-    Assert.Equal(document, stitcher.BuildFrame().Pixels);
+    Assert.Equal(document, stitcher.BuildFrame(TestContext.Current.CancellationToken).Pixels);
   }
 
   [Fact]
@@ -419,12 +510,12 @@ public sealed class VerticalScrollStitcherTests
     Assert.Equal(2, visited);
     Assert.Equal(1, stitcher.FrameCount);
     Assert.Equal(FrameHeight, stitcher.Height);
-    Assert.Equal(first.Pixels, stitcher.BuildFrame().Pixels);
+    Assert.Equal(first.Pixels, stitcher.BuildFrame(TestContext.Current.CancellationToken).Pixels);
 
     // 同一输入不取消时仍完整判定歧义，取消没有改变已接受的图像或匹配语义。
     Assert.Equal(ScrollAppendStatus.Ambiguous, stitcher.Append(next, TestContext.Current.CancellationToken).Status);
     Assert.Equal(1, stitcher.FrameCount);
-    Assert.Equal(first.Pixels, stitcher.BuildFrame().Pixels);
+    Assert.Equal(first.Pixels, stitcher.BuildFrame(TestContext.Current.CancellationToken).Pixels);
   }
 
   [Fact]
@@ -453,7 +544,7 @@ public sealed class VerticalScrollStitcherTests
     Assert.Equal(200, stitcher.FrameCount);
     Assert.Equal(FrameHeight + 199, stitcher.Height);
 
-    CapturedFrame built = stitcher.BuildFrame();
+    CapturedFrame built = stitcher.BuildFrame(TestContext.Current.CancellationToken);
     Assert.Equal(FrameHeight + 199, built.Height);
     Assert.Equal(document.AsSpan(0, (FrameHeight + 199) * Width * 4).ToArray(), built.Pixels);
   }
@@ -490,7 +581,7 @@ public sealed class VerticalScrollStitcherTests
     Assert.Equal(stitchedHeight, stitcher.Height);
     Assert.Equal(
       document.AsSpan(0, stitchedHeight * width * 4).ToArray(),
-      stitcher.BuildFrame().Pixels);
+      stitcher.BuildFrame(TestContext.Current.CancellationToken).Pixels);
   }
 
   [Fact]
@@ -516,8 +607,8 @@ public sealed class VerticalScrollStitcherTests
     var stitcher = new VerticalScrollStitcher(FrameFromDocument(document, Width, 0, FrameHeight));
     stitcher.Append(FrameFromDocument(document, Width, 20, FrameHeight), TestContext.Current.CancellationToken);
 
-    CapturedFrame first = stitcher.BuildFrame();
-    CapturedFrame second = stitcher.BuildFrame();
+    CapturedFrame first = stitcher.BuildFrame(TestContext.Current.CancellationToken);
+    CapturedFrame second = stitcher.BuildFrame(TestContext.Current.CancellationToken);
     Assert.NotSame(first.Pixels, second.Pixels);
     first.Pixels.AsSpan().Fill(0x00);
     Assert.Equal(document, second.Pixels);

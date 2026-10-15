@@ -37,7 +37,7 @@ internal static class ScrollCaptureSession
   /// 单次采集会话的全部状态。窗口/按钮在 UI 线程构建，采集循环跑在线程池，
   /// UI 更新统一经 DispatcherQueue；失败状态保留窗口给用户查看，取消/关闭后才向调用方抛出。
   /// </summary>
-  private sealed class Session
+  internal sealed class Session
   {
     private const int CaptureIntervalMs = 550; // 约 500–600ms 采集节奏。
     // 静止判定为连续两帧完全相同（一次比较）：内容静止后最迟 1 个采集间隔（550ms）内上交；
@@ -52,6 +52,9 @@ internal static class ScrollCaptureSession
     private const int WindowChromeSlackPx = 60; // 标题栏等非客户区估算冗余。
     private const int PreviewMaxLogicalPx = 220; // 预览框逻辑尺寸上限。
     private const int PreviewMaxDecodePx = PreviewMaxLogicalPx * 2; // 按小尺寸解码，避免保留全帧位图。
+    private const int TotalTimeoutMs = 180_000;
+    private const int NoProgressTimeoutMs = 30_000;
+    private const int AutomaticNoProgressAttempts = 3;
     private const uint GaRoot = 2;
     private const uint MonitorDefaultToNearest = 2;
 
@@ -71,6 +74,25 @@ internal static class ScrollCaptureSession
     private Button _startButton = null!;
     private Button _finishButton = null!;
     private Button _cancelButton = null!;
+    private ComboBox _directionBox = null!;
+    private CheckBox _automaticBox = null!;
+    private NumberBox _leadingBox = null!;
+    private NumberBox _trailingBox = null!;
+    private NumberBox _offsetBox = null!;
+    private Button _confirmButton = null!;
+    private Image _pendingImage = null!;
+    private StackPanel _options = null!;
+    private ScrollCaptureDirection _direction;
+    private int _fixedLeading, _fixedTrailing;
+    private volatile bool _automatic;
+    private volatile bool _reviewPending;
+    private volatile bool _initialPreviewConfirmed;
+    private volatile int _confirmedOffset;
+    private CapturedFrame? _pendingFrame;
+    private CapturedFrame? _finalFrame;
+    private long _lastProgress;
+    private bool _scrollOutstanding;
+    private int _noProgressAttempts;
 
     private nint _source;
     private PhysicalRectangle _sourceRect;
@@ -85,10 +107,13 @@ internal static class ScrollCaptureSession
     private volatile bool _finishRequested;
     private volatile Exception? _failure;
     private Task? _loop;
+    private Task _deadlineTask = Task.CompletedTask;
     private bool _finishSamplingStarted;
     private bool _closed;
     private Task _previewTask = Task.CompletedTask;
     private CancellationTokenRegistration _registration;
+
+    internal Window ControlWindow => _window;
 
     public Session(nint owner, PhysicalRectangle bounds, CancellationToken external)
     {
@@ -143,10 +168,14 @@ internal static class ScrollCaptureSession
           }
         }
 
+        await _deadlineTask;
         // 先等预览渲染收尾再关窗，避免向已关闭窗口写入。
         await _previewTask;
         _previewImage.Source = null;
         _lastCaptured = null;
+        _pendingFrame = null;
+        _finalFrame = null;
+        _pendingImage.Source = null;
         _stitcher = null;
         CloseControlWindow(); // owner/任务栏恢复由调用方负责，此处只关本模块控制窗。
         _lifecycle.Dispose();
@@ -205,7 +234,7 @@ internal static class ScrollCaptureSession
     /// <summary>构建原生 WinUI 控制窗：置顶、禁最大/最小/resize，按选区四边在工作区内找空位。</summary>
     private void CreateWindow()
     {
-      _statusText = new TextBlock { Text = "准备中…" };
+      _statusText = new TextBlock { Text = "准备中…", TextWrapping = TextWrapping.Wrap };
       double aspect = (double)_bounds.Height / Math.Max(1, _bounds.Width);
       int previewWidth = Math.Clamp(_bounds.Width, 80, PreviewMaxLogicalPx);
       int previewHeight = (int)Math.Clamp(Math.Round(previewWidth * aspect), 60, 160);
@@ -234,15 +263,49 @@ internal static class ScrollCaptureSession
       var root = new StackPanel { Spacing = 8, Padding = new Thickness(12), Width = WindowLogicalWidth };
       root.Children.Add(new TextBlock
       {
-        Text = "请确认选区位于单一显示器的源窗口内容区域内，避开标题栏、滚动条等固定元素；"
-            + "开始后每次向下滚动一段并停顿，内容静止后自动拼接。",
+        Text = "仅支持静态、可重叠的普通窗口内容。选择方向与固定边缘范围，首帧预览后确认；"
+            + "自动模式使用选区中心的标准滚轮，不支持游戏、受保护画面、提权窗口或自定义滚动控件。",
         TextWrapping = TextWrapping.Wrap,
       });
+      _directionBox = new ComboBox { Header = "滚动方向", SelectedIndex = 0, HorizontalAlignment = HorizontalAlignment.Stretch };
+      foreach (string direction in new[] { "向下", "向上", "向右", "向左" }) _directionBox.Items.Add(direction);
+      _directionBox.SelectedIndex = 0;
+      AutomationProperties.SetAutomationId(_directionBox, "scroll-capture-direction");
+      _automaticBox = new CheckBox { Content = "自动滚动（普通窗口标准滚轮）" };
+      AutomationProperties.SetAutomationId(_automaticBox, "scroll-capture-automatic");
+      _leadingBox = EdgeNumber("固定顶部 / 左侧（像素）", "scroll-capture-leading");
+      _trailingBox = EdgeNumber("固定底部 / 右侧（像素）", "scroll-capture-trailing");
+      var edgeRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+      _leadingBox.Width = 144;
+      _trailingBox.Width = 144;
+      edgeRow.Children.Add(_leadingBox);
+      edgeRow.Children.Add(_trailingBox);
+      _options = new StackPanel { Spacing = 4 };
+      _options.Children.Add(_directionBox);
+      _options.Children.Add(_automaticBox);
+      _options.Children.Add(edgeRow);
+      root.Children.Add(_options);
       root.Children.Add(_statusText);
       root.Children.Add(_previewImage);
+      _pendingImage = new Image { Width = previewWidth, Height = previewHeight, Stretch = Stretch.Uniform, Visibility = Visibility.Collapsed };
+      root.Children.Add(_pendingImage);
+      _offsetBox = EdgeNumber("纠偏位移（所选方向的像素数）", "scroll-capture-offset");
+      _offsetBox.Minimum = 1;
+      _offsetBox.Visibility = Visibility.Collapsed;
+      root.Children.Add(_offsetBox);
+      _confirmButton = new Button { Content = "确认预览并继续", Visibility = Visibility.Collapsed };
+      AutomationProperties.SetAutomationId(_confirmButton, "scroll-capture-confirm");
+      _confirmButton.Click += OnConfirm;
+      root.Children.Add(_confirmButton);
       root.Children.Add(_errorText);
       root.Children.Add(buttons);
-      _window = new Window { Title = "VibeOCR 滚动截图", Content = root };
+      var scroller = new ScrollViewer
+      {
+        Content = root,
+        VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+      };
+      _window = new Window { Title = "VibeOCR 滚动截图", Content = scroller };
       OverlappedPresenter presenter = OverlappedPresenter.Create();
       presenter.IsAlwaysOnTop = true;
       presenter.IsResizable = false;
@@ -346,7 +409,9 @@ internal static class ScrollCaptureSession
       {
         await using var capture = new ScreenCaptureService(Guid.NewGuid());
         _lastStableWitness = Environment.TickCount64;
+        _lastProgress = _lastStableWitness;
         _elapsed.Start();
+        _deadlineTask = EnforceDeadlineAsync();
         // 完成采样等待源窗口恢复前台的截止时刻；仅本循环线程读写，无需跨线程同步。
         long finishForegroundDeadline = 0;
         while (true)
@@ -356,6 +421,47 @@ internal static class ScrollCaptureSession
           {
             return;
           }
+
+          if (_elapsed.ElapsedMilliseconds >= TotalTimeoutMs)
+          {
+            Fail(new InvalidOperationException("采集超过 3 分钟总时限，已停止；本次未完成，未生成长图。"));
+            return;
+          }
+          if (Environment.TickCount64 - _lastProgress >= NoProgressTimeoutMs)
+          {
+            Fail(new InvalidOperationException("30 秒没有新增有效内容，已停止；本次未完成，未生成长图。"));
+            return;
+          }
+          if (_reviewPending)
+          {
+            string? sourceViolation = GuardBeforeCapture(GetForegroundWindow());
+            if (sourceViolation is not null) { Fail(new InvalidOperationException(sourceViolation)); return; }
+            if (_confirmedOffset > 0 && _pendingFrame is { } pending && _stitcher is { } current)
+            {
+              int offset = _confirmedOffset;
+              _confirmedOffset = 0;
+              ScrollAppendResult correction = current.AppendWithOffset(pending, offset, _lifecycle.Token);
+              if (correction.Status != ScrollAppendStatus.Added)
+              {
+                RunOnUi(() => _errorText.Text = "纠偏未通过完整重叠校验，请核对位移；未修改已收图像。取消可丢弃本次采集。");
+              }
+              else
+              {
+                _pendingFrame = null;
+                _reviewPending = false;
+                _lastProgress = Environment.TickCount64;
+                DiscardStableWitness();
+                _appendedForCurrentStreak = false;
+                ReportAccepted(current, pending);
+                if (_failure is not null) return;
+                RunOnUi(HideReview);
+                SetForegroundWindow(_source);
+              }
+            }
+            await Task.Delay(CaptureIntervalMs, _lifecycle.Token);
+            continue;
+          }
+
 
           if (_finishRequested && !_finishSamplingStarted)
           {
@@ -430,7 +536,7 @@ internal static class ScrollCaptureSession
               return;
             }
 
-            if (_finishSamplingStarted && _stitcher is not null && _appendedForCurrentStreak)
+            if (!_reviewPending && _finishSamplingStarted && _stitcher is not null && _appendedForCurrentStreak)
             {
               CompleteBuild(_stitcher);
               return;
@@ -447,6 +553,28 @@ internal static class ScrollCaptureSession
             }
           }
 
+          if (_automatic && !_reviewPending && !_finishRequested && _appendedForCurrentStreak)
+          {
+            if (_scrollOutstanding && ++_noProgressAttempts >= AutomaticNoProgressAttempts)
+            {
+              _automatic = false;
+              _scrollOutstanding = false;
+              PauseForReview("自动滚动连续 3 次未前进：无法判断是否到达末尾，当前仅捕获已收选段。可确认后手动继续，或点击完成预览选段。", null);
+            }
+            else
+            {
+              string? inputViolation = GuardBeforeCapture(GetForegroundWindow());
+              if (inputViolation is not null) { Fail(new InvalidOperationException(inputViolation)); return; }
+              if (!SendScroll())
+              {
+                Fail(new InvalidOperationException("标准滚轮输入被系统拒绝，不支持此目标窗口；本次未完成。"));
+                return;
+              }
+              _scrollOutstanding = true;
+              DiscardStableWitness();
+              _appendedForCurrentStreak = false;
+            }
+          }
           await Task.Delay(CaptureIntervalMs, _lifecycle.Token);
         }
       }
@@ -579,9 +707,10 @@ internal static class ScrollCaptureSession
 
       if (_stitcher is null)
       {
-        _stitcher = new VerticalScrollStitcher(frame);
+        _stitcher = new VerticalScrollStitcher(frame, _direction, _fixedLeading, _fixedTrailing);
         _appendedForCurrentStreak = true;
         ReportAccepted(_stitcher, frame);
+        PauseForReview($"请检查首帧。红色预览标出固定顶部/左侧 {_fixedLeading}px，底部/右侧 {_fixedTrailing}px；这些边缘将各保留一次，范围必须仅包含固定内容。确认后开始滚动。", null);
         return;
       }
 
@@ -595,21 +724,29 @@ internal static class ScrollCaptureSession
       {
         case ScrollAppendStatus.Added:
           _appendedForCurrentStreak = true;
+          _lastProgress = Environment.TickCount64;
+          _scrollOutstanding = false;
+          _noProgressAttempts = 0;
           ReportAccepted(_stitcher, frame);
           break;
         case ScrollAppendStatus.Duplicate:
           _appendedForCurrentStreak = true;
           break;
         case ScrollAppendStatus.Reverse:
-          Fail(new InvalidDataException("检测到反向滚动（内容回退），无法继续拼接，已停止采集。"));
-          break;
         case ScrollAppendStatus.NoOverlap:
-          Fail(new InvalidDataException(
-              "新内容与已拼接区域无重叠；请减小每次滚动距离（保留至少四分之一选区高度且不少于 32 像素的重叠），已停止采集。"));
-          break;
         case ScrollAppendStatus.Ambiguous:
-          Fail(new InvalidDataException(
-              "滚动偏移无法确定（内容重复或相似）；请减小每次滚动距离，已停止采集。"));
+          _automatic = false;
+          _scrollOutstanding = false;
+          string reason = result.Status switch
+          {
+            ScrollAppendStatus.Reverse => "反向滚动",
+            ScrollAppendStatus.NoOverlap => "没有足够重叠",
+            _ => "重复纹理导致偏移歧义",
+          };
+          PauseForReview($"无法可靠拼接（{reason}），自动滚动已停止，本次尚未完成。上图为已收选段，下图为待拼帧；输入所选方向的真实位移并明确确认。完整重叠必须一致，否则拒绝；不能确认时请取消重选。", frame);
+          break;
+        case ScrollAppendStatus.FixedContentChanged:
+          Fail(new InvalidDataException("用户指定的固定边缘发生变化，不能安全移除；本次未完成，请重新框选固定范围。"));
           break;
         case ScrollAppendStatus.LowTexture:
           Fail(new InvalidDataException(
@@ -628,33 +765,71 @@ internal static class ScrollCaptureSession
     /// <summary>完成路径：先确保最后一段静止内容已上交（含最后一次滚动），再 BuildFrame。</summary>
     private void CompleteBuild(VerticalScrollStitcher stitcher)
     {
-      _elapsed.Stop();
-      CapturedFrame frame = stitcher.BuildFrame();
+      CapturedFrame frame = stitcher.BuildFrame(_lifecycle.Token);
       AppLog.Info(
-          $"scroll-capture 完成：frames={stitcher.FrameCount}, " +
+          $"scroll-capture 选段预览就绪：frames={stitcher.FrameCount}, " +
           $"size={frame.Width}x{frame.Height}, elapsedMs={(int)_elapsed.ElapsedMilliseconds}");
       VerticalScrollStitcher snapshot = stitcher;
       RunOnUi(() =>
       {
-        _statusText.Text = $"已完成：{snapshot.FrameCount} 帧 · 高度 {frame.Height} px";
+        _statusText.Text = $"已收选段：{snapshot.FrameCount} 帧，等待预览确认";
         _startButton.IsEnabled = false;
         _finishButton.IsEnabled = false;
       });
-      _completion.TrySetResult(frame);
+      _finalFrame = frame;
+      _reviewPending = true;
+      byte[]? preview = EncodePreviewBmp(frame);
+      RunOnUi(() =>
+      {
+        _statusText.Text = $"选段预览：{frame.Width} × {frame.Height}px。请核对方向、固定栏和接缝；只包含本次已收范围，不保证整个文档已到末尾。";
+        _errorText.Visibility = Visibility.Collapsed;
+        _confirmButton.Content = "确认选段并送入编辑器";
+        _confirmButton.Visibility = Visibility.Visible;
+        _confirmButton.IsEnabled = false;
+        _previewTask = RenderFinalPreviewAsync(_previewTask, preview, frame);
+      });
     }
 
     private void ReportAccepted(VerticalScrollStitcher stitcher, CapturedFrame frame)
     {
-      string status = $"已收 {stitcher.FrameCount} 帧 · 已拼高度 {stitcher.Height} px";
-      byte[]? preview = EncodePreviewBmp(frame);
+      string status = $"已收 {stitcher.FrameCount} 帧 · {stitcher.Width} × {stitcher.Height} px";
+      CapturedFrame stitched = stitcher.BuildFrame(_lifecycle.Token);
+      CapturedFrame previewFrame = stitcher.FrameCount == 1 ? MarkFixedEdges(frame) : stitched;
+      byte[]? preview = EncodePreviewBmp(previewFrame);
+      if (preview is null)
+      {
+        Fail(new InvalidOperationException("无法生成已收选段预览，本次未完成，请取消后重试。"));
+        return;
+      }
       RunOnUi(() =>
       {
         _statusText.Text = status;
         _finishButton.IsEnabled = true; // 首个稳定帧进入拼接器后“完成”可用。
-        UpdatePreview(preview, frame.Width, frame.Height);
+        UpdatePreview(preview, stitched.Width, stitched.Height);
       });
     }
 
+    private CapturedFrame MarkFixedEdges(CapturedFrame frame)
+    {
+      if (_fixedLeading == 0 && _fixedTrailing == 0) return frame;
+      byte[] pixels = (byte[])frame.Pixels.Clone();
+      bool horizontal = _direction is ScrollCaptureDirection.Left or ScrollCaptureDirection.Right;
+      int extent = horizontal ? frame.Width : frame.Height;
+      for (int y = 0; y < frame.Height; y++)
+      {
+        _lifecycle.Token.ThrowIfCancellationRequested();
+        for (int x = 0; x < frame.Width; x++)
+        {
+          int axis = horizontal ? x : y;
+          if (axis >= _fixedLeading && axis < extent - _fixedTrailing) continue;
+          int offset = y * frame.Stride + x * 4;
+          pixels[offset] /= 2;
+          pixels[offset + 1] /= 2;
+          pixels[offset + 2] = (byte)((pixels[offset + 2] + 255) / 2);
+        }
+      }
+      return new CapturedFrame(pixels, frame.Width, frame.Height, frame.Stride, frame.PixelFormat);
+    }
     private static byte[]? EncodePreviewBmp(CapturedFrame frame)
     {
       try
@@ -714,7 +889,7 @@ internal static class ScrollCaptureSession
       }
       catch (Exception error)
       {
-        AppLog.Warn($"scroll-capture 预览解码失败：{error.Message}");
+        Fail(new InvalidOperationException($"无法显示选段预览，本次未完成：{error.Message}", error));
       }
     }
 
@@ -733,6 +908,7 @@ internal static class ScrollCaptureSession
       AppLog.Warn($"scroll-capture 停止：{error.Message}");
       RunOnUi(() =>
       {
+        HideReview();
         _errorText.Text = error.Message;
         _errorText.Visibility = Visibility.Visible;
         // 固定高度窗口中为错误说明和取消按钮腾出空间。
@@ -740,13 +916,238 @@ internal static class ScrollCaptureSession
         _startButton.IsEnabled = false;
         _finishButton.IsEnabled = false;
         _cancelButton.IsEnabled = true;
-        _statusText.Text = "采集已停止：请查看上方错误，处理后关闭窗口。";
+        _statusText.Text = "本次未完成，未生成长图：请查看原因后取消或关闭窗口。";
       });
     }
 
+    private async Task EnforceDeadlineAsync()
+    {
+      try
+      {
+        await Task.Delay(TotalTimeoutMs, _lifecycle.Token);
+        Fail(new InvalidOperationException("已到 3 分钟总时限（包含预览与纠偏等待），本次未完成，未生成长图。"));
+      }
+      catch (OperationCanceledException) { }
+    }
+
+    private async Task RenderFinalPreviewAsync(Task previous, byte[]? bytes, CapturedFrame frame)
+    {
+      await previous;
+      if (_lifecycle.IsCancellationRequested || _failure is not null) return;
+      if (bytes is null)
+      {
+        Fail(new InvalidOperationException("无法生成选段预览，本次未完成，请重试。"));
+        return;
+      }
+      await RenderPreviewAsync(bytes, frame.Width, frame.Height);
+      if (!_lifecycle.IsCancellationRequested && _failure is null) _confirmButton.IsEnabled = true;
+    }
+    private static NumberBox EdgeNumber(string header, string automationId)
+    {
+      var box = new NumberBox
+      {
+        Header = header,
+        Minimum = 0,
+        Maximum = VerticalScrollStitcher.MaximumDimension,
+        Value = 0,
+        SmallChange = 1,
+        SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Compact
+      };
+      AutomationProperties.SetAutomationId(box, automationId);
+      return box;
+    }
+
+    private void PauseForReview(string message, CapturedFrame? pending)
+    {
+      if (_failure is not null || _completion.Task.IsCompleted) return;
+      _pendingFrame = pending;
+      _reviewPending = true;
+      byte[]? preview = pending is null ? null : EncodePreviewBmp(pending);
+      if (pending is not null && preview is null)
+      {
+        Fail(new InvalidOperationException("无法生成待拼预览，本次未完成，请取消后重试。"));
+        return;
+      }
+      RunOnUi(() =>
+      {
+        _statusText.Text = "采集已暂停，等待明确确认；尚未生成成品。";
+        _errorText.Text = message;
+        _errorText.Visibility = Visibility.Visible;
+        _confirmButton.Content = pending is null ? "确认预览并继续" : "确认位移并校验拼接";
+        _confirmButton.Visibility = Visibility.Visible;
+        _confirmButton.IsEnabled = false;
+        _finishButton.IsEnabled = pending is null && _initialPreviewConfirmed;
+        _offsetBox.Visibility = pending is null ? Visibility.Collapsed : Visibility.Visible;
+        if (pending is not null && _stitcher is { } stitcher)
+        {
+          _offsetBox.Maximum = stitcher.MaximumOffset;
+          _offsetBox.Value = Math.Max(1, stitcher.MaximumOffset / 2);
+          _pendingImage.Visibility = Visibility.Visible;
+        }
+        _previewTask = RenderReviewPreviewAsync(_previewTask, preview);
+      });
+    }
+
+    private async Task RenderReviewPreviewAsync(Task previous, byte[]? bytes)
+    {
+      await previous;
+      if (_lifecycle.IsCancellationRequested || _failure is not null) return;
+      if (bytes is null) { _confirmButton.IsEnabled = true; return; }
+      try
+      {
+        using var stream = new InMemoryRandomAccessStream();
+        using (var writer = new DataWriter(stream))
+        {
+          writer.WriteBytes(bytes);
+          await writer.StoreAsync();
+          writer.DetachStream();
+        }
+        stream.Seek(0);
+        var bitmap = new BitmapImage
+        {
+          DecodePixelType = DecodePixelType.Physical,
+          DecodePixelWidth = PreviewMaxDecodePx
+        };
+        await bitmap.SetSourceAsync(stream);
+        if (!_lifecycle.IsCancellationRequested && _failure is null)
+        {
+          _pendingImage.Source = bitmap;
+          _confirmButton.IsEnabled = true;
+        }
+      }
+      catch (Exception error) { Fail(new InvalidOperationException($"无法显示待拼预览，本次未完成：{error.Message}", error)); }
+    }
+
+    private void HideReview()
+    {
+      _confirmButton.Visibility = Visibility.Collapsed;
+      _confirmButton.IsEnabled = false;
+      _offsetBox.Visibility = Visibility.Collapsed;
+      _pendingImage.Visibility = Visibility.Collapsed;
+      _pendingImage.Source = null;
+      _errorText.Visibility = Visibility.Collapsed;
+    }
+
+    private void OnConfirm(object sender, RoutedEventArgs args)
+    {
+      if (!_reviewPending || !_confirmButton.IsEnabled || _failure is not null || _completion.Task.IsCompleted) return;
+      if (_finalFrame is { } final)
+      {
+        _completion.TrySetResult(final);
+        return;
+      }
+      if (_pendingFrame is not null)
+      {
+        double offset = _offsetBox.Value;
+        if (!double.IsFinite(offset) || offset != Math.Truncate(offset) || offset < 1 || offset > _offsetBox.Maximum)
+        {
+          _errorText.Text = "纠偏位移必须是范围内的整数像素。";
+          return;
+        }
+        _confirmedOffset = (int)offset;
+        return;
+      }
+      HideReview();
+      _initialPreviewConfirmed = true;
+      _reviewPending = false;
+      _statusText.Text = "采集中：按所选方向滚动并停稳；可点击完成预览已收选段。";
+      SetForegroundWindow(_source);
+    }
+
+    private bool SendScroll()
+    {
+      var center = new Point { X = _bounds.X + _bounds.Width / 2, Y = _bounds.Y + _bounds.Height / 2 };
+      nint target = WindowFromPoint(center);
+      if (target == 0 || GetAncestor(target, GaRoot) != _source || GetForegroundWindow() != _source) return false;
+      bool horizontal = _direction is ScrollCaptureDirection.Left or ScrollCaptureDirection.Right;
+      int delta = _direction is ScrollCaptureDirection.Down or ScrollCaptureDirection.Left ? -120 : 120;
+      nint coordinates = unchecked((nint)((uint)(ushort)center.X | ((uint)(ushort)center.Y << 16)));
+      return SendMessageTimeoutW(target, horizontal ? 0x020Eu : 0x020Au,
+        unchecked((nint)(delta << 16)), coordinates, 0x0003, 250, out _) != 0;
+    }
+    // 此自检使用真实 WinUI 控件与解码，阻塞上一张预览来验证确认门控，不需要桌面前台权限。
+    internal static async Task VerifyPreviewGateSelfCheckAsync()
+    {
+      static Session Create()
+      {
+        var session = new Session(1, new PhysicalRectangle(0, 0, 48, 96), CancellationToken.None)
+        {
+          _window = new Window(),
+          _statusText = new TextBlock(),
+          _errorText = new TextBlock(),
+          _previewImage = new Image(),
+          _pendingImage = new Image(),
+          _offsetBox = new NumberBox(),
+          _startButton = new Button(),
+          _finishButton = new Button(),
+          _cancelButton = new Button(),
+          _confirmButton = new Button { IsEnabled = true },
+        };
+        session._window.Content = session._previewImage;
+        return session;
+      }
+      static void Check(bool condition, string message)
+      {
+        if (!condition) throw new InvalidOperationException(message);
+      }
+      byte[] pixels = new byte[48 * 96 * 4];
+      for (int y = 0; y < 96; y++) pixels[y * 48 * 4] = (byte)y;
+      var frame = new CapturedFrame(pixels, 48, 96, 48 * 4, "BGRA8");
+      var final = Create();
+      var pending = Create();
+      var first = Create();
+      var witness = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      try
+      {
+        final._previewTask = witness.Task;
+        final.CompleteBuild(new VerticalScrollStitcher(frame));
+        Check(final._confirmButton.Visibility == Visibility.Visible && !final._confirmButton.IsEnabled,
+            "Final confirmation must disable immediately, even if the preceding preview enabled it.");
+        final.OnConfirm(final._confirmButton, new RoutedEventArgs());
+        Check(!final._completion.Task.IsCompleted, "An unfinished preview must not publish its frame.");
+        witness.SetResult();
+        await final._previewTask;
+        Check(final._previewImage.Source is not null && final._confirmButton.IsEnabled,
+            "Only the decoded final preview may enable confirmation.");
+        final.OnConfirm(final._confirmButton, new RoutedEventArgs());
+        Check((await final._completion.Task)?.Pixels.SequenceEqual(frame.Pixels) == true,
+            "Confirmation must return the final decoded frame.");
+
+        var invalid = new CapturedFrame([], 48, 96, 48 * 4, "BGRA8");
+        first.ReportAccepted(new VerticalScrollStitcher(frame), invalid);
+        first.PauseForReview("synthetic initial frame", null);
+        await first._previewTask;
+        Check(first._failure is not null && first._errorText.Visibility == Visibility.Visible &&
+            !first._confirmButton.IsEnabled && first._confirmButton.Visibility == Visibility.Collapsed,
+            "An initial preview encoding failure must not reopen confirmation.");
+
+        pending.PauseForReview("synthetic pending frame", invalid);
+        await pending._previewTask;
+        Check(pending._failure is not null && pending._errorText.Visibility == Visibility.Visible &&
+            pending._errorText.Text.Contains("无法生成待拼预览", StringComparison.Ordinal),
+            "A pending-frame encoding failure must produce a visible failure.");
+        Check(!pending._confirmButton.IsEnabled && pending._confirmButton.Visibility == Visibility.Collapsed,
+            "A failed pending preview must keep confirmation closed.");
+        pending.OnConfirm(pending._confirmButton, new RoutedEventArgs());
+        Check(!pending._completion.Task.IsCompleted && pending._confirmedOffset == 0,
+            "A failed preview must neither publish output nor accept a correction.");
+      }
+      finally
+      {
+        witness.TrySetResult();
+        foreach (Session session in new[] { final, pending, first })
+        {
+          session._lifecycle.Cancel();
+          await session._previewTask;
+          session._previewImage.Source = null;
+          session._window.Close();
+          session._lifecycle.Dispose();
+        }
+      }
+    }
     private void SetReadyUi()
     {
-      _statusText.Text = "就绪：点击“开始”后，在源窗口中向下滚动内容。";
+      _statusText.Text = "就绪：选择方向、滚动模式和固定边缘，点击开始采样首帧。";
       _startButton.IsEnabled = true;
     }
 
@@ -757,8 +1158,23 @@ internal static class ScrollCaptureSession
         return; // 防止两轮采集同时运行。
       }
 
+      int axis = _directionBox.SelectedIndex >= 2 ? _bounds.Width : _bounds.Height;
+      if (!double.IsFinite(_leadingBox.Value) || !double.IsFinite(_trailingBox.Value) ||
+          _leadingBox.Value != Math.Truncate(_leadingBox.Value) || _trailingBox.Value != Math.Truncate(_trailingBox.Value) ||
+          _leadingBox.Value < 0 || _trailingBox.Value < 0 || _leadingBox.Value + _trailingBox.Value > axis - 64)
+      {
+        _errorText.Text = "固定范围必须是非负整数像素，且至少留下 64 像素滚动内容。";
+        _errorText.Visibility = Visibility.Visible;
+        return;
+      }
+      _direction = (ScrollCaptureDirection)_directionBox.SelectedIndex;
+      _automatic = _automaticBox.IsChecked == true;
+      _fixedLeading = (int)_leadingBox.Value;
+      _fixedTrailing = (int)_trailingBox.Value;
+      _options.Visibility = Visibility.Collapsed;
+      _errorText.Visibility = Visibility.Collapsed;
       _startButton.IsEnabled = false;
-      _statusText.Text = "采集中：向下滚动一段后停顿，等待内容静止。";
+      _statusText.Text = "采集中：请保持首帧静止，稍后确认预览。";
       SetForegroundWindow(_source); // 焦点归还源窗口，由用户手动滚动。
       _loop = Task.Run(RunLoopAsync);
     }
@@ -770,6 +1186,10 @@ internal static class ScrollCaptureSession
         return;
       }
 
+      if (_pendingFrame is not null || !_initialPreviewConfirmed) return;
+      HideReview();
+      _reviewPending = false;
+      _automatic = false;
       _finishButton.IsEnabled = false;
       _finishRequested = true;
       _statusText.Text = "正在收尾：正在把源窗口恢复前台，请停止滚动，等待最后一帧稳定。";
@@ -902,6 +1322,10 @@ internal static class ScrollCaptureSession
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetWindowDisplayAffinity(nint window, uint affinity);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern nint SendMessageTimeoutW(nint window, uint message, nint wParam,
+      nint lParam, uint flags, uint timeout, out nuint result);
 
     [DllImport("user32.dll")]
     private static extern nint GetForegroundWindow();
