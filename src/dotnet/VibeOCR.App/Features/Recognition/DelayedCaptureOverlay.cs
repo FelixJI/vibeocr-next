@@ -84,6 +84,7 @@ internal sealed class DelayedCaptureOverlay
 
   internal Window Window => _window;
   internal Button CancelButton => _cancel;
+  internal nint Handle => _handle;
 
   /// <summary>展示并等待倒计时；false 表示用户取消/窗口关闭。</summary>
   public static async Task<bool> RunAsync(
@@ -97,6 +98,17 @@ internal sealed class DelayedCaptureOverlay
   {
     _countdown.Text = $"{_remaining}";
     _window.Activate();
+    // #245 C2：普通 Window 激活不会建立 XAML 焦点，root.KeyDown 收不到
+    // Esc。直接聚焦可见“取消”按钮这一真实可聚焦控件（不引入不可见幽灵
+    // Tab stop）；未 Loaded 时挂一次 Loaded 再聚焦，保证首帧后成功。
+    if (_cancel.IsLoaded)
+    {
+      _cancel.Focus(FocusState.Programmatic);
+    }
+    else
+    {
+      _cancel.Loaded += (_, _) => _cancel.Focus(FocusState.Programmatic);
+    }
     _timer.Start();
     using CancellationTokenRegistration registration = cancellationToken.Register(
         () => _window.DispatcherQueue.TryEnqueue(() => Stop(false)));

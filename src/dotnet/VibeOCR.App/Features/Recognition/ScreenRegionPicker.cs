@@ -464,7 +464,8 @@ public sealed class ScreenRegionPicker(
       LastRegionCapture frozen, Func<IReadOnlyList<ScreenMonitorTarget>> queryMonitors)
   {
     if (!CapturePreferencesStore.IsLastRegionUsable(frozen, queryMonitors(), GetVirtualDesktop()))
-      throw new InvalidDataException("截图期间显示器布局已变化，请重新框选。");
+      throw new CaptureValidationException(
+        CaptureRefusal.LayoutChanged, "截图期间显示器布局已变化，请重新框选。");
   }
 
   private static async Task<OverlaySelection?> ShowOverlayAsync(
@@ -714,7 +715,7 @@ public sealed class ScreenRegionPicker(
         {
           EnsureFrozenLayoutCurrent(frozenLayout, queryMonitors ?? ScreenTargetQuery.EnumerateMonitors);
         }
-        catch (InvalidDataException error)
+        catch (CaptureValidationException error)
         {
           completion.TrySetException(error);
           overlay.Close();
@@ -1414,7 +1415,8 @@ public sealed class ScreenRegionPicker(
         desktop.Validate();
         if (checked((long)desktop.Width * desktop.Height * 4) > MaximumCaptureBytes)
         {
-            throw new InvalidDataException("虚拟桌面截图超过 256 MiB 限制。");
+            throw new CaptureValidationException(
+                CaptureRefusal.TooLarge, "虚拟桌面截图超过 256 MiB 上限。");
         }
         return desktop;
     }

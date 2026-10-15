@@ -183,7 +183,8 @@ public sealed class InputService : IInputService
             byte[] bgra = capture.Read(frame);
             EnsureLayoutUnchanged(layoutBefore, desktopBefore);
             if (bounds != ResolveTargetBounds(request, preferences, owner, foreground))
-                throw new InvalidDataException("截图目标已移动或改变大小，请重新截图。");
+                throw new CaptureValidationException(
+                    CaptureRefusal.LayoutChanged, "截图目标已移动或改变大小，请重新截图。");
             cancellationToken.ThrowIfCancellationRequested();
             return new RecognitionInput(
                 EncodeTopDownBmp(bgra, bounds.Width, bounds.Height, frame.Stride),
@@ -216,21 +217,31 @@ public sealed class InputService : IInputService
     {
         if (ScreenTargetQuery.VirtualDesktop() != desktop ||
             !ScreenTargetQuery.LayoutsMatch(previous, ScreenTargetQuery.EnumerateMonitors()))
-            throw new InvalidDataException("截图期间显示器布局已变化，请重新截图。");
+            throw new CaptureValidationException(
+                CaptureRefusal.LayoutChanged, "截图期间显示器布局已变化，请重新截图。");
     }
 
     private static PhysicalRectangle ResolveTargetBounds(
         ScreenshotCaptureRequest request,
         CapturePreferences preferences,
         nint owner,
-        nint foreground)
+        nint foreground) =>
+        ResolveTargetBounds(request, preferences, owner, foreground, ScreenTargetQuery.VirtualDesktop());
+
+    /// <summary>
+    /// #245 C1 可测 seam：生产路径按真实虚拟桌面进入同一实现。分配上限按
+    /// “实际捕获目标”而非整个虚拟桌面——巨大/稀疏桌面上小窗口、固定/上次
+    /// 区域与单屏目标仍可捕获；全屏目标本身即整桌面，上限语义不变。
+    /// 实际分配上限不删除。
+    /// </summary>
+    internal static PhysicalRectangle ResolveTargetBounds(
+        ScreenshotCaptureRequest request,
+        CapturePreferences preferences,
+        nint owner,
+        nint foreground,
+        PhysicalRectangle desktop)
     {
-        PhysicalRectangle desktop = ScreenTargetQuery.VirtualDesktop();
         desktop.Validate();
-        if (checked((long)desktop.Width * desktop.Height * 4) > MaximumCaptureBytes)
-        {
-            throw new InvalidDataException("虚拟桌面截图超过 256 MiB 限制。");
-        }
 
         PhysicalRectangle bounds = request.Kind switch
         {
@@ -246,10 +257,21 @@ public sealed class InputService : IInputService
         PhysicalRectangle? clipped = SmartScreenCandidates.Intersect(bounds, desktop);
         if (clipped is null)
         {
-            throw new InvalidDataException("截图目标不在当前桌面范围内，请重试。");
+            throw new CaptureValidationException(
+                CaptureRefusal.RegionUnavailable, "截图目标不在当前桌面范围内，请重试。");
         }
 
-        return clipped.Value;
+        PhysicalRectangle target = clipped.Value;
+        if (checked((long)target.Width * target.Height * 4) > MaximumCaptureBytes)
+        {
+            throw new CaptureValidationException(
+                CaptureRefusal.TooLarge,
+                target == desktop
+                    ? "全屏截图超过 256 MiB 上限，请改用区域/显示器截图。"
+                    : "截图目标区域超过 256 MiB 上限，请缩小目标后重试。");
+        }
+
+        return target;
     }
 
     internal static PhysicalRectangle ResolveActiveWindow(
@@ -266,7 +288,8 @@ public sealed class InputService : IInputService
         PhysicalRectangle? bounds = window == 0 || window == owner
             ? null
             : ScreenTargetQuery.TryGetWindowBounds(window, preferences.EffectiveWindowBoundsMode);
-        return bounds ?? throw new InvalidDataException(
+        return bounds ?? throw new CaptureValidationException(
+            CaptureRefusal.WindowUnavailable,
             "目标活动窗口已不可用（消失/最小化），请在其置顶后重试。");
     }
 
@@ -274,10 +297,13 @@ public sealed class InputService : IInputService
         CapturePreferences preferences, PhysicalRectangle desktop)
     {
         PhysicalRectangle fixedRegion = preferences.FixedRegion
-            ?? throw new InvalidDataException("尚未设置固定截图区域，请先在截图选项中设置。");
+            ?? throw new CaptureValidationException(
+                CaptureRefusal.MissingFixedRegion,
+                "尚未设置固定截图区域，请先在截图选项中设置。");
         if (!CapturePreferencesStore.IsRegionInsideDesktop(fixedRegion, desktop))
         {
-            throw new InvalidDataException(
+            throw new CaptureValidationException(
+                CaptureRefusal.RegionUnavailable,
                 "固定截图区域不在当前桌面范围内（显示器布局可能已变化），请在截图选项中重新设置。");
         }
 
@@ -289,32 +315,37 @@ public sealed class InputService : IInputService
         IReadOnlyList<ScreenMonitorTarget> monitors = ScreenTargetQuery.EnumerateMonitors();
         if (monitors.Count == 0)
         {
-            throw new InvalidDataException("未检测到可用显示器，无法截图。");
+            throw new CaptureValidationException(
+                CaptureRefusal.MonitorUnavailable, "未检测到可用显示器，无法截图。");
         }
 
         if (string.IsNullOrEmpty(deviceName))
         {
             return monitors.Count == 1
                 ? monitors[0].Bounds
-                : throw new InvalidDataException("存在多台显示器，请从截图模式菜单选择目标显示器。");
+                : throw new CaptureValidationException(
+                    CaptureRefusal.MonitorUnavailable, "存在多台显示器，请从截图模式菜单选择目标显示器。");
         }
 
         return monitors.FirstOrDefault(
             monitor => string.Equals(monitor.DeviceName, deviceName, StringComparison.Ordinal))
             is { } matched
             ? matched.Bounds
-            : throw new InvalidDataException("所选显示器当前不可用（可能已断开），请重新选择。");
+            : throw new CaptureValidationException(
+                CaptureRefusal.MonitorUnavailable, "所选显示器当前不可用（可能已断开），请重新选择。");
     }
 
     private static PhysicalRectangle ResolveLastRegion(
         CapturePreferences preferences, PhysicalRectangle desktop)
     {
         LastRegionCapture? last = preferences.LastRegion
-            ?? throw new InvalidDataException("尚无上次截图区域，请先完成一次框选截图。");
+            ?? throw new CaptureValidationException(
+                CaptureRefusal.RegionUnavailable, "尚无上次截图区域，请先完成一次框选截图。");
         if (!CapturePreferencesStore.IsLastRegionUsable(
                 last, ScreenTargetQuery.EnumerateMonitors(), desktop))
         {
-            throw new InvalidDataException(
+            throw new CaptureValidationException(
+                CaptureRefusal.RegionUnavailable,
                 "上次截图区域已不可用（显示器布局变化或区域越界），请重新框选。");
         }
 

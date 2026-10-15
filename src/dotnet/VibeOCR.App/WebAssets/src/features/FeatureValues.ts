@@ -66,6 +66,18 @@ export function statusLabel(value: unknown, fallback: string): string {
     "recognition.cancelled": "识别已取消，可重新选择输入",
     "recognition.modeUnavailable":
       "所选识别模式在当前环境不可用；请检查模型、设备与运行环境",
+    "recognition.captureRefused.missingFixedRegion":
+      "尚未设置固定截图区域；请打开截图选项设置后重试",
+    "recognition.captureRefused.regionUnavailable":
+      "固定/上次截图区域当前不可用（布局变化或越界）；请重新框选或在截图选项中调整",
+    "recognition.captureRefused.windowUnavailable":
+      "目标活动窗口已不可用（消失或最小化）；请在其置顶后重试",
+    "recognition.captureRefused.monitorUnavailable":
+      "所选显示器当前不可用或未选择；请从截图模式菜单重新选择",
+    "recognition.captureRefused.layoutChanged":
+      "截图期间显示器布局发生变化；请重新截图",
+    "recognition.captureRefused.tooLarge":
+      "截图区域超出 256 MiB 上限；请缩小目标后重试",
     "recognition.exported": "结果已导出",
     "recognition.exportCancelled": "已取消导出，识别结果仍保留",
     "recognition.exportedIncomplete":

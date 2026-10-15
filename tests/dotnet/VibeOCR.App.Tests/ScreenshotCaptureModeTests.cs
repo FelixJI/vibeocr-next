@@ -119,6 +119,45 @@ public class ScreenshotCaptureModeTests
     Assert.Equal(3, inputs.AreaCalls);
   }
 
+  /// <summary>
+  /// #245 C1 回归：分配上限按实际捕获目标而非整个虚拟桌面。旧实现会在
+  /// 解析目标前按整桌早拒——巨大/稀疏桌面上小固定区域被错误拒绝。
+  /// </summary>
+  [Fact]
+  public void ResolveTargetBoundsAllowsSmallTargetsOnHugeSparseDesktop()
+  {
+    // 16384×8192×4B = 512MiB 桌面（负原点），旧实现在此直接拒收。
+    var desktop = new PhysicalRectangle(-4096, 0, 16384, 8192);
+    var preferences = new CapturePreferences(
+      FixedRegion: new PhysicalRectangle(-100, 200, 640, 480));
+
+    PhysicalRectangle resolved = InputService.ResolveTargetBounds(
+      new ScreenshotCaptureRequest(ScreenshotCaptureKind.FixedRegion),
+      preferences, owner: 0, foreground: 0, desktop);
+
+    Assert.Equal(new PhysicalRectangle(-100, 200, 640, 480), resolved);
+  }
+
+  [Fact]
+  public void ResolveTargetBoundsRejectsFullscreenAndOversizedActualTargetsOnSameDesktop()
+  {
+    var desktop = new PhysicalRectangle(-4096, 0, 16384, 8192);
+
+    CaptureValidationException fullscreen = Assert.Throws<CaptureValidationException>(() =>
+      InputService.ResolveTargetBounds(
+        new ScreenshotCaptureRequest(ScreenshotCaptureKind.Fullscreen),
+        new CapturePreferences(), owner: 0, foreground: 0, desktop));
+    Assert.Equal(CaptureRefusal.TooLarge, fullscreen.ReasonCode);
+
+    // 实际目标本身超限（非整桌早拒）：裁剪后仍拒绝。
+    CaptureValidationException oversized = Assert.Throws<CaptureValidationException>(() =>
+      InputService.ResolveTargetBounds(
+        new ScreenshotCaptureRequest(ScreenshotCaptureKind.FixedRegion),
+        new CapturePreferences(FixedRegion: new PhysicalRectangle(desktop.X, 0, 16384, 5000)),
+        owner: 0, foreground: 0, desktop));
+    Assert.Equal(CaptureRefusal.TooLarge, oversized.ReasonCode);
+  }
+
   private sealed class RoutingInputService : IInputService
   {
     public int AreaCalls;

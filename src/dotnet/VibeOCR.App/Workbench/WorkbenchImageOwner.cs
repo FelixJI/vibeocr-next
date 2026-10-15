@@ -571,8 +571,13 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
         if (viewModel.TerminalState is JobState.Cancelled or JobState.Failed)
         {
           ReleaseCaptureGuard();
-          operations.PublishTerminal(SessionState(recognitionChannel, false,
-            viewModel.TerminalState is JobState.Failed ? "recognition.failed" : "recognition.cancelled"));
+          // #245 C3：本地截图校验拒绝走稳定 captureRefused 状态码（WebAssets
+          // FeatureValues 提供对应指引文案），不与 Runtime 失败混为
+          // recognition.failed。
+          string captureOutcome = viewModel.TerminalState is JobState.Failed
+            ? viewModel.CaptureRefusalStatusCode ?? "recognition.failed"
+            : "recognition.cancelled";
+          operations.PublishTerminal(SessionState(recognitionChannel, false, captureOutcome));
           return;
         }
         if (viewModel.CurrentInput is { } captured)
@@ -1440,9 +1445,9 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     viewModel.InvalidateResult();
     viewModel.ReleaseInput();
     if (channel == recognitionChannel)
-      {
-        ClearResultActions();
-      }
+    {
+      ClearResultActions();
+    }
     InvalidateScreenshotTextLayer(channel);
     ClearScreenshotSession(channel);
     return SessionState(channel, false, "recognition.ready");

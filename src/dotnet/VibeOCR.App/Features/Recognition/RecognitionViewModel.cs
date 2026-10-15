@@ -296,6 +296,13 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
 
     public void Cancel() => _activeRun?.Cancel();
 
+    /// <summary>
+    /// #245 C3：本地截图校验拒绝的稳定状态码（recognition.captureRefused.
+    /// &lt;reason&gt;）；仅在最近一次输入运行以该类失败结束时非空，供宿主
+    /// 按既有稳定状态码文案路径投影，不扩散任意底层异常信息。
+    /// </summary>
+    public string? CaptureRefusalStatusCode { get; private set; }
+
     public Task RecognizeViaSupervisorAsync(
         Func<CancellationToken, Task<RecognitionInput?>> loadInput,
         CancellationToken cancellationToken,
@@ -342,6 +349,7 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
                 return;
             }
         }
+        CaptureRefusalStatusCode = null;
         long generation = Interlocked.Increment(ref _generation);
         CancellationTokenSource? previous = Interlocked.Exchange(
             ref _activeRun,
@@ -504,6 +512,18 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
                 TerminalState = error.Code is HttpV2ErrorCode.Cancelled
                     ? JobState.Cancelled : JobState.Failed;
                 Status = LocalizeV2(error.Code);
+            }
+        }
+        catch (CaptureValidationException error)
+        {
+            // #245 C3：本地截图校验（未配置区域/目标消失/屏断开/越界/超限）
+            // 与 Runtime 无关，不得落入 Supervisor 断开处理器；稳定状态码 +
+            // 既有中文指引经宿主按状态码文案路径呈现。
+            if (generation == Volatile.Read(ref _generation))
+            {
+                TerminalState = JobState.Failed;
+                CaptureRefusalStatusCode = error.StatusCode;
+                Status = error.Message;
             }
         }
         catch (Exception error) when (error is IOException or ObjectDisposedException)

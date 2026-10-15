@@ -80,8 +80,10 @@ public sealed class ScreenSelectionSessionTests
     store.Saved = null;
     var invalid = new InputService(static () => 0,
       screenRegionPicker: new FrozenRegionPicker(changed), preferences: store);
-    await Assert.ThrowsAsync<InvalidDataException>(() =>
+    CaptureValidationException refused = await Assert.ThrowsAsync<CaptureValidationException>(() =>
       invalid.CaptureScreenAsync(TestContext.Current.CancellationToken));
+    // 语义：采集期间冻结布局与当前布局不一致属于“布局已变化”，而非区域缺失。
+    Assert.Equal(CaptureRefusal.LayoutChanged, refused.ReasonCode);
     Assert.Null(store.Saved);
   }
 

@@ -36,6 +36,9 @@ public sealed partial class App
         case "DelayedOverlayCompletesAfterConfiguredSeconds":
           await VerifyDelayedCaptureKeepsNewForegroundAsync();
           break;
+        case "DelayedOverlayEscKeyCancelsAndRestoresForeground":
+          await VerifyDelayedCaptureEscKeyAsync();
+          break;
         case "RegionPickerRejectsChangedMonitorLayoutWithSameDesktopBounds":
           await VerifyRegionPickerLayoutChangeAsync();
           break;
@@ -123,10 +126,9 @@ public sealed partial class App
     var target = new Window { Content = new Microsoft.UI.Xaml.Controls.TextBlock { Text = "capture B" } };
     try
     {
-      original.Activate();
       nint originalHandle = WinRT.Interop.WindowNative.GetWindowHandle(original);
       nint targetHandle = WinRT.Interop.WindowNative.GetWindowHandle(target);
-      await WaitForCaptureUiAsync(() => ScreenTargetQuery.GetForegroundWindowHandle() == originalHandle);
+      await ActivateAndWaitForegroundAsync(original, originalHandle);
       Task<bool> pending = DelayedCaptureOverlay.RunAsync(1, CancellationToken.None);
       target.Activate();
       await WaitForCaptureUiAsync(() => ScreenTargetQuery.GetForegroundWindowHandle() == targetHandle);
@@ -168,9 +170,11 @@ public sealed partial class App
         selection = await picker.PickAsync(CancellationToken.None);
         throw new InvalidOperationException("Region picker accepted a changed monitor layout with unchanged outer bounds.");
       }
-      catch (InvalidDataException error)
+      catch (CaptureValidationException error)
       {
         Check(error.Message.Contains("显示器布局", StringComparison.Ordinal), "Picker must report layout changes.");
+        Check(error.StatusCode == "recognition.captureRefused.layoutChanged",
+            "Picker layout refusal must carry a stable status code.");
         Check(queries >= 3 && native.Captures == 1, "Regression must reach real picker confirmation after freezing.");
         Check(IsWindowVisible(handle), "Rejected region must restore owner visibility.");
       }
@@ -192,11 +196,10 @@ public sealed partial class App
   private static async Task VerifyDelayedCaptureCancellationAsync()
   {
     var owner = new Window { Content = new Microsoft.UI.Xaml.Controls.TextBlock { Text = "capture smoke owner" } };
-    owner.Activate();
     nint handle = WinRT.Interop.WindowNative.GetWindowHandle(owner);
     try
     {
-      await WaitForCaptureUiAsync(() => ScreenTargetQuery.GetForegroundWindowHandle() == handle);
+      await ActivateAndWaitForegroundAsync(owner, handle);
       var input = new InputService(() => handle);
       try
       {
@@ -205,7 +208,7 @@ public sealed partial class App
             CancellationToken.None);
         throw new InvalidOperationException("Vanished capture target was accepted.");
       }
-      catch (InvalidDataException)
+      catch (CaptureValidationException)
       {
         Check(IsWindowVisible(handle), "Direct capture failure must restore owner visibility.");
         Check(ScreenTargetQuery.GetForegroundWindowHandle() == handle,
@@ -247,6 +250,89 @@ public sealed partial class App
     }
     finally { owner.Close(); }
   }
+
+  /// <summary>
+  /// #245 C2：真实键盘路径验证——SendInput 注入真实 ESC 按下/抬起（倒计时
+  /// 窗为前台），断言取消生效并恢复宿主前台；不调用任何内部取消方法。
+  /// </summary>
+  private static async Task VerifyDelayedCaptureEscKeyAsync()
+  {
+    var owner = new Window { Content = new Microsoft.UI.Xaml.Controls.TextBlock { Text = "capture esc owner" } };
+    nint handle = WinRT.Interop.WindowNative.GetWindowHandle(owner);
+    try
+    {
+      await ActivateAndWaitForegroundAsync(owner, handle);
+      var overlay = new DelayedCaptureOverlay(30);
+      Task<bool> pending = overlay.ShowAsync(CancellationToken.None);
+      await WaitForCaptureForegroundAsync(overlay);
+      Check(SendRealEscapeKey() == 2, "Both real ESC keydown and keyup must be accepted.");
+      Check(!await pending.WaitAsync(TimeSpan.FromSeconds(10)), "Real ESC key must cancel the countdown.");
+      await WaitForCaptureUiAsync(() => ScreenTargetQuery.GetForegroundWindowHandle() == handle);
+    }
+    finally { owner.Close(); }
+  }
+
+  private static async Task WaitForCaptureForegroundAsync(DelayedCaptureOverlay overlay)
+  {
+    for (int attempt = 0; attempt < 200; attempt++)
+    {
+      if (ScreenTargetQuery.GetForegroundWindowHandle() == overlay.Handle && overlay.CancelButton.IsLoaded)
+        return;
+      await Task.Delay(25);
+    }
+    throw new InvalidOperationException("Countdown window never became the foreground target.");
+  }
+
+  private static uint SendRealEscapeKey()
+  {
+    const uint keyEventfKeyUp = 0x0002;
+    var down = new SmokeKeyInput { Type = 1, VirtualKey = 0x1B };
+    var up = new SmokeKeyInput { Type = 1, VirtualKey = 0x1B, Flags = keyEventfKeyUp };
+    return SendInput(2, [down, up], Marshal.SizeOf<SmokeKeyInput>());
+  }
+
+  [StructLayout(LayoutKind.Explicit)]
+  private struct SmokeKeyInput
+  {
+    [FieldOffset(0)] public uint Type;
+    [FieldOffset(8)] public ushort VirtualKey;
+    [FieldOffset(10)] public ushort Scan;
+    [FieldOffset(12)] public uint Flags;
+    [FieldOffset(16)] public uint Time;
+    [FieldOffset(24)] public nint ExtraInfo;
+    [FieldOffset(32)] private readonly long _padding;
+  }
+
+  [DllImport("user32.dll", SetLastError = true)]
+  private static extern uint SendInput(uint count, SmokeKeyInput[] inputs, int size);
+
+  /// <summary>
+  /// 单次激活并等待真实前台；拒绝时如实失败并携带当时前台窗口诊断
+  /// （不重试、不削弱断言；前台许可与启动环境的关系由主代理复测裁决）。
+  /// </summary>
+  private static async Task ActivateAndWaitForegroundAsync(Window window, nint handle)
+  {
+    window.Activate();
+    for (int poll = 0; poll < 40; poll++)
+    {
+      if (ScreenTargetQuery.GetForegroundWindowHandle() == handle) return;
+      await Task.Delay(25);
+    }
+
+    nint current = ScreenTargetQuery.GetForegroundWindowHandle();
+    throw new InvalidOperationException(
+        $"Capture UI foreground activation was denied; owner={handle} current={current} " +
+        $"title='{(current == 0 ? "" : GetWindowTextDiagnostics(current))}'.");
+  }
+
+  private static string GetWindowTextDiagnostics(nint window)
+  {
+    var buffer = new System.Text.StringBuilder(256);
+    return GetWindowTextW(window, buffer, buffer.Capacity) > 0 ? buffer.ToString() : "<no title>";
+  }
+
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  private static extern int GetWindowTextW(nint window, System.Text.StringBuilder text, int capacity);
 
   private static async Task WaitForCaptureUiAsync(Func<bool> ready)
   {

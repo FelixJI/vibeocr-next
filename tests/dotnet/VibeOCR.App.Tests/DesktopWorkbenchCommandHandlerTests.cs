@@ -1699,6 +1699,87 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     }
   }
 
+  /// <summary>
+  /// #245 C3 集成契约：缺固定区域配置的本地校验拒绝沿真实截图命令链发布
+  /// recognition.captureRefused.missingFixedRegion（而非 recognition.failed
+  /// /Supervisor 断开文案）；前端 statusLabel 已为该码提供修复指引。
+  /// </summary>
+  [Fact]
+  public async Task MissingFixedRegionCapturePublishesCaptureRefusedTerminal()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-capture-refused-{Guid.NewGuid():N}");
+    string resourceRoot = Path.Combine(root, "resources");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      var client = new CompletedRecognitionInferenceClient();
+      var inputs = new MissingFixedRegionInputService();
+      var recognition = new RecognitionViewModel(client, inputs);
+      var settings = new SettingsViewModel(client);
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      (ShellActionDispatcher dispatcher, _, _, _, _) = CreateShellActions(root);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        () => recognition,
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => settings,
+        CreateShellViewModel,
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker,
+        resourceRoot,
+        static () => 0,
+        annotationStore,
+        shellActions: dispatcher);
+      var terminal = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+      handler.StateChanged += state =>
+      {
+        if (state is RecognitionWorkbenchState { IsBusy: false } final)
+        {
+          terminal.TrySetResult(final.StatusCode);
+        }
+      };
+
+      WorkbenchCommandOutcome outcome = await handler.ExecuteAsync(
+        new CaptureScreenshotSessionCommand(
+          new ScreenshotCaptureRequest(ScreenshotCaptureKind.FixedRegion)),
+        TestContext.Current.CancellationToken);
+
+      Assert.Null(outcome.Error);
+      string statusCode = await terminal.Task.WaitAsync(
+        TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      Assert.Equal("recognition.captureRefused.missingFixedRegion", statusCode);
+      Assert.Equal(JobState.Failed, recognition.TerminalState);
+      Assert.Equal("尚未设置固定截图区域，请先在截图选项中设置。", recognition.Status);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  private sealed class MissingFixedRegionInputService : IInputService
+  {
+    public Task<RecognitionInput?> CaptureAreaAsync(
+      ScreenshotCaptureRequest request,
+      CancellationToken cancellationToken) =>
+      throw new CaptureValidationException(
+        CaptureRefusal.MissingFixedRegion, "尚未设置固定截图区域，请先在截图选项中设置。");
+
+    public Task<RecognitionInput?> PickFileAsync(CancellationToken cancellationToken) =>
+      Task.FromResult<RecognitionInput?>(new RecognitionInput([1], "image/png", "file.png", "file"));
+
+    public Task<RecognitionInput?> ReadClipboardAsync(CancellationToken cancellationToken) =>
+      PickFileAsync(cancellationToken);
+
+    public Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken) =>
+      PickFileAsync(cancellationToken);
+
+    public Task<RecognitionInput?> ReadDroppedFileAsync(string path, CancellationToken cancellationToken) =>
+      PickFileAsync(cancellationToken);
+  }
   [Fact]
   public async Task CaptureEntriesAreSingleFlightAcrossActionsAndRetryAfterCancel()
   {
