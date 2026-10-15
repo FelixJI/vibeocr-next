@@ -278,9 +278,9 @@ describe("RecognitionPage lean editor", () => {
     expect(screen.queryByRole("button", { name: "检查文件大小" })).toBeNull();
     // 必要的识别面功能保留：显示缩放（不改像素）与显式识别入口。
     expect(screen.getByLabelText("显示缩放")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "识别当前图" }),
-    ).toBeInTheDocument();
+    for (const name of ["文字识别", "表格识别", "公式识别"])
+      expect(screen.getByRole("button", { name })).toBeDisabled();
+    expect(screen.getByText(/识别目录未就绪/)).toBeInTheDocument();
     unmount();
   });
 

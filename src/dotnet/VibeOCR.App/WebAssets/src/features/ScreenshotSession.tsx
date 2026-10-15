@@ -2,6 +2,31 @@ import type { ScreenshotTextLayerState } from "../components/ImageCanvasEditor";
 
 import { resource } from "./FeatureValues";
 
+export interface ImageRecognitionMode {
+  readonly modeId: string;
+  readonly displayName: string;
+  readonly availability: string;
+  readonly reasonCode?: string | null;
+  readonly hint?: string | null;
+}
+
+export function imageRecognitionModes(
+  value: unknown,
+): readonly ImageRecognitionMode[] {
+  if (!Array.isArray(value) || value.length !== 3) return [];
+  return value.every((entry: unknown) => {
+    if (entry === null || typeof entry !== "object") return false;
+    const mode = entry as Partial<ImageRecognitionMode>;
+    return (
+      typeof mode.modeId === "string" &&
+      typeof mode.displayName === "string" &&
+      typeof mode.availability === "string"
+    );
+  })
+    ? value
+    : [];
+}
+
 export interface ScreenshotSessionState {
   readonly sessionId: string;
   readonly revision: number;
