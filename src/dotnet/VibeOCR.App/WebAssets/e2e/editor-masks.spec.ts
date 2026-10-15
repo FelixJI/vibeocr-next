@@ -883,3 +883,181 @@ test("sparse diagonal effects bound scratch canvases in natural output", async (
     /./,
   );
 });
+
+async function exactFractionalStroke(
+  page: Page,
+  points: readonly { x: number; y: number }[],
+) {
+  await page.mouse.move(5, 5);
+  await page
+    .locator('canvas[aria-label="图片检查画布"]')
+    .evaluate((element, points) => {
+      const box = element.getBoundingClientRect();
+      const emit = (
+        type: string,
+        at: { x: number; y: number },
+        buttons: number,
+      ) =>
+        element.dispatchEvent(
+          new PointerEvent(type, {
+            bubbles: true,
+            pointerId: 1,
+            pointerType: "mouse",
+            isPrimary: true,
+            button: 0,
+            buttons,
+            clientX: box.x + (at.x / 900) * box.width,
+            clientY: box.y + (at.y / 600) * box.height,
+          }),
+        );
+      emit("pointerdown", points[0]!, 1);
+      for (const at of points.slice(1)) emit("pointermove", at, 1);
+      emit("pointerup", points.at(-1)!, 0);
+    }, points);
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+}
+
+for (const tool of ["马赛克", "模糊"]) {
+  for (const [edge, points] of [
+    [
+      "left",
+      [
+        { x: 524.8, y: 300 },
+        { x: 870.3, y: 300 },
+      ],
+    ],
+    [
+      "right",
+      [
+        { x: 100.3, y: 300 },
+        { x: 499.2, y: 300 },
+      ],
+    ],
+    [
+      "top",
+      [
+        { x: 300, y: 524.8 },
+        { x: 300, y: 570.3 },
+      ],
+    ],
+    [
+      "bottom",
+      [
+        { x: 300, y: 100.3 },
+        { x: 300, y: 499.2 },
+      ],
+    ],
+  ] as const) {
+    test(
+      tool +
+        " fractional " +
+        edge +
+        " tile sliver exports without zero-sized canvas",
+      async ({ page }) => {
+        await page.setViewportSize({ width: 1280, height: 900 });
+        const uploads: { contentType: string; body: Buffer }[] = [];
+        await routeSource(
+          page,
+          '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600"><defs><pattern id="p" width="16" height="16" patternUnits="userSpaceOnUse"><rect width="16" height="16" fill="white"/><rect width="8" height="16" fill="black"/></pattern></defs><rect width="900" height="600" fill="url(#p)"/></svg>',
+          "fractional-sliver.svg",
+        );
+        await mountWithUploadCapture(page, uploads, "fractional-sliver.svg");
+        await expect(page.getByText(/原图 900×600/)).toBeVisible();
+        const baseline = await saveAndDecode(page, uploads);
+        await page.getByRole("button", { name: tool, exact: true }).click();
+        await page.getByLabel("马赛克与模糊绘制方式").selectOption("brush");
+        await exactFractionalStroke(page, points);
+        await expect(page.getByText(/width or height of 0/)).toHaveCount(0);
+        const actual = await saveAndDecode(page, uploads);
+        expectSameAlpha(baseline, actual);
+        const middle = {
+          x: Math.round((points[0].x + points[1].x) / 2),
+          y: Math.round((points[0].y + points[1].y) / 2),
+        };
+        expect(pixelAt(actual, middle.x, middle.y)).not.toEqual(
+          pixelAt(baseline, middle.x, middle.y),
+        );
+        await page.getByRole("button", { name: "撤销", exact: true }).click();
+        const restored = await saveAndDecode(page, uploads);
+        expect(
+          Buffer.compare(
+            Buffer.from(restored.pixels),
+            Buffer.from(baseline.pixels),
+          ),
+        ).toBe(0);
+      },
+    );
+  }
+}
+
+test("fractional mosaic uses one unfragmented grid across the 512px black-white seam", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const uploads: { contentType: string; body: Buffer }[] = [];
+  await routeSource(
+    page,
+    '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600"><rect width="512" height="600" fill="black"/><rect x="512" width="388" height="600" fill="white"/></svg>',
+    "fractional-mosaic-grid.svg",
+  );
+  await mountWithUploadCapture(page, uploads, "fractional-mosaic-grid.svg");
+  await expect(page.getByText(/原图 900×600/)).toBeVisible();
+  const baseline = await saveAndDecode(page, uploads);
+  await page.getByRole("button", { name: "马赛克", exact: true }).click();
+  await page.getByLabel("马赛克与模糊绘制方式").selectOption("brush");
+  await exactFractionalStroke(page, [
+    { x: 13.3, y: 300 },
+    { x: 870.3, y: 300 },
+  ]);
+  const actual = await saveAndDecode(page, uploads);
+  const reference = await page.evaluate(
+    ({ pixels }) => {
+      const source = document.createElement("canvas");
+      source.width = 900;
+      source.height = 600;
+      source
+        .getContext("2d")!
+        .putImageData(
+          new ImageData(new Uint8ClampedArray(pixels), 900, 600),
+          0,
+          0,
+        );
+      const area = { x: 0.3, y: 287, width: 883, height: 26 };
+      const down = document.createElement("canvas");
+      down.width = Math.ceil(area.width / 14);
+      down.height = Math.ceil(area.height / 14);
+      const small = down.getContext("2d")!;
+      small.imageSmoothingEnabled = true;
+      small.imageSmoothingQuality = "high";
+      small.drawImage(
+        source,
+        area.x,
+        area.y,
+        area.width,
+        area.height,
+        0,
+        0,
+        down.width,
+        down.height,
+      );
+      const result = document.createElement("canvas");
+      result.width = 900;
+      result.height = 600;
+      const context = result.getContext("2d")!;
+      context.imageSmoothingEnabled = false;
+      context.drawImage(down, area.x, area.y, area.width, area.height);
+      return Array.from(context.getImageData(510, 300, 14, 1).data);
+    },
+    { pixels: baseline.pixels },
+  );
+  for (let x = 510; x < 524; x++)
+    expect(pixelAt(actual, x, 300)).toEqual(
+      reference.slice((x - 510) * 4, (x - 509) * 4),
+    );
+  expect(pixelAt(actual, 511, 300)).toEqual(pixelAt(actual, 512, 300));
+});

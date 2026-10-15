@@ -7774,6 +7774,7 @@ function applyBrushTiles(
         y = Math.round(planned.y * sy);
       const right = Math.round((planned.x + planned.width) * sx),
         bottom = Math.round((planned.y + planned.height) * sy);
+      if (right <= x || bottom <= y) continue;
       const area = {
         x: x / sx,
         y: y / sy,
@@ -7840,15 +7841,13 @@ function applyMosaicBrush(
     gy = Math.floor((area.y - fullArea.y) / cellHeight);
   const right = Math.ceil((area.x + area.width - fullArea.x) / cellWidth),
     bottom = Math.ceil((area.y + area.height - fullArea.y) / cellHeight);
-  const sample = clampRect(
-    {
-      x: fullArea.x + gx * cellWidth,
-      y: fullArea.y + gy * cellHeight,
-      width: (right - gx) * cellWidth,
-      height: (bottom - gy) * cellHeight,
-    },
-    size,
-  );
+  // 保留裁剪前的格子映射；drawImage 会同步裁剪源与目标，不能拉伸剩余源区域。
+  const sample = {
+    x: fullArea.x + gx * cellWidth,
+    y: fullArea.y + gy * cellHeight,
+    width: (right - gx) * cellWidth,
+    height: (bottom - gy) * cellHeight,
+  };
   const down = effectSurface(
     canvas,
     right - gx,
