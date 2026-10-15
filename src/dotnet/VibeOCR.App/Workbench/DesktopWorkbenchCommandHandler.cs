@@ -95,7 +95,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     Func<Task<string?>>? pickPdfSavePath = null, Func<Task<string?>>? pickPdfFolder = null,
     Func<string, Task<bool>>? flushPdfPreview = null,
     Func<CancellationToken, Task>? ensureRuntimeReady = null,
-    IResultActionPlatform? resultActionPlatform = null)
+    IResultActionPlatform? resultActionPlatform = null,
+    ISystemImportReader? systemImportReader = null)
   {
 
     recognitionFactory = recognitionFactory ??
@@ -128,7 +129,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     Resources = new WorkbenchResourcesOwner(resourceBroker, resourceRoot);
     Settings = new WorkbenchSettingsOwner(ensureRuntimeReady, inferenceAttached, settingsFactory, shell, shellActions, supervisorInstanceId, operations, RefreshFeatureCatalogStatesAsync, InvalidateImageRecognition);
     Selection = new WorkbenchSelectionOwner(ensureRuntimeReady, inferenceAttached, optionsLayout, Settings, GetRecognitionTaskEngine);
-    Image = new WorkbenchImageOwner(annotatedImagePlatform, annotationStore, ensureRuntimeReady, inferenceAttached, optionsLayout, pinScreenshot, recognitionFactory, resourceBroker, shellActions, structuredClipboard, supervisorInstanceId, textLayerRecognitionFactory, resultActionPlatform, Settings, Resources, Selection, operations, SynchronizeBatchMode);
+    Image = new WorkbenchImageOwner(annotatedImagePlatform, annotationStore, ensureRuntimeReady, inferenceAttached, optionsLayout, pinScreenshot, recognitionFactory, resourceBroker, shellActions, structuredClipboard, supervisorInstanceId, textLayerRecognitionFactory, resultActionPlatform, Settings, Resources, Selection, operations, SynchronizeBatchMode, systemImportReader);
     Batch = new WorkbenchBatchOwner(batchFactory, windowHandle, Settings, Resources, Selection, operations);
     Pdf = new WorkbenchPdfOwner(confirmPdfClose, flushPdfPreview, optionsLayout, pdfFactory, pickPdfFolder, pickPdfSavePath, windowHandle, Settings, Resources, Selection, operations);
     QrCode = new WorkbenchQrCodeOwner(annotatedImagePlatform, qrCodeFactory, windowHandle, Resources, operations);
@@ -265,7 +266,52 @@ public sealed class DesktopWorkbenchCommandHandler :
           false,
           "workbench.error.captureInProgress"));
     }
-    catch (ClipboardBusyException)
+    catch (WorkbenchImageOwner.ImageImportInProgressException)
+    {
+      return new WorkbenchCommandOutcome(
+        [],
+        new WorkbenchProblem(
+          "image_import_in_progress",
+          WorkbenchProblemCategory.Conflict,
+          false,
+          "workbench.error.imageImportInProgress"));
+    }
+    catch (WorkbenchImageOwner.ImageImportRefusedException error)
+    {
+      return new WorkbenchCommandOutcome(
+        [],
+        new WorkbenchProblem(
+          "image_import_refused",
+          WorkbenchProblemCategory.InvalidCommand,
+          false,
+          error.MessageKey));
+    }
+    catch (SystemImportRejectException error)
+    {
+      // 同步读取阶段即被拒绝（超限/坏格式/无内容）：明确回执，不触碰画布。
+      return new WorkbenchCommandOutcome(
+        [],
+        new WorkbenchProblem(
+          "image_import_refused",
+          WorkbenchProblemCategory.InvalidCommand,
+          false,
+          error.Reason switch
+          {
+            "oversize" => "workbench.error.imageImportOversize",
+            "invalid" => "workbench.error.imageImportInvalid",
+            "batch" => "workbench.error.imageImportRefused",
+            "empty" => "workbench.error.imageImportEmpty",
+            _ => "workbench.error.imageImportRefused",
+          }));
+    }
+    catch (System.Runtime.InteropServices.COMException) when (command is
+      PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand or
+      ImportDroppedImageEditContentCommand or ImportDroppedScreenshotContentCommand)
+    {
+      return new WorkbenchCommandOutcome([], new WorkbenchProblem(
+        "image_import_refused", WorkbenchProblemCategory.Unavailable,
+        false, "workbench.error.imageImportInvalid"));
+    }    catch (ClipboardBusyException)
     {
       return new WorkbenchCommandOutcome(
         [],

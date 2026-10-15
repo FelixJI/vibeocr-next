@@ -119,7 +119,8 @@ public sealed partial class MainWindow : Window
     Func<ManagedEnvironmentSession?>? smokeManagedSession = null,
     Func<int>? smokeInstallAttempts = null,
     ShellActionDispatcher? shellActions = null,
-    Func<CancellationToken, Task>? ensureRuntimeReady = null)
+    Func<CancellationToken, Task>? ensureRuntimeReady = null,
+    ISystemImportReader? systemImportReader = null)
   {
     this.diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
     this.layout = layout ?? throw new ArgumentNullException(nameof(layout));
@@ -167,7 +168,8 @@ public sealed partial class MainWindow : Window
       shellActions: shellActions,
       optionsLayout: layout, confirmPdfClose: ConfirmPdfCloseAsync,
       flushPdfPreview: FlushPdfPreviewAsync,
-      ensureRuntimeReady: ensureRuntimeReady);
+      ensureRuntimeReady: ensureRuntimeReady,
+      systemImportReader: systemImportReader);
     commandHandler.ScreenshotSessionReady += ShowImageEditor;
     commandHandler.ScreenshotCaptureStarting += OnScreenshotCaptureStarting;
     commandHandler.ScreenshotCaptureFinished += OnScreenshotCaptureFinished;
@@ -596,7 +598,11 @@ public sealed partial class MainWindow : Window
 
   private void OnDragOver(object sender, DragEventArgs args)
   {
-    if (args.DataView.Contains(StandardDataFormats.StorageItems))
+    // #232：文本拖放仅对图片编辑承载面有意义；其余路由维持既有文件语义。
+    if (args.DataView.Contains(StandardDataFormats.StorageItems) ||
+      ((args.DataView.Contains(StandardDataFormats.Text) ||
+        args.DataView.Contains(StandardDataFormats.Bitmap)) &&
+        application.CurrentRoute is WorkbenchRoute.ImageEdit or WorkbenchRoute.Recognition))
     {
       args.AcceptedOperation = DataPackageOperation.Copy;
     }
@@ -604,26 +610,37 @@ public sealed partial class MainWindow : Window
 
   private async void OnDrop(object sender, DragEventArgs args)
   {
+    var deferral = args.GetDeferral();
     try
     {
-      if (!args.DataView.Contains(StandardDataFormats.StorageItems))
+      // 活动编辑承载面：DataPackage 整体交给宿主导入命令（StorageItems/Text
+      // 优先级与授权由 C# 读取）；其余路由维持既有文件路径路由。
+      WorkbenchCommand command;
+      if (application.CurrentRoute is WorkbenchRoute.ImageEdit or WorkbenchRoute.Recognition)
       {
+        await webHost.ImportDroppedContentAsync(args.DataView, application.CurrentRoute);
         return;
       }
-      IReadOnlyList<IStorageItem> items = await args.DataView.GetStorageItemsAsync();
-      string[] paths = items.OfType<StorageFile>().Select(file => file.Path).ToArray();
-      if (paths.Length == 0)
+      else
       {
-        return;
+        if (!args.DataView.Contains(StandardDataFormats.StorageItems))
+        {
+          return;
+        }
+        IReadOnlyList<IStorageItem> items = await args.DataView.GetStorageItemsAsync();
+        string[] paths = items.OfType<StorageFile>().Select(file => file.Path).ToArray();
+        if (paths.Length == 0)
+        {
+          return;
+        }
+        command = application.CurrentRoute switch
+        {
+          WorkbenchRoute.Batch => new AddDroppedBatchFilesCommand(paths),
+          WorkbenchRoute.QrCode => new DecodeDroppedQrCodeCommand(paths[0]),
+          WorkbenchRoute.Pdf => new OpenDroppedPdfCommand(paths[0]),
+          _ => new RecognizeDroppedFileCommand(paths[0]),
+        };
       }
-      WorkbenchCommand command = application.CurrentRoute switch
-      {
-        WorkbenchRoute.ImageEdit => new OpenDroppedImageEditFileCommand(paths[0]),
-        WorkbenchRoute.Batch => new AddDroppedBatchFilesCommand(paths),
-        WorkbenchRoute.QrCode => new DecodeDroppedQrCodeCommand(paths[0]),
-        WorkbenchRoute.Pdf => new OpenDroppedPdfCommand(paths[0]),
-        _ => new RecognizeDroppedFileCommand(paths[0]),
-      };
       await application.ExecuteAsync(
         new WorkbenchCommandEnvelope(Guid.NewGuid(), command),
         CancellationToken.None);
@@ -633,6 +650,10 @@ public sealed partial class MainWindow : Window
     {
       AppLog.Error("Workbench file drop failed", error);
       RecoveryStatus.Text = "无法读取拖入的文件，请重新选择。";
+    }
+    finally
+    {
+      deferral.Complete();
     }
   }
 

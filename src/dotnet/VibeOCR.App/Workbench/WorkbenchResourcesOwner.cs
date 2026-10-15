@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -11,10 +12,11 @@ namespace VibeOCR.App.Workbench;
 
 internal sealed class WorkbenchResourcesOwner(WorkbenchResourceBroker resourceBroker, string resourceRoot)
 {
+  private readonly object gate = new();
   private readonly List<string> generatedFiles = [];
   private readonly Dictionary<string, string> resourceFiles = new(StringComparer.Ordinal);
   private readonly Dictionary<string, IReadOnlyList<WorkbenchResourceReference>> structuredResourceChildren = new(StringComparer.Ordinal);
-  internal readonly Dictionary<string, string> structuredResourceFiles = new(StringComparer.Ordinal);
+  private readonly Dictionary<string, string> structuredResourceFiles = new(StringComparer.Ordinal);
   internal Task<WorkbenchResourceReference?> PublishStructuredResultAsync(
     RecognitionViewModel viewModel,
     CancellationToken cancellationToken)
@@ -52,8 +54,11 @@ internal sealed class WorkbenchResourcesOwner(WorkbenchResourceBroker resourceBr
       await PublishFileAsync(
         Encoding.UTF8.GetBytes(json.ToJsonString()),
         "application/json; charset=utf-8", ".json", cancellationToken);
-    structuredResourceFiles[structured.Url] = structuredPath;
-    structuredResourceChildren[structured.Url] = [];
+    lock (gate)
+    {
+      structuredResourceFiles[structured.Url] = structuredPath;
+      structuredResourceChildren[structured.Url] = [];
+    }
     return structured;
   }
 
@@ -133,31 +138,41 @@ internal sealed class WorkbenchResourcesOwner(WorkbenchResourceBroker resourceBr
         await PublishFileAsync(
           Encoding.UTF8.GetBytes(json.ToJsonString()),
           "application/json; charset=utf-8", ".json", cancellationToken);
-      structuredResourceFiles[structured.Url] = structuredPath;
-      structuredResourceChildren[structured.Url] = children; adopted = true;
+      lock (gate)
+      {
+        structuredResourceFiles[structured.Url] = structuredPath;
+        structuredResourceChildren[structured.Url] = children; adopted = true;
+      }
       return structured;
     }
     finally { if (!adopted) foreach (WorkbenchResourceReference child in children) ReleaseResource(child); }
   }
 
+  internal bool TryGetStructuredFile(string resourceUri, [NotNullWhen(true)] out string? path)
+  {
+    lock (gate) return structuredResourceFiles.TryGetValue(resourceUri, out path);
+  }
   internal void ReleaseResource(WorkbenchResourceReference resource)
   {
-    structuredResourceFiles.Remove(resource.Url);
-    if (structuredResourceChildren.Remove(resource.Url, out var children))
-      foreach (WorkbenchResourceReference child in children) ReleaseResource(child);
-    if (!Uri.TryCreate(resource.Url, UriKind.Absolute, out Uri? uri)) return;
-    resourceBroker.Revoke(new WorkbenchResourceLease(uri, DateTimeOffset.MaxValue));
-    // Published input files belong to the app and are retained only while leased.
-    if (resourceFiles.TryGetValue(resource.Url, out string? path))
+    lock (gate)
     {
-      try
+      structuredResourceFiles.Remove(resource.Url);
+      if (structuredResourceChildren.Remove(resource.Url, out var children))
+        foreach (WorkbenchResourceReference child in children) ReleaseResource(child);
+      if (!Uri.TryCreate(resource.Url, UriKind.Absolute, out Uri? uri)) return;
+      resourceBroker.Revoke(new WorkbenchResourceLease(uri, DateTimeOffset.MaxValue));
+      // Published input files belong to the app and are retained only while leased.
+      if (resourceFiles.TryGetValue(resource.Url, out string? path))
       {
-        File.Delete(path);
-        resourceFiles.Remove(resource.Url);
-        generatedFiles.Remove(path);
+        try
+        {
+          File.Delete(path);
+          resourceFiles.Remove(resource.Url);
+          generatedFiles.Remove(path);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
       }
-      catch (IOException) { }
-      catch (UnauthorizedAccessException) { }
     }
   }
 
@@ -182,8 +197,11 @@ internal sealed class WorkbenchResourcesOwner(WorkbenchResourceBroker resourceBr
       await File.WriteAllBytesAsync(destination, data, cancellationToken);
       cancellationToken.ThrowIfCancellationRequested();
       WorkbenchResourceLease lease = resourceBroker.Lease(relative, mediaType, TimeSpan.FromHours(1));
-      generatedFiles.Add(destination);
-      resourceFiles[lease.Uri.AbsoluteUri] = destination;
+      lock (gate)
+      {
+        generatedFiles.Add(destination);
+        resourceFiles[lease.Uri.AbsoluteUri] = destination;
+      }
       return (new WorkbenchResourceReference(lease.Uri.AbsoluteUri, mediaType, data.LongLength), destination);
     }
     catch
@@ -204,12 +222,15 @@ internal sealed class WorkbenchResourcesOwner(WorkbenchResourceBroker resourceBr
 
   internal void Release()
   {
-    foreach (string file in generatedFiles)
+    lock (gate)
     {
-      try { File.Delete(file); }
-      catch (IOException) { }
-      catch (UnauthorizedAccessException) { }
+      foreach (string file in generatedFiles)
+      {
+        try { File.Delete(file); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+      }
+      generatedFiles.Clear(); structuredResourceFiles.Clear(); structuredResourceChildren.Clear();
     }
-    generatedFiles.Clear(); structuredResourceFiles.Clear(); structuredResourceChildren.Clear();
   }
 }

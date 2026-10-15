@@ -374,6 +374,22 @@ function commandProblemLabel(messageKey: string): string {
       "截图内容或会话已更新；请在新画面上重试复制、保存或识别。",
     "workbench.error.captureInProgress":
       "已有截图选区正在进行中；请先完成或取消当前选区，再重新触发。",
+    "workbench.error.imageImportInProgress":
+      "正在导入系统内容；请稍候或先完成当前导入。",
+    "workbench.error.imageImportSingleBaseline":
+      "空画布请先导入一张图片；多图批次未导入。",
+    "workbench.error.imageImportOpenFirst":
+      "请先打开或截取一张图片，再把系统内容粘贴为对象。",
+    "workbench.error.imageImportEmpty":
+      "系统剪贴板或拖入内容中没有可导入的图片或文本。",
+    "workbench.error.imageImportOversize":
+      "导入内容超出限制（单图 16 MiB/1600 万像素/8192 边，文本 4096 字符/128 行）；本批未导入，已有画布保持不变。",
+    "workbench.error.imageImportInvalid":
+      "导入内容格式无效或无法解码；本批未导入，已有画布保持不变。",
+    "workbench.error.imageImportRefused":
+      "本次导入被拒绝；已有画布保持不变，请调整内容后重试。",
+    "workbench.error.imageImportUnavailable":
+      "当前环境暂不支持读取系统内容导入。",
   };
   return messages[messageKey] ?? "当前操作被原生宿主拒绝，请检查状态后重试。";
 }

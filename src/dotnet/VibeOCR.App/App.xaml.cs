@@ -362,7 +362,8 @@ public sealed partial class App : Application
           () => _managedSession,
           () => Volatile.Read(ref _managedEnvironmentInstallAttempts),
           shellActions: _actionDispatcher,
-          ensureRuntimeReady: EnsureRuntimeReadyAsync);
+          ensureRuntimeReady: EnsureRuntimeReadyAsync,
+          systemImportReader: InputService.CreateImportReader());
         _window.AppWindow.Closing += OnAppWindowClosing;
         _window.Closed += OnWindowClosedFallback;
         _window.Activate();

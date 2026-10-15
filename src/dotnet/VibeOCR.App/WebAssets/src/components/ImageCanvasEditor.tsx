@@ -182,6 +182,7 @@ const TOOL_LABELS: Readonly<Record<Tool, string>> = {
   pen: "画笔",
   highlighter: "荧光笔",
   numbering: "序号",
+  image: "图片",
   exclude: "屏蔽",
   crop: "裁剪",
   inpaint: "去水印",
@@ -397,6 +398,24 @@ interface InpaintPreviewResult {
   readonly canvas: HTMLCanvasElement;
 }
 
+/** 宿主 #232 导入项描述符：图片/文本体一律经 opaque 资源获取，不内联。 */
+export interface EditorImportItem {
+  readonly kind: "image" | "text";
+  readonly assetId: string;
+  readonly resourceUri: string;
+  readonly byteLength: number;
+  readonly pixelWidth?: number;
+  readonly pixelHeight?: number;
+}
+
+/** 一次成功导入批次：绑定宿主会话/修订与请求 id，供幂等/迟到判定。 */
+export interface EditorImportDescriptor {
+  readonly requestId: string;
+  readonly sessionId: string;
+  readonly revision: number;
+  readonly items: readonly EditorImportItem[];
+}
+
 /** draw()/exportCanvas 共用的补丁绘制层：矩形为原图（未旋转）像素空间。 */
 export interface InpaintDrawLayer {
   readonly patches?: readonly {
@@ -427,7 +446,10 @@ type EditorCommandSuffix =
   | "cancelScreenshotTextLayer"
   | "copyScreenshotSelection"
   | "copyAnnotatedImage"
-  | "saveAnnotatedImage";
+  | "saveAnnotatedImage"
+  | "ackImport"
+  | "rejectImport"
+  | "releaseAssets";
 
 type EditorCommandMap = Readonly<
   Record<EditorCommandSuffix, `${EditorCommandScope}.${EditorCommandSuffix}`>
@@ -449,6 +471,9 @@ const EDITOR_COMMANDS: Readonly<Record<EditorCommandScope, EditorCommandMap>> =
       copyScreenshotSelection: "recognition.copyScreenshotSelection",
       copyAnnotatedImage: "recognition.copyAnnotatedImage",
       saveAnnotatedImage: "recognition.saveAnnotatedImage",
+      ackImport: "recognition.ackImport",
+      rejectImport: "recognition.rejectImport",
+      releaseAssets: "recognition.releaseAssets",
     },
     imageEdit: {
       notifyScreenshotRevision: "imageEdit.notifyScreenshotRevision",
@@ -462,6 +487,9 @@ const EDITOR_COMMANDS: Readonly<Record<EditorCommandScope, EditorCommandMap>> =
       copyScreenshotSelection: "imageEdit.copyScreenshotSelection",
       copyAnnotatedImage: "imageEdit.copyAnnotatedImage",
       saveAnnotatedImage: "imageEdit.saveAnnotatedImage",
+      ackImport: "imageEdit.ackImport",
+      rejectImport: "imageEdit.rejectImport",
+      releaseAssets: "imageEdit.releaseAssets",
     },
   };
 
@@ -476,6 +504,8 @@ interface ImageCanvasEditorProps {
   readonly sourceByteLength?: number;
   readonly session?: ScreenshotSessionHandle;
   readonly textLayer?: ScreenshotTextLayerState;
+  /** #232 宿主系统内容导入描述符：全部解码成功后一次 commit 追加对象。 */
+  readonly systemImport?: EditorImportDescriptor;
   readonly autoText?: boolean;
   readonly showAutoTextPreference?: boolean;
   readonly onAutoTextChange?: (enabled: boolean) => void;
@@ -875,6 +905,7 @@ export function ImageCanvasEditor({
   captureScene,
   session,
   textLayer,
+  systemImport,
   autoText: autoTextProp,
   showAutoTextPreference = true,
   onAutoTextChange,
@@ -889,6 +920,8 @@ export function ImageCanvasEditor({
   const proofreading = !!proofread && proofreadActive;
   const captureGeometry = captureScene;
   const contentRevisionRef = useRef(session?.revision ?? 0);
+  const importGenerationRef = useRef(0);
+  const importMountedRef = useRef(true);
   const presentation = useRef<CapturePixelPresentation | undefined>(undefined);
   const backdropRef = useRef<HTMLImageElement>(null);
   useEffect(() => {
@@ -963,7 +996,7 @@ export function ImageCanvasEditor({
     clipboardSnapshot?.source === source &&
     clipboardSnapshot.sessionId === (session?.sessionId ?? "")
       ? clipboardSnapshot.marks
-      : [];
+      : EMPTY.marks;
   const [offscreenIds, setOffscreenIds] = useState<ReadonlySet<string>>(
     new Set(),
   );
@@ -1250,6 +1283,7 @@ export function ImageCanvasEditor({
   useLayoutEffect(() => {
     if (resetResourcesKey.current === resetKey) return;
     resetResourcesKey.current = resetKey;
+    retireImportsRef.current();
     draftMark.current = undefined;
     cropDraft.current = undefined;
     dragStart.current = undefined;
@@ -1266,6 +1300,12 @@ export function ImageCanvasEditor({
     inpaintWorkerRef.current = undefined;
     inpaintPatchStore.current.clear();
     inpaintDraft.current = undefined;
+    // 换图/换会话：丢弃导入资产强引用与消费记录；宿主在会话替换时整体回收。
+    importAssetsRef.current.clear();
+    importAssetUrlsRef.current.clear();
+    consumedImportRequestsRef.current = new Set();
+    importGenerationRef.current += 1;
+    importInFlightRef.current = false;
   }, [resetKey, session?.revision, session?.sessionId]);
 
   // 冻结基准初始屏蔽：宿主随新基准回发归一化排除框时，映射回当前
@@ -1514,6 +1554,7 @@ export function ImageCanvasEditor({
             { patches: layer.patches, preview: layer.preview },
             undefined,
             false,
+            importAssetsRef.current,
           );
           cached = {
             canvas: base,
@@ -1555,6 +1596,8 @@ export function ImageCanvasEditor({
         false,
         layer,
         cached,
+        true,
+        importAssetsRef.current,
       );
       if (cropDraft.current) {
         drawCropPreview(canvas, cropDraft.current);
@@ -1637,11 +1680,290 @@ export function ImageCanvasEditor({
     }
   }, [history]);
 
-  // 卸载：终止在途 Worker 并释放补丁像素；不触碰宿主状态。
+  // #232 导入图片资产 store：按 assetId 强引用已解码位图，不进历史/桥；
+  // 撤销/重做/导出始终用内存位图，不依赖资源 TTL 后重新 GET。
+  const importAssetsRef = useRef(new Map<string, HTMLImageElement>());
+  const importAssetUrlsRef = useRef(new Map<string, string>());
+  const importInFlightRef = useRef(false);
+  const consumedImportRequestsRef = useRef<ReadonlySet<string>>(new Set());
+  const pendingImportRef = useRef<EditorImportDescriptor | undefined>(
+    undefined,
+  );
+  const retireImportsRef = useRef(retireImports);
+  // latest-ref：commit/cancelDrawing 是渲染期函数，直接列入导入 effect 依赖
+  // 会每帧重跑；经 ref 取最新渲染实现，async 回调始终拿到当前 historyIndex，
+  // 且导入前有修订不变校验，不会用旧闭包覆盖新内容。
+  const commitRef = useRef(commit);
+  const cancelDrawingRef = useRef(cancelDrawing);
+  useLayoutEffect(() => {
+    commitRef.current = commit;
+    cancelDrawingRef.current = cancelDrawing;
+    retireImportsRef.current = retireImports;
+  });
+
+  function retireImports(): void {
+    const pending = pendingImportRef.current;
+    pendingImportRef.current = undefined;
+    if (pending)
+      void actions.run({
+        type: commands.rejectImport,
+        sessionId: pending.sessionId,
+        revision: pending.revision,
+        requestId: pending.requestId,
+      });
+    const resourceUris = [...importAssetUrlsRef.current.values()];
+    importAssetUrlsRef.current.clear();
+    importAssetsRef.current.clear();
+    if (!sessionIdRef.current) return;
+    for (let offset = 0; offset < resourceUris.length; offset += 16)
+      void actions.run({
+        type: commands.releaseAssets,
+        sessionId: sessionIdRef.current,
+        resourceUris: resourceUris.slice(offset, offset + 16),
+      });
+  }
+  // 资产 GC：保留历史（含重做）与编辑器剪贴板引用；导入批次仅在 commit 时登记。释放
+  // 经宿主 releaseAssets 精确回收 owned 资源（幂等，分批 ≤16）。
   useEffect(() => {
+    if (!session) return;
+    const alive = new Set<string>();
+    for (const marks of [...history.map((entry) => entry.marks), clipboard]) {
+      for (const mark of marks) {
+        if (mark.tool === "image" && mark.assetId) alive.add(mark.assetId);
+      }
+    }
+    const released: string[] = [];
+    for (const assetId of [...importAssetsRef.current.keys()]) {
+      if (alive.has(assetId)) continue;
+      importAssetsRef.current.delete(assetId);
+      const url = importAssetUrlsRef.current.get(assetId);
+      importAssetUrlsRef.current.delete(assetId);
+      if (url) released.push(url);
+    }
+    for (let index = 0; index < released.length; index += 16) {
+      void actions.run({
+        type: commands.releaseAssets,
+        sessionId: session.sessionId,
+        resourceUris: released.slice(index, index + 16),
+      });
+    }
+  }, [history, clipboard, session, actions, commands.releaseAssets]);
+
+  // 宿主导入批次：会话/修订绑定校验 → 全部真实解码 → 一次 commit 追加
+  // 对象并选中；迟到/取消/解码失败/存在未完成草稿时拒收，旧画布不变。
+  useEffect(() => {
+    const descriptor = systemImport;
+    if (!descriptor || descriptor.items.length === 0) return;
+    // 重放幂等：同一请求只消费一次（撤销后也不重复追加）。
+    if (consumedImportRequestsRef.current.has(descriptor.requestId)) return;
+    consumedImportRequestsRef.current = new Set([
+      ...consumedImportRequestsRef.current,
+      descriptor.requestId,
+    ]);
+    const acknowledge = () =>
+      actions.run({
+        type: commands.ackImport,
+        sessionId: descriptor.sessionId,
+        revision: descriptor.revision,
+        requestId: descriptor.requestId,
+      });
+    const rejectImport = () =>
+      void actions.run({
+        type: commands.rejectImport,
+        sessionId: descriptor.sessionId,
+        revision: descriptor.revision,
+        requestId: descriptor.requestId,
+      });
+    if (
+      !session ||
+      session.sessionId !== descriptor.sessionId ||
+      contentRevisionRef.current !== descriptor.revision ||
+      importInFlightRef.current
+    ) {
+      rejectImport();
+      return;
+    }
+    importInFlightRef.current = true;
+    pendingImportRef.current = descriptor;
+    const generation = importGenerationRef.current;
+    void (async () => {
+      try {
+        const decodedImages: { assetId: string; image: HTMLImageElement }[] =
+          [];
+        for (const item of descriptor.items) {
+          if (item.kind !== "image") continue;
+          const image = await new Promise<HTMLImageElement>((resolve, fail) => {
+            const element = new Image();
+            element.decoding = "async";
+            element.onload = () => resolve(element);
+            element.onerror = () =>
+              fail(new Error("import image decode failed"));
+            element.src = item.resourceUri;
+          });
+          decodedImages.push({ assetId: item.assetId, image });
+        }
+        const decodedTexts: { assetId: string; text: string }[] = [];
+        for (const item of descriptor.items) {
+          if (item.kind !== "text") continue;
+          const response = await fetch(item.resourceUri, {
+            cache: "no-store",
+            credentials: "omit",
+          });
+          if (!response.ok) throw new Error("import text fetch failed");
+          decodedTexts.push({
+            assetId: item.assetId,
+            text: await response.text(),
+          });
+        }
+        // 全部 decode 成功后一次 commit；期间任何修订/草稿变化都拒收，
+        // 不自动丢弃用户未完成的文字/折线/修补草稿。
+        if (
+          !importMountedRef.current ||
+          generation !== importGenerationRef.current ||
+          !session ||
+          session.sessionId !== descriptor.sessionId ||
+          contentRevisionRef.current !== descriptor.revision ||
+          textEditingRef.current ||
+          draftMark.current ||
+          cropDraft.current ||
+          inpaintDraft.current ||
+          moveDragRef.current ||
+          markDragRef.current ||
+          objectDraftRef.current ||
+          cropResizeRef.current ||
+          marqueeRef.current
+        ) {
+          rejectImport();
+          if (
+            importMountedRef.current &&
+            generation === importGenerationRef.current
+          )
+            setOperationMessage(
+              "导入期间画布已变化或存在未完成草稿；本批未导入，画布保持原状。",
+            );
+          return;
+        }
+        const canvas = canvasRef.current;
+        const size = canvas ? canvasSize(canvas) : { width: 900, height: 600 };
+        const imported: Mark[] = [];
+        let offset = 0;
+        for (const decoded of decodedImages) {
+          const naturalWidth = decoded.image.naturalWidth || 1;
+          const naturalHeight = decoded.image.naturalHeight || 1;
+          const fit = Math.min(
+            1,
+            (Math.min(size.width, size.height) * 0.5) /
+              Math.max(naturalWidth, naturalHeight),
+          );
+          const width = Math.max(1, naturalWidth * fit);
+          const height = Math.max(1, naturalHeight * fit);
+          const centerX = size.width / 2 + offset;
+          const centerY = size.height / 2 + offset;
+          imported.push({
+            id: nextMarkId(),
+            tool: "image",
+            assetId: decoded.assetId,
+            start: {
+              x: centerX - width / 2,
+              y: centerY - height / 2,
+            },
+            end: {
+              x: centerX + width / 2,
+              y: centerY + height / 2,
+            },
+          });
+          offset += 24;
+        }
+        for (const entry of decodedTexts) {
+          imported.push({
+            id: nextMarkId(),
+            tool: "text",
+            text: entry.text,
+            // 0 = 自然字形宽（#230 契约）：多行按 lineHeight 展开，端点仅作锚点。
+            textWidth: 0,
+            start: {
+              x: size.width / 2 + offset,
+              y: size.height / 2 + offset,
+            },
+            end: {
+              x: size.width / 2 + offset,
+              y: size.height / 2 + offset,
+            },
+          });
+          offset += 24;
+        }
+        // 资产强引用先登记：commit 后历史立即引用，GC 不会误回收。
+        for (const decoded of decodedImages) {
+          importAssetsRef.current.set(decoded.assetId, decoded.image);
+          const descriptor2 = descriptor.items.find(
+            (item) => item.assetId === decoded.assetId,
+          );
+          if (descriptor2)
+            importAssetUrlsRef.current.set(
+              decoded.assetId,
+              descriptor2.resourceUri,
+            );
+        }
+        cancelDrawingRef.current();
+        commitRef.current({
+          ...state,
+          marks: [...state.marks, ...imported],
+        });
+        setObjectSelection({
+          ids: new Set(imported.map((mark) => mark.id)),
+          primary: imported[imported.length - 1]?.id,
+        });
+        if (await acknowledge()) {
+          // 文字已复制进对象与历史，不再需要宿主资源；图片由历史/剪贴板 GC 回收。
+          const resourceUris = descriptor.items
+            .filter(
+              (item) =>
+                item.kind === "text" ||
+                !importMountedRef.current ||
+                generation !== importGenerationRef.current,
+            )
+            .map((item) => item.resourceUri);
+          if (resourceUris.length)
+            await actions.run({
+              type: commands.releaseAssets,
+              sessionId: descriptor.sessionId,
+              resourceUris,
+            });
+        }
+        if (
+          importMountedRef.current &&
+          generation === importGenerationRef.current
+        )
+          setOperationMessage(
+            `已导入 ${imported.length} 个对象；可撤销，其余画布内容不变。`,
+          );
+      } catch {
+        rejectImport();
+        if (
+          importMountedRef.current &&
+          generation === importGenerationRef.current
+        )
+          setOperationMessage("导入内容解码失败；本批未导入，画布保持原状。");
+      } finally {
+        if (pendingImportRef.current?.requestId === descriptor.requestId)
+          pendingImportRef.current = undefined;
+        if (generation === importGenerationRef.current)
+          importInFlightRef.current = false;
+      }
+    })();
+  }, [systemImport, session, actions, commands, state]);
+
+  // 卸载：终止 Worker、释放补丁像素，并退役本编辑器持有的导入资源。
+  useEffect(() => {
+    importMountedRef.current = true;
     const store = inpaintPatchStore.current;
     const workerRef = inpaintWorkerRef;
     return () => {
+      importMountedRef.current = false;
+      // StrictMode 的探测卸载会立即重新挂载；仅真实退役才释放宿主资源。
+      queueMicrotask(() => {
+        if (!importMountedRef.current) retireImportsRef.current();
+      });
       inpaintGenerationRef.current += 1;
       workerRef.current?.terminate();
       workerRef.current = undefined;
@@ -1688,6 +2010,7 @@ export function ImageCanvasEditor({
         format: outputFormat,
         quality: jpegQuality,
         inpaint: { patches: appliedInpaintPatches() },
+        imageAssets: importAssetsRef.current,
       });
       if (textEditingRef.current || !exportContextUnchanged(frozen)) {
         setOperationMessage("检查期间内容或设置已变化，请重新检查。");
@@ -3239,6 +3562,7 @@ export function ImageCanvasEditor({
       quality: jpegQuality,
       inpaint: { patches: appliedInpaintPatches() },
       bakeExclusions,
+      imageAssets: importAssetsRef.current,
     });
     const resourceUri = await uploadAnnotatedImage(blob);
     if (textEditingRef.current || !exportContextUnchanged(frozen)) {
@@ -5757,6 +6081,8 @@ function draw(
   inpaintLayer?: InpaintDrawLayer,
   cached?: { canvas: HTMLCanvasElement; markCount: number },
   overlays = true,
+  /** #232 导入图片资产（assetId → 已解码位图）；缺失的资产不绘制。 */
+  imageAssets?: ReadonlyMap<string, CanvasImageSource>,
 ) {
   const context = canvas?.getContext("2d");
   if (!canvas || !context) return;
@@ -5853,6 +6179,27 @@ function draw(
   context.strokeStyle = "#f38b35";
   marks.forEach((mark, index) => {
     if (index < (cached?.markCount ?? 0)) return;
+    if (mark.tool === "image") {
+      const source = mark.assetId ? imageAssets?.get(mark.assetId) : undefined;
+      const x = Math.min(mark.start.x, mark.end.x);
+      const y = Math.min(mark.start.y, mark.end.y);
+      const width = Math.abs(mark.end.x - mark.start.x);
+      const height = Math.abs(mark.end.y - mark.start.y);
+      if (source && width > 0 && height > 0) {
+        context.save();
+        context.setLineDash([]);
+        if (mark.rotation || mark.flipX || mark.flipY) {
+          const centerX = x + width / 2;
+          const centerY = y + height / 2;
+          context.translate(centerX, centerY);
+          context.rotate(((mark.rotation ?? 0) * Math.PI) / 180);
+          context.scale(mark.flipX ? -1 : 1, mark.flipY ? -1 : 1);
+          context.translate(-centerX, -centerY);
+        }
+        context.drawImage(source, x, y, width, height);
+        context.restore();
+      }
+    }
     const width = mark.end.x - mark.start.x;
     const height = mark.end.y - mark.start.y;
     const color = mark.style?.color ?? DEFAULT_COLOR;
@@ -6511,6 +6858,8 @@ interface ExportCanvasOptions {
   readonly inpaint?: InpaintDrawLayer;
   /** 识别/屏蔽副本输入：把排除区写入不透明白色像素；普通导出保持 false。 */
   readonly bakeExclusions?: boolean;
+  /** #232 导入图片资产：与显示同一分派绘制，导出像素含导入对象。 */
+  readonly imageAssets?: ReadonlyMap<string, CanvasImageSource>;
 }
 
 /** 编码器必须真实产出目标格式：类型与文件签名不一致时拒绝，不得只改后缀。 */
@@ -6580,6 +6929,9 @@ async function exportCanvas(
     options.format === "image/jpeg" ? "#ffffff" : undefined,
     options.bakeExclusions === true,
     { patches: options.inpaint?.patches },
+    undefined,
+    true,
+    options.imageAssets,
   );
 
   const mappedCrop = state.crop
