@@ -1,4 +1,10 @@
 import { expect, test } from "@playwright/test";
+import {
+  monitorEventLoopDelay,
+  performance as nodePerformance,
+  PerformanceObserver,
+  type PerformanceEntry,
+} from "node:perf_hooks";
 import type { HostCommand } from "../src/bridge/client";
 import {
   expectCommand,
@@ -91,12 +97,46 @@ for (const size of [
       ["settings", "设置"],
       ["diagnostics", "关于与诊断"],
     ] as const) {
+      const gcEvents: { startedAt: number; durationMs: number }[] = [];
+      const recordGc = (entries: readonly PerformanceEntry[]) => {
+        for (const entry of entries) {
+          gcEvents.push({
+            startedAt: entry.startTime,
+            durationMs: entry.duration,
+          });
+          gcEvents.sort((left, right) => right.durationMs - left.durationMs);
+          gcEvents.splice(8);
+        }
+      };
+      const gcObserver = new PerformanceObserver((list) =>
+        recordGc(list.getEntries()),
+      );
+      const loopDelay = monitorEventLoopDelay({ resolution: 20 });
+      const nodeTiming = {
+        navigationStartedAt: nodePerformance.now(),
+        assertionStartedAt: null as number | null,
+        assertionEndedAt: null as number | null,
+      };
+      gcObserver.observe({ entryTypes: ["gc"] });
+      loopDelay.enable();
       try {
         await page.getByRole("link", { name, exact: true }).click();
-        await expect(
-          page.getByRole("heading", { level: 1, name, exact: false }),
-        ).toBeVisible();
+        nodeTiming.assertionStartedAt = nodePerformance.now();
+        try {
+          await expect(
+            page.getByRole("heading", { level: 1, name, exact: false }),
+          ).toBeVisible();
+        } finally {
+          nodeTiming.assertionEndedAt = nodePerformance.now();
+        }
       } catch (error) {
+        recordGc(gcObserver.takeRecords());
+        const nodeEvidence = {
+          ...nodeTiming,
+          observedAt: nodePerformance.now(),
+          eventLoopDelayMaxMs: loopDelay.max / 1_000_000,
+          gcEvents: gcEvents.slice(),
+        };
         try {
           const evidence = await page.evaluate((expectedRoute) => {
             const host = window as Window & {
@@ -179,7 +219,11 @@ for (const size of [
             .catch(() => "角色快照不可用");
           console.error(
             "[navigation-failure]",
-            JSON.stringify({ ...evidence, headingRoles }),
+            JSON.stringify({
+              ...evidence,
+              nodeTiming: nodeEvidence,
+              headingRoles,
+            }),
           );
         } catch (diagnosticError) {
           console.error(
@@ -188,6 +232,9 @@ for (const size of [
           );
         }
         throw error;
+      } finally {
+        loopDelay.disable();
+        gcObserver.disconnect();
       }
       expect(
         await page.evaluate(() => document.documentElement.scrollWidth),

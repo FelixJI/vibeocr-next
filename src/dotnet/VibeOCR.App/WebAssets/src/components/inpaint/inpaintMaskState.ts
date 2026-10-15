@@ -241,6 +241,31 @@ export function applyMaskBrush(
   return { ok: true, state: result };
 }
 
+/** 按补丁 id 去重统计保留的历史前缀；默认包含全部撤销/重做引用。
+ * 新提交传入当前游标，排除将被截断的重做分支；存储由历史 GC 回收。
+ * 此数值只约束唯一补丁像素，不代表浏览器或进程的内存峰值。 */
+export function totalDistinctPatchPixels(
+  entries: readonly {
+    readonly patches?: readonly {
+      readonly id: number;
+      readonly width: number;
+      readonly height: number;
+    }[];
+  }[],
+  retainedThrough = entries.length - 1,
+): number {
+  const seen = new Set<number>();
+  let total = 0;
+  for (const entry of entries.slice(0, retainedThrough + 1)) {
+    for (const patch of entry.patches ?? []) {
+      if (seen.has(patch.id)) continue;
+      seen.add(patch.id);
+      total += patch.width * patch.height;
+    }
+  }
+  return total;
+}
+
 /** 掩膜紧致包围盒（无有效像素时 undefined）。 */
 export function maskBounds(
   state: InpaintMaskState | undefined,

@@ -19,7 +19,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { createPortal } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import type { AppActions } from "../app/types";
 
 import {
@@ -29,6 +29,7 @@ import {
 import {
   annotationFill,
   annotationStrokeAlpha,
+  annotationStrokeWidth,
   constrainBoxDrag,
   constrainLineDrag,
   exclusionCoversOutput,
@@ -54,18 +55,48 @@ import {
   type Point,
 } from "./annotationGeometry";
 import {
+  alignMarkIds,
+  cloneMarks,
+  deleteMarkIds,
+  distributeMarkIds,
+  expandGroupSelection,
+  groupMarkIds,
+  markBoundsOf,
+  markOffscreen,
+  marksContainedInRect,
+  mirrorMarkIds,
+  moveMarkIds,
+  reorderMarkIds,
+  rotateMarkIds,
+  scaleMarkIds,
+  selectionBounds,
+  selectionUnits,
+  setMarkLocked,
+  ungroupMarkIds,
+  unlockedMarkIds,
+  type ObjectAlign,
+  type ObjectDistributeAxis,
+  type ObjectZOrder,
+} from "./annotationObjects";
+import {
   AnnotationNumberInput,
   AnnotationTextPanel,
 } from "./AnnotationTextPanel";
 import {
-  calloutLeaderSegment,
+  calloutLeaderPaths,
   nextNumberOrdinal,
   drawTextAnnotation,
-  textAnnotationBounds,
+  textAnnotationLocalBounds,
+  transformTextPoint,
   isFontMark,
   isContentMark,
   resolveAnnotationFont,
 } from "./annotationText";
+import {
+  annotationArrowGeometry,
+  annotationPaths,
+  hitStrokePaths,
+} from "./annotationStrokeGeometry";
 import { uploadAnnotatedImage } from "./annotationHandoff";
 import { captureSceneStyle } from "./captureSceneLayout";
 import type { CaptureScene } from "../bridge/captureScene";
@@ -100,6 +131,7 @@ import {
   applyMaskRect,
   maskBounds,
   maskCount,
+  totalDistinctPatchPixels,
   type InpaintMaskOpResult,
   type InpaintMaskState,
 } from "./inpaint/inpaintMaskState";
@@ -597,6 +629,7 @@ function AnnotationStylePanel({
   activeFillOpacity,
   eyedropperAvailable,
   eyedropperBusy,
+  styleTargetId,
   onPickColor,
   onStyleChange,
 }: {
@@ -618,12 +651,21 @@ function AnnotationStylePanel({
   readonly activeFillOpacity: number;
   readonly eyedropperAvailable: boolean;
   readonly eyedropperBusy: boolean;
+  /** 就地编辑目标对象 id：草稿开始时冻结，blur 提交带回，防止画布
+   * pointerdown 已切换选区后把草稿写进新对象。 */
+  readonly styleTargetId: string | undefined;
   readonly onPickColor: () => void;
-  readonly onStyleChange: (change: StyleChange) => void;
+  readonly onStyleChange: (
+    change: StyleChange,
+    targetId?: string | null,
+  ) => void;
 }) {
   // 数值输入草稿仅存在于此面板：焦点内自由编辑，blur/Enter 才提交。
+  // targetId 随草稿冻结：即便提交前焦点被画布点击夺走，也写入当时
+  // 正在编辑的对象，而不是重新解析的当前选区。
   const [opacityDraft, setOpacityDraft] = useState<
-    { kind: "stroke" | "fill"; raw: string } | undefined
+    | { kind: "stroke" | "fill"; raw: string; targetId: string | null }
+    | undefined
   >();
   if (
     !showColorControl &&
@@ -693,6 +735,13 @@ function AnnotationStylePanel({
                 })
               }
             >
+              {Number.isFinite(activeStrokeWidth) &&
+                activeStrokeWidth > 0 &&
+                !STROKE_WIDTHS.some((width) => width === activeStrokeWidth) && (
+                  <option value={String(activeStrokeWidth)}>
+                    {activeStrokeWidth}px
+                  </option>
+                )}
               {STROKE_WIDTHS.map((width) => (
                 <option key={width} value={String(width)}>
                   {width}px
@@ -710,13 +759,24 @@ function AnnotationStylePanel({
               onBlur={() => {
                 if (opacityDraft?.kind === "stroke")
                   commitOpacityInput(opacityDraft.raw, (value) =>
-                    onStyleChange({ kind: "strokeOpacity", value }),
+                    onStyleChange(
+                      { kind: "strokeOpacity", value },
+                      opacityDraft.targetId,
+                    ),
                   );
                 setOpacityDraft(undefined);
               }}
-              onChange={(_, data) =>
-                setOpacityDraft({ kind: "stroke", raw: data.value })
-              }
+              onChange={(_, data) => {
+                setOpacityDraft((current) =>
+                  current?.kind === "stroke"
+                    ? { ...current, raw: data.value }
+                    : {
+                        kind: "stroke",
+                        raw: data.value,
+                        targetId: styleTargetId ?? null,
+                      },
+                );
+              }}
               onKeyDown={(event) => {
                 if (event.key === "Enter") event.currentTarget.blur();
               }}
@@ -770,6 +830,15 @@ function AnnotationStylePanel({
               onStyleChange({ kind: "cornerRadius", value: Number(data.value) })
             }
           >
+            {Number.isFinite(activeCornerRadius) &&
+              activeCornerRadius >= 0 &&
+              !RECT_CORNER_RADII.some(
+                (radius) => radius === activeCornerRadius,
+              ) && (
+                <option value={String(activeCornerRadius)}>
+                  {activeCornerRadius}px
+                </option>
+              )}
             {RECT_CORNER_RADII.map((radius) => (
               <option key={radius} value={String(radius)}>
                 {radius === 0 ? "直角" : `${radius}px`}
@@ -860,13 +929,24 @@ function AnnotationStylePanel({
                   onBlur={() => {
                     if (opacityDraft?.kind === "fill")
                       commitOpacityInput(opacityDraft.raw, (value) =>
-                        onStyleChange({ kind: "fillOpacity", value }),
+                        onStyleChange(
+                          { kind: "fillOpacity", value },
+                          opacityDraft.targetId,
+                        ),
                       );
                     setOpacityDraft(undefined);
                   }}
-                  onChange={(_, data) =>
-                    setOpacityDraft({ kind: "fill", raw: data.value })
-                  }
+                  onChange={(_, data) => {
+                    setOpacityDraft((current) =>
+                      current?.kind === "fill"
+                        ? { ...current, raw: data.value }
+                        : {
+                            kind: "fill",
+                            raw: data.value,
+                            targetId: styleTargetId ?? null,
+                          },
+                    );
+                  }}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") event.currentTarget.blur();
                   }}
@@ -955,29 +1035,76 @@ export function ImageCanvasEditor({
     sceneViewport.height,
   );
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [displayCanvas, setDisplayCanvas] = useState<HTMLCanvasElement | null>(
+    null,
+  );
+  const attachCanvas = useCallback((canvas: HTMLCanvasElement | null) => {
+    canvasRef.current = canvas;
+    setDisplayCanvas(canvas);
+  }, []);
   const viewportRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement | undefined>(undefined);
   const dragStart = useRef<Point | undefined>(undefined);
   const selectionDragBounds = useRef<DOMRect | undefined>(undefined);
-  const selectedMarkRef = useRef<number | undefined>(undefined);
+  // 稳定对象 id：单调计数，不随撤销/重置回退，历史内 id 永不复用。
+  const nextMarkIdRef = useRef(0);
+  const nextGroupIdRef = useRef(0);
+  function nextMarkId(): string {
+    nextMarkIdRef.current += 1;
+    return `mark-${nextMarkIdRef.current}`;
+  }
+  function nextGroupId(): string {
+    nextGroupIdRef.current += 1;
+    return `group-${nextGroupIdRef.current}`;
+  }
+  // 编辑器内对象剪贴板：仅存对象快照，不接系统剪贴板/桥（232 另行导入）。
+  const [clipboardSnapshot, setClipboardSnapshot] = useState<{
+    source: string;
+    sessionId: string;
+    marks: readonly Mark[];
+  }>();
+  const clipboard =
+    clipboardSnapshot?.source === source &&
+    clipboardSnapshot.sessionId === (session?.sessionId ?? "")
+      ? clipboardSnapshot.marks
+      : [];
+  const [offscreenIds, setOffscreenIds] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
   const exportInProgressRef = useRef(false);
-  // 选定标记的几何编辑拖拽：origin 冻结拖前几何，resizeDraft 驱动实时预览。
+  // 选定对象的几何编辑拖拽：origin 冻结拖前几何，objectDraft 驱动实时预览。
   // resize = 矩形类（矩形/椭圆/屏蔽）八点缩放；endpoint = 直线/箭头端点。
   const markDragRef = useRef<
     | {
         readonly kind: "resize";
-        readonly index: number;
+        readonly id: string;
         readonly handle: ExclusionResizeHandle;
         readonly origin: Mark;
+        readonly revision: number;
       }
     | {
         readonly kind: "endpoint";
-        readonly index: number;
+        readonly id: string;
         readonly endpoint: "start" | "end";
         readonly origin: Mark;
+        readonly revision: number;
       }
     | undefined
   >(undefined);
+  // 整选区平移拖拽：冻结拖前对象集合与开始修订，提交前校验。
+  const moveDragRef = useRef<
+    | {
+        readonly ids: readonly string[];
+        readonly origins: readonly Mark[];
+        readonly hitId: string;
+        readonly revision: number;
+      }
+    | undefined
+  >(undefined);
+  // 空白处框选草稿：松开时完整包含的未锁定对象入选择。
+  const marqueeRef = useRef<{ start: Point; end: Point } | undefined>(
+    undefined,
+  );
   // 选区（裁剪框）四边/四角拖拽：origin 冻结拖前矩形，cropDraft 驱动实时预览。
   const cropResizeRef = useRef<
     | {
@@ -1006,15 +1133,17 @@ export function ImageCanvasEditor({
     | undefined
   >(undefined);
   const [annotationText, setAnnotationText] = useState("文本");
-  const [textEdit, setTextEdit] = useState<{ index: number; mark: Mark }>();
+  const [textEdit, setTextEdit] = useState<{ id: string; mark: Mark }>();
   const textInputRef = useRef<HTMLTextAreaElement>(null);
   const textComposing = useRef(false);
   const textEditingRef = useRef(false);
-  textEditingRef.current = !!textEdit;
-  const textEditingIndex = textEdit?.index;
+  useLayoutEffect(() => {
+    textEditingRef.current = !!textEdit;
+  }, [textEdit]);
+  const textEditingId = textEdit?.id;
   useEffect(() => {
-    if (textEditingIndex !== undefined) textInputRef.current?.focus();
-  }, [textEditingIndex]);
+    if (textEditingId !== undefined) textInputRef.current?.focus();
+  }, [textEditingId]);
   // 各工具属性记忆：每个工具独立记录自己消费的属性，切换工具互不覆盖；
   // 未记录时回退默认值；“重置属性”删除当前工具条目回到默认。
   const [toolAttributes, setToolAttributes] = useState<
@@ -1042,7 +1171,23 @@ export function ImageCanvasEditor({
     () => typeof (window as WindowWithEyeDropper).EyeDropper === "function",
   );
   const [eyedropperBusy, setEyedropperBusy] = useState(false);
-  const [selectedMark, setSelectedMark] = useState<number | undefined>();
+  // 多选状态：稳定 id 集合 + 主选（最后点入者，承载手柄/就地属性编辑）。
+  interface ObjectSelectionState {
+    readonly ids: ReadonlySet<string>;
+    readonly primary: string | undefined;
+  }
+  const NO_SELECTION: ObjectSelectionState = {
+    ids: new Set<string>(),
+    primary: undefined,
+  };
+  const [objectSelection, setObjectSelection] =
+    useState<ObjectSelectionState>(NO_SELECTION);
+  const selectionRef = useRef(objectSelection);
+  useLayoutEffect(() => {
+    selectionRef.current = objectSelection;
+  }, [objectSelection]);
+  const selectedMark: string | undefined = objectSelection.primary;
+  const selectedIds: ReadonlySet<string> = objectSelection.ids;
   const [history, setHistory] = useState<readonly EditorState[]>([EMPTY]);
   const [historyIndex, setHistoryIndex] = useState(0);
   const [imageRevision, setImageRevision] = useState(0);
@@ -1050,6 +1195,7 @@ export function ImageCanvasEditor({
   const [decodedSourceSize, setDecodedSourceSize] = useState<{
     source: string;
     size: CanvasSize;
+    image: HTMLImageElement;
   }>();
   const sourceSize =
     decodedSourceSize?.source === source ? decodedSourceSize.size : undefined;
@@ -1075,6 +1221,19 @@ export function ImageCanvasEditor({
   >(undefined);
   const draftMark = useRef<Mark | undefined>(undefined);
   const draftPoints = useRef<Point[]>([]);
+  function scheduleDraw() {
+    if (pendingDraw.current !== undefined) return;
+    pendingDraw.current = requestAnimationFrame(() => {
+      pendingDraw.current = undefined;
+      try {
+        latestDraw.current();
+      } catch (error) {
+        if (presentation.current) presentation.current.fail("draw");
+        else throw error;
+      }
+    });
+  }
+
   function setDraftMark(
     value: Mark | undefined | ((current: Mark | undefined) => Mark | undefined),
   ) {
@@ -1185,19 +1344,18 @@ export function ImageCanvasEditor({
       }
     | undefined
   >(undefined);
-  const resizeDraft = useRef<
-    { readonly index: number; readonly mark: Mark } | undefined
+  // 对象拖拽预览覆盖：按 id 覆盖拖动中的对象（缩放/端点/整选区平移共用），
+  // 记录开始修订，提交前校验防止串入过期状态。
+  const objectDraftRef = useRef<
+    | { readonly byId: ReadonlyMap<string, Mark>; readonly revision: number }
+    | undefined
   >(undefined);
-  function setResizeDraft(
+  function setObjectDraft(
     value:
-      | { readonly index: number; readonly mark: Mark }
-      | undefined
-      | ((
-          current: { readonly index: number; readonly mark: Mark } | undefined,
-        ) => { readonly index: number; readonly mark: Mark } | undefined),
+      | { readonly byId: ReadonlyMap<string, Mark>; readonly revision: number }
+      | undefined,
   ) {
-    resizeDraft.current =
-      typeof value === "function" ? value(resizeDraft.current) : value;
+    objectDraftRef.current = value;
     scheduleDraw();
   }
   // 本地修订：编辑提交即时推进，不等宿主回显；文字层绑定据此立即失效。
@@ -1227,6 +1385,18 @@ export function ImageCanvasEditor({
   const state = history[historyIndex] ?? EMPTY;
   const hasExclusions = state.marks.some(isExclusionMark);
 
+  // 取字模式：仅当宿主层就绪且绑定与当前本地修订一致时展示；
+  // 显示的图像就是识别输入的同一最终 PNG，不拿旧层映射。
+  const layerImageRef = textLayer?.image;
+  const layerImageUrl = layerImageRef?.url;
+  const layerReady =
+    tool === "textSelect" &&
+    textLayer?.status === "textlayer.ready" &&
+    !!textLayer.binding &&
+    textLayer.binding.sessionId === session?.sessionId &&
+    textLayer.binding.revision === localRevision &&
+    !!layerImageUrl;
+
   // 换图（新截图、新输入文件或迟到源替换）或会话切换时重置编辑历史：
   // 旧图标注/裁剪不得导出到新图。按 React 推荐在渲染期随 props 调整状态，
   // 而不是在 effect 中级联 setState。
@@ -1237,25 +1407,10 @@ export function ImageCanvasEditor({
     setAppliedResetKey(resetKey);
     setHistory([EMPTY]);
     setHistoryIndex(0);
-    setDraftMark(undefined);
-    setCropDraft(undefined);
-    dragStart.current = undefined;
     setTextEdit(undefined);
-    textComposing.current = false;
-    markDragRef.current = undefined;
-    cropResizeRef.current = undefined;
-    setResizeDraft(undefined);
-    selectedMarkRef.current = undefined;
-    setSelectedMark(undefined);
-    sessionIdRef.current = session?.sessionId;
-    contentRevisionRef.current = session?.revision ?? 0;
+    setObjectSelection(NO_SELECTION);
     setLocalRevision(session?.revision ?? 0);
     // 换图/换会话：作废在途修补请求与迟到响应，丢弃全部补丁像素。
-    inpaintGenerationRef.current += 1;
-    inpaintWorkerRef.current?.terminate();
-    inpaintWorkerRef.current = undefined;
-    inpaintPatchStore.current.clear();
-    setInpaintDraft(undefined);
     setInpaintSelection(undefined);
     setInpaintPreview(undefined);
     setInpaintBusy(false);
@@ -1272,6 +1427,27 @@ export function ImageCanvasEditor({
     setDupmatchAccepted(undefined);
     setDupmatchBusy(false);
   }
+  const resetResourcesKey = useRef<string | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (resetResourcesKey.current === resetKey) return;
+    resetResourcesKey.current = resetKey;
+    draftMark.current = undefined;
+    cropDraft.current = undefined;
+    dragStart.current = undefined;
+    textComposing.current = false;
+    markDragRef.current = undefined;
+    cropResizeRef.current = undefined;
+    objectDraftRef.current = undefined;
+    moveDragRef.current = undefined;
+    marqueeRef.current = undefined;
+    sessionIdRef.current = session?.sessionId;
+    contentRevisionRef.current = session?.revision ?? 0;
+    inpaintGenerationRef.current += 1;
+    inpaintWorkerRef.current?.terminate();
+    inpaintWorkerRef.current = undefined;
+    inpaintPatchStore.current.clear();
+    inpaintDraft.current = undefined;
+  }, [resetKey, session?.revision, session?.sessionId]);
 
   // 冻结基准初始屏蔽：宿主随新基准回发归一化排除框时，映射回当前
   // 显示空间重建初始 exclude 标记（可编辑/可清除）；仅在基准变化时执行
@@ -1304,6 +1480,7 @@ export function ImageCanvasEditor({
     }
     const fresh: EditorState = { rotation: 0, marks: [] };
     const marks = boxes.map((box) => ({
+      id: nextMarkId(),
       tool: "exclude" as const,
       ...exclusionDisplayPoints(box, image, fresh, canvasSize(canvas)),
     }));
@@ -1373,6 +1550,7 @@ export function ImageCanvasEditor({
       }
       imageRef.current = image;
       setDecodedSourceSize({
+        image,
         source,
         size: { width: image.naturalWidth, height: image.naturalHeight },
       });
@@ -1392,28 +1570,18 @@ export function ImageCanvasEditor({
 
   // 去水印绘制层：应用补丁从存储解析；预览仅在对比为“修补后”时叠加；
   // 选区高亮按映射后的有效范围回投显示，用户看到的就是实际修改范围。
-  const displayCanvasRef = canvasRef.current;
-  const imageForLayer = imageRef.current;
-  // 已应用补丁只随编辑历史变化；导出/预览编码共用同一份解析结果。
-  const appliedInpaintPatches = useMemo<
-    readonly { rect: PixelPatch; canvas: HTMLCanvasElement }[]
-  >(
-    () =>
-      (state.patches ?? [])
-        .map((patch) => ({
-          rect: patch,
-          canvas: inpaintPatchStore.current.get(patch.id),
-        }))
-        .filter(
-          (
-            entry,
-          ): entry is {
-            rect: PixelPatch;
-            canvas: HTMLCanvasElement;
-          } => !!entry.canvas,
-        ),
-    [state],
-  );
+  const imageForLayer =
+    decodedSourceSize?.source === source ? decodedSourceSize.image : undefined;
+  function appliedInpaintPatches(): readonly {
+    rect: PixelPatch;
+    canvas: HTMLCanvasElement;
+  }[] {
+    return (state.patches ?? []).flatMap((rect) => {
+      const canvas = inpaintPatchStore.current.get(rect.id);
+      return canvas ? [{ rect, canvas }] : [];
+    });
+  }
+
   function currentInpaintLayer(): InpaintDrawLayer {
     const preview =
       inpaintPreview && inpaintCompare === "after" ? inpaintPreview : undefined;
@@ -1423,11 +1591,11 @@ export function ImageCanvasEditor({
       tool === "inpaint" &&
       drag &&
       imageForLayer &&
-      displayCanvasRef &&
+      displayCanvas &&
       imageForLayer.naturalWidth > 0 &&
       imageForLayer.naturalHeight > 0
     ) {
-      const displaySize = canvasSize(displayCanvasRef);
+      const displaySize = canvasSize(displayCanvas);
       const rect = selectionToNaturalRect(
         drag.start,
         drag.end,
@@ -1449,11 +1617,11 @@ export function ImageCanvasEditor({
     if (
       tool === "dupmatch" &&
       imageForLayer &&
-      displayCanvasRef &&
+      displayCanvas &&
       imageForLayer.naturalWidth > 0 &&
       imageForLayer.naturalHeight > 0
     ) {
-      const displaySize = canvasSize(displayCanvasRef);
+      const displaySize = canvasSize(displayCanvas);
       const entries: {
         rect: InpaintRect;
         accepted: boolean;
@@ -1486,7 +1654,7 @@ export function ImageCanvasEditor({
       duplicateOverlay = entries.length > 0 ? entries : undefined;
     }
     return {
-      patches: appliedInpaintPatches,
+      patches: appliedInpaintPatches(),
       preview: preview
         ? { rect: preview.naturalRect, canvas: preview.canvas }
         : undefined,
@@ -1516,15 +1684,34 @@ export function ImageCanvasEditor({
         return;
       }
       const image = imageRef.current;
+      const offscreen = new Set(
+        state.marks
+          .filter((mark) =>
+            markOffscreen(
+              mark,
+              canvasSize(canvas),
+              canvas.getContext("2d") ?? undefined,
+            ),
+          )
+          .map((mark) => mark.id),
+      );
+      setOffscreenIds((current) =>
+        current.size === offscreen.size &&
+        [...current].every((id) => offscreen.has(id))
+          ? current
+          : offscreen,
+      );
       const layer = currentInpaintLayer();
       const crop = cropDraft.current ? undefined : state.crop;
       const renderedState = crop === state.crop ? state : { ...state, crop };
       // Only the unchanged prefix is cached: moving a mark must also recompute
       // all later mosaic/blur marks that sample its pixels. Never cache exports.
-      const markCount = Math.min(
-        state.marks.length,
-        resizeDraft.current?.index ?? selectedMark ?? state.marks.length,
-      );
+      const draftIds = objectDraftRef.current?.byId.keys() ?? [];
+      let markCount = state.marks.length;
+      for (const id of [...selectedIds, ...draftIds]) {
+        const index = state.marks.findIndex((mark) => mark.id === id);
+        if (index >= 0 && index < markCount) markCount = index;
+      }
       let cached = previewCache.current;
       if (canvas.width * canvas.height <= 16_000_000) {
         if (
@@ -1585,16 +1772,14 @@ export function ImageCanvasEditor({
         imageRef.current,
         // 拖动裁剪时保留完整画面，只更新遮罩；松开后提交实际裁剪。
         renderedState,
-        selectedMark,
-        resizeDraft.current
-          ? state.marks.map((mark, index) =>
-              index === resizeDraft.current!.index
-                ? resizeDraft.current!.mark
-                : mark,
+        selectedIds,
+        objectDraftRef.current
+          ? state.marks.map(
+              (mark) => objectDraftRef.current!.byId.get(mark.id) ?? mark,
             )
           : textEdit
-            ? state.marks.map((mark, index) =>
-                index === textEdit.index ? textEdit.mark : mark,
+            ? state.marks.map((mark) =>
+                mark.id === textEdit.id ? textEdit.mark : mark,
               )
             : draftMark.current
               ? [...state.marks, draftMark.current]
@@ -1614,6 +1799,22 @@ export function ImageCanvasEditor({
         // 截图现场：选区即当前裁剪范围；无已提交裁剪时在四边/四角绘制闲置手柄。
         drawSceneCropHandles(canvas, state.crop);
       }
+      if (marqueeRef.current) {
+        // 空白框选草稿：蓝色虚线实时反馈包含范围。
+        const marqueeContext = canvas.getContext("2d");
+        const area = clampRect(
+          normalizedRect(marqueeRef.current),
+          canvasSize(canvas),
+        );
+        if (marqueeContext && (area.width > 0 || area.height > 0)) {
+          marqueeContext.save();
+          marqueeContext.setLineDash([6, 4]);
+          marqueeContext.lineWidth = 1.5;
+          marqueeContext.strokeStyle = "#1f6feb";
+          marqueeContext.strokeRect(area.x, area.y, area.width, area.height);
+          marqueeContext.restore();
+        }
+      }
       if (
         image &&
         image.naturalWidth > 0 &&
@@ -1626,18 +1827,6 @@ export function ImageCanvasEditor({
     };
     if (!layerReady) scheduleDraw();
   });
-  function scheduleDraw() {
-    if (pendingDraw.current !== undefined) return;
-    pendingDraw.current = requestAnimationFrame(() => {
-      pendingDraw.current = undefined;
-      try {
-        latestDraw.current();
-      } catch (error) {
-        if (presentation.current) presentation.current.fail("draw");
-        else throw error;
-      }
-    });
-  }
 
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
@@ -1709,42 +1898,24 @@ export function ImageCanvasEditor({
 
   // 导出/信息行共用的当前输出尺寸；值不变时保持引用稳定，避免无关编辑
   // 重置用户正在输入的宽高草稿。
-  const lastOutputSize = useRef<CanvasSize | undefined>(undefined);
   const currentOutputSize = useMemo<CanvasSize | undefined>(() => {
-    const decoded = decodedSourceSize;
-    const image = imageRef.current;
-    if (
-      !decoded ||
-      decoded.source !== source ||
-      !image ||
-      !image.naturalWidth ||
-      !image.naturalHeight
-    ) {
-      return undefined;
-    }
-    const canvas = canvasRef.current;
-    const size = finalOutputSize(
-      image,
+    if (!imageForLayer) return undefined;
+    return finalOutputSize(
+      imageForLayer,
       state,
-      canvas ? canvasSize(canvas) : { width: 900, height: 600 },
+      displayCanvas ? canvasSize(displayCanvas) : { width: 900, height: 600 },
     );
-    const previous = lastOutputSize.current;
-    if (
-      previous &&
-      previous.width === size.width &&
-      previous.height === size.height
-    ) {
-      return previous;
-    }
-    lastOutputSize.current = size;
-    return size;
-  }, [state, decodedSourceSize, source]);
+  }, [state, imageForLayer, displayCanvas]);
 
   // 尺寸输入草稿只在真实输出尺寸变化时刷新（渲染期随值调整，不打断输入）。
   const [appliedDraftSize, setAppliedDraftSize] = useState<
     CanvasSize | undefined
   >();
-  if (currentOutputSize && appliedDraftSize !== currentOutputSize) {
+  if (
+    currentOutputSize &&
+    (appliedDraftSize?.width !== currentOutputSize.width ||
+      appliedDraftSize?.height !== currentOutputSize.height)
+  ) {
     setAppliedDraftSize(currentOutputSize);
     setSizeDraft({
       width: String(currentOutputSize.width),
@@ -1763,7 +1934,7 @@ export function ImageCanvasEditor({
       const blob = await exportCanvas(frozen.image, canvasRef.current, state, {
         format: outputFormat,
         quality: jpegQuality,
-        inpaint: { patches: appliedInpaintPatches },
+        inpaint: { patches: appliedInpaintPatches() },
       });
       if (textEditingRef.current || !exportContextUnchanged(frozen)) {
         setOperationMessage("检查期间内容或设置已变化，请重新检查。");
@@ -1792,6 +1963,29 @@ export function ImageCanvasEditor({
     nonce: -1,
   });
   const prepareInFlight = useRef(false);
+
+  async function prepareTextLayer() {
+    if (!session || prepareInFlight.current || exportInProgressRef.current) {
+      return;
+    }
+    if (refuseIfFullyMasked("textLayer")) return;
+    prepareInFlight.current = true;
+    try {
+      // 文字层与识别同源：屏蔽区写入白色像素，被屏蔽文字不可进入可选层。
+      const exported = await exportFinalImageIfUnchanged(true);
+      if (!exported) return;
+      await actions.run({
+        type: commands.prepareScreenshotTextLayer,
+        sessionId: exported.sessionId,
+        revision: exported.revision,
+        resourceUri: exported.resourceUri,
+      });
+    } catch {
+      setOperationMessage("无法导出或提交文字层准备，请重试。");
+    } finally {
+      prepareInFlight.current = false;
+    }
+  }
 
   useEffect(() => {
     if (
@@ -1833,33 +2027,29 @@ export function ImageCanvasEditor({
     currentLayerKey,
   ]);
 
-  async function prepareTextLayer() {
-    if (!session || prepareInFlight.current || exportInProgressRef.current) {
-      return;
-    }
-    if (refuseIfFullyMasked("textLayer")) return;
-    prepareInFlight.current = true;
-    try {
-      // 文字层与识别同源：屏蔽区写入白色像素，被屏蔽文字不可进入可选层。
-      const exported = await exportFinalImageIfUnchanged(true);
-      if (!exported) return;
-      await actions.run({
-        type: commands.prepareScreenshotTextLayer,
-        sessionId: exported.sessionId,
-        revision: exported.revision,
-        resourceUri: exported.resourceUri,
-      });
-    } catch {
-      setOperationMessage("无法导出或提交文字层准备，请重试。");
-    } finally {
-      prepareInFlight.current = false;
-    }
-  }
-
   function commit(next: EditorState) {
     setHistory((current) => [...current.slice(0, historyIndex + 1), next]);
     setHistoryIndex((current) => current + 1);
+    // 提交后剔除已不存在对象的选择；主选失效时回退到剩余集合的顶层。
+    pruneSelection(next.marks);
     notifyContentRevision();
+  }
+
+  /** 按存活 id 裁剪选择：撤销/删除/清除后的悬空 id 不再命中任何对象。 */
+  function pruneSelection(marks: readonly Mark[]): void {
+    const current = selectionRef.current;
+    if (current.ids.size === 0) return;
+    const alive = new Set(marks.map((mark) => mark.id));
+    const kept = [...current.ids].filter((id) => alive.has(id));
+    if (kept.length === current.ids.size) return;
+    const keptSet = new Set(kept);
+    const primary =
+      current.primary && keptSet.has(current.primary)
+        ? current.primary
+        : kept[kept.length - 1];
+    setObjectSelection(
+      keptSet.size > 0 ? { ids: keptSet, primary } : NO_SELECTION,
+    );
   }
 
   function notifyContentRevision() {
@@ -2192,15 +2382,9 @@ export function ImageCanvasEditor({
     worker.postMessage(request, [buffer, maskCopy.buffer]);
   }
 
-  /** 已存活补丁像素总量（含撤销/重做分支）：补丁画布存储峰值估算。 */
+  /** 新提交后仍保留的唯一补丁像素数；被截断的重做分支不计入。 */
   function totalPatchPixels(): number {
-    let total = 0;
-    for (const entry of history) {
-      for (const patch of entry.patches ?? []) {
-        total += patch.width * patch.height;
-      }
-    }
-    return total;
+    return totalDistinctPatchPixels(history, historyIndex);
   }
 
   /** 明确应用预览：恰好一次 commit 追加补丁，随历史可撤销/重做；历史
@@ -2211,7 +2395,7 @@ export function ImageCanvasEditor({
     const addition = preview.naturalRect.width * preview.naturalRect.height;
     if (totalPatchPixels() + addition > INPAINT_MAX_TOTAL_PATCH_PIXELS) {
       setOperationMessage(
-        `历史修补总量将超出 ${INPAINT_MAX_TOTAL_PATCH_PIXELS / 1_000_000}MP 预算（补丁存储峰值约 ${Math.round((INPAINT_MAX_TOTAL_PATCH_PIXELS * 4) / 1_048_576)}MB）；请先撤销部分修补后再应用。`,
+        `历史修补总量将超出 ${INPAINT_MAX_TOTAL_PATCH_PIXELS / 1_000_000}MP 预算；请先撤销部分修补后再应用。`,
       );
       return;
     }
@@ -2409,7 +2593,13 @@ export function ImageCanvasEditor({
       composed.canvas.height,
     ).data;
     const patches = [...(state.patches ?? [])];
-    const acceptedLabels: string[] = [];
+    // 先完整暂存本批补丁：任一候选构造失败则丢弃整批（未写入 store/
+    // 历史，画布引用即刻释放），不遗留已建补丁的孤儿像素。
+    const staged: {
+      readonly id: number;
+      readonly rect: DuplicateCandidate;
+      readonly canvas: HTMLCanvasElement;
+    }[] = [];
     for (const candidate of chosen) {
       // 候选周边 2px 环境平均色：纯色遮挡与背景衔接；无有效采样时黑色。
       let r = 0;
@@ -2456,16 +2646,21 @@ export function ImageCanvasEditor({
       patch.height = candidate.height;
       const context = patch.getContext("2d");
       if (!context) {
-        setOperationMessage("无法生成遮挡补丁，本次应用已取消。");
+        setOperationMessage(
+          "无法生成遮挡补丁，本次应用已整体取消；图片未被修改。",
+        );
         return;
       }
       context.fillStyle = color;
       context.fillRect(0, 0, patch.width, patch.height);
-      const id = inpaintPatchIdRef.current + 1;
-      inpaintPatchIdRef.current = id;
-      inpaintPatchStore.current.set(id, patch);
-      patches.push({ id, ...candidate });
-      acceptedLabels.push(String(id));
+      const id = inpaintPatchIdRef.current + staged.length + 1;
+      staged.push({ id, rect: candidate, canvas: patch });
+    }
+    // 全部成功后一次性移交：store 写入与历史提交要么整体发生要么不发生。
+    inpaintPatchIdRef.current += staged.length;
+    for (const entry of staged) {
+      inpaintPatchStore.current.set(entry.id, entry.canvas);
+      patches.push({ id: entry.id, ...entry.rect });
     }
     commit({ ...state, patches });
     cancelDupmatchPending();
@@ -2474,9 +2669,45 @@ export function ImageCanvasEditor({
     );
   }
 
-  function select(index: number | undefined) {
-    selectedMarkRef.current = index;
-    setSelectedMark(index);
+  /** 单选替换：点击/列表选择入口；组成员自动展开为整组（组整体选择）。 */
+  function select(id: string | undefined): void {
+    if (!id) {
+      setObjectSelection(NO_SELECTION);
+      return;
+    }
+    const ids = expandGroupSelection(state.marks, new Set([id]));
+    setObjectSelection({ ids, primary: id });
+  }
+
+  /** 修饰键增减：已在选区内则移除，否则加入；组按整组切换。 */
+  function toggleSelection(id: string): void {
+    const groupIds = expandGroupSelection(state.marks, new Set([id]));
+    const current = selectionRef.current;
+    const adding = ![...groupIds].some((member) => current.ids.has(member));
+    if (adding) {
+      const ids = new Set([...current.ids, ...groupIds]);
+      setObjectSelection({ ids, primary: id });
+      return;
+    }
+    const ids = new Set(
+      [...current.ids].filter((entry) => !groupIds.has(entry)),
+    );
+    const primary =
+      current.primary && ids.has(current.primary)
+        ? current.primary
+        : [...ids][ids.size - 1];
+    setObjectSelection(ids.size > 0 ? { ids, primary } : NO_SELECTION);
+  }
+
+  /** 选区含锁定对象时整体不可修改：避免对锁组/锁对象的部分修改。 */
+  function selectionModifiable(ids: ReadonlySet<string> | undefined): boolean {
+    const effective = ids ?? selectionRef.current.ids;
+    if (effective.size === 0) return false;
+    if (state.marks.some((mark) => effective.has(mark.id) && mark.locked)) {
+      setOperationMessage("选区包含已锁定对象；请先在对象列表解锁后再修改。");
+      return false;
+    }
+    return true;
   }
 
   // 样式编辑目标：选择工具下选中描边类（矩形/椭圆/箭头/画笔/荧光笔）
@@ -2485,9 +2716,9 @@ export function ImageCanvasEditor({
   // 无填充，渲染与旧版完全一致。
   const editingMarkCandidate =
     tool === "select" && selectedMark !== undefined
-      ? textEdit?.index === selectedMark
+      ? textEdit?.id === selectedMark
         ? textEdit.mark
-        : state.marks[selectedMark]
+        : state.marks.find((mark) => mark.id === selectedMark)
       : undefined;
   const editingMark =
     editingMarkCandidate && COLOR_TOOLS.includes(editingMarkCandidate.tool)
@@ -2540,18 +2771,38 @@ export function ImageCanvasEditor({
     };
   }
 
-  function applyStyleChange(change: StyleChange): void {
-    const index = selectedMark;
-    const mark = editingMark && index !== undefined ? editingMark : undefined;
-    if (mark && index !== undefined) {
+  function applyStyleChange(
+    change: StyleChange,
+    targetId?: string | null,
+  ): void {
+    // 目标优先级：blur 提交携带的 targetId（防点入画布后选区已换）> 当前
+    // 主选 > 工具属性记忆。选中标记时就地改样式入历史。
+    const candidate =
+      targetId === null
+        ? undefined
+        : targetId !== undefined
+          ? state.marks.find((mark) => mark.id === targetId)
+          : editingMark;
+    const mark =
+      candidate && COLOR_TOOLS.includes(candidate.tool) ? candidate : undefined;
+    if (typeof targetId === "string" && !mark) return;
+    if (mark) {
+      if (
+        !selectionModifiable(
+          expandGroupSelection(state.marks, new Set([mark.id])),
+        )
+      )
+        return;
       const style = mark.style ?? {};
       // 选中标记已带填充时，改色保留其原不透明度、改不透明度保留其原色；
       // 回退值取所属工具记忆而非当前选择工具。
       const owningTool = attributesOfTool(mark.tool);
-      const preservedFillColor = editingFill?.color ?? owningTool.fillColor;
-      const preservedFillOpacity = editingFill
-        ? Math.round(editingFill.alpha * 100)
-        : owningTool.fillOpacity;
+      const targetFill = annotationFill(mark);
+      const preservedFillColor =
+        targetFill?.color ?? style.fill?.color ?? owningTool.fillColor;
+      const preservedFillOpacity = targetFill
+        ? Math.round(targetFill.alpha * 100)
+        : (style.fill?.opacity ?? owningTool.fillOpacity);
       const next: Mark["style"] =
         change.kind === "color"
           ? { ...style, color: change.value }
@@ -2593,13 +2844,14 @@ export function ImageCanvasEditor({
                                 opacity: change.value,
                               },
                             };
-      if (textEdit?.index === index)
-        setTextEdit({ index, mark: { ...mark, style: next } });
+      if (JSON.stringify(style) === JSON.stringify(next)) return;
+      if (textEdit?.id === mark.id)
+        setTextEdit({ id: mark.id, mark: { ...mark, style: next } });
       else
         commit({
           ...state,
-          marks: state.marks.map((entry, entryIndex) =>
-            entryIndex === index ? { ...entry, style: next } : entry,
+          marks: state.marks.map((entry) =>
+            entry.id === mark.id ? { ...entry, style: next } : entry,
           ),
         });
       return;
@@ -2771,8 +3023,8 @@ export function ImageCanvasEditor({
       textEdit
         ? {
             ...state,
-            marks: state.marks.map((mark, index) =>
-              index === textEdit.index ? textEdit.mark : mark,
+            marks: state.marks.map((mark) =>
+              mark.id === textEdit.id ? textEdit.mark : mark,
             ),
           }
         : state,
@@ -2896,8 +3148,10 @@ export function ImageCanvasEditor({
     dragStart.current = undefined;
     markDragRef.current = undefined;
     cropResizeRef.current = undefined;
+    moveDragRef.current = undefined;
+    marqueeRef.current = undefined;
     colorPickPendingRef.current = false;
-    setResizeDraft(undefined);
+    setObjectDraft(undefined);
     setCropDraft(undefined);
     setDraftMark(undefined);
     setInpaintDraft(undefined);
@@ -2965,17 +3219,23 @@ export function ImageCanvasEditor({
       }
       if (tool === "select") {
         const at = point(event);
+        const primaryId = selectionRef.current.primary;
         const selected =
-          selectedMarkRef.current === undefined
+          primaryId === undefined
             ? undefined
-            : state.marks[selectedMarkRef.current];
+            : state.marks.find((mark) => mark.id === primaryId);
         // 选定标记的几何手柄优先：矩形类八点缩放、直线/箭头端点。
         const handle =
-          selected && isBoxResizableMark(selected)
+          selected &&
+          selectionRef.current.ids.size === 1 &&
+          isBoxResizableMark(selected)
             ? rectResizeHandle(selected, at)
             : undefined;
         const endpoint =
-          !handle && selected && isEndpointMark(selected)
+          !handle &&
+          selected &&
+          selectionRef.current.ids.size === 1 &&
+          isEndpointMark(selected)
             ? endpointHandle(selected, at)
             : undefined;
         // 选区四边/四角：悬停时提示对应的方向光标。
@@ -3035,22 +3295,23 @@ export function ImageCanvasEditor({
       const start = dragStart.current;
       const drag = markDragRef.current;
       if (!start) return;
-      setResizeDraft({
-        index: drag.index,
-        mark:
-          drag.kind === "resize"
-            ? resizeBoxMark(
-                drag.origin,
-                drag.handle,
-                { x: at.x - start.x, y: at.y - start.y },
-                event.shiftKey,
-              )
-            : moveEndpointMark(
-                drag.origin,
-                drag.endpoint,
-                { x: at.x - start.x, y: at.y - start.y },
-                event.shiftKey,
-              ),
+      const next =
+        drag.kind === "resize"
+          ? resizeBoxMark(
+              drag.origin,
+              drag.handle,
+              { x: at.x - start.x, y: at.y - start.y },
+              event.shiftKey,
+            )
+          : moveEndpointMark(
+              drag.origin,
+              drag.endpoint,
+              { x: at.x - start.x, y: at.y - start.y },
+              event.shiftKey,
+            );
+      setObjectDraft({
+        byId: new Map([[drag.id, next]]),
+        revision: drag.revision,
       });
       return;
     }
@@ -3074,16 +3335,24 @@ export function ImageCanvasEditor({
     }
     const at = point(event);
     if (tool === "select") {
-      const index = selectedMarkRef.current;
-      const mark = index === undefined ? undefined : state.marks[index];
-      if (index !== undefined && mark)
-        setResizeDraft({
-          index,
-          mark: moveMark(mark, {
-            x: at.x - dragStart.current.x,
-            y: at.y - dragStart.current.y,
-          }),
-        });
+      if (marqueeRef.current) {
+        marqueeRef.current.end = at;
+        scheduleDraw();
+        return;
+      }
+      // 整选区平移：所有选中对象从冻结原像同步位移。
+      const drag = moveDragRef.current;
+      if (drag) {
+        const delta = {
+          x: at.x - dragStart.current.x,
+          y: at.y - dragStart.current.y,
+        };
+        const byId = new Map<string, Mark>();
+        for (const origin of drag.origins) {
+          byId.set(origin.id, moveMark(origin, delta));
+        }
+        setObjectDraft({ byId, revision: drag.revision });
+      }
       return;
     }
     setDraftMark((current) => {
@@ -3135,31 +3404,37 @@ export function ImageCanvasEditor({
     selectionDragBounds.current = event.currentTarget.getBoundingClientRect();
     dragStart.current = start;
     if (tool === "select") {
-      // 选定标记的几何手柄优先命中：矩形类八点缩放、直线/箭头端点；
-      // 其次选区四边/四角裁剪手柄。
-      const index = selectedMarkRef.current;
-      const selected = index !== undefined ? state.marks[index] : undefined;
+      // 主选（单选时）的几何手柄优先命中：矩形类八点缩放、直线/箭头端点；
+      // 其次选区四边/四角裁剪手柄；命中对象则替换/增减选择并开始平移，
+      // 空白处进入框选草稿（含锁定对象：命中跳过，列表可解锁）。
+      const primaryId = selectionRef.current.primary;
+      const single =
+        selectionRef.current.ids.size === 1 && primaryId !== undefined
+          ? state.marks.find((mark) => mark.id === primaryId)
+          : undefined;
       const handle =
-        index !== undefined && selected && isBoxResizableMark(selected)
-          ? rectResizeHandle(selected, start)
+        single && !single.locked && isBoxResizableMark(single)
+          ? rectResizeHandle(single, start)
           : undefined;
       const endpoint =
-        index !== undefined && !handle && selected && isEndpointMark(selected)
-          ? endpointHandle(selected, start)
+        !handle && single && !single.locked && isEndpointMark(single)
+          ? endpointHandle(single, start)
           : undefined;
-      if (index !== undefined && selected && handle) {
+      if (single && handle) {
         markDragRef.current = {
           kind: "resize",
-          index,
+          id: single.id,
           handle,
-          origin: selected,
+          origin: single,
+          revision: contentRevisionRef.current,
         };
-      } else if (index !== undefined && selected && endpoint) {
+      } else if (single && endpoint) {
         markDragRef.current = {
           kind: "endpoint",
-          index,
+          id: single.id,
           endpoint,
-          origin: selected,
+          origin: single,
+          revision: contentRevisionRef.current,
         };
       } else {
         const cropBase = cropAdjustBase(
@@ -3171,13 +3446,37 @@ export function ImageCanvasEditor({
         if (cropBase && cropHandle) {
           cropResizeRef.current = { handle: cropHandle, origin: cropBase };
         } else {
-          select(
-            findMark(
-              state.marks,
-              start,
-              canvasRef.current?.getContext("2d") ?? undefined,
-            ),
+          const hitId = findMark(
+            state.marks,
+            start,
+            canvasRef.current?.getContext("2d") ?? undefined,
           );
+          if (hitId === undefined) {
+            // 空白按下：进入框选；未拖动松开时清空选择（与旧单击空白一致）。
+            marqueeRef.current = { start, end: start };
+          } else if (event.shiftKey || event.ctrlKey || event.metaKey) {
+            toggleSelection(hitId);
+          } else {
+            const alreadySelected = selectionRef.current.ids.has(hitId);
+            if (!alreadySelected) select(hitId);
+            // 选区就绪后尝试开始整选区平移（含锁定时拒绝并提示）。
+            const ids = alreadySelected
+              ? selectionRef.current.ids
+              : expandGroupSelection(state.marks, new Set([hitId]));
+            const origins = state.marks.filter((mark) => ids.has(mark.id));
+            if (origins.some((mark) => mark.locked)) {
+              setOperationMessage(
+                "选区包含已锁定对象，不能拖动；可在对象列表解锁。",
+              );
+            } else {
+              moveDragRef.current = {
+                ids: [...ids],
+                origins,
+                hitId,
+                revision: contentRevisionRef.current,
+              };
+            }
+          }
         }
       }
     } else if (tool === "inpaint") {
@@ -3219,6 +3518,7 @@ export function ImageCanvasEditor({
         points.push(start);
       }
       setDraftMark({
+        id: existing?.id ?? nextMarkId(),
         tool,
         start: points[0]!,
         end: start,
@@ -3228,6 +3528,7 @@ export function ImageCanvasEditor({
     } else {
       draftPoints.current = [start];
       setDraftMark({
+        id: nextMarkId(),
         tool,
         start,
         end: start,
@@ -3263,14 +3564,50 @@ export function ImageCanvasEditor({
     const start = dragStart.current;
     const draft = draftMark.current;
     dragStart.current = undefined;
-    setResizeDraft(undefined);
+    setObjectDraft(undefined);
     setDraftMark(undefined);
     // 裁剪草稿无论是否提交都结束：短拖/单击不留 0 尺寸草稿裁空画布。
     if (tool === "crop") setCropDraft(undefined);
+    // 空白框选：完整包含的未锁定对象入选择；未拖动（单击空白）清空选择。
+    if (tool === "select" && marqueeRef.current) {
+      const marquee = marqueeRef.current;
+      marqueeRef.current = undefined;
+      const distance = Math.hypot(
+        end.x - marquee.start.x,
+        end.y - marquee.start.y,
+      );
+      if (distance >= 4) {
+        const rect = normalizedRect({ start: marquee.start, end: end });
+        const ids = expandGroupSelection(
+          state.marks,
+          marksContainedInRect(
+            state.marks,
+            rect,
+            canvasRef.current?.getContext("2d") ?? undefined,
+          ),
+        );
+        if (ids.size > 0) {
+          const topmost = state.marks.findLast((mark) => ids.has(mark.id))?.id;
+          setObjectSelection({ ids, primary: topmost });
+          setOperationMessage(
+            `已选择 ${ids.size} 个对象（框选完整包含）；可拖动、对齐或成组。`,
+          );
+        } else {
+          setObjectSelection(NO_SELECTION);
+        }
+      } else {
+        setObjectSelection(NO_SELECTION);
+      }
+      return;
+    }
     if (markDragRef.current) {
       const drag = markDragRef.current;
       markDragRef.current = undefined;
-      setResizeDraft(undefined);
+      setObjectDraft(undefined);
+      if (drag.revision !== contentRevisionRef.current) {
+        setOperationMessage("内容已变化，本次手柄拖动已放弃；请重试。");
+        return;
+      }
       const next =
         drag.kind === "resize"
           ? resizeBoxMark(
@@ -3298,9 +3635,7 @@ export function ImageCanvasEditor({
       if (moved) {
         commit({
           ...state,
-          marks: state.marks.map((mark, markIndex) =>
-            markIndex === drag.index ? next : mark,
-          ),
+          marks: state.marks.map((mark) => (mark.id === drag.id ? next : mark)),
         });
       }
       return;
@@ -3339,15 +3674,21 @@ export function ImageCanvasEditor({
       return;
     }
     if (tool === "select") {
-      const index = selectedMarkRef.current;
-      if (index === undefined) return;
+      const drag = moveDragRef.current;
+      moveDragRef.current = undefined;
+      if (!drag) return;
       const delta = { x: end.x - start.x, y: end.y - start.y };
-      if (Math.hypot(delta.x, delta.y) < 2) return;
+      if (Math.hypot(delta.x, delta.y) < 2) {
+        select(drag.hitId);
+        return;
+      }
+      if (drag.revision !== contentRevisionRef.current) {
+        setOperationMessage("内容已变化，本次拖动已放弃；请重试。");
+        return;
+      }
       commit({
         ...state,
-        marks: state.marks.map((mark, markIndex) =>
-          markIndex === index ? moveMark(mark, delta) : mark,
-        ),
+        marks: moveMarkIds(state.marks, new Set(drag.ids), delta),
       });
       return;
     }
@@ -3394,6 +3735,7 @@ export function ImageCanvasEditor({
           marks: [
             ...state.marks,
             {
+              id: draft?.id ?? nextMarkId(),
               tool,
               start: points[0] ?? start,
               end: points[points.length - 1] ?? end,
@@ -3412,6 +3754,7 @@ export function ImageCanvasEditor({
         marks: [
           ...state.marks,
           {
+            id: draft?.id ?? nextMarkId(),
             tool,
             start,
             end,
@@ -3470,6 +3813,7 @@ export function ImageCanvasEditor({
       return;
     }
     if (tool === "text" || Math.hypot(end.x - start.x, end.y - start.y) >= 8) {
+      let createdId: string | undefined;
       if (tool === "crop") {
         commit({ ...state, crop: { start, end } });
       } else if (
@@ -3493,11 +3837,13 @@ export function ImageCanvasEditor({
           tool === "line" || tool === "arrow"
             ? constrainLineDrag(start, end, event.shiftKey)
             : end;
+        createdId = draft?.id ?? nextMarkId();
         commit({
           ...state,
           marks: [
             ...state.marks,
             {
+              id: createdId,
               tool,
               start: box ? box.start : start,
               end: box ? box.end : lineEnd,
@@ -3514,7 +3860,7 @@ export function ImageCanvasEditor({
       }
       if (tool === "text" || tool === "callout") {
         setTool("select");
-        select(state.marks.length);
+        if (createdId) select(createdId);
       }
     }
   }
@@ -3543,6 +3889,7 @@ export function ImageCanvasEditor({
         marks: [
           ...state.marks,
           {
+            id: draft.id,
             tool: "polyline",
             start: deduped[0]!,
             end: deduped[deduped.length - 1]!,
@@ -3615,7 +3962,7 @@ export function ImageCanvasEditor({
     const blob = await exportCanvas(frozen.image, canvasRef.current, state, {
       format: outputFormat,
       quality: jpegQuality,
-      inpaint: { patches: appliedInpaintPatches },
+      inpaint: { patches: appliedInpaintPatches() },
       bakeExclusions,
     });
     const resourceUri = await uploadAnnotatedImage(blob);
@@ -3829,15 +4176,20 @@ export function ImageCanvasEditor({
   const contentMark =
     fontMark && isContentMark(fontMark) ? fontMark : undefined;
   function updateFontMark(patch: Partial<Mark>): void {
-    if (!fontMark || selectedMark === undefined) return;
+    if (
+      !fontMark ||
+      selectedMark === undefined ||
+      !selectionModifiable(effectiveSelection())
+    )
+      return;
     const next = { ...fontMark, ...patch };
-    if (textEdit?.index === selectedMark)
-      setTextEdit({ index: selectedMark, mark: next });
+    if (textEdit?.id === selectedMark)
+      setTextEdit({ id: selectedMark, mark: next });
     else
       commit({
         ...state,
-        marks: state.marks.map((mark, index) =>
-          index === selectedMark ? next : mark,
+        marks: state.marks.map((mark) =>
+          mark.id === selectedMark ? next : mark,
         ),
       });
   }
@@ -3848,13 +4200,18 @@ export function ImageCanvasEditor({
         textStyle: { ...activeToolAttributes.textStyle, ...patch },
       });
   }
-  function beginTextEdit(index: number): void {
-    const mark = state.marks[index];
-    if (!mark || !isContentMark(mark)) return;
+  function beginTextEdit(id: string): void {
+    const mark = state.marks.find((entry) => entry.id === id);
+    if (
+      !mark ||
+      !isContentMark(mark) ||
+      !selectionModifiable(expandGroupSelection(state.marks, new Set([id])))
+    )
+      return;
     cancelDrawing();
-    select(index);
+    select(id);
     setTool("select");
-    setTextEdit({ index, mark });
+    setTextEdit({ id, mark });
     setOperationMessage("正在编辑文字草稿；完成后才能复制或保存，Esc 可取消。");
   }
   function finishTextEdit(): void {
@@ -3865,12 +4222,12 @@ export function ImageCanvasEditor({
     }
     if (
       JSON.stringify(textEdit.mark) !==
-      JSON.stringify(state.marks[textEdit.index])
+      JSON.stringify(state.marks.find((mark) => mark.id === textEdit.id))
     )
       commit({
         ...state,
-        marks: state.marks.map((mark, index) =>
-          index === textEdit.index ? textEdit.mark : mark,
+        marks: state.marks.map((mark) =>
+          mark.id === textEdit.id ? textEdit.mark : mark,
         ),
       });
     setTextEdit(undefined);
@@ -3889,6 +4246,8 @@ export function ImageCanvasEditor({
     return resolved.family;
   }
   function renumber(): void {
+    if (state.marks.some((mark) => mark.tool === "numbering" && mark.locked))
+      return;
     const start = attributesOfTool("numbering").numberStart;
     let next = start;
     commit({
@@ -3899,19 +4258,268 @@ export function ImageCanvasEditor({
     });
     setOperationMessage("已从 " + start + " 重新编号；可撤销。");
   }
+  // —— 对象批量操作：每次恰好一条历史，按稳定 id 定位；含锁选区禁改 ——
+  function objectActionContext(): CanvasRenderingContext2D | undefined {
+    return canvasRef.current?.getContext("2d") ?? undefined;
+  }
+
+  function effectiveSelection(): ReadonlySet<string> {
+    return expandGroupSelection(state.marks, selectionRef.current.ids);
+  }
+
+  /** 变换基准：选区联合边界（含字形旋转包围盒）中心。 */
+  function selectionCenterOf(ids: ReadonlySet<string>): Point | undefined {
+    const bounds = selectionBounds(state.marks, ids, objectActionContext());
+    if (!bounds) return undefined;
+    return { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+  }
+
+  function commitTransform(
+    ids: ReadonlySet<string>,
+    marks: readonly Mark[],
+    message: string,
+  ): void {
+    if (
+      marks.length === state.marks.length &&
+      marks.every((mark, index) => mark === state.marks[index])
+    )
+      return;
+    cancelDrawing();
+    commit({ ...state, marks });
+    const primary = selectionRef.current.primary;
+    setObjectSelection({
+      ids,
+      primary: primary && ids.has(primary) ? primary : [...ids][ids.size - 1],
+    });
+    setOperationMessage(message);
+  }
+
+  function nudgeSelection(delta: Point): void {
+    cancelDrawing();
+    const ids = effectiveSelection();
+    if (!ids.size || !selectionModifiable(ids)) return;
+    commit({ ...state, marks: moveMarkIds(state.marks, ids, delta) });
+  }
+
+  function deleteSelection(): void {
+    const ids = effectiveSelection();
+    if (!ids.size || !selectionModifiable(ids)) return;
+    cancelDrawing();
+    commit({ ...state, marks: deleteMarkIds(state.marks, ids) });
+    setObjectSelection(NO_SELECTION);
+    setOperationMessage(`已删除 ${ids.size} 个对象；可用撤销恢复。`);
+  }
+
+  function rotateSelection(): void {
+    const ids = effectiveSelection();
+    if (!ids.size || !selectionModifiable(ids)) return;
+    const center = selectionCenterOf(ids);
+    if (!center) return;
+    commitTransform(
+      ids,
+      rotateMarkIds(state.marks, ids, center),
+      "已将选区旋转 90°；命中与导出同步更新，可撤销。",
+    );
+  }
+
+  function mirrorSelection(axis: "h" | "v"): void {
+    const ids = effectiveSelection();
+    if (!ids.size || !selectionModifiable(ids)) return;
+    const center = selectionCenterOf(ids);
+    if (!center) return;
+    commitTransform(
+      ids,
+      mirrorMarkIds(state.marks, ids, center, axis),
+      axis === "h" ? "已水平镜像选区；可撤销。" : "已垂直镜像选区；可撤销。",
+    );
+  }
+
+  function scaleSelection(factor: number): void {
+    const ids = effectiveSelection();
+    if (!ids.size || !selectionModifiable(ids)) return;
+    const center = selectionCenterOf(ids);
+    if (!center) return;
+    commitTransform(
+      ids,
+      scaleMarkIds(state.marks, ids, factor, center),
+      factor > 1
+        ? "已等比放大选区（几何与线宽/字号同步缩放一次）。"
+        : "已等比缩小选区（几何与线宽/字号同步缩放一次）。",
+    );
+  }
+
+  function reorderSelection(mode: ObjectZOrder): void {
+    const ids = effectiveSelection();
+    if (!ids.size || !selectionModifiable(ids)) return;
+    commitTransform(
+      ids,
+      reorderMarkIds(state.marks, ids, mode),
+      "已调整层级；相对顺序保持不变。",
+    );
+  }
+
+  function alignSelection(align: ObjectAlign): void {
+    const ids = effectiveSelection();
+    if (ids.size < 2 || !selectionModifiable(ids)) return;
+    commitTransform(
+      ids,
+      alignMarkIds(state.marks, ids, align, objectActionContext()),
+      "已按选区边界对齐；可撤销。",
+    );
+  }
+
+  function distributeSelection(axis: ObjectDistributeAxis): void {
+    const ids = effectiveSelection();
+    if (ids.size < 3 || !selectionModifiable(ids)) return;
+    commitTransform(
+      ids,
+      distributeMarkIds(state.marks, ids, axis, objectActionContext()),
+      "已等距分布（首尾固定）；可撤销。",
+    );
+  }
+
+  function groupSelection(): void {
+    const ids = effectiveSelection();
+    if (ids.size < 2 || !selectionModifiable(ids)) return;
+    commitTransform(
+      ids,
+      groupMarkIds(state.marks, ids, nextGroupId()),
+      `已组合 ${ids.size} 个对象；点击任一成员将整组选择。`,
+    );
+  }
+
+  function ungroupSelection(): void {
+    const ids = effectiveSelection();
+    if (!ids.size || !selectionModifiable(ids)) return;
+    if (!state.marks.some((mark) => ids.has(mark.id) && mark.groupId)) return;
+    commitTransform(
+      ids,
+      ungroupMarkIds(state.marks, ids),
+      "已解组；成员层级与样式保持不变。",
+    );
+  }
+
+  function lockSelection(): void {
+    const ids = effectiveSelection();
+    if (!ids.size) return;
+    commitTransform(
+      ids,
+      setMarkLocked(state.marks, ids, true),
+      "已锁定选区；画布不再命中，可在对象列表选择后解锁。",
+    );
+  }
+
+  function unlockSelection(): void {
+    const ids = effectiveSelection();
+    if (!ids.size) return;
+    commitTransform(
+      ids,
+      setMarkLocked(state.marks, ids, false),
+      "已解锁选区；画布命中恢复。",
+    );
+  }
+
+  function copySelection(): void {
+    const ids = effectiveSelection();
+    if (!ids.size) return;
+    setClipboardSnapshot({
+      source,
+      sessionId: session?.sessionId ?? "",
+      marks: state.marks.filter((mark) => ids.has(mark.id)),
+    });
+    setOperationMessage(
+      `已复制 ${ids.size} 个对象到编辑器剪贴板（不写入系统剪贴板）。`,
+    );
+  }
+
+  function canAppendObjects(clones: readonly Mark[]): boolean {
+    if (
+      state.marks.filter(isExclusionMark).length +
+        clones.filter(isExclusionMark).length >
+      MAX_EXCLUSION_MARKS
+    ) {
+      setOperationMessage("最多保留 64 个屏蔽区域；本次复制未修改对象。");
+      return false;
+    }
+    return true;
+  }
+
+  function pasteClipboard(): void {
+    if (!clipboard.length) return;
+    const clones = cloneMarks(
+      clipboard,
+      new Set(clipboard.map((mark) => mark.id)),
+      { x: 16, y: 16 },
+      nextMarkId,
+      nextGroupId,
+    );
+    if (!canAppendObjects(clones)) return;
+    cancelDrawing();
+    commit({ ...state, marks: [...state.marks, ...clones] });
+    setObjectSelection({
+      ids: new Set(clones.map((mark) => mark.id)),
+      primary: clones[clones.length - 1]?.id,
+    });
+    setOperationMessage(
+      `已粘贴 ${clones.length} 个对象副本；副本样式独立，可撤销。`,
+    );
+  }
+
+  function duplicateSelection(): void {
+    const ids = effectiveSelection();
+    if (!ids.size || !selectionModifiable(ids)) return;
+    const clones = cloneMarks(
+      state.marks,
+      ids,
+      { x: 16, y: 16 },
+      nextMarkId,
+      nextGroupId,
+    );
+    if (!canAppendObjects(clones)) return;
+    cancelDrawing();
+    commit({ ...state, marks: [...state.marks, ...clones] });
+    setObjectSelection({
+      ids: new Set(clones.map((mark) => mark.id)),
+      primary: clones[clones.length - 1]?.id,
+    });
+    setOperationMessage("已创建选区副本；副本与原件样式独立，可撤销。");
+  }
+
+  function selectAllObjects(): void {
+    const ids = unlockedMarkIds(state.marks);
+    if (!ids.size) return;
+    cancelDrawing();
+    setObjectSelection({
+      ids,
+      primary: state.marks.findLast((mark) => ids.has(mark.id))?.id,
+    });
+    setOperationMessage(`已全选 ${ids.size} 个未锁定对象。`);
+  }
+
+  /** 离屏对象显式回中心：一次平移入历史，可撤销；不自动裁切/丢弃。 */
+  function restoreObjectToCenter(id: string): void {
+    const mark = state.marks.find((entry) => entry.id === id);
+    const canvas = canvasRef.current;
+    if (!mark || mark.locked || !canvas) return;
+    const size = canvasSize(canvas);
+    const ids = expandGroupSelection(state.marks, new Set([id]));
+    if (!markOffscreen(mark, size, objectActionContext())) return;
+    if (!selectionModifiable(ids)) return;
+    const bounds = markBoundsOf(mark, objectActionContext());
+    cancelDrawing();
+    commit({
+      ...state,
+      marks: moveMarkIds(state.marks, ids, {
+        x: size.width / 2 - bounds.x - bounds.width / 2,
+        y: size.height / 2 - bounds.y - bounds.height / 2,
+      }),
+    });
+    select(id);
+    setOperationMessage("已将离屏对象移回画布中心；可撤销。");
+  }
+
   const panning = tool === "hand" || spaceHeld;
 
-  // 取字模式：仅当宿主层就绪且绑定与当前本地修订一致时展示；
-  // 显示的图像就是识别输入的同一最终 PNG，不拿旧层映射。
-  const layerImageRef = textLayer?.image;
-  const layerImageUrl = layerImageRef?.url;
-  const layerReady =
-    tool === "textSelect" &&
-    textLayer?.status === "textlayer.ready" &&
-    !!textLayer.binding &&
-    textLayer.binding.sessionId === session?.sessionId &&
-    textLayer.binding.revision === localRevision &&
-    !!layerImageUrl;
   const [decodedLayer, setDecodedLayer] = useState<
     { url: string; image: HTMLImageElement } | undefined
   >();
@@ -3971,14 +4579,14 @@ export function ImageCanvasEditor({
   // 行框是 [0,1000] 归一化坐标（参考最终输出 PNG），排除矩形同步归一化。
   const layerExclusionRects = useMemo(
     () =>
-      layerReady && imageForLayer && canvasRef.current
+      layerReady && imageForLayer && displayCanvas
         ? exclusionNormalizedRects(
             imageForLayer,
             state,
-            canvasSize(canvasRef.current),
+            canvasSize(displayCanvas),
           )
         : undefined,
-    [layerReady, state, imageForLayer],
+    [layerReady, state, imageForLayer, displayCanvas],
   );
   const visibleLayerLines = useMemo(
     () =>
@@ -4173,27 +4781,72 @@ export function ImageCanvasEditor({
       );
     });
 
+  // 选区派生态（工具栏/列表共用）：含锁判定驱动修改类动作禁用。
+  const selectionCount = selectedIds.size;
+  const selectionUnitCount = selectionUnits(
+    state.marks,
+    selectedIds,
+    undefined,
+  ).length;
+  const selectionTouchLocked =
+    selectionCount > 0 &&
+    state.marks.some((mark) => selectedIds.has(mark.id) && mark.locked);
+  const selectionModifiableUi = selectionCount > 0 && !selectionTouchLocked;
+  const selectionTouchGroup =
+    selectionCount > 0 &&
+    state.marks.some((mark) => selectedIds.has(mark.id) && !!mark.groupId);
+  const hasUnlockedMarks = state.marks.some((mark) => !mark.locked);
+  // 对象列表（下排属性区）：按 z 序列出全部对象；锁定/离屏对象在画布
+  // 不可选/不可见，仍可在此选择并解锁/移回中心（不静默裁切）。
+  const markIsOffscreen = (mark: Mark): boolean => offscreenIds.has(mark.id);
+  const primaryMark =
+    selectedMark !== undefined
+      ? state.marks.find((mark) => mark.id === selectedMark)
+      : undefined;
+  const primaryIndex = primaryMark ? state.marks.indexOf(primaryMark) : -1;
   const objectSelectionControl = tool === "select" &&
     state.marks.length > 0 && (
-      <label className="editor-style-control">
-        <span aria-hidden="true">标注</span>
-        <Select
-          aria-label="选择标注对象"
-          size="small"
-          value={selectedMark === undefined ? "" : String(selectedMark)}
-          onChange={(_, data) => {
-            cancelDrawing();
-            select(data.value === "" ? undefined : Number(data.value));
-          }}
-        >
-          <option value="">未选择</option>
-          {state.marks.map((mark, index) => (
-            <option key={index} value={String(index)}>
-              {index + 1} · {TOOL_LABELS[mark.tool]}
+      <>
+        <label className="editor-style-control">
+          <span aria-hidden="true">标注</span>
+          <Select
+            aria-label="选择标注对象"
+            size="small"
+            value={primaryIndex >= 0 ? String(primaryIndex) : ""}
+            onChange={(_, data) => {
+              cancelDrawing();
+              if (data.value === "") select(undefined);
+              else {
+                const index = Number(data.value);
+                const mark = state.marks[index];
+                if (mark) select(mark.id);
+              }
+            }}
+          >
+            <option value="">
+              {selectionCount > 1
+                ? `未选择（已选 ${selectionCount} 个）`
+                : "未选择"}
             </option>
-          ))}
-        </Select>
-      </label>
+            {state.marks.map((mark, index) => (
+              <option key={mark.id} value={String(index)}>
+                {index + 1} · {TOOL_LABELS[mark.tool]}
+                {mark.locked ? "（已锁定）" : ""}
+                {markIsOffscreen(mark) ? "（画布外）" : ""}
+              </option>
+            ))}
+          </Select>
+        </label>
+        {primaryMark && markIsOffscreen(primaryMark) && !primaryMark.locked && (
+          <ToolbarButton
+            aria-label="对象回中心"
+            onClick={() => restoreObjectToCenter(primaryMark.id)}
+            title="把离屏对象移回画布中心（可撤销）"
+          >
+            回中心
+          </ToolbarButton>
+        )}
+      </>
     );
 
   const annotationTextInput = (tool === "text" ||
@@ -4207,14 +4860,16 @@ export function ImageCanvasEditor({
       rows={2}
       maxLength={4000}
       ref={textInputRef}
+      disabled={!!contentMark?.locked}
       value={contentMark ? (contentMark.text ?? "") : annotationText}
       onChange={(_, data) => {
-        if (contentMark && selectedMark !== undefined)
+        if (contentMark && selectedMark !== undefined) {
+          if (!selectionModifiable(effectiveSelection())) return;
           setTextEdit({
-            index: selectedMark,
+            id: selectedMark,
             mark: { ...contentMark, text: data.value },
           });
-        else setAnnotationText(data.value);
+        } else setAnnotationText(data.value);
       }}
       onCompositionStart={() => {
         textComposing.current = true;
@@ -4281,6 +4936,7 @@ export function ImageCanvasEditor({
       activeStyleColor={activeStyleColor}
       eyedropperAvailable={eyedropperAvailable}
       eyedropperBusy={eyedropperBusy}
+      styleTargetId={editingMark?.id}
       onPickColor={
         eyedropperAvailable ? () => void pickScreenColor() : enterCanvasPick
       }
@@ -4310,9 +4966,9 @@ export function ImageCanvasEditor({
   // 属性排直接调其强度并逐次入历史（可撤销）；显示与像素同一函数。
   const effectMarkCandidate =
     tool === "select" && selectedMark !== undefined
-      ? textEdit?.index === selectedMark
+      ? textEdit?.id === selectedMark
         ? textEdit.mark
-        : state.marks[selectedMark]
+        : state.marks.find((mark) => mark.id === selectedMark)
       : undefined;
   const editingEffectMark =
     effectMarkCandidate &&
@@ -4334,8 +4990,8 @@ export function ImageCanvasEditor({
     if (editingEffectMark && selectedMark !== undefined) {
       commit({
         ...state,
-        marks: state.marks.map((entry, index) =>
-          index === selectedMark
+        marks: state.marks.map((entry) =>
+          entry.id === selectedMark
             ? { ...entry, style: { ...entry.style, intensity: value } }
             : entry,
         ),
@@ -4483,13 +5139,14 @@ export function ImageCanvasEditor({
       </div>
     ) : undefined;
 
+  const activeFontSize = activeTextStyle.fontSize ?? 24;
   const fontSizeControl = fontTool && (
     <label className="editor-style-control">
       <span aria-hidden="true">字号</span>
       <Select
         aria-label="文字字号"
         size="small"
-        value={String(activeTextStyle.fontSize ?? 24)}
+        value={String(activeFontSize)}
         onChange={(_, data) =>
           fontMark
             ? updateFontMark({
@@ -4498,6 +5155,11 @@ export function ImageCanvasEditor({
             : updateToolAttribute({ fontSize: Number(data.value) })
         }
       >
+        {Number.isFinite(activeFontSize) &&
+          activeFontSize > 0 &&
+          !FONT_SIZES.some((size) => size === activeFontSize) && (
+            <option value={String(activeFontSize)}>{activeFontSize}px</option>
+          )}
         {FONT_SIZES.map((size) => (
           <option key={size} value={String(size)}>
             {size}px
@@ -4716,9 +5378,223 @@ export function ImageCanvasEditor({
       )}
     </>
   );
+  // 对象动作（上排）：选择工具下可见；含锁选区时修改类禁用，避免部分
+  // 修改锁定对象/锁组。纯文字按钮，不新增图标语义。
+  const objectActionControls = toolset === "full" &&
+    tool === "select" &&
+    !textEdit && (
+      <>
+        <ToolbarButton
+          aria-label="全选对象"
+          disabled={!hasUnlockedMarks}
+          onClick={selectAllObjects}
+          title="全选未锁定对象（Ctrl+A）"
+        >
+          全选
+        </ToolbarButton>
+        <ToolbarButton
+          aria-label="粘贴对象"
+          disabled={clipboard.length === 0}
+          onClick={pasteClipboard}
+          title="粘贴编辑器剪贴板对象（Ctrl+V）"
+        >
+          粘贴
+        </ToolbarButton>
+        {selectionCount > 0 && (
+          <>
+            <ToolbarButton
+              aria-label="复制对象"
+              onClick={copySelection}
+              title="复制到编辑器剪贴板（Ctrl+C）"
+            >
+              复制
+            </ToolbarButton>
+            <ToolbarButton
+              aria-label="重复对象"
+              disabled={!selectionModifiableUi}
+              onClick={duplicateSelection}
+              title="原位创建副本（Ctrl+D）"
+            >
+              重复
+            </ToolbarButton>
+            <ToolbarButton
+              aria-label="删除对象"
+              disabled={!selectionModifiableUi}
+              onClick={deleteSelection}
+              title="删除所选对象（Delete）"
+            >
+              删除
+            </ToolbarButton>
+            <ToolbarButton
+              aria-label="对象旋转 90°"
+              disabled={!selectionModifiableUi}
+              onClick={rotateSelection}
+              title="所选对象绕选区中心旋转 90°（命中/导出同步）"
+            >
+              旋转90°
+            </ToolbarButton>
+            <ToolbarButton
+              aria-label="水平镜像"
+              disabled={!selectionModifiableUi}
+              onClick={() => mirrorSelection("h")}
+              title="绕选区中心水平镜像"
+            >
+              镜像H
+            </ToolbarButton>
+            <ToolbarButton
+              aria-label="垂直镜像"
+              disabled={!selectionModifiableUi}
+              onClick={() => mirrorSelection("v")}
+              title="绕选区中心垂直镜像"
+            >
+              镜像V
+            </ToolbarButton>
+            <ToolbarButton
+              aria-label="放大选区"
+              disabled={!selectionModifiableUi}
+              onClick={() => scaleSelection(1.25)}
+              title="等比放大（几何与线宽/字号同步缩放一次）"
+            >
+              放大
+            </ToolbarButton>
+            <ToolbarButton
+              aria-label="缩小选区"
+              disabled={!selectionModifiableUi}
+              onClick={() => scaleSelection(0.8)}
+              title="等比缩小（几何与线宽/字号同步缩放一次）"
+            >
+              缩小
+            </ToolbarButton>
+            <ToolbarButton
+              aria-label="上移一层"
+              disabled={!selectionModifiableUi}
+              onClick={() => reorderSelection("up")}
+              title="上移一层（保持相对顺序）"
+            >
+              上移一层
+            </ToolbarButton>
+            <ToolbarButton
+              aria-label="下移一层"
+              disabled={!selectionModifiableUi}
+              onClick={() => reorderSelection("down")}
+              title="下移一层（保持相对顺序）"
+            >
+              下移一层
+            </ToolbarButton>
+            <ToolbarButton
+              aria-label="置顶"
+              disabled={!selectionModifiableUi}
+              onClick={() => reorderSelection("front")}
+              title="置顶（保持相对顺序）"
+            >
+              置顶
+            </ToolbarButton>
+            <ToolbarButton
+              aria-label="置底"
+              disabled={!selectionModifiableUi}
+              onClick={() => reorderSelection("back")}
+              title="置底（保持相对顺序）"
+            >
+              置底
+            </ToolbarButton>
+            {selectionUnitCount >= 2 && (
+              <Menu>
+                <MenuTrigger disableButtonEnhancement>
+                  <ToolbarButton
+                    aria-label="对齐与等距"
+                    disabled={!selectionModifiableUi}
+                    title="按变换边界对齐/等距分布"
+                  >
+                    对齐
+                  </ToolbarButton>
+                </MenuTrigger>
+                <MenuPopover>
+                  <MenuList>
+                    {(
+                      [
+                        ["left", "左对齐"],
+                        ["hcenter", "水平居中"],
+                        ["right", "右对齐"],
+                        ["top", "顶对齐"],
+                        ["vcenter", "垂直居中"],
+                        ["bottom", "底对齐"],
+                      ] as const
+                    ).map(([align, label]) => (
+                      <MenuItem
+                        key={align}
+                        disabled={!selectionModifiableUi}
+                        onClick={() => alignSelection(align)}
+                      >
+                        {label}
+                      </MenuItem>
+                    ))}
+                    <MenuItem
+                      disabled={
+                        !selectionModifiableUi || selectionUnitCount < 3
+                      }
+                      onClick={() => distributeSelection("h")}
+                    >
+                      水平等距（≥3，首尾固定）
+                    </MenuItem>
+                    <MenuItem
+                      disabled={
+                        !selectionModifiableUi || selectionUnitCount < 3
+                      }
+                      onClick={() => distributeSelection("v")}
+                    >
+                      垂直等距（≥3，首尾固定）
+                    </MenuItem>
+                  </MenuList>
+                </MenuPopover>
+              </Menu>
+            )}
+            {selectionCount >= 2 && (
+              <ToolbarButton
+                aria-label="组合"
+                disabled={!selectionModifiableUi}
+                onClick={groupSelection}
+                title="组合所选对象（不重排层级）"
+              >
+                组合
+              </ToolbarButton>
+            )}
+            {selectionTouchGroup && (
+              <ToolbarButton
+                aria-label="解组"
+                disabled={!selectionModifiableUi}
+                onClick={ungroupSelection}
+                title="解散所选组（成员保留层级与样式）"
+              >
+                解组
+              </ToolbarButton>
+            )}
+            <ToolbarButton
+              aria-label="锁定"
+              onClick={lockSelection}
+              title="锁定所选对象：画布不再命中，可经对象列表选择后解锁"
+            >
+              锁定
+            </ToolbarButton>
+            {selectionTouchLocked && (
+              <ToolbarButton
+                aria-label="解锁"
+                onClick={unlockSelection}
+                title="解锁所选对象"
+              >
+                解锁
+              </ToolbarButton>
+            )}
+          </>
+        )}
+      </>
+    );
 
   /** 清空屏蔽：只移除排除区，普通标注保留，几何变更入历史可撤销。 */
   function clearExclusions() {
+    if (state.marks.some((mark) => isExclusionMark(mark) && mark.locked)) {
+      setOperationMessage("屏蔽区包含锁定对象，请先解锁。");
+      return;
+    }
     cancelDrawing();
     select(undefined);
     commit({
@@ -4779,7 +5655,10 @@ export function ImageCanvasEditor({
       title="清空屏蔽"
       icon={<ToolbarIcon name="clearExclusions" />}
       aria-label="清空屏蔽"
-      disabled={!hasExclusions}
+      disabled={
+        !hasExclusions ||
+        state.marks.some((mark) => isExclusionMark(mark) && mark.locked)
+      }
       onClick={clearExclusions}
     >
       {captureStyle ? undefined : "清空屏蔽"}
@@ -4798,6 +5677,10 @@ export function ImageCanvasEditor({
   /** 清除编辑：整体回到空白基准，入历史可撤销；进行中的草稿（折线等）
    * 属于被清除的编辑内容，一并放弃，不得在 EMPTY 后仍渲染或复活。 */
   function clearEdits() {
+    if (state.marks.some((mark) => mark.locked)) {
+      setOperationMessage("存在锁定对象，请先解锁再清除编辑。");
+      return;
+    }
     cancelDrawing();
     select(undefined);
     commit(EMPTY);
@@ -4898,7 +5781,7 @@ export function ImageCanvasEditor({
       aria-label="清除编辑"
       appearance="transparent"
       size="small"
-      disabled={!hasEdits}
+      disabled={!hasEdits || state.marks.some((mark) => mark.locked)}
       onClick={clearEdits}
     >
       {captureStyle ? undefined : "清除编辑"}
@@ -5048,6 +5931,7 @@ export function ImageCanvasEditor({
           {textLayerControls}
           {inpaintOperations}
           {dupmatchOperations}
+          {objectActionControls}
           {rotateControl}
           {resetAttributesControl}
           {contentMark && !textEdit && (
@@ -5076,7 +5960,13 @@ export function ImageCanvasEditor({
           )}
           {activeFontTool === "numbering" &&
             state.marks.some((mark) => mark.tool === "numbering") && (
-              <ToolbarButton aria-label="重新编号" onClick={renumber}>
+              <ToolbarButton
+                aria-label="重新编号"
+                disabled={state.marks.some(
+                  (mark) => mark.tool === "numbering" && mark.locked,
+                )}
+                onClick={renumber}
+              >
                 重新编号
               </ToolbarButton>
             )}
@@ -5245,7 +6135,7 @@ export function ImageCanvasEditor({
         {toolset === "full"
           ? captureStyle
             ? "拖拽绘制标注；拖动选区四边与四角可调整裁剪范围。矩形/椭圆选中后可拖八点手柄缩放，直线/箭头/说明可拖端点；文字可双击继续编辑，上排完成或取消。说明从指向位置拖到文字位置。按住 Shift 约束正方形/正圆/45°，按住 Alt 以起点为中心绘制；折线单击加点、双击或 Enter 完成，Esc 放弃草稿。手形或按住 Space 可平移；滚轮可调线宽。马赛克/模糊支持矩形与笔刷，强度连续可调（兼容旧弱/中/强档位），选中已绘区域可再调强度；遮挡为纯色不透明像素，与屏蔽区（仅识别输入）分开；效果写入复制、保存副本及显式识别输入；画面缩放不改变内容。"
-            : "拖拽绘制或裁剪；选择标注后可拖动，矩形/椭圆可拖八点手柄缩放，直线/箭头/说明可拖端点；文字可双击继续编辑，上排完成或取消。说明从指向位置拖到文字位置；已提交裁剪框的四边/四角可继续拖拽调整。按住 Shift 约束正方形/正圆/45°，按住 Alt 以起点为中心绘制；折线单击加点、双击或 Enter 完成，Esc 放弃草稿。手形或按住 Space 可平移；滚轮可调线宽。马赛克/模糊支持矩形与笔刷，强度连续可调（兼容旧弱/中/强档位），选中已绘区域可再调强度；遮挡为纯色不透明像素，与屏蔽区（仅识别输入）分开；效果写入复制、保存副本及显式识别输入；画面缩放不改变内容。"
+            : "拖拽绘制或裁剪；选择标注后可拖动，矩形/椭圆可拖八点手柄缩放，直线/箭头/说明可拖端点；文字可双击继续编辑，上排完成或取消。说明从指向位置拖到文字位置；已提交裁剪框的四边/四角可继续拖拽调整。按住 Shift 约束正方/正圆/45°，按住 Alt 以起点为中心绘制；折线单击加点、双击或 Enter 完成，Esc 放弃草稿。手形或按住 Space 可平移；滚轮可调线宽。选择工具下可 Ctrl+点击增减选择、空白拖动框选（完整包含）、Ctrl+A 全选，上排提供复制/粘贴/重复、层级、对齐等距、组合/锁定与旋转/镜像/缩放；方向键微移、Delete 删除。马赛克/模糊支持矩形与笔刷，强度连续可调（兼容旧弱/中/强档位），选中已绘区域可再调强度；遮挡为纯色不透明像素，与屏蔽区（仅识别输入）分开；效果写入复制、保存副本及显式识别输入；画面缩放不改变内容。"
           : "拖拽框选“屏蔽”区，识别时忽略其中内容；“去水印”先框选、预览修补再应用；旋转调整整图方向。按住 Space 可平移，画面缩放不改变内容。"}
       </p>
       {tool === "inpaint" && (
@@ -5461,20 +6351,57 @@ export function ImageCanvasEditor({
               return;
             }
             const modifier = event.ctrlKey || event.metaKey;
-            if (modifier && event.key.toLowerCase() === "z") {
+            const key = event.key.toLowerCase();
+            if (modifier && key === "z") {
               event.preventDefault();
               if (event.shiftKey) redo();
               else undo();
-            } else if (modifier && event.key.toLowerCase() === "y") {
+            } else if (modifier && key === "y") {
               event.preventDefault();
               redo();
-            } else if (event.key === "Delete" && selectedMark !== undefined) {
+            } else if (tool !== "select" && event.key !== "Escape") {
+              return;
+            } else if (modifier && key === "a") {
+              // 全选未锁定对象（含锁定对象跳过，可在列表选择/解锁）。
               event.preventDefault();
-              commit({
-                ...state,
-                marks: state.marks.filter((_, index) => index !== selectedMark),
-              });
-              select(undefined);
+              const ids = unlockedMarkIds(state.marks);
+              if (ids.size > 0) {
+                const topmost = state.marks.findLast((mark) =>
+                  ids.has(mark.id),
+                )?.id;
+                setObjectSelection({ ids, primary: topmost });
+              }
+            } else if (modifier && key === "c") {
+              event.preventDefault();
+              copySelection();
+            } else if (modifier && key === "v") {
+              event.preventDefault();
+              pasteClipboard();
+            } else if (modifier && key === "d") {
+              event.preventDefault();
+              duplicateSelection();
+            } else if (
+              (event.key === "ArrowLeft" ||
+                event.key === "ArrowRight" ||
+                event.key === "ArrowUp" ||
+                event.key === "ArrowDown") &&
+              selectionRef.current.ids.size > 0
+            ) {
+              // 微移仅画布上下文：焦点在输入框时不进入本处理器。
+              event.preventDefault();
+              const step = event.shiftKey ? 10 : 1;
+              const delta =
+                event.key === "ArrowLeft"
+                  ? { x: -step, y: 0 }
+                  : event.key === "ArrowRight"
+                    ? { x: step, y: 0 }
+                    : event.key === "ArrowUp"
+                      ? { x: 0, y: -step }
+                      : { x: 0, y: step };
+              nudgeSelection(delta);
+            } else if (event.key === "Delete") {
+              event.preventDefault();
+              deleteSelection();
             } else if (event.key === "Escape") {
               dragStart.current = undefined;
               setDraftMark(undefined);
@@ -5483,7 +6410,9 @@ export function ImageCanvasEditor({
               select(undefined);
               markDragRef.current = undefined;
               cropResizeRef.current = undefined;
-              setResizeDraft(undefined);
+              moveDragRef.current = undefined;
+              marqueeRef.current = undefined;
+              setObjectDraft(undefined);
               setTool("select");
             }
           }}
@@ -5492,19 +6421,33 @@ export function ImageCanvasEditor({
             if (draftMark.current?.tool === "polyline") {
               commitPolylineDraft();
             } else {
-              const index = findMark(
+              const id = findMark(
                 state.marks,
                 point(event),
                 canvasRef.current?.getContext("2d") ?? undefined,
               );
-              if (index !== undefined) beginTextEdit(index);
+              if (id !== undefined) beginTextEdit(id);
             }
           }}
           onPointerCancel={cancelDrawing}
+          onPointerDownCapture={(event) => {
+            const input = document.activeElement;
+            if (
+              input instanceof HTMLInputElement &&
+              input.closest(".canvas-editor") ===
+                event.currentTarget.closest(".canvas-editor") &&
+              ["边框不透明度", "填充不透明度"].includes(
+                input.getAttribute("aria-label") ?? "",
+              )
+            ) {
+              // 失焦提交先于本次绘制冻结样式，避免 pointerdown 默认聚焦晚于取样。
+              flushSync(() => input.blur());
+            }
+          }}
           onPointerDown={pointerDown}
           onPointerMove={pointerMove}
           onPointerUp={pointerUp}
-          ref={canvasRef}
+          ref={attachCanvas}
           tabIndex={0}
           width={captureStyle ? captureGeometry?.width : 900}
         />
@@ -5582,28 +6525,7 @@ function textLayerStatusLabel(
   }
 }
 
-function markBounds(mark: Mark, context?: CanvasRenderingContext2D) {
-  if (context && isFontMark(mark)) {
-    const box = textAnnotationBounds(context, mark);
-    return {
-      left: Math.min(box.x, mark.start.x),
-      top: Math.min(box.y, mark.start.y),
-      right: Math.max(box.x + box.width, mark.start.x),
-      bottom: Math.max(box.y + box.height, mark.start.y),
-    };
-  }
-  let left = mark.start.x,
-    right = mark.start.x,
-    top = mark.start.y,
-    bottom = mark.start.y;
-  for (const point of mark.points ?? [mark.start, mark.end]) {
-    left = Math.min(left, point.x);
-    right = Math.max(right, point.x);
-    top = Math.min(top, point.y);
-    bottom = Math.max(bottom, point.y);
-  }
-  return { left, right, top, bottom };
-}
+/** 旧 markBounds 局部实现由 annotationObjects.markBoundsOf 取代（旋转感知）。 */
 
 function moveMark(mark: Mark, delta: Point): Mark {
   const move = (at: Point) => ({ x: at.x + delta.x, y: at.y + delta.y });
@@ -5689,7 +6611,7 @@ function drawPointHandleSquares(
 }
 
 /** 虚线 [12,8]；点线圆头间距至少两倍线宽，避免粗线端帽重叠。
- * 长度随 markScale 缩放，预览与导出同一节奏。 */
+ * 固定长度随自然导出比例与对象比例缩放，线宽已烘焙对象比例。 */
 function applyDashPattern(
   context: CanvasRenderingContext2D,
   style: AnnotationLineStyle | undefined,
@@ -5722,7 +6644,7 @@ function draw(
   canvas: HTMLCanvasElement | null,
   image: HTMLImageElement | undefined,
   state: EditorState,
-  selectedMark: number | undefined,
+  selectedIds: ReadonlySet<string> | undefined,
   marksOverride?: readonly Mark[],
   showEditorChrome = true,
   markScale = 1,
@@ -5866,7 +6788,7 @@ function draw(
     const width = mark.end.x - mark.start.x;
     const height = mark.end.y - mark.start.y;
     const color = mark.style?.color ?? DEFAULT_COLOR;
-    const lineWidth = (mark.style?.strokeWidth ?? 3) * markScale;
+    const lineWidth = annotationStrokeWidth(mark) * markScale;
     const strokeAlpha = annotationStrokeAlpha(mark);
     if (mark.tool === "rectangle") {
       context.setLineDash([]);
@@ -5891,7 +6813,12 @@ function draw(
         }
         context.save();
         context.globalAlpha = strokeAlpha;
-        applyDashPattern(context, mark.style?.lineStyle, markScale, lineWidth);
+        applyDashPattern(
+          context,
+          mark.style?.lineStyle,
+          markScale * (mark.objectScale ?? 1),
+          lineWidth,
+        );
         context.stroke();
         context.restore();
       } else {
@@ -5905,7 +6832,12 @@ function draw(
         }
         context.save();
         context.globalAlpha = strokeAlpha;
-        applyDashPattern(context, mark.style?.lineStyle, markScale, lineWidth);
+        applyDashPattern(
+          context,
+          mark.style?.lineStyle,
+          markScale * (mark.objectScale ?? 1),
+          lineWidth,
+        );
         context.strokeRect(mark.start.x, mark.start.y, width, height);
         context.restore();
       }
@@ -5934,7 +6866,12 @@ function draw(
       }
       context.save();
       context.globalAlpha = strokeAlpha;
-      applyDashPattern(context, mark.style?.lineStyle, markScale, lineWidth);
+      applyDashPattern(
+        context,
+        mark.style?.lineStyle,
+        markScale * (mark.objectScale ?? 1),
+        lineWidth,
+      );
       context.stroke();
       context.restore();
     } else if (mark.tool === "line" || mark.tool === "polyline") {
@@ -5942,26 +6879,20 @@ function draw(
       // 草稿的活动 end 追加为最后一个顶点：拖拽/悬停中的新段实时可见；
       // 已提交标记 end == 最后顶点，不追加，渲染与旧像素不变。未提交
       // 草稿只进预览画布，导出/历史仍只包含已提交 points。
-      const committedPoints =
-        mark.tool === "polyline" && mark.points?.length
-          ? mark.points
-          : [mark.start, mark.end];
-      const points = [...committedPoints];
-      if (mark.tool === "polyline") {
-        const last = points[points.length - 1];
-        if (last && (last.x !== mark.end.x || last.y !== mark.end.y)) {
-          points.push(mark.end);
-        }
-      }
+      const path = annotationPaths(mark)[0]!;
+      const points = path.points;
       context.save();
       context.strokeStyle = color;
       context.lineWidth = lineWidth;
       context.globalAlpha = strokeAlpha;
-      applyDashPattern(context, mark.style?.lineStyle, markScale, lineWidth);
-      if (!mark.style?.lineStyle || mark.style.lineStyle === "solid") {
-        context.lineCap = "round";
-      }
-      context.lineJoin = "round";
+      applyDashPattern(
+        context,
+        mark.style?.lineStyle,
+        markScale * (mark.objectScale ?? 1),
+        lineWidth,
+      );
+      context.lineCap = path.cap;
+      context.lineJoin = path.join ?? "miter";
       context.beginPath();
       points.forEach((at, pointIndex) => {
         if (pointIndex === 0) context.moveTo(at.x, at.y);
@@ -5979,93 +6910,33 @@ function draw(
       context.strokeStyle = color;
       context.save();
       context.globalAlpha = strokeAlpha;
-      const arrowStyle = mark.style?.arrowStyle ?? "open";
-      const doubleHead = mark.style?.arrowDouble === true;
-      const angle = Math.atan2(height, width);
-      // 旧默认开放头：两条 16px 短线，保持旧对象渲染不变。
-      const drawOpenHead = (tip: Point, dir: number): void => {
+      const geometry = annotationArrowGeometry(mark, markScale);
+      const groups = [[geometry.shaft], ...geometry.heads];
+      groups.forEach((paths, index) => {
         context.setLineDash([]);
         context.beginPath();
-        context.moveTo(tip.x, tip.y);
-        context.lineTo(
-          tip.x - 16 * markScale * Math.cos(dir - 0.45),
-          tip.y - 16 * markScale * Math.sin(dir - 0.45),
-        );
-        context.moveTo(tip.x, tip.y);
-        context.lineTo(
-          tip.x - 16 * markScale * Math.cos(dir + 0.45),
-          tip.y - 16 * markScale * Math.sin(dir + 0.45),
-        );
-        context.stroke();
-      };
-      // 短箭头的端头共同受总长度约束，防止轴杆反向穿过空心头。
-      const headSize = Math.min(
-        (10 + (mark.style?.strokeWidth ?? 3) * 2) * markScale,
-        Math.hypot(width, height) / (doubleHead ? 2 : 1),
-      );
-      const drawTriangleHead = (
-        tip: Point,
-        dir: number,
-        filled: boolean,
-      ): void => {
-        const half = headSize / 2.5;
-        const base = {
-          x: tip.x - headSize * Math.cos(dir),
-          y: tip.y - headSize * Math.sin(dir),
-        };
-        context.setLineDash([]);
-        context.beginPath();
-        context.moveTo(tip.x, tip.y);
-        context.lineTo(
-          base.x + half * Math.cos(dir - Math.PI / 2),
-          base.y + half * Math.sin(dir - Math.PI / 2),
-        );
-        context.lineTo(
-          base.x + half * Math.cos(dir + Math.PI / 2),
-          base.y + half * Math.sin(dir + Math.PI / 2),
-        );
-        context.closePath();
-        if (filled) {
+        for (const path of paths) {
+          path.points.forEach((at, pointIndex) => {
+            if (pointIndex === 0) context.moveTo(at.x, at.y);
+            else context.lineTo(at.x, at.y);
+          });
+          if (path.closed) context.closePath();
+        }
+        if (paths.some((path) => path.filled)) {
           context.fillStyle = color;
           context.fill();
         }
+        if (index === 0)
+          applyDashPattern(
+            context,
+            mark.style?.lineStyle,
+            markScale * (mark.objectScale ?? 1),
+            lineWidth,
+          );
+        context.lineCap = paths[0]!.cap;
+        context.lineJoin = paths[0]!.join ?? "miter";
         context.stroke();
-      };
-      if (arrowStyle === "open") {
-        // 旧路径：完整轴杆 + 端头短线（无轴杆缩短），字节等价旧渲染。
-        context.beginPath();
-        context.moveTo(mark.start.x, mark.start.y);
-        context.lineTo(mark.end.x, mark.end.y);
-        applyDashPattern(context, mark.style?.lineStyle, markScale, lineWidth);
-        context.stroke();
-        drawOpenHead(mark.end, angle);
-        if (doubleHead) drawOpenHead(mark.start, angle + Math.PI);
-      } else {
-        // 三角头：轴杆止于端头底边，空心内部不穿越轴杆。
-        const axis = {
-          x: Math.cos(angle),
-          y: Math.sin(angle),
-        };
-        const shaftStart = doubleHead
-          ? {
-              x: mark.start.x + headSize * axis.x,
-              y: mark.start.y + headSize * axis.y,
-            }
-          : mark.start;
-        const shaftEnd = {
-          x: mark.end.x - headSize * axis.x,
-          y: mark.end.y - headSize * axis.y,
-        };
-        context.beginPath();
-        context.moveTo(shaftStart.x, shaftStart.y);
-        context.lineTo(shaftEnd.x, shaftEnd.y);
-        applyDashPattern(context, mark.style?.lineStyle, markScale, lineWidth);
-        context.stroke();
-        drawTriangleHead(mark.end, angle, arrowStyle === "solid");
-        if (doubleHead) {
-          drawTriangleHead(mark.start, angle + Math.PI, arrowStyle === "solid");
-        }
-      }
+      });
       context.restore();
     } else if (isContentMark(mark)) {
       drawTextAnnotation(context, mark, markScale);
@@ -6074,18 +6945,18 @@ function draw(
     } else if (mark.tool === "blur") {
       applyBlur(context, canvas, mark, markScale);
     } else if (mark.tool === "pen" || mark.tool === "highlighter") {
-      const points = mark.points ?? [mark.start, mark.end];
+      const path = annotationPaths(mark)[0]!;
+      const points = path.points;
       context.setLineDash([]);
       context.save();
       context.strokeStyle = color;
-      context.lineCap = "round";
-      context.lineJoin = "round";
+      context.lineCap = path.cap;
+      context.lineJoin = path.join ?? "miter";
       if (mark.tool === "highlighter") {
         // 边框不透明度与荧光笔自身 35% 透明相乘：旧标记（缺省 100%）
         // 渲染保持不变，不覆盖原有透明语义。
         context.globalAlpha = 0.35 * strokeAlpha;
-        context.lineWidth =
-          Math.max((mark.style?.strokeWidth ?? 3) * 4, 12) * markScale;
+        context.lineWidth = lineWidth;
       } else {
         context.globalAlpha = strokeAlpha;
         context.lineWidth = lineWidth;
@@ -6104,7 +6975,13 @@ function draw(
     } else if (mark.tool === "exclude") {
       if (showEditorChrome) {
         // 预览专用外观：红色虚线 + 斜纹，明确区别于普通标注；不入导出。
-        drawExclusionChrome(context, mark, selectedMark === index);
+        drawExclusionChrome(
+          context,
+          mark,
+          selectedIds?.has(mark.id) === true &&
+            selectedIds.size === 1 &&
+            !mark.locked,
+        );
       } else if (bakeExclusions) {
         // 识别/屏蔽副本输入：外扩取整后的不透明白色硬覆盖，
         // 严格不保留原始文字像素（与 exclusionNaturalRects 同一取整）。
@@ -6135,20 +7012,22 @@ function draw(
     } else if (mark.tool === "numbering") {
       drawTextAnnotation(context, mark, markScale);
     }
-    if (showEditorChrome && selectedMark === index) {
-      const bounds = markBounds(mark, context);
+    if (showEditorChrome && selectedIds?.has(mark.id) === true) {
+      const bounds = markBoundsOf(mark, context);
       context.setLineDash([7, 5]);
       context.lineWidth = 1 * markScale;
       context.strokeStyle = "#f38b35";
       context.strokeRect(
-        bounds.left - 5,
-        bounds.top - 5,
-        bounds.right - bounds.left + 10,
-        bounds.bottom - bounds.top + 10,
+        bounds.x - 5,
+        bounds.y - 5,
+        bounds.width + 10,
+        bounds.height + 10,
       );
       // 几何编辑手柄：矩形/椭圆八点缩放；直线/箭头两端端点（屏蔽标记
       // 自带八点手柄，不重复绘制）。
       if (
+        selectedIds?.size === 1 &&
+        !mark.locked &&
         (mark.tool === "rectangle" ||
           mark.tool === "ellipse" ||
           mark.tool === "solid") &&
@@ -6156,11 +7035,20 @@ function draw(
       ) {
         drawHandleSquares(context, normalizedRect(mark), "#f38b35");
       } else if (
-        mark.tool === "line" ||
-        mark.tool === "arrow" ||
-        mark.tool === "callout"
+        selectedIds?.size === 1 &&
+        !mark.locked &&
+        isEndpointMark(mark)
       ) {
-        drawPointHandleSquares(context, [mark.start, mark.end], "#f38b35");
+        drawPointHandleSquares(
+          context,
+          isFontMark(mark)
+            ? [
+                transformTextPoint(mark, mark.start),
+                transformTextPoint(mark, mark.end),
+              ]
+            : [mark.start, mark.end],
+          "#f38b35",
+        );
       }
     }
   });
@@ -6347,6 +7235,7 @@ function isEndpointMark(mark: Mark): boolean {
 /** 直线/箭头端点命中：两端都在半径内时取距离更近的一端（相等时稳定取
  * start），短线段（长度 < 2×半径）的 end 手柄因此仍然可命中可拖拽。 */
 function endpointHandle(mark: Mark, at: Point): "start" | "end" | undefined {
+  if (isFontMark(mark)) at = transformTextPoint(mark, at, true);
   const toStart = Math.hypot(at.x - mark.start.x, at.y - mark.start.y);
   const toEnd = Math.hypot(at.x - mark.end.x, at.y - mark.end.y);
   if (toStart > EXCLUSION_HANDLE_RADIUS && toEnd > EXCLUSION_HANDLE_RADIUS)
@@ -6411,6 +7300,24 @@ function moveEndpointMark(
   shift: boolean,
 ): Mark {
   if (delta.x === 0 && delta.y === 0) return mark;
+  if (isFontMark(mark)) {
+    const worldStart = transformTextPoint(mark, mark.start);
+    if (endpoint === "end") {
+      const next = {
+        ...mark,
+        end: { x: mark.end.x + delta.x, y: mark.end.y + delta.y },
+      };
+      return { ...next, start: transformTextPoint(next, worldStart, true) };
+    }
+    return {
+      ...mark,
+      start: transformTextPoint(
+        mark,
+        { x: worldStart.x + delta.x, y: worldStart.y + delta.y },
+        true,
+      ),
+    };
+  }
   const at = { x: mark[endpoint].x + delta.x, y: mark[endpoint].y + delta.y };
   return endpoint === "end"
     ? { ...mark, end: constrainLineDrag(mark.start, at, shift) }
@@ -6535,6 +7442,8 @@ function compositeThroughMask(
   compositor.globalCompositeOperation = "source-over";
   context.save();
   context.imageSmoothingEnabled = false;
+  // 效果仅重绘已有像素的颜色，透明度沿用原图。
+  context.globalCompositeOperation = "source-atop";
   context.drawImage(composited, area.x, area.y, area.width, area.height);
   context.restore();
 }
@@ -6894,73 +7803,67 @@ function findMark(
   marks: readonly Mark[],
   point: Point,
   context?: CanvasRenderingContext2D,
-): number | undefined {
+): string | undefined {
   for (let index = marks.length - 1; index >= 0; index -= 1) {
     const mark = marks[index];
-    if (!mark) continue;
+    // 锁定对象画布命中跳过：透明对象按几何命中，锁定对象仅列表可选。
+    if (!mark || mark.locked) continue;
     if (context && isFontMark(mark)) {
-      const box = textAnnotationBounds(context, mark);
-      const leader =
-        mark.tool === "callout"
-          ? calloutLeaderSegment(box, mark.start)
-          : undefined;
+      // 字形旋转：指针逆旋转回局部未旋转空间后按同一盒/引线判定。
+      const at = transformTextPoint(mark, point, true);
+      const box = textAnnotationLocalBounds(context, mark);
+      const hitPadding = Math.max(
+        6,
+        (mark.style?.textOutline?.width ?? 0) / 2,
+        mark.tool === "callout" ? annotationStrokeWidth(mark) / 2 : 0,
+      );
+      const leaderPaths =
+        mark.tool === "callout" ? calloutLeaderPaths(box, mark) : [];
       if (
-        (point.x >= box.x - 6 &&
-          point.x <= box.x + box.width + 6 &&
-          point.y >= box.y - 6 &&
-          point.y <= box.y + box.height + 6) ||
-        (leader && distanceToSegment(point, leader.from, leader.to) <= 10)
+        (at.x >= box.x - hitPadding &&
+          at.x <= box.x + box.width + hitPadding &&
+          at.y >= box.y - hitPadding &&
+          at.y <= box.y + box.height + hitPadding) ||
+        hitStrokePaths(leaderPaths, at, annotationStrokeWidth(mark))
       )
-        return index;
+        return mark.id;
       continue;
     }
-    // 直线/箭头/折线：按到线段的最短距离命中，避免包络盒内误选；
-    // 其余工具沿用包络盒（±10px 容差）。
+    // 直线/箭头/折线/画笔：按到线段的最短距离命中，避免包络盒内误选；
+    // 笔刷马赛克/模糊同样按轨迹+笔刷半径精确命中；其余工具沿用包络盒
+    // （±10px 容差）；透明对象按几何命中。
     if (
       mark.tool === "line" ||
       mark.tool === "arrow" ||
-      mark.tool === "polyline"
+      mark.tool === "polyline" ||
+      mark.tool === "pen" ||
+      mark.tool === "highlighter" ||
+      ((mark.tool === "mosaic" || mark.tool === "blur") && mark.points?.length)
     ) {
-      const points =
-        mark.tool === "polyline" && mark.points?.length
-          ? mark.points
-          : [mark.start, mark.end];
-      let hit = false;
-      for (let i = 1; i < points.length; i += 1) {
-        if (distanceToSegment(point, points[i - 1]!, points[i]!) <= 10) {
-          hit = true;
-          break;
-        }
-      }
-      if (hit) return index;
+      if (
+        hitStrokePaths(
+          annotationPaths(mark),
+          point,
+          mark.tool === "mosaic" || mark.tool === "blur"
+            ? Math.max(2, mark.style?.brushSize ?? 24)
+            : annotationStrokeWidth(mark),
+        )
+      )
+        return mark.id;
       continue;
     }
-    const left = Math.min(mark.start.x, mark.end.x) - 10;
-    const right = Math.max(mark.start.x, mark.end.x) + 10;
-    const top = Math.min(mark.start.y, mark.end.y) - 10;
-    const bottom = Math.max(mark.start.y, mark.end.y) + 10;
+    const bounds = markBoundsOf(mark, context);
+    const left = bounds.x - 10;
+    const right = bounds.x + bounds.width + 10;
+    const top = bounds.y - 10;
+    const bottom = bounds.y + bounds.height + 10;
     if (
       point.x >= left &&
       point.x <= right &&
       point.y >= top &&
       point.y <= bottom
     )
-      return index;
+      return mark.id;
   }
   return undefined;
-}
-
-/** 点到线段的最短距离：命中半径判定用，不引入额外几何库。 */
-function distanceToSegment(at: Point, from: Point, to: Point): number {
-  const dx = to.x - from.x;
-  const dy = to.y - from.y;
-  if (dx === 0 && dy === 0) return Math.hypot(at.x - from.x, at.y - from.y);
-  const t = Math.max(
-    0,
-    Math.min(
-      1,
-      ((at.x - from.x) * dx + (at.y - from.y) * dy) / (dx * dx + dy * dy),
-    ),
-  );
-  return Math.hypot(at.x - (from.x + t * dx), at.y - (from.y + t * dy));
 }

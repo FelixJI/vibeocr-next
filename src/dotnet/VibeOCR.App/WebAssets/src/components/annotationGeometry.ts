@@ -78,6 +78,9 @@ export interface AnnotationFill {
 }
 
 export interface Mark {
+  /** 稳定对象 id：所有创建入口（含初始屏蔽播种）单调分配，不随撤销回退；
+   * 选择/草稿/历史按 id 对应，删除/重排不串对象。 */
+  readonly id: string;
   readonly tool: AnnotationTool;
   readonly start: Point;
   readonly end: Point;
@@ -89,6 +92,17 @@ export interface Mark {
   readonly points?: readonly Point[];
   /** 序号标记的自动编号（绘制时重建）。 */
   readonly ordinal?: number;
+  /** 最小平面对象组：同组成员整体选择/变换；不嵌套。 */
+  readonly groupId?: string;
+  /** 锁定：画布命中跳过、修改操作禁用；可经对象列表解锁。 */
+  readonly locked?: boolean;
+  /** 对象自身旋转（90° 倍数）：字形类标记旋转字形与命中；几何类标记
+   * （矩形/线条/轨迹/效果/屏蔽）把旋转直接烘焙进坐标，不携带该字段。 */
+  readonly rotation?: 0 | 90 | 180 | 270;
+  readonly flipX?: boolean;
+  readonly flipY?: boolean;
+  /** 几何/字号已烘焙缩放；固定像素装饰（内边距/端头）单独乘此比例。 */
+  readonly objectScale?: number;
 }
 
 /** 已应用的本地像素修补：原图（未旋转）像素空间的整数矩形。
@@ -166,6 +180,67 @@ export function constrainLineDrag(
   };
 }
 
+/** 点绕中心顺时针旋转 quarter 个直角（屏幕坐标系 y 向下）。 */
+export function rotatePointQuarter(
+  at: Point,
+  center: Point,
+  quarter: number,
+): Point {
+  let { x, y } = at;
+  for (let step = 0; step < ((quarter % 4) + 4) % 4; step += 1) {
+    const dx = x - center.x;
+    const dy = y - center.y;
+    x = center.x - dy;
+    y = center.y + dx;
+  }
+  return { x, y };
+}
+
+/** 字形与说明引线共用的局部变换锚点。 */
+export function textTransformAnchor(mark: Mark): Point {
+  if (mark.tool === "numbering") return mark.start;
+  if (mark.tool === "callout") return mark.end;
+  return { x: Math.min(mark.start.x, mark.end.x), y: mark.end.y };
+}
+
+export function transformTextPoint(
+  mark: Mark,
+  at: Point,
+  inverse = false,
+): Point {
+  const center = textTransformAnchor(mark);
+  const quarter = (mark.rotation ?? 0) / 90;
+  let point = inverse ? rotatePointQuarter(at, center, -quarter) : at;
+  point = {
+    x: center.x + (point.x - center.x) * (mark.flipX ? -1 : 1),
+    y: center.y + (point.y - center.y) * (mark.flipY ? -1 : 1),
+  };
+  return inverse ? point : rotatePointQuarter(point, center, quarter);
+}
+
+/** 点绕中心等比缩放（factor>0）。 */
+export function scalePointAround(
+  at: Point,
+  center: Point,
+  factor: number,
+): Point {
+  return {
+    x: center.x + (at.x - center.x) * factor,
+    y: center.y + (at.y - center.y) * factor,
+  };
+}
+
+/** 点绕中心沿轴镜像：axis=h 时翻转 x，axis=v 时翻转 y。 */
+export function mirrorPointAround(
+  at: Point,
+  center: Point,
+  axis: "h" | "v",
+): Point {
+  return axis === "h"
+    ? { x: 2 * center.x - at.x, y: at.y }
+    : { x: at.x, y: 2 * center.y - at.y };
+}
+
 export function isExclusionMark(mark: Mark): boolean {
   return mark.tool === "exclude";
 }
@@ -174,6 +249,14 @@ export function isExclusionMark(mark: Mark): boolean {
 function clampPercent(value: number | undefined, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
   return Math.min(100, Math.max(0, value));
+}
+
+/** strokeWidth 已烘焙对象比例；仅荧光笔固定最小宽额外消费 objectScale。 */
+export function annotationStrokeWidth(mark: Mark): number {
+  const width = mark.style?.strokeWidth ?? 3;
+  return mark.tool === "highlighter"
+    ? Math.max(width * 4, 12 * (mark.objectScale ?? 1))
+    : width;
 }
 
 /** 标记边框/线条不透明度 → canvas globalAlpha [0,1]；缺省 1（旧对象不变）。 */
@@ -275,17 +358,42 @@ export function rotateEditorState(
     projectPoint(point, image, state.rotation, size, nextRotation, size);
   return {
     rotation: nextRotation,
-    marks: state.marks.map((mark) => ({
-      ...mark,
-      // 旧标记首次旋转前捕获原水平跨度；字号与布局宽度同属显示单位。
-      ...(mark.tool === "text"
-        ? { textWidth: mark.textWidth ?? Math.abs(mark.end.x - mark.start.x) }
-        : {}),
-      start: rotatePoint(mark.start),
-      end: rotatePoint(mark.end),
-      // 画笔/荧光笔轨迹点同映射，旋转后实际轨迹不错位。
-      ...(mark.points ? { points: mark.points.map(rotatePoint) } : {}),
-    })),
+    marks: state.marks.map((mark) => {
+      const next: Mark = {
+        ...mark,
+        // 旧标记首次旋转前捕获原水平跨度；字号与布局宽度同属显示单位。
+        ...(mark.tool === "text"
+          ? { textWidth: mark.textWidth ?? Math.abs(mark.end.x - mark.start.x) }
+          : {}),
+        start: rotatePoint(mark.start),
+        end: rotatePoint(mark.end),
+        // 画笔/荧光笔轨迹点同映射，旋转后实际轨迹不错位。
+        ...(mark.points ? { points: mark.points.map(rotatePoint) } : {}),
+      };
+      // 带对象变换的文字保留局部布局，仅投影世界锚点，避免端点换序造成跳位。
+      if (mark.tool === "text" && (mark.rotation || mark.flipX || mark.flipY)) {
+        const anchor = textTransformAnchor(mark);
+        const projected = rotatePoint(anchor);
+        const dx = projected.x - anchor.x,
+          dy = projected.y - anchor.y;
+        return {
+          ...next,
+          start: { x: mark.start.x + dx, y: mark.start.y + dy },
+          end: { x: mark.end.x + dx, y: mark.end.y + dy },
+        };
+      }
+      // 引线目标先还原到世界坐标再投影，最后写回新锚点的局部空间。
+      return mark.tool === "callout"
+        ? {
+            ...next,
+            start: transformTextPoint(
+              next,
+              rotatePoint(transformTextPoint(mark, mark.start)),
+              true,
+            ),
+          }
+        : next;
+    }),
     ...(state.crop
       ? {
           crop: {

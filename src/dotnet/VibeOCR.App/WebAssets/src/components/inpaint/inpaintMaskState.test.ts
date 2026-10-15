@@ -6,8 +6,9 @@ import {
   INPAINT_MASK_WORK_BUDGET,
   maskBounds,
   maskCount,
+  totalDistinctPatchPixels,
 } from "./inpaintMaskState";
-import type { InpaintRect } from "./inpaint";
+import { INPAINT_MAX_TOTAL_PATCH_PIXELS, type InpaintRect } from "./inpaint";
 
 const IMAGE = { width: 64, height: 48 };
 
@@ -138,5 +139,57 @@ describe("inpaint mask state", () => {
       expect(["roi-budget", "work-budget"]).toContain(result.reason);
       expect(INPAINT_MASK_WORK_BUDGET).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("totalDistinctPatchPixels（历史补丁聚合预算口径）", () => {
+  it("counts only references retained by a new commit while preserving undo/redo storage", () => {
+    const earlier = { id: 1, width: 2000, height: 2000 };
+    const redoOnly = { id: 2, width: 2000, height: 2000 };
+    const history = [{ patches: [earlier] }, { patches: [earlier, redoOnly] }];
+    // Undo keeps redo live until the next commit; the new branch then drops it.
+    expect(totalDistinctPatchPixels(history)).toBe(8_000_000);
+    expect(totalDistinctPatchPixels(history, 0)).toBe(4_000_000);
+    expect(
+      totalDistinctPatchPixels(history, 0) + 4_000_000,
+    ).toBeLessThanOrEqual(INPAINT_MAX_TOTAL_PATCH_PIXELS);
+    expect(history[1]!.patches).toEqual([earlier, redoOnly]);
+  });
+
+  it("重复历史引用只计一次：同一补丁在多个条目出现不重复累计", () => {
+    const patch = { id: 1, width: 1000, height: 1000 };
+    const entries = [
+      { patches: [patch] },
+      // 后续每次提交（或撤销/重做分支）都重复引用同一补丁。
+      { patches: [patch] },
+      { patches: [patch, { id: 2, width: 500, height: 400 }] },
+    ];
+    // 旧实现逐条目累加会得到 3.2MP，普通编辑几次就虚假满额。
+    expect(totalDistinctPatchPixels(entries)).toBe(1_200_000);
+  });
+
+  it("真实超限口径：4MP 补丁重复引用两次仍是 4MP，恰好加满不误拒", () => {
+    const fourMp = { id: 7, width: 2000, height: 2000 };
+    const entries = [{ patches: [fourMp] }, { patches: [fourMp] }];
+    expect(totalDistinctPatchPixels(entries)).toBe(4_000_000);
+    // 存量 4MP + 新 4MP = 8MP ≤ 预算：应允许（旧实现 8M 存量会误拒）。
+    expect(totalDistinctPatchPixels(entries) + 4_000_000).toBeLessThanOrEqual(
+      INPAINT_MAX_TOTAL_PATCH_PIXELS,
+    );
+    // 真实超限（不同 id 的存活补丁总量超预算）仍应被拒绝路径识别。
+    const bloated = [
+      { patches: [{ id: 1, width: 2000, height: 2000 }] },
+      { patches: [{ id: 2, width: 2000, height: 2000 }] },
+      { patches: [{ id: 3, width: 2000, height: 2000 }] },
+      {
+        patches: [
+          { id: 4, width: 2000, height: 2000 },
+          { id: 5, width: 100, height: 50 },
+        ],
+      },
+    ];
+    expect(totalDistinctPatchPixels(bloated) + 1).toBeGreaterThan(
+      INPAINT_MAX_TOTAL_PATCH_PIXELS,
+    );
   });
 });

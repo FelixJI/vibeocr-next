@@ -74,6 +74,22 @@ describe("findDuplicateRegions", () => {
     expect(exact!.error).toBeLessThanOrEqual(6);
   });
 
+  it("finds copies above and left of the source without scanning outside the image", () => {
+    const source = { x: 60, y: 40, width: 12, height: 9 };
+    const rgba = paint(96, 64, (x, y) =>
+      x >= 3 && x < 15 && y >= 4 && y < 13
+        ? textureAt(x - 3 + source.x, y - 4 + source.y)
+        : textureAt(x, y),
+    );
+    expect(findDuplicateRegions(rgba, 96, 64, source)).toContainEqual({
+      x: 3,
+      y: 4,
+      width: 12,
+      height: 9,
+      error: 0,
+    });
+  });
+
   it("rejects low-texture (near flat) source blocks", () => {
     const width = 48;
     const height = 32;
@@ -141,6 +157,56 @@ describe("findDuplicateRegions", () => {
         }),
       ),
     ).toBe("invalid-rect");
+  });
+
+  it("finds non-grid-aligned duplicates that a strided search would miss", () => {
+    // root 核实案例：512×512 纹理底图，32×32 源块 (20,20)，完全一致
+    // 副本 (75,73)。旧实现确定性步长 2 永不访问奇数偏移，会错误地报
+    // no-duplicates；新两阶段搜索访问每个整数偏移，必须找到。
+    const width = 512;
+    const height = 512;
+    const rgba = paint(width, height, textureAt);
+    for (let y = 0; y < 32; y += 1) {
+      for (let x = 0; x < 32; x += 1) {
+        const p = ((73 + y) * width + (75 + x)) * 4;
+        const q = ((20 + y) * width + (20 + x)) * 4;
+        rgba[p] = rgba[q]!;
+        rgba[p + 1] = rgba[q + 1]!;
+        rgba[p + 2] = rgba[q + 2]!;
+        rgba[p + 3] = 255;
+      }
+    }
+
+    const candidates = findDuplicateRegions(rgba, width, height, {
+      x: 20,
+      y: 20,
+      width: 32,
+      height: 32,
+    });
+
+    const exact = candidates.find(
+      (candidate) => candidate.x === 75 && candidate.y === 73,
+    );
+    expect(exact).toBeDefined();
+    expect(exact!.error).toBeLessThanOrEqual(6);
+  });
+
+  it("explicitly rejects when full-offset screening would exceed the work budget", () => {
+    // 6.76MP 图（≤ 8MP 上限）+ 32×32 源块：偏移 6.6M × 16 采样超
+    // 筛选预算。旧实现静默步进稀疏网格（漏扫）；新实现显式拒绝。
+    const width = 2600;
+    const height = 2600;
+    const rgba = paint(width, height, textureAt);
+    expect(
+      failureCodeOf(() =>
+        findDuplicateRegions(rgba, width, height, {
+          x: 20,
+          y: 20,
+          width: 32,
+          height: 32,
+        }),
+      ),
+    ).toBe("budget-exceeded");
   });
 
   it("bounds candidates and keeps them non-overlapping and disjoint from source", () => {

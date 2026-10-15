@@ -1,4 +1,17 @@
-import type { AnnotationStyle, Mark, Point, Rect } from "./annotationGeometry";
+import {
+  textTransformAnchor,
+  transformTextPoint,
+  type AnnotationStyle,
+  type Mark,
+  type Point,
+  type Rect,
+} from "./annotationGeometry";
+import {
+  openArrowHeadPaths,
+  type AnnotationPath,
+} from "./annotationStrokeGeometry";
+
+export { textTransformAnchor, transformTextPoint } from "./annotationGeometry";
 
 export const FONT_TOOLS = ["text", "callout", "numbering"] as const;
 export function isFontMark(mark: Mark): boolean {
@@ -90,6 +103,30 @@ export function calloutLeaderSegment(
   };
 }
 
+/** 引线与端头路径供绘制、可见边界和命中共用。 */
+export function calloutLeaderPaths(
+  box: Rect,
+  mark: Mark,
+  scale = 1,
+): readonly AnnotationPath[] {
+  const leader = calloutLeaderSegment(
+    box,
+    mark.start,
+    scale * (mark.objectScale ?? 1),
+  );
+  if (!leader) return [];
+  const angle = Math.atan2(
+    mark.start.y - leader.from.y,
+    mark.start.x - leader.from.x,
+  );
+  return [
+    { points: [leader.from, mark.start], cap: "butt" },
+    ...(mark.style?.calloutStyle === "arrow"
+      ? openArrowHeadPaths(mark.start, angle, leader.headSize)
+      : []),
+  ];
+}
+
 export function annotationFont(
   style: AnnotationStyle | undefined,
   scale = 1,
@@ -168,10 +205,11 @@ function textLayout(
   };
 }
 
-export function textAnnotationBounds(
+/** 未旋转布局边界：字形/背景/命中共用的基准盒（含内边距）。 */
+function unrotatedTextBox(
   context: CanvasRenderingContext2D,
   mark: Mark,
-  scale = 1,
+  scale: number,
 ): Rect {
   context.save();
   if (mark.tool === "numbering") {
@@ -179,12 +217,12 @@ export function textAnnotationBounds(
     const size = (mark.style?.fontSize ?? 24) * scale;
     const radius = Math.max(
       size * 0.68,
-      8 * scale,
+      8 * scale * (mark.objectScale ?? 1),
       context.measureText(
         numberLabel(mark.ordinal ?? 1, mark.style?.numberFormat),
       ).width /
         2 +
-        4 * scale,
+        4 * scale * (mark.objectScale ?? 1),
     );
     context.restore();
     return {
@@ -199,7 +237,7 @@ export function textAnnotationBounds(
     mark.tool === "callout" ||
     (mark.style?.textBackground?.enabled !== false &&
       mark.style?.textBackground)
-      ? 6 * scale
+      ? 6 * scale * (mark.objectScale ?? 1)
       : 0;
   context.restore();
   return {
@@ -210,6 +248,45 @@ export function textAnnotationBounds(
   };
 }
 
+/** 未旋转局部布局盒：命中测试先把指针逆旋转回局部空间再用本盒判定。 */
+export function textAnnotationLocalBounds(
+  context: CanvasRenderingContext2D,
+  mark: Mark,
+  scale = 1,
+): Rect {
+  return unrotatedTextBox(context, mark, scale);
+}
+
+function boundsOfPoints(points: readonly Point[]): Rect {
+  let left = Number.POSITIVE_INFINITY,
+    right = Number.NEGATIVE_INFINITY,
+    top = Number.POSITIVE_INFINITY,
+    bottom = Number.NEGATIVE_INFINITY;
+  for (const at of points) {
+    left = Math.min(left, at.x);
+    right = Math.max(right, at.x);
+    top = Math.min(top, at.y);
+    bottom = Math.max(bottom, at.y);
+  }
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+export function textAnnotationBounds(
+  context: CanvasRenderingContext2D,
+  mark: Mark,
+  scale = 1,
+): Rect {
+  const box = unrotatedTextBox(context, mark, scale);
+  return boundsOfPoints(
+    [
+      { x: box.x, y: box.y },
+      { x: box.x + box.width, y: box.y },
+      { x: box.x + box.width, y: box.y + box.height },
+      { x: box.x, y: box.y + box.height },
+    ].map((at) => transformTextPoint(mark, at)),
+  );
+}
+
 export function drawTextAnnotation(
   context: CanvasRenderingContext2D,
   mark: Mark,
@@ -217,9 +294,16 @@ export function drawTextAnnotation(
 ): void {
   context.save();
   context.setLineDash([]);
+  if (mark.rotation || mark.flipX || mark.flipY) {
+    const center = textTransformAnchor(mark);
+    context.translate(center.x, center.y);
+    context.rotate(((mark.rotation ?? 0) * Math.PI) / 180);
+    context.scale(mark.flipX ? -1 : 1, mark.flipY ? -1 : 1);
+    context.translate(-center.x, -center.y);
+  }
   const color = mark.style?.color ?? "#f38b35";
   if (mark.tool === "numbering") {
-    const box = textAnnotationBounds(context, mark, scale);
+    const box = unrotatedTextBox(context, mark, scale);
     const radius = box.width / 2;
     const shape = mark.style?.numberShape ?? "circle";
     context.fillStyle = color;
@@ -249,29 +333,20 @@ export function drawTextAnnotation(
     return;
   }
   const layout = textLayout(context, mark, scale);
-  const box = textAnnotationBounds(context, mark, scale);
-  const leader =
-    mark.tool === "callout"
-      ? calloutLeaderSegment(box, mark.start, scale)
-      : undefined;
-  if (leader) {
-    const joint = leader.from;
+  const box = unrotatedTextBox(context, mark, scale);
+  const leaderPaths =
+    mark.tool === "callout" ? calloutLeaderPaths(box, mark, scale) : [];
+  if (leaderPaths.length) {
     context.strokeStyle = color;
+    context.lineCap = leaderPaths[0]!.cap;
+    context.lineJoin = leaderPaths[0]!.join ?? "miter";
     context.lineWidth = (mark.style?.strokeWidth ?? 3) * scale;
     context.beginPath();
-    context.moveTo(joint.x, joint.y);
-    context.lineTo(mark.start.x, mark.start.y);
-    if (mark.style?.calloutStyle === "arrow") {
-      const angle = Math.atan2(mark.start.y - joint.y, mark.start.x - joint.x);
-      const head = leader.headSize;
-      for (const side of [-0.45, 0.45]) {
-        context.moveTo(mark.start.x, mark.start.y);
-        context.lineTo(
-          mark.start.x - head * Math.cos(angle + side),
-          mark.start.y - head * Math.sin(angle + side),
-        );
-      }
-    }
+    for (const path of leaderPaths)
+      path.points.forEach((at, index) => {
+        if (index === 0) context.moveTo(at.x, at.y);
+        else context.lineTo(at.x, at.y);
+      });
     context.stroke();
   }
   const background = mark.style?.textBackground;

@@ -9,13 +9,20 @@
  *   源块 ≤ DUPLICATE_MAX_SOURCE_PIXELS（512×512=0.26MP）。源块灰度方差
  *   低于 DUPLICATE_LOW_TEXTURE_VARIANCE 时拒绝（纯色/近纯色块在任何
  *   平移处都“匹配”，结果无意义）。
- * - 工作量有界：偏移总数 × 源块像素数 ≤ DUPLICATE_WORK_BUDGET
- *   （96M 次像素比较，每次早退）。超出的偏移空间按确定性步长 s 稀疏
- *   采样（s = ceil(sqrt(总量/预算))），网格对齐 (0,0)，可复现；步进
- *   采样可能错过未落在网格上的副本，这是显式资源边界，不是静默错误。
+ * - 工作量有界：覆盖全部整数偏移，以十六点筛选和有限精比控制成本，
+ *   超预算明确拒绝，不返回不完整的搜索结果。
  * - 候选上限 DUPLICATE_MAX_CANDIDATES：按平均误差升序保留，且两两
  *   不重叠、不与源块重叠（部分重叠的平移块会平凡匹配自身边缘）。
  * - 无任何候选时以 "no-duplicates" 显式失败。
+ *
+ * 搜索分两阶段，覆盖每一个整数平移偏移（不存在未访问的偏移）：
+ * 1. 筛选：对每个偏移只比较固定 4×4 采样点（十六个像素，确定性
+ *    位置），平均每通道差 ≤ 筛选阈值才进入精比。筛选总量 = 偏移数 ×
+ *    16，超过 DUPLICATE_WORK_BUDGET 时显式 budget-exceeded 拒绝
+ *    （图片过大/源块过小），不继续也不遇漏。
+ * 2. 精比：逐像素比较（RGB、累计容差早退），总量受
+ *    DUPLICATE_PRECISE_BUDGET 约束；相似位置过多导致超限时同样
+ *    budget-exceeded 拒绝，不把截断的扫描当作完整结果。
  *
  * 资源开销：直接在传入缓冲区上读取，无额外像素副本；响应只携带少量
  * 候选坐标。峰值内存即调用方传入的 32MB 基线（8MP RGBA）。
@@ -48,8 +55,32 @@ export const DUPLICATE_MAX_CANDIDATES = 8;
 export const DUPLICATE_MATCH_TOLERANCE = 6;
 /** 源块灰度方差下限：低于它的近纯色块直接拒绝。 */
 export const DUPLICATE_LOW_TEXTURE_VARIANCE = 16;
-/** 像素比较总预算：偏移数 × 源块像素数 ≤ 96M。 */
+/** 像素比较总预算：筛选阶段偏移数 × 16 采样 ≤ 96M。 */
 export const DUPLICATE_WORK_BUDGET = 96_000_000;
+/** 精比阶段逐像素比较总量 ≤ 32M：相似位置过多时显式拒绝。 */
+export const DUPLICATE_PRECISE_BUDGET = 32_000_000;
+/** 筛选阈值：每通道平均差 ≤ 24（4× 容差）才进入精比，宽进严出，
+ * 不漏掉真实副本（精比才是最终判定）。 */
+const DUPLICATE_SCREEN_TOLERANCE = 24;
+/** 固定 4×4 采样点：确定性位置（块内等分网格中心），不依赖随机数。 */
+const DUPLICATE_SCREEN_SAMPLES: readonly { x: number; y: number }[] = [
+  { x: 1, y: 1 },
+  { x: 2, y: 1 },
+  { x: 3, y: 1 },
+  { x: 4, y: 1 },
+  { x: 1, y: 2 },
+  { x: 2, y: 2 },
+  { x: 3, y: 2 },
+  { x: 4, y: 2 },
+  { x: 1, y: 3 },
+  { x: 2, y: 3 },
+  { x: 3, y: 3 },
+  { x: 4, y: 3 },
+  { x: 1, y: 4 },
+  { x: 2, y: 4 },
+  { x: 3, y: 4 },
+  { x: 4, y: 4 },
+];
 
 export class DuplicateError extends Error {
   readonly code: DuplicateFailureCode;
@@ -172,21 +203,47 @@ export function findDuplicateRegions(
     );
   }
 
-  // 有界偏移网格：总比较次数 = 偏移数 × 块像素数 ≤ 预算。
+  // 阶段 0：筛选预算。覆盖每个整数偏移（步长 1，无未访问偏移）；
+  // 筛选成本 = 偏移数 × 16 采样，超过预算时显式拒绝。
   const offsetsX = width - bw + 1;
   const offsetsY = height - bh + 1;
-  const stride = Math.max(
-    1,
-    Math.ceil(Math.sqrt((offsetsX * offsetsY * count) / DUPLICATE_WORK_BUDGET)),
-  );
-  const tolerance = DUPLICATE_MATCH_TOLERANCE * count; // 每×3通道累计容差
-  const best: DuplicateCandidate[] = [];
+  const offsets = offsetsX * offsetsY;
+  if (offsets * DUPLICATE_SCREEN_SAMPLES.length > DUPLICATE_WORK_BUDGET) {
+    fail(
+      "budget-exceeded",
+      `筛选 ${offsets} 个平移偏移超出工作量预算 ${DUPLICATE_WORK_BUDGET}；请缩小图片或增大框选范围后重试。`,
+    );
+  }
+  // 采样点落在块内等分 5×5 网格的内 4×4 交叉点：确定性、对小至 5px
+  // 的块也有效（小 4px 以下直接用全部像素比例）。块 < 5px 时方差很难
+  // 过低纹理阈值，但采样仍需安全映射。
+  const screenSamples = DUPLICATE_SCREEN_SAMPLES.map((sample) => ({
+    lx: Math.min(bw - 1, Math.floor((sample.x * bw) / 5)),
+    ly: Math.min(bh - 1, Math.floor((sample.y * bh) / 5)),
+  }));
+  const screenTolerance = DUPLICATE_SCREEN_TOLERANCE * screenSamples.length * 3; // 每×3通道累计
+  const screenCache: number[] = [];
+  for (const sample of screenSamples) {
+    const p = ((y0 + sample.ly) * width + (x0 + sample.lx)) * 4;
+    screenCache.push(
+      (rgba[p] ?? 0) + (rgba[p + 1] ?? 0) * 256 + (rgba[p + 2] ?? 0) * 65536,
+    );
+  }
+  const screenAt = (lx: number, ly: number, cx: number, cy: number) => {
+    const q = ((cy + ly) * width + (cx + lx)) * 4;
+    return (
+      (rgba[q] ?? 0) + (rgba[q + 1] ?? 0) * 256 + (rgba[q + 2] ?? 0) * 65536
+    );
+  };
 
-  for (let dy = 0; dy < offsetsY; dy += stride) {
-    for (let dx = 0; dx < offsetsX; dx += stride) {
-      const cx = x0 + dx;
-      const cy = y0 + dy;
-      if (dx === 0 && dy === 0) continue;
+  const tolerance = DUPLICATE_MATCH_TOLERANCE * count * 3; // 每×3通道累计容差
+  const best: DuplicateCandidate[] = [];
+  let preciseWork = 0;
+
+  for (let dy = 0; dy < offsetsY; dy += 1) {
+    for (let dx = 0; dx < offsetsX; dx += 1) {
+      const cx = dx;
+      const cy = dy;
       const candidate: DuplicateRect = {
         x: cx,
         y: cy,
@@ -194,7 +251,20 @@ export function findDuplicateRegions(
         height: bh,
       };
       if (rectsOverlap(candidate, block)) continue;
-      // 源块与候选块逐像素比较（RGB），累计误差超容差即早退。
+      // 阶段 1：便宜筛选——16 个采样点的平均差，宽阈值宽进严出。
+      let screenError = 0;
+      for (let i = 0; i < screenSamples.length; i += 1) {
+        const sample = screenSamples[i]!;
+        const packed = screenCache[i]!;
+        const other = screenAt(sample.lx, sample.ly, cx, cy);
+        screenError +=
+          Math.abs((packed & 255) - (other & 255)) +
+          Math.abs(((packed >> 8) & 255) - ((other >> 8) & 255)) +
+          Math.abs(((packed >> 16) & 255) - ((other >> 16) & 255));
+        if (screenError > screenTolerance) break;
+      }
+      if (screenError > screenTolerance) continue;
+      // 阶段 2：逐像素精比（RGB），累计容差早退；总量受精比预算约束。
       let error = 0;
       compare: for (let y = 0; y < bh; y += 1) {
         for (let x = 0; x < bw; x += 1) {
@@ -204,6 +274,13 @@ export function findDuplicateRegions(
             Math.abs((rgba[p] ?? 0) - (rgba[q] ?? 0)) +
             Math.abs((rgba[p + 1] ?? 0) - (rgba[q + 1] ?? 0)) +
             Math.abs((rgba[p + 2] ?? 0) - (rgba[q + 2] ?? 0));
+          preciseWork += 1;
+          if (preciseWork > DUPLICATE_PRECISE_BUDGET) {
+            fail(
+              "budget-exceeded",
+              `相似位置过多，精比超出预算 ${DUPLICATE_PRECISE_BUDGET}；请缩小框选范围后重试。`,
+            );
+          }
           if (error > tolerance) break compare;
         }
       }

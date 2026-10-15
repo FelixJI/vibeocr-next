@@ -83,7 +83,9 @@ class FakeWorker {
   }
 }
 
-function installCanvasStubs(): () => void {
+function installCanvasStubs(
+  failWhen?: (canvas: HTMLCanvasElement) => boolean,
+): () => void {
   if (typeof ImageData === "undefined") {
     vi.stubGlobal("ImageData", FakeImageData);
   }
@@ -117,7 +119,11 @@ function installCanvasStubs(): () => void {
   )!;
   Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
     configurable: true,
-    value: vi.fn(() => fakeContext()),
+    value: vi.fn(function (this: HTMLCanvasElement) {
+      // 可注入的构造失败：按画布尺寸精确命中目标补丁画布。
+      if (failWhen && failWhen(this)) return null;
+      return fakeContext();
+    }),
   });
   return () => {
     Object.defineProperty(
@@ -229,6 +235,70 @@ describe("duplicate match wiring", () => {
     }
   });
 
+  it("a mid-batch patch failure cancels the whole apply without partial commits", async () => {
+    // 第二个候选构造失败时，第一张补丁也不能进入持久 store。
+    const restore = installCanvasStubs((canvas) => canvas.width === 11);
+    const storeWrites = vi.spyOn(Map.prototype, "set");
+    let retry: (() => void) | undefined;
+    vi.stubGlobal("Image", FakeImage);
+    vi.stubGlobal("Worker", FakeWorker);
+    FakeWorker.instances = [];
+    try {
+      const { unmount, canvas } = await renderEditor();
+      dragSource(canvas);
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "查找重复" }));
+      });
+      const worker = FakeWorker.instances[0]!;
+      await act(async () => {
+        worker.respond({
+          ok: true,
+          candidates: [
+            { x: 80, y: 40, width: 10, height: 8, error: 0.2 },
+            { x: 120, y: 60, width: 11, height: 8, error: 1.4 },
+          ],
+        });
+      });
+      await act(async () => {
+        fireEvent.click(
+          screen.getByRole("button", { name: "确认应用重复遮挡" }),
+        );
+      });
+      expect(
+        screen.getByText(/本次应用已整体取消；图片未被修改/),
+      ).toBeInTheDocument();
+      expect(
+        storeWrites.mock.calls.filter(
+          ([id, value]) =>
+            typeof id === "number" &&
+            value instanceof HTMLCanvasElement &&
+            value.width === 10 &&
+            value.height === 8,
+        ),
+      ).toHaveLength(0);
+      // 历史未变：无部分应用、无孤儿提交。
+      expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "清除编辑" })).toBeDisabled();
+      // 候选仍在：恢复构造后可整批重试。
+      restore();
+      retry = installCanvasStubs();
+      await act(async () => {
+        fireEvent.click(
+          screen.getByRole("button", { name: "确认应用重复遮挡" }),
+        );
+      });
+      expect(screen.getByText(/已应用 2 处重复内容遮挡/)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "撤销" })).toBeEnabled();
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+      });
+      expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
+      unmount();
+    } finally {
+      retry?.();
+      restore();
+    }
+  });
   it("drops late worker responses after the content changed", async () => {
     const restore = installCanvasStubs();
     vi.stubGlobal("Image", FakeImage);
