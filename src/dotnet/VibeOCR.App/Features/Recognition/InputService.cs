@@ -365,11 +365,16 @@ public sealed class InputService : IInputService
                 SelectionRecognitionMode = selection.RecognitionModeId,
                 SelectionRecognitionIntent = selection.RecognitionIntent,
             };
+            if (selection.FrozenRegion is { } frozen)
+                ScreenRegionPicker.EnsureFrozenLayoutCurrent(frozen, ScreenTargetQuery.EnumerateMonitors);
             // 上次区域只持久化坐标与布局快照，绝不保存像素（#236 AC3）；
             // 持久化失败只告警，不得让已成功截图失败或泄漏 CaptureScene。
             try
             {
-                _preferences?.SaveLastRegion(selection.Bounds);
+                if (selection.FrozenRegion is { } region)
+                    _preferences?.SaveLastRegion(region);
+                else
+                    _preferences?.SaveLastRegion(selection.Bounds);
             }
             catch (Exception saveError) when (
                 saveError is IOException or UnauthorizedAccessException or InvalidOperationException)

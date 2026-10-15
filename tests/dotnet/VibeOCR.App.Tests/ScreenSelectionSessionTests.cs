@@ -65,6 +65,44 @@ public sealed class ScreenSelectionSessionTests
     Assert.Equal(new PhysicalRectangle(10, 20, 2, 2), input.CaptureBounds);
   }
 
+  [Fact]
+  public async Task InputSavesFrozenLayoutAndRejectsChangedLayoutBeforeSaving()
+  {
+    var bounds = new PhysicalRectangle(10, 20, 2, 2);
+    LastRegionCapture frozen = CapturePreferencesStore.SnapshotRegion(bounds);
+    var store = new RecordingCapturePreferences();
+    var inputService = new InputService(static () => 0,
+      screenRegionPicker: new FrozenRegionPicker(frozen), preferences: store);
+    Assert.NotNull(await inputService.CaptureScreenAsync(TestContext.Current.CancellationToken));
+    Assert.Equal(frozen, store.Saved);
+
+    LastRegionCapture changed = frozen with { Monitors = [] };
+    store.Saved = null;
+    var invalid = new InputService(static () => 0,
+      screenRegionPicker: new FrozenRegionPicker(changed), preferences: store);
+    await Assert.ThrowsAsync<InvalidDataException>(() =>
+      invalid.CaptureScreenAsync(TestContext.Current.CancellationToken));
+    Assert.Null(store.Saved);
+  }
+
+  private sealed class FrozenRegionPicker(LastRegionCapture frozen) : IScreenRegionPicker
+  {
+    public Task<ScreenRegionSelection?> PickAsync(CancellationToken cancellationToken) =>
+      Task.FromResult<ScreenRegionSelection?>(new ScreenRegionSelection(frozen.Bounds, new byte[16], 8)
+      {
+        FrozenRegion = frozen,
+      });
+  }
+
+  private sealed class RecordingCapturePreferences : ICapturePreferencesStore
+  {
+    internal LastRegionCapture? Saved;
+    public CapturePreferences Load() => new();
+    public void Save(CapturePreferences preferences) => Saved = preferences.LastRegion;
+    public void SaveLastRegion(PhysicalRectangle bounds) =>
+      throw new InvalidOperationException("Frozen capture must not resample current monitors when saving.");
+  }
+
   private sealed class FailingCapturePreferences : ICapturePreferencesStore
   {
     public CapturePreferences Load() => new();

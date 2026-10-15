@@ -45,6 +45,9 @@ public interface ICapturePreferencesStore
 
   /// <summary>框选成功后保存上次区域（仅坐标与布局快照，绝不保存像素）。</summary>
   void SaveLastRegion(PhysicalRectangle bounds);
+
+  void SaveLastRegion(LastRegionCapture region) =>
+      Save(Load() with { LastRegion = region });
 }
 
 public sealed class CapturePreferencesStore(PortableLayout layout) : ICapturePreferencesStore
@@ -143,16 +146,19 @@ public sealed class CapturePreferencesStore(PortableLayout layout) : ICapturePre
         },
       }));
 
-  public void SaveLastRegion(PhysicalRectangle bounds)
+  public void SaveLastRegion(PhysicalRectangle bounds) => SaveLastRegion(SnapshotRegion(bounds));
+
+  public void SaveLastRegion(LastRegionCapture region)
   {
     CapturePreferences current = Load();
-    Save(current with { LastRegion = SnapshotRegion(bounds) });
+    Save(current with { LastRegion = region });
   }
 
   /// <summary>把当前显示器布局快照进区域记录（供保存上次/固定区域复用）。</summary>
-  public static LastRegionCapture SnapshotRegion(PhysicalRectangle bounds) => new(
+  public static LastRegionCapture SnapshotRegion(
+      PhysicalRectangle bounds, IReadOnlyList<ScreenMonitorTarget>? monitors = null) => new(
       bounds,
-      ScreenTargetQuery.EnumerateMonitors()
+      (monitors ?? ScreenTargetQuery.EnumerateMonitors())
           .Select(monitor => new MonitorLayoutSnapshot(
               monitor.Bounds.X,
               monitor.Bounds.Y,

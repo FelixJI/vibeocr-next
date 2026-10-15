@@ -12,7 +12,7 @@ namespace VibeOCR.App.Features.Recognition;
 /// #236 延时截图倒计时窗口：无边框置顶小窗显示剩余秒数，Esc 或“取消”
 /// 按钮显式中止；倒计时结束返回 true 后才进入框选。窗口仅呈现文本与
 /// 现有按钮，不新增图标、不采样屏幕。结束（完成/取消/异常/取消令牌）
-/// 都会停止计时器、关闭窗口，并在打开前存在其它前台窗口时恢复其前台。
+/// 都会停止计时器、关闭窗口；取消时恢复原前台，成功时保留用户新前台。
 /// </summary>
 internal sealed class DelayedCaptureOverlay
 {
@@ -100,14 +100,16 @@ internal sealed class DelayedCaptureOverlay
     _timer.Start();
     using CancellationTokenRegistration registration = cancellationToken.Register(
         () => _window.DispatcherQueue.TryEnqueue(() => Stop(false)));
+    bool proceed = false;
     try
     {
-      return await _completion.Task;
+      proceed = await _completion.Task;
+      return proceed;
     }
     finally
     {
       Stop(false);
-      CloseWindowAndRestore();
+      CloseWindowAndRestore(restoreForeground: !proceed);
     }
   }
 
@@ -123,7 +125,7 @@ internal sealed class DelayedCaptureOverlay
     _completion.TrySetResult(proceed);
   }
 
-  private void CloseWindowAndRestore()
+  private void CloseWindowAndRestore(bool restoreForeground)
   {
     try
     {
@@ -135,7 +137,7 @@ internal sealed class DelayedCaptureOverlay
     }
     finally
     {
-      if (_previousForeground != 0 && _previousForeground != _handle)
+      if (restoreForeground && _previousForeground != 0 && _previousForeground != _handle)
       {
         SetForegroundWindow(_previousForeground);
       }

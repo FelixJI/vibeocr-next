@@ -25,6 +25,8 @@ public sealed record ScreenRegionSelection(
 {
     internal ScreenshotCaptureScene? CaptureScene { get; init; }
 
+    internal LastRegionCapture? FrozenRegion { get; init; }
+
     /// <summary>
     /// 普通截图入口动作栏选择的显式动作；null 或 <see cref="ScreenshotSelectionAction.Edit"/>
     /// 表示沿用既有确认语义（现场编辑宿主）。专用直接入口不设置该值。
@@ -191,6 +193,18 @@ public sealed class ScreenRegionPicker(
     ICapturePreferencesStore? preferences = null) : IScreenRegionPicker
 {
     private readonly ICapturePreferencesStore? _preferences = preferences;
+    private readonly Func<IReadOnlyList<ScreenMonitorTarget>> _queryMonitors = ScreenTargetQuery.EnumerateMonitors;
+    private readonly IScreenCaptureNativeMethods? _captureNative;
+    private readonly bool _automaticSelection;
+
+    // 仅内部合成 smoke 注入像素/布局，确认复用已有 automaticSelection；不改真实显示器。
+    internal ScreenRegionPicker(Func<nint> ownerWindow, IScreenCaptureNativeMethods captureNative,
+        Func<IReadOnlyList<ScreenMonitorTarget>> queryMonitors) : this(ownerWindow)
+    {
+        _captureNative = captureNative;
+        _queryMonitors = queryMonitors;
+        _automaticSelection = true;
+    }
     private sealed class SelectionCanvas : Canvas
     {
       public void SetCursor(InputSystemCursorShape shape)
@@ -263,15 +277,17 @@ public sealed class ScreenRegionPicker(
         {
             await Task.Delay(180, cancellationToken);
             PhysicalRectangle desktop = GetVirtualDesktop();
+            LastRegionCapture frozenLayout = CapturePreferencesStore.SnapshotRegion(desktop, _queryMonitors());
             SmartScreenCandidates candidates = SmartScreenCandidates.Capture(desktop);
             await using var capture = new ScreenCaptureService(
-                Guid.NewGuid(), cursorOverlay: new GdiScreenCursorOverlay());
+                Guid.NewGuid(), _captureNative, new GdiScreenCursorOverlay());
             // #236 光标选项对框选/延时链路同样生效：冻结底图即最终裁剪来源。
             CapturedFrame? frame = capture.Capture(
                 desktop,
                 TimeSpan.FromMinutes(1),
                 _preferences?.Load().IncludeCursor ?? false);
             byte[] desktopBgra = capture.Read(frame);
+            EnsureFrozenLayoutCurrent(frozenLayout, _queryMonitors);
             byte[] desktopBmp = EncodeTopDownBmp(
                 desktopBgra,
                 desktop.Width,
@@ -288,7 +304,10 @@ public sealed class ScreenRegionPicker(
                 candidates,
                 keepForEditing: !scrolling,
                 cancellationToken,
-                selectionActions: selectionActions);
+                automaticSelection: _automaticSelection,
+                selectionActions: selectionActions,
+                frozenLayout: frozenLayout,
+                queryMonitors: _queryMonitors);
             if (selection is null)
             {
                 return null;
@@ -296,6 +315,7 @@ public sealed class ScreenRegionPicker(
 
             PhysicalRectangle selected = selection.Bounds;
             scene = selection.Scene;
+            EnsureFrozenLayoutCurrent(frozenLayout, _queryMonitors);
             // 长截图（专用入口或动作栏 ScrollCapture）都复用当前已固化的选区
             // 直接滚动采集，不再弹二次框选；冻结桌面只用于选区，拼接前释放。
             if (scrolling || selection.SelectionAction is ScreenshotSelectionAction.ScrollCapture)
@@ -309,7 +329,10 @@ public sealed class ScreenRegionPicker(
                 CapturedFrame? stitched = await ScrollCaptureSession.CaptureAsync(
                     owner, selected, cancellationToken);
                 return stitched is null ? null : new ScreenRegionSelection(
-                    selected, stitched.Pixels, stitched.Stride, stitched.Height);
+                    selected, stitched.Pixels, stitched.Stride, stitched.Height)
+                {
+                    FrozenRegion = frozenLayout with { Bounds = selected },
+                };
             }
 
             byte[] cropped = CropBgra(desktopBgra, desktop, selected);
@@ -319,6 +342,7 @@ public sealed class ScreenRegionPicker(
                 selected.Width * 4)
             {
                 CaptureScene = scene,
+                FrozenRegion = frozenLayout with { Bounds = selected },
                 SelectionAction = selection.SelectionAction,
                 RecognitionModeId = selection.RecognitionModeId,
                 RecognitionIntent = selection.RecognitionIntent,
@@ -436,6 +460,13 @@ public sealed class ScreenRegionPicker(
     return scene;
   }
 
+  internal static void EnsureFrozenLayoutCurrent(
+      LastRegionCapture frozen, Func<IReadOnlyList<ScreenMonitorTarget>> queryMonitors)
+  {
+    if (!CapturePreferencesStore.IsLastRegionUsable(frozen, queryMonitors(), GetVirtualDesktop()))
+      throw new InvalidDataException("截图期间显示器布局已变化，请重新框选。");
+  }
+
   private static async Task<OverlaySelection?> ShowOverlayAsync(
     PhysicalRectangle desktop,
     BitmapImage background,
@@ -444,7 +475,9 @@ public sealed class ScreenRegionPicker(
     bool keepForEditing,
     CancellationToken cancellationToken,
     bool automaticSelection = false,
-    ScreenshotSelectionActions? selectionActions = null)
+    ScreenshotSelectionActions? selectionActions = null,
+    LastRegionCapture? frozenLayout = null,
+    Func<IReadOnlyList<ScreenMonitorTarget>>? queryMonitors = null)
   {
     // 普通入口：稳定选区后显示动作栏；专用直接入口保持既有立即确认。
     bool ordinary = selectionActions is not null;
@@ -675,6 +708,19 @@ public sealed class ScreenRegionPicker(
         ScreenshotRecognitionIntent? recognitionIntent = null)
     {
       if (completion.Task.IsCompleted) return;
+      if (accept && frozenLayout is not null)
+      {
+        try
+        {
+          EnsureFrozenLayoutCurrent(frozenLayout, queryMonitors ?? ScreenTargetQuery.EnumerateMonitors);
+        }
+        catch (InvalidDataException error)
+        {
+          completion.TrySetException(error);
+          overlay.Close();
+          return;
+        }
+      }
       PhysicalRectangle? result = accept && session.ActiveSelection is { } rect
           ? rect with { X = rect.X + desktop.X, Y = rect.Y + desktop.Y } : null;
       if (result is { } bounds && action is ScreenshotSelectionAction.Edit && keepForEditing)
@@ -1245,9 +1291,10 @@ public sealed class ScreenRegionPicker(
       session.Begin(new(0, 0));
       session.End(new(desktop.Width, desktop.Height));
       Render();
-      // 自检只捕获自己的子窗口，不是整个虚拟桌面；几何已在上方校验。
-      // 直接复用确认后的 HWND 移交，不套用真实桌面的变化/候选检查。
-      CompleteSelection(true);
+      // 子窗口 synthetic scene 沿用直接交接；带完整布局的 picker smoke
+      // 与用户确认共用 FinishAsync，验证冻结后的布局变化检查。
+      if (frozenLayout is null) CompleteSelection(true);
+      else Finish(true);
     }
     try
     {

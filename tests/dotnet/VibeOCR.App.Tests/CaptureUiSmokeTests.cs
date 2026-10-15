@@ -26,6 +26,10 @@ public sealed class CaptureUiSmokeTests : IDisposable
       RunUiSmokeAsync(nameof(DelayedOverlayCompletesAfterConfiguredSeconds));
 
   [Fact]
+  public Task RegionPickerRejectsChangedMonitorLayoutWithSameDesktopBounds() =>
+      RunUiSmokeAsync(nameof(RegionPickerRejectsChangedMonitorLayoutWithSameDesktopBounds));
+
+  [Fact]
   public void ActiveWindowResolutionRejectsVanishedTargets()
   {
     var request = new ScreenshotCaptureRequest(ScreenshotCaptureKind.ActiveWindow);

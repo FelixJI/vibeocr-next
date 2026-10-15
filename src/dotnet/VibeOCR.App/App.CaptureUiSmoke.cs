@@ -34,8 +34,10 @@ public sealed partial class App
           await VerifyDelayedCaptureCancellationAsync();
           break;
         case "DelayedOverlayCompletesAfterConfiguredSeconds":
-          Check(await DelayedCaptureOverlay.RunAsync(1, CancellationToken.None),
-              "Countdown must complete after its configured delay.");
+          await VerifyDelayedCaptureKeepsNewForegroundAsync();
+          break;
+        case "RegionPickerRejectsChangedMonitorLayoutWithSameDesktopBounds":
+          await VerifyRegionPickerLayoutChangeAsync();
           break;
         default:
           throw new InvalidOperationException("Unknown capture UI smoke scenario.");
@@ -112,6 +114,78 @@ public sealed partial class App
       CloseSmokeDialog(nan);
       CloseSmokeDialog(invalid);
       CloseSmokeDialog(failing);
+    }
+  }
+
+  private static async Task VerifyDelayedCaptureKeepsNewForegroundAsync()
+  {
+    var original = new Window { Content = new Microsoft.UI.Xaml.Controls.TextBlock { Text = "capture A" } };
+    var target = new Window { Content = new Microsoft.UI.Xaml.Controls.TextBlock { Text = "capture B" } };
+    try
+    {
+      original.Activate();
+      nint originalHandle = WinRT.Interop.WindowNative.GetWindowHandle(original);
+      nint targetHandle = WinRT.Interop.WindowNative.GetWindowHandle(target);
+      await WaitForCaptureUiAsync(() => ScreenTargetQuery.GetForegroundWindowHandle() == originalHandle);
+      Task<bool> pending = DelayedCaptureOverlay.RunAsync(1, CancellationToken.None);
+      target.Activate();
+      await WaitForCaptureUiAsync(() => ScreenTargetQuery.GetForegroundWindowHandle() == targetHandle);
+      Check(await pending, "Countdown must complete after its configured delay.");
+      Check(ScreenTargetQuery.GetForegroundWindowHandle() == targetHandle,
+          "Successful countdown must keep the user's newly selected foreground B.");
+    }
+    finally
+    {
+      target.Close();
+      original.Close();
+    }
+  }
+
+  private static async Task VerifyRegionPickerLayoutChangeAsync()
+  {
+    PhysicalRectangle desktop = ScreenTargetQuery.VirtualDesktop();
+    int split = desktop.Width / 2;
+    int shift = Math.Min(360, desktop.Height / 3);
+    var primary = new ScreenMonitorTarget(new PhysicalRectangle(
+        desktop.X, desktop.Y, split, desktop.Height), true, "synthetic-primary");
+    var secondary = new ScreenMonitorTarget(new PhysicalRectangle(
+        desktop.X + split, desktop.Y, desktop.Width - split, desktop.Height - shift),
+        false, "synthetic-secondary");
+    ScreenMonitorTarget[] before = [primary, secondary];
+    ScreenMonitorTarget[] after = [primary, secondary with { Bounds = secondary.Bounds with { Y = desktop.Y + shift } }];
+    var owner = new Window { Content = new Microsoft.UI.Xaml.Controls.TextBlock { Text = "capture layout owner" } };
+    owner.Activate();
+    nint handle = WinRT.Interop.WindowNative.GetWindowHandle(owner);
+    int queries = 0;
+    var native = new SyntheticCapturePixels();
+    var picker = new ScreenRegionPicker(() => handle, native, () => ++queries <= 2 ? before : after);
+    try
+    {
+      Check(ScreenTargetQuery.VirtualDesktop() == desktop, "Synthetic fixture must not reconfigure the desktop.");
+      ScreenRegionSelection? selection = null;
+      try
+      {
+        selection = await picker.PickAsync(CancellationToken.None);
+        throw new InvalidOperationException("Region picker accepted a changed monitor layout with unchanged outer bounds.");
+      }
+      catch (InvalidDataException error)
+      {
+        Check(error.Message.Contains("显示器布局", StringComparison.Ordinal), "Picker must report layout changes.");
+        Check(queries >= 3 && native.Captures == 1, "Regression must reach real picker confirmation after freezing.");
+        Check(IsWindowVisible(handle), "Rejected region must restore owner visibility.");
+      }
+      finally { selection?.CaptureScene?.Dispose(); }
+    }
+    finally { owner.Close(); }
+  }
+
+  private sealed class SyntheticCapturePixels : IScreenCaptureNativeMethods
+  {
+    internal int Captures;
+    public byte[] CaptureBgra(PhysicalRectangle bounds)
+    {
+      Captures++;
+      return new byte[checked(bounds.Width * bounds.Height * 4)];
     }
   }
 
