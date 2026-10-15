@@ -593,6 +593,126 @@ describe("文字、序号和说明对象", () => {
     unmount();
   });
 
+  it("序号删除中间对象、手改较大值后自动递增且字母不重复", async () => {
+    stubCanvasStack({ width: 900, height: 600 });
+    const harness = stubAnimationFrames();
+    const { unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+    fireEvent.click(screen.getByRole("button", { name: "序号" }));
+    fireEvent.change(screen.getByLabelText("序号起点"), {
+      target: { value: "25" },
+    });
+    fireEvent.blur(screen.getByLabelText("序号起点"));
+    fireEvent.change(screen.getByLabelText("序号格式"), {
+      target: { value: "upper" },
+    });
+    for (const x of [200, 300, 400])
+      await dragDraw(canvas, harness, { x, y: 200 }, { x, y: 200 });
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "1" },
+    });
+    fireEvent.keyDown(canvas, { key: "Delete" });
+    fireEvent.click(screen.getByRole("button", { name: "序号" }));
+    await dragDraw(canvas, harness, { x: 500, y: 200 }, { x: 500, y: 200 });
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "2" },
+    });
+    expect(screen.getByLabelText("序号值")).toHaveValue(28);
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    fireEvent.change(screen.getByLabelText("序号值"), {
+      target: { value: "51" },
+    });
+    fireEvent.blur(screen.getByLabelText("序号值"));
+    fireEvent.click(screen.getByRole("button", { name: "序号" }));
+    await dragDraw(canvas, harness, { x: 600, y: 200 }, { x: 600, y: 200 });
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "3" },
+    });
+    expect(screen.getByLabelText("序号值")).toHaveValue(52);
+    harness.flush();
+    expect(
+      allCalls().some(
+        (call) => call.op === "fillText" && call.args[0] === "AZ",
+      ),
+    ).toBe(true);
+    unmount();
+  });
+  it("序号合法输入立即生效，空草稿和连续输入不重挂或抢焦点", async () => {
+    stubCanvasStack({ width: 900, height: 600 });
+    const harness = stubAnimationFrames();
+    const { actions, unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+    fireEvent.click(screen.getByRole("button", { name: "序号" }));
+    fireEvent.change(screen.getByLabelText("序号格式"), {
+      target: { value: "upper" },
+    });
+    const start = screen.getByLabelText("序号起点");
+    act(() => start.focus());
+    fireEvent.change(start, { target: { value: "25" } });
+    fireEvent.change(start, { target: { value: "" } });
+    expect(start).toHaveValue(null);
+    expect(start).toHaveFocus();
+    expect(screen.getByLabelText("序号起点")).toBe(start);
+    fireEvent.change(start, { target: { value: "25" } });
+    await dragDraw(canvas, harness, { x: 200, y: 200 }, { x: 200, y: 200 });
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    const value = screen.getByLabelText("序号值");
+    expect(value).toHaveValue(25);
+    act(() => value.focus());
+    clearCalls();
+    fireEvent.change(value, { target: { value: "52" } });
+    harness.flush();
+    expect(screen.getByLabelText("序号值")).toBe(value);
+    expect(value).toHaveFocus();
+    expect(
+      allCalls().some(
+        (call) => call.op === "fillText" && call.args[0] === "AZ",
+      ),
+    ).toBe(true);
+    fireEvent.change(value, { target: { value: "" } });
+    expect(value).toHaveValue(null);
+    expect(value).toHaveFocus();
+    expect(revisions(actions)).toEqual([1, 2]);
+    fireEvent.change(value, { target: { value: "53" } });
+    expect(screen.getByLabelText("序号值")).toBe(value);
+    expect(value).toHaveFocus();
+    unmount();
+  });
+  it("说明引线按实际边缘连接，选择命中与该线段一致", async () => {
+    stubCanvasStack({ width: 900, height: 600 });
+    const harness = stubAnimationFrames();
+    const { unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+    fireEvent.click(screen.getByRole("button", { name: "说明" }));
+    fireEvent.change(screen.getByLabelText("标注文字"), {
+      target: { value: "abcdefghij\nabcdefghij\nabcdefghij\nabcdefghij" },
+    });
+    fireEvent.change(screen.getByLabelText("说明样式"), {
+      target: { value: "arrow" },
+    });
+    await dragDraw(canvas, harness, { x: 600, y: 100 }, { x: 300, y: 220 });
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "" },
+    });
+    await dragDraw(canvas, harness, { x: 500, y: 165 }, { x: 500, y: 165 });
+    expect(screen.getByLabelText("选择标注对象")).toHaveValue("0");
+    unmount();
+  });
+
   it("序号起点、字母、形状、单对象序号与批量重新编号均可撤销", async () => {
     stubCanvasStack();
     const harness = stubAnimationFrames();

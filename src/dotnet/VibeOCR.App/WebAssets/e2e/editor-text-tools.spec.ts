@@ -472,3 +472,88 @@ test("清空前置屏蔽取消文字草稿并保留原文字、矩形和可撤�
   await objects.selectOption("1");
   await expect(page.getByLabel("标注文字")).toHaveValue("A原文字");
 });
+
+test("序号输入不先失焦即放置，删除和手改后按最大值自动续号", async ({
+  page,
+}) => {
+  await setupTextHost(page);
+  await page.getByRole("button", { name: "序号", exact: true }).click();
+  await page.getByLabel("序号格式").selectOption("upper");
+  await page.getByLabel("序号起点").fill("25");
+  await drag(page, 200, 200, 200, 200);
+  await page.getByRole("button", { name: "选择", exact: true }).click();
+  await page.getByLabel("选择标注对象").selectOption("0");
+  await expect(page.getByLabel("序号值")).toHaveValue("25");
+  await page.getByRole("button", { name: "序号", exact: true }).click();
+  await drag(page, 300, 200, 300, 200);
+  await drag(page, 400, 200, 400, 200);
+  await page.getByRole("button", { name: "选择", exact: true }).click();
+  await page.getByLabel("选择标注对象").selectOption("1");
+  await page.getByLabel("图片检查画布").focus();
+  await page.keyboard.press("Delete");
+  await page.getByRole("button", { name: "序号", exact: true }).click();
+  await drag(page, 500, 200, 500, 200);
+  await page.getByRole("button", { name: "选择", exact: true }).click();
+  await page.getByLabel("选择标注对象").selectOption("2");
+  await expect(page.getByLabel("序号值")).toHaveValue("28");
+  await page.getByLabel("选择标注对象").selectOption("0");
+  await page.getByLabel("序号值").fill("51");
+  await expect(page.getByLabel("序号值")).toBeFocused();
+  await page.getByRole("button", { name: "序号", exact: true }).click();
+  await drag(page, 600, 200, 600, 200);
+  await page.getByRole("button", { name: "选择", exact: true }).click();
+  await page.getByLabel("选择标注对象").selectOption("3");
+  await expect(page.getByLabel("序号值")).toHaveValue("52");
+});
+test("关闭背景的右上目标说明不从框内穿线，命中和PNG导出一致", async ({
+  page,
+}) => {
+  const { uploads } = await setupTextHost(page);
+  await page.getByRole("button", { name: "说明", exact: true }).click();
+  await page
+    .getByLabel("标注文字")
+    .fill("X         \nX         \nX         \nX");
+  await page.getByLabel("文字字体").fill("monospace");
+  await page.getByLabel("文字字体").press("Tab");
+  await page.getByLabel("自定义颜色").fill("#1f6feb");
+  await page.getByLabel("说明样式").selectOption("arrow");
+  await page.getByLabel("文字背景", { exact: true }).uncheck();
+  await drag(page, 600, 100, 300, 220);
+  await deselect(page);
+  await expect
+    .poll(
+      async () =>
+        (await scan(page, { x: 330, y: 220, width: 70, height: 30 })).blue,
+    )
+    .toBe(0);
+  const at = await client(page, 500, 168);
+  await page.mouse.click(at.x, at.y);
+  await expect(page.getByLabel("选择标注对象")).toHaveValue("0");
+  await deselect(page);
+  const png = await save(page, uploads);
+  expect(
+    (await scan(page, { x: 330, y: 220, width: 70, height: 30 }, png)).blue,
+  ).toBe(0);
+  expect(
+    (await scan(page, { x: 490, y: 155, width: 30, height: 30 }, png)).blue,
+  ).toBeGreaterThan(20);
+});
+test("深色序号底形使用白字，预览和PNG导出均有实际可读字形", async ({
+  page,
+}) => {
+  const { uploads } = await setupTextHost(page);
+  await page.getByRole("button", { name: "序号", exact: true }).click();
+  await page.getByLabel("序号形状").selectOption("square");
+  await page.getByLabel("文字字号").selectOption("48");
+  await page.getByLabel("自定义颜色").fill("#000000");
+  await drag(page, 300, 250, 300, 250);
+  await page.getByRole("button", { name: "选择", exact: true }).click();
+  await deselect(page);
+  const area = { x: 280, y: 230, width: 40, height: 40 };
+  await expect
+    .poll(async () => (await scan(page, area)).white)
+    .toBeGreaterThan(20);
+  const pixels = await scan(page, area, await save(page, uploads));
+  expect(pixels.white).toBeGreaterThan(50);
+  expect(pixels.black).toBeGreaterThan(100);
+});

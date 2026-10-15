@@ -1,4 +1,4 @@
-import type { AnnotationStyle, Mark, Rect } from "./annotationGeometry";
+import type { AnnotationStyle, Mark, Point, Rect } from "./annotationGeometry";
 
 export const FONT_TOOLS = ["text", "callout", "numbering"] as const;
 export function isFontMark(mark: Mark): boolean {
@@ -21,6 +21,73 @@ export function numberLabel(
   )
     label = String.fromCharCode(65 + ((n - 1) % 26)) + label;
   return format === "lower" ? label.toLowerCase() : label;
+}
+
+/** 起点是下限，已有有效序号决定后续编号，删除中间对象不会复用旧号。 */
+export function nextNumberOrdinal(
+  marks: readonly Mark[],
+  start: number,
+): number {
+  return marks.reduce(
+    (next, mark) =>
+      mark.tool === "numbering" &&
+      Number.isSafeInteger(mark.ordinal) &&
+      (mark.ordinal ?? 0) > 0
+        ? Math.max(next, mark.ordinal! + 1)
+        : next,
+    start,
+  );
+}
+
+function numberTextColor(background: string): string {
+  if (!/^#[0-9a-f]{6}$/i.test(background)) return "#161616";
+  const linear = (value: number) => {
+    const channel = value / 255;
+    return channel <= 0.04045
+      ? channel / 12.92
+      : ((channel + 0.055) / 1.055) ** 2.4;
+  };
+  const rgb = Number.parseInt(background.slice(1), 16);
+  const luminance =
+    0.2126 * linear((rgb >> 16) & 255) +
+    0.7152 * linear((rgb >> 8) & 255) +
+    0.0722 * linear(rgb & 255);
+  const darkContrast = (luminance + 0.05) / (linear(22) + 0.05);
+  const lightContrast = 1.05 / (luminance + 0.05);
+  return lightContrast > darkContrast ? "#ffffff" : "#161616";
+}
+
+/** 中心朝目标的射线与框边相交；目标在框内/边上时不画引线，避免穿字。 */
+export function calloutLeaderSegment(
+  box: Rect,
+  target: Point,
+  scale = 1,
+): { from: Point; to: Point; headSize: number } | undefined {
+  const right = box.x + box.width,
+    bottom = box.y + box.height;
+  if (
+    target.x >= box.x &&
+    target.x <= right &&
+    target.y >= box.y &&
+    target.y <= bottom
+  )
+    return undefined;
+  const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  const dx = target.x - center.x,
+    dy = target.y - center.y;
+  const fraction = Math.min(
+    dx === 0 ? Infinity : box.width / 2 / Math.abs(dx),
+    dy === 0 ? Infinity : box.height / 2 / Math.abs(dy),
+  );
+  const distance = Math.hypot(
+    target.x - Math.max(box.x, Math.min(right, target.x)),
+    target.y - Math.max(box.y, Math.min(bottom, target.y)),
+  );
+  return {
+    from: { x: center.x + dx * fraction, y: center.y + dy * fraction },
+    to: target,
+    headSize: Math.min(16 * scale, distance / 2),
+  };
 }
 
 export function annotationFont(
@@ -166,7 +233,7 @@ export function drawTextAnnotation(
     }
     if (shape !== "none") context.fill();
     context.font = annotationFont({ ...mark.style, fontBold: true }, scale);
-    context.fillStyle = shape === "none" ? color : "#161616";
+    context.fillStyle = shape === "none" ? color : numberTextColor(color);
     context.textAlign = "center";
     context.textBaseline = "middle";
     context.fillText(
@@ -179,8 +246,12 @@ export function drawTextAnnotation(
   }
   const layout = textLayout(context, mark, scale);
   const box = textAnnotationBounds(context, mark, scale);
-  if (mark.tool === "callout") {
-    const joint = { x: box.x, y: box.y + box.height / 2 };
+  const leader =
+    mark.tool === "callout"
+      ? calloutLeaderSegment(box, mark.start, scale)
+      : undefined;
+  if (leader) {
+    const joint = leader.from;
     context.strokeStyle = color;
     context.lineWidth = (mark.style?.strokeWidth ?? 3) * scale;
     context.beginPath();
@@ -188,10 +259,7 @@ export function drawTextAnnotation(
     context.lineTo(mark.start.x, mark.start.y);
     if (mark.style?.calloutStyle === "arrow") {
       const angle = Math.atan2(mark.start.y - joint.y, mark.start.x - joint.x);
-      const head = Math.min(
-        16 * scale,
-        Math.hypot(mark.start.x - joint.x, mark.start.y - joint.y) / 2,
-      );
+      const head = leader.headSize;
       for (const side of [-0.45, 0.45]) {
         context.moveTo(mark.start.x, mark.start.y);
         context.lineTo(

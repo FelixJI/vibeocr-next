@@ -202,3 +202,41 @@ export function AnnotationTextPanel({
     </>
   );
 }
+
+/** 输入草稿独立于已生效数值：合法数字即时同步，空/非法输入保留至失焦。 */
+export function AnnotationNumberInput({
+  value,
+  label,
+  onValueChange,
+}: {
+  value: number;
+  label: "序号值" | "序号起点";
+  onValueChange: (value: number) => void;
+}) {
+  const [draft, setDraft] = useState({ value, text: String(value) });
+  if (draft.value !== value) setDraft({ value, text: String(value) });
+  return (
+    <label className="editor-style-control">
+      <span aria-hidden="true">{label === "序号起点" ? "起点" : label}</span>
+      <Input
+        aria-label={label}
+        type="number"
+        size="small"
+        min={1}
+        max={9999}
+        value={draft.text}
+        onChange={(_, data) => {
+          const next = Number(data.value);
+          const valid =
+            data.value.trim() !== "" &&
+            Number.isInteger(next) &&
+            next >= 1 &&
+            next <= 9999;
+          setDraft({ value: valid ? next : value, text: data.value });
+          if (valid) onValueChange(next);
+        }}
+        onBlur={() => setDraft({ value, text: String(value) })}
+      />
+    </label>
+  );
+}

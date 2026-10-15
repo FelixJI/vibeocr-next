@@ -10,6 +10,7 @@ import type { Mark } from "./annotationGeometry";
 function context() {
   return {
     font: "",
+    fillStyle: "",
     save: vi.fn(),
     restore: vi.fn(),
     setLineDash: vi.fn(),
@@ -90,6 +91,64 @@ describe("annotationText", () => {
       else expect(ctx.fill).not.toHaveBeenCalled();
     },
   );
+  it.each([
+    ["右侧", { x: 200, y: 92.5 }, { x: 116, y: 92.5 }],
+    ["上方", { x: 105, y: 0 }, { x: 105, y: 74 }],
+    ["下方", { x: 105, y: 200 }, { x: 105, y: 111 }],
+  ])("说明引线从朝向目标的%s边缘出发，不穿过文字框", (_name, target, joint) => {
+    const ctx = context();
+    drawTextAnnotation(ctx as unknown as CanvasRenderingContext2D, {
+      tool: "callout",
+      start: target as { x: number; y: number },
+      end: { x: 100, y: 100 },
+      text: "X",
+      style: {
+        fontSize: 20,
+        calloutStyle: "arrow",
+        textBackground: { enabled: false },
+      },
+    });
+    const expected = joint as { x: number; y: number };
+    expect(ctx.moveTo.mock.calls[0]).toEqual([expected.x, expected.y]);
+  });
+  it("说明目标在文字框内时不绘制引线和箭头头部", () => {
+    const ctx = context();
+    drawTextAnnotation(ctx as unknown as CanvasRenderingContext2D, {
+      tool: "callout",
+      start: { x: 105, y: 90 },
+      end: { x: 100, y: 100 },
+      text: "X",
+      style: {
+        fontSize: 20,
+        calloutStyle: "arrow",
+        textBackground: { enabled: false },
+      },
+    });
+    expect(ctx.moveTo).not.toHaveBeenCalled();
+    expect(ctx.lineTo).not.toHaveBeenCalled();
+  });
+  it.each([
+    ["circle", "#000000", "#ffffff"],
+    ["square", "#1f6feb", "#ffffff"],
+    ["diamond", "#111111", "#ffffff"],
+    ["circle", "#ffffff", "#161616"],
+    ["square", "#888888", "#161616"],
+    ["none", "#000000", "#000000"],
+  ] as const)("序号%s底形%s使用可读文字%s", (shape, color, expected) => {
+    const ctx = context();
+    const inks: string[] = [];
+    ctx.fillText.mockImplementation(() => {
+      inks.push(ctx.fillStyle);
+    });
+    drawTextAnnotation(ctx as unknown as CanvasRenderingContext2D, {
+      tool: "numbering",
+      start: { x: 100, y: 100 },
+      end: { x: 100, y: 100 },
+      ordinal: 1,
+      style: { numberShape: shape, color },
+    });
+    expect(inks).toEqual([expected]);
+  });
   it("字体检测不会把不存在字体的浏览器fallback当已安装", () => {
     const ctx = context();
     const canvas = ctx as unknown as CanvasRenderingContext2D;

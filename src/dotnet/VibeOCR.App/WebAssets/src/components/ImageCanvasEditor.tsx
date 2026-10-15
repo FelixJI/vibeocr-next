@@ -53,8 +53,13 @@ import {
   type PixelPatch,
   type Point,
 } from "./annotationGeometry";
-import { AnnotationTextPanel } from "./AnnotationTextPanel";
 import {
+  AnnotationNumberInput,
+  AnnotationTextPanel,
+} from "./AnnotationTextPanel";
+import {
+  calloutLeaderSegment,
+  nextNumberOrdinal,
   drawTextAnnotation,
   textAnnotationBounds,
   isFontMark,
@@ -2545,9 +2550,10 @@ export function ImageCanvasEditor({
           : {}),
         ...(tool === "numbering"
           ? {
-              ordinal:
-                activeToolAttributes.numberStart +
-                state.marks.filter((mark) => mark.tool === "numbering").length,
+              ordinal: nextNumberOrdinal(
+                state.marks,
+                activeToolAttributes.numberStart,
+              ),
             }
           : {}),
       });
@@ -2713,8 +2719,7 @@ export function ImageCanvasEditor({
             end,
             ordinal:
               draft?.ordinal ??
-              activeToolAttributes.numberStart +
-                state.marks.filter((mark) => mark.tool === "numbering").length,
+              nextNumberOrdinal(state.marks, activeToolAttributes.numberStart),
             style: draft?.style ?? currentStyle(),
           },
         ],
@@ -4161,37 +4166,17 @@ export function ImageCanvasEditor({
               />
             )}
             {activeFontTool === "numbering" && (
-              <label className="editor-style-control">
-                <span aria-hidden="true">{fontMark ? "序号值" : "起点"}</span>
-                <Input
-                  aria-label={fontMark ? "序号值" : "序号起点"}
-                  type="number"
-                  size="small"
-                  min={1}
-                  max={9999}
-                  key={
-                    fontMark
-                      ? "mark-" + selectedMark + "-" + fontMark.ordinal
-                      : "number-start-" + activeToolAttributes.numberStart
-                  }
-                  defaultValue={String(
-                    fontMark?.ordinal ?? activeToolAttributes.numberStart,
-                  )}
-                  onBlur={(event) => {
-                    const value = Number(event.currentTarget.value);
-                    if (
-                      Number.isInteger(value) &&
-                      value >= 1 &&
-                      value <= 9999
-                    ) {
-                      if (fontMark) {
-                        if (value !== fontMark.ordinal)
-                          updateFontMark({ ordinal: value });
-                      } else updateToolAttribute({ numberStart: value });
-                    }
-                  }}
-                />
-              </label>
+              <AnnotationNumberInput
+                key={fontMark ? "mark-" + selectedMark : "number-start"}
+                label={fontMark ? "序号值" : "序号起点"}
+                value={fontMark?.ordinal ?? activeToolAttributes.numberStart}
+                onValueChange={(value) => {
+                  if (fontMark) {
+                    if (value !== fontMark.ordinal)
+                      updateFontMark({ ordinal: value });
+                  } else updateToolAttribute({ numberStart: value });
+                }}
+              />
             )}
             {effectIntensityControl}
             {autoTextControl}
@@ -5694,16 +5679,16 @@ function findMark(
     if (!mark) continue;
     if (context && isFontMark(mark)) {
       const box = textAnnotationBounds(context, mark);
+      const leader =
+        mark.tool === "callout"
+          ? calloutLeaderSegment(box, mark.start)
+          : undefined;
       if (
         (point.x >= box.x - 6 &&
           point.x <= box.x + box.width + 6 &&
           point.y >= box.y - 6 &&
           point.y <= box.y + box.height + 6) ||
-        (mark.tool === "callout" &&
-          distanceToSegment(point, mark.start, {
-            x: box.x,
-            y: box.y + box.height / 2,
-          }) <= 10)
+        (leader && distanceToSegment(point, leader.from, leader.to) <= 10)
       )
         return index;
       continue;
