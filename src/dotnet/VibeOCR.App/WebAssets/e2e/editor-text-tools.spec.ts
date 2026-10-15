@@ -343,3 +343,87 @@ test("非1:1原图的多行字号背景在导出中按自然比例缩放", async
     (await scan(page, { x: 49, y: 63, width: 60, height: 11 }, png)).blue,
   ).toBeGreaterThan(5);
 });
+
+for (const label of ["文字", "说明"]) {
+  test(
+    label + "续编可使用画布取色，取消保留旧色、完成后导出新色",
+    async ({ page }) => {
+      await page.addInitScript(() =>
+        Object.defineProperty(window, "EyeDropper", {
+          value: undefined,
+          configurable: true,
+        }),
+      );
+      const { uploads } = await setupTextHost(page);
+      await page.getByRole("button", { name: label, exact: true }).click();
+      await page.getByLabel("标注文字").fill("取色测试");
+      await page.getByLabel("自定义颜色").fill("#1f6feb");
+      await page.getByLabel("文字背景", { exact: true }).check();
+      await drag(page, 150, 180, 550, 180);
+      const canvas = page.getByLabel("图片检查画布");
+      const area = {
+        x: label === "文字" ? 155 : 555,
+        y: 160,
+        width: 80,
+        height: 18,
+      };
+      await page.getByRole("button", { name: "编辑文字", exact: true }).click();
+      const pick = page.getByRole("button", { name: "屏幕取色", exact: true });
+      await expect(pick).toHaveAttribute(
+        "title",
+        "取色：点击后在画布上取样颜色",
+      );
+      const sample = async () => {
+        await pick.click();
+        const at = await client(page, 800, 500);
+        await page.mouse.click(at.x, at.y);
+        await expect(page.getByLabel("自定义颜色")).toHaveValue("#12a150");
+      };
+      await sample();
+      await expect.poll(async () => (await scan(page, area)).blue).toBe(0);
+      await page
+        .getByRole("button", { name: "取消文字编辑", exact: true })
+        .click();
+      await expect(page.getByLabel("自定义颜色")).toHaveValue("#1f6feb");
+      await expect
+        .poll(async () => (await scan(page, area)).blue)
+        .toBeGreaterThan(20);
+      expect(
+        (await scan(page, area, await save(page, uploads))).blue,
+      ).toBeGreaterThan(20);
+      await page.getByRole("button", { name: "编辑文字", exact: true }).click();
+      await pick.click();
+      await page
+        .getByRole("button", { name: "取消文字编辑", exact: true })
+        .click();
+      const afterCancel = await client(page, 800, 500);
+      await page.mouse.click(afterCancel.x, afterCancel.y);
+      await page.getByLabel("选择标注对象").selectOption("0");
+      await expect(page.getByLabel("自定义颜色")).toHaveValue("#1f6feb");
+      await page.getByRole("button", { name: "编辑文字", exact: true }).click();
+      await pick.click();
+      await canvas.focus();
+      await page.keyboard.press("Escape");
+      await expect(
+        page.getByText("已取消取色；标注颜色保持不变。"),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "完成文字编辑", exact: true }),
+      ).toBeVisible();
+      await sample();
+      await page
+        .getByRole("button", { name: "完成文字编辑", exact: true })
+        .click();
+      await deselect(page);
+      const png = await save(page, uploads);
+      expect((await scan(page, area, png)).blue).toBe(0);
+      expect((await scan(page, area, png)).green).toBeGreaterThan(20);
+      await page.getByRole("button", { name: "撤销", exact: true }).click();
+      await page.getByLabel("选择标注对象").selectOption("0");
+      await expect(page.getByLabel("自定义颜色")).toHaveValue("#1f6feb");
+      await expect(
+        page.getByLabel("选择标注对象").locator("option"),
+      ).toHaveCount(2);
+    },
+  );
+}

@@ -35,6 +35,7 @@ interface RecordedCanvas {
 
 const state = {
   canvases: [] as RecordedCanvas[],
+  sampleResult: undefined as Uint8ClampedArray | undefined,
 };
 
 function proxyFor(
@@ -47,6 +48,8 @@ function proxyFor(
       if (typeof prop !== "string") return undefined;
       return (...args: unknown[]) => {
         calls.push({ op: prop, args });
+        if (prop === "getImageData" && state.sampleResult)
+          return { data: state.sampleResult };
         if (prop === "measureText")
           return { width: String(args[0] ?? "").length * 12 };
         return undefined;
@@ -62,6 +65,7 @@ function proxyFor(
 
 function stubCanvasStack(natural?: { width: number; height: number }) {
   state.canvases = [];
+  state.sampleResult = undefined;
   Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
     configurable: true,
     value: function (this: HTMLCanvasElement) {
@@ -234,6 +238,109 @@ describe("文字、序号和说明对象", () => {
     await dragDraw(canvas, harness, { x: 100, y: 220 }, { x: 300, y: 220 });
     return { ...rendered, canvas, harness };
   }
+
+  it.each(["文字", "说明"])(
+    "%s续编时画布取色只改草稿，取消保留旧色、完成一条历史",
+    async (label) => {
+      stubCanvasStack({ width: 900, height: 600 });
+      const harness = stubAnimationFrames();
+      const { actions, unmount } = await renderEditor();
+      const canvas = getEditorCanvas();
+      mockCanvasBox(canvas, 900, 600);
+      harness.flush();
+      fireEvent.click(screen.getByRole("button", { name: label }));
+      fireEvent.change(screen.getByLabelText("标注文字"), {
+        target: { value: "取色测试" },
+      });
+      fireEvent.change(screen.getByLabelText("自定义颜色"), {
+        target: { value: "#1f6feb" },
+      });
+      await dragDraw(canvas, harness, { x: 100, y: 220 }, { x: 300, y: 220 });
+      fireEvent.doubleClick(canvas, {
+        clientX: label === "文字" ? 110 : 310,
+        clientY: 210,
+      });
+      fireEvent.change(screen.getByLabelText("标注文字"), {
+        target: { value: "草稿取色" },
+      });
+      const pick = () => screen.getByRole("button", { name: "屏幕取色" });
+      expect(pick()).toHaveAttribute("title", "取色：点击后在画布上取样颜色");
+      state.sampleResult = new Uint8ClampedArray([224, 32, 32, 255]);
+      const sample = () => {
+        fireEvent.click(pick());
+        fireEvent.pointerDown(canvas, {
+          pointerId: 1,
+          clientX: 700,
+          clientY: 500,
+        });
+        fireEvent.pointerUp(canvas, {
+          pointerId: 1,
+          clientX: 700,
+          clientY: 500,
+        });
+        harness.flush();
+      };
+      sample();
+      const sampled = state.canvases.find((entry) =>
+        entry.calls.some((call) => call.op === "getImageData"),
+      );
+      expect(
+        sampled?.calls.some(
+          (call) => call.op === "fillText" && call.args[0] === "草稿取色",
+        ),
+      ).toBe(true);
+      expect(screen.getByLabelText("自定义颜色")).toHaveValue("#e02020");
+      expect(revisions(actions)).toEqual([1]);
+      expect(
+        allCalls().some(
+          (call) => call.op === "fillStyle" && call.args[0] === "#e02020",
+        ),
+      ).toBe(true);
+      fireEvent.click(screen.getByRole("button", { name: "取消文字编辑" }));
+      harness.flush();
+      expect(screen.getByLabelText("自定义颜色")).toHaveValue("#1f6feb");
+      expect(revisions(actions)).toEqual([1]);
+      fireEvent.click(screen.getByRole("button", { name: "编辑文字" }));
+      fireEvent.click(pick());
+      fireEvent.click(screen.getByRole("button", { name: "取消文字编辑" }));
+      fireEvent.pointerDown(canvas, {
+        pointerId: 1,
+        clientX: 700,
+        clientY: 500,
+      });
+      fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 700, clientY: 500 });
+      harness.flush();
+      expect(revisions(actions)).toEqual([1]);
+      fireEvent.change(screen.getByLabelText("选择标注对象"), {
+        target: { value: "0" },
+      });
+      expect(screen.getByLabelText("自定义颜色")).toHaveValue("#1f6feb");
+      fireEvent.click(screen.getByRole("button", { name: "编辑文字" }));
+      fireEvent.click(pick());
+      fireEvent.keyDown(canvas, { key: "Escape" });
+      expect(
+        screen.getByText("已取消取色；标注颜色保持不变。"),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "完成文字编辑" }),
+      ).toBeInTheDocument();
+      sample();
+      fireEvent.click(screen.getByRole("button", { name: "完成文字编辑" }));
+      harness.flush();
+      expect(revisions(actions)).toEqual([1, 2]);
+      expect(screen.getByLabelText("自定义颜色")).toHaveValue("#e02020");
+      fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+      harness.flush();
+      fireEvent.change(screen.getByLabelText("选择标注对象"), {
+        target: { value: "0" },
+      });
+      expect(screen.getByLabelText("自定义颜色")).toHaveValue("#1f6feb");
+      expect(
+        screen.getByLabelText("选择标注对象").querySelectorAll("option"),
+      ).toHaveLength(2);
+      unmount();
+    },
+  );
 
   it("双击继续编辑多行文字及字体属性：草稿不入历史，完成一次提交，取消保留旧文字", async () => {
     const { actions, canvas, harness, unmount } = await placeText();

@@ -2112,7 +2112,14 @@ export function ImageCanvasEditor({
     draw(
       clean,
       imageRef.current,
-      state,
+      textEdit
+        ? {
+            ...state,
+            marks: state.marks.map((mark, index) =>
+              index === textEdit.index ? textEdit.mark : mark,
+            ),
+          }
+        : state,
       undefined,
       undefined,
       false,
@@ -2435,13 +2442,14 @@ export function ImageCanvasEditor({
   }
 
   function pointerDown(event: React.PointerEvent<HTMLCanvasElement>) {
-    if (event.button !== 0 || dragStart.current || textEdit) return;
+    if (event.button !== 0 || dragStart.current) return;
     // 一次性画布取色：只采样像素，不开始任何绘制/选中/裁剪。
     if (colorPickPendingRef.current) {
       sampleCanvasColor(point(event), event.currentTarget);
       event.currentTarget.style.cursor = "";
       return;
     }
+    if (textEdit) return;
     if (tool === "textSelect" || tool === "hand" || spaceHeld) return;
     const start = point(event);
     selectionDragBounds.current = event.currentTarget.getBoundingClientRect();
@@ -3487,7 +3495,7 @@ export function ImageCanvasEditor({
           return;
         if (event.key === "Escape" && textEdit) {
           event.preventDefault();
-          setTextEdit(undefined);
+          cancelDrawing();
           setOperationMessage("已取消文字编辑，原文字保留。");
         } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
           event.preventDefault();
@@ -4108,7 +4116,7 @@ export function ImageCanvasEditor({
               <ToolbarButton
                 aria-label="取消文字编辑"
                 onClick={() => {
-                  setTextEdit(undefined);
+                  cancelDrawing();
                   setOperationMessage("已取消文字编辑，原文字保留。");
                 }}
               >
@@ -4484,6 +4492,14 @@ export function ImageCanvasEditor({
               isImeCompositionEvent(event.nativeEvent)
             )
               return;
+            if (event.key === "Escape" && colorPickPendingRef.current) {
+              // 取消画布取色：不触发选区清除/工具切换/会话关闭。
+              event.preventDefault();
+              event.stopPropagation();
+              colorPickPendingRef.current = false;
+              setOperationMessage("已取消取色；标注颜色保持不变。");
+              return;
+            }
             if (textEdit) {
               if (event.key === "Escape") {
                 event.preventDefault();
@@ -4503,14 +4519,6 @@ export function ImageCanvasEditor({
               return;
             }
             const modifier = event.ctrlKey || event.metaKey;
-            if (event.key === "Escape" && colorPickPendingRef.current) {
-              // 取消画布取色：不触发选区清除/工具切换/会话关闭。
-              event.preventDefault();
-              event.stopPropagation();
-              colorPickPendingRef.current = false;
-              setOperationMessage("已取消取色；标注颜色保持不变。");
-              return;
-            }
             if (modifier && event.key.toLowerCase() === "z") {
               event.preventDefault();
               if (event.shiftKey) redo();
