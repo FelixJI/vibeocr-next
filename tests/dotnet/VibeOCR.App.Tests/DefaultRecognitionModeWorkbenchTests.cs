@@ -420,7 +420,7 @@ public sealed class DefaultRecognitionModeWorkbenchTests
     return new SettingsSnapshot { Extra = extra };
   }
 
-  private static Wire.Health DefaultModeHealth() => new()
+  internal static Wire.Health DefaultModeHealth() => new()
   {
     SchemaVersion = 2,
     InstanceId = "sup-1",

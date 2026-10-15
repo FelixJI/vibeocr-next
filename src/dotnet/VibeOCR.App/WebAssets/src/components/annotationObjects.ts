@@ -3,6 +3,7 @@ import {
   mirrorPointAround,
   rotatePointQuarter,
   scalePointAround,
+  rotatedBoundingBox,
   type CanvasSize,
   type Mark,
   type Point,
@@ -24,6 +25,24 @@ import {
 
 /** 对象批量操作的公共上下文：字形类边界测量需要 2D 上下文（measureText）。 */
 export type BoundsContext = CanvasRenderingContext2D | undefined;
+
+/** 字形类与导入图片共享单对象局部变换（rotation/flip）：旋转/镜像只移动
+ * 锚点并翻转标志，几何不烘入坐标，位图/字形随局部变换绘制。 */
+export function isTransformableMark(mark: Mark): boolean {
+  return isFontMark(mark) || mark.tool === "image";
+}
+
+/** 导入图片对象的局部矩形（未旋转）。 */
+function imageMarkRect(mark: Mark): Rect {
+  const left = Math.min(mark.start.x, mark.end.x);
+  const top = Math.min(mark.start.y, mark.end.y);
+  return {
+    x: left,
+    y: top,
+    width: Math.abs(mark.end.x - mark.start.x),
+    height: Math.abs(mark.end.y - mark.start.y),
+  };
+}
 
 /** 对齐目标：按变换边界（含字形旋转后的轴对齐包围盒）计算。 */
 export type ObjectAlign =
@@ -93,6 +112,21 @@ export function markBoundsOf(mark: Mark, context: BoundsContext): Rect {
       annotationPaths(mark),
       Math.max(2, mark.style?.brushSize ?? 24),
     );
+  }
+  if (mark.tool === "image") {
+    // 位图矩形 + 局部 90° 旋转/镜像后的轴对齐包围盒；无变换时退化为原矩形。
+    const rect = imageMarkRect(mark);
+    const rotated = rotatedBoundingBox(
+      rect.width,
+      rect.height,
+      mark.rotation ?? 0,
+    );
+    return {
+      x: rect.x + (rect.width - rotated.width) / 2,
+      y: rect.y + (rect.height - rotated.height) / 2,
+      width: rotated.width,
+      height: rotated.height,
+    };
   }
   const padding =
     mark.tool === "rectangle" || mark.tool === "ellipse"
@@ -237,8 +271,14 @@ export function scaleMarkIds(
 }
 
 /** 字形只移动局部锚点，方向由共享字形变换表达，避免布局横宽二次旋转。 */
-function moveTextAnchor(mark: Mark, map: (at: Point) => Point): Mark {
-  const anchor = textTransformAnchor(mark);
+function moveTransformAnchor(mark: Mark, map: (at: Point) => Point): Mark {
+  const anchor =
+    mark.tool === "image"
+      ? {
+          x: (mark.start.x + mark.end.x) / 2,
+          y: (mark.start.y + mark.end.y) / 2,
+        }
+      : textTransformAnchor(mark);
   const next = map(anchor);
   return mapMarkPoints(mark, (at) => ({
     x: at.x + next.x - anchor.x,
@@ -254,9 +294,9 @@ export function rotateMarkIds(
   return marks.map((mark) => {
     if (!ids.has(mark.id)) return mark;
     const rotate = (at: Point) => rotatePointQuarter(at, center, 1);
-    return isFontMark(mark)
+    return isTransformableMark(mark)
       ? {
-          ...moveTextAnchor(mark, rotate),
+          ...moveTransformAnchor(mark, rotate),
           rotation: (((mark.rotation ?? 0) + 90) % 360) as Mark["rotation"],
         }
       : mapMarkPoints(mark, rotate);
@@ -272,9 +312,9 @@ export function mirrorMarkIds(
   return marks.map((mark) => {
     if (!ids.has(mark.id)) return mark;
     const mirror = (at: Point) => mirrorPointAround(at, center, axis);
-    return isFontMark(mark)
+    return isTransformableMark(mark)
       ? {
-          ...moveTextAnchor(mark, mirror),
+          ...moveTransformAnchor(mark, mirror),
           rotation: ((360 - (mark.rotation ?? 0)) % 360) as Mark["rotation"],
           ...(axis === "h" ? { flipX: !mark.flipX } : { flipY: !mark.flipY }),
         }

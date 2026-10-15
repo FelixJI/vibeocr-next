@@ -49,6 +49,8 @@ import { recognitionEngines } from "./TaskEngineValues";
 import {
   screenshotSession,
   screenshotTextLayer,
+  imageEditImport,
+  importErrorLabel,
   imageRecognitionModes,
 } from "./ScreenshotSession";
 
@@ -250,12 +252,13 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
       }
     >
       <StatusLine>
-        {statusLabel(
-          state.statusCode,
-          viewState.connected
-            ? "等待宿主输入。"
-            : "等待宿主输入。演示状态不会读取剪贴板、文件或屏幕。",
-        )}
+        {importErrorLabel(state.importError) ??
+          statusLabel(
+            state.statusCode,
+            viewState.connected
+              ? "等待宿主输入。"
+              : "等待宿主输入。演示状态不会读取剪贴板、文件或屏幕。",
+          )}
       </StatusLine>
       <TaskEngineSelector
         engines={recognitionEngines(state.engines)}
@@ -312,6 +315,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
                 source={input.url}
                 sourceByteLength={input.byteLength}
                 textLayer={textLayer}
+                systemImport={imageEditImport(state.import)}
                 autoText={
                   session?.textSelectionRequested === true && autoTextPreference
                 }

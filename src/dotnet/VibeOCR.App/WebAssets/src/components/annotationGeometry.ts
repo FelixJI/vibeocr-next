@@ -11,6 +11,9 @@ export type AnnotationTool =
   | "pen"
   | "highlighter"
   | "numbering"
+  /** #232 导入图片对象：几何为 start/end 矩形，位图存编辑器侧 asset
+   * store（强引用，不进历史/桥），旋转/镜像走局部变换。 */
+  | "image"
   /** 识别排除区：只影响识别输入与显式屏蔽副本，不写入普通导出。 */
   | "exclude"
   /** 纯色不透明遮挡：写入普通导出与识别输入的真实不透明像素，
@@ -85,6 +88,9 @@ export interface Mark {
   readonly start: Point;
   readonly end: Point;
   readonly text?: string;
+  /** 导入图片对象的不可变资产 id：指向编辑器侧 asset store；同 asset
+   * 可被多个对象共享（克隆共享位图，不重复计入宿主解码预算）。 */
+  readonly assetId?: string;
   /** 正立文字的布局横宽（逻辑显示单位，0为纯垂直拖动）；独立于旋转后的端点跨度。 */
   readonly textWidth?: number;
   readonly style?: AnnotationStyle;
@@ -370,6 +376,28 @@ export function rotateEditorState(
         // 画笔/荧光笔轨迹点同映射，旋转后实际轨迹不错位。
         ...(mark.points ? { points: mark.points.map(rotatePoint) } : {}),
       };
+      // 图片保持局部长宽比例，整图旋转只投影中心、缩放局部矩形并累加朝向。
+      if (mark.tool === "image") {
+        const center = rotatePoint({
+          x: (mark.start.x + mark.end.x) / 2,
+          y: (mark.start.y + mark.end.y) / 2,
+        });
+        const scale =
+          imageTransform(image, nextRotation, size).scale /
+          imageTransform(image, state.rotation, size).scale;
+        const width = Math.abs(mark.end.x - mark.start.x) * scale;
+        const height = Math.abs(mark.end.y - mark.start.y) * scale;
+        return {
+          ...next,
+          start: { x: center.x - width / 2, y: center.y - height / 2 },
+          end: { x: center.x + width / 2, y: center.y + height / 2 },
+          rotation: (((mark.rotation ?? 0) +
+            nextRotation -
+            state.rotation +
+            360) %
+            360) as Mark["rotation"],
+        };
+      }
       // 带对象变换的文字保留局部布局，仅投影世界锚点，避免端点换序造成跳位。
       if (mark.tool === "text" && (mark.rotation || mark.flipX || mark.flipY)) {
         const anchor = textTransformAnchor(mark);
