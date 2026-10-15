@@ -66,7 +66,11 @@ def _wait_for_result(
             return json.loads(path.read_text(encoding="utf-8"))
         logs = sorted(bootstrap_log_root.glob("bootstrapper-*.log"))
         if logs:
-            content = logs[-1].read_text(encoding="utf-8", errors="replace")
+            try:
+                content = logs[-1].read_text(encoding="utf-8", errors="replace")
+            except FileNotFoundError:
+                # Updating may move the log after enumeration; result remains required.
+                content = ""
             if "[ERROR]" in content:
                 raise RuntimeError(f"Portable bootstrapper failed:\n{content[-4000:]}")
         time.sleep(0.25)
