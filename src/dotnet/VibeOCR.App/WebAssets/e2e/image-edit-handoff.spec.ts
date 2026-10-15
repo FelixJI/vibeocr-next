@@ -1,6 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { mountHost, sendState, snapshot } from "./workbench-host";
+import {
+  expectCommand,
+  mountHost,
+  sendState,
+  snapshot,
+} from "./workbench-host";
 
 /**
  * 显式识别交接（mock host 边界模拟，非真实 scene 窗口/真实 C# 宿主）：
@@ -159,6 +164,12 @@ test("explicit recognition handoff keeps edited ordinary pixels, mask and route"
   await page.getByRole("button", { name: "识别当前图" }).click();
   await expect.poll(() => uploads.length).toBe(1);
   expect(uploads[0]!.contentType).toBe("image/png");
+  // 上传被接收不代表响应已返回；交接命令在取得资源 URI 后才会发出。
+  await expectCommand(page, {
+    scope: "imageEdit",
+    action: "recognizeScreenshotImage",
+    arguments: expect.objectContaining({ sessionId: "handoff-e2e" }),
+  });
   const recognizeCommand = await page.evaluate(() =>
     (
       window as unknown as {
