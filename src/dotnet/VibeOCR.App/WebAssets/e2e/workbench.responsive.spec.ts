@@ -22,7 +22,29 @@ for (const size of [
     page.on("pageerror", (error) => errors.push(error.message));
     await page.addInitScript(() => {
       const events: { type: string; label: string | null }[] = [];
-      Object.assign(window, { __navigationEvents: events });
+      const timing = {
+        startedAt: 0,
+        headingAppearedAt: null as number | null,
+        label: "",
+      };
+      const recordHeadingAppearance = () => {
+        if (!timing.startedAt || timing.headingAppearedAt !== null) return;
+        if (
+          Array.from(document.querySelectorAll("h1")).some((heading) =>
+            heading.textContent?.includes(timing.label),
+          )
+        )
+          timing.headingAppearedAt = performance.now();
+      };
+      new MutationObserver(recordHeadingAppearance).observe(document, {
+        childList: true,
+        characterData: true,
+        subtree: true,
+      });
+      Object.assign(window, {
+        __navigationEvents: events,
+        __navigationTiming: timing,
+      });
       for (const type of ["pointerdown", "pointerup", "click"]) {
         document.addEventListener(
           type,
@@ -31,6 +53,12 @@ for (const size of [
               ".navigation-rail a",
             );
             if (!link) return;
+            if (type === "click") {
+              timing.startedAt = performance.now();
+              timing.headingAppearedAt = null;
+              timing.label = link.getAttribute("aria-label") ?? "";
+              recordHeadingAppearance();
+            }
             events.push({ type, label: link.getAttribute("aria-label") });
             if (events.length > 8) events.shift();
           },
@@ -73,6 +101,11 @@ for (const size of [
           const evidence = await page.evaluate((expectedRoute) => {
             const host = window as Window & {
               __testHost: { commands: readonly HostCommand[] };
+              __navigationTiming: {
+                startedAt: number;
+                headingAppearedAt: number | null;
+                label: string;
+              };
               __navigationEvents: readonly {
                 type: string;
                 label: string | null;
@@ -81,9 +114,41 @@ for (const size of [
             return {
               hash: location.hash,
               expectedRoute,
+              timing: {
+                ...host.__navigationTiming,
+                observedAt: performance.now(),
+              },
+              resources: performance
+                .getEntriesByType("resource")
+                .filter((entry) =>
+                  /\/assets\/[^/]+\.js$/.test(new URL(entry.name).pathname),
+                )
+                .slice(-8)
+                .map((entry) => ({
+                  path: new URL(entry.name).pathname,
+                  startedAt: entry.startTime,
+                  completedAt: entry.startTime + entry.duration,
+                })),
               headings: Array.from(document.querySelectorAll("h1"))
                 .slice(0, 8)
-                .map((heading) => heading.textContent?.trim()),
+                .map((heading) => {
+                  const ancestors = [];
+                  for (
+                    let element: Element | null = heading;
+                    element && ancestors.length < 12;
+                    element = element.parentElement
+                  ) {
+                    const style = getComputedStyle(element);
+                    ancestors.push({
+                      tag: element.tagName,
+                      display: style.display,
+                      visibility: style.visibility,
+                      ariaHidden: element.getAttribute("aria-hidden"),
+                      inert: element.hasAttribute("inert"),
+                    });
+                  }
+                  return { text: heading.textContent?.trim(), ancestors };
+                }),
               currentLinks: Array.from(
                 document.querySelectorAll(".navigation-rail a[aria-current]"),
               )
@@ -101,7 +166,21 @@ for (const size of [
               pointerEvents: host.__navigationEvents.slice(-8),
             };
           }, route);
-          console.error("[navigation-failure]", JSON.stringify(evidence));
+          const headingRoles = await page
+            .locator(".page-region")
+            .ariaSnapshot({ timeout: 500 })
+            .then((value) =>
+              value
+                .split("\n")
+                .filter((line) => /^\s*- (heading|status|alert)\b/.test(line))
+                .slice(0, 8)
+                .join("\n"),
+            )
+            .catch(() => "角色快照不可用");
+          console.error(
+            "[navigation-failure]",
+            JSON.stringify({ ...evidence, headingRoles }),
+          );
         } catch (diagnosticError) {
           console.error(
             "[navigation-failure] evidence unavailable:",
