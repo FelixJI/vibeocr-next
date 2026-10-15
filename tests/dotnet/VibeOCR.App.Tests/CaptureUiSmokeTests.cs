@@ -32,6 +32,18 @@ public sealed class CaptureUiSmokeTests : IDisposable
       RunUiSmokeAsync(nameof(RegionPickerRejectsChangedMonitorLayoutWithSameDesktopBounds));
 
   [Fact]
+  public Task ScrollCaptureAllowsNarrowHorizontalSelectionAndEnforcesAxisLimits() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureAllowsNarrowHorizontalSelectionAndEnforcesAxisLimits));
+
+  [Fact]
+  public Task ScrollCaptureReverseFrameCanBeDiscardedBeforeForwardResume() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureReverseFrameCanBeDiscardedBeforeForwardResume));
+
+  [Fact]
+  public Task ScrollCapturePendingPreviewBoundsBothDimensionsWithoutUpscaling() =>
+      RunUiSmokeAsync(nameof(ScrollCapturePendingPreviewBoundsBothDimensionsWithoutUpscaling));
+
+  [Fact]
   public Task ScrollCapturePreviewWaitsForDecodeAndRejectsPendingEncodingFailure() =>
       RunUiSmokeAsync(nameof(ScrollCapturePreviewWaitsForDecodeAndRejectsPendingEncodingFailure));
 

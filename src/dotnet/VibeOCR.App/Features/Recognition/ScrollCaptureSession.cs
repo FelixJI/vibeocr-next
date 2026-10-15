@@ -45,8 +45,7 @@ internal static class ScrollCaptureSession
     private const int StableComparisonsRequired = 1;
     private const int DynamicContentTimeoutMs = 5000; // 持续变化上限，避免无限忙循环。
     private const int ForegroundRestoreTimeoutMs = 5000; // 完成采样等待源窗口恢复前台的上限，防止无限挂起。
-    private const int MinSelectionWidthPx = 32; // 首帧分配前的最小选区宽度。
-    private const int MinSelectionHeightPx = 64; // 首帧分配前的最小选区高度。
+    private const int MinSelectionSidePx = 32; // 方向尚未选择时，两边采用同一最小值；开始时另验滚动轴至少 64px。
     private const int PlacementGapPx = 16; // 控制窗与选区间距（physical px）。
     private const int WindowLogicalWidth = 320; // 控制窗固定逻辑宽度，长文本按此换行。
     private const int WindowChromeSlackPx = 60; // 标题栏等非客户区估算冗余。
@@ -93,6 +92,7 @@ internal static class ScrollCaptureSession
     private long _lastProgress;
     private bool _scrollOutstanding;
     private int _noProgressAttempts;
+    private bool _reverseReviewIssued;
     private volatile string _scrollInputDiagnostic = "not attempted";
 
     private nint _source;
@@ -191,14 +191,14 @@ internal static class ScrollCaptureSession
     /// <summary>首次 GDI 采集前的选区尺寸守卫：过小无采集意义，过大直接拒绝超限整帧分配。</summary>
     private void ValidateSelectionSize()
     {
-      if (_bounds.Width < MinSelectionWidthPx ||
-          _bounds.Height < MinSelectionHeightPx ||
+      if (_bounds.Width < MinSelectionSidePx ||
+          _bounds.Height < MinSelectionSidePx ||
           _bounds.Width > VerticalScrollStitcher.MaximumDimension ||
           _bounds.Height > VerticalScrollStitcher.MaximumDimension ||
           (long)_bounds.Width * _bounds.Height > VerticalScrollStitcher.MaximumPixels)
       {
         throw new InvalidOperationException(
-            $"选区尺寸超出滚动截图支持范围（宽≥{MinSelectionWidthPx}、高≥{MinSelectionHeightPx}，"
+            $"选区尺寸超出滚动截图支持范围（宽≥{MinSelectionSidePx}、高≥{MinSelectionSidePx}，"
             + $"单边≤{VerticalScrollStitcher.MaximumDimension}，"
             + $"总像素≤{VerticalScrollStitcher.MaximumPixels}），请重新框选。");
       }
@@ -729,6 +729,7 @@ internal static class ScrollCaptureSession
       switch (result.Status)
       {
         case ScrollAppendStatus.Added:
+          _reverseReviewIssued = false;
           _appendedForCurrentStreak = true;
           _lastProgress = Environment.TickCount64;
           _scrollOutstanding = false;
@@ -736,16 +737,28 @@ internal static class ScrollCaptureSession
           ReportAccepted(_stitcher, frame);
           break;
         case ScrollAppendStatus.Duplicate:
+          _reverseReviewIssued = false;
           _appendedForCurrentStreak = true;
           break;
         case ScrollAppendStatus.Reverse:
+          _automatic = false;
+          _scrollOutstanding = false;
+          _appendedForCurrentStreak = true;
+          // 返回已收边界前只暂停一次；明确丢弃后允许手动回到边界或完成已有选段。
+          // 不收反向帧、不重置无进展期限，也不把负位移送进只接受正数的纠偏。
+          if (!_reverseReviewIssued)
+          {
+            _reverseReviewIssued = true;
+            PauseForReview("检测到反向滚动：该帧未加入已收选段。请丢弃反向帧后，按所选方向滚回已收边界再继续；也可点击完成预览已有选段。", null);
+            RunOnUi(() => _confirmButton.Content = "丢弃反向帧并继续");
+          }
+          break;
         case ScrollAppendStatus.NoOverlap:
         case ScrollAppendStatus.Ambiguous:
           _automatic = false;
           _scrollOutstanding = false;
           string reason = result.Status switch
           {
-            ScrollAppendStatus.Reverse => "反向滚动",
             ScrollAppendStatus.NoOverlap => "没有足够重叠",
             _ => "重复纹理导致偏移歧义",
           };
@@ -864,6 +877,17 @@ internal static class ScrollCaptureSession
       _previewTask = RenderPreviewAsync(bmp, width, height);
     }
 
+    private static BitmapImage CreatePreviewBitmap(int width, int height)
+    {
+      double scale = Math.Min(1.0, (double)PreviewMaxDecodePx / Math.Max(width, height));
+      return new BitmapImage
+      {
+        DecodePixelType = DecodePixelType.Physical,
+        DecodePixelWidth = Math.Max(1, (int)Math.Round(width * scale)),
+        DecodePixelHeight = Math.Max(1, (int)Math.Round(height * scale)),
+      };
+    }
+
     private async Task RenderPreviewAsync(byte[] bmp, int width, int height)
     {
       try
@@ -877,13 +901,7 @@ internal static class ScrollCaptureSession
         }
 
         stream.Seek(0);
-        double scale = Math.Min(1.0, (double)PreviewMaxDecodePx / Math.Max(width, height));
-        var bitmap = new BitmapImage
-        {
-          DecodePixelType = DecodePixelType.Physical,
-          DecodePixelWidth = Math.Max(1, (int)Math.Round(width * scale)),
-          DecodePixelHeight = Math.Max(1, (int)Math.Round(height * scale)),
-        };
+        BitmapImage bitmap = CreatePreviewBitmap(width, height);
         await bitmap.SetSourceAsync(stream);
         if (_lifecycle.IsCancellationRequested)
         {
@@ -990,11 +1008,11 @@ internal static class ScrollCaptureSession
           _offsetBox.Value = Math.Max(1, stitcher.MaximumOffset / 2);
           _pendingImage.Visibility = Visibility.Visible;
         }
-        _previewTask = RenderReviewPreviewAsync(_previewTask, preview);
+        _previewTask = RenderReviewPreviewAsync(_previewTask, preview, pending?.Width ?? 0, pending?.Height ?? 0);
       });
     }
 
-    private async Task RenderReviewPreviewAsync(Task previous, byte[]? bytes)
+    private async Task RenderReviewPreviewAsync(Task previous, byte[]? bytes, int width, int height)
     {
       await previous;
       if (_lifecycle.IsCancellationRequested || _failure is not null) return;
@@ -1009,11 +1027,7 @@ internal static class ScrollCaptureSession
           writer.DetachStream();
         }
         stream.Seek(0);
-        var bitmap = new BitmapImage
-        {
-          DecodePixelType = DecodePixelType.Physical,
-          DecodePixelWidth = PreviewMaxDecodePx
-        };
+        BitmapImage bitmap = CreatePreviewBitmap(width, height);
         await bitmap.SetSourceAsync(stream);
         if (!_lifecycle.IsCancellationRequested && _failure is null)
         {
@@ -1196,28 +1210,29 @@ internal static class ScrollCaptureSession
       }
     }
 
+    private static Session CreateSelfCheckSession(int width = 48, int height = 96)
+    {
+      var session = new Session(1, new PhysicalRectangle(0, 0, width, height), CancellationToken.None)
+      {
+        _window = new Window(),
+        _statusText = new TextBlock(),
+        _errorText = new TextBlock(),
+        _previewImage = new Image(),
+        _pendingImage = new Image(),
+        _offsetBox = new NumberBox(),
+        _startButton = new Button(),
+        _finishButton = new Button(),
+        _cancelButton = new Button(),
+        _confirmButton = new Button { IsEnabled = true },
+      };
+      session._window.Content = session._previewImage;
+      return session;
+    }
+
     // 此自检使用真实 WinUI 控件与解码，阻塞上一张预览来验证确认门控，不需要桌面前台权限。
     internal static async Task VerifyPreviewGateSelfCheckAsync()
     {
       VerifyScrollInputBoundaries();
-      static Session Create()
-      {
-        var session = new Session(1, new PhysicalRectangle(0, 0, 48, 96), CancellationToken.None)
-        {
-          _window = new Window(),
-          _statusText = new TextBlock(),
-          _errorText = new TextBlock(),
-          _previewImage = new Image(),
-          _pendingImage = new Image(),
-          _offsetBox = new NumberBox(),
-          _startButton = new Button(),
-          _finishButton = new Button(),
-          _cancelButton = new Button(),
-          _confirmButton = new Button { IsEnabled = true },
-        };
-        session._window.Content = session._previewImage;
-        return session;
-      }
       static void Check(bool condition, string message)
       {
         if (!condition) throw new InvalidOperationException(message);
@@ -1225,10 +1240,10 @@ internal static class ScrollCaptureSession
       byte[] pixels = new byte[48 * 96 * 4];
       for (int y = 0; y < 96; y++) pixels[y * 48 * 4] = (byte)y;
       var frame = new CapturedFrame(pixels, 48, 96, 48 * 4, "BGRA8");
-      var final = Create();
-      var pending = Create();
-      var first = Create();
-      var manual = Create();
+      var final = CreateSelfCheckSession();
+      var pending = CreateSelfCheckSession();
+      var first = CreateSelfCheckSession();
+      var manual = CreateSelfCheckSession();
       var witness = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
       try
       {
@@ -1290,6 +1305,122 @@ internal static class ScrollCaptureSession
         }
       }
     }
+    internal static void VerifySelectionGeometrySelfCheck()
+    {
+      foreach ((int width, int height, ScrollCaptureDirection direction) in new[]
+          { (200, 40, ScrollCaptureDirection.Right), (40, 200, ScrollCaptureDirection.Down) })
+      {
+        var session = new Session(1, new PhysicalRectangle(0, 0, width, height), CancellationToken.None);
+        try
+        {
+          session.ValidateSelectionSize();
+          byte[] pixels = new byte[width * height * 4];
+          for (int y = 0; y < height; y++)
+            for (int x = 0; x < width; x++) pixels[(y * width + x) * 4] = (byte)(x + y);
+          _ = new VerticalScrollStitcher(new CapturedFrame(pixels, width, height, width * 4, "BGRA8"), direction);
+          session._directionBox = new ComboBox();
+          for (int index = 0; index < 4; index++) session._directionBox.Items.Add(index);
+          session._directionBox.SelectedIndex = direction == ScrollCaptureDirection.Right ? 0 : 2;
+          session._leadingBox = new NumberBox { Value = 0 };
+          session._trailingBox = new NumberBox { Value = 0 };
+          session._errorText = new TextBlock();
+          session.OnStart(session, new RoutedEventArgs());
+          if (session._loop is not null || !session._errorText.Text.Contains("64", StringComparison.Ordinal))
+            throw new InvalidOperationException("The selected scroll axis must still leave at least 64 pixels before capture starts.");
+        }
+        finally { session._lifecycle.Dispose(); }
+      }
+      foreach ((int width, int height) in new[] { (31, 200), (200, 31), (32769, 32), (4000, 2001) })
+      {
+        var session = new Session(1, new PhysicalRectangle(0, 0, width, height), CancellationToken.None);
+        try
+        {
+          try { session.ValidateSelectionSize(); }
+          catch (InvalidOperationException) { continue; }
+          throw new InvalidOperationException("Common minimum side and resource limits must remain enforced.");
+        }
+        finally { session._lifecycle.Dispose(); }
+      }
+    }
+
+    internal static async Task VerifyReverseRecoverySelfCheckAsync()
+    {
+      static CapturedFrame Frame(int top)
+      {
+        byte[] pixels = new byte[48 * 96 * 4];
+        for (int y = 0; y < 96; y++)
+          for (int x = 0; x < 48; x++) pixels[(y * 48 + x) * 4] = (byte)(top + y);
+        return new CapturedFrame(pixels, 48, 96, 48 * 4, "BGRA8");
+      }
+      var session = CreateSelfCheckSession();
+      try
+      {
+        session._automatic = true;
+        session._stableStreak = StableComparisonsRequired;
+        session.HandleStable(Frame(32));
+        await session._previewTask;
+        session.OnConfirm(session, new RoutedEventArgs());
+        session._appendedForCurrentStreak = false;
+        CapturedFrame reverse = Frame(12);
+        session.HandleStable(reverse);
+        await session._previewTask;
+        if (session._pendingFrame is not null || session._offsetBox.Visibility != Visibility.Collapsed ||
+            !Equals(session._confirmButton.Content, "丢弃反向帧并继续") || !session._reviewPending || session._automatic)
+          throw new InvalidOperationException("A reverse frame must offer explicit discard/continue, never impossible positive correction.");
+        if (session._stitcher?.FrameCount != 1 || !session._stitcher.BuildFrame().Pixels.SequenceEqual(Frame(32).Pixels))
+          throw new InvalidOperationException("Reverse review must not change the accepted segment.");
+        session.OnConfirm(session, new RoutedEventArgs());
+        session._appendedForCurrentStreak = false; // 模拟控制窗过渡后重新取得稳定见证。
+        session.HandleStable(reverse);
+        if (session._reviewPending || session._pendingFrame is not null || session._completion.Task.IsCompleted)
+          throw new InvalidOperationException("Discarding a reverse frame must resume manual capture without re-prompting on the same stable frame.");
+        session._appendedForCurrentStreak = false;
+        session.HandleStable(Frame(52));
+        await session._previewTask;
+        if (session._stitcher.FrameCount != 2 || session._stitcher.Height != 116)
+          throw new InvalidOperationException("Forward scrolling after discard must append to the retained accepted segment.");
+      }
+      finally
+      {
+        session._lifecycle.Cancel();
+        await session._previewTask;
+        session._window.Close();
+        session._lifecycle.Dispose();
+      }
+    }
+
+    internal static async Task VerifyPendingPreviewBoundsSelfCheckAsync()
+    {
+      foreach ((int width, int height) in new[] { (32, 2160), (2160, 32), (32, 96) })
+      {
+        var session = CreateSelfCheckSession(width, height);
+        try
+        {
+          var frame = new CapturedFrame(new byte[width * height * 4], width, height, width * 4, "BGRA8");
+          session.PauseForReview("synthetic pending preview bounds", frame);
+          await session._previewTask;
+          BitmapImage? bitmap = session._pendingImage.Source as BitmapImage;
+          // PixelWidth/Height 在此报告源尺寸；解码约束由 DecodePixelWidth/Height 表达。
+          if (session._failure is not null || bitmap is null ||
+              bitmap.DecodePixelWidth < 1 || bitmap.DecodePixelWidth > Math.Min(width, PreviewMaxDecodePx) ||
+              bitmap.DecodePixelHeight < 1 || bitmap.DecodePixelHeight > Math.Min(height, PreviewMaxDecodePx) ||
+              bitmap.PixelWidth != width || bitmap.PixelHeight != height)
+            throw new InvalidOperationException(
+                $"Pending preview must bound both decode dimensions by the longest edge without enlarging small frames. " +
+                $"source={width}x{height}, decode={bitmap?.DecodePixelWidth}x{bitmap?.DecodePixelHeight}, " +
+                $"pixels={bitmap?.PixelWidth}x{bitmap?.PixelHeight}, failure={session._failure?.Message}");
+        }
+        finally
+        {
+          session._lifecycle.Cancel();
+          await session._previewTask;
+          session._pendingImage.Source = null;
+          session._window.Close();
+          session._lifecycle.Dispose();
+        }
+      }
+    }
+
     private void SetReadyUi()
     {
       _statusText.Text = "就绪：选择方向、滚动模式和固定边缘，点击开始采样首帧。";

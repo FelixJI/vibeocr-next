@@ -24,6 +24,15 @@ public sealed partial class App
       var store = new CapturePreferencesStore(layout);
       switch (scenario)
       {
+        case "ScrollCaptureAllowsNarrowHorizontalSelectionAndEnforcesAxisLimits":
+          ScrollCaptureSession.Session.VerifySelectionGeometrySelfCheck();
+          break;
+        case "ScrollCaptureReverseFrameCanBeDiscardedBeforeForwardResume":
+          await ScrollCaptureSession.Session.VerifyReverseRecoverySelfCheckAsync();
+          break;
+        case "ScrollCapturePendingPreviewBoundsBothDimensionsWithoutUpscaling":
+          await ScrollCaptureSession.Session.VerifyPendingPreviewBoundsSelfCheckAsync();
+          break;
         case "ScrollCapturePreviewWaitsForDecodeAndRejectsPendingEncodingFailure":
           await ScrollCaptureSession.Session.VerifyPreviewGateSelfCheckAsync();
           break;
