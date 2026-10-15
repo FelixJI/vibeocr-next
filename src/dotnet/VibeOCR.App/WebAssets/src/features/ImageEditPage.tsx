@@ -21,6 +21,7 @@ import {
   screenshotTextLayer,
   imageEditImport,
   importErrorLabel,
+  imageRecognitionModes,
 } from "./ScreenshotSession";
 
 import { StatusLine } from "./FeaturePanels";
@@ -156,6 +157,7 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
           canRecognize={viewState.capabilities.includes(
             "recognition.screenshotSession",
           )}
+          recognitionModes={imageRecognitionModes(state.recognitionModes)}
           source={input.url}
           captureScene={captureScene}
           sourceByteLength={input.byteLength}

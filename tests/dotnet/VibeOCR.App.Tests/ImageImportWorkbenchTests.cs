@@ -955,6 +955,8 @@ public sealed class ImageImportWorkbenchTests
         await handler.ExecuteAsync(new PasteImageEditSystemContentCommand(), TestContext.Current.CancellationToken);
         first = await captured.Task;
       }
+      Assert.NotNull(first.RecognitionModes);
+      Assert.Equal(3, first.RecognitionModes.Count);
       WorkbenchCommandOutcome second = await handler.ExecuteAsync(new PasteImageEditSystemContentCommand(), TestContext.Current.CancellationToken);
       Assert.Equal("image_import_in_progress", second.Error?.Code);
       Assert.Single(SessionFiles(root, new byte[8]));

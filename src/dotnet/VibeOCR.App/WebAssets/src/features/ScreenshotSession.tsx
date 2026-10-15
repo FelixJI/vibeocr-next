@@ -27,6 +27,31 @@ export function importErrorLabel(value: unknown): string | undefined {
       return "无法导入内容；请检查格式、尺寸和访问权限，已有画布保持不变。";
   }
 }
+export interface ImageRecognitionMode {
+  readonly modeId: string;
+  readonly displayName: string;
+  readonly availability: string;
+  readonly reasonCode?: string | null;
+  readonly hint?: string | null;
+}
+
+export function imageRecognitionModes(
+  value: unknown,
+): readonly ImageRecognitionMode[] {
+  if (!Array.isArray(value) || value.length !== 3) return [];
+  return value.every((entry: unknown) => {
+    if (entry === null || typeof entry !== "object") return false;
+    const mode = entry as Partial<ImageRecognitionMode>;
+    return (
+      typeof mode.modeId === "string" &&
+      typeof mode.displayName === "string" &&
+      typeof mode.availability === "string"
+    );
+  })
+    ? value
+    : [];
+}
+
 export interface ScreenshotSessionState {
   readonly sessionId: string;
   readonly revision: number;

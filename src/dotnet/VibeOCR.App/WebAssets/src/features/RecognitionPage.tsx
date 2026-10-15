@@ -51,6 +51,7 @@ import {
   screenshotTextLayer,
   imageEditImport,
   importErrorLabel,
+  imageRecognitionModes,
 } from "./ScreenshotSession";
 
 import { Panel, StatusLine } from "./FeaturePanels";
@@ -309,6 +310,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
                   "recognition.annotation",
                 )}
                 canRecognize={sessionCapable}
+                recognitionModes={imageRecognitionModes(state.recognitionModes)}
                 session={session}
                 source={input.url}
                 sourceByteLength={input.byteLength}
