@@ -28,6 +28,8 @@ import {
 import {
   annotationFill,
   annotationStrokeAlpha,
+  constrainBoxDrag,
+  constrainLineDrag,
   exclusionCoversOutput,
   exclusionDisplayPoints,
   exclusionNormalizedRects,
@@ -38,6 +40,9 @@ import {
   projectPoint,
   rectIntersectsBox,
   rotateEditorState,
+  type AnnotationArrowStyle,
+  type AnnotationFill,
+  type AnnotationLineStyle,
   type AnnotationTool,
   type CanvasSize,
   type EditorState,
@@ -103,7 +108,11 @@ type StyleChange =
   | { readonly kind: "strokeOpacity"; readonly value: number }
   | { readonly kind: "fillEnabled"; readonly value: boolean }
   | { readonly kind: "fillColor"; readonly value: string }
-  | { readonly kind: "fillOpacity"; readonly value: number };
+  | { readonly kind: "fillOpacity"; readonly value: number }
+  | { readonly kind: "lineStyle"; readonly value: AnnotationLineStyle }
+  | { readonly kind: "cornerRadius"; readonly value: number }
+  | { readonly kind: "arrowStyle"; readonly value: AnnotationArrowStyle }
+  | { readonly kind: "arrowDouble"; readonly value: boolean };
 
 const EMPTY: EditorState = { rotation: 0, marks: [] };
 const DEFAULT_COLOR = "#f38b35";
@@ -115,6 +124,8 @@ const TOOL_LABELS: Readonly<Record<Tool, string>> = {
   rectangle: "矩形",
   ellipse: "椭圆",
   arrow: "箭头",
+  line: "直线",
+  polyline: "折线",
   text: "文字",
   mosaic: "马赛克",
   blur: "模糊",
@@ -126,7 +137,9 @@ const TOOL_LABELS: Readonly<Record<Tool, string>> = {
   inpaint: "去水印",
 };
 
-const TOOL_ICONS: Readonly<Record<Tool, ToolbarIconName>> = {
+/** 图标语义需用户确认后才新增：直线/折线暂无矢量图标，用清晰文字按钮，
+ * 不渲染空图标按钮；其余工具沿用既有 Tabler 图标。 */
+const TOOL_ICONS: Readonly<Partial<Record<Tool, ToolbarIconName>>> = {
   select: "select",
   hand: "hand",
   textSelect: "textSelect",
@@ -150,10 +163,23 @@ const STROKE_TOOLS: readonly Tool[] = [
   "rectangle",
   "ellipse",
   "arrow",
+  "line",
+  "polyline",
   "pen",
   "highlighter",
 ];
 const COLOR_TOOLS: readonly Tool[] = [...STROKE_TOOLS, "text", "numbering"];
+/** 线型（实/虚/点）属性适用的描边工具。 */
+const LINE_STYLE_TOOLS: readonly Tool[] = [
+  "rectangle",
+  "ellipse",
+  "line",
+  "polyline",
+  "arrow",
+];
+/** 圆角仅矩形提供；箭头端头样式仅箭头工具。 */
+const CORNER_TOOLS: readonly Tool[] = ["rectangle"];
+const ARROW_TOOLS: readonly Tool[] = ["arrow"];
 
 const TOOL_ORDER: readonly Tool[] = [
   "select",
@@ -162,6 +188,8 @@ const TOOL_ORDER: readonly Tool[] = [
   "rectangle",
   "ellipse",
   "arrow",
+  "line",
+  "polyline",
   "text",
   "mosaic",
   "blur",
@@ -192,11 +220,45 @@ const STROKE_COLORS = [
   "#ffffff",
 ] as const;
 const STROKE_WIDTHS = [2, 3, 5, 8] as const;
+/** 矩形圆角档位（px）：0 与旧对象直角渲染一致。 */
+const RECT_CORNER_RADII = [0, 6, 12, 18] as const;
 const FONT_SIZES = [16, 24, 32, 48] as const;
 /** 形状（矩形/椭圆）支持填充；其余描边工具仅复用边框不透明度。 */
 const FILL_TOOLS: readonly Tool[] = ["rectangle", "ellipse"];
 const DEFAULT_FILL_COLOR = "#ffffff";
 const DEFAULT_FILL_OPACITY = 50;
+
+/** 单个工具的属性记忆全集：只有该工具真正消费的字段才会展示/写入标记。 */
+interface ToolAttributes {
+  readonly color: string;
+  readonly strokeWidth: number;
+  readonly strokeOpacity: number;
+  readonly lineStyle: AnnotationLineStyle;
+  readonly cornerRadius: number;
+  readonly fillEnabled: boolean;
+  readonly fillColor: string;
+  readonly fillOpacity: number;
+  readonly arrowStyle: AnnotationArrowStyle;
+  readonly arrowDouble: boolean;
+  readonly fontSize: number;
+  readonly intensity: number;
+}
+
+/** 工具属性默认值：与旧标记缺省渲染一致（实线/直角/开放单向箭头/空心）。 */
+const DEFAULT_TOOL_ATTRIBUTES: ToolAttributes = {
+  color: DEFAULT_COLOR,
+  strokeWidth: 3,
+  strokeOpacity: 100,
+  lineStyle: "solid",
+  cornerRadius: 0,
+  fillEnabled: false,
+  fillColor: DEFAULT_FILL_COLOR,
+  fillOpacity: DEFAULT_FILL_OPACITY,
+  arrowStyle: "open",
+  arrowDouble: false,
+  fontSize: 24,
+  intensity: 2,
+};
 
 /** 马赛克/模糊强度档位：1=弱、2=中（缺省）、3=强。 */
 const EFFECT_INTENSITIES = [1, 2, 3] as const;
@@ -385,10 +447,17 @@ interface ImageCanvasEditorProps {
 function AnnotationStylePanel({
   showColorControl,
   showStrokeControls,
+  showLineStyleControl,
+  showCornerControl,
+  showArrowControls,
   showFillControl,
   activeStyleColor,
   activeStrokeWidth,
   activeStrokeOpacity,
+  activeLineStyle,
+  activeCornerRadius,
+  activeArrowStyle,
+  activeArrowDouble,
   activeFillEnabled,
   activeFillColor,
   activeFillOpacity,
@@ -399,10 +468,17 @@ function AnnotationStylePanel({
 }: {
   readonly showColorControl: boolean;
   readonly showStrokeControls: boolean;
+  readonly showLineStyleControl: boolean;
+  readonly showCornerControl: boolean;
+  readonly showArrowControls: boolean;
   readonly showFillControl: boolean;
   readonly activeStyleColor: string;
   readonly activeStrokeWidth: number;
   readonly activeStrokeOpacity: number;
+  readonly activeLineStyle: AnnotationLineStyle;
+  readonly activeCornerRadius: number;
+  readonly activeArrowStyle: AnnotationArrowStyle;
+  readonly activeArrowDouble: boolean;
   readonly activeFillEnabled: boolean;
   readonly activeFillColor: string;
   readonly activeFillOpacity: number;
@@ -415,7 +491,15 @@ function AnnotationStylePanel({
   const [opacityDraft, setOpacityDraft] = useState<
     { kind: "stroke" | "fill"; raw: string } | undefined
   >();
-  if (!showColorControl && !showStrokeControls && !showFillControl) return null;
+  if (
+    !showColorControl &&
+    !showStrokeControls &&
+    !showLineStyleControl &&
+    !showCornerControl &&
+    !showArrowControls &&
+    !showFillControl
+  )
+    return null;
   return (
     <>
       {showColorControl && (
@@ -513,6 +597,91 @@ function AnnotationStylePanel({
               }
             />
             <span aria-hidden="true">%</span>
+          </label>
+        </>
+      )}
+      {showLineStyleControl && (
+        <label className="editor-style-control">
+          <span aria-hidden="true">线型</span>
+          <Select
+            aria-label="线型"
+            size="small"
+            value={activeLineStyle}
+            onChange={(_, data) =>
+              onStyleChange({
+                kind: "lineStyle",
+                value:
+                  data.value === "dashed"
+                    ? "dashed"
+                    : data.value === "dotted"
+                      ? "dotted"
+                      : "solid",
+              })
+            }
+          >
+            <option value="solid">实线</option>
+            <option value="dashed">虚线</option>
+            <option value="dotted">点线</option>
+          </Select>
+        </label>
+      )}
+      {showCornerControl && (
+        <label className="editor-style-control">
+          <span aria-hidden="true">圆角</span>
+          <Select
+            aria-label="矩形圆角"
+            size="small"
+            value={String(activeCornerRadius)}
+            onChange={(_, data) =>
+              onStyleChange({ kind: "cornerRadius", value: Number(data.value) })
+            }
+          >
+            {RECT_CORNER_RADII.map((radius) => (
+              <option key={radius} value={String(radius)}>
+                {radius === 0 ? "直角" : `${radius}px`}
+              </option>
+            ))}
+          </Select>
+        </label>
+      )}
+      {showArrowControls && (
+        <>
+          <label className="editor-style-control">
+            <span aria-hidden="true">箭头样式</span>
+            <Select
+              aria-label="箭头样式"
+              size="small"
+              value={activeArrowStyle}
+              onChange={(_, data) =>
+                onStyleChange({
+                  kind: "arrowStyle",
+                  value:
+                    data.value === "solid"
+                      ? "solid"
+                      : data.value === "hollow"
+                        ? "hollow"
+                        : "open",
+                })
+              }
+            >
+              <option value="open">开放</option>
+              <option value="solid">实心</option>
+              <option value="hollow">空心</option>
+            </Select>
+          </label>
+          <label className="editor-style-control">
+            <input
+              aria-label="双向箭头"
+              checked={activeArrowDouble}
+              onChange={(event) =>
+                onStyleChange({
+                  kind: "arrowDouble",
+                  value: event.target.checked,
+                })
+              }
+              type="checkbox"
+            />
+            <span aria-hidden="true">双向</span>
           </label>
         </>
       )}
@@ -655,13 +824,22 @@ export function ImageCanvasEditor({
   const viewportRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement | undefined>(undefined);
   const dragStart = useRef<Point | undefined>(undefined);
+  const selectionDragBounds = useRef<DOMRect | undefined>(undefined);
   const selectedMarkRef = useRef<number | undefined>(undefined);
   const exportInProgressRef = useRef(false);
-  // 选定屏蔽矩形的八点缩放拖拽：origin 冻结拖前几何，resizeDraft 驱动实时预览。
-  const resizeRef = useRef<
+  // 选定标记的几何编辑拖拽：origin 冻结拖前几何，resizeDraft 驱动实时预览。
+  // resize = 矩形类（矩形/椭圆/屏蔽）八点缩放；endpoint = 直线/箭头端点。
+  const markDragRef = useRef<
     | {
+        readonly kind: "resize";
         readonly index: number;
         readonly handle: ExclusionResizeHandle;
+        readonly origin: Mark;
+      }
+    | {
+        readonly kind: "endpoint";
+        readonly index: number;
+        readonly endpoint: "start" | "end";
         readonly origin: Mark;
       }
     | undefined
@@ -694,21 +872,21 @@ export function ImageCanvasEditor({
     | undefined
   >(undefined);
   const [annotationText, setAnnotationText] = useState("文本");
-  const [strokeColor, setStrokeColor] = useState<string>(DEFAULT_COLOR);
-  const [strokeWidth, setStrokeWidth] = useState<number>(3);
-  // 边框/线条不透明度与形状填充：仅影响矩形/椭圆/描边类新标记；
-  // 默认 100%/关闭填充，保持旧空心效果，旧标记（无该字段）渲染不变。
-  // 默认值合并为单对象状态，减少分散 setter。
-  const [shapeDefaults, setShapeDefaults] = useState({
-    strokeOpacity: 100,
-    fillEnabled: false,
-    fillColor: DEFAULT_FILL_COLOR,
-    fillOpacity: DEFAULT_FILL_OPACITY,
+  // 各工具属性记忆：每个工具独立记录自己消费的属性，切换工具互不覆盖；
+  // 未记录时回退默认值；“重置属性”删除当前工具条目回到默认。
+  const [toolAttributes, setToolAttributes] = useState<
+    Partial<Record<Tool, Partial<ToolAttributes>>>
+  >({});
+  /** 任意工具的属性记忆（含默认回退）：选中标记按其所属工具恢复，
+   * 不受当前选择工具影响。 */
+  function attributesOfTool(name: Tool): ToolAttributes {
+    return { ...DEFAULT_TOOL_ATTRIBUTES, ...toolAttributes[name] };
+  }
+  const activeToolAttributes = attributesOfTool(tool);
+  const toolAttributesRef = useRef(toolAttributes);
+  useEffect(() => {
+    toolAttributesRef.current = toolAttributes;
   });
-  const { strokeOpacity, fillEnabled, fillColor, fillOpacity } = shapeDefaults;
-  const [fontSize, setFontSize] = useState<number>(24);
-  // 马赛克/模糊强度：创建标记时写入 style.intensity，历史条目保留当时档位。
-  const [effectIntensity, setEffectIntensity] = useState<number>(2);
   // 支持 EyeDropper 时提供屏幕取色；构造失败/取消保持当前颜色。
   const [eyedropperAvailable] = useState(
     () => typeof (window as WindowWithEyeDropper).EyeDropper === "function",
@@ -854,7 +1032,7 @@ export function ImageCanvasEditor({
     setDraftMark(undefined);
     setCropDraft(undefined);
     dragStart.current = undefined;
-    resizeRef.current = undefined;
+    markDragRef.current = undefined;
     cropResizeRef.current = undefined;
     setResizeDraft(undefined);
     selectedMarkRef.current = undefined;
@@ -1628,33 +1806,62 @@ export function ImageCanvasEditor({
   const styleEditing = !!editingMark;
   const activeStyleColor = editingMark
     ? (editingMark.style?.color ?? DEFAULT_COLOR)
-    : strokeColor;
+    : activeToolAttributes.color;
   const activeStrokeWidth = editingMark
     ? (editingMark.style?.strokeWidth ?? 3)
-    : strokeWidth;
+    : activeToolAttributes.strokeWidth;
   const activeStrokeOpacity = editingMark
     ? Math.round(annotationStrokeAlpha(editingMark) * 100)
-    : strokeOpacity;
+    : activeToolAttributes.strokeOpacity;
+  const activeLineStyle = editingMark
+    ? (editingMark.style?.lineStyle ?? "solid")
+    : activeToolAttributes.lineStyle;
+  const activeCornerRadius = editingMark
+    ? (editingMark.style?.cornerRadius ?? 0)
+    : activeToolAttributes.cornerRadius;
+  const activeArrowStyle = editingMark
+    ? (editingMark.style?.arrowStyle ?? "open")
+    : activeToolAttributes.arrowStyle;
+  const activeArrowDouble = editingMark
+    ? editingMark.style?.arrowDouble === true
+    : activeToolAttributes.arrowDouble;
   const editingFill = editingMark ? annotationFill(editingMark) : undefined;
-  const activeFillEnabled = editingMark ? !!editingFill : fillEnabled;
-  const activeFillColor = editingFill?.color ?? fillColor;
+  const activeFillEnabled = editingMark
+    ? !!editingFill
+    : activeToolAttributes.fillEnabled;
+  const activeFillColor = editingFill?.color ?? activeToolAttributes.fillColor;
   const activeFillOpacity = editingFill
     ? Math.round(editingFill.alpha * 100)
-    : fillOpacity;
+    : activeToolAttributes.fillOpacity;
 
-  /** 属性排样式统一入口：选中标记时就地改样式入历史，否则更新绘制默认值；集中回退避免散布条件 setter 分派。 */
+  /** 属性排样式统一入口：选中标记时就地改样式入历史，否则更新当前工具的属性记忆；集中回退避免散布条件 setter 分派。 */
+  /** 重新开启填充：对象自身携带的关闭前值（fill.enabled=false 保留
+   * color/opacity）优先，其次所属工具的属性记忆；结果写入对象自身样式，
+   * 随历史/撤销重做与视图投影自然流转，无索引侧表。 */
+  function reenabledFill(
+    previous: AnnotationFill | undefined,
+    owningTool: ToolAttributes,
+  ): AnnotationFill {
+    if (previous) return { color: previous.color, opacity: previous.opacity };
+    return {
+      color: owningTool.fillColor,
+      opacity: owningTool.fillOpacity,
+    };
+  }
+
   function applyStyleChange(change: StyleChange): void {
     const index = selectedMark;
     const mark =
       editingMark && index !== undefined ? state.marks[index] : undefined;
-    if (mark) {
+    if (mark && index !== undefined) {
       const style = mark.style ?? {};
       // 选中标记已带填充时，改色保留其原不透明度、改不透明度保留其原色；
-      // 不用绘制默认值覆盖另一维。
-      const preservedFillColor = editingFill?.color ?? fillColor;
+      // 回退值取所属工具记忆而非当前选择工具。
+      const owningTool = attributesOfTool(mark.tool);
+      const preservedFillColor = editingFill?.color ?? owningTool.fillColor;
       const preservedFillOpacity = editingFill
         ? Math.round(editingFill.alpha * 100)
-        : fillOpacity;
+        : owningTool.fillOpacity;
       const next: Mark["style"] =
         change.kind === "color"
           ? { ...style, color: change.value }
@@ -1662,28 +1869,40 @@ export function ImageCanvasEditor({
             ? { ...style, strokeWidth: change.value }
             : change.kind === "strokeOpacity"
               ? { ...style, strokeOpacity: change.value }
-              : change.kind === "fillEnabled"
-                ? {
-                    ...style,
-                    fill: change.value
-                      ? { color: fillColor, opacity: fillOpacity }
-                      : undefined,
-                  }
-                : change.kind === "fillColor"
-                  ? {
-                      ...style,
-                      fill: {
-                        color: change.value,
-                        opacity: preservedFillOpacity,
-                      },
-                    }
-                  : {
-                      ...style,
-                      fill: {
-                        color: preservedFillColor,
-                        opacity: change.value,
-                      },
-                    };
+              : change.kind === "lineStyle"
+                ? { ...style, lineStyle: change.value }
+                : change.kind === "cornerRadius"
+                  ? { ...style, cornerRadius: change.value }
+                  : change.kind === "arrowStyle"
+                    ? { ...style, arrowStyle: change.value }
+                    : change.kind === "arrowDouble"
+                      ? { ...style, arrowDouble: change.value }
+                      : change.kind === "fillEnabled"
+                        ? {
+                            ...style,
+                            // 关闭保留值（enabled=false 渲染为空心），重开
+                            // 恢复对象自身值或所属工具记忆。
+                            fill: change.value
+                              ? reenabledFill(style.fill, owningTool)
+                              : style.fill
+                                ? { ...style.fill, enabled: false }
+                                : undefined,
+                          }
+                        : change.kind === "fillColor"
+                          ? {
+                              ...style,
+                              fill: {
+                                color: change.value,
+                                opacity: preservedFillOpacity,
+                              },
+                            }
+                          : {
+                              ...style,
+                              fill: {
+                                color: preservedFillColor,
+                                opacity: change.value,
+                              },
+                            };
       commit({
         ...state,
         marks: state.marks.map((entry, entryIndex) =>
@@ -1692,22 +1911,54 @@ export function ImageCanvasEditor({
       });
       return;
     }
-    if (change.kind === "color") setStrokeColor(change.value);
-    else if (change.kind === "strokeWidth") setStrokeWidth(change.value);
-    else
-      setShapeDefaults((current) =>
-        change.kind === "strokeOpacity"
-          ? { ...current, strokeOpacity: change.value }
-          : change.kind === "fillEnabled"
-            ? { ...current, fillEnabled: change.value }
-            : change.kind === "fillColor"
-              ? { ...current, fillColor: change.value }
-              : { ...current, fillOpacity: change.value },
-      );
+    // 未选中标记：更新当前工具的属性记忆（不影响其他工具，可重置）。
+    updateToolAttribute(
+      change.kind === "color"
+        ? { color: change.value }
+        : change.kind === "strokeWidth"
+          ? { strokeWidth: change.value }
+          : change.kind === "strokeOpacity"
+            ? { strokeOpacity: change.value }
+            : change.kind === "lineStyle"
+              ? { lineStyle: change.value }
+              : change.kind === "cornerRadius"
+                ? { cornerRadius: change.value }
+                : change.kind === "arrowStyle"
+                  ? { arrowStyle: change.value }
+                  : change.kind === "arrowDouble"
+                    ? { arrowDouble: change.value }
+                    : change.kind === "fillEnabled"
+                      ? { fillEnabled: change.value }
+                      : change.kind === "fillColor"
+                        ? { fillColor: change.value }
+                        : { fillOpacity: change.value },
+    );
+  }
+
+  /** 更新当前工具的属性记忆；各工具互不影响，重置时删除条目回默认。 */
+  function updateToolAttribute(change: Partial<ToolAttributes>): void {
+    setToolAttributes((current) => ({
+      ...current,
+      [tool]: { ...current[tool], ...change },
+    }));
+  }
+
+  /** 重置当前工具属性记忆：回到默认值，不触碰已有标记与历史。 */
+  function resetToolAttributes(): void {
+    setToolAttributes((current) => {
+      const next = { ...current };
+      delete next[tool];
+      return next;
+    });
+    setOperationMessage(`已重置“${TOOL_LABELS[tool]}”工具属性为默认值。`);
   }
 
   function point(event: React.PointerEvent<HTMLCanvasElement>): Point {
-    const bounds = event.currentTarget.getBoundingClientRect();
+    // 选中对象会展开属性栏；同一手势沿按下时边界换算，避免布局移动变成对象位移。
+    const bounds =
+      tool === "select" && dragStart.current && selectionDragBounds.current
+        ? selectionDragBounds.current
+        : event.currentTarget.getBoundingClientRect();
     return {
       x:
         ((event.clientX - bounds.left) / Math.max(bounds.width, 1)) *
@@ -1735,18 +1986,41 @@ export function ImageCanvasEditor({
   }
 
   function currentStyle(): Mark["style"] {
+    const attributes = activeToolAttributes;
     return {
-      color: strokeColor,
-      strokeWidth,
-      fontSize,
+      color: attributes.color,
+      strokeWidth: attributes.strokeWidth,
+      fontSize: attributes.fontSize,
       // 马赛克/模糊创建时冻结当前强度档位，撤销/重做回放当时效果。
       ...(tool === "mosaic" || tool === "blur"
-        ? { intensity: effectIntensity }
+        ? { intensity: attributes.intensity }
         : {}),
       // 描边类工具冻结边框不透明度；形状工具另冻结填充样式。
-      ...(STROKE_TOOLS.includes(tool) ? { strokeOpacity } : {}),
-      ...(FILL_TOOLS.includes(tool) && fillEnabled
-        ? { fill: { color: fillColor, opacity: fillOpacity } }
+      ...(STROKE_TOOLS.includes(tool)
+        ? { strokeOpacity: attributes.strokeOpacity }
+        : {}),
+      ...(FILL_TOOLS.includes(tool) && attributes.fillEnabled
+        ? {
+            fill: {
+              color: attributes.fillColor,
+              opacity: attributes.fillOpacity,
+            },
+          }
+        : {}),
+      // 线型/圆角/箭头端头：与默认一致时不写入，旧字段兼容且载荷精简。
+      ...(LINE_STYLE_TOOLS.includes(tool) && attributes.lineStyle !== "solid"
+        ? { lineStyle: attributes.lineStyle }
+        : {}),
+      ...(CORNER_TOOLS.includes(tool) && attributes.cornerRadius > 0
+        ? { cornerRadius: attributes.cornerRadius }
+        : {}),
+      ...(tool === "arrow"
+        ? {
+            ...(attributes.arrowStyle !== "open"
+              ? { arrowStyle: attributes.arrowStyle }
+              : {}),
+            ...(attributes.arrowDouble ? { arrowDouble: true } : {}),
+          }
         : {}),
     };
   }
@@ -1912,7 +2186,7 @@ export function ImageCanvasEditor({
 
   function cancelDrawing() {
     dragStart.current = undefined;
-    resizeRef.current = undefined;
+    markDragRef.current = undefined;
     cropResizeRef.current = undefined;
     colorPickPendingRef.current = false;
     setResizeDraft(undefined);
@@ -1921,40 +2195,100 @@ export function ImageCanvasEditor({
     setInpaintDraft(undefined);
   }
 
+  // 滚轮调线宽：仅描边类工具且未在就地编辑选中标记时生效；监听只挂画布
+  // （非被动，阻止页面滚动），输入框/下拉自身的键盘与滚动不受影响。
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return undefined;
+    const onWheel = (event: WheelEvent) => {
+      if (!STROKE_TOOLS.includes(tool) || styleEditing) return;
+      event.preventDefault();
+      const previous: ToolAttributes = {
+        ...DEFAULT_TOOL_ATTRIBUTES,
+        ...toolAttributesRef.current[tool],
+      };
+      const nearest = STROKE_WIDTHS.reduce(
+        (best, width, index) =>
+          Math.abs(width - previous.strokeWidth) <
+          Math.abs(STROKE_WIDTHS[best]! - previous.strokeWidth)
+            ? index
+            : best,
+        0,
+      );
+      const next = Math.max(
+        0,
+        Math.min(
+          STROKE_WIDTHS.length - 1,
+          nearest + (event.deltaY > 0 ? -1 : 1),
+        ),
+      );
+      const strokeWidth = STROKE_WIDTHS[next]!;
+      setToolAttributes((current) => ({
+        ...current,
+        [tool]: { ...current[tool], strokeWidth },
+      }));
+      setOperationMessage(
+        draftMark.current
+          ? `下一笔线条宽度：${strokeWidth}px。`
+          : `线条宽度：${strokeWidth}px。`,
+      );
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+  }, [tool, styleEditing]);
+
   function pointerMove(event: React.PointerEvent<HTMLCanvasElement>) {
     if (colorPickPendingRef.current) {
       event.currentTarget.style.cursor = "crosshair";
       return;
     }
     if (!dragStart.current) {
+      // 折线草稿悬停橡皮筋：无按键拖拽时也把活动端跟随游标，下一段实时
+      // 预览可见；仅更新草稿（不入历史、不入导出），点击才真正加点。
+      if (tool === "polyline" && draftMark.current?.tool === "polyline") {
+        setDraftMark((current) =>
+          current && current.tool === "polyline"
+            ? { ...current, end: point(event) }
+            : current,
+        );
+        return;
+      }
       if (tool === "select") {
         const at = point(event);
         const selected =
           selectedMarkRef.current === undefined
             ? undefined
             : state.marks[selectedMarkRef.current];
+        // 选定标记的几何手柄优先：矩形类八点缩放、直线/箭头端点。
         const handle =
-          selected && isExclusionMark(selected)
+          selected && isBoxResizableMark(selected)
             ? rectResizeHandle(selected, at)
             : undefined;
+        const endpoint =
+          !handle && selected && isEndpointMark(selected)
+            ? endpointHandle(selected, at)
+            : undefined;
         // 选区四边/四角：悬停时提示对应的方向光标。
-        const cropBase = handle
-          ? undefined
-          : cropAdjustBase(
-              state,
-              canvasSize(event.currentTarget),
-              !!captureGeometry,
-            );
+        const cropBase =
+          handle || endpoint
+            ? undefined
+            : cropAdjustBase(
+                state,
+                canvasSize(event.currentTarget),
+                !!captureGeometry,
+              );
         const cropHandle = cropBase
           ? rectResizeHandle(cropBase, at)
           : undefined;
         event.currentTarget.style.cursor = handle
           ? `${handle}-resize`
-          : cropHandle
-            ? `${cropHandle}-resize`
-            : findMark(state.marks, at) === undefined
-              ? "default"
-              : "move";
+          : endpoint
+            ? "move"
+            : cropHandle
+              ? `${cropHandle}-resize`
+              : findMark(state.marks, at) === undefined
+                ? "default"
+                : "move";
       }
       return;
     }
@@ -1965,16 +2299,27 @@ export function ImageCanvasEditor({
       );
       return;
     }
-    if (resizeRef.current) {
+    if (markDragRef.current) {
       const at = point(event);
       const start = dragStart.current;
+      const drag = markDragRef.current;
+      if (!start) return;
       setResizeDraft({
-        index: resizeRef.current.index,
-        mark: resizeExclusionMark(
-          resizeRef.current.origin,
-          resizeRef.current.handle,
-          { x: at.x - start.x, y: at.y - start.y },
-        ),
+        index: drag.index,
+        mark:
+          drag.kind === "resize"
+            ? resizeBoxMark(
+                drag.origin,
+                drag.handle,
+                { x: at.x - start.x, y: at.y - start.y },
+                event.shiftKey,
+              )
+            : moveEndpointMark(
+                drag.origin,
+                drag.endpoint,
+                { x: at.x - start.x, y: at.y - start.y },
+                event.shiftKey,
+              ),
       });
       return;
     }
@@ -2012,15 +2357,31 @@ export function ImageCanvasEditor({
     }
     setDraftMark((current) => {
       if (!current) return current;
-      if (tool !== "pen" && tool !== "highlighter")
-        return { ...current, end: at };
-      const points = draftPoints.current;
-      const last = points[points.length - 1];
-      if (last && Math.hypot(at.x - last.x, at.y - last.y) < 2) {
-        return current;
+      if (tool === "pen" || tool === "highlighter") {
+        const points = draftPoints.current;
+        const last = points[points.length - 1];
+        if (last && Math.hypot(at.x - last.x, at.y - last.y) < 2) {
+          return current;
+        }
+        points.push(at);
+        return { ...current, points, end: at };
       }
-      points.push(at);
-      return { ...current, points, end: at };
+      const anchor = dragStart.current ?? current.start;
+      // Shift/Alt 拖拽约束：矩形/椭圆正方/正圆与中心绘制；直线/箭头 45°。
+      if (tool === "rectangle" || tool === "ellipse") {
+        const box = constrainBoxDrag(anchor, at, {
+          shift: event.shiftKey,
+          fromCenter: event.altKey,
+        });
+        return { ...current, start: box.start, end: box.end };
+      }
+      if (tool === "line" || tool === "arrow") {
+        return {
+          ...current,
+          end: constrainLineDrag(anchor, at, event.shiftKey),
+        };
+      }
+      return { ...current, end: at };
     });
   }
 
@@ -2034,17 +2395,35 @@ export function ImageCanvasEditor({
     }
     if (tool === "textSelect" || tool === "hand" || spaceHeld) return;
     const start = point(event);
+    selectionDragBounds.current = event.currentTarget.getBoundingClientRect();
     dragStart.current = start;
     if (tool === "select") {
-      // 选定屏蔽矩形优先命中八点缩放手柄；其次选区四边/四角裁剪手柄。
+      // 选定标记的几何手柄优先命中：矩形类八点缩放、直线/箭头端点；
+      // 其次选区四边/四角裁剪手柄。
       const index = selectedMarkRef.current;
       const selected = index !== undefined ? state.marks[index] : undefined;
       const handle =
-        index !== undefined && selected && isExclusionMark(selected)
+        index !== undefined && selected && isBoxResizableMark(selected)
           ? rectResizeHandle(selected, start)
           : undefined;
+      const endpoint =
+        index !== undefined && !handle && selected && isEndpointMark(selected)
+          ? endpointHandle(selected, start)
+          : undefined;
       if (index !== undefined && selected && handle) {
-        resizeRef.current = { index, handle, origin: selected };
+        markDragRef.current = {
+          kind: "resize",
+          index,
+          handle,
+          origin: selected,
+        };
+      } else if (index !== undefined && selected && endpoint) {
+        markDragRef.current = {
+          kind: "endpoint",
+          index,
+          endpoint,
+          origin: selected,
+        };
       } else {
         const cropBase = cropAdjustBase(
           state,
@@ -2069,6 +2448,25 @@ export function ImageCanvasEditor({
       setInpaintDraft({ start, end: start });
     } else if (tool === "crop") {
       setCropDraft({ start, end: start });
+    } else if (tool === "polyline") {
+      // 折线：单击加点，草稿保持开放；拖拽段在松开时补点；双击/Enter
+      // 提交，Esc 或切换工具放弃（cancelDrawing）。
+      const existing = draftMark.current;
+      const points =
+        existing?.tool === "polyline" && existing.points
+          ? [...existing.points]
+          : [start];
+      const last = points[points.length - 1]!;
+      if (Math.hypot(start.x - last.x, start.y - last.y) >= 3) {
+        points.push(start);
+      }
+      setDraftMark({
+        tool,
+        start: points[0]!,
+        end: start,
+        points,
+        style: existing?.style ?? currentStyle(),
+      });
     } else {
       draftPoints.current = [start];
       setDraftMark({
@@ -2105,21 +2503,42 @@ export function ImageCanvasEditor({
     setDraftMark(undefined);
     // 裁剪草稿无论是否提交都结束：短拖/单击不留 0 尺寸草稿裁空画布。
     if (tool === "crop") setCropDraft(undefined);
-    if (resizeRef.current) {
-      const { index, handle, origin } = resizeRef.current;
-      resizeRef.current = undefined;
+    if (markDragRef.current) {
+      const drag = markDragRef.current;
+      markDragRef.current = undefined;
       setResizeDraft(undefined);
-      commit({
-        ...state,
-        marks: state.marks.map((mark, markIndex) =>
-          markIndex === index
-            ? resizeExclusionMark(origin, handle, {
-                x: end.x - start.x,
-                y: end.y - start.y,
-              })
-            : mark,
-        ),
-      });
+      const next =
+        drag.kind === "resize"
+          ? resizeBoxMark(
+              drag.origin,
+              drag.handle,
+              { x: end.x - start.x, y: end.y - start.y },
+              event.shiftKey,
+            )
+          : moveEndpointMark(
+              drag.origin,
+              drag.endpoint,
+              { x: end.x - start.x, y: end.y - start.y },
+              event.shiftKey,
+            );
+      // 几何未变（单击手柄）不入历史：拖拽才产生一条缩放/端点编辑记录。
+      const moved =
+        Math.hypot(
+          next.start.x - drag.origin.start.x,
+          next.start.y - drag.origin.start.y,
+        ) >= 1 ||
+        Math.hypot(
+          next.end.x - drag.origin.end.x,
+          next.end.y - drag.origin.end.y,
+        ) >= 1;
+      if (moved) {
+        commit({
+          ...state,
+          marks: state.marks.map((mark, markIndex) =>
+            markIndex === drag.index ? next : mark,
+          ),
+        });
+      }
       return;
     }
     if (cropResizeRef.current) {
@@ -2168,6 +2587,24 @@ export function ImageCanvasEditor({
       });
       return;
     }
+    if (tool === "polyline") {
+      // 折线草稿保持开放：拖拽段（≥8px）在松开时补点，单击交给下一次
+      // pointerDown 加点；提交只发生在双击/Enter（恰好一条历史）。
+      if (draft?.tool === "polyline") {
+        const points = [...(draft.points ?? [])];
+        const last = points[points.length - 1];
+        if (
+          Math.hypot(end.x - start.x, end.y - start.y) >= 8 &&
+          (!last || Math.hypot(end.x - last.x, end.y - last.y) >= 3)
+        ) {
+          points.push(end);
+          setDraftMark({ ...draft, points, end });
+        } else {
+          setDraftMark(draft);
+        }
+      }
+      return;
+    }
     if (tool === "pen" || tool === "highlighter") {
       setDraftMark(undefined);
       const sampled = draft?.points ?? [start];
@@ -2212,7 +2649,7 @@ export function ImageCanvasEditor({
             ordinal:
               state.marks.filter((mark) => mark.tool === "numbering").length +
               1,
-            style: currentStyle(),
+            style: draft?.style ?? currentStyle(),
           },
         ],
       });
@@ -2249,23 +2686,74 @@ export function ImageCanvasEditor({
         setOperationMessage(
           `屏蔽区已达上限 ${MAX_EXCLUSION_MARKS} 个；请先删除或清空后再新增。`,
         );
-      } else
+      } else {
+        // 提交与预览同源约束：Shift 正方/正圆/45°，Alt 中心绘制。
+        const box =
+          tool === "rectangle" || tool === "ellipse"
+            ? constrainBoxDrag(start, end, {
+                shift: event.shiftKey,
+                fromCenter: event.altKey,
+              })
+            : undefined;
+        const lineEnd =
+          tool === "line" || tool === "arrow"
+            ? constrainLineDrag(start, end, event.shiftKey)
+            : end;
         commit({
           ...state,
           marks: [
             ...state.marks,
             {
               tool,
-              start,
-              end,
-              style: currentStyle(),
+              start: box ? box.start : start,
+              end: box ? box.end : lineEnd,
+              style: draft?.style ?? currentStyle(),
               ...(tool === "text"
                 ? { text: annotationText.trim() || "文本" }
                 : {}),
             },
           ],
         });
+      }
     }
+  }
+
+  /** 提交折线草稿：去重相邻点、要求有效长度，恰好一条历史；不足两点
+   * 视为误触放弃，不产生空历史。双击与 Enter 共用本入口。 */
+  function commitPolylineDraft() {
+    const draft = draftMark.current;
+    if (draft?.tool !== "polyline") return;
+    const deduped: Point[] = [];
+    for (const at of draft.points ?? []) {
+      const last = deduped[deduped.length - 1];
+      if (!last || Math.hypot(at.x - last.x, at.y - last.y) >= 3) {
+        deduped.push(at);
+      }
+    }
+    const length = deduped.reduce((total, at, index) => {
+      const previous = deduped[index - 1];
+      return previous
+        ? total + Math.hypot(at.x - previous.x, at.y - previous.y)
+        : total;
+    }, 0);
+    if (deduped.length >= 2 && length >= 4) {
+      commit({
+        ...state,
+        marks: [
+          ...state.marks,
+          {
+            tool: "polyline",
+            start: deduped[0]!,
+            end: deduped[deduped.length - 1]!,
+            points: deduped,
+            style: draft.style,
+          },
+        ],
+      });
+    } else {
+      setOperationMessage("折线至少需要两个不同位置的点；已放弃本次草稿。");
+    }
+    setDraftMark(undefined);
   }
 
   /** 操作开始时冻结的导出上下文；await 归来后必须逐项一致才允许发送。 */
@@ -2767,12 +3255,14 @@ export function ImageCanvasEditor({
     // 截图现场无裁剪按钮：选区四边/四角拖拽直接调整裁剪。
     .filter((value) => !(captureStyle && value === "crop"))
     .map((value) => {
+      // 新增工具（直线/折线）无已确认图标：始终显示清晰文字，不放空按钮。
+      const icon = TOOL_ICONS[value];
       return (
         <ToolbarButton
           appearance={tool === value ? "primary" : "subtle"}
           aria-label={TOOL_LABELS[value]}
           title={TOOL_LABELS[value]}
-          icon={<ToolbarIcon name={TOOL_ICONS[value]} />}
+          icon={icon ? <ToolbarIcon name={icon} /> : undefined}
           aria-pressed={tool === value}
           key={value}
           onClick={() => {
@@ -2780,15 +3270,40 @@ export function ImageCanvasEditor({
             setTool(value);
           }}
         >
-          {/* 现场仅图标为主；马赛克/模糊为用户确认的效果预览入口，带短标签。 */}
+          {/* 现场以图标为主；马赛克/模糊为用户确认的效果预览入口，带短标签。 */}
           {captureStyle
-            ? value === "mosaic" || value === "blur"
-              ? TOOL_LABELS[value]
-              : undefined
+            ? icon
+              ? value === "mosaic" || value === "blur"
+                ? TOOL_LABELS[value]
+                : undefined
+              : TOOL_LABELS[value]
             : TOOL_LABELS[value]}
         </ToolbarButton>
       );
     });
+
+  const objectSelectionControl = tool === "select" &&
+    state.marks.length > 0 && (
+      <label className="editor-style-control">
+        <span aria-hidden="true">标注</span>
+        <Select
+          aria-label="选择标注对象"
+          size="small"
+          value={selectedMark === undefined ? "" : String(selectedMark)}
+          onChange={(_, data) => {
+            cancelDrawing();
+            select(data.value === "" ? undefined : Number(data.value));
+          }}
+        >
+          <option value="">未选择</option>
+          {state.marks.map((mark, index) => (
+            <option key={index} value={String(index)}>
+              {index + 1} · {TOOL_LABELS[mark.tool]}
+            </option>
+          ))}
+        </Select>
+      </label>
+    );
 
   const annotationTextInput = tool === "text" && (
     <Input
@@ -2805,6 +3320,16 @@ export function ImageCanvasEditor({
     toolset === "full" && (COLOR_TOOLS.includes(tool) || styleEditing);
   const showStrokeWidthControl =
     toolset === "full" && (STROKE_TOOLS.includes(tool) || styleEditing);
+  const showLineStyleControl =
+    toolset === "full" &&
+    (LINE_STYLE_TOOLS.includes(tool) ||
+      (editingMark ? LINE_STYLE_TOOLS.includes(editingMark.tool) : false));
+  const showCornerControl =
+    toolset === "full" &&
+    (CORNER_TOOLS.includes(tool) || editingMark?.tool === "rectangle");
+  const showArrowControls =
+    toolset === "full" &&
+    (ARROW_TOOLS.includes(tool) || editingMark?.tool === "arrow");
   const showFillControl =
     toolset === "full" &&
     (FILL_TOOLS.includes(tool) ||
@@ -2814,9 +3339,13 @@ export function ImageCanvasEditor({
   // 父级仅以单一 onStyleChange 入口承接（选中标记就地改样式或更新默认值）。
   const stylePanel = (
     <AnnotationStylePanel
+      activeArrowDouble={activeArrowDouble}
+      activeArrowStyle={activeArrowStyle}
+      activeCornerRadius={activeCornerRadius}
       activeFillColor={activeFillColor}
       activeFillEnabled={activeFillEnabled}
       activeFillOpacity={activeFillOpacity}
+      activeLineStyle={activeLineStyle}
       activeStrokeOpacity={activeStrokeOpacity}
       activeStrokeWidth={activeStrokeWidth}
       activeStyleColor={activeStyleColor}
@@ -2826,11 +3355,27 @@ export function ImageCanvasEditor({
         eyedropperAvailable ? () => void pickScreenColor() : enterCanvasPick
       }
       onStyleChange={applyStyleChange}
+      showArrowControls={showArrowControls}
       showColorControl={showStrokeColorControl}
+      showCornerControl={showCornerControl}
       showFillControl={showFillControl}
+      showLineStyleControl={showLineStyleControl}
       showStrokeControls={showStrokeWidthControl}
     />
   );
+  // 重置当前工具属性：仅在存在属性记忆的工具出现；就地编辑选中标记时
+  // 不提供，避免把“标记样式”与“工具记忆”混为一谈。
+  const resetAttributesControl = !styleEditing &&
+    (COLOR_TOOLS.includes(tool) || tool === "mosaic" || tool === "blur") && (
+      <ToolbarButton
+        aria-label="重置属性"
+        icon={<ToolbarIcon name="refresh" />}
+        title="重置当前工具属性为默认值"
+        onClick={resetToolAttributes}
+      >
+        {captureStyle ? undefined : "重置属性"}
+      </ToolbarButton>
+    );
   const effectIntensityControl = toolset === "full" &&
     (tool === "mosaic" || tool === "blur") && (
       <label className="editor-style-control">
@@ -2838,8 +3383,10 @@ export function ImageCanvasEditor({
         <Select
           aria-label="马赛克与模糊强度"
           size="small"
-          value={String(effectIntensity)}
-          onChange={(_, data) => setEffectIntensity(Number(data.value))}
+          value={String(activeToolAttributes.intensity)}
+          onChange={(_, data) =>
+            updateToolAttribute({ intensity: Number(data.value) })
+          }
         >
           {EFFECT_INTENSITIES.map((level) => (
             <option key={level} value={String(level)}>
@@ -2856,8 +3403,10 @@ export function ImageCanvasEditor({
       <Select
         aria-label="文字字号"
         size="small"
-        value={String(fontSize)}
-        onChange={(_, data) => setFontSize(Number(data.value))}
+        value={String(activeToolAttributes.fontSize)}
+        onChange={(_, data) =>
+          updateToolAttribute({ fontSize: Number(data.value) })
+        }
       >
         {FONT_SIZES.map((size) => (
           <option key={size} value={String(size)}>
@@ -3025,7 +3574,7 @@ export function ImageCanvasEditor({
   function clearExclusions() {
     select(undefined);
     setResizeDraft(undefined);
-    resizeRef.current = undefined;
+    markDragRef.current = undefined;
     commit({
       ...state,
       marks: state.marks.filter((mark) => !isExclusionMark(mark)),
@@ -3041,6 +3590,9 @@ export function ImageCanvasEditor({
       icon={<ToolbarIcon name="rotate" />}
       aria-label="旋转 90°"
       onClick={() => {
+        // 整图旋转：进行中的折线/裁剪/修补草稿坐标随旋转失效，统一放弃，
+        // 不留在旧坐标叠加渲染或被 Enter/双击复活。
+        cancelDrawing();
         const image = imageRef.current;
         const canvas = canvasRef.current;
         const nextRotation = (state.rotation + 90) % 360;
@@ -3097,8 +3649,10 @@ export function ImageCanvasEditor({
     !!state.resize ||
     !!state.patches?.length;
 
-  /** 清除编辑：整体回到空白基准，入历史可撤销。 */
+  /** 清除编辑：整体回到空白基准，入历史可撤销；进行中的草稿（折线等）
+   * 属于被清除的编辑内容，一并放弃，不得在 EMPTY 后仍渲染或复活。 */
   function clearEdits() {
+    cancelDrawing();
     select(undefined);
     commit(EMPTY);
   }
@@ -3259,6 +3813,7 @@ export function ImageCanvasEditor({
   // 修补对比）或选中描边类标记的就地样式、会话取字偏好存在时渲染；
   // 上下文操作已归主排。
   const settingsRowActive =
+    !!objectSelectionControl ||
     styleEditing ||
     tool === "text" ||
     (toolset === "full" &&
@@ -3341,6 +3896,7 @@ export function ImageCanvasEditor({
           {textLayerControls}
           {inpaintOperations}
           {rotateControl}
+          {resetAttributesControl}
           {captureStyle ? null : clearExclusionsButton}
           {undoButton}
           {redoButton}
@@ -3360,6 +3916,7 @@ export function ImageCanvasEditor({
             size="small"
             className="editor-toolbar editor-toolbar-settings"
           >
+            {objectSelectionControl}
             {annotationTextInput}
             {stylePanel}
             {fontSizeControl}
@@ -3478,8 +4035,8 @@ export function ImageCanvasEditor({
       <p className="editor-guidance">
         {toolset === "full"
           ? captureStyle
-            ? "拖拽绘制标注；拖动选区四边与四角可调整裁剪范围。手形或按住 Space 可平移。画笔与荧光笔沿拖拽轨迹绘制，序号单击放置。马赛克/模糊强度可在工具栏选择，与打码一样写入复制、保存副本及显式识别输入；画面缩放不改变内容。"
-            : "拖拽绘制或裁剪；选择标注后可拖动，已提交裁剪框的四边/四角可继续拖拽调整。手形或按住 Space 可平移。画笔与荧光笔沿拖拽轨迹绘制，序号单击放置。马赛克/模糊强度可在工具栏选择，写入复制、保存副本及显式识别输入；画面缩放不改变内容。"
+            ? "拖拽绘制标注；拖动选区四边与四角可调整裁剪范围。矩形/椭圆选中后可拖八点手柄缩放，直线/箭头可拖端点。按住 Shift 约束正方形/正圆/45°，按住 Alt 以起点为中心绘制；折线单击加点、双击或 Enter 完成，Esc 放弃草稿。手形或按住 Space 可平移；滚轮可调线宽。马赛克/模糊强度可在工具栏选择，写入复制、保存副本及显式识别输入；画面缩放不改变内容。"
+            : "拖拽绘制或裁剪；选择标注后可拖动，矩形/椭圆可拖八点手柄缩放，直线/箭头可拖端点，已提交裁剪框的四边/四角可继续拖拽调整。按住 Shift 约束正方形/正圆/45°，按住 Alt 以起点为中心绘制；折线单击加点、双击或 Enter 完成，Esc 放弃草稿。手形或按住 Space 可平移；滚轮可调线宽。马赛克/模糊强度可在工具栏选择，写入复制、保存副本及显式识别输入；画面缩放不改变内容。"
           : "拖拽框选“屏蔽”区，识别时忽略其中内容；“去水印”先框选、预览修补再应用；旋转调整整图方向。按住 Space 可平移，画面缩放不改变内容。"}
       </p>
       {tool === "inpaint" && (
@@ -3657,6 +4214,15 @@ export function ImageCanvasEditor({
             // IME 组合（含标注文字输入结束前迟到的 229 键）不触发撤销/
             // 删除/手势取消；非组合行为保持不变。
             if (isImeCompositionEvent(event.nativeEvent)) return;
+            // Enter 完成折线草稿：监听只挂画布，焦点在输入框时不触发。
+            if (
+              event.key === "Enter" &&
+              draftMark.current?.tool === "polyline"
+            ) {
+              event.preventDefault();
+              commitPolylineDraft();
+              return;
+            }
             const modifier = event.ctrlKey || event.metaKey;
             if (event.key === "Escape" && colorPickPendingRef.current) {
               // 取消画布取色：不触发选区清除/工具切换/会话关闭。
@@ -3686,10 +4252,16 @@ export function ImageCanvasEditor({
               setCropDraft(undefined);
               setInpaintDraft(undefined);
               select(undefined);
-              resizeRef.current = undefined;
+              markDragRef.current = undefined;
               cropResizeRef.current = undefined;
               setResizeDraft(undefined);
               setTool("select");
+            }
+          }}
+          onDoubleClick={() => {
+            // 双击完成折线草稿：恰好一条历史；其他工具无草稿时忽略。
+            if (draftMark.current?.tool === "polyline") {
+              commitPolylineDraft();
             }
           }}
           onPointerCancel={cancelDrawing}
@@ -3854,6 +4426,46 @@ function drawHandleSquares(
   context.restore();
 }
 
+/** 端点手柄（直线/箭头）：与八点手柄同样式的白底方块。 */
+function drawPointHandleSquares(
+  context: CanvasRenderingContext2D,
+  points: readonly Point[],
+  stroke: string,
+) {
+  context.save();
+  context.setLineDash([]);
+  context.fillStyle = "#ffffff";
+  context.strokeStyle = stroke;
+  for (const at of points) {
+    context.fillRect(at.x - 4, at.y - 4, 8, 8);
+    context.strokeRect(at.x - 4, at.y - 4, 8, 8);
+  }
+  context.restore();
+}
+
+/** 虚线 [12,8]；点线圆头间距至少两倍线宽，避免粗线端帽重叠。
+ * 长度随 markScale 缩放，预览与导出同一节奏。 */
+function applyDashPattern(
+  context: CanvasRenderingContext2D,
+  style: AnnotationLineStyle | undefined,
+  markScale: number,
+  lineWidth: number,
+): void {
+  if (style === "dashed") {
+    context.setLineDash([12 * markScale, 8 * markScale]);
+    context.lineCap = "butt";
+  } else if (style === "dotted") {
+    context.setLineDash([
+      2 * markScale,
+      Math.max(6 * markScale, lineWidth * 2),
+    ]);
+    context.lineCap = "round";
+  } else {
+    context.setLineDash([]);
+    context.lineCap = "butt";
+  }
+}
+
 function canvasSize(canvas: HTMLCanvasElement): CanvasSize {
   return {
     width: Number(canvas.dataset.coordinateWidth) || canvas.width,
@@ -3981,18 +4593,42 @@ function draw(
       context.lineWidth = lineWidth;
       context.strokeStyle = color;
       const fill = annotationFill(mark);
-      if (fill) {
-        // 填充先铺底，边框后绘制覆盖在上：两者颜色/不透明度独立。
+      const radius = Math.min(
+        (mark.style?.cornerRadius ?? 0) * markScale,
+        Math.min(Math.abs(width), Math.abs(height)) / 2,
+      );
+      if (radius > 0 && typeof context.roundRect === "function") {
+        // 圆角路径：填充先铺底、边框后描，两者颜色/不透明度独立。
+        const area = normalizedRect(mark);
+        context.beginPath();
+        context.roundRect(area.x, area.y, area.width, area.height, radius);
+        if (fill) {
+          context.save();
+          context.globalAlpha = fill.alpha;
+          context.fillStyle = fill.color;
+          context.fill();
+          context.restore();
+        }
         context.save();
-        context.globalAlpha = fill.alpha;
-        context.fillStyle = fill.color;
-        context.fillRect(mark.start.x, mark.start.y, width, height);
+        context.globalAlpha = strokeAlpha;
+        applyDashPattern(context, mark.style?.lineStyle, markScale, lineWidth);
+        context.stroke();
+        context.restore();
+      } else {
+        // 直角/旧路径：fillRect+strokeRect 保持旧对象像素不变。
+        if (fill) {
+          context.save();
+          context.globalAlpha = fill.alpha;
+          context.fillStyle = fill.color;
+          context.fillRect(mark.start.x, mark.start.y, width, height);
+          context.restore();
+        }
+        context.save();
+        context.globalAlpha = strokeAlpha;
+        applyDashPattern(context, mark.style?.lineStyle, markScale, lineWidth);
+        context.strokeRect(mark.start.x, mark.start.y, width, height);
         context.restore();
       }
-      context.save();
-      context.globalAlpha = strokeAlpha;
-      context.strokeRect(mark.start.x, mark.start.y, width, height);
-      context.restore();
     } else if (mark.tool === "ellipse") {
       context.setLineDash([]);
       context.lineWidth = lineWidth;
@@ -4018,6 +4654,43 @@ function draw(
       }
       context.save();
       context.globalAlpha = strokeAlpha;
+      applyDashPattern(context, mark.style?.lineStyle, markScale, lineWidth);
+      context.stroke();
+      context.restore();
+    } else if (mark.tool === "line" || mark.tool === "polyline") {
+      // 直线/折线共用描边路径：折线用采样点，直线退化 start→end。折线
+      // 草稿的活动 end 追加为最后一个顶点：拖拽/悬停中的新段实时可见；
+      // 已提交标记 end == 最后顶点，不追加，渲染与旧像素不变。未提交
+      // 草稿只进预览画布，导出/历史仍只包含已提交 points。
+      const committedPoints =
+        mark.tool === "polyline" && mark.points?.length
+          ? mark.points
+          : [mark.start, mark.end];
+      const points = [...committedPoints];
+      if (mark.tool === "polyline") {
+        const last = points[points.length - 1];
+        if (last && (last.x !== mark.end.x || last.y !== mark.end.y)) {
+          points.push(mark.end);
+        }
+      }
+      context.save();
+      context.strokeStyle = color;
+      context.lineWidth = lineWidth;
+      context.globalAlpha = strokeAlpha;
+      applyDashPattern(context, mark.style?.lineStyle, markScale, lineWidth);
+      if (!mark.style?.lineStyle || mark.style.lineStyle === "solid") {
+        context.lineCap = "round";
+      }
+      context.lineJoin = "round";
+      context.beginPath();
+      points.forEach((at, pointIndex) => {
+        if (pointIndex === 0) context.moveTo(at.x, at.y);
+        else context.lineTo(at.x, at.y);
+      });
+      if (points.length === 1) {
+        const only = points[0]!;
+        context.lineTo(only.x + 0.1, only.y);
+      }
       context.stroke();
       context.restore();
     } else if (mark.tool === "arrow") {
@@ -4026,23 +4699,93 @@ function draw(
       context.strokeStyle = color;
       context.save();
       context.globalAlpha = strokeAlpha;
-      context.beginPath();
-      context.moveTo(mark.start.x, mark.start.y);
-      context.lineTo(mark.end.x, mark.end.y);
-      context.stroke();
+      const arrowStyle = mark.style?.arrowStyle ?? "open";
+      const doubleHead = mark.style?.arrowDouble === true;
       const angle = Math.atan2(height, width);
-      context.beginPath();
-      context.moveTo(mark.end.x, mark.end.y);
-      context.lineTo(
-        mark.end.x - 16 * markScale * Math.cos(angle - 0.45),
-        mark.end.y - 16 * markScale * Math.sin(angle - 0.45),
+      // 旧默认开放头：两条 16px 短线，保持旧对象渲染不变。
+      const drawOpenHead = (tip: Point, dir: number): void => {
+        context.setLineDash([]);
+        context.beginPath();
+        context.moveTo(tip.x, tip.y);
+        context.lineTo(
+          tip.x - 16 * markScale * Math.cos(dir - 0.45),
+          tip.y - 16 * markScale * Math.sin(dir - 0.45),
+        );
+        context.moveTo(tip.x, tip.y);
+        context.lineTo(
+          tip.x - 16 * markScale * Math.cos(dir + 0.45),
+          tip.y - 16 * markScale * Math.sin(dir + 0.45),
+        );
+        context.stroke();
+      };
+      // 短箭头的端头共同受总长度约束，防止轴杆反向穿过空心头。
+      const headSize = Math.min(
+        (10 + (mark.style?.strokeWidth ?? 3) * 2) * markScale,
+        Math.hypot(width, height) / (doubleHead ? 2 : 1),
       );
-      context.moveTo(mark.end.x, mark.end.y);
-      context.lineTo(
-        mark.end.x - 16 * markScale * Math.cos(angle + 0.45),
-        mark.end.y - 16 * markScale * Math.sin(angle + 0.45),
-      );
-      context.stroke();
+      const drawTriangleHead = (
+        tip: Point,
+        dir: number,
+        filled: boolean,
+      ): void => {
+        const half = headSize / 2.5;
+        const base = {
+          x: tip.x - headSize * Math.cos(dir),
+          y: tip.y - headSize * Math.sin(dir),
+        };
+        context.setLineDash([]);
+        context.beginPath();
+        context.moveTo(tip.x, tip.y);
+        context.lineTo(
+          base.x + half * Math.cos(dir - Math.PI / 2),
+          base.y + half * Math.sin(dir - Math.PI / 2),
+        );
+        context.lineTo(
+          base.x + half * Math.cos(dir + Math.PI / 2),
+          base.y + half * Math.sin(dir + Math.PI / 2),
+        );
+        context.closePath();
+        if (filled) {
+          context.fillStyle = color;
+          context.fill();
+        }
+        context.stroke();
+      };
+      if (arrowStyle === "open") {
+        // 旧路径：完整轴杆 + 端头短线（无轴杆缩短），字节等价旧渲染。
+        context.beginPath();
+        context.moveTo(mark.start.x, mark.start.y);
+        context.lineTo(mark.end.x, mark.end.y);
+        applyDashPattern(context, mark.style?.lineStyle, markScale, lineWidth);
+        context.stroke();
+        drawOpenHead(mark.end, angle);
+        if (doubleHead) drawOpenHead(mark.start, angle + Math.PI);
+      } else {
+        // 三角头：轴杆止于端头底边，空心内部不穿越轴杆。
+        const axis = {
+          x: Math.cos(angle),
+          y: Math.sin(angle),
+        };
+        const shaftStart = doubleHead
+          ? {
+              x: mark.start.x + headSize * axis.x,
+              y: mark.start.y + headSize * axis.y,
+            }
+          : mark.start;
+        const shaftEnd = {
+          x: mark.end.x - headSize * axis.x,
+          y: mark.end.y - headSize * axis.y,
+        };
+        context.beginPath();
+        context.moveTo(shaftStart.x, shaftStart.y);
+        context.lineTo(shaftEnd.x, shaftEnd.y);
+        applyDashPattern(context, mark.style?.lineStyle, markScale, lineWidth);
+        context.stroke();
+        drawTriangleHead(mark.end, angle, arrowStyle === "solid");
+        if (doubleHead) {
+          drawTriangleHead(mark.start, angle + Math.PI, arrowStyle === "solid");
+        }
+      }
       context.restore();
     } else if (mark.tool === "text") {
       context.setLineDash([]);
@@ -4128,6 +4871,16 @@ function draw(
         bounds.right - bounds.left + 10,
         bounds.bottom - bounds.top + 10,
       );
+      // 几何编辑手柄：矩形/椭圆八点缩放；直线/箭头两端端点（屏蔽标记
+      // 自带八点手柄，不重复绘制）。
+      if (
+        (mark.tool === "rectangle" || mark.tool === "ellipse") &&
+        !isExclusionMark(mark)
+      ) {
+        drawHandleSquares(context, normalizedRect(mark), "#f38b35");
+      } else if (mark.tool === "line" || mark.tool === "arrow") {
+        drawPointHandleSquares(context, [mark.start, mark.end], "#f38b35");
+      }
     }
   });
   if (showEditorChrome && overlays && state.crop) {
@@ -4166,7 +4919,10 @@ function drawExclusionChrome(
   selected: boolean,
 ) {
   const area = normalizedRect(mark);
-  if (area.width <= 0 || area.height <= 0) return;
+  if (area.width <= 0 || area.height <= 0) {
+    if (selected) drawHandleSquares(context, area, "#e02020");
+    return;
+  }
   context.save();
   context.fillStyle = "rgba(224, 32, 32, 0.12)";
   context.fillRect(area.x, area.y, area.width, area.height);
@@ -4226,20 +4982,27 @@ function exclusionHandlePoint(
   };
 }
 
-/** 任意 start/end 矩形的八点手柄命中测试（含屏蔽标记与选区裁剪框）。 */
+/** 任意 start/end 矩形的八点手柄命中测试（含屏蔽标记与选区裁剪框）：
+ * 小矩形各手柄命中圈重叠时取距离最近者（相等时稳定取枚举顺序靠前），
+ * 不再按 nw→w 固定顺序首命中。 */
 function rectResizeHandle(
   rect: Pick<Mark, "start" | "end">,
   at: Point,
 ): ExclusionResizeHandle | undefined {
   const area = normalizedRect(rect);
-  if (area.width <= 0 || area.height <= 0) return undefined;
+  // 零尺寸手柄重叠时仍按最近距离命中，允许把退化对象重新拉开。
+  let best: ExclusionResizeHandle | undefined;
+  let bestDistance = Number.POSITIVE_INFINITY;
   for (const handle of EXCLUSION_RESIZE_HANDLES) {
     const point = exclusionHandlePoint(area, handle);
-    if (Math.hypot(at.x - point.x, at.y - point.y) <= EXCLUSION_HANDLE_RADIUS) {
-      return handle;
+    const distance = Math.hypot(at.x - point.x, at.y - point.y);
+    // 严格小于：等距 tie 保留先遍历到的手柄，行为稳定可预测。
+    if (distance <= EXCLUSION_HANDLE_RADIUS && distance < bestDistance) {
+      best = handle;
+      bestDistance = distance;
     }
   }
-  return undefined;
+  return best;
 }
 
 /** 可拖拽调整裁剪的基准矩形：已提交裁剪优先；截图现场无裁剪时为整幅选区。 */
@@ -4283,16 +5046,91 @@ function resizeRectPoints(
   };
 }
 
-/** 拖动手柄调整屏蔽矩形：反向拖拽自动翻转，不产生负尺寸。 */
-function resizeExclusionMark(
+/** 矩形对角类标记（矩形/椭圆/屏蔽）支持八点缩放。 */
+function isBoxResizableMark(mark: Mark): boolean {
+  return (
+    mark.tool === "rectangle" ||
+    mark.tool === "ellipse" ||
+    isExclusionMark(mark)
+  );
+}
+
+/** 直线/箭头支持端点拖拽。 */
+function isEndpointMark(mark: Mark): boolean {
+  return mark.tool === "line" || mark.tool === "arrow";
+}
+
+/** 直线/箭头端点命中：两端都在半径内时取距离更近的一端（相等时稳定取
+ * start），短线段（长度 < 2×半径）的 end 手柄因此仍然可命中可拖拽。 */
+function endpointHandle(mark: Mark, at: Point): "start" | "end" | undefined {
+  const toStart = Math.hypot(at.x - mark.start.x, at.y - mark.start.y);
+  const toEnd = Math.hypot(at.x - mark.end.x, at.y - mark.end.y);
+  if (toStart > EXCLUSION_HANDLE_RADIUS && toEnd > EXCLUSION_HANDLE_RADIUS)
+    return undefined;
+  return toStart <= toEnd ? "start" : "end";
+}
+
+/** 拖动八点手柄缩放矩形类标记（屏蔽/矩形/椭圆共用）：反向拖拽自动翻转；
+ * Shift + 角手柄对角锚定，保持拖前宽高比（正方/正圆约束的缩放版）。 */
+function resizeBoxMark(
   mark: Mark,
   handle: ExclusionResizeHandle,
   delta: Point,
+  shift: boolean,
 ): Mark {
+  if (delta.x === 0 && delta.y === 0) return mark;
+  const left = Math.min(mark.start.x, mark.end.x);
+  const right = Math.max(mark.start.x, mark.end.x);
+  const top = Math.min(mark.start.y, mark.end.y);
+  const bottom = Math.max(mark.start.y, mark.end.y);
+  const width = right - left;
+  const height = bottom - top;
+  if (shift && handle.length === 2) {
+    const anchorX = handle.includes("w") ? right : left;
+    const anchorY = handle.includes("n") ? bottom : top;
+    const cornerX = (handle.includes("w") ? left : right) + delta.x;
+    const cornerY = (handle.includes("n") ? top : bottom) + delta.y;
+    const dx = cornerX - anchorX;
+    const dy = cornerY - anchorY;
+    // 零宽/零高退化时退回正方约束，避免除零。
+    const ratio = width > 0 && height > 0 ? width / height : 1;
+    // 保持比例时把两个轴的拖拽位移都换算到宽轴取较大者：宽高比 2:1 的
+    // 矩形 dy=80 意味着宽应到 160（高 80），而不是 max(|dx|,|dy|)=80
+    // 直接当宽（旧实现会把 2:1 缩成 80×40）。
+    const nextWidth = Math.max(Math.abs(dx), Math.abs(dy) * ratio);
+    const nextHeight = nextWidth / ratio;
+    const x2 = anchorX + (dx < 0 ? -1 : 1) * nextWidth;
+    const y2 = anchorY + (dy < 0 ? -1 : 1) * nextHeight;
+    return {
+      ...mark,
+      start: {
+        x: Math.min(anchorX, x2),
+        y: Math.min(anchorY, y2),
+      },
+      end: {
+        x: Math.max(anchorX, x2),
+        y: Math.max(anchorY, y2),
+      },
+    };
+  }
   return {
     ...mark,
     ...resizeRectPoints(mark.start, mark.end, handle, delta),
   };
+}
+
+/** 拖动直线/箭头端点：另一端固定；Shift 吸附 45° 倍数方向。 */
+function moveEndpointMark(
+  mark: Mark,
+  endpoint: "start" | "end",
+  delta: Point,
+  shift: boolean,
+): Mark {
+  if (delta.x === 0 && delta.y === 0) return mark;
+  const at = { x: mark[endpoint].x + delta.x, y: mark[endpoint].y + delta.y };
+  return endpoint === "end"
+    ? { ...mark, end: constrainLineDrag(mark.start, at, shift) }
+    : { ...mark, start: constrainLineDrag(mark.end, at, shift) };
 }
 
 function normalizedRect(mark: Pick<Mark, "start" | "end">) {
@@ -4558,6 +5396,27 @@ function findMark(marks: readonly Mark[], point: Point): number | undefined {
   for (let index = marks.length - 1; index >= 0; index -= 1) {
     const mark = marks[index];
     if (!mark) continue;
+    // 直线/箭头/折线：按到线段的最短距离命中，避免包络盒内误选；
+    // 其余工具沿用包络盒（±10px 容差）。
+    if (
+      mark.tool === "line" ||
+      mark.tool === "arrow" ||
+      mark.tool === "polyline"
+    ) {
+      const points =
+        mark.tool === "polyline" && mark.points?.length
+          ? mark.points
+          : [mark.start, mark.end];
+      let hit = false;
+      for (let i = 1; i < points.length; i += 1) {
+        if (distanceToSegment(point, points[i - 1]!, points[i]!) <= 10) {
+          hit = true;
+          break;
+        }
+      }
+      if (hit) return index;
+      continue;
+    }
     const left = Math.min(mark.start.x, mark.end.x) - 10;
     const right = Math.max(mark.start.x, mark.end.x) + 10;
     const top = Math.min(mark.start.y, mark.end.y) - 10;
@@ -4571,4 +5430,19 @@ function findMark(marks: readonly Mark[], point: Point): number | undefined {
       return index;
   }
   return undefined;
+}
+
+/** 点到线段的最短距离：命中半径判定用，不引入额外几何库。 */
+function distanceToSegment(at: Point, from: Point, to: Point): number {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  if (dx === 0 && dy === 0) return Math.hypot(at.x - from.x, at.y - from.y);
+  const t = Math.max(
+    0,
+    Math.min(
+      1,
+      ((at.x - from.x) * dx + (at.y - from.y) * dy) / (dx * dx + dy * dy),
+    ),
+  );
+  return Math.hypot(at.x - (from.x + t * dx), at.y - (from.y + t * dy));
 }
