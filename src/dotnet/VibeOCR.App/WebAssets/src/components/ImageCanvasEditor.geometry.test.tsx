@@ -1142,3 +1142,269 @@ describe("选中对象填充恢复（C3 回归）", () => {
     unmount();
   });
 });
+
+describe("小矩形八点手柄最近命中（D1 回归）", () => {
+  it("8×8 矩形点击 se 命中 se 而非 nw：拖拽扩展到 (400,200)-(500,300)", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await dragDraw(canvas, harness, { x: 400, y: 200 }, { x: 408, y: 208 });
+    await clickSelect(canvas, harness, { x: 404, y: 204 });
+    // se 角 (408,208)：距 nw (400,200) ≈11.3 也在命中圈内（重叠），
+    // 旧实现固定顺序首命中 nw，会把左上角拖走。
+    fireEvent.pointerDown(canvas, { pointerId: 3, clientX: 408, clientY: 208 });
+    fireEvent.pointerMove(canvas, { pointerId: 3, clientX: 500, clientY: 300 });
+    harness.flush();
+    clearCalls();
+    fireEvent.pointerUp(canvas, { pointerId: 3, clientX: 500, clientY: 300 });
+    harness.flush();
+    expect(drawnRects()).toContainEqual([400, 200, 100, 100]);
+    unmount();
+  });
+
+  it("8×8 椭圆与屏蔽共用同一最近命中：se 手柄真实拖动", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+
+    // 椭圆：拖 se 后包围盒 (400,200)-(500,300) → 中心 (450,250) r50。
+    fireEvent.click(screen.getByRole("button", { name: "椭圆" }));
+    await dragDraw(canvas, harness, { x: 400, y: 200 }, { x: 408, y: 208 });
+    await clickSelect(canvas, harness, { x: 404, y: 204 });
+    fireEvent.pointerDown(canvas, { pointerId: 3, clientX: 408, clientY: 208 });
+    fireEvent.pointerMove(canvas, { pointerId: 3, clientX: 500, clientY: 300 });
+    harness.flush();
+    clearCalls();
+    fireEvent.pointerUp(canvas, { pointerId: 3, clientX: 500, clientY: 300 });
+    harness.flush();
+    const ellipses = allCalls()
+      .filter((call) => call.op === "ellipse")
+      .map((call) => call.args);
+    expect(ellipses).toContainEqual([450, 250, 50, 50, 0, 0, Math.PI * 2]);
+
+    // 屏蔽小矩形：八点手柄同样最近命中。旧选择（椭圆）的手柄会抢先
+    // 命中点击，先点空白取消选择再选中屏蔽。
+    fireEvent.click(screen.getByRole("button", { name: "屏蔽" }));
+    await dragDraw(canvas, harness, { x: 400, y: 200 }, { x: 408, y: 208 });
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.pointerDown(canvas, { pointerId: 2, clientX: 700, clientY: 450 });
+    fireEvent.pointerUp(canvas, { pointerId: 2, clientX: 700, clientY: 450 });
+    harness.flush();
+    await clickSelect(canvas, harness, { x: 404, y: 204 });
+    fireEvent.pointerDown(canvas, { pointerId: 4, clientX: 408, clientY: 208 });
+    fireEvent.pointerMove(canvas, { pointerId: 4, clientX: 500, clientY: 300 });
+    harness.flush();
+    clearCalls();
+    fireEvent.pointerUp(canvas, { pointerId: 4, clientX: 500, clientY: 300 });
+    harness.flush();
+    expect(drawnRects()).toContainEqual([400, 200, 100, 100]);
+    unmount();
+  });
+});
+
+describe("Shift 角拖拽按原比例归一（D2 回归）", () => {
+  async function shiftDragCorner(
+    canvas: HTMLCanvasElement,
+    harness: ReturnType<typeof stubAnimationFrames>,
+    from: { x: number; y: number },
+    to: { x: number; y: number },
+    pointerId: number,
+  ) {
+    fireEvent.pointerDown(canvas, {
+      pointerId,
+      clientX: from.x,
+      clientY: from.y,
+    });
+    fireEvent.pointerMove(canvas, {
+      pointerId,
+      clientX: to.x,
+      clientY: to.y,
+      shiftKey: true,
+    });
+    harness.flush();
+    clearCalls();
+    fireEvent.pointerUp(canvas, {
+      pointerId,
+      clientX: to.x,
+      clientY: to.y,
+      shiftKey: true,
+    });
+    harness.flush();
+  }
+
+  it("宽主导 2:1 矩形 dy=80 时宽到 160（旧实现错缩成 80×40）", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await dragDraw(canvas, harness, { x: 100, y: 100 }, { x: 260, y: 180 });
+    await clickSelect(canvas, harness, { x: 180, y: 140 });
+    // se 总位移后 corner=(120,180)：相对锚 (100,100) 总向量 dx=20/dy=80。
+    await shiftDragCorner(
+      canvas,
+      harness,
+      { x: 260, y: 180 },
+      { x: 120, y: 180 },
+      3,
+    );
+    expect(drawnRects()).toContainEqual([100, 100, 160, 80]);
+    unmount();
+  });
+
+  it("高矩形 1:2 宽轴主导：dx=160 时按比例放大到 160×320（旧实现不变/错缩）", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await dragDraw(canvas, harness, { x: 100, y: 100 }, { x: 180, y: 260 });
+    await clickSelect(canvas, harness, { x: 140, y: 180 });
+    // se 总向量 dx=160/dy=40：宽轴换算后 160×320；旧实现 max 尺寸当高
+    // 再乘比例 → 80×160（尺寸不变，不会提交新几何）。
+    await shiftDragCorner(
+      canvas,
+      harness,
+      { x: 180, y: 260 },
+      { x: 260, y: 140 },
+      3,
+    );
+    expect(drawnRects()).toContainEqual([100, 100, 160, 320]);
+    unmount();
+  });
+
+  it("高矩形 1:2 高轴位移 dx=50/dy=80：宽度换算不丢大轴输入（40→50）", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await dragDraw(canvas, harness, { x: 100, y: 100 }, { x: 180, y: 260 });
+    await clickSelect(canvas, harness, { x: 140, y: 180 });
+    // dy=80 名义高主导，但 dx=50 > dy×ratio=40：宽度必须采纳 50（高
+    // 100）；旧实现把 max 尺寸当高再乘比例 → 40×80，丢弃宽轴输入。
+    await shiftDragCorner(
+      canvas,
+      harness,
+      { x: 180, y: 260 },
+      { x: 150, y: 180 },
+      3,
+    );
+    expect(drawnRects()).toContainEqual([100, 100, 50, 100]);
+    unmount();
+  });
+
+  it("Shift 角拖拽越过锚点：翻转到对侧且尺寸仍按比例", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+
+    // 宽矩形 2:1，se 拖过锚点到左上 (60,60)：总向量 (-40,-40)，
+    // 宽轴换算 80×40，矩形翻转到锚点左上。
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await dragDraw(canvas, harness, { x: 100, y: 100 }, { x: 260, y: 180 });
+    await clickSelect(canvas, harness, { x: 180, y: 140 });
+    await shiftDragCorner(
+      canvas,
+      harness,
+      { x: 260, y: 180 },
+      { x: 60, y: 60 },
+      3,
+    );
+    expect(drawnRects()).toContainEqual([20, 60, 80, 40]);
+    unmount();
+  });
+});
+
+describe("整体状态操作放弃进行中草稿（D3 回归）", () => {
+  it("清除编辑后折线草稿不再渲染，Enter/双击不复活", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { actions, unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+
+    // 先提交一个矩形使“清除编辑”可用，再开始折线草稿。
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await dragDraw(canvas, harness, { x: 100, y: 100 }, { x: 260, y: 180 });
+    fireEvent.click(screen.getByRole("button", { name: "折线" }));
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 300 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 100, clientY: 300 });
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 300, clientY: 350 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 300, clientY: 350 });
+    harness.flush();
+    expect(revisions(actions)).toEqual([1]);
+
+    fireEvent.click(screen.getByRole("button", { name: "清除编辑" }));
+    harness.flush();
+    expect(revisions(actions)).toEqual([1, 2]);
+    // EMPTY 后草稿不得继续叠加渲染（旧实现仍可见）。
+    clearCalls();
+    harness.flush();
+    const lineTos = allCalls()
+      .filter((call) => call.op === "lineTo")
+      .map((call) => call.args);
+    expect(lineTos).not.toContainEqual([300, 350]);
+    // Enter/双击均不复活旧草稿（旧实现会再产生一条历史）。
+    fireEvent.keyDown(canvas, { key: "Enter" });
+    harness.flush();
+    fireEvent.doubleClick(canvas, { clientX: 300, clientY: 350 });
+    harness.flush();
+    expect(revisions(actions)).toEqual([1, 2]);
+    unmount();
+  });
+
+  it("整图旋转后草稿不留在旧坐标渲染，Enter 不复活", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { actions, unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+
+    fireEvent.click(screen.getByRole("button", { name: "折线" }));
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 300 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 100, clientY: 300 });
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 300, clientY: 350 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 300, clientY: 350 });
+    harness.flush();
+
+    fireEvent.click(screen.getByRole("button", { name: "旋转 90°" }));
+    harness.flush();
+    expect(revisions(actions)).toEqual([1]);
+    // 旋转后画面不得残留旧坐标草稿（旧实现叠加渲染）。
+    clearCalls();
+    harness.flush();
+    const lineTos = allCalls()
+      .filter((call) => call.op === "lineTo")
+      .map((call) => call.args);
+    expect(lineTos).not.toContainEqual([300, 350]);
+    fireEvent.keyDown(canvas, { key: "Enter" });
+    harness.flush();
+    fireEvent.doubleClick(canvas, { clientX: 300, clientY: 350 });
+    harness.flush();
+    expect(revisions(actions)).toEqual([1]);
+    unmount();
+  });
+});

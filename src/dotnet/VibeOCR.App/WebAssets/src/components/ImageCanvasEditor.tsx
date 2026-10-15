@@ -3576,6 +3576,9 @@ export function ImageCanvasEditor({
       icon={<ToolbarIcon name="rotate" />}
       aria-label="旋转 90°"
       onClick={() => {
+        // 整图旋转：进行中的折线/裁剪/修补草稿坐标随旋转失效，统一放弃，
+        // 不留在旧坐标叠加渲染或被 Enter/双击复活。
+        cancelDrawing();
         const image = imageRef.current;
         const canvas = canvasRef.current;
         const nextRotation = (state.rotation + 90) % 360;
@@ -3632,8 +3635,10 @@ export function ImageCanvasEditor({
     !!state.resize ||
     !!state.patches?.length;
 
-  /** 清除编辑：整体回到空白基准，入历史可撤销。 */
+  /** 清除编辑：整体回到空白基准，入历史可撤销；进行中的草稿（折线等）
+   * 属于被清除的编辑内容，一并放弃，不得在 EMPTY 后仍渲染或复活。 */
   function clearEdits() {
+    cancelDrawing();
     select(undefined);
     commit(EMPTY);
   }
@@ -4960,20 +4965,27 @@ function exclusionHandlePoint(
   };
 }
 
-/** 任意 start/end 矩形的八点手柄命中测试（含屏蔽标记与选区裁剪框）。 */
+/** 任意 start/end 矩形的八点手柄命中测试（含屏蔽标记与选区裁剪框）：
+ * 小矩形各手柄命中圈重叠时取距离最近者（相等时稳定取枚举顺序靠前），
+ * 不再按 nw→w 固定顺序首命中。 */
 function rectResizeHandle(
   rect: Pick<Mark, "start" | "end">,
   at: Point,
 ): ExclusionResizeHandle | undefined {
   const area = normalizedRect(rect);
   if (area.width <= 0 || area.height <= 0) return undefined;
+  let best: ExclusionResizeHandle | undefined;
+  let bestDistance = Number.POSITIVE_INFINITY;
   for (const handle of EXCLUSION_RESIZE_HANDLES) {
     const point = exclusionHandlePoint(area, handle);
-    if (Math.hypot(at.x - point.x, at.y - point.y) <= EXCLUSION_HANDLE_RADIUS) {
-      return handle;
+    const distance = Math.hypot(at.x - point.x, at.y - point.y);
+    // 严格小于：等距 tie 保留先遍历到的手柄，行为稳定可预测。
+    if (distance <= EXCLUSION_HANDLE_RADIUS && distance < bestDistance) {
+      best = handle;
+      bestDistance = distance;
     }
   }
-  return undefined;
+  return best;
 }
 
 /** 可拖拽调整裁剪的基准矩形：已提交裁剪优先；截图现场无裁剪时为整幅选区。 */
@@ -5062,10 +5074,13 @@ function resizeBoxMark(
     const cornerY = (handle.includes("n") ? top : bottom) + delta.y;
     const dx = cornerX - anchorX;
     const dy = cornerY - anchorY;
-    const ratio = height > 0 ? width / height : 1;
-    const size = Math.max(Math.abs(dx), Math.abs(dy));
-    const nextWidth = ratio >= 1 ? size : size * ratio;
-    const nextHeight = ratio >= 1 ? size / ratio : size;
+    // 零宽/零高退化时退回正方约束，避免除零。
+    const ratio = width > 0 && height > 0 ? width / height : 1;
+    // 保持比例时把两个轴的拖拽位移都换算到宽轴取较大者：宽高比 2:1 的
+    // 矩形 dy=80 意味着宽应到 160（高 80），而不是 max(|dx|,|dy|)=80
+    // 直接当宽（旧实现会把 2:1 缩成 80×40）。
+    const nextWidth = Math.max(Math.abs(dx), Math.abs(dy) * ratio);
+    const nextHeight = nextWidth / ratio;
     const x2 = anchorX + (dx < 0 ? -1 : 1) * nextWidth;
     const y2 = anchorY + (dy < 0 ? -1 : 1) * nextHeight;
     return {
