@@ -19,7 +19,7 @@ public sealed class RuntimeInstallerReceiptProcessTests
     Directory.CreateDirectory(root);
     Process? child = null;
     Task<RuntimeInstallerProcessResult>? running = null;
-    try
+    await RuntimeInstallerClientTests.CompleteCancellationFixtureAsync(async () =>
     {
       string script = Path.Combine(root, "installer.ps1");
       await File.WriteAllTextAsync(script, """
@@ -52,35 +52,19 @@ public sealed class RuntimeInstallerReceiptProcessTests
           System.Globalization.CultureInfo.InvariantCulture));
         // The host exits while its receipt is still behind a slow output consumer.
         Thread.Sleep(TimeSpan.FromSeconds(12));
-      }, cancellation.Token);
+      }, cancellation.Token,
+        processStarted: process => child = RuntimeInstallerClientTests.ObserveCancellationFixture(process));
       int pid = await reading.Task.WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
-      child = Process.GetProcessById(pid);
+      Assert.NotNull(child);
+      Assert.Equal(pid, child.Id);
       cancellation.Cancel();
       await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
         running.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
       Assert.True(child.HasExited);
-    }
-    finally
+    }, async () =>
     {
-      await ReapCancellationFixtureAsync(child, running);
+      await RuntimeInstallerClientTests.ReapCancellationFixtureAsync(child, running);
       TestDirectory.Delete(root, recursive: true);
-    }
+    });
   }
-
-  private static async Task ReapCancellationFixtureAsync(
-    Process? child, Task<RuntimeInstallerProcessResult>? running)
-  {
-    if (child is not null)
-    {
-      if (!child.HasExited) child.Kill(entireProcessTree: true);
-      await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
-      child.Dispose();
-    }
-    if (running is not null)
-    {
-      try { await running.WaitAsync(TimeSpan.FromSeconds(20)); }
-      catch (OperationCanceledException) { }
-    }
-  }
-
 }

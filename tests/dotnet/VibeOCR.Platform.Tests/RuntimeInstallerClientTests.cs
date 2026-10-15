@@ -1,5 +1,6 @@
 using ManagedEnvironmentInstallProgress = VibeOCR.Runtime.Contracts.Generated.Host.ManagedEnvironmentInstallEvent;
 using System.Diagnostics;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -1381,6 +1382,124 @@ public sealed class RuntimeInstallerClientTests
     }
 
     [Fact]
+    public async Task RealRunnerFixtureReadinessFailurePreservesErrorAndReapsProcess()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-maint-no-marker-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        Process? child = null;
+        Process? observer = null;
+        Task? exited = null;
+        Task<RuntimeInstallerProcessResult>? running = null;
+        try
+        {
+            string script = Path.Combine(root, "installer.ps1");
+            string started = Path.Combine(root, "never-created.pid");
+            await File.WriteAllTextAsync(script, "Start-Sleep -Seconds 120",
+                TestContext.Current.CancellationToken);
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
+                    "WindowsPowerShell", "v1.0", "powershell.exe"),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            foreach (string argument in new[] { "-NoProfile", "-NonInteractive", "-File", script,
+                "--maintenance-cancel-control" })
+                startInfo.ArgumentList.Add(argument);
+            Exception? error = await Record.ExceptionAsync(async () =>
+            {
+                await CompleteCancellationFixtureAsync(async () =>
+                {
+                    running = RuntimeInstallerCommandRunner.RunProcessAsync(startInfo, null,
+                        TestContext.Current.CancellationToken, processStarted: process =>
+                        {
+                            child = ObserveCancellationFixture(process);
+                            observer = ObserveCancellationFixture(process);
+                            exited = observer.WaitForExitAsync(TestContext.Current.CancellationToken);
+                        });
+                    await AwaitFileAsync(started, TimeSpan.FromMilliseconds(100));
+                }, () => ReapCancellationFixtureAsync(child, running));
+            });
+            TimeoutException timeout = Assert.IsType<TimeoutException>(error);
+            Assert.Contains(started, timeout.Message);
+            Assert.NotNull(exited);
+            Assert.True(exited.IsCompletedSuccessfully);
+            Assert.NotNull(running);
+            Assert.True(running.IsCompleted);
+        }
+        finally
+        {
+            // The independent observer also reaps a process when this regression runs against the old fixture.
+            await ReapCancellationFixtureAsync(observer, running);
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task CancellationFixturePreservesBodyAndCleanupFailures()
+    {
+        var bodyError = new InvalidOperationException("fixture body failed");
+        var cleanupError = new IOException("fixture cleanup failed");
+        AggregateException failure = await Assert.ThrowsAsync<AggregateException>(() =>
+            CompleteCancellationFixtureAsync(() => Task.FromException(bodyError),
+                () => Task.FromException(cleanupError)));
+        Assert.Equal(new Exception[] { bodyError, cleanupError }, failure.InnerExceptions);
+    }
+
+    [Fact]
+    public async Task RealRunnerProcessStartedObserverFailureStillDrainsAndAllowsReaping()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-maint-observer-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        Process? child = null;
+        var expected = new InvalidOperationException("fixture observer failed");
+        try
+        {
+            string script = Path.Combine(root, "installer.ps1");
+            await File.WriteAllTextAsync(script, "Start-Sleep -Seconds 120",
+                TestContext.Current.CancellationToken);
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
+                    "WindowsPowerShell", "v1.0", "powershell.exe"),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            foreach (string argument in new[] { "-NoProfile", "-NonInteractive", "-File", script })
+                startInfo.ArgumentList.Add(argument);
+            Task<RuntimeInstallerProcessResult> running = RuntimeInstallerCommandRunner.RunProcessAsync(
+                startInfo, null, TestContext.Current.CancellationToken, processStarted: process =>
+                {
+                    child = ObserveCancellationFixture(process);
+                    throw expected;
+                });
+            InvalidOperationException failure = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                running.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+            Assert.Same(expected, failure);
+            Assert.True(running.IsCompleted);
+            Assert.NotNull(child);
+        }
+        finally
+        {
+            await ReapCancellationFixtureAsync(child, running: null);
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
+    internal static Process ObserveCancellationFixture(Process process)
+    {
+        Process observer = Process.GetProcessById(process.Id);
+        _ = observer.SafeHandle;
+        return observer;
+    }
+
+    [Fact]
     public async Task RealRunnerPreRegistrationReceiptTerminatesWithoutInstall()
     {
         string root = Path.Combine(
@@ -1389,7 +1508,7 @@ public sealed class RuntimeInstallerClientTests
         Directory.CreateDirectory(root);
         Process? child = null;
         Task<RuntimeInstallerProcessResult>? running = null;
-        try
+        await CompleteCancellationFixtureAsync(async () =>
         {
             string script = Path.Combine(root, "installer.ps1");
             string started = Path.Combine(root, "started.pid");
@@ -1425,9 +1544,11 @@ public sealed class RuntimeInstallerClientTests
                 startInfo.ArgumentList.Add(argument);
             using var cancellation = new CancellationTokenSource();
             running = RuntimeInstallerCommandRunner.RunProcessAsync(
-                startInfo, standardOutputLine: null, cancellation.Token);
+                startInfo, standardOutputLine: null, cancellation.Token,
+                processStarted: process => child = ObserveCancellationFixture(process));
             string pid = await AwaitFileAsync(started, TimeSpan.FromSeconds(20));
-            child = Process.GetProcessById(int.Parse(pid,
+            Assert.NotNull(child);
+            Assert.Equal(child.Id, int.Parse(pid,
                 System.Globalization.CultureInfo.InvariantCulture));
 
             cancellation.Cancel();
@@ -1442,12 +1563,11 @@ public sealed class RuntimeInstallerClientTests
             await File.WriteAllTextAsync(gate, "release", TestContext.Current.CancellationToken);
             await Task.Delay(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
             Assert.False(File.Exists(installMarker));
-        }
-        finally
+        }, async () =>
         {
             await ReapCancellationFixtureAsync(child, running);
             TestDirectory.Delete(root, recursive: true);
-        }
+        });
     }
 
     [Fact]
@@ -1459,7 +1579,7 @@ public sealed class RuntimeInstallerClientTests
         Directory.CreateDirectory(root);
         Process? child = null;
         Task<RuntimeInstallerProcessResult>? running = null;
-        try
+        await CompleteCancellationFixtureAsync(async () =>
         {
             string script = Path.Combine(root, "installer.ps1");
             string started = Path.Combine(root, "started.pid");
@@ -1491,9 +1611,11 @@ public sealed class RuntimeInstallerClientTests
                 startInfo.ArgumentList.Add(argument);
             using var cancellation = new CancellationTokenSource();
             running = RuntimeInstallerCommandRunner.RunProcessAsync(
-                startInfo, standardOutputLine: null, cancellation.Token);
+                startInfo, standardOutputLine: null, cancellation.Token,
+                processStarted: process => child = ObserveCancellationFixture(process));
             string pid = await AwaitFileAsync(started, TimeSpan.FromSeconds(20));
-            child = Process.GetProcessById(int.Parse(pid,
+            Assert.NotNull(child);
+            Assert.Equal(child.Id, int.Parse(pid,
                 System.Globalization.CultureInfo.InvariantCulture));
 
             cancellation.Cancel();
@@ -1504,22 +1626,39 @@ public sealed class RuntimeInstallerClientTests
                 running.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
             Assert.True(child.HasExited);
             Assert.False(File.Exists(installMarker));
-        }
-        finally
+        }, async () =>
         {
             await ReapCancellationFixtureAsync(child, running);
             TestDirectory.Delete(root, recursive: true);
-        }
+        });
     }
 
-    private static async Task ReapCancellationFixtureAsync(
+    internal static async Task CompleteCancellationFixtureAsync(Func<Task> body, Func<Task> cleanup)
+    {
+        Exception? failure = null;
+        try { await body(); }
+        catch (Exception error) { failure = error; }
+        try { await cleanup(); }
+        catch (Exception error)
+        {
+            if (failure is null) throw;
+            if (!ReferenceEquals(failure, error))
+                throw new AggregateException("Cancellation fixture and cleanup both failed.", failure, error);
+        }
+        if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
+    internal static async Task ReapCancellationFixtureAsync(
         Process? child, Task<RuntimeInstallerProcessResult>? running)
     {
         if (child is not null)
         {
-            if (!child.HasExited) child.Kill(entireProcessTree: true);
-            await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
-            child.Dispose();
+            try
+            {
+                if (!child.HasExited) child.Kill(entireProcessTree: true);
+                await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            finally { child.Dispose(); }
         }
         if (running is not null)
         {
@@ -1537,7 +1676,7 @@ public sealed class RuntimeInstallerClientTests
         Directory.CreateDirectory(root);
         Process? child = null;
         Task<RuntimeInstallerProcessResult>? running = null;
-        try
+        await CompleteCancellationFixtureAsync(async () =>
         {
             string script = Path.Combine(root, "installer.ps1");
             string started = Path.Combine(root, "started.pid");
@@ -1568,9 +1707,11 @@ public sealed class RuntimeInstallerClientTests
                 startInfo.ArgumentList.Add(argument);
             using var cancellation = new CancellationTokenSource();
             running = RuntimeInstallerCommandRunner.RunProcessAsync(
-                startInfo, standardOutputLine: null, cancellation.Token);
+                startInfo, standardOutputLine: null, cancellation.Token,
+                processStarted: process => child = ObserveCancellationFixture(process));
             string pid = await AwaitFileAsync(started, TimeSpan.FromSeconds(20));
-            child = Process.GetProcessById(int.Parse(pid,
+            Assert.NotNull(child);
+            Assert.Equal(child.Id, int.Parse(pid,
                 System.Globalization.CultureInfo.InvariantCulture));
 
             cancellation.Cancel();
@@ -1583,12 +1724,11 @@ public sealed class RuntimeInstallerClientTests
             // 与 commit marker 保留即证明 registered 未被终止。
             Assert.Contains("\"ok\":true", result.StandardOutput);
             Assert.True(File.Exists(commitMarker));
-        }
-        finally
+        }, async () =>
         {
             await ReapCancellationFixtureAsync(child, running);
             TestDirectory.Delete(root, recursive: true);
-        }
+        });
     }
 
     [Theory]
