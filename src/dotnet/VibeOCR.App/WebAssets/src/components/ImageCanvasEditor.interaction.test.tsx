@@ -1086,3 +1086,81 @@ describe("不透明度数值输入契约", () => {
     unmount();
   });
 });
+
+describe("OBJ-03 对象比例装饰", () => {
+  it("荧光笔最小宽随对象缩小到80%，一次撤销恢复12px", async () => {
+    stubCanvasStack({ width: 900, height: 600 });
+    const harness = stubAnimationFrames();
+    const { unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    fireEvent.click(screen.getByRole("button", { name: "荧光笔" }));
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 200, clientY: 100 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 300, clientY: 100 });
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "缩小选区" }));
+    for (const holder of state.canvases) holder.calls.length = 0;
+    harness.flush();
+    expect(
+      allCalls().some(
+        (call) =>
+          call.op === "lineWidth" &&
+          Math.abs(Number(call.args[0]) - 9.6) < 0.00001,
+      ),
+    ).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+    for (const holder of state.canvases) holder.calls.length = 0;
+    harness.flush();
+    expect(
+      allCalls().some((call) => call.op === "lineWidth" && call.args[0] === 12),
+    ).toBe(true);
+    unmount();
+  });
+  it.each([
+    ["dashed", [15, 10]],
+    ["dotted", [2.5, 7.5]],
+  ] as const)(
+    "%s的固定线节随125%%对象放大，线宽不重复缩放",
+    async (lineStyle, expected) => {
+      stubCanvasStack({ width: 900, height: 600 });
+      const harness = stubAnimationFrames();
+      const { unmount } = await renderEditor();
+      const canvas = getEditorCanvas();
+      mockCanvasBox(canvas, 900, 600);
+      fireEvent.click(screen.getByRole("button", { name: "直线" }));
+      fireEvent.change(screen.getByLabelText("线型"), {
+        target: { value: lineStyle },
+      });
+      fireEvent.pointerDown(canvas, {
+        pointerId: 1,
+        clientX: 100,
+        clientY: 100,
+      });
+      fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 300, clientY: 100 });
+      fireEvent.click(screen.getByRole("button", { name: "选择" }));
+      fireEvent.change(screen.getByLabelText("选择标注对象"), {
+        target: { value: "0" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "放大选区" }));
+      for (const holder of state.canvases) holder.calls.length = 0;
+      harness.flush();
+      expect(
+        allCalls().some(
+          (call) =>
+            call.op === "setLineDash" &&
+            JSON.stringify(call.args[0]) === JSON.stringify(expected),
+        ),
+      ).toBe(true);
+      expect(
+        allCalls().some(
+          (call) => call.op === "lineWidth" && call.args[0] === 3.75,
+        ),
+      ).toBe(true);
+      unmount();
+    },
+  );
+});

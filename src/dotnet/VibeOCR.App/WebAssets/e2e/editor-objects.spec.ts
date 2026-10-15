@@ -527,3 +527,90 @@ test("锁定文字禁止直接输入与全局清除，解锁后可继续编辑",
   await action(page, "完成文字编辑");
   await expect(page.getByLabel("标注文字")).toHaveValue("继续");
 });
+
+test("OBJ-01 重复屏蔽达到64后按钮与Ctrl+D整次拒绝且不增加历史", async ({
+  page,
+}) => {
+  const { canvas, list } = await setup(page);
+  await action(page, "屏蔽");
+  await drag(page, 100, 100, 160, 150);
+  await action(page, "选择");
+  for (let count = 2; count <= 64; count *= 2) {
+    await action(page, "全选对象");
+    await action(page, "重复对象");
+    await expect(list.locator("option")).toHaveCount(count + 1);
+  }
+  await list.selectOption("0");
+  await action(page, "重复对象");
+  await expect(
+    page.getByText("最多保留 64 个屏蔽区域；本次复制未修改对象。"),
+  ).toBeVisible();
+  await expect(list.locator("option")).toHaveCount(65);
+  await canvas.focus();
+  await canvas.press("Control+d");
+  await expect(list.locator("option")).toHaveCount(65);
+  await canvas.press("Control+z");
+  await expect(list.locator("option")).toHaveCount(33);
+});
+
+for (const tool of ["画笔", "荧光笔"]) {
+  test(
+    "OBJ-02 " + tool + "轨迹中段可选而首尾空白弦线不命中",
+    async ({ page }) => {
+      const { list } = await setup(page);
+      await action(page, tool);
+      const from = await at(page, 100, 100);
+      await page.mouse.move(from.x, from.y);
+      await page.mouse.down();
+      const middle = await at(page, 200, 250);
+      await page.mouse.move(middle.x, middle.y);
+      const end = await at(page, 300, 100);
+      await page.mouse.move(end.x, end.y);
+      await page.mouse.up();
+      await action(page, "选择");
+      await click(page, 200, 250);
+      await expect(list).toHaveValue("0");
+      await list.selectOption("");
+      await click(page, 200, 100);
+      await expect(list).toHaveValue("");
+    },
+  );
+}
+
+test("OBJ-04 镜像说明再整图旋转后PNG引线继续指向原图目标", async ({
+  page,
+}, info) => {
+  const { uploads, list } = await setup(page, { width: 300, height: 200 });
+  await action(page, "说明");
+  await page.getByLabel("标注文字").fill("F→AB");
+  await page.getByLabel("文字字号").selectOption("32");
+  await page.getByLabel("自定义颜色").fill("#1f6feb");
+  await drag(page, 100, 100, 300, 210);
+  await action(page, "选择");
+  await list.selectOption("0");
+  await action(page, "水平镜像");
+  const worldTargetX = await page.evaluate(() => {
+    const context = document.createElement("canvas").getContext("2d")!;
+    context.font = "400 32px system-ui, sans-serif";
+    return 306 + context.measureText("F→AB").width;
+  });
+  await action(page, "旋转 90°");
+  await list.selectOption("");
+  const png = await save(page, uploads);
+  const expected = { x: (600 - 100) / 3, y: worldTargetX / 3 };
+  const positions = [];
+  for (let dy = -2; dy <= 2; dy++)
+    for (let dx = -2; dx <= 2; dx++)
+      positions.push({
+        x: Math.round(expected.x) + dx,
+        y: Math.round(expected.y) + dy,
+      });
+  const colors = await pixels(page, png, positions);
+  expect(
+    colors.filter(
+      ([red, green, blue]) =>
+        red! < 90 && green! > 60 && green! < 150 && blue! > 180,
+    ).length,
+  ).toBeGreaterThan(1);
+  await writeFile(info.outputPath("mirrored-callout-image-rotation.png"), png);
+});

@@ -1,10 +1,13 @@
 import {
-  rotatePointQuarter,
+  textTransformAnchor,
+  transformTextPoint,
   type AnnotationStyle,
   type Mark,
   type Point,
   type Rect,
 } from "./annotationGeometry";
+
+export { textTransformAnchor, transformTextPoint } from "./annotationGeometry";
 
 export const FONT_TOOLS = ["text", "callout", "numbering"] as const;
 export function isFontMark(mark: Mark): boolean {
@@ -215,28 +218,6 @@ function unrotatedTextBox(
     width: layout.width + padding * 2,
     height: layout.height + padding * 2,
   };
-}
-
-/** 字形与说明引线共用的局部变换锚点。 */
-export function textTransformAnchor(mark: Mark): Point {
-  if (mark.tool === "numbering") return mark.start;
-  if (mark.tool === "callout") return mark.end;
-  return { x: Math.min(mark.start.x, mark.end.x), y: mark.end.y };
-}
-
-export function transformTextPoint(
-  mark: Mark,
-  at: Point,
-  inverse = false,
-): Point {
-  const center = textTransformAnchor(mark);
-  const quarter = (mark.rotation ?? 0) / 90;
-  let point = inverse ? rotatePointQuarter(at, center, -quarter) : at;
-  point = {
-    x: center.x + (point.x - center.x) * (mark.flipX ? -1 : 1),
-    y: center.y + (point.y - center.y) * (mark.flipY ? -1 : 1),
-  };
-  return inverse ? point : rotatePointQuarter(point, center, quarter);
 }
 
 /** 未旋转局部布局盒：命中测试先把指针逆旋转回局部空间再用本盒判定。 */

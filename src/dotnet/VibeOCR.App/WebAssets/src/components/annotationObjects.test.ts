@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Mark, Point } from "./annotationGeometry";
-import { mirrorPointAround, rotatePointQuarter } from "./annotationGeometry";
+import {
+  mirrorPointAround,
+  rotatePointQuarter,
+  rotateEditorState,
+  projectPoint,
+} from "./annotationGeometry";
 import { textAnnotationBounds, transformTextPoint } from "./annotationText";
 import {
   alignMarkIds,
@@ -221,5 +226,43 @@ describe("对象身份、组与批量几何", () => {
     expect(scaleMarkIds(list, ids("a"), 0, { x: 0, y: 0 })).toBe(list);
     expect(moveMarkIds(list, ids("a"), { x: 5, y: -10 })[0]!.textWidth).toBe(0);
     expect(selectionBounds([], ids(), undefined)).toBeUndefined();
+  });
+});
+
+describe("OBJ-04 说明局部变换与整图旋转组合", () => {
+  it.each([
+    { rotation: 0 as const, flipX: true },
+    { rotation: 90 as const, flipY: true },
+  ])("世界引线目标经正逆映射投影，保留字形方向与字号：%j", (transform) => {
+    const image = { naturalWidth: 900, naturalHeight: 600 } as HTMLImageElement;
+    const size = { width: 900, height: 600 };
+    const original: Mark = {
+      id: "callout",
+      tool: "callout",
+      start: { x: 100, y: 100 },
+      end: { x: 300, y: 210 },
+      text: "F",
+      textWidth: 0,
+      objectScale: 1.25,
+      style: { fontSize: 40 },
+      ...transform,
+    };
+    const worldTarget = transformTextPoint(original, original.start);
+    const turned = rotateEditorState(
+      { rotation: 0, marks: [original] },
+      image,
+      size,
+      90,
+    ).marks[0]!;
+    const actual = transformTextPoint(turned, turned.start);
+    const expected = projectPoint(worldTarget, image, 0, size, 90, size);
+    expect(actual.x).toBeCloseTo(expected.x, 8);
+    expect(actual.y).toBeCloseTo(expected.y, 8);
+    expect(turned.rotation).toBe(original.rotation);
+    expect(turned.flipX).toBe(original.flipX);
+    expect(turned.flipY).toBe(original.flipY);
+    expect(turned.style).toBe(original.style);
+    expect(turned.textWidth).toBe(0);
+    expect(turned.objectScale).toBe(1.25);
   });
 });

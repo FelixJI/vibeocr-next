@@ -3672,6 +3672,18 @@ export function ImageCanvasEditor({
     );
   }
 
+  function canAppendObjects(clones: readonly Mark[]): boolean {
+    if (
+      state.marks.filter(isExclusionMark).length +
+        clones.filter(isExclusionMark).length >
+      MAX_EXCLUSION_MARKS
+    ) {
+      setOperationMessage("最多保留 64 个屏蔽区域；本次复制未修改对象。");
+      return false;
+    }
+    return true;
+  }
+
   function pasteClipboard(): void {
     if (!clipboard.length) return;
     const clones = cloneMarks(
@@ -3681,14 +3693,7 @@ export function ImageCanvasEditor({
       nextMarkId,
       nextGroupId,
     );
-    if (
-      state.marks.filter(isExclusionMark).length +
-        clones.filter(isExclusionMark).length >
-      MAX_EXCLUSION_MARKS
-    ) {
-      setOperationMessage("最多保留 64 个屏蔽区域；本次复制未修改对象。");
-      return;
-    }
+    if (!canAppendObjects(clones)) return;
     cancelDrawing();
     commit({ ...state, marks: [...state.marks, ...clones] });
     setObjectSelection({
@@ -3710,6 +3715,7 @@ export function ImageCanvasEditor({
       nextMarkId,
       nextGroupId,
     );
+    if (!canAppendObjects(clones)) return;
     cancelDrawing();
     commit({ ...state, marks: [...state.marks, ...clones] });
     setObjectSelection({
@@ -5590,7 +5596,7 @@ function drawPointHandleSquares(
 }
 
 /** 虚线 [12,8]；点线圆头间距至少两倍线宽，避免粗线端帽重叠。
- * 长度随 markScale 缩放，预览与导出同一节奏。 */
+ * 固定长度随自然导出比例与对象比例缩放，线宽已烘焙对象比例。 */
 function applyDashPattern(
   context: CanvasRenderingContext2D,
   style: AnnotationLineStyle | undefined,
@@ -5757,7 +5763,12 @@ function draw(
         }
         context.save();
         context.globalAlpha = strokeAlpha;
-        applyDashPattern(context, mark.style?.lineStyle, markScale, lineWidth);
+        applyDashPattern(
+          context,
+          mark.style?.lineStyle,
+          markScale * (mark.objectScale ?? 1),
+          lineWidth,
+        );
         context.stroke();
         context.restore();
       } else {
@@ -5771,7 +5782,12 @@ function draw(
         }
         context.save();
         context.globalAlpha = strokeAlpha;
-        applyDashPattern(context, mark.style?.lineStyle, markScale, lineWidth);
+        applyDashPattern(
+          context,
+          mark.style?.lineStyle,
+          markScale * (mark.objectScale ?? 1),
+          lineWidth,
+        );
         context.strokeRect(mark.start.x, mark.start.y, width, height);
         context.restore();
       }
@@ -5800,7 +5816,12 @@ function draw(
       }
       context.save();
       context.globalAlpha = strokeAlpha;
-      applyDashPattern(context, mark.style?.lineStyle, markScale, lineWidth);
+      applyDashPattern(
+        context,
+        mark.style?.lineStyle,
+        markScale * (mark.objectScale ?? 1),
+        lineWidth,
+      );
       context.stroke();
       context.restore();
     } else if (mark.tool === "line" || mark.tool === "polyline") {
@@ -5822,7 +5843,12 @@ function draw(
       context.strokeStyle = color;
       context.lineWidth = lineWidth;
       context.globalAlpha = strokeAlpha;
-      applyDashPattern(context, mark.style?.lineStyle, markScale, lineWidth);
+      applyDashPattern(
+        context,
+        mark.style?.lineStyle,
+        markScale * (mark.objectScale ?? 1),
+        lineWidth,
+      );
       if (!mark.style?.lineStyle || mark.style.lineStyle === "solid") {
         context.lineCap = "round";
       }
@@ -5906,7 +5932,12 @@ function draw(
         context.beginPath();
         context.moveTo(mark.start.x, mark.start.y);
         context.lineTo(mark.end.x, mark.end.y);
-        applyDashPattern(context, mark.style?.lineStyle, markScale, lineWidth);
+        applyDashPattern(
+          context,
+          mark.style?.lineStyle,
+          markScale * (mark.objectScale ?? 1),
+          lineWidth,
+        );
         context.stroke();
         drawOpenHead(mark.end, angle);
         if (doubleHead) drawOpenHead(mark.start, angle + Math.PI);
@@ -5929,7 +5960,12 @@ function draw(
         context.beginPath();
         context.moveTo(shaftStart.x, shaftStart.y);
         context.lineTo(shaftEnd.x, shaftEnd.y);
-        applyDashPattern(context, mark.style?.lineStyle, markScale, lineWidth);
+        applyDashPattern(
+          context,
+          mark.style?.lineStyle,
+          markScale * (mark.objectScale ?? 1),
+          lineWidth,
+        );
         context.stroke();
         drawTriangleHead(mark.end, angle, arrowStyle === "solid");
         if (doubleHead) {
@@ -5955,7 +5991,10 @@ function draw(
         // 渲染保持不变，不覆盖原有透明语义。
         context.globalAlpha = 0.35 * strokeAlpha;
         context.lineWidth =
-          Math.max((mark.style?.strokeWidth ?? 3) * 4, 12) * markScale;
+          Math.max(
+            (mark.style?.strokeWidth ?? 3) * 4,
+            12 * (mark.objectScale ?? 1),
+          ) * markScale;
       } else {
         context.globalAlpha = strokeAlpha;
         context.lineWidth = lineWidth;
@@ -6605,13 +6644,13 @@ function findMark(
       mark.tool === "pen" ||
       mark.tool === "highlighter"
     ) {
-      const points =
-        mark.tool === "polyline" && mark.points?.length
-          ? mark.points
-          : [mark.start, mark.end];
+      const points = mark.points?.length ? mark.points : [mark.start, mark.end];
       let hit = false;
-      for (let i = 1; i < points.length; i += 1) {
-        if (distanceToSegment(point, points[i - 1]!, points[i]!) <= 10) {
+      for (let i = 0; i < points.length; i += 1) {
+        if (
+          distanceToSegment(point, points[Math.max(0, i - 1)]!, points[i]!) <=
+          10
+        ) {
           hit = true;
           break;
         }

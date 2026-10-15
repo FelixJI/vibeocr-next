@@ -190,6 +190,28 @@ export function rotatePointQuarter(
   return { x, y };
 }
 
+/** 字形与说明引线共用的局部变换锚点。 */
+export function textTransformAnchor(mark: Mark): Point {
+  if (mark.tool === "numbering") return mark.start;
+  if (mark.tool === "callout") return mark.end;
+  return { x: Math.min(mark.start.x, mark.end.x), y: mark.end.y };
+}
+
+export function transformTextPoint(
+  mark: Mark,
+  at: Point,
+  inverse = false,
+): Point {
+  const center = textTransformAnchor(mark);
+  const quarter = (mark.rotation ?? 0) / 90;
+  let point = inverse ? rotatePointQuarter(at, center, -quarter) : at;
+  point = {
+    x: center.x + (point.x - center.x) * (mark.flipX ? -1 : 1),
+    y: center.y + (point.y - center.y) * (mark.flipY ? -1 : 1),
+  };
+  return inverse ? point : rotatePointQuarter(point, center, quarter);
+}
+
 /** 点绕中心等比缩放（factor>0）。 */
 export function scalePointAround(
   at: Point,
@@ -322,17 +344,30 @@ export function rotateEditorState(
     projectPoint(point, image, state.rotation, size, nextRotation, size);
   return {
     rotation: nextRotation,
-    marks: state.marks.map((mark) => ({
-      ...mark,
-      // 旧标记首次旋转前捕获原水平跨度；字号与布局宽度同属显示单位。
-      ...(mark.tool === "text"
-        ? { textWidth: mark.textWidth ?? Math.abs(mark.end.x - mark.start.x) }
-        : {}),
-      start: rotatePoint(mark.start),
-      end: rotatePoint(mark.end),
-      // 画笔/荧光笔轨迹点同映射，旋转后实际轨迹不错位。
-      ...(mark.points ? { points: mark.points.map(rotatePoint) } : {}),
-    })),
+    marks: state.marks.map((mark) => {
+      const next: Mark = {
+        ...mark,
+        // 旧标记首次旋转前捕获原水平跨度；字号与布局宽度同属显示单位。
+        ...(mark.tool === "text"
+          ? { textWidth: mark.textWidth ?? Math.abs(mark.end.x - mark.start.x) }
+          : {}),
+        start: rotatePoint(mark.start),
+        end: rotatePoint(mark.end),
+        // 画笔/荧光笔轨迹点同映射，旋转后实际轨迹不错位。
+        ...(mark.points ? { points: mark.points.map(rotatePoint) } : {}),
+      };
+      // 引线目标先还原到世界坐标再投影，最后写回新锚点的局部空间。
+      return mark.tool === "callout"
+        ? {
+            ...next,
+            start: transformTextPoint(
+              next,
+              rotatePoint(transformTextPoint(mark, mark.start)),
+              true,
+            ),
+          }
+        : next;
+    }),
     ...(state.crop
       ? {
           crop: {
