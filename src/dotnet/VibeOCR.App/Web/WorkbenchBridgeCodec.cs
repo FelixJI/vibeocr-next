@@ -110,6 +110,12 @@ public static class WorkbenchBridgeCodec
   private static readonly HashSet<string> ResourceUriArgumentFields = ["resourceUri"];
   private static readonly HashSet<string> SessionRevisionArgumentFields =
     ["sessionId", "revision"];
+  private static readonly HashSet<string> ImportRequestArgumentFields =
+    ["sessionId", "revision", "requestId"];
+  private static readonly HashSet<string> ReleaseAssetsArgumentFields =
+    ["sessionId", "resourceUris"];
+  private const int MaxImportRequestIdLength = 64;
+  private const int MaxReleasedImportAssets = 16;
   private static readonly HashSet<string> SessionResourceArgumentFields =
     ["resourceUri", "sessionId", "revision"];
   private static readonly HashSet<string> SessionResourceWithExclusionArgumentFields =
@@ -450,6 +456,46 @@ public static class WorkbenchBridgeCodec
         return new CopyImageEditAnnotatedImageCommand(ParseAnnotationResourceUri(arguments));
       case ("imageEdit", "saveAnnotatedImage"):
         return new SaveImageEditAnnotatedImageCommand(ParseAnnotationResourceUri(arguments));
+      case ("imageEdit", "pasteSystemContent"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new PasteImageEditSystemContentCommand();
+      case ("imageEdit", "ackImport"):
+        EnsureObjectWithFields(arguments, ImportRequestArgumentFields, "command arguments");
+        return new AckImageEditImportCommand(
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments),
+          ParseImportRequestId(arguments));
+      case ("imageEdit", "rejectImport"):
+        EnsureObjectWithFields(arguments, ImportRequestArgumentFields, "command arguments");
+        return new RejectImageEditImportCommand(
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments),
+          ParseImportRequestId(arguments));
+      case ("imageEdit", "releaseAssets"):
+        EnsureObjectWithFields(arguments, ReleaseAssetsArgumentFields, "command arguments");
+        return new ReleaseImageEditAssetsCommand(
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseReleasedImportAssets(arguments));
+      case ("recognition", "pasteSystemContent"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new PasteScreenshotSystemContentCommand();
+      case ("recognition", "ackImport"):
+        EnsureObjectWithFields(arguments, ImportRequestArgumentFields, "command arguments");
+        return new AckScreenshotImportCommand(
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments),
+          ParseImportRequestId(arguments));
+      case ("recognition", "rejectImport"):
+        EnsureObjectWithFields(arguments, ImportRequestArgumentFields, "command arguments");
+        return new RejectScreenshotImportCommand(
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments),
+          ParseImportRequestId(arguments));
+      case ("recognition", "releaseAssets"):
+        EnsureObjectWithFields(arguments, ReleaseAssetsArgumentFields, "command arguments");
+        return new ReleaseScreenshotAssetsCommand(
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseReleasedImportAssets(arguments));
       case ("recognition", "selectImage"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new SelectRecognitionImageCommand();
@@ -1509,6 +1555,25 @@ public static class WorkbenchBridgeCodec
       "Workbench bridge route is invalid."),
   };
 
+  private static object SerializeImportState(ImageEditImportState import) => new
+  {
+    import.RequestId,
+    import.SessionId,
+    import.Revision,
+    items = import.Items.Select(item => new
+    {
+      item.Kind,
+      item.AssetId,
+      item.ResourceUri,
+      item.MediaType,
+      item.ByteLength,
+      item.PixelWidth,
+      item.PixelHeight,
+      item.TextLength,
+      item.TextLines,
+    }).ToArray(),
+  };
+
   private static object? SerializeWorkbenchState(WorkbenchState? state) => state switch
   {
     ShellWorkbenchState shell => new { route = FormatRoute(shell.Route) },
@@ -1540,6 +1605,8 @@ public static class WorkbenchBridgeCodec
         image = imageEdit.TextLayer.Image,
         lines = imageEdit.TextLayer.Lines ?? [],
       },
+      import = imageEdit.Import is null ? null : SerializeImportState(imageEdit.Import),
+      importError = imageEdit.ImportError,
     },
     RecognitionWorkbenchState recognition => new
     {
@@ -1574,6 +1641,8 @@ public static class WorkbenchBridgeCodec
       },
       structuredResult = recognition.StructuredResult,
       resultImage = recognition.ResultImage,
+      import = recognition.Import is null ? null : SerializeImportState(recognition.Import),
+      importError = recognition.ImportError,
     },
     BatchWorkbenchState batch => new
     {
@@ -1842,6 +1911,43 @@ public static class WorkbenchBridgeCodec
         $"Workbench {name} is invalid.");
     }
     return value;
+  }
+
+  /// <summary>导入请求 id：非空有界不透明字符串（宿主生成），不接受任意大 payload。</summary>
+  private static string ParseImportRequestId(JsonElement arguments)
+  {
+    string? requestId = arguments.GetProperty("requestId").GetString();
+    if (string.IsNullOrWhiteSpace(requestId) || requestId.Length > MaxImportRequestIdLength)
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench image import request id is invalid.");
+    }
+    return requestId;
+  }
+
+  /// <summary>导入资产释放列表：只接受宿主 owned opaque 资源 URI（同源
+  /// __resource/32hex）；本地路径、文件/网络 URL 一律拒绝，不是授权凭证。</summary>
+  private static IReadOnlyList<string> ParseReleasedImportAssets(JsonElement arguments)
+  {
+    JsonElement uris = arguments.GetProperty("resourceUris");
+    if (uris.ValueKind != JsonValueKind.Array || uris.GetArrayLength() > MaxReleasedImportAssets)
+    {
+      throw new WorkbenchBridgeProtocolException(
+        "Workbench image import release list is invalid.");
+    }
+    List<string> accepted = [];
+    foreach (JsonElement entry in uris.EnumerateArray())
+    {
+      string? uri = entry.GetString();
+      if (uri is null || !Uri.TryCreate(uri, UriKind.Absolute, out Uri? parsed) ||
+        !WorkbenchResourceBroker.IsResourceUri(parsed))
+      {
+        throw new WorkbenchBridgeProtocolException(
+          "Workbench image import release URI is invalid.");
+      }
+      accepted.Add(parsed.AbsoluteUri);
+    }
+    return accepted;
   }
 
   private static IReadOnlyList<int> ParsePageIndexes(JsonElement element)

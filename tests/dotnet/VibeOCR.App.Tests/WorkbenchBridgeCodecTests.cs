@@ -1376,6 +1376,52 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     root["payload"]!["command"]!["arguments"]!.AsObject().Remove("documentId");
     Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(root.ToJsonString(), session));
   }
+  [Fact]
+  public void ParseCommandSupportsSystemImportActionsAndRejectsNonOwnedUris()
+  {
+    Guid sessionId = Guid.NewGuid();
+    // 粘贴系统内容：空参数命令（Web 不传路径/内容，宿主独占读取）。
+    Assert.IsType<PasteImageEditSystemContentCommand>(ParseForTest(
+      CommandJson(sessionId, "imageEdit", "pasteSystemContent", "{}"), sessionId).Command);
+    Assert.IsType<PasteScreenshotSystemContentCommand>(ParseForTest(
+      CommandJson(sessionId, "recognition", "pasteSystemContent", "{}"), sessionId).Command);
+    // ack/reject：严格字段（sessionId/revision/requestId）。
+    string ackArguments = $$"""
+      { "sessionId": "{{sessionId}}", "revision": 3, "requestId": "{{new string('a', 32)}}" }
+      """;
+    AckImageEditImportCommand ack = Assert.IsType<AckImageEditImportCommand>(ParseForTest(
+      CommandJson(sessionId, "imageEdit", "ackImport", ackArguments), sessionId).Command);
+    Assert.Equal(3, ack.Revision);
+    Assert.IsType<RejectScreenshotImportCommand>(ParseForTest(
+      CommandJson(sessionId, "recognition", "rejectImport", ackArguments), sessionId).Command);
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
+      CommandJson(sessionId, "imageEdit", "ackImport",
+        $$"""{ "sessionId": "{{sessionId}}", "revision": 3, "requestId": "req", "extra": 1 }"""),
+      sessionId));
+
+    // releaseAssets：只接受宿主 owned opaque 资源 URI；本地路径与外部 URL 均拒绝。
+    string validRelease = $$"""
+      { "sessionId": "{{sessionId}}", "resourceUris": ["https://app.vibeocr/__resource/0123456789abcdef0123456789abcdef"] }
+      """;
+    ReleaseImageEditAssetsCommand release = Assert.IsType<ReleaseImageEditAssetsCommand>(ParseForTest(
+      CommandJson(sessionId, "imageEdit", "releaseAssets", validRelease), sessionId).Command);
+    Assert.Single(release.ResourceUris);
+    Assert.IsType<ReleaseScreenshotAssetsCommand>(ParseForTest(
+      CommandJson(sessionId, "recognition", "releaseAssets", validRelease), sessionId).Command);
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
+      CommandJson(sessionId, "imageEdit", "releaseAssets",
+        $$"""{ "sessionId": "{{sessionId}}", "resourceUris": ["C:\\Users\\someone\\pictures\\secret.png"] }"""),
+      sessionId));
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
+      CommandJson(sessionId, "recognition", "releaseAssets",
+        $$"""{ "sessionId": "{{sessionId}}", "resourceUris": ["https://evil.example.com/__resource/0123456789abcdef0123456789abcdef"] }"""),
+      sessionId));
+    // 粘贴命令不接受任何参数字段（含路径/内容字节）。
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
+      CommandJson(sessionId, "imageEdit", "pasteSystemContent",
+        $$"""{ "path": "C:\\temp\\x.png" }"""),
+      sessionId));
+  }
   private static WorkbenchCommandEnvelope ParseForTest(string json, Guid session)
   {
     WorkbenchCommandEnvelope envelope = WorkbenchBridgeCodec.ParseCommand(json, session);

@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using VibeOCR.App.Workbench;
 using Windows.Storage.Streams;
+using Windows.ApplicationModel.DataTransfer;
 
 namespace VibeOCR.App.Web;
 
@@ -138,6 +139,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   internal bool HasWebViewBindings => core is not null;
   internal bool HasSubscription => subscription is { IsCompleted: false };
   private readonly CancellationTokenSource lifetime = new();
+  private CancellationTokenSource importDocumentCancellation;
   private readonly List<Uri> uploadedAnnotations = [];
   private PendingPdfPreviewFlush? pendingPdfPreviewFlush;
   private sealed record PendingPdfPreviewFlush(Guid Id, Guid Session, string DocumentId, TaskCompletionSource<bool> Completion);
@@ -191,8 +193,20 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     this.annotationStore = annotationStore ?? throw new ArgumentNullException(nameof(annotationStore));
     this.applicationOwner = applicationOwner;
     this.fixedRoute = fixedRoute;
+    importDocumentCancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
   }
 
+  // 两个原生 Drop 入口共用；固定编辑窗口始终承载 recognition，与 CaptureScene 是否存在无关。
+  internal ValueTask<WorkbenchCommandReceipt> ImportDroppedContentAsync(
+    DataPackageView content, WorkbenchRoute route = WorkbenchRoute.Recognition)
+  {
+    ObjectDisposedException.ThrowIf(disposed, this);
+    WorkbenchCommand command = fixedRoute is null && route == WorkbenchRoute.ImageEdit
+      ? new ImportDroppedImageEditContentCommand(content)
+      : new ImportDroppedScreenshotContentCommand(content);
+    return application.ExecuteAsync(new WorkbenchCommandEnvelope(Guid.NewGuid(), command),
+      importDocumentCancellation.Token);
+  }
   public event Action<string>? StateChanged;
 
   public event Action<Exception>? ProtocolViolation;
@@ -360,8 +374,11 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   }
 
   // 绑定消息泵文档身份与投递动作；InitializeAsync 注册真实 core，测试注册替身。
-  internal void RegisterBridge(object sender, Action<string> post, Func<Action, bool>? enqueue = null) =>
+  internal void RegisterBridge(object sender, Action<string> post, Func<Action, bool>? enqueue = null)
+  {
+    if (bridge is { } previous && !ReferenceEquals(previous.Sender, sender)) ResetWebDocument();
     bridge = (sender, post, enqueue ?? (action => dispatcher?.TryEnqueue(action.Invoke) == true));
+  }
 
   internal async Task ReceiveWebMessageAsync(string message, object sender)
   {
@@ -411,7 +428,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
         throw new WorkbenchBridgeProtocolException("Scene navigation cannot change the workbench route.");
       WorkbenchCommandReceipt receipt = await application.ExecuteAsync(
         envelope,
-        lifetime.Token);
+        envelope.Command is PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand
+          ? importDocumentCancellation.Token : lifetime.Token);
       // 同一文档内 bootstrap 换 session 不丢已接受回执；换文档/换桥/销毁后旧回执抑制。
       if (bridge is { } deliver && OwnsCurrentBridgeDocument(sender, document))
         deliver.Post(WorkbenchBridgeCodec.SerializeReceipt(receipt));
@@ -593,6 +611,10 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   // 导航与渲染进程失败共用：换文档即作废 session/bootstrap 代际与在途 flush。
   internal void ResetWebDocument()
   {
+    if (disposed) return;
+    importDocumentCancellation.Cancel();
+    importDocumentCancellation.Dispose();
+    importDocumentCancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
     Interlocked.Increment(ref bootstrapGeneration);
     Interlocked.Increment(ref documentGeneration);
     sessionId = null;
@@ -760,6 +782,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     AbandonPdfPreviewFlush();
     CaptureBackground = null;
     lifetime.Cancel();
+    importDocumentCancellation.Dispose();
     subscriptionCancellation?.Cancel();
     if (subscription is not null)
     {
