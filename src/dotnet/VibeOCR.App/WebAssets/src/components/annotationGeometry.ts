@@ -245,6 +245,14 @@ function clampPercent(value: number | undefined, fallback: number): number {
   return Math.min(100, Math.max(0, value));
 }
 
+/** strokeWidth 已烘焙对象比例；仅荧光笔固定最小宽额外消费 objectScale。 */
+export function annotationStrokeWidth(mark: Mark): number {
+  const width = mark.style?.strokeWidth ?? 3;
+  return mark.tool === "highlighter"
+    ? Math.max(width * 4, 12 * (mark.objectScale ?? 1))
+    : width;
+}
+
 /** 标记边框/线条不透明度 → canvas globalAlpha [0,1]；缺省 1（旧对象不变）。 */
 export function annotationStrokeAlpha(mark: Mark): number {
   return clampPercent(mark.style?.strokeOpacity, 100) / 100;

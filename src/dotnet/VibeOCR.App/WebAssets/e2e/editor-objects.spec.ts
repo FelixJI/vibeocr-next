@@ -614,3 +614,71 @@ test("OBJ-04 镜像说明再整图旋转后PNG引线继续指向原图目标", a
   ).toBeGreaterThan(1);
   await writeFile(info.outputPath("mirrored-callout-image-rotation.png"), png);
 });
+
+test("PR249 不透明度逐字输入及Enter仅一条历史，直接画布绘制使用失焦值", async ({
+  page,
+}) => {
+  const { uploads, list } = await setup(page);
+  await rectangle(page, 100, 120);
+  await action(page, "选择");
+  await list.selectOption("0");
+  for (const label of ["边框不透明度", "填充不透明度"]) {
+    const input = page.getByLabel(label, { exact: true });
+    await input.fill("");
+    await input.pressSequentially("37");
+    await input.press("Enter");
+    await action(page, "撤销");
+    await list.selectOption("0");
+    await expect(input).toHaveValue("100");
+  }
+  await action(page, "矩形");
+  await page.getByLabel("填充不透明度", { exact: true }).fill("37");
+  await drag(page, 500, 300, 600, 360);
+  await action(page, "选择");
+  await list.selectOption("");
+  expect(
+    (await pixels(page, await save(page, uploads), [{ x: 550, y: 330 }]))[0],
+  ).toEqual([94, 113, 62]);
+});
+
+test("PR249 宽荧光笔及缩放后画笔的可见边缘可命中，外侧不误选", async ({
+  page,
+}) => {
+  const { list } = await setup(page);
+  for (const tool of ["荧光笔", "画笔"]) {
+    await action(page, tool);
+    await page.getByLabel("线条宽度").selectOption("8");
+    await drag(page, 100, 200, 500, 200);
+    await action(page, "选择");
+    const index = "0";
+    if (tool === "画笔") {
+      await list.selectOption(index);
+      for (let n = 0; n < 6; n++) await action(page, "放大选区");
+      await list.selectOption("");
+    }
+    await click(page, 300, 214);
+    await expect(list).toHaveValue(index);
+    if (tool === "荧光笔") {
+      await action(page, "放大选区");
+      await list.selectOption("");
+      await click(page, 300, 219);
+      await expect(list).toHaveValue(index);
+      await list.selectOption("");
+      await click(page, 300, 222);
+      await expect(list).toHaveValue("");
+      await action(page, "全选对象");
+      await action(page, "删除对象");
+    }
+  }
+});
+
+test("PR249 重复锁定不追加空历史，一次撤销恢复解锁", async ({ page }) => {
+  const { list } = await setup(page);
+  await rectangle(page, 100, 120);
+  await action(page, "选择");
+  await list.selectOption("0");
+  await action(page, "锁定");
+  await action(page, "锁定");
+  await action(page, "撤销");
+  await expect(list.locator("option").last()).not.toContainText("已锁定");
+});

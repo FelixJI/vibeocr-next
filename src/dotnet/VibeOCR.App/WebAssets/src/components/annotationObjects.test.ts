@@ -266,3 +266,20 @@ describe("OBJ-04 说明局部变换与整图旋转组合", () => {
     expect(turned.objectScale).toBe(1.25);
   });
 });
+
+describe("PR249 锁定幂等", () => {
+  it("重复锁定或解锁保持对象引用，整组变化一次后不产生空修改", () => {
+    const marks = [box("a", 0), box("b", 40)];
+    const unchanged = setMarkLocked(marks, ids("a"), false);
+    expect(unchanged[0]).toBe(marks[0]);
+    expect(unchanged[1]).toBe(marks[1]);
+    const grouped = groupMarkIds(marks, ids("a", "b"), "g");
+    const locked = setMarkLocked(grouped, ids("a"), true);
+    const relocked = setMarkLocked(locked, ids("b"), true);
+    expect(relocked[0]).toBe(locked[0]);
+    expect(relocked[1]).toBe(locked[1]);
+    const unlocked = setMarkLocked(locked, ids("a"), false);
+    expect(setMarkLocked(unlocked, ids("a"), false)).toEqual(unlocked);
+    expect(setMarkLocked(unlocked, ids("a"), false)[0]).toBe(unlocked[0]);
+  });
+});

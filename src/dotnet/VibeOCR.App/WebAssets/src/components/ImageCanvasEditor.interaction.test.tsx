@@ -1164,3 +1164,112 @@ describe("OBJ-03 对象比例装饰", () => {
     },
   );
 });
+
+describe("PR249 不透明度草稿提交", () => {
+  async function prepareTwoObjects() {
+    stubCanvasStack({ width: 900, height: 600 });
+    const harness = stubAnimationFrames();
+    const rendered = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    fireEvent.click(screen.getByLabelText("填充"));
+    const drawBox = (x: number) => {
+      fireEvent.pointerDown(canvas, { pointerId: 1, clientX: x, clientY: 100 });
+      fireEvent.pointerUp(canvas, {
+        pointerId: 1,
+        clientX: x + 100,
+        clientY: 180,
+      });
+    };
+    const setFill = (color: string, opacity: string) => {
+      fireEvent.change(screen.getByLabelText("填充颜色"), {
+        target: { value: color },
+      });
+      fireEvent.change(screen.getByLabelText("填充不透明度"), {
+        target: { value: opacity },
+      });
+      fireEvent.blur(screen.getByLabelText("填充不透明度"));
+    };
+    setFill("#e02020", "20");
+    drawBox(100);
+    setFill("#1f6feb", "80");
+    drawBox(400);
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    return { ...rendered, canvas, harness };
+  }
+  it.each(["边框不透明度", "填充不透明度"])(
+    "%s输入3→37只在失焦提交一次，非法草稿不新增历史",
+    async (label) => {
+      const { actions, unmount } = await prepareTwoObjects();
+      const initial = label === "边框不透明度" ? 100 : 20;
+      const input = screen.getByLabelText(label);
+      vi.mocked(actions.run).mockClear();
+      fireEvent.change(input, { target: { value: "3" } });
+      fireEvent.change(input, { target: { value: "37" } });
+      expect(actions.run).not.toHaveBeenCalled();
+      fireEvent.blur(input);
+      expect(actions.run).toHaveBeenCalledTimes(1);
+      fireEvent.change(input, { target: { value: "" } });
+      fireEvent.blur(input);
+      expect(input).toHaveValue(37);
+      fireEvent.change(input, { target: { value: "101" } });
+      fireEvent.blur(input);
+      expect(input).toHaveValue(37);
+      expect(actions.run).toHaveBeenCalledTimes(1);
+      fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+      fireEvent.change(screen.getByLabelText("选择标注对象"), {
+        target: { value: "0" },
+      });
+      expect(screen.getByLabelText(label)).toHaveValue(initial);
+      unmount();
+    },
+  );
+  it("填充草稿跨选区提交仍保留原对象颜色，且只提交一次", async () => {
+    const { actions, unmount } = await prepareTwoObjects();
+    const input = screen.getByLabelText("填充不透明度");
+    vi.mocked(actions.run).mockClear();
+    fireEvent.change(input, { target: { value: "37" } });
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "1" },
+    });
+    fireEvent.blur(input);
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    expect(screen.getByLabelText("填充颜色")).toHaveValue("#e02020");
+    expect(screen.getByLabelText("填充不透明度")).toHaveValue(37);
+    expect(actions.run).toHaveBeenCalledTimes(1);
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "1" },
+    });
+    expect(screen.getByLabelText("填充颜色")).toHaveValue("#1f6feb");
+    expect(screen.getByLabelText("填充不透明度")).toHaveValue(80);
+    unmount();
+  });
+  it.each(["删除", "锁定"])(
+    "草稿目标%s后不写入对象或新绘图工具记忆",
+    async (action) => {
+      const { canvas, unmount } = await prepareTwoObjects();
+      fireEvent.change(screen.getByLabelText("填充不透明度"), {
+        target: { value: "37" },
+      });
+      if (action === "删除") fireEvent.keyDown(canvas, { key: "Delete" });
+      else fireEvent.click(screen.getByRole("button", { name: "锁定" }));
+      fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+      fireEvent.blur(screen.getByLabelText("填充不透明度"));
+      expect(screen.getByLabelText("填充不透明度")).toHaveValue(80);
+      if (action === "锁定") {
+        fireEvent.click(screen.getByRole("button", { name: "选择" }));
+        fireEvent.change(screen.getByLabelText("选择标注对象"), {
+          target: { value: "0" },
+        });
+        expect(screen.getByLabelText("填充不透明度")).toHaveValue(20);
+      }
+      unmount();
+    },
+  );
+});

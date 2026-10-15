@@ -19,7 +19,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { createPortal } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import type { AppActions } from "../app/types";
 
 import {
@@ -29,6 +29,7 @@ import {
 import {
   annotationFill,
   annotationStrokeAlpha,
+  annotationStrokeWidth,
   constrainBoxDrag,
   constrainLineDrag,
   exclusionCoversOutput,
@@ -540,13 +541,17 @@ function AnnotationStylePanel({
    * pointerdown 已切换选区后把草稿写进新对象。 */
   readonly styleTargetId: string | undefined;
   readonly onPickColor: () => void;
-  readonly onStyleChange: (change: StyleChange, targetId?: string) => void;
+  readonly onStyleChange: (
+    change: StyleChange,
+    targetId?: string | null,
+  ) => void;
 }) {
   // 数值输入草稿仅存在于此面板：焦点内自由编辑，blur/Enter 才提交。
   // targetId 随草稿冻结：即便提交前焦点被画布点击夺走，也写入当时
   // 正在编辑的对象，而不是重新解析的当前选区。
   const [opacityDraft, setOpacityDraft] = useState<
-    { kind: "stroke" | "fill"; raw: string; targetId?: string } | undefined
+    | { kind: "stroke" | "fill"; raw: string; targetId: string | null }
+    | undefined
   >();
   if (
     !showColorControl &&
@@ -641,16 +646,14 @@ function AnnotationStylePanel({
                 setOpacityDraft(undefined);
               }}
               onChange={(_, data) => {
-                setOpacityDraft({
-                  kind: "stroke",
-                  raw: data.value,
-                  targetId: styleTargetId,
-                });
-                commitOpacityInput(data.value, (value) =>
-                  onStyleChange(
-                    { kind: "strokeOpacity", value },
-                    styleTargetId,
-                  ),
+                setOpacityDraft((current) =>
+                  current?.kind === "stroke"
+                    ? { ...current, raw: data.value }
+                    : {
+                        kind: "stroke",
+                        raw: data.value,
+                        targetId: styleTargetId ?? null,
+                      },
                 );
               }}
               onKeyDown={(event) => {
@@ -804,16 +807,14 @@ function AnnotationStylePanel({
                     setOpacityDraft(undefined);
                   }}
                   onChange={(_, data) => {
-                    setOpacityDraft({
-                      kind: "fill",
-                      raw: data.value,
-                      targetId: styleTargetId,
-                    });
-                    commitOpacityInput(data.value, (value) =>
-                      onStyleChange(
-                        { kind: "fillOpacity", value },
-                        styleTargetId,
-                      ),
+                    setOpacityDraft((current) =>
+                      current?.kind === "fill"
+                        ? { ...current, raw: data.value }
+                        : {
+                            kind: "fill",
+                            raw: data.value,
+                            targetId: styleTargetId ?? null,
+                          },
                     );
                   }}
                   onKeyDown={(event) => {
@@ -2094,15 +2095,21 @@ export function ImageCanvasEditor({
     };
   }
 
-  function applyStyleChange(change: StyleChange, targetId?: string): void {
+  function applyStyleChange(
+    change: StyleChange,
+    targetId?: string | null,
+  ): void {
     // 目标优先级：blur 提交携带的 targetId（防点入画布后选区已换）> 当前
     // 主选 > 工具属性记忆。选中标记时就地改样式入历史。
     const candidate =
-      targetId !== undefined
-        ? state.marks.find((mark) => mark.id === targetId)
-        : editingMark;
+      targetId === null
+        ? undefined
+        : targetId !== undefined
+          ? state.marks.find((mark) => mark.id === targetId)
+          : editingMark;
     const mark =
       candidate && COLOR_TOOLS.includes(candidate.tool) ? candidate : undefined;
+    if (typeof targetId === "string" && !mark) return;
     if (mark) {
       if (
         !selectionModifiable(
@@ -2114,10 +2121,12 @@ export function ImageCanvasEditor({
       // 选中标记已带填充时，改色保留其原不透明度、改不透明度保留其原色；
       // 回退值取所属工具记忆而非当前选择工具。
       const owningTool = attributesOfTool(mark.tool);
-      const preservedFillColor = editingFill?.color ?? owningTool.fillColor;
-      const preservedFillOpacity = editingFill
-        ? Math.round(editingFill.alpha * 100)
-        : owningTool.fillOpacity;
+      const targetFill = annotationFill(mark);
+      const preservedFillColor =
+        targetFill?.color ?? style.fill?.color ?? owningTool.fillColor;
+      const preservedFillOpacity = targetFill
+        ? Math.round(targetFill.alpha * 100)
+        : (style.fill?.opacity ?? owningTool.fillOpacity);
       const next: Mark["style"] =
         change.kind === "color"
           ? { ...style, color: change.value }
@@ -5429,6 +5438,20 @@ export function ImageCanvasEditor({
             }
           }}
           onPointerCancel={cancelDrawing}
+          onPointerDownCapture={(event) => {
+            const input = document.activeElement;
+            if (
+              input instanceof HTMLInputElement &&
+              input.closest(".canvas-editor") ===
+                event.currentTarget.closest(".canvas-editor") &&
+              ["边框不透明度", "填充不透明度"].includes(
+                input.getAttribute("aria-label") ?? "",
+              )
+            ) {
+              // 失焦提交先于本次绘制冻结样式，避免 pointerdown 默认聚焦晚于取样。
+              flushSync(() => input.blur());
+            }
+          }}
           onPointerDown={pointerDown}
           onPointerMove={pointerMove}
           onPointerUp={pointerUp}
@@ -5738,7 +5761,7 @@ function draw(
     const width = mark.end.x - mark.start.x;
     const height = mark.end.y - mark.start.y;
     const color = mark.style?.color ?? DEFAULT_COLOR;
-    const lineWidth = (mark.style?.strokeWidth ?? 3) * markScale;
+    const lineWidth = annotationStrokeWidth(mark) * markScale;
     const strokeAlpha = annotationStrokeAlpha(mark);
     if (mark.tool === "rectangle") {
       context.setLineDash([]);
@@ -5990,11 +6013,7 @@ function draw(
         // 边框不透明度与荧光笔自身 35% 透明相乘：旧标记（缺省 100%）
         // 渲染保持不变，不覆盖原有透明语义。
         context.globalAlpha = 0.35 * strokeAlpha;
-        context.lineWidth =
-          Math.max(
-            (mark.style?.strokeWidth ?? 3) * 4,
-            12 * (mark.objectScale ?? 1),
-          ) * markScale;
+        context.lineWidth = lineWidth;
       } else {
         context.globalAlpha = strokeAlpha;
         context.lineWidth = lineWidth;
@@ -6645,11 +6664,12 @@ function findMark(
       mark.tool === "highlighter"
     ) {
       const points = mark.points?.length ? mark.points : [mark.start, mark.end];
+      const hitRadius = Math.max(10, annotationStrokeWidth(mark) / 2);
       let hit = false;
       for (let i = 0; i < points.length; i += 1) {
         if (
           distanceToSegment(point, points[Math.max(0, i - 1)]!, points[i]!) <=
-          10
+          hitRadius
         ) {
           hit = true;
           break;

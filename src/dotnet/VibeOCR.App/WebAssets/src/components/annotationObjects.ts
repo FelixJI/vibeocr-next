@@ -364,7 +364,7 @@ export function setMarkLocked(
 ): readonly Mark[] {
   const expanded = expandGroupSelection(marks, ids);
   return marks.map((mark) =>
-    expanded.has(mark.id)
+    expanded.has(mark.id) && !!mark.locked !== locked
       ? { ...mark, ...(locked ? { locked: true } : { locked: undefined }) }
       : mark,
   );
