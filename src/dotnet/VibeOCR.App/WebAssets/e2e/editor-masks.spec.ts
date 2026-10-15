@@ -18,7 +18,7 @@ interface PixelRegion {
 interface DecodedImage {
   width: number;
   height: number;
-  pixels: number[];
+  pixels: Buffer;
 }
 
 async function decodeUpload(
@@ -27,7 +27,7 @@ async function decodeUpload(
   mediaType: string,
   region?: PixelRegion,
 ): Promise<DecodedImage> {
-  return page.evaluate(
+  const decoded = await page.evaluate(
     async ({ base64, mediaType, region }) => {
       const binary = atob(base64);
       const bytes = new Uint8Array(binary.length);
@@ -53,20 +53,31 @@ async function decodeUpload(
         canvas.width,
         canvas.height,
       );
+      bitmap.close();
       const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      // 用紧凑字节跨Playwright协议，避免为每个RGBA字节序列化一个JS数字。
+      let binaryRgba = "";
+      for (let offset = 0; offset < data.length; offset += 32768) {
+        binaryRgba += String.fromCharCode(
+          ...data.subarray(offset, offset + 32768),
+        );
+      }
       return {
         width: canvas.width,
         height: canvas.height,
-        pixels: Array.from(data),
+        rgbaBase64: btoa(binaryRgba),
       };
     },
     { base64: body.toString("base64"), mediaType, region },
   );
+  const pixels = Buffer.from(decoded.rgbaBase64, "base64");
+  expect(pixels.length).toBe(decoded.width * decoded.height * 4);
+  return { width: decoded.width, height: decoded.height, pixels };
 }
 
 function pixelAt(image: DecodedImage, x: number, y: number): number[] {
   const offset = (y * image.width + x) * 4;
-  return image.pixels.slice(offset, offset + 4);
+  return Array.from(image.pixels.subarray(offset, offset + 4));
 }
 
 function expectSameAlpha(baseline: DecodedImage, actual: DecodedImage): void {
@@ -801,17 +812,22 @@ test("tiled blur matches a whole-image filter across the 512px seam and click st
   await pointerStroke(page, [map({ x: 50, y: 64 }), map({ x: 970, y: 64 })]);
   const actual = await saveAndDecode(page, uploads);
   const expected = await page.evaluate(
-    ({ pixels }) => {
+    async ({ pngBase64 }) => {
+      const bitmap = await createImageBitmap(
+        new Blob(
+          [
+            Uint8Array.from(atob(pngBase64), (character) =>
+              character.charCodeAt(0),
+            ),
+          ],
+          { type: "image/png" },
+        ),
+      );
       const source = document.createElement("canvas");
       source.width = 1024;
       source.height = 128;
-      source
-        .getContext("2d")!
-        .putImageData(
-          new ImageData(new Uint8ClampedArray(pixels), 1024, 128),
-          0,
-          0,
-        );
+      source.getContext("2d")!.drawImage(bitmap, 0, 0);
+      bitmap.close();
       const result = document.createElement("canvas");
       result.width = 1024;
       result.height = 128;
@@ -820,7 +836,7 @@ test("tiled blur matches a whole-image filter across the 512px seam and click st
       context.drawImage(source, 0, 0);
       return Array.from(context.getImageData(508, 64, 8, 1).data);
     },
-    { pixels: baseline.pixels },
+    { pngBase64: uploads[0]!.body.toString("base64") },
   );
   for (let x = 508; x < 516; x++)
     expect(pixelAt(actual, x, 64)).toEqual(
@@ -832,7 +848,7 @@ test("tiled blur matches a whole-image filter across the 512px seam and click st
   expect(pixelAt(clicked, 511, 64)).not.toEqual(pixelAt(baseline, 511, 64));
   await page.getByRole("button", { name: "撤销", exact: true }).click();
   const restored = await saveAndDecode(page, uploads);
-  expect(restored.pixels).toEqual(baseline.pixels);
+  expect(Buffer.compare(restored.pixels, baseline.pixels)).toBe(0);
 });
 
 test("sparse diagonal effects bound scratch canvases in natural output", async ({
@@ -1016,17 +1032,22 @@ test("fractional mosaic uses one unfragmented grid across the 512px black-white 
   ]);
   const actual = await saveAndDecode(page, uploads);
   const reference = await page.evaluate(
-    ({ pixels }) => {
+    async ({ pngBase64 }) => {
+      const bitmap = await createImageBitmap(
+        new Blob(
+          [
+            Uint8Array.from(atob(pngBase64), (character) =>
+              character.charCodeAt(0),
+            ),
+          ],
+          { type: "image/png" },
+        ),
+      );
       const source = document.createElement("canvas");
       source.width = 900;
       source.height = 600;
-      source
-        .getContext("2d")!
-        .putImageData(
-          new ImageData(new Uint8ClampedArray(pixels), 900, 600),
-          0,
-          0,
-        );
+      source.getContext("2d")!.drawImage(bitmap, 0, 0);
+      bitmap.close();
       const area = { x: 0.3, y: 287, width: 883, height: 26 };
       const down = document.createElement("canvas");
       down.width = Math.ceil(area.width / 14);
@@ -1053,7 +1074,7 @@ test("fractional mosaic uses one unfragmented grid across the 512px black-white 
       context.drawImage(down, area.x, area.y, area.width, area.height);
       return Array.from(context.getImageData(510, 300, 14, 1).data);
     },
-    { pixels: baseline.pixels },
+    { pngBase64: uploads[0]!.body.toString("base64") },
   );
   for (let x = 510; x < 524; x++)
     expect(pixelAt(actual, x, 300)).toEqual(
