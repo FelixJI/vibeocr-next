@@ -64,6 +64,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
   const [leftImageMode, setLeftImageMode] = useState<"proofread" | "edit">(
     "proofread",
   );
+  const [proofreadBindingKey, setProofreadBindingKey] = useState<string>();
   // 排版模式为结果单一状态：唯一的一组复制/导出按钮按它提交，避免
   // 结果区再叠一套全局输出按钮。
   const [resultTextMode, setResultTextMode] = useState<ResultTextMode>("raw");
@@ -121,6 +122,11 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
               : Promise.resolve(false),
         }
       : undefined;
+  // 仅结果身份变化时恢复默认校对；同一结果的宿主更新不打断编辑。
+  if (proofreadBindingKey !== proofread?.bindingKey) {
+    setProofreadBindingKey(proofread?.bindingKey);
+    setLeftImageMode("proofread");
+  }
   // Windows 常用命令：打开与工具栏按钮同一入口；Ctrl+C 仅在无文本选择、
   // 目标非输入控件且存在可复制结果时降级为复制识别结果（镜像页级唯一
   // 复制按钮：lines 结果按当前排版模式，其余 plain），不覆盖用户已有

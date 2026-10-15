@@ -8,6 +8,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppActions, AppViewState } from "../app/types";
+import { feature } from "./FeatureValues";
 import { RecognitionPage } from "./RecognitionPage";
 
 afterEach(() => {
@@ -219,6 +220,68 @@ describe("recognition page result actions", () => {
     fireEvent.click(screen.getByRole("button", { name: "编辑图片" }));
     expect(toolbar().getByRole("button", { name: "撤销" })).toBeEnabled();
   });
+
+  it.each(["resultImage", "structuredResult"] as const)(
+    "新结果的 %s 变化恢复校对，同一结果更新保留编辑模式",
+    async (changedResource) => {
+      const { viewState, actions } = setup(true);
+      const { rerender } = render(
+        <RecognitionPage viewState={viewState} actions={actions} />,
+      );
+      await screen.findByRole("img", { name: "识别结果参考图" });
+      fireEvent.click(screen.getByRole("button", { name: "编辑图片" }));
+      rerender(
+        <RecognitionPage
+          viewState={{ ...viewState, revision: 2 }}
+          actions={actions}
+        />,
+      );
+      expect(screen.getByRole("button", { name: "编辑图片" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      const url =
+        changedResource === "resultImage"
+          ? "https://resource.vibeocr/next-result-image.png"
+          : "https://resource.vibeocr/next-structured.json";
+      rerender(
+        <RecognitionPage
+          viewState={{
+            ...viewState,
+            revision: 3,
+            features: {
+              ...viewState.features,
+              recognition: {
+                ...feature(viewState, "recognition"),
+                [changedResource]: {
+                  url,
+                  mediaType:
+                    changedResource === "resultImage"
+                      ? "image/png"
+                      : "application/json",
+                  byteLength: 4,
+                },
+              },
+            },
+          }}
+          actions={actions}
+        />,
+      );
+      const image = await screen.findByRole("img", {
+        name: "识别结果参考图",
+      });
+      expect(image).toHaveAttribute(
+        "src",
+        changedResource === "resultImage"
+          ? url
+          : "https://resource.vibeocr/result-image.png",
+      );
+      expect(screen.getByRole("button", { name: "图像校对" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+    },
+  );
 
   it("falls back to plain copy for non-lines results", async () => {
     const { viewState, actions } = setup(false);
