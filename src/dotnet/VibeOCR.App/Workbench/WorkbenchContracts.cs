@@ -89,7 +89,12 @@ public sealed record CaptureRecognitionScreenCommand : WorkbenchCommand;
 /// happens only through an explicit <see cref="RecognizeScreenshotImageCommand"/>
 /// carrying the session's current revision.
 /// </summary>
-public sealed record CaptureScreenshotSessionCommand : WorkbenchCommand;
+/// <summary>
+/// 纯截图会话命令；Request 为 null 时保持既有框选入口（Web 桥与旧热键
+/// 零行为变化），非 null 时由宿主按 #236 直接目标模式采集。
+/// </summary>
+public sealed record CaptureScreenshotSessionCommand(
+    ScreenshotCaptureRequest? Request = null) : WorkbenchCommand;
 public sealed record CaptureScreenshotTextSessionCommand : WorkbenchCommand;
 public sealed record CaptureScrollingScreenshotCommand : WorkbenchCommand;
 

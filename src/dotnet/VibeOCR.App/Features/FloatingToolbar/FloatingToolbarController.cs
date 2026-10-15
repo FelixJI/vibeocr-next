@@ -28,6 +28,9 @@ internal interface IFloatingToolbarView : IDisposable
 {
     event EventHandler? PointerEntered;
 
+    /// <summary>#236 右键请求统一截图模式菜单。</summary>
+    event EventHandler? ModeMenuRequested;
+
     event EventHandler? PointerExited;
 
     event EventHandler<PhysicalRectangle>? DragStarted;

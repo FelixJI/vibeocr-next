@@ -13,6 +13,13 @@ internal static class HotkeyActionCatalog
     public const string ClipboardRecognize = "clipboard_recognize";
     public const string ToggleToolbar = "toggle_toolbar";
     public const string ShowWorkbench = "show_workbench";
+    public const string ScreenshotFullscreen = "screenshot_fullscreen";
+    public const string ScreenshotWindow = "screenshot_window";
+    public const string ScreenshotMonitor = "screenshot_monitor";
+    public const string ScreenshotFixed = "screenshot_fixed";
+    public const string ScreenshotRepeat = "screenshot_repeat";
+    public const string ScreenshotDelayed = "screenshot_delayed";
+    public const string ScreenshotMenu = "screenshot_menu";
 
     /// <summary>hotkeys 节点中的旧版单动作字段名，保持同步以便旧版本回滚。</summary>
     public const string LegacyGlobalScreenshotField = "global_screenshot";
@@ -28,6 +35,13 @@ internal static class HotkeyActionCatalog
         ClipboardRecognize,
         ToggleToolbar,
         ShowWorkbench,
+        ScreenshotFullscreen,
+        ScreenshotWindow,
+        ScreenshotMonitor,
+        ScreenshotFixed,
+        ScreenshotRepeat,
+        ScreenshotDelayed,
+        ScreenshotMenu,
     ];
 
     private static readonly IReadOnlyDictionary<string, string> DisplayNames =
@@ -38,6 +52,13 @@ internal static class HotkeyActionCatalog
             [ClipboardRecognize] = "剪贴板识别",
             [ToggleToolbar] = "悬浮栏显示/隐藏",
             [ShowWorkbench] = "打开工作台",
+            [ScreenshotFullscreen] = "全屏截图",
+            [ScreenshotWindow] = "活动窗口截图",
+            [ScreenshotMonitor] = "显示器截图",
+            [ScreenshotFixed] = "固定区域截图",
+            [ScreenshotRepeat] = "重复上次区域截图",
+            [ScreenshotDelayed] = "延时截图",
+            [ScreenshotMenu] = "打开截图模式菜单",
         };
 
     public static bool IsKnown(string actionId) =>
