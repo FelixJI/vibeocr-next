@@ -1483,6 +1483,36 @@ class ManagedEnvironmentStore:
             _atomic_json(self._registry, data)
             return self._public_record(record, probe, data)
 
+    def _next_revision(self, env_id: str, record: dict) -> int:
+        """在 store 锁与目标 operation 锁内推导下一个未占用的修订号。
+
+        跳过 cleanup ledger 已保留路径与磁盘既有目录（含旧 ``N-<hex>``
+        后缀目录的数字前缀），失败重试/修复因此不覆盖残留；ledger 读取
+        自带既有路径校验，新路径写入前仍经 remember_path 重新校验。
+        """
+        taken = {record["revision"]}
+        for relative, owner in managed_cleanup.read_ledger(self)["paths"].items():
+            parts = Path(relative).parts
+            if (
+                owner["environment_id"] != env_id
+                or len(parts) != 3
+                or parts[:2] != (env_id, "revisions")
+            ):
+                continue
+            stem = parts[2].split("-", 1)[0]
+            if stem.isdigit():
+                taken.add(int(stem))
+        revisions = self.root / env_id / "revisions"
+        if revisions.is_dir():
+            for child in revisions.iterdir():
+                stem = child.name.split("-", 1)[0]
+                if stem.isdigit():
+                    taken.add(int(stem))
+        revision = record["revision"] + 1
+        while revision in taken:
+            revision += 1
+        return revision
+
     def repair_empty(self, env_id: str) -> dict:
         """Recreate only an empty venv after a Portable path or Python ABI change."""
         with self._target_operation(env_id), RuntimeStoreLock(self._lock):
@@ -1500,8 +1530,8 @@ class ManagedEnvironmentStore:
                 )
             if self._probe(record)["healthy"]:
                 return self._public_record(record, self._probe(record), data)
-            revision = record["revision"] + 1
-            directory = f"{revision}-{uuid4().hex[:16]}"
+            revision = self._next_revision(env_id, record)
+            directory = str(revision)
             root = self.root / env_id / "revisions" / directory
             managed_cleanup.remember_path(self, env_id, revision, root)
             result = subprocess.run(
@@ -1914,9 +1944,10 @@ class ManagedEnvironmentStore:
                     for source in selection.effective_download_sources
                     if source.kind == DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX
                 )
-                revision = record["revision"] + 1
-                directory = f"{revision}-{uuid4().hex[:16]}"
+                revision = self._next_revision(env_id, record)
+                directory = str(revision)
                 root = self.root / env_id / "revisions" / directory
+                # 推导已避开 ledger 与磁盘占用；守卫防越权并发写入。
                 if root.exists():
                     raise ManagedEnvironmentError("candidate revision already exists")
                 managed_cleanup.remember_path(self, env_id, revision, root)

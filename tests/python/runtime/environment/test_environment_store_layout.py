@@ -9,17 +9,21 @@
   用名称/用途派生的可读 slug。
 - 新 UI 只有一个全局来源设置：显式保存全局默认必须清除所有环境同 kind
   旧 override，否则隐性遮蔽新全局默认。
+- 修订目录不再追加随机后缀：过长路径改用纯数字短目录，号码避开活跃
+  路径、失败残留与 ledger 保留路径；旧 uuid/带后缀记录照常读取。
 """
 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
 
 import pytest
 from test_runtime_installer import _omit_unused_pip_bootstrap, _release
+from vibeocr.runtime.environments import managed_cleanup
 from vibeocr.runtime.environments.managed_environments import (
     ManagedEnvironmentError,
     ManagedEnvironmentStore,
@@ -440,3 +444,134 @@ def test_global_source_save_clears_matching_environment_overrides(
     env_a = next(item for item in listed["environments"] if item["id"] == a["id"])
     assert env_a["override_source_ids"] == ["gone-model"]
     assert env_a["unknown_source_ids"] == ["gone-model"]
+
+
+def test_new_revisions_use_short_numeric_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 实测痛点：revisions/2-<16随机位>/Scripts/python.exe 过长；
+    # 新修订目录必须是无后缀纯数字（旧 uuid 后缀实现在此失败）。
+    manager, _calls = _manager(
+        tmp_path,
+        monkeypatch,
+        with_base_pack=False,
+        install=lambda _python, _scope, _endpoint: None,
+    )
+    item = manager.create("短目录")
+    plan = manager.preview_install(item["id"], "rapidocr-cpu", ("tuna-pypi",))
+    installed = manager.install(
+        plan["plan_id"], item["id"], "rapidocr-cpu", ("tuna-pypi",)
+    )
+    assert installed["status"] == "installed"
+    assert installed["revision"] == 2
+    assert installed["path"].endswith(str(Path(item["id"]) / "revisions" / "2"))
+    revisions = manager.root / item["id"] / "revisions"
+    assert (revisions / "2").is_dir()
+    assert all(re.fullmatch(r"[0-9]+", path.name) for path in revisions.iterdir())
+
+    # 同一环境再次安装继续递增短数字目录。
+    plan = manager.preview_install(item["id"], "rapidocr-cpu", ("pypi",))
+    upgraded = manager.install(plan["plan_id"], item["id"], "rapidocr-cpu", ("pypi",))
+    assert upgraded["revision"] == 3
+    assert upgraded["path"].endswith(str(Path(item["id"]) / "revisions" / "3"))
+    assert (revisions / "3").is_dir()
+
+
+def test_failed_install_retry_takes_fresh_numeric_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 失败候选已落盘并由 ledger 保留：重试必须拿新号码，不复用残留。
+    attempts: list[int] = []
+
+    def install(_python: Path, _scope, _endpoint: str) -> None:
+        attempts.append(len(attempts))
+        if len(attempts) == 1:
+            raise ManagedEnvironmentError("synthetic install failure")
+
+    manager, _calls = _manager(
+        tmp_path, monkeypatch, with_base_pack=False, install=install
+    )
+    item = manager.create("重试")
+    revisions = manager.root / item["id"] / "revisions"
+    plan = manager.preview_install(item["id"], "rapidocr-cpu", ("tuna-pypi",))
+    with pytest.raises(ManagedEnvironmentError, match="synthetic install failure"):
+        manager.install(plan["plan_id"], item["id"], "rapidocr-cpu", ("tuna-pypi",))
+    surviving = manager.list()["environments"][0]
+    assert surviving["revision"] == 1
+    assert surviving["status"] == "empty"
+    assert (revisions / "2").is_dir(), "失败候选 venv 已落盘"
+
+    installed = manager.install(
+        plan["plan_id"], item["id"], "rapidocr-cpu", ("tuna-pypi",)
+    )
+    assert installed["revision"] == 3
+    assert installed["path"].endswith(str(Path(item["id"]) / "revisions" / "3"))
+    # 残留与候选并存，残留交给 cleanup。
+    assert (revisions / "2").is_dir()
+    assert (revisions / "3").is_dir()
+    ledger = managed_cleanup.read_ledger(manager)
+    assert str(Path(item["id"]) / "revisions" / "2") in ledger["paths"]
+    assert str(Path(item["id"]) / "revisions" / "3") in ledger["paths"]
+
+
+def test_repair_empty_uses_short_numeric_revision_and_skips_residuals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=False)
+    item = manager.create("修复")
+    env_id = item["id"]
+    revisions = manager.root / env_id / "revisions"
+    # 磁盘残留 2（无 ledger 记录）与 ledger 保留的 3 都必须被跳过。
+    (revisions / "2").mkdir()
+    with RuntimeStoreLock(manager._lock):
+        managed_cleanup.remember_path(manager, env_id, 3, revisions / "3")
+    registry = manager.paths.state_root / "environments.json"
+    value = json.loads(registry.read_text(encoding="utf-8"))
+    value["environments"][env_id]["python_version"] = "3.13.0"
+    registry.write_text(json.dumps(value), encoding="utf-8")
+
+    repaired = manager.repair_empty(env_id)
+    assert repaired["revision"] == 4
+    assert repaired["path"].endswith(str(Path(env_id) / "revisions" / "4"))
+    assert re.fullmatch(r"[0-9]+", Path(repaired["path"]).name)
+    assert (revisions / "2").is_dir()
+    assert (revisions / "4").is_dir()
+
+
+def test_legacy_revision_suffix_paths_remain_readable_and_not_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 旧 uuid 环境与 16/32 位后缀修订路径照常读取；新修订仍取纯数字并
+    # 跳过旧后缀目录已占用的号码。
+    manager, _calls = _manager(
+        tmp_path,
+        monkeypatch,
+        with_base_pack=False,
+        install=lambda _python, _scope, _endpoint: None,
+    )
+    env_id = "f" * 8 + "8adbc0de" + "0" * 16
+    with RuntimeStoreLock(manager._lock):
+        data = manager._read()
+        data["environments"][env_id] = {
+            "id": env_id,
+            "name": "旧环境",
+            "revision": 1,
+            "kind": "venv",
+            "path": str(Path(env_id) / "revisions" / f"1-{'a' * 16}"),
+            "status": "empty",
+            "python_version": manager.manifest.python.version,
+            "abi": manager.manifest.python.abi,
+        }
+        manager._registry.parent.mkdir(parents=True, exist_ok=True)
+        manager._registry.write_text(json.dumps(data), encoding="utf-8")
+    assert manager.list()["environments"][0]["id"] == env_id
+
+    revisions = manager.root / env_id / "revisions"
+    (revisions / f"2-{'b' * 32}").mkdir(parents=True)
+    plan = manager.preview_install(env_id, "rapidocr-cpu", ("tuna-pypi",))
+    installed = manager.install(plan["plan_id"], env_id, "rapidocr-cpu", ("tuna-pypi",))
+    assert installed["revision"] == 3
+    assert installed["path"].endswith(str(Path(env_id) / "revisions" / "3"))
+    assert installed["status"] == "installed"
+    # 旧带后缀目录原样保留，不迁移、不改名。
+    assert (revisions / f"2-{'b' * 32}").is_dir()
