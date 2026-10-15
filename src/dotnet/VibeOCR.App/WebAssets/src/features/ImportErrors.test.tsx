@@ -15,6 +15,10 @@ for (const scope of ["imageEdit", "recognition"] as const) {
   describe(`${scope} native import failures`, () => {
     it.each([
       [
+        "workbench.error.imageImportSingleBaseline",
+        "空画布请先导入一张图片；多图批次未导入。",
+      ],
+      [
         "workbench.error.imageImportOpenFirst",
         "请先打开图片，再导入文字对象。",
       ],

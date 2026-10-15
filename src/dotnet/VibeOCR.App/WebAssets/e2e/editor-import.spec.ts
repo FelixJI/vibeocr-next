@@ -191,7 +191,28 @@ for (const scope of ["imageEdit", "recognition"] as const) {
       [490, 280],
       [360, 250],
     ];
+    const editorFrame = await page
+      .getByLabel("图片检查画布")
+      .evaluate((element) => {
+        const canvas = element as HTMLCanvasElement;
+        const context = canvas.getContext("2d")!;
+        const scaleX = canvas.width / Number(canvas.dataset.coordinateWidth);
+        const scaleY = canvas.height / Number(canvas.dataset.coordinateHeight);
+        const pixels = context.getImageData(
+          Math.floor(360 * scaleX),
+          Math.floor(250 * scaleY),
+          Math.ceil(180 * scaleX),
+          Math.ceil(10 * scaleY),
+        ).data;
+        return Array.from(pixels).some(
+          (alpha, index) => index % 4 === 3 && alpha > 0,
+        );
+      });
+    expect(editorFrame).toBe(true);
     const imported = await save("imported-alpha");
+    expect(await pngPixels(page, imported, [[365, 255]])).toEqual([
+      [0, 0, 0, 0],
+    ]);
     expect(await pngPixels(page, imported, points)).toEqual([
       [255, 0, 0, 128],
       [0, 0, 255, 255],
@@ -256,7 +277,9 @@ for (const scope of ["imageEdit", "recognition"] as const) {
       (await commands(page)).filter(
         (command) =>
           command.action === "releaseAssets" &&
-          (command.arguments.resourceUris as string[]).includes(imageUrl),
+          (command.arguments.resourceUris as string[]).some(
+            (uri) => uri === imageUrl,
+          ),
       ),
     ).toHaveLength(0);
     expect(await save("undo-import")).toEqual(original);

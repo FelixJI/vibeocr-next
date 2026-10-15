@@ -398,6 +398,15 @@ public sealed class ImageImportWorkbenchTests
       var oldPackage = new Windows.ApplicationModel.DataTransfer.DataPackage();
       oldPackage.SetText("旧host独有文本");
       Assert.True((await first.ImportDroppedContentAsync(oldPackage.GetView(), WorkbenchRoute.ImageEdit)).Ok);
+      var firstState = Assert.IsType<ImageEditWorkbenchState>((await app.BootstrapAsync(TestContext.Current.CancellationToken)).States.Single(state => state.Scope == "imageEdit").State);
+      var deniedPackage = new Windows.ApplicationModel.DataTransfer.DataPackage();
+      deniedPackage.SetText("确认前拒绝的第二批");
+      Assert.Equal("image_import_in_progress", (await first.ImportDroppedContentAsync(deniedPackage.GetView(), WorkbenchRoute.ImageEdit)).Error?.Code);
+      var preserved = Assert.IsType<ImageEditWorkbenchState>((await app.BootstrapAsync(TestContext.Current.CancellationToken)).States.Single(state => state.Scope == "imageEdit").State);
+      Assert.Equal(firstState.Import!.RequestId, preserved.Import?.RequestId);
+      Assert.Empty(TextSessionFiles(root, "确认前拒绝的第二批"));
+      await app.ExecuteAsync(new WorkbenchCommandEnvelope(Guid.NewGuid(), new AckImageEditImportCommand(
+        Guid.Parse(firstState.Import!.SessionId), firstState.Import.Revision, firstState.Import.RequestId)), TestContext.Current.CancellationToken);
       var livePackage = new Windows.ApplicationModel.DataTransfer.DataPackage();
       livePackage.SetText("新host独有文本");
       ImageEditWorkbenchState live;
@@ -829,7 +838,13 @@ public sealed class ImageImportWorkbenchTests
             sessionId, first.ScreenshotSession.Revision, first.Import.RequestId),
           TestContext.Current.CancellationToken);
 
-      // 第二批：再入 1 张即超过 16 asset 聚合上限：整批拒绝，不发布部分描述符。
+      if (!acknowledge)
+      {
+        WorkbenchCommandOutcome blocked = await handler.ExecuteAsync(new PasteImageEditSystemContentCommand(), TestContext.Current.CancellationToken);
+        Assert.Equal("image_import_in_progress", blocked.Error?.Code);
+        Assert.Equal(16, SessionFiles(root, new byte[8]).Length);
+        return;
+      }      // 第二批：再入 1 张即超过 16 asset 聚合上限：整批拒绝，不发布部分描述符。
       using (var captured = new StateAwaiter<ImageEditWorkbenchState>(handler,
         state => state.ImportError is not null))
       {
@@ -900,6 +915,61 @@ public sealed class ImageImportWorkbenchTests
     }
   }
 
+  [Fact]
+  public async Task EmptyCanvasRejectsWholeMultiImageBatchWithoutOpeningSession()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var store = new WorkbenchAnnotationStore(root);
+      var reader = new ControlledImportReader();
+      reader.Next(ImageContent((1, 1), (2, 2)));
+      await using var handler = CreateHandler(broker, store, root, reader, new TaggedInputService());
+      WorkbenchCommandOutcome outcome = await handler.ExecuteAsync(new PasteImageEditSystemContentCommand(), TestContext.Current.CancellationToken);
+      Assert.Equal("image_import_refused", outcome.Error?.Code);
+      Assert.Equal("workbench.error.imageImportSingleBaseline", outcome.Error?.MessageKey);
+      Assert.Null(handler.InitialStates.OfType<ImageEditWorkbenchState>().Single().ScreenshotSession);
+      Assert.False(Directory.Exists(Path.Combine(root, "session")));
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task PublishedBatchRemainsSingleFlightUntilAckOrReject(bool acknowledge)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var store = new WorkbenchAnnotationStore(root);
+      var reader = new ControlledImportReader();
+      await using var handler = CreateHandler(broker, store, root, reader, new TaggedInputService());
+      Guid session = await EstablishImageEditSessionAsync(handler);
+      reader.Next(ImageContent((1, 1)));
+      ImageEditWorkbenchState first;
+      using (var captured = new StateAwaiter<ImageEditWorkbenchState>(handler, state => state.Import is not null))
+      {
+        await handler.ExecuteAsync(new PasteImageEditSystemContentCommand(), TestContext.Current.CancellationToken);
+        first = await captured.Task;
+      }
+      WorkbenchCommandOutcome second = await handler.ExecuteAsync(new PasteImageEditSystemContentCommand(), TestContext.Current.CancellationToken);
+      Assert.Equal("image_import_in_progress", second.Error?.Code);
+      Assert.Single(SessionFiles(root, new byte[8]));
+      WorkbenchCommand confirmation = acknowledge
+        ? new AckImageEditImportCommand(session, 0, first.Import!.RequestId)
+        : new RejectImageEditImportCommand(session, 0, first.Import!.RequestId);
+      await handler.ExecuteAsync(confirmation, TestContext.Current.CancellationToken);
+      reader.Next(ImageContent((2, 2)));
+      using var next = new StateAwaiter<ImageEditWorkbenchState>(handler, state => state.Import is not null);
+      Assert.Null((await handler.ExecuteAsync(new PasteImageEditSystemContentCommand(), TestContext.Current.CancellationToken)).Error);
+      Assert.Single((await next.Task).Import!.Items);
+      Assert.Equal(acknowledge ? 2 : 1, SessionFiles(root, new byte[8]).Length);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
   [Fact]
   public async Task SingleFlightRejectsSecondImportWhileReading()
   {

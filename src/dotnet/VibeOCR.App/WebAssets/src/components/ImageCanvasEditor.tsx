@@ -6138,7 +6138,6 @@ function draw(
         context.drawImage(source, x, y, width, height);
         context.restore();
       }
-      return;
     }
     const width = mark.end.x - mark.start.x;
     const height = mark.end.y - mark.start.y;

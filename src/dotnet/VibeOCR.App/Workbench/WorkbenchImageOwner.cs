@@ -484,7 +484,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     CancellationToken DocumentToken);
 
   /// <summary>通道导入状态：在途单飞请求 + 待确认暂存 + 已采纳会话资产。</summary>
-  private sealed record StagedImportBatch(long Revision, List<StagedImportAsset> Assets);
+  private sealed record StagedImportBatch(long Revision, List<StagedImportAsset> Assets, ImageEditImportState Descriptor);
 
   private sealed class ImportChannelState
   {
@@ -648,7 +648,8 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
             AnnotatedImageOperationCancelledException => "cancelled",
             _ => "invalid",
           };
-          operations.PublishTerminal(ImportTerminalState(channel, null, reason,
+          operations.PublishTerminal(ImportTerminalState(channel,
+            error is ImageImportInProgressException ? import.Unacknowledged.Values.FirstOrDefault()?.Descriptor : null, reason,
             isBusy: import.ActiveRequestId is not null));
         }
         throw;
@@ -666,7 +667,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     CancellationToken token = cancellation.Token;
     lock (import)
     {
-      if (import.ActiveRequestId is not null) throw new ImageImportInProgressException();
+      if (import.ActiveRequestId is not null || import.Unacknowledged.Count > 0) throw new ImageImportInProgressException();
       import.ActiveRequestId = requestId;
       import.ActiveCancellation = cancellation;
       import.ActiveDocument = cancellationToken;
@@ -678,6 +679,8 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       token.ThrowIfCancellationRequested();
       if (generation != Volatile.Read(ref channel.Generation) || channel.SessionId is not null)
         throw new ImageImportRefusedException("workbench.error.screenshotSessionStale");
+      if (content?.Images.Count > 1)
+        throw new ImageImportRefusedException("workbench.error.imageImportSingleBaseline");
       if (content?.Images.FirstOrDefault() is { } image)
       {
         var input = new RecognitionInput(image.Data, image.MediaType, "import", "drop");
@@ -714,7 +717,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     {
       Guid sessionId = channel.SessionId ??
         throw new ImageImportRefusedException("workbench.error.imageImportOpenFirst");
-      if (import.ActiveRequestId is not null) throw new ImageImportInProgressException();
+      if (import.ActiveRequestId is not null || import.Unacknowledged.Count > 0) throw new ImageImportInProgressException();
       cancellationToken.ThrowIfCancellationRequested();
       string requestId = Guid.NewGuid().ToString("N");
       long revision = channel.Revision;
@@ -834,11 +837,9 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
           return;
         }
         cancellation.Token.ThrowIfCancellationRequested();
-        import.Unacknowledged[requestId] = new StagedImportBatch(revision, staged);
-        operations.PublishTerminal(ImportTerminalState(
-          channel,
-          new ImageEditImportState(requestId, sessionId.ToString("N"), revision, items),
-          null));
+        var descriptor = new ImageEditImportState(requestId, sessionId.ToString("N"), revision, items);
+        import.Unacknowledged[requestId] = new StagedImportBatch(revision, staged, descriptor);
+        operations.PublishTerminal(ImportTerminalState(channel, descriptor, null));
       }
     }
     catch (Exception error) when (

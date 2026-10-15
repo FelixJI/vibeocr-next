@@ -547,7 +547,7 @@ public sealed class InputService : IInputService, ISystemImportReader
                 cancellationToken.ThrowIfCancellationRequested();
                 using IRandomAccessStreamWithContentType stream = await file.OpenReadAsync().AsTask(cancellationToken);
                 SystemImportImageItem image = await ReadImportImageAsync(
-                    stream, MediaType(file.Path), cancellationToken, remainingPixels, remainingBytes);
+                    stream, MediaType(file.Name), cancellationToken, remainingPixels, remainingBytes);
                 images.Add(image);
                 remainingPixels -= (long)image.PixelWidth * image.PixelHeight;
                 remainingBytes -= image.Data.LongLength;

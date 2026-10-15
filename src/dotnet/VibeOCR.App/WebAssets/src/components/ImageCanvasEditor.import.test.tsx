@@ -106,6 +106,41 @@ function recordCanvasDrawImage(targets: unknown[]): () => void {
 }
 
 describe("image canvas editor system import", () => {
+  it("draws selection chrome around an adopted image", async () => {
+    stubImageDecode();
+    const rectangles: unknown[][] = [];
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
+      function (this: HTMLCanvasElement) {
+        return new Proxy({} as CanvasRenderingContext2D, {
+          get: (_target, property) => {
+            if (property === "canvas") return this;
+            return (...args: unknown[]) => {
+              if (property === "strokeRect") rectangles.push(args);
+              if (property === "measureText") return { width: 10 };
+            };
+          },
+        });
+      },
+    );
+    const descriptor = imageDescriptor("selected-image");
+    render(
+      <ImageCanvasEditor
+        actions={createActions()}
+        canExport={false}
+        canRecognize={false}
+        source="https://app.vibeocr/__resource/base.png"
+        session={SESSION_A}
+        systemImport={{ ...descriptor, items: [descriptor.items[0]!] }}
+      />,
+    );
+    await waitFor(() =>
+      expect(
+        rectangles.some(
+          (rectangle) => rectangle[2] === 50 && rectangle[3] === 30,
+        ),
+      ).toBe(true),
+    );
+  });
   it("retires all sixteen adopted image URIs on real unmount", async () => {
     stubImageDecode();
     const actions = createActions();
@@ -408,8 +443,8 @@ describe("image canvas editor system import", () => {
       actions.run.mock.calls.some(
         ([action]) =>
           (action as { type?: string }).type === "recognition.releaseAssets" &&
-          (action as { resourceUris: string[] }).resourceUris.includes(
-            "https://app.vibeocr/__resource/import-image",
+          (action as { resourceUris: string[] }).resourceUris.some(
+            (uri) => uri === "https://app.vibeocr/__resource/import-image",
           ),
       ),
     ).toBe(false);

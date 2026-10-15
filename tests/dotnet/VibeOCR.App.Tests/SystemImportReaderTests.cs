@@ -35,6 +35,24 @@ public sealed class SystemImportReaderTests
   }
 
   [Fact]
+  public async Task BrokeredStorageFileWithoutPathUsesAuthorizedNameAndRealDecoder()
+  {
+    byte[] png = await PngAsync();
+    StorageFile file = await StorageFile.CreateStreamedFileAsync("brokered.png", async request =>
+    {
+      using Stream output = request.AsStreamForWrite();
+      await output.WriteAsync(png, Token);
+    }, null);
+    Assert.Equal(string.Empty, file.Path);
+    var package = new DataPackage();
+    package.SetStorageItems([file]);
+    ImportedSystemContent? content = await InputService.CreateImportReader().ReadPackageForImportAsync(package.GetView(), Token);
+    SystemImportImageItem image = Assert.Single(content!.Images);
+    Assert.Equal("image/png", image.MediaType);
+    Assert.Equal(png, image.Data);
+    Assert.Equal(2, image.PixelWidth);
+  }
+  [Fact]
   public async Task StorageItemsEncodedBudgetRejectsWholeBatchBeforeReadingFifthImage()
   {
     string root = Path.Combine(Path.GetTempPath(), $"vibeocr-import-bytes-{Guid.NewGuid():N}");

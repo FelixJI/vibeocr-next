@@ -7,6 +7,8 @@ import { resource } from "./FeatureValues";
 export function importErrorLabel(value: unknown): string | undefined {
   if (typeof value !== "string" || !value) return undefined;
   switch (value) {
+    case "workbench.error.imageImportSingleBaseline":
+      return "空画布请先导入一张图片；多图批次未导入。";
     case "workbench.error.imageImportOpenFirst":
       return "请先打开图片，再导入文字对象。";
     case "oversize":

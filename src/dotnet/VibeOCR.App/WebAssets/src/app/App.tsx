@@ -376,6 +376,8 @@ function commandProblemLabel(messageKey: string): string {
       "已有截图选区正在进行中；请先完成或取消当前选区，再重新触发。",
     "workbench.error.imageImportInProgress":
       "正在导入系统内容；请稍候或先完成当前导入。",
+    "workbench.error.imageImportSingleBaseline":
+      "空画布请先导入一张图片；多图批次未导入。",
     "workbench.error.imageImportOpenFirst":
       "请先打开或截取一张图片，再把系统内容粘贴为对象。",
     "workbench.error.imageImportEmpty":
