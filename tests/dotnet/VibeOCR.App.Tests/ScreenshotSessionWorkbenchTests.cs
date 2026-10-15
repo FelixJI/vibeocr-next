@@ -269,6 +269,111 @@ public sealed class ScreenshotSessionWorkbenchTests
     }
   }
 
+  private sealed class RefreshingImageSelectionClient : SelectionSubmitClient
+  {
+    public bool RemoveModeCapability;
+    public bool TableUnavailable;
+
+    public override async Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
+    {
+      Wire.Health health = await base.GetHealthAsync(cancellationToken);
+      if (RemoveModeCapability) return health with { Capabilities = [], CapabilityDescriptors = [] };
+      health = health with
+      {
+        Capabilities = [.. health.Capabilities!, RuntimeSelectionService.DefaultRecognitionModeCapability],
+      };
+      if (!TableUnavailable) return health;
+      Wire.CapabilityDescriptor descriptor = health.CapabilityDescriptors!.Single();
+      Wire.RecognitionModeCatalog catalog = descriptor.RecognitionModeCatalog!;
+      return health with
+      {
+        CapabilityDescriptors = [descriptor with
+        {
+          RecognitionModeCatalog = catalog with
+          {
+            Modes = [.. catalog.Modes.Select(mode => mode.Id == Wire.RecognitionModeId.PaddleTable
+              ? mode with { Availability = Wire.RecognitionModeAvailability.Unavailable } : mode)],
+          },
+        }],
+      };
+    }
+
+    public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>
+      Task.FromResult(new SettingsSnapshot
+      {
+        Extra = new Dictionary<string, JsonElement>
+        {
+          ["default_recognition_mode"] = JsonSerializer.SerializeToElement("paddle_table"),
+        },
+      });
+  }
+
+  [Theory]
+  [InlineData("recognition", true)]
+  [InlineData("recognition", false)]
+  [InlineData("imageEdit", true)]
+  [InlineData("imageEdit", false)]
+  public async Task CompletedImageLegacyModeRefusesCatalogLossAfterReadiness(
+    string scope, bool removeModeCapability)
+  {
+    string root = TemporaryRoot();
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    try
+    {
+      var inference = new RefreshingImageSelectionClient();
+      var recognition = new RecognitionViewModel(inference, new FixedCaptureInput());
+      var settings = new SettingsViewModel(inference);
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(recognition, root, broker, annotations, settings,
+        inferenceAttached: () => true, ensureRuntimeReady: async ct =>
+        {
+          entered.TrySetResult();
+          await release.Task.WaitAsync(ct);
+        });
+      await handler.ExecuteAsync(new SetThemeCommand(WorkbenchTheme.Light), TestContext.Current.CancellationToken);
+      var captured = new TaskCompletionSource<RecognitionScreenshotSessionState>(TaskCreationOptions.RunContinuationsAsynchronously);
+      handler.StateChanged += state =>
+      {
+        RecognitionScreenshotSessionState? session = state switch
+        {
+          RecognitionWorkbenchState r when scope == "recognition" && !r.IsBusy => r.ScreenshotSession,
+          ImageEditWorkbenchState e when scope == "imageEdit" && !e.IsBusy => e.ScreenshotSession,
+          _ => null,
+        };
+        if (session is not null) captured.TrySetResult(session);
+      };
+      await handler.ExecuteAsync(scope == "recognition"
+        ? new OpenRecognitionImageForEditCommand() : new SelectImageEditFileCommand(),
+        TestContext.Current.CancellationToken);
+      RecognitionScreenshotSessionState session = await captured.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      // 同时覆盖旧命令的显式任务覆盖与继承默认；两者都必须保留解析后的模式身份。
+      await handler.ExecuteAsync(new SetTaskEngineCommand(removeModeCapability ? "paddle_table" : null),
+        TestContext.Current.CancellationToken);
+      WorkbenchAnnotationLease lease = UploadAnnotation(annotations, AnnotationPng);
+      using var terminal = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && (state.StatusCode == "recognition.modeUnavailable" || state.Result is not null));
+      WorkbenchCommand command = scope == "recognition"
+        ? new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, Guid.Parse(session.SessionId), session.Revision, [])
+        : new RecognizeImageEditImageCommand(lease.ResourceUri.AbsoluteUri, Guid.Parse(session.SessionId), session.Revision, []);
+      Assert.Null((await handler.ExecuteAsync(command, TestContext.Current.CancellationToken)).Error);
+      await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      Assert.Null((await handler.ExecuteAsync(new SetTaskEngineCommand("paddle_text"), TestContext.Current.CancellationToken)).Error);
+      inference.RemoveModeCapability = removeModeCapability;
+      inference.TableUnavailable = !removeModeCapability;
+      // 普通目录刷新，不触发maintenance或会话代际失效。
+      Assert.True(await settings.RefreshSelectionAsync(TestContext.Current.CancellationToken));
+      release.TrySetResult();
+      RecognitionWorkbenchState result = await terminal.Task;
+      Assert.Empty(inference.Requests);
+      Assert.Empty(inference.UploadedContent);
+      Assert.Equal("recognition.modeUnavailable", result.StatusCode);
+    }
+    finally { release.TrySetResult(); Directory.Delete(root, recursive: true); }
+  }
+
   private static WorkbenchCommand ParseImageRecognitionCommand(
     string scope, Guid sessionId, long revision, string resourceUri, object? modeId)
   {

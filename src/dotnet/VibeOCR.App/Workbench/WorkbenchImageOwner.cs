@@ -1083,7 +1083,10 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       : layer with { Lines = kept };
   }
 
-  private RecognitionSubmitSelection FreezeImageRecognitionSelection(string? modeId, bool explicitMode)
+  private sealed record FrozenImageRecognitionSelection(
+    string? ModeId, RecognitionSubmitSelection Parameters);
+
+  private FrozenImageRecognitionSelection FreezeImageRecognitionSelection(string? modeId, bool explicitMode)
   {
     if (explicitMode && (string.IsNullOrWhiteSpace(modeId) || settingsOwner.IsEnvironmentSwitching))
       throw new RecognitionModeUnavailableException("所选识别模式无效或运行环境正在切换；请稍后重试。");
@@ -1094,15 +1097,27 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       RecognitionModeOption? mode = effectiveId is null ? null : snapshot.Catalog.SelectRecognitionMode(effectiveId);
       if (explicitMode && mode?.Availability != "ready")
         throw new RecognitionModeUnavailableException("当前运行环境未声明所选识别模式；请检查设置。");
-      return new RecognitionSubmitSelection(mode?.PipelineId ?? "OCR", mode?.Engine,
-        snapshot.MineruConfigFor(mode?.Id), selectionPolicy.GetModeOptions(mode)?.ToWire(mode!));
+      return new FrozenImageRecognitionSelection(mode?.Id,
+        new RecognitionSubmitSelection(mode?.PipelineId ?? "OCR", mode?.Engine,
+          snapshot.MineruConfigFor(mode?.Id), selectionPolicy.GetModeOptions(mode)?.ToWire(mode!)));
     }
     if (explicitMode)
       throw new RecognitionModeUnavailableException("识别目录未就绪；请在设置中连接并准备运行环境。");
     OcrEngine? engine = OcrEngineWire.Parse(modeId);
     if (modeId is not null && engine is null)
       throw new RecognitionModeUnavailableException("任务识别模式尚未绑定 Runtime catalog，已拒绝回退。");
-    return new RecognitionSubmitSelection(RecognitionVm.Pipeline, engine, null, null);
+    return new FrozenImageRecognitionSelection(null,
+      new RecognitionSubmitSelection(RecognitionVm.Pipeline, engine, null, null));
+  }
+
+  private void ValidateImageRecognitionSelection(FrozenImageRecognitionSelection selection)
+  {
+    if (selection.ModeId is null) return;
+    RuntimeSelectionService? catalog = settingsOwner.CurrentModel?.RecognitionSelection?.Catalog;
+    if (catalog?.SupportsRecognitionModes is not true)
+      throw new RecognitionModeUnavailableException("识别目录未就绪；请检查运行环境。");
+    if (catalog.SelectRecognitionMode(selection.ModeId).Availability != "ready")
+      throw new RecognitionModeUnavailableException("所选识别模式尚未就绪；请在设置中准备后重试。");
   }
 
   private async Task<WorkbenchState?> StartScreenshotRecognitionAsync(
@@ -1115,7 +1130,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     string? requestedMode = command.ModeId ?? RecognitionVm.TaskEngine;
     // 显式按钮在消费上传租约/接管图像前严格验证，并冻结模式及选项。
     // 旧命令仅在冷目录时延迟解析，但不重读等待期间变化的任务模式。
-    RecognitionSubmitSelection? selection = command.ModeId is not null || settingsOwner.CurrentModel?.RecognitionSelection is not null
+    FrozenImageRecognitionSelection? selection = command.ModeId is not null || settingsOwner.CurrentModel?.RecognitionSelection is not null
       ? FreezeImageRecognitionSelection(requestedMode, command.ModeId is not null) : null;
     using WorkbenchAnnotationFile annotation = TakeScreenshotAnnotation(command.ResourceUri);
     // 上传的是未烘焙遮罩的普通最终像素：同一份字节兼当新的显示基准，
@@ -1213,7 +1228,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     string? requestedMode = command.ModeId ?? RecognitionVm.TaskEngine;
     // 显式按钮在消费上传租约/接管图像前严格验证，并冻结模式及选项。
     // 旧命令仅在冷目录时延迟解析，但不重读等待期间变化的任务模式。
-    RecognitionSubmitSelection? selection = command.ModeId is not null || settingsOwner.CurrentModel?.RecognitionSelection is not null
+    FrozenImageRecognitionSelection? selection = command.ModeId is not null || settingsOwner.CurrentModel?.RecognitionSelection is not null
       ? FreezeImageRecognitionSelection(requestedMode, command.ModeId is not null) : null;
     using WorkbenchAnnotationFile annotation = TakeScreenshotAnnotation(command.ResourceUri);
     // 与 recognition 会话同一快照语义：读取的是未烘焙遮罩的普通最终像素。
@@ -1297,7 +1312,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     IReadOnlyList<WorkbenchExclusionBox> exclusions,
     string? requestedMode,
     bool explicitMode,
-    RecognitionSubmitSelection? selection,
+    FrozenImageRecognitionSelection? selection,
     CancellationTokenSource demand)
   {
     CancellationToken cancellationToken = demand.Token;
@@ -1314,18 +1329,12 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
         return;
       }
       if (generation != Volatile.Read(ref recognitionChannel.Generation)) return;
-      if (explicitMode)
-      {
-        RuntimeSelectionService? catalog = settingsOwner.CurrentModel?.RecognitionSelection?.Catalog;
-        if (catalog?.SupportsRecognitionModes is not true)
-          throw new RecognitionModeUnavailableException("识别目录未就绪；请检查运行环境。");
-        if (catalog.SelectRecognitionMode(requestedMode!).Availability != "ready")
-          throw new RecognitionModeUnavailableException("所选识别模式尚未就绪；请在设置中准备后重试。");
-      }
       selection ??= FreezeImageRecognitionSelection(requestedMode, explicitMode);
+      // 旧命令同样按冻结时解析出的模式复验，不读取等待期间的新任务选择。
+      ValidateImageRecognitionSelection(selection);
       RecognitionVm.AdoptInput(displayInput);
       RecognitionWorkbenchState state = await RunRecognitionAsync(
-        viewModel => viewModel.RecognizeCapturedInputAsync(input, cancellationToken, selection),
+        viewModel => viewModel.RecognizeCapturedInputAsync(input, cancellationToken, selection.Parameters),
         generation,
         cancellationToken);
       // B 的副本建立 recognition 自身独立快照会话：后续回显（任务模式/
@@ -1384,7 +1393,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     RecognitionInput input,
     string? requestedMode,
     bool explicitMode,
-    RecognitionSubmitSelection? selection,
+    FrozenImageRecognitionSelection? selection,
     CancellationTokenSource demand)
   {
     CancellationToken cancellationToken = demand.Token;
@@ -1408,17 +1417,11 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
         operations.PublishTerminal(SessionRecognitionState(false, "recognition.cancelled"));
         return;
       }
-      if (explicitMode)
-      {
-        RuntimeSelectionService? catalog = settingsOwner.CurrentModel?.RecognitionSelection?.Catalog;
-        if (catalog?.SupportsRecognitionModes is not true)
-          throw new RecognitionModeUnavailableException("识别目录未就绪；请检查运行环境。");
-        if (catalog.SelectRecognitionMode(requestedMode!).Availability != "ready")
-          throw new RecognitionModeUnavailableException("所选识别模式尚未就绪；请在设置中准备后重试。");
-      }
       selection ??= FreezeImageRecognitionSelection(requestedMode, explicitMode);
+      // 旧命令同样按冻结时解析出的模式复验，不读取等待期间的新任务选择。
+      ValidateImageRecognitionSelection(selection);
       RecognitionViewModel viewModel = RecognitionVm;
-      await viewModel.RecognizeCapturedInputAsync(input, cancellationToken, selection);
+      await viewModel.RecognizeCapturedInputAsync(input, cancellationToken, selection.Parameters);
       if (generation != Volatile.Read(ref recognitionChannel.Generation))
       {
         return;
