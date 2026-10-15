@@ -72,10 +72,65 @@ public interface IInputService
     Task<RecognitionInput?> ReadDroppedFileAsync(string path, CancellationToken cancellationToken);
 }
 
-public sealed class InputService : IInputService
+public sealed record SystemImportImageItem(
+    byte[] Data,
+    string MediaType,
+    int PixelWidth,
+    int PixelHeight);
+
+/// <summary>
+/// 对象导入读取结果：一次 DataPackage 快照只按优先级采一类内容
+/// （Bitmap → 授权 StorageItems 图片 → 纯文本），文件拖拽携带的
+/// 同名文本不再产生第二个对象；Source 记录实际命中的格式。
+/// </summary>
+public sealed record ImportedSystemContent(
+    IReadOnlyList<SystemImportImageItem> Images,
+    string? Text,
+    string Source)
+{
+    public const string BitmapSource = "bitmap";
+    public const string StorageItemsSource = "storageItems";
+    public const string TextSource = "text";
+}
+
+/// <summary>
+/// #232 对象导入的窄读取接缝：系统剪贴板/原生拖入 DataPackage 只由
+/// C# 宿主读取与校验，Web 不接受本地路径或网络 URL 充当授权。
+/// 实现必须真实读流并做硬截止校验，超限整批抛出拒绝，不截断。
+/// </summary>
+public interface ISystemImportReader
+{
+    Task<ImportedSystemContent?> ReadClipboardForImportAsync(CancellationToken cancellationToken);
+
+    Task<ImportedSystemContent?> ReadPackageForImportAsync(
+        DataPackageView view,
+        CancellationToken cancellationToken);
+}
+
+/// <summary>导入读取被明确拒绝（无内容/超限/格式不支持）；Reason 供回执映射。</summary>
+public sealed class SystemImportRejectException(
+    string reason,
+    string message,
+    Exception? innerException = null) : Exception(message, innerException)
+{
+    public string Reason { get; } = reason;
+}
+
+public sealed class InputService : IInputService, ISystemImportReader
 {
     private const long MaximumInputBytes = 256L << 20;
     private const long MaximumCaptureBytes = 256L << 20;
+    /// <summary>#232 单个导入图片的编码体积/像素/单边硬上限（拒绝，不降采样）。</summary>
+    internal const long MaximumImportImageBytes = 16L << 20;
+    internal const long MaximumImportImagePixels = 16_000_000;
+    internal const int MaximumImportImageSide = 8192;
+    /// <summary>#232 导入文本硬上限：UTF-16 code unit 数与行数（拒绝，不截断）。</summary>
+    internal const int MaximumImportTextLength = 4096;
+    internal const int MaximumImportTextLines = 128;
+    /// <summary>#232 单次导入（粘贴/拖入）的项目数上限。</summary>
+    internal const int MaximumImportItems = 16;
+    internal const long MaximumImportBatchPixels = 32_000_000;
+    internal const long MaximumImportBatchBytes = 64L << 20;
     private readonly Func<nint> _windowHandle;
     private readonly IScreenRegionPicker _screenRegionPicker;
     private readonly IScreenRegionPicker _scrollingRegionPicker;
@@ -118,7 +173,7 @@ public sealed class InputService : IInputService
         }
 
         RandomAccessStreamReference reference = await content.GetBitmapAsync();
-        using IRandomAccessStreamWithContentType stream = await reference.OpenReadAsync();
+        using IRandomAccessStreamWithContentType stream = await reference.OpenReadAsync().AsTask(cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         if (stream.Size > MaximumInputBytes)
         {
@@ -425,6 +480,157 @@ public sealed class InputService : IInputService
     public Task<RecognitionInput?> ReadDroppedFileAsync(
         string path,
         CancellationToken cancellationToken) => ReadFileAsync(path, "drop", cancellationToken);
+
+    public Task<ImportedSystemContent?> ReadClipboardForImportAsync(CancellationToken cancellationToken)
+    {
+        DataPackageView content = Clipboard.GetContent();
+        return ReadDataPackageCoreAsync(content, cancellationToken);
+    }
+
+    public Task<ImportedSystemContent?> ReadPackageForImportAsync(
+        DataPackageView view,
+        CancellationToken cancellationToken) => ReadDataPackageCoreAsync(view, cancellationToken);
+
+    /// <summary>轻量导入读取器：不构造选区 picker，仅供工作台对象导入注入。</summary>
+    internal static ISystemImportReader CreateImportReader() => new ImportOnlyReader();
+
+    private sealed class ImportOnlyReader : ISystemImportReader
+    {
+        public Task<ImportedSystemContent?> ReadClipboardForImportAsync(CancellationToken cancellationToken)
+        {
+            DataPackageView content = Clipboard.GetContent();
+            return ReadDataPackageCoreAsync(content, cancellationToken);
+        }
+
+        public Task<ImportedSystemContent?> ReadPackageForImportAsync(
+            DataPackageView view,
+            CancellationToken cancellationToken) =>
+            ReadDataPackageCoreAsync(view, cancellationToken);
+    }
+
+    private static async Task<ImportedSystemContent?> ReadDataPackageCoreAsync(
+        DataPackageView view,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(view);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (view.Contains(StandardDataFormats.Bitmap))
+        {
+            RandomAccessStreamReference reference = await view.GetBitmapAsync().AsTask(cancellationToken);
+            using IRandomAccessStreamWithContentType stream = await reference.OpenReadAsync().AsTask(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            SystemImportImageItem image = await ReadImportImageAsync(
+                stream,
+                string.IsNullOrWhiteSpace(stream.ContentType) ? "image/png" : stream.ContentType,
+                cancellationToken);
+            return new ImportedSystemContent([image], null, ImportedSystemContent.BitmapSource);
+        }
+        if (view.Contains(StandardDataFormats.StorageItems))
+        {
+            IReadOnlyList<IStorageItem> items = await view.GetStorageItemsAsync().AsTask(cancellationToken);
+            List<StorageFile> files = items.OfType<StorageFile>().ToList();
+            if (files.Count != items.Count)
+                throw new SystemImportRejectException("invalid", "不支持导入文件夹；本批未导入。");
+            if (files.Count == 0) return null;
+            if (files.Count > MaximumImportItems)
+                throw new SystemImportRejectException("batch", $"单次最多导入 {MaximumImportItems} 个项目。");
+            foreach (StorageFile file in files)
+            {
+                if (!IsSupportedImportImageExtension(Path.GetExtension(file.Name)))
+                    throw new SystemImportRejectException(
+                        "invalid", $"不支持导入的文件类型：{file.Name}");
+            }
+            List<SystemImportImageItem> images = [];
+            long remainingPixels = MaximumImportBatchPixels, remainingBytes = MaximumImportBatchBytes;
+            foreach (StorageFile file in files)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                using IRandomAccessStreamWithContentType stream = await file.OpenReadAsync().AsTask(cancellationToken);
+                SystemImportImageItem image = await ReadImportImageAsync(
+                    stream, MediaType(file.Path), cancellationToken, remainingPixels, remainingBytes);
+                images.Add(image);
+                remainingPixels -= (long)image.PixelWidth * image.PixelHeight;
+                remainingBytes -= image.Data.LongLength;
+            }
+            return new ImportedSystemContent(images, null, ImportedSystemContent.StorageItemsSource);
+        }
+        if (view.Contains(StandardDataFormats.Text))
+        {
+            string text = await view.GetTextAsync().AsTask(cancellationToken);
+            ValidateImportText(text);
+            return new ImportedSystemContent([], text, ImportedSystemContent.TextSource);
+        }
+        return null;
+    }
+
+    /// <summary>硬截止读取并真实解码一张导入图片：先按头部长度拒绝，再按
+    /// 实际读流/解码结果拒绝；解码成功才返回，杜绝伪造扩展名。</summary>
+    private static async Task<SystemImportImageItem> ReadImportImageAsync(
+        IRandomAccessStreamWithContentType stream,
+        string mediaType,
+        CancellationToken cancellationToken,
+        long remainingPixels = MaximumImportBatchPixels,
+        long remainingBytes = MaximumImportBatchBytes)
+    {
+        if (stream.Size > MaximumImportImageBytes)
+            throw new SystemImportRejectException(
+                "oversize", "导入图片超过 16 MiB 上限。");
+        if ((long)stream.Size > remainingBytes)
+            throw new SystemImportRejectException("budget", "导入资源总体积超过 64 MiB 上限。");
+        byte[] data = new byte[(int)stream.Size];
+        using (DataReader reader = new(stream.GetInputStreamAt(0)))
+        {
+            uint loaded = await reader.LoadAsync((uint)data.Length).AsTask(cancellationToken);
+            if (loaded != data.Length)
+                throw new SystemImportRejectException(
+                    "invalid", "导入图片读取不完整。");
+            reader.ReadBytes(data);
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        using MemoryStream memory = new(data, writable: false);
+        using var random = memory.AsRandomAccessStream();
+        try
+        {
+            BitmapDecoder decoder = await BitmapDecoder.CreateAsync(random).AsTask(cancellationToken);
+            uint width = decoder.PixelWidth, height = decoder.PixelHeight;
+            if (width == 0 || height == 0 ||
+                width > MaximumImportImageSide || height > MaximumImportImageSide ||
+                (long)width * height > MaximumImportImagePixels)
+                throw new SystemImportRejectException(
+                    "oversize", "导入图片尺寸超出支持范围（单边 ≤8192，总像素 ≤1600 万）。");
+            if ((long)width * height > remainingPixels)
+                throw new SystemImportRejectException("budget", "导入图片总像素超过 3200 万上限。");
+            _ = await decoder.GetPixelDataAsync().AsTask(cancellationToken);
+            if (!mediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+                mediaType = decoder.DecoderInformation.MimeTypes.FirstOrDefault() ?? "image/png";
+            return new SystemImportImageItem(data, mediaType, (int)width, (int)height);
+        }
+        catch (Exception error) when (
+            error is not (SystemImportRejectException or OperationCanceledException))
+        {
+            throw new SystemImportRejectException("invalid", "无法解码导入图片。", error);
+        }
+    }
+
+    internal static void ValidateImportText(string text)
+    {
+        if (text.Length > MaximumImportTextLength)
+            throw new SystemImportRejectException(
+                "oversize", $"导入文本超过 {MaximumImportTextLength} 字符上限。");
+        int lines = 1;
+        foreach (char character in text)
+            if (character == '\n')
+                lines++;
+        if (lines > MaximumImportTextLines)
+            throw new SystemImportRejectException(
+                "oversize", $"导入文本超过 {MaximumImportTextLines} 行上限。");
+    }
+
+    internal static bool IsSupportedImportImageExtension(string extension) => extension.ToLowerInvariant() switch
+    {
+        ".png" or ".jpg" or ".jpeg" or ".bmp" or ".webp" => true,
+        _ => false,
+    };
 
     private static async Task<RecognitionInput?> ReadFileAsync(
         string path,

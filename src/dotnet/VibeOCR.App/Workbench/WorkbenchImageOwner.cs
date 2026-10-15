@@ -11,11 +11,13 @@ using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 using Windows.Graphics.Imaging;
+using Windows.Storage;
 using Windows.Storage.Pickers;
+using Windows.ApplicationModel.DataTransfer;
 
 namespace VibeOCR.App.Workbench;
 
-internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImagePlatform, WorkbenchAnnotationStore annotationStore, Func<CancellationToken, Task>? ensureRuntimeReady, Func<bool>? inferenceAttached, PortableLayout? optionsLayout, Action<WorkbenchAnnotationFile, Guid, long, RecognitionTextLayerState?, IReadOnlyList<WorkbenchExclusionBox>>? pinScreenshot, Func<RecognitionViewModel> recognitionFactory, WorkbenchResourceBroker resourceBroker, ShellActionDispatcher? shellActions, IStructuredClipboardPlatform structuredClipboard, Func<string?> supervisorInstanceId, Func<RecognitionViewModel> textLayerRecognitionFactory, IResultActionPlatform resultActionPlatform, WorkbenchSettingsOwner settingsOwner, WorkbenchResourcesOwner resources, WorkbenchSelectionOwner selectionPolicy, WorkbenchOperations operations, Action synchronizeBatchMode)
+internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImagePlatform, WorkbenchAnnotationStore annotationStore, Func<CancellationToken, Task>? ensureRuntimeReady, Func<bool>? inferenceAttached, PortableLayout? optionsLayout, Action<WorkbenchAnnotationFile, Guid, long, RecognitionTextLayerState?, IReadOnlyList<WorkbenchExclusionBox>>? pinScreenshot, Func<RecognitionViewModel> recognitionFactory, WorkbenchResourceBroker resourceBroker, ShellActionDispatcher? shellActions, IStructuredClipboardPlatform structuredClipboard, Func<string?> supervisorInstanceId, Func<RecognitionViewModel> textLayerRecognitionFactory, IResultActionPlatform resultActionPlatform, WorkbenchSettingsOwner settingsOwner, WorkbenchResourcesOwner resources, WorkbenchSelectionOwner selectionPolicy, WorkbenchOperations operations, Action synchronizeBatchMode, ISystemImportReader? systemImportReader)
 {
   internal event Action? ScreenshotSelectionSettingsRequested;
   internal event Action? ScreenshotSelectionRecognized;
@@ -26,7 +28,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
   public event Action<Guid, long>? ScreenshotSessionDetached;
   public event Action<Guid, long>? ScreenshotTextLayerInvalidated;
   public event Action<RecognitionTextLayerState?>? ScreenshotTextLayerChanged;
-  internal bool Handles(WorkbenchCommand command) => command is SelectRecognitionImageCommand or RecognizeDroppedFileCommand or ReadRecognitionClipboardCommand or CaptureRecognitionScreenCommand or SelectImageEditFileCommand or ReadImageEditClipboardCommand or OpenDroppedImageEditFileCommand or OpenRecognitionImageForEditCommand or PasteRecognitionImageForEditCommand or CaptureScreenshotSessionCommand or CaptureScreenshotTextSessionCommand or CaptureScrollingScreenshotCommand or CloseScreenshotSessionCommand or CloseImageEditSessionCommand or NotifyScreenshotSessionRevisionCommand or NotifyImageEditRevisionCommand or CopyScreenshotImageCommand or CopyImageEditImageCommand or SaveScreenshotImageCommand or SaveImageEditImageCommand or PinScreenshotImageCommand or PinImageEditImageCommand or RecognizeScreenshotImageCommand or RecognizeImageEditImageCommand or PrepareScreenshotTextLayerCommand or PrepareImageEditTextLayerCommand or CancelScreenshotTextLayerCommand or CancelImageEditTextLayerCommand or CopyScreenshotSelectionCommand or CopyImageEditSelectionCommand or CancelRecognitionCommand or CopyRecognitionResultCommand or CopyStructuredResultCommand or CopyRecognitionLinesCommand or CopyStructuredCellsCommand or UpdateRecognitionLineCommand or ExportRecognitionResultCommand or CopyAnnotatedImageCommand or CopyImageEditAnnotatedImageCommand or SaveAnnotatedImageCommand or SaveImageEditAnnotatedImageCommand or SetTaskEngineCommand or SetRecognitionOptionsCommand;
+  internal bool Handles(WorkbenchCommand command) => command is SelectRecognitionImageCommand or RecognizeDroppedFileCommand or ReadRecognitionClipboardCommand or CaptureRecognitionScreenCommand or SelectImageEditFileCommand or ReadImageEditClipboardCommand or OpenDroppedImageEditFileCommand or OpenRecognitionImageForEditCommand or PasteRecognitionImageForEditCommand or CaptureScreenshotSessionCommand or CaptureScreenshotTextSessionCommand or CaptureScrollingScreenshotCommand or CloseScreenshotSessionCommand or CloseImageEditSessionCommand or NotifyScreenshotSessionRevisionCommand or NotifyImageEditRevisionCommand or CopyScreenshotImageCommand or CopyImageEditImageCommand or SaveScreenshotImageCommand or SaveImageEditImageCommand or PinScreenshotImageCommand or PinImageEditImageCommand or RecognizeScreenshotImageCommand or RecognizeImageEditImageCommand or PrepareScreenshotTextLayerCommand or PrepareImageEditTextLayerCommand or CancelScreenshotTextLayerCommand or CancelImageEditTextLayerCommand or CopyScreenshotSelectionCommand or CopyImageEditSelectionCommand or CancelRecognitionCommand or CopyRecognitionResultCommand or CopyStructuredResultCommand or CopyRecognitionLinesCommand or CopyStructuredCellsCommand or UpdateRecognitionLineCommand or ExportRecognitionResultCommand or CopyAnnotatedImageCommand or CopyImageEditAnnotatedImageCommand or SaveAnnotatedImageCommand or SaveImageEditAnnotatedImageCommand or SetTaskEngineCommand or SetRecognitionOptionsCommand or PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand or ImportDroppedImageEditContentCommand or ImportDroppedScreenshotContentCommand or AckImageEditImportCommand or AckScreenshotImportCommand or RejectImageEditImportCommand or RejectScreenshotImportCommand or ReleaseImageEditAssetsCommand or ReleaseScreenshotAssetsCommand;
 
   internal async ValueTask<WorkbenchState?> ExecuteAsync(WorkbenchCommand command, CancellationToken cancellationToken) => command switch
   {
@@ -150,6 +152,22 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       cancellationToken),
     SetTaskEngineCommand taskEngine => SetTaskEngine(taskEngine),
     SetRecognitionOptionsCommand options => SetRecognitionOptions(options),
+    PasteImageEditSystemContentCommand => await StartSystemPasteAsync(
+      imageEditChannel, imageEditImport, cancellationToken),
+    PasteScreenshotSystemContentCommand => await StartSystemPasteAsync(
+      recognitionChannel, recognitionImport, cancellationToken),
+    ImportDroppedImageEditContentCommand drop => await StartDroppedImportAsync(
+      imageEditChannel, imageEditImport, drop.Content, cancellationToken),
+    ImportDroppedScreenshotContentCommand drop => await StartDroppedImportAsync(
+      recognitionChannel, recognitionImport, drop.Content, cancellationToken),
+    AckImageEditImportCommand ack => AcknowledgeImport(imageEditChannel, imageEditImport, ack),
+    AckScreenshotImportCommand ack => AcknowledgeImport(recognitionChannel, recognitionImport, ack),
+    RejectImageEditImportCommand reject => RejectImport(imageEditChannel, imageEditImport, reject),
+    RejectScreenshotImportCommand reject => RejectImport(recognitionChannel, recognitionImport, reject),
+    ReleaseImageEditAssetsCommand release => ReleaseImportAssets(
+      imageEditChannel, imageEditImport, release.SessionId, release.ResourceUris),
+    ReleaseScreenshotAssetsCommand release => ReleaseImportAssets(
+      recognitionChannel, recognitionImport, release.SessionId, release.ResourceUris),
     _ => throw new InvalidOperationException("Unsupported Image workbench command."),
   };
 
@@ -439,6 +457,386 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
 
   private WorkbenchAnnotationFile TakeScreenshotAnnotation(string resourceUri) =>
     annotationStore.Take(new Uri(resourceUri));
+
+  // ---- #232 对象导入：C# 独占读取系统 DataPackage，成功发布 owned 资源
+  // 描述符，失败/取消/迟到回收暂存资源，旧画布与会话不变。 ----
+
+  /// <summary>导入图片资产聚合上限：不同 asset（含历史/重做引用与暂存）合计。</summary>
+  internal const int MaximumImportAssets = 16;
+  internal const long MaximumImportAggregatePixels = InputService.MaximumImportBatchPixels;
+  internal const long MaximumImportAggregateBytes = InputService.MaximumImportBatchBytes;
+
+  internal sealed class ImageImportInProgressException : Exception
+  {
+    public ImageImportInProgressException() : base("An image import is already running.") { }
+  }
+
+  /// <summary>同步拒绝（无会话/无内容/入口不可用）：携带 Web 回执 message key。</summary>
+  internal sealed class ImageImportRefusedException(string messageKey) : Exception
+  {
+    public string MessageKey { get; } = messageKey;
+  }
+
+  private sealed record StagedImportAsset(
+    WorkbenchResourceReference Reference,
+    string AssetId,
+    long Pixels);
+
+  /// <summary>通道导入状态：在途单飞请求 + 待确认暂存 + 已采纳会话资产。</summary>
+  private sealed record StagedImportBatch(long Revision, List<StagedImportAsset> Assets);
+
+  private sealed class ImportChannelState
+  {
+    public string? ActiveRequestId;
+    public CancellationTokenSource? ActiveCancellation;
+    public readonly Dictionary<string, StagedImportBatch> Unacknowledged =
+      new(StringComparer.Ordinal);
+    public readonly Dictionary<string, StagedImportAsset> Adopted =
+      new(StringComparer.Ordinal);
+  }
+
+  private readonly ImportChannelState imageEditImport = new();
+  private readonly ImportChannelState recognitionImport = new();
+
+  private ImportChannelState ImportStateFor(ImageSessionChannel channel) =>
+    ReferenceEquals(channel, imageEditChannel) ? imageEditImport : recognitionImport;
+
+  private void ReleaseChannelImports(ImportChannelState import)
+  {
+    import.ActiveRequestId = null;
+    import.ActiveCancellation?.Cancel();
+    import.ActiveCancellation?.Dispose();
+    import.ActiveCancellation = null;
+    foreach (StagedImportBatch staged in import.Unacknowledged.Values)
+      foreach (StagedImportAsset asset in staged.Assets)
+        resources.ReleaseResource(asset.Reference);
+    import.Unacknowledged.Clear();
+    foreach (StagedImportAsset asset in import.Adopted.Values)
+      resources.ReleaseResource(asset.Reference);
+    import.Adopted.Clear();
+  }
+
+  /// <summary>导入终态：按通道投影，携带描述符或拒绝原因，不改变基准。</summary>
+  private WorkbenchState ImportTerminalState(
+    ImageSessionChannel channel,
+    ImageEditImportState? import,
+    string? error)
+  {
+    if (ReferenceEquals(channel, imageEditChannel))
+      return new ImageEditWorkbenchState(
+        false,
+        imageEditChannel.SessionId is null ? "recognition.ready" : SessionStatusCode(imageEditChannel),
+        imageEditChannel.SessionInput,
+        CurrentScreenshotSession(imageEditChannel),
+        imageEditChannel.TextLayer,
+        import,
+        error);
+    return SessionRecognitionState(
+      false,
+      recognitionChannel.SessionId is null ? "recognition.ready"
+        : recognitionChannel.SessionResult is null ? "recognition.session" : "recognition.completed") with
+    {
+      Import = import,
+      ImportError = error,
+    };
+  }
+
+  private async Task<WorkbenchState?> StartSystemPasteAsync(
+    ImageSessionChannel channel,
+    ImportChannelState import,
+    CancellationToken cancellationToken)
+  {
+    if (systemImportReader is null)
+      throw new ImageImportRefusedException("workbench.error.imageImportUnavailable");
+    if (channel.SessionId is null)
+      return await OpenImportedBaselineAsync(channel, import,
+        token => systemImportReader.ReadClipboardForImportAsync(token), cancellationToken);
+    _ = StartSystemImport(
+      channel, import,
+      token => systemImportReader.ReadClipboardForImportAsync(token),
+      cancellationToken);
+    return null;
+  }
+
+  private async Task<WorkbenchState?> StartDroppedImportAsync(
+    ImageSessionChannel channel,
+    ImportChannelState import,
+    DataPackageView content,
+    CancellationToken cancellationToken)
+  {
+    if (systemImportReader is null)
+      throw new ImageImportRefusedException("workbench.error.imageImportUnavailable");
+    if (channel.SessionId is null)
+      return await OpenImportedBaselineAsync(channel, import,
+        token => systemImportReader.ReadPackageForImportAsync(content, token), cancellationToken);
+    // 原生 Drop deferral 必须覆盖整个 DataPackage 读取，不能在后台读完前结束。
+    await StartSystemImport(
+      channel, import,
+      token => systemImportReader.ReadPackageForImportAsync(content, token),
+      cancellationToken);
+    return null;
+  }
+
+  private async Task<WorkbenchState?> OpenImportedBaselineAsync(
+    ImageSessionChannel channel,
+    ImportChannelState import,
+    Func<CancellationToken, Task<ImportedSystemContent?>> read,
+    CancellationToken cancellationToken)
+  {
+    if (import.ActiveRequestId is not null) throw new ImageImportInProgressException();
+    string requestId = Guid.NewGuid().ToString("N");
+    using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, operations.Token);
+    CancellationToken token = cancellation.Token;
+    import.ActiveRequestId = requestId;
+    import.ActiveCancellation = cancellation;
+    long generation = Volatile.Read(ref channel.Generation);
+    try
+    {
+      ImportedSystemContent? content = await read(token);
+      token.ThrowIfCancellationRequested();
+      if (generation != Volatile.Read(ref channel.Generation) || channel.SessionId is not null)
+        throw new ImageImportRefusedException("workbench.error.screenshotSessionStale");
+      if (content?.Images.FirstOrDefault() is { } image)
+      {
+        var input = new RecognitionInput(image.Data, image.MediaType, "import", "drop");
+        return StartImageEdit(channel,
+          viewModel => viewModel.OpenImportedImageForEditAsync(input, cancellationToken), cancellationToken);
+      }
+      if (content?.Text is not null)
+        throw new ImageImportRefusedException("workbench.error.imageImportOpenFirst");
+      throw new ImageImportRefusedException("workbench.error.imageImportEmpty");
+    }
+    catch (OperationCanceledException)
+    {
+      throw new AnnotatedImageOperationCancelledException();
+    }
+    finally
+    {
+      if (import.ActiveRequestId == requestId)
+      {
+        import.ActiveRequestId = null;
+        import.ActiveCancellation = null;
+      }
+    }
+  }
+  private Task StartSystemImport(
+    ImageSessionChannel channel,
+    ImportChannelState import,
+    Func<CancellationToken, Task<ImportedSystemContent?>> read,
+    CancellationToken cancellationToken)
+  {
+    Guid sessionId = channel.SessionId ??
+      throw new ImageImportRefusedException("workbench.error.imageImportOpenFirst");
+    // 读取/解码窗口内单飞：重复触发明确拒绝，不排队也不重读剪贴板。
+    if (import.ActiveRequestId is not null)
+      throw new ImageImportInProgressException();
+    string requestId = Guid.NewGuid().ToString("N");
+    long revision = channel.Revision;
+    long generation = Volatile.Read(ref channel.Generation);
+    CancellationTokenSource cancellation =
+      CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, operations.Token);
+    import.ActiveRequestId = requestId;
+    import.ActiveCancellation = cancellation;
+    Task completion = Task.CompletedTask;
+    operations.Start(
+      SessionState(channel, true, "recognition.running"),
+      () => completion = CompleteSystemImportAsync(
+        channel, import, read, requestId, sessionId, revision, generation, cancellation));
+    return completion;
+  }
+
+  private async Task CompleteSystemImportAsync(
+    ImageSessionChannel channel,
+    ImportChannelState import,
+    Func<CancellationToken, Task<ImportedSystemContent?>> read,
+    string requestId,
+    Guid sessionId,
+    long revision,
+    long generation,
+    CancellationTokenSource cancellation)
+  {
+    List<StagedImportAsset> staged = [];
+    try
+    {
+      ImportedSystemContent? content = await read(cancellation.Token);
+      if (import.ActiveRequestId != requestId) return;
+      if (content is null || (content.Images.Count == 0 && content.Text is null))
+        throw new SystemImportRejectException("empty", "剪贴板或拖入内容中没有可导入的图片或文本。");
+      if (content.Images.Count + (content.Text is null ? 0 : 1) > InputService.MaximumImportItems)
+        throw new SystemImportRejectException(
+          "batch", $"单次最多导入 {InputService.MaximumImportItems} 个项目。");
+      // 聚合预算：已采纳 + 待确认暂存 + 本次批次全部计入后再发布，超限整批拒绝。
+      long totalPixels = 0, totalBytes = 0;
+      int totalImages = 0;
+      void Count(StagedImportAsset asset)
+      {
+        totalPixels += asset.Pixels;
+        totalBytes += asset.Reference.ByteLength;
+        if (asset.Pixels > 0) totalImages++;
+      }
+      foreach (StagedImportAsset asset in import.Adopted.Values) Count(asset);
+      foreach (StagedImportBatch pending in import.Unacknowledged.Values)
+        foreach (StagedImportAsset asset in pending.Assets) Count(asset);
+      foreach (SystemImportImageItem image in content.Images)
+      {
+        totalPixels += (long)image.PixelWidth * image.PixelHeight;
+        totalBytes += image.Data.LongLength;
+        totalImages++;
+      }
+      if (content.Text is not null) totalBytes += Encoding.UTF8.GetByteCount(content.Text);
+      if (totalImages > MaximumImportAssets)
+        throw new SystemImportRejectException(
+          "budget", $"导入图片资产超过 {MaximumImportAssets} 个上限；请先删除不再需要的导入对象。");
+      if (totalPixels > MaximumImportAggregatePixels)
+        throw new SystemImportRejectException(
+          "budget", "导入图片总像素超过 3200 万上限；请先删除不再需要的导入对象。");
+      if (totalBytes > MaximumImportAggregateBytes)
+        throw new SystemImportRejectException(
+          "budget", "导入资源总体积超过 64 MiB 上限；请先删除不再需要的导入对象。");
+      // 全部校验通过后才发布资源；任一项失败回收已发布项，不产生半批。
+      List<ImageEditImportItem> items = [];
+      foreach (SystemImportImageItem image in content.Images)
+      {
+        WorkbenchResourceReference reference = await resources.PublishBytesAsync(
+          image.Data,
+          image.MediaType,
+          WorkbenchResourcesOwner.ExtensionForMediaType(image.MediaType),
+          cancellation.Token);
+        staged.Add(new StagedImportAsset(reference, Guid.NewGuid().ToString("N"),
+          (long)image.PixelWidth * image.PixelHeight));
+        items.Add(new ImageEditImportItem(
+          "image", staged[^1].AssetId, reference.Url, reference.MediaType, reference.ByteLength,
+          image.PixelWidth, image.PixelHeight));
+      }
+      if (content.Text is { } text)
+      {
+        WorkbenchResourceReference reference = await resources.PublishBytesAsync(
+          Encoding.UTF8.GetBytes(text),
+          "text/plain; charset=utf-8",
+          ".txt",
+          cancellation.Token);
+        staged.Add(new StagedImportAsset(reference, Guid.NewGuid().ToString("N"), 0));
+        items.Add(new ImageEditImportItem(
+          "text", staged[^1].AssetId, reference.Url, reference.MediaType, reference.ByteLength,
+          TextLength: text.Length,
+          TextLines: CountImportLines(text)));
+      }
+      // 迟到拒绝：基准/会话/修订任一变化都不发布可采纳对象，旧画布不变。
+      if (generation != Volatile.Read(ref channel.Generation) ||
+        channel.SessionId != sessionId || channel.Revision != revision)
+      {
+        foreach (StagedImportAsset asset in staged) resources.ReleaseResource(asset.Reference);
+        return;
+      }
+      import.Unacknowledged[requestId] = new StagedImportBatch(revision, staged);
+      operations.PublishTerminal(ImportTerminalState(
+        channel,
+        new ImageEditImportState(requestId, sessionId.ToString("N"), revision, items),
+        null));
+    }
+    catch (Exception error) when (
+      error is SystemImportRejectException or InvalidDataException or
+        IOException or UnauthorizedAccessException or OperationCanceledException)
+    {
+      foreach (StagedImportAsset asset in staged) resources.ReleaseResource(asset.Reference);
+      bool current = import.ActiveRequestId == requestId &&
+        generation == Volatile.Read(ref channel.Generation) &&
+        channel.SessionId == sessionId && channel.Revision == revision;
+      string reason = error switch
+      {
+        OperationCanceledException => "cancelled",
+        SystemImportRejectException rejected => rejected.Reason,
+        _ => "invalid",
+      };
+      AppLog.Warn($"Image import failed ({reason}): {error.Message}");
+      if (current)
+        operations.PublishTerminal(ImportTerminalState(channel, null, reason));
+    }
+    catch (Exception error)
+    {
+      // 意外异常也必须回到终态：不能让导入 busy 永久滞留，旧画布保持不变。
+      foreach (StagedImportAsset asset in staged) resources.ReleaseResource(asset.Reference);
+      bool current = import.ActiveRequestId == requestId &&
+        generation == Volatile.Read(ref channel.Generation) &&
+        channel.SessionId == sessionId && channel.Revision == revision;
+      AppLog.Error("Image import crashed", error);
+      if (current)
+        operations.PublishTerminal(ImportTerminalState(channel, null, "invalid"));
+    }
+    finally
+    {
+      if (import.ActiveRequestId == requestId)
+      {
+        import.ActiveRequestId = null;
+        import.ActiveCancellation = null;
+      }
+      cancellation.Dispose();
+    }
+  }
+
+  internal static int CountImportLines(string text)
+  {
+    int lines = 1;
+    foreach (char character in text)
+      if (character == '\n')
+        lines++;
+    return lines;
+  }
+
+  /// <summary>Web 采纳确认：暂存转入会话资产集；重复/未知请求幂等无副作用。</summary>
+  private WorkbenchState? AcknowledgeImport(
+    ImageSessionChannel channel,
+    ImportChannelState import,
+    IImageImportTarget ack)
+  {
+    if (channel.SessionId == ack.SessionId &&
+      import.Unacknowledged.TryGetValue(ack.RequestId, out StagedImportBatch? staged) &&
+      staged.Revision == ack.Revision)
+    {
+      import.Unacknowledged.Remove(ack.RequestId);
+      foreach (StagedImportAsset asset in staged.Assets)
+        import.Adopted[asset.Reference.Url] = asset;
+    }
+    return CurrentChannelState(channel);
+  }
+
+  /// <summary>Web 拒收（过期/取消/解码失败）：精确回收该请求的暂存资源；幂等。</summary>
+  private WorkbenchState? RejectImport(
+    ImageSessionChannel channel,
+    ImportChannelState import,
+    IImageImportTarget reject)
+  {
+    if (channel.SessionId == reject.SessionId &&
+      import.Unacknowledged.TryGetValue(reject.RequestId, out StagedImportBatch? staged) &&
+      staged.Revision == reject.Revision)
+    {
+      import.Unacknowledged.Remove(reject.RequestId);
+      foreach (StagedImportAsset asset in staged.Assets)
+        resources.ReleaseResource(asset.Reference);
+    }
+    return CurrentChannelState(channel);
+  }
+
+  /// <summary>Web 释放不再被历史（含重做）引用的资产；只回收本会话已采纳的 owned URI。</summary>
+  private WorkbenchState? ReleaseImportAssets(
+    ImageSessionChannel channel,
+    ImportChannelState import,
+    Guid sessionId,
+    IReadOnlyList<string> resourceUris)
+  {
+    if (channel.SessionId == sessionId)
+    {
+      foreach (string uri in resourceUris)
+      {
+        if (!Uri.TryCreate(uri, UriKind.Absolute, out Uri? parsed) ||
+          !WorkbenchResourceBroker.IsResourceUri(parsed))
+          continue;
+        if (import.Adopted.Remove(uri, out StagedImportAsset? asset))
+          resources.ReleaseResource(asset.Reference);
+      }
+    }
+    return CurrentChannelState(channel);
+  }
 
   private WorkbenchState? StartImageEdit(
     ImageSessionChannel channel,
@@ -1910,6 +2308,8 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
 
   private void ClearScreenshotSession(ImageSessionChannel channel)
   {
+    // 会话被关闭/替换：导入暂存与会话资产随会话整体回收，不残留 owned 文件。
+    ReleaseChannelImports(ImportStateFor(channel));
     if (ReferenceEquals(channel, recognitionChannel)) ClearResultActions();
     if (channel.SessionId is { } id)
       ScreenshotSessionDetached?.Invoke(id, channel.Revision);

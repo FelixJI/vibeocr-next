@@ -16,7 +16,11 @@ import { feature, booleanValue } from "./FeatureValues";
 
 import { resource } from "./FeatureValues";
 
-import { screenshotSession, screenshotTextLayer } from "./ScreenshotSession";
+import {
+  screenshotSession,
+  screenshotTextLayer,
+  imageEditImport,
+} from "./ScreenshotSession";
 
 import { StatusLine } from "./FeaturePanels";
 
@@ -111,17 +115,35 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
               </Button>
             </>
           )}
+          {/* #232 显式文字动作：宿主读取系统剪贴板，图片/文本成为可编辑
+              对象；空画布时图片走旧基准入口、文本提示先打开图片。不新增图标。 */}
+          <Button
+            disabled={!viewState.connected || busy}
+            onClick={() =>
+              actions.run({
+                type: scene
+                  ? "recognition.pasteSystemContent"
+                  : "imageEdit.pasteSystemContent",
+              })
+            }
+          >
+            粘贴系统内容
+          </Button>
         </>
       }
     >
       <StatusLine>
         {busy
           ? "正在读取图片…"
-          : state.statusCode === "recognition.inputFailed"
-            ? "无法读取图片；当前编辑已保留，请检查格式、尺寸和访问权限。"
-            : input
-              ? "原图保留；默认另存副本。"
-              : "选择、粘贴或拖入图片。"}
+          : state.importError
+            ? state.importError === "cancelled"
+              ? "导入已取消；已有画布与历史保持不变。"
+              : "导入未完成；本批未导入，已有画布与历史保持不变。"
+            : state.statusCode === "recognition.inputFailed"
+              ? "无法读取图片；当前编辑已保留，请检查格式、尺寸和访问权限。"
+              : input
+                ? "原图保留；默认另存副本。"
+                : "选择、粘贴或拖入图片。"}
       </StatusLine>
       {session?.sceneEditing && !scene ? (
         <EmptyStage
@@ -141,6 +163,7 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
           sourceByteLength={input.byteLength}
           session={session}
           textLayer={screenshotTextLayer(state.textLayer)}
+          systemImport={imageEditImport(state.import)}
           autoText={
             session?.textSelectionRequested === true && autoTextPreference
           }

@@ -1,4 +1,5 @@
 import type { ScreenshotTextLayerState } from "../components/ImageCanvasEditor";
+import type { EditorImportDescriptor } from "../components/ImageCanvasEditor";
 
 import { resource } from "./FeatureValues";
 
@@ -54,6 +55,54 @@ export function screenshotSession(
           : undefined,
       }
     : undefined;
+}
+
+// 宿主回发的 #232 对象导入批次；字段不完整时按无导入处理。
+export function imageEditImport(
+  value: unknown,
+): EditorImportDescriptor | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return undefined;
+  const candidate = value as Partial<EditorImportDescriptor>;
+  if (
+    typeof candidate.requestId !== "string" ||
+    candidate.requestId.length === 0 ||
+    typeof candidate.sessionId !== "string" ||
+    typeof candidate.revision !== "number" ||
+    !Array.isArray(candidate.items) ||
+    candidate.items.length === 0 ||
+    candidate.items.length > 16
+  )
+    return undefined;
+  const items = candidate.items.filter(
+    (
+      item,
+    ): item is {
+      kind: "image" | "text";
+      assetId: string;
+      resourceUri: string;
+      byteLength: number;
+      pixelWidth?: number;
+      pixelHeight?: number;
+    } =>
+      typeof item === "object" &&
+      item !== null &&
+      (item.kind === "image" || item.kind === "text") &&
+      typeof item.assetId === "string" &&
+      item.assetId.length > 0 &&
+      typeof item.resourceUri === "string" &&
+      item.resourceUri.startsWith("https://app.vibeocr/__resource/") &&
+      typeof item.byteLength === "number" &&
+      Number.isFinite(item.byteLength) &&
+      item.byteLength >= 0,
+  );
+  if (items.length === 0) return undefined;
+  return {
+    requestId: candidate.requestId,
+    sessionId: candidate.sessionId,
+    revision: candidate.revision,
+    items,
+  };
 }
 
 export interface TextLayerLineState {

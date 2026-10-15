@@ -161,6 +161,10 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         RunInputAsync(ct => _inputs.ReadDroppedFileAsync(path, ct), cancellationToken,
             recognize: false, persistCurrentInput: true);
 
+    /// <summary>已由宿主读取并校验的同一导入快照直接建立基准，避免二次读取剪贴板。</summary>
+    internal Task OpenImportedImageForEditAsync(RecognitionInput input, CancellationToken cancellationToken) =>
+        RunInputAsync(_ => Task.FromResult<RecognitionInput?>(input), cancellationToken,
+            recognize: false, persistCurrentInput: true);
     public void ReleaseInput()
     {
         CurrentInput?.DisposeCaptureScene();

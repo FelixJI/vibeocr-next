@@ -242,6 +242,82 @@ public sealed record CopyImageEditAnnotatedImageCommand(string ResourceUri) : Wo
 
 public sealed record SaveImageEditAnnotatedImageCommand(string ResourceUri) : WorkbenchCommand;
 
+// ---- #232 对象导入：系统剪贴板/原生拖入内容经 C# 宿主授权读取后，
+// 以宿主 owned 资源原子追加为可编辑对象（图片/文本一律资源化，不内联）。 ----
+
+/// <summary>“粘贴系统内容”动作：imageEdit 通道；无会话时由宿主回退旧基准入口或拒绝。</summary>
+public sealed record PasteImageEditSystemContentCommand : WorkbenchCommand;
+
+/// <summary>“粘贴系统内容”动作：recognition 通道（截图现场窗口）。</summary>
+public sealed record PasteScreenshotSystemContentCommand : WorkbenchCommand;
+
+/// <summary>原生拖入内容导入（仅宿主构造，不经桥解析）：DataPackage 由 C# 读取。</summary>
+public sealed record ImportDroppedImageEditContentCommand(
+    Windows.ApplicationModel.DataTransfer.DataPackageView Content) : WorkbenchCommand;
+
+/// <summary>原生拖入内容导入（recognition 通道，仅宿主构造）。</summary>
+public sealed record ImportDroppedScreenshotContentCommand(
+    Windows.ApplicationModel.DataTransfer.DataPackageView Content) : WorkbenchCommand;
+
+/// <summary>导入确认/拒收命令的共享合同：绑定会话/修订 + 本次导入请求 id。</summary>
+public interface IImageImportTarget : IScreenshotSessionTarget
+{
+  string RequestId { get; }
+}
+
+/// <summary>Web 确认采纳一批导入对象：宿主把暂存资源转入会话资产集；幂等。</summary>
+public sealed record AckImageEditImportCommand(
+    Guid SessionId,
+    long Revision,
+    string RequestId) : WorkbenchCommand, IImageImportTarget;
+
+public sealed record AckScreenshotImportCommand(
+    Guid SessionId,
+    long Revision,
+    string RequestId) : WorkbenchCommand, IImageImportTarget;
+
+/// <summary>Web 拒收一批导入（会话/修订过期、取消、解码失败）：宿主精确回收暂存资源；幂等。</summary>
+public sealed record RejectImageEditImportCommand(
+    Guid SessionId,
+    long Revision,
+    string RequestId) : WorkbenchCommand, IImageImportTarget;
+
+public sealed record RejectScreenshotImportCommand(
+    Guid SessionId,
+    long Revision,
+    string RequestId) : WorkbenchCommand, IImageImportTarget;
+
+/// <summary>Web 释放不再被历史（含重做）引用的导入资产资源；幂等，只接受宿主 owned opaque URI。</summary>
+public sealed record ReleaseImageEditAssetsCommand(
+    Guid SessionId,
+    IReadOnlyList<string> ResourceUris) : WorkbenchCommand;
+
+public sealed record ReleaseScreenshotAssetsCommand(
+    Guid SessionId,
+    IReadOnlyList<string> ResourceUris) : WorkbenchCommand;
+
+/// <summary>
+/// 一次成功导入的描述符集合：只携带有界元数据与 opaque 资源引用，
+/// 图片/文本体一律经资源获取，永不内联进 64KiB 桥状态。
+/// </summary>
+public sealed record ImageEditImportState(
+    string RequestId,
+    string SessionId,
+    long Revision,
+    IReadOnlyList<ImageEditImportItem> Items);
+
+/// <summary>单个导入项描述符：kind=image 携带像素尺寸，kind=text 携带字符/行数。</summary>
+public sealed record ImageEditImportItem(
+    string Kind,
+    string AssetId,
+    string ResourceUri,
+    string MediaType,
+    long ByteLength,
+    int PixelWidth = 0,
+    int PixelHeight = 0,
+    int TextLength = 0,
+    int TextLines = 0);
+
 public sealed record SelectRecognitionImageCommand : WorkbenchCommand;
 
 public sealed record RecognizeDroppedFileCommand(string Path) : WorkbenchCommand;
@@ -585,7 +661,9 @@ public sealed record RecognitionWorkbenchState(
   RecognitionScreenshotSessionState? ScreenshotSession = null,
   RecognitionTextLayerState? TextLayer = null,
   WorkbenchResourceReference? StructuredResult = null,
-  WorkbenchResourceReference? ResultImage = null) : WorkbenchState
+  WorkbenchResourceReference? ResultImage = null,
+  ImageEditImportState? Import = null,
+  string? ImportError = null) : WorkbenchState
 {
   public override string Scope => "recognition";
 }
@@ -613,7 +691,9 @@ public sealed record ImageEditWorkbenchState(
   string StatusCode,
   WorkbenchResourceReference? Input = null,
   RecognitionScreenshotSessionState? ScreenshotSession = null,
-  RecognitionTextLayerState? TextLayer = null) : WorkbenchState
+  RecognitionTextLayerState? TextLayer = null,
+  ImageEditImportState? Import = null,
+  string? ImportError = null) : WorkbenchState
 {
   public override string Scope => "imageEdit";
 }

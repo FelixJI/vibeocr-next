@@ -46,7 +46,11 @@ import { TaskEngineSelector } from "./TaskEngineSelection";
 
 import { recognitionEngines } from "./TaskEngineValues";
 
-import { screenshotSession, screenshotTextLayer } from "./ScreenshotSession";
+import {
+  screenshotSession,
+  screenshotTextLayer,
+  imageEditImport,
+} from "./ScreenshotSession";
 
 import { Panel, StatusLine } from "./FeaturePanels";
 
@@ -307,6 +311,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
                 source={input.url}
                 sourceByteLength={input.byteLength}
                 textLayer={textLayer}
+                systemImport={imageEditImport(state.import)}
                 autoText={
                   session?.textSelectionRequested === true && autoTextPreference
                 }

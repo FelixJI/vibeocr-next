@@ -457,3 +457,34 @@ describe("PR249 第三轮可见描边边界", () => {
     },
   );
 });
+
+describe("导入图片局部变换锚点", () => {
+  it.each(["rotate", "horizontal", "vertical"] as const)(
+    "%s 绕图片中心变换，位置不漂移且另一对象不变",
+    (operation) => {
+      const image: Mark = {
+        id: "image",
+        tool: "image",
+        assetId: "asset",
+        start: { x: 370, y: 260 },
+        end: { x: 530, y: 340 },
+      };
+      const other = box("untouched", 10);
+      const marks =
+        operation === "rotate"
+          ? rotateMarkIds([image, other], ids("image"), { x: 450, y: 300 })
+          : mirrorMarkIds(
+              [image, other],
+              ids("image"),
+              { x: 450, y: 300 },
+              operation === "horizontal" ? "h" : "v",
+            );
+      expect(marks[0]!.start).toEqual(image.start);
+      expect(marks[0]!.end).toEqual(image.end);
+      expect(marks[1]).toBe(other);
+      const bounds = markBoundsOf(marks[0]!, undefined);
+      expect(bounds.x + bounds.width / 2).toBe(450);
+      expect(bounds.y + bounds.height / 2).toBe(300);
+    },
+  );
+});

@@ -8,6 +8,7 @@ using VibeOCR.App.Services;
 using VibeOCR.App.Web;
 using VibeOCR.App.Workbench;
 using VibeOCR.Platform.Windows;
+using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
 
 namespace VibeOCR.App;
@@ -16,6 +17,7 @@ namespace VibeOCR.App;
 internal sealed class ImageEditWindow : IAsyncDisposable
 {
   private readonly WebView2 webView = new();
+  private readonly IWorkbenchApplication application;
   private static int activeWebViewCount;
   private readonly TaskCompletionSource<long> presented = new(TaskCreationOptions.RunContinuationsAsynchronously);
   internal long CreatedTimestamp { get; } = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -66,6 +68,7 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     ScreenshotCaptureScene? captureScene = null)
   {
     SessionId = sessionId;
+    this.application = application;
     this.assetFolder = assetFolder;
     this.captureScene = captureScene;
     if (captureScene is not null) webView.Opacity = 0;
@@ -89,6 +92,11 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     recovery.Child = recoveryPanel;
     var content = captureScene?.Root ?? new Grid();
     contentRoot = content;
+    // #232：两个原生窗口（含截图现场）接同一宿主导入命令：DataPackage 由
+    // C# 读取，异步处理用原生事件 deferral，完成前不释放拖放源。
+    content.AllowDrop = true;
+    content.DragOver += OnDragOver;
+    content.Drop += OnDrop;
     content.Children.Add(webView);
     content.Children.Add(recovery);
     content.AddHandler(UIElement.PreviewKeyDownEvent,
@@ -158,6 +166,42 @@ internal sealed class ImageEditWindow : IAsyncDisposable
   [DllImport("user32.dll")]
   [return: MarshalAs(UnmanagedType.Bool)]
   private static extern bool SetForegroundWindow(nint window);
+
+  private void OnDragOver(object sender, DragEventArgs args)
+  {
+    if (args.DataView.Contains(StandardDataFormats.Bitmap) ||
+      args.DataView.Contains(StandardDataFormats.StorageItems) ||
+      args.DataView.Contains(StandardDataFormats.Text))
+    {
+      args.AcceptedOperation = DataPackageOperation.Copy;
+    }
+  }
+
+  private async void OnDrop(object sender, DragEventArgs args)
+  {
+    var deferral = args.GetDeferral();
+    try
+    {
+      if (closed) return;
+      // scene 窗口承载 recognition 会话，独立编辑窗承载 imageEdit 会话；
+      // 同一 DataPackage 读取/校验/发布链路，不替换基准。
+      WorkbenchCommand command = captureScene is null
+        ? new ImportDroppedImageEditContentCommand(args.DataView)
+        : new ImportDroppedScreenshotContentCommand(args.DataView);
+      await application.ExecuteAsync(
+        new WorkbenchCommandEnvelope(Guid.NewGuid(), command),
+        CancellationToken.None);
+    }
+    catch (Exception error) when (
+      error is IOException or UnauthorizedAccessException or InvalidOperationException)
+    {
+      AppLog.Error("Image editor drop failed", error);
+    }
+    finally
+    {
+      deferral.Complete();
+    }
+  }
 
   private async void OnLoaded(object sender, RoutedEventArgs args)
   {
