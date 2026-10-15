@@ -239,6 +239,65 @@ describe("文字、序号和说明对象", () => {
     return { ...rendered, canvas, harness };
   }
 
+  it("清空前置屏蔽会取消文字草稿，保留原文字和后续矩形，撤销恢复屏蔽", async () => {
+    stubCanvasStack({ width: 900, height: 600 });
+    const harness = stubAnimationFrames();
+    const { actions, unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+    fireEvent.click(screen.getByRole("button", { name: "屏蔽" }));
+    await dragDraw(canvas, harness, { x: 80, y: 80 }, { x: 150, y: 130 });
+    fireEvent.click(screen.getByRole("button", { name: "文字" }));
+    fireEvent.change(screen.getByLabelText("标注文字"), {
+      target: { value: "A原文字" },
+    });
+    await dragDraw(canvas, harness, { x: 200, y: 220 }, { x: 360, y: 220 });
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    fireEvent.change(screen.getByLabelText("自定义颜色"), {
+      target: { value: "#1f6feb" },
+    });
+    await dragDraw(canvas, harness, { x: 500, y: 300 }, { x: 700, y: 450 });
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "编辑文字" }));
+    fireEvent.change(screen.getByLabelText("标注文字"), {
+      target: { value: "A*草稿" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "清空屏蔽" }));
+    harness.flush();
+    // 旧实现留下完成入口，点击后会把旧index1的草稿覆写到矩形B。
+    const staleFinish = screen.queryByRole("button", { name: "完成文字编辑" });
+    if (staleFinish) fireEvent.click(staleFinish);
+    const options = () =>
+      Array.from(
+        screen.getByLabelText("选择标注对象").querySelectorAll("option"),
+      ).map((option) => option.textContent);
+    expect(options()).toEqual(["未选择", "1 · 文字", "2 · 矩形"]);
+    expect(
+      screen.queryByRole("button", { name: "完成文字编辑" }),
+    ).not.toBeInTheDocument();
+    expect(revisions(actions)).toEqual([1, 2, 3, 4]);
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    expect(screen.getByLabelText("标注文字")).toHaveValue("A原文字");
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "1" },
+    });
+    expect(screen.getByLabelText("自定义颜色")).toHaveValue("#1f6feb");
+    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+    harness.flush();
+    expect(options()).toEqual(["未选择", "1 · 屏蔽", "2 · 文字", "3 · 矩形"]);
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "1" },
+    });
+    expect(screen.getByLabelText("标注文字")).toHaveValue("A原文字");
+    unmount();
+  });
+
   it.each(["文字", "说明"])(
     "%s续编时画布取色只改草稿，取消保留旧色、完成一条历史",
     async (label) => {

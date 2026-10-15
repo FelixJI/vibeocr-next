@@ -427,3 +427,48 @@ for (const label of ["文字", "说明"]) {
     },
   );
 }
+
+test("清空前置屏蔽取消文字草稿并保留原文字、矩形和可撤销历史", async ({
+  page,
+}) => {
+  const { uploads } = await setupTextHost(page);
+  await page.getByRole("button", { name: "屏蔽", exact: true }).click();
+  await drag(page, 80, 80, 150, 130);
+  await page.getByRole("button", { name: "文字", exact: true }).click();
+  await page.getByLabel("标注文字").fill("A原文字");
+  await drag(page, 200, 220, 360, 220);
+  await page.getByRole("button", { name: "矩形", exact: true }).click();
+  await page.getByLabel("自定义颜色").fill("#1f6feb");
+  await page.getByLabel("线条宽度").selectOption("8");
+  await drag(page, 500, 300, 700, 450);
+  await page.getByRole("button", { name: "选择", exact: true }).click();
+  await page.getByLabel("选择标注对象").selectOption("1");
+  await page.getByRole("button", { name: "编辑文字", exact: true }).click();
+  await page.getByLabel("标注文字").fill("A*草稿");
+  await page.getByRole("button", { name: "清空屏蔽", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "完成文字编辑", exact: true }),
+  ).toHaveCount(0);
+  const objects = page.getByLabel("选择标注对象");
+  await expect(objects.locator("option")).toHaveText([
+    "未选择",
+    "1 · 文字",
+    "2 · 矩形",
+  ]);
+  await objects.selectOption("0");
+  await expect(page.getByLabel("标注文字")).toHaveValue("A原文字");
+  await deselect(page);
+  const png = await save(page, uploads);
+  expect(
+    (await scan(page, { x: 550, y: 298, width: 100, height: 4 }, png)).blue,
+  ).toBeGreaterThan(300);
+  await page.getByRole("button", { name: "撤销", exact: true }).click();
+  await expect(objects.locator("option")).toHaveText([
+    "未选择",
+    "1 · 屏蔽",
+    "2 · 文字",
+    "3 · 矩形",
+  ]);
+  await objects.selectOption("1");
+  await expect(page.getByLabel("标注文字")).toHaveValue("A原文字");
+});

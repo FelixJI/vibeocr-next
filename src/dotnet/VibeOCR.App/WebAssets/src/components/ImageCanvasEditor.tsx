@@ -3773,9 +3773,8 @@ export function ImageCanvasEditor({
 
   /** 清空屏蔽：只移除排除区，普通标注保留，几何变更入历史可撤销。 */
   function clearExclusions() {
+    cancelDrawing();
     select(undefined);
-    setResizeDraft(undefined);
-    markDragRef.current = undefined;
     commit({
       ...state,
       marks: state.marks.filter((mark) => !isExclusionMark(mark)),
