@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppActions, AppViewState } from "../app/types";
@@ -144,6 +145,79 @@ describe("recognition page result actions", () => {
     await fireEvent.keyDown(window, { key: "c", ctrlKey: true });
     expect(actions.run).not.toHaveBeenCalled();
     selection.removeAllRanges();
+  });
+
+  it("左侧单一图片区承载校对：绑定冻结结果图、无第二张图、右侧不重复渲染", async () => {
+    const { viewState, actions } = setup(true);
+    render(<RecognitionPage viewState={viewState} actions={actions} />);
+    const inputPanel = screen.getByRole("region", { name: "输入图像" });
+    // 校对层默认展示在左侧输入面板，图源是冻结结果图而非会话基准图。
+    const image = await within(inputPanel).findByRole("img", {
+      name: "识别结果参考图",
+    });
+    expect(image).toHaveAttribute(
+      "src",
+      "https://resource.vibeocr/result-image.png",
+    );
+    expect(screen.getAllByRole("img", { name: "识别结果参考图" })).toHaveLength(
+      1,
+    );
+    const resultPanel = screen.getByRole("region", {
+      name: /^识别结果$/,
+    });
+    expect(
+      within(resultPanel).queryByRole("img", { name: "识别结果参考图" }),
+    ).toBeNull();
+  });
+
+  it("模式切换不丢编辑状态；校对模式不消费文档级 Ctrl+S", async () => {
+    const { viewState, actions } = setup(true);
+    const viewStateWithAnnotation = {
+      ...viewState,
+      capabilities: [...viewState.capabilities, "recognition.annotation"],
+    };
+    render(
+      <RecognitionPage viewState={viewStateWithAnnotation} actions={actions} />,
+    );
+    await screen.findByRole("img", { name: "识别结果参考图" });
+    const ctrlS = () => {
+      const event = new KeyboardEvent("keydown", {
+        key: "s",
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    // 校对模式：编辑器仅隐藏，文档级 Ctrl+S 挂起（不 preventDefault）。
+    expect(ctrlS()).toBe(false);
+    // 本地编辑手势同步挂起：Space 不进入平移（滚动默认行为保留）。
+    const viewport = screen.getByLabelText("图片视口");
+    fireEvent.keyDown(viewport, { code: "Space", key: " " });
+    expect(viewport).not.toHaveClass("is-panning");
+    fireEvent.keyUp(viewport, { code: "Space", key: " " });
+    // 切到编辑：校对层卸载，工具栏可达，旋转产生可撤销历史。
+    fireEvent.click(screen.getByRole("button", { name: "编辑图片" }));
+    expect(screen.queryByRole("img", { name: "识别结果参考图" })).toBeNull();
+    const toolbar = () =>
+      within(screen.getByRole("toolbar", { name: "图片编辑工具" }));
+    fireEvent.click(toolbar().getByRole("button", { name: "旋转 90°" }));
+    expect(toolbar().getByRole("button", { name: "撤销" })).toBeEnabled();
+    // 编辑模式 Ctrl+S 被编辑器接管。
+    expect(ctrlS()).toBe(true);
+    // 编辑模式本地手势恢复：Space 进入平移，抬起退出。
+    fireEvent.keyDown(viewport, { code: "Space", key: " " });
+    expect(viewport).toHaveClass("is-panning");
+    fireEvent.keyUp(viewport, { code: "Space", key: " " });
+    expect(viewport).not.toHaveClass("is-panning");
+    // 往返校对/编辑：编辑器不卸载，历史保留。
+    fireEvent.click(screen.getByRole("button", { name: "图像校对" }));
+    expect(
+      screen.getByRole("img", { name: "识别结果参考图" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "编辑图片" }));
+    expect(toolbar().getByRole("button", { name: "撤销" })).toBeEnabled();
   });
 
   it("falls back to plain copy for non-lines results", async () => {

@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  annotationFill,
+  annotationStrokeAlpha,
   finalOutputSize,
   imageTransform,
   outputSize,
@@ -8,10 +10,67 @@ import {
   rotateEditorState,
   rotatedBoundingBox,
   type EditorState,
+  type Mark,
 } from "./annotationGeometry";
 import { uploadAnnotatedImage } from "./annotationHandoff";
 
 afterEach(() => vi.unstubAllGlobals());
+
+describe("annotation stroke/fill opacity resolution", () => {
+  const legacy: Mark = {
+    tool: "rectangle",
+    start: { x: 0, y: 0 },
+    end: { x: 40, y: 30 },
+  };
+
+  it("keeps legacy marks fully opaque and hollow (old rendering unchanged)", () => {
+    expect(annotationStrokeAlpha(legacy)).toBe(1);
+    expect(annotationFill(legacy)).toBeUndefined();
+  });
+
+  it("resolves 0-100 percent with clamping; 0% is a valid value", () => {
+    expect(
+      annotationStrokeAlpha({
+        ...legacy,
+        style: { strokeOpacity: 0 },
+      }),
+    ).toBe(0);
+    expect(
+      annotationStrokeAlpha({
+        ...legacy,
+        style: { strokeOpacity: 60 },
+      }),
+    ).toBeCloseTo(0.6, 10);
+    expect(
+      annotationStrokeAlpha({
+        ...legacy,
+        style: { strokeOpacity: 500 },
+      }),
+    ).toBe(1);
+    expect(
+      annotationStrokeAlpha({
+        ...legacy,
+        style: { strokeOpacity: Number.NaN },
+      }),
+    ).toBe(1);
+  });
+
+  it("resolves fill color/opacity with safe defaults", () => {
+    expect(
+      annotationFill({ ...legacy, style: { fill: { opacity: 40 } } }),
+    ).toEqual({ color: "#ffffff", alpha: 0.4 });
+    expect(
+      annotationFill({
+        ...legacy,
+        style: { fill: { color: "#E02020", opacity: 0 } },
+      }),
+    ).toEqual({ color: "#e02020", alpha: 0 });
+    expect(
+      annotationFill({ ...legacy, style: { fill: { color: "#12a150" } } }),
+    ).toEqual({ color: "#12a150", alpha: 1 });
+    expect(annotationFill({ ...legacy, style: {} })).toBeUndefined();
+  });
+});
 
 describe("annotated image handoff", () => {
   it("uploads PNG bytes to the bounded same-origin host endpoint", async () => {

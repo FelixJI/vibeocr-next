@@ -4,6 +4,7 @@ import {
   fireEvent,
   render,
   screen,
+  within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -294,8 +295,9 @@ describe("颜色工具：常用色、自定义与屏幕取色", () => {
     mockCanvasBox(canvas, 900, 600);
     harness.flush();
 
-    fireEvent.click(screen.getByRole("button", { name: "常用颜色 #12a150" }));
+    // 颜色/取色属于当前工具属性：先切到颜色工具，属性排才出现色板。
     fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    fireEvent.click(screen.getByRole("button", { name: "常用颜色 #12a150" }));
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
     fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 400, clientY: 300 });
     harness.flush();
@@ -324,6 +326,8 @@ describe("颜色工具：常用色、自定义与屏幕取色", () => {
     mockCanvasBox(canvas, 900, 600);
     harness.flush();
 
+    // 先切颜色工具，自定义颜色输入才在属性排出现。
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
     fireEvent.change(screen.getByLabelText("自定义颜色"), {
       target: { value: "#00c8ff" },
     });
@@ -352,6 +356,8 @@ describe("颜色工具：常用色、自定义与屏幕取色", () => {
       },
     );
     const { unmount } = await renderEditor();
+    // 屏幕取色入口随颜色工具的属性排出现。
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
     expect(
       screen.getByRole("button", { name: "屏幕取色" }),
     ).toBeInTheDocument();
@@ -392,6 +398,8 @@ describe("颜色工具：常用色、自定义与屏幕取色", () => {
     mockCanvasBox(canvas, 900, 600);
     harness.flush();
 
+    // 取色入口随颜色工具的属性排出现。
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
     const pick = screen.getByRole("button", { name: "屏幕取色" });
     expect(pick).toHaveAttribute("title", "取色：点击后在画布上取样颜色");
     fireEvent.click(pick);
@@ -435,6 +443,8 @@ describe("颜色工具：常用色、自定义与屏幕取色", () => {
     mockCanvasBox(canvas, 900, 600);
     harness.flush();
 
+    // 取色入口随颜色工具的属性排出现。
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
     fireEvent.click(screen.getByRole("button", { name: "屏幕取色" }));
     fireEvent.keyDown(canvas, { key: "Escape" });
     expect(
@@ -442,7 +452,7 @@ describe("颜色工具：常用色、自定义与屏幕取色", () => {
     ).toBeInTheDocument();
     state.sampleResult = new Uint8ClampedArray([224, 32, 32, 255]);
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 120, clientY: 80 });
-    // 取样已取消：点击落到普通选择工具，不产生取色/标记。
+    // 取样已取消：点击落到当前绘图工具，不产生取色/标记提交。
     expect(screen.queryByText(/已从画布取色/)).toBeNull();
     expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
     state.sampleResult = undefined;
@@ -768,5 +778,306 @@ describe("Windows document commands on the editor surface (Ctrl+S / Ctrl+W)", ()
     });
     delete (document as { hidden?: boolean }).hidden;
     expect(actions.run).not.toHaveBeenCalled();
+  });
+});
+
+describe("形状边框/填充不透明度（canvas 调用契约）", () => {
+  function clearCalls() {
+    state.canvases.forEach((entry) => {
+      entry.calls.length = 0;
+    });
+  }
+
+  async function drawRectangle(
+    harness: FrameHarness,
+    canvas: HTMLCanvasElement,
+  ) {
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 400, clientY: 300 });
+    harness.flush();
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 400, clientY: 300 });
+    harness.flush();
+  }
+
+  it("默认矩形保持旧空心效果：无填充、边框完全不透明", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+    clearCalls();
+
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await drawRectangle(harness, canvas);
+
+    // 旧对象/默认样式：不产生任何 fillRect，globalAlpha 全为 1。
+    const calls = allCalls();
+    expect(calls.some((call) => call.op === "fillRect")).toBe(false);
+    const alphas = calls
+      .filter((call) => call.op === "globalAlpha")
+      .map((call) => call.args[0]);
+    expect(alphas.length).toBeGreaterThan(0);
+    expect(new Set(alphas)).toEqual(new Set([1]));
+    expect(calls.find((call) => call.op === "strokeRect")?.args).toEqual([
+      100, 100, 300, 200,
+    ]);
+    unmount();
+  });
+
+  it("矩形填充与边框不透明度按序写入真实绘制调用（先填充后描边）", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    fireEvent.click(screen.getByLabelText("填充"));
+    fireEvent.change(screen.getByLabelText("填充颜色"), {
+      target: { value: "#ff0000" },
+    });
+    const fillOpacity = screen.getByLabelText("填充不透明度");
+    fireEvent.change(fillOpacity, { target: { value: "40" } });
+    fireEvent.blur(fillOpacity);
+    const strokeOpacity = screen.getByLabelText("边框不透明度");
+    fireEvent.change(strokeOpacity, { target: { value: "60" } });
+    fireEvent.blur(strokeOpacity);
+    clearCalls();
+    await drawRectangle(harness, canvas);
+
+    // 含 fillRect 的离屏缓存画布承载真实绘制序列。
+    const recorded = state.canvases.find((entry) =>
+      entry.calls.some((call) => call.op === "fillRect"),
+    )!;
+    expect(recorded).toBeDefined();
+    const calls = recorded.calls;
+    const fillAlpha = calls.findIndex(
+      (call) => call.op === "globalAlpha" && call.args[0] === 0.4,
+    );
+    expect(fillAlpha).toBeGreaterThanOrEqual(0);
+    const afterFillAlpha = calls.slice(fillAlpha);
+    const fillStyleIndex = afterFillAlpha.findIndex(
+      (call) => call.op === "fillStyle" && call.args[0] === "#ff0000",
+    );
+    expect(fillStyleIndex).toBeGreaterThanOrEqual(0);
+    expect(
+      afterFillAlpha
+        .slice(fillStyleIndex)
+        .find((call) => call.op === "fillRect")?.args,
+    ).toEqual([100, 100, 300, 200]);
+    // 边框不透明度 60%：globalAlpha 0.6 在填充之后、strokeRect 之前生效。
+    const strokeAlpha = calls.findIndex(
+      (call) => call.op === "globalAlpha" && call.args[0] === 0.6,
+    );
+    expect(strokeAlpha).toBeGreaterThan(fillAlpha);
+    expect(
+      calls.slice(strokeAlpha).find((call) => call.op === "strokeRect")?.args,
+    ).toEqual([100, 100, 300, 200]);
+    unmount();
+  });
+
+  it("荧光笔复用边框不透明度且不破坏自身 35% 透明语义", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+
+    fireEvent.click(screen.getByRole("button", { name: "荧光笔" }));
+    // 旧默认（100%）：保持 0.35 不变。
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 200, clientY: 150 });
+    harness.flush();
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 200, clientY: 150 });
+    harness.flush();
+    expect(
+      allCalls().some(
+        (call) => call.op === "globalAlpha" && call.args[0] === 0.35,
+      ),
+    ).toBe(true);
+
+    // 50% 边框不透明度：与 0.35 相乘 → 0.175。
+    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+    harness.flush();
+    fireEvent.change(screen.getByLabelText("边框不透明度"), {
+      target: { value: "50" },
+    });
+    fireEvent.blur(screen.getByLabelText("边框不透明度"));
+    fireEvent.pointerDown(canvas, { pointerId: 2, clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(canvas, { pointerId: 2, clientX: 200, clientY: 150 });
+    harness.flush();
+    fireEvent.pointerUp(canvas, { pointerId: 2, clientX: 200, clientY: 150 });
+    harness.flush();
+    expect(
+      allCalls().some(
+        (call) => call.op === "globalAlpha" && call.args[0] === 0.175,
+      ),
+    ).toBe(true);
+    unmount();
+  });
+
+  it("选中已有矩形修改边框/填充属性入历史，撤销逐级恢复", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { actions, unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+
+    // 先创建一个默认空心矩形。
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await drawRectangle(harness, canvas);
+    expect(actions.run).toHaveBeenCalledTimes(1);
+
+    // 切回选择工具并点选该矩形：属性排按标记样式展开。
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.pointerDown(canvas, { pointerId: 3, clientX: 200, clientY: 150 });
+    fireEvent.pointerUp(canvas, { pointerId: 3, clientX: 200, clientY: 150 });
+    const settings = within(
+      screen.getByRole("toolbar", { name: "当前工具设置" }),
+    );
+    expect(settings.getByLabelText("边框不透明度")).toBeInTheDocument();
+    expect(settings.getByLabelText("填充")).not.toBeChecked();
+
+    // 边框不透明度 0% 有效：写入真实 globalAlpha 0。
+    const opacity = settings.getByLabelText("边框不透明度");
+    fireEvent.change(opacity, { target: { value: "0" } });
+    fireEvent.blur(opacity);
+    expect(actions.run).toHaveBeenCalledTimes(2);
+    clearCalls();
+    harness.flush();
+    expect(
+      allCalls().some(
+        (call) => call.op === "globalAlpha" && call.args[0] === 0,
+      ),
+    ).toBe(true);
+
+    // 开启填充：填充像素出现在绘制流中。
+    fireEvent.click(settings.getByLabelText("填充"));
+    expect(actions.run).toHaveBeenCalledTimes(3);
+    clearCalls();
+    harness.flush();
+    expect(allCalls().some((call) => call.op === "fillRect")).toBe(true);
+
+    // 改填充色保留已有不透明度（50），改不透明度保留已有色：
+    // 不得用绘制默认值覆盖另一维。
+    fireEvent.change(settings.getByLabelText("填充颜色"), {
+      target: { value: "#ff0000" },
+    });
+    clearCalls();
+    harness.flush();
+    const fillCalls = () => allCalls();
+    const redFill = fillCalls().findIndex(
+      (call) => call.op === "fillStyle" && call.args[0] === "#ff0000",
+    );
+    expect(redFill).toBeGreaterThanOrEqual(0);
+    expect(
+      fillCalls()
+        .slice(Math.max(0, redFill - 3), redFill + 1)
+        .some((call) => call.op === "globalAlpha" && call.args[0] === 0.5),
+    ).toBe(true);
+    const markOpacity = settings.getByLabelText("填充不透明度");
+    fireEvent.change(markOpacity, { target: { value: "80" } });
+    fireEvent.blur(markOpacity);
+    clearCalls();
+    harness.flush();
+    const redFill2 = fillCalls().findIndex(
+      (call) => call.op === "fillStyle" && call.args[0] === "#ff0000",
+    );
+    expect(redFill2).toBeGreaterThanOrEqual(0);
+    expect(
+      fillCalls()
+        .slice(Math.max(0, redFill2 - 3), redFill2 + 1)
+        .some((call) => call.op === "globalAlpha" && call.args[0] === 0.8),
+    ).toBe(true);
+
+    // 逐级撤销验证恢复链：80% → 50%（保留原色）→ 原色 #ffffff/50 →
+    // 空心 → 原始矩形；不跳过任何一级历史检查。
+    const stepUndo = (expectFill?: { color: string; alpha: number }) => {
+      fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+      clearCalls();
+      harness.flush();
+      const calls = allCalls();
+      if (expectFill) {
+        const fillIndex = calls.findIndex(
+          (call) =>
+            call.op === "fillStyle" && call.args[0] === expectFill.color,
+        );
+        expect(fillIndex).toBeGreaterThanOrEqual(0);
+        expect(
+          calls
+            .slice(Math.max(0, fillIndex - 3), fillIndex + 1)
+            .some(
+              (call) =>
+                call.op === "globalAlpha" && call.args[0] === expectFill.alpha,
+            ),
+        ).toBe(true);
+      } else {
+        expect(calls.some((call) => call.op === "fillRect")).toBe(false);
+      }
+    };
+    stepUndo({ color: "#ff0000", alpha: 0.5 });
+    stepUndo({ color: "#ffffff", alpha: 0.5 });
+    stepUndo();
+    expect(allCalls().some((call) => call.op === "strokeRect")).toBe(true);
+    // 撤销清除选择：属性排收起（选择工具无其他属性）。
+    expect(screen.queryByRole("toolbar", { name: "当前工具设置" })).toBeNull();
+    // 再撤销：边框回到完全不透明。
+    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+    clearCalls();
+    harness.flush();
+    expect(
+      allCalls()
+        .filter((call) => call.op === "globalAlpha")
+        .every((call) => call.args[0] === 1),
+    ).toBe(true);
+    expect(allCalls().some((call) => call.op === "strokeRect")).toBe(true);
+    unmount();
+  });
+});
+
+describe("不透明度数值输入契约", () => {
+  it("清空/越界不写 0；Enter 提交任意整数并写入真实绘制", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { actions, unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    const opacity = screen.getByLabelText("边框不透明度");
+    expect(opacity).toHaveValue(100);
+    // 清空后 blur：不意外写 0，显示回退已提交值 100，也不产生修订。
+    fireEvent.change(opacity, { target: { value: "" } });
+    fireEvent.blur(opacity);
+    expect(opacity).toHaveValue(100);
+    expect(actions.run).not.toHaveBeenCalled();
+    // 越界同样不写回。
+    fireEvent.change(opacity, { target: { value: "101" } });
+    fireEvent.blur(opacity);
+    expect(opacity).toHaveValue(100);
+    // Enter 提交任意整数 37（非预设档位）：真实焦点下 Enter 触发 blur 提交，
+    // 提交结果由后续绘制的 globalAlpha 0.37 证明（不经 fireEvent.blur 兜底）。
+    act(() => {
+      opacity.focus();
+    });
+    fireEvent.change(opacity, { target: { value: "37" } });
+    fireEvent.keyDown(opacity, { key: "Enter" });
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 400, clientY: 300 });
+    harness.flush();
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 400, clientY: 300 });
+    harness.flush();
+    expect(actions.run).toHaveBeenCalledTimes(1);
+    expect(
+      state.canvases
+        .flatMap((entry) => entry.calls)
+        .some((call) => call.op === "globalAlpha" && call.args[0] === 0.37),
+    ).toBe(true);
+    unmount();
   });
 });

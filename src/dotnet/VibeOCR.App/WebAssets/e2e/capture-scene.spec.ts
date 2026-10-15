@@ -160,10 +160,10 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
         .evaluate((image: HTMLImageElement) => image.naturalWidth),
     )
     .toBe(2560);
-  const toolButtons = page
+  const mainRowButtons = page
     .getByRole("toolbar", { name: "图片编辑工具" })
     .locator("button");
-  const toolRows = await toolButtons.evaluateAll(
+  const actionRows = await mainRowButtons.evaluateAll(
     (buttons) =>
       new Set(
         buttons.map((button) => {
@@ -172,7 +172,8 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
         }),
       ).size,
   );
-  expect(toolRows).toBe(1);
+  // 主排承载全部工具与操作，始终单行（过宽时容器内滚动）。
+  expect(actionRows).toBe(1);
   await expect(
     page.getByRole("button", { name: "矩形", exact: true }),
   ).toHaveText("");
@@ -416,9 +417,10 @@ test("马赛克强度与常用色影响真实导出", async ({ page }) => {
   expect(uploads[2]?.equals(uploads[0]!)).toBe(false);
 
   // 常用色色板：导出像素携带所选颜色（#1f6feb = rgb(31,111,235)）。
+  // 色板随颜色工具的属性排出现：先切矩形再选色。
   await page.getByRole("button", { name: "撤销" }).click();
-  await page.getByRole("button", { name: "常用颜色 #1f6feb" }).click();
   await page.getByRole("button", { name: "矩形", exact: true }).click();
+  await page.getByRole("button", { name: "常用颜色 #1f6feb" }).click();
   await page.mouse.move(450, 150);
   await page.mouse.down();
   await page.mouse.move(560, 240, { steps: 3 });

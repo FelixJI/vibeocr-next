@@ -1,39 +1,11 @@
 import {
-  Square,
-  Circle,
-  ArrowUpRight,
-  Pencil,
-  Highlighter,
-  Type,
-  ListOrdered,
-  Grid2X2,
-  Droplets,
-  ShieldOff,
-  Crop,
-  Eraser,
-  TextCursor,
-  MousePointer2,
-  Hand,
-  RotateCw,
-  Undo2,
-  Redo2,
-  Copy,
-  Save,
-  Pin,
-  Pipette,
-  ScanText,
-  X,
-  Trash2,
-  Settings2,
-  Check,
-  Eye,
-  ShieldX,
-  ClipboardCopy,
-  RefreshCw,
-} from "lucide-react";
-import {
   Button,
   Input,
+  Menu,
+  MenuItem,
+  MenuList,
+  MenuPopover,
+  MenuTrigger,
   Select,
   Toolbar,
   ToolbarButton,
@@ -54,6 +26,8 @@ import {
   shouldRunDocumentCommand,
 } from "../app/keyboard";
 import {
+  annotationFill,
+  annotationStrokeAlpha,
   exclusionCoversOutput,
   exclusionDisplayPoints,
   exclusionNormalizedRects,
@@ -77,6 +51,13 @@ import type { CaptureScene } from "../bridge/captureScene";
 import { CapturePixelPresentation } from "./capturePixelPresentation";
 import { ImageTextLayer } from "./ImageTextLayer";
 import { toImageTextLines } from "./imageTextLayerGeometry";
+import { ResultImageTextOverlay } from "./ResultImageTextOverlay";
+import type {
+  IndexedResultLine,
+  OverlayLineEditHandler,
+} from "./ResultImageTextOverlay";
+import { ToolbarIcon } from "./ToolbarIcon";
+import type { ToolbarIconName } from "./toolbarIconData";
 import type { InpaintRect, InpaintResponse } from "./inpaint/inpaint";
 import {
   describeInpaintFailure,
@@ -115,6 +96,15 @@ export interface ScreenshotTextLayerState {
 type Tool =
   "select" | "hand" | "textSelect" | AnnotationTool | "crop" | "inpaint";
 
+/** 属性排样式变更：判别联合保证每个 kind 携带对应类型，无需盲转换。 */
+type StyleChange =
+  | { readonly kind: "color"; readonly value: string }
+  | { readonly kind: "strokeWidth"; readonly value: number }
+  | { readonly kind: "strokeOpacity"; readonly value: number }
+  | { readonly kind: "fillEnabled"; readonly value: boolean }
+  | { readonly kind: "fillColor"; readonly value: string }
+  | { readonly kind: "fillOpacity"; readonly value: number };
+
 const EMPTY: EditorState = { rotation: 0, marks: [] };
 const DEFAULT_COLOR = "#f38b35";
 
@@ -136,23 +126,34 @@ const TOOL_LABELS: Readonly<Record<Tool, string>> = {
   inpaint: "去水印",
 };
 
-const TOOL_ICONS = {
-  select: MousePointer2,
-  hand: Hand,
-  textSelect: TextCursor,
-  rectangle: Square,
-  ellipse: Circle,
-  arrow: ArrowUpRight,
-  text: Type,
-  mosaic: Grid2X2,
-  blur: Droplets,
-  pen: Pencil,
-  highlighter: Highlighter,
-  numbering: ListOrdered,
-  exclude: ShieldOff,
-  crop: Crop,
-  inpaint: Eraser,
+const TOOL_ICONS: Readonly<Record<Tool, ToolbarIconName>> = {
+  select: "select",
+  hand: "hand",
+  textSelect: "textSelect",
+  rectangle: "rectangle",
+  ellipse: "ellipse",
+  arrow: "arrow",
+  text: "text",
+  mosaic: "mosaic",
+  blur: "blur",
+  pen: "pen",
+  highlighter: "highlighter",
+  numbering: "numbering",
+  exclude: "exclude",
+  crop: "crop",
+  inpaint: "inpaint",
 };
+
+/** 下排属性 gating：仅当前工具真正消费的设置才展示（选择/手形/裁剪等
+ * 无关设置不出现）。 */
+const STROKE_TOOLS: readonly Tool[] = [
+  "rectangle",
+  "ellipse",
+  "arrow",
+  "pen",
+  "highlighter",
+];
+const COLOR_TOOLS: readonly Tool[] = [...STROKE_TOOLS, "text", "numbering"];
 
 const TOOL_ORDER: readonly Tool[] = [
   "select",
@@ -192,6 +193,10 @@ const STROKE_COLORS = [
 ] as const;
 const STROKE_WIDTHS = [2, 3, 5, 8] as const;
 const FONT_SIZES = [16, 24, 32, 48] as const;
+/** 形状（矩形/椭圆）支持填充；其余描边工具仅复用边框不透明度。 */
+const FILL_TOOLS: readonly Tool[] = ["rectangle", "ellipse"];
+const DEFAULT_FILL_COLOR = "#ffffff";
+const DEFAULT_FILL_OPACITY = 50;
 
 /** 马赛克/模糊强度档位：1=弱、2=中（缺省）、3=强。 */
 const EFFECT_INTENSITIES = [1, 2, 3] as const;
@@ -202,6 +207,18 @@ const BLUR_RADII: Readonly<Record<number, number>> = { 1: 5, 2: 10, 3: 20 };
 function markEffectIntensity(mark: Mark): number {
   const value = mark.style?.intensity;
   return value === 1 || value === 3 ? value : 2;
+}
+
+/** 数值输入提交：仅 0-100 整数生效；空/越界/非整数丢弃，不意外写 0。 */
+function commitOpacityInput(
+  raw: string | undefined,
+  apply: (value: number) => void,
+): void {
+  if (raw === undefined) return;
+  const trimmed = raw.trim();
+  if (!/^\d{1,3}$/.test(trimmed)) return;
+  const value = Number(trimmed);
+  if (value >= 0 && value <= 100) apply(value);
 }
 
 /** input[type=color] 仅接受 #rrggbb；非法值回退默认色。 */
@@ -346,6 +363,228 @@ interface ImageCanvasEditorProps {
   readonly toolset?: EditorToolset;
   /** 会话命令 scope：默认 recognition；非 scene 图片编辑页传 imageEdit。 */
   readonly commandScope?: EditorCommandScope;
+  /** 左侧校对面数据：冻结参考图（宿主 state.resultImage，绝不用会话基准
+   * 图冒充）+ 结果行框与行编辑闭环。提供且 proofreadActive 时，同一图片
+   * 区显示校对层；编辑画布仅隐藏（display:none），编辑历史与未提交状态
+   * 保留，文档级 Ctrl+S/Ctrl+W 在校对模式挂起。 */
+  readonly proofread?: {
+    readonly imageUrl: string;
+    /** 绑定键：参考图或结构化资源变化时校对层整体重挂（清空编辑草稿）。 */
+    readonly bindingKey: string;
+    readonly lines: readonly IndexedResultLine[];
+    readonly onUpdateLine?: OverlayLineEditHandler;
+  };
+  /** 校对层是否激活：切换由宿主 UI 控制；无 proofread 数据时忽略。 */
+  readonly proofreadActive?: boolean;
+}
+
+/** 属性下排样式面板：颜色/线宽/边框不透明度/填充开关/颜色/不透明度；
+ * 不透明度为 0-100 任意整数，blur/Enter 提交，空/越界/非整数不写回。
+ * 所有变更经统一 onStyleChange 上交，荧光笔边框不透明度与自身 35% 透明
+ * 相乘的语义由父级 draw 决定。 */
+function AnnotationStylePanel({
+  showColorControl,
+  showStrokeControls,
+  showFillControl,
+  activeStyleColor,
+  activeStrokeWidth,
+  activeStrokeOpacity,
+  activeFillEnabled,
+  activeFillColor,
+  activeFillOpacity,
+  eyedropperAvailable,
+  eyedropperBusy,
+  onPickColor,
+  onStyleChange,
+}: {
+  readonly showColorControl: boolean;
+  readonly showStrokeControls: boolean;
+  readonly showFillControl: boolean;
+  readonly activeStyleColor: string;
+  readonly activeStrokeWidth: number;
+  readonly activeStrokeOpacity: number;
+  readonly activeFillEnabled: boolean;
+  readonly activeFillColor: string;
+  readonly activeFillOpacity: number;
+  readonly eyedropperAvailable: boolean;
+  readonly eyedropperBusy: boolean;
+  readonly onPickColor: () => void;
+  readonly onStyleChange: (change: StyleChange) => void;
+}) {
+  // 数值输入草稿仅存在于此面板：焦点内自由编辑，blur/Enter 才提交。
+  const [opacityDraft, setOpacityDraft] = useState<
+    { kind: "stroke" | "fill"; raw: string } | undefined
+  >();
+  if (!showColorControl && !showStrokeControls && !showFillControl) return null;
+  return (
+    <>
+      {showColorControl && (
+        <div
+          aria-label="标注颜色"
+          className="editor-color-control"
+          role="group"
+        >
+          {STROKE_COLORS.map((color) => (
+            <button
+              aria-label={`常用颜色 ${color}`}
+              aria-pressed={
+                normalizeHexColor(activeStyleColor).toLowerCase() === color
+              }
+              className="editor-color-swatch"
+              key={color}
+              onClick={() => onStyleChange({ kind: "color", value: color })}
+              title={color}
+              type="button"
+              style={{ background: color }}
+            />
+          ))}
+          <input
+            aria-label="自定义颜色"
+            onChange={(event) =>
+              onStyleChange({ kind: "color", value: event.target.value })
+            }
+            title="自定义颜色"
+            type="color"
+            value={normalizeHexColor(activeStyleColor)}
+          />
+          <Button
+            appearance="subtle"
+            aria-label="屏幕取色"
+            disabled={eyedropperBusy}
+            icon={<ToolbarIcon name="pipette" />}
+            onClick={onPickColor}
+            size="small"
+            title={
+              eyedropperAvailable ? "屏幕取色" : "取色：点击后在画布上取样颜色"
+            }
+          />
+        </div>
+      )}
+      {showStrokeControls && (
+        <>
+          <label className="editor-style-control">
+            <span aria-hidden="true">线宽</span>
+            <Select
+              aria-label="线条宽度"
+              size="small"
+              value={String(activeStrokeWidth)}
+              onChange={(_, data) =>
+                onStyleChange({
+                  kind: "strokeWidth",
+                  value: Number(data.value),
+                })
+              }
+            >
+              {STROKE_WIDTHS.map((width) => (
+                <option key={width} value={String(width)}>
+                  {width}px
+                </option>
+              ))}
+            </Select>
+          </label>
+          <label className="editor-style-control">
+            <span aria-hidden="true">边框不透明度</span>
+            <Input
+              aria-label="边框不透明度"
+              inputMode="numeric"
+              max={100}
+              min={0}
+              onBlur={() => {
+                if (opacityDraft?.kind === "stroke")
+                  commitOpacityInput(opacityDraft.raw, (value) =>
+                    onStyleChange({ kind: "strokeOpacity", value }),
+                  );
+                setOpacityDraft(undefined);
+              }}
+              onChange={(_, data) =>
+                setOpacityDraft({ kind: "stroke", raw: data.value })
+              }
+              onKeyDown={(event) => {
+                if (event.key === "Enter") event.currentTarget.blur();
+              }}
+              size="small"
+              style={{ width: 72 }}
+              title="0-100 的整数百分比"
+              type="number"
+              value={
+                opacityDraft?.kind === "stroke"
+                  ? opacityDraft.raw
+                  : String(activeStrokeOpacity)
+              }
+            />
+            <span aria-hidden="true">%</span>
+          </label>
+        </>
+      )}
+      {showFillControl && (
+        <>
+          <label className="editor-style-control">
+            <input
+              aria-label="填充"
+              checked={activeFillEnabled}
+              onChange={(event) =>
+                onStyleChange({
+                  kind: "fillEnabled",
+                  value: event.target.checked,
+                })
+              }
+              type="checkbox"
+            />
+            <span aria-hidden="true">填充</span>
+          </label>
+          {activeFillEnabled && (
+            <>
+              <input
+                aria-label="填充颜色"
+                className="editor-fill-color"
+                onChange={(event) =>
+                  onStyleChange({
+                    kind: "fillColor",
+                    value: event.target.value,
+                  })
+                }
+                title="填充颜色"
+                type="color"
+                value={normalizeHexColor(activeFillColor)}
+              />
+              <label className="editor-style-control">
+                <span aria-hidden="true">填充不透明度</span>
+                <Input
+                  aria-label="填充不透明度"
+                  inputMode="numeric"
+                  max={100}
+                  min={0}
+                  onBlur={() => {
+                    if (opacityDraft?.kind === "fill")
+                      commitOpacityInput(opacityDraft.raw, (value) =>
+                        onStyleChange({ kind: "fillOpacity", value }),
+                      );
+                    setOpacityDraft(undefined);
+                  }}
+                  onChange={(_, data) =>
+                    setOpacityDraft({ kind: "fill", raw: data.value })
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") event.currentTarget.blur();
+                  }}
+                  size="small"
+                  style={{ width: 72 }}
+                  title="0-100 的整数百分比"
+                  type="number"
+                  value={
+                    opacityDraft?.kind === "fill"
+                      ? opacityDraft.raw
+                      : String(activeFillOpacity)
+                  }
+                />
+                <span aria-hidden="true">%</span>
+              </label>
+            </>
+          )}
+        </>
+      )}
+    </>
+  );
 }
 
 export function ImageCanvasEditor({
@@ -363,8 +602,12 @@ export function ImageCanvasEditor({
   onRecognitionSubmitted,
   toolset = "full",
   commandScope = "recognition",
+  proofread,
+  proofreadActive = false,
 }: ImageCanvasEditorProps) {
   const commands = EDITOR_COMMANDS[commandScope];
+  // 校对模式：同一图片区切换显示结果行框，编辑器其余 chrome 隐藏但状态保留。
+  const proofreading = !!proofread && proofreadActive;
   const captureGeometry = captureScene;
   const contentRevisionRef = useRef(session?.revision ?? 0);
   const presentation = useRef<CapturePixelPresentation | undefined>(undefined);
@@ -453,6 +696,16 @@ export function ImageCanvasEditor({
   const [annotationText, setAnnotationText] = useState("文本");
   const [strokeColor, setStrokeColor] = useState<string>(DEFAULT_COLOR);
   const [strokeWidth, setStrokeWidth] = useState<number>(3);
+  // 边框/线条不透明度与形状填充：仅影响矩形/椭圆/描边类新标记；
+  // 默认 100%/关闭填充，保持旧空心效果，旧标记（无该字段）渲染不变。
+  // 默认值合并为单对象状态，减少分散 setter。
+  const [shapeDefaults, setShapeDefaults] = useState({
+    strokeOpacity: 100,
+    fillEnabled: false,
+    fillColor: DEFAULT_FILL_COLOR,
+    fillOpacity: DEFAULT_FILL_OPACITY,
+  });
+  const { strokeOpacity, fillEnabled, fillColor, fillOpacity } = shapeDefaults;
   const [fontSize, setFontSize] = useState<number>(24);
   // 马赛克/模糊强度：创建标记时写入 style.intensity，历史条目保留当时档位。
   const [effectIntensity, setEffectIntensity] = useState<number>(2);
@@ -1359,6 +1612,100 @@ export function ImageCanvasEditor({
     setSelectedMark(index);
   }
 
+  // 样式编辑目标：选择工具下选中描边类（矩形/椭圆/箭头/画笔/荧光笔）
+  // 已有标记时，属性排就地编辑该标记样式（每次修改入历史可撤销）；
+  // 未选中时同一控件编辑新标记的绘制默认值。旧标记缺省：边框 100%、
+  // 无填充，渲染与旧版完全一致。
+  const editingMarkCandidate =
+    tool === "select" && selectedMark !== undefined
+      ? state.marks[selectedMark]
+      : undefined;
+  const editingMark =
+    editingMarkCandidate &&
+    (STROKE_TOOLS as readonly string[]).includes(editingMarkCandidate.tool)
+      ? editingMarkCandidate
+      : undefined;
+  const styleEditing = !!editingMark;
+  const activeStyleColor = editingMark
+    ? (editingMark.style?.color ?? DEFAULT_COLOR)
+    : strokeColor;
+  const activeStrokeWidth = editingMark
+    ? (editingMark.style?.strokeWidth ?? 3)
+    : strokeWidth;
+  const activeStrokeOpacity = editingMark
+    ? Math.round(annotationStrokeAlpha(editingMark) * 100)
+    : strokeOpacity;
+  const editingFill = editingMark ? annotationFill(editingMark) : undefined;
+  const activeFillEnabled = editingMark ? !!editingFill : fillEnabled;
+  const activeFillColor = editingFill?.color ?? fillColor;
+  const activeFillOpacity = editingFill
+    ? Math.round(editingFill.alpha * 100)
+    : fillOpacity;
+
+  /** 属性排样式统一入口：选中标记时就地改样式入历史，否则更新绘制默认值；集中回退避免散布条件 setter 分派。 */
+  function applyStyleChange(change: StyleChange): void {
+    const index = selectedMark;
+    const mark =
+      editingMark && index !== undefined ? state.marks[index] : undefined;
+    if (mark) {
+      const style = mark.style ?? {};
+      // 选中标记已带填充时，改色保留其原不透明度、改不透明度保留其原色；
+      // 不用绘制默认值覆盖另一维。
+      const preservedFillColor = editingFill?.color ?? fillColor;
+      const preservedFillOpacity = editingFill
+        ? Math.round(editingFill.alpha * 100)
+        : fillOpacity;
+      const next: Mark["style"] =
+        change.kind === "color"
+          ? { ...style, color: change.value }
+          : change.kind === "strokeWidth"
+            ? { ...style, strokeWidth: change.value }
+            : change.kind === "strokeOpacity"
+              ? { ...style, strokeOpacity: change.value }
+              : change.kind === "fillEnabled"
+                ? {
+                    ...style,
+                    fill: change.value
+                      ? { color: fillColor, opacity: fillOpacity }
+                      : undefined,
+                  }
+                : change.kind === "fillColor"
+                  ? {
+                      ...style,
+                      fill: {
+                        color: change.value,
+                        opacity: preservedFillOpacity,
+                      },
+                    }
+                  : {
+                      ...style,
+                      fill: {
+                        color: preservedFillColor,
+                        opacity: change.value,
+                      },
+                    };
+      commit({
+        ...state,
+        marks: state.marks.map((entry, entryIndex) =>
+          entryIndex === index ? { ...entry, style: next } : entry,
+        ),
+      });
+      return;
+    }
+    if (change.kind === "color") setStrokeColor(change.value);
+    else if (change.kind === "strokeWidth") setStrokeWidth(change.value);
+    else
+      setShapeDefaults((current) =>
+        change.kind === "strokeOpacity"
+          ? { ...current, strokeOpacity: change.value }
+          : change.kind === "fillEnabled"
+            ? { ...current, fillEnabled: change.value }
+            : change.kind === "fillColor"
+              ? { ...current, fillColor: change.value }
+              : { ...current, fillOpacity: change.value },
+      );
+  }
+
   function point(event: React.PointerEvent<HTMLCanvasElement>): Point {
     const bounds = event.currentTarget.getBoundingClientRect();
     return {
@@ -1396,7 +1743,17 @@ export function ImageCanvasEditor({
       ...(tool === "mosaic" || tool === "blur"
         ? { intensity: effectIntensity }
         : {}),
+      // 描边类工具冻结边框不透明度；形状工具另冻结填充样式。
+      ...(STROKE_TOOLS.includes(tool) ? { strokeOpacity } : {}),
+      ...(FILL_TOOLS.includes(tool) && fillEnabled
+        ? { fill: { color: fillColor, opacity: fillOpacity } }
+        : {}),
     };
+  }
+
+  /** 取色结果统一走单一分发调用点（屏幕取色/画布取样共用）。 */
+  function applyPickedColor(hex: string): void {
+    applyStyleChange({ kind: "color", value: hex });
   }
 
   /** EyeDropper 屏幕取色：结果色仅更新当前标注色，失败/取消不改动。 */
@@ -1408,7 +1765,7 @@ export function ImageCanvasEditor({
       const result = await new Picker().open();
       const hex = result.sRGBHex?.toLowerCase();
       if (hex && /^#[0-9a-f]{6}$/.test(hex)) {
-        setStrokeColor(hex);
+        applyPickedColor(hex);
         setOperationMessage(`已从屏幕取色 ${hex}。`);
       }
     } catch {
@@ -1459,7 +1816,7 @@ export function ImageCanvasEditor({
       return;
     }
     const hex = rgbToHex(pixel.data[0]!, pixel.data[1]!, pixel.data[2]!);
-    setStrokeColor(hex);
+    applyPickedColor(hex);
     setOperationMessage(`已从画布取色 ${hex}。`);
   }
 
@@ -2162,14 +2519,6 @@ export function ImageCanvasEditor({
     }
   }
 
-  const shapeTool =
-    tool !== "select" &&
-    tool !== "hand" &&
-    tool !== "textSelect" &&
-    tool !== "crop" &&
-    tool !== "text" &&
-    tool !== "numbering" &&
-    tool !== "exclude";
   const fontTool = tool === "text" || tool === "numbering";
   const panning = tool === "hand" || spaceHeld;
 
@@ -2362,6 +2711,7 @@ export function ImageCanvasEditor({
     canExport,
     isExporting,
     hasSession: !!session,
+    suspended: proofreading,
   });
   useEffect(() => {
     documentCommandRef.current = {
@@ -2370,10 +2720,13 @@ export function ImageCanvasEditor({
       canExport,
       isExporting,
       hasSession: !!session,
+      suspended: proofreading,
     };
   });
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      // 校对模式挂起文档级命令：隐藏的编辑器不得继续消费 Ctrl+S/Ctrl+W。
+      if (documentCommandRef.current.suspended) return;
       if (
         !shouldRunDocumentCommand(event) ||
         event.repeat ||
@@ -2406,23 +2759,20 @@ export function ImageCanvasEditor({
   }, []);
 
   // —— 工具栏组合片段 ——
-  // 截图现场（与 Classic 同构）分两排：第一排是主操作（工具、旋转/清空
-  // 屏蔽/撤销/重做、复制/保存/贴图/识别/结束会话/清除编辑），第二排是
-  // 颜色/线宽/字号/强度等标注样式与取字、去水印的上下文操作；两排各自
-  // 可换行，窄选区不横向溢出。普通编辑页仍渲染单条可换行工具栏，片段
-  // 顺序与旧实现一致。两种布局复用同一批片段：按钮的可访问名称、title
-  // 提示与命令不随布局变化。
+  // 现场两排（与原生框选悬浮栏同构）：上排承载全部工具与操作，不换行，
+  // 过宽靠容器内水平滚动保持单行可达；下排仅当前工具属性，可换行收纳。
+  // 普通页仍是单条工具栏+底部 footer，两种布局共用片段，可访问名称与
+  // 命令不随布局变化。
   const toolButtons = TOOLSETS[toolset]
     // 截图现场无裁剪按钮：选区四边/四角拖拽直接调整裁剪。
     .filter((value) => !(captureStyle && value === "crop"))
     .map((value) => {
-      const Icon = TOOL_ICONS[value];
       return (
         <ToolbarButton
           appearance={tool === value ? "primary" : "subtle"}
           aria-label={TOOL_LABELS[value]}
           title={TOOL_LABELS[value]}
-          icon={captureStyle ? <Icon size={18} /> : undefined}
+          icon={<ToolbarIcon name={TOOL_ICONS[value]} />}
           aria-pressed={tool === value}
           key={value}
           onClick={() => {
@@ -2430,7 +2780,12 @@ export function ImageCanvasEditor({
             setTool(value);
           }}
         >
-          {captureStyle ? undefined : TOOL_LABELS[value]}
+          {/* 现场仅图标为主；马赛克/模糊为用户确认的效果预览入口，带短标签。 */}
+          {captureStyle
+            ? value === "mosaic" || value === "blur"
+              ? TOOL_LABELS[value]
+              : undefined
+            : TOOL_LABELS[value]}
         </ToolbarButton>
       );
     });
@@ -2444,43 +2799,38 @@ export function ImageCanvasEditor({
     />
   );
 
-  const strokeColorControl = toolset === "full" && (
-    <div aria-label="标注颜色" className="editor-color-control" role="group">
-      {STROKE_COLORS.map((color) => (
-        <button
-          aria-label={`常用颜色 ${color}`}
-          aria-pressed={normalizeHexColor(strokeColor).toLowerCase() === color}
-          className="editor-color-swatch"
-          key={color}
-          onClick={() => setStrokeColor(color)}
-          title={color}
-          type="button"
-          style={{ background: color }}
-        />
-      ))}
-      <input
-        aria-label="自定义颜色"
-        onChange={(event) => setStrokeColor(event.target.value)}
-        title="自定义颜色"
-        type="color"
-        value={normalizeHexColor(strokeColor)}
-      />
-      <Button
-        appearance="subtle"
-        aria-label="屏幕取色"
-        disabled={eyedropperBusy}
-        icon={<Pipette size={16} />}
-        onClick={() =>
-          eyedropperAvailable ? void pickScreenColor() : enterCanvasPick()
-        }
-        size="small"
-        title={
-          eyedropperAvailable ? "屏幕取色" : "取色：点击后在画布上取样颜色"
-        }
-      />
-    </div>
-  );
+  // 可见性：绘制时按当前工具；选择工具下选中描边类标记时按标记工具，
+  // 其余工具（选择未选中/手形/裁剪等）不出现无关设置。
+  const showStrokeColorControl =
+    toolset === "full" && (COLOR_TOOLS.includes(tool) || styleEditing);
+  const showStrokeWidthControl =
+    toolset === "full" && (STROKE_TOOLS.includes(tool) || styleEditing);
+  const showFillControl =
+    toolset === "full" &&
+    (FILL_TOOLS.includes(tool) ||
+      (editingMark ? FILL_TOOLS.includes(editingMark.tool) : false));
 
+  // 属性下排样式控件收敛为独立面板：控件与事件接线在子组件内完成，
+  // 父级仅以单一 onStyleChange 入口承接（选中标记就地改样式或更新默认值）。
+  const stylePanel = (
+    <AnnotationStylePanel
+      activeFillColor={activeFillColor}
+      activeFillEnabled={activeFillEnabled}
+      activeFillOpacity={activeFillOpacity}
+      activeStrokeOpacity={activeStrokeOpacity}
+      activeStrokeWidth={activeStrokeWidth}
+      activeStyleColor={activeStyleColor}
+      eyedropperAvailable={eyedropperAvailable}
+      eyedropperBusy={eyedropperBusy}
+      onPickColor={
+        eyedropperAvailable ? () => void pickScreenColor() : enterCanvasPick
+      }
+      onStyleChange={applyStyleChange}
+      showColorControl={showStrokeColorControl}
+      showFillControl={showFillControl}
+      showStrokeControls={showStrokeWidthControl}
+    />
+  );
   const effectIntensityControl = toolset === "full" &&
     (tool === "mosaic" || tool === "blur") && (
       <label className="editor-style-control">
@@ -2500,24 +2850,6 @@ export function ImageCanvasEditor({
       </label>
     );
 
-  const strokeWidthControl = toolset === "full" && shapeTool && (
-    <label className="editor-style-control">
-      <span aria-hidden="true">线宽</span>
-      <Select
-        aria-label="线条宽度"
-        size="small"
-        value={String(strokeWidth)}
-        onChange={(_, data) => setStrokeWidth(Number(data.value))}
-      >
-        {STROKE_WIDTHS.map((width) => (
-          <option key={width} value={String(width)}>
-            {width}px
-          </option>
-        ))}
-      </Select>
-    </label>
-  );
-
   const fontSizeControl = fontTool && (
     <label className="editor-style-control">
       <span aria-hidden="true">字号</span>
@@ -2536,21 +2868,26 @@ export function ImageCanvasEditor({
     </label>
   );
 
-  const autoTextControl = session && showAutoTextPreference && (
-    <label className="editor-style-control">
-      <input
-        aria-label="自动取字"
-        checked={autoText}
-        onChange={(event) => {
-          setLocalAutoText(event.target.checked);
-          onAutoTextChange?.(event.target.checked);
-        }}
-        type="checkbox"
-      />
-      <span aria-hidden="true">自动取字</span>
-    </label>
-  );
+  // 自动取字偏好：仅随取字工具在属性排显示；偏好状态本身（autoText/
+  // onAutoTextChange）不受工具切换影响，切回取字时恢复勾选。
+  const autoTextControl = session &&
+    showAutoTextPreference &&
+    tool === "textSelect" && (
+      <label className="editor-style-control">
+        <input
+          aria-label="自动取字"
+          checked={autoText}
+          onChange={(event) => {
+            setLocalAutoText(event.target.checked);
+            onAutoTextChange?.(event.target.checked);
+          }}
+          type="checkbox"
+        />
+        <span aria-hidden="true">自动取字</span>
+      </label>
+    );
 
+  // 取字上下文操作（按钮，非属性）：主排按工具显示。
   const textLayerControls = (
     <>
       {tool === "textSelect" &&
@@ -2558,7 +2895,7 @@ export function ImageCanvasEditor({
         session && (
           <ToolbarButton
             aria-label="取消准备文字层"
-            icon={captureStyle ? <X size={18} /> : undefined}
+            icon={<ToolbarIcon name="exit" />}
             title="取消准备文字层"
             onClick={() =>
               void actions.run({
@@ -2578,7 +2915,7 @@ export function ImageCanvasEditor({
           <ToolbarButton
             aria-label="重新准备文字层"
             disabled={!canRecognize}
-            icon={captureStyle ? <RefreshCw size={18} /> : undefined}
+            icon={<ToolbarIcon name="refresh" />}
             title="重新准备文字层"
             onClick={() => setPrepareNonce((nonce) => nonce + 1)}
           >
@@ -2588,7 +2925,7 @@ export function ImageCanvasEditor({
       {tool === "textSelect" && selectionText.length > 0 && session && (
         <Button
           appearance="primary"
-          icon={captureStyle ? <Copy size={18} /> : undefined}
+          icon={<ToolbarIcon name="copy" />}
           size="small"
           onPointerDown={() => {
             const text = readLayerSelection();
@@ -2608,13 +2945,13 @@ export function ImageCanvasEditor({
     </>
   );
 
-  const inpaintControls = tool === "inpaint" && (
+  const inpaintOperations = tool === "inpaint" && (
     <>
       <ToolbarButton
         appearance="primary"
         aria-label="预览修补"
         disabled={!inpaintSelection || inpaintBusy || !!inpaintPreview}
-        icon={captureStyle ? <Eye size={18} /> : undefined}
+        icon={<ToolbarIcon name="preview" />}
         title="预览修补"
         onClick={startInpaintPreview}
       >
@@ -2623,7 +2960,7 @@ export function ImageCanvasEditor({
       {inpaintBusy ? (
         <ToolbarButton
           aria-label="取消修补"
-          icon={captureStyle ? <X size={18} /> : undefined}
+          icon={<ToolbarIcon name="exit" />}
           title="取消修补"
           onClick={() => cancelInpaintPending("已取消修补；当前图片未被修改。")}
         >
@@ -2634,7 +2971,7 @@ export function ImageCanvasEditor({
           <ToolbarButton
             appearance="primary"
             aria-label="应用修补"
-            icon={captureStyle ? <Check size={18} /> : undefined}
+            icon={<ToolbarIcon name="confirm" />}
             title="应用修补"
             onClick={applyInpaintPreview}
           >
@@ -2642,7 +2979,7 @@ export function ImageCanvasEditor({
           </ToolbarButton>
           <ToolbarButton
             aria-label="放弃修补预览"
-            icon={captureStyle ? <X size={18} /> : undefined}
+            icon={<ToolbarIcon name="exit" />}
             title="放弃修补预览"
             onClick={() =>
               cancelInpaintPending("已放弃修补预览；当前图片未被修改。")
@@ -2650,25 +2987,11 @@ export function ImageCanvasEditor({
           >
             {captureStyle ? undefined : "放弃预览"}
           </ToolbarButton>
-          <label className="editor-style-control">
-            <span aria-hidden="true">对比</span>
-            <Select
-              aria-label="修补对比"
-              size="small"
-              value={inpaintCompare}
-              onChange={(_, data) =>
-                setInpaintCompare(data.value === "before" ? "before" : "after")
-              }
-            >
-              <option value="after">修补后</option>
-              <option value="before">本次修补前</option>
-            </Select>
-          </label>
         </>
       ) : inpaintSelection ? (
         <ToolbarButton
           aria-label="清除修补选区"
-          icon={captureStyle ? <X size={18} /> : undefined}
+          icon={<ToolbarIcon name="exit" />}
           title="清除修补选区"
           onClick={() =>
             cancelInpaintPending("已清除修补选区；当前图片未被修改。")
@@ -2680,187 +3003,280 @@ export function ImageCanvasEditor({
     </>
   );
 
-  const historyControls = (
-    <>
-      <ToolbarButton
-        title="旋转 90°"
-        icon={captureStyle ? <RotateCw size={18} /> : undefined}
-        aria-label="旋转 90°"
-        onClick={() => {
-          const image = imageRef.current;
-          const canvas = canvasRef.current;
-          const nextRotation = (state.rotation + 90) % 360;
-          commit(
-            image && canvas
-              ? rotateEditorState(
-                  state,
-                  image,
-                  canvasSize(canvas),
-                  nextRotation,
-                )
-              : { ...state, rotation: nextRotation },
-          );
-        }}
+  // 修补参数（对比下拉）：属性下排，仅在存在预览时展示。
+  const inpaintCompareControl = tool === "inpaint" && inpaintPreview && (
+    <label className="editor-style-control">
+      <span aria-hidden="true">对比</span>
+      <Select
+        aria-label="修补对比"
+        size="small"
+        value={inpaintCompare}
+        onChange={(_, data) =>
+          setInpaintCompare(data.value === "before" ? "before" : "after")
+        }
       >
-        {captureStyle ? undefined : "旋转 90°"}
-      </ToolbarButton>
-      <ToolbarButton
-        title="清空屏蔽"
-        icon={captureStyle ? <ShieldX size={18} /> : undefined}
-        aria-label="清空屏蔽"
-        disabled={!hasExclusions}
-        onClick={() => {
-          // 只移除排除区：普通标注保留，几何变更入历史可撤销。
-          select(undefined);
-          setResizeDraft(undefined);
-          resizeRef.current = undefined;
-          commit({
-            ...state,
-            marks: state.marks.filter((mark) => !isExclusionMark(mark)),
-          });
-          setOperationMessage("已清空全部屏蔽区；可用撤销恢复。");
-        }}
-      >
-        {captureStyle ? undefined : "清空屏蔽"}
-      </ToolbarButton>
-      <ToolbarButton
-        title="撤销"
-        icon={captureStyle ? <Undo2 size={18} /> : undefined}
-        aria-label="撤销"
-        disabled={historyIndex === 0}
-        onClick={undo}
-      >
-        {captureStyle ? undefined : "撤销"}
-      </ToolbarButton>
-      <ToolbarButton
-        title="重做"
-        icon={captureStyle ? <Redo2 size={18} /> : undefined}
-        aria-label="重做"
-        disabled={historyIndex >= history.length - 1}
-        onClick={redo}
-      >
-        {captureStyle ? undefined : "重做"}
-      </ToolbarButton>
-    </>
+        <option value="after">修补后</option>
+        <option value="before">本次修补前</option>
+      </Select>
+    </label>
   );
 
-  // 导出/会话主操作：普通编辑页渲染在底部 editor-footer；截图现场并入
-  // 第一排工具栏（Classic 顶排“保存/复制/取消”同位），状态提示仍由
-  // footer 的 output 承载（现场为固定位置浮层，不影响布局）。
-  const exportActions = (
-    <>
-      <Button
-        title="复制标注图"
-        icon={captureStyle ? <Copy size={18} /> : undefined}
-        aria-label="复制标注图"
-        size="small"
-        disabled={!canExport || isExporting}
-        onClick={() => void copyAnnotatedImage()}
-      >
-        {captureStyle ? undefined : "复制标注图"}
-      </Button>
-      {hasExclusions && (
-        <Button
-          title="复制屏蔽副本"
-          icon={captureStyle ? <ClipboardCopy size={18} /> : undefined}
-          aria-label="复制屏蔽副本"
-          size="small"
-          disabled={!canExport || isExporting}
-          onClick={() => void copyAnnotatedImage(true)}
-        >
-          {captureStyle ? undefined : "复制屏蔽副本"}
-        </Button>
-      )}
-      <Button
-        title="保存标注图"
-        icon={captureStyle ? <Save size={18} /> : undefined}
-        aria-label="保存标注图"
-        size="small"
-        disabled={!canExport || isExporting}
-        onClick={() => void saveAnnotatedImage()}
-      >
-        {captureStyle ? undefined : "保存标注图"}
-      </Button>
-      {hasExclusions && (
-        <Button
-          title="保存屏蔽副本"
-          icon={captureStyle ? <ShieldOff size={18} /> : undefined}
-          aria-label="保存屏蔽副本"
-          size="small"
-          disabled={!canExport || isExporting}
-          onClick={() => void saveAnnotatedImage(true)}
-        >
-          {captureStyle ? undefined : "保存屏蔽副本"}
-        </Button>
-      )}
-      {session && (
-        <>
-          <Button
-            title="贴图"
-            icon={captureStyle ? <Pin size={18} /> : undefined}
-            aria-label="贴图"
-            size="small"
-            disabled={!canExport || isExporting}
-            onClick={() => void pinCurrentImage()}
-          >
-            {captureStyle ? undefined : "贴图"}
-          </Button>
-          <Button
-            title="识别当前图"
-            icon={captureStyle ? <ScanText size={18} /> : undefined}
-            aria-label="识别当前图"
-            appearance="primary"
-            size="small"
-            disabled={!canRecognize || isExporting}
-            onClick={() => void recognizeCurrentImage()}
-          >
-            {captureStyle ? undefined : "识别当前图"}
-          </Button>
-          <Button
-            title="结束会话"
-            icon={captureStyle ? <X size={18} /> : undefined}
-            aria-label="结束会话"
-            appearance="transparent"
-            size="small"
-            disabled={isExporting}
-            onClick={() =>
-              void actions.run({ type: commands.closeScreenshotSession })
-            }
-          >
-            {captureStyle ? undefined : "结束会话"}
-          </Button>
-        </>
-      )}
-      <Button
-        title="清除编辑"
-        icon={captureStyle ? <Trash2 size={18} /> : undefined}
-        aria-label="清除编辑"
-        appearance="transparent"
-        size="small"
-        disabled={
-          state.marks.length === 0 &&
-          state.rotation === 0 &&
-          !state.crop &&
-          !state.resize &&
-          !state.patches?.length
-        }
-        onClick={() => {
-          select(undefined);
-          commit(EMPTY);
-        }}
-      >
-        {captureStyle ? undefined : "清除编辑"}
-      </Button>
-    </>
+  /** 清空屏蔽：只移除排除区，普通标注保留，几何变更入历史可撤销。 */
+  function clearExclusions() {
+    select(undefined);
+    setResizeDraft(undefined);
+    resizeRef.current = undefined;
+    commit({
+      ...state,
+      marks: state.marks.filter((mark) => !isExclusionMark(mark)),
+    });
+    setOperationMessage("已清空全部屏蔽区；可用撤销恢复。");
+  }
+
+  // 历史操作：旋转/撤销/重做属操作，现场排上排，普通页在工具栏末尾；
+  // 清空屏蔽在现场收入“更多”菜单，普通页仍为按钮。
+  const rotateControl = (
+    <ToolbarButton
+      title="旋转 90°"
+      icon={<ToolbarIcon name="rotate" />}
+      aria-label="旋转 90°"
+      onClick={() => {
+        const image = imageRef.current;
+        const canvas = canvasRef.current;
+        const nextRotation = (state.rotation + 90) % 360;
+        commit(
+          image && canvas
+            ? rotateEditorState(state, image, canvasSize(canvas), nextRotation)
+            : { ...state, rotation: nextRotation },
+        );
+      }}
+    >
+      {captureStyle ? undefined : "旋转 90°"}
+    </ToolbarButton>
   );
+  const undoButton = (
+    <ToolbarButton
+      title="撤销"
+      icon={<ToolbarIcon name="undo" />}
+      aria-label="撤销"
+      disabled={historyIndex === 0}
+      onClick={undo}
+    >
+      {captureStyle ? undefined : "撤销"}
+    </ToolbarButton>
+  );
+  const redoButton = (
+    <ToolbarButton
+      title="重做"
+      icon={<ToolbarIcon name="redo" />}
+      aria-label="重做"
+      disabled={historyIndex >= history.length - 1}
+      onClick={redo}
+    >
+      {captureStyle ? undefined : "重做"}
+    </ToolbarButton>
+  );
+  const clearExclusionsButton = (
+    <ToolbarButton
+      title="清空屏蔽"
+      icon={<ToolbarIcon name="clearExclusions" />}
+      aria-label="清空屏蔽"
+      disabled={!hasExclusions}
+      onClick={clearExclusions}
+    >
+      {captureStyle ? undefined : "清空屏蔽"}
+    </ToolbarButton>
+  );
+
+  // 导出/会话主操作：全部并入主排；footer 只承载状态提示（现场为固定
+  // 位置浮层）。
+  const hasEdits =
+    state.marks.length > 0 ||
+    state.rotation !== 0 ||
+    !!state.crop ||
+    !!state.resize ||
+    !!state.patches?.length;
+
+  /** 清除编辑：整体回到空白基准，入历史可撤销。 */
+  function clearEdits() {
+    select(undefined);
+    commit(EMPTY);
+  }
+
+  const copyAnnotatedButton = (
+    <Button
+      title="复制标注图"
+      icon={<ToolbarIcon name="copy" />}
+      aria-label="复制标注图"
+      size="small"
+      disabled={!canExport || isExporting}
+      onClick={() => void copyAnnotatedImage()}
+    >
+      {captureStyle ? undefined : "复制标注图"}
+    </Button>
+  );
+  const copyExcludedButton = hasExclusions && (
+    <Button
+      title="复制屏蔽副本"
+      icon={<ToolbarIcon name="copyExcluded" />}
+      aria-label="复制屏蔽副本"
+      size="small"
+      disabled={!canExport || isExporting}
+      onClick={() => void copyAnnotatedImage(true)}
+    >
+      {captureStyle ? undefined : "复制屏蔽副本"}
+    </Button>
+  );
+  const saveAnnotatedButton = (
+    <Button
+      title="保存标注图"
+      icon={<ToolbarIcon name="save" />}
+      aria-label="保存标注图"
+      size="small"
+      disabled={!canExport || isExporting}
+      onClick={() => void saveAnnotatedImage()}
+    >
+      {captureStyle ? undefined : "保存标注图"}
+    </Button>
+  );
+  const saveExcludedButton = hasExclusions && (
+    <Button
+      title="保存屏蔽副本"
+      icon={<ToolbarIcon name="saveExcluded" />}
+      aria-label="保存屏蔽副本"
+      size="small"
+      disabled={!canExport || isExporting}
+      onClick={() => void saveAnnotatedImage(true)}
+    >
+      {captureStyle ? undefined : "保存屏蔽副本"}
+    </Button>
+  );
+  const pinButton = session && (
+    <Button
+      title="贴图"
+      icon={<ToolbarIcon name="pin" />}
+      aria-label="贴图"
+      size="small"
+      disabled={!canExport || isExporting}
+      onClick={() => void pinCurrentImage()}
+    >
+      {captureStyle ? undefined : "贴图"}
+    </Button>
+  );
+  const recognizeButton = session && (
+    <Button
+      title="识别当前图"
+      icon={<ToolbarIcon name="textRecognition" />}
+      aria-label="识别当前图"
+      appearance="primary"
+      size="small"
+      disabled={!canRecognize || isExporting}
+      onClick={() => void recognizeCurrentImage()}
+    >
+      {captureStyle ? undefined : "识别当前图"}
+    </Button>
+  );
+  const closeSessionButton = session && (
+    <Button
+      title="结束会话"
+      icon={<ToolbarIcon name="exit" />}
+      aria-label="结束会话"
+      appearance="transparent"
+      size="small"
+      disabled={isExporting}
+      onClick={() =>
+        void actions.run({ type: commands.closeScreenshotSession })
+      }
+    >
+      {captureStyle ? undefined : "结束会话"}
+    </Button>
+  );
+  const clearEditsButton = (
+    <Button
+      title="清除编辑"
+      icon={<ToolbarIcon name="clear" />}
+      aria-label="清除编辑"
+      appearance="transparent"
+      size="small"
+      disabled={!hasEdits}
+      onClick={clearEdits}
+    >
+      {captureStyle ? undefined : "清除编辑"}
+    </Button>
+  );
+
+  // “更多”菜单收纳现场低频操作（按当前可用状态）；菜单项保留原按钮
+  // 的权限/忙态守卫，普通页直出按钮不收菜单。
+  const moreActionsMenu = captureStyle && (
+    <Menu>
+      <MenuTrigger disableButtonEnhancement>
+        <ToolbarButton
+          aria-label="更多操作"
+          icon={<ToolbarIcon name="more" />}
+          title="更多操作"
+        />
+      </MenuTrigger>
+      <MenuPopover>
+        <MenuList>
+          <MenuItem
+            disabled={!hasExclusions}
+            icon={<ToolbarIcon name="clearExclusions" />}
+            onClick={clearExclusions}
+          >
+            清空屏蔽
+          </MenuItem>
+          {hasExclusions && (
+            <>
+              <MenuItem
+                disabled={!canExport || isExporting}
+                icon={<ToolbarIcon name="copyExcluded" />}
+                onClick={() => void copyAnnotatedImage(true)}
+              >
+                复制屏蔽副本
+              </MenuItem>
+              <MenuItem
+                disabled={!canExport || isExporting}
+                icon={<ToolbarIcon name="saveExcluded" />}
+                onClick={() => void saveAnnotatedImage(true)}
+              >
+                保存屏蔽副本
+              </MenuItem>
+            </>
+          )}
+          <MenuItem
+            disabled={!hasEdits}
+            icon={<ToolbarIcon name="clear" />}
+            onClick={clearEdits}
+          >
+            清除编辑
+          </MenuItem>
+        </MenuList>
+      </MenuPopover>
+    </Menu>
+  );
+
+  // 下排收起：仅当前工具参数（颜色/线宽/边框不透明度/填充/字号/强度、
+  // 修补对比）或选中描边类标记的就地样式、会话取字偏好存在时渲染；
+  // 上下文操作已归主排。
+  const settingsRowActive =
+    styleEditing ||
+    tool === "text" ||
+    (toolset === "full" &&
+      (COLOR_TOOLS.includes(tool) || tool === "mosaic" || tool === "blur")) ||
+    !!inpaintCompareControl ||
+    !!autoTextControl;
 
   return (
     <div
-      className={`canvas-editor${captureStyle ? " capture-scene-editor" : ""}`}
+      className={`canvas-editor${
+        captureStyle ? " capture-scene-editor" : ""
+      }${proofreading ? " is-proofreading" : ""}`}
       style={captureStyle}
       data-screenshot-session={session?.sessionId ?? ""}
       onKeyDown={(event) => {
         if (isImeCompositionEvent(event.nativeEvent)) return;
+        // 校对模式挂起本地编辑手势（Space 平移/Esc 关闭），不抢占校对交互。
+        if (proofreading) return;
         const target = event.target as HTMLElement;
         // 文档命令由 window 消费，画布手势仍在本地处理。
         if (
@@ -2911,59 +3327,55 @@ export function ImageCanvasEditor({
           </div>,
           document.body,
         )}
-      {captureStyle ? (
-        // 截图现场：主操作一排、样式与上下文操作一排；两排均可换行。
-        <div className="editor-scene-toolstack">
-          <Toolbar
-            aria-label="图片编辑工具"
-            size="small"
-            className="editor-toolbar editor-toolbar-scene-primary"
-          >
-            {toolButtons}
-            {historyControls}
-            {exportActions}
-          </Toolbar>
-          <Toolbar
-            aria-label="标注样式与辅助操作"
-            size="small"
-            className="editor-toolbar editor-toolbar-scene-secondary"
-          >
-            {annotationTextInput}
-            {strokeColorControl}
-            {effectIntensityControl}
-            {strokeWidthControl}
-            {fontSizeControl}
-            {autoTextControl}
-            {textLayerControls}
-            {inpaintControls}
-          </Toolbar>
-        </div>
-      ) : (
+      {/* 主排：全部工具与操作同排（过宽时容器内水平滚动保持单行可达，
+          不把工具挪离主排）；下排仅当前工具属性，无属性时收起。 */}
+      <div className="editor-toolbar-stack">
         <Toolbar
           aria-label="图片编辑工具"
           size="small"
-          className="editor-toolbar"
+          className={`editor-toolbar editor-toolbar-main${
+            captureStyle ? " editor-toolbar-scene-primary" : ""
+          }`}
         >
           {toolButtons}
-          {annotationTextInput}
-          {strokeColorControl}
-          {effectIntensityControl}
-          {strokeWidthControl}
-          {fontSizeControl}
-          <span aria-hidden="true" className="editor-toolbar-break" />
-          {autoTextControl}
           {textLayerControls}
-          {inpaintControls}
-          {historyControls}
+          {inpaintOperations}
+          {rotateControl}
+          {captureStyle ? null : clearExclusionsButton}
+          {undoButton}
+          {redoButton}
+          {copyAnnotatedButton}
+          {captureStyle ? null : copyExcludedButton}
+          {saveAnnotatedButton}
+          {captureStyle ? null : saveExcludedButton}
+          {pinButton}
+          {recognizeButton}
+          {closeSessionButton}
+          {captureStyle ? null : clearEditsButton}
+          {moreActionsMenu}
         </Toolbar>
-      )}
+        {settingsRowActive ? (
+          <Toolbar
+            aria-label="当前工具设置"
+            size="small"
+            className="editor-toolbar editor-toolbar-settings"
+          >
+            {annotationTextInput}
+            {stylePanel}
+            {fontSizeControl}
+            {effectIntensityControl}
+            {autoTextControl}
+            {inpaintCompareControl}
+          </Toolbar>
+        ) : null}
+      </div>
       {toolset === "full" && (
         <details
           className="editor-output-settings"
           open={captureStyle ? undefined : true}
         >
           <summary aria-label="输出设置" title="输出设置">
-            <Settings2 size={18} />
+            <ToolbarIcon name="settings" />
           </summary>
           <Toolbar
             aria-label="输出设置"
@@ -3137,6 +3549,8 @@ export function ImageCanvasEditor({
           cursor: panning ? "grab" : undefined,
         }}
         onContextMenu={(event) => {
+          // 校对模式：右键/选区交互归校对层，编辑器不拦截。
+          if (proofreading) return;
           const text = readLayerSelection();
           if (tool !== "textSelect" || !text) {
             setCopyMenu(undefined);
@@ -3152,6 +3566,8 @@ export function ImageCanvasEditor({
           });
         }}
         onPointerDown={(event) => {
+          // 校对模式：不进入平移捕获，保留容器原生滚动。
+          if (proofreading) return;
           if (event.button === 0) setCopyMenu(undefined);
           if (!panning) return;
           panStart.current = {
@@ -3180,7 +3596,16 @@ export function ImageCanvasEditor({
           panStart.current = undefined;
         }}
       >
-        {layerReady ? (
+        {proofreading && proofread ? (
+          // 左侧校对面：冻结参考图 + 结果行框投影；编辑画布仅隐藏，切换回
+          // 编辑模式时未提交编辑与历史原样恢复。
+          <ResultImageTextOverlay
+            key={proofread.bindingKey}
+            imageUrl={proofread.imageUrl}
+            lines={proofread.lines}
+            onUpdateLine={proofread.onUpdateLine}
+          />
+        ) : layerReady ? (
           <div
             className="image-text-frame"
             ref={stageRef}
@@ -3218,7 +3643,7 @@ export function ImageCanvasEditor({
             aspectRatio: captureStyle
               ? `${captureGeometry?.width} / ${captureGeometry?.height}`
               : "3 / 2",
-            display: layerReady ? "none" : "block",
+            display: layerReady || proofreading ? "none" : "block",
             cursor: panning
               ? "grab"
               : tool === "select"
@@ -3293,7 +3718,6 @@ export function ImageCanvasEditor({
         )}
       </div>
       <div className="editor-footer">
-        {captureStyle ? null : exportActions}
         <output aria-live="polite" className="editor-operation-status">
           {canExport
             ? operationMessage
@@ -3551,11 +3975,24 @@ function draw(
     const height = mark.end.y - mark.start.y;
     const color = mark.style?.color ?? DEFAULT_COLOR;
     const lineWidth = (mark.style?.strokeWidth ?? 3) * markScale;
+    const strokeAlpha = annotationStrokeAlpha(mark);
     if (mark.tool === "rectangle") {
       context.setLineDash([]);
       context.lineWidth = lineWidth;
       context.strokeStyle = color;
+      const fill = annotationFill(mark);
+      if (fill) {
+        // 填充先铺底，边框后绘制覆盖在上：两者颜色/不透明度独立。
+        context.save();
+        context.globalAlpha = fill.alpha;
+        context.fillStyle = fill.color;
+        context.fillRect(mark.start.x, mark.start.y, width, height);
+        context.restore();
+      }
+      context.save();
+      context.globalAlpha = strokeAlpha;
       context.strokeRect(mark.start.x, mark.start.y, width, height);
+      context.restore();
     } else if (mark.tool === "ellipse") {
       context.setLineDash([]);
       context.lineWidth = lineWidth;
@@ -3570,11 +4007,25 @@ function draw(
         0,
         Math.PI * 2,
       );
+      const fill = annotationFill(mark);
+      if (fill) {
+        context.save();
+        context.globalAlpha = fill.alpha;
+        context.fillStyle = fill.color;
+        // fill() 不清除当前路径：先按填充不透明度填充，再沿同一路径描边。
+        context.fill();
+        context.restore();
+      }
+      context.save();
+      context.globalAlpha = strokeAlpha;
       context.stroke();
+      context.restore();
     } else if (mark.tool === "arrow") {
       context.setLineDash([]);
       context.lineWidth = lineWidth;
       context.strokeStyle = color;
+      context.save();
+      context.globalAlpha = strokeAlpha;
       context.beginPath();
       context.moveTo(mark.start.x, mark.start.y);
       context.lineTo(mark.end.x, mark.end.y);
@@ -3592,6 +4043,7 @@ function draw(
         mark.end.y - 16 * markScale * Math.sin(angle + 0.45),
       );
       context.stroke();
+      context.restore();
     } else if (mark.tool === "text") {
       context.setLineDash([]);
       context.fillStyle = color;
@@ -3609,10 +4061,13 @@ function draw(
       context.lineCap = "round";
       context.lineJoin = "round";
       if (mark.tool === "highlighter") {
-        context.globalAlpha = 0.35;
+        // 边框不透明度与荧光笔自身 35% 透明相乘：旧标记（缺省 100%）
+        // 渲染保持不变，不覆盖原有透明语义。
+        context.globalAlpha = 0.35 * strokeAlpha;
         context.lineWidth =
           Math.max((mark.style?.strokeWidth ?? 3) * 4, 12) * markScale;
       } else {
+        context.globalAlpha = strokeAlpha;
         context.lineWidth = lineWidth;
       }
       context.beginPath();
