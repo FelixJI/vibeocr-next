@@ -41,6 +41,7 @@ import {
   rectIntersectsBox,
   rotateEditorState,
   type AnnotationArrowStyle,
+  type AnnotationFill,
   type AnnotationLineStyle,
   type AnnotationTool,
   type CanvasSize,
@@ -876,10 +877,12 @@ export function ImageCanvasEditor({
   const [toolAttributes, setToolAttributes] = useState<
     Partial<Record<Tool, Partial<ToolAttributes>>>
   >({});
-  const activeToolAttributes: ToolAttributes = {
-    ...DEFAULT_TOOL_ATTRIBUTES,
-    ...toolAttributes[tool],
-  };
+  /** 任意工具的属性记忆（含默认回退）：选中标记按其所属工具恢复，
+   * 不受当前选择工具影响。 */
+  function attributesOfTool(name: Tool): ToolAttributes {
+    return { ...DEFAULT_TOOL_ATTRIBUTES, ...toolAttributes[name] };
+  }
+  const activeToolAttributes = attributesOfTool(tool);
   const toolAttributesRef = useRef(toolAttributes);
   useEffect(() => {
     toolAttributesRef.current = toolAttributes;
@@ -1832,19 +1835,33 @@ export function ImageCanvasEditor({
     : activeToolAttributes.fillOpacity;
 
   /** 属性排样式统一入口：选中标记时就地改样式入历史，否则更新当前工具的属性记忆；集中回退避免散布条件 setter 分派。 */
+  /** 重新开启填充：对象自身携带的关闭前值（fill.enabled=false 保留
+   * color/opacity）优先，其次所属工具的属性记忆；结果写入对象自身样式，
+   * 随历史/撤销重做与视图投影自然流转，无索引侧表。 */
+  function reenabledFill(
+    previous: AnnotationFill | undefined,
+    owningTool: ToolAttributes,
+  ): AnnotationFill {
+    if (previous) return { color: previous.color, opacity: previous.opacity };
+    return {
+      color: owningTool.fillColor,
+      opacity: owningTool.fillOpacity,
+    };
+  }
+
   function applyStyleChange(change: StyleChange): void {
     const index = selectedMark;
     const mark =
       editingMark && index !== undefined ? state.marks[index] : undefined;
-    if (mark) {
+    if (mark && index !== undefined) {
       const style = mark.style ?? {};
       // 选中标记已带填充时，改色保留其原不透明度、改不透明度保留其原色；
-      // 不用绘制默认值覆盖另一维。
-      const preservedFillColor =
-        editingFill?.color ?? activeToolAttributes.fillColor;
+      // 回退值取所属工具记忆而非当前选择工具。
+      const owningTool = attributesOfTool(mark.tool);
+      const preservedFillColor = editingFill?.color ?? owningTool.fillColor;
       const preservedFillOpacity = editingFill
         ? Math.round(editingFill.alpha * 100)
-        : activeToolAttributes.fillOpacity;
+        : owningTool.fillOpacity;
       const next: Mark["style"] =
         change.kind === "color"
           ? { ...style, color: change.value }
@@ -1863,12 +1880,13 @@ export function ImageCanvasEditor({
                       : change.kind === "fillEnabled"
                         ? {
                             ...style,
+                            // 关闭保留值（enabled=false 渲染为空心），重开
+                            // 恢复对象自身值或所属工具记忆。
                             fill: change.value
-                              ? {
-                                  color: activeToolAttributes.fillColor,
-                                  opacity: activeToolAttributes.fillOpacity,
-                                }
-                              : undefined,
+                              ? reenabledFill(style.fill, owningTool)
+                              : style.fill
+                                ? { ...style.fill, enabled: false }
+                                : undefined,
                           }
                         : change.kind === "fillColor"
                           ? {
@@ -2221,6 +2239,16 @@ export function ImageCanvasEditor({
       return;
     }
     if (!dragStart.current) {
+      // 折线草稿悬停橡皮筋：无按键拖拽时也把活动端跟随游标，下一段实时
+      // 预览可见；仅更新草稿（不入历史、不入导出），点击才真正加点。
+      if (tool === "polyline" && draftMark.current?.tool === "polyline") {
+        setDraftMark((current) =>
+          current && current.tool === "polyline"
+            ? { ...current, end: point(event) }
+            : current,
+        );
+        return;
+      }
       if (tool === "select") {
         const at = point(event);
         const selected =
@@ -4611,11 +4639,21 @@ function draw(
       context.stroke();
       context.restore();
     } else if (mark.tool === "line" || mark.tool === "polyline") {
-      // 直线/折线共用描边路径：折线用采样点，直线退化 start→end。
-      const points =
+      // 直线/折线共用描边路径：折线用采样点，直线退化 start→end。折线
+      // 草稿的活动 end 追加为最后一个顶点：拖拽/悬停中的新段实时可见；
+      // 已提交标记 end == 最后顶点，不追加，渲染与旧像素不变。未提交
+      // 草稿只进预览画布，导出/历史仍只包含已提交 points。
+      const committedPoints =
         mark.tool === "polyline" && mark.points?.length
           ? mark.points
           : [mark.start, mark.end];
+      const points = [...committedPoints];
+      if (mark.tool === "polyline") {
+        const last = points[points.length - 1];
+        if (last && (last.x !== mark.end.x || last.y !== mark.end.y)) {
+          points.push(mark.end);
+        }
+      }
       context.save();
       context.strokeStyle = color;
       context.lineWidth = lineWidth;
@@ -4993,18 +5031,14 @@ function isEndpointMark(mark: Mark): boolean {
   return mark.tool === "line" || mark.tool === "arrow";
 }
 
-/** 直线/箭头端点命中：任一端在半径内即命中，start 优先（重叠取起点）。 */
+/** 直线/箭头端点命中：两端都在半径内时取距离更近的一端（相等时稳定取
+ * start），短线段（长度 < 2×半径）的 end 手柄因此仍然可命中可拖拽。 */
 function endpointHandle(mark: Mark, at: Point): "start" | "end" | undefined {
-  if (
-    Math.hypot(at.x - mark.start.x, at.y - mark.start.y) <=
-    EXCLUSION_HANDLE_RADIUS
-  )
-    return "start";
-  if (
-    Math.hypot(at.x - mark.end.x, at.y - mark.end.y) <= EXCLUSION_HANDLE_RADIUS
-  )
-    return "end";
-  return undefined;
+  const toStart = Math.hypot(at.x - mark.start.x, at.y - mark.start.y);
+  const toEnd = Math.hypot(at.x - mark.end.x, at.y - mark.end.y);
+  if (toStart > EXCLUSION_HANDLE_RADIUS && toEnd > EXCLUSION_HANDLE_RADIUS)
+    return undefined;
+  return toStart <= toEnd ? "start" : "end";
 }
 
 /** 拖动八点手柄缩放矩形类标记（屏蔽/矩形/椭圆共用）：反向拖拽自动翻转；

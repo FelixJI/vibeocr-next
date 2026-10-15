@@ -72,6 +72,25 @@ describe("annotation stroke/fill opacity resolution", () => {
     ).toEqual({ color: "#12a150", alpha: 1 });
     expect(annotationFill({ ...legacy, style: {} })).toBeUndefined();
   });
+
+  it("treats fill.enabled=false as hollow while keeping the stored values", () => {
+    // 关闭填充：解析为空心（渲染/导出与无 fill 一致），但值随对象保留，
+    // 重新开启时从对象自身恢复，不需要任何索引侧表。
+    const disabled = {
+      ...legacy,
+      style: {
+        fill: { color: "#ff0000", opacity: 40, enabled: false },
+      },
+    };
+    expect(annotationFill(disabled)).toBeUndefined();
+    // 缺省（undefined/true）保持启用：旧字段兼容。
+    expect(
+      annotationFill({
+        ...legacy,
+        style: { fill: { color: "#12a150", opacity: 70, enabled: true } },
+      }),
+    ).toEqual({ color: "#12a150", alpha: 0.7 });
+  });
 });
 
 describe("annotated image handoff", () => {

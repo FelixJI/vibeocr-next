@@ -46,11 +46,15 @@ export type AnnotationLineStyle = "solid" | "dashed" | "dotted";
 /** 箭头端头样式：开放（旧默认两线头）/实心三角/空心三角。 */
 export type AnnotationArrowStyle = "open" | "hollow" | "solid";
 
-/** 形状填充样式：存在即启用；颜色缺省白、不透明度缺省 100。 */
+/** 形状填充样式：存在即启用；颜色缺省白、不透明度缺省 100。
+ * enabled=false 表示填充被关闭但保留原值：渲染/导出与空心一致，
+ * 重新开启时从对象自身恢复（随历史撤销/重做，不做索引侧表）。 */
 export interface AnnotationFill {
   readonly color?: string;
   /** 0-100 百分比；0 为有效值（完全透明填充）。 */
   readonly opacity?: number;
+  /** 缺省（undefined/true）= 启用；false = 关闭但保留值。 */
+  readonly enabled?: boolean;
 }
 
 export interface Mark {
@@ -155,12 +159,13 @@ export function annotationStrokeAlpha(mark: Mark): number {
   return clampPercent(mark.style?.strokeOpacity, 100) / 100;
 }
 
-/** 标记填充解析：无 fill 为 undefined（空心）；0% 不透明度是有效透明填充。 */
+/** 标记填充解析：无 fill 或 fill.enabled=false 为 undefined（空心，
+ * 旧对象与关闭填充的渲染一致）；0% 不透明度是有效透明填充。 */
 export function annotationFill(
   mark: Mark,
 ): { readonly color: string; readonly alpha: number } | undefined {
   const fill = mark.style?.fill;
-  if (!fill) return undefined;
+  if (!fill || fill.enabled === false) return undefined;
   const color =
     typeof fill.color === "string" && /^#[0-9a-fA-F]{6}$/.test(fill.color)
       ? fill.color.toLowerCase()

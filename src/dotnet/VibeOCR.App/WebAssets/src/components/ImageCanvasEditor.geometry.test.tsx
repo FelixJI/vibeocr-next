@@ -875,3 +875,270 @@ describe("AC4 历史、Esc 草稿与变换后命中", () => {
     unmount();
   });
 });
+
+describe("短线段端点命中（C1 回归）", () => {
+  it("长度小于双命中圈的直线/箭头：点击 end 侧拖动的是 end 而不是 start", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+
+    // 直线 (300,200)→(310,204)：长度≈10.8 < 2×12，两端命中圈重叠。
+    fireEvent.click(screen.getByRole("button", { name: "直线" }));
+    await dragDraw(canvas, harness, { x: 300, y: 200 }, { x: 310, y: 204 });
+    await clickSelect(canvas, harness, { x: 305, y: 202 });
+    // 按在 end 附近 (311,205)：距 end≈1.4、距 start≈11.2 → 应命中 end。
+    // 旧实现无条件优先 start，会把起点拖走。
+    fireEvent.pointerDown(canvas, { pointerId: 3, clientX: 311, clientY: 205 });
+    fireEvent.pointerMove(canvas, { pointerId: 3, clientX: 500, clientY: 300 });
+    harness.flush();
+    clearCalls();
+    fireEvent.pointerUp(canvas, { pointerId: 3, clientX: 500, clientY: 300 });
+    harness.flush();
+    // 提交后帧：轴杆 lineTo(500,300)；旧实现拖走 start 时线段终点仍 (310,204)。
+    const lineTos = allCalls()
+      .filter((call) => call.op === "lineTo")
+      .map((call) => call.args);
+    expect(lineTos).toContainEqual([500, 300]);
+    expect(lineTos).not.toContainEqual([310, 204]);
+
+    // 箭头短线同构：共享同一 endpointHandle。前一个直线仍处于选中态，
+    // 用对象下拉直接选中箭头，避免旧选择的手柄抢先命中。
+    fireEvent.click(screen.getByRole("button", { name: "箭头" }));
+    await dragDraw(canvas, harness, { x: 300, y: 200 }, { x: 308, y: 203 });
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "1" },
+    });
+    fireEvent.pointerDown(canvas, { pointerId: 4, clientX: 309, clientY: 204 });
+    fireEvent.pointerMove(canvas, { pointerId: 4, clientX: 560, clientY: 260 });
+    harness.flush();
+    clearCalls();
+    fireEvent.pointerUp(canvas, { pointerId: 4, clientX: 560, clientY: 260 });
+    harness.flush();
+    const arrowTos = allCalls()
+      .filter((call) => call.op === "lineTo")
+      .map((call) => call.args);
+    expect(arrowTos).toContainEqual([560, 260]);
+    expect(arrowTos).not.toContainEqual([308, 203]);
+    unmount();
+  });
+});
+
+describe("折线活动段预览（C2 回归）", () => {
+  it("拖拽新段与单击后悬停都实时可见；悬停不入历史，Esc 放弃草稿", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { actions, unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+
+    fireEvent.click(screen.getByRole("button", { name: "折线" }));
+    // 1) 拖拽中的活动段：pointerup 之前画布已绘制到当前拖拽点。
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 300, clientY: 150 });
+    harness.flush();
+    // 旧实现只遍历已提交 points：拖拽点 (300,150) 不可见。
+    expect(
+      allCalls()
+        .filter((call) => call.op === "lineTo")
+        .map((call) => call.args),
+    ).toContainEqual([300, 150]);
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 300, clientY: 150 });
+    harness.flush();
+
+    // 2) 单击加点后悬停：下一段橡皮筋跟随游标，仍只是草稿。
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 400, clientY: 200 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 400, clientY: 200 });
+    clearCalls();
+    fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 520, clientY: 260 });
+    harness.flush();
+    expect(
+      allCalls()
+        .filter((call) => call.op === "lineTo")
+        .map((call) => call.args),
+    ).toContainEqual([520, 260]);
+    // 悬停零历史：无修订、撤销仍禁用（悬停点绝不被提交/导出）。
+    expect(revisions(actions)).toEqual([]);
+    expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
+
+    // 3) Esc 放弃草稿（同时切回选择工具）；重新激活折线后正常单击-双击
+    //    提交恰好一条历史。
+    fireEvent.keyDown(canvas, { key: "Escape" });
+    harness.flush();
+    fireEvent.click(screen.getByRole("button", { name: "折线" }));
+    fireEvent.pointerDown(canvas, { pointerId: 2, clientX: 100, clientY: 100 });
+    fireEvent.pointerUp(canvas, { pointerId: 2, clientX: 100, clientY: 100 });
+    fireEvent.pointerDown(canvas, { pointerId: 2, clientX: 300, clientY: 150 });
+    fireEvent.pointerUp(canvas, { pointerId: 2, clientX: 300, clientY: 150 });
+    fireEvent.doubleClick(canvas, { clientX: 300, clientY: 150 });
+    harness.flush();
+    expect(revisions(actions)).toEqual([1]);
+    unmount();
+  });
+});
+
+describe("选中对象填充恢复（C3 回归）", () => {
+  function fillCalls() {
+    return allCalls();
+  }
+
+  it("新空心对象启用填充使用所属工具记忆，而非选择工具默认", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+
+    // 矩形工具记忆：填充 #e02020/80 后关闭（记忆保留值）。
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    fireEvent.click(screen.getByLabelText("填充"));
+    fireEvent.change(screen.getByLabelText("填充颜色"), {
+      target: { value: "#e02020" },
+    });
+    const opacity = screen.getByLabelText("填充不透明度");
+    fireEvent.change(opacity, { target: { value: "80" } });
+    fireEvent.blur(opacity);
+    fireEvent.click(screen.getByLabelText("填充"));
+    await dragDraw(canvas, harness, { x: 100, y: 100 }, { x: 400, y: 300 });
+
+    // 选择工具下给空心对象开启填充：恢复矩形工具记忆值。
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    const settings = within(
+      screen.getByRole("toolbar", { name: "当前工具设置" }),
+    );
+    expect(settings.getByLabelText("填充")).not.toBeChecked();
+    fireEvent.click(settings.getByLabelText("填充"));
+    // 旧实现写入选择工具默认白/50。
+    expect(settings.getByLabelText("填充颜色")).toHaveValue("#e02020");
+    expect(settings.getByLabelText("填充不透明度")).toHaveValue(80);
+    clearCalls();
+    harness.flush();
+    const calls = fillCalls();
+    const fillIndex = calls.findIndex(
+      (call) => call.op === "fillStyle" && call.args[0] === "#e02020",
+    );
+    expect(fillIndex).toBeGreaterThanOrEqual(0);
+    expect(
+      calls
+        .slice(Math.max(0, fillIndex - 3), fillIndex + 1)
+        .some((call) => call.op === "globalAlpha" && call.args[0] === 0.8),
+    ).toBe(true);
+    unmount();
+  });
+
+  it("已有自定义填充关闭再开启恢复对象原值，undo/redo 逐级可回", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { actions, unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+
+    // 画一个带工具记忆填充的矩形，再把对象填充改成自定义值。
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    fireEvent.click(screen.getByLabelText("填充"));
+    await dragDraw(canvas, harness, { x: 100, y: 100 }, { x: 400, y: 300 });
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    const settings = () =>
+      within(screen.getByRole("toolbar", { name: "当前工具设置" }));
+    fireEvent.change(settings().getByLabelText("填充颜色"), {
+      target: { value: "#ff0000" },
+    });
+    const opacity = settings().getByLabelText("填充不透明度");
+    fireEvent.change(opacity, { target: { value: "40" } });
+    fireEvent.blur(opacity);
+    expect(revisions(actions)).toHaveLength(3);
+
+    // 关闭：值保留在对象自身（enabled=false 渲染为空心）。
+    fireEvent.click(settings().getByLabelText("填充"));
+    expect(revisions(actions)).toHaveLength(4);
+    expect(settings().getByLabelText("填充")).not.toBeChecked();
+
+    // 撤销回到启用（自定义值仍在）；重做回到关闭。撤销/重做会清除选择，
+    // 经对象下拉重新选中后断言。
+    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+    harness.flush();
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    expect(settings().getByLabelText("填充")).toBeChecked();
+    expect(settings().getByLabelText("填充颜色")).toHaveValue("#ff0000");
+    expect(settings().getByLabelText("填充不透明度")).toHaveValue(40);
+    fireEvent.click(screen.getByRole("button", { name: "重做" }));
+    harness.flush();
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    expect(settings().getByLabelText("填充")).not.toBeChecked();
+
+    // 重新开启：恢复对象关闭前的自定义值（旧实现丢成白/50）。
+    fireEvent.click(settings().getByLabelText("填充"));
+    expect(settings().getByLabelText("填充颜色")).toHaveValue("#ff0000");
+    expect(settings().getByLabelText("填充不透明度")).toHaveValue(40);
+    unmount();
+  });
+
+  it("删除对象使索引重排后，重开填充仍恢复该对象自身值且互不污染", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+
+    // rect0：椭圆 #12a150/70；rect1：矩形工具记忆填充后改为 #ff0000。
+    fireEvent.click(screen.getByRole("button", { name: "椭圆" }));
+    fireEvent.click(screen.getByLabelText("填充"));
+    fireEvent.change(screen.getByLabelText("填充颜色"), {
+      target: { value: "#12a150" },
+    });
+    const ellipseOpacity = screen.getByLabelText("填充不透明度");
+    fireEvent.change(ellipseOpacity, { target: { value: "70" } });
+    fireEvent.blur(ellipseOpacity);
+    await dragDraw(canvas, harness, { x: 100, y: 100 }, { x: 300, y: 260 });
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    fireEvent.click(screen.getByLabelText("填充"));
+    await dragDraw(canvas, harness, { x: 350, y: 100 }, { x: 550, y: 260 });
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "1" },
+    });
+    const settings = () =>
+      within(screen.getByRole("toolbar", { name: "当前工具设置" }));
+    fireEvent.change(settings().getByLabelText("填充颜色"), {
+      target: { value: "#ff0000" },
+    });
+
+    // 两对象分别关闭填充：值随各自样式保存。
+    fireEvent.click(settings().getByLabelText("填充"));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    fireEvent.click(settings().getByLabelText("填充"));
+
+    // 删除 rect0（索引重排，rect1 由 1 变 0）。
+    fireEvent.keyDown(canvas, { key: "Delete" });
+    harness.flush();
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+
+    // 重新开启 rect1 的填充：恢复其自身 #ff0000（旧索引侧表方案在重排
+    // 后会错配成别的对象或工具默认）。
+    fireEvent.click(settings().getByLabelText("填充"));
+    expect(settings().getByLabelText("填充颜色")).toHaveValue("#ff0000");
+    expect(settings().getByLabelText("填充不透明度")).toHaveValue(50);
+    unmount();
+  });
+});
