@@ -10,6 +10,7 @@ import {
   Textarea,
   Toolbar,
   ToolbarButton,
+  useFocusableGroup,
 } from "@fluentui/react-components";
 import {
   useCallback,
@@ -5001,11 +5002,22 @@ export function ImageCanvasEditor({
     }
     updateToolAttribute({ intensity: value });
   }
+  const effectIntensityFocus = useFocusableGroup({
+    ignoreDefaultKeydown: {
+      ArrowLeft: true,
+      ArrowRight: true,
+      ArrowUp: true,
+      ArrowDown: true,
+      Home: true,
+      End: true,
+    },
+  });
   const effectIntensityControl = toolset === "full" &&
     effectIntensityTarget !== undefined && (
       <label className="editor-style-control">
         <span aria-hidden="true">强度</span>
         <input
+          {...effectIntensityFocus}
           aria-label="马赛克与模糊强度"
           disabled={effectIntensityLocked}
           max={EFFECT_INTENSITY_MAX}
