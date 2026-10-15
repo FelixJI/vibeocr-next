@@ -12,7 +12,96 @@ import {
   markOffscreen,
   moveMarkIds,
   scaleMarkIds,
+  marksContainedInRect,
 } from "./annotationObjects";
+
+it("GEO-02 共线短末段的round连接不超出butt末端，框选与离屏一致", () => {
+  const mark: Mark = {
+    id: "polyline",
+    tool: "polyline",
+    start: { x: 400, y: 300 },
+    end: { x: 443.25, y: 300 },
+    points: [
+      { x: 400, y: 300 },
+      { x: 440, y: 300 },
+      { x: 443.25, y: 300 },
+    ],
+    style: { strokeWidth: 8, lineStyle: "dashed" },
+  };
+  expect(markBoundsOf(mark, undefined)).toEqual({
+    x: 400,
+    y: 296,
+    width: 43.25,
+    height: 8,
+  });
+  expect(
+    marksContainedInRect(
+      [mark],
+      { x: 399, y: 295, width: 44.5, height: 10 },
+      undefined,
+    ),
+  ).toEqual(new Set(["polyline"]));
+  const ids = new Set(["polyline"]);
+  const shifted = moveMarkIds(
+    scaleMarkIds([mark], ids, 1.25 ** 6, { x: 422, y: 300 }),
+    ids,
+    { x: -505, y: 0 },
+  )[0]!;
+  const box = markBoundsOf(shifted, undefined);
+  expect(box.x + box.width).toBeCloseTo(-1.93768310546875, 8);
+  expect(markOffscreen(shifted, { width: 900, height: 600 }, undefined)).toBe(
+    true,
+  );
+});
+
+it.each([1, -1] as const)(
+  "GEO-02 %d向斜转角只含外侧圆弧；短末段不虚增另一轴",
+  (sign) => {
+    const q = 4 / Math.SQRT2;
+    const points = [
+      { x: -20, y: -20 * sign },
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+      { x: -0.25, y: 0.25 * sign },
+    ];
+    const box = strokePathsBounds([{ points, cap: "butt", join: "round" }], 8);
+    expect(box.x).toBeCloseTo(-20 - q, 8);
+    expect(box.x + box.width).toBeCloseTo(4, 8);
+    expect(box.y).toBeCloseTo(sign === 1 ? -20 - q : -0.25 - q, 8);
+    expect(box.y + box.height).toBeCloseTo(sign === 1 ? 0.25 + q : 20 + q, 8);
+  },
+);
+
+it("GEO-02 近直线不变圆盘，180度折返仍保留前方半圆与round端帽", () => {
+  const near = strokePathsBounds(
+    [
+      {
+        points: [
+          { x: 0, y: 0 },
+          { x: 40, y: 0 },
+          { x: 43.25, y: 0.01 },
+        ],
+        cap: "butt",
+        join: "round",
+      },
+    ],
+    8,
+  );
+  const length = Math.hypot(3.25, 0.01);
+  expect(near.x + near.width).toBeCloseTo(43.25 + (4 * 0.01) / length, 8);
+  expect(near.y + near.height).toBeCloseTo(0.01 + (4 * 3.25) / length, 8);
+  const points = [
+    { x: 0, y: 0 },
+    { x: 40, y: 0 },
+    { x: 39.75, y: 0 },
+  ];
+  expect(
+    strokePathsBounds([{ points, cap: "butt", join: "round" }], 8),
+  ).toEqual({ x: 0, y: -4, width: 44, height: 8 });
+  expect(
+    strokePathsBounds([{ points, cap: "round", join: "round" }], 8),
+  ).toEqual({ x: -4, y: -4, width: 48, height: 8 });
+});
 
 it.each([
   ["line", undefined, "round"],

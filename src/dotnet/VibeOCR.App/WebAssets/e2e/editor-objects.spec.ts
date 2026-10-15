@@ -1102,3 +1102,56 @@ test("GEO-01 平端帽开放箭头完全不可见后仍可从列表回中心", a
   await action(page, "撤销");
   await expect(list.locator("option").last()).toContainText("画布外");
 });
+
+test("GEO-02 虚线折线短末段完全离屏后可恢复且一次撤销", async ({
+  page,
+}, info) => {
+  const { uploads, list, canvas } = await setup(page);
+  await action(page, "折线");
+  await page.getByLabel("线条宽度").selectOption("8");
+  await page.getByLabel("线型").selectOption("dashed");
+  await page.getByLabel("自定义颜色").fill("#1f6feb");
+  await click(page, 400, 300);
+  await click(page, 440, 300);
+  await click(page, 443.25, 300);
+  await canvas.press("Enter");
+  await action(page, "选择");
+  await list.selectOption("");
+  await writeFile(
+    info.outputPath("round-join-original.png"),
+    await save(page, uploads),
+  );
+  await list.selectOption("0");
+  for (let i = 0; i < 6; i++) await action(page, "放大选区");
+  await canvas.focus();
+  for (let i = 0; i < 50; i++) await canvas.press("Shift+ArrowLeft");
+  for (let i = 0; i < 5; i++) await canvas.press("ArrowLeft");
+  await list.selectOption("");
+  const png = await save(page, uploads);
+  await writeFile(info.outputPath("round-join-offscreen.png"), png);
+  const painted = await page.evaluate(async (png) => {
+    const image = await createImageBitmap(
+      new Blob([Uint8Array.from(atob(png), (c) => c.charCodeAt(0))], {
+        type: "image/png",
+      }),
+    );
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const ctx = canvas.getContext("2d")!;
+    ctx.drawImage(image, 0, 0);
+    image.close();
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    let count = 0;
+    for (let i = 0; i < data.length; i += 4)
+      if (data[i] !== 18 || data[i + 1] !== 161 || data[i + 2] !== 80) count++;
+    return count;
+  }, png.toString("base64"));
+  expect(painted).toBe(0);
+  await expect(list.locator("option").last()).toContainText("画布外");
+  await list.selectOption("0");
+  await action(page, "对象回中心");
+  await expect(list.locator("option").last()).not.toContainText("画布外");
+  await action(page, "撤销");
+  await expect(list.locator("option").last()).toContainText("画布外");
+});

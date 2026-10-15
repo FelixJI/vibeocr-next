@@ -190,6 +190,62 @@ function miterJoins(
   return joins;
 }
 
+/** round连接只补两外法线间的圆弧；AABB只需弧内的四个轴向极值。 */
+function roundJoinExtrema(
+  path: AnnotationPath,
+  radius: number,
+): readonly Point[] {
+  // Canvas忽略连续零长度段；连接方向来自两侧实际非零线段。
+  const points = path.points.filter(
+    (at, index, all) =>
+      index === 0 || at.x !== all[index - 1]!.x || at.y !== all[index - 1]!.y,
+  );
+  if (
+    path.closed &&
+    points.length > 1 &&
+    points[0]!.x === points.at(-1)!.x &&
+    points[0]!.y === points.at(-1)!.y
+  )
+    points.pop();
+  const extrema: Point[] = [];
+  const axes = [
+    { x: 1, y: 0 },
+    { x: 0, y: 1 },
+    { x: -1, y: 0 },
+    { x: 0, y: -1 },
+  ];
+  points.forEach((at, index) => {
+    if (!path.closed && (index === 0 || index === points.length - 1)) return;
+    const before = points[(index + points.length - 1) % points.length]!,
+      after = points[(index + 1) % points.length]!;
+    const ax = at.x - before.x,
+      ay = at.y - before.y,
+      bx = after.x - at.x,
+      by = after.y - at.y;
+    const al = Math.hypot(ax, ay),
+      bl = Math.hypot(bx, by);
+    if (!al || !bl) return;
+    const ux = ax / al,
+      uy = ay / al,
+      vx = bx / bl,
+      vy = by / bl;
+    const turn = Math.atan2(ux * vy - uy * vx, ux * vx + uy * vy);
+    if (turn === 0) return;
+    const direction = turn > 0 ? 1 : -1,
+      side = -direction;
+    const start = Math.atan2(ux * side, -uy * side),
+      full = Math.PI * 2;
+    for (const axis of axes) {
+      const along =
+        (((direction * (Math.atan2(axis.y, axis.x) - start)) % full) + full) %
+        full;
+      if (along <= Math.abs(turn))
+        extrema.push({ x: at.x + axis.x * radius, y: at.y + axis.y * radius });
+    }
+  });
+  return extrema;
+}
+
 export function strokePathsBounds(
   paths: readonly AnnotationPath[],
   width: number,
@@ -222,10 +278,7 @@ export function strokePathsBounds(
       round(path.points.at(-1)!);
     }
     if (path.join === "round") {
-      path.points.forEach((at, index) => {
-        if (path.closed || (index > 0 && index < path.points.length - 1))
-          round(at);
-      });
+      for (const at of roundJoinExtrema(path, radius)) points.push(at);
     } else
       for (const join of miterJoins(path, radius))
         for (const at of join) points.push(at);
