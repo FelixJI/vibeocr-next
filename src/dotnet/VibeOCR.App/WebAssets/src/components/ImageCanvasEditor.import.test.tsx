@@ -1,5 +1,6 @@
 import {
   act,
+  cleanup,
   fireEvent,
   render,
   screen,
@@ -12,6 +13,7 @@ import type { EditorImportDescriptor } from "./ImageCanvasEditor";
 import { ImageCanvasEditor } from "./ImageCanvasEditor";
 
 afterEach(() => {
+  cleanup();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -104,6 +106,157 @@ function recordCanvasDrawImage(targets: unknown[]): () => void {
 }
 
 describe("image canvas editor system import", () => {
+  it("retires all sixteen adopted image URIs on real unmount", async () => {
+    stubImageDecode();
+    const actions = createActions();
+    const descriptor = imageDescriptor("full-quota");
+    const items = Array.from({ length: 16 }, (_, index) => ({
+      ...descriptor.items[0]!,
+      assetId: `asset-${index}`,
+      resourceUri: `https://app.vibeocr/__resource/image-${index}`,
+    }));
+    const { unmount } = render(
+      <ImageCanvasEditor
+        actions={actions}
+        canExport={false}
+        canRecognize={false}
+        source="https://app.vibeocr/__resource/base.png"
+        session={SESSION_A}
+        systemImport={{ ...descriptor, items }}
+      />,
+    );
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "recognition.ackImport" }),
+      ),
+    );
+    unmount();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "recognition.releaseAssets",
+      sessionId: SESSION_A.sessionId,
+      resourceUris: items.map((item) => item.resourceUri),
+    });
+  });
+
+  it("retires a pending descriptor immediately and releases a late acknowledgement", async () => {
+    stubImageDecode();
+    let resolveAck!: (accepted: boolean) => void;
+    const actions = createActions();
+    actions.run.mockImplementation((action: { type: string }) =>
+      action.type === "recognition.ackImport"
+        ? new Promise<boolean>((resolve) => {
+            resolveAck = resolve;
+          })
+        : Promise.resolve(true),
+    );
+    const descriptor = imageDescriptor("ack-during-retirement");
+    const { unmount } = render(
+      <ImageCanvasEditor
+        actions={actions}
+        canExport={false}
+        canRecognize={false}
+        source="https://app.vibeocr/__resource/base.png"
+        session={SESSION_A}
+        systemImport={{ ...descriptor, items: [descriptor.items[0]!] }}
+      />,
+    );
+    await waitFor(() => expect(resolveAck).toBeDefined());
+    unmount();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "recognition.rejectImport",
+      sessionId: SESSION_A.sessionId,
+      revision: 0,
+      requestId: descriptor.requestId,
+    });
+    actions.run.mockClear();
+    await act(async () => resolveAck(true));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "recognition.releaseAssets",
+      sessionId: SESSION_A.sessionId,
+      resourceUris: [descriptor.items[0]!.resourceUri],
+    });
+  });
+
+  it("rejects delayed decoding during an object move and preserves the unfinished drag", async () => {
+    stubImageDecode("ok", { width: 900, height: 600 });
+    recordCanvasDrawImage([]);
+    let resolveText!: (value: { ok: boolean; text(): Promise<string> }) => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveText = resolve;
+          }),
+      ),
+    );
+    const actions = createActions();
+    const props = {
+      actions,
+      canExport: false,
+      canRecognize: false,
+      source: "https://app.vibeocr/__resource/base.png",
+      session: SESSION_A,
+    };
+    const { rerender, unmount } = render(<ImageCanvasEditor {...props} />);
+    const canvas = screen.getByLabelText("图片检查画布");
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 900,
+      height: 600,
+    } as DOMRect);
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 10, clientY: 10 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 110, clientY: 90 });
+    const descriptor = imageDescriptor("during-move", SESSION_A.sessionId, 1);
+    rerender(
+      <ImageCanvasEditor
+        {...props}
+        systemImport={{ ...descriptor, items: [descriptor.items[1]!] }}
+      />,
+    );
+    await waitFor(() => expect(resolveText).toBeDefined());
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    fireEvent.pointerDown(canvas, { pointerId: 2, clientX: 50, clientY: 50 });
+    fireEvent.pointerMove(canvas, { pointerId: 2, clientX: 80, clientY: 80 });
+    await act(async () =>
+      resolveText({ ok: true, text: () => Promise.resolve("迟到导入") }),
+    );
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenCalledWith({
+        type: "recognition.rejectImport",
+        sessionId: SESSION_A.sessionId,
+        revision: 1,
+        requestId: descriptor.requestId,
+      }),
+    );
+    expect(
+      actions.run.mock.calls.some(
+        ([action]) =>
+          (action as { type: string }).type === "recognition.ackImport",
+      ),
+    ).toBe(false);
+    fireEvent.pointerUp(canvas, { pointerId: 2, clientX: 80, clientY: 80 });
+    expect(
+      actions.run.mock.calls.filter(
+        ([action]) =>
+          (action as { type: string }).type ===
+          "recognition.notifyScreenshotRevision",
+      ),
+    ).toHaveLength(2);
+    unmount();
+  });
+
   it("keeps copied image pixels after undo and redo truncation until the clipboard is replaced", async () => {
     const images = stubImageDecode();
     const targets: unknown[] = [];

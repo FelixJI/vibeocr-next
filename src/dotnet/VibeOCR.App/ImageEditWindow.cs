@@ -183,14 +183,7 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     try
     {
       if (closed) return;
-      // scene 窗口承载 recognition 会话，独立编辑窗承载 imageEdit 会话；
-      // 同一 DataPackage 读取/校验/发布链路，不替换基准。
-      WorkbenchCommand command = captureScene is null
-        ? new ImportDroppedImageEditContentCommand(args.DataView)
-        : new ImportDroppedScreenshotContentCommand(args.DataView);
-      await application.ExecuteAsync(
-        new WorkbenchCommandEnvelope(Guid.NewGuid(), command),
-        CancellationToken.None);
+      await host.ImportDroppedContentAsync(args.DataView);
     }
     catch (Exception error) when (
       error is IOException or UnauthorizedAccessException or InvalidOperationException)

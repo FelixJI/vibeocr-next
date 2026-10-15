@@ -331,3 +331,121 @@ for (const scope of ["imageEdit", "recognition"] as const) {
     ).toBe(true);
   });
 }
+
+test("图片编辑离开设置再返回释放满额资源并可再次导入", async ({
+  page,
+}, info) => {
+  const sessionId = "33333333333333333333333333333333";
+  const baseUrl = "https://app.vibeocr/__resource/route-base";
+  const png = await page.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 900;
+    canvas.height = 600;
+    return canvas.toDataURL("image/png").split(",")[1]!;
+  });
+  await page.route("https://app.vibeocr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const response = await page.request.get(
+      `http://127.0.0.1:4174${url.pathname}${url.search}`,
+    );
+    await route.fulfill({ response });
+  });
+  await page.route(baseUrl, (route) =>
+    route.fulfill({
+      contentType: "image/png",
+      body: Buffer.from(png, "base64"),
+    }),
+  );
+  const importedPng = await page.request.get(
+    "http://127.0.0.1:4174/vibeocr-64.png",
+  );
+  const bytes = await importedPng.body();
+  const items = Array.from({ length: 16 }, (_, index) => ({
+    kind: "image",
+    assetId: `route-${index}`,
+    resourceUri: `https://app.vibeocr/__resource/route-${index}`,
+    byteLength: bytes.length,
+    pixelWidth: 64,
+    pixelHeight: 64,
+  }));
+  await page.route("https://app.vibeocr/__resource/route-*", (route) =>
+    route.fulfill({ contentType: "image/png", body: bytes }),
+  );
+  // Playwright 的后注册路由优先：基准资源保持真实 900x600。
+  await page.route(baseUrl, (route) =>
+    route.fulfill({
+      contentType: "image/png",
+      body: Buffer.from(png, "base64"),
+    }),
+  );
+  const state = {
+    isBusy: false,
+    statusCode: "recognition.completed",
+    input: {
+      url: baseUrl,
+      mediaType: "image/png",
+      byteLength: Buffer.from(png, "base64").length,
+    },
+    screenshotSession: { sessionId, revision: 0, sceneEditing: false },
+  };
+  await mountHost(
+    page,
+    {
+      ...snapshot,
+      route: "imageEdit",
+      capabilities: ["recognition.results", "recognition.annotation"],
+      features: { imageEdit: state },
+    },
+    "https://app.vibeocr/",
+  );
+  await sendState(page, "imageEdit", {
+    ...state,
+    import: { requestId: "full-route-quota", sessionId, revision: 0, items },
+  });
+  await expectCommand(page, {
+    scope: "imageEdit",
+    action: "ackImport",
+    arguments: { sessionId, revision: 0, requestId: "full-route-quota" },
+  });
+  const list = page.getByLabel("选择标注对象");
+  await expect(list.locator("option")).toHaveCount(17);
+  // 真实宿主 ack 后会投影无 import 的当前会话状态。
+  const revision = (await commands(page))
+    .filter((command) => command.action === "notifyScreenshotRevision")
+    .at(-1)!.arguments.revision;
+  const resumed = {
+    ...state,
+    screenshotSession: { ...state.screenshotSession, revision },
+  };
+  await sendState(page, "imageEdit", resumed);
+  await page.getByRole("link", { name: "设置", exact: true }).click();
+  await expectCommand(page, {
+    scope: "imageEdit",
+    action: "releaseAssets",
+    arguments: {
+      sessionId,
+      resourceUris: items.map((item) => item.resourceUri),
+    },
+  });
+  await page.getByRole("link", { name: "图片编辑", exact: true }).click();
+  await expect(page.getByText("原图 900×600", { exact: false })).toBeVisible();
+  await expect(list).toHaveCount(0);
+  await sendState(page, "imageEdit", {
+    ...resumed,
+    import: {
+      requestId: "after-route-retirement",
+      sessionId,
+      revision,
+      items: [items[0]],
+    },
+  });
+  await expectCommand(page, {
+    scope: "imageEdit",
+    action: "ackImport",
+    arguments: { sessionId, revision, requestId: "after-route-retirement" },
+  });
+  await expect(list.locator("option")).toHaveCount(2);
+  await page.screenshot({
+    path: info.outputPath("route-retirement-reimport.png"),
+  });
+});

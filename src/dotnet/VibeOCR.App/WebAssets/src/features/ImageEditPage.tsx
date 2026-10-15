@@ -20,6 +20,7 @@ import {
   screenshotSession,
   screenshotTextLayer,
   imageEditImport,
+  importErrorLabel,
 } from "./ScreenshotSession";
 
 import { StatusLine } from "./FeaturePanels";
@@ -133,17 +134,14 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
       }
     >
       <StatusLine>
-        {busy
-          ? "正在读取图片…"
-          : state.importError
-            ? state.importError === "cancelled"
-              ? "导入已取消；已有画布与历史保持不变。"
-              : "导入未完成；本批未导入，已有画布与历史保持不变。"
+        {importErrorLabel(state.importError) ??
+          (busy
+            ? "正在读取图片…"
             : state.statusCode === "recognition.inputFailed"
               ? "无法读取图片；当前编辑已保留，请检查格式、尺寸和访问权限。"
               : input
                 ? "原图保留；默认另存副本。"
-                : "选择、粘贴或拖入图片。"}
+                : "选择、粘贴或拖入图片。")}
       </StatusLine>
       {session?.sceneEditing && !scene ? (
         <EmptyStage

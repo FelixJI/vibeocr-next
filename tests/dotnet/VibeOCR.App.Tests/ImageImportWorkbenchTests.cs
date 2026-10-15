@@ -246,6 +246,92 @@ public sealed class ImageImportWorkbenchTests
     return Guid.Parse(state.ScreenshotSession.SessionId);
   }
 
+  [Theory]
+  [InlineData(WorkbenchRoute.ImageEdit, "text")]
+  [InlineData(WorkbenchRoute.Recognition, "text")]
+  [InlineData(WorkbenchRoute.ImageEdit, "invalid")]
+  [InlineData(WorkbenchRoute.Recognition, "oversize")]
+  public async Task NativeDropEntryProjectsEmptyCanvasRefusalsIntoVisibleFeatureState(WorkbenchRoute route, string contentKind)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var store = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(broker, store, root, InputService.CreateImportReader(), new TaggedInputService());
+      await using var app = new WorkbenchApplication([], route, handler);
+      await using var host = new WebWorkbenchHost(app, broker, store, applicationOwner: false);
+      List<WorkbenchState> states = [];
+      handler.StateChanged += states.Add;
+      var package = new Windows.ApplicationModel.DataTransfer.DataPackage();
+      using var bytes = await WebWorkbenchHost.BufferBytesAsync(contentKind == "oversize"
+        ? new byte[checked((int)InputService.MaximumImportImageBytes + 1)] : new byte[] { 1, 2, 3 }, TestContext.Current.CancellationToken);
+      if (contentKind == "text") package.SetText("只能先打开图片");
+      else package.SetBitmap(Windows.Storage.Streams.RandomAccessStreamReference.CreateFromStream(bytes));
+      WorkbenchCommandReceipt receipt = await host.ImportDroppedContentAsync(package.GetView(), route);
+      Assert.False(receipt.Ok);
+      Assert.Equal("image_import_refused", receipt.Error?.Code);
+      string? visible = route == WorkbenchRoute.ImageEdit
+        ? Assert.Single(states.OfType<ImageEditWorkbenchState>()).ImportError
+        : Assert.Single(states.OfType<RecognitionWorkbenchState>()).ImportError;
+      Assert.Equal(contentKind == "text" ? "workbench.error.imageImportOpenFirst" : contentKind, visible);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
+  public async Task ResetWebDocumentCancelsRealDeferredDataProviderAndKeepsSameCanvasClean()
+  {
+    string root = TemporaryRoot();
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var providerDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    Task<WorkbenchCommandReceipt>? importing = null;
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var store = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(broker, store, root, InputService.CreateImportReader(), new TaggedInputService());
+      Guid session = await EstablishImageEditSessionAsync(handler);
+      await using var app = new WorkbenchApplication([], WorkbenchRoute.ImageEdit, handler);
+      await using var host = new WebWorkbenchHost(app, broker, store, applicationOwner: false);
+      object document = new();
+      var posted = new System.Collections.Concurrent.ConcurrentQueue<string>();
+      host.RegisterBridge(document, posted.Enqueue, action => { action(); return true; });
+      string bootstrap = JsonSerializer.Serialize(new { version = 2, kind = "request", id = Guid.NewGuid(), type = "app.bootstrap", payload = new { } });
+      await host.ReceiveWebMessageAsync(bootstrap, document);
+      var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      var package = new Windows.ApplicationModel.DataTransfer.DataPackage();
+      package.SetDataProvider(Windows.ApplicationModel.DataTransfer.StandardDataFormats.Text, async request =>
+      {
+        var deferral = request.GetDeferral();
+        started.TrySetResult();
+        try { await release.Task; request.SetData("旧文档迟到文本"); }
+        catch (System.Runtime.InteropServices.COMException) { /* 已取消的 WinRT consumer 可以拒绝迟到交付。 */ }
+        finally { deferral.Complete(); providerDone.TrySetResult(); }
+      });
+      var states = new System.Collections.Concurrent.ConcurrentQueue<WorkbenchState>();
+      handler.StateChanged += states.Enqueue;
+      importing = host.ImportDroppedContentAsync(package.GetView(), WorkbenchRoute.ImageEdit).AsTask();
+      await started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+      try
+      {
+        host.ResetWebDocument();
+        await host.ReceiveWebMessageAsync(bootstrap, document);
+        Assert.Same(importing, await Task.WhenAny(importing, Task.Delay(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken)));
+      }
+      finally { release.TrySetResult(); await importing; await providerDone.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken); }
+      Assert.DoesNotContain(states.OfType<ImageEditWorkbenchState>(), state => state.Import is not null);
+      Assert.DoesNotContain(states.OfType<ImageEditWorkbenchState>(), state => state.ImportError is not null);
+      Assert.Empty(TextSessionFiles(root, "旧文档迟到文本"));
+      Assert.Single(SessionFiles(root, [0x21, 0x02]));
+      ImageEditWorkbenchState current = Assert.IsType<ImageEditWorkbenchState>((await app.BootstrapAsync(TestContext.Current.CancellationToken)).States.Single(state => state.Scope == "imageEdit").State);
+      Assert.Equal(session.ToString("N"), current.ScreenshotSession?.SessionId);
+      Assert.False(current.IsBusy);
+      Assert.Null(current.ImportError);
+      Assert.Null(current.Import);
+    }
+    finally { release.TrySetResult(); Directory.Delete(root, recursive: true); }
+  }
   [Fact]
   public async Task EmptyCanvasReadIsSingleFlightAndCloseCancelsItsProvider()
   {
@@ -309,11 +395,13 @@ public sealed class ImageImportWorkbenchTests
       Guid sessionId = await EstablishImageEditSessionAsync(handler);
       using var cancellation = new CancellationTokenSource();
       reader.Hold();
-      using var captured = new StateAwaiter<ImageEditWorkbenchState>(handler, state => state.ImportError == "cancelled");
+      // 调用方 token 退役（生产为 Web 文档）只结束 busy，不向继任文档投影旧错误。
+      using var captured = new StateAwaiter<ImageEditWorkbenchState>(handler, state => state.IsTerminal && !state.IsBusy);
       await handler.ExecuteAsync(new PasteImageEditSystemContentCommand(), cancellation.Token);
       cancellation.Cancel();
       ImageEditWorkbenchState state = await captured.Task;
       Assert.Equal(sessionId.ToString("N"), state.ScreenshotSession!.SessionId);
+      Assert.Null(state.ImportError);
       Assert.Null(state.Import);
       Assert.Single(Directory.GetFiles(Path.Combine(root, "session")));
     }
@@ -394,14 +482,16 @@ public sealed class ImageImportWorkbenchTests
       ImageEditWorkbenchState edit;
       using (var captured = new StateAwaiter<ImageEditWorkbenchState>(handler, state => state.Import is not null))
       {
-        Assert.Null((await handler.ExecuteAsync(new ImportDroppedImageEditContentCommand(editPackage.GetView()), TestContext.Current.CancellationToken)).Error);
+        Assert.Null((await main.ImportDroppedContentAsync(editPackage.GetView(), WorkbenchRoute.ImageEdit)).Error);
         edit = await captured.Task;
       }
       var scenePackage = new Windows.ApplicationModel.DataTransfer.DataPackage();
       scenePackage.SetText("截图现场文本");
       using (var captured = new StateAwaiter<RecognitionWorkbenchState>(handler, state => state.Import is not null))
       {
-        Assert.Null((await handler.ExecuteAsync(new ImportDroppedScreenshotContentCommand(scenePackage.GetView()), TestContext.Current.CancellationToken)).Error);
+        Assert.Null(scene.CaptureScene);
+        Assert.Null((await scene.ImportDroppedContentAsync(scenePackage.GetView())).Error);
+        Assert.True(captured.Task.IsCompleted, "无 CaptureScene 的固定窗口也必须把原生 Drop 交给 recognition。");
         recognition = await captured.Task;
       }
       Assert.Equal(editId.ToString("N"), edit.Import!.SessionId);
@@ -586,6 +676,21 @@ public sealed class ImageImportWorkbenchTests
         ImageEditWorkbenchState failed = await captured.Task;
         Assert.Equal("budget", failed.ImportError);
         Assert.Null(failed.Import);
+      }
+      if (acknowledge)
+      {
+        // 页面退役释放精确的 16 个已采纳 URI；同一会话返回后可再次导入。
+        await handler.ExecuteAsync(new ReleaseImageEditAssetsCommand(sessionId,
+          first.Import.Items.Select(item => item.ResourceUri).ToArray()),
+          TestContext.Current.CancellationToken);
+        using var captured = new StateAwaiter<ImageEditWorkbenchState>(handler,
+          state => state.Import is not null);
+        await handler.ExecuteAsync(new PasteImageEditSystemContentCommand(),
+          TestContext.Current.CancellationToken);
+        reader.Next(ImageContent((1, 1)));
+        ImageEditWorkbenchState resumed = await captured.Task;
+        Assert.Single(resumed.Import!.Items);
+        Assert.Equal(sessionId.ToString("N"), resumed.Import.SessionId);
       }
     }
     finally

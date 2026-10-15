@@ -3,6 +3,28 @@ import type { EditorImportDescriptor } from "../components/ImageCanvasEditor";
 
 import { resource } from "./FeatureValues";
 
+// 原生拖放与 Web 按钮共用导入拒绝状态；不把宿主异常或文件路径写进 UI。
+export function importErrorLabel(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value) return undefined;
+  switch (value) {
+    case "workbench.error.imageImportOpenFirst":
+      return "请先打开图片，再导入文字对象。";
+    case "oversize":
+    case "workbench.error.imageImportOversize":
+      return "导入内容超出大小或尺寸上限；本批未导入，已有画布保持不变。";
+    case "budget":
+      return "导入资源超过画布预算；本批未导入，请先释放不再需要的对象。";
+    case "inProgress":
+      return "正在读取上一批导入内容，请稍后再试。";
+    case "cancelled":
+      return "导入已取消；已有画布与历史保持不变。";
+    case "empty":
+    case "workbench.error.imageImportEmpty":
+      return "没有可导入的图片或文字；已有画布保持不变。";
+    default:
+      return "无法导入内容；请检查格式、尺寸和访问权限，已有画布保持不变。";
+  }
+}
 export interface ScreenshotSessionState {
   readonly sessionId: string;
   readonly revision: number;

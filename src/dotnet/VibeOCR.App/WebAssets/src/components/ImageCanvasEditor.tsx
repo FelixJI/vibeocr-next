@@ -1279,6 +1279,7 @@ export function ImageCanvasEditor({
   useLayoutEffect(() => {
     if (resetResourcesKey.current === resetKey) return;
     resetResourcesKey.current = resetKey;
+    retireImportsRef.current();
     draftMark.current = undefined;
     cropDraft.current = undefined;
     dragStart.current = undefined;
@@ -1681,6 +1682,10 @@ export function ImageCanvasEditor({
   const importAssetUrlsRef = useRef(new Map<string, string>());
   const importInFlightRef = useRef(false);
   const consumedImportRequestsRef = useRef<ReadonlySet<string>>(new Set());
+  const pendingImportRef = useRef<EditorImportDescriptor | undefined>(
+    undefined,
+  );
+  const retireImportsRef = useRef(retireImports);
   // latest-ref：commit/cancelDrawing 是渲染期函数，直接列入导入 effect 依赖
   // 会每帧重跑；经 ref 取最新渲染实现，async 回调始终拿到当前 historyIndex，
   // 且导入前有修订不变校验，不会用旧闭包覆盖新内容。
@@ -1689,8 +1694,30 @@ export function ImageCanvasEditor({
   useLayoutEffect(() => {
     commitRef.current = commit;
     cancelDrawingRef.current = cancelDrawing;
+    retireImportsRef.current = retireImports;
   });
 
+  function retireImports(): void {
+    const pending = pendingImportRef.current;
+    pendingImportRef.current = undefined;
+    if (pending)
+      void actions.run({
+        type: commands.rejectImport,
+        sessionId: pending.sessionId,
+        revision: pending.revision,
+        requestId: pending.requestId,
+      });
+    const resourceUris = [...importAssetUrlsRef.current.values()];
+    importAssetUrlsRef.current.clear();
+    importAssetsRef.current.clear();
+    if (!sessionIdRef.current) return;
+    for (let offset = 0; offset < resourceUris.length; offset += 16)
+      void actions.run({
+        type: commands.releaseAssets,
+        sessionId: sessionIdRef.current,
+        resourceUris: resourceUris.slice(offset, offset + 16),
+      });
+  }
   // 资产 GC：保留历史（含重做）与编辑器剪贴板引用；导入批次仅在 commit 时登记。释放
   // 经宿主 releaseAssets 精确回收 owned 资源（幂等，分批 ≤16）。
   useEffect(() => {
@@ -1753,6 +1780,7 @@ export function ImageCanvasEditor({
       return;
     }
     importInFlightRef.current = true;
+    pendingImportRef.current = descriptor;
     const generation = importGenerationRef.current;
     void (async () => {
       try {
@@ -1794,7 +1822,12 @@ export function ImageCanvasEditor({
           textEditingRef.current ||
           draftMark.current ||
           cropDraft.current ||
-          inpaintDraft.current
+          inpaintDraft.current ||
+          moveDragRef.current ||
+          markDragRef.current ||
+          objectDraftRef.current ||
+          cropResizeRef.current ||
+          marqueeRef.current
         ) {
           rejectImport();
           if (
@@ -1879,7 +1912,12 @@ export function ImageCanvasEditor({
         if (await acknowledge()) {
           // 文字已复制进对象与历史，不再需要宿主资源；图片由历史/剪贴板 GC 回收。
           const resourceUris = descriptor.items
-            .filter((item) => item.kind === "text")
+            .filter(
+              (item) =>
+                item.kind === "text" ||
+                !importMountedRef.current ||
+                generation !== importGenerationRef.current,
+            )
             .map((item) => item.resourceUri);
           if (resourceUris.length)
             await actions.run({
@@ -1903,19 +1941,25 @@ export function ImageCanvasEditor({
         )
           setOperationMessage("导入内容解码失败；本批未导入，画布保持原状。");
       } finally {
+        if (pendingImportRef.current?.requestId === descriptor.requestId)
+          pendingImportRef.current = undefined;
         if (generation === importGenerationRef.current)
           importInFlightRef.current = false;
       }
     })();
   }, [systemImport, session, actions, commands, state]);
 
-  // 卸载：终止在途 Worker 并释放补丁像素；不触碰宿主状态。
+  // 卸载：终止 Worker、释放补丁像素，并退役本编辑器持有的导入资源。
   useEffect(() => {
     importMountedRef.current = true;
     const store = inpaintPatchStore.current;
     const workerRef = inpaintWorkerRef;
     return () => {
       importMountedRef.current = false;
+      // StrictMode 的探测卸载会立即重新挂载；仅真实退役才释放宿主资源。
+      queueMicrotask(() => {
+        if (!importMountedRef.current) retireImportsRef.current();
+      });
       inpaintGenerationRef.current += 1;
       workerRef.current?.terminate();
       workerRef.current = undefined;

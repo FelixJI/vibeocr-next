@@ -50,6 +50,7 @@ import {
   screenshotSession,
   screenshotTextLayer,
   imageEditImport,
+  importErrorLabel,
 } from "./ScreenshotSession";
 
 import { Panel, StatusLine } from "./FeaturePanels";
@@ -250,12 +251,13 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
       }
     >
       <StatusLine>
-        {statusLabel(
-          state.statusCode,
-          viewState.connected
-            ? "等待宿主输入。"
-            : "等待宿主输入。演示状态不会读取剪贴板、文件或屏幕。",
-        )}
+        {importErrorLabel(state.importError) ??
+          statusLabel(
+            state.statusCode,
+            viewState.connected
+              ? "等待宿主输入。"
+              : "等待宿主输入。演示状态不会读取剪贴板、文件或屏幕。",
+          )}
       </StatusLine>
       <TaskEngineSelector
         engines={recognitionEngines(state.engines)}

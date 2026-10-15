@@ -616,13 +616,10 @@ public sealed partial class MainWindow : Window
       // 活动编辑承载面：DataPackage 整体交给宿主导入命令（StorageItems/Text
       // 优先级与授权由 C# 读取）；其余路由维持既有文件路径路由。
       WorkbenchCommand command;
-      if (application.CurrentRoute is WorkbenchRoute.ImageEdit)
+      if (application.CurrentRoute is WorkbenchRoute.ImageEdit or WorkbenchRoute.Recognition)
       {
-        command = new ImportDroppedImageEditContentCommand(args.DataView);
-      }
-      else if (application.CurrentRoute is WorkbenchRoute.Recognition)
-      {
-        command = new ImportDroppedScreenshotContentCommand(args.DataView);
+        await webHost.ImportDroppedContentAsync(args.DataView, application.CurrentRoute);
+        return;
       }
       else
       {
