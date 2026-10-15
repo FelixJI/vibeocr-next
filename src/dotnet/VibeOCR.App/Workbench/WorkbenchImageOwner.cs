@@ -362,7 +362,8 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     recognitionChannel.SessionId is null ? null : recognitionChannel.SessionResult,
     selectionPolicy.RecognitionEngines(),
     recognitionChannel.ViewModel?.TaskEngine,
-    CurrentScreenshotSession(recognitionChannel));
+    CurrentScreenshotSession(recognitionChannel),
+    RecognitionModes: BuildSelectionModeEntries(settingsOwner.CurrentModel?.RecognitionSelection));
 
   /// <summary>通道当前会话的 wire 投影；无会话时为 null。</summary>
   private RecognitionScreenshotSessionState? CurrentScreenshotSession(
@@ -373,7 +374,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
         channel.ExcludeBoxes)
       : null;
 
-  /// <summary>imageEdit 通道状态：与 recognition 会话投影同形，无引擎目录。</summary>
+  /// <summary>imageEdit 通道状态：会话独立，三类识别共用权威目录投影。</summary>
   internal ImageEditWorkbenchState ImageEditState(
     bool isBusy,
     string statusCode) => new(
@@ -381,7 +382,8 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     statusCode,
     imageEditChannel.SessionInput,
     CurrentScreenshotSession(imageEditChannel),
-    imageEditChannel.TextLayer);
+    imageEditChannel.TextLayer,
+    BuildSelectionModeEntries(settingsOwner.CurrentModel?.RecognitionSelection));
 
   /// <summary>会话状态固定复用缓存的基准图/结果资源，避免重发布新 URL 导致编辑器重置。</summary>
   private RecognitionWorkbenchState SessionRecognitionState(
@@ -398,7 +400,8 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       StructuredResult: recognitionChannel.SessionResult is null
         ? null
         : recognitionChannel.SessionStructuredResult,
-      ResultImage: recognitionChannel.SessionResult is null ? null : resultImage);
+      ResultImage: recognitionChannel.SessionResult is null ? null : resultImage,
+      RecognitionModes: BuildSelectionModeEntries(settingsOwner.CurrentModel?.RecognitionSelection));
 
   /// <summary>通道会话状态：按通道目标 scope 发布（recognition/imageEdit）。</summary>
   private WorkbenchState SessionState(
@@ -1080,6 +1083,43 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       : layer with { Lines = kept };
   }
 
+  private sealed record FrozenImageRecognitionSelection(
+    string? ModeId, RecognitionSubmitSelection Parameters);
+
+  private FrozenImageRecognitionSelection FreezeImageRecognitionSelection(string? modeId, bool explicitMode)
+  {
+    if (explicitMode && (string.IsNullOrWhiteSpace(modeId) || settingsOwner.IsEnvironmentSwitching))
+      throw new RecognitionModeUnavailableException("所选识别模式无效或运行环境正在切换；请稍后重试。");
+    RecognitionSelectionSnapshot? snapshot = settingsOwner.EnsureModel().RecognitionSelection;
+    if (snapshot?.Catalog.SupportsRecognitionModes is true)
+    {
+      string? effectiveId = explicitMode ? modeId : WorkbenchSelectionOwner.EffectiveModeIdOrDefault(snapshot, modeId, requireUsable: true);
+      RecognitionModeOption? mode = effectiveId is null ? null : snapshot.Catalog.SelectRecognitionMode(effectiveId);
+      if (explicitMode && mode?.Availability != "ready")
+        throw new RecognitionModeUnavailableException("当前运行环境未声明所选识别模式；请检查设置。");
+      return new FrozenImageRecognitionSelection(mode?.Id,
+        new RecognitionSubmitSelection(mode?.PipelineId ?? "OCR", mode?.Engine,
+          snapshot.MineruConfigFor(mode?.Id), selectionPolicy.GetModeOptions(mode)?.ToWire(mode!)));
+    }
+    if (explicitMode)
+      throw new RecognitionModeUnavailableException("识别目录未就绪；请在设置中连接并准备运行环境。");
+    OcrEngine? engine = OcrEngineWire.Parse(modeId);
+    if (modeId is not null && engine is null)
+      throw new RecognitionModeUnavailableException("任务识别模式尚未绑定 Runtime catalog，已拒绝回退。");
+    return new FrozenImageRecognitionSelection(null,
+      new RecognitionSubmitSelection(RecognitionVm.Pipeline, engine, null, null));
+  }
+
+  private void ValidateImageRecognitionSelection(FrozenImageRecognitionSelection selection)
+  {
+    if (selection.ModeId is null) return;
+    RuntimeSelectionService? catalog = settingsOwner.CurrentModel?.RecognitionSelection?.Catalog;
+    if (catalog?.SupportsRecognitionModes is not true)
+      throw new RecognitionModeUnavailableException("识别目录未就绪；请检查运行环境。");
+    if (catalog.SelectRecognitionMode(selection.ModeId).Availability != "ready")
+      throw new RecognitionModeUnavailableException("所选识别模式尚未就绪；请在设置中准备后重试。");
+  }
+
   private async Task<WorkbenchState?> StartScreenshotRecognitionAsync(
     ImageSessionChannel channel,
     RecognizeScreenshotImageCommand command,
@@ -1087,6 +1127,11 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
   {
     _ = RecognitionVm;
     ValidateScreenshotSession(channel, command.SessionId, command.Revision);
+    string? requestedMode = command.ModeId ?? RecognitionVm.TaskEngine;
+    // 显式按钮在消费上传租约/接管图像前严格验证，并冻结模式及选项。
+    // 旧命令仅在冷目录时延迟解析，但不重读等待期间变化的任务模式。
+    FrozenImageRecognitionSelection? selection = command.ModeId is not null || settingsOwner.CurrentModel?.RecognitionSelection is not null
+      ? FreezeImageRecognitionSelection(requestedMode, command.ModeId is not null) : null;
     using WorkbenchAnnotationFile annotation = TakeScreenshotAnnotation(command.ResourceUri);
     // 上传的是未烘焙遮罩的普通最终像素：同一份字节兼当新的显示基准，
     // 也是无遮罩时的 OCR 输入；不重复全图上传。
@@ -1156,6 +1201,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
           sessionId,
           revision,
           input,
+          requestedMode, command.ModeId is not null, selection,
           demand));
     }
     finally
@@ -1179,6 +1225,11 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     ImageSessionChannel channel = imageEditChannel;
     _ = channel.ViewModel ??= recognitionFactory();
     ValidateScreenshotSession(channel, command.SessionId, command.Revision);
+    string? requestedMode = command.ModeId ?? RecognitionVm.TaskEngine;
+    // 显式按钮在消费上传租约/接管图像前严格验证，并冻结模式及选项。
+    // 旧命令仅在冷目录时延迟解析，但不重读等待期间变化的任务模式。
+    FrozenImageRecognitionSelection? selection = command.ModeId is not null || settingsOwner.CurrentModel?.RecognitionSelection is not null
+      ? FreezeImageRecognitionSelection(requestedMode, command.ModeId is not null) : null;
     using WorkbenchAnnotationFile annotation = TakeScreenshotAnnotation(command.ResourceUri);
     // 与 recognition 会话同一快照语义：读取的是未烘焙遮罩的普通最终像素。
     byte[] normalBytes = await File.ReadAllBytesAsync(annotation.Path, cancellationToken);
@@ -1245,6 +1296,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
           input,
           displayInput,
           exclusions,
+          requestedMode, command.ModeId is not null, selection,
           demand));
     }
     finally
@@ -1258,6 +1310,9 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     RecognitionInput input,
     RecognitionInput displayInput,
     IReadOnlyList<WorkbenchExclusionBox> exclusions,
+    string? requestedMode,
+    bool explicitMode,
+    FrozenImageRecognitionSelection? selection,
     CancellationTokenSource demand)
   {
     CancellationToken cancellationToken = demand.Token;
@@ -1274,10 +1329,12 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
         return;
       }
       if (generation != Volatile.Read(ref recognitionChannel.Generation)) return;
-      SynchronizeRecognitionMode(requireUsable: true);
+      selection ??= FreezeImageRecognitionSelection(requestedMode, explicitMode);
+      // 旧命令同样按冻结时解析出的模式复验，不读取等待期间的新任务选择。
+      ValidateImageRecognitionSelection(selection);
       RecognitionVm.AdoptInput(displayInput);
       RecognitionWorkbenchState state = await RunRecognitionAsync(
-        viewModel => viewModel.RecognizeCapturedInputAsync(input, cancellationToken),
+        viewModel => viewModel.RecognizeCapturedInputAsync(input, cancellationToken, selection.Parameters),
         generation,
         cancellationToken);
       // B 的副本建立 recognition 自身独立快照会话：后续回显（任务模式/
@@ -1334,6 +1391,9 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     Guid sessionId,
     long revision,
     RecognitionInput input,
+    string? requestedMode,
+    bool explicitMode,
+    FrozenImageRecognitionSelection? selection,
     CancellationTokenSource demand)
   {
     CancellationToken cancellationToken = demand.Token;
@@ -1357,9 +1417,11 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
         operations.PublishTerminal(SessionRecognitionState(false, "recognition.cancelled"));
         return;
       }
-      SynchronizeRecognitionMode(requireUsable: true);
+      selection ??= FreezeImageRecognitionSelection(requestedMode, explicitMode);
+      // 旧命令同样按冻结时解析出的模式复验，不读取等待期间的新任务选择。
+      ValidateImageRecognitionSelection(selection);
       RecognitionViewModel viewModel = RecognitionVm;
-      await viewModel.RecognizeCapturedInputAsync(input, cancellationToken);
+      await viewModel.RecognizeCapturedInputAsync(input, cancellationToken, selection.Parameters);
       if (generation != Volatile.Read(ref recognitionChannel.Generation))
       {
         return;
@@ -1986,7 +2048,8 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       recognitionChannel.ViewModel?.TaskEngine,
       CurrentScreenshotSession(recognitionChannel),
       StructuredResult: structured,
-      ResultImage: result is null ? null : resultImage);
+      ResultImage: result is null ? null : resultImage,
+      RecognitionModes: BuildSelectionModeEntries(settingsOwner.CurrentModel?.RecognitionSelection));
   }
 
   /// <summary>Runtime 回显的已提交默认识别模式 id；仅 Bound 状态非空。</summary>
@@ -2764,6 +2827,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     RecognitionWorkbenchState current = await CurrentRecognitionStateAsync(
       "recognition.ready", cancellationToken);
     bool isBusy = viewModel.IsBusy;
+    operations.Publish(CurrentImageEditState() with { IsBusy = imageEditChannel.ViewModel?.IsBusy ?? false });
     operations.Publish(current with
     {
       StatusCode = WorkbenchImageOwner.RecognitionStatusCode(viewModel, isBusy),
