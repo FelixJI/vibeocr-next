@@ -1426,6 +1426,7 @@ public sealed class RuntimeInstallerClientTests
             TimeoutException timeout = Assert.IsType<TimeoutException>(error);
             Assert.Contains(started, timeout.Message);
             Assert.NotNull(exited);
+            await exited.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             Assert.True(exited.IsCompletedSuccessfully);
             Assert.NotNull(running);
             Assert.True(running.IsCompleted);
