@@ -76,6 +76,8 @@ export interface Mark {
   readonly start: Point;
   readonly end: Point;
   readonly text?: string;
+  /** 正立文字的布局横宽（逻辑显示单位，0为纯垂直拖动）；独立于旋转后的端点跨度。 */
+  readonly textWidth?: number;
   readonly style?: AnnotationStyle;
   /** 画笔/荧光笔的采样点（含 start/end）；其他工具为空。 */
   readonly points?: readonly Point[];
@@ -269,6 +271,10 @@ export function rotateEditorState(
     rotation: nextRotation,
     marks: state.marks.map((mark) => ({
       ...mark,
+      // 旧标记首次旋转前捕获原水平跨度；字号与布局宽度同属显示单位。
+      ...(mark.tool === "text"
+        ? { textWidth: mark.textWidth ?? Math.abs(mark.end.x - mark.start.x) }
+        : {}),
       start: rotatePoint(mark.start),
       end: rotatePoint(mark.end),
       // 画笔/荧光笔轨迹点同映射，旋转后实际轨迹不错位。

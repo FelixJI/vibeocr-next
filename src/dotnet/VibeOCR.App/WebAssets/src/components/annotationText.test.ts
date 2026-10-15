@@ -6,7 +6,11 @@ import {
   textAnnotationBounds,
   resolveAnnotationFont,
 } from "./annotationText";
-import type { Mark } from "./annotationGeometry";
+import {
+  rotateEditorState,
+  type EditorState,
+  type Mark,
+} from "./annotationGeometry";
 function context() {
   return {
     font: "",
@@ -168,4 +172,90 @@ describe("annotationText", () => {
       available: true,
     });
   });
+});
+
+it.each(["center", "right"] as const)(
+  "旧文字框%s对齐在90/270/回转保留横宽，导出标量只缩放一次",
+  (textAlign) => {
+    const ctx = context();
+    const canvas = ctx as unknown as CanvasRenderingContext2D;
+    const image = { naturalWidth: 900, naturalHeight: 600 } as HTMLImageElement;
+    let state: EditorState = {
+      rotation: 0,
+      marks: [
+        {
+          tool: "text",
+          start: { x: 200, y: 300 },
+          end: { x: 360, y: 300 },
+          text: "X",
+          style: {
+            fontSize: 20,
+            textAlign,
+            textBackground: { color: "#ffffff" },
+          },
+        },
+      ],
+    };
+    for (const rotation of [90, 270, 0]) {
+      state = rotateEditorState(
+        state,
+        image,
+        { width: 900, height: 600 },
+        rotation,
+      );
+      const mark = state.marks[0]!;
+      const left = Math.min(mark.start.x, mark.end.x);
+      drawTextAnnotation(canvas, mark);
+      expect(textAnnotationBounds(canvas, mark).width).toBeCloseTo(172);
+      expect(ctx.fillText.mock.calls.at(-1)?.[1]).toBeCloseTo(
+        left + (textAlign === "center" ? 75 : 150),
+      );
+      drawTextAnnotation(
+        canvas,
+        {
+          ...mark,
+          start: { x: mark.start.x * 2, y: mark.start.y * 2 },
+          end: { x: mark.end.x * 2, y: mark.end.y * 2 },
+        },
+        2,
+      );
+      expect(
+        textAnnotationBounds(
+          canvas,
+          {
+            ...mark,
+            start: { x: mark.start.x * 2, y: mark.start.y * 2 },
+            end: { x: mark.end.x * 2, y: mark.end.y * 2 },
+          },
+          2,
+        ).width,
+      ).toBeCloseTo(344);
+    }
+  },
+);
+
+it("纯垂直拖动的旧文字框旋转后仍仅按字形宽度布局，不把dy当横宽", () => {
+  const canvas = context() as unknown as CanvasRenderingContext2D;
+  const image = { naturalWidth: 900, naturalHeight: 600 } as HTMLImageElement;
+  let state: EditorState = {
+    rotation: 0,
+    marks: [
+      {
+        tool: "text",
+        start: { x: 200, y: 200 },
+        end: { x: 200, y: 500 },
+        text: "X",
+        style: { fontSize: 20 },
+      },
+    ],
+  };
+  for (const rotation of [90, 270, 0]) {
+    state = rotateEditorState(
+      state,
+      image,
+      { width: 900, height: 600 },
+      rotation,
+    );
+    expect(textAnnotationBounds(canvas, state.marks[0]!).width).toBeCloseTo(10);
+  }
 });

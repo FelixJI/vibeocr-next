@@ -2779,6 +2779,9 @@ export function ImageCanvasEditor({
               start: box ? box.start : start,
               end: box ? box.end : lineEnd,
               style: draft?.style ?? currentStyle(),
+              ...(tool === "text"
+                ? { textWidth: Math.abs(end.x - start.x) }
+                : {}),
               ...(["text", "callout"].includes(tool)
                 ? { text: draft?.text ?? (annotationText.trim() || "文本") }
                 : {}),
@@ -5588,6 +5591,7 @@ async function exportCanvas(
       state.rotation,
       naturalSize,
     );
+  // textWidth 与字号保持逻辑单位；draw 的 markScale 统一缩放一次。
   const naturalState: EditorState = {
     rotation: state.rotation,
     marks: state.marks.map((mark) => ({

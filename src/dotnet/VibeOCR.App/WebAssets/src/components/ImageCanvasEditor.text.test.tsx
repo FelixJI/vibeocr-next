@@ -876,3 +876,66 @@ for (const tool of ["文字", "序号", "说明"] as const) {
     );
   });
 }
+
+it("反向创建宽文字经旋转、拖动、续编、取消和撤销仍保留布局宽度", async () => {
+  stubCanvasStack({ width: 900, height: 600 });
+  const harness = stubAnimationFrames();
+  const { actions } = await renderEditor();
+  const canvas = getEditorCanvas();
+  mockCanvasBox(canvas, 900, 600);
+  harness.flush();
+  fireEvent.click(screen.getByRole("button", { name: "文字" }));
+  fireEvent.change(screen.getByLabelText("标注文字"), {
+    target: { value: "X" },
+  });
+  fireEvent.change(screen.getByLabelText("文字对齐"), {
+    target: { value: "center" },
+  });
+  fireEvent.click(screen.getByLabelText("文字背景"));
+  await dragDraw(canvas, harness, { x: 360, y: 300 }, { x: 200, y: 300 });
+  const expectWidth = (width: number) =>
+    expect(
+      allCalls().some(
+        (call) =>
+          call.op === "fillRect" &&
+          Math.abs(Number(call.args[2]) - width) < 0.01,
+      ),
+    ).toBe(true);
+  expectWidth(172);
+  fireEvent.click(screen.getByRole("button", { name: "旋转 90°" }));
+  clearCalls();
+  harness.flush();
+  expectWidth(172);
+  clearCalls();
+  await dragDraw(canvas, harness, { x: 500, y: 120 }, { x: 540, y: 145 });
+  expectWidth(172);
+  expect(revisions(actions)).toEqual([1, 2, 3]);
+  fireEvent.click(screen.getByRole("button", { name: "编辑文字" }));
+  fireEvent.change(screen.getByLabelText("标注文字"), {
+    target: { value: "YY" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "完成文字编辑" }));
+  clearCalls();
+  harness.flush();
+  expectWidth(172);
+  fireEvent.click(screen.getByRole("button", { name: "编辑文字" }));
+  fireEvent.change(screen.getByLabelText("标注文字"), {
+    target: { value: "放弃" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "取消文字编辑" }));
+  expect(screen.getByLabelText("标注文字")).toHaveValue("YY");
+  expect(revisions(actions)).toEqual([1, 2, 3, 4]);
+  clearCalls();
+  fireEvent.click(screen.getByRole("button", { name: "保存标注图" }));
+  await act(async () => {});
+  expectWidth(258);
+  for (let n = 0; n < 3; n++)
+    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+  clearCalls();
+  harness.flush();
+  expectWidth(172);
+  fireEvent.change(screen.getByLabelText("选择标注对象"), {
+    target: { value: "0" },
+  });
+  expect(screen.getByLabelText("标注文字")).toHaveValue("X");
+});

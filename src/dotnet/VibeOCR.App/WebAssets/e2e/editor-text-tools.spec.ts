@@ -139,6 +139,7 @@ async function scan(
         white,
         black,
         green,
+        pixels: data.length / 4,
         width: canvas.width,
         height: canvas.height,
       };
@@ -600,5 +601,82 @@ for (const tool of ["文字", "序号", "说明"] as const) {
     await page.screenshot({
       path: testInfo.outputPath("direct-font-draw.png"),
     });
+  });
+}
+
+for (const alignment of ["center", "right"] as const) {
+  test(`宽文字框${alignment}背景与对齐在90/270/回转及非1:1PNG保持横宽`, async ({
+    page,
+  }, testInfo) => {
+    const { uploads } = await setupTextHost(page, { width: 300, height: 200 });
+    await page.getByRole("button", { name: "文字", exact: true }).click();
+    await page.getByLabel("标注文字").fill("X");
+    await page.getByLabel("文字字体").fill("monospace");
+    await page.getByLabel("文字字号").selectOption("48");
+    await page.getByLabel("文字对齐").selectOption(alignment);
+    await page.getByLabel("文字背景", { exact: true }).check();
+    await page.getByLabel("自定义颜色").fill("#1f6feb");
+    await drag(page, 200, 300, 360, 300);
+    await deselect(page);
+    const glyphWidth = await page.evaluate(() => {
+      const context = document.createElement("canvas").getContext("2d")!;
+      context.font = "600 48px monospace, sans-serif";
+      return context.measureText("X").width;
+    });
+    for (const step of [
+      { rotation: 90, clicks: 1, left: 450, baseline: 240 },
+      { rotation: 270, clicks: 2, left: 450, baseline: 360 },
+      { rotation: 0, clicks: 1, left: 200, baseline: 300 },
+    ]) {
+      for (let n = 0; n < step.clicks; n++)
+        await page
+          .getByRole("button", { name: "旋转 90°", exact: true })
+          .click();
+      const white = {
+        x: step.left + 115,
+        y: step.baseline - 22,
+        width: 15,
+        height: 12,
+      };
+      const blue = {
+        x:
+          step.left +
+          (alignment === "center" ? (160 - glyphWidth) / 2 : 160 - glyphWidth) -
+          2,
+        y: step.baseline - 48,
+        width: glyphWidth + 4,
+        height: 54,
+      };
+      await expect
+        .poll(async () => {
+          const pixels = await scan(page, white);
+          return pixels.white / pixels.pixels;
+        })
+        .toBeGreaterThan(0.95);
+      await expect
+        .poll(async () => (await scan(page, blue)).blue)
+        .toBeGreaterThan(20);
+      const png = await save(page, uploads);
+      const natural =
+        step.rotation === 0
+          ? { width: 300, height: 200 }
+          : { width: 200, height: 300 };
+      const scale = natural.height / 600;
+      const project = (r: typeof white) => ({
+        x: natural.width / 2 + (r.x - 450) * scale,
+        y: natural.height / 2 + (r.y - 300) * scale,
+        width: r.width * scale,
+        height: r.height * scale,
+      });
+      const pixels = await scan(page, project(white), png);
+      expect(pixels.width).toBe(natural.width);
+      expect(pixels.height).toBe(natural.height);
+      expect(pixels.white).toBeGreaterThan(8);
+      expect((await scan(page, project(blue), png)).blue).toBeGreaterThan(5);
+      await writeFile(
+        testInfo.outputPath(`wide-text-${step.rotation}.png`),
+        png,
+      );
+    }
   });
 }

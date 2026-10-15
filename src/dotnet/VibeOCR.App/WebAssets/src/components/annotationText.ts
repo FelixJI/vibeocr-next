@@ -149,7 +149,11 @@ function textLayout(
   const width = Math.max(
     size / 2,
     ...measured,
-    mark.tool === "callout" ? 0 : Math.abs(mark.end.x - mark.start.x),
+    mark.tool === "callout"
+      ? 0
+      : mark.textWidth === undefined
+        ? Math.abs(mark.end.x - mark.start.x)
+        : mark.textWidth * scale,
   );
   return {
     x,
