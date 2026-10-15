@@ -364,6 +364,18 @@ export function rotateEditorState(
         // 画笔/荧光笔轨迹点同映射，旋转后实际轨迹不错位。
         ...(mark.points ? { points: mark.points.map(rotatePoint) } : {}),
       };
+      // 带对象变换的文字保留局部布局，仅投影世界锚点，避免端点换序造成跳位。
+      if (mark.tool === "text" && (mark.rotation || mark.flipX || mark.flipY)) {
+        const anchor = textTransformAnchor(mark);
+        const projected = rotatePoint(anchor);
+        const dx = projected.x - anchor.x,
+          dy = projected.y - anchor.y;
+        return {
+          ...next,
+          start: { x: mark.start.x + dx, y: mark.start.y + dy },
+          end: { x: mark.end.x + dx, y: mark.end.y + dy },
+        };
+      }
       // 引线目标先还原到世界坐标再投影，最后写回新锚点的局部空间。
       return mark.tool === "callout"
         ? {

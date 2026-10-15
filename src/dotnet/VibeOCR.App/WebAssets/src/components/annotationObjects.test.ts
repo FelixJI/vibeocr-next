@@ -283,3 +283,82 @@ describe("PR249 锁定幂等", () => {
     expect(setMarkLocked(unlocked, ids("a"), false)[0]).toBe(unlocked[0]);
   });
 });
+
+describe("PR249 第二轮对象契约", () => {
+  it("完整单组重复组合保持引用，组加普通对象仍可合并", () => {
+    const marks = groupMarkIds(
+      [box("a", 0), box("b", 40), box("c", 80)],
+      ids("a", "b"),
+      "g",
+    );
+    expect(groupMarkIds(marks, ids("a", "b"), "replacement")).toBe(marks);
+    const merged = groupMarkIds(marks, ids("a", "b", "c"), "merged");
+    expect(merged.map((mark) => mark.groupId)).toEqual([
+      "merged",
+      "merged",
+      "merged",
+    ]);
+  });
+  it.each([
+    { rotation: 90 as const },
+    { flipX: true },
+    { flipY: true },
+    { rotation: 270 as const, flipX: true },
+  ])(
+    "带对象变换的普通文字整图旋转投影原世界锚点，不改变局部字形：%j",
+    (transform) => {
+      const image = {
+        naturalWidth: 300,
+        naturalHeight: 200,
+      } as HTMLImageElement;
+      const size = { width: 900, height: 600 };
+      let mark: Mark = {
+        id: "text",
+        tool: "text",
+        start: { x: 180, y: 180 },
+        end: { x: 420, y: 216 },
+        text: "F2Ab",
+        textWidth: 240,
+        objectScale: 1.25,
+        style: { fontSize: 48 },
+        ...transform,
+      };
+      let previousRotation = 0;
+      for (const rotation of [90, 180, 270, 0]) {
+        const anchor = { x: Math.min(mark.start.x, mark.end.x), y: mark.end.y };
+        const expected = projectPoint(
+          anchor,
+          image,
+          previousRotation,
+          size,
+          rotation,
+          size,
+        );
+        const next = rotateEditorState(
+          { rotation: previousRotation, marks: [mark] },
+          image,
+          size,
+          rotation,
+        ).marks[0]!;
+        expect(Math.min(next.start.x, next.end.x)).toBeCloseTo(expected.x, 8);
+        expect(next.end.y).toBeCloseTo(expected.y, 8);
+        expect(next.end.x - next.start.x).toBeCloseTo(
+          mark.end.x - mark.start.x,
+          8,
+        );
+        expect(next.end.y - next.start.y).toBeCloseTo(
+          mark.end.y - mark.start.y,
+          8,
+        );
+        expect(next.rotation).toBe(mark.rotation);
+        expect(next.flipX).toBe(mark.flipX);
+        expect(next.flipY).toBe(mark.flipY);
+        expect(next.textWidth).toBe(240);
+        expect(next.style).toBe(mark.style);
+        expect(next.objectScale).toBe(1.25);
+        mark = next;
+        previousRotation = rotation;
+      }
+    },
+  );
+});

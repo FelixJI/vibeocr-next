@@ -1273,3 +1273,79 @@ describe("PR249 不透明度草稿提交", () => {
     },
   );
 });
+
+describe("PR249 第二轮对象交互", () => {
+  async function prepareSelection() {
+    stubCanvasStack({ width: 900, height: 600 });
+    stubAnimationFrames();
+    const rendered = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    for (const x of [100, 300]) {
+      fireEvent.pointerDown(canvas, { pointerId: 1, clientX: x, clientY: 100 });
+      fireEvent.pointerUp(canvas, {
+        pointerId: 1,
+        clientX: x + 100,
+        clientY: 180,
+      });
+    }
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.keyDown(canvas, { key: "a", ctrlKey: true });
+    return { ...rendered, canvas };
+  }
+  it("重复组合不追加历史，一次撤销恢复未分组", async () => {
+    const { actions, unmount } = await prepareSelection();
+    fireEvent.click(screen.getByRole("button", { name: "组合" }));
+    vi.mocked(actions.run).mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "组合" }));
+    expect(actions.run).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+    expect(screen.queryByRole("button", { name: "解组" })).toBeNull();
+    unmount();
+  });
+  it.each(["矩形", "画笔", "折线"])(
+    "%s绘制上下文忽略旧选区对象快捷键，Enter仍完成草稿",
+    async (tool) => {
+      const { actions, canvas, unmount } = await prepareSelection();
+      fireEvent.keyDown(canvas, { key: "c", ctrlKey: true });
+      fireEvent.click(screen.getByRole("button", { name: tool }));
+      fireEvent.pointerDown(canvas, {
+        pointerId: 1,
+        clientX: 500,
+        clientY: 300,
+      });
+      fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 550, clientY: 330 });
+      vi.mocked(actions.run).mockClear();
+      for (const event of [
+        { key: "d", ctrlKey: true },
+        { key: "v", ctrlKey: true },
+        { key: "ArrowRight" },
+        { key: "Delete" },
+        { key: "a", ctrlKey: true },
+        { key: "c", ctrlKey: true },
+      ])
+        fireEvent.keyDown(canvas, event);
+      expect(actions.run).not.toHaveBeenCalled();
+      if (tool === "折线") {
+        fireEvent.pointerDown(canvas, {
+          pointerId: 1,
+          clientX: 600,
+          clientY: 350,
+        });
+        fireEvent.pointerUp(canvas, {
+          pointerId: 1,
+          clientX: 600,
+          clientY: 350,
+        });
+        fireEvent.keyDown(canvas, { key: "Enter" });
+        expect(actions.run).toHaveBeenCalledTimes(1);
+      }
+      fireEvent.click(screen.getByRole("button", { name: "选择" }));
+      expect(
+        screen.getByLabelText("选择标注对象").querySelectorAll("option"),
+      ).toHaveLength(4);
+      unmount();
+    },
+  );
+});

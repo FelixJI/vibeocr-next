@@ -70,6 +70,7 @@ import {
   rotateMarkIds,
   scaleMarkIds,
   selectionBounds,
+  selectionUnits,
   setMarkLocked,
   ungroupMarkIds,
   unlockedMarkIds,
@@ -4032,6 +4033,11 @@ export function ImageCanvasEditor({
 
   // 选区派生态（工具栏/列表共用）：含锁判定驱动修改类动作禁用。
   const selectionCount = selectedIds.size;
+  const selectionUnitCount = selectionUnits(
+    state.marks,
+    selectedIds,
+    undefined,
+  ).length;
   const selectionTouchLocked =
     selectionCount > 0 &&
     state.marks.some((mark) => selectedIds.has(mark.id) && mark.locked);
@@ -4528,7 +4534,7 @@ export function ImageCanvasEditor({
             >
               置底
             </ToolbarButton>
-            {selectionCount >= 2 && (
+            {selectionUnitCount >= 2 && (
               <Menu>
                 <MenuTrigger disableButtonEnhancement>
                   <ToolbarButton
@@ -4560,13 +4566,17 @@ export function ImageCanvasEditor({
                       </MenuItem>
                     ))}
                     <MenuItem
-                      disabled={!selectionModifiableUi || selectionCount < 3}
+                      disabled={
+                        !selectionModifiableUi || selectionUnitCount < 3
+                      }
                       onClick={() => distributeSelection("h")}
                     >
                       水平等距（≥3，首尾固定）
                     </MenuItem>
                     <MenuItem
-                      disabled={!selectionModifiableUi || selectionCount < 3}
+                      disabled={
+                        !selectionModifiableUi || selectionUnitCount < 3
+                      }
                       onClick={() => distributeSelection("v")}
                     >
                       垂直等距（≥3，首尾固定）
@@ -5369,6 +5379,8 @@ export function ImageCanvasEditor({
             } else if (modifier && key === "y") {
               event.preventDefault();
               redo();
+            } else if (tool !== "select" && event.key !== "Escape") {
+              return;
             } else if (modifier && key === "a") {
               // 全选未锁定对象（含锁定对象跳过，可在列表选择/解锁）。
               event.preventDefault();

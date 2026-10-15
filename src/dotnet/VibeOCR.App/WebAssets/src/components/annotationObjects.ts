@@ -246,7 +246,7 @@ export function reorderMarkIds(
 }
 
 /** 组合是对齐与等距的一个单元，成员保持相对位置。 */
-function selectionUnits(
+export function selectionUnits(
   marks: readonly Mark[],
   ids: ReadonlySet<string>,
   context: BoundsContext,
@@ -334,7 +334,15 @@ export function groupMarkIds(
   ids: ReadonlySet<string>,
   groupId: string,
 ): readonly Mark[] {
-  if (ids.size < 2) return marks;
+  const selected = marks.filter((mark) => ids.has(mark.id));
+  if (selected.length < 2) return marks;
+  const currentGroup = selected[0]!.groupId;
+  if (
+    currentGroup &&
+    selected.every((mark) => mark.groupId === currentGroup) &&
+    !marks.some((mark) => mark.groupId === currentGroup && !ids.has(mark.id))
+  )
+    return marks;
   return marks.map((mark) => (ids.has(mark.id) ? { ...mark, groupId } : mark));
 }
 

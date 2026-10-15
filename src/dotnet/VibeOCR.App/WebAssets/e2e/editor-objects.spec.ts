@@ -720,3 +720,177 @@ test("PR249 重复锁定不追加空历史，一次撤销恢复解锁", async ({
   await action(page, "撤销");
   await expect(list.locator("option").last()).not.toContainText("已锁定");
 });
+
+test("PR249 第二轮菜单按组逻辑单元启用且锁定一致", async ({ page }) => {
+  const { canvas, list } = await setup(page);
+  await rectangle(page, 100, 120);
+  await rectangle(page, 300, 120);
+  await action(page, "选择");
+  await canvas.focus();
+  await canvas.press("Control+a");
+  await action(page, "组合");
+  await expect(page.getByRole("button", { name: "对齐与等距" })).toHaveCount(0);
+  await rectangle(page, 500, 140);
+  await action(page, "选择");
+  await canvas.focus();
+  await canvas.press("Control+a");
+  await action(page, "对齐与等距");
+  await expect(page.getByRole("menuitem", { name: /水平等距/ })).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await rectangle(page, 700, 180);
+  await action(page, "选择");
+  await canvas.focus();
+  await canvas.press("Control+a");
+  await action(page, "对齐与等距");
+  await expect(page.getByRole("menuitem", { name: /水平等距/ })).toBeEnabled();
+  await page.keyboard.press("Escape");
+  await action(page, "锁定");
+  await expect(page.getByRole("button", { name: "对齐与等距" })).toBeDisabled();
+  await list.selectOption("0");
+  await action(page, "解锁");
+  await expect(page.getByRole("button", { name: "对齐与等距" })).toHaveCount(0);
+});
+
+test("PR249 第二轮绘制工具对象快捷键不丢折线草稿，合法撤销重做仍可用", async ({
+  page,
+}) => {
+  const { canvas, list } = await setup(page);
+  await rectangle(page, 100, 120);
+  await action(page, "选择");
+  await list.selectOption("0");
+  await canvas.focus();
+  await canvas.press("Control+c");
+  await action(page, "折线");
+  await click(page, 500, 300);
+  await click(page, 600, 350);
+  for (const key of [
+    "Control+d",
+    "Control+v",
+    "ArrowRight",
+    "Delete",
+    "Control+a",
+    "Control+c",
+  ])
+    await canvas.press(key);
+  await canvas.press("Enter");
+  await action(page, "选择");
+  await expect(list.locator("option")).toHaveCount(3);
+  await canvas.focus();
+  await canvas.press("Control+z");
+  await expect(list.locator("option")).toHaveCount(2);
+  await canvas.press("Control+y");
+  await expect(list.locator("option")).toHaveCount(3);
+});
+
+test("PR249 第二轮普通文字对象旋转镜像后整图旋转保留世界锚点与真实PNG命中", async ({
+  page,
+}, info) => {
+  const { uploads, list } = await setup(page, { width: 300, height: 200 });
+  await action(page, "文字");
+  await page.getByLabel("标注文字").fill("F2Ab");
+  await page.getByLabel("文字字号").selectOption("48");
+  await page.getByLabel("文字字体").fill("Arial");
+  await page.getByLabel("文字字体").press("Tab");
+  await page.getByLabel("自定义颜色").fill("#1f6feb");
+  await drag(page, 180, 216, 420, 216);
+  await action(page, "选择");
+  await list.selectOption("0");
+  await action(page, "对象旋转 90°");
+  await action(page, "水平镜像");
+  await list.selectOption("");
+  const before = await save(page, uploads);
+  await action(page, "旋转 90°");
+  const after = await save(page, uploads);
+  const readBounds = (png: Buffer) =>
+    page.evaluate(async (png) => {
+      const image = await createImageBitmap(
+        new Blob([Uint8Array.from(atob(png), (c) => c.charCodeAt(0))], {
+          type: "image/png",
+        }),
+      );
+      const canvas = document.createElement("canvas");
+      canvas.width = image.width;
+      canvas.height = image.height;
+      const ctx = canvas.getContext("2d")!;
+      ctx.drawImage(image, 0, 0);
+      image.close();
+      const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let left = canvas.width,
+        top = canvas.height,
+        right = 0,
+        bottom = 0,
+        count = 0;
+      for (let i = 0; i < data.length; i += 4)
+        if (
+          data[i]! < 90 &&
+          data[i + 1]! > 60 &&
+          data[i + 1]! < 150 &&
+          data[i + 2]! > 180
+        ) {
+          const x = (i / 4) % canvas.width,
+            y = Math.floor(i / 4 / canvas.width);
+          left = Math.min(left, x);
+          top = Math.min(top, y);
+          right = Math.max(right, x);
+          bottom = Math.max(bottom, y);
+          count++;
+        }
+      return {
+        width: canvas.width,
+        height: canvas.height,
+        left,
+        top,
+        right,
+        bottom,
+        count,
+      };
+    }, png.toString("base64"));
+  const original = await readBounds(before),
+    actual = await readBounds(after);
+  // 对象变换后锚点(318,78)，自然(106,26)；整图90°映射到(174,106)。
+  // 字形方向保持，PNG导出比例由1/3变1/2，局部距离只乘1.5。
+  const expected = {
+    left: 174 + (original.left - 106) * 1.5,
+    right: 174 + (original.right - 106) * 1.5,
+    top: 106 + (original.top - 26) * 1.5,
+    bottom: 106 + (original.bottom - 26) * 1.5,
+  };
+  await Promise.all([
+    writeFile(info.outputPath("text-world-before.png"), before),
+    writeFile(info.outputPath("text-world-after.png"), after),
+    writeFile(
+      info.outputPath("text-world-bounds.json"),
+      JSON.stringify({ original, actual, expected }, null, 2),
+    ),
+  ]);
+  expect(actual.width).toBe(200);
+  expect(actual.height).toBe(300);
+  expect(original.count).toBeGreaterThan(50);
+  expect(actual.count).toBeGreaterThan(50);
+  for (const edge of ["left", "right", "top", "bottom"] as const)
+    expect(Math.abs(actual[edge] - expected[edge])).toBeLessThanOrEqual(2);
+  await click(
+    page,
+    450 + ((expected.left + expected.right) / 2 - 100) * 2,
+    300 + ((expected.top + expected.bottom) / 2 - 150) * 2,
+  );
+  await expect(list).toHaveValue("0");
+});
+
+test("PR249 第二轮重复组合不增加撤销步骤，重选后检查原组已解体", async ({
+  page,
+}) => {
+  const { canvas, list } = await setup(page);
+  await rectangle(page, 100, 120);
+  await rectangle(page, 300, 120);
+  await action(page, "选择");
+  await canvas.focus();
+  await canvas.press("Control+a");
+  await action(page, "组合");
+  await action(page, "组合");
+  await action(page, "撤销");
+  await list.selectOption("0");
+  await expect(
+    page.getByRole("button", { name: "解组", exact: true }),
+  ).toHaveCount(0);
+});
