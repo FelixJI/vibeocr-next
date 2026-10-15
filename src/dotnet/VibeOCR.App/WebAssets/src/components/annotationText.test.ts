@@ -43,6 +43,7 @@ describe("annotationText", () => {
   it("多行对齐、描边、下划线和背景与测量共用尺寸，导出按比例缩放", () => {
     const ctx = context();
     const mark: Mark = {
+      id: "text-1",
       tool: "text",
       start: { x: 10, y: 20 },
       end: { x: 110, y: 40 },
@@ -82,6 +83,7 @@ describe("annotationText", () => {
     (shape) => {
       const ctx = context();
       drawTextAnnotation(ctx as unknown as CanvasRenderingContext2D, {
+        id: "number",
         tool: "numbering",
         start: { x: 100, y: 100 },
         end: { x: 100, y: 100 },
@@ -102,6 +104,7 @@ describe("annotationText", () => {
   ])("说明引线从朝向目标的%s边缘出发，不穿过文字框", (_name, target, joint) => {
     const ctx = context();
     drawTextAnnotation(ctx as unknown as CanvasRenderingContext2D, {
+      id: "callout-1",
       tool: "callout",
       start: target as { x: number; y: number },
       end: { x: 100, y: 100 },
@@ -118,6 +121,7 @@ describe("annotationText", () => {
   it("说明目标在文字框内时不绘制引线和箭头头部", () => {
     const ctx = context();
     drawTextAnnotation(ctx as unknown as CanvasRenderingContext2D, {
+      id: "callout-2",
       tool: "callout",
       start: { x: 105, y: 90 },
       end: { x: 100, y: 100 },
@@ -145,6 +149,7 @@ describe("annotationText", () => {
       inks.push(ctx.fillStyle);
     });
     drawTextAnnotation(ctx as unknown as CanvasRenderingContext2D, {
+      id: "numbering-ink",
       tool: "numbering",
       start: { x: 100, y: 100 },
       end: { x: 100, y: 100 },
@@ -184,6 +189,7 @@ it.each(["center", "right"] as const)(
       rotation: 0,
       marks: [
         {
+          id: "text-align",
           tool: "text",
           start: { x: 200, y: 300 },
           end: { x: 360, y: 300 },
@@ -241,6 +247,7 @@ it("纯垂直拖动的旧文字框旋转后仍仅按字形宽度布局，不把d
     rotation: 0,
     marks: [
       {
+        id: "text-vertical",
         tool: "text",
         start: { x: 200, y: 200 },
         end: { x: 200, y: 500 },

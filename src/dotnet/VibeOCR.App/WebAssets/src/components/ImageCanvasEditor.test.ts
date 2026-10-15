@@ -20,6 +20,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("annotation stroke/fill opacity resolution", () => {
   const legacy: Mark = {
+    id: "fixture",
     tool: "rectangle",
     start: { x: 0, y: 0 },
     end: { x: 40, y: 30 },
@@ -364,6 +365,7 @@ describe("annotation rotation", () => {
       rotation: 0,
       marks: [
         {
+          id: "fixture",
           tool: "rectangle",
           start: { x: 200, y: 180 },
           end: { x: 420, y: 310 },
@@ -398,6 +400,7 @@ describe("annotation rotation", () => {
       rotation: 0,
       marks: [
         {
+          id: "fixture",
           tool: "pen",
           start: { x: 200, y: 180 },
           end: { x: 420, y: 310 },

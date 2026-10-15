@@ -72,6 +72,9 @@ export interface AnnotationFill {
 }
 
 export interface Mark {
+  /** 稳定对象 id：所有创建入口（含初始屏蔽播种）单调分配，不随撤销回退；
+   * 选择/草稿/历史按 id 对应，删除/重排不串对象。 */
+  readonly id: string;
   readonly tool: AnnotationTool;
   readonly start: Point;
   readonly end: Point;
@@ -83,6 +86,17 @@ export interface Mark {
   readonly points?: readonly Point[];
   /** 序号标记的自动编号（绘制时重建）。 */
   readonly ordinal?: number;
+  /** 最小平面对象组：同组成员整体选择/变换；不嵌套。 */
+  readonly groupId?: string;
+  /** 锁定：画布命中跳过、修改操作禁用；可经对象列表解锁。 */
+  readonly locked?: boolean;
+  /** 对象自身旋转（90° 倍数）：字形类标记旋转字形与命中；几何类标记
+   * （矩形/线条/轨迹/效果/屏蔽）把旋转直接烘焙进坐标，不携带该字段。 */
+  readonly rotation?: 0 | 90 | 180 | 270;
+  readonly flipX?: boolean;
+  readonly flipY?: boolean;
+  /** 几何/字号已烘焙缩放；固定像素装饰（内边距/端头）单独乘此比例。 */
+  readonly objectScale?: number;
 }
 
 /** 已应用的本地像素修补：原图（未旋转）像素空间的整数矩形。
@@ -158,6 +172,45 @@ export function constrainLineDrag(
     x: anchor.x + Math.cos(angle) * length,
     y: anchor.y + Math.sin(angle) * length,
   };
+}
+
+/** 点绕中心顺时针旋转 quarter 个直角（屏幕坐标系 y 向下）。 */
+export function rotatePointQuarter(
+  at: Point,
+  center: Point,
+  quarter: number,
+): Point {
+  let { x, y } = at;
+  for (let step = 0; step < ((quarter % 4) + 4) % 4; step += 1) {
+    const dx = x - center.x;
+    const dy = y - center.y;
+    x = center.x - dy;
+    y = center.y + dx;
+  }
+  return { x, y };
+}
+
+/** 点绕中心等比缩放（factor>0）。 */
+export function scalePointAround(
+  at: Point,
+  center: Point,
+  factor: number,
+): Point {
+  return {
+    x: center.x + (at.x - center.x) * factor,
+    y: center.y + (at.y - center.y) * factor,
+  };
+}
+
+/** 点绕中心沿轴镜像：axis=h 时翻转 x，axis=v 时翻转 y。 */
+export function mirrorPointAround(
+  at: Point,
+  center: Point,
+  axis: "h" | "v",
+): Point {
+  return axis === "h"
+    ? { x: 2 * center.x - at.x, y: at.y }
+    : { x: at.x, y: 2 * center.y - at.y };
 }
 
 export function isExclusionMark(mark: Mark): boolean {
