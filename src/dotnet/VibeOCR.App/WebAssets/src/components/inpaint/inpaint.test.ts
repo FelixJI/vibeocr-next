@@ -546,3 +546,24 @@ describe("inpaintMask", () => {
     expect(effects.insideRgbChanged).toBeGreaterThan(0);
   });
 });
+
+it("alternating smoothing retains the bounded gradient pixel regression", () => {
+  const rgba = paintImage(18, 18, (x, y) => [
+    (x * 17 + y * 31) % 256,
+    (x * 19 + y * 7) % 256,
+    (x * 5 + y * 23) % 256,
+    255,
+  ]);
+  const actual = inpaintRectangle(rgba, 18, 18, {
+    x: 1,
+    y: 1,
+    width: 16,
+    height: 16,
+  });
+  expect([
+    channel(actual, 18, 11, 1, 0),
+    channel(actual, 18, 12, 1, 1),
+    channel(actual, 18, 9, 2, 0),
+    channel(actual, 18, 9, 2, 1),
+  ]).toEqual([174, 181, 143, 141]);
+});

@@ -323,7 +323,7 @@ export function inpaintMask(
   for (let sweep = 0; sweep < sweeps; sweep += 1) {
     for (let step = 0; step < count; step += 1) {
       // 掩膜内像素的稳定遍历：queue 恰好含每个掩膜像素一次。
-      const idx = queue[step] ?? -1;
+      const idx = queue[sweep % 2 === 0 ? step : count - 1 - step] ?? -1;
       if (idx < 0) continue;
       const lx = idx % mw;
       const ly = (idx - lx) / mw;

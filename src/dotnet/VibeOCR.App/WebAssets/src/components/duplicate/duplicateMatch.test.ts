@@ -50,6 +50,53 @@ function failureCodeOf(run: () => void): string {
 }
 
 describe("findDuplicateRegions", () => {
+  it("accepts equal-sum RGB texture and rejects copies with different alpha", () => {
+    const rgba = paint(48, 16, (x, y) => {
+      if (y >= 4 && y < 12 && (x < 8 || (x >= 16 && x < 24) || x >= 32)) {
+        const a = x >= 32 ? 0 : 128;
+        return (x + y) % 2 === 0 ? [255, 0, 0, a] : [0, 255, 0, a];
+      }
+      return [80, 80, 80, 255];
+    });
+    const matches = findDuplicateRegions(rgba, 48, 16, {
+      x: 0,
+      y: 4,
+      width: 8,
+      height: 8,
+    });
+    expect(matches).toContainEqual({
+      x: 16,
+      y: 4,
+      width: 8,
+      height: 8,
+      error: 0,
+    });
+    expect(matches.some(({ x }) => x >= 32)).toBe(false);
+  });
+  it("rejects RGB-identical transparent copies while retaining matching opacity", () => {
+    const rgba = paint(48, 16, (x, y) => {
+      if (y >= 4 && y < 12 && (x < 8 || (x >= 16 && x < 24) || x >= 32)) {
+        const value = ((x + y) % 2) * 255;
+        return [value, value, value, x >= 32 ? 0 : 128];
+      }
+      return [80, 80, 80, 255];
+    });
+    const matches = findDuplicateRegions(rgba, 48, 16, {
+      x: 0,
+      y: 4,
+      width: 8,
+      height: 8,
+    });
+    expect(matches).toContainEqual({
+      x: 16,
+      y: 4,
+      width: 8,
+      height: 8,
+      error: 0,
+    });
+    expect(matches.some(({ x }) => x >= 32)).toBe(false);
+  });
+
   it("R10 suppresses overlapping windows before limiting independent copies", () => {
     const rgba = paint(128, 48, (x, y) => {
       if (

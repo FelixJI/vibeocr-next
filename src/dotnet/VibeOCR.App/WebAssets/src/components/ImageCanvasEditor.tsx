@@ -1660,7 +1660,7 @@ export function ImageCanvasEditor({
         ? { rect: preview.naturalRect, canvas: preview.canvas }
         : undefined,
       selection,
-      maskOverlay: inpaintMaskOverlay,
+      maskOverlay: inpaintPreview ? undefined : inpaintMaskOverlay,
       duplicateOverlay,
     };
   }
@@ -6767,12 +6767,12 @@ function draw(
       }
       if (inpaintLayer?.duplicateOverlay?.length) {
         context.save();
-        context.lineWidth = 2 / scale;
-        context.font = `${12 / scale}px sans-serif`;
+        context.lineWidth = 2;
+        context.font = "12px sans-serif";
         for (const entry of inpaintLayer.duplicateOverlay) {
           const dx = (-image.naturalWidth * scale) / 2 + entry.rect.x * scale;
           const dy = (-image.naturalHeight * scale) / 2 + entry.rect.y * scale;
-          context.setLineDash(entry.accepted ? [] : [5 / scale, 4 / scale]);
+          context.setLineDash(entry.accepted ? [] : [5, 4]);
           context.strokeStyle = entry.accepted ? "#12a150" : "#8a8886";
           context.strokeRect(
             dx,
@@ -6783,7 +6783,7 @@ function draw(
           if (entry.label) {
             context.setLineDash([]);
             context.fillStyle = entry.accepted ? "#12a150" : "#8a8886";
-            context.fillText(entry.label, dx + 4 / scale, dy + 14 / scale);
+            context.fillText(entry.label, dx + 4, dy + 14);
           }
         }
         context.restore();
@@ -7018,7 +7018,12 @@ function draw(
         context.fillStyle = normalizeHexColor(
           mark.style?.color ?? DEFAULT_SOLID_COLOR,
         );
-        context.fillRect(area.x, area.y, area.width, area.height);
+        context.fillRect(
+          Math.floor(area.x),
+          Math.floor(area.y),
+          Math.ceil(area.x + area.width) - Math.floor(area.x),
+          Math.ceil(area.y + area.height) - Math.floor(area.y),
+        );
       }
     } else if (mark.tool === "numbering") {
       drawTextAnnotation(context, mark, markScale);

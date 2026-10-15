@@ -17,6 +17,47 @@ function rectState(): InpaintRect {
 }
 
 describe("inpaint mask state", () => {
+  it("subtracting distant rectangles and brushes never expands or rejects the ROI", () => {
+    const current = { rect: rectState(), data: new Uint8Array(96).fill(1) };
+    const image = { width: 4000, height: 4000 };
+    expect(
+      applyMaskRect(
+        current,
+        { x: 3000, y: 3000, width: 20, height: 20 },
+        image,
+        false,
+      ),
+    ).toEqual({ ok: true, state: current });
+    expect(
+      applyMaskBrush(current, [{ x: 3000, y: 3000 }], 10, image, false),
+    ).toEqual({ ok: true, state: current });
+    expect(
+      applyMaskRect(
+        current,
+        { x: 0, y: 0, width: 14, height: 12 },
+        image,
+        false,
+      ),
+    ).toMatchObject({ ok: true, state: { rect: current.rect } });
+  });
+  it("discarding the last mask pixels clears rectangle and brush state", () => {
+    const current = {
+      rect: { x: 10, y: 10, width: 2, height: 2 },
+      data: new Uint8Array(4).fill(1),
+    };
+    expect(
+      applyMaskRect(
+        current,
+        { x: 0, y: 0, width: 50, height: 40 },
+        IMAGE,
+        false,
+      ),
+    ).toEqual({ ok: true, state: undefined });
+    expect(
+      applyMaskBrush(current, [{ x: 11, y: 11 }], 5, IMAGE, false),
+    ).toEqual({ ok: true, state: undefined });
+  });
+
   it.each([
     { x: 100, y: 10, width: 8, height: 8 },
     { x: -100, y: 10, width: 8, height: 8 },

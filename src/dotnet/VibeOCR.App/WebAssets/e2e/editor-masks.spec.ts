@@ -343,7 +343,7 @@ test("solid occlusion bakes opaque pixels into normal export while exclusion doe
   const uploads: { contentType: string; body: Buffer }[] = [];
   await routeSource(
     page,
-    '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="120"><rect width="240" height="120" fill="#0aa05a"/><rect x="40" y="20" width="24" height="16" fill="#e020f0"/></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="120"><rect width="240" height="120" fill="#0aa05a" fill-opacity="0.4"/><rect x="40" y="20" width="24" height="16" fill="#e020f0"/></svg>',
     "masks-solid-source.svg",
   );
   await mountWithUploadCapture(page, uploads, "masks-solid-source.svg");
@@ -357,6 +357,21 @@ test("solid occlusion bakes opaque pixels into normal export while exclusion doe
   await pointerStroke(page, [toDisplay(30, 40), toDisplay(110, 80)]);
   const solid = await saveAndDecode(page, uploads);
   expect(pixelAt(solid, 70, 60)).toEqual([0, 0, 0, 255]);
+
+  await page.getByRole("button", { name: "遮挡" }).click();
+  await pointerStroke(page, [toDisplay(120.3, 85.3), toDisplay(140.7, 100.7)]);
+  const fractional = await saveAndDecode(page, uploads);
+  expect(pixelAt(baseline, 120, 85)[3]).toBeLessThan(255);
+  for (const [x, y] of [
+    [120, 85],
+    [140, 85],
+    [120, 100],
+    [140, 100],
+  ] as const) {
+    expect(pixelAt(fractional, x, y)).toEqual([0, 0, 0, 255]);
+  }
+  await page.getByRole("button", { name: "撤销", exact: true }).click();
+
   expectOutsideRegionIdentical(
     baseline,
     solid,
@@ -423,7 +438,30 @@ test("mask add/remove with a hole inpaints real worker pixels and preserves hole
   await expect(page.getByText(/修补预览完成/)).toBeVisible({
     timeout: 30_000,
   });
+  const readPreviewPixel = () =>
+    page.locator('canvas[aria-label="图片检查画布"]').evaluate((element) => {
+      const canvas = element as HTMLCanvasElement;
+      return Array.from(
+        canvas
+          .getContext("2d")!
+          .getImageData(
+            Math.floor((320 * canvas.width) / 900),
+            Math.floor((260 * canvas.height) / 600),
+            1,
+            1,
+          ).data,
+      );
+    });
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  const visibleAfter = await readPreviewPixel();
   await page.getByLabel("修补对比").selectOption("before");
+  await expect.poll(readPreviewPixel).toEqual([224, 32, 240, 255]);
+
   const previewOnly = await saveAndDecode(page, uploads);
   expect(
     Buffer.compare(
@@ -437,6 +475,7 @@ test("mask add/remove with a hole inpaints real worker pixels and preserves hole
   await expect(page.getByText(/已应用修补/)).toBeVisible();
 
   const applied = await saveAndDecode(page, uploads);
+  await expect.poll(readPreviewPixel).toEqual(visibleAfter);
   // 洞内：水印洋红原样保留（含字节）。
   expect(pixelAt(applied, 48, 20)).toEqual(magenta);
   // 环形掩膜：恢复背景绿；采样点距洞边界≥6px，避免平滑渗色合入断言。
@@ -501,6 +540,16 @@ test("duplicate match previews candidates, applies once, follows rotation, and u
   // 图案像素确证：A 内 (12,8) 为洋红象限。
   expect(patternAt(12, 8).slice(0, 3)).toEqual([255, 0, 255]);
 
+  await page.evaluate(() => {
+    const original = CanvasRenderingContext2D.prototype.strokeRect;
+    CanvasRenderingContext2D.prototype.strokeRect = function (...args) {
+      if (this.strokeStyle === "#12a150") {
+        document.body.dataset.duplicateLineWidth = String(this.lineWidth);
+        document.body.dataset.duplicateFont = this.font;
+      }
+      return original.apply(this, args);
+    };
+  });
   await page.getByRole("button", { name: "重复匹配" }).click();
   // 框选源 A：外扩取整后恰为 (10,6,10,8) 图案本身。
   await pointerStroke(page, [toDisplay(10.5, 6.5), toDisplay(19.5, 13.5)]);
@@ -509,6 +558,15 @@ test("duplicate match previews candidates, applies once, follows rotation, and u
   await expect(page.getByText(/找到 2 处重复内容/)).toBeVisible({
     timeout: 30_000,
   });
+
+  await expect(page.locator("body")).toHaveAttribute(
+    "data-duplicate-line-width",
+    "2",
+  );
+  await expect(page.locator("body")).toHaveAttribute(
+    "data-duplicate-font",
+    "12px sans-serif",
+  );
 
   // 确认前导出与基线逐字节一致（候选只是预览）。
   const beforeConfirm = await saveAndDecode(page, uploads);

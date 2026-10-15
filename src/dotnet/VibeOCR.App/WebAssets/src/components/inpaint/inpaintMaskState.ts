@@ -68,6 +68,17 @@ function rectsUnion(a: InpaintRect, b: InpaintRect): InpaintRect {
   };
 }
 
+function intersectRects(a: InpaintRect, b: InpaintRect): InpaintRect {
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  return {
+    x,
+    y,
+    width: Math.max(0, Math.min(a.x + a.width, b.x + b.width) - x),
+    height: Math.max(0, Math.min(a.y + a.height, b.y + b.height) - y),
+  };
+}
+
 /** 以新 ROI 重分配并拷贝旧数据。 */
 function resizeState(
   state: InpaintMaskState,
@@ -117,7 +128,7 @@ export function applyMaskRect(
   image: ImageSize,
   add: boolean,
 ): InpaintMaskOpResult {
-  const region = clampRectToImage(rect, image);
+  let region = clampRectToImage(rect, image);
   if (
     region.x >= image.width ||
     region.y >= image.height ||
@@ -132,7 +143,14 @@ export function applyMaskRect(
   if (!add && !current) {
     return { ok: true, state: current };
   }
-  const prepared = prepare(current, region);
+  if (!add && current) {
+    region = intersectRects(region, current.rect);
+    if (region.width <= 0 || region.height <= 0)
+      return { ok: true, state: current };
+  }
+  const prepared = add
+    ? prepare(current, region)
+    : { ok: true as const, state: current! };
   if (!prepared.ok) return prepared;
   const state = prepared.state;
   const next = new Uint8Array(state.data);
@@ -149,7 +167,10 @@ export function applyMaskRect(
   if (add && countMasked(result) > INPAINT_MAX_MASK_PIXELS) {
     return { ok: false, reason: "mask-budget" };
   }
-  return { ok: true, state: result };
+  return {
+    ok: true,
+    state: !add && countMasked(result) === 0 ? undefined : result,
+  };
 }
 
 /** 笔刷增/减：点列（原图空间）沿轨迹以半径 stamp 光栅化。 */
@@ -177,7 +198,7 @@ export function applyMaskBrush(
     maxX = Math.max(maxX, at.x);
     maxY = Math.max(maxY, at.y);
   }
-  const region = clampRectToImage(
+  let region = clampRectToImage(
     {
       x: minX - r,
       y: minY - r,
@@ -188,24 +209,33 @@ export function applyMaskBrush(
   );
   if (region.width <= 0 || region.height <= 0)
     return { ok: true, state: current };
-  const prepared = prepare(current, region);
+  if (!add && current) {
+    region = intersectRects(region, current.rect);
+    if (region.width <= 0 || region.height <= 0)
+      return { ok: true, state: current };
+  }
+  const prepared = add
+    ? prepare(current, region)
+    : { ok: true as const, state: current! };
   if (!prepared.ok) return prepared;
   const state = prepared.state;
   const next = new Uint8Array(state.data);
   const stamp = (cx: number, cy: number): number => {
     let work = 0;
-    const top = Math.max(0, Math.floor(cy - r));
-    const bottom = Math.min(image.height - 1, Math.ceil(cy + r));
+    const top = Math.max(state.rect.y, Math.floor(cy - r));
+    const bottom = Math.min(
+      state.rect.y + state.rect.height - 1,
+      Math.ceil(cy + r),
+    );
     for (let y = top; y <= bottom; y += 1) {
       const span = Math.floor(Math.sqrt(Math.max(0, r * r - (y - cy) ** 2)));
-      work += span * 2 + 1;
-      const left = Math.floor(cx) - span;
-      const right = Math.floor(cx) + span;
-      for (
-        let x = Math.max(0, left);
-        x <= Math.min(image.width - 1, right);
-        x += 1
-      ) {
+      const left = Math.max(state.rect.x, Math.floor(cx) - span);
+      const right = Math.min(
+        state.rect.x + state.rect.width - 1,
+        Math.floor(cx) + span,
+      );
+      work += add ? span * 2 + 1 : Math.max(0, right - left + 1);
+      for (let x = left; x <= right; x += 1) {
         const lx = x - state.rect.x;
         const ly = y - state.rect.y;
         if (
@@ -239,7 +269,10 @@ export function applyMaskBrush(
   if (add && countMasked(result) > INPAINT_MAX_MASK_PIXELS) {
     return { ok: false, reason: "mask-budget" };
   }
-  return { ok: true, state: result };
+  return {
+    ok: true,
+    state: !add && countMasked(result) === 0 ? undefined : result,
+  };
 }
 
 /** 按补丁 id 去重统计保留的历史前缀；默认包含全部撤销/重做引用。

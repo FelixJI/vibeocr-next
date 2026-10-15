@@ -6,7 +6,7 @@
  * - 只支持同尺度平移：候选块与源块同宽高，只比较整数平移偏移；不做
  *   旋转/缩放/镜像，也不做亚像素对齐。
  * - 基线整图 ≤ DUPLICATE_MAX_IMAGE_PIXELS（8MP，与修补同一预算叙事）；
- *   源块 ≤ DUPLICATE_MAX_SOURCE_PIXELS（512×512=0.26MP）。源块灰度方差
+ *   源块 ≤ DUPLICATE_MAX_SOURCE_PIXELS（512×512=0.26MP）。源块 RGB 通道平均方差
  *   低于 DUPLICATE_LOW_TEXTURE_VARIANCE 时拒绝（纯色/近纯色块在任何
  *   平移处都“匹配”，结果无意义）。
  * - 工作量有界：覆盖全部整数偏移，以十六点筛选和有限精比控制成本，
@@ -21,7 +21,7 @@
  *    位置，去重），累计差不超过整块容差才进入精比。筛选总量 ≤ 偏移数 ×
  *    16，超过 DUPLICATE_WORK_BUDGET 时显式 budget-exceeded 拒绝
  *    （图片过大/源块过小），不继续也不遇漏。
- * 2. 精比：逐像素比较（RGB、累计容差早退），总量受
+ * 2. 精比：逐像素比较（RGB 容差与完全相同的 alpha、累计容差早退），总量受
  *    DUPLICATE_PRECISE_BUDGET 约束；相似位置过多导致超限时同样
  *    budget-exceeded 拒绝，不把截断的扫描当作完整结果。
  *
@@ -57,7 +57,7 @@ export const DUPLICATE_MAX_CANDIDATES = 8;
 export const DUPLICATE_MAX_MATCH_WINDOWS = 4096;
 /** 平均每通道绝对差 ≤ 6 视为重复（PNG 无损副本为 0；轻微重编码可容忍）。 */
 export const DUPLICATE_MATCH_TOLERANCE = 6;
-/** 源块灰度方差下限：低于它的近纯色块直接拒绝。 */
+/** 源块 RGB 通道平均方差下限：低于它的近纯色块直接拒绝。 */
 export const DUPLICATE_LOW_TEXTURE_VARIANCE = 16;
 /** 像素比较总预算：筛选阶段偏移数 × 16 采样 ≤ 96M。 */
 export const DUPLICATE_WORK_BUDGET = 96_000_000;
@@ -184,19 +184,25 @@ export function findDuplicateRegions(
   const block: DuplicateRect = { x: x0, y: y0, width: bw, height: bh };
   const count = bw * bh;
 
-  // 源块灰度方差：近纯色块拒绝（低纹理）。
-  let sum = 0;
-  let sumSquares = 0;
+  // 源块 RGB 通道平均方差：近纯色块拒绝（低纹理）。
+  const sums = [0, 0, 0];
+  const squares = [0, 0, 0];
   for (let y = 0; y < bh; y += 1) {
     for (let x = 0; x < bw; x += 1) {
       const p = ((y0 + y) * width + (x0 + x)) * 4;
-      const gray =
-        (((rgba[p] ?? 0) + (rgba[p + 1] ?? 0) + (rgba[p + 2] ?? 0)) / 3) | 0;
-      sum += gray;
-      sumSquares += gray * gray;
+      for (let c = 0; c < 3; c += 1) {
+        const value = rgba[p + c] ?? 0;
+        sums[c] = sums[c]! + value;
+        squares[c] = squares[c]! + value * value;
+      }
     }
   }
-  const variance = Math.max(0, sumSquares / count - (sum / count) ** 2);
+  const variance =
+    sums.reduce(
+      (total, sum, c) =>
+        total + Math.max(0, squares[c]! / count - (sum / count) ** 2),
+      0,
+    ) / 3;
   if (variance < DUPLICATE_LOW_TEXTURE_VARIANCE) {
     fail(
       "low-texture",
@@ -269,7 +275,7 @@ export function findDuplicateRegions(
         if (screenError > tolerance) break;
       }
       if (screenError > tolerance) continue;
-      // 阶段 2：逐像素精比（RGB），累计容差早退；总量受精比预算约束。
+      // 阶段 2：逐像素精比（RGB 容差、alpha 必须相同），累计容差早退；总量受精比预算约束。
       let error = 0;
       compare: for (let y = 0; y < bh; y += 1) {
         for (let x = 0; x < bw; x += 1) {
@@ -286,6 +292,7 @@ export function findDuplicateRegions(
               `相似位置过多，精比超出预算 ${DUPLICATE_PRECISE_BUDGET}；请缩小框选范围后重试。`,
             );
           }
+          if (rgba[p + 3] !== rgba[q + 3]) error = tolerance + 1;
           if (error > tolerance) break compare;
         }
       }
