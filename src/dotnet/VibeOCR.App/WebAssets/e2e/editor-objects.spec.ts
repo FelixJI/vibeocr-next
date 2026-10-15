@@ -894,3 +894,154 @@ test("PR249 第二轮重复组合不增加撤销步骤，重选后检查原组�
     page.getByRole("button", { name: "解组", exact: true }),
   ).toHaveCount(0);
 });
+
+for (const arrowStyle of ["open", "hollow", "solid"]) {
+  test(
+    "PR249 第三轮 " + arrowStyle + "箭头缩放四向端头真实PNG可见像素可点击",
+    async ({ page }, info) => {
+      const { uploads, list } = await setup(page);
+      await action(page, "箭头");
+      await page.getByLabel("箭头样式").selectOption(arrowStyle);
+      await page.getByLabel("双向箭头").check();
+      await page.getByLabel("自定义颜色").fill("#1f6feb");
+      await drag(page, 400, 300, 440, 300);
+      await action(page, "选择");
+      await list.selectOption("0");
+      for (let step = 0; step < 6; step++) await action(page, "放大选区");
+      for (let turn = 0; turn < 4; turn++) {
+        await list.selectOption("");
+        const png = await save(page, uploads);
+        const wing = await page.evaluate(
+          async ({ png, vertical }) => {
+            const image = await createImageBitmap(
+              new Blob([Uint8Array.from(atob(png), (c) => c.charCodeAt(0))], {
+                type: "image/png",
+              }),
+            );
+            const canvas = document.createElement("canvas");
+            canvas.width = image.width;
+            canvas.height = image.height;
+            const ctx = canvas.getContext("2d")!;
+            ctx.drawImage(image, 0, 0);
+            image.close();
+            const data = ctx.getImageData(
+              0,
+              0,
+              canvas.width,
+              canvas.height,
+            ).data;
+            let result = { x: 0, y: 0, distance: 0 };
+            let tip = { x: 0, y: 0, distance: 0 };
+            for (let i = 0; i < data.length; i += 4)
+              if (
+                data[i]! < 90 &&
+                data[i + 1]! > 60 &&
+                data[i + 1]! < 150 &&
+                data[i + 2]! > 180
+              ) {
+                const x = (i / 4) % canvas.width,
+                  y = Math.floor(i / 4 / canvas.width),
+                  distance = Math.abs(vertical ? x - 420 : y - 300);
+                if (distance > result.distance) result = { x, y, distance };
+                const along = Math.abs(vertical ? y - 300 : x - 420);
+                if (along > tip.distance) tip = { x, y, distance: along };
+              }
+            return { ...result, tip };
+          },
+          { png: png.toString("base64"), vertical: turn % 2 === 1 },
+        );
+        await Promise.all([
+          writeFile(info.outputPath("arrow-" + turn + ".png"), png),
+          writeFile(
+            info.outputPath("wing-" + turn + ".json"),
+            JSON.stringify(wing),
+          ),
+        ]);
+        expect(wing.distance).toBeGreaterThan(20);
+        await click(page, wing.x + 0.5, wing.y + 0.5);
+        await expect(list).toHaveValue("0");
+        if (arrowStyle !== "open") {
+          // 三角miter尖角也有真实像素超出端点10px，不能只计算半线宽外扩。
+          expect(wing.tip.distance - 20 * 1.25 ** 6).toBeGreaterThan(10);
+          await list.selectOption("");
+          await click(page, wing.tip.x + 0.5, wing.tip.y + 0.5);
+          await expect(list).toHaveValue("0");
+        }
+        await action(page, "对象旋转 90°");
+      }
+    },
+  );
+}
+
+test("PR249 第三轮粗荧光笔仅露出4px仍可见且真实PNG可命中", async ({
+  page,
+}, info) => {
+  const { uploads, list, canvas } = await setup(page);
+  await action(page, "荧光笔");
+  await page.getByLabel("线条宽度").selectOption("8");
+  await drag(page, 100, 48, 300, 48);
+  await action(page, "选择");
+  await list.selectOption("0");
+  await canvas.focus();
+  for (let i = 0; i < 6; i++) await canvas.press("Shift+ArrowUp");
+  await list.selectOption("");
+  const png = await save(page, uploads);
+  await writeFile(info.outputPath("partial-highlighter.png"), png);
+  const sample = await pixels(page, png, [
+    { x: 200, y: 1 },
+    { x: 200, y: 10 },
+  ]);
+  expect(sample[0]).not.toEqual([18, 161, 80]);
+  expect(sample[1]).toEqual([18, 161, 80]);
+  await expect(list.locator("option").last()).not.toContainText("画布外");
+  await click(page, 200, 1);
+  await expect(list).toHaveValue("0");
+});
+
+test("PR249 第三轮混合多选主对象在画内不显示回中心，离屏组恢复保留间距可撤销", async ({
+  page,
+}, info) => {
+  const { uploads, list, canvas } = await setup(page);
+  await rectangle(page, 100, 120);
+  await action(page, "选择");
+  await list.selectOption("0");
+  await canvas.focus();
+  for (let i = 0; i < 30; i++) await canvas.press("Shift+ArrowLeft");
+  await rectangle(page, 500, 300, "#1f6feb");
+  await action(page, "选择");
+  await canvas.focus();
+  await canvas.press("Control+a");
+  await expect(list).toHaveValue("1");
+  await expect(
+    page.getByRole("button", { name: "对象回中心", exact: true }),
+  ).toHaveCount(0);
+  // 列表明确选择实际离屏对象后才提供恢复；锁定仍阻止动作。
+  await list.selectOption("0");
+  await action(page, "锁定");
+  await expect(
+    page.getByRole("button", { name: "对象回中心", exact: true }),
+  ).toHaveCount(0);
+  await action(page, "解锁");
+  await action(page, "对象回中心");
+  await canvas.focus();
+  await canvas.press("Control+a");
+  await action(page, "组合");
+  await canvas.focus();
+  for (let i = 0; i < 65; i++) await canvas.press("Shift+ArrowLeft");
+  await expect(list.locator("option").nth(1)).toContainText("画布外");
+  await action(page, "对象回中心");
+  const png = await save(page, uploads);
+  await writeFile(info.outputPath("recovered-group.png"), png);
+  // 组原间距100x30，整体中心恢复到450,300；两成员的相对位置不变。
+  expect(
+    await pixels(page, png, [
+      { x: 400, y: 285 },
+      { x: 500, y: 315 },
+    ]),
+  ).toEqual([
+    [224, 32, 32],
+    [31, 111, 235],
+  ]);
+  await action(page, "撤销");
+  await expect(list.locator("option").nth(1)).toContainText("画布外");
+});

@@ -6,6 +6,10 @@ import {
   type Point,
   type Rect,
 } from "./annotationGeometry";
+import {
+  openArrowHeadPaths,
+  type AnnotationPath,
+} from "./annotationStrokeGeometry";
 
 export { textTransformAnchor, transformTextPoint } from "./annotationGeometry";
 
@@ -97,6 +101,30 @@ export function calloutLeaderSegment(
     to: target,
     headSize: Math.min(16 * scale, distance / 2),
   };
+}
+
+/** 引线与端头路径供绘制、可见边界和命中共用。 */
+export function calloutLeaderPaths(
+  box: Rect,
+  mark: Mark,
+  scale = 1,
+): readonly AnnotationPath[] {
+  const leader = calloutLeaderSegment(
+    box,
+    mark.start,
+    scale * (mark.objectScale ?? 1),
+  );
+  if (!leader) return [];
+  const angle = Math.atan2(
+    mark.start.y - leader.from.y,
+    mark.start.x - leader.from.x,
+  );
+  return [
+    { points: [leader.from, mark.start] },
+    ...(mark.style?.calloutStyle === "arrow"
+      ? openArrowHeadPaths(mark.start, angle, leader.headSize)
+      : []),
+  ];
 }
 
 export function annotationFont(
@@ -306,28 +334,17 @@ export function drawTextAnnotation(
   }
   const layout = textLayout(context, mark, scale);
   const box = unrotatedTextBox(context, mark, scale);
-  const leader =
-    mark.tool === "callout"
-      ? calloutLeaderSegment(box, mark.start, scale * (mark.objectScale ?? 1))
-      : undefined;
-  if (leader) {
-    const joint = leader.from;
+  const leaderPaths =
+    mark.tool === "callout" ? calloutLeaderPaths(box, mark, scale) : [];
+  if (leaderPaths.length) {
     context.strokeStyle = color;
     context.lineWidth = (mark.style?.strokeWidth ?? 3) * scale;
     context.beginPath();
-    context.moveTo(joint.x, joint.y);
-    context.lineTo(mark.start.x, mark.start.y);
-    if (mark.style?.calloutStyle === "arrow") {
-      const angle = Math.atan2(mark.start.y - joint.y, mark.start.x - joint.x);
-      const head = leader.headSize;
-      for (const side of [-0.45, 0.45]) {
-        context.moveTo(mark.start.x, mark.start.y);
-        context.lineTo(
-          mark.start.x - head * Math.cos(angle + side),
-          mark.start.y - head * Math.sin(angle + side),
-        );
-      }
-    }
+    for (const path of leaderPaths)
+      path.points.forEach((at, index) => {
+        if (index === 0) context.moveTo(at.x, at.y);
+        else context.lineTo(at.x, at.y);
+      });
     context.stroke();
   }
   const background = mark.style?.textBackground;

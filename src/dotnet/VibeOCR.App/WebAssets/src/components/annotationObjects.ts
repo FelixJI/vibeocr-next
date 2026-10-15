@@ -1,4 +1,5 @@
 import {
+  annotationStrokeWidth,
   mirrorPointAround,
   rotatePointQuarter,
   scalePointAround,
@@ -8,11 +9,17 @@ import {
   type Rect,
 } from "./annotationGeometry";
 import {
+  calloutLeaderPaths,
   isFontMark,
   textAnnotationBounds,
+  textAnnotationLocalBounds,
   textTransformAnchor,
   transformTextPoint,
 } from "./annotationText";
+import {
+  annotationPathBounds,
+  strokePathsBounds,
+} from "./annotationStrokeGeometry";
 
 /** 对象批量操作的公共上下文：字形类边界测量需要 2D 上下文（measureText）。 */
 export type BoundsContext = CanvasRenderingContext2D | undefined;
@@ -28,10 +35,47 @@ export type ObjectDistributeAxis = "h" | "v";
 export type ObjectZOrder = "up" | "down" | "front" | "back";
 
 /** 单对象边界（变换后轴对齐包围盒）：字形类按文本边界并包含锚点（引线端），
- * 其余按几何点集。与选中虚线框同一规则。 */
+ * 路径含实际描边与端头，其余形状含描边外沿。与选中虚线框同一规则。 */
 export function markBoundsOf(mark: Mark, context: BoundsContext): Rect {
   if (context && isFontMark(mark)) {
-    const box = textAnnotationBounds(context, mark);
+    let box = textAnnotationBounds(context, mark);
+    const padding =
+      mark.tool === "numbering"
+        ? 0
+        : Math.max(
+            (mark.style?.textOutline?.width ?? 0) / 2,
+            mark.tool === "callout" ? annotationStrokeWidth(mark) / 2 : 0,
+          );
+    box = {
+      x: box.x - padding,
+      y: box.y - padding,
+      width: box.width + 2 * padding,
+      height: box.height + 2 * padding,
+    };
+    if (mark.tool === "callout") {
+      const paths = calloutLeaderPaths(
+        textAnnotationLocalBounds(context, mark),
+        mark,
+      );
+      if (paths.length) {
+        const local = strokePathsBounds(paths, annotationStrokeWidth(mark));
+        const corners = [
+          { x: local.x, y: local.y },
+          { x: local.x + local.width, y: local.y },
+          { x: local.x, y: local.y + local.height },
+          { x: local.x + local.width, y: local.y + local.height },
+        ].map((at) => transformTextPoint(mark, at));
+        const x = Math.min(box.x, ...corners.map((at) => at.x)),
+          y = Math.min(box.y, ...corners.map((at) => at.y));
+        box = {
+          x,
+          y,
+          width: Math.max(box.x + box.width, ...corners.map((at) => at.x)) - x,
+          height:
+            Math.max(box.y + box.height, ...corners.map((at) => at.y)) - y,
+        };
+      }
+    }
     const start = transformTextPoint(mark, mark.start);
     const left = Math.min(box.x, start.x);
     const top = Math.min(box.y, start.y);
@@ -39,6 +83,12 @@ export function markBoundsOf(mark: Mark, context: BoundsContext): Rect {
     const bottom = Math.max(box.y + box.height, start.y);
     return { x: left, y: top, width: right - left, height: bottom - top };
   }
+  if (["line", "polyline", "pen", "highlighter", "arrow"].includes(mark.tool))
+    return annotationPathBounds(mark);
+  const padding =
+    mark.tool === "rectangle" || mark.tool === "ellipse"
+      ? annotationStrokeWidth(mark) / 2
+      : 0;
   let left = mark.start.x,
     right = mark.start.x,
     top = mark.start.y,
@@ -49,7 +99,12 @@ export function markBoundsOf(mark: Mark, context: BoundsContext): Rect {
     top = Math.min(top, at.y);
     bottom = Math.max(bottom, at.y);
   }
-  return { x: left, y: top, width: right - left, height: bottom - top };
+  return {
+    x: left - padding,
+    y: top - padding,
+    width: right - left + 2 * padding,
+    height: bottom - top + 2 * padding,
+  };
 }
 
 /** 选区联合边界；空选区返回 undefined。 */

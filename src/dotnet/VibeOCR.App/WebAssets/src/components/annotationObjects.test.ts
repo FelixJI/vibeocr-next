@@ -16,6 +16,7 @@ import {
   expandGroupSelection,
   groupMarkIds,
   markOffscreen,
+  markBoundsOf,
   marksContainedInRect,
   mirrorMarkIds,
   moveMarkIds,
@@ -104,14 +105,14 @@ describe("对象身份、组与批量几何", () => {
     expect(
       marksContainedInRect(
         locked,
-        { x: 0, y: 0, width: 100, height: 20 },
+        { x: -2, y: -2, width: 104, height: 24 },
         undefined,
       ),
     ).toEqual(ids("c"));
     expect(
       marksContainedInRect(
         marks,
-        { x: 0, y: 0, width: 20, height: 10 },
+        { x: -1.5, y: -1.5, width: 23, height: 13 },
         undefined,
       ),
     ).toEqual(ids("a"));
@@ -358,6 +359,100 @@ describe("PR249 第二轮对象契约", () => {
         expect(next.objectScale).toBe(1.25);
         mark = next;
         previousRotation = rotation;
+      }
+    },
+  );
+});
+
+describe("PR249 第三轮可见描边边界", () => {
+  it.each(["pen", "highlighter"] as const)(
+    "%s粗描边四向旋转/缩放后部分可见，不被当成离屏或完整框入中心线",
+    (tool) => {
+      const original: Mark = {
+        id: "ink",
+        tool,
+        start: { x: 100, y: -12 },
+        end: { x: 200, y: -12 },
+        points: [
+          { x: 100, y: -12 },
+          { x: 200, y: -12 },
+        ],
+        style: { strokeWidth: tool === "highlighter" ? 8 : 32 },
+      };
+      for (const factor of [1, 1.25]) {
+        let mark = scaleMarkIds([original], ids("ink"), factor, {
+          x: 150,
+          y: 0,
+        })[0]!;
+        for (let turn = 0; turn < 4; turn++) {
+          expect(
+            markOffscreen(mark, { width: 300, height: 300 }, undefined),
+          ).toBe(false);
+          expect(
+            marksContainedInRect(
+              [mark],
+              {
+                x: Math.min(mark.start.x, mark.end.x),
+                y: Math.min(mark.start.y, mark.end.y),
+                width: Math.abs(mark.end.x - mark.start.x),
+                height: Math.abs(mark.end.y - mark.start.y),
+              },
+              undefined,
+            ),
+          ).toEqual(ids());
+          mark = rotateMarkIds([mark], ids("ink"), { x: 150, y: 150 })[0]!;
+        }
+      }
+    },
+  );
+  it.each(["rectangle", "ellipse", "line", "polyline"] as const)(
+    "%s边界包含实际描边外沿，效果/屏蔽不凭空扩大",
+    (tool) => {
+      const mark: Mark = {
+        id: "shape",
+        tool,
+        start: { x: 100, y: 100 },
+        end: { x: 200, y: 150 },
+        style: { strokeWidth: 32 },
+      };
+      expect(markBoundsOf(mark, undefined)).toEqual({
+        x: 84,
+        y: 84,
+        width: 132,
+        height: 82,
+      });
+      expect(markBoundsOf({ ...mark, tool: "exclude" }, undefined)).toEqual({
+        x: 100,
+        y: 100,
+        width: 100,
+        height: 50,
+      });
+    },
+  );
+  it.each(["open", "hollow", "solid"] as const)(
+    "%s箭头的四向端头和描边在对象比例下进入边界",
+    (arrowStyle) => {
+      let mark: Mark = {
+        id: "arrow",
+        tool: "arrow",
+        start: { x: 100, y: 150 },
+        end: { x: 300, y: 150 },
+        style: { strokeWidth: 12, arrowStyle, arrowDouble: true },
+        objectScale: 4,
+      };
+      for (let turn = 0; turn < 4; turn++) {
+        const bounds = markBoundsOf(mark, undefined);
+        expect(turn % 2 ? bounds.width : bounds.height).toBeGreaterThan(60);
+        const centerline = {
+          x: Math.min(mark.start.x, mark.end.x) - 6,
+          y: Math.min(mark.start.y, mark.end.y) - 6,
+          width: Math.abs(mark.end.x - mark.start.x) + 12,
+          height: Math.abs(mark.end.y - mark.start.y) + 12,
+        };
+        expect(marksContainedInRect([mark], centerline, undefined)).toEqual(
+          ids(),
+        );
+        mark = rotateMarkIds([mark], ids("arrow"), { x: 200, y: 150 })[0]!;
       }
     },
   );

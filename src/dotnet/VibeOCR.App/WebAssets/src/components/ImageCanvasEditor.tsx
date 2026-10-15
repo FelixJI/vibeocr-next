@@ -83,7 +83,7 @@ import {
   AnnotationTextPanel,
 } from "./AnnotationTextPanel";
 import {
-  calloutLeaderSegment,
+  calloutLeaderPaths,
   nextNumberOrdinal,
   drawTextAnnotation,
   textAnnotationLocalBounds,
@@ -92,6 +92,12 @@ import {
   isContentMark,
   resolveAnnotationFont,
 } from "./annotationText";
+import {
+  annotationArrowGeometry,
+  annotationPathPoints,
+  annotationPaths,
+  hitStrokePaths,
+} from "./annotationStrokeGeometry";
 import { uploadAnnotatedImage } from "./annotationHandoff";
 import { captureSceneStyle } from "./captureSceneLayout";
 import type { CaptureScene } from "../bridge/captureScene";
@@ -3753,6 +3759,7 @@ export function ImageCanvasEditor({
     if (!mark || mark.locked || !canvas) return;
     const size = canvasSize(canvas);
     const ids = expandGroupSelection(state.marks, new Set([id]));
+    if (!markOffscreen(mark, size, objectActionContext())) return;
     if (!selectionModifiable(ids)) return;
     const bounds = selectionBounds(state.marks, ids, objectActionContext());
     if (!bounds) return;
@@ -4053,11 +4060,6 @@ export function ImageCanvasEditor({
     selectedMark !== undefined
       ? state.marks.find((mark) => mark.id === selectedMark)
       : undefined;
-  const selectionHasOffscreen =
-    selectionCount > 0 &&
-    state.marks.some(
-      (mark) => selectedIds.has(mark.id) && markIsOffscreen(mark),
-    );
   const primaryIndex = primaryMark ? state.marks.indexOf(primaryMark) : -1;
   const objectSelectionControl = tool === "select" &&
     state.marks.length > 0 && (
@@ -4092,7 +4094,7 @@ export function ImageCanvasEditor({
             ))}
           </Select>
         </label>
-        {selectionHasOffscreen && primaryMark && !primaryMark.locked && (
+        {primaryMark && markIsOffscreen(primaryMark) && !primaryMark.locked && (
           <ToolbarButton
             aria-label="对象回中心"
             onClick={() => restoreObjectToCenter(primaryMark.id)}
@@ -5864,16 +5866,7 @@ function draw(
       // 草稿的活动 end 追加为最后一个顶点：拖拽/悬停中的新段实时可见；
       // 已提交标记 end == 最后顶点，不追加，渲染与旧像素不变。未提交
       // 草稿只进预览画布，导出/历史仍只包含已提交 points。
-      const committedPoints = mark.points?.length
-        ? mark.points
-        : [mark.start, mark.end];
-      const points = [...committedPoints];
-      if (mark.tool === "polyline") {
-        const last = points[points.length - 1];
-        if (last && (last.x !== mark.end.x || last.y !== mark.end.y)) {
-          points.push(mark.end);
-        }
-      }
+      const points = annotationPathPoints(mark);
       context.save();
       context.strokeStyle = color;
       context.lineWidth = lineWidth;
@@ -5905,108 +5898,31 @@ function draw(
       context.strokeStyle = color;
       context.save();
       context.globalAlpha = strokeAlpha;
-      const arrowStyle = mark.style?.arrowStyle ?? "open";
-      const doubleHead = mark.style?.arrowDouble === true;
-      const angle = Math.atan2(height, width);
-      // 旧默认开放头：两条 16px 短线，保持旧对象渲染不变。
-      const drawOpenHead = (tip: Point, dir: number): void => {
+      const geometry = annotationArrowGeometry(mark, markScale);
+      const groups = [[geometry.shaft], ...geometry.heads];
+      groups.forEach((paths, index) => {
         context.setLineDash([]);
         context.beginPath();
-        context.moveTo(tip.x, tip.y);
-        context.lineTo(
-          tip.x -
-            16 * markScale * (mark.objectScale ?? 1) * Math.cos(dir - 0.45),
-          tip.y -
-            16 * markScale * (mark.objectScale ?? 1) * Math.sin(dir - 0.45),
-        );
-        context.moveTo(tip.x, tip.y);
-        context.lineTo(
-          tip.x -
-            16 * markScale * (mark.objectScale ?? 1) * Math.cos(dir + 0.45),
-          tip.y -
-            16 * markScale * (mark.objectScale ?? 1) * Math.sin(dir + 0.45),
-        );
-        context.stroke();
-      };
-      // 短箭头的端头共同受总长度约束，防止轴杆反向穿过空心头。
-      const headSize = Math.min(
-        (10 * (mark.objectScale ?? 1) + (mark.style?.strokeWidth ?? 3) * 2) *
-          markScale,
-        Math.hypot(width, height) / (doubleHead ? 2 : 1),
-      );
-      const drawTriangleHead = (
-        tip: Point,
-        dir: number,
-        filled: boolean,
-      ): void => {
-        const half = headSize / 2.5;
-        const base = {
-          x: tip.x - headSize * Math.cos(dir),
-          y: tip.y - headSize * Math.sin(dir),
-        };
-        context.setLineDash([]);
-        context.beginPath();
-        context.moveTo(tip.x, tip.y);
-        context.lineTo(
-          base.x + half * Math.cos(dir - Math.PI / 2),
-          base.y + half * Math.sin(dir - Math.PI / 2),
-        );
-        context.lineTo(
-          base.x + half * Math.cos(dir + Math.PI / 2),
-          base.y + half * Math.sin(dir + Math.PI / 2),
-        );
-        context.closePath();
-        if (filled) {
+        for (const path of paths) {
+          path.points.forEach((at, pointIndex) => {
+            if (pointIndex === 0) context.moveTo(at.x, at.y);
+            else context.lineTo(at.x, at.y);
+          });
+          if (path.closed) context.closePath();
+        }
+        if (paths.some((path) => path.filled)) {
           context.fillStyle = color;
           context.fill();
         }
+        if (index === 0)
+          applyDashPattern(
+            context,
+            mark.style?.lineStyle,
+            markScale * (mark.objectScale ?? 1),
+            lineWidth,
+          );
         context.stroke();
-      };
-      if (arrowStyle === "open") {
-        // 旧路径：完整轴杆 + 端头短线（无轴杆缩短），字节等价旧渲染。
-        context.beginPath();
-        context.moveTo(mark.start.x, mark.start.y);
-        context.lineTo(mark.end.x, mark.end.y);
-        applyDashPattern(
-          context,
-          mark.style?.lineStyle,
-          markScale * (mark.objectScale ?? 1),
-          lineWidth,
-        );
-        context.stroke();
-        drawOpenHead(mark.end, angle);
-        if (doubleHead) drawOpenHead(mark.start, angle + Math.PI);
-      } else {
-        // 三角头：轴杆止于端头底边，空心内部不穿越轴杆。
-        const axis = {
-          x: Math.cos(angle),
-          y: Math.sin(angle),
-        };
-        const shaftStart = doubleHead
-          ? {
-              x: mark.start.x + headSize * axis.x,
-              y: mark.start.y + headSize * axis.y,
-            }
-          : mark.start;
-        const shaftEnd = {
-          x: mark.end.x - headSize * axis.x,
-          y: mark.end.y - headSize * axis.y,
-        };
-        context.beginPath();
-        context.moveTo(shaftStart.x, shaftStart.y);
-        context.lineTo(shaftEnd.x, shaftEnd.y);
-        applyDashPattern(
-          context,
-          mark.style?.lineStyle,
-          markScale * (mark.objectScale ?? 1),
-          lineWidth,
-        );
-        context.stroke();
-        drawTriangleHead(mark.end, angle, arrowStyle === "solid");
-        if (doubleHead) {
-          drawTriangleHead(mark.start, angle + Math.PI, arrowStyle === "solid");
-        }
-      }
+      });
       context.restore();
     } else if (isContentMark(mark)) {
       drawTextAnnotation(context, mark, markScale);
@@ -6015,7 +5931,7 @@ function draw(
     } else if (mark.tool === "blur") {
       applyBlur(context, canvas, mark, markScale);
     } else if (mark.tool === "pen" || mark.tool === "highlighter") {
-      const points = mark.points ?? [mark.start, mark.end];
+      const points = annotationPathPoints(mark);
       context.setLineDash([]);
       context.save();
       context.strokeStyle = color;
@@ -6652,16 +6568,19 @@ function findMark(
       // 字形旋转：指针逆旋转回局部未旋转空间后按同一盒/引线判定。
       const at = transformTextPoint(mark, point, true);
       const box = textAnnotationLocalBounds(context, mark);
-      const leader =
-        mark.tool === "callout"
-          ? calloutLeaderSegment(box, mark.start)
-          : undefined;
+      const hitPadding = Math.max(
+        6,
+        (mark.style?.textOutline?.width ?? 0) / 2,
+        mark.tool === "callout" ? annotationStrokeWidth(mark) / 2 : 0,
+      );
+      const leaderPaths =
+        mark.tool === "callout" ? calloutLeaderPaths(box, mark) : [];
       if (
-        (at.x >= box.x - 6 &&
-          at.x <= box.x + box.width + 6 &&
-          at.y >= box.y - 6 &&
-          at.y <= box.y + box.height + 6) ||
-        (leader && distanceToSegment(at, leader.from, leader.to) <= 10)
+        (at.x >= box.x - hitPadding &&
+          at.x <= box.x + box.width + hitPadding &&
+          at.y >= box.y - hitPadding &&
+          at.y <= box.y + box.height + hitPadding) ||
+        hitStrokePaths(leaderPaths, at, annotationStrokeWidth(mark))
       )
         return mark.id;
       continue;
@@ -6675,25 +6594,21 @@ function findMark(
       mark.tool === "pen" ||
       mark.tool === "highlighter"
     ) {
-      const points = mark.points?.length ? mark.points : [mark.start, mark.end];
-      const hitRadius = Math.max(10, annotationStrokeWidth(mark) / 2);
-      let hit = false;
-      for (let i = 0; i < points.length; i += 1) {
-        if (
-          distanceToSegment(point, points[Math.max(0, i - 1)]!, points[i]!) <=
-          hitRadius
-        ) {
-          hit = true;
-          break;
-        }
-      }
-      if (hit) return mark.id;
+      if (
+        hitStrokePaths(
+          annotationPaths(mark),
+          point,
+          annotationStrokeWidth(mark),
+        )
+      )
+        return mark.id;
       continue;
     }
-    const left = Math.min(mark.start.x, mark.end.x) - 10;
-    const right = Math.max(mark.start.x, mark.end.x) + 10;
-    const top = Math.min(mark.start.y, mark.end.y) - 10;
-    const bottom = Math.max(mark.start.y, mark.end.y) + 10;
+    const bounds = markBoundsOf(mark, context);
+    const left = bounds.x - 10;
+    const right = bounds.x + bounds.width + 10;
+    const top = bounds.y - 10;
+    const bottom = bounds.y + bounds.height + 10;
     if (
       point.x >= left &&
       point.x <= right &&
@@ -6703,19 +6618,4 @@ function findMark(
       return mark.id;
   }
   return undefined;
-}
-
-/** 点到线段的最短距离：命中半径判定用，不引入额外几何库。 */
-function distanceToSegment(at: Point, from: Point, to: Point): number {
-  const dx = to.x - from.x;
-  const dy = to.y - from.y;
-  if (dx === 0 && dy === 0) return Math.hypot(at.x - from.x, at.y - from.y);
-  const t = Math.max(
-    0,
-    Math.min(
-      1,
-      ((at.x - from.x) * dx + (at.y - from.y) * dy) / (dx * dx + dy * dy),
-    ),
-  );
-  return Math.hypot(at.x - (from.x + t * dx), at.y - (from.y + t * dy));
 }
