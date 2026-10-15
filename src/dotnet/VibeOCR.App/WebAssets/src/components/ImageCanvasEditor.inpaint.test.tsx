@@ -182,7 +182,37 @@ function dragSelection(canvas: HTMLElement): void {
 }
 
 describe("inpaint tool wiring", () => {
-  it("R6 fallback preview rejects oversized images before mask allocation", async () => {
+  it("R9 a first remove rectangle never creates a repair mask or worker", async () => {
+    const restore = installCanvasStubs();
+    vi.stubGlobal("Image", FakeImage);
+    vi.stubGlobal("Worker", FakeWorker);
+    FakeWorker.instances = [];
+    try {
+      const { actions, unmount, canvas } = await renderEditor();
+      await waitFor(() =>
+        expect(screen.getByText(/原图 160×100/)).toBeInTheDocument(),
+      );
+      fireEvent.change(screen.getByLabelText("修补掩膜绘制方式"), {
+        target: { value: "rect-remove" },
+      });
+      dragSelection(canvas);
+      const preview = screen.getByRole("button", { name: "预览修补" });
+      await act(async () => {
+        fireEvent.click(preview);
+      });
+      expect(FakeWorker.instances).toHaveLength(0);
+      expect(preview).toBeDisabled();
+      expect(screen.queryByRole("button", { name: "应用修补" })).toBeNull();
+      expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "清除编辑" })).toBeDisabled();
+      expect(actions.run).not.toHaveBeenCalled();
+      unmount();
+    } finally {
+      restore();
+    }
+  });
+
+  it("R6 rejected oversized regions cannot allocate storage or become preview masks", async () => {
     const restore = installCanvasStubs();
     class BigImage extends FakeImage {
       override readonly naturalWidth = 9000;
@@ -190,6 +220,7 @@ describe("inpaint tool wiring", () => {
     }
     vi.stubGlobal("Image", BigImage);
     vi.stubGlobal("Worker", FakeWorker);
+    FakeWorker.instances = [];
     try {
       const { unmount, canvas } = await renderEditor();
       dragSelection(canvas);
@@ -205,7 +236,9 @@ describe("inpaint tool wiring", () => {
         }),
       );
       fireEvent.click(screen.getByRole("button", { name: "预览修补" }));
-      expect(screen.getByText(/超出去水印预算/)).toBeInTheDocument();
+      expect(screen.getByText(/修补掩膜工作区超过/)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "预览修补" })).toBeDisabled();
+      expect(FakeWorker.instances).toHaveLength(0);
       expect(allocations.filter((size) => size > 1_000_000)).toEqual([]);
       unmount();
     } finally {

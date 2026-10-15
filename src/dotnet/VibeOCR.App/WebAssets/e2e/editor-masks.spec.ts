@@ -684,3 +684,41 @@ test("R7 a full-image mask with a known hole previews and applies real worker pi
     Buffer.compare(Buffer.from(undone.pixels), Buffer.from(baseline.pixels)),
   ).toBe(0);
 });
+
+test("R9 the first remove stroke keeps export bytes and history unchanged", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const uploads: { contentType: string; body: Buffer }[] = [];
+  const workers: string[] = [];
+  page.on("worker", (worker) => workers.push(worker.url()));
+  await routeSource(
+    page,
+    '<svg xmlns="http://www.w3.org/2000/svg" width="96" height="48"><rect width="96" height="48" fill="#0aa05a"/><rect x="32" y="12" width="32" height="16" fill="#e020f0"/></svg>',
+    "masks-remove-first.svg",
+  );
+  await mountWithUploadCapture(page, uploads, "masks-remove-first.svg");
+  await expect(page.getByText(/原图 96×48/)).toBeVisible();
+  const baseline = await saveAndDecode(page, uploads);
+  await page.getByRole("button", { name: "去水印", exact: true }).click();
+  await page.getByLabel("修补掩膜绘制方式").selectOption("rect-remove");
+  const map = makeCanvasMapper(96, 48);
+  await pointerStroke(page, [
+    map({ x: 30.5, y: 10.5 }),
+    map({ x: 65.5, y: 29.5 }),
+  ]);
+  await expect(
+    page.getByRole("button", { name: "预览修补", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "应用修补", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "撤销", exact: true }),
+  ).toBeDisabled();
+  const unchanged = await saveAndDecode(page, uploads);
+  expect(
+    Buffer.compare(Buffer.from(unchanged.pixels), Buffer.from(baseline.pixels)),
+  ).toBe(0);
+  expect(workers).toEqual([]);
+});

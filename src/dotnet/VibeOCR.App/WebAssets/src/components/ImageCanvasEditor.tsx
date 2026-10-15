@@ -2199,37 +2199,23 @@ export function ImageCanvasEditor({
       setOperationMessage("图片尚未解码完成，无法修补；请稍后重试。");
       return;
     }
-    // 先检查尺寸与实际选中像素，再创建矩形兼容掩膜或扫描其边界。
-    const selection = inpaintSelection;
-    const region =
-      inpaintMask?.rect ??
-      (selection
-        ? selectionToNaturalRect(
-            selection.start,
-            selection.end,
-            image,
-            state.rotation,
-            canvasSize(canvas),
-          )
-        : undefined);
-    if (!region) {
-      setOperationMessage("请先拖拽框选或笔刷涂抹要去水印的区域。");
+    // 只有成功添加的有效掩膜可预览；拖拽移除区不是待修补区域。
+    const maskState = inpaintMask;
+    if (!maskState) {
+      setOperationMessage("修补掩膜为空，请先添加要修补的区域。");
       return;
     }
-    const selectedPixels = inpaintMask
-      ? maskCount(inpaintMask)
-      : region.width * region.height;
-    const preflight = preflightSelection(region, image, selectedPixels);
+    const preflight = preflightSelection(
+      maskState.rect,
+      image,
+      maskCount(maskState),
+    );
     if (!preflight.ok) {
       setOperationMessage(
         describeInpaintFailure(preflight.code, preflight.message),
       );
       return;
     }
-    const maskState = inpaintMask ?? {
-      rect: region,
-      data: new Uint8Array(region.width * region.height).fill(1),
-    };
     const rect = maskBounds(maskState);
     if (!rect) {
       setOperationMessage("修补掩膜为空，请先框选或涂抹要修补的区域。");
@@ -2238,10 +2224,6 @@ export function ImageCanvasEditor({
     if (typeof Worker !== "function") {
       setOperationMessage("当前环境不支持本地修补，当前图片未被修改。");
       return;
-    }
-    if (!inpaintMask) {
-      inpaintMaskRef.current = maskState;
-      setInpaintMask(maskState);
     }
     // 基线合成到原图尺寸离屏画布：透明/已修补像素一起作为修补输入。
     const composed = composeBaseline(image);
@@ -5276,9 +5258,7 @@ export function ImageCanvasEditor({
         appearance="primary"
         aria-label="预览修补"
         disabled={
-          (!inpaintSelection && inpaintMaskPixelCount === 0) ||
-          inpaintBusy ||
-          !!inpaintPreview
+          inpaintMaskPixelCount === 0 || inpaintBusy || !!inpaintPreview
         }
         icon={<ToolbarIcon name="preview" />}
         title="预览修补"
