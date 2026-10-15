@@ -381,6 +381,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     selectionPolicy.RecognitionEngines(),
     recognitionChannel.ViewModel?.TaskEngine,
     CurrentScreenshotSession(recognitionChannel),
+    Import: Volatile.Read(ref recognitionImport.PendingDescriptor),
     RecognitionModes: BuildSelectionModeEntries(settingsOwner.CurrentModel?.RecognitionSelection));
 
   /// <summary>通道当前会话的 wire 投影；无会话时为 null。</summary>
@@ -401,6 +402,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     imageEditChannel.SessionInput,
     CurrentScreenshotSession(imageEditChannel),
     imageEditChannel.TextLayer,
+    Import: Volatile.Read(ref imageEditImport.PendingDescriptor),
     RecognitionModes: BuildSelectionModeEntries(settingsOwner.CurrentModel?.RecognitionSelection));
 
   /// <summary>会话状态固定复用缓存的基准图/结果资源，避免重发布新 URL 导致编辑器重置。</summary>
@@ -419,6 +421,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
         ? null
         : recognitionChannel.SessionStructuredResult,
       ResultImage: recognitionChannel.SessionResult is null ? null : resultImage,
+      Import: Volatile.Read(ref recognitionImport.PendingDescriptor),
       RecognitionModes: BuildSelectionModeEntries(settingsOwner.CurrentModel?.RecognitionSelection));
 
   /// <summary>通道会话状态：按通道目标 scope 发布（recognition/imageEdit）。</summary>
@@ -492,6 +495,8 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
   private sealed class ImportChannelState
   {
     public string? ActiveRequestId;
+    // 仅投影当前唯一暂存批次的同一描述符；builder无锁读取，生命周期仍由Unacknowledged管理。
+    public ImageEditImportState? PendingDescriptor;
     public CancellationTokenSource? ActiveCancellation;
     public CancellationToken ActiveDocument;
     public CancellationToken ProjectionDocument;
@@ -526,6 +531,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
         foreach (StagedImportAsset asset in staged.Assets)
           resources.ReleaseResource(asset.Reference);
       import.Unacknowledged.Clear();
+      Volatile.Write(ref import.PendingDescriptor, null);
       foreach (StagedImportAsset asset in import.Adopted.Values)
         resources.ReleaseResource(asset.Reference);
       import.Adopted.Clear();
@@ -539,7 +545,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     {
       foreach (var pending in import.Unacknowledged.Where(pair => pair.Value.Assets.Any(asset => asset.DocumentToken == document)).ToArray())
       {
-        import.Unacknowledged.Remove(pending.Key);
+        ForgetPendingImport(import, pending.Key);
         foreach (StagedImportAsset asset in pending.Value.Assets) resources.ReleaseResource(asset.Reference);
       }
       foreach (var adopted in import.Adopted.Where(pair => pair.Value.DocumentToken == document).ToArray())
@@ -562,6 +568,13 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     }
   }
 
+  // 调用者持有通道锁；重复/旧请求不能清除另一批次的投影。
+  private static void ForgetPendingImport(ImportChannelState import, string requestId)
+  {
+    import.Unacknowledged.Remove(requestId);
+    if (Volatile.Read(ref import.PendingDescriptor)?.RequestId == requestId)
+      Volatile.Write(ref import.PendingDescriptor, null);
+  }
   private static void PruneDocumentRegistrations(ImportChannelState import)
   {
     foreach (CancellationToken document in import.Documents.Keys.ToArray())
@@ -841,6 +854,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
         cancellation.Token.ThrowIfCancellationRequested();
         var descriptor = new ImageEditImportState(requestId, sessionId.ToString("N"), revision, items);
         import.Unacknowledged[requestId] = new StagedImportBatch(revision, staged, descriptor);
+        Volatile.Write(ref import.PendingDescriptor, descriptor);
         operations.PublishTerminal(ImportTerminalState(channel, descriptor, null));
       }
     }
@@ -850,6 +864,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     {
       lock (import)
       {
+        ForgetPendingImport(import, requestId);
         foreach (StagedImportAsset asset in staged) resources.ReleaseResource(asset.Reference);
         bool current = import.ActiveRequestId == requestId &&
           generation == Volatile.Read(ref channel.Generation) &&
@@ -871,6 +886,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       lock (import)
       {
         // 意外异常也必须回到终态：不能让导入 busy 永久滞留，旧画布保持不变。
+        ForgetPendingImport(import, requestId);
         foreach (StagedImportAsset asset in staged) resources.ReleaseResource(asset.Reference);
         bool current = import.ActiveRequestId == requestId &&
           generation == Volatile.Read(ref channel.Generation) &&
@@ -917,7 +933,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
         import.Unacknowledged.TryGetValue(ack.RequestId, out StagedImportBatch? staged) &&
         staged.Revision == ack.Revision)
       {
-        import.Unacknowledged.Remove(ack.RequestId);
+        ForgetPendingImport(import, ack.RequestId);
         foreach (StagedImportAsset asset in staged.Assets)
           import.Adopted[asset.Reference.Url] = asset;
       }
@@ -938,7 +954,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
         import.Unacknowledged.TryGetValue(reject.RequestId, out StagedImportBatch? staged) &&
         staged.Revision == reject.Revision)
       {
-        import.Unacknowledged.Remove(reject.RequestId);
+        ForgetPendingImport(import, reject.RequestId);
         foreach (StagedImportAsset asset in staged.Assets)
           resources.ReleaseResource(asset.Reference);
       }
@@ -2580,6 +2596,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       CurrentScreenshotSession(recognitionChannel),
       StructuredResult: structured,
       ResultImage: result is null ? null : resultImage,
+      Import: Volatile.Read(ref recognitionImport.PendingDescriptor),
       RecognitionModes: BuildSelectionModeEntries(settingsOwner.CurrentModel?.RecognitionSelection));
   }
 

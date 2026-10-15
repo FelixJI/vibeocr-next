@@ -10,6 +10,7 @@ using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 using Xunit;
+using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 
 namespace VibeOCR.App.Tests;
 
@@ -134,14 +135,34 @@ public sealed class ImageImportWorkbenchTests
 
   private sealed class CompletingInferenceClient : InferenceClientStub;
 
+  private sealed class CatalogImportClient : InferenceClientStub
+  {
+    public int HealthReads { get; private set; }
+    public int SettingsReads { get; private set; }
+    public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken)
+    {
+      SettingsReads++;
+      return Task.FromResult(new SettingsSnapshot
+      {
+        Extra = new Dictionary<string, JsonElement> { ["default_recognition_mode"] = JsonSerializer.SerializeToElement("rapid_text") },
+      });
+    }
+    public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
+    {
+      HealthReads++;
+      return Task.FromResult(DefaultRecognitionModeWorkbenchTests.DefaultModeHealth());
+    }
+  }
   private static DesktopWorkbenchCommandHandler CreateHandler(
     WorkbenchResourceBroker broker,
     WorkbenchAnnotationStore annotationStore,
     string resourceRoot,
     ISystemImportReader reader,
-    TaggedInputService inputs)
+    TaggedInputService inputs,
+    InferenceClientStub? inferenceClient = null,
+    bool attached = false)
   {
-    var inference = new CompletingInferenceClient();
+    var inference = inferenceClient ?? new CompletingInferenceClient();
     return new DesktopWorkbenchCommandHandler(
       () => new RecognitionViewModel(inference, inputs),
       static () => throw new InvalidOperationException(),
@@ -155,7 +176,7 @@ public sealed class ImageImportWorkbenchTests
       resourceRoot,
       static () => 0,
       annotationStore,
-      inferenceAttached: () => false,
+      inferenceAttached: () => attached,
       systemImportReader: reader);
   }
 
@@ -379,6 +400,99 @@ public sealed class ImageImportWorkbenchTests
         catch (ObjectDisposedException) when (cancellationError is AggregateException aggregate &&
           aggregate.Flatten().InnerExceptions.Any(error => error is ObjectDisposedException)) { }
       }
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+  [Theory]
+  [InlineData("imageEdit", false)]
+  [InlineData("imageEdit", true)]
+  [InlineData("recognition", false)]
+  [InlineData("recognition", true)]
+  public async Task CatalogRefreshAndMailboxResyncKeepPendingImportUntilAckOrReject(string scope, bool acknowledge)
+  {
+    static ImageEditImportState? ImportOf(WorkbenchState? state) => state switch
+    {
+      ImageEditWorkbenchState image => image.Import,
+      RecognitionWorkbenchState recognition => recognition.Import,
+      _ => null,
+    };
+    string root = TemporaryRoot();
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var store = new WorkbenchAnnotationStore(root);
+      var inference = new CatalogImportClient();
+      await using var handler = CreateHandler(broker, store, root, InputService.CreateImportReader(), new TaggedInputService(), inference, attached: true);
+      await EstablishImageEditSessionAsync(handler);
+      using (var baseline = new StateAwaiter<RecognitionWorkbenchState>(handler, state => state.ScreenshotSession is not null))
+      {
+        await handler.ExecuteAsync(new PasteRecognitionImageForEditCommand(), TestContext.Current.CancellationToken);
+        await baseline.Task;
+      }
+      WorkbenchRoute route = scope == "imageEdit" ? WorkbenchRoute.ImageEdit : WorkbenchRoute.Recognition;
+      await using var app = new WorkbenchApplication([], route, handler);
+      await using var host = new WebWorkbenchHost(app, broker, store, applicationOwner: false);
+      await app.BootstrapAsync(TestContext.Current.CancellationToken);
+      WorkbenchCommandReceipt seed = await app.ExecuteAsync(new WorkbenchCommandEnvelope(Guid.NewGuid(), new NavigateWorkbenchCommand(route)), TestContext.Current.CancellationToken);
+      await using var delayed = app.SubscribeAsync(seed.Revision - 1, TestContext.Current.CancellationToken).GetAsyncEnumerator(TestContext.Current.CancellationToken);
+      Assert.True(await delayed.MoveNextAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
+      Assert.Equal("shell", delayed.Current.Scope);
+      var package = new Windows.ApplicationModel.DataTransfer.DataPackage();
+      package.SetText("catalog pending import");
+      ImageEditImportState descriptor;
+      using (var first = new StateAwaiter<WorkbenchState>(handler, state => state.Scope == scope && ImportOf(state) is not null))
+      {
+        Assert.True((await host.ImportDroppedContentAsync(package.GetView(), route)).Ok);
+        descriptor = ImportOf(await first.Task)!;
+      }
+      Assert.Equal("image_import_in_progress", (await host.ImportDroppedContentAsync(package.GetView(), route)).Error?.Code);
+      int priorHealth = inference.HealthReads, priorSettings = inference.SettingsReads;
+      await handler.RefreshRecognitionCatalogAsync(TestContext.Current.CancellationToken);
+      Assert.True(inference.HealthReads > priorHealth);
+      Assert.True(inference.SettingsReads > priorSettings);
+      WorkbenchBootstrap bootstrap = await app.BootstrapAsync(TestContext.Current.CancellationToken);
+      Assert.True(await delayed.MoveNextAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
+      Assert.Equal(WorkbenchStateChange.Reset, delayed.Current.Change);
+      var replay = new List<WorkbenchStateEnvelope>();
+      do
+      {
+        Assert.True(await delayed.MoveNextAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
+        replay.Add(delayed.Current);
+      } while (delayed.Current.Change != WorkbenchStateChange.Ready);
+      WorkbenchState? delayedState = replay.Single(state => state.Scope == scope).State;
+      WorkbenchState? bootstrapState = bootstrap.States.Single(state => state.Scope == scope).State;
+      Assert.Equal((descriptor.RequestId, descriptor.RequestId), (ImportOf(delayedState)?.RequestId, ImportOf(bootstrapState)?.RequestId));
+      Assert.Equal(descriptor.RequestId, ImportOf(handler.InitialStates.Single(state => state.Scope == scope))?.RequestId);
+      var modes = bootstrapState is ImageEditWorkbenchState image ? image.RecognitionModes : ((RecognitionWorkbenchState)bootstrapState!).RecognitionModes;
+      Assert.Equal(3, modes!.Count);
+      Assert.Equal("rapid_text", modes[0].ModeId);
+      Guid session = Guid.Parse(descriptor.SessionId);
+      WorkbenchCommand confirmation = (scope, acknowledge) switch
+      {
+        ("imageEdit", true) => new AckImageEditImportCommand(session, descriptor.Revision, descriptor.RequestId),
+        ("imageEdit", false) => new RejectImageEditImportCommand(session, descriptor.Revision, descriptor.RequestId),
+        (_, true) => new AckScreenshotImportCommand(session, descriptor.Revision, descriptor.RequestId),
+        _ => new RejectScreenshotImportCommand(session, descriptor.Revision, descriptor.RequestId),
+      };
+      await app.ExecuteAsync(new WorkbenchCommandEnvelope(Guid.NewGuid(), confirmation), TestContext.Current.CancellationToken);
+      await handler.RefreshRecognitionCatalogAsync(TestContext.Current.CancellationToken);
+      bootstrap = await app.BootstrapAsync(TestContext.Current.CancellationToken);
+      Assert.Null(ImportOf(bootstrap.States.Single(state => state.Scope == scope).State));
+      WorkbenchState? confirmed = null;
+      for (int index = 0; index < WorkbenchStateMailbox.AllScopes.Count + 2; index++)
+      {
+        Assert.True(await delayed.MoveNextAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
+        if (delayed.Current.Scope != scope || delayed.Current.State is null) continue;
+        confirmed = delayed.Current.State;
+        break;
+      }
+      Assert.NotNull(confirmed);
+      Assert.Null(ImportOf(confirmed));
+      Assert.Equal(acknowledge ? 1 : 0, TextSessionFiles(root, "catalog pending import").Length);
+      host.ResetWebDocument();
+      Assert.Empty(TextSessionFiles(root, "catalog pending import"));
+      Assert.Null(ImportOf((await app.BootstrapAsync(TestContext.Current.CancellationToken)).States.Single(state => state.Scope == scope).State));
+      Assert.Equal(2, SessionFiles(root, [0x21, 0x02]).Length);
     }
     finally { Directory.Delete(root, recursive: true); }
   }
