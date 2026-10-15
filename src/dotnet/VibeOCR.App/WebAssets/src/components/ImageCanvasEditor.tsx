@@ -1298,6 +1298,9 @@ export function ImageCanvasEditor({
   const [inpaintMask, setInpaintMask] = useState<
     InpaintMaskState | undefined
   >();
+  // 同步基线供同一事件中的取消、批量涂抹和预览消费。
+  const inpaintMaskRef = useRef<InpaintMaskState | undefined>(undefined);
+  const pendingMaskFrame = useRef<number | undefined>(undefined);
   // 掩膜叠加层（绿色提示画布，尺寸 = ROI）：随掩膜变化重建。
   const inpaintMaskOverlay = useMemo(() => {
     if (!inpaintMask) return undefined;
@@ -1321,7 +1324,7 @@ export function ImageCanvasEditor({
     return { rect: inpaintMask.rect, canvas };
   }, [inpaintMask]);
   // 掩膜笔刷拖拽中的采样点（显示空间→操作时映射原图）：不入历史。
-  const inpaintBrushPoints = useRef<readonly Point[]>([]);
+  const inpaintBrushPoints = useRef<Point[]>([]);
   // 重复内容匹配（AC3）：候选仅存在于组件状态，确认前不修改内容。
   const dupmatchDraft = useRef<{ start: Point; end: Point } | undefined>(
     undefined,
@@ -1419,8 +1422,12 @@ export function ImageCanvasEditor({
     setInpaintSelection(undefined);
     setInpaintPreview(undefined);
     setInpaintBusy(false);
+    inpaintMaskRef.current = undefined;
     setInpaintMask(undefined);
     inpaintBrushPoints.current = [];
+    if (pendingMaskFrame.current !== undefined)
+      cancelAnimationFrame(pendingMaskFrame.current);
+    pendingMaskFrame.current = undefined;
     // 重复匹配状态同样绑定源与会话：一并作废。
     dupmatchGenerationRef.current += 1;
     dupmatchWorkerRef.current?.terminate();
@@ -1674,6 +1681,10 @@ export function ImageCanvasEditor({
       if (pendingDraw.current !== undefined)
         cancelAnimationFrame(pendingDraw.current);
       pendingDraw.current = undefined;
+      if (pendingMaskFrame.current !== undefined)
+        cancelAnimationFrame(pendingMaskFrame.current);
+      pendingMaskFrame.current = undefined;
+      inpaintBrushPoints.current = [];
       previewCache.current = undefined;
       delete canvasRef.current?.dataset.frameReady;
     },
@@ -1887,12 +1898,6 @@ export function ImageCanvasEditor({
     inpaintSelectionRef.current = inpaintSelection;
   }, [inpaintSelection]);
 
-  // 掩膜镜像：迟到修补响应与最新掩膜比对，不依赖旧闭包。
-  const inpaintMaskRef = useRef<InpaintMaskState | undefined>(undefined);
-  useEffect(() => {
-    inpaintMaskRef.current = inpaintMask;
-  }, [inpaintMask]);
-
   // 补丁像素仅保留仍被历史（含撤销/重做分支）引用的条目。
   useEffect(() => {
     const alive = new Set<number>();
@@ -2051,20 +2056,21 @@ export function ImageCanvasEditor({
     currentLayerKey,
   ]);
 
-  function commit(next: EditorState) {
+  function commit(next: EditorState): boolean {
     try {
       validateBrushBudget(imageRef.current, canvasRef.current, next);
     } catch (error) {
       setOperationMessage(
         error instanceof Error ? error.message : "笔刷效果预算检查失败",
       );
-      return;
+      return false;
     }
     setHistory((current) => [...current.slice(0, historyIndex + 1), next]);
     setHistoryIndex((current) => current + 1);
     // 提交后剔除已不存在对象的选择；主选失效时回退到剩余集合的顶层。
     pruneSelection(next.marks);
     notifyContentRevision();
+    return true;
   }
 
   /** 按存活 id 裁剪选择：撤销/删除/清除后的悬空 id 不再命中任何对象。 */
@@ -2113,8 +2119,12 @@ export function ImageCanvasEditor({
     setInpaintSelection(undefined);
     setInpaintPreview(undefined);
     setInpaintBusy(false);
+    inpaintMaskRef.current = undefined;
     setInpaintMask(undefined);
     inpaintBrushPoints.current = [];
+    if (pendingMaskFrame.current !== undefined)
+      cancelAnimationFrame(pendingMaskFrame.current);
+    pendingMaskFrame.current = undefined;
     if (message) setOperationMessage(message);
   }
 
@@ -2157,6 +2167,7 @@ export function ImageCanvasEditor({
       setOperationMessage(message);
       return;
     }
+    inpaintMaskRef.current = result.state;
     setInpaintMask(result.state);
     if (successMessage) setOperationMessage(successMessage);
   }
@@ -2181,7 +2192,7 @@ export function ImageCanvasEditor({
     );
     runMaskOperation(
       applyMaskRect(
-        inpaintMask,
+        inpaintMaskRef.current,
         rect,
         { width: image.naturalWidth, height: image.naturalHeight },
         add,
@@ -2210,7 +2221,7 @@ export function ImageCanvasEditor({
     );
     runMaskOperation(
       applyMaskBrush(
-        inpaintMask,
+        inpaintMaskRef.current,
         naturalPoints,
         activeToolAttributes.inpaintBrushSize / 2,
         {
@@ -2220,6 +2231,26 @@ export function ImageCanvasEditor({
         add,
       ),
     );
+  }
+
+  /** 帧内保留全部轨迹点，仅在帧边界复制 ROI、计数及重建叠加层。 */
+  function flushMaskBrush(): void {
+    if (pendingMaskFrame.current !== undefined)
+      cancelAnimationFrame(pendingMaskFrame.current);
+    pendingMaskFrame.current = undefined;
+    const points = inpaintBrushPoints.current;
+    if (!points.length) return;
+    inpaintBrushPoints.current = [points[points.length - 1]!];
+    paintMaskBrush(points, activeToolAttributes.maskMode === "brush-add");
+  }
+
+  function queueMaskBrush(at: Point): void {
+    inpaintBrushPoints.current.push(at);
+    if (pendingMaskFrame.current !== undefined) return;
+    pendingMaskFrame.current = requestAnimationFrame(() => {
+      pendingMaskFrame.current = undefined;
+      flushMaskBrush();
+    });
   }
 
   /** 用当前基线（原图 + 已应用补丁）与二值掩膜发起 CPU Worker 修补预览。 */
@@ -2232,7 +2263,8 @@ export function ImageCanvasEditor({
       return;
     }
     // 只有成功添加的有效掩膜可预览；拖拽移除区不是待修补区域。
-    const maskState = inpaintMask;
+    flushMaskBrush();
+    const maskState = inpaintMaskRef.current;
     if (!maskState) {
       setOperationMessage("修补掩膜为空，请先添加要修补的区域。");
       return;
@@ -2419,10 +2451,15 @@ export function ImageCanvasEditor({
     const id = inpaintPatchIdRef.current + 1;
     inpaintPatchIdRef.current = id;
     inpaintPatchStore.current.set(id, preview.canvas);
-    commit({
-      ...state,
-      patches: [...(state.patches ?? []), { id, ...preview.naturalRect }],
-    });
+    if (
+      !commit({
+        ...state,
+        patches: [...(state.patches ?? []), { id, ...preview.naturalRect }],
+      })
+    ) {
+      inpaintPatchStore.current.delete(id);
+      return;
+    }
     setOperationMessage(
       "已应用修补；可用撤销恢复原图，复制/保存/识别使用修补后的画面。",
     );
@@ -2679,7 +2716,10 @@ export function ImageCanvasEditor({
       inpaintPatchStore.current.set(entry.id, entry.canvas);
       patches.push({ id: entry.id, ...entry.rect });
     }
-    commit({ ...state, patches });
+    if (!commit({ ...state, patches })) {
+      for (const entry of staged) inpaintPatchStore.current.delete(entry.id);
+      return;
+    }
     cancelDupmatchPending();
     setOperationMessage(
       `已应用 ${chosen.length} 处重复内容遮挡；可用撤销恢复，复制/保存/识别使用真实像素。`,
@@ -2864,13 +2904,15 @@ export function ImageCanvasEditor({
       if (JSON.stringify(style) === JSON.stringify(next)) return;
       if (textEdit?.id === mark.id)
         setTextEdit({ id: mark.id, mark: { ...mark, style: next } });
-      else
-        commit({
+      else if (
+        !commit({
           ...state,
           marks: state.marks.map((entry) =>
             entry.id === mark.id ? { ...entry, style: next } : entry,
           ),
-        });
+        })
+      )
+        return;
       return;
     }
     // 未选中标记：更新当前工具的属性记忆（不影响其他工具，可重置）。
@@ -3097,7 +3139,7 @@ export function ImageCanvasEditor({
       );
       return;
     }
-    commit({ ...state, resize: next });
+    if (!commit({ ...state, resize: next })) return;
     setOperationMessage(
       next
         ? `已设置输出尺寸 ${next.width}×${next.height}（${label}）；可用撤销恢复。`
@@ -3174,6 +3216,9 @@ export function ImageCanvasEditor({
     setInpaintDraft(undefined);
     dupmatchDraft.current = undefined;
     inpaintBrushPoints.current = [];
+    if (pendingMaskFrame.current !== undefined)
+      cancelAnimationFrame(pendingMaskFrame.current);
+    pendingMaskFrame.current = undefined;
   }
 
   // 滚轮调线宽：仅描边类工具且未在就地编辑选中标记时生效；监听只挂画布
@@ -3287,11 +3332,7 @@ export function ImageCanvasEditor({
       const at = point(event);
       const mode = activeToolAttributes.maskMode;
       if (mode === "brush-add" || mode === "brush-remove") {
-        // 每次移动只抹最近一段：增量入掩膜，避免长轨迹重复光栅化。
-        const trail = inpaintBrushPoints.current;
-        const last = trail[trail.length - 1] ?? at;
-        inpaintBrushPoints.current = [...trail, at];
-        paintMaskBrush([last, at], mode === "brush-add");
+        queueMaskBrush(at);
         return;
       }
       setInpaintDraft((current) =>
@@ -3506,8 +3547,8 @@ export function ImageCanvasEditor({
         setInpaintSelection(undefined);
       }
       if (mode === "brush-add" || mode === "brush-remove") {
-        inpaintBrushPoints.current = [start];
-        paintMaskBrush([start], mode === "brush-add");
+        inpaintBrushPoints.current = [];
+        queueMaskBrush(start);
       } else {
         setInpaintDraft({ start, end: start });
       }
@@ -3650,10 +3691,15 @@ export function ImageCanvasEditor({
           next.end.y - drag.origin.end.y,
         ) >= 1;
       if (moved) {
-        commit({
-          ...state,
-          marks: state.marks.map((mark) => (mark.id === drag.id ? next : mark)),
-        });
+        if (
+          !commit({
+            ...state,
+            marks: state.marks.map((mark) =>
+              mark.id === drag.id ? next : mark,
+            ),
+          })
+        )
+          return;
       }
       return;
     }
@@ -3680,13 +3726,16 @@ export function ImageCanvasEditor({
         Math.abs(next.width - before.width) >= 1 ||
         Math.abs(next.height - before.height) >= 1
       ) {
-        commit({
-          ...state,
-          crop: {
-            start: { x: next.x, y: next.y },
-            end: { x: next.x + next.width, y: next.y + next.height },
-          },
-        });
+        if (
+          !commit({
+            ...state,
+            crop: {
+              start: { x: next.x, y: next.y },
+              end: { x: next.x + next.width, y: next.y + next.height },
+            },
+          })
+        )
+          return;
       }
       return;
     }
@@ -3703,10 +3752,13 @@ export function ImageCanvasEditor({
         setOperationMessage("内容已变化，本次拖动已放弃；请重试。");
         return;
       }
-      commit({
-        ...state,
-        marks: moveMarkIds(state.marks, new Set(drag.ids), delta),
-      });
+      if (
+        !commit({
+          ...state,
+          marks: moveMarkIds(state.marks, new Set(drag.ids), delta),
+        })
+      )
+        return;
       return;
     }
     if (tool === "polyline") {
@@ -3747,48 +3799,62 @@ export function ImageCanvasEditor({
           : total;
       }, 0);
       if (length >= 4 || tool === "mosaic" || tool === "blur") {
-        commit({
+        if (
+          !commit({
+            ...state,
+            marks: [
+              ...state.marks,
+              {
+                id: draft?.id ?? nextMarkId(),
+                tool,
+                start: points[0] ?? start,
+                end: points[points.length - 1] ?? end,
+                points,
+                style: draft?.style ?? currentStyle(),
+              },
+            ],
+          })
+        )
+          return;
+      }
+      return;
+    }
+    if (tool === "numbering") {
+      // 序号支持单击放置，不要求拖拽距离。
+      if (
+        !commit({
           ...state,
           marks: [
             ...state.marks,
             {
               id: draft?.id ?? nextMarkId(),
               tool,
-              start: points[0] ?? start,
-              end: points[points.length - 1] ?? end,
-              points,
+              start,
+              end,
+              ordinal:
+                draft?.ordinal ??
+                nextNumberOrdinal(
+                  state.marks,
+                  activeToolAttributes.numberStart,
+                ),
               style: draft?.style ?? currentStyle(),
             },
           ],
-        });
-      }
-      return;
-    }
-    if (tool === "numbering") {
-      // 序号支持单击放置，不要求拖拽距离。
-      commit({
-        ...state,
-        marks: [
-          ...state.marks,
-          {
-            id: draft?.id ?? nextMarkId(),
-            tool,
-            start,
-            end,
-            ordinal:
-              draft?.ordinal ??
-              nextNumberOrdinal(state.marks, activeToolAttributes.numberStart),
-            style: draft?.style ?? currentStyle(),
-          },
-        ],
-      });
+        })
+      )
+        return;
       return;
     }
     if (tool === "inpaint") {
       setInpaintDraft(undefined);
       const mode = activeToolAttributes.maskMode;
       if (mode === "brush-add" || mode === "brush-remove") {
+        queueMaskBrush(end);
+        flushMaskBrush();
         inpaintBrushPoints.current = [];
+        if (pendingMaskFrame.current !== undefined)
+          cancelAnimationFrame(pendingMaskFrame.current);
+        pendingMaskFrame.current = undefined;
         return;
       }
       if (Math.hypot(end.x - start.x, end.y - start.y) >= 8) {
@@ -3832,7 +3898,7 @@ export function ImageCanvasEditor({
     if (tool === "text" || Math.hypot(end.x - start.x, end.y - start.y) >= 8) {
       let createdId: string | undefined;
       if (tool === "crop") {
-        commit({ ...state, crop: { start, end } });
+        if (!commit({ ...state, crop: { start, end } })) return;
       } else if (
         tool === "exclude" &&
         state.marks.filter(isExclusionMark).length >= MAX_EXCLUSION_MARKS
@@ -3855,25 +3921,28 @@ export function ImageCanvasEditor({
             ? constrainLineDrag(start, end, event.shiftKey)
             : end;
         createdId = draft?.id ?? nextMarkId();
-        commit({
-          ...state,
-          marks: [
-            ...state.marks,
-            {
-              id: createdId,
-              tool,
-              start: box ? box.start : start,
-              end: box ? box.end : lineEnd,
-              style: draft?.style ?? currentStyle(),
-              ...(tool === "text"
-                ? { textWidth: Math.abs(end.x - start.x) }
-                : {}),
-              ...(["text", "callout"].includes(tool)
-                ? { text: draft?.text ?? (annotationText.trim() || "文本") }
-                : {}),
-            },
-          ],
-        });
+        if (
+          !commit({
+            ...state,
+            marks: [
+              ...state.marks,
+              {
+                id: createdId,
+                tool,
+                start: box ? box.start : start,
+                end: box ? box.end : lineEnd,
+                style: draft?.style ?? currentStyle(),
+                ...(tool === "text"
+                  ? { textWidth: Math.abs(end.x - start.x) }
+                  : {}),
+                ...(["text", "callout"].includes(tool)
+                  ? { text: draft?.text ?? (annotationText.trim() || "文本") }
+                  : {}),
+              },
+            ],
+          })
+        )
+          return;
       }
       if (tool === "text" || tool === "callout") {
         setTool("select");
@@ -3901,20 +3970,23 @@ export function ImageCanvasEditor({
         : total;
     }, 0);
     if (deduped.length >= 2 && length >= 4) {
-      commit({
-        ...state,
-        marks: [
-          ...state.marks,
-          {
-            id: draft.id,
-            tool: "polyline",
-            start: deduped[0]!,
-            end: deduped[deduped.length - 1]!,
-            points: deduped,
-            style: draft.style,
-          },
-        ],
-      });
+      if (
+        !commit({
+          ...state,
+          marks: [
+            ...state.marks,
+            {
+              id: draft.id,
+              tool: "polyline",
+              start: deduped[0]!,
+              end: deduped[deduped.length - 1]!,
+              points: deduped,
+              style: draft.style,
+            },
+          ],
+        })
+      )
+        return;
     } else {
       setOperationMessage("折线至少需要两个不同位置的点；已放弃本次草稿。");
     }
@@ -4193,30 +4265,35 @@ export function ImageCanvasEditor({
   };
   const contentMark =
     fontMark && isContentMark(fontMark) ? fontMark : undefined;
-  function updateFontMark(patch: Partial<Mark>): void {
+  function updateFontMark(patch: Partial<Mark>): boolean {
     if (
       !fontMark ||
       selectedMark === undefined ||
       !selectionModifiable(effectiveSelection())
     )
-      return;
+      return false;
     const next = { ...fontMark, ...patch };
     if (textEdit?.id === selectedMark)
       setTextEdit({ id: selectedMark, mark: next });
-    else
-      commit({
+    else if (
+      !commit({
         ...state,
         marks: state.marks.map((mark) =>
           mark.id === selectedMark ? next : mark,
         ),
-      });
+      })
+    )
+      return false;
+    return true;
   }
-  function applyTextStyle(patch: Partial<AnnotationTextStyle>): void {
-    if (fontMark) updateFontMark({ style: { ...fontMark.style, ...patch } });
+  function applyTextStyle(patch: Partial<AnnotationTextStyle>): boolean {
+    if (fontMark)
+      return updateFontMark({ style: { ...fontMark.style, ...patch } });
     else
       updateToolAttribute({
         textStyle: { ...activeToolAttributes.textStyle, ...patch },
       });
+    return true;
   }
   function beginTextEdit(id: string): void {
     const mark = state.marks.find((entry) => entry.id === id);
@@ -4242,12 +4319,15 @@ export function ImageCanvasEditor({
       JSON.stringify(textEdit.mark) !==
       JSON.stringify(state.marks.find((mark) => mark.id === textEdit.id))
     )
-      commit({
-        ...state,
-        marks: state.marks.map((mark) =>
-          mark.id === textEdit.id ? textEdit.mark : mark,
-        ),
-      });
+      if (
+        !commit({
+          ...state,
+          marks: state.marks.map((mark) =>
+            mark.id === textEdit.id ? textEdit.mark : mark,
+          ),
+        })
+      )
+        return;
     setTextEdit(undefined);
     setOperationMessage("已完成文字编辑。");
   }
@@ -4256,8 +4336,11 @@ export function ImageCanvasEditor({
       canvasRef.current?.getContext("2d") ?? null,
       requested || "system-ui",
     );
-    if (resolved.family !== (activeTextStyle.fontFamily ?? "system-ui"))
-      applyTextStyle({ fontFamily: resolved.family });
+    if (
+      resolved.family !== (activeTextStyle.fontFamily ?? "system-ui") &&
+      !applyTextStyle({ fontFamily: resolved.family })
+    )
+      return activeTextStyle.fontFamily ?? "system-ui";
     if (!resolved.available)
       setOperationMessage("字体“" + requested + "”不可用，已回退到系统字体。");
     else setOperationMessage("已使用字体“" + resolved.family + "”。");
@@ -4268,12 +4351,15 @@ export function ImageCanvasEditor({
       return;
     const start = attributesOfTool("numbering").numberStart;
     let next = start;
-    commit({
-      ...state,
-      marks: state.marks.map((mark) =>
-        mark.tool === "numbering" ? { ...mark, ordinal: next++ } : mark,
-      ),
-    });
+    if (
+      !commit({
+        ...state,
+        marks: state.marks.map((mark) =>
+          mark.tool === "numbering" ? { ...mark, ordinal: next++ } : mark,
+        ),
+      })
+    )
+      return;
     setOperationMessage("已从 " + start + " 重新编号；可撤销。");
   }
   // —— 对象批量操作：每次恰好一条历史，按稳定 id 定位；含锁选区禁改 ——
@@ -4303,7 +4389,7 @@ export function ImageCanvasEditor({
     )
       return;
     cancelDrawing();
-    commit({ ...state, marks });
+    if (!commit({ ...state, marks })) return;
     const primary = selectionRef.current.primary;
     setObjectSelection({
       ids,
@@ -4316,14 +4402,15 @@ export function ImageCanvasEditor({
     cancelDrawing();
     const ids = effectiveSelection();
     if (!ids.size || !selectionModifiable(ids)) return;
-    commit({ ...state, marks: moveMarkIds(state.marks, ids, delta) });
+    if (!commit({ ...state, marks: moveMarkIds(state.marks, ids, delta) }))
+      return;
   }
 
   function deleteSelection(): void {
     const ids = effectiveSelection();
     if (!ids.size || !selectionModifiable(ids)) return;
     cancelDrawing();
-    commit({ ...state, marks: deleteMarkIds(state.marks, ids) });
+    if (!commit({ ...state, marks: deleteMarkIds(state.marks, ids) })) return;
     setObjectSelection(NO_SELECTION);
     setOperationMessage(`已删除 ${ids.size} 个对象；可用撤销恢复。`);
   }
@@ -4473,7 +4560,7 @@ export function ImageCanvasEditor({
     );
     if (!canAppendObjects(clones)) return;
     cancelDrawing();
-    commit({ ...state, marks: [...state.marks, ...clones] });
+    if (!commit({ ...state, marks: [...state.marks, ...clones] })) return;
     setObjectSelection({
       ids: new Set(clones.map((mark) => mark.id)),
       primary: clones[clones.length - 1]?.id,
@@ -4495,7 +4582,7 @@ export function ImageCanvasEditor({
     );
     if (!canAppendObjects(clones)) return;
     cancelDrawing();
-    commit({ ...state, marks: [...state.marks, ...clones] });
+    if (!commit({ ...state, marks: [...state.marks, ...clones] })) return;
     setObjectSelection({
       ids: new Set(clones.map((mark) => mark.id)),
       primary: clones[clones.length - 1]?.id,
@@ -4525,13 +4612,16 @@ export function ImageCanvasEditor({
     if (!selectionModifiable(ids)) return;
     const bounds = markBoundsOf(mark, objectActionContext());
     cancelDrawing();
-    commit({
-      ...state,
-      marks: moveMarkIds(state.marks, ids, {
-        x: size.width / 2 - bounds.x - bounds.width / 2,
-        y: size.height / 2 - bounds.y - bounds.height / 2,
-      }),
-    });
+    if (
+      !commit({
+        ...state,
+        marks: moveMarkIds(state.marks, ids, {
+          x: size.width / 2 - bounds.x - bounds.width / 2,
+          y: size.height / 2 - bounds.y - bounds.height / 2,
+        }),
+      })
+    )
+      return;
     select(id);
     setOperationMessage("已将离屏对象移回画布中心；可撤销。");
   }
@@ -5021,14 +5111,17 @@ export function ImageCanvasEditor({
         )
       )
         return;
-      commit({
-        ...state,
-        marks: state.marks.map((entry) =>
-          entry.id === selectedMark
-            ? { ...entry, style: { ...entry.style, intensity: value } }
-            : entry,
-        ),
-      });
+      if (
+        !commit({
+          ...state,
+          marks: state.marks.map((entry) =>
+            entry.id === selectedMark
+              ? { ...entry, style: { ...entry.style, intensity: value } }
+              : entry,
+          ),
+        })
+      )
+        return;
       setOperationMessage("已调整该区域强度；可用撤销恢复。");
       return;
     }
@@ -5639,11 +5732,14 @@ export function ImageCanvasEditor({
       return;
     }
     cancelDrawing();
+    if (
+      !commit({
+        ...state,
+        marks: state.marks.filter((mark) => !isExclusionMark(mark)),
+      })
+    )
+      return;
     select(undefined);
-    commit({
-      ...state,
-      marks: state.marks.filter((mark) => !isExclusionMark(mark)),
-    });
     setOperationMessage("已清空全部屏蔽区；可用撤销恢复。");
   }
 
@@ -5661,11 +5757,19 @@ export function ImageCanvasEditor({
         const image = imageRef.current;
         const canvas = canvasRef.current;
         const nextRotation = (state.rotation + 90) % 360;
-        commit(
-          image && canvas
-            ? rotateEditorState(state, image, canvasSize(canvas), nextRotation)
-            : { ...state, rotation: nextRotation },
-        );
+        if (
+          !commit(
+            image && canvas
+              ? rotateEditorState(
+                  state,
+                  image,
+                  canvasSize(canvas),
+                  nextRotation,
+                )
+              : { ...state, rotation: nextRotation },
+          )
+        )
+          return;
       }}
     >
       {captureStyle ? undefined : "旋转 90°"}
@@ -5725,8 +5829,8 @@ export function ImageCanvasEditor({
       return;
     }
     cancelDrawing();
+    if (!commit(EMPTY)) return;
     select(undefined);
-    commit(EMPTY);
   }
 
   const copyAnnotatedButton = (

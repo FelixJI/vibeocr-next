@@ -50,6 +50,27 @@ function failureCodeOf(run: () => void): string {
 }
 
 describe("findDuplicateRegions", () => {
+  it("R15 accepts alpha-only texture and rejects a different opacity pattern", () => {
+    const rgba = paint(48, 16, (x, y) => {
+      if (y >= 4 && y < 12 && (x < 8 || (x >= 16 && x < 24) || x >= 32))
+        return [100, 100, 100, x >= 32 ? 128 : ((x + y) % 2) * 255];
+      return [80, 80, 80, 255];
+    });
+    const matches = findDuplicateRegions(rgba, 48, 16, {
+      x: 0,
+      y: 4,
+      width: 8,
+      height: 8,
+    });
+    expect(matches).toContainEqual({
+      x: 16,
+      y: 4,
+      width: 8,
+      height: 8,
+      error: 0,
+    });
+    expect(matches.some(({ x }) => x >= 32)).toBe(false);
+  });
   it("accepts equal-sum RGB texture and rejects copies with different alpha", () => {
     const rgba = paint(48, 16, (x, y) => {
       if (y >= 4 && y < 12 && (x < 8 || (x >= 16 && x < 24) || x >= 32)) {

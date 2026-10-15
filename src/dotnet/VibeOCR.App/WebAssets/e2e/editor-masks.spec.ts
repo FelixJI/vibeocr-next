@@ -1082,3 +1082,118 @@ test("fractional mosaic uses one unfragmented grid across the 512px black-white 
     );
   expect(pixelAt(actual, 511, 300)).toEqual(pixelAt(actual, 512, 300));
 });
+
+test("R15 restarting preview with a dense brush keeps every point and discards the old mask", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const uploads: { contentType: string; body: Buffer }[] = [];
+  await routeSource(
+    page,
+    '<svg xmlns="http://www.w3.org/2000/svg" width="96" height="48"><rect width="96" height="48" fill="#0aa05a"/><rect x="10" y="12" width="6" height="6" fill="#e020f0"/><path d="M60 30 L66 20 L72 30 L78 20" stroke="#e020f0" stroke-width="2" fill="none"/></svg>',
+    "masks-r15-restart.svg",
+  );
+  await mountWithUploadCapture(page, uploads, "masks-r15-restart.svg");
+  await expect(page.getByText(/原图 96×48/)).toBeVisible();
+  const baseline = await saveAndDecode(page, uploads);
+  const map = makeCanvasMapper(96, 48);
+  await page.getByRole("button", { name: "去水印" }).click();
+  await pointerStroke(page, [map({ x: 9, y: 11 }), map({ x: 17, y: 19 })]);
+  await page.getByRole("button", { name: "预览修补" }).click();
+  await expect(page.getByText(/修补预览完成/)).toBeVisible();
+  await page.getByLabel("修补掩膜绘制方式").selectOption("brush-add");
+  await page.getByLabel("修补掩膜笔刷大小").selectOption("10");
+  // One browser task: all bends arrive before rAF, including the pointerup-only endpoint.
+  const points = [
+    map({ x: 60, y: 30 }),
+    map({ x: 66, y: 20 }),
+    map({ x: 72, y: 30 }),
+    map({ x: 78, y: 20 }),
+  ];
+  await page
+    .locator('canvas[aria-label="图片检查画布"]')
+    .evaluate((canvas, points) => {
+      const box = canvas.getBoundingClientRect();
+      points.forEach((at, i) =>
+        canvas.dispatchEvent(
+          new PointerEvent(
+            i === 0
+              ? "pointerdown"
+              : i === points.length - 1
+                ? "pointerup"
+                : "pointermove",
+            {
+              bubbles: true,
+              pointerId: 1,
+              button: 0,
+              buttons: i === points.length - 1 ? 0 : 1,
+              clientX: box.x + (at.x * box.width) / 900,
+              clientY: box.y + (at.y * box.height) / 600,
+            },
+          ),
+        ),
+      );
+    }, points);
+  await page.getByRole("button", { name: "预览修补" }).click();
+  await expect(page.getByText(/修补预览完成/)).toBeVisible();
+  await page.getByRole("button", { name: "应用修补" }).click();
+  const applied = await saveAndDecode(page, uploads);
+  expect(pixelAt(applied, 12, 14)).toEqual(pixelAt(baseline, 12, 14));
+  for (const [x, y] of [
+    [60, 30],
+    [66, 20],
+    [72, 30],
+    [78, 20],
+  ]) {
+    const repaired = pixelAt(applied, x!, y!);
+    expect(repaired).toEqual([10, 160, 90, 255]);
+  }
+  expectSameAlpha(baseline, applied);
+  expectOutsideRegionIdentical(
+    baseline,
+    applied,
+    (x, y) => x >= 55 && x < 84 && y >= 15 && y < 36,
+  );
+  await page.getByRole("button", { name: "撤销" }).click();
+  const undone = await saveAndDecode(page, uploads);
+  expect(Buffer.compare(undone.pixels, baseline.pixels)).toBe(0);
+  await expect(page.getByRole("button", { name: "撤销" })).toBeDisabled();
+});
+
+test("R15 alpha-only duplicate texture finds the real RGBA copy", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const uploads: { contentType: string; body: Buffer }[] = [];
+  await routeSource(
+    page,
+    '<svg xmlns="http://www.w3.org/2000/svg" width="96" height="48"><defs><pattern id="p" width="2" height="2" patternUnits="userSpaceOnUse"><rect width="2" height="2" fill="#646464" opacity=".25"/><path d="M0 0h1v1H0z M1 1h1v1H1z" fill="#646464"/></pattern></defs><rect x="10" y="6" width="10" height="8" fill="url(#p)"/><rect x="60" y="30" width="10" height="8" fill="url(#p)"/></svg>',
+    "masks-r15-alpha.svg",
+  );
+  await mountWithUploadCapture(page, uploads, "masks-r15-alpha.svg");
+  await expect(page.getByText(/原图 96×48/)).toBeVisible();
+  const baseline = await saveAndDecode(page, uploads);
+  expect(pixelAt(baseline, 10, 6)[3]).toBe(255);
+  expect(pixelAt(baseline, 11, 6)[3]).toBeLessThan(255);
+  const map = makeCanvasMapper(96, 48);
+  await page.getByRole("button", { name: "重复匹配" }).click();
+  await pointerStroke(page, [
+    map({ x: 10.5, y: 6.5 }),
+    map({ x: 19.5, y: 13.5 }),
+  ]);
+  await page.getByRole("button", { name: "查找重复" }).click();
+  await expect(page.getByText(/找到 1 处重复内容/)).toBeVisible();
+  const previewOnly = await saveAndDecode(page, uploads);
+  expect(Buffer.compare(previewOnly.pixels, baseline.pixels)).toBe(0);
+  await page.getByRole("button", { name: "确认应用重复遮挡" }).click();
+  const applied = await saveAndDecode(page, uploads);
+  expectOutsideRegionIdentical(
+    baseline,
+    applied,
+    (x, y) => x >= 60 && x < 70 && y >= 30 && y < 38,
+  );
+  expect(pixelAt(applied, 61, 30)[3]).toBe(255);
+  await page.getByRole("button", { name: "撤销" }).click();
+  const undone = await saveAndDecode(page, uploads);
+  expect(Buffer.compare(undone.pixels, baseline.pixels)).toBe(0);
+});

@@ -1616,3 +1616,71 @@ it("rejects a natural-pixel oversized effect before history commit", async () =>
   expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
   unmount();
 });
+
+it("R15 rejected intensity preserves the error, selected mark and history", async () => {
+  stubCanvasStack({ width: 16000, height: 4000 });
+  const harness = stubAnimationFrames();
+  const { actions, unmount } = await renderEditor();
+  const canvas = getEditorCanvas();
+  mockCanvasBox(canvas, 900, 600);
+  harness.flush();
+  fireEvent.click(screen.getByRole("button", { name: "模糊" }));
+  fireEvent.change(screen.getByLabelText("马赛克与模糊绘制方式"), {
+    target: { value: "brush" },
+  });
+  fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 400, clientY: 300 });
+  fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 410, clientY: 300 });
+  expect(screen.getByRole("button", { name: "撤销" })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "选择" }));
+  fireEvent.change(screen.getByLabelText("选择标注对象"), {
+    target: { value: "0" },
+  });
+  vi.mocked(actions.run).mockClear();
+  fireEvent.change(screen.getByLabelText("马赛克与模糊强度"), {
+    target: { value: "3" },
+  });
+  expect(
+    screen.getByText(/笔刷效果超出8MP暂存或4MP单块采样预算/),
+  ).toBeVisible();
+  expect(screen.queryByText(/已调整该区域强度/)).toBeNull();
+  expect(screen.getByLabelText("马赛克与模糊强度")).toHaveValue("2");
+  expect(actions.run).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+  expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
+  unmount();
+});
+
+it("R15 rejected enlargement keeps selection, revision and one undo entry", async () => {
+  stubCanvasStack({ width: 8000, height: 8000 });
+  const harness = stubAnimationFrames();
+  const { actions, unmount } = await renderEditor();
+  const canvas = getEditorCanvas();
+  mockCanvasBox(canvas, 900, 600);
+  harness.flush();
+  fireEvent.click(screen.getByRole("button", { name: "模糊" }));
+  fireEvent.change(screen.getByLabelText("马赛克与模糊绘制方式"), {
+    target: { value: "brush" },
+  });
+  fireEvent.change(screen.getByLabelText("马赛克与模糊笔刷大小"), {
+    target: { value: "64" },
+  });
+  fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 190, clientY: 300 });
+  fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 710, clientY: 300 });
+  fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 710, clientY: 300 });
+  expect(screen.getByRole("button", { name: "撤销" })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "选择" }));
+  fireEvent.change(screen.getByLabelText("选择标注对象"), {
+    target: { value: "0" },
+  });
+  vi.mocked(actions.run).mockClear();
+  fireEvent.click(screen.getByRole("button", { name: "放大选区" }));
+  expect(
+    screen.getByText(/笔刷效果超出8MP暂存或4MP单块采样预算/),
+  ).toBeVisible();
+  expect(screen.queryByText(/已等比放大选区/)).toBeNull();
+  expect(screen.getByLabelText("选择标注对象")).toHaveValue("0");
+  expect(actions.run).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+  expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
+  unmount();
+});

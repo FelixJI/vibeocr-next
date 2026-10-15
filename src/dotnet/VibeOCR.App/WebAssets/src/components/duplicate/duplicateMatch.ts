@@ -186,25 +186,26 @@ export function findDuplicateRegions(
   const block: DuplicateRect = { x: x0, y: y0, width: bw, height: bh };
   const count = bw * bh;
 
-  // 源块 RGB 通道平均方差：近纯色块拒绝（低纹理）。
-  const sums = [0, 0, 0];
-  const squares = [0, 0, 0];
+  // 保持 RGB 平均方差门槛；alpha 自身的纹理也能区分精确 RGBA 匹配。
+  const sums = [0, 0, 0, 0];
+  const squares = [0, 0, 0, 0];
   for (let y = 0; y < bh; y += 1) {
     for (let x = 0; x < bw; x += 1) {
       const p = ((y0 + y) * width + (x0 + x)) * 4;
-      for (let c = 0; c < 3; c += 1) {
+      for (let c = 0; c < 4; c += 1) {
         const value = rgba[p + c] ?? 0;
         sums[c] = sums[c]! + value;
         squares[c] = squares[c]! + value * value;
       }
     }
   }
-  const variance =
-    sums.reduce(
-      (total, sum, c) =>
-        total + Math.max(0, squares[c]! / count - (sum / count) ** 2),
-      0,
-    ) / 3;
+  const variances = sums.map((sum, c) =>
+    Math.max(0, squares[c]! / count - (sum / count) ** 2),
+  );
+  const variance = Math.max(
+    (variances[0]! + variances[1]! + variances[2]!) / 3,
+    variances[3]!,
+  );
   if (variance < DUPLICATE_LOW_TEXTURE_VARIANCE) {
     fail(
       "low-texture",
