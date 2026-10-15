@@ -549,3 +549,35 @@ test.describe("缩放后的标注控制点", () => {
     await expectCanvasPixel(canvas, 550, 400, GREEN, 20);
   });
 });
+
+test("拖动中滚轮调整保留当前预览与导出线宽，下一笔使用新线宽", async ({
+  page,
+}) => {
+  const { uploads } = await setupGeometryHost(page);
+  const canvas = page.getByLabel("图片检查画布");
+  await page.getByRole("button", { name: "直线", exact: true }).click();
+  await configureTool(page, { color: "#1f6feb", width: "3" });
+  const start = await canvasClient(page, 150, 200);
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  const end = await canvasClient(page, 750, 200);
+  await page.mouse.move(end.x, end.y);
+  await expectCanvasPixel(canvas, 400, 200, STROKE_BLUE, 40);
+  await page.mouse.wheel(0, -100);
+  await expect(page.getByLabel("线条宽度")).toHaveValue("5");
+  await page.mouse.wheel(0, -100);
+  await expect(page.getByLabel("线条宽度")).toHaveValue("8");
+  await expectCanvasPixel(canvas, 400, 203, GREEN, 20);
+  await page.mouse.up();
+  await expectCanvasPixel(canvas, 400, 203, GREEN, 20);
+  await dragOnCanvas(page, { x: 150, y: 300 }, { x: 750, y: 300 });
+  await expectCanvasPixel(canvas, 400, 303, STROKE_BLUE, 40);
+  await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+  await expect.poll(() => uploads.length).toBe(1);
+  const pixels = await decodeUploadPixels(page, uploads[0]!.body, [
+    { x: 400, y: 203 },
+    { x: 400, y: 303 },
+  ]);
+  expect(withinTolerance(pixels[0]!, GREEN, 20)).toBe(true);
+  expect(withinTolerance(pixels[1]!, STROKE_BLUE, 30)).toBe(true);
+});

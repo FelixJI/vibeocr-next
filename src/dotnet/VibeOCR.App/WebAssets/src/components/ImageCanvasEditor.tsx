@@ -2227,7 +2227,11 @@ export function ImageCanvasEditor({
         ...current,
         [tool]: { ...current[tool], strokeWidth },
       }));
-      setOperationMessage(`线条宽度：${strokeWidth}px。`);
+      setOperationMessage(
+        draftMark.current
+          ? `下一笔线条宽度：${strokeWidth}px。`
+          : `线条宽度：${strokeWidth}px。`,
+      );
     };
     canvas.addEventListener("wheel", onWheel, { passive: false });
     return () => canvas.removeEventListener("wheel", onWheel);
@@ -2310,7 +2314,12 @@ export function ImageCanvasEditor({
                 { x: at.x - start.x, y: at.y - start.y },
                 event.shiftKey,
               )
-            : moveEndpointMark(drag.origin, drag.endpoint, at, event.shiftKey),
+            : moveEndpointMark(
+                drag.origin,
+                drag.endpoint,
+                { x: at.x - start.x, y: at.y - start.y },
+                event.shiftKey,
+              ),
       });
       return;
     }
@@ -2456,7 +2465,7 @@ export function ImageCanvasEditor({
         start: points[0]!,
         end: start,
         points,
-        style: currentStyle(),
+        style: existing?.style ?? currentStyle(),
       });
     } else {
       draftPoints.current = [start];
@@ -2506,7 +2515,12 @@ export function ImageCanvasEditor({
               { x: end.x - start.x, y: end.y - start.y },
               event.shiftKey,
             )
-          : moveEndpointMark(drag.origin, drag.endpoint, end, event.shiftKey);
+          : moveEndpointMark(
+              drag.origin,
+              drag.endpoint,
+              { x: end.x - start.x, y: end.y - start.y },
+              event.shiftKey,
+            );
       // 几何未变（单击手柄）不入历史：拖拽才产生一条缩放/端点编辑记录。
       const moved =
         Math.hypot(
@@ -2635,7 +2649,7 @@ export function ImageCanvasEditor({
             ordinal:
               state.marks.filter((mark) => mark.tool === "numbering").length +
               1,
-            style: currentStyle(),
+            style: draft?.style ?? currentStyle(),
           },
         ],
       });
@@ -2693,7 +2707,7 @@ export function ImageCanvasEditor({
               tool,
               start: box ? box.start : start,
               end: box ? box.end : lineEnd,
-              style: currentStyle(),
+              style: draft?.style ?? currentStyle(),
               ...(tool === "text"
                 ? { text: annotationText.trim() || "文本" }
                 : {}),
@@ -4905,7 +4919,10 @@ function drawExclusionChrome(
   selected: boolean,
 ) {
   const area = normalizedRect(mark);
-  if (area.width <= 0 || area.height <= 0) return;
+  if (area.width <= 0 || area.height <= 0) {
+    if (selected) drawHandleSquares(context, area, "#e02020");
+    return;
+  }
   context.save();
   context.fillStyle = "rgba(224, 32, 32, 0.12)";
   context.fillRect(area.x, area.y, area.width, area.height);
@@ -4973,7 +4990,7 @@ function rectResizeHandle(
   at: Point,
 ): ExclusionResizeHandle | undefined {
   const area = normalizedRect(rect);
-  if (area.width <= 0 || area.height <= 0) return undefined;
+  // 零尺寸手柄重叠时仍按最近距离命中，允许把退化对象重新拉开。
   let best: ExclusionResizeHandle | undefined;
   let bestDistance = Number.POSITIVE_INFINITY;
   for (const handle of EXCLUSION_RESIZE_HANDLES) {
@@ -5105,9 +5122,11 @@ function resizeBoxMark(
 function moveEndpointMark(
   mark: Mark,
   endpoint: "start" | "end",
-  at: Point,
+  delta: Point,
   shift: boolean,
 ): Mark {
+  if (delta.x === 0 && delta.y === 0) return mark;
+  const at = { x: mark[endpoint].x + delta.x, y: mark[endpoint].y + delta.y };
   return endpoint === "end"
     ? { ...mark, end: constrainLineDrag(mark.start, at, shift) }
     : { ...mark, start: constrainLineDrag(mark.end, at, shift) };

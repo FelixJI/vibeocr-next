@@ -897,11 +897,11 @@ describe("短线段端点命中（C1 回归）", () => {
     clearCalls();
     fireEvent.pointerUp(canvas, { pointerId: 3, clientX: 500, clientY: 300 });
     harness.flush();
-    // 提交后帧：轴杆 lineTo(500,300)；旧实现拖走 start 时线段终点仍 (310,204)。
+    // 提交后帧：轴杆 lineTo(499,299)；旧实现拖走 start 时线段终点仍 (310,204)。
     const lineTos = allCalls()
       .filter((call) => call.op === "lineTo")
       .map((call) => call.args);
-    expect(lineTos).toContainEqual([500, 300]);
+    expect(lineTos).toContainEqual([499, 299]);
     expect(lineTos).not.toContainEqual([310, 204]);
 
     // 箭头短线同构：共享同一 endpointHandle。前一个直线仍处于选中态，
@@ -921,7 +921,7 @@ describe("短线段端点命中（C1 回归）", () => {
     const arrowTos = allCalls()
       .filter((call) => call.op === "lineTo")
       .map((call) => call.args);
-    expect(arrowTos).toContainEqual([560, 260]);
+    expect(arrowTos).toContainEqual([559, 259]);
     expect(arrowTos).not.toContainEqual([308, 203]);
     unmount();
   });
@@ -1407,4 +1407,228 @@ describe("整体状态操作放弃进行中草稿（D3 回归）", () => {
     expect(revisions(actions)).toEqual([1]);
     unmount();
   });
+});
+
+describe("E 轮手势边界回归", () => {
+  it.each(["直线", "箭头"])(
+    "%s 端点偏心抓取：原地松开零历史，拖动保留抓取偏移与 Shift",
+    async (toolName) => {
+      stubCanvasStack();
+      const harness = stubAnimationFrames();
+      const { actions, unmount } = await renderEditor();
+      const canvas = getEditorCanvas();
+      mockCanvasBox(canvas, 900, 600);
+      harness.flush();
+      fireEvent.click(screen.getByRole("button", { name: toolName }));
+      await dragDraw(canvas, harness, { x: 100, y: 100 }, { x: 400, y: 200 });
+      await clickSelect(canvas, harness, { x: 250, y: 150 });
+      // Shift 原地点击非 45° 线的端点命中圈，也不能修改端点或入历史。
+      fireEvent.pointerDown(canvas, {
+        pointerId: 3,
+        clientX: 403,
+        clientY: 202,
+      });
+      fireEvent.pointerUp(canvas, {
+        pointerId: 3,
+        clientX: 403,
+        clientY: 202,
+        shiftKey: true,
+      });
+      harness.flush();
+      expect(revisions(actions)).toEqual([1]);
+      clearCalls();
+      fireEvent.pointerDown(canvas, {
+        pointerId: 4,
+        clientX: 403,
+        clientY: 202,
+      });
+      fireEvent.pointerMove(canvas, {
+        pointerId: 4,
+        clientX: 463,
+        clientY: 242,
+      });
+      harness.flush();
+      expect(
+        allCalls()
+          .filter((call) => call.op === "lineTo")
+          .map((call) => call.args),
+      ).toContainEqual([expect.closeTo(460, 8), expect.closeTo(240, 8)]);
+      clearCalls();
+      fireEvent.pointerUp(canvas, { pointerId: 4, clientX: 463, clientY: 242 });
+      harness.flush();
+      expect(revisions(actions)).toEqual([1, 2]);
+      expect(
+        allCalls()
+          .filter((call) => call.op === "lineTo")
+          .map((call) => call.args),
+      ).toContainEqual([expect.closeTo(460, 8), expect.closeTo(240, 8)]);
+      // start 端同样采用位移：偏移 (+3,+2) 后拖 (+160,+10)，再相对 end 吸附。
+      fireEvent.pointerDown(canvas, {
+        pointerId: 5,
+        clientX: 103,
+        clientY: 102,
+      });
+      clearCalls();
+      fireEvent.pointerMove(canvas, {
+        pointerId: 5,
+        clientX: 263,
+        clientY: 112,
+        shiftKey: true,
+      });
+      harness.flush();
+      const snapped = Math.hypot(460 - 260, 240 - 110) / Math.SQRT2;
+      const expected = [460 - snapped, 240 - snapped];
+      expect(
+        allCalls()
+          .filter((call) => call.op === "moveTo")
+          .map((call) => call.args),
+      ).toContainEqual(expected.map((value) => expect.closeTo(value, 8)));
+      clearCalls();
+      fireEvent.pointerUp(canvas, {
+        pointerId: 5,
+        clientX: 263,
+        clientY: 112,
+        shiftKey: true,
+      });
+      harness.flush();
+      expect(
+        allCalls()
+          .filter((call) => call.op === "moveTo")
+          .map((call) => call.args),
+      ).toContainEqual(expected.map((value) => expect.closeTo(value, 8)));
+      expect(revisions(actions)).toEqual([1, 2, 3]);
+      unmount();
+    },
+  );
+
+  it.each(
+    ["矩形", "椭圆", "屏蔽", "裁剪"].flatMap((toolName) =>
+      ["width", "height"].map((axis) => ({ toolName, axis })),
+    ),
+  )(
+    "$toolName 零 $axis 后仍可从退化手柄拉回有效尺寸",
+    async ({ toolName, axis }) => {
+      stubCanvasStack();
+      const harness = stubAnimationFrames();
+      const { actions, unmount } = await renderEditor();
+      const canvas = getEditorCanvas();
+      mockCanvasBox(canvas, 900, 600);
+      harness.flush();
+      fireEvent.click(screen.getByRole("button", { name: toolName }));
+      await dragDraw(canvas, harness, { x: 100, y: 100 }, { x: 200, y: 200 });
+      await clickSelect(canvas, harness, { x: 150, y: 150 });
+      const edge = axis === "width" ? { x: 200, y: 150 } : { x: 150, y: 200 };
+      const collapsed =
+        axis === "width" ? { x: 100, y: 150 } : { x: 150, y: 100 };
+      await dragDraw(canvas, harness, edge, collapsed);
+      expect(revisions(actions)).toEqual([1, 2]);
+      expect(drawnRects()).toContainEqual([
+        collapsed.x - 4,
+        collapsed.y - 4,
+        8,
+        8,
+      ]);
+      clearCalls();
+      // 退化后的手柄仍可见：中心位置的 8px 手柄，而非仅隐形命中。
+      fireEvent.pointerMove(canvas, {
+        pointerId: 2,
+        clientX: collapsed.x,
+        clientY: collapsed.y,
+      });
+      expect(canvas.style.cursor).toMatch(/resize/);
+      await dragDraw(canvas, harness, collapsed, edge);
+      expect(revisions(actions)).toEqual([1, 2, 3]);
+      if (toolName === "椭圆") {
+        expect(
+          allCalls()
+            .filter((call) => call.op === "ellipse")
+            .map((call) => call.args.slice(0, 4)),
+        ).toContainEqual([150, 150, 50, 50]);
+      } else {
+        expect(drawnRects()).toContainEqual([100, 100, 100, 100]);
+      }
+      unmount();
+    },
+  );
+
+  it.each(["矩形", "椭圆", "直线", "箭头", "画笔", "荧光笔", "折线"])(
+    "%s 绘制中滚轮仅记忆下一笔，当前预览与提交保留按下样式",
+    async (toolName) => {
+      stubCanvasStack();
+      const harness = stubAnimationFrames();
+      const { actions, unmount } = await renderEditor();
+      const canvas = getEditorCanvas();
+      mockCanvasBox(canvas, 900, 600);
+      harness.flush();
+      fireEvent.click(screen.getByRole("button", { name: toolName }));
+      fireEvent.pointerDown(canvas, {
+        pointerId: 1,
+        clientX: 100,
+        clientY: 100,
+      });
+      fireEvent.pointerMove(canvas, {
+        pointerId: 1,
+        clientX: 400,
+        clientY: 200,
+      });
+      harness.flush();
+      act(() =>
+        canvas.dispatchEvent(
+          new WheelEvent("wheel", { deltaY: -100, cancelable: true }),
+        ),
+      );
+      await act(async () => {});
+      expect(screen.getByLabelText("线条宽度")).toHaveValue("5");
+      expect(screen.getByText("下一笔线条宽度：5px。")).toBeInTheDocument();
+      fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 400, clientY: 200 });
+      if (toolName === "折线") {
+        fireEvent.pointerDown(canvas, {
+          pointerId: 2,
+          clientX: 500,
+          clientY: 250,
+        });
+        fireEvent.pointerUp(canvas, {
+          pointerId: 2,
+          clientX: 500,
+          clientY: 250,
+        });
+      }
+      clearCalls();
+      if (toolName === "折线") fireEvent.keyDown(canvas, { key: "Enter" });
+      harness.flush();
+      const widths: number[] = [];
+      for (const recorded of state.canvases) {
+        let width = 0;
+        for (const call of recorded.calls) {
+          if (call.op === "lineWidth") width = call.args[0] as number;
+          if (call.op === "stroke" || call.op === "strokeRect")
+            widths.push(width);
+        }
+      }
+      expect(widths.length).toBeGreaterThan(0);
+      expect(
+        widths.every((width) => width === (toolName === "荧光笔" ? 12 : 3)),
+      ).toBe(true);
+      expect(revisions(actions)).toEqual([1]);
+      // 同一工具下一笔使用记忆中的 5px。
+      fireEvent.pointerDown(canvas, {
+        pointerId: 3,
+        clientX: 100,
+        clientY: 300,
+      });
+      fireEvent.pointerMove(canvas, {
+        pointerId: 3,
+        clientX: 400,
+        clientY: 400,
+      });
+      clearCalls();
+      harness.flush();
+      expect(
+        allCalls()
+          .filter((call) => call.op === "lineWidth")
+          .map((call) => call.args[0]),
+      ).toContain(toolName === "荧光笔" ? 20 : 5);
+      unmount();
+    },
+  );
 });
