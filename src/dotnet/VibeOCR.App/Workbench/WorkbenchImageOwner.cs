@@ -62,7 +62,8 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     PasteRecognitionImageForEditCommand => StartImageEdit(
       recognitionChannel,
       viewModel => viewModel.PasteImageForEditAsync(cancellationToken), cancellationToken),
-    CaptureScreenshotSessionCommand => StartScreenshotSession(false, cancellationToken),
+    CaptureScreenshotSessionCommand area =>
+        StartScreenshotSession(false, cancellationToken, request: area.Request),
     CaptureScreenshotTextSessionCommand => StartScreenshotSession(true, cancellationToken),
     CaptureScrollingScreenshotCommand => StartScreenshotSession(false, cancellationToken, scrolling: true),
     CloseScreenshotSessionCommand => CloseScreenshotSession(recognitionChannel),
@@ -498,7 +499,8 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
   }
 
   private WorkbenchState? StartScreenshotSession(
-    bool textSelectionRequested, CancellationToken cancellationToken, bool scrolling = false)
+    bool textSelectionRequested, CancellationToken cancellationToken, bool scrolling = false,
+    ScreenshotCaptureRequest? request = null)
   {
     _ = RecognitionVm;
     // 截图单飞：任一截图入口（主窗/热键/悬浮栏/页面按钮）同时只允许一个
@@ -519,7 +521,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       return operations.Start(
         SessionState(recognitionChannel, true, "recognition.running"),
         () => CompleteScreenshotSessionAsync(generation, textSelectionRequested, scrolling,
-          demand));
+          demand, request));
     }
     catch
     {
@@ -539,7 +541,8 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     long generation,
     bool textSelectionRequested,
     bool scrolling,
-    CancellationTokenSource demand)
+    CancellationTokenSource demand,
+    ScreenshotCaptureRequest? request = null)
   {
     CancellationToken cancellationToken = demand.Token;
     // 所有截图入口（主窗/热键/悬浮栏）统一让位：截图期间工具栏与感应条
@@ -559,6 +562,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
         else
           await viewModel.CaptureScreenshotSessionAsync(
             textSelectionRequested ? null : BuildSelectionActions(),
+            request,
             cancellationToken);
         if (generation != Volatile.Read(ref recognitionChannel.Generation))
         {
@@ -567,8 +571,13 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
         if (viewModel.TerminalState is JobState.Cancelled or JobState.Failed)
         {
           ReleaseCaptureGuard();
-          operations.PublishTerminal(SessionState(recognitionChannel, false,
-            viewModel.TerminalState is JobState.Failed ? "recognition.failed" : "recognition.cancelled"));
+          // #245 C3：本地截图校验拒绝走稳定 captureRefused 状态码（WebAssets
+          // FeatureValues 提供对应指引文案），不与 Runtime 失败混为
+          // recognition.failed。
+          string captureOutcome = viewModel.TerminalState is JobState.Failed
+            ? viewModel.CaptureRefusalStatusCode ?? "recognition.failed"
+            : "recognition.cancelled";
+          operations.PublishTerminal(SessionState(recognitionChannel, false, captureOutcome));
           return;
         }
         if (viewModel.CurrentInput is { } captured)
@@ -1436,9 +1445,9 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     viewModel.InvalidateResult();
     viewModel.ReleaseInput();
     if (channel == recognitionChannel)
-      {
-        ClearResultActions();
-      }
+    {
+      ClearResultActions();
+    }
     InvalidateScreenshotTextLayer(channel);
     ClearScreenshotSession(channel);
     return SessionState(channel, false, "recognition.ready");

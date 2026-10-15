@@ -83,6 +83,12 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
 
   public event EventHandler<FloatingToolbarCommand>? CommandInvoked;
 
+  /// <summary>
+  /// #236 右键请求统一截图模式菜单（与托盘/热键同一菜单）；不改变任何
+  /// 既有按钮行为。
+  /// </summary>
+  public event EventHandler? ModeMenuRequested;
+
   public bool IsVisible { get; private set; }
 
   public bool IsPointerOver
@@ -407,6 +413,15 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
         "exit", "隐藏悬浮栏", FloatingToolbarCommand.DismissToolbar));
     _root.Children.Add(bar);
 
+    // 右键 = 截图模式菜单入口（#236）；不拦截按钮/把手的左键语义。
+    _root.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, args) =>
+    {
+      if (args.GetCurrentPoint(_root).Properties.IsRightButtonPressed)
+      {
+        ModeMenuRequested?.Invoke(this, EventArgs.Empty);
+        args.Handled = true;
+      }
+    }), true);
     _root.PointerEntered += (_, _) => UpdatePointerPresence();
     _root.PointerExited += (_, _) => UpdatePointerPresence();
     _grip.PointerPressed += OnGripPointerPressed;
