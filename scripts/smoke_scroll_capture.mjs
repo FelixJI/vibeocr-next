@@ -27,6 +27,7 @@ const requireWebAssets = createRequire(path.resolve(scriptDir,
 const { chromium, expect } = requireWebAssets('@playwright/test');
 const fixtureScript = path.join(scriptDir, 'scroll_capture_fixture.ps1');
 const selectionInset = 16;
+const previewPauseMs = 5500; // Preview wait must not consume the dynamic-content window.
 const stableWaitMs = 1350; // >= 1.3 s settle between start/wheel/finish.
 const wheelSteps = 3;
 // Prepared-candidate mode keeps the retained Runtime state, so the app starts
@@ -563,8 +564,9 @@ async function waitForCapturePreview(appPid, expectedText = '确认预览并继�
   throw new Error(`Capture preview confirmation was not ready: ${expectedText}`);
 }
 
-async function confirmCapturePreview(appPid, expectedText = '确认预览并继续') {
+async function confirmCapturePreview(appPid, expectedText = '确认预览并继续', pauseMs = 0) {
   await waitForCapturePreview(appPid, expectedText);
+  if (pauseMs) await delay(pauseMs);
   await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-confirm' });
 }
 
@@ -611,7 +613,7 @@ async function runScrollCapture(app, fixture, { cancel }) {
   assert(!during.some((item) => item.Handle === app.main.Handle && item.Visible),
     'Main window stayed visible while the scroll controller owned the screen.');
   await recordBar('started');
-  await confirmCapturePreview(appPid);
+  await confirmCapturePreview(appPid, '确认预览并继续', previewPauseMs);
   await delay(stableWaitMs);
   await native('frame', { FixturePid: fixture.pid, Handle: fixture.root, X: opened.selection.left, Y: opened.selection.top, Width: opened.selection.width, Height: opened.selection.height, EvidenceRoot: app.evidence.smokeRoot, OutputPath: path.join(app.evidence.smokeRoot, 'source-before.png') });
 
@@ -1121,6 +1123,7 @@ async function verifyReverseRecovery(app, fixture) {
     'Reverse review exposed an impossible positive-offset correction.');
   assert.deepEqual(await sessionEvidence(app.page), sessionsBefore,
     'Reverse review published a screenshot before explicit final confirmation.');
+  await delay(previewPauseMs);
   await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-confirm' });
   await wheel(-120); // Back to the first accepted viewport: no new strip.
   await delay(stableWaitMs);
@@ -1183,7 +1186,7 @@ async function verifyReverseRecovery(app, fixture) {
   assert.deepEqual(await sessionEvidence(app.page), beforeCancel,
     'Cancelling reverse review created or changed a screenshot session.');
   return {
-    rejected, discardAction: discard.name, resumed: resumed.text, finalPreview: finalPreview.text,
+    rejected, discardAction: discard.name, reviewPauseMs: previewPauseMs, resumed: resumed.text, finalPreview: finalPreview.text,
     sessionId: recoveredId, startOffsetPixels, stitched: analysis,
     output: path.join(app.evidence.smokeRoot, outputName),
     noOutputBeforeFinalConfirmation: true, cancelPreservedHistory: true,
@@ -1243,6 +1246,7 @@ async function main() {
         'synthetic table: first column "行 NNNN / Row", second column "中文 · line NNNN · VibeOCR"',
     };
     evidence.stableWaitMs = stableWaitMs;
+    evidence.previewPauseMs = previewPauseMs;
     evidence.wheelSteps = wheelSteps;
 
     // 1) Cancel before any output exists: no session may open.

@@ -508,43 +508,12 @@ internal static class ScrollCaptureSession
             continue;
           }
 
-          CapturedFrame? previous = _lastCaptured;
-          _lastCaptured = frame;
-          bool identical = false;
-          if (previous is not null)
+          await ObserveFrameAsync(frame);
+          if (_failure is not null || _completion.Task.IsCompleted) return;
+          if (!_reviewPending && _finishSamplingStarted && _stitcher is not null && _appendedForCurrentStreak)
           {
-            CapturedFrame prior = previous;
-            // 纯字节比对放线程池并传 token：取消时立即中止，不占住 UI 线程。
-            identical = await Task.Run(
-                () => frame.Pixels.AsSpan().SequenceEqual(prior.Pixels), _lifecycle.Token);
-          }
-
-          long now = Environment.TickCount64;
-          if (identical)
-          {
-            _lastStableWitness = now;
-            _stableStreak++;
-            HandleStable(frame);
-            if (_failure is not null || _completion.Task.IsCompleted)
-            {
-              return;
-            }
-
-            if (!_reviewPending && _finishSamplingStarted && _stitcher is not null && _appendedForCurrentStreak)
-            {
-              CompleteBuild(_stitcher);
-              return;
-            }
-          }
-          else
-          {
-            _stableStreak = 0;
-            _appendedForCurrentStreak = false;
-            if (now - _lastStableWitness > DynamicContentTimeoutMs)
-            {
-              Fail(new InvalidDataException("选区内容持续变化（动态内容），始终未能稳定，已停止采集。"));
-              return;
-            }
+            CompleteBuild(_stitcher);
+            return;
           }
 
           if (_automatic && !_reviewPending && !_finishRequested && _appendedForCurrentStreak)
@@ -580,6 +549,40 @@ internal static class ScrollCaptureSession
       {
         Fail(new InvalidOperationException($"滚动截图采集失败：{error.Message}", error));
       }
+    }
+
+    // 生产循环与 UI 自检共同经过真实帧比较和动态超时判定。
+    private async Task ObserveFrameAsync(CapturedFrame frame)
+    {
+      CapturedFrame? previous = _lastCaptured;
+      _lastCaptured = frame;
+      bool identical = false;
+      if (previous is not null)
+      {
+        CapturedFrame prior = previous;
+        // 纯字节比对放线程池并传 token：取消时立即中止，不占住 UI 线程。
+        identical = await Task.Run(
+            () => frame.Pixels.AsSpan().SequenceEqual(prior.Pixels), _lifecycle.Token);
+      }
+
+      long now = Environment.TickCount64;
+      if (identical)
+      {
+        _lastStableWitness = now;
+        _stableStreak++;
+        HandleStable(frame);
+      }
+      else
+      {
+        _stableStreak = 0;
+        _appendedForCurrentStreak = false;
+        if (now - _lastStableWitness > DynamicContentTimeoutMs)
+        {
+          Fail(new InvalidDataException("选区内容持续变化（动态内容），始终未能稳定，已停止采集。"));
+          return;
+        }
+      }
+
     }
 
     /// <summary>丢弃过渡帧并重新计算内容稳定时间。</summary>
@@ -1153,6 +1156,8 @@ internal static class ScrollCaptureSession
       HideReview();
       _initialPreviewConfirmed = true;
       _finishButton.IsEnabled = _stitcher is not null;
+      // 预览等待不属于动态变化；恢复前丢弃旧见证，保留总时限与无进展计时。
+      DiscardStableWitness();
       _reviewPending = false;
       _statusText.Text = "采集中：按所选方向滚动并停稳；可点击完成预览已收选段。";
       SetForegroundWindow(_source);
@@ -1344,14 +1349,15 @@ internal static class ScrollCaptureSession
         Check((await final._completion.Task)?.Pixels.SequenceEqual(frame.Pixels) == true,
             "Confirmation must return the final decoded frame.");
 
-        manual._stableStreak = StableComparisonsRequired;
-        manual.HandleStable(frame);
+        manual._lastStableWitness = Environment.TickCount64;
+        await manual.ObserveFrameAsync(frame);
+        await manual.ObserveFrameAsync(frame);
         await manual._previewTask;
         Check(!manual._finishButton.IsEnabled, "Initial preview must precede finishing.");
         manual.OnConfirm(manual._confirmButton, new RoutedEventArgs());
         Check(manual._finishButton.IsEnabled, "Confirmed first frame must restore the finish button.");
-        manual._appendedForCurrentStreak = false;
-        manual.HandleStable(frame);
+        await manual.ObserveFrameAsync(frame);
+        await manual.ObserveFrameAsync(frame);
         Check(manual._finishButton.IsEnabled && manual._stitcher?.FrameCount == 1,
             "Duplicate stable frames must retain single-frame completion without increasing the frame count.");
         manual.OnFinish(manual._finishButton, new RoutedEventArgs());
@@ -1388,6 +1394,72 @@ internal static class ScrollCaptureSession
         }
       }
     }
+    internal static async Task VerifyPreviewResumeStableWindowSelfCheckAsync()
+    {
+      static CapturedFrame Frame(int top)
+      {
+        byte[] pixels = new byte[48 * 96 * 4];
+        for (int y = 0; y < 96; y++)
+          for (int x = 0; x < 48; x++) pixels[(y * 48 + x) * 4] = (byte)(top + y);
+        return new CapturedFrame(pixels, 48, 96, 48 * 4, "BGRA8");
+      }
+      var sessions = new[] { CreateSelfCheckSession(), CreateSelfCheckSession() };
+      try
+      {
+        foreach (Session session in sessions)
+        {
+          session._lastStableWitness = Environment.TickCount64;
+          await session.ObserveFrameAsync(Frame(32));
+          await session.ObserveFrameAsync(Frame(32));
+          await session._previewTask;
+          if (session._failure is not null || !session._reviewPending || !session._confirmButton.IsEnabled)
+            throw new InvalidOperationException("The test must first reach the decoded initial preview.");
+          if (ReferenceEquals(session, sessions[1]))
+          {
+            session.OnConfirm(session, new RoutedEventArgs());
+            await session.ObserveFrameAsync(Frame(12));
+            await session.ObserveFrameAsync(Frame(12));
+            await session._previewTask;
+            if (!Equals(session._confirmButton.Content, "丢弃反向帧并继续"))
+              throw new InvalidOperationException("The recovery case must pause on a real reverse-frame review.");
+          }
+          session._lastStableWitness = Environment.TickCount64 - DynamicContentTimeoutMs - 1000;
+          long progressBefore = session._lastProgress = Environment.TickCount64 - NoProgressTimeoutMs + 1000;
+          session._elapsed.Start();
+          await Task.Delay(20);
+          long elapsedBefore = session._elapsed.ElapsedTicks;
+          long confirmedAt = Environment.TickCount64;
+          session.OnConfirm(session, new RoutedEventArgs());
+          await session.ObserveFrameAsync(Frame(52));
+          if (session._failure is not null)
+            throw new InvalidOperationException("A changed frame immediately after a long preview must get a fresh dynamic window.", session._failure);
+          if (session._lastStableWitness < confirmedAt || session._stableStreak != 0)
+            throw new InvalidOperationException("Confirmation must discard the pre-preview frame and start the full stable-frame window.");
+          if (session._lastProgress != progressBefore || !session._elapsed.IsRunning || session._elapsed.ElapsedTicks < elapsedBefore)
+            throw new InvalidOperationException("Preview confirmation must preserve the no-progress and total capture budgets.");
+          session._lastStableWitness = Environment.TickCount64 - DynamicContentTimeoutMs + 1000;
+          await session.ObserveFrameAsync(Frame(53));
+          if (session._failure is not null)
+            throw new InvalidOperationException("Changing content inside the fresh five-second window must be allowed.");
+          session._lastStableWitness = Environment.TickCount64 - DynamicContentTimeoutMs - 1;
+          await session.ObserveFrameAsync(Frame(54));
+          if (session._failure is not InvalidDataException || session._lastProgress != progressBefore)
+            throw new InvalidOperationException("Changing content beyond the same five-second window must still stop without granting progress.");
+        }
+      }
+      finally
+      {
+        foreach (Session session in sessions)
+        {
+          session._lifecycle.Cancel();
+          await session._previewTask;
+          session._previewImage.Source = null;
+          session._window.Close();
+          session._lifecycle.Dispose();
+        }
+      }
+    }
+
     internal static void VerifySelectionGeometrySelfCheck()
     {
       foreach ((int width, int height, ScrollCaptureDirection direction) in new[]
@@ -1439,13 +1511,14 @@ internal static class ScrollCaptureSession
       try
       {
         session._automatic = true;
-        session._stableStreak = StableComparisonsRequired;
-        session.HandleStable(Frame(32));
+        session._lastStableWitness = Environment.TickCount64;
+        await session.ObserveFrameAsync(Frame(32));
+        await session.ObserveFrameAsync(Frame(32));
         await session._previewTask;
         session.OnConfirm(session, new RoutedEventArgs());
-        session._appendedForCurrentStreak = false;
         CapturedFrame reverse = Frame(12);
-        session.HandleStable(reverse);
+        await session.ObserveFrameAsync(reverse);
+        await session.ObserveFrameAsync(reverse);
         await session._previewTask;
         if (session._pendingFrame is not null || session._offsetBox.Visibility != Visibility.Collapsed ||
             !Equals(session._confirmButton.Content, "丢弃反向帧并继续") || !session._reviewPending || session._automatic)
@@ -1453,12 +1526,12 @@ internal static class ScrollCaptureSession
         if (session._stitcher?.FrameCount != 1 || !session._stitcher.BuildFrame().Pixels.SequenceEqual(Frame(32).Pixels))
           throw new InvalidOperationException("Reverse review must not change the accepted segment.");
         session.OnConfirm(session, new RoutedEventArgs());
-        session._appendedForCurrentStreak = false; // 模拟控制窗过渡后重新取得稳定见证。
-        session.HandleStable(reverse);
+        await session.ObserveFrameAsync(reverse);
+        await session.ObserveFrameAsync(reverse);
         if (session._reviewPending || session._pendingFrame is not null || session._completion.Task.IsCompleted)
           throw new InvalidOperationException("Discarding a reverse frame must resume manual capture without re-prompting on the same stable frame.");
-        session._appendedForCurrentStreak = false;
-        session.HandleStable(Frame(52));
+        await session.ObserveFrameAsync(Frame(52));
+        await session.ObserveFrameAsync(Frame(52));
         await session._previewTask;
         if (session._stitcher.FrameCount != 2 || session._stitcher.Height != 116)
           throw new InvalidOperationException("Forward scrolling after discard must append to the retained accepted segment.");
@@ -1521,12 +1594,13 @@ internal static class ScrollCaptureSession
       try
       {
         CapturedFrame first = Frame(0);
-        session._stableStreak = StableComparisonsRequired;
-        session.HandleStable(first);
+        session._lastStableWitness = Environment.TickCount64;
+        await session.ObserveFrameAsync(first);
+        await session.ObserveFrameAsync(first);
         await session._previewTask;
         session.OnConfirm(session, new RoutedEventArgs());
-        session._appendedForCurrentStreak = false;
-        session.HandleStable(Frame(128));
+        await session.ObserveFrameAsync(Frame(128));
+        await session.ObserveFrameAsync(Frame(128));
         await session._previewTask;
         if (session._failure is null || session._pendingFrame is not null ||
             session._confirmButton.Visibility != Visibility.Collapsed || session._finishButton.IsEnabled)
@@ -1609,12 +1683,13 @@ internal static class ScrollCaptureSession
           CapturedFrame first = Periodic(width, height, 0, horizontal);
           CapturedFrame pending = Periodic(width, height, 2, horizontal);
           session._direction = horizontal ? ScrollCaptureDirection.Right : ScrollCaptureDirection.Down;
-          session._stableStreak = StableComparisonsRequired;
-          session.HandleStable(first);
+          session._lastStableWitness = Environment.TickCount64;
+          await session.ObserveFrameAsync(first);
+          await session.ObserveFrameAsync(first);
           await session._previewTask;
           session.OnConfirm(session, new RoutedEventArgs());
-          session._appendedForCurrentStreak = false;
-          session.HandleStable(pending);
+          await session.ObserveFrameAsync(pending);
+          await session.ObserveFrameAsync(pending);
           await session._previewTask;
           if (!ReferenceEquals(session._pendingFrame, pending) || !session._reviewPending ||
               session._offsetBox.Visibility != Visibility.Visible || session._finishButton.IsEnabled)
@@ -1673,12 +1748,13 @@ internal static class ScrollCaptureSession
       Task worker = Task.CompletedTask;
       try
       {
-        session._stableStreak = StableComparisonsRequired;
-        session.HandleStable(Periodic(96, 0));
+        session._lastStableWitness = Environment.TickCount64;
+        await session.ObserveFrameAsync(Periodic(96, 0));
+        await session.ObserveFrameAsync(Periodic(96, 0));
         await session._previewTask;
         session.OnConfirm(session, new RoutedEventArgs());
-        session._appendedForCurrentStreak = false;
-        session.HandleStable(Periodic(96, 2));
+        await session.ObserveFrameAsync(Periodic(96, 2));
+        await session.ObserveFrameAsync(Periodic(96, 2));
         await session._previewTask;
         session._offsetBox.Value = 10;
         session.OnConfirm(session, new RoutedEventArgs());
@@ -1694,9 +1770,8 @@ internal static class ScrollCaptureSession
         await DrainUiAsync(session);
         CapturedFrame accepted = session._stitcher!.BuildFrame();
         CapturedFrame next = Periodic(96, 4);
-        session._stableStreak = StableComparisonsRequired;
-        session._appendedForCurrentStreak = false;
-        session.HandleStable(next);
+        await session.ObserveFrameAsync(next);
+        await session.ObserveFrameAsync(next);
         await session._previewTask;
         session.ApplyConfirmedOffset(); // B 尚未确认，不能消费 A 的重复点击。
         CapturedFrame unconfirmed = session._stitcher.BuildFrame();
@@ -1717,12 +1792,13 @@ internal static class ScrollCaptureSession
         for (int index = 1; index < sessions.Length; index++)
         {
           session = sessions[index];
-          session._stableStreak = StableComparisonsRequired;
-          session.HandleStable(Periodic(96, 0));
+          session._lastStableWitness = Environment.TickCount64;
+          await session.ObserveFrameAsync(Periodic(96, 0));
+          await session.ObserveFrameAsync(Periodic(96, 0));
           await session._previewTask;
           session.OnConfirm(session, new RoutedEventArgs());
-          session._appendedForCurrentStreak = false;
-          session.HandleStable(Periodic(96, 2));
+          await session.ObserveFrameAsync(Periodic(96, 2));
+          await session.ObserveFrameAsync(Periodic(96, 2));
           await session._previewTask;
           session._offsetBox.Value = 10;
           session.OnConfirm(session, new RoutedEventArgs());

@@ -45,6 +45,9 @@ public sealed partial class App
         case "ScrollCapturePendingPreviewBoundsBothDimensionsWithoutUpscaling":
           await ScrollCaptureSession.Session.VerifyPendingPreviewBoundsSelfCheckAsync();
           break;
+        case "ScrollCapturePreviewResumeGetsFreshDynamicWindowWithoutResettingBudgets":
+          await ScrollCaptureSession.Session.VerifyPreviewResumeStableWindowSelfCheckAsync();
+          break;
         case "ScrollCapturePreviewWaitsForDecodeAndRejectsPendingEncodingFailure":
           await ScrollCaptureSession.Session.VerifyPreviewGateSelfCheckAsync();
           break;
