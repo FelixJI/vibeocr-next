@@ -6,7 +6,7 @@
  * - 只支持同尺度平移：候选块与源块同宽高，只比较整数平移偏移；不做
  *   旋转/缩放/镜像，也不做亚像素对齐。
  * - 基线整图 ≤ DUPLICATE_MAX_IMAGE_PIXELS（8MP，与修补同一预算叙事）；
- *   源块 ≤ DUPLICATE_MAX_SOURCE_PIXELS（512×512=0.26MP）。源块 RGB 通道平均方差
+ *   源块 ≤ DUPLICATE_MAX_SOURCE_PIXELS（512×512=0.26MP）。源块 RGB 通道平均方差与 alpha 方差的较大值
  *   低于 DUPLICATE_LOW_TEXTURE_VARIANCE 时拒绝（纯色/近纯色块在任何
  *   平移处都“匹配”，结果无意义）。
  * - 工作量有界：覆盖全部整数偏移，以十六点/分块下界筛选和有限精比控制成本，
@@ -59,7 +59,7 @@ export const DUPLICATE_MAX_CANDIDATES = 8;
 export const DUPLICATE_MAX_MATCH_WINDOWS = 4096;
 /** 平均每通道绝对差 ≤ 6 视为重复（PNG 无损副本为 0；轻微重编码可容忍）。 */
 export const DUPLICATE_MATCH_TOLERANCE = 6;
-/** 源块 RGB 通道平均方差下限：低于它的近纯色块直接拒绝。 */
+/** RGB 平均方差与 alpha 方差的较大值下限：低于它的近纯色块直接拒绝。 */
 export const DUPLICATE_LOW_TEXTURE_VARIANCE = 16;
 /** 像素比较总预算：筛选阶段偏移数 × 16 采样 ≤ 96M。 */
 export const DUPLICATE_WORK_BUDGET = 96_000_000;
