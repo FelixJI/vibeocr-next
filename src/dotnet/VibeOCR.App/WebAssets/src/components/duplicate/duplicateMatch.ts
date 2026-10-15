@@ -11,8 +11,9 @@
  *   平移处都“匹配”，结果无意义）。
  * - 工作量有界：覆盖全部整数偏移，以十六点筛选和有限精比控制成本，
  *   超预算明确拒绝，不返回不完整的搜索结果。
- * - 候选上限 DUPLICATE_MAX_CANDIDATES：按平均误差升序保留，且两两
- *   不重叠、不与源块重叠（部分重叠的平移块会平凡匹配自身边缘）。
+ * - 合格窗口最多 DUPLICATE_MAX_MATCH_WINDOWS，超限明确拒绝。完整扫描后
+ *   按平均误差、y、x 升序去除重叠，再取 DUPLICATE_MAX_CANDIDATES 个
+ *   候选；候选两两不重叠，也不与源块重叠。
  * - 无任何候选时以 "no-duplicates" 显式失败。
  *
  * 搜索分两阶段，覆盖每一个整数平移偏移（不存在未访问的偏移）：
@@ -24,8 +25,9 @@
  *    DUPLICATE_PRECISE_BUDGET 约束；相似位置过多导致超限时同样
  *    budget-exceeded 拒绝，不把截断的扫描当作完整结果。
  *
- * 资源开销：直接在传入缓冲区上读取，无额外像素副本；响应只携带少量
- * 候选坐标。峰值内存即调用方传入的 32MB 基线（8MP RGBA）。
+ * 资源开销：直接读取传入的基线（最多 32MB RGBA），无额外像素副本；
+ * 最多存储 4096 个合格窗口的坐标和误差，排序后最多进行 4096×8 次重叠
+ * 检查，响应只携带最多 8 个候选坐标。
  */
 
 export interface DuplicateRect {
@@ -51,6 +53,8 @@ export type DuplicateFailureCode =
 export const DUPLICATE_MAX_IMAGE_PIXELS = 8_000_000;
 export const DUPLICATE_MAX_SOURCE_PIXELS = 262_144;
 export const DUPLICATE_MAX_CANDIDATES = 8;
+/** 去除重叠前的合格窗口上限：超限失败，避免静默截断或无界存储。 */
+export const DUPLICATE_MAX_MATCH_WINDOWS = 4096;
 /** 平均每通道绝对差 ≤ 6 视为重复（PNG 无损副本为 0；轻微重编码可容忍）。 */
 export const DUPLICATE_MATCH_TOLERANCE = 6;
 /** 源块灰度方差下限：低于它的近纯色块直接拒绝。 */
@@ -238,7 +242,7 @@ export function findDuplicateRegions(
   };
 
   const tolerance = DUPLICATE_MATCH_TOLERANCE * count * 3; // 每×3通道累计容差
-  const best: DuplicateCandidate[] = [];
+  const matches: DuplicateCandidate[] = [];
   let preciseWork = 0;
 
   for (let dy = 0; dy < offsetsY; dy += 1) {
@@ -286,24 +290,19 @@ export function findDuplicateRegions(
         }
       }
       if (error > tolerance) continue;
-      const entry: DuplicateCandidate = {
-        ...candidate,
-        error: error / (count * 3),
-      };
-      // 有序插入并截断到候选上限。
-      let slot = best.length;
-      while (slot > 0 && (best[slot - 1]?.error ?? 0) > entry.error) {
-        slot -= 1;
+      if (matches.length >= DUPLICATE_MAX_MATCH_WINDOWS) {
+        fail(
+          "budget-exceeded",
+          `合格匹配窗口超过上限 ${DUPLICATE_MAX_MATCH_WINDOWS}；请缩小图片或调整源选区后重试。`,
+        );
       }
-      if (slot < DUPLICATE_MAX_CANDIDATES) {
-        best.splice(slot, 0, entry);
-        if (best.length > DUPLICATE_MAX_CANDIDATES) best.pop();
-      }
+      matches.push({ ...candidate, error: error / (count * 3) });
     }
   }
-  // 非极大抑制：按误差升序保留两两不重叠的候选。
+  // 完整扫描后先排序再去除重叠，避免重叠窗口占满最终候选名额。
+  matches.sort((a, b) => a.error - b.error || a.y - b.y || a.x - b.x);
   const kept: DuplicateCandidate[] = [];
-  for (const candidate of best) {
+  for (const candidate of matches) {
     if (kept.some((existing) => rectsOverlap(existing, candidate))) continue;
     kept.push(candidate);
     if (kept.length >= DUPLICATE_MAX_CANDIDATES) break;

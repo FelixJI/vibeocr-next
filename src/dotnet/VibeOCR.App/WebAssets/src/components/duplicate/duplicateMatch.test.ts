@@ -50,6 +50,68 @@ function failureCodeOf(run: () => void): string {
 }
 
 describe("findDuplicateRegions", () => {
+  it("R10 suppresses overlapping windows before limiting independent copies", () => {
+    const rgba = paint(128, 48, (x, y) => {
+      if (
+        y >= 4 &&
+        y < 12 &&
+        ((x >= 0 && x < 8) || (x >= 24 && x < 48) || (x >= 80 && x < 88))
+      ) {
+        const value = ((x + y) % 2) * 255;
+        return [value, value, value, 255];
+      }
+      return [100, 100, 100, 255];
+    });
+    const matches = findDuplicateRegions(rgba, 128, 48, {
+      x: 0,
+      y: 4,
+      width: 8,
+      height: 8,
+    });
+    expect(matches.map(({ x, y, error }) => ({ x, y, error }))).toEqual(
+      [24, 32, 40, 80].map((x) => ({ x, y: 4, error: 0 })),
+    );
+  });
+
+  it("R10 ranks a later better match first and resolves equal errors in scan order", () => {
+    const rgba = paint(128, 48, (x, y) => {
+      if (y >= 4 && y < 12) {
+        const value = ((x + y) % 2) * 255;
+        if ((x >= 0 && x < 8) || (x >= 80 && x < 88))
+          return [value, value, value, 255];
+        if (x >= 24 && x < 48) {
+          const biased = value === 0 ? 2 : 253;
+          return [biased, biased, biased, 255];
+        }
+      }
+      return [100, 100, 100, 255];
+    });
+    const source = { x: 0, y: 4, width: 8, height: 8 };
+    const matches = findDuplicateRegions(rgba, 128, 48, source);
+    expect(matches.map(({ x, y, error }) => ({ x, y, error }))).toEqual([
+      { x: 80, y: 4, error: 0 },
+      ...[24, 32, 40].map((x) => ({ x, y: 4, error: 2 })),
+    ]);
+    expect(findDuplicateRegions(rgba, 128, 48, source)).toEqual(matches);
+  });
+
+  it("R10 explicitly rejects excessive match windows instead of returning a truncated search", () => {
+    const rgba = paint(256, 64, (x, y) => {
+      const value = ((x + y) % 2) * 255;
+      return [value, value, value, 255];
+    });
+    expect(
+      failureCodeOf(() =>
+        findDuplicateRegions(rgba, 256, 64, {
+          x: 0,
+          y: 0,
+          width: 8,
+          height: 8,
+        }),
+      ),
+    ).toBe("budget-exceeded");
+  });
+
   it("R8 retains a valid copy whose entire error is concentrated at screening samples", () => {
     const source = { x: 8, y: 8, width: 32, height: 32 };
     const coordinates = [6, 12, 19, 25];
