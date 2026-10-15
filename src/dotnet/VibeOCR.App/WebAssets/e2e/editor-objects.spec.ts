@@ -317,8 +317,10 @@ async function inkOverlap(
             }
           if (hit) matched++;
         }
-        return { count, ratio: matched / count };
+        return { count, matched, ratio: matched / count };
       };
+      const sourceSize = { width: source.width, height: source.height },
+        targetSize = { width: target.width, height: target.height };
       const forward = compare(expected, actual),
         backward = compare(actual, expected);
       source.close();
@@ -342,6 +344,10 @@ async function inkOverlap(
         return { left, top, right, bottom, count };
       };
       return {
+        sourceSize,
+        targetSize,
+        forward,
+        backward,
         overlap: Math.min(forward.ratio, backward.ratio),
         union: forward.count + backward.count,
         expected: bounds(expected),
@@ -365,10 +371,17 @@ test("文字自身旋转镜像与比例缩放在非1:1 PNG中只变换一次，�
 }, info) => {
   const { uploads, list } = await setup(page, { width: 300, height: 200 });
   await action(page, "文字");
-  await page.getByLabel("标注文字").fill("F→AB");
-  await page.getByLabel("文字字号").selectOption("32");
+  await page.getByLabel("标注文字").fill("F2Ab");
+  // 自然字号16px、整数基点；非对称ASCII避免小字hinting及箭头fallback影响位图参考。
+  await page.getByLabel("文字字号").selectOption("48");
+  await page.getByLabel("文字字体").fill("Arial");
+  await page.getByLabel("文字字体").press("Tab");
+  await expect(
+    page.getByText("已使用字体“Arial”。", { exact: true }),
+  ).toBeVisible();
+  await page.evaluate(() => document.fonts.ready.then(() => undefined));
   await page.getByLabel("自定义颜色").fill("#1f6feb");
-  await drag(page, 200, 210, 400, 210);
+  await drag(page, 180, 216, 420, 216);
   await action(page, "选择");
   await list.selectOption("");
   const original = await save(page, uploads);
@@ -376,42 +389,67 @@ test("文字自身旋转镜像与比例缩放在非1:1 PNG中只变换一次，�
   await action(page, "对象旋转 90°");
   await list.selectOption("");
   const rotated = await save(page, uploads);
-  expect(
-    (await inkOverlap(page, original, rotated, 90, false, 1)).overlap,
-  ).toBeGreaterThan(0.95);
+  const rotatedResult = await inkOverlap(page, original, rotated, 90, false, 1);
+  await Promise.all([
+    writeFile(info.outputPath("text-original.png"), original),
+    writeFile(info.outputPath("text-rotated.png"), rotated),
+    writeFile(
+      info.outputPath("text-transform-pixels.json"),
+      JSON.stringify({ rotated: rotatedResult }, null, 2),
+    ),
+  ]);
+  expect(rotatedResult.overlap).toBeGreaterThan(0.95);
   await click(page, 300, 150);
   await expect(list).toHaveValue("0");
   await action(page, "水平镜像");
   await list.selectOption("");
   const mirrored = await save(page, uploads);
-  expect(
-    (await inkOverlap(page, original, mirrored, 90, true, 1)).overlap,
-  ).toBeGreaterThan(0.95);
-  await list.selectOption("0");
-  await action(page, "放大选区");
-  await list.selectOption("");
-  const scaled = await save(page, uploads);
-  const result = await inkOverlap(page, original, scaled, 90, true, 1.25);
-  expect(result.union).toBeGreaterThan(60);
-  expect(result.overlap).toBeGreaterThan(0.8);
+  const mirroredResult = await inkOverlap(
+    page,
+    original,
+    mirrored,
+    90,
+    true,
+    1,
+  );
   await Promise.all([
-    writeFile(info.outputPath("text-original.png"), original),
-    writeFile(info.outputPath("text-rotated.png"), rotated),
     writeFile(info.outputPath("text-mirrored.png"), mirrored),
-    writeFile(info.outputPath("text-scaled.png"), scaled),
     writeFile(
       info.outputPath("text-transform-pixels.json"),
       JSON.stringify(
-        {
-          rotated: await inkOverlap(page, original, rotated, 90, false, 1),
-          mirrored: await inkOverlap(page, original, mirrored, 90, true, 1),
-          scaled: result,
-        },
+        { rotated: rotatedResult, mirrored: mirroredResult },
         null,
         2,
       ),
     ),
   ]);
+  expect(mirroredResult.overlap).toBeGreaterThan(0.95);
+  await list.selectOption("0");
+  await action(page, "放大选区");
+  await list.selectOption("");
+  const scaled = await save(page, uploads);
+  const result = await inkOverlap(page, original, scaled, 90, true, 1.25);
+  await Promise.all([
+    writeFile(info.outputPath("text-scaled.png"), scaled),
+    writeFile(
+      info.outputPath("text-transform-pixels.json"),
+      JSON.stringify(
+        { rotated: rotatedResult, mirrored: mirroredResult, scaled: result },
+        null,
+        2,
+      ),
+    ),
+  ]);
+  expect(result.union).toBeGreaterThan(60);
+  expect(result.overlap).toBeGreaterThan(0.8);
+  for (const comparison of [rotatedResult, mirroredResult, result]) {
+    expect(comparison.sourceSize).toEqual({ width: 300, height: 200 });
+    expect(comparison.targetSize).toEqual({ width: 300, height: 200 });
+    for (const edge of ["left", "top", "right", "bottom"] as const)
+      expect(
+        Math.abs(comparison.actual[edge] - comparison.expected[edge]),
+      ).toBeLessThanOrEqual(1);
+  }
   await list.selectOption("0");
   await page.screenshot({ path: info.outputPath("text-object-transform.png") });
 });
