@@ -5,7 +5,7 @@ param(
     [Parameter(Mandatory = $true)][ValidateSet(
         'fixture', 'windows', 'taskbar-state', 'probe', 'foreground', 'focus', 'raise', 'wheel', 'scenario',
         'mouse-move', 'mouse-down', 'mouse-up', 'mouse-right', 'key', 'hide', 'lower', 'close', 'quit',
-        'uia-find', 'uia-invoke', 'uia-bar-text', 'metrics', 'save-file', 'frame', 'geometry', 'window-text')][string]$Action,
+        'selection-scroll', 'uia-find', 'uia-invoke', 'uia-bar-text', 'metrics', 'save-file', 'frame', 'geometry', 'window-text')][string]$Action,
     [int]$AppPid = 0,
     [int]$FixturePid = 0,
     [long]$Handle = 0,
@@ -622,6 +622,24 @@ try {
         'hide' { [ScrollCaptureNative]::Hide($Handle, $AppPid) }
         'close' { [ScrollCaptureNative]::Close($Handle, $(if ($FixturePid -gt 0) { $FixturePid } else { $AppPid })) }
         'quit' { [ScrollCaptureNative]::Quit($Handle, $FixturePid, $ThreadId) }
+        'selection-scroll' {
+            [ScrollCaptureNative]::RequireOwner($Handle, $AppPid)
+            $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Handle)
+            $condition = [System.Windows.Automation.AndCondition]::new(
+                [System.Windows.Automation.PropertyCondition]::new(
+                    [System.Windows.Automation.AutomationElement]::NameProperty, '长截图'),
+                [System.Windows.Automation.PropertyCondition]::new(
+                    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                    [System.Windows.Automation.ControlType]::Button))
+            $buttons = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)
+            if ($buttons.Count -ne 1 -or -not $buttons[0].Current.IsEnabled -or $buttons[0].Current.IsOffscreen) {
+                throw 'The owned picker must expose exactly one visible enabled long screenshot action'
+            }
+            $found = @{ Element = $buttons[0]; Window = $root; WindowHandle = $Handle }
+            $evidence = Convert-ElementToEvidence $found
+            $buttons[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+            $evidence | ConvertTo-Json -Compress
+        }
         'uia-find' {
             $found = Find-AppElementById $AppPid $AutomationId
             if ($null -eq $found) { @{ found = $false } | ConvertTo-Json -Compress }

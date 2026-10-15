@@ -18,6 +18,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import readline from 'node:readline';
 import crypto from 'node:crypto';
+import { stopOwned } from './smoke_native_actions.mjs';
 
 const execFileAsync = promisify(execFile);
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -198,40 +199,9 @@ async function startFixture() {
       fixture.wheelStepPixels >= 8, 'Scroll fixture row encoding is unusable.');
     return fixture;
   } catch (error) {
-    await forceStop(child);
+    await stopOwned(child, 'close', {});
     throw error;
   }
-}
-
-async function waitExit(child, timeoutMs) {
-  if (!child || child.exitCode !== null) return true;
-  return Promise.race([
-    once(child, 'exit').then(() => true),
-    delay(timeoutMs).then(() => false),
-  ]);
-}
-
-async function forceStop(child) {
-  if (!child?.pid || child.exitCode !== null) return;
-  try {
-    await execFileAsync('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
-      timeout: 10000, windowsHide: true,
-    });
-  } catch (error) {
-    if (child.exitCode === null) {
-      child.kill();
-      await waitExit(child, 5000);
-      throw new Error(`Owned process tree cleanup was not confirmed for ${child.pid}: ${error.message}`);
-    }
-  }
-  assert(await waitExit(child, 5000), `Owned process ${child.pid} survived cleanup.`);
-}
-
-async function stopOwned(child, closeAction, options) {
-  if (!child || child.exitCode !== null) return;
-  try { await native(closeAction, options); } catch { /* bounded PID cleanup below */ }
-  if (await waitExit(child, 5000)) return;
-  await forceStop(child);
 }
 
 async function connectPage(child, port) {
@@ -292,7 +262,7 @@ async function launchApp(candidate, webviewData, instanceId, { shellOnly = true 
       .sort((a, b) => area(b) - area(a))[0];
     return { child, browser, page, main, port };
   } catch (error) {
-    try { await forceStop(child); }
+    try { await stopOwned(child, 'close', {}); }
     catch (cleanupError) {
       throw new AggregateError([error, cleanupError],
         `Isolated app startup and owned PID cleanup both failed: ${error.message}; ${cleanupError.message}`);
@@ -331,6 +301,48 @@ async function sessionEvidence(page) {
 
 async function recognitionSnapshot(page) {
   return page.evaluate(() => window.__scrollCaptureRecognition ?? null);
+}
+
+// Public state excludes transient status/busy fields: a cancelled capture must
+// preserve the exact prior session, revision and original/final resource refs.
+async function screenshotOutput(page) {
+  const state = await recognitionSnapshot(page);
+  return { session: state?.screenshotSession ?? null, input: state?.input ?? null,
+    result: state?.result ?? null, resultImage: state?.resultImage ?? null };
+}
+
+async function assertStoppedOutput(app, before, statusCode = 'recognition.cancelled') {
+  await app.page.waitForFunction((statusCode) =>
+    window.__scrollCaptureRecognition?.statusCode === statusCode &&
+    window.__scrollCaptureRecognition?.isBusy === false, statusCode, { timeout: 15000 });
+  assert.deepEqual(await screenshotOutput(app.page), before,
+    'Stopped capture changed the previous session, revision or image resources.');
+}
+
+async function connectEditor(app) {
+  const until = Date.now() + 15000;
+  let page;
+  while (Date.now() < until) {
+    page = app.browser.contexts().flatMap((context) => context.pages())
+      .find((item) => !item.isClosed() && item !== app.page && item !== app.editorPage &&
+        item.url().includes('#/imageEdit?scene=1'));
+    if (page) break;
+    await delay(100);
+  }
+  assert(page, 'Screenshot editor WebView did not appear.');
+  await page.getByRole('heading', { name: '截图现场编辑', exact: true }).waitFor({ timeout: 15000 });
+  await page.getByLabel('图片检查画布').waitFor({ timeout: 15000 });
+  const session = (await screenshotOutput(app.page)).session;
+  assert(session?.sessionId, 'Main window published no screenshot session for the editor.');
+  await expect(page.locator('.canvas-editor')).toHaveAttribute(
+    'data-screenshot-session', session.sessionId, { timeout: 15000 });
+  app.editorPage = page;
+  const editors = (await windows(app.child.pid)).filter((item) => item.Visible &&
+    item.Handle !== app.main.Handle && area(item) > 20000);
+  assert.equal(editors.length, 1, 'Expected exactly one owned screenshot editor window.');
+  app.editorWindow = editors[0];
+  app.evidence.editor = { url: page.url(), handle: app.editorWindow.Handle, sessionId: session.sessionId };
+  return page;
 }
 
 async function observeNextAnnotationUpload(page) {
@@ -372,6 +384,8 @@ async function observeNextAnnotationUpload(page) {
 // text-layer preparation and the explicit recognition each export one final
 // PNG) without altering the request. Records stay readable after restore.
 async function watchAnnotationUploads(page) {
+  const uploads = [];
+  await page.exposeFunction('__scrollCaptureRecordUpload', (entry) => uploads.push(entry));
   await page.evaluate(() => {
     const originalFetch = window.fetch;
     const observed = [];
@@ -387,13 +401,20 @@ async function watchAnnotationUploads(page) {
             entry.mimeType = body.type;
             entry.byteLength = body.size;
             body.arrayBuffer().then(
-              (buffer) => { entry.bytes = Array.from(new Uint8Array(buffer)); },
-              () => { entry.problem = 'Blob observation failed'; },
+              (buffer) => {
+                entry.bytes = Array.from(new Uint8Array(buffer));
+                return window.__scrollCaptureRecordUpload(entry);
+              },
+              () => {
+                entry.problem = 'Blob observation failed';
+                return window.__scrollCaptureRecordUpload(entry);
+              },
             );
           }
         } catch {
           entry.problem = 'Blob observation failed';
         }
+        if (entry.problem) void window.__scrollCaptureRecordUpload(entry);
       }
       return originalFetch.apply(this, arguments);
     };
@@ -402,6 +423,9 @@ async function watchAnnotationUploads(page) {
       delete window.__scrollCaptureRestoreUploads;
     };
   });
+  // Scene recognition closes this WebView; retain the passive upload evidence
+  // in the harness before that handoff instead of reading a closed page.
+  return uploads;
 }
 
 async function controlBar(appPid, automationId) {
@@ -458,22 +482,23 @@ async function dragSelection(app, fixture, selection, overlayHandle) {
   await native('mouse-move', { AppPid: appPid, X: x1, Y: y1 });
   await delay(350);
   await native('mouse-up', { AppPid: appPid, X: x1, Y: y1 });
-  // The production picker may keep a preview after drag-release; one real
-  // Enter confirms it, mirroring the owned keyboard confirm mode.
+  // Keep the manual selection geometry proof before choosing its native action.
   await delay(1200);
   app.evidence.selectionText = JSON.parse(await native('window-text', { AppPid: appPid, Handle: overlayHandle }));
   const size = app.evidence.selectionText.map((text) => text.match(/^手动 · (\d+) × (\d+) px/)).find(Boolean);
   const point = app.evidence.selectionText.map((text) => text.match(/^(-?\d+), (-?\d+)\n#/)).find(Boolean);
-  assert(size && point, 'Picker did not expose a manual selection and physical pointer location.');
-  const actual = { width: Number(size[1]), height: Number(size[2]), right: Number(point[1]), bottom: Number(point[2]) };
+  assert(size && point, 'Picker did not expose a manual selection and bottom-right sample pixel.');
+  // The bottom-right magnifier samples the last included pixel, not the exclusive edge.
+  const actual = { width: Number(size[1]), height: Number(size[2]), right: Number(point[1]) + 1, bottom: Number(point[2]) + 1 };
   actual.left = actual.right - actual.width;
   actual.top = actual.bottom - actual.height;
   for (const edge of ['left', 'top', 'right', 'bottom'])
     assert(Math.abs(actual[edge] - selection[edge]) <= 5, `Picker coordinate mapping differs by more than five pixels at ${edge}.`);
   Object.assign(selection, actual);
-  if ((await windows(appPid)).some(isOverlay(app, fixture))) {
-    await native('key', { AppPid: appPid, Key: 'enter' });
-  }
+  app.evidence.selectionAction = JSON.parse(await native('selection-scroll',
+    { AppPid: appPid, Handle: overlayHandle }));
+  assert.equal(app.evidence.selectionAction.windowHandle, overlayHandle,
+    'Long screenshot action did not belong to the selected picker.');
   const until = Date.now() + 10000;
   while (Date.now() < until) {
     if (!(await windows(appPid)).some(isOverlay(app, fixture))) return;
@@ -482,7 +507,7 @@ async function dragSelection(app, fixture, selection, overlayHandle) {
   throw new Error('Region picker overlay did not close after owned selection.');
 }
 
-// Opens 长截图, drags the fixed fixture-internal selection (inset from the
+// Opens 截图, drags the fixed fixture-internal selection (inset from the
 // client edges so borders and any chrome are excluded) and waits for the
 // native scroll control bar.
 async function startScrollSession(app, fixture) {
@@ -499,7 +524,7 @@ async function startScrollSession(app, fixture) {
     X: fixture.clientRect.left + 100, Y: fixture.clientRect.top + 100 }));
   app.evidence.sourceBeforeSelection = sourceProbe;
   assert.equal(sourceProbe.HitPid, fixture.pid, 'Synthetic source is obscured before selection.');
-  await app.page.getByRole('button', { name: '长截图' }).click();
+  await app.page.getByRole('button', { name: '截图', exact: true }).click();
   const overlays = await waitForWindows(app.child.pid, isOverlay(app, fixture), 15000);
   const overlay = overlays.sort((a, b) => area(b) - area(a))[0];
   assert.equal(Number(await native('taskbar-state')), app.evidence.taskbarStateBefore,
@@ -545,6 +570,7 @@ async function confirmCapturePreview(appPid, expectedText = '确认预览并继�
 
 async function runScrollCapture(app, fixture, { cancel }) {
   const appPid = app.child.pid;
+  const outputBefore = await screenshotOutput(app.page);
   const opened = await startScrollSession(app, fixture);
   const barTexts = [];
   app.evidence.activeCapture = { selection: opened.selection, barTexts };
@@ -560,7 +586,8 @@ async function runScrollCapture(app, fixture, { cancel }) {
     const restored = await windows(appPid);
     assert(restored.some((item) => item.Handle === app.main.Handle && item.Visible),
       'Cancelled scroll capture did not restore the main window.');
-    return { cancelled: true, barTexts, ...opened };
+    await assertStoppedOutput(app, outputBefore);
+    return { cancelled: true, preservedOutput: outputBefore, barTexts, ...opened };
   }
 
   const controlWindow = (await windows(appPid)).find((item) => item.Handle === opened.start.windowHandle);
@@ -626,10 +653,10 @@ async function runScrollCapture(app, fixture, { cancel }) {
   assert(restored.some((item) => item.Handle === app.main.Handle && item.Visible),
     'Finished scroll capture did not restore the main window.');
 
-  await app.page.getByRole('heading', { name: '单次识别' }).waitFor({ timeout: 15000 });
-  const editor = app.page.getByLabel('图片检查画布');
+  const page = await connectEditor(app);
+  const editor = page.getByLabel('图片检查画布');
   await editor.waitFor({ timeout: 15000 });
-  await app.page.waitForFunction(() => {
+  await page.waitForFunction(() => {
     const canvas = document.querySelector('canvas[aria-label="图片检查画布"]');
     if (!canvas) return false;
     const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
@@ -642,31 +669,33 @@ async function runScrollCapture(app, fixture, { cancel }) {
 }
 
 async function copySessionPng(app, evidenceRoot, outputName = 'scroll-capture-stitched.png') {
-  await observeNextAnnotationUpload(app.page);
+  const page = app.editorPage;
+  assert(page && !page.isClosed(), 'Screenshot editor is not available for export.');
+  await observeNextAnnotationUpload(page);
   try {
-    const requestPromise = app.page.waitForRequest((request) =>
+    const requestPromise = page.waitForRequest((request) =>
       request.method() === 'POST' && request.url() === 'https://app.vibeocr/__annotation',
     { timeout: 15000 });
-    await app.page.getByRole('button', { name: '复制标注图' }).click();
+    await page.getByRole('button', { name: '复制标注图' }).click();
     const request = await requestPromise;
     const response = await request.response();
     assert.equal(response?.status(), 201, 'Public annotation upload was not accepted.');
-    await app.page.waitForFunction(() => {
+    await page.waitForFunction(() => {
       const upload = window.__scrollCaptureUpload;
       return upload && (Array.isArray(upload.bytes) || upload.problem !== null);
     }, null, { timeout: 8000 });
-    const upload = await app.page.evaluate(() => window.__scrollCaptureUpload);
+    const upload = await page.evaluate(() => window.__scrollCaptureUpload);
     assert.equal(upload.count, 1, `Expected one product PNG upload, saw ${upload.count}.`);
     assert.equal(upload.problem, null, `Product Blob observation failed: ${upload.problem}.`);
     assert.equal(upload.mimeType, 'image/png', 'Product upload Blob was not image/png.');
     const png = Buffer.from(upload.bytes);
     assert(png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])),
       'Product upload Blob is not PNG.');
-    await app.page.getByText('已复制截图副本', { exact: false }).waitFor({ timeout: 8000 });
+    await page.getByText('已复制截图副本', { exact: false }).waitFor({ timeout: 8000 });
     fs.writeFileSync(path.join(evidenceRoot, outputName), png);
     return png;
   } finally {
-    await app.page.evaluate(() => window.__scrollCaptureRestoreFetch?.()).catch(() => {});
+    await page.evaluate(() => window.__scrollCaptureRestoreFetch?.()).catch(() => {});
   }
 }
 
@@ -835,12 +864,12 @@ async function waitForScreenshotRecognition(app, sessionId, revision) {
 async function verifyPreparedCandidateRecognition(app, {
   evidenceRoot, fixture, selection, analysis, sessionId, revision,
 }) {
-  const { page } = app;
+  const page = app.editorPage;
   const startY = selection.top - fixture.clientRect.top;
   const maxRow = Math.floor((analysis.height - 1 + startY) / fixture.rowHeight);
   assert(requiredTopRow <= maxRow && requiredBottomRow <= maxRow,
     'Stitched document does not reach the required coverage rows for this fixture.');
-  await watchAnnotationUploads(page);
+  const recognitionUploads = await watchAnnotationUploads(page);
   try {
     // Observe public state before submitting anything: the catalog proves the
     // real Runtime service is up, so 取字 never races Supervisor startup.
@@ -852,8 +881,8 @@ async function verifyPreparedCandidateRecognition(app, {
       return uploads.length >= 1 &&
         (Array.isArray(uploads[0].bytes) || uploads[0].problem !== null);
     }, null, { timeout: 30000 });
-    const uploads = () => page.evaluate(() => window.__scrollCaptureUploads ?? []);
-    const uploaded = (await uploads()).find((item) => Array.isArray(item.bytes));
+    const uploaded = (await page.evaluate(() => window.__scrollCaptureUploads ?? []))
+      .find((item) => Array.isArray(item.bytes));
     assert(uploaded, 'Text layer preparation produced no observable PNG upload.');
     assert.equal(uploaded.problem, null,
       `Text layer upload observation failed: ${uploaded.problem}.`);
@@ -899,24 +928,24 @@ async function verifyPreparedCandidateRecognition(app, {
       normalizeOcrText([...layerLines.map((line) => line.text), ...domLines].join('\n')),
       maxRow);
 
+    const editorClosed = page.waitForEvent('close', { timeout: 30000 });
     await page.getByRole('button', { name: '识别当前图' }).click();
+    await editorClosed;
     const completed = await waitForScreenshotRecognition(app, sessionId, revision);
-    await page.waitForFunction(() =>
+    await app.page.waitForFunction(() =>
       (document.querySelector('.result-document')?.textContent ?? '').trim().length > 0,
       null, { timeout: 30000 });
-    const resultText = await page.evaluate(async (url) =>
+    const resultText = await app.page.evaluate(async (url) =>
       (await (await fetch(url, { cache: 'no-store' })).text()), completed.result.url);
     const resultRows = assertRequiredRows('Explicit recognition',
       normalizeOcrText(resultText), maxRow);
     fs.writeFileSync(path.join(evidenceRoot, 'scroll-recognition-result.txt'), resultText);
     // Both exports must have resolved their async Blob observation before any
     // byte comparison; length equality alone never counts as content equality.
-    await page.waitForFunction(() => {
-      const uploads = window.__scrollCaptureUploads ?? [];
-      return uploads.length >= 2 && uploads.every((item) =>
-        Array.isArray(item.bytes) || item.problem !== null);
-    }, null, { timeout: 30000 });
-    const recognitionUploads = await uploads();
+    const uploadDeadline = Date.now() + 30000;
+    while (recognitionUploads.length < 2 && Date.now() < uploadDeadline) await delay(100);
+    assert(recognitionUploads.length >= 2,
+      'Text-layer and recognition uploads were not both observed before editor handoff.');
     const recognized = recognitionUploads[recognitionUploads.length - 1];
     assert.equal(recognized?.problem, null,
       `Explicit recognition upload observation failed: ${recognized?.problem}.`);
@@ -926,7 +955,7 @@ async function verifyPreparedCandidateRecognition(app, {
     if (Array.isArray(recognized?.bytes))
       fs.writeFileSync(path.join(evidenceRoot, 'scroll-recognition-input.png'),
         Buffer.from(recognized.bytes));
-    await page.screenshot({ path: path.join(evidenceRoot, 'scroll-recognition.png') });
+    await app.page.screenshot({ path: path.join(evidenceRoot, 'scroll-recognition.png') });
     return {
       textLayer: {
         status: layer.status,
@@ -1006,6 +1035,7 @@ async function verifyControllerFailureModes(app, fixture) {
   const results = [];
   const runNegative = async ({ scenario, before, expectedParts, trigger, restore = true }) => {
     const sessionsBefore = await sessionEvidence(app.page);
+    const outputBefore = await screenshotOutput(app.page);
     if (before) await setScenario(before);
     await startScrollSession(app, fixture);
     await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-start' });
@@ -1014,12 +1044,13 @@ async function verifyControllerFailureModes(app, fixture) {
       controllerErrorTimeoutMs);
     await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-cancel' });
     await waitForControlBarGone(appPid, 'scroll-capture-start', 10000);
-    await app.page.waitForFunction(() => window.__scrollCaptureCurrentSession === null);
+    await assertStoppedOutput(app, outputBefore, 'recognition.failed');
     const sessionsAfter = await sessionEvidence(app.page);
     assert.deepEqual(sessionsAfter, sessionsBefore,
       `${scenario} round created or changed a screenshot session.`);
     if (restore) await setScenario('normal');
-    results.push({ scenario, barText: bar.text });
+    results.push({ scenario, barText: bar.text, terminalStatus: 'recognition.failed',
+      preservedOutput: outputBefore });
   };
 
   // All-white content set before start: the first stable frame has no vertical
@@ -1124,7 +1155,7 @@ async function verifyReverseRecovery(app, fixture) {
   assert(recoveredId && !priorIds.includes(recoveredId) &&
     added.every((item) => item.sessionId === recoveredId),
     'Explicit confirmation must create exactly one new screenshot session.');
-  await app.page.getByLabel('图片检查画布').waitFor({ timeout: 15000 });
+  await connectEditor(app);
   const outputName = 'scroll-capture-reverse-recovered.png';
   const png = await copySessionPng(app, app.evidence.smokeRoot, outputName);
   // The earlier full-capture round left the fixture at wheelSteps * step.
@@ -1140,6 +1171,7 @@ async function verifyReverseRecovery(app, fixture) {
   // Preserve the original reverse cancellation check as a separate real round.
   // Its history now includes the explicitly confirmed recovered output above.
   const beforeCancel = await sessionEvidence(app.page);
+  const outputBeforeCancel = await screenshotOutput(app.page);
   await startScrollSession(app, fixture);
   await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-start' });
   await confirmCapturePreview(appPid);
@@ -1147,7 +1179,7 @@ async function verifyReverseRecovery(app, fixture) {
   await waitForCapturePreview(appPid, '丢弃反向帧并继续');
   await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-cancel' });
   await waitForControlBarGone(appPid, 'scroll-capture-start', 10000);
-  await app.page.waitForFunction(() => window.__scrollCaptureCurrentSession === null);
+  await assertStoppedOutput(app, outputBeforeCancel);
   assert.deepEqual(await sessionEvidence(app.page), beforeCancel,
     'Cancelling reverse review created or changed a screenshot session.');
   return {
@@ -1200,7 +1232,7 @@ async function main() {
     evidence.taskbarStateBefore = Number(await native('taskbar-state'));
     evidence.appPids.push(app.child.pid);
     await watchScreenshotSession(app.page);
-    await app.page.getByRole('button', { name: '长截图' }).waitFor({ timeout: 20000 });
+    await app.page.getByRole('button', { name: '截图', exact: true }).waitFor({ timeout: 20000 });
     fixture = await startFixture();
     evidence.fixture = {
       pid: fixture.pid, rootHandle: fixture.root, rootRect: fixture.rootRect,
@@ -1218,7 +1250,7 @@ async function main() {
     assert.equal((await sessionEvidence(app.page)).length, 0,
       'Cancelled scroll capture broadcast a screenshot session.');
     evidence.cancelBeforeOutput = {
-      cancelled: true, overlayHandle: cancelledFirst.overlayHandle,
+      cancelled: true, preservedOutput: cancelledFirst.preservedOutput, overlayHandle: cancelledFirst.overlayHandle,
       barTexts: cancelledFirst.barTexts,
     };
 
@@ -1239,13 +1271,14 @@ async function main() {
 
     const png = await copySessionPng(app, smokeRoot);
     const savedPath = path.join(smokeRoot, 'scroll-capture-native-save.png');
-    await app.page.getByRole('button', { name: '保存标注图', exact: true }).click();
-    await native('save-file', { AppPid: app.child.pid, Handle: app.main.Handle,
+    const editorPage = app.editorPage;
+    await editorPage.getByRole('button', { name: '保存标注图', exact: true }).click();
+    await native('save-file', { AppPid: app.child.pid, Handle: app.editorWindow.Handle,
       OutputPath: savedPath, EvidenceRoot: smokeRoot }, 30000);
     const saveDeadline = Date.now() + 15000;
     while (!fs.existsSync(savedPath) && Date.now() < saveDeadline) await delay(150);
     assert(fs.existsSync(savedPath), 'Native file picker did not save the long screenshot.');
-    await app.page.getByText('已保存截图副本', { exact: false }).waitFor({ timeout: 15000 });
+    await editorPage.getByText('已保存截图副本', { exact: false }).waitFor({ timeout: 15000 });
     const savedPng = fs.readFileSync(savedPath);
     assert(savedPng.equals(png), 'Native saved PNG differs from the same unedited screenshot export.');
     evidence.nativeSave = { path: savedPath, bytes: savedPng.length, equalsCopiedImage: true };
@@ -1280,14 +1313,14 @@ async function main() {
     const sessionIds = new Set(sessionsBeforeEdit.map((item) => item.sessionId));
     assert.equal(sessionIds.size, 1, 'More than one screenshot session was broadcast.');
     const revisionBefore = sessionsBeforeEdit.at(-1).revision ?? 0;
-    await app.page.getByRole('button', { name: '矩形', exact: true }).click();
-    await app.page.getByRole('combobox', { name: '线条宽度' }).selectOption('8');
-    const box = await app.page.getByLabel('图片检查画布').boundingBox();
+    await editorPage.getByRole('button', { name: '矩形', exact: true }).click();
+    await editorPage.getByRole('combobox', { name: '线条宽度' }).selectOption('8');
+    const box = await editorPage.getByLabel('图片检查画布').boundingBox();
     assert(box && box.width > 100 && box.height > 100, 'Editor canvas has no usable bounds.');
-    await app.page.mouse.move(box.x + box.width * 0.35, box.y + box.height * 0.45);
-    await app.page.mouse.down();
-    await app.page.mouse.move(box.x + box.width * 0.65, box.y + box.height * 0.55);
-    await app.page.mouse.up();
+    await editorPage.mouse.move(box.x + box.width * 0.35, box.y + box.height * 0.45);
+    await editorPage.mouse.down();
+    await editorPage.mouse.move(box.x + box.width * 0.65, box.y + box.height * 0.55);
+    await editorPage.mouse.up();
     await app.page.waitForFunction((before) => {
       const sessions = window.__scrollCaptureSessions ?? [];
       const last = sessions.at(-1);
@@ -1301,7 +1334,7 @@ async function main() {
       revisionBefore, revisionAfter: sessionsAfterEdit.at(-1).revision,
       zeroAutoOcr: 'UNVERIFIED in this harness; covered by ScreenshotSessionWorkbenchTests',
     };
-    await app.page.screenshot({ path: path.join(smokeRoot, 'scroll-capture-editor.png') });
+    await editorPage.screenshot({ path: path.join(smokeRoot, 'scroll-capture-editor.png') });
 
     // 3b) Prepared-candidate mode only: real Runtime text layer plus explicit
     // OCR over the same stitched final image, before the cancel phase runs.
@@ -1320,11 +1353,11 @@ async function main() {
 
     // 4) Cancel after a finished output: the previous output must not become a new session.
     const cancelledAgain = await runScrollCapture(app, fixture, { cancel: true });
-    await app.page.waitForFunction(() => window.__scrollCaptureCurrentSession === null);
     const sessionsAfterCancel = await sessionEvidence(app.page);
     assert(sessionsAfterCancel.every((item) => item.sessionId === sessionsBeforeEdit[0].sessionId),
       'Cancelled capture incorrectly published the previous image as a new session.');
-    evidence.cancelAfterOutput = { cancelled: true, barTexts: cancelledAgain.barTexts };
+    evidence.cancelAfterOutput = { cancelled: true, preservedOutput: cancelledAgain.preservedOutput,
+      barTexts: cancelledAgain.barTexts };
 
     evidence.reverseRecovery = await verifyReverseRecovery(app, fixture);
     evidence.reverseRejected = evidence.reverseRecovery.rejected;
@@ -1346,7 +1379,7 @@ async function main() {
     const cleanupErrors = [];
     if (fixture) {
       try { await stopOwned(fixture.child, 'close', {
-        FixturePid: fixture.pid, Handle: fixture.root,
+        AppPid: fixture.pid, Handle: fixture.root,
       }); } catch (error) { cleanupErrors.push(error); }
     }
     if (app) {
