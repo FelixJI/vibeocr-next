@@ -114,6 +114,8 @@ internal static class ScrollCaptureSession
     private CancellationTokenRegistration _registration;
 
     internal Window ControlWindow => _window;
+    internal bool HasReleasedCaptureResources => _loop?.IsCompleted != false && _previewTask.IsCompleted &&
+        _stitcher is null && _lastCaptured is null && _pendingFrame is null && _finalFrame is null;
 
     public Session(nint owner, PhysicalRectangle bounds, CancellationToken external)
     {
@@ -1049,6 +1051,7 @@ internal static class ScrollCaptureSession
       }
       HideReview();
       _initialPreviewConfirmed = true;
+      _finishButton.IsEnabled = _stitcher is not null;
       _reviewPending = false;
       _statusText.Text = "采集中：按所选方向滚动并停稳；可点击完成预览已收选段。";
       SetForegroundWindow(_source);
@@ -1096,6 +1099,7 @@ internal static class ScrollCaptureSession
       var final = Create();
       var pending = Create();
       var first = Create();
+      var manual = Create();
       var witness = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
       try
       {
@@ -1113,6 +1117,18 @@ internal static class ScrollCaptureSession
         Check((await final._completion.Task)?.Pixels.SequenceEqual(frame.Pixels) == true,
             "Confirmation must return the final decoded frame.");
 
+        manual._stableStreak = StableComparisonsRequired;
+        manual.HandleStable(frame);
+        await manual._previewTask;
+        Check(!manual._finishButton.IsEnabled, "Initial preview must precede finishing.");
+        manual.OnConfirm(manual._confirmButton, new RoutedEventArgs());
+        Check(manual._finishButton.IsEnabled, "Confirmed first frame must restore the finish button.");
+        manual._appendedForCurrentStreak = false;
+        manual.HandleStable(frame);
+        Check(manual._finishButton.IsEnabled && manual._stitcher?.FrameCount == 1,
+            "Duplicate stable frames must retain single-frame completion without increasing the frame count.");
+        manual.OnFinish(manual._finishButton, new RoutedEventArgs());
+        Check(manual._finishRequested, "The enabled finish action must request final sampling.");
         var invalid = new CapturedFrame([], 48, 96, 48 * 4, "BGRA8");
         first.ReportAccepted(new VerticalScrollStitcher(frame), invalid);
         first.PauseForReview("synthetic initial frame", null);
@@ -1135,7 +1151,7 @@ internal static class ScrollCaptureSession
       finally
       {
         witness.TrySetResult();
-        foreach (Session session in new[] { final, pending, first })
+        foreach (Session session in new[] { final, pending, first, manual })
         {
           session._lifecycle.Cancel();
           await session._previewTask;

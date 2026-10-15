@@ -384,7 +384,7 @@ public sealed class InputService : IInputService
             RecognitionInput input = new RecognitionInput(
                 EncodeTopDownBmp(
                     selection.Bgra,
-                    selection.Bounds.Width,
+                    selection.PixelWidth ?? selection.Bounds.Width,
                     selection.PixelHeight ?? selection.Bounds.Height,
                     selection.Stride),
                 "image/bmp",

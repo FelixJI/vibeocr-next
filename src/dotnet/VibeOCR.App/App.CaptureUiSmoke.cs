@@ -108,19 +108,19 @@ public sealed partial class App
         var peer = new ButtonAutomationPeer(Button(id));
         ((IInvokeProvider)peer.GetPattern(PatternInterface.Invoke)).Invoke();
       }
+      bool success = scenario == "ScrollCaptureAutoScrollRequiresPreviewAndReturnsConfirmedSegment";
+      FindScrollSmokeControl<Microsoft.UI.Xaml.Controls.CheckBox>(root, "scroll-capture-automatic").IsChecked = success;
+      Invoke("scroll-capture-start");
+      var confirm = Button("scroll-capture-confirm");
+      await WaitForScrollUiAsync(() => confirm.Visibility == Visibility.Visible && confirm.IsEnabled, cancellation.Token);
+      Check(viewer.VerticalOffset == 0 && !capture.IsCompleted, "Initial preview must precede scrolling/output.");
       if (scenario == "ScrollCaptureCancellationDiscardsFramesAndClosesController")
       {
         Invoke("scroll-capture-cancel");
-        Check(await capture is null, "Cancelled scroll capture must not return a frame.");
+        Check(await capture is null, "Cancellation after the first accepted frame must not return a partial image.");
       }
       else
       {
-        bool success = scenario == "ScrollCaptureAutoScrollRequiresPreviewAndReturnsConfirmedSegment";
-        FindScrollSmokeControl<Microsoft.UI.Xaml.Controls.CheckBox>(root, "scroll-capture-automatic").IsChecked = success;
-        Invoke("scroll-capture-start");
-        var confirm = Button("scroll-capture-confirm");
-        await WaitForScrollUiAsync(() => confirm.Visibility == Visibility.Visible && confirm.IsEnabled, cancellation.Token);
-        Check(viewer.VerticalOffset == 0 && !capture.IsCompleted, "Initial preview must precede scrolling/output.");
         if (!success)
         {
           source.Close();
@@ -149,6 +149,7 @@ public sealed partial class App
               "Automatic standard scrolling must return the confirmed multi-frame segment.");
         }
       }
+      Check(session.HasReleasedCaptureResources, "The capture loop and retained frames must be released before returning.");
       Check(!IsWindowVisible(controllerHandle),
           "Capture controller must be closed before returning.");
     }

@@ -174,6 +174,31 @@ public sealed class VerticalScrollStitcherTests
     Assert.Throws<OperationCanceledException>(() => new VerticalScrollStitcher(first).BuildFrame(cancel.Token));
   }
   [Fact]
+  public void HorizontalCaptureHonorsWidthLimitAndCancelsWithoutChangingAcceptedState()
+  {
+    const int limit = VerticalScrollStitcher.MaximumDimension;
+    byte[] document = RenderDocument(8, limit + 8);
+    CapturedFrame wide = Orient(FrameFromDocument(document, 8, 0, limit), ScrollCaptureDirection.Right);
+    var capped = new VerticalScrollStitcher(wide, ScrollCaptureDirection.Right);
+    Assert.Equal(ScrollAppendStatus.LimitReached, capped.Append(
+      Orient(FrameFromDocument(document, 8, 8, limit), ScrollCaptureDirection.Right),
+      TestContext.Current.CancellationToken).Status);
+    Assert.Equal(limit, capped.Width);
+    Assert.Equal(wide.Pixels, capped.BuildFrame(TestContext.Current.CancellationToken).Pixels);
+
+    CapturedFrame first = Orient(PeriodicFrame(Width, FrameHeight, 8, 0), ScrollCaptureDirection.Right);
+    CapturedFrame next = Orient(PeriodicFrame(Width, FrameHeight, 8, 4), ScrollCaptureDirection.Right);
+    var stitcher = new VerticalScrollStitcher(first, ScrollCaptureDirection.Right);
+    using var cancellation = new CancellationTokenSource();
+    Assert.Throws<OperationCanceledException>(() => stitcher.AppendCore(next, cancellation.Token, offset =>
+    {
+      if (offset == 2) cancellation.Cancel();
+    }));
+    Assert.Equal(1, stitcher.FrameCount);
+    Assert.Equal(first.Width, stitcher.Width);
+    Assert.Equal(first.Pixels, stitcher.BuildFrame(TestContext.Current.CancellationToken).Pixels);
+  }
+  [Fact]
   public void ConstructorStoresFirstFrameAndBuildsExactCopy()
   {
     byte[] document = RenderDocument(Width, FrameHeight);
