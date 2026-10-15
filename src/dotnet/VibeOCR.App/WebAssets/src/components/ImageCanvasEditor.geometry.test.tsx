@@ -1698,11 +1698,12 @@ describe("G1 手柄零位移", () => {
       });
       harness.flush();
       // 悬停在同一手柄：预览仍保留原包围框，退化形状不会因 Shift 自动展开。
+      const padding = toolName === "屏蔽" ? 5 : 6.5;
       expect(drawnRects()).toContainEqual([
-        left - 5,
-        top - 5,
-        width + 10,
-        height + 10,
+        left - padding,
+        top - padding,
+        width + padding * 2,
+        height + padding * 2,
       ]);
       fireEvent.pointerUp(canvas, {
         pointerId: 2,
