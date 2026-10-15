@@ -333,6 +333,170 @@ public sealed class ImageImportWorkbenchTests
     finally { release.TrySetResult(); Directory.Delete(root, recursive: true); }
   }
   [Fact]
+  public async Task DocumentCancellationBetweenRegistrationAndReadRetiresBeforeDisposingChildToken()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var store = new WorkbenchAnnotationStore(root);
+      var handler = CreateHandler(broker, store, root, InputService.CreateImportReader(), new TaggedInputService());
+      Guid session = await EstablishImageEditSessionAsync(handler);
+      var app = new WorkbenchApplication([], WorkbenchRoute.ImageEdit, handler);
+      var host = new WebWorkbenchHost(app, broker, store, applicationOwner: false);
+      Task? resetting = null;
+      Exception? cancellationError = null;
+      try
+      {
+        handler.Image.ImportDocumentRegistered = document =>
+        {
+          resetting = Task.Run(host.ResetWebDocument);
+          // Cancel已置位；它的retirement callback必然等待当前StartSystemImport通道锁。
+          Assert.True(document.WaitHandle.WaitOne(TimeSpan.FromSeconds(10)));
+        };
+        var package = new Windows.ApplicationModel.DataTransfer.DataPackage();
+        package.SetText("注册窗口退役，不得读取");
+        await host.ImportDroppedContentAsync(package.GetView(), WorkbenchRoute.ImageEdit);
+        Assert.NotNull(resetting);
+        cancellationError = await Record.ExceptionAsync(() => resetting.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
+        Assert.Null(cancellationError);
+        ImageEditWorkbenchState current = Assert.IsType<ImageEditWorkbenchState>((await app.BootstrapAsync(TestContext.Current.CancellationToken)).States.Single(state => state.Scope == "imageEdit").State);
+        Assert.Null(current.Import);
+        Assert.False(current.IsBusy);
+        Assert.Equal(session.ToString("N"), current.ScreenshotSession?.SessionId);
+        Assert.Empty(TextSessionFiles(root, "注册窗口退役，不得读取"));
+        handler.Image.ImportDocumentRegistered = null;
+        using var captured = new StateAwaiter<ImageEditWorkbenchState>(handler, state => state.Import is not null);
+        Assert.True((await host.ImportDroppedContentAsync(package.GetView(), WorkbenchRoute.ImageEdit)).Ok);
+        Assert.Single((await captured.Task).Import!.Items);
+      }
+      finally
+      {
+        handler.Image.ImportDocumentRegistered = null;
+        await host.DisposeAsync();
+        try { await app.DisposeAsync(); }
+        // 旧实现的同一个已Dispose child也会使清理抛出；保留上面的首个取消异常作权威反例。
+        catch (ObjectDisposedException) when (cancellationError is AggregateException aggregate &&
+          aggregate.Flatten().InnerExceptions.Any(error => error is ObjectDisposedException)) { }
+      }
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+  [Fact]
+  public async Task RetiringOneDocumentPreservesAnotherHostsLatestImportInSameChannel()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var store = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(broker, store, root, InputService.CreateImportReader(), new TaggedInputService());
+      await EstablishImageEditSessionAsync(handler);
+      await using var app = new WorkbenchApplication([], WorkbenchRoute.ImageEdit, handler);
+      await using var first = new WebWorkbenchHost(app, broker, store, applicationOwner: false);
+      await using var second = new WebWorkbenchHost(app, broker, store, applicationOwner: false);
+      var oldPackage = new Windows.ApplicationModel.DataTransfer.DataPackage();
+      oldPackage.SetText("旧host独有文本");
+      Assert.True((await first.ImportDroppedContentAsync(oldPackage.GetView(), WorkbenchRoute.ImageEdit)).Ok);
+      var livePackage = new Windows.ApplicationModel.DataTransfer.DataPackage();
+      livePackage.SetText("新host独有文本");
+      ImageEditWorkbenchState live;
+      using (var captured = new StateAwaiter<ImageEditWorkbenchState>(handler, state => state.Import is not null))
+      {
+        Assert.True((await second.ImportDroppedContentAsync(livePackage.GetView(), WorkbenchRoute.ImageEdit)).Ok);
+        live = await captured.Task;
+      }
+      first.ResetWebDocument();
+      WorkbenchBootstrap replay = await app.BootstrapAsync(TestContext.Current.CancellationToken);
+      Assert.Equal(live.Import!.RequestId, Assert.IsType<ImageEditWorkbenchState>(replay.States.Single(state => state.Scope == "imageEdit").State).Import?.RequestId);
+      Assert.Empty(TextSessionFiles(root, "旧host独有文本"));
+      Assert.Single(TextSessionFiles(root, "新host独有文本"));
+      second.ResetWebDocument();
+      Assert.Empty(TextSessionFiles(root, "新host独有文本"));
+      replay = await app.BootstrapAsync(TestContext.Current.CancellationToken);
+      Assert.Null(Assert.IsType<ImageEditWorkbenchState>(replay.States.Single(state => state.Scope == "imageEdit").State).Import);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task ResetWebDocumentRetiresPublishedAndAdoptedAssetsWithoutTouchingOtherHost(bool acknowledge)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var store = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(broker, store, root, InputService.CreateImportReader(), new TaggedInputService());
+      Guid editSession = await EstablishImageEditSessionAsync(handler);
+      using (var capture = new StateAwaiter<RecognitionWorkbenchState>(handler, state => state.ScreenshotSession is not null))
+      {
+        await handler.ExecuteAsync(new PasteRecognitionImageForEditCommand(), TestContext.Current.CancellationToken);
+        await capture.Task;
+      }
+      await using var app = new WorkbenchApplication([], WorkbenchRoute.ImageEdit, handler);
+      await using var main = new WebWorkbenchHost(app, broker, store, applicationOwner: false);
+      await using var scene = new WebWorkbenchHost(app, broker, store, applicationOwner: false, fixedRoute: WorkbenchRoute.ImageEdit);
+      object document = new();
+      main.RegisterBridge(document, _ => { }, action => { action(); return true; });
+      string bootstrap = JsonSerializer.Serialize(new { version = 2, kind = "request", id = Guid.NewGuid(), type = "app.bootstrap", payload = new { } });
+      await main.ReceiveWebMessageAsync(bootstrap, document);
+      var otherPackage = new Windows.ApplicationModel.DataTransfer.DataPackage();
+      otherPackage.SetText("其他host仍然拥有的资源");
+      RecognitionWorkbenchState other;
+      using (var captured = new StateAwaiter<RecognitionWorkbenchState>(handler, state => state.Import is not null))
+      {
+        Assert.True((await scene.ImportDroppedContentAsync(otherPackage.GetView())).Ok);
+        other = await captured.Task;
+      }
+      using var stream = new Windows.Storage.Streams.InMemoryRandomAccessStream();
+      var encoder = await Windows.Graphics.Imaging.BitmapEncoder.CreateAsync(Windows.Graphics.Imaging.BitmapEncoder.PngEncoderId, stream);
+      encoder.SetPixelData(Windows.Graphics.Imaging.BitmapPixelFormat.Rgba8, Windows.Graphics.Imaging.BitmapAlphaMode.Straight,
+        1, 1, 96, 96, [255, 0, 0, 128]);
+      await encoder.FlushAsync();
+      using var reader = new Windows.Storage.Streams.DataReader(stream.GetInputStreamAt(0));
+      await reader.LoadAsync((uint)stream.Size);
+      byte[] png = new byte[checked((int)stream.Size)];
+      reader.ReadBytes(png);
+      string input = Path.Combine(root, "input.png");
+      await File.WriteAllBytesAsync(input, png, TestContext.Current.CancellationToken);
+      var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(input);
+      var package = new Windows.ApplicationModel.DataTransfer.DataPackage();
+      package.SetStorageItems(Enumerable.Repeat<Windows.Storage.IStorageItem>(file, 16));
+      ImageEditWorkbenchState imported;
+      using (var captured = new StateAwaiter<ImageEditWorkbenchState>(handler, state => state.Import is not null))
+      {
+        Assert.True((await main.ImportDroppedContentAsync(package.GetView(), WorkbenchRoute.ImageEdit)).Ok);
+        imported = await captured.Task;
+      }
+      Assert.Equal(16, imported.Import!.Items.Count);
+      if (acknowledge)
+        await app.ExecuteAsync(new WorkbenchCommandEnvelope(Guid.NewGuid(), new AckImageEditImportCommand(
+          editSession, 0, imported.Import.RequestId)), TestContext.Current.CancellationToken);
+      Assert.Equal(16, SessionFiles(root, png).Length);
+      // 不调用React cleanup：真实host Reload边界负责退役已经发布/采纳的资产。
+      main.ResetWebDocument();
+      await main.ReceiveWebMessageAsync(bootstrap, document);
+      WorkbenchBootstrap replay = await app.BootstrapAsync(TestContext.Current.CancellationToken);
+      ImageEditWorkbenchState current = Assert.IsType<ImageEditWorkbenchState>(replay.States.Single(state => state.Scope == "imageEdit").State);
+      Assert.Null(current.Import);
+      Assert.False(current.IsBusy);
+      Assert.Equal(editSession.ToString("N"), current.ScreenshotSession?.SessionId);
+      Assert.Empty(SessionFiles(root, png));
+      Assert.Equal(2, SessionFiles(root, [0x21, 0x02]).Length); // 两通道各自的基准都保留。
+      Assert.Single(TextSessionFiles(root, "其他host仍然拥有的资源"));
+      Assert.Equal(other.Import!.RequestId, Assert.IsType<RecognitionWorkbenchState>(replay.States.Single(state => state.Scope == "recognition").State).Import?.RequestId);
+      using (var captured = new StateAwaiter<ImageEditWorkbenchState>(handler, state => state.Import is not null))
+      {
+        Assert.True((await main.ImportDroppedContentAsync(package.GetView(), WorkbenchRoute.ImageEdit)).Ok);
+        Assert.Equal(16, (await captured.Task).Import!.Items.Count);
+      }
+      Assert.Equal(16, SessionFiles(root, png).Length);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+  [Fact]
   public async Task EmptyCanvasReadIsSingleFlightAndCloseCancelsItsProvider()
   {
     string root = TemporaryRoot();
