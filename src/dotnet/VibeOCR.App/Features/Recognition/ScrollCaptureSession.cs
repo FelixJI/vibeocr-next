@@ -1474,11 +1474,13 @@ internal static class ScrollCaptureSession
 
     internal static async Task VerifyPendingPreviewBoundsSelfCheckAsync()
     {
-      foreach ((int width, int height) in new[] { (32, 2160), (2160, 32), (32, 96) })
+      // 所有用例先创建窗口，避免关闭最后窗口后在下一次异步解码期间退出 App。
+      var sessions = new[] { CreateSelfCheckSession(32, 2160), CreateSelfCheckSession(2160, 32), CreateSelfCheckSession(32, 96) };
+      try
       {
-        var session = CreateSelfCheckSession(width, height);
-        try
+        foreach (Session session in sessions)
         {
+          int width = session._bounds.Width, height = session._bounds.Height;
           var frame = new CapturedFrame(new byte[width * height * 4], width, height, width * 4, "BGRA8");
           session.PauseForReview("synthetic pending preview bounds", frame);
           await session._previewTask;
@@ -1493,7 +1495,10 @@ internal static class ScrollCaptureSession
                 $"source={width}x{height}, decode={bitmap?.DecodePixelWidth}x{bitmap?.DecodePixelHeight}, " +
                 $"pixels={bitmap?.PixelWidth}x{bitmap?.PixelHeight}, failure={session._failure?.Message}");
         }
-        finally
+      }
+      finally
+      {
+        foreach (Session session in sessions)
         {
           session._lifecycle.Cancel();
           await session._previewTask;
