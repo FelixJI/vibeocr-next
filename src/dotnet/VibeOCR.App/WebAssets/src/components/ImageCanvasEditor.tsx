@@ -1365,6 +1365,8 @@ export function ImageCanvasEditor({
   const [dupmatchSelection, setDupmatchSelection] = useState<
     { start: Point; end: Point } | undefined
   >();
+  // 与掩膜相同：异步导入消费同步选区，不能读解码开始时的闭包。
+  const dupmatchSelectionRef = useRef<typeof dupmatchSelection>(undefined);
   const [dupmatchBusy, setDupmatchBusy] = useState(false);
   const [dupmatchCandidates, setDupmatchCandidates] = useState<
     readonly DuplicateCandidate[] | undefined
@@ -1467,6 +1469,7 @@ export function ImageCanvasEditor({
     dupmatchWorkerRef.current = undefined;
     dupmatchFrozenRef.current = undefined;
     dupmatchDraft.current = undefined;
+    dupmatchSelectionRef.current = undefined;
     setDupmatchSelection(undefined);
     setDupmatchCandidates(undefined);
     setDupmatchAccepted(undefined);
@@ -2102,6 +2105,7 @@ export function ImageCanvasEditor({
           inpaintMaskRef.current ||
           inpaintBrushPoints.current.length > 0 ||
           dupmatchDraft.current ||
+          dupmatchSelectionRef.current ||
           dupmatchFrozenRef.current ||
           moveDragRef.current ||
           markDragRef.current ||
@@ -2812,6 +2816,7 @@ export function ImageCanvasEditor({
     }
     dupmatchFrozenRef.current = undefined;
     dupmatchDraft.current = undefined;
+    dupmatchSelectionRef.current = undefined;
     setDupmatchSelection(undefined);
     setDupmatchCandidates(undefined);
     setDupmatchAccepted(undefined);
@@ -3898,6 +3903,7 @@ export function ImageCanvasEditor({
         cancelDupmatchPending("已放弃上一次重复匹配，请重新框选。");
       } else {
         dupmatchDraft.current = undefined;
+        dupmatchSelectionRef.current = undefined;
         setDupmatchSelection(undefined);
       }
       dupmatchDraft.current = { start, end: start };
@@ -4220,7 +4226,7 @@ export function ImageCanvasEditor({
       dupmatchDraft.current = undefined;
       scheduleDraw();
       if (draft && Math.hypot(end.x - start.x, end.y - start.y) >= 8) {
-        setDupmatchSelection({
+        const selection = {
           start: {
             x: Math.min(start.x, end.x),
             y: Math.min(start.y, end.y),
@@ -4229,7 +4235,9 @@ export function ImageCanvasEditor({
             x: Math.max(start.x, end.x),
             y: Math.max(start.y, end.y),
           },
-        });
+        };
+        dupmatchSelectionRef.current = selection;
+        setDupmatchSelection(selection);
         setOperationMessage(
           "已框选重复内容源区域；点击“查找重复”搜索同尺度平移副本。",
         );

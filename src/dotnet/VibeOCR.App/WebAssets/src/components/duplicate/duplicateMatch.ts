@@ -18,16 +18,18 @@
  *
  * 搜索分两阶段，覆盖每一个整数平移偏移（不存在未访问的偏移）：
  * 1. 筛选：小块对每个偏移比较固定 4×4 采样点（十六个像素，确定性
- *    位置，去重），累计差不超过整块容差才进入精比。筛选总量 ≤ 偏移数 ×
+ *    位置，去重），RGB 累计差不超过整块容差且 alpha 样本相同才进入精比。初始筛选总量 ≤ 偏移数 ×
  *    16，超过 DUPLICATE_WORK_BUDGET 时显式 budget-exceeded 拒绝
  *    （图片过大/源块过小），不继续也不遇漏。
- *    大块改用 4×4 不重叠分块的 RGB 和之差下界，仍为16次筛选；
- *    按需分配≤100MB的三通道Uint32积分表，累计值≤8MP×255。
+ *    大块用 4×4 不重叠 RGB 分块和下界及块内 alpha 样本；源 alpha 有纹理时，
+ *    先将 RGB 筛过窗口记入 bitset，再复用积分表存储 alpha，要求各块 alpha 和相等。
+ *    两阶段每次实际分块检查共同计入96M预算，不把第二遍扫描当作免费工作。
+ *    三通道 Uint32 表与 bitset 联合≤100MB，累计值≤8MP×255。
  * 2. 精比：逐像素比较（RGB 容差与完全相同的 alpha、累计容差早退），总量受
  *    DUPLICATE_PRECISE_BUDGET 约束；相似位置过多导致超限时同样
  *    budget-exceeded 拒绝，不把截断的扫描当作完整结果。
  *
- * 资源开销：直接读取传入的基线（最多 32MB RGBA），无额外像素副本；大块另有≤100MB积分表；
+ * 资源开销：直接读取传入的基线（最多 32MB RGBA），无额外像素副本；大块另有联合≤100MB积分表与筛选bitset；
  * 最多存储 4096 个合格窗口的坐标和误差，排序后最多进行 4096×8 次重叠
  * 检查，响应只携带最多 8 个候选坐标。
  */
@@ -61,7 +63,7 @@ export const DUPLICATE_MAX_MATCH_WINDOWS = 4096;
 export const DUPLICATE_MATCH_TOLERANCE = 6;
 /** RGB 平均方差与 alpha 方差的较大值下限：低于它的近纯色块直接拒绝。 */
 export const DUPLICATE_LOW_TEXTURE_VARIANCE = 16;
-/** 像素比较总预算：筛选阶段偏移数 × 16 采样 ≤ 96M。 */
+/** 筛选检查总预算：RGB 分块/样本与额外 alpha 分块检查合计 ≤96M。 */
 export const DUPLICATE_WORK_BUDGET = 96_000_000;
 /** 精比阶段逐像素比较总量 ≤ 32M：相似位置过多时显式拒绝。 */
 export const DUPLICATE_PRECISE_BUDGET = 32_000_000;
@@ -240,19 +242,27 @@ export function findDuplicateRegions(
   for (const sample of screenSamples) {
     const p = ((y0 + sample.ly) * width + (x0 + sample.lx)) * 4;
     screenCache.push(
-      (rgba[p] ?? 0) + (rgba[p + 1] ?? 0) * 256 + (rgba[p + 2] ?? 0) * 65536,
+      (rgba[p] ?? 0) +
+        (rgba[p + 1] ?? 0) * 256 +
+        (rgba[p + 2] ?? 0) * 65536 +
+        (rgba[p + 3] ?? 0) * 16777216,
     );
   }
   const screenAt = (lx: number, ly: number, cx: number, cy: number) => {
     const q = ((cy + ly) * width + (cx + lx)) * 4;
     return (
-      (rgba[q] ?? 0) + (rgba[q + 1] ?? 0) * 256 + (rgba[q + 2] ?? 0) * 65536
+      (rgba[q] ?? 0) +
+      (rgba[q + 1] ?? 0) * 256 +
+      (rgba[q + 2] ?? 0) * 65536 +
+      (rgba[q + 3] ?? 0) * 16777216
     );
   };
 
   // 大块使用互不重叠的分块 RGB 和之差；三角不等式保证它不超过真实 L1 误差。
-  // 三通道 Uint32 积分表最多100MB；8MP×255<2^32，无整数溢出。
+  // RGB 筛过窗口用 bitset 记录，再在同一 Uint32Array 前部覆盖构造 alpha 表。
+  // 积分表与 bitset 联合最多100MB；8MP×255<2^32，无整数溢出。
   let integral: Uint32Array | undefined;
+  let screened: Uint8Array | undefined;
   const stride = (width + 1) * 3;
   const integralSum = (
     x: number,
@@ -275,12 +285,18 @@ export function findDuplicateRegions(
     width: number;
     height: number;
     sums: readonly number[];
+    alpha: number;
   }[] = [];
   if (count * DUPLICATE_MATCH_TOLERANCE * 3 >= 16 * 765) {
     const entries = (width + 1) * (height + 1) * 3;
-    if (entries * 4 > 100_000_000 || width * height * 255 >= 2 ** 32)
-      fail("budget-exceeded", "重复匹配积分表超过100MB预算");
+    const bitmapBytes = variances[3]! > 0 ? Math.ceil(offsets / 8) : 0;
+    if (
+      entries * 4 + bitmapBytes > 100_000_000 ||
+      width * height * 255 >= 2 ** 32
+    )
+      fail("budget-exceeded", "重复匹配积分表超过100MB预算（含筛选bitset）");
     integral = new Uint32Array(entries);
+    if (bitmapBytes) screened = new Uint8Array(bitmapBytes);
     for (let y = 0; y < height; y++) {
       const row = [0, 0, 0];
       for (let x = 0; x < width; x++)
@@ -302,11 +318,105 @@ export function findDuplicateRegions(
           width: w,
           height: h,
           sums: [0, 1, 2].map((c) => integralSum(x0 + x, y0 + y, w, h, c)),
+          alpha:
+            rgba[
+              ((y0 + y + Math.floor(h / 2)) * width +
+                x0 +
+                x +
+                Math.floor(w / 2)) *
+                4 +
+                3
+            ]!,
         });
       }
   }
 
   const tolerance = DUPLICATE_MATCH_TOLERANCE * count * 3; // 每×3通道累计容差
+  let screenWork = 0;
+  const chargeScreen = () => {
+    screenWork += 1;
+    if (screenWork > DUPLICATE_WORK_BUDGET)
+      fail(
+        "budget-exceeded",
+        "筛选工作量超过预算 " +
+          DUPLICATE_WORK_BUDGET +
+          "；请缩小图片或调整源选区后重试。",
+      );
+  };
+  const passesInitialScreen = (cx: number, cy: number): boolean => {
+    let error = 0;
+    if (integral) {
+      for (const part of blocks) {
+        chargeScreen();
+        const q =
+          ((cy + part.y + Math.floor(part.height / 2)) * width +
+            cx +
+            part.x +
+            Math.floor(part.width / 2)) *
+          4;
+        if (rgba[q + 3] !== part.alpha) return false;
+        for (let c = 0; c < 3; c++)
+          error += Math.abs(
+            part.sums[c]! -
+              integralSum(cx + part.x, cy + part.y, part.width, part.height, c),
+          );
+        if (error > tolerance) return false;
+      }
+    } else {
+      for (let i = 0; i < screenSamples.length; i++) {
+        chargeScreen();
+        const sample = screenSamples[i]!,
+          packed = screenCache[i]!;
+        const other = screenAt(sample.lx, sample.ly, cx, cy);
+        if (packed >>> 24 !== other >>> 24) return false;
+        error +=
+          Math.abs((packed & 255) - (other & 255)) +
+          Math.abs(((packed >> 8) & 255) - ((other >> 8) & 255)) +
+          Math.abs(((packed >> 16) & 255) - ((other >> 16) & 255));
+        if (error > tolerance) return false;
+      }
+    }
+    return true;
+  };
+  const alphaStride = width + 1;
+  const alphaSum = (x: number, y: number, w: number, h: number): number => {
+    const table = integral!;
+    return (
+      table[(y + h) * alphaStride + x + w]! -
+      table[y * alphaStride + x + w]! -
+      table[(y + h) * alphaStride + x]! +
+      table[y * alphaStride + x]!
+    );
+  };
+  if (screened) {
+    for (let cy = 0; cy < offsetsY; cy++)
+      for (let cx = 0; cx < offsetsX; cx++) {
+        if (
+          rectsOverlap({ x: cx, y: cy, width: bw, height: bh }, block) ||
+          !passesInitialScreen(cx, cy)
+        )
+          continue;
+        const index = cy * offsetsX + cx;
+        screened[index >> 3] = screened[index >> 3]! | (1 << (index & 7));
+      }
+    // RGB 分块和已缓存，且窗口筛选已完成；此后不再读取 RGB 积分布局。
+    const table = integral!;
+    table.fill(0, 0, alphaStride);
+    for (let y = 0; y < height; y++) {
+      let row = 0;
+      table[(y + 1) * alphaStride] = 0;
+      for (let x = 0; x < width; x++) {
+        row += rgba[(y * width + x) * 4 + 3]!;
+        table[(y + 1) * alphaStride + x + 1] =
+          table[y * alphaStride + x + 1]! + row;
+      }
+    }
+  }
+  const alphaSums = screened
+    ? blocks.map((part) =>
+        alphaSum(x0 + part.x, y0 + part.y, part.width, part.height),
+      )
+    : [];
   const matches: DuplicateCandidate[] = [];
   let preciseWork = 0;
 
@@ -321,35 +431,23 @@ export function findDuplicateRegions(
         height: bh,
       };
       if (rectsOverlap(candidate, block)) continue;
-      // 去重采样点的累计差是整块累计差的下界，只有超过整块容差才拒绝。
-      let screenError = 0;
-      if (integral) {
-        for (const part of blocks) {
-          for (let c = 0; c < 3; c++)
-            screenError += Math.abs(
-              part.sums[c]! -
-                integralSum(
-                  cx + part.x,
-                  cy + part.y,
-                  part.width,
-                  part.height,
-                  c,
-                ),
-            );
-          if (screenError > tolerance) break;
+      if (screened) {
+        const index = cy * offsetsX + cx;
+        if ((screened[index >> 3]! & (1 << (index & 7))) === 0) continue;
+        let sameAlpha = true;
+        for (let i = 0; i < blocks.length; i++) {
+          chargeScreen();
+          const part = blocks[i]!;
+          if (
+            alphaSum(cx + part.x, cy + part.y, part.width, part.height) !==
+            alphaSums[i]
+          ) {
+            sameAlpha = false;
+            break;
+          }
         }
-      }
-      for (let i = 0; !integral && i < screenSamples.length; i += 1) {
-        const sample = screenSamples[i]!;
-        const packed = screenCache[i]!;
-        const other = screenAt(sample.lx, sample.ly, cx, cy);
-        screenError +=
-          Math.abs((packed & 255) - (other & 255)) +
-          Math.abs(((packed >> 8) & 255) - ((other >> 8) & 255)) +
-          Math.abs(((packed >> 16) & 255) - ((other >> 16) & 255));
-        if (screenError > tolerance) break;
-      }
-      if (screenError > tolerance) continue;
+        if (!sameAlpha) continue;
+      } else if (!passesInitialScreen(cx, cy)) continue;
       // 阶段 2：逐像素精比（RGB 容差、alpha 必须相同），累计容差早退；总量受精比预算约束。
       let error = 0;
       compare: for (let y = 0; y < bh; y += 1) {

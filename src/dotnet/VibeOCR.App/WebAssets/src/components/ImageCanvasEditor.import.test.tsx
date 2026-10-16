@@ -772,3 +772,116 @@ describe("image canvas editor system import", () => {
     unmount();
   });
 });
+
+it.each(["finished-duplicate", "finish-during-decode"] as const)(
+  "R16 rejects import and preserves the source selection: %s",
+  async (timing) => {
+    let finishDecode: (() => void) | undefined;
+    class ControlledImage {
+      naturalWidth = 900;
+      naturalHeight = 600;
+      decoding = "async";
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      set src(value: string) {
+        if (value.includes("import-image"))
+          finishDecode = () => this.onload?.();
+        else queueMicrotask(() => this.onload?.());
+      }
+    }
+    vi.stubGlobal("Image", ControlledImage);
+    recordCanvasDrawImage([]);
+    const actions = createActions();
+    const props = {
+      actions,
+      canExport: true,
+      canRecognize: false,
+      source: "https://app.vibeocr/__resource/base.png",
+      session: SESSION_A,
+    };
+    const { rerender, unmount } = render(<ImageCanvasEditor {...props} />);
+    await waitFor(() => expect(screen.getByText(/原图 900×600/)).toBeVisible());
+    const canvas = screen.getByLabelText("图片检查画布");
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 900,
+      height: 600,
+    } as DOMRect);
+    fireEvent.click(screen.getByRole("button", { name: "重复匹配" }));
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 200, clientY: 200 });
+    const finishSelection = () =>
+      fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 280, clientY: 260 });
+    if (timing === "finished-duplicate") {
+      finishSelection();
+      expect(screen.getByRole("button", { name: "查找重复" })).toBeEnabled();
+    }
+    const descriptor = imageDescriptor("R16-" + timing);
+    rerender(
+      <ImageCanvasEditor
+        {...props}
+        systemImport={{ ...descriptor, items: [descriptor.items[0]!] }}
+      />,
+    );
+    expect(finishDecode).toBeTypeOf("function");
+    if (timing === "finish-during-decode") {
+      expect(screen.getByRole("button", { name: "查找重复" })).toBeDisabled();
+      finishSelection();
+      expect(screen.getByRole("button", { name: "查找重复" })).toBeEnabled();
+    }
+    await act(async () => finishDecode!());
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenCalledWith({
+        type: "recognition.rejectImport",
+        sessionId: SESSION_A.sessionId,
+        revision: 0,
+        requestId: descriptor.requestId,
+      }),
+    );
+    expect(actions.run).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "recognition.ackImport" }),
+    );
+    expect(actions.run).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "recognition.notifyScreenshotRevision" }),
+    );
+    expect(actions.run).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "recognition.releaseAssets" }),
+    );
+    expect(screen.getByRole("button", { name: "查找重复" })).toBeEnabled();
+    expect(
+      screen.getByText(/导入期间画布已变化或存在未完成草稿/),
+    ).toBeVisible();
+    expect(screen.queryByText(/已导入/)).toBeNull();
+    expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "清除编辑" })).toBeDisabled();
+    // A short replacement gesture explicitly clears the previous source selection.
+    fireEvent.pointerDown(canvas, { pointerId: 2, clientX: 200, clientY: 200 });
+    fireEvent.pointerUp(canvas, { pointerId: 2, clientX: 200, clientY: 200 });
+    expect(screen.getByRole("button", { name: "查找重复" })).toBeDisabled();
+    actions.run.mockClear();
+    const next = {
+      ...descriptor,
+      requestId: descriptor.requestId + "-after-clear",
+    };
+    rerender(
+      <ImageCanvasEditor
+        {...props}
+        systemImport={{ ...next, items: [next.items[0]!] }}
+      />,
+    );
+    await act(async () => finishDecode!());
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "recognition.ackImport",
+      sessionId: SESSION_A.sessionId,
+      revision: 0,
+      requestId: next.requestId,
+    });
+    expect(actions.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "recognition.notifyScreenshotRevision",
+        revision: 1,
+      }),
+    );
+    unmount();
+  },
+);

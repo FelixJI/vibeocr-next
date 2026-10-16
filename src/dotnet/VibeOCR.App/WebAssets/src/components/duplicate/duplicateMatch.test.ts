@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   DuplicateError,
@@ -50,6 +50,30 @@ function failureCodeOf(run: () => void): string {
 }
 
 describe("findDuplicateRegions", () => {
+  it.each([0, 5])(
+    "R16 alpha integral reaches a distant sparse 100x100 copy with RGB error %s",
+    (rgbError) => {
+      const width = 1000,
+        height = 220;
+      const source = { x: 0, y: 0, width: 100, height: 100 };
+      const rgba = paint(width, height, (x, y) => {
+        const inCopy = x >= 800 && x < 900 && y >= 100 && y < 200;
+        const lx = inCopy ? x - 800 : x,
+          ly = inCopy ? y - 100 : y;
+        const alpha = lx >= 80 && lx < 100 && ly >= 98 && ly < 100 ? 255 : 0;
+        const rgb = inCopy ? rgbError : 0;
+        return [rgb, rgb, rgb, alpha];
+      });
+      expect(findDuplicateRegions(rgba, width, height, source)).toContainEqual({
+        x: 800,
+        y: 100,
+        width: 100,
+        height: 100,
+        error: rgbError,
+      });
+    },
+  );
+
   it("R15 accepts alpha-only texture and rejects a different opacity pattern", () => {
     const rgba = paint(48, 16, (x, y) => {
       if (y >= 4 && y < 12 && (x < 8 || (x >= 16 && x < 24) || x >= 32))
@@ -439,4 +463,210 @@ it("rejects the integral table byte budget before allocating it", () => {
       height: 4,
     }),
   ).toThrow("积分表超过100MB预算");
+});
+
+it("R16 charges both RGB and alpha screening against the shared 96M budget", () => {
+  const width = 2000,
+    height = 2000;
+  const rgba = paint(width, height, (x, y) => {
+    const alpha =
+      x < 100 && y < 100 && y % 25 === 0
+        ? x % 25 === 0
+          ? 255
+          : x % 25 === 1
+            ? 1
+            : 128
+        : 128;
+    return [0, 0, 0, alpha];
+  });
+  // Each source part has the same alpha sum as a blank window, but differs at its
+  // first pixel: precision costs one pixel, while both complete 16-part passes count.
+  expect(() =>
+    findDuplicateRegions(rgba, width, height, {
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 100,
+    }),
+  ).toThrow(/筛选工作量超过预算 96000000/);
+});
+
+it.each([0, 128, 255])(
+  "R16 constant source alpha %s rejects different candidate opacity and retains the valid copy",
+  (alpha) => {
+    const source = { x: 0, y: 0, width: 100, height: 100 };
+    const rgba = paint(700, 240, (x, y) => {
+      if (
+        y >= 100 &&
+        y < 200 &&
+        ((x >= 240 && x < 340) || (x >= 500 && x < 600))
+      ) {
+        const lx = x >= 500 ? x - 500 : x - 240;
+        const [r, g, b] = textureAt(lx, y - 100);
+        return [r, g, b, x >= 500 ? alpha : alpha === 255 ? 254 : alpha + 1];
+      }
+      if (x < 100 && y < 100) {
+        const [r, g, b] = textureAt(x, y);
+        return [r, g, b, alpha];
+      }
+      return [80, 80, 80, 17];
+    });
+    const matches = findDuplicateRegions(rgba, 700, 240, source);
+    expect(matches).toContainEqual({
+      x: 500,
+      y: 100,
+      width: 100,
+      height: 100,
+      error: 0,
+    });
+    expect(matches.some(({ x, y }) => x === 240 && y === 100)).toBe(false);
+  },
+);
+
+it("R16 equal alpha block sums still require exact per-pixel opacity", () => {
+  const rgba = paint(700, 240, (x, y) => {
+    const good = x >= 500 && x < 600 && y >= 100 && y < 200;
+    const bad = x >= 240 && x < 340 && y >= 100 && y < 200;
+    if ((x < 100 && y < 100) || good || bad) {
+      const lx = good ? x - 500 : bad ? x - 240 : x,
+        ly = good || bad ? y - 100 : y;
+      let alpha = (lx + ly) % 2 === 0 ? 0 : 255;
+      if (bad && ly === 1 && (lx === 1 || lx === 2)) alpha = 255 - alpha;
+      return [100, 100, 100, alpha];
+    }
+    return [80, 80, 80, 17];
+  });
+  const matches = findDuplicateRegions(rgba, 700, 240, {
+    x: 0,
+    y: 0,
+    width: 100,
+    height: 100,
+  });
+  expect(matches).toContainEqual({
+    x: 500,
+    y: 100,
+    width: 100,
+    height: 100,
+    error: 0,
+  });
+  expect(matches.some(({ x, y }) => x === 240 && y === 100)).toBe(false);
+});
+
+it("R16 reuses one RGB-sized table and a bitset within 100MB on an 8MP image", () => {
+  const width = 4000,
+    height = 2000,
+    side = 512;
+  const rgba = new Uint8ClampedArray(width * height * 4).fill(255);
+  for (const [ox, oy] of [
+    [0, 0],
+    [width - side, height - side],
+  ]) {
+    for (let y = 0; y < side; y++)
+      for (let x = 0; x < side; x++) {
+        const p = ((oy! + y) * width + ox! + x) * 4;
+        const value = (x + y) % 2 === 0 ? 0 : 10;
+        rgba[p] = rgba[p + 1] = rgba[p + 2] = value;
+        rgba[p + 3] = (x + y) % 2 === 0 ? 0 : 255;
+      }
+  }
+  const allocations: number[] = [];
+  const Native32 = Uint32Array,
+    Native8 = Uint8Array;
+  vi.stubGlobal(
+    "Uint32Array",
+    new Proxy(Native32, {
+      construct(target, args) {
+        allocations.push(Number(args[0]) * 4);
+        return Reflect.construct(target, args);
+      },
+    }),
+  );
+  vi.stubGlobal(
+    "Uint8Array",
+    new Proxy(Native8, {
+      construct(target, args) {
+        allocations.push(Number(args[0]));
+        return Reflect.construct(target, args);
+      },
+    }),
+  );
+  try {
+    expect(
+      findDuplicateRegions(rgba, width, height, {
+        x: 0,
+        y: 0,
+        width: side,
+        height: side,
+      }),
+    ).toContainEqual({
+      x: width - side,
+      y: height - side,
+      width: side,
+      height: side,
+      error: 0,
+    });
+    expect(allocations).toEqual([
+      (width + 1) * (height + 1) * 3 * 4,
+      Math.ceil(((width - side + 1) * (height - side + 1)) / 8),
+    ]);
+    expect(
+      allocations.reduce((sum, bytes) => sum + bytes, 0),
+    ).toBeLessThanOrEqual(100_000_000);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it("R16 alpha integral uses the actual nonzero source origin and finds a copy above-left", () => {
+  const rgba = paint(1000, 220, (x, y) => {
+    const inSource = x >= 800 && x < 900 && y >= 100 && y < 200;
+    const lx = inSource ? x - 800 : x,
+      ly = inSource ? y - 100 : y;
+    return [0, 0, 0, lx >= 80 && lx < 100 && ly >= 98 && ly < 100 ? 255 : 0];
+  });
+  expect(
+    findDuplicateRegions(rgba, 1000, 220, {
+      x: 800,
+      y: 100,
+      width: 100,
+      height: 100,
+    }),
+  ).toContainEqual({ x: 0, y: 0, width: 100, height: 100, error: 0 });
+});
+
+it("R16 includes the candidate bitset in the 100MB preallocation check", () => {
+  const width = 490000,
+    height = 16;
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y++)
+    for (let x = 0; x < 512; x++) {
+      const p = (y * width + x) * 4,
+        value = (x + y) % 2 === 0 ? 0 : 255;
+      rgba[p] = rgba[p + 1] = rgba[p + 2] = rgba[p + 3] = value;
+    }
+  const allocate = vi.fn();
+  const Native = Uint32Array;
+  vi.stubGlobal(
+    "Uint32Array",
+    new Proxy(Native, {
+      construct(target, args) {
+        allocate();
+        return Reflect.construct(target, args);
+      },
+    }),
+  );
+  try {
+    // The RGB table alone is 99,960,204 bytes; its bitset crosses the existing cap.
+    expect(() =>
+      findDuplicateRegions(rgba, width, height, {
+        x: 0,
+        y: 0,
+        width: 512,
+        height: 16,
+      }),
+    ).toThrow(/积分表超过100MB预算/);
+    expect(allocate).not.toHaveBeenCalled();
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });
