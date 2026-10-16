@@ -32,6 +32,67 @@ public sealed class CaptureUiSmokeTests : IDisposable
       RunUiSmokeAsync(nameof(RegionPickerRejectsChangedMonitorLayoutWithSameDesktopBounds));
 
   [Fact]
+  public Task ScrollCaptureCorrectionAuthorizationStaysWithItsPendingFrame() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureCorrectionAuthorizationStaysWithItsPendingFrame));
+
+  [Fact]
+  public Task ScrollCaptureAmbiguousChoicesPreserveStateAndAllowFeasibleCorrection() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureAmbiguousChoicesPreserveStateAndAllowFeasibleCorrection));
+
+  [Fact]
+  public Task ScrollCaptureNoOverlapStopsWithoutImpossibleCorrection() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureNoOverlapStopsWithoutImpossibleCorrection));
+
+  [Fact]
+  public Task ScrollCaptureKeepsFirstFailureAcrossDeadlineAndConcurrentStops() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureKeepsFirstFailureAcrossDeadlineAndConcurrentStops));
+
+  [Fact]
+  public Task ScrollCaptureAllowsNarrowHorizontalSelectionAndEnforcesAxisLimits() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureAllowsNarrowHorizontalSelectionAndEnforcesAxisLimits));
+
+  [Fact]
+  public Task ScrollCaptureReverseFrameCanBeDiscardedBeforeForwardResume() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureReverseFrameCanBeDiscardedBeforeForwardResume));
+
+  [Fact]
+  public Task ScrollCapturePendingPreviewBoundsBothDimensionsWithoutUpscaling() =>
+      RunUiSmokeAsync(nameof(ScrollCapturePendingPreviewBoundsBothDimensionsWithoutUpscaling));
+
+  [Fact]
+  public Task ScrollCaptureAcceptedPreviewSkipsBusyRendererAndBoundsAllocation() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureAcceptedPreviewSkipsBusyRendererAndBoundsAllocation));
+
+  [Fact]
+  public Task ScrollCapturePreviewResumeGetsFreshDynamicWindowWithoutResettingBudgets() =>
+      RunUiSmokeAsync(nameof(ScrollCapturePreviewResumeGetsFreshDynamicWindowWithoutResettingBudgets));
+
+  [Fact]
+  public Task ScrollCapturePreviewWaitsForDecodeAndRejectsPendingEncodingFailure() =>
+      RunUiSmokeAsync(nameof(ScrollCapturePreviewWaitsForDecodeAndRejectsPendingEncodingFailure));
+
+  [Fact]
+  public Task ScrollCaptureAutoScrollRequiresPreviewAndReturnsConfirmedSegment() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureAutoScrollRequiresPreviewAndReturnsConfirmedSegment));
+
+  [Theory]
+  [InlineData(null, false, false)] // DispatcherQueue 不存在。
+  [InlineData(false, false, false)] // DispatcherQueue 拒绝入队。
+  [InlineData(true, false, false)] // UI 关闭先于已入队但尚未执行的关闭操作。
+  [InlineData(true, true, false)] // token 已取消，UI 关闭先于注册回调。
+  [InlineData(false, false, true)] // 已发生的首次 failure 优先。
+  public Task ScrollCaptureCancellationCompletesBeforeUiDispatchAndKeepsFirstFailure(
+      bool? acceptsQueue, bool closeBeforeCallback, bool failFirst) =>
+      ScrollCaptureSession.Session.VerifyExternalCancellationSelfCheckAsync(acceptsQueue, closeBeforeCallback, failFirst);
+
+  [Fact]
+  public Task ScrollCaptureCancellationDiscardsFramesAndClosesController() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureCancellationDiscardsFramesAndClosesController));
+
+  [Fact]
+  public Task ScrollCaptureVanishedSourceFailsWithoutReturningPartialFrame() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureVanishedSourceFailsWithoutReturningPartialFrame));
+  [Fact]
   public void ActiveWindowResolutionRejectsVanishedTargets()
   {
     var request = new ScreenshotCaptureRequest(ScreenshotCaptureKind.ActiveWindow);

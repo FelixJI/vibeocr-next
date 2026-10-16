@@ -21,7 +21,8 @@ public sealed record ScreenRegionSelection(
     PhysicalRectangle Bounds,
     byte[] Bgra,
     int Stride,
-    int? PixelHeight = null)
+    int? PixelHeight = null,
+    int? PixelWidth = null)
 {
     internal ScreenshotCaptureScene? CaptureScene { get; init; }
 
@@ -255,6 +256,8 @@ public sealed class ScreenRegionPicker(
     private const int VirtualScreenHeight = 79;
     private readonly Func<nint> _ownerWindow = ownerWindow ?? throw new ArgumentNullException(nameof(ownerWindow));
 
+  internal static ScreenRegionSelection CreateScrollingSelection(PhysicalRectangle bounds, CapturedFrame frame) =>
+      new(bounds, frame.Pixels, frame.Stride, PixelHeight: frame.Height, PixelWidth: frame.Width);
     public Task<ScreenRegionSelection?> PickAsync(CancellationToken cancellationToken) =>
         PickAsyncCore(null, cancellationToken);
 
@@ -328,8 +331,7 @@ public sealed class ScreenRegionPicker(
                 await Task.Delay(180, cancellationToken);
                 CapturedFrame? stitched = await ScrollCaptureSession.CaptureAsync(
                     owner, selected, cancellationToken);
-                return stitched is null ? null : new ScreenRegionSelection(
-                    selected, stitched.Pixels, stitched.Stride, stitched.Height)
+                return stitched is null ? null : CreateScrollingSelection(selected, stitched) with
                 {
                     FrozenRegion = frozenLayout with { Bounds = selected },
                 };

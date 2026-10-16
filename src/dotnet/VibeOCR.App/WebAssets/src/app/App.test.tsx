@@ -1,5 +1,6 @@
 import {
   act,
+  cleanup,
   fireEvent,
   render as renderImmediate,
   screen,
@@ -8,11 +9,26 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { App, type AppActions, type AppViewState } from "./App";
 
 Object.assign(globalThis, { NodeFilter: window.NodeFilter });
+
+// 先完成真实页面模块加载，再验证路由渲染；冷启动编译不占用 DOM 断言的等待窗口。
+beforeAll(async () => {
+  await Promise.all([
+    import("../features/RecognitionPage"),
+    import("../features/ImageEditPage"),
+    import("../features/BatchPage"),
+    import("../features/PdfPage"),
+    import("../features/QrCodePage"),
+    import("../features/SettingsPage"),
+    import("../features/DiagnosticsPage"),
+  ]);
+});
+
+afterEach(cleanup);
 
 async function renderLoaded(element: React.ReactNode) {
   const result = renderImmediate(element);
@@ -56,7 +72,7 @@ describe("AppShell", () => {
       features: {},
       runtimeLabel: "原生宿主已连接",
     };
-    const { rerender, unmount } = await renderLoaded(
+    const { rerender } = await renderLoaded(
       <App actions={actions} viewState={viewState} />,
     );
     expect(
@@ -75,7 +91,6 @@ describe("AppShell", () => {
       screen.getByRole("heading", { name: "截图现场编辑" }),
     ).toBeInTheDocument();
     expect(window.location.hash).toBe("#/imageEdit?scene=1");
-    unmount();
   });
 
   it("opens files and clipboard images for editing without recognition commands", async () => {
