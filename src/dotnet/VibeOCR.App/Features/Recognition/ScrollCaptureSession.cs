@@ -2009,25 +2009,77 @@ internal static class ScrollCaptureSession
 
     private void CancelFromUi()
     {
-      _lifecycle.Cancel();
       lock (_terminalGate)
       {
         _correctionAuthorization = null;
         if (_failure is not null) _completion.TrySetException(_failure);
+        else if (_external.IsCancellationRequested) _completion.TrySetCanceled(_external);
         else _completion.TrySetResult(null);
       }
+      _lifecycle.Cancel();
     }
 
-    private void OnExternalCancelled()
+    private void OnExternalCancelled() =>
+        OnExternalCancelled(action => _window?.DispatcherQueue.TryEnqueue(() => action()) == true);
+
+    private void OnExternalCancelled(Func<Action, bool> enqueueClose)
     {
-      _lifecycle.Cancel();
-      lock (_terminalGate) _correctionAuthorization = null;
-      DispatcherQueue? queue = _window?.DispatcherQueue;
-      queue?.TryEnqueue(() =>
+      // 终态不依赖 UI 队列存活；已发生的故障和外部取消由同一把锁裁决。
+      CancelFromUi();
+      enqueueClose(CloseControlWindow);
+    }
+
+    // 无窗口自检：关闭队列仅记录/拒绝操作，不创建 WinUI 控件或占用桌面。
+    internal static async Task VerifyExternalCancellationSelfCheckAsync(bool? acceptsQueue, bool closeBeforeCallback, bool failFirst)
+    {
+      static async Task Verify(bool? acceptsQueue, bool closeBeforeCallback = false, Exception? failure = null)
       {
-        _completion.TrySetCanceled(_external);
-        CloseControlWindow();
-      });
+        using var external = new CancellationTokenSource();
+        var session = new Session(1, new PhysicalRectangle(0, 0, 48, 96), external.Token);
+        Action? queuedClose = null;
+        bool EnqueueClose(Action close)
+        {
+          if (acceptsQueue == true) queuedClose = close;
+          return acceptsQueue == true;
+        }
+        if (failure is not null) session.Fail(failure);
+        using CancellationTokenRegistration registration = external.Token.Register(() =>
+        {
+          if (closeBeforeCallback) session.CancelFromUi();
+          if (acceptsQueue is null) session.OnExternalCancelled();
+          else session.OnExternalCancelled(EnqueueClose);
+        });
+        try
+        {
+          external.Cancel();
+          // 即使 UI 先处理关闭或永远不执行排队操作，终态也必须已经确定。
+          if (acceptsQueue == true) session.CancelFromUi();
+          if (!session._completion.Task.IsCompleted)
+            throw new InvalidOperationException("External cancellation waited for the UI close queue.");
+          if (failure is not null)
+          {
+            try { await session._completion.Task; }
+            catch (Exception error) when (ReferenceEquals(error, failure)) { return; }
+            throw new InvalidOperationException("External cancellation lost the first failure.");
+          }
+          if (!session._completion.Task.IsCanceled)
+            throw new InvalidOperationException("External cancellation became a null user cancellation.");
+          queuedClose?.Invoke();
+          try { await session._completion.Task; }
+          catch (OperationCanceledException error) when (error.CancellationToken == external.Token) { return; }
+          throw new InvalidOperationException("External cancellation lost its token.");
+        }
+        finally { session._lifecycle.Dispose(); }
+      }
+      await Verify(acceptsQueue, closeBeforeCallback, failFirst ? new InvalidOperationException("first failure") : null);
+      var user = new Session(1, new PhysicalRectangle(0, 0, 48, 96), CancellationToken.None);
+      try
+      {
+        user.CancelFromUi();
+        if (await user._completion.Task is not null)
+          throw new InvalidOperationException("User cancellation returned partial output.");
+      }
+      finally { user._lifecycle.Dispose(); }
     }
 
     private void CloseControlWindow()

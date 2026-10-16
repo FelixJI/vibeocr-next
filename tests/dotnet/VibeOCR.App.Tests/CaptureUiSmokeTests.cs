@@ -75,6 +75,16 @@ public sealed class CaptureUiSmokeTests : IDisposable
   public Task ScrollCaptureAutoScrollRequiresPreviewAndReturnsConfirmedSegment() =>
       RunUiSmokeAsync(nameof(ScrollCaptureAutoScrollRequiresPreviewAndReturnsConfirmedSegment));
 
+  [Theory]
+  [InlineData(null, false, false)] // DispatcherQueue 不存在。
+  [InlineData(false, false, false)] // DispatcherQueue 拒绝入队。
+  [InlineData(true, false, false)] // UI 关闭先于已入队但尚未执行的关闭操作。
+  [InlineData(true, true, false)] // token 已取消，UI 关闭先于注册回调。
+  [InlineData(false, false, true)] // 已发生的首次 failure 优先。
+  public Task ScrollCaptureCancellationCompletesBeforeUiDispatchAndKeepsFirstFailure(
+      bool? acceptsQueue, bool closeBeforeCallback, bool failFirst) =>
+      ScrollCaptureSession.Session.VerifyExternalCancellationSelfCheckAsync(acceptsQueue, closeBeforeCallback, failFirst);
+
   [Fact]
   public Task ScrollCaptureCancellationDiscardsFramesAndClosesController() =>
       RunUiSmokeAsync(nameof(ScrollCaptureCancellationDiscardsFramesAndClosesController));
