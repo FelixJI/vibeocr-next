@@ -634,39 +634,70 @@ it("R16 alpha integral uses the actual nonzero source origin and finds a copy ab
   ).toContainEqual({ x: 0, y: 0, width: 100, height: 100, error: 0 });
 });
 
-it("R16 includes the candidate bitset in the 100MB preallocation check", () => {
-  const width = 490000,
-    height = 16;
-  const rgba = new Uint8ClampedArray(width * height * 4);
-  for (let y = 0; y < height; y++)
-    for (let x = 0; x < 512; x++) {
-      const p = (y * width + x) * 4,
-        value = (x + y) % 2 === 0 ? 0 : 255;
-      rgba[p] = rgba[p + 1] = rgba[p + 2] = rgba[p + 3] = value;
+it.each([undefined, 0, 128, 255])(
+  "R16/R17 includes the candidate bitset in the 100MB preallocation check for alpha %s",
+  (alpha) => {
+    const width = 490000,
+      height = 16;
+    const rgba = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < 512; x++) {
+        const p = (y * width + x) * 4,
+          value = (x + y) % 2 === 0 ? 0 : 255;
+        rgba[p] = rgba[p + 1] = rgba[p + 2] = value;
+        rgba[p + 3] = alpha ?? value;
+      }
+    const allocate = vi.fn();
+    const Native = Uint32Array;
+    vi.stubGlobal(
+      "Uint32Array",
+      new Proxy(Native, {
+        construct(target, args) {
+          allocate();
+          return Reflect.construct(target, args);
+        },
+      }),
+    );
+    try {
+      // The RGB table alone is 99,960,204 bytes; its bitset crosses the existing cap.
+      expect(() =>
+        findDuplicateRegions(rgba, width, height, {
+          x: 0,
+          y: 0,
+          width: 512,
+          height: 16,
+        }),
+      ).toThrow(/积分表超过100MB预算/);
+      expect(allocate).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
     }
-  const allocate = vi.fn();
-  const Native = Uint32Array;
-  vi.stubGlobal(
-    "Uint32Array",
-    new Proxy(Native, {
-      construct(target, args) {
-        allocate();
-        return Reflect.construct(target, args);
-      },
-    }),
-  );
-  try {
-    // The RGB table alone is 99,960,204 bytes; its bitset crosses the existing cap.
-    expect(() =>
+  },
+);
+
+it.each([0, 128, 255])(
+  "R17 constant source alpha %s reaches the last copy past unsampled last-row defects",
+  (alpha) => {
+    const width = 100,
+      height = 16000;
+    const rgba = paint(width, height, (x, y) => {
+      const value = (x + y) % 2 === 0 ? 0 : 255;
+      // Every early non-source block differs only at its final pixel, outside all 16 samples.
+      const defective = x === 99 && y % 100 === 99 && y >= 100 && y < 15900;
+      return [
+        value,
+        value,
+        value,
+        defective ? (alpha === 255 ? 254 : alpha + 1) : alpha,
+      ];
+    });
+    expect(
       findDuplicateRegions(rgba, width, height, {
         x: 0,
         y: 0,
-        width: 512,
-        height: 16,
+        width: 100,
+        height: 100,
       }),
-    ).toThrow(/积分表超过100MB预算/);
-    expect(allocate).not.toHaveBeenCalled();
-  } finally {
-    vi.unstubAllGlobals();
-  }
-});
+    ).toEqual([{ x: 0, y: 15900, width: 100, height: 100, error: 0 }]);
+  },
+);

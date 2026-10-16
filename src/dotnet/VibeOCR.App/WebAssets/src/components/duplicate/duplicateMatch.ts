@@ -21,7 +21,7 @@
  *    位置，去重），RGB 累计差不超过整块容差且 alpha 样本相同才进入精比。初始筛选总量 ≤ 偏移数 ×
  *    16，超过 DUPLICATE_WORK_BUDGET 时显式 budget-exceeded 拒绝
  *    （图片过大/源块过小），不继续也不遇漏。
- *    大块用 4×4 不重叠 RGB 分块和下界及块内 alpha 样本；源 alpha 有纹理时，
+ *    大块用 4×4 不重叠 RGB 分块和下界及块内 alpha 样本；所有大块都
  *    先将 RGB 筛过窗口记入 bitset，再复用积分表存储 alpha，要求各块 alpha 和相等。
  *    两阶段每次实际分块检查共同计入96M预算，不把第二遍扫描当作免费工作。
  *    三通道 Uint32 表与 bitset 联合≤100MB，累计值≤8MP×255。
@@ -289,14 +289,15 @@ export function findDuplicateRegions(
   }[] = [];
   if (count * DUPLICATE_MATCH_TOLERANCE * 3 >= 16 * 765) {
     const entries = (width + 1) * (height + 1) * 3;
-    const bitmapBytes = variances[3]! > 0 ? Math.ceil(offsets / 8) : 0;
+    // 源 alpha 恒定不代表候选恒定；所有大块都必须检查 alpha 分块和。
+    const bitmapBytes = Math.ceil(offsets / 8);
     if (
       entries * 4 + bitmapBytes > 100_000_000 ||
       width * height * 255 >= 2 ** 32
     )
       fail("budget-exceeded", "重复匹配积分表超过100MB预算（含筛选bitset）");
     integral = new Uint32Array(entries);
-    if (bitmapBytes) screened = new Uint8Array(bitmapBytes);
+    screened = new Uint8Array(bitmapBytes);
     for (let y = 0; y < height; y++) {
       const row = [0, 0, 0];
       for (let x = 0; x < width; x++)
