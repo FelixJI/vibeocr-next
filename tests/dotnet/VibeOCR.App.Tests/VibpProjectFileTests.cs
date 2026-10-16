@@ -226,6 +226,89 @@ public sealed class VibpProjectFileTests
   }
 
   [Fact]
+  public async Task RejectsNullAssetIdInManifest()
+  {
+    string directory = NewTempDirectory();
+    try
+    {
+      byte[] source = PngBytes(4, 3);
+      byte[] asset = PngBytes(2, 2);
+      // 显式 null 资产 id：不可信输入必须得到格式异常而非裸 ArgumentNullException。
+      string manifest = $$"""
+        {
+          "schemaVersion": 1,
+          "canvas": { "width": 900, "height": 600 },
+          "source": { "mediaType": "image/png", "width": 4, "height": 3, "length": {{source.Length}} },
+          "assets": [
+            { "id": null, "width": 2, "height": 2, "length": {{asset.Length}} }
+          ],
+          "state": { "rotation": 0, "marks": [] }
+        }
+        """;
+      string packagePath = Path.Combine(directory, "project.vibp");
+      WriteRawPackage(packagePath, manifest,
+        ("source.png", source),
+        ($"asset-{AssetId}.png", asset));
+
+      VibpProjectFormatException error = await Assert.ThrowsAsync<VibpProjectFormatException>(
+        () => VibpProjectFile.ReadAsync(
+          packagePath, Path.Combine(directory, "open"), TestContext.Current.CancellationToken));
+      Assert.Contains("asset id", error.Message);
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task RejectsNullMarkIdInManifest()
+  {
+    string directory = NewTempDirectory();
+    try
+    {
+      byte[] source = PngBytes(4, 3);
+      string manifest = ManifestJson(source.Length).Replace("\"marks\": []",
+        "\"marks\": [" + MarkJson("\"tool\": \"rectangle\", \"start\": { \"x\": 1, \"y\": 1 }").Replace(
+          "\"id\": \"mark-1\"", "\"id\": null") + "]");
+      string packagePath = Path.Combine(directory, "project.vibp");
+      WriteRawPackage(packagePath, manifest, ("source.png", source));
+
+      VibpProjectFormatException error = await Assert.ThrowsAsync<VibpProjectFormatException>(
+        () => VibpProjectFile.ReadAsync(
+          packagePath, Path.Combine(directory, "open"), TestContext.Current.CancellationToken));
+      Assert.Contains("mark id", error.Message);
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task RejectsNullMarkToolAsFormatException()
+  {
+    string directory = NewTempDirectory();
+    try
+    {
+      byte[] source = PngBytes(4, 3);
+      string manifest = ManifestJson(source.Length).Replace("\"marks\": []",
+        "\"marks\": [" + MarkJson("\"tool\": null, \"start\": { \"x\": 1, \"y\": 1 }") + "]");
+      string packagePath = Path.Combine(directory, "project.vibp");
+      WriteRawPackage(packagePath, manifest, ("source.png", source));
+
+      VibpProjectFormatException error = await Assert.ThrowsAsync<VibpProjectFormatException>(
+        () => VibpProjectFile.ReadAsync(
+          packagePath, Path.Combine(directory, "open"), TestContext.Current.CancellationToken));
+      Assert.Contains("unknown tool", error.Message);
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  [Fact]
   public async Task RoundTripPreservesBytesAndManifestSemantics()
   {
     string directory = NewTempDirectory();

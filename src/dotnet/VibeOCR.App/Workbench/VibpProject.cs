@@ -336,10 +336,10 @@ internal static class VibpProjectRules
     long bytes = 0;
     foreach (VibpAssetResource asset in manifest.Assets)
     {
-      if (!AssetIdPattern.IsMatch(asset.Id) || !ids.Add(asset.Id))
+      if (asset.Id is null || !AssetIdPattern.IsMatch(asset.Id) || !ids.Add(asset.Id))
       {
         throw new VibpProjectFormatException(
-          "Project asset id is malformed or duplicated.");
+          "Project asset id is malformed, null or duplicated.");
       }
       ValidateDimensions($"asset {asset.Id}", asset.Width, asset.Height,
         VibpProjectLimits.MaximumAssetPixels);
@@ -454,10 +454,10 @@ internal static class VibpProjectRules
     HashSet<string> markIds,
     ref int totalPoints)
   {
-    if (!MarkIdPattern.IsMatch(mark.Id) || !markIds.Add(mark.Id))
+    if (mark.Id is null || !MarkIdPattern.IsMatch(mark.Id) || !markIds.Add(mark.Id))
     {
       throw new VibpProjectFormatException(
-        "Project mark id is malformed or duplicated.");
+        "Project mark id is malformed, null or duplicated.");
     }
     if (!MarkTools.Contains(mark.Tool))
     {
