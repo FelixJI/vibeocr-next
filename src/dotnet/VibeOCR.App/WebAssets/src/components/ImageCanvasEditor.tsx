@@ -2565,7 +2565,9 @@ export function ImageCanvasEditor({
       applyMaskBrush(
         inpaintMaskRef.current,
         naturalPoints,
-        activeToolAttributes.inpaintBrushSize / 2,
+        activeToolAttributes.inpaintBrushSize /
+          2 /
+          imageTransform(image, state.rotation, displaySize).scale,
         {
           width: image.naturalWidth,
           height: image.naturalHeight,

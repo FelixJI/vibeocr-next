@@ -49,6 +49,7 @@ class FakeImage {
 }
 
 interface CapturedRequest {
+  mask: ArrayBuffer;
   generation: number;
   width: number;
   height: number;
@@ -183,6 +184,106 @@ function dragSelection(canvas: HTMLElement): void {
 }
 
 describe("inpaint tool wiring", () => {
+  it.each([
+    { width: 3600, height: 2000, rotation: 0, scale: 0.25 },
+    { width: 160, height: 100, rotation: 0, scale: 5.625 },
+    { width: 2000, height: 3600, rotation: 90, scale: 0.25 },
+    { width: 100, height: 160, rotation: 90, scale: 5.625 },
+  ])(
+    "R18 maps add/remove brush radius to natural pixels at $scale scale and $rotation degrees",
+    async ({ width, height, rotation, scale }) => {
+      const restore = installCanvasStubs();
+      class SizedImage extends FakeImage {
+        override readonly naturalWidth = width;
+        override readonly naturalHeight = height;
+      }
+      vi.stubGlobal("Image", SizedImage);
+      vi.stubGlobal("Worker", FakeWorker);
+      FakeWorker.instances = [];
+      const paint = vi.spyOn(maskOperations, "applyMaskBrush");
+      try {
+        const { canvas, unmount } = await renderEditor();
+        if (rotation)
+          fireEvent.click(screen.getByRole("button", { name: "旋转 90°" }));
+        // CSS is half the logical 900x600 canvas; tool sizes use logical pixels.
+        canvas.getBoundingClientRect = () =>
+          ({ left: 0, top: 0, width: 450, height: 300 }) as DOMRect;
+        const naturalPoint =
+          rotation === 90
+            ? { x: width / 2 + 20 / scale, y: height / 2 - 50 / scale }
+            : { x: width / 2 + 50 / scale, y: height / 2 + 20 / scale };
+        for (const [mode, diameter, add] of [
+          ["brush-add", 60, true],
+          ["brush-remove", 20, false],
+        ] as const) {
+          fireEvent.change(screen.getByLabelText("修补掩膜绘制方式"), {
+            target: { value: mode },
+          });
+          fireEvent.change(screen.getByLabelText("修补掩膜笔刷大小"), {
+            target: { value: String(diameter) },
+          });
+          fireEvent.pointerDown(canvas, {
+            pointerId: 18,
+            clientX: 250,
+            clientY: 160,
+          });
+          fireEvent.pointerUp(canvas, {
+            pointerId: 18,
+            clientX: 250,
+            clientY: 160,
+          });
+          const call = paint.mock.calls.at(-1)!;
+          expect(call[2]).toBeCloseTo(diameter / 2 / scale, 10);
+          expect(call[4]).toBe(add);
+          for (const at of call[1]) {
+            expect(at.x).toBeCloseTo(naturalPoint.x, 10);
+            expect(at.y).toBeCloseTo(naturalPoint.y, 10);
+          }
+        }
+        const result = paint.mock.results.at(-1)!
+          .value as maskOperations.InpaintMaskOpResult;
+        if (!result.ok || !result.state)
+          throw new Error("expected remaining ring mask");
+        const mask = result.state;
+        const at = (x: number, y: number) =>
+          mask.data[(y - mask.rect.y) * mask.rect.width + x - mask.rect.x] ?? 0;
+        expect(at(Math.round(naturalPoint.x), Math.round(naturalPoint.y))).toBe(
+          0,
+        );
+        expect(
+          at(
+            Math.round(naturalPoint.x + 20 / scale),
+            Math.round(naturalPoint.y),
+          ),
+        ).toBe(1);
+        expect(
+          screen.getByRole("button", { name: "撤销" }).hasAttribute("disabled"),
+        ).toBe(rotation === 0);
+        fireEvent.click(screen.getByRole("button", { name: "预览修补" }));
+        const request = FakeWorker.instances[0]!.requests[0]!;
+        expect(request.width).toBe(width);
+        expect(request.height).toBe(height);
+        const previewMask = new Uint8Array(request.mask);
+        expect(previewMask).toHaveLength(
+          request.rect.width * request.rect.height,
+        );
+        for (let y = 0; y < request.rect.height; y++)
+          for (let x = 0; x < request.rect.width; x++)
+            expect(previewMask[y * request.rect.width + x]).toBe(
+              at(request.rect.x + x, request.rect.y + y),
+            );
+        await act(async () => FakeWorker.instances[0]!.succeed());
+        fireEvent.click(screen.getByRole("button", { name: "应用修补" }));
+        expect(screen.getByText(/已应用修补/)).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+        expect(screen.getByRole("button", { name: "重做" })).toBeEnabled();
+        unmount();
+      } finally {
+        restore();
+      }
+    },
+  );
+
   it.each([
     ["brush-add", true],
     ["brush-remove", true],

@@ -1102,7 +1102,8 @@ test("R15 restarting preview with a dense brush keeps every point and discards t
   await page.getByRole("button", { name: "预览修补" }).click();
   await expect(page.getByText(/修补预览完成/)).toBeVisible();
   await page.getByLabel("修补掩膜绘制方式").selectOption("brush-add");
-  await page.getByLabel("修补掩膜笔刷大小").selectOption("10");
+  // 显示笔刷需覆盖放大 9.375 倍后的 2px 原图水印及其边缘。
+  await page.getByLabel("修补掩膜笔刷大小").selectOption("60");
   // One browser task: all bends arrive before rAF, including the pointerup-only endpoint.
   const points = [
     map({ x: 60, y: 30 }),
