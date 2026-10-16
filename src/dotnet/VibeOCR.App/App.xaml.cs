@@ -122,6 +122,7 @@ public sealed partial class App : Application
     {
         if (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "capture-ui")
         {
+            CaptureUiSmokeTrace.Stage("on-launched");
             _ = RunCaptureUiSmokeAsync();
             return;
         }

@@ -18,6 +18,7 @@ import {
 import {
   INPAINT_MAX_IMAGE_PIXELS,
   INPAINT_MAX_MASK_PIXELS,
+  INPAINT_MAX_ROI_PIXELS,
   type InpaintFailureCode,
   type InpaintRect,
 } from "./inpaint";
@@ -105,6 +106,7 @@ export type SelectionPreflight =
 export function preflightSelection(
   rect: InpaintRect,
   image: NaturalImageSize,
+  selectedPixels = rect.width * rect.height,
 ): SelectionPreflight {
   if (rect.width <= 0 || rect.height <= 0) {
     return {
@@ -121,18 +123,25 @@ export function preflightSelection(
       message: `图片 ${image.naturalWidth}×${image.naturalHeight}（${(imagePixels / 1_000_000).toFixed(1)}MP）超过去水印支持的上限 8MP，请先缩小图片。`,
     };
   }
-  const maskPixels = rect.width * rect.height;
-  if (maskPixels > INPAINT_MAX_MASK_PIXELS) {
+  const roiPixels = rect.width * rect.height;
+  if (
+    roiPixels > INPAINT_MAX_ROI_PIXELS ||
+    selectedPixels > INPAINT_MAX_MASK_PIXELS
+  ) {
     return {
       ok: false,
       code: "budget-exceeded",
-      message: `有效选区 ${(maskPixels / 1_000_000).toFixed(2)}MP 超过去水印单次上限 1MP（${Math.round(rect.width)}×${Math.round(rect.height)}），请分多次框选较小区域。`,
+      message: `修补工作区 ${(roiPixels / 1_000_000).toFixed(2)}MP 或有效掩膜 ${(selectedPixels / 1_000_000).toFixed(2)}MP 超过单次上限 1MP，请分多次修补较小区域。`,
     };
   }
-  if (
-    rect.width === image.naturalWidth &&
-    rect.height === image.naturalHeight
-  ) {
+  if (selectedPixels <= 0) {
+    return {
+      ok: false,
+      code: "empty-mask",
+      message: "修补掩膜为空，请先框选或涂抹要修补的区域。",
+    };
+  }
+  if (selectedPixels === imagePixels) {
     return {
       ok: false,
       code: "mask-covers-image",

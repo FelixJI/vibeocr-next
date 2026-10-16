@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { InpaintError, inpaintRectangle, type InpaintRect } from "./inpaint";
+import {
+  inpaintMask,
+  inpaintRectangle,
+  InpaintError,
+  type InpaintRect,
+} from "./inpaint";
 
 type Pixel = readonly [number, number, number, number];
 
@@ -361,4 +366,204 @@ describe("inpaintRectangle", () => {
     expect(cornerEffects.insideRgbChanged).toBeGreaterThan(0);
     expect(cornerInput).toEqual(cornerOriginal);
   });
+});
+
+describe("inpaintMask", () => {
+  it("R1 fills disconnected mask islands from known pixels inside the ROI", () => {
+    const roi = { x: 2, y: 2, width: 8, height: 8 };
+    const mask = new Uint8Array(64);
+    for (const index of [0, 27, 63]) mask[index] = 1;
+    const rgba = paintImage(12, 12, (x, y) =>
+      mask[(y - 2) * 8 + x - 2] === 1 && x >= 2 && x < 10 && y >= 2 && y < 10
+        ? [240, 30, 220, 128]
+        : [12, 160, 90, 255],
+    );
+    const out = inpaintMask(rgba, 12, 12, roi, mask);
+    for (let y = 0; y < 12; y++)
+      for (let x = 0; x < 12; x++) {
+        const selected =
+          x >= 2 &&
+          x < 10 &&
+          y >= 2 &&
+          y < 10 &&
+          mask[(y - 2) * 8 + x - 2] === 1;
+        const pixel = (y * 12 + x) * 4;
+        if (selected) {
+          expect(Array.from(out.slice(pixel, pixel + 4))).toEqual([
+            12, 160, 90, 128,
+          ]);
+        } else
+          expect(Array.from(out.slice(pixel, pixel + 4))).toEqual(
+            Array.from(rgba.slice(pixel, pixel + 4)),
+          );
+      }
+  });
+
+  it("R7 fills a full-image ROI using an unmasked known hole", () => {
+    const width = 64,
+      height = 48;
+    const hole = (x: number, y: number) =>
+      x >= 27 && x < 37 && y >= 19 && y < 29;
+    const rgba = paintImage(width, height, (x, y) =>
+      hole(x, y) ? [12, 160, 90, 255] : [240, 30, 220, 255],
+    );
+    const mask = new Uint8Array(width * height).fill(1);
+    for (let y = 19; y < 29; y++)
+      for (let x = 27; x < 37; x++) mask[y * width + x] = 0;
+    const out = inpaintMask(
+      rgba,
+      width,
+      height,
+      { x: 0, y: 0, width, height },
+      mask,
+    );
+    expect(Array.from(out)).toEqual(
+      Array.from(paintImage(width, height, () => [12, 160, 90, 255])),
+    );
+  });
+
+  it("fills only masked pixels: holes and outside bytes stay identical", () => {
+    const width = 32;
+    const height = 24;
+    const inMask = (x: number, y: number) =>
+      x >= 8 &&
+      x < 20 &&
+      y >= 6 &&
+      y < 18 &&
+      !(x >= 13 && x < 16 && y >= 10 && y < 13);
+    const rgba = paintImage(width, height, (x, y) =>
+      inMask(x, y) ? [240, 30, 220, 255] : [12, 160, 90, 255],
+    );
+    const original = new Uint8ClampedArray(rgba);
+    const roi: InpaintRect = { x: 8, y: 6, width: 12, height: 12 };
+    const mask = new Uint8Array(12 * 12);
+    for (let y = 0; y < 12; y += 1) {
+      for (let x = 0; x < 12; x += 1) {
+        if (x >= 5 && x < 8 && y >= 4 && y < 7) continue; // 洞：保留原水印像素
+        mask[y * 12 + x] = 1;
+      }
+    }
+
+    const out = inpaintMask(rgba, width, height, roi, mask);
+
+    expect(countByteDiffs(rgba, original)).toBe(0);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        for (let c = 0; c < 4; c += 1) {
+          const before = original[(y * width + x) * 4 + c] ?? 0;
+          const after = out[(y * width + x) * 4 + c] ?? 0;
+          if (inMask(x, y) && !(x >= 13 && x < 16 && y >= 10 && y < 13)) {
+            if (c === 3) expect(after).toBe(before);
+          } else {
+            expect(after, `pixel (${x},${y}) ch${c}`).toBe(before);
+          }
+        }
+      }
+    }
+    // 掩膜区域中心恢复为背景色。
+    expectRgbNear(out, width, 10, 8, [12, 160, 90], 4);
+  });
+
+  it("rejects empty masks and whole-image masks", () => {
+    const width = 20;
+    const height = 16;
+    const rgba = paintImage(width, height, () => [10, 20, 30, 255]);
+    expect(
+      failureCodeOf(() =>
+        inpaintMask(
+          rgba,
+          width,
+          height,
+          { x: 2, y: 2, width: 8, height: 8 },
+          new Uint8Array(64),
+        ),
+      ),
+    ).toBe("empty-mask");
+    expect(
+      failureCodeOf(() =>
+        inpaintMask(
+          rgba,
+          width,
+          height,
+          { x: 0, y: 0, width: width, height: height },
+          new Uint8Array(width * height).fill(1),
+        ),
+      ),
+    ).toBe("mask-covers-image");
+    expect(
+      failureCodeOf(() =>
+        inpaintMask(
+          rgba,
+          width,
+          height,
+          { x: 2, y: 2, width: 8, height: 8 },
+          new Uint8Array(9),
+        ),
+      ),
+    ).toBe("invalid-rect");
+  });
+
+  it("rejects ROI beyond the allocation budget", () => {
+    const width = 1100;
+    const height = 1100;
+    const rgba = paintImage(width, height, () => [1, 2, 3, 255]);
+    const roi: InpaintRect = { x: 0, y: 0, width: 1001, height: 1001 };
+    expect(
+      failureCodeOf(() =>
+        inpaintMask(
+          rgba,
+          width,
+          height,
+          roi,
+          new Uint8Array(1001 * 1001).fill(1),
+        ),
+      ),
+    ).toBe("budget-exceeded");
+  });
+
+  it("rectangle wrapper keeps the legacy rect contract", () => {
+    const width = 32;
+    const height = 24;
+    const rect: InpaintRect = { x: 8, y: 8, width: 12, height: 8 };
+    const inside = (x: number, y: number) =>
+      x >= rect.x &&
+      x < rect.x + rect.width &&
+      y >= rect.y &&
+      y < rect.y + rect.height;
+    const rgba = paintImage(width, height, (x, y) =>
+      inside(x, y) ? [240, 30, 220, 255] : [12, 160, 90, 255],
+    );
+    const out = inpaintRectangle(rgba, width, height, rect);
+    expectRgbNear(out, width, 14, 12, [12, 160, 90], 3);
+    const effects = scanMaskEffects(out, rgba, width, height, {
+      x0: 8,
+      y0: 8,
+      x1: 20,
+      y1: 16,
+    });
+    expect(effects.outsideDiffs).toBe(0);
+    expect(effects.insideAlphaDiffs).toBe(0);
+    expect(effects.insideRgbChanged).toBeGreaterThan(0);
+  });
+});
+
+it("alternating smoothing retains the bounded gradient pixel regression", () => {
+  const rgba = paintImage(18, 18, (x, y) => [
+    (x * 17 + y * 31) % 256,
+    (x * 19 + y * 7) % 256,
+    (x * 5 + y * 23) % 256,
+    255,
+  ]);
+  const actual = inpaintRectangle(rgba, 18, 18, {
+    x: 1,
+    y: 1,
+    width: 16,
+    height: 16,
+  });
+  expect([
+    channel(actual, 18, 11, 1, 0),
+    channel(actual, 18, 12, 1, 1),
+    channel(actual, 18, 9, 2, 0),
+    channel(actual, 18, 9, 2, 1),
+  ]).toEqual([174, 181, 143, 141]);
 });

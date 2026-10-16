@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AppActions } from "../app/types";
 import type { InpaintFailureCode, InpaintResponse } from "./inpaint/inpaint";
+import * as maskOperations from "./inpaint/inpaintMaskState";
 import { ImageCanvasEditor } from "./ImageCanvasEditor";
 
 afterEach(() => {
@@ -36,8 +37,8 @@ function createActions(): AppActions & { run: ReturnType<typeof vi.fn> } {
 }
 
 class FakeImage {
-  readonly naturalWidth = 160;
-  readonly naturalHeight = 100;
+  readonly naturalWidth: number = 160;
+  readonly naturalHeight: number = 100;
   decoding = "";
   src = "";
   onload: (() => void) | null = null;
@@ -48,6 +49,7 @@ class FakeImage {
 }
 
 interface CapturedRequest {
+  mask: ArrayBuffer;
   generation: number;
   width: number;
   height: number;
@@ -182,6 +184,297 @@ function dragSelection(canvas: HTMLElement): void {
 }
 
 describe("inpaint tool wiring", () => {
+  it.each([
+    { width: 3600, height: 2000, rotation: 0, scale: 0.25 },
+    { width: 160, height: 100, rotation: 0, scale: 5.625 },
+    { width: 2000, height: 3600, rotation: 90, scale: 0.25 },
+    { width: 100, height: 160, rotation: 90, scale: 5.625 },
+  ])(
+    "R18 maps add/remove brush radius to natural pixels at $scale scale and $rotation degrees",
+    async ({ width, height, rotation, scale }) => {
+      const restore = installCanvasStubs();
+      class SizedImage extends FakeImage {
+        override readonly naturalWidth = width;
+        override readonly naturalHeight = height;
+      }
+      vi.stubGlobal("Image", SizedImage);
+      vi.stubGlobal("Worker", FakeWorker);
+      FakeWorker.instances = [];
+      const paint = vi.spyOn(maskOperations, "applyMaskBrush");
+      try {
+        const { canvas, unmount } = await renderEditor();
+        if (rotation)
+          fireEvent.click(screen.getByRole("button", { name: "旋转 90°" }));
+        // CSS is half the logical 900x600 canvas; tool sizes use logical pixels.
+        canvas.getBoundingClientRect = () =>
+          ({ left: 0, top: 0, width: 450, height: 300 }) as DOMRect;
+        const naturalPoint =
+          rotation === 90
+            ? { x: width / 2 + 20 / scale, y: height / 2 - 50 / scale }
+            : { x: width / 2 + 50 / scale, y: height / 2 + 20 / scale };
+        for (const [mode, diameter, add] of [
+          ["brush-add", 60, true],
+          ["brush-remove", 20, false],
+        ] as const) {
+          fireEvent.change(screen.getByLabelText("修补掩膜绘制方式"), {
+            target: { value: mode },
+          });
+          fireEvent.change(screen.getByLabelText("修补掩膜笔刷大小"), {
+            target: { value: String(diameter) },
+          });
+          fireEvent.pointerDown(canvas, {
+            pointerId: 18,
+            clientX: 250,
+            clientY: 160,
+          });
+          fireEvent.pointerUp(canvas, {
+            pointerId: 18,
+            clientX: 250,
+            clientY: 160,
+          });
+          const call = paint.mock.calls.at(-1)!;
+          expect(call[2]).toBeCloseTo(diameter / 2 / scale, 10);
+          expect(call[4]).toBe(add);
+          for (const at of call[1]) {
+            expect(at.x).toBeCloseTo(naturalPoint.x, 10);
+            expect(at.y).toBeCloseTo(naturalPoint.y, 10);
+          }
+        }
+        const result = paint.mock.results.at(-1)!
+          .value as maskOperations.InpaintMaskOpResult;
+        if (!result.ok || !result.state)
+          throw new Error("expected remaining ring mask");
+        const mask = result.state;
+        const at = (x: number, y: number) =>
+          mask.data[(y - mask.rect.y) * mask.rect.width + x - mask.rect.x] ?? 0;
+        expect(at(Math.round(naturalPoint.x), Math.round(naturalPoint.y))).toBe(
+          0,
+        );
+        expect(
+          at(
+            Math.round(naturalPoint.x + 20 / scale),
+            Math.round(naturalPoint.y),
+          ),
+        ).toBe(1);
+        expect(
+          screen.getByRole("button", { name: "撤销" }).hasAttribute("disabled"),
+        ).toBe(rotation === 0);
+        fireEvent.click(screen.getByRole("button", { name: "预览修补" }));
+        const request = FakeWorker.instances[0]!.requests[0]!;
+        expect(request.width).toBe(width);
+        expect(request.height).toBe(height);
+        const previewMask = new Uint8Array(request.mask);
+        expect(previewMask).toHaveLength(
+          request.rect.width * request.rect.height,
+        );
+        for (let y = 0; y < request.rect.height; y++)
+          for (let x = 0; x < request.rect.width; x++)
+            expect(previewMask[y * request.rect.width + x]).toBe(
+              at(request.rect.x + x, request.rect.y + y),
+            );
+        await act(async () => FakeWorker.instances[0]!.succeed());
+        fireEvent.click(screen.getByRole("button", { name: "应用修补" }));
+        expect(screen.getByText(/已应用修补/)).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+        expect(screen.getByRole("button", { name: "重做" })).toBeEnabled();
+        unmount();
+      } finally {
+        restore();
+      }
+    },
+  );
+
+  it.each([
+    ["brush-add", true],
+    ["brush-remove", true],
+    ["brush-add", false],
+    ["brush-remove", false],
+  ] as const)(
+    "R15 resets the mask before the first %s stroke (preview=%s)",
+    async (mode, previewReady) => {
+      const restore = installCanvasStubs();
+      vi.stubGlobal("Image", FakeImage);
+      vi.stubGlobal("Worker", FakeWorker);
+      FakeWorker.instances = [];
+      try {
+        const { canvas, unmount } = await renderEditor();
+        dragSelection(canvas);
+        fireEvent.click(screen.getByRole("button", { name: "预览修补" }));
+        if (previewReady)
+          await act(async () => FakeWorker.instances[0]!.succeed());
+        fireEvent.change(screen.getByLabelText("修补掩膜绘制方式"), {
+          target: { value: mode },
+        });
+        fireEvent.pointerDown(canvas, {
+          pointerId: 1,
+          clientX: 700,
+          clientY: 450,
+        });
+        fireEvent.pointerUp(canvas, {
+          pointerId: 1,
+          clientX: 700,
+          clientY: 450,
+        });
+        const preview = screen.getByRole("button", { name: "预览修补" });
+        if (mode === "brush-remove") {
+          expect(preview).toBeDisabled();
+        } else {
+          fireEvent.click(preview);
+          const request = FakeWorker.instances[1]!.requests[0]!;
+          expect(request.rect.x).toBeGreaterThan(100);
+          expect(request.rect.y).toBeGreaterThan(55);
+        }
+        expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
+        unmount();
+      } finally {
+        restore();
+      }
+    },
+  );
+
+  it("R15 batches all mask trajectory points per frame and flushes pointerup and cancels queued strokes", async () => {
+    const restore = installCanvasStubs();
+    class LargeImage extends FakeImage {
+      override readonly naturalWidth = 1200;
+      override readonly naturalHeight = 1000;
+    }
+    vi.stubGlobal("Image", LargeImage);
+    const frames = new Map<number, FrameRequestCallback>();
+    let id = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.set(++id, callback);
+      return id;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (frame: number) =>
+      frames.delete(frame),
+    );
+    const paint = vi.spyOn(maskOperations, "applyMaskBrush");
+    try {
+      const { canvas, unmount } = await renderEditor();
+      fireEvent.pointerDown(canvas, {
+        pointerId: 1,
+        clientX: 100,
+        clientY: 50,
+      });
+      fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 800, clientY: 550 });
+      fireEvent.change(screen.getByLabelText("修补掩膜绘制方式"), {
+        target: { value: "brush-add" },
+      });
+      fireEvent.pointerDown(canvas, {
+        pointerId: 1,
+        clientX: 200,
+        clientY: 200,
+      });
+      for (let x = 210; x <= 400; x += 10)
+        fireEvent.pointerMove(canvas, {
+          pointerId: 1,
+          clientX: x,
+          clientY: 200 + (x % 30),
+        });
+      expect(paint).not.toHaveBeenCalled();
+      act(() => {
+        const pending = [...frames.values()];
+        frames.clear();
+        pending.forEach((cb) => cb(0));
+      });
+      expect(paint).toHaveBeenCalledTimes(1);
+      expect(paint.mock.calls[0]![0]!.data.length).toBeGreaterThan(900_000);
+      const expectedPoints = [
+        { x: 200, y: 200 },
+        ...Array.from({ length: 20 }, (_, i) => {
+          const x = 210 + i * 10;
+          return { x, y: 200 + (x % 30) };
+        }),
+      ].map(({ x, y }) => ({ x: (x - 90) / 0.6, y: y / 0.6 }));
+      expect(paint.mock.calls[0]![1]).toHaveLength(expectedPoints.length);
+      paint.mock.calls[0]![1].forEach((at, index) => {
+        expect(at.x).toBeCloseTo(expectedPoints[index]!.x, 10);
+        expect(at.y).toBeCloseTo(expectedPoints[index]!.y, 10);
+      });
+      fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 450, clientY: 240 });
+      expect(paint).toHaveBeenCalledTimes(2);
+      expect(paint.mock.calls[1]![1].at(-1)!.x).toBe(600);
+      fireEvent.pointerDown(canvas, {
+        pointerId: 2,
+        clientX: 600,
+        clientY: 300,
+      });
+      fireEvent.pointerCancel(canvas, { pointerId: 2 });
+      act(() => {
+        const pending = [...frames.values()];
+        frames.clear();
+        pending.forEach((cb) => cb(0));
+      });
+      expect(paint).toHaveBeenCalledTimes(2);
+      unmount();
+    } finally {
+      restore();
+    }
+  });
+  it("R9 a first remove rectangle never creates a repair mask or worker", async () => {
+    const restore = installCanvasStubs();
+    vi.stubGlobal("Image", FakeImage);
+    vi.stubGlobal("Worker", FakeWorker);
+    FakeWorker.instances = [];
+    try {
+      const { actions, unmount, canvas } = await renderEditor();
+      await waitFor(() =>
+        expect(screen.getByText(/原图 160×100/)).toBeInTheDocument(),
+      );
+      fireEvent.change(screen.getByLabelText("修补掩膜绘制方式"), {
+        target: { value: "rect-remove" },
+      });
+      dragSelection(canvas);
+      const preview = screen.getByRole("button", { name: "预览修补" });
+      await act(async () => {
+        fireEvent.click(preview);
+      });
+      expect(FakeWorker.instances).toHaveLength(0);
+      expect(preview).toBeDisabled();
+      expect(screen.queryByRole("button", { name: "应用修补" })).toBeNull();
+      expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "清除编辑" })).toBeDisabled();
+      expect(actions.run).not.toHaveBeenCalled();
+      unmount();
+    } finally {
+      restore();
+    }
+  });
+
+  it("R6 rejected oversized regions cannot allocate storage or become preview masks", async () => {
+    const restore = installCanvasStubs();
+    class BigImage extends FakeImage {
+      override readonly naturalWidth = 9000;
+      override readonly naturalHeight = 6000;
+    }
+    vi.stubGlobal("Image", BigImage);
+    vi.stubGlobal("Worker", FakeWorker);
+    FakeWorker.instances = [];
+    try {
+      const { unmount, canvas } = await renderEditor();
+      dragSelection(canvas);
+      const allocations: number[] = [];
+      const Native = Uint8Array;
+      vi.stubGlobal(
+        "Uint8Array",
+        new Proxy(Native, {
+          construct(target, args) {
+            if (typeof args[0] === "number") allocations.push(args[0]);
+            return Reflect.construct(target, args);
+          },
+        }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "预览修补" }));
+      expect(screen.getByText(/修补掩膜工作区超过/)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "预览修补" })).toBeDisabled();
+      expect(FakeWorker.instances).toHaveLength(0);
+      expect(allocations.filter((size) => size > 1_000_000)).toEqual([]);
+      unmount();
+    } finally {
+      restore();
+    }
+  });
+
   it("requires an explicit selection before previewing and reports Beta limits", async () => {
     const restore = installCanvasStubs();
     vi.stubGlobal("Image", FakeImage);

@@ -18,10 +18,13 @@ public sealed partial class App
     string result = Path.Combine(root, "result.txt");
     try
     {
+      CaptureUiSmokeTrace.Stage("smoke-enter");
       string scenario = Environment.GetEnvironmentVariable("VIBEOCR_CAPTURE_UI_SCENARIO") ?? "";
+      CaptureUiSmokeTrace.Stage("portable-state.begin");
       var layout = PortableLayout.Resolve(Path.Combine(root, "VibeOCR.exe"), "production");
       layout.EnsurePortableState();
       var store = new CapturePreferencesStore(layout);
+      CaptureUiSmokeTrace.Stage("scenario.begin");
       switch (scenario)
       {
         case "OptionsDialogSavesMergedOptionsAndKeepsFreshLastRegion":
@@ -45,12 +48,16 @@ public sealed partial class App
         default:
           throw new InvalidOperationException("Unknown capture UI smoke scenario.");
       }
+      CaptureUiSmokeTrace.Stage("scenario.passed");
       File.WriteAllText(result, "passed");
+      CaptureUiSmokeTrace.Stage("result-written.exit-0");
       Environment.Exit(0);
     }
     catch (Exception error)
     {
+      CaptureUiSmokeTrace.Stage("scenario.failed");
       File.WriteAllText(result, error.ToString());
+      CaptureUiSmokeTrace.Stage("result-written.exit-1");
       Environment.Exit(1);
     }
   }
@@ -86,37 +93,61 @@ public sealed partial class App
 
   private static void VerifyCaptureOptionsErrors(CapturePreferencesStore store)
   {
+    CaptureUiSmokeTrace.Stage("options.construct-failing");
     var failing = new CaptureOptionsDialog(new CaptureSmokeFailingStore());
+    CaptureUiSmokeTrace.Stage("options.construct-invalid");
     var invalid = new CaptureOptionsDialog(store);
+    CaptureUiSmokeTrace.Stage("options.construct-nan");
     var nan = new CaptureOptionsDialog(store);
+    CaptureUiSmokeTrace.Stage("options.constructed");
     try
     {
+      CaptureUiSmokeTrace.Stage("options.show-failing.begin");
       failing.Show(0);
+      CaptureUiSmokeTrace.Stage("options.show-failing.end");
       failing.DelayInput.Value = 9;
+      CaptureUiSmokeTrace.Stage("options.save-failing.begin");
       Check(failing.TrySave() is not null, "Storage failure must be reported.");
+      CaptureUiSmokeTrace.Stage("options.save-failing.end");
       Check(failing.ErrorText.Visibility == Visibility.Visible, "Storage error must be visible.");
       Check(failing.Window is not null && failing.DelayInput.Value == 9,
           "Failed save must preserve window and pending input.");
 
+      CaptureUiSmokeTrace.Stage("options.show-invalid.begin");
       invalid.Show(0);
+      CaptureUiSmokeTrace.Stage("options.show-invalid.end");
       invalid.DelayInput.Value = double.NaN;
       invalid.FixedWInput.Value = -5;
+      CaptureUiSmokeTrace.Stage("options.save-invalid.begin");
       Check(invalid.TrySave() is not null && invalid.ErrorText.Text.Contains("正数", StringComparison.Ordinal),
           "Invalid region dimensions must be rejected visibly.");
+      CaptureUiSmokeTrace.Stage("options.save-invalid.end");
       invalid.FixedWInput.Value = 100;
       invalid.FixedHInput.Value = 50;
+      CaptureUiSmokeTrace.Stage("options.save-corrected.begin");
       Check(invalid.TrySave() is null, "Corrected region must save.");
+      CaptureUiSmokeTrace.Stage("options.save-corrected.end");
 
+      CaptureUiSmokeTrace.Stage("options.show-nan.begin");
       nan.Show(0);
+      CaptureUiSmokeTrace.Stage("options.show-nan.end");
       nan.DelayInput.Value = double.NaN;
+      CaptureUiSmokeTrace.Stage("options.save-nan.begin");
       Check(nan.TrySave() is null, "NaN delay must safely fall back.");
+      CaptureUiSmokeTrace.Stage("options.save-nan.end");
       Check(store.Load().EffectiveDelaySeconds == 3, "NaN delay must use the default.");
     }
     finally
     {
+      CaptureUiSmokeTrace.Stage("options.close-nan.begin");
       CloseSmokeDialog(nan);
+      CaptureUiSmokeTrace.Stage("options.close-nan.end");
+      CaptureUiSmokeTrace.Stage("options.close-invalid.begin");
       CloseSmokeDialog(invalid);
+      CaptureUiSmokeTrace.Stage("options.close-invalid.end");
+      CaptureUiSmokeTrace.Stage("options.close-failing.begin");
       CloseSmokeDialog(failing);
+      CaptureUiSmokeTrace.Stage("options.close-failing.end");
     }
   }
 
@@ -364,5 +395,26 @@ public sealed partial class App
     public void Save(CapturePreferences preferences) => throw new IOException("simulated disk full");
     public void SaveLastRegion(PhysicalRectangle bounds) =>
         throw new InvalidOperationException("Options dialog must not save last region.");
+  }
+}
+
+// 只为隔离 capture-ui 子进程保留有界阶段；不启用正式应用日志或改变 UI 调度。
+internal static class CaptureUiSmokeTrace
+{
+  internal static void Stage(string stage)
+  {
+    if (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") != "capture-ui") return;
+    string? root = Environment.GetEnvironmentVariable("VIBEOCR_CAPTURE_UI_ROOT");
+    if (string.IsNullOrWhiteSpace(root)) return;
+    try
+    {
+      string path = Path.Combine(root, "stages.txt");
+      if (File.Exists(path) && new FileInfo(path).Length >= 8192) return;
+      File.AppendAllText(path, $"{Environment.TickCount64}ms pid={Environment.ProcessId} {stage}\n");
+    }
+    catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+    {
+      // 诊断写失败不能代替自检的原始结果；父夹具会显示缺失/不可读的阶段。
+    }
   }
 }

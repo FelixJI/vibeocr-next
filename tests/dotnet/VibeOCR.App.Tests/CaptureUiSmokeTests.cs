@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Runtime.ExceptionServices;
+using System.Text;
 using VibeOCR.App.Inference;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.App.Features.Recognition;
@@ -101,17 +103,19 @@ public sealed class CaptureUiSmokeTests : IDisposable
     start.Environment["VIBEOCR_SELF_TEST_SMOKE"] = "capture-ui";
     start.Environment["VIBEOCR_CAPTURE_UI_ROOT"] = _root;
     start.Environment["VIBEOCR_CAPTURE_UI_SCENARIO"] = scenario;
+    var elapsed = Stopwatch.StartNew();
     using Process child = Process.Start(start) ?? throw new InvalidOperationException("Could not start UI smoke.");
-    try
+    Task exited = child.WaitForExitAsync(TestContext.Current.CancellationToken);
+    await CompleteUiSmokeAsync(async () =>
     {
-      await child.WaitForExitAsync(TestContext.Current.CancellationToken).WaitAsync(
+      await exited.WaitAsync(
           TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
       string result = Path.Combine(_root, "result.txt");
       string detail = File.Exists(result) ? File.ReadAllText(result) : "No UI smoke result.";
       Assert.True(child.ExitCode == 0, $"UI smoke exit={child.ExitCode}: {detail}");
       Assert.Equal("passed", detail);
-    }
-    finally
+      TestContext.Current.TestOutputHelper!.WriteLine(ReadUiSmokeDiagnostics(child, exited, _root));
+    }, async () =>
     {
       if (!child.HasExited)
       {
@@ -119,7 +123,108 @@ public sealed class CaptureUiSmokeTests : IDisposable
         using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         await child.WaitForExitAsync(cleanup.Token);
       }
+    }, error => TestContext.Current.TestOutputHelper!.WriteLine(
+        $"UI smoke scenario={scenario}, failure={error.GetType().Name}, elapsedMs={elapsed.ElapsedMilliseconds}\n" +
+        ReadUiSmokeDiagnostics(child, exited, _root)));
+  }
+
+  private static async Task CompleteUiSmokeAsync(
+      Func<Task> body, Func<Task> cleanup, Action<Exception> reportFailure)
+  {
+    Exception? failure = null;
+    try { await body(); }
+    catch (Exception error)
+    {
+      failure = error;
+      try { reportFailure(error); }
+      catch (Exception diagnosticError)
+      {
+        failure = new AggregateException("UI smoke failure diagnostics also failed.", error, diagnosticError);
+      }
     }
+    try { await cleanup(); }
+    catch (Exception cleanupError)
+    {
+      if (failure is not null)
+        throw new AggregateException("UI smoke and process cleanup both failed.", failure, cleanupError);
+      throw;
+    }
+    if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
+  }
+
+  private static string ReadUiSmokeDiagnostics(Process child, Task exited, string root)
+  {
+    string state;
+    try
+    {
+      bool hasExited = child.HasExited;
+      state = $"pid={child.Id}, hasExited={hasExited}, exitCode={(hasExited ? child.ExitCode.ToString() : "<running>")}";
+    }
+    catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception)
+    {
+      state = $"processStateUnavailable={error.GetType().Name}";
+    }
+    return $"{state}, exitWait={exited.Status}\n" +
+        $"stages (tail):\n{ReadDiagnosticFile(Path.Combine(root, "stages.txt"), tail: true)}\n" +
+        $"result (head):\n{ReadDiagnosticFile(Path.Combine(root, "result.txt"), tail: false)}";
+  }
+
+  private static string ReadDiagnosticFile(string path, bool tail)
+  {
+    const int limit = 4096;
+    try
+    {
+      using var file = new FileStream(path, FileMode.Open, FileAccess.Read,
+          FileShare.ReadWrite | FileShare.Delete);
+      bool truncated = file.Length > limit;
+      if (tail && truncated) file.Seek(-limit, SeekOrigin.End);
+      byte[] bytes = new byte[limit];
+      int count = file.Read(bytes);
+      return Encoding.UTF8.GetString(bytes, 0, count) + (truncated ? "\n<truncated>" : "");
+    }
+    catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+    {
+      return $"<unavailable: {error.GetType().Name}>";
+    }
+  }
+
+  [Fact]
+  public async Task UiSmokeTimeoutIsReportedBeforeCleanupWithoutReplacingOriginalError()
+  {
+    var expected = new TimeoutException("UI smoke did not exit");
+    var events = new List<string>();
+    TimeoutException actual = await Assert.ThrowsAsync<TimeoutException>(() => CompleteUiSmokeAsync(
+        () => Task.FromException(expected),
+        () => { events.Add("cleanup"); return Task.CompletedTask; },
+        error => { Assert.Same(expected, error); events.Add("diagnostics"); }));
+    Assert.Same(expected, actual);
+    Assert.Equal(new[] { "diagnostics", "cleanup" }, events);
+  }
+
+  [Fact]
+  public async Task UiSmokePreservesTimeoutAndCleanupFailure()
+  {
+    var expected = new TimeoutException("UI smoke did not exit");
+    var cleanup = new IOException("process cleanup failed");
+    AggregateException actual = await Assert.ThrowsAsync<AggregateException>(() => CompleteUiSmokeAsync(
+        () => Task.FromException(expected), () => Task.FromException(cleanup), _ => { }));
+    Assert.Equal(new Exception[] { expected, cleanup }, actual.InnerExceptions);
+  }
+
+  [Fact]
+  public void UiSmokeDiagnosticsIncludeBoundedStageTailResultHeadAndProcessState()
+  {
+    Directory.CreateDirectory(_root);
+    File.WriteAllText(Path.Combine(_root, "stages.txt"), new string('s', 8192) + "last-stage");
+    File.WriteAllText(Path.Combine(_root, "result.txt"), "original-result" + new string('r', 8192));
+    using Process current = Process.GetCurrentProcess();
+    string diagnostics = ReadUiSmokeDiagnostics(current, Task.CompletedTask, _root);
+    Assert.Contains($"pid={current.Id}, hasExited=False", diagnostics);
+    Assert.Contains("exitWait=RanToCompletion", diagnostics);
+    Assert.Contains("last-stage", diagnostics);
+    Assert.Contains("original-result", diagnostics);
+    Assert.Contains("<truncated>", diagnostics);
+    Assert.True(diagnostics.Length < 8500);
   }
 
   public void Dispose()

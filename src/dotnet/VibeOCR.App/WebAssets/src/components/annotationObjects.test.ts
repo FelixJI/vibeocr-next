@@ -200,6 +200,40 @@ describe("对象身份、组与批量几何", () => {
       expect(roundTrip.rotation).toBe(0);
     },
   );
+  it.each(["mosaic", "blur"] as const)(
+    "%s 笔刷缩放同步轨迹、宽度与命中包围盒",
+    (tool) => {
+      const original: Mark = {
+        id: "brush",
+        tool,
+        start: { x: 100, y: 100 },
+        end: { x: 200, y: 100 },
+        points: [
+          { x: 100, y: 100 },
+          { x: 200, y: 100 },
+        ],
+        style: { brushSize: 24 },
+      };
+      const before = markBoundsOf(original, undefined);
+      const scaled = scaleMarkIds([original], ids("brush"), 2, {
+        x: 0,
+        y: 0,
+      })[0]!;
+      expect(scaled.style!.brushSize).toBe(48);
+      expect(scaled.points).toEqual([
+        { x: 200, y: 200 },
+        { x: 400, y: 200 },
+      ]);
+      const after = markBoundsOf(scaled, undefined);
+      expect(after).toEqual({
+        x: before.x * 2,
+        y: before.y * 2,
+        width: before.width * 2,
+        height: before.height * 2,
+      });
+      expect(original.style!.brushSize).toBe(24);
+    },
+  );
   it("比例缩放字号、横宽、装饰只乘一次，零横宽保留且非法比例拒绝", () => {
     const original: Mark = {
       id: "a",
