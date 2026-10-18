@@ -215,6 +215,38 @@ public sealed class WorkbenchProjectStoreTests
   }
 
   [Fact]
+  public async Task SameSlotOverlappingUploadsKeepOnlyNewestRequest()
+  {
+    // 同槽两上传重叠：老大 POST 慢读、新小 POST 后发先完成——旧请求
+    // 必须不能覆盖新贡献（仅最新请求序号可提交），新 lease 仍可消费。
+    using var store = new WorkbenchProjectStore();
+    object host = new();
+    GatedJsonStream oldStream = new(
+      "{\"canvas\":{\"width\":16,\"height\":12},\"state\":{\"rotation\":0,\"marks\":[]},\"patches\":[]}");
+    Task<WorkbenchProjectContributionLease> oldUpload = Task.Run(() =>
+      store.UploadAsync(oldStream, host, TestContext.Current.CancellationToken));
+    await oldStream.ReadStarted.WaitAsync(
+      TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+    // 新小 POST 后发先完成：同槽暂存自己的贡献。
+    WorkbenchProjectContributionLease fresh = await store.UploadAsync(
+      Body(new VibpCanvas { Width = 9, Height = 9 }, null), host,
+      TestContext.Current.CancellationToken);
+    Assert.Equal((1, (Guid?)fresh.ContributeId), store.Staged);
+
+    // 老请求续读完成：提交点被请求序号拒绝，不覆盖新贡献。
+    oldStream.Unblock();
+    WorkbenchProjectUploadException superseded = await Assert.ThrowsAsync<
+      WorkbenchProjectUploadException>(() => oldUpload);
+    Assert.Contains("superseded by a newer request", superseded.Message);
+
+    // 新 lease 仍可被保存命令消费，且贡献是新请求的。
+    WorkbenchProjectContribution? consumed = store.TryTake(fresh.ContributeId);
+    Assert.NotNull(consumed);
+    Assert.Equal(9, consumed.Canvas.Width);
+  }
+
+  [Fact]
   public async Task ExpiredContributionIsNotConsumed()
   {
     AdjustableTimeProvider clock = new();

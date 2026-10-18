@@ -18,8 +18,8 @@ internal sealed partial class WorkbenchImageOwner
   internal ProjectOpenDescriptor? CurrentProjectOpen => Volatile.Read(ref currentProjectOpen);
 
   private ProjectOpenDescriptor? currentProjectOpen;
-  /// <summary>打开工程 picker 单飞：picker await 期间占用，取消/异常/完成释放。</summary>
-  private int projectOpenInFlight;
+  /// <summary>保存/打开共享单飞：包含 picker await，取消/异常/完成释放。</summary>
+  private int projectOperationInFlight;
 
   internal sealed record ProjectOpenDescriptor(
     Guid PendingId,
@@ -92,167 +92,197 @@ internal sealed partial class WorkbenchImageOwner
     {
       throw new ImageImportRefusedException("workbench.error.imageImportUnavailable");
     }
-    ValidateScreenshotSession(channel, sessionId, revision);
-    WorkbenchProjectContribution? contribution = projectStore.TryTake(contributeId);
-    if (contribution is null)
+    if (Interlocked.Exchange(ref projectOperationInFlight, 1) != 0)
     {
-      throw new ImageImportRefusedException("workbench.error.screenshotSessionStale");
+      throw new ImageImportInProgressException();
     }
-    // entry 总预算前置（picker 前）：manifest+source+被引用资产+补丁 ≤128。
-    // 只计当前 marks 唯一引用的资产；Web 侧同界早拒，宿主仍独立收紧。
-    HashSet<string> referencedAssetIds = [..
-      contribution.State.Marks.Select(mark => mark.AssetId).OfType<string>()];
-    if (2L + referencedAssetIds.Count + contribution.Patches.Count >
-      VibpProjectLimits.MaximumEntries)
-    {
-      throw new ImageImportRefusedException("workbench.error.imageImportRefused");
-    }
-    // 写入所需身份先快照：picker 异步期间以此再核验，防替换/GC 竞态。
-    long generation = Volatile.Read(ref channel.Generation);
-    WorkbenchResourceReference? input = channel.SessionInput;
-    if (input is null)
-    {
-      throw new ImageImportRefusedException("workbench.error.imageImportRefused");
-    }
-    List<(WorkbenchResourceReference Reference, string AssetId, int Width, int Height)> held = [];
-    lock (import)
-    {
-      foreach (StagedImportAsset asset in import.Adopted.Values)
-      {
-        if (asset.Pixels > 0)
-        {
-          held.Add((asset.Reference, asset.AssetId, asset.Width, asset.Height));
-        }
-      }
-    }
-
-    string? path = await projectSavePicker(cancellationToken);
-    if (path is null)
-    {
-      // 取消不丢画布：会话/贡献不受影响（贡献已消费，可由 Web 重新上传）。
-      throw new AnnotatedImageOperationCancelledException();
-    }
-    // 异步边界再核验：会话/修订/代际任一变化都不落盘（旧文件天然保留）。
-    if (channel.SessionId != sessionId || channel.Revision != revision ||
-      generation != Volatile.Read(ref channel.Generation))
-    {
-      throw new ScreenshotSessionStaleException();
-    }
-    if (!resources.TryGetSessionFile(input.Url, out string? sourcePath) || !File.Exists(sourcePath))
-    {
-      throw new ImageImportRefusedException("workbench.error.imageImportRefused");
-    }
-    // 保存期间持有真实文件句柄；会话回收可删除路径，但不能截断在途读取。
-    List<FileStream> opened = [];
+    bool publishedBusy = false;
     try
     {
-      FileStream source = new(sourcePath, FileMode.Open, FileAccess.Read,
-        FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.SequentialScan);
-      opened.Add(source);
-      long sourceLength = source.Length;
-      string sourceEntryName = VibpProjectRules.SourceEntryName(input.MediaType);
-      List<VibpAssetResource> assetResources = [];
-      List<VibpProjectEntry> entries = [new(sourceEntryName, sourceLength, () => source)];
-      foreach ((WorkbenchResourceReference reference, string assetId, int width, int height) in held)
+      ValidateScreenshotSession(channel, sessionId, revision);
+      WorkbenchProjectContribution? contribution = projectStore.TryTake(contributeId);
+      if (contribution is null)
       {
-        if (!referencedAssetIds.Contains(assetId))
-        {
-          continue;
-        }
-        if (!string.Equals(reference.MediaType, "image/png", StringComparison.Ordinal) ||
-          !resources.TryGetSessionFile(reference.Url, out string? assetPath))
-        {
-          throw new ImageImportRefusedException("workbench.error.imageImportRefused");
-        }
-        FileStream asset = new(assetPath, FileMode.Open, FileAccess.Read,
-          FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.SequentialScan);
-        opened.Add(asset);
-        long assetLength = asset.Length;
-        assetResources.Add(new VibpAssetResource
-        {
-          Id = assetId,
-          Width = width,
-          Height = height,
-          Length = assetLength,
-        });
-        entries.Add(new($"asset-{assetId}.png", assetLength, () => asset));
+        throw new ImageImportRefusedException("workbench.error.screenshotSessionStale");
       }
-      (int sourceWidth, int sourceHeight) =
-        await ReadProjectImageDimensionsAsync(sourcePath, input.MediaType, cancellationToken);
-      foreach (WorkbenchProjectPatchBytes patch in contribution.Patches)
+      operations.Publish(SessionState(channel, true, SessionStatusCode(channel)));
+      publishedBusy = true;
+      // entry 总预算前置（picker 前）：manifest+source+被引用资产+补丁 ≤128。
+      // 只计当前 marks 唯一引用的资产；Web 侧同界早拒，宿主仍独立收紧。
+      HashSet<string> referencedAssetIds = [..
+        contribution.State.Marks.Select(mark => mark.AssetId).OfType<string>()];
+      if (2L + referencedAssetIds.Count + contribution.Patches.Count >
+        VibpProjectLimits.MaximumEntries)
       {
-        byte[] png = patch.Png;
-        entries.Add(new($"patch-{patch.Id}.png", png.LongLength,
-          () => new MemoryStream(png, writable: false)));
+        throw new ImageImportRefusedException("workbench.error.imageImportRefused");
       }
-      // 补丁字节直接来自 Web 上传：原子写入前用真实平台 decoder 完整验证
-      // （codec/尺寸 + 全像素解码，捕获缺 IDAT/IEND/截断/损坏）；预算先限
-      // 1MP/8MP 再逐块解码，取消随 token 传播。
-      long decodedPixels = 0;
-      foreach (WorkbenchProjectPatchBytes patch in contribution.Patches)
+      // 写入所需身份先快照：picker 异步期间以此再核验，防替换/GC 竞态。
+      long generation = Volatile.Read(ref channel.Generation);
+      WorkbenchResourceReference? input = channel.SessionInput;
+      if (input is null)
       {
-        long pixels = (long)patch.Width * patch.Height;
-        if (pixels > VibpProjectLimits.MaximumPatchPixels)
+        throw new ImageImportRefusedException("workbench.error.imageImportRefused");
+      }
+      List<(WorkbenchResourceReference Reference, string AssetId, int Width, int Height)> held = [];
+      lock (import)
+      {
+        foreach (StagedImportAsset asset in import.Adopted.Values)
         {
-          throw new VibpProjectFormatException(
-            $"Project patch {patch.Id} exceeds the per-patch pixel budget.");
+          if (asset.Pixels > 0)
+          {
+            held.Add((asset.Reference, asset.AssetId, asset.Width, asset.Height));
+          }
         }
-        decodedPixels += pixels;
-        if (decodedPixels > VibpProjectLimits.MaximumPatchAggregatePixels)
-        {
-          throw new VibpProjectFormatException(
-            "Project patches exceed the aggregate pixel budget.");
-        }
-        await ValidatePatchPngAsync(patch, cancellationToken);
       }
 
-      var manifest = new VibpProjectManifest
+      if (!resources.TryGetSessionFile(input.Url, out string? sourcePath) || !File.Exists(sourcePath))
       {
-        SchemaVersion = VibpProjectLimits.SchemaVersion,
-        Canvas = contribution.Canvas,
-        Source = new VibpSourceResource
+        throw new ImageImportRefusedException("workbench.error.imageImportRefused");
+      }
+      // 保存期间持有真实文件句柄；会话回收可删除路径，但不能截断在途读取。
+      List<FileStream> opened = [];
+      try
+      {
+        FileStream source = new(sourcePath, FileMode.Open, FileAccess.Read,
+          FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.SequentialScan);
+        opened.Add(source);
+        long sourceLength = source.Length;
+        if (sourceLength < 1 || sourceLength > VibpProjectLimits.MaximumSourceBytes)
         {
-          MediaType = input.MediaType,
-          Width = sourceWidth,
-          Height = sourceHeight,
-          Length = sourceLength,
-        },
-        Assets = assetResources,
-        State = contribution.State with
+          throw new VibpProjectFormatException(
+            "Project source entry length is outside the byte budget.");
+        }
+        string sourceEntryName = VibpProjectRules.SourceEntryName(input.MediaType);
+        List<VibpAssetResource> assetResources = [];
+        List<VibpProjectEntry> entries = [new(sourceEntryName, sourceLength, () => source)];
+        foreach ((WorkbenchResourceReference reference, string assetId, int width, int height) in held)
         {
-          Patches = [.. contribution.Patches.Select(patch => new VibpPatch
+          if (!referencedAssetIds.Contains(assetId))
           {
-            Id = patch.Id,
-            X = patch.X,
-            Y = patch.Y,
-            Width = patch.Width,
-            Height = patch.Height,
-            Length = patch.Png.LongLength,
-          })],
-        },
-      };
-      // 最终身份核验后异步原子写（后台压缩不阻塞 UI，chunk/entry/提交前
-      // 响应取消）：失败/取消抛出，旧工程文件保持，临时文件由 AtomicFile 清理。
-      // entry 只交出已打开的流，不在后台重新查询会话或资源路径。
-      if (channel.SessionId != sessionId || channel.Revision != revision ||
-        generation != Volatile.Read(ref channel.Generation))
-      {
-        throw new ScreenshotSessionStaleException();
+            continue;
+          }
+          if (!string.Equals(reference.MediaType, "image/png", StringComparison.Ordinal) ||
+            !resources.TryGetSessionFile(reference.Url, out string? assetPath))
+          {
+            throw new ImageImportRefusedException("workbench.error.imageImportRefused");
+          }
+          FileStream asset = new(assetPath, FileMode.Open, FileAccess.Read,
+            FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.SequentialScan);
+          opened.Add(asset);
+          long assetLength = asset.Length;
+          assetResources.Add(new VibpAssetResource
+          {
+            Id = assetId,
+            Width = width,
+            Height = height,
+            Length = assetLength,
+          });
+          entries.Add(new($"asset-{assetId}.png", assetLength, () => asset));
+        }
+        (int sourceWidth, int sourceHeight) =
+          await ReadProjectImageDimensionsAsync(sourcePath, input.MediaType, cancellationToken);
+        foreach (WorkbenchProjectPatchBytes patch in contribution.Patches)
+        {
+          byte[] png = patch.Png;
+          entries.Add(new($"patch-{patch.Id}.png", png.LongLength,
+            () => new MemoryStream(png, writable: false)));
+        }
+        // 补丁字节直接来自 Web 上传：原子写入前用真实平台 decoder 完整验证
+        // （codec/尺寸 + 全像素解码，捕获缺 IDAT/IEND/截断/损坏）；预算先限
+        // 1MP/8MP 再逐块解码，取消随 token 传播。
+        long decodedPixels = 0;
+        foreach (WorkbenchProjectPatchBytes patch in contribution.Patches)
+        {
+          long pixels = (long)patch.Width * patch.Height;
+          if (pixels > VibpProjectLimits.MaximumPatchPixels)
+          {
+            throw new VibpProjectFormatException(
+              $"Project patch {patch.Id} exceeds the per-patch pixel budget.");
+          }
+          decodedPixels += pixels;
+          if (decodedPixels > VibpProjectLimits.MaximumPatchAggregatePixels)
+          {
+            throw new VibpProjectFormatException(
+              "Project patches exceed the aggregate pixel budget.");
+          }
+          await ValidatePatchPngAsync(patch, cancellationToken);
+        }
+
+        var manifest = new VibpProjectManifest
+        {
+          SchemaVersion = VibpProjectLimits.SchemaVersion,
+          Canvas = contribution.Canvas,
+          Source = new VibpSourceResource
+          {
+            MediaType = input.MediaType,
+            Width = sourceWidth,
+            Height = sourceHeight,
+            Length = sourceLength,
+          },
+          Assets = assetResources,
+          State = contribution.State with
+          {
+            Patches = [.. contribution.Patches.Select(patch => new VibpPatch
+            {
+              Id = patch.Id,
+              X = patch.X,
+              Y = patch.Y,
+              Width = patch.Width,
+              Height = patch.Height,
+              Length = patch.Png.LongLength,
+            })],
+          },
+        };
+        // 使用最终写入的同一完整 manifest 计算预算，不为上传 state 猜固定裕量。
+        VibpProjectRules.ValidateManifest(manifest);
+        if (JsonSerializer.SerializeToUtf8Bytes(manifest, VibpProjectRules.ManifestJson).LongLength >
+          VibpProjectLimits.MaximumManifestBytes)
+        {
+          throw new VibpProjectFormatException("Project manifest exceeds the byte budget.");
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        string? path = await projectSavePicker(cancellationToken);
+        if (path is null)
+        {
+          throw new AnnotatedImageOperationCancelledException();
+        }
+        // 最终身份核验后异步原子写（后台压缩不阻塞 UI，chunk/entry/提交前
+        // 响应取消）：失败/取消抛出，旧工程文件保持，临时文件由 AtomicFile 清理。
+        // entry 只交出已打开的流，不在后台重新查询会话或资源路径。
+        if (channel.SessionId != sessionId || channel.Revision != revision ||
+          generation != Volatile.Read(ref channel.Generation))
+        {
+          throw new ScreenshotSessionStaleException();
+        }
+        await VibpProjectFile.WriteAsync(path, manifest, entries, cancellationToken);
+        // await 后身份再核验：会话已替换时不返回旧通道投影覆盖错误会话。
+        if (channel.SessionId != sessionId || channel.Revision != revision ||
+          generation != Volatile.Read(ref channel.Generation))
+        {
+          throw new ScreenshotSessionStaleException();
+        }
+        return CurrentChannelState(channel);
       }
-      await VibpProjectFile.WriteAsync(path, manifest, entries, cancellationToken);
-      // await 后身份再核验：会话已替换时不返回旧通道投影覆盖错误会话。
-      if (channel.SessionId != sessionId || channel.Revision != revision ||
-        generation != Volatile.Read(ref channel.Generation))
+      finally
       {
-        throw new ScreenshotSessionStaleException();
+        foreach (FileStream stream in opened)
+        {
+          stream.Dispose();
+        }
       }
-      return CurrentChannelState(channel);
     }
     finally
     {
-      foreach (FileStream stream in opened)
+      try
       {
-        stream.Dispose();
+        if (publishedBusy)
+        {
+          operations.PublishTerminal(CurrentChannelState(channel));
+        }
+      }
+      finally
+      {
+        Volatile.Write(ref projectOperationInFlight, 0);
       }
     }
   }
@@ -267,7 +297,7 @@ internal sealed partial class WorkbenchImageOwner
     // 第二次请求同步拒绝，不会叠加第二个原生 picker 或交错 pending。
     List<WorkbenchResourceReference> published = [];
     string? extractDirectory = null;
-    if (Interlocked.Exchange(ref projectOpenInFlight, 1) != 0)
+    if (Interlocked.Exchange(ref projectOperationInFlight, 1) != 0)
     {
       throw new ImageImportInProgressException();
     }
@@ -370,7 +400,7 @@ internal sealed partial class WorkbenchImageOwner
     }
     finally
     {
-      Volatile.Write(ref projectOpenInFlight, 0);
+      Volatile.Write(ref projectOperationInFlight, 0);
     }
   }
 
@@ -384,7 +414,7 @@ internal sealed partial class WorkbenchImageOwner
       throw new WorkbenchProjectOpenConflictException(
         "Project open acknowledgement is late or unknown.");
     }
-    WorkbenchProjectPendingOpen committed = projectOpen.Acknowledge(
+    projectOpen.Acknowledge(
       ack.PendingId,
       new WorkbenchProjectOpenBinding(ack.SessionId, ack.Revision, ack.Generation));
     ImageSessionChannel target = imageEditChannel;
@@ -398,20 +428,42 @@ internal sealed partial class WorkbenchImageOwner
       throw new WorkbenchProjectOpenConflictException(
         "Project open acknowledgement no longer matches the current session.");
     }
+    // Detached 订阅方可能同步取消 ack 文档。先通知、再检查，旧会话的
+    // 输入/资产/VM 在此仍完整；提交段不再触发该外部回调。
+    try
+    {
+      if (!documentToken.IsCancellationRequested && target.SessionId is { } previousSession)
+      {
+        ScreenshotSessionDetached?.Invoke(previousSession, target.Revision);
+      }
+    }
+    catch
+    {
+      ReleaseDescriptorResources(descriptor);
+      Volatile.Write(ref currentProjectOpen, null);
+      throw;
+    }
     // ack 所属文档已取消（导航/恢复/重载后迟到 ack）：拒绝切换，旧会话
     // 与既有导入保持；不向已死文档插入恢复资产（同步 Register 竞态）。
-    if (documentToken.IsCancellationRequested)
+    if (documentToken.IsCancellationRequested ||
+      (target.SessionId ?? Guid.Empty) != ack.SessionId || target.Revision != ack.Revision ||
+      Volatile.Read(ref target.Generation) != ack.Generation)
     {
       ReleaseDescriptorResources(descriptor);
       Volatile.Write(ref currentProjectOpen, null);
       throw new WorkbenchProjectOpenConflictException(
-        "Project open acknowledgement arrived for a cancelled document.");
+        "Project open acknowledgement was cancelled or its session changed before commit.");
     }
+    // 提交点：上面的文档检查通过。以下同步段不再通知 Detached；此后
+    // 文档取消按普通会话文档退休语义处理，不回滚已提交的新工程。
     // 原子切换：释放旧会话/导入并安装恢复基准与资产（逻辑 frame 随
     // manifest/state 携带，不做坐标重投影）。
     AdvanceImageGeneration(target);
-    ClearScreenshotSession(target);
+    ClearScreenshotSession(target, notifyDetached: false);
     InvalidateScreenshotTextLayer(target);
+    target.ViewModel?.Cancel();
+    target.ViewModel?.InvalidateResult();
+    target.ViewModel?.ReleaseInput();
     target.SessionId = Guid.NewGuid();
     target.Revision = 0;
     target.SessionInput = descriptor.Source;

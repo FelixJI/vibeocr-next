@@ -2528,12 +2528,12 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       : [.. lines.OrderBy(line => line.Y1).ThenBy(line => line.X1)];
   }
 
-  private void ClearScreenshotSession(ImageSessionChannel channel)
+  private void ClearScreenshotSession(ImageSessionChannel channel, bool notifyDetached = true)
   {
     // 会话被关闭/替换：导入暂存与会话资产随会话整体回收，不残留 owned 文件。
     ReleaseChannelImports(ImportStateFor(channel));
     if (ReferenceEquals(channel, recognitionChannel)) ClearResultActions();
-    if (channel.SessionId is { } id)
+    if (notifyDetached && channel.SessionId is { } id)
       ScreenshotSessionDetached?.Invoke(id, channel.Revision);
     if (channel.SessionInput is { } input)
       resources.ReleaseResource(input);

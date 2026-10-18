@@ -23,12 +23,22 @@ public sealed class WorkbenchProjectWiringTests
   {
     public string? SavePath;
     public string? OpenPath;
+    public int SaveCalls;
+    public int OpenCalls;
+    public Func<CancellationToken, Task<string?>>? SaveOverride;
+    public Func<CancellationToken, Task<string?>>? OpenOverride;
 
-    public Func<CancellationToken, Task<string?>> SavePicker =>
-      _ => Task.FromResult(SavePath);
+    public Func<CancellationToken, Task<string?>> SavePicker => token =>
+    {
+      SaveCalls++;
+      return SaveOverride?.Invoke(token) ?? Task.FromResult(SavePath);
+    };
 
-    public Func<CancellationToken, Task<string?>> OpenPicker =>
-      _ => Task.FromResult(OpenPath);
+    public Func<CancellationToken, Task<string?>> OpenPicker => token =>
+    {
+      OpenCalls++;
+      return OpenOverride?.Invoke(token) ?? Task.FromResult(OpenPath);
+    };
   }
 
   private static DesktopWorkbenchCommandHandler CreateHandler(
@@ -37,11 +47,17 @@ public sealed class WorkbenchProjectWiringTests
     WorkbenchProjectStore projectStore,
     string resourceRoot,
     PickerStub picker,
-    string sourceMediaType = "image/png")
+    string sourceMediaType = "image/png",
+    Action<RecognitionViewModel>? observeViewModel = null)
   {
     var inference = new CompletingInferenceClient();
     return new DesktopWorkbenchCommandHandler(
-      () => new RecognitionViewModel(inference, new ProjectInputService(sourceMediaType)),
+      () =>
+      {
+        var model = new RecognitionViewModel(inference, new ProjectInputService(sourceMediaType));
+        observeViewModel?.Invoke(model);
+        return model;
+      },
       static () => throw new InvalidOperationException(),
       static () => throw new InvalidOperationException(),
       static () => throw new InvalidOperationException(),
@@ -119,7 +135,7 @@ public sealed class WorkbenchProjectWiringTests
         height = patch.Height,
         png = Convert.ToBase64String(patch.Png),
       }).ToArray(),
-    }));
+    }, VibpProjectRules.ManifestJson));
   }
 
   private static byte[] Png1X1() => PngBytes(1, 1);
@@ -316,6 +332,187 @@ public sealed class WorkbenchProjectWiringTests
       return gate.Task;
     };
     public void Release(string? path) => gate.TrySetResult(path);
+  }
+
+  [Theory]
+  [InlineData(true, true)]
+  [InlineData(true, false)]
+  [InlineData(false, true)]
+  public async Task ProjectSaveAndOpenSharePickerSingleFlight(bool firstSave, bool secondSave)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      using var store = new WorkbenchProjectStore();
+      var gate = new GatedOpenPickerStub();
+      var picker = new PickerStub
+      {
+        SaveOverride = firstSave ? gate.Picker : null,
+        OpenOverride = firstSave ? null : gate.Picker,
+      };
+      await using var handler = CreateHandler(broker, annotations, store, root, picker);
+      Guid session = await EstablishSessionAsync(handler, WorkbenchRoute.ImageEdit);
+      (Guid firstId, _) = await ContributeAsync(store);
+      Task<WorkbenchCommandOutcome> first = handler.ExecuteAsync(firstSave
+        ? new SaveImageEditProjectCommand(firstId, session, 0)
+        : new OpenImageEditProjectCommand(), TestContext.Current.CancellationToken).AsTask();
+      await gate.Entered.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+      (Guid secondId, _) = await ContributeAsync(store);
+      WorkbenchCommandOutcome second = await handler.ExecuteAsync(secondSave
+        ? new SaveImageEditProjectCommand(secondId, session, 0)
+        : new OpenImageEditProjectCommand(), TestContext.Current.CancellationToken);
+      Assert.Equal("image_import_in_progress", second.Error?.Code);
+      Assert.Equal(1, picker.SaveCalls + picker.OpenCalls);
+      gate.Release(null);
+      Assert.Equal("annotation_operation_cancelled", (await first).Error?.Code);
+      // guard 释放且拒绝的第二次保存未消费贡献。
+      WorkbenchCommandOutcome retried = await handler.ExecuteAsync(secondSave
+        ? new SaveImageEditProjectCommand(secondId, session, 0)
+        : new OpenImageEditProjectCommand(), TestContext.Current.CancellationToken);
+      Assert.Equal("annotation_operation_cancelled", retried.Error?.Code);
+      Assert.Equal(2, picker.SaveCalls + picker.OpenCalls);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Theory]
+  [InlineData(true, false)]
+  [InlineData(false, true)]
+  public async Task PickerFailureReleasesSharedProjectGuard(bool saving, bool cancelled)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      using var store = new WorkbenchProjectStore();
+      using var cancellation = new CancellationTokenSource();
+      cancellation.Cancel();
+      Func<CancellationToken, Task<string?>> fail = _ => cancelled
+        ? Task.FromCanceled<string?>(cancellation.Token)
+        : Task.FromException<string?>(new IOException("Picker failed."));
+      var picker = new PickerStub
+      {
+        SaveOverride = saving ? fail : null,
+        OpenOverride = saving ? null : fail,
+      };
+      await using var handler = CreateHandler(broker, annotations, store, root, picker);
+      Guid session = await EstablishSessionAsync(handler, WorkbenchRoute.ImageEdit);
+      (Guid contribution, _) = await ContributeAsync(store);
+      WorkbenchCommand command = saving
+        ? new SaveImageEditProjectCommand(contribution, session, 0)
+        : new OpenImageEditProjectCommand();
+      if (cancelled)
+      {
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+          handler.ExecuteAsync(command, TestContext.Current.CancellationToken).AsTask());
+      }
+      else
+      {
+        Assert.Equal("desktop_command_failed", (await handler.ExecuteAsync(command,
+          TestContext.Current.CancellationToken)).Error?.Code);
+      }
+      picker.SaveOverride = null;
+      picker.OpenOverride = null;
+      (Guid retry, _) = await ContributeAsync(store);
+      WorkbenchCommandOutcome next = await handler.ExecuteAsync(saving
+        ? new OpenImageEditProjectCommand()
+        : new SaveImageEditProjectCommand(retry, session, 0), TestContext.Current.CancellationToken);
+      Assert.Equal("annotation_operation_cancelled", next.Error?.Code);
+      Assert.Equal(2, picker.SaveCalls + picker.OpenCalls);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task SaveProjectRefusesCompleteManifestOverflowBeforePicker()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      VibpMark[] marks = [.. Enumerable.Range(1, 32).Select(index => new VibpMark
+      {
+        Id = $"mark-{index}", Tool = "text",
+        Start = new VibpPoint { X = 1, Y = 1 }, End = new VibpPoint { X = 2, Y = 2 },
+        Text = new string('a', VibpProjectLimits.MaximumMarkTextLength), TextWidth = 100,
+      })];
+      var state = new VibpEditorState { Rotation = 0, Marks = marks };
+      long excess = JsonSerializer.SerializeToUtf8Bytes(state, VibpProjectRules.ManifestJson).LongLength -
+        WorkbenchProjectStore.MaximumStateBytes + 1;
+      for (int i = marks.Length - 1; excess > 0; i--)
+      {
+        int removed = (int)Math.Min(excess, marks[i].Text!.Length - 1);
+        marks[i] = marks[i] with { Text = marks[i].Text![..^removed] };
+        excess -= removed;
+      }
+      Assert.Equal(WorkbenchProjectStore.MaximumStateBytes - 1,
+        JsonSerializer.SerializeToUtf8Bytes(state, VibpProjectRules.ManifestJson).LongLength);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      using var store = new WorkbenchProjectStore();
+      var picker = new PickerStub { SavePath = Path.Combine(root, "untouched.vibp") };
+      File.WriteAllBytes(picker.SavePath, [11, 22]);
+      await using var handler = CreateHandler(broker, annotations, store, root, picker);
+      Guid session = await EstablishSessionAsync(handler, WorkbenchRoute.ImageEdit);
+      using MemoryStream body = BuildContribution(new VibpCanvas { Width = 64, Height = 48 }, state);
+      WorkbenchProjectContributionLease lease = await store.UploadAsync(body, TestContext.Current.CancellationToken);
+      WorkbenchCommandOutcome saved = await handler.ExecuteAsync(
+        new SaveImageEditProjectCommand(lease.ContributeId, session, 0), TestContext.Current.CancellationToken);
+      Assert.Equal("project_format_invalid", saved.Error?.Code);
+      Assert.Equal(0, picker.SaveCalls);
+      Assert.Equal(new byte[] { 11, 22 }, File.ReadAllBytes(picker.SavePath));
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task SaveProjectRefusesSourceLengthOverflowBeforePicker()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      using var store = new WorkbenchProjectStore();
+      var picker = new PickerStub { SavePath = Path.Combine(root, "untouched.vibp") };
+      File.WriteAllBytes(picker.SavePath, [11, 22]);
+      await using var handler = CreateHandler(broker, annotations, store, root, picker);
+      Guid session = await EstablishSessionAsync(handler, WorkbenchRoute.ImageEdit);
+      string sourcePath = Assert.Single(SourceSessionFiles(root));
+      using (var source = new FileStream(sourcePath, FileMode.Open, FileAccess.Write))
+      {
+        source.SetLength(VibpProjectLimits.MaximumSourceBytes + 1);
+      }
+      (Guid contribution, _) = await ContributeAsync(store);
+      WorkbenchCommandOutcome saved = await handler.ExecuteAsync(
+        new SaveImageEditProjectCommand(contribution, session, 0), TestContext.Current.CancellationToken);
+      Assert.Equal("project_format_invalid", saved.Error?.Code);
+      Assert.Equal(0, picker.SaveCalls);
+      Assert.Equal(new byte[] { 11, 22 }, File.ReadAllBytes(picker.SavePath));
+      // 校验失败没有撤销旧会话；恢复fixture真实长度后同session仍能保存。
+      using (var source = new FileStream(sourcePath, FileMode.Open, FileAccess.Write))
+      {
+        source.SetLength(Source.Length);
+      }
+      (Guid retry, _) = await ContributeAsync(store);
+      Assert.Null((await handler.ExecuteAsync(new SaveImageEditProjectCommand(retry, session, 0),
+        TestContext.Current.CancellationToken)).Error);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
   }
 
   [Fact]
@@ -582,14 +779,42 @@ public sealed class WorkbenchProjectWiringTests
       // ack 携带受控文档 token（宿主路由）：恢复资产绑定该身份。
       using var document = CancellationTokenSource.CreateLinkedTokenSource(
         TestContext.Current.CancellationToken);
-      Assert.Null((await opener.ExecuteAsync(
+      WorkbenchCommandOutcome committed = await opener.ExecuteAsync(
         new AckImageEditProjectOpenCommand(
           pending.PendingId, pending.Binding.SessionId, pending.Binding.Revision,
-          pending.Binding.Generation),
-        document.Token)).Error);
+          pending.Binding.Generation), document.Token);
+      Assert.Null(committed.Error);
+      Guid oldSession = Guid.Parse(Assert.Single(committed.States.OfType<ImageEditWorkbenchState>())
+        .ScreenshotSession!.SessionId);
       Assert.NotEmpty(pending.Assets);
       string assetUrl = pending.Assets.Values.First().Url;
       Assert.True(await ResourceExistsAsync(broker, assetUrl));
+
+      // 下一次打开在 Detached 回调中取消：旧文档资产不能先被 Clear 清掉。
+      Assert.Null((await opener.ExecuteAsync(new OpenImageEditProjectCommand(),
+        TestContext.Current.CancellationToken)).Error);
+      WorkbenchImageOwner.ProjectOpenDescriptor replacement = opener.CurrentProjectOpen!;
+      using var cancelledDocument = new CancellationTokenSource();
+      void CancelSwitch(Guid session, long revision) => cancelledDocument.Cancel();
+      opener.ScreenshotSessionDetached += CancelSwitch;
+      WorkbenchCommandOutcome refused = await opener.ExecuteAsync(new AckImageEditProjectOpenCommand(
+        replacement.PendingId, replacement.Binding.SessionId, replacement.Binding.Revision,
+        replacement.Binding.Generation), cancelledDocument.Token);
+      opener.ScreenshotSessionDetached -= CancelSwitch;
+      Assert.Equal("project_open_conflict", refused.Error?.Code);
+      Assert.True(await ResourceExistsAsync(broker, assetUrl));
+      Assert.False(await ResourceExistsAsync(broker, replacement.Assets[assetId].Url));
+      openPicker.SavePath = Path.Combine(root, "old-assets-survive.vibp");
+      using (MemoryStream body = BuildContribution(manifest.Canvas, manifest.State))
+      {
+        WorkbenchProjectContributionLease lease = await store.UploadAsync(body, TestContext.Current.CancellationToken);
+        Assert.Null((await opener.ExecuteAsync(new SaveImageEditProjectCommand(
+          lease.ContributeId, oldSession, 0), TestContext.Current.CancellationToken)).Error);
+      }
+      VibpProjectArchive savedOld = await VibpProjectFile.ReadAsync(openPicker.SavePath!,
+        Path.Combine(root, "old-assets-survive"), TestContext.Current.CancellationToken);
+      Assert.Equal(manifest.State.Marks, savedOld.Manifest.State.Marks);
+      Assert.Equal(assetPng, File.ReadAllBytes(savedOld.AssetPaths[assetId]));
 
       // 文档取消（导航/恢复/重载）：既有 RetireDocumentImports 精确回收
       // 恢复资产租约与文件。
@@ -610,8 +835,10 @@ public sealed class WorkbenchProjectWiringTests
     }
   }
 
-  [Fact]
-  public async Task AckDocumentCancelledDuringSwitchRetiresRestoredAssets()
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task AckFailureBeforeCommitKeepsOldSessionInputAndAssets(bool callbackThrows)
   {
     string root = TemporaryRoot();
     string projectPath = Path.Combine(root, "race.vibp");
@@ -660,11 +887,15 @@ public sealed class WorkbenchProjectWiringTests
           () => new MemoryStream(assetPng)),
       ]);
 
-      // 同一 handler 建立非空 imageEdit 旧会话：ack 切换时
-      // ClearScreenshotSession 同步触发 Detached 事件。
+      // 同一 handler 建立旧会话与真实 VM 输入。
       var openPicker = new PickerStub { OpenPath = projectPath };
-      await using var opener = CreateHandler(broker, annotations, store, root, openPicker);
+      RecognitionViewModel? oldModel = null;
+      await using var opener = CreateHandler(broker, annotations, store, root, openPicker,
+        observeViewModel: model => oldModel = model);
       Guid priorSession = await EstablishSessionAsync(opener, WorkbenchRoute.ImageEdit);
+      Assert.NotNull(oldModel);
+      RecognitionInput oldInput = Assert.IsType<RecognitionInput>(oldModel.CurrentInput);
+      string oldSourcePath = Assert.Single(SourceSessionFiles(root));
       Assert.Null((await opener.ExecuteAsync(
         new OpenImageEditProjectCommand(),
         TestContext.Current.CancellationToken)).Error);
@@ -673,20 +904,45 @@ public sealed class WorkbenchProjectWiringTests
 
       using var document = CancellationTokenSource.CreateLinkedTokenSource(
         TestContext.Current.CancellationToken);
-      // 确定性取消点：旧会话被切换清除时（ClearScreenshotSession 同步事件）
-      // 取消 ack 所属文档 token——落在提前检查之后、资产插入之前。
-      opener.ScreenshotSessionDetached += (_, _) => document.Cancel();
+      // 确定性取消点：Detached 外部回调返回前，必须尚未释放旧数据。
+      void InterruptCommit(Guid session, long revision)
+      {
+        if (callbackThrows) throw new IOException("Detached subscriber failed.");
+        document.Cancel();
+      }
+      opener.ScreenshotSessionDetached += InterruptCommit;
 
-      Assert.Null((await opener.ExecuteAsync(
+      WorkbenchCommandOutcome cancelled = await opener.ExecuteAsync(
         new AckImageEditProjectOpenCommand(
           pending.PendingId, pending.Binding.SessionId, pending.Binding.Revision,
-          pending.Binding.Generation),
-        document.Token)).Error);
-
-      // 已取消文档不得残留恢复资产：租约已回收（具体异常类型）。
-      string assetUrl = pending.Assets[assetId].Url;
-      await Assert.ThrowsAsync<WorkbenchResourceAccessException>(async () =>
-        await broker.OpenAsync(new Uri(assetUrl), TestContext.Current.CancellationToken));
+          pending.Binding.Generation), document.Token);
+      opener.ScreenshotSessionDetached -= InterruptCommit;
+      Assert.Equal(callbackThrows ? "desktop_command_failed" : "project_open_conflict", cancelled.Error?.Code);
+      Assert.Same(oldInput, oldModel.CurrentInput);
+      Assert.Equal(Source, File.ReadAllBytes(oldSourcePath));
+      Assert.Null(opener.CurrentProjectOpen);
+      Assert.False(await ResourceExistsAsync(broker, pending.Source.Url));
+      Assert.False(await ResourceExistsAsync(broker, pending.Assets[assetId].Url));
+      // 用旧会话真正保存并重开，证明没有只保留一个孤立 source。
+      openPicker.SavePath = Path.Combine(root, "old-survives.vibp");
+      (Guid contribution, _) = await ContributeAsync(store);
+      WorkbenchCommandOutcome saved = await opener.ExecuteAsync(
+        new SaveImageEditProjectCommand(contribution, priorSession, 0),
+        TestContext.Current.CancellationToken);
+      Assert.Null(saved.Error);
+      VibpProjectArchive oldArchive = await VibpProjectFile.ReadAsync(openPicker.SavePath!,
+        Path.Combine(root, "old-survives"), TestContext.Current.CancellationToken);
+      Assert.Equal(Source, File.ReadAllBytes(oldArchive.SourcePath));
+      // 随后成功提交才释放旧 VM 输入和旧资源。
+      Assert.Null((await opener.ExecuteAsync(new OpenImageEditProjectCommand(),
+        TestContext.Current.CancellationToken)).Error);
+      WorkbenchImageOwner.ProjectOpenDescriptor retryOpen = opener.CurrentProjectOpen!;
+      Assert.Null((await opener.ExecuteAsync(new AckImageEditProjectOpenCommand(
+        retryOpen.PendingId, retryOpen.Binding.SessionId, retryOpen.Binding.Revision,
+        retryOpen.Binding.Generation), TestContext.Current.CancellationToken)).Error);
+      Assert.Null(oldModel.CurrentInput);
+      Assert.Null(oldModel.ResultInput);
+      Assert.False(File.Exists(oldSourcePath));
     }
     finally
     {

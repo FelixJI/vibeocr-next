@@ -75,6 +75,10 @@ public sealed class WorkbenchProjectStore : IDisposable
   {
     public StagedContribution? Staged;
     public long Generation;
+    /// <summary>槽内请求序号：每次上传开始递增，仅最新请求可提交。
+    /// 防同槽两上传重叠（老大 POST 慢读、新小 POST 后发先完成）时旧请求
+    /// 覆盖新贡献——代际只随撤销/销毁推进，不区分同代重叠请求。</summary>
+    public long Requests;
     public ITimer? ExpiryTimer;
   }
 
@@ -133,11 +137,13 @@ public sealed class WorkbenchProjectStore : IDisposable
     cancellationToken.ThrowIfCancellationRequested();
     Slot slot;
     long uploadGeneration;
+    long request;
     lock (gate)
     {
       ThrowIfDisposed();
       slot = SlotFor(caller);
       uploadGeneration = slot.Generation;
+      request = ++slot.Requests;
     }
     byte[] body = await ReadBoundedAsync(content, MaximumUploadBytes, cancellationToken);
     WorkbenchProjectContribution contribution = ParseContribution(body);
@@ -145,10 +151,11 @@ public sealed class WorkbenchProjectStore : IDisposable
     lock (gate)
     {
       ThrowIfDisposed();
-      if (slot.Generation != uploadGeneration)
+      // 撤销/销毁（代际）或同槽更新请求（序号）任一变化，旧请求不提交。
+      if (slot.Generation != uploadGeneration || slot.Requests != request)
       {
         throw new WorkbenchProjectUploadException(
-          "Project contribution upload was superseded by a document reset.");
+          "Project contribution upload was superseded by a newer request or document reset.");
       }
       SweepExpired(timeProvider.GetUtcNow());
       slot.Staged = new StagedContribution(

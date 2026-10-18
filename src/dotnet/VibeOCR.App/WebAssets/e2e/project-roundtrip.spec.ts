@@ -981,6 +981,10 @@ for (const { stateFirst, leaveDuringAck } of [
         action: "releaseAssets",
         arguments: { sessionId: restoredSession, resourceUris: [assetUrl] },
       });
+      // releaseAssets 早于懒加载页面就绪，先完成导航再回收资源代理。
+      await expect(
+        page.getByRole("button", { name: "选择图片", exact: true }),
+      ).toBeVisible();
     },
   );
 }
