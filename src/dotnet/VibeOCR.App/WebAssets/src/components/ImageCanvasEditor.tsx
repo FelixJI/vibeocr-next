@@ -1929,7 +1929,8 @@ export function ImageCanvasEditor({
         // Only the unchanged prefix is cached: moving a mark must also recompute
         // all later mosaic/blur marks that sample its pixels. Never cache exports.
         const draftIds = objectDraftRef.current?.byId.keys() ?? [];
-        let markCount = state.marks.length;
+        // 擦除草稿会改变数组索引，不能复用包含待删除对象的缓存前缀。
+        let markCount = objectEraserHits.current?.size ? 0 : state.marks.length;
         for (const id of [...selectedIds, ...draftIds]) {
           const index = state.marks.findIndex((mark) => mark.id === id);
           if (index >= 0 && index < markCount) markCount = index;
@@ -6116,10 +6117,7 @@ export function ImageCanvasEditor({
       </label>
     );
   // #235 选择工具下可就地编辑的新对象：聚光灯/放大镜/文字与图片（水印）。
-  const emphasisMarkCandidate =
-    tool === "select" && selectedMark !== undefined
-      ? state.marks.find((mark) => mark.id === selectedMark)
-      : undefined;
+  const emphasisMarkCandidate = editingMarkCandidate;
   const editingSpotlightMark =
     emphasisMarkCandidate?.tool === "spotlight"
       ? emphasisMarkCandidate
@@ -9507,10 +9505,10 @@ function drawSpotlight(
     );
     area = clampRect(
       {
-        x: (size.width - image.naturalWidth * scale) / 2,
-        y: (size.height - image.naturalHeight * scale) / 2,
-        width: image.naturalWidth * scale,
-        height: image.naturalHeight * scale,
+        x: (size.width - sourceWidth * scale) / 2,
+        y: (size.height - sourceHeight * scale) / 2,
+        width: sourceWidth * scale,
+        height: sourceHeight * scale,
       },
       size,
     );
@@ -9652,7 +9650,8 @@ function renderMagnifierBase(
   draw(
     base,
     image,
-    state,
+    // 裁剪只限制最终输出，不能清空镜子的底图采样源。
+    { ...state, crop: undefined },
     undefined,
     [],
     false,

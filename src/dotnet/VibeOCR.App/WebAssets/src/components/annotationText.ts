@@ -352,7 +352,7 @@ export function drawTextAnnotation(
   const background = mark.style?.textBackground;
   if ((background && background.enabled !== false) || mark.tool === "callout") {
     context.save();
-    context.globalAlpha =
+    context.globalAlpha *=
       background?.enabled === false ? 0 : (background?.opacity ?? 100) / 100;
     context.fillStyle = background?.color ?? "#ffffff";
     context.fillRect(box.x, box.y, box.width, box.height);

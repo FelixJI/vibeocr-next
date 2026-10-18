@@ -1,5 +1,11 @@
+import { writeFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
-import { mountHost, snapshot } from "./workbench-host";
+import {
+  expectCommand,
+  mountHost,
+  sendState,
+  snapshot,
+} from "./workbench-host";
 
 /** #235 强调工具回归：聚光灯多区域并集/底图范围、放大镜真实倍率与
  * 边界/透明采样契约、对象橡皮擦锁定/Esc/底图保护、水印透明度像素证据。
@@ -143,9 +149,42 @@ async function pixels(page: Page, png: Buffer, points: [number, number][]) {
   );
 }
 
+/** 比较解码后的自然像素，避免 PNG 编码字节差异影响判断。 */
+async function pixelDifference(page: Page, a: Buffer, b: Buffer) {
+  return page.evaluate(
+    async ({ a, b }) => {
+      const decode = async (base64: string) => {
+        const bitmap = await createImageBitmap(
+          new Blob([Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))], {
+            type: "image/png",
+          }),
+        );
+        const canvas = document.createElement("canvas");
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        const context = canvas.getContext("2d")!;
+        context.drawImage(bitmap, 0, 0);
+        bitmap.close();
+        return context.getImageData(0, 0, canvas.width, canvas.height);
+      };
+      const [left, right] = await Promise.all([decode(a), decode(b)]);
+      if (left.width !== right.width || left.height !== right.height)
+        throw new Error("输出尺寸不同");
+      let changed = 0;
+      for (let i = 0; i < left.data.length; i += 1)
+        if (left.data[i] !== right.data[i]) changed += 1;
+      return changed;
+    },
+    { a: a.toString("base64"), b: b.toString("base64") },
+  );
+}
 /** 预览画布逻辑坐标采样（900×600 逻辑画布）。 */
 async function previewPixels(page: Page, points: [number, number][]) {
-  return page.evaluate((points) => {
+  return page.evaluate(async (points) => {
+    // 等待已排队的画布绘制完成，避免取到属性/裁剪提交前的旧帧。
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    );
     const canvas = document.querySelector<HTMLCanvasElement>(
       '[aria-label="图片检查画布"]',
     )!;
@@ -238,20 +277,18 @@ test("magnifier: real zoom anchored to unclamped geometry at canvas edge", async
   const png = await save(page, uploads);
   const sampled = await pixels(page, png, [
     [800, 175],
-    [940, 175],
+    [880, 175],
   ]);
-  // 正确：dest(800) → source 762.5+(800-700)/2=812.5；dest(940) → 882.5。
-  expect(Math.abs(sampled[0]![0] - gray(812))).toBeLessThanOrEqual(6);
-  expect(Math.abs(sampled[1]![0] - gray(882))).toBeLessThanOrEqual(6);
+  // dest(800) → source812.5；dest(880) → source852.5，两个取点都在输出边界内。
+  expect(Math.abs(sampled[0]![0] - gray(812))).toBeLessThanOrEqual(2);
+  expect(Math.abs(sampled[1]![0] - gray(852))).toBeLessThanOrEqual(2);
 });
 
-test("magnifier: moves with object and samples base+patches only, replacing lens area", async ({
+test("magnifier: moves with object and excludes annotation pixels", async ({
   page,
 }) => {
   const { uploads } = await setup(page);
-  // 镜下先画一个不透明矩形标注（z 序在放大镜之下）：镜内不得透出它；
-  // 镜的 source 左缘越出底图（<0）→ 该处为透明采样，替换后保持透明
-  // （旧实现 source-over 会残留镜下矩形/底图）。
+  // 镜下先画不透明矩形标注：镜内只显示底图，不得采到下层标注。
   await action(page, "矩形");
   await page.getByLabel("填充", { exact: true }).check();
   await drag(page, 380, 200, 620, 400);
@@ -296,12 +333,11 @@ test("magnifier: crop + non-1:1 export keeps sampling consistent", async ({
     return size;
   }, png.toString("base64"));
   expect(info).toEqual({ width: 300, height: 250 });
-  // 输出像素 (275,200)：裁剪内自然坐标 = 100+275*2=650, 50+200*2=450；
-  // 镜 dest(650,450) → source = 550+(650-500)/2=625, 150+(450-150)/2=300。
-  const sampled = await pixels(page, png, [[275, 200]]);
-  // 镜内像素经 2× 上采样 + 输出 2× 缩小双重平滑：容差 10 覆盖重采样噪声，
-  // 仍远小于坐标/锚定错误造成的几十级漂移。
-  expect(Math.abs(sampled[0]![0] - gray(625))).toBeLessThanOrEqual(10);
+  // 输出 (210,75) 对应自然 (520,200)，在镜内且偏离中心；source x=560，
+  // 与未放大的原图 x520 相差约11级，2级容差可排除不放大/错误锚点。
+  const sampled = await pixels(page, png, [[210, 75]]);
+  // 2级仅容许8-bit渐变重采样量化，不能掩盖坐标偏移。
+  expect(Math.abs(sampled[0]![0] - gray(560))).toBeLessThanOrEqual(2);
 });
 
 test("eraser: locked objects protected, Esc cancels gesture, base pixels intact", async ({
@@ -346,6 +382,11 @@ test("eraser: locked objects protected, Esc cancels gesture, base pixels intact"
     .isEnabled();
   // 擦除前的“锁定”历史仍在（可撤销），但 Esc 的手势不得追加新历史。
   expect(undoEnabledAfter).toBe(undoEnabledBefore);
+  await action(page, "撤销");
+  await expect(options).toHaveCount(3);
+  await expect(options.nth(1)).not.toContainText("已锁定");
+  await action(page, "重做");
+  await expect(options.nth(1)).toContainText("已锁定");
   // 底图保护：全部对象清除后导出与最初基准逐像素一致。
   await action(page, "选择");
   await page.getByLabel("选择标注对象").selectOption({ index: 1 });
@@ -353,33 +394,7 @@ test("eraser: locked objects protected, Esc cancels gesture, base pixels intact"
   await action(page, "橡皮擦");
   await drag(page, 40, 130, 380, 130);
   const cleaned = await save(page, uploads);
-  const diff = await page.evaluate(
-    async ({ a, b }) => {
-      const decode = async (base64: string) => {
-        const bitmap = await createImageBitmap(
-          new Blob([Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))], {
-            type: "image/png",
-          }),
-        );
-        const canvas = document.createElement("canvas");
-        canvas.width = bitmap.width;
-        canvas.height = bitmap.height;
-        canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
-        bitmap.close();
-        return canvas
-          .getContext("2d")!
-          .getImageData(0, 0, canvas.width, canvas.height).data;
-      };
-      const left = await decode(a);
-      const right = await decode(b);
-      let changed = 0;
-      for (let index = 0; index < left.length; index += 1) {
-        if (left[index] !== right[index]) changed += 1;
-      }
-      return changed;
-    },
-    { a: pristine.toString("base64"), b: cleaned.toString("base64") },
-  );
+  const diff = await pixelDifference(page, pristine, cleaned);
   expect(diff).toBe(0);
 });
 
@@ -588,33 +603,7 @@ test("watermark: text and imported image opacity edit, undo, and project payload
   // 撤销恢复 100% 像素。
   await action(page, "撤销");
   const undone = await save(page, uploads);
-  const undoneDiff = await page.evaluate(
-    async ({ a, b }) => {
-      const decode = async (base64: string) => {
-        const bitmap = await createImageBitmap(
-          new Blob([Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))], {
-            type: "image/png",
-          }),
-        );
-        const canvas = document.createElement("canvas");
-        canvas.width = bitmap.width;
-        canvas.height = bitmap.height;
-        canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
-        bitmap.close();
-        return canvas
-          .getContext("2d")!
-          .getImageData(0, 0, canvas.width, canvas.height).data;
-      };
-      const left = await decode(a);
-      const right = await decode(b);
-      let changed = 0;
-      for (let index = 0; index < left.length; index += 1) {
-        if (left[index] !== right[index]) changed += 1;
-      }
-      return changed;
-    },
-    { a: fullOpacity.toString("base64"), b: undone.toString("base64") },
-  );
+  const undoneDiff = await pixelDifference(page, fullOpacity, undone);
   expect(undoneDiff).toBe(0);
   // 图片水印不透明度：就地编辑入历史，工程载荷携带 strokeOpacity。
   await page.getByLabel("选择标注对象").selectOption({ label: "1 · 图片" });
@@ -629,4 +618,620 @@ test("watermark: text and imported image opacity edit, undo, and project payload
   expect(imageMark?.style?.strokeOpacity).toBe(50);
   const textMark = payload.state.marks.find((mark) => mark.tool === "text");
   expect(textMark?.style?.strokeOpacity).toBe(100);
+});
+
+test("F1 spotlight rotation 90/270: mask limited to rotated base bounds", async ({
+  page,
+}, testInfo) => {
+  const { uploads } = await setup(page, {
+    svg:
+      '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600">' +
+      '<rect width="900" height="600" fill="#12a150"/></svg>',
+  });
+  await action(page, "聚光灯");
+  await drag(page, 380, 260, 520, 340); // 孔洞以画布中心为对称
+  for (const rotation of [90, 270]) {
+    for (let turn = 0; turn < (rotation === 90 ? 1 : 2); turn += 1) {
+      await action(page, "旋转 90°");
+    }
+    // 900×600 旋转 90° 后在 900×600 画布上底图实际占 x250..650，y0..600。
+    // 旧实现用未旋转尺寸推包围盒（x150..750，y100..500）会在此失败。
+    const preview = await previewPixels(page, [
+      [200, 300], // 旋转边距：透明，不被染黑
+      [450, 50], // 底图内、孔洞外：必须压暗
+      [450, 300], // 孔洞（绕画布中心旋转后仍在中心）：原始绿色
+    ]);
+    expect(preview[0]![3]).toBe(0);
+    expect(preview[1]![1]).toBeLessThan(161);
+    expect(preview[2]!.slice(0, 3)).toEqual([18, 161, 80]);
+    const exported = await pixels(page, await save(page, uploads), [
+      [300, 75],
+      [300, 450],
+    ]);
+    expect(exported[0]![1]).toBeLessThan(161);
+    expect(exported[1]!.slice(0, 3)).toEqual([18, 161, 80]);
+    await page.screenshot({
+      path: testInfo.outputPath("spotlight-rotation-" + rotation + ".png"),
+    });
+  }
+});
+
+test("F2 magnifier crop: preview and export sample the same unclipped base", async ({
+  page,
+}) => {
+  const { uploads } = await setup(page);
+  await action(page, "放大镜");
+  await drag(page, 500, 150, 700, 300); // 中心 (600,225)，zoom=2 → source 550..650/150..225
+  await action(page, "裁剪");
+  await drag(page, 650, 50, 900, 550); // 裁剪 (650,50)-(900,550)
+  // 预览 (675,225)：source x = 550+(675-500)/2 = 637.5（灰度约 180）。
+  // 旧实现把 crop 传进采样基底：crop 外（<650）被清空 → 此处透明，失败。
+  const preview = await previewPixels(page, [[675, 225]]);
+  expect(Math.abs(preview[0]![0] - gray(637))).toBeLessThanOrEqual(6);
+  expect(preview[0]![3]).toBe(255);
+  const png = await save(page, uploads);
+  const info = await page.evaluate(async (base64) => {
+    const bitmap = await createImageBitmap(
+      new Blob([Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))], {
+        type: "image/png",
+      }),
+    );
+    const size = { width: bitmap.width, height: bitmap.height };
+    bitmap.close();
+    return size;
+  }, png.toString("base64"));
+  expect(info).toEqual({ width: 250, height: 500 });
+  // 导出 (25,175) = 自然 (675,225)：与预览同像素（不透明同一灰度）。
+  const sampled = await pixels(page, png, [[25, 175]]);
+  expect(Math.abs(sampled[0]![0] - gray(637))).toBeLessThanOrEqual(6);
+  expect(sampled[0]![3]).toBe(255);
+});
+
+test("F3 text watermark: draft text/font kept when editing opacity in place", async ({
+  page,
+}) => {
+  const { projects } = await setup(page);
+  await action(page, "文字");
+  await drag(page, 100, 100, 360, 170);
+  await action(page, "选择");
+  await page.getByLabel("选择标注对象").selectOption({ label: "1 · 文字" });
+  await action(page, "编辑文字");
+  const textarea = page.getByLabel("标注文字");
+  await textarea.fill("B水印草稿");
+  await page.getByLabel("粗体", { exact: true }).check();
+  await page.getByLabel("文字背景").check();
+  const opacityInput = page.getByLabel("水印不透明度");
+  await opacityInput.fill("30");
+  await opacityInput.press("Enter");
+  await action(page, "完成文字编辑");
+  await action(page, "保存工程");
+  await expect.poll(() => projects.length).toBe(1);
+  const payload = projects[0] as {
+    state: {
+      marks: {
+        tool: string;
+        text?: string;
+        style?: {
+          strokeOpacity?: number;
+          textBackground?: unknown;
+          fontBold?: boolean;
+        };
+      }[];
+    };
+  };
+  const textMark = payload.state.marks.find((mark) => mark.tool === "text");
+  // 旧实现用 stale state 快照重置 textEdit：草稿文字与背景样式全部丢失。
+  expect(textMark?.text).toBe("B水印草稿");
+  expect(textMark?.style?.strokeOpacity).toBe(30);
+  expect(textMark?.style?.textBackground).toBeDefined();
+  expect(textMark?.style?.fontBold).toBe(true);
+});
+
+test("F4 text watermark opacity 0 also removes its background", async ({
+  page,
+}) => {
+  const { uploads } = await setup(page);
+  const pristine = await save(page, uploads);
+  await action(page, "文字");
+  await drag(page, 100, 400, 420, 470);
+  await action(page, "选择");
+  await page.getByLabel("选择标注对象").selectOption({ label: "1 · 文字" });
+  await page.getByLabel("文字背景").check();
+  const opacityInput = page.getByLabel("水印不透明度");
+  await opacityInput.fill("0");
+  await opacityInput.press("Enter");
+  const zeroed = await save(page, uploads);
+  // 整体不透明度 0：文字与其背景都必须消失，导出与无对象基准零差异。
+  const diff = await pixelDifference(page, pristine, zeroed);
+  expect(diff).toBe(0);
+});
+
+test("F5 magnifier samples applied patch and keeps transparent margin transparent", async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(90_000);
+  // 真实本地修补：框选洋红块 → 预览 → 应用（写入历史，成为采样基底一部分）。
+  const { uploads } = await setup(page, {
+    svg:
+      '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600">' +
+      '<rect x="40" y="40" width="820" height="520" fill="#0aa05a"/>' +
+      '<rect x="400" y="250" width="100" height="100" fill="#e020f0"/></svg>',
+  });
+  await testInfo.attach("F5-透明底图+待修补水印", {
+    body: await page.getByLabel("图片检查画布").screenshot(),
+    contentType: "image/png",
+  });
+  // 真实本地修补：框选洋红块 → 预览 → 应用（写入历史，成为采样基底一部分）。
+  await action(page, "去水印");
+  await drag(page, 396, 246, 504, 354);
+  await action(page, "预览修补");
+  await expect(page.getByText(/修补预览完成/)).toBeVisible({ timeout: 30_000 });
+  await action(page, "应用修补");
+  await expect(page.getByText(/已应用修补/)).toBeVisible();
+  // 放大镜 2× 覆盖修补区中心：若采样原底图（而非底图+已应用修补）会显示洋红。
+  await action(page, "放大镜");
+  await drag(page, 430, 220, 530, 320);
+  await testInfo.attach("F5-修补后放大镜", {
+    body: await page.getByLabel("图片检查画布").screenshot(),
+    contentType: "image/png",
+  });
+  // 先验证镜子确实采到已应用修补。
+  const png = await save(page, uploads);
+  const sampled = await pixels(page, png, [
+    [460, 245], // 镜内：修补后的背景绿（洋红已被修补替换）
+    [640, 300], // 底图内无修补：原始绿
+  ]);
+  expect(sampled[0]![1]).toBeGreaterThan(100);
+  expect(Math.abs(sampled[0]![1]! - sampled[1]![1]!)).toBeLessThanOrEqual(30);
+  expect(sampled[0]![2]).toBeLessThan(sampled[0]![1]!);
+  // 镜子中心移到透明边距，dest x50 下方原本有绿色，但采样 source x35
+  // 位于透明区；替换式绘制必须清除原绿色，不能 source-over 残留。
+  await action(page, "放大镜");
+  await drag(page, 0, 100, 200, 250);
+  await action(page, "选择");
+  await page.getByLabel("选择标注对象").selectOption({ label: "2 · 放大镜" });
+  await drag(page, 100, 175, 20, 175);
+  const transparentPreview = await previewPixels(page, [
+    [50, 175],
+    [100, 175],
+  ]);
+  const transparentPng = await save(page, uploads);
+  const transparentExport = await pixels(page, transparentPng, [
+    [50, 175],
+    [100, 175],
+  ]);
+  expect(transparentPreview[0]![3]).toBe(0);
+  expect(transparentExport[0]![3]).toBe(0);
+  expect(transparentPreview[1]![3]).toBe(255);
+  expect(transparentExport[1]!.slice(0, 3)).toEqual([10, 160, 90]);
+});
+
+test("F5b image watermark: real semi-transparent pixels blend with opacity", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const baseUrl = "https://app.vibeocr/__resource/wm2-base";
+  const imageUrl = "https://app.vibeocr/__resource/wm2-png";
+  const pngs = await page.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 900;
+    canvas.height = 600;
+    const context = canvas.getContext("2d")!;
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, 900, 600);
+    const base = canvas.toDataURL("image/png").split(",")[1]!;
+    canvas.width = 160;
+    canvas.height = 80;
+    const image = canvas.getContext("2d")!;
+    image.fillStyle = "rgba(255,0,0,0.5)";
+    image.fillRect(0, 0, 80, 80);
+    image.fillStyle = "#0000ff";
+    image.fillRect(80, 0, 80, 80);
+    return { base, image: canvas.toDataURL("image/png").split(",")[1]! };
+  });
+  const original = Buffer.from(pngs.base, "base64");
+  const importPng = Buffer.from(pngs.image, "base64");
+  await page.route("https://app.vibeocr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const response = await page.request.get(
+      `http://127.0.0.1:4174${url.pathname}${url.search}`,
+    );
+    await route.fulfill({ response });
+  });
+  await page.route(baseUrl, (route) =>
+    route.fulfill({ contentType: "image/png", body: original }),
+  );
+  await page.route(imageUrl, (route) =>
+    route.fulfill({ contentType: "image/png", body: importPng }),
+  );
+  const uploads: Buffer[] = [];
+  await page.route("**/__annotation", async (route) => {
+    uploads.push(route.request().postDataBuffer()!);
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({ resourceUri: "https://app.vibeocr/a" }),
+    });
+  });
+  await mountHost(
+    page,
+    {
+      ...snapshot,
+      route: "imageEdit",
+      capabilities: ["recognition.results", "recognition.annotation"],
+      features: {
+        imageEdit: {
+          isBusy: false,
+          statusCode: "recognition.completed",
+          input: {
+            url: baseUrl,
+            mediaType: "image/png",
+            byteLength: original.length,
+          },
+          screenshotSession: { sessionId: SESSION, revision: 0 },
+        },
+      },
+    },
+    "https://app.vibeocr/",
+  );
+  await expect(page.getByText("原图 900×600", { exact: false })).toBeVisible();
+  await action(page, "粘贴系统内容");
+  const descriptor = {
+    requestId: "wm2-image",
+    sessionId: SESSION,
+    revision: 0,
+    items: [
+      {
+        kind: "image",
+        assetId: "wm2-png",
+        resourceUri: imageUrl,
+        byteLength: importPng.length,
+        pixelWidth: 160,
+        pixelHeight: 80,
+      },
+    ],
+  };
+  await page.evaluate((descriptor) => {
+    const host = (
+      window as unknown as {
+        __testHost: { state: (scope: string, value: unknown) => void };
+      }
+    ).__testHost;
+    host.state("imageEdit", {
+      isBusy: false,
+      statusCode: "recognition.completed",
+      input: {
+        url: "https://app.vibeocr/__resource/wm2-base",
+        mediaType: "image/png",
+        byteLength: 2048,
+      },
+      screenshotSession: {
+        sessionId: "33333333333333333333333333333333",
+        revision: 0,
+      },
+      import: descriptor,
+    });
+  }, descriptor);
+  await expect(page.getByLabel("选择标注对象")).toContainText("图片");
+  await action(page, "选择");
+  await page.getByLabel("选择标注对象").selectOption({ label: "1 · 图片" });
+  const opacityInput = page.getByLabel("水印不透明度");
+  await opacityInput.fill("50");
+  await opacityInput.press("Enter");
+  const count = uploads.length;
+  await action(page, "保存标注图");
+  await expect.poll(() => uploads.length).toBe(count + 1);
+  const png = uploads[count]!;
+  // 半透明红半 × 整体 50%：0.5×(0.5红+0.5白)+0.5白 = (255,191,191)；
+  // 不透明蓝半 × 50% = (128,128,255)。旧实现若忽略 globalAlpha 会得到
+  // (255,128,128)/(0,0,255)，若双重叠加会得到其它值。
+  const sampled = await pixels(page, png, [
+    [400, 280],
+    [500, 280],
+  ]);
+  expect(sampled[0]!.slice(0, 3)).toEqual([255, 191, 191]);
+  // Canvas 的 8-bit alpha 乘法与颜色量化允许最多 2 级舍入误差。
+  for (const channel of [0, 1]) {
+    expect(Math.abs(sampled[1]![channel]! - 128)).toBeLessThanOrEqual(2);
+  }
+  expect(sampled[1]![2]).toBe(255);
+  expect(sampled[0]![3]).toBe(255);
+});
+
+test("F5c emphasis save-restore keeps spotlight/magnifier/watermark pixels", async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const baseUrl = "https://app.vibeocr/__resource/rt-base";
+  const imageUrl = "https://app.vibeocr/__resource/rt-asset";
+  const pngs = await page.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 900;
+    canvas.height = 600;
+    const context = canvas.getContext("2d")!;
+    context.fillStyle = "#f0f0f0";
+    context.fillRect(0, 0, 900, 600);
+    context.fillStyle = "#1f6feb";
+    context.fillRect(360, 80, 180, 120);
+    const base = canvas.toDataURL("image/png").split(",")[1]!;
+    canvas.width = 90;
+    canvas.height = 60;
+    const image = canvas.getContext("2d")!;
+    image.fillStyle = "#e02020";
+    image.fillRect(0, 0, 90, 60);
+    return { base, image: canvas.toDataURL("image/png").split(",")[1]! };
+  });
+  const original = Buffer.from(pngs.base, "base64");
+  const importPng = Buffer.from(pngs.image, "base64");
+  await page.route("https://app.vibeocr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const response = await page.request.get(
+      `http://127.0.0.1:4174${url.pathname}${url.search}`,
+    );
+    await route.fulfill({ response });
+  });
+  await page.route(baseUrl, (route) =>
+    route.fulfill({ contentType: "image/png", body: original }),
+  );
+  await page.route(imageUrl, (route) =>
+    route.fulfill({ contentType: "image/png", body: importPng }),
+  );
+  const uploads: Buffer[] = [];
+  const projects: unknown[] = [];
+  await page.route("**/__annotation", async (route) => {
+    uploads.push(route.request().postDataBuffer()!);
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({ resourceUri: "https://app.vibeocr/a" }),
+    });
+  });
+  await page.route("**/__project", async (route) => {
+    projects.push(route.request().postDataJSON());
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({ contributeId: "a".repeat(32) }),
+    });
+  });
+  await mountHost(
+    page,
+    {
+      ...snapshot,
+      route: "imageEdit",
+      capabilities: ["recognition.results", "recognition.annotation"],
+      features: {
+        imageEdit: {
+          isBusy: false,
+          statusCode: "recognition.completed",
+          input: {
+            url: baseUrl,
+            mediaType: "image/png",
+            byteLength: original.length,
+          },
+          screenshotSession: { sessionId: SESSION, revision: 0 },
+        },
+      },
+    },
+    "https://app.vibeocr/",
+  );
+  await expect(page.getByText("原图 900×600", { exact: false })).toBeVisible();
+  // 授权导入图片资产。
+  await action(page, "粘贴系统内容");
+  const descriptor = {
+    requestId: "rt-image",
+    sessionId: SESSION,
+    revision: 0,
+    items: [
+      {
+        kind: "image",
+        assetId: "rt-asset",
+        resourceUri: imageUrl,
+        byteLength: importPng.length,
+        pixelWidth: 90,
+        pixelHeight: 60,
+      },
+    ],
+  };
+  await page.evaluate((descriptor) => {
+    const host = (
+      window as unknown as {
+        __testHost: { state: (scope: string, value: unknown) => void };
+      }
+    ).__testHost;
+    host.state("imageEdit", {
+      isBusy: false,
+      statusCode: "recognition.completed",
+      input: {
+        url: "https://app.vibeocr/__resource/rt-base",
+        mediaType: "image/png",
+        byteLength: 2048,
+      },
+      screenshotSession: {
+        sessionId: "33333333333333333333333333333333",
+        revision: 0,
+      },
+      import: descriptor,
+    });
+  }, descriptor);
+  await expect(page.getByLabel("选择标注对象")).toContainText("图片");
+  // 文字水印 30%。
+  await action(page, "文字");
+  await drag(page, 100, 400, 420, 470);
+  await action(page, "选择");
+  await page.getByLabel("选择标注对象").selectOption({ label: "2 · 文字" });
+  const opacityInput = page.getByLabel("水印不透明度");
+  await opacityInput.fill("30");
+  await opacityInput.press("Enter");
+  // 聚光灯 + 放大镜（对象级操作经选择工具选中后不动）。
+  await action(page, "聚光灯");
+  await drag(page, 200, 100, 360, 220);
+  await action(page, "放大镜");
+  await drag(page, 500, 150, 700, 300);
+  // 保存前导出基准。
+  const countBefore = uploads.length;
+  await action(page, "保存标注图");
+  await expect.poll(() => uploads.length).toBe(countBefore + 1);
+  const before = uploads[countBefore]!;
+  await action(page, "保存工程");
+  await expect.poll(() => projects.length).toBe(1);
+  const payload = projects[0] as {
+    canvas: { width: number; height: number };
+    state: {
+      marks: { id: string; tool: string; assetId?: string }[];
+    };
+  };
+  // 以捕获载荷组装真实 manifest 并走生产恢复路径（解析→安装→导出）。
+  const manifest = {
+    schemaVersion: 1,
+    canvas: payload.canvas,
+    source: {
+      mediaType: "image/png",
+      width: 900,
+      height: 600,
+      length: original.length,
+    },
+    assets: [
+      { id: "rt-asset", width: 90, height: 60, length: importPng.length },
+    ],
+    state: {
+      ...payload.state,
+      patches: [],
+    },
+  };
+  const manifestUrl = "https://app.vibeocr/__resource/rt-manifest";
+  await page.route(manifestUrl, (route) =>
+    route.fulfill({
+      contentType: "application/json; charset=utf-8",
+      body: JSON.stringify(manifest),
+    }),
+  );
+  const secondSession = "44444444444444444444444444444444";
+  await sendState(page, "imageEdit", {
+    isBusy: false,
+    statusCode: "recognition.completed",
+    input: {
+      url: baseUrl,
+      mediaType: "image/png",
+      byteLength: original.length,
+    },
+    screenshotSession: { sessionId: secondSession, revision: 0 },
+    projectOpen: {
+      pendingId: "b".repeat(32),
+      sessionId: secondSession,
+      revision: 0,
+      generation: 3,
+      manifest: {
+        url: manifestUrl,
+        mediaType: "application/json; charset=utf-8",
+        byteLength: JSON.stringify(manifest).length,
+      },
+      source: {
+        url: baseUrl,
+        mediaType: "image/png",
+        byteLength: original.length,
+      },
+      assets: [
+        {
+          id: "rt-asset",
+          resource: {
+            url: imageUrl,
+            mediaType: "image/png",
+            byteLength: importPng.length,
+          },
+        },
+      ],
+      patches: [],
+    },
+  });
+  await expectCommand(page, {
+    scope: "imageEdit",
+    action: "ackProjectOpen",
+    arguments: {
+      pendingId: "b".repeat(32),
+      sessionId: secondSession,
+      revision: 0,
+      generation: 3,
+    },
+  });
+  // ack 后宿主切换到新会话才安装已准备的工程，与真实宿主握手一致。
+  await sendState(page, "imageEdit", {
+    isBusy: false,
+    statusCode: "recognition.completed",
+    input: {
+      url: baseUrl,
+      mediaType: "image/png",
+      byteLength: original.length,
+    },
+    screenshotSession: {
+      sessionId: "55555555555555555555555555555555",
+      revision: 0,
+    },
+  });
+  await expect(page.getByText("工程已恢复", { exact: false })).toBeVisible();
+  // 恢复后导出必须与保存前逐像素一致（含聚光灯遮罩/孔洞、放大镜采样、
+  // 图片资产与水印透明度）。
+  const countAfter = uploads.length;
+  await action(page, "保存标注图");
+  await expect.poll(() => uploads.length).toBe(countAfter + 1);
+  const after = uploads[countAfter]!;
+  const diff = await pixelDifference(page, before, after);
+  expect(diff).toBe(0);
+  const beforePath = testInfo.outputPath("emphasis-before-restore.png");
+  const afterPath = testInfo.outputPath("emphasis-after-restore.png");
+  await writeFile(beforePath, before);
+  await writeFile(afterPath, after);
+  await testInfo.attach("emphasis-before-restore", {
+    path: beforePath,
+    contentType: "image/png",
+  });
+  await testInfo.attach("emphasis-after-restore", {
+    path: afterPath,
+    contentType: "image/png",
+  });
+});
+
+test("F6 eraser: hit objects vanish from drag preview immediately", async ({
+  page,
+}) => {
+  const { uploads } = await setup(page);
+  const pristine = await save(page, uploads);
+  await action(page, "遮挡");
+  await drag(page, 100, 100, 180, 160);
+  await action(page, "遮挡");
+  await drag(page, 300, 100, 380, 160);
+  await action(page, "橡皮擦");
+  const from = await at(page, 140, 130);
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(from.x + 20, from.y);
+  await page.waitForTimeout(200);
+  // 拖拽中：第一个遮挡已从预览消失（露出底图渐变），第二个仍可见。
+  const midDrag = await previewPixels(page, [
+    [140, 130],
+    [340, 130],
+  ]);
+  // 底图渐变：gray(140)=40（无遮挡黑块残留）。
+  expect(Math.abs(midDrag[0]![0] - gray(140))).toBeLessThanOrEqual(6);
+  expect(midDrag[1]![0]).toBeLessThanOrEqual(10);
+  await page.mouse.up();
+  await action(page, "选择");
+  await expect(page.getByLabel("选择标注对象").locator("option")).toHaveCount(
+    2,
+  );
+  // 同一手势只擦掉第一个对象：第二个仍保留；一次撤销恢复整个手势。
+  await action(page, "撤销");
+  await expect(page.getByLabel("选择标注对象").locator("option")).toHaveCount(
+    3,
+  );
+  await action(page, "橡皮擦");
+  await drag(page, 40, 130, 380, 130);
+  // 最终底图像素不变。
+  const cleaned = await save(page, uploads);
+  expect(await pixelDifference(page, cleaned, pristine)).toBe(0);
+  await action(page, "撤销");
+  await action(page, "选择");
+  await expect(page.getByLabel("选择标注对象").locator("option")).toHaveCount(
+    3,
+  );
 });
