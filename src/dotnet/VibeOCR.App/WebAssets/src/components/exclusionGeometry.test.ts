@@ -278,3 +278,42 @@ describe("displayRectsToNormalizedRects #235 H3e codec bounds", () => {
     expect(boxes[0]!.x + boxes[0]!.width).toBeLessThanOrEqual(1000);
   });
 });
+
+describe("exclusionNormalizedRects #235 R8 codec bounds", () => {
+  // GLM fresh 复核反例：640×480 原图 rotation90，显示 480×640，
+  // resize 500×400，屏蔽 (240,0)-(480,640)。旧 base 生产链
+  // exclusionOutputRects→exclusionNormalizedRects 以 output 缩放再除
+  // output：x=500.0000000000001、right=1000.0000000000002，C# codec
+  // （严格 <=1000）在上传完成后拒绝该命令。
+  const R8_IMAGE = fakeImage(640, 480);
+  const R8_DISPLAY = { width: 480, height: 640 };
+  const state: EditorState = {
+    rotation: 90,
+    marks: [exclusionMark({ x: 240, y: 0 }, { x: 480, y: 640 })],
+    resize: { width: 500, height: 400 },
+  };
+
+  it("does not fully cover the output for the half-image exclusion", () => {
+    expect(exclusionCoversOutput(R8_IMAGE, state, R8_DISPLAY)).toBe(false);
+  });
+
+  it("keeps the base exclusion box within [0,1000] at the exact half position", () => {
+    const boxes = exclusionNormalizedRects(R8_IMAGE, state, R8_DISPLAY);
+    expect(boxes).toHaveLength(1);
+    const box = boxes[0]!;
+    // 半幅屏蔽：端点恰为 500 与 1000（或 0 与 500，取决于旋转方向），
+    // 不允许缩小遮挡或浮点越界。
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.width).toBeGreaterThan(0);
+    expect(box.height).toBeGreaterThan(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(1000);
+    expect(box.y + box.height).toBeLessThanOrEqual(1000);
+    expect([box.x, box.x + box.width].sort((a, b) => a - b)).toEqual([
+      500, 1000,
+    ]);
+    expect([box.y, box.y + box.height].sort((a, b) => a - b)).toEqual([
+      0, 1000,
+    ]);
+  });
+});

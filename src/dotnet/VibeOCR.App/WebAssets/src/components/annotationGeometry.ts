@@ -691,26 +691,51 @@ export function exclusionOutputRects(
 }
 
 /** 屏蔽矩形投影到最终输出的 [0,1000] 归一化坐标，与文字层行框同参考系。 */
+/** 自然空间矩形 → 裁剪内剩余区间 → [0,1000] 归一化端点（base 与
+ * 镜泄露区共用尾段）：端点夹取保证 0≤x,y、x+width/y+height≤1000、
+ * width,height>0，无 epsilon、不缩小遮挡。 */
+function cropClippedNormalizedBoxes(
+  rects: readonly Rect[],
+  crop: Rect,
+): Rect[] {
+  const boxes: Rect[] = [];
+  for (const rect of rects) {
+    const left = Math.max(rect.x, crop.x);
+    const top = Math.max(rect.y, crop.y);
+    const right = Math.min(rect.x + rect.width, crop.x + crop.width);
+    const bottom = Math.min(rect.y + rect.height, crop.y + crop.height);
+    if (right <= left || bottom <= top) continue;
+    const x0 = Math.max(0, ((left - crop.x) / crop.width) * 1000);
+    const y0 = Math.max(0, ((top - crop.y) / crop.height) * 1000);
+    const x1 = Math.min(1000, ((right - crop.x) / crop.width) * 1000);
+    const y1 = Math.min(1000, ((bottom - crop.y) / crop.height) * 1000);
+    if (x1 <= x0 || y1 <= y0) continue;
+    boxes.push({ x: x0, y: y0, width: x1 - x0, height: y1 - y0 });
+  }
+  return boxes;
+}
+
 export function exclusionNormalizedRects(
   image: HTMLImageElement,
   state: EditorState,
   displaySize: CanvasSize,
 ): readonly Rect[] {
-  const output = finalOutputSize(image, state, displaySize);
-  return exclusionOutputRects(image, state, displaySize).map((rect) => ({
-    x: (rect.x / output.width) * 1000,
-    y: (rect.y / output.height) * 1000,
-    width: (rect.width / output.width) * 1000,
-    height: (rect.height / output.height) * 1000,
-  }));
+  // base 生产链改为权威 snapped 自然矩形 + 共用端点归一化尾段：绕开
+  // exclusionOutputRects 的“先乘 output 缩放再除 output”浮点路径
+  // （比值恒等：scale/output ≡ 1/crop 尺寸），避免 1000.0000000000002
+  // 越界被 C# codec 拒绝；exclusionOutputRects 其余消费者不变。
+  const crop = mappedCropRect(image, state, displaySize);
+  if (crop.width <= 0 || crop.height <= 0) return [];
+  return cropClippedNormalizedBoxes(
+    exclusionNaturalRects(image, state, displaySize),
+    crop,
+  );
 }
 
 /** 任意显示空间矩形 → 最终输出 [0,1000] 归一化框：与
  * exclusionNormalizedRects 同一裁剪/缩放映射（旋转→裁剪→指定尺寸），
- * 供非 mark 几何（如放大镜采样泄露区）复用同一信任边界。
- * 端点映射后夹取到 [0,1000]：消除先乘 output 缩放再除 output 的冗余
- * 运算及其浮点越界（right=1000.0000000000001 会被 C# codec 严格拒绝），
- * 保证 x,y≥0、width,height>0、x+width/y+height≤1000，不用 epsilon。 */
+ * 供非 mark 几何（如放大镜采样泄露区）复用同一信任边界与同一端点
+ * 归一化尾段（契约同上，不用 epsilon）。 */
 export function displayRectsToNormalizedRects(
   rects: readonly Rect[],
   image: HTMLImageElement,
@@ -729,30 +754,18 @@ export function displayRectsToNormalizedRects(
       state.rotation,
       naturalSize,
     );
-  const boxes: Rect[] = [];
+  const naturalRects: Rect[] = [];
   for (const rect of rects) {
     const start = mapPoint({ x: rect.x, y: rect.y });
     const end = mapPoint({ x: rect.x + rect.width, y: rect.y + rect.height });
-    // 裁剪内剩余区间 → 归一化端点；无 resize 时 output==crop 尺寸，
-    // 端点比值与旧实现一致（scale/output 宽高比恰为 1/crop 尺寸）。
-    const left = Math.max(Math.min(start.x, end.x), crop.x);
-    const top = Math.max(Math.min(start.y, end.y), crop.y);
-    const right = Math.min(Math.max(start.x, end.x), crop.x + crop.width);
-    const bottom = Math.min(Math.max(start.y, end.y), crop.y + crop.height);
-    if (right <= left || bottom <= top) continue;
-    const x0 = Math.max(0, ((left - crop.x) / crop.width) * 1000);
-    const y0 = Math.max(0, ((top - crop.y) / crop.height) * 1000);
-    const x1 = Math.min(1000, ((right - crop.x) / crop.width) * 1000);
-    const y1 = Math.min(1000, ((bottom - crop.y) / crop.height) * 1000);
-    if (x1 <= x0 || y1 <= y0) continue;
-    boxes.push({
-      x: x0,
-      y: y0,
-      width: x1 - x0,
-      height: y1 - y0,
+    naturalRects.push({
+      x: Math.min(start.x, end.x),
+      y: Math.min(start.y, end.y),
+      width: Math.abs(end.x - start.x),
+      height: Math.abs(end.y - start.y),
     });
   }
-  return boxes;
+  return cropClippedNormalizedBoxes(naturalRects, crop);
 }
 
 /** 归一化 [0,1000] 排除框回投到当前显示空间：exclusionNormalizedRects
