@@ -417,7 +417,8 @@ public sealed class DesktopWorkbenchCommandHandler :
   internal ScreenshotCaptureScene? TakeScreenshotCaptureScene(Guid sessionId) => Image.TakeScreenshotCaptureScene(sessionId);
   public Task<RecognitionTextLayerState?> PreparePinnedTextLayerAsync(Guid sessionId, long revision, string imagePath, CancellationToken cancellationToken = default) => Image.PreparePinnedTextLayerAsync(sessionId, revision, imagePath, cancellationToken);
   /// <summary>#238 pinEdit：单编辑槽会话建立与宿主事件转发。</summary>
-  internal Task<Guid?> TryOpenPinEditSessionAsync(Guid pinId, byte[] png, CancellationToken cancellationToken = default) => Image.TryOpenPinEditSessionAsync(pinId, png, cancellationToken);
+  internal Task<Guid?> TryOpenPinEditSessionAsync(Guid pinId, byte[] png, CancellationToken cancellationToken = default,
+    IReadOnlyList<WorkbenchExclusionBox>? excludeBoxes = null) => Image.TryOpenPinEditSessionAsync(pinId, png, cancellationToken, excludeBoxes);
   internal event Action<Guid, long, Guid>? PinSnapshotApplied
   {
     add => Image.PinSnapshotApplied += value;

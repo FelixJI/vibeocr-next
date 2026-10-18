@@ -29,7 +29,8 @@ public sealed partial class App
       static () => throw new InvalidOperationException(), () => new SettingsViewModel(_inferenceGateway),
       () => new ShellViewModel(new PinSmokeHotkeys(), new PinSmokeStartup()),
       static () => throw new InvalidOperationException(), new WindowLayoutStore(Path.Combine(layout.DataRoot, "layout.json")),
-      inferenceAttached: () => false);
+      inferenceAttached: () => false, supervisorInstanceId: () => "pins-smoke",
+      preparePinnedTextLayer: (session, revision, path, token) => main!.VerifyMaskedPinOcrInputAsync(session, revision, path, token));
     main.Activate();
     try { await main.VerifyPinsSelfCheckAsync(); }
     finally { main.Close(); await main.ShutdownCompletion; }

@@ -669,7 +669,7 @@ public sealed class InputService : IInputService, ISystemImportReader
         return new RecognitionInput(data, MediaType(path), info.Name, origin);
     }
 
-    private static async Task ValidateImageAsync(byte[] data, CancellationToken cancellationToken)
+    internal static async Task ValidateImageAsync(byte[] data, CancellationToken cancellationToken)
     {
         using var stream = new MemoryStream(data);
         using var random = stream.AsRandomAccessStream();

@@ -1,6 +1,8 @@
 using System.Buffers.Binary;
 using System.Text.Json;
 using VibeOCR.App.Services;
+using VibeOCR.App.Features.Recognition;
+using VibeOCR.App.Web;
 using VibeOCR.App.Workbench;
 
 namespace VibeOCR.App.Features.Pins;
@@ -14,8 +16,10 @@ namespace VibeOCR.App.Features.Pins;
 internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
 {
   internal sealed record Recovery(Guid Id, string Kind, string Content, int X, int Y,
-    int Width, int Height, bool Collapsed = false, bool PassThrough = false, bool Grouped = false);
-  private sealed record Snapshot(string Generation);
+    int Width, int Height, bool Collapsed = false, bool PassThrough = false, bool Grouped = false,
+    int? ExpandedClientWidth = null, int? ExpandedClientHeight = null,
+    IReadOnlyList<WorkbenchExclusionBox>? ExcludeBoxes = null);
+  private sealed record Snapshot(string Generation, IReadOnlyList<WorkbenchExclusionBox>? ExcludeBoxes = null);
   private const string PointerFileName = "current.json";
   private const string RecoveryFileName = "window.json";
 
@@ -30,13 +34,14 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
     VibpProjectManifest manifest,
     IReadOnlyList<VibpProjectEntry> entries,
     byte[] finalPng,
-    CancellationToken cancellationToken)
+    CancellationToken cancellationToken,
+    IReadOnlyList<WorkbenchExclusionBox>? excludeBoxes = null)
   {
     ArgumentNullException.ThrowIfNull(manifest);
     ArgumentNullException.ThrowIfNull(entries);
     ArgumentNullException.ThrowIfNull(finalPng);
-    if (finalPng.Length > PinHistoryStore.MaximumEntryBytes || SniffPngSize(finalPng) == (0, 0))
-      throw new InvalidOperationException("Pin snapshot PNG is invalid or exceeds the byte budget.");
+    await ValidatePngAsync(finalPng, cancellationToken);
+    WorkbenchExclusionBox.ValidateCollection(excludeBoxes ?? []);
     Directory.CreateDirectory(root);
     EnsureOwnedDirectory(root);
     string directory = DirectoryFor(pinId);
@@ -50,7 +55,7 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
       await VibpProjectFile.WriteAsync(project, manifest, entries, cancellationToken);
       AtomicFile.Write(image, stream => stream.Write(finalPng), cancellationToken);
       // The pointer is the sole commit: readers see the old pair or the new pair.
-      byte[] pointer = JsonSerializer.SerializeToUtf8Bytes(new Snapshot(generation));
+      byte[] pointer = JsonSerializer.SerializeToUtf8Bytes(new Snapshot(generation, excludeBoxes ?? []));
       AtomicFile.Write(Path.Combine(directory, PointerFileName), stream => stream.Write(pointer), cancellationToken);
     }
     catch
@@ -80,7 +85,7 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
     EnsureOwnedDirectory(directory);
     string pointer = Path.Combine(directory, PointerFileName);
     if (!File.Exists(pointer)) return null;
-    Snapshot? snapshot = JsonSerializer.Deserialize<Snapshot>(File.ReadAllText(pointer));
+    Snapshot? snapshot = ReadSnapshot(pinId);
     if (snapshot is null || !Guid.TryParseExact(snapshot.Generation, "N", out _)) return null;
     string path = Path.Combine(directory, snapshot.Generation + extension);
     return File.Exists(path) ? path : null;
@@ -92,9 +97,55 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
 
   public string? GetSnapshotProjectPath(Guid pinId) => SnapshotPath(pinId, ".vibp");
 
+  private Snapshot? ReadSnapshot(Guid pinId)
+  {
+    string path = Path.Combine(DirectoryFor(pinId), PointerFileName);
+    if (!File.Exists(path)) return null;
+    EnsureOwnedDirectory(root);
+    EnsureOwnedDirectory(DirectoryFor(pinId));
+    if (new FileInfo(path).Length > 16 * 1024) throw new InvalidDataException("Invalid pin metadata.");
+    Snapshot? snapshot = JsonSerializer.Deserialize<Snapshot>(File.ReadAllText(path));
+    WorkbenchExclusionBox.ValidateCollection(snapshot?.ExcludeBoxes ?? []);
+    return snapshot;
+  }
+
+  internal IReadOnlyList<WorkbenchExclusionBox>? GetSnapshotExclusions(Guid pinId) => ReadSnapshot(pinId)?.ExcludeBoxes;
+
+  internal PinHistoryImage? ReadSnapshotPng(Guid pinId)
+  {
+    string? path = GetSnapshotPngPath(pinId);
+    if (path is null || new FileInfo(path).Length > PinHistoryStore.MaximumEntryBytes) return null;
+    byte[] png = File.ReadAllBytes(path);
+    return TryValidatePng(png, out int width, out int height) ? new(png, width, height) : null;
+  }
+
+  internal static async Task ValidatePngAsync(byte[] png, CancellationToken cancellationToken)
+  {
+    if (png.LongLength is < 1 or > PinHistoryStore.MaximumEntryBytes)
+      throw new InvalidDataException("Pin PNG exceeds the byte budget.");
+    using MemoryStream structure = new(png, writable: false);
+    await WorkbenchAnnotationStore.ValidatePngStructureCoreAsync(structure, cancellationToken);
+    await InputService.ValidateImageAsync(png, cancellationToken);
+  }
+
+  internal static bool TryValidatePng(byte[] png, out int width, out int height)
+  {
+    width = height = 0;
+    try
+    {
+      // Stores have a synchronous API. Decode on MTA so a UI caller never blocks its own continuation.
+      Task.Run(() => ValidatePngAsync(png, CancellationToken.None)).GetAwaiter().GetResult();
+      (width, height) = SniffPngSize(png);
+      return width > 0 && height > 0;
+    }
+    catch (InvalidDataException) { return false; }
+  }
+
+
   internal void SaveRecovery(Recovery record, byte[]? png = null)
   {
     if (record.Width < 1 || record.Height < 1 || record.Content.Length > 256 * 1024) throw new InvalidOperationException("Invalid pin bounds.");
+    WorkbenchExclusionBox.ValidateCollection(record.ExcludeBoxes ?? []);
     Directory.CreateDirectory(root);
     EnsureOwnedDirectory(root);
     string directory = DirectoryFor(record.Id);
@@ -102,7 +153,7 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
     EnsureOwnedDirectory(directory);
     if (png is not null)
     {
-      if (png.Length > PinHistoryStore.MaximumEntryBytes || SniffPngSize(png) == (0, 0))
+      if (!TryValidatePng(png, out _, out _))
         throw new InvalidOperationException("Invalid pin image.");
       AtomicFile.Write(Path.Combine(directory, "image.png"), stream => stream.Write(png));
     }
@@ -123,11 +174,13 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
         string path = Path.Combine(directory, RecoveryFileName);
         if (!File.Exists(path) || new FileInfo(path).Length > 512 * 1024) continue;
         Recovery? record = JsonSerializer.Deserialize<Recovery>(File.ReadAllText(path));
+        if (record is not null) WorkbenchExclusionBox.ValidateCollection(record.ExcludeBoxes ?? []);
+        if (record?.Kind == "Image" && ReadSnapshotPng(id) is null) continue;
         if (record is not null && record.Id == id && record.Width is > 0 and <= 32768 &&
           record.Height is > 0 and <= 32768 && record.Content is { Length: <= 262144 } &&
           record.Kind is "Image" or "Text" or "Color" or "Formula" or "FileText") result.Add(record);
       }
-      catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
+      catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
       { AppLog.Warn($"Skipped damaged pin recovery: {id}: {error.Message}"); }
       if (result.Count == 4) break;
     }

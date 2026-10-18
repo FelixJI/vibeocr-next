@@ -115,6 +115,7 @@ public sealed class PinEditChannelWorkbenchTests
     public readonly List<string> Order = [];
     public Guid LastPinId;
     public byte[]? LastPng;
+    public IReadOnlyList<WorkbenchExclusionBox>? LastExclusions;
     public string? PngPath;
 
     public Task WriteSnapshotAsync(
@@ -122,11 +123,12 @@ public sealed class PinEditChannelWorkbenchTests
       VibpProjectManifest manifest,
       IReadOnlyList<VibpProjectEntry> entries,
       byte[] finalPng,
-      CancellationToken cancellationToken)
+      CancellationToken cancellationToken, IReadOnlyList<WorkbenchExclusionBox>? excludeBoxes = null)
     {
       Order.Add("write");
       LastPinId = pinId;
       LastPng = finalPng;
+      LastExclusions = excludeBoxes;
       string root = Path.Combine(Path.GetTempPath(), "vibeocr-pin-edit-writer");
       Directory.CreateDirectory(root);
       PngPath = Path.Combine(root, $"{pinId:N}.png");
@@ -236,7 +238,7 @@ public sealed class PinEditChannelWorkbenchTests
   {
     await using var harness = new Harness();
     Guid? sessionId = await harness.Handler.TryOpenPinEditSessionAsync(
-      Guid.NewGuid(), Png, TestContext.Current.CancellationToken);
+      Guid.NewGuid(), Png, TestContext.Current.CancellationToken, [new(0, 0, 250, 1000)]);
     Assert.NotNull(sessionId);
     // C1：会话建立与后续命令只发布 pinEdit scope，不产出 recognition/imageEdit。
     Assert.All(harness.States, state => Assert.Equal("pinEdit", state.Scope));
@@ -245,6 +247,7 @@ public sealed class PinEditChannelWorkbenchTests
         Assert.IsType<PinEditWorkbenchState>(state).ScreenshotSession is not null));
     Assert.Equal(sessionId.ToString()!.Replace("-", ""), opened.ScreenshotSession!.SessionId);
     Assert.NotNull(opened.Input);
+    Assert.Equal(new WorkbenchExclusionBox(0, 0, 250, 1000), Assert.Single(opened.ScreenshotSession.ExcludeBoxes!));
   }
 
   [Fact]
@@ -262,7 +265,7 @@ public sealed class PinEditChannelWorkbenchTests
       new MemoryStream(Png), TestContext.Current.CancellationToken);
 
     WorkbenchCommandOutcome outcome = harness.Execute(new ApplyPinEditSnapshotCommand(
-      contribution.ContributeId, png.ResourceUri.AbsoluteUri, sessionId!.Value, 0));
+      contribution.ContributeId, png.ResourceUri.AbsoluteUri, sessionId!.Value, 0, [new(0, 0, 1000, 250)]));
 
     Assert.Null(outcome.Error);
     Assert.True(outcome.States.Count == 0 || outcome.States.All(state => state.Scope == "pinEdit"));
@@ -270,10 +273,28 @@ public sealed class PinEditChannelWorkbenchTests
     Assert.Equal(["write", "written"], harness.Writer.Order);
     Assert.Equal((sessionId.Value, 0L, pinId), harness.Applied.Single());
     Assert.Equal(Png, harness.Writer.LastPng);
+    Assert.Equal(new WorkbenchExclusionBox(0, 0, 1000, 250), Assert.Single(harness.Writer.LastExclusions!));
     // 会话结束：applied 终态后通道回到无会话投影。
     Assert.Contains(harness.States, state => state is PinEditWorkbenchState pin &&
       pin.StatusCode == "pinEdit.applied");
     Assert.DoesNotContain(harness.States, state => state.Scope is "recognition" or "imageEdit");
+  }
+
+  [Fact]
+  public async Task ExclusionBudgetIsRejectedBeforeConsumingTheOwnedSaveLeases()
+  {
+    await using var harness = new Harness();
+    Guid? session = await harness.Handler.TryOpenPinEditSessionAsync(Guid.NewGuid(), Png, TestContext.Current.CancellationToken);
+    WorkbenchProjectContributionLease contribution = await harness.Projects.UploadAsync(
+      new MemoryStream(System.Text.Encoding.UTF8.GetBytes(ContributionBody)), this, TestContext.Current.CancellationToken);
+    WorkbenchAnnotationLease image = await harness.Annotations.UploadPngAsync(new MemoryStream(Png), TestContext.Current.CancellationToken);
+    WorkbenchExclusionBox[] tooMany = Enumerable.Repeat(new WorkbenchExclusionBox(0, 0, 10, 10), 65).ToArray();
+    WorkbenchCommandOutcome refused = harness.Execute(new ApplyPinEditSnapshotCommand(
+      contribution.ContributeId, image.ResourceUri.AbsoluteUri, session!.Value, 0, tooMany));
+    Assert.NotNull(refused.Error); Assert.Empty(harness.Writer.Order);
+    WorkbenchCommandOutcome saved = harness.Execute(new ApplyPinEditSnapshotCommand(
+      contribution.ContributeId, image.ResourceUri.AbsoluteUri, session.Value, 0, []));
+    Assert.Null(saved.Error); Assert.Equal(["write", "written"], harness.Writer.Order);
   }
 
   [Fact]

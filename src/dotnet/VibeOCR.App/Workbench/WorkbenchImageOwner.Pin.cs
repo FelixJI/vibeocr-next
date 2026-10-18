@@ -10,13 +10,14 @@ namespace VibeOCR.App.Workbench;
 /// </summary>
 internal interface IPinSnapshotWriter
 {
-  /// <summary>原子写入快照（先 .vibp 后 PNG；任一失败保留旧快照）。</summary>
+  /// <summary>工程、PNG 与最终坐标系 OCR 排除框一并提交；任一失败保留旧快照。</summary>
   Task WriteSnapshotAsync(
     Guid pinId,
     VibpProjectManifest manifest,
     IReadOnlyList<VibpProjectEntry> entries,
     byte[] finalPng,
-    CancellationToken cancellationToken);
+    CancellationToken cancellationToken,
+    IReadOnlyList<WorkbenchExclusionBox>? excludeBoxes = null);
 
   /// <summary>该贴图当前快照 PNG 的 owned 路径；从未编辑过为 null。</summary>
   string? GetSnapshotPngPath(Guid pinId);
@@ -95,8 +96,10 @@ internal sealed partial class WorkbenchImageOwner
   internal async Task<Guid?> TryOpenPinEditSessionAsync(
     Guid pinId,
     byte[] png,
-    CancellationToken cancellationToken)
+    CancellationToken cancellationToken,
+    IReadOnlyList<WorkbenchExclusionBox>? excludeBoxes = null)
   {
+    WorkbenchExclusionBox.ValidateCollection(excludeBoxes ?? []);
     if (pinSnapshotWriter is null)
     {
       throw new InvalidOperationException("Pin editing is unavailable.");
@@ -116,7 +119,7 @@ internal sealed partial class WorkbenchImageOwner
       pinEditChannel.Revision = 0;
       pinEditChannel.SceneEditing = false;
       pinEditChannel.SessionInput = input;
-      pinEditChannel.ExcludeBoxes = [];
+      pinEditChannel.ExcludeBoxes = excludeBoxes ?? [];
       pinEditPinId = pinId;
       if (pinSnapshotWriter.GetSnapshotProjectPath(pinId) is { } projectPath)
         await RestorePinProjectAsync(projectPath, cancellationToken);
@@ -240,6 +243,8 @@ internal sealed partial class WorkbenchImageOwner
     try
     {
       ValidateScreenshotSession(pinEditChannel, command.SessionId, command.Revision);
+      IReadOnlyList<WorkbenchExclusionBox> snapshotExclusions = command.ExcludeBoxes ?? pinEditChannel.ExcludeBoxes;
+      WorkbenchExclusionBox.ValidateCollection(snapshotExclusions);
       WorkbenchProjectContribution? contribution = projectStore?.TryTake(command.ContributeId);
       if (contribution is null)
       {
@@ -254,7 +259,7 @@ internal sealed partial class WorkbenchImageOwner
       Guid pinId = pinEditPinId ?? throw new ScreenshotSessionStaleException();
       await PersistProjectSnapshotAsync(pinEditChannel, pinEditImport, contribution,
         command.SessionId, command.Revision, (manifest, entries) =>
-          pinSnapshotWriter.WriteSnapshotAsync(pinId, manifest, entries, finalPng, cancellationToken),
+          pinSnapshotWriter.WriteSnapshotAsync(pinId, manifest, entries, finalPng, cancellationToken, snapshotExclusions),
         cancellationToken);
       PinSnapshotApplied?.Invoke(command.SessionId, command.Revision, pinId);
       pinEditPinId = null;
@@ -262,6 +267,10 @@ internal sealed partial class WorkbenchImageOwner
       ClearScreenshotSession(pinEditChannel, notifyDetached: false);
       operations.PublishTerminal(PinEditState(false, "pinEdit.applied"));
       return null;
+    }
+    catch (InvalidDataException)
+    {
+      throw new ImageImportRefusedException("workbench.error.imageImportRefused");
     }
     finally
     {

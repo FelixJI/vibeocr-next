@@ -22,9 +22,25 @@ public sealed class PinHistoryStoreTests : IDisposable
     public override DateTimeOffset GetUtcNow() => Now;
   }
 
-  private static byte[] PngWithTag(byte tag) =>
-    [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13,
-      0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1, tag, 0, 0, 0];
+  private static byte[] PngWithTag(byte tag, int? length = null)
+  {
+    byte[] png = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+    byte[] data = new byte[length is { } total ? total - png.Length - 12 : 6];
+    Array.Fill(data, (byte)'A');
+    data[0] = (byte)'t'; data[1] = (byte)'a'; data[2] = (byte)'g'; data[3] = 0;
+    data[4] = (byte)('A' + tag % 26);
+    byte[] type = "tEXt"u8.ToArray();
+    using MemoryStream result = new();
+    result.Write(png.AsSpan(0, png.Length - 12));
+    Span<byte> number = stackalloc byte[4];
+    System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(number, (uint)data.Length);
+    result.Write(number); result.Write(type); result.Write(data);
+    uint crc = WorkbenchAnnotationStore.PngCrc32.Update(0xffffffffu, type);
+    crc = WorkbenchAnnotationStore.PngCrc32.Update(crc, data) ^ 0xffffffffu;
+    System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(number, crc);
+    result.Write(number); result.Write(png.AsSpan(png.Length - 12));
+    return result.ToArray();
+  }
 
   private PinHistoryStore Store(FrozenTime? time = null)
   {
@@ -147,6 +163,24 @@ public sealed class PinHistoryStoreTests : IDisposable
   }
 
   [Fact]
+  public void CorruptionAfterIhdrWithSameLengthIsRejectedOnReloadAndReopen()
+  {
+    var store = Store(); store.SetEnabled(true);
+    store.RecordSuccessfulCapture("good", PngWithTag(1));
+    store.RecordSuccessfulCapture("damaged", PngWithTag(2));
+    string id = store.Projection(null).Entries[0].EntryId;
+    string path = Path.Combine(PinHistoryStore.RootFor(root), id, "image.png");
+    byte[] damaged = File.ReadAllBytes(path);
+    Array.Clear(damaged, 24, damaged.Length - 24);
+    File.WriteAllBytes(path, damaged);
+    Assert.Null(store.TryReadImage(id));
+    Assert.Single(Store().Projection(null).Entries);
+    store.RecordSuccessfulCapture("invalid-new", damaged);
+    Assert.Equal(2, store.Projection(null).Count);
+    Assert.NotNull(store.Projection(null).Error);
+  }
+
+  [Fact]
   public void ClearAndDeleteOnlyTouchOwnedListedDirectories()
   {
     var store = new PinHistoryStore(root, new FrozenTime());
@@ -203,8 +237,7 @@ public sealed class PinHistoryStoreTests : IDisposable
   {
     var store = Store();
     store.SetEnabled(true);
-    byte[] image = new byte[PinHistoryStore.MaximumEntryBytes];
-    PngWithTag(1).CopyTo(image, 0);
+    byte[] image = PngWithTag(1, (int)PinHistoryStore.MaximumEntryBytes);
     store.RecordSuccessfulCapture("oldest", image);
     store.EnrichRecognizedText("oldest", "oldest-marker");
     for (int index = 0; index < 4; index++) store.RecordSuccessfulCapture($"new-{index}", image);

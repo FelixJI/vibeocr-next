@@ -491,13 +491,24 @@ internal sealed class PinnedImageWindow : IDisposable
 
   internal Features.Pins.PinSnapshotStore.Recovery RecoveryState() => new(
     PinId, "Image", "", window.AppWindow.Position.X, window.AppWindow.Position.Y,
-    window.AppWindow.Size.Width, window.AppWindow.Size.Height, collapsed, passThrough, grouped);
+    window.AppWindow.Size.Width, window.AppWindow.Size.Height, collapsed, passThrough, grouped,
+    expandedClientSize?.Width, expandedClientSize?.Height, excludeBoxes);
 
   internal void RestoreGeometry(Features.Pins.PinSnapshotStore.Recovery recovery)
   {
     window.AppWindow.MoveAndResize(new RectInt32(recovery.X, recovery.Y, recovery.Width, recovery.Height));
     SetGrouped(recovery.Grouped);
     SetCollapsed(recovery.Collapsed);
+    if (recovery.Collapsed)
+    {
+      (int width, int height) = ComputeOriginalClientSize(
+        imageWidth, imageHeight, AvailableClientWidth(), AvailableClientHeight());
+      // Legacy collapsed records have no expanded size; use image geometry, never the narrow band.
+      expandedClientSize = recovery.ExpandedClientWidth is > 0 and <= 32768 &&
+        recovery.ExpandedClientHeight is > 0 and <= 32768
+        ? new SizeInt32(recovery.ExpandedClientWidth.Value, recovery.ExpandedClientHeight.Value)
+        : new SizeInt32(width, height);
+    }
     SetPassThrough(recovery.PassThrough);
   }
 
@@ -586,19 +597,24 @@ internal sealed class PinnedImageWindow : IDisposable
     return (topmost, originalSize, minimize, maximize, close, more);
   }
 
+  private async Task PrepareTextAsync()
+  {
+    long generation = textGeneration;
+    status.Text = "正在准备文字层";
+    RecognitionTextLayerState? prepared = await prepareText();
+    if (disposed || generation != textGeneration) return;
+    if (prepared is not null) Update(prepared, detached: true);
+  }
+
+  internal Task SmokePrepareTextAsync() => PrepareTextAsync();
+  internal IReadOnlyList<string> SmokeLayerTexts => layer?.Lines?.Select(line => line.Text).ToArray() ?? [];
+
   private (Button PrepareText, Button CopySelection, Button ZoomIn, Slider Opacity)
     BuildActionsFlyout()
   {
     var panel = new StackPanel { Spacing = 4 };
     var primary = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
-    Button prepareText = AddButton(primary, "取字", async () =>
-    {
-      long generation = textGeneration;
-      status.Text = "正在准备文字层";
-      RecognitionTextLayerState? prepared = await this.prepareText();
-      if (disposed || generation != textGeneration) return;
-      if (prepared is not null) Update(prepared, detached: true);
-    });
+    Button prepareText = AddButton(primary, "取字", PrepareTextAsync);
     Button copySelection = AddButton(primary, "复制所选", CopySelectionAsync);
     AddButton(primary, "复制图片", async () =>
     {
@@ -667,8 +683,7 @@ internal sealed class PinnedImageWindow : IDisposable
       expandedClientSize = new SizeInt32(client.Right - client.Left, client.Bottom - client.Top);
       uint dpi = GetDpiForWindow(handle);
       int bandPhysical = (int)Math.Ceiling(BandHeightDip * dpi / 96.0);
-      window.AppWindow.ResizeClient(new SizeInt32(
-        expandedClientSize.Value.Width, bandPhysical));
+      ResizePhysicalClient(new SizeInt32(expandedClientSize.Value.Width, bandPhysical));
       collapsed = true;
       status.Text = "已折叠；可从更多菜单展开";
     }
@@ -677,10 +692,20 @@ internal sealed class PinnedImageWindow : IDisposable
       (int restoreWidth, int restoreHeight) = ComputeOriginalClientSize(
         imageWidth, imageHeight, AvailableClientWidth(), AvailableClientHeight());
       SizeInt32 target = expandedClientSize ?? new SizeInt32(restoreWidth, restoreHeight);
-      window.AppWindow.ResizeClient(target);
+      ResizePhysicalClient(target);
       collapsed = false;
     }
     SyncInteractionButtons();
+  }
+
+  private void ResizePhysicalClient(SizeInt32 target)
+  {
+    nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
+    if (!GetWindowRect(handle, out RectL outer) || !GetClientRect(handle, out RectL client))
+      throw new InvalidOperationException("Pin physical bounds are unavailable.");
+    // ResizeClient counts the hidden WinUI title bar on restored windows. Use the actual native frame.
+    window.AppWindow.Resize(new SizeInt32(target.Width + outer.Right - outer.Left - client.Right + client.Left,
+      target.Height + outer.Bottom - outer.Top - client.Bottom + client.Top));
   }
 
   /// <summary>穿透：点击穿过贴图；恢复仅经管理入口或其他贴图菜单。</summary>
@@ -982,7 +1007,8 @@ internal sealed class PinnedImageWindow : IDisposable
 
   /// <summary>应用快照：显示源换为 owned PNG，尺寸/会话身份重绑，
   /// 旧文字层失效；退出最大化时按新像素恢复 1:1 客户区。</summary>
-  internal async Task ApplySnapshotAsync(string ownedPngPath, int width, int height, Guid newSessionId)
+  internal async Task ApplySnapshotAsync(string ownedPngPath, int width, int height, Guid newSessionId,
+    IReadOnlyList<WorkbenchExclusionBox> snapshotExclusions)
   {
     if (disposed) return;
     ownedImagePath = ownedPngPath;
@@ -991,7 +1017,7 @@ internal sealed class PinnedImageWindow : IDisposable
     sessionId = newSessionId;
     revision = 0;
     imageUrl = "https://pin.vibeocr/image.png";
-    excludeBoxes = [];
+    excludeBoxes = snapshotExclusions;
     layer = null;
     textGeneration++;
     oldSnapshot = false;

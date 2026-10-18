@@ -115,7 +115,7 @@ public static class WorkbenchBridgeCodec
   private static readonly HashSet<string> SaveProjectArgumentFields =
     ["contributeId", "sessionId", "revision"];
   private static readonly HashSet<string> ApplySnapshotArgumentFields =
-    ["contributeId", "resourceUri", "sessionId", "revision"];
+    ["contributeId", "resourceUri", "sessionId", "revision", "excludeBoxes"];
   private static readonly HashSet<string> EntryIdArgumentFields = ["entryId"];
   private static readonly HashSet<string> ListHistoryArgumentFields = ["query"];
   private static readonly HashSet<string> RejectProjectOpenArgumentFields =
@@ -545,7 +545,8 @@ public static class WorkbenchBridgeCodec
           ParseProjectContributionId(arguments),
           ReadAnnotationResourceUri(arguments),
           ParseGuidArgument(arguments, "sessionId"),
-          ParseContentRevision(arguments));
+          ParseContentRevision(arguments),
+          arguments.TryGetProperty("excludeBoxes", out _) ? ParseExclusionBoxes(arguments) : null);
       case ("pinEdit", "ackImport"):
         EnsureObjectWithFields(arguments, ImportRequestArgumentFields, "command arguments");
         return new AckPinEditImportCommand(

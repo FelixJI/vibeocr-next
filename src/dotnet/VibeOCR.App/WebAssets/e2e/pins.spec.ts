@@ -19,12 +19,18 @@ const png = Buffer.from(
   "base64",
 );
 
-async function pinEditor(page: Page, image = png) {
+async function pinEditor(
+  page: Page,
+  image = png,
+  excludeBoxes: { x: number; y: number; width: number; height: number }[] = [],
+  imageReady?: Promise<void>,
+) {
   const projects: ProjectContributionBody[] = [];
   const uploads: Buffer[] = [];
   await page.route("https://app.vibeocr/**", async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/__resource/pin-image") {
+      await imageReady;
       await route.fulfill({ contentType: "image/png", body: image });
       return;
     }
@@ -72,7 +78,11 @@ async function pinEditor(page: Page, image = png) {
             mediaType: "image/png",
             byteLength: image.length,
           },
-          screenshotSession: { sessionId: sourceSession, revision: 0 },
+          screenshotSession: {
+            sessionId: sourceSession,
+            revision: 0,
+            excludeBoxes,
+          },
         },
       },
     },
@@ -118,6 +128,7 @@ test("pin editor saves one owned snapshot and acknowledges only after the comman
       resourceUri: "https://app.vibeocr/__annotation/" + "c".repeat(32),
       sessionId: sourceSession,
       revision: 1,
+      excludeBoxes: [],
     },
   });
   await releaseCommand(page);
@@ -134,6 +145,7 @@ test("pin editor saves one owned snapshot and acknowledges only after the comman
       resourceUri: "https://app.vibeocr/__annotation/" + "c".repeat(32),
       sessionId: sourceSession,
       revision: 1,
+      excludeBoxes: [],
     },
   });
   await page.screenshot({ path: testInfo.outputPath("pin-editor.png") });
@@ -204,6 +216,68 @@ test("pin keyboard save uses the owned transaction and cancel keeps a dirty pin"
     .toBe(true);
 });
 
+test("pin cannot edit or commit before its inherited exclusions are ready", async ({
+  page,
+}) => {
+  let releaseImage!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    releaseImage = resolve;
+  });
+  const { projects, uploads } = await pinEditor(
+    page,
+    png,
+    [{ x: 0, y: 0, width: 250, height: 1000 }],
+    ready,
+  );
+  try {
+    await page.getByRole("button", { name: "旋转 90°", exact: true }).click();
+    await requestPinSnapshot(page, sourceSession);
+    await expect
+      .poll(async () =>
+        (await readPinReports(page)).some(
+          (report) => report.payload.ok === false,
+        ),
+      )
+      .toBe(true);
+    expect(projects).toHaveLength(0);
+    expect(uploads).toHaveLength(0);
+  } finally {
+    releaseImage();
+  }
+  await expect(page.getByText("原图 1×1", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "旋转 90°", exact: true }).click();
+  await requestPinSnapshot(page, sourceSession);
+  await expect.poll(() => projects.length).toBe(1);
+  expect(projects[0]!.state.rotation).toBe(90);
+  expect(projects[0]!.state.marks.map((mark) => mark.tool)).toEqual([
+    "exclude",
+  ]);
+});
+
+test("JPEG output remains available while owned snapshot uses a real PNG", async ({
+  page,
+}) => {
+  const { uploads, projects } = await pinEditor(page);
+  await page.getByLabel("输出格式", { exact: true }).selectOption("image/jpeg");
+  await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+  await expect.poll(() => uploads.length).toBe(1);
+  expect([...uploads[0]!.subarray(0, 2)]).toEqual([255, 216]);
+  await requestPinSnapshot(page, sourceSession);
+  await expect.poll(() => uploads.length).toBe(2);
+  await expect.poll(() => projects.length).toBe(1);
+  expect([...uploads[1]!.subarray(0, 8)]).toEqual([
+    137, 80, 78, 71, 13, 10, 26, 10,
+  ]);
+  await expect
+    .poll(async () =>
+      (await readPinReports(page)).some((report) => report.payload.ok === true),
+    )
+    .toBe(true);
+  await expect(page.getByLabel("输出格式", { exact: true })).toHaveValue(
+    "image/jpeg",
+  );
+});
+
 test("pin owned save and restore retain spotlight and magnifier geometry and pixels", async ({
   page,
 }) => {
@@ -222,7 +296,9 @@ test("pin owned save and restore retain spotlight and magnifier geometry and pix
     }),
     "base64",
   );
-  const { projects, uploads } = await pinEditor(page, base);
+  const { projects, uploads } = await pinEditor(page, base, [
+    { x: 0, y: 0, width: 250, height: 1000 },
+  ]);
   await expect(page.getByText("原图 900×600", { exact: false })).toBeVisible();
   async function draw(
     tool: string,
@@ -247,7 +323,8 @@ test("pin owned save and restore retain spotlight and magnifier geometry and pix
     await page.mouse.up();
   }
   await draw("聚光灯", 100, 100, 300, 280);
-  await draw("放大镜", 500, 100, 700, 280);
+  await draw("放大镜", 50, 100, 350, 280);
+  await page.getByRole("button", { name: "旋转 90°", exact: true }).click();
   await requestPinSnapshot(page, sourceSession);
   await expect.poll(() => projects.length).toBe(1);
   await expect.poll(() => uploads.length).toBe(1);
@@ -257,11 +334,40 @@ test("pin owned save and restore retain spotlight and magnifier geometry and pix
     )
     .toBe(true);
   expect(projects[0]!.state.marks.map((mark) => mark.tool)).toEqual([
+    "exclude",
     "spotlight",
     "magnifier",
   ]);
-  expect(projects[0]!.state.marks[0]!.regions).toHaveLength(1);
-  expect(projects[0]!.state.marks[1]!.zoom).toBe(2);
+  expect(projects[0]!.state.marks[1]!.regions).toHaveLength(1);
+  expect(projects[0]!.state.marks[2]!.zoom).toBe(2);
+  const initialBoxes = await page.evaluate(() => {
+    const commands = (
+      window as Window & {
+        __testHost: {
+          commands: {
+            action: string;
+            arguments: {
+              excludeBoxes?: {
+                x: number;
+                y: number;
+                width: number;
+                height: number;
+              }[];
+            };
+          }[];
+        };
+      }
+    ).__testHost.commands;
+    return commands.find((command) => command.action === "applySnapshot")!
+      .arguments.excludeBoxes!;
+  });
+  expect(initialBoxes.length).toBeGreaterThanOrEqual(2); // Base exclusion and magnifier sampling propagation.
+  expect(initialBoxes[0]!.x).toBe(0);
+  expect(initialBoxes[0]!.y).toBe(0);
+  expect(initialBoxes[0]!.width).toBe(1000);
+  // Rotation maps the left 225px to the top; the existing natural-pixel contract snaps outward.
+  expect(initialBoxes[0]!.height).toBeGreaterThanOrEqual(250);
+  expect(initialBoxes[0]!.height).toBeLessThanOrEqual((226 / 900) * 1000);
   const manifest = {
     schemaVersion: 1,
     canvas: projects[0]!.canvas,
@@ -286,7 +392,11 @@ test("pin owned save and restore retain spotlight and magnifier geometry and pix
     isBusy: false,
     statusCode: "pinEdit.session",
     input: { url: sourceUrl, mediaType: "image/png", byteLength: base.length },
-    screenshotSession: { sessionId: restoredSession, revision: 0 },
+    screenshotSession: {
+      sessionId: restoredSession,
+      revision: 0,
+      excludeBoxes: initialBoxes,
+    },
     projectRestore: {
       pendingId: "f".repeat(32),
       sessionId: restoredSession,
@@ -311,6 +421,18 @@ test("pin owned save and restore retain spotlight and magnifier geometry and pix
   await expect.poll(() => projects.length).toBe(2);
   await expect.poll(() => uploads.length).toBe(2);
   expect(projects[1]!.state).toEqual(projects[0]!.state);
+  const allBoxes = await page.evaluate(() =>
+    (
+      window as Window & {
+        __testHost: {
+          commands: { action: string; arguments: { excludeBoxes?: unknown } }[];
+        };
+      }
+    ).__testHost.commands
+      .filter((command) => command.action === "applySnapshot")
+      .map((command) => command.arguments.excludeBoxes),
+  );
+  expect(allBoxes).toEqual([initialBoxes, initialBoxes]);
   const differences = await page.evaluate(
     async (encoded) => {
       const frames = await Promise.all(

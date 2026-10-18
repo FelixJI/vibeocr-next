@@ -111,11 +111,65 @@ public sealed class PinSnapshotStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task SnapshotCommitsExclusionsWithItsImageAndProject()
+  {
+    var store = new PinSnapshotStore(root); Guid id = Guid.NewGuid();
+    WorkbenchExclusionBox[] boxes = [new(0, 0, 250, 1000)];
+    await store.WriteSnapshotAsync(id, Manifest(), Entries(), Png, TestContext.Current.CancellationToken, boxes);
+    Assert.Equal(boxes, store.GetSnapshotExclusions(id));
+    await Assert.ThrowsAsync<IOException>(() => store.WriteSnapshotAsync(id, Manifest(),
+      [new("source.png", Png.Length, () => throw new IOException("read failed"))], Png,
+      TestContext.Current.CancellationToken, []));
+    Assert.Equal(boxes, store.GetSnapshotExclusions(id));
+  }
+
+  [Fact]
+  public void CorruptRecoveryPngWithIntactIhdrDoesNotBecomeAPin()
+  {
+    var store = new PinSnapshotStore(root); Guid id = Guid.NewGuid();
+    store.SaveRecovery(new(id, "Image", "", 0, 0, 640, 480), Png);
+    byte[] corrupt = [.. Png]; Array.Clear(corrupt, 24, corrupt.Length - 24);
+    File.WriteAllBytes(store.GetSnapshotPngPath(id)!, corrupt);
+    Assert.Null(store.ReadSnapshotPng(id));
+    Assert.Empty(store.LoadRecovery());
+  }
+
+  [Fact]
+  public async Task RealDecoderRejectsEmptyIdatEvenWhenPngStructureIsValid()
+  {
+    int typeAt = Png.AsSpan().IndexOf("IDAT"u8);
+    using MemoryStream invalid = new();
+    invalid.Write(Png.AsSpan(0, typeAt - 4));
+    invalid.Write(new byte[4]); invalid.Write("IDAT"u8);
+    byte[] crc = new byte[4];
+    System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(crc,
+      VibeOCR.App.Web.WorkbenchAnnotationStore.PngCrc32.Update(0xffffffffu, "IDAT"u8) ^ 0xffffffffu);
+    invalid.Write(crc); invalid.Write(Png.AsSpan(Png.Length - 12));
+    byte[] corrupt = invalid.ToArray();
+    invalid.Position = 0;
+    await VibeOCR.App.Web.WorkbenchAnnotationStore.ValidatePngStructureCoreAsync(invalid, TestContext.Current.CancellationToken);
+    Assert.False(PinSnapshotStore.TryValidatePng(corrupt, out _, out _));
+  }
+
+  [Fact]
+  public void InvalidRecoveryExclusionsAreSkippedWithoutBlockingOtherPins()
+  {
+    var store = new PinSnapshotStore(root); Guid good = Guid.NewGuid(), bad = Guid.NewGuid();
+    var record = new PinSnapshotStore.Recovery(good, "Image", "", 0, 0, 640, 480);
+    store.SaveRecovery(record, Png);
+    store.SaveRecovery(record with { Id = bad }, Png);
+    string window = Path.Combine(PinSnapshotStore.RootFor(root), bad.ToString("N"), "window.json");
+    File.WriteAllText(window, System.Text.Json.JsonSerializer.Serialize(record with
+      { Id = bad, ExcludeBoxes = [new(-1, 0, 10, 10)] }));
+    Assert.Equal(good, Assert.Single(store.LoadRecovery()).Id);
+  }
+
+  [Fact]
   public void RecoveryRoundTripsContentAndPhysicalPositionAndSkipsBrokenRecords()
   {
     var store = new PinSnapshotStore(root);
     Guid good = Guid.NewGuid(), bad = Guid.NewGuid();
-    var record = new PinSnapshotStore.Recovery(good, "Image", "", -1200, 45, 640, 480, true, true, true);
+    var record = new PinSnapshotStore.Recovery(good, "Image", "", -1200, 45, 640, 480, true, true, true, 638, 478);
     store.SaveRecovery(record, Png);
     string badDir = Path.Combine(PinSnapshotStore.RootFor(root), bad.ToString("N"));
     Directory.CreateDirectory(badDir);

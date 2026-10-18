@@ -1692,7 +1692,7 @@ export function ImageCanvasEditor({
   // 显示空间重建初始 exclude 标记（可编辑/可清除）；仅在基准变化时执行
   // 一次，不推进修订、不触发 OCR，后续修改沿用既有 revision 机制。
   const seededBaselineRef = useRef<string>("");
-  useEffect(() => {
+  useLayoutEffect(() => {
     const seedKey = session ? `${session.sessionId}:${source}` : "";
     if (!seedKey || seededBaselineRef.current === seedKey) return;
     const boxes = session?.excludeBoxes;
@@ -1739,6 +1739,13 @@ export function ImageCanvasEditor({
     historyIndex,
     state,
   ]);
+
+  function initialExclusionsReady(): boolean {
+    return (
+      !session?.excludeBoxes?.length ||
+      seededBaselineRef.current === `${session.sessionId}:${source}`
+    );
+  }
 
   // 画布取色（EyeDropper 不可用时的 fallback）：true 时下一次画布点击只取样颜色。
   const colorPickPendingRef = useRef(false);
@@ -2704,6 +2711,10 @@ export function ImageCanvasEditor({
   ]);
 
   function commit(next: EditorState): boolean {
+    if (!initialExclusionsReady()) {
+      setOperationMessage("正在恢复原有屏蔽区，请稍后重试编辑。");
+      return false;
+    }
     try {
       validateBrushBudget(imageRef.current, canvasRef.current, next);
     } catch (error) {
@@ -4919,7 +4930,10 @@ export function ImageCanvasEditor({
 
   /** 多出口共用的安全导出：上传归来后校验未变；变化则不发送。
    * bake=true 时把排除区写入不透明白色像素（识别输入与显式屏蔽副本）。 */
-  async function exportFinalImageIfUnchanged(bakeExclusions = false): Promise<
+  async function exportFinalImageIfUnchanged(
+    bakeExclusions = false,
+    forcePng = false,
+  ): Promise<
     | {
         resourceUri: string;
         sessionId?: string;
@@ -4935,7 +4949,7 @@ export function ImageCanvasEditor({
     }
     const frozen = freezeExportContext();
     const blob = await exportCanvas(frozen.image, canvasRef.current, state, {
-      format: outputFormat,
+      format: forcePng ? "image/png" : outputFormat,
       quality: jpegQuality,
       inpaint: { patches: appliedInpaintPatches() },
       bakeExclusions,
@@ -5236,6 +5250,10 @@ export function ImageCanvasEditor({
       textEdit
     )
       return false;
+    if (!initialExclusionsReady()) {
+      setOperationMessage("正在恢复原有屏蔽区，请稍后重试完成贴图。");
+      return false;
+    }
     const image = imageRef.current;
     const canvas = canvasRef.current;
     if (!image || !canvas || !image.naturalWidth || !image.naturalHeight) {
@@ -5246,12 +5264,19 @@ export function ImageCanvasEditor({
     const frozenSession = session.sessionId;
     const frozenRevision = contentRevisionRef.current;
     try {
+      const boxes = hostExclusionBoxes();
+      if (!boxes) {
+        setOperationMessage(
+          "排除框数量超过宿主上限（64）：请减少屏蔽区或放大镜后重试完成贴图。",
+        );
+        return false;
+      }
       setOperationMessage("正在采集贴图内容……");
       const payload = await buildProjectContributionPayload();
       setOperationMessage("正在上传贴图内容……");
       const contributeId = await uploadProjectContribution(payload);
       // 最终合成 PNG：与贡献同一次冻结上下文，导出后逐项复核。
-      const exported = await exportFinalImageIfUnchanged(false);
+      const exported = await exportFinalImageIfUnchanged(false, true);
       if (
         !exported?.sessionId ||
         sessionIdRef.current !== frozenSession ||
@@ -5262,6 +5287,7 @@ export function ImageCanvasEditor({
       }
       const applied = await actions.run({
         type: "pinEdit.applySnapshot",
+        excludeBoxes: boxes,
         contributeId,
         resourceUri: exported.resourceUri,
         sessionId: frozenSession,

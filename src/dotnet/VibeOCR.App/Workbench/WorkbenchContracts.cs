@@ -139,6 +139,16 @@ public sealed record WorkbenchExclusionBox(
     double Width,
     double Height)
 {
+  /// <summary>原生保存/恢复入口与桥使用同一有界归一化矩形约束。</summary>
+  internal static void ValidateCollection(IReadOnlyList<WorkbenchExclusionBox> boxes)
+  {
+    if (boxes.Count > 64 || boxes.Any(box => box is null ||
+      !double.IsFinite(box.X) || !double.IsFinite(box.Y) || !double.IsFinite(box.Width) || !double.IsFinite(box.Height) ||
+      box.X < 0 || box.Y < 0 || box.Width <= 0 || box.Height <= 0 ||
+      box.X + box.Width > 1000 || box.Y + box.Height > 1000))
+      throw new InvalidDataException("Invalid pin exclusion rectangles (maximum 64).");
+  }
+
   /// <summary>
   /// 行框与排除矩形是否正面积相交（仅贴边不算）：同一判定供原位层与
   /// 贴图层消费，避免两份语义漂移。
@@ -347,7 +357,8 @@ public sealed record ApplyPinEditSnapshotCommand(
     Guid ContributeId,
     string ResourceUri,
     Guid SessionId,
-    long Revision) : WorkbenchCommand, IScreenshotSessionResource;
+    long Revision,
+    IReadOnlyList<WorkbenchExclusionBox>? ExcludeBoxes = null) : WorkbenchCommand, IScreenshotSessionResource;
 
 // ---- #238 截图历史：宿主 owned 持久化；默认关闭，容量双上限。 ----
 

@@ -96,6 +96,7 @@ public sealed partial class MainWindow : Window
     (Task<RecognitionTextLayerState?> Task, CancellationTokenSource Cancellation)> pinTextTasks = [];
   private readonly SyntheticScreenRegionPicker? screenshotSmokePicker;
   private readonly Func<string?>? supervisorInstanceId;
+  private readonly Func<Guid, long, string, CancellationToken, Task<RecognitionTextLayerState?>> preparePinnedTextLayer;
   private readonly Func<int>? smokeSubmitAttempts;
   private readonly Func<string?>? smokeLastJobId;
   private readonly Func<int>? smokeStartupEnsureAttempts;
@@ -130,7 +131,8 @@ public sealed partial class MainWindow : Window
     Func<int>? smokeInstallAttempts = null,
     ShellActionDispatcher? shellActions = null,
     Func<CancellationToken, Task>? ensureRuntimeReady = null,
-    ISystemImportReader? systemImportReader = null)
+    ISystemImportReader? systemImportReader = null,
+    Func<Guid, long, string, CancellationToken, Task<RecognitionTextLayerState?>>? preparePinnedTextLayer = null)
   {
     this.diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
     this.layout = layout ?? throw new ArgumentNullException(nameof(layout));
@@ -192,6 +194,7 @@ public sealed partial class MainWindow : Window
       pinHistory: pinHistoryStore,
       projectSavePicker: projectPicker.PickSavePathAsync,
       projectOpenPicker: projectPicker.PickOpenPathAsync);
+    this.preparePinnedTextLayer = preparePinnedTextLayer ?? commandHandler.PreparePinnedTextLayerAsync;
     commandHandler.ScreenshotSessionReady += ShowImageEditor;
     commandHandler.PinSnapshotApplied += OnPinSnapshotApplied;
     commandHandler.PinEditSessionClosed += OnPinEditSessionClosed;
@@ -1299,7 +1302,7 @@ public sealed partial class MainWindow : Window
       return;
     }
     Guid? sessionId = await commandHandler.TryOpenPinEditSessionAsync(
-      target.PinId, png, CancellationToken.None);
+      target.PinId, png, CancellationToken.None, target.CurrentExcludeBoxes);
     if (sessionId is not { } id) return;
     if (shuttingDown || target.Disposed)
     {
@@ -1339,7 +1342,7 @@ public sealed partial class MainWindow : Window
           try
           {
             (int width, int height) = Features.Pins.PinSnapshotStore.SniffPngSize(File.ReadAllBytes(path));
-            pinSnapshotSwap = target.ApplySnapshotAsync(path, width, height, sessionId);
+            pinSnapshotSwap = target.ApplySnapshotAsync(path, width, height, sessionId, pinSnapshotStore!.GetSnapshotExclusions(pinId) ?? []);
           }
           catch (Exception error)
           {
@@ -1439,15 +1442,17 @@ public sealed partial class MainWindow : Window
         {
           string? path = pinSnapshotStore.GetSnapshotPngPath(record.Id);
           if (path is null) continue;
-          byte[] png = File.ReadAllBytes(path);
-          (int width, int height) = Features.Pins.PinSnapshotStore.SniffPngSize(png);
-          if (width < 1 || height < 1) continue;
+          PinHistoryImage? decoded = pinSnapshotStore.ReadSnapshotPng(record.Id);
+          if (decoded is null) continue;
+          byte[] png = decoded.Png;
+          int width = decoded.Width, height = decoded.Height;
+          IReadOnlyList<WorkbenchExclusionBox> exclusions = pinSnapshotStore.GetSnapshotExclusions(record.Id) ?? record.ExcludeBoxes ?? [];
           string temp = Path.Combine(resourceRoot, $"pin-{Guid.NewGuid():N}.png");
           File.WriteAllBytes(temp, png);
           PinnedImageWindow? pin = null;
           pin = new PinnedImageWindow(new WorkbenchAnnotationFile(temp, width, height),
-            Guid.NewGuid(), 0, null, [], () => PreparePinTextAsync(pin!.SessionId,
-              pin.Revision, pin.CurrentImagePath, []), () => supervisorInstanceId?.Invoke(), record.Id);
+            Guid.NewGuid(), 0, null, exclusions, () => PreparePinTextAsync(pin!.SessionId,
+              pin.Revision, pin.CurrentImagePath, pin.CurrentExcludeBoxes), () => supervisorInstanceId?.Invoke(), record.Id);
           WirePinWindow(pin);
           pin.RestoreGeometry(record);
           if (record.Grouped) TogglePinGroup(pin);
@@ -1502,7 +1507,7 @@ public sealed partial class MainWindow : Window
     CancellationToken cancellationToken)
   {
     if (excludeBoxes.Count == 0)
-      return await commandHandler.PreparePinnedTextLayerAsync(
+      return await preparePinnedTextLayer(
         sessionId, revision, imagePath, cancellationToken);
     if (PinnedTextMask.CoversEntireImage(excludeBoxes))
       throw new PinnedTextPreparationException(
@@ -1511,7 +1516,7 @@ public sealed partial class MainWindow : Window
       imagePath, excludeBoxes, cancellationToken);
     try
     {
-      return await commandHandler.PreparePinnedTextLayerAsync(
+      return await preparePinnedTextLayer(
         sessionId, revision, masked, cancellationToken);
     }
     finally

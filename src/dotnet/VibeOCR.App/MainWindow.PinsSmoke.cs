@@ -35,6 +35,12 @@ public sealed partial class MainWindow
     BitmapEncoder encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, encoded);
     byte[] pixels = new byte[64 * 32 * 4];
     for (int i = 0; i < pixels.Length; i += 4) { pixels[i] = 50; pixels[i + 1] = 140; pixels[i + 2] = 220; pixels[i + 3] = 255; }
+    // Two real raster H glyphs: one in the initially excluded left quarter, one visible.
+    foreach (int startX in new[] { 4, 44 })
+      for (int y = 6; y < 25; y++)
+        for (int x = startX; x < startX + 10; x++)
+          if (x < startX + 2 || x >= startX + 8 || y is >= 14 and < 17)
+          { int at = (y * 64 + x) * 4; pixels[at] = pixels[at + 1] = pixels[at + 2] = 0; }
     encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied, 64, 32, 96, 96, pixels);
     await encoder.FlushAsync();
     encoded.Seek(0);
@@ -45,7 +51,8 @@ public sealed partial class MainWindow
     for (int i = 0; i < 2; i++)
     {
       WorkbenchAnnotationLease lease = await annotationStore.UploadPngAsync(new MemoryStream(png), CancellationToken.None);
-      PinScreenshot(annotationStore.Take(lease.ResourceUri), Guid.NewGuid(), 0, null, []);
+      PinScreenshot(annotationStore.Take(lease.ResourceUri), Guid.NewGuid(), 0, null,
+        i == 0 ? [new WorkbenchExclusionBox(0, 0, 250, 1000)] : []);
     }
     PinnedImageWindow first = pinnedImages[0], second = pinnedImages[1];
     await WaitForPinCheckAsync(() => Task.FromResult(first.SmokeDocumentReady && second.SmokeDocumentReady), "Static pins not ready.");
@@ -61,7 +68,7 @@ public sealed partial class MainWindow
       await EnterPinEditAsync(second);
       await WaitForPinEditorAsync(second);
       if (first.Editing || !second.Editing || pinSnapshotStore!.GetSnapshotProjectPath(first.PinId) is null ||
-        first.SmokeImageSize != (32, 64)) throw new InvalidOperationException("Switch did not commit the first pin before opening the second.");
+        first.SmokeImageSize != (32, 64)) throw new InvalidOperationException($"Switch did not commit: firstEditing={first.Editing}, secondEditing={second.Editing}, size={first.SmokeImageSize}, project={pinSnapshotStore!.GetSnapshotProjectPath(first.PinId)}, body={await first.SmokeEditorEvaluateAsync("document.body.textContent")}");
 
       await RotateSmokePinAsync(second);
       string blocker = Path.Combine(PinSnapshotStore.RootFor(layout.DataRoot), second.PinId.ToString("N"), "current.json");
@@ -81,6 +88,7 @@ public sealed partial class MainWindow
       await RotateSmokePinAsync(first);
       if (!await first.SaveEditAsync()) throw new InvalidOperationException("Restored project could not save.");
       if (first.SmokeImageSize != (64, 32)) throw new InvalidOperationException("Restored rotation was lost or flattened.");
+      await VerifySmokePinTextAsync(first);
       if (observedScopes.Any(scope => scope is "recognition" or "imageEdit"))
         throw new InvalidOperationException("Pin editing polluted a main image channel.");
 
@@ -118,10 +126,24 @@ public sealed partial class MainWindow
         throw new InvalidOperationException("Closing a single pin did not delete its owned recovery record.");
 
       CaptureUiSmokeTrace.Stage("pins.exit-recovery");
+      var expanded = first.SmokeClientSize;
+      first.SetCollapsed(true);
       if (!await PreparePinsExitAsync()) throw new InvalidOperationException("Exit recovery could not persist pins.");
       var recovered = pinSnapshotStore.LoadRecovery();
       if (recovered.Count != 1 || !recovered.Any(item => item.Id == first.PinId && item.X == first.SmokePosition.X))
         throw new InvalidOperationException("Pin recovery did not retain content and physical position.");
+      // Simulate the same shutdown disposal and fresh recovery path, preserving owned records.
+      shuttingDown = true;
+      first.ForceClose();
+      shuttingDown = false;
+      RestorePins();
+      first = pinnedImages.Single();
+      await WaitForPinCheckAsync(() => Task.FromResult(first.SmokeDocumentReady), "Recovered static pin not ready.");
+      if (!first.Collapsed) throw new InvalidOperationException("Recovery lost the collapsed state.");
+      first.SetCollapsed(false);
+      if (first.SmokeClientSize.Width != expanded.Width || first.SmokeClientSize.Height != expanded.Height)
+        throw new InvalidOperationException($"Recovery lost expanded size: expected={expanded.Width}x{expanded.Height}, actual={first.SmokeClientSize.Width}x{first.SmokeClientSize.Height}, record={JsonSerializer.Serialize(recovered.Single())}");
+      await VerifySmokePinTextAsync(first);
       first.Close(); second.Close();
       if (pinSnapshotStore.LoadRecovery().Count != 0) throw new InvalidOperationException("Closing a pin kept its owned recovery entry.");
     }
@@ -134,9 +156,46 @@ public sealed partial class MainWindow
     }
   }
 
+  private static async Task VerifySmokePinTextAsync(PinnedImageWindow pin)
+  {
+    if (pin.CurrentExcludeBoxes.Count == 0) throw new InvalidOperationException("Pin lost its OCR exclusions.");
+    await pin.SmokePrepareTextAsync();
+    if (pin.SmokeLayerTexts.Count != 1 || pin.SmokeLayerTexts[0] != "visible")
+      throw new InvalidOperationException("Pin text layer resurrected an excluded line.");
+  }
+
+  internal async Task<RecognitionTextLayerState?> VerifyMaskedPinOcrInputAsync(
+    Guid session, long revision, string input, CancellationToken token)
+  {
+    PinnedImageWindow pin = pinnedImages.Single(item => item.SessionId == session);
+    if (input == pin.CurrentImagePath) throw new InvalidOperationException("OCR received the ordinary unmasked pin.");
+    using var memory = new MemoryStream(await File.ReadAllBytesAsync(input, token));
+    using var random = memory.AsRandomAccessStream();
+    BitmapDecoder decoder = await BitmapDecoder.CreateAsync(random);
+    byte[] pixels = (await decoder.GetPixelDataAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Straight,
+      new BitmapTransform(), ExifOrientationMode.IgnoreExifOrientation, ColorManagementMode.DoNotColorManage)).DetachPixelData();
+    WorkbenchExclusionBox box = pin.CurrentExcludeBoxes[0];
+    double centerX = box.X + box.Width / 2, centerY = box.Y + box.Height / 2;
+    int x = (int)(centerX / 1000 * decoder.PixelWidth), y = (int)(centerY / 1000 * decoder.PixelHeight);
+    int offset = (y * (int)decoder.PixelWidth + x) * 4;
+    if (!pixels.AsSpan(offset, 4).SequenceEqual(new byte[] { 255, 255, 255, 255 }))
+      throw new InvalidOperationException("Excluded glyph pixels reached OCR.");
+    using var ordinary = new MemoryStream(await File.ReadAllBytesAsync(pin.CurrentImagePath, token));
+    using var ordinaryRandom = ordinary.AsRandomAccessStream();
+    BitmapDecoder ordinaryDecoder = await BitmapDecoder.CreateAsync(ordinaryRandom);
+    byte[] ordinaryPixels = (await ordinaryDecoder.GetPixelDataAsync()).DetachPixelData();
+    if (ordinaryPixels.AsSpan(offset, 4).SequenceEqual(new byte[] { 255, 255, 255, 255 }))
+      throw new InvalidOperationException("OCR masking modified the ordinary display/copy/save image.");
+    double safeX = centerX < 500 ? 800 : 100, safeY = centerY < 500 ? 800 : 100;
+    return new RecognitionTextLayerState("textlayer.ready", null, new(session.ToString("N"), revision),
+      "rapid_text", "pins-smoke", null,
+      [new("hidden", centerX - 1, centerY - 1, centerX + 1, centerY + 1),
+       new("visible", safeX, safeY, safeX + 5, safeY + 5)]);
+  }
+
   private static Task WaitForPinEditorAsync(PinnedImageWindow pin) => WaitForPinCheckAsync(
     async () => (await pin.SmokeEditorEvaluateAsync(
-      "!!document.querySelector('.canvas-editor[data-screenshot-session]') && !!document.querySelector('canvas[aria-label=\"图片检查画布\"]') && !Array.from(document.querySelectorAll('button')).find(b=>b.getAttribute('aria-label')==='旋转 90°')?.disabled")) == "true",
+      "!!document.querySelector('.canvas-editor[data-screenshot-session]') && !!document.querySelector('canvas[aria-label=\"图片检查画布\"]') && /原图 [0-9]+×[0-9]+/.test(document.body.textContent) && !Array.from(document.querySelectorAll('button')).find(b=>b.getAttribute('aria-label')==='旋转 90°')?.disabled")) == "true",
     "Pin editor did not decode its input.");
 
   private static async Task RotateSmokePinAsync(PinnedImageWindow pin)

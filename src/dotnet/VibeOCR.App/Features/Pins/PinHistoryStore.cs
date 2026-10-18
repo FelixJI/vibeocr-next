@@ -1,4 +1,3 @@
-using System.Buffers.Binary;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using VibeOCR.App.Services;
@@ -21,7 +20,6 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
   public const long MaximumEntryBytes = 64L << 20;
   private const string IndexFileName = "index.json";
   private const string ImageFileName = "image.png";
-  private static readonly byte[] PngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
   private static readonly JsonSerializerOptions IndexJson = new()
   {
@@ -85,7 +83,7 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
             entry.Width < 1 || entry.Height < 1 || valid.Any(item => item.Id == entry.Id)) continue;
           PinSnapshotStore.EnsureOwnedDirectory(Path.Combine(root, entry.Id));
           if (!File.Exists(ImagePath(entry.Id)) || new FileInfo(ImagePath(entry.Id)).Length != entry.Bytes ||
-            !TrySniffPngSize(File.ReadAllBytes(ImagePath(entry.Id)), out int width, out int height) ||
+            !PinSnapshotStore.TryValidatePng(File.ReadAllBytes(ImagePath(entry.Id)), out int width, out int height) ||
             width != entry.Width || height != entry.Height) continue;
           valid.Add(entry);
         }
@@ -118,25 +116,6 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
   }
 
   private string ImagePath(string entryId) => Path.Combine(root, entryId, ImageFileName);
-
-  private static bool TrySniffPngSize(ReadOnlySpan<byte> png, out int width, out int height)
-  {
-    width = 0;
-    height = 0;
-    if (png.Length < 24 || !png[..8].SequenceEqual(PngSignature))
-    {
-      return false;
-    }
-    uint w = BinaryPrimitives.ReadUInt32BigEndian(png[16..20]);
-    uint h = BinaryPrimitives.ReadUInt32BigEndian(png[20..24]);
-    if (w is 0 or > 32_768 || h is 0 or > 32_768)
-    {
-      return false;
-    }
-    width = (int)w;
-    height = (int)h;
-    return true;
-  }
 
   public bool IsEnabled
   {
@@ -173,9 +152,9 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
       {
         return;
       }
-      if (!TrySniffPngSize(png, out int width, out int height))
+      if (!PinSnapshotStore.TryValidatePng(png, out int width, out int height))
       {
-        lastError = "截图未录入历史：PNG 尺寸无效。";
+        lastError = "截图未录入历史：PNG 内容或尺寸无效。";
         return;
       }
       List<IndexEntry> previous = entries;
@@ -267,9 +246,10 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
 
   public PinHistoryImage? TryReadImage(string entryId)
   {
+    IndexEntry? entry;
     lock (gate)
     {
-      IndexEntry? entry = entries.FirstOrDefault(item => item.Id == entryId);
+      entry = entries.FirstOrDefault(item => item.Id == entryId);
       if (entry is null || !Guid.TryParseExact(entryId, "N", out _))
       {
         return null;
@@ -279,13 +259,14 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
     {
       PinSnapshotStore.EnsureOwnedDirectory(root);
       PinSnapshotStore.EnsureOwnedDirectory(Path.Combine(root, entryId));
-      if (new FileInfo(ImagePath(entryId)).Length > MaximumEntryBytes) return null;
+      if (new FileInfo(ImagePath(entryId)).Length != entry.Bytes) return null;
       byte[] png = File.ReadAllBytes(ImagePath(entryId));
       if (png.Length < 1 || png.Length > MaximumEntryBytes)
       {
         return null;
       }
-      if (!TrySniffPngSize(png, out int width, out int height)) return null;
+      if (!PinSnapshotStore.TryValidatePng(png, out int width, out int height) ||
+        width != entry.Width || height != entry.Height) return null;
       return new PinHistoryImage(png, width, height);
     }
     catch (Exception error) when (
