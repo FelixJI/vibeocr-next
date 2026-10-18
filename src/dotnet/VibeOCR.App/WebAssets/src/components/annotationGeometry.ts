@@ -1,3 +1,4 @@
+import type { CanvasComposition } from "./canvasComposition";
 export type AnnotationTool =
   | "rectangle"
   | "ellipse"
@@ -123,6 +124,7 @@ export interface PixelPatch {
 }
 
 export interface EditorState {
+  readonly composition?: CanvasComposition;
   readonly rotation: number;
   readonly marks: readonly Mark[];
   readonly crop?: { readonly start: Point; readonly end: Point };
@@ -430,6 +432,7 @@ export function rotateEditorState(
           },
         }
       : {}),
+    ...(state.composition ? { composition: state.composition } : {}),
     // 指定输出尺寸是绝对目标：旋转内容不改变用户设置的输出宽高。
     ...(state.resize ? { resize: state.resize } : {}),
     // 像素修补固定在原图（未旋转）空间：旋转视图不需要重映射补丁坐标。

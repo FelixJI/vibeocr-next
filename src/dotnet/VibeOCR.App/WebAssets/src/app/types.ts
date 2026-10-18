@@ -29,6 +29,12 @@ export interface AppViewState {
 }
 
 export type AppActionType =
+  | "settings.setEditorPreferences"
+  | "settings.pickImageOutputDirectory"
+  | "imageEdit.savePresetImage"
+  | "recognition.savePresetImage"
+  | "batch.prepareImageExport"
+  | "batch.exportImage"
   | "imageEdit.selectImage"
   | "imageEdit.readClipboard"
   | "imageEdit.pasteSystemContent"

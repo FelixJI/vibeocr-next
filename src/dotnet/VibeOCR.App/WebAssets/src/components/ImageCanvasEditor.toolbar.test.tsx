@@ -108,6 +108,52 @@ function iconPathOf(element: HTMLElement): string | null {
 }
 
 describe("截图现场主排（全部工具+操作）与属性下排", () => {
+  it.each([undefined, scene])(
+    "常用预设保存操作只在主排，属性/输出行不承载操作（现场=%s）",
+    (captureScene) => {
+      const props = {
+        actions: createActions(),
+        canExport: true,
+        canRecognize: true,
+        source: "https://app.vibeocr/__resource/screenshot.bmp",
+        captureScene,
+        session: { sessionId: "capture", revision: 0 },
+        showAutoTextPreference: false,
+        editorSettings: { imageOutputDirectory: "C:/authorized-output" },
+      };
+      const { rerender } = render(<ImageCanvasEditor {...props} />);
+      const mainRow = screen.getByRole("toolbar", { name: "图片编辑工具" });
+      const main = within(mainRow);
+      const savePreset = main.getByRole("button", {
+        name: "按常用预设保存",
+      });
+      expect(savePreset).toBeEnabled();
+      expect(savePreset.closest(".editor-toolbar-main")).toBe(mainRow);
+      const outputRow = document.querySelector(
+        '.editor-output-settings [role="toolbar"]',
+      );
+      expect(outputRow).not.toBeNull();
+      expect(outputRow).not.toContainElement(savePreset);
+      expect(
+        within(outputRow as HTMLElement).queryByRole("button", {
+          name: "按常用预设保存",
+          hidden: true,
+        }),
+      ).toBeNull();
+      fireEvent.click(main.getByRole("button", { name: "矩形" }));
+      const properties = within(
+        screen.getByRole("toolbar", { name: "当前工具设置" }),
+      );
+      expect(
+        properties.queryByRole("button", {
+          name: "按常用预设保存",
+        }),
+      ).toBeNull();
+      rerender(<ImageCanvasEditor {...props} canExport={false} />);
+      expect(savePreset).toBeDisabled();
+    },
+  );
+
   it("主排承载全部工具与操作；下排仅当前工具属性，无属性时收起", () => {
     const actions = createActions();
     render(

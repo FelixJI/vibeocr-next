@@ -905,6 +905,31 @@ public sealed class VibpProjectFileTests
   }
 
   [Fact]
+  public async Task CompositionRoundTripKeepsOriginalSourceAuthorizedAssetAndEditableState()
+  {
+    string directory = NewTempDirectory();
+    try
+    {
+      byte[] source = PngBytes(6, 4), asset = PngBytes(2, 2), patch1 = PngBytes(3, 1), patch2 = PngBytes(1, 2);
+      VibpProjectManifest original = FullManifest(source, asset, patch1, patch2);
+      var composition = new VibpComposition(20, "image", "#ffffff", "#123456", 5, 12, "16:9", "horizontal", [AssetId], AssetId, new("vertical", 25, 50));
+      VibpProjectManifest manifest = original with { State = original.State with { Composition = composition } };
+      string package = Path.Combine(directory, "composed.vibp");
+      VibpProjectFile.Write(package, manifest,
+      [new("source.png", source.Length, () => new MemoryStream(source)), new($"asset-{AssetId}.png", asset.Length, () => new MemoryStream(asset)),
+       new("patch-1.png", patch1.Length, () => new MemoryStream(patch1)), new("patch-2.png", patch2.Length, () => new MemoryStream(patch2))]);
+      VibpProjectArchive archive = await VibpProjectFile.ReadAsync(package, Path.Combine(directory, "opened"), TestContext.Current.CancellationToken);
+      Assert.Equal(source, File.ReadAllBytes(archive.SourcePath));
+      Assert.Equal(asset, File.ReadAllBytes(archive.AssetPaths[AssetId]));
+      Assert.Equal(original.State.Marks.Count, archive.Manifest.State.Marks.Count);
+      Assert.Equal(composition.Cut, archive.Manifest.State.Composition!.Cut);
+      Assert.Equal(AssetId, archive.Manifest.State.Composition.BackgroundAssetId);
+      Assert.Equal(AssetId, Assert.Single(archive.Manifest.State.Composition.AssetIds));
+    }
+    finally { Directory.Delete(directory, recursive: true); }
+  }
+
+  [Fact]
   public async Task RoundTripPreservesBytesAndManifestSemantics()
   {
     string directory = NewTempDirectory();

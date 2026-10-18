@@ -1,3 +1,4 @@
+import { DEFAULT_EDITOR_PREFERENCES } from "./editorPreferences";
 import { Profiler } from "react";
 import {
   act,
@@ -707,4 +708,57 @@ describe("editor export pixels and previews", () => {
     );
     unmount();
   });
+});
+
+describe("output preset copy acknowledgement", () => {
+  it.each([true, false])(
+    "closes only after successful host copy acknowledgement (%s)",
+    async (success) => {
+      stubCanvasStack();
+      const actions = createActions();
+      let acknowledge: ((value: boolean) => void) | undefined;
+      actions.run.mockImplementation((action: { type: string }) =>
+        action.type === "recognition.copyScreenshotImage"
+          ? new Promise<boolean>((resolve) => {
+              acknowledge = resolve;
+            })
+          : Promise.resolve(true),
+      );
+      render(
+        <ImageCanvasEditor
+          {...editorProps({ actions })}
+          editorSettings={{
+            editorPreferences: {
+              ...DEFAULT_EDITOR_PREFERENCES,
+              output: {
+                ...DEFAULT_EDITOR_PREFERENCES.output,
+                closeAfterCopy: true,
+              },
+            },
+          }}
+        />,
+      );
+      await waitFor(() =>
+        expect(screen.getByText(/原图 64×32/)).toBeInTheDocument(),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "复制标注图" }));
+      await waitFor(() => expect(acknowledge).toBeDefined());
+      expect(actions.run).not.toHaveBeenCalledWith({
+        type: "recognition.closeScreenshotSession",
+      });
+      await act(async () => {
+        acknowledge!(success);
+      });
+      if (success)
+        await waitFor(() =>
+          expect(actions.run).toHaveBeenCalledWith({
+            type: "recognition.closeScreenshotSession",
+          }),
+        );
+      else
+        expect(actions.run).not.toHaveBeenCalledWith({
+          type: "recognition.closeScreenshotSession",
+        });
+    },
+  );
 });

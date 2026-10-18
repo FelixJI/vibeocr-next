@@ -1,3 +1,4 @@
+using VibeOCR.App.Features.Configuration;
 using System.Text.Json;
 using VibeOCR.App.Features.Batch;
 using VibeOCR.App.Features.Recognition;
@@ -153,6 +154,53 @@ public sealed class BatchCompletionWorkbenchTests
       envelope.Change is WorkbenchStateChange.Reset or WorkbenchStateChange.Ready);
   }
 
+  [Fact]
+  public async Task ImagePresetExportConsumesEachLeaseOncePreservesSourceAndFrozenQueueOrder()
+  {
+    await using var harness = await CompletionHarness.CreateAsync(new BatchRunClient(), outputPreset: true);
+    CancellationToken token = TestContext.Current.CancellationToken;
+    byte[] first = VibpProjectFileTests.BuildPng(4, 3), second = VibpProjectFileTests.BuildPng(6, 2);
+    string firstPath = Path.Combine(harness.Root, "original.png");
+    string subdirectory = Directory.CreateDirectory(Path.Combine(harness.Root, "second")).FullName;
+    string secondPath = Path.Combine(subdirectory, "original.png");
+    File.WriteAllBytes(firstPath, first); File.WriteAllBytes(secondPath, second);
+    harness.Batch.AddFiles([firstPath, secondPath]);
+    Guid firstId = harness.Batch.Items[0].Id, secondId = harness.Batch.Items[1].Id;
+    WorkbenchCommandOutcome prepared = await harness.Handler.ExecuteAsync(new PrepareBatchImageCommand(0), token);
+    Assert.Null(prepared.Error);
+    BatchWorkbenchState projected = Assert.IsType<BatchWorkbenchState>(Assert.Single(prepared.States));
+    Assert.Equal(firstId, projected.ExportImageId);
+    Assert.NotNull(projected.ExportImage);
+    harness.Batch.Items.Move(0, 1);
+    WorkbenchAnnotationLease lease = await harness.StageImageAsync(first, token);
+    WorkbenchCommandOutcome exported = await harness.Handler.ExecuteAsync(new ExportBatchImageCommand(firstId, lease.ResourceUri.AbsoluteUri, "default"), token);
+    Assert.Null(exported.Error);
+    Assert.Equal(first, File.ReadAllBytes(firstPath));
+    Assert.Equal(first, File.ReadAllBytes(Path.Combine(harness.Root, "original_1.png")));
+    Assert.Throws<WorkbenchAnnotationAccessException>(() => harness.TakeAnnotation(lease));
+    prepared = await harness.Handler.ExecuteAsync(new PrepareBatchImageCommand(1), token);
+    Assert.Null(prepared.Error);
+    projected = Assert.IsType<BatchWorkbenchState>(Assert.Single(prepared.States));
+    Assert.Equal(secondId, projected.ExportImageId);
+    lease = await harness.StageImageAsync(second, token);
+    WorkbenchCommandOutcome failed = await harness.Handler.ExecuteAsync(new ExportBatchImageCommand(secondId, lease.ResourceUri.AbsoluteUri, "missing-preset"), token);
+    Assert.NotNull(failed.Error);
+    Assert.Throws<WorkbenchAnnotationAccessException>(() => harness.TakeAnnotation(lease));
+    Assert.Equal(second, File.ReadAllBytes(secondPath));
+    Assert.Equal(first, File.ReadAllBytes(Path.Combine(harness.Root, "original_1.png")));
+    Assert.False(File.Exists(Path.Combine(harness.Root, "original_2.png")));
+    WorkbenchCommandOutcome configured = await harness.Handler.ExecuteAsync(new SetEditorPreferencesCommand(
+      EditorPreferences.Default with { Output = new(NameTemplate: "{name}", Width: 2, Height: 2) }), token);
+    Assert.Null(configured.Error);
+    Assert.Null((await harness.Handler.ExecuteAsync(new PrepareBatchImageCommand(1), token)).Error);
+    lease = await harness.StageImageAsync(second, token);
+    failed = await harness.Handler.ExecuteAsync(new ExportBatchImageCommand(secondId, lease.ResourceUri.AbsoluteUri, "default"), token);
+    Assert.NotNull(failed.Error);
+    Assert.Throws<WorkbenchAnnotationAccessException>(() => harness.TakeAnnotation(lease));
+    Assert.False(File.Exists(Path.Combine(harness.Root, "original_2.png")));
+    Assert.Equal(2, harness.Batch.Items.Count);
+  }
+
   private static IReadOnlyList<BatchWorkbenchState> TerminalBatchStates(
     IEnumerable<WorkbenchStateEnvelope> envelopes) =>
     envelopes.Select(envelope => envelope.State)
@@ -203,10 +251,13 @@ public sealed class BatchCompletionWorkbenchTests
     public BatchViewModel Batch { get; }
 
     public string Root => root;
+    public Task<WorkbenchAnnotationLease> StageImageAsync(byte[] bytes, CancellationToken token) => annotations.UploadPngAsync(new MemoryStream(bytes), token);
+    public void TakeAnnotation(WorkbenchAnnotationLease lease) { using WorkbenchAnnotationFile image = annotations.Take(lease.ResourceUri); }
+
 
     public static async Task<CompletionHarness> CreateAsync(
       BatchRunClient client,
-      Exception? readFailure = null)
+      Exception? readFailure = null, bool outputPreset = false)
     {
       string root = Path.Combine(
         Path.GetTempPath(), $"vibeocr-batch-terminal-{Guid.NewGuid():N}");
@@ -215,6 +266,13 @@ public sealed class BatchCompletionWorkbenchTests
       var broker = new WorkbenchResourceBroker(resourceRoot);
       var annotations = new WorkbenchAnnotationStore(resourceRoot);
       var batch = new BatchViewModel(client, new HarnessBatchFiles(readFailure));
+      PortableLayout? layout = null;
+      if (outputPreset)
+      {
+        layout = PortableLayout.Resolve(Path.Combine(root, "VibeOCR.Next.exe"), "production");
+        layout.EnsurePortableState();
+        EditorPreferencesStore.Save(layout, new(EditorPreferences.Default with { Output = new(NameTemplate: "{name}") }, root));
+      }
       var handler = new DesktopWorkbenchCommandHandler(
         () => new RecognitionViewModel(client, new FixedInputService()),
         () => batch,
@@ -227,7 +285,7 @@ public sealed class BatchCompletionWorkbenchTests
         broker,
         resourceRoot,
         static () => 0,
-        annotations);
+        annotations, optionsLayout: layout);
       var application = new WorkbenchApplication(
         ["batch.add", "batch.run"], WorkbenchRoute.Recognition, handler);
       try
@@ -240,9 +298,12 @@ public sealed class BatchCompletionWorkbenchTests
           application.SubscribeAsync(bootstrap.Revision, end.Token)
             .GetAsyncEnumerator(end.Token));
         // async iterator 在首个 MoveNext 时才注册 mailbox。
-        harness.firstMove = harness.subscription.MoveNextAsync();
-        Assert.False(harness.firstMove.Value.IsCompleted,
-          "The subscription must be parked on the mailbox signal after registration.");
+        if (!outputPreset)
+        {
+          harness.firstMove = harness.subscription.MoveNextAsync();
+          Assert.False(harness.firstMove.Value.IsCompleted,
+            "The subscription must be parked on the mailbox signal after registration.");
+        }
         return harness;
       }
       catch

@@ -130,12 +130,12 @@ public sealed class DesktopWorkbenchCommandHandler :
     confirmPdfClose = confirmPdfClose ?? (_ => Task.FromResult(PdfCloseDecision.Cancel));
 
     Resources = new WorkbenchResourcesOwner(resourceBroker, resourceRoot);
-    Settings = new WorkbenchSettingsOwner(ensureRuntimeReady, inferenceAttached, settingsFactory, shell, shellActions, supervisorInstanceId, operations, RefreshFeatureCatalogStatesAsync, InvalidateImageRecognition);
+    Settings = new WorkbenchSettingsOwner(ensureRuntimeReady, inferenceAttached, settingsFactory, shell, shellActions, supervisorInstanceId, operations, RefreshFeatureCatalogStatesAsync, InvalidateImageRecognition, optionsLayout, windowHandle);
     Selection = new WorkbenchSelectionOwner(ensureRuntimeReady, inferenceAttached, optionsLayout, Settings, GetRecognitionTaskEngine);
     Image = new WorkbenchImageOwner(annotatedImagePlatform, annotationStore, ensureRuntimeReady, inferenceAttached, optionsLayout, pinScreenshot, recognitionFactory, resourceBroker, shellActions, structuredClipboard, supervisorInstanceId, textLayerRecognitionFactory, resultActionPlatform, Settings, Resources, Selection, operations, SynchronizeBatchMode, systemImportReader, projectStore, projectSavePicker, projectOpenPicker);
     // 工程打开事务终止（取消/超时/替换）经既有状态邮箱发布终态，不触碰 UI 线程。
     Image.ProjectOpenTerminated += Image.OnProjectOpenTerminated;
-    Batch = new WorkbenchBatchOwner(batchFactory, windowHandle, Settings, Resources, Selection, operations);
+    Batch = new WorkbenchBatchOwner(batchFactory, windowHandle, Settings, Resources, Selection, operations, annotationStore);
     Pdf = new WorkbenchPdfOwner(confirmPdfClose, flushPdfPreview, optionsLayout, pdfFactory, pickPdfFolder, pickPdfSavePath, windowHandle, Settings, Resources, Selection, operations);
     QrCode = new WorkbenchQrCodeOwner(annotatedImagePlatform, qrCodeFactory, windowHandle, Resources, operations);
     System = new WorkbenchSystemOwner(diagnostics, resourceRoot, shell, structuredClipboard, updateFactory, operations);
@@ -337,7 +337,8 @@ public sealed class DesktopWorkbenchCommandHandler :
       return new WorkbenchCommandOutcome([], new WorkbenchProblem(
         "image_import_refused", WorkbenchProblemCategory.Unavailable,
         false, "workbench.error.imageImportInvalid"));
-    }    catch (ClipboardBusyException)
+    }
+    catch (ClipboardBusyException)
     {
       return new WorkbenchCommandOutcome(
         [],
@@ -346,6 +347,14 @@ public sealed class DesktopWorkbenchCommandHandler :
           WorkbenchProblemCategory.Unavailable,
           true,
           "workbench.error.clipboardBusy"));
+    }
+    catch (Exception error) when (
+      command is (SavePresetImageCommand or PrepareBatchImageCommand or ExportBatchImageCommand or PickImageOutputDirectoryCommand or SetEditorPreferencesCommand) &&
+      error is (InvalidDataException or global::System.Text.Json.JsonException or global::System.Runtime.InteropServices.COMException))
+    {
+      return new WorkbenchCommandOutcome([], new WorkbenchProblem(
+        "image_output_refused", WorkbenchProblemCategory.InvalidCommand,
+        true, "workbench.error.desktopCommandFailed"));
     }
     catch (Exception error) when (
       error is IOException or UnauthorizedAccessException or InvalidOperationException or

@@ -9,6 +9,19 @@ namespace VibeOCR.App.Tests;
 public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
 {
   [Fact]
+  public void PresetOutputNeverAcceptsWebPathsAndRetainsSessionBinding()
+  {
+    Guid session = Guid.NewGuid();
+    string resource = "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef";
+    string valid = JsonSerializer.Serialize(new { resourceUri = resource, presetId = "default", sessionId = session.ToString("N"), revision = 3 });
+    SavePresetImageCommand command = Assert.IsType<SavePresetImageCommand>(ParseForTest(CommandJson(session, "imageEdit", "savePresetImage", valid), session).Command);
+    Assert.Equal(session, command.SessionId);
+    Assert.Equal(3, command.Revision);
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(CommandJson(session, "imageEdit", "savePresetImage", JsonSerializer.Serialize(new { resourceUri = resource, presetId = "default", directory = "C:/private" })), session));
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(CommandJson(session, "settings", "pickImageOutputDirectory", "{\"path\":\"C:/private\"}"), session));
+  }
+
+  [Fact]
   public void PdfBlockEditRequiresDocumentSessionAndOldText()
   {
     Guid bridgeSession = Guid.NewGuid();

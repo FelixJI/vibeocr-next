@@ -1,3 +1,4 @@
+using VibeOCR.App.Features.Configuration;
 using VibeOCR.Platform.Windows;
 using VibeOCR.App.Features.Recognition;
 
@@ -585,6 +586,12 @@ public sealed record EndHotkeyRecordingCommand(Guid RecordingId) : WorkbenchComm
 /// can always be found again from settings, the tray menu, or the toolbar
 /// toggle action.
 /// </summary>
+public sealed record SetEditorPreferencesCommand(EditorPreferences Preferences) : WorkbenchCommand;
+public sealed record PickImageOutputDirectoryCommand : WorkbenchCommand;
+public sealed record SavePresetImageCommand(string ResourceUri, string PresetId, string Scope, Guid? SessionId = null, long? Revision = null) : WorkbenchCommand;
+public sealed record PrepareBatchImageCommand(int Index) : WorkbenchCommand;
+public sealed record ExportBatchImageCommand(Guid ItemId, string ResourceUri, string PresetId) : WorkbenchCommand;
+
 public sealed record SetFloatingToolbarEnabledCommand(bool Enabled) : WorkbenchCommand;
 
 /// <summary>Change the floating toolbar dock edge and auto-hide behavior live.</summary>
@@ -826,7 +833,7 @@ public sealed record BatchWorkbenchState(
   IReadOnlyList<RecognitionEngineChoice>? Engines = null,
   string? TaskEngine = null,
   bool ExportIncomplete = false,
-  string? InputKindNotice = null) : WorkbenchState
+  string? InputKindNotice = null, WorkbenchResourceReference? ExportImage = null, Guid? ExportImageId = null) : WorkbenchState
 {
   public override string Scope => "batch";
 }
@@ -940,7 +947,8 @@ public sealed record SettingsWorkbenchState(
   VibeOCR.Platform.Bootstrap.ManagedCleanupResult? EnvironmentCleanupResult = null,
   bool EnvironmentCanCancelCleanup = false,
   int EnvironmentCleanupPage = 0,
-  int EnvironmentCleanupPageCount = 1) : WorkbenchState
+  int EnvironmentCleanupPageCount = 1,
+  EditorPreferences? EditorPreferences = null, string? ImageOutputDirectory = null, string? EditorPreferencesError = null) : WorkbenchState
 {
   public override string Scope => "settings";
 }

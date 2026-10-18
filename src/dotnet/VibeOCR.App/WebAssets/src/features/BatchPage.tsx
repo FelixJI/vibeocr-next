@@ -1,3 +1,4 @@
+import { BatchImageExport } from "./BatchImageExport";
 import { Badge, Button, Input, ProgressBar } from "@fluentui/react-components";
 
 import {
@@ -85,7 +86,9 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
   const itemCount = numberValue(state.itemCount);
   const completed = numberValue(state.completedCount);
   const failed = numberValue(state.failedCount);
+  const [imageExporting, setImageExporting] = useState(false);
   const running = booleanValue(state.isRunning);
+  const queueLocked = running || imageExporting;
   const items = batchItems(state.items);
   const windowStart = Math.max(0, numberValue(state.windowStart));
   const engines = recognitionEngines(state.engines);
@@ -111,6 +114,7 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
             capability="batch.add"
             capabilities={viewState.capabilities}
             action={{ type: "batch.addFiles" }}
+            disabled={imageExporting}
             actions={actions}
             icon={<FilePlus2 aria-hidden="true" size={16} />}
           >
@@ -122,7 +126,7 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
             capabilities={viewState.capabilities}
             action={{ type: "batch.start" }}
             actions={actions}
-            disabled={itemCount === 0 || running}
+            disabled={itemCount === 0 || queueLocked}
             icon={<Play aria-hidden="true" size={16} />}
           >
             开始识别
@@ -132,7 +136,7 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
             capabilities={viewState.capabilities}
             action={{ type: running ? "batch.cancel" : "batch.clear" }}
             actions={actions}
-            disabled={itemCount === 0}
+            disabled={itemCount === 0 || imageExporting}
             icon={
               running ? (
                 <Square aria-hidden="true" size={16} />
@@ -150,10 +154,18 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
         engines={engines}
         taskEngine={stringValue(state.taskEngine)}
         enabled={
-          viewState.capabilities.includes("recognition.engine") && !running
+          viewState.capabilities.includes("recognition.engine") && !queueLocked
         }
         actions={actions}
         scope="batch"
+      />
+      <BatchImageExport
+        state={state}
+        settings={feature(viewState, "settings")}
+        count={itemCount}
+        actions={actions}
+        busy={queueLocked}
+        onBusy={setImageExporting}
       />
       <div className="collection-workspace">
         <Panel label="QUEUE" title="文件队列">
@@ -208,7 +220,7 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
                           aria-label={`${item.name} 的页码范围`}
                           placeholder="默认页码（all 或 1,3-5）"
                           defaultValue={item.pageRange ?? ""}
-                          disabled={running}
+                          disabled={queueLocked}
                           onBlur={(event) => {
                             const pageRange = event.currentTarget.value.trim();
                             if (pageRange !== (item.pageRange ?? "")) {
@@ -235,7 +247,7 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
                       <Button
                         appearance="subtle"
                         aria-label={`上移 ${item.name}`}
-                        disabled={running || windowStart + index === 0}
+                        disabled={queueLocked || windowStart + index === 0}
                         onClick={() =>
                           actions.run({
                             type: "batch.moveItem",
@@ -250,7 +262,7 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
                         appearance="subtle"
                         aria-label={`下移 ${item.name}`}
                         disabled={
-                          running || windowStart + index >= itemCount - 1
+                          queueLocked || windowStart + index >= itemCount - 1
                         }
                         onClick={() =>
                           actions.run({
@@ -265,7 +277,7 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
                       <Button
                         appearance="subtle"
                         aria-label={`移除 ${item.name}`}
-                        disabled={running}
+                        disabled={queueLocked}
                         onClick={() =>
                           actions.run({
                             type: "batch.removeItem",

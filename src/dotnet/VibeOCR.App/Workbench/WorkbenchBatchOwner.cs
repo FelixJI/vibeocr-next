@@ -1,3 +1,6 @@
+using VibeOCR.App.Web;
+using Windows.Graphics.Imaging;
+using System.Runtime.InteropServices.WindowsRuntime;
 using VibeOCR.App.Features.Batch;
 using VibeOCR.App.Features.Settings;
 using VibeOCR.App.Services;
@@ -9,12 +12,14 @@ using Windows.Storage.Pickers;
 
 namespace VibeOCR.App.Workbench;
 
-internal sealed class WorkbenchBatchOwner(Func<BatchViewModel> batchFactory, Func<nint> windowHandle, WorkbenchSettingsOwner settingsOwner, WorkbenchResourcesOwner resources, WorkbenchSelectionOwner selectionPolicy, WorkbenchOperations operations)
+internal sealed class WorkbenchBatchOwner(Func<BatchViewModel> batchFactory, Func<nint> windowHandle, WorkbenchSettingsOwner settingsOwner, WorkbenchResourcesOwner resources, WorkbenchSelectionOwner selectionPolicy, WorkbenchOperations operations, WorkbenchAnnotationStore annotationStore)
 {
-  internal bool Handles(WorkbenchCommand command) => command is AddBatchFilesCommand or AddDroppedBatchFilesCommand or ExportBatchCommand or StartBatchCommand or CancelBatchCommand or ClearBatchCommand or MoveBatchItemCommand or RemoveBatchItemCommand or SetBatchItemPageRangeCommand or SetBatchWindowCommand or SetBatchTaskEngineCommand;
+  internal bool Handles(WorkbenchCommand command) => command is PrepareBatchImageCommand or ExportBatchImageCommand or AddBatchFilesCommand or AddDroppedBatchFilesCommand or ExportBatchCommand or StartBatchCommand or CancelBatchCommand or ClearBatchCommand or MoveBatchItemCommand or RemoveBatchItemCommand or SetBatchItemPageRangeCommand or SetBatchWindowCommand or SetBatchTaskEngineCommand;
 
   internal async ValueTask<WorkbenchState?> ExecuteAsync(WorkbenchCommand command, CancellationToken cancellationToken) => command switch
   {
+    PrepareBatchImageCommand image => await PrepareImageAsync(image.Index, cancellationToken),
+    ExportBatchImageCommand image => await ExportImageAsync(image, cancellationToken),
     AddBatchFilesCommand => await AddBatchFilesAsync(cancellationToken),
     AddDroppedBatchFilesCommand dropped => await AddDroppedBatchFilesAsync(
       dropped,
@@ -74,6 +79,65 @@ internal sealed class WorkbenchBatchOwner(Func<BatchViewModel> batchFactory, Fun
       batchExportIncomplete = exports.Any(result => result.Incomplete is true);
     }
     return await BatchStateAsync(batch, cancellationToken);
+  }
+
+  private WorkbenchResourceReference? exportImage;
+  private Guid? exportImageId;
+  private BatchItemViewModel[] imageExportSnapshot = [];
+  private int exportImageIndex;
+
+  private async Task<BatchWorkbenchState> PrepareImageAsync(int index, CancellationToken token)
+  {
+    batch ??= batchFactory();
+    if (batch.IsRunning) throw new InvalidOperationException("识别期间不可批量导出图片。");
+    if (exportImage is not null) resources.ReleaseResource(exportImage);
+    exportImage = null;
+    exportImageId = null;
+    if (index == 0) imageExportSnapshot = batch.Items.ToArray();
+    if (index < 0 || index >= imageExportSnapshot.Length) throw new InvalidDataException("批量图片项已变化。");
+    BatchItemViewModel item = imageExportSnapshot[index];
+    if (!batch.Items.Contains(item)) throw new InvalidDataException("批量图片项已被移除。");
+    exportImageIndex = index;
+    string extension = Path.GetExtension(item.Path).ToLowerInvariant();
+    string mediaType = extension switch
+    {
+      ".png" => "image/png",
+      ".jpg" or ".jpeg" => "image/jpeg",
+      ".bmp" => "image/bmp",
+      ".webp" => "image/webp",
+      _ => throw new InvalidDataException("此队列项不是可导出的图片。"),
+    };
+    await using FileStream input = File.OpenRead(item.Path);
+    if (input.Length is < 1 or > 67108864) throw new InvalidDataException("图片超过 64MiB 上限。");
+    using var random = input.AsRandomAccessStream();
+    BitmapDecoder decoder = await BitmapDecoder.CreateAsync(random).AsTask(token);
+    if (decoder.PixelWidth > 32768 || decoder.PixelHeight > 32768 || (long)decoder.PixelWidth * decoder.PixelHeight > 64_000_000)
+      throw new InvalidDataException("图片超过 64MP 或单边 32768 上限。");
+    input.Position = 0;
+    byte[] bytes = new byte[checked((int)input.Length)];
+    await input.ReadExactlyAsync(bytes, token);
+    exportImage = await resources.PublishBytesAsync(bytes, mediaType, extension, token);
+    exportImageId = item.Id;
+    return BatchState(batch) with { ExportImage = exportImage, ExportImageId = exportImageId };
+  }
+
+  private async Task<BatchWorkbenchState> ExportImageAsync(ExportBatchImageCommand command, CancellationToken token)
+  {
+    using WorkbenchAnnotationFile image = annotationStore.Take(new Uri(command.ResourceUri));
+    BatchItemViewModel item = batch?.Items.FirstOrDefault(item => item.Id == command.ItemId)
+      ?? throw new InvalidDataException("批量图片项已被移除，未写入。");
+    try
+    {
+      if (exportImageId != item.Id || exportImage is null) throw new InvalidDataException("批量图片授权已失效。");
+      await settingsOwner.SavePresetImageAsync(image, command.PresetId, item.Name, exportImageIndex + 1, token);
+      return BatchState(batch!);
+    }
+    finally
+    {
+      if (exportImage is not null) resources.ReleaseResource(exportImage);
+      exportImage = null;
+      exportImageId = null;
+    }
   }
 
   private Task<BatchWorkbenchState?> StartBatchAsync(
@@ -332,5 +396,5 @@ internal sealed class WorkbenchBatchOwner(Func<BatchViewModel> batchFactory, Fun
   }
 
   internal void Stop() { Interlocked.Increment(ref batchGeneration); batchPreparation?.Cancel(); batch?.CancelAll(); }
-  internal void Release() => batchStructured.Clear();
+  internal void Release() { batchStructured.Clear(); imageExportSnapshot = []; if (exportImage is not null) resources.ReleaseResource(exportImage); exportImage = null; exportImageId = null; }
 }

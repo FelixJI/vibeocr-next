@@ -1,3 +1,7 @@
+using VibeOCR.App.Web;
+using VibeOCR.App.Features.Configuration;
+using Windows.Storage;
+using Windows.Storage.Pickers;
 using System.ComponentModel;
 using VibeOCR.App.Features.FloatingToolbar;
 using VibeOCR.App.Features.Settings;
@@ -8,13 +12,15 @@ using VibeOCR.Platform.Bootstrap;
 
 namespace VibeOCR.App.Workbench;
 
-internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensureRuntimeReady, Func<bool>? inferenceAttached, Func<SettingsViewModel> settingsFactory, Lazy<ShellViewModel> shell, ShellActionDispatcher? shellActions, Func<string?> supervisorInstanceId, WorkbenchOperations operations, Func<CancellationToken, Task> refreshFeatureStates, Action invalidateImageRecognition)
+internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensureRuntimeReady, Func<bool>? inferenceAttached, Func<SettingsViewModel> settingsFactory, Lazy<ShellViewModel> shell, ShellActionDispatcher? shellActions, Func<string?> supervisorInstanceId, WorkbenchOperations operations, Func<CancellationToken, Task> refreshFeatureStates, Action invalidateImageRecognition, PortableLayout? optionsLayout = null, Func<nint>? windowHandle = null)
 {
   public event Action? PinnedTextEnvironmentChanged;
-  internal bool Handles(WorkbenchCommand command) => command is RefreshRuntimeCommand or RefreshEnvironmentListCommand or CreateEnvironmentCommand or SetEnvironmentSourcesCommand or PreviewEnvironmentInstallCommand or ConfirmEnvironmentInstallCommand or CancelEnvironmentInstallCommand or InvalidateEnvironmentPlanCommand or SwitchEnvironmentCommand or SetEnvironmentCleanupPageCommand or PreviewEnvironmentCleanupCommand or RunEnvironmentCleanupCommand or CancelEnvironmentCleanupCommand or DeleteEnvironmentCommand or RepairEmptyEnvironmentCommand or FindCompatibleEnvironmentCommand or PrepareEnvironmentCommand or PrepareRemoteHostCommand or SetThemeCommand or SetStartupCommand or BeginHotkeyRecordingCommand or EndHotkeyRecordingCommand or SetActionHotkeyCommand or ResetActionHotkeyCommand or SetFloatingToolbarEnabledCommand or SetFloatingToolbarLayoutCommand or SetFloatingToolbarPreferencesCommand or ShowFloatingToolbarCommand or HideFloatingToolbarCommand or SetDownloadSourceCommand or SetAcceleratorCommand or SetRuntimeFeatureCommand or SetMineruConnectionCommand or SetMineruRecognitionCommand or SetDefaultRecognitionModeCommand or PrepareMineruConnectionCommand or InstallRuntimeCommand or ConfirmRuntimeInstallCommand or CancelRuntimeMaintenanceCommand or RetryRuntimeMaintenanceCommand;
+  internal bool Handles(WorkbenchCommand command) => command is SetEditorPreferencesCommand or PickImageOutputDirectoryCommand or RefreshRuntimeCommand or RefreshEnvironmentListCommand or CreateEnvironmentCommand or SetEnvironmentSourcesCommand or PreviewEnvironmentInstallCommand or ConfirmEnvironmentInstallCommand or CancelEnvironmentInstallCommand or InvalidateEnvironmentPlanCommand or SwitchEnvironmentCommand or SetEnvironmentCleanupPageCommand or PreviewEnvironmentCleanupCommand or RunEnvironmentCleanupCommand or CancelEnvironmentCleanupCommand or DeleteEnvironmentCommand or RepairEmptyEnvironmentCommand or FindCompatibleEnvironmentCommand or PrepareEnvironmentCommand or PrepareRemoteHostCommand or SetThemeCommand or SetStartupCommand or BeginHotkeyRecordingCommand or EndHotkeyRecordingCommand or SetActionHotkeyCommand or ResetActionHotkeyCommand or SetFloatingToolbarEnabledCommand or SetFloatingToolbarLayoutCommand or SetFloatingToolbarPreferencesCommand or ShowFloatingToolbarCommand or HideFloatingToolbarCommand or SetDownloadSourceCommand or SetAcceleratorCommand or SetRuntimeFeatureCommand or SetMineruConnectionCommand or SetMineruRecognitionCommand or SetDefaultRecognitionModeCommand or PrepareMineruConnectionCommand or InstallRuntimeCommand or ConfirmRuntimeInstallCommand or CancelRuntimeMaintenanceCommand or RetryRuntimeMaintenanceCommand;
 
   internal async ValueTask<WorkbenchState?> ExecuteAsync(WorkbenchCommand command, CancellationToken cancellationToken) => command switch
   {
+    SetEditorPreferencesCommand editor => SetEditorPreferences(editor.Preferences),
+    PickImageOutputDirectoryCommand => await PickImageOutputDirectoryAsync(),
     RefreshRuntimeCommand => await RefreshRuntimeAsync(cancellationToken),
     RefreshEnvironmentListCommand => await RunEnvironmentAsync(
       environment => environment.RefreshAsync(cancellationToken), cancellationToken),
@@ -667,7 +673,7 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     shell.Value.StartWithSystem,
     Sources: [],
     HotkeyActions: HotkeyActionStates(),
-    FloatingToolbar: ToolbarProjection());
+    FloatingToolbar: ToolbarProjection(), EditorPreferences: EditorSettings.Preferences, ImageOutputDirectory: ValidOutputDirectory(), EditorPreferencesError: editorPreferencesError);
 
   private IReadOnlyList<SettingsHotkeyActionState> HotkeyActionStates() =>
     shellActions is null
@@ -770,6 +776,7 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
       feature.Selected))],
     HotkeyActions: HotkeyActionStates(),
     FloatingToolbar: ToolbarProjection(toolbarError),
+    EditorPreferences: EditorSettings.Preferences, ImageOutputDirectory: ValidOutputDirectory(), EditorPreferencesError: editorPreferencesError,
     Maintenance: new SettingsMaintenanceState(
       viewModel.Maintenance.State.IsRunning,
       viewModel.Maintenance.State.StatusCode,
@@ -894,6 +901,68 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
           match.EnvironmentId, match.Name, match.Revision, match.Status,
           match.Active, match.Selected, match.ReasonCode)).ToArray())
       : null);
+
+  private StoredEditorPreferences? editorSettings;
+  private string? editorPreferencesError;
+  internal StoredEditorPreferences EditorSettings
+  {
+    get
+    {
+      if (editorSettings is not null) return editorSettings;
+      try { editorSettings = EditorPreferencesStore.Load(optionsLayout); }
+      catch (Exception error) when (error is System.Text.Json.JsonException or IOException or InvalidDataException or UnauthorizedAccessException)
+      {
+        editorPreferencesError = "编辑器设置无法读取，原文件已保留：" + error.Message;
+        editorSettings = new(EditorPreferences.Default, null);
+      }
+      return editorSettings;
+    }
+  }
+
+  private string? ValidOutputDirectory()
+  {
+    string? directory = EditorSettings.Directory;
+    if (directory is null || Directory.Exists(directory)) return directory;
+    editorPreferencesError = "输出目录已失效，请重新选择目录。";
+    return null;
+  }
+
+  private SettingsWorkbenchState SetEditorPreferences(EditorPreferences preferences)
+  {
+    var next = EditorSettings with { Preferences = preferences };
+    try { EditorPreferencesStore.Save(optionsLayout, next); editorSettings = next; editorPreferencesError = null; }
+    catch (Exception error) when (error is System.Text.Json.JsonException or IOException or InvalidDataException or UnauthorizedAccessException)
+    { editorPreferencesError = "保存失败，原设置已保留：" + error.Message; }
+    return CurrentState();
+  }
+
+  private async Task<SettingsWorkbenchState> PickImageOutputDirectoryAsync()
+  {
+    var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.PicturesLibrary };
+    picker.FileTypeFilter.Add("*");
+    WinRT.Interop.InitializeWithWindow.Initialize(picker, windowHandle?.Invoke() ?? 0);
+    StorageFolder? folder = await picker.PickSingleFolderAsync();
+    if (folder is null) return CurrentState();
+    if (!Directory.Exists(folder.Path)) throw new DirectoryNotFoundException("请选择有效输出目录。");
+    var next = EditorSettings with { Directory = folder.Path };
+    EditorPreferencesStore.Save(optionsLayout, next);
+    editorSettings = next;
+    editorPreferencesError = null;
+    return CurrentState();
+  }
+
+  internal async Task SavePresetImageAsync(WorkbenchAnnotationFile image, string presetId, string sourceName, int index, CancellationToken token)
+  {
+    ImageOutputPreset preset = EditorSettings.Preferences.Output;
+    if (presetId != preset.Id) throw new InvalidDataException("输出预设不存在。");
+    string directory = ValidOutputDirectory() ?? throw new DirectoryNotFoundException("请先为输出预设选择有效目录。");
+    if (image.MediaType != preset.Format) throw new InvalidDataException("上传格式与输出预设不一致。");
+    if (image.Width is < 1 or > VibpProjectLimits.MaximumResizeSide || image.Height is < 1 or > VibpProjectLimits.MaximumResizeSide ||
+      (long)image.Width * image.Height > VibpProjectLimits.MaximumResizePixels ||
+      preset.Width > 0 && (image.Width != preset.Width || image.Height != preset.Height))
+      throw new InvalidDataException("上传尺寸与输出预设或像素预算不一致。");
+    await EditorPreferencesStore.WriteNewAsync(image.Path, directory, EditorPreferencesStore.FileName(preset, sourceName, index), token);
+  }
 
   internal SettingsWorkbenchState CurrentState() => settings is null ? SettingsShellState() : SettingsState(settings);
   internal void Stop()

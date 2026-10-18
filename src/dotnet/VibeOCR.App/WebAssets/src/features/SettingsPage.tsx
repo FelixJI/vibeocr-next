@@ -1,3 +1,5 @@
+import { EditorPreferencesPanel } from "../components/EditorPreferencesPanel";
+import { editorPreferences } from "../components/editorPreferences";
 import {
   Badge,
   Button,
@@ -1239,6 +1241,21 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
           </Panel>
         )}
       </div>
+      <EditorPreferencesPanel
+        key={JSON.stringify(state.editorPreferences)}
+        value={editorPreferences(state.editorPreferences)}
+        actions={actions}
+        directory={
+          typeof state.imageOutputDirectory === "string"
+            ? state.imageOutputDirectory
+            : undefined
+        }
+        error={
+          typeof state.editorPreferencesError === "string"
+            ? state.editorPreferencesError
+            : undefined
+        }
+      />
     </Workspace>
   );
 }

@@ -1,3 +1,4 @@
+using VibeOCR.App.Features.Configuration;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -383,6 +384,29 @@ public static class WorkbenchBridgeCodec
   {
     switch (scope, action)
     {
+      case ("settings", "setEditorPreferences"):
+        EnsureObjectWithFields(arguments, new HashSet<string>(["preferences"]), "command arguments");
+        var editorPreferences = arguments.GetProperty("preferences").Deserialize<EditorPreferences>(EditorPreferencesStore.Json)
+          ?? throw new WorkbenchBridgeProtocolException("Invalid editor preferences.");
+        try { editorPreferences.Validate(); }
+        catch (InvalidDataException error) { throw new WorkbenchBridgeProtocolException("Invalid editor preferences.", error); }
+        return new SetEditorPreferencesCommand(editorPreferences);
+      case ("settings", "pickImageOutputDirectory"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new PickImageOutputDirectoryCommand();
+      case ("imageEdit", "savePresetImage"):
+      case ("recognition", "savePresetImage"):
+        bool boundPreset = arguments.TryGetProperty("sessionId", out _);
+        EnsureObjectWithFields(arguments, new HashSet<string>(boundPreset
+          ? ["resourceUri", "presetId", "sessionId", "revision"] : ["resourceUri", "presetId"]), "command arguments");
+        return new SavePresetImageCommand(ReadAnnotationResourceUri(arguments), arguments.GetProperty("presetId").GetString() ?? "", scope!,
+          boundPreset ? ParseGuidArgument(arguments, "sessionId") : null, boundPreset ? ParseContentRevision(arguments) : null);
+      case ("batch", "prepareImageExport"):
+        EnsureObjectWithFields(arguments, new HashSet<string>(["index"]), "command arguments");
+        return new PrepareBatchImageCommand(arguments.GetProperty("index").GetInt32());
+      case ("batch", "exportImage"):
+        EnsureObjectWithFields(arguments, new HashSet<string>(["itemId", "resourceUri", "presetId"]), "command arguments");
+        return new ExportBatchImageCommand(ParseGuidArgument(arguments, "itemId"), ReadAnnotationResourceUri(arguments), arguments.GetProperty("presetId").GetString() ?? "");
       case ("shell", "navigate"):
         EnsureObjectWithFields(arguments, RouteArgumentFields, "command arguments");
         return new NavigateWorkbenchCommand(
@@ -1703,6 +1727,7 @@ public static class WorkbenchBridgeCodec
       batch.CompletedCount,
       batch.FailedCount,
       items = batch.Items ?? [],
+      batch.ExportImage, batch.ExportImageId,
       batch.WindowStart,
       engines = batch.Engines ?? [],
       batch.TaskEngine,
@@ -1773,6 +1798,7 @@ public static class WorkbenchBridgeCodec
         settings.FloatingToolbar.Visibility,
         settings.FloatingToolbar.Error,
       },
+      settings.EditorPreferences, settings.ImageOutputDirectory, settings.EditorPreferencesError,
       settings.StatusMessage,
       settings.ServiceStatus,
       settings.MaintenanceStatus,
