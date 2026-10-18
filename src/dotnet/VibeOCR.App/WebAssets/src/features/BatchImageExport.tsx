@@ -7,7 +7,8 @@ import { encodeImagePreset } from "../components/imagePresetEncoding";
 import { uploadAnnotatedImage } from "../components/annotationHandoff";
 import { resource } from "./FeatureValues";
 
-type ImageReady = { url: string; id: string } | undefined;
+type ImageReady =
+  { url: string; id: string } | { unavailable: true } | undefined;
 export function BatchImageExport({
   state,
   settings,
@@ -32,13 +33,18 @@ export function BatchImageExport({
   const image = resource(state.exportImage);
   const imageId =
     typeof state.exportImageId === "string" ? state.exportImageId : undefined;
+  const decodeUnavailable = state.exportImageError === "decode_unavailable";
   useEffect(() => {
-    if (image && imageId && waiting.current) {
+    if (decodeUnavailable && imageId && waiting.current) {
+      const resolve = waiting.current;
+      waiting.current = undefined;
+      resolve({ unavailable: true });
+    } else if (image && imageId && waiting.current) {
       const resolve = waiting.current;
       waiting.current = undefined;
       resolve({ url: image.url, id: imageId });
     }
-  }, [image, imageId]);
+  }, [image, imageId, decodeUnavailable]);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -54,7 +60,8 @@ export function BatchImageExport({
     onBusy(true);
     setExecuting(true);
     let succeeded = 0,
-      failed = 0;
+      failed = 0,
+      unavailable = 0;
     try {
       for (let index = 0; index < count && !cancelled.current; index++) {
         setProgress(
@@ -79,6 +86,10 @@ export function BatchImageExport({
           }
           const next = await ready;
           if (!next) throw new Error("队列图片未准备完成");
+          if ("unavailable" in next) {
+            unavailable++;
+            throw new Error("格式解码不可用或图片内容损坏");
+          }
           if (cancelled.current) break;
           const blob = await encodeImagePreset(next.url, preferences.output);
           if (cancelled.current) break;
@@ -102,7 +113,7 @@ export function BatchImageExport({
       }
       if (mounted.current)
         setProgress(
-          `${cancelled.current ? "已停止" : "输出完成"}：成功 ${succeeded}，失败/非图片 ${failed}。已成功文件保留；原图与已有文件未覆盖。`,
+          `${cancelled.current ? "已停止" : "输出完成"}：成功 ${succeeded}，失败/非图片 ${failed}。${unavailable ? `其中 ${unavailable} 项格式解码不可用或图片内容损坏。` : ""}已成功文件保留；原图与已有文件未覆盖。`,
         );
     } finally {
       if (mounted.current) {
@@ -130,7 +141,7 @@ export function BatchImageExport({
       )}
       <p>
         逐张转换格式、质量与尺寸；沿用输出目录/文件名模板，不套用编辑器排版。JPEG
-        透明区域合成白底；文档项保留并报告为非图片。
+        透明区域合成白底。输出为静态图片，动画/多帧仅取首帧，多页图片仅取第一页；原文件保持不变。文档项保留并报告为非图片；缺少格式解码器时明确报错。
       </p>
       {progress && <p role="status">{progress}</p>}
       <fieldset className="editor-preferences-lock" disabled={executing}>

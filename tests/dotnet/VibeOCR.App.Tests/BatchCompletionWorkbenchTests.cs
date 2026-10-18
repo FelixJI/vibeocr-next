@@ -1,5 +1,8 @@
 using VibeOCR.App.Features.Configuration;
+using VibeOCR.App.Features.QrCode;
 using System.Text.Json;
+using Windows.Graphics.Imaging;
+using System.Runtime.InteropServices.WindowsRuntime;
 using VibeOCR.App.Features.Batch;
 using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Features.Settings;
@@ -201,6 +204,99 @@ public sealed class BatchCompletionWorkbenchTests
     Assert.Equal(2, harness.Batch.Items.Count);
   }
 
+  // Pillow-generated two-frame/page samples: first red, then blue; original containers must remain intact.
+  [Theory]
+  [InlineData("gif", "R0lGODlhAgABAIEAAP8AAAAAAAAAAAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQACgAAACwAAAAAAgABAAAIBQABAAgIACH5BAEKAAEALAAAAAACAAEAgQAA/wAAAAAAAAAAAAgFAAEACAgAOw==")]
+  [InlineData("tif", "SUkqAAgAAAALAAABBAABAAAAAgAAAAEBBAABAAAAAQAAAAIBAwAEAAAAkgAAAAMBAwABAAAAAQAAAAYBAwABAAAAAgAAABEBBAABAAAAmgAAABUBAwABAAAABAAAABYBBAABAAAAAQAAABcBBAABAAAACAAAABwBAwABAAAAAQAAAFIBAwABAAAAAgAAALgAAAAIAAgACAAIAP8AAP//AAD/AAAAAAAAAAAAAAAAAABJSSoACAAAAAsAAAEEAAEAAAACAAAAAQEEAAEAAAABAAAAAgEDAAQAAABCAQAAAwEDAAEAAAABAAAABgEDAAEAAAACAAAAEQEEAAEAAABKAQAAFQEDAAEAAAAEAAAAFgEEAAEAAAABAAAAFwEEAAEAAAAIAAAAHAEDAAEAAAABAAAAUgEDAAEAAAACAAAAAAAAAAgACAAIAAgAAAD//wAA//8AAAAAAAAAAAAAAAAAAA==")]
+  [InlineData("tiff", "SUkqAAgAAAALAAABBAABAAAAAgAAAAEBBAABAAAAAQAAAAIBAwAEAAAAkgAAAAMBAwABAAAAAQAAAAYBAwABAAAAAgAAABEBBAABAAAAmgAAABUBAwABAAAABAAAABYBBAABAAAAAQAAABcBBAABAAAACAAAABwBAwABAAAAAQAAAFIBAwABAAAAAgAAALgAAAAIAAgACAAIAP8AAP//AAD/AAAAAAAAAAAAAAAAAABJSSoACAAAAAsAAAEEAAEAAAACAAAAAQEEAAEAAAABAAAAAgEDAAQAAABCAQAAAwEDAAEAAAABAAAABgEDAAEAAAACAAAAEQEEAAEAAABKAQAAFQEDAAEAAAAEAAAAFgEEAAEAAAABAAAAFwEEAAEAAAAIAAAAHAEDAAEAAAABAAAAUgEDAAEAAAACAAAAAAAAAAgACAAIAAgAAAD//wAA//8AAAAAAAAAAAAAAAAAAA==")]
+  public async Task ImagePresetNormalizesGifAndTiffFirstFrameToStaticPng(string extension, string encoded)
+  {
+    await using var harness = await CompletionHarness.CreateAsync(new BatchRunClient(), outputPreset: true);
+    CancellationToken token = TestContext.Current.CancellationToken;
+    byte[] original = Convert.FromBase64String(encoded);
+    string path = Path.Combine(harness.Root, $"original.{extension}");
+    File.WriteAllBytes(path, original);
+    harness.Batch.AddFiles([path]);
+    Guid id = Assert.Single(harness.Batch.Items).Id;
+    WorkbenchCommandOutcome prepared = await harness.Handler.ExecuteAsync(new PrepareBatchImageCommand(0), token);
+    Assert.Null(prepared.Error);
+    BatchWorkbenchState state = Assert.IsType<BatchWorkbenchState>(Assert.Single(prepared.States));
+    Assert.Null(state.ExportImageError);
+    Assert.Equal(id, state.ExportImageId);
+    Assert.NotNull(state.ExportImage);
+    Assert.Equal("image/png", state.ExportImage.MediaType);
+    byte[] png = await harness.ReadResourceAsync(state.ExportImage, token);
+    using var random = new MemoryStream(png).AsRandomAccessStream();
+    BitmapDecoder decoder = await BitmapDecoder.CreateAsync(random).AsTask(token);
+    Assert.Equal(BitmapDecoder.PngDecoderId, decoder.DecoderInformation.CodecId);
+    Assert.Equal(1u, decoder.FrameCount);
+    Assert.Equal(2u, decoder.PixelWidth);
+    Assert.Equal(1u, decoder.PixelHeight);
+    byte[] pixels = (await decoder.GetPixelDataAsync(BitmapPixelFormat.Rgba8, BitmapAlphaMode.Straight,
+      new BitmapTransform(), ExifOrientationMode.IgnoreExifOrientation, ColorManagementMode.DoNotColorManage).AsTask(token)).DetachPixelData();
+    Assert.Equal(new byte[] { 255, 0, 0, 255 }, pixels[..4]);
+    WorkbenchAnnotationLease lease = await harness.StageImageAsync(png, token);
+    Assert.Null((await harness.Handler.ExecuteAsync(new ExportBatchImageCommand(id, lease.ResourceUri.AbsoluteUri, "default"), token)).Error);
+    Assert.Equal(png, File.ReadAllBytes(Path.Combine(harness.Root, "original.png")));
+    Assert.Equal(original, File.ReadAllBytes(path));
+    Assert.Throws<WorkbenchAnnotationAccessException>(() => harness.TakeAnnotation(lease));
+  }
+
+  [Fact]
+  public async Task ImagePresetNormalizesExifOrientationOnce()
+  {
+    await using var harness = await CompletionHarness.CreateAsync(new BatchRunClient(), outputPreset: true);
+    CancellationToken token = TestContext.Current.CancellationToken;
+    byte[] jpeg = await QrCodeSavePlatform.EncodeImageAsync(VibpProjectFileTests.BuildPng(2, 1), BitmapEncoder.JpegEncoderId, token);
+    byte[] exif = Convert.FromHexString("FFE100224578696600004D4D002A00000008000101120003000000010006000000000000");
+    byte[] original = [.. jpeg[..2], .. exif, .. jpeg[2..]];
+    string path = Path.Combine(harness.Root, "oriented.jpg");
+    File.WriteAllBytes(path, original);
+    harness.Batch.AddFiles([path]);
+    WorkbenchCommandOutcome prepared = await harness.Handler.ExecuteAsync(new PrepareBatchImageCommand(0), token);
+    Assert.Null(prepared.Error);
+    BatchWorkbenchState state = Assert.IsType<BatchWorkbenchState>(Assert.Single(prepared.States));
+    Assert.Null(state.ExportImageError);
+    byte[] png = await harness.ReadResourceAsync(state.ExportImage!, token);
+    using var memory = new MemoryStream(png);
+    using var random = memory.AsRandomAccessStream();
+    BitmapDecoder decoder = await BitmapDecoder.CreateAsync(random).AsTask(token);
+    Assert.Equal(1u, decoder.PixelWidth);
+    Assert.Equal(2u, decoder.PixelHeight);
+    Assert.Equal(decoder.PixelWidth, decoder.OrientedPixelWidth);
+    Assert.Equal(original, File.ReadAllBytes(path));
+  }
+
+  [Theory]
+  [InlineData("jp2", "AAAADGpQICANCocKAAAAFGZ0eXBqcDIgAAAAAGpwMiAAAAAtanAyaAAAABZpaGRyAAAAAQAAAAIAAwcHAAAAAAAPY29scgEAAAAAABAAAACVanAyY/9P/1EALwAAAAAAAgAAAAEAAAAAAAAAAAAAAAIAAAABAAAAAAAAAAAAAwcBAQcBAQcBAf9SAAwAAAABAAAEBAAB/1wABEBA/2QAJQABQ3JlYXRlZCBieSBPcGVuSlBFRyB2ZXJzaW9uIDIuNS40/5AACgAAAAAAHQAB/5PPtAgBr9+AEAk/34AQCT//2Q==")]
+  [InlineData("gif", "AQIDBA==")]
+  public async Task ImagePresetReportsUnavailableDecoderWithoutMisclassifyingImage(string extension, string encoded)
+  {
+    await using var harness = await CompletionHarness.CreateAsync(new BatchRunClient(), outputPreset: true);
+    CancellationToken token = TestContext.Current.CancellationToken;
+    byte[] original = Convert.FromBase64String(encoded);
+    string path = Path.Combine(harness.Root, $"format.{extension}");
+    File.WriteAllBytes(path, original);
+    harness.Batch.AddFiles([path]);
+    WorkbenchCommandOutcome prepared = await harness.Handler.ExecuteAsync(new PrepareBatchImageCommand(0), token);
+    Assert.Null(prepared.Error);
+    BatchWorkbenchState state = Assert.IsType<BatchWorkbenchState>(Assert.Single(prepared.States));
+    Assert.Equal(harness.Batch.Items[0].Id, state.ExportImageId);
+    if (state.ExportImageError is not null)
+    {
+      Assert.Equal("decode_unavailable", state.ExportImageError);
+      Assert.Null(state.ExportImage);
+      Assert.False(File.Exists(Path.Combine(harness.Root, "format.png")));
+    }
+    else
+    {
+      Assert.Equal("jp2", extension); // Valid JP2 may be decoded when a system codec is installed.
+      Assert.NotNull(state.ExportImage);
+      Assert.Equal("image/png", state.ExportImage.MediaType);
+    }
+    Assert.Equal(original, File.ReadAllBytes(path));
+  }
+
   private static IReadOnlyList<BatchWorkbenchState> TerminalBatchStates(
     IEnumerable<WorkbenchStateEnvelope> envelopes) =>
     envelopes.Select(envelope => envelope.State)
@@ -253,6 +349,13 @@ public sealed class BatchCompletionWorkbenchTests
     public string Root => root;
     public Task<WorkbenchAnnotationLease> StageImageAsync(byte[] bytes, CancellationToken token) => annotations.UploadPngAsync(new MemoryStream(bytes), token);
     public void TakeAnnotation(WorkbenchAnnotationLease lease) { using WorkbenchAnnotationFile image = annotations.Take(lease.ResourceUri); }
+    public async Task<byte[]> ReadResourceAsync(WorkbenchResourceReference reference, CancellationToken token)
+    {
+      await using WorkbenchResourceResponse response = await broker.OpenAsync(new Uri(reference.Url), token);
+      using var output = new MemoryStream();
+      await response.Content.CopyToAsync(output, token);
+      return output.ToArray();
+    }
 
 
     public static async Task<CompletionHarness> CreateAsync(

@@ -100,7 +100,11 @@ async function commands(page: Page) {
       ).__testHost.commands,
   );
 }
-async function setup(page: Page, settings: Record<string, unknown> = {}) {
+async function setup(
+  page: Page,
+  settings: Record<string, unknown> = {},
+  size = { width: 80, height: 40 },
+) {
   await page.route("https://app.vibeocr/**", async (route) => {
     const url = new URL(route.request().url());
     const response = await page.request.get(
@@ -108,7 +112,7 @@ async function setup(page: Page, settings: Record<string, unknown> = {}) {
     );
     await route.fulfill({ response });
   });
-  const base = await png(page, 80, 40, true),
+  const base = await png(page, size.width, size.height, true),
     imported = await png(page, 20, 10);
   const uploads: { contentType: string; bytes: Buffer }[] = [];
   const projects: Record<string, unknown>[] = [];
@@ -159,7 +163,9 @@ async function setup(page: Page, settings: Record<string, unknown> = {}) {
     },
     "https://app.vibeocr/",
   );
-  await expect(page.getByText(/原图 80×40/)).toBeVisible();
+  await expect(
+    page.getByText(new RegExp(`原图 ${size.width}×${size.height}`)),
+  ).toBeVisible();
   return { uploads, projects, state, imported };
 }
 
@@ -444,7 +450,7 @@ test("批量逐张复用预设，JPEG 白底，部分失败保留成功并保留
   });
   const batch = {
     isRunning: false,
-    itemCount: 2,
+    itemCount: 3,
     completedCount: 0,
     failedCount: 0,
     items: [],
@@ -470,12 +476,20 @@ test("批量逐张复用预设，JPEG 白底，部分失败保留成功并保留
   await page
     .getByRole("button", { name: "按常用预设批量导出图片", exact: true })
     .click();
-  for (const index of [0, 1]) {
+  for (const index of [0, 1, 2]) {
     await expectCommand(page, {
       scope: "batch",
       action: "prepareImageExport",
       arguments: { index },
     });
+    if (index === 2) {
+      await sendState(page, "batch", {
+        ...batch,
+        exportImageId: "33333333333333333333333333333333",
+        exportImageError: "decode_unavailable",
+      });
+      continue;
+    }
     if (index === 1) await rejectNextCommand(page);
     await sendState(page, "batch", {
       ...batch,
@@ -497,7 +511,13 @@ test("批量逐张复用预设，JPEG 白底，部分失败保留成功并保留
     });
   }
   await expect(
-    page.getByText(/输出完成：成功 1，失败\/非图片 1/),
+    page.getByText(/输出完成：成功 1，失败\/非图片 2/),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/其中 1 项格式解码不可用或图片内容损坏/),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/动画\/多帧仅取首帧，多页图片仅取第一页/),
   ).toBeVisible();
   expect(uploads.length).toBe(2);
   const image = await pixels(
@@ -791,4 +811,81 @@ test("235×239：被中段裁除的屏蔽源仍屏蔽放大镜泄露，全部普
     (command) => command.action === "recognizeScreenshotImage",
   )!;
   expect(recognition.arguments.excludeBoxes).toEqual(boxes);
+});
+
+test("F239-01：无排版20000px图片保留普通输出，真实排版仍拒绝超限", async ({
+  page,
+}) => {
+  const { uploads } = await setup(page, {}, { width: 20000, height: 100 });
+  for (const [index, name] of ["复制标注图", "保存标注图", "贴图"].entries()) {
+    await page.getByRole("button", { name, exact: true }).click();
+    await expect.poll(() => uploads.length).toBe(index + 1);
+    if (index > 0) expect(uploads[index]!.bytes).toEqual(uploads[0]!.bytes);
+  }
+  const dimensions = await page.evaluate(async (base64) => {
+    const bitmap = await createImageBitmap(
+      new Blob([Uint8Array.from(atob(base64), (char) => char.charCodeAt(0))], {
+        type: "image/png",
+      }),
+    );
+    const size = [bitmap.width, bitmap.height];
+    bitmap.close();
+    return size;
+  }, uploads[0]!.bytes.toString("base64"));
+  expect(dimensions).toEqual([20000, 100]);
+  await page.getByRole("button", { name: "取字", exact: true }).click();
+  await expect.poll(() => uploads.length).toBe(4);
+  expect(uploads[3]!.bytes).toEqual(uploads[0]!.bytes);
+  await page.getByRole("button", { name: "选择", exact: true }).click();
+  await page.getByRole("button", { name: "画布排版", exact: true }).click();
+  await page.getByLabel("排版边距", { exact: true }).fill("1");
+  await page.getByRole("button", { name: "文字识别", exact: true }).click();
+  await expect(page.getByText(/排版输出超出上限/).first()).toBeVisible();
+  expect(uploads.length).toBe(4);
+  await page
+    .getByRole("toolbar", { name: "图片编辑工具", exact: true })
+    .getByRole("button", { name: "重置排版", exact: true })
+    .click();
+  await page.getByRole("button", { name: "文字识别", exact: true }).click();
+  await expect.poll(() => uploads.length).toBe(5);
+  expect(uploads[4]!.bytes).toEqual(uploads[0]!.bytes);
+});
+
+test("F239-03：仅排版编辑可从上排清除或重置，撤销恢复真实预览", async ({
+  page,
+}, info) => {
+  await setup(page);
+  const main = page.getByRole("toolbar", { name: "图片编辑工具", exact: true });
+  await expect(
+    main.getByRole("button", { name: "清除编辑", exact: true }),
+  ).toBeDisabled();
+  await main.getByRole("button", { name: "画布排版", exact: true }).click();
+  const panel = page.getByRole("region", { name: "画布排版属性", exact: true });
+  await expect(
+    panel.getByRole("button", { name: "重置排版", exact: true }),
+  ).toHaveCount(0);
+  const reset = main.getByRole("button", { name: "重置排版", exact: true });
+  await expect(reset).toBeDisabled();
+  await page.getByLabel("排版边距", { exact: true }).fill("10");
+  const width = () =>
+    page
+      .getByAltText("排版输出预览")
+      .evaluate((img: HTMLImageElement) => img.naturalWidth);
+  await expect.poll(width).toBe(100);
+  await expect(
+    main.getByRole("button", { name: "清除编辑", exact: true }),
+  ).toBeEnabled();
+  await main.getByRole("button", { name: "清除编辑", exact: true }).click();
+  await expect.poll(width).toBe(80);
+  await main.getByRole("button", { name: "撤销", exact: true }).click();
+  await expect.poll(width).toBe(100);
+  await reset.click();
+  await expect.poll(width).toBe(80);
+  await main.getByRole("button", { name: "撤销", exact: true }).click();
+  await expect.poll(width).toBe(100);
+  await reset.scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: info.outputPath("composition-reset-primary-row.png"),
+    fullPage: true,
+  });
 });

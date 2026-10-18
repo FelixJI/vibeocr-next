@@ -32,6 +32,37 @@ function imported(x: number, y: number, width = 20, height = 10): Mark {
   };
 }
 describe("composition exclusion projection", () => {
+  it.each([
+    { width: 20000, height: 100 },
+    { width: 9000, height: 8000 },
+    { width: 32768, height: 3000 },
+  ])(
+    "preserves ordinary source budget without composition ($width×$height)",
+    (size) => {
+      const large = {
+        naturalWidth: size.width,
+        naturalHeight: size.height,
+      } as HTMLImageElement;
+      const state: EditorState = {
+        rotation: 0,
+        marks: [exclude(1, 0, 0, size.width / 2, size.height)],
+      };
+      const result = compositionExclusions(large, state, size);
+      expect(result.size).toEqual(size);
+      expect(result.normalized).toEqual([
+        { x: 0, y: 0, width: 500, height: 1000 },
+      ]);
+      expect(result.fullyMasked).toBe(false);
+      expect(() =>
+        compositionExclusions(
+          large,
+          { ...state, composition: { ...DEFAULT_COMPOSITION, margin: 1 } },
+          size,
+        ),
+      ).toThrow(/排版输出超出上限/);
+    },
+  );
+
   it("shares magnifier leakage with plain and composed output, even when its source is cut away", () => {
     const state: EditorState = {
       rotation: 0,

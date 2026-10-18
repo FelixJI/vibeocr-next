@@ -139,7 +139,7 @@ public sealed class QrCodeSavePlatform(Func<nint> windowHandle) : IQrCodeSavePla
     /// </param>
     internal static async Task<byte[]> EncodeImageAsync(
         byte[] png, Guid encoderId, CancellationToken cancellationToken,
-        bool bypassPassthrough = false)
+        bool bypassPassthrough = false, bool respectExifOrientation = false)
     {
         cancellationToken.ThrowIfCancellationRequested();
         using var input = new InMemoryRandomAccessStream();
@@ -152,17 +152,18 @@ public sealed class QrCodeSavePlatform(Func<nint> windowHandle) : IQrCodeSavePla
         input.Seek(0);
         BitmapDecoder decoder = await BitmapDecoder.CreateAsync(input);
         cancellationToken.ThrowIfCancellationRequested();
-        if (!bypassPassthrough && encoderId == BitmapEncoder.PngEncoderId && decoder.DecoderInformation.CodecId == BitmapDecoder.PngDecoderId) return png;
+        if (!bypassPassthrough && !respectExifOrientation && encoderId == BitmapEncoder.PngEncoderId && decoder.DecoderInformation.CodecId == BitmapDecoder.PngDecoderId) return png;
         BitmapAlphaMode alpha = encoderId == BitmapEncoder.PngEncoderId ? BitmapAlphaMode.Straight : BitmapAlphaMode.Ignore;
         PixelDataProvider source = await decoder.GetPixelDataAsync(
             BitmapPixelFormat.Bgra8, alpha,
-            new BitmapTransform(), ExifOrientationMode.IgnoreExifOrientation,
+            new BitmapTransform(), respectExifOrientation ? ExifOrientationMode.RespectExifOrientation : ExifOrientationMode.IgnoreExifOrientation,
             ColorManagementMode.DoNotColorManage);
         cancellationToken.ThrowIfCancellationRequested();
         using var output = new InMemoryRandomAccessStream();
         BitmapEncoder encoder = await BitmapEncoder.CreateAsync(encoderId, output);
         encoder.SetPixelData(BitmapPixelFormat.Bgra8, alpha,
-            decoder.PixelWidth, decoder.PixelHeight, 96, 96, source.DetachPixelData());
+            respectExifOrientation ? decoder.OrientedPixelWidth : decoder.PixelWidth,
+            respectExifOrientation ? decoder.OrientedPixelHeight : decoder.PixelHeight, 96, 96, source.DetachPixelData());
         await encoder.FlushAsync();
         using var reader = new DataReader(output.GetInputStreamAt(0));
         uint length = checked((uint)output.Size);

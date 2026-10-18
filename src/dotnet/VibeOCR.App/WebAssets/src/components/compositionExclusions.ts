@@ -7,7 +7,7 @@ import {
   type Rect,
 } from "./annotationGeometry";
 import { markBoundsOf } from "./annotationObjects";
-import { compositionLayout, DEFAULT_COMPOSITION } from "./canvasComposition";
+import { compositionLayout, type CompositionLayout } from "./canvasComposition";
 
 function snapClipped(rect: Rect, size: CanvasSize): Rect | undefined {
   const x = Math.max(0, Math.min(size.width, Math.floor(rect.x))),
@@ -55,9 +55,17 @@ export function compositionExclusions(
   assets?: ReadonlyMap<string, HTMLImageElement>,
 ) {
   const baseSize = finalOutputSize(image, state, display);
-  const settings = state.composition ?? DEFAULT_COMPOSITION;
-  const layout = compositionLayout(baseSize, settings, assets),
-    origin = layout.placements[0]!;
+  const settings = state.composition;
+  // 无排版沿用普通图片的 32768px / 100MP 合同，不额外套排版画布预算。
+  const layout: CompositionLayout = settings
+    ? compositionLayout(baseSize, settings, assets)
+    : {
+        size: baseSize,
+        baseSize,
+        cut: undefined,
+        placements: [{ x: 0, y: 0, ...baseSize }],
+      };
+  const origin = layout.placements[0]!;
   const project = (value: number, axis: "horizontal" | "vertical") => {
     const cut = layout.cut;
     if (!cut || cut.axis !== axis) return value;
@@ -106,7 +114,7 @@ export function compositionExclusions(
       maskedAssets.add(mark.assetId);
   }
   if (
-    settings.background === "image" &&
+    settings?.background === "image" &&
     settings.backgroundAssetId &&
     maskedAssets.has(settings.backgroundAssetId)
   )

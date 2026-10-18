@@ -7083,6 +7083,7 @@ export function ImageCanvasEditor({
     state.rotation !== 0 ||
     !!state.crop ||
     !!state.resize ||
+    !!state.composition ||
     !!state.patches?.length;
 
   /** 清除编辑：整体回到空白基准，入历史可撤销；进行中的草稿（折线等）
@@ -7430,6 +7431,18 @@ export function ImageCanvasEditor({
               onClick={() => setCompositionOpen((open) => !open)}
             >
               排版
+            </ToolbarButton>
+          )}
+          {toolset === "full" && (compositionOpen || state.composition) && (
+            <ToolbarButton
+              aria-label="重置排版"
+              disabled={!state.composition || isExporting || !!textEdit}
+              onClick={() => {
+                cancelDrawing();
+                commit({ ...state, composition: undefined });
+              }}
+            >
+              重置排版
             </ToolbarButton>
           )}
           {textLayerControls}

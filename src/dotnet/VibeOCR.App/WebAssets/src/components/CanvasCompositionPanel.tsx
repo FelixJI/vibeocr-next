@@ -1,5 +1,5 @@
 import { useEffect, useEffectEvent, useState } from "react";
-import { Button, Input, Select } from "@fluentui/react-components";
+import { Input, Select } from "@fluentui/react-components";
 import {
   DEFAULT_COMPOSITION,
   type CanvasComposition,
@@ -236,7 +236,6 @@ export function CanvasCompositionPanel({
           </label>
         </>
       )}
-      <Button onClick={() => onChange(undefined)}>重置排版</Button>
       {preview.width && preview.height && (
         <p>
           排版最终尺寸：{preview.width}×{preview.height}

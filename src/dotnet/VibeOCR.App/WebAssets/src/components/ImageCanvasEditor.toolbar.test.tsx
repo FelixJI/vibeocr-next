@@ -155,6 +155,44 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     },
   );
 
+  it("composition-only edits clear and reset in the main row, with undo restoring properties", async () => {
+    stubCanvasStack();
+    render(
+      <ImageCanvasEditor
+        actions={createActions()}
+        canExport
+        canRecognize
+        source="https://app.vibeocr/__resource/screenshot.bmp"
+        session={{ sessionId: "capture", revision: 0 }}
+        showAutoTextPreference={false}
+      />,
+    );
+    const mainRow = screen.getByRole("toolbar", { name: "图片编辑工具" });
+    const main = within(mainRow);
+    expect(main.getByRole("button", { name: "清除编辑" })).toBeDisabled();
+    fireEvent.click(main.getByRole("button", { name: "画布排版" }));
+    const panel = within(screen.getByRole("region", { name: "画布排版属性" }));
+    expect(panel.queryByRole("button", { name: "重置排版" })).toBeNull();
+    const reset = main.getByRole("button", { name: "重置排版" });
+    expect(reset.closest(".editor-toolbar-main")).toBe(mainRow);
+    expect(reset).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("排版边距"), {
+      target: { value: "10" },
+    });
+    expect(main.getByRole("button", { name: "清除编辑" })).toBeEnabled();
+    expect(reset).toBeEnabled();
+    fireEvent.click(main.getByRole("button", { name: "清除编辑" }));
+    expect(screen.getByLabelText("排版边距")).toHaveValue(0);
+    expect(reset).toBeDisabled();
+    fireEvent.click(main.getByRole("button", { name: "撤销" }));
+    expect(screen.getByLabelText("排版边距")).toHaveValue(10);
+    fireEvent.click(reset);
+    expect(screen.getByLabelText("排版边距")).toHaveValue(0);
+    fireEvent.click(main.getByRole("button", { name: "撤销" }));
+    expect(screen.getByLabelText("排版边距")).toHaveValue(10);
+    await act(async () => {});
+  });
+
   it("new tools respect custom order, hidden menu and local shortcuts", () => {
     render(
       <ImageCanvasEditor

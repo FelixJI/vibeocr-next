@@ -1,4 +1,6 @@
 using VibeOCR.App.Web;
+using VibeOCR.App.Features.QrCode;
+using System.Runtime.InteropServices;
 using Windows.Graphics.Imaging;
 using System.Runtime.InteropServices.WindowsRuntime;
 using VibeOCR.App.Features.Batch;
@@ -99,24 +101,33 @@ internal sealed class WorkbenchBatchOwner(Func<BatchViewModel> batchFactory, Fun
     if (!batch.Items.Contains(item)) throw new InvalidDataException("批量图片项已被移除。");
     exportImageIndex = index;
     string extension = Path.GetExtension(item.Path).ToLowerInvariant();
-    string mediaType = extension switch
-    {
-      ".png" => "image/png",
-      ".jpg" or ".jpeg" => "image/jpeg",
-      ".bmp" => "image/bmp",
-      ".webp" => "image/webp",
-      _ => throw new InvalidDataException("此队列项不是可导出的图片。"),
-    };
+    if (!BatchCommands.MediaType(extension).StartsWith("image/", StringComparison.Ordinal))
+      throw new InvalidDataException("此队列项不是可导出的图片。");
     await using FileStream input = File.OpenRead(item.Path);
     if (input.Length is < 1 or > 67108864) throw new InvalidDataException("图片超过 64MiB 上限。");
-    using var random = input.AsRandomAccessStream();
-    BitmapDecoder decoder = await BitmapDecoder.CreateAsync(random).AsTask(token);
-    if (decoder.PixelWidth > 32768 || decoder.PixelHeight > 32768 || (long)decoder.PixelWidth * decoder.PixelHeight > 64_000_000)
-      throw new InvalidDataException("图片超过 64MP 或单边 32768 上限。");
-    input.Position = 0;
-    byte[] bytes = new byte[checked((int)input.Length)];
-    await input.ReadExactlyAsync(bytes, token);
-    exportImage = await resources.PublishBytesAsync(bytes, mediaType, extension, token);
+    byte[] bytes;
+    try
+    {
+      using var random = input.AsRandomAccessStream();
+      BitmapDecoder decoder = await BitmapDecoder.CreateAsync(random).AsTask(token);
+      if (decoder.OrientedPixelWidth == 0 || decoder.OrientedPixelHeight == 0 ||
+        decoder.OrientedPixelWidth > 32768 || decoder.OrientedPixelHeight > 32768 ||
+        (long)decoder.OrientedPixelWidth * decoder.OrientedPixelHeight > 64_000_000)
+        throw new InvalidDataException("图片超过 64MP 或单边 32768 上限。");
+      input.Position = 0;
+      byte[] original = new byte[checked((int)input.Length)];
+      await input.ReadExactlyAsync(original, token);
+      // 与宿主已有编码器共用真实解码：固定首帧/首页，TIFF 等不交给浏览器解码。
+      bytes = await QrCodeSavePlatform.EncodeImageAsync(original, BitmapEncoder.PngEncoderId, token,
+        bypassPassthrough: true, respectExifOrientation: true);
+    }
+    catch (Exception error) when (error is COMException or NotSupportedException)
+    {
+      AppLog.Warn($"Batch image format decode unavailable ({extension}): {error.Message}");
+      return BatchState(batch) with { ExportImageId = item.Id, ExportImageError = "decode_unavailable" };
+    }
+    if (bytes.LongLength > 67108864) throw new InvalidDataException("图片静态编码超过 64MiB 上限。");
+    exportImage = await resources.PublishBytesAsync(bytes, "image/png", ".png", token);
     exportImageId = item.Id;
     return BatchState(batch) with { ExportImage = exportImage, ExportImageId = exportImageId };
   }

@@ -836,6 +836,7 @@ public sealed record BatchWorkbenchState(
   string? InputKindNotice = null, WorkbenchResourceReference? ExportImage = null, Guid? ExportImageId = null) : WorkbenchState
 {
   public override string Scope => "batch";
+  public string? ExportImageError { get; init; }
 }
 
 public sealed record BatchWorkbenchItem(
