@@ -26,6 +26,13 @@ public static class VibpProjectLimits
   public const long MaximumSourceBytes = 64L << 20;
   public const long MaximumSourcePixels = 100_000_000;
   public const int MaximumImageSide = 32_768;
+  /// <summary>逻辑 canvas 总像素上限：与编辑器输出上限（64MP）一致，
+  /// 独立于 source 的 100MP；防止 32768² 声明驱动真实画布分配。</summary>
+  public const long MaximumCanvasPixels = 64_000_000;
+  /// <summary>输出 resize 上限：与编辑器 UI 输出限额一致（单边 16384/总 64MP），
+  /// 区别于逻辑 canvas 的 32768 单边；防止手造工程在导出时分配巨大输出。</summary>
+  public const int MaximumResizeSide = 16_384;
+  public const long MaximumResizePixels = 64_000_000;
 
   public const int MaximumAssets = 16;
   public const long MaximumAssetPixels = 32_000_000;
@@ -305,7 +312,8 @@ internal static class VibpProjectRules
   private static void ValidateCanvas(VibpCanvas canvas)
   {
     if (canvas.Width is < 1 or > VibpProjectLimits.MaximumImageSide ||
-        canvas.Height is < 1 or > VibpProjectLimits.MaximumImageSide)
+        canvas.Height is < 1 or > VibpProjectLimits.MaximumImageSide ||
+        (long)canvas.Width * canvas.Height > VibpProjectLimits.MaximumCanvasPixels)
     {
       throw new VibpProjectFormatException(
         "Project canvas frame is outside the supported bounds.");
@@ -374,8 +382,9 @@ internal static class VibpProjectRules
         "Project state rotation must be a multiple of 90 degrees.");
     }
     if (state.Resize is { } resize &&
-        (resize.Width is < 1 or > VibpProjectLimits.MaximumImageSide ||
-         resize.Height is < 1 or > VibpProjectLimits.MaximumImageSide))
+        (resize.Width is < 1 or > VibpProjectLimits.MaximumResizeSide ||
+         resize.Height is < 1 or > VibpProjectLimits.MaximumResizeSide ||
+         (long)resize.Width * resize.Height > VibpProjectLimits.MaximumResizePixels))
     {
       throw new VibpProjectFormatException(
         "Project output resize is outside the supported bounds.");
@@ -616,7 +625,10 @@ internal static class VibpProjectRules
         throw new VibpProjectFormatException(
           $"Project mark {markId} text outline color is malformed.");
       }
-      if (outline.Width <= 0 || outline.Width > VibpProjectLimits.MaximumScalarMagnitude)
+      // 宽度 0 是生产合法状态（面板勾开再关）：保留颜色仅关闭描边；
+      // 负数/非有限/超上限仍拒绝。
+      if (!double.IsFinite(outline.Width) ||
+        outline.Width < 0 || outline.Width > VibpProjectLimits.MaximumScalarMagnitude)
       {
         throw new VibpProjectFormatException(
           $"Project mark {markId} text outline width is out of range.");

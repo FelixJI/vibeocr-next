@@ -180,7 +180,8 @@ public sealed class WorkbenchProjectStore : IDisposable
 
     VibpCanvas canvas = upload.Canvas ?? throw Fail("Project contribution canvas is null.");
     if (canvas.Width is < 1 or > VibpProjectLimits.MaximumImageSide ||
-      canvas.Height is < 1 or > VibpProjectLimits.MaximumImageSide)
+      canvas.Height is < 1 or > VibpProjectLimits.MaximumImageSide ||
+      (long)canvas.Width * canvas.Height > VibpProjectLimits.MaximumCanvasPixels)
     {
       throw Fail("Project contribution canvas is outside the supported bounds.");
     }

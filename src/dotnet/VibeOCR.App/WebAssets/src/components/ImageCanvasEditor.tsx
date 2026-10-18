@@ -104,10 +104,13 @@ import { uploadAnnotatedImage } from "./annotationHandoff";
 import {
   buildContributionState,
   contributionStateBytes,
+  PROJECT_CANVAS_TOTAL_PIXELS,
   PROJECT_PATCH_MAX_COUNT,
   PROJECT_PATCH_MAX_PIXELS,
   PROJECT_PATCH_TOTAL_BYTES,
   PROJECT_PATCH_TOTAL_PIXELS,
+  PROJECT_RESIZE_MAX_SIDE,
+  PROJECT_RESIZE_TOTAL_PIXELS,
   PROJECT_STATE_BUDGET_BYTES,
   restoreEditorState,
   wireToMark,
@@ -8416,6 +8419,28 @@ export function validateProjectRestore(
     savedCanvas.height < 1
   ) {
     throw new Error("工程逻辑画布或原图尺寸无效");
+  }
+  // 逻辑 canvas 总像素预算（与宿主/编辑器 64MP 一致）：在任何真实画布
+  // 分配前拒绝，不依赖后续安装路径兜底。
+  if (savedCanvas.width * savedCanvas.height > PROJECT_CANVAS_TOTAL_PIXELS) {
+    throw new Error(
+      `工程逻辑画布超出 64MP 总像素上限（${savedCanvas.width}×${savedCanvas.height}）；未确认切换，当前画布保持不变。`,
+    );
+  }
+  // 输出 resize 上限（与编辑器 UI 一致）：恢复后导出分配前拒绝。
+  if (
+    state.resize &&
+    (!Number.isInteger(state.resize.width) ||
+      !Number.isInteger(state.resize.height) ||
+      state.resize.width < 1 ||
+      state.resize.height < 1 ||
+      state.resize.width > PROJECT_RESIZE_MAX_SIDE ||
+      state.resize.height > PROJECT_RESIZE_MAX_SIDE ||
+      state.resize.width * state.resize.height > PROJECT_RESIZE_TOTAL_PIXELS)
+  ) {
+    throw new Error(
+      "工程输出尺寸超出上限（单边≤16384px，总像素≤64MP）；未确认切换，当前画布保持不变。",
+    );
   }
   const canvas = document.createElement("canvas");
   canvas.dataset.coordinateWidth = String(savedCanvas.width);

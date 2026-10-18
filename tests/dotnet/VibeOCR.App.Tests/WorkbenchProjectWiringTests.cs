@@ -36,11 +36,12 @@ public sealed class WorkbenchProjectWiringTests
     WorkbenchAnnotationStore annotationStore,
     WorkbenchProjectStore projectStore,
     string resourceRoot,
-    PickerStub picker)
+    PickerStub picker,
+    string sourceMediaType = "image/png")
   {
     var inference = new CompletingInferenceClient();
     return new DesktopWorkbenchCommandHandler(
-      () => new RecognitionViewModel(inference, new ProjectInputService()),
+      () => new RecognitionViewModel(inference, new ProjectInputService(sourceMediaType)),
       static () => throw new InvalidOperationException(),
       static () => throw new InvalidOperationException(),
       static () => throw new InvalidOperationException(),
@@ -222,6 +223,53 @@ public sealed class WorkbenchProjectWiringTests
 
       Assert.Null(outcome.Error);
       Assert.True(File.Exists(projectPath));
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task SaveProjectRefusesMismatchedSourceContainerAndKeepsTarget()
+  {
+    string root = TemporaryRoot();
+    string projectPath = Path.Combine(root, "mismatched.vibp");
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      using var store = new WorkbenchProjectStore();
+      var picker = new PickerStub { SavePath = projectPath };
+      // 会话输入声明 image/jpeg 但真实字节是 PNG（生产错报容器）：保存
+      // 必须在写入前拒绝，不产出不可重开的工程，原目标文件与会话保留。
+      await File.WriteAllBytesAsync(projectPath, [0xAA, 0xBB, 0xCC],
+        TestContext.Current.CancellationToken);
+      byte[] originalTarget = await File.ReadAllBytesAsync(
+        projectPath, TestContext.Current.CancellationToken);
+      await using var handler = CreateHandler(
+        broker, annotations, store, root, picker, sourceMediaType: "image/jpeg");
+      Guid session = await EstablishSessionAsync(handler, WorkbenchRoute.ImageEdit);
+      (Guid contributeId, _) = await ContributeAsync(store);
+
+      WorkbenchCommandOutcome outcome = await handler.ExecuteAsync(
+        new SaveImageEditProjectCommand(contributeId, session, 0),
+        TestContext.Current.CancellationToken);
+
+      Assert.Equal("project_format_invalid", outcome.Error?.Code);
+      // 旧目标文件字节不变；会话仍可用（同会话正确声明后可再保存）。
+      Assert.Equal(originalTarget, await File.ReadAllBytesAsync(
+        projectPath, TestContext.Current.CancellationToken));
+      Assert.Null(handler.CurrentProjectOpen);
+      // 会话仍有效：同一会话/修订的新贡献再保存，仍确定性拒绝于同一容器
+      // 根因（若会话被失败路径清除，这里会是 screenshot_session_stale）。
+      (Guid second, _) = await ContributeAsync(store);
+      WorkbenchCommandOutcome retried = await handler.ExecuteAsync(
+        new SaveImageEditProjectCommand(second, session, 0),
+        TestContext.Current.CancellationToken);
+      Assert.Equal("project_format_invalid", retried.Error?.Code);
+      Assert.Equal(originalTarget, await File.ReadAllBytesAsync(
+        projectPath, TestContext.Current.CancellationToken));
     }
     finally
     {
@@ -798,20 +846,21 @@ public sealed class WorkbenchProjectWiringTests
     return root;
   }
 
-  /// <summary>真实 PNG 输入（平台可解码），使保存路径的维度读取真实工作。</summary>
-  private sealed class ProjectInputService : IInputService
+  /// <summary>真实 PNG 输入（平台可解码）；媒体类型可参数化以模拟
+  /// 声明容器与真实字节不符（PNG 改名 .jpg）的生产错误。</summary>
+  private sealed class ProjectInputService(string mediaType = "image/png") : IInputService
   {
     public Task<RecognitionInput?> PickFileAsync(CancellationToken cancellationToken) =>
       Task.FromResult<RecognitionInput?>(new RecognitionInput(
-        Source, "image/png", "edit.png", "file"));
+        Source, mediaType, "edit.png", "file"));
 
     public Task<RecognitionInput?> ReadClipboardAsync(CancellationToken cancellationToken) =>
       Task.FromResult<RecognitionInput?>(new RecognitionInput(
-        Source, "image/png", "clipboard.png", "clipboard"));
+        Source, mediaType, "clipboard.png", "clipboard"));
 
     public Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken) =>
       Task.FromResult<RecognitionInput?>(new RecognitionInput(
-        Source, "image/png", "capture.png", "capture"));
+        Source, mediaType, "capture.png", "capture"));
 
     public Task<RecognitionInput?> ReadDroppedFileAsync(string path, CancellationToken cancellationToken) =>
       Task.FromResult<RecognitionInput?>(null);

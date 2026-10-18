@@ -129,6 +129,163 @@ public sealed class VibpProjectFileTests
     }
   }
 
+  [Fact]
+  public void CanvasTotalPixelBudgetIsEnforcedOnMetadataOnly()
+  {
+    string directory = NewTempDirectory();
+    try
+    {
+      byte[] source = PngBytes(8, 6);
+      VibpProjectManifest Base(int width, int height) => new()
+      {
+        SchemaVersion = 1,
+        Canvas = new VibpCanvas { Width = width, Height = height },
+        Source = new VibpSourceResource
+        {
+          MediaType = "image/png", Width = 8, Height = 6, Length = source.Length,
+        },
+        Assets = [],
+        State = new VibpEditorState { Rotation = 0, Marks = [] },
+      };
+      // 边界：8000×8000 恰好 64MP 允许；小合法 source 不受影响。
+      VibpProjectFile.Write(Path.Combine(directory, "edge.vibp"), Base(8000, 8000),
+        [new VibpProjectEntry("source.png", source.Length, () => new MemoryStream(source))]);
+      // 超 1 像素即拒绝；32768² 巨大逻辑 canvas 同样拒绝（元数据层，不分配）。
+      foreach ((int width, int height) in new[] { (8000, 8001), (32768, 32768) })
+      {
+        VibpProjectFormatException error = Assert.Throws<VibpProjectFormatException>(
+          () => VibpProjectFile.Write(
+            Path.Combine(directory, $"bad-{width}x{height}.vibp"), Base(width, height),
+            [new VibpProjectEntry("source.png", source.Length, () => new MemoryStream(source))]));
+        Assert.Contains("canvas", error.Message);
+      }
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  [Fact]
+  public void ResizeBudgetMatchesEditorOutputLimitsOnMetadataOnly()
+  {
+    string directory = NewTempDirectory();
+    try
+    {
+      byte[] source = PngBytes(8, 6);
+      VibpProjectManifest Base(int width, int height) => new()
+      {
+        SchemaVersion = 1,
+        Canvas = new VibpCanvas { Width = 64, Height = 48 },
+        Source = new VibpSourceResource
+        {
+          MediaType = "image/png", Width = 8, Height = 6, Length = source.Length,
+        },
+        Assets = [],
+        State = new VibpEditorState
+        {
+          Rotation = 0,
+          Marks = [],
+          Resize = new VibpSize { Width = width, Height = height },
+        },
+      };
+      // 边界：8000×8000 恰好 64MP 且单边 ≤16384 允许。
+      VibpProjectFile.Write(Path.Combine(directory, "edge.vibp"), Base(8000, 8000),
+        [new VibpProjectEntry("source.png", source.Length, () => new MemoryStream(source))]);
+      // 单边超 16384（旧 32768 边界内、总量未超）与总量超 64MP 均拒绝。
+      foreach ((int width, int height) in new[] { (16385, 2), (16384, 4096) })
+      {
+        VibpProjectFormatException error = Assert.Throws<VibpProjectFormatException>(
+          () => VibpProjectFile.Write(
+            Path.Combine(directory, $"bad-{width}x{height}.vibp"), Base(width, height),
+            [new VibpProjectEntry("source.png", source.Length, () => new MemoryStream(source))]));
+        Assert.Contains("resize", error.Message);
+      }
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task RoundTripsZeroWidthTextOutlineAndRejectsNegative()
+  {
+    string directory = NewTempDirectory();
+    try
+    {
+      byte[] source = PngBytes(64, 48);
+      var manifest = new VibpProjectManifest
+      {
+        SchemaVersion = 1,
+        Canvas = new VibpCanvas { Width = 900, Height = 600 },
+        Source = new VibpSourceResource
+        {
+          MediaType = "image/png", Width = 64, Height = 48, Length = source.Length,
+        },
+        Assets = [],
+        State = new VibpEditorState
+        {
+          Rotation = 0,
+          Marks =
+          [
+            new VibpMark
+            {
+              Id = "mark-1",
+              Tool = "text",
+              Start = new VibpPoint { X = 1, Y = 1 },
+              End = new VibpPoint { X = 80, Y = 40 },
+              Text = "勾开再关",
+              TextWidth = 100,
+              Style = new VibpMarkStyle
+              {
+                TextOutline = new VibpTextOutlineStyle { Color = "#161616", Width = 0 },
+              },
+            },
+          ],
+        },
+      };
+      string packagePath = Path.Combine(directory, "outline.vibp");
+      VibpProjectFile.Write(packagePath, manifest,
+        [new VibpProjectEntry("source.png", source.Length, () => new MemoryStream(source))]);
+
+      VibpProjectArchive archive = await VibpProjectFile.ReadAsync(
+        packagePath, Path.Combine(directory, "open"), TestContext.Current.CancellationToken);
+      VibpMark roundTripped = Assert.Single(archive.Manifest.State.Marks);
+      Assert.NotNull(roundTripped.Style?.TextOutline);
+      Assert.Equal(0, roundTripped.Style.TextOutline.Width);
+      Assert.Equal("#161616", roundTripped.Style.TextOutline.Color);
+
+      // 负数与超上限仍拒绝。
+      foreach (double badWidth in new[] { -0.5, 1001 })
+      {
+        var invalid = manifest with
+        {
+          State = manifest.State with
+          {
+            Marks =
+            [
+              roundTripped with
+              {
+                Style = roundTripped.Style with
+                {
+                  TextOutline = new VibpTextOutlineStyle { Color = "#161616", Width = badWidth },
+                },
+              },
+            ],
+          },
+        };
+        Assert.Throws<VibpProjectFormatException>(() => VibpProjectFile.Write(
+          Path.Combine(directory, $"bad-outline-{badWidth}.vibp"), invalid,
+          [new VibpProjectEntry("source.png", source.Length, () => new MemoryStream(source))]));
+      }
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
   [Theory]
   [InlineData("mosaic", 0)]
   [InlineData("mosaic", 1)]

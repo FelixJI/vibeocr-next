@@ -1,7 +1,6 @@
 using System.Text.Json;
 using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Web;
-using Windows.Graphics.Imaging;
 
 namespace VibeOCR.App.Workbench;
 
@@ -393,31 +392,12 @@ internal sealed partial class WorkbenchImageOwner
     }
   }
 
-  /// <summary>平台元数据级维度读取（Oriented 尺寸，与读取路径同语义），
-  /// 容器不匹配/不可解码按格式异常拒绝。</summary>
-  private static async Task<(int Width, int Height)> ReadProjectImageDimensionsAsync(
-    string path, string mediaType, CancellationToken cancellationToken)
-  {
-    try
-    {
-      await using FileStream stream = new(
-        path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024,
-        FileOptions.Asynchronous | FileOptions.SequentialScan);
-      using var random = stream.AsRandomAccessStream();
-      BitmapDecoder decoder = await BitmapDecoder.CreateAsync(random).AsTask(cancellationToken);
-      (int width, int height) = (checked((int)decoder.OrientedPixelWidth), checked((int)decoder.OrientedPixelHeight));
-      if (width < 1 || height < 1)
-      {
-        throw new VibpProjectFormatException($"Project source {mediaType} cannot be decoded.");
-      }
-      return (width, height);
-    }
-    catch (Exception error) when (error is not (VibpProjectFormatException or OperationCanceledException))
-    {
-      throw new VibpProjectFormatException(
-        $"Project source {mediaType} metadata cannot be read.", error);
-    }
-  }
+  /// <summary>保存路径的会话 source 维度/容器核实：直接复用读取路径的
+  /// VibpProjectFile.ReadImageDimensionsAsync（同一 codec 判定 + Oriented
+  /// 尺寸），声明容器与真实字节不符时在写入前拒绝，不产出不可重开的工程。</summary>
+  private static Task<(int Width, int Height)> ReadProjectImageDimensionsAsync(
+    string path, string mediaType, CancellationToken cancellationToken) =>
+    VibpProjectFile.ReadImageDimensionsAsync(path, mediaType, cancellationToken);
 
   private static void TryDeleteProjectDirectory(string directory)
   {

@@ -250,6 +250,58 @@ describe("project manifest parsing", () => {
       }),
     ).toThrow("工程修补数据不完整");
   });
+
+  it("rejects canvas and resize over pixel budgets before any allocation", () => {
+    // 巨大逻辑 canvas：任何资源 fetch/decode 前拒绝（元数据层）。
+    expect(() =>
+      parseProjectManifest({
+        ...manifest,
+        canvas: { width: 32768, height: 32768 },
+      }),
+    ).toThrow("工程数据结构不完整");
+    expect(() =>
+      parseProjectManifest({
+        ...manifest,
+        canvas: { width: 8000, height: 8001 },
+      }),
+    ).toThrow("工程数据结构不完整");
+    // 边界 8000×8000 恰好 64MP：接受。
+    expect(() =>
+      parseProjectManifest({
+        ...manifest,
+        canvas: { width: 8000, height: 8000 },
+      }),
+    ).not.toThrow();
+    // 手造巨大 resize：单边超 16384 或总量超 64MP 拒绝。
+    expect(() =>
+      parseProjectManifest({
+        ...manifest,
+        state: {
+          ...manifest.state,
+          resize: { width: 32768, height: 32768 },
+        },
+      }),
+    ).toThrow("工程输出尺寸超出上限");
+    expect(() =>
+      parseProjectManifest({
+        ...manifest,
+        state: {
+          ...manifest.state,
+          resize: { width: 16385, height: 2 },
+        },
+      }),
+    ).toThrow("工程输出尺寸超出上限");
+    // 边界 8000×8000 允许。
+    expect(() =>
+      parseProjectManifest({
+        ...manifest,
+        state: {
+          ...manifest.state,
+          resize: { width: 8000, height: 8000 },
+        },
+      }),
+    ).not.toThrow();
+  });
 });
 
 describe("project contribution upload", () => {
@@ -319,6 +371,30 @@ describe("wire editor state shape", () => {
 });
 
 describe("ack 前预算校验", () => {
+  it("rejects giant canvas/resize metadata before install", () => {
+    const image = new Image();
+    Object.defineProperty(image, "naturalWidth", { value: 1600 });
+    Object.defineProperty(image, "naturalHeight", { value: 900 });
+    const state: WireEditorState = { rotation: 0, marks: [], patches: [] };
+    expect(() =>
+      validateProjectRestore(image, { width: 32768, height: 32768 }, state),
+    ).toThrow("逻辑画布超出 64MP");
+    expect(() =>
+      validateProjectRestore(
+        image,
+        { width: 900, height: 600 },
+        { ...state, resize: { width: 16385, height: 2 } },
+      ),
+    ).toThrow("工程输出尺寸超出上限");
+    expect(() =>
+      validateProjectRestore(
+        image,
+        { width: 900, height: 600 },
+        { ...state, resize: { width: 8000, height: 8000 } },
+      ),
+    ).not.toThrow();
+  });
+
   it("accepts a modest brush and rejects an over-budget restore", () => {
     const image = new Image();
     Object.defineProperty(image, "naturalWidth", { value: 20_000 });

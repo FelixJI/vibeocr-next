@@ -235,8 +235,10 @@ public static class VibpProjectFile
   /// <summary>平台元数据级维度/容器校验：FileStream → IRandomAccessStream →
   /// BitmapDecoder.CreateAsync 读取 OrientedPixelWidth/Height（与 InputService
   /// 导入路径及浏览器 <img> natural 尺寸同语义：EXIF 方向已应用，编辑器/补丁
-  /// 的原图坐标空间即该定向后尺寸），不调用 GetPixelDataAsync，不分配整图像素缓冲。</summary>
-  private static async Task<(int Width, int Height)> ReadImageDimensionsAsync(
+  /// 的原图坐标空间即该定向后尺寸），不调用 GetPixelDataAsync，不分配整图像素缓冲。
+  /// 保存路径（会话持有 source 的媒体类型核实）与读取路径共用同一 codec 判定，
+  /// 防止 PNG 改名 .jpg 后写出不可重开的工程。</summary>
+  internal static async Task<(int Width, int Height)> ReadImageDimensionsAsync(
     string path, string mediaType, CancellationToken cancellationToken)
   {
     Guid expectedCodec = mediaType switch

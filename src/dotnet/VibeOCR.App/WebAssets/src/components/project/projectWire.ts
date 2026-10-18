@@ -149,6 +149,13 @@ export interface ProjectOpenWire {
 
 export const PROJECT_STATE_BUDGET_BYTES = 256 * 1024;
 export const PROJECT_UPLOAD_BUDGET_BYTES = 64 * 1024 * 1024;
+/** 逻辑 canvas 总像素上限：与编辑器输出上限及宿主 VibpProjectLimits 一致；
+ * 在任何真实画布分配前拒绝（parse/ack 前）。 */
+export const PROJECT_CANVAS_TOTAL_PIXELS = 64_000_000;
+/** 输出 resize 上限：与编辑器 UI 输出限额一致（单边 16384/总 64MP），
+ * 区别于逻辑 canvas 的 32768 单边；恢复/导出前拒绝手造巨大输出。 */
+export const PROJECT_RESIZE_MAX_SIDE = 16_384;
+export const PROJECT_RESIZE_TOTAL_PIXELS = 64_000_000;
 export const PROJECT_PATCH_MAX_PIXELS = 1_000_000;
 export const PROJECT_PATCH_TOTAL_PIXELS = 8_000_000;
 export const PROJECT_PATCH_MAX_COUNT = 126;
@@ -341,6 +348,7 @@ export function parseProjectManifest(value: unknown): WireManifest {
     !isRecord(value.canvas) ||
     !finiteNumber(value.canvas.width) ||
     !finiteNumber(value.canvas.height) ||
+    value.canvas.width * value.canvas.height > PROJECT_CANVAS_TOTAL_PIXELS ||
     !isRecord(value.source) ||
     typeof value.source.mediaType !== "string" ||
     !finiteNumber(value.source.width) ||
@@ -414,6 +422,18 @@ export function parseProjectManifest(value: unknown): WireManifest {
       : undefined;
   if (resizeWire && !resize) {
     throw new Error("工程输出尺寸数据不完整");
+  }
+  if (
+    resize &&
+    (!Number.isInteger(resize.width) ||
+      !Number.isInteger(resize.height) ||
+      resize.width < 1 ||
+      resize.height < 1 ||
+      resize.width > PROJECT_RESIZE_MAX_SIDE ||
+      resize.height > PROJECT_RESIZE_MAX_SIDE ||
+      resize.width * resize.height > PROJECT_RESIZE_TOTAL_PIXELS)
+  ) {
+    throw new Error("工程输出尺寸超出上限（单边≤16384px，总像素≤64MP）");
   }
   const sourceLength = finiteNumber(value.source.length)
     ? value.source.length

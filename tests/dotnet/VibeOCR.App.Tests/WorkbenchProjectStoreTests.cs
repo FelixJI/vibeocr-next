@@ -57,6 +57,27 @@ public sealed class WorkbenchProjectStoreTests
   }
 
   [Fact]
+  public async Task UploadRejectsCanvasOverTotalPixelBudget()
+  {
+    using var store = new WorkbenchProjectStore();
+    // 元数据级拒绝：8000×8001 超 64MP 总量（不分配任何巨大画布）；
+    // 32768² 同样拒绝。
+    foreach ((int width, int height) in new[] { (8000, 8001), (32768, 32768) })
+    {
+      WorkbenchProjectUploadException error = await Assert.ThrowsAsync<WorkbenchProjectUploadException>(
+        () => store.UploadAsync(
+          Body(new VibpCanvas { Width = width, Height = height }, null),
+          TestContext.Current.CancellationToken));
+      Assert.Contains("bounds", error.Message);
+    }
+    // 边界值 8000×8000 恰好 64MP：接受。
+    WorkbenchProjectContributionLease edge = await store.UploadAsync(
+      Body(new VibpCanvas { Width = 8000, Height = 8000 }, null),
+      TestContext.Current.CancellationToken);
+    Assert.NotNull(store.TryTake(edge.ContributeId));
+  }
+
+  [Fact]
   public async Task ExpiredContributionIsNotConsumed()
   {
     AdjustableTimeProvider clock = new();
