@@ -83,7 +83,8 @@ public sealed class WorkbenchProjectWiringTests
   }
 
   private static async Task<(Guid ContributeId, MemoryStream Body)> ContributeAsync(
-    WorkbenchProjectStore store)
+    WorkbenchProjectStore store,
+    byte[]? patchPng = null)
   {
     MemoryStream body = new(JsonSerializer.SerializeToUtf8Bytes(new
     {
@@ -91,13 +92,37 @@ public sealed class WorkbenchProjectWiringTests
       state = new { rotation = 0, marks = Array.Empty<object>() },
       patches = new object[]
       {
-        new { id = 1, x = 2, y = 3, width = 4, height = 3, png = Convert.ToBase64String(Patch) },
+        new { id = 1, x = 2, y = 3, width = 4, height = 3, png = Convert.ToBase64String(patchPng ?? Patch) },
       },
     }));
     WorkbenchProjectContributionLease lease = await store.UploadAsync(
       body, TestContext.Current.CancellationToken);
     return (lease.ContributeId, body);
   }
+
+  /// <summary>多补丁贡献（1×1 PNG，元数据小图）。</summary>
+  private static MemoryStream BuildContribution(
+    VibpCanvas canvas,
+    object? state,
+    params (int Id, int X, int Y, int Width, int Height, byte[] Png)[] patches)
+  {
+    return new MemoryStream(JsonSerializer.SerializeToUtf8Bytes(new
+    {
+      canvas = new { width = canvas.Width, height = canvas.Height },
+      state = state ?? new { rotation = 0, marks = Array.Empty<object>() },
+      patches = patches.Select(patch => new
+      {
+        id = patch.Id,
+        x = patch.X,
+        y = patch.Y,
+        width = patch.Width,
+        height = patch.Height,
+        png = Convert.ToBase64String(patch.Png),
+      }).ToArray(),
+    }));
+  }
+
+  private static byte[] Png1X1() => PngBytes(1, 1);
 
   [Fact]
   public async Task SaveProjectWritesPackageFromHeldSessionResources()
@@ -276,6 +301,226 @@ public sealed class WorkbenchProjectWiringTests
       Directory.Delete(root, recursive: true);
     }
   }
+
+  private sealed class GatedOpenPickerStub
+  {
+    private readonly TaskCompletionSource entered = new(
+      TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource<string?> gate =
+      new(TaskCreationOptions.RunContinuationsAsynchronously);
+    /// <summary>picker 已被调用（同步信号，避免猜时序）。</summary>
+    public Task Entered => entered.Task;
+    public Func<CancellationToken, Task<string?>> Picker => _ =>
+    {
+      entered.TrySetResult();
+      return gate.Task;
+    };
+    public void Release(string? path) => gate.TrySetResult(path);
+  }
+
+  [Fact]
+  public async Task OpenProjectSingleFlightRejectsSecondPickerWhileFirstInFlight()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      using var store = new WorkbenchProjectStore();
+      var gate = new GatedOpenPickerStub();
+      var inference = new CompletingInferenceClient();
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        () => new RecognitionViewModel(inference, new ProjectInputService()),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => new SettingsViewModel(inference),
+        () => new ShellViewModel(new StubHotkeyRegistrar(), new StubStartupRegistrar()),
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker,
+        root,
+        static () => 0,
+        annotations,
+        projectStore: store,
+        projectOpenPicker: gate.Picker);
+
+      Task<WorkbenchCommandOutcome> first = Task.Run(async () => await handler.ExecuteAsync(
+        new OpenImageEditProjectCommand(), TestContext.Current.CancellationToken));
+      // 同步等待第一个 picker 确实进入（无 delay/yield 猜时序）。
+      await gate.Entered.WaitAsync(
+        TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+      // 第二次请求同步拒绝：不叠加第二个原生 picker。
+      WorkbenchCommandOutcome second = await handler.ExecuteAsync(
+        new OpenImageEditProjectCommand(), TestContext.Current.CancellationToken);
+      Assert.Equal("image_import_in_progress", second.Error?.Code);
+
+      // 取消路径：释放 picker 为取消，单飞 guard 归零，后续可再次打开。
+      gate.Release(null);
+      WorkbenchCommandOutcome cancelled = await first.WaitAsync(
+        TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+      Assert.Equal("annotation_operation_cancelled", cancelled.Error?.Code);
+      WorkbenchCommandOutcome third = await handler.ExecuteAsync(
+        new OpenImageEditProjectCommand(), TestContext.Current.CancellationToken);
+      Assert.Equal("annotation_operation_cancelled", third.Error?.Code);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task SaveProjectRefusesEntryOverrunBeforePicker()
+  {
+    // 有效 ≤126 补丁 + marks 唯一引用 3 个资产：合计 2+3+126=131 > 128，
+    // 宿主 picker 前拒绝（上传侧各单项均合法，不放宽上传限制）。
+    byte[] png = Png1X1();
+    string[] assetIds = new[] { "a", "b", "c" }.Select(prefix => prefix + new string('0', 31)).ToArray();
+    MemoryStream body = new(JsonSerializer.SerializeToUtf8Bytes(new
+    {
+      canvas = new { width = 64, height = 48 },
+      state = new
+      {
+        rotation = 0,
+        marks = assetIds.Select((assetId, index) => new
+        {
+          id = $"mark-{index + 1}",
+          tool = "image",
+          start = new { x = 1, y = 1 },
+          end = new { x = 20, y = 20 },
+          assetId,
+        }).ToArray(),
+      },
+      patches = Enumerable.Range(1, 126).Select(id => new
+      {
+        id,
+        x = 0,
+        y = 0,
+        width = 1,
+        height = 1,
+        png = Convert.ToBase64String(png),
+      }).ToArray(),
+    }));
+
+    string root = TemporaryRoot();
+    string projectPath = Path.Combine(root, "overrun.vibp");
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      using var store = new WorkbenchProjectStore();
+      var picker = new PickerStub { SavePath = projectPath };
+      await using var handler = CreateHandler(broker, annotations, store, root, picker);
+      Guid session = await EstablishSessionAsync(handler, WorkbenchRoute.ImageEdit);
+      WorkbenchProjectContributionLease lease = await store.UploadAsync(
+        body, TestContext.Current.CancellationToken);
+
+      WorkbenchCommandOutcome outcome = await handler.ExecuteAsync(
+        new SaveImageEditProjectCommand(lease.ContributeId, session, 0),
+        TestContext.Current.CancellationToken);
+
+      Assert.Equal("image_import_refused", outcome.Error?.Code);
+      Assert.False(File.Exists(projectPath));
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Theory]
+  [InlineData("invalid-bit-depth")]
+  [InlineData("invalid-color-type")]
+  [InlineData("truncate")]
+  [InlineData("drop-iend")]
+  [InlineData("zeroed-idat")]
+  [InlineData("random-idat")]
+  [InlineData("bad-crc")]
+  public async Task SaveProjectFullyDecodesPatchPngBeforeAtomicWrite(string mutation)
+  {
+    string root = TemporaryRoot();
+    string projectPath = Path.Combine(root, $"bad-{mutation}.vibp");
+    try
+    {
+      await File.WriteAllBytesAsync(projectPath, [0x12, 0x34],
+        TestContext.Current.CancellationToken);
+      byte[] originalTarget = await File.ReadAllBytesAsync(
+        projectPath, TestContext.Current.CancellationToken);
+      // 均能通过上传侧签名+IHDR 维度结构检查（旧实现会直接写出不可重开
+      // 的工程）：无效 IHDR 编码由平台解码拒绝；截断/缺 IEND/IDAT 全零/
+      // 全随机/坏 CRC 由共享结构+标准 CRC32 校验拒绝（防 WIC 宽容）。
+      byte[] corrupted = mutation switch
+      {
+        "invalid-bit-depth" => Mutate(Patch, 24, 99),
+        "invalid-color-type" => Mutate(Patch, 25, 99),
+        "truncate" => Patch[..^30],
+        "drop-iend" => Patch[..^12],
+        "zeroed-idat" => ZeroIdat(Patch),
+        "random-idat" => RandomizeIdat(Patch, 42),
+        "bad-crc" => Mutate(Patch, Patch.Length - 6, (byte)(Patch[^6] ^ 0xFF)),
+        _ => throw new ArgumentOutOfRangeException(nameof(mutation)),
+      };
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      using var store = new WorkbenchProjectStore();
+      var picker = new PickerStub { SavePath = projectPath };
+      await using var handler = CreateHandler(broker, annotations, store, root, picker);
+      Guid session = await EstablishSessionAsync(handler, WorkbenchRoute.ImageEdit);
+      (Guid contributeId, _) = await ContributeAsync(store, corrupted);
+
+      WorkbenchCommandOutcome outcome = await handler.ExecuteAsync(
+        new SaveImageEditProjectCommand(contributeId, session, 0),
+        TestContext.Current.CancellationToken);
+
+      Assert.Equal("project_format_invalid", outcome.Error?.Code);
+      Assert.Equal(originalTarget, await File.ReadAllBytesAsync(
+        projectPath, TestContext.Current.CancellationToken));
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  private static byte[] Mutate(byte[] source, int offset, byte value)
+  {
+    byte[] mutated = [.. source];
+    mutated[offset] = value;
+    return mutated;
+  }
+
+  /// <summary>IDAT 数据区置零/随机化（chunk 头之后、尾 CRC 之前）。</summary>
+  private static byte[] MutateIdat(byte[] png, Random? random)
+  {
+    byte[] mutated = [.. png];
+    int idatDataStart = FindIdatDataStart(mutated);
+    for (int i = idatDataStart; i < mutated.Length - 4; i++)
+    {
+      mutated[i] = random is null ? (byte)0 : (byte)random.Next(256);
+    }
+    return mutated;
+  }
+
+  private static byte[] ZeroIdat(byte[] png) => MutateIdat(png, null);
+
+  private static byte[] RandomizeIdat(byte[] png, int seed) => MutateIdat(png, new Random(seed));
+
+  private static int FindIdatDataStart(byte[] png)
+  {
+    // 签名 8 + IHDR 块（12+13）→ 下一 chunk 头 8 字节后即 IDAT 数据。
+    int offset = 8 + 25 + 8;
+    if (offset >= png.Length ||
+      !png.AsSpan(offset - 4, 4).SequenceEqual("IDAT"u8))
+    {
+      throw new InvalidOperationException("fixture does not start IDAT at expected offset");
+    }
+    return offset;
+  }
+
+  /// <summary>平台实测诚实记录（TEMP/task233-r7-wic-tolerance-evidence.md）：
+  /// WIC 对截断/缺 IEND/IDAT 全零/全随机均宽容；共享结构+CRC 校验在平台
+  /// 解码前拒绝这些样本，无效 IHDR 编码仍由平台解码拒绝。</summary>
 
   [Fact]
   public async Task OpenProjectPublishesPendingAndAckSwitchesSession()

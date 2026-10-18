@@ -5,6 +5,8 @@ import { validateProjectRestore } from "../ImageCanvasEditor";
 import {
   buildContributionState,
   contributionStateBytes,
+  countReferencedAssets,
+  patchEntryBudget,
   parseProjectManifest,
   parseProjectOpen,
   restoreEditorState,
@@ -162,6 +164,26 @@ describe("project contribution serialization", () => {
     const body = buildContributionState({ width: 900, height: 600 }, state);
     expect(contributionStateBytes(body)).toBeLessThan(256 * 1024);
     expect(contributionStateBytes(body)).toBeGreaterThan(100);
+  });
+});
+
+describe("project entry budget", () => {
+  it("derives the patch budget from uniquely referenced assets", () => {
+    // 共享 asset 引用只计一次：多个 image 标记引用同一资产。
+    const marks = [
+      { assetId: "a".repeat(32) },
+      { assetId: "a".repeat(32) },
+      { assetId: "b".repeat(32) },
+      {},
+      { assetId: undefined },
+    ];
+    expect(countReferencedAssets(marks)).toBe(2);
+    expect(patchEntryBudget(0)).toBe(126);
+    expect(patchEntryBudget(16)).toBe(110);
+    // 16 资产 + 110 补丁 = 128 恰好允许；17 资产时预算 109 块。
+    expect(2 + 16 + 110).toBeLessThanOrEqual(128);
+    expect(2 + 16 + 111).toBeGreaterThan(128);
+    expect(patchEntryBudget(17)).toBe(109);
   });
 });
 

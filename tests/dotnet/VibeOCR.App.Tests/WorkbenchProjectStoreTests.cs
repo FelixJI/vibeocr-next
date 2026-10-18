@@ -78,6 +78,86 @@ public sealed class WorkbenchProjectStoreTests
   }
 
   [Fact]
+  public async Task ExpiryTimerActivelyReleasesStagedContribution()
+  {
+    // 无人再上传/消费：到期计时器主动清除强引用，无需真实 sleep。
+    AdjustableTimeProvider clock = new();
+    using var store = new WorkbenchProjectStore(clock);
+    WorkbenchProjectContributionLease lease = await store.UploadAsync(
+      Body(new VibpCanvas { Width = 8, Height = 8 }, null),
+      TestContext.Current.CancellationToken);
+    Assert.Equal((1, (Guid?)lease.ContributeId), store.Staged);
+    Assert.Equal(1, store.ActiveExpiryTimers);
+
+    clock.Advance(WorkbenchProjectStore.DefaultLifetime + TimeSpan.FromSeconds(1));
+
+    Assert.Equal((0, null), store.Staged);
+    Assert.Equal(0, store.ActiveExpiryTimers);
+    Assert.Null(store.TryTake(lease.ContributeId));
+  }
+
+  [Fact]
+  public async Task LateExpiryCallbackDoesNotClearReplacedContribution()
+  {
+    AdjustableTimeProvider clock = new();
+    using var store = new WorkbenchProjectStore(clock);
+    WorkbenchProjectContributionLease first = await store.UploadAsync(
+      Body(new VibpCanvas { Width = 8, Height = 8 }, null),
+      TestContext.Current.CancellationToken);
+    // 替换为第二份贡献：旧计时器被取消，即使迟到触发也不清新贡献。
+    WorkbenchProjectContributionLease second = await store.UploadAsync(
+      Body(new VibpCanvas { Width = 9, Height = 9 }, null),
+      TestContext.Current.CancellationToken);
+
+    clock.Advance(WorkbenchProjectStore.DefaultLifetime + TimeSpan.FromSeconds(1));
+
+    // 只剩第二份到期：第一份的迟到回调已被取消（无交叉清除）。
+    Assert.Equal((0, null), store.Staged);
+  }
+
+  [Fact]
+  public async Task ConsumeAndRevokeCancelExpiryTimer()
+  {
+    AdjustableTimeProvider clock = new();
+    using var store = new WorkbenchProjectStore(clock);
+    WorkbenchProjectContributionLease consumed = await store.UploadAsync(
+      Body(new VibpCanvas { Width = 8, Height = 8 }, null),
+      TestContext.Current.CancellationToken);
+    Assert.NotNull(store.TryTake(consumed.ContributeId));
+    Assert.Equal(0, store.ActiveExpiryTimers);
+
+    WorkbenchProjectContributionLease revoked = await store.UploadAsync(
+      Body(new VibpCanvas { Width = 8, Height = 8 }, null),
+      TestContext.Current.CancellationToken);
+    store.RevokeAll();
+    Assert.Equal(0, store.ActiveExpiryTimers);
+
+    // 取消计时器后推进时间：无任何触发，状态保持空。
+    clock.Advance(WorkbenchProjectStore.DefaultLifetime * 2);
+    Assert.Equal((0, null), store.Staged);
+  }
+
+  [Fact]
+  public async Task UploadRejectsStructureInvalidPngAfterSharedCrcValidation()
+  {
+    // 直接相关 annotation 共享实现回归：结构+CRC 校验拒绝坏样本并接受
+    // 真实 CRC fixture（流式入口，供 project 补丁复用的同一实现）。
+    using var store = new WorkbenchProjectStore();
+    byte[] valid = PngBytes(4, 3);
+    await WorkbenchAnnotationStore.ValidatePngStructureCoreAsync(
+      new MemoryStream(valid), TestContext.Current.CancellationToken);
+
+    await Assert.ThrowsAsync<InvalidDataException>(() =>
+      WorkbenchAnnotationStore.ValidatePngStructureCoreAsync(
+        new MemoryStream(valid[..^30]), TestContext.Current.CancellationToken));
+    byte[] zeroed = [.. valid];
+    for (int i = 41; i < zeroed.Length - 4; i++) zeroed[i] = 0;
+    await Assert.ThrowsAsync<InvalidDataException>(() =>
+      WorkbenchAnnotationStore.ValidatePngStructureCoreAsync(
+        new MemoryStream(zeroed), TestContext.Current.CancellationToken));
+  }
+
+  [Fact]
   public async Task ExpiredContributionIsNotConsumed()
   {
     AdjustableTimeProvider clock = new();
@@ -556,11 +636,58 @@ public sealed class WorkbenchProjectStoreTests
 
   private sealed class AdjustableTimeProvider : TimeProvider
   {
+    private readonly List<ManualTimer> timers = [];
     private DateTimeOffset utcNow = DateTimeOffset.UnixEpoch;
 
     public override DateTimeOffset GetUtcNow() => utcNow;
 
-    public void Advance(TimeSpan duration) => utcNow += duration;
+    public override ITimer CreateTimer(
+      TimerCallback callback,
+      object? state,
+      TimeSpan dueTime,
+      TimeSpan period)
+    {
+      ManualTimer timer = new(callback, utcNow + dueTime);
+      lock (timers)
+      {
+        timers.Add(timer);
+      }
+      return timer;
+    }
+
+    /// <summary>推进时钟并触发所有到期未取消的计时器（同步、确定性）。</summary>
+    public void Advance(TimeSpan duration)
+    {
+      utcNow += duration;
+      List<ManualTimer> due = [];
+      lock (timers)
+      {
+        due.AddRange(timers.Where(timer => !timer.Disposed && timer.Due <= utcNow));
+      }
+      foreach (ManualTimer timer in due)
+      {
+        timer.Fire();
+      }
+    }
+
+    private sealed class ManualTimer(TimerCallback callback, DateTimeOffset due) : ITimer
+    {
+      public DateTimeOffset Due { get; } = due;
+
+      public bool Disposed { get; private set; }
+
+      public void Fire() => callback(null);
+
+      public bool Change(TimeSpan dueTime, TimeSpan period) => true;
+
+      public void Dispose() => Disposed = true;
+
+      public ValueTask DisposeAsync()
+      {
+        Disposed = true;
+        return ValueTask.CompletedTask;
+      }
+    }
   }
 
   /// <summary>真实 PNG（8bit RGB，完整 zlib/Adler32/CRC32，平台可解码）。</summary>
@@ -600,9 +727,12 @@ public sealed class WorkbenchProjectStoreTests
     Span<byte> length = stackalloc byte[4];
     BinaryPrimitives.WriteUInt32BigEndian(length, checked((uint)data.Length));
     chunk.Write(length);
-    chunk.Write(Encoding.ASCII.GetBytes(type));
+    byte[] typeBytes = Encoding.ASCII.GetBytes(type);
+    chunk.Write(typeBytes);
     chunk.Write(data);
-    chunk.Write([0, 0, 0, 0]);
+    // 标准 PNG CRC32（type+data），与生产共享校验一致。
+    byte[] payload = [.. typeBytes, .. data];
+    chunk.Write(VibpProjectFileTests.CrcChunkBytes(payload));
     return chunk.ToArray();
   }
 

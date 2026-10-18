@@ -159,6 +159,24 @@ export const PROJECT_RESIZE_TOTAL_PIXELS = 64_000_000;
 export const PROJECT_PATCH_MAX_PIXELS = 1_000_000;
 export const PROJECT_PATCH_TOTAL_PIXELS = 8_000_000;
 export const PROJECT_PATCH_MAX_COUNT = 126;
+/** ZIP entry 总上限（含 manifest+source）：与宿主 VibpProjectLimits 一致。 */
+export const PROJECT_ENTRY_TOTAL = 128;
+
+/** 当前 marks 唯一引用的图片资产数：共享 asset 引用只计一次。 */
+export function countReferencedAssets(
+  marks: readonly { readonly assetId?: string }[],
+): number {
+  return new Set(
+    marks
+      .map((mark) => mark.assetId)
+      .filter((assetId): assetId is string => assetId !== undefined),
+  ).size;
+}
+
+/** 补丁 entry 预算：128 - manifest+source - 唯一资产；与宿主同界。 */
+export function patchEntryBudget(referencedAssetCount: number): number {
+  return PROJECT_ENTRY_TOTAL - 2 - referencedAssetCount;
+}
 export const PROJECT_PATCH_TOTAL_BYTES = 64 * 1024 * 1024;
 export const PROJECT_OPEN_DEADLINE_MS = 30_000;
 

@@ -68,6 +68,7 @@ public sealed class WorkbenchProjectStore : IDisposable
   private StagedContribution? staged;
   private long generation;
   private bool disposed;
+  private ITimer? expiryTimer;
 
   internal (int Count, Guid? Id) Staged
   {
@@ -76,6 +77,17 @@ public sealed class WorkbenchProjectStore : IDisposable
       lock (gate)
       {
         return (staged is null ? 0 : 1, staged?.Lease.ContributeId);
+      }
+    }
+  }
+
+  internal int ActiveExpiryTimers
+  {
+    get
+    {
+      lock (gate)
+      {
+        return expiryTimer is null ? 0 : 1;
       }
     }
   }
@@ -117,6 +129,17 @@ public sealed class WorkbenchProjectStore : IDisposable
       staged = new StagedContribution(
         new WorkbenchProjectContributionLease(Guid.NewGuid(), timeProvider.GetUtcNow() + lifetime),
         contribution);
+      // 主动到期回收：无人再上传/消费时也按时释放补丁字节强引用。
+      // 回调精确匹配当前代际+id：迟到触发不得清除替换后的新贡献。
+      long stagedGeneration = Volatile.Read(ref generation);
+      Guid stagedId = staged.Lease.ContributeId;
+      expiryTimer?.Dispose();
+      DateTimeOffset dueAt = staged.Lease.ExpiresAt;
+      expiryTimer = timeProvider.CreateTimer(
+        _ => ExpireStaged(stagedGeneration, stagedId),
+        null,
+        dueAt - timeProvider.GetUtcNow(),
+        Timeout.InfiniteTimeSpan);
       return staged.Lease;
     }
   }
@@ -131,6 +154,7 @@ public sealed class WorkbenchProjectStore : IDisposable
       if (staged is { } current && current.Lease.ContributeId == contributeId)
       {
         staged = null;
+        CancelExpiryTimer();
         return current.Contribution;
       }
       return null;
@@ -145,6 +169,7 @@ public sealed class WorkbenchProjectStore : IDisposable
     {
       staged = null;
       generation++;
+      CancelExpiryTimer();
     }
   }
 
@@ -155,7 +180,31 @@ public sealed class WorkbenchProjectStore : IDisposable
       disposed = true;
       staged = null;
       generation++;
+      CancelExpiryTimer();
     }
+  }
+
+  /// <summary>到期回调：仅当仍是自己代际内的同一贡献且已过期时清除。</summary>
+  private void ExpireStaged(long stagedGeneration, Guid stagedId)
+  {
+    lock (gate)
+    {
+      if (Volatile.Read(ref generation) != stagedGeneration)
+      {
+        return;
+      }
+      if (staged is { Lease.ContributeId: var id } && id == stagedId)
+      {
+        staged = null;
+        CancelExpiryTimer();
+      }
+    }
+  }
+
+  private void CancelExpiryTimer()
+  {
+    expiryTimer?.Dispose();
+    expiryTimer = null;
   }
 
   /// <summary>根/子对象均为严格 typed DTO（未知字段/重复键/缺字段拒绝）。</summary>
@@ -314,6 +363,7 @@ public sealed class WorkbenchProjectStore : IDisposable
     if (staged is { Lease.ExpiresAt: var expiresAt } current && expiresAt <= utcNow)
     {
       staged = null;
+      CancelExpiryTimer();
       _ = current;
     }
   }

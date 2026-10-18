@@ -347,7 +347,6 @@ public sealed class WorkbenchAnnotationStore : IDisposable
     string path,
     CancellationToken cancellationToken)
   {
-    byte[] signature = new byte[PngSignature.Length];
     await using FileStream source = new(
       path,
       FileMode.Open,
@@ -355,11 +354,30 @@ public sealed class WorkbenchAnnotationStore : IDisposable
       FileShare.Read,
       bufferSize: 4096,
       FileOptions.Asynchronous | FileOptions.SequentialScan);
+    try
+    {
+      await ValidatePngStructureCoreAsync(source, cancellationToken);
+    }
+    catch (InvalidDataException error)
+    {
+      throw new WorkbenchAnnotationAccessException(error.Message, error);
+    }
+  }
+
+  /// <summary>PNG 结构+CRC 唯一实现（流式，供 annotation 路径入口与
+  /// project 补丁字节复用）：签名/IHDR 首块/IDAT 连续/IEND 终止/尾部
+  /// 干净，并对每个 chunk 校验标准 PNG CRC32（type+data），流式分块
+  /// 计算不整体复制。违反抛 InvalidDataException；annotation 路径包装为
+  /// WorkbenchAnnotationAccessException，project 路径包装为格式异常。</summary>
+  internal static async Task ValidatePngStructureCoreAsync(
+    Stream source,
+    CancellationToken cancellationToken)
+  {
+    byte[] signature = new byte[PngSignature.Length];
     await ReadExactlyAsync(source, signature, cancellationToken);
     if (!signature.AsSpan().SequenceEqual(PngSignature))
     {
-      throw new WorkbenchAnnotationAccessException(
-        "Annotated image is not a PNG file.");
+      throw new InvalidDataException("Annotated image is not a PNG file.");
     }
 
     bool firstChunk = true;
@@ -368,33 +386,39 @@ public sealed class WorkbenchAnnotationStore : IDisposable
     bool imageDataEnded = false;
     bool hasEnd = false;
     byte[] chunkHeader = new byte[8];
+    byte[] chunkBuffer = new byte[64 * 1024];
     while (source.Position < source.Length)
     {
       await ReadExactlyAsync(source, chunkHeader, cancellationToken);
       uint dataLength = BinaryPrimitives.ReadUInt32BigEndian(chunkHeader.AsSpan(0, 4));
       if ((long)dataLength + 4 > source.Length - source.Position)
       {
-        throw new WorkbenchAnnotationAccessException(
+        throw new InvalidDataException(
           "Annotated PNG contains a truncated chunk.");
       }
 
-      bool isHeader = chunkHeader.AsSpan(4, 4).SequenceEqual(IhdrType);
-      bool isImageData = chunkHeader.AsSpan(4, 4).SequenceEqual(IdatType);
-      bool isEnd = chunkHeader.AsSpan(4, 4).SequenceEqual(IendType);
+      ReadOnlySpan<byte> chunkType = chunkHeader.AsSpan(4, 4);
+      bool isHeader = chunkType.SequenceEqual(IhdrType);
+      bool isImageData = chunkType.SequenceEqual(IdatType);
+      bool isEnd = chunkType.SequenceEqual(IendType);
       if (firstChunk && !isHeader)
       {
-        throw new WorkbenchAnnotationAccessException(
+        throw new InvalidDataException(
           "Annotated PNG must begin with IHDR.");
       }
+      // 标准 PNG CRC32：寄存器预置 0xFFFFFFFF、结束异或 0xFFFFFFFF。
+      uint crcRegister = 0xFFFF_FFFFu;
+      crcRegister = PngCrc32.Update(crcRegister, chunkType);
       if (isHeader)
       {
         if (hasHeader || !firstChunk || dataLength != 13)
         {
-          throw new WorkbenchAnnotationAccessException(
+          throw new InvalidDataException(
             "Annotated PNG IHDR is invalid or duplicated.");
         }
         byte[] header = new byte[13];
         await ReadExactlyAsync(source, header, cancellationToken);
+        crcRegister = PngCrc32.Update(crcRegister, header);
         ValidatePngHeader(header);
         hasHeader = true;
       }
@@ -402,7 +426,7 @@ public sealed class WorkbenchAnnotationStore : IDisposable
       {
         if (dataLength != 0 || !hasHeader || !hasImageData)
         {
-          throw new WorkbenchAnnotationAccessException(
+          throw new InvalidDataException(
             "Annotated PNG IEND is invalid.");
         }
         hasEnd = true;
@@ -413,7 +437,7 @@ public sealed class WorkbenchAnnotationStore : IDisposable
         {
           if (imageDataEnded)
           {
-            throw new WorkbenchAnnotationAccessException(
+            throw new InvalidDataException(
               "Annotated PNG IDAT chunks must be consecutive.");
           }
           hasImageData = true;
@@ -422,16 +446,36 @@ public sealed class WorkbenchAnnotationStore : IDisposable
         {
           imageDataEnded = true;
         }
-        source.Seek(dataLength, SeekOrigin.Current);
+        long remaining = dataLength;
+        while (remaining > 0)
+        {
+          int read = await source.ReadAsync(
+            chunkBuffer.AsMemory(0, (int)Math.Min(chunkBuffer.Length, remaining)),
+            cancellationToken);
+          if (read <= 0)
+          {
+            throw new InvalidDataException(
+              "Annotated PNG contains a truncated chunk.");
+          }
+          crcRegister = PngCrc32.Update(crcRegister, chunkBuffer.AsSpan(0, read));
+          remaining -= read;
+        }
       }
 
-      source.Seek(4, SeekOrigin.Current); // Format-defined CRC; presence is bounded above.
+      byte[] crcBytes = new byte[4];
+      await ReadExactlyAsync(source, crcBytes, cancellationToken);
+      uint stored = BinaryPrimitives.ReadUInt32BigEndian(crcBytes);
+      if (stored != (crcRegister ^ 0xFFFF_FFFFu))
+      {
+        throw new InvalidDataException(
+          "Annotated PNG chunk CRC does not match its contents.");
+      }
       firstChunk = false;
       if (hasEnd)
       {
         if (source.Position != source.Length)
         {
-          throw new WorkbenchAnnotationAccessException(
+          throw new InvalidDataException(
             "Annotated PNG contains data after IEND.");
         }
         break;
@@ -439,7 +483,7 @@ public sealed class WorkbenchAnnotationStore : IDisposable
     }
     if (!hasEnd)
     {
-      throw new WorkbenchAnnotationAccessException(
+      throw new InvalidDataException(
         "Annotated PNG is missing IEND.");
     }
   }
@@ -466,7 +510,7 @@ public sealed class WorkbenchAnnotationStore : IDisposable
     };
     if (!validBitDepth || header[10] != 0 || header[11] != 0 || header[12] > 1)
     {
-      throw new WorkbenchAnnotationAccessException(
+      throw new InvalidDataException(
         "Annotated PNG IHDR encoding is unsupported.");
     }
   }
@@ -603,4 +647,36 @@ public sealed class WorkbenchAnnotationStore : IDisposable
     string Path,
     DateTimeOffset ExpiresAt,
     long Length, int Width, int Height);
+
+  /// <summary>标准 PNG CRC32（type+data）：表驱动流式计算，与浏览器
+  /// Canvas PNG 编码器、WIC 及本仓 PNG fixture 生成的尾字段一致。</summary>
+  internal static class PngCrc32
+  {
+    private static readonly uint[] Table = BuildTable();
+
+    private static uint[] BuildTable()
+    {
+      uint[] table = new uint[256];
+      for (uint index = 0; index < 256; index++)
+      {
+        uint value = index;
+        for (int bit = 0; bit < 8; bit++)
+        {
+          value = (value & 1) != 0 ? 0xEDB8_8320u ^ (value >> 1) : value >> 1;
+        }
+        table[index] = value;
+      }
+      return table;
+    }
+
+    public static uint Update(uint crc, ReadOnlySpan<byte> data)
+    {
+      uint current = crc;
+      foreach (byte value in data)
+      {
+        current = Table[(current ^ value) & 0xFF] ^ (current >> 8);
+      }
+      return current;
+    }
+  }
 }

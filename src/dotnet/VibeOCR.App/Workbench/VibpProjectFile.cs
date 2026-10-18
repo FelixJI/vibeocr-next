@@ -170,17 +170,20 @@ public static class VibpProjectFile
       Dictionary<string, ZipArchiveEntry> entries = CollectEntries(archive);
 
       long decompressedTotal = 0;
-      VibpProjectManifest manifest = ReadManifest(entries, ref decompressedTotal);
+      VibpProjectManifest manifest;
+      (manifest, decompressedTotal) = await ReadManifestAsync(
+        entries, decompressedTotal, cancellationToken);
       ValidateEntrySet(manifest, entries);
 
       Directory.CreateDirectory(destinationDirectory);
       string sourceEntryName = VibpProjectRules.SourceEntryName(manifest.Source.MediaType);
-      string sourcePath = ExtractEntry(
+      (string sourcePath, decompressedTotal) = await ExtractEntryAsync(
         entries[sourceEntryName],
         Path.Combine(destinationDirectory, sourceEntryName),
         manifest.Source.Length,
         maximumDecompressedBytes,
-        ref decompressedTotal);
+        decompressedTotal,
+        cancellationToken);
       (int width, int height) = await ReadImageDimensionsAsync(
         sourcePath, manifest.Source.MediaType, cancellationToken);
       RequireSameDimensions("source", width, height,
@@ -190,12 +193,13 @@ public static class VibpProjectFile
       foreach (VibpAssetResource asset in manifest.Assets)
       {
         string entryName = $"asset-{asset.Id}.png";
-        string assetPath = ExtractEntry(
+        (string assetPath, decompressedTotal) = await ExtractEntryAsync(
           entries[entryName],
           Path.Combine(destinationDirectory, entryName),
           asset.Length,
           maximumDecompressedBytes,
-          ref decompressedTotal);
+          decompressedTotal,
+          cancellationToken);
         (width, height) = await ReadImageDimensionsAsync(assetPath, "image/png", cancellationToken);
         RequireSameDimensions($"asset {asset.Id}", width, height, asset.Width, asset.Height);
         assetPaths.Add(asset.Id, assetPath);
@@ -205,12 +209,13 @@ public static class VibpProjectFile
       foreach (VibpPatch patch in manifest.State.Patches)
       {
         string entryName = $"patch-{patch.Id}.png";
-        string patchPath = ExtractEntry(
+        (string patchPath, decompressedTotal) = await ExtractEntryAsync(
           entries[entryName],
           Path.Combine(destinationDirectory, entryName),
           patch.Length,
           maximumDecompressedBytes,
-          ref decompressedTotal);
+          decompressedTotal,
+          cancellationToken);
         (width, height) = await ReadImageDimensionsAsync(patchPath, "image/png", cancellationToken);
         RequireSameDimensions($"patch {patch.Id}", width, height, patch.Width, patch.Height);
         patchPaths.Add(patch.Id, patchPath);
@@ -306,11 +311,13 @@ public static class VibpProjectFile
     return entries;
   }
 
-  private static VibpProjectManifest ReadManifest(
-    Dictionary<string, ZipArchiveEntry> entries, ref long decompressedTotal)
+  private static async Task<(VibpProjectManifest Manifest, long DecompressedTotal)> ReadManifestAsync(
+    Dictionary<string, ZipArchiveEntry> entries, long decompressedTotal,
+    CancellationToken cancellationToken)
   {
-    (byte[] manifestBytes, long manifestLength) = ReadEntryBounded(
-      entries[VibpProjectLimits.ManifestEntryName], VibpProjectLimits.MaximumManifestBytes);
+    (byte[] manifestBytes, long manifestLength) = await ReadEntryBoundedAsync(
+      entries[VibpProjectLimits.ManifestEntryName], VibpProjectLimits.MaximumManifestBytes,
+      cancellationToken);
     decompressedTotal += manifestLength;
     try
     {
@@ -327,7 +334,7 @@ public static class VibpProjectFile
           $"expected {VibpProjectLimits.SchemaVersion}.");
       }
       VibpProjectRules.ValidateManifest(manifest);
-      return manifest;
+      return (manifest, decompressedTotal);
     }
     catch (JsonException error)
     {
@@ -360,15 +367,15 @@ public static class VibpProjectFile
     }
   }
 
-  private static (byte[] Bytes, long Length) ReadEntryBounded(
-    ZipArchiveEntry entry, long maximumBytes)
+  private static async Task<(byte[] Bytes, long Length)> ReadEntryBoundedAsync(
+    ZipArchiveEntry entry, long maximumBytes, CancellationToken cancellationToken)
   {
-    using Stream stream = entry.Open();
+    await using Stream stream = entry.Open();
     byte[] buffer = new byte[CopyBufferSize];
     using var content = new MemoryStream();
     long total = 0;
     int read;
-    while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
+    while ((read = await stream.ReadAsync(buffer, cancellationToken)) > 0)
     {
       total += read;
       if (total > maximumBytes)
@@ -383,22 +390,24 @@ public static class VibpProjectFile
 
   /// <summary>按实际流式读取量限额解包：manifest 与全部 entry 共享同一全局解压预算，
   /// 且每个 chunk 读完、写盘前即检测累计总量与该 entry 声明长度；
-  /// 声明长度已在 manifest 校验 ≤ 单 entry 上限，不信任 ZIP 元数据的长度。</summary>
-  private static string ExtractEntry(
+  /// 声明长度已在 manifest 校验 ≤ 单 entry 上限，不信任 ZIP 元数据的长度。
+  /// 异步 chunk 读写并逐 chunk 响应取消：不在 UI 线程持续同步解压。</summary>
+  private static async Task<(string Path, long DecompressedTotal)> ExtractEntryAsync(
     ZipArchiveEntry entry,
     string destinationPath,
     long declaredLength,
     long maximumDecompressedBytes,
-    ref long decompressedTotal)
+    long decompressedTotal,
+    CancellationToken cancellationToken)
   {
-    using Stream source = entry.Open();
-    using var destination = new FileStream(
+    await using Stream source = entry.Open();
+    await using var destination = new FileStream(
       destinationPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
-      CopyBufferSize, FileOptions.SequentialScan);
+      CopyBufferSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
     byte[] buffer = new byte[CopyBufferSize];
     long total = 0;
     int read;
-    while ((read = source.Read(buffer, 0, buffer.Length)) > 0)
+    while ((read = await source.ReadAsync(buffer, cancellationToken)) > 0)
     {
       total += read;
       decompressedTotal += read;
@@ -412,14 +421,14 @@ public static class VibpProjectFile
         throw new VibpProjectFormatException(
           "Project package exceeds the 192 MiB decompressed budget.");
       }
-      destination.Write(buffer, 0, read);
+      await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
     }
     if (total != declaredLength)
     {
       throw new VibpProjectFormatException(
         $"Project entry {entry.FullName} length {total} does not match the declared {declaredLength}.");
     }
-    return destinationPath;
+    return (destinationPath, decompressedTotal);
   }
 
   private static void CopyDeclared(Stream source, Stream target, long declaredLength, string name)

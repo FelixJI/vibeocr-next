@@ -104,8 +104,9 @@ import { uploadAnnotatedImage } from "./annotationHandoff";
 import {
   buildContributionState,
   contributionStateBytes,
+  countReferencedAssets,
   PROJECT_CANVAS_TOTAL_PIXELS,
-  PROJECT_PATCH_MAX_COUNT,
+  patchEntryBudget,
   PROJECT_PATCH_MAX_PIXELS,
   PROJECT_PATCH_TOTAL_BYTES,
   PROJECT_PATCH_TOTAL_PIXELS,
@@ -4664,6 +4665,15 @@ export function ImageCanvasEditor({
     try {
       setOperationMessage("正在采集工程内容……");
       const applied = appliedInpaintPatches();
+      // entry 总预算前置（encode/upload/picker 前）：manifest+source+唯一
+      // 引用资产+补丁 ≤128；共享 asset 引用只计一次（与宿主同界）。
+      const referencedAssetCount = countReferencedAssets(state.marks);
+      const patchBudget = patchEntryBudget(referencedAssetCount);
+      if (applied.length > patchBudget) {
+        throw new Error(
+          `工程包含 ${referencedAssetCount} 张嵌入图片和 ${applied.length} 块修补，合计最多 ${patchBudget} 块修补，请减少图片对象或修补后再保存。`,
+        );
+      }
       const encoded: {
         id: number;
         x: number;
@@ -4675,9 +4685,9 @@ export function ImageCanvasEditor({
       let totalPixels = 0;
       let totalBytes = 0;
       for (const { rect, canvas: patchCanvas } of applied) {
-        if (encoded.length >= PROJECT_PATCH_MAX_COUNT) {
+        if (encoded.length >= patchBudget) {
           throw new Error(
-            `已应用修补超过 ${PROJECT_PATCH_MAX_COUNT} 块上限，无法保存为工程。`,
+            `工程包含 ${referencedAssetCount} 张嵌入图片，修补最多 ${patchBudget} 块，请减少图片对象或修补后再保存。`,
           );
         }
         const pixels = rect.width * rect.height;

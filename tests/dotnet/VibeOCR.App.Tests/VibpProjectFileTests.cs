@@ -20,10 +20,39 @@ public sealed class VibpProjectFileTests
   [Fact]
   public async Task RoundTripSupportsRealWebpSource()
   {
-    // 真实 VP8 WebP（Pillow 生成），验证本机 WIC 解码器 CodecId 与 round-trip。
+    // 真实 VP8 WebP（Pillow 生成）。WebP 是可选系统 codec（微软官方
+    // bitmapdecoder/GetDecoderInformationEnumerator 均不保证 inbox），
+    // 测试按实际能力双分支：无 codec 时用真实 WebP 包验证安全拒绝。
     byte[] source = Convert.FromBase64String(
       "UklGRjoAAABXRUJQVlA4IC4AAACQAQCdASoEAAMAAUAmJaACdLoAA5gA/vCbQ/4DdfFtMv/ucD/uyf/2yf+pAAAA");
     Assert.Equal("RIFF"u8.ToArray(), source[..4]);
+    if (!HasWebPDecoder())
+    {
+      // 分支证据（本机/云各自标记，不声称双分支本地实测）：系统无 WebP
+      // decoder 时，真实 WebP 包的 ReadAsync 必须安全拒绝且清理解包目录。
+      string absentDirectory = NewTempDirectory();
+      try
+      {
+        WriteWebpPackage(Path.Combine(absentDirectory, "project.vibp"), source);
+        VibpProjectFormatException rejected = await Assert.ThrowsAsync<VibpProjectFormatException>(
+          () => VibpProjectFile.ReadAsync(
+            Path.Combine(absentDirectory, "project.vibp"),
+            Path.Combine(absentDirectory, "open"),
+            TestContext.Current.CancellationToken));
+        Assert.Contains("metadata cannot be read", rejected.Message);
+        // 解包目录不残留失败后的部分文件（源 entry 解包后 WIC 拒绝）。
+        string openDirectory = Path.Combine(absentDirectory, "open");
+        if (Directory.Exists(openDirectory))
+        {
+          Assert.Empty(Directory.GetFiles(openDirectory, "*", SearchOption.AllDirectories));
+        }
+      }
+      finally
+      {
+        Directory.Delete(absentDirectory, recursive: true);
+      }
+      return;
+    }
     (Guid codecId, int width, int height) = await ProbeImageAsync(source);
     // CodecId 由本机 decoder 实证，与模块常量一致（不凭记忆断言）。
     Assert.Equal(VibpProjectFile.WebpDecoderId, codecId);
@@ -122,6 +151,44 @@ public sealed class VibpProjectFileTests
       Assert.Throws<VibpProjectFormatException>(() => VibpProjectFile.Write(
         Path.Combine(directory, "bad.vibp"), invalid,
         [new VibpProjectEntry("source.png", source.Length, () => new MemoryStream(source))]));
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task ReadAsyncRespondsToCancellationDuringExtraction()
+  {
+    string directory = NewTempDirectory();
+    try
+    {
+      // 大 entry（8MB）：解包中途取消必须在后续 WIC await 前生效。
+      byte[] source = new byte[8 * 1024 * 1024];
+      Random.Shared.NextBytes(source);
+      var manifest = new VibpProjectManifest
+      {
+        SchemaVersion = 1,
+        Canvas = new VibpCanvas { Width = 64, Height = 48 },
+        Source = new VibpSourceResource
+        {
+          // 真实 PNG 声明与字节长度（内容不可解码但取消先于 WIC）。
+          MediaType = "image/png", Width = 64, Height = 48, Length = source.Length,
+        },
+        Assets = [],
+        State = new VibpEditorState { Rotation = 0, Marks = [] },
+      };
+      string packagePath = Path.Combine(directory, "cancel.vibp");
+      VibpProjectFile.Write(packagePath, manifest,
+        [new VibpProjectEntry("source.png", source.Length, () => new MemoryStream(source))]);
+
+      using var cancellation = new CancellationTokenSource();
+      cancellation.CancelAfter(TimeSpan.FromMilliseconds(20));
+
+      await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+        VibpProjectFile.ReadAsync(
+          packagePath, Path.Combine(directory, "open"), cancellation.Token));
     }
     finally
     {
@@ -1596,6 +1663,38 @@ public sealed class VibpProjectFileTests
       (int)decoder.OrientedPixelWidth, (int)decoder.OrientedPixelHeight);
   }
 
+  /// <summary>枚举系统实际 codec：WebP CodecId 是否可用（能力探测，非假设）。
+  /// GetDecoderInformationEnumerator 在当前投影中同步返回集合。</summary>
+  private static bool HasWebPDecoder()
+  {
+    foreach (BitmapCodecInformation codec in BitmapDecoder.GetDecoderInformationEnumerator())
+    {
+      if (codec.CodecId == VibpProjectFile.WebpDecoderId)
+      {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// <summary>写入声明 image/webp 的真实 WebP 工程（供安全拒绝分支）。</summary>
+  private static void WriteWebpPackage(string packagePath, byte[] source)
+  {
+    var manifest = new VibpProjectManifest
+    {
+      SchemaVersion = 1,
+      Canvas = new VibpCanvas { Width = 4, Height = 3 },
+      Source = new VibpSourceResource
+      {
+        MediaType = "image/webp", Width = 4, Height = 3, Length = source.Length,
+      },
+      Assets = [],
+      State = new VibpEditorState { Rotation = 0, Marks = [] },
+    };
+    VibpProjectFile.Write(packagePath, manifest,
+      [new VibpProjectEntry("source.webp", source.Length, () => new MemoryStream(source))]);
+  }
+
   private static async Task<InMemoryRandomAccessStream> WriteToStreamAsync(byte[] image)
   {
     var memory = new InMemoryRandomAccessStream();
@@ -1633,6 +1732,13 @@ public sealed class VibpProjectFileTests
       table[index] = value;
     }
     return table;
+  }
+
+  /// <summary>CRC32 大端 4 字节（供其他测试 fixture 复用同一算法）。</summary>
+  internal static byte[] CrcChunkBytes(byte[] payload)
+  {
+    uint crc = Crc32(payload);
+    return [(byte)(crc >> 24), (byte)(crc >> 16), (byte)(crc >> 8), (byte)crc];
   }
 
   private static uint Crc32(byte[] data)
