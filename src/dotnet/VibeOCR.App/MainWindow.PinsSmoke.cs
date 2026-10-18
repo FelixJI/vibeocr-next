@@ -48,12 +48,43 @@ public sealed partial class MainWindow
     await reader.LoadAsync(checked((uint)encoded.Size));
     byte[] png = new byte[checked((int)encoded.Size)];
     reader.ReadBytes(png);
-    for (int i = 0; i < 2; i++)
+    string initialImage = Path.Combine(resourceRoot, "pins-smoke-source.png");
+    await File.WriteAllBytesAsync(initialImage, png);
+    await application.ExecuteAsync(new(Guid.NewGuid(), new OpenDroppedImageEditFileCommand(initialImage)), CancellationToken.None);
+    await WaitForPinCheckAsync(async () => await WorkbenchWebView.ExecuteScriptAsync(
+      "document.body.textContent.includes('原图 64×32') && !document.querySelector('button[aria-label=\"贴图\"]')?.disabled") == "true",
+      "Main image editor did not load the source.");
+    await WorkbenchWebView.ExecuteScriptAsync("document.querySelector('button[aria-label=\"屏蔽\"]').click()");
+    await WorkbenchWebView.ExecuteScriptAsync("""
+      (()=>{const c=document.querySelector('canvas[aria-label="图片检查画布"]');const r=c.getBoundingClientRect();
+      const e=(type,x,y,buttons)=>c.dispatchEvent(new PointerEvent(type,{bubbles:true,pointerId:1,pointerType:'mouse',isPrimary:true,button:0,buttons,clientX:r.left+r.width*x/900,clientY:r.top+r.height*y/600}));
+      e('pointerdown',1,76,1);e('pointermove',224,524,1);e('pointerup',224,524,0);
+      const select=document.querySelector('select[aria-label="输出格式"]');select.value='image/jpeg';select.dispatchEvent(new Event('change',{bubbles:true}));})()
+      """);
+    string pinRoot = PinSnapshotStore.RootFor(layout.DataRoot);
+    int windowCount = CountSmokeAppWindows();
+    File.WriteAllText(pinRoot, "owned persistence blocker");
+    try
     {
-      WorkbenchAnnotationLease lease = await annotationStore.UploadPngAsync(new MemoryStream(png), CancellationToken.None);
-      PinScreenshot(annotationStore.Take(lease.ResourceUri), Guid.NewGuid(), 0, null,
-        i == 0 ? [new WorkbenchExclusionBox(0, 0, 250, 1000)] : []);
+      for (int attempt = 0; attempt < 2; attempt++)
+      {
+        await WorkbenchWebView.ExecuteScriptAsync("document.querySelector('button[aria-label=\"贴图\"]').click()");
+        await WaitForPinCheckAsync(async () => await WorkbenchWebView.ExecuteScriptAsync(
+          "document.body.textContent.includes('贴图未创建') && !document.querySelector('button[aria-label=\"贴图\"]')?.disabled") == "true",
+          "Failed first pin did not return a recoverable receipt.");
+        await WaitForPinCheckAsync(() => Task.FromResult(CountSmokeAppWindows() == windowCount), "Failed pin leaked an unregistered native window.");
+        if (pinnedImages.Count != 0) throw new InvalidOperationException("Failed first pin was registered.");
+      }
     }
+    finally { File.Delete(pinRoot); }
+    await WorkbenchWebView.ExecuteScriptAsync("document.querySelector('button[aria-label=\"贴图\"]').click()");
+    await WaitForPinCheckAsync(() => Task.FromResult(pinnedImages.Count == 1), "JPEG selection prevented first pin creation.");
+    if (pinSnapshotStore!.ReadSnapshotPng(pinnedImages[0].PinId) is not { Width: 64, Height: 32 })
+      throw new InvalidOperationException("First pin was not a decodable owned PNG.");
+    if (await WorkbenchWebView.ExecuteScriptAsync("document.querySelector('select[aria-label=\"输出格式\"]').value === 'image/jpeg'") != "true")
+      throw new InvalidOperationException("First pin changed the ordinary output format.");
+    WorkbenchAnnotationLease secondLease = await annotationStore.UploadPngAsync(new MemoryStream(png), CancellationToken.None);
+    PinScreenshot(annotationStore.Take(secondLease.ResourceUri), Guid.NewGuid(), 0, null, []);
     PinnedImageWindow first = pinnedImages[0], second = pinnedImages[1];
     await WaitForPinCheckAsync(() => Task.FromResult(first.SmokeDocumentReady && second.SmokeDocumentReady), "Static pins not ready.");
     var observedScopes = new List<string>();
@@ -191,6 +222,21 @@ public sealed partial class MainWindow
       "rapid_text", "pins-smoke", null,
       [new("hidden", centerX - 1, centerY - 1, centerX + 1, centerY + 1),
        new("visible", safeX, safeY, safeX + 5, safeY + 5)]);
+  }
+
+  private int CountSmokeAppWindows()
+  {
+    int count = 0;
+    string windowClass = PaddleSmokeNative.GetWindowClassName(WinRT.Interop.WindowNative.GetWindowHandle(this));
+    var probe = new PaddleSmokeNative.EnumWindowsProc((hwnd, _) =>
+    {
+      PaddleSmokeNative.GetWindowThreadProcessId(hwnd, out uint processId);
+      if (processId == Environment.ProcessId && PaddleSmokeNative.GetWindowClassName(hwnd) == windowClass) count++;
+      return true;
+    });
+    PaddleSmokeNative.EnumWindows(probe, nint.Zero);
+    GC.KeepAlive(probe);
+    return count;
   }
 
   private static Task WaitForPinEditorAsync(PinnedImageWindow pin) => WaitForPinCheckAsync(

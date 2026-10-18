@@ -124,7 +124,14 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
     if (png.LongLength is < 1 or > PinHistoryStore.MaximumEntryBytes)
       throw new InvalidDataException("Pin PNG exceeds the byte budget.");
     using MemoryStream structure = new(png, writable: false);
-    await WorkbenchAnnotationStore.ValidatePngStructureCoreAsync(structure, cancellationToken);
+    try
+    {
+      await WorkbenchAnnotationStore.ValidatePngStructureCoreAsync(structure, cancellationToken);
+    }
+    catch (WorkbenchAnnotationAccessException error)
+    {
+      throw new InvalidDataException("Invalid pin PNG structure.", error);
+    }
     await InputService.ValidateImageAsync(png, cancellationToken);
   }
 

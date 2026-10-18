@@ -5352,7 +5352,8 @@ export function ImageCanvasEditor({
       }
       // 贴图显示/复制/保存使用未烘焙遮罩的原图像素（AC5）；宿主在取字时
       // 按冻结的 excludeBoxes 生成临时遮罩输入，并沿用行过滤拒绝被屏文字。
-      const exported = await exportFinalImageIfUnchanged(false);
+      // 首次贴图与 owned 快照同用 PNG；普通复制/保存继续尊重输出格式。
+      const exported = await exportFinalImageIfUnchanged(false, true);
       if (!exported?.sessionId) return;
       const pinned = await actions.run({
         type: commands.pinScreenshotImage,

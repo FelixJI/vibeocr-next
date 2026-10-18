@@ -265,4 +265,32 @@ public sealed class PinHistoryStoreTests : IDisposable
     Assert.True(System.Text.Encoding.UTF8.GetByteCount(wire) < WorkbenchBridgeCodec.MaxMessageBytes);
   }
 
+  [Theory]
+  [InlineData(0)]
+  [InlineData(1)]
+  [InlineData(2)]
+  [InlineData(3)]
+  [InlineData(4)]
+  public void InvalidDimensionsAndTruncatedImagesDoNotBlockHistory(int corruption)
+  {
+    var store = Store(); store.SetEnabled(true);
+    store.RecordSuccessfulCapture("good", PngWithTag(1));
+    store.RecordSuccessfulCapture("damaged", PngWithTag(2));
+    string id = store.Projection(null).Entries[0].EntryId;
+    string path = Path.Combine(PinHistoryStore.RootFor(root), id, "image.png");
+    byte[] damaged = File.ReadAllBytes(path);
+    if (corruption == 0) damaged[19] = 0;
+    else if (corruption == 1) damaged[23] = 0;
+    else if (corruption is 2 or 3)
+      System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(
+        damaged.AsSpan(corruption == 2 ? 16 : 20, 4), 32769);
+    else damaged = damaged[..20];
+    File.WriteAllBytes(path, damaged);
+    Assert.Null(store.TryReadImage(id));
+    Assert.Single(Store().Projection(null).Entries);
+    store.RecordSuccessfulCapture("invalid-new", damaged);
+    Assert.Equal(2, store.Projection(null).Count);
+    Assert.NotNull(store.Projection(null).Error);
+  }
+
 }

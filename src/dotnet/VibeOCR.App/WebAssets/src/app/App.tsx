@@ -1,4 +1,3 @@
-import { FormulaRenderPage } from "../features/FormulaRenderPage";
 import {
   FluentProvider,
   MessageBar,
@@ -28,6 +27,12 @@ import { vibeDarkTheme, vibeLightTheme } from "../theme/theme";
 import type { AppActions, AppViewState } from "./types";
 
 export type { AppActions, AppViewState } from "./types";
+
+const FormulaRenderPage = lazy(() =>
+  import("../features/FormulaRenderPage").then((module) => ({
+    default: module.FormulaRenderPage,
+  })),
+);
 
 const featureLoaders = {
   RecognitionPage: () =>
@@ -206,7 +211,12 @@ export function App({
 
   const effectiveDark =
     viewState.theme === "dark" || (viewState.theme === "system" && systemDark);
-  if (window.location.hash.includes("?formula=1")) return <FormulaRenderPage />;
+  if (window.location.hash.includes("?formula=1"))
+    return (
+      <Suspense fallback={null}>
+        <FormulaRenderPage />
+      </Suspense>
+    );
 
   return (
     <FluentProvider

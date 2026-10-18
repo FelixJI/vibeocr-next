@@ -24,6 +24,7 @@ async function pinEditor(
   image = png,
   excludeBoxes: { x: number; y: number; width: number; height: number }[] = [],
   imageReady?: Promise<void>,
+  ordinaryEditor = false,
 ) {
   const projects: ProjectContributionBody[] = [];
   const uploads: Buffer[] = [];
@@ -65,12 +66,12 @@ async function pinEditor(
       capabilities: ["recognition.annotation", "recognition.screenshotSession"],
       features: {
         recognition: { isBusy: false, statusCode: "recognition.ready" },
-        imageEdit: {
+        [ordinaryEditor ? "pinEdit" : "imageEdit"]: {
           isBusy: false,
           statusCode: "recognition.session",
           input: null,
         },
-        pinEdit: {
+        [ordinaryEditor ? "imageEdit" : "pinEdit"]: {
           isBusy: false,
           statusCode: "pinEdit.session",
           input: {
@@ -86,10 +87,15 @@ async function pinEditor(
         },
       },
     },
-    "https://app.vibeocr/#/imageEdit?pin=1",
+    ordinaryEditor
+      ? "https://app.vibeocr/#/imageEdit"
+      : "https://app.vibeocr/#/imageEdit?pin=1",
   );
   await expect(
-    page.getByRole("button", { name: "完成贴图", exact: true }),
+    page.getByRole("button", {
+      name: ordinaryEditor ? "贴图" : "完成贴图",
+      exact: true,
+    }),
   ).toBeEnabled();
   return { projects, uploads };
 }
@@ -543,3 +549,34 @@ for (const [name, source, expected] of [
     }
   });
 }
+
+test("first pin is PNG while ordinary save and copy retain JPEG selection", async ({
+  page,
+}) => {
+  const { uploads } = await pinEditor(page, png, [], undefined, true);
+  await page.getByLabel("输出格式", { exact: true }).selectOption("image/jpeg");
+  await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+  await expect.poll(() => uploads.length).toBe(1);
+  expect([...uploads[0]!.subarray(0, 3)]).toEqual([0xff, 0xd8, 0xff]);
+  await page.getByRole("button", { name: "复制标注图", exact: true }).click();
+  await expect.poll(() => uploads.length).toBe(2);
+  expect([...uploads[1]!.subarray(0, 3)]).toEqual([0xff, 0xd8, 0xff]);
+  await page.getByRole("button", { name: "贴图", exact: true }).click();
+  await expect.poll(() => uploads.length).toBe(3);
+  expect([...uploads[2]!.subarray(0, 8)]).toEqual([
+    137, 80, 78, 71, 13, 10, 26, 10,
+  ]);
+  await expectCommand(page, {
+    scope: "imageEdit",
+    action: "pinScreenshotImage",
+    arguments: {
+      resourceUri: "https://app.vibeocr/__annotation/" + "c".repeat(32),
+      sessionId: sourceSession,
+      revision: 1,
+      excludeBoxes: [],
+    },
+  });
+  await expect(page.getByLabel("输出格式", { exact: true })).toHaveValue(
+    "image/jpeg",
+  );
+});

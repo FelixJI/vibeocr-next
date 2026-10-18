@@ -1088,8 +1088,17 @@ public sealed partial class MainWindow : Window
         pending!.CurrentExcludeBoxes),
       () => supervisorInstanceId?.Invoke());
     pending = pinned;
-    pinSnapshotStore?.SaveRecovery(pinned.RecoveryState(), File.ReadAllBytes(image.Path));
-    WirePinWindow(pinned);
+    try
+    {
+      pinSnapshotStore?.SaveRecovery(pinned.RecoveryState(), File.ReadAllBytes(image.Path));
+      WirePinWindow(pinned);
+    }
+    catch
+    {
+      // Construction already owns the image and native window, even before registration.
+      pinned.ForceClose();
+      throw;
+    }
   }
 
   /// <summary>贴图窗口统一接线：编辑槽事件、交互事件、关闭清理与注册。</summary>

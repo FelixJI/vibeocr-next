@@ -181,4 +181,32 @@ public sealed class PinSnapshotStoreTests : IDisposable
     Assert.True(Directory.Exists(badDir));
   }
 
+  [Theory]
+  [InlineData(0)]
+  [InlineData(1)]
+  [InlineData(2)]
+  [InlineData(3)]
+  [InlineData(4)]
+  [InlineData(5)]
+  public void InvalidDimensionsAndTruncatedStructuresDoNotBlockRecovery(int corruption)
+  {
+    byte[] damaged = [.. Png];
+    if (corruption == 0) damaged[19] = 0;
+    else if (corruption == 1) damaged[23] = 0;
+    else if (corruption is 2 or 3)
+      System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(
+        damaged.AsSpan(corruption == 2 ? 16 : 20, 4), 32769);
+    else damaged = damaged[..(corruption == 4 ? 20 : 35)];
+    Assert.False(PinSnapshotStore.TryValidatePng(damaged, out _, out _));
+    var store = new PinSnapshotStore(root);
+    Guid good = Guid.NewGuid(), bad = Guid.NewGuid();
+    var record = new PinSnapshotStore.Recovery(good, "Image", "", 0, 0, 640, 480);
+    store.SaveRecovery(record, Png);
+    store.SaveRecovery(record with { Id = bad }, Png);
+    File.WriteAllBytes(store.GetSnapshotPngPath(bad)!, damaged);
+    Assert.Null(store.ReadSnapshotPng(bad));
+    Assert.Equal(good, Assert.Single(store.LoadRecovery()).Id);
+    Assert.Throws<InvalidOperationException>(() => store.SaveRecovery(record with { Id = Guid.NewGuid() }, damaged));
+  }
+
 }
