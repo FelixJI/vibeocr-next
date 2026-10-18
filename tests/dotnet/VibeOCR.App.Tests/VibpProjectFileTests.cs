@@ -59,6 +59,77 @@ public sealed class VibpProjectFileTests
   }
 
   [Fact]
+  public async Task RoundTripsSolidToolAndContinuousIntensityBrushSize()
+  {
+    string directory = NewTempDirectory();
+    try
+    {
+      byte[] source = PngBytes(64, 48);
+      var manifest = new VibpProjectManifest
+      {
+        SchemaVersion = 1,
+        Canvas = new VibpCanvas { Width = 900, Height = 600 },
+        Source = new VibpSourceResource
+        {
+          MediaType = "image/png", Width = 64, Height = 48, Length = source.Length,
+        },
+        Assets = [],
+        State = new VibpEditorState
+        {
+          Rotation = 0,
+          Marks =
+          [
+            new VibpMark
+            {
+              Id = "mark-1",
+              Tool = "solid",
+              Start = new VibpPoint { X = 1, Y = 2 },
+              End = new VibpPoint { X = 30, Y = 20 },
+              Style = new VibpMarkStyle
+              {
+                Color = "#010203",
+                Intensity = 1.7,
+                BrushSize = 42.5,
+                StrokeOpacity = 65,
+              },
+            },
+          ],
+        },
+      };
+      string packagePath = Path.Combine(directory, "solid.vibp");
+      VibpProjectFile.Write(packagePath, manifest,
+        [new VibpProjectEntry("source.png", source.Length, () => new MemoryStream(source))]);
+
+      VibpProjectArchive archive = await VibpProjectFile.ReadAsync(
+        packagePath, Path.Combine(directory, "open"), TestContext.Current.CancellationToken);
+
+      VibpMark roundTripped = Assert.Single(archive.Manifest.State.Marks);
+      VibpMarkStyle? roundTrippedStyle = roundTripped.Style;
+      Assert.NotNull(roundTrippedStyle);
+      Assert.Equal("solid", roundTripped.Tool);
+      Assert.Equal(1.7, roundTrippedStyle.Intensity);
+      Assert.Equal(42.5, roundTrippedStyle.BrushSize);
+      Assert.Equal(65, roundTrippedStyle.StrokeOpacity);
+
+      // 超界 intensity 仍拒绝。
+      var invalid = manifest with
+      {
+        State = manifest.State with
+        {
+          Marks = [roundTripped with { Style = roundTrippedStyle with { Intensity = 3.5 } }],
+        },
+      };
+      Assert.Throws<VibpProjectFormatException>(() => VibpProjectFile.Write(
+        Path.Combine(directory, "bad.vibp"), invalid,
+        [new VibpProjectEntry("source.png", source.Length, () => new MemoryStream(source))]));
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  [Fact]
   public async Task RejectsGlobalDecompressedBudgetAcrossEntries()
   {
     string directory = NewTempDirectory();

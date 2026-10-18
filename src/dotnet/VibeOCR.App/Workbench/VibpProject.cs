@@ -122,7 +122,10 @@ public sealed record VibpMarkStyle
   public string? Color { get; init; }
   public double? StrokeWidth { get; init; }
   public double? FontSize { get; init; }
-  public int? Intensity { get; init; }
+  /// <summary>马赛克/模糊强度：连续值 [1,3]（旧档位 1/2/3 为兼容锚点）。</summary>
+  public double? Intensity { get; init; }
+  /// <summary>自由笔刷效果（马赛克/模糊）的笔刷直径（显示单位 px）。</summary>
+  public double? BrushSize { get; init; }
   public double? StrokeOpacity { get; init; }
   public VibpFillStyle? Fill { get; init; }
   public string? LineStyle { get; init; }
@@ -204,6 +207,7 @@ internal static class VibpProjectRules
   [
     "rectangle", "ellipse", "arrow", "line", "polyline", "text", "callout",
     "mosaic", "blur", "pen", "highlighter", "numbering", "image", "exclude",
+    "solid",
   ];
   private static readonly HashSet<string> PointTools = ["pen", "highlighter", "polyline"];
   private static readonly HashSet<string> TextTools = ["text", "callout"];
@@ -581,11 +585,13 @@ internal static class VibpProjectRules
     ValidateOptionalColor(markId, style.Color);
     ValidateOptionalPositive(markId, "strokeWidth", style.StrokeWidth);
     ValidateOptionalPositive(markId, "fontSize", style.FontSize);
-    if (style.Intensity is not null and not (1 or 2 or 3))
+    if (style.Intensity is not null &&
+        (style.Intensity < 1 || style.Intensity > 3 || !double.IsFinite(style.Intensity.Value)))
     {
       throw new VibpProjectFormatException(
-        $"Project mark {markId} intensity must be 1, 2 or 3.");
+        $"Project mark {markId} intensity must be within 1-3.");
     }
+    ValidateOptionalPositive(markId, "brushSize", style.BrushSize);
     ValidateOptionalPercent(markId, "strokeOpacity", style.StrokeOpacity);
     ValidateOptionalNonNegative(markId, "cornerRadius", style.CornerRadius);
     ValidateOptionalMember(markId, "lineStyle", style.LineStyle, LineStyles);
