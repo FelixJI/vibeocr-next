@@ -234,6 +234,58 @@ describe("对象身份、组与批量几何", () => {
       expect(original.style!.brushSize).toBe(24);
     },
   );
+  it.each(["mosaic", "blur"] as const)(
+    "%s 笔刷单击与轨迹边界保留 round 端帽圆盘",
+    (tool) => {
+      const brush = 40;
+      // 单击：真实效果是直径=笔刷的圆点，边界必须是完整圆盘，
+      // 不能被裁成弦线端面。
+      const single: Mark = {
+        id: "single",
+        tool,
+        start: { x: 100, y: 100 },
+        end: { x: 100, y: 100 },
+        points: [{ x: 100, y: 100 }],
+        style: { brushSize: brush },
+      };
+      const singleBounds = markBoundsOf(single, undefined);
+      expect(singleBounds.x).toBeCloseTo(80, 6);
+      expect(singleBounds.y).toBeCloseTo(80, 6);
+      expect(singleBounds.x + singleBounds.width).toBeCloseTo(120.1, 6);
+      expect(singleBounds.y + singleBounds.height).toBeCloseTo(120, 6);
+      // 轨迹：端点圆帽必须越过起止点半径，而不是被裁成端面。
+      const stroke: Mark = {
+        ...single,
+        id: "stroke",
+        end: { x: 200, y: 100 },
+        points: [
+          { x: 100, y: 100 },
+          { x: 200, y: 100 },
+        ],
+      };
+      expect(markBoundsOf(stroke, undefined)).toEqual({
+        x: 80,
+        y: 80,
+        width: 140,
+        height: 40,
+      });
+      // 矩形模式（无 points）：绘制侧 applyMosaic/applyBlur 对无 points
+      // 的 mark 按精确矩形应用效果，边界不得套笔刷半径或端帽。
+      const rect: Mark = {
+        id: "rect",
+        tool,
+        start: { x: 100, y: 100 },
+        end: { x: 200, y: 150 },
+        style: { brushSize: brush },
+      };
+      expect(markBoundsOf(rect, undefined)).toEqual({
+        x: 100,
+        y: 100,
+        width: 100,
+        height: 50,
+      });
+    },
+  );
   it("比例缩放字号、横宽、装饰只乘一次，零横宽保留且非法比例拒绝", () => {
     const original: Mark = {
       id: "a",

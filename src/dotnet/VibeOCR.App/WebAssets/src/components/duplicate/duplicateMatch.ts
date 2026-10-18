@@ -101,6 +101,16 @@ function fail(code: DuplicateFailureCode, message: string): never {
   throw new DuplicateError(code, message);
 }
 
+/** 筛选工作量超出共享96M预算时的统一拒绝；热循环内联调用，语义与 chargeScreen 一致。 */
+function failScreenWorkBudget(): never {
+  fail(
+    "budget-exceeded",
+    "筛选工作量超过预算 " +
+      DUPLICATE_WORK_BUDGET +
+      "；请缩小图片或调整源选区后重试。",
+  );
+}
+
 export interface DuplicateRequest {
   /** 调用方递增的请求代；响应原样回带，迟到结果由 UI 丢弃。 */
   readonly generation: number;
@@ -185,7 +195,6 @@ export function findDuplicateRegions(
       `源选区 ${bw * bh} 像素超过重复匹配上限 ${DUPLICATE_MAX_SOURCE_PIXELS}`,
     );
   }
-  const block: DuplicateRect = { x: x0, y: y0, width: bw, height: bh };
   const count = bw * bh;
 
   // 保持 RGB 平均方差门槛；alpha 自身的纹理也能区分精确 RGBA 匹配。
@@ -299,13 +308,24 @@ export function findDuplicateRegions(
     integral = new Uint32Array(entries);
     screened = new Uint8Array(bitmapBytes);
     for (let y = 0; y < height; y++) {
-      const row = [0, 0, 0];
-      for (let x = 0; x < width; x++)
-        for (let c = 0; c < 3; c++) {
-          row[c] = row[c]! + rgba[(y * width + x) * 4 + c]!;
-          integral[(y + 1) * stride + (x + 1) * 3 + c] =
-            integral[y * stride + (x + 1) * 3 + c]! + row[c]!;
-        }
+      let r0 = 0,
+        r1 = 0,
+        r2 = 0;
+      const srcRow = y * width * 4;
+      const nextRow = (y + 1) * stride;
+      const prevRow = y * stride;
+      for (let x = 0; x < width; x++) {
+        const p = srcRow + x * 4;
+        const col = (x + 1) * 3;
+        const target = nextRow + col,
+          source = prevRow + col;
+        r0 += rgba[p]!;
+        r1 += rgba[p + 1]!;
+        r2 += rgba[p + 2]!;
+        integral[target] = integral[source]! + r0;
+        integral[target + 1] = integral[source + 1]! + r1;
+        integral[target + 2] = integral[source + 2]! + r2;
+      }
     }
     for (let gy = 0; gy < 4; gy++)
       for (let gx = 0; gx < 4; gx++) {
@@ -336,46 +356,23 @@ export function findDuplicateRegions(
   let screenWork = 0;
   const chargeScreen = () => {
     screenWork += 1;
-    if (screenWork > DUPLICATE_WORK_BUDGET)
-      fail(
-        "budget-exceeded",
-        "筛选工作量超过预算 " +
-          DUPLICATE_WORK_BUDGET +
-          "；请缩小图片或调整源选区后重试。",
-      );
+    if (screenWork > DUPLICATE_WORK_BUDGET) failScreenWorkBudget();
   };
+  // 小块采样筛选走这里；大块的 RGB/alpha 分块筛选拆到下方两个平铺热循环，
+  // 每块一次 charge、拒绝条件与失败点保持不变，只消除闭包与逐块重复索引计算。
   const passesInitialScreen = (cx: number, cy: number): boolean => {
     let error = 0;
-    if (integral) {
-      for (const part of blocks) {
-        chargeScreen();
-        const q =
-          ((cy + part.y + Math.floor(part.height / 2)) * width +
-            cx +
-            part.x +
-            Math.floor(part.width / 2)) *
-          4;
-        if (rgba[q + 3] !== part.alpha) return false;
-        for (let c = 0; c < 3; c++)
-          error += Math.abs(
-            part.sums[c]! -
-              integralSum(cx + part.x, cy + part.y, part.width, part.height, c),
-          );
-        if (error > tolerance) return false;
-      }
-    } else {
-      for (let i = 0; i < screenSamples.length; i++) {
-        chargeScreen();
-        const sample = screenSamples[i]!,
-          packed = screenCache[i]!;
-        const other = screenAt(sample.lx, sample.ly, cx, cy);
-        if (packed >>> 24 !== other >>> 24) return false;
-        error +=
-          Math.abs((packed & 255) - (other & 255)) +
-          Math.abs(((packed >> 8) & 255) - ((other >> 8) & 255)) +
-          Math.abs(((packed >> 16) & 255) - ((other >> 16) & 255));
-        if (error > tolerance) return false;
-      }
+    for (let i = 0; i < screenSamples.length; i++) {
+      chargeScreen();
+      const sample = screenSamples[i]!,
+        packed = screenCache[i]!;
+      const other = screenAt(sample.lx, sample.ly, cx, cy);
+      if (packed >>> 24 !== other >>> 24) return false;
+      error +=
+        Math.abs((packed & 255) - (other & 255)) +
+        Math.abs(((packed >> 8) & 255) - ((other >> 8) & 255)) +
+        Math.abs(((packed >> 16) & 255) - ((other >> 16) & 255));
+      if (error > tolerance) return false;
     }
     return true;
   };
@@ -389,27 +386,110 @@ export function findDuplicateRegions(
       table[y * alphaStride + x]!
     );
   };
+  // 大块筛选热路径的平铺常量：每块每通道的四个积分表角点偏移、中心
+  // alpha 位置与源和预先合并成单一偏移，偏移循环里只剩 base + 常量的
+  // typed-array 读写；计数语义与拒绝条件保持不变。
+  const partCount = blocks.length;
+  const rgbTopHigh = new Int32Array(partCount * 3);
+  const rgbTopBase = new Int32Array(partCount * 3);
+  const rgbBaseHigh = new Int32Array(partCount * 3);
+  const rgbBaseBase = new Int32Array(partCount * 3);
+  const partSum = new Float64Array(partCount * 3);
+  const partCenter = new Int32Array(partCount);
+  const partCenterAlpha = new Int32Array(partCount);
+  const alphaTopHigh = new Int32Array(partCount);
+  const alphaTopBase = new Int32Array(partCount);
+  const alphaBaseHigh = new Int32Array(partCount);
+  const alphaBaseBase = new Int32Array(partCount);
+  for (let i = 0; i < partCount; i++) {
+    const part = blocks[i]!;
+    const rowTop = (part.y + part.height) * stride,
+      rowBase = part.y * stride,
+      colHigh = (part.x + part.width) * 3,
+      colBase = part.x * 3;
+    for (let c = 0; c < 3; c++) {
+      rgbTopHigh[i * 3 + c] = rowTop + colHigh + c;
+      rgbTopBase[i * 3 + c] = rowTop + colBase + c;
+      rgbBaseHigh[i * 3 + c] = rowBase + colHigh + c;
+      rgbBaseBase[i * 3 + c] = rowBase + colBase + c;
+      partSum[i * 3 + c] = part.sums[c]!;
+    }
+    partCenter[i] =
+      ((part.y + (part.height >> 1)) * width + part.x + (part.width >> 1)) * 4 +
+      3;
+    partCenterAlpha[i] = part.alpha;
+    alphaTopHigh[i] =
+      (part.y + part.height) * alphaStride + part.x + part.width;
+    alphaTopBase[i] = (part.y + part.height) * alphaStride + part.x;
+    alphaBaseHigh[i] = part.y * alphaStride + part.x + part.width;
+    alphaBaseBase[i] = part.y * alphaStride + part.x;
+  }
   if (screened) {
-    for (let cy = 0; cy < offsetsY; cy++)
+    const table = integral!;
+    const blockRight = x0 + bw,
+      blockBottom = y0 + bh;
+    for (let cy = 0; cy < offsetsY; cy++) {
+      const rgbRow = cy * stride;
+      const centerRow = cy * width * 4;
+      const bitRow = cy * offsetsX;
       for (let cx = 0; cx < offsetsX; cx++) {
-        if (
-          rectsOverlap({ x: cx, y: cy, width: bw, height: bh }, block) ||
-          !passesInitialScreen(cx, cy)
-        )
+        if (cx < blockRight && cx + bw > x0 && cy < blockBottom && cy + bh > y0)
           continue;
-        const index = cy * offsetsX + cx;
+        const base = rgbRow + cx * 3;
+        const centerBase = centerRow + cx * 4;
+        let error = 0;
+        let pass = true;
+        for (let i = 0; i < partCount; i++) {
+          screenWork += 1;
+          if (screenWork > DUPLICATE_WORK_BUDGET) failScreenWorkBudget();
+          if (rgba[centerBase + partCenter[i]!] !== partCenterAlpha[i]!) {
+            pass = false;
+            break;
+          }
+          const s = i * 3;
+          error +=
+            Math.abs(
+              partSum[s]! -
+                (table[base + rgbTopHigh[s]!]! -
+                  table[base + rgbBaseHigh[s]!]! -
+                  table[base + rgbTopBase[s]!]! +
+                  table[base + rgbBaseBase[s]!]!),
+            ) +
+            Math.abs(
+              partSum[s + 1]! -
+                (table[base + rgbTopHigh[s + 1]!]! -
+                  table[base + rgbBaseHigh[s + 1]!]! -
+                  table[base + rgbTopBase[s + 1]!]! +
+                  table[base + rgbBaseBase[s + 1]!]!),
+            ) +
+            Math.abs(
+              partSum[s + 2]! -
+                (table[base + rgbTopHigh[s + 2]!]! -
+                  table[base + rgbBaseHigh[s + 2]!]! -
+                  table[base + rgbTopBase[s + 2]!]! +
+                  table[base + rgbBaseBase[s + 2]!]!),
+            );
+          if (error > tolerance) {
+            pass = false;
+            break;
+          }
+        }
+        if (!pass) continue;
+        const index = bitRow + cx;
         screened[index >> 3] = screened[index >> 3]! | (1 << (index & 7));
       }
+    }
     // RGB 分块和已缓存，且窗口筛选已完成；此后不再读取 RGB 积分布局。
-    const table = integral!;
     table.fill(0, 0, alphaStride);
     for (let y = 0; y < height; y++) {
       let row = 0;
-      table[(y + 1) * alphaStride] = 0;
-      for (let x = 0; x < width; x++) {
-        row += rgba[(y * width + x) * 4 + 3]!;
-        table[(y + 1) * alphaStride + x + 1] =
-          table[y * alphaStride + x + 1]! + row;
+      const next = (y + 1) * alphaStride,
+        prev = y * alphaStride;
+      let p = y * width * 4 + 3;
+      table[next] = 0;
+      for (let x = 0; x < width; x++, p += 4) {
+        row += rgba[p]!;
+        table[next + x + 1] = table[prev + x + 1]! + row;
       }
     }
   }
@@ -418,29 +498,31 @@ export function findDuplicateRegions(
         alphaSum(x0 + part.x, y0 + part.y, part.width, part.height),
       )
     : [];
+  const alphaTable = screened ? integral! : undefined;
   const matches: DuplicateCandidate[] = [];
   let preciseWork = 0;
 
   for (let dy = 0; dy < offsetsY; dy += 1) {
+    const bitRow = dy * offsetsX;
+    const alphaRow = dy * alphaStride;
     for (let dx = 0; dx < offsetsX; dx += 1) {
       const cx = dx;
       const cy = dy;
-      const candidate: DuplicateRect = {
-        x: cx,
-        y: cy,
-        width: bw,
-        height: bh,
-      };
-      if (rectsOverlap(candidate, block)) continue;
-      if (screened) {
-        const index = cy * offsetsX + cx;
-        if ((screened[index >> 3]! & (1 << (index & 7))) === 0) continue;
+      if (cx < x0 + bw && cx + bw > x0 && cy < y0 + bh && cy + bh > y0)
+        continue;
+      if (alphaTable) {
+        const index = bitRow + dx;
+        if ((screened![index >> 3]! & (1 << (index & 7))) === 0) continue;
         let sameAlpha = true;
-        for (let i = 0; i < blocks.length; i++) {
-          chargeScreen();
-          const part = blocks[i]!;
+        for (let i = 0; i < partCount; i++) {
+          screenWork += 1;
+          if (screenWork > DUPLICATE_WORK_BUDGET) failScreenWorkBudget();
+          const row = alphaRow + dx;
           if (
-            alphaSum(cx + part.x, cy + part.y, part.width, part.height) !==
+            alphaTable[row + alphaTopHigh[i]!]! -
+              alphaTable[row + alphaBaseHigh[i]!]! -
+              alphaTable[row + alphaTopBase[i]!]! +
+              alphaTable[row + alphaBaseBase[i]!]! !==
             alphaSums[i]
           ) {
             sameAlpha = false;
@@ -477,7 +559,13 @@ export function findDuplicateRegions(
           `合格匹配窗口超过上限 ${DUPLICATE_MAX_MATCH_WINDOWS}；请缩小图片或调整源选区后重试。`,
         );
       }
-      matches.push({ ...candidate, error: error / (count * 3) });
+      matches.push({
+        x: cx,
+        y: cy,
+        width: bw,
+        height: bh,
+        error: error / (count * 3),
+      });
     }
   }
   // 完整扫描后先排序再去除重叠，避免重叠窗口占满最终候选名额。

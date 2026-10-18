@@ -107,9 +107,15 @@ export function markBoundsOf(mark: Mark, context: BoundsContext): Rect {
     return annotationPathBounds(mark);
   // 笔刷马赛克/模糊：真实边界 = 轨迹路径 + 笔刷半径（选中框/命中/
   // 对齐同源），不退化为空白弦线，也不用整块效果采样包围盒。
+  // strokeMaskSurface 固定 round cap/join 绘制：这里显式钉住 round 端帽，
+  // 不依赖 annotationPaths 对非虚线工具的默认回退；无 points 的矩形
+  // 模式与绘制侧一致走下方通用 start/end 矩形分支，不套笔刷半径。
   if ((mark.tool === "mosaic" || mark.tool === "blur") && mark.points?.length) {
     return strokePathsBounds(
-      annotationPaths(mark),
+      annotationPaths(mark).map((path) => ({
+        ...path,
+        cap: "round" as const,
+      })),
       Math.max(2, mark.style?.brushSize ?? 24),
     );
   }
